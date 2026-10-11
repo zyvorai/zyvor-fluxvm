@@ -1580,6 +1580,19 @@ pub struct RuntimeCapabilities {
     pub orchestration_owner: String,
     pub migration: Vec<RuntimeMigrationCapability>,
     pub snapshot: Vec<RuntimeSnapshotCapability>,
+    /// Changed-block-tracking backups to object storage.
+    #[serde(default)]
+    pub backup: Vec<RuntimeBackupCapability>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RuntimeBackupCapability {
+    pub backend: BackendKind,
+    pub full: bool,
+    pub incremental: bool,
+    pub targets: Vec<String>,
+    pub compression: Vec<String>,
+    pub encryption: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

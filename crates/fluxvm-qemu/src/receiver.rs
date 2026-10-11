@@ -6,7 +6,6 @@
 
 use crate::qmp;
 use anyhow::{Context, Result, bail};
-use fluxvm_core::backend::path_arg;
 use fluxvm_core::config::Config;
 use fluxvm_core::model::{MigrationStreamCapabilities, MigrationTlsSpec};
 use std::path::{Path, PathBuf};
@@ -102,10 +101,7 @@ pub fn incoming_argv(
         "-display".into(),
         "none".into(),
         "-drive".into(),
-        format!(
-            "file={},if=virtio,format={disk_format},cache=writeback",
-            path_arg(disk)
-        ),
+        crate::disks::root_drive(disk, disk_format, None),
         "-incoming".into(),
         "defer".into(),
         "-qmp".into(),
@@ -231,6 +227,14 @@ mod tests {
         assert!(args.windows(2).any(|w| w == ["-incoming", "defer"]));
         assert!(args.iter().any(|a| a.contains("/srv/shared/root.raw")));
         assert!(!args.iter().any(|a| a.contains("qemu-img")));
+    }
+
+    #[test]
+    fn qcow2_receiver_root_matches_the_boot_drive() {
+        let disk = Path::new("/w/root.qcow2");
+        let args = incoming_argv(disk, "qcow2", 2, 512, Path::new("/run/fluxvm/qmp.sock"));
+        let drive = crate::disks::root_drive(disk, "qcow2", None);
+        assert!(args.windows(2).any(|w| w[0] == "-drive" && w[1] == drive));
     }
 
     #[test]

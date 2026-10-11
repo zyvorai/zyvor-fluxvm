@@ -13,6 +13,7 @@ fluxvm-core = { path = "../fluxvm-core" }
 fluxvm-storage = { path = "../fluxvm-storage" }
 fluxvm-network = { path = "../fluxvm-network" }
 fluxvm-image = { path = "../fluxvm-image" }
+fluxvm-backup-s3 = { path = "../fluxvm-backup-s3" }
 fluxvm-qemu = { path = "../fluxvm-qemu" }
 fluxvm-cloud-hypervisor = { path = "../fluxvm-cloud-hypervisor" }
 fluxvm-firecracker = { path = "../fluxvm-firecracker" }

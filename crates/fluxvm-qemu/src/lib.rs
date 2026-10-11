@@ -1,6 +1,7 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
 // SPDX-License-Identifier: Apache-2.0
 
+pub mod block;
 mod confidential;
 pub mod disks;
 mod qmp;
@@ -80,16 +81,7 @@ pub fn build_args(
     // export this VM owns. Every other storage backend (including the
     // Default qcow2 overlay) opens `ctx.disk` directly, just with a format
     // that varies by backend (see `fluxvm_image::storage::disk_format`).
-    let disk_drive = match &ctx.nbd_export {
-        Some(socket) => format!("file=nbd:unix:{},if=virtio,format=raw", socket.display()),
-        // writeback (not cache=none) so QMP `savevm` / internal snapshots work on
-        // CoW overlays — O_DIRECT hangs human-monitor-command savevm indefinitely.
-        None => format!(
-            "file={},if=virtio,format={},cache=writeback",
-            path_arg(&ctx.disk),
-            ctx.disk_format
-        ),
-    };
+    let disk_drive = disks::root_drive(&ctx.disk, &ctx.disk_format, ctx.nbd_export.as_deref());
     // Reserve hotplug headroom by default so `device_add` (CPU) and
     // `device_add pc-dimm` (memory) have somewhere to land -- found live:
     // with a bare `-smp N`/`-m N`, `query-hotpluggable-cpus` reports zero

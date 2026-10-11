@@ -314,7 +314,12 @@ impl VmManager {
 
     /// Copies a standalone backup qcow2 over `dst` as `format` via a temp
     /// file in the same directory, so a failed copy leaves `dst` untouched.
-    async fn copy_backup_disk(&self, src: &Path, dst: &Path, format: &str) -> Result<()> {
+    pub(crate) async fn copy_backup_disk(
+        &self,
+        src: &Path,
+        dst: &Path,
+        format: &str,
+    ) -> Result<()> {
         let mut tmp = dst.as_os_str().to_owned();
         tmp.push(".restore");
         let tmp = PathBuf::from(tmp);

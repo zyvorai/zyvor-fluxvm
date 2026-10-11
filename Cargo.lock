@@ -2317,6 +2317,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "fluxvm-backup-s3"
+version = "0.4.0"
+dependencies = [
+ "aes-gcm",
+ "anyhow",
+ "async-trait",
+ "base64",
+ "chrono",
+ "hex",
+ "hmac",
+ "md-5 0.10.6",
+ "rand 0.8.8",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "fluxvm-blockd"
 version = "0.3.0"
 dependencies = [
@@ -2661,6 +2683,7 @@ dependencies = [
  "chrono",
  "fluxvm-core",
  "libc",
+ "serde",
  "serde_json",
  "tempfile",
  "tokio",
@@ -2675,6 +2698,7 @@ dependencies = [
  "base64",
  "chrono",
  "fluxvm-apple",
+ "fluxvm-backup-s3",
  "fluxvm-cgroup",
  "fluxvm-cloud-hypervisor",
  "fluxvm-core",

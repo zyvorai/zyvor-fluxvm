@@ -25,6 +25,7 @@ use uuid::Uuid;
 pub mod apple_placement;
 pub mod backup;
 pub mod branch;
+pub mod cbt;
 pub mod changes;
 pub mod confidential;
 pub mod density;
@@ -5865,7 +5866,11 @@ mod tests {
         assert_eq!(files[0].permissions.as_deref(), Some("0600"));
     }
 
-    fn req(backend: BackendKind, kernel: Option<&str>, firmware: Option<&str>) -> CreateVmRequest {
+    pub(crate) fn req(
+        backend: BackendKind,
+        kernel: Option<&str>,
+        firmware: Option<&str>,
+    ) -> CreateVmRequest {
         CreateVmRequest {
             apple: None,
             name: "fixture".into(),
