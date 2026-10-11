@@ -70,6 +70,14 @@ pub fn validate(networks: &[AppleNetwork]) -> Result<()> {
         if let Some(a) = &n.address {
             parse_address(a)?;
         }
+        if let Some(m) = n.mtu
+            && !(MIN_MTU..=MAX_MTU).contains(&m)
+        {
+            bail!(
+                "network {:?}: mtu must be {MIN_MTU}..={MAX_MTU}, got {m}",
+                n.name
+            );
+        }
         if let Some(m) = &n.mac
             && fluxvm_vz_switch::parse_mac(m).is_none()
         {
@@ -81,6 +89,12 @@ pub fn validate(networks: &[AppleNetwork]) -> Result<()> {
     }
     Ok(())
 }
+
+/// The MTU a private network has unless it names another one.
+pub const DEFAULT_MTU: u32 = 1500;
+/// Bounds for `apple.networks[].mtu`.
+pub const MIN_MTU: u32 = 1280;
+pub const MAX_MTU: u32 = 9000;
 
 /// Fills in each network's `address` and `mac`. `existing` are the networks of the VMs that already exist.
 pub fn assign(networks: &mut [AppleNetwork], existing: &[AppleNetwork]) -> Result<()> {
@@ -99,7 +113,24 @@ pub fn assign(networks: &mut [AppleNetwork], existing: &[AppleNetwork]) -> Resul
         }
     }
     let mut new_subnets: BTreeMap<String, u8> = BTreeMap::new();
+    // The MTU belongs to the network: existing members define it, and a joiner either agrees or inherits it.
+    let mut net_mtu: BTreeMap<&str, u32> = BTreeMap::new();
+    for e in existing {
+        net_mtu
+            .entry(&e.name)
+            .or_insert_with(|| e.mtu.unwrap_or(DEFAULT_MTU));
+    }
     for net in networks.iter_mut() {
+        if let Some(&have) = net_mtu.get(net.name.as_str()) {
+            match net.mtu {
+                Some(m) if m != have => bail!(
+                    "network {:?} has mtu {have}; a member cannot use {m} (every member of a network shares one MTU)",
+                    net.name
+                ),
+                None if have != DEFAULT_MTU => net.mtu = Some(have),
+                _ => {}
+            }
+        }
         let n = match subnet.get(net.name.as_str()).or(new_subnets.get(&net.name)) {
             Some(n) => *n,
             None => {
@@ -308,7 +339,7 @@ fn netobs_bridge_socket() -> Option<PathBuf> {
 pub fn cloud_init(networks: &[AppleNetwork]) -> (Vec<(String, String, String)>, Vec<String>) {
     let mut files = Vec::new();
     let mut script = String::from(
-        "#!/bin/sh\n# Written by FluxVM: private network addresses, matched by MAC.\nset -u\nup() {\n  for d in /sys/class/net/*; do\n    [ \"$(cat \"$d/address\" 2>/dev/null)\" = \"$1\" ] || continue\n    ip link set \"${d##*/}\" up && ip addr replace \"$2\" dev \"${d##*/}\"\n  done\n}\n",
+        "#!/bin/sh\n# Written by FluxVM: private network addresses, matched by MAC.\nset -u\nup() {\n  for d in /sys/class/net/*; do\n    [ \"$(cat \"$d/address\" 2>/dev/null)\" = \"$1\" ] || continue\n    { [ -z \"${3:-}\" ] || ip link set \"${d##*/}\" mtu \"$3\"; }\n    ip link set \"${d##*/}\" up && ip addr replace \"$2\" dev \"${d##*/}\"\n  done\n}\n",
     );
     for net in networks {
         let (Some(mac), Some(address)) = (net.mac.as_deref(), net.address.as_deref()) else {
@@ -317,11 +348,18 @@ pub fn cloud_init(networks: &[AppleNetwork]) -> (Vec<(String, String, String)>, 
         files.push((
             format!("/etc/systemd/network/10-fluxvm-{}.network", net.name),
             format!(
-                "[Match]\nMACAddress={mac}\n\n[Network]\nAddress={address}\nLinkLocalAddressing=no\nIPv6AcceptRA=no\n"
+                "[Match]\nMACAddress={mac}\n\n{}[Network]\nAddress={address}\nLinkLocalAddressing=no\nIPv6AcceptRA=no\n",
+                net.mtu
+                    .filter(|m| *m != DEFAULT_MTU)
+                    .map(|m| format!("[Link]\nMTUBytes={m}\n\n"))
+                    .unwrap_or_default()
             ),
             "0644".to_string(),
         ));
-        script.push_str(&format!("up {mac} {address}\n"));
+        match net.mtu.filter(|m| *m != DEFAULT_MTU) {
+            Some(m) => script.push_str(&format!("up {mac} {address} {m}\n")),
+            None => script.push_str(&format!("up {mac} {address}\n")),
+        }
     }
     if files.is_empty() {
         return (files, Vec::new());
@@ -346,6 +384,9 @@ pub struct NetworkSummary {
     /// `10.89.N.0/24`.
     pub subnet: String,
     pub members: Vec<Member>,
+    /// The network's MTU; absent means the default 1500.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mtu: Option<u32>,
     /// Whether its switch process is up (it exits on its own 30 s after the last guest leaves).
     pub switch_running: bool,
 }
@@ -378,6 +419,7 @@ pub fn summarize<'a>(
                     name: n.name.clone(),
                     subnet: format!("{}.{}.{subnet}.0/{PREFIX_LEN}", BASE[0], BASE[1]),
                     members: Vec::new(),
+                    mtu: n.mtu.filter(|m| *m != DEFAULT_MTU),
                     switch_running: false,
                 });
             entry.members.push(Member {
@@ -408,7 +450,56 @@ mod tests {
             name: name.into(),
             address: None,
             mac: None,
+            mtu: None,
         }
+    }
+
+    #[test]
+    fn mtu_is_checked_shared_by_members_and_reaches_the_guest() {
+        let jumbo = |name: &str, mtu: Option<u32>| AppleNetwork {
+            mtu,
+            ..net(name)
+        };
+        // Bounds.
+        for bad in [100u32, 1279, 9001] {
+            assert!(
+                validate(&[jumbo("lab", Some(bad))]).is_err(),
+                "mtu {bad} should be refused"
+            );
+        }
+        assert!(validate(&[jumbo("lab", Some(1280))]).is_ok());
+        assert!(validate(&[jumbo("lab", Some(9000))]).is_ok());
+        // The first member defines it; a joiner without one inherits it; a joiner with another one is refused.
+        let mut first = vec![jumbo("lab", Some(9000))];
+        assign(&mut first, &[]).unwrap();
+        let mut inherit = vec![net("lab")];
+        assign(&mut inherit, &first).unwrap();
+        assert_eq!(inherit[0].mtu, Some(9000));
+        let mut clash = vec![jumbo("lab", Some(4000))];
+        let err = assign(&mut clash, &first).unwrap_err().to_string();
+        assert!(err.contains("9000") && err.contains("4000"), "{err}");
+        // A default-MTU network does not grow one; naming 1500 explicitly agrees with it.
+        let mut plain = vec![net("shop")];
+        assign(&mut plain, &[]).unwrap();
+        let mut j = vec![jumbo("shop", Some(1500))];
+        assign(&mut j, &plain).unwrap();
+        let mut k = vec![net("shop")];
+        assign(&mut k, &plain).unwrap();
+        assert_eq!(k[0].mtu, None);
+        // The guest side: networkd unit and fallback script.
+        let (files, _) = cloud_init(&first);
+        let unit = files
+            .iter()
+            .find(|f| f.0.ends_with("10-fluxvm-lab.network"))
+            .unwrap();
+        assert!(unit.1.contains("[Link]\nMTUBytes=9000\n"), "{}", unit.1);
+        let script = files.iter().find(|f| f.0.ends_with("fluxvm-vznet")).unwrap();
+        assert!(script.1.contains(" 9000\n") && script.1.contains("mtu \"$3\""));
+        let (plain_files, _) = cloud_init(&plain);
+        assert!(
+            !plain_files.iter().any(|f| f.1.contains("MTUBytes")),
+            "a default network writes no MTU"
+        );
     }
 
     #[test]

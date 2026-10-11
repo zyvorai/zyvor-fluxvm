@@ -119,6 +119,9 @@ fn static_nic_entries(ci: &CloudInitSpec) -> String {
             yaml_quote(&nic.mac),
             yaml_quote(&nic.address)
         ));
+        if let Some(m) = nic.mtu {
+            out.push_str(&format!("    mtu: {m}\n"));
+        }
     }
     out
 }
@@ -289,6 +292,7 @@ mod tests {
         let ci = spec(vec![CloudInitNic {
             mac: "02:e2:1f:84:d3:72".into(),
             address: "10.89.7.20/24".into(),
+            mtu: None,
         }]);
         let (_, _, nc) = write_seed_files(d.path(), &ci, None).unwrap();
         let body = fs::read_to_string(nc.expect("a network-config")).unwrap();
@@ -299,6 +303,23 @@ mod tests {
         assert!(nic.contains("link-local: []") && nic.contains("accept-ra: false"));
         // "fluxvm-nic0" sorts before "vz-nic": networkd picks the first file that matches.
         assert!("fluxvm-nic0" < "vz-nic");
+    }
+
+    #[test]
+    fn private_card_mtu_is_written_only_when_set() {
+        let d = tempfile::tempdir().unwrap();
+        let nic = |mtu| CloudInitNic {
+            mac: "02:e2:1f:84:d3:72".into(),
+            address: "10.89.7.20/24".into(),
+            mtu,
+        };
+        let (_, _, nc) = write_seed_files(d.path(), &spec(vec![nic(Some(9000))]), None).unwrap();
+        let body = fs::read_to_string(nc.unwrap()).unwrap();
+        assert!(body.split("fluxvm-nic0:").nth(1).unwrap().contains("mtu: 9000"));
+        let d2 = tempfile::tempdir().unwrap();
+        let (_, _, nc) = write_seed_files(d2.path(), &spec(vec![nic(None)]), None).unwrap();
+        let body = fs::read_to_string(nc.unwrap()).unwrap();
+        assert!(!body.split("fluxvm-nic0:").nth(1).unwrap().contains("mtu:"));
     }
 
     #[test]

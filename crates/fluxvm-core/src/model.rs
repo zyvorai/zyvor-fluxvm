@@ -401,6 +401,9 @@ pub struct CloudInitNic {
     pub mac: String,
     /// Address with prefix length, e.g. `10.89.7.20/24`.
     pub address: String,
+    /// The card's MTU, when it is not the default 1500.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mtu: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -804,6 +807,11 @@ pub struct AppleNetwork {
     pub address: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mac: Option<String>,
+    /// MTU of the whole network, 1280-9000 (default 1500). Every member must agree; a guest that omits it inherits
+    /// the network's. Above 1500 the runner raises its card's `maximumTransmissionUnit` and the guest sets the
+    /// same MTU through its seed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mtu: Option<u32>,
 }
 
 /// A host directory shared into a `vz` Linux guest under a fixed virtiofs tag.
