@@ -159,16 +159,28 @@ pub fn estimate_ms(
 
 impl VmManager {
     /// What `POST /v1/vms/{id}/fork` with `spec` would be refused for, and what it would cost.
-    pub async fn plan_fork(self: &Arc<Self>, id: Uuid, spec: ForkSpec) -> Result<ForkPlan> {
+    pub async fn plan_fork(
+        self: &Arc<Self>,
+        id: Uuid,
+        spec: ForkSpec,
+        actor: Option<&str>,
+    ) -> Result<ForkPlan> {
         let src = self.get(id).await?;
-        Ok(self.plan_for(&src, None, &spec, &src.name, false).await)
+        Ok(self
+            .plan_for(&src, None, &spec, &src.name, false, actor)
+            .await)
     }
 
     /// What `POST /v1/branches/{id}/start` with `spec` would be refused for, and what it would cost.
-    pub async fn plan_branch_start(self: &Arc<Self>, id: Uuid, spec: ForkSpec) -> Result<ForkPlan> {
+    pub async fn plan_branch_start(
+        self: &Arc<Self>,
+        id: Uuid,
+        spec: ForkSpec,
+        actor: Option<&str>,
+    ) -> Result<ForkPlan> {
         let (template, name) = self.branch_template(id)?;
         Ok(self
-            .plan_for(&template, Some(name.clone()), &spec, &name, true)
+            .plan_for(&template, Some(name.clone()), &spec, &name, true, actor)
             .await)
     }
 
@@ -179,6 +191,7 @@ impl VmManager {
         spec: &ForkSpec,
         display: &str,
         from_branch: bool,
+        actor: Option<&str>,
     ) -> ForkPlan {
         let mut refusals: Vec<PlanRefusal> = Vec::new();
         let mut refuse = |code: &'static str, e: anyhow::Error| {
@@ -219,7 +232,7 @@ impl VmManager {
         }
         if spec.count >= 1
             && spec.count <= MAX_FORK_COUNT
-            && let Err(e) = self.admit_fork_batch(src, spec.count).await
+            && let Err(e) = self.check_fork_batch(src, spec.count, actor).await
         {
             refuse("quota", e);
         }

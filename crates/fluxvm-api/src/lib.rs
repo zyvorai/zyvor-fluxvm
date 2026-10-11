@@ -2572,10 +2572,12 @@ async fn fork_plan(
     State(m): State<Arc<VmManager>>,
     Extension(role): Extension<Role>,
     Path(id): Path<Uuid>,
+    actor: Option<Extension<AuditActor>>,
     Json(req): Json<fluxvm_scheduler::fork::ForkSpec>,
 ) -> ApiResult<Json<fluxvm_scheduler::fork_plan::ForkPlan>> {
     require_admin(role)?;
-    Ok(Json(m.plan_fork(id, req).await?))
+    let actor_name = actor.as_ref().map(|a| a.0.0.as_str());
+    Ok(Json(m.plan_fork(id, req, actor_name).await?))
 }
 
 /// What a start from a branch would be refused for and cost, without doing it.
@@ -2583,10 +2585,12 @@ async fn branch_start_plan(
     State(m): State<Arc<VmManager>>,
     Extension(role): Extension<Role>,
     Path(id): Path<Uuid>,
+    actor: Option<Extension<AuditActor>>,
     Json(req): Json<fluxvm_scheduler::fork::ForkSpec>,
 ) -> ApiResult<Json<fluxvm_scheduler::fork_plan::ForkPlan>> {
     require_admin(role)?;
-    Ok(Json(m.plan_branch_start(id, req).await?))
+    let actor_name = actor.as_ref().map(|a| a.0.0.as_str());
+    Ok(Json(m.plan_branch_start(id, req, actor_name).await?))
 }
 
 async fn fork_vm(
@@ -2599,12 +2603,7 @@ async fn fork_vm(
 ) -> ApiResult<impl IntoResponse> {
     require_admin(role)?;
     let actor_name = actor.as_ref().map(|a| a.0.0.as_str());
-    let src = m.get(id).await?;
-    for _ in 0..req.count.min(fluxvm_scheduler::fork::MAX_FORK_COUNT) {
-        m.enforce_token_quotas(actor_name, &src.request)
-            .await
-            .map_err(|e| ApiError::forbidden(e.to_string()))?;
-    }
+    // Host, tenant and token quotas are checked, as one batch and atomically with the reservation, inside the fork.
     let started = std::time::Instant::now();
     let report = m.fork_vm_spec(id, req, actor_name).await?;
     let items = report.children.clone();

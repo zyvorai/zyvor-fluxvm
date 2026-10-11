@@ -16,7 +16,8 @@ use anyhow::{Context, Result, bail};
 use fluxvm_core::config::Policy;
 use fluxvm_core::model::{PoolRecord, VmRecord};
 use fluxvm_core::policy::{
-    QuotaLedger, UsageTotals, enforce_host_totals, ledger_for_host_admission, ledger_is_warm,
+    BatchReservation, QuotaLedger, UsageTotals, enforce_host_totals, ledger_for_host_admission,
+    ledger_is_warm,
 };
 use std::{
     collections::HashMap,
@@ -229,7 +230,52 @@ impl Store {
     /// Receiver reservations in `untracked_host` are kept.
     pub async fn rebuild_quota_ledger(&self) -> Result<QuotaLedger> {
         self.with_exclusive(|_| ((), LedgerDelta::Rebuild)).await?;
+        // Batches admitted by a process that is gone were never recorded; their reservations are stale.
+        self.mutate_quota(|l| {
+            l.reserved_tenants.clear();
+            l.reserved_tokens.clear();
+            Ok(())
+        })
+        .await?;
         self.quota_ledger().await
+    }
+
+    /// Admits a batch of identical VMs against the host, tenant and token limits as a whole and reserves it, atomically
+    /// with the check (the store lock is held). Pair with [`Self::release_batch`] once the VMs are recorded or the
+    /// batch failed. A reservation left by a crash is cleared by [`Self::rebuild_quota_ledger`] at startup.
+    pub async fn reserve_batch(
+        &self,
+        batch: BatchReservation,
+        policy: &Policy,
+        max_vms_per_token: Option<usize>,
+        max_memory_mib_per_token: Option<u64>,
+    ) -> Result<()> {
+        let policy = policy.clone();
+        self.mutate_quota(move |ledger| {
+            ledger.reserve_batch(&batch, &policy, max_vms_per_token, max_memory_mib_per_token)
+        })
+        .await
+    }
+
+    /// Whether [`Self::reserve_batch`] would admit `batch` right now. Reads only; nothing is reserved.
+    pub async fn check_batch(
+        &self,
+        batch: BatchReservation,
+        policy: &Policy,
+        max_vms_per_token: Option<usize>,
+        max_memory_mib_per_token: Option<u64>,
+    ) -> Result<()> {
+        let mut ledger = self.quota_ledger().await?;
+        ledger.reserve_batch(&batch, policy, max_vms_per_token, max_memory_mib_per_token)
+    }
+
+    /// Returns a reservation taken by [`Self::reserve_batch`].
+    pub async fn release_batch(&self, batch: BatchReservation) -> Result<()> {
+        self.mutate_quota(move |ledger| {
+            ledger.release_batch(&batch);
+            Ok(())
+        })
+        .await
     }
 
     /// Charge `vcpus` and `memory_mib` against the host cap without adding a
@@ -377,7 +423,7 @@ fn apply_ledger_delta(
         }
         LedgerDelta::Rebuild => {
             let mut ledger = quota_ledger_from(map);
-            ledger.untracked_host = read_untracked_host(vms_path);
+            carry_reservations(vms_path, &mut ledger);
             write_quota_ledger(vms_path, &ledger)
         }
         other => {
@@ -394,7 +440,7 @@ fn apply_ledger_delta(
                 write_quota_ledger(vms_path, &ledger)
             } else {
                 let mut ledger = quota_ledger_from(map);
-                ledger.untracked_host = read_untracked_host(vms_path);
+                carry_reservations(vms_path, &mut ledger);
                 write_quota_ledger(vms_path, &ledger)
             }
         }
@@ -440,14 +486,18 @@ fn read_warm_ledger(vms_path: &Path, vm_count: u64) -> Option<QuotaLedger> {
     ledger_is_warm(ledger.host.vms, vm_count).then_some(ledger)
 }
 
-fn read_untracked_host(vms_path: &Path) -> UsageTotals {
+/// Copies what is not derived from the VM records (receiver reservations and admitted-but-unrecorded batches) from
+/// the previous ledger into a rebuilt one.
+fn carry_reservations(vms_path: &Path, ledger: &mut QuotaLedger) {
     let quota_path = vms_path.with_file_name("quotas.json");
     let Ok(raw) = fs::read_to_string(&quota_path) else {
-        return UsageTotals::default();
+        return;
     };
-    serde_json::from_str::<QuotaLedger>(&raw)
-        .map(|ledger| ledger.untracked_host)
-        .unwrap_or_default()
+    if let Ok(old) = serde_json::from_str::<QuotaLedger>(&raw) {
+        ledger.untracked_host = old.untracked_host;
+        ledger.reserved_tenants = old.reserved_tenants;
+        ledger.reserved_tokens = old.reserved_tokens;
+    }
 }
 
 fn load_quota_ledger(vms_path: &Path, map: &HashMap<Uuid, VmRecord>) -> QuotaLedger {
@@ -455,7 +505,7 @@ fn load_quota_ledger(vms_path: &Path, map: &HashMap<Uuid, VmRecord>) -> QuotaLed
         return ledger;
     }
     let mut ledger = quota_ledger_from(map);
-    ledger.untracked_host = read_untracked_host(vms_path);
+    carry_reservations(vms_path, &mut ledger);
     ledger
 }
 
@@ -1039,6 +1089,97 @@ mod tests {
         let warm = store.quota_ledger().await.unwrap();
         assert_eq!(warm.host.memory_mib, 999);
         assert_eq!(warm.host.vcpus, 2);
+    }
+
+    fn batch(n: u64, tenant: &str) -> BatchReservation {
+        BatchReservation {
+            count: n,
+            vcpus: 2,
+            memory_mib: 1024,
+            tenant: Some(tenant.into()),
+            token: Some("ci".into()),
+        }
+    }
+
+    #[tokio::test]
+    async fn two_batches_racing_for_room_that_fits_one_admit_exactly_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = std::sync::Arc::new(Store::load(dir.path()).unwrap());
+        let policy = fluxvm_core::config::Policy {
+            max_memory_mib_host: Some(4096),
+            ..Default::default()
+        };
+        // Each batch is 3 GiB; the host holds 4.
+        let mut tasks = Vec::new();
+        for _ in 0..6 {
+            let s = store.clone();
+            let p = policy.clone();
+            tasks.push(tokio::spawn(async move {
+                s.reserve_batch(batch(3, "t"), &p, None, None).await.is_ok()
+            }));
+        }
+        let mut admitted = 0;
+        for t in tasks {
+            admitted += usize::from(t.await.unwrap());
+        }
+        assert_eq!(
+            admitted, 1,
+            "only one of six concurrent batches may be admitted"
+        );
+        let l = store.quota_ledger().await.unwrap();
+        assert_eq!(l.untracked_host.memory_mib, 3 * 1024);
+        assert_eq!(l.reserved_tenants["t"].vms, 3);
+        assert_eq!(l.reserved_tokens["ci"].vms, 3);
+        // `check_batch` reads only.
+        assert!(
+            store
+                .check_batch(batch(3, "t"), &policy, None, None)
+                .await
+                .is_err()
+        );
+        assert!(
+            store
+                .check_batch(batch(1, "t"), &policy, None, None)
+                .await
+                .is_ok()
+        );
+        assert_eq!(
+            store
+                .quota_ledger()
+                .await
+                .unwrap()
+                .untracked_host
+                .memory_mib,
+            3 * 1024
+        );
+        store.release_batch(batch(3, "t")).await.unwrap();
+        let l = store.quota_ledger().await.unwrap();
+        assert_eq!(l.untracked_host.memory_mib, 0);
+        assert!(l.reserved_tenants.is_empty() && l.reserved_tokens.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_reservation_survives_a_ledger_rebuild_but_not_a_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::load(dir.path()).unwrap();
+        let policy = fluxvm_core::config::Policy::default();
+        store
+            .reserve_batch(batch(2, "t"), &policy, None, None)
+            .await
+            .unwrap();
+        // A VM record arrives while the batch is in flight: the ledger is updated and the reservation is kept.
+        let mut vm = fixture_record("child");
+        vm.request.tenant = Some("t".into());
+        vm.request.vcpus = 2;
+        vm.request.memory_mib = 1024;
+        store.insert(vm).await.unwrap();
+        let l = store.quota_ledger().await.unwrap();
+        assert_eq!(l.reserved_tenants["t"].vms, 2);
+        assert_eq!(l.tenants["t"].vms, 1, "the record's own total stays exact");
+        // Daemon startup rebuilds the ledger: a reservation from a process that is gone must not linger.
+        let after = store.rebuild_quota_ledger().await.unwrap();
+        assert!(after.reserved_tenants.is_empty() && after.reserved_tokens.is_empty());
+        assert_eq!(after.tenants["t"].vms, 1);
     }
 
     #[tokio::test]

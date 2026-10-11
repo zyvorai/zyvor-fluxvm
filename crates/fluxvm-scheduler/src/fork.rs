@@ -197,6 +197,47 @@ pub struct IdentityOutcome {
     pub ms: u64,
 }
 
+/// The batch a fork of `count` children of `src` asks for. An absent actor or the anonymous admin has no token quota.
+fn fork_batch(
+    src: &VmRecord,
+    count: u32,
+    actor: Option<&str>,
+) -> fluxvm_core::policy::BatchReservation {
+    fluxvm_core::policy::BatchReservation {
+        count: u64::from(count),
+        vcpus: src.request.vcpus,
+        memory_mib: src.request.memory_mib,
+        tenant: src.request.tenant.clone(),
+        token: actor
+            .filter(|a| *a != "anonymous-admin" && *a != "none")
+            .map(str::to_string),
+    }
+}
+
+/// Quota reserved for a fork batch; released when dropped (children recorded, or the batch failed).
+pub(crate) struct ForkReservation {
+    manager: Arc<VmManager>,
+    batch: Option<fluxvm_core::policy::BatchReservation>,
+}
+
+impl Drop for ForkReservation {
+    fn drop(&mut self) {
+        let Some(batch) = self.batch.take() else {
+            return;
+        };
+        let m = Arc::clone(&self.manager);
+        // Drop cannot await; the release is one short store write. Without a runtime the daemon is gone anyway and
+        // startup clears stale reservations.
+        if let Ok(h) = tokio::runtime::Handle::try_current() {
+            h.spawn(async move {
+                if let Err(e) = m.store.release_batch(batch).await {
+                    tracing::warn!(error = %e, "releasing a fork quota reservation failed");
+                }
+            });
+        }
+    }
+}
+
 /// Per-child timings and identity result.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ForkChildReport {
@@ -326,7 +367,8 @@ impl VmManager {
             return self.fork_vm_vz(src, spec, post, actor, started).await;
         }
         check_forkable(&src, spec.count)?;
-        self.admit_fork_batch(&src, spec.count).await?;
+        // Held until the children are recorded (or the fork failed); dropped at the end of this function.
+        let _reservation = self.admit_fork_batch(&src, spec.count, actor).await?;
         let count = spec.count;
         let prefix = spec
             .name_prefix
@@ -387,50 +429,60 @@ impl VmManager {
         })
     }
 
-    /// Tenant and host admission for one more child of `src` (the same limits a create of that size meets).
-    async fn admit_fork_child(&self, src: &VmRecord) -> Result<()> {
-        self.admit_fork_batch(src, 1).await
+    /// Admits a fork batch (`count` children of `src`) against the host, tenant and API-token limits as a whole and
+    /// reserves it, atomically with the check, so two forks racing each other (or a create) cannot both be admitted into
+    /// room that only one fits. Done before the parent is paused, so a batch that cannot fit is refused up front instead
+    /// of failing child by child. The reservation is released when the returned guard is dropped (after the children
+    /// are recorded, or the batch failed); creates and other forks see it meanwhile.
+    pub(crate) async fn admit_fork_batch(
+        self: &Arc<Self>,
+        src: &VmRecord,
+        count: u32,
+        actor: Option<&str>,
+    ) -> Result<ForkReservation> {
+        let batch = fork_batch(src, count, actor);
+        if let Err(e) = self
+            .store
+            .reserve_batch(
+                batch.clone(),
+                &self.cfg.policy,
+                self.cfg.auth.max_vms_per_token,
+                self.cfg.auth.max_memory_mib_per_token,
+            )
+            .await
+        {
+            audit_event(
+                "quota.deny",
+                &[
+                    ("scope", "fork"),
+                    ("vm_id", &src.id.to_string()),
+                    ("count", &count.to_string()),
+                    ("reason", &e.to_string()),
+                ],
+            );
+            return Err(e);
+        }
+        Ok(ForkReservation {
+            manager: Arc::clone(self),
+            batch: Some(batch),
+        })
     }
 
-    /// Admission for `count` children at once: the checks a create of that size meets, against the ledger as it would
-    /// be once the first `count - 1` children exist. Done before the parent is paused, so a batch that cannot fit is
-    /// refused up front instead of failing child by child.
-    pub(crate) async fn admit_fork_batch(&self, src: &VmRecord, count: u32) -> Result<()> {
-        let mut ledger = self.store.quota_ledger().await?;
-        let extra = u64::from(count.saturating_sub(1));
-        if extra > 0 {
-            let (v, m) = (
-                u64::from(src.request.vcpus) * extra,
-                src.request.memory_mib * extra,
-            );
-            ledger.host.vms += extra;
-            ledger.host.vcpus += v;
-            ledger.host.memory_mib += m;
-            if let Some(t) = src.request.tenant.as_deref() {
-                let e = ledger.tenants.entry(t.to_string()).or_default();
-                e.vms += extra;
-                e.vcpus += v;
-                e.memory_mib += m;
-            }
-        }
-        if let Some(tenant) = src.request.tenant.as_deref()
-            && !self.cfg.policy.tenants.is_empty()
-        {
-            fluxvm_core::policy::enforce_tenant_totals(
-                tenant,
-                src.request.vcpus,
-                src.request.memory_mib,
+    /// Whether a batch would be admitted right now, without reserving anything (for plans).
+    pub(crate) async fn check_fork_batch(
+        &self,
+        src: &VmRecord,
+        count: u32,
+        actor: Option<&str>,
+    ) -> Result<()> {
+        self.store
+            .check_batch(
+                fork_batch(src, count, actor),
                 &self.cfg.policy,
-                &ledger,
-            )?;
-        }
-        fluxvm_core::policy::enforce_host_totals(
-            src.request.vcpus,
-            src.request.memory_mib,
-            &self.cfg.policy,
-            &fluxvm_core::policy::ledger_for_host_admission(&ledger),
-        )?;
-        Ok(())
+                self.cfg.auth.max_vms_per_token,
+                self.cfg.auth.max_memory_mib_per_token,
+            )
+            .await
     }
 
     /// Fork a running `vz` (Apple Virtualization.framework) Linux guest into `count` running children.
@@ -451,7 +503,7 @@ impl VmManager {
     ) -> Result<ForkReport> {
         check_vz_forkable(&src, spec.count)?;
         check_fork_network_mode(&src, spec.network)?;
-        self.admit_fork_batch(&src, spec.count).await?;
+        let _reservation = self.admit_fork_batch(&src, spec.count, actor).await?;
         let id = src.id;
         let count = spec.count;
         let prefix = spec
@@ -621,7 +673,6 @@ impl VmManager {
         created: &std::sync::Mutex<Vec<Uuid>>,
     ) -> Result<(VmRecord, ForkChildReport)> {
         let t0 = Instant::now();
-        self.admit_fork_child(src).await?;
         let id = Uuid::new_v4();
         op.record(Resource::ForkChild { vm_id: id })
             .context("journaling fork child")?;
@@ -792,7 +843,6 @@ impl VmManager {
         post: &ForkPost,
     ) -> Result<(VmRecord, ForkChildReport)> {
         let t0 = Instant::now();
-        self.admit_fork_child(src).await?;
 
         let id = Uuid::new_v4();
         op.record(Resource::ForkChild { vm_id: id })

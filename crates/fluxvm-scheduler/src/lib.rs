@@ -2463,6 +2463,8 @@ impl VmManager {
             }
         }
         let ledger = self.store.quota_ledger().await?;
+        // Batches that a fork has admitted but not yet recorded count against the tenant too.
+        let tenant_view = fluxvm_core::policy::ledger_with_reservations(&ledger);
         if let Some(tenant) = req.tenant.as_deref()
             && !self.cfg.policy.tenants.is_empty()
         {
@@ -2471,7 +2473,7 @@ impl VmManager {
                 req.vcpus,
                 req.memory_mib,
                 &self.cfg.policy,
-                &ledger,
+                &tenant_view,
             ) {
                 let reason = e.to_string();
                 audit_event("quota.deny", &[("tenant", tenant), ("reason", &reason)]);
@@ -3093,7 +3095,8 @@ impl VmManager {
         if actor == "anonymous-admin" || actor == "none" {
             return Ok(());
         }
-        let ledger = self.store.quota_ledger().await?;
+        let ledger =
+            fluxvm_core::policy::ledger_with_reservations(&self.store.quota_ledger().await?);
         if let Err(e) = fluxvm_core::policy::enforce_token_totals(
             actor,
             req.vcpus,

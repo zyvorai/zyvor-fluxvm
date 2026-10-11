@@ -45,6 +45,131 @@ pub struct QuotaLedger {
     /// (`host.vms` against the store length) still applies.
     #[serde(default)]
     pub untracked_host: UsageTotals,
+    /// Batches admitted but not yet recorded (a fork or branch start in progress): tenant and token totals they will
+    /// add. Held apart from `tenants` and `tokens` so a rebuild from the VM records keeps them (see
+    /// [`ledger_with_reservations`]) and the records' own totals stay exact.
+    #[serde(default)]
+    pub reserved_tenants: BTreeMap<String, UsageTotals>,
+    #[serde(default)]
+    pub reserved_tokens: BTreeMap<String, UsageTotals>,
+}
+
+/// The ledger admission decides against: the records' totals plus every batch that has been admitted but not yet
+/// recorded, per tenant and token (host vCPUs and memory are in `untracked_host`, see [`ledger_for_host_admission`]).
+pub fn ledger_with_reservations(ledger: &QuotaLedger) -> QuotaLedger {
+    let mut view = ledger_for_host_admission(ledger);
+    for (k, r) in &ledger.reserved_tenants {
+        let e = view.tenants.entry(k.clone()).or_default();
+        e.vms = e.vms.saturating_add(r.vms);
+        e.vcpus = e.vcpus.saturating_add(r.vcpus);
+        e.memory_mib = e.memory_mib.saturating_add(r.memory_mib);
+    }
+    for (k, r) in &ledger.reserved_tokens {
+        let e = view.tokens.entry(k.clone()).or_default();
+        e.vms = e.vms.saturating_add(r.vms);
+        e.vcpus = e.vcpus.saturating_add(r.vcpus);
+        e.memory_mib = e.memory_mib.saturating_add(r.memory_mib);
+    }
+    view
+}
+
+/// A batch of identical VMs (a fork's children) to admit as one unit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BatchReservation {
+    pub count: u64,
+    pub vcpus: u8,
+    pub memory_mib: u64,
+    pub tenant: Option<String>,
+    /// The API token's name; `None` for no token or the anonymous admin (no token quota applies).
+    pub token: Option<String>,
+}
+
+impl QuotaLedger {
+    /// Admits `b` against the host, tenant and token limits **as a whole** and records it as reserved, or refuses with
+    /// the first limit it would break and changes nothing. Called under the store lock, so two batches racing each other
+    /// cannot both be admitted into room that only one fits.
+    pub fn reserve_batch(
+        &mut self,
+        b: &BatchReservation,
+        policy: &Policy,
+        max_vms_per_token: Option<usize>,
+        max_memory_mib_per_token: Option<u64>,
+    ) -> Result<()> {
+        let mut view = ledger_with_reservations(self);
+        // `enforce_*` price one more VM; add the other `count - 1` to the view first.
+        let extra = b.count.saturating_sub(1);
+        if extra > 0 {
+            let (v, m) = (u64::from(b.vcpus) * extra, b.memory_mib * extra);
+            view.host.vcpus = view.host.vcpus.saturating_add(v);
+            view.host.memory_mib = view.host.memory_mib.saturating_add(m);
+            if let Some(t) = b.tenant.as_deref() {
+                let e = view.tenants.entry(t.to_string()).or_default();
+                e.vms = e.vms.saturating_add(extra);
+                e.vcpus = e.vcpus.saturating_add(v);
+                e.memory_mib = e.memory_mib.saturating_add(m);
+            }
+            if let Some(k) = b.token.as_deref() {
+                let e = view.tokens.entry(k.to_string()).or_default();
+                e.vms = e.vms.saturating_add(extra);
+                e.vcpus = e.vcpus.saturating_add(v);
+                e.memory_mib = e.memory_mib.saturating_add(m);
+            }
+        }
+        if let Some(t) = b.tenant.as_deref()
+            && !policy.tenants.is_empty()
+        {
+            enforce_tenant_totals(t, b.vcpus, b.memory_mib, policy, &view)?;
+        }
+        enforce_host_totals(b.vcpus, b.memory_mib, policy, &view)?;
+        if let Some(k) = b.token.as_deref() {
+            enforce_token_totals(
+                k,
+                b.vcpus,
+                b.memory_mib,
+                max_vms_per_token,
+                max_memory_mib_per_token,
+                &view,
+            )?;
+        }
+        let (v, m) = (u64::from(b.vcpus) * b.count, b.memory_mib * b.count);
+        self.untracked_host.vcpus = self.untracked_host.vcpus.saturating_add(v);
+        self.untracked_host.memory_mib = self.untracked_host.memory_mib.saturating_add(m);
+        let bump = |e: &mut UsageTotals| {
+            e.vms = e.vms.saturating_add(b.count);
+            e.vcpus = e.vcpus.saturating_add(v);
+            e.memory_mib = e.memory_mib.saturating_add(m);
+        };
+        if let Some(t) = b.tenant.as_deref() {
+            bump(self.reserved_tenants.entry(t.to_string()).or_default());
+        }
+        if let Some(k) = b.token.as_deref() {
+            bump(self.reserved_tokens.entry(k.to_string()).or_default());
+        }
+        Ok(())
+    }
+
+    /// Returns what [`QuotaLedger::reserve_batch`] reserved. Never underflows.
+    pub fn release_batch(&mut self, b: &BatchReservation) {
+        let (v, m) = (u64::from(b.vcpus) * b.count, b.memory_mib * b.count);
+        self.untracked_host.vcpus = self.untracked_host.vcpus.saturating_sub(v);
+        self.untracked_host.memory_mib = self.untracked_host.memory_mib.saturating_sub(m);
+        let drop_from = |map: &mut BTreeMap<String, UsageTotals>, key: &str| {
+            if let Some(e) = map.get_mut(key) {
+                e.vms = e.vms.saturating_sub(b.count);
+                e.vcpus = e.vcpus.saturating_sub(v);
+                e.memory_mib = e.memory_mib.saturating_sub(m);
+                if e.vms == 0 && e.vcpus == 0 && e.memory_mib == 0 {
+                    map.remove(key);
+                }
+            }
+        };
+        if let Some(t) = b.tenant.as_deref() {
+            drop_from(&mut self.reserved_tenants, t);
+        }
+        if let Some(k) = b.token.as_deref() {
+            drop_from(&mut self.reserved_tokens, k);
+        }
+    }
 }
 
 /// Host admission view: VM totals plus reservations that are not VM records.
@@ -429,5 +554,123 @@ mod tests {
         assert_eq!(vmm_seccomp_mode_from(None), VmmSeccompMode::Log);
         assert_eq!(vmm_seccomp_mode_from(Some("kill")), VmmSeccompMode::Kill);
         assert_eq!(vmm_seccomp_mode_from(Some("off")), VmmSeccompMode::Off);
+    }
+
+    fn batch(count: u64, tenant: Option<&str>, token: Option<&str>) -> BatchReservation {
+        BatchReservation {
+            count,
+            vcpus: 2,
+            memory_mib: 1024,
+            tenant: tenant.map(str::to_string),
+            token: token.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn a_reserved_batch_is_seen_by_the_next_one_so_two_cannot_share_room_for_one() {
+        let policy = Policy {
+            max_memory_mib_host: Some(4096),
+            ..Default::default()
+        };
+        let mut l = QuotaLedger::default();
+        l.reserve_batch(&batch(3, None, None), &policy, None, None)
+            .unwrap();
+        // 3 GiB are held; another 2 GiB batch does not fit although nothing has been recorded yet.
+        let err = l
+            .reserve_batch(&batch(2, None, None), &policy, None, None)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("max_memory_mib_host"), "{err}");
+        assert_eq!(
+            l.untracked_host.memory_mib,
+            3 * 1024,
+            "a refusal changes nothing"
+        );
+        // One more does fit; releasing the first makes room for the 2-batch again.
+        l.reserve_batch(&batch(1, None, None), &policy, None, None)
+            .unwrap();
+        l.release_batch(&batch(3, None, None));
+        l.reserve_batch(&batch(2, None, None), &policy, None, None)
+            .unwrap();
+        assert_eq!(l.untracked_host.memory_mib, 3 * 1024);
+    }
+
+    #[test]
+    fn a_batch_is_priced_whole_against_the_tenant() {
+        let policy = Policy {
+            tenants: vec![TenantPolicy {
+                tenant: "acme".into(),
+                max_vms_total: Some(4),
+                max_vcpus_total: None,
+                max_memory_mib_total: None,
+            }],
+            ..Default::default()
+        };
+        let mut l = QuotaLedger::default();
+        l.ingest(Some("acme"), None, 2, 1024);
+        l.ingest(Some("acme"), None, 2, 1024);
+        // Two VMs exist, so a batch of 3 would make 5: refused as a whole, not child by child.
+        let err = l
+            .reserve_batch(&batch(3, Some("acme"), None), &policy, None, None)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("max_vms_total"), "{err}");
+        assert!(l.reserved_tenants.is_empty());
+        l.reserve_batch(&batch(2, Some("acme"), None), &policy, None, None)
+            .unwrap();
+        // The two reserved count: one more VM is now over the limit of 4.
+        assert!(
+            l.reserve_batch(&batch(1, Some("acme"), None), &policy, None, None)
+                .is_err()
+        );
+        // Other tenants are unaffected.
+        l.reserve_batch(&batch(5, Some("other"), None), &policy, None, None)
+            .unwrap();
+        l.release_batch(&batch(2, Some("acme"), None));
+        assert!(
+            !l.reserved_tenants.contains_key("acme"),
+            "an empty entry is dropped"
+        );
+    }
+
+    #[test]
+    fn a_batch_is_priced_whole_against_the_token() {
+        let policy = Policy::default();
+        let mut l = QuotaLedger::default();
+        l.ingest(None, Some("ci"), 2, 1024);
+        // max_vms_per_token 3 with one VM already: a batch of 3 makes 4. The old per-child loop priced one VM.
+        assert!(
+            l.reserve_batch(&batch(3, None, Some("ci")), &policy, Some(3), None)
+                .is_err()
+        );
+        l.reserve_batch(&batch(2, None, Some("ci")), &policy, Some(3), None)
+            .unwrap();
+        // Memory: 1 existing + 2 reserved = 3 GiB; the cap of 3 GiB leaves nothing.
+        assert!(
+            l.reserve_batch(&batch(1, None, Some("ci")), &policy, None, Some(3 * 1024))
+                .is_err()
+        );
+        // No token (anonymous admin) is never limited by token quotas.
+        l.reserve_batch(&batch(9, None, None), &policy, Some(1), Some(1))
+            .unwrap();
+    }
+
+    #[test]
+    fn reservations_survive_a_json_round_trip_and_an_old_ledger_has_none() {
+        let mut l = QuotaLedger::default();
+        l.reserve_batch(
+            &batch(2, Some("t"), Some("k")),
+            &Policy::default(),
+            None,
+            None,
+        )
+        .unwrap();
+        let back: QuotaLedger = serde_json::from_str(&serde_json::to_string(&l).unwrap()).unwrap();
+        assert_eq!(back, l);
+        let old: QuotaLedger = serde_json::from_str(
+            r#"{"host":{"vms":0,"vcpus":0,"memory_mib":0},"tenants":{},"tokens":{}}"#,
+        )
+        .unwrap();
+        assert!(old.reserved_tenants.is_empty() && old.reserved_tokens.is_empty());
     }
 }

@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+### Fixed: fork and branch-start quotas are checked as one atomic batch
+- A fork of N children was priced as N separate checks of one VM against an unchanged ledger (the API loop) for **API
+  token quotas**, and host and tenant checks read the ledger without holding anything, so two forks racing each other (or
+  a fork and a create) could both be admitted into room that only one fits. The batch is now admitted and reserved in one
+  step under the store lock (`QuotaLedger::reserve_batch`): host, tenant and token limits are priced for all N children,
+  creates and other forks see the reservation, and it is released when the children are recorded or the fork failed. A
+  reservation left by a crash is cleared when the daemon starts. `quota.deny` events for a refused fork carry
+  `scope=fork`, the machine and the count. The fork and branch-start plans use the same check without reserving.
+  Verified on an M4: with `max_memory_mib_host = 7000` and a 2 GiB parent, two simultaneous `count: 2` forks admitted
+  exactly one (6 144 MiB) and refused the other whole.
+
 ### Added: live egress policy for `apple.usernet` guests (`PUT /v1/vms/{id}/usernet/policy`)
 - Change a running usernet guest's allow/deny CIDRs, ports and DNS names without restarting it: the daemon validates the
   change like create, stores it in the VM record, rewrites the gateway's config and signals it (SIGHUP); new connections and
