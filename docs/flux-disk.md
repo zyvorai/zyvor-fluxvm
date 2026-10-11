@@ -6,7 +6,10 @@ ordinary `nbd` disk (see [macos.md](macos.md#extra-disks)). The binary also work
 overlay files.
 
 **Status.** The NBD protocol, overlay format, encryption and lazy fetch are covered by in-tree tests against an in-tree client.
-Interop with Virtualization.framework's NBD client is **UNVERIFIED**; so is any use under a booted guest.
+Virtualization.framework's NBD client has been run against it once on an Apple M4 (macOS 27.2, Debian 13 guest): connect,
+read, write, persistence across restart, and an immutable base all held. Not exercised on hardware: encryption, the lazy HTTP
+base, structured replies against VZ, and rebase and resize under a running guest. An overlay that has children is frozen and is
+served read-only.
 
 ## Overlays
 

@@ -940,6 +940,10 @@ impl BlockBackend for CowBackend {
         self.size.load(Ordering::SeqCst)
     }
 
+    fn is_read_only(&self) -> bool {
+        self.is_frozen()
+    }
+
     fn read_at(&self, off: u64, buf: &mut [u8]) -> io::Result<()> {
         self.check(off, buf.len() as u64)?;
         let bm = self.bitmap.read().unwrap();
