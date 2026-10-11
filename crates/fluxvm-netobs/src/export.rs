@@ -33,6 +33,9 @@ pub struct FlowView {
     pub server: Endpoint,
     /// "outbound" when the guest opened the flow, "inbound" otherwise.
     pub direction: &'static str,
+    /// How client and server were decided: "observed" (TCP handshake segment), "first_packet" (UDP/ICMP) or
+    /// "guessed" (TCP first seen mid-stream, well-known/lower port heuristic).
+    pub oriented: &'static str,
     pub vlan: Option<u16>,
     pub first_seen_us: u64,
     pub last_seen_us: u64,
@@ -94,6 +97,7 @@ impl FlowView {
             } else {
                 "inbound"
             },
+            oriented: f.oriented.name(),
             vlan: f.vlan,
             first_seen_us: f.first_seen_us,
             last_seen_us: f.last_seen_us,
@@ -237,6 +241,7 @@ pub enum EventKind {
         client: Endpoint,
         server: Endpoint,
         direction: &'static str,
+        oriented: &'static str,
     },
     FlowUpdate {
         flow: Box<FlowView>,
@@ -320,8 +325,21 @@ pub struct CounterView {
     pub flows_evicted: u64,
     pub flows_expired: u64,
     pub drops_by_reason: Vec<(String, u64)>,
+    /// Frames accepted from every source (in-process tap plus bridges) and frames those sources discarded.
     pub tap_enqueued: u64,
     pub tap_dropped: u64,
+    /// The bridge share of the two totals above: frames ingested from, and drops reported for, switch
+    /// processes. `bridge_dropped_by_reason` has one entry per label in
+    /// [`crate::source::BRIDGE_DROP_REASONS`] (a fixed set).
+    pub bridge_frames: u64,
+    pub bridge_dropped: u64,
+    pub bridge_dropped_by_reason: Vec<(String, u64)>,
+    /// Exported frames cut to the client's snap length (their byte counts are understated).
+    pub bridge_truncated_to_snaplen: u64,
+    /// Frames clients report sent that the server has not seen: in flight or lost with a dead connection.
+    pub bridge_unconfirmed: u64,
+    /// Frames a switch observed but could not hand to the destination guest (full receive queue).
+    pub switch_forward_dropped: u64,
     /// Reassembly: segments dropped over a bound, streams abandoned on the global budget, messages left
     /// incomplete at the prefix limit, evasion-style overlap conflicts, and bytes currently buffered.
     pub reasm_segments_dropped: u64,
@@ -451,6 +469,40 @@ pub fn render_prometheus(s: &Summary) -> String {
         "Frames the tap discarded because its queue was full.",
         c.tap_dropped,
     );
+    counter(
+        &mut o,
+        "fluxvm_netobs_bridge_frames_total",
+        "Frames ingested from switch bridges.",
+        c.bridge_frames,
+    );
+    counter(
+        &mut o,
+        "fluxvm_netobs_bridge_truncated_total",
+        "Bridge frames cut to the export snap length (byte counts understated).",
+        c.bridge_truncated_to_snaplen,
+    );
+    counter(
+        &mut o,
+        "fluxvm_netobs_switch_forward_dropped_total",
+        "Frames a switch observed but could not deliver to the destination guest.",
+        c.switch_forward_dropped,
+    );
+    let _ = writeln!(
+        o,
+        "# HELP fluxvm_netobs_bridge_unconfirmed Frames bridge clients report sent that the daemon has not seen.\n# TYPE fluxvm_netobs_bridge_unconfirmed gauge\nfluxvm_netobs_bridge_unconfirmed {}",
+        c.bridge_unconfirmed
+    );
+    let _ = writeln!(
+        o,
+        "# HELP fluxvm_netobs_bridge_dropped_total Observations lost between a switch and the observer, by reason.\n# TYPE fluxvm_netobs_bridge_dropped_total counter"
+    );
+    for (reason, n) in &c.bridge_dropped_by_reason {
+        let _ = writeln!(
+            o,
+            "fluxvm_netobs_bridge_dropped_total{{reason=\"{}\"}} {n}",
+            esc(reason)
+        );
+    }
     counter(
         &mut o,
         "fluxvm_netobs_reasm_segments_dropped_total",

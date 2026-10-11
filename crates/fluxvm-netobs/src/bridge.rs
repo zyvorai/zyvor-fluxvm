@@ -23,8 +23,12 @@
 //! ```text
 //! 1 IDENT  id u32 | mac [6] | vm_len u8 | vm | net_len u8 | network | nic_len u8 | nic
 //! 2 FRAME  id u32 | ts_us u64 | direction u8 | verdict u8 | reason u8 | frame bytes...
-//! 3 STATS  sent u64 | dropped u64            (client totals since it started; lets the server account
-//!                                             drops that never reached it)
+//! 3 STATS  sent u64 | dropped u64 [| queue_full u64 | disconnected u64 | oversize u64 | write_error u64
+//!                                  | truncated_to_snaplen u64 | switch_forward_dropped u64]
+//!                                            (client totals since it started; lets the server account
+//!                                             drops that never reached it. The bracketed part is optional
+//!                                             and read when present. It is the first record on every
+//!                                             connection, so the server has a baseline for `sent`.)
 //! ```
 //!
 //! `IDENT` binds a connection-local id to an [`Identity`] and precedes the first `FRAME` that uses it; ids are
@@ -45,7 +49,7 @@
 
 use crate::flow::{Direction, DropReason, FrameMeta, Identity, Verdict};
 use crate::observer::Observer;
-use crate::source::{TapStats, now_us};
+use crate::source::{BridgeLoss, REASON_SERVER_REJECTED, REASON_UNSPECIFIED, now_us};
 use std::collections::HashMap;
 use std::io::{self, BufReader, Read, Write};
 use std::ops::Range;
@@ -53,8 +57,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::mpsc::{RecvTimeoutError, SyncSender, TrySendError, sync_channel};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -135,27 +138,62 @@ pub fn encode_frame(out: &mut Vec<u8>, id: u32, meta: &FrameMeta, frame: &[u8]) 
     if frame.len() > MAX_FRAME {
         return None;
     }
-    let (kind, reason) = verdict_code(meta.verdict);
+    encode_frame_parts(out, id, meta.ts_us, meta.direction, meta.verdict, frame);
+    Some(())
+}
+
+/// [`encode_frame`] without the [`FrameMeta`]; `frame` must not exceed [`MAX_FRAME`].
+fn encode_frame_parts(
+    out: &mut Vec<u8>,
+    id: u32,
+    ts_us: u64,
+    direction: Direction,
+    verdict: Verdict,
+    frame: &[u8],
+) {
+    let (kind, reason) = verdict_code(verdict);
     out.extend_from_slice(&((FRAME_FIXED + frame.len()) as u32).to_be_bytes());
     out.push(T_FRAME);
     out.extend_from_slice(&id.to_be_bytes());
-    out.extend_from_slice(&meta.ts_us.to_be_bytes());
-    out.push(match meta.direction {
+    out.extend_from_slice(&ts_us.to_be_bytes());
+    out.push(match direction {
         Direction::FromGuest => 0,
         Direction::ToGuest => 1,
     });
     out.push(kind);
     out.push(reason);
     out.extend_from_slice(frame);
-    Some(())
 }
 
-/// Appends a STATS record to `out`.
+/// Appends a STATS record (totals only) to `out`.
 pub fn encode_stats(out: &mut Vec<u8>, sent: u64, dropped: u64) {
     out.extend_from_slice(&17u32.to_be_bytes());
     out.push(T_STATS);
     out.extend_from_slice(&sent.to_be_bytes());
     out.extend_from_slice(&dropped.to_be_bytes());
+}
+
+/// The part of a STATS record added after the first release of v1: drops split by reason and two more
+/// counters. An old server ignores the extra bytes; a new server accepts a record without them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct StatsExt {
+    /// queue_full, disconnected, oversize, write_error (the order of [`crate::source::BRIDGE_DROP_REASONS`]).
+    pub dropped_by_reason: [u64; 4],
+    pub truncated_to_snaplen: u64,
+    pub switch_forward_dropped: u64,
+}
+
+/// Appends a STATS record carrying [`StatsExt`] to `out`.
+pub fn encode_stats_ext(out: &mut Vec<u8>, sent: u64, dropped: u64, ext: &StatsExt) {
+    out.extend_from_slice(&((1 + 16 + 6 * 8) as u32).to_be_bytes());
+    out.push(T_STATS);
+    out.extend_from_slice(&sent.to_be_bytes());
+    out.extend_from_slice(&dropped.to_be_bytes());
+    for v in ext.dropped_by_reason {
+        out.extend_from_slice(&v.to_be_bytes());
+    }
+    out.extend_from_slice(&ext.truncated_to_snaplen.to_be_bytes());
+    out.extend_from_slice(&ext.switch_forward_dropped.to_be_bytes());
 }
 
 /// A decoded record body (the bytes after the length prefix).
@@ -175,6 +213,7 @@ pub enum Decoded<'a> {
     Stats {
         sent: u64,
         dropped: u64,
+        ext: Option<StatsExt>,
     },
     /// A record type this version does not know: skipped.
     Unknown(u8),
@@ -254,7 +293,19 @@ pub fn decode_body(b: &[u8]) -> Result<Decoded<'_>, DecodeError> {
             let sent = u64::from_be_bytes(rest[..8].try_into().map_err(|_| DecodeError::Short)?);
             let dropped =
                 u64::from_be_bytes(rest[8..16].try_into().map_err(|_| DecodeError::Short)?);
-            Ok(Decoded::Stats { sent, dropped })
+            let ext = if rest.len() >= 16 + 6 * 8 {
+                let u = |i: usize| {
+                    u64::from_be_bytes(rest[16 + 8 * i..24 + 8 * i].try_into().unwrap_or([0; 8]))
+                };
+                Some(StatsExt {
+                    dropped_by_reason: [u(0), u(1), u(2), u(3)],
+                    truncated_to_snaplen: u(4),
+                    switch_forward_dropped: u(5),
+                })
+            } else {
+                None
+            };
+            Ok(Decoded::Stats { sent, dropped, ext })
         }
         t => Ok(Decoded::Unknown(t)),
     }
@@ -268,36 +319,49 @@ pub fn decode_body(b: &[u8]) -> Result<Decoded<'_>, DecodeError> {
 pub struct BridgeClientConfig {
     /// Frames that may wait for the writer thread.
     pub queue_capacity: usize,
+    /// Encoded bytes that may wait for the writer thread (the queue is full at whichever limit comes first).
+    pub queue_bytes: usize,
     /// Frames longer than this are cut (at most [`MAX_FRAME`]).
     pub snaplen: usize,
     pub reconnect_min: Duration,
     pub reconnect_max: Duration,
     /// A write that stalls this long drops the connection (the peer is stuck), so the queue keeps draining.
     pub write_timeout: Duration,
+    /// How often the client reports its totals (when they changed) so the server can account for drops.
+    pub stats_interval: Duration,
 }
 
 impl Default for BridgeClientConfig {
     fn default() -> Self {
         Self {
-            queue_capacity: 2048,
+            // About 100 ms of a 300 kpps guest, and 16 MiB (some 10k MTU-size frames).
+            queue_capacity: 32_768,
+            queue_bytes: 16 * 1024 * 1024,
             snaplen: 2048,
             reconnect_min: Duration::from_millis(50),
             reconnect_max: Duration::from_secs(2),
             write_timeout: Duration::from_millis(250),
+            stats_interval: Duration::from_millis(250),
         }
     }
 }
 
-/// Client-side counters.
+/// Client-side counters. Every frame offered through [`BridgeClient::tap_as`] ends up in exactly one of
+/// `sent` (written to the socket) or one of the `dropped_*` counters, or is still queued.
 #[derive(Debug, Default)]
 pub struct BridgeClientStats {
+    /// Frames accepted into the queue.
     pub queued: AtomicU64,
+    /// Frames fully written to the socket.
     pub sent: AtomicU64,
     pub truncated_to_snaplen: AtomicU64,
     pub dropped_queue_full: AtomicU64,
     pub dropped_disconnected: AtomicU64,
     pub dropped_oversize: AtomicU64,
     pub dropped_write_error: AtomicU64,
+    /// Frames the switch observed but did not deliver to the destination guest (see
+    /// [`BridgeClient::note_forward_drop`]). Not part of [`Self::total_dropped`]: the observer saw them.
+    pub switch_forward_dropped: AtomicU64,
     pub connects: AtomicU64,
     pub reconnects: AtomicU64,
     pub connect_failures: AtomicU64,
@@ -305,41 +369,74 @@ pub struct BridgeClientStats {
 
 impl BridgeClientStats {
     pub fn total_dropped(&self) -> u64 {
+        self.dropped_by_reason().iter().sum()
+    }
+
+    /// Drops in the order of the first four labels of [`crate::source::BRIDGE_DROP_REASONS`]: queue_full,
+    /// disconnected, oversize, write_error.
+    pub fn dropped_by_reason(&self) -> [u64; 4] {
         [
-            &self.dropped_queue_full,
-            &self.dropped_disconnected,
-            &self.dropped_oversize,
-            &self.dropped_write_error,
+            Self::get(&self.dropped_queue_full),
+            Self::get(&self.dropped_disconnected),
+            Self::get(&self.dropped_oversize),
+            Self::get(&self.dropped_write_error),
         ]
-        .iter()
-        .map(|c| c.load(Ordering::Relaxed))
-        .sum()
     }
 
     pub fn get(c: &AtomicU64) -> u64 {
         c.load(Ordering::Relaxed)
     }
+
+    fn snapshot(&self) -> (u64, u64, StatsExt) {
+        let by = self.dropped_by_reason();
+        (
+            Self::get(&self.sent),
+            by.iter().sum(),
+            StatsExt {
+                dropped_by_reason: by,
+                truncated_to_snaplen: Self::get(&self.truncated_to_snaplen),
+                switch_forward_dropped: Self::get(&self.switch_forward_dropped),
+            },
+        )
+    }
 }
 
-struct Item {
-    identity: Arc<Identity>,
-    ts_us: u64,
-    direction: Direction,
-    verdict: Verdict,
-    data: Vec<u8>,
+/// The queue the datapath fills and the writer thread empties: frames already encoded as wire records, so the
+/// datapath does one short lock and one copy per frame, and the writer does one `write` per batch.
+struct Queue {
+    buf: Vec<u8>,
+    frames: usize,
+    /// Identities in id order (the id is the index). Append-only: a reconnect announces them all again.
+    idents: Vec<Arc<Identity>>,
+    index: HashMap<Arc<Identity>, u32>,
+    /// The identity most recently used, to skip hashing when one port sends a run of frames.
+    last: Option<(Arc<Identity>, u32)>,
+}
+
+struct Core {
+    q: Mutex<Queue>,
+    cv: Condvar,
+    /// A connection is up. When it is not, frames are counted as dropped without being queued.
+    connected: AtomicBool,
+    stats: Arc<BridgeClientStats>,
+    /// Frames the writer is finished with (written or dropped), for [`BridgeClient::flush`].
+    settled: AtomicU64,
+    stop: AtomicBool,
+    snaplen: usize,
+    cap_frames: usize,
+    cap_bytes: usize,
 }
 
 struct ClientShared {
-    tx: SyncSender<Item>,
+    core: Arc<Core>,
     stats: Arc<BridgeClientStats>,
-    stop: Arc<AtomicBool>,
     join: Mutex<Option<JoinHandle<()>>>,
-    snaplen: usize,
 }
 
 impl Drop for ClientShared {
     fn drop(&mut self) {
-        self.stop.store(true, Ordering::Relaxed);
+        self.core.stop.store(true, Ordering::Relaxed);
+        self.core.cv.notify_all();
         if let Some(j) = self.join.lock().unwrap_or_else(|e| e.into_inner()).take() {
             let _ = j.join();
         }
@@ -357,28 +454,40 @@ impl BridgeClient {
     /// that is not there yet simply means frames are dropped (and counted) until it is.
     pub fn connect(path: impl Into<PathBuf>, cfg: BridgeClientConfig) -> BridgeClient {
         let path = path.into();
-        let (tx, rx) = sync_channel::<Item>(cfg.queue_capacity.max(1));
         let stats = Arc::new(BridgeClientStats::default());
-        let stop = Arc::new(AtomicBool::new(false));
-        let snaplen = cfg.snaplen.clamp(64, MAX_FRAME);
+        let core = Arc::new(Core {
+            q: Mutex::new(Queue {
+                buf: Vec::with_capacity(64 * 1024),
+                frames: 0,
+                idents: Vec::new(),
+                index: HashMap::new(),
+                last: None,
+            }),
+            cv: Condvar::new(),
+            connected: AtomicBool::new(false),
+            stats: stats.clone(),
+            settled: AtomicU64::new(0),
+            stop: AtomicBool::new(false),
+            snaplen: cfg.snaplen.clamp(64, MAX_FRAME),
+            cap_frames: cfg.queue_capacity.max(1),
+            cap_bytes: cfg.queue_bytes.max(MAX_RECORD + 4),
+        });
         let client_id = {
             let mut h = std::collections::hash_map::DefaultHasher::new();
             use std::hash::{Hash, Hasher};
             (std::process::id(), now_us(), &path).hash(&mut h);
             h.finish()
         };
-        let (st, sp) = (stats.clone(), stop.clone());
+        let c = core.clone();
         let join = std::thread::Builder::new()
             .name("fluxvm-netobs-bridge-tx".into())
-            .spawn(move || client_loop(path, cfg, rx, st, sp, client_id))
+            .spawn(move || client_loop(path, cfg, c, client_id))
             .ok();
         BridgeClient {
             shared: Arc::new(ClientShared {
-                tx,
+                core,
                 stats,
-                stop,
                 join: Mutex::new(join),
-                snaplen,
             }),
         }
     }
@@ -387,7 +496,7 @@ impl BridgeClient {
         &self.shared.stats
     }
 
-    /// Queues a frame for `identity`. Never blocks.
+    /// Queues a frame for `identity`. Never blocks beyond a short, uncontended lock.
     pub fn tap_as(
         &self,
         identity: &Arc<Identity>,
@@ -395,25 +504,57 @@ impl BridgeClient {
         verdict: Verdict,
         frame: &[u8],
     ) {
-        let s = &self.shared;
-        let keep = frame.len().min(s.snaplen);
+        let c = &self.shared.core;
+        let st = &c.stats;
+        let keep = frame.len().min(c.snaplen);
         if keep < frame.len() {
-            s.stats.truncated_to_snaplen.fetch_add(1, Ordering::Relaxed);
+            st.truncated_to_snaplen.fetch_add(1, Ordering::Relaxed);
         }
-        let item = Item {
-            identity: identity.clone(),
-            ts_us: now_us(),
-            direction,
-            verdict,
-            data: frame[..keep].to_vec(),
+        if !c.connected.load(Ordering::Relaxed) {
+            st.dropped_disconnected.fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+        let ts_us = now_us();
+        let mut q = c.q.lock().unwrap_or_else(|e| e.into_inner());
+        let id = match &q.last {
+            Some((l, id)) if Arc::ptr_eq(l, identity) => Some(*id),
+            _ => match q.index.get(identity) {
+                Some(id) => Some(*id),
+                None => {
+                    let id = q.idents.len();
+                    let encodable = {
+                        let mut scratch = Vec::new();
+                        encode_ident(&mut scratch, 0, identity).is_some()
+                    };
+                    if id >= MAX_IDENTS_PER_CONN || !encodable {
+                        None
+                    } else {
+                        q.idents.push(identity.clone());
+                        q.index.insert(identity.clone(), id as u32);
+                        Some(id as u32)
+                    }
+                }
+            },
         };
-        match s.tx.try_send(item) {
-            Ok(()) => {
-                s.stats.queued.fetch_add(1, Ordering::Relaxed);
-            }
-            Err(TrySendError::Full(_)) | Err(TrySendError::Disconnected(_)) => {
-                s.stats.dropped_queue_full.fetch_add(1, Ordering::Relaxed);
-            }
+        let Some(id) = id else {
+            drop(q);
+            st.dropped_oversize.fetch_add(1, Ordering::Relaxed);
+            return;
+        };
+        q.last = Some((identity.clone(), id));
+        let need = 4 + FRAME_FIXED + keep;
+        if q.frames >= c.cap_frames || q.buf.len() + need > c.cap_bytes {
+            drop(q);
+            st.dropped_queue_full.fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+        encode_frame_parts(&mut q.buf, id, ts_us, direction, verdict, &frame[..keep]);
+        q.frames += 1;
+        let first = q.frames == 1;
+        drop(q);
+        st.queued.fetch_add(1, Ordering::Relaxed);
+        if first {
+            c.cv.notify_one();
         }
     }
 
@@ -425,16 +566,22 @@ impl BridgeClient {
         }
     }
 
+    /// Records that the switch observed a frame but could not hand it to its destination (a full receive
+    /// queue). It is reported to the server as `switch_forward_dropped`; it is not an observation loss.
+    pub fn note_forward_drop(&self) {
+        self.shared
+            .stats
+            .switch_forward_dropped
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
     /// Blocks until everything queued so far has been written or dropped, or `timeout` passes. For tests and
     /// orderly shutdown; the datapath never calls it.
     pub fn flush(&self, timeout: Duration) -> bool {
-        let s = &self.shared.stats;
+        let c = &self.shared.core;
         let deadline = Instant::now() + timeout;
         loop {
-            let done = BridgeClientStats::get(&s.sent) + s.total_dropped()
-                - BridgeClientStats::get(&s.dropped_queue_full)
-                >= BridgeClientStats::get(&s.queued);
-            if done {
+            if c.settled.load(Ordering::Relaxed) >= BridgeClientStats::get(&c.stats.queued) {
                 return true;
             }
             if Instant::now() >= deadline {
@@ -459,37 +606,92 @@ impl crate::source::Tap for BridgeTap {
     }
 }
 
-fn client_loop(
-    path: PathBuf,
-    cfg: BridgeClientConfig,
-    rx: std::sync::mpsc::Receiver<Item>,
-    stats: Arc<BridgeClientStats>,
-    stop: Arc<AtomicBool>,
-    client_id: u64,
-) {
+/// How many whole records of `data` (all FRAME records) end within the first `written` bytes.
+fn complete_records(data: &[u8], written: usize) -> usize {
+    let (mut pos, mut n) = (0usize, 0usize);
+    while pos + 4 <= data.len() {
+        let len =
+            u32::from_be_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]) as usize;
+        let end = pos + 4 + len;
+        if end > written || end > data.len() {
+            break;
+        }
+        n += 1;
+        pos = end;
+    }
+    n
+}
+
+/// Writes all of `data`, returning how many bytes left before an error (equal to the length on success).
+fn write_counted(s: &mut UnixStream, data: &[u8]) -> (usize, bool) {
+    let mut off = 0;
+    while off < data.len() {
+        match s.write(&data[off..]) {
+            Ok(0) => return (off, false),
+            Ok(n) => off += n,
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            Err(_) => return (off, false),
+        }
+    }
+    (off, true)
+}
+
+fn client_loop(path: PathBuf, cfg: BridgeClientConfig, core: Arc<Core>, client_id: u64) {
+    let stats = core.stats.clone();
     let mut conn: Option<UnixStream> = None;
     let mut ever_connected = false;
-    let mut idents: HashMap<Arc<Identity>, u32> = HashMap::new();
+    let mut announced = 0usize;
     let mut backoff = cfg.reconnect_min;
     let mut next_attempt = Instant::now();
-    let mut buf: Vec<u8> = Vec::with_capacity(4096);
-    let mut last_stats = (0u64, 0u64);
+    let mut spare: Vec<u8> = Vec::with_capacity(64 * 1024);
+    let mut hdr: Vec<u8> = Vec::new();
+    let mut last_stats: Option<(u64, u64, StatsExt)> = None;
     let mut last_stats_at = Instant::now();
-    while !stop.load(Ordering::Relaxed) {
-        if conn.is_none() && Instant::now() >= next_attempt {
+    let send_stats = |s: &mut UnixStream, last: &mut Option<(u64, u64, StatsExt)>| -> bool {
+        let now = stats.snapshot();
+        if last.as_ref() == Some(&now) {
+            return true;
+        }
+        let mut b = Vec::with_capacity(80);
+        encode_stats_ext(&mut b, now.0, now.1, &now.2);
+        let ok = s.write_all(&b).is_ok();
+        if ok {
+            *last = Some(now);
+        }
+        ok
+    };
+    let mut final_pass = false;
+    loop {
+        if core.stop.load(Ordering::Relaxed) {
+            if final_pass {
+                break;
+            }
+            // One more pass to hand whatever is queued to the socket (or count it) before leaving.
+            final_pass = true;
+        }
+        if conn.is_none() && Instant::now() >= next_attempt && !final_pass {
             match UnixStream::connect(&path) {
                 Ok(mut s) => {
                     let _ = s.set_write_timeout(Some(cfg.write_timeout));
                     if s.write_all(&encode_preamble(client_id)).is_ok() {
-                        conn = Some(s);
-                        idents.clear();
+                        announced = 0;
                         backoff = cfg.reconnect_min;
                         stats.connects.fetch_add(1, Ordering::Relaxed);
                         if ever_connected {
                             stats.reconnects.fetch_add(1, Ordering::Relaxed);
                         }
                         ever_connected = true;
-                        last_stats = (u64::MAX, u64::MAX); // force a STATS record on the new connection
+                        // The first record on a connection is a STATS: the server takes `sent` from it as the
+                        // baseline for what it should go on to receive.
+                        last_stats = None;
+                        if send_stats(&mut s, &mut last_stats) {
+                            last_stats_at = Instant::now();
+                            conn = Some(s);
+                            core.connected.store(true, Ordering::Relaxed);
+                        } else {
+                            stats.connect_failures.fetch_add(1, Ordering::Relaxed);
+                            next_attempt = Instant::now() + backoff;
+                        }
                     } else {
                         stats.connect_failures.fetch_add(1, Ordering::Relaxed);
                         next_attempt = Instant::now() + backoff;
@@ -502,72 +704,78 @@ fn client_loop(
                 }
             }
         }
-        match rx.recv_timeout(Duration::from_millis(50)) {
-            Ok(item) => {
-                let Some(s) = conn.as_mut() else {
-                    stats.dropped_disconnected.fetch_add(1, Ordering::Relaxed);
-                    continue;
-                };
-                buf.clear();
-                let id = match idents.get(&item.identity) {
-                    Some(id) => Some(*id),
-                    None => {
-                        let id = idents.len() as u32;
-                        if idents.len() >= MAX_IDENTS_PER_CONN
-                            || encode_ident(&mut buf, id, &item.identity).is_none()
-                        {
-                            None
-                        } else {
-                            idents.insert(item.identity.clone(), id);
-                            Some(id)
-                        }
-                    }
-                };
-                let meta = FrameMeta {
-                    identity: item.identity.clone(),
-                    ts_us: item.ts_us,
-                    direction: item.direction,
-                    verdict: item.verdict,
-                };
-                let Some(id) = id else {
-                    // Too many identities for one connection (or an unencodable name): start over.
-                    stats.dropped_oversize.fetch_add(1, Ordering::Relaxed);
-                    conn = None;
-                    next_attempt = Instant::now();
-                    continue;
-                };
-                if encode_frame(&mut buf, id, &meta, &item.data).is_none() {
-                    stats.dropped_oversize.fetch_add(1, Ordering::Relaxed);
-                    continue;
+
+        // Take everything queued in one swap.
+        let (n, new_idents) = {
+            let mut q = core.q.lock().unwrap_or_else(|e| e.into_inner());
+            if q.frames == 0 && !final_pass {
+                q = core
+                    .cv
+                    .wait_timeout(q, Duration::from_millis(50))
+                    .unwrap_or_else(|e| e.into_inner())
+                    .0;
+            }
+            if q.frames == 0 {
+                (0, Vec::new())
+            } else {
+                spare.clear();
+                std::mem::swap(&mut q.buf, &mut spare);
+                let n = q.frames;
+                q.frames = 0;
+                let from = announced.min(q.idents.len());
+                (n, q.idents[from..].to_vec())
+            }
+        };
+        if n > 0 {
+            match conn.as_mut() {
+                None => {
+                    stats
+                        .dropped_disconnected
+                        .fetch_add(n as u64, Ordering::Relaxed);
                 }
-                if s.write_all(&buf).is_err() {
-                    stats.dropped_write_error.fetch_add(1, Ordering::Relaxed);
-                    conn = None;
-                    next_attempt = Instant::now() + cfg.reconnect_min;
-                } else {
-                    stats.sent.fetch_add(1, Ordering::Relaxed);
+                Some(s) => {
+                    hdr.clear();
+                    for (k, ident) in new_idents.iter().enumerate() {
+                        let _ = encode_ident(&mut hdr, (announced + k) as u32, ident);
+                    }
+                    let (hw, hok) = write_counted(s, &hdr);
+                    let (complete, ok) = if hok {
+                        let (w, ok) = write_counted(s, &spare);
+                        (complete_records(&spare, w), ok)
+                    } else {
+                        let _ = hw;
+                        (0, false)
+                    };
+                    stats.sent.fetch_add(complete as u64, Ordering::Relaxed);
+                    if ok {
+                        announced += new_idents.len();
+                    } else {
+                        stats
+                            .dropped_write_error
+                            .fetch_add((n - complete) as u64, Ordering::Relaxed);
+                        conn = None;
+                        core.connected.store(false, Ordering::Relaxed);
+                        next_attempt = Instant::now() + cfg.reconnect_min;
+                    }
                 }
             }
-            Err(RecvTimeoutError::Timeout) => {}
-            Err(RecvTimeoutError::Disconnected) => break,
+            core.settled.fetch_add(n as u64, Ordering::Relaxed);
         }
         if let Some(s) = conn.as_mut()
-            && (last_stats_at.elapsed() >= Duration::from_secs(1)
-                || last_stats == (u64::MAX, u64::MAX))
+            && last_stats_at.elapsed() >= cfg.stats_interval
         {
-            let now = (BridgeClientStats::get(&stats.sent), stats.total_dropped());
-            if now != last_stats {
-                buf.clear();
-                encode_stats(&mut buf, now.0, now.1);
-                if s.write_all(&buf).is_err() {
-                    conn = None;
-                    next_attempt = Instant::now() + cfg.reconnect_min;
-                } else {
-                    last_stats = now;
-                }
+            if !send_stats(s, &mut last_stats) {
+                conn = None;
+                core.connected.store(false, Ordering::Relaxed);
+                next_attempt = Instant::now() + cfg.reconnect_min;
             }
             last_stats_at = Instant::now();
         }
+    }
+    core.connected.store(false, Ordering::Relaxed);
+    // Report the final totals so the server's account is complete.
+    if let Some(s) = conn.as_mut() {
+        let _ = send_stats(s, &mut last_stats);
     }
 }
 
@@ -626,8 +834,39 @@ pub struct BridgeServer {
     path: PathBuf,
     cfg: BridgeServerConfig,
     stats: Arc<BridgeServerStats>,
-    tap_stats: Arc<TapStats>,
+    loss: Arc<BridgeLoss>,
     stop: Arc<AtomicBool>,
+}
+
+/// What the server remembers about one client (a switch process) across its connections.
+#[derive(Default)]
+struct ClientAcct {
+    /// Last cumulative drop counters reported, by reason (queue_full, disconnected, oversize, write_error).
+    by_reason: [u64; 4],
+    /// Last cumulative total, for clients that do not send reasons.
+    dropped_total: u64,
+    truncated: u64,
+    forward: u64,
+    /// The client's `sent` when this server first heard from it: only frames after it are expected here.
+    sent_base: Option<u64>,
+    /// Frames received on connections of this client that have since ended.
+    received_closed: u64,
+}
+
+type Clients = Arc<Mutex<HashMap<u64, ClientAcct>>>;
+
+/// Adds a connection's received-frame count to its client's account when the connection ends, however it ends.
+struct ConnGuard {
+    clients: Clients,
+    client_id: u64,
+    received: u64,
+}
+
+impl Drop for ConnGuard {
+    fn drop(&mut self) {
+        let mut g = self.clients.lock().unwrap_or_else(|e| e.into_inner());
+        g.entry(self.client_id).or_default().received_closed += self.received;
+    }
 }
 
 /// Stops a running [`BridgeServer`] from another thread.
@@ -645,6 +884,7 @@ pub struct BridgeRunning {
     stop: BridgeStop,
     join: Option<JoinHandle<io::Result<()>>>,
     pub stats: Arc<BridgeServerStats>,
+    pub loss: Arc<BridgeLoss>,
 }
 
 impl BridgeRunning {
@@ -694,7 +934,7 @@ impl BridgeServer {
             path,
             cfg,
             stats: Arc::new(BridgeServerStats::default()),
-            tap_stats: Arc::new(TapStats::default()),
+            loss: Arc::new(BridgeLoss::default()),
             stop: Arc::new(AtomicBool::new(false)),
         })
     }
@@ -712,11 +952,12 @@ impl BridgeServer {
     }
 
     /// Serves until stopped: accepts connections and ingests their frames into `observer`. Also ages the
-    /// observer's flows while traffic is idle. When the observer has no tap statistics registered yet, the
-    /// bridge's (frames received, drops reported by clients) become its `tap_enqueued` / `tap_dropped`.
+    /// observer's flows while traffic is idle. The bridge's loss accounting is registered with the observer
+    /// (alongside, never instead of, an in-process tap), so frames received and every drop reported by clients
+    /// appear in its summary as `bridge_*` and are added into `tap_enqueued` / `tap_dropped`.
     pub fn run(self, observer: Arc<Observer>) -> io::Result<()> {
-        observer.set_tap_stats_if_unset(self.tap_stats.clone());
-        let clients: Arc<Mutex<HashMap<u64, u64>>> = Arc::new(Mutex::new(HashMap::new()));
+        observer.add_bridge_loss(self.loss.clone());
+        let clients: Clients = Arc::new(Mutex::new(HashMap::new()));
         // Each worker with a second handle to its socket, so stopping can unblock a read that is waiting.
         let mut workers: Vec<(JoinHandle<()>, Option<UnixStream>)> = Vec::new();
         let finish = |workers: Vec<(JoinHandle<()>, Option<UnixStream>)>| {
@@ -744,7 +985,7 @@ impl BridgeServer {
                         obs: observer.clone(),
                         cfg: self.cfg.clone(),
                         stats: self.stats.clone(),
-                        tap_stats: self.tap_stats.clone(),
+                        loss: self.loss.clone(),
                         stop: self.stop.clone(),
                         clients: clients.clone(),
                     };
@@ -783,11 +1024,17 @@ impl BridgeServer {
     pub fn spawn(self, observer: Arc<Observer>) -> BridgeRunning {
         let stop = self.stop_handle();
         let stats = self.stats();
+        let loss = self.loss.clone();
         let join = std::thread::Builder::new()
             .name("fluxvm-netobs-bridge".into())
             .spawn(move || self.run(observer))
             .ok();
-        BridgeRunning { stop, join, stats }
+        BridgeRunning {
+            stop,
+            join,
+            stats,
+            loss,
+        }
     }
 }
 
@@ -844,9 +1091,9 @@ struct Worker {
     obs: Arc<Observer>,
     cfg: BridgeServerConfig,
     stats: Arc<BridgeServerStats>,
-    tap_stats: Arc<TapStats>,
+    loss: Arc<BridgeLoss>,
     stop: Arc<AtomicBool>,
-    clients: Arc<Mutex<HashMap<u64, u64>>>,
+    clients: Clients,
 }
 
 impl Worker {
@@ -871,8 +1118,8 @@ impl Worker {
         self.stats
             .frames
             .fetch_add(batch.len() as u64, Ordering::Relaxed);
-        self.tap_stats
-            .enqueued
+        self.loss
+            .frames
             .fetch_add(batch.len() as u64, Ordering::Relaxed);
         batch.clear();
         arena.clear();
@@ -900,6 +1147,11 @@ impl Worker {
             return Ok(());
         }
         let client_id = u64::from_be_bytes(pre[8..16].try_into().unwrap_or([0; 8]));
+        let mut guard = ConnGuard {
+            clients: self.clients.clone(),
+            client_id,
+            received: 0,
+        };
 
         let mut idents: HashMap<u32, Arc<Identity>> = HashMap::new();
         let mut arena: Vec<u8> = Vec::new();
@@ -973,6 +1225,7 @@ impl Worker {
                     data,
                 }) => match idents.get(&id) {
                     Some(identity) => {
+                        guard.received += 1;
                         let start = arena.len();
                         arena.extend_from_slice(data);
                         batch.push((
@@ -989,24 +1242,70 @@ impl Worker {
                         }
                     }
                     None => {
+                        guard.received += 1;
                         self.stats.unknown_ident.fetch_add(1, Ordering::Relaxed);
+                        self.loss.dropped[REASON_SERVER_REJECTED].fetch_add(1, Ordering::Relaxed);
                     }
                 },
-                Ok(Decoded::Stats { sent: _, dropped }) => {
+                Ok(Decoded::Stats { sent, dropped, ext }) => {
                     self.stats.stats_records.fetch_add(1, Ordering::Relaxed);
-                    let delta = {
+                    let mut delta_total = 0u64;
+                    let unconfirmed = {
                         let mut g = self.clients.lock().unwrap_or_else(|e| e.into_inner());
-                        if g.len() >= 256 && !g.contains_key(&client_id) {
-                            g.clear();
+                        if g.len() >= 1024
+                            && !g.contains_key(&client_id)
+                            && let Some(k) = g.keys().next().copied()
+                        {
+                            g.remove(&k);
                         }
-                        let last = g.insert(client_id, dropped).unwrap_or(0);
-                        dropped.saturating_sub(last)
+                        let a = g.entry(client_id).or_default();
+                        let base = *a
+                            .sent_base
+                            .get_or_insert(sent.saturating_sub(guard.received));
+                        match ext {
+                            Some(e) => {
+                                for (i, v) in e.dropped_by_reason.iter().enumerate() {
+                                    let d = v.saturating_sub(a.by_reason[i]);
+                                    a.by_reason[i] = *v;
+                                    if d > 0 {
+                                        self.loss.dropped[i].fetch_add(d, Ordering::Relaxed);
+                                        delta_total += d;
+                                    }
+                                }
+                                a.dropped_total = dropped;
+                                let t = e.truncated_to_snaplen.saturating_sub(a.truncated);
+                                a.truncated = e.truncated_to_snaplen;
+                                self.loss
+                                    .truncated_to_snaplen
+                                    .fetch_add(t, Ordering::Relaxed);
+                                let f = e.switch_forward_dropped.saturating_sub(a.forward);
+                                a.forward = e.switch_forward_dropped;
+                                self.loss
+                                    .switch_forward_dropped
+                                    .fetch_add(f, Ordering::Relaxed);
+                            }
+                            None => {
+                                let d = dropped.saturating_sub(a.dropped_total);
+                                a.dropped_total = dropped;
+                                if d > 0 {
+                                    self.loss.dropped[REASON_UNSPECIFIED]
+                                        .fetch_add(d, Ordering::Relaxed);
+                                    delta_total += d;
+                                }
+                            }
+                        }
+                        (sent.saturating_sub(base))
+                            .saturating_sub(a.received_closed + guard.received)
                     };
-                    if delta > 0 {
+                    self.loss
+                        .unconfirmed
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .insert(client_id, unconfirmed);
+                    if delta_total > 0 {
                         self.stats
                             .client_reported_dropped
-                            .fetch_add(delta, Ordering::Relaxed);
-                        self.tap_stats.dropped.fetch_add(delta, Ordering::Relaxed);
+                            .fetch_add(delta_total, Ordering::Relaxed);
                     }
                 }
                 Ok(Decoded::Unknown(_)) => {
@@ -1107,7 +1406,8 @@ mod tests {
             recs[2],
             Decoded::Stats {
                 sent: 5,
-                dropped: 2
+                dropped: 2,
+                ext: None
             }
         );
     }
@@ -1296,6 +1596,173 @@ mod tests {
     }
 
     #[test]
+    fn stats_ext_round_trips_and_old_stats_decode_without_it() {
+        let ext = StatsExt {
+            dropped_by_reason: [1, 2, 3, 4],
+            truncated_to_snaplen: 5,
+            switch_forward_dropped: 6,
+        };
+        let mut b = Vec::new();
+        encode_stats_ext(&mut b, 100, 10, &ext);
+        let len = u32::from_be_bytes(b[..4].try_into().unwrap()) as usize;
+        assert_eq!(len, b.len() - 4);
+        assert_eq!(
+            decode_body(&b[4..]),
+            Ok(Decoded::Stats {
+                sent: 100,
+                dropped: 10,
+                ext: Some(ext)
+            })
+        );
+        let mut old = Vec::new();
+        encode_stats(&mut old, 7, 1);
+        assert_eq!(
+            decode_body(&old[4..]),
+            Ok(Decoded::Stats {
+                sent: 7,
+                dropped: 1,
+                ext: None
+            })
+        );
+    }
+
+    #[test]
+    fn partial_writes_count_only_whole_records() {
+        let mut data = Vec::new();
+        let meta = FrameMeta {
+            identity: ident("vm-a"),
+            ts_us: 1,
+            direction: Direction::FromGuest,
+            verdict: Verdict::Allowed,
+        };
+        for _ in 0..3 {
+            encode_frame(&mut data, 0, &meta, &[1u8; 40]).unwrap();
+        }
+        let rec = data.len() / 3;
+        assert_eq!(complete_records(&data, data.len()), 3);
+        assert_eq!(complete_records(&data, 2 * rec), 2);
+        assert_eq!(complete_records(&data, 2 * rec + rec - 1), 2);
+        assert_eq!(complete_records(&data, 0), 0);
+    }
+
+    /// Offers `n` frames through a deliberately small queue and checks that every one is either ingested or
+    /// counted, that the summary says so by reason, and that nothing is left unconfirmed.
+    #[test]
+    fn offered_equals_ingested_plus_counted_drops() {
+        let dir = tempfile::tempdir().unwrap();
+        let (obs, server) = start(&dir);
+        // The daemon registers its in-process tap first; the bridge must be accounted for regardless.
+        let (_t, rx) = crate::source::NetTap::new(4, 2048);
+        obs.set_tap_stats(rx.stats());
+        let client = BridgeClient::connect(
+            sock(&dir),
+            BridgeClientConfig {
+                queue_capacity: 16,
+                ..BridgeClientConfig::default()
+            },
+        );
+        let a = ident("vm-a");
+        assert!(wait_for(|| {
+            client.shared.core.connected.load(Ordering::Relaxed)
+        }));
+        let f = udp_v4((G, 1), (S, 2), &[7u8; 300]);
+        let offered = 50_000u64;
+        for _ in 0..offered {
+            client.tap_as(&a, Direction::FromGuest, Verdict::Allowed, &f);
+        }
+        assert!(client.flush(Duration::from_secs(10)));
+        let st = client.stats();
+        assert!(
+            BridgeClientStats::get(&st.dropped_queue_full) > 0,
+            "a 16-frame queue must overflow under a burst"
+        );
+        let dropped = st.total_dropped();
+        assert_eq!(BridgeClientStats::get(&st.sent) + dropped, offered);
+        assert!(wait_for(|| {
+            let s = obs.summary(now_us());
+            s.counters.bridge_frames + s.counters.bridge_dropped == offered
+                && s.counters.bridge_unconfirmed == 0
+        }));
+        let s = obs.summary(now_us());
+        assert_eq!(s.counters.bridge_frames, BridgeClientStats::get(&st.sent));
+        assert_eq!(obs.counters().frames, s.counters.bridge_frames);
+        assert_eq!(s.counters.bridge_dropped, dropped);
+        assert_eq!(s.counters.tap_dropped, dropped, "totals include bridges");
+        let by: std::collections::HashMap<_, _> = s
+            .counters
+            .bridge_dropped_by_reason
+            .iter()
+            .cloned()
+            .collect();
+        assert_eq!(
+            by["queue_full"],
+            BridgeClientStats::get(&st.dropped_queue_full)
+        );
+        assert_eq!(by.len(), crate::source::BRIDGE_DROP_REASONS.len());
+        server.shutdown().unwrap();
+    }
+
+    #[test]
+    fn frames_for_unannounced_identities_are_counted_as_server_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let (obs, server) = start(&dir);
+        let mut c = UnixStream::connect(sock(&dir)).unwrap();
+        c.write_all(&encode_preamble(9)).unwrap();
+        let meta = FrameMeta {
+            identity: ident("vm-a"),
+            ts_us: 1,
+            direction: Direction::FromGuest,
+            verdict: Verdict::Allowed,
+        };
+        let mut b = Vec::new();
+        encode_frame(&mut b, 77, &meta, &udp_v4((G, 1), (S, 2), b"x")).unwrap();
+        c.write_all(&b).unwrap();
+        assert!(wait_for(|| {
+            obs.summary(now_us()).counters.bridge_dropped == 1
+        }));
+        let s = obs.summary(now_us());
+        let by: std::collections::HashMap<_, _> = s
+            .counters
+            .bridge_dropped_by_reason
+            .iter()
+            .cloned()
+            .collect();
+        assert_eq!(by["server_rejected"], 1);
+        server.shutdown().unwrap();
+    }
+
+    #[test]
+    fn switch_side_forward_drops_and_snaplen_cuts_are_reported() {
+        let dir = tempfile::tempdir().unwrap();
+        let (obs, server) = start(&dir);
+        let client = BridgeClient::connect(
+            sock(&dir),
+            BridgeClientConfig {
+                snaplen: 64,
+                stats_interval: Duration::from_millis(20),
+                ..BridgeClientConfig::default()
+            },
+        );
+        assert!(wait_for(|| {
+            client.shared.core.connected.load(Ordering::Relaxed)
+        }));
+        let a = ident("vm-a");
+        client.note_forward_drop();
+        client.note_forward_drop();
+        client.tap_as(
+            &a,
+            Direction::FromGuest,
+            Verdict::Allowed,
+            &udp_v4((G, 1), (S, 2), &[1u8; 400]),
+        );
+        assert!(wait_for(|| {
+            let c = obs.summary(now_us()).counters;
+            c.switch_forward_dropped == 2 && c.bridge_truncated_to_snaplen == 1
+        }));
+        server.shutdown().unwrap();
+    }
+
+    #[test]
     fn client_never_blocks_and_drops_when_nobody_listens() {
         let dir = tempfile::tempdir().unwrap();
         let client = BridgeClient::connect(
@@ -1316,11 +1783,10 @@ mod tests {
             "tap_as must never block"
         );
         let st = client.stats();
-        assert!(BridgeClientStats::get(&st.dropped_queue_full) > 0);
-        assert!(wait_for(|| BridgeClientStats::get(
-            &st.dropped_disconnected
-        ) > 0
-            || BridgeClientStats::get(&st.connect_failures) > 0));
+        // With nobody listening every frame is refused up front as `disconnected`, and every one is counted.
+        assert_eq!(BridgeClientStats::get(&st.dropped_disconnected), 20_000);
+        assert_eq!(st.total_dropped(), 20_000);
+        assert!(wait_for(|| BridgeClientStats::get(&st.connect_failures) > 0));
         assert_eq!(BridgeClientStats::get(&st.sent), 0);
     }
 
