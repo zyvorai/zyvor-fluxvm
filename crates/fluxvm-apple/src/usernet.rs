@@ -19,7 +19,7 @@ use anyhow::{Context, Result, bail};
 use fluxvm_core::model::{
     AppleGuest, AppleSpec, AppleUsernet, CreateVmRequest, NetworkSpec,
 };
-use fluxvm_usernet::{Cidr, PortForward, Proto, UserNetConfig};
+use fluxvm_usernet::{Cidr, Cidr6, GuestFamily, PortForward, Proto, UserNetConfig};
 use std::net::IpAddr;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::net::UnixDatagram;
@@ -66,6 +66,8 @@ pub fn validate(u: &AppleUsernet, req: &CreateVmRequest, apple: &AppleSpec) -> R
     for (what, n) in [
         ("allow_cidrs", u.allow_cidrs.len()),
         ("deny_cidrs", u.deny_cidrs.len()),
+        ("allow_cidrs6", u.allow_cidrs6.len()),
+        ("deny_cidrs6", u.deny_cidrs6.len()),
         ("allow_ports", u.allow_ports.len()),
         ("deny_ports", u.deny_ports.len()),
         ("dns_allow", u.dns_allow.len()),
@@ -79,6 +81,13 @@ pub fn validate(u: &AppleUsernet, req: &CreateVmRequest, apple: &AppleSpec) -> R
     for c in u.allow_cidrs.iter().chain(&u.deny_cidrs) {
         c.parse::<Cidr>()
             .map_err(|e| anyhow::anyhow!("apple.usernet CIDR {e}"))?;
+    }
+    for c in u.allow_cidrs6.iter().chain(&u.deny_cidrs6) {
+        c.parse::<Cidr6>()
+            .map_err(|e| anyhow::anyhow!("apple.usernet IPv6 CIDR {e}"))?;
+    }
+    if !u.ipv6 && (!u.allow_cidrs6.is_empty() || !u.deny_cidrs6.is_empty()) {
+        bail!("apple.usernet.allow_cidrs6 / deny_cidrs6 need apple.usernet.ipv6");
     }
     for p in u.allow_ports.iter().chain(&u.deny_ports) {
         if *p == 0 {
@@ -110,6 +119,12 @@ pub fn validate(u: &AppleUsernet, req: &CreateVmRequest, apple: &AppleSpec) -> R
                 f.host_port
             );
         }
+        match f.guest_family.as_deref().map(str::to_ascii_lowercase).as_deref() {
+            None | Some("v4") => {}
+            Some("v6") if u.ipv6 => {}
+            Some("v6") => bail!("apple.usernet forward guest_family v6 needs apple.usernet.ipv6"),
+            Some(other) => bail!("apple.usernet forward guest_family {other:?} must be v4 or v6"),
+        }
         let addr: IpAddr = match &f.host_addr {
             Some(a) => a
                 .parse()
@@ -123,7 +138,8 @@ pub fn validate(u: &AppleUsernet, req: &CreateVmRequest, apple: &AppleSpec) -> R
             );
         }
     }
-    Ok(())
+    // The gateway's own validation covers what is left (guest addresses against the prefix, family rules).
+    to_config(u, None).map(|_| ())
 }
 
 /// Maps the request's spec onto the gateway's config. `guest_mac` pins the NIC's MAC so the gateway never learns another.
@@ -141,13 +157,21 @@ pub fn to_config(u: &AppleUsernet, guest_mac: Option<[u8; 6]>) -> Result<UserNet
     c.egress.allow_domains = u.dns_allow.clone();
     c.egress.deny_domains = u.dns_deny.clone();
     c.egress.allow_private = u.allow_private;
+    c.ipv6 = u.ipv6;
+    let cidrs6 = |v: &[String]| -> Result<Vec<Cidr6>> {
+        v.iter()
+            .map(|s| s.parse::<Cidr6>().map_err(|e| anyhow::anyhow!("IPv6 CIDR {e}")))
+            .collect()
+    };
+    c.egress.allow_cidrs6 = cidrs6(&u.allow_cidrs6)?;
+    c.egress.deny_cidrs6 = cidrs6(&u.deny_cidrs6)?;
     if let Some(mtu) = u.mtu {
         c.mtu = mtu;
     }
     c.guest_mac = guest_mac;
     for f in &u.port_forwards {
         // The host side may be IPv4 or IPv6 (`host_addr`); the guest side is its IPv4 lease address.
-        c.forwards.push(PortForward::new(
+        let mut fwd = PortForward::new(
             if f.protocol.eq_ignore_ascii_case("udp") {
                 Proto::Udp
             } else {
@@ -159,7 +183,14 @@ pub fn to_config(u: &AppleUsernet, guest_mac: Option<[u8; 6]>) -> Result<UserNet
             },
             f.host_port,
             f.guest_port,
-        ));
+        );
+        if f.guest_family.as_deref().is_some_and(|g| g.eq_ignore_ascii_case("v6")) {
+            fwd.guest_family = GuestFamily::V6;
+        }
+        if let Some(a) = &f.guest_addr {
+            fwd.guest_addr = Some(a.parse().context("forward guest_addr")?);
+        }
+        c.forwards.push(fwd);
     }
     c.validate().map_err(|e| anyhow::anyhow!("apple.usernet: {e}"))?;
     Ok(c)
@@ -622,6 +653,44 @@ mod tests {
     }
 
     #[test]
+    fn ipv6_spec_maps_into_the_gateway_config() {
+        let u: AppleUsernet = serde_json::from_value(serde_json::json!({
+            "ipv6": true,
+            "allow_cidrs6": ["2001:db8::/32"],
+            "port_forwards": [
+                {"host_port": 8080, "guest_port": 80, "guest_family": "v6"},
+                {"host_port": 8081, "guest_port": 81}
+            ]
+        }))
+        .unwrap();
+        let c = to_config(&u, None).unwrap();
+        assert!(c.ipv6);
+        assert_eq!(c.egress.allow_cidrs6.len(), 1);
+        assert_eq!(c.forwards[0].guest_family, GuestFamily::V6);
+        assert_eq!(c.forwards[1].guest_family, GuestFamily::V4);
+    }
+
+    #[test]
+    fn ipv6_fields_need_the_toggle_and_valid_values() {
+        let ck = |u: serde_json::Value| check(serde_json::json!({ "usernet": u }), user());
+        assert!(ck(serde_json::json!({"allow_cidrs6": ["2001:db8::/32"]})).is_err(), "needs ipv6");
+        assert!(ck(serde_json::json!({"ipv6": true, "allow_cidrs6": ["nope"]})).is_err());
+        assert!(
+            ck(serde_json::json!({"port_forwards": [{"host_port": 8080, "guest_port": 80, "guest_family": "v6"}]}))
+                .is_err(),
+            "v6 forward needs ipv6"
+        );
+        assert!(
+            ck(serde_json::json!({"ipv6": true, "port_forwards": [{"host_port": 8080, "guest_port": 80, "guest_family": "v5"}]}))
+                .is_err()
+        );
+        assert!(
+            ck(serde_json::json!({"ipv6": true, "allow_cidrs6": ["2001:db8::/32"], "port_forwards": [{"host_port": 8080, "guest_port": 80, "guest_family": "v6", "guest_addr": "fd5a:7f1a:2c3b:2::10"}]}))
+                .is_ok()
+        );
+    }
+
+    #[test]
     fn rejects_bad_ports_cidrs_domains_and_mtu() {
         for bad in [
             serde_json::json!({"allow_cidrs": ["10.0.0.0/33"]}),
@@ -657,6 +726,8 @@ mod tests {
                 host_addr: None,
                 host_port: 5353,
                 guest_port: 53,
+                guest_family: None,
+                guest_addr: None,
             }],
             ..Default::default()
         };

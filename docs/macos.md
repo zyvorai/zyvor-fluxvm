@@ -583,8 +583,10 @@ These compile against the macOS 27 SDK and are validated at admission. Except fo
   and the gateway each inherit an end (runner fd 3, `usernet_fd` in the runner config; gateway `--fd 3`), and the daemon restarts a
   gateway that dies for as long as the runner lives; the gateway also exits when the runner is gone. The gateway needs `fluxvm-usernet`
   next to `fluxctl` (or `FLUXVM_USERNET`). With network observability on, the gateway copies each frame to the daemon (`--tap-fd`),
-  so `/v1/netobs/*` sees real frames for the VM (verdict is always `allowed` at the frame level: denials show in the gateway log,
-  `<workspace>/usernet.log`). Frames reach the observer only when the VM is launched by the `fluxctl serve` daemon. IP discovery and
+  so `/v1/netobs/*` sees real frames for the VM (the gateway runs with tap version 2, so a frame it denied by policy arrives with a `denied` verdict and one it dropped for another
+  reason, such as a spoofed source, as `dropped`; the details are in the gateway log, `<workspace>/usernet.log`). IPv6 is opt-in:
+  `"ipv6": true` serves a ULA /64 by SLAAC with the same egress policy, `allow_cidrs6` / `deny_cidrs6` take IPv6 CIDRs, and a forward
+  can set `"guest_family": "v6"` (with an optional `"guest_addr"` inside the /64; otherwise the last address the guest used). Frames reach the observer only when the VM is launched by the `fluxctl serve` daemon. IP discovery and
   the legacy 127.0.0.1 `network.forwards` relay read the NAT lease file and do not work: use `usernet.port_forwards`. Never booted;
   the file-handle attachment path is the same one private networks use, which is verified.
 - **Custom Virtio (macOS 27+, Linux guests):** `custom_virtio: true` adds a vendor Virtio device (id `0x3F`, PCI `1af4:107f`; an earlier id, `0xFF00`, was outside the range Linux binds) with a host-side provider. Queue 0 is a bounded (1 MiB) versioned JSON control channel (`ping`, `echo`, `capabilities`, `stats`, `map-probe`); queue 1 is the bulk queue (`bulk_zero`, `fill`, `copy`, `crc32`, up to 64 MiB). The guest driver is in `guest/virtio-flux` (`/dev/fluxvm`, `/dev/fluxvm-bulk`, `fluxvm_virtioctl`). **Verified** on the M4 with a Debian 13 guest: `ping`, `echo`, `stats` and `capabilities`. `fluxvm_virtioctl bulk-test`, `bulk-zero-test`, `bulk-copy-test` and `bulk-crc-test` (queue 1, 1 B to 1 MiB) pass after the driver stopped using a stack buffer for its request; the 64 MiB host cap was not tried. See [macos-vz27-full-stack.md](macos-vz27-full-stack.md).

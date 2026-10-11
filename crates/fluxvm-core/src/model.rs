@@ -714,6 +714,14 @@ pub struct AppleUsernet {
     /// IP MTU, 576..=9000 (default 1500).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mtu: Option<u16>,
+    /// Serve IPv6 to the guest (a ULA /64 by SLAAC, with the same egress policy). Off by default.
+    #[serde(default)]
+    pub ipv6: bool,
+    /// IPv6 CIDRs the guest may reach (any entry here makes the policy a strict allow-list, like `allow_cidrs`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allow_cidrs6: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deny_cidrs6: Vec<String>,
 }
 
 /// One host -> guest port forward of [`AppleUsernet`].
@@ -729,6 +737,12 @@ pub struct AppleUsernetForward {
     /// 1024..=65535, or 0 for an ephemeral port.
     pub host_port: u16,
     pub guest_port: u16,
+    /// `v4` (default) forwards to the guest's lease address; `v6` needs `apple.usernet.ipv6`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guest_family: Option<String>,
+    /// Explicit guest address: for `v6` an address inside the guest /64 (otherwise the last one the guest used).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guest_addr: Option<String>,
 }
 
 fn default_usernet_proto() -> String {
