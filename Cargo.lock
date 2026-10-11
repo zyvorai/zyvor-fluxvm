@@ -2284,8 +2284,11 @@ dependencies = [
 name = "fluxvm-blockd"
 version = "0.3.0"
 dependencies = [
+ "aes 0.8.4",
  "anyhow",
  "libc",
+ "reqwest",
+ "sha2 0.10.9",
  "tempfile",
  "tokio",
 ]

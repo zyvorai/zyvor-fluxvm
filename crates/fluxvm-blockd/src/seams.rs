@@ -1,31 +1,31 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
 // SPDX-License-Identifier: Apache-2.0
 
-//! Extension seams. Documented, deliberately unimplemented.
+//! Extension seams and their implementations.
 //!
-//! * Encryption: wrap a [`BlockBackend`](crate::BlockBackend) with a type
-//!   implementing [`BlockCipher`]; it transforms each 64 KiB block (or a
-//!   sub-block sector, XTS-style) on write and read. Place it *below* the
-//!   CoW layer to encrypt overlay data, or above it to encrypt the guest view.
-//!   Not implemented: key management is undecided.
-//! * Lazy pull: a [`LazySource`] is a `BlockBackend` used as the CoW base
-//!   that fetches missing blocks (e.g. over HTTP range requests or from a
-//!   registry) on first read and caches them. `CowBackend::create_on` accepts
-//!   any `Arc<dyn BlockBackend>` as base so no change is needed in the CoW
-//!   layer; the persisted overlay header only knows file parents today, so a
-//!   lazy base would need a new `parent_kind`. Not implemented.
+//! * Encryption: [`BlockCipher`] transforms each 64 KiB overlay block on
+//!   write and read. Implemented by [`crate::crypt::XtsCipher`]
+//!   (AES-256-XTS, tweak = block index) and applied by
+//!   [`CowBackend`](crate::CowBackend) to the overlay's own data region.
+//! * Lazy pull: a [`LazySource`] is a read-only `BlockBackend` used as the CoW
+//!   base that fetches missing chunks on first read and caches them.
+//!   Implemented by [`crate::lazy::LazyHttp`] (HTTP(S) range reads into a
+//!   sparse on-disk cache); recorded in the overlay header as parent kind 2.
 
 use std::io;
 
-/// Per-block transform (encryption seam). Not implemented by this crate.
+/// Per-block transform (encryption seam).
 pub trait BlockCipher: Send + Sync {
-    /// `block_index` is the tweak/nonce input.
+    /// `block_index` is the tweak/nonce input. `data` is a whole block.
     fn encrypt(&self, block_index: u64, data: &mut [u8]) -> io::Result<()>;
     fn decrypt(&self, block_index: u64, data: &mut [u8]) -> io::Result<()>;
+    /// Salted key-check value stored in the overlay header so a wrong key is
+    /// rejected at open. Must not reveal the key.
+    fn key_check(&self, salt: &[u8; 16]) -> [u8; 32];
 }
 
-/// Lazy-pull seam. Not implemented by this crate.
+/// Lazy-pull seam.
 pub trait LazySource: crate::BlockBackend {
-    /// Hint that `[off, off+len)` will be read soon.
+    /// Hint that `[off, off+len)` will be read soon (best effort, async).
     fn prefetch(&self, off: u64, len: u64);
 }

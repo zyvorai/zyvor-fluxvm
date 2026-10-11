@@ -10,13 +10,17 @@
 
 pub mod backend;
 pub mod cow;
+pub mod crypt;
+pub mod lazy;
 pub mod limiter;
 pub mod nbd;
 pub mod seams;
 pub mod sparse;
 
 pub use backend::{BlockBackend, RawFile};
-pub use cow::CowBackend;
+pub use cow::{CowBackend, CreateOptions, OpenOptions};
+pub use crypt::XtsCipher;
+pub use lazy::{LazyConfig, LazyHttp};
 pub use limiter::Limiter;
 pub use nbd::{Export, Server};
 
