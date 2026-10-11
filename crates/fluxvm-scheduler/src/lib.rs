@@ -403,6 +403,72 @@ fn vz_agent_token_via_cloud_init(req: &mut CreateVmRequest) {
     });
 }
 
+/// Whether a vz guest's agent token may be written straight into its provisioned raw root disk (offline ext4 injection)
+/// instead of riding in cloud-init. `Err` carries the reason it may not, for the log; the caller then keeps the cloud-init path.
+///
+/// `vm_running` is a hard stop: a disk attached to a running VM is never written to. `disk_is_raw` is the format the
+/// provisioning step produced (see `fluxvm_image::storage::disk_format`).
+fn vz_token_disk_injection_eligible(
+    req: &CreateVmRequest,
+    disk_is_raw: bool,
+    vm_running: bool,
+) -> std::result::Result<(), &'static str> {
+    if req.backend != BackendKind::Vz {
+        return Err("not a vz guest");
+    }
+    if vm_running {
+        return Err("VM is running; its disk is never written to");
+    }
+    if req.agent.as_ref().and_then(|a| a.token.as_deref()).is_none() {
+        return Err("no agent token");
+    }
+    let Some(apple) = req.apple.as_ref() else {
+        // Defaults: a Linux guest on a plain root disk.
+        return vz_token_storage_ok(req, disk_is_raw);
+    };
+    if apple.init_config.is_some() {
+        return Err("OCI sandbox: token goes in the meta share");
+    }
+    if apple.guest_os != fluxvm_core::model::AppleGuest::Linux {
+        return Err("not a Linux guest");
+    }
+    if apple.asif_overlay {
+        return Err("ASIF overlay disk is not a raw ext4 image");
+    }
+    if apple.root_read_only {
+        return Err("root disk is attached read-only");
+    }
+    vz_token_storage_ok(req, disk_is_raw)
+}
+
+fn vz_token_storage_ok(
+    req: &CreateVmRequest,
+    disk_is_raw: bool,
+) -> std::result::Result<(), &'static str> {
+    if req.storage != StorageBackend::Default {
+        return Err("disk is not a private default-storage clone");
+    }
+    if !disk_is_raw {
+        return Err("disk is not raw");
+    }
+    Ok(())
+}
+
+/// Removes the agent token's cloud-init file (after the token was injected into the disk instead), dropping a
+/// cloud-init spec that was only there to carry it.
+fn strip_vz_agent_token_from_cloud_init(req: &mut CreateVmRequest) {
+    let Some(ci) = req.cloud_init.as_mut() else {
+        return;
+    };
+    ci.write_files
+        .retain(|f| f.path != fluxvm_guest_protocol::TOKEN_FILE_PATH);
+    let empty = serde_json::to_value(&*ci).ok()
+        == serde_json::to_value(fluxvm_core::model::CloudInitSpec::default()).ok();
+    if empty {
+        req.cloud_init = None;
+    }
+}
+
 /// VM-state snapshot save/restore: QEMU (`savevm`/`-loadvm`), Cloud Hypervisor
 /// (snapshot dir + `--restore`), Firecracker (`/snapshot/create`+`/load`), and
 /// FluxVm (hypervisor control SnapshotSave/Restore — FC or FLUXKVM1 by engine).
@@ -2281,7 +2347,8 @@ impl VmManager {
                 agent.token = Some(Uuid::new_v4().to_string());
             }
         }
-        // guestkit cannot open a disk on macOS, so a vz guest gets its token from cloud-init instead.
+        // The token goes in cloud-init first; once the disk is provisioned it is moved onto the raw root disk when that can be
+        // done offline (see `vz_token_disk_injection_eligible`), which falls back to this copy otherwise.
         // An OCI sandbox has no cloud-init: its token goes in the meta share (`fluxvm_apple::oci_meta_dir`).
         let oci_init = req.apple.as_ref().is_some_and(|a| a.init_config.is_some());
         if needs_cid && req.backend == BackendKind::Vz && !oci_init {
@@ -2439,6 +2506,44 @@ impl VmManager {
                 .context("provisioning VM disk")?
             };
             record.disk = provisioned.disk.clone();
+            // The VM has not been launched, so its disk is ours to write. A raw ext4 clone gets the agent token
+            // directly (no seed disk needed for it); anything else keeps the cloud-init copy added above.
+            if needs_cid
+                && !fluxvm_apple::macos_install::is_macos_install(&req)
+                && vz_token_disk_injection_eligible(
+                    &req,
+                    fluxvm_image::storage::disk_format(req.backend, req.storage) == "raw",
+                    false,
+                )
+                .is_ok()
+            {
+                let token = req
+                    .agent
+                    .as_ref()
+                    .and_then(|a| a.token.clone())
+                    .unwrap_or_default();
+                let target = provisioned.disk.clone();
+                let injected = tokio::task::spawn_blocking(move || {
+                    fluxvm_diskinject::inject_agent_token(&target, &token)
+                })
+                .await
+                .context("agent token injection worker panicked")?;
+                match injected {
+                    Ok(_) => {
+                        strip_vz_agent_token_from_cloud_init(&mut req);
+                        strip_vz_agent_token_from_cloud_init(&mut record.request);
+                        tracing::info!(vm = %id, "agent token injected into the root disk");
+                    }
+                    Err(e) => {
+                        // Unsupported / Corrupt / NoRoot / Invalid (and I/O): cloud-init already carries the token.
+                        tracing::warn!(
+                            vm = %id,
+                            error = %e,
+                            "offline agent token injection failed; using cloud-init"
+                        );
+                    }
+                }
+            }
             record.lvm_lv = provisioned.lvm_lv.clone();
             record.nbd_pid = provisioned.nbd_pid;
             if let Some(pid) = provisioned.nbd_pid {
@@ -5347,6 +5452,61 @@ async fn wait_for_agent_ready(vm: &VmRecord) -> Result<()> {
 mod tests {
     use super::*;
     use fluxvm_core::model::NetworkSpec;
+
+    #[test]
+    fn vz_token_disk_injection_decision() {
+        let with_token = |mut r: CreateVmRequest| {
+            r.agent = Some(fluxvm_core::model::AgentSpec {
+                enabled: true,
+                port: fluxvm_guest_protocol::DEFAULT_PORT,
+                token: Some("t".into()),
+            });
+            r
+        };
+        let r = with_token(req(BackendKind::Vz, None, None));
+        assert!(vz_token_disk_injection_eligible(&r, true, false).is_ok());
+        assert!(vz_token_disk_injection_eligible(&r, true, true).is_err(), "running VM");
+        assert!(vz_token_disk_injection_eligible(&r, false, false).is_err(), "not raw");
+        let q = with_token(req(BackendKind::Qemu, None, None));
+        assert!(vz_token_disk_injection_eligible(&q, true, false).is_err());
+        let none = req(BackendKind::Vz, None, None);
+        assert!(vz_token_disk_injection_eligible(&none, true, false).is_err(), "no token");
+        let mut mac = with_token(req(BackendKind::Vz, None, None));
+        mac.apple = Some(
+            serde_json::from_value(serde_json::json!({"guest_os": "macos"})).unwrap(),
+        );
+        assert!(vz_token_disk_injection_eligible(&mac, true, false).is_err());
+        let mut oci = with_token(req(BackendKind::Vz, None, None));
+        oci.apple = Some(
+            serde_json::from_value(serde_json::json!({"init_config": {}})).unwrap(),
+        );
+        assert!(vz_token_disk_injection_eligible(&oci, true, false).is_err());
+        let mut shared = with_token(req(BackendKind::Vz, None, None));
+        shared.storage = StorageBackend::Shared;
+        assert!(vz_token_disk_injection_eligible(&shared, true, false).is_err());
+    }
+
+    #[test]
+    fn stripping_the_token_drops_a_cloud_init_that_only_carried_it() {
+        let mut r = req(BackendKind::Vz, None, None);
+        r.agent = Some(fluxvm_core::model::AgentSpec {
+            enabled: true,
+            port: fluxvm_guest_protocol::DEFAULT_PORT,
+            token: Some("t".into()),
+        });
+        vz_agent_token_via_cloud_init(&mut r);
+        strip_vz_agent_token_from_cloud_init(&mut r);
+        assert!(r.cloud_init.is_none());
+        r.cloud_init = Some(CloudInitSpec {
+            runcmd: vec!["echo hi".into()],
+            ..Default::default()
+        });
+        vz_agent_token_via_cloud_init(&mut r);
+        strip_vz_agent_token_from_cloud_init(&mut r);
+        let ci = r.cloud_init.unwrap();
+        assert!(ci.write_files.is_empty());
+        assert_eq!(ci.runcmd.len(), 1);
+    }
 
     #[test]
     fn vz_agent_token_is_written_by_cloud_init_once() {

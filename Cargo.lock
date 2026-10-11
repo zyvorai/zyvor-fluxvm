@@ -2633,6 +2633,7 @@ dependencies = [
  "fluxvm-cgroup",
  "fluxvm-cloud-hypervisor",
  "fluxvm-core",
+ "fluxvm-diskinject",
  "fluxvm-firecracker",
  "fluxvm-guest-protocol",
  "fluxvm-hypervisor",
