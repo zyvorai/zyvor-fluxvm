@@ -237,8 +237,9 @@ fn constant_time_eq(a: &str, b: &str) -> bool {
 ///
 /// - The fleet token (`--token`) is the operator ([`Caller::Admin`]); node heartbeats use it too.
 /// - A tenant token (see `POST /fleet/tenants`) is [`Caller::Tenant`], limited to [`tenant_route_allowed`].
-/// - Without a fleet token (lab mode) every caller that does not present a tenant token is the operator, exactly as
-///   before tenants existed. Configure `--token` before creating tenants.
+/// - Without a fleet token (lab mode) every caller that is not a tenant is the operator, as before tenants existed,
+///   but only while no tenant exists: once one does, anonymous callers and unknown tokens get a 401. Central refuses
+///   to create tenants without `--token`.
 async fn auth_middleware(State(fleet): State<Fleet>, mut req: Request, next: Next) -> Response {
     if req.uri().path() == "/healthz" {
         return next.run(req).await;
@@ -269,11 +270,24 @@ async fn auth_middleware(State(fleet): State<Fleet>, mut req: Request, next: Nex
                         .into_response();
                 }
                 Some(tenant) => Caller::Tenant(tenant.id.clone()),
-                None if expected.is_none() => Caller::Admin,
+                // Lab mode keeps ignoring stray tokens, but only until tenants exist: after that an unknown token is
+                // a mistyped tenant token and must not quietly become the operator.
+                None if expected.is_none() && !tenancy.enabled() => Caller::Admin,
                 None => return unauthorized(),
             }
         }
-        (None, None) => Caller::Admin,
+        (None, None) => {
+            // Lab mode, but tenants exist (the token was removed after they were created): an anonymous caller could
+            // be a tenant that dropped its token, so nobody is the operator until central runs with --token again.
+            if fleet.tenancy.lock().await.enabled() {
+                return (
+                    StatusCode::UNAUTHORIZED,
+                    Json(json!({"error": "tenants exist but central runs without --token; restart it with --token"})),
+                )
+                    .into_response();
+            }
+            Caller::Admin
+        }
         (Some(_), None) => return unauthorized(),
     };
     if let Caller::Tenant(t) = &caller
@@ -1129,12 +1143,11 @@ async fn create_vm_inner(
 
     let (req_vcpus, req_mem) = request_sizes(&body);
     let profile = extract_security_profile(&body)?;
-    let apple_request = apple_placement_request(&body, req_vcpus, req_mem);
-    let macos_guest = apple_request.as_ref().is_some_and(|r| r.macos_guest);
 
-    // Who placement acts for: the tenant (own or named by the operator) once tenancy is on, else the caller.
-    let effective = {
-        let tenancy = fleet.tenancy.lock().await;
+    // Who placement acts for: the tenant (own or named by the operator) once tenancy is on, else the caller. The
+    // quota is reserved (not just checked) so parallel creates by one tenant cannot overshoot it.
+    let (effective, reservation) = {
+        let mut tenancy = fleet.tenancy.lock().await;
         match &tenant {
             Some(t) if tenancy.enabled() => {
                 if *caller == Caller::Admin && !tenancy.tenants.contains_key(t) {
@@ -1143,16 +1156,142 @@ async fn create_vm_inner(
                         format!("no tenant '{t}'"),
                     ));
                 }
-                if !skip_quota {
-                    tenancy
-                        .check_quota(t, req_vcpus, req_mem)
-                        .map_err(tenancy_error)?;
+                let reservation = if skip_quota {
+                    None
+                } else {
+                    Some(
+                        tenancy
+                            .reserve(t, req_vcpus, req_mem)
+                            .map_err(tenancy_error)?,
+                    )
+                };
+                if wants_tenant_vmnet(&body) {
+                    let had = tenancy.tenants.get(t).and_then(|x| x.network_index);
+                    if let Some(net) = tenancy.tenant_vmnet(t) {
+                        body["apple"]["vmnet"] = net;
+                        if had.is_none() {
+                            fleet.persist_tenancy(&tenancy);
+                        }
+                    }
                 }
-                Caller::Tenant(t.clone())
+                (Caller::Tenant(t.clone()), reservation)
             }
-            _ => caller.clone(),
+            _ => (caller.clone(), None),
         }
     };
+    // Released below once placement answered, or on drop if the request is cancelled mid-flight (client gone).
+    let mut hold = ReservationHold {
+        fleet,
+        id: reservation,
+    };
+    // After any tenant network was stamped, so placement asks for a vmnet-capable Mac.
+    let apple_request = apple_placement_request(&body, req_vcpus, req_mem);
+    let macos_guest = apple_request.as_ref().is_some_and(|r| r.macos_guest);
+    let placed = place_and_dispatch(
+        fleet,
+        caller,
+        &effective,
+        body,
+        Placement {
+            requested_node,
+            selector,
+            reschedulable,
+            tenant,
+            vcpus: req_vcpus,
+            memory_mib: req_mem,
+            profile,
+            apple: apple_request,
+            macos_guest,
+        },
+    )
+    .await;
+    if let Some(id) = hold.id.take() {
+        // A successful create is already in the ledger, so the quota stays held without a gap.
+        fleet.tenancy.lock().await.release_reservation(id);
+    }
+    placed
+}
+
+/// A quota reservation that is released when dropped unreleased, so a create whose future is dropped (the client
+/// disconnected while the node was still answering) does not hold the tenant's quota until central restarts.
+struct ReservationHold<'a> {
+    fleet: &'a Fleet,
+    id: Option<u64>,
+}
+
+impl Drop for ReservationHold<'_> {
+    fn drop(&mut self) {
+        let Some(id) = self.id.take() else {
+            return;
+        };
+        if let Ok(mut tenancy) = self.fleet.tenancy.try_lock() {
+            tenancy.release_reservation(id);
+            return;
+        }
+        let tenancy = self.fleet.tenancy.clone();
+        if let Ok(rt) = tokio::runtime::Handle::try_current() {
+            rt.spawn(async move {
+                tenancy.lock().await.release_reservation(id);
+            });
+        }
+    }
+}
+
+/// Whether a create should join its tenant's isolated vmnet network: a `vz` VM that did not choose its own network
+/// (vmnet, usernet, a bridge, or no network at all).
+fn wants_tenant_vmnet(body: &Value) -> bool {
+    if body.get("backend").and_then(Value::as_str) != Some("vz") {
+        return false;
+    }
+    if body
+        .get("network")
+        .and_then(|n| n.get("mode"))
+        .and_then(Value::as_str)
+        == Some("none")
+    {
+        return false;
+    }
+    let apple = body.get("apple");
+    // A malformed `apple` (not an object) is left for the node to reject; stamping into it would panic.
+    if apple.is_some_and(|a| !a.is_object() && !a.is_null()) {
+        return false;
+    }
+    let set = |k: &str| apple.and_then(|a| a.get(k)).is_some_and(|v| !v.is_null());
+    !(set("vmnet") || set("usernet") || set("bridge_interface"))
+}
+
+/// What [`create_vm_inner`] worked out about a create before placing it.
+struct Placement {
+    requested_node: Option<String>,
+    selector: HashMap<String, String>,
+    reschedulable: bool,
+    tenant: Option<String>,
+    vcpus: u32,
+    memory_mib: u64,
+    profile: SecurityProfile,
+    apple: Option<ApplePlacementRequest>,
+    macos_guest: bool,
+}
+
+/// Places a create (named node or automatic, with failover), forwards it, and records it in the ledger.
+async fn place_and_dispatch(
+    fleet: &Fleet,
+    caller: &Caller,
+    effective: &Caller,
+    body: Value,
+    p: Placement,
+) -> Result<Json<Value>, AppError> {
+    let Placement {
+        requested_node,
+        selector,
+        reschedulable,
+        tenant,
+        vcpus: req_vcpus,
+        memory_mib: req_mem,
+        profile,
+        apple: apple_request,
+        macos_guest,
+    } = p;
     let spec = reschedulable.then(|| {
         let mut s = body.clone();
         if !selector.is_empty() {
@@ -1175,7 +1314,7 @@ async fn create_vm_inner(
                     ));
                 }
                 tenancy
-                    .admit(&name, &effective, macos_guest, true)
+                    .admit(&name, effective, macos_guest, true)
                     .map_err(tenancy_error)?;
             }
             resolve_target(&nodes, Some(name), req_vcpus, req_mem, &selector, profile)?
@@ -1212,7 +1351,7 @@ async fn create_vm_inner(
             let admit = |n: &NodeInfo| {
                 !tenancy.draining.contains(&n.name)
                     && tenancy
-                        .admit(&n.name, &effective, macos_guest, false)
+                        .admit(&n.name, effective, macos_guest, false)
                         .is_ok()
             };
             (
@@ -1232,7 +1371,7 @@ async fn create_vm_inner(
         let Some(target) = target else {
             return Err(last_unreachable.unwrap_or_else(|| {
                 let mut msg = no_candidate_message(&selector);
-                if tenancy_on && macos_guest && effective != Caller::Admin {
+                if tenancy_on && macos_guest && *effective != Caller::Admin {
                     msg.push_str(
                         "; macOS guests run only on Macs the tenant leases: lease one with POST /fleet/leases",
                     );

@@ -22,6 +22,8 @@ This is an engineering control, not legal advice. The rules are defaults in `GET
 | `exclusive_leased_hosts` | `true` | A leased Mac runs only its lessee's VMs |
 | `min_lease_hours` | `24` | Values below 24 are raised to 24 |
 | `ledger_retention_days` | `400` | Ended VMs and leases older than this are dropped by the reconciler (`0` keeps all) |
+| `isolate_tenant_networks` | `false` | Each tenant's `vz` VMs join their own vmnet network (`fluxvm-tenant-<id>`, one /24 each) |
+| `tenant_subnet_prefix` | `10.230` | Tenant n gets `10.230.n.0/24` (indices are assigned once and kept) |
 
 ## Turning it on
 
@@ -81,7 +83,8 @@ you scrub.
 
 Every VM created through central is recorded in a ledger with its tenant, node, size and start and end times. Quotas
 (`max_vms`, `max_vcpus`, `max_memory_mib`, `max_leased_hosts`) are checked against the ledger before placement, and a
-breach returns `429`. A tenant's create is always stamped with `"tenant": "<id>"`. Tenants see, delete and exec only VMs
+breach returns `429`. A create in flight holds its share of the quota until the node answers, so a burst of parallel
+creates cannot overshoot. A tenant's create is always stamped with `"tenant": "<id>"`. Tenants see, delete and exec only VMs
 the ledger records as theirs; anything else is a `404`.
 
 The reconciler runs every 60 s (`--reconcile-secs`, or on demand with `fluxctl fleet reconcile`). It closes ledger
@@ -146,8 +149,8 @@ The ledger covers VMs created through central. VMs created directly on a node ar
 - A two-Mac hardware run of leases, scrub and drain.
 - Host-level scrubbing beyond VM workspaces.
 - A highly available central: the registry is still one process with JSON files.
-- Per-tenant vmnet isolation between a tenant's VMs on different Macs.
-- Quota checks are not atomic with the create, so a burst of parallel creates by one tenant can overshoot its quota
-  slightly.
-- In lab mode (no `--token`), any caller without a tenant token is the operator, even once tenants exist. Central logs
-  a warning at start.
+- Tenant networks are per Mac: one tenant's VMs on two Macs are on two separate vmnet networks with the same subnet,
+  not one network spanning both Macs. A cross-Mac overlay is still to do. Network isolation also needs macOS 26+ and
+  the `fluxvm-vmnetd` broker on every Mac, neither verified on hardware yet.
+- Lab mode (no `--token`) and tenants do not mix: central refuses to create tenants without `--token`, and if tenants
+  exist when it starts without one, every caller except a tenant gets a `401` (node heartbeats included).

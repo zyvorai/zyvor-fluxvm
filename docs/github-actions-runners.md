@@ -61,8 +61,27 @@ runs-on: [self-hosted, macOS, ARM64, fluxvm]
 | `pools[].max_runners` | `2` | Concurrent runners in the pool. On macOS, keep this at or below 2 × leased Macs (Apple's two-guest limit) |
 | `pools[].job_timeout_secs` | `21600` | Hard limit per runner |
 | `pools[].boot_timeout_secs` | `600` | How long `exec` waits for the guest agent |
+| `webhook.listen` | (off) | Listen for GitHub `workflow_job` webhooks at `POST /github/webhook`; queued jobs start a runner at once |
+| `webhook.secret_env` | `GITHUB_WEBHOOK_SECRET` | The webhook secret. Deliveries without a valid `X-Hub-Signature-256` get a `401` |
+
+### Webhook mode
+
+Polling alone starts a runner up to `poll_interval_secs` after a job is queued. With `webhook` set, a `queued` delivery
+starts a runner immediately, and a `completed` delivery retires finished runners immediately. Polling keeps running
+as a safety net for missed deliveries and restarts.
+
+To set it up, add a webhook on the repository or organization:
+- payload URL `https://<host>/github/webhook` (put TLS in front of the listener);
+- content type `application/json`;
+- the secret from `GITHUB_WEBHOOK_SECRET`;
+- event "Workflow jobs" only.
+
+Deliveries for repositories that are not in `github.repos` are ignored.
 
 ## Security notes
+
+- GitHub lists are followed page by page (`Link: rel="next"`, up to 20 pages of 100), and only on the configured API
+  host, so the token is never sent anywhere else.
 
 - A JIT config can register exactly one runner, once. It is passed in the create body (`cloud-init`) or the exec call,
   and is never logged. Runner VMs are created without `"reschedulable"`, so central never stores the body.
@@ -71,7 +90,5 @@ runs-on: [self-hosted, macOS, ARM64, fluxvm]
 
 ## Not done yet
 
-- Webhook mode (`workflow_job` events) instead of polling.
-- Pagination beyond 100 queued runs, jobs or runners per repository.
 - Warm pools: a VM restored from a snapshot already waiting for a job.
 - GitLab and Buildkite.

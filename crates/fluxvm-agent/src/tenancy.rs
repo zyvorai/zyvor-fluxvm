@@ -78,6 +78,9 @@ pub struct Tenant {
     #[serde(default)]
     pub disabled: bool,
     pub created_at: DateTime<Utc>,
+    /// The tenant's /24 under `Policy::tenant_subnet_prefix` when network isolation is on (assigned on first use).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network_index: Option<u8>,
 }
 
 impl Tenant {
@@ -172,6 +175,17 @@ pub struct Policy {
     /// Ended VMs and leases older than this are dropped by the reconciler (0 keeps everything). Export usage first.
     #[serde(default = "ledger_retention_days")]
     pub ledger_retention_days: i64,
+    /// Give every tenant's `vz` VMs their own named vmnet network (one /24 per tenant), so two tenants' VMs on one
+    /// Mac never share a network. Needs macOS 26+ and the `fluxvm-vmnetd` broker on every Mac. Off by default.
+    #[serde(default)]
+    pub isolate_tenant_networks: bool,
+    /// First two octets of the tenant /24s, e.g. `10.230` gives tenant n `10.230.n.0/24`.
+    #[serde(default = "tenant_subnet_prefix")]
+    pub tenant_subnet_prefix: String,
+}
+
+fn tenant_subnet_prefix() -> String {
+    "10.230".into()
 }
 
 fn ledger_retention_days() -> i64 {
@@ -193,6 +207,8 @@ impl Default for Policy {
             exclusive_leased_hosts: true,
             min_lease_hours: MIN_LEASE_HOURS,
             ledger_retention_days: ledger_retention_days(),
+            isolate_tenant_networks: false,
+            tenant_subnet_prefix: tenant_subnet_prefix(),
         }
     }
 }
@@ -382,6 +398,21 @@ pub struct TenancyState {
     /// Nodes being drained (`POST /fleet/nodes/{name}/drain`); cleared by uncordon.
     #[serde(default)]
     pub draining: BTreeSet<String>,
+    /// Quota held by creates that are in flight (between the quota check and the node's answer). In memory only: a
+    /// restart drops them, and the requests they belonged to are gone with it.
+    #[serde(skip)]
+    reservations: Vec<Reservation>,
+    #[serde(skip)]
+    next_reservation: u64,
+}
+
+/// Quota held by one in-flight create.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Reservation {
+    id: u64,
+    tenant: String,
+    vcpus: u32,
+    memory_mib: u64,
 }
 
 impl TenancyState {
@@ -414,6 +445,7 @@ impl TenancyState {
             quota,
             disabled: false,
             created_at: now,
+            network_index: None,
         };
         self.tenants.insert(id.into(), t.clone());
         Ok((t, token))
@@ -671,6 +703,11 @@ impl TenancyState {
             cpu += u64::from(v.vcpus);
             mem += v.memory_mib;
         }
+        for r in self.reservations.iter().filter(|r| r.tenant == tenant) {
+            n += 1;
+            cpu += u64::from(r.vcpus);
+            mem += r.memory_mib;
+        }
         if let Some(max) = q.max_vms
             && n + 1 > max
         {
@@ -693,6 +730,67 @@ impl TenancyState {
             )));
         }
         Ok(())
+    }
+
+    /// The vmnet network a tenant's `vz` VMs join when [`Policy::isolate_tenant_networks`] is on: a shared-mode
+    /// network named `fluxvm-tenant-<id>` on the tenant's own /24, assigning the tenant the lowest free index on first
+    /// use. Returns `None` when isolation is off, the tenant is unknown, the prefix is malformed, or all 254 /24s are
+    /// taken.
+    pub fn tenant_vmnet(&mut self, tenant: &str) -> Option<Value> {
+        if !self.policy.isolate_tenant_networks {
+            return None;
+        }
+        let prefix = self.policy.tenant_subnet_prefix.clone();
+        let octets: Vec<&str> = prefix.split('.').collect();
+        if octets.len() != 2 || octets.iter().any(|o| o.parse::<u8>().is_err()) {
+            return None;
+        }
+        let index = match self.tenants.get(tenant)?.network_index {
+            Some(i) => i,
+            None => {
+                let used: BTreeSet<u8> = self
+                    .tenants
+                    .values()
+                    .filter_map(|t| t.network_index)
+                    .collect();
+                let free = (1..=254u8).find(|i| !used.contains(i))?;
+                self.tenants.get_mut(tenant)?.network_index = Some(free);
+                free
+            }
+        };
+        Some(serde_json::json!({
+            "name": format!("fluxvm-tenant-{tenant}"),
+            "mode": "shared",
+            "subnet": format!("{prefix}.{index}.0"),
+            "mask": "255.255.255.0",
+        }))
+    }
+
+    /// Checks the quota and, if it fits, holds that much for an in-flight create, so parallel creates by one tenant
+    /// cannot overshoot. Release it with [`TenancyState::release_reservation`] once the create succeeded (after
+    /// [`TenancyState::record_vm`]) or failed.
+    pub fn reserve(
+        &mut self,
+        tenant: &str,
+        vcpus: u32,
+        memory_mib: u64,
+    ) -> Result<u64, TenancyError> {
+        self.check_quota(tenant, vcpus, memory_mib)?;
+        self.next_reservation += 1;
+        let id = self.next_reservation;
+        self.reservations.push(Reservation {
+            id,
+            tenant: tenant.to_owned(),
+            vcpus,
+            memory_mib,
+        });
+        Ok(id)
+    }
+
+    pub fn release_reservation(&mut self, id: u64) -> bool {
+        let before = self.reservations.len();
+        self.reservations.retain(|r| r.id != id);
+        self.reservations.len() != before
     }
 
     // ---- ledger -----------------------------------------------------------------------------------------------
@@ -1097,6 +1195,62 @@ mod tests {
         ));
         assert!(s.end_vm("n", "3", t0()));
         assert!(s.check_quota("a", 1, 1).is_ok());
+    }
+
+    #[test]
+    fn reservations_hold_quota_until_released() {
+        let mut s = state_with(&["a"]);
+        s.update_tenant(
+            "a",
+            Some(Quota {
+                max_vms: Some(2),
+                max_memory_mib: Some(8192),
+                ..Default::default()
+            }),
+            None,
+            None,
+        )
+        .unwrap();
+        let r1 = s.reserve("a", 2, 4096).unwrap();
+        let r2 = s.reserve("a", 2, 4096).unwrap();
+        assert_ne!(r1, r2);
+        // Two creates in flight fill the quota: a third is refused before any node is asked.
+        assert!(matches!(s.reserve("a", 1, 1), Err(TenancyError::Quota(_))));
+        // One succeeded (recorded, then released): still full.
+        s.record_vm(vm("n", "1", Some("a"), t0()));
+        assert!(s.release_reservation(r1));
+        assert!(s.reserve("a", 1, 1).is_err());
+        // The other failed: its hold goes away.
+        assert!(s.release_reservation(r2));
+        assert!(!s.release_reservation(r2));
+        assert!(s.reserve("a", 1, 1).is_ok());
+        // Reservations are never persisted.
+        let back: TenancyState = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
+        assert!(back.reservations.is_empty());
+    }
+
+    #[test]
+    fn tenant_networks_get_stable_distinct_subnets() {
+        let mut s = state_with(&["a", "b"]);
+        assert!(s.tenant_vmnet("a").is_none(), "off by default");
+        s.policy.isolate_tenant_networks = true;
+        let a = s.tenant_vmnet("a").unwrap();
+        let b = s.tenant_vmnet("b").unwrap();
+        assert_eq!(a["name"], "fluxvm-tenant-a");
+        assert_eq!(a["subnet"], "10.230.1.0");
+        assert_eq!(b["subnet"], "10.230.2.0");
+        assert_eq!(a["mode"], "shared");
+        // Stable across calls and restarts.
+        assert_eq!(s.tenant_vmnet("a").unwrap(), a);
+        let back: TenancyState = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
+        assert_eq!(back.tenants["a"].network_index, Some(1));
+        // A freed index is reused.
+        s.delete_tenant("a").unwrap();
+        s.create_tenant("c", None, Quota::default(), t0()).unwrap();
+        assert_eq!(s.tenant_vmnet("c").unwrap()["subnet"], "10.230.1.0");
+        assert!(s.tenant_vmnet("nobody").is_none());
+        s.policy.tenant_subnet_prefix = "10.300".into();
+        assert!(s.tenant_vmnet("b").is_none());
     }
 
     #[test]
