@@ -41,9 +41,7 @@ impl VmManager {
         if vm.backend != BackendKind::Vz {
             bail!("this is a vz backend feature");
         }
-        if vm.status != VmStatus::Running {
-            bail!("the VM is {:?}; start it first", vm.status);
-        }
+        crate::require_live(&vm, false)?;
         Ok(vm)
     }
 

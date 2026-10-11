@@ -64,6 +64,13 @@ impl<E: Into<anyhow::Error>> From<E> for ApiError {
                 message: format!("{:#}", e),
             };
         }
+        // A control call that needs a live runner on a VM that is not running: a state conflict.
+        if e.downcast_ref::<fluxvm_scheduler::VmNotLive>().is_some() {
+            return Self {
+                status: StatusCode::CONFLICT,
+                message: format!("{:#}", e),
+            };
+        }
         use fluxvm_scheduler::procbox_sandbox::ProcboxError;
         // Procbox sandboxes fail in ways a plain 400 would hide: a disabled
         // feature, a guest-only route, an unenforceable policy, a too-large
@@ -5788,11 +5795,30 @@ mod tests {
             assert!(body.contains("width"), "{body}");
             // The owner reaches the VM; it is not running, so there is nothing to resize.
             let (st, body) = call(router(m.clone()), "POST", &uri, "acme", Some(ok)).await;
-            assert_eq!(st, StatusCode::BAD_REQUEST);
+            assert_eq!(st, StatusCode::CONFLICT);
             assert!(body.contains("start it first"), "{body}");
             // Missing required fields never reach the handler.
             let (st, _) = call(router(m), "POST", &uri, "acme", Some(r#"{"width":1920}"#)).await;
             assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY);
+        }
+
+        #[tokio::test]
+        async fn runner_controls_on_a_stopped_vm_are_a_readable_conflict() {
+            let m = manager(tenant_tokens());
+            let mut vm = fixture(BackendKind::Vz, VmStatus::Stopped, false);
+            vm.request.tenant = Some("acme".into());
+            let id = vm.id;
+            m.store.insert(vm).await.unwrap();
+            for (method, path) in [
+                ("POST", format!("/v1/vms/{id}/pause")),
+                ("POST", format!("/v1/vms/{id}/resume")),
+                ("GET", format!("/v1/vms/{id}/screenshot")),
+            ] {
+                let (st, body) = call(router(m.clone()), method, &path, "acme", None).await;
+                assert_eq!(st, StatusCode::CONFLICT, "{path}: {body}");
+                assert!(body.contains("start it first"), "{path}: {body}");
+                assert!(!body.contains("os error"), "{path}: {body}");
+            }
         }
 
         #[tokio::test]
