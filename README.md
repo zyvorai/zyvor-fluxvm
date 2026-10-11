@@ -49,11 +49,12 @@ FluxVM runs natively on Apple silicon. Its `vz` backend drives Apple's **Virtual
 | **Agents see the screen** | Screenshots, keyboard and mouse for any `vz` guest, with no Screen Recording permission on the host |
 
 ```bash
-xcode-select --install && brew install hivex
-cargo build -p fluxctl                              # builds and signs the vz runner
+brew install zyvorai/tap/fluxvm                     # prebuilt, Apple silicon, macOS 14+
 fluxctl run                                         # a throwaway Debian 13 VM and a shell
 fluxctl sandbox run alpine:3.22 --rm -- echo hi     # a container in its own VM
 ```
+
+From source instead: `xcode-select --install && brew install hivex && cargo build -p fluxctl` (builds and signs the vz runner).
 
 [**FluxVM on Mac**](https://zyvorai.github.io/zyvor-fluxvm/mac) · [**Build a Mac cloud**](https://zyvorai.github.io/zyvor-fluxvm/mac-cloud) · [Mac guide](docs/macos.md) · [Mac cloud guide](docs/mac-cloud.md) · [Architecture](docs/macos-architecture.md)
 

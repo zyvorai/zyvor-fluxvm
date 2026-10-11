@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### Added: Homebrew install
+- `brew install zyvorai/tap/fluxvm` installs the 0.4.0 Apple-silicon package (`fluxctl`, the signed runner, `fluxvm-vz-switch`,
+  `fluxvm-blockd`, `fluxvm-usernet`). The first v0.4.0 build lacked `fluxvm-usernet`, which `apple.usernet` needs next to
+  `fluxctl`; the tag was re-cut with it before anything was published.
+
 ### Added: fork a running `vz` Linux guest (`POST /v1/vms/{id}/fork`)
 - One runner save plus APFS clones, then each child is restored from the same state with the parent's machine identifier and
   MAC. Needs `network.mode = none` or `apple.usernet` without port forwards; macOS guests, extra disks, vmnet/bridged/private
