@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import Foundation
 import Virtualization
+import Security
 
 struct FluxAppleHostCapabilities: Codable {
     let osVersion: String
@@ -20,6 +21,17 @@ struct FluxAppleHostCapabilities: Codable {
     let usbPassthroughAPI: Bool
     let efiSecureBoot: Bool
     let rosetta: String          // installed | not-installed | not-supported
+    /// Whether this runner carries `com.apple.vm.networking`, which vmnet networks and bridged attachments need to start their
+    /// interface (without it Virtualization reports "Internal Network Error" once the VM runs). Apple grants it only through a
+    /// provisioning profile; an ad-hoc signed binary that claims it is killed at launch, so a runner that answers this is
+    /// either legitimately provisioned or does not claim it.
+    let vmNetworkingEntitlement: Bool
+}
+
+private func fluxHasEntitlement(_ name: String) -> Bool {
+    guard let task = SecTaskCreateFromSelf(nil),
+          let value = SecTaskCopyValueForEntitlement(task, name as CFString, nil) else { return false }
+    return (value as? Bool) == true
 }
 
 func fluxAppleHostCapabilities() -> FluxAppleHostCapabilities {
@@ -62,6 +74,7 @@ func fluxAppleHostCapabilities() -> FluxAppleHostCapabilities {
             case .notInstalled: return "not-installed"
             default: return "not-supported"
             }
-        }()
+        }(),
+        vmNetworkingEntitlement: fluxHasEntitlement("com.apple.vm.networking")
     )
 }
