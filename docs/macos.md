@@ -213,13 +213,17 @@ Exec over vsock for macOS guests is **experimental and unverified** (next sectio
 IPSW; that download path has not been run end to end (only Apple's metadata lookup was checked on an Apple silicon Mac). Apple
 allows two macOS VMs at a time per Mac.
 
-### Guest agent over vsock (experimental; the transport is verified, the agent is not)
+### Guest agent over vsock (experimental; verified on one M4 and macOS 27.0.1)
 
 By default a macOS guest has no vsock device and no FluxVM agent, and is reached over SSH only. `"apple": {"macos_vsock": true}` adds a
 `VZVirtioSocketDeviceConfiguration` to the macOS guest. **Verified on an M4 with a macOS 27.0.1 guest:** a guest program can create
 and bind an `AF_VSOCK` socket (family 40, Darwin's `sockaddr_vm`: length, family, 16 reserved bits, port, CID) with a stock `perl`,
 and the host reaches it through the runner's `CONNECT <port>` proxy (`OK 1024`, then the guest's bytes). A port with no listener
-returns nothing. Not run: the FluxVM guest agent as a LaunchDaemon on top of this.
+returns nothing. **The agent was run too:** `crates/fluxvm-guest-agent/macos/install.sh` put it in the guest as a LaunchDaemon (root, token
+at `/etc/fluxvm-guest-agent.token`, mode 0600), and from the host through the proxy `ping` answered `pong`, a wrong token was
+refused, `exec` ran as root (`Darwin arm64`, `27.0.1`), `put-file` and `get-file` round-tripped, and an exec policy was refused
+with "policy could not be enforced, command not run". Uninstalling removed the daemon, binary and token. Not run: the PTY shell,
+`shutdown`, `reset-identity`, a reboot of the guest with the daemon installed, and `vz_guest` driving it through the daemon.
 
 - **Guest side.** `fluxvm-guest-agent` builds for macOS (`cargo build -p fluxvm-guest-agent`). The vsock listener, exec, file
   transfer, shell (PTY), shutdown and hostname reset are ported; per-exec policies (Landlock/seccomp) are refused outright because
@@ -230,8 +234,8 @@ returns nothing. Not run: the FluxVM guest agent as a LaunchDaemon on top of thi
   it does not answer. Without the flag nothing is attempted. Exec policies and argv exec still need the agent.
 - **Checked:** the flag validates (macOS guests only), the runner config carries it, the Swift runner compiles, the agent's
   macOS build passes its unit tests (file transfer and PTY shell run against a local socketpair, the `sockaddr_vm` layout), and the
-  fallback decision is unit-tested. **Not checked:** that a macOS guest boots with the device, that `bind` on `AF_VSOCK` succeeds
-  there, and that the host's `connect` reaches it.
+  fallback decision is unit-tested. **Checked on hardware:** that a macOS guest boots with the device, that `bind` on `AF_VSOCK`
+  succeeds there, that the host's `connect` reaches it, and the agent's `ping`, token check, `exec`, file transfer and policy refusal.
 
 ## Display, audio, sharing and USB options
 
@@ -681,7 +685,7 @@ These compile against the macOS 27 SDK and are validated at admission. Except fo
 | `GET /v1/vms/{id}/vz/attestation` and `fluxctl vz attestation verify`: signed boot manifest, host claim only (**not exercised on a booted VM**) | hardware attestation, TPM, measured boot |
 | offline agent-token and SSH-key injection into a private raw root disk (token injection verified on a booted Debian 13 guest; SSH-key injection **unverified on a booted guest**) | injection into a running VM's disk, qcow2, shared storage, or another user's `authorized_keys` |
 | overlay disk exclusivity across VM records (create, attach, start) | protecting an overlay file from processes outside FluxVM |
-| `apple.macos_vsock` for macOS guests: vsock device plus a LaunchDaemon agent (**experimental**: the vsock transport is verified on hardware, the LaunchDaemon agent has not been run; SSH remains the fallback) | exec policies in macOS guests (Landlock/seccomp are Linux-only) |
+| `apple.macos_vsock` for macOS guests: vsock device plus a LaunchDaemon agent (**experimental**: verified on one M4 with a macOS 27.0.1 guest for ping, exec and files; SSH remains the fallback) | exec policies in macOS guests (Landlock/seccomp are Linux-only) |
 | extra disks (image, block device, NBD, blockd overlay (verified once on hardware); virtio, NVMe, USB), USB disk hot-attach and detach, private networks, console ports, bridged and vmnet networking, balloon, Rosetta, display, audio | (vmnet forwards may be UDP; NAT forwards are TCP only) |
 
 The same table is encoded in `fluxvm_apple::CAPABILITIES`; unsupported requests are refused with a specific message before any
@@ -708,7 +712,7 @@ What has actually been run, and what has not. One Apple M4, macOS 27.2, 16 GiB, 
 | Runner accounting (`fluxvm_vm_runner_rss_bytes`, `fluxvm_vm_runner_cpu_seconds_total`) | **Failed on first run, fixed, re-verified.** The numbers were the runner process only: with 2 vCPUs pinned the runner showed 0.0% CPU and 73 MB RSS while `com.apple.Virtualization.VirtualMachine.xpc` (ppid 1, a separate pid) showed 200% and 710 MB. The XPC service is now attributed to its runner through the VM's open root disk and `efi.bin` and summed in; see "Host-side accounting". The responsible pid (`responsibility_get_pid_responsible_for_pid`) and the parent pid do not identify the runner, and `launchctl procinfo` needs root. |
 | Display resize (`vz/display`) | **Partial.** The API call works and the connector's preferred mode in the guest changes; fbcon `virtual_size` and the active mode do not (a headless guest has no KMS client), so the result is not deterministic without one. The reply no longer claims the guest followed; see "Control preconditions, display resize". |
 | Control preconditions (pause/resume/shutdown/stop, display, devices, snapshot) | **Verified (PASS) except** `pause` and `resume` on a stopped VM, which returned a raw `runner 'pause': connecting to .../<id>.ctl: No such file or directory (os error 2)`. Fixed: pause, resume, balloon, screenshot, input, USB and display now answer `409` `the VM is Stopped; start it first` before touching the runner (API tests; not re-run against hardware). |
-| macOS guest vsock (`apple.macos_vsock`) | **Verified (transport).** macOS 27.0.1 guest, device configured: a stock `perl` in the guest created, bound and listened on an `AF_VSOCK` socket (port 1024, any CID), and the host's `CONNECT 1024` through the runner proxy answered `OK 1024` followed by the guest's bytes; `CONNECT` to a port with no listener returned nothing. The LaunchDaemon agent was **not** run. The guest needed no special entitlement or root for the bind. |
+| macOS guest vsock (`apple.macos_vsock`) | **Verified.** macOS 27.0.1 guest, device configured: a stock `perl` bound `AF_VSOCK` port 1024 and the host's `CONNECT 1024` answered `OK 1024` plus the guest's bytes (a port with no listener returned nothing). The LaunchDaemon agent installed with `install.sh` then answered from the host over the same proxy: `ping` -> `pong`, a wrong token refused, `exec` as root (`Darwin arm64`, `27.0.1`), `put-file`/`get-file` round trip, exec policy refused as Linux-only. Uninstall left nothing behind. **Not run:** PTY shell, `shutdown`, `reset-identity`, a guest reboot with the daemon, and `vz_guest` selecting the agent. |
 
 Two things seen in the same runs that matter when you write guest-side tooling or debug a boot:
 

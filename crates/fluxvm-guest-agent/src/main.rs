@@ -99,8 +99,8 @@ fn run_server(port: u32, token_file: &str) -> Result<()> {
 }
 
 /// The AF_VSOCK listener. Linux and Darwin differ only in the `sockaddr_vm` layout (Darwin's carries a length byte and
-/// has no `VMADDR_CID_ANY` in the `libc` crate). The Darwin path is UNVERIFIED on hardware: it assumes a macOS guest
-/// with a virtio-socket device (`apple.macos_vsock`) exposes a bindable AF_VSOCK; nothing here has run in a macOS VM.
+/// has no `VMADDR_CID_ANY` in the `libc` crate). The Darwin path is verified on an Apple M4: a macOS 27.0.1 guest with a
+/// virtio-socket device (`apple.macos_vsock`) binds this address and the host reaches it.
 #[cfg(unix)]
 mod vsock {
     use anyhow::Result;

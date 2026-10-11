@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! `apple.macos_vsock` is an experimental, opt-in flag: the Rust spec, the runner config, the Swift runner and the guest
-//! agent's LaunchDaemon files agree on its name and default off. Nothing here boots a VM; whether a macOS guest exposes a
-//! usable vsock device is UNVERIFIED on hardware.
+//! agent's LaunchDaemon files agree on its name and default off. Nothing here boots a VM; the hardware result (a macOS 27.0.1
+//! guest binds AF_VSOCK and the LaunchDaemon agent answers over it) is recorded in docs/macos.md.
 use std::fs;
 use std::path::PathBuf;
 
@@ -30,8 +30,8 @@ fn runner_adds_a_socket_device_to_macos_guests_only_behind_the_flag() {
         "the guarded device must be in the macOS branch"
     );
     assert!(
-        swift.contains("unverified"),
-        "the runner comment must say the path is unverified"
+        swift.contains("verified on an M4"),
+        "the runner comment must say what was verified"
     );
 }
 
@@ -44,13 +44,13 @@ fn flag_is_in_the_runner_config_and_off_by_default() {
 }
 
 #[test]
-fn capability_matrix_labels_it_experimental_and_unverified() {
+fn capability_matrix_labels_it_experimental_and_says_what_was_verified() {
     let row = fluxvm_apple::CAPABILITIES
         .iter()
         .find(|c| c.feature.contains("macos_vsock"))
         .expect("capability row");
     assert!(row.supported);
-    assert!(row.note.contains("EXPERIMENTAL") && row.note.contains("unverified"));
+    assert!(row.note.contains("EXPERIMENTAL") && row.note.contains("Verified on"));
 }
 
 #[test]
@@ -65,5 +65,5 @@ fn launch_daemon_files_match_the_agent_defaults() {
     let install = read("../fluxvm-guest-agent/macos/install.sh");
     assert!(install.contains(fluxvm_guest_protocol::TOKEN_FILE_PATH));
     assert!(install.contains("dev.zyvor.fluxvm-guest-agent"));
-    assert!(install.contains("UNVERIFIED"));
+    assert!(install.contains("EXPERIMENTAL"));
 }
