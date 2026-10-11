@@ -148,6 +148,24 @@ pub enum Resource {
     TempFile { path: PathBuf },
 }
 
+/// How far a fork child got. Ordered: a later phase implies the earlier ones.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "kebab-case")]
+pub enum ForkPhase {
+    /// Files cloned and the record inserted; not yet restored.
+    Prepared,
+    /// The runner restored the saved state.
+    Restored,
+    /// The identity reset was confirmed (or deliberately skipped by `preserve`/`best-effort`).
+    IdentityReset,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ForkChildState {
+    pub vm_id: Uuid,
+    pub phase: ForkPhase,
+}
+
 /// One in-flight mutating operation.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct OpIntent {
@@ -170,6 +188,12 @@ pub struct OpIntent {
     pub attempts: u32,
     #[serde(default)]
     pub resources: Vec<Resource>,
+    /// Fork only: how many children the operation set out to create, and how far each got. Recovery adopts the batch
+    /// only when every one of them reached `IdentityReset`; otherwise it removes all of them (fork is all-or-nothing).
+    #[serde(default)]
+    pub fork_expected: u32,
+    #[serde(default)]
+    pub fork_children: Vec<ForkChildState>,
 }
 
 /// Rollback gives up (and clears the intent, with an error log) after this
@@ -295,6 +319,8 @@ impl OpGuard {
                 owner_start: proc_start_time(pid),
                 attempts: 0,
                 resources,
+                fork_expected: 0,
+                fork_children: Vec::new(),
             },
         )?;
         Ok(Self {
@@ -315,6 +341,29 @@ impl OpGuard {
             write_op(&self.state_dir, &intent)?;
         }
         Ok(())
+    }
+
+    /// Fork: how many children this operation will create (durable, before the first is started).
+    pub fn fork_expect(&self, count: u32) -> Result<()> {
+        let _serialise = self.record_lock.lock().unwrap_or_else(|e| e.into_inner());
+        let mut intent = read_op(&self.state_dir, self.op, self.op_id)?;
+        intent.fork_expected = count;
+        write_op(&self.state_dir, &intent)
+    }
+
+    /// Fork: `child` reached `phase` (only ever moves forward).
+    pub fn fork_phase(&self, child: Uuid, phase: ForkPhase) -> Result<()> {
+        let _serialise = self.record_lock.lock().unwrap_or_else(|e| e.into_inner());
+        let mut intent = read_op(&self.state_dir, self.op, self.op_id)?;
+        match intent.fork_children.iter_mut().find(|c| c.vm_id == child) {
+            Some(c) if c.phase >= phase => return Ok(()),
+            Some(c) => c.phase = phase,
+            None => intent.fork_children.push(ForkChildState {
+                vm_id: child,
+                phase,
+            }),
+        }
+        write_op(&self.state_dir, &intent)
     }
 
     /// Clears the intent: nothing is left to roll back.

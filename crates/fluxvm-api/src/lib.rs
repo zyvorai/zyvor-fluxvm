@@ -1011,6 +1011,51 @@ fn render_metrics(vms: &[VmRecord]) -> String {
         fluxvm_core::metrics::vm_start_duration_ms_total()
     ));
 
+    let (forks, failed, children, total_ms, snap_ms, restore_ms, identity_ms, identity_failed) =
+        fluxvm_core::metrics::fork_totals();
+    for (name, help, v) in [
+        ("fluxvm_fork_total", "Fork requests that completed.", forks),
+        (
+            "fluxvm_fork_failed_total",
+            "Fork requests that were refused or rolled back after starting.",
+            failed,
+        ),
+        (
+            "fluxvm_fork_children_total",
+            "Children created by completed forks.",
+            children,
+        ),
+        (
+            "fluxvm_fork_duration_ms_total",
+            "Cumulative wall time of completed forks in milliseconds.",
+            total_ms,
+        ),
+        (
+            "fluxvm_fork_parent_snapshot_ms_total",
+            "Cumulative time parents were held for the fork save and disk clone, in milliseconds.",
+            snap_ms,
+        ),
+        (
+            "fluxvm_fork_child_restore_ms_total",
+            "Cumulative per-child restore time in milliseconds (divide by children for a mean).",
+            restore_ms,
+        ),
+        (
+            "fluxvm_fork_child_identity_ms_total",
+            "Cumulative per-child identity reset time in milliseconds.",
+            identity_ms,
+        ),
+        (
+            "fluxvm_fork_identity_failed_total",
+            "Strict or best-effort identity resets that could not be confirmed.",
+            identity_failed,
+        ),
+    ] {
+        out.push_str(&format!(
+            "# HELP {name} {help}\n# TYPE {name} counter\n{name} {v}\n"
+        ));
+    }
+
     out
 }
 

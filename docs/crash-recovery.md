@@ -116,9 +116,17 @@ For each intent whose owner is gone:
   through `delete()`, and finally removes the workspace.
 - **snapshot** and **restore**: remove the `snapshot_dir` or `*.restore.tmp`
   file. Nothing else.
-- **fork**: all or nothing. Every child it started is removed (through
-  `delete()` if it has a record; otherwise by killing its VMM, cleaning its
-  netns and policy and removing its workspace), then the parent's fork snapshot.
+- **fork**: all or nothing, in both directions. The intent records how many
+  children were wanted and how far each got (`prepared`, `restored`,
+  `identity-reset`). If **every** child reached `identity-reset` and is still a
+  running VM, the operation only missed its last step (answering the caller):
+  the batch is **adopted**, only the parent's fork snapshot is removed, and
+  `vm.fork.adopted` is audited. In every other case (a child short of
+  `identity-reset`, one missing or dead, fewer recorded than wanted, or an
+  intent written before phases existed) every child it started is removed
+  (through `delete()` if it has a record; otherwise by killing its VMM, cleaning
+  its netns and policy and removing its workspace), then the parent's fork
+  snapshot.
 
 If every step succeeded the intent is cleared. Otherwise `attempts` is
 incremented and written back; after `MAX_ROLLBACK_ATTEMPTS` (5) the intent is

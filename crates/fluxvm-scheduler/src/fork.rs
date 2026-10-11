@@ -22,7 +22,7 @@
 //! agent's `ResetIdentity` so each child gets its own hostname, machine-id and
 //! fresh entropy (best effort: a failure is logged loudly and audited).
 
-use crate::journal::{OpGuard, OpKind, Resource};
+use crate::journal::{ForkPhase, OpGuard, OpKind, Resource};
 use crate::{FIRST_GUEST_CID, VmManager, audit_event, validate_vm_name};
 use anyhow::{Context, Result, bail};
 use chrono::{Duration, Utc};
@@ -181,6 +181,26 @@ impl VmManager {
         spec: ForkSpec,
         actor: Option<&str>,
     ) -> Result<ForkReport> {
+        let r = self.fork_vm_spec_inner(id, spec, actor).await;
+        match &r {
+            Ok(rep) => fluxvm_core::metrics::record_fork(
+                rep.children.len() as u64,
+                rep.parent_snapshot_ms,
+                rep.total_ms,
+                rep.reports.iter().map(|c| c.restore_ms).sum(),
+                rep.reports.iter().map(|c| c.identity.ms).sum(),
+            ),
+            Err(_) => fluxvm_core::metrics::record_fork_failed(),
+        }
+        r
+    }
+
+    async fn fork_vm_spec_inner(
+        self: &Arc<Self>,
+        id: Uuid,
+        spec: ForkSpec,
+        actor: Option<&str>,
+    ) -> Result<ForkReport> {
         let started = Instant::now();
         let src = self.get(id).await?;
         if let Some(p) = spec.parallelism
@@ -216,6 +236,7 @@ impl VmManager {
             }],
         )
         .context("journaling fork intent")?;
+        op.fork_expect(count).context("journaling fork size")?;
         let snap_started = Instant::now();
         self.create_vm_snapshot(id, &tag).await?;
         let parent_snapshot_ms = snap_started.elapsed().as_millis() as u64;
@@ -341,6 +362,7 @@ impl VmManager {
             )
             .context("journaling fork intent")?,
         );
+        op.fork_expect(count).context("journaling fork size")?;
         let snap_started = Instant::now();
         self.create_vm_snapshot(id, &tag).await?;
         let parent_snapshot_ms = snap_started.elapsed().as_millis() as u64;
@@ -525,6 +547,7 @@ impl VmManager {
             return Err(e);
         }
         let prepare_ms = t0.elapsed().as_millis() as u64;
+        let _ = op.fork_phase(id, ForkPhase::Prepared);
         let t1 = Instant::now();
         let started = self.start_from_snapshot(id, tag).await;
         let _ = std::fs::remove_dir_all(workspace.join("snapshots").join(tag));
@@ -536,6 +559,7 @@ impl VmManager {
                 return Err(e);
             }
         };
+        let _ = op.fork_phase(id, ForkPhase::Restored);
         let outcome = match self.reset_child_identity(&vm, name, identity).await {
             Ok(o) => o,
             Err(e) => {
@@ -543,6 +567,7 @@ impl VmManager {
                 return Err(e.context("identity reset"));
             }
         };
+        let _ = op.fork_phase(id, ForkPhase::IdentityReset);
         // Re-read: the reset may have rotated the token on the stored record.
         let vm = self.get(id).await.unwrap_or(vm);
         let report = ForkChildReport {
@@ -694,6 +719,7 @@ impl VmManager {
         }
 
         let prepare_ms = t0.elapsed().as_millis() as u64;
+        let _ = op.fork_phase(id, ForkPhase::Prepared);
         let t1 = Instant::now();
         let started = self.start_from_snapshot(id, tag).await;
         let _ = std::fs::remove_dir_all(workspace.join("snapshots").join(tag));
@@ -705,6 +731,7 @@ impl VmManager {
                 return Err(e);
             }
         };
+        let _ = op.fork_phase(id, ForkPhase::Restored);
         let outcome = match self.reset_child_identity(&vm, name, identity).await {
             Ok(o) => o,
             Err(e) => {
@@ -712,6 +739,7 @@ impl VmManager {
                 return Err(e.context("identity reset"));
             }
         };
+        let _ = op.fork_phase(id, ForkPhase::IdentityReset);
         let vm = self.get(id).await.unwrap_or(vm);
         let report = ForkChildReport {
             id,
@@ -872,6 +900,7 @@ impl VmManager {
              identity=best-effort or preserve to fork this guest anyway",
             REQUIRED_STEPS.join(", ")
         );
+        fluxvm_core::metrics::record_fork_identity_failed();
         tracing::error!(vm = %vm.id, error = %problem, "fork child identity reset FAILED");
         audit_event(
             "vm.fork.identity-reset-failed",

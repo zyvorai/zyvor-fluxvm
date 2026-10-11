@@ -363,7 +363,7 @@ impl VmManager {
             let done = match intent.op {
                 OpKind::Create => self.rollback_create(&intent).await,
                 OpKind::Snapshot | OpKind::Restore => self.rollback_files(&intent),
-                OpKind::Fork => self.rollback_fork(&intent).await,
+                OpKind::Fork => self.settle_fork(&intent).await,
             };
             if done {
                 let _ = journal::finish_op(&state_dir, intent.op, intent.op_id);
@@ -463,8 +463,66 @@ impl VmManager {
         ok
     }
 
-    /// Fork is all-or-nothing: every child it started is removed, finished or
-    /// not, and so is the parent's fork snapshot.
+    /// An interrupted fork. Fork is all-or-nothing, so the batch is either **adopted** whole or rolled back whole.
+    ///
+    /// Adopted when the intent says how many children were wanted, every one reached `IdentityReset`, and every one is
+    /// still a running VM: the operation only missed its last step (answering the caller), the children are valid and
+    /// independent machines, and removing them would destroy running work for nothing. Anything else (a child short of
+    /// `IdentityReset`, a missing or dead child, an intent from before phases were journaled) is rolled back.
+    async fn settle_fork(&self, intent: &OpIntent) -> bool {
+        if self.fork_batch_is_complete(intent).await {
+            tracing::warn!(
+                parent = %intent.vm_id,
+                children = intent.fork_children.len(),
+                "adopting the children of a fork that finished but was never acknowledged"
+            );
+            crate::audit_event(
+                "vm.fork.adopted",
+                &[
+                    ("vm_id", &intent.vm_id.to_string()),
+                    ("op_id", &intent.op_id.to_string()),
+                    ("children", &intent.fork_children.len().to_string()),
+                ],
+            );
+            // Only the parent's fork snapshot is left to remove; the children stay.
+            let mut ok = true;
+            for r in &intent.resources {
+                if let Resource::SnapshotDir { path } = r
+                    && resource_is_ours(&self.cfg.state_dir, intent.vm_id, r)
+                {
+                    ok &= journal::remove_tree(path).is_ok();
+                }
+            }
+            return ok;
+        }
+        self.rollback_fork(intent).await
+    }
+
+    async fn fork_batch_is_complete(&self, intent: &OpIntent) -> bool {
+        use crate::journal::ForkPhase;
+        let want = intent.fork_expected as usize;
+        if want == 0 || intent.fork_children.len() != want {
+            return false;
+        }
+        for c in &intent.fork_children {
+            if c.phase != ForkPhase::IdentityReset {
+                return false;
+            }
+            let Some(vm) = self.store.get(c.vm_id).await else {
+                return false;
+            };
+            let alive = match vm.pid {
+                Some(pid) => fluxvm_core::process::process_alive(pid).await,
+                None => false,
+            };
+            if vm.status != VmStatus::Running || !alive {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Every child it started is removed, finished or not, and so is the parent's fork snapshot.
     async fn rollback_fork(&self, intent: &OpIntent) -> bool {
         let state_dir = &self.cfg.state_dir;
         let mut ok = true;
@@ -962,6 +1020,121 @@ mod tests {
         assert!(!partial.exists());
         assert!(good.exists());
         assert!(journal::pending_ops(&sd).is_empty());
+    }
+
+    /// A fork intent whose owner has gone, with `phases` for as many children as given.
+    fn abandoned_fork(
+        sd: &Path,
+        parent: Uuid,
+        expected: u32,
+        children: &[(Uuid, journal::ForkPhase)],
+    ) -> PathBuf {
+        let snap = sd
+            .join("instances")
+            .join(parent.to_string())
+            .join("snapshots")
+            .join("fork-t");
+        fs::create_dir_all(&snap).unwrap();
+        let g = journal::OpGuard::begin(
+            sd,
+            OpKind::Fork,
+            Uuid::new_v4(),
+            parent,
+            vec![Resource::SnapshotDir { path: snap.clone() }],
+        )
+        .unwrap();
+        g.fork_expect(expected).unwrap();
+        for (id, phase) in children {
+            g.record(Resource::ForkChild { vm_id: *id }).unwrap();
+            g.fork_phase(*id, *phase).unwrap();
+        }
+        drop(g);
+        snap
+    }
+
+    async fn child_record(m: &VmManager, id: Uuid, running: bool) {
+        let ws = m.cfg.state_dir.join("instances").join(id.to_string());
+        fs::create_dir_all(&ws).unwrap();
+        let mut rec = creating_record(id, &ws, 1);
+        rec.name = format!("c-{}", &id.to_string()[..4]);
+        if running {
+            rec.status = VmStatus::Running;
+            // This process: certainly alive, and the adopt path never signals it.
+            rec.pid = Some(std::process::id());
+        } else {
+            rec.status = VmStatus::Stopped;
+        }
+        m.store.insert_with_cid(rec, false, 3).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_fork_whose_children_all_finished_is_adopted_not_destroyed() {
+        use journal::ForkPhase::IdentityReset;
+        let td = tempfile::tempdir().unwrap();
+        let m = manager(td.path());
+        let sd = m.cfg.state_dir.clone();
+        let parent = Uuid::new_v4();
+        let (a, b) = (Uuid::new_v4(), Uuid::new_v4());
+        child_record(&m, a, true).await;
+        child_record(&m, b, true).await;
+        let snap = abandoned_fork(&sd, parent, 2, &[(a, IdentityReset), (b, IdentityReset)]);
+        m.replay_pending_ops().await;
+        assert!(
+            m.store.get(a).await.is_some(),
+            "a finished child was removed"
+        );
+        assert!(
+            m.store.get(b).await.is_some(),
+            "a finished child was removed"
+        );
+        assert!(!snap.exists(), "the parent's fork snapshot must still go");
+        assert!(journal::pending_ops(&sd).is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_fork_with_one_unfinished_child_is_rolled_back_whole() {
+        use journal::ForkPhase::{IdentityReset, Restored};
+        let td = tempfile::tempdir().unwrap();
+        let m = manager(td.path());
+        let sd = m.cfg.state_dir.clone();
+        let parent = Uuid::new_v4();
+        let (a, b) = (Uuid::new_v4(), Uuid::new_v4());
+        // Stopped records: rollback deletes them, and must never be able to signal this process.
+        child_record(&m, a, false).await;
+        child_record(&m, b, false).await;
+        let snap = abandoned_fork(&sd, parent, 2, &[(a, IdentityReset), (b, Restored)]);
+        m.replay_pending_ops().await;
+        assert!(m.store.get(a).await.is_none());
+        assert!(m.store.get(b).await.is_none());
+        assert!(!snap.exists());
+        assert!(journal::pending_ops(&sd).is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_fork_short_of_its_expected_children_or_without_phases_is_rolled_back() {
+        use journal::ForkPhase::IdentityReset;
+        let td = tempfile::tempdir().unwrap();
+        let m = manager(td.path());
+        let sd = m.cfg.state_dir.clone();
+        let parent = Uuid::new_v4();
+        // Three wanted, only one recorded.
+        let a = Uuid::new_v4();
+        child_record(&m, a, false).await;
+        abandoned_fork(&sd, parent, 3, &[(a, IdentityReset)]);
+        m.replay_pending_ops().await;
+        assert!(
+            m.store.get(a).await.is_none(),
+            "a partial batch was adopted"
+        );
+        // An intent from before phases existed (expected = 0).
+        let b = Uuid::new_v4();
+        child_record(&m, b, false).await;
+        abandoned_fork(&sd, parent, 0, &[(b, IdentityReset)]);
+        m.replay_pending_ops().await;
+        assert!(
+            m.store.get(b).await.is_none(),
+            "an old-format intent was adopted"
+        );
     }
 
     #[tokio::test]
