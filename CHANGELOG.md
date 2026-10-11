@@ -13,6 +13,8 @@
 - `GET /v1/host/overview` and `GET /v1/host/apple/capabilities` (see docs/api.md), consumed by Velora's Control Centre.
 - `GET /v1/host/history`: an in-memory hour of host memory and per-VM CPU/RSS at 5 s spacing, so a dashboard that connects
   late has its sparklines at once. Empty after a daemon restart.
+- `POST /v1/vms/{id}/fork/plan` and `POST /v1/branches/{id}/start/plan`: refusals (with the real reason) and a memory/time
+  bound for a fork or branch start, without doing it.
 - The `vm.fork` and `vm.branch.start` events now carry `total_ms` and a per-child `report` (prepare, restore, identity,
   hooks, ready), so a fork can be replayed later from the event log.
 

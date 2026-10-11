@@ -368,6 +368,8 @@ pub fn router(manager: Arc<VmManager>) -> Router {
         .route("/v1/vms/{id}/restart", post(restart_vm))
         .route("/v1/vms/{id}/clone", post(clone_vm))
         .route("/v1/vms/{id}/fork", post(fork_vm))
+        .route("/v1/vms/{id}/fork/plan", post(fork_plan))
+        .route("/v1/branches/{id}/start/plan", post(branch_start_plan))
         .route(
             "/v1/vm-templates",
             get(list_vm_templates).post(save_vm_template),
@@ -2506,6 +2508,28 @@ async fn restart_vm(
 
 /// Fork a running flux-vm VM into `count` running children from one memory
 /// snapshot (see `fluxvm_scheduler::fork`).
+/// What a fork would be refused for and cost, without doing it (same body as `POST /v1/vms/{id}/fork`).
+async fn fork_plan(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<fluxvm_scheduler::fork::ForkSpec>,
+) -> ApiResult<Json<fluxvm_scheduler::fork_plan::ForkPlan>> {
+    require_admin(role)?;
+    Ok(Json(m.plan_fork(id, req).await?))
+}
+
+/// What a start from a branch would be refused for and cost, without doing it.
+async fn branch_start_plan(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<fluxvm_scheduler::fork::ForkSpec>,
+) -> ApiResult<Json<fluxvm_scheduler::fork_plan::ForkPlan>> {
+    require_admin(role)?;
+    Ok(Json(m.plan_branch_start(id, req).await?))
+}
+
 async fn fork_vm(
     State(m): State<Arc<VmManager>>,
     Extension(role): Extension<Role>,

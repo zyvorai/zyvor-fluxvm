@@ -456,10 +456,7 @@ mod tests {
 
     #[test]
     fn mtu_is_checked_shared_by_members_and_reaches_the_guest() {
-        let jumbo = |name: &str, mtu: Option<u32>| AppleNetwork {
-            mtu,
-            ..net(name)
-        };
+        let jumbo = |name: &str, mtu: Option<u32>| AppleNetwork { mtu, ..net(name) };
         // Bounds.
         for bad in [100u32, 1279, 9001] {
             assert!(
@@ -493,7 +490,10 @@ mod tests {
             .find(|f| f.0.ends_with("10-fluxvm-lab.network"))
             .unwrap();
         assert!(unit.1.contains("[Link]\nMTUBytes=9000\n"), "{}", unit.1);
-        let script = files.iter().find(|f| f.0.ends_with("fluxvm-vznet")).unwrap();
+        let script = files
+            .iter()
+            .find(|f| f.0.ends_with("fluxvm-vznet"))
+            .unwrap();
         assert!(script.1.contains(" 9000\n") && script.1.contains("mtu \"$3\""));
         let (plain_files, _) = cloud_init(&plain);
         assert!(
