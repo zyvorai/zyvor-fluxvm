@@ -40,6 +40,10 @@ pub(crate) fn routes() -> Router<Arc<VmManager>> {
         .route("/v1/host/apple/capabilities", get(host_capabilities))
         .route("/v1/host/overview", get(host_overview))
         .route("/v1/host/history", get(host_history))
+        .route(
+            "/v1/vms/{id}/usernet/policy",
+            get(usernet_policy).put(usernet_policy_set),
+        )
         .route("/v1/host/apple/ipsw", get(ipsw_status).post(ipsw_download))
         .route("/v1/vms/{id}/vz/secure-boot", get(secure_boot))
         .route("/v1/vms/{id}/vz/custom-virtio", get(custom_virtio))
@@ -106,6 +110,28 @@ async fn host_history(Query(q): Query<HistoryQuery>) -> Json<Value> {
         "capacity": fluxvm_scheduler::history::CAPACITY,
         "items": items,
     }))
+}
+
+/// The egress policy of a usernet guest as stored.
+async fn usernet_policy(
+    State(m): State<Arc<VmManager>>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<Value>> {
+    Ok(Json(m.vz_usernet_policy(id).await?))
+}
+
+/// Changes a usernet guest's egress policy; applied to the running gateway at once (open connections are not cut) and
+/// stored, so restarts, forks and branch starts use it. Absent fields keep their value.
+async fn usernet_policy_set(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+    actor: Option<Extension<crate::AuditActor>>,
+    Json(patch): Json<fluxvm_scheduler::vz_devices::PolicyPatch>,
+) -> ApiResult<Json<Value>> {
+    require_admin(role)?;
+    let actor_name = actor.as_ref().map(|a| a.0.0.as_str());
+    Ok(Json(m.vz_usernet_policy_set(id, patch, actor_name).await?))
 }
 
 async fn secure_boot(

@@ -40,6 +40,7 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     let fd = fd.ok_or("--fd is required")?;
+    let cfg_reload_path = cfg_path.clone();
     let cfg: UserNetConfig = match cfg_path {
         Some(p) => serde_json::from_slice(&std::fs::read(p)?)?,
         None => UserNetConfig::default(),
@@ -71,6 +72,31 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
         });
+        // SIGHUP re-reads `--config` and swaps only the egress policy: the daemon rewrites the file, then signals. The
+        // listeners, MTU and addresses are unchanged; established connections keep going.
+        if let Some(path) = cfg_reload_path.clone() {
+            let h = net.handle();
+            if let Ok(mut hup) =
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
+            {
+                tokio::spawn(async move {
+                    while hup.recv().await.is_some() {
+                        match std::fs::read(&path)
+                            .map_err(|e| e.to_string())
+                            .and_then(|b| {
+                                serde_json::from_slice::<UserNetConfig>(&b)
+                                    .map_err(|e| e.to_string())
+                            }) {
+                            Ok(c) => {
+                                h.set_egress(c.egress);
+                                eprintln!("fluxvm-usernet: reloaded the egress policy from {path}");
+                            }
+                            Err(e) => eprintln!("fluxvm-usernet: reload of {path} failed: {e}"),
+                        }
+                    }
+                });
+            }
+        }
         if let Some(pid) = watch_pid {
             let h = net.handle();
             tokio::spawn(async move {

@@ -217,6 +217,18 @@ fn ops() -> Vec<Op> {
         ),
         op(
             "get",
+            "/v1/vms/{id}/usernet/policy",
+            "The egress policy of an apple.usernet guest as stored",
+            HOST,
+        ),
+        op(
+            "put",
+            "/v1/vms/{id}/usernet/policy",
+            "Change a usernet guest's egress policy; applied to the running gateway without cutting open connections",
+            HOST,
+        ),
+        op(
+            "get",
             "/v1/host/history",
             "Last hour of host memory and per-VM runner usage at 5 s spacing (in memory; empty after a daemon restart)",
             HOST,

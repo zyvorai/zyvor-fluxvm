@@ -668,6 +668,13 @@ Two read-only routes feed a dashboard without scraping `/metrics`:
   high is every child using all its memory. Children
   fault pages back in after a restore, so a child's size grows towards (and on the M4 slightly past) its parent's. The time
   is the median of forks recorded on this Mac and is absent until there is one.
+- `GET /v1/vms/{id}/usernet/policy` and `PUT /v1/vms/{id}/usernet/policy` (admin): the egress policy of an `apple.usernet`
+  guest. `PUT` takes any of `allow_cidrs`, `deny_cidrs`, `allow_ports`, `deny_ports`, `dns_allow`, `dns_deny`,
+  `allow_private`, `allow_cidrs6`, `deny_cidrs6` (absent keeps, a present empty list clears), validates them like create,
+  stores them in the VM record (so a restart, a fork or a branch start uses them) and, when the gateway runs, applies them at
+  once: the daemon rewrites the gateway's config and signals it, and **new** connections and DNS queries follow the new
+  policy while open connections are not cut. Reply: the policy plus `applied` and a `note`. Port forwards, MTU and
+  addresses are not changed this way.
 - `GET /v1/host/overview`: `daemon` (`version`, `uptime_seconds`), `host` (`os_version`, `cpu_count`, `memory_total_mib`,
   `memory_available_mib`, `memory_pressure` `normal|warn|critical`, `nested_virtualization`, `rosetta`), `vms` (`total`,
   `by_status`, `by_backend`), `branches`, `usage[]`, `helpers` (`runner`, `switch`, `blockd`, `usernet` present or not) and
