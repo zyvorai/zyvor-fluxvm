@@ -70,6 +70,32 @@ impl VmManager {
         fluxvm_apple::vz27::usb_list(&self.vz_running_vm(id).await?).await
     }
 
+    /// Resizes display `display` of a running VM (`VZGraphicsDisplay.reconfigure`, macOS 14+). The request is validated
+    /// before the VM is looked up, so a bad size is reported the same whether or not the VM runs. UNVERIFIED on hardware:
+    /// whether the guest follows the new size depends on its display driver.
+    pub async fn vz_display_resize(
+        &self,
+        id: Uuid,
+        width: u32,
+        height: u32,
+        display: u32,
+        ppi: Option<u32>,
+    ) -> Result<()> {
+        fluxvm_apple::display_resize_request(width, height, display, ppi)?;
+        let vm = self.vz_running_vm(id).await?;
+        fluxvm_apple::display_resize(&vm, width, height, display, ppi).await?;
+        audit_event(
+            "vm.display_resize",
+            &[
+                ("vm_id", &id.to_string()),
+                ("width", &width.to_string()),
+                ("height", &height.to_string()),
+                ("display", &display.to_string()),
+            ],
+        );
+        Ok(())
+    }
+
     /// Host USB accessories the user has granted to FluxVMUSBAccess.app.
     pub async fn vz_usb_physical_list(&self, id: Uuid) -> Result<Vec<Value>> {
         fluxvm_apple::physical_usb_list(&self.vz_running_vm(id).await?).await
@@ -104,7 +130,8 @@ pub struct VmRunnerUsage {
 pub fn runner_usage_samples(vms: &[VmRecord]) -> Vec<VmRunnerUsage> {
     vms.iter()
         .filter(|vm| {
-            vm.backend == BackendKind::Vz && matches!(vm.status, VmStatus::Running | VmStatus::Paused)
+            vm.backend == BackendKind::Vz
+                && matches!(vm.status, VmStatus::Running | VmStatus::Paused)
         })
         .filter_map(|vm| {
             let u = fluxvm_apple::runner_usage(vm.pid?).ok()?;

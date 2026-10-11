@@ -239,6 +239,13 @@ fn ops() -> Vec<Op> {
         .body("InstantiateTemplateRequest")
         .returns("VmRecord")
         .status("201"),
+        op(
+            "post",
+            "/v1/vms/{id}/vz/display",
+            "Resize a display of a running vz guest (admin; macOS 14+, guest driver permitting)",
+            VMS,
+        )
+        .body("VzDisplayResize"),
         op("get", "/v1/events", "Lifecycle events", EVENTS)
             .returns("EventList")
             .query(&[
@@ -312,6 +319,12 @@ fn schemas() -> Value {
         "VmRecord": obj("A VM: id, name, status, backend, request, labels, workspace, guest_ip, ..."),
         "CreateVmRequest": obj("VM spec: name, backend, image, vcpus, memory_mib, network, cloud_init, ..."),
         "VmList": list("VmRecord"),
+        "VzDisplayResize": {"type": "object", "required": ["width", "height"], "properties": {
+            "width": {"type": "integer", "minimum": 800, "maximum": 5120},
+            "height": {"type": "integer", "minimum": 600, "maximum": 2880},
+            "display": {"type": "integer", "minimum": 0, "maximum": 7, "default": 0},
+            "ppi": {"type": "integer", "minimum": 72, "maximum": 300, "description": "macOS guests only"}
+        }},
         "VmPatch": {"type": "object", "properties": {
             "name": {"type": "string"},
             "labels": {"type": "object", "additionalProperties": {"type": ["string", "null"]}}

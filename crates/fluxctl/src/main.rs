@@ -1826,6 +1826,11 @@ enum VzCommand {
         #[arg(value_parser = output::parse_vm_ref)]
         id: Uuid,
     },
+    /// Display controls of a running guest.
+    Display {
+        #[command(subcommand)]
+        command: VzDisplayCommand,
+    },
     /// Driver state and counters of the custom Virtio device; `--reset` asks it to re-negotiate.
     CustomVirtio {
         #[arg(value_parser = output::parse_vm_ref)]
@@ -1846,12 +1851,42 @@ enum VzCommand {
 }
 
 #[derive(Subcommand)]
+enum VzDisplayCommand {
+    /// Resize a display of a running guest (macOS 14+; whether the guest follows depends on its display driver).
+    Resize {
+        #[arg(value_parser = output::parse_vm_ref)]
+        id: Uuid,
+        /// Pixels, 800..=5120.
+        #[arg(long)]
+        width: u32,
+        /// Pixels, 600..=2880.
+        #[arg(long)]
+        height: u32,
+        /// Display index, 0..=7.
+        #[arg(long, default_value_t = 0)]
+        display: u32,
+        /// Pixels per inch, 72..=300 (macOS guests only).
+        #[arg(long)]
+        ppi: Option<u32>,
+    },
+}
+
+#[derive(Subcommand)]
 enum VznetCommand {
     /// Networks in use, their subnets and members (`--json` for the raw `GET /v1/vznets`).
     Ls {
         #[arg(long)]
         json: bool,
     },
+}
+
+/// Body of `POST /v1/vms/{id}/vz/display`; `ppi` is omitted when unset.
+fn vz_display_body(width: u32, height: u32, display: u32, ppi: Option<u32>) -> serde_json::Value {
+    let mut b = serde_json::json!({"width": width, "height": height, "display": display});
+    if let Some(p) = ppi {
+        b["ppi"] = p.into();
+    }
+    b
 }
 
 /// `fluxctl vznet ls` as a table.
@@ -3053,6 +3088,23 @@ async fn run_remote(
                 &r.call(Method::GET, &format!("/v1/vms/{id}/vz/secure-boot"), None)
                     .await?,
             )?,
+            VzCommand::Display {
+                command:
+                    VzDisplayCommand::Resize {
+                        id,
+                        width,
+                        height,
+                        display,
+                        ppi,
+                    },
+            } => pretty(
+                &r.call(
+                    Method::POST,
+                    &format!("/v1/vms/{id}/vz/display"),
+                    Some(vz_display_body(width, height, display, ppi)),
+                )
+                .await?,
+            )?,
             VzCommand::CustomVirtio { id, reset: true } => pretty(
                 &r.call(
                     Method::POST,
@@ -4183,6 +4235,19 @@ async fn main() -> Result<()> {
                 VzCommand::Host => fluxvm_scheduler::vz_devices::apple_host_capabilities().await?,
                 VzCommand::Ipsw { download } => m.macos_ipsw(download).await?,
                 VzCommand::SecureBoot { id } => m.vz_secure_boot_status(id).await?,
+                VzCommand::Display {
+                    command:
+                        VzDisplayCommand::Resize {
+                            id,
+                            width,
+                            height,
+                            display,
+                            ppi,
+                        },
+                } => {
+                    m.vz_display_resize(id, width, height, display, ppi).await?;
+                    vz_display_body(width, height, display, ppi)
+                }
                 VzCommand::CustomVirtio { id, reset: true } => {
                     m.vz_custom_virtio_reset(id).await?;
                     serde_json::json!({"ok": true})
@@ -5912,6 +5977,60 @@ mod agent_cli_tests {
         assert!(!path.exists());
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod vz_display_cli_tests {
+    use super::*;
+
+    fn parse(args: &[&str]) -> Command {
+        let mut full = vec!["fluxvm"];
+        full.extend_from_slice(args);
+        Cli::try_parse_from(full).unwrap().command
+    }
+
+    #[test]
+    fn display_resize_parses_with_defaults() {
+        let id = Uuid::nil().to_string();
+        let Command::Vz {
+            command:
+                VzCommand::Display {
+                    command:
+                        VzDisplayCommand::Resize {
+                            width,
+                            height,
+                            display,
+                            ppi,
+                            ..
+                        },
+                },
+        } = parse(&[
+            "vz", "display", "resize", &id, "--width", "1920", "--height", "1080",
+        ])
+        else {
+            panic!("expected vz display resize");
+        };
+        assert_eq!((width, height, display, ppi), (1920, 1080, 0, None));
+    }
+
+    #[test]
+    fn display_resize_requires_a_size() {
+        let id = Uuid::nil().to_string();
+        assert!(Cli::try_parse_from(["fluxvm", "vz", "display", "resize", &id]).is_err());
+        assert!(
+            Cli::try_parse_from(["fluxvm", "vz", "display", "resize", &id, "--width", "1920"])
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn display_body_omits_unset_ppi() {
+        assert_eq!(
+            vz_display_body(1920, 1080, 0, None),
+            serde_json::json!({"width": 1920, "height": 1080, "display": 0})
+        );
+        assert_eq!(vz_display_body(2560, 1600, 1, Some(220))["ppi"], 220);
     }
 }
 

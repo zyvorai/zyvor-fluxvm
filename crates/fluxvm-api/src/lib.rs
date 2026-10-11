@@ -33,12 +33,12 @@ use uuid::Uuid;
 
 mod grants;
 mod idempotency;
+mod netobs_api;
 mod oidc;
 mod openapi;
 mod rate_limit;
 #[cfg(target_os = "macos")]
 pub mod self_control;
-mod netobs_api;
 pub use netobs_api::install_netobs;
 mod speculate_api;
 mod vz_api;
@@ -5674,7 +5674,10 @@ mod tests {
             assert_eq!(st, StatusCode::OK, "{body}");
             assert!(body.contains("\"enabled\":true"), "{body}");
             if pump.is_some() {
-                assert!(fluxvm_netobs::global_tap().is_some(), "the install published its tap");
+                assert!(
+                    fluxvm_netobs::global_tap().is_some(),
+                    "the install published its tap"
+                );
             }
         }
 
@@ -5707,7 +5710,10 @@ mod tests {
             assert_eq!(st, StatusCode::OK, "{body}");
             assert!(body.contains("netobs-test-vm"), "{body}");
             let (_, body) = call(app(), "GET", "/v1/netobs/flows", "acme", None).await;
-            assert!(!body.contains("netobs-test-vm"), "tenant token saw another VM: {body}");
+            assert!(
+                !body.contains("netobs-test-vm"),
+                "tenant token saw another VM: {body}"
+            );
 
             let (st, body) = call(app(), "GET", "/v1/netobs/summary", "ops", None).await;
             assert_eq!(st, StatusCode::OK);
@@ -5744,6 +5750,49 @@ mod tests {
             )
             .await;
             assert_eq!(st, StatusCode::NOT_FOUND);
+        }
+
+        #[tokio::test]
+        async fn vz_display_resize_is_tenant_scoped_admin_only_and_validated() {
+            let mut auth = tenant_tokens();
+            auth.tokens.push(ApiToken {
+                token: "ro".into(),
+                role: Role::ReadOnly,
+                name: Some("ro".into()),
+                tenant: None,
+            });
+            let m = manager(auth);
+            let mut vm = fixture(BackendKind::Vz, VmStatus::Stopped, false);
+            vm.request.tenant = Some("acme".into());
+            let id = vm.id;
+            m.store.insert(vm).await.unwrap();
+            let uri = format!("/v1/vms/{id}/vz/display");
+            let ok = r#"{"width":1920,"height":1080}"#;
+
+            // Another tenant sees no such VM.
+            let (st, _) = call(router(m.clone()), "POST", &uri, "other", Some(ok)).await;
+            assert_eq!(st, StatusCode::NOT_FOUND);
+            // A read-only token may not change the display.
+            let (st, _) = call(router(m.clone()), "POST", &uri, "ro", Some(ok)).await;
+            assert_eq!(st, StatusCode::FORBIDDEN);
+            // A bad size is rejected before the VM state matters.
+            let (st, body) = call(
+                router(m.clone()),
+                "POST",
+                &uri,
+                "acme",
+                Some(r#"{"width":100,"height":1080}"#),
+            )
+            .await;
+            assert_eq!(st, StatusCode::BAD_REQUEST);
+            assert!(body.contains("width"), "{body}");
+            // The owner reaches the VM; it is not running, so there is nothing to resize.
+            let (st, body) = call(router(m.clone()), "POST", &uri, "acme", Some(ok)).await;
+            assert_eq!(st, StatusCode::BAD_REQUEST);
+            assert!(body.contains("start it first"), "{body}");
+            // Missing required fields never reach the handler.
+            let (st, _) = call(router(m), "POST", &uri, "acme", Some(r#"{"width":1920}"#)).await;
+            assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY);
         }
 
         #[tokio::test]

@@ -8,6 +8,7 @@
 //! * `GET|POST /v1/host/apple/ipsw`
 //! * `GET  /v1/vms/{id}/vz/secure-boot`
 //! * `GET  /v1/vms/{id}/vz/custom-virtio`
+//! * `POST /v1/vms/{id}/vz/display`
 //! * `POST /v1/vms/{id}/vz/custom-virtio/reset`
 //! * `GET  /v1/vms/{id}/vz/usb`
 //! * `GET|POST /v1/vms/{id}/vz/usb/physical`
@@ -36,6 +37,7 @@ pub(crate) fn routes() -> Router<Arc<VmManager>> {
             "/v1/vms/{id}/vz/custom-virtio/reset",
             post(custom_virtio_reset),
         )
+        .route("/v1/vms/{id}/vz/display", post(display_resize))
         .route("/v1/vms/{id}/vz/usb", get(usb_list))
         .route(
             "/v1/vms/{id}/vz/usb/physical",
@@ -75,6 +77,35 @@ async fn custom_virtio_reset(
     require_admin(role)?;
     m.vz_custom_virtio_reset(id).await?;
     Ok(Json(json!({"ok": true})))
+}
+
+#[derive(Deserialize)]
+struct DisplayResize {
+    width: u32,
+    height: u32,
+    #[serde(default)]
+    display: u32,
+    #[serde(default)]
+    ppi: Option<u32>,
+}
+
+/// Resizes a display of a running guest (admin). The tenant guard has already scoped `{id}` to the token's tenant.
+async fn display_resize(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+    Json(b): Json<DisplayResize>,
+) -> ApiResult<Json<Value>> {
+    require_admin(role)?;
+    m.vz_display_resize(id, b.width, b.height, b.display, b.ppi)
+        .await?;
+    Ok(Json(json!({
+        "ok": true,
+        "width": b.width,
+        "height": b.height,
+        "display": b.display,
+        "ppi": b.ppi,
+    })))
 }
 
 async fn usb_list(State(m): State<Arc<VmManager>>, Path(id): Path<Uuid>) -> ApiResult<Json<Value>> {
