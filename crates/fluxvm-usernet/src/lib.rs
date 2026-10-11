@@ -104,7 +104,20 @@ pub struct FlowEvent {
     /// Bytes guest -> remote / remote -> guest, on `close`.
     pub bytes_tx: u64,
     pub bytes_rx: u64,
+    /// On `deny` events: identical denials (same protocol, guest and remote address) that were not reported because
+    /// they arrived within [`DENY_EVENT_INTERVAL`] of the previous event; counted into the next one.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub suppressed: u32,
 }
+
+fn is_zero(n: &u32) -> bool {
+    *n == 0
+}
+
+/// Minimum spacing of identical `deny` events (per protocol + guest + remote address).
+pub const DENY_EVENT_INTERVAL: Duration = Duration::from_secs(1);
+/// Bound on the number of tracked deny keys.
+const MAX_DENY_KEYS: usize = 1024;
 
 /// Where one configured port forward listens (see [`UserNet::forward_status`]).
 #[derive(Clone, Debug, Serialize, serde::Deserialize, PartialEq, Eq)]
@@ -364,6 +377,7 @@ impl UserNet {
             tap: self.tap,
             tap_version: self.tap_version,
             pending_tap: RefCell::new(None),
+            deny_seen: RefCell::new(HashMap::new()),
             ip_id: Cell::new(1),
             reasm: frag::Reassembler::default(),
             icmp: HashMap::new(),
@@ -511,6 +525,8 @@ pub(crate) struct Engine {
     tap_version: u8,
     /// The guest frame currently being processed, held back until its verdict is known.
     pending_tap: RefCell<Option<Vec<u8>>>,
+    /// Last published `deny` per (proto, guest, remote): (when, suppressed since).
+    deny_seen: RefCell<HashMap<DenyKey, (Instant, u32)>>,
     ip_id: Cell<u16>,
     reasm: frag::Reassembler,
     icmp: HashMap<icmp::IcmpKey, icmp::IcmpFlow>,
@@ -519,6 +535,33 @@ pub(crate) struct Engine {
     last_ra: Option<Instant>,
     /// The guest's IPv6 address as last seen as a packet source (target of `GuestFamily::V6` forwards).
     pub(crate) guest_ip6: Option<Ipv6Addr>,
+}
+
+type DenyKey = (Proto, SocketAddr, SocketAddr);
+
+/// Decides whether a `deny` event for `key` is published now. `Some(n)`: publish it, `n` identical denials were
+/// suppressed since the previous one. `None`: within [`DENY_EVENT_INTERVAL`] of the last event, counted.
+fn deny_gate(seen: &mut HashMap<DenyKey, (Instant, u32)>, key: DenyKey, now: Instant) -> Option<u32> {
+    if let Some((last, n)) = seen.get_mut(&key) {
+        if now.saturating_duration_since(*last) < DENY_EVENT_INTERVAL {
+            *n = n.saturating_add(1);
+            return None;
+        }
+        let suppressed = *n;
+        *last = now;
+        *n = 0;
+        return Some(suppressed);
+    }
+    if seen.len() >= MAX_DENY_KEYS {
+        // Entries older than the interval carry no state that still suppresses anything, except their counts;
+        // those are dropped (a few suppressed events go unreported) to keep the table bounded.
+        seen.retain(|_, (last, _)| now.saturating_duration_since(*last) < DENY_EVENT_INTERVAL);
+        if seen.len() >= MAX_DENY_KEYS {
+            seen.clear();
+        }
+    }
+    seen.insert(key, (now, 0));
+    Some(0)
 }
 
 fn now_ms() -> u64 {
@@ -766,6 +809,7 @@ impl Engine {
             name: None,
             bytes_tx: 0,
             bytes_rx: 0,
+            suppressed: 0,
         }
     }
 
@@ -793,15 +837,19 @@ impl Engine {
 
     /// A policy denial: publishes the event and marks the guest frame being processed as denied.
     fn deny_from(&self, proto: Proto, guest: SocketAddr, rip: IpAddr, rport: u16, reason: &str) {
+        // The frame is denied (and tapped as such) every time; only the event stream is rate limited.
         self.tap_commit(TAP_VERDICT_DENIED);
-        let mut e = self.log(
-            FlowKind::Deny,
-            proto,
-            Direction::Outbound,
-            guest,
-            SocketAddr::new(rip, rport),
-        );
+        let remote = SocketAddr::new(rip, rport);
+        let Some(suppressed) = deny_gate(
+            &mut self.deny_seen.borrow_mut(),
+            (proto, guest, remote),
+            Instant::now(),
+        ) else {
+            return;
+        };
+        let mut e = self.log(FlowKind::Deny, proto, Direction::Outbound, guest, remote);
         e.reason = Some(reason.to_string());
+        e.suppressed = suppressed;
         self.publish(e);
     }
 

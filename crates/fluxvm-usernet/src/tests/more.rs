@@ -300,13 +300,15 @@ async fn icmp_echo_policy_and_rate_limit() {
             .await;
     }
     tokio::time::sleep(Duration::from_millis(400)).await;
+    // Identical denials are collapsed into one event (the rest are counted in `suppressed` of the next one), so
+    // the burst shows up as a single rate-limit event.
     let mut limited = 0;
     while let Ok(e) = r.log.try_recv() {
         if e.kind == FlowKind::Deny && e.reason.as_deref() == Some("rate-limit") {
-            limited += 1;
+            limited += 1 + e.suppressed;
         }
     }
-    assert!(limited >= 7, "expected most requests rate limited, saw {limited}");
+    assert!((1..=2).contains(&limited), "expected one collapsed rate-limit event, saw {limited}");
 }
 
 #[tokio::test]
@@ -1091,6 +1093,56 @@ async fn udp_forward_ipv6_both_ways() {
     r.guest.send_udp(cfg.gateway_ip6(), 5001, sport, b"back6").await;
     let (n, from) = timeout(Duration::from_secs(5), host.recv_from(&mut buf)).await.unwrap().unwrap();
     assert_eq!((&buf[..n], from), (&b"back6"[..], r.fwd[0]));
+}
+
+#[test]
+fn deny_gate_rate_limits_per_tuple_and_counts_suppressed() {
+    let sa = |s: &str| s.parse::<SocketAddr>().unwrap();
+    let k1 = (Proto::Udp, sa("10.0.2.15:4000"), sa("10.1.1.1:53"));
+    let k2 = (Proto::Udp, sa("10.0.2.15:4001"), sa("10.1.1.1:53"));
+    let mut seen = HashMap::new();
+    let t0 = Instant::now();
+    assert_eq!(deny_gate(&mut seen, k1, t0), Some(0));
+    assert_eq!(deny_gate(&mut seen, k1, t0 + Duration::from_millis(10)), None);
+    assert_eq!(deny_gate(&mut seen, k1, t0 + Duration::from_millis(999)), None);
+    // A different tuple is independent.
+    assert_eq!(deny_gate(&mut seen, k2, t0 + Duration::from_millis(20)), Some(0));
+    // After the interval the next event carries the count.
+    assert_eq!(deny_gate(&mut seen, k1, t0 + Duration::from_millis(1000)), Some(2));
+    assert_eq!(deny_gate(&mut seen, k1, t0 + Duration::from_millis(1500)), None);
+    assert_eq!(deny_gate(&mut seen, k1, t0 + Duration::from_millis(2100)), Some(1));
+    assert_eq!(deny_gate(&mut seen, k1, t0 + Duration::from_millis(3200)), Some(0));
+    // The table stays bounded.
+    for i in 0..(MAX_DENY_KEYS as u16 + 50) {
+        let k = (Proto::Tcp, sa("10.0.2.15:1"), SocketAddr::new(Ipv4Addr::new(9, 9, 9, 9).into(), i));
+        deny_gate(&mut seen, k, t0 + Duration::from_secs(10));
+    }
+    assert!(seen.len() <= MAX_DENY_KEYS);
+}
+
+#[tokio::test]
+async fn repeated_denials_are_rate_limited_but_every_frame_is_still_denied() {
+    let mut r = start(UserNetConfig::default()); // 10.0.0.0/8 is private: denied
+    let g = &r.guest;
+    for _ in 0..20 {
+        g.send_udp(Ipv4Addr::new(10, 9, 9, 9), 4100, 9, b"x").await;
+    }
+    let first = next_event(&mut r.log, FlowKind::Deny).await;
+    assert_eq!((first.suppressed, first.reason.as_deref()), (0, Some("private-range")));
+    // No second event inside the interval.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(r.log.try_recv().is_err(), "burst must not produce more events");
+    // After the interval the next denial reports how many were swallowed.
+    tokio::time::sleep(DENY_EVENT_INTERVAL).await;
+    g.send_udp(Ipv4Addr::new(10, 9, 9, 9), 4100, 9, b"x").await;
+    let next = next_event(&mut r.log, FlowKind::Deny).await;
+    assert_eq!(next.suppressed, 19);
+    let json = serde_json::to_string(&next).unwrap();
+    assert!(json.contains("\"suppressed\":19"));
+    assert!(!serde_json::to_string(&first).unwrap().contains("suppressed"));
+    // A different 5-tuple is reported immediately.
+    g.send_udp(Ipv4Addr::new(10, 9, 9, 9), 4101, 9, b"x").await;
+    assert_eq!(next_event(&mut r.log, FlowKind::Deny).await.guest.port(), 4101);
 }
 
 #[tokio::test]

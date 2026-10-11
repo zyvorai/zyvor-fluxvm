@@ -655,9 +655,11 @@ mod tests {
             guest_addr: addr.map(|a| a.parse().unwrap()),
             ..PortForward::new(Proto::Tcp, "::1".parse().unwrap(), 0, 80)
         };
-        let mut c = UserNetConfig::default();
+        let mut c = UserNetConfig {
+            forwards: vec![fwd(GuestFamily::V4, None)],
+            ..Default::default()
+        };
         // v6 host listener to the (default) v4 guest is fine.
-        c.forwards = vec![fwd(GuestFamily::V4, None)];
         assert!(c.validate().is_ok());
         c.forwards = vec![fwd(GuestFamily::V4, Some("10.0.2.15"))];
         assert!(c.validate().is_ok());
