@@ -94,7 +94,11 @@ pub struct NetobsConfig {
 
 impl Default for NetobsConfig {
     fn default() -> Self {
-        Self { enabled: true, queue_frames: 4096, snaplen: 2048 }
+        Self {
+            enabled: true,
+            queue_frames: 4096,
+            snaplen: 2048,
+        }
     }
 }
 
@@ -1199,7 +1203,10 @@ mod netobs_config_tests {
         assert!(on.enabled_with_env(Some("1")));
         assert!(!on.enabled_with_env(Some("0")));
         assert!(!on.enabled_with_env(Some(" Off ")));
-        let off = NetobsConfig { enabled: false, ..Default::default() };
+        let off = NetobsConfig {
+            enabled: false,
+            ..Default::default()
+        };
         assert!(!off.enabled_with_env(Some("1")));
     }
 }

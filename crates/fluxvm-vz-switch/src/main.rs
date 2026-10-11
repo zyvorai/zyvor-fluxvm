@@ -13,8 +13,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-const USAGE: &str =
-    "usage: fluxvm-vz-switch --socket PATH [--idle-exit-secs N] [--netobs-socket PATH [--network NAME]]";
+const USAGE: &str = "usage: fluxvm-vz-switch --socket PATH [--idle-exit-secs N] [--netobs-socket PATH [--network NAME]]";
 
 fn main() {
     let mut socket: Option<PathBuf> = None;
@@ -42,7 +41,10 @@ fn main() {
     let Some(socket) = socket else { usage() };
     if let Some(path) = netobs_socket {
         let network = network.unwrap_or_else(|| {
-            socket.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "private".to_string())
+            socket
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "private".to_string())
         });
         start_export(&path, &network);
     }

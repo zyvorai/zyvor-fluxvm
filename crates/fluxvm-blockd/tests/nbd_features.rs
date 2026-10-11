@@ -23,9 +23,15 @@ struct Client {
 }
 
 enum Reply {
-    Simple { err: u32 },
+    Simple {
+        err: u32,
+    },
     /// Structured: chunks as (offset, data), plus error if any.
-    Structured { chunks: Vec<(u64, Vec<u8>)>, err: Option<u32>, frames: usize },
+    Structured {
+        chunks: Vec<(u64, Vec<u8>)>,
+        err: Option<u32>,
+        frames: usize,
+    },
 }
 
 impl Client {
@@ -124,15 +130,23 @@ impl Client {
             self.s.read_exact(&mut p).await.unwrap();
             frames += 1;
             match ty {
-                REPLY_TYPE_OFFSET_DATA => {
-                    chunks.push((u64::from_be_bytes(p[0..8].try_into().unwrap()), p[8..].to_vec()))
-                }
+                REPLY_TYPE_OFFSET_DATA => chunks.push((
+                    u64::from_be_bytes(p[0..8].try_into().unwrap()),
+                    p[8..].to_vec(),
+                )),
                 REPLY_TYPE_ERROR => err = Some(u32::from_be_bytes(p[0..4].try_into().unwrap())),
                 REPLY_TYPE_NONE => {}
                 t => panic!("unexpected chunk type {t}"),
             }
             if flags & REPLY_FLAG_DONE != 0 {
-                return (handle, Reply::Structured { chunks, err, frames });
+                return (
+                    handle,
+                    Reply::Structured {
+                        chunks,
+                        err,
+                        frames,
+                    },
+                );
             }
             // Next chunk begins with a fresh magic.
             assert_eq!(self.s.read_u32().await.unwrap(), STRUCTURED_REPLY_MAGIC);
@@ -184,14 +198,27 @@ async fn structured_read_chunks_dont_fragment_and_errors() {
     assert_eq!(size, 8 << 20);
     assert!(flags & FLAG_SEND_DF != 0);
 
-    let data: Vec<u8> = (0..(3 << 20) + 17u32).map(|i| ((i * 31) >> 3) as u8).collect();
-    assert_eq!(c.simple_ok(CMD_WRITE, 0, 4096, data.len() as u32, &data).await, 0);
+    let data: Vec<u8> = (0..(3 << 20) + 17u32)
+        .map(|i| ((i * 31) >> 3) as u8)
+        .collect();
+    assert_eq!(
+        c.simple_ok(CMD_WRITE, 0, 4096, data.len() as u32, &data)
+            .await,
+        0
+    );
 
     // Fragmented: >1 MiB split into several OFFSET_DATA chunks, in order.
     let h = c.send(0, CMD_READ, 4096, data.len() as u32, &[]).await;
     let (rh, r) = c.recv().await;
     assert_eq!(rh, h);
-    let Reply::Structured { chunks, err, frames } = r else { panic!() };
+    let Reply::Structured {
+        chunks,
+        err,
+        frames,
+    } = r
+    else {
+        panic!()
+    };
     assert!(err.is_none());
     assert!(frames >= 4, "{frames}");
     let mut got = Vec::new();
@@ -202,17 +229,26 @@ async fn structured_read_chunks_dont_fragment_and_errors() {
     assert_eq!(got, data);
 
     // DF: exactly one chunk.
-    let h = c.send(CMDF_DF, CMD_READ, 4096, data.len() as u32, &[]).await;
+    let h = c
+        .send(CMDF_DF, CMD_READ, 4096, data.len() as u32, &[])
+        .await;
     let (rh, r) = c.recv().await;
     assert_eq!(rh, h);
-    let Reply::Structured { chunks, frames, .. } = r else { panic!() };
-    assert_eq!((frames, chunks.len(), chunks[0].1.len()), (1, 1, data.len()));
+    let Reply::Structured { chunks, frames, .. } = r else {
+        panic!()
+    };
+    assert_eq!(
+        (frames, chunks.len(), chunks[0].1.len()),
+        (1, 1, data.len())
+    );
 
     // Error is a structured ERROR chunk.
     let h = c.send(0, CMD_READ, 8 << 20, 1, &[]).await;
     let (rh, r) = c.recv().await;
     assert_eq!(rh, h);
-    let Reply::Structured { err, chunks, .. } = r else { panic!() };
+    let Reply::Structured { err, chunks, .. } = r else {
+        panic!()
+    };
     assert_eq!(err, Some(EINVAL));
     assert!(chunks.is_empty());
 
@@ -272,7 +308,10 @@ impl BlockBackend for Probe {
         r
     }
     fn flush(&self) -> io::Result<()> {
-        self.flushes.lock().unwrap().push(self.writes_done.load(Ordering::SeqCst));
+        self.flushes
+            .lock()
+            .unwrap()
+            .push(self.writes_done.load(Ordering::SeqCst));
         Ok(())
     }
     fn write_zeroes(&self, off: u64, len: u64) -> io::Result<()> {
@@ -316,8 +355,15 @@ async fn requests_run_in_parallel_and_replies_match_by_handle() {
         assert!(seen.contains_key(&h));
     }
     let el = t.elapsed();
-    assert!(el < Duration::from_millis(8 * 150 - 200), "not parallel: {el:?}");
-    assert!(p.max.load(Ordering::SeqCst) >= 4, "max concurrency {}", p.max.load(Ordering::SeqCst));
+    assert!(
+        el < Duration::from_millis(8 * 150 - 200),
+        "not parallel: {el:?}"
+    );
+    assert!(
+        p.max.load(Ordering::SeqCst) >= 4,
+        "max concurrency {}",
+        p.max.load(Ordering::SeqCst)
+    );
 }
 
 #[tokio::test]
@@ -349,10 +395,21 @@ async fn flush_is_a_barrier_and_fua_flushes() {
     }
     let fpos = order.iter().position(|h| *h == fh).unwrap();
     for w in &write_handles {
-        assert!(order.iter().position(|h| h == w).unwrap() < fpos, "write after flush: {order:?}");
+        assert!(
+            order.iter().position(|h| h == w).unwrap() < fpos,
+            "write after flush: {order:?}"
+        );
     }
-    assert_eq!(order.iter().position(|h| *h == rh).unwrap(), 5, "read must follow flush");
-    assert_eq!(p.flushes.lock().unwrap().clone(), vec![4], "flush saw all 4 writes");
+    assert_eq!(
+        order.iter().position(|h| *h == rh).unwrap(),
+        5,
+        "read must follow flush"
+    );
+    assert_eq!(
+        p.flushes.lock().unwrap().clone(),
+        vec![4],
+        "flush saw all 4 writes"
+    );
     let rd = read_data.unwrap();
     assert_eq!(&rd[0..8], &[0u8; 8]);
     assert_eq!(&rd[24..32], &[3u8; 8]);
@@ -401,7 +458,10 @@ fn cli_resize_rebase_branch_encrypted() {
         let o = CowBackend::create_opts(
             &ov,
             &p.join("a/base.img"),
-            &fluxvm_blockd::CreateOptions { size: None, cipher: Some(cipher.clone()) },
+            &fluxvm_blockd::CreateOptions {
+                size: None,
+                cipher: Some(cipher.clone()),
+            },
         )
         .unwrap();
         o.write_at(5, b"cli").unwrap();
@@ -411,7 +471,11 @@ fn cli_resize_rebase_branch_encrypted() {
         .args(["resize", "--overlay", ov.to_str().unwrap(), "--size", "2T"])
         .output()
         .unwrap();
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     assert!(String::from_utf8_lossy(&out.stdout).contains("rewritten"));
     let out = bin()
         .args(["resize", "--overlay", ov.to_str().unwrap(), "--size", "1M"])
@@ -427,26 +491,49 @@ fn cli_resize_rebase_branch_encrypted() {
         .arg(p.join("b/base.img"))
         .output()
         .unwrap();
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 
     // Branch needs the key for an encrypted parent and passes it on.
     let child = p.join("a/c.ovl");
     let out = bin()
-        .args(["branch", "--from", ov.to_str().unwrap(), "--to", child.to_str().unwrap()])
+        .args([
+            "branch",
+            "--from",
+            ov.to_str().unwrap(),
+            "--to",
+            child.to_str().unwrap(),
+        ])
         .env_remove("FLUXVM_BLOCKD_KEY")
         .output()
         .unwrap();
     assert!(!out.status.success());
     assert!(!child.exists());
     let out = bin()
-        .args(["branch", "--from", ov.to_str().unwrap(), "--to", child.to_str().unwrap()])
+        .args([
+            "branch",
+            "--from",
+            ov.to_str().unwrap(),
+            "--to",
+            child.to_str().unwrap(),
+        ])
         .args(["--key-file", key.to_str().unwrap()])
         .output()
         .unwrap();
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let c = CowBackend::open_with(
         &child,
-        &fluxvm_blockd::OpenOptions { key: Some(cipher), ..Default::default() },
+        &fluxvm_blockd::OpenOptions {
+            key: Some(cipher),
+            ..Default::default()
+        },
     )
     .unwrap();
     assert!(c.is_encrypted());

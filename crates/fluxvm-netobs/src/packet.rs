@@ -245,7 +245,11 @@ fn parse_ipv4<'a>(b: &'a [u8], pkt: &mut Packet<'a>) {
     let total = be16(b, 2).unwrap_or(0) as usize;
     // total == 0 happens with segmentation offload; fall back to the frame length. A total smaller than the header
     // is a lie; trust the frame.
-    let end = if total >= ihl { total.min(b.len()) } else { b.len() };
+    let end = if total >= ihl {
+        total.min(b.len())
+    } else {
+        b.len()
+    };
     if total > b.len() {
         pkt.truncated = true;
     }
@@ -275,7 +279,11 @@ fn parse_ipv6<'a>(b: &'a [u8], pkt: &mut Packet<'a>) {
         return;
     }
     let plen = be16(b, 4).unwrap_or(0) as usize;
-    let end = if plen == 0 { b.len() } else { (40 + plen).min(b.len()) };
+    let end = if plen == 0 {
+        b.len()
+    } else {
+        (40 + plen).min(b.len())
+    };
     if plen != 0 && 40 + plen > b.len() {
         pkt.truncated = true;
     }
@@ -399,7 +407,11 @@ fn parse_l4<'a>(proto: u8, b: &'a [u8], pkt: &mut Packet<'a>) {
             }
             let len = u16::from_be_bytes([b[4], b[5]]);
             // Honour the UDP length when plausible, so Ethernet padding is not mistaken for payload.
-            let end = if (len as usize) >= 8 { (len as usize).min(b.len()) } else { b.len() };
+            let end = if (len as usize) >= 8 {
+                (len as usize).min(b.len())
+            } else {
+                b.len()
+            };
             pkt.l4 = L4::Udp(Udp {
                 sport: u16::from_be_bytes([b[0], b[1]]),
                 dport: u16::from_be_bytes([b[2], b[3]]),
@@ -413,7 +425,13 @@ fn parse_l4<'a>(proto: u8, b: &'a [u8], pkt: &mut Packet<'a>) {
                 return;
             }
             let v6 = proto == IPPROTO_ICMPV6;
-            let mut icmp = Icmp { v6, kind: b[0], code: b[1], id: 0, seq: 0 };
+            let mut icmp = Icmp {
+                v6,
+                kind: b[0],
+                code: b[1],
+                id: 0,
+                seq: 0,
+            };
             if icmp.is_echo_request() || icmp.is_echo_reply() {
                 match (be16(b, 4), be16(b, 6)) {
                     (Some(id), Some(seq)) => {
@@ -513,10 +531,31 @@ mod tests {
     #[test]
     fn tcp_syn_with_options() {
         let mut t = vec![
-            0x30, 0x39, 0x01, 0xbb, 0, 0, 0, 1, 0, 0, 0, 0, 7 << 4, TCP_SYN, 0xff, 0xff, 0, 0, 0, 0,
+            0x30,
+            0x39,
+            0x01,
+            0xbb,
+            0,
+            0,
+            0,
+            1,
+            0,
+            0,
+            0,
+            0,
+            7 << 4,
+            TCP_SYN,
+            0xff,
+            0xff,
+            0,
+            0,
+            0,
+            0,
         ];
         t.extend_from_slice(&[2, 4, 0x05, 0xb4, 1, 3, 3, 7]);
-        let mut ip = vec![0x45, 0, 0, 0, 0, 0, 0, 0, 64, 6, 0, 0, 10, 0, 0, 1, 10, 0, 0, 2];
+        let mut ip = vec![
+            0x45, 0, 0, 0, 0, 0, 0, 0, 64, 6, 0, 0, 10, 0, 0, 1, 10, 0, 0, 2,
+        ];
         let total = (20 + t.len()) as u16;
         ip[2..4].copy_from_slice(&total.to_be_bytes());
         ip.extend_from_slice(&t);
@@ -579,7 +618,26 @@ mod tests {
     #[test]
     fn ipv6_with_hop_by_hop_and_tcp() {
         let mut t = vec![
-            0x1f, 0x90, 0x00, 0x50, 0, 0, 0, 9, 0, 0, 0, 0, 5 << 4, TCP_ACK, 0, 10, 0, 0, 0, 0,
+            0x1f,
+            0x90,
+            0x00,
+            0x50,
+            0,
+            0,
+            0,
+            9,
+            0,
+            0,
+            0,
+            0,
+            5 << 4,
+            TCP_ACK,
+            0,
+            10,
+            0,
+            0,
+            0,
+            0,
         ];
         t.extend_from_slice(b"hi");
         let mut ip = vec![0x60, 0, 0, 0, 0, 0, 0, 64];
@@ -610,7 +668,15 @@ mod tests {
     #[test]
     fn truncated_frames_never_panic() {
         let good = [
-            tcp_v4((A, 1000), (B, 80), 1, 0, TCP_SYN, 100, b"GET / HTTP/1.1\r\n"),
+            tcp_v4(
+                (A, 1000),
+                (B, 80),
+                1,
+                0,
+                TCP_SYN,
+                100,
+                b"GET / HTTP/1.1\r\n",
+            ),
             udp_v4((A, 1000), (B, 53), &[0u8; 40]),
             icmp_echo_v4(A, B, false, 1, 1),
         ];

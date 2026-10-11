@@ -46,7 +46,9 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
     };
     // SAFETY: the caller hands this process ownership of the descriptor.
     let owned = unsafe { OwnedFd::from_raw_fd(fd) };
-    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
     rt.block_on(async move {
         let mut net = UserNet::from_fd(cfg, owned)?;
         if let Some(t) = tap_fd {

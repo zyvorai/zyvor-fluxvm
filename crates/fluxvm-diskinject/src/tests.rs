@@ -50,7 +50,11 @@ fn mke2fs(img: &Path, size: &str, args: &[&str], populate: Option<&Path>) {
     }
     c.arg(img).arg(size);
     let o = c.output().unwrap();
-    assert!(o.status.success(), "mke2fs failed: {}", String::from_utf8_lossy(&o.stderr));
+    assert!(
+        o.status.success(),
+        "mke2fs failed: {}",
+        String::from_utf8_lossy(&o.stderr)
+    );
 }
 
 fn e2fsck(img: &Path) -> (bool, String) {
@@ -100,7 +104,9 @@ fn populate(dir: &Path, etc_files: usize) {
     fs::write(dir.join("etc/fstab"), "# fstab\n").unwrap();
     for i in 0..etc_files {
         fs::write(
-            dir.join(format!("etc/some-reasonably-long-config-file-name-{i:05}.conf")),
+            dir.join(format!(
+                "etc/some-reasonably-long-config-file-name-{i:05}.conf"
+            )),
             format!("k={i}\n"),
         )
         .unwrap();
@@ -125,7 +131,10 @@ fn full_scenario(img: &Path) {
     let rep = inject_agent_token(img, "s3cret-token").unwrap();
     assert!(rep.files[0].created);
     assert_fsck_clean(img);
-    assert_eq!(cat(img, fluxvm_guest_protocol::TOKEN_FILE_PATH), b"s3cret-token");
+    assert_eq!(
+        cat(img, fluxvm_guest_protocol::TOKEN_FILE_PATH),
+        b"s3cret-token"
+    );
     let st = stat(img, fluxvm_guest_protocol::TOKEN_FILE_PATH);
     assert!(st.contains("Mode:  0600"), "{st}");
     assert!(st.contains("User:     0   Group:     0"), "{st}");
@@ -160,7 +169,9 @@ fn full_scenario(img: &Path) {
         img,
         &[
             InjectFile::new("/var/lib/fluxvm/state/x", Vec::new()),
-            InjectFile::new("/opt/a/b/c/d.txt", b"d".to_vec()).owner(1000, 1000).mode(0o640),
+            InjectFile::new("/opt/a/b/c/d.txt", b"d".to_vec())
+                .owner(1000, 1000)
+                .mode(0o640),
         ],
     )
     .unwrap();
@@ -182,7 +193,14 @@ fn ext4_1k_blocks_no_csum_no_64bit() {
     need_tools!();
     let (_td, img) = setup(
         "32M",
-        &["-b", "1024", "-O", "^metadata_csum,^64bit,^orphan_file", "-I", "256"],
+        &[
+            "-b",
+            "1024",
+            "-O",
+            "^metadata_csum,^64bit,^orphan_file",
+            "-I",
+            "256",
+        ],
         20,
     );
     full_scenario(&img);
@@ -195,10 +213,18 @@ fn refuses_legacy_uninit_bg() {
     let tree = td.path().join("tree");
     populate(&tree, 2);
     let img = td.path().join("u.img");
-    mke2fs(&img, "32M", &["-O", "^metadata_csum,uninit_bg,^orphan_file"], Some(&tree));
+    mke2fs(
+        &img,
+        "32M",
+        &["-O", "^metadata_csum,uninit_bg,^orphan_file"],
+        Some(&tree),
+    );
     let before = sha(&img);
     let err = inject_agent_token(&img, "t").unwrap_err();
-    assert!(matches!(err, Error::NoRoot(ref m) if m.contains("uninit_bg")), "{err}");
+    assert!(
+        matches!(err, Error::NoRoot(ref m) if m.contains("uninit_bg")),
+        "{err}"
+    );
     assert_eq!(before, sha(&img));
 }
 
@@ -221,7 +247,12 @@ fn multi_group_lazy_init() {
     need_tools!();
     let (_td, img) = setup(
         "512M",
-        &["-E", "lazy_itable_init=1,lazy_journal_init=1", "-O", "metadata_csum,64bit,flex_bg"],
+        &[
+            "-E",
+            "lazy_itable_init=1,lazy_journal_init=1",
+            "-O",
+            "metadata_csum,64bit,flex_bg",
+        ],
         50,
     );
     full_scenario(&img);
@@ -242,12 +273,26 @@ fn htree_directory_insertions() {
     assert!(stat(&img, "/etc").contains("Flags: 0x81000"));
     assert_fsck_clean(&img);
     let files: Vec<InjectFile> = (0..60)
-        .map(|i| InjectFile::new(format!("/etc/injected-file-with-a-long-name-{i:03}"), format!("{i}\n").into_bytes()))
+        .map(|i| {
+            InjectFile::new(
+                format!("/etc/injected-file-with-a-long-name-{i:03}"),
+                format!("{i}\n").into_bytes(),
+            )
+        })
         .collect();
     inject_files(&img, &files).unwrap();
     assert_fsck_clean(&img);
-    assert_eq!(cat(&img, "/etc/injected-file-with-a-long-name-059"), b"59\n");
-    assert_eq!(cat(&img, "/etc/some-reasonably-long-config-file-name-00399.conf"), b"k=399\n");
+    assert_eq!(
+        cat(&img, "/etc/injected-file-with-a-long-name-059"),
+        b"59\n"
+    );
+    assert_eq!(
+        cat(
+            &img,
+            "/etc/some-reasonably-long-config-file-name-00399.conf"
+        ),
+        b"k=399\n"
+    );
 }
 
 #[test]
@@ -257,7 +302,12 @@ fn directory_growth_new_block() {
     // Far more entries than fit in the single existing block of /newdir
     // (created fresh, 1 block, 4 KiB): ~150 entries of ~40 bytes.
     let files: Vec<InjectFile> = (0..300)
-        .map(|i| InjectFile::new(format!("/newdir/entry-with-long-padding-name-{i:04}.txt"), vec![b'a'; 10]))
+        .map(|i| {
+            InjectFile::new(
+                format!("/newdir/entry-with-long-padding-name-{i:04}.txt"),
+                vec![b'a'; 10],
+            )
+        })
         .collect();
     let rep = inject_files(&img, &files).unwrap();
     assert_eq!(rep.dirs_created, vec!["/newdir".to_string()]);
@@ -304,7 +354,10 @@ fn gpt_partitioned_disk() {
     let extracted = td.path().join("extracted.img");
     std::fs::write(&extracted, &out[off as usize..off as usize + pdata.len()]).unwrap();
     assert_fsck_clean(&extracted);
-    assert_eq!(cat(&extracted, fluxvm_guest_protocol::TOKEN_FILE_PATH), b"gpt-token");
+    assert_eq!(
+        cat(&extracted, fluxvm_guest_protocol::TOKEN_FILE_PATH),
+        b"gpt-token"
+    );
     // nothing outside the partition changed
     assert_eq!(&out[..off as usize], &disk[..off as usize]);
     assert_eq!(
@@ -325,7 +378,10 @@ fn refuses_needs_recovery_and_leaves_image_untouched() {
     assert!(o.status.success());
     let before = sha(&img);
     let err = inject_agent_token(&img, "t").unwrap_err();
-    assert!(matches!(err, Error::NoRoot(ref m) if m.contains("recovery")), "{err}");
+    assert!(
+        matches!(err, Error::NoRoot(ref m) if m.contains("recovery")),
+        "{err}"
+    );
     assert_eq!(before, sha(&img));
 }
 
@@ -334,7 +390,12 @@ fn refuses_unsupported_feature_quota() {
     need_tools!();
     let td = tempfile::tempdir().unwrap();
     let img = td.path().join("q.img");
-    mke2fs(&img, "32M", &["-O", "quota", "-E", "quotatype=usrquota"], None);
+    mke2fs(
+        &img,
+        "32M",
+        &["-O", "quota", "-E", "quotatype=usrquota"],
+        None,
+    );
     let before = sha(&img);
     let err = inject_agent_token(&img, "t").unwrap_err();
     assert!(matches!(err, Error::NoRoot(_)), "{err}");
@@ -365,8 +426,14 @@ fn refuses_non_root_disk_and_bad_input() {
     let td = tempfile::tempdir().unwrap();
     let img = td.path().join("noetc.img");
     mke2fs(&img, "16M", &[], None);
-    assert!(matches!(inject_agent_token(&img, "t"), Err(Error::NoRoot(_))));
-    assert!(matches!(set_hostname(&img, "bad host"), Err(Error::Invalid(_))));
+    assert!(matches!(
+        inject_agent_token(&img, "t"),
+        Err(Error::NoRoot(_))
+    ));
+    assert!(matches!(
+        set_hostname(&img, "bad host"),
+        Err(Error::Invalid(_))
+    ));
     assert!(matches!(
         inject_files(&img, &[InjectFile::new("relative", vec![])]),
         Err(Error::Invalid(_))
@@ -382,7 +449,11 @@ fn symlinked_parent_is_followed() {
     std::os::unix::fs::symlink("usr/bin", tree.join("bin")).unwrap();
     let img = td.path().join("r.img");
     mke2fs(&img, "32M", &[], Some(&tree));
-    inject_files(&img, &[InjectFile::new("/bin/tool", b"#!/bin/sh\n".to_vec()).mode(0o755)]).unwrap();
+    inject_files(
+        &img,
+        &[InjectFile::new("/bin/tool", b"#!/bin/sh\n".to_vec()).mode(0o755)],
+    )
+    .unwrap();
     assert_fsck_clean(&img);
     assert_eq!(cat(&img, "/usr/bin/tool"), b"#!/bin/sh\n");
 }

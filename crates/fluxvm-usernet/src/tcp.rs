@@ -262,7 +262,11 @@ impl TcpConn {
     /// Record guest SACK blocks (only ranges within `(snd_una, snd_max]` are meaningful).
     fn sack_update(&mut self, blocks: &[(u32, u32)]) {
         for &(s, e) in blocks {
-            let s = if seq_lt(s, self.snd_una) { self.snd_una } else { s };
+            let s = if seq_lt(s, self.snd_una) {
+                self.snd_una
+            } else {
+                s
+            };
             if !seq_lt(s, e) || seq_lt(self.snd_max, e) {
                 continue;
             }
@@ -343,7 +347,9 @@ impl TcpConn {
     fn retransmit_holes(&mut self, budget: usize, out: &mut Vec<TcpOut>) -> usize {
         let mut sent = 0;
         while sent < budget {
-            let Some((s, e)) = self.next_hole() else { break };
+            let Some((s, e)) = self.next_hole() else {
+                break;
+            };
             if !self.retransmit_range(s, e, out) {
                 break;
             }
@@ -372,9 +378,7 @@ impl TcpConn {
             .map(|(s, d)| (*s, s.wrapping_add(d.len() as u32)))
             .collect();
         if let Some(l) = self.last_ooo
-            && let Some(i) = v
-                .iter()
-                .position(|(s, e)| !seq_lt(l, *s) && seq_lt(l, *e))
+            && let Some(i) = v.iter().position(|(s, e)| !seq_lt(l, *s) && seq_lt(l, *e))
         {
             v.swap(0, i);
         }
@@ -418,7 +422,8 @@ impl TcpConn {
 
     /// Data bytes between snd_una and snd_nxt (the retransmission-rewound send point).
     fn data_in_flight(&self) -> usize {
-        (self.snd_nxt.wrapping_sub(self.snd_una) as usize).saturating_sub(usize::from(self.fin_sent))
+        (self.snd_nxt.wrapping_sub(self.snd_una) as usize)
+            .saturating_sub(usize::from(self.fin_sent))
     }
 
     /// Data bytes ever sent and not yet acknowledged.
@@ -970,7 +975,12 @@ mod tests {
     fn data_both_ways_and_close() {
         let (mut c, now) = established();
         let mut out = Vec::new();
-        let r = c.on_segment(&seg(101, c.snd_nxt, ACK | PSH, b"hello"), true, now, &mut out);
+        let r = c.on_segment(
+            &seg(101, c.snd_nxt, ACK | PSH, b"hello"),
+            true,
+            now,
+            &mut out,
+        );
         assert_eq!(r.data.as_deref(), Some(&b"hello"[..]));
         assert_eq!(out.last().unwrap().ack, 106);
         out.clear();
@@ -1125,7 +1135,10 @@ mod tests {
             }
         }
         assert!(c.in_recovery());
-        let r = out.iter().find(|o| o.seq == una).expect("fast retransmit of the first segment");
+        let r = out
+            .iter()
+            .find(|o| o.seq == una)
+            .expect("fast retransmit of the first segment");
         assert_eq!(r.payload.len(), 1000);
         assert_eq!(c.ssthresh(), 5_000);
         assert_eq!(c.cwnd(), 5_000 + 3_000);
@@ -1138,7 +1151,11 @@ mod tests {
         out.clear();
         c.on_segment(&ack_at(&c, max), true, now, &mut out);
         assert!(!c.in_recovery());
-        assert!(c.cwnd() <= 5_000 + 1000 && c.cwnd() >= 1000, "cwnd {}", c.cwnd());
+        assert!(
+            c.cwnd() <= 5_000 + 1000 && c.cwnd() >= 1000,
+            "cwnd {}",
+            c.cwnd()
+        );
     }
 
     #[test]
@@ -1156,7 +1173,10 @@ mod tests {
         // ACK covers the first retransmit but not everything: segment 1 is lost as well.
         c.on_segment(&ack_at(&c, una + 1000), true, now, &mut out);
         assert!(c.in_recovery());
-        assert!(out.iter().any(|o| o.seq == una + 1000 && o.payload.len() == 1000));
+        assert!(
+            out.iter()
+                .any(|o| o.seq == una + 1000 && o.payload.len() == 1000)
+        );
     }
 
     #[test]
@@ -1167,7 +1187,11 @@ mod tests {
         assert_eq!(out.len(), 10);
         let una = c.snd_una;
         out.clear();
-        c.tick(now + Duration::from_secs(1), Duration::from_secs(60), &mut out);
+        c.tick(
+            now + Duration::from_secs(1),
+            Duration::from_secs(60),
+            &mut out,
+        );
         assert_eq!(out.len(), 1, "one segment after a timeout");
         assert_eq!((out[0].seq, out[0].payload.len()), (una, 1000));
         assert_eq!(c.cwnd(), 1000);
@@ -1176,7 +1200,10 @@ mod tests {
         let max = c.snd_max;
         out.clear();
         c.on_segment(&ack_at(&c, max), true, now, &mut out);
-        assert_eq!(c.snd_nxt.wrapping_sub(max), out.iter().map(|o| o.payload.len() as u32).sum::<u32>());
+        assert_eq!(
+            c.snd_nxt.wrapping_sub(max),
+            out.iter().map(|o| o.payload.len() as u32).sum::<u32>()
+        );
         assert!(!out.is_empty());
     }
 
@@ -1214,7 +1241,12 @@ mod tests {
         c.push_host_data(&[1u8; 500], t, &mut out);
         let una = c.snd_una;
         out.clear();
-        c.on_segment(&ack_at(&c, una + 500), true, t + Duration::from_millis(200), &mut out);
+        c.on_segment(
+            &ack_at(&c, una + 500),
+            true,
+            t + Duration::from_millis(200),
+            &mut out,
+        );
         // RTTVAR = 3/4*50 + 1/4*|100-200| = 62.5, SRTT = 7/8*100 + 1/8*200 = 112.5, RTO = 362.5.
         assert!(near(c.srtt().unwrap(), Duration::from_micros(112_500)));
         assert!(near(c.rto(), Duration::from_micros(362_500)));
@@ -1230,7 +1262,11 @@ mod tests {
         let mut out = Vec::new();
         c.push_host_data(&[1u8; 500], t, &mut out);
         out.clear();
-        c.tick(t + Duration::from_millis(1400), Duration::from_secs(600), &mut out);
+        c.tick(
+            t + Duration::from_millis(1400),
+            Duration::from_secs(600),
+            &mut out,
+        );
         assert!(out.is_empty(), "no spurious retransmit");
     }
 
@@ -1258,7 +1294,12 @@ mod tests {
         c.push_host_data(&[1u8; 500], t, &mut out);
         let una = c.snd_una;
         out.clear();
-        c.on_segment(&ack_at(&c, una + 500), true, t + Duration::from_millis(100), &mut out);
+        c.on_segment(
+            &ack_at(&c, una + 500),
+            true,
+            t + Duration::from_millis(100),
+            &mut out,
+        );
         assert!(c.rto() < Duration::from_millis(600));
 
         // Repeated timeouts double up to MAX_RTO and then give up.
@@ -1288,7 +1329,11 @@ mod tests {
         let blocks = [
             vec![(una + 1000, una + 3000)],
             vec![(una + 4000, una + 6000), (una + 1000, una + 3000)],
-            vec![(una + 7000, una + 10_000), (una + 4000, una + 6000), (una + 1000, una + 3000)],
+            vec![
+                (una + 7000, una + 10_000),
+                (una + 4000, una + 6000),
+                (una + 1000, una + 3000),
+            ],
         ];
         let mut rexmit: Vec<u32> = Vec::new();
         for b in blocks.iter().cycle().take(6) {
@@ -1305,7 +1350,11 @@ mod tests {
         }
         assert!(c.in_recovery());
         rexmit.sort_unstable();
-        assert_eq!(rexmit, vec![una, una + 3000, una + 6000], "only holes, each once");
+        assert_eq!(
+            rexmit,
+            vec![una, una + 3000, una + 6000],
+            "only holes, each once"
+        );
         // The retransmissions fill everything: a cumulative ACK ends recovery.
         out.clear();
         c.on_segment(&ack_at(&c, max), true, now, &mut out);

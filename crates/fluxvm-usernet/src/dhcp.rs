@@ -97,7 +97,12 @@ pub fn reply(cfg: &UserNetConfig, req: &Msg, msg_type: u8) -> Vec<u8> {
 }
 
 #[cfg(test)]
-pub(crate) fn test_request(mac: Mac, msg_type: u8, xid: [u8; 4], requested: Option<Ipv4Addr>) -> Vec<u8> {
+pub(crate) fn test_request(
+    mac: Mac,
+    msg_type: u8,
+    xid: [u8; 4],
+    requested: Option<Ipv4Addr>,
+) -> Vec<u8> {
     let mut v = vec![0u8; 240];
     v[0] = 1;
     v[1] = 1;

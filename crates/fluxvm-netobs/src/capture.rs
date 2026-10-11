@@ -95,7 +95,9 @@ impl std::fmt::Display for CaptureError {
             CaptureError::UnfilteredRefused => {
                 f.write_str("capture needs a filter: set at least one of host, port, proto")
             }
-            CaptureError::TooManySessions(n) => write!(f, "at most {n} concurrent capture sessions"),
+            CaptureError::TooManySessions(n) => {
+                write!(f, "at most {n} concurrent capture sessions")
+            }
         }
     }
 }
@@ -150,7 +152,10 @@ impl Default for CaptureManager {
 
 impl CaptureManager {
     pub fn new(max_sessions: usize) -> Self {
-        Self { sessions: HashMap::new(), max_sessions }
+        Self {
+            sessions: HashMap::new(),
+            max_sessions,
+        }
     }
 
     pub fn has_active(&self) -> bool {
@@ -158,7 +163,12 @@ impl CaptureManager {
     }
 
     /// Starts (or replaces) the capture for `vm`.
-    pub fn enable(&mut self, vm: &str, req: CaptureRequest, now_us: u64) -> Result<(), CaptureError> {
+    pub fn enable(
+        &mut self,
+        vm: &str,
+        req: CaptureRequest,
+        now_us: u64,
+    ) -> Result<(), CaptureError> {
         if req.filter.is_empty() {
             return Err(CaptureError::UnfilteredRefused);
         }
@@ -197,7 +207,9 @@ impl CaptureManager {
 
     /// Offers a parsed frame. Cheap when no session exists for `vm`.
     pub fn offer(&mut self, vm: &str, now_us: u64, frame: &[u8], pkt: &Packet<'_>) {
-        let Some(s) = self.sessions.get_mut(vm) else { return };
+        let Some(s) = self.sessions.get_mut(vm) else {
+            return;
+        };
         if now_us >= s.expires_us || !s.filter.matches(pkt) {
             return;
         }
@@ -266,7 +278,11 @@ impl CaptureManager {
             parts.push(format!("port {p}"));
         }
         if let Some(p) = &f.proto {
-            parts.push(crate::flow::parse_proto(p).map(proto_name).unwrap_or_else(|| p.clone()));
+            parts.push(
+                crate::flow::parse_proto(p)
+                    .map(proto_name)
+                    .unwrap_or_else(|| p.clone()),
+            );
         }
         parts.join(" and ")
     }
@@ -294,7 +310,7 @@ pub fn write_pcap<W: Write>(w: &mut W, snaplen: u32, frames: &[CapturedFrame]) -
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::packet::{self, build, TCP_ACK};
+    use crate::packet::{self, TCP_ACK, build};
     use std::net::Ipv4Addr;
 
     const A: Ipv4Addr = Ipv4Addr::new(10, 0, 0, 1);
@@ -322,7 +338,10 @@ mod tests {
     }
 
     fn req(filter: CaptureFilter) -> CaptureRequest {
-        CaptureRequest { filter, ..CaptureRequest::default() }
+        CaptureRequest {
+            filter,
+            ..CaptureRequest::default()
+        }
     }
 
     #[test]
@@ -341,7 +360,11 @@ mod tests {
     #[test]
     fn filter_host_port_proto() {
         let mut m = CaptureManager::default();
-        let filter = CaptureFilter { host: Some(A.into()), port: Some(53), proto: Some("udp".into()) };
+        let filter = CaptureFilter {
+            host: Some(A.into()),
+            port: Some(53),
+            proto: Some("udp".into()),
+        };
         m.enable("vm", req(filter), 0).unwrap();
         let yes = build::udp_v4((A, 4000), (B, 53), b"q");
         let wrong_port = build::udp_v4((A, 4000), (B, 80), b"q");
@@ -361,7 +384,14 @@ mod tests {
         let mut m = CaptureManager::default();
         m.enable(
             "vm",
-            CaptureRequest { filter: CaptureFilter { port: Some(9), ..Default::default() }, snaplen: 40, ..Default::default() },
+            CaptureRequest {
+                filter: CaptureFilter {
+                    port: Some(9),
+                    ..Default::default()
+                },
+                snaplen: 40,
+                ..Default::default()
+            },
             0,
         )
         .unwrap();
@@ -387,7 +417,14 @@ mod tests {
         let mut m = CaptureManager::default();
         m.enable(
             "vm",
-            CaptureRequest { filter: CaptureFilter { port: Some(9), ..Default::default() }, max_packets: 3, ..Default::default() },
+            CaptureRequest {
+                filter: CaptureFilter {
+                    port: Some(9),
+                    ..Default::default()
+                },
+                max_packets: 3,
+                ..Default::default()
+            },
             0,
         )
         .unwrap();
@@ -399,7 +436,11 @@ mod tests {
         let st = &m.status(100)[0];
         assert_eq!((st.packets, st.matched, st.overwritten), (3, 10, 7));
         let (_, frames) = m.frames("vm", 100).unwrap();
-        assert_eq!(*frames[0].data.last().unwrap(), 7, "oldest retained is the 8th frame");
+        assert_eq!(
+            *frames[0].data.last().unwrap(),
+            7,
+            "oldest retained is the 8th frame"
+        );
     }
 
     #[test]
@@ -407,7 +448,14 @@ mod tests {
         let mut m = CaptureManager::default();
         m.enable(
             "vm",
-            CaptureRequest { filter: CaptureFilter { port: Some(9), ..Default::default() }, ttl_secs: 1, ..Default::default() },
+            CaptureRequest {
+                filter: CaptureFilter {
+                    port: Some(9),
+                    ..Default::default()
+                },
+                ttl_secs: 1,
+                ..Default::default()
+            },
             0,
         )
         .unwrap();
@@ -417,15 +465,24 @@ mod tests {
         m.offer("vm", 1_000_000, &f, &p); // at expiry: not captured
         assert_eq!(m.status(1_000_001)[0].packets, 1);
         assert!(!m.status(1_000_001)[0].active);
-        assert!(m.pcap("vm", 1_000_001 + RETAIN_AFTER_STOP_US).is_none(), "gone after the retention window");
+        assert!(
+            m.pcap("vm", 1_000_001 + RETAIN_AFTER_STOP_US).is_none(),
+            "gone after the retention window"
+        );
     }
 
     #[test]
     fn session_count_is_bounded() {
         let mut m = CaptureManager::new(1);
-        let flt = CaptureFilter { port: Some(1), ..Default::default() };
+        let flt = CaptureFilter {
+            port: Some(1),
+            ..Default::default()
+        };
         m.enable("a", req(flt.clone()), 0).unwrap();
-        assert!(matches!(m.enable("b", req(flt.clone()), 0), Err(CaptureError::TooManySessions(1))));
+        assert!(matches!(
+            m.enable("b", req(flt.clone()), 0),
+            Err(CaptureError::TooManySessions(1))
+        ));
         m.enable("a", req(flt), 0).unwrap(); // replacing is fine
     }
 }

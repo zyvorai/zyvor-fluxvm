@@ -104,7 +104,11 @@ impl Redaction {
             Redact::Registrable => {
                 let labels: Vec<&str> = name.trim_end_matches('.').split('.').collect();
                 let n = labels.len();
-                Some(if n <= 2 { labels.join(".") } else { labels[n - 2..].join(".") })
+                Some(if n <= 2 {
+                    labels.join(".")
+                } else {
+                    labels[n - 2..].join(".")
+                })
             }
             Redact::Hash => {
                 let mut h = Sha256::new();
@@ -179,7 +183,12 @@ fn dns_rr(b: &[u8], at: usize) -> Option<(u16, u16, u32, usize, usize, usize)> {
     let (_, p) = dns_name(b, at)?;
     let ty = be16(b, p)?;
     let class = be16(b, p + 2)?;
-    let ttl = u32::from_be_bytes([*b.get(p + 4)?, *b.get(p + 5)?, *b.get(p + 6)?, *b.get(p + 7)?]);
+    let ttl = u32::from_be_bytes([
+        *b.get(p + 4)?,
+        *b.get(p + 5)?,
+        *b.get(p + 6)?,
+        *b.get(p + 7)?,
+    ]);
     let rdlen = be16(b, p + 8)? as usize;
     let rd = p + 10;
     b.get(rd..rd + rdlen)?;
@@ -193,7 +202,11 @@ fn parse_https_rr(b: &[u8], rd: usize, rdlen: usize) -> Option<HttpsRr> {
     let end = rd + rdlen;
     let mut rr = HttpsRr {
         priority,
-        target: if target.is_empty() { ".".to_string() } else { target },
+        target: if target.is_empty() {
+            ".".to_string()
+        } else {
+            target
+        },
         alpn: Vec::new(),
         port: None,
         ech: false,
@@ -213,8 +226,16 @@ fn parse_https_rr(b: &[u8], rd: usize, rdlen: usize) -> Option<HttpsRr> {
                 let mut i = 0;
                 while i < v.len() && rr.alpn.len() < 8 {
                     let l = v[i] as usize;
-                    let Some(id) = v.get(i + 1..i + 1 + l) else { break };
-                    rr.alpn.push(String::from_utf8_lossy(id).chars().filter(|c| !c.is_control()).take(32).collect());
+                    let Some(id) = v.get(i + 1..i + 1 + l) else {
+                        break;
+                    };
+                    rr.alpn.push(
+                        String::from_utf8_lossy(id)
+                            .chars()
+                            .filter(|c| !c.is_control())
+                            .take(32)
+                            .collect(),
+                    );
                     i += 1 + l;
                 }
             }
@@ -263,7 +284,11 @@ fn dns_name(b: &[u8], at: usize) -> Option<(String, usize)> {
             return None;
         }
         for &c in label {
-            out.push(if (0x21..0x7f).contains(&c) { (c as char).to_ascii_lowercase() } else { '?' });
+            out.push(if (0x21..0x7f).contains(&c) {
+                (c as char).to_ascii_lowercase()
+            } else {
+                '?'
+            });
         }
         pos += 1 + len;
     }
@@ -309,7 +334,9 @@ pub fn parse_dns(b: &[u8]) -> Option<DnsMessage> {
     // and a malformed record ends parsing with whatever was decoded so far.
     'sections: for (section, count, cap) in [(0u8, an, 32u16), (1, ns, 16), (2, ar, 16)] {
         for _ in 0..count.min(cap) {
-            let Some((ty, class, ttl, rd, rdlen, next)) = dns_rr(b, pos) else { break 'sections };
+            let Some((ty, class, ttl, rd, rdlen, next)) = dns_rr(b, pos) else {
+                break 'sections;
+            };
             pos = next;
             let data = &b[rd..rd + rdlen];
             match section {
@@ -319,7 +346,9 @@ pub fn parse_dns(b: &[u8]) -> Option<DnsMessage> {
                     }
                     match (ty, rdlen) {
                         (1, 4) if msg.addrs.len() < 8 => {
-                            msg.addrs.push(IpAddr::V4(Ipv4Addr::new(data[0], data[1], data[2], data[3])));
+                            msg.addrs.push(IpAddr::V4(Ipv4Addr::new(
+                                data[0], data[1], data[2], data[3],
+                            )));
                         }
                         (28, 16) if msg.addrs.len() < 8 => {
                             let mut o = [0u8; 16];
@@ -461,7 +490,9 @@ pub fn handshake_message(b: &[u8]) -> Hs<'_> {
             Some(3) => {}
             Some(_) => return Hs::Not,
         }
-        let Some(len) = be16(b, off + 3) else { return Hs::Need };
+        let Some(len) = be16(b, off + 3) else {
+            return Hs::Need;
+        };
         let len = len as usize;
         if len == 0 || len > 16_384 {
             return Hs::Not;
@@ -500,7 +531,10 @@ pub fn parse_client_hello(b: &[u8]) -> Option<ClientHello> {
 
 /// Parses a ClientHello handshake body (the bytes after the 4-byte handshake header).
 pub fn parse_client_hello_body(body: &[u8]) -> Option<ClientHello> {
-    let mut hello = ClientHello { legacy_version: be16(body, 0)?, ..Default::default() };
+    let mut hello = ClientHello {
+        legacy_version: be16(body, 0)?,
+        ..Default::default()
+    };
     let mut p = 2 + 32;
     let sid = *body.get(p)? as usize;
     p += 1 + sid;
@@ -536,7 +570,13 @@ pub fn parse_client_hello_body(body: &[u8]) -> Option<ClientHello> {
                     if let Some(name) = data.get(5..5 + n) {
                         let s: String = name
                             .iter()
-                            .map(|&c| if (0x21..0x7f).contains(&c) { (c as char).to_ascii_lowercase() } else { '?' })
+                            .map(|&c| {
+                                if (0x21..0x7f).contains(&c) {
+                                    (c as char).to_ascii_lowercase()
+                                } else {
+                                    '?'
+                                }
+                            })
                             .collect();
                         hello.sni = Some(s);
                     }
@@ -564,7 +604,9 @@ pub fn parse_client_hello_body(body: &[u8]) -> Option<ClientHello> {
                 let mut i = 0;
                 while i < list.len() {
                     let l = list[i] as usize;
-                    let Some(v) = list.get(i + 1..i + 1 + l) else { break };
+                    let Some(v) = list.get(i + 1..i + 1 + l) else {
+                        break;
+                    };
                     hello.alpn.push(v.to_vec());
                     i += 1 + l;
                 }
@@ -572,7 +614,9 @@ pub fn parse_client_hello_body(body: &[u8]) -> Option<ClientHello> {
             43 => {
                 let n = *data.first()? as usize;
                 for c in data.get(1..1 + n)?.chunks_exact(2) {
-                    hello.supported_versions.push(u16::from_be_bytes([c[0], c[1]]));
+                    hello
+                        .supported_versions
+                        .push(u16::from_be_bytes([c[0], c[1]]));
                 }
             }
             _ => {}
@@ -582,7 +626,10 @@ pub fn parse_client_hello_body(body: &[u8]) -> Option<ClientHello> {
 }
 
 fn join_dec<I: IntoIterator<Item = u32>>(it: I) -> String {
-    it.into_iter().map(|v| v.to_string()).collect::<Vec<_>>().join("-")
+    it.into_iter()
+        .map(|v| v.to_string())
+        .collect::<Vec<_>>()
+        .join("-")
 }
 
 impl ClientHello {
@@ -591,9 +638,27 @@ impl ClientHello {
         format!(
             "{},{},{},{},{}",
             self.legacy_version,
-            join_dec(self.ciphers.iter().copied().filter(|c| !is_grease(*c)).map(u32::from)),
-            join_dec(self.extensions.iter().copied().filter(|c| !is_grease(*c)).map(u32::from)),
-            join_dec(self.groups.iter().copied().filter(|c| !is_grease(*c)).map(u32::from)),
+            join_dec(
+                self.ciphers
+                    .iter()
+                    .copied()
+                    .filter(|c| !is_grease(*c))
+                    .map(u32::from)
+            ),
+            join_dec(
+                self.extensions
+                    .iter()
+                    .copied()
+                    .filter(|c| !is_grease(*c))
+                    .map(u32::from)
+            ),
+            join_dec(
+                self.groups
+                    .iter()
+                    .copied()
+                    .filter(|c| !is_grease(*c))
+                    .map(u32::from)
+            ),
             join_dec(self.point_formats.iter().map(|v| u32::from(*v))),
         )
     }
@@ -628,8 +693,18 @@ impl ClientHello {
                 _ => "00",
             }
         };
-        let ciphers: Vec<u16> = self.ciphers.iter().copied().filter(|c| !is_grease(*c)).collect();
-        let exts: Vec<u16> = self.extensions.iter().copied().filter(|c| !is_grease(*c)).collect();
+        let ciphers: Vec<u16> = self
+            .ciphers
+            .iter()
+            .copied()
+            .filter(|c| !is_grease(*c))
+            .collect();
+        let exts: Vec<u16> = self
+            .extensions
+            .iter()
+            .copied()
+            .filter(|c| !is_grease(*c))
+            .collect();
         let alpn = match self.alpn.first() {
             Some(v) if !v.is_empty() => {
                 let (f, l) = (v[0], v[v.len() - 1]);
@@ -660,15 +735,39 @@ impl ClientHello {
         };
         let mut sorted = ciphers;
         sorted.sort_unstable();
-        let b = hash12(&sorted.iter().map(|c| format!("{c:04x}")).collect::<Vec<_>>().join(","));
-        let mut ext_sorted: Vec<u16> = exts.into_iter().filter(|e| *e != 0x0000 && *e != 0x0010).collect();
+        let b = hash12(
+            &sorted
+                .iter()
+                .map(|c| format!("{c:04x}"))
+                .collect::<Vec<_>>()
+                .join(","),
+        );
+        let mut ext_sorted: Vec<u16> = exts
+            .into_iter()
+            .filter(|e| *e != 0x0000 && *e != 0x0010)
+            .collect();
         ext_sorted.sort_unstable();
-        let mut c_in = ext_sorted.iter().map(|c| format!("{c:04x}")).collect::<Vec<_>>().join(",");
+        let mut c_in = ext_sorted
+            .iter()
+            .map(|c| format!("{c:04x}"))
+            .collect::<Vec<_>>()
+            .join(",");
         if !self.sig_algs.is_empty() {
             c_in.push('_');
-            c_in.push_str(&self.sig_algs.iter().map(|c| format!("{c:04x}")).collect::<Vec<_>>().join(","));
+            c_in.push_str(
+                &self
+                    .sig_algs
+                    .iter()
+                    .map(|c| format!("{c:04x}"))
+                    .collect::<Vec<_>>()
+                    .join(","),
+            );
         }
-        let c = hash12(if ext_sorted.is_empty() && self.sig_algs.is_empty() { "" } else { &c_in });
+        let c = hash12(if ext_sorted.is_empty() && self.sig_algs.is_empty() {
+            ""
+        } else {
+            &c_in
+        });
         format!("{a}_{b}_{c}")
     }
 }
@@ -679,8 +778,8 @@ impl ClientHello {
 
 /// The `random` a server sends to mark a HelloRetryRequest (RFC 8446 section 4.1.3).
 const HELLO_RETRY_RANDOM: [u8; 32] = [
-    0xcf, 0x21, 0xad, 0x74, 0xe5, 0x9a, 0x61, 0x11, 0xbe, 0x1d, 0x8c, 0x02, 0x1e, 0x65, 0xb8, 0x91, 0xc2, 0xa2,
-    0x11, 0x16, 0x7a, 0xbb, 0x8c, 0x5e, 0x07, 0x9e, 0x09, 0xe2, 0xc8, 0xa8, 0x33, 0x9c,
+    0xcf, 0x21, 0xad, 0x74, 0xe5, 0x9a, 0x61, 0x11, 0xbe, 0x1d, 0x8c, 0x02, 0x1e, 0x65, 0xb8, 0x91,
+    0xc2, 0xa2, 0x11, 0x16, 0x7a, 0xbb, 0x8c, 0x5e, 0x07, 0x9e, 0x09, 0xe2, 0xc8, 0xa8, 0x33, 0x9c,
 ];
 
 /// What a ServerHello says in the clear. Only the hello itself is read: certificates (clear in TLS 1.2) and
@@ -711,7 +810,10 @@ pub fn parse_server_hello(b: &[u8]) -> Option<ServerHello> {
 
 /// Parses a ServerHello handshake body (the bytes after the 4-byte handshake header).
 pub fn parse_server_hello_body(body: &[u8]) -> Option<ServerHello> {
-    let mut h = ServerHello { legacy_version: be16(body, 0)?, ..Default::default() };
+    let mut h = ServerHello {
+        legacy_version: be16(body, 0)?,
+        ..Default::default()
+    };
     h.hello_retry = body.get(2..34)? == HELLO_RETRY_RANDOM;
     let mut p = 34;
     let sid = *body.get(p)? as usize;
@@ -827,11 +929,19 @@ impl ServerHello {
             }
             _ => "00".to_string(),
         };
-        let a = format!("{transport}{version}{:02}{alpn}", self.extensions.len().min(99));
+        let a = format!(
+            "{transport}{version}{:02}{alpn}",
+            self.extensions.len().min(99)
+        );
         let c = if self.extensions.is_empty() {
             "000000000000".to_string()
         } else {
-            let s = self.extensions.iter().map(|e| format!("{e:04x}")).collect::<Vec<_>>().join(",");
+            let s = self
+                .extensions
+                .iter()
+                .map(|e| format!("{e:04x}"))
+                .collect::<Vec<_>>()
+                .join(",");
             hex(&Sha256::digest(s.as_bytes()))[..12].to_string()
         };
         format!("{a}_{:04x}_{c}", self.cipher)
@@ -870,7 +980,11 @@ pub fn sni_is_doh(sni: &str, hosts: &[String]) -> bool {
     let n = sni.trim_end_matches('.').to_ascii_lowercase();
     hosts.iter().any(|h| {
         let h = h.trim_end_matches('.').to_ascii_lowercase();
-        !h.is_empty() && (n == h || (n.len() > h.len() && n.ends_with(&h) && n.as_bytes()[n.len() - h.len() - 1] == b'.'))
+        !h.is_empty()
+            && (n == h
+                || (n.len() > h.len()
+                    && n.ends_with(&h)
+                    && n.as_bytes()[n.len() - h.len() - 1] == b'.'))
     })
 }
 
@@ -880,11 +994,20 @@ pub fn sni_is_doh(sni: &str, hosts: &[String]) -> bool {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Http {
-    Request { method: &'static str, host: Option<String>, version: String },
-    Response { status: u16, version: String },
+    Request {
+        method: &'static str,
+        host: Option<String>,
+        version: String,
+    },
+    Response {
+        status: u16,
+        version: String,
+    },
 }
 
-const METHODS: &[&str] = &["GET", "POST", "PUT", "DELETE", "HEAD", "OPTIONS", "PATCH", "CONNECT", "TRACE"];
+const METHODS: &[&str] = &[
+    "GET", "POST", "PUT", "DELETE", "HEAD", "OPTIONS", "PATCH", "CONNECT", "TRACE",
+];
 
 /// Recognises an HTTP/1.x request or response head at the start of `b`. The request target is deliberately not
 /// returned.
@@ -898,10 +1021,16 @@ pub fn parse_http(b: &[u8]) -> Option<Http> {
         if !(100..600).contains(&status) || minor.len() != 1 {
             return None;
         }
-        return Some(Http::Response { status, version: format!("1.{minor}") });
+        return Some(Http::Response {
+            status,
+            version: format!("1.{minor}"),
+        });
     }
     let mut it = line.split(' ');
-    let method = METHODS.iter().copied().find(|m| *m == it.next().unwrap_or(""))?;
+    let method = METHODS
+        .iter()
+        .copied()
+        .find(|m| *m == it.next().unwrap_or(""))?;
     let target = it.next()?;
     let ver = it.next()?;
     let version = ver.strip_prefix("HTTP/1.")?;
@@ -929,7 +1058,11 @@ pub fn parse_http(b: &[u8]) -> Option<Http> {
     if host.is_none() && method == "CONNECT" {
         host = Some(target.to_ascii_lowercase());
     }
-    Some(Http::Request { method, host, version: format!("1.{version}") })
+    Some(Http::Request {
+        method,
+        host,
+        version: format!("1.{version}"),
+    })
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -957,7 +1090,7 @@ pub fn detect_quic_initial(b: &[u8]) -> Option<QuicInitial> {
     let ptype = (first >> 4) & 0x03;
     let initial = match version {
         0x0000_0001 => ptype == 0,
-        0x6b33_43cf => ptype == 1, // QUIC v2
+        0x6b33_43cf => ptype == 1,                         // QUIC v2
         v if v & 0xffff_ff00 == 0xff00_0000 => ptype == 0, // IETF drafts
         _ => false,
     };
@@ -969,7 +1102,11 @@ pub fn detect_quic_initial(b: &[u8]) -> Option<QuicInitial> {
     if dcid > 20 || scid > 20 {
         return None;
     }
-    Some(QuicInitial { version, dcid_len: dcid, scid_len: scid })
+    Some(QuicInitial {
+        version,
+        dcid_len: dcid,
+        scid_len: scid,
+    })
 }
 
 /// Builders for wire fixtures. Public so other crates' tests (and tools) can synthesise traffic.
@@ -985,7 +1122,20 @@ pub mod fixtures {
     }
 
     pub fn dns_query(id: u16, qname: &str, qtype: u16) -> Vec<u8> {
-        let mut m = vec![(id >> 8) as u8, id as u8, 0x01, 0x00, 0, 1, 0, 0, 0, 0, 0, 0];
+        let mut m = vec![
+            (id >> 8) as u8,
+            id as u8,
+            0x01,
+            0x00,
+            0,
+            1,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+        ];
         m.extend(name(qname));
         m.extend_from_slice(&qtype.to_be_bytes());
         m.extend_from_slice(&[0, 1]);
@@ -1063,7 +1213,13 @@ pub mod fixtures {
         A([u8; 4]),
         Aaaa([u8; 16]),
         Cname(&'a str),
-        Https { priority: u16, target: &'a str, alpn: &'a [&'a str], port: Option<u16>, ech: bool },
+        Https {
+            priority: u16,
+            target: &'a str,
+            alpn: &'a [&'a str],
+            port: Option<u16>,
+            ech: bool,
+        },
         /// Any other type with opaque rdata.
         Raw(u16, &'a [u8]),
     }
@@ -1109,7 +1265,13 @@ pub mod fixtures {
                 Rr::A(ip) => (1, ip.to_vec()),
                 Rr::Aaaa(ip) => (28, ip.to_vec()),
                 Rr::Cname(t) => (5, name(t)),
-                Rr::Https { priority, target, alpn, port, ech } => {
+                Rr::Https {
+                    priority,
+                    target,
+                    alpn,
+                    port,
+                    ech,
+                } => {
                     let mut r = priority.to_be_bytes().to_vec();
                     r.extend(name(if *target == "." { "" } else { target }));
                     if !alpn.is_empty() {
@@ -1161,7 +1323,12 @@ pub mod fixtures {
         }
         body.extend_from_slice(&(e.len() as u16).to_be_bytes());
         body.extend(e);
-        let mut hs = vec![2, (body.len() >> 16) as u8, (body.len() >> 8) as u8, body.len() as u8];
+        let mut hs = vec![
+            2,
+            (body.len() >> 16) as u8,
+            (body.len() >> 8) as u8,
+            body.len() as u8,
+        ];
         hs.extend(body);
         let mut rec = vec![0x16, 0x03, 0x03];
         rec.extend_from_slice(&(hs.len() as u16).to_be_bytes());
@@ -1188,7 +1355,12 @@ pub mod fixtures {
         }
         body.extend_from_slice(&(e.len() as u16).to_be_bytes());
         body.extend(e);
-        let mut hs = vec![1, (body.len() >> 16) as u8, (body.len() >> 8) as u8, body.len() as u8];
+        let mut hs = vec![
+            1,
+            (body.len() >> 16) as u8,
+            (body.len() >> 8) as u8,
+            body.len() as u8,
+        ];
         hs.extend(body);
         let mut rec = vec![0x16, 0x03, 0x01];
         rec.extend_from_slice(&(hs.len() as u16).to_be_bytes());
@@ -1210,11 +1382,20 @@ mod tests {
         assert_eq!(q.qname, "www.example.com");
         assert_eq!(dns_type_name(q.qtype), "AAAA");
 
-        let r = parse_dns(&dns_response(0xbeef, "www.example.com", 1, 0, &[[93, 184, 216, 34], [1, 2, 3, 4]]))
-            .unwrap();
+        let r = parse_dns(&dns_response(
+            0xbeef,
+            "www.example.com",
+            1,
+            0,
+            &[[93, 184, 216, 34], [1, 2, 3, 4]],
+        ))
+        .unwrap();
         assert!(r.response);
         assert_eq!(r.rcode, 0);
-        assert_eq!(r.addrs, vec![IpAddr::from([93, 184, 216, 34]), IpAddr::from([1, 2, 3, 4])]);
+        assert_eq!(
+            r.addrs,
+            vec![IpAddr::from([93, 184, 216, 34]), IpAddr::from([1, 2, 3, 4])]
+        );
 
         let nx = parse_dns(&dns_response(1, "nope.example", 1, 3, &[])).unwrap();
         assert_eq!(dns_rcode_name(nx.rcode), "NXDOMAIN");
@@ -1246,7 +1427,9 @@ mod tests {
         for _ in 0..5000 {
             let mut m = base.clone();
             for _ in 0..4 {
-                s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                s = s
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
                 let i = (s >> 33) as usize % m.len();
                 m[i] = (s >> 20) as u8;
             }
@@ -1268,7 +1451,10 @@ mod tests {
             ],
         );
         let ch = parse_client_hello(&hello).unwrap();
-        assert_eq!(ch.ja3_string(), "769,47-53-5-10-49161-49162-49171-49172-50-56-19-4,0-10-11,23-24-25,0");
+        assert_eq!(
+            ch.ja3_string(),
+            "769,47-53-5-10-49161-49162-49171-49172-50-56-19-4,0-10-11,23-24-25,0"
+        );
         assert_eq!(ch.ja3(), "ada70206e40642a3e4461f35503241d5");
         assert_eq!(ch.sni.as_deref(), Some("example.com"));
     }
@@ -1276,7 +1462,10 @@ mod tests {
     #[test]
     fn md5_known_vector() {
         assert_eq!(hex(&Md5::digest(b"")), "d41d8cd98f00b204e9800998ecf8427e");
-        assert_eq!(hex(&Md5::digest(b"abc")), "900150983cd24fb0d6963f7d28e17f72");
+        assert_eq!(
+            hex(&Md5::digest(b"abc")),
+            "900150983cd24fb0d6963f7d28e17f72"
+        );
     }
 
     #[test]
@@ -1284,7 +1473,11 @@ mod tests {
         let hello = client_hello(
             0x0303,
             &[0x0a0a, 0x1301, 0xdada],
-            &[ext(0x2a2a, &[0]), ext_sni("a.test"), ext_groups(&[0x4a4a, 29])],
+            &[
+                ext(0x2a2a, &[0]),
+                ext_sni("a.test"),
+                ext_groups(&[0x4a4a, 29]),
+            ],
         );
         let ch = parse_client_hello(&hello).unwrap();
         assert_eq!(ch.ja3_string(), "771,4865,0-10,29,");
@@ -1297,8 +1490,8 @@ mod tests {
     #[test]
     fn ja4_chrome_cipher_section() {
         let ciphers = [
-            0x1a1a, 0x1301, 0x1302, 0x1303, 0xc02b, 0xc02f, 0xc02c, 0xc030, 0xcca9, 0xcca8, 0xc013, 0xc014,
-            0x009c, 0x009d, 0x002f, 0x0035,
+            0x1a1a, 0x1301, 0x1302, 0x1303, 0xc02b, 0xc02f, 0xc02c, 0xc030, 0xcca9, 0xcca8, 0xc013,
+            0xc014, 0x009c, 0x009d, 0x002f, 0x0035,
         ];
         let hello = client_hello(
             0x0303,
@@ -1342,12 +1535,18 @@ mod tests {
 
     #[test]
     fn tls_garbage_never_panics() {
-        let base = client_hello(0x0303, &[0x1301, 0x1302], &[ext_sni("x.test"), ext_alpn(&["h2"]), ext_groups(&[29])]);
+        let base = client_hello(
+            0x0303,
+            &[0x1301, 0x1302],
+            &[ext_sni("x.test"), ext_alpn(&["h2"]), ext_groups(&[29])],
+        );
         let mut s = 99u64;
         for _ in 0..5000 {
             let mut m = base.clone();
             for _ in 0..3 {
-                s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                s = s
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
                 let i = (s >> 33) as usize % m.len();
                 m[i] = (s >> 20) as u8;
             }
@@ -1361,7 +1560,11 @@ mod tests {
             .unwrap();
         assert_eq!(
             r,
-            Http::Request { method: "GET", host: Some("api.example.com:8080".into()), version: "1.1".into() }
+            Http::Request {
+                method: "GET",
+                host: Some("api.example.com:8080".into()),
+                version: "1.1".into()
+            }
         );
         // The path must not appear anywhere in the record.
         assert!(!format!("{r:?}").contains("secret"));
@@ -1371,7 +1574,10 @@ mod tests {
     fn http_response_and_non_http() {
         assert_eq!(
             parse_http(b"HTTP/1.0 503 Service Unavailable\r\nX: y\r\n\r\n"),
-            Some(Http::Response { status: 503, version: "1.0".into() })
+            Some(Http::Response {
+                status: 503,
+                version: "1.0".into()
+            })
         );
         assert!(parse_http(b"SSH-2.0-OpenSSH_9.6\r\n").is_none());
         assert!(parse_http(b"GET / HTTP/2.0\r\n").is_none());
@@ -1385,7 +1591,14 @@ mod tests {
         p[4] = 1; // version 1
         p[5] = 8; // dcid len
         p[6 + 8] = 0; // scid len
-        assert_eq!(detect_quic_initial(&p), Some(QuicInitial { version: 1, dcid_len: 8, scid_len: 0 }));
+        assert_eq!(
+            detect_quic_initial(&p),
+            Some(QuicInitial {
+                version: 1,
+                dcid_len: 8,
+                scid_len: 0
+            })
+        );
         p[0] = 0xe3; // type 2 = Handshake in v1
         assert!(detect_quic_initial(&p).is_none());
         assert!(detect_quic_initial(&p[..600]).is_none());
@@ -1395,7 +1608,11 @@ mod tests {
 
     #[test]
     fn handshake_message_stitches_records_and_reports_needs() {
-        let rec = client_hello(0x0303, &[0x1301], &[ext_sni("frag.example.com"), ext_alpn(&["h2"])]);
+        let rec = client_hello(
+            0x0303,
+            &[0x1301],
+            &[ext_sni("frag.example.com"), ext_alpn(&["h2"])],
+        );
         let hs = &rec[5..];
         // Re-frame the same handshake message as three TLS records.
         let mut frag = Vec::new();
@@ -1407,21 +1624,38 @@ mod tests {
         match handshake_message(&frag) {
             Hs::Complete(1, body) => {
                 assert!(matches!(body, std::borrow::Cow::Owned(_)));
-                assert_eq!(parse_client_hello_body(&body).unwrap().sni.as_deref(), Some("frag.example.com"));
+                assert_eq!(
+                    parse_client_hello_body(&body).unwrap().sni.as_deref(),
+                    Some("frag.example.com")
+                );
             }
             other => panic!("{other:?}"),
         }
-        assert_eq!(parse_client_hello(&frag).unwrap().alpn, vec![b"h2".to_vec()]);
+        assert_eq!(
+            parse_client_hello(&frag).unwrap().alpn,
+            vec![b"h2".to_vec()]
+        );
         // A single record borrows.
-        assert!(matches!(handshake_message(&rec), Hs::Complete(1, std::borrow::Cow::Borrowed(_))));
+        assert!(matches!(
+            handshake_message(&rec),
+            Hs::Complete(1, std::borrow::Cow::Borrowed(_))
+        ));
         // Every proper prefix is "need more", never "complete" and never a panic.
         for n in 1..frag.len() {
             assert_eq!(handshake_message(&frag[..n]), Hs::Need, "prefix {n}");
         }
         assert_eq!(handshake_message(b""), Hs::Need);
         assert_eq!(handshake_message(b"GET /"), Hs::Not);
-        assert_eq!(handshake_message(&[0x16, 0x03, 0x01, 0x00, 0x00]), Hs::Not, "zero-length record");
-        assert_eq!(handshake_message(&[0x16, 0x03, 0x01, 0xff, 0xff]), Hs::Not, "record over 2^14");
+        assert_eq!(
+            handshake_message(&[0x16, 0x03, 0x01, 0x00, 0x00]),
+            Hs::Not,
+            "zero-length record"
+        );
+        assert_eq!(
+            handshake_message(&[0x16, 0x03, 0x01, 0xff, 0xff]),
+            Hs::Not,
+            "record over 2^14"
+        );
         // A handshake header claiming more than the cap.
         let mut huge = vec![0x16, 0x03, 0x01, 0x00, 0x08, 0x01, 0xff, 0xff, 0xff];
         huge.extend_from_slice(&[0; 4]);
@@ -1430,9 +1664,16 @@ mod tests {
 
     #[test]
     fn server_hello_parsing_and_fingerprints() {
-        let tls13 = server_hello(0x0303, 0x1301, &[ext(43, &[3, 4]), ext(51, &[0, 0x1d, 0, 0])]);
+        let tls13 = server_hello(
+            0x0303,
+            0x1301,
+            &[ext(43, &[3, 4]), ext(51, &[0, 0x1d, 0, 0])],
+        );
         let h = parse_server_hello(&tls13).unwrap();
-        assert_eq!((h.legacy_version, h.cipher, h.selected_version), (0x0303, 0x1301, Some(0x0304)));
+        assert_eq!(
+            (h.legacy_version, h.cipher, h.selected_version),
+            (0x0303, 0x1301, Some(0x0304))
+        );
         assert_eq!(h.negotiated_version(), 0x0304);
         assert_eq!(h.extensions, vec![43, 51]);
         assert!(!h.hello_retry);
@@ -1446,11 +1687,24 @@ mod tests {
         assert_eq!(h.ja4s_for('q'), "q130200_1301_a56c5b993250");
 
         // TLS 1.2 with a clear ALPN and the classic JA3S shape.
-        let tls12 = server_hello(0x0303, 0xc02f, &[ext(0xff01, &[0]), ext(0, &[]), ext(11, &[1, 0]), ext_alpn(&["http/1.1"])]);
+        let tls12 = server_hello(
+            0x0303,
+            0xc02f,
+            &[
+                ext(0xff01, &[0]),
+                ext(0, &[]),
+                ext(11, &[1, 0]),
+                ext_alpn(&["http/1.1"]),
+            ],
+        );
         let h = parse_server_hello(&tls12).unwrap();
         assert_eq!(h.ja3s_string(), "771,49199,65281-0-11-16");
         assert_eq!(h.alpn.as_deref(), Some(&b"http/1.1"[..]));
-        assert!(h.ja4s().starts_with("t120411_c02f_") || h.ja4s().starts_with("t1204h1_c02f_"), "{}", h.ja4s());
+        assert!(
+            h.ja4s().starts_with("t120411_c02f_") || h.ja4s().starts_with("t1204h1_c02f_"),
+            "{}",
+            h.ja4s()
+        );
         assert_eq!(tls_version_name(h.negotiated_version()), "TLS1.2");
 
         // No extensions at all.
@@ -1469,7 +1723,15 @@ mod tests {
 
     #[test]
     fn server_hello_garbage_never_panics() {
-        let base = server_hello(0x0303, 0x1301, &[ext(43, &[3, 4]), ext(51, &[0, 0x1d, 0, 0]), ext_alpn(&["h2"])]);
+        let base = server_hello(
+            0x0303,
+            0x1301,
+            &[
+                ext(43, &[3, 4]),
+                ext(51, &[0, 0x1d, 0, 0]),
+                ext_alpn(&["h2"]),
+            ],
+        );
         for n in 0..base.len() {
             let _ = parse_server_hello(&base[..n]);
         }
@@ -1477,7 +1739,9 @@ mod tests {
         for _ in 0..5000 {
             let mut m = base.clone();
             for _ in 0..3 {
-                s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                s = s
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
                 let i = (s >> 33) as usize % m.len();
                 m[i] = (s >> 20) as u8;
             }
@@ -1496,7 +1760,13 @@ mod tests {
             0,
             &[
                 Rr::Cname("t.example.net"),
-                Rr::Https { priority: 0, target: "alt.example.com", alpn: &[], port: None, ech: false },
+                Rr::Https {
+                    priority: 0,
+                    target: "alt.example.com",
+                    alpn: &[],
+                    port: None,
+                    ech: false,
+                },
                 Rr::A([1, 2, 3, 4]),
                 Rr::Raw(99, &[1, 2, 3]),
             ],
@@ -1508,9 +1778,24 @@ mod tests {
         assert_eq!(m.https[0].priority, 0);
         assert_eq!(m.https[0].target, "alt.example.com");
         assert_eq!(m.addrs, vec![IpAddr::from([1, 2, 3, 4])]);
-        assert_eq!(m.edns, Some(Edns { udp_size: 1400, version: 0, ext_rcode: 0, dnssec_ok: true }));
+        assert_eq!(
+            m.edns,
+            Some(Edns {
+                udp_size: 1400,
+                version: 0,
+                ext_rcode: 0,
+                dnssec_ok: true
+            })
+        );
         // Truncated anywhere: whatever parsed so far is returned or None; never a panic.
-        let full = dns_response_rr(3, "x.test", 1, 0, &[Rr::Cname("y.test"), Rr::A([9, 9, 9, 9])], Some((512, false, 0)));
+        let full = dns_response_rr(
+            3,
+            "x.test",
+            1,
+            0,
+            &[Rr::Cname("y.test"), Rr::A([9, 9, 9, 9])],
+            Some((512, false, 0)),
+        );
         for n in 0..full.len() {
             let _ = parse_dns(&full[..n]);
         }
@@ -1524,7 +1809,10 @@ mod tests {
 
     #[test]
     fn doh_host_matching() {
-        let hosts: Vec<String> = ["dns.google", "Cloudflare-DNS.com."].iter().map(|s| s.to_string()).collect();
+        let hosts: Vec<String> = ["dns.google", "Cloudflare-DNS.com."]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
         assert!(sni_is_doh("dns.google", &hosts));
         assert!(sni_is_doh("DNS.GOOGLE.", &hosts));
         assert!(sni_is_doh("mozilla.cloudflare-dns.com", &hosts));
@@ -1538,15 +1826,27 @@ mod tests {
     #[test]
     fn redaction_modes() {
         let r = Redaction::default();
-        assert_eq!(r.apply(Redact::Keep, "a.b.example.com").as_deref(), Some("a.b.example.com"));
-        assert_eq!(r.apply(Redact::Registrable, "a.b.example.com").as_deref(), Some("example.com"));
-        assert_eq!(r.apply(Redact::Registrable, "localhost").as_deref(), Some("localhost"));
+        assert_eq!(
+            r.apply(Redact::Keep, "a.b.example.com").as_deref(),
+            Some("a.b.example.com")
+        );
+        assert_eq!(
+            r.apply(Redact::Registrable, "a.b.example.com").as_deref(),
+            Some("example.com")
+        );
+        assert_eq!(
+            r.apply(Redact::Registrable, "localhost").as_deref(),
+            Some("localhost")
+        );
         assert_eq!(r.apply(Redact::Drop, "x"), None);
         let h1 = r.apply(Redact::Hash, "secret.example").unwrap();
         let h2 = r.apply(Redact::Hash, "secret.example").unwrap();
         assert_eq!(h1, h2);
         assert!(h1.starts_with("h:") && !h1.contains("secret"));
-        let salted = Redaction { salt: "other".into(), ..Redaction::default() };
+        let salted = Redaction {
+            salt: "other".into(),
+            ..Redaction::default()
+        };
         assert_ne!(salted.apply(Redact::Hash, "secret.example").unwrap(), h1);
     }
 }

@@ -25,7 +25,10 @@ fn runner_adds_a_socket_device_to_macos_guests_only_behind_the_flag() {
     assert!(guarded < device, "device configured before the flag check");
     // The macOS branch ends at its `} else {`; the device must be inside it.
     let else_at = branch.find("} else {").unwrap();
-    assert!(device < else_at, "the guarded device must be in the macOS branch");
+    assert!(
+        device < else_at,
+        "the guarded device must be in the macOS branch"
+    );
     assert!(
         swift.contains("unverified"),
         "the runner comment must say the path is unverified"

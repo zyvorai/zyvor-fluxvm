@@ -153,10 +153,12 @@ impl XtsCipher {
 fn unhex(s: &[u8]) -> io::Result<Vec<u8>> {
     let v = |c: u8| (c as char).to_digit(16).map(|d| d as u8);
     s.chunks(2)
-        .map(|p| match (p.first().and_then(|c| v(*c)), p.get(1).and_then(|c| v(*c))) {
-            (Some(a), Some(b)) => Ok(a << 4 | b),
-            _ => Err(invalid("invalid hex key")),
-        })
+        .map(
+            |p| match (p.first().and_then(|c| v(*c)), p.get(1).and_then(|c| v(*c))) {
+                (Some(a), Some(b)) => Ok(a << 4 | b),
+                _ => Err(invalid("invalid hex key")),
+            },
+        )
         .collect()
 }
 

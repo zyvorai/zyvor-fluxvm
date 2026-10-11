@@ -137,7 +137,11 @@ fn as_udp6(f: &[u8]) -> Option<(Ipv6Addr, Ipv6Addr, u16, u16, Vec<u8>)> {
     if ip.next_header != PROTO_UDP {
         return None;
     }
-    assert_eq!(l4_checksum(ip.src, ip.dst, PROTO_UDP, ip.payload), 0, "bad udp6 checksum");
+    assert_eq!(
+        l4_checksum(ip.src, ip.dst, PROTO_UDP, ip.payload),
+        0,
+        "bad udp6 checksum"
+    );
     let u = parse_udp(ip.payload)?;
     Some((ip.src, ip.dst, u.sport, u.dport, u.payload.to_vec()))
 }
@@ -152,7 +156,11 @@ fn as_icmp6(f: &[u8]) -> Option<(Ipv6Addr, Ipv6Addr, u8, Vec<u8>)> {
     if ip.next_header != PROTO_ICMPV6 {
         return None;
     }
-    assert_eq!(l4_checksum(ip.src, ip.dst, PROTO_ICMPV6, ip.payload), 0, "bad icmpv6 checksum");
+    assert_eq!(
+        l4_checksum(ip.src, ip.dst, PROTO_ICMPV6, ip.payload),
+        0,
+        "bad icmpv6 checksum"
+    );
     Some((ip.src, ip.dst, ip.hop_limit, ip.payload.to_vec()))
 }
 
@@ -166,7 +174,11 @@ fn as_udp(f: &[u8]) -> Option<(Ipv4Addr, Ipv4Addr, u16, u16, Vec<u8>)> {
         return None;
     }
     assert_eq!(checksum(&e.payload[..20]), 0, "bad ip checksum");
-    assert_eq!(l4_checksum(ip.src, ip.dst, PROTO_UDP, ip.payload), 0, "bad udp checksum");
+    assert_eq!(
+        l4_checksum(ip.src, ip.dst, PROTO_UDP, ip.payload),
+        0,
+        "bad udp checksum"
+    );
     let u = parse_udp(ip.payload)?;
     Some((ip.src, ip.dst, u.sport, u.dport, u.payload.to_vec()))
 }
@@ -270,7 +282,13 @@ impl<'a> Conn<'a> {
             remote,
             sport,
             dport,
-            TcpOut { seq: isn, flags: SYN, window: 65535, mss: Some(1460), ..Default::default() },
+            TcpOut {
+                seq: isn,
+                flags: SYN,
+                window: 65535,
+                mss: Some(1460),
+                ..Default::default()
+            },
         )
         .await;
         let sa = g
@@ -278,7 +296,11 @@ impl<'a> Conn<'a> {
                 as_tcp(f).filter(|s| s.src == remote && s.sport == dport && s.dport == sport)
             })
             .await;
-        assert_eq!(sa.flags & (SYN | ACK), SYN | ACK, "expected SYN-ACK, got {sa:?}");
+        assert_eq!(
+            sa.flags & (SYN | ACK),
+            SYN | ACK,
+            "expected SYN-ACK, got {sa:?}"
+        );
         assert_eq!(sa.ack, isn + 1);
         let c = Conn {
             g,
@@ -302,7 +324,13 @@ impl<'a> Conn<'a> {
                 self.remote,
                 self.sport,
                 self.dport,
-                TcpOut { seq: self.snd_nxt, ack: self.rcv_nxt, flags: ACK, window: 65535, ..Default::default() },
+                TcpOut {
+                    seq: self.snd_nxt,
+                    ack: self.rcv_nxt,
+                    flags: ACK,
+                    window: 65535,
+                    ..Default::default()
+                },
             )
             .await;
     }
@@ -364,7 +392,13 @@ impl<'a> Conn<'a> {
                 self.remote,
                 self.sport,
                 self.dport,
-                TcpOut { seq: self.snd_nxt, ack: self.rcv_nxt, flags: FIN | ACK, window: 65535, ..Default::default() },
+                TcpOut {
+                    seq: self.snd_nxt,
+                    ack: self.rcv_nxt,
+                    flags: FIN | ACK,
+                    window: 65535,
+                    ..Default::default()
+                },
             )
             .await;
         self.snd_nxt += 1;
@@ -455,7 +489,9 @@ async fn arp_and_icmp_echo() {
         .guest
         .recv_where("ARP reply", |f| {
             let e = parse_eth(f)?;
-            (e.ethertype == ETH_ARP).then(|| parse_arp(e.payload)).flatten()
+            (e.ethertype == ETH_ARP)
+                .then(|| parse_arp(e.payload))
+                .flatten()
         })
         .await;
     assert_eq!((op, smac, sip), (2, c.gateway_mac, c.gateway_ip));
@@ -463,7 +499,12 @@ async fn arp_and_icmp_echo() {
     // An address that is not ours gets no answer.
     let req = build_arp(1, GMAC, c.guest_ip, [0; 6], Ipv4Addr::new(10, 0, 2, 99));
     r.guest.send_eth(BROADCAST, ETH_ARP, &req).await;
-    assert!(r.guest.silent(150, |f| parse_eth(f).is_some_and(|e| e.ethertype == ETH_ARP)).await);
+    assert!(
+        r.guest
+            .silent(150, |f| parse_eth(f)
+                .is_some_and(|e| e.ethertype == ETH_ARP))
+            .await
+    );
 
     // ICMP echo to the gateway.
     let mut icmp = vec![8, 0, 0, 0, 0x12, 0x34, 0, 1, b'p', b'i', b'n', b'g'];
@@ -505,15 +546,36 @@ async fn dhcp_offer_ack_nak_and_mtu() {
     assert_eq!(&offer[16..20], &cfg.guest_ip.octets());
     assert_eq!(dhcp::test_option(&offer, 53), Some(vec![dhcp::OFFER]));
     assert_eq!(dhcp::test_option(&offer, 1), Some(vec![255, 255, 255, 0]));
-    assert_eq!(dhcp::test_option(&offer, 3), Some(cfg.gateway_ip.octets().to_vec()));
-    assert_eq!(dhcp::test_option(&offer, 6), Some(cfg.dns_ip.octets().to_vec()));
-    assert_eq!(dhcp::test_option(&offer, 26), Some(1400u16.to_be_bytes().to_vec()));
+    assert_eq!(
+        dhcp::test_option(&offer, 3),
+        Some(cfg.gateway_ip.octets().to_vec())
+    );
+    assert_eq!(
+        dhcp::test_option(&offer, 6),
+        Some(cfg.dns_ip.octets().to_vec())
+    );
+    assert_eq!(
+        dhcp::test_option(&offer, 26),
+        Some(1400u16.to_be_bytes().to_vec())
+    );
 
-    send(dhcp::test_request(GMAC, dhcp::REQUEST, [5, 6, 7, 8], Some(cfg.guest_ip))).await;
+    send(dhcp::test_request(
+        GMAC,
+        dhcp::REQUEST,
+        [5, 6, 7, 8],
+        Some(cfg.guest_ip),
+    ))
+    .await;
     let ack = g.recv_where("ack", dhcp_reply).await;
     assert_eq!(dhcp::test_option(&ack, 53), Some(vec![dhcp::ACK]));
 
-    send(dhcp::test_request(GMAC, dhcp::REQUEST, [9, 9, 9, 9], Some(Ipv4Addr::new(10, 0, 2, 77)))).await;
+    send(dhcp::test_request(
+        GMAC,
+        dhcp::REQUEST,
+        [9, 9, 9, 9],
+        Some(Ipv4Addr::new(10, 0, 2, 77)),
+    ))
+    .await;
     let nak = g.recv_where("nak", dhcp_reply).await;
     assert_eq!(dhcp::test_option(&nak, 53), Some(vec![dhcp::NAK]));
 }
@@ -543,7 +605,11 @@ async fn dns_forwarding_and_deny() {
     g.send_udp(cfg.dns_ip, 5353, 53, &q).await;
     let nx = g.recv_where("nxdomain", dns_reply).await;
     assert_eq!(nx[3] & 0xf, 3);
-    assert_eq!(count.load(Ordering::SeqCst), 1, "denied query must not reach upstream");
+    assert_eq!(
+        count.load(Ordering::SeqCst),
+        1,
+        "denied query must not reach upstream"
+    );
     let ev = next_event(&mut r.log, FlowKind::DnsDeny).await;
     assert_eq!(ev.reason.as_deref(), Some("deny-domain"));
 }
@@ -587,7 +653,12 @@ async fn tcp_connect_refused_resets_guest() {
             Ipv4Addr::LOCALHOST,
             40001,
             closed,
-            TcpOut { seq: 100, flags: SYN, window: 65535, ..Default::default() },
+            TcpOut {
+                seq: 100,
+                flags: SYN,
+                window: 65535,
+                ..Default::default()
+            },
         )
         .await;
     let s = r
@@ -607,7 +678,10 @@ async fn udp_nat_echo() {
     for msg in [&b"one"[..], &b"two"[..]] {
         g.send_udp(Ipv4Addr::LOCALHOST, 41000, port, msg).await;
         let (src, dst, sport, dport, p) = g.recv_where("udp echo", as_udp).await;
-        assert_eq!((src, dst, sport, dport), (Ipv4Addr::LOCALHOST, g.cfg.guest_ip, port, 41000));
+        assert_eq!(
+            (src, dst, sport, dport),
+            (Ipv4Addr::LOCALHOST, g.cfg.guest_ip, port, 41000)
+        );
         assert_eq!(p, msg);
     }
     next_event(&mut r.log, FlowKind::Open).await;
@@ -624,17 +698,30 @@ async fn egress_policy_denies_private_by_default() {
         Ipv4Addr::LOCALHOST,
         42000,
         tcp_port,
-        TcpOut { seq: 1, flags: SYN, window: 65535, ..Default::default() },
+        TcpOut {
+            seq: 1,
+            flags: SYN,
+            window: 65535,
+            ..Default::default()
+        },
     )
     .await;
-    let s = g.recv_where("RST", |f| as_tcp(f).filter(|s| s.sport == tcp_port)).await;
+    let s = g
+        .recv_where("RST", |f| as_tcp(f).filter(|s| s.sport == tcp_port))
+        .await;
     assert_eq!(s.flags & RST, RST);
     let ev = next_event(&mut r.log, FlowKind::Deny).await;
-    assert_eq!((ev.proto, ev.reason.as_deref()), (Proto::Tcp, Some("private-range")));
+    assert_eq!(
+        (ev.proto, ev.reason.as_deref()),
+        (Proto::Tcp, Some("private-range"))
+    );
 
     g.send_udp(Ipv4Addr::LOCALHOST, 42001, udp_port, b"x").await;
     let ev = next_event(&mut r.log, FlowKind::Deny).await;
-    assert_eq!((ev.proto, ev.reason.as_deref()), (Proto::Udp, Some("private-range")));
+    assert_eq!(
+        (ev.proto, ev.reason.as_deref()),
+        (Proto::Udp, Some("private-range"))
+    );
     assert!(g.silent(150, |f| as_udp(f).is_some()).await);
 
     // The gateway alias is off too.
@@ -642,10 +729,16 @@ async fn egress_policy_denies_private_by_default() {
         g.cfg.gateway_ip,
         42002,
         tcp_port,
-        TcpOut { seq: 1, flags: SYN, window: 65535, ..Default::default() },
+        TcpOut {
+            seq: 1,
+            flags: SYN,
+            window: 65535,
+            ..Default::default()
+        },
     )
     .await;
-    g.recv_where("RST", |f| as_tcp(f).filter(|s| s.flags & RST != 0)).await;
+    g.recv_where("RST", |f| as_tcp(f).filter(|s| s.flags & RST != 0))
+        .await;
     let ev = next_event(&mut r.log, FlowKind::Deny).await;
     assert_eq!(ev.reason.as_deref(), Some("host-loopback"));
 }
@@ -668,10 +761,16 @@ async fn egress_port_rules_and_loopback_alias() {
         g.cfg.gateway_ip,
         43001,
         port.wrapping_add(1),
-        TcpOut { seq: 1, flags: SYN, window: 65535, ..Default::default() },
+        TcpOut {
+            seq: 1,
+            flags: SYN,
+            window: 65535,
+            ..Default::default()
+        },
     )
     .await;
-    g.recv_where("RST", |f| as_tcp(f).filter(|s| s.flags & RST != 0)).await;
+    g.recv_where("RST", |f| as_tcp(f).filter(|s| s.flags & RST != 0))
+        .await;
 }
 
 #[tokio::test]
@@ -683,23 +782,40 @@ async fn dns_answers_teach_the_allow_list() {
     cfg.egress.allow_domains = vec!["example.test".into()];
     let mut r = start(cfg.clone());
     let g = &r.guest;
-    let syn = TcpOut { seq: 1, flags: SYN, window: 65535, ..Default::default() };
+    let syn = TcpOut {
+        seq: 1,
+        flags: SYN,
+        window: 65535,
+        ..Default::default()
+    };
 
     // 127.0.0.1 is private and not in any CIDR: refused until a DNS answer for an allowed name teaches it.
-    g.send_tcp(Ipv4Addr::LOCALHOST, 44000, port, syn.clone()).await;
-    let s = g.recv_where("RST", |f| as_tcp(f).filter(|s| s.sport == port)).await;
+    g.send_tcp(Ipv4Addr::LOCALHOST, 44000, port, syn.clone())
+        .await;
+    let s = g
+        .recv_where("RST", |f| as_tcp(f).filter(|s| s.sport == port))
+        .await;
     assert_eq!(s.flags & RST, RST);
     let ev = next_event(&mut r.log, FlowKind::Deny).await;
     assert_eq!(ev.reason.as_deref(), Some("private-range"));
 
     // Names outside the list do not resolve at all.
-    g.send_udp(cfg.dns_ip, 5300, 53, &dns::test_query(1, "other.test")).await;
+    g.send_udp(cfg.dns_ip, 5300, 53, &dns::test_query(1, "other.test"))
+        .await;
     let ev = next_event(&mut r.log, FlowKind::DnsDeny).await;
     assert_eq!(ev.reason.as_deref(), Some("domain-not-allowed"));
 
-    g.send_udp(cfg.dns_ip, 5300, 53, &dns::test_query(2, "api.example.test")).await;
+    g.send_udp(
+        cfg.dns_ip,
+        5300,
+        53,
+        &dns::test_query(2, "api.example.test"),
+    )
+    .await;
     g.recv_where("answer", |f| {
-        as_udp(f).filter(|u| u.2 == 53 && u.4[..2] == [0, 2]).map(|u| u.4)
+        as_udp(f)
+            .filter(|u| u.2 == 53 && u.4[..2] == [0, 2])
+            .map(|u| u.4)
     })
     .await;
 
@@ -710,7 +826,12 @@ async fn dns_answers_teach_the_allow_list() {
 #[tokio::test]
 async fn tcp_port_forward_host_to_guest() {
     let mut cfg = UserNetConfig::default();
-    cfg.forwards = vec![PortForward::new(Proto::Tcp, Ipv4Addr::LOCALHOST.into(), 0, 8080)];
+    cfg.forwards = vec![PortForward::new(
+        Proto::Tcp,
+        Ipv4Addr::LOCALHOST.into(),
+        0,
+        8080,
+    )];
     let mut r = start(cfg.clone());
     let addr = r.fwd[0];
     let g = &r.guest;
@@ -718,9 +839,18 @@ async fn tcp_port_forward_host_to_guest() {
     let mut host = TcpStream::connect(addr).await.unwrap();
     // The gateway opens a connection to the guest from gateway_ip:ephemeral.
     let syn = g
-        .recv_where("forward SYN", |f| as_tcp(f).filter(|s| s.flags & (SYN | ACK) == SYN))
+        .recv_where("forward SYN", |f| {
+            as_tcp(f).filter(|s| s.flags & (SYN | ACK) == SYN)
+        })
         .await;
-    assert_eq!((syn.src, syn.dst, syn.dport), (IpAddr::from(cfg.gateway_ip), IpAddr::from(cfg.guest_ip), 8080));
+    assert_eq!(
+        (syn.src, syn.dst, syn.dport),
+        (
+            IpAddr::from(cfg.gateway_ip),
+            IpAddr::from(cfg.guest_ip),
+            8080
+        )
+    );
     let gisn = 5000u32;
     // Reply as the guest: swap addresses.
     let reply = |o: TcpOut| build_tcp(cfg.guest_ip, cfg.gateway_ip, 8080, syn.sport, &o);
@@ -755,7 +885,10 @@ async fn tcp_port_forward_host_to_guest() {
     .await
     .unwrap();
     let mut buf = [0u8; 4];
-    timeout(Duration::from_secs(5), host.read_exact(&mut buf)).await.unwrap().unwrap();
+    timeout(Duration::from_secs(5), host.read_exact(&mut buf))
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(&buf, b"pong");
     let ev = next_event(&mut r.log, FlowKind::Open).await;
     assert_eq!((ev.direction, ev.guest.port()), (Direction::Inbound, 8080));
@@ -769,17 +902,28 @@ fn build_ip_frame(cfg: &UserNetConfig, tcp: Vec<u8>) -> Vec<u8> {
 #[tokio::test]
 async fn udp_port_forward_host_to_guest() {
     let mut cfg = UserNetConfig::default();
-    cfg.forwards = vec![PortForward::new(Proto::Udp, Ipv4Addr::LOCALHOST.into(), 0, 5000)];
+    cfg.forwards = vec![PortForward::new(
+        Proto::Udp,
+        Ipv4Addr::LOCALHOST.into(),
+        0,
+        5000,
+    )];
     let r = start(cfg.clone());
     let addr = r.fwd[0];
     let g = &r.guest;
     let host = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     host.send_to(b"hi guest", addr).await.unwrap();
     let (src, dst, sport, dport, p) = g.recv_where("forwarded udp", as_udp).await;
-    assert_eq!((src, dst, dport, p.as_slice()), (cfg.gateway_ip, cfg.guest_ip, 5000, &b"hi guest"[..]));
+    assert_eq!(
+        (src, dst, dport, p.as_slice()),
+        (cfg.gateway_ip, cfg.guest_ip, 5000, &b"hi guest"[..])
+    );
     g.send_udp(cfg.gateway_ip, 5000, sport, b"hi host").await;
     let mut buf = [0u8; 64];
-    let (n, from) = timeout(Duration::from_secs(5), host.recv_from(&mut buf)).await.unwrap().unwrap();
+    let (n, from) = timeout(Duration::from_secs(5), host.recv_from(&mut buf))
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!((&buf[..n], from), (&b"hi host"[..], addr));
 }
 
@@ -789,12 +933,27 @@ async fn guest_is_pinned_to_its_lease_and_shutdown_works() {
     let r = start(cfg_allow_loopback());
     let g = &r.guest;
     // Spoofed source address: ignored.
-    let u = build_udp(Ipv4Addr::new(10, 0, 2, 99), Ipv4Addr::LOCALHOST, 1, port, b"x");
-    let ip = build_ipv4(Ipv4Addr::new(10, 0, 2, 99), Ipv4Addr::LOCALHOST, PROTO_UDP, &u);
+    let u = build_udp(
+        Ipv4Addr::new(10, 0, 2, 99),
+        Ipv4Addr::LOCALHOST,
+        1,
+        port,
+        b"x",
+    );
+    let ip = build_ipv4(
+        Ipv4Addr::new(10, 0, 2, 99),
+        Ipv4Addr::LOCALHOST,
+        PROTO_UDP,
+        &u,
+    );
     g.send_eth(g.cfg.gateway_mac, ETH_IPV4, &ip).await;
     assert!(g.silent(150, |f| as_udp(f).is_some()).await);
     r.handle.shutdown();
-    timeout(Duration::from_secs(2), r.task).await.unwrap().unwrap().unwrap();
+    timeout(Duration::from_secs(2), r.task)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
 }
 
 #[tokio::test]
@@ -808,7 +967,10 @@ async fn frame_tap_sees_both_directions() {
     let mut un = UserNet::new(cfg.clone(), a).unwrap();
     un.set_tap(tap_tx).unwrap();
     let task = tokio::spawn(un.run());
-    let guest = Guest { s: UnixDatagram::from_std(b).unwrap(), cfg: cfg.clone() };
+    let guest = Guest {
+        s: UnixDatagram::from_std(b).unwrap(),
+        cfg: cfg.clone(),
+    };
     let req = build_arp(1, GMAC, cfg.guest_ip, [0; 6], cfg.gateway_ip);
     guest.send_eth(BROADCAST, ETH_ARP, &req).await;
     guest
@@ -817,7 +979,9 @@ async fn frame_tap_sees_both_directions() {
             (e.ethertype == ETH_ARP).then_some(())
         })
         .await;
-    tap_rx.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+    tap_rx
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
     let mut dirs = Vec::new();
     let mut buf = vec![0u8; 2048];
     while dirs.len() < 2 {

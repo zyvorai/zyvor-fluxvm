@@ -23,9 +23,18 @@ fn punch(file: &File, off: u64, len: u64) -> io::Result<()> {
             fp_length: libc::off_t,
         }
         const F_PUNCHHOLE: libc::c_int = 99;
-        let arg = FPunchHole { fp_flags: 0, reserved: 0, fp_offset: off as _, fp_length: len as _ };
+        let arg = FPunchHole {
+            fp_flags: 0,
+            reserved: 0,
+            fp_offset: off as _,
+            fp_length: len as _,
+        };
         let r = unsafe { libc::fcntl(fd, F_PUNCHHOLE, &arg) };
-        if r == -1 { Err(io::Error::last_os_error()) } else { Ok(()) }
+        if r == -1 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(())
+        }
     }
     #[cfg(target_os = "linux")]
     {
@@ -37,7 +46,11 @@ fn punch(file: &File, off: u64, len: u64) -> io::Result<()> {
                 len as libc::off_t,
             )
         };
-        if r == -1 { Err(io::Error::last_os_error()) } else { Ok(()) }
+        if r == -1 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(())
+        }
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {

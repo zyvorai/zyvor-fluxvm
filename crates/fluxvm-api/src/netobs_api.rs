@@ -48,10 +48,7 @@ fn observer() -> Option<Arc<Observer>> {
 }
 
 /// The VM ids a tenant-scoped token may see; `None` for unscoped tokens.
-async fn scope(
-    m: &VmManager,
-    tenant: Option<Extension<TokenTenant>>,
-) -> Option<HashSet<String>> {
+async fn scope(m: &VmManager, tenant: Option<Extension<TokenTenant>>) -> Option<HashSet<String>> {
     let Extension(TokenTenant(t)) = tenant?;
     Some(
         m.list()
@@ -64,7 +61,10 @@ async fn scope(
 }
 
 fn not_found(msg: &str) -> ApiError {
-    ApiError { status: StatusCode::NOT_FOUND, message: msg.to_string() }
+    ApiError {
+        status: StatusCode::NOT_FOUND,
+        message: msg.to_string(),
+    }
 }
 
 fn unavailable() -> ApiError {
@@ -87,7 +87,9 @@ pub(crate) async fn summary(
 ) -> ApiResult<Json<serde_json::Value>> {
     let now = fluxvm_netobs::now_us();
     let Some(o) = observer() else {
-        return Ok(Json(serde_json::to_value(fluxvm_netobs::Summary::disabled(now)).unwrap_or_default()));
+        return Ok(Json(
+            serde_json::to_value(fluxvm_netobs::Summary::disabled(now)).unwrap_or_default(),
+        ));
     };
     let scope = scope(&m, tenant).await;
     let mut s = o.summary(now);
@@ -121,7 +123,9 @@ pub(crate) async fn flows(
     Query(p): Query<FlowParams>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let Some(o) = observer() else {
-        return Ok(Json(json!({"schema": fluxvm_netobs::SCHEMA_VERSION, "enabled": false, "items": []})));
+        return Ok(Json(
+            json!({"schema": fluxvm_netobs::SCHEMA_VERSION, "enabled": false, "items": []}),
+        ));
     };
     let q = FlowQuery {
         vm: p.vm,
@@ -207,7 +211,9 @@ pub(crate) async fn dns(
     Query(p): Query<DnsParams>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let Some(o) = observer() else {
-        return Ok(Json(json!({"schema": fluxvm_netobs::SCHEMA_VERSION, "enabled": false, "items": []})));
+        return Ok(Json(
+            json!({"schema": fluxvm_netobs::SCHEMA_VERSION, "enabled": false, "items": []}),
+        ));
     };
     let scope = scope(&m, tenant).await;
     Ok(Json(json!({
@@ -222,7 +228,9 @@ pub(crate) async fn history(
     tenant: Option<Extension<TokenTenant>>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let Some(o) = observer() else {
-        return Ok(Json(json!({"schema": fluxvm_netobs::SCHEMA_VERSION, "enabled": false, "windows": []})));
+        return Ok(Json(
+            json!({"schema": fluxvm_netobs::SCHEMA_VERSION, "enabled": false, "windows": []}),
+        ));
     };
     let scope = scope(&m, tenant).await;
     let windows: Vec<_> = o
@@ -230,7 +238,9 @@ pub(crate) async fn history(
         .into_iter()
         .map(|(start, end, rows)| json!({"start_us": start, "end_us": end, "rows": rows}))
         .collect();
-    Ok(Json(json!({"schema": fluxvm_netobs::SCHEMA_VERSION, "enabled": true, "windows": windows})))
+    Ok(Json(
+        json!({"schema": fluxvm_netobs::SCHEMA_VERSION, "enabled": true, "windows": windows}),
+    ))
 }
 
 pub(crate) async fn capture_status(
@@ -238,7 +248,9 @@ pub(crate) async fn capture_status(
     tenant: Option<Extension<TokenTenant>>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let Some(o) = observer() else {
-        return Ok(Json(json!({"schema": fluxvm_netobs::SCHEMA_VERSION, "enabled": false, "sessions": []})));
+        return Ok(Json(
+            json!({"schema": fluxvm_netobs::SCHEMA_VERSION, "enabled": false, "sessions": []}),
+        ));
     };
     let scope = scope(&m, tenant).await;
     let sessions: Vec<_> = o
@@ -246,7 +258,9 @@ pub(crate) async fn capture_status(
         .into_iter()
         .filter(|c| scope.as_ref().is_none_or(|s| s.contains(&c.vm)))
         .collect();
-    Ok(Json(json!({"schema": fluxvm_netobs::SCHEMA_VERSION, "enabled": true, "sessions": sessions})))
+    Ok(Json(
+        json!({"schema": fluxvm_netobs::SCHEMA_VERSION, "enabled": true, "sessions": sessions}),
+    ))
 }
 
 #[derive(Debug, Deserialize)]
@@ -273,7 +287,9 @@ pub(crate) async fn capture_enable(
         status: StatusCode::BAD_REQUEST,
         message: e.to_string(),
     })?;
-    Ok(Json(json!({"vm": body.vm, "enabled": true, "ttl_secs": ttl, "filter": filter})))
+    Ok(Json(
+        json!({"vm": body.vm, "enabled": true, "ttl_secs": ttl, "filter": filter}),
+    ))
 }
 
 #[derive(Debug, Deserialize)]
@@ -316,10 +332,16 @@ pub(crate) async fn capture_pcap(
     Ok((
         StatusCode::OK,
         [
-            (header::CONTENT_TYPE, "application/vnd.tcpdump.pcap".to_string()),
+            (
+                header::CONTENT_TYPE,
+                "application/vnd.tcpdump.pcap".to_string(),
+            ),
             (
                 header::CONTENT_DISPOSITION,
-                format!("attachment; filename=\"netobs-{}.pcap\"", p.vm.replace(['"', '/', '\\'], "_")),
+                format!(
+                    "attachment; filename=\"netobs-{}.pcap\"",
+                    p.vm.replace(['"', '/', '\\'], "_")
+                ),
             ),
         ],
         bytes,

@@ -43,7 +43,10 @@ impl Reassembler {
         let key: Key = (ip.src, ip.dst, ip.proto, ip.id);
         let off = ip.frag_off;
         let data = ip.payload;
-        if data.is_empty() || (ip.mf && !data.len().is_multiple_of(8)) || off + data.len() > MAX_PAYLOAD {
+        if data.is_empty()
+            || (ip.mf && !data.len().is_multiple_of(8))
+            || off + data.len() > MAX_PAYLOAD
+        {
             self.map.remove(&key);
             return None;
         }
@@ -98,7 +101,8 @@ impl Reassembler {
     /// Drop datagrams older than [`TIMEOUT`]; returns how many.
     pub fn expire(&mut self, now: Instant) -> usize {
         let n = self.map.len();
-        self.map.retain(|_, e| now.duration_since(e.first) <= TIMEOUT);
+        self.map
+            .retain(|_, e| now.duration_since(e.first) <= TIMEOUT);
         n - self.map.len()
     }
 }
@@ -150,7 +154,10 @@ mod tests {
             assert!(r.add(&p, now).is_none());
         }
         assert_eq!(r.len(), MAX_DATAGRAMS);
-        assert_eq!(r.expire(now + TIMEOUT + Duration::from_secs(1)), MAX_DATAGRAMS);
+        assert_eq!(
+            r.expire(now + TIMEOUT + Duration::from_secs(1)),
+            MAX_DATAGRAMS
+        );
         assert_eq!(r.len(), 0);
     }
 

@@ -915,7 +915,12 @@ fn reset_identity(
         if !valid_hostname(name) {
             failures.push(format!("invalid hostname {name:?}"));
         } else {
-            let rc = unsafe { libc::sethostname(name.as_ptr() as *const libc::c_char, name.len() as libc::c_int) };
+            let rc = unsafe {
+                libc::sethostname(
+                    name.as_ptr() as *const libc::c_char,
+                    name.len() as libc::c_int,
+                )
+            };
             if rc != 0 {
                 failures.push(format!("sethostname: {}", std::io::Error::last_os_error()));
             } else {
@@ -1032,14 +1037,7 @@ mod tests {
         // just the calling thread's fds), so the agent's read on its own
         // end never sees EOF even after the client side closes — a
         // same-process test artifact, not a real cross-VM vsock bug.
-        let rc = unsafe {
-            libc::socketpair(
-                libc::AF_UNIX,
-                libc::SOCK_STREAM,
-                0,
-                fds.as_mut_ptr(),
-            )
-        };
+        let rc = unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, fds.as_mut_ptr()) };
         assert_eq!(
             rc,
             0,

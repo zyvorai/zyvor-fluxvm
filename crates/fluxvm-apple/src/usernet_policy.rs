@@ -72,10 +72,21 @@ fn parse_cidr(raw: &str) -> Result<IpCidrAny, String> {
     let (ip, _) = raw
         .split_once('/')
         .ok_or_else(|| format!("CIDR {raw:?} must include /prefix"))?;
-    let ip: IpAddr = ip.trim().parse().map_err(|_| format!("invalid IP in CIDR {raw:?}"))?;
+    let ip: IpAddr = ip
+        .trim()
+        .parse()
+        .map_err(|_| format!("invalid IP in CIDR {raw:?}"))?;
     match ip {
-        IpAddr::V4(_) => raw.trim().parse::<Cidr>().map(IpCidrAny::V4).map_err(|e| format!("CIDR {e}")),
-        IpAddr::V6(_) => raw.trim().parse::<Cidr6>().map(IpCidrAny::V6).map_err(|e| format!("CIDR {e}")),
+        IpAddr::V4(_) => raw
+            .trim()
+            .parse::<Cidr>()
+            .map(IpCidrAny::V4)
+            .map_err(|e| format!("CIDR {e}")),
+        IpAddr::V6(_) => raw
+            .trim()
+            .parse::<Cidr6>()
+            .map(IpCidrAny::V6)
+            .map_err(|e| format!("CIDR {e}")),
     }
 }
 
@@ -92,7 +103,9 @@ fn domain_entry(pat: &str) -> Option<String> {
     let ok = !host.is_empty()
         && !host.contains('*')
         && !host.starts_with('.')
-        && host.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.');
+        && host
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.');
     ok.then_some(p)
 }
 
@@ -123,7 +136,10 @@ pub fn egress_from_network_policy(p: &NetworkPolicyView) -> Result<Converted, St
         let (proto, port) = r
             .split_once('/')
             .ok_or_else(|| format!("port rule {r:?} must be proto/PORT"))?;
-        let port: u16 = port.trim().parse().map_err(|_| format!("invalid port in {r:?}"))?;
+        let port: u16 = port
+            .trim()
+            .parse()
+            .map_err(|_| format!("invalid port in {r:?}"))?;
         match proto.trim().to_ascii_lowercase().as_str() {
             "tcp" => tcp.push(port),
             "udp" => udp.push(port),
@@ -160,7 +176,10 @@ pub fn egress_from_network_policy(p: &NetworkPolicyView) -> Result<Converted, St
             )),
         }
     }
-    if !p.allow_fqdns.is_empty() && e.allow_domains.is_empty() && e.allow_cidrs.is_empty() && e.allow_cidrs6.is_empty()
+    if !p.allow_fqdns.is_empty()
+        && e.allow_domains.is_empty()
+        && e.allow_cidrs.is_empty()
+        && e.allow_cidrs6.is_empty()
     {
         // Every FQDN entry was dropped: do not silently fall back to "allow everything public".
         e.deny_cidrs.push("0.0.0.0/0".parse().unwrap());
@@ -176,7 +195,10 @@ pub fn egress_from_network_policy(p: &NetworkPolicyView) -> Result<Converted, St
     if !p.default_allow && !lists && e.deny_cidrs.iter().all(|c| c.prefix != 0) {
         e.deny_cidrs.push("0.0.0.0/0".parse().unwrap());
         e.deny_cidrs6.push("::/0".parse().unwrap());
-        notes.push("default_allow=false without allow lists: converted to deny-all via 0/0 and ::/0".into());
+        notes.push(
+            "default_allow=false without allow lists: converted to deny-all via 0/0 and ::/0"
+                .into(),
+        );
     }
 
     // ICMP: allowed when the source policy does not enforce, or explicitly.
@@ -190,7 +212,9 @@ pub fn egress_from_network_policy(p: &NetworkPolicyView) -> Result<Converted, St
         ));
     }
     if p.deny_udp {
-        unsupported.push("deny_udp has no gateway counterpart (UDP stays allowed per CIDR/port rules)".into());
+        unsupported.push(
+            "deny_udp has no gateway counterpart (UDP stays allowed per CIDR/port rules)".into(),
+        );
     }
     if p.max_egress_mbps.is_some() || p.max_egress_pps.is_some() {
         unsupported.push("max_egress_mbps / max_egress_pps are not enforced by the gateway".into());
@@ -199,7 +223,10 @@ pub fn egress_from_network_policy(p: &NetworkPolicyView) -> Result<Converted, St
         notes.push("audit_mode (log-and-allow) is enforced as a real policy by the gateway".into());
     }
     if !p.groups.is_empty() || !p.labels.is_empty() {
-        notes.push("groups/labels are merged into the policy by fluxvm-network before this conversion".into());
+        notes.push(
+            "groups/labels are merged into the policy by fluxvm-network before this conversion"
+                .into(),
+        );
     }
 
     Ok(Converted {
@@ -223,13 +250,20 @@ mod tests {
     }
 
     fn chk(e: &EgressPolicy, ip: &str, port: u16) -> Decision {
-        e.check(ip.parse::<Ipv4Addr>().unwrap(), port, &HashMap::new(), Instant::now())
+        e.check(
+            ip.parse::<Ipv4Addr>().unwrap(),
+            port,
+            &HashMap::new(),
+            Instant::now(),
+        )
     }
 
     #[test]
     fn network_json_roundtrips_into_the_view_with_its_defaults() {
         // A full VmNetworkPolicy document (extra fields ignored, defaults applied).
-        let v = view(r#"{"allow_cidrs":["10.0.0.0/8","2001:db8::/32"],"sample_rate":4,"compiled_group_ids":[1]}"#);
+        let v = view(
+            r#"{"allow_cidrs":["10.0.0.0/8","2001:db8::/32"],"sample_rate":4,"compiled_group_ids":[1]}"#,
+        );
         assert!(v.default_allow);
         assert_eq!(v.allow_cidrs.len(), 2);
         let c = egress_from_network_policy(&v).unwrap();
@@ -254,22 +288,33 @@ mod tests {
         .unwrap();
         let e = &c.egress;
         assert_eq!(chk(e, "203.0.113.5", 443), Decision::Allow);
-        assert_eq!(chk(e, "203.0.113.5", 22), Decision::Deny("port-not-allowed"));
+        assert_eq!(
+            chk(e, "203.0.113.5", 22),
+            Decision::Deny("port-not-allowed")
+        );
         assert_eq!(chk(e, "8.8.8.8", 443), Decision::Deny("not-in-allow-list"));
         assert_eq!(chk(e, "203.0.113.66", 443), Decision::Deny("deny-cidr"));
-        assert!(!c.icmp_proxy, "enforcing policy without allow_icmp drops ICMP");
+        assert!(
+            !c.icmp_proxy,
+            "enforcing policy without allow_icmp drops ICMP"
+        );
     }
 
     #[test]
     fn ports_only_allows_any_destination_on_those_ports() {
         let c = egress_from_network_policy(&view(r#"{"allow_ports":["tcp/443"]}"#)).unwrap();
         assert_eq!(chk(&c.egress, "10.9.9.9", 443), Decision::Allow);
-        assert_eq!(chk(&c.egress, "10.9.9.9", 80), Decision::Deny("port-not-allowed"));
+        assert_eq!(
+            chk(&c.egress, "10.9.9.9", 80),
+            Decision::Deny("port-not-allowed")
+        );
     }
 
     #[test]
     fn mixed_protocol_ports_widen_and_are_reported() {
-        let c = egress_from_network_policy(&view(r#"{"allow_ports":["tcp/443","udp/53","sctp/9"]}"#)).unwrap();
+        let c =
+            egress_from_network_policy(&view(r#"{"allow_ports":["tcp/443","udp/53","sctp/9"]}"#))
+                .unwrap();
         assert_eq!(c.egress.allow_ports, vec![53, 443]);
         assert!(c.notes.iter().any(|n| n.contains("both protocols")));
         assert!(c.notes.iter().any(|n| n.contains("SCTP")));
@@ -280,24 +325,37 @@ mod tests {
         let c = egress_from_network_policy(&view(r#"{"default_allow":false}"#)).unwrap();
         assert_eq!(chk(&c.egress, "8.8.8.8", 443), Decision::Deny("deny-cidr"));
         assert!(!c.icmp_proxy);
-        let d = c
-            .egress
-            .check6("2606:4700::1".parse().unwrap(), Some(443), &HashMap::new(), Instant::now());
+        let d = c.egress.check6(
+            "2606:4700::1".parse().unwrap(),
+            Some(443),
+            &HashMap::new(),
+            Instant::now(),
+        );
         assert_eq!(d, Decision::Deny("deny-cidr"));
     }
 
     #[test]
     fn fqdns_become_domains_and_unusable_patterns_fail_closed() {
-        let c = egress_from_network_policy(&view(r#"{"allow_fqdns":["Example.com","*.corp.test"],"allow_icmp":true}"#))
-            .unwrap();
+        let c = egress_from_network_policy(&view(
+            r#"{"allow_fqdns":["Example.com","*.corp.test"],"allow_icmp":true}"#,
+        ))
+        .unwrap();
         assert_eq!(c.egress.allow_domains, vec!["example.com", "*.corp.test"]);
         assert!(c.icmp_proxy);
         assert_eq!(c.egress.check_domain("api.corp.test"), Decision::Allow);
-        assert!(matches!(c.egress.check_domain("evil.test"), Decision::Deny(_)));
+        assert!(matches!(
+            c.egress.check_domain("evil.test"),
+            Decision::Deny(_)
+        ));
 
-        let c = egress_from_network_policy(&view(r#"{"allow_fqdns":["api-*.example.com"]}"#)).unwrap();
+        let c =
+            egress_from_network_policy(&view(r#"{"allow_fqdns":["api-*.example.com"]}"#)).unwrap();
         assert!(c.egress.allow_domains.is_empty());
-        assert_eq!(chk(&c.egress, "8.8.8.8", 443), Decision::Deny("deny-cidr"), "fails closed");
+        assert_eq!(
+            chk(&c.egress, "8.8.8.8", 443),
+            Decision::Deny("deny-cidr"),
+            "fails closed"
+        );
     }
 
     #[test]

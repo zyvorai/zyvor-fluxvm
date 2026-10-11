@@ -22,8 +22,8 @@ pub mod capture;
 pub mod export;
 pub mod flow;
 pub mod h2;
-mod hpack_huffman;
 pub mod health;
+mod hpack_huffman;
 pub mod l7;
 pub mod observer;
 pub mod packet;
@@ -39,5 +39,6 @@ pub use flow::{Direction, DropReason, FrameMeta, Identity, Verdict};
 pub use l7::{Redact, Redaction};
 pub use observer::{FlowQuery, Observer, ObserverConfig, global, install_global};
 pub use source::{
-    FrameSource, NetTap, Tap, TapReceiver, PumpHandle, global_tap, install_global_tap, now_us, spawn_pump,
+    FrameSource, NetTap, PumpHandle, Tap, TapReceiver, global_tap, install_global_tap, now_us,
+    spawn_pump,
 };

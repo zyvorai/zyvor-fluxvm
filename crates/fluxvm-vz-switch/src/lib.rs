@@ -66,7 +66,8 @@ pub fn set_tap(tap: fluxvm_netobs::NetTap, network: &str) -> bool {
 /// observer's process may start later or restart; frames are dropped and counted meanwhile.
 #[cfg(feature = "netobs")]
 pub fn set_bridge(client: fluxvm_netobs::bridge::BridgeClient, network: &str) -> bool {
-    TAP.set((TapSink::Bridge(client), network.to_string())).is_ok()
+    TAP.set((TapSink::Bridge(client), network.to_string()))
+        .is_ok()
 }
 
 /// Starts a [`fluxvm_netobs::bridge::BridgeClient`] for `socket` and installs it. Returns false if a sink was
@@ -325,7 +326,12 @@ fn pump(table: Arc<Table>, port: Arc<Port>) {
         let routed = targets(&ids, port.id, frame);
         #[cfg(feature = "netobs")]
         if let Some((t, id)) = &tap {
-            t.tap_as(id, fluxvm_netobs::Direction::FromGuest, tap_verdict(&routed), frame);
+            t.tap_as(
+                id,
+                fluxvm_netobs::Direction::FromGuest,
+                tap_verdict(&routed),
+                frame,
+            );
         }
         match routed {
             Ok(to) => {
@@ -629,7 +635,11 @@ mod tests {
         let (b, b_ctl) = join(&sock, "tap-b", B);
         std::thread::sleep(Duration::from_millis(100));
         send(&a, &frame(B, A));
-        assert_eq!(recv_timeout(&b, 1000), Some(frame(B, A)), "forwarding is unaffected by the tap");
+        assert_eq!(
+            recv_timeout(&b, 1000),
+            Some(frame(B, A)),
+            "forwarding is unaffected by the tap"
+        );
         send(&a, &frame(B, C)); // spoofed source
         std::thread::sleep(Duration::from_millis(200));
         let mut seen = Vec::new();
@@ -639,7 +649,13 @@ mod tests {
                 seen.push(f.verdict);
             }
         }
-        assert_eq!(seen, vec![Verdict::Allowed, Verdict::Dropped(DropReason::SpoofedSource)]);
+        assert_eq!(
+            seen,
+            vec![
+                Verdict::Allowed,
+                Verdict::Dropped(DropReason::SpoofedSource)
+            ]
+        );
         drop((a_ctl, b_ctl));
         server.join().unwrap();
     }

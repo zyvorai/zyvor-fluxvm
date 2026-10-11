@@ -25,12 +25,20 @@ pub struct Identity {
 
 impl Identity {
     pub fn new(vm_id: &str, network: &str, nic: &str, mac: Mac) -> Arc<Self> {
-        Arc::new(Self { vm_id: vm_id.into(), network: network.into(), nic: nic.into(), mac })
+        Arc::new(Self {
+            vm_id: vm_id.into(),
+            network: network.into(),
+            nic: nic.into(),
+            mac,
+        })
     }
 
     pub fn mac_string(&self) -> String {
         let m = self.mac;
-        format!("{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}", m[0], m[1], m[2], m[3], m[4], m[5])
+        format!(
+            "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+            m[0], m[1], m[2], m[3], m[4], m[5]
+        )
     }
 }
 
@@ -80,7 +88,10 @@ impl DropReason {
     }
 
     pub fn index(self) -> usize {
-        Self::ALL.iter().position(|r| *r == self).unwrap_or(Self::ALL.len() - 1)
+        Self::ALL
+            .iter()
+            .position(|r| *r == self)
+            .unwrap_or(Self::ALL.len() - 1)
     }
 }
 
@@ -138,7 +149,13 @@ pub struct FlowKey {
 impl FlowKey {
     pub fn new(id: &Identity, proto: u8, src: (IpAddr, u16), dst: (IpAddr, u16)) -> Self {
         let (a, b) = if src <= dst { (src, dst) } else { (dst, src) };
-        Self { vm: id.vm_id.clone(), nic: id.nic.clone(), proto, a, b }
+        Self {
+            vm: id.vm_id.clone(),
+            nic: id.nic.clone(),
+            proto,
+            a,
+            b,
+        }
     }
 }
 
@@ -158,7 +175,10 @@ pub fn parse_proto(s: &str) -> Option<u8> {
         "udp" => Some(IPPROTO_UDP),
         "icmp" => Some(IPPROTO_ICMP),
         "icmpv6" | "icmp6" => Some(IPPROTO_ICMPV6),
-        other => other.strip_prefix("proto").and_then(|n| n.parse().ok()).or_else(|| other.parse().ok()),
+        other => other
+            .strip_prefix("proto")
+            .and_then(|n| n.parse().ok())
+            .or_else(|| other.parse().ok()),
     }
 }
 
@@ -277,7 +297,10 @@ impl FlowConfig {
     }
 
     fn min_idle(&self) -> u64 {
-        self.tcp_idle_us.min(self.udp_idle_us).min(self.other_idle_us).min(self.closed_linger_us)
+        self.tcp_idle_us
+            .min(self.udp_idle_us)
+            .min(self.other_idle_us)
+            .min(self.closed_linger_us)
     }
 }
 
@@ -298,7 +321,13 @@ pub struct FlowTable {
 
 impl FlowTable {
     pub fn new(cfg: FlowConfig) -> Self {
-        Self { cfg, map: HashMap::new(), order: BTreeMap::new(), tick: 0, next_id: 1 }
+        Self {
+            cfg,
+            map: HashMap::new(),
+            order: BTreeMap::new(),
+            tick: 0,
+            next_id: 1,
+        }
     }
 
     pub fn config(&self) -> &FlowConfig {
@@ -343,7 +372,9 @@ impl FlowTable {
             false
         } else {
             while self.map.len() >= self.cfg.max_flows.max(1) {
-                let Some((_, old)) = self.order.pop_first() else { break };
+                let Some((_, old)) = self.order.pop_first() else {
+                    break;
+                };
                 if let Some(e) = self.map.remove(&old) {
                     evicted.push(e.flow);
                 }
@@ -352,10 +383,20 @@ impl FlowTable {
             self.next_id += 1;
             self.tick += 1;
             self.order.insert(self.tick, key.clone());
-            self.map.insert(key.clone(), Entry { flow: make(id), tick: self.tick });
+            self.map.insert(
+                key.clone(),
+                Entry {
+                    flow: make(id),
+                    tick: self.tick,
+                },
+            );
             true
         };
-        let flow = &mut self.map.get_mut(key).expect("flow was just inserted or found").flow;
+        let flow = &mut self
+            .map
+            .get_mut(key)
+            .expect("flow was just inserted or found")
+            .flow;
         (flow, created)
     }
 
@@ -377,7 +418,11 @@ impl FlowTable {
                 break;
             }
             let reason_closed = e.flow.closed.is_some();
-            let timeout = if reason_closed { self.cfg.closed_linger_us } else { self.cfg.idle_for(&e.flow) };
+            let timeout = if reason_closed {
+                self.cfg.closed_linger_us
+            } else {
+                self.cfg.idle_for(&e.flow)
+            };
             if age >= timeout {
                 due.push((*tick, key.clone()));
             }
@@ -485,7 +530,10 @@ mod tests {
 
     #[test]
     fn lru_cap_evicts_least_recently_seen() {
-        let mut t = FlowTable::new(FlowConfig { max_flows: 3, ..FlowConfig::default() });
+        let mut t = FlowTable::new(FlowConfig {
+            max_flows: 3,
+            ..FlowConfig::default()
+        });
         let i = id();
         let mut ev = Vec::new();
         let keys: Vec<FlowKey> = (0..4)
@@ -507,7 +555,10 @@ mod tests {
 
     #[test]
     fn closed_flows_linger_then_export() {
-        let mut t = FlowTable::new(FlowConfig { closed_linger_us: 50, ..FlowConfig::default() });
+        let mut t = FlowTable::new(FlowConfig {
+            closed_linger_us: 50,
+            ..FlowConfig::default()
+        });
         let i = id();
         let mut ev = Vec::new();
         let k = FlowKey::new(&i, IPPROTO_TCP, ep(1, 1), ep(2, 2));
@@ -521,7 +572,10 @@ mod tests {
 
     #[test]
     fn active_timeout_snapshots_without_removing() {
-        let mut t = FlowTable::new(FlowConfig { active_timeout_us: 100, ..FlowConfig::default() });
+        let mut t = FlowTable::new(FlowConfig {
+            active_timeout_us: 100,
+            ..FlowConfig::default()
+        });
         let i = id();
         let mut ev = Vec::new();
         let k = FlowKey::new(&i, IPPROTO_TCP, ep(1, 1), ep(2, 2));

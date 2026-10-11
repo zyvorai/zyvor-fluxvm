@@ -534,7 +534,10 @@ mod tests {
             },
         );
         assert_eq!(l4_checksum(a, b, PROTO_TCP, &t), 0);
-        assert_eq!(parse_tcp(&t).unwrap().sack, vec![(10, 20), (30, 40), (50, 60)]);
+        assert_eq!(
+            parse_tcp(&t).unwrap().sack,
+            vec![(10, 20), (30, 40), (50, 60)]
+        );
     }
 
     #[test]

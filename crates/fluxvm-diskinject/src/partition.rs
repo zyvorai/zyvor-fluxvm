@@ -154,7 +154,10 @@ fn parse_gpt(file: &File, file_len: u64, ss: u64, hdr: &[u8]) -> Result<Vec<Cand
         let first = u64::from_le_bytes(e[32..40].try_into().unwrap());
         let last = u64::from_le_bytes(e[40..48].try_into().unwrap());
         if last < first {
-            return Err(Error::Corrupt(format!("GPT partition {} has last < first", i + 1)));
+            return Err(Error::Corrupt(format!(
+                "GPT partition {} has last < first",
+                i + 1
+            )));
         }
         if ty == ESP_GUID || ty == BIOS_BOOT_GUID {
             continue;
@@ -247,9 +250,6 @@ mod tests {
         img[0..4].copy_from_slice(b"QFI\xfb");
         let mut f = tempfile::tempfile().unwrap();
         f.write_all(&img).unwrap();
-        assert!(matches!(
-            candidates(&f, 8192),
-            Err(Error::Unsupported(_))
-        ));
+        assert!(matches!(candidates(&f, 8192), Err(Error::Unsupported(_))));
     }
 }
