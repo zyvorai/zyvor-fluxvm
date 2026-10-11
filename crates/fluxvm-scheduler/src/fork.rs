@@ -50,6 +50,9 @@ impl VmManager {
         actor: Option<&str>,
     ) -> Result<Vec<VmRecord>> {
         let src = self.get(id).await?;
+        if src.backend == BackendKind::Vz {
+            return self.fork_vm_vz(src, count, name_prefix, actor).await;
+        }
         check_forkable(&src, count)?;
         let prefix = name_prefix.unwrap_or_else(|| format!("{}-fork", src.name));
         let names: Vec<String> = (1..=count).map(|n| format!("{prefix}-{n}")).collect();
@@ -93,6 +96,186 @@ impl VmManager {
         Ok(children)
     }
 
+    /// Tenant and host admission for one more child of `src` (the same limits a create of that size meets).
+    async fn admit_fork_child(&self, src: &VmRecord) -> Result<()> {
+        let ledger = self.store.quota_ledger().await?;
+        if let Some(tenant) = src.request.tenant.as_deref()
+            && !self.cfg.policy.tenants.is_empty()
+        {
+            fluxvm_core::policy::enforce_tenant_totals(
+                tenant,
+                src.request.vcpus,
+                src.request.memory_mib,
+                &self.cfg.policy,
+                &ledger,
+            )?;
+        }
+        fluxvm_core::policy::enforce_host_totals(
+            src.request.vcpus,
+            src.request.memory_mib,
+            &self.cfg.policy,
+            &fluxvm_core::policy::ledger_for_host_admission(&ledger),
+        )?;
+        Ok(())
+    }
+
+    /// Fork a running `vz` (Apple Virtualization.framework) Linux guest into `count` running children.
+    ///
+    /// One runner `save` pauses the parent for a moment and clones its disk (`snapshot_save`); every child gets APFS
+    /// clones of that state and disk and the parent's machine identifier and MAC (the saved device state is bound to
+    /// them), and is restored through the ordinary `start_from_snapshot`. Children share the parent's MAC and address,
+    /// so each must own its network: `network.mode = none`, or `apple.usernet` (a private userspace NAT per VM).
+    async fn fork_vm_vz(
+        self: &Arc<Self>,
+        src: VmRecord,
+        count: u32,
+        name_prefix: Option<String>,
+        actor: Option<&str>,
+    ) -> Result<Vec<VmRecord>> {
+        check_vz_forkable(&src, count)?;
+        let id = src.id;
+        let prefix = name_prefix.unwrap_or_else(|| format!("{}-fork", src.name));
+        let names: Vec<String> = (1..=count).map(|n| format!("{prefix}-{n}")).collect();
+        for name in &names {
+            validate_vm_name(name)?;
+        }
+        let tag = format!("fork-{}", &Uuid::new_v4().simple().to_string()[..12]);
+        let op = OpGuard::begin(
+            &self.cfg.state_dir,
+            OpKind::Fork,
+            Uuid::new_v4(),
+            id,
+            vec![Resource::SnapshotDir {
+                path: src.workspace.join("snapshots").join(&tag),
+            }],
+        )
+        .context("journaling fork intent")?;
+        self.create_vm_snapshot(id, &tag).await?;
+        let mut children: Vec<VmRecord> = Vec::with_capacity(names.len());
+        let mut failure = None;
+        for name in &names {
+            match self.fork_child_vz(&src, &tag, name, actor, &op).await {
+                Ok(child) => children.push(child),
+                Err(e) => {
+                    failure = Some(e.context(format!("forking child {name}")));
+                    break;
+                }
+            }
+        }
+        if let Some(e) = failure {
+            // All-or-nothing, as for the KVM fork.
+            for child in &children {
+                let _ = self.delete(child.id).await;
+            }
+            if let Err(e) = self.delete_vm_snapshot(id, &tag).await {
+                tracing::warn!(vm = %id, tag, error = %e, "removing fork snapshot failed");
+            }
+            op.finish();
+            return Err(e);
+        }
+        if let Err(e) = self.delete_vm_snapshot(id, &tag).await {
+            tracing::warn!(vm = %id, tag, error = %e, "removing fork snapshot failed");
+        }
+        op.finish();
+        let ids: Vec<String> = children.iter().map(|c| c.id.to_string()).collect();
+        audit_event(
+            "vm.fork",
+            &[
+                ("vm_id", &id.to_string()),
+                ("count", &count.to_string()),
+                ("children", &ids.join(",")),
+                ("backend", "vz"),
+            ],
+        );
+        Ok(children)
+    }
+
+    async fn fork_child_vz(
+        self: &Arc<Self>,
+        src: &VmRecord,
+        tag: &str,
+        name: &str,
+        actor: Option<&str>,
+        op: &OpGuard,
+    ) -> Result<VmRecord> {
+        self.admit_fork_child(src).await?;
+        let id = Uuid::new_v4();
+        op.record(Resource::ForkChild { vm_id: id })
+            .context("journaling fork child")?;
+        let workspace = self.cfg.state_dir.join("instances").join(id.to_string());
+        std::fs::create_dir_all(&workspace)?;
+        let (parent_ws, child_ws, tag_owned) =
+            (src.workspace.clone(), workspace.clone(), tag.to_string());
+        let disk = tokio::task::spawn_blocking(move || {
+            fluxvm_apple::prepare_fork_child(&parent_ws, &tag_owned, &child_ws)
+        })
+        .await
+        .context("fork child file preparation panicked")?;
+        let disk = match disk {
+            Ok(d) => d,
+            Err(e) => {
+                let _ = self.delete(id).await;
+                let _ = std::fs::remove_dir_all(&workspace);
+                return Err(e.context("preparing the child's files"));
+            }
+        };
+        let mut req = src.request.clone();
+        req.name = name.to_string();
+        req.loadvm_tag = None;
+        if let Some(actor) = actor {
+            req.created_by_token = Some(actor.to_string());
+        }
+        let mut labels = src.labels.clone();
+        labels.insert(FORKED_FROM_LABEL.to_string(), src.id.to_string());
+        let mut record = src.clone();
+        record.id = id;
+        record.name = req.name.clone();
+        record.status = VmStatus::Stopped;
+        record.pid = None;
+        record.created_at = Utc::now();
+        record.expires_at = req
+            .ttl_seconds
+            .map(|s| Utc::now() + Duration::seconds(s as i64));
+        record.workspace = workspace.clone();
+        record.disk = disk;
+        record.seed_disk = src
+            .seed_disk
+            .as_ref()
+            .map(|_| workspace.join("seed.img"))
+            .filter(|p| p.is_file());
+        record.control_socket = None;
+        record.log_path = workspace.join("console.log");
+        record.error = None;
+        record.request = req;
+        record.tap_name = None;
+        record.netns = None;
+        record.vsock_socket = None;
+        record.dhcp_leasefile = None;
+        record.guest_ip = None;
+        record.labels = labels;
+        let needs_cid = src.guest_cid.is_some();
+        if let Err(e) = self
+            .store
+            .insert_with_cid(record, needs_cid, FIRST_GUEST_CID)
+            .await
+        {
+            let _ = std::fs::remove_dir_all(&workspace);
+            return Err(e);
+        }
+        let started = self.start_from_snapshot(id, tag).await;
+        let _ = std::fs::remove_dir_all(workspace.join("snapshots").join(tag));
+        match started {
+            Ok(vm) => {
+                reset_child_identity(&vm, name).await;
+                Ok(vm)
+            }
+            Err(e) => {
+                let _ = self.delete(id).await;
+                Err(e)
+            }
+        }
+    }
+
     async fn fork_children(
         self: &Arc<Self>,
         src: &VmRecord,
@@ -133,24 +316,7 @@ impl VmManager {
         actor: Option<&str>,
         op: &OpGuard,
     ) -> Result<VmRecord> {
-        let ledger = self.store.quota_ledger().await?;
-        if let Some(tenant) = src.request.tenant.as_deref()
-            && !self.cfg.policy.tenants.is_empty()
-        {
-            fluxvm_core::policy::enforce_tenant_totals(
-                tenant,
-                src.request.vcpus,
-                src.request.memory_mib,
-                &self.cfg.policy,
-                &ledger,
-            )?;
-        }
-        fluxvm_core::policy::enforce_host_totals(
-            src.request.vcpus,
-            src.request.memory_mib,
-            &self.cfg.policy,
-            &fluxvm_core::policy::ledger_for_host_admission(&ledger),
-        )?;
+        self.admit_fork_child(src).await?;
 
         let id = Uuid::new_v4();
         op.record(Resource::ForkChild { vm_id: id })
@@ -328,6 +494,59 @@ async fn reset_child_identity(vm: &VmRecord, hostname: &str) {
     }
 }
 
+/// What a `vz` fork needs. Children resume the parent's saved device state, so they keep its MAC and address: each
+/// must have a network of its own (none, or a per-VM userspace NAT), nothing may bind a fixed host port, and nothing
+/// may be shared that two running VMs cannot both own.
+pub(crate) fn check_vz_forkable(src: &VmRecord, count: u32) -> Result<()> {
+    use fluxvm_core::model::AppleGuest;
+    if count == 0 || count > MAX_FORK_COUNT {
+        bail!("count must be between 1 and {MAX_FORK_COUNT}");
+    }
+    if src.status != VmStatus::Running && src.status != VmStatus::Paused {
+        bail!(
+            "fork needs a running or paused VM (status={:?})",
+            src.status
+        );
+    }
+    if src.request.storage != StorageBackend::Default {
+        bail!("fork supports local file-backed disks only");
+    }
+    let apple = src.request.apple.clone().unwrap_or_default();
+    if apple.guest_os == AppleGuest::Macos {
+        bail!("fork of a macOS guest is not supported: its auxiliary storage is bound to one VM");
+    }
+    if !apple.extra_disks.is_empty() {
+        bail!("fork of a vz guest with extra disks is not supported: a child would share them");
+    }
+    if apple.vmnet.is_some() || apple.bridge_interface.is_some() || !apple.networks.is_empty() {
+        bail!(
+            "fork needs a network of its own per child: bridged, vmnet and private-network guests would put two VMs \
+             with one MAC on a shared segment"
+        );
+    }
+    match &src.request.network {
+        NetworkSpec::None => {}
+        NetworkSpec::User { forwards } if forwards.is_empty() && apple.usernet.is_some() => {}
+        NetworkSpec::User { .. } => {
+            bail!(
+                "fork needs network mode none, or mode user with apple.usernet and no forwards: on the Mac's NAT the \
+                 children would share the parent's MAC and address"
+            );
+        }
+        _ => bail!("fork of a vz guest needs network mode none or user"),
+    }
+    if apple
+        .usernet
+        .as_ref()
+        .is_some_and(|u| !u.port_forwards.is_empty())
+    {
+        bail!(
+            "fork is refused while apple.usernet has port forwards: every child would bind the same host port"
+        );
+    }
+    Ok(())
+}
+
 pub(crate) fn check_forkable(src: &VmRecord, count: u32) -> Result<()> {
     if count == 0 || count > MAX_FORK_COUNT {
         bail!("count must be between 1 and {MAX_FORK_COUNT}");
@@ -410,5 +629,61 @@ mod tests {
         assert!(format!("{err:#}").contains("flux-vm"));
         let err = check_forkable(&record(netns, "flux-vm", "stopped"), 2).unwrap_err();
         assert!(format!("{err:#}").contains("running"));
+    }
+
+    fn vz_record(extra: serde_json::Value, status: &str) -> VmRecord {
+        let mut r = serde_json::to_value(record(serde_json::json!({"mode": "user"}), "vz", status))
+            .unwrap();
+        let req = r["request"].as_object_mut().unwrap();
+        for (k, v) in extra.as_object().unwrap() {
+            req.insert(k.clone(), v.clone());
+        }
+        serde_json::from_value(r).unwrap()
+    }
+
+    #[test]
+    fn vz_fork_admission_rules() {
+        let un = serde_json::json!({"usernet": {}});
+        let ok = vz_record(serde_json::json!({"apple": un}), "running");
+        assert!(check_vz_forkable(&ok, 2).is_ok());
+        assert!(format!("{:#}", check_vz_forkable(&ok, 0).unwrap_err()).contains("count"));
+
+        // The Mac's NAT: children would share the parent's MAC and address.
+        let nat = vz_record(serde_json::json!({}), "running");
+        let err = check_vz_forkable(&nat, 2).unwrap_err();
+        assert!(format!("{err:#}").contains("apple.usernet"), "{err:#}");
+
+        // Host port forwards would be bound by every child.
+        let fwd = vz_record(
+            serde_json::json!({"apple": {"usernet": {"port_forwards": [
+                {"protocol": "tcp", "host_port": 8080, "guest_port": 80}]}}}),
+            "running",
+        );
+        assert!(format!("{:#}", check_vz_forkable(&fwd, 1).unwrap_err()).contains("port forwards"));
+
+        let stopped = vz_record(serde_json::json!({"apple": un}), "stopped");
+        assert!(format!("{:#}", check_vz_forkable(&stopped, 1).unwrap_err()).contains("running"));
+
+        let mac = vz_record(
+            serde_json::json!({"apple": {"guest_os": "macos", "usernet": {}}}),
+            "running",
+        );
+        assert!(format!("{:#}", check_vz_forkable(&mac, 1).unwrap_err()).contains("macOS"));
+
+        let disks = vz_record(
+            serde_json::json!({"apple": {"usernet": {}, "extra_disks": [
+                {"name": "d", "kind": "image", "path": "/tmp/d.raw"}]}}),
+            "running",
+        );
+        assert!(format!("{:#}", check_vz_forkable(&disks, 1).unwrap_err()).contains("extra disks"));
+
+        let none = {
+            let mut r =
+                serde_json::to_value(record(serde_json::json!({"mode": "none"}), "vz", "running"))
+                    .unwrap();
+            r["request"]["backend"] = "vz".into();
+            serde_json::from_value::<VmRecord>(r).unwrap()
+        };
+        assert!(check_vz_forkable(&none, 3).is_ok());
     }
 }
