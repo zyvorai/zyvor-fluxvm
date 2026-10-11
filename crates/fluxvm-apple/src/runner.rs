@@ -476,6 +476,32 @@ pub fn snapshot_dir(workspace: &Path, tag: &str) -> PathBuf {
     workspace.join("snapshots").join(tag)
 }
 
+/// Copies snapshot `tag` of `parent` out of the VM's workspace into `dest`, laid out as a workspace of its own (the saved
+/// state, disk and firmware files under `snapshots/<dest_tag>`, and the machine identifier, MAC and seed beside them), so
+/// the checkpoint outlives the VM and [`prepare_fork_child`] can restore children from it unchanged. All clones are
+/// copy-on-write on APFS. This is what a branch is made of.
+pub fn export_checkpoint(parent: &Path, tag: &str, dest: &Path, dest_tag: &str) -> Result<()> {
+    let src = snapshot_dir(parent, tag);
+    if !src.join(STATE_FILE).is_file() {
+        bail!("snapshot {tag:?} has no saved state at {}", src.display());
+    }
+    let dst = snapshot_dir(dest, dest_tag);
+    fs::create_dir_all(&dst).with_context(|| format!("creating {}", dst.display()))?;
+    for name in std::iter::once(&STATE_FILE).chain(SNAPSHOT_FILES.iter()) {
+        let from = src.join(name);
+        if from.is_file() {
+            clone_file(&from, &dst.join(name))?;
+        }
+    }
+    for name in ["generic-id.bin", MAC_FILE, "seed.img"] {
+        let from = parent.join(name);
+        if from.is_file() {
+            clone_file(&from, &dest.join(name))?;
+        }
+    }
+    Ok(())
+}
+
 /// Populates a fork child's workspace `child` from snapshot `tag` of the parent workspace `parent`: the saved state and
 /// its disk and firmware files (so the child can be started from the same tag), a clone of the snapshot disk as its
 /// `root.raw`, and the per-VM files the saved device state is bound to: the machine identifier (`generic-id.bin`), the
@@ -1007,6 +1033,51 @@ mod one_shot_tests {
         // The parent's own MAC is still recycled as before.
         release_mac_to(&parent, &pool);
         assert_eq!(fs::read_dir(&pool).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn a_checkpoint_outlives_its_vm_and_restores_children() {
+        let dir = tempfile::tempdir().unwrap();
+        let (vm, branch, child) = (
+            dir.path().join("vm"),
+            dir.path().join("branch"),
+            dir.path().join("child"),
+        );
+        for w in [&vm, &child] {
+            fs::create_dir_all(w).unwrap();
+        }
+        let snap = snapshot_dir(&vm, "s");
+        fs::create_dir_all(&snap).unwrap();
+        fs::write(snap.join(STATE_FILE), b"state").unwrap();
+        fs::write(snap.join("disk.raw"), b"disk").unwrap();
+        fs::write(snap.join("efi.bin"), b"efi").unwrap();
+        fs::write(vm.join("generic-id.bin"), b"mid").unwrap();
+        fs::write(vm.join(MAC_FILE), "02:11:22:33:44:55").unwrap();
+        fs::write(vm.join("seed.img"), b"seed").unwrap();
+
+        export_checkpoint(&vm, "s", &branch, "ckpt").unwrap();
+        // The VM and its snapshot go away; the checkpoint is self-contained.
+        fs::remove_dir_all(&vm).unwrap();
+        let disk = prepare_fork_child(&branch, "ckpt", &child).unwrap();
+        assert_eq!(fs::read(&disk).unwrap(), b"disk");
+        assert_eq!(
+            fs::read(snapshot_dir(&child, "ckpt").join(STATE_FILE)).unwrap(),
+            b"state"
+        );
+        assert_eq!(fs::read(child.join("generic-id.bin")).unwrap(), b"mid");
+        assert_eq!(
+            fs::read_to_string(child.join(MAC_FILE)).unwrap(),
+            "02:11:22:33:44:55"
+        );
+        assert!(child.join(MAC_SHARED_MARKER).exists());
+        // Several children from one checkpoint do not disturb it.
+        let child2 = dir.path().join("child2");
+        fs::create_dir_all(&child2).unwrap();
+        prepare_fork_child(&branch, "ckpt", &child2).unwrap();
+        assert_eq!(
+            fs::read(snapshot_dir(&branch, "ckpt").join("disk.raw")).unwrap(),
+            b"disk"
+        );
     }
 
     #[test]

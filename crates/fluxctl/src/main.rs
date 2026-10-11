@@ -499,6 +499,12 @@ enum Command {
         id: Uuid,
         name: String,
     },
+    /// Named, durable checkpoints of a running vz guest: create one, start new VMs from it
+    /// any number of times, list, delete. REST: `/v1/vms/{id}/branches`, `/v1/branches[/{id}[/start]]`.
+    Branch {
+        #[command(subcommand)]
+        command: BranchCommand,
+    },
     /// Named VM specs: save once, create many. REST: `/v1/vm-templates[/{name}]`,
     /// `POST /v1/vm-templates/{name}/instantiate`.
     VmTemplate {
@@ -1457,6 +1463,51 @@ enum SandboxCommand {
         #[arg(value_parser = output::parse_vm_ref)]
         id: Uuid,
         cs: Uuid,
+    },
+}
+
+#[derive(Subcommand)]
+enum BranchCommand {
+    /// Checkpoint a running vz guest (it keeps running; held briefly for the save).
+    Create {
+        #[arg(value_parser = output::parse_vm_ref)]
+        vm: Uuid,
+        name: String,
+        /// `key=value`, repeatable.
+        #[arg(long = "label")]
+        labels: Vec<String>,
+    },
+    /// List branches: all of them, or one VM's.
+    List {
+        #[arg(value_parser = output::parse_vm_ref)]
+        vm: Option<Uuid>,
+    },
+    Show {
+        id: Uuid,
+    },
+    Delete {
+        id: Uuid,
+    },
+    /// Start N new VMs from a branch, as `fork-vm` does (same identity, network and readiness flags).
+    Start {
+        id: Uuid,
+        #[arg(short = 'n', long, default_value_t = 1)]
+        count: u32,
+        /// Names are `<prefix>-<n>` (default `<branch name>`).
+        #[arg(long)]
+        prefix: Option<String>,
+        #[arg(long, value_parser = ["unique", "best-effort", "preserve"])]
+        identity: Option<String>,
+        #[arg(long, value_parser = ["auto", "isolated", "none", "preserve"])]
+        network: Option<String>,
+        #[arg(long)]
+        parallel: Option<u8>,
+        #[arg(long)]
+        ready: Option<String>,
+        #[arg(long)]
+        ready_timeout: Option<u32>,
+        #[arg(long = "hook")]
+        hooks: Vec<String>,
     },
 }
 
@@ -3092,6 +3143,59 @@ async fn run_remote(
             let body = create::create_body(&args)?;
             pretty(&r.call(Method::POST, "/v1/vms", Some(body)).await?)?
         }
+        Command::Branch { command } => match command {
+            BranchCommand::Create { vm, name, labels } => pretty(
+                &r.call(
+                    Method::POST,
+                    &format!("/v1/vms/{vm}/branches"),
+                    Some(json!({"name": name, "labels": parse_labels(&labels)?})),
+                )
+                .await?,
+            )?,
+            BranchCommand::List { vm } => {
+                let path = match vm {
+                    Some(v) => format!("/v1/vms/{v}/branches"),
+                    None => "/v1/branches".to_string(),
+                };
+                pretty(&r.call(Method::GET, &path, None).await?)?
+            }
+            BranchCommand::Show { id } => pretty(
+                &r.call(Method::GET, &format!("/v1/branches/{id}"), None)
+                    .await?,
+            )?,
+            BranchCommand::Delete { id } => {
+                r.call(Method::DELETE, &format!("/v1/branches/{id}"), None)
+                    .await?;
+                println!("deleted {id}");
+            }
+            BranchCommand::Start {
+                id,
+                count,
+                prefix,
+                identity,
+                network,
+                parallel,
+                ready,
+                ready_timeout,
+                hooks,
+            } => pretty(
+                &r.call(
+                    Method::POST,
+                    &format!("/v1/branches/{id}/start"),
+                    Some(fork_body(
+                        count,
+                        prefix,
+                        identity,
+                        network,
+                        parallel,
+                        ready,
+                        ready_timeout,
+                        &hooks,
+                    )?),
+                )
+                .await?,
+            )?,
+        },
         Command::VmTemplate { command } => match command {
             TemplateCommand::List => {
                 let v = r.call(Method::GET, "/v1/vm-templates", None).await?;
@@ -3488,7 +3592,7 @@ async fn run_remote(
         }
         _ => anyhow::bail!(
             "this command is not available with --server; supported: run, ssh, create, vm-template, list, get, \
-             status <vm>, start, stop, restart, delete, pause, resume, label, rename-vm, clone-vm, fork-vm, import-image, snapshot, \
+             status <vm>, start, stop, restart, delete, pause, resume, label, rename-vm, clone-vm, fork-vm, branch, import-image, snapshot, \
              snapshot-list, snapshot-delete, backup, disk, events [-f], serial, quota, healthz, \
              readyz, wait (not --for agent)"
         ),
@@ -4029,6 +4133,66 @@ async fn main() -> Result<()> {
             )
             .await?
         }
+        Command::Branch { command } => match command {
+            BranchCommand::Create { vm, name, labels } => {
+                let b = m
+                    .create_branch(vm, name, parse_labels(&labels)?, None)
+                    .await?;
+                println!("{}", serde_json::to_string_pretty(&b)?);
+            }
+            BranchCommand::List { vm } => {
+                let items = m.list_branches(vm).await?;
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({"items": items}))?
+                );
+            }
+            BranchCommand::Show { id } => {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&m.get_branch(id).await?)?
+                );
+            }
+            BranchCommand::Delete { id } => {
+                m.delete_branch(id, None).await?;
+                println!("deleted {id}");
+            }
+            BranchCommand::Start {
+                id,
+                count,
+                prefix,
+                identity,
+                network,
+                parallel,
+                ready,
+                ready_timeout,
+                hooks,
+            } => {
+                let body = fork_body(
+                    count,
+                    prefix,
+                    identity,
+                    network,
+                    parallel,
+                    ready,
+                    ready_timeout,
+                    &hooks,
+                )?;
+                let spec: fluxvm_scheduler::fork::ForkSpec = serde_json::from_value(body)?;
+                let report = m.start_branch(id, spec, None).await?;
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "items": report.children,
+                        "fork": {
+                            "total_ms": report.total_ms,
+                            "parallelism": report.parallelism,
+                            "children": report.reports,
+                        },
+                    }))?
+                );
+            }
+        },
         Command::VmTemplate { command } => match command {
             TemplateCommand::List => {
                 output::print_list(format, &m.list_vm_templates()?, output::TEMPLATE_COLUMNS)?
@@ -7733,5 +7897,90 @@ mod fork_ready_tests {
         for bad in ["soon", "tcp:", "tcp:0", "tcp:70000", "http:x"] {
             assert!(parse_fork_ready(bad).is_err(), "{bad}");
         }
+    }
+}
+
+/// `--label key=value` pairs.
+fn parse_labels(labels: &[String]) -> anyhow::Result<std::collections::BTreeMap<String, String>> {
+    labels
+        .iter()
+        .map(|l| {
+            l.split_once('=')
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .ok_or_else(|| anyhow::anyhow!("--label wants key=value, got {l:?}"))
+        })
+        .collect()
+}
+
+/// The fork-spec JSON the `fork-vm` and `branch start` flags describe.
+#[allow(clippy::too_many_arguments)]
+fn fork_body(
+    count: u32,
+    prefix: Option<String>,
+    identity: Option<String>,
+    network: Option<String>,
+    parallel: Option<u8>,
+    ready: Option<String>,
+    ready_timeout: Option<u32>,
+    hooks: &[String],
+) -> anyhow::Result<serde_json::Value> {
+    use serde_json::json;
+    let mut body = json!({"count": count});
+    if let Some(p) = prefix {
+        body["name_prefix"] = json!(p);
+    }
+    if let Some(i) = identity {
+        body["identity"] = json!(i);
+    }
+    if let Some(n) = network {
+        body["network"] = json!(n);
+    }
+    if let Some(p) = parallel {
+        body["parallelism"] = json!(p);
+    }
+    if let Some(r) = ready {
+        body["ready"] = parse_fork_ready(&r)?;
+    }
+    if let Some(t) = ready_timeout {
+        body["ready_timeout_seconds"] = json!(t);
+    }
+    if !hooks.is_empty() {
+        body["hooks"] = json!(
+            hooks
+                .iter()
+                .map(|h| h.split_whitespace().collect::<Vec<_>>())
+                .collect::<Vec<_>>()
+        );
+    }
+    Ok(body)
+}
+
+#[cfg(test)]
+mod branch_cli_tests {
+    use super::{fork_body, parse_labels};
+    use serde_json::json;
+
+    #[test]
+    fn labels_and_the_start_body_are_built_from_flags() {
+        let l = parse_labels(&["a=1".into(), "team=x=y".into()]).unwrap();
+        assert_eq!(l["a"], "1");
+        assert_eq!(l["team"], "x=y");
+        assert!(parse_labels(&["nokey".into()]).is_err());
+        let b = fork_body(
+            2,
+            Some("w".into()),
+            Some("preserve".into()),
+            None,
+            Some(4),
+            Some("tcp:22".into()),
+            Some(30),
+            &["touch /tmp/x".into()],
+        )
+        .unwrap();
+        assert_eq!(
+            b,
+            json!({"count": 2, "name_prefix": "w", "identity": "preserve", "parallelism": 4,
+                   "ready": {"tcp": 22}, "ready_timeout_seconds": 30, "hooks": [["touch", "/tmp/x"]]})
+        );
     }
 }

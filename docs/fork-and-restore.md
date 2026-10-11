@@ -145,6 +145,36 @@ Not done:
 - A plain snapshot restore of the same VM (`vm_restore.rs`) does not call
   `ResetIdentity`; it only waits for the agent to answer again.
 
+## Branches
+
+A branch is a **named, durable checkpoint** of a running `vz` Linux guest: its saved machine state and disk (APFS
+clones, so it costs nothing until something writes) plus the VM record it came from, kept under
+`<state_dir>/branches/<id>/`, outside the VM's workspace. Start any number of VMs from it, now or after the source VM
+is gone.
+
+```sh
+fluxctl branch create <vm> checkpoint-a --label purpose=demo   # the guest keeps running; held ~0.4 s
+fluxctl branch list [<vm>]
+fluxctl branch start <branch> -n 4 --prefix worker             # same flags as fork-vm: --identity --network --ready --hook
+fluxctl branch delete <branch>
+```
+
+REST: `POST /v1/vms/{id}/branches {"name", "labels"}`, `GET /v1/vms/{id}/branches`, `GET /v1/branches[/{id}]`,
+`DELETE /v1/branches/{id}`, `POST /v1/branches/{id}/start` (the body and the response are the fork spec and report).
+
+- **Same machinery as fork.** `start` restores each VM from the checkpoint with the same identity reset (strict by
+  default), token rotation, parallel restore, hooks and readiness; the same limits apply (a Linux guest on
+  `apple.usernet` or no network, no extra disks).
+- **Semantics are those of the checkpoint instant:** a file written before `create` is in every started VM, one written
+  after is in none. Verified on hardware.
+- **Lineage.** A VM started from a branch carries `fluxvm.dev/branch=<id>`; a branch taken of it records
+  `parent_branch`. Deleting a branch does not touch VMs started from it or branches derived from it (their files are
+  clones).
+- **Secrets.** The directory is 0700 and holds the source VM's record, including its agent token; the API never returns
+  it. The saved memory also contains whatever the guest held, as with any snapshot.
+- **Not here yet:** committing a branch's disk back, rebase, flatten, a disk diff, MCP tools. A crash during `create`
+  can leave a hidden `.<id>.partial` directory in `branches/` (ignored by listing; safe to delete).
+
 ## Hooks and readiness
 
 `hooks` (argv lists, at most 8) run in each child **after** its identity is reset and **before** readiness is probed,
