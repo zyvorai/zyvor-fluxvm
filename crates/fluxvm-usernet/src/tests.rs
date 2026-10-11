@@ -5,6 +5,7 @@
 //! `VZFileHandleNetworkDeviceAttachment` guest would exchange, against real host sockets on 127.0.0.1.
 
 use super::*;
+use std::net::IpAddr;
 use std::time::Duration;
 use tokio::net::UdpSocket;
 use tokio::task::JoinHandle;
@@ -72,39 +73,87 @@ fn cfg_allow_loopback() -> UserNetConfig {
 
 #[derive(Debug, Clone)]
 struct Seg {
-    src: Ipv4Addr,
-    dst: Ipv4Addr,
+    src: IpAddr,
+    dst: IpAddr,
     sport: u16,
     dport: u16,
     seq: u32,
     ack: u32,
     flags: u8,
+    window: u16,
     mss: Option<u16>,
+    wscale: Option<u8>,
+    sack_ok: bool,
+    sack: Vec<(u32, u32)>,
     payload: Vec<u8>,
 }
 
+/// A TCP segment (IPv4 or IPv6) in an Ethernet frame.
 fn as_tcp(f: &[u8]) -> Option<Seg> {
     let e = parse_eth(f)?;
-    if e.ethertype != ETH_IPV4 {
-        return None;
-    }
-    let ip = parse_ipv4(e.payload)?;
-    if ip.proto != PROTO_TCP {
-        return None;
-    }
-    assert_eq!(l4_checksum(ip.src, ip.dst, PROTO_TCP, ip.payload), 0, "bad tcp checksum");
-    let t = parse_tcp(ip.payload)?;
+    let (src, dst, l4): (IpAddr, IpAddr, &[u8]) = match e.ethertype {
+        ETH_IPV4 => {
+            let ip = parse_ipv4(e.payload)?;
+            if ip.proto != PROTO_TCP || ip.fragment {
+                return None;
+            }
+            (ip.src.into(), ip.dst.into(), ip.payload)
+        }
+        ETH_IPV6 => {
+            let ip = parse_ipv6(e.payload)?;
+            if ip.next_header != PROTO_TCP {
+                return None;
+            }
+            (ip.src.into(), ip.dst.into(), ip.payload)
+        }
+        _ => return None,
+    };
+    assert_eq!(l4_checksum(src, dst, PROTO_TCP, l4), 0, "bad tcp checksum");
+    let t = parse_tcp(l4)?;
     Some(Seg {
-        src: ip.src,
-        dst: ip.dst,
+        src,
+        dst,
         sport: t.sport,
         dport: t.dport,
         seq: t.seq,
         ack: t.ack,
         flags: t.flags,
+        window: t.window,
         mss: t.mss,
+        wscale: t.wscale,
+        sack_ok: t.sack_ok,
+        sack: t.sack.clone(),
         payload: t.payload.to_vec(),
     })
+}
+
+/// A UDP datagram over IPv6 in an Ethernet frame: (src, dst, sport, dport, payload).
+fn as_udp6(f: &[u8]) -> Option<(Ipv6Addr, Ipv6Addr, u16, u16, Vec<u8>)> {
+    let e = parse_eth(f)?;
+    if e.ethertype != ETH_IPV6 {
+        return None;
+    }
+    let ip = parse_ipv6(e.payload)?;
+    if ip.next_header != PROTO_UDP {
+        return None;
+    }
+    assert_eq!(l4_checksum(ip.src, ip.dst, PROTO_UDP, ip.payload), 0, "bad udp6 checksum");
+    let u = parse_udp(ip.payload)?;
+    Some((ip.src, ip.dst, u.sport, u.dport, u.payload.to_vec()))
+}
+
+/// An ICMPv6 message in an Ethernet frame: (src, dst, hop limit, message `[type, code, csum, body]`).
+fn as_icmp6(f: &[u8]) -> Option<(Ipv6Addr, Ipv6Addr, u8, Vec<u8>)> {
+    let e = parse_eth(f)?;
+    if e.ethertype != ETH_IPV6 {
+        return None;
+    }
+    let ip = parse_ipv6(e.payload)?;
+    if ip.next_header != PROTO_ICMPV6 {
+        return None;
+    }
+    assert_eq!(l4_checksum(ip.src, ip.dst, PROTO_ICMPV6, ip.payload), 0, "bad icmpv6 checksum");
+    Some((ip.src, ip.dst, ip.hop_limit, ip.payload.to_vec()))
 }
 
 fn as_udp(f: &[u8]) -> Option<(Ipv4Addr, Ipv4Addr, u16, u16, Vec<u8>)> {
@@ -113,7 +162,7 @@ fn as_udp(f: &[u8]) -> Option<(Ipv4Addr, Ipv4Addr, u16, u16, Vec<u8>)> {
         return None;
     }
     let ip = parse_ipv4(e.payload)?;
-    if ip.proto != PROTO_UDP {
+    if ip.proto != PROTO_UDP || ip.fragment {
         return None;
     }
     assert_eq!(checksum(&e.payload[..20]), 0, "bad ip checksum");
@@ -130,18 +179,42 @@ impl Guest {
             .unwrap();
     }
 
-    async fn send_ip(&self, dst: Ipv4Addr, proto: u8, l4: &[u8]) {
-        let ip = build_ipv4(self.cfg.guest_ip, dst, proto, l4);
-        self.send_eth(self.cfg.gateway_mac, ETH_IPV4, &ip).await;
+    /// The guest's SLAAC address (any address in the advertised /64 works; this one is fixed for the tests).
+    fn ip6(&self) -> Ipv6Addr {
+        let mut s = self.cfg.ipv6_prefix.segments();
+        s[7] = 0x1234;
+        Ipv6Addr::from(s)
     }
 
-    async fn send_udp(&self, dst: Ipv4Addr, sport: u16, dport: u16, data: &[u8]) {
-        let u = build_udp(self.cfg.guest_ip, dst, sport, dport, data);
+    fn src_for(&self, dst: IpAddr) -> IpAddr {
+        match dst {
+            IpAddr::V4(_) => self.cfg.guest_ip.into(),
+            IpAddr::V6(_) => self.ip6().into(),
+        }
+    }
+
+    async fn send_ip(&self, dst: impl Into<IpAddr>, proto: u8, l4: &[u8]) {
+        match dst.into() {
+            IpAddr::V4(d) => {
+                let ip = build_ipv4(self.cfg.guest_ip, d, proto, l4);
+                self.send_eth(self.cfg.gateway_mac, ETH_IPV4, &ip).await;
+            }
+            IpAddr::V6(d) => {
+                let ip = build_ipv6(self.ip6(), d, proto, 64, l4);
+                self.send_eth(self.cfg.gateway_mac, ETH_IPV6, &ip).await;
+            }
+        }
+    }
+
+    async fn send_udp(&self, dst: impl Into<IpAddr>, sport: u16, dport: u16, data: &[u8]) {
+        let dst = dst.into();
+        let u = build_udp(self.src_for(dst), dst, sport, dport, data);
         self.send_ip(dst, PROTO_UDP, &u).await;
     }
 
-    async fn send_tcp(&self, dst: Ipv4Addr, sport: u16, dport: u16, o: TcpOut) {
-        let seg = build_tcp(self.cfg.guest_ip, dst, sport, dport, &o);
+    async fn send_tcp(&self, dst: impl Into<IpAddr>, sport: u16, dport: u16, o: TcpOut) {
+        let dst = dst.into();
+        let seg = build_tcp(self.src_for(dst), dst, sport, dport, &o);
         self.send_ip(dst, PROTO_TCP, &seg).await;
     }
 
@@ -178,7 +251,7 @@ impl Guest {
 /// A minimal guest-side TCP endpoint.
 struct Conn<'a> {
     g: &'a Guest,
-    remote: Ipv4Addr,
+    remote: IpAddr,
     sport: u16,
     dport: u16,
     snd_nxt: u32,
@@ -190,7 +263,8 @@ struct Conn<'a> {
 }
 
 impl<'a> Conn<'a> {
-    async fn connect(g: &'a Guest, remote: Ipv4Addr, sport: u16, dport: u16) -> Conn<'a> {
+    async fn connect(g: &'a Guest, remote: impl Into<IpAddr>, sport: u16, dport: u16) -> Conn<'a> {
+        let remote = remote.into();
         let isn = 7000;
         g.send_tcp(
             remote,
@@ -206,7 +280,7 @@ impl<'a> Conn<'a> {
             .await;
         assert_eq!(sa.flags & (SYN | ACK), SYN | ACK, "expected SYN-ACK, got {sa:?}");
         assert_eq!(sa.ack, isn + 1);
-        let mut c = Conn {
+        let c = Conn {
             g,
             remote,
             sport,
@@ -331,7 +405,7 @@ async fn udp_echo_server() -> u16 {
     let s = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let port = s.local_addr().unwrap().port();
     tokio::spawn(async move {
-        let mut b = vec![0u8; 2048];
+        let mut b = vec![0u8; 65535];
         while let Ok((n, p)) = s.recv_from(&mut b).await {
             let _ = s.send_to(&b[..n], p).await;
         }
@@ -651,7 +725,7 @@ async fn tcp_port_forward_host_to_guest() {
     let syn = g
         .recv_where("forward SYN", |f| as_tcp(f).filter(|s| s.flags & (SYN | ACK) == SYN))
         .await;
-    assert_eq!((syn.src, syn.dst, syn.dport), (cfg.gateway_ip, cfg.guest_ip, 8080));
+    assert_eq!((syn.src, syn.dst, syn.dport), (IpAddr::from(cfg.gateway_ip), IpAddr::from(cfg.guest_ip), 8080));
     let gisn = 5000u32;
     // Reply as the guest: swap addresses.
     let reply = |o: TcpOut| build_tcp(cfg.guest_ip, cfg.gateway_ip, 8080, syn.sport, &o);
@@ -765,3 +839,5 @@ async fn frame_tap_sees_both_directions() {
     assert_eq!(dirs, vec![TAP_FROM_GUEST, TAP_TO_GUEST]);
     task.abort();
 }
+
+mod more;
