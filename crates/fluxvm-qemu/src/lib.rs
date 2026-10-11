@@ -6,6 +6,7 @@ mod confidential;
 pub mod disks;
 pub mod numa;
 mod qmp;
+pub use qmp::GuestMemoryStats;
 pub mod receiver;
 
 pub use confidential::{
@@ -200,6 +201,18 @@ pub fn build_args(
         "-device".into(),
         "virtio-scsi-pci,id=scsi0,bus=pcie.0".into(),
     ]);
+    if let Some(balloon) = &req.balloon {
+        req.validate_balloon()?;
+        let on_off = |b: bool| if b { "on" } else { "off" };
+        a.extend([
+            "-device".into(),
+            format!(
+                "virtio-balloon-pci,id=balloon0,bus=pcie.0,deflate-on-oom={},free-page-reporting={}",
+                on_off(balloon.deflate_on_oom),
+                on_off(balloon.free_page_reporting)
+            ),
+        ]);
+    }
 
     a.extend(disks::boot_args(&ctx.workspace));
     a.extend(disks::cdrom_args(&req.cdroms));
@@ -535,6 +548,7 @@ impl VmBackend for QemuBackend {
         let sidecar_pids: Vec<u32> = virtiofsd_pids.iter().copied().chain(swtpm_pid).collect();
 
         let args = build_args(cfg, req, ctx, &virtiofs_sockets)?;
+        reset_balloon_target(&ctx.workspace);
         let spawned = fluxvm_core::process::spawn_vmm(
             &cfg.qemu_binary,
             &args,
@@ -670,6 +684,88 @@ pub async fn hotplug_memory(_cfg: &Config, vm: &VmRecord, add_memory_mib: u64) -
     let hotplugged =
         qmp::hotplug_memory(&vm.workspace.join("qmp.sock"), add_memory_mib, QMP_TIMEOUT).await?;
     Ok(vm.request.memory_mib.saturating_add(hotplugged))
+}
+
+/// Live guest memory of a QEMU VM: boot memory plus hot-added DIMMs.
+pub async fn live_memory_mib(vm: &VmRecord) -> Result<u64> {
+    let devices = qmp::query_memory_devices(&vm.workspace.join("qmp.sock"), QMP_TIMEOUT).await?;
+    Ok(vm
+        .request
+        .memory_mib
+        .saturating_add(qmp::sum_memory_devices_mib(&devices)))
+}
+
+/// Balloon state of a QEMU VM in the in-tree engine's terms: `target_mib`
+/// and `actual_mib` are memory taken away from the guest. Setting
+/// `balloon_mib` asks QEMU to leave the guest `memory - balloon_mib`.
+pub async fn balloon_control(
+    vm: &VmRecord,
+    balloon_mib: Option<u64>,
+    min_guest_mib: u64,
+) -> Result<(u64, u64, u64)> {
+    if vm.request.balloon.is_none() {
+        anyhow::bail!("this VM was created without a balloon device");
+    }
+    let sock = vm.workspace.join("qmp.sock");
+    let memory_mib = live_memory_mib(vm).await?;
+    let target = match balloon_mib {
+        Some(mib) => {
+            let max = memory_mib.saturating_sub(min_guest_mib);
+            if mib > max {
+                anyhow::bail!(
+                    "balloon of {mib} MiB leaves the guest under {min_guest_mib} MiB \
+                     (memory {memory_mib} MiB, max balloon {max} MiB)"
+                );
+            }
+            qmp::balloon_set(&sock, (memory_mib - mib) * 1024 * 1024, QMP_TIMEOUT).await?;
+            write_balloon_target(&vm.workspace, mib);
+            mib
+        }
+        None => read_balloon_target(&vm.workspace),
+    };
+    let actual_guest_mib = qmp::query_balloon(&sock, QMP_TIMEOUT).await? / (1024 * 1024);
+    Ok((
+        memory_mib,
+        target,
+        memory_mib.saturating_sub(actual_guest_mib),
+    ))
+}
+
+/// QEMU does not report the requested balloon target, only where the guest
+/// is now, so the last target set through FluxVM is kept in the workspace.
+fn balloon_target_path(workspace: &Path) -> PathBuf {
+    workspace.join("balloon-target-mib")
+}
+
+fn write_balloon_target(workspace: &Path, mib: u64) {
+    let _ = std::fs::write(balloon_target_path(workspace), mib.to_string());
+}
+
+fn read_balloon_target(workspace: &Path) -> u64 {
+    std::fs::read_to_string(balloon_target_path(workspace))
+        .ok()
+        .and_then(|s| s.trim().parse().ok())
+        .unwrap_or(0)
+}
+
+/// Clears the stored balloon target; a freshly launched QEMU starts with
+/// the balloon deflated.
+pub fn reset_balloon_target(workspace: &Path) {
+    let _ = std::fs::remove_file(balloon_target_path(workspace));
+}
+
+/// Guest memory statistics of a ballooned QEMU VM (see
+/// [`qmp::balloon_guest_stats`]).
+pub async fn balloon_guest_stats(vm: &VmRecord) -> Result<Option<GuestMemoryStats>> {
+    let Some(spec) = &vm.request.balloon else {
+        return Ok(None);
+    };
+    qmp::balloon_guest_stats(
+        &vm.workspace.join("qmp.sock"),
+        spec.stats_interval_secs,
+        QMP_TIMEOUT,
+    )
+    .await
 }
 
 /// Hot-add a virtio-net NIC on an already-created TAP. `index` selects
@@ -862,6 +958,7 @@ mod tests {
             hugepages: None,
             vfio_devices: vec![],
             numa: vec![],
+            balloon: None,
             pod_uid: None,
             secure_boot: None,
             tpm: None,
@@ -994,6 +1091,43 @@ mod tests {
             args.iter()
                 .any(|a| a.starts_with("virtio-scsi-pci,id=scsi0"))
         );
+    }
+
+    #[test]
+    fn no_balloon_device_unless_requested() {
+        let args = build_args(&cfg(), &req(2048), &ctx(), &[]).unwrap();
+        assert!(!args.iter().any(|a| a.starts_with("virtio-balloon-pci")));
+    }
+
+    #[test]
+    fn balloon_adds_a_reporting_device() {
+        let mut r = req(2048);
+        r.balloon = Some(fluxvm_core::model::BalloonSpec::default());
+        let args = build_args(&cfg(), &r, &ctx(), &[]).unwrap();
+        assert!(args.iter().any(|a| a
+            == "virtio-balloon-pci,id=balloon0,bus=pcie.0,deflate-on-oom=on,free-page-reporting=on"));
+
+        r.balloon = Some(fluxvm_core::model::BalloonSpec {
+            free_page_reporting: false,
+            deflate_on_oom: false,
+            stats_interval_secs: 0,
+        });
+        let args = build_args(&cfg(), &r, &ctx(), &[]).unwrap();
+        assert!(
+            args.iter()
+                .any(|a| a.ends_with("deflate-on-oom=off,free-page-reporting=off"))
+        );
+    }
+
+    #[test]
+    fn balloon_is_refused_with_pinned_memory() {
+        let mut r = req(2048);
+        r.balloon = Some(fluxvm_core::model::BalloonSpec::default());
+        r.hugepages = Some(true);
+        assert!(build_args(&cfg(), &r, &ctx(), &[]).is_err());
+        r.hugepages = None;
+        r.vfio_devices = vec!["0000:01:00.0".into()];
+        assert!(build_args(&cfg(), &r, &ctx(), &[]).is_err());
     }
 
     #[test]
@@ -1357,6 +1491,7 @@ mod snapshot_save_tests {
                 hugepages: None,
                 vfio_devices: vec![],
                 numa: vec![],
+                balloon: None,
                 pod_uid: None,
                 secure_boot: None,
                 tpm: None,

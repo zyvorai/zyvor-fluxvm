@@ -52,7 +52,7 @@ impl std::fmt::Display for PressureLevel {
 /// One sample of host memory state. A field is `None` when the host does not
 /// expose it (no PSI in the kernel, non-Linux, unreadable file); a threshold
 /// whose input is `None` is skipped rather than failing every create.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct HostPressure {
     pub mem_available_mib: Option<u64>,
     pub mem_total_mib: Option<u64>,
@@ -61,6 +61,7 @@ pub struct HostPressure {
     /// `full avg10` of `/proc/pressure/memory`, percent.
     pub psi_full_avg10: Option<f64>,
     /// macOS memory-pressure level.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub level: Option<PressureLevel>,
 }
 

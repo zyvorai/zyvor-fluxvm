@@ -2689,6 +2689,10 @@ impl VmManager {
             anyhow::bail!("numa requires backend qemu");
         }
         req.validate_numa()?;
+        if req.balloon.is_some() && req.backend != BackendKind::Qemu {
+            anyhow::bail!("balloon requires backend qemu");
+        }
+        req.validate_balloon()?;
 
         let result: Result<()> = async {
             if req.storage == StorageBackend::Shared {
@@ -5972,6 +5976,7 @@ mod tests {
             hugepages: None,
             vfio_devices: vec![],
             numa: vec![],
+            balloon: None,
             pod_uid: None,
             secure_boot: None,
             tpm: None,

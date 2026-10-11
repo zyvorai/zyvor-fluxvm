@@ -15,6 +15,8 @@ counts shared pages fairly. For the fork and restore side of density see
 | `GET /v1/vms/{id}/memory` (PSS, private, shared) | yes (parser unit tested) | not yet |
 | `scripts/bench-density-count.sh` | yes (shell, not run) | not yet |
 | Guest balloon driver reaching `actual_mib` | n/a | not yet |
+| QEMU `balloon` device, QMP balloon control, guest stats | yes (unit tests pass) | see Kairon `scripts/lab-elastic-memory.sh` |
+| `GET /v1/host/memory` | yes | see Kairon `scripts/lab-elastic-memory.sh` |
 
 Nothing in this batch has been run end-to-end on real VMs. No density numbers are claimed here; run the
 benchmark below to get them for your host.
@@ -43,8 +45,8 @@ curl -sS http://127.0.0.1:7788/v1/vms/$VM/balloon -H 'content-type: application/
   config-change interrupt.
 - `actual_mib` is the size the guest driver has reached so far. It lags the target and can stop short.
 - A balloon that would leave the guest under 64 MiB is rejected.
-- Only a **running** VM on the flux-vm KVM engine has a balloon. Other backends and stopped VMs return
-  400. `POST` is admin-only; `GET` is allowed for read-only tokens.
+- Only a **running** VM on the flux-vm KVM engine, the vz backend, or a QEMU VM created with
+  `balloon` (below) has a balloon. Other backends and stopped VMs return 400. `POST` is admin-only; `GET` is allowed for read-only tokens.
 - Setting the balloon is audited as `vm.balloon` (`vm_id`, `target_mib`).
 
 **Guest balloon driver caveat.** The host side only moves the target. The guest kernel must include and
@@ -52,6 +54,34 @@ load the `virtio_balloon` driver for `actual_mib` to follow. Without it the targ
 `actual_mib` stays where it was, and no memory is returned. Check `actual_mib` after setting a target
 and do not assume reclaim happened. Reclaimed memory also only helps the host if the pages were
 actually backed by host memory; a guest that never touched them has nothing to give back.
+
+## QEMU VMs: virtio-balloon and free-page reporting
+
+A QEMU VM gets a balloon only when it is created with `balloon`:
+
+```json
+{"backend": "qemu", "memory_mib": 4096, "balloon": {}}
+```
+
+This adds `-device virtio-balloon-pci,id=balloon0,bus=pcie.0,deflate-on-oom=on,free-page-reporting=on`.
+
+| Field | Default | Meaning |
+|---|---|---|
+| `free_page_reporting` | `true` | The guest reports freed pages and QEMU drops them from host memory with no balloon target (guest kernel 5.8 or newer). |
+| `deflate_on_oom` | `true` | The guest takes pages back from the balloon rather than OOM-killing a process. |
+| `stats_interval_secs` | `5` | Guest memory statistics polling, turned on at the first `GET /v1/vms/{id}/memory` (0 disables). |
+
+- `GET/POST /v1/vms/{id}/balloon` work the same as for the KVM engine. QEMU's `balloon` command takes
+  the size the guest keeps, so FluxVM sends `memory - balloon_mib`, where `memory` includes hot-added
+  DIMMs. `actual_mib` comes from `query-balloon`.
+- QEMU does not report the requested target, so the last value set is kept in the VM workspace
+  (`balloon-target-mib`) and cleared on every launch, when the balloon starts deflated.
+- `balloon` is refused with `hugepages`, `vfio_devices` (VFIO pins all guest memory) and confidential
+  profiles, and on every backend other than qemu.
+- `GET /v1/host/memory` returns `MemTotal`, `MemAvailable` and memory PSI `some`/`full avg10` so an
+  external controller (Kairon's node agent) can decide balloon targets. FluxVM itself does not
+  reclaim from QEMU VMs; idle reclaim below stays limited to sandboxes.
+- Hot-added DIMMs can be ballooned, but they are never unplugged.
 
 ## Pressure-aware admission
 

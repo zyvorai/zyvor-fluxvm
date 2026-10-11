@@ -235,6 +235,12 @@ fn ops() -> Vec<Op> {
         ),
         op(
             "get",
+            "/v1/host/memory",
+            "Host memory now: MemTotal, MemAvailable and memory PSI some/full avg10",
+            HOST,
+        ),
+        op(
+            "get",
             "/v1/host/topology",
             "Host hardware graph: NUMA nodes (CPUs, memory, hugepages) and placeable PCI devices with NUMA node, PCIe root and IOMMU group",
             HOST,
