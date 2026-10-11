@@ -31,8 +31,17 @@ have not all been green; see the pull requests for their state.
 
 ## Quick start
 
-A Homebrew package can be built from each version tag (see [`packaging/homebrew`](../packaging/homebrew/README.md)), but no tap is
-published yet, so build from source as below.
+**Install with Homebrew** (Apple silicon, macOS 14 or later):
+
+```bash
+brew install zyvorai/tap/fluxvm
+fluxctl run                      # a throwaway Debian VM and a shell
+brew services start fluxvm       # the daemon in the background, API on 127.0.0.1:7788
+```
+
+The package is built from each version tag (see [`packaging/homebrew`](../packaging/homebrew/README.md)) and contains `fluxctl`, the
+signed `fluxvm-vz-runner`, `fluxvm-vz-switch`, `fluxvm-blockd` and `fluxvm-usernet` side by side, which is where the daemon looks for
+them. Or build from source:
 
 ```bash
 xcode-select --install          # compiler for the Swift runner
