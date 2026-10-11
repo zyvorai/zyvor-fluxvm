@@ -1,7 +1,7 @@
 # Homebrew package (macOS, Apple silicon)
 
-`fluxvm.rb` installs the prebuilt package from a GitHub release: `fluxctl` and the signed `fluxvm-vz-runner` side by side in
-`bin`, plus a `brew services` entry for the daemon. The tap is `zyvorai/homebrew-fluxvm` (`Formula/fluxvm.rb`).
+`fluxvm.rb` installs the prebuilt package from a GitHub release: `fluxctl`, the signed `fluxvm-vz-runner`, `fluxvm-vz-switch` and `fluxvm-blockd` side by side in
+`bin`, plus a `brew services` entry for the daemon. The tap is `zyvorai/homebrew-tap` (`Formula/fluxvm.rb`, next to its casks).
 
 ## Cutting a release
 
@@ -10,8 +10,8 @@
    (a **draft** release is created if there is none; publish it when you are happy).
 2. Fill in the formula from the package (or from the `.sha256` file's hash):
    `scripts/update-homebrew-formula.sh 0.4.0 path/to/fluxvm-0.4.0-macos-arm64.tar.gz`
-3. Put `fluxvm.rb` in a tap repository (`zyvorai/homebrew-fluxvm`, `Formula/fluxvm.rb`). Users then run
-   `brew install zyvorai/fluxvm/fluxvm`.
+3. Publish the draft release (a draft's assets cannot be downloaded), then put `fluxvm.rb` in the tap as `Formula/fluxvm.rb`.
+   Users then run `brew install zyvorai/tap/fluxvm`.
 
 ## Build the package locally
 
