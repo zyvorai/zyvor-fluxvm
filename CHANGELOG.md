@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+### Verified: the macOS guest agent over vsock (`apple.macos_vsock`)
+- On an Apple M4 with a macOS 27.0.1 guest: the guest binds `AF_VSOCK`, the host reaches it through the runner's `CONNECT`
+  proxy, and the LaunchDaemon agent installed by `crates/fluxvm-guest-agent/macos/install.sh` answers `ping`, enforces its
+  token, runs `exec` as root and round-trips files; exec policies are refused as Linux-only. Not run: the PTY shell,
+  `shutdown`, `reset-identity`, a reboot with the daemon installed, and `vz_guest` choosing the agent. Still experimental.
+- Packaging: `fluxvm-blockd` is now in the macOS package and the Homebrew formula (the daemon looks for it next to `fluxctl`).
+
 ## 0.4.0 (2026-10-11)
 
 ### Added: native macOS-first VZ base (FluxDisk, usernet, netobs, diskinject, macOS guest agent)

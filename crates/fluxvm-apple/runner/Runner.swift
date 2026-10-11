@@ -66,7 +66,7 @@ struct Config: Decodable {
     let usb_controllers: Int?       // XHCI controller count (1-4)
     let vmnet: FluxVMNetSpec?       // macOS 26+ per-VM vmnet network (nil: NAT or bridge)
     let custom_virtio: Bool?        // macOS 27+ custom Virtio device hook (Linux guests)
-    let macos_vsock: Bool?          // macOS guests: add a virtio-socket device (experimental, unverified)
+    let macos_vsock: Bool?          // macOS guests: add a virtio-socket device (experimental; verified on an M4 with a macOS 27.0.1 guest)
     let shares: [Share]?
     let forwards: [Forward]?
     let network_none: Bool?         // attach no network device at all
@@ -559,7 +559,7 @@ final class Runner: NSObject, VZVirtualMachineDelegate, NSWindowDelegate {
             c.graphicsDevices = [g]
             c.keyboards = [VZMacKeyboardConfiguration()]
             c.pointingDevices = [VZMacTrackpadConfiguration()]
-            // EXPERIMENTAL, opt-in: whether a macOS guest has a usable vsock device is unverified on hardware. Without
+            // EXPERIMENTAL, opt-in: a macOS guest has a usable vsock device (verified on an M4, macOS 27.0.1). Without
             // the flag a macOS guest keeps no socket device and is reached over SSH only.
             if cfg.macos_vsock == true {
                 c.socketDevices = [VZVirtioSocketDeviceConfiguration()]

@@ -139,7 +139,7 @@ pub const CAPABILITIES: &[Capability] = &[
     ),
     yes(
         "guest agent over vsock, macOS guests (apple.macos_vsock)",
-        "EXPERIMENTAL, opt-in, unverified on hardware: adds a virtio-socket device to a macOS guest; whether the guest exposes a usable vsock is a hypothesis. Needs the macOS LaunchDaemon agent (crates/fluxvm-guest-agent/macos); exec and files fall back to SSH when it does not answer",
+        "EXPERIMENTAL, opt-in: adds a virtio-socket device to a macOS guest. Verified on an Apple M4 with a macOS 27.0.1 guest: the LaunchDaemon agent (crates/fluxvm-guest-agent/macos) answers ping, exec and file transfer over vsock and enforces its token; exec policies are refused (Linux only). Exec and files fall back to SSH when the agent does not answer",
     ),
     yes(
         "macOS guests",
@@ -1532,7 +1532,7 @@ mod tests {
             .iter()
             .find(|c| c.feature.contains("macos_vsock"))
             .expect("capability row");
-        assert!(c.note.contains("EXPERIMENTAL") && c.note.contains("unverified"));
+        assert!(c.note.contains("EXPERIMENTAL") && c.note.contains("Verified on"));
     }
 
     #[test]

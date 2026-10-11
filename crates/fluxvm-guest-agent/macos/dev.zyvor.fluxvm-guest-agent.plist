@@ -2,8 +2,8 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!--
   LaunchDaemon for the FluxVM guest agent inside a macOS guest.
-  EXPERIMENTAL and UNVERIFIED on hardware: it assumes the VM was created with apple.macos_vsock = true and that the
-  guest exposes a bindable AF_VSOCK. Install with install.sh; the token is read from /etc/fluxvm-guest-agent.token.
+  EXPERIMENTAL. Verified on an Apple M4 with a macOS 27.0.1 guest created with apple.macos_vsock = true. Install with
+  install.sh; the token is read from /etc/fluxvm-guest-agent.token.
 -->
 <plist version="1.0">
 <dict>

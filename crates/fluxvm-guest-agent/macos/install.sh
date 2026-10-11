@@ -2,9 +2,9 @@
 # Installs the FluxVM guest agent as a LaunchDaemon inside a macOS guest.
 # Run as root, in the guest:  sudo ./install.sh /path/to/fluxvm-guest-agent [token]
 #
-# EXPERIMENTAL and UNVERIFIED on hardware: nothing here has run in a real macOS guest. It assumes the VM was created
-# with `apple.macos_vsock: true` and that the guest exposes a usable AF_VSOCK device. Without a token the agent
-# refuses every request (fail closed). Uninstall:  sudo ./install.sh --uninstall
+# EXPERIMENTAL. Verified on an Apple M4 with a macOS 27.0.1 guest created with `apple.macos_vsock: true`: the daemon
+# starts, binds AF_VSOCK and answers ping, exec and file transfer from the host. Without a token the agent refuses
+# every request (fail closed). Uninstall:  sudo ./install.sh --uninstall
 set -eu
 
 LABEL=dev.zyvor.fluxvm-guest-agent
