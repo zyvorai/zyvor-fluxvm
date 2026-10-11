@@ -15,7 +15,13 @@ path = "src/lib.rs"
 name = "fluxvm-vz-switch"
 path = "src/main.rs"
 
+[features]
+default = []
+# Frame tap for guest-network observability (fluxvm-netobs). Off by default; see `set_tap`.
+netobs = ["dep:fluxvm-netobs"]
+
 [dependencies]
+fluxvm-netobs = { path = "../fluxvm-netobs", optional = true }
 anyhow = "1"
 libc = "0.2"
 serde = { version = "1", features = ["derive"] }

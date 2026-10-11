@@ -2237,6 +2237,7 @@ dependencies = [
  "fluxvm-core",
  "fluxvm-guest-protocol",
  "fluxvm-image",
+ "fluxvm-netobs",
  "fluxvm-network",
  "fluxvm-scheduler",
  "fluxvm-vsock-client",
@@ -2522,6 +2523,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "fluxvm-netobs"
+version = "0.3.0"
+dependencies = [
+ "md-5 0.10.6",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+]
+
+[[package]]
 name = "fluxvm-network"
 version = "0.3.0"
 dependencies = [
@@ -2654,6 +2665,7 @@ name = "fluxvm-vz-switch"
 version = "0.3.0"
 dependencies = [
  "anyhow",
+ "fluxvm-netobs",
  "libc",
  "serde",
  "serde_json",

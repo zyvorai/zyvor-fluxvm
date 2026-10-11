@@ -38,6 +38,7 @@ mod openapi;
 mod rate_limit;
 #[cfg(target_os = "macos")]
 pub mod self_control;
+mod netobs_api;
 mod speculate_api;
 
 #[derive(Clone)]
@@ -387,6 +388,18 @@ pub fn router(manager: Arc<VmManager>) -> Router {
         .route("/v1/vms/{id}/cdroms/{name}/eject", post(eject_vm_cdrom))
         .route("/v1/events", get(list_events))
         .route("/v1/events/stream", get(stream_events))
+        .route("/v1/netobs/summary", get(netobs_api::summary))
+        .route("/v1/netobs/flows", get(netobs_api::flows))
+        .route("/v1/netobs/flows/stream", get(netobs_api::stream))
+        .route("/v1/netobs/dns", get(netobs_api::dns))
+        .route("/v1/netobs/history", get(netobs_api::history))
+        .route(
+            "/v1/netobs/capture",
+            get(netobs_api::capture_status)
+                .post(netobs_api::capture_enable)
+                .delete(netobs_api::capture_disable),
+        )
+        .route("/v1/netobs/capture.pcap", get(netobs_api::capture_pcap))
         .route("/v1/quotas/me", get(my_quota))
         .route("/v1/vms/{id}/attest", get(get_vm_evidence))
         .route("/v1/vms/{id}/secrets/release", post(release_vm_secret))
@@ -763,7 +776,8 @@ fn build_oidc(cfg: &fluxvm_core::config::AuthConfig) -> Option<Arc<oidc::OidcVal
 }
 
 async fn metrics(State(m): State<Arc<VmManager>>) -> Response {
-    let body = render_metrics(&m.list().await);
+    let mut body = render_metrics(&m.list().await);
+    body.push_str(&netobs_api::prometheus());
     (
         StatusCode::OK,
         [("content-type", "text/plain; version=0.0.4; charset=utf-8")],
@@ -5557,6 +5571,74 @@ mod tests {
                 assert!(body.contains("\nfluxvm_host_memory_pressure_level "));
                 assert!(body.contains("\nfluxvm_host_mem_available_mib "));
             }
+        }
+
+        #[tokio::test]
+        async fn netobs_routes_scope_by_tenant_and_gate_capture() {
+            use fluxvm_netobs::{Direction, FrameMeta, Identity, Observer, Verdict};
+            let obs = match fluxvm_netobs::global() {
+                Some(o) => o,
+                None => {
+                    let o = Arc::new(Observer::new(Default::default()));
+                    fluxvm_netobs::install_global(o);
+                    fluxvm_netobs::global().expect("observer installed")
+                }
+            };
+            let ip = |n| std::net::Ipv4Addr::new(10, 9, 9, n);
+            let frame = fluxvm_netobs::packet::build::udp_v4((ip(1), 5000), (ip(2), 6000), b"x");
+            obs.ingest(
+                &frame,
+                &FrameMeta {
+                    identity: Identity::new("netobs-test-vm", "n", "eth0", [2, 0, 0, 0, 0, 1]),
+                    ts_us: fluxvm_netobs::now_us(),
+                    direction: Direction::FromGuest,
+                    verdict: Verdict::Allowed,
+                },
+            );
+            let m = manager(density_tokens());
+            let app = || router(m.clone());
+
+            let (st, body) = call(app(), "GET", "/v1/netobs/flows", "ops", None).await;
+            assert_eq!(st, StatusCode::OK, "{body}");
+            assert!(body.contains("netobs-test-vm"), "{body}");
+            let (_, body) = call(app(), "GET", "/v1/netobs/flows", "acme", None).await;
+            assert!(!body.contains("netobs-test-vm"), "tenant token saw another VM: {body}");
+
+            let (st, body) = call(app(), "GET", "/v1/netobs/summary", "ops", None).await;
+            assert_eq!(st, StatusCode::OK);
+            assert!(body.contains("\"enabled\":true"), "{body}");
+
+            let (_, body) = call(app(), "GET", "/metrics", "ops", None).await;
+            assert!(body.contains("\nfluxvm_netobs_frames_total "), "{body}");
+
+            // Capture needs a filter, is scoped, and has nothing to download until enabled.
+            let (st, _) = call(
+                app(),
+                "POST",
+                "/v1/netobs/capture",
+                "ops",
+                Some(r#"{"vm":"netobs-test-vm"}"#),
+            )
+            .await;
+            assert_eq!(st, StatusCode::BAD_REQUEST);
+            let (st, _) = call(
+                app(),
+                "POST",
+                "/v1/netobs/capture",
+                "acme",
+                Some(r#"{"vm":"netobs-test-vm","filter":{"port":53}}"#),
+            )
+            .await;
+            assert_eq!(st, StatusCode::NOT_FOUND);
+            let (st, _) = call(
+                app(),
+                "GET",
+                "/v1/netobs/capture.pcap?vm=netobs-test-vm",
+                "ops",
+                None,
+            )
+            .await;
+            assert_eq!(st, StatusCode::NOT_FOUND);
         }
 
         #[tokio::test]
