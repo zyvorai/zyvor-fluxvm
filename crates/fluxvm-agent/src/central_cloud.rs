@@ -232,6 +232,12 @@ pub(super) async fn create_tenant(
     Json(b): Json<CreateTenantBody>,
 ) -> Result<(StatusCode, Json<Value>), AppError> {
     require_admin(&caller)?;
+    if fleet.token.is_none() {
+        return Err(AppError(
+            StatusCode::CONFLICT,
+            "central runs without --token: anyone could act as the operator, so tenants are refused; restart it with --token first".into(),
+        ));
+    }
     let mut t = fleet.tenancy.lock().await;
     let (tenant, token) = t
         .create_tenant(&b.id, b.display_name, b.quota, Utc::now())
@@ -1218,6 +1224,104 @@ mod tests {
             .unwrap();
         let (s, _) = call(&app, "GET", "/fleet/tenants/me", &token, json!({})).await;
         assert_eq!(s, 403);
+    }
+
+    #[tokio::test]
+    async fn lab_mode_refuses_tenants_and_unknown_tokens_once_tenants_exist() {
+        let mut fleet = fleet_of(vec![mac("mac-a", 32_000, 0)], TenancyState::default());
+        fleet.token = None;
+        let app = app(fleet.clone());
+        // No fleet token: creating a tenant is refused.
+        let (s, v) = call(
+            &app,
+            "POST",
+            "/fleet/tenants",
+            "anything",
+            json!({"id": "acme"}),
+        )
+        .await;
+        assert_eq!(s, 409, "{v}");
+        // Without tenants a stray token is ignored (operator).
+        let (s, _) = call(&app, "GET", "/fleet/leases", "stray", json!({})).await;
+        assert_eq!(s, 200);
+        // Once a tenant exists (e.g. created while a token was set), a stray token is refused.
+        fleet
+            .tenancy
+            .lock()
+            .await
+            .create_tenant("acme", None, Quota::default(), Utc::now())
+            .unwrap();
+        let (s, _) = call(&app, "GET", "/fleet/leases", "stray", json!({})).await;
+        assert_eq!(s, 401);
+    }
+
+    #[tokio::test]
+    async fn parallel_creates_cannot_overshoot_the_quota() {
+        // A slow node: every create takes 300 ms, so all requests are in flight together.
+        let app = Router::new().route(
+            "/v1/vms",
+            post(|| async {
+                tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                Json(json!({"id": uuid::Uuid::new_v4().to_string(), "name": "x"}))
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        let mut n = mac("linux-1", 64_000, 0);
+        n.apple = None;
+        n.vcpus_total = 64;
+        n.fluxvm_url = url;
+        let mut tenancy = TenancyState::default();
+        tenancy
+            .create_tenant(
+                "acme",
+                None,
+                Quota {
+                    max_vms: Some(3),
+                    ..Default::default()
+                },
+                Utc::now(),
+            )
+            .unwrap();
+        let fleet = fleet_of(vec![n], tenancy);
+        let mut set = tokio::task::JoinSet::new();
+        for _ in 0..8 {
+            let fleet = fleet.clone();
+            set.spawn(async move {
+                create_vm_inner(
+                    &fleet,
+                    &Caller::Tenant("acme".into()),
+                    json!({"backend": "qemu", "name": "x", "vcpus": 1, "memory_mib": 512}),
+                    false,
+                )
+                .await
+                .map(|_| ())
+                .map_err(|e| e.0)
+            });
+        }
+        let (mut ok, mut quota) = (0, 0);
+        while let Some(r) = set.join_next().await {
+            match r.unwrap() {
+                Ok(()) => ok += 1,
+                Err(code) if code == StatusCode::TOO_MANY_REQUESTS => quota += 1,
+                Err(other) => panic!("unexpected {other}"),
+            }
+        }
+        assert_eq!((ok, quota), (3, 5));
+        assert_eq!(
+            fleet
+                .tenancy
+                .lock()
+                .await
+                .vms
+                .iter()
+                .filter(|v| v.active())
+                .count(),
+            3
+        );
     }
 
     #[tokio::test]

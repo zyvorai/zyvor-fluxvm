@@ -382,6 +382,21 @@ pub struct TenancyState {
     /// Nodes being drained (`POST /fleet/nodes/{name}/drain`); cleared by uncordon.
     #[serde(default)]
     pub draining: BTreeSet<String>,
+    /// Quota held by creates that are in flight (between the quota check and the node's answer). In memory only: a
+    /// restart drops them, and the requests they belonged to are gone with it.
+    #[serde(skip)]
+    reservations: Vec<Reservation>,
+    #[serde(skip)]
+    next_reservation: u64,
+}
+
+/// Quota held by one in-flight create.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Reservation {
+    id: u64,
+    tenant: String,
+    vcpus: u32,
+    memory_mib: u64,
 }
 
 impl TenancyState {
@@ -671,6 +686,11 @@ impl TenancyState {
             cpu += u64::from(v.vcpus);
             mem += v.memory_mib;
         }
+        for r in self.reservations.iter().filter(|r| r.tenant == tenant) {
+            n += 1;
+            cpu += u64::from(r.vcpus);
+            mem += r.memory_mib;
+        }
         if let Some(max) = q.max_vms
             && n + 1 > max
         {
@@ -693,6 +713,33 @@ impl TenancyState {
             )));
         }
         Ok(())
+    }
+
+    /// Checks the quota and, if it fits, holds that much for an in-flight create, so parallel creates by one tenant
+    /// cannot overshoot. Release it with [`TenancyState::release_reservation`] once the create succeeded (after
+    /// [`TenancyState::record_vm`]) or failed.
+    pub fn reserve(
+        &mut self,
+        tenant: &str,
+        vcpus: u32,
+        memory_mib: u64,
+    ) -> Result<u64, TenancyError> {
+        self.check_quota(tenant, vcpus, memory_mib)?;
+        self.next_reservation += 1;
+        let id = self.next_reservation;
+        self.reservations.push(Reservation {
+            id,
+            tenant: tenant.to_owned(),
+            vcpus,
+            memory_mib,
+        });
+        Ok(id)
+    }
+
+    pub fn release_reservation(&mut self, id: u64) -> bool {
+        let before = self.reservations.len();
+        self.reservations.retain(|r| r.id != id);
+        self.reservations.len() != before
     }
 
     // ---- ledger -----------------------------------------------------------------------------------------------
@@ -1097,6 +1144,38 @@ mod tests {
         ));
         assert!(s.end_vm("n", "3", t0()));
         assert!(s.check_quota("a", 1, 1).is_ok());
+    }
+
+    #[test]
+    fn reservations_hold_quota_until_released() {
+        let mut s = state_with(&["a"]);
+        s.update_tenant(
+            "a",
+            Some(Quota {
+                max_vms: Some(2),
+                max_memory_mib: Some(8192),
+                ..Default::default()
+            }),
+            None,
+            None,
+        )
+        .unwrap();
+        let r1 = s.reserve("a", 2, 4096).unwrap();
+        let r2 = s.reserve("a", 2, 4096).unwrap();
+        assert_ne!(r1, r2);
+        // Two creates in flight fill the quota: a third is refused before any node is asked.
+        assert!(matches!(s.reserve("a", 1, 1), Err(TenancyError::Quota(_))));
+        // One succeeded (recorded, then released): still full.
+        s.record_vm(vm("n", "1", Some("a"), t0()));
+        assert!(s.release_reservation(r1));
+        assert!(s.reserve("a", 1, 1).is_err());
+        // The other failed: its hold goes away.
+        assert!(s.release_reservation(r2));
+        assert!(!s.release_reservation(r2));
+        assert!(s.reserve("a", 1, 1).is_ok());
+        // Reservations are never persisted.
+        let back: TenancyState = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
+        assert!(back.reservations.is_empty());
     }
 
     #[test]

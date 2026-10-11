@@ -237,8 +237,9 @@ fn constant_time_eq(a: &str, b: &str) -> bool {
 ///
 /// - The fleet token (`--token`) is the operator ([`Caller::Admin`]); node heartbeats use it too.
 /// - A tenant token (see `POST /fleet/tenants`) is [`Caller::Tenant`], limited to [`tenant_route_allowed`].
-/// - Without a fleet token (lab mode) every caller that does not present a tenant token is the operator, exactly as
-///   before tenants existed. Configure `--token` before creating tenants.
+/// - Without a fleet token (lab mode) a caller presenting no token is the operator, as before tenants existed; a
+///   token that is not a tenant's is ignored while there are no tenants and refused (401) once there are. Central
+///   refuses to create tenants without `--token`.
 async fn auth_middleware(State(fleet): State<Fleet>, mut req: Request, next: Next) -> Response {
     if req.uri().path() == "/healthz" {
         return next.run(req).await;
@@ -269,7 +270,9 @@ async fn auth_middleware(State(fleet): State<Fleet>, mut req: Request, next: Nex
                         .into_response();
                 }
                 Some(tenant) => Caller::Tenant(tenant.id.clone()),
-                None if expected.is_none() => Caller::Admin,
+                // Lab mode keeps ignoring stray tokens, but only until tenants exist: after that an unknown token is
+                // a mistyped tenant token and must not quietly become the operator.
+                None if expected.is_none() && !tenancy.enabled() => Caller::Admin,
                 None => return unauthorized(),
             }
         }
@@ -1132,9 +1135,10 @@ async fn create_vm_inner(
     let apple_request = apple_placement_request(&body, req_vcpus, req_mem);
     let macos_guest = apple_request.as_ref().is_some_and(|r| r.macos_guest);
 
-    // Who placement acts for: the tenant (own or named by the operator) once tenancy is on, else the caller.
-    let effective = {
-        let tenancy = fleet.tenancy.lock().await;
+    // Who placement acts for: the tenant (own or named by the operator) once tenancy is on, else the caller. The
+    // quota is reserved (not just checked) so parallel creates by one tenant cannot overshoot it.
+    let (effective, reservation) = {
+        let mut tenancy = fleet.tenancy.lock().await;
         match &tenant {
             Some(t) if tenancy.enabled() => {
                 if *caller == Caller::Admin && !tenancy.tenants.contains_key(t) {
@@ -1143,16 +1147,77 @@ async fn create_vm_inner(
                         format!("no tenant '{t}'"),
                     ));
                 }
-                if !skip_quota {
-                    tenancy
-                        .check_quota(t, req_vcpus, req_mem)
-                        .map_err(tenancy_error)?;
-                }
-                Caller::Tenant(t.clone())
+                let reservation = if skip_quota {
+                    None
+                } else {
+                    Some(
+                        tenancy
+                            .reserve(t, req_vcpus, req_mem)
+                            .map_err(tenancy_error)?,
+                    )
+                };
+                (Caller::Tenant(t.clone()), reservation)
             }
-            _ => caller.clone(),
+            _ => (caller.clone(), None),
         }
     };
+    let placed = place_and_dispatch(
+        fleet,
+        caller,
+        &effective,
+        body,
+        Placement {
+            requested_node,
+            selector,
+            reschedulable,
+            tenant,
+            vcpus: req_vcpus,
+            memory_mib: req_mem,
+            profile,
+            apple: apple_request,
+            macos_guest,
+        },
+    )
+    .await;
+    if let Some(id) = reservation {
+        // A successful create is already in the ledger, so the quota stays held without a gap.
+        fleet.tenancy.lock().await.release_reservation(id);
+    }
+    placed
+}
+
+/// What [`create_vm_inner`] worked out about a create before placing it.
+struct Placement {
+    requested_node: Option<String>,
+    selector: HashMap<String, String>,
+    reschedulable: bool,
+    tenant: Option<String>,
+    vcpus: u32,
+    memory_mib: u64,
+    profile: SecurityProfile,
+    apple: Option<ApplePlacementRequest>,
+    macos_guest: bool,
+}
+
+/// Places a create (named node or automatic, with failover), forwards it, and records it in the ledger.
+async fn place_and_dispatch(
+    fleet: &Fleet,
+    caller: &Caller,
+    effective: &Caller,
+    body: Value,
+    p: Placement,
+) -> Result<Json<Value>, AppError> {
+    let Placement {
+        requested_node,
+        selector,
+        reschedulable,
+        tenant,
+        vcpus: req_vcpus,
+        memory_mib: req_mem,
+        profile,
+        apple: apple_request,
+        macos_guest,
+    } = p;
     let spec = reschedulable.then(|| {
         let mut s = body.clone();
         if !selector.is_empty() {
@@ -1175,7 +1240,7 @@ async fn create_vm_inner(
                     ));
                 }
                 tenancy
-                    .admit(&name, &effective, macos_guest, true)
+                    .admit(&name, effective, macos_guest, true)
                     .map_err(tenancy_error)?;
             }
             resolve_target(&nodes, Some(name), req_vcpus, req_mem, &selector, profile)?
@@ -1212,7 +1277,7 @@ async fn create_vm_inner(
             let admit = |n: &NodeInfo| {
                 !tenancy.draining.contains(&n.name)
                     && tenancy
-                        .admit(&n.name, &effective, macos_guest, false)
+                        .admit(&n.name, effective, macos_guest, false)
                         .is_ok()
             };
             (
@@ -1232,7 +1297,7 @@ async fn create_vm_inner(
         let Some(target) = target else {
             return Err(last_unreachable.unwrap_or_else(|| {
                 let mut msg = no_candidate_message(&selector);
-                if tenancy_on && macos_guest && effective != Caller::Admin {
+                if tenancy_on && macos_guest && *effective != Caller::Admin {
                     msg.push_str(
                         "; macOS guests run only on Macs the tenant leases: lease one with POST /fleet/leases",
                     );
