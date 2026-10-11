@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+### Added: native macOS-first VZ base (FluxDisk, usernet, netobs, diskinject, macOS guest agent)
+All of it is unit/protocol tested on a Mac; none of it has been booted against a real VZ guest, so every item is marked
+unverified on hardware in `docs/macos.md`.
+- `fluxvm-blockd` (FluxDisk): pure-Rust NBD server for VZ's NBD attachment. Copy-on-write overlays with instant `branch`,
+  `rebase`, grow-only `resize`, AES-256-XTS at rest, lazy HTTP range base with a persisted block cache, structured replies and
+  parallel requests, IOPS/bandwidth limiter. New `apple.extra_disks` kind `overlay`, served by a supervised blockd per VM.
+- `fluxvm-usernet`: userspace NAT gateway over `VZFileHandleNetworkDeviceAttachment` (`apple.usernet`): ARP, DHCPv4, DNS
+  (UDP and TCP) with allow/deny, TCP (window scaling, SACK, NewReno) and UDP NAT, outbound ICMP echo, fragmentation, opt-in
+  IPv6, egress CIDR/port/domain policy, host-to-guest TCP/UDP forwards, flow-event stream.
+- `fluxvm-netobs` and `/v1/netobs/{summary,flows,flows/stream,dns,history,capture,capture.pcap}`: bounded flow table, TCP
+  health, DNS/TLS (SNI, JA3/JA4, ServerHello)/QUIC Initial/HTTP-2/h2c metadata with redaction, RED rollups, capped pcap ring
+  (off by default, admin-only). Fed by the usernet frame tap and by `fluxvm-vz-switch` through a bridge socket.
+  `FLUXVM_NETOBS=off` disables it.
+- `fluxvm-diskinject`: offline ext4 writer for raw Linux guest disks on macOS; the vz agent token is injected before launch
+  with a cloud-init fallback.
+- `apple.macos_vsock` (experimental): vsock device for macOS guests plus a macOS-buildable `fluxvm-guest-agent` and LaunchDaemon;
+  SSH remains the fallback.
+- `apple.root_caching` / `apple.root_sync`, runner control preconditions, display resize, per-feature minimum macOS in refusals,
+  loopback-only `tcp` vsock services (local model server), `fluxvm_vm_runner_*` metrics, a signed boot manifest in the
+  `metadata` vsock service (a host claim, not a hardware root of trust).
+- Not done: NAT MTU (not in the SDK for NAT attachments), fast fork on vz (needs hardware).
+
 ### Verified: `apple.asif_overlay` on a Linux guest
 - `scripts/vz-asif-overlay-live-test.sh`: on macOS 27.2 a 64 MiB guest write grows `disk-overlay.asif` and leaves the base `root.raw`
   byte-identical. The docs no longer list the overlay as unverified (macOS guests with an overlay were not run).
