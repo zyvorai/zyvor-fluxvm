@@ -2253,10 +2253,12 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tokio",
  "tower",
  "tracing",
  "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]
@@ -2519,6 +2521,7 @@ name = "fluxvm-image"
 version = "0.4.1"
 dependencies = [
  "anyhow",
+ "axum",
  "base64",
  "ed25519-dalek",
  "flate2",

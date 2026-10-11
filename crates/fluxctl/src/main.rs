@@ -807,6 +807,13 @@ enum Command {
         #[command(subcommand)]
         command: OciCommand,
     },
+    /// VM images as OCI artifacts: push a raw disk or a prepared macOS template directory to any OCI registry and
+    /// pull it onto another host. Chunked, zstd-compressed, zero chunks skipped, unchanged chunks never re-uploaded.
+    /// Credentials: `FLUXVM_REGISTRY_USER` / `FLUXVM_REGISTRY_PASSWORD`. See docs/vm-images.md.
+    VmImage {
+        #[command(subcommand)]
+        command: VmImageCommand,
+    },
     /// Private VM-to-VM networks between `vz` guests (`apple.networks`, `oci.networks`). See docs/macos.md.
     Vznet {
         #[command(subcommand)]
@@ -1106,6 +1113,165 @@ enum FleetCommand {
     /// Delete a VM on a specific node through the fleet proxy. REST
     /// equivalent: `DELETE /fleet/vms/{node}/{id}`.
     Delete { node: String, id: Uuid },
+    /// Tenants (operator): create, list, quota, disable, rotate token. See docs/mac-cloud-tenancy.md.
+    Tenant {
+        #[command(subcommand)]
+        command: FleetTenantCommand,
+    },
+    /// Mac host leases: a tenant rents a whole, empty Mac for at least 24 hours.
+    Lease {
+        #[command(subcommand)]
+        command: FleetLeaseCommand,
+    },
+    /// Cordon a node and handle its VMs: `cordon` (default) only reports, `evict-ephemeral` deletes VMs with a TTL
+    /// or `fluxvm.dev/ephemeral=true`, `reschedule` also recreates `"reschedulable": true` VMs on another node.
+    /// REST: `POST /fleet/nodes/{name}/drain`.
+    Drain {
+        name: String,
+        #[arg(long, default_value = "cordon")]
+        mode: String,
+        /// Drain a node that is leased to a tenant.
+        #[arg(long)]
+        force: bool,
+    },
+    /// Drain progress and lease/scrub state of a node. REST: `GET /fleet/nodes/{name}/drain`.
+    DrainStatus { name: String },
+    /// Clear a node released from a lease for reuse (refused while it runs VMs unless `--force` deletes them).
+    /// REST: `POST /fleet/nodes/{name}/scrub`.
+    Scrub {
+        name: String,
+        #[arg(long)]
+        force: bool,
+    },
+    /// Metering per tenant (VM, vCPU and memory hours; actual and billable lease hours). REST: `GET /fleet/usage`.
+    Usage {
+        /// RFC 3339 start (default: 30 days before `--to`).
+        #[arg(long)]
+        from: Option<String>,
+        /// RFC 3339 end (default: now).
+        #[arg(long)]
+        to: Option<String>,
+        #[arg(long)]
+        tenant: Option<String>,
+        /// CSV instead of JSON.
+        #[arg(long)]
+        csv: bool,
+    },
+    /// Reconcile the VM ledger against every node and end expired leases now. REST: `POST /fleet/reconcile`.
+    Reconcile,
+    /// Run a command in a VM through its node's guest agent. REST: `POST /fleet/vms/{node}/{id}/exec`.
+    Exec {
+        node: String,
+        id: String,
+        #[arg(long)]
+        timeout: Option<u64>,
+        #[arg(trailing_var_arg = true, required = true)]
+        command: Vec<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum FleetTenantCommand {
+    /// Create a tenant; prints its bearer token once.
+    Create {
+        id: String,
+        #[arg(long)]
+        display_name: Option<String>,
+        #[command(flatten)]
+        quota: FleetQuotaArgs,
+    },
+    List,
+    Get {
+        id: String,
+    },
+    /// The calling tenant's own record (with a tenant token).
+    Me,
+    /// Change quota (only the flags given) and/or enable/disable.
+    Update {
+        id: String,
+        #[command(flatten)]
+        quota: FleetQuotaArgs,
+        #[arg(long, conflicts_with = "enable")]
+        disable: bool,
+        #[arg(long)]
+        enable: bool,
+    },
+    Delete {
+        id: String,
+    },
+    RotateToken {
+        id: String,
+    },
+}
+
+#[derive(clap::Args, Debug, Clone, Default)]
+struct FleetQuotaArgs {
+    #[arg(long)]
+    max_vms: Option<u32>,
+    #[arg(long)]
+    max_vcpus: Option<u64>,
+    #[arg(long)]
+    max_memory_mib: Option<u64>,
+    #[arg(long)]
+    max_leased_hosts: Option<u32>,
+}
+
+impl FleetQuotaArgs {
+    fn is_empty(&self) -> bool {
+        self.max_vms.is_none()
+            && self.max_vcpus.is_none()
+            && self.max_memory_mib.is_none()
+            && self.max_leased_hosts.is_none()
+    }
+
+    fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "max_vms": self.max_vms,
+            "max_vcpus": self.max_vcpus,
+            "max_memory_mib": self.max_memory_mib,
+            "max_leased_hosts": self.max_leased_hosts,
+        })
+    }
+}
+
+#[derive(Subcommand)]
+enum FleetLeaseCommand {
+    /// Lease a Mac (the smallest free one that fits, or `--node`).
+    Create {
+        /// Operator only: the tenant to lease for.
+        #[arg(long)]
+        tenant: Option<String>,
+        #[arg(long)]
+        node: Option<String>,
+        /// Lease length in hours (at least 24); omitted runs until released.
+        #[arg(long)]
+        hours: Option<i64>,
+        #[arg(long)]
+        min_vcpus: Option<u32>,
+        #[arg(long)]
+        min_memory_mib: Option<u64>,
+        /// Only Macs with nested virtualization (M3 or later).
+        #[arg(long)]
+        nested: bool,
+        #[arg(long = "node-selector", value_parser = parse_label)]
+        node_selector: Vec<(String, String)>,
+    },
+    List {
+        #[arg(long)]
+        tenant: Option<String>,
+        /// `active` or `released`.
+        #[arg(long)]
+        state: Option<String>,
+    },
+    Get {
+        id: String,
+    },
+    /// End a lease (not before its 24-hour minimum, unless an operator passes `--force`).
+    Release {
+        id: String,
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1864,6 +2030,70 @@ enum GroupCommand {
     Delete {
         name: String,
     },
+}
+
+#[derive(Subcommand)]
+enum VmImageCommand {
+    /// Push a disk file or a VM directory (e.g. a macOS template: disk.raw, hardware.bin, auxiliary.bin) to
+    /// `registry/repo:tag`. Per-VM identity (identity.bin, generic-id.bin, vz-mac), saved state and logs stay behind.
+    Push {
+        src: PathBuf,
+        reference: String,
+        /// Chunk size in MiB (1-512, default 64).
+        #[arg(long)]
+        chunk_mib: Option<usize>,
+        /// A file name to leave out (repeatable).
+        #[arg(long)]
+        exclude: Vec<String>,
+        /// `linux` or `macos` (detected when omitted).
+        #[arg(long)]
+        os: Option<String>,
+        /// A human name stored in the image (`org.opencontainers.image.title`).
+        #[arg(long)]
+        name: Option<String>,
+    },
+    /// Pull `registry/repo:tag` (or `@sha256:…`) into a new directory; use `<dest>/disk.raw` as a VM's `image`.
+    Pull { reference: String, dest: PathBuf },
+}
+
+/// `fluxctl vm-image`: client-side only (registry and local files), so it never needs the daemon or a VmManager.
+async fn run_vm_image(command: VmImageCommand) -> Result<()> {
+    let out = match command {
+        VmImageCommand::Push {
+            src,
+            reference,
+            chunk_mib,
+            exclude,
+            os,
+            name,
+        } => {
+            let opts = image::vm_artifact::PushOptions {
+                chunk_size: chunk_mib.map_or(0, |m| m.saturating_mul(1024 * 1024)),
+                exclude,
+                os,
+                name,
+                annotations: Default::default(),
+            };
+            serde_json::to_value(
+                image::vm_artifact::push(&src, &reference, registry_credentials_from_env(), &opts)
+                    .await
+                    .with_context(|| format!("pushing {} to {reference}", src.display()))?,
+            )?
+        }
+        VmImageCommand::Pull { reference, dest } => serde_json::to_value(
+            image::vm_artifact::pull(&reference, &dest, registry_credentials_from_env())
+                .await
+                .with_context(|| format!("pulling {reference}"))?,
+        )?,
+    };
+    println!("{}", serde_json::to_string_pretty(&out)?);
+    Ok(())
+}
+
+fn registry_credentials_from_env() -> Option<image::oci_registry::Credentials> {
+    let username = std::env::var("FLUXVM_REGISTRY_USER").ok()?;
+    let password = std::env::var("FLUXVM_REGISTRY_PASSWORD").unwrap_or_default();
+    Some(image::oci_registry::Credentials { username, password })
 }
 
 #[derive(Subcommand)]
@@ -3932,6 +4162,9 @@ async fn main() -> Result<()> {
         )
         .await;
     }
+    if let Command::VmImage { command } = cli.command {
+        return run_vm_image(command).await;
+    }
     if !matches!(cli.command, Command::Serve)
         && let Some(r) = remote::endpoint(
             cli.server.clone(),
@@ -5503,6 +5736,7 @@ async fn main() -> Result<()> {
         Command::Vznet {
             command: VznetCommand::Ls { json },
         } => print_vznets(&serde_json::to_value(m.vznets(None).await)?, json)?,
+        Command::VmImage { command } => run_vm_image(command).await?,
         Command::Oci { command } => {
             let out = match command {
                 OciCommand::Pull { image, platform } => {
@@ -5797,6 +6031,280 @@ async fn main() -> Result<()> {
                             &fleet_client::node_vms(&central, token, &name).await?
                         )?
                     );
+                }
+                FleetCommand::Tenant { command } => {
+                    use reqwest::Method;
+                    let out = match command {
+                        FleetTenantCommand::Create {
+                            id,
+                            display_name,
+                            quota,
+                        } => {
+                            fleet_client::call(
+                                &central,
+                                token,
+                                Method::POST,
+                                "/fleet/tenants",
+                                Some(serde_json::json!({
+                                    "id": id,
+                                    "display_name": display_name,
+                                    "quota": quota.to_json(),
+                                })),
+                            )
+                            .await?
+                        }
+                        FleetTenantCommand::List => {
+                            fleet_client::call(&central, token, Method::GET, "/fleet/tenants", None)
+                                .await?
+                        }
+                        FleetTenantCommand::Get { id } => {
+                            fleet_client::call(
+                                &central,
+                                token,
+                                Method::GET,
+                                &format!("/fleet/tenants/{id}"),
+                                None,
+                            )
+                            .await?
+                        }
+                        FleetTenantCommand::Me => {
+                            fleet_client::call(
+                                &central,
+                                token,
+                                Method::GET,
+                                "/fleet/tenants/me",
+                                None,
+                            )
+                            .await?
+                        }
+                        FleetTenantCommand::Update {
+                            id,
+                            quota,
+                            disable,
+                            enable,
+                        } => {
+                            let mut body = serde_json::json!({});
+                            if !quota.is_empty() {
+                                // Merge the given flags into the current quota.
+                                let current = fleet_client::call(
+                                    &central,
+                                    token,
+                                    Method::GET,
+                                    &format!("/fleet/tenants/{id}"),
+                                    None,
+                                )
+                                .await?;
+                                let mut q = current
+                                    .get("quota")
+                                    .cloned()
+                                    .unwrap_or_else(|| serde_json::json!({}));
+                                if let (Some(qo), Some(new)) =
+                                    (q.as_object_mut(), quota.to_json().as_object())
+                                {
+                                    for (k, v) in new {
+                                        if !v.is_null() {
+                                            qo.insert(k.clone(), v.clone());
+                                        }
+                                    }
+                                }
+                                body["quota"] = q;
+                            }
+                            if disable || enable {
+                                body["disabled"] = serde_json::json!(disable);
+                            }
+                            fleet_client::call(
+                                &central,
+                                token,
+                                Method::PATCH,
+                                &format!("/fleet/tenants/{id}"),
+                                Some(body),
+                            )
+                            .await?
+                        }
+                        FleetTenantCommand::Delete { id } => {
+                            fleet_client::call(
+                                &central,
+                                token,
+                                Method::DELETE,
+                                &format!("/fleet/tenants/{id}"),
+                                None,
+                            )
+                            .await?
+                        }
+                        FleetTenantCommand::RotateToken { id } => {
+                            fleet_client::call(
+                                &central,
+                                token,
+                                Method::POST,
+                                &format!("/fleet/tenants/{id}/rotate-token"),
+                                None,
+                            )
+                            .await?
+                        }
+                    };
+                    println!("{}", serde_json::to_string_pretty(&out)?);
+                }
+                FleetCommand::Lease { command } => {
+                    use reqwest::Method;
+                    let out = match command {
+                        FleetLeaseCommand::Create {
+                            tenant,
+                            node,
+                            hours,
+                            min_vcpus,
+                            min_memory_mib,
+                            nested,
+                            node_selector,
+                        } => {
+                            let selector: std::collections::HashMap<String, String> =
+                                node_selector.into_iter().collect();
+                            fleet_client::call(
+                                &central,
+                                token,
+                                Method::POST,
+                                "/fleet/leases",
+                                Some(serde_json::json!({
+                                    "tenant": tenant,
+                                    "node": node,
+                                    "hours": hours,
+                                    "min_vcpus": min_vcpus.unwrap_or(0),
+                                    "min_memory_mib": min_memory_mib.unwrap_or(0),
+                                    "nested_virtualization": nested,
+                                    "nodeSelector": selector,
+                                })),
+                            )
+                            .await?
+                        }
+                        FleetLeaseCommand::List { tenant, state } => {
+                            let q = fleet_client::query(&[("tenant", tenant), ("state", state)]);
+                            fleet_client::call(
+                                &central,
+                                token,
+                                Method::GET,
+                                &format!("/fleet/leases{q}"),
+                                None,
+                            )
+                            .await?
+                        }
+                        FleetLeaseCommand::Get { id } => {
+                            fleet_client::call(
+                                &central,
+                                token,
+                                Method::GET,
+                                &format!("/fleet/leases/{id}"),
+                                None,
+                            )
+                            .await?
+                        }
+                        FleetLeaseCommand::Release { id, force } => {
+                            let q = fleet_client::query(&[(
+                                "force",
+                                force.then(|| "true".to_string()),
+                            )]);
+                            fleet_client::call(
+                                &central,
+                                token,
+                                Method::POST,
+                                &format!("/fleet/leases/{id}/release{q}"),
+                                None,
+                            )
+                            .await?
+                        }
+                    };
+                    println!("{}", serde_json::to_string_pretty(&out)?);
+                }
+                FleetCommand::Drain { name, mode, force } => {
+                    let q = fleet_client::query(&[
+                        ("mode", Some(mode)),
+                        ("force", force.then(|| "true".to_string())),
+                    ]);
+                    let out = fleet_client::call(
+                        &central,
+                        token,
+                        reqwest::Method::POST,
+                        &format!("/fleet/nodes/{name}/drain{q}"),
+                        None,
+                    )
+                    .await?;
+                    println!("{}", serde_json::to_string_pretty(&out)?);
+                }
+                FleetCommand::DrainStatus { name } => {
+                    let out = fleet_client::call(
+                        &central,
+                        token,
+                        reqwest::Method::GET,
+                        &format!("/fleet/nodes/{name}/drain"),
+                        None,
+                    )
+                    .await?;
+                    println!("{}", serde_json::to_string_pretty(&out)?);
+                }
+                FleetCommand::Scrub { name, force } => {
+                    let q = fleet_client::query(&[("force", force.then(|| "true".to_string()))]);
+                    let out = fleet_client::call(
+                        &central,
+                        token,
+                        reqwest::Method::POST,
+                        &format!("/fleet/nodes/{name}/scrub{q}"),
+                        None,
+                    )
+                    .await?;
+                    println!("{}", serde_json::to_string_pretty(&out)?);
+                }
+                FleetCommand::Usage {
+                    from,
+                    to,
+                    tenant,
+                    csv,
+                } => {
+                    let q = fleet_client::query(&[
+                        ("from", from),
+                        ("to", to),
+                        ("tenant", tenant),
+                        ("format", csv.then(|| "csv".to_string())),
+                    ]);
+                    let out = fleet_client::call(
+                        &central,
+                        token,
+                        reqwest::Method::GET,
+                        &format!("/fleet/usage{q}"),
+                        None,
+                    )
+                    .await?;
+                    match out {
+                        serde_json::Value::String(text) => print!("{text}"),
+                        v => println!("{}", serde_json::to_string_pretty(&v)?),
+                    }
+                }
+                FleetCommand::Reconcile => {
+                    let out = fleet_client::call(
+                        &central,
+                        token,
+                        reqwest::Method::POST,
+                        "/fleet/reconcile",
+                        None,
+                    )
+                    .await?;
+                    println!("{}", serde_json::to_string_pretty(&out)?);
+                }
+                FleetCommand::Exec {
+                    node,
+                    id,
+                    timeout,
+                    command,
+                } => {
+                    let out = fleet_client::call(
+                        &central,
+                        token,
+                        reqwest::Method::POST,
+                        &format!("/fleet/vms/{node}/{id}/exec"),
+                        Some(serde_json::json!({
+                            "command": command.join(" "),
+                            "timeout_seconds": timeout,
+                        })),
+                    )
+                    .await?;
+                    println!("{}", serde_json::to_string_pretty(&out)?);
                 }
                 FleetCommand::Delete { node, id } => {
                     fleet_client::delete_vm(&central, token, &node, id).await?;

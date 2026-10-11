@@ -1,0 +1,47 @@
+{
+  "github": {
+    "owner": "zyvorai",
+    "repos": ["zyvor-fluxvm", "zyvor-velora"],
+    "scope": "org",
+    "runner_group_id": 1
+  },
+  "fleet": {
+    "url": "http://fleet-registry:7799",
+    "token_env": "FLUXVM_AGENT_TOKEN"
+  },
+  "poll_interval_secs": 15,
+  "pools": [
+    {
+      "name": "macos",
+      "labels": ["self-hosted", "macOS", "ARM64", "fluxvm"],
+      "max_runners": 2,
+      "launch": "exec",
+      "runner_dir": "/Users/runner/actions-runner",
+      "runner_user": "runner",
+      "job_timeout_secs": 7200,
+      "vm": {
+        "backend": "vz",
+        "image": "/Users/fluxvm/vms/macos-27-xcode/disk.raw",
+        "vcpus": 6,
+        "memory_mib": 16384,
+        "apple": { "guest_os": "macos", "macos_vsock": true },
+        "agent": { "enabled": true }
+      }
+    },
+    {
+      "name": "linux",
+      "labels": ["self-hosted", "Linux", "ARM64", "fluxvm"],
+      "max_runners": 8,
+      "launch": "cloud-init",
+      "runner_user": "runner",
+      "vm": {
+        "backend": "vz",
+        "image": "/Users/fluxvm/vms/debian-13-runner/debian-13.raw",
+        "vcpus": 4,
+        "memory_mib": 8192,
+        "apple": { "rosetta": true },
+        "cloud_init": { "user": "runner" }
+      }
+    }
+  ]
+}
