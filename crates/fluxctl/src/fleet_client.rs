@@ -202,6 +202,61 @@ pub async fn delete_vm(central: &str, token: Option<&str>, node: &str, id: Uuid)
     Ok(())
 }
 
+/// Any `/fleet/*` call: `method` on `path` with an optional JSON body. A `204` answers `{"ok": true}`; a non-JSON
+/// success body (CSV usage) comes back as a JSON string.
+pub async fn call(
+    central: &str,
+    token: Option<&str>,
+    method: reqwest::Method,
+    path: &str,
+    body: Option<Value>,
+) -> Result<Value> {
+    let http = reqwest::Client::new();
+    let mut req = authed(
+        http.request(method.clone(), format!("{central}{path}")),
+        token,
+    );
+    if let Some(b) = body {
+        req = req.json(&b);
+    }
+    let resp = req
+        .send()
+        .await
+        .with_context(|| format!("{method} {path}"))?;
+    let resp = check_success(resp, &format!("{method} {path}")).await?;
+    if resp.status() == reqwest::StatusCode::NO_CONTENT {
+        return Ok(serde_json::json!({"ok": true}));
+    }
+    let text = resp.text().await.unwrap_or_default();
+    Ok(serde_json::from_str(&text).unwrap_or(Value::String(text)))
+}
+
+/// Percent-encodes a query value (RFC 3986 unreserved characters pass through).
+pub fn query_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~') {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
+/// `?k=v&…` from the pairs whose value is set.
+pub fn query(pairs: &[(&str, Option<String>)]) -> String {
+    let parts: Vec<String> = pairs
+        .iter()
+        .filter_map(|(k, v)| v.as_ref().map(|v| format!("{k}={}", query_escape(v))))
+        .collect();
+    if parts.is_empty() {
+        String::new()
+    } else {
+        format!("?{}", parts.join("&"))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

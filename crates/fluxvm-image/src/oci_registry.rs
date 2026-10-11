@@ -100,7 +100,7 @@ impl ImageRef {
         })
     }
 
-    fn base_url(&self) -> String {
+    pub(crate) fn base_url(&self) -> String {
         // Plain HTTP only for registries on this machine (a local mirror, or tests).
         let local =
             self.registry.starts_with("localhost") || self.registry.starts_with("127.0.0.1");
@@ -128,7 +128,7 @@ impl std::fmt::Display for ImageRef {
     }
 }
 
-fn validate_digest(d: &str) -> Result<&str> {
+pub(crate) fn validate_digest(d: &str) -> Result<&str> {
     let hex = d
         .strip_prefix("sha256:")
         .with_context(|| format!("unsupported digest {d:?} (only sha256)"))?;
@@ -142,7 +142,7 @@ fn validate_digest(d: &str) -> Result<&str> {
     Ok(hex)
 }
 
-fn sha256_digest(bytes: &[u8]) -> String {
+pub(crate) fn sha256_digest(bytes: &[u8]) -> String {
     format!("sha256:{:x}", Sha256::digest(bytes))
 }
 
@@ -645,7 +645,7 @@ impl Puller {
     }
 }
 
-async fn read_capped(mut resp: reqwest::Response, cap: u64) -> Result<Vec<u8>> {
+pub(crate) async fn read_capped(mut resp: reqwest::Response, cap: u64) -> Result<Vec<u8>> {
     let mut out = Vec::new();
     while let Some(chunk) = resp.chunk().await? {
         if (out.len() + chunk.len()) as u64 > cap {
@@ -657,7 +657,7 @@ async fn read_capped(mut resp: reqwest::Response, cap: u64) -> Result<Vec<u8>> {
 }
 
 /// `Bearer realm="…",service="…",scope="…"` into its key/value pairs.
-fn parse_bearer_challenge(h: &str) -> Option<Vec<(String, String)>> {
+pub(crate) fn parse_bearer_challenge(h: &str) -> Option<Vec<(String, String)>> {
     let rest = h
         .trim()
         .strip_prefix("Bearer ")
