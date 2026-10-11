@@ -34,6 +34,7 @@ members = [
     "crates/fluxvm-blockd",
     "crates/fluxvm-diskinject",
     "crates/fluxvm-usernet",
+    "crates/fluxvm-netobs",
 ]
 
 # containerd-shim 0.11 fatally mis-parses containerd ≥ 2.3 BootstrapParams on
