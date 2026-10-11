@@ -610,6 +610,52 @@ pub async fn migration_cancel(
     qmp::migration_cancel(&vm.workspace.join("qmp.sock"), QMP_TIMEOUT).await
 }
 
+pub async fn migration_tune(
+    _cfg: &Config,
+    vm: &VmRecord,
+    req: &fluxvm_core::model::MigrationTuneRequest,
+) -> Result<fluxvm_core::model::MigrationStatus> {
+    qmp::migration_tune(&vm.workspace.join("qmp.sock"), req, QMP_TIMEOUT).await
+}
+
+pub async fn migration_start_postcopy(
+    _cfg: &Config,
+    vm: &VmRecord,
+) -> Result<fluxvm_core::model::MigrationStatus> {
+    qmp::migration_start_postcopy(&vm.workspace.join("qmp.sock"), QMP_TIMEOUT).await
+}
+
+/// `(major, minor)` of `cfg.qemu_binary`, probed once per binary path.
+/// `None` when the binary is missing or its banner is unrecognised.
+pub fn qemu_version(cfg: &Config) -> Option<(u32, u32)> {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    type VersionCache = Mutex<HashMap<String, Option<(u32, u32)>>>;
+    static CACHE: OnceLock<VersionCache> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(v) = cache.lock().ok()?.get(&cfg.qemu_binary) {
+        return *v;
+    }
+    let v = std::process::Command::new(&cfg.qemu_binary)
+        .arg("--version")
+        .output()
+        .ok()
+        .and_then(|o| parse_qemu_version(&String::from_utf8_lossy(&o.stdout)));
+    cache.lock().ok()?.insert(cfg.qemu_binary.clone(), v);
+    v
+}
+
+/// Parses `QEMU emulator version 9.2.0 (...)`.
+pub fn parse_qemu_version(banner: &str) -> Option<(u32, u32)> {
+    let rest = banner.split("version").nth(1)?.trim_start();
+    let mut parts = rest
+        .split(|c: char| !c.is_ascii_digit())
+        .filter(|s| !s.is_empty());
+    let major = parts.next()?.parse().ok()?;
+    let minor = parts.next()?.parse().ok()?;
+    Some((major, minor))
+}
+
 /// Hot-add `add_vcpus` vCPUs. Returns the realized vCPU count after adding
 /// (bounded by `max_vcpus`'s headroom reserved at launch — see `build_args`).
 pub async fn hotplug_cpu(_cfg: &Config, vm: &VmRecord, add_vcpus: u8) -> Result<u8> {

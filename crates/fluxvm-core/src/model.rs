@@ -1186,6 +1186,143 @@ pub struct MigrationStartRequest {
     /// plain `tcp:`/`unix:` behavior.
     #[serde(default)]
     pub tls: Option<MigrationTlsSpec>,
+    /// Enables QEMU's `auto-converge` capability with these throttle
+    /// parameters. The caller can raise them mid-flight with
+    /// `POST /v1/vms/{id}/migration/tune`.
+    #[serde(default)]
+    pub auto_converge: Option<MigrationAutoConverge>,
+    /// multifd stream compression. Needs `multifd_channels > 1`, and the
+    /// receiver must be created with the same compression.
+    #[serde(default)]
+    pub compression: Option<MigrationCompression>,
+    /// Overrides `mode`'s post-copy handling. `Armed` enables `postcopy-ram`
+    /// without switching; `POST /v1/vms/{id}/migration/postcopy` switches
+    /// later. `None` keeps `mode`'s meaning (`PostCopy` = `Immediate`).
+    #[serde(default)]
+    pub post_copy: Option<PostCopyMode>,
+}
+
+impl MigrationStartRequest {
+    /// The post-copy behaviour `mode` and `post_copy` resolve to; errors when
+    /// they contradict each other.
+    pub fn effective_post_copy(&self) -> anyhow::Result<PostCopyMode> {
+        match (self.mode, self.post_copy) {
+            (MigrationMode::PreCopy, None) => Ok(PostCopyMode::Disabled),
+            (MigrationMode::PostCopy, None) => Ok(PostCopyMode::Immediate),
+            (MigrationMode::PostCopy, Some(PostCopyMode::Disabled)) => {
+                anyhow::bail!("mode post-copy contradicts post_copy disabled")
+            }
+            (_, Some(p)) => Ok(p),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum PostCopyMode {
+    #[default]
+    Disabled,
+    /// Switch to post-copy as soon as pre-copy is active.
+    Immediate,
+    /// Enable post-copy but stay in pre-copy until asked to switch.
+    Armed,
+}
+
+/// QEMU auto-converge throttle, in percent of guest vCPU time (1-99 each).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct MigrationAutoConverge {
+    #[serde(default)]
+    pub initial_pct: Option<u8>,
+    #[serde(default)]
+    pub increment_pct: Option<u8>,
+    #[serde(default)]
+    pub max_pct: Option<u8>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum MigrationCompressionAlgorithm {
+    #[default]
+    None,
+    Zlib,
+    Zstd,
+}
+
+impl MigrationCompressionAlgorithm {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Zlib => "zlib",
+            Self::Zstd => "zstd",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct MigrationCompression {
+    pub algorithm: MigrationCompressionAlgorithm,
+    /// zstd 0-20, zlib 0-9. `None` keeps QEMU's default level.
+    #[serde(default)]
+    pub level: Option<u8>,
+}
+
+impl MigrationCompression {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        let max = match self.algorithm {
+            MigrationCompressionAlgorithm::None => return Ok(()),
+            MigrationCompressionAlgorithm::Zlib => 9,
+            MigrationCompressionAlgorithm::Zstd => 20,
+        };
+        if let Some(level) = self.level
+            && level > max
+        {
+            anyhow::bail!(
+                "{} compression level must be 0-{max} (got {level})",
+                self.algorithm.as_str()
+            );
+        }
+        Ok(())
+    }
+}
+
+/// Stream capabilities a receiver must enable before `migrate-incoming`;
+/// QEMU refuses a stream whose capabilities don't match on both ends.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct MigrationStreamCapabilities {
+    #[serde(default)]
+    pub multifd_channels: Option<u8>,
+    #[serde(default)]
+    pub compression: Option<MigrationCompression>,
+    #[serde(default)]
+    pub post_copy: bool,
+}
+
+impl MigrationStreamCapabilities {
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+/// Mid-flight changes to a running migration (`migrate-set-parameters`).
+/// Unset fields are left as they are.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct MigrationTuneRequest {
+    #[serde(default)]
+    pub bandwidth_mbps: Option<u64>,
+    #[serde(default)]
+    pub max_downtime_ms: Option<u64>,
+    #[serde(default)]
+    pub cpu_throttle_initial_pct: Option<u8>,
+    #[serde(default)]
+    pub cpu_throttle_increment_pct: Option<u8>,
+    #[serde(default)]
+    pub max_cpu_throttle_pct: Option<u8>,
+}
+
+impl MigrationTuneRequest {
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
 }
 
 /// Cert/key material for QEMU's `tls-creds-x509` migration transport.
@@ -1215,7 +1352,7 @@ pub enum MigrationPhase {
     Unknown,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct MigrationStatus {
     pub phase: MigrationPhase,
     /// Raw VMM status for forward compatibility with newer QEMU states.
@@ -1232,6 +1369,39 @@ pub struct MigrationStatus {
     pub downtime_ms: Option<u64>,
     #[serde(default)]
     pub error: Option<String>,
+    #[serde(flatten)]
+    pub telemetry: MigrationTelemetry,
+}
+
+/// `query-migrate` progress detail beyond the RAM counters. Every field is
+/// optional: QEMU only reports some of them in some phases.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Default)]
+pub struct MigrationTelemetry {
+    /// Pages dirtied per second, as of the last dirty sync.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dirty_pages_rate: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dirty_sync_count: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page_size: Option<u64>,
+    /// Zero pages sent as a marker instead of their contents.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duplicate_pages: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub normal_bytes: Option<u64>,
+    /// Current transfer rate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mbps: Option<f64>,
+    /// QEMU's estimate of the stop-and-copy downtime if it switched now.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_downtime_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_throttle_pct: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub setup_time_ms: Option<u64>,
+    /// Destination page faults served from the source during post-copy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub postcopy_requests: Option<u64>,
 }
 
 /// Target-side QEMU incoming receiver. The caller picks the node; this
@@ -1278,6 +1448,10 @@ pub struct MigrationReceiverRequest {
     /// `disk_format` are then taken from the record.
     #[serde(default)]
     pub record: Option<Box<VmRecord>>,
+    /// Must match the source's `migration/start` request (multifd,
+    /// compression, post-copy); applied on activate.
+    #[serde(default)]
+    pub capabilities: MigrationStreamCapabilities,
 }
 
 fn default_disk_format() -> String {
@@ -1316,6 +1490,9 @@ pub struct MigrationReceiver {
     /// which `adopt` turns into a running VM.
     #[serde(default)]
     pub source_id: Option<Uuid>,
+    /// Stream capabilities supplied at create time; applied on activate.
+    #[serde(default, skip_serializing_if = "MigrationStreamCapabilities::is_empty")]
+    pub capabilities: MigrationStreamCapabilities,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1356,6 +1533,21 @@ pub struct RuntimeMigrationCapability {
     /// there (no attempt has succeeded yet).
     #[serde(default = "default_status_pollable")]
     pub status_pollable: bool,
+    /// `auto_converge` on `migration/start` is honoured.
+    #[serde(default)]
+    pub auto_converge: bool,
+    /// multifd compression algorithms `migration/start` accepts.
+    #[serde(default)]
+    pub compression: Vec<String>,
+    /// `post_copy: armed` plus `POST .../migration/postcopy` work.
+    #[serde(default)]
+    pub post_copy_switch: bool,
+    /// `POST .../migration/tune` works on an in-flight migration.
+    #[serde(default)]
+    pub live_tune: bool,
+    /// multifd and post-copy may be combined (QEMU 10.0 and later).
+    #[serde(default)]
+    pub post_copy_with_multifd: bool,
 }
 fn default_status_pollable() -> bool {
     true
@@ -2258,10 +2450,77 @@ mod migration_tls_model_tests {
                 key_path: "/etc/key.pem".into(),
                 tls_hostname: Some("dest.example.com".into()),
             }),
+            auto_converge: Some(MigrationAutoConverge {
+                initial_pct: Some(20),
+                increment_pct: Some(10),
+                max_pct: Some(80),
+            }),
+            compression: Some(MigrationCompression {
+                algorithm: MigrationCompressionAlgorithm::Zstd,
+                level: Some(3),
+            }),
+            post_copy: Some(PostCopyMode::Armed),
         };
         let round_tripped: MigrationStartRequest =
             serde_json::from_value(serde_json::to_value(&req).unwrap()).unwrap();
         assert_eq!(round_tripped, req);
+    }
+
+    #[test]
+    fn migration_start_request_adaptive_fields_default_when_absent() {
+        let req: MigrationStartRequest =
+            serde_json::from_value(serde_json::json!({"destination": "tcp:h:1"})).unwrap();
+        assert_eq!(req.auto_converge, None);
+        assert_eq!(req.compression, None);
+        assert_eq!(req.post_copy, None);
+        assert_eq!(req.effective_post_copy().unwrap(), PostCopyMode::Disabled);
+    }
+
+    #[test]
+    fn effective_post_copy_resolves_mode_and_override() {
+        let mut req: MigrationStartRequest = serde_json::from_value(
+            serde_json::json!({"destination": "tcp:h:1", "mode": "post-copy"}),
+        )
+        .unwrap();
+        assert_eq!(req.effective_post_copy().unwrap(), PostCopyMode::Immediate);
+        req.post_copy = Some(PostCopyMode::Armed);
+        assert_eq!(req.effective_post_copy().unwrap(), PostCopyMode::Armed);
+        req.post_copy = Some(PostCopyMode::Disabled);
+        assert!(req.effective_post_copy().is_err());
+        req.mode = MigrationMode::PreCopy;
+        req.post_copy = Some(PostCopyMode::Armed);
+        assert_eq!(req.effective_post_copy().unwrap(), PostCopyMode::Armed);
+    }
+
+    #[test]
+    fn compression_level_is_bounded_per_algorithm() {
+        let zstd = |level| MigrationCompression {
+            algorithm: MigrationCompressionAlgorithm::Zstd,
+            level: Some(level),
+        };
+        assert!(zstd(20).validate().is_ok());
+        assert!(zstd(21).validate().is_err());
+        let zlib = MigrationCompression {
+            algorithm: MigrationCompressionAlgorithm::Zlib,
+            level: Some(10),
+        };
+        assert!(zlib.validate().is_err());
+    }
+
+    #[test]
+    fn migration_status_telemetry_is_flat_on_the_wire() {
+        let v = serde_json::json!({
+            "phase": "active", "status": "active",
+            "dirty_pages_rate": 1200, "mbps": 941.5, "expected_downtime_ms": 80
+        });
+        let s: MigrationStatus = serde_json::from_value(v).unwrap();
+        assert_eq!(s.telemetry.dirty_pages_rate, Some(1200));
+        assert_eq!(s.telemetry.mbps, Some(941.5));
+        assert_eq!(s.telemetry.expected_downtime_ms, Some(80));
+        let out = serde_json::to_value(&s).unwrap();
+        assert_eq!(out["dirty_pages_rate"], 1200);
+        assert!(out.get("telemetry").is_none());
+        assert!(out.get("postcopy_requests").is_none());
     }
 
     #[test]
@@ -2292,6 +2551,7 @@ mod migration_tls_model_tests {
             vcpus: 1,
             memory_mib: 512,
             source_id: None,
+            capabilities: Default::default(),
             tls: Some(MigrationTlsSpec {
                 ca_path: "a".into(),
                 cert_path: "b".into(),

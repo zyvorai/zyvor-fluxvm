@@ -753,6 +753,17 @@ fn validate_migration_receiver_request(
     if let Some(tls) = &req.tls {
         validate_migration_tls_spec(tls, cfg)?;
     }
+    if req.capabilities.multifd_channels == Some(0) {
+        bail!("capabilities.multifd_channels must be >= 1 when set");
+    }
+    if let Some(c) = &req.capabilities.compression {
+        c.validate()?;
+        if c.algorithm != fluxvm_core::model::MigrationCompressionAlgorithm::None
+            && req.capabilities.multifd_channels.unwrap_or(1) < 2
+        {
+            bail!("capabilities.compression needs capabilities.multifd_channels > 1");
+        }
+    }
     Ok(())
 }
 
@@ -3371,6 +3382,49 @@ impl VmManager {
         Ok(status)
     }
 
+    /// `(major, minor)` of the configured QEMU binary, when it can be probed.
+    pub fn qemu_version(&self) -> Option<(u32, u32)> {
+        fluxvm_qemu::qemu_version(&self.cfg)
+    }
+
+    /// Changes bandwidth, downtime limit or auto-converge throttle of an
+    /// in-flight migration.
+    pub async fn tune_migration(
+        &self,
+        id: Uuid,
+        req: &fluxvm_core::model::MigrationTuneRequest,
+    ) -> Result<fluxvm_core::model::MigrationStatus> {
+        let vm = self.get(id).await?;
+        if vm.backend != BackendKind::Qemu {
+            bail!(
+                "migration tune contract v1 supports qemu only (backend={:?})",
+                vm.backend
+            );
+        }
+        let status = fluxvm_qemu::migration_tune(&self.cfg, &vm, req).await?;
+        let vm_id = id.to_string();
+        let detail = serde_json::to_string(req).unwrap_or_default();
+        audit_event("migration.tune", &[("vm_id", &vm_id), ("params", &detail)]);
+        Ok(status)
+    }
+
+    /// Switches an armed migration to post-copy. From here on the
+    /// destination owns the guest's memory: a failure loses the VM rather
+    /// than leaving it running on the source.
+    pub async fn start_postcopy(&self, id: Uuid) -> Result<fluxvm_core::model::MigrationStatus> {
+        let vm = self.get(id).await?;
+        if vm.backend != BackendKind::Qemu {
+            bail!(
+                "post-copy switch contract v1 supports qemu only (backend={:?})",
+                vm.backend
+            );
+        }
+        let status = fluxvm_qemu::migration_start_postcopy(&self.cfg, &vm).await?;
+        let vm_id = id.to_string();
+        audit_event("migration.postcopy", &[("vm_id", &vm_id)]);
+        Ok(status)
+    }
+
     fn receiver_dir(&self) -> std::path::PathBuf {
         self.cfg.state_dir.join("migration-receivers")
     }
@@ -3488,6 +3542,7 @@ impl VmManager {
             memory_mib: req.memory_mib,
             tls: req.tls,
             source_id: None,
+            capabilities: req.capabilities,
         };
         if let Err(e) = self.write_receiver(&rec) {
             if let Err(stop) = process::terminate_pid(launched.pid).await {
@@ -3527,7 +3582,13 @@ impl VmManager {
         } else {
             rec.listen_uri.as_str()
         };
-        fluxvm_qemu::receiver::activate(&rec.qmp_socket, incoming, rec.tls.as_ref()).await?;
+        fluxvm_qemu::receiver::activate(
+            &rec.qmp_socket,
+            incoming,
+            rec.tls.as_ref(),
+            &rec.capabilities,
+        )
+        .await?;
         Ok(rec)
     }
 
@@ -7111,9 +7172,20 @@ mod migration_tls_validation_tests {
             expires_in_seconds: None,
             tls: None,
             record: None,
+            capabilities: Default::default(),
         };
         assert!(validate_migration_receiver_request(&req, &cfg).is_err());
         req.listen_host = "10.0.0.5".into();
+        assert!(validate_migration_receiver_request(&req, &cfg).is_ok());
+        req.capabilities.compression = Some(fluxvm_core::model::MigrationCompression {
+            algorithm: fluxvm_core::model::MigrationCompressionAlgorithm::Zstd,
+            level: Some(3),
+        });
+        assert!(
+            validate_migration_receiver_request(&req, &cfg).is_err(),
+            "compression without multifd must be refused"
+        );
+        req.capabilities.multifd_channels = Some(4);
         assert!(validate_migration_receiver_request(&req, &cfg).is_ok());
         req.listen_host.clear(); // defaults to 0.0.0.0
         assert!(validate_migration_receiver_request(&req, &cfg).is_ok());

@@ -8,7 +8,7 @@ use crate::qmp;
 use anyhow::{Context, Result, bail};
 use fluxvm_core::backend::path_arg;
 use fluxvm_core::config::Config;
-use fluxvm_core::model::MigrationTlsSpec;
+use fluxvm_core::model::{MigrationStreamCapabilities, MigrationTlsSpec};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -175,10 +175,18 @@ pub async fn launch(
     })
 }
 
-pub async fn activate(qmp_socket: &Path, uri: &str, tls: Option<&MigrationTlsSpec>) -> Result<()> {
+pub async fn activate(
+    qmp_socket: &Path,
+    uri: &str,
+    tls: Option<&MigrationTlsSpec>,
+    caps: &MigrationStreamCapabilities,
+) -> Result<()> {
     if !uri.starts_with("tcp:") && !uri.starts_with("unix:") {
         bail!("migration receiver uri must be tcp: or unix: (got {uri})");
     }
+    qmp::set_incoming_capabilities(qmp_socket, caps, ACTIVATE_TIMEOUT)
+        .await
+        .context("enabling the incoming stream capabilities")?;
     if let Some(tls) = tls {
         let workspace = qmp_socket
             .parent()
