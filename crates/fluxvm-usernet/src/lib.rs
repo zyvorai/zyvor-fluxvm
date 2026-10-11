@@ -453,6 +453,10 @@ enum Ev {
     TcpHostErr {
         id: u64,
     },
+    /// The host writer finished a write: the guest's window may have room again.
+    TcpHostDrained {
+        id: u64,
+    },
     ForwardAccepted {
         idx: usize,
         stream: TcpStream,
@@ -657,6 +661,9 @@ async fn tcp_writer(
                 let n = d.len();
                 let r = w.write_all(&d).await;
                 queued.fetch_sub(n, Ordering::Relaxed);
+                if r.is_ok() {
+                    let _ = ev.try_send(Ev::TcpHostDrained { id });
+                }
                 if r.is_err() {
                     let _ = ev.send(Ev::TcpHostErr { id }).await;
                     return;
@@ -1452,8 +1459,12 @@ impl Engine {
                 return;
             };
             let is_dns = f.dns.is_some();
-            let can = is_dns
-                || (f.to_host.is_some() && f.queued.load(Ordering::Relaxed) < MAX_QUEUED_TO_HOST);
+            // Backpressure is the advertised window (queue room); this hard cap only guards a guest that
+            // ignores it.
+            let queued = f.queued.load(Ordering::Relaxed);
+            f.conn
+                .note_host_room(MAX_QUEUED_TO_HOST.saturating_sub(queued));
+            let can = is_dns || (f.to_host.is_some() && queued < 2 * MAX_QUEUED_TO_HOST);
             let mut out = Vec::new();
             let res = f.conn.on_segment(t, can, now, &mut out);
             let mut dns_data = None;
@@ -1690,6 +1701,16 @@ impl Engine {
                 let key = f.key;
                 self.flush_tcp(key, out);
             }
+            Ev::TcpHostDrained { id } => {
+                let Some(f) = self.flows.get_mut(&id) else {
+                    return;
+                };
+                let room = MAX_QUEUED_TO_HOST.saturating_sub(f.queued.load(Ordering::Relaxed));
+                let mut out = Vec::new();
+                f.conn.set_host_room(room, &mut out);
+                let key = f.key;
+                self.flush_tcp(key, out);
+            }
             Ev::TcpHostErr { id } => {
                 let Some(f) = self.flows.get_mut(&id) else {
                     return;
@@ -1845,6 +1866,11 @@ impl Engine {
                 idle
             };
             f.conn.tick(now, idle, &mut out);
+            // Safety net for a lost drain notification: reopen a closed window.
+            if f.dns.is_none() {
+                let room = MAX_QUEUED_TO_HOST.saturating_sub(f.queued.load(Ordering::Relaxed));
+                f.conn.set_host_room(room, &mut out);
+            }
             let closed = f.conn.state == State::Closed;
             if !out.is_empty() || closed {
                 work.push((*id, f.key, out, closed));
