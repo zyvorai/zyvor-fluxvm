@@ -72,7 +72,8 @@ certificate involved.
 | Networking build | `com.apple.security.virtualization` and `com.apple.vm.networking` | opt in with `FLUXVM_VZ_BRIDGE=1 cargo build -p fluxvm-apple`; needed for bridged networking |
 
 `com.apple.vm.networking` is restricted: ad-hoc signing of it only works with SIP/AMFI relaxed or a provisioning profile
-([macos.md](macos.md#mac-studio-options)). Environment switches: `FLUXVM_VZ_RUNNER` points at another runner binary,
+([macos.md](macos.md#mac-studio-options)). Release packages can carry a Developer ID signed `FluxVMRunner.app` with that
+profile, which the daemon prefers over the plain runner: see [macos-signing.md](macos-signing.md). Environment switches: `FLUXVM_VZ_RUNNER` points at another runner binary,
 `FLUXVM_SKIP_VZ_RUNNER=1` skips building it, and `FLUXVM_VZ_SWITCH` points at another switch binary.
 
 ### The control socket

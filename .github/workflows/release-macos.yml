@@ -35,6 +35,45 @@ jobs:
           [ -n "$X" ] && sudo xcode-select -s "$X"
           echo "$(xcode-select -p): SDK $(xcrun --show-sdk-version)"
       - run: brew install hivex
+      # Developer ID signing and notarization, when the repository has the secrets (docs/macos-signing.md). Without
+      # them (forks, first releases) the package is ad hoc signed exactly as before.
+      - name: Import the signing certificate and profiles
+        id: signing
+        env:
+          CERT_P12: ${{ secrets.MACOS_DEVELOPER_ID_P12 }}
+          CERT_PASSWORD: ${{ secrets.MACOS_DEVELOPER_ID_P12_PASSWORD }}
+          PROFILE_RUNNER: ${{ secrets.MACOS_PROFILE_RUNNER }}
+          PROFILE_VMNETD: ${{ secrets.MACOS_PROFILE_VMNETD }}
+          PROFILE_USBD: ${{ secrets.MACOS_PROFILE_USBD }}
+          NOTARY_KEY: ${{ secrets.MACOS_NOTARY_KEY_P8 }}
+          NOTARY_KEY_ID: ${{ secrets.MACOS_NOTARY_KEY_ID }}
+          NOTARY_ISSUER: ${{ secrets.MACOS_NOTARY_ISSUER }}
+        run: |
+          if [ -z "$CERT_P12" ]; then echo "no signing secrets: ad hoc package"; exit 0; fi
+          S="$RUNNER_TEMP/signing"; mkdir -p "$S"; chmod 700 "$S"
+          KC="$S/build.keychain-db"; KC_PW="$(uuidgen)"
+          echo "$CERT_P12" | base64 --decode > "$S/cert.p12"
+          security create-keychain -p "$KC_PW" "$KC"
+          security set-keychain-settings -lut 21600 "$KC"
+          security unlock-keychain -p "$KC_PW" "$KC"
+          security import "$S/cert.p12" -k "$KC" -P "$CERT_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KC_PW" "$KC" >/dev/null
+          security list-keychains -d user -s "$KC" $(security list-keychains -d user | tr -d '"')
+          rm -f "$S/cert.p12"
+          ID="$(security find-identity -v -p codesigning "$KC" | sed -n 's/.*"\(Developer ID Application: .*\)"/\1/p' | head -n1)"
+          [ -n "$ID" ] || { echo "no Developer ID Application identity in the certificate" >&2; exit 1; }
+          echo "FLUXVM_SIGN_IDENTITY=$ID" >> "$GITHUB_ENV"
+          for p in RUNNER VMNETD USBD; do
+            v="PROFILE_$p"; [ -n "${!v}" ] || continue
+            echo "${!v}" | base64 --decode > "$S/$p.provisionprofile"
+            echo "FLUXVM_PROFILE_$p=$S/$p.provisionprofile" >> "$GITHUB_ENV"
+          done
+          if [ -n "$NOTARY_KEY" ]; then
+            echo "$NOTARY_KEY" | base64 --decode > "$S/notary.p8"
+            { echo "FLUXVM_NOTARY_KEY=$S/notary.p8"; echo "FLUXVM_NOTARY_KEY_ID=$NOTARY_KEY_ID";
+              echo "FLUXVM_NOTARY_ISSUER=$NOTARY_ISSUER"; echo "FLUXVM_NOTARIZE=1"; } >> "$GITHUB_ENV"
+          fi
+          echo "keychain=$KC" >> "$GITHUB_OUTPUT"
       - name: Package
         id: pkg
         working-directory: fluxvm
@@ -49,6 +88,19 @@ jobs:
           "$D"/fluxvm-*/bin/fluxctl --version
           for b in fluxvm-vz-runner fluxvm-vz-switch fluxvm-blockd fluxvm-usernet; do test -x "$D"/fluxvm-*/bin/$b || { echo "missing $b"; exit 1; }; done
           codesign -d --entitlements - "$D"/fluxvm-*/bin/fluxvm-vz-runner 2>&1 | grep com.apple.security.virtualization
+          for app in "$D"/fluxvm-*/libexec/*.app "$D"/fluxvm-*/bin/*.app; do
+            [ -d "$app" ] || continue
+            codesign --verify --strict --deep "$app"
+            if [ "${FLUXVM_NOTARIZE:-0}" = 1 ]; then xcrun stapler validate "$app"; spctl -a -t exec -vv "$app"; fi
+          done
+          if [ -n "${FLUXVM_PROFILE_RUNNER:-}" ]; then
+            codesign -d --entitlements - "$D"/fluxvm-*/bin/FluxVMRunner.app 2>&1 | grep com.apple.vm.networking
+          fi
+      - name: Remove the signing keychain
+        if: always() && steps.signing.outputs.keychain != ''
+        run: |
+          security delete-keychain "${{ steps.signing.outputs.keychain }}" || true
+          rm -rf "$RUNNER_TEMP/signing"
       - uses: actions/upload-artifact@v4
         with:
           name: fluxvm-macos-arm64

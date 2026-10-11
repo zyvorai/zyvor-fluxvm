@@ -709,7 +709,18 @@ pub(crate) fn tail_runner_log(workspace: &Path) -> String {
     }
 }
 
-/// Locates the signed runner: `FLUXVM_VZ_RUNNER`, then next to the daemon binary, then the copy built by this crate.
+/// The runner inside the Developer ID signed bundle (`FluxVMRunner.app`) that a release package ships when it has a
+/// provisioning profile for `com.apple.vm.networking`. Restricted entitlements are only honoured for an executable
+/// launched from its bundle, so this path, not a copy of the binary, is what must be run.
+pub const RUNNER_BUNDLE_EXE: &str = "FluxVMRunner.app/Contents/MacOS/fluxvm-vz-runner";
+
+/// Runner candidates in `dir`, best first: the networking bundle, then the plain runner.
+pub fn runner_candidates(dir: &Path) -> [PathBuf; 2] {
+    [dir.join(RUNNER_BUNDLE_EXE), dir.join("fluxvm-vz-runner")]
+}
+
+/// Locates the signed runner: `FLUXVM_VZ_RUNNER`, then next to the daemon binary (the `FluxVMRunner.app` bundle before
+/// the plain binary), then the copy built by this crate.
 pub fn find_runner() -> Result<PathBuf> {
     let mut tried = Vec::new();
     if let Some(p) = std::env::var_os("FLUXVM_VZ_RUNNER") {
@@ -722,11 +733,12 @@ pub fn find_runner() -> Result<PathBuf> {
     if let Ok(exe) = std::env::current_exe()
         && let Some(dir) = exe.parent()
     {
-        let p = dir.join("fluxvm-vz-runner");
-        if p.is_file() {
-            return Ok(p);
+        for p in runner_candidates(dir) {
+            if p.is_file() {
+                return Ok(p);
+            }
+            tried.push(p);
         }
-        tried.push(p);
     }
     if let Some(p) = option_env!("FLUXVM_VZ_RUNNER_BUILT") {
         let p = PathBuf::from(p);
@@ -1129,6 +1141,15 @@ mod one_shot_tests {
 #[cfg(test)]
 mod template_tests {
     use super::*;
+
+    #[test]
+    fn the_networking_bundle_is_preferred_over_the_plain_runner() {
+        let d = tempfile::tempdir().unwrap();
+        let [bundle, plain] = runner_candidates(d.path());
+        assert!(bundle.ends_with("FluxVMRunner.app/Contents/MacOS/fluxvm-vz-runner"));
+        assert!(plain.ends_with("fluxvm-vz-runner"));
+        assert!(!plain.to_string_lossy().contains(".app"));
+    }
 
     #[test]
     fn a_prepared_guest_is_cloned_without_its_machine_identifier() {

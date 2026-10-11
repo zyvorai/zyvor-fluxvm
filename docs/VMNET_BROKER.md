@@ -22,9 +22,10 @@ turned into JSON or text.
 - **Runner side.** `apple.vmnet.name` makes a network named and shareable; the runner acquires it through
   `VmnetSerialization.swift` and releases it when the VM stops. An unnamed `apple.vmnet` keeps the existing per-runner network and
   does not touch the broker. If the broker is not running, a named network fails with `vmnetd XPC connection failed`.
-- **Install.** `crates/fluxvm-apple/macos/vmnetd/build-install.sh` builds with `xcrun swiftc` for macOS 26, ad-hoc signs with
-  `com.apple.vm.networking` from `Entitlements.plist`, installs the binary to `/usr/local/libexec/fluxvm-vmnetd` with `sudo`, and
-  bootstraps the launch agent with `launchctl`.
+- **Install.** `crates/fluxvm-apple/macos/vmnetd/build-install.sh` either builds from source (macOS 26 target, ad hoc signed with the
+  virtualization entitlement only, installed to `/usr/local/libexec/fluxvm-vmnetd` with `sudo`) or, with
+  `FLUXVM_PACKAGE_DIR`, uses a release package's Developer ID signed `libexec/FluxVMNetworking.app`, the only form that can hold
+  `com.apple.vm.networking` ([macos-signing.md](macos-signing.md)). Either way it bootstraps the launch agent with `launchctl`.
 
 ## What is verified
 
