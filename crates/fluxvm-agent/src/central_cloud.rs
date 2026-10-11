@@ -1448,6 +1448,10 @@ mod tests {
         assert!(!wants_tenant_vmnet(
             &json!({"backend": "vz", "apple": {"bridge_interface": "en0"}})
         ));
+        // A malformed `apple` is left alone (indexing into it would panic).
+        assert!(!wants_tenant_vmnet(
+            &json!({"backend": "vz", "apple": "oops"})
+        ));
         let mut body = json!({"backend": "vz"});
         body["apple"]["vmnet"] = json!({"name": "x"});
         assert_eq!(body["apple"]["vmnet"]["name"], "x");

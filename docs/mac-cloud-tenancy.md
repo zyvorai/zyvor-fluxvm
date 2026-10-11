@@ -152,5 +152,5 @@ The ledger covers VMs created through central. VMs created directly on a node ar
 - Tenant networks are per Mac: one tenant's VMs on two Macs are on two separate vmnet networks with the same subnet,
   not one network spanning both Macs. A cross-Mac overlay is still to do. Network isolation also needs macOS 26+ and
   the `fluxvm-vmnetd` broker on every Mac, neither verified on hardware yet.
-- In lab mode (no `--token`), a caller with no token at all is still the operator. Central refuses to create tenants
-  in lab mode, and refuses unknown tokens once tenants exist.
+- Lab mode (no `--token`) and tenants do not mix: central refuses to create tenants without `--token`, and if tenants
+  exist when it starts without one, every caller except a tenant gets a `401` (node heartbeats included).

@@ -237,9 +237,9 @@ fn constant_time_eq(a: &str, b: &str) -> bool {
 ///
 /// - The fleet token (`--token`) is the operator ([`Caller::Admin`]); node heartbeats use it too.
 /// - A tenant token (see `POST /fleet/tenants`) is [`Caller::Tenant`], limited to [`tenant_route_allowed`].
-/// - Without a fleet token (lab mode) a caller presenting no token is the operator, as before tenants existed; a
-///   token that is not a tenant's is ignored while there are no tenants and refused (401) once there are. Central
-///   refuses to create tenants without `--token`.
+/// - Without a fleet token (lab mode) every caller that is not a tenant is the operator, as before tenants existed,
+///   but only while no tenant exists: once one does, anonymous callers and unknown tokens get a 401. Central refuses
+///   to create tenants without `--token`.
 async fn auth_middleware(State(fleet): State<Fleet>, mut req: Request, next: Next) -> Response {
     if req.uri().path() == "/healthz" {
         return next.run(req).await;
@@ -276,7 +276,18 @@ async fn auth_middleware(State(fleet): State<Fleet>, mut req: Request, next: Nex
                 None => return unauthorized(),
             }
         }
-        (None, None) => Caller::Admin,
+        (None, None) => {
+            // Lab mode, but tenants exist (the token was removed after they were created): an anonymous caller could
+            // be a tenant that dropped its token, so nobody is the operator until central runs with --token again.
+            if fleet.tenancy.lock().await.enabled() {
+                return (
+                    StatusCode::UNAUTHORIZED,
+                    Json(json!({"error": "tenants exist but central runs without --token; restart it with --token"})),
+                )
+                    .into_response();
+            }
+            Caller::Admin
+        }
         (Some(_), None) => return unauthorized(),
     };
     if let Caller::Tenant(t) = &caller
@@ -1168,6 +1179,11 @@ async fn create_vm_inner(
             _ => (caller.clone(), None),
         }
     };
+    // Released below once placement answered, or on drop if the request is cancelled mid-flight (client gone).
+    let mut hold = ReservationHold {
+        fleet,
+        id: reservation,
+    };
     // After any tenant network was stamped, so placement asks for a vmnet-capable Mac.
     let apple_request = apple_placement_request(&body, req_vcpus, req_mem);
     let macos_guest = apple_request.as_ref().is_some_and(|r| r.macos_guest);
@@ -1189,11 +1205,36 @@ async fn create_vm_inner(
         },
     )
     .await;
-    if let Some(id) = reservation {
+    if let Some(id) = hold.id.take() {
         // A successful create is already in the ledger, so the quota stays held without a gap.
         fleet.tenancy.lock().await.release_reservation(id);
     }
     placed
+}
+
+/// A quota reservation that is released when dropped unreleased, so a create whose future is dropped (the client
+/// disconnected while the node was still answering) does not hold the tenant's quota until central restarts.
+struct ReservationHold<'a> {
+    fleet: &'a Fleet,
+    id: Option<u64>,
+}
+
+impl Drop for ReservationHold<'_> {
+    fn drop(&mut self) {
+        let Some(id) = self.id.take() else {
+            return;
+        };
+        if let Ok(mut tenancy) = self.fleet.tenancy.try_lock() {
+            tenancy.release_reservation(id);
+            return;
+        }
+        let tenancy = self.fleet.tenancy.clone();
+        if let Ok(rt) = tokio::runtime::Handle::try_current() {
+            rt.spawn(async move {
+                tenancy.lock().await.release_reservation(id);
+            });
+        }
+    }
 }
 
 /// Whether a create should join its tenant's isolated vmnet network: a `vz` VM that did not choose its own network
@@ -1211,6 +1252,10 @@ fn wants_tenant_vmnet(body: &Value) -> bool {
         return false;
     }
     let apple = body.get("apple");
+    // A malformed `apple` (not an object) is left for the node to reject; stamping into it would panic.
+    if apple.is_some_and(|a| !a.is_object() && !a.is_null()) {
+        return false;
+    }
     let set = |k: &str| apple.and_then(|a| a.get(k)).is_some_and(|v| !v.is_null());
     !(set("vmnet") || set("usernet") || set("bridge_interface"))
 }
