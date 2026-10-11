@@ -427,6 +427,75 @@ fn vz_token_disk_injection_eligible(
     {
         return Err("no agent token");
     }
+    vz_root_disk_writable(req, disk_is_raw)
+}
+
+/// What offline injection of the SSH public key(s) into a vz guest's root disk should do.
+#[derive(Debug, PartialEq, Eq)]
+struct VzSshKeyInjection {
+    /// The keys to append to `/root/.ssh/authorized_keys`.
+    keys: Vec<String>,
+    /// Whether, once every key is on the disk, the cloud-init copy only repeats it. False when cloud-init installs the
+    /// keys for a different account than root, which the disk copy does not replace.
+    cloud_init_redundant: bool,
+}
+
+/// Whether the request's SSH public keys (`cloud_init.ssh_authorized_keys`) may also be written offline into a vz guest's
+/// root disk, the way the agent token is. `Err` carries the reason it may not, for the log; the cloud-init copy then
+/// stays the only one.
+///
+/// Offline injection can only write root's `authorized_keys`. The key is therefore injected when cloud-init's `user` is
+/// unset (what `fluxctl ssh` logs in as is root) or `root`, and only in the explicit `root` case does it make the
+/// cloud-init copy redundant. For any other user the keys belong to that account and nothing is injected.
+fn vz_ssh_key_disk_injection_plan(
+    req: &CreateVmRequest,
+    disk_is_raw: bool,
+    vm_running: bool,
+) -> std::result::Result<VzSshKeyInjection, &'static str> {
+    if req.backend != BackendKind::Vz {
+        return Err("not a vz guest");
+    }
+    if vm_running {
+        return Err("VM is running; its disk is never written to");
+    }
+    let Some(ci) = req.cloud_init.as_ref() else {
+        return Err("no SSH public key");
+    };
+    if ci.ssh_authorized_keys.is_empty() {
+        return Err("no SSH public key");
+    }
+    if ci
+        .ssh_authorized_keys
+        .iter()
+        .any(|k| k.trim().is_empty() || k.contains('\n'))
+    {
+        return Err("an SSH key is not a single non-empty line");
+    }
+    let redundant = match ci.user.as_deref() {
+        None => false,
+        Some("root") => true,
+        Some(_) => {
+            return Err(
+                "keys are for a non-root user; only root's authorized_keys can be written offline",
+            );
+        }
+    };
+    vz_root_disk_writable(req, disk_is_raw)?;
+    Ok(VzSshKeyInjection {
+        keys: ci
+            .ssh_authorized_keys
+            .iter()
+            .map(|k| k.trim().to_owned())
+            .collect(),
+        cloud_init_redundant: redundant,
+    })
+}
+
+/// The disk-shape conditions shared by every offline injection into a vz guest's root disk.
+fn vz_root_disk_writable(
+    req: &CreateVmRequest,
+    disk_is_raw: bool,
+) -> std::result::Result<(), &'static str> {
     let Some(apple) = req.apple.as_ref() else {
         // Defaults: a Linux guest on a plain root disk.
         return vz_token_storage_ok(req, disk_is_raw);
@@ -467,6 +536,20 @@ fn strip_vz_agent_token_from_cloud_init(req: &mut CreateVmRequest) {
     };
     ci.write_files
         .retain(|f| f.path != fluxvm_guest_protocol::TOKEN_FILE_PATH);
+    let empty = serde_json::to_value(&*ci).ok()
+        == serde_json::to_value(fluxvm_core::model::CloudInitSpec::default()).ok();
+    if empty {
+        req.cloud_init = None;
+    }
+}
+
+/// Removes the SSH public keys from a vz guest's cloud-init (after they were injected into the disk instead), dropping a
+/// cloud-init spec that was only there to carry them.
+fn strip_vz_ssh_keys_from_cloud_init(req: &mut CreateVmRequest) {
+    let Some(ci) = req.cloud_init.as_mut() else {
+        return;
+    };
+    ci.ssh_authorized_keys.clear();
     let empty = serde_json::to_value(&*ci).ok()
         == serde_json::to_value(fluxvm_core::model::CloudInitSpec::default()).ok();
     if empty {
@@ -2569,6 +2652,41 @@ impl VmManager {
                             vm = %id,
                             error = %e,
                             "offline agent token injection failed; using cloud-init"
+                        );
+                    }
+                }
+            }
+            // The SSH public key(s) go onto the same raw root disk; the cloud-init copy is dropped only when every key made it
+            // there and cloud-init would have installed them for root (otherwise it stays, as the fallback or the real copy).
+            if !fluxvm_apple::macos_install::is_macos_install(&req)
+                && let Ok(plan) = vz_ssh_key_disk_injection_plan(
+                    &req,
+                    fluxvm_image::storage::disk_format(req.backend, req.storage) == "raw",
+                    false,
+                )
+            {
+                let target = provisioned.disk.clone();
+                let keys = plan.keys.clone();
+                let injected = tokio::task::spawn_blocking(move || {
+                    keys.iter()
+                        .try_for_each(|k| fluxvm_diskinject::inject_ssh_key(&target, k).map(drop))
+                })
+                .await
+                .context("SSH key injection worker panicked")?;
+                match injected {
+                    Ok(()) if plan.cloud_init_redundant => {
+                        strip_vz_ssh_keys_from_cloud_init(&mut req);
+                        strip_vz_ssh_keys_from_cloud_init(&mut record.request);
+                        tracing::info!(vm = %id, "SSH public key injected into the root disk");
+                    }
+                    Ok(()) => {
+                        tracing::info!(vm = %id, "SSH public key also injected into root's authorized_keys");
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            vm = %id,
+                            error = %e,
+                            "offline SSH key injection failed; using cloud-init"
                         );
                     }
                 }
@@ -5489,6 +5607,74 @@ async fn wait_for_agent_ready(vm: &VmRecord) -> Result<()> {
 mod tests {
     use super::*;
     use fluxvm_core::model::NetworkSpec;
+
+    #[test]
+    fn vz_ssh_key_injection_decision() {
+        let keyed = |user: Option<&str>, keys: &[&str]| {
+            let mut r = req(BackendKind::Vz, None, None);
+            r.cloud_init = Some(CloudInitSpec {
+                user: user.map(str::to_owned),
+                ssh_authorized_keys: keys.iter().map(|k| (*k).to_owned()).collect(),
+                ..Default::default()
+            });
+            r
+        };
+        let k = "ssh-ed25519 AAAA t@h";
+        // Explicit root: injected, and the cloud-init copy is then redundant.
+        let plan = vz_ssh_key_disk_injection_plan(
+            &keyed(Some("root"), &[k, " ssh-rsa BBBB "]),
+            true,
+            false,
+        )
+        .unwrap();
+        assert_eq!(plan.keys, [k, "ssh-rsa BBBB"]);
+        assert!(plan.cloud_init_redundant);
+        // Unset user: also written for root, but cloud-init's copy (the default account) is kept.
+        let plan = vz_ssh_key_disk_injection_plan(&keyed(None, &[k]), true, false).unwrap();
+        assert!(!plan.cloud_init_redundant);
+        // Another account's keys are never put in root's file.
+        assert!(vz_ssh_key_disk_injection_plan(&keyed(Some("ubuntu"), &[k]), true, false).is_err());
+        // No keys, bad keys, running VM, wrong backend, non-raw disk.
+        assert!(vz_ssh_key_disk_injection_plan(&keyed(None, &[]), true, false).is_err());
+        assert!(vz_ssh_key_disk_injection_plan(&keyed(None, &["a\nb"]), true, false).is_err());
+        assert!(vz_ssh_key_disk_injection_plan(&keyed(None, &[k]), true, true).is_err());
+        assert!(vz_ssh_key_disk_injection_plan(&keyed(None, &[k]), false, false).is_err());
+        let mut q = keyed(None, &[k]);
+        q.backend = BackendKind::Qemu;
+        assert!(vz_ssh_key_disk_injection_plan(&q, true, false).is_err());
+        // The same disk rules as the token: OCI sandboxes, macOS guests, read-only roots, shared storage.
+        let mut oci = keyed(None, &[k]);
+        oci.apple = Some(serde_json::from_value(serde_json::json!({"init_config": {}})).unwrap());
+        assert!(vz_ssh_key_disk_injection_plan(&oci, true, false).is_err());
+        let mut mac = keyed(None, &[k]);
+        mac.apple = Some(serde_json::from_value(serde_json::json!({"guest_os": "macos"})).unwrap());
+        assert!(vz_ssh_key_disk_injection_plan(&mac, true, false).is_err());
+        let mut shared = keyed(None, &[k]);
+        shared.storage = StorageBackend::Shared;
+        assert!(vz_ssh_key_disk_injection_plan(&shared, true, false).is_err());
+    }
+
+    #[test]
+    fn stripping_ssh_keys_keeps_the_rest_of_cloud_init() {
+        let mut r = req(BackendKind::Vz, None, None);
+        r.cloud_init = Some(CloudInitSpec {
+            ssh_authorized_keys: vec!["ssh-ed25519 AAAA t@h".into()],
+            ..Default::default()
+        });
+        strip_vz_ssh_keys_from_cloud_init(&mut r);
+        assert!(
+            r.cloud_init.is_none(),
+            "a spec that only carried the key is dropped"
+        );
+        r.cloud_init = Some(CloudInitSpec {
+            ssh_authorized_keys: vec!["ssh-ed25519 AAAA t@h".into()],
+            runcmd: vec!["true".into()],
+            ..Default::default()
+        });
+        strip_vz_ssh_keys_from_cloud_init(&mut r);
+        let ci = r.cloud_init.unwrap();
+        assert!(ci.ssh_authorized_keys.is_empty() && ci.runcmd == ["true"]);
+    }
 
     #[test]
     fn vz_token_disk_injection_decision() {
