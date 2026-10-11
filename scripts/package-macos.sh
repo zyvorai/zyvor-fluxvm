@@ -81,8 +81,8 @@ xcrun swiftc -swift-version 5 -O -target arm64-apple-macosx27.0 "$APPLE/macos/us
 fs_sign_bundle "$STAGE/libexec/FluxVMUSBAccess.app" dev.zyvor.fluxvm.usbd "${FLUXVM_PROFILE_USBD:-}" \
   com.apple.developer.accessory-access.usb
 
-# Launch agents pointing into the bundles; `fluxctl service install` and the helper install scripts substitute
-# __PREFIX__ with where the package was unpacked.
+# Launch agents pointing into the bundles; the helper install scripts (FLUXVM_PACKAGE_DIR=… build-install.sh)
+# substitute __PREFIX__ with where the package was unpacked.
 sed 's#/usr/local/libexec/fluxvm-vmnetd#__PREFIX__/libexec/FluxVMNetworking.app/Contents/MacOS/fluxvm-vmnetd#' \
   "$APPLE/macos/vmnetd/dev.zyvor.fluxvm.vmnetd.plist" > "$STAGE/share/launchd/dev.zyvor.fluxvm.vmnetd.plist"
 sed 's#/Applications/FluxVMUSBAccess.app#__PREFIX__/libexec/FluxVMUSBAccess.app#' \

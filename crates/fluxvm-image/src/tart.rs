@@ -239,9 +239,17 @@ pub fn lz4_block_decode(src: &[u8], out: &mut Vec<u8>, limit: usize) -> Result<(
         let len = read_len(&mut i, (token & 15) as usize)? + 4;
         ensure!(out.len() + len <= limit, "LZ4 block decodes past its size");
         let start = out.len() - offset;
-        for k in 0..len {
-            let b = out[start + k];
-            out.push(b);
+        if offset >= len {
+            // No overlap: one copy.
+            out.extend_from_within(start..start + len);
+        } else {
+            // Overlapping (a repeated pattern): copy in steps of `offset`, each step reading only bytes already written.
+            let mut left = len;
+            while left > 0 {
+                let n = left.min(offset);
+                out.extend_from_within(start..start + n);
+                left -= n;
+            }
         }
     }
     Ok(())
@@ -266,7 +274,10 @@ pub fn apple_lz4_decode(data: &[u8], expected: usize) -> Result<Vec<u8>> {
                 let decoded = u32_at(i)?;
                 let encoded = u32_at(i + 4)?;
                 i += 8;
-                let block = data.get(i..i + encoded).context("truncated LZ4 block")?;
+                let block = i
+                    .checked_add(encoded)
+                    .and_then(|end| data.get(i..end))
+                    .context("truncated LZ4 block")?;
                 i += encoded;
                 let before = out.len();
                 let limit = before.checked_add(decoded).context("LZ4 size overflow")?;
@@ -284,7 +295,10 @@ pub fn apple_lz4_decode(data: &[u8], expected: usize) -> Result<Vec<u8>> {
             b"bv4-" => {
                 let n = u32_at(i)?;
                 i += 4;
-                let raw = data.get(i..i + n).context("truncated stored block")?;
+                let raw = i
+                    .checked_add(n)
+                    .and_then(|end| data.get(i..end))
+                    .context("truncated stored block")?;
                 i += n;
                 ensure!(
                     out.len() + n <= expected,

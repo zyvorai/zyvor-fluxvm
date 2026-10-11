@@ -1186,8 +1186,8 @@ mod tests {
             let (d, n) = put(compressed);
             layers.push(
                 json!({"mediaType": tart::MT_DISK_V2, "digest": d, "size": n, "annotations": {
-                    tart::ANN_UNCOMPRESSED_SIZE: raw.len().to_string(),
-                    tart::ANN_UNCOMPRESSED_DIGEST: digest,
+                    (tart::ANN_UNCOMPRESSED_SIZE): raw.len().to_string(),
+                    (tart::ANN_UNCOMPRESSED_DIGEST): digest,
                 }}),
             );
             raw_all.extend(raw);

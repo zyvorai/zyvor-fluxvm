@@ -21,7 +21,9 @@ else
   cp "$ROOT/Info.plist" "$APP/Contents/Info.plist"
   xcrun swiftc -swift-version 5 -O -target arm64-apple-macosx27.0 "$ROOT/main.swift" \
     -framework AppKit -framework Foundation -framework AccessoryAccess -o "$APP/Contents/MacOS/FluxVMUSBAccess"
-  codesign --force --deep --sign - --entitlements "$ROOT/Entitlements.plist" "$APP"
+  # Ad hoc: the restricted com.apple.developer.accessory-access.usb (Entitlements.plist, for profile-signed builds)
+  # would get the helper killed at launch, so no entitlements.
+  codesign --force --deep --sign - "$APP"
   sudo rm -rf /Applications/FluxVMUSBAccess.app
   sudo cp -R "$APP" /Applications/FluxVMUSBAccess.app
   cp "$ROOT/dev.zyvor.fluxvm.usbd.plist" "$PLIST"

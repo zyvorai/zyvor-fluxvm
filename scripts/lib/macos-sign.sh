@@ -145,7 +145,10 @@ fs_sign_bundle() {
 
 # fs_has_entitlement <path> <entitlement>
 fs_has_entitlement() {
-  codesign -d --entitlements - --xml "$1" 2>/dev/null | grep -q "<key>$2</key>"
+  # Not piped into grep -q: under pipefail an early grep exit can fail codesign with SIGPIPE.
+  local xml
+  xml="$(codesign -d --entitlements - --xml "$1" 2>/dev/null)" || return 1
+  grep -qF "<key>$2</key>" <<<"$xml"
 }
 
 # fs_notarize <file.zip>
@@ -164,5 +167,10 @@ fs_notarize() {
   local out
   out="$(xcrun notarytool submit "$zip" "${auth[@]}" --wait --output-format json)" || fs_die "notarytool failed: $out"
   echo "$out"
-  grep -q '"status" *: *"Accepted"' <<<"$out" || fs_die "notarization was not accepted"
+  if ! grep -q '"status" *: *"Accepted"' <<<"$out"; then
+    local id
+    id="$(sed -n 's/.*"id" *: *"\([^"]*\)".*/\1/p' <<<"$out" | head -n1)"
+    if [[ -n "$id" ]]; then xcrun notarytool log "$id" "${auth[@]}" >&2 || true; fi
+    fs_die "notarization was not accepted"
+  fi
 }
