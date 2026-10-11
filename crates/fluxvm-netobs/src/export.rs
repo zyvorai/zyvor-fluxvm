@@ -54,6 +54,13 @@ pub struct FlowView {
     pub dns_queries: u64,
     pub dns_last_qname: Option<String>,
     pub quic_version: Option<u32>,
+    /// Negotiated TLS version and cipher, and JA3S/JA4S, from the ServerHello.
+    pub tls_version: Option<String>,
+    pub tls_cipher: Option<String>,
+    pub ja3s: Option<String>,
+    pub ja4s: Option<String>,
+    /// "dot", "doh" or "doq" when the flow is recognised as encrypted DNS.
+    pub encrypted_dns: Option<&'static str>,
     pub tcp: Option<TcpHealthView>,
     pub icmp: Option<IcmpHealth>,
     pub close_reason: Option<CloseReason>,
@@ -98,6 +105,11 @@ impl FlowView {
             dns_queries: f.l7.dns_queries,
             dns_last_qname: f.l7.dns_last_qname.clone(),
             quic_version: f.l7.quic_version,
+            tls_version: f.l7.tls_version.clone(),
+            tls_cipher: f.l7.tls_cipher.clone(),
+            ja3s: f.l7.ja3s.clone(),
+            ja4s: f.l7.ja4s.clone(),
+            encrypted_dns: f.l7.encrypted_dns,
             tcp,
             icmp,
             close_reason: close,
@@ -122,6 +134,36 @@ pub struct DnsRecord {
     pub rcode: Option<String>,
     pub latency_us: Option<u64>,
     pub answers: Vec<String>,
+    /// Record types present in the answer section (`A`, `AAAA`, `CNAME`, `HTTPS`, ...).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub answer_types: Vec<String>,
+    /// CNAME targets (redacted like `qname`; empty when answers are not kept).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub cnames: Vec<String>,
+    /// HTTPS (type 65) service bindings.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub https: Vec<HttpsView>,
+    /// EDNS(0) parameters of the message, if it carried an OPT record.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub edns: Option<EdnsView>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct EdnsView {
+    pub udp_size: u16,
+    pub version: u8,
+    pub dnssec_ok: bool,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct HttpsView {
+    pub priority: u16,
+    /// The target name (redacted like `qname`); `"."` means the owner name. Absent when redacted away.
+    pub target: Option<String>,
+    pub alpn: Vec<String>,
+    pub port: Option<u16>,
+    /// An Encrypted ClientHello configuration is advertised.
+    pub ech: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -134,6 +176,20 @@ pub struct TlsRecord {
     pub alpn: Option<String>,
 }
 
+/// What the server's hello said: negotiated version and cipher, and the JA3S/JA4S fingerprints. Certificates and
+/// anything after the hello are never read.
+#[derive(Debug, Clone, Serialize)]
+pub struct TlsServerRecord {
+    pub flow_id: u64,
+    pub server: Endpoint,
+    pub version: String,
+    pub cipher: String,
+    /// The "ServerHello" was a HelloRetryRequest.
+    pub hello_retry: bool,
+    pub ja3s: Option<String>,
+    pub ja4s: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct HttpRecord {
     pub flow_id: u64,
@@ -142,7 +198,14 @@ pub struct HttpRecord {
     pub method: Option<&'static str>,
     pub host: Option<String>,
     pub status: Option<u16>,
+    /// "1.0", "1.1" or "2".
     pub version: String,
+    /// HTTP/2 `:scheme` (requests).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scheme: Option<String>,
+    /// HTTP/2 response media type (parameters removed).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content_type: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -163,8 +226,23 @@ pub enum EventKind {
     FlowClosed { reason: CloseReason, flow: Box<FlowView> },
     Dns(DnsRecord),
     Tls(TlsRecord),
+    TlsServer(TlsServerRecord),
     Http(HttpRecord),
-    Quic { flow_id: u64, server: Endpoint, version: u32, dcid_len: u8 },
+    Quic {
+        flow_id: u64,
+        server: Endpoint,
+        version: u32,
+        dcid_len: u8,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        scid_len: Option<u8>,
+        /// From the decrypted Initial (redacted like a TLS SNI).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        sni: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        alpn: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        ja4: Option<String>,
+    },
     Drop(DropRecord),
 }
 
@@ -176,6 +254,7 @@ impl EventKind {
             EventKind::FlowClosed { .. } => "flow_closed",
             EventKind::Dns(_) => "dns",
             EventKind::Tls(_) => "tls",
+            EventKind::TlsServer(_) => "tls_server",
             EventKind::Http(_) => "http",
             EventKind::Quic { .. } => "quic",
             EventKind::Drop(_) => "drop",
@@ -217,6 +296,15 @@ pub struct CounterView {
     pub drops_by_reason: Vec<(String, u64)>,
     pub tap_enqueued: u64,
     pub tap_dropped: u64,
+    /// Reassembly: segments dropped over a bound, streams abandoned on the global budget, messages left
+    /// incomplete at the prefix limit, evasion-style overlap conflicts, and bytes currently buffered.
+    pub reasm_segments_dropped: u64,
+    pub reasm_streams_abandoned: u64,
+    pub reasm_incomplete: u64,
+    pub reasm_conflicts: u64,
+    pub reasm_bytes: u64,
+    pub encrypted_dns_flows: u64,
+    pub quic_hellos: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -294,6 +382,37 @@ pub fn render_prometheus(s: &Summary) -> String {
         "fluxvm_netobs_tap_dropped_total",
         "Frames the tap discarded because its queue was full.",
         c.tap_dropped,
+    );
+    counter(
+        &mut o,
+        "fluxvm_netobs_reasm_segments_dropped_total",
+        "TCP segments (or QUIC CRYPTO data) dropped because a reassembly bound was hit.",
+        c.reasm_segments_dropped,
+    );
+    counter(
+        &mut o,
+        "fluxvm_netobs_reasm_streams_abandoned_total",
+        "Streams abandoned because the global reassembly budget was exhausted.",
+        c.reasm_streams_abandoned,
+    );
+    counter(
+        &mut o,
+        "fluxvm_netobs_reasm_incomplete_total",
+        "Streams whose first message was still incomplete at the per-stream byte limit.",
+        c.reasm_incomplete,
+    );
+    counter(
+        &mut o,
+        "fluxvm_netobs_reasm_conflicts_total",
+        "Overlapping retransmissions whose bytes differed from the first copy.",
+        c.reasm_conflicts,
+    );
+    counter(&mut o, "fluxvm_netobs_encrypted_dns_flows_total", "Flows recognised as DoT/DoH/DoQ.", c.encrypted_dns_flows);
+    counter(&mut o, "fluxvm_netobs_quic_hellos_total", "QUIC ClientHellos decoded from Initial packets.", c.quic_hellos);
+    let _ = writeln!(
+        o,
+        "# HELP fluxvm_netobs_reasm_bytes Bytes currently buffered for stream reassembly.\n# TYPE fluxvm_netobs_reasm_bytes gauge\nfluxvm_netobs_reasm_bytes {}",
+        c.reasm_bytes
     );
     let _ = writeln!(
         o,
@@ -416,6 +535,10 @@ mod tests {
                 server: Endpoint { ip: "1.2.3.4".into(), port: 443 },
                 version: 1,
                 dcid_len: 8,
+                scid_len: None,
+                sni: None,
+                alpn: None,
+                ja4: None,
             },
         };
         let v: serde_json::Value = serde_json::to_value(&ev).unwrap();

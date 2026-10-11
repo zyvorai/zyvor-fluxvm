@@ -1,15 +1,20 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
 // SPDX-License-Identifier: Apache-2.0
 
-//! Application-layer metadata extraction. Everything here is bounds-checked, allocation-light and reads only the
-//! first segment of a message; nothing is reassembled, decrypted or exported as payload.
+//! Application-layer metadata extraction. Everything here is bounds-checked and allocation-light, and works on
+//! byte slices; reassembling a stream into such a slice is the job of [`crate::reasm`] / [`crate::streams`], and
+//! QUIC and HTTP/2 have their own modules ([`crate::quic`], [`crate::h2`]). Payload is never exported.
 //!
-//! * DNS over UDP and TCP/53: query name, type, response code, answer addresses.
-//! * TLS ClientHello: SNI, ALPN, JA3 and JA4 fingerprints (single-segment hellos only).
+//! * DNS over UDP and TCP/53: query name, type, response code (including the EDNS-extended bits), answer
+//!   addresses, CNAME targets, answer record types, HTTPS service bindings and the EDNS(0) header.
+//! * TLS ClientHello: SNI, ALPN, JA3 and JA4 fingerprints; handshake messages split over several TLS records are
+//!   stitched ([`handshake_message`]).
+//! * TLS ServerHello: negotiated version and cipher, JA3S and JA4S. Certificates are never read.
 //! * HTTP/1.x: request method, `Host`, version, and response status. The request target (path and query) is never
 //!   read into a record.
-//! * QUIC: Initial packet detection (version, connection-id lengths). Initial packets are encrypted; their
-//!   contents (and so SNI) are not decoded.
+//! * QUIC: Initial packet detection (version, connection-id lengths); the ClientHello inside it is decoded by
+//!   [`crate::quic`].
+//! * Encrypted-DNS recognition helpers (DoH host matching, see [`sni_is_doh`]).
 //!
 //! [`Redaction`] is applied by the observer before any name leaves this layer's output.
 
@@ -129,6 +134,97 @@ pub struct DnsMessage {
     pub answer_count: u16,
     /// A/AAAA answer addresses (at most 8).
     pub addrs: Vec<IpAddr>,
+    /// CNAME targets from the answer section, in order (at most 4).
+    pub cnames: Vec<String>,
+    /// Distinct record types present in the answer section, in order of first appearance (at most 8).
+    pub answer_types: Vec<u16>,
+    /// HTTPS (type 65) service bindings (at most 4).
+    pub https: Vec<HttpsRr>,
+    /// The EDNS(0) OPT pseudo-record, if any. Its options (client subnet, cookies, padding) are not read.
+    pub edns: Option<Edns>,
+}
+
+impl DnsMessage {
+    /// The rcode including the EDNS extended bits: `(edns.ext_rcode << 4) | rcode`.
+    pub fn full_rcode(&self) -> u16 {
+        let ext = self.edns.as_ref().map_or(0, |e| e.ext_rcode as u16);
+        (ext << 4) | self.rcode as u16
+    }
+}
+
+/// EDNS(0) header fields from the OPT record (RFC 6891).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Edns {
+    pub udp_size: u16,
+    pub version: u8,
+    pub ext_rcode: u8,
+    /// DNSSEC OK.
+    pub dnssec_ok: bool,
+}
+
+/// An HTTPS resource record (RFC 9460) reduced to what is useful for observation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HttpsRr {
+    pub priority: u16,
+    /// The target name; `"."` means the owner name itself.
+    pub target: String,
+    pub alpn: Vec<String>,
+    pub port: Option<u16>,
+    /// An Encrypted ClientHello config is advertised.
+    pub ech: bool,
+}
+
+/// One resource record header: `(type, class, ttl, rdata start, rdata length, offset after the record)`.
+fn dns_rr(b: &[u8], at: usize) -> Option<(u16, u16, u32, usize, usize, usize)> {
+    let (_, p) = dns_name(b, at)?;
+    let ty = be16(b, p)?;
+    let class = be16(b, p + 2)?;
+    let ttl = u32::from_be_bytes([*b.get(p + 4)?, *b.get(p + 5)?, *b.get(p + 6)?, *b.get(p + 7)?]);
+    let rdlen = be16(b, p + 8)? as usize;
+    let rd = p + 10;
+    b.get(rd..rd + rdlen)?;
+    Some((ty, class, ttl, rd, rdlen, rd + rdlen))
+}
+
+fn parse_https_rr(b: &[u8], rd: usize, rdlen: usize) -> Option<HttpsRr> {
+    let data = b.get(rd..rd + rdlen)?;
+    let priority = be16(data, 0)?;
+    let (target, mut p) = dns_name(b, rd + 2)?;
+    let end = rd + rdlen;
+    let mut rr = HttpsRr {
+        priority,
+        target: if target.is_empty() { ".".to_string() } else { target },
+        alpn: Vec::new(),
+        port: None,
+        ech: false,
+    };
+    for _ in 0..16 {
+        if p + 4 > end {
+            break;
+        }
+        let key = be16(b, p)?;
+        let len = be16(b, p + 2)? as usize;
+        if p + 4 + len > end {
+            break;
+        }
+        let v = &b[p + 4..p + 4 + len];
+        match key {
+            1 => {
+                let mut i = 0;
+                while i < v.len() && rr.alpn.len() < 8 {
+                    let l = v[i] as usize;
+                    let Some(id) = v.get(i + 1..i + 1 + l) else { break };
+                    rr.alpn.push(String::from_utf8_lossy(id).chars().filter(|c| !c.is_control()).take(32).collect());
+                    i += 1 + l;
+                }
+            }
+            3 if len == 2 => rr.port = Some(u16::from_be_bytes([v[0], v[1]])),
+            5 => rr.ech = true,
+            _ => {}
+        }
+        p += 4 + len;
+    }
+    Some(rr)
 }
 
 /// Reads a (possibly compressed) name at `at`. Returns the name and the offset just past it in the *original*
@@ -182,6 +278,8 @@ pub fn parse_dns(b: &[u8]) -> Option<DnsMessage> {
     let flags = be16(b, 2)?;
     let qd = be16(b, 4)?;
     let an = be16(b, 6)?;
+    let ns = be16(b, 8)?;
+    let ar = be16(b, 10)?;
     let opcode = ((flags >> 11) & 0x0f) as u8;
     if qd != 1 || opcode > 5 {
         return None;
@@ -191,29 +289,7 @@ pub fn parse_dns(b: &[u8]) -> Option<DnsMessage> {
     let qclass = be16(b, pos + 2)?;
     pos += 4;
     let response = flags & 0x8000 != 0;
-    let mut addrs = Vec::new();
-    if response {
-        for _ in 0..an.min(32) {
-            let Some((_, p)) = dns_name(b, pos) else { break };
-            let (Some(ty), Some(rdlen)) = (be16(b, p), be16(b, p + 8)) else { break };
-            let rd = p + 10;
-            let rdlen = rdlen as usize;
-            let Some(data) = b.get(rd..rd + rdlen) else { break };
-            if addrs.len() < 8 {
-                match (ty, rdlen) {
-                    (1, 4) => addrs.push(IpAddr::V4(Ipv4Addr::new(data[0], data[1], data[2], data[3]))),
-                    (28, 16) => {
-                        let mut o = [0u8; 16];
-                        o.copy_from_slice(data);
-                        addrs.push(IpAddr::V6(Ipv6Addr::from(o)));
-                    }
-                    _ => {}
-                }
-            }
-            pos = rd + rdlen;
-        }
-    }
-    Some(DnsMessage {
+    let mut msg = DnsMessage {
         id: be16(b, 0)?,
         response,
         opcode,
@@ -223,8 +299,59 @@ pub fn parse_dns(b: &[u8]) -> Option<DnsMessage> {
         qtype,
         qclass,
         answer_count: an,
-        addrs,
-    })
+        addrs: Vec::new(),
+        cnames: Vec::new(),
+        answer_types: Vec::new(),
+        https: Vec::new(),
+        edns: None,
+    };
+    // Answers, then authority (skipped), then additional (only the OPT record is read). Each section is bounded
+    // and a malformed record ends parsing with whatever was decoded so far.
+    'sections: for (section, count, cap) in [(0u8, an, 32u16), (1, ns, 16), (2, ar, 16)] {
+        for _ in 0..count.min(cap) {
+            let Some((ty, class, ttl, rd, rdlen, next)) = dns_rr(b, pos) else { break 'sections };
+            pos = next;
+            let data = &b[rd..rd + rdlen];
+            match section {
+                0 => {
+                    if msg.answer_types.len() < 8 && !msg.answer_types.contains(&ty) {
+                        msg.answer_types.push(ty);
+                    }
+                    match (ty, rdlen) {
+                        (1, 4) if msg.addrs.len() < 8 => {
+                            msg.addrs.push(IpAddr::V4(Ipv4Addr::new(data[0], data[1], data[2], data[3])));
+                        }
+                        (28, 16) if msg.addrs.len() < 8 => {
+                            let mut o = [0u8; 16];
+                            o.copy_from_slice(data);
+                            msg.addrs.push(IpAddr::V6(Ipv6Addr::from(o)));
+                        }
+                        (5, _) if msg.cnames.len() < 4 => {
+                            if let Some((n, _)) = dns_name(b, rd) {
+                                msg.cnames.push(n);
+                            }
+                        }
+                        (65, _) if msg.https.len() < 4 => {
+                            if let Some(h) = parse_https_rr(b, rd, rdlen) {
+                                msg.https.push(h);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                2 if ty == 41 && msg.edns.is_none() => {
+                    msg.edns = Some(Edns {
+                        udp_size: class,
+                        ext_rcode: (ttl >> 24) as u8,
+                        version: (ttl >> 16) as u8,
+                        dnssec_ok: ttl & 0x8000 != 0,
+                    });
+                }
+                _ => {}
+            }
+        }
+    }
+    Some(msg)
 }
 
 /// DNS over TCP: a two-byte length then the message. Only a complete message in this segment is decoded.
@@ -252,6 +379,11 @@ pub fn dns_type_name(t: u16) -> String {
 }
 
 pub fn dns_rcode_name(r: u8) -> String {
+    dns_rcode_name_full(u16::from(r))
+}
+
+/// Names a full (EDNS-extended) rcode.
+pub fn dns_rcode_name_full(r: u16) -> String {
     match r {
         0 => "NOERROR".into(),
         1 => "FORMERR".into(),
@@ -259,6 +391,7 @@ pub fn dns_rcode_name(r: u8) -> String {
         3 => "NXDOMAIN".into(),
         4 => "NOTIMP".into(),
         5 => "REFUSED".into(),
+        16 => "BADVERS".into(),
         n => format!("RCODE{n}"),
     }
 }
@@ -285,19 +418,88 @@ fn is_grease(v: u16) -> bool {
     v & 0x0f0f == 0x0a0a && (v >> 8) == (v & 0xff)
 }
 
+/// The largest handshake message body accepted (a ClientHello with large post-quantum key shares is ~2 KiB).
+const MAX_HANDSHAKE: usize = 65_535;
+
+/// The outcome of looking for the first handshake message in the start of a TLS byte stream.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Hs<'a> {
+    /// The first handshake message is complete: its type and body (the 4-byte handshake header removed). The body
+    /// is borrowed when it sits inside one record and owned when it was stitched from several.
+    Complete(u8, std::borrow::Cow<'a, [u8]>),
+    /// A valid prefix: more bytes are needed.
+    Need,
+    /// Not a TLS handshake stream (or lengths that cannot be one).
+    Not,
+}
+
+/// Finds the first handshake message at the start of `b`, a stream of TLS records. A message split across several
+/// records (RFC 8446 section 5.1 permits fragmentation) is stitched together; up to 8 records are walked.
+pub fn handshake_message(b: &[u8]) -> Hs<'_> {
+    use std::borrow::Cow;
+    // Whether `p` holds a whole message; `Err` for a length that cannot be right.
+    fn whole(p: &[u8]) -> Result<Option<(u8, usize)>, ()> {
+        if p.len() < 4 {
+            return Ok(None);
+        }
+        let len = ((p[1] as usize) << 16) | ((p[2] as usize) << 8) | p[3] as usize;
+        if len > MAX_HANDSHAKE {
+            return Err(());
+        }
+        Ok((p.len() >= 4 + len).then_some((p[0], len)))
+    }
+    let mut off = 0usize;
+    let mut stitched: Vec<u8> = Vec::new();
+    for rec_no in 0..8 {
+        match b.get(off) {
+            None => return Hs::Need,
+            Some(0x16) => {}
+            Some(_) => return Hs::Not,
+        }
+        match b.get(off + 1) {
+            None => return Hs::Need,
+            Some(3) => {}
+            Some(_) => return Hs::Not,
+        }
+        let Some(len) = be16(b, off + 3) else { return Hs::Need };
+        let len = len as usize;
+        if len == 0 || len > 16_384 {
+            return Hs::Not;
+        }
+        let end = (off + 5 + len).min(b.len());
+        let rec = &b[(off + 5).min(end)..end];
+        if rec_no == 0 {
+            match whole(rec) {
+                Err(()) => return Hs::Not,
+                Ok(Some((ty, l))) => return Hs::Complete(ty, Cow::Borrowed(&rec[4..4 + l])),
+                Ok(None) => {}
+            }
+        }
+        stitched.extend_from_slice(rec);
+        match whole(&stitched) {
+            Err(()) => return Hs::Not,
+            Ok(Some((ty, l))) => return Hs::Complete(ty, Cow::Owned(stitched[4..4 + l].to_vec())),
+            Ok(None) => {}
+        }
+        if off + 5 + len > b.len() {
+            return Hs::Need;
+        }
+        off += 5 + len;
+    }
+    Hs::Not
+}
+
 /// Parses a TLS ClientHello from the first bytes of a TCP stream. Returns `None` unless the whole handshake
-/// message is present in `b` (a hello split across segments or records is not reassembled).
+/// message is present in `b` (a hello that continues in a later segment needs the reassembled stream).
 pub fn parse_client_hello(b: &[u8]) -> Option<ClientHello> {
-    if *b.first()? != 0x16 || *b.get(1)? != 3 {
-        return None;
+    match handshake_message(b) {
+        Hs::Complete(1, body) => parse_client_hello_body(&body),
+        _ => None,
     }
-    let rec_len = be16(b, 3)? as usize;
-    let rec = b.get(5..5 + rec_len.min(b.len().saturating_sub(5)))?;
-    if *rec.first()? != 1 {
-        return None;
-    }
-    let hs_len = ((*rec.get(1)? as usize) << 16) | ((*rec.get(2)? as usize) << 8) | *rec.get(3)? as usize;
-    let body = rec.get(4..4 + hs_len)?;
+}
+
+/// Parses a ClientHello handshake body (the bytes after the 4-byte handshake header).
+pub fn parse_client_hello_body(body: &[u8]) -> Option<ClientHello> {
     let mut hello = ClientHello { legacy_version: be16(body, 0)?, ..Default::default() };
     let mut p = 2 + 32;
     let sid = *body.get(p)? as usize;
@@ -403,6 +605,11 @@ impl ClientHello {
 
     /// The JA4 TLS-over-TCP fingerprint (`t` prefix), `a_b_c` form.
     pub fn ja4(&self) -> String {
+        self.ja4_for('t')
+    }
+
+    /// JA4 with an explicit transport prefix: `t` for TLS over TCP, `q` for QUIC.
+    pub fn ja4_for(&self, transport: char) -> String {
         let version = {
             let best = self
                 .supported_versions
@@ -436,7 +643,8 @@ impl ClientHello {
             _ => "00".to_string(),
         };
         let a = format!(
-            "t{}{}{:02}{:02}{}",
+            "{}{}{}{:02}{:02}{}",
+            transport,
             version,
             if self.sni.is_some() { 'd' } else { 'i' },
             ciphers.len().min(99),
@@ -463,6 +671,207 @@ impl ClientHello {
         let c = hash12(if ext_sorted.is_empty() && self.sig_algs.is_empty() { "" } else { &c_in });
         format!("{a}_{b}_{c}")
     }
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// TLS ServerHello, JA3S, JA4S
+// ---------------------------------------------------------------------------------------------------------------
+
+/// The `random` a server sends to mark a HelloRetryRequest (RFC 8446 section 4.1.3).
+const HELLO_RETRY_RANDOM: [u8; 32] = [
+    0xcf, 0x21, 0xad, 0x74, 0xe5, 0x9a, 0x61, 0x11, 0xbe, 0x1d, 0x8c, 0x02, 0x1e, 0x65, 0xb8, 0x91, 0xc2, 0xa2,
+    0x11, 0x16, 0x7a, 0xbb, 0x8c, 0x5e, 0x07, 0x9e, 0x09, 0xe2, 0xc8, 0xa8, 0x33, 0x9c,
+];
+
+/// What a ServerHello says in the clear. Only the hello itself is read: certificates (clear in TLS 1.2) and
+/// everything after are never decoded.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ServerHello {
+    pub legacy_version: u16,
+    pub cipher: u16,
+    pub compression: u8,
+    /// Extension types in wire order.
+    pub extensions: Vec<u16>,
+    /// The version from the `supported_versions` extension (TLS 1.3).
+    pub selected_version: Option<u16>,
+    /// The ALPN protocol selected (clear in a TLS 1.2 ServerHello; encrypted in 1.3).
+    pub alpn: Option<Vec<u8>>,
+    pub key_share_group: Option<u16>,
+    /// This is a HelloRetryRequest rather than a real ServerHello.
+    pub hello_retry: bool,
+}
+
+/// Parses a ServerHello from the first bytes of the server's side of a TCP stream.
+pub fn parse_server_hello(b: &[u8]) -> Option<ServerHello> {
+    match handshake_message(b) {
+        Hs::Complete(2, body) => parse_server_hello_body(&body),
+        _ => None,
+    }
+}
+
+/// Parses a ServerHello handshake body (the bytes after the 4-byte handshake header).
+pub fn parse_server_hello_body(body: &[u8]) -> Option<ServerHello> {
+    let mut h = ServerHello { legacy_version: be16(body, 0)?, ..Default::default() };
+    h.hello_retry = body.get(2..34)? == HELLO_RETRY_RANDOM;
+    let mut p = 34;
+    let sid = *body.get(p)? as usize;
+    p += 1 + sid;
+    h.cipher = be16(body, p)?;
+    p += 2;
+    h.compression = *body.get(p)?;
+    p += 1;
+    if p == body.len() {
+        return Some(h);
+    }
+    let ext_len = be16(body, p)? as usize;
+    p += 2;
+    let exts = body.get(p..p + ext_len)?;
+    let mut e = 0;
+    while e + 4 <= exts.len() {
+        let ty = be16(exts, e)?;
+        let len = be16(exts, e + 2)? as usize;
+        let data = exts.get(e + 4..e + 4 + len)?;
+        e += 4 + len;
+        h.extensions.push(ty);
+        match ty {
+            43 if data.len() == 2 => h.selected_version = be16(data, 0),
+            51 if data.len() >= 2 => h.key_share_group = be16(data, 0),
+            16 => {
+                // protocol_name_list with exactly one entry.
+                let n = be16(data, 0)? as usize;
+                let list = data.get(2..2 + n)?;
+                let l = *list.first()? as usize;
+                h.alpn = list.get(1..1 + l).map(<[u8]>::to_vec);
+            }
+            _ => {}
+        }
+    }
+    Some(h)
+}
+
+pub fn tls_version_name(v: u16) -> String {
+    match v {
+        0x0304 => "TLS1.3".into(),
+        0x0303 => "TLS1.2".into(),
+        0x0302 => "TLS1.1".into(),
+        0x0301 => "TLS1.0".into(),
+        0x0300 => "SSL3".into(),
+        n => format!("0x{n:04x}"),
+    }
+}
+
+pub fn tls_cipher_name(c: u16) -> String {
+    match c {
+        0x1301 => "TLS_AES_128_GCM_SHA256".into(),
+        0x1302 => "TLS_AES_256_GCM_SHA384".into(),
+        0x1303 => "TLS_CHACHA20_POLY1305_SHA256".into(),
+        0x1304 => "TLS_AES_128_CCM_SHA256".into(),
+        0x1305 => "TLS_AES_128_CCM_8_SHA256".into(),
+        0xc02b => "TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256".into(),
+        0xc02c => "TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384".into(),
+        0xc02f => "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256".into(),
+        0xc030 => "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384".into(),
+        0xcca8 => "TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256".into(),
+        0xcca9 => "TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256".into(),
+        0x009c => "TLS_RSA_WITH_AES_128_GCM_SHA256".into(),
+        0x009d => "TLS_RSA_WITH_AES_256_GCM_SHA384".into(),
+        0xc013 => "TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA".into(),
+        0xc014 => "TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA".into(),
+        0x002f => "TLS_RSA_WITH_AES_128_CBC_SHA".into(),
+        0x0035 => "TLS_RSA_WITH_AES_256_CBC_SHA".into(),
+        n => format!("0x{n:04x}"),
+    }
+}
+
+impl ServerHello {
+    /// The version actually negotiated: the `supported_versions` selection when present, else the legacy field.
+    pub fn negotiated_version(&self) -> u16 {
+        self.selected_version.unwrap_or(self.legacy_version)
+    }
+
+    /// The JA3S input string: `version,cipher,extensions` with the extension types in wire order.
+    pub fn ja3s_string(&self) -> String {
+        format!(
+            "{},{},{}",
+            self.legacy_version,
+            self.cipher,
+            join_dec(self.extensions.iter().map(|e| u32::from(*e)))
+        )
+    }
+
+    /// MD5 of [`Self::ja3s_string`] (the JA3S hash).
+    pub fn ja3s(&self) -> String {
+        hex(&Md5::digest(self.ja3s_string().as_bytes()))
+    }
+
+    /// The JA4S fingerprint, `a_b_c`: protocol, version, extension count and ALPN; the chosen cipher; and a hash of
+    /// the extension types in wire order. `transport` is `t` (TCP) or `q` (QUIC).
+    pub fn ja4s_for(&self, transport: char) -> String {
+        let version = match self.negotiated_version() {
+            0x0304 => "13",
+            0x0303 => "12",
+            0x0302 => "11",
+            0x0301 => "10",
+            0x0300 => "s3",
+            _ => "00",
+        };
+        let alpn = match &self.alpn {
+            Some(v) if !v.is_empty() => {
+                let (f, l) = (v[0], v[v.len() - 1]);
+                if f.is_ascii_alphanumeric() && l.is_ascii_alphanumeric() {
+                    format!("{}{}", f as char, l as char)
+                } else {
+                    let h = hex(v);
+                    format!("{}{}", &h[..1], &h[h.len() - 1..])
+                }
+            }
+            _ => "00".to_string(),
+        };
+        let a = format!("{transport}{version}{:02}{alpn}", self.extensions.len().min(99));
+        let c = if self.extensions.is_empty() {
+            "000000000000".to_string()
+        } else {
+            let s = self.extensions.iter().map(|e| format!("{e:04x}")).collect::<Vec<_>>().join(",");
+            hex(&Sha256::digest(s.as_bytes()))[..12].to_string()
+        };
+        format!("{a}_{:04x}_{c}", self.cipher)
+    }
+
+    pub fn ja4s(&self) -> String {
+        self.ja4s_for('t')
+    }
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Encrypted DNS recognition
+// ---------------------------------------------------------------------------------------------------------------
+
+/// Public DNS-over-HTTPS resolvers' names, matched against the SNI of a TLS or QUIC hello. Deployments extend
+/// this through `ObserverConfig::doh_hosts`.
+pub const DEFAULT_DOH_HOSTS: &[&str] = &[
+    "dns.google",
+    "dns.google.com",
+    "cloudflare-dns.com",
+    "one.one.one.one",
+    "dns.quad9.net",
+    "dns9.quad9.net",
+    "dns10.quad9.net",
+    "dns11.quad9.net",
+    "doh.opendns.com",
+    "dns.nextdns.io",
+    "dns.adguard-dns.com",
+    "doh.cleanbrowsing.org",
+    "doh.mullvad.net",
+    "doh.libredns.gr",
+];
+
+/// True when `sni` is one of `hosts` or a subdomain of one (case-insensitive, trailing dot ignored).
+pub fn sni_is_doh(sni: &str, hosts: &[String]) -> bool {
+    let n = sni.trim_end_matches('.').to_ascii_lowercase();
+    hosts.iter().any(|h| {
+        let h = h.trim_end_matches('.').to_ascii_lowercase();
+        !h.is_empty() && (n == h || (n.len() > h.len() && n.ends_with(&h) && n.as_bytes()[n.len() - h.len() - 1] == b'.'))
+    })
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -647,6 +1056,117 @@ pub mod fixtures {
             b.extend_from_slice(&x.to_be_bytes());
         }
         (43, b)
+    }
+
+    /// An answer record for [`dns_response_rr`].
+    pub enum Rr<'a> {
+        A([u8; 4]),
+        Aaaa([u8; 16]),
+        Cname(&'a str),
+        Https { priority: u16, target: &'a str, alpn: &'a [&'a str], port: Option<u16>, ech: bool },
+        /// Any other type with opaque rdata.
+        Raw(u16, &'a [u8]),
+    }
+
+    fn opt_rr(udp: u16, ext_rcode: u8, do_bit: bool) -> Vec<u8> {
+        let mut r = vec![0u8, 0, 41];
+        r.extend_from_slice(&udp.to_be_bytes());
+        r.push(ext_rcode);
+        r.push(0); // version
+        r.extend_from_slice(&(if do_bit { 0x8000u16 } else { 0 }).to_be_bytes());
+        r.extend_from_slice(&[0, 0]); // no options
+        r
+    }
+
+    /// A query carrying an EDNS(0) OPT record.
+    pub fn dns_query_edns(id: u16, qname: &str, qtype: u16, udp: u16, do_bit: bool) -> Vec<u8> {
+        let mut m = dns_query(id, qname, qtype);
+        m[10..12].copy_from_slice(&1u16.to_be_bytes());
+        m.extend(opt_rr(udp, 0, do_bit));
+        m
+    }
+
+    /// A response with typed answers (names in rdata are uncompressed) and an optional OPT record
+    /// `(udp size, DO bit, extended rcode)`.
+    pub fn dns_response_rr(
+        id: u16,
+        qname: &str,
+        qtype: u16,
+        rcode: u8,
+        answers: &[Rr<'_>],
+        edns: Option<(u16, bool, u8)>,
+    ) -> Vec<u8> {
+        let mut m = vec![(id >> 8) as u8, id as u8, 0x81, 0x80 | (rcode & 0x0f)];
+        m.extend_from_slice(&[0, 1]);
+        m.extend_from_slice(&(answers.len() as u16).to_be_bytes());
+        m.extend_from_slice(&[0, 0]);
+        m.extend_from_slice(&(edns.is_some() as u16).to_be_bytes());
+        m.extend(name(qname));
+        m.extend_from_slice(&qtype.to_be_bytes());
+        m.extend_from_slice(&[0, 1]);
+        for a in answers {
+            let (ty, rd): (u16, Vec<u8>) = match a {
+                Rr::A(ip) => (1, ip.to_vec()),
+                Rr::Aaaa(ip) => (28, ip.to_vec()),
+                Rr::Cname(t) => (5, name(t)),
+                Rr::Https { priority, target, alpn, port, ech } => {
+                    let mut r = priority.to_be_bytes().to_vec();
+                    r.extend(name(if *target == "." { "" } else { target }));
+                    if !alpn.is_empty() {
+                        let mut list = Vec::new();
+                        for p in *alpn {
+                            list.push(p.len() as u8);
+                            list.extend_from_slice(p.as_bytes());
+                        }
+                        r.extend_from_slice(&[0, 1]);
+                        r.extend_from_slice(&(list.len() as u16).to_be_bytes());
+                        r.extend(list);
+                    }
+                    if let Some(p) = port {
+                        r.extend_from_slice(&[0, 3, 0, 2]);
+                        r.extend_from_slice(&p.to_be_bytes());
+                    }
+                    if *ech {
+                        r.extend_from_slice(&[0, 5, 0, 3, 1, 2, 3]);
+                    }
+                    (65, r)
+                }
+                Rr::Raw(t, d) => (*t, d.to_vec()),
+            };
+            m.extend_from_slice(&[0xc0, 0x0c]);
+            m.extend_from_slice(&ty.to_be_bytes());
+            m.extend_from_slice(&[0, 1, 0, 0, 0, 60]);
+            m.extend_from_slice(&(rd.len() as u16).to_be_bytes());
+            m.extend(rd);
+        }
+        if let Some((udp, do_bit, ext)) = edns {
+            m.extend(opt_rr(udp, ext, do_bit));
+        }
+        m
+    }
+
+    /// A TLS record carrying one ServerHello (session id empty, no compression).
+    pub fn server_hello(legacy_version: u16, cipher: u16, exts: &[(u16, Vec<u8>)]) -> Vec<u8> {
+        let mut body = Vec::new();
+        body.extend_from_slice(&legacy_version.to_be_bytes());
+        body.extend_from_slice(&[0x24; 32]);
+        body.push(0);
+        body.extend_from_slice(&cipher.to_be_bytes());
+        body.push(0);
+        let mut e = Vec::new();
+        for (ty, d) in exts {
+            e.extend_from_slice(&ty.to_be_bytes());
+            e.extend_from_slice(&(d.len() as u16).to_be_bytes());
+            e.extend_from_slice(d);
+        }
+        body.extend_from_slice(&(e.len() as u16).to_be_bytes());
+        body.extend(e);
+        let mut hs = vec![2, (body.len() >> 16) as u8, (body.len() >> 8) as u8, body.len() as u8];
+        hs.extend(body);
+        let mut rec = vec![0x16, 0x03, 0x03];
+        rec.extend_from_slice(&(hs.len() as u16).to_be_bytes());
+        rec.extend(hs);
+        rec
     }
 
     /// A TLS record carrying one ClientHello with the given fields, extensions in the order given.
@@ -871,6 +1391,148 @@ mod tests {
         assert!(detect_quic_initial(&p[..600]).is_none());
         p[0] = 0x43;
         assert!(detect_quic_initial(&p).is_none());
+    }
+
+    #[test]
+    fn handshake_message_stitches_records_and_reports_needs() {
+        let rec = client_hello(0x0303, &[0x1301], &[ext_sni("frag.example.com"), ext_alpn(&["h2"])]);
+        let hs = &rec[5..];
+        // Re-frame the same handshake message as three TLS records.
+        let mut frag = Vec::new();
+        for part in [&hs[..10], &hs[10..40], &hs[40..]] {
+            frag.extend_from_slice(&[0x16, 0x03, 0x01]);
+            frag.extend_from_slice(&(part.len() as u16).to_be_bytes());
+            frag.extend_from_slice(part);
+        }
+        match handshake_message(&frag) {
+            Hs::Complete(1, body) => {
+                assert!(matches!(body, std::borrow::Cow::Owned(_)));
+                assert_eq!(parse_client_hello_body(&body).unwrap().sni.as_deref(), Some("frag.example.com"));
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(parse_client_hello(&frag).unwrap().alpn, vec![b"h2".to_vec()]);
+        // A single record borrows.
+        assert!(matches!(handshake_message(&rec), Hs::Complete(1, std::borrow::Cow::Borrowed(_))));
+        // Every proper prefix is "need more", never "complete" and never a panic.
+        for n in 1..frag.len() {
+            assert_eq!(handshake_message(&frag[..n]), Hs::Need, "prefix {n}");
+        }
+        assert_eq!(handshake_message(b""), Hs::Need);
+        assert_eq!(handshake_message(b"GET /"), Hs::Not);
+        assert_eq!(handshake_message(&[0x16, 0x03, 0x01, 0x00, 0x00]), Hs::Not, "zero-length record");
+        assert_eq!(handshake_message(&[0x16, 0x03, 0x01, 0xff, 0xff]), Hs::Not, "record over 2^14");
+        // A handshake header claiming more than the cap.
+        let mut huge = vec![0x16, 0x03, 0x01, 0x00, 0x08, 0x01, 0xff, 0xff, 0xff];
+        huge.extend_from_slice(&[0; 4]);
+        assert_eq!(handshake_message(&huge), Hs::Not);
+    }
+
+    #[test]
+    fn server_hello_parsing_and_fingerprints() {
+        let tls13 = server_hello(0x0303, 0x1301, &[ext(43, &[3, 4]), ext(51, &[0, 0x1d, 0, 0])]);
+        let h = parse_server_hello(&tls13).unwrap();
+        assert_eq!((h.legacy_version, h.cipher, h.selected_version), (0x0303, 0x1301, Some(0x0304)));
+        assert_eq!(h.negotiated_version(), 0x0304);
+        assert_eq!(h.extensions, vec![43, 51]);
+        assert!(!h.hello_retry);
+        assert_eq!(tls_version_name(h.negotiated_version()), "TLS1.3");
+        assert_eq!(tls_cipher_name(h.cipher), "TLS_AES_128_GCM_SHA256");
+        assert_eq!(h.ja3s_string(), "771,4865,43-51");
+        assert_eq!(h.ja3s(), hex(&Md5::digest(b"771,4865,43-51")));
+        // JA4S for a TLS 1.3 hello with extensions 002b,0033 is the FoxIO documentation example
+        // `t130200_1301_a56c5b993250`; the third part is SHA-256("002b,0033")[..12], checked here by computation.
+        assert_eq!(h.ja4s(), "t130200_1301_a56c5b993250");
+        assert_eq!(h.ja4s_for('q'), "q130200_1301_a56c5b993250");
+
+        // TLS 1.2 with a clear ALPN and the classic JA3S shape.
+        let tls12 = server_hello(0x0303, 0xc02f, &[ext(0xff01, &[0]), ext(0, &[]), ext(11, &[1, 0]), ext_alpn(&["http/1.1"])]);
+        let h = parse_server_hello(&tls12).unwrap();
+        assert_eq!(h.ja3s_string(), "771,49199,65281-0-11-16");
+        assert_eq!(h.alpn.as_deref(), Some(&b"http/1.1"[..]));
+        assert!(h.ja4s().starts_with("t120411_c02f_") || h.ja4s().starts_with("t1204h1_c02f_"), "{}", h.ja4s());
+        assert_eq!(tls_version_name(h.negotiated_version()), "TLS1.2");
+
+        // No extensions at all.
+        let bare = parse_server_hello(&server_hello(0x0303, 0x009c, &[])).unwrap();
+        assert_eq!(bare.ja3s_string(), "771,156,");
+        assert_eq!(bare.ja4s(), "t120000_009c_000000000000");
+    }
+
+    #[test]
+    fn hello_retry_request_is_flagged() {
+        let mut rec = server_hello(0x0303, 0x1301, &[ext(43, &[3, 4])]);
+        // The random sits after record header (5), handshake header (4) and version (2).
+        rec[11..43].copy_from_slice(&HELLO_RETRY_RANDOM);
+        assert!(parse_server_hello(&rec).unwrap().hello_retry);
+    }
+
+    #[test]
+    fn server_hello_garbage_never_panics() {
+        let base = server_hello(0x0303, 0x1301, &[ext(43, &[3, 4]), ext(51, &[0, 0x1d, 0, 0]), ext_alpn(&["h2"])]);
+        for n in 0..base.len() {
+            let _ = parse_server_hello(&base[..n]);
+        }
+        let mut s = 7u64;
+        for _ in 0..5000 {
+            let mut m = base.clone();
+            for _ in 0..3 {
+                s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                let i = (s >> 33) as usize % m.len();
+                m[i] = (s >> 20) as u8;
+            }
+            let _ = parse_server_hello(&m);
+            let _ = handshake_message(&m);
+        }
+    }
+
+    #[test]
+    fn dns_answer_types_https_and_edns() {
+        use fixtures::Rr;
+        let m = parse_dns(&dns_response_rr(
+            3,
+            "svc.example.com",
+            65,
+            0,
+            &[
+                Rr::Cname("t.example.net"),
+                Rr::Https { priority: 0, target: "alt.example.com", alpn: &[], port: None, ech: false },
+                Rr::A([1, 2, 3, 4]),
+                Rr::Raw(99, &[1, 2, 3]),
+            ],
+            Some((1400, true, 0)),
+        ))
+        .unwrap();
+        assert_eq!(m.answer_types, vec![5, 65, 1, 99]);
+        assert_eq!(m.cnames, vec!["t.example.net"]);
+        assert_eq!(m.https[0].priority, 0);
+        assert_eq!(m.https[0].target, "alt.example.com");
+        assert_eq!(m.addrs, vec![IpAddr::from([1, 2, 3, 4])]);
+        assert_eq!(m.edns, Some(Edns { udp_size: 1400, version: 0, ext_rcode: 0, dnssec_ok: true }));
+        // Truncated anywhere: whatever parsed so far is returned or None; never a panic.
+        let full = dns_response_rr(3, "x.test", 1, 0, &[Rr::Cname("y.test"), Rr::A([9, 9, 9, 9])], Some((512, false, 0)));
+        for n in 0..full.len() {
+            let _ = parse_dns(&full[..n]);
+        }
+        // A bad record in the middle keeps the answers before it.
+        let mut bad = full.clone();
+        let at = bad.len() - 8; // inside the OPT record
+        bad[at] = 0xff;
+        let p = parse_dns(&bad).unwrap();
+        assert_eq!(p.addrs, vec![IpAddr::from([9, 9, 9, 9])]);
+    }
+
+    #[test]
+    fn doh_host_matching() {
+        let hosts: Vec<String> = ["dns.google", "Cloudflare-DNS.com."].iter().map(|s| s.to_string()).collect();
+        assert!(sni_is_doh("dns.google", &hosts));
+        assert!(sni_is_doh("DNS.GOOGLE.", &hosts));
+        assert!(sni_is_doh("mozilla.cloudflare-dns.com", &hosts));
+        assert!(!sni_is_doh("notdns.google", &hosts), "label boundary");
+        assert!(!sni_is_doh("google", &hosts));
+        assert!(!sni_is_doh("example.com", &hosts));
+        assert!(!sni_is_doh("anything", &["".to_string()]));
+        assert!(DEFAULT_DOH_HOSTS.contains(&"dns.google"));
     }
 
     #[test]

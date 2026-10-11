@@ -180,6 +180,25 @@ pub struct FlowL7 {
     pub quic_version: Option<u32>,
     /// Outstanding DNS queries awaiting a response: (transaction id, send time).
     pub dns_pending: Vec<(u16, u64)>,
+    /// Negotiated TLS version and cipher from the ServerHello ("TLS1.3", "TLS_AES_128_GCM_SHA256").
+    pub tls_version: Option<String>,
+    pub tls_cipher: Option<String>,
+    pub ja3s: Option<String>,
+    pub ja4s: Option<String>,
+    /// "dot", "doh" or "doq" when the flow is recognised as encrypted DNS.
+    pub encrypted_dns: Option<&'static str>,
+    /// SYN sequence numbers per direction (client-to-server, server-to-client), used as reassembly bases.
+    pub isn: [Option<u32>; 2],
+    /// Payload has been seen in this direction.
+    pub data_seen: [bool; 2],
+    /// Nothing more to learn from this direction's first bytes (not TLS/h2, or already parsed).
+    pub dir_done: [bool; 2],
+    /// Reassembly state for the first bytes of a TLS or HTTP/2 connection; present only while needed.
+    pub streams: Option<Box<crate::streams::FlowStreams>>,
+    /// Both directions finished: do not start reassembly again.
+    pub streams_done: bool,
+    /// Initial-packet decoding state for a QUIC flow.
+    pub quic: Option<Box<crate::quic::QuicFlow>>,
 }
 
 #[derive(Debug, Clone)]
