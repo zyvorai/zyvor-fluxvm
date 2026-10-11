@@ -165,6 +165,24 @@ fn ops() -> Vec<Op> {
         .body("SnapshotRequest"),
         op("get", "/v1/vms/{id}/snapshots", "List snapshots", SNAPSHOTS).returns("SnapshotList"),
         op(
+            "get",
+            "/v1/host/overview",
+            "One-call dashboard: daemon, host memory/CPU, VM counts, per-VM runner usage, helper availability",
+            HOST,
+        )
+        .returns("HostOverview"),
+        op(
+            "get",
+            "/v1/host/apple/capabilities",
+            "The capability table judged against this Mac (available here, and why not)",
+            HOST,
+        )
+        .returns("CapabilityReport"),
+        op("get", "/v1/host/apple", "Apple host capabilities (runner probe)", HOST),
+        op("get", "/v1/vznets", "Private vz networks and their members", HOST),
+        op("get", "/v1/vms/{id}/balloon", "Memory balloon status", VMS),
+        op("post", "/v1/vms/{id}/balloon", "Set the memory balloon target", VMS),
+        op(
             "post",
             "/v1/vms/{id}/branches",
             "Checkpoint a running vz guest as a named, durable branch",
@@ -349,6 +367,8 @@ fn schemas() -> Value {
         "CreateVmRequest": obj("VM spec: name, backend, image, vcpus, memory_mib, network, cloud_init, ..."),
         "VmList": list("VmRecord"),
         "BranchList": list("VmBranch"),
+        "HostOverview": {"type": "object", "properties": {"daemon": {"type": "object"}, "host": {"type": "object"}, "vms": {"type": "object"}, "branches": {"type": "integer"}, "usage": {"type": "array", "items": {"type": "object", "properties": {"vm_id": {"type": "string", "format": "uuid"}, "name": {"type": "string"}, "status": {"type": "string"}, "cpu_seconds_total": {"type": "number"}, "rss_bytes": {"type": "integer"}, "service_attributed": {"type": "boolean"}, "started_at": {"type": "integer", "nullable": true}}}}, "helpers": {"type": "object"}, "networking": {"type": "object"}}},
+        "CapabilityReport": {"type": "object", "properties": {"os_version": {"type": "string", "nullable": true}, "probed": {"type": "boolean"}, "items": {"type": "array", "items": {"type": "object", "properties": {"feature": {"type": "string"}, "supported": {"type": "boolean"}, "note": {"type": "string"}, "min_macos": {"type": "integer"}, "available_here": {"type": "boolean", "nullable": true}, "reason": {"type": "string", "nullable": true}}}}}},
         "CreateBranchRequest": {"type": "object", "required": ["name"], "properties": {"name": {"type": "string"}, "labels": {"type": "object", "additionalProperties": {"type": "string"}}}},
         "VmBranch": {"type": "object", "properties": {"id": {"type": "string", "format": "uuid"}, "name": {"type": "string"}, "source_vm": {"type": "string", "format": "uuid"}, "source_name": {"type": "string"}, "parent_branch": {"type": "string", "format": "uuid", "nullable": true}, "created_at": {"type": "string", "format": "date-time"}, "labels": {"type": "object", "additionalProperties": {"type": "string"}}, "vcpus": {"type": "integer"}, "memory_mib": {"type": "integer"}, "state_bytes": {"type": "integer"}}},
         "VzDisplayResize": {"type": "object", "required": ["width", "height"], "properties": {

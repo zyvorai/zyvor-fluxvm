@@ -489,6 +489,76 @@ pub fn set_host_capabilities(caps: Option<crate::host_caps::AppleHostCapabilitie
     *HOST.write().unwrap_or_else(|e| e.into_inner()) = caps;
 }
 
+/// The host capabilities installed by [`set_host_capabilities`], if any.
+pub fn current_host_capabilities() -> Option<crate::host_caps::AppleHostCapabilities> {
+    HOST.read().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
+/// One row of the capability table, judged against this Mac.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct CapabilityStatus {
+    pub feature: &'static str,
+    /// The backend offers it at all (the static table).
+    pub supported: bool,
+    pub note: &'static str,
+    /// Minimum macOS major version of the host.
+    pub min_macos: u32,
+    /// `Some(true)` usable on this Mac, `Some(false)` not, `None` when the host has not been probed.
+    pub available_here: Option<bool>,
+    /// Why it is not available here (macOS version, chip generation, entitlement), when it is not.
+    pub reason: Option<String>,
+}
+
+/// The capability table judged against `host`: what a client can offer a user, and why a feature is greyed out.
+pub fn capability_report(
+    host: Option<&crate::host_caps::AppleHostCapabilities>,
+) -> Vec<CapabilityStatus> {
+    CAPABILITIES
+        .iter()
+        .map(|c| {
+            let need = c.required_macos();
+            let (available_here, reason) = if !c.supported {
+                (Some(false), Some(c.note.to_string()))
+            } else if let Some(h) = host {
+                let have = macos_major(&h.os_version);
+                let why = if let Some(have) = have.filter(|have| *have < need) {
+                    Some(format!(
+                        "needs macOS {need} or later; this Mac runs macOS {have}"
+                    ))
+                } else if c.feature == "nested virtualization" && !h.nested_virtualization {
+                    Some("needs an M3 or later chip and macOS 15+".to_string())
+                } else if (c.feature == "vmnet custom network" || c.feature == "bridged networking")
+                    && h.vm_networking_entitlement == Some(false)
+                {
+                    Some(
+                        "needs a runner signed with com.apple.vm.networking, which Apple grants only through a \
+                         provisioning profile; use the usernet gateway or private networks instead"
+                            .to_string(),
+                    )
+                } else if c.feature == "Linux Rosetta" && h.rosetta != "installed" {
+                    Some(format!(
+                        "Rosetta for Linux is not installed on this Mac ({})",
+                        if h.rosetta.is_empty() { "unknown" } else { &h.rosetta }
+                    ))
+                } else {
+                    None
+                };
+                (Some(why.is_none()), why)
+            } else {
+                (None, None)
+            };
+            CapabilityStatus {
+                feature: c.feature,
+                supported: c.supported,
+                note: c.note,
+                min_macos: need,
+                available_here,
+                reason,
+            }
+        })
+        .collect()
+}
+
 /// The macOS major version in `os_version` as reported by `ProcessInfo` (`"Version 27.2 (Build 25C56)"`).
 pub fn macos_major(os_version: &str) -> Option<u32> {
     let rest = &os_version[os_version.find(|c: char| c.is_ascii_digit())?..];
@@ -1603,6 +1673,79 @@ mod tests {
         let linux = r#""apple":{"macos_vsock":true}"#;
         let err = validate_request(&req(linux)).unwrap_err().to_string();
         assert!(err.contains("macos_vsock"), "{err}");
+    }
+
+    #[test]
+    fn capability_report_explains_what_this_mac_cannot_do() {
+        use crate::host_caps::AppleHostCapabilities;
+        let host =
+            |os: &str, nested: bool, ent: Option<bool>, rosetta: &str| AppleHostCapabilities {
+                os_version: os.into(),
+                nested_virtualization: nested,
+                vm_networking_entitlement: ent,
+                rosetta: rosetta.into(),
+                ..Default::default()
+            };
+        let by = |rep: &[CapabilityStatus], f: &str| -> CapabilityStatus {
+            rep.iter().find(|c| c.feature == f).unwrap().clone()
+        };
+        // Not probed: nothing is claimed either way.
+        let unknown = capability_report(None);
+        assert!(
+            unknown
+                .iter()
+                .filter(|c| c.supported)
+                .all(|c| c.available_here.is_none())
+        );
+        // Unsupported rows are never available, with the table's own reason.
+        let tap = by(&unknown, "tap / macvtap / netns / eBPF networking");
+        assert_eq!(tap.available_here, Some(false));
+        assert!(tap.reason.as_deref().unwrap().contains("Linux kernel"));
+
+        let old = capability_report(Some(&host(
+            "Version 15.1 (Build x)",
+            false,
+            Some(false),
+            "not-installed",
+        )));
+        let vmnet = by(&old, "vmnet custom network");
+        assert_eq!(vmnet.available_here, Some(false));
+        assert!(
+            vmnet.reason.unwrap().contains("macOS 26"),
+            "macOS version is reported first"
+        );
+        let nested = by(&old, "nested virtualization");
+        assert!(nested.reason.unwrap().contains("M3"));
+        assert!(
+            by(&old, "Linux Rosetta")
+                .reason
+                .unwrap()
+                .contains("not installed")
+        );
+        assert_eq!(by(&old, "vcpus").available_here, Some(true));
+
+        // New enough macOS, but the runner lacks the networking entitlement.
+        let m27 = capability_report(Some(&host(
+            "Version 27.2 (Build y)",
+            true,
+            Some(false),
+            "installed",
+        )));
+        let vmnet = by(&m27, "vmnet custom network");
+        assert_eq!(vmnet.available_here, Some(false));
+        assert!(vmnet.reason.unwrap().contains("com.apple.vm.networking"));
+        assert_eq!(by(&m27, "bridged networking").available_here, Some(false));
+        assert_eq!(by(&m27, "usernet gateway").available_here, Some(true));
+        assert_eq!(by(&m27, "nested virtualization").available_here, Some(true));
+        assert_eq!(by(&m27, "Linux Rosetta").available_here, Some(true));
+        // An older runner that does not report the entitlement is not second-guessed.
+        let unk = capability_report(Some(&host(
+            "Version 27.2 (Build y)",
+            true,
+            None,
+            "installed",
+        )));
+        assert_eq!(by(&unk, "vmnet custom network").available_here, Some(true));
     }
 
     #[test]

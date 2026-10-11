@@ -5,6 +5,8 @@
 //! `router()`.
 //!
 //! * `GET  /v1/host/apple`
+//! * `GET  /v1/host/apple/capabilities`
+//! * `GET  /v1/host/overview`
 //! * `GET|POST /v1/host/apple/ipsw`
 //! * `GET  /v1/vms/{id}/vz/secure-boot`
 //! * `GET  /v1/vms/{id}/vz/custom-virtio`
@@ -28,9 +30,15 @@ use serde_json::{Value, json};
 use std::sync::Arc;
 use uuid::Uuid;
 
+/// When the router was built, for the overview's daemon uptime.
+static DAEMON_STARTED: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+
 pub(crate) fn routes() -> Router<Arc<VmManager>> {
+    DAEMON_STARTED.get_or_init(std::time::Instant::now);
     Router::new()
         .route("/v1/host/apple", get(host_apple))
+        .route("/v1/host/apple/capabilities", get(host_capabilities))
+        .route("/v1/host/overview", get(host_overview))
         .route("/v1/host/apple/ipsw", get(ipsw_status).post(ipsw_download))
         .route("/v1/vms/{id}/vz/secure-boot", get(secure_boot))
         .route("/v1/vms/{id}/vz/custom-virtio", get(custom_virtio))
@@ -55,6 +63,31 @@ async fn host_apple() -> ApiResult<Json<Value>> {
             message: format!("{e:#}"),
         })?;
     Ok(Json(caps))
+}
+
+/// The capability table judged against this Mac: for each feature whether it is available here and, when it is not, why
+/// (macOS version, chip generation, missing entitlement). The table itself is static; the verdicts come from the same
+/// host probe admission uses.
+async fn host_capabilities() -> ApiResult<Json<Value>> {
+    Ok(Json(
+        fluxvm_scheduler::vz_devices::apple_capabilities_json().await,
+    ))
+}
+
+/// Everything a dashboard needs in one cheap call: daemon, host, VM counts, per-VM usage rows and helper availability.
+/// CPU is cumulative seconds (take two samples for a rate); a VM with no usable runner pid has no usage row.
+async fn host_overview(State(m): State<Arc<VmManager>>) -> ApiResult<Json<Value>> {
+    let vms = m.list().await;
+    let branches = m.list_branches(None).await.map(|b| b.len()).unwrap_or(0);
+    let uptime = DAEMON_STARTED.get().map(|t| t.elapsed().as_secs());
+    let mut body = fluxvm_scheduler::vz_devices::apple_host_overview_json(vms, branches, uptime)
+        .await
+        .map_err(|e| ApiError {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            message: format!("{e:#}"),
+        })?;
+    body["networking"]["netobs_enabled"] = json!(fluxvm_netobs::global().is_some());
+    Ok(Json(body))
 }
 
 async fn secure_boot(
