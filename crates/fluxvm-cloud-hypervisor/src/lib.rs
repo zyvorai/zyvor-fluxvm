@@ -7,8 +7,8 @@ use fluxvm_core::{
     backend::{LaunchContext, LaunchResult, VmBackend, path_arg, validate_migration_transport},
     config::Config,
     model::{
-        BackendKind, CreateVmRequest, MigrationMode, MigrationPhase, MigrationStartRequest,
-        MigrationStatus, NetworkSpec, VmRecord,
+        BackendKind, CreateVmRequest, MigrationPhase, MigrationStartRequest, MigrationStatus,
+        NetworkSpec, VmRecord,
     },
     process::{output_checked_timeout, run_checked_timeout, spawn_swtpm},
 };
@@ -481,6 +481,26 @@ pub async fn migration_start(
     if request.multifd_channels == Some(0) {
         bail!("multifd_channels must be >= 1 when set");
     }
+    if request.auto_converge.is_some() {
+        bail!(
+            "Cloud Hypervisor has no auto-converge -- leave auto_converge unset for this backend"
+        );
+    }
+    if request
+        .compression
+        .is_some_and(|c| c.algorithm != fluxvm_core::model::MigrationCompressionAlgorithm::None)
+    {
+        bail!(
+            "Cloud Hypervisor has no migration stream compression -- leave compression unset for this backend"
+        );
+    }
+    let post_copy = request.effective_post_copy()?;
+    if post_copy == fluxvm_core::model::PostCopyMode::Armed {
+        bail!(
+            "Cloud Hypervisor cannot switch to post-copy mid-migration -- use post_copy immediate or disabled"
+        );
+    }
+    let post_copy = post_copy == fluxvm_core::model::PostCopyMode::Immediate;
     let connections = request.multifd_channels.filter(|c| *c > 1);
     let is_unix = request.destination.starts_with("unix:");
     if connections.is_some() && is_unix {
@@ -488,7 +508,7 @@ pub async fn migration_start(
             "Cloud Hypervisor rejects multifd_channels > 1 over a unix: destination -- use tcp: instead, or drop multifd_channels"
         );
     }
-    if connections.is_some() && request.mode == MigrationMode::PostCopy {
+    if connections.is_some() && post_copy {
         bail!(
             "Cloud Hypervisor's post-copy mode requires a single connection -- leave multifd_channels unset (or 1) when mode is post-copy"
         );
@@ -498,7 +518,7 @@ pub async fn migration_start(
     if let Some(ms) = request.max_downtime_ms {
         send_config.push_str(&format!(",downtime_ms={ms}"));
     }
-    if request.mode == MigrationMode::PostCopy {
+    if post_copy {
         send_config.push_str(",memory_mode=postcopy");
     }
     if let Some(n) = connections {
@@ -531,6 +551,7 @@ pub async fn migration_start(
         total_time_ms: None,
         downtime_ms: None,
         error: None,
+        telemetry: Default::default(),
     })
 }
 
@@ -691,6 +712,7 @@ fn json_u64(info: &Value, path: &[&str]) -> Result<u64> {
 mod tests {
     use super::*;
     use fluxvm_core::backend::PreparedNetwork;
+    use fluxvm_core::model::MigrationMode;
 
     #[test]
     fn qga_serial_socket_flag_shape() {
@@ -1158,6 +1180,9 @@ mod tests {
             max_downtime_ms: None,
             multifd_channels: None,
             tls: None,
+            auto_converge: None,
+            compression: None,
+            post_copy: None,
         }
     }
 

@@ -22,10 +22,45 @@ Live migration primitives:
 - `POST /v1/vms/{id}/migration/start`
 - `GET /v1/vms/{id}/migration/status`
 - `POST /v1/vms/{id}/migration/cancel`
+- `POST /v1/vms/{id}/migration/tune` (QEMU only)
+- `POST /v1/vms/{id}/migration/postcopy` (QEMU only)
 
-`fluxctl migrate start|status|cancel` is the CLI equivalent of the three
-routes above -- for the standalone mode mentioned below, where there is no
-Fabric orchestrator to drive them over HTTP.
+`fluxctl migrate start|status|cancel` is the CLI equivalent of the first
+three routes above -- for the standalone mode mentioned below, where there
+is no Fabric orchestrator to drive them over HTTP.
+
+### Adaptive controls (QEMU)
+
+These let the caller steer a migration that is not converging. FluxVM only
+applies them; deciding when to use them is the orchestrator's job.
+
+- `start` also accepts `auto_converge {initial_pct, increment_pct, max_pct}`
+  (QEMU's `auto-converge` capability and its throttle parameters, 1-99
+  each), `compression {algorithm: none|zlib|zstd, level}` (multifd
+  compression; needs `multifd_channels > 1`) and
+  `post_copy: disabled|immediate|armed`. `armed` enables `postcopy-ram` but
+  stays in pre-copy. `mode: post-copy` without `post_copy` means `immediate`,
+  as before.
+- `tune {bandwidth_mbps, max_downtime_ms, cpu_throttle_initial_pct,
+  cpu_throttle_increment_pct, max_cpu_throttle_pct}` changes those
+  parameters on the in-flight migration (`migrate-set-parameters`). QEMU
+  cannot change capabilities mid-flight, so auto-converge has to be enabled
+  at `start`. To keep it effectively off until needed, start with all three
+  percentages at 1.
+- `postcopy` switches an armed, active migration to post-copy. From then on
+  the destination owns guest memory: if the stream breaks, the VM is lost,
+  not left running on the source.
+- `status` also reports `dirty_pages_rate`, `dirty_sync_count`, `page_size`,
+  `duplicate_pages`, `normal_bytes`, `mbps`, `expected_downtime_ms`,
+  `cpu_throttle_pct`, `setup_time_ms` and `postcopy_requests` when QEMU
+  provides them. QEMU reports no compression ratio for multifd compression.
+- A receiver must be created with matching
+  `capabilities {multifd_channels, compression, post_copy}`. They are applied
+  before `migrate-incoming`, and QEMU refuses a stream whose capabilities
+  differ between the two ends.
+- `GET /v1/runtime/capabilities` reports `autoConverge`, `compression`,
+  `postCopySwitch`, `liveTune` and `postCopyWithMultifd`. The last is true
+  only when the QEMU binary reports version 10.0 or later.
 
 Contract v1 is intentionally narrow:
 

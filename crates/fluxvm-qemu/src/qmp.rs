@@ -11,7 +11,9 @@
 use anyhow::{Context, Result, bail};
 use fluxvm_core::backend::validate_migration_transport;
 use fluxvm_core::model::{
-    MigrationMode, MigrationPhase, MigrationStartRequest, MigrationStatus, MigrationTlsSpec,
+    MigrationCompression, MigrationCompressionAlgorithm, MigrationPhase, MigrationStartRequest,
+    MigrationStatus, MigrationStreamCapabilities, MigrationTelemetry, MigrationTlsSpec,
+    MigrationTuneRequest, PostCopyMode,
 };
 use serde_json::{Value, json};
 use std::{
@@ -150,6 +152,7 @@ fn parse_migration_status(v: &Value) -> MigrationStatus {
         .unwrap_or("unknown")
         .to_string();
     let ram = v.get("ram");
+    let ram_u64 = |k: &str| ram.and_then(|r| r.get(k)).and_then(Value::as_u64);
     MigrationStatus {
         phase: migration_phase(&status),
         status,
@@ -164,7 +167,226 @@ fn parse_migration_status(v: &Value) -> MigrationStatus {
             .get("error-desc")
             .and_then(Value::as_str)
             .map(str::to_string),
+        telemetry: MigrationTelemetry {
+            dirty_pages_rate: ram_u64("dirty-pages-rate"),
+            dirty_sync_count: ram_u64("dirty-sync-count"),
+            page_size: ram_u64("page-size"),
+            duplicate_pages: ram_u64("duplicate"),
+            normal_bytes: ram_u64("normal-bytes"),
+            mbps: ram.and_then(|r| r.get("mbps")).and_then(Value::as_f64),
+            expected_downtime_ms: v.get("expected-downtime").and_then(Value::as_u64),
+            cpu_throttle_pct: v.get("cpu-throttle-percentage").and_then(Value::as_u64),
+            setup_time_ms: v.get("setup-time").and_then(Value::as_u64),
+            postcopy_requests: ram_u64("postcopy-requests"),
+        },
     }
+}
+
+fn check_pct(name: &str, v: Option<u8>) -> Result<()> {
+    if let Some(p) = v
+        && !(1..=99).contains(&p)
+    {
+        bail!("{name} must be 1-99 (got {p})");
+    }
+    Ok(())
+}
+
+/// The `migrate-set-capabilities` list and `migrate-set-parameters` map a
+/// start request needs, validated. Pure so the mapping is unit-tested
+/// without a QEMU.
+pub(crate) fn start_settings(
+    request: &MigrationStartRequest,
+) -> Result<(Vec<Value>, serde_json::Map<String, Value>, PostCopyMode)> {
+    if request.multifd_channels == Some(0) {
+        bail!("multifd_channels must be >= 1 when set");
+    }
+    let post_copy = request.effective_post_copy()?;
+    let multifd = request.multifd_channels.unwrap_or(1) > 1;
+    let mut capabilities = Vec::new();
+    let mut params = serde_json::Map::new();
+    if multifd {
+        capabilities.push(json!({"capability": "multifd", "state": true}));
+    }
+    if post_copy != PostCopyMode::Disabled {
+        capabilities.push(json!({"capability": "postcopy-ram", "state": true}));
+    }
+    if let Some(ac) = &request.auto_converge {
+        check_pct("auto_converge.initial_pct", ac.initial_pct)?;
+        check_pct("auto_converge.increment_pct", ac.increment_pct)?;
+        check_pct("auto_converge.max_pct", ac.max_pct)?;
+        capabilities.push(json!({"capability": "auto-converge", "state": true}));
+        if let Some(p) = ac.initial_pct {
+            params.insert("cpu-throttle-initial".into(), Value::from(p));
+        }
+        if let Some(p) = ac.increment_pct {
+            params.insert("cpu-throttle-increment".into(), Value::from(p));
+        }
+        if let Some(p) = ac.max_pct {
+            params.insert("max-cpu-throttle".into(), Value::from(p));
+        }
+    }
+    if let Some(mbps) = request.bandwidth_mbps {
+        // QEMU max-bandwidth is bytes/second. Decimal Mbps is the operator-facing unit.
+        params.insert(
+            "max-bandwidth".into(),
+            Value::from(mbps.saturating_mul(1_000_000) / 8),
+        );
+    }
+    if let Some(ms) = request.max_downtime_ms {
+        params.insert("downtime-limit".into(), Value::from(ms));
+    }
+    if let Some(channels) = request.multifd_channels.filter(|c| *c > 1) {
+        params.insert("multifd-channels".into(), Value::from(channels));
+    }
+    if let Some(c) = &request.compression {
+        insert_compression(&mut params, c, multifd, true)?;
+    }
+    Ok((capabilities, params, post_copy))
+}
+
+fn insert_compression(
+    params: &mut serde_json::Map<String, Value>,
+    c: &MigrationCompression,
+    multifd: bool,
+    with_level: bool,
+) -> Result<()> {
+    c.validate()?;
+    if c.algorithm == MigrationCompressionAlgorithm::None {
+        return Ok(());
+    }
+    if !multifd {
+        bail!(
+            "{} compression needs multifd_channels > 1",
+            c.algorithm.as_str()
+        );
+    }
+    params.insert(
+        "multifd-compression".into(),
+        Value::from(c.algorithm.as_str()),
+    );
+    if with_level && let Some(level) = c.level {
+        let key = match c.algorithm {
+            MigrationCompressionAlgorithm::Zstd => "multifd-zstd-level",
+            _ => "multifd-zlib-level",
+        };
+        params.insert(key.into(), Value::from(level));
+    }
+    Ok(())
+}
+
+/// Receiver-side settings that must mirror the source's stream.
+pub(crate) fn incoming_settings(
+    caps: &MigrationStreamCapabilities,
+) -> Result<(Vec<Value>, serde_json::Map<String, Value>)> {
+    if caps.multifd_channels == Some(0) {
+        bail!("multifd_channels must be >= 1 when set");
+    }
+    let multifd = caps.multifd_channels.unwrap_or(1) > 1;
+    let mut capabilities = Vec::new();
+    let mut params = serde_json::Map::new();
+    if multifd {
+        capabilities.push(json!({"capability": "multifd", "state": true}));
+        params.insert(
+            "multifd-channels".into(),
+            Value::from(caps.multifd_channels.unwrap_or(1)),
+        );
+    }
+    if caps.post_copy {
+        capabilities.push(json!({"capability": "postcopy-ram", "state": true}));
+    }
+    if let Some(c) = &caps.compression {
+        insert_compression(&mut params, c, multifd, false)?;
+    }
+    Ok((capabilities, params))
+}
+
+/// Enables the stream capabilities on an `-incoming defer` QEMU. Call before
+/// `migrate-incoming`.
+pub(crate) async fn set_incoming_capabilities(
+    socket: &Path,
+    caps: &MigrationStreamCapabilities,
+    timeout: Duration,
+) -> Result<()> {
+    let (capabilities, params) = incoming_settings(caps)?;
+    if !capabilities.is_empty() {
+        execute(
+            socket,
+            "migrate-set-capabilities",
+            Some(json!({"capabilities": capabilities})),
+            timeout,
+        )
+        .await?;
+    }
+    if !params.is_empty() {
+        execute(
+            socket,
+            "migrate-set-parameters",
+            Some(Value::Object(params)),
+            timeout,
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+pub(crate) fn tune_params(req: &MigrationTuneRequest) -> Result<serde_json::Map<String, Value>> {
+    check_pct("cpu_throttle_initial_pct", req.cpu_throttle_initial_pct)?;
+    check_pct("cpu_throttle_increment_pct", req.cpu_throttle_increment_pct)?;
+    check_pct("max_cpu_throttle_pct", req.max_cpu_throttle_pct)?;
+    let mut params = serde_json::Map::new();
+    if let Some(mbps) = req.bandwidth_mbps {
+        params.insert(
+            "max-bandwidth".into(),
+            Value::from(mbps.saturating_mul(1_000_000) / 8),
+        );
+    }
+    if let Some(ms) = req.max_downtime_ms {
+        params.insert("downtime-limit".into(), Value::from(ms));
+    }
+    if let Some(p) = req.cpu_throttle_initial_pct {
+        params.insert("cpu-throttle-initial".into(), Value::from(p));
+    }
+    if let Some(p) = req.cpu_throttle_increment_pct {
+        params.insert("cpu-throttle-increment".into(), Value::from(p));
+    }
+    if let Some(p) = req.max_cpu_throttle_pct {
+        params.insert("max-cpu-throttle".into(), Value::from(p));
+    }
+    if params.is_empty() {
+        bail!("tune request sets nothing");
+    }
+    Ok(params)
+}
+
+/// Changes parameters of an in-flight migration. QEMU applies
+/// `max-bandwidth`, `downtime-limit` and the throttle parameters live.
+pub async fn migration_tune(
+    socket: &Path,
+    req: &MigrationTuneRequest,
+    timeout: Duration,
+) -> Result<MigrationStatus> {
+    let params = tune_params(req)?;
+    execute(
+        socket,
+        "migrate-set-parameters",
+        Some(Value::Object(params)),
+        timeout,
+    )
+    .await?;
+    migration_status(socket, timeout).await
+}
+
+/// Switches an armed pre-copy migration to post-copy. Only valid while the
+/// migration is active and was started with post-copy enabled.
+pub async fn migration_start_postcopy(socket: &Path, timeout: Duration) -> Result<MigrationStatus> {
+    let status = migration_status(socket, timeout).await?;
+    match status.phase {
+        MigrationPhase::Active => {}
+        MigrationPhase::PostcopyActive => return Ok(status),
+        other => bail!("post-copy can only start from an active migration (phase {other:?})"),
+    }
+    execute(socket, "migrate-start-postcopy", None, timeout).await?;
+    migration_status(socket, timeout).await
 }
 
 pub async fn migration_status(socket: &Path, timeout: Duration) -> Result<MigrationStatus> {
@@ -247,18 +469,8 @@ pub async fn migration_start(
     timeout: Duration,
 ) -> Result<MigrationStatus> {
     validate_migration_transport(&request.destination)?;
+    let (capabilities, params, post_copy) = start_settings(request)?;
 
-    if request.multifd_channels == Some(0) {
-        bail!("multifd_channels must be >= 1 when set");
-    }
-
-    let mut capabilities = Vec::new();
-    if request.multifd_channels.unwrap_or(1) > 1 {
-        capabilities.push(json!({"capability": "multifd", "state": true}));
-    }
-    if request.mode == MigrationMode::PostCopy {
-        capabilities.push(json!({"capability": "postcopy-ram", "state": true}));
-    }
     if !capabilities.is_empty() {
         execute(
             socket,
@@ -269,20 +481,6 @@ pub async fn migration_start(
         .await?;
     }
 
-    let mut params = serde_json::Map::new();
-    if let Some(mbps) = request.bandwidth_mbps {
-        // QEMU max-bandwidth is bytes/second. Decimal Mbps is the operator-facing unit.
-        params.insert(
-            "max-bandwidth".into(),
-            Value::from(mbps.saturating_mul(1_000_000) / 8),
-        );
-    }
-    if let Some(ms) = request.max_downtime_ms {
-        params.insert("downtime-limit".into(), Value::from(ms));
-    }
-    if let Some(channels) = request.multifd_channels.filter(|c| *c > 1) {
-        params.insert("multifd-channels".into(), Value::from(channels));
-    }
     if !params.is_empty() {
         execute(
             socket,
@@ -318,7 +516,7 @@ pub async fn migration_start(
     )
     .await?;
 
-    if request.mode == MigrationMode::PostCopy {
+    if post_copy == PostCopyMode::Immediate {
         // QEMU only accepts migrate-start-postcopy once pre-copy has entered
         // active state. Keep this short: the API call is orchestration setup,
         // not the long-running migration wait loop (Fabric polls status).
@@ -1069,6 +1267,137 @@ mod migration_contract_tests {
         assert!(validate_migration_transport("unix:/run/fluxvm/incoming.sock").is_ok());
     }
 
+    fn start_req(v: Value) -> MigrationStartRequest {
+        let mut v = v;
+        v["destination"] = json!("tcp:10.0.0.4:4444");
+        serde_json::from_value(v).unwrap()
+    }
+
+    fn cap_names(caps: &[Value]) -> Vec<&str> {
+        caps.iter()
+            .map(|c| c["capability"].as_str().unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn parses_adaptive_telemetry() {
+        let status = parse_migration_status(&json!({
+            "status": "active",
+            "expected-downtime": 300,
+            "setup-time": 12,
+            "cpu-throttle-percentage": 40,
+            "ram": {"transferred": 75, "remaining": 25, "total": 100, "duplicate": 9,
+                    "normal-bytes": 4096, "dirty-pages-rate": 5000, "mbps": 812.5,
+                    "dirty-sync-count": 4, "page-size": 4096, "postcopy-requests": 0}
+        }));
+        let t = status.telemetry;
+        assert_eq!(t.dirty_pages_rate, Some(5000));
+        assert_eq!(t.dirty_sync_count, Some(4));
+        assert_eq!(t.page_size, Some(4096));
+        assert_eq!(t.duplicate_pages, Some(9));
+        assert_eq!(t.normal_bytes, Some(4096));
+        assert_eq!(t.mbps, Some(812.5));
+        assert_eq!(t.expected_downtime_ms, Some(300));
+        assert_eq!(t.cpu_throttle_pct, Some(40));
+        assert_eq!(t.setup_time_ms, Some(12));
+        assert_eq!(t.postcopy_requests, Some(0));
+    }
+
+    #[test]
+    fn start_settings_maps_adaptive_request() {
+        let (caps, params, pc) = start_settings(&start_req(json!({
+            "multifd_channels": 4,
+            "bandwidth_mbps": 8000,
+            "max_downtime_ms": 250,
+            "auto_converge": {"initial_pct": 1, "increment_pct": 5, "max_pct": 1},
+            "compression": {"algorithm": "zstd", "level": 3},
+            "post_copy": "armed"
+        })))
+        .unwrap();
+        assert_eq!(pc, PostCopyMode::Armed);
+        assert_eq!(
+            cap_names(&caps),
+            ["multifd", "postcopy-ram", "auto-converge"]
+        );
+        assert_eq!(params["max-bandwidth"], 1_000_000_000u64);
+        assert_eq!(params["downtime-limit"], 250);
+        assert_eq!(params["multifd-channels"], 4);
+        assert_eq!(params["multifd-compression"], "zstd");
+        assert_eq!(params["multifd-zstd-level"], 3);
+        assert_eq!(params["cpu-throttle-initial"], 1);
+        assert_eq!(params["cpu-throttle-increment"], 5);
+        assert_eq!(params["max-cpu-throttle"], 1);
+    }
+
+    #[test]
+    fn start_settings_keeps_legacy_post_copy_mode_immediate() {
+        let (caps, _, pc) = start_settings(&start_req(json!({"mode": "post-copy"}))).unwrap();
+        assert_eq!(pc, PostCopyMode::Immediate);
+        assert_eq!(cap_names(&caps), ["postcopy-ram"]);
+    }
+
+    #[test]
+    fn start_settings_rejects_invalid_combinations() {
+        for bad in [
+            json!({"compression": {"algorithm": "zstd"}}),
+            json!({"multifd_channels": 2, "compression": {"algorithm": "zstd", "level": 21}}),
+            json!({"auto_converge": {"max_pct": 100}}),
+            json!({"auto_converge": {"initial_pct": 0}}),
+            json!({"multifd_channels": 0}),
+            json!({"mode": "post-copy", "post_copy": "disabled"}),
+        ] {
+            assert!(
+                start_settings(&start_req(bad.clone())).is_err(),
+                "accepted {bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn incoming_settings_mirror_the_source_stream() {
+        let caps: MigrationStreamCapabilities = serde_json::from_value(json!({
+            "multifd_channels": 4,
+            "compression": {"algorithm": "zstd", "level": 9},
+            "post_copy": true
+        }))
+        .unwrap();
+        let (c, params) = incoming_settings(&caps).unwrap();
+        assert_eq!(cap_names(&c), ["multifd", "postcopy-ram"]);
+        assert_eq!(params["multifd-channels"], 4);
+        assert_eq!(params["multifd-compression"], "zstd");
+        assert!(
+            params.get("multifd-zstd-level").is_none(),
+            "the level only matters on the sending side"
+        );
+        let (c, p) = incoming_settings(&MigrationStreamCapabilities::default()).unwrap();
+        assert!(c.is_empty() && p.is_empty());
+    }
+
+    #[test]
+    fn tune_params_maps_and_validates() {
+        let p = tune_params(&MigrationTuneRequest {
+            bandwidth_mbps: Some(80),
+            max_downtime_ms: Some(500),
+            cpu_throttle_initial_pct: Some(20),
+            cpu_throttle_increment_pct: Some(10),
+            max_cpu_throttle_pct: Some(60),
+        })
+        .unwrap();
+        assert_eq!(p["max-bandwidth"], 10_000_000u64);
+        assert_eq!(p["downtime-limit"], 500);
+        assert_eq!(p["cpu-throttle-initial"], 20);
+        assert_eq!(p["cpu-throttle-increment"], 10);
+        assert_eq!(p["max-cpu-throttle"], 60);
+        assert!(tune_params(&MigrationTuneRequest::default()).is_err());
+        assert!(
+            tune_params(&MigrationTuneRequest {
+                max_cpu_throttle_pct: Some(0),
+                ..Default::default()
+            })
+            .is_err()
+        );
+    }
+
     #[test]
     fn maps_postcopy_states() {
         for state in ["postcopy-active", "postcopy-paused", "postcopy-recover"] {
@@ -1113,7 +1442,7 @@ mod hotplug_tests {
     /// connection per step -- this serves `steps` in order, each on its own
     /// connection, asserting the expected command name and replying with
     /// the given canned `return` value.
-    async fn serve_script(listener: UnixListener, steps: Vec<(&'static str, Value)>) {
+    pub(super) async fn serve_script(listener: UnixListener, steps: Vec<(&'static str, Value)>) {
         for (expect_command, reply) in steps {
             let (stream, _) = listener.accept().await.unwrap();
             let (read_half, mut write_half) = stream.into_split();
@@ -1614,5 +1943,116 @@ mod fd_session_tests {
             format!("{err:#}").contains("connecting to QMP socket"),
             "{err:#}"
         );
+    }
+}
+
+#[cfg(test)]
+mod migration_qmp_tests {
+    use super::hotplug_tests::serve_script;
+    use super::*;
+    use tokio::net::UnixListener;
+
+    #[test]
+    fn parses_qemu_version_banner() {
+        assert_eq!(
+            crate::parse_qemu_version(
+                "QEMU emulator version 10.0.2 (Debian 1:10.0.2+ds-1)\nCopyright (c) 2003-2025"
+            ),
+            Some((10, 0))
+        );
+        assert_eq!(
+            crate::parse_qemu_version("QEMU emulator version 8.2.2"),
+            Some((8, 2))
+        );
+        assert_eq!(crate::parse_qemu_version("not qemu"), None);
+    }
+
+    #[tokio::test]
+    async fn start_postcopy_switches_an_active_migration() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("qmp.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        let server = tokio::spawn(serve_script(
+            listener,
+            vec![
+                ("query-migrate", json!({"status": "active"})),
+                ("migrate-start-postcopy", json!({})),
+                ("query-migrate", json!({"status": "postcopy-active"})),
+            ],
+        ));
+        let status = migration_start_postcopy(&path, Duration::from_secs(5))
+            .await
+            .unwrap();
+        assert_eq!(status.phase, MigrationPhase::PostcopyActive);
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn start_postcopy_refuses_a_finished_migration() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("qmp.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        let server = tokio::spawn(serve_script(
+            listener,
+            vec![("query-migrate", json!({"status": "completed"}))],
+        ));
+        let err = migration_start_postcopy(&path, Duration::from_secs(5))
+            .await
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("only start from an active migration"));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn tune_sets_parameters_then_reports_status() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("qmp.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        let server = tokio::spawn(serve_script(
+            listener,
+            vec![
+                ("migrate-set-parameters", json!({})),
+                (
+                    "query-migrate",
+                    json!({"status": "active", "cpu-throttle-percentage": 30}),
+                ),
+            ],
+        ));
+        let status = migration_tune(
+            &path,
+            &MigrationTuneRequest {
+                max_cpu_throttle_pct: Some(50),
+                ..Default::default()
+            },
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
+        assert_eq!(status.telemetry.cpu_throttle_pct, Some(30));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn incoming_capabilities_are_set_before_migrate_incoming() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("qmp.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        let server = tokio::spawn(serve_script(
+            listener,
+            vec![
+                ("migrate-set-capabilities", json!({})),
+                ("migrate-set-parameters", json!({})),
+                ("migrate-incoming", json!({})),
+            ],
+        ));
+        let caps = MigrationStreamCapabilities {
+            multifd_channels: Some(4),
+            compression: None,
+            post_copy: true,
+        };
+        crate::receiver::activate(&path, "tcp:0.0.0.0:4444", None, &caps)
+            .await
+            .unwrap();
+        server.await.unwrap();
     }
 }

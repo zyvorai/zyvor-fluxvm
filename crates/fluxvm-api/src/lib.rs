@@ -422,6 +422,8 @@ pub fn router(manager: Arc<VmManager>) -> Router {
         .route("/v1/vms/{id}/migration/start", post(start_migration))
         .route("/v1/vms/{id}/migration/status", get(migration_status))
         .route("/v1/vms/{id}/migration/cancel", post(cancel_migration))
+        .route("/v1/vms/{id}/migration/tune", post(tune_migration))
+        .route("/v1/vms/{id}/migration/postcopy", post(start_postcopy))
         .route("/v1/vms/{id}/migration/finish", post(finish_migration))
         .route("/v1/migration/receivers", post(create_migration_receiver))
         .route(
@@ -2051,7 +2053,12 @@ async fn release_vm_secret(
     Ok(Json(json!(m.release_test_secret(id).await?)))
 }
 
-async fn runtime_capabilities() -> Json<fluxvm_core::model::RuntimeCapabilities> {
+async fn runtime_capabilities(
+    State(m): State<Arc<VmManager>>,
+) -> Json<fluxvm_core::model::RuntimeCapabilities> {
+    // multifd+post-copy together needs QEMU 10.0; an unknown version is
+    // reported as unsupported rather than guessed.
+    let qemu_postcopy_with_multifd = m.qemu_version().is_some_and(|v| v >= (10, 0));
     use fluxvm_core::model::{
         BackendKind, RuntimeCapabilities, RuntimeMigrationCapability, RuntimeSnapshotCapability,
     };
@@ -2069,6 +2076,11 @@ async fn runtime_capabilities() -> Json<fluxvm_core::model::RuntimeCapabilities>
                 requires_shared_storage: true,
                 transports: vec!["tcp".into(), "unix".into()],
                 status_pollable: true,
+                auto_converge: true,
+                compression: vec!["zlib".into(), "zstd".into()],
+                post_copy_switch: true,
+                live_tune: true,
+                post_copy_with_multifd: qemu_postcopy_with_multifd,
             },
             RuntimeMigrationCapability {
                 backend: BackendKind::CloudHypervisor,
@@ -2082,6 +2094,11 @@ async fn runtime_capabilities() -> Json<fluxvm_core::model::RuntimeCapabilities>
                 requires_shared_storage: true,
                 transports: vec!["tcp".into(), "unix".into()],
                 status_pollable: false,
+                auto_converge: false,
+                compression: Vec::new(),
+                post_copy_switch: false,
+                live_tune: false,
+                post_copy_with_multifd: false,
             },
         ],
         snapshot: vec![
@@ -2184,6 +2201,25 @@ async fn cancel_migration(
 ) -> ApiResult<Json<fluxvm_core::model::MigrationStatus>> {
     require_admin(role)?;
     Ok(Json(m.cancel_migration(id).await?))
+}
+
+async fn tune_migration(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<fluxvm_core::model::MigrationTuneRequest>,
+) -> ApiResult<Json<fluxvm_core::model::MigrationStatus>> {
+    require_admin(role)?;
+    Ok(Json(m.tune_migration(id, &req).await?))
+}
+
+async fn start_postcopy(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<fluxvm_core::model::MigrationStatus>> {
+    require_admin(role)?;
+    Ok(Json(m.start_postcopy(id).await?))
 }
 
 async fn create_migration_receiver(

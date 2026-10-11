@@ -4667,6 +4667,9 @@ async fn main() -> Result<()> {
                     max_downtime_ms,
                     multifd_channels,
                     tls: None,
+                    auto_converge: None,
+                    compression: None,
+                    post_copy: None,
                 };
                 println!(
                     "{}",
@@ -4711,6 +4714,7 @@ async fn main() -> Result<()> {
                         expires_in_seconds,
                         tls: None,
                         record: None,
+                        capabilities: Default::default(),
                     };
                     println!(
                         "{}",

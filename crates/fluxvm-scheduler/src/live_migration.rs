@@ -341,6 +341,7 @@ impl VmManager {
             memory_mib: 0,
             tls: req.tls,
             source_id: Some(source.id),
+            capabilities: req.capabilities,
         };
         if let Err(e) = self.write_receiver(&rec) {
             if let Some(pid) = record.pid {
