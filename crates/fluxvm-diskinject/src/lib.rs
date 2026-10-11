@@ -145,11 +145,15 @@ pub struct Report {
 
 fn validate_path(p: &str) -> Result<()> {
     if !p.starts_with('/') || p.len() < 2 || p.ends_with('/') {
-        return Err(Error::Invalid(format!("path {p:?} must be absolute and name a file")));
+        return Err(Error::Invalid(format!(
+            "path {p:?} must be absolute and name a file"
+        )));
     }
     for c in p.split('/').skip(1) {
         if c.is_empty() || c == "." || c == ".." || c.len() > 255 || c.contains('\0') {
-            return Err(Error::Invalid(format!("path {p:?} has a bad component {c:?}")));
+            return Err(Error::Invalid(format!(
+                "path {p:?} has a bad component {c:?}"
+            )));
         }
     }
     Ok(())
@@ -186,7 +190,10 @@ pub fn inject_files(disk: &Path, files: &[InjectFile]) -> Result<Report> {
     let file = OpenOptions::new().read(true).write(true).open(disk)?;
     let meta = file.metadata()?;
     if !meta.is_file() {
-        return Err(Error::Invalid(format!("{} is not a regular file", disk.display())));
+        return Err(Error::Invalid(format!(
+            "{} is not a regular file",
+            disk.display()
+        )));
     }
     let cands = partition::candidates(&file, meta.len())?;
 
@@ -281,7 +288,9 @@ pub fn inject_files(disk: &Path, files: &[InjectFile]) -> Result<Report> {
 pub fn inject_ssh_key(disk: &Path, key: &str) -> Result<Report> {
     let key = key.trim();
     if key.is_empty() || key.contains('\n') {
-        return Err(Error::Invalid("ssh key must be a single non-empty line".into()));
+        return Err(Error::Invalid(
+            "ssh key must be a single non-empty line".into(),
+        ));
     }
     let f = InjectFile::new("/root/.ssh/authorized_keys", key.as_bytes())
         .mode(0o600)

@@ -16,9 +16,7 @@
 //! UNVERIFIED on hardware: no VM has been booted through this path.
 
 use anyhow::{Context, Result, bail};
-use fluxvm_core::model::{
-    AppleGuest, AppleSpec, AppleUsernet, CreateVmRequest, NetworkSpec,
-};
+use fluxvm_core::model::{AppleGuest, AppleSpec, AppleUsernet, CreateVmRequest, NetworkSpec};
 use fluxvm_usernet::{Cidr, Cidr6, GuestFamily, PortForward, Proto, UserNetConfig};
 use std::net::IpAddr;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
@@ -119,16 +117,21 @@ pub fn validate(u: &AppleUsernet, req: &CreateVmRequest, apple: &AppleSpec) -> R
                 f.host_port
             );
         }
-        match f.guest_family.as_deref().map(str::to_ascii_lowercase).as_deref() {
+        match f
+            .guest_family
+            .as_deref()
+            .map(str::to_ascii_lowercase)
+            .as_deref()
+        {
             None | Some("v4") => {}
             Some("v6") if u.ipv6 => {}
             Some("v6") => bail!("apple.usernet forward guest_family v6 needs apple.usernet.ipv6"),
             Some(other) => bail!("apple.usernet forward guest_family {other:?} must be v4 or v6"),
         }
         let addr: IpAddr = match &f.host_addr {
-            Some(a) => a
-                .parse()
-                .map_err(|_| anyhow::anyhow!("apple.usernet forward host_addr {a:?} is not an IP address"))?,
+            Some(a) => a.parse().map_err(|_| {
+                anyhow::anyhow!("apple.usernet forward host_addr {a:?} is not an IP address")
+            })?,
             None => IpAddr::from([127, 0, 0, 1]),
         };
         if f.host_port != 0 && !seen.insert((proto, addr, f.host_port)) {
@@ -160,7 +163,10 @@ pub fn to_config(u: &AppleUsernet, guest_mac: Option<[u8; 6]>) -> Result<UserNet
     c.ipv6 = u.ipv6;
     let cidrs6 = |v: &[String]| -> Result<Vec<Cidr6>> {
         v.iter()
-            .map(|s| s.parse::<Cidr6>().map_err(|e| anyhow::anyhow!("IPv6 CIDR {e}")))
+            .map(|s| {
+                s.parse::<Cidr6>()
+                    .map_err(|e| anyhow::anyhow!("IPv6 CIDR {e}"))
+            })
             .collect()
     };
     c.egress.allow_cidrs6 = cidrs6(&u.allow_cidrs6)?;
@@ -184,7 +190,10 @@ pub fn to_config(u: &AppleUsernet, guest_mac: Option<[u8; 6]>) -> Result<UserNet
             f.host_port,
             f.guest_port,
         );
-        if f.guest_family.as_deref().is_some_and(|g| g.eq_ignore_ascii_case("v6")) {
+        if f.guest_family
+            .as_deref()
+            .is_some_and(|g| g.eq_ignore_ascii_case("v6"))
+        {
             fwd.guest_family = GuestFamily::V6;
         }
         if let Some(a) = &f.guest_addr {
@@ -192,7 +201,8 @@ pub fn to_config(u: &AppleUsernet, guest_mac: Option<[u8; 6]>) -> Result<UserNet
         }
         c.forwards.push(fwd);
     }
-    c.validate().map_err(|e| anyhow::anyhow!("apple.usernet: {e}"))?;
+    c.validate()
+        .map_err(|e| anyhow::anyhow!("apple.usernet: {e}"))?;
     Ok(c)
 }
 
@@ -322,7 +332,9 @@ pub const FORWARDS_FILE: &str = "usernet-forwards.json";
 /// a `host_port: 0` forward is discovered. Empty when the VM has no usernet or its gateway has not reported yet.
 /// The file belongs to one gateway process: if the supervisor restarted the gateway the ephemeral ports changed
 /// and the file was rewritten.
-pub fn usernet_forward_addrs(vm: &fluxvm_core::model::VmRecord) -> Result<Vec<fluxvm_usernet::ForwardStatus>> {
+pub fn usernet_forward_addrs(
+    vm: &fluxvm_core::model::VmRecord,
+) -> Result<Vec<fluxvm_usernet::ForwardStatus>> {
     let p = vm.workspace.join(FORWARDS_FILE);
     let raw = match std::fs::read(&p) {
         Ok(r) => r,
@@ -342,7 +354,8 @@ impl Gateway {
         workspace: &Path,
         mac: &str,
     ) -> Result<Self> {
-        let mac = parse_mac(mac).with_context(|| format!("apple.usernet: bad guest MAC {mac:?}"))?;
+        let mac =
+            parse_mac(mac).with_context(|| format!("apple.usernet: bad guest MAC {mac:?}"))?;
         let bin = find_usernet()?;
         let cfg = to_config(u, Some(mac))?;
         let config_path = workspace.join("usernet.json");
@@ -543,9 +556,18 @@ mod tests {
     #[test]
     fn tap_verdict_bytes_map_to_netobs_verdicts() {
         use fluxvm_netobs::{DropReason, Verdict};
-        assert_eq!(tap_verdict(fluxvm_usernet::TAP_VERDICT_PASS), Verdict::Allowed);
-        assert_eq!(tap_verdict(fluxvm_usernet::TAP_VERDICT_DENIED), Verdict::Denied(DropReason::Policy));
-        assert_eq!(tap_verdict(fluxvm_usernet::TAP_VERDICT_DROPPED), Verdict::Dropped(DropReason::Other));
+        assert_eq!(
+            tap_verdict(fluxvm_usernet::TAP_VERDICT_PASS),
+            Verdict::Allowed
+        );
+        assert_eq!(
+            tap_verdict(fluxvm_usernet::TAP_VERDICT_DENIED),
+            Verdict::Denied(DropReason::Policy)
+        );
+        assert_eq!(
+            tap_verdict(fluxvm_usernet::TAP_VERDICT_DROPPED),
+            Verdict::Dropped(DropReason::Other)
+        );
         assert_eq!(tap_verdict(200), Verdict::Dropped(DropReason::Other));
     }
     use fluxvm_core::model::AppleUsernetForward;
@@ -673,7 +695,10 @@ mod tests {
     #[test]
     fn ipv6_fields_need_the_toggle_and_valid_values() {
         let ck = |u: serde_json::Value| check(serde_json::json!({ "usernet": u }), user());
-        assert!(ck(serde_json::json!({"allow_cidrs6": ["2001:db8::/32"]})).is_err(), "needs ipv6");
+        assert!(
+            ck(serde_json::json!({"allow_cidrs6": ["2001:db8::/32"]})).is_err(),
+            "needs ipv6"
+        );
         assert!(ck(serde_json::json!({"ipv6": true, "allow_cidrs6": ["nope"]})).is_err());
         assert!(
             ck(serde_json::json!({"port_forwards": [{"host_port": 8080, "guest_port": 80, "guest_family": "v6"}]}))
@@ -744,7 +769,10 @@ mod tests {
 
     #[test]
     fn mac_parsing() {
-        assert_eq!(parse_mac("aa:bb:cc:dd:ee:ff"), Some([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]));
+        assert_eq!(
+            parse_mac("aa:bb:cc:dd:ee:ff"),
+            Some([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff])
+        );
         assert_eq!(parse_mac("aa:bb:cc:dd:ee"), None);
         assert_eq!(parse_mac("aa:bb:cc:dd:ee:gg"), None);
     }

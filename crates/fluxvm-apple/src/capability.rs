@@ -1207,9 +1207,7 @@ mod tests {
         assert!(validate_request(&svc(r#""tcp":"127.0.0.1:8080","socket":"a""#)).is_err());
         assert!(validate_request(&svc(r#""tcp":"127.0.0.1:8080","builtin":"metadata""#)).is_err());
         // reserved guest ports are refused for tcp services like any other
-        let reserved = req(
-            r#""apple":{"vsock_services":[{"port":3128,"tcp":"127.0.0.1:8080"}]}"#,
-        );
+        let reserved = req(r#""apple":{"vsock_services":[{"port":3128,"tcp":"127.0.0.1:8080"}]}"#);
         assert!(validate_request(&reserved).is_err());
         let low = req(r#""apple":{"vsock_services":[{"port":80,"tcp":"127.0.0.1:8080"}]}"#);
         assert!(validate_request(&low).is_err());

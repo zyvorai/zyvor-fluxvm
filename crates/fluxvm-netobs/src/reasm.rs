@@ -80,7 +80,10 @@ impl Stream {
 
     /// A stream whose first byte has sequence number `base`.
     pub fn with_base(base: u32) -> Self {
-        Self { base: Some(base), ..Self::default() }
+        Self {
+            base: Some(base),
+            ..Self::default()
+        }
     }
 
     /// Sets the sequence number of the first byte unless one is already known (the SYN's ISN + 1).
@@ -95,7 +98,12 @@ impl Stream {
 
     /// Bytes of heap this stream holds (what counts against the budget).
     pub fn mem(&self) -> usize {
-        self.buf.capacity() + self.pending.iter().map(|(_, d)| d.capacity()).sum::<usize>()
+        self.buf.capacity()
+            + self
+                .pending
+                .iter()
+                .map(|(_, d)| d.capacity())
+                .sum::<usize>()
     }
 
     pub fn pending_segments(&self) -> usize {
@@ -111,7 +119,14 @@ impl Stream {
 
     /// Offers a segment. `limit` caps the contiguous prefix, `max_segs` the pending list, and `room` is how many
     /// more bytes the caller's budget can take.
-    pub fn push(&mut self, seq: u32, data: &[u8], limit: usize, max_segs: usize, room: usize) -> Push {
+    pub fn push(
+        &mut self,
+        seq: u32,
+        data: &[u8],
+        limit: usize,
+        max_segs: usize,
+        room: usize,
+    ) -> Push {
         if data.is_empty() || limit == 0 {
             return Push::Ignored;
         }
@@ -152,7 +167,11 @@ impl Stream {
             return Push::Appended(added);
         }
         // A gap in front of this segment.
-        if self.pending.iter().any(|(o, d)| *o == off && d.len() >= data.len()) {
+        if self
+            .pending
+            .iter()
+            .any(|(o, d)| *o == off && d.len() >= data.len())
+        {
             return Push::Ignored;
         }
         if self.pending.len() >= max_segs || self.pending_bytes + data.len() > limit {
@@ -169,7 +188,11 @@ impl Stream {
 
     fn drain_pending(&mut self, limit: usize) -> usize {
         let mut added = 0;
-        while self.pending.first().is_some_and(|(o, _)| *o <= self.buf.len()) {
+        while self
+            .pending
+            .first()
+            .is_some_and(|(o, _)| *o <= self.buf.len())
+        {
             let (o, d) = self.pending.remove(0);
             self.pending_bytes -= d.len();
             let skip = self.buf.len() - o;
@@ -199,7 +222,10 @@ mod tests {
         let d = data(300);
         let mut s = Stream::with_base(1000);
         assert_eq!(s.push(1000, &d[..100], LIM, 8, ROOM), Push::Appended(100));
-        assert_eq!(s.push(1100, &d[100..300], LIM, 8, ROOM), Push::Appended(200));
+        assert_eq!(
+            s.push(1100, &d[100..300], LIM, 8, ROOM),
+            Push::Appended(200)
+        );
         assert_eq!(s.contiguous(), &d[..]);
     }
 
@@ -220,9 +246,21 @@ mod tests {
         let d = data(300);
         let mut s = Stream::with_base(0);
         s.push(0, &d[..150], LIM, 8, ROOM);
-        assert_eq!(s.push(0, &d[..150], LIM, 8, ROOM), Push::Ignored, "exact retransmit");
-        assert_eq!(s.push(50, &d[50..120], LIM, 8, ROOM), Push::Ignored, "fully covered");
-        assert_eq!(s.push(100, &d[100..300], LIM, 8, ROOM), Push::Appended(150), "partial overlap adds the tail");
+        assert_eq!(
+            s.push(0, &d[..150], LIM, 8, ROOM),
+            Push::Ignored,
+            "exact retransmit"
+        );
+        assert_eq!(
+            s.push(50, &d[50..120], LIM, 8, ROOM),
+            Push::Ignored,
+            "fully covered"
+        );
+        assert_eq!(
+            s.push(100, &d[100..300], LIM, 8, ROOM),
+            Push::Appended(150),
+            "partial overlap adds the tail"
+        );
         assert_eq!(s.contiguous(), &d[..]);
         assert_eq!(s.conflicts, 0);
     }
@@ -242,10 +280,16 @@ mod tests {
         let base = u32::MAX - 49;
         let mut s = Stream::with_base(base);
         assert_eq!(s.push(base, &d[..50], LIM, 8, ROOM), Push::Appended(50));
-        assert_eq!(s.push(base.wrapping_add(50), &d[50..], LIM, 8, ROOM), Push::Appended(50));
+        assert_eq!(
+            s.push(base.wrapping_add(50), &d[50..], LIM, 8, ROOM),
+            Push::Appended(50)
+        );
         assert_eq!(s.contiguous(), &d[..]);
         // Old data from before the base.
-        assert_eq!(s.push(base.wrapping_sub(10), &d[..5], LIM, 8, ROOM), Push::Ignored);
+        assert_eq!(
+            s.push(base.wrapping_sub(10), &d[..5], LIM, 8, ROOM),
+            Push::Ignored
+        );
     }
 
     #[test]
@@ -268,20 +312,35 @@ mod tests {
         let mut s = Stream::with_base(0);
         // Segments beyond the gap at offset 0.
         for i in 0..4u32 {
-            assert_eq!(s.push(100 + i * 10, &[1u8; 5], LIM, 4, ROOM), Push::Buffered);
+            assert_eq!(
+                s.push(100 + i * 10, &[1u8; 5], LIM, 4, ROOM),
+                Push::Buffered
+            );
         }
-        assert_eq!(s.push(300, &[1u8; 5], LIM, 4, ROOM), Push::Dropped(DropWhy::PendingFull));
+        assert_eq!(
+            s.push(300, &[1u8; 5], LIM, 4, ROOM),
+            Push::Dropped(DropWhy::PendingFull)
+        );
         // Byte-bound as well.
         let mut s = Stream::with_base(0);
         assert_eq!(s.push(10, &[1u8; 1000], LIM, 8, ROOM), Push::Buffered);
-        assert_eq!(s.push(20, &[1u8; 100], LIM, 8, ROOM), Push::Dropped(DropWhy::PendingFull));
+        assert_eq!(
+            s.push(20, &[1u8; 100], LIM, 8, ROOM),
+            Push::Dropped(DropWhy::PendingFull)
+        );
     }
 
     #[test]
     fn budget_is_respected() {
         let mut s = Stream::with_base(0);
-        assert_eq!(s.push(0, &[1u8; 100], LIM, 8, 50), Push::Dropped(DropWhy::Budget));
-        assert_eq!(s.push(10, &[1u8; 100], LIM, 8, 50), Push::Dropped(DropWhy::Budget));
+        assert_eq!(
+            s.push(0, &[1u8; 100], LIM, 8, 50),
+            Push::Dropped(DropWhy::Budget)
+        );
+        assert_eq!(
+            s.push(10, &[1u8; 100], LIM, 8, 50),
+            Push::Dropped(DropWhy::Budget)
+        );
         assert!(s.contiguous().is_empty());
         assert_eq!(s.mem(), 0);
     }
@@ -333,7 +392,13 @@ mod tests {
             }
             let mut s = Stream::with_base(base);
             for (o, l) in &segs {
-                let r = s.push(base.wrapping_add(*o as u32), &d[*o..*o + *l], 4096, 4096, ROOM);
+                let r = s.push(
+                    base.wrapping_add(*o as u32),
+                    &d[*o..*o + *l],
+                    4096,
+                    4096,
+                    ROOM,
+                );
                 assert!(!matches!(r, Push::Dropped(_)), "round {round}");
             }
             assert_eq!(s.contiguous(), &d[..], "round {round}");
@@ -345,7 +410,9 @@ mod tests {
     fn hostile_input_never_panics() {
         let mut st = 77u64;
         let mut next = move || {
-            st = st.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            st = st
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             (st >> 20) as u32
         };
         let mut s = Stream::new();

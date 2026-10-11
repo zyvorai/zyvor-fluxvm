@@ -14,15 +14,18 @@
 use crate::flow::{Direction, FrameMeta, Identity, Verdict};
 use crate::observer::Observer;
 use std::io;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, TrySendError, sync_channel};
-use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// Unix time in microseconds.
 pub fn now_us() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_micros() as u64).unwrap_or(0)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_micros() as u64)
+        .unwrap_or(0)
 }
 
 /// A pull-style frame source.
@@ -106,14 +109,22 @@ impl NetTap {
         let (tx, rx) = sync_channel(capacity.max(1));
         let stats = Arc::new(TapStats::default());
         (
-            NetTap { tx, stats: stats.clone(), identity: None, snaplen: snaplen.clamp(64, 65_535) },
+            NetTap {
+                tx,
+                stats: stats.clone(),
+                identity: None,
+                snaplen: snaplen.clamp(64, 65_535),
+            },
             TapReceiver { rx, stats },
         )
     }
 
     /// A clone of this tap that attributes its frames to `identity` (one per guest port).
     pub fn for_identity(&self, identity: Arc<Identity>) -> NetTap {
-        NetTap { identity: Some(identity), ..self.clone() }
+        NetTap {
+            identity: Some(identity),
+            ..self.clone()
+        }
     }
 
     pub fn stats(&self) -> &Arc<TapStats> {
@@ -121,7 +132,13 @@ impl NetTap {
     }
 
     /// Queues a frame for `identity`. Never blocks; a full queue (or a gone consumer) drops and counts.
-    pub fn tap_as(&self, identity: &Arc<Identity>, direction: Direction, verdict: Verdict, frame: &[u8]) {
+    pub fn tap_as(
+        &self,
+        identity: &Arc<Identity>,
+        direction: Direction,
+        verdict: Verdict,
+        frame: &[u8],
+    ) {
         let keep = frame.len().min(self.snaplen);
         let item = TapFrame {
             identity: identity.clone(),
@@ -238,12 +255,19 @@ mod tests {
     fn full_queue_drops_and_counts_without_blocking() {
         let (tap, rx) = NetTap::new(4, 2048);
         let tap = tap.for_identity(id());
-        let f = build::udp_v4((Ipv4Addr::new(10, 0, 0, 1), 1), (Ipv4Addr::new(10, 0, 0, 2), 2), b"x");
+        let f = build::udp_v4(
+            (Ipv4Addr::new(10, 0, 0, 1), 1),
+            (Ipv4Addr::new(10, 0, 0, 2), 2),
+            b"x",
+        );
         let start = std::time::Instant::now();
         for _ in 0..1000 {
             tap.tap(Direction::FromGuest, Verdict::Allowed, &f);
         }
-        assert!(start.elapsed() < Duration::from_secs(2), "tap must never block");
+        assert!(
+            start.elapsed() < Duration::from_secs(2),
+            "tap must never block"
+        );
         let s = rx.stats();
         assert_eq!(s.enqueued(), 4);
         assert_eq!(s.dropped(), 996);
@@ -290,7 +314,11 @@ mod tests {
         let (tap, rx) = NetTap::new(64, 2048);
         let pump = spawn_pump(obs.clone(), rx);
         let tap = tap.for_identity(id());
-        let f = build::udp_v4((Ipv4Addr::new(10, 0, 0, 1), 5000), (Ipv4Addr::new(10, 0, 0, 2), 6000), b"hi");
+        let f = build::udp_v4(
+            (Ipv4Addr::new(10, 0, 0, 1), 5000),
+            (Ipv4Addr::new(10, 0, 0, 2), 6000),
+            b"hi",
+        );
         for _ in 0..5 {
             tap.tap(Direction::FromGuest, Verdict::Allowed, &f);
         }
@@ -317,8 +345,17 @@ mod tests {
     #[test]
     fn frame_source_drains_into_observer() {
         let obs = Observer::new(ObserverConfig::default());
-        let f = build::udp_v4((Ipv4Addr::new(10, 0, 0, 1), 5000), (Ipv4Addr::new(10, 0, 0, 2), 6000), b"hi");
-        let meta = FrameMeta { identity: id(), ts_us: 1, direction: Direction::FromGuest, verdict: Verdict::Allowed };
+        let f = build::udp_v4(
+            (Ipv4Addr::new(10, 0, 0, 1), 5000),
+            (Ipv4Addr::new(10, 0, 0, 2), 6000),
+            b"hi",
+        );
+        let meta = FrameMeta {
+            identity: id(),
+            ts_us: 1,
+            direction: Direction::FromGuest,
+            verdict: Verdict::Allowed,
+        };
         let mut src = Replay(vec![(f.clone(), meta.clone()), (f, meta)]);
         assert_eq!(drain(&mut src, &obs).unwrap(), 2);
         assert_eq!(obs.counters().frames, 2);

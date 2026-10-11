@@ -45,8 +45,8 @@ mod v6;
 pub mod wire;
 
 pub use config::{
-    Cidr, Cidr6, Decision, EgressPolicy, GuestFamily, PortForward, Proto, UserNetConfig, is_non_unicast,
-    is_non_unicast6, is_private, is_private6,
+    Cidr, Cidr6, Decision, EgressPolicy, GuestFamily, PortForward, Proto, UserNetConfig,
+    is_non_unicast, is_non_unicast6, is_private, is_private6,
 };
 
 use serde::Serialize;
@@ -309,7 +309,10 @@ impl UserNet {
         let mut tmp = path.as_os_str().to_owned();
         tmp.push(".tmp");
         let tmp = std::path::PathBuf::from(tmp);
-        std::fs::write(&tmp, serde_json::to_vec_pretty(&file).map_err(io::Error::other)?)?;
+        std::fs::write(
+            &tmp,
+            serde_json::to_vec_pretty(&file).map_err(io::Error::other)?,
+        )?;
         std::fs::rename(&tmp, path)
     }
 
@@ -324,7 +327,11 @@ impl UserNet {
             fwd_tasks.push(
                 tokio::spawn(async move {
                     while let Ok((stream, peer)) = l.accept().await {
-                        if tx.send(Ev::ForwardAccepted { idx, stream, peer }).await.is_err() {
+                        if tx
+                            .send(Ev::ForwardAccepted { idx, stream, peer })
+                            .await
+                            .is_err()
+                        {
                             break;
                         }
                     }
@@ -428,14 +435,38 @@ enum DnsVia {
 }
 
 enum Ev {
-    TcpConnected { id: u64, stream: TcpStream },
-    TcpConnectFailed { id: u64, reason: String },
-    TcpData { id: u64, data: Vec<u8> },
-    TcpHostEof { id: u64 },
-    TcpHostErr { id: u64 },
-    ForwardAccepted { idx: usize, stream: TcpStream, peer: SocketAddr },
-    UdpReply { key: FKey, data: Vec<u8> },
-    UdpFwdIn { idx: usize, peer: SocketAddr, data: Vec<u8> },
+    TcpConnected {
+        id: u64,
+        stream: TcpStream,
+    },
+    TcpConnectFailed {
+        id: u64,
+        reason: String,
+    },
+    TcpData {
+        id: u64,
+        data: Vec<u8>,
+    },
+    TcpHostEof {
+        id: u64,
+    },
+    TcpHostErr {
+        id: u64,
+    },
+    ForwardAccepted {
+        idx: usize,
+        stream: TcpStream,
+        peer: SocketAddr,
+    },
+    UdpReply {
+        key: FKey,
+        data: Vec<u8>,
+    },
+    UdpFwdIn {
+        idx: usize,
+        peer: SocketAddr,
+        data: Vec<u8>,
+    },
     DnsReply {
         via: DnsVia,
         local_ip: IpAddr,
@@ -444,7 +475,10 @@ enum Ev {
         query: Vec<u8>,
         answer: Option<Vec<u8>>,
     },
-    IcmpReply { key: icmp::IcmpKey, data: Vec<u8> },
+    IcmpReply {
+        key: icmp::IcmpKey,
+        data: Vec<u8>,
+    },
 }
 
 /// Flow identity: guest address and port, remote address and port.
@@ -541,7 +575,11 @@ type DenyKey = (Proto, SocketAddr, SocketAddr);
 
 /// Decides whether a `deny` event for `key` is published now. `Some(n)`: publish it, `n` identical denials were
 /// suppressed since the previous one. `None`: within [`DENY_EVENT_INTERVAL`] of the last event, counted.
-fn deny_gate(seen: &mut HashMap<DenyKey, (Instant, u32)>, key: DenyKey, now: Instant) -> Option<u32> {
+fn deny_gate(
+    seen: &mut HashMap<DenyKey, (Instant, u32)>,
+    key: DenyKey,
+    now: Instant,
+) -> Option<u32> {
     if let Some((last, n)) = seen.get_mut(&key) {
         if now.saturating_duration_since(*last) < DENY_EVENT_INTERVAL {
             *n = n.saturating_add(1);
@@ -570,12 +608,7 @@ fn now_ms() -> u64 {
         .map_or(0, |d| d.as_millis() as u64)
 }
 
-async fn tcp_reader(
-    id: u64,
-    mut r: OwnedReadHalf,
-    budget: Arc<Semaphore>,
-    ev: mpsc::Sender<Ev>,
-) {
+async fn tcp_reader(id: u64, mut r: OwnedReadHalf, budget: Arc<Semaphore>, ev: mpsc::Sender<Ev>) {
     loop {
         let Ok(permit) = budget.acquire_many(CHUNK).await else {
             return;
@@ -660,7 +693,10 @@ async fn query_upstream_tcp(up: SocketAddr, q: &[u8]) -> Option<Vec<u8>> {
         s.read_exact(&mut buf).await.ok()?;
         (buf.len() >= 12 && buf[..2] == q[..2]).then_some(buf)
     };
-    tokio::time::timeout(Duration::from_secs(5), r).await.ok().flatten()
+    tokio::time::timeout(Duration::from_secs(5), r)
+        .await
+        .ok()
+        .flatten()
 }
 
 async fn resolve(upstreams: &[SocketAddr], q: &[u8]) -> Option<Vec<u8>> {
@@ -757,7 +793,11 @@ impl Engine {
         match (src, dst) {
             (IpAddr::V4(s), IpAddr::V4(d)) => {
                 let ip = wire::build_ipv4_with(s, d, proto, l4, self.next_ip_id(), df);
-                let dst_mac = if d.is_broadcast() { BROADCAST } else { self.guest_dst_mac() };
+                let dst_mac = if d.is_broadcast() {
+                    BROADCAST
+                } else {
+                    self.guest_dst_mac()
+                };
                 if ip.len() <= mtu {
                     self.emit_frame(wire::ETH_IPV4, dst_mac, &ip);
                 } else if df {
@@ -797,7 +837,14 @@ impl Engine {
         }
     }
 
-    fn log(&self, kind: FlowKind, proto: Proto, dir: Direction, guest: SocketAddr, remote: SocketAddr) -> FlowEvent {
+    fn log(
+        &self,
+        kind: FlowKind,
+        proto: Proto,
+        dir: Direction,
+        guest: SocketAddr,
+        remote: SocketAddr,
+    ) -> FlowEvent {
         FlowEvent {
             ts_ms: now_ms(),
             kind,
@@ -899,7 +946,9 @@ impl Engine {
     }
 
     fn on_arp(&mut self, src_mac: Mac, p: &[u8]) {
-        let Some((op, smac, sip, tip)) = wire::parse_arp(p) else { return };
+        let Some((op, smac, sip, tip)) = wire::parse_arp(p) else {
+            return;
+        };
         if op != 1 || smac != src_mac {
             return;
         }
@@ -972,7 +1021,13 @@ impl Engine {
         let c = wire::checksum(&m);
         m[2..4].copy_from_slice(&c.to_be_bytes());
         self.mark_dropped();
-        self.send_ip(self.cfg.gateway_ip.into(), guest.into(), wire::PROTO_ICMP, &m, false);
+        self.send_ip(
+            self.cfg.gateway_ip.into(),
+            guest.into(),
+            wire::PROTO_ICMP,
+            &m,
+            false,
+        );
     }
 
     fn on_icmp(&mut self, ip: &wire::Ipv4<'_>) {
@@ -1012,7 +1067,12 @@ impl Engine {
         };
         let r = dhcp::reply(&self.cfg, &m, kind);
         let u = wire::build_udp(self.cfg.gateway_ip, Ipv4Addr::BROADCAST, 67, 68, &r);
-        let ip = wire::build_ipv4(self.cfg.gateway_ip, Ipv4Addr::BROADCAST, wire::PROTO_UDP, &u);
+        let ip = wire::build_ipv4(
+            self.cfg.gateway_ip,
+            Ipv4Addr::BROADCAST,
+            wire::PROTO_UDP,
+            &u,
+        );
         self.emit_frame(wire::ETH_IPV4, BROADCAST, &ip);
     }
 
@@ -1020,8 +1080,14 @@ impl Engine {
         loop {
             let p = self.next_port;
             self.next_port = if p == 65535 { 49152 } else { p + 1 };
-            let (gw, gw6) = (IpAddr::V4(self.cfg.gateway_ip), IpAddr::V6(self.cfg.gateway_ip6()));
-            let used = self.keys.keys().any(|k| (k.r == gw || k.r == gw6) && k.rp == p)
+            let (gw, gw6) = (
+                IpAddr::V4(self.cfg.gateway_ip),
+                IpAddr::V6(self.cfg.gateway_ip6()),
+            );
+            let used = self
+                .keys
+                .keys()
+                .any(|k| (k.r == gw || k.r == gw6) && k.rp == p)
                 || self.udp_rev.contains_key(&p);
             if !used {
                 return p;
@@ -1051,7 +1117,12 @@ impl Engine {
         if non_unicast {
             return;
         }
-        let key = FKey { g: src, gp: u.sport, r: dst, rp: u.dport };
+        let key = FKey {
+            g: src,
+            gp: u.sport,
+            r: dst,
+            rp: u.dport,
+        };
         let now = Instant::now();
         if let Some(f) = self.udp.get_mut(&key) {
             f.last = now;
@@ -1069,7 +1140,11 @@ impl Engine {
         }
         // Sends go through the std socket (a fresh tokio socket reports WouldBlock to `try_send` until its
         // first readiness event); a clone feeds the receive task.
-        let bind = if target.is_ipv4() { "0.0.0.0:0" } else { "[::]:0" };
+        let bind = if target.is_ipv4() {
+            "0.0.0.0:0"
+        } else {
+            "[::]:0"
+        };
         let socks = std::net::UdpSocket::bind(bind).and_then(|s| {
             s.set_nonblocking(true)?;
             s.connect(target)?;
@@ -1079,7 +1154,14 @@ impl Engine {
         let (sock, r) = match socks {
             Ok((s, r)) => (Arc::new(s), r),
             Err(e) => {
-                return self.deny(Proto::Udp, src, u.sport, dst, u.dport, &format!("socket: {e}"));
+                return self.deny(
+                    Proto::Udp,
+                    src,
+                    u.sport,
+                    dst,
+                    u.dport,
+                    &format!("socket: {e}"),
+                );
             }
         };
         let _ = sock.send(u.payload);
@@ -1087,7 +1169,14 @@ impl Engine {
         let task = tokio::spawn(async move {
             let mut buf = vec![0u8; 65535];
             while let Ok(n) = r.recv(&mut buf).await {
-                if tx.send(Ev::UdpReply { key, data: buf[..n].to_vec() }).await.is_err() {
+                if tx
+                    .send(Ev::UdpReply {
+                        key,
+                        data: buf[..n].to_vec(),
+                    })
+                    .await
+                    .is_err()
+                {
                     break;
                 }
             }
@@ -1162,15 +1251,31 @@ impl Engine {
     // ----- DNS ---------------------------------------------------------------------------------------------
 
     /// Deliver a gateway-generated answer (NXDOMAIN, SERVFAIL) to the guest.
-    fn dns_respond(&mut self, via: DnsVia, local_ip: IpAddr, guest: IpAddr, gport: u16, reply: &[u8]) {
+    fn dns_respond(
+        &mut self,
+        via: DnsVia,
+        local_ip: IpAddr,
+        guest: IpAddr,
+        gport: u16,
+        reply: &[u8],
+    ) {
         match via {
             DnsVia::Udp => self.send_udp(local_ip, 53, guest, gport, reply),
             DnsVia::Tcp(id) => self.dns_tcp_push(id, reply, false),
         }
     }
 
-    fn handle_dns(&mut self, via: DnsVia, local_ip: IpAddr, guest: IpAddr, gport: u16, msg: Vec<u8>) {
-        let Some(q) = dns::parse_query(&msg) else { return };
+    fn handle_dns(
+        &mut self,
+        via: DnsVia,
+        local_ip: IpAddr,
+        guest: IpAddr,
+        gport: u16,
+        msg: Vec<u8>,
+    ) {
+        let Some(q) = dns::parse_query(&msg) else {
+            return;
+        };
         let proto = match via {
             DnsVia::Udp => Proto::Udp,
             DnsVia::Tcp(_) => Proto::Tcp,
@@ -1179,14 +1284,26 @@ impl Engine {
         let remote = SocketAddr::new(local_ip, 53);
         if let Decision::Deny(why) = self.cfg.egress.check_domain(&q.name) {
             self.tap_commit(TAP_VERDICT_DENIED);
-            let mut e = self.log(FlowKind::DnsDeny, proto, Direction::Outbound, guest_sa, remote);
+            let mut e = self.log(
+                FlowKind::DnsDeny,
+                proto,
+                Direction::Outbound,
+                guest_sa,
+                remote,
+            );
             e.name = Some(q.name.clone());
             e.reason = Some(why.into());
             self.publish(e);
             let r = dns::build_reply(&msg, &q, 3, false);
             return self.dns_respond(via, local_ip, guest, gport, &r);
         }
-        let mut e = self.log(FlowKind::DnsQuery, proto, Direction::Outbound, guest_sa, remote);
+        let mut e = self.log(
+            FlowKind::DnsQuery,
+            proto,
+            Direction::Outbound,
+            guest_sa,
+            remote,
+        );
         e.name = Some(q.name.clone());
         self.publish(e);
         let Ok(permit) = self.dns_sem.clone().try_acquire_owned() else {
@@ -1222,7 +1339,9 @@ impl Engine {
     /// Queue a length-prefixed answer on a DNS-over-TCP flow; `was_pending` when it completes an upstream query.
     fn dns_tcp_push(&mut self, id: u64, reply: &[u8], was_pending: bool) {
         let now = Instant::now();
-        let Some(f) = self.flows.get_mut(&id) else { return };
+        let Some(f) = self.flows.get_mut(&id) else {
+            return;
+        };
         let Some(d) = f.dns.as_mut() else { return };
         if was_pending {
             d.pending = d.pending.saturating_sub(1);
@@ -1241,7 +1360,9 @@ impl Engine {
         let mut msgs = Vec::new();
         let (local_ip, guest, gport);
         {
-            let Some(f) = self.flows.get_mut(&id) else { return };
+            let Some(f) = self.flows.get_mut(&id) else {
+                return;
+            };
             let Some(d) = f.dns.as_mut() else { return };
             if let Some(data) = data {
                 d.buf.extend_from_slice(&data);
@@ -1287,9 +1408,15 @@ impl Engine {
             return;
         }
         let o = if t.flags & ACK != 0 {
-            TcpOut { seq: t.ack, flags: RST, ..Default::default() }
+            TcpOut {
+                seq: t.ack,
+                flags: RST,
+                ..Default::default()
+            }
         } else {
-            let len = t.payload.len() as u32 + u32::from(t.flags & SYN != 0) + u32::from(t.flags & FIN != 0);
+            let len = t.payload.len() as u32
+                + u32::from(t.flags & SYN != 0)
+                + u32::from(t.flags & FIN != 0);
             TcpOut {
                 seq: 0,
                 ack: t.seq.wrapping_add(len),
@@ -1302,12 +1429,20 @@ impl Engine {
     }
 
     fn on_tcp(&mut self, src: IpAddr, dst: IpAddr, t: &wire::Tcp<'_>) {
-        let key = FKey { g: src, gp: t.sport, r: dst, rp: t.dport };
+        let key = FKey {
+            g: src,
+            gp: t.sport,
+            r: dst,
+            rp: t.dport,
+        };
         let now = Instant::now();
         if let Some(&id) = self.keys.get(&key) {
-            let Some(f) = self.flows.get_mut(&id) else { return };
+            let Some(f) = self.flows.get_mut(&id) else {
+                return;
+            };
             let is_dns = f.dns.is_some();
-            let can = is_dns || (f.to_host.is_some() && f.queued.load(Ordering::Relaxed) < MAX_QUEUED_TO_HOST);
+            let can = is_dns
+                || (f.to_host.is_some() && f.queued.load(Ordering::Relaxed) < MAX_QUEUED_TO_HOST);
             let mut out = Vec::new();
             let res = f.conn.on_segment(t, can, now, &mut out);
             let mut dns_data = None;
@@ -1365,8 +1500,14 @@ impl Engine {
             let r = tokio::time::timeout(to, TcpStream::connect(target)).await;
             let m = match r {
                 Ok(Ok(stream)) => Ev::TcpConnected { id, stream },
-                Ok(Err(e)) => Ev::TcpConnectFailed { id, reason: e.to_string() },
-                Err(_) => Ev::TcpConnectFailed { id, reason: "connect timeout".into() },
+                Ok(Err(e)) => Ev::TcpConnectFailed {
+                    id,
+                    reason: e.to_string(),
+                },
+                Err(_) => Ev::TcpConnectFailed {
+                    id,
+                    reason: "connect timeout".into(),
+                },
             };
             let _ = ev.send(m).await;
         })
@@ -1428,22 +1569,33 @@ impl Engine {
         let _ = stream.set_nodelay(true);
         let (r, w) = stream.into_split();
         let (tx, rx) = mpsc::unbounded_channel();
-        let Some(f) = self.flows.get_mut(&id) else { return };
+        let Some(f) = self.flows.get_mut(&id) else {
+            return;
+        };
         f.to_host = Some(tx);
         f.tasks.push(
             tokio::spawn(tcp_reader(id, r, f.budget.clone(), self.ev_tx.clone())).abort_handle(),
         );
         f.tasks.push(
-            tokio::spawn(tcp_writer(id, w, rx, f.queued.clone(), self.ev_tx.clone())).abort_handle(),
+            tokio::spawn(tcp_writer(id, w, rx, f.queued.clone(), self.ev_tx.clone()))
+                .abort_handle(),
         );
     }
 
     fn remove_flow(&mut self, id: u64) {
-        let Some(f) = self.flows.remove(&id) else { return };
+        let Some(f) = self.flows.remove(&id) else {
+            return;
+        };
         self.keys.remove(&f.key);
         if f.opened {
             let remote = SocketAddr::new(f.key.r, f.key.rp);
-            let mut e = self.log(FlowKind::Close, Proto::Tcp, f.dir, SocketAddr::new(f.key.g, f.key.gp), remote);
+            let mut e = self.log(
+                FlowKind::Close,
+                Proto::Tcp,
+                f.dir,
+                SocketAddr::new(f.key.g, f.key.gp),
+                remote,
+            );
             e.bytes_tx = f.conn.bytes_up;
             e.bytes_rx = f.conn.bytes_down;
             self.publish(e);
@@ -1477,7 +1629,9 @@ impl Engine {
                     return;
                 }
                 self.attach_host_stream(id, stream);
-                let Some(f) = self.flows.get_mut(&id) else { return };
+                let Some(f) = self.flows.get_mut(&id) else {
+                    return;
+                };
                 f.opened = true;
                 let mut out = Vec::new();
                 f.conn.host_connected(now, &mut out);
@@ -1488,7 +1642,9 @@ impl Engine {
                 }
             }
             Ev::TcpConnectFailed { id, reason } => {
-                let Some(f) = self.flows.get_mut(&id) else { return };
+                let Some(f) = self.flows.get_mut(&id) else {
+                    return;
+                };
                 let key = f.key;
                 let mut out = Vec::new();
                 f.conn.rst(&mut out);
@@ -1506,21 +1662,27 @@ impl Engine {
                 self.remove_flow(id);
             }
             Ev::TcpData { id, data } => {
-                let Some(f) = self.flows.get_mut(&id) else { return };
+                let Some(f) = self.flows.get_mut(&id) else {
+                    return;
+                };
                 let mut out = Vec::new();
                 f.conn.push_host_data(&data, now, &mut out);
                 let key = f.key;
                 self.flush_tcp(key, out);
             }
             Ev::TcpHostEof { id } => {
-                let Some(f) = self.flows.get_mut(&id) else { return };
+                let Some(f) = self.flows.get_mut(&id) else {
+                    return;
+                };
                 let mut out = Vec::new();
                 f.conn.host_eof(now, &mut out);
                 let key = f.key;
                 self.flush_tcp(key, out);
             }
             Ev::TcpHostErr { id } => {
-                let Some(f) = self.flows.get_mut(&id) else { return };
+                let Some(f) = self.flows.get_mut(&id) else {
+                    return;
+                };
                 let mut out = Vec::new();
                 f.conn.rst(&mut out);
                 let key = f.key;
@@ -1578,7 +1740,9 @@ impl Engine {
                 }
             }
             Ev::UdpReply { key, data } => {
-                let Some(f) = self.udp.get_mut(&key) else { return };
+                let Some(f) = self.udp.get_mut(&key) else {
+                    return;
+                };
                 f.last = now;
                 f.down += data.len() as u64;
                 self.send_udp(key.r, key.rp, key.g, key.gp, &data);
@@ -1610,8 +1774,17 @@ impl Engine {
                 self.udp_rev.insert(gw_port, (idx, peer, now));
                 self.send_udp(gw_ip, gw_port, guest_ip, gport, &data);
             }
-            Ev::DnsReply { via, local_ip, guest, guest_port, query, answer } => {
-                let Some(q) = dns::parse_query(&query) else { return };
+            Ev::DnsReply {
+                via,
+                local_ip,
+                guest,
+                guest_port,
+                query,
+                answer,
+            } => {
+                let Some(q) = dns::parse_query(&query) else {
+                    return;
+                };
                 let reply = match answer {
                     None => dns::build_reply(&query, &q, 2, false), // SERVFAIL
                     Some(a) => {
@@ -1655,7 +1828,11 @@ impl Engine {
         let mut work = Vec::new();
         for (id, f) in self.flows.iter_mut() {
             let mut out = Vec::new();
-            let idle = if f.dns.is_some() { idle.min(DNS_TCP_IDLE) } else { idle };
+            let idle = if f.dns.is_some() {
+                idle.min(DNS_TCP_IDLE)
+            } else {
+                idle
+            };
             f.conn.tick(now, idle, &mut out);
             let closed = f.conn.state == State::Closed;
             if !out.is_empty() || closed {
@@ -1689,7 +1866,8 @@ impl Engine {
                 self.publish(e);
             }
         }
-        self.udp_rev.retain(|_, (_, _, last)| now.duration_since(*last) <= udp_idle);
+        self.udp_rev
+            .retain(|_, (_, _, last)| now.duration_since(*last) <= udp_idle);
         let rev = &self.udp_rev;
         self.udp_sessions.retain(|_, p| rev.contains_key(p));
         self.learned.retain(|_, exp| *exp > now);

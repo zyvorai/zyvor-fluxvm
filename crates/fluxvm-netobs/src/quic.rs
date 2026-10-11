@@ -29,13 +29,13 @@ pub const VERSION_2: u32 = 0x6b33_43cf;
 
 /// RFC 9001 section 5.2.
 const SALT_V1: [u8; 20] = [
-    0x38, 0x76, 0x2c, 0xf7, 0xf5, 0x59, 0x34, 0xb3, 0x4d, 0x17, 0x9a, 0xe6, 0xa4, 0xc8, 0x0c, 0xad, 0xcc, 0xbb,
-    0x7f, 0x0a,
+    0x38, 0x76, 0x2c, 0xf7, 0xf5, 0x59, 0x34, 0xb3, 0x4d, 0x17, 0x9a, 0xe6, 0xa4, 0xc8, 0x0c, 0xad,
+    0xcc, 0xbb, 0x7f, 0x0a,
 ];
 /// RFC 9369 section 3.3.1.
 const SALT_V2: [u8; 20] = [
-    0x0d, 0xed, 0xe3, 0xde, 0xf7, 0x00, 0xa6, 0xdb, 0x81, 0x93, 0x81, 0xbe, 0x6e, 0x26, 0x9d, 0xcb, 0xf9, 0xbd,
-    0x2e, 0xd9,
+    0x0d, 0xed, 0xe3, 0xde, 0xf7, 0x00, 0xa6, 0xdb, 0x81, 0x93, 0x81, 0xbe, 0x6e, 0x26, 0x9d, 0xcb,
+    0xf9, 0xbd, 0x2e, 0xd9,
 ];
 
 /// Most Initial packets decoded per flow, and the CRYPTO bytes kept (a hello with post-quantum key shares is
@@ -113,7 +113,13 @@ pub fn parse_initial_header(b: &[u8]) -> Option<InitialHeader<'_>> {
     if length < 1 + 16 || p.checked_add(length)? > b.len() {
         return None;
     }
-    Some(InitialHeader { version, dcid, scid, pn_offset: p, length })
+    Some(InitialHeader {
+        version,
+        dcid,
+        scid,
+        pn_offset: p,
+        length,
+    })
 }
 
 /// The packet-protection material for client Initials.
@@ -153,7 +159,11 @@ pub fn client_initial_keys(version: u32, dcid: &[u8]) -> Option<InitialKeys> {
     let mut client_secret = [0u8; 32];
     expand_label(&initial, "client in", &mut client_secret)?;
     let client = Hkdf::<Sha256>::from_prk(&client_secret).ok()?;
-    let mut k = InitialKeys { key: [0; 16], iv: [0; 12], hp: [0; 16] };
+    let mut k = InitialKeys {
+        key: [0; 16],
+        iv: [0; 12],
+        hp: [0; 16],
+    };
     expand_label(&client, key_l, &mut k.key)?;
     expand_label(&client, iv_l, &mut k.iv)?;
     expand_label(&client, hp_l, &mut k.hp)?;
@@ -182,7 +192,10 @@ pub struct DecryptedInitial {
 /// Removes header and packet protection from the Initial packet at the start of `datagram`. `key_dcid` is the
 /// connection ID the keys derive from when it differs from the packet's own Destination Connection ID (a client
 /// keeps deriving from its first DCID after it has seen the server's).
-pub fn decrypt_client_initial(datagram: &[u8], key_dcid: Option<&[u8]>) -> Option<DecryptedInitial> {
+pub fn decrypt_client_initial(
+    datagram: &[u8],
+    key_dcid: Option<&[u8]>,
+) -> Option<DecryptedInitial> {
     let h = parse_initial_header(datagram)?;
     let keys = client_initial_keys(h.version, key_dcid.unwrap_or(h.dcid))?;
     let sample_at = h.pn_offset + 4;
@@ -206,8 +219,20 @@ pub fn decrypt_client_initial(datagram: &[u8], key_dcid: Option<&[u8]>) -> Optio
         nonce[4 + i] ^= b;
     }
     let aead = Aes128Gcm::new_from_slice(&keys.key).ok()?;
-    let plain = aead.decrypt(GenericArray::from_slice(&nonce), Payload { msg: ct, aad: &header }).ok()?;
-    Some(DecryptedInitial { packet_number: pn, crypto: crypto_frames(&plain), packet_len: h.packet_len() })
+    let plain = aead
+        .decrypt(
+            GenericArray::from_slice(&nonce),
+            Payload {
+                msg: ct,
+                aad: &header,
+            },
+        )
+        .ok()?;
+    Some(DecryptedInitial {
+        packet_number: pn,
+        crypto: crypto_frames(&plain),
+        packet_len: h.packet_len(),
+    })
 }
 
 /// Walks the frames of an Initial packet and returns its CRYPTO frames. Stops at the first frame type that cannot
@@ -247,9 +272,13 @@ fn crypto_frames(p: &[u8]) -> Vec<(u64, Vec<u8>)> {
                 }
             }
             0x06 => {
-                let (Some(off), Some(len)) = (rd(&mut i), rd(&mut i)) else { break };
+                let (Some(off), Some(len)) = (rd(&mut i), rd(&mut i)) else {
+                    break;
+                };
                 let Ok(len) = usize::try_from(len) else { break };
-                let Some(data) = i.checked_add(len).and_then(|e| p.get(i..e)) else { break };
+                let Some(data) = i.checked_add(len).and_then(|e| p.get(i..e)) else {
+                    break;
+                };
                 if out.len() < 16 {
                     out.push((off, data.to_vec()));
                 }
@@ -279,7 +308,13 @@ impl Default for QuicFlow {
 
 impl QuicFlow {
     pub fn new() -> Self {
-        Self { dcid: [0; MAX_CID], dcid_len: 0, crypto: Stream::with_base(0), packets: 0, finished: false }
+        Self {
+            dcid: [0; MAX_CID],
+            dcid_len: 0,
+            crypto: Stream::with_base(0),
+            packets: 0,
+            finished: false,
+        }
     }
 
     pub fn mem(&self) -> usize {
@@ -305,8 +340,12 @@ impl QuicFlow {
         let mut at = 0;
         // An Initial may be followed by coalesced packets (Handshake, 0-RTT, or another Initial).
         for _ in 0..3 {
-            let Some(rest) = datagram.get(at..) else { break };
-            let Some(h) = parse_initial_header(rest) else { break };
+            let Some(rest) = datagram.get(at..) else {
+                break;
+            };
+            let Some(h) = parse_initial_header(rest) else {
+                break;
+            };
             if self.packets >= MAX_PACKETS_PER_FLOW {
                 self.finish();
                 return (None, dropped);
@@ -317,10 +356,14 @@ impl QuicFlow {
             }
             self.packets += 1;
             let key_dcid = self.dcid[..self.dcid_len as usize].to_vec();
-            let Some(d) = decrypt_client_initial(rest, Some(&key_dcid)) else { break };
+            let Some(d) = decrypt_client_initial(rest, Some(&key_dcid)) else {
+                break;
+            };
             at += d.packet_len;
             for (off, data) in &d.crypto {
-                let Ok(off) = u32::try_from(*off) else { continue };
+                let Ok(off) = u32::try_from(*off) else {
+                    continue;
+                };
                 match self.crypto.push(off, data, MAX_CRYPTO_BYTES, 8, room) {
                     Push::Dropped(_) => dropped = true,
                     Push::Appended(_) | Push::Buffered | Push::Ignored => {}
@@ -366,7 +409,14 @@ pub mod fixtures {
     /// Builds a protected client Initial whose payload is `frames` padded with PADDING frames so the packet is
     /// `pad_to` bytes in total (use 1200 for a datagram that satisfies the client minimum). The packet number is
     /// encoded in 4 bytes.
-    pub fn client_initial(version: u32, dcid: &[u8], scid: &[u8], pn: u32, frames: &[u8], pad_to: usize) -> Vec<u8> {
+    pub fn client_initial(
+        version: u32,
+        dcid: &[u8],
+        scid: &[u8],
+        pn: u32,
+        frames: &[u8],
+        pad_to: usize,
+    ) -> Vec<u8> {
         client_initial_keyed(version, dcid, dcid, scid, pn, frames, pad_to)
     }
 
@@ -405,7 +455,15 @@ pub mod fixtures {
             nonce[4 + i] ^= b;
         }
         let aead = Aes128Gcm::new_from_slice(&keys.key).unwrap();
-        let ct = aead.encrypt(GenericArray::from_slice(&nonce), Payload { msg: &plain, aad: &hdr }).unwrap();
+        let ct = aead
+            .encrypt(
+                GenericArray::from_slice(&nonce),
+                Payload {
+                    msg: &plain,
+                    aad: &hdr,
+                },
+            )
+            .unwrap();
         let mut pkt = hdr;
         pkt.extend_from_slice(&ct);
         let sample: [u8; 16] = pkt[pn_offset + 4..pn_offset + 20].try_into().unwrap();
@@ -441,7 +499,10 @@ mod tests {
 
     fn unhex(s: &str) -> Vec<u8> {
         let s: String = s.split_whitespace().collect();
-        (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap()).collect()
+        (0..s.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+            .collect()
     }
 
     // ---- RFC 9001 Appendix A.1/A.2: the client Initial. -------------------------------------------------------
@@ -481,14 +542,21 @@ mod tests {
         // Build the packet the RFC describes: DCID 8394c8f03e515708, empty SCID, packet number 2, the CRYPTO
         // frame above padded to a 1200-byte datagram.
         let crypto = unhex(A_CRYPTO);
-        assert_eq!(crypto.len(), 4 + 0xf1, "CRYPTO frame: type + offset + 2-byte length + 241 bytes");
+        assert_eq!(
+            crypto.len(),
+            4 + 0xf1,
+            "CRYPTO frame: type + offset + 2-byte length + 241 bytes"
+        );
         let pkt = client_initial(VERSION_1, &unhex(A_DCID), &[], 2, &crypto, 1200);
         assert_eq!(pkt.len(), 1200);
         // The protected header and the sample (first ciphertext bytes) match the RFC.
         assert_eq!(pkt[..22].to_vec(), unhex(A_PROTECTED_HEADER));
         assert_eq!(pkt[22..38].to_vec(), unhex(A_SAMPLE));
         // And the last 16 bytes (the AEAD tag) are the RFC's.
-        assert_eq!(pkt[1184..].to_vec(), unhex("e221af44860018ab0856972e194cd934"));
+        assert_eq!(
+            pkt[1184..].to_vec(),
+            unhex("e221af44860018ab0856972e194cd934")
+        );
 
         // Decrypt it with the production path.
         let d = decrypt_client_initial(&pkt, None).unwrap();
@@ -506,7 +574,11 @@ mod tests {
         assert_eq!(hello.sni.as_deref(), Some("example.com"));
         assert_eq!(hello.alpn, vec![b"alpn".to_vec()]);
         // 2 cipher suites, 11 extensions, first ALPN "alpn" -> "an".
-        assert!(hello.ja4_for('q').starts_with("q13d0211an_"), "{}", hello.ja4_for('q'));
+        assert!(
+            hello.ja4_for('q').starts_with("q13d0211an_"),
+            "{}",
+            hello.ja4_for('q')
+        );
     }
 
     // RFC 9369 Appendix A.1: QUIC v2 Initial keys for the same DCID.
@@ -520,8 +592,16 @@ mod tests {
 
     #[test]
     fn v2_roundtrip_through_the_driver() {
-        let hello = handshake_client_hello(&[tls::ext_sni("v2.example.org"), tls::ext_alpn(&["h3"])]);
-        let pkt = client_initial(VERSION_2, &[1, 2, 3, 4, 5, 6, 7, 8], &[9, 9], 0, &crypto_frame(0, &hello), 1252);
+        let hello =
+            handshake_client_hello(&[tls::ext_sni("v2.example.org"), tls::ext_alpn(&["h3"])]);
+        let pkt = client_initial(
+            VERSION_2,
+            &[1, 2, 3, 4, 5, 6, 7, 8],
+            &[9, 9],
+            0,
+            &crypto_frame(0, &hello),
+            1252,
+        );
         let h = parse_initial_header(&pkt).unwrap();
         assert_eq!((h.version, h.dcid.len(), h.scid.len()), (VERSION_2, 8, 2));
         let (hello, _) = QuicFlow::new().on_datagram(&pkt, usize::MAX);
@@ -532,7 +612,8 @@ mod tests {
 
     #[test]
     fn hello_split_over_two_crypto_frames_and_two_packets() {
-        let hello = handshake_client_hello(&[tls::ext_sni("split.example.net"), tls::ext_alpn(&["h3"])]);
+        let hello =
+            handshake_client_hello(&[tls::ext_sni("split.example.net"), tls::ext_alpn(&["h3"])]);
         let cut = hello.len() / 2;
         let dcid = [7u8; 8];
         // Two CRYPTO frames in one packet, delivered out of order within it, plus the second half again in a
@@ -543,8 +624,22 @@ mod tests {
         let (h, _) = QuicFlow::new().on_datagram(&one, usize::MAX);
         assert_eq!(h.unwrap().sni.as_deref(), Some("split.example.net"));
 
-        let p1 = client_initial(VERSION_1, &dcid, &[], 0, &crypto_frame(cut as u64, &hello[cut..]), 1200);
-        let p2 = client_initial(VERSION_1, &dcid, &[], 1, &crypto_frame(0, &hello[..cut]), 1200);
+        let p1 = client_initial(
+            VERSION_1,
+            &dcid,
+            &[],
+            0,
+            &crypto_frame(cut as u64, &hello[cut..]),
+            1200,
+        );
+        let p2 = client_initial(
+            VERSION_1,
+            &dcid,
+            &[],
+            1,
+            &crypto_frame(0, &hello[..cut]),
+            1200,
+        );
         let mut q = QuicFlow::new();
         assert_eq!(q.on_datagram(&p1, usize::MAX).0, None);
         assert!(q.mem() > 0);
@@ -559,7 +654,14 @@ mod tests {
         let hello = handshake_client_hello(&[tls::ext_sni("late.example.com")]);
         let cut = hello.len() / 2;
         let first_dcid = [3u8; 8];
-        let p1 = client_initial(VERSION_1, &first_dcid, &[], 0, &crypto_frame(0, &hello[..cut]), 1200);
+        let p1 = client_initial(
+            VERSION_1,
+            &first_dcid,
+            &[],
+            0,
+            &crypto_frame(0, &hello[..cut]),
+            1200,
+        );
         let mut q = QuicFlow::new();
         assert_eq!(q.on_datagram(&p1, usize::MAX).0, None);
         // The second packet names a different DCID (the server's chosen connection ID) but is still protected with
@@ -573,8 +675,14 @@ mod tests {
             &crypto_frame(cut as u64, &hello[cut..]),
             1200,
         );
-        assert!(decrypt_client_initial(&p2, None).is_none(), "own DCID derives the wrong keys");
-        assert_eq!(q.on_datagram(&p2, usize::MAX).0.unwrap().sni.as_deref(), Some("late.example.com"));
+        assert!(
+            decrypt_client_initial(&p2, None).is_none(),
+            "own DCID derives the wrong keys"
+        );
+        assert_eq!(
+            q.on_datagram(&p2, usize::MAX).0.unwrap().sni.as_deref(),
+            Some("late.example.com")
+        );
     }
 
     #[test]
@@ -627,11 +735,21 @@ mod tests {
 
     #[test]
     fn garbage_never_panics() {
-        let hello = handshake_client_hello(&[tls::ext_sni("fuzz.example.com"), tls::ext_alpn(&["h3"])]);
-        let base = client_initial(VERSION_1, &[1, 2, 3, 4, 5, 6, 7, 8], &[1], 0, &crypto_frame(0, &hello), 1200);
+        let hello =
+            handshake_client_hello(&[tls::ext_sni("fuzz.example.com"), tls::ext_alpn(&["h3"])]);
+        let base = client_initial(
+            VERSION_1,
+            &[1, 2, 3, 4, 5, 6, 7, 8],
+            &[1],
+            0,
+            &crypto_frame(0, &hello),
+            1200,
+        );
         let mut s = 0xfeed_u64;
         let mut next = move || {
-            s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            s = s
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             (s >> 24) as usize
         };
         for n in 0..base.len().min(80) {

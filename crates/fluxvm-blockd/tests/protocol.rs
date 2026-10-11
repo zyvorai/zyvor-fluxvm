@@ -66,7 +66,10 @@ impl Client {
             return Err(last.rep);
         }
         let info = &r[0].payload;
-        assert_eq!(u16::from_be_bytes(info[0..2].try_into().unwrap()), INFO_EXPORT);
+        assert_eq!(
+            u16::from_be_bytes(info[0..2].try_into().unwrap()),
+            INFO_EXPORT
+        );
         Ok((
             u64::from_be_bytes(info[2..10].try_into().unwrap()),
             u16::from_be_bytes(info[10..12].try_into().unwrap()),
@@ -238,7 +241,11 @@ async fn limiter_throttles_over_the_wire() {
     for _ in 0..15 {
         c.read(0, 512).await.unwrap();
     }
-    assert!(t.elapsed() >= Duration::from_millis(400), "{:?}", t.elapsed());
+    assert!(
+        t.elapsed() >= Duration::from_millis(400),
+        "{:?}",
+        t.elapsed()
+    );
 }
 
 /// Needs `qemu-nbd`/`qemu-img` on PATH; run with `--ignored`. Starts our
@@ -249,14 +256,23 @@ async fn interop_qemu_img() {
     let d = tempfile::tempdir().unwrap();
     let p = d.path().join("x.img");
     std::fs::write(&p, vec![0x5Au8; 1 << 20]).unwrap();
-    let addr =
-        start(vec![Export::new("x", Arc::new(RawFile::open(&p, false).unwrap()))]).await;
+    let addr = start(vec![Export::new(
+        "x",
+        Arc::new(RawFile::open(&p, false).unwrap()),
+    )])
+    .await;
     let url = format!("nbd://127.0.0.1:{}/x", addr.port());
     let out = tokio::task::spawn_blocking(move || {
-        std::process::Command::new("qemu-img").args(["info", &url]).output()
+        std::process::Command::new("qemu-img")
+            .args(["info", &url])
+            .output()
     })
     .await
     .unwrap()
     .expect("qemu-img not installed");
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 }

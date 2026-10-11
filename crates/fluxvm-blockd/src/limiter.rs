@@ -33,7 +33,11 @@ impl Limiter {
             iops: io,
             burst_bytes,
             burst_ops,
-            state: Mutex::new(State { bytes: burst_bytes, ops: burst_ops, last: Instant::now() }),
+            state: Mutex::new(State {
+                bytes: burst_bytes,
+                ops: burst_ops,
+                last: Instant::now(),
+            }),
         }
     }
 
@@ -86,7 +90,10 @@ mod tests {
             assert!(l.reserve(t0, 0).is_zero());
         }
         let w = l.reserve(t0, 0);
-        assert!(w >= Duration::from_millis(9) && w <= Duration::from_millis(11), "{w:?}");
+        assert!(
+            w >= Duration::from_millis(9) && w <= Duration::from_millis(11),
+            "{w:?}"
+        );
         // 1 second later the bucket is refilled (capped at burst).
         assert!(l.reserve(t0 + Duration::from_secs(1), 0).is_zero());
     }
@@ -97,7 +104,10 @@ mod tests {
         let t0 = l.epoch();
         assert!(l.reserve(t0, 250_000).is_zero());
         let w = l.reserve(t0, 500_000); // 500k debt at 1MB/s
-        assert!(w >= Duration::from_millis(490) && w <= Duration::from_millis(510), "{w:?}");
+        assert!(
+            w >= Duration::from_millis(490) && w <= Duration::from_millis(510),
+            "{w:?}"
+        );
     }
 
     #[tokio::test]
@@ -108,6 +118,10 @@ mod tests {
             l.acquire(0).await;
         }
         // 10 ops past the burst at 20/s => ~500ms
-        assert!(start.elapsed() >= Duration::from_millis(400), "{:?}", start.elapsed());
+        assert!(
+            start.elapsed() >= Duration::from_millis(400),
+            "{:?}",
+            start.elapsed()
+        );
     }
 }

@@ -347,8 +347,13 @@ mod tests {
         assert_eq!(
             a,
             [
-                "serve", "--export", "d=/b,overlay=/o", "--listen", "127.0.0.1:0",
-                "--watch-pid-file", "/ws/runner.pid"
+                "serve",
+                "--export",
+                "d=/b,overlay=/o",
+                "--listen",
+                "127.0.0.1:0",
+                "--watch-pid-file",
+                "/ws/runner.pid"
             ]
         );
     }

@@ -81,9 +81,19 @@ impl FlowView {
             nic: f.identity.nic.to_string(),
             mac: f.identity.mac_string(),
             proto: proto_name(f.proto),
-            client: Endpoint { ip: f.client.0.to_string(), port: f.client.1 },
-            server: Endpoint { ip: f.server.0.to_string(), port: f.server.1 },
-            direction: if f.guest_is_client { "outbound" } else { "inbound" },
+            client: Endpoint {
+                ip: f.client.0.to_string(),
+                port: f.client.1,
+            },
+            server: Endpoint {
+                ip: f.server.0.to_string(),
+                port: f.server.1,
+            },
+            direction: if f.guest_is_client {
+                "outbound"
+            } else {
+                "inbound"
+            },
             vlan: f.vlan,
             first_seen_us: f.first_seen_us,
             last_seen_us: f.last_seen_us,
@@ -221,9 +231,20 @@ pub struct DropRecord {
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum EventKind {
-    FlowOpened { flow_id: u64, proto: String, client: Endpoint, server: Endpoint, direction: &'static str },
-    FlowUpdate { flow: Box<FlowView> },
-    FlowClosed { reason: CloseReason, flow: Box<FlowView> },
+    FlowOpened {
+        flow_id: u64,
+        proto: String,
+        client: Endpoint,
+        server: Endpoint,
+        direction: &'static str,
+    },
+    FlowUpdate {
+        flow: Box<FlowView>,
+    },
+    FlowClosed {
+        reason: CloseReason,
+        flow: Box<FlowView>,
+    },
     Dns(DnsRecord),
     Tls(TlsRecord),
     TlsServer(TlsServerRecord),
@@ -278,7 +299,12 @@ impl NetEvent {
     /// One Server-Sent Events frame: `id` is the sequence number, so a client can resume with `?since=<id>`.
     pub fn to_sse(&self) -> String {
         let data = serde_json::to_string(self).unwrap_or_else(|_| "{}".into());
-        format!("id: {}\nevent: netobs.{}\ndata: {}\n\n", self.seq, self.kind.name(), data)
+        format!(
+            "id: {}\nevent: netobs.{}\ndata: {}\n\n",
+            self.seq,
+            self.kind.name(),
+            data
+        )
     }
 }
 
@@ -357,7 +383,9 @@ impl Summary {
 }
 
 fn esc(v: &str) -> String {
-    v.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n")
+    v.replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
 }
 
 /// Prometheus text exposition (version 0.0.4). Label cardinality is bounded: global counters and per-VM series
@@ -369,14 +397,54 @@ pub fn render_prometheus(s: &Summary) -> String {
         let _ = writeln!(o, "# HELP {name} {help}\n# TYPE {name} counter\n{name} {v}");
     };
     let c = &s.counters;
-    counter(&mut o, "fluxvm_netobs_frames_total", "Guest frames observed.", c.frames);
-    counter(&mut o, "fluxvm_netobs_bytes_total", "Guest frame bytes observed.", c.bytes);
-    counter(&mut o, "fluxvm_netobs_malformed_total", "Frames too short to parse.", c.malformed);
-    counter(&mut o, "fluxvm_netobs_truncated_total", "Frames with a header cut short or lying lengths.", c.truncated);
-    counter(&mut o, "fluxvm_netobs_flows_created_total", "Flows created.", c.flows_created);
-    counter(&mut o, "fluxvm_netobs_flows_evicted_total", "Flows evicted because the table was full.", c.flows_evicted);
-    counter(&mut o, "fluxvm_netobs_flows_expired_total", "Flows aged out.", c.flows_expired);
-    counter(&mut o, "fluxvm_netobs_tap_enqueued_total", "Frames queued by the datapath tap.", c.tap_enqueued);
+    counter(
+        &mut o,
+        "fluxvm_netobs_frames_total",
+        "Guest frames observed.",
+        c.frames,
+    );
+    counter(
+        &mut o,
+        "fluxvm_netobs_bytes_total",
+        "Guest frame bytes observed.",
+        c.bytes,
+    );
+    counter(
+        &mut o,
+        "fluxvm_netobs_malformed_total",
+        "Frames too short to parse.",
+        c.malformed,
+    );
+    counter(
+        &mut o,
+        "fluxvm_netobs_truncated_total",
+        "Frames with a header cut short or lying lengths.",
+        c.truncated,
+    );
+    counter(
+        &mut o,
+        "fluxvm_netobs_flows_created_total",
+        "Flows created.",
+        c.flows_created,
+    );
+    counter(
+        &mut o,
+        "fluxvm_netobs_flows_evicted_total",
+        "Flows evicted because the table was full.",
+        c.flows_evicted,
+    );
+    counter(
+        &mut o,
+        "fluxvm_netobs_flows_expired_total",
+        "Flows aged out.",
+        c.flows_expired,
+    );
+    counter(
+        &mut o,
+        "fluxvm_netobs_tap_enqueued_total",
+        "Frames queued by the datapath tap.",
+        c.tap_enqueued,
+    );
     counter(
         &mut o,
         "fluxvm_netobs_tap_dropped_total",
@@ -407,8 +475,18 @@ pub fn render_prometheus(s: &Summary) -> String {
         "Overlapping retransmissions whose bytes differed from the first copy.",
         c.reasm_conflicts,
     );
-    counter(&mut o, "fluxvm_netobs_encrypted_dns_flows_total", "Flows recognised as DoT/DoH/DoQ.", c.encrypted_dns_flows);
-    counter(&mut o, "fluxvm_netobs_quic_hellos_total", "QUIC ClientHellos decoded from Initial packets.", c.quic_hellos);
+    counter(
+        &mut o,
+        "fluxvm_netobs_encrypted_dns_flows_total",
+        "Flows recognised as DoT/DoH/DoQ.",
+        c.encrypted_dns_flows,
+    );
+    counter(
+        &mut o,
+        "fluxvm_netobs_quic_hellos_total",
+        "QUIC ClientHellos decoded from Initial packets.",
+        c.quic_hellos,
+    );
     let _ = writeln!(
         o,
         "# HELP fluxvm_netobs_reasm_bytes Bytes currently buffered for stream reassembly.\n# TYPE fluxvm_netobs_reasm_bytes gauge\nfluxvm_netobs_reasm_bytes {}",
@@ -424,23 +502,61 @@ pub fn render_prometheus(s: &Summary) -> String {
         "# HELP fluxvm_netobs_frame_drops_total Frames the datapath dropped or denied, by reason.\n# TYPE fluxvm_netobs_frame_drops_total counter"
     );
     for (reason, n) in &c.drops_by_reason {
-        let _ = writeln!(o, "fluxvm_netobs_frame_drops_total{{reason=\"{}\"}} {n}", esc(reason));
+        let _ = writeln!(
+            o,
+            "fluxvm_netobs_frame_drops_total{{reason=\"{}\"}} {n}",
+            esc(reason)
+        );
     }
     let series: &[(&str, &str, fn(&Red) -> u64)] = &[
         ("packets_total", "Packets per VM.", |r| r.packets),
         ("bytes_total", "Frame bytes per VM.", |r| r.bytes),
         ("flows_total", "Flows opened per VM.", |r| r.flows),
         ("tcp_resets_total", "TCP resets per VM.", |r| r.resets),
-        ("tcp_retransmits_total", "TCP retransmissions per VM.", |r| r.retransmits),
-        ("tcp_zero_window_total", "TCP zero-window episodes per VM.", |r| r.zero_windows),
-        ("drops_total", "Dropped or denied frames attributed to flows, per VM.", |r| r.drops),
-        ("dns_queries_total", "DNS queries per VM.", |r| r.dns_queries),
-        ("dns_errors_total", "DNS responses with a non-zero rcode per VM.", |r| r.dns_errors),
-        ("http_requests_total", "Cleartext HTTP/1 requests per VM.", |r| r.http_requests),
-        ("http_5xx_total", "Cleartext HTTP/1 5xx responses per VM.", |r| r.http_5xx),
-        ("tls_handshakes_total", "TLS ClientHellos per VM.", |r| r.tls_handshakes),
-        ("rtt_microseconds_sum", "Sum of TCP RTT samples per VM.", |r| r.rtt_sum_us),
-        ("rtt_samples_total", "TCP RTT samples per VM.", |r| r.rtt_samples),
+        (
+            "tcp_retransmits_total",
+            "TCP retransmissions per VM.",
+            |r| r.retransmits,
+        ),
+        (
+            "tcp_zero_window_total",
+            "TCP zero-window episodes per VM.",
+            |r| r.zero_windows,
+        ),
+        (
+            "drops_total",
+            "Dropped or denied frames attributed to flows, per VM.",
+            |r| r.drops,
+        ),
+        ("dns_queries_total", "DNS queries per VM.", |r| {
+            r.dns_queries
+        }),
+        (
+            "dns_errors_total",
+            "DNS responses with a non-zero rcode per VM.",
+            |r| r.dns_errors,
+        ),
+        (
+            "http_requests_total",
+            "Cleartext HTTP/1 requests per VM.",
+            |r| r.http_requests,
+        ),
+        (
+            "http_5xx_total",
+            "Cleartext HTTP/1 5xx responses per VM.",
+            |r| r.http_5xx,
+        ),
+        ("tls_handshakes_total", "TLS ClientHellos per VM.", |r| {
+            r.tls_handshakes
+        }),
+        (
+            "rtt_microseconds_sum",
+            "Sum of TCP RTT samples per VM.",
+            |r| r.rtt_sum_us,
+        ),
+        ("rtt_samples_total", "TCP RTT samples per VM.", |r| {
+            r.rtt_samples
+        }),
     ];
     for (name, help, get) in series {
         let full = format!("fluxvm_netobs_vm_{name}");
@@ -506,7 +622,11 @@ mod tests {
         s.per_vm.push(VmSummary {
             vm_id: "vm\"1".into(),
             flows_active: 1,
-            red: Red { packets: 9, retransmits: 2, ..Red::default() },
+            red: Red {
+                packets: 9,
+                retransmits: 2,
+                ..Red::default()
+            },
         });
         s
     }
@@ -518,7 +638,11 @@ mod tests {
         assert!(t.contains("fluxvm_netobs_frame_drops_total{reason=\"policy\"} 2\n"));
         assert!(t.contains("fluxvm_netobs_vm_tcp_retransmits_total{vm=\"vm\\\"1\"} 2\n"));
         // Every sample line is preceded by its HELP/TYPE once.
-        assert_eq!(t.matches("# TYPE fluxvm_netobs_vm_packets_total counter").count(), 1);
+        assert_eq!(
+            t.matches("# TYPE fluxvm_netobs_vm_packets_total counter")
+                .count(),
+            1
+        );
     }
 
     #[test]
@@ -532,7 +656,10 @@ mod tests {
             nic: "eth0".into(),
             kind: EventKind::Quic {
                 flow_id: 1,
-                server: Endpoint { ip: "1.2.3.4".into(), port: 443 },
+                server: Endpoint {
+                    ip: "1.2.3.4".into(),
+                    port: 443,
+                },
                 version: 1,
                 dcid_len: 8,
                 scid_len: None,

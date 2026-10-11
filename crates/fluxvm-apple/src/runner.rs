@@ -274,7 +274,10 @@ impl RunnerConfig {
                     })
                 })
                 .collect::<Result<_>>()?,
-            usernet_fd: apple.usernet.as_ref().map(|_| crate::usernet::RUNNER_NIC_FD),
+            usernet_fd: apple
+                .usernet
+                .as_ref()
+                .map(|_| crate::usernet::RUNNER_NIC_FD),
             console_ports: apple
                 .console_ports
                 .iter()

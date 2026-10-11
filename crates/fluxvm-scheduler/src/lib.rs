@@ -476,9 +476,7 @@ fn vz_ssh_key_disk_injection_plan(
     let redundant = match ci.user.as_deref() {
         Some("root") => true,
         None => {
-            return Err(
-                "cloud-init user is unset; keys belong to the default account, not root",
-            );
+            return Err("cloud-init user is unset; keys belong to the default account, not root");
         }
         Some(_) => {
             return Err(
@@ -5641,7 +5639,9 @@ mod tests {
         assert!(vz_ssh_key_disk_injection_plan(&keyed(Some("ubuntu"), &[k]), true, false).is_err());
         // No keys, bad keys, running VM, wrong backend, non-raw disk.
         assert!(vz_ssh_key_disk_injection_plan(&keyed(Some("root"), &[]), true, false).is_err());
-        assert!(vz_ssh_key_disk_injection_plan(&keyed(Some("root"), &["a\nb"]), true, false).is_err());
+        assert!(
+            vz_ssh_key_disk_injection_plan(&keyed(Some("root"), &["a\nb"]), true, false).is_err()
+        );
         assert!(vz_ssh_key_disk_injection_plan(&keyed(Some("root"), &[k]), true, true).is_err());
         assert!(vz_ssh_key_disk_injection_plan(&keyed(Some("root"), &[k]), false, false).is_err());
         let mut q = keyed(Some("root"), &[k]);

@@ -56,7 +56,12 @@ pub struct LazyConfig {
 
 impl Default for LazyConfig {
     fn default() -> Self {
-        Self { parallel: 4, sha256: None, timeout: Duration::from_secs(30), retries: 2 }
+        Self {
+            parallel: 4,
+            sha256: None,
+            timeout: Duration::from_secs(30),
+            retries: 2,
+        }
     }
 }
 
@@ -155,12 +160,17 @@ impl LazyHttp {
             map.write_all_at(&hdr, 0)?;
             map.write_all_at(&bits, MAP_HDR)?;
         }
-        let have: u64 = (0..nchunks).filter(|c| bits[(c / 8) as usize] & (1 << (c % 8)) != 0).count() as u64;
+        let have: u64 = (0..nchunks)
+            .filter(|c| bits[(c / 8) as usize] & (1 << (c % 8)) != 0)
+            .count() as u64;
         let this = Arc::new_cyclic(|me| Self {
             url: url.to_string(),
             size,
             nchunks,
-            cfg: LazyConfig { parallel: cfg.parallel.max(1), ..cfg },
+            cfg: LazyConfig {
+                parallel: cfg.parallel.max(1),
+                ..cfg
+            },
             client: Some(client),
             data,
             map,
@@ -170,7 +180,10 @@ impl LazyHttp {
             failed: AtomicBool::new(false),
             verified: AtomicBool::new(false),
             me: me.clone(),
-            pq: Mutex::new(PrefetchQ { q: VecDeque::new(), active: 0 }),
+            pq: Mutex::new(PrefetchQ {
+                q: VecDeque::new(),
+                active: 0,
+            }),
             fetches: AtomicUsize::new(0),
         });
         if have == nchunks {
@@ -226,18 +239,30 @@ impl LazyHttp {
             .send()
             .map_err(|e| other(format!("range request failed: {e}")))?;
         if resp.status().as_u16() != 206 {
-            return Err(other(format!("range request returned HTTP {}", resp.status())));
+            return Err(other(format!(
+                "range request returned HTTP {}",
+                resp.status()
+            )));
         }
-        let body = resp.bytes().map_err(|e| other(format!("body read failed: {e}")))?;
+        let body = resp
+            .bytes()
+            .map_err(|e| other(format!("body read failed: {e}")))?;
         if body.len() as u64 != e - s {
-            return Err(other(format!("short body: {} of {} bytes", body.len(), e - s)));
+            return Err(other(format!(
+                "short body: {} of {} bytes",
+                body.len(),
+                e - s
+            )));
         }
         Ok(body.to_vec())
     }
 
     fn ensure(&self, c: u64) -> io::Result<()> {
         if self.failed.load(Ordering::SeqCst) {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "lazy source sha256 mismatch"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "lazy source sha256 mismatch",
+            ));
         }
         if self.has(c) {
             return Ok(());
@@ -297,7 +322,10 @@ impl LazyHttp {
             Ok(())
         } else {
             self.failed.store(true, Ordering::SeqCst);
-            Err(io::Error::new(io::ErrorKind::InvalidData, "lazy source sha256 mismatch"))
+            Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "lazy source sha256 mismatch",
+            ))
         }
     }
 
@@ -368,7 +396,10 @@ impl BlockBackend for LazyHttp {
     }
 
     fn read_at(&self, off: u64, buf: &mut [u8]) -> io::Result<()> {
-        if off.checked_add(buf.len() as u64).is_none_or(|e| e > self.size) {
+        if off
+            .checked_add(buf.len() as u64)
+            .is_none_or(|e| e > self.size)
+        {
             return Err(oob());
         }
         if buf.is_empty() {
@@ -378,7 +409,10 @@ impl BlockBackend for LazyHttp {
         let last = (off + buf.len() as u64 - 1) / CHUNK;
         let missing: Vec<u64> = (first..=last).filter(|c| !self.has(*c)).collect();
         if self.failed.load(Ordering::SeqCst) {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "lazy source sha256 mismatch"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "lazy source sha256 mismatch",
+            ));
         }
         if !missing.is_empty() {
             self.fetch_many(&missing)?;
@@ -387,7 +421,10 @@ impl BlockBackend for LazyHttp {
     }
 
     fn write_at(&self, _off: u64, _data: &[u8]) -> io::Result<()> {
-        Err(io::Error::new(io::ErrorKind::PermissionDenied, "lazy source is read-only"))
+        Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "lazy source is read-only",
+        ))
     }
 
     fn flush(&self) -> io::Result<()> {
@@ -395,7 +432,10 @@ impl BlockBackend for LazyHttp {
     }
 
     fn write_zeroes(&self, _off: u64, _len: u64) -> io::Result<()> {
-        Err(io::Error::new(io::ErrorKind::PermissionDenied, "lazy source is read-only"))
+        Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "lazy source is read-only",
+        ))
     }
 }
 

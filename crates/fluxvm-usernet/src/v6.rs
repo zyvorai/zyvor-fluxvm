@@ -85,7 +85,10 @@ impl Engine {
                 }
             }
             nh => {
-                tracing::debug!(next_header = nh, "usernet: dropping unsupported IPv6 next header");
+                tracing::debug!(
+                    next_header = nh,
+                    "usernet: dropping unsupported IPv6 next header"
+                );
                 self.mark_dropped();
             }
         }
@@ -105,7 +108,8 @@ impl Engine {
         if p.len() < 8 {
             return;
         }
-        let src_ok = ip.src.is_unspecified() || is_link_local(ip.src) || self.cfg.in_prefix6(ip.src);
+        let src_ok =
+            ip.src.is_unspecified() || is_link_local(ip.src) || self.cfg.in_prefix6(ip.src);
         if !src_ok {
             return self.mark_dropped();
         }
@@ -129,7 +133,11 @@ impl Engine {
                 self.send_icmp6(target, dst, ICMP6_NA, &body, 255);
             }
             ICMP6_RS if ip.hop_limit == 255 => {
-                let dst = if ip.src.is_unspecified() { ALL_NODES } else { ip.src };
+                let dst = if ip.src.is_unspecified() {
+                    ALL_NODES
+                } else {
+                    ip.src
+                };
                 self.send_ra(dst);
             }
             ICMP6_ECHO_REQ => {
@@ -183,7 +191,10 @@ impl Engine {
         if !self.cfg.ipv6 || self.guest_mac.is_none() {
             return;
         }
-        if self.last_ra.is_none_or(|t| now.duration_since(t) >= RA_INTERVAL) {
+        if self
+            .last_ra
+            .is_none_or(|t| now.duration_since(t) >= RA_INTERVAL)
+        {
             self.last_ra = Some(now);
             self.send_ra(ALL_NODES);
         }

@@ -103,7 +103,12 @@ pub struct Export {
 
 impl Export {
     pub fn new(name: impl Into<String>, backend: Arc<dyn BlockBackend>) -> Self {
-        Self { name: name.into(), backend, read_only: false, limiter: None }
+        Self {
+            name: name.into(),
+            backend,
+            read_only: false,
+            limiter: None,
+        }
     }
     pub fn read_only(mut self, ro: bool) -> Self {
         self.read_only = ro;
@@ -130,7 +135,9 @@ pub struct Server {
 
 impl Server {
     pub fn new(exports: Vec<Export>) -> Arc<Self> {
-        Arc::new(Self { exports: exports.into_iter().map(Arc::new).collect() })
+        Arc::new(Self {
+            exports: exports.into_iter().map(Arc::new).collect(),
+        })
     }
 
     /// Resolve a requested name; the empty name selects the only/first export.
@@ -173,19 +180,28 @@ impl Server {
         s.write_all(&hello).await?;
         let cflags = s.read_u32().await?;
         if cflags & CF_FIXED_NEWSTYLE == 0 {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "client lacks fixed newstyle"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "client lacks fixed newstyle",
+            ));
         }
         let no_zeroes = cflags & CF_NO_ZEROES != 0;
         let mut structured = false;
         loop {
             let magic = s.read_u64().await?;
             if magic != IHAVEOPT {
-                return Err(io::Error::new(io::ErrorKind::InvalidData, "bad option magic"));
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "bad option magic",
+                ));
             }
             let opt = s.read_u32().await?;
             let len = s.read_u32().await?;
             if len > MAX_OPT {
-                return Err(io::Error::new(io::ErrorKind::InvalidData, "option too large"));
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "option too large",
+                ));
             }
             let mut data = vec![0u8; len as usize];
             s.read_exact(&mut data).await?;
@@ -193,7 +209,9 @@ impl Server {
                 OPT_EXPORT_NAME => {
                     let name = String::from_utf8_lossy(&data).into_owned();
                     // No error channel for EXPORT_NAME: just drop the connection.
-                    let Some(e) = self.find(&name) else { return Ok(None) };
+                    let Some(e) = self.find(&name) else {
+                        return Ok(None);
+                    };
                     let mut r = Vec::new();
                     r.extend_from_slice(&e.backend.size().to_be_bytes());
                     r.extend_from_slice(&e.flags().to_be_bytes());
@@ -309,7 +327,9 @@ fn errno(e: &io::Error) -> u32 {
 async fn blocking<T: Send + 'static>(
     f: impl FnOnce() -> io::Result<T> + Send + 'static,
 ) -> io::Result<T> {
-    tokio::task::spawn_blocking(f).await.map_err(|e| io::Error::other(e.to_string()))?
+    tokio::task::spawn_blocking(f)
+        .await
+        .map_err(|e| io::Error::other(e.to_string()))?
 }
 
 type Tx = mpsc::Sender<Vec<u8>>;
@@ -346,7 +366,10 @@ async fn request_loop(
         }
         let magic = rd.read_u32().await?;
         if magic != REQ_MAGIC {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "bad request magic"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "bad request magic",
+            ));
         }
         let cflags = rd.read_u16().await?;
         let cmd = rd.read_u16().await?;
@@ -414,7 +437,13 @@ async fn request_loop(
                         }
                         (Ok(buf), true) => {
                             if buf.is_empty() {
-                                let f = struct_frame(REPLY_FLAG_DONE, REPLY_TYPE_NONE, handle, &[], &[]);
+                                let f = struct_frame(
+                                    REPLY_FLAG_DONE,
+                                    REPLY_TYPE_NONE,
+                                    handle,
+                                    &[],
+                                    &[],
+                                );
                                 let _ = tx.send(f).await;
                                 return;
                             }
@@ -435,7 +464,10 @@ async fn request_loop(
             CMD_WRITE => {
                 if len > MAX_REQ {
                     // Cannot resync without reading the payload; drop the link.
-                    return Err(io::Error::new(io::ErrorKind::InvalidData, "write too large"));
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "write too large",
+                    ));
                 }
                 let mut data = vec![0u8; len as usize];
                 rd.read_exact(&mut data).await?;
@@ -460,7 +492,9 @@ async fn request_loop(
                         if fua { b.flush() } else { Ok(()) }
                     })
                     .await;
-                    let _ = tx.send(simple_frame(r.err().map_or(0, |x| errno(&x)), handle, &[])).await;
+                    let _ = tx
+                        .send(simple_frame(r.err().map_or(0, |x| errno(&x)), handle, &[]))
+                        .await;
                 });
             }
             CMD_TRIM | CMD_WRITE_ZEROES => {
@@ -489,7 +523,9 @@ async fn request_loop(
                         if fua { b.flush() } else { Ok(()) }
                     })
                     .await;
-                    let _ = tx.send(simple_frame(r.err().map_or(0, |x| errno(&x)), handle, &[])).await;
+                    let _ = tx
+                        .send(simple_frame(r.err().map_or(0, |x| errno(&x)), handle, &[]))
+                        .await;
                 });
             }
             _ => {

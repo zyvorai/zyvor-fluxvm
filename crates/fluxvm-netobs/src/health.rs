@@ -67,15 +67,27 @@ pub struct RttStats {
 impl RttStats {
     pub fn add(&mut self, rtt_us: u64) {
         self.last_us = rtt_us;
-        self.min_us = if self.samples == 0 { rtt_us } else { self.min_us.min(rtt_us) };
+        self.min_us = if self.samples == 0 {
+            rtt_us
+        } else {
+            self.min_us.min(rtt_us)
+        };
         self.max_us = self.max_us.max(rtt_us);
         self.sum_us = self.sum_us.saturating_add(rtt_us);
-        self.srtt_us = if self.samples == 0 { rtt_us } else { (self.srtt_us * 7 + rtt_us) / 8 };
+        self.srtt_us = if self.samples == 0 {
+            rtt_us
+        } else {
+            (self.srtt_us * 7 + rtt_us) / 8
+        };
         self.samples += 1;
     }
 
     pub fn mean_us(&self) -> u64 {
-        if self.samples == 0 { 0 } else { self.sum_us / self.samples }
+        if self.samples == 0 {
+            0
+        } else {
+            self.sum_us / self.samples
+        }
     }
 }
 
@@ -213,7 +225,8 @@ impl TcpHealth {
                     d.handshake_rtt_us = Some(rtt);
                     self.rtt.add(rtt);
                 }
-            } else if self.midstream && self.syn_ts.is_none() && self.state == TcpState::Established {
+            } else if self.midstream && self.syn_ts.is_none() && self.state == TcpState::Established
+            {
                 // The first packet seen is a SYN-ACK (the SYN predates the observation).
                 self.midstream = false;
                 self.state = TcpState::SynReceived;
@@ -351,7 +364,11 @@ impl IcmpHealth {
             self.pending.push_back((m.id, m.seq, ts_us));
         } else if m.is_echo_reply() {
             self.echo_replies += 1;
-            if let Some(i) = self.pending.iter().position(|(id, seq, _)| *id == m.id && *seq == m.seq) {
+            if let Some(i) = self
+                .pending
+                .iter()
+                .position(|(id, seq, _)| *id == m.id && *seq == m.seq)
+            {
                 let (_, _, sent) = self.pending.remove(i)?;
                 let rtt = ts_us.saturating_sub(sent);
                 self.rtt.add(rtt);
@@ -398,7 +415,11 @@ mod tests {
         let mut h = TcpHealth::new();
         h.on_segment(C, 1_000, &seg(100, 0, TCP_SYN, 65535, 0));
         assert_eq!(h.state, TcpState::SynSent);
-        let d = h.on_segment(S, 1_000 + 12_000, &seg(500, 101, TCP_SYN | TCP_ACK, 65535, 0));
+        let d = h.on_segment(
+            S,
+            1_000 + 12_000,
+            &seg(500, 101, TCP_SYN | TCP_ACK, 65535, 0),
+        );
         assert_eq!(d.handshake_rtt_us, Some(12_000));
         assert_eq!(h.state, TcpState::SynReceived);
         h.on_segment(C, 13_100, &seg(101, 501, TCP_ACK, 65535, 0));
@@ -499,8 +520,20 @@ mod tests {
     #[test]
     fn icmp_echo_pairing() {
         let mut h = IcmpHealth::default();
-        let req = Icmp { v6: false, kind: 8, code: 0, id: 1, seq: 1 };
-        let rep = Icmp { v6: false, kind: 0, code: 0, id: 1, seq: 1 };
+        let req = Icmp {
+            v6: false,
+            kind: 8,
+            code: 0,
+            id: 1,
+            seq: 1,
+        };
+        let rep = Icmp {
+            v6: false,
+            kind: 0,
+            code: 0,
+            id: 1,
+            seq: 1,
+        };
         assert_eq!(h.on_message(100, &req), None);
         assert_eq!(h.on_message(1_600, &rep), Some(1_500));
         assert_eq!((h.echo_requests, h.echo_replies), (1, 1));

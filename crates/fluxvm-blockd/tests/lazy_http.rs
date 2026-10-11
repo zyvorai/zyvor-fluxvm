@@ -7,12 +7,14 @@
 use fluxvm_blockd::cow::overlay_info;
 use fluxvm_blockd::nbd::*;
 use fluxvm_blockd::seams::LazySource;
-use fluxvm_blockd::{BlockBackend, CowBackend, CreateOptions, Export, LazyConfig, LazyHttp, OpenOptions, Server};
+use fluxvm_blockd::{
+    BlockBackend, CowBackend, CreateOptions, Export, LazyConfig, LazyHttp, OpenOptions, Server,
+};
 use sha2::{Digest, Sha256};
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener};
-use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -55,10 +57,13 @@ fn http_server(data: Arc<Vec<u8>>, delay: Duration) -> HttpSrv {
                 x.fetch_max(now, Ordering::SeqCst);
                 std::thread::sleep(delay);
                 let total = data.len() as u64;
-                let range = text.lines().find_map(|l| l.strip_prefix("range: bytes=")).and_then(|v| {
-                    let (a, b) = v.trim().split_once('-')?;
-                    Some((a.parse::<u64>().ok()?, b.parse::<u64>().ok()?))
-                });
+                let range = text
+                    .lines()
+                    .find_map(|l| l.strip_prefix("range: bytes="))
+                    .and_then(|v| {
+                        let (a, b) = v.trim().split_once('-')?;
+                        Some((a.parse::<u64>().ok()?, b.parse::<u64>().ok()?))
+                    });
                 let mode = m.load(Ordering::SeqCst);
                 match (range, mode) {
                     (_, MODE_NO_RANGE) | (None, _) => {
@@ -88,11 +93,20 @@ fn http_server(data: Arc<Vec<u8>>, delay: Duration) -> HttpSrv {
             });
         }
     });
-    HttpSrv { addr, mode, requests, max_concurrent: max }
+    HttpSrv {
+        addr,
+        mode,
+        requests,
+        max_concurrent: max,
+    }
 }
 
 fn image(len: usize) -> Arc<Vec<u8>> {
-    Arc::new((0..len as u64).map(|i| (i.wrapping_mul(2654435761) >> 13) as u8).collect())
+    Arc::new(
+        (0..len as u64)
+            .map(|i| (i.wrapping_mul(2654435761) >> 13) as u8)
+            .collect(),
+    )
 }
 
 fn sha(d: &[u8]) -> [u8; 32] {
@@ -104,7 +118,12 @@ fn url(s: &HttpSrv) -> String {
 }
 
 fn cfg(parallel: usize) -> LazyConfig {
-    LazyConfig { parallel, timeout: Duration::from_secs(5), retries: 0, ..Default::default() }
+    LazyConfig {
+        parallel,
+        timeout: Duration::from_secs(5),
+        retries: 0,
+        ..Default::default()
+    }
 }
 
 #[test]
@@ -154,7 +173,10 @@ fn prefetch_parallelism_is_bounded_and_completes() {
     }
     assert_eq!(srv.requests.load(Ordering::SeqCst) - probe_reqs, 8);
     let m = srv.max_concurrent.load(Ordering::SeqCst);
-    assert!(m == 2, "max concurrent fetches {m}, wanted exactly the configured 2");
+    assert!(
+        m == 2,
+        "max concurrent fetches {m}, wanted exactly the configured 2"
+    );
     let mut all = vec![0u8; data.len()];
     l.read_at(0, &mut all).unwrap();
     assert_eq!(all, *data);
@@ -165,7 +187,10 @@ fn sha256_verified_once_fully_cached_and_mismatch_is_sticky() {
     let data = image(3 << 20);
     let srv = http_server(data.clone(), Duration::ZERO);
     let d = tempfile::tempdir().unwrap();
-    let good = LazyConfig { sha256: Some(sha(&data)), ..cfg(3) };
+    let good = LazyConfig {
+        sha256: Some(sha(&data)),
+        ..cfg(3)
+    };
     let l = LazyHttp::open(&url(&srv), &d.path().join("good"), good).unwrap();
     assert_eq!(l.verified(), None);
     let mut b = vec![0u8; 100];
@@ -176,7 +201,10 @@ fn sha256_verified_once_fully_cached_and_mismatch_is_sticky() {
     assert!(l.is_complete());
     assert_eq!(l.verified(), Some(true));
 
-    let bad = LazyConfig { sha256: Some([0xAB; 32]), ..cfg(3) };
+    let bad = LazyConfig {
+        sha256: Some([0xAB; 32]),
+        ..cfg(3)
+    };
     let l = LazyHttp::open(&url(&srv), &d.path().join("bad"), bad).unwrap();
     let e = l.read_at(0, &mut all).unwrap_err();
     assert!(e.to_string().contains("sha256"), "{e}");
@@ -191,7 +219,9 @@ fn server_without_range_support_is_rejected() {
     let srv = http_server(data, Duration::ZERO);
     srv.mode.store(MODE_NO_RANGE, Ordering::SeqCst);
     let d = tempfile::tempdir().unwrap();
-    let e = LazyHttp::open(&url(&srv), &d.path().join("c"), cfg(1)).err().unwrap();
+    let e = LazyHttp::open(&url(&srv), &d.path().join("c"), cfg(1))
+        .err()
+        .unwrap();
     assert!(e.to_string().contains("range"), "{e}");
 }
 
@@ -201,7 +231,10 @@ fn overlay_over_lazy_source_header_and_reopen() {
     let srv = http_server(data.clone(), Duration::ZERO);
     let d = tempfile::tempdir().unwrap();
     let ov = d.path().join("o.ovl");
-    let lz = LazyConfig { sha256: Some(sha(&data)), ..cfg(2) };
+    let lz = LazyConfig {
+        sha256: Some(sha(&data)),
+        ..cfg(2)
+    };
     let o = CowBackend::create_on_lazy(&ov, &url(&srv), &CreateOptions::default(), &lz).unwrap();
     assert_eq!(o.size(), data.len() as u64);
     o.write_at(70_000, b"patched").unwrap();
@@ -212,9 +245,20 @@ fn overlay_over_lazy_source_header_and_reopen() {
     o.prefetch(0, data.len() as u64);
     o.flush().unwrap();
     drop(o);
-    assert_eq!(overlay_info(&ov).unwrap(), (false, 2), "parent kind is lazy http");
+    assert_eq!(
+        overlay_info(&ov).unwrap(),
+        (false, 2),
+        "parent kind is lazy http"
+    );
     // Reopen: sha256 comes from the header, URL too.
-    let o = CowBackend::open_with(&ov, &OpenOptions { lazy: cfg(2), ..Default::default() }).unwrap();
+    let o = CowBackend::open_with(
+        &ov,
+        &OpenOptions {
+            lazy: cfg(2),
+            ..Default::default()
+        },
+    )
+    .unwrap();
     let mut b2 = vec![0u8; 20];
     o.read_at(69_995, &mut b2).unwrap();
     assert_eq!(b, b2);
@@ -233,7 +277,12 @@ async fn mid_stream_failure_surfaces_as_eio_not_hang() {
     let u = url(&srv);
     let ovc = ov.clone();
     let o = tokio::task::spawn_blocking(move || {
-        let lz = LazyConfig { timeout: Duration::from_secs(3), retries: 1, parallel: 2, ..Default::default() };
+        let lz = LazyConfig {
+            timeout: Duration::from_secs(3),
+            retries: 1,
+            parallel: 2,
+            ..Default::default()
+        };
         CowBackend::create_on_lazy(&ovc, &u, &CreateOptions::default(), &lz).unwrap()
     })
     .await

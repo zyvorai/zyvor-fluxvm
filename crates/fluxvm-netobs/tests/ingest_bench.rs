@@ -27,8 +27,24 @@ fn corpus(vm: usize) -> Vec<Vec<u8>> {
         let c = (g, 20_000 + p);
         v.push(tcp_v4(c, (s, 443), 1, 0, TCP_SYN, 65535, b""));
         for n in 0..6u32 {
-            v.push(tcp_v4(c, (s, 443), 2 + n * 100, 1, TCP_ACK | TCP_PSH, 65535, &[0x55u8; 100]));
-            v.push(tcp_v4((s, 443), c, 1, 2 + n * 100 + 100, TCP_ACK, 65535, b""));
+            v.push(tcp_v4(
+                c,
+                (s, 443),
+                2 + n * 100,
+                1,
+                TCP_ACK | TCP_PSH,
+                65535,
+                &[0x55u8; 100],
+            ));
+            v.push(tcp_v4(
+                (s, 443),
+                c,
+                1,
+                2 + n * 100 + 100,
+                TCP_ACK,
+                65535,
+                b"",
+            ));
         }
     }
     for p in 0..64u16 {
@@ -68,10 +84,15 @@ fn run(threads: usize, frames_per_thread: usize, batch: usize) -> f64 {
                     while i < frames_per_thread {
                         let n = batch.min(frames_per_thread - i);
                         let metas: Vec<FrameMeta> = (0..n)
-                            .map(|k| FrameMeta { ts_us: meta.ts_us + 5 * (k as u64 + 1), ..meta.clone() })
+                            .map(|k| FrameMeta {
+                                ts_us: meta.ts_us + 5 * (k as u64 + 1),
+                                ..meta.clone()
+                            })
                             .collect();
                         meta.ts_us += 5 * n as u64;
-                        obs.ingest_batch((0..n).map(|k| (&frames[(i + k) % frames.len()][..], &metas[k])));
+                        obs.ingest_batch(
+                            (0..n).map(|k| (&frames[(i + k) % frames.len()][..], &metas[k])),
+                        );
                         i += n;
                     }
                 }
@@ -86,13 +107,24 @@ fn run(threads: usize, frames_per_thread: usize, batch: usize) -> f64 {
 #[test]
 #[ignore = "benchmark; run with --ignored in release mode"]
 fn ingest_frames_per_second() {
-    let env = |k: &str, d: usize| std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d);
+    let env = |k: &str, d: usize| {
+        std::env::var(k)
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(d)
+    };
     let frames = env("FLUXVM_NETOBS_BENCH_FRAMES", 1_000_000);
     let threads = env("FLUXVM_NETOBS_BENCH_THREADS", 4);
     let single = run(1, frames, 1);
     println!("netobs ingest, 1 producer, per-frame lock : {single:>12.0} frames/s");
     let multi = run(threads, frames, 1);
-    println!("netobs ingest, {threads} producers, per-frame lock: {multi:>12.0} frames/s ({:.2}x)", multi / single);
+    println!(
+        "netobs ingest, {threads} producers, per-frame lock: {multi:>12.0} frames/s ({:.2}x)",
+        multi / single
+    );
     let batched = run(threads, frames, 64);
-    println!("netobs ingest, {threads} producers, batches of 64: {batched:>12.0} frames/s ({:.2}x)", batched / single);
+    println!(
+        "netobs ingest, {threads} producers, batches of 64: {batched:>12.0} frames/s ({:.2}x)",
+        batched / single
+    );
 }

@@ -256,7 +256,24 @@ pub(crate) fn test_big_answer(query: &[u8], n: usize) -> Vec<u8> {
     let mut v = build_reply(query, &q, 0, false);
     v[6..8].copy_from_slice(&(n as u16).to_be_bytes());
     for i in 0..n {
-        v.extend_from_slice(&[0xc0, 12, 0, 1, 0, 1, 0, 0, 1, 44, 0, 4, 10, 1, (i >> 8) as u8, i as u8]);
+        v.extend_from_slice(&[
+            0xc0,
+            12,
+            0,
+            1,
+            0,
+            1,
+            0,
+            0,
+            1,
+            44,
+            0,
+            4,
+            10,
+            1,
+            (i >> 8) as u8,
+            i as u8,
+        ]);
     }
     v
 }
@@ -272,7 +289,10 @@ mod tests {
         a[6..8].copy_from_slice(&1u16.to_be_bytes());
         a.extend_from_slice(&[0xc0, 12, 0, 28, 0, 1, 0, 0, 0, 60, 0, 16]);
         a.extend_from_slice(&"2001:db8::7".parse::<Ipv6Addr>().unwrap().octets());
-        assert_eq!(parse_addr_records(&a), vec![("2001:db8::7".parse().unwrap(), 60)]);
+        assert_eq!(
+            parse_addr_records(&a),
+            vec![("2001:db8::7".parse().unwrap(), 60)]
+        );
 
         assert_eq!(udp_limit(&q), 512);
         let mut e = q.clone();

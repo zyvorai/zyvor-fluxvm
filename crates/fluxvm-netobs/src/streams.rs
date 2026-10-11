@@ -62,8 +62,15 @@ impl Default for FlowStreams {
 
 impl FlowStreams {
     pub fn new() -> Self {
-        let d = || DirStream { stream: Stream::new(), kind: Kind::Unknown, h2: None };
-        Self { dirs: [d(), d()], h2_connection: false }
+        let d = || DirStream {
+            stream: Stream::new(),
+            kind: Kind::Unknown,
+            h2: None,
+        };
+        Self {
+            dirs: [d(), d()],
+            h2_connection: false,
+        }
     }
 
     /// Heap bytes held (counted against the observer-wide budget).
@@ -113,7 +120,10 @@ impl FlowStreams {
         }
         let before = d.stream.conflicts;
         let limit = cfg.max_bytes_per_stream;
-        match d.stream.push(seq, payload, limit, cfg.max_pending_segments, room) {
+        match d
+            .stream
+            .push(seq, payload, limit, cfg.max_pending_segments, room)
+        {
             Push::Dropped(DropWhy::Budget) => {
                 stats.dropped = Some(DropWhy::Budget);
                 Self::finish(d);
@@ -225,10 +235,23 @@ mod tests {
         )
     }
 
-    fn feed_all(fs: &mut FlowStreams, dir: usize, base: u32, chunks: &[(usize, &[u8])]) -> Vec<StreamOut> {
+    fn feed_all(
+        fs: &mut FlowStreams,
+        dir: usize,
+        base: u32,
+        chunks: &[(usize, &[u8])],
+    ) -> Vec<StreamOut> {
         let mut out = Vec::new();
         for (off, c) in chunks {
-            fs.feed(dir, base.wrapping_add(*off as u32), c, Some(base.wrapping_sub(1)), &ReasmConfig::default(), ROOM, &mut out);
+            fs.feed(
+                dir,
+                base.wrapping_add(*off as u32),
+                c,
+                Some(base.wrapping_sub(1)),
+                &ReasmConfig::default(),
+                ROOM,
+                &mut out,
+            );
         }
         out
     }
@@ -241,7 +264,9 @@ mod tests {
         let mut fs = FlowStreams::new();
         let out = feed_all(&mut fs, 0, 1000, &[(0, a), (100, b), (400, c)]);
         assert_eq!(out.len(), 1);
-        let StreamOut::ClientHello(ch) = &out[0] else { panic!() };
+        let StreamOut::ClientHello(ch) = &out[0] else {
+            panic!()
+        };
         assert_eq!(ch.sni.as_deref(), Some("split.example.com"));
         assert_eq!(ch.alpn, vec![b"h2".to_vec(), b"http/1.1".to_vec()]);
         assert!(!fs.all_done(), "the server direction is still open");
@@ -253,16 +278,18 @@ mod tests {
         let h = hello();
         let n = h.len();
         let chunks: Vec<(usize, &[u8])> = vec![
-            (300, &h[300..]),     // tail first
-            (0, &h[..120]),       // head
-            (0, &h[..120]),       // retransmit
-            (100, &h[100..320]),  // overlaps head and tail
-            (150, &h[150..200]),  // fully inside
+            (300, &h[300..]),    // tail first
+            (0, &h[..120]),      // head
+            (0, &h[..120]),      // retransmit
+            (100, &h[100..320]), // overlaps head and tail
+            (150, &h[150..200]), // fully inside
         ];
         let mut fs = FlowStreams::new();
         let out = feed_all(&mut fs, 0, 0xffff_ff00, &chunks); // also wraps the sequence space
         assert_eq!(out.len(), 1, "n = {n}");
-        let StreamOut::ClientHello(ch) = &out[0] else { panic!() };
+        let StreamOut::ClientHello(ch) = &out[0] else {
+            panic!()
+        };
         assert_eq!(ch.sni.as_deref(), Some("split.example.com"));
     }
 
@@ -285,7 +312,14 @@ mod tests {
     #[test]
     fn server_hello_metadata_without_certificates() {
         // TLS 1.3 ServerHello: supported_versions=1.3, key_share x25519.
-        let sh = tls::server_hello(0x0303, 0x1301, &[tls::ext(43, &[0x03, 0x04]), tls::ext(51, &[0x00, 0x1d, 0x00, 0x00])]);
+        let sh = tls::server_hello(
+            0x0303,
+            0x1301,
+            &[
+                tls::ext(43, &[0x03, 0x04]),
+                tls::ext(51, &[0x00, 0x1d, 0x00, 0x00]),
+            ],
+        );
         // Followed by an opaque record, as a real server would send.
         let mut wire = sh.clone();
         wire.extend_from_slice(&[0x14, 0x03, 0x03, 0x00, 0x01, 0x01]);
@@ -295,7 +329,9 @@ mod tests {
         let (a, b) = wire.split_at(30);
         let out = feed_all(&mut fs, 1, 7000, &[(0, a), (30, b)]);
         assert_eq!(out.len(), 1);
-        let StreamOut::ServerHello(s) = &out[0] else { panic!() };
+        let StreamOut::ServerHello(s) = &out[0] else {
+            panic!()
+        };
         assert_eq!(s.negotiated_version(), 0x0304);
         assert_eq!(s.cipher, 0x1301);
         assert_eq!(s.key_share_group, Some(29));
@@ -306,7 +342,15 @@ mod tests {
     fn non_tls_streams_do_not_hold_memory() {
         let mut fs = FlowStreams::new();
         let mut out = Vec::new();
-        fs.feed(0, 1, b"GET / HTTP/1.1\r\nHost: x\r\n\r\n", Some(0), &ReasmConfig::default(), ROOM, &mut out);
+        fs.feed(
+            0,
+            1,
+            b"GET / HTTP/1.1\r\nHost: x\r\n\r\n",
+            Some(0),
+            &ReasmConfig::default(),
+            ROOM,
+            &mut out,
+        );
         assert!(out.is_empty());
         assert_eq!(fs.dirs[0].kind, Kind::Done);
         assert_eq!(fs.dirs[0].stream.mem(), 0);
@@ -317,7 +361,15 @@ mod tests {
         let h = hello();
         let mut fs = FlowStreams::new();
         let mut out = Vec::new();
-        let s = fs.feed(0, 1, &h[..200], Some(0), &ReasmConfig::default(), 50, &mut out);
+        let s = fs.feed(
+            0,
+            1,
+            &h[..200],
+            Some(0),
+            &ReasmConfig::default(),
+            50,
+            &mut out,
+        );
         assert_eq!(s.dropped, Some(DropWhy::Budget));
         assert_eq!(fs.dirs[0].kind, Kind::Done);
         assert!(out.is_empty());
@@ -326,32 +378,62 @@ mod tests {
     #[test]
     fn pending_overflow_is_counted_and_memory_bounded() {
         let h = hello();
-        let cfg = ReasmConfig { max_pending_segments: 2, ..ReasmConfig::default() };
+        let cfg = ReasmConfig {
+            max_pending_segments: 2,
+            ..ReasmConfig::default()
+        };
         let mut fs = FlowStreams::new();
         let mut out = Vec::new();
         let mut dropped = 0;
         for i in 1..6usize {
-            let s = fs.feed(0, (i * 50) as u32 + 1, &h[i * 50..i * 50 + 40], Some(0), &cfg, ROOM, &mut out);
+            let s = fs.feed(
+                0,
+                (i * 50) as u32 + 1,
+                &h[i * 50..i * 50 + 40],
+                Some(0),
+                &cfg,
+                ROOM,
+                &mut out,
+            );
             if s.dropped == Some(DropWhy::PendingFull) {
                 dropped += 1;
             }
         }
         // First segment (offset 0) never arrived; the gap segments are pending-bounded.
         assert_eq!(dropped, 3);
-        assert!(fs.mem() <= 2 * 40, "two pending segments of 40 bytes at most, got {}", fs.mem());
+        assert!(
+            fs.mem() <= 2 * 40,
+            "two pending segments of 40 bytes at most, got {}",
+            fs.mem()
+        );
     }
 
     #[test]
     fn hello_larger_than_the_prefix_gives_up() {
-        let big = tls::client_hello(0x0303, &[0x1301], &[tls::ext_sni("big.test"), tls::ext(0x0015, &vec![0u8; 3000])]);
-        let cfg = ReasmConfig { max_bytes_per_stream: 1024, ..ReasmConfig::default() };
+        let big = tls::client_hello(
+            0x0303,
+            &[0x1301],
+            &[tls::ext_sni("big.test"), tls::ext(0x0015, &vec![0u8; 3000])],
+        );
+        let cfg = ReasmConfig {
+            max_bytes_per_stream: 1024,
+            ..ReasmConfig::default()
+        };
         let mut fs = FlowStreams::new();
         let mut out = Vec::new();
         let mut gave_up = false;
         let mut at = 0;
         while at < big.len() {
             let n = 500.min(big.len() - at);
-            let s = fs.feed(0, at as u32 + 1, &big[at..at + n], Some(0), &cfg, ROOM, &mut out);
+            let s = fs.feed(
+                0,
+                at as u32 + 1,
+                &big[at..at + n],
+                Some(0),
+                &cfg,
+                ROOM,
+                &mut out,
+            );
             gave_up |= s.gave_up;
             at += n;
         }
@@ -363,9 +445,17 @@ mod tests {
     #[test]
     fn h2c_connection_both_directions() {
         let mut c2s = h2f::client_preface();
-        c2s.extend(h2f::headers_frame(1, true, &h2f::request_block("GET", "http", "/secret", "mesh.svc:8080")));
+        c2s.extend(h2f::headers_frame(
+            1,
+            true,
+            &h2f::request_block("GET", "http", "/secret", "mesh.svc:8080"),
+        ));
         let mut s2c = h2f::settings();
-        s2c.extend(h2f::headers_frame(1, true, &h2f::response_block(200, Some("application/grpc"))));
+        s2c.extend(h2f::headers_frame(
+            1,
+            true,
+            &h2f::response_block(200, Some("application/grpc")),
+        ));
         let mut fs = FlowStreams::new();
         let mut out = Vec::new();
         // Split the client bytes mid-frame and deliver the response between the pieces.
@@ -386,7 +476,10 @@ mod tests {
         assert_eq!(msgs.len(), 2);
         assert_eq!(msgs[0].headers.authority.as_deref(), Some("mesh.svc:8080"));
         assert_eq!(msgs[1].headers.status, Some(200));
-        assert_eq!(msgs[1].headers.content_type.as_deref(), Some("application/grpc"));
+        assert_eq!(
+            msgs[1].headers.content_type.as_deref(),
+            Some("application/grpc")
+        );
         assert!(!format!("{out:?}").contains("secret"));
     }
 
@@ -394,15 +487,25 @@ mod tests {
     fn hostile_segments_never_panic_and_stay_bounded() {
         let mut st = 0xabcdu64;
         let mut next = move || {
-            st = st.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            st = st
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             (st >> 20) as u32
         };
         let seeds: Vec<Vec<u8>> = vec![hello(), h2f::client_preface(), {
             let mut v = h2f::client_preface();
-            v.extend(h2f::headers_frame(1, true, &h2f::request_block("GET", "http", "/", "a.test")));
+            v.extend(h2f::headers_frame(
+                1,
+                true,
+                &h2f::request_block("GET", "http", "/", "a.test"),
+            ));
             v
         }];
-        let cfg = ReasmConfig { max_bytes_per_stream: 2048, max_pending_segments: 4, ..ReasmConfig::default() };
+        let cfg = ReasmConfig {
+            max_bytes_per_stream: 2048,
+            max_pending_segments: 4,
+            ..ReasmConfig::default()
+        };
         for _ in 0..400 {
             let mut fs = FlowStreams::new();
             let mut out = Vec::new();
@@ -410,7 +513,10 @@ mod tests {
             for _ in 0..30 {
                 let off = (next() as usize) % (base.len() + 50);
                 let len = ((next() as usize) % 200).min(base.len().saturating_sub(off).max(1));
-                let mut chunk: Vec<u8> = base.get(off..(off + len).min(base.len())).unwrap_or(&[]).to_vec();
+                let mut chunk: Vec<u8> = base
+                    .get(off..(off + len).min(base.len()))
+                    .unwrap_or(&[])
+                    .to_vec();
                 if next() % 3 == 0 && !chunk.is_empty() {
                     let at = next() as usize % chunk.len();
                     chunk[at] = next() as u8;

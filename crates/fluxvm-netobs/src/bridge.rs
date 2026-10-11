@@ -85,7 +85,12 @@ fn verdict_code(v: Verdict) -> (u8, u8) {
 }
 
 fn verdict_from(kind: u8, reason: u8) -> Option<Verdict> {
-    let r = || DropReason::ALL.get(reason as usize).copied().unwrap_or(DropReason::Other);
+    let r = || {
+        DropReason::ALL
+            .get(reason as usize)
+            .copied()
+            .unwrap_or(DropReason::Other)
+    };
     match kind {
         0 => Some(Verdict::Allowed),
         1 => Some(Verdict::Denied(r())),
@@ -105,7 +110,11 @@ pub fn encode_preamble(client_id: u64) -> [u8; PREAMBLE_LEN] {
 
 /// Appends an IDENT record to `out`. `None` when a name does not fit in 255 bytes.
 pub fn encode_ident(out: &mut Vec<u8>, id: u32, identity: &Identity) -> Option<()> {
-    let names = [identity.vm_id.as_bytes(), identity.network.as_bytes(), identity.nic.as_bytes()];
+    let names = [
+        identity.vm_id.as_bytes(),
+        identity.network.as_bytes(),
+        identity.nic.as_bytes(),
+    ];
     if names.iter().any(|n| n.len() > 255) {
         return None;
     }
@@ -152,9 +161,21 @@ pub fn encode_stats(out: &mut Vec<u8>, sent: u64, dropped: u64) {
 /// A decoded record body (the bytes after the length prefix).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Decoded<'a> {
-    Ident { id: u32, identity: Identity },
-    Frame { id: u32, ts_us: u64, direction: Direction, verdict: Verdict, data: &'a [u8] },
-    Stats { sent: u64, dropped: u64 },
+    Ident {
+        id: u32,
+        identity: Identity,
+    },
+    Frame {
+        id: u32,
+        ts_us: u64,
+        direction: Direction,
+        verdict: Verdict,
+        data: &'a [u8],
+    },
+    Stats {
+        sent: u64,
+        dropped: u64,
+    },
     /// A record type this version does not know: skipped.
     Unknown(u8),
 }
@@ -209,21 +230,30 @@ pub fn decode_body(b: &[u8]) -> Result<Decoded<'_>, DecodeError> {
                 return Err(DecodeError::Short);
             }
             let id = u32::from_be_bytes([rest[0], rest[1], rest[2], rest[3]]);
-            let ts_us = u64::from_be_bytes([rest[4], rest[5], rest[6], rest[7], rest[8], rest[9], rest[10], rest[11]]);
+            let ts_us = u64::from_be_bytes([
+                rest[4], rest[5], rest[6], rest[7], rest[8], rest[9], rest[10], rest[11],
+            ]);
             let direction = match rest[12] {
                 0 => Direction::FromGuest,
                 1 => Direction::ToGuest,
                 _ => return Err(DecodeError::BadDirection),
             };
             let verdict = verdict_from(rest[13], rest[14]).ok_or(DecodeError::BadVerdict)?;
-            Ok(Decoded::Frame { id, ts_us, direction, verdict, data: &rest[15..] })
+            Ok(Decoded::Frame {
+                id,
+                ts_us,
+                direction,
+                verdict,
+                data: &rest[15..],
+            })
         }
         T_STATS => {
             if rest.len() < 16 {
                 return Err(DecodeError::Short);
             }
             let sent = u64::from_be_bytes(rest[..8].try_into().map_err(|_| DecodeError::Short)?);
-            let dropped = u64::from_be_bytes(rest[8..16].try_into().map_err(|_| DecodeError::Short)?);
+            let dropped =
+                u64::from_be_bytes(rest[8..16].try_into().map_err(|_| DecodeError::Short)?);
             Ok(Decoded::Stats { sent, dropped })
         }
         t => Ok(Decoded::Unknown(t)),
@@ -343,7 +373,13 @@ impl BridgeClient {
             .spawn(move || client_loop(path, cfg, rx, st, sp, client_id))
             .ok();
         BridgeClient {
-            shared: Arc::new(ClientShared { tx, stats, stop, join: Mutex::new(join), snaplen }),
+            shared: Arc::new(ClientShared {
+                tx,
+                stats,
+                stop,
+                join: Mutex::new(join),
+                snaplen,
+            }),
         }
     }
 
@@ -352,7 +388,13 @@ impl BridgeClient {
     }
 
     /// Queues a frame for `identity`. Never blocks.
-    pub fn tap_as(&self, identity: &Arc<Identity>, direction: Direction, verdict: Verdict, frame: &[u8]) {
+    pub fn tap_as(
+        &self,
+        identity: &Arc<Identity>,
+        direction: Direction,
+        verdict: Verdict,
+        frame: &[u8],
+    ) {
         let s = &self.shared;
         let keep = frame.len().min(s.snaplen);
         if keep < frame.len() {
@@ -377,7 +419,10 @@ impl BridgeClient {
 
     /// A handle bound to `identity` that implements [`crate::Tap`].
     pub fn for_identity(&self, identity: Arc<Identity>) -> BridgeTap {
-        BridgeTap { client: self.clone(), identity }
+        BridgeTap {
+            client: self.clone(),
+            identity,
+        }
     }
 
     /// Blocks until everything queued so far has been written or dropped, or `timeout` passes. For tests and
@@ -386,7 +431,8 @@ impl BridgeClient {
         let s = &self.shared.stats;
         let deadline = Instant::now() + timeout;
         loop {
-            let done = BridgeClientStats::get(&s.sent) + s.total_dropped() - BridgeClientStats::get(&s.dropped_queue_full)
+            let done = BridgeClientStats::get(&s.sent) + s.total_dropped()
+                - BridgeClientStats::get(&s.dropped_queue_full)
                 >= BridgeClientStats::get(&s.queued);
             if done {
                 return true;
@@ -408,7 +454,8 @@ pub struct BridgeTap {
 
 impl crate::source::Tap for BridgeTap {
     fn tap(&self, direction: Direction, verdict: Verdict, frame: &[u8]) {
-        self.client.tap_as(&self.identity, direction, verdict, frame);
+        self.client
+            .tap_as(&self.identity, direction, verdict, frame);
     }
 }
 
@@ -466,7 +513,9 @@ fn client_loop(
                     Some(id) => Some(*id),
                     None => {
                         let id = idents.len() as u32;
-                        if idents.len() >= MAX_IDENTS_PER_CONN || encode_ident(&mut buf, id, &item.identity).is_none() {
+                        if idents.len() >= MAX_IDENTS_PER_CONN
+                            || encode_ident(&mut buf, id, &item.identity).is_none()
+                        {
                             None
                         } else {
                             idents.insert(item.identity.clone(), id);
@@ -503,7 +552,8 @@ fn client_loop(
             Err(RecvTimeoutError::Disconnected) => break,
         }
         if let Some(s) = conn.as_mut()
-            && (last_stats_at.elapsed() >= Duration::from_secs(1) || last_stats == (u64::MAX, u64::MAX))
+            && (last_stats_at.elapsed() >= Duration::from_secs(1)
+                || last_stats == (u64::MAX, u64::MAX))
         {
             let now = (BridgeClientStats::get(&stats.sent), stats.total_dropped());
             if now != last_stats {
@@ -537,7 +587,11 @@ pub struct BridgeServerConfig {
 
 impl Default for BridgeServerConfig {
     fn default() -> Self {
-        Self { max_connections: 64, batch: 64, stall_timeout: Duration::from_secs(10) }
+        Self {
+            max_connections: 64,
+            batch: 64,
+            stall_timeout: Duration::from_secs(10),
+        }
     }
 }
 
@@ -598,7 +652,9 @@ impl BridgeRunning {
     pub fn shutdown(mut self) -> io::Result<()> {
         self.stop.stop();
         match self.join.take() {
-            Some(j) => j.join().unwrap_or_else(|_| Err(io::Error::other("bridge server panicked"))),
+            Some(j) => j
+                .join()
+                .unwrap_or_else(|_| Err(io::Error::other("bridge server panicked"))),
             None => Ok(()),
         }
     }
@@ -621,7 +677,12 @@ impl BridgeServer {
         let path = path.as_ref().to_path_buf();
         if path.exists() {
             match UnixStream::connect(&path) {
-                Ok(_) => return Err(io::Error::new(io::ErrorKind::AddrInUse, "a bridge server is already listening")),
+                Ok(_) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::AddrInUse,
+                        "a bridge server is already listening",
+                    ));
+                }
                 Err(_) => std::fs::remove_file(&path)?,
             }
         }
@@ -672,7 +733,9 @@ impl BridgeServer {
                 Ok((conn, _)) => {
                     workers.retain(|(w, _)| !w.is_finished());
                     if workers.len() >= self.cfg.max_connections.max(1) {
-                        self.stats.connections_rejected.fetch_add(1, Ordering::Relaxed);
+                        self.stats
+                            .connections_rejected
+                            .fetch_add(1, Ordering::Relaxed);
                         drop(conn);
                         continue;
                     }
@@ -686,13 +749,18 @@ impl BridgeServer {
                         clients: clients.clone(),
                     };
                     let ctl = conn.try_clone().ok();
-                    if let Ok(h) = std::thread::Builder::new().name("fluxvm-netobs-bridge-rx".into()).spawn(move || {
-                        w.serve(conn);
-                    }) {
+                    if let Ok(h) = std::thread::Builder::new()
+                        .name("fluxvm-netobs-bridge-rx".into())
+                        .spawn(move || {
+                            w.serve(conn);
+                        })
+                    {
                         workers.push((h, ctl));
                     }
                 }
-                Err(e) if e.kind() == io::ErrorKind::WouldBlock => std::thread::sleep(Duration::from_millis(10)),
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(10))
+                }
                 Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
                 Err(e) => {
                     self.stop.store(true, Ordering::Relaxed);
@@ -735,7 +803,12 @@ enum Fill {
 }
 
 /// Reads exactly `buf.len()` bytes, tolerating read timeouts so `stop` is honoured.
-fn fill<R: Read>(r: &mut R, buf: &mut [u8], stop: &AtomicBool, stall: Duration) -> io::Result<Fill> {
+fn fill<R: Read>(
+    r: &mut R,
+    buf: &mut [u8],
+    stop: &AtomicBool,
+    stall: Duration,
+) -> io::Result<Fill> {
     let mut got = 0;
     let mut last = Instant::now();
     while got < buf.len() {
@@ -748,7 +821,12 @@ fn fill<R: Read>(r: &mut R, buf: &mut [u8], stop: &AtomicBool, stall: Duration) 
                 got += n;
                 last = Instant::now();
             }
-            Err(e) if matches!(e.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut) => {
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                ) =>
+            {
                 if got > 0 && last.elapsed() > stall {
                     return Ok(Fill::Stalled);
                 }
@@ -788,9 +866,14 @@ impl Worker {
         if batch.is_empty() {
             return;
         }
-        self.obs.ingest_batch(batch.iter().map(|(r, m)| (&arena[r.clone()], m)));
-        self.stats.frames.fetch_add(batch.len() as u64, Ordering::Relaxed);
-        self.tap_stats.enqueued.fetch_add(batch.len() as u64, Ordering::Relaxed);
+        self.obs
+            .ingest_batch(batch.iter().map(|(r, m)| (&arena[r.clone()], m)));
+        self.stats
+            .frames
+            .fetch_add(batch.len() as u64, Ordering::Relaxed);
+        self.tap_stats
+            .enqueued
+            .fetch_add(batch.len() as u64, Ordering::Relaxed);
         batch.clear();
         arena.clear();
     }
@@ -882,13 +965,24 @@ impl Worker {
                         idents.insert(id, Arc::new(identity));
                     }
                 }
-                Ok(Decoded::Frame { id, ts_us, direction, verdict, data }) => match idents.get(&id) {
+                Ok(Decoded::Frame {
+                    id,
+                    ts_us,
+                    direction,
+                    verdict,
+                    data,
+                }) => match idents.get(&id) {
                     Some(identity) => {
                         let start = arena.len();
                         arena.extend_from_slice(data);
                         batch.push((
                             start..arena.len(),
-                            FrameMeta { identity: identity.clone(), ts_us, direction, verdict },
+                            FrameMeta {
+                                identity: identity.clone(),
+                                ts_us,
+                                direction,
+                                verdict,
+                            },
                         ));
                         if batch.len() >= self.cfg.batch.max(1) {
                             self.flush(&mut arena, &mut batch);
@@ -909,7 +1003,9 @@ impl Worker {
                         dropped.saturating_sub(last)
                     };
                     if delta > 0 {
-                        self.stats.client_reported_dropped.fetch_add(delta, Ordering::Relaxed);
+                        self.stats
+                            .client_reported_dropped
+                            .fetch_add(delta, Ordering::Relaxed);
                         self.tap_stats.dropped.fetch_add(delta, Ordering::Relaxed);
                     }
                 }
@@ -958,7 +1054,12 @@ mod tests {
     }
 
     fn meta(id: &Arc<Identity>, ts: u64, d: Direction, v: Verdict) -> FrameMeta {
-        FrameMeta { identity: id.clone(), ts_us: ts, direction: d, verdict: v }
+        FrameMeta {
+            identity: id.clone(),
+            ts_us: ts,
+            direction: d,
+            verdict: v,
+        }
     }
 
     // ---- wire format --------------------------------------------------------------------------------------
@@ -968,7 +1069,12 @@ mod tests {
         let id = ident("vm-ü");
         let mut out = Vec::new();
         encode_ident(&mut out, 7, &id).unwrap();
-        let m = meta(&id, 123_456, Direction::ToGuest, Verdict::Denied(DropReason::Policy));
+        let m = meta(
+            &id,
+            123_456,
+            Direction::ToGuest,
+            Verdict::Denied(DropReason::Policy),
+        );
         encode_frame(&mut out, 7, &m, b"frame-bytes").unwrap();
         encode_stats(&mut out, 5, 2);
 
@@ -997,7 +1103,13 @@ mod tests {
                 data: b"frame-bytes"
             }
         );
-        assert_eq!(recs[2], Decoded::Stats { sent: 5, dropped: 2 });
+        assert_eq!(
+            recs[2],
+            Decoded::Stats {
+                sent: 5,
+                dropped: 2
+            }
+        );
     }
 
     #[test]
@@ -1017,7 +1129,13 @@ mod tests {
         let id = ident("vm");
         let mut good = Vec::new();
         encode_ident(&mut good, 1, &id).unwrap();
-        encode_frame(&mut good, 1, &meta(&id, 1, Direction::FromGuest, Verdict::Allowed), &[1, 2, 3]).unwrap();
+        encode_frame(
+            &mut good,
+            1,
+            &meta(&id, 1, Direction::FromGuest, Verdict::Allowed),
+            &[1, 2, 3],
+        )
+        .unwrap();
         // Every truncation of every record body.
         let mut at = 0;
         while at < good.len() {
@@ -1030,7 +1148,9 @@ mod tests {
         }
         let mut s = 99u64;
         for _ in 0..20_000 {
-            s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            s = s
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             let len = (s >> 56) as usize;
             let b: Vec<u8> = (0..len).map(|i| (s >> (i % 48)) as u8 ^ i as u8).collect();
             let _ = decode_body(&b);
@@ -1039,7 +1159,13 @@ mod tests {
         assert!(matches!(decode_body(&[99, 1, 2]), Ok(Decoded::Unknown(99))));
         // Direction 5 is not a direction.
         let mut f = Vec::new();
-        encode_frame(&mut f, 0, &meta(&id, 1, Direction::FromGuest, Verdict::Allowed), b"x").unwrap();
+        encode_frame(
+            &mut f,
+            0,
+            &meta(&id, 1, Direction::FromGuest, Verdict::Allowed),
+            b"x",
+        )
+        .unwrap();
         f[4 + 1 + 4 + 8] = 5;
         assert_eq!(decode_body(&f[4..]), Err(DecodeError::BadDirection));
     }
@@ -1070,15 +1196,39 @@ mod tests {
         let a = ident("vm-a");
         let b = Identity::new("vm-b", "net-a", "private", [2, 0, 0, 0, 0, 9]);
 
-        let hello = l7f::client_hello(0x0303, &[0x1301], &[l7f::ext_sni("bridge.example.org"), l7f::ext_alpn(&["h2"])]);
+        let hello = l7f::client_hello(
+            0x0303,
+            &[0x1301],
+            &[l7f::ext_sni("bridge.example.org"), l7f::ext_alpn(&["h2"])],
+        );
         assert!(wait_for(|| {
-            client.tap_as(&a, Direction::FromGuest, Verdict::Allowed, &udp_v4((G, 4000), (S, 9), b"warmup"));
+            client.tap_as(
+                &a,
+                Direction::FromGuest,
+                Verdict::Allowed,
+                &udp_v4((G, 4000), (S, 9), b"warmup"),
+            );
             client.flush(Duration::from_millis(200));
             BridgeServerStats::get(&server.stats.frames) > 0
         }));
-        client.tap_as(&a, Direction::FromGuest, Verdict::Allowed, &tcp_v4((G, 5000), (S, 443), 1, 0, TCP_SYN, 100, b""));
-        client.tap_as(&a, Direction::FromGuest, Verdict::Allowed, &tcp_v4((G, 5000), (S, 443), 2, 1, TCP_ACK | TCP_PSH, 100, &hello));
-        client.tap_as(&b, Direction::ToGuest, Verdict::Denied(DropReason::Policy), &udp_v4((S, 53), (G, 7000), b"x"));
+        client.tap_as(
+            &a,
+            Direction::FromGuest,
+            Verdict::Allowed,
+            &tcp_v4((G, 5000), (S, 443), 1, 0, TCP_SYN, 100, b""),
+        );
+        client.tap_as(
+            &a,
+            Direction::FromGuest,
+            Verdict::Allowed,
+            &tcp_v4((G, 5000), (S, 443), 2, 1, TCP_ACK | TCP_PSH, 100, &hello),
+        );
+        client.tap_as(
+            &b,
+            Direction::ToGuest,
+            Verdict::Denied(DropReason::Policy),
+            &udp_v4((S, 53), (G, 7000), b"x"),
+        );
         assert!(client.flush(Duration::from_secs(5)));
 
         assert!(wait_for(|| obs.flows(&FlowQuery::default()).len() >= 3));
@@ -1088,10 +1238,16 @@ mod tests {
         assert_eq!(tls.sni.as_deref(), Some("bridge.example.org"));
         assert_eq!(tls.network, "net-a");
         let denied = flows.iter().find(|f| f.vm_id == "vm-b").unwrap();
-        assert_eq!((denied.verdict, denied.drop_reason), ("denied", Some("policy")));
+        assert_eq!(
+            (denied.verdict, denied.drop_reason),
+            ("denied", Some("policy"))
+        );
         assert_eq!(denied.mac, "02:00:00:00:00:09");
         server.shutdown().unwrap();
-        assert!(!sock(&dir).exists(), "the socket file is removed on shutdown");
+        assert!(
+            !sock(&dir).exists(),
+            "the socket file is removed on shutdown"
+        );
     }
 
     #[test]
@@ -1100,20 +1256,37 @@ mod tests {
         let (obs, server) = start(&dir);
         let client = BridgeClient::connect(
             sock(&dir),
-            BridgeClientConfig { snaplen: 64, ..BridgeClientConfig::default() },
+            BridgeClientConfig {
+                snaplen: 64,
+                ..BridgeClientConfig::default()
+            },
         );
         let a = ident("vm-a");
         // One frame larger than the wire allows: dropped and counted client side.
         client.tap_as(&a, Direction::FromGuest, Verdict::Allowed, &[0u8; 100]);
         assert!(wait_for(|| {
-            client.tap_as(&a, Direction::FromGuest, Verdict::Allowed, &udp_v4((G, 1), (S, 2), b"x"));
+            client.tap_as(
+                &a,
+                Direction::FromGuest,
+                Verdict::Allowed,
+                &udp_v4((G, 1), (S, 2), b"x"),
+            );
             BridgeServerStats::get(&server.stats.frames) > 2
         }));
         assert!(BridgeClientStats::get(&client.stats().truncated_to_snaplen) > 0);
         // Provoke a client-side drop that the server can only learn from STATS.
-        client.shared.stats.dropped_disconnected.fetch_add(41, Ordering::Relaxed);
+        client
+            .shared
+            .stats
+            .dropped_disconnected
+            .fetch_add(41, Ordering::Relaxed);
         assert!(wait_for(|| {
-            client.tap_as(&a, Direction::FromGuest, Verdict::Allowed, &udp_v4((G, 1), (S, 2), b"x"));
+            client.tap_as(
+                &a,
+                Direction::FromGuest,
+                Verdict::Allowed,
+                &udp_v4((G, 1), (S, 2), b"x"),
+            );
             BridgeServerStats::get(&server.stats.client_reported_dropped) >= 41
         }));
         let s = obs.summary(now_us());
@@ -1127,7 +1300,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let client = BridgeClient::connect(
             sock(&dir),
-            BridgeClientConfig { queue_capacity: 8, ..BridgeClientConfig::default() },
+            BridgeClientConfig {
+                queue_capacity: 8,
+                ..BridgeClientConfig::default()
+            },
         );
         let a = ident("vm-a");
         let f = udp_v4((G, 1), (S, 2), &[7u8; 500]);
@@ -1135,10 +1311,16 @@ mod tests {
         for _ in 0..20_000 {
             client.tap_as(&a, Direction::FromGuest, Verdict::Allowed, &f);
         }
-        assert!(t.elapsed() < Duration::from_secs(5), "tap_as must never block");
+        assert!(
+            t.elapsed() < Duration::from_secs(5),
+            "tap_as must never block"
+        );
         let st = client.stats();
         assert!(BridgeClientStats::get(&st.dropped_queue_full) > 0);
-        assert!(wait_for(|| BridgeClientStats::get(&st.dropped_disconnected) > 0 || BridgeClientStats::get(&st.connect_failures) > 0));
+        assert!(wait_for(|| BridgeClientStats::get(
+            &st.dropped_disconnected
+        ) > 0
+            || BridgeClientStats::get(&st.connect_failures) > 0));
         assert_eq!(BridgeClientStats::get(&st.sent), 0);
     }
 
@@ -1178,7 +1360,10 @@ mod tests {
             std::thread::sleep(Duration::from_micros(200));
             errors = BridgeClientStats::get(&client.stats().dropped_write_error);
         }
-        assert!(errors > 0, "a write to a peer that never reads must time out and be counted");
+        assert!(
+            errors > 0,
+            "a write to a peer that never reads must time out and be counted"
+        );
         assert!(BridgeClientStats::get(&client.stats().dropped_queue_full) + errors > 0);
         drop(client);
         done.store(true, Ordering::Relaxed);
@@ -1198,7 +1383,13 @@ mod tests {
 
     fn frame_record(id: u32, f: &[u8]) -> Vec<u8> {
         let mut v = Vec::new();
-        encode_frame(&mut v, id, &meta(&ident("x"), 1_000, Direction::FromGuest, Verdict::Allowed), f).unwrap();
+        encode_frame(
+            &mut v,
+            id,
+            &meta(&ident("x"), 1_000, Direction::FromGuest, Verdict::Allowed),
+            f,
+        )
+        .unwrap();
         v
     }
 
@@ -1235,13 +1426,19 @@ mod tests {
         w.extend_from_slice(&u32::MAX.to_be_bytes());
         c.write_all(&w).unwrap();
         c.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
-        assert!(wait_for(|| BridgeServerStats::get(&server.stats.oversize_records) == 1));
+        assert!(wait_for(|| BridgeServerStats::get(
+            &server.stats.oversize_records
+        ) == 1));
         // The server hung up: a read sees EOF.
         let mut b = [0u8; 1];
         match c.read(&mut b) {
             Ok(0) => {}
             // Closing a socket that still has unread data may surface as a reset instead of a clean EOF.
-            Err(e) if !matches!(e.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut) => {}
+            Err(e)
+                if !matches!(
+                    e.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                ) => {}
             other => panic!("expected the server to hang up, got {other:?}"),
         }
         assert_eq!(obs.counters().frames, 0);
@@ -1261,7 +1458,9 @@ mod tests {
         w.extend_from_slice(&partial[..partial.len() - 5]);
         c.write_all(&w).unwrap();
         drop(c); // EOF in the middle of a record
-        assert!(wait_for(|| BridgeServerStats::get(&server.stats.truncated) == 1));
+        assert!(wait_for(
+            || BridgeServerStats::get(&server.stats.truncated) == 1
+        ));
         assert_eq!(obs.counters().frames, 1, "only the complete frame arrives");
         assert_eq!(BridgeServerStats::get(&server.stats.frames), 1);
         server.shutdown().unwrap();
@@ -1274,16 +1473,22 @@ mod tests {
         let mut c = raw_connect(&dir);
         c.write_all(&encode_preamble(1)[..7]).unwrap();
         drop(c);
-        assert!(wait_for(|| BridgeServerStats::get(&server.stats.truncated) == 1));
+        assert!(wait_for(
+            || BridgeServerStats::get(&server.stats.truncated) == 1
+        ));
 
         let mut c = raw_connect(&dir);
         let mut p = encode_preamble(1);
         p[4] = 99;
         c.write_all(&p).unwrap();
-        assert!(wait_for(|| BridgeServerStats::get(&server.stats.bad_version) == 1));
+        assert!(wait_for(|| BridgeServerStats::get(
+            &server.stats.bad_version
+        ) == 1));
         let mut c2 = raw_connect(&dir);
         c2.write_all(b"GET / HTTP/1.1\r\n\r\n....").unwrap();
-        assert!(wait_for(|| BridgeServerStats::get(&server.stats.bad_version) == 2));
+        assert!(wait_for(|| BridgeServerStats::get(
+            &server.stats.bad_version
+        ) == 2));
         assert_eq!(obs.counters().frames, 0);
         server.shutdown().unwrap();
     }
@@ -1320,13 +1525,20 @@ mod tests {
         let client = BridgeClient::connect(sock(&dir), BridgeClientConfig::default());
         let a = ident("vm-a");
         let send = |port: u16| {
-            client.tap_as(&a, Direction::FromGuest, Verdict::Allowed, &udp_v4((G, port), (S, 9000), b"ping"));
+            client.tap_as(
+                &a,
+                Direction::FromGuest,
+                Verdict::Allowed,
+                &udp_v4((G, port), (S, 9000), b"ping"),
+            );
         };
         // No server yet: nothing is delivered, the client does not hang or panic.
         for p in 0..10 {
             send(2000 + p);
         }
-        assert!(wait_for(|| BridgeClientStats::get(&client.stats().connect_failures) > 0));
+        assert!(wait_for(|| BridgeClientStats::get(
+            &client.stats().connect_failures
+        ) > 0));
 
         let server = BridgeServer::bind(sock(&dir)).unwrap().spawn(obs.clone());
         assert!(wait_for(|| {
@@ -1347,7 +1559,12 @@ mod tests {
         assert!(BridgeClientStats::get(&client.stats().connects) > first_conn);
         assert!(BridgeClientStats::get(&client.stats().reconnects) >= 1);
         let flows = obs2.flows(&FlowQuery::default());
-        assert!(flows.iter().all(|f| f.vm_id == "vm-a" && f.network == "net-a"), "identity survived the reconnect");
+        assert!(
+            flows
+                .iter()
+                .all(|f| f.vm_id == "vm-a" && f.network == "net-a"),
+            "identity survived the reconnect"
+        );
         server2.shutdown().unwrap();
     }
 
@@ -1372,7 +1589,10 @@ mod tests {
         let obs = Arc::new(Observer::new(ObserverConfig::default()));
         let server = BridgeServer::bind_with(
             sock(&dir),
-            BridgeServerConfig { max_connections: 2, ..BridgeServerConfig::default() },
+            BridgeServerConfig {
+                max_connections: 2,
+                ..BridgeServerConfig::default()
+            },
         )
         .unwrap()
         .spawn(obs);
@@ -1383,7 +1603,9 @@ mod tests {
             keep.push(c);
             std::thread::sleep(Duration::from_millis(30));
         }
-        assert!(wait_for(|| BridgeServerStats::get(&server.stats.connections_rejected) >= 1));
+        assert!(wait_for(|| BridgeServerStats::get(
+            &server.stats.connections_rejected
+        ) >= 1));
         assert!(BridgeServerStats::get(&server.stats.active) <= 2);
         drop(keep);
         server.shutdown().unwrap();
@@ -1394,14 +1616,18 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (obs, server) = start(&dir);
         let per = 500u64;
-        let clients: Vec<BridgeClient> =
-            (0..4).map(|_| BridgeClient::connect(sock(&dir), BridgeClientConfig::default())).collect();
+        let clients: Vec<BridgeClient> = (0..4)
+            .map(|_| BridgeClient::connect(sock(&dir), BridgeClientConfig::default()))
+            .collect();
         // Wait until every client is connected.
-        assert!(wait_for(|| clients.iter().all(|c| BridgeClientStats::get(&c.stats().connects) >= 1)));
+        assert!(wait_for(|| clients
+            .iter()
+            .all(|c| BridgeClientStats::get(&c.stats().connects) >= 1)));
         std::thread::scope(|sc| {
             for (n, c) in clients.iter().enumerate() {
                 sc.spawn(move || {
-                    let id = Identity::new(&format!("vm-{n}"), "net-a", "private", build::GUEST_MAC);
+                    let id =
+                        Identity::new(&format!("vm-{n}"), "net-a", "private", build::GUEST_MAC);
                     for i in 0..per {
                         let f = udp_v4((G, 10_000 + (i % 50) as u16), (S, 9000), b"concurrent");
                         // Retry on a full queue so the test counts deliveries, not tap drops.

@@ -65,7 +65,9 @@ fn parse_size(s: &str) -> Result<u64> {
         Some('T' | 't') => (&s[..s.len() - 1], 1 << 40),
         _ => (s, 1),
     };
-    num.parse::<u64>()?.checked_mul(mul).context("size overflow")
+    num.parse::<u64>()?
+        .checked_mul(mul)
+        .context("size overflow")
 }
 
 fn is_url(s: &str) -> bool {
@@ -75,7 +77,9 @@ fn is_url(s: &str) -> bool {
 fn parse_export(spec: &str) -> Result<Export> {
     let mut parts = spec.split(',');
     let first = parts.next().unwrap_or("");
-    let (name, base) = first.split_once('=').context("export must start with name=base")?;
+    let (name, base) = first
+        .split_once('=')
+        .context("export must start with name=base")?;
     let (mut overlay, mut ro, mut iops, mut bps) = (None, false, None, None);
     let (mut encrypt, mut keyfile, mut cache) = (false, None, None);
     let mut lazy = LazyConfig::default();
@@ -95,8 +99,14 @@ fn parse_export(spec: &str) -> Result<Export> {
         }
     }
     let key = load_key(keyfile.as_deref())?;
-    let open = OpenOptions { key: key.clone(), lazy: lazy.clone() };
-    let create = CreateOptions { size: None, cipher: if encrypt { key.clone() } else { None } };
+    let open = OpenOptions {
+        key: key.clone(),
+        lazy: lazy.clone(),
+    };
+    let create = CreateOptions {
+        size: None,
+        cipher: if encrypt { key.clone() } else { None },
+    };
     if encrypt && key.is_none() {
         bail!("`encrypt` needs a key (keyfile= or {KEY_ENV})");
     }
@@ -141,8 +151,14 @@ async fn main() -> Result<()> {
                 match a.as_str() {
                     "--export" => specs.push(args.next().context("--export value")?),
                     "--listen" => listen = args.next().context("--listen value")?,
-                    "--watch-pid-file" => watch_file = Some(PathBuf::from(args.next().context("--watch-pid-file value")?)),
-                    "--watch-pid" => watch_pid = Some(args.next().context("--watch-pid value")?.parse::<i32>()?),
+                    "--watch-pid-file" => {
+                        watch_file = Some(PathBuf::from(
+                            args.next().context("--watch-pid-file value")?,
+                        ))
+                    }
+                    "--watch-pid" => {
+                        watch_pid = Some(args.next().context("--watch-pid value")?.parse::<i32>()?)
+                    }
                     _ => bail!("unknown argument `{a}`\n{USAGE}"),
                 }
             }
@@ -151,7 +167,10 @@ async fn main() -> Result<()> {
             }
             // Backends use blocking IO (and a blocking http client).
             let exports = tokio::task::spawn_blocking(move || {
-                specs.iter().map(|s| parse_export(s)).collect::<Result<Vec<_>>>()
+                specs
+                    .iter()
+                    .map(|s| parse_export(s))
+                    .collect::<Result<Vec<_>>>()
             })
             .await??;
             let listener = tokio::net::TcpListener::bind(&listen).await?;
@@ -203,10 +222,20 @@ async fn main() -> Result<()> {
             let key = load_key(kf.as_deref())?;
             tokio::task::spawn_blocking(move || -> Result<()> {
                 let enc = overlay_info(Path::new(&from))?.0;
-                let open = OpenOptions { key: key.clone(), ..Default::default() };
-                let create =
-                    CreateOptions { size: None, cipher: if enc { key } else { None } };
-                CowBackend::create_on_overlay_opts(Path::new(&to), Path::new(&from), &create, &open)?;
+                let open = OpenOptions {
+                    key: key.clone(),
+                    ..Default::default()
+                };
+                let create = CreateOptions {
+                    size: None,
+                    cipher: if enc { key } else { None },
+                };
+                CowBackend::create_on_overlay_opts(
+                    Path::new(&to),
+                    Path::new(&from),
+                    &create,
+                    &open,
+                )?;
                 println!("created {to} on top of {from} (parent frozen)");
                 Ok(())
             })
@@ -224,7 +253,10 @@ async fn main() -> Result<()> {
                 }
             }
             let (ov, parent) = (ov.context("--overlay")?, parent.context("--parent")?);
-            let mut open = OpenOptions { key: load_key(kf.as_deref())?, ..Default::default() };
+            let mut open = OpenOptions {
+                key: load_key(kf.as_deref())?,
+                ..Default::default()
+            };
             if let Some(s) = sha {
                 open.lazy.sha256 = Some(parse_hex32(&s)?);
             }
@@ -244,7 +276,10 @@ async fn main() -> Result<()> {
                     _ => bail!("unknown argument `{a}`\n{USAGE}"),
                 }
             }
-            let (ov, size) = (ov.context("--overlay")?, parse_size(&size.context("--size")?)?);
+            let (ov, size) = (
+                ov.context("--overlay")?,
+                parse_size(&size.context("--size")?)?,
+            );
             tokio::task::spawn_blocking(move || -> Result<()> {
                 let moved = CowBackend::resize_file(Path::new(&ov), size)?;
                 println!(

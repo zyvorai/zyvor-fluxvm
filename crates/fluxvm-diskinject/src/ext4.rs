@@ -24,7 +24,8 @@ pub const ROOT_INO: u32 = 2;
 // compat
 const COMPAT_HAS_JOURNAL: u32 = 0x4;
 const COMPAT_ORPHAN_FILE: u32 = 0x1000;
-const COMPAT_KNOWN_OK: u32 = 0x1 | 0x2 | 0x4 | 0x8 | 0x10 | 0x20 | 0x200 | 0x800 | COMPAT_ORPHAN_FILE;
+const COMPAT_KNOWN_OK: u32 =
+    0x1 | 0x2 | 0x4 | 0x8 | 0x10 | 0x20 | 0x200 | 0x800 | COMPAT_ORPHAN_FILE;
 // incompat
 const INCOMPAT_FILETYPE: u32 = 0x2;
 const INCOMPAT_RECOVER: u32 = 0x4;
@@ -32,8 +33,12 @@ const INCOMPAT_EXTENTS: u32 = 0x40;
 const INCOMPAT_64BIT: u32 = 0x80;
 const INCOMPAT_FLEX_BG: u32 = 0x200;
 const INCOMPAT_CSUM_SEED: u32 = 0x2000;
-const INCOMPAT_OK: u32 =
-    INCOMPAT_FILETYPE | INCOMPAT_RECOVER | INCOMPAT_EXTENTS | INCOMPAT_64BIT | INCOMPAT_FLEX_BG | INCOMPAT_CSUM_SEED;
+const INCOMPAT_OK: u32 = INCOMPAT_FILETYPE
+    | INCOMPAT_RECOVER
+    | INCOMPAT_EXTENTS
+    | INCOMPAT_64BIT
+    | INCOMPAT_FLEX_BG
+    | INCOMPAT_CSUM_SEED;
 // ro_compat
 const RO_METADATA_CSUM: u32 = 0x400;
 const RO_GDT_CSUM: u32 = 0x10;
@@ -143,7 +148,9 @@ impl Fs {
         }
         let rev = le32(&sb, 0x4C);
         if rev != 1 {
-            return Err(Error::Unsupported(format!("ext revision {rev} (need dynamic rev 1)")));
+            return Err(Error::Unsupported(format!(
+                "ext revision {rev} (need dynamic rev 1)"
+            )));
         }
         let compat = le32(&sb, 0x5C);
         let incompat = le32(&sb, 0x60);
@@ -172,10 +179,14 @@ impl Fs {
             )));
         }
         if incompat & INCOMPAT_EXTENTS == 0 {
-            return Err(Error::Unsupported("filesystem has no extents feature (ext2/3)".into()));
+            return Err(Error::Unsupported(
+                "filesystem has no extents feature (ext2/3)".into(),
+            ));
         }
         if incompat & INCOMPAT_FILETYPE == 0 {
-            return Err(Error::Unsupported("filesystem has no filetype feature".into()));
+            return Err(Error::Unsupported(
+                "filesystem has no filetype feature".into(),
+            ));
         }
         let csum = ro & RO_METADATA_CSUM != 0;
         if ro & RO_GDT_CSUM != 0 {
@@ -192,18 +203,27 @@ impl Fs {
         if le32(&sb, 0xE8) != 0 {
             return Err(Error::Unsupported("orphan inode list is not empty".into()));
         }
-        for (off, what) in [(0x240usize, "user quota"), (0x244, "group quota"), (0x26C, "project quota"), (0x254, "snapshot")] {
+        for (off, what) in [
+            (0x240usize, "user quota"),
+            (0x244, "group quota"),
+            (0x26C, "project quota"),
+            (0x254, "snapshot"),
+        ] {
             if le32(&sb, off) != 0 {
                 return Err(Error::Unsupported(format!("{what} inode in use")));
             }
         }
         let log_bs = le32(&sb, 0x18);
         if log_bs > 2 {
-            return Err(Error::Unsupported("block size above 4096 not supported".into()));
+            return Err(Error::Unsupported(
+                "block size above 4096 not supported".into(),
+            ));
         }
         let bs = 1024usize << log_bs;
         if le32(&sb, 0x1C) != log_bs {
-            return Err(Error::Unsupported("bigalloc/cluster size differs from block size".into()));
+            return Err(Error::Unsupported(
+                "bigalloc/cluster size differs from block size".into(),
+            ));
         }
         let is64 = incompat & INCOMPAT_64BIT != 0;
         let mut blocks_count = le32(&sb, 0x4) as u64;
@@ -237,11 +257,15 @@ impl Fs {
         }
         let groups = ((blocks_count - first_data_block) as usize).div_ceil(bpg);
         if le32(&sb, 0x0) as u64 != groups as u64 * ipg as u64 {
-            return Err(Error::Corrupt("inodes_count != groups * inodes_per_group".into()));
+            return Err(Error::Corrupt(
+                "inodes_count != groups * inodes_per_group".into(),
+            ));
         }
         let desc_size = if is64 { le16(&sb, 0xFE) as usize } else { 32 };
         if is64 && desc_size != 64 {
-            return Err(Error::Unsupported(format!("64bit descriptor size {desc_size}")));
+            return Err(Error::Unsupported(format!(
+                "64bit descriptor size {desc_size}"
+            )));
         }
         let gdt_block = first_data_block + 1;
         let gdt_blocks = ((groups * desc_size) as u64).div_ceil(bs as u64);
@@ -255,7 +279,9 @@ impl Fs {
                 return Err(Error::Corrupt("superblock checksum mismatch".into()));
             }
             if sb[0x175] != 1 {
-                return Err(Error::Unsupported("unknown superblock checksum type".into()));
+                return Err(Error::Unsupported(
+                    "unknown superblock checksum type".into(),
+                ));
             }
         }
         let now = std::time::SystemTime::now()
@@ -288,12 +314,16 @@ impl Fs {
         for g in 0..groups {
             let d = fs.read_gd(g)?;
             if csum && le16(&d, 0x1E) != fs.gd_csum(g, &d) {
-                return Err(Error::Corrupt(format!("group descriptor {g} checksum mismatch")));
+                return Err(Error::Corrupt(format!(
+                    "group descriptor {g} checksum mismatch"
+                )));
             }
             let it = fs.gd_inode_table(&d);
             let itb = (ipg * inode_size).div_ceil(bs) as u64;
             if it == 0 || it + itb > blocks_count {
-                return Err(Error::Corrupt(format!("group {g} inode table out of range")));
+                return Err(Error::Corrupt(format!(
+                    "group {g} inode table out of range"
+                )));
             }
         }
         // Root inode must be a directory.
@@ -314,7 +344,9 @@ impl Fs {
 
     fn read_block(&self, blk: u64) -> Result<Vec<u8>> {
         if blk >= self.blocks_count {
-            return Err(Error::Corrupt(format!("block {blk} beyond end of filesystem")));
+            return Err(Error::Corrupt(format!(
+                "block {blk} beyond end of filesystem"
+            )));
         }
         if let Some(b) = self.overlay.get(&blk) {
             return Ok(b.clone());
@@ -480,7 +512,9 @@ impl Fs {
     fn check_orphan_file_empty(&mut self) -> Result<()> {
         let ino = le32(&self.sb, 0x280);
         if ino == 0 {
-            return Err(Error::Corrupt("orphan_file feature without orphan file inode".into()));
+            return Err(Error::Corrupt(
+                "orphan_file feature without orphan file inode".into(),
+            ));
         }
         let raw = self.read_inode(ino)?;
         let (ext, _) = self.extents_of(ino, &raw)?;
@@ -588,7 +622,14 @@ impl Fs {
         let iseed = self.inode_seed(ino, raw);
         let mut out = Vec::new();
         let mut tree = Vec::new();
-        self.parse_node(&raw[0x28..0x28 + 60], true, iseed, None, &mut out, &mut tree)?;
+        self.parse_node(
+            &raw[0x28..0x28 + 60],
+            true,
+            iseed,
+            None,
+            &mut out,
+            &mut tree,
+        )?;
         out.sort_by_key(|e| e.lblock);
         Ok((out, tree))
     }
@@ -633,10 +674,16 @@ impl Fs {
                     (raw_len, false)
                 };
                 let phys = le32(e, 8) as u64 | (le16(e, 6) as u64) << 32;
-                if len == 0 || phys + len as u64 > self.blocks_count || phys < self.first_data_block {
+                if len == 0 || phys + len as u64 > self.blocks_count || phys < self.first_data_block
+                {
                     return Err(Error::Corrupt("extent out of range".into()));
                 }
-                out.push(Extent { lblock: le32(e, 0), len, phys, uninit });
+                out.push(Extent {
+                    lblock: le32(e, 0),
+                    len,
+                    phys,
+                    uninit,
+                });
             } else {
                 let child = le32(e, 4) as u64 | (le16(e, 8) as u64) << 32;
                 tree.push(child);
@@ -650,7 +697,9 @@ impl Fs {
     fn read_data(&self, ino: u32, raw: &[u8]) -> Result<Vec<u8>> {
         let size = Self::inode_size_bytes(raw);
         if size > MAX_READ {
-            return Err(Error::Unsupported(format!("inode {ino} too large to read ({size} bytes)")));
+            return Err(Error::Unsupported(format!(
+                "inode {ino} too large to read ({size} bytes)"
+            )));
         }
         let (ext, _) = self.extents_of(ino, raw)?;
         let mut out = vec![0u8; size as usize];
@@ -702,7 +751,9 @@ impl Fs {
         let mut v = Vec::new();
         for e in ext {
             if e.uninit {
-                return Err(Error::Unsupported("directory with uninitialised extent".into()));
+                return Err(Error::Unsupported(
+                    "directory with uninitialised extent".into(),
+                ));
             }
             for k in 0..e.len as u64 {
                 if (e.lblock as u64 + k) < nblocks {
@@ -759,12 +810,15 @@ impl Fs {
             let mut b = self.read_block(*blk)?;
             if self.csum {
                 let t = self.bs - 12;
-                let is_tail = le32(&b, t) == 0 && le16(&b, t + 4) == 12 && b[t + 6] == 0 && b[t + 7] == 0xDE;
+                let is_tail =
+                    le32(&b, t) == 0 && le16(&b, t + 4) == 12 && b[t + 6] == 0 && b[t + 7] == 0xDE;
                 if !is_tail {
                     continue; // htree interior node or foreign shape: leave alone
                 }
                 if le32(&b, t + 8) != crc32c_raw(iseed, &b[..t]) {
-                    return Err(Error::Corrupt(format!("directory block {blk} checksum mismatch")));
+                    return Err(Error::Corrupt(format!(
+                        "directory block {blk} checksum mismatch"
+                    )));
                 }
             }
             let mut off = 0usize;
@@ -864,7 +918,9 @@ impl Fs {
         let mut merged = false;
         if let Some(last) = ext.last_mut() {
             if last.uninit {
-                return Err(Error::Unsupported("directory ends in uninitialised extent".into()));
+                return Err(Error::Unsupported(
+                    "directory ends in uninitialised extent".into(),
+                ));
             }
             if last.lblock + last.len == new_l
                 && last.phys + last.len as u64 == pb
@@ -875,7 +931,12 @@ impl Fs {
             }
         }
         if !merged {
-            ext.push(Extent { lblock: new_l, len: 1, phys: pb, uninit: false });
+            ext.push(Extent {
+                lblock: new_l,
+                len: 1,
+                phys: pb,
+                uninit: false,
+            });
         }
         let extra = self.write_extents(dir_ino, &mut raw, &ext, leaf, goal_g)?;
         let nsize = size + self.bs as u64;
@@ -915,7 +976,9 @@ impl Fs {
                     && b[21] == b'.';
                 let dd_rec = le16(&b, 12 + 4) as usize;
                 if !dot_ok || dd_rec != self.bs - 12 {
-                    return Err(Error::Corrupt("indexed directory has unexpected root block".into()));
+                    return Err(Error::Corrupt(
+                        "indexed directory has unexpected root block".into(),
+                    ));
                 }
                 // drop dx_root_info / dx entries; shrink ".." to leave room for the tail
                 b[24..].fill(0);
@@ -969,7 +1032,9 @@ impl Fs {
         }
         let max = (self.bs - 12) / 12;
         if ext.len() > max {
-            return Err(Error::Unsupported("too many extents for one leaf block".into()));
+            return Err(Error::Unsupported(
+                "too many extents for one leaf block".into(),
+            ));
         }
         let (lb, newly) = match leaf {
             Some(l) => (l, 0),
@@ -983,7 +1048,11 @@ impl Fs {
         for (i, e) in ext.iter().enumerate() {
             let o = 12 + i * 12;
             p32(&mut node, o, e.lblock);
-            let l = if e.uninit { e.len + MAX_EXTENT_LEN } else { e.len };
+            let l = if e.uninit {
+                e.len + MAX_EXTENT_LEN
+            } else {
+                e.len
+            };
             p16(&mut node, o + 4, l as u16);
             p16(&mut node, o + 6, (e.phys >> 32) as u16);
             p32(&mut node, o + 8, e.phys as u32);
@@ -1015,7 +1084,11 @@ impl Fs {
         for (i, e) in ext.iter().enumerate() {
             let o = 12 + i * 12;
             p32(&mut r, o, e.lblock);
-            let l = if e.uninit { e.len + MAX_EXTENT_LEN } else { e.len };
+            let l = if e.uninit {
+                e.len + MAX_EXTENT_LEN
+            } else {
+                e.len
+            };
             p16(&mut r, o + 4, l as u16);
             p16(&mut r, o + 6, (e.phys >> 32) as u16);
             p32(&mut r, o + 8, e.phys as u32);
@@ -1036,7 +1109,9 @@ impl Fs {
         let bmb = self.gd_block_bitmap(d);
         let bm = self.read_block(bmb)?;
         if !self.bitmap_csum_ok(d, 0x18, 0x38, &bm[..self.bpg / 8]) {
-            return Err(Error::Corrupt(format!("group {g} block bitmap checksum mismatch")));
+            return Err(Error::Corrupt(format!(
+                "group {g} block bitmap checksum mismatch"
+            )));
         }
         let (start, n) = self.group_blocks(g);
         let rel = |blk: u64| -> Option<usize> {
@@ -1092,7 +1167,11 @@ impl Fs {
                     continue;
                 }
                 let run_start = i;
-                while i < n && !bit(&bm, i) && (i - run_start) < need as usize && (i - run_start) < MAX_EXTENT_LEN as usize {
+                while i < n
+                    && !bit(&bm, i)
+                    && (i - run_start) < need as usize
+                    && (i - run_start) < MAX_EXTENT_LEN as usize
+                {
                     set_bit(&mut bm, i);
                     i += 1;
                 }
@@ -1101,7 +1180,9 @@ impl Fs {
                 need -= len as u64;
                 let phys = start + run_start as u64;
                 match runs.last_mut() {
-                    Some(l) if l.0 + l.1 as u64 == phys && l.1 + len <= MAX_EXTENT_LEN => l.1 += len,
+                    Some(l) if l.0 + l.1 as u64 == phys && l.1 + len <= MAX_EXTENT_LEN => {
+                        l.1 += len
+                    }
                     _ => runs.push((phys, len)),
                 }
             }
@@ -1144,16 +1225,22 @@ impl Fs {
             let g = ((blk - self.first_data_block) / self.bpg as u64) as usize;
             let mut d = self.read_gd(g)?;
             if self.gd_flags(&d) & BG_BLOCK_UNINIT != 0 {
-                return Err(Error::Corrupt(format!("freeing block {blk} in BLOCK_UNINIT group")));
+                return Err(Error::Corrupt(format!(
+                    "freeing block {blk} in BLOCK_UNINIT group"
+                )));
             }
             if self.is_fs_metadata(blk, &d) {
-                return Err(Error::Corrupt(format!("refusing to free metadata block {blk}")));
+                return Err(Error::Corrupt(format!(
+                    "refusing to free metadata block {blk}"
+                )));
             }
             let mut bm = self.load_block_bitmap(g, &d)?;
             let (gs, _) = self.group_blocks(g);
             let i = (blk - gs) as usize;
             if !bit(&bm, i) {
-                return Err(Error::Corrupt(format!("block {blk} to free is not allocated")));
+                return Err(Error::Corrupt(format!(
+                    "block {blk} to free is not allocated"
+                )));
             }
             clear_bit(&mut bm, i);
             self.bitmap_csum_set(&mut d, 0x18, 0x38, &bm[..self.bpg / 8]);
@@ -1182,7 +1269,9 @@ impl Fs {
             let full = self.read_block(ibm)?;
             let nbytes = self.ipg / 8;
             if !self.bitmap_csum_ok(&d, 0x1A, 0x3A, &full[..nbytes]) {
-                return Err(Error::Corrupt(format!("group {g} inode bitmap checksum mismatch")));
+                return Err(Error::Corrupt(format!(
+                    "group {g} inode bitmap checksum mismatch"
+                )));
             }
             let mut bm = full.clone();
             let free = (0..self.ipg).filter(|&i| !bit(&bm, i)).count() as u32;
@@ -1201,7 +1290,11 @@ impl Fs {
                     "group {g}: inode in use beyond itable_unused boundary"
                 )));
             }
-            let min_idx = if g == 0 { self.first_ino as usize - 1 } else { 0 };
+            let min_idx = if g == 0 {
+                self.first_ino as usize - 1
+            } else {
+                0
+            };
             let Some(idx) = (min_idx..self.ipg).find(|&i| !bit(&bm, i)) else {
                 continue;
             };
@@ -1241,7 +1334,15 @@ impl Fs {
 
     // ---------------------------------------------------------- path walking
 
-    fn new_inode_raw(&self, mode: u16, uid: u32, gid: u32, links: u16, size: u64, flags: u32) -> Vec<u8> {
+    fn new_inode_raw(
+        &self,
+        mode: u16,
+        uid: u32,
+        gid: u32,
+        links: u16,
+        size: u64,
+        flags: u32,
+    ) -> Vec<u8> {
         let mut r = vec![0u8; self.inode_size];
         p16(&mut r, 0, mode);
         p16(&mut r, 2, uid as u16);
@@ -1286,7 +1387,12 @@ impl Fs {
             self.bs as u64,
             EXTENTS_FL,
         );
-        let ext = [Extent { lblock: 0, len: 1, phys: pb, uninit: false }];
+        let ext = [Extent {
+            lblock: 0,
+            len: 1,
+            phys: pb,
+            uninit: false,
+        }];
         raw[0x28..0x28 + 60].copy_from_slice(&Self::build_extent_root(&ext));
         self.set_i_blocks(&mut raw, (self.bs / 512) as u64);
         let iseed = self.inode_seed(ino, &raw);
@@ -1307,7 +1413,9 @@ impl Fs {
         let mut praw = self.read_inode(parent)?;
         let links = le16(&praw, 0x1A);
         if links >= 65000 {
-            return Err(Error::Unsupported("parent directory link count too high".into()));
+            return Err(Error::Unsupported(
+                "parent directory link count too high".into(),
+            ));
         }
         if links > 1 {
             p16(&mut praw, 0x1A, links + 1);
@@ -1498,17 +1606,33 @@ impl Fs {
                 let pg = (parent as usize - 1) / self.ipg;
                 let ino = self.alloc_inode(pg, false)?;
                 goal_g = (ino as usize - 1) / self.ipg;
-                let raw = self.new_inode_raw(S_IFREG | (mode & 0o7777) as u16, uid, gid, 1, 0, EXTENTS_FL);
+                let raw = self.new_inode_raw(
+                    S_IFREG | (mode & 0o7777) as u16,
+                    uid,
+                    gid,
+                    1,
+                    0,
+                    EXTENTS_FL,
+                );
                 (ino, raw, true)
             }
         };
-        let runs = if nblocks > 0 { self.alloc_blocks(goal_g, nblocks)? } else { vec![] };
+        let runs = if nblocks > 0 {
+            self.alloc_blocks(goal_g, nblocks)?
+        } else {
+            vec![]
+        };
         // write data
         let mut ext = Vec::new();
         let mut l = 0u32;
         let mut pos = 0usize;
         for (start, len) in &runs {
-            ext.push(Extent { lblock: l, len: *len, phys: *start, uninit: false });
+            ext.push(Extent {
+                lblock: l,
+                len: *len,
+                phys: *start,
+                uninit: false,
+            });
             for k in 0..*len as u64 {
                 let mut b = vec![0u8; self.bs];
                 let n = std::cmp::min(self.bs, data.len() - pos);
@@ -1570,7 +1694,11 @@ impl Fs {
                 early.push((blk, data));
             }
         }
-        for (blk, data) in early.into_iter().chain(late).chain(std::iter::once((sb_blk, sbb))) {
+        for (blk, data) in early
+            .into_iter()
+            .chain(late)
+            .chain(std::iter::once((sb_blk, sbb)))
+        {
             self.file
                 .write_all_at(&data, self.base + blk * self.bs as u64)?;
         }

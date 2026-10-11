@@ -50,7 +50,10 @@ impl BlockBackend for RawFile {
         self.size
     }
     fn read_at(&self, off: u64, buf: &mut [u8]) -> io::Result<()> {
-        if off.checked_add(buf.len() as u64).is_none_or(|e| e > self.size) {
+        if off
+            .checked_add(buf.len() as u64)
+            .is_none_or(|e| e > self.size)
+        {
             return Err(oob());
         }
         let mut done = 0;
@@ -65,7 +68,10 @@ impl BlockBackend for RawFile {
         Ok(())
     }
     fn write_at(&self, off: u64, data: &[u8]) -> io::Result<()> {
-        if off.checked_add(data.len() as u64).is_none_or(|e| e > self.size) {
+        if off
+            .checked_add(data.len() as u64)
+            .is_none_or(|e| e > self.size)
+        {
             return Err(oob());
         }
         self.file.write_all_at(data, off)

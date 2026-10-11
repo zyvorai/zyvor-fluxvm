@@ -208,7 +208,6 @@ impl Field {
     }
 }
 
-
 #[derive(Debug, Clone)]
 struct Entry {
     field: Field,
@@ -261,7 +260,12 @@ impl Headers {
                 }
             }
             Field::ContentType if self.content_type.is_none() => {
-                let media = v.split(';').next().unwrap_or("").trim().to_ascii_lowercase();
+                let media = v
+                    .split(';')
+                    .next()
+                    .unwrap_or("")
+                    .trim()
+                    .to_ascii_lowercase();
                 if !media.is_empty() && media.len() <= 64 {
                     self.content_type = Some(media);
                 }
@@ -316,7 +320,9 @@ fn read_int(b: &[u8], pos: &mut usize, prefix: u32) -> Result<usize, HpackError>
         if shift > 28 {
             return Err(HpackError::BadInteger);
         }
-        v = v.checked_add(usize::from(byte & 0x7f) << shift).ok_or(HpackError::BadInteger)?;
+        v = v
+            .checked_add(usize::from(byte & 0x7f) << shift)
+            .ok_or(HpackError::BadInteger)?;
         if byte & 0x80 == 0 {
             return Ok(v);
         }
@@ -357,7 +363,11 @@ impl HpackDecoder {
     /// A decoder whose dynamic table starts at `size` bytes (a peer may raise it, up to [`MAX_TABLE_SIZE`], with
     /// a table size update).
     pub fn with_table_size(size: usize) -> Self {
-        Self { table: VecDeque::new(), size: 0, max_size: size.min(MAX_TABLE_SIZE) }
+        Self {
+            table: VecDeque::new(),
+            size: 0,
+            max_size: size.min(MAX_TABLE_SIZE),
+        }
     }
 
     /// Number of dynamic table entries.
@@ -403,9 +413,17 @@ impl HpackDecoder {
             let (n, v) = STATIC_TABLE[idx - 1];
             let field = Field::from_name(n.as_bytes());
             let value = (field != Field::Other && !v.is_empty()).then(|| v.to_string());
-            return Ok(Entry { field, value, name_len: n.len(), value_len: v.len() });
+            return Ok(Entry {
+                field,
+                value,
+                name_len: n.len(),
+                value_len: v.len(),
+            });
         }
-        self.table.get(idx - STATIC_TABLE.len() - 1).cloned().ok_or(HpackError::BadIndex)
+        self.table
+            .get(idx - STATIC_TABLE.len() - 1)
+            .cloned()
+            .ok_or(HpackError::BadIndex)
     }
 
     /// Decodes one complete header block, returning the fields of interest. Values of every other header are
@@ -445,7 +463,14 @@ impl HpackDecoder {
                     let s = read_str(block, &mut pos)?;
                     let mut name = Vec::new();
                     let len = s.decode(Some(&mut name), 32)?;
-                    (if len <= 32 { Field::from_name(&name) } else { Field::Other }, len)
+                    (
+                        if len <= 32 {
+                            Field::from_name(&name)
+                        } else {
+                            Field::Other
+                        },
+                        len,
+                    )
                 } else {
                     let e = self.lookup(idx)?;
                     (e.field, e.name_len)
@@ -466,7 +491,12 @@ impl HpackDecoder {
                     h.set(field, s);
                 }
                 if incremental {
-                    self.insert(Entry { field, value, name_len, value_len });
+                    self.insert(Entry {
+                        field,
+                        value,
+                        name_len,
+                        value_len,
+                    });
                 }
             }
         }
@@ -560,14 +590,19 @@ impl H2Dir {
         }
         loop {
             let at = self.consumed;
-            let Some(hdr) = buf.get(at..at + 9) else { return };
-            let len = (usize::from(hdr[0]) << 16) | (usize::from(hdr[1]) << 8) | usize::from(hdr[2]);
+            let Some(hdr) = buf.get(at..at + 9) else {
+                return;
+            };
+            let len =
+                (usize::from(hdr[0]) << 16) | (usize::from(hdr[1]) << 8) | usize::from(hdr[2]);
             let (ty, flags) = (hdr[3], hdr[4]);
             if len > MAX_FRAME_PAYLOAD {
                 self.fail("frame larger than the default maximum");
                 return;
             }
-            let Some(payload) = buf.get(at + 9..at + 9 + len) else { return };
+            let Some(payload) = buf.get(at + 9..at + 9 + len) else {
+                return;
+            };
             self.consumed = at + 9 + len;
             if self.pending.is_some() && ty != FRAME_CONTINUATION {
                 self.fail("frame interleaved in a header block");
@@ -583,7 +618,10 @@ impl H2Dir {
                     if flags & FLAG_END_HEADERS != 0 {
                         self.decode(fragment, report, out);
                     } else {
-                        self.pending = Some(Pending { block: fragment.to_vec(), report });
+                        self.pending = Some(Pending {
+                            block: fragment.to_vec(),
+                            report,
+                        });
                     }
                 }
                 FRAME_CONTINUATION => {
@@ -615,7 +653,10 @@ impl H2Dir {
         match self.hpack.decode_block(block) {
             Ok(headers) => {
                 if report && (headers.method.is_some() || headers.status.is_some()) {
-                    out.push(H2Message { from_client: self.from_client, headers });
+                    out.push(H2Message {
+                        from_client: self.from_client,
+                        headers,
+                    });
                 }
             }
             Err(_) => self.fail("HPACK decoding error"),
@@ -647,7 +688,13 @@ pub mod fixtures {
     use super::*;
 
     pub fn frame(ty: u8, flags: u8, stream: u32, payload: &[u8]) -> Vec<u8> {
-        let mut f = vec![(payload.len() >> 16) as u8, (payload.len() >> 8) as u8, payload.len() as u8, ty, flags];
+        let mut f = vec![
+            (payload.len() >> 16) as u8,
+            (payload.len() >> 8) as u8,
+            payload.len() as u8,
+            ty,
+            flags,
+        ];
         f.extend_from_slice(&(stream & 0x7fff_ffff).to_be_bytes());
         f.extend_from_slice(payload);
         f
@@ -664,7 +711,12 @@ pub mod fixtures {
     }
 
     pub fn headers_frame(stream: u32, end_stream: bool, block: &[u8]) -> Vec<u8> {
-        frame(FRAME_HEADERS, FLAG_END_HEADERS | u8::from(end_stream), stream, block)
+        frame(
+            FRAME_HEADERS,
+            FLAG_END_HEADERS | u8::from(end_stream),
+            stream,
+            block,
+        )
     }
 
     fn lit(out: &mut Vec<u8>, name_idx_prefix: &[u8], value: &[u8]) {
@@ -717,7 +769,10 @@ mod tests {
 
     fn unhex(s: &str) -> Vec<u8> {
         let s: String = s.split_whitespace().collect();
-        (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap()).collect()
+        (0..s.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+            .collect()
     }
 
     fn headers(d: &mut HpackDecoder, hex: &str) -> Headers {
@@ -737,7 +792,11 @@ mod tests {
         assert_eq!((d.dynamic_len(), d.dynamic_size()), (1, 57));
 
         let h = headers(&mut d, "8286 84be 5808 6e6f 2d63 6163 6865");
-        assert_eq!(h.authority.as_deref(), Some("www.example.com"), "from the dynamic table");
+        assert_eq!(
+            h.authority.as_deref(),
+            Some("www.example.com"),
+            "from the dynamic table"
+        );
         assert_eq!((d.dynamic_len(), d.dynamic_size()), (2, 110));
 
         let h = headers(
@@ -759,7 +818,10 @@ mod tests {
         let h = headers(&mut d, "8286 84be 5886 a8eb 1064 9cbf");
         assert_eq!(h.authority.as_deref(), Some("www.example.com"));
         assert_eq!((d.dynamic_len(), d.dynamic_size()), (2, 110));
-        let h = headers(&mut d, "8287 85bf 4088 25a8 49e9 5ba9 7d7f 8925 a849 e95b b8e8 b4bf");
+        let h = headers(
+            &mut d,
+            "8287 85bf 4088 25a8 49e9 5ba9 7d7f 8925 a849 e95b b8e8 b4bf",
+        );
         assert_eq!(h.scheme.as_deref(), Some("https"));
         assert_eq!(h.authority.as_deref(), Some("www.example.com"));
         assert_eq!((d.dynamic_len(), d.dynamic_size()), (3, 164));
@@ -798,13 +860,20 @@ mod tests {
     #[test]
     fn huffman_known_strings() {
         let mut out = Vec::new();
-        let n = huffman_decode(&unhex("f1e3 c2e5 f23a 6ba0 ab90 f4ff"), Some(&mut out), 100).unwrap();
+        let n =
+            huffman_decode(&unhex("f1e3 c2e5 f23a 6ba0 ab90 f4ff"), Some(&mut out), 100).unwrap();
         assert_eq!(out, b"www.example.com");
         assert_eq!(n, 15);
         // Count-only mode agrees, and a cap truncates the copy but not the count.
-        assert_eq!(huffman_decode(&unhex("f1e3 c2e5 f23a 6ba0 ab90 f4ff"), None, 0), Some(15));
+        assert_eq!(
+            huffman_decode(&unhex("f1e3 c2e5 f23a 6ba0 ab90 f4ff"), None, 0),
+            Some(15)
+        );
         let mut small = Vec::new();
-        assert_eq!(huffman_decode(&unhex("f1e3 c2e5 f23a 6ba0 ab90 f4ff"), Some(&mut small), 4), Some(15));
+        assert_eq!(
+            huffman_decode(&unhex("f1e3 c2e5 f23a 6ba0 ab90 f4ff"), Some(&mut small), 4),
+            Some(15)
+        );
         assert_eq!(small, b"www.");
         // Padding that is not all ones is rejected; so is padding of 8 or more bits.
         assert!(huffman_decode(&unhex("f1e3 c2e5 f23a 6ba0 ab90 f4fe"), None, 0).is_none());
@@ -826,17 +895,30 @@ mod tests {
     fn path_and_other_values_are_never_kept() {
         let mut d = HpackDecoder::new();
         let h = d
-            .decode_block(&request_block("GET", "https", "/very/secret/path?token=abc123", "Api.Example.com"))
+            .decode_block(&request_block(
+                "GET",
+                "https",
+                "/very/secret/path?token=abc123",
+                "Api.Example.com",
+            ))
             .unwrap();
         assert_eq!(h.authority.as_deref(), Some("api.example.com"));
         let dbg = format!("{h:?}{d:?}");
-        assert!(!dbg.contains("secret") && !dbg.contains("abc123") && !dbg.contains("fixture-agent"), "{dbg}");
+        assert!(
+            !dbg.contains("secret") && !dbg.contains("abc123") && !dbg.contains("fixture-agent"),
+            "{dbg}"
+        );
     }
 
     #[test]
     fn response_status_and_content_type() {
         let mut d = HpackDecoder::new();
-        let h = d.decode_block(&response_block(200, Some("Application/JSON; charset=utf-8"))).unwrap();
+        let h = d
+            .decode_block(&response_block(
+                200,
+                Some("Application/JSON; charset=utf-8"),
+            ))
+            .unwrap();
         assert_eq!(h.status, Some(200));
         assert_eq!(h.content_type.as_deref(), Some("application/json"));
         let h = d.decode_block(&response_block(503, None)).unwrap();
@@ -848,7 +930,8 @@ mod tests {
     fn dynamic_table_size_update_and_limits() {
         let mut d = HpackDecoder::new();
         // size update to 0 empties the table
-        d.decode_block(&request_block("GET", "http", "/", "a.test")).unwrap();
+        d.decode_block(&request_block("GET", "http", "/", "a.test"))
+            .unwrap();
         assert_eq!(d.dynamic_len(), 1);
         d.decode_block(&[0x20]).unwrap();
         assert_eq!(d.dynamic_len(), 0);
@@ -857,10 +940,20 @@ mod tests {
         big.extend_from_slice(&[0xe1, 0xff, 0x7f]);
         assert_eq!(d.decode_block(&big), Err(HpackError::TableSize));
         // Index 0 and out-of-range indexes.
-        assert_eq!(HpackDecoder::new().decode_block(&[0x80]), Err(HpackError::BadIndex));
-        assert_eq!(HpackDecoder::new().decode_block(&[0xff, 0x7f]), Err(HpackError::BadIndex));
+        assert_eq!(
+            HpackDecoder::new().decode_block(&[0x80]),
+            Err(HpackError::BadIndex)
+        );
+        assert_eq!(
+            HpackDecoder::new().decode_block(&[0xff, 0x7f]),
+            Err(HpackError::BadIndex)
+        );
         // Runaway integer continuation.
-        assert!(HpackDecoder::new().decode_block(&[0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x01]).is_err());
+        assert!(
+            HpackDecoder::new()
+                .decode_block(&[0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x01])
+                .is_err()
+        );
     }
 
     #[test]
@@ -881,7 +974,10 @@ mod tests {
     #[test]
     fn too_many_fields_is_an_error() {
         let block = vec![0x82u8; MAX_HEADERS_PER_BLOCK + 1];
-        assert_eq!(HpackDecoder::new().decode_block(&block), Err(HpackError::TooManyFields));
+        assert_eq!(
+            HpackDecoder::new().decode_block(&block),
+            Err(HpackError::TooManyFields)
+        );
     }
 
     #[test]
@@ -895,9 +991,17 @@ mod tests {
     #[test]
     fn frames_requests_and_responses() {
         let mut stream = client_preface();
-        stream.extend(headers_frame(1, true, &request_block("POST", "http", "/upload/secret", "svc.local:8080")));
+        stream.extend(headers_frame(
+            1,
+            true,
+            &request_block("POST", "http", "/upload/secret", "svc.local:8080"),
+        ));
         stream.extend(frame(0, 0, 1, b"data data data")); // DATA is skipped
-        stream.extend(headers_frame(3, true, &request_block("GET", "http", "/other", "svc.local:8080")));
+        stream.extend(headers_frame(
+            3,
+            true,
+            &request_block("GET", "http", "/other", "svc.local:8080"),
+        ));
         let mut c = H2Dir::new(true);
         let mut out = Vec::new();
         c.advance(&stream, &mut out);
@@ -909,7 +1013,11 @@ mod tests {
         assert!(!format!("{out:?}").contains("secret"));
 
         let mut resp = settings();
-        resp.extend(headers_frame(1, false, &response_block(200, Some("application/grpc"))));
+        resp.extend(headers_frame(
+            1,
+            false,
+            &response_block(200, Some("application/grpc")),
+        ));
         resp.extend(headers_frame(3, true, &response_block(404, None)));
         let mut s = H2Dir::new(false);
         let mut out = Vec::new();
@@ -917,15 +1025,26 @@ mod tests {
         assert_eq!(out.len(), 2);
         assert!(!out[0].from_client);
         assert_eq!(out[0].headers.status, Some(200));
-        assert_eq!(out[0].headers.content_type.as_deref(), Some("application/grpc"));
+        assert_eq!(
+            out[0].headers.content_type.as_deref(),
+            Some("application/grpc")
+        );
         assert_eq!(out[1].headers.status, Some(404));
     }
 
     #[test]
     fn incremental_advance_matches_one_shot() {
         let mut stream = client_preface();
-        stream.extend(headers_frame(1, true, &request_block("GET", "http", "/", "a.test")));
-        stream.extend(headers_frame(3, true, &request_block("GET", "http", "/x", "b.test")));
+        stream.extend(headers_frame(
+            1,
+            true,
+            &request_block("GET", "http", "/", "a.test"),
+        ));
+        stream.extend(headers_frame(
+            3,
+            true,
+            &request_block("GET", "http", "/x", "b.test"),
+        ));
         let mut inc = H2Dir::new(true);
         let mut got = Vec::new();
         for n in 0..=stream.len() {
@@ -981,11 +1100,24 @@ mod tests {
         assert!(c.dead && out.is_empty());
 
         let mut c = H2Dir::new(false);
-        c.advance(&frame(FRAME_CONTINUATION, FLAG_END_HEADERS, 1, b"x"), &mut out);
+        c.advance(
+            &frame(FRAME_CONTINUATION, FLAG_END_HEADERS, 1, b"x"),
+            &mut out,
+        );
         assert!(c.dead);
 
         let mut c = H2Dir::new(false);
-        let mut huge = vec![0x01, 0x00, 0x00, FRAME_HEADERS, FLAG_END_HEADERS, 0, 0, 0, 1]; // 65536 bytes
+        let mut huge = vec![
+            0x01,
+            0x00,
+            0x00,
+            FRAME_HEADERS,
+            FLAG_END_HEADERS,
+            0,
+            0,
+            0,
+            1,
+        ]; // 65536 bytes
         huge.extend_from_slice(&[0; 16]);
         c.advance(&huge, &mut out);
         assert!(c.dead);
@@ -1000,7 +1132,9 @@ mod tests {
     fn rng(seed: u64) -> impl FnMut() -> u64 {
         let mut s = seed;
         move || {
-            s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            s = s
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             s >> 16
         }
     }
@@ -1009,8 +1143,16 @@ mod tests {
     fn fuzz_hpack_and_frames_never_panic() {
         let mut next = rng(0x5eed);
         let mut seed_stream = client_preface();
-        seed_stream.extend(headers_frame(1, true, &request_block("GET", "https", "/p", "fuzz.test")));
-        seed_stream.extend(headers_frame(3, false, &response_block(200, Some("text/html"))));
+        seed_stream.extend(headers_frame(
+            1,
+            true,
+            &request_block("GET", "https", "/p", "fuzz.test"),
+        ));
+        seed_stream.extend(headers_frame(
+            3,
+            false,
+            &response_block(200, Some("text/html")),
+        ));
         // Truncations.
         for n in 0..seed_stream.len() {
             let mut c = H2Dir::new(true);

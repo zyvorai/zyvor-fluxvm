@@ -202,14 +202,19 @@ pub struct EgressPolicy {
 pub(crate) fn domain_matches(list: &[String], name: &str) -> bool {
     let n = name.trim_end_matches('.').to_ascii_lowercase();
     list.iter().any(|d| {
-        let d = d.trim_start_matches("*.").trim_end_matches('.').to_ascii_lowercase();
+        let d = d
+            .trim_start_matches("*.")
+            .trim_end_matches('.')
+            .to_ascii_lowercase();
         n == d || n.ends_with(&format!(".{d}"))
     })
 }
 
 impl EgressPolicy {
     pub fn is_allow_list(&self) -> bool {
-        !self.allow_cidrs.is_empty() || !self.allow_cidrs6.is_empty() || !self.allow_domains.is_empty()
+        !self.allow_cidrs.is_empty()
+            || !self.allow_cidrs6.is_empty()
+            || !self.allow_domains.is_empty()
     }
 
     /// Like [`EgressPolicy::check`] for traffic that has no port (ICMP echo): port rules are not applied.
@@ -522,9 +527,7 @@ impl UserNetConfig {
             }
         }
         for ip in [self.gateway_ip, self.dns_ip, self.guest_ip] {
-            if ip == self.broadcast()
-                || u32::from(ip) & !u32::from(self.netmask()) == 0
-            {
+            if ip == self.broadcast() || u32::from(ip) & !u32::from(self.netmask()) == 0 {
                 return Err(bad(format!("{ip} is the network or broadcast address")));
             }
         }
@@ -552,7 +555,10 @@ impl UserNetConfig {
                 (GuestFamily::V4, None) => {}
                 (GuestFamily::V4, Some(IpAddr::V4(a))) if a == self.guest_ip => {}
                 (GuestFamily::V4, Some(a)) => {
-                    return Err(bad(format!("forward guest_addr {a} is not guest_ip {}", self.guest_ip)));
+                    return Err(bad(format!(
+                        "forward guest_addr {a} is not guest_ip {}",
+                        self.guest_ip
+                    )));
                 }
                 (GuestFamily::V6, a) => {
                     if !self.ipv6 {
@@ -561,7 +567,8 @@ impl UserNetConfig {
                     match a {
                         None => {}
                         Some(IpAddr::V6(a)) => {
-                            if !self.in_prefix6(a) || a == self.gateway_ip6() || a == self.dns_ip6() {
+                            if !self.in_prefix6(a) || a == self.gateway_ip6() || a == self.dns_ip6()
+                            {
                                 return Err(bad(format!(
                                     "forward guest_addr {a} must be a guest address inside {}/64",
                                     self.ipv6_prefix
@@ -569,7 +576,9 @@ impl UserNetConfig {
                             }
                         }
                         Some(a) => {
-                            return Err(bad(format!("forward guest_addr {a} is not an IPv6 address")));
+                            return Err(bad(format!(
+                                "forward guest_addr {a} is not an IPv6 address"
+                            )));
                         }
                     }
                 }
@@ -641,11 +650,20 @@ mod tests {
             p.check(ip("93.184.216.34"), 443, &l, now),
             Decision::Deny("not-in-allow-list")
         );
-        l.insert(ip("93.184.216.34"), now + std::time::Duration::from_secs(30));
+        l.insert(
+            ip("93.184.216.34"),
+            now + std::time::Duration::from_secs(30),
+        );
         assert_eq!(p.check(ip("93.184.216.34"), 443, &l, now), Decision::Allow);
         assert_eq!(p.check_domain("www.Example.com."), Decision::Allow);
-        assert_eq!(p.check_domain("evil.com"), Decision::Deny("domain-not-allowed"));
-        assert_eq!(p.check_domain("notexample.com"), Decision::Deny("domain-not-allowed"));
+        assert_eq!(
+            p.check_domain("evil.com"),
+            Decision::Deny("domain-not-allowed")
+        );
+        assert_eq!(
+            p.check_domain("notexample.com"),
+            Decision::Deny("domain-not-allowed")
+        );
     }
 
     #[test]
@@ -674,13 +692,20 @@ mod tests {
         assert!(c.validate().is_ok());
         c.forwards = vec![fwd(GuestFamily::V6, Some("fd5a:7f1a:2c3b:2::10"))];
         assert!(c.validate().is_ok());
-        for bad in ["fd00::1", "fd5a:7f1a:2c3b:2::2", "fd5a:7f1a:2c3b:2::3", "10.0.2.15"] {
+        for bad in [
+            "fd00::1",
+            "fd5a:7f1a:2c3b:2::2",
+            "fd5a:7f1a:2c3b:2::3",
+            "10.0.2.15",
+        ] {
             c.forwards = vec![fwd(GuestFamily::V6, Some(bad))];
             assert!(c.validate().is_err(), "{bad}");
         }
         // JSON: family and address default away.
-        let f: PortForward =
-            serde_json::from_str(r#"{"proto":"udp","host_addr":"::1","host_port":5000,"guest_port":53}"#).unwrap();
+        let f: PortForward = serde_json::from_str(
+            r#"{"proto":"udp","host_addr":"::1","host_port":5000,"guest_port":53}"#,
+        )
+        .unwrap();
         assert_eq!((f.guest_family, f.guest_addr), (GuestFamily::V4, None));
         let f: PortForward = serde_json::from_str(
             r#"{"proto":"tcp","host_port":5000,"guest_port":22,"guest_family":"v6","guest_addr":"fd5a:7f1a:2c3b:2::10"}"#,

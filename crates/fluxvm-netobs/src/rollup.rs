@@ -23,7 +23,13 @@ pub struct RollupKey {
 
 impl RollupKey {
     fn overflow() -> Self {
-        Self { vm: "_other".into(), peer: IpAddr::V4(Ipv4Addr::UNSPECIFIED), port: 0, proto: 0, outbound: true }
+        Self {
+            vm: "_other".into(),
+            peer: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+            port: 0,
+            proto: 0,
+            outbound: true,
+        }
     }
 }
 
@@ -74,11 +80,20 @@ impl Red {
 
     /// Everything that counts against the "errors" leg of RED.
     pub fn error_events(&self) -> u64 {
-        self.resets + self.retransmits + self.zero_windows + self.drops + self.dns_errors + self.http_5xx
+        self.resets
+            + self.retransmits
+            + self.zero_windows
+            + self.drops
+            + self.dns_errors
+            + self.http_5xx
     }
 
     pub fn rtt_mean_us(&self) -> u64 {
-        if self.rtt_samples == 0 { 0 } else { self.rtt_sum_us / self.rtt_samples }
+        if self.rtt_samples == 0 {
+            0
+        } else {
+            self.rtt_sum_us / self.rtt_samples
+        }
     }
 }
 
@@ -86,16 +101,23 @@ impl Red {
 #[derive(Debug, Clone, Copy)]
 pub enum Sample {
     FlowOpened,
-    Packet { bytes: u64 },
+    Packet {
+        bytes: u64,
+    },
     Reset,
     Retransmit,
     ZeroWindow,
     Drop,
     Rtt(u64),
     DnsQuery,
-    DnsResponse { error: bool, latency_us: Option<u64> },
+    DnsResponse {
+        error: bool,
+        latency_us: Option<u64>,
+    },
     HttpRequest,
-    HttpResponse { status: u16 },
+    HttpResponse {
+        status: u16,
+    },
     TlsHello,
 }
 
@@ -155,7 +177,12 @@ pub struct RollupConfig {
 
 impl Default for RollupConfig {
     fn default() -> Self {
-        Self { window_us: 30_000_000, max_windows: 240, max_age_us: 3_600_000_000, max_keys: 4096 }
+        Self {
+            window_us: 30_000_000,
+            max_windows: 240,
+            max_age_us: 3_600_000_000,
+            max_keys: 4096,
+        }
     }
 }
 
@@ -168,7 +195,11 @@ pub struct Rollup {
 impl Rollup {
     pub fn new(cfg: RollupConfig) -> Self {
         Self {
-            current: Window { start_us: 0, end_us: 0, rows: HashMap::new() },
+            current: Window {
+                start_us: 0,
+                end_us: 0,
+                rows: HashMap::new(),
+            },
             history: VecDeque::new(),
             cfg,
         }
@@ -183,14 +214,22 @@ impl Rollup {
         let w = self.cfg.window_us.max(1);
         if self.current.end_us == 0 {
             let start = now_us - now_us % w;
-            self.current = Window { start_us: start, end_us: start + w, rows: HashMap::new() };
+            self.current = Window {
+                start_us: start,
+                end_us: start + w,
+                rows: HashMap::new(),
+            };
             return;
         }
         if now_us >= self.current.end_us {
             let start = now_us - now_us % w;
             let done = std::mem::replace(
                 &mut self.current,
-                Window { start_us: start, end_us: start + w, rows: HashMap::new() },
+                Window {
+                    start_us: start,
+                    end_us: start + w,
+                    rows: HashMap::new(),
+                },
             );
             if !done.rows.is_empty() {
                 self.history.push_back(done);
@@ -248,12 +287,21 @@ mod tests {
     use super::*;
 
     fn key(port: u16) -> RollupKey {
-        RollupKey { vm: "vm".into(), peer: "10.0.0.2".parse().unwrap(), port, proto: 6, outbound: true }
+        RollupKey {
+            vm: "vm".into(),
+            peer: "10.0.0.2".parse().unwrap(),
+            port,
+            proto: 6,
+            outbound: true,
+        }
     }
 
     #[test]
     fn windows_close_and_merge() {
-        let mut r = Rollup::new(RollupConfig { window_us: 100, ..RollupConfig::default() });
+        let mut r = Rollup::new(RollupConfig {
+            window_us: 100,
+            ..RollupConfig::default()
+        });
         r.record(10, key(80), Sample::Packet { bytes: 100 });
         r.record(50, key(80), Sample::Retransmit);
         r.record(120, key(80), Sample::Packet { bytes: 50 });
@@ -266,18 +314,30 @@ mod tests {
 
     #[test]
     fn history_is_bounded_by_count_and_age() {
-        let mut r = Rollup::new(RollupConfig { window_us: 10, max_windows: 3, max_age_us: 1_000, max_keys: 8 });
+        let mut r = Rollup::new(RollupConfig {
+            window_us: 10,
+            max_windows: 3,
+            max_age_us: 1_000,
+            max_keys: 8,
+        });
         for t in 0..10u64 {
             r.record(t * 10, key(1), Sample::Packet { bytes: 1 });
         }
         assert!(r.history().count() <= 3);
         r.record(5_000, key(1), Sample::Packet { bytes: 1 });
-        assert_eq!(r.history().count(), 0, "everything older than max_age is gone");
+        assert_eq!(
+            r.history().count(),
+            0,
+            "everything older than max_age is gone"
+        );
     }
 
     #[test]
     fn key_cardinality_is_capped() {
-        let mut r = Rollup::new(RollupConfig { max_keys: 2, ..RollupConfig::default() });
+        let mut r = Rollup::new(RollupConfig {
+            max_keys: 2,
+            ..RollupConfig::default()
+        });
         for p in 0..10u16 {
             r.record(1, key(p), Sample::FlowOpened);
         }
@@ -289,10 +349,24 @@ mod tests {
     #[test]
     fn dns_and_http_samples() {
         let mut red = Red::default();
-        red.apply(Sample::DnsResponse { error: true, latency_us: Some(900) });
-        red.apply(Sample::DnsResponse { error: false, latency_us: Some(100) });
+        red.apply(Sample::DnsResponse {
+            error: true,
+            latency_us: Some(900),
+        });
+        red.apply(Sample::DnsResponse {
+            error: false,
+            latency_us: Some(100),
+        });
         red.apply(Sample::HttpResponse { status: 502 });
         red.apply(Sample::HttpResponse { status: 200 });
-        assert_eq!((red.dns_errors, red.dns_latency_sum_us, red.http_5xx, red.http_responses), (1, 1000, 1, 2));
+        assert_eq!(
+            (
+                red.dns_errors,
+                red.dns_latency_sum_us,
+                red.http_5xx,
+                red.http_responses
+            ),
+            (1, 1000, 1, 2)
+        );
     }
 }

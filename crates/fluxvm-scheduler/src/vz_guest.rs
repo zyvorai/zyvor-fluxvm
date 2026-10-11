@@ -62,9 +62,10 @@ pub(crate) fn vz_sandbox_agent(create: &CreateVmRequest) -> Option<AgentSpec> {
 
 /// The request opted a macOS guest in to the experimental vsock device (`apple.macos_vsock`).
 fn macos_vsock_requested(create: &CreateVmRequest) -> bool {
-    create.apple.as_ref().is_some_and(|a| {
-        a.guest_os == fluxvm_core::model::AppleGuest::Macos && a.macos_vsock
-    })
+    create
+        .apple
+        .as_ref()
+        .is_some_and(|a| a.guest_os == fluxvm_core::model::AppleGuest::Macos && a.macos_vsock)
 }
 
 fn is_macos_guest(create: &CreateVmRequest) -> bool {
@@ -316,10 +317,8 @@ mod tests {
     fn macos(vsock: bool, agent: Option<AgentSpec>) -> CreateVmRequest {
         let mut r = create("/mac.raw", agent);
         r.apple = Some(
-            serde_json::from_value(
-                serde_json::json!({"guest_os": "macos", "macos_vsock": vsock}),
-            )
-            .unwrap(),
+            serde_json::from_value(serde_json::json!({"guest_os": "macos", "macos_vsock": vsock}))
+                .unwrap(),
         );
         r
     }
@@ -328,7 +327,13 @@ mod tests {
     fn macos_guests_try_the_agent_only_when_they_opted_in_to_vsock() {
         // No flag: no vsock device exists, so nothing is attempted and SSH is used directly.
         assert!(vz_sandbox_agent(&macos(false, None)).is_none());
-        let mut c = macos(false, Some(AgentSpec { enabled: true, ..AgentSpec::default() }));
+        let mut c = macos(
+            false,
+            Some(AgentSpec {
+                enabled: true,
+                ..AgentSpec::default()
+            }),
+        );
         assert_eq!(agent_path(&c), AgentPath::Skip);
         // Flag: an agent is enabled by default and probed before use.
         c = macos(true, None);
@@ -336,7 +341,10 @@ mod tests {
         assert!(c.agent.is_some());
         assert_eq!(agent_path(&c), AgentPath::ProbeFirst);
         // An explicitly disabled agent stays off even with the flag.
-        let off = AgentSpec { enabled: false, ..AgentSpec::default() };
+        let off = AgentSpec {
+            enabled: false,
+            ..AgentSpec::default()
+        };
         assert_eq!(agent_path(&macos(true, Some(off))), AgentPath::Skip);
     }
 
@@ -344,7 +352,10 @@ mod tests {
     fn linux_guests_keep_the_plain_agent_path() {
         let mut c = create("/my.raw", None);
         assert_eq!(agent_path(&c), AgentPath::Skip);
-        c.agent = Some(AgentSpec { enabled: true, ..AgentSpec::default() });
+        c.agent = Some(AgentSpec {
+            enabled: true,
+            ..AgentSpec::default()
+        });
         assert_eq!(agent_path(&c), AgentPath::Try);
     }
 

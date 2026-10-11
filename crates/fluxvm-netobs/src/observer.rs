@@ -17,22 +17,24 @@
 
 use crate::capture::{CaptureError, CaptureManager, CaptureRequest, CaptureStatus};
 use crate::export::{
-    CounterView, DnsRecord, DropRecord, EdnsView, Endpoint, EventKind, FlowView, HttpRecord, HttpsView, NetEvent,
-    RedRow, SCHEMA_VERSION, Summary, TlsRecord, TlsServerRecord, VmSummary,
+    CounterView, DnsRecord, DropRecord, EdnsView, Endpoint, EventKind, FlowView, HttpRecord,
+    HttpsView, NetEvent, RedRow, SCHEMA_VERSION, Summary, TlsRecord, TlsServerRecord, VmSummary,
 };
 use crate::flow::{
-    Direction, DropReason, Flow, FlowConfig, FlowKey, FlowL7, FlowTable, FrameMeta, Identity, Verdict, parse_proto,
-    proto_name,
+    Direction, DropReason, Flow, FlowConfig, FlowKey, FlowL7, FlowTable, FrameMeta, Identity,
+    Verdict, parse_proto, proto_name,
 };
 use crate::h2::H2Message;
 use crate::health::{CloseReason, Dir, Health, HealthDelta, IcmpHealth, TcpHealth};
 use crate::l7::{self, ClientHello, Http, Redaction, ServerHello};
-use crate::packet::{self, IPPROTO_ICMP, IPPROTO_ICMPV6, IPPROTO_TCP, L4, Net, Packet, TCP_ACK, TCP_SYN, Tcp};
+use crate::packet::{
+    self, IPPROTO_ICMP, IPPROTO_ICMPV6, IPPROTO_TCP, L4, Net, Packet, TCP_ACK, TCP_SYN, Tcp,
+};
 use crate::quic::QuicFlow;
 use crate::reasm::{DropWhy, ReasmConfig};
-use crate::streams::{FlowStreams, StreamOut};
 use crate::rollup::{Red, Rollup, RollupConfig, RollupKey, Sample};
 use crate::source::{TapStats, now_us};
+use crate::streams::{FlowStreams, StreamOut};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::IpAddr;
 use std::sync::atomic::Ordering;
@@ -78,7 +80,10 @@ impl Default for ObserverConfig {
             capture_sessions: 8,
             max_vms: 1024,
             reasm: ReasmConfig::default(),
-            doh_hosts: l7::DEFAULT_DOH_HOSTS.iter().map(|s| s.to_string()).collect(),
+            doh_hosts: l7::DEFAULT_DOH_HOSTS
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
             quic_initial: true,
             h2: true,
         }
@@ -211,7 +216,10 @@ pub struct Observer {
 }
 
 fn ep(a: (IpAddr, u16)) -> Endpoint {
-    Endpoint { ip: a.0.to_string(), port: a.1 }
+    Endpoint {
+        ip: a.0.to_string(),
+        port: a.1,
+    }
 }
 
 impl Inner {
@@ -222,11 +230,17 @@ impl Inner {
         if self.closed.len() >= self.cfg.closed_flows.max(1) {
             self.closed.pop_front();
         }
-        self.closed.push_back(Closed { view: view.clone(), at_us: now });
+        self.closed.push_back(Closed {
+            view: view.clone(),
+            at_us: now,
+        });
         self.events.emit(
             now,
             &flow.identity,
-            EventKind::FlowClosed { reason, flow: Box::new(view) },
+            EventKind::FlowClosed {
+                reason,
+                flow: Box::new(view),
+            },
         );
     }
 
@@ -242,7 +256,8 @@ impl Inner {
             self.finish(now, flow, reason);
         }
         let mut snaps = Vec::new();
-        self.flows.due_active(now, |f| snaps.push(FlowView::from_flow(f, None)));
+        self.flows
+            .due_active(now, |f| snaps.push(FlowView::from_flow(f, None)));
         for v in snaps {
             let id = Identity {
                 vm_id: v.vm_id.as_str().into(),
@@ -250,11 +265,16 @@ impl Inner {
                 nic: v.nic.as_str().into(),
                 mac: [0; 6],
             };
-            self.events.emit(now, &id, EventKind::FlowUpdate { flow: Box::new(v) });
+            self.events
+                .emit(now, &id, EventKind::FlowUpdate { flow: Box::new(v) });
         }
         self.rollup.advance(now);
         let max_age = self.cfg.closed_max_age_us;
-        while self.closed.front().is_some_and(|c| now.saturating_sub(c.at_us) > max_age) {
+        while self
+            .closed
+            .front()
+            .is_some_and(|c| now.saturating_sub(c.at_us) > max_age)
+        {
             self.closed.pop_front();
         }
     }
@@ -337,7 +357,11 @@ impl Inner {
             },
             &mut evicted,
         );
-        let dir = if flow.client == src { Dir::ClientToServer } else { Dir::ServerToClient };
+        let dir = if flow.client == src {
+            Dir::ClientToServer
+        } else {
+            Dir::ServerToClient
+        };
         flow.last_seen_us = flow.last_seen_us.max(now);
         flow.packets[dir as usize] += 1;
         flow.bytes[dir as usize] += frame.len() as u64;
@@ -351,10 +375,16 @@ impl Inner {
                 proto: proto_name(flow.proto),
                 client: ep(flow.client),
                 server: ep(flow.server),
-                direction: if flow.guest_is_client { "outbound" } else { "inbound" },
+                direction: if flow.guest_is_client {
+                    "outbound"
+                } else {
+                    "inbound"
+                },
             });
         }
-        samples.push(Sample::Packet { bytes: frame.len() as u64 });
+        samples.push(Sample::Packet {
+            bytes: frame.len() as u64,
+        });
 
         if !meta.verdict.is_allowed() {
             flow.dropped_packets += 1;
@@ -366,7 +396,11 @@ impl Inner {
                     src: ep(src),
                     dst: ep(dst),
                     verdict: meta.verdict.kind(),
-                    reason: meta.verdict.reason().map(DropReason::name).unwrap_or("other"),
+                    reason: meta
+                        .verdict
+                        .reason()
+                        .map(DropReason::name)
+                        .unwrap_or("other"),
                 }));
             }
             flow.verdict = meta.verdict;
@@ -425,7 +459,16 @@ impl Inner {
                 };
                 // Retransmissions are not re-parsed, except that reassembly must still see them: health calls
                 // reordered segments "retransmits" too, and a late segment may be the one that fills a gap.
-                inspect_l7(flow, now, &pkt, dir, delta.retransmit, &mut ctx, &mut samples, &mut events);
+                inspect_l7(
+                    flow,
+                    now,
+                    &pkt,
+                    dir,
+                    delta.retransmit,
+                    &mut ctx,
+                    &mut samples,
+                    &mut events,
+                );
             }
         }
 
@@ -477,10 +520,12 @@ fn track_mem(ctx: &mut L7Ctx<'_>, before: usize, after: usize) {
 }
 
 fn method_static(m: &str) -> &'static str {
-    ["GET", "POST", "PUT", "DELETE", "HEAD", "OPTIONS", "PATCH", "CONNECT", "TRACE"]
-        .into_iter()
-        .find(|k| *k == m)
-        .unwrap_or("OTHER")
+    [
+        "GET", "POST", "PUT", "DELETE", "HEAD", "OPTIONS", "PATCH", "CONNECT", "TRACE",
+    ]
+    .into_iter()
+    .find(|k| *k == m)
+    .unwrap_or("OTHER")
 }
 
 /// Records a ClientHello (from TCP or QUIC). Returns the TLS record to publish, or `None` when this flow's hello
@@ -512,7 +557,11 @@ fn apply_client_hello(
         // Mark the hello as seen so it is not parsed again for every segment.
         flow.l7.ja3 = Some(String::new());
     }
-    flow.l7.alpn = h.alpn.first().and_then(|a| std::str::from_utf8(a).ok()).map(str::to_string);
+    flow.l7.alpn = h
+        .alpn
+        .first()
+        .and_then(|a| std::str::from_utf8(a).ok())
+        .map(str::to_string);
     samples.push(Sample::TlsHello);
     Some(TlsRecord {
         flow_id: flow.id,
@@ -524,7 +573,11 @@ fn apply_client_hello(
     })
 }
 
-fn apply_server_hello(flow: &mut Flow, h: &ServerHello, ctx: &mut L7Ctx<'_>) -> Option<TlsServerRecord> {
+fn apply_server_hello(
+    flow: &mut Flow,
+    h: &ServerHello,
+    ctx: &mut L7Ctx<'_>,
+) -> Option<TlsServerRecord> {
     if flow.l7.tls_version.is_some() {
         return None;
     }
@@ -559,9 +612,14 @@ fn apply_h2(
     let h = &m.headers;
     let red = ctx.red;
     if m.from_client {
-        let Some(method) = h.method.as_deref() else { return };
+        let Some(method) = h.method.as_deref() else {
+            return;
+        };
         flow.l7.http_requests += 1;
-        let host = h.authority.as_deref().and_then(|a| red.apply(red.http_host, a));
+        let host = h
+            .authority
+            .as_deref()
+            .and_then(|a| red.apply(red.http_host, a));
         if host.is_some() {
             flow.l7.http_host = host.clone();
         }
@@ -640,7 +698,9 @@ fn inspect_l7(
     } else {
         match &pkt.l4 {
             L4::Udp(_) if sport == 53 || dport == 53 => l7::parse_dns(payload).map(|m| (m, false)),
-            L4::Tcp(_) if sport == 53 || dport == 53 => l7::parse_dns_tcp(payload).map(|m| (m, true)),
+            L4::Tcp(_) if sport == 53 || dport == 53 => {
+                l7::parse_dns_tcp(payload).map(|m| (m, true))
+            }
             _ => None,
         }
     };
@@ -657,7 +717,10 @@ fn inspect_l7(
                 let (_, sent) = flow.l7.dns_pending.remove(i);
                 latency = Some(now.saturating_sub(sent));
             }
-            samples.push(Sample::DnsResponse { error: rcode != 0, latency_us: latency });
+            samples.push(Sample::DnsResponse {
+                error: rcode != 0,
+                latency_us: latency,
+            });
         } else {
             flow.l7.dns_queries += 1;
             if flow.l7.dns_pending.len() >= 16 {
@@ -667,7 +730,13 @@ fn inspect_l7(
             samples.push(Sample::DnsQuery);
         }
         let keep = red.dns_answers;
-        let name_of = |n: &str| if n == "." { Some(".".to_string()) } else { red.apply(red.dns_qname, n) };
+        let name_of = |n: &str| {
+            if n == "." {
+                Some(".".to_string())
+            } else {
+                red.apply(red.dns_qname, n)
+            }
+        };
         let rec = DnsRecord {
             ts_us: now,
             vm_id: flow.identity.vm_id.to_string(),
@@ -681,9 +750,21 @@ fn inspect_l7(
             qtype: l7::dns_type_name(m.qtype),
             rcode: m.response.then(|| l7::dns_rcode_name_full(rcode)),
             latency_us: latency,
-            answers: if keep { m.addrs.iter().map(|a| a.to_string()).collect() } else { Vec::new() },
-            answer_types: m.answer_types.iter().map(|t| l7::dns_type_name(*t)).collect(),
-            cnames: if keep { m.cnames.iter().filter_map(|n| name_of(n)).collect() } else { Vec::new() },
+            answers: if keep {
+                m.addrs.iter().map(|a| a.to_string()).collect()
+            } else {
+                Vec::new()
+            },
+            answer_types: m
+                .answer_types
+                .iter()
+                .map(|t| l7::dns_type_name(*t))
+                .collect(),
+            cnames: if keep {
+                m.cnames.iter().filter_map(|n| name_of(n)).collect()
+            } else {
+                Vec::new()
+            },
             https: if keep {
                 m.https
                     .iter()
@@ -728,7 +809,9 @@ fn inspect_quic(
     if payload.len() < 1200 || payload[0] & 0xc0 != 0xc0 {
         return;
     }
-    let Some(q) = l7::detect_quic_initial(payload) else { return };
+    let Some(q) = l7::detect_quic_initial(payload) else {
+        return;
+    };
     let first = flow.l7.quic_version.is_none();
     if first {
         flow.l7.app = Some("quic");
@@ -742,7 +825,10 @@ fn inspect_quic(
     if ctx.quic && dir == Dir::ClientToServer && flow.l7.ja3.is_none() && flow.l7.sni.is_none() {
         let room = ctx.reasm.max_total_bytes.saturating_sub(*ctx.reasm_bytes);
         let before = flow_mem(&flow.l7);
-        let qf = flow.l7.quic.get_or_insert_with(|| Box::new(QuicFlow::new()));
+        let qf = flow
+            .l7
+            .quic
+            .get_or_insert_with(|| Box::new(QuicFlow::new()));
         if !qf.is_finished() {
             let (h, dropped) = qf.on_datagram(payload, room);
             if dropped {
@@ -867,7 +953,11 @@ fn inspect_tcp(
         let red = ctx.red;
         flow.l7.app = Some("http");
         match h {
-            Http::Request { method, host, version } => {
+            Http::Request {
+                method,
+                host,
+                version,
+            } => {
                 flow.l7.http_requests += 1;
                 let host = host.and_then(|h| red.apply(red.http_host, &h));
                 if host.is_some() {
@@ -928,7 +1018,11 @@ impl RollupCtx {
 
 impl RollupCtx {
     fn key(&self) -> RollupKey {
-        let (peer, outbound) = if self.guest_is_client { (self.server.0, true) } else { (self.client, false) };
+        let (peer, outbound) = if self.guest_is_client {
+            (self.server.0, true)
+        } else {
+            (self.client, false)
+        };
         RollupKey {
             vm: self.identity.vm_id.to_string(),
             peer,
@@ -955,7 +1049,11 @@ impl Observer {
             inner: Mutex::new(Inner {
                 flows: FlowTable::new(cfg.flow.clone()),
                 rollup: Rollup::new(cfg.rollup.clone()),
-                events: Events { ring: VecDeque::new(), next_seq: 1, cap: cfg.event_ring },
+                events: Events {
+                    ring: VecDeque::new(),
+                    next_seq: 1,
+                    cap: cfg.event_ring,
+                },
                 dns: VecDeque::new(),
                 closed: VecDeque::new(),
                 capture: CaptureManager::new(cfg.capture_sessions),
@@ -1017,7 +1115,11 @@ impl Observer {
     }
 
     pub fn summary(&self, now_us: u64) -> Summary {
-        let tap = self.tap_stats.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let tap = self
+            .tap_stats
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
         let mut g = self.lock();
         g.tick(now_us);
         let mut active: HashMap<String, u64> = HashMap::new();
@@ -1035,9 +1137,16 @@ impl Observer {
             flows_created: c.flows_created,
             flows_evicted: c.flows_evicted,
             flows_expired: c.flows_expired,
-            drops_by_reason: DropReason::ALL.iter().map(|r| (r.name().to_string(), c.drops[r.index()])).collect(),
-            tap_enqueued: tap.as_ref().map_or(0, |t| t.enqueued.load(Ordering::Relaxed)),
-            tap_dropped: tap.as_ref().map_or(0, |t| t.dropped.load(Ordering::Relaxed)),
+            drops_by_reason: DropReason::ALL
+                .iter()
+                .map(|r| (r.name().to_string(), c.drops[r.index()]))
+                .collect(),
+            tap_enqueued: tap
+                .as_ref()
+                .map_or(0, |t| t.enqueued.load(Ordering::Relaxed)),
+            tap_dropped: tap
+                .as_ref()
+                .map_or(0, |t| t.dropped.load(Ordering::Relaxed)),
             reasm_segments_dropped: c.reasm_segments_dropped,
             reasm_streams_abandoned: c.reasm_streams_abandoned,
             reasm_incomplete: c.reasm_incomplete,
@@ -1057,7 +1166,11 @@ impl Observer {
             .collect();
         per_vm.sort_by(|a, b| a.vm_id.cmp(&b.vm_id));
         let merged = g.rollup.merged(None);
-        let since = g.rollup.history().next().map_or(g.rollup.current().start_us, |w| w.start_us);
+        let since = g
+            .rollup
+            .history()
+            .next()
+            .map_or(g.rollup.current().start_us, |w| w.start_us);
         let mut rows: Vec<RedRow> = merged
             .into_iter()
             .map(|(k, red)| RedRow {
@@ -1100,7 +1213,12 @@ impl Observer {
             .filter(|v| q.matches(v))
             .collect();
         if q.include_closed {
-            out.extend(g.closed.iter().map(|c| c.view.clone()).filter(|v| q.matches(v)));
+            out.extend(
+                g.closed
+                    .iter()
+                    .map(|c| c.view.clone())
+                    .filter(|v| q.matches(v)),
+            );
         }
         out.sort_by(|a, b| b.last_seen_us.cmp(&a.last_seen_us));
         out.truncate(limit);
@@ -1108,7 +1226,12 @@ impl Observer {
     }
 
     /// Recent DNS records, newest first.
-    pub fn dns(&self, vm: Option<&str>, allowed: Option<&HashSet<String>>, limit: usize) -> Vec<DnsRecord> {
+    pub fn dns(
+        &self,
+        vm: Option<&str>,
+        allowed: Option<&HashSet<String>>,
+        limit: usize,
+    ) -> Vec<DnsRecord> {
         let g = self.lock();
         let limit = if limit == 0 { 200 } else { limit.min(5000) };
         g.dns
@@ -1188,7 +1311,11 @@ impl Observer {
         g.rollup
             .history()
             .map(|w| (w.start_us, w.end_us, conv(w)))
-            .chain(std::iter::once((g.rollup.current().start_us, g.rollup.current().end_us, conv(g.rollup.current()))))
+            .chain(std::iter::once((
+                g.rollup.current().start_us,
+                g.rollup.current().end_us,
+                conv(g.rollup.current()),
+            )))
             .collect()
     }
 }
@@ -1223,7 +1350,12 @@ mod tests {
     }
 
     fn meta(id: &Arc<Identity>, ts_us: u64, direction: Direction) -> FrameMeta {
-        FrameMeta { identity: id.clone(), ts_us, direction, verdict: Verdict::Allowed }
+        FrameMeta {
+            identity: id.clone(),
+            ts_us,
+            direction,
+            verdict: Verdict::Allowed,
+        }
     }
 
     fn obs() -> Observer {
@@ -1238,19 +1370,59 @@ mod tests {
         let s = (S, 80);
         let t0 = 1_000_000u64;
         let send = |ts: u64, from_guest: bool, f: Vec<u8>| {
-            let d = if from_guest { Direction::FromGuest } else { Direction::ToGuest };
+            let d = if from_guest {
+                Direction::FromGuest
+            } else {
+                Direction::ToGuest
+            };
             o.ingest(&f, &meta(&i, ts, d));
         };
         send(t0, true, tcp_v4(c, s, 100, 0, TCP_SYN, 65535, b""));
-        send(t0 + 20_000, false, tcp_v4(s, c, 900, 101, TCP_SYN | TCP_ACK, 65535, b""));
-        send(t0 + 20_100, true, tcp_v4(c, s, 101, 901, TCP_ACK, 65535, b""));
+        send(
+            t0 + 20_000,
+            false,
+            tcp_v4(s, c, 900, 101, TCP_SYN | TCP_ACK, 65535, b""),
+        );
+        send(
+            t0 + 20_100,
+            true,
+            tcp_v4(c, s, 101, 901, TCP_ACK, 65535, b""),
+        );
         let req = b"GET /private/path HTTP/1.1\r\nHost: Example.org\r\n\r\n";
-        send(t0 + 30_000, true, tcp_v4(c, s, 101, 901, TCP_ACK | TCP_PSH, 65535, req));
-        send(t0 + 55_000, false, tcp_v4(s, c, 901, 101 + req.len() as u32, TCP_ACK, 65535, b""));
+        send(
+            t0 + 30_000,
+            true,
+            tcp_v4(c, s, 101, 901, TCP_ACK | TCP_PSH, 65535, req),
+        );
+        send(
+            t0 + 55_000,
+            false,
+            tcp_v4(s, c, 901, 101 + req.len() as u32, TCP_ACK, 65535, b""),
+        );
         // Retransmit of the request.
-        send(t0 + 300_000, true, tcp_v4(c, s, 101, 901, TCP_ACK | TCP_PSH, 65535, req));
-        send(t0 + 310_000, false, tcp_v4(s, c, 901, 101, TCP_ACK | TCP_PSH, 65535, b"HTTP/1.1 503 x\r\n\r\n"));
-        send(t0 + 320_000, true, tcp_v4(c, s, 101 + req.len() as u32, 919, TCP_RST, 0, b""));
+        send(
+            t0 + 300_000,
+            true,
+            tcp_v4(c, s, 101, 901, TCP_ACK | TCP_PSH, 65535, req),
+        );
+        send(
+            t0 + 310_000,
+            false,
+            tcp_v4(
+                s,
+                c,
+                901,
+                101,
+                TCP_ACK | TCP_PSH,
+                65535,
+                b"HTTP/1.1 503 x\r\n\r\n",
+            ),
+        );
+        send(
+            t0 + 320_000,
+            true,
+            tcp_v4(c, s, 101 + req.len() as u32, 919, TCP_RST, 0, b""),
+        );
 
         let flows = o.flows(&FlowQuery::default());
         assert_eq!(flows.len(), 1);
@@ -1262,7 +1434,10 @@ mod tests {
         let tcp = f.tcp.as_ref().unwrap();
         assert_eq!(tcp.handshake_rtt_us, Some(20_000));
         assert_eq!(tcp.retransmits_c2s, 1);
-        assert_eq!(tcp.rtt.samples, 2, "handshake plus one data RTT; the retransmitted data is not sampled");
+        assert_eq!(
+            tcp.rtt.samples, 2,
+            "handshake plus one data RTT; the retransmitted data is not sampled"
+        );
         assert_eq!(tcp.rtt.last_us, 25_000);
         assert_eq!(f.http_host.as_deref(), Some("example.org"));
         assert_eq!(f.app, Some("http"));
@@ -1274,15 +1449,21 @@ mod tests {
         assert_eq!((vm.red.http_requests, vm.red.http_5xx), (1, 1));
         assert!(s.top_errors[0].red.error_events() >= 3);
         // No path anywhere in anything exported.
-        let json = serde_json::to_string(&(o.flows(&FlowQuery::default()), o.events_since(0, None, None, 1000).0))
-            .unwrap();
+        let json = serde_json::to_string(&(
+            o.flows(&FlowQuery::default()),
+            o.events_since(0, None, None, 1000).0,
+        ))
+        .unwrap();
         assert!(!json.contains("private"));
     }
 
     #[test]
     fn closed_flow_is_exported_after_linger_and_new_syn_restarts() {
         let o = Observer::new(ObserverConfig {
-            flow: FlowConfig { closed_linger_us: 2_000_000, ..FlowConfig::default() },
+            flow: FlowConfig {
+                closed_linger_us: 2_000_000,
+                ..FlowConfig::default()
+            },
             ..ObserverConfig::default()
         });
         let i = id("vm-a");
@@ -1290,19 +1471,36 @@ mod tests {
         let s = (S, 443);
         let m = |ts| meta(&i, ts, Direction::FromGuest);
         o.ingest(&tcp_v4(c, s, 1, 0, TCP_SYN, 100, b""), &m(1_000_000));
-        o.ingest(&tcp_v4(c, s, 2, 0, TCP_FIN | TCP_ACK, 100, b""), &m(1_100_000));
-        o.ingest(&tcp_v4(s, c, 9, 3, TCP_FIN | TCP_ACK, 100, b""), &m(1_200_000));
+        o.ingest(
+            &tcp_v4(c, s, 2, 0, TCP_FIN | TCP_ACK, 100, b""),
+            &m(1_100_000),
+        );
+        o.ingest(
+            &tcp_v4(s, c, 9, 3, TCP_FIN | TCP_ACK, 100, b""),
+            &m(1_200_000),
+        );
         assert_eq!(o.flows(&FlowQuery::default()).len(), 1);
         // A new SYN on the same 5-tuple is a new flow; the old one moves to history.
         o.ingest(&tcp_v4(c, s, 5000, 0, TCP_SYN, 100, b""), &m(1_300_000));
-        let all = o.flows(&FlowQuery { include_closed: true, ..FlowQuery::default() });
+        let all = o.flows(&FlowQuery {
+            include_closed: true,
+            ..FlowQuery::default()
+        });
         assert_eq!(all.len(), 2);
-        assert_eq!(all.iter().filter(|f| f.close_reason == Some(CloseReason::Fin)).count(), 1);
+        assert_eq!(
+            all.iter()
+                .filter(|f| f.close_reason == Some(CloseReason::Fin))
+                .count(),
+            1
+        );
         // Idle aging finally removes the second flow, via tick.
         o.tick(1_300_000 + 400_000_000);
         assert!(o.flows(&FlowQuery::default()).is_empty());
         let ev = o.events_since(0, None, None, 1000).0;
-        assert_eq!(ev.iter().filter(|e| e.kind.name() == "flow_closed").count(), 2);
+        assert_eq!(
+            ev.iter().filter(|e| e.kind.name() == "flow_closed").count(),
+            2
+        );
     }
 
     #[test]
@@ -1312,11 +1510,23 @@ mod tests {
         let c = (G, 5353);
         let r = (NS, 53);
         let q = fixtures::dns_query(0x1234, "Secret.Internal.Example.com", 1);
-        let a = fixtures::dns_response(0x1234, "secret.internal.example.com", 1, 0, &[[10, 1, 2, 3]]);
-        o.ingest(&udp_v4(c, r, &q), &meta(&i, 10_000_000, Direction::FromGuest));
+        let a = fixtures::dns_response(
+            0x1234,
+            "secret.internal.example.com",
+            1,
+            0,
+            &[[10, 1, 2, 3]],
+        );
+        o.ingest(
+            &udp_v4(c, r, &q),
+            &meta(&i, 10_000_000, Direction::FromGuest),
+        );
         o.ingest(&udp_v4(r, c, &a), &meta(&i, 10_004_500, Direction::ToGuest));
         let nx = fixtures::dns_response(0x9999, "nope.example.com", 1, 3, &[]);
-        o.ingest(&udp_v4(r, c, &nx), &meta(&i, 10_005_000, Direction::ToGuest));
+        o.ingest(
+            &udp_v4(r, c, &nx),
+            &meta(&i, 10_005_000, Direction::ToGuest),
+        );
 
         let d = o.dns(None, None, 10);
         assert_eq!(d.len(), 3);
@@ -1325,14 +1535,21 @@ mod tests {
         assert_eq!(resp.qname.as_deref(), Some("secret.internal.example.com"));
         assert_eq!(resp.answers, vec!["10.1.2.3"]);
         let s = o.summary(10_006_000);
-        assert_eq!((s.per_vm[0].red.dns_queries, s.per_vm[0].red.dns_errors), (1, 1));
+        assert_eq!(
+            (s.per_vm[0].red.dns_queries, s.per_vm[0].red.dns_errors),
+            (1, 1)
+        );
         assert_eq!(s.per_vm[0].red.dns_latency_sum_us, 4_500);
 
         // Strict redaction drops names and answers before storage.
-        let o = Observer::new(ObserverConfig { redaction: Redaction::strict(), ..ObserverConfig::default() });
+        let o = Observer::new(ObserverConfig {
+            redaction: Redaction::strict(),
+            ..ObserverConfig::default()
+        });
         o.ingest(&udp_v4(c, r, &q), &meta(&i, 1, Direction::FromGuest));
         o.ingest(&udp_v4(r, c, &a), &meta(&i, 2, Direction::ToGuest));
-        let json = serde_json::to_string(&(o.dns(None, None, 10), o.flows(&FlowQuery::default()))).unwrap();
+        let json = serde_json::to_string(&(o.dns(None, None, 10), o.flows(&FlowQuery::default())))
+            .unwrap();
         assert!(!json.to_lowercase().contains("secret"));
         assert!(!json.contains("10.1.2.3"));
         assert_eq!(o.dns(None, None, 10)[0].qname, None);
@@ -1353,21 +1570,37 @@ mod tests {
         );
         let c = (G, 50000);
         let s = (S, 443);
-        o.ingest(&tcp_v4(c, s, 1, 0, TCP_SYN, 100, b""), &meta(&i, 1, Direction::FromGuest));
-        o.ingest(&tcp_v4(c, s, 2, 1, TCP_ACK | TCP_PSH, 100, &hello), &meta(&i, 2, Direction::FromGuest));
+        o.ingest(
+            &tcp_v4(c, s, 1, 0, TCP_SYN, 100, b""),
+            &meta(&i, 1, Direction::FromGuest),
+        );
+        o.ingest(
+            &tcp_v4(c, s, 2, 1, TCP_ACK | TCP_PSH, 100, &hello),
+            &meta(&i, 2, Direction::FromGuest),
+        );
         let f = &o.flows(&FlowQuery::default())[0];
         assert_eq!(f.sni.as_deref(), Some("api.example.com"));
         assert_eq!(f.app, Some("tls"));
         assert_eq!(f.ja3.as_ref().map(String::len), Some(32));
-        assert!(f.ja4.as_ref().unwrap().starts_with("t13d0203h2_"), "{:?}", f.ja4);
+        assert!(
+            f.ja4.as_ref().unwrap().starts_with("t13d0203h2_"),
+            "{:?}",
+            f.ja4
+        );
         assert_eq!(o.summary(3).per_vm[0].red.tls_handshakes, 1);
 
         // Hashing keeps correlation without the name.
         let o = Observer::new(ObserverConfig {
-            redaction: Redaction { tls_sni: Redact::Hash, ..Redaction::default() },
+            redaction: Redaction {
+                tls_sni: Redact::Hash,
+                ..Redaction::default()
+            },
             ..ObserverConfig::default()
         });
-        o.ingest(&tcp_v4(c, s, 2, 1, TCP_ACK | TCP_PSH, 100, &hello), &meta(&i, 2, Direction::FromGuest));
+        o.ingest(
+            &tcp_v4(c, s, 2, 1, TCP_ACK | TCP_PSH, 100, &hello),
+            &meta(&i, 2, Direction::FromGuest),
+        );
         let sni = o.flows(&FlowQuery::default())[0].sni.clone().unwrap();
         assert!(sni.starts_with("h:") && !sni.contains("example"));
     }
@@ -1385,20 +1618,44 @@ mod tests {
         };
         o.ingest(&f, &denied);
         o.ingest(&f, &denied);
-        let flows = o.flows(&FlowQuery { verdict: Some("denied".into()), ..FlowQuery::default() });
+        let flows = o.flows(&FlowQuery {
+            verdict: Some("denied".into()),
+            ..FlowQuery::default()
+        });
         assert_eq!(flows.len(), 1);
-        assert_eq!((flows[0].verdict, flows[0].drop_reason, flows[0].dropped_packets), ("denied", Some("policy"), 2));
+        assert_eq!(
+            (
+                flows[0].verdict,
+                flows[0].drop_reason,
+                flows[0].dropped_packets
+            ),
+            ("denied", Some("policy"), 2)
+        );
         let s = o.summary(6);
-        let policy = s.counters.drops_by_reason.iter().find(|(r, _)| r == "policy").unwrap().1;
+        let policy = s
+            .counters
+            .drops_by_reason
+            .iter()
+            .find(|(r, _)| r == "policy")
+            .unwrap()
+            .1;
         assert_eq!(policy, 2);
-        let drops = o.events_since(0, None, None, 100).0.iter().filter(|e| e.kind.name() == "drop").count();
+        let drops = o
+            .events_since(0, None, None, 100)
+            .0
+            .iter()
+            .filter(|e| e.kind.name() == "drop")
+            .count();
         assert_eq!(drops, 1, "one drop event per flow, not per packet");
     }
 
     #[test]
     fn flow_table_cap_holds_under_a_scan() {
         let o = Observer::new(ObserverConfig {
-            flow: FlowConfig { max_flows: 100, ..FlowConfig::default() },
+            flow: FlowConfig {
+                max_flows: 100,
+                ..FlowConfig::default()
+            },
             ..ObserverConfig::default()
         });
         let i = id("vm-a");
@@ -1409,7 +1666,10 @@ mod tests {
         let s = o.summary(10_000);
         assert_eq!(s.flows_active, 100);
         assert_eq!(s.counters.flows_evicted, 4900);
-        assert!(o.events_since(0, None, None, 100_000).0.len() <= 4096, "event ring is bounded");
+        assert!(
+            o.events_since(0, None, None, 100_000).0.len() <= 4096,
+            "event ring is bounded"
+        );
     }
 
     #[test]
@@ -1418,12 +1678,26 @@ mod tests {
         let i = id("vm-a");
         let mut s = 0xdead_beef_u64;
         let mut next = || {
-            s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            s = s
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             (s >> 24) as u32
         };
         let seeds = [
-            tcp_v4((G, 1), (S, 53), 1, 1, TCP_ACK, 1, &fixtures::dns_query(1, "a.b", 1)),
-            udp_v4((G, 1), (NS, 53), &fixtures::dns_response(1, "a.b", 1, 0, &[[1, 1, 1, 1]])),
+            tcp_v4(
+                (G, 1),
+                (S, 53),
+                1,
+                1,
+                TCP_ACK,
+                1,
+                &fixtures::dns_query(1, "a.b", 1),
+            ),
+            udp_v4(
+                (G, 1),
+                (NS, 53),
+                &fixtures::dns_response(1, "a.b", 1, 0, &[[1, 1, 1, 1]]),
+            ),
             tcp_v4(
                 (G, 1),
                 (S, 443),
@@ -1433,7 +1707,15 @@ mod tests {
                 1,
                 &fixtures::client_hello(0x0303, &[0x1301], &[fixtures::ext_sni("x")]),
             ),
-            tcp_v4((G, 1), (S, 80), 1, 1, TCP_ACK, 1, b"GET / HTTP/1.1\r\nHost: x\r\n\r\n"),
+            tcp_v4(
+                (G, 1),
+                (S, 80),
+                1,
+                1,
+                TCP_ACK,
+                1,
+                b"GET / HTTP/1.1\r\nHost: x\r\n\r\n",
+            ),
         ];
         for n in 0..30_000u64 {
             let mut f = seeds[(next() % 4) as usize].clone();
@@ -1455,10 +1737,16 @@ mod tests {
         let o = obs();
         for vm in ["vm-a", "vm-b"] {
             let i = id(vm);
-            o.ingest(&udp_v4((G, 1), (S, 2), b"x"), &meta(&i, 1, Direction::FromGuest));
+            o.ingest(
+                &udp_v4((G, 1), (S, 2), b"x"),
+                &meta(&i, 1, Direction::FromGuest),
+            );
         }
         let only_a: HashSet<String> = ["vm-a".to_string()].into();
-        let q = FlowQuery { allowed_vms: Some(only_a.clone()), ..FlowQuery::default() };
+        let q = FlowQuery {
+            allowed_vms: Some(only_a.clone()),
+            ..FlowQuery::default()
+        };
         let flows = o.flows(&q);
         assert_eq!(flows.len(), 1);
         assert_eq!(flows[0].vm_id, "vm-a");
@@ -1485,7 +1773,11 @@ mod tests {
     }
 
     fn tls_events(o: &Observer, kind: &str) -> usize {
-        o.events_since(0, None, None, 100_000).0.iter().filter(|e| e.kind.name() == kind).count()
+        o.events_since(0, None, None, 100_000)
+            .0
+            .iter()
+            .filter(|e| e.kind.name() == kind)
+            .count()
     }
 
     #[test]
@@ -1509,15 +1801,30 @@ mod tests {
         order.extend(1..parts - 1);
         for (k, n) in order.iter().enumerate() {
             let (seq, data) = seg(*n);
-            o.ingest(&tcp_v4(c, s, seq, 1, TCP_ACK | TCP_PSH, 100, data), &m(10 + k as u64));
+            o.ingest(
+                &tcp_v4(c, s, seq, 1, TCP_ACK | TCP_PSH, 100, data),
+                &m(10 + k as u64),
+            );
         }
         let f = &o.flows(&FlowQuery::default())[0];
         assert_eq!(f.sni.as_deref(), Some("split.example.com"));
         assert_eq!(f.app, Some("tls"));
         assert_eq!(f.alpn.as_deref(), Some("h2"));
-        assert!(f.ja4.as_ref().unwrap().starts_with("t13d0204h2_"), "{:?}", f.ja4);
-        assert_eq!(tls_events(&o, "tls"), 1, "one hello, one event, however many segments");
-        assert_eq!(o.summary(100).counters.reasm_bytes, 0, "buffers are released once parsed");
+        assert!(
+            f.ja4.as_ref().unwrap().starts_with("t13d0204h2_"),
+            "{:?}",
+            f.ja4
+        );
+        assert_eq!(
+            tls_events(&o, "tls"),
+            1,
+            "one hello, one event, however many segments"
+        );
+        assert_eq!(
+            o.summary(100).counters.reasm_bytes,
+            0,
+            "buffers are released once parsed"
+        );
         assert_eq!(o.summary(100).per_vm[0].red.tls_handshakes, 1);
     }
 
@@ -1526,24 +1833,43 @@ mod tests {
         let o = obs();
         let i = id("vm-a");
         let (c, s) = ((G, 50200), (S, 443));
-        o.ingest(&tcp_v4(c, s, 1, 0, TCP_SYN, 100, b""), &meta(&i, 1, Direction::FromGuest));
-        o.ingest(&tcp_v4(s, c, 9000, 2, TCP_SYN | TCP_ACK, 100, b""), &meta(&i, 2, Direction::ToGuest));
+        o.ingest(
+            &tcp_v4(c, s, 1, 0, TCP_SYN, 100, b""),
+            &meta(&i, 1, Direction::FromGuest),
+        );
+        o.ingest(
+            &tcp_v4(s, c, 9000, 2, TCP_SYN | TCP_ACK, 100, b""),
+            &meta(&i, 2, Direction::ToGuest),
+        );
         let sh = fixtures::server_hello(
             0x0303,
             0x1301,
-            &[fixtures::ext(43, &[0x03, 0x04]), fixtures::ext(51, &[0x00, 0x1d, 0x00, 0x00])],
+            &[
+                fixtures::ext(43, &[0x03, 0x04]),
+                fixtures::ext(51, &[0x00, 0x1d, 0x00, 0x00]),
+            ],
         );
         let mut wire = sh.clone();
         wire.extend_from_slice(&[0x17, 0x03, 0x03, 0x00, 0x20]);
         wire.extend_from_slice(&[0x99; 32]);
         let (a, b) = wire.split_at(20);
-        o.ingest(&tcp_v4(s, c, 9001, 2, TCP_ACK | TCP_PSH, 100, a), &meta(&i, 3, Direction::ToGuest));
-        o.ingest(&tcp_v4(s, c, 9001 + 20, 2, TCP_ACK | TCP_PSH, 100, b), &meta(&i, 4, Direction::ToGuest));
+        o.ingest(
+            &tcp_v4(s, c, 9001, 2, TCP_ACK | TCP_PSH, 100, a),
+            &meta(&i, 3, Direction::ToGuest),
+        );
+        o.ingest(
+            &tcp_v4(s, c, 9001 + 20, 2, TCP_ACK | TCP_PSH, 100, b),
+            &meta(&i, 4, Direction::ToGuest),
+        );
         let f = &o.flows(&FlowQuery::default())[0];
         assert_eq!(f.tls_version.as_deref(), Some("TLS1.3"));
         assert_eq!(f.tls_cipher.as_deref(), Some("TLS_AES_128_GCM_SHA256"));
         assert_eq!(f.ja3s.as_ref().map(String::len), Some(32));
-        assert!(f.ja4s.as_ref().unwrap().starts_with("t130200_1301_"), "{:?}", f.ja4s);
+        assert!(
+            f.ja4s.as_ref().unwrap().starts_with("t130200_1301_"),
+            "{:?}",
+            f.ja4s
+        );
         assert_eq!(tls_events(&o, "tls_server"), 1);
         // Only metadata: the opaque application-data bytes never show up anywhere.
         let json = serde_json::to_string(&o.events_since(0, None, None, 1000).0).unwrap();
@@ -1553,7 +1879,10 @@ mod tests {
     #[test]
     fn reassembly_budget_is_enforced_and_returned() {
         let o = Observer::new(ObserverConfig {
-            reasm: crate::reasm::ReasmConfig { max_total_bytes: 8 * 1024, ..Default::default() },
+            reasm: crate::reasm::ReasmConfig {
+                max_total_bytes: 8 * 1024,
+                ..Default::default()
+            },
             ..ObserverConfig::default()
         });
         let i = id("vm-a");
@@ -1561,7 +1890,10 @@ mod tests {
         // Many connections each stuck after the first 300 bytes of a hello.
         for p in 0..200u16 {
             let (c, s) = ((G, 40000 + p), (S, 443));
-            o.ingest(&tcp_v4(c, s, 1, 0, TCP_SYN, 100, b""), &meta(&i, 10 + p as u64, Direction::FromGuest));
+            o.ingest(
+                &tcp_v4(c, s, 1, 0, TCP_SYN, 100, b""),
+                &meta(&i, 10 + p as u64, Direction::FromGuest),
+            );
             o.ingest(
                 &tcp_v4(c, s, 2, 1, TCP_ACK | TCP_PSH, 100, &hello[..300]),
                 &meta(&i, 10 + p as u64, Direction::FromGuest),
@@ -1569,7 +1901,10 @@ mod tests {
         }
         let c = o.summary(1000).counters;
         assert!(c.reasm_bytes <= 8 * 1024, "held {} bytes", c.reasm_bytes);
-        assert!(c.reasm_streams_abandoned > 0 && c.reasm_segments_dropped > 0, "{c:?}");
+        assert!(
+            c.reasm_streams_abandoned > 0 && c.reasm_segments_dropped > 0,
+            "{c:?}"
+        );
         // Dropping the flows returns their bytes.
         o.tick(10 + 400_000_000);
         assert_eq!(o.summary(10 + 400_000_000).counters.reasm_bytes, 0);
@@ -1578,21 +1913,41 @@ mod tests {
     #[test]
     fn reassembly_can_be_disabled() {
         let o = Observer::new(ObserverConfig {
-            reasm: crate::reasm::ReasmConfig { enabled: false, ..Default::default() },
+            reasm: crate::reasm::ReasmConfig {
+                enabled: false,
+                ..Default::default()
+            },
             ..ObserverConfig::default()
         });
         let i = id("vm-a");
         let hello = big_hello("off.example.com");
         let (c, s) = ((G, 50300), (S, 443));
-        o.ingest(&tcp_v4(c, s, 1, 0, TCP_SYN, 100, b""), &meta(&i, 1, Direction::FromGuest));
-        o.ingest(&tcp_v4(c, s, 2, 1, TCP_ACK, 100, &hello[..300]), &meta(&i, 2, Direction::FromGuest));
-        o.ingest(&tcp_v4(c, s, 302, 1, TCP_ACK, 100, &hello[300..]), &meta(&i, 3, Direction::FromGuest));
+        o.ingest(
+            &tcp_v4(c, s, 1, 0, TCP_SYN, 100, b""),
+            &meta(&i, 1, Direction::FromGuest),
+        );
+        o.ingest(
+            &tcp_v4(c, s, 2, 1, TCP_ACK, 100, &hello[..300]),
+            &meta(&i, 2, Direction::FromGuest),
+        );
+        o.ingest(
+            &tcp_v4(c, s, 302, 1, TCP_ACK, 100, &hello[300..]),
+            &meta(&i, 3, Direction::FromGuest),
+        );
         assert_eq!(o.flows(&FlowQuery::default())[0].sni, None);
         assert_eq!(o.summary(5).counters.reasm_bytes, 0);
         // A hello that fits in one segment still works.
-        let small = fixtures::client_hello(0x0303, &[0x1301], &[fixtures::ext_sni("one.example.com")]);
-        o.ingest(&tcp_v4((G, 50301), s, 2, 1, TCP_ACK, 100, &small), &meta(&i, 4, Direction::FromGuest));
-        assert!(o.flows(&FlowQuery::default()).iter().any(|f| f.sni.as_deref() == Some("one.example.com")));
+        let small =
+            fixtures::client_hello(0x0303, &[0x1301], &[fixtures::ext_sni("one.example.com")]);
+        o.ingest(
+            &tcp_v4((G, 50301), s, 2, 1, TCP_ACK, 100, &small),
+            &meta(&i, 4, Direction::FromGuest),
+        );
+        assert!(
+            o.flows(&FlowQuery::default())
+                .iter()
+                .any(|f| f.sni.as_deref() == Some("one.example.com"))
+        );
     }
 
     #[test]
@@ -1602,25 +1957,58 @@ mod tests {
         let i = id("vm-a");
         let (c, s) = ((G, 50400), (S, 8080));
         let mut req = h2::client_preface();
-        req.extend(h2::headers_frame(1, true, &h2::request_block("POST", "http", "/v1/secret/path?k=v", "Api.Mesh.local:8080")));
+        req.extend(h2::headers_frame(
+            1,
+            true,
+            &h2::request_block("POST", "http", "/v1/secret/path?k=v", "Api.Mesh.local:8080"),
+        ));
         let mut resp = h2::settings();
-        resp.extend(h2::headers_frame(1, true, &h2::response_block(503, Some("application/json; charset=utf-8"))));
-        o.ingest(&tcp_v4(c, s, 100, 0, TCP_SYN, 100, b""), &meta(&i, 1, Direction::FromGuest));
-        o.ingest(&tcp_v4(s, c, 500, 101, TCP_SYN | TCP_ACK, 100, b""), &meta(&i, 2, Direction::ToGuest));
+        resp.extend(h2::headers_frame(
+            1,
+            true,
+            &h2::response_block(503, Some("application/json; charset=utf-8")),
+        ));
+        o.ingest(
+            &tcp_v4(c, s, 100, 0, TCP_SYN, 100, b""),
+            &meta(&i, 1, Direction::FromGuest),
+        );
+        o.ingest(
+            &tcp_v4(s, c, 500, 101, TCP_SYN | TCP_ACK, 100, b""),
+            &meta(&i, 2, Direction::ToGuest),
+        );
         let (a, b) = req.split_at(30);
-        o.ingest(&tcp_v4(c, s, 101, 501, TCP_ACK, 100, a), &meta(&i, 3, Direction::FromGuest));
-        o.ingest(&tcp_v4(c, s, 131, 501, TCP_ACK, 100, b), &meta(&i, 4, Direction::FromGuest));
-        o.ingest(&tcp_v4(s, c, 501, 101 + req.len() as u32, TCP_ACK, 100, &resp), &meta(&i, 5, Direction::ToGuest));
+        o.ingest(
+            &tcp_v4(c, s, 101, 501, TCP_ACK, 100, a),
+            &meta(&i, 3, Direction::FromGuest),
+        );
+        o.ingest(
+            &tcp_v4(c, s, 131, 501, TCP_ACK, 100, b),
+            &meta(&i, 4, Direction::FromGuest),
+        );
+        o.ingest(
+            &tcp_v4(s, c, 501, 101 + req.len() as u32, TCP_ACK, 100, &resp),
+            &meta(&i, 5, Direction::ToGuest),
+        );
         let f = &o.flows(&FlowQuery::default())[0];
         assert_eq!(f.app, Some("h2"));
         assert_eq!(f.http_host.as_deref(), Some("api.mesh.local:8080"));
         assert_eq!(f.http_requests, 1);
         let sum = o.summary(10);
-        assert_eq!((sum.per_vm[0].red.http_requests, sum.per_vm[0].red.http_5xx), (1, 1));
+        assert_eq!(
+            (sum.per_vm[0].red.http_requests, sum.per_vm[0].red.http_5xx),
+            (1, 1)
+        );
         let evs = o.events_since(0, None, None, 1000).0;
         let json = serde_json::to_string(&evs).unwrap();
-        assert!(json.contains("\"version\":\"2\"") && json.contains("application/json") && json.contains("\"scheme\":\"http\""));
-        assert!(!json.contains("secret") && !json.contains("charset"), "path and parameters never leave: {json}");
+        assert!(
+            json.contains("\"version\":\"2\"")
+                && json.contains("application/json")
+                && json.contains("\"scheme\":\"http\"")
+        );
+        assert!(
+            !json.contains("secret") && !json.contains("charset"),
+            "path and parameters never leave: {json}"
+        );
         // An h2 connection keeps its (bounded) prefix while it may still carry frames, and gives it back when the
         // flow ends.
         let held = o.summary(10).counters.reasm_bytes;
@@ -1633,17 +2021,34 @@ mod tests {
     fn http2_host_redaction_applies() {
         use crate::h2::fixtures as h2;
         let o = Observer::new(ObserverConfig {
-            redaction: Redaction { http_host: Redact::Drop, ..Redaction::default() },
+            redaction: Redaction {
+                http_host: Redact::Drop,
+                ..Redaction::default()
+            },
             ..ObserverConfig::default()
         });
         let i = id("vm-a");
         let (c, s) = ((G, 50401), (S, 8080));
         let mut req = h2::client_preface();
-        req.extend(h2::headers_frame(1, true, &h2::request_block("GET", "http", "/", "private.mesh.local")));
-        o.ingest(&tcp_v4(c, s, 1, 0, TCP_ACK, 100, &req), &meta(&i, 1, Direction::FromGuest));
+        req.extend(h2::headers_frame(
+            1,
+            true,
+            &h2::request_block("GET", "http", "/", "private.mesh.local"),
+        ));
+        o.ingest(
+            &tcp_v4(c, s, 1, 0, TCP_ACK, 100, &req),
+            &meta(&i, 1, Direction::FromGuest),
+        );
         let f = &o.flows(&FlowQuery::default())[0];
-        assert_eq!((f.app, f.http_requests, f.http_host.clone()), (Some("h2"), 1, None));
-        assert!(!serde_json::to_string(&o.events_since(0, None, None, 100).0).unwrap().contains("private.mesh"));
+        assert_eq!(
+            (f.app, f.http_requests, f.http_host.clone()),
+            (Some("h2"), 1, None)
+        );
+        assert!(
+            !serde_json::to_string(&o.events_since(0, None, None, 100).0)
+                .unwrap()
+                .contains("private.mesh")
+        );
     }
 
     fn quic_vector() -> Vec<u8> {
@@ -1653,47 +2058,104 @@ mod tests {
             fixtures::ext_alpn(&["h3"]),
             fixtures::ext_supported_versions(&[0x0304]),
         ]);
-        client_initial(crate::quic::VERSION_1, &[0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08], &[1, 2], 0, &crypto_frame(0, &hello), 1252)
+        client_initial(
+            crate::quic::VERSION_1,
+            &[0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08],
+            &[1, 2],
+            0,
+            &crypto_frame(0, &hello),
+            1252,
+        )
     }
 
     #[test]
     fn quic_initial_yields_sni_alpn_and_ja4() {
         let o = obs();
         let i = id("vm-a");
-        o.ingest(&udp_v4((G, 55000), (S, 443), &quic_vector()), &meta(&i, 1, Direction::FromGuest));
+        o.ingest(
+            &udp_v4((G, 55000), (S, 443), &quic_vector()),
+            &meta(&i, 1, Direction::FromGuest),
+        );
         let f = &o.flows(&FlowQuery::default())[0];
         assert_eq!((f.app, f.quic_version), (Some("quic"), Some(1)));
         assert_eq!(f.sni.as_deref(), Some("quic.example.com"));
         assert_eq!(f.alpn.as_deref(), Some("h3"));
-        assert!(f.ja4.as_ref().unwrap().starts_with("q13d0203h3_"), "{:?}", f.ja4);
+        assert!(
+            f.ja4.as_ref().unwrap().starts_with("q13d0203h3_"),
+            "{:?}",
+            f.ja4
+        );
         let ev = o.events_since(0, None, None, 100).0;
         assert_eq!(ev.iter().filter(|e| e.kind.name() == "quic").count(), 1);
         assert_eq!(o.summary(5).counters.quic_hellos, 1);
         // A second client Initial datagram does not duplicate anything.
-        o.ingest(&udp_v4((G, 55000), (S, 443), &quic_vector()), &meta(&i, 2, Direction::FromGuest));
-        assert_eq!(o.events_since(0, None, None, 100).0.iter().filter(|e| e.kind.name() == "quic").count(), 1);
+        o.ingest(
+            &udp_v4((G, 55000), (S, 443), &quic_vector()),
+            &meta(&i, 2, Direction::FromGuest),
+        );
+        assert_eq!(
+            o.events_since(0, None, None, 100)
+                .0
+                .iter()
+                .filter(|e| e.kind.name() == "quic")
+                .count(),
+            1
+        );
     }
 
     #[test]
     fn quic_redaction_and_switch_off() {
         let i = id("vm-a");
-        let strict = Observer::new(ObserverConfig { redaction: Redaction::strict(), ..ObserverConfig::default() });
-        strict.ingest(&udp_v4((G, 55001), (S, 443), &quic_vector()), &meta(&i, 1, Direction::FromGuest));
-        let f = &strict.flows(&FlowQuery::default())[0];
-        assert_eq!((f.sni.clone(), f.ja4.clone()), (None, None));
-        assert!(!serde_json::to_string(&strict.events_since(0, None, None, 100).0).unwrap().to_lowercase().contains("example"));
-
-        let hashed = Observer::new(ObserverConfig {
-            redaction: Redaction { tls_sni: Redact::Hash, ..Redaction::default() },
+        let strict = Observer::new(ObserverConfig {
+            redaction: Redaction::strict(),
             ..ObserverConfig::default()
         });
-        hashed.ingest(&udp_v4((G, 55002), (S, 443), &quic_vector()), &meta(&i, 1, Direction::FromGuest));
-        assert!(hashed.flows(&FlowQuery::default())[0].sni.as_deref().unwrap().starts_with("h:"));
+        strict.ingest(
+            &udp_v4((G, 55001), (S, 443), &quic_vector()),
+            &meta(&i, 1, Direction::FromGuest),
+        );
+        let f = &strict.flows(&FlowQuery::default())[0];
+        assert_eq!((f.sni.clone(), f.ja4.clone()), (None, None));
+        assert!(
+            !serde_json::to_string(&strict.events_since(0, None, None, 100).0)
+                .unwrap()
+                .to_lowercase()
+                .contains("example")
+        );
 
-        let off = Observer::new(ObserverConfig { quic_initial: false, ..ObserverConfig::default() });
-        off.ingest(&udp_v4((G, 55003), (S, 443), &quic_vector()), &meta(&i, 1, Direction::FromGuest));
+        let hashed = Observer::new(ObserverConfig {
+            redaction: Redaction {
+                tls_sni: Redact::Hash,
+                ..Redaction::default()
+            },
+            ..ObserverConfig::default()
+        });
+        hashed.ingest(
+            &udp_v4((G, 55002), (S, 443), &quic_vector()),
+            &meta(&i, 1, Direction::FromGuest),
+        );
+        assert!(
+            hashed.flows(&FlowQuery::default())[0]
+                .sni
+                .as_deref()
+                .unwrap()
+                .starts_with("h:")
+        );
+
+        let off = Observer::new(ObserverConfig {
+            quic_initial: false,
+            ..ObserverConfig::default()
+        });
+        off.ingest(
+            &udp_v4((G, 55003), (S, 443), &quic_vector()),
+            &meta(&i, 1, Direction::FromGuest),
+        );
         let f = &off.flows(&FlowQuery::default())[0];
-        assert_eq!((f.app, f.sni.clone()), (Some("quic"), None), "detected, not decrypted");
+        assert_eq!(
+            (f.app, f.sni.clone()),
+            (Some("quic"), None),
+            "detected, not decrypted"
+        );
     }
 
     #[test]
@@ -1701,20 +2163,44 @@ mod tests {
         let i = id("vm-a");
         let o = obs();
         // DoT: TCP/853.
-        o.ingest(&tcp_v4((G, 50500), (S, 853), 1, 0, TCP_SYN, 100, b""), &meta(&i, 1, Direction::FromGuest));
+        o.ingest(
+            &tcp_v4((G, 50500), (S, 853), 1, 0, TCP_SYN, 100, b""),
+            &meta(&i, 1, Direction::FromGuest),
+        );
         // DoH: a hello whose SNI is on the list (also a subdomain).
-        for (n, sni) in ["dns.google", "Resolver.Cloudflare-DNS.com", "www.example.com"].into_iter().enumerate() {
+        for (n, sni) in [
+            "dns.google",
+            "Resolver.Cloudflare-DNS.com",
+            "www.example.com",
+        ]
+        .into_iter()
+        .enumerate()
+        {
             let hello = fixtures::client_hello(0x0303, &[0x1301], &[fixtures::ext_sni(sni)]);
             o.ingest(
-                &tcp_v4((G, 50600 + n as u16), (S, 443), 2, 1, TCP_ACK | TCP_PSH, 100, &hello),
+                &tcp_v4(
+                    (G, 50600 + n as u16),
+                    (S, 443),
+                    2,
+                    1,
+                    TCP_ACK | TCP_PSH,
+                    100,
+                    &hello,
+                ),
                 &meta(&i, 2, Direction::FromGuest),
             );
         }
         // DoQ: QUIC to UDP/853.
-        o.ingest(&udp_v4((G, 50700), (S, 853), &quic_vector()), &meta(&i, 3, Direction::FromGuest));
+        o.ingest(
+            &udp_v4((G, 50700), (S, 853), &quic_vector()),
+            &meta(&i, 3, Direction::FromGuest),
+        );
         let tags: Vec<(u16, Option<&str>)> = {
-            let mut v: Vec<_> =
-                o.flows(&FlowQuery::default()).iter().map(|f| (f.server.port, f.encrypted_dns)).collect();
+            let mut v: Vec<_> = o
+                .flows(&FlowQuery::default())
+                .iter()
+                .map(|f| (f.server.port, f.encrypted_dns))
+                .collect();
             v.sort();
             v
         };
@@ -1736,7 +2222,10 @@ mod tests {
             redaction: Redaction::strict(),
             ..ObserverConfig::default()
         });
-        for (n, sni) in ["dns.google", "x.doh.corp.internal"].into_iter().enumerate() {
+        for (n, sni) in ["dns.google", "x.doh.corp.internal"]
+            .into_iter()
+            .enumerate()
+        {
             let hello = fixtures::client_hello(0x0303, &[0x1301], &[fixtures::ext_sni(sni)]);
             custom.ingest(
                 &tcp_v4((G, 50800 + n as u16), (S, 443), 2, 1, TCP_ACK, 100, &hello),
@@ -1744,8 +2233,14 @@ mod tests {
             );
         }
         let f = custom.flows(&FlowQuery::default());
-        assert_eq!(f.iter().filter(|f| f.encrypted_dns == Some("doh")).count(), 1);
-        assert!(f.iter().all(|f| f.sni.is_none()), "the tag does not leak the name under strict redaction");
+        assert_eq!(
+            f.iter().filter(|f| f.encrypted_dns == Some("doh")).count(),
+            1
+        );
+        assert!(
+            f.iter().all(|f| f.sni.is_none()),
+            "the tag does not leak the name under strict redaction"
+        );
     }
 
     #[test]
@@ -1764,7 +2259,13 @@ mod tests {
                 Rr::Cname("edge.cdn.example.net"),
                 Rr::A([192, 0, 2, 1]),
                 Rr::Aaaa([0x20, 0x01, 0xd, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]),
-                Rr::Https { priority: 1, target: ".", alpn: &["h3", "h2"], port: Some(8443), ech: true },
+                Rr::Https {
+                    priority: 1,
+                    target: ".",
+                    alpn: &["h3", "h2"],
+                    port: Some(8443),
+                    ech: true,
+                },
             ],
             Some((4096, true, 0)),
         );
@@ -1778,21 +2279,39 @@ mod tests {
         assert_eq!(resp.answers, vec!["192.0.2.1", "2001:db8::1"]);
         assert_eq!(resp.https.len(), 1);
         let h = &resp.https[0];
-        assert_eq!((h.priority, h.target.as_deref(), h.port, h.ech), (1, Some("."), Some(8443), true));
+        assert_eq!(
+            (h.priority, h.target.as_deref(), h.port, h.ech),
+            (1, Some("."), Some(8443), true)
+        );
         assert_eq!(h.alpn, vec!["h3", "h2"]);
-        assert_eq!(resp.edns.as_ref().map(|e| (e.udp_size, e.dnssec_ok)), Some((4096, true)));
+        assert_eq!(
+            resp.edns.as_ref().map(|e| (e.udp_size, e.dnssec_ok)),
+            Some((4096, true))
+        );
         assert_eq!(resp.latency_us, Some(2_000));
         let qrec = d.iter().find(|r| !r.response).unwrap();
-        assert_eq!(qrec.edns.as_ref().map(|e| (e.udp_size, e.dnssec_ok)), Some((1232, true)));
+        assert_eq!(
+            qrec.edns.as_ref().map(|e| (e.udp_size, e.dnssec_ok)),
+            Some((1232, true))
+        );
 
         // Answer detail follows the answer redaction setting; names follow the qname setting.
-        let strict = Observer::new(ObserverConfig { redaction: Redaction::strict(), ..ObserverConfig::default() });
+        let strict = Observer::new(ObserverConfig {
+            redaction: Redaction::strict(),
+            ..ObserverConfig::default()
+        });
         strict.ingest(&udp_v4(c, r, &q), &meta(&i, 1_000, Direction::FromGuest));
         strict.ingest(&udp_v4(r, c, &a), &meta(&i, 3_000, Direction::ToGuest));
         let json = serde_json::to_string(&strict.dns(None, None, 10)).unwrap();
-        assert!(!json.contains("cdn") && !json.contains("192.0.2.1") && !json.contains("h3"), "{json}");
+        assert!(
+            !json.contains("cdn") && !json.contains("192.0.2.1") && !json.contains("h3"),
+            "{json}"
+        );
         let r2 = strict.dns(None, None, 10);
-        assert_eq!(r2.iter().find(|r| r.response).unwrap().answer_types, vec!["CNAME", "A", "AAAA", "HTTPS"]);
+        assert_eq!(
+            r2.iter().find(|r| r.response).unwrap().answer_types,
+            vec!["CNAME", "A", "AAAA", "HTTPS"]
+        );
 
         // Extended rcode.
         let bad = fixtures::dns_response_rr(1, "x.test", 1, 0, &[], Some((512, false, 1)));
@@ -1805,13 +2324,23 @@ mod tests {
     fn dns_over_tcp_still_works_and_malformed_additional_is_survivable() {
         let o = obs();
         let i = id("vm-a");
-        let a = fixtures::dns_response_rr(7, "t.test", 1, 0, &[fixtures::Rr::A([1, 2, 3, 4])], Some((512, false, 0)));
+        let a = fixtures::dns_response_rr(
+            7,
+            "t.test",
+            1,
+            0,
+            &[fixtures::Rr::A([1, 2, 3, 4])],
+            Some((512, false, 0)),
+        );
         for cut in 0..a.len() {
             let _ = l7::parse_dns(&a[..cut]);
         }
         let mut t = (a.len() as u16).to_be_bytes().to_vec();
         t.extend(&a);
-        o.ingest(&tcp_v4((NS, 53), (G, 40404), 1, 1, TCP_ACK, 100, &t), &meta(&i, 1, Direction::ToGuest));
+        o.ingest(
+            &tcp_v4((NS, 53), (G, 40404), 1, 1, TCP_ACK, 100, &t),
+            &meta(&i, 1, Direction::ToGuest),
+        );
         let d = o.dns(None, None, 10);
         assert_eq!(d.len(), 1);
         assert!(d[0].tcp && d[0].answers == vec!["1.2.3.4"]);
@@ -1820,13 +2349,18 @@ mod tests {
     #[test]
     fn mixed_hostile_l7_traffic_never_panics_or_overruns_the_budget() {
         let o = Observer::new(ObserverConfig {
-            reasm: crate::reasm::ReasmConfig { max_total_bytes: 64 * 1024, ..Default::default() },
+            reasm: crate::reasm::ReasmConfig {
+                max_total_bytes: 64 * 1024,
+                ..Default::default()
+            },
             ..ObserverConfig::default()
         });
         let i = id("vm-a");
         let mut s = 0x5eed_u64;
         let mut next = move || {
-            s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            s = s
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             (s >> 24) as u32
         };
         let seeds: Vec<Vec<u8>> = vec![
@@ -1853,7 +2387,11 @@ mod tests {
                 let at = next() as usize % chunk.len();
                 chunk[at] = next() as u8;
             }
-            let seq = if next() % 2 == 0 { off as u32 + 1 } else { next() % 100_000 };
+            let seq = if next() % 2 == 0 {
+                off as u32 + 1
+            } else {
+                next() % 100_000
+            };
             let frame = match next() % 3 {
                 0 => udp_v4((G, 40000 + port), (S, 443), seed),
                 1 => tcp_v4((G, 40000 + port), (S, 443), seq, 1, TCP_ACK, 100, &chunk),
@@ -1876,14 +2414,23 @@ mod tests {
         o.capture_enable(
             "vm-a",
             CaptureRequest {
-                filter: CaptureFilter { port: Some(53), ..Default::default() },
+                filter: CaptureFilter {
+                    port: Some(53),
+                    ..Default::default()
+                },
                 ..CaptureRequest::default()
             },
         )
         .unwrap();
         let ts = now_us();
-        o.ingest(&udp_v4((G, 5000), (NS, 53), b"q"), &meta(&i, ts, Direction::FromGuest));
-        o.ingest(&udp_v4((G, 5000), (NS, 80), b"q"), &meta(&i, ts, Direction::FromGuest));
+        o.ingest(
+            &udp_v4((G, 5000), (NS, 53), b"q"),
+            &meta(&i, ts, Direction::FromGuest),
+        );
+        o.ingest(
+            &udp_v4((G, 5000), (NS, 80), b"q"),
+            &meta(&i, ts, Direction::FromGuest),
+        );
         let pcap = o.capture_pcap("vm-a").unwrap();
         assert_eq!(&pcap[..4], &[0xd4, 0xc3, 0xb2, 0xa1]);
         assert_eq!(o.capture_status()[0].packets, 1);

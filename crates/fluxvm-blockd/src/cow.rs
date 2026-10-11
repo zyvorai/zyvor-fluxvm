@@ -167,7 +167,11 @@ impl Header {
         }
         let size = u64::from_le_bytes(h[16..24].try_into().unwrap());
         let n = u32_at(32) as usize;
-        let limit = if version == 2 { EXT_OFF } else { HEADER_LEN as usize } - 36;
+        let limit = if version == 2 {
+            EXT_OFF
+        } else {
+            HEADER_LEN as usize
+        } - 36;
         if n > limit {
             return Err(bad("corrupt parent path"));
         }
@@ -212,7 +216,10 @@ impl Header {
 /// Canonical directory + file name; the file need not be a symlink target.
 fn canon_file(p: &Path) -> io::Result<PathBuf> {
     let abs = std::path::absolute(p)?;
-    let name = abs.file_name().ok_or_else(|| bad("path has no file name"))?.to_owned();
+    let name = abs
+        .file_name()
+        .ok_or_else(|| bad("path has no file name"))?
+        .to_owned();
     let dir = abs.parent().ok_or_else(|| bad("path has no parent"))?;
     Ok(dir.canonicalize()?.join(name))
 }
@@ -323,7 +330,12 @@ impl CowBackend {
     /// frozen). The parent file is marked frozen so it can no longer change
     /// under the child.
     pub fn create_on_overlay(path: &Path, parent: &Path) -> io::Result<Arc<Self>> {
-        Self::create_on_overlay_opts(path, parent, &CreateOptions::default(), &OpenOptions::default())
+        Self::create_on_overlay_opts(
+            path,
+            parent,
+            &CreateOptions::default(),
+            &OpenOptions::default(),
+        )
     }
 
     pub fn create_on_overlay_opts(
@@ -386,7 +398,10 @@ impl CowBackend {
             cow: Some(self.clone()),
             sha: None,
         };
-        let o = CreateOptions { size: None, cipher: self.cipher.clone() };
+        let o = CreateOptions {
+            size: None,
+            cipher: self.cipher.clone(),
+        };
         Self::create_with(new_path, par, &o)
     }
 
@@ -406,15 +421,25 @@ impl CowBackend {
         if size < psize {
             return Err(bad("overlay smaller than base"));
         }
-        let file = FsOpen::new().read(true).write(true).create_new(true).open(path)?;
+        let file = FsOpen::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(path)?;
         let cpath = canon_file(path)?;
         let (parent, rel) = match &par.target {
             ParentTarget::Url(u) => (u.clone(), false),
             ParentTarget::File(t) => {
                 let dir = cpath.parent().unwrap();
                 match rel_path(dir, t) {
-                    Some(r) => (r.to_str().ok_or_else(|| bad("non-utf8 path"))?.to_string(), true),
-                    None => (t.to_str().ok_or_else(|| bad("non-utf8 path"))?.to_string(), false),
+                    Some(r) => (
+                        r.to_str().ok_or_else(|| bad("non-utf8 path"))?.to_string(),
+                        true,
+                    ),
+                    None => (
+                        t.to_str().ok_or_else(|| bad("non-utf8 path"))?.to_string(),
+                        false,
+                    ),
                 }
             }
         };
@@ -552,7 +577,12 @@ impl CowBackend {
         let mut to_freeze: Option<Arc<CowBackend>> = None;
         let (kind, target, psize, sha) = if is_url(parent) {
             let l = LazyHttp::open(parent, &lazy_cache_base(&cpath), open.lazy.clone())?;
-            (KIND_LAZY, ParentTarget::Url(parent.to_string()), l.size(), open.lazy.sha256)
+            (
+                KIND_LAZY,
+                ParentTarget::Url(parent.to_string()),
+                l.size(),
+                open.lazy.sha256,
+            )
         } else {
             let pp = Path::new(parent).canonicalize()?;
             if pp == cpath {
@@ -564,7 +594,9 @@ impl CowBackend {
                     return Err(bad("rebase would create a cycle"));
                 }
                 if p.cipher.is_some() != h.encrypted {
-                    return Err(bad("encrypted and plain overlays cannot be mixed in a chain"));
+                    return Err(bad(
+                        "encrypted and plain overlays cannot be mixed in a chain",
+                    ));
                 }
                 let s = p.size();
                 to_freeze = Some(p);
@@ -582,18 +614,16 @@ impl CowBackend {
                 h.parent = u;
                 h.rel = false;
             }
-            ParentTarget::File(t) => {
-                match rel_path(cpath.parent().unwrap(), &t) {
-                    Some(r) => {
-                        h.parent = r.to_str().ok_or_else(|| bad("non-utf8 path"))?.to_string();
-                        h.rel = true;
-                    }
-                    None => {
-                        h.parent = t.to_str().ok_or_else(|| bad("non-utf8 path"))?.to_string();
-                        h.rel = false;
-                    }
+            ParentTarget::File(t) => match rel_path(cpath.parent().unwrap(), &t) {
+                Some(r) => {
+                    h.parent = r.to_str().ok_or_else(|| bad("non-utf8 path"))?.to_string();
+                    h.rel = true;
                 }
-            }
+                None => {
+                    h.parent = t.to_str().ok_or_else(|| bad("non-utf8 path"))?.to_string();
+                    h.rel = false;
+                }
+            },
         }
         h.kind = kind;
         h.sha = sha;
@@ -619,7 +649,11 @@ impl CowBackend {
     }
 
     fn chain_contains(&self, p: &Path) -> bool {
-        self.path == p || self.parent_cow.as_ref().is_some_and(|c| c.chain_contains(p))
+        self.path == p
+            || self
+                .parent_cow
+                .as_ref()
+                .is_some_and(|c| c.chain_contains(p))
     }
 
     /// Grow the live overlay to `new_size` (grow only). Succeeds in place
@@ -646,7 +680,8 @@ impl CowBackend {
             ));
         }
         let enc = self.cipher.is_some();
-        self.file.set_len(self.data_off + data_len(enc, new_n, new_size))?;
+        self.file
+            .set_len(self.data_off + data_len(enc, new_n, new_size))?;
         self.file.write_all_at(&new_size.to_le_bytes(), 16)?;
         self.file.sync_all()?;
         bm.resize(need as usize, 0);
@@ -691,7 +726,11 @@ impl CowBackend {
         let mut tmp_name = cpath.as_os_str().to_owned();
         tmp_name.push(".resize-tmp");
         let tmp_path = PathBuf::from(tmp_name);
-        let tmp = FsOpen::new().read(true).write(true).create_new(true).open(&tmp_path)?;
+        let tmp = FsOpen::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&tmp_path)?;
         let res = (|| -> io::Result<()> {
             let mut nh = h.clone();
             nh.version = 2;
@@ -758,7 +797,12 @@ impl CowBackend {
 
     /// Number of blocks held by this layer.
     pub fn allocated_blocks(&self) -> u64 {
-        self.bitmap.read().unwrap().iter().map(|b| b.count_ones() as u64).sum()
+        self.bitmap
+            .read()
+            .unwrap()
+            .iter()
+            .map(|b| b.count_ones() as u64)
+            .sum()
     }
 
     fn check(&self, off: u64, len: u64) -> io::Result<()> {
@@ -770,7 +814,10 @@ impl CowBackend {
 
     fn check_writable(&self) -> io::Result<()> {
         if self.is_frozen() {
-            return Err(io::Error::new(io::ErrorKind::PermissionDenied, "overlay is frozen"));
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "overlay is frozen",
+            ));
         }
         Ok(())
     }
@@ -800,7 +847,8 @@ impl CowBackend {
 
     fn read_block_plain(&self, c: &dyn BlockCipher, b: u64) -> io::Result<Vec<u8>> {
         let mut blk = vec![0u8; BLOCK_SIZE as usize];
-        self.file.read_exact_at(&mut blk, self.data_off + b * BLOCK_SIZE)?;
+        self.file
+            .read_exact_at(&mut blk, self.data_off + b * BLOCK_SIZE)?;
         c.decrypt(b, &mut blk)?;
         Ok(blk)
     }
@@ -822,7 +870,9 @@ impl CowBackend {
         }
         let mut done = 0;
         while done < buf.len() {
-            let n = self.file.read_at(&mut buf[done..], self.data_off + off + done as u64)?;
+            let n = self
+                .file
+                .read_at(&mut buf[done..], self.data_off + off + done as u64)?;
             if n == 0 {
                 buf[done..].fill(0);
                 break;
@@ -868,8 +918,7 @@ impl CowBackend {
                     // Copy up: merge into the parent's view of the block first.
                     let mut blk = vec![0u8; self.block_len(b) as usize];
                     self.read_base(bstart, &mut blk)?;
-                    blk[(pos - bstart) as usize..(seg_end - bstart) as usize]
-                        .copy_from_slice(src);
+                    blk[(pos - bstart) as usize..(seg_end - bstart) as usize].copy_from_slice(src);
                     self.file.write_all_at(&blk, self.data_off + bstart)?;
                 }
             }
@@ -988,7 +1037,8 @@ impl CowBackend {
     #[doc(hidden)]
     pub fn raw_block(&self, b: u64) -> io::Result<Vec<u8>> {
         let mut v = vec![0u8; BLOCK_SIZE as usize];
-        self.file.read_exact_at(&mut v, self.data_off + b * BLOCK_SIZE)?;
+        self.file
+            .read_exact_at(&mut v, self.data_off + b * BLOCK_SIZE)?;
         Ok(v)
     }
 }
@@ -1061,7 +1111,8 @@ mod tests {
         let a2 = CowBackend::open(&d.path().join("a.ovl")).unwrap();
         assert!(a2.is_frozen());
         // Grandchild via path.
-        let g = CowBackend::create_on_overlay(&d.path().join("g.ovl"), &d.path().join("b.ovl")).unwrap();
+        let g = CowBackend::create_on_overlay(&d.path().join("g.ovl"), &d.path().join("b.ovl"))
+            .unwrap();
         assert_eq!(rd(&*g, 0, 7), *b"child-b");
     }
 
@@ -1081,7 +1132,10 @@ mod tests {
         assert_eq!(rd(&*o, (3 << 20) + 70_000, 2), [0xFF; 2]);
         // Partial-block zero keeps neighbours.
         o.write_zeroes((3 << 20) + 140_000, 10).unwrap();
-        assert_eq!(rd(&*o, (3 << 20) + 139_999, 12), [0xFF, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xFF]);
+        assert_eq!(
+            rd(&*o, (3 << 20) + 139_999, 12),
+            [0xFF, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xFF]
+        );
     }
 
     #[test]
@@ -1118,11 +1172,17 @@ mod feature_tests {
     }
 
     fn enc_opts(n: u8) -> CreateOptions {
-        CreateOptions { size: None, cipher: Some(key(n)) }
+        CreateOptions {
+            size: None,
+            cipher: Some(key(n)),
+        }
     }
 
     fn open_key(n: u8) -> OpenOptions {
-        OpenOptions { key: Some(key(n)), ..Default::default() }
+        OpenOptions {
+            key: Some(key(n)),
+            ..Default::default()
+        }
     }
 
     #[test]
@@ -1137,7 +1197,10 @@ mod feature_tests {
         drop(o);
         // Stored relative.
         let mut hb = vec![0u8; 4096];
-        File::open(a.join("o.ovl")).unwrap().read_exact_at(&mut hb, 0).unwrap();
+        File::open(a.join("o.ovl"))
+            .unwrap()
+            .read_exact_at(&mut hb, 0)
+            .unwrap();
         let h = Header::decode(&hb).unwrap();
         assert!(h.rel);
         assert_eq!(h.parent, "base.img");
@@ -1156,8 +1219,12 @@ mod feature_tests {
             std::fs::create_dir(d.path().join(s)).unwrap();
         }
         std::fs::write(d.path().join("x/base.img"), vec![1u8; 1 << 18]).unwrap();
-        let p = CowBackend::create(&d.path().join("x/p.ovl"), &d.path().join("x/base.img"), None)
-            .unwrap();
+        let p = CowBackend::create(
+            &d.path().join("x/p.ovl"),
+            &d.path().join("x/base.img"),
+            None,
+        )
+        .unwrap();
         p.write_at(0, b"P").unwrap();
         p.flush().unwrap();
         drop(p);
@@ -1165,7 +1232,10 @@ mod feature_tests {
             .unwrap();
         drop(c);
         let mut hb = vec![0u8; 4096];
-        File::open(d.path().join("y/c.ovl")).unwrap().read_exact_at(&mut hb, 0).unwrap();
+        File::open(d.path().join("y/c.ovl"))
+            .unwrap()
+            .read_exact_at(&mut hb, 0)
+            .unwrap();
         assert_eq!(Header::decode(&hb).unwrap().parent, "../x/p.ovl");
         let m = d.path().join("m");
         std::fs::create_dir(&m).unwrap();
@@ -1191,7 +1261,8 @@ mod feature_tests {
         f.write_all_at(&h, 0).unwrap();
         f.write_all_at(&[1u8], 4096).unwrap(); // block 0 present
         f.set_len(off + size).unwrap();
-        f.write_all_at(&vec![block0; BLOCK_SIZE as usize], off).unwrap();
+        f.write_all_at(&vec![block0; BLOCK_SIZE as usize], off)
+            .unwrap();
         let _ = n;
     }
 
@@ -1249,8 +1320,7 @@ mod feature_tests {
         drop(o);
         // Rebase to missing parent fails and leaves the overlay intact.
         assert!(
-            CowBackend::rebase(&a.join("o.ovl"), "/no/such/file", &OpenOptions::default())
-                .is_err()
+            CowBackend::rebase(&a.join("o.ovl"), "/no/such/file", &OpenOptions::default()).is_err()
         );
         assert!(CowBackend::open(&a.join("o.ovl")).is_ok());
         // Cycle: parent <- child, rebase parent onto child.

@@ -119,7 +119,14 @@ impl Engine {
             let task = tokio::spawn(async move {
                 let mut buf = vec![0u8; 2048];
                 while let Ok(n) = recv.recv(&mut buf).await {
-                    if tx.send(Ev::IcmpReply { key, data: buf[..n].to_vec() }).await.is_err() {
+                    if tx
+                        .send(Ev::IcmpReply {
+                            key,
+                            data: buf[..n].to_vec(),
+                        })
+                        .await
+                        .is_err()
+                    {
                         break;
                     }
                 }
@@ -147,7 +154,9 @@ impl Engine {
         } else if !self.icmp_token(now) {
             return self.deny_from(Proto::Icmp, guest, rip, 0, "rate-limit");
         }
-        let Some(f) = self.icmp.get_mut(&key) else { return };
+        let Some(f) = self.icmp.get_mut(&key) else {
+            return;
+        };
         f.last = now;
         f.up += p.len().saturating_sub(8) as u64;
         if f.pending.len() >= MAX_PENDING {
@@ -159,7 +168,9 @@ impl Engine {
 
     pub(crate) fn on_icmp_reply(&mut self, key: IcmpKey, data: &[u8], now: Instant) {
         let guest_ip = self.cfg.guest_ip;
-        let Some(f) = self.icmp.get_mut(&key) else { return };
+        let Some(f) = self.icmp.get_mut(&key) else {
+            return;
+        };
         let mut p = data;
         // macOS delivers the IP header with datagram ICMP sockets, Linux does not.
         if p.len() >= 20 && p[0] >> 4 == 4 {
