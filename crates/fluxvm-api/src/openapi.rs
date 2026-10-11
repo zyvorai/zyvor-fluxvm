@@ -205,6 +205,12 @@ fn ops() -> Vec<Op> {
         .returns("HostOverview"),
         op(
             "get",
+            "/v1/host/history",
+            "Last hour of host memory and per-VM runner usage at 5 s spacing (in memory; empty after a daemon restart)",
+            HOST,
+        ),
+        op(
+            "get",
             "/v1/host/apple/capabilities",
             "The capability table judged against this Mac (available here, and why not)",
             HOST,

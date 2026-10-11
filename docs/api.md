@@ -652,6 +652,12 @@ Every verb is admin-only, `GET` included. Validation failures (bad host, bad TTL
 
 Two read-only routes feed a dashboard without scraping `/metrics`:
 
+- `GET /v1/host/history[?since=<rfc3339>]`: the last hour of host memory and per-VM runner usage at 5-second spacing:
+  `{interval_seconds, capacity, items: [{ts, memory_available_mib, memory_total_mib, memory_pressure, vms: [{vm_id,
+  cpu_seconds_total, rss_bytes}]}]}`, oldest first, `since` exclusive. In memory only: it is empty after a daemon restart. A
+  dashboard uses it to draw full sparklines on connect.
+- The `vm.fork` and `vm.branch.start` events (`GET /v1/events?event=vm.`) carry `total_ms` and `report`, a JSON array with one
+  entry per child: `{id, name, prepare_ms, restore_ms, identity_ms, identity_via, hooks_ms, ready_ms, total_ms}`.
 - `GET /v1/host/overview`: `daemon` (`version`, `uptime_seconds`), `host` (`os_version`, `cpu_count`, `memory_total_mib`,
   `memory_available_mib`, `memory_pressure` `normal|warn|critical`, `nested_virtualization`, `rosetta`), `vms` (`total`,
   `by_status`, `by_backend`), `branches`, `usage[]`, `helpers` (`runner`, `switch`, `blockd`, `usernet` present or not) and

@@ -11,6 +11,10 @@
 
 ### Added: Control Centre endpoints
 - `GET /v1/host/overview` and `GET /v1/host/apple/capabilities` (see docs/api.md), consumed by Velora's Control Centre.
+- `GET /v1/host/history`: an in-memory hour of host memory and per-VM CPU/RSS at 5 s spacing, so a dashboard that connects
+  late has its sparklines at once. Empty after a daemon restart.
+- The `vm.fork` and `vm.branch.start` events now carry `total_ms` and a per-child `report` (prepare, restore, identity,
+  hooks, ready), so a fork can be replayed later from the event log.
 
 ## 0.4.1 (2026-10-11)
 

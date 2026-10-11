@@ -314,6 +314,8 @@ impl VmManager {
                         ForkIdentityMode::Unique => "unique",
                     },
                 ),
+                ("total_ms", &started.elapsed().as_millis().to_string()),
+                ("report", &crate::fork::report_json(&reports)),
             ],
         );
         let report = ForkReport {

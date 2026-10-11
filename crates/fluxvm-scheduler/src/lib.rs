@@ -32,6 +32,7 @@ pub mod density;
 pub mod events;
 pub mod fork;
 pub mod grants;
+pub mod history;
 pub mod guest_exec;
 pub mod idempotency;
 pub mod journal;

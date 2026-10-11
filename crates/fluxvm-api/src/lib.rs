@@ -346,6 +346,7 @@ fn require_admin(role: Role) -> ApiResult<()> {
 }
 
 pub fn router(manager: Arc<VmManager>) -> Router {
+    fluxvm_scheduler::history::start_sampler(&manager);
     let oidc = build_oidc(&manager.cfg.auth);
     let mut router = Router::new()
         .route("/healthz", get(|| async { Json(json!({"ok": true})) }))
