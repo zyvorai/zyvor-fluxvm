@@ -662,6 +662,9 @@ pub async fn pull(reference: &str, dest: &Path, creds: Option<Credentials>) -> R
         );
     }
     let manifest: Manifest = serde_json::from_slice(&bytes).context("parsing manifest")?;
+    if crate::tart::is_tart(manifest.layers.iter().map(|l| l.media_type.as_str())) {
+        return pull_tart(&mut s, &r, &manifest, manifest_digest, dest).await;
+    }
     ensure!(
         manifest.config.media_type == MT_CONFIG,
         "{r} is not a FluxVM VM image (config media type {:?})",
@@ -672,18 +675,7 @@ pub async fn pull(reference: &str, dest: &Path, creds: Option<Credentials>) -> R
         serde_json::from_slice(&config_bytes).context("parsing VM artifact config")?;
     validate(&manifest, &config)?;
 
-    let parent = dest
-        .parent()
-        .filter(|p| !p.as_os_str().is_empty())
-        .unwrap_or(Path::new("."));
-    fs::create_dir_all(parent)?;
-    let tmp = parent.join(format!(
-        ".{}.partial-{}",
-        dest.file_name().and_then(|n| n.to_str()).unwrap_or("vm"),
-        std::process::id()
-    ));
-    let _ = fs::remove_dir_all(&tmp);
-    fs::create_dir(&tmp)?;
+    let tmp = partial_dir(dest)?;
     let result = async {
         let mut handles = BTreeMap::new();
         for f in &config.files {
@@ -740,6 +732,141 @@ pub async fn pull(reference: &str, dest: &Path, creds: Option<Credentials>) -> R
     })
 }
 
+/// A fresh sibling directory of `dest` for a pull in progress; renamed onto `dest` once everything verified.
+fn partial_dir(dest: &Path) -> Result<PathBuf> {
+    let parent = dest
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    fs::create_dir_all(parent)?;
+    let tmp = parent.join(format!(
+        ".{}.partial-{}",
+        dest.file_name().and_then(|n| n.to_str()).unwrap_or("vm"),
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&tmp);
+    fs::create_dir(&tmp)?;
+    Ok(tmp)
+}
+
+/// Pulls a Tart image (see [`crate::tart`]) and converts it into a FluxVM bundle: `disk.raw`, the NVRAM as
+/// `auxiliary.bin` (macOS) or `efi.bin` (Linux), and `hardware.bin` for macOS. Tart's machine identifier is dropped.
+async fn pull_tart(
+    s: &mut Session,
+    r: &ImageRef,
+    manifest: &Manifest,
+    manifest_digest: String,
+    dest: &Path,
+) -> Result<PullReport> {
+    use crate::tart;
+    let layers: Vec<(&str, &BTreeMap<String, String>)> = manifest
+        .layers
+        .iter()
+        .map(|l| (l.media_type.as_str(), &l.annotations))
+        .collect();
+    let (slices, disk_size) = tart::plan(&layers)?;
+    let config_bytes = s.blob(&manifest.layers[0], tart::MAX_SMALL_BLOB).await?;
+    let tcfg = tart::TartConfig::parse(&config_bytes)?;
+    let hardware = tcfg.hardware_model_bytes()?;
+    let nvram_desc = &manifest.layers[manifest.layers.len() - 1];
+
+    let tmp = partial_dir(dest)?;
+    let result = async {
+        let mut downloaded = config_bytes.len() as u64;
+        let disk = fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(tmp.join("disk.raw"))?;
+        disk.set_len(disk_size)?;
+        for sl in &slices {
+            // LZ4 can grow incompressible data slightly; allow for that over the 512 MiB slice.
+            let compressed = s
+                .blob(
+                    &manifest.layers[sl.layer],
+                    tart::MAX_SLICE + tart::MAX_SLICE / 64,
+                )
+                .await?;
+            downloaded += compressed.len() as u64;
+            let expected = usize::try_from(sl.size)?;
+            let raw =
+                tokio::task::spawn_blocking(move || tart::apple_lz4_decode(&compressed, expected))
+                    .await
+                    .context("decompression task")??;
+            if let Some(d) = &sl.digest {
+                ensure!(
+                    &sha256_digest(&raw) == d,
+                    "disk slice at offset {} does not match its uncompressed digest",
+                    sl.offset
+                );
+            }
+            write_sparse(&disk, sl.offset, &raw)?;
+        }
+        disk.sync_all()?;
+        let nvram = s.blob(nvram_desc, tart::MAX_SMALL_BLOB).await?;
+        downloaded += nvram.len() as u64;
+        fs::write(tmp.join(tcfg.nvram_file()), &nvram)?;
+        if let Some(hw) = &hardware {
+            fs::write(tmp.join("hardware.bin"), hw)?;
+        }
+        anyhow::Ok((downloaded, nvram.len() as u64))
+    }
+    .await;
+    let (downloaded, nvram_size) = match result {
+        Ok(x) => x,
+        Err(e) => {
+            let _ = fs::remove_dir_all(&tmp);
+            return Err(e);
+        }
+    };
+    fs::rename(&tmp, dest)
+        .with_context(|| format!("moving the pulled image to {}", dest.display()))?;
+
+    let mut files = vec![
+        ArtifactFile {
+            name: "disk.raw".into(),
+            size: disk_size,
+        },
+        ArtifactFile {
+            name: tcfg.nvram_file().into(),
+            size: nvram_size,
+        },
+    ];
+    if let Some(hw) = &hardware {
+        files.push(ArtifactFile {
+            name: "hardware.bin".into(),
+            size: hw.len() as u64,
+        });
+    }
+    let mut annotations = BTreeMap::new();
+    annotations.insert("dev.zyvor.fluxvm.source".to_owned(), "tart".to_owned());
+    annotations.insert(
+        "dev.zyvor.fluxvm.tart.cpu-count".to_owned(),
+        tcfg.cpu_count.to_string(),
+    );
+    annotations.insert(
+        "dev.zyvor.fluxvm.tart.memory-bytes".to_owned(),
+        tcfg.memory_size.to_string(),
+    );
+    Ok(PullReport {
+        reference: r.to_string(),
+        manifest_digest,
+        dir: dest.to_path_buf(),
+        config: VmArtifactConfig {
+            format_version: 1,
+            os: tcfg.fluxvm_os().into(),
+            architecture: "arm64".into(),
+            name: manifest
+                .annotations
+                .get("org.opencontainers.image.title")
+                .cloned(),
+            chunk_size: tart::MAX_SLICE,
+            files,
+            annotations,
+        },
+        bytes_downloaded: downloaded,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -749,6 +876,7 @@ mod tests {
         http::{HeaderMap, Method, StatusCode, Uri},
         response::{IntoResponse, Response},
     };
+    use serde_json::json;
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
 
@@ -1017,6 +1145,123 @@ mod tests {
             .filter(|e| e.file_name().to_string_lossy().contains("partial"))
             .collect();
         assert!(leftovers.is_empty());
+    }
+
+    /// Stores a Tart image in the fake registry: three disk slices (LZ4 with a cross-block match, an all-zero stored
+    /// slice, a plain LZ4 block) and the NVRAM. Returns the slices' expected raw bytes.
+    fn store_tart_image(reg: &Shared, reference: &str, os: &str, tamper: bool) -> Vec<u8> {
+        use crate::tart::{
+            self,
+            tests::{BLOCK, frame},
+        };
+        let mut reg = reg.lock().unwrap();
+        let mut put = |bytes: Vec<u8>| -> (String, u64) {
+            let d = sha256_digest(&bytes);
+            let n = bytes.len() as u64;
+            reg.blobs.insert(d.clone(), bytes);
+            (d, n)
+        };
+        let second: &[u8] = &[0x0F, 3, 0, 0, 0x10, b'!'];
+        let slices: Vec<(Vec<u8>, Vec<u8>)> = vec![
+            (
+                frame(&[(b"xyz".as_slice(), None), (second, Some(20))]),
+                b"xyzxyzxyzxyzxyzxyzxyzx!".to_vec(),
+            ),
+            (frame(&[(&[0u8; 4096][..], None)]), vec![0u8; 4096]),
+            (frame(&[(BLOCK, Some(13))]), b"abcabcabcabcx".to_vec()),
+        ];
+        let config = json!({"version": 1, "os": os, "arch": "arm64", "cpuCount": 4,
+            "memorySize": 8u64 << 30, "hardwareModel": "aHctbW9kZWw=", "ecid": "aWQ="})
+        .to_string()
+        .into_bytes();
+        let (cd, cn) = put(config);
+        let mut layers = vec![json!({"mediaType": tart::MT_CONFIG, "digest": cd, "size": cn})];
+        let mut raw_all = Vec::new();
+        for (i, (compressed, raw)) in slices.into_iter().enumerate() {
+            let digest = if tamper && i == 2 {
+                sha256_digest(b"other")
+            } else {
+                sha256_digest(&raw)
+            };
+            let (d, n) = put(compressed);
+            layers.push(
+                json!({"mediaType": tart::MT_DISK_V2, "digest": d, "size": n, "annotations": {
+                    tart::ANN_UNCOMPRESSED_SIZE: raw.len().to_string(),
+                    tart::ANN_UNCOMPRESSED_DIGEST: digest,
+                }}),
+            );
+            raw_all.extend(raw);
+        }
+        let (nd, nn) = put(b"nvram-bytes".to_vec());
+        layers.push(json!({"mediaType": tart::MT_NVRAM, "digest": nd, "size": nn}));
+        let (sd, sn) = put(br#"{"architecture":"arm64","os":"darwin"}"#.to_vec());
+        let manifest = json!({
+            "schemaVersion": 2,
+            "mediaType": MT_OCI_MANIFEST,
+            "config": {"mediaType": "application/vnd.oci.image.config.v1+json", "digest": sd, "size": sn},
+            "layers": layers,
+            "annotations": {"org.cirruslabs.tart.uncompressed-disk-size": raw_all.len().to_string()},
+        })
+        .to_string()
+        .into_bytes();
+        reg.manifests.insert(reference.to_owned(), manifest);
+        raw_all
+    }
+
+    #[tokio::test]
+    async fn tart_images_convert_into_fluxvm_bundles() {
+        let (host, reg) = registry(true).await;
+        let raw = store_tart_image(&reg, "sequoia-base", "darwin", false);
+        let d = tempfile::tempdir().unwrap();
+        let dest = d.path().join("mac");
+        let pulled = pull(
+            &format!("{host}/cirruslabs/macos:sequoia-base"),
+            &dest,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(pulled.config.os, "macos");
+        assert_eq!(pulled.config.annotations["dev.zyvor.fluxvm.source"], "tart");
+        assert_eq!(
+            pulled.config.annotations["dev.zyvor.fluxvm.tart.cpu-count"],
+            "4"
+        );
+        assert_eq!(fs::read(dest.join("disk.raw")).unwrap(), raw);
+        assert_eq!(
+            fs::read(dest.join("auxiliary.bin")).unwrap(),
+            b"nvram-bytes"
+        );
+        assert_eq!(fs::read(dest.join("hardware.bin")).unwrap(), b"hw-model");
+        assert!(
+            !dest.join("identity.bin").exists(),
+            "Tart's ecid is not carried over"
+        );
+
+        // Linux: the NVRAM is the EFI variable store and there is no hardware model.
+        store_tart_image(&reg, "debian", "linux", false);
+        let dest = d.path().join("linux");
+        pull(&format!("{host}/cirruslabs/macos:debian"), &dest, None)
+            .await
+            .unwrap();
+        assert_eq!(fs::read(dest.join("efi.bin")).unwrap(), b"nvram-bytes");
+        assert!(!dest.join("hardware.bin").exists());
+    }
+
+    #[tokio::test]
+    async fn tart_slices_are_checked_against_their_digest() {
+        let (host, reg) = registry(false).await;
+        store_tart_image(&reg, "bad", "darwin", true);
+        let d = tempfile::tempdir().unwrap();
+        let dest = d.path().join("mac");
+        let err = pull(&format!("{host}/cirruslabs/macos:bad"), &dest, None)
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("uncompressed digest"),
+            "{err:#}"
+        );
+        assert!(!dest.exists());
     }
 
     #[test]
