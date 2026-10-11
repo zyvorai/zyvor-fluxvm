@@ -40,9 +40,10 @@ pub use host_caps::{AppleHostCapabilities, host_capabilities, prime_host_capabil
 pub use ipsw::{IpswInfo, latest_ipsw};
 pub use runner::{
     EGRESS_PORT, ForwardConfig, OneShotVm, RunnerConfig, SELF_CONTROL_PORT, SNAPSHOT_FILES,
-    STATE_FILE, ShareConfig, adopt_macos_template, clone_file, console_port_socket, find_runner,
-    ip_file, oci_meta_dir, prepare_fork_child, read_guest_ip, release_mac,
-    self_control_socket_path, set_self_control_socket, snapshot_dir, write_oci_meta_as,
+    STATE_FILE, ShareConfig, adopt_macos_template, clone_file, console_port_socket,
+    export_checkpoint, find_runner, ip_file, oci_meta_dir, prepare_fork_child, read_guest_ip,
+    release_mac, self_control_socket_path, set_self_control_socket, snapshot_dir,
+    write_oci_meta_as,
 };
 pub use usage::{
     RunnerUsage, VmUsage, attribute_services, is_vz_service_path, mach_ticks_to_seconds,

@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+### Added: Flux Branch (`fluxctl branch`, `/v1/vms/{id}/branches`, `/v1/branches`)
+- Named, durable checkpoints of a running vz Linux guest (state and disk as APFS clones, stored outside the VM's workspace),
+  startable any number of times with fork's identity reset, token rotation, parallel restore, hooks and readiness. They
+  survive the source VM's deletion and a daemon restart, and a VM started from a branch can be branched (`parent_branch`).
+  Verified on an M4: create 0.38 s, start of 2 VMs 1.9 s, checkpoint-instant file semantics. Not yet: commit, rebase,
+  flatten, diff, MCP tools.
+
 ### Changed: fork v2 (`POST /v1/vms/{id}/fork`): strict identity, rotated agent token, parallel children
 - **`identity` defaults to `unique`**: the fork fails and every child is deleted unless the guest confirms hostname, machine-id,
   entropy, SSH host keys, cloud-init, DHCP and network state, and the child's agent token is rotated. Before this a failed reset

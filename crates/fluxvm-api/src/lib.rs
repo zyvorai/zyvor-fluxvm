@@ -384,6 +384,13 @@ pub fn router(manager: Arc<VmManager>) -> Router {
         .route("/v1/backups", get(list_backups))
         .route("/v1/backups/{name}", delete(delete_backup))
         .route("/v1/backups/{name}/root", get(download_backup_root))
+        .route(
+            "/v1/vms/{id}/branches",
+            get(list_vm_branches).post(create_branch),
+        )
+        .route("/v1/branches", get(list_branches))
+        .route("/v1/branches/{id}", get(get_branch).delete(delete_branch))
+        .route("/v1/branches/{id}/start", post(start_branch))
         .route("/v1/vms/{id}/snapshots", get(list_vm_snapshots))
         .route("/v1/vms/{id}/snapshots/{tag}", delete(delete_vm_snapshot))
         .route(
@@ -2572,6 +2579,85 @@ async fn patch_vm(
 ) -> ApiResult<Json<serde_json::Value>> {
     require_admin(role)?;
     Ok(Json(json!(m.patch(id, patch).await?)))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CreateBranchRequest {
+    name: String,
+    #[serde(default)]
+    labels: std::collections::BTreeMap<String, String>,
+}
+
+/// Checkpoint a running `vz` guest as a named, durable branch (see `fluxvm_scheduler::branch`).
+async fn create_branch(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+    actor: Option<Extension<AuditActor>>,
+    Json(req): Json<CreateBranchRequest>,
+) -> ApiResult<impl IntoResponse> {
+    require_admin(role)?;
+    let actor_name = actor.as_ref().map(|a| a.0.0.as_str());
+    let branch = m
+        .create_branch(id, req.name, req.labels, actor_name)
+        .await?;
+    Ok((StatusCode::CREATED, Json(json!(branch))))
+}
+
+async fn list_vm_branches(
+    State(m): State<Arc<VmManager>>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<serde_json::Value>> {
+    Ok(Json(json!({"items": m.list_branches(Some(id)).await?})))
+}
+
+async fn list_branches(State(m): State<Arc<VmManager>>) -> ApiResult<Json<serde_json::Value>> {
+    Ok(Json(json!({"items": m.list_branches(None).await?})))
+}
+
+async fn get_branch(
+    State(m): State<Arc<VmManager>>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<serde_json::Value>> {
+    Ok(Json(json!(m.get_branch(id).await?)))
+}
+
+async fn delete_branch(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+    actor: Option<Extension<AuditActor>>,
+) -> ApiResult<StatusCode> {
+    require_admin(role)?;
+    let actor_name = actor.as_ref().map(|a| a.0.0.as_str());
+    m.delete_branch(id, actor_name).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Start `count` new VMs from a branch; the body is the fork spec and so is the response.
+async fn start_branch(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+    actor: Option<Extension<AuditActor>>,
+    Json(spec): Json<fluxvm_scheduler::fork::ForkSpec>,
+) -> ApiResult<impl IntoResponse> {
+    require_admin(role)?;
+    let actor_name = actor.as_ref().map(|a| a.0.0.as_str());
+    let started = std::time::Instant::now();
+    let report = m.start_branch(id, spec, actor_name).await?;
+    let body = json!({
+        "items": report.children,
+        "elapsed_ms": started.elapsed().as_millis() as u64,
+        "fork": {
+            "identity": report.reports.first().map(|r| r.identity.via.clone()),
+            "total_ms": report.total_ms,
+            "parallelism": report.parallelism,
+            "children": report.reports,
+        },
+    });
+    Ok((StatusCode::CREATED, Json(body)))
 }
 
 async fn list_vm_snapshots(

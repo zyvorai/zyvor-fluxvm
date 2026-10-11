@@ -165,6 +165,29 @@ fn ops() -> Vec<Op> {
         .body("SnapshotRequest"),
         op("get", "/v1/vms/{id}/snapshots", "List snapshots", SNAPSHOTS).returns("SnapshotList"),
         op(
+            "post",
+            "/v1/vms/{id}/branches",
+            "Checkpoint a running vz guest as a named, durable branch",
+            SNAPSHOTS,
+        )
+        .body("CreateBranchRequest")
+        .returns("VmBranch")
+        .status("201"),
+        op("get", "/v1/vms/{id}/branches", "List a VM's branches", SNAPSHOTS)
+            .returns("BranchList"),
+        op("get", "/v1/branches", "List all branches", SNAPSHOTS).returns("BranchList"),
+        op("get", "/v1/branches/{id}", "Get a branch", SNAPSHOTS).returns("VmBranch"),
+        op("delete", "/v1/branches/{id}", "Delete a branch", SNAPSHOTS),
+        op(
+            "post",
+            "/v1/branches/{id}/start",
+            "Start new VMs from a branch (the body is the fork spec)",
+            SNAPSHOTS,
+        )
+        .body("ForkVmRequest")
+        .returns("VmList")
+        .status("201"),
+        op(
             "delete",
             "/v1/vms/{id}/snapshots/{tag}",
             "Delete a snapshot",
@@ -325,6 +348,9 @@ fn schemas() -> Value {
         "VmRecord": obj("A VM: id, name, status, backend, request, labels, workspace, guest_ip, ..."),
         "CreateVmRequest": obj("VM spec: name, backend, image, vcpus, memory_mib, network, cloud_init, ..."),
         "VmList": list("VmRecord"),
+        "BranchList": list("VmBranch"),
+        "CreateBranchRequest": {"type": "object", "required": ["name"], "properties": {"name": {"type": "string"}, "labels": {"type": "object", "additionalProperties": {"type": "string"}}}},
+        "VmBranch": {"type": "object", "properties": {"id": {"type": "string", "format": "uuid"}, "name": {"type": "string"}, "source_vm": {"type": "string", "format": "uuid"}, "source_name": {"type": "string"}, "parent_branch": {"type": "string", "format": "uuid", "nullable": true}, "created_at": {"type": "string", "format": "date-time"}, "labels": {"type": "object", "additionalProperties": {"type": "string"}}, "vcpus": {"type": "integer"}, "memory_mib": {"type": "integer"}, "state_bytes": {"type": "integer"}}},
         "VzDisplayResize": {"type": "object", "required": ["width", "height"], "properties": {
             "width": {"type": "integer", "minimum": 800, "maximum": 5120},
             "height": {"type": "integer", "minimum": 600, "maximum": 2880},

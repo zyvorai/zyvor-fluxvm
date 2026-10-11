@@ -128,14 +128,14 @@ fn root_path() -> String {
 
 /// The post-restore steps of a fork, validated once.
 #[derive(Debug, Clone)]
-struct ForkPost {
+pub(crate) struct ForkPost {
     hooks: Vec<Vec<String>>,
     ready: ForkReady,
     timeout: std::time::Duration,
 }
 
 impl ForkSpec {
-    fn post(&self) -> Result<ForkPost> {
+    pub(crate) fn post(&self) -> Result<ForkPost> {
         if self.hooks.len() > 8 {
             bail!("at most 8 fork hooks");
         }
@@ -369,7 +369,7 @@ impl VmManager {
     /// Admission for `count` children at once: the checks a create of that size meets, against the ledger as it would
     /// be once the first `count - 1` children exist. Done before the parent is paused, so a batch that cannot fit is
     /// refused up front instead of failing child by child.
-    async fn admit_fork_batch(&self, src: &VmRecord, count: u32) -> Result<()> {
+    pub(crate) async fn admit_fork_batch(&self, src: &VmRecord, count: u32) -> Result<()> {
         let mut ledger = self.store.quota_ledger().await?;
         let extra = u64::from(count.saturating_sub(1));
         if extra > 0 {
@@ -458,24 +458,81 @@ impl VmManager {
         self.create_vm_snapshot(id, &tag).await?;
         let parent_snapshot_ms = snap_started.elapsed().as_millis() as u64;
 
+        let src = Arc::new(src);
+        let result = self
+            .fork_vz_children(
+                Arc::clone(&src),
+                &tag,
+                names,
+                spec.identity,
+                Arc::new(post),
+                actor,
+                Arc::clone(&op),
+                parallelism,
+            )
+            .await;
+        // Success or not, the parent's fork snapshot has done its job.
+        if let Err(e) = self.delete_vm_snapshot(id, &tag).await {
+            tracing::warn!(vm = %id, tag, error = %e, "removing fork snapshot failed");
+        }
+        if let Ok(op) = Arc::try_unwrap(op) {
+            op.finish();
+        }
+        let mut done = result?;
+        done.sort_by(|a, b| a.0.name.cmp(&b.0.name));
+        let (children, reports): (Vec<_>, Vec<_>) = done.into_iter().unzip();
+        let ids: Vec<String> = children.iter().map(|c| c.id.to_string()).collect();
+        audit_event(
+            "vm.fork",
+            &[
+                ("vm_id", &id.to_string()),
+                ("count", &count.to_string()),
+                ("children", &ids.join(",")),
+                ("backend", "vz"),
+                ("identity", &format!("{:?}", spec.identity)),
+                ("parallelism", &parallelism.to_string()),
+                ("parent_snapshot_ms", &parent_snapshot_ms.to_string()),
+            ],
+        );
+        Ok(ForkReport {
+            children,
+            reports,
+            parent_snapshot_ms,
+            total_ms: started.elapsed().as_millis() as u64,
+            parallelism,
+        })
+    }
+
+    /// Starts `names` as children of `src`, `parallelism` at a time, each restored from `src.workspace/snapshots/<tag>`.
+    /// All-or-nothing: when one fails, every child this call created (started or not) is deleted and the error is
+    /// returned. Shared by a live fork (the parent's fresh snapshot) and a branch start (a stored checkpoint).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn fork_vz_children(
+        self: &Arc<Self>,
+        src: Arc<VmRecord>,
+        tag: &str,
+        names: Vec<String>,
+        identity: ForkIdentityMode,
+        post: Arc<ForkPost>,
+        actor: Option<&str>,
+        op: Arc<OpGuard>,
+        parallelism: u8,
+    ) -> Result<Vec<(VmRecord, ForkChildReport)>> {
         let created: Arc<std::sync::Mutex<Vec<Uuid>>> = Arc::default();
         let sem = Arc::new(tokio::sync::Semaphore::new(usize::from(parallelism)));
         let mut set = tokio::task::JoinSet::new();
-        let src = Arc::new(src);
-        let post = Arc::new(post);
         let actor_owned = actor.map(str::to_owned);
         for name in names {
             let (this, src, tag, op, sem, created, actor, post) = (
                 Arc::clone(self),
                 Arc::clone(&src),
-                tag.clone(),
+                tag.to_string(),
                 Arc::clone(&op),
                 Arc::clone(&sem),
                 Arc::clone(&created),
                 actor_owned.clone(),
                 Arc::clone(&post),
             );
-            let identity = spec.identity;
             set.spawn(async move {
                 let _permit = sem.acquire_owned().await;
                 let r = this
@@ -514,47 +571,13 @@ impl VmManager {
             }
         }
         if let Some(e) = failure {
-            // All-or-nothing, as for the KVM fork: every child this call created, started or not.
             let ids: Vec<Uuid> = created.lock().map(|g| g.clone()).unwrap_or_default();
             for child in ids {
                 let _ = self.delete(child).await;
             }
-            if let Err(e) = self.delete_vm_snapshot(id, &tag).await {
-                tracing::warn!(vm = %id, tag, error = %e, "removing fork snapshot failed");
-            }
-            if let Ok(op) = Arc::try_unwrap(op) {
-                op.finish();
-            }
             return Err(e);
         }
-        if let Err(e) = self.delete_vm_snapshot(id, &tag).await {
-            tracing::warn!(vm = %id, tag, error = %e, "removing fork snapshot failed");
-        }
-        if let Ok(op) = Arc::try_unwrap(op) {
-            op.finish();
-        }
-        done.sort_by(|a, b| a.0.name.cmp(&b.0.name));
-        let (children, reports): (Vec<_>, Vec<_>) = done.into_iter().unzip();
-        let ids: Vec<String> = children.iter().map(|c| c.id.to_string()).collect();
-        audit_event(
-            "vm.fork",
-            &[
-                ("vm_id", &id.to_string()),
-                ("count", &count.to_string()),
-                ("children", &ids.join(",")),
-                ("backend", "vz"),
-                ("identity", &format!("{:?}", spec.identity)),
-                ("parallelism", &parallelism.to_string()),
-                ("parent_snapshot_ms", &parent_snapshot_ms.to_string()),
-            ],
-        );
-        Ok(ForkReport {
-            children,
-            reports,
-            parent_snapshot_ms,
-            total_ms: started.elapsed().as_millis() as u64,
-            parallelism,
-        })
+        Ok(done)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1196,7 +1219,7 @@ fn runner_log_tail(vm: &VmRecord) -> String {
 }
 
 /// `network` against what a vz parent allows.
-fn check_fork_network_mode(src: &VmRecord, mode: ForkNetworkMode) -> Result<()> {
+pub(crate) fn check_fork_network_mode(src: &VmRecord, mode: ForkNetworkMode) -> Result<()> {
     let isolated = match &src.request.network {
         NetworkSpec::None => true,
         NetworkSpec::User { .. } => src
