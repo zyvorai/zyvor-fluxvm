@@ -151,6 +151,11 @@ Only processes whose `/proc/<pid>/comm` starts with `qemu`, `cloud-hyper`,
 `firecracker`, `jailer`, `virtiofsd`, `swtpm` or `fluxvm` are ever killed on a
 rolled-back VM's behalf.
 
+On macOS there is no `/proc`: the lookup reads `ps` and matches only `fluxvm-vz-runner` processes whose command line
+names the VM's workspace or id (a fork child's runner is stopped this way before its record is deleted, since the record
+may not yet hold the runner's pid). Until this was added, a `kill -9` of the daemon mid-fork left the children's guests
+running with their workspaces deleted.
+
 ### sweep_orphans
 
 Removes things nothing accounts for. A name is "claimed" if a VM record, a

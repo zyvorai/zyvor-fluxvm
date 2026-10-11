@@ -173,7 +173,34 @@ pub(crate) fn planned_create_resources(
     out
 }
 
+/// Pids of the Apple runner processes whose command line mentions any of `needles`. There is no `/proc` on macOS, so
+/// this reads `ps`; without it a crash-recovery rollback removed a VM's record and workspace and left its runner (and
+/// the guest) running, which a hardware crash test found.
+#[cfg(not(target_os = "linux"))]
+fn vmm_pids_referencing(needles: &[String]) -> Vec<u32> {
+    let me = std::process::id();
+    let Ok(out) = std::process::Command::new("/bin/ps")
+        .args(["-axo", "pid=,command="])
+        .output()
+    else {
+        return Vec::new();
+    };
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|l| {
+            let l = l.trim_start();
+            let (pid, cmd) = l.split_once(char::is_whitespace)?;
+            let pid: u32 = pid.parse().ok()?;
+            (pid != me
+                && cmd.contains("fluxvm-vz-runner")
+                && needles.iter().any(|n| cmd.contains(n.as_str())))
+            .then_some(pid)
+        })
+        .collect()
+}
+
 /// Pids of VMM-like processes whose command line mentions any of `needles`.
+#[cfg(target_os = "linux")]
 fn vmm_pids_referencing(needles: &[String]) -> Vec<u32> {
     let me = std::process::id();
     let Ok(rd) = fs::read_dir("/proc") else {
@@ -530,6 +557,9 @@ impl VmManager {
             let Resource::ForkChild { vm_id: child } = r else {
                 continue;
             };
+            // Always first: the record may predate the runner's pid being stored, and deleting a record does not
+            // stop a VMM the record does not know about.
+            kill_vmm_processes(state_dir, *child).await;
             if self.store.get(*child).await.is_some() {
                 if let Err(e) = self.delete(*child).await {
                     tracing::warn!(vm = %child, error = %e, "removing a fork child failed");
@@ -1135,6 +1165,42 @@ mod tests {
             m.store.get(b).await.is_none(),
             "an old-format intent was adopted"
         );
+    }
+
+    /// A fork whose child runner was never recorded on its VM record leaves a live runner behind; recovery must stop it.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn rolling_back_a_fork_stops_a_runner_the_record_does_not_know() {
+        use std::os::unix::process::CommandExt;
+        let td = tempfile::tempdir().unwrap();
+        let m = manager(td.path());
+        let sd = m.cfg.state_dir.clone();
+        let parent = Uuid::new_v4();
+        let child = Uuid::new_v4();
+        let ws = sd.join("instances").join(child.to_string());
+        // Stands in for fluxvm-vz-runner: argv[0] and the config path are what recovery matches on.
+        let mut dummy = std::process::Command::new("/bin/sleep")
+            .arg("30")
+            .arg0(format!(
+                "fluxvm-vz-runner run --config {}/vz-config.json",
+                ws.display()
+            ))
+            .spawn()
+            .unwrap();
+        child_record(&m, child, false).await; // a record with no pid, as a crash mid-start leaves
+        abandoned_fork(&sd, parent, 1, &[(child, journal::ForkPhase::Restored)]);
+        m.replay_pending_ops().await;
+        let mut gone = false;
+        for _ in 0..40 {
+            if dummy.try_wait().unwrap().is_some() {
+                gone = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        let _ = dummy.kill();
+        assert!(gone, "the child's runner was left running");
+        assert!(m.store.get(child).await.is_none());
     }
 
     #[tokio::test]

@@ -20,6 +20,10 @@
 - **Post-fork `hooks` and `ready`** (`running`, `agent`, `exec`, `tcp`, `http`) with `ready_timeout_seconds`: hooks run as argv
   through the agent after the identity reset, readiness is probed inside each child, and a failure deletes the whole batch.
   `fluxctl fork-vm --hook --ready --ready-timeout`.
+- **Fixed: crash recovery on macOS left VMs running.** Rolling back an interrupted operation found VMM processes through
+  `/proc`, which macOS does not have, so a `kill -9` of the daemon mid-fork (or mid-create) removed the record and workspace
+  and left the runner and guest alive. Recovery now finds Apple runners with `ps` and always stops a fork child's runner
+  before deleting its record. Found by killing the daemon on an M4.
 - **Crash recovery adopts a fully finished fork** (every child at `identity-reset` and running) instead of deleting running
   work; any other interrupted fork is still rolled back whole. Fork metrics (`fluxvm_fork_*`) are exported.
 - Verified on an M4: 4 strict children in 3.6 s; 5 of 5 distinct machine-ids, host keys and tokens. A NAT guest still cannot be
