@@ -29,6 +29,33 @@ impl RunnerUsage {
     }
 }
 
+/// When process `pid` started, as Unix seconds (`proc_pidinfo` `PROC_PIDTBSDINFO`). `None` when the process is gone or
+/// not ours to inspect, and off macOS.
+pub fn process_started_at(pid: u32) -> Option<i64> {
+    #[cfg(target_os = "macos")]
+    {
+        let pid = i32::try_from(pid).ok()?;
+        // SAFETY: `info` is a zeroed proc_bsdinfo of the size passed; proc_pidinfo fills it for PROC_PIDTBSDINFO.
+        let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+        let size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
+        let n = unsafe {
+            libc::proc_pidinfo(
+                pid,
+                libc::PROC_PIDTBSDINFO,
+                0,
+                (&mut info as *mut libc::proc_bsdinfo).cast(),
+                size,
+            )
+        };
+        (n == size).then(|| info.pbi_start_tvsec as i64)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = pid;
+        None
+    }
+}
+
 /// Converts Mach absolute-time ticks to seconds with a `mach_timebase_info` ratio (125/3 on Apple silicon, 1/1 on Intel).
 /// A zero denominator yields 0 rather than dividing by zero.
 pub fn mach_ticks_to_seconds(ticks: u64, numer: u32, denom: u32) -> f64 {
@@ -399,5 +426,23 @@ mod attribution_tests {
         assert!(u.service_pids.is_empty());
         assert!(u.usage.rss_bytes > 0);
         assert!(vm_usage(&[(4_000_000, dir.path().to_path_buf())])[0].is_none());
+    }
+}
+
+#[cfg(test)]
+mod started_at_tests {
+    use super::process_started_at;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn this_process_started_in_the_past_few_minutes() {
+        let t = process_started_at(std::process::id()).expect("our own start time");
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        assert!(t <= now && now - t < 6 * 3600, "start {t} vs now {now}");
+        // A pid that is not there has no start time.
+        assert!(process_started_at(u32::MAX - 1).is_none());
     }
 }

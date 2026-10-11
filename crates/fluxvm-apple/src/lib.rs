@@ -28,8 +28,9 @@ pub mod vznet;
 
 pub use attest::{Attestation, verify_attestation, verify_attestation_hex};
 pub use capability::{
-    CAPABILITIES, Capability, RUNNER_MIN_MACOS, macos_major, set_host_capabilities, validate_disk,
-    validate_request, validate_request_with_host, with_egress_forwarder, with_guest_reporting,
+    CAPABILITIES, Capability, CapabilityStatus, RUNNER_MIN_MACOS, capability_report,
+    current_host_capabilities, macos_major, set_host_capabilities, validate_disk, validate_request,
+    validate_request_with_host, with_egress_forwarder, with_guest_reporting,
     with_self_control_forwarder, with_shared_folder_mounts,
 };
 pub use control::{ControlReply, call as control_call, call_with as control_call_with};
@@ -47,7 +48,7 @@ pub use runner::{
 };
 pub use usage::{
     RunnerUsage, VmUsage, attribute_services, is_vz_service_path, mach_ticks_to_seconds,
-    runner_usage, vm_usage,
+    process_started_at, runner_usage, vm_usage,
 };
 pub use usb_passthrough::{physical_usb_attach, physical_usb_list};
 

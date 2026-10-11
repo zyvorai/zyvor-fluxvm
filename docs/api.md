@@ -648,6 +648,22 @@ Response (`GrantInfo`, which has no secret field):
 Every verb is admin-only, `GET` included. Validation failures (bad host, bad TTL, unresolvable
 `secret_ref`, more than 32 grants) return 400.
 
+### Host overview and capabilities (macOS)
+
+Two read-only routes feed a dashboard without scraping `/metrics`:
+
+- `GET /v1/host/overview`: `daemon` (`version`, `uptime_seconds`), `host` (`os_version`, `cpu_count`, `memory_total_mib`,
+  `memory_available_mib`, `memory_pressure` `normal|warn|critical`, `nested_virtualization`, `rosetta`), `vms` (`total`,
+  `by_status`, `by_backend`), `branches`, `usage[]`, `helpers` (`runner`, `switch`, `blockd`, `usernet` present or not) and
+  `networking` (`vm_networking_entitlement`, `netobs_enabled`). `usage[]` has one row per running or paused `vz` VM:
+  `vm_id`, `name`, `status`, `cpu_seconds_total` (cumulative: take two samples for a rate), `rss_bytes`,
+  `service_attributed` and `started_at` (Unix seconds, the runner process start). CPU and RSS are the runner plus its
+  Virtualization XPC service when `service_attributed` is true, otherwise the runner alone (the guest's own usage is not
+  included). Verified against `ps` on an M4: `started_at` exact, RSS equal to runner plus service.
+- `GET /v1/host/apple/capabilities`: the capability table judged against this Mac: per `feature` `supported`, `note`,
+  `min_macos`, `available_here` (`null` when the host has not been probed) and `reason` (macOS version, chip generation,
+  missing `com.apple.vm.networking`, missing Rosetta).
+
 ### Balloon and memory
 
 Guide: [memory-density.md](memory-density.md).

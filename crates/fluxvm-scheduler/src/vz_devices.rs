@@ -176,3 +176,121 @@ pub async fn apple_host_capabilities() -> Result<Value> {
     let caps = tokio::task::spawn_blocking(fluxvm_apple::host_capabilities).await??;
     Ok(serde_json::to_value(caps)?)
 }
+
+/// `GET /v1/host/apple/capabilities`: the capability table judged against the probed Mac.
+pub async fn apple_capabilities_json() -> Value {
+    fluxvm_apple::prime_host_capabilities().await;
+    let host = fluxvm_apple::current_host_capabilities();
+    json!({
+        "os_version": host.as_ref().map(|h| h.os_version.clone()),
+        "probed": host.is_some(),
+        "items": fluxvm_apple::capability_report(host.as_ref()),
+    })
+}
+
+/// `GET /v1/host/overview` without the netobs flag (the API layer owns the observer): daemon version, host, VM counts,
+/// per-VM runner usage and helper availability.
+pub async fn apple_host_overview_json(
+    vms: Vec<VmRecord>,
+    branches: usize,
+    uptime_seconds: Option<u64>,
+) -> anyhow::Result<Value> {
+    use std::collections::BTreeMap;
+    let mut by_status: BTreeMap<String, u64> = BTreeMap::new();
+    let mut by_backend: BTreeMap<String, u64> = BTreeMap::new();
+    for vm in &vms {
+        *by_status
+            .entry(format!("{:?}", vm.status).to_lowercase())
+            .or_default() += 1;
+        *by_backend
+            .entry(format!("{:?}", vm.backend).to_lowercase())
+            .or_default() += 1;
+    }
+    let total = vms.len();
+    let sampled = vms.clone();
+    let (rows, host_mem) = tokio::task::spawn_blocking(move || {
+        (
+            runner_usage_samples(&sampled),
+            fluxvm_core::pressure_admission::sample_host(),
+        )
+    })
+    .await?;
+    let usage: Vec<Value> = rows
+        .iter()
+        .map(|u| {
+            let vm = vms.iter().find(|v| v.id == u.vm_id);
+            json!({
+                "vm_id": u.vm_id,
+                "name": u.name,
+                "status": vm.map(|v| format!("{:?}", v.status).to_lowercase()),
+                "cpu_seconds_total": u.cpu_seconds,
+                "rss_bytes": u.rss_bytes,
+                "service_attributed": u.service_attributed,
+                "started_at": vm.and_then(|v| v.pid).and_then(fluxvm_apple::process_started_at),
+            })
+        })
+        .collect();
+    fluxvm_apple::prime_host_capabilities().await;
+    let caps = fluxvm_apple::current_host_capabilities();
+    Ok(json!({
+        "daemon": {
+            "version": env!("CARGO_PKG_VERSION"),
+            "uptime_seconds": uptime_seconds,
+        },
+        "host": {
+            "os_version": caps.as_ref().map(|c| c.os_version.clone()),
+            "cpu_count": std::thread::available_parallelism().map(|n| n.get()).ok(),
+            "memory_total_mib": host_mem.mem_total_mib,
+            "memory_available_mib": host_mem.mem_available_mib,
+            "memory_pressure": host_mem.level,
+            "nested_virtualization": caps.as_ref().map(|c| c.nested_virtualization),
+            "rosetta": caps.as_ref().map(|c| c.rosetta.clone()),
+        },
+        "vms": {"total": total, "by_status": by_status, "by_backend": by_backend},
+        "branches": branches,
+        "usage": usage,
+        "helpers": {
+            "runner": fluxvm_apple::find_runner().is_ok(),
+            "switch": fluxvm_apple::vznet::find_switch().is_ok(),
+            "blockd": fluxvm_apple::blockd::find_blockd().is_ok(),
+            "usernet": fluxvm_apple::usernet::find_usernet().is_ok(),
+        },
+        "networking": {
+            "vm_networking_entitlement": caps.as_ref().and_then(|c| c.vm_networking_entitlement),
+        },
+    }))
+}
+
+#[cfg(test)]
+mod overview_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn the_overview_has_the_documented_shape_with_no_vms() {
+        let v = apple_host_overview_json(Vec::new(), 3, Some(42))
+            .await
+            .unwrap();
+        assert_eq!(v["daemon"]["uptime_seconds"], 42);
+        assert!(
+            v["daemon"]["version"]
+                .as_str()
+                .is_some_and(|s| !s.is_empty())
+        );
+        assert_eq!(v["vms"]["total"], 0);
+        assert_eq!(v["branches"], 3);
+        assert!(v["usage"].as_array().unwrap().is_empty());
+        for h in ["runner", "switch", "blockd", "usernet"] {
+            assert!(v["helpers"][h].is_boolean(), "{h}");
+        }
+        assert!(v["host"]["cpu_count"].as_u64().unwrap_or(0) >= 1);
+    }
+
+    #[tokio::test]
+    async fn the_capability_report_lists_every_table_row() {
+        let v = apple_capabilities_json().await;
+        let n = v["items"].as_array().unwrap().len();
+        assert_eq!(n, fluxvm_apple::CAPABILITIES.len());
+        assert!(v["items"][0]["feature"].is_string());
+        assert!(v["items"][0]["min_macos"].as_u64().unwrap() >= 14);
+    }
+}
