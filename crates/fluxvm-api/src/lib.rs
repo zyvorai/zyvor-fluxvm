@@ -391,6 +391,11 @@ pub fn router(manager: Arc<VmManager>) -> Router {
         .route("/v1/branches", get(list_branches))
         .route("/v1/branches/{id}", get(get_branch).delete(delete_branch))
         .route("/v1/branches/{id}/start", post(start_branch))
+        .route("/v1/vms/{id}/cbt-backup", post(cbt_backup))
+        .route("/v1/vms/{id}/cbt-restore", post(cbt_restore))
+        .route("/v1/cbt/synthesize", post(cbt_synthesize))
+        .route("/v1/cbt/delete", post(cbt_delete))
+        .route("/v1/cbt-jobs/{id}", get(cbt_job))
         .route("/v1/vms/{id}/snapshots", get(list_vm_snapshots))
         .route("/v1/vms/{id}/snapshots/{tag}", delete(delete_vm_snapshot))
         .route(
@@ -2112,8 +2117,11 @@ async fn runtime_capabilities(
     // reported as unsupported rather than guessed.
     let qemu_postcopy_with_multifd = m.qemu_version().is_some_and(|v| v >= (10, 0));
     use fluxvm_core::model::{
-        BackendKind, RuntimeCapabilities, RuntimeMigrationCapability, RuntimeSnapshotCapability,
+        BackendKind, RuntimeBackupCapability, RuntimeCapabilities, RuntimeMigrationCapability,
+        RuntimeSnapshotCapability,
     };
+    // Persistent bitmaps, bitmap-mode and zstd qcow2 clusters need QEMU 5.1.
+    let cbt = m.qemu_version().is_some_and(|v| v >= (5, 1));
     Json(RuntimeCapabilities {
         api_version: "runtime.fluxvm.zyvor.io/v1".into(),
         scope: "node-local".into(),
@@ -2179,6 +2187,18 @@ async fn runtime_capabilities(
                 portable: false,
             },
         ],
+        backup: if cbt {
+            vec![RuntimeBackupCapability {
+                backend: BackendKind::Qemu,
+                full: true,
+                incremental: true,
+                targets: vec!["s3".into(), "dir".into()],
+                compression: vec!["zstd".into()],
+                encryption: vec![fluxvm_scheduler::cbt::ENCRYPTION_ALGORITHM.into()],
+            }]
+        } else {
+            vec![]
+        },
     })
 }
 
@@ -2732,6 +2752,64 @@ async fn delete_backup(
     }
     m.delete_backup(&name)?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Starts a changed-block-tracking backup to object storage; poll the
+/// returned job at `GET /v1/cbt-jobs/{id}`.
+async fn cbt_backup(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<fluxvm_scheduler::cbt::CbtBackupRequest>,
+) -> ApiResult<impl IntoResponse> {
+    require_admin(role)?;
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(m.start_cbt_backup(id, req).await?),
+    ))
+}
+
+async fn cbt_restore(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<fluxvm_scheduler::cbt::CbtRestoreRequest>,
+) -> ApiResult<impl IntoResponse> {
+    require_admin(role)?;
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(m.start_cbt_restore(id, req).await?),
+    ))
+}
+
+async fn cbt_synthesize(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Json(req): Json<fluxvm_scheduler::cbt::CbtSynthesizeRequest>,
+) -> ApiResult<impl IntoResponse> {
+    require_admin(role)?;
+    Ok((StatusCode::ACCEPTED, Json(m.start_cbt_synthesize(req)?)))
+}
+
+async fn cbt_delete(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Json(req): Json<fluxvm_scheduler::cbt::CbtDeleteRequest>,
+) -> ApiResult<Json<fluxvm_scheduler::cbt::CbtDeleteResult>> {
+    require_admin(role)?;
+    Ok(Json(m.cbt_delete(req).await?))
+}
+
+async fn cbt_job(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<fluxvm_scheduler::cbt::CbtJob>> {
+    require_admin(role)?;
+    m.cbt_job(id)?.map(Json).ok_or_else(|| ApiError {
+        status: StatusCode::NOT_FOUND,
+        message: format!("CBT job {id} not found"),
+    })
 }
 
 /// Streams a backup's standalone root qcow2, e.g. so Veyron can publish an
@@ -5230,6 +5308,93 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        }
+
+        #[tokio::test]
+        async fn cbt_routes_are_admin_only_and_delete_by_manifest() {
+            let dir = Box::leak(Box::new(tempfile::tempdir().unwrap()));
+            let bucket = dir.path().join("bucket");
+            let backup = bucket.join("ns/vm/c1/00000000-b0");
+            std::fs::create_dir_all(&backup).unwrap();
+            std::fs::write(backup.join("root.qcow2"), b"layer").unwrap();
+            let manifest = json!({
+                "version": 1, "backupId": "b0", "chainId": "c1", "sequence": 0,
+                "kind": "full", "parent": null, "vmName": "vm",
+                "createdAt": "2026-10-11T00:00:00Z", "quiesced": false,
+                "disks": [{"name": "root", "key": "ns/vm/c1/00000000-b0/root.qcow2",
+                    "virtualSize": 5, "storedSize": 5, "changedBytes": 5, "sha256": "x"}],
+                "consolidates": [], "retainUntil": null
+            });
+            std::fs::write(backup.join("manifest.json"), manifest.to_string()).unwrap();
+            let app = router(manager(AuthConfig {
+                tokens: vec![
+                    ApiToken {
+                        token: "admin".into(),
+                        role: Role::Admin,
+                        name: None,
+                        tenant: None,
+                    },
+                    ApiToken {
+                        token: "ro".into(),
+                        role: Role::ReadOnly,
+                        name: None,
+                        tenant: None,
+                    },
+                ],
+                ..Default::default()
+            }));
+            let target = json!({"type": "dir", "path": bucket});
+            let delete =
+                json!({"target": target, "manifestKeys": ["ns/vm/c1/00000000-b0/manifest.json"]});
+            assert_eq!(
+                request(
+                    app.clone(),
+                    "POST",
+                    "/v1/cbt/delete",
+                    Some("ro"),
+                    Some(&delete.to_string())
+                )
+                .await,
+                StatusCode::FORBIDDEN
+            );
+            assert_eq!(
+                request(
+                    app.clone(),
+                    "POST",
+                    "/v1/cbt/delete",
+                    Some("admin"),
+                    Some(&delete.to_string())
+                )
+                .await,
+                StatusCode::OK
+            );
+            assert!(!backup.join("root.qcow2").exists());
+            assert!(!backup.join("manifest.json").exists());
+            assert_eq!(
+                status_for(
+                    app.clone(),
+                    "GET",
+                    &format!("/v1/cbt-jobs/{}", Uuid::new_v4()),
+                    Some("admin")
+                )
+                .await,
+                StatusCode::NOT_FOUND
+            );
+            let bad_chain = json!({
+                "target": target, "prefix": "ns/vm", "chainId": "../x", "sequence": 0,
+                "backupId": "b1", "mode": "full"
+            });
+            assert_eq!(
+                request(
+                    app,
+                    "POST",
+                    &format!("/v1/vms/{}/cbt-backup", Uuid::new_v4()),
+                    Some("admin"),
+                    Some(&bad_chain.to_string())
+                )
+                .await,
+                StatusCode::BAD_REQUEST
+            );
         }
 
         #[tokio::test]

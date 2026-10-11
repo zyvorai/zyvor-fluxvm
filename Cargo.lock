@@ -2698,6 +2698,7 @@ dependencies = [
  "base64",
  "chrono",
  "fluxvm-apple",
+ "fluxvm-backup-s3",
  "fluxvm-cgroup",
  "fluxvm-cloud-hypervisor",
  "fluxvm-core",

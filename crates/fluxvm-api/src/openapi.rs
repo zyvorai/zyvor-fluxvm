@@ -139,6 +139,38 @@ fn ops() -> Vec<Op> {
             VMS,
         ),
         op(
+            "post",
+            "/v1/vms/{id}/cbt-backup",
+            "Start a full or incremental (dirty-bitmap) backup to S3",
+            VMS,
+        )
+        .body("CbtBackupRequest")
+        .returns("CbtJob")
+        .status("202"),
+        op(
+            "post",
+            "/v1/vms/{id}/cbt-restore",
+            "Restore a CBT chain point into the stopped VM",
+            VMS,
+        )
+        .body("CbtRestoreRequest")
+        .returns("CbtJob")
+        .status("202"),
+        op(
+            "post",
+            "/v1/cbt/synthesize",
+            "Consolidate a CBT chain into a synthetic full",
+            VMS,
+        )
+        .body("CbtSynthesizeRequest")
+        .returns("CbtJob")
+        .status("202"),
+        op("post", "/v1/cbt/delete", "Delete CBT backups by manifest", VMS)
+            .body("CbtDeleteRequest")
+            .returns("CbtDeleteResult"),
+        op("get", "/v1/cbt-jobs/{id}", "Poll a CBT backup, restore or synthesize job", VMS)
+            .returns("CbtJob"),
+        op(
             "get",
             "/v1/vms/{id}/logs",
             "Console log (text; ?follow=true streams)",
@@ -344,7 +376,7 @@ fn schemas() -> Value {
     let obj =
         |desc: &str| json!({"type": "object", "description": desc, "additionalProperties": true});
     let list = |item: &str| json!({"type": "object", "properties": {"items": {"type": "array", "items": {"$ref": format!("#/components/schemas/{item}")}}}});
-    json!({
+    let mut all = json!({
         "VmRecord": obj("A VM: id, name, status, backend, request, labels, workspace, guest_ip, ..."),
         "CreateVmRequest": obj("VM spec: name, backend, image, vcpus, memory_mib, network, cloud_init, ..."),
         "VmList": list("VmRecord"),
@@ -434,6 +466,69 @@ fn schemas() -> Value {
         "VmEvent": obj("ts, event, vm_id and event-specific fields"),
         "EventList": list("VmEvent"),
         "Error": {"type": "object", "properties": {"error": {"type": "string"}}}
+    });
+    if let (Some(all), Value::Object(cbt)) = (all.as_object_mut(), cbt_schemas()) {
+        all.extend(cbt);
+    }
+    all
+}
+
+/// Kept apart from [`schemas`]: one `json!` that size exceeds the macro
+/// recursion limit.
+fn cbt_schemas() -> Value {
+    json!({
+        "CbtTarget": {"type": "object", "required": ["type"], "description": "Credentials are used for this request only and never stored", "properties": {
+            "type": {"type": "string", "enum": ["s3", "dir"]},
+            "endpoint": {"type": "string"}, "bucket": {"type": "string"}, "region": {"type": "string"},
+            "accessKeyId": {"type": "string"}, "secretAccessKey": {"type": "string"},
+            "sessionToken": {"type": "string"}, "pathStyle": {"type": "boolean", "default": true},
+            "path": {"type": "string", "description": "dir targets only"}
+        }},
+        "CbtEncryption": {"type": "object", "required": ["keyId", "key"], "properties": {
+            "keyId": {"type": "string"}, "key": {"type": "string", "description": "base64 of 32 bytes (AES-256-GCM)"}
+        }},
+        "CbtParent": {"type": "object", "required": ["backupId", "sequence", "manifestKey"], "properties": {
+            "backupId": {"type": "string"}, "sequence": {"type": "integer"}, "manifestKey": {"type": "string"}
+        }},
+        "CbtBackupRequest": {"type": "object", "required": ["target", "prefix", "chainId", "sequence", "backupId", "mode"], "properties": {
+            "target": {"$ref": "#/components/schemas/CbtTarget"},
+            "prefix": {"type": "string"}, "chainId": {"type": "string"}, "sequence": {"type": "integer"},
+            "backupId": {"type": "string"}, "mode": {"type": "string", "enum": ["full", "incremental"]},
+            "parent": {"$ref": "#/components/schemas/CbtParent"},
+            "quiesce": {"type": "string", "enum": ["auto", "required", "never"], "default": "auto"},
+            "encryption": {"$ref": "#/components/schemas/CbtEncryption"},
+            "retainUntil": {"type": "string", "format": "date-time", "description": "S3 Object Lock COMPLIANCE retention"}
+        }},
+        "CbtRestoreRequest": {"type": "object", "required": ["target", "manifestKey"], "properties": {
+            "target": {"$ref": "#/components/schemas/CbtTarget"}, "manifestKey": {"type": "string"},
+            "encryption": {"$ref": "#/components/schemas/CbtEncryption"}
+        }},
+        "CbtSynthesizeRequest": {"type": "object", "required": ["target", "prefix", "manifestKey", "backupId"], "properties": {
+            "target": {"$ref": "#/components/schemas/CbtTarget"}, "prefix": {"type": "string"},
+            "manifestKey": {"type": "string"}, "backupId": {"type": "string"},
+            "encryption": {"$ref": "#/components/schemas/CbtEncryption"},
+            "retainUntil": {"type": "string", "format": "date-time"}
+        }},
+        "CbtDeleteRequest": {"type": "object", "required": ["target", "manifestKeys"], "properties": {
+            "target": {"$ref": "#/components/schemas/CbtTarget"},
+            "manifestKeys": {"type": "array", "items": {"type": "string"}}
+        }},
+        "CbtDeleteResult": {"type": "object", "properties": {
+            "deleted": {"type": "array", "items": {"type": "string"}},
+            "notFound": {"type": "array", "items": {"type": "string"}},
+            "retentionHeld": {"type": "array", "items": {"type": "string"}}
+        }},
+        "CbtJob": {"type": "object", "properties": {
+            "id": {"type": "string", "format": "uuid"},
+            "kind": {"type": "string", "enum": ["backup", "restore", "synthesize"]},
+            "state": {"type": "string", "enum": ["running", "succeeded", "failed"]},
+            "phase": {"type": "string"}, "bytesDone": {"type": "integer"}, "bytesTotal": {"type": "integer"},
+            "error": {"type": "string"},
+            "fullRequired": {"type": "boolean", "description": "The incremental could not run; take a full next"},
+            "manifestKey": {"type": "string"},
+            "manifest": {"type": "object", "description": "chainId, sequence, kind, parent, disks[{name, key, virtualSize, storedSize, changedBytes, sha256}]"},
+            "skipped": {"type": "array", "items": {"type": "object"}}
+        }}
     })
 }
 

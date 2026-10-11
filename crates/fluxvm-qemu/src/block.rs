@@ -201,6 +201,13 @@ pub async fn merge_bitmaps(
     Ok(())
 }
 
+/// Asks a QEMU process or `qemu-storage-daemon` to exit, flushing
+/// persistent bitmaps to its images.
+pub async fn quit(socket: &Path, timeout: Duration) -> Result<()> {
+    qmp::execute(socket, "quit", None, timeout).await?;
+    Ok(())
+}
+
 pub async fn transaction(socket: &Path, args: Value, timeout: Duration) -> Result<()> {
     qmp::execute(socket, "transaction", Some(args), timeout)
         .await

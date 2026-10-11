@@ -17,6 +17,9 @@ pub struct Config {
     pub run_dir: PathBuf,
     pub qemu_binary: String,
     pub qemu_img_binary: String,
+    /// Opens a stopped VM's disks for an incremental (CBT) backup, so its
+    /// persistent dirty bitmaps are read and updated exactly as QEMU would.
+    pub qemu_storage_daemon_binary: String,
     /// Only consulted when a `CreateVmRequest` has `shared_folders` — one
     /// instance is spawned per share, QEMU backend only.
     pub virtiofsd_binary: String,
@@ -206,6 +209,7 @@ impl Default for Config {
             run_dir: default_run_dir(),
             qemu_binary: "qemu-system-x86_64".into(),
             qemu_img_binary: "qemu-img".into(),
+            qemu_storage_daemon_binary: "qemu-storage-daemon".into(),
             virtiofsd_binary: "virtiofsd".into(),
             cloud_hypervisor_binary: "cloud-hypervisor".into(),
             ch_remote_binary: "ch-remote".into(),

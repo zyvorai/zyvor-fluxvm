@@ -119,7 +119,8 @@ fn file_driver(path: &Path) -> &'static str {
     }
 }
 
-fn node_name(name: &str) -> String {
+/// The QEMU block node of data disk `name`.
+pub fn node_name(name: &str) -> String {
     format!("data-{name}")
 }
 
