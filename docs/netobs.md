@@ -95,11 +95,12 @@ Frames reach the observer from two kinds of source:
 - **In-process taps.** The `apple.usernet` userspace gateway offers each frame it sees, with the gateway's verdict, to the
   process-wide `NetTap`. A drained tap feeds the observer through a pump started with the daemon.
 - **The bridge.** `fluxvm-vz-switch` (one process per `apple.networks` private network) cannot call the daemon's observer
-  in-process. When built with the `netobs` feature and a daemon observer exists, the daemon binds
+  in-process. The switch's `netobs` feature is on by default (a plain `cargo build` accepts `--netobs-socket`; build with
+  `--no-default-features` to leave it out). When a daemon observer exists, the daemon binds
   `<runner socket dir>/netobs-bridge.sock` (mode 0600) and starts each switch with `--netobs-socket PATH --network NAME`. The switch
   exports every guest frame with its verdict over a versioned (`FXNB` v1) unix-stream protocol; it never blocks, drops and counts
-  when the queue is full or the daemon is gone, and reconnects with backoff. A switch built without the feature is restarted
-  without the flag.
+  when the queue is full or the daemon is gone, and reconnects with backoff. A switch built without the feature (rejects the
+  flag with exit status 2) is restarted without it.
 
 ## Honest limits
 

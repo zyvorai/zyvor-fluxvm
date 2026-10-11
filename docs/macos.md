@@ -509,7 +509,8 @@ on a private layer-2 network that only the guests joining it share (Linux guests
   demand and listening on `/tmp/fluxvm-<uid>/vznet-<name>.sock` (mode 0600). The runner hands it one end of a datagram socket pair
   (`VZFileHandleNetworkDeviceAttachment`). The switch forwards by the MAC each port registered with, drops frames with any other
   source MAC, floods broadcast and multicast, and drops unicast to unknown MACs. It exits 30 s after the last guest leaves; a runner
-  that loses its switch starts it again and reconnects.
+  that loses its switch starts it again and reconnects. A plain build of the switch includes the `netobs` frame export
+  (`--netobs-socket PATH [--network NAME]`, see [netobs](netobs.md)); `--no-default-features` builds one without it.
 - **Isolation:** guests on different networks, or not on one, cannot reach each other. A network belongs to the tenant of the VMs
   already on it. `networks` works with `network.mode = "none"` (an isolated cluster) but not with `egress_allow`, since another guest
   could relay around the proxy.
