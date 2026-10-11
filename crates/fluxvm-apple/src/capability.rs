@@ -702,6 +702,21 @@ fn validate_static(req: &CreateVmRequest) -> Result<()> {
                  LaunchDaemon and reached over vsock (see docs/macos.md)"
             );
         }
+        if let Some(m) = apple.nat_mtu {
+            if !(576..=1500).contains(&m) {
+                bail!(
+                    "apple.nat_mtu must be 576..=1500 (Virtualization's NAT attachment has no larger MTU)"
+                );
+            }
+            if matches!(apple.guest_os, fluxvm_core::model::AppleGuest::Macos) {
+                bail!("apple.nat_mtu is applied through cloud-init and needs a Linux guest");
+            }
+            if apple.usernet.is_some() || apple.vmnet.is_some() {
+                bail!(
+                    "apple.nat_mtu is for the Mac's NAT or a bridged card; use apple.usernet.mtu or apple.vmnet.mtu there"
+                );
+            }
+        }
         if apple.bridge_interface.as_deref().is_some_and(str::is_empty) {
             bail!("apple.bridge_interface cannot be empty");
         }
@@ -1562,10 +1577,19 @@ mod tests {
             let err = validate_request_with_host(&r, Some(&host(Some(false))))
                 .unwrap_err()
                 .to_string();
-            assert!(err.contains("com.apple.vm.networking") && err.contains("apple.usernet"), "{err}");
+            assert!(
+                err.contains("com.apple.vm.networking") && err.contains("apple.usernet"),
+                "{err}"
+            );
             // A runner that has it, or one too old to say, is not second-guessed.
-            assert!(validate_request_with_host(&r, Some(&host(Some(true)))).is_ok(), "{json}");
-            assert!(validate_request_with_host(&r, Some(&host(None))).is_ok(), "{json}");
+            assert!(
+                validate_request_with_host(&r, Some(&host(Some(true)))).is_ok(),
+                "{json}"
+            );
+            assert!(
+                validate_request_with_host(&r, Some(&host(None))).is_ok(),
+                "{json}"
+            );
         }
         // Guests that use neither are unaffected.
         let plain = req("");
@@ -1579,6 +1603,23 @@ mod tests {
         let linux = r#""apple":{"macos_vsock":true}"#;
         let err = validate_request(&req(linux)).unwrap_err().to_string();
         assert!(err.contains("macos_vsock"), "{err}");
+    }
+
+    #[test]
+    fn nat_mtu_admission() {
+        assert!(validate_request(&req(r#""apple":{"nat_mtu":1400}"#)).is_ok());
+        for (json, needle) in [
+            (r#""apple":{"nat_mtu":1501}"#, "576..=1500"),
+            (r#""apple":{"nat_mtu":500}"#, "576..=1500"),
+            (
+                r#""apple":{"nat_mtu":1400,"guest_os":"macos"}"#,
+                "Linux guest",
+            ),
+            (r#""apple":{"nat_mtu":1400,"usernet":{}}"#, "usernet.mtu"),
+        ] {
+            let err = validate_request(&req(json)).expect_err(json).to_string();
+            assert!(err.contains(needle), "{json}: {err}");
+        }
     }
 
     #[test]

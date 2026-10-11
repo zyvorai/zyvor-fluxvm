@@ -390,6 +390,9 @@ pub struct CloudInitSpec {
     /// `network-online.target`; a catch-all DHCP match would otherwise wait on them until its timeout.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub static_nics: Vec<CloudInitNic>,
+    /// MTU for the guest's DHCP-configured primary card (`apple.nat_mtu`), as a network-config `mtu`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mtu: Option<u16>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -696,6 +699,12 @@ pub struct AppleSpec {
     /// DNS allow/deny and port forwards, and feeds `/v1/netobs/*`. UNVERIFIED on hardware.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usernet: Option<AppleUsernet>,
+    /// Linux guests on the Mac's NAT (or bridged): the MTU the guest sets on its primary card, 576..=1500, applied through the
+    /// seed's network-config. Virtualization has no MTU property for NAT attachments, so this only *lowers* what the guest
+    /// sends (a tunnel or VPN path that cannot carry 1500); the host's NAT still passes at most 1500. For a gateway you
+    /// control and for jumbo frames use `usernet.mtu`. Needs cloud-init (a seed is built with defaults when none was given).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nat_mtu: Option<u16>,
 }
 
 /// Userspace gateway settings for a `vz` Linux guest (see [`AppleSpec::usernet`]). Mapped to `fluxvm-usernet`'s
@@ -980,6 +989,7 @@ impl Default for AppleSpec {
             recovery: false,
             rosetta_cache: None,
             usernet: None,
+            nat_mtu: None,
         }
     }
 }

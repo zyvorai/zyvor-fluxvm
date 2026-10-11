@@ -28,10 +28,14 @@ turned into JSON or text.
 
 ## What is verified
 
-Nothing at runtime. On the test Mac (Apple M4, macOS 27.2, SIP on) the broker built and was ad-hoc signed with
-`com.apple.vm.networking`, but the kernel killed it at launch (exit 137, SIGKILL). We did not find out why. The installer was not run
-(it needs `sudo` and `launchctl bootstrap`). A named-vmnet VM failed cleanly with `vmnetd XPC connection failed`, as expected with no
-broker.
+On the test Mac (Apple M4, macOS 27.2, SIP on) the original build, ad-hoc signed with `com.apple.vm.networking`, was killed at
+launch (exit 137): that entitlement is restricted and needs an Apple-issued provisioning profile. Signed with only
+`com.apple.security.virtualization` the broker starts under launchd and `vmnet_network_create` succeeds in it. **But a VM cannot use
+the network:** Virtualization starts the VM and then reports `Internal Network Error` (`network-disconnected`), the same for a
+named network through the broker and for an unnamed one created inside the runner, so the cause is the runner lacking
+`com.apple.vm.networking`, not the sharing. This is therefore **unusable on a Mac without that entitlement's provisioning profile**.
+Admission now refuses `apple.vmnet` (and `apple.bridge_interface`) when the runner does not hold it. For networks shared between
+guests without the entitlement use `apple.networks` (private layer-2 networks, `fluxvm-vz-switch`), and for a controlled NAT
+`apple.usernet`.
 
-Two runners sharing one `apple.vmnet.name`, bidirectional TCP and UDP between them, has **not** been run. Do not treat shared networks
-as production-ready until that test is recorded on hardware ([macos-architecture.md](macos-architecture.md#14-what-is-verified)).
+Two runners sharing one `apple.vmnet.name` has never run, for that reason.

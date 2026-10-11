@@ -29,6 +29,21 @@
 - Verified on an M4: 4 strict children in 3.6 s; 5 of 5 distinct machine-ids, host keys and tokens. A NAT guest still cannot be
   forked: its state restored onto a usernet NIC leaves the NIC disconnected.
 
+### Fixed: `apple.usernet.mtu` above 1500 had no effect
+- The gateway advertised the MTU over DHCP but the file-handle attachment stayed at Virtualization's default 1500, so the guest
+  kept 1500 and any jumbo frame was dropped. The runner now sets `maximumTransmissionUnit` to match. Verified on an M4: MTU 9000 in
+  the guest and 8972-byte DF pings to the gateway succeed; the published 0.4.0 stays at 1500 and fails them.
+
+### Added: `apple.nat_mtu`
+- Lowers the MTU a Linux guest sets on its primary card on the Mac's NAT (576 to 1500) through the seed's network-config.
+  Virtualization has no MTU property for NAT attachments, so this cannot raise it. Verified: guest MTU 1400, NAT still works.
+
+### Changed: vmnet and bridged networks are refused up front without the networking entitlement
+- A runner without `com.apple.vm.networking` boots a vmnet guest and then reports `Internal Network Error`. The runner's
+  `host-capabilities` now includes `vmNetworkingEntitlement` and admission refuses `apple.vmnet` and `apple.bridge_interface`
+  with the reason and the alternatives (`apple.usernet`, `apple.networks`). The vmnet broker's kill at launch is explained
+  (restricted entitlement, no provisioning profile); it cannot be fixed by signing here.
+
 ### Fixed: the host could never choose the macOS guest agent
 - Admission refused `agent.enabled` for every macOS guest ("fluxvm-guest-agent is a Linux binary"), and the sandbox path sets it for
   `apple.macos_vsock` guests, so a macOS agent that answered over vsock was never used. It is now accepted with `macos_vsock`
