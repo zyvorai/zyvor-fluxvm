@@ -33,12 +33,12 @@ use uuid::Uuid;
 
 mod grants;
 mod idempotency;
+mod netobs_api;
 mod oidc;
 mod openapi;
 mod rate_limit;
 #[cfg(target_os = "macos")]
 pub mod self_control;
-mod netobs_api;
 pub use netobs_api::install_netobs;
 mod speculate_api;
 mod vz_api;
@@ -5674,7 +5674,10 @@ mod tests {
             assert_eq!(st, StatusCode::OK, "{body}");
             assert!(body.contains("\"enabled\":true"), "{body}");
             if pump.is_some() {
-                assert!(fluxvm_netobs::global_tap().is_some(), "the install published its tap");
+                assert!(
+                    fluxvm_netobs::global_tap().is_some(),
+                    "the install published its tap"
+                );
             }
         }
 
@@ -5707,7 +5710,10 @@ mod tests {
             assert_eq!(st, StatusCode::OK, "{body}");
             assert!(body.contains("netobs-test-vm"), "{body}");
             let (_, body) = call(app(), "GET", "/v1/netobs/flows", "acme", None).await;
-            assert!(!body.contains("netobs-test-vm"), "tenant token saw another VM: {body}");
+            assert!(
+                !body.contains("netobs-test-vm"),
+                "tenant token saw another VM: {body}"
+            );
 
             let (st, body) = call(app(), "GET", "/v1/netobs/summary", "ops", None).await;
             assert_eq!(st, StatusCode::OK);
@@ -5744,6 +5750,115 @@ mod tests {
             )
             .await;
             assert_eq!(st, StatusCode::NOT_FOUND);
+        }
+
+        #[tokio::test]
+        async fn vz_display_resize_is_tenant_scoped_admin_only_and_validated() {
+            let mut auth = tenant_tokens();
+            auth.tokens.push(ApiToken {
+                token: "ro".into(),
+                role: Role::ReadOnly,
+                name: Some("ro".into()),
+                tenant: None,
+            });
+            let m = manager(auth);
+            let mut vm = fixture(BackendKind::Vz, VmStatus::Stopped, false);
+            vm.request.tenant = Some("acme".into());
+            let id = vm.id;
+            m.store.insert(vm).await.unwrap();
+            let uri = format!("/v1/vms/{id}/vz/display");
+            let ok = r#"{"width":1920,"height":1080}"#;
+
+            // Another tenant sees no such VM.
+            let (st, _) = call(router(m.clone()), "POST", &uri, "other", Some(ok)).await;
+            assert_eq!(st, StatusCode::NOT_FOUND);
+            // A read-only token may not change the display.
+            let (st, _) = call(router(m.clone()), "POST", &uri, "ro", Some(ok)).await;
+            assert_eq!(st, StatusCode::FORBIDDEN);
+            // A bad size is rejected before the VM state matters.
+            let (st, body) = call(
+                router(m.clone()),
+                "POST",
+                &uri,
+                "acme",
+                Some(r#"{"width":100,"height":1080}"#),
+            )
+            .await;
+            assert_eq!(st, StatusCode::BAD_REQUEST);
+            assert!(body.contains("width"), "{body}");
+            // The owner reaches the VM; it is not running, so there is nothing to resize.
+            let (st, body) = call(router(m.clone()), "POST", &uri, "acme", Some(ok)).await;
+            assert_eq!(st, StatusCode::BAD_REQUEST);
+            assert!(body.contains("start it first"), "{body}");
+            // Missing required fields never reach the handler.
+            let (st, _) = call(router(m), "POST", &uri, "acme", Some(r#"{"width":1920}"#)).await;
+            assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY);
+        }
+
+        #[tokio::test]
+        async fn vz_attestation_is_tenant_scoped_and_served_with_the_host_key() {
+            let m = manager(tenant_tokens());
+            let ws = tempfile::tempdir().unwrap();
+            let mut vm = fixture(BackendKind::Vz, VmStatus::Stopped, false);
+            vm.request.tenant = Some("acme".into());
+            vm.workspace = ws.path().to_path_buf();
+            let id = vm.id;
+            m.store.insert(vm).await.unwrap();
+            let mut qemu = fixture(BackendKind::Qemu, VmStatus::Stopped, false);
+            qemu.request.tenant = Some("acme".into());
+            let qemu_id = qemu.id;
+            m.store.insert(qemu).await.unwrap();
+            let uri = format!("/v1/vms/{id}/vz/attestation");
+
+            // Not launched yet: nothing to serve.
+            let (st, body) = call(router(m.clone()), "GET", &uri, "acme", None).await;
+            assert_eq!(st, StatusCode::BAD_REQUEST);
+            assert!(body.contains("no attestation recorded"), "{body}");
+
+            // What a launch records: the attestation object, and the daemon's public key under state_dir.
+            let payload = json!({
+                "version": 1, "claim": "host-asserted", "vm_id": id.to_string(), "issued_at_unix": 7,
+                "kernel": null, "initrd": null, "cmdline_sha256": null,
+                "root_disk": {"path": "/r", "size": 1, "mtime_unix": null, "digest": "00"},
+                "runner": {"path": "/x", "size": 1, "mtime_unix": null, "digest": "11"},
+                "apple_spec_sha256": "22",
+            })
+            .to_string();
+            let pk = "ab".repeat(32);
+            std::fs::write(
+                ws.path().join("vz-attestation.json"),
+                json!({"alg": "ed25519", "payload": payload, "signature": "cd".repeat(64), "public_key": pk})
+                    .to_string(),
+            )
+            .unwrap();
+            std::fs::create_dir_all(&m.cfg.state_dir).unwrap();
+            std::fs::write(
+                m.cfg.state_dir.join("vz-attestation.pub"),
+                format!("{pk}\n"),
+            )
+            .unwrap();
+
+            let (st, body) = call(router(m.clone()), "GET", &uri, "acme", None).await;
+            assert_eq!(st, StatusCode::OK, "{body}");
+            let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+            assert_eq!(v["public_key"], pk);
+            assert_eq!(v["manifest"]["vm_id"], id.to_string());
+            assert_eq!(v["attestation"]["alg"], "ed25519");
+            assert!(v["claim"].as_str().unwrap().contains("not by hardware"));
+
+            // Another tenant sees no such VM; a non-vz VM has no attestation.
+            let (st, _) = call(router(m.clone()), "GET", &uri, "other", None).await;
+            assert_eq!(st, StatusCode::NOT_FOUND);
+            let (st, body) = call(
+                router(m),
+                "GET",
+                &format!("/v1/vms/{qemu_id}/vz/attestation"),
+                "acme",
+                None,
+            )
+            .await;
+            assert_eq!(st, StatusCode::BAD_REQUEST);
+            assert!(body.contains("vz backend"), "{body}");
         }
 
         #[tokio::test]

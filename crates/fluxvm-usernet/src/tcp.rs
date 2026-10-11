@@ -10,9 +10,13 @@
 //!   (RFC 2018) when the guest sent SACK-permitted.
 //! * Send side (host -> guest): NewReno congestion control (RFC 5681 / 6582): slow start from an initial window of
 //!   10 segments, congestion avoidance, fast retransmit and fast recovery on three duplicate ACKs, and a
-//!   go-back-N restart from a one-segment window on retransmission timeout. The guest's SACK blocks are parsed
-//!   but not used for selective retransmission, and the RTO is a fixed 400 ms doubled per retry (no RTT
-//!   estimator), so a path with RTT over 400 ms sees spurious retransmits.
+//!   go-back-N restart from a one-segment window on retransmission timeout.
+//! * The retransmission timer follows RFC 6298: SRTT/RTTVAR from one timed segment per flight, Karn's rule (a
+//!   retransmitted segment is never timed), RTO clamped to `[MIN_RTO, MAX_RTO]` and doubled per timeout. Until the
+//!   first sample the RTO is [`INIT_RTO`] (400 ms rather than the RFC's 1 s: the peer is a local VM).
+//! * The guest's SACK blocks feed a scoreboard (RFC 2018/6675 style). In fast recovery only the holes the
+//!   scoreboard shows (un-SACKed bytes below the highest SACKed byte) are retransmitted, each at most once per
+//!   recovery. The scoreboard is cleared on a timeout (the receiver may renege).
 
 use crate::wire::{ACK, FIN, PSH, RST, SYN, Tcp, TcpOut};
 use std::collections::VecDeque;
@@ -23,8 +27,12 @@ pub const RCV_WND: usize = 256 * 1024;
 /// Shift we announce when the guest offers window scaling: `RCV_WND >> 3` fits the 16-bit field.
 const RCV_SCALE: u8 = 3;
 const MAX_RETRIES: u32 = 8;
-const MAX_RTO: Duration = Duration::from_secs(8);
+const MAX_RTO: Duration = Duration::from_secs(60);
+const MIN_RTO: Duration = Duration::from_millis(200);
 const INIT_RTO: Duration = Duration::from_millis(400);
+/// Hole retransmissions allowed per incoming ACK during SACK recovery.
+const SACK_REXMIT_PER_ACK: usize = 2;
+const MAX_SACK_RANGES: usize = 64;
 const MAX_OOO_BLOCKS: usize = 32;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -95,6 +103,15 @@ pub struct TcpConn {
     last_tx: Instant,
     pub last_activity: Instant,
     rto: Duration,
+    /// RFC 6298 smoothed RTT and variation (`None` until the first sample).
+    srtt: Option<Duration>,
+    rttvar: Duration,
+    /// The one segment being timed: (sequence number just past it, send time). Cleared on any retransmission.
+    rtt_probe: Option<(u32, Instant)>,
+    /// Guest-SACKed ranges above snd_una: sorted, disjoint, non-adjacent `(start, end)`.
+    scoreboard: Vec<(u32, u32)>,
+    /// Highest sequence retransmitted in the current recovery (holes below it are not resent).
+    rexmit_high: u32,
     retries: u32,
     pub bytes_up: u64,
     pub bytes_down: u64,
@@ -132,6 +149,11 @@ impl TcpConn {
             last_tx: now,
             last_activity: now,
             rto: INIT_RTO,
+            srtt: None,
+            rttvar: Duration::ZERO,
+            rtt_probe: None,
+            scoreboard: Vec::new(),
+            rexmit_high: iss,
             retries: 0,
             bytes_up: 0,
             bytes_down: 0,
@@ -168,6 +190,7 @@ impl TcpConn {
         self.snd_nxt = self.iss.wrapping_add(1);
         self.snd_max = self.snd_nxt;
         self.last_tx = now;
+        self.rtt_probe = Some((self.snd_nxt, now));
     }
 
     fn syn_ack(&self) -> TcpOut {
@@ -203,7 +226,130 @@ impl TcpConn {
         out.push(c.syn());
         c.snd_nxt = c.iss.wrapping_add(1);
         c.snd_max = c.snd_nxt;
+        c.rtt_probe = Some((c.snd_nxt, now));
         c
+    }
+
+    /// Feed an RTT measurement (RFC 6298 section 2) and recompute the RTO, dropping any backoff.
+    fn rtt_sample(&mut self, r: Duration) {
+        match self.srtt {
+            None => {
+                self.srtt = Some(r);
+                self.rttvar = r / 2;
+            }
+            Some(srtt) => {
+                let delta = srtt.abs_diff(r);
+                self.rttvar = self.rttvar * 3 / 4 + delta / 4;
+                self.srtt = Some(srtt * 7 / 8 + r / 8);
+            }
+        }
+        let srtt = self.srtt.unwrap_or(r);
+        let var = (self.rttvar * 4).max(Duration::from_millis(1));
+        self.rto = (srtt + var).clamp(MIN_RTO, MAX_RTO);
+    }
+
+    /// `ack` acknowledged new data: complete the timed segment if it is covered (Karn: a retransmission clears
+    /// the probe, so an ambiguous ACK is never sampled).
+    fn rtt_on_ack(&mut self, ack: u32, now: Instant) {
+        if let Some((end, t0)) = self.rtt_probe
+            && !seq_lt(ack, end)
+        {
+            self.rtt_probe = None;
+            self.rtt_sample(now.saturating_duration_since(t0));
+        }
+    }
+
+    /// Record guest SACK blocks (only ranges within `(snd_una, snd_max]` are meaningful).
+    fn sack_update(&mut self, blocks: &[(u32, u32)]) {
+        for &(s, e) in blocks {
+            let s = if seq_lt(s, self.snd_una) { self.snd_una } else { s };
+            if !seq_lt(s, e) || seq_lt(self.snd_max, e) {
+                continue;
+            }
+            self.scoreboard.push((s, e));
+        }
+        self.sack_normalize();
+    }
+
+    fn sack_normalize(&mut self) {
+        let base = self.snd_una;
+        let mut v: Vec<(u32, u32)> = std::mem::take(&mut self.scoreboard)
+            .into_iter()
+            .filter_map(|(s, e)| {
+                let s = if seq_lt(s, base) { base } else { s };
+                seq_lt(s, e).then_some((s, e))
+            })
+            .collect();
+        v.sort_by_key(|(s, _)| s.wrapping_sub(base));
+        let mut out: Vec<(u32, u32)> = Vec::new();
+        for (s, e) in v {
+            if let Some((_, pe)) = out.last_mut()
+                && !seq_lt(*pe, s)
+            {
+                if seq_lt(*pe, e) {
+                    *pe = e;
+                }
+                continue;
+            }
+            out.push((s, e));
+        }
+        out.truncate(MAX_SACK_RANGES);
+        self.scoreboard = out;
+    }
+
+    /// Bytes the guest reports holding above snd_una.
+    fn sacked_bytes(&self) -> usize {
+        self.scoreboard
+            .iter()
+            .map(|(s, e)| e.wrapping_sub(*s) as usize)
+            .sum()
+    }
+
+    /// The next un-SACKed, not-yet-retransmitted hole below the highest SACKed byte, at most one MSS long.
+    fn next_hole(&self) -> Option<(u32, u32)> {
+        let mut pos = if seq_lt(self.rexmit_high, self.snd_una) {
+            self.snd_una
+        } else {
+            self.rexmit_high
+        };
+        for &(s, e) in &self.scoreboard {
+            if seq_lt(pos, s) {
+                let cap = pos.wrapping_add(self.mss as u32);
+                let end = if seq_lt(s, cap) { s } else { cap };
+                return Some((pos, end));
+            }
+            if seq_lt(pos, e) {
+                pos = e;
+            }
+        }
+        None
+    }
+
+    /// Retransmit `[start, end)` of the send buffer.
+    fn retransmit_range(&mut self, start: u32, end: u32, out: &mut Vec<TcpOut>) -> bool {
+        let off = start.wrapping_sub(self.snd_una) as usize;
+        let want = end.wrapping_sub(start) as usize;
+        if off >= self.sndbuf.len() {
+            return false;
+        }
+        let n = want.min(self.sndbuf.len() - off);
+        out.push(self.data_seg(start, ACK, self.copy_range(off, n)));
+        self.rexmit_high = start.wrapping_add(n as u32);
+        self.rtt_probe = None;
+        true
+    }
+
+    /// SACK-driven retransmission of up to `budget` holes. Returns how many segments were sent.
+    fn retransmit_holes(&mut self, budget: usize, out: &mut Vec<TcpOut>) -> usize {
+        let mut sent = 0;
+        while sent < budget {
+            let Some((s, e)) = self.next_hole() else { break };
+            if !self.retransmit_range(s, e, out) {
+                break;
+            }
+            sent += 1;
+        }
+        sent
     }
 
     /// Receive window to put in the 16-bit field of a non-SYN segment.
@@ -278,6 +424,16 @@ impl TcpConn {
     /// Data bytes ever sent and not yet acknowledged.
     fn outstanding(&self) -> usize {
         (self.snd_max.wrapping_sub(self.snd_una) as usize).min(self.sndbuf.len())
+    }
+
+    #[cfg(test)]
+    pub fn rto(&self) -> Duration {
+        self.rto
+    }
+
+    #[cfg(test)]
+    pub fn srtt(&self) -> Option<Duration> {
+        self.srtt
     }
 
     #[cfg(test)]
@@ -362,7 +518,11 @@ impl TcpConn {
                 self.copy_range(sent, n),
             );
             out.push(seg);
+            let is_new = !seq_lt(self.snd_nxt, self.snd_max);
             self.snd_nxt = self.snd_nxt.wrapping_add(n as u32);
+            if is_new && self.rtt_probe.is_none() {
+                self.rtt_probe = Some((self.snd_nxt, now));
+            }
             sent += n;
         }
         if self.fin_queued && !self.fin_sent && sent == self.sndbuf.len() {
@@ -378,9 +538,11 @@ impl TcpConn {
 
     /// Retransmit the first unacknowledged segment (fast retransmit / partial ACK) without moving snd_nxt.
     fn retransmit_one(&mut self, out: &mut Vec<TcpOut>) {
+        self.rtt_probe = None;
         if !self.sndbuf.is_empty() {
             let n = self.mss.min(self.sndbuf.len());
             out.push(self.data_seg(self.snd_una, ACK, self.copy_range(0, n)));
+            self.rexmit_high = self.snd_una.wrapping_add(n as u32);
         } else if self.fin_sent && !self.fin_acked {
             out.push(self.data_seg(self.snd_una, FIN | ACK, Vec::new()));
         }
@@ -393,6 +555,9 @@ impl TcpConn {
         self.cwnd = self.mss;
         self.dupacks = 0;
         self.recover = None;
+        self.scoreboard.clear();
+        self.rexmit_high = self.snd_una;
+        self.rtt_probe = None;
         self.snd_nxt = self.snd_una;
         self.fin_sent = false;
         let before = out.len();
@@ -408,13 +573,22 @@ impl TcpConn {
             if !seq_lt(ack, rec) {
                 // Full acknowledgement: leave recovery with a deflated window (RFC 6582 section 3.2, step 3).
                 self.recover = None;
+                self.rexmit_high = self.snd_una;
                 self.cwnd = self
                     .ssthresh
                     .min(self.outstanding().max(self.mss) + self.mss)
                     .max(self.mss);
             } else {
                 // Partial acknowledgement: the next hole is lost too.
-                self.retransmit_one(out);
+                if !seq_lt(self.snd_una, self.rexmit_high) {
+                    // snd_una itself is the new hole (not yet resent).
+                    self.retransmit_one(out);
+                    if !self.scoreboard.is_empty() {
+                        self.retransmit_holes(SACK_REXMIT_PER_ACK - 1, out);
+                    }
+                } else {
+                    self.retransmit_holes(SACK_REXMIT_PER_ACK, out);
+                }
                 self.cwnd = self.cwnd.saturating_sub(acked).max(self.mss) + self.mss;
             }
         } else if self.cwnd < self.ssthresh {
@@ -428,10 +602,13 @@ impl TcpConn {
         self.dupacks += 1;
         if self.recover.is_some() {
             self.cwnd += self.mss; // each dup ACK means a segment left the network
-        } else if self.dupacks == 3 {
+            self.retransmit_holes(SACK_REXMIT_PER_ACK, out);
+        } else if self.dupacks == 3 || self.sacked_bytes() >= 3 * self.mss {
             self.ssthresh = (self.outstanding() / 2).max(2 * self.mss);
             self.recover = Some(self.snd_max);
+            self.rexmit_high = self.snd_una;
             self.retransmit_one(out);
+            self.retransmit_holes(SACK_REXMIT_PER_ACK - 1, out);
             self.cwnd = self.ssthresh + 3 * self.mss;
         }
     }
@@ -541,6 +718,7 @@ impl TcpConn {
                     self.sack_ok = seg.sack_ok;
                     self.state = State::Established;
                     self.retries = 0;
+                    self.rtt_on_ack(seg.ack, now);
                     out.push(self.ack_only());
                     self.pump(now, out);
                 } else if seg.flags & ACK != 0 {
@@ -563,6 +741,7 @@ impl TcpConn {
                     self.snd_una = seg.ack;
                     self.state = State::Established;
                     self.retries = 0;
+                    self.rtt_on_ack(seg.ack, now);
                 } else {
                     return res;
                 }
@@ -590,9 +769,22 @@ impl TcpConn {
                 self.sndbuf.drain(..n);
                 res.acked = n;
                 self.retries = 0;
-                self.rto = INIT_RTO;
                 self.last_tx = now;
+                self.rtt_on_ack(ack, now);
+                self.sack_normalize();
+                if !seg.sack.is_empty() {
+                    self.sack_update(&seg.sack);
+                }
                 self.on_new_ack(n, ack, out);
+            } else if ack == self.snd_una
+                && !seg.sack.is_empty()
+                && seg.payload.is_empty()
+                && seg.flags & FIN == 0
+                && self.snd_una != self.snd_max
+            {
+                // Duplicate ACK carrying SACK information.
+                self.sack_update(&seg.sack);
+                self.on_dup_ack(out);
             } else if ack == self.snd_una
                 && seg.payload.is_empty()
                 && seg.flags & FIN == 0
@@ -689,6 +881,7 @@ impl TcpConn {
                 return true;
             }
             self.rto = (self.rto * 2).min(MAX_RTO);
+            self.rtt_probe = None; // Karn: nothing in flight is a valid sample any more
             match self.state {
                 State::SynRcvd => {
                     out.push(self.syn_ack());
@@ -985,5 +1178,157 @@ mod tests {
         c.on_segment(&ack_at(&c, max), true, now, &mut out);
         assert_eq!(c.snd_nxt.wrapping_sub(max), out.iter().map(|o| o.payload.len() as u32).sum::<u32>());
         assert!(!out.is_empty());
+    }
+
+    /// A passive connection whose handshake took `rtt`, established at `t0 + rtt`.
+    fn established_after(rtt: Duration) -> (TcpConn, Instant) {
+        let t0 = Instant::now();
+        let mut syn = seg(100, 0, SYN, &[]);
+        syn.mss = Some(1000);
+        syn.wscale = Some(7);
+        syn.sack_ok = true;
+        let mut c = TcpConn::new_passive(&syn, 1460, t0);
+        let mut out = Vec::new();
+        c.host_connected(t0, &mut out);
+        let iss = out[0].seq;
+        out.clear();
+        let mut a = seg(101, iss + 1, ACK, &[]);
+        a.window = 1000;
+        c.on_segment(&a, true, t0 + rtt, &mut out);
+        assert_eq!(c.state, State::Established);
+        (c, t0 + rtt)
+    }
+
+    fn near(a: Duration, b: Duration) -> bool {
+        let d = a.abs_diff(b);
+        d < Duration::from_millis(2)
+    }
+
+    #[test]
+    fn rto_follows_rfc6298() {
+        let (mut c, t) = established_after(Duration::from_millis(100));
+        // First sample: SRTT = R, RTTVAR = R/2, RTO = SRTT + 4*RTTVAR.
+        assert!(near(c.srtt().unwrap(), Duration::from_millis(100)));
+        assert!(near(c.rto(), Duration::from_millis(300)));
+        let mut out = Vec::new();
+        c.push_host_data(&[1u8; 500], t, &mut out);
+        let una = c.snd_una;
+        out.clear();
+        c.on_segment(&ack_at(&c, una + 500), true, t + Duration::from_millis(200), &mut out);
+        // RTTVAR = 3/4*50 + 1/4*|100-200| = 62.5, SRTT = 7/8*100 + 1/8*200 = 112.5, RTO = 362.5.
+        assert!(near(c.srtt().unwrap(), Duration::from_micros(112_500)));
+        assert!(near(c.rto(), Duration::from_micros(362_500)));
+    }
+
+    #[test]
+    fn rto_has_a_floor_and_slow_paths_do_not_retransmit_spuriously() {
+        let (c, _) = established_after(Duration::from_millis(1));
+        assert_eq!(c.rto(), MIN_RTO);
+        // A 1.5 s path: the old fixed 400 ms RTO would have fired three times by now.
+        let (mut c, t) = established_after(Duration::from_millis(1500));
+        assert!(c.rto() >= Duration::from_secs(4));
+        let mut out = Vec::new();
+        c.push_host_data(&[1u8; 500], t, &mut out);
+        out.clear();
+        c.tick(t + Duration::from_millis(1400), Duration::from_secs(600), &mut out);
+        assert!(out.is_empty(), "no spurious retransmit");
+    }
+
+    #[test]
+    fn karn_no_sample_from_retransmitted_data_and_backoff_is_capped() {
+        let (mut c, mut t) = established_after(Duration::from_millis(100));
+        let srtt = c.srtt().unwrap();
+        let mut out = Vec::new();
+        c.push_host_data(&[1u8; 500], t, &mut out);
+        let una = c.snd_una;
+        // Time out once: the data is retransmitted and the RTO doubles.
+        t += c.rto();
+        out.clear();
+        c.tick(t, Duration::from_secs(3600), &mut out);
+        assert_eq!(out.len(), 1);
+        assert!(near(c.rto(), Duration::from_millis(600)));
+        // The ACK of the retransmission is ambiguous: no sample is taken, the estimate is unchanged.
+        t += Duration::from_millis(10);
+        out.clear();
+        c.on_segment(&ack_at(&c, una + 500), true, t, &mut out);
+        assert_eq!(c.srtt().unwrap(), srtt);
+        // The backoff survives until a clean sample...
+        assert!(near(c.rto(), Duration::from_millis(600)));
+        // ...which a fresh segment provides.
+        c.push_host_data(&[1u8; 500], t, &mut out);
+        let una = c.snd_una;
+        out.clear();
+        c.on_segment(&ack_at(&c, una + 500), true, t + Duration::from_millis(100), &mut out);
+        assert!(c.rto() < Duration::from_millis(600));
+
+        // Repeated timeouts double up to MAX_RTO and then give up.
+        c.push_host_data(&[1u8; 500], t, &mut out);
+        let mut max_seen = Duration::ZERO;
+        loop {
+            t += c.rto();
+            out.clear();
+            let gave_up = c.tick(t, Duration::from_secs(36_000), &mut out);
+            max_seen = max_seen.max(c.rto());
+            if gave_up {
+                break;
+            }
+        }
+        assert_eq!(max_seen, MAX_RTO);
+    }
+
+    #[test]
+    fn sack_scoreboard_retransmits_only_the_holes() {
+        let (mut c, now) = established_ws(1000);
+        let mut out = Vec::new();
+        c.push_host_data(&vec![9u8; 100_000], now, &mut out);
+        assert_eq!(out.len(), 10);
+        let una = c.snd_una;
+        let max = c.snd_max;
+        // Segments 0, 3 and 6 are lost; the guest SACKs the rest as it arrives.
+        let blocks = [
+            vec![(una + 1000, una + 3000)],
+            vec![(una + 4000, una + 6000), (una + 1000, una + 3000)],
+            vec![(una + 7000, una + 10_000), (una + 4000, una + 6000), (una + 1000, una + 3000)],
+        ];
+        let mut rexmit: Vec<u32> = Vec::new();
+        for b in blocks.iter().cycle().take(6) {
+            out.clear();
+            let mut s = ack_at(&c, una);
+            s.sack = b.clone();
+            c.on_segment(&s, true, now, &mut out);
+            for o in &out {
+                if !o.payload.is_empty() && seq_lt(o.seq, max) {
+                    assert_eq!(o.payload.len(), 1000);
+                    rexmit.push(o.seq);
+                }
+            }
+        }
+        assert!(c.in_recovery());
+        rexmit.sort_unstable();
+        assert_eq!(rexmit, vec![una, una + 3000, una + 6000], "only holes, each once");
+        // The retransmissions fill everything: a cumulative ACK ends recovery.
+        out.clear();
+        c.on_segment(&ack_at(&c, max), true, now, &mut out);
+        assert!(!c.in_recovery());
+        assert!(c.scoreboard.is_empty());
+    }
+
+    #[test]
+    fn sack_blocks_are_clamped_and_merged() {
+        let (mut c, now) = established_ws(1000);
+        let mut out = Vec::new();
+        c.push_host_data(&vec![9u8; 10_000], now, &mut out);
+        let una = c.snd_una;
+        // Garbage (beyond snd_max, empty, below una) is ignored; overlapping blocks merge.
+        c.sack_update(&[
+            (una + 20_000, una + 21_000),
+            (una + 2000, una + 2000),
+            (una.wrapping_sub(500), una),
+            (una + 1000, una + 3000),
+            (una + 2500, una + 4000),
+            (una + 4000, una + 5000),
+        ]);
+        assert_eq!(c.scoreboard, vec![(una + 1000, una + 5000)]);
+        assert_eq!(c.next_hole(), Some((una, una + 1000)));
     }
 }

@@ -19,7 +19,7 @@ use anyhow::{Context, Result, bail};
 use fluxvm_core::model::{
     AppleGuest, AppleSpec, AppleUsernet, CreateVmRequest, NetworkSpec,
 };
-use fluxvm_usernet::{Cidr, PortForward, Proto, UserNetConfig};
+use fluxvm_usernet::{Cidr, Cidr6, GuestFamily, PortForward, Proto, UserNetConfig};
 use std::net::IpAddr;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::net::UnixDatagram;
@@ -66,6 +66,8 @@ pub fn validate(u: &AppleUsernet, req: &CreateVmRequest, apple: &AppleSpec) -> R
     for (what, n) in [
         ("allow_cidrs", u.allow_cidrs.len()),
         ("deny_cidrs", u.deny_cidrs.len()),
+        ("allow_cidrs6", u.allow_cidrs6.len()),
+        ("deny_cidrs6", u.deny_cidrs6.len()),
         ("allow_ports", u.allow_ports.len()),
         ("deny_ports", u.deny_ports.len()),
         ("dns_allow", u.dns_allow.len()),
@@ -79,6 +81,13 @@ pub fn validate(u: &AppleUsernet, req: &CreateVmRequest, apple: &AppleSpec) -> R
     for c in u.allow_cidrs.iter().chain(&u.deny_cidrs) {
         c.parse::<Cidr>()
             .map_err(|e| anyhow::anyhow!("apple.usernet CIDR {e}"))?;
+    }
+    for c in u.allow_cidrs6.iter().chain(&u.deny_cidrs6) {
+        c.parse::<Cidr6>()
+            .map_err(|e| anyhow::anyhow!("apple.usernet IPv6 CIDR {e}"))?;
+    }
+    if !u.ipv6 && (!u.allow_cidrs6.is_empty() || !u.deny_cidrs6.is_empty()) {
+        bail!("apple.usernet.allow_cidrs6 / deny_cidrs6 need apple.usernet.ipv6");
     }
     for p in u.allow_ports.iter().chain(&u.deny_ports) {
         if *p == 0 {
@@ -110,6 +119,12 @@ pub fn validate(u: &AppleUsernet, req: &CreateVmRequest, apple: &AppleSpec) -> R
                 f.host_port
             );
         }
+        match f.guest_family.as_deref().map(str::to_ascii_lowercase).as_deref() {
+            None | Some("v4") => {}
+            Some("v6") if u.ipv6 => {}
+            Some("v6") => bail!("apple.usernet forward guest_family v6 needs apple.usernet.ipv6"),
+            Some(other) => bail!("apple.usernet forward guest_family {other:?} must be v4 or v6"),
+        }
         let addr: IpAddr = match &f.host_addr {
             Some(a) => a
                 .parse()
@@ -123,7 +138,8 @@ pub fn validate(u: &AppleUsernet, req: &CreateVmRequest, apple: &AppleSpec) -> R
             );
         }
     }
-    Ok(())
+    // The gateway's own validation covers what is left (guest addresses against the prefix, family rules).
+    to_config(u, None).map(|_| ())
 }
 
 /// Maps the request's spec onto the gateway's config. `guest_mac` pins the NIC's MAC so the gateway never learns another.
@@ -141,24 +157,40 @@ pub fn to_config(u: &AppleUsernet, guest_mac: Option<[u8; 6]>) -> Result<UserNet
     c.egress.allow_domains = u.dns_allow.clone();
     c.egress.deny_domains = u.dns_deny.clone();
     c.egress.allow_private = u.allow_private;
+    c.ipv6 = u.ipv6;
+    let cidrs6 = |v: &[String]| -> Result<Vec<Cidr6>> {
+        v.iter()
+            .map(|s| s.parse::<Cidr6>().map_err(|e| anyhow::anyhow!("IPv6 CIDR {e}")))
+            .collect()
+    };
+    c.egress.allow_cidrs6 = cidrs6(&u.allow_cidrs6)?;
+    c.egress.deny_cidrs6 = cidrs6(&u.deny_cidrs6)?;
     if let Some(mtu) = u.mtu {
         c.mtu = mtu;
     }
     c.guest_mac = guest_mac;
     for f in &u.port_forwards {
-        c.forwards.push(PortForward {
-            proto: if f.protocol.eq_ignore_ascii_case("udp") {
+        // The host side may be IPv4 or IPv6 (`host_addr`); the guest side is its IPv4 lease address.
+        let mut fwd = PortForward::new(
+            if f.protocol.eq_ignore_ascii_case("udp") {
                 Proto::Udp
             } else {
                 Proto::Tcp
             },
-            host_addr: match &f.host_addr {
+            match &f.host_addr {
                 Some(a) => a.parse().context("forward host_addr")?,
                 None => IpAddr::from([127, 0, 0, 1]),
             },
-            host_port: f.host_port,
-            guest_port: f.guest_port,
-        });
+            f.host_port,
+            f.guest_port,
+        );
+        if f.guest_family.as_deref().is_some_and(|g| g.eq_ignore_ascii_case("v6")) {
+            fwd.guest_family = GuestFamily::V6;
+        }
+        if let Some(a) = &f.guest_addr {
+            fwd.guest_addr = Some(a.parse().context("forward guest_addr")?);
+        }
+        c.forwards.push(fwd);
     }
     c.validate().map_err(|e| anyhow::anyhow!("apple.usernet: {e}"))?;
     Ok(c)
@@ -277,8 +309,29 @@ pub struct Gateway {
     config_path: PathBuf,
     vm_id: uuid::Uuid,
     log_path: PathBuf,
+    /// `<workspace>/usernet-forwards.json`, written by the gateway (`--forwards-out`).
+    forwards_path: PathBuf,
     bin: PathBuf,
     mac: [u8; 6],
+}
+
+/// File name of the gateway's bound-forward report inside a VM workspace.
+pub const FORWARDS_FILE: &str = "usernet-forwards.json";
+
+/// Where each of the VM's `apple.usernet` port forwards is really listening, in `port_forwards` order. This is how
+/// a `host_port: 0` forward is discovered. Empty when the VM has no usernet or its gateway has not reported yet.
+/// The file belongs to one gateway process: if the supervisor restarted the gateway the ephemeral ports changed
+/// and the file was rewritten.
+pub fn usernet_forward_addrs(vm: &fluxvm_core::model::VmRecord) -> Result<Vec<fluxvm_usernet::ForwardStatus>> {
+    let p = vm.workspace.join(FORWARDS_FILE);
+    let raw = match std::fs::read(&p) {
+        Ok(r) => r,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e).with_context(|| format!("reading {}", p.display())),
+    };
+    let f: fluxvm_usernet::ForwardStatusFile =
+        serde_json::from_slice(&raw).with_context(|| format!("parsing {}", p.display()))?;
+    Ok(f.forwards)
 }
 
 impl Gateway {
@@ -295,6 +348,9 @@ impl Gateway {
         let config_path = workspace.join("usernet.json");
         std::fs::write(&config_path, serde_json::to_vec_pretty(&cfg)?)
             .with_context(|| format!("writing {}", config_path.display()))?;
+        // A report left by a previous run describes ports that are gone.
+        let forwards_path = workspace.join(FORWARDS_FILE);
+        let _ = std::fs::remove_file(&forwards_path);
         let (guest_end, gw_end) = pair()?;
         set_bufs(guest_end.as_raw_fd());
         set_bufs(gw_end.as_raw_fd());
@@ -312,6 +368,7 @@ impl Gateway {
             config_path,
             vm_id,
             log_path: workspace.join("usernet.log"),
+            forwards_path,
             bin,
             mac,
         })
@@ -395,7 +452,9 @@ impl Gateway {
             .arg("--config")
             .arg(&self.config_path)
             .arg("--watch-pid")
-            .arg(runner_pid.to_string());
+            .arg(runner_pid.to_string())
+            .arg("--forwards-out")
+            .arg(&self.forwards_path);
         let nic = self.gw_end.as_raw_fd();
         let tap = self.tap.as_ref().map(|(tx, _)| tx.as_raw_fd());
         if tap.is_some() {
@@ -491,6 +550,40 @@ mod tests {
     }
     use fluxvm_core::model::AppleUsernetForward;
 
+    fn vm_in(ws: &Path) -> fluxvm_core::model::VmRecord {
+        let mut v: serde_json::Value = serde_json::json!({
+            "id": uuid::Uuid::new_v4(), "name": "t", "backend": "vz", "status": "running",
+            "pid": null, "created_at": "2026-01-01T00:00:00Z", "expires_at": null,
+            "workspace": ws, "disk": "/tmp/d", "seed_disk": null, "tap_name": null,
+            "control_socket": null, "log_path": "/tmp/l", "error": null,
+            "request": {"name": "t", "image": "/tmp/i", "vcpus": 1, "memory_mib": 512},
+        });
+        v["request"]["backend"] = "vz".into();
+        serde_json::from_value(v).expect("VmRecord")
+    }
+
+    #[test]
+    fn forward_addrs_reader_handles_missing_and_present_files() {
+        let ws = std::env::temp_dir().join(format!("fluxvm-apple-fwd-{}", std::process::id()));
+        std::fs::create_dir_all(&ws).unwrap();
+        let vm = vm_in(&ws);
+        assert!(usernet_forward_addrs(&vm).unwrap().is_empty());
+        std::fs::write(
+            ws.join(FORWARDS_FILE),
+            r#"{"pid":7,"forwards":[
+                {"index":0,"proto":"tcp","bound":"127.0.0.1:40123","guest_port":22,"guest_family":"v4"},
+                {"index":1,"proto":"udp","bound":"[::1]:40124","guest_port":53,"guest_family":"v6"}]}"#,
+        )
+        .unwrap();
+        let f = usernet_forward_addrs(&vm).unwrap();
+        assert_eq!(f.len(), 2);
+        assert_eq!(f[0].bound, "127.0.0.1:40123".parse().unwrap());
+        assert_eq!((f[1].proto, f[1].guest_port), (Proto::Udp, 53));
+        std::fs::write(ws.join(FORWARDS_FILE), b"{not json").unwrap();
+        assert!(usernet_forward_addrs(&vm).is_err());
+        std::fs::remove_dir_all(&ws).unwrap();
+    }
+
     fn req(apple: serde_json::Value, network: serde_json::Value) -> CreateVmRequest {
         serde_json::from_value(serde_json::json!({
             "name": "t", "image": "/tmp/i", "backend": "vz",
@@ -560,6 +653,44 @@ mod tests {
     }
 
     #[test]
+    fn ipv6_spec_maps_into_the_gateway_config() {
+        let u: AppleUsernet = serde_json::from_value(serde_json::json!({
+            "ipv6": true,
+            "allow_cidrs6": ["2001:db8::/32"],
+            "port_forwards": [
+                {"host_port": 8080, "guest_port": 80, "guest_family": "v6"},
+                {"host_port": 8081, "guest_port": 81}
+            ]
+        }))
+        .unwrap();
+        let c = to_config(&u, None).unwrap();
+        assert!(c.ipv6);
+        assert_eq!(c.egress.allow_cidrs6.len(), 1);
+        assert_eq!(c.forwards[0].guest_family, GuestFamily::V6);
+        assert_eq!(c.forwards[1].guest_family, GuestFamily::V4);
+    }
+
+    #[test]
+    fn ipv6_fields_need_the_toggle_and_valid_values() {
+        let ck = |u: serde_json::Value| check(serde_json::json!({ "usernet": u }), user());
+        assert!(ck(serde_json::json!({"allow_cidrs6": ["2001:db8::/32"]})).is_err(), "needs ipv6");
+        assert!(ck(serde_json::json!({"ipv6": true, "allow_cidrs6": ["nope"]})).is_err());
+        assert!(
+            ck(serde_json::json!({"port_forwards": [{"host_port": 8080, "guest_port": 80, "guest_family": "v6"}]}))
+                .is_err(),
+            "v6 forward needs ipv6"
+        );
+        assert!(
+            ck(serde_json::json!({"ipv6": true, "port_forwards": [{"host_port": 8080, "guest_port": 80, "guest_family": "v5"}]}))
+                .is_err()
+        );
+        assert!(
+            ck(serde_json::json!({"ipv6": true, "allow_cidrs6": ["2001:db8::/32"], "port_forwards": [{"host_port": 8080, "guest_port": 80, "guest_family": "v6", "guest_addr": "fd5a:7f1a:2c3b:2::10"}]}))
+                .is_ok()
+        );
+    }
+
+    #[test]
     fn rejects_bad_ports_cidrs_domains_and_mtu() {
         for bad in [
             serde_json::json!({"allow_cidrs": ["10.0.0.0/33"]}),
@@ -595,6 +726,8 @@ mod tests {
                 host_addr: None,
                 host_port: 5353,
                 guest_port: 53,
+                guest_family: None,
+                guest_addr: None,
             }],
             ..Default::default()
         };

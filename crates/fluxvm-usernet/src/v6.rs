@@ -8,7 +8,8 @@
 //! The gateway answers as three addresses: `prefix::2` (gateway, with the optional host-loopback alias),
 //! `prefix::3` (DNS) and its EUI-64 link-local address, which is the router address in the RAs. Not supported:
 //! extension headers and fragments (dropped), outbound ICMPv6 echo (denied with `icmpv6-proxy-unsupported`),
-//! MLD, and v6 port forwards.
+//! and MLD. A v6 port forward targets `PortForward::guest_addr` or, failing that, the last in-prefix source
+//! address seen from the guest.
 
 use crate::wire::{self, Ipv6, Mac};
 use crate::{Engine, Proto};
@@ -70,6 +71,9 @@ impl Engine {
                 // NAT only for addresses inside the advertised prefix (SLAAC, including privacy addresses).
                 if !self.cfg.in_prefix6(ip.src) || self.is_gateway_addr6(ip.src) {
                     return self.mark_dropped();
+                }
+                if self.guest_ip6 != Some(ip.src) {
+                    self.guest_ip6 = Some(ip.src); // target of GuestFamily::V6 forwards
                 }
                 let (src, dst) = (ip.src.into(), ip.dst.into());
                 if ip.next_header == wire::PROTO_UDP {

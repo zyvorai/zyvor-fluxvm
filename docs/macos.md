@@ -96,6 +96,14 @@ to the VM log, and records the guest's NAT address.
   FluxVM itself (no qemu-img needed), and every image is kept sparse. `kali` follows Kali's current rolling build. Vendor root
   disks are small (Ubuntu's is about 3.5 GiB), so set `disk_size_gib` for real work. A file of the same name, or a catalog entry, wins. Named images are not catalog images, so `policy.require_catalog_names` rejects them.
 - **Cloud-init:** a NoCloud ISO built with `hdiutil`, with a MAC-based DHCP identity so the address stays stable.
+- **Offline injection (Linux guests, private raw clone, never a running VM):** the guest agent token is written straight into the
+  root disk's ext4 filesystem by `fluxvm-diskinject` (no seed ISO needed for it), and the request's SSH public keys
+  (`cloud_init.ssh_authorized_keys`) are appended to `/root/.ssh/authorized_keys` the same way. Both are skipped, and the
+  cloud-init copy stays the only one, for OCI sandboxes, macOS guests, ASIF overlays, a read-only root, non-default storage and
+  non-raw disks. A failed injection also keeps the cloud-init copy. Keys are injected only when `cloud_init.user` is explicitly `root` (then the cloud-init copy is dropped once every key is on the
+  disk). With the user unset or any other account the keys belong to that account, so nothing is written to root's file: the offline
+  writer can only touch root's `authorized_keys`, and writing them there would grant a root login that cloud-init alone does not. **Unverified on hardware:** unit-tested decision logic and an
+  ext4 round trip in `fluxvm-diskinject`; not exercised through a booted guest.
 - **Guest address:** macOS offers no usable DHCP-lease or ARP view to a spawned process, so FluxVM adds a small systemd
   service to the cloud-init (when a `cloud_init` is given) that prints `VELORA-IP <addr>` on the serial console; the runner
   parses it and `GET /v1/vms/{id}` reports it as `guest_ip`. It also turns off OpenSSH's per-source penalties inside the
@@ -369,7 +377,11 @@ Verified on macOS 27.2 with a Debian 13 guest: a file changed after `self_snapsh
   error from the middle of a transition. **Unverified on hardware** (compiled against the macOS 27 SDK only).
 - `display-resize` on the runner control socket calls `VZGraphicsDisplay.reconfigure(configuration:)` (macOS 14+) on a running or
   paused VM. From Rust: `fluxvm_apple::display_resize(&vm, width, height, display, ppi)`; `ppi` only applies to macOS guests.
-  **Unverified on hardware**: whether the guest follows the new size depends on its display driver. There is no REST route.
+  REST: `POST /v1/vms/{id}/vz/display` with `{"width": 1920, "height": 1080, "display": 0, "ppi": 220}` (`display` and `ppi`
+  optional; admin role; tenant-scoped like the other `vz` routes; the size is validated before the VM is looked up), CLI:
+  `fluxctl vz display resize <vm> --width 1920 --height 1080 [--display N] [--ppi N]`. The route is covered by API tests against a
+  stopped VM (validation, tenant and role checks); **unverified on hardware**: whether the guest follows the new size depends on
+  its display driver.
 - Every capability-table entry has a `min_macos` (`None` means the runner floor, macOS 14); for example USB controller and nested
   virtualization 15, vmnet 26, custom Virtio, Secure Boot, ASIF overlay and macOS provisioning 27. When the daemon has probed the
   host (it does so once, before the first `vz` create), `fluxvm_apple::validate_request` refuses with the real requirement
@@ -413,6 +425,23 @@ What it does and does not prove:
 - If the manifest cannot be produced (for example an unreadable file) the boot continues and the metadata has no `attestation`
   field; a verifier must treat a missing field as a failure.
 - Unit-tested (sign, verify, tamper, key file mode); **not exercised** end to end on a booted VM.
+
+**Delivery to an out-of-band verifier.** Each launch also keeps the attestation object in the VM's workspace
+(`vz-attestation.json`; a launch that produced none removes the previous file). `GET /v1/vms/{id}/vz/attestation` (any role,
+tenant-scoped, any VM state once it has launched; 400 before the first launch) returns
+`{"vm_id", "claim", "issued_at_unix", "attestation": {alg, payload, signature, public_key}, "manifest": {...}, "public_key": "<hex>"}`;
+`manifest` is `payload` decoded for convenience, and `public_key` is the daemon's key from `vz-attestation.pub` (read, never
+created by the request). Verify it with:
+
+```sh
+fluxctl vz attestation verify --vm web                       # against the host-served key: a consistency check only
+fluxctl vz attestation verify --vm web --trusted-key <hex>   # against a key you obtained out of band
+```
+
+The command uses `fluxvm_apple::verify_attestation_hex`, prints the manifest on success and exits non-zero when the signature does
+not match. Without `--trusted-key` the host vouches for itself, so the output carries a warning; only a key you already trusted
+gives the check any meaning. Everything above about what the signature does not prove still applies. The route and CLI are tested
+against synthetic attestations (API handler, tenant scoping, sign/verify round trip); **not exercised** against a booted VM.
 
 ### Stored sign-in
 
@@ -505,8 +534,12 @@ A Linux guest takes extra disks in `apple.extra_disks`, or with `fluxctl disk at
   missing; `path` is never written) through a `fluxvm-blockd serve` the daemon starts on 127.0.0.1 with an ephemeral port before the
   runner and stops when the runner exits. The runner sees an ordinary `nbd` disk (`nbd://127.0.0.1:<port>/<disk name>`), so the
   same macOS 14 requirement and start-time attachment apply. `fluxvm-blockd` is found next to `fluxctl` or through
-  `FLUXVM_BLOCKD`; its output goes to `<workspace>/blockd.log`. An overlay file must not be used by two VMs at once (only repeats
-  inside one request are refused). Paths must be absolute and contain no comma.
+  `FLUXVM_BLOCKD`; its output goes to `<workspace>/blockd.log`. An overlay file belongs to exactly one VM record: create, `disk
+  attach` and start refuse an overlay that is another record's overlay, base image, extra image or root disk (running or stopped),
+  that one VM names twice, or whose base is an overlay another VM still writes (a chain parent in use). A clone of a VM with
+  overlay disks is refused for the same reason. Paths are compared after resolving symlinks and `..`; the check covers FluxVM's own
+  records, not other processes. Paths must be absolute and contain no comma. Encryption, lazy HTTP bases, `branch`, `rebase` and
+  `resize` are `fluxvm-blockd` CLI features, not request fields; see [flux-disk.md](flux-disk.md).
 - Virtualization.framework fixes a VM's devices when it starts, so `fluxctl disk attach` and `detach` apply at the next start. The
   exception is a USB image disk on a running guest: attach plugs it in at once (macOS 15), and detach unplugs it at once as long
   as the VM has not restarted since. A new image made with `--size-gib` is deleted on detach once nothing uses it.
@@ -550,8 +583,10 @@ These compile against the macOS 27 SDK and are validated at admission. Except fo
   and the gateway each inherit an end (runner fd 3, `usernet_fd` in the runner config; gateway `--fd 3`), and the daemon restarts a
   gateway that dies for as long as the runner lives; the gateway also exits when the runner is gone. The gateway needs `fluxvm-usernet`
   next to `fluxctl` (or `FLUXVM_USERNET`). With network observability on, the gateway copies each frame to the daemon (`--tap-fd`),
-  so `/v1/netobs/*` sees real frames for the VM (verdict is always `allowed` at the frame level: denials show in the gateway log,
-  `<workspace>/usernet.log`). Frames reach the observer only when the VM is launched by the `fluxctl serve` daemon. IP discovery and
+  so `/v1/netobs/*` sees real frames for the VM (the gateway runs with tap version 2, so a frame it denied by policy arrives with a `denied` verdict and one it dropped for another
+  reason, such as a spoofed source, as `dropped`; the details are in the gateway log, `<workspace>/usernet.log`). IPv6 is opt-in:
+  `"ipv6": true` serves a ULA /64 by SLAAC with the same egress policy, `allow_cidrs6` / `deny_cidrs6` take IPv6 CIDRs, and a forward
+  can set `"guest_family": "v6"` (with an optional `"guest_addr"` inside the /64; otherwise the last address the guest used). Frames reach the observer only when the VM is launched by the `fluxctl serve` daemon. IP discovery and
   the legacy 127.0.0.1 `network.forwards` relay read the NAT lease file and do not work: use `usernet.port_forwards`. Never booted;
   the file-handle attachment path is the same one private networks use, which is verified.
 - **Custom Virtio (macOS 27+, Linux guests):** `custom_virtio: true` adds a vendor Virtio device (id `0x3F`, PCI `1af4:107f`; an earlier id, `0xFF00`, was outside the range Linux binds) with a host-side provider. Queue 0 is a bounded (1 MiB) versioned JSON control channel (`ping`, `echo`, `capabilities`, `stats`, `map-probe`); queue 1 is the bulk queue (`bulk_zero`, `fill`, `copy`, `crc32`, up to 64 MiB). The guest driver is in `guest/virtio-flux` (`/dev/fluxvm`, `/dev/fluxvm-bulk`, `fluxvm_virtioctl`). **Verified** on the M4 with a Debian 13 guest: `ping`, `echo`, `stats` and `capabilities`. `fluxvm_virtioctl bulk-test`, `bulk-zero-test`, `bulk-copy-test` and `bulk-crc-test` (queue 1, 1 B to 1 MiB) pass after the driver stopped using a stack buffer for its request; the 64 MiB host cap was not tried. See [macos-vz27-full-stack.md](macos-vz27-full-stack.md).
@@ -622,6 +657,11 @@ These compile against the macOS 27 SDK and are validated at admission. Except fo
 | guest agent over vsock (proxied like Firecracker; needs the agent in the image) | hotplug of CPU, memory and NICs; cdroms; firmware overrides |
 | macOS guests (installed from an IPSW through the API or by hand, then cloned; see above) | live migration, in-place restore of a running VM, direct kernel boot of macOS guests |
 | `apple.usernet` userspace gateway for Linux guests (egress/DNS policy, UDP/TCP forwards, netobs frames; **unverified on hardware**) | |
+| network observability: `/v1/netobs/*`, `fluxctl netobs`, `/metrics` series, private-network switches bridged into the daemon (see [netobs.md](netobs.md); unit/integration tested with synthetic frames, **unverified with live guest traffic**) | packet payload retention without an explicit, filtered, expiring capture |
+| `POST /v1/vms/{id}/vz/display` and `fluxctl vz display resize` (**unverified on hardware**; guest driver permitting, macOS 14+) | |
+| `GET /v1/vms/{id}/vz/attestation` and `fluxctl vz attestation verify`: signed boot manifest, host claim only (**not exercised on a booted VM**) | hardware attestation, TPM, measured boot |
+| offline agent-token and SSH-key injection into a private raw root disk (**unverified on a booted guest**) | injection into a running VM's disk, qcow2, shared storage, or another user's `authorized_keys` |
+| overlay disk exclusivity across VM records (create, attach, start) | protecting an overlay file from processes outside FluxVM |
 | `apple.macos_vsock` for macOS guests: vsock device plus a LaunchDaemon agent (**experimental, unverified**; SSH remains the fallback) | exec policies in macOS guests (Landlock/seccomp are Linux-only) |
 | extra disks (image, block device, NBD, blockd overlay (**unverified**); virtio, NVMe, USB), USB disk hot-attach and detach, private networks, console ports, bridged and vmnet networking, balloon, Rosetta, display, audio | (vmnet forwards may be UDP; NAT forwards are TCP only) |
 

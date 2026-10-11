@@ -21,6 +21,8 @@ pub mod ssh;
 mod usage;
 mod usb_passthrough;
 pub mod usernet;
+pub mod usernet_policy;
+pub use usernet::usernet_forward_addrs;
 pub mod vz27;
 pub mod vznet;
 
@@ -264,8 +266,15 @@ impl VmBackend for AppleBackend {
                 )
                 .await
                 {
-                    Ok(with) => with,
+                    Ok(with) => {
+                        // Kept for `GET /v1/vms/{id}/vz/attestation`; failing to keep it does not block the boot.
+                        if let Err(e) = attest::persist(&ctx.workspace, &with) {
+                            tracing::warn!(vm = %ctx.id, error = %e, "boot attestation not recorded");
+                        }
+                        with
+                    }
                     Err(e) => {
+                        attest::clear(&ctx.workspace);
                         tracing::warn!(vm = %ctx.id, error = %e, "boot attestation not produced");
                         meta
                     }

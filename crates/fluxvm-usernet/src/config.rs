@@ -337,7 +337,22 @@ pub enum Proto {
     Icmp,
 }
 
-/// Publish a guest port on the host: `host_addr:host_port` -> guest `guest_port`.
+/// Which of the guest's addresses a forward targets.
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "lowercase")]
+pub enum GuestFamily {
+    /// The guest's IPv4 lease address (`UserNetConfig::guest_ip`).
+    #[default]
+    V4,
+    /// The guest's IPv6 address in `ipv6_prefix`: `PortForward::guest_addr` when set, otherwise the most recent
+    /// in-prefix source address the gateway has seen from the guest (SLAAC addresses are chosen by the guest).
+    /// Needs `UserNetConfig::ipv6`.
+    V6,
+}
+
+/// Publish a guest port on the host: `host_addr:host_port` -> guest `guest_port`. The host side listens on
+/// `host_addr` of either family independently of the guest side (a `::1` listener can reach an IPv4 guest, and a
+/// `127.0.0.1` listener an IPv6 guest).
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PortForward {
     pub proto: Proto,
@@ -346,6 +361,26 @@ pub struct PortForward {
     /// 0 picks an ephemeral port; see [`UserNet::forward_addrs`](crate::UserNet::forward_addrs).
     pub host_port: u16,
     pub guest_port: u16,
+    /// Guest address family (default IPv4).
+    #[serde(default)]
+    pub guest_family: GuestFamily,
+    /// Explicit guest address. For `v4` it must equal `guest_ip`; for `v6` it must lie in `ipv6_prefix`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guest_addr: Option<IpAddr>,
+}
+
+impl PortForward {
+    /// A forward to the guest's IPv4 address.
+    pub fn new(proto: Proto, host_addr: IpAddr, host_port: u16, guest_port: u16) -> Self {
+        Self {
+            proto,
+            host_addr,
+            host_port,
+            guest_port,
+            guest_family: GuestFamily::V4,
+            guest_addr: None,
+        }
+    }
 }
 
 fn default_host_addr() -> IpAddr {
@@ -513,6 +548,32 @@ impl UserNetConfig {
             if f.guest_port == 0 {
                 return Err(bad("forward guest_port must be non-zero"));
             }
+            match (f.guest_family, f.guest_addr) {
+                (GuestFamily::V4, None) => {}
+                (GuestFamily::V4, Some(IpAddr::V4(a))) if a == self.guest_ip => {}
+                (GuestFamily::V4, Some(a)) => {
+                    return Err(bad(format!("forward guest_addr {a} is not guest_ip {}", self.guest_ip)));
+                }
+                (GuestFamily::V6, a) => {
+                    if !self.ipv6 {
+                        return Err(bad("forward guest_family v6 needs ipv6 enabled"));
+                    }
+                    match a {
+                        None => {}
+                        Some(IpAddr::V6(a)) => {
+                            if !self.in_prefix6(a) || a == self.gateway_ip6() || a == self.dns_ip6() {
+                                return Err(bad(format!(
+                                    "forward guest_addr {a} must be a guest address inside {}/64",
+                                    self.ipv6_prefix
+                                )));
+                            }
+                        }
+                        Some(a) => {
+                            return Err(bad(format!("forward guest_addr {a} is not an IPv6 address")));
+                        }
+                    }
+                }
+            }
             if f.host_port != 0 && !seen.insert((f.proto, f.host_addr, f.host_port)) {
                 return Err(bad(format!(
                     "duplicate forward {:?} {}:{}",
@@ -585,6 +646,47 @@ mod tests {
         assert_eq!(p.check_domain("www.Example.com."), Decision::Allow);
         assert_eq!(p.check_domain("evil.com"), Decision::Deny("domain-not-allowed"));
         assert_eq!(p.check_domain("notexample.com"), Decision::Deny("domain-not-allowed"));
+    }
+
+    #[test]
+    fn forward_family_validation() {
+        let fwd = |fam, addr: Option<&str>| PortForward {
+            guest_family: fam,
+            guest_addr: addr.map(|a| a.parse().unwrap()),
+            ..PortForward::new(Proto::Tcp, "::1".parse().unwrap(), 0, 80)
+        };
+        let mut c = UserNetConfig {
+            forwards: vec![fwd(GuestFamily::V4, None)],
+            ..Default::default()
+        };
+        // v6 host listener to the (default) v4 guest is fine.
+        assert!(c.validate().is_ok());
+        c.forwards = vec![fwd(GuestFamily::V4, Some("10.0.2.15"))];
+        assert!(c.validate().is_ok());
+        c.forwards = vec![fwd(GuestFamily::V4, Some("10.0.2.99"))];
+        assert!(c.validate().is_err());
+        c.forwards = vec![fwd(GuestFamily::V4, Some("fd5a:7f1a:2c3b:2::10"))];
+        assert!(c.validate().is_err());
+        // v6 guest needs ipv6 on.
+        c.forwards = vec![fwd(GuestFamily::V6, None)];
+        assert!(c.validate().is_err());
+        c.ipv6 = true;
+        assert!(c.validate().is_ok());
+        c.forwards = vec![fwd(GuestFamily::V6, Some("fd5a:7f1a:2c3b:2::10"))];
+        assert!(c.validate().is_ok());
+        for bad in ["fd00::1", "fd5a:7f1a:2c3b:2::2", "fd5a:7f1a:2c3b:2::3", "10.0.2.15"] {
+            c.forwards = vec![fwd(GuestFamily::V6, Some(bad))];
+            assert!(c.validate().is_err(), "{bad}");
+        }
+        // JSON: family and address default away.
+        let f: PortForward =
+            serde_json::from_str(r#"{"proto":"udp","host_addr":"::1","host_port":5000,"guest_port":53}"#).unwrap();
+        assert_eq!((f.guest_family, f.guest_addr), (GuestFamily::V4, None));
+        let f: PortForward = serde_json::from_str(
+            r#"{"proto":"tcp","host_port":5000,"guest_port":22,"guest_family":"v6","guest_addr":"fd5a:7f1a:2c3b:2::10"}"#,
+        )
+        .unwrap();
+        assert_eq!(f.guest_family, GuestFamily::V6);
     }
 
     #[test]

@@ -5,6 +5,8 @@
 //! (the end of the NIC socketpair the VM does not hold). Flow events are written to stdout as JSON lines.
 //! `--watch-pid P` makes it exit once process P is gone (the runner whose NIC it serves).
 //! `--tap-fd M` additionally copies every frame to that `SOCK_DGRAM` socket (see `UserNet::set_tap`); with
+//! `--forwards-out PATH` writes where each port forward is really listening (see `ForwardStatusFile`), which is how a
+//! `host_port: 0` forward is discovered.
 //! `--tap-version 2` each datagram is `[dir][verdict][frame]` (verdict 0 pass, 1 denied by policy, 2 dropped),
 //! the default version 1 is `[dir][frame]`.
 
@@ -23,6 +25,7 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
     let mut cfg_path: Option<String> = None;
     let mut tap_fd: Option<i32> = None;
     let mut watch_pid: Option<i32> = None;
+    let mut forwards_out: Option<String> = None;
     let mut tap_version: u8 = fluxvm_usernet::TAP_VERSION_1;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
@@ -32,7 +35,8 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
             "--tap-version" => tap_version = args.next().ok_or("--tap-version needs a value")?.parse()?,
             "--watch-pid" => watch_pid = Some(args.next().ok_or("--watch-pid needs a value")?.parse()?),
             "--config" => cfg_path = Some(args.next().ok_or("--config needs a value")?),
-            _ => return Err(format!("usage: fluxvm-usernet --fd N [--tap-fd M [--tap-version 1|2]] [--watch-pid P] [--config cfg.json] (got {a:?})").into()),
+            "--forwards-out" => forwards_out = Some(args.next().ok_or("--forwards-out needs a value")?),
+            _ => return Err(format!("usage: fluxvm-usernet --fd N [--tap-fd M [--tap-version 1|2]] [--watch-pid P] [--config cfg.json] [--forwards-out PATH] (got {a:?})").into()),
         }
     }
     let fd = fd.ok_or("--fd is required")?;
@@ -50,6 +54,12 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
             let t = unsafe { OwnedFd::from_raw_fd(t) };
             net.set_tap(t.into())?;
             net.set_tap_version(tap_version)?;
+        }
+        if let Some(p) = &forwards_out
+            && let Err(e) = net.write_forward_status(std::path::Path::new(p))
+        {
+            // Not fatal: the guest's network works, only the bound-address report is missing.
+            eprintln!("fluxvm-usernet: writing {p}: {e}");
         }
         let mut log = net.handle().subscribe();
         tokio::spawn(async move {
