@@ -21,6 +21,8 @@ pub mod ssh;
 mod usage;
 mod usb_passthrough;
 pub mod usernet;
+pub mod usernet_policy;
+pub use usernet::usernet_forward_addrs;
 pub mod vz27;
 pub mod vznet;
 

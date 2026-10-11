@@ -24,8 +24,9 @@
 //!   towards the guest when DF is clear, and ICMP "fragmentation needed" for guest packets over the MTU with DF set;
 //! * optional IPv6 (`UserNetConfig::ipv6`): NDP, router advertisements with a ULA /64 and RDNSS (SLAAC), ICMPv6
 //!   echo to the gateway, TCP/UDP NAT and DNS over the same egress policy (v6 CIDR lists, ULA/link-local/loopback
-//!   denied by default). Outbound ICMPv6 echo, v6 fragments and v6 port forwards are not supported;
-//! * host -> guest TCP and UDP port forwards (IPv4 guest address);
+//!   denied by default). Outbound ICMPv6 echo and v6 fragments are not supported;
+//! * host -> guest TCP and UDP port forwards: the host side listens on an IPv4 or IPv6 address, the guest side is
+//!   the IPv4 lease address or (with `ipv6`) an IPv6 address ([`GuestFamily`]);
 //! * a [`FlowEvent`] stream (open, close, deny, DNS) on a broadcast channel, and an optional frame tap with
 //!   per-frame policy verdicts ([`UserNet::set_tap_version`]).
 //!
@@ -44,7 +45,7 @@ mod v6;
 pub mod wire;
 
 pub use config::{
-    Cidr, Cidr6, Decision, EgressPolicy, PortForward, Proto, UserNetConfig, is_non_unicast,
+    Cidr, Cidr6, Decision, EgressPolicy, GuestFamily, PortForward, Proto, UserNetConfig, is_non_unicast,
     is_non_unicast6, is_private, is_private6,
 };
 
@@ -103,6 +104,39 @@ pub struct FlowEvent {
     /// Bytes guest -> remote / remote -> guest, on `close`.
     pub bytes_tx: u64,
     pub bytes_rx: u64,
+    /// On `deny` events: identical denials (same protocol, guest and remote address) that were not reported because
+    /// they arrived within [`DENY_EVENT_INTERVAL`] of the previous event; counted into the next one.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub suppressed: u32,
+}
+
+fn is_zero(n: &u32) -> bool {
+    *n == 0
+}
+
+/// Minimum spacing of identical `deny` events (per protocol + guest + remote address).
+pub const DENY_EVENT_INTERVAL: Duration = Duration::from_secs(1);
+/// Bound on the number of tracked deny keys.
+const MAX_DENY_KEYS: usize = 1024;
+
+/// Where one configured port forward listens (see [`UserNet::forward_status`]).
+#[derive(Clone, Debug, Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct ForwardStatus {
+    /// Index into `UserNetConfig::forwards`.
+    pub index: usize,
+    pub proto: Proto,
+    /// The address the host listener is really bound to (the resolved port when `host_port` was 0).
+    pub bound: SocketAddr,
+    pub guest_port: u16,
+    pub guest_family: GuestFamily,
+}
+
+/// The `--forwards-out` file.
+#[derive(Clone, Debug, Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct ForwardStatusFile {
+    /// The gateway process that bound the listeners (ephemeral ports change when it restarts).
+    pub pid: u32,
+    pub forwards: Vec<ForwardStatus>,
 }
 
 /// Cloneable control surface for a running [`UserNet`].
@@ -248,6 +282,37 @@ impl UserNet {
         &self.fwd_addrs
     }
 
+    /// Where every configured forward actually listens, in config order.
+    pub fn forward_status(&self) -> Vec<ForwardStatus> {
+        self.cfg
+            .forwards
+            .iter()
+            .zip(&self.fwd_addrs)
+            .enumerate()
+            .map(|(index, (f, bound))| ForwardStatus {
+                index,
+                proto: f.proto,
+                bound: *bound,
+                guest_port: f.guest_port,
+                guest_family: f.guest_family,
+            })
+            .collect()
+    }
+
+    /// Writes [`Self::forward_status`] as `{"pid":..,"forwards":[..]}` to `path` (atomically: temp file + rename).
+    /// The listeners are bound in [`UserNet::new`], so the file is complete as soon as the gateway exists.
+    pub fn write_forward_status(&self, path: &std::path::Path) -> io::Result<()> {
+        let file = ForwardStatusFile {
+            pid: std::process::id(),
+            forwards: self.forward_status(),
+        };
+        let mut tmp = path.as_os_str().to_owned();
+        tmp.push(".tmp");
+        let tmp = std::path::PathBuf::from(tmp);
+        std::fs::write(&tmp, serde_json::to_vec_pretty(&file).map_err(io::Error::other)?)?;
+        std::fs::rename(&tmp, path)
+    }
+
     /// Serve until [`UserNetHandle::shutdown`] or a fatal socket error. Must run inside a tokio runtime.
     pub async fn run(self) -> io::Result<()> {
         let sock = UnixDatagram::from_std(self.sock)?;
@@ -312,11 +377,13 @@ impl UserNet {
             tap: self.tap,
             tap_version: self.tap_version,
             pending_tap: RefCell::new(None),
+            deny_seen: RefCell::new(HashMap::new()),
             ip_id: Cell::new(1),
             reasm: frag::Reassembler::default(),
             icmp: HashMap::new(),
             icmp_bucket: (icmp_tokens, Instant::now()),
             last_ra: None,
+            guest_ip6: None,
         };
         let r = engine.run_loop(ev_rx, self.handle.shutdown.clone()).await;
         for t in fwd_tasks {
@@ -458,12 +525,43 @@ pub(crate) struct Engine {
     tap_version: u8,
     /// The guest frame currently being processed, held back until its verdict is known.
     pending_tap: RefCell<Option<Vec<u8>>>,
+    /// Last published `deny` per (proto, guest, remote): (when, suppressed since).
+    deny_seen: RefCell<HashMap<DenyKey, (Instant, u32)>>,
     ip_id: Cell<u16>,
     reasm: frag::Reassembler,
     icmp: HashMap<icmp::IcmpKey, icmp::IcmpFlow>,
     /// Echo-request token bucket: (tokens, last refill).
     icmp_bucket: (f64, Instant),
     last_ra: Option<Instant>,
+    /// The guest's IPv6 address as last seen as a packet source (target of `GuestFamily::V6` forwards).
+    pub(crate) guest_ip6: Option<Ipv6Addr>,
+}
+
+type DenyKey = (Proto, SocketAddr, SocketAddr);
+
+/// Decides whether a `deny` event for `key` is published now. `Some(n)`: publish it, `n` identical denials were
+/// suppressed since the previous one. `None`: within [`DENY_EVENT_INTERVAL`] of the last event, counted.
+fn deny_gate(seen: &mut HashMap<DenyKey, (Instant, u32)>, key: DenyKey, now: Instant) -> Option<u32> {
+    if let Some((last, n)) = seen.get_mut(&key) {
+        if now.saturating_duration_since(*last) < DENY_EVENT_INTERVAL {
+            *n = n.saturating_add(1);
+            return None;
+        }
+        let suppressed = *n;
+        *last = now;
+        *n = 0;
+        return Some(suppressed);
+    }
+    if seen.len() >= MAX_DENY_KEYS {
+        // Entries older than the interval carry no state that still suppresses anything, except their counts;
+        // those are dropped (a few suppressed events go unreported) to keep the table bounded.
+        seen.retain(|_, (last, _)| now.saturating_duration_since(*last) < DENY_EVENT_INTERVAL);
+        if seen.len() >= MAX_DENY_KEYS {
+            seen.clear();
+        }
+    }
+    seen.insert(key, (now, 0));
+    Some(0)
 }
 
 fn now_ms() -> u64 {
@@ -711,6 +809,7 @@ impl Engine {
             name: None,
             bytes_tx: 0,
             bytes_rx: 0,
+            suppressed: 0,
         }
     }
 
@@ -723,17 +822,34 @@ impl Engine {
         SocketAddr::new(self.cfg.guest_ip.into(), port)
     }
 
+    /// `(guest address, gateway address used as the source towards it)` for forward `idx`, or `None` while an
+    /// IPv6 guest address is still unknown.
+    fn fwd_endpoints(&self, idx: usize) -> Option<(IpAddr, IpAddr)> {
+        let f = &self.cfg.forwards[idx];
+        match f.guest_family {
+            GuestFamily::V4 => Some((self.cfg.guest_ip.into(), self.cfg.gateway_ip.into())),
+            GuestFamily::V6 => f
+                .guest_addr
+                .or(self.guest_ip6.map(IpAddr::V6))
+                .map(|g| (g, self.cfg.gateway_ip6().into())),
+        }
+    }
+
     /// A policy denial: publishes the event and marks the guest frame being processed as denied.
     fn deny_from(&self, proto: Proto, guest: SocketAddr, rip: IpAddr, rport: u16, reason: &str) {
+        // The frame is denied (and tapped as such) every time; only the event stream is rate limited.
         self.tap_commit(TAP_VERDICT_DENIED);
-        let mut e = self.log(
-            FlowKind::Deny,
-            proto,
-            Direction::Outbound,
-            guest,
-            SocketAddr::new(rip, rport),
-        );
+        let remote = SocketAddr::new(rip, rport);
+        let Some(suppressed) = deny_gate(
+            &mut self.deny_seen.borrow_mut(),
+            (proto, guest, remote),
+            Instant::now(),
+        ) else {
+            return;
+        };
+        let mut e = self.log(FlowKind::Deny, proto, Direction::Outbound, guest, remote);
         e.reason = Some(reason.to_string());
+        e.suppressed = suppressed;
         self.publish(e);
     }
 
@@ -904,8 +1020,9 @@ impl Engine {
         loop {
             let p = self.next_port;
             self.next_port = if p == 65535 { 49152 } else { p + 1 };
-            let gw = IpAddr::V4(self.cfg.gateway_ip);
-            let used = self.keys.keys().any(|k| k.r == gw && k.rp == p) || self.udp_rev.contains_key(&p);
+            let (gw, gw6) = (IpAddr::V4(self.cfg.gateway_ip), IpAddr::V6(self.cfg.gateway_ip6()));
+            let used = self.keys.keys().any(|k| (k.r == gw || k.r == gw6) && k.rp == p)
+                || self.udp_rev.contains_key(&p);
             if !used {
                 return p;
             }
@@ -918,7 +1035,7 @@ impl Engine {
         if u.dport == 53 && self.is_dns_dst(dst) {
             return self.handle_dns(DnsVia::Udp, dst, src, u.sport, u.payload.to_vec());
         }
-        if dst == IpAddr::V4(self.cfg.gateway_ip)
+        if (dst == IpAddr::V4(self.cfg.gateway_ip) || dst == IpAddr::V6(self.cfg.gateway_ip6()))
             && let Some((idx, peer, last)) = self.udp_rev.get_mut(&u.dport)
         {
             *last = Instant::now();
@@ -1411,13 +1528,24 @@ impl Engine {
                 self.remove_flow(id);
             }
             Ev::ForwardAccepted { idx, stream, peer } => {
-                let fwd = &self.cfg.forwards[idx];
-                let gport = fwd.guest_port;
+                let gport = self.cfg.forwards[idx].guest_port;
+                let Some((guest_ip, gw_ip)) = self.fwd_endpoints(idx) else {
+                    let mut e = self.log(
+                        FlowKind::ConnectFailed,
+                        Proto::Tcp,
+                        Direction::Inbound,
+                        SocketAddr::new(self.cfg.gateway_ip6().into(), gport),
+                        peer,
+                    );
+                    e.reason = Some("guest-ipv6-unknown".into());
+                    self.publish(e);
+                    return; // dropping `stream` closes the host connection
+                };
                 let gw_port = self.alloc_port();
                 let key = FKey {
-                    g: self.cfg.guest_ip.into(),
+                    g: guest_ip,
                     gp: gport,
-                    r: self.cfg.gateway_ip.into(),
+                    r: gw_ip,
                     rp: gw_port,
                 };
                 if self.flows.len() >= self.cfg.max_tcp_flows {
@@ -1426,7 +1554,7 @@ impl Engine {
                 let id = self.next_id;
                 self.next_id += 1;
                 let mut out = Vec::new();
-                let conn = TcpConn::new_active(self.mss(false), now, &mut out);
+                let conn = TcpConn::new_active(self.mss(guest_ip.is_ipv6()), now, &mut out);
                 self.keys.insert(key, id);
                 self.flows.insert(
                     id,
@@ -1457,6 +1585,9 @@ impl Engine {
             }
             Ev::UdpFwdIn { idx, peer, data } => {
                 let gport = self.cfg.forwards[idx].guest_port;
+                let Some((guest_ip, gw_ip)) = self.fwd_endpoints(idx) else {
+                    return; // IPv6 guest address not known yet: the datagram is dropped
+                };
                 let gw_port = match self.udp_sessions.get(&(idx, peer)) {
                     Some(&p) => p,
                     None => {
@@ -1469,7 +1600,7 @@ impl Engine {
                             FlowKind::Open,
                             Proto::Udp,
                             Direction::Inbound,
-                            self.guest_addr(gport),
+                            SocketAddr::new(guest_ip, gport),
                             peer,
                         );
                         self.publish(e);
@@ -1477,13 +1608,7 @@ impl Engine {
                     }
                 };
                 self.udp_rev.insert(gw_port, (idx, peer, now));
-                self.send_udp(
-                    self.cfg.gateway_ip.into(),
-                    gw_port,
-                    self.cfg.guest_ip.into(),
-                    gport,
-                    &data,
-                );
+                self.send_udp(gw_ip, gw_port, guest_ip, gport, &data);
             }
             Ev::DnsReply { via, local_ip, guest, guest_port, query, answer } => {
                 let Some(q) = dns::parse_query(&query) else { return };
