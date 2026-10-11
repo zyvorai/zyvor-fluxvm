@@ -559,7 +559,7 @@ pub(crate) struct Engine {
     tap_version: u8,
     /// The guest frame currently being processed, held back until its verdict is known.
     pending_tap: RefCell<Option<Vec<u8>>>,
-    /// Last published `deny` per (proto, guest, remote): (when, suppressed since).
+    /// Last published `deny` per (proto, guest, remote, reason): (when, suppressed since).
     deny_seen: RefCell<HashMap<DenyKey, (Instant, u32)>>,
     ip_id: Cell<u16>,
     reasm: frag::Reassembler,
@@ -571,7 +571,16 @@ pub(crate) struct Engine {
     pub(crate) guest_ip6: Option<Ipv6Addr>,
 }
 
-type DenyKey = (Proto, SocketAddr, SocketAddr);
+/// (protocol, guest, remote, hash of the reason): a different reason is a different event, so a burst of one denial
+/// (say `icmp-socket-unavailable`) never masks another (say `rate-limit`).
+type DenyKey = (Proto, SocketAddr, SocketAddr, u64);
+
+fn reason_hash(reason: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    reason.hash(&mut h);
+    h.finish()
+}
 
 /// Decides whether a `deny` event for `key` is published now. `Some(n)`: publish it, `n` identical denials were
 /// suppressed since the previous one. `None`: within [`DENY_EVENT_INTERVAL`] of the last event, counted.
@@ -891,7 +900,7 @@ impl Engine {
         let remote = SocketAddr::new(rip, rport);
         let Some(suppressed) = deny_gate(
             &mut self.deny_seen.borrow_mut(),
-            (proto, guest, remote),
+            (proto, guest, remote, reason_hash(reason)),
             Instant::now(),
         ) else {
             return;
