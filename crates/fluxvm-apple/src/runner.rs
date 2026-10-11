@@ -140,6 +140,9 @@ pub struct VsockServiceConfig {
     pub socket: Option<PathBuf>,
     /// `metadata` or `telemetry`, answered by the runner.
     pub builtin: Option<String>,
+    /// Loopback TCP port on this Mac that the guest's connections are relayed to (always 127.0.0.1; the runner has
+    /// no host field to misuse).
+    pub tcp_port: Option<u16>,
 }
 
 /// The host end of VM `id`'s allow-listed vsock service `name` (`apple.vsock_services[].socket`). The host-side service
@@ -306,6 +309,10 @@ impl RunnerConfig {
                             None => None,
                         },
                         builtin: s.builtin.clone(),
+                        tcp_port: match &s.tcp {
+                            Some(t) => Some(crate::capability::loopback_tcp_port(t)?),
+                            None => None,
+                        },
                     })
                 })
                 .collect::<Result<_>>()?,

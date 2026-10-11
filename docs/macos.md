@@ -296,15 +296,48 @@ restore and restart the VM it runs in through an MCP server at `http://127.0.0.1
 ### Extra guest→host vsock services
 
 `apple.vsock_services` opens more vsock ports from the guest to the host, and only the ports it lists (Linux guests; the guest
-reaches the host at CID 2). Each entry is `{"port": N, "builtin": "metadata" | "telemetry"}` or `{"port": N, "socket": "name"}`:
+reaches the host at CID 2). Each entry is `{"port": N, "builtin": "metadata" | "telemetry"}`, `{"port": N, "socket": "name"}` or `{"port": N, "tcp": "127.0.0.1:PORT"}`:
 
 - `metadata`: the guest connects and reads one JSON line (`id`, `name`, `vcpus`, `memory_mib`); the runner then closes.
 - `telemetry`: the guest writes lines and the runner appends them to `<workspace>/telemetry.log`, up to 8 MiB, then drops the rest.
+- `tcp`: `{"port": N, "tcp": "127.0.0.1:PORT"}` relays the guest's connections to a TCP server on this Mac. Loopback only:
+  the host must be `127.0.0.1` (or `localhost`) and `PORT` 1024-65535; anything else is refused at create time, and the runner
+  receives only a port and connects to the constant `127.0.0.1`. **Unverified on hardware** (validation and the runner config are
+  unit- and contract-tested; the relay itself has not been run). See "Local model server" below.
 - `socket`: connections are relayed to `/tmp/fluxvm-<uid>/<vm id>.svc-<name>`. The host operator runs whatever listens there. The
   name is `[a-z0-9_-]{1,32}`, so a spec cannot point the guest at another host path (such as the daemon's own socket).
 
+#### Local model server (host inference over vsock)
+
+To give a guest an OpenAI-compatible endpoint backed by the Mac's GPU, run MLX (`mlx_lm.server --port 8080`) or llama.cpp
+(`llama-server --port 8080`) on the host, bound to `127.0.0.1`, and create the VM with
+`fluxctl create --vsock-service 5100=tcp:127.0.0.1:8080` (no network card needed). Inside the guest, forward a local port to
+the vsock service (CID 2, port 5100) and point the client at it:
+
+```sh
+# inside the guest; the tcp service is allow-listed, so only this one host port is reachable
+python3 - <<'PY' &
+import socket, threading
+def pump(a, b):
+    try:
+        while (d := a.recv(65536)): b.sendall(d)
+    finally: a.close(); b.close()
+srv = socket.socket(); srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+srv.bind(("127.0.0.1", 8080)); srv.listen(16)
+while True:
+    c, _ = srv.accept()
+    v = socket.socket(socket.AF_VSOCK); v.connect((2, 5100))
+    threading.Thread(target=pump, args=(c, v), daemon=True).start()
+    threading.Thread(target=pump, args=(v, c), daemon=True).start()
+PY
+curl http://127.0.0.1:8080/v1/models     # OPENAI_BASE_URL=http://127.0.0.1:8080/v1 for SDKs
+```
+
+The host server sees every request from the guest, so run it with the model and prompts you are willing to expose to that VM;
+the relay adds no authentication.
+
 Ports must be 1024-65535, not 3128 (egress proxy), 7790 (self-control), 7791 or 22, at most 16 per VM. Create with
-`fluxctl create --vsock-service 5001=metadata --vsock-service 5003=socket:echo`. From a guest with python3:
+`fluxctl create --vsock-service 5001=metadata --vsock-service 5003=socket:echo --vsock-service 5100=tcp:127.0.0.1:8080`. From a guest with python3:
 `s=socket.socket(socket.AF_VSOCK); s.connect((2, 5001)); print(s.recv(4096))`.
 Verified on a Debian 13 guest by `scripts/vz-vsock-services-live-test.sh`.
 

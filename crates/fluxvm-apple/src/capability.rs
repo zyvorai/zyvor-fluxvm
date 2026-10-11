@@ -412,6 +412,27 @@ pub fn validate_disk(d: &fluxvm_core::model::AppleDisk) -> Result<()> {
 /// Ports the runner uses itself, or that a guest's own services expect (sshd over vsock).
 const RESERVED_VSOCK_PORTS: [u32; 4] = [22, 3128, 7790, 7791];
 
+/// The port of an `apple.vsock_services[].tcp` target. Only `127.0.0.1:<port>` (or `localhost:<port>`) with a port of
+/// 1024 or more is accepted, so a guest can never be pointed at another machine, the LAN or a privileged port.
+pub fn loopback_tcp_port(target: &str) -> Result<u16> {
+    let bad = || {
+        anyhow::anyhow!(
+            "apple.vsock_services tcp target {target:?} must be 127.0.0.1:<port> with a port of 1024..=65535 (loopback only)"
+        )
+    };
+    let (host, port) = target.rsplit_once(':').ok_or_else(bad)?;
+    if host != "127.0.0.1" && host != "localhost" {
+        return Err(bad());
+    }
+    if port.is_empty() || !port.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(bad());
+    }
+    match port.parse::<u16>() {
+        Ok(p) if p >= 1024 => Ok(p),
+        _ => Err(bad()),
+    }
+}
+
 fn validate_vsock_services(services: &[fluxvm_core::model::AppleVsockService]) -> Result<()> {
     if services.len() > 16 {
         bail!("apple.vsock_services allows at most 16 entries");
@@ -428,8 +449,11 @@ fn validate_vsock_services(services: &[fluxvm_core::model::AppleVsockService]) -
         if !seen.insert(s.port) {
             bail!("apple.vsock_services lists port {} twice", s.port);
         }
-        match (&s.socket, &s.builtin) {
-            (Some(n), None) => {
+        match (&s.socket, &s.builtin, &s.tcp) {
+            (None, None, Some(t)) => {
+                loopback_tcp_port(t)?;
+            }
+            (Some(n), None, None) => {
                 if n.is_empty()
                     || n.len() > 32
                     || !n.chars().all(|c| {
@@ -439,12 +463,12 @@ fn validate_vsock_services(services: &[fluxvm_core::model::AppleVsockService]) -
                     bail!("apple.vsock_services socket name {n:?} must match [a-z0-9_-]{{1,32}}");
                 }
             }
-            (None, Some(b)) if b == "metadata" || b == "telemetry" => {}
-            (None, Some(b)) => {
+            (None, Some(b), None) if b == "metadata" || b == "telemetry" => {}
+            (None, Some(b), None) => {
                 bail!("apple.vsock_services builtin {b:?} is not \"metadata\" or \"telemetry\"")
             }
             _ => bail!(
-                "apple.vsock_services port {} needs exactly one of socket and builtin",
+                "apple.vsock_services port {} needs exactly one of socket, builtin and tcp",
                 s.port
             ),
         }
@@ -1145,6 +1169,50 @@ mod tests {
         assert!(validate_request_with_host(&nested, Some(&host("Version 15.2", true))).is_ok());
         // an unparseable OS string never blocks a request
         assert!(validate_request_with_host(&vmnet, Some(&host("???", false))).is_ok());
+    }
+
+    #[test]
+    fn tcp_vsock_services_are_loopback_only() {
+        for good in ["127.0.0.1:8080", "localhost:11434", "127.0.0.1:1024"] {
+            assert!(loopback_tcp_port(good).is_ok(), "{good}");
+        }
+        for bad in [
+            "127.0.0.1:80",
+            "127.0.0.1:1023",
+            "127.0.0.1:0",
+            "127.0.0.1:65536",
+            "127.0.0.1:",
+            "127.0.0.1",
+            "10.0.0.5:8080",
+            "0.0.0.0:8080",
+            "192.168.64.1:8080",
+            "example.com:8080",
+            "127.0.0.2:8080",
+            "[::1]:8080",
+            "127.0.0.1:80a",
+            "127.0.0.1.evil.com:8080",
+            "",
+        ] {
+            assert!(loopback_tcp_port(bad).is_err(), "{bad}");
+        }
+        let svc = |s: &str| {
+            req(&format!(
+                r#""apple":{{"vsock_services":[{{"port":5100,{s}}}]}}"#
+            ))
+        };
+        assert!(validate_request(&svc(r#""tcp":"127.0.0.1:8080""#)).is_ok());
+        assert!(validate_request(&svc(r#""tcp":"10.0.0.2:8080""#)).is_err());
+        assert!(validate_request(&svc(r#""tcp":"127.0.0.1:80""#)).is_err());
+        // exactly one target kind
+        assert!(validate_request(&svc(r#""tcp":"127.0.0.1:8080","socket":"a""#)).is_err());
+        assert!(validate_request(&svc(r#""tcp":"127.0.0.1:8080","builtin":"metadata""#)).is_err());
+        // reserved guest ports are refused for tcp services like any other
+        let reserved = req(
+            r#""apple":{"vsock_services":[{"port":3128,"tcp":"127.0.0.1:8080"}]}"#,
+        );
+        assert!(validate_request(&reserved).is_err());
+        let low = req(r#""apple":{"vsock_services":[{"port":80,"tcp":"127.0.0.1:8080"}]}"#);
+        assert!(validate_request(&low).is_err());
     }
 
     #[test]

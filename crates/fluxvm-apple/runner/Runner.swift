@@ -27,6 +27,7 @@ struct VsockService: Decodable {
     let port: UInt32
     let socket: String?             // host unix socket to relay to
     let builtin: String?            // "metadata" | "telemetry"
+    let tcp_port: UInt16?           // relay to 127.0.0.1:<tcp_port> on this Mac (loopback only; the host is not configurable)
 }
 
 struct Config: Decodable {
@@ -1286,6 +1287,8 @@ final class Runner: NSObject, VZVirtualMachineDelegate, NSWindowDelegate {
                             else { finish() }
                         } else if let path = svc.socket, let u = self.connectUnix(path) {
                             splice(fd, u) { close(u); self.release(conn) }
+                        } else if let port = svc.tcp_port, port >= 1024, let u = self.connectLoopback(port) {
+                            splice(fd, u) { close(u); self.release(conn) }
                         } else {
                             finish()
                         }
@@ -1298,6 +1301,26 @@ final class Runner: NSObject, VZVirtualMachineDelegate, NSWindowDelegate {
                 self.serviceDelegates.append(delegate)
             }
         }
+    }
+
+    /// A TCP connection to 127.0.0.1:`port` on this Mac, for `apple.vsock_services[].tcp`. The address is a constant:
+    /// nothing from the spec or the guest can change the host.
+    func connectLoopback(_ port: UInt16) -> Int32? {
+        let s = socket(AF_INET, SOCK_STREAM, 0)
+        guard s >= 0 else { return nil }
+        var a = sockaddr_in()
+        a.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        a.sin_family = sa_family_t(AF_INET)
+        a.sin_port = port.bigEndian
+        a.sin_addr.s_addr = UInt32(0x7f000001).bigEndian
+        let ok = withUnsafePointer(to: &a) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                Darwin.connect(s, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
+        if ok == 0 { return s }
+        close(s)
+        return nil
     }
 
     func hostAllowed(_ host: String, _ rules: [String]) -> Bool {

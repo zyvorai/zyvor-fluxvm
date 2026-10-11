@@ -779,7 +779,7 @@ pub struct AppleShare {
     pub read_only: bool,
 }
 
-/// One guest→host vsock service (see `AppleSpec::vsock_services`). Exactly one of `socket` and `builtin` is set.
+/// One guest→host vsock service (see `AppleSpec::vsock_services`). Exactly one of `socket`, `builtin` and `tcp` is set.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct AppleVsockService {
     /// The vsock port the guest connects to (1024..=65535; not 3128, 7790 or 7791, which the runner uses itself).
@@ -791,6 +791,11 @@ pub struct AppleVsockService {
     /// `telemetry`: the guest writes lines that the runner appends to `<workspace>/telemetry.log` (capped at 8 MiB).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub builtin: Option<String>,
+    /// Relay to a TCP server on this Mac, `127.0.0.1:<port>` (port 1024..=65535; `localhost` is accepted and means
+    /// 127.0.0.1). Loopback only: any other host is refused. Use it to give a guest an OpenAI-compatible local model
+    /// server (MLX, llama.cpp) without a network card.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tcp: Option<String>,
 }
 
 /// An extra disk for a `vz` Linux guest: a raw image file (default), a host block device, or a network block device
