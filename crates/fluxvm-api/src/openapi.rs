@@ -204,6 +204,24 @@ fn ops() -> Vec<Op> {
         )
         .returns("HostOverview"),
         op(
+            "post",
+            "/v1/vms/{id}/fork/plan",
+            "What a fork would be refused for and cost (memory bounds, estimated time), without doing it",
+            HOST,
+        ),
+        op(
+            "post",
+            "/v1/branches/{id}/start/plan",
+            "What a start from a branch would be refused for and cost, without doing it",
+            HOST,
+        ),
+        op(
+            "get",
+            "/v1/host/history",
+            "Last hour of host memory and per-VM runner usage at 5 s spacing (in memory; empty after a daemon restart)",
+            HOST,
+        ),
+        op(
             "get",
             "/v1/host/apple/capabilities",
             "The capability table judged against this Mac (available here, and why not)",

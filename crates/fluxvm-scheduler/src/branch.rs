@@ -72,6 +72,18 @@ impl VmManager {
         self.branches_dir().join(id.to_string())
     }
 
+    /// The record a start from branch `id` would clone, and the branch's name (for plans: nothing is written).
+    pub(crate) fn branch_template(&self, id: Uuid) -> Result<(VmRecord, String)> {
+        let file = self.read_branch_file(id)?;
+        let mut template = file.record;
+        template.workspace = self.branch_dir(id);
+        template.status = VmStatus::Running;
+        template
+            .labels
+            .insert(BRANCH_LABEL.to_string(), id.to_string());
+        Ok((template, file.branch.name))
+    }
+
     fn read_branch_file(&self, id: Uuid) -> Result<BranchFile> {
         let raw = std::fs::read(self.branch_dir(id).join(BRANCH_FILE))
             .with_context(|| format!("branch {id} not found"))?;
@@ -314,6 +326,8 @@ impl VmManager {
                         ForkIdentityMode::Unique => "unique",
                     },
                 ),
+                ("total_ms", &started.elapsed().as_millis().to_string()),
+                ("report", &crate::fork::report_json(&reports)),
             ],
         );
         let report = ForkReport {

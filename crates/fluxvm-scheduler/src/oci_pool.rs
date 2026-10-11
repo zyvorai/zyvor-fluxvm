@@ -508,6 +508,7 @@ mod tests {
             name: "n".into(),
             address: None,
             mac: None,
+            mtu: None,
         }];
         assert!(!eligible(&c), "private networks");
         let mut c = base.clone();

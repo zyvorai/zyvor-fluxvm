@@ -214,6 +214,30 @@ pub struct ForkChildReport {
     pub total_ms: u64,
 }
 
+/// The per-child timings as a compact JSON array, for the `vm.fork` / `vm.branch.start` events: the event log holds
+/// string fields, and a recorded fork can then be replayed (prepare, restore, identity, hooks, ready) later.
+pub fn report_json(reports: &[ForkChildReport]) -> String {
+    serde_json::Value::Array(
+        reports
+            .iter()
+            .map(|r| {
+                serde_json::json!({
+                    "id": r.id,
+                    "name": r.name,
+                    "prepare_ms": r.prepare_ms,
+                    "restore_ms": r.restore_ms,
+                    "identity_ms": r.identity.ms,
+                    "identity_via": r.identity.via,
+                    "hooks_ms": r.hooks_ms,
+                    "ready_ms": r.ready_ms,
+                    "total_ms": r.total_ms,
+                })
+            })
+            .collect(),
+    )
+    .to_string()
+}
+
 /// The result of a fork: the children and where the time went.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ForkReport {
@@ -350,6 +374,8 @@ impl VmManager {
                 ("children", &ids.join(",")),
                 ("identity", &format!("{:?}", spec.identity)),
                 ("parent_snapshot_ms", &parent_snapshot_ms.to_string()),
+                ("total_ms", &started.elapsed().as_millis().to_string()),
+                ("report", &report_json(&reports)),
             ],
         );
         Ok(ForkReport {
@@ -492,6 +518,8 @@ impl VmManager {
                 ("identity", &format!("{:?}", spec.identity)),
                 ("parallelism", &parallelism.to_string()),
                 ("parent_snapshot_ms", &parent_snapshot_ms.to_string()),
+                ("total_ms", &started.elapsed().as_millis().to_string()),
+                ("report", &report_json(&reports)),
             ],
         );
         Ok(ForkReport {
@@ -1336,6 +1364,39 @@ pub(crate) fn check_forkable(src: &VmRecord, count: u32) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_fork_event_report_is_compact_json_with_every_phase() {
+        let r = ForkChildReport {
+            id: Uuid::nil(),
+            name: "web-fork-1".into(),
+            prepare_ms: 11,
+            restore_ms: 1500,
+            identity: IdentityOutcome {
+                via: "agent".into(),
+                ms: 40,
+                ..Default::default()
+            },
+            hooks_ms: 2,
+            ready_ms: 300,
+            total_ms: 1900,
+        };
+        let v: serde_json::Value = serde_json::from_str(&report_json(&[r])).unwrap();
+        let c = &v[0];
+        assert_eq!(c["name"], "web-fork-1");
+        for (k, n) in [
+            ("prepare_ms", 11),
+            ("restore_ms", 1500),
+            ("identity_ms", 40),
+            ("hooks_ms", 2),
+            ("ready_ms", 300),
+            ("total_ms", 1900),
+        ] {
+            assert_eq!(c[k], n, "{k}");
+        }
+        assert_eq!(c["identity_via"], "agent");
+        assert_eq!(report_json(&[]), "[]");
+    }
 
     fn record(network: serde_json::Value, backend: &str, status: &str) -> VmRecord {
         serde_json::from_value(serde_json::json!({

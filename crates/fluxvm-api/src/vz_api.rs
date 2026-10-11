@@ -19,7 +19,7 @@
 use super::{ApiError, ApiResult, require_admin};
 use axum::{
     Extension, Json, Router,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     routing::{get, post},
 };
@@ -39,6 +39,7 @@ pub(crate) fn routes() -> Router<Arc<VmManager>> {
         .route("/v1/host/apple", get(host_apple))
         .route("/v1/host/apple/capabilities", get(host_capabilities))
         .route("/v1/host/overview", get(host_overview))
+        .route("/v1/host/history", get(host_history))
         .route("/v1/host/apple/ipsw", get(ipsw_status).post(ipsw_download))
         .route("/v1/vms/{id}/vz/secure-boot", get(secure_boot))
         .route("/v1/vms/{id}/vz/custom-virtio", get(custom_virtio))
@@ -88,6 +89,23 @@ async fn host_overview(State(m): State<Arc<VmManager>>) -> ApiResult<Json<Value>
         })?;
     body["networking"]["netobs_enabled"] = json!(fluxvm_netobs::global().is_some());
     Ok(Json(body))
+}
+
+#[derive(Deserialize)]
+struct HistoryQuery {
+    /// RFC 3339; only samples strictly after it are returned.
+    since: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+/// The last hour of host memory and per-VM runner usage at five-second spacing, for a dashboard that connects late.
+/// In memory only: it starts empty when the daemon starts.
+async fn host_history(Query(q): Query<HistoryQuery>) -> Json<Value> {
+    let items = fluxvm_scheduler::history::global().since(q.since);
+    Json(json!({
+        "interval_seconds": fluxvm_scheduler::history::INTERVAL_SECONDS,
+        "capacity": fluxvm_scheduler::history::CAPACITY,
+        "items": items,
+    }))
 }
 
 async fn secure_boot(

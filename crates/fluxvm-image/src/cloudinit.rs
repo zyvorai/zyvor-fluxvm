@@ -315,7 +315,12 @@ mod tests {
         };
         let (_, _, nc) = write_seed_files(d.path(), &spec(vec![nic(Some(9000))]), None).unwrap();
         let body = fs::read_to_string(nc.unwrap()).unwrap();
-        assert!(body.split("fluxvm-nic0:").nth(1).unwrap().contains("mtu: 9000"));
+        assert!(
+            body.split("fluxvm-nic0:")
+                .nth(1)
+                .unwrap()
+                .contains("mtu: 9000")
+        );
         let d2 = tempfile::tempdir().unwrap();
         let (_, _, nc) = write_seed_files(d2.path(), &spec(vec![nic(None)]), None).unwrap();
         let body = fs::read_to_string(nc.unwrap()).unwrap();
