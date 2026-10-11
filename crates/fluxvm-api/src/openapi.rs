@@ -223,6 +223,12 @@ fn ops() -> Vec<Op> {
         ),
         op(
             "get",
+            "/v1/host/topology",
+            "Host hardware graph: NUMA nodes (CPUs, memory, hugepages) and placeable PCI devices with NUMA node, PCIe root and IOMMU group",
+            HOST,
+        ),
+        op(
+            "get",
             "/v1/host/apple/capabilities",
             "The capability table judged against this Mac (available here, and why not)",
             HOST,

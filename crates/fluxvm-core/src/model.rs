@@ -1591,6 +1591,22 @@ pub struct RuntimeCapabilities {
     /// Changed-block-tracking backups to object storage.
     #[serde(default)]
     pub backup: Vec<RuntimeBackupCapability>,
+    /// Host-level placement support.
+    #[serde(default)]
+    pub host: RuntimeHostCapability,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeHostCapability {
+    /// `GET /v1/host/topology` reports NUMA nodes and placeable devices.
+    pub topology: bool,
+    /// `CreateVmRequest.numa` binds guest memory and vCPU threads to host
+    /// NUMA nodes (QEMU).
+    pub numa_binding: bool,
+    /// `POST /v1/host/pci/bind` and `/release` move any IOMMU group to and
+    /// from vfio-pci.
+    pub pci_bind: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

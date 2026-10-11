@@ -356,6 +356,7 @@ pub fn router(manager: Arc<VmManager>) -> Router {
         .route("/v1/runtime/capabilities", get(runtime_capabilities)) // ZYVOR_RUNTIME_BOUNDARY_V1
         .route("/v1/security/capabilities", get(security_capabilities))
         .route("/v1/host/confidential", get(host_confidential))
+        .route("/v1/host/topology", get(host_topology))
         .route("/v1/host/gpus", get(list_host_gpus))
         .route("/v1/host/gpus/preflight", get(host_gpu_preflight))
         .route("/v1/host/gpus/bind", post(bind_host_gpu))
@@ -2202,6 +2203,11 @@ async fn runtime_capabilities(
         } else {
             vec![]
         },
+        host: fluxvm_core::model::RuntimeHostCapability {
+            topology: cfg!(target_os = "linux"),
+            numa_binding: cfg!(target_os = "linux"),
+            pci_bind: cfg!(target_os = "linux"),
+        },
     })
 }
 
@@ -2213,6 +2219,20 @@ fn allocated_vfio_bdfs(vms: &[VmRecord]) -> std::collections::HashSet<String> {
         }
     }
     out
+}
+
+async fn host_topology(
+    State(m): State<Arc<VmManager>>,
+) -> Json<fluxvm_core::topology::HostTopology> {
+    let allocated = allocated_vfio_bdfs(&m.list().await);
+    let state_dir = m.cfg.state_dir.clone();
+    Json(
+        tokio::task::spawn_blocking(move || {
+            fluxvm_core::topology::discover_host(&state_dir, &allocated)
+        })
+        .await
+        .unwrap_or_default(),
+    )
 }
 
 async fn list_host_gpus(State(m): State<Arc<VmManager>>) -> ApiResult<Json<serde_json::Value>> {
