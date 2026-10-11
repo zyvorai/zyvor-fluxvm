@@ -248,10 +248,17 @@ async fn frozen_overlay_is_exported_read_only_without_asking() {
 
     // Branching freezes it: the same export now advertises and enforces read-only.
     let _b = a.branch(&d.path().join("b.ovl")).unwrap();
-    assert_eq!(c.write(0, b"y").await, EPERM, "an open connection sees the freeze at once");
+    assert_eq!(
+        c.write(0, b"y").await,
+        EPERM,
+        "an open connection sees the freeze at once"
+    );
     let mut c2 = Client::connect(addr).await;
     let (_, flags) = c2.go("a").await.unwrap();
-    assert!(flags & FLAG_READ_ONLY != 0, "new connections get the read-only flag");
+    assert!(
+        flags & FLAG_READ_ONLY != 0,
+        "new connections get the read-only flag"
+    );
     assert_eq!(c2.read(0, 1).await.unwrap(), b"x");
 }
 

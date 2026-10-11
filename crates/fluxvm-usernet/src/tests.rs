@@ -674,7 +674,11 @@ async fn pinned_guest_mac_addresses_gateway_frames_to_the_guest() {
                 .map(|_| f[0..6].to_vec())
         })
         .await;
-    assert_eq!(dst, GMAC.to_vec(), "TCP to the guest must not be sent to the broadcast address");
+    assert_eq!(
+        dst,
+        GMAC.to_vec(),
+        "TCP to the guest must not be sent to the broadcast address"
+    );
 }
 
 #[tokio::test]
