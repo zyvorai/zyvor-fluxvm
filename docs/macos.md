@@ -380,8 +380,15 @@ Verified on macOS 27.2 with a Debian 13 guest: a file changed after `self_snapsh
   REST: `POST /v1/vms/{id}/vz/display` with `{"width": 1920, "height": 1080, "display": 0, "ppi": 220}` (`display` and `ppi`
   optional; admin role; tenant-scoped like the other `vz` routes; the size is validated before the VM is looked up), CLI:
   `fluxctl vz display resize <vm> --width 1920 --height 1080 [--display N] [--ppi N]`. The route is covered by API tests against a
-  stopped VM (validation, tenant and role checks); **unverified on hardware**: whether the guest follows the new size depends on
-  its display driver.
+  stopped VM (validation, tenant and role checks).
+- **What a resize does, measured on the M4 with a Debian 13 guest (partial).** The call succeeds and the DRM connector's
+  *preferred* mode in the guest changes to the new size. The *active* mode does not: fbcon's `virtual_size` and the console
+  resolution stay as they were. A headless guest has no KMS client, and switching the active mode takes one (a compositor, or a
+  tool that sets a mode through the DRM/KMS API); without one the guest keeps its mode and what a later modeset picks is not
+  deterministic. So the reply means "the host asked for this size", not "the guest now runs at it": the REST and CLI reply carry
+  `"requested": true`, `"applied_to_guest": "not confirmed"` and a `note` saying so, and `ok` only reports that the runner
+  accepted the call. To get a guest to the new size, run a compositor or set the mode from inside the guest after the resize.
+  macOS guests follow through their own window server and were not measured.
 - Every capability-table entry has a `min_macos` (`None` means the runner floor, macOS 14); for example USB controller and nested
   virtualization 15, vmnet 26, custom Virtio, Secure Boot, ASIF overlay and macOS provisioning 27. When the daemon has probed the
   host (it does so once, before the first `vz` create), `fluxvm_apple::validate_request` refuses with the real requirement
@@ -669,7 +676,7 @@ These compile against the macOS 27 SDK and are validated at admission. Except fo
 | macOS guests (installed from an IPSW through the API or by hand, then cloned; see above) | live migration, in-place restore of a running VM, direct kernel boot of macOS guests |
 | `apple.usernet` userspace gateway for Linux guests (egress/DNS policy, UDP/TCP forwards, netobs frames; DHCP, DNS, ICMP, IPv6 SLAAC and deny verdicts verified on hardware, **TCP and forwards not yet re-verified after a fix**) | |
 | network observability: `/v1/netobs/*`, `fluxctl netobs`, `/metrics` series, private-network switches bridged into the daemon (see [netobs.md](netobs.md); unit/integration tested with synthetic frames, **unverified with live guest traffic**) | packet payload retention without an explicit, filtered, expiring capture |
-| `POST /v1/vms/{id}/vz/display` and `fluxctl vz display resize` (**unverified on hardware**; guest driver permitting, macOS 14+) | |
+| `POST /v1/vms/{id}/vz/display` and `fluxctl vz display resize` (macOS 14+; **partial on hardware**: the connector's preferred mode changes, the active mode needs a KMS client in the guest) | |
 | `GET /v1/vms/{id}/vz/attestation` and `fluxctl vz attestation verify`: signed boot manifest, host claim only (**not exercised on a booted VM**) | hardware attestation, TPM, measured boot |
 | offline agent-token and SSH-key injection into a private raw root disk (token injection verified on a booted Debian 13 guest; SSH-key injection **unverified on a booted guest**) | injection into a running VM's disk, qcow2, shared storage, or another user's `authorized_keys` |
 | overlay disk exclusivity across VM records (create, attach, start) | protecting an overlay file from processes outside FluxVM |

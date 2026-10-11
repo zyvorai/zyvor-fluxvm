@@ -242,7 +242,7 @@ fn ops() -> Vec<Op> {
         op(
             "post",
             "/v1/vms/{id}/vz/display",
-            "Resize a display of a running vz guest (admin; macOS 14+, guest driver permitting)",
+            "Ask for a new preferred mode on a display of a running vz guest (admin; macOS 14+). The guest follows only when a KMS client switches its active mode; the reply says the request was made, not that the guest changed",
             VMS,
         )
         .body("VzDisplayResize"),

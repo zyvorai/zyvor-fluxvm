@@ -1871,7 +1871,8 @@ enum VzAttestationCommand {
 
 #[derive(Subcommand)]
 enum VzDisplayCommand {
-    /// Resize a display of a running guest (macOS 14+; whether the guest follows depends on its display driver).
+    /// Ask the host to resize a display of a running guest (macOS 14+). This updates the display's preferred mode; a guest
+    /// follows only when a KMS client (compositor) switches its active mode, so a headless guest keeps its current mode.
     Resize {
         #[arg(value_parser = output::parse_vm_ref)]
         id: Uuid,
@@ -4307,7 +4308,7 @@ async fn main() -> Result<()> {
                         },
                 } => {
                     m.vz_display_resize(id, width, height, display, ppi).await?;
-                    vz_display_body(width, height, display, ppi)
+                    fluxvm_apple::display_resize_reply(width, height, display, ppi)
                 }
                 VzCommand::CustomVirtio { id, reset: true } => {
                     m.vz_custom_virtio_reset(id).await?;

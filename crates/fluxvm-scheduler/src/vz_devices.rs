@@ -6,6 +6,7 @@
 
 use crate::{VmManager, audit_event};
 use anyhow::{Result, bail};
+pub use fluxvm_apple::display_resize_reply;
 use fluxvm_core::model::{BackendKind, VmRecord, VmStatus};
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -69,8 +70,8 @@ impl VmManager {
     }
 
     /// Resizes display `display` of a running VM (`VZGraphicsDisplay.reconfigure`, macOS 14+). The request is validated
-    /// before the VM is looked up, so a bad size is reported the same whether or not the VM runs. UNVERIFIED on hardware:
-    /// whether the guest follows the new size depends on its display driver.
+    /// before the VM is looked up, so a bad size is reported the same whether or not the VM runs. This only updates the
+    /// connector's preferred mode: the guest follows when a KMS client switches its active mode (see `DISPLAY_RESIZE_NOTE`).
     pub async fn vz_display_resize(
         &self,
         id: Uuid,

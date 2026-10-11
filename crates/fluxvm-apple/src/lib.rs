@@ -33,7 +33,9 @@ pub use capability::{
     with_self_control_forwarder, with_shared_folder_mounts,
 };
 pub use control::{ControlReply, call as control_call, call_with as control_call_with};
-pub use display::{display_resize, display_resize_request};
+pub use display::{
+    DISPLAY_RESIZE_NOTE, display_resize, display_resize_reply, display_resize_request,
+};
 pub use host_caps::{AppleHostCapabilities, host_capabilities, prime_host_capabilities};
 pub use ipsw::{IpswInfo, latest_ipsw};
 pub use runner::{
