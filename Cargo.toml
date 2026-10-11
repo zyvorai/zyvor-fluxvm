@@ -13,6 +13,7 @@ members = [
     "crates/fluxvm-guest-agent",
     "crates/fluxvm-vsock-client",
     "crates/fluxvm-qemu",
+    "crates/fluxvm-backup-s3",
     "crates/fluxvm-cloud-hypervisor",
     "crates/fluxvm-firecracker",
     "crates/fluxvm-hypervisor",
