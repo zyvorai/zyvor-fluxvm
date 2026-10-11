@@ -45,7 +45,7 @@ end
 return 0
 "#;
 
-/// Atomically: drop the lock if we hold it (clean shutdown hands over at once instead of after the TTL).
+/// Atomically: drop the lock if we hold it, so a takeover need not wait out the TTL.
 const RELEASE_LUA: &str = r#"
 if redis.call('GET', KEYS[1]) == ARGV[1] then
   return redis.call('DEL', KEYS[1])
@@ -77,7 +77,9 @@ impl HaStore {
     pub fn memory(cluster: &str) -> Self {
         Self {
             backend: Backend::Memory(Arc::new(Mutex::new(Memory::default()))),
-            prefix: format!("fluxvm:fleet:{cluster}"),
+            // The braces are a Redis Cluster hash tag: the lock and state keys share a slot, as the fenced two-key
+            // EVAL requires.
+            prefix: format!("fluxvm:fleet:{{{cluster}}}"),
         }
     }
 
@@ -88,7 +90,9 @@ impl HaStore {
             .context("connecting to the HA Redis")?;
         Ok(Self {
             backend: Backend::Redis(Box::new(mgr)),
-            prefix: format!("fluxvm:fleet:{cluster}"),
+            // The braces are a Redis Cluster hash tag: the lock and state keys share a slot, as the fenced two-key
+            // EVAL requires.
+            prefix: format!("fluxvm:fleet:{{{cluster}}}"),
         })
     }
 

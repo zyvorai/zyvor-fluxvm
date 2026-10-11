@@ -5,7 +5,7 @@
 
 use super::*;
 use crate::ha::HaConfig;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Instant;
 use tokio::sync::mpsc;
 
@@ -14,6 +14,10 @@ pub(super) struct HaRuntime {
     pub(super) cfg: HaConfig,
     leader: std::sync::Mutex<Option<String>>,
     is_leader: AtomicBool,
+    /// Serving also stops once this deadline (ms since `epoch`) passes without a renewal, so a leader whose elector
+    /// is stuck (hung store call, starved task) stops before its lock can lapse and pass to another central.
+    epoch: Instant,
+    lease_until_ms: AtomicU64,
     stopped: AtomicBool,
     tx: mpsc::UnboundedSender<(&'static str, String)>,
 }
@@ -28,6 +32,8 @@ impl HaRuntime {
                 cfg,
                 leader: std::sync::Mutex::new(None),
                 is_leader: AtomicBool::new(false),
+                epoch: Instant::now(),
+                lease_until_ms: AtomicU64::new(0),
                 stopped: AtomicBool::new(false),
                 tx,
             }),
@@ -37,6 +43,17 @@ impl HaRuntime {
 
     pub(super) fn is_leader(&self) -> bool {
         self.is_leader.load(Ordering::SeqCst)
+            && (self.epoch.elapsed().as_millis() as u64)
+                < self.lease_until_ms.load(Ordering::SeqCst)
+    }
+
+    /// After a successful renewal that started at `started`, the lock holds until at least `started + ttl`; serve
+    /// until `margin` before that.
+    fn extend_lease(&self, started: Instant, margin: std::time::Duration) {
+        let until =
+            started.saturating_duration_since(self.epoch) + self.cfg.ttl.saturating_sub(margin);
+        self.lease_until_ms
+            .store(until.as_millis() as u64, Ordering::SeqCst);
     }
 
     pub(super) fn leader(&self) -> Option<String> {
@@ -91,6 +108,9 @@ async fn load_state(fleet: &Fleet, ha: &HaRuntime) -> anyhow::Result<()> {
         let nodes: HashMap<String, NodeInfo> =
             serde_json::from_str(&raw).map_err(|e| anyhow::anyhow!("mirrored nodes: {e}"))?;
         let mut n = fleet.nodes.lock().await;
+        // The mirror is authoritative for which nodes exist: a node only in this central's own (older) registry was
+        // deregistered by a later leader. Standbys take no heartbeats, so nothing newer is lost here.
+        n.retain(|name, _| nodes.contains_key(name));
         // Keep any node that heartbeated here more recently than the mirror knows.
         for (name, info) in nodes {
             match n.get(&name) {
@@ -151,27 +171,41 @@ pub(super) fn spawn(
         let me = ha.cfg.advertise_url.clone();
         let ttl = ha.cfg.ttl;
         let every = (ttl / 3).max(std::time::Duration::from_millis(50));
-        let mut last_ok = Instant::now();
         loop {
             if ha.stopped.load(Ordering::SeqCst) {
                 return;
             }
-            match ha.cfg.store.acquire(&me, ttl).await {
+            let started = Instant::now();
+            let res = match tokio::time::timeout(every, ha.cfg.store.acquire(&me, ttl)).await {
+                Ok(r) => r,
+                Err(_) => Err(anyhow::anyhow!("timed out after {every:?}")),
+            };
+            match res {
                 Ok(holder) => {
-                    last_ok = Instant::now();
                     let leading = holder == me;
                     *ha.leader.lock().unwrap_or_else(|e| e.into_inner()) = Some(holder);
-                    if leading && !ha.is_leader() {
-                        match load_state(&fleet, &ha).await {
-                            Ok(()) => {
-                                ha.is_leader.store(true, Ordering::SeqCst);
-                                tracing::info!(%me, "became fleet leader");
-                            }
-                            Err(e) => {
-                                tracing::error!(error = %e, "holding the lock but could not load state; not serving")
+                    if leading {
+                        let was_serving = ha.is_leader();
+                        ha.extend_lease(started, every);
+                        if !was_serving {
+                            // Newly leading (or our lease lapsed meanwhile): load what the store holds first.
+                            ha.is_leader.store(false, Ordering::SeqCst);
+                            match load_state(&fleet, &ha).await {
+                                Ok(()) => {
+                                    ha.is_leader.store(true, Ordering::SeqCst);
+                                    tracing::info!(%me, "became fleet leader");
+                                    // Seed the mirror with our tenancy, otherwise only written on a change.
+                                    let t = serde_json::to_string(&*fleet.tenancy.lock().await);
+                                    if let Ok(t) = t {
+                                        ha.mirror("tenancy", t);
+                                    }
+                                }
+                                Err(e) => {
+                                    tracing::error!(error = %e, "holding the lock but could not load state; not serving")
+                                }
                             }
                         }
-                    } else if !leading {
+                    } else {
                         ha.step_down("another central holds the lock");
                     }
                     if ha.is_leader() {
@@ -183,8 +217,9 @@ pub(super) fn spawn(
                 }
                 Err(e) => {
                     tracing::warn!(error = %e, "fleet leader lock unreachable");
-                    // Without the store there is no fencing: stop serving before the lock could pass to another.
-                    if last_ok.elapsed() >= ttl.saturating_sub(every) {
+                    // Without the store there is no fencing: the lease deadline has already stopped serving before
+                    // the lock could pass to another; this records it.
+                    if !ha.is_leader() {
                         ha.step_down("leader lock store unreachable");
                     }
                 }

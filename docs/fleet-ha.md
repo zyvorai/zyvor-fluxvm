@@ -33,8 +33,9 @@ fluxvm-agent node --name studio-1 --central http://central-a.internal:7799,http:
   steps down.
 - **Standbys** answer every fleet request with `503`, `{"leader": "<url>"}` and an `x-fluxvm-leader` header. They
   never redirect, so bearer tokens are only ever sent to URLs you configured.
-- **Losing Redis.** If the leader cannot reach Redis for a TTL, it stops serving. It can no longer prove it is the only
-  leader, and it would rather refuse requests than risk two leaders.
+- **Losing Redis.** A leader's right to serve is a lease that ends two-thirds of a TTL after its last successful
+  renewal (each Redis call is also time-limited). If the leader cannot reach Redis, it stops serving when the lease
+  ends: it can no longer prove it is the only leader, and it would rather refuse requests than risk two.
 
 ## Clients
 
@@ -60,3 +61,8 @@ unhealthy.
 - Quota reservations for creates in flight live only on the leader. A failover during a create can briefly let a
   tenant go one VM over quota. The reconciler corrects the ledger afterwards.
 - Each central keeps its local JSON files as well, so a single central keeps working if `--ha-redis` is removed.
+- Keys are `fluxvm:fleet:{<cluster>}:leader` and `…:state:<name>`. The braces are a hash tag, so this works on Redis
+  Cluster too.
+- A clean shutdown does not release the lock yet, so the standby takes over after the TTL either way.
+- The node registry is mirrored on each renewal. A cordon or deregistration in the last third of a TTL before a leader
+  crash can be lost. Tenancy changes are mirrored immediately.
