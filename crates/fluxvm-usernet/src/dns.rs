@@ -3,7 +3,7 @@
 
 //! Just enough DNS wire handling for a policy-checking forwarder.
 
-use std::net::Ipv4Addr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 pub struct Query {
     pub name: String,
@@ -81,6 +81,7 @@ pub fn build_reply(query: &[u8], q: &Query, rcode: u8, truncated: bool) -> Vec<u
 }
 
 /// A records (address, ttl) in a response's answer section.
+#[cfg(test)]
 pub fn parse_a_records(buf: &[u8]) -> Vec<(Ipv4Addr, u32)> {
     let mut out = Vec::new();
     let mut parse = || -> Option<()> {
@@ -111,6 +112,112 @@ pub fn parse_a_records(buf: &[u8]) -> Vec<(Ipv4Addr, u32)> {
     out
 }
 
+/// Addresses (A and AAAA) with their TTLs in a response's answer section.
+pub fn parse_addr_records(buf: &[u8]) -> Vec<(IpAddr, u32)> {
+    let mut out = Vec::new();
+    let mut parse = || -> Option<()> {
+        if buf.len() < 12 || buf[2] & 0x80 == 0 {
+            return None;
+        }
+        let qd = u16::from_be_bytes([buf[4], buf[5]]);
+        let an = u16::from_be_bytes([buf[6], buf[7]]);
+        let mut off = 12;
+        for _ in 0..qd {
+            off = read_name(buf, off)?.1 + 4;
+        }
+        for _ in 0..an {
+            let (_, o) = read_name(buf, off)?;
+            let h = buf.get(o..o + 10)?;
+            let rtype = u16::from_be_bytes([h[0], h[1]]);
+            let ttl = u32::from_be_bytes([h[4], h[5], h[6], h[7]]);
+            let rdlen = usize::from(u16::from_be_bytes([h[8], h[9]]));
+            let rd = buf.get(o + 10..o + 10 + rdlen)?;
+            match (rtype, rdlen) {
+                (1, 4) => out.push((Ipv4Addr::new(rd[0], rd[1], rd[2], rd[3]).into(), ttl)),
+                (28, 16) => {
+                    let a: [u8; 16] = rd.try_into().ok()?;
+                    out.push((Ipv6Addr::from(a).into(), ttl));
+                }
+                _ => {}
+            }
+            off = o + 10 + rdlen;
+        }
+        Some(())
+    };
+    let _ = parse();
+    out
+}
+
+/// The TC (truncated) bit of a response.
+pub fn is_truncated(buf: &[u8]) -> bool {
+    buf.len() >= 4 && buf[2] & 0x02 != 0
+}
+
+/// The largest UDP response the client accepts: its EDNS0 payload size when the query carries an OPT record,
+/// otherwise 512 (RFC 1035).
+pub fn udp_limit(query: &[u8]) -> usize {
+    let f = || -> Option<usize> {
+        if query.len() < 12 {
+            return None;
+        }
+        let qd = u16::from_be_bytes([query[4], query[5]]);
+        let an = u16::from_be_bytes([query[6], query[7]]);
+        let ns = u16::from_be_bytes([query[8], query[9]]);
+        let ar = u16::from_be_bytes([query[10], query[11]]);
+        let mut off = 12;
+        for _ in 0..qd {
+            off = read_name(query, off)?.1 + 4;
+        }
+        for i in 0..(u32::from(an) + u32::from(ns) + u32::from(ar)) {
+            let (_, o) = read_name(query, off)?;
+            let h = query.get(o..o + 10)?;
+            let rtype = u16::from_be_bytes([h[0], h[1]]);
+            if rtype == 41 && i >= u32::from(an) + u32::from(ns) {
+                return Some(usize::from(u16::from_be_bytes([h[2], h[3]])).max(512));
+            }
+            off = o + 10 + usize::from(u16::from_be_bytes([h[8], h[9]]));
+        }
+        None
+    };
+    f().unwrap_or(512)
+}
+
+/// A header-plus-question reply with TC=1 and no answers, telling the client to retry over TCP.
+pub fn truncate_reply(answer: &[u8]) -> Option<Vec<u8>> {
+    if answer.len() < 12 || u16::from_be_bytes([answer[4], answer[5]]) == 0 {
+        return None;
+    }
+    let (_, off) = read_name(answer, 12)?;
+    answer.get(off..off + 4)?;
+    let mut v = answer[..off + 4].to_vec();
+    v[2] |= 0x02;
+    v[4..6].copy_from_slice(&1u16.to_be_bytes());
+    v[6..12].fill(0);
+    Some(v)
+}
+
+/// Prefix `msg` with its two-byte length (DNS over TCP, RFC 1035 section 4.2.2).
+pub fn tcp_frame(msg: &[u8]) -> Vec<u8> {
+    let mut v = Vec::with_capacity(msg.len() + 2);
+    v.extend_from_slice(&(msg.len() as u16).to_be_bytes());
+    v.extend_from_slice(msg);
+    v
+}
+
+/// Pop one complete length-prefixed message from the front of `buf`.
+pub fn tcp_take(buf: &mut Vec<u8>) -> Option<Vec<u8>> {
+    if buf.len() < 2 {
+        return None;
+    }
+    let n = usize::from(u16::from_be_bytes([buf[0], buf[1]]));
+    if buf.len() < 2 + n {
+        return None;
+    }
+    let m = buf[2..2 + n].to_vec();
+    buf.drain(..2 + n);
+    Some(m)
+}
+
 #[cfg(test)]
 pub(crate) fn test_query(id: u16, name: &str) -> Vec<u8> {
     let mut v = vec![(id >> 8) as u8, id as u8, 0x01, 0, 0, 1, 0, 0, 0, 0, 0, 0];
@@ -135,8 +242,58 @@ pub(crate) fn test_answer(query: &[u8], ip: Ipv4Addr, ttl: u32) -> Vec<u8> {
 }
 
 #[cfg(test)]
+pub(crate) fn test_query_type(id: u16, name: &str, qtype: u16) -> Vec<u8> {
+    let mut v = test_query(id, name);
+    let n = v.len();
+    v[n - 4..n - 2].copy_from_slice(&qtype.to_be_bytes());
+    v
+}
+
+/// An answer with `n` A records (to build large responses).
+#[cfg(test)]
+pub(crate) fn test_big_answer(query: &[u8], n: usize) -> Vec<u8> {
+    let q = parse_query(query).unwrap();
+    let mut v = build_reply(query, &q, 0, false);
+    v[6..8].copy_from_slice(&(n as u16).to_be_bytes());
+    for i in 0..n {
+        v.extend_from_slice(&[0xc0, 12, 0, 1, 0, 1, 0, 0, 1, 44, 0, 4, 10, 1, (i >> 8) as u8, i as u8]);
+    }
+    v
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn aaaa_edns_and_tcp_framing() {
+        let q = test_query_type(7, "v6.test", 28);
+        let mut a = build_reply(&q, &parse_query(&q).unwrap(), 0, false);
+        a[6..8].copy_from_slice(&1u16.to_be_bytes());
+        a.extend_from_slice(&[0xc0, 12, 0, 28, 0, 1, 0, 0, 0, 60, 0, 16]);
+        a.extend_from_slice(&"2001:db8::7".parse::<Ipv6Addr>().unwrap().octets());
+        assert_eq!(parse_addr_records(&a), vec![("2001:db8::7".parse().unwrap(), 60)]);
+
+        assert_eq!(udp_limit(&q), 512);
+        let mut e = q.clone();
+        e[10..12].copy_from_slice(&1u16.to_be_bytes());
+        e.extend_from_slice(&[0, 0, 41, 0x10, 0, 0, 0, 0, 0, 0, 0]); // root OPT, udp size 4096
+        assert_eq!(udp_limit(&e), 4096);
+
+        let big = test_big_answer(&q, 100);
+        assert!(big.len() > 512);
+        let t = truncate_reply(&big).unwrap();
+        assert!(is_truncated(&t));
+        assert_eq!(&t[..2], &q[..2]);
+        assert_eq!(u16::from_be_bytes([t[6], t[7]]), 0);
+
+        let mut buf = tcp_frame(b"abc");
+        buf.extend_from_slice(&tcp_frame(b"defg")[..3]);
+        assert_eq!(tcp_take(&mut buf).as_deref(), Some(&b"abc"[..]));
+        assert!(tcp_take(&mut buf).is_none());
+        buf.extend_from_slice(&tcp_frame(b"defg")[3..]);
+        assert_eq!(tcp_take(&mut buf).as_deref(), Some(&b"defg"[..]));
+    }
 
     #[test]
     fn query_and_answer() {

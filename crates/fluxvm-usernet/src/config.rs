@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
 use std::io;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::str::FromStr;
 use std::time::Instant;
 
@@ -66,6 +66,79 @@ impl<'de> Deserialize<'de> for Cidr {
     }
 }
 
+/// An IPv6 CIDR block, `addr/n` (a bare address is a /128).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Cidr6 {
+    pub addr: Ipv6Addr,
+    pub prefix: u8,
+}
+
+impl Cidr6 {
+    pub fn contains(&self, ip: Ipv6Addr) -> bool {
+        let mask = if self.prefix == 0 {
+            0
+        } else {
+            u128::MAX << (128 - u32::from(self.prefix))
+        };
+        u128::from(ip) & mask == u128::from(self.addr) & mask
+    }
+}
+
+impl FromStr for Cidr6 {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, String> {
+        let (a, p) = match s.split_once('/') {
+            Some((a, p)) => (a, p.parse::<u8>().map_err(|e| format!("{s:?}: {e}"))?),
+            None => (s, 128),
+        };
+        if p > 128 {
+            return Err(format!("{s:?}: prefix > 128"));
+        }
+        Ok(Cidr6 {
+            addr: a.parse().map_err(|e| format!("{s:?}: {e}"))?,
+            prefix: p,
+        })
+    }
+}
+
+impl fmt::Display for Cidr6 {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}/{}", self.addr, self.prefix)
+    }
+}
+
+impl Serialize for Cidr6 {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.collect_str(self)
+    }
+}
+
+impl<'de> Deserialize<'de> for Cidr6 {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(d)?;
+        s.parse().map_err(serde::de::Error::custom)
+    }
+}
+
+/// IPv6 addresses a guest must not reach unless explicitly allowed: loopback, unspecified, unique-local
+/// (`fc00::/7`), link-local (`fe80::/10`), deprecated site-local (`fec0::/10`) and IPv4-mapped/compatible forms
+/// (which would otherwise sidestep the IPv4 rules).
+pub fn is_private6(ip: Ipv6Addr) -> bool {
+    let s = ip.segments();
+    ip.is_loopback()
+        || ip.is_unspecified()
+        || (s[0] & 0xfe00) == 0xfc00
+        || (s[0] & 0xffc0) == 0xfe80
+        || (s[0] & 0xffc0) == 0xfec0
+        || ip.to_ipv4_mapped().is_some()
+        || s[0..6] == [0, 0, 0, 0, 0, 0]
+}
+
+/// Never a valid IPv6 NAT destination, regardless of policy.
+pub fn is_non_unicast6(ip: Ipv6Addr) -> bool {
+    ip.is_unspecified() || ip.is_multicast()
+}
+
 /// Addresses a guest must not reach unless explicitly allowed: loopback, RFC 1918, link-local, CGNAT, "this network",
 /// benchmarking, reserved.
 pub fn is_private(ip: Ipv4Addr) -> bool {
@@ -116,6 +189,10 @@ pub struct EgressPolicy {
     pub allow_domains: Vec<String>,
     /// Names that always get NXDOMAIN.
     pub deny_domains: Vec<String>,
+    /// IPv6 counterparts of `allow_cidrs` / `deny_cidrs` (only consulted when `ipv6` is on). An allow-list is
+    /// active when any of `allow_cidrs`, `allow_cidrs6` or `allow_domains` is configured.
+    pub allow_cidrs6: Vec<Cidr6>,
+    pub deny_cidrs6: Vec<Cidr6>,
     /// Let the guest reach private ranges (not multicast/broadcast).
     pub allow_private: bool,
     /// Map the gateway address to the host's 127.0.0.1 (like slirp's 10.0.2.2). Off by default.
@@ -132,7 +209,54 @@ pub(crate) fn domain_matches(list: &[String], name: &str) -> bool {
 
 impl EgressPolicy {
     pub fn is_allow_list(&self) -> bool {
-        !self.allow_cidrs.is_empty() || !self.allow_domains.is_empty()
+        !self.allow_cidrs.is_empty() || !self.allow_cidrs6.is_empty() || !self.allow_domains.is_empty()
+    }
+
+    /// Like [`EgressPolicy::check`] for traffic that has no port (ICMP echo): port rules are not applied.
+    pub fn check_addr(
+        &self,
+        ip: Ipv4Addr,
+        learned: &HashMap<Ipv4Addr, Instant>,
+        now: Instant,
+    ) -> Decision {
+        self.check_inner(ip, None, learned, now)
+    }
+
+    /// IPv6 destination check; same order as [`EgressPolicy::check`] with the v6 CIDR lists and the v6
+    /// private ranges. `port` is `None` for portless traffic (ICMPv6).
+    pub fn check6(
+        &self,
+        ip: Ipv6Addr,
+        port: Option<u16>,
+        learned: &HashMap<Ipv6Addr, Instant>,
+        now: Instant,
+    ) -> Decision {
+        if is_non_unicast6(ip) {
+            return Decision::Deny("non-unicast");
+        }
+        if self.deny_cidrs6.iter().any(|c| c.contains(ip)) {
+            return Decision::Deny("deny-cidr");
+        }
+        if let Some(port) = port {
+            if self.deny_ports.contains(&port) {
+                return Decision::Deny("deny-port");
+            }
+            if !self.allow_ports.is_empty() && !self.allow_ports.contains(&port) {
+                return Decision::Deny("port-not-allowed");
+            }
+        }
+        let explicit = self.allow_cidrs6.iter().any(|c| c.contains(ip))
+            || learned.get(&ip).is_some_and(|exp| *exp > now);
+        if explicit {
+            return Decision::Allow;
+        }
+        if is_private6(ip) && !self.allow_private {
+            return Decision::Deny("private-range");
+        }
+        if self.is_allow_list() {
+            return Decision::Deny("not-in-allow-list");
+        }
+        Decision::Allow
     }
 
     /// `learned` maps DNS-learned addresses to their expiry.
@@ -143,17 +267,29 @@ impl EgressPolicy {
         learned: &HashMap<Ipv4Addr, Instant>,
         now: Instant,
     ) -> Decision {
+        self.check_inner(ip, Some(port), learned, now)
+    }
+
+    fn check_inner(
+        &self,
+        ip: Ipv4Addr,
+        port: Option<u16>,
+        learned: &HashMap<Ipv4Addr, Instant>,
+        now: Instant,
+    ) -> Decision {
         if is_non_unicast(ip) {
             return Decision::Deny("non-unicast");
         }
         if self.deny_cidrs.iter().any(|c| c.contains(ip)) {
             return Decision::Deny("deny-cidr");
         }
-        if self.deny_ports.contains(&port) {
-            return Decision::Deny("deny-port");
-        }
-        if !self.allow_ports.is_empty() && !self.allow_ports.contains(&port) {
-            return Decision::Deny("port-not-allowed");
+        if let Some(port) = port {
+            if self.deny_ports.contains(&port) {
+                return Decision::Deny("deny-port");
+            }
+            if !self.allow_ports.is_empty() && !self.allow_ports.contains(&port) {
+                return Decision::Deny("port-not-allowed");
+            }
         }
         let explicit = self.allow_cidrs.iter().any(|c| c.contains(ip))
             || learned.get(&ip).is_some_and(|exp| *exp > now);
@@ -197,6 +333,8 @@ impl EgressPolicy {
 pub enum Proto {
     Tcp,
     Udp,
+    /// Only used in [`FlowEvent`](crate::FlowEvent)s for proxied ICMP echo; not valid for a port forward.
+    Icmp,
 }
 
 /// Publish a guest port on the host: `host_addr:host_port` -> guest `guest_port`.
@@ -236,6 +374,16 @@ pub struct UserNetConfig {
     pub udp_idle_secs: u64,
     pub tcp_idle_secs: u64,
     pub connect_timeout_secs: u64,
+    /// Proxy guest ICMP echo requests to allowed public hosts through unprivileged ICMP datagram sockets.
+    pub icmp_proxy: bool,
+    /// Echo requests per second accepted from the guest (token bucket, burst = 2x).
+    pub icmp_rate_per_sec: u32,
+    pub max_icmp_flows: usize,
+    /// Serve IPv6: NDP, router advertisements with `ipv6_prefix` (SLAAC), ICMPv6 echo to the gateway, and TCP/UDP
+    /// NAT. Off by default: the gateway then ignores IPv6 entirely.
+    pub ipv6: bool,
+    /// The /64 advertised to the guest, a ULA by default. The gateway is `prefix::2`, DNS is `prefix::3`.
+    pub ipv6_prefix: Ipv6Addr,
 }
 
 impl Default for UserNetConfig {
@@ -257,6 +405,11 @@ impl Default for UserNetConfig {
             udp_idle_secs: 60,
             tcp_idle_secs: 30 * 60,
             connect_timeout_secs: 10,
+            icmp_proxy: true,
+            icmp_rate_per_sec: 20,
+            max_icmp_flows: 64,
+            ipv6: false,
+            ipv6_prefix: Ipv6Addr::new(0xfd5a, 0x7f1a, 0x2c3b, 0x0002, 0, 0, 0, 0),
         }
     }
 }
@@ -272,6 +425,46 @@ impl UserNetConfig {
 
     pub fn broadcast(&self) -> Ipv4Addr {
         Ipv4Addr::from(u32::from(self.guest_ip) | !u32::from(self.netmask()))
+    }
+
+    fn v6_host(&self, n: u16) -> Ipv6Addr {
+        let mut s = self.ipv6_prefix.segments();
+        s[4..8].fill(0);
+        s[7] = n;
+        Ipv6Addr::from(s)
+    }
+
+    /// The gateway's global (ULA) IPv6 address, `prefix::2`.
+    pub fn gateway_ip6(&self) -> Ipv6Addr {
+        self.v6_host(2)
+    }
+
+    /// The DNS service address, `prefix::3`.
+    pub fn dns_ip6(&self) -> Ipv6Addr {
+        self.v6_host(3)
+    }
+
+    /// The gateway's link-local address (EUI-64 of `gateway_mac`), the RA source and default router.
+    pub fn gateway_ll6(&self) -> Ipv6Addr {
+        let m = self.gateway_mac;
+        Ipv6Addr::new(
+            0xfe80,
+            0,
+            0,
+            0,
+            u16::from_be_bytes([m[0] ^ 2, m[1]]),
+            u16::from_be_bytes([m[2], 0xff]),
+            u16::from_be_bytes([0xfe, m[3]]),
+            u16::from_be_bytes([m[4], m[5]]),
+        )
+    }
+
+    pub fn in_prefix6(&self, ip: Ipv6Addr) -> bool {
+        Cidr6 {
+            addr: self.ipv6_prefix,
+            prefix: 64,
+        }
+        .contains(ip)
     }
 
     pub fn validate(&self) -> io::Result<()> {
@@ -304,7 +497,19 @@ impl UserNetConfig {
             return Err(bad("gateway_mac must be a unicast address"));
         }
         let mut seen = std::collections::HashSet::new();
+        if self.ipv6 {
+            let s = self.ipv6_prefix.segments();
+            if s[4..8] != [0, 0, 0, 0] {
+                return Err(bad("ipv6_prefix must be a /64 (low 64 bits zero)"));
+            }
+            if self.ipv6_prefix.is_multicast() || (s[0] & 0xffc0) == 0xfe80 {
+                return Err(bad("ipv6_prefix must be a global or unique-local prefix"));
+            }
+        }
         for f in &self.forwards {
+            if f.proto == Proto::Icmp {
+                return Err(bad("forward proto must be tcp or udp"));
+            }
             if f.guest_port == 0 {
                 return Err(bad("forward guest_port must be non-zero"));
             }
@@ -385,8 +590,10 @@ mod tests {
     #[test]
     fn config_validation_and_cidr_json() {
         assert!(UserNetConfig::default().validate().is_ok());
-        let mut c = UserNetConfig::default();
-        c.gateway_ip = ip("10.0.3.2");
+        let c = UserNetConfig {
+            gateway_ip: ip("10.0.3.2"),
+            ..Default::default()
+        };
         assert!(c.validate().is_err());
         let c: UserNetConfig = serde_json::from_str(
             r#"{"mtu":1400,"egress":{"allow_cidrs":["10.0.0.0/8"],"allow_ports":[443]}}"#,
