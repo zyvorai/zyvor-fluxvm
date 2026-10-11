@@ -389,6 +389,31 @@ Verified on macOS 27.2 with a Debian 13 guest: a file changed after `self_snapsh
   the idle time before a sandbox's balloon is inflated to 60 s under warn or critical pressure. Normal pressure leaves the
   configured `sandbox.idle_balloon_secs` unchanged.
 
+### Boot attestation (a host claim, not hardware attestation)
+
+For a VM with a `metadata` vsock service, the document the guest reads gains an `attestation` field: a manifest signed with an
+ed25519 key the daemon keeps in its state directory (`vz-attestation.key`, mode 0600, created on first use; the public half is
+`vz-attestation.pub`). The manifest lists the kernel, initrd, command line (sha256), root disk, runner binary and the `apple`
+spec digest, plus the VM id and the issue time. A root disk or other file over 256 MiB is not hashed; it carries
+`"digest": "skipped"` with its size and mtime. The signature covers the exact `payload` text, so verify it as received:
+
+```rust
+let manifest = fluxvm_apple::verify_attestation_hex(&attestation_json, trusted_public_key_hex)?;
+```
+
+What it does and does not prove:
+
+- It records what the host says it started, signed by a key a file on the host holds. A guest or operator that already trusts
+  that public key can detect a different host key, or a document altered in transit or at rest.
+- It is **not** a hardware root of trust. Virtualization.framework has no TPM and no measured boot, the key is not in the Secure
+  Enclave, and a compromised host (or anyone who can read the key file) can sign anything. Nothing proves the host booted the
+  bytes it listed, and files over the hashing limit (typically the root disk) are only identified by size and mtime.
+- The public key must reach the guest or verifier out of band; the `public_key` field inside the document is informational and
+  is never used to verify.
+- If the manifest cannot be produced (for example an unreadable file) the boot continues and the metadata has no `attestation`
+  field; a verifier must treat a missing field as a failure.
+- Unit-tested (sign, verify, tamper, key file mode); **not exercised** end to end on a booted VM.
+
 ### Stored sign-in
 
 `fluxctl signin` keeps a guest username and password in the host's login Keychain (service `dev.zyvor.fluxvm.vm-signin`,

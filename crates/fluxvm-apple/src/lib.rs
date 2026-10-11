@@ -7,6 +7,7 @@
 //! `fluxvm-vz-runner` (see `runner/Runner.swift`), which the backend supervises over a unix control
 //! socket (one JSON line per request). See `docs/macos.md` for the contract and the capability matrix.
 
+pub mod attest;
 pub mod blockd;
 mod capability;
 mod control;
@@ -23,6 +24,7 @@ pub mod usernet;
 pub mod vz27;
 pub mod vznet;
 
+pub use attest::{Attestation, verify_attestation, verify_attestation_hex};
 pub use capability::{
     CAPABILITIES, Capability, RUNNER_MIN_MACOS, macos_major, set_host_capabilities, validate_disk,
     validate_request, validate_request_with_host, with_egress_forwarder, with_guest_reporting,
@@ -248,6 +250,28 @@ impl VmBackend for AppleBackend {
         let runner = find_runner()?;
         let mut conf = RunnerConfig::for_launch(req, ctx)?;
         conf.serial_log_max_bytes = Some(cfg.apple.serial_log_max_mib.max(1) << 20);
+        // Signed boot manifest in the `metadata` vsock service (a host claim, not hardware attestation; see `attest`).
+        // A failure leaves the metadata without an `attestation` field rather than blocking the boot.
+        if let Some(meta) = conf.vsock_metadata.take() {
+            conf.vsock_metadata = Some(
+                match attest::attach(
+                    cfg.state_dir.clone(),
+                    meta.clone(),
+                    ctx.id.to_string(),
+                    req.clone(),
+                    ctx.disk.clone(),
+                    runner.clone(),
+                )
+                .await
+                {
+                    Ok(with) => with,
+                    Err(e) => {
+                        tracing::warn!(vm = %ctx.id, error = %e, "boot attestation not produced");
+                        meta
+                    }
+                },
+            );
+        }
         for net in &mut conf.networks {
             net.socket = vznet::ensure_switch(&net.name).await?;
             net.switch_bin = vznet::find_switch()?;
