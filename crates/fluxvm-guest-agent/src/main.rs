@@ -56,13 +56,16 @@ fn main() -> Result<()> {
 fn run_server(port: u32, token_file: &str) -> Result<()> {
     use std::os::fd::FromRawFd;
 
-    let expected_token: Arc<Option<String>> = Arc::new(
-        std::fs::read_to_string(token_file)
-            .ok()
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty()),
-    );
-    if expected_token.is_some() {
+    let expected_token: Arc<std::sync::Mutex<TokenState>> =
+        Arc::new(std::sync::Mutex::new(TokenState {
+            current: std::fs::read_to_string(token_file)
+                .ok()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty()),
+            previous: None,
+            file: token_file.to_string(),
+        }));
+    if expected_token.lock().is_ok_and(|t| t.current.is_some()) {
         eprintln!("fluxvm-guest-agent: token found at {token_file}, requests must authenticate");
     } else if exec_policy::insecure_opt_in(std::env::var(exec_policy::INSECURE_ENV).ok().as_deref())
     {
@@ -157,9 +160,70 @@ fn run_server(_port: u32, _token_file: &str) -> Result<()> {
 }
 
 #[cfg(unix)]
+/// The agent's shared secret. After a rotation (`ResetIdentity.new_agent_token`) the token it replaced stays valid for
+/// requests until one authenticates with the new one, so a reply the host never saw cannot lock it out.
+struct TokenState {
+    current: Option<String>,
+    previous: Option<String>,
+    file: String,
+}
+
+/// How a request's token compares with the agent's.
+#[derive(Debug, PartialEq, Eq)]
+enum Auth {
+    /// No token is provisioned.
+    NoToken,
+    Authorized,
+    Denied,
+}
+
+impl TokenState {
+    fn authorize(&mut self, got: Option<&str>) -> Auth {
+        let Some(cur) = self.current.as_deref() else {
+            return Auth::NoToken;
+        };
+        if got.is_some_and(|g| constant_time_eq(cur, g)) {
+            // The host has the new token: the old one is no longer needed.
+            self.previous = None;
+            return Auth::Authorized;
+        }
+        if let (Some(prev), Some(g)) = (self.previous.as_deref(), got)
+            && constant_time_eq(prev, g)
+        {
+            return Auth::Authorized;
+        }
+        Auth::Denied
+    }
+
+    /// Writes `new` to the token file (0600, atomically) and starts accepting it.
+    fn rotate(&mut self, new: &str) -> std::io::Result<()> {
+        use std::io::Write as _;
+        use std::os::unix::fs::OpenOptionsExt;
+        if new.len() < 16 || new.chars().any(|c| c.is_whitespace() || c.is_control()) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "new token must be at least 16 characters with no whitespace",
+            ));
+        }
+        let tmp = format!("{}.new", self.file);
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&tmp)?;
+        f.write_all(format!("{new}\n").as_bytes())?;
+        f.sync_all()?;
+        std::fs::rename(&tmp, &self.file)?;
+        self.previous = self.current.take();
+        self.current = Some(new.to_string());
+        Ok(())
+    }
+}
+
 fn handle_connection(
     file: std::fs::File,
-    expected_token: &Option<String>,
+    token_state: &std::sync::Mutex<TokenState>,
     listener_fd: i32,
 ) -> Result<()> {
     let mut writer = file.try_clone().context("cloning connection fd")?;
@@ -171,7 +235,11 @@ fn handle_connection(
     }
     let envelope: Envelope = decode_line(&line).context("parsing request")?;
 
-    if expected_token.is_none()
+    let auth = token_state
+        .lock()
+        .map(|mut t| t.authorize(envelope.token.as_deref()))
+        .unwrap_or(Auth::Denied);
+    if auth == Auth::NoToken
         && !exec_policy::insecure_opt_in(std::env::var(exec_policy::INSECURE_ENV).ok().as_deref())
     {
         writer.write_all(
@@ -187,12 +255,8 @@ fn handle_connection(
         return Ok(());
     }
 
-    if let Some(expected) = expected_token {
-        let authorized = envelope
-            .token
-            .as_deref()
-            .is_some_and(|got| constant_time_eq(expected, got));
-        if !authorized {
+    if auth != Auth::NoToken {
+        if auth != Auth::Authorized {
             writer.write_all(
                 encode_line(&AgentResponse::Error {
                     message: "unauthorized: missing or incorrect token".into(),
@@ -247,12 +311,42 @@ fn handle_connection(
             regenerate_machine_id,
             reseed_entropy,
             entropy_base64,
-        } => reset_identity(
-            hostname.as_deref(),
-            regenerate_machine_id,
-            reseed_entropy,
-            entropy_base64.as_deref(),
-        ),
+            regenerate_ssh_host_keys,
+            reset_cloud_init,
+            reset_dhcp_identity,
+            flush_network_state,
+            new_agent_token,
+        } => {
+            let mut resp = reset_identity(
+                hostname.as_deref(),
+                regenerate_machine_id,
+                reseed_entropy,
+                entropy_base64.as_deref(),
+            );
+            if let AgentResponse::IdentityReset { applied, failures } = &mut resp {
+                reset_identity_extras(
+                    ExtraResets {
+                        ssh_host_keys: regenerate_ssh_host_keys,
+                        cloud_init: reset_cloud_init,
+                        dhcp: reset_dhcp_identity,
+                        network_state: flush_network_state,
+                    },
+                    applied,
+                    failures,
+                );
+                // Last, so every other step has run under the old token.
+                if let Some(new) = new_agent_token.as_deref() {
+                    match token_state.lock() {
+                        Ok(mut t) => match t.rotate(new) {
+                            Ok(()) => applied.push("agent-token".to_string()),
+                            Err(e) => failures.push(format!("agent token: {e}")),
+                        },
+                        Err(_) => failures.push("agent token: state poisoned".to_string()),
+                    }
+                }
+            }
+            resp
+        }
     };
 
     writer.write_all(encode_line(&response)?.as_bytes())?;
@@ -893,6 +987,132 @@ fn reset_identity(
     AgentResponse::IdentityReset { applied, failures }
 }
 
+/// Which of the extra, strict-mode identity steps a request asked for.
+#[derive(Clone, Copy)]
+struct ExtraResets {
+    ssh_host_keys: bool,
+    cloud_init: bool,
+    dhcp: bool,
+    network_state: bool,
+}
+
+/// Runs `cmd`; `Ok(false)` when the tool is not installed (nothing to reset), `Err` when it ran and failed.
+#[cfg(target_os = "linux")]
+fn run_tool(cmd: &str, args: &[&str]) -> Result<bool, String> {
+    match Command::new(cmd)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+    {
+        Ok(s) if s.success() => Ok(true),
+        Ok(s) => Err(format!("{cmd} {}: {s}", args.join(" "))),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(format!("{cmd}: {e}")),
+    }
+}
+
+/// The identity a clone shares with its parent beyond hostname, machine-id and entropy. A step whose tool or
+/// subject is absent (no sshd, no cloud-init, no networkd) is reported applied: there is nothing to reset, and a strict
+/// caller must not fail a guest for lacking software.
+#[cfg(target_os = "linux")]
+fn reset_identity_extras(x: ExtraResets, applied: &mut Vec<String>, failures: &mut Vec<String>) {
+    if x.ssh_host_keys {
+        let dir = std::path::Path::new("/etc/ssh");
+        let mut ok = true;
+        if dir.is_dir() {
+            if let Ok(rd) = std::fs::read_dir(dir) {
+                for e in rd.flatten() {
+                    let n = e.file_name().to_string_lossy().into_owned();
+                    if n.starts_with("ssh_host_")
+                        && (n.ends_with("_key") || n.ends_with("_key.pub"))
+                        && let Err(err) = std::fs::remove_file(e.path())
+                    {
+                        failures.push(format!("removing {n}: {err}"));
+                        ok = false;
+                    }
+                }
+            }
+            match run_tool("ssh-keygen", &["-A"]) {
+                Ok(_) => {}
+                Err(e) => {
+                    failures.push(e);
+                    ok = false;
+                }
+            }
+            // Best effort: a running sshd still holds the old keys in memory.
+            let _ = run_tool(
+                "systemctl",
+                &["try-reload-or-restart", "ssh.service", "sshd.service"],
+            );
+        }
+        if ok {
+            applied.push("ssh-host-keys".to_string());
+        }
+    }
+    if x.cloud_init {
+        match run_tool("cloud-init", &["clean", "--logs"]) {
+            Ok(_) => applied.push("cloud-init".to_string()),
+            Err(e) => failures.push(e),
+        }
+    }
+    if x.dhcp {
+        let networkd_active =
+            run_tool("systemctl", &["is-active", "--quiet", "systemd-networkd"]).unwrap_or(false);
+        if !networkd_active {
+            applied.push("dhcp".to_string());
+        } else {
+            let ifaces: Vec<String> = std::fs::read_dir("/sys/class/net")
+                .map(|rd| {
+                    rd.flatten()
+                        .map(|e| e.file_name().to_string_lossy().into_owned())
+                        .filter(|n| n != "lo")
+                        .collect()
+                })
+                .unwrap_or_default();
+            let _ = run_tool("networkctl", &["reload"]);
+            let mut args = vec!["reconfigure"];
+            args.extend(ifaces.iter().map(String::as_str));
+            match run_tool("networkctl", &args) {
+                Ok(_) => applied.push("dhcp".to_string()),
+                Err(e) => failures.push(e),
+            }
+        }
+    }
+    if x.network_state {
+        let mut ok = true;
+        for (cmd, args) in [
+            ("ip", &["neigh", "flush", "all"][..]),
+            ("ip", &["route", "flush", "cache"][..]),
+        ] {
+            if let Err(e) = run_tool(cmd, args) {
+                failures.push(e);
+                ok = false;
+            }
+        }
+        let _ = run_tool("conntrack", &["-F"]);
+        if ok {
+            applied.push("network-state".to_string());
+        }
+    }
+}
+
+/// macOS guests have none of these steps; asking for them is reported, never silently skipped.
+#[cfg(all(unix, not(target_os = "linux")))]
+fn reset_identity_extras(x: ExtraResets, _applied: &mut Vec<String>, failures: &mut Vec<String>) {
+    for (asked, what) in [
+        (x.ssh_host_keys, "ssh-host-keys"),
+        (x.cloud_init, "cloud-init"),
+        (x.dhcp, "dhcp"),
+        (x.network_state, "network-state"),
+    ] {
+        if asked {
+            failures.push(format!("{what} reset is not supported on macOS guests"));
+        }
+    }
+}
+
 /// macOS guests: only the hostname is applied (sethostname + scutil). The Linux machine-id, RNDADDENTROPY and `ip neigh`
 /// steps have no macOS equivalent, so a request for them is reported as a failure rather than silently skipped.
 /// UNVERIFIED on hardware.
@@ -945,6 +1165,65 @@ fn reset_identity(
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+
+    fn state(dir: &std::path::Path, token: &str) -> TokenState {
+        let file = dir.join("token").to_string_lossy().into_owned();
+        std::fs::write(&file, format!("{token}\n")).unwrap();
+        TokenState {
+            current: Some(token.to_string()),
+            previous: None,
+            file,
+        }
+    }
+
+    #[test]
+    fn rotation_replaces_the_token_and_keeps_the_old_one_for_one_request() {
+        let d = tempfile::tempdir().unwrap();
+        let mut t = state(d.path(), "old-token-0123456789");
+        assert_eq!(t.authorize(Some("old-token-0123456789")), Auth::Authorized);
+        assert_eq!(t.authorize(Some("nope")), Auth::Denied);
+        assert_eq!(t.authorize(None), Auth::Denied);
+
+        t.rotate("new-token-abcdefghij").unwrap();
+        // The file holds the new token, 0600.
+        let on_disk = std::fs::read_to_string(&t.file).unwrap();
+        assert_eq!(on_disk.trim(), "new-token-abcdefghij");
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(&t.file).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        // A host that never saw the reply still gets in with the old token...
+        assert_eq!(t.authorize(Some("old-token-0123456789")), Auth::Authorized);
+        // ...until a request authenticates with the new one, which retires the old.
+        assert_eq!(t.authorize(Some("new-token-abcdefghij")), Auth::Authorized);
+        assert_eq!(t.authorize(Some("old-token-0123456789")), Auth::Denied);
+    }
+
+    #[test]
+    fn rotation_refuses_weak_or_malformed_tokens_and_leaves_the_old_one() {
+        let d = tempfile::tempdir().unwrap();
+        let mut t = state(d.path(), "old-token-0123456789");
+        for bad in [
+            "short",
+            "has space in it 0123456789",
+            "line\nbreak-0123456789",
+        ] {
+            assert!(t.rotate(bad).is_err(), "{bad:?}");
+        }
+        assert_eq!(t.authorize(Some("old-token-0123456789")), Auth::Authorized);
+        assert!(t.previous.is_none());
+    }
+
+    #[test]
+    fn no_token_is_reported_as_such() {
+        let mut t = TokenState {
+            current: None,
+            previous: None,
+            file: "/nonexistent".into(),
+        };
+        assert_eq!(t.authorize(Some("anything")), Auth::NoToken);
+    }
 
     #[test]
     fn vsock_sockaddr_listens_on_any_cid_at_the_requested_port() {
