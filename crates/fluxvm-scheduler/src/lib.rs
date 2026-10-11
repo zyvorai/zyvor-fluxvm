@@ -2553,6 +2553,7 @@ impl VmManager {
                             Some(fluxvm_core::model::CloudInitNic {
                                 mac: n.mac.clone()?,
                                 address: n.address.clone()?,
+                                mtu: n.mtu.filter(|m| *m != 1500),
                             })
                         })
                         .collect();

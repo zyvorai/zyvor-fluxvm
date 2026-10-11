@@ -243,6 +243,7 @@ struct PrivateNetwork: Decodable {
     let mac: String
     let socket: String
     let switch_bin: String
+    let mtu: UInt32?     // > 1500: the attachment's maximumTransmissionUnit
 }
 
 /// One card on a private network: the guest's end of a datagram socketpair goes to Virtualization, the other end is
@@ -269,6 +270,9 @@ final class PrivateLink {
         }
         switchEnd = fds[1]
         attachment = VZFileHandleNetworkDeviceAttachment(fileHandle: FileHandle(fileDescriptor: fds[0], closeOnDealloc: true))
+        // Jumbo frames: Virtualization drops anything above the attachment's MTU (default 1500), and the guest sets the
+        // same MTU through its seed, so the two must agree.
+        if let mtu = net.mtu, mtu > 1500 { attachment.maximumTransmissionUnit = Int(mtu) }
     }
 
     func start() {

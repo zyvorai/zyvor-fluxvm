@@ -107,8 +107,10 @@ fn tap_verdict(routed: &Result<Vec<u64>, &'static str>) -> fluxvm_netobs::Verdic
     }
 }
 
-/// Largest frame accepted: a 1500-byte MTU frame plus headroom for VLAN tags. Bigger datagrams are dropped.
-pub const MAX_FRAME: usize = 1600;
+/// Largest frame accepted: a 9000-byte MTU (the most `apple.networks[].mtu` allows) plus the Ethernet header and a VLAN
+/// tag. A guest cannot send more than its card's MTU in any case (Virtualization drops the rest), so this only bounds
+/// what a misbehaving peer can push; bigger datagrams are dropped.
+pub const MAX_FRAME: usize = 9216;
 const ETH_HEADER: usize = 14;
 
 /// The first line a runner sends on the stream, together with the frame socket.

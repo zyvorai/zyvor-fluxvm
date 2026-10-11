@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+### Added: jumbo MTU on private networks (`apple.networks[].mtu`)
+- `mtu` (1280 to 9000, default 1500) is a property of the network: the first member defines it, later members inherit it or
+  must agree. The runner raises the card's `maximumTransmissionUnit`, the guest gets the same MTU through its networkd unit,
+  fallback script and seed network-config, and `fluxvm-vz-switch` accepts frames up to 9216 bytes (it dropped anything above
+  1600). `GET /v1/vznets` reports `mtu`. Verified on an M4: two guests at MTU 9000, 8972-byte DF ping 3/3. Container sandboxes
+  (`oci.networks`) stay at 1500.
+
+### Added: Control Centre endpoints
+- `GET /v1/host/overview` and `GET /v1/host/apple/capabilities` (see docs/api.md), consumed by Velora's Control Centre.
+
 ## 0.4.1 (2026-10-11)
 
 ### Added: Flux Branch (`fluxctl branch`, `/v1/vms/{id}/branches`, `/v1/branches`)

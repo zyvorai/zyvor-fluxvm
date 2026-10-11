@@ -128,6 +128,8 @@ pub struct NetworkConfig {
     pub socket: PathBuf,
     /// The switch binary, so the runner can restart a switch that died.
     pub switch_bin: PathBuf,
+    /// The network's MTU when it is above 1500: the runner raises the card's `maximumTransmissionUnit` to it.
+    pub mtu: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -275,6 +277,7 @@ impl RunnerConfig {
                             .with_context(|| format!("network {} has no MAC assigned", n.name))?,
                         socket: crate::vznet::socket_path(&n.name)?,
                         switch_bin: PathBuf::new(),
+                        mtu: n.mtu.filter(|m| *m > 1500),
                     })
                 })
                 .collect::<Result<_>>()?,
