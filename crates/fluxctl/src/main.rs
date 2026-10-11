@@ -31,6 +31,7 @@ mod fleet_client;
 mod launch_agent;
 mod mcp;
 mod mcp_install;
+mod netobs;
 mod output;
 mod remote;
 mod run;
@@ -789,6 +790,12 @@ enum Command {
     Vz {
         #[command(subcommand)]
         command: VzCommand,
+    },
+    /// Guest-network observability: flows, DNS, roll-ups, packet capture. REST: `/v1/netobs/*`. Always talks to the
+    /// daemon (`--server`, the current context, or the local `listen`). See docs/netobs.md.
+    Netobs {
+        #[command(subcommand)]
+        command: netobs::NetobsCommand,
     },
     /// List image catalog entries (machinectl `list-images`).
     ListImages,
@@ -2724,6 +2731,7 @@ async fn run_remote(
         Command::Get { id } | Command::Status { id: Some(id), .. } => {
             pretty(&r.call(Method::GET, &format!("/v1/vms/{id}"), None).await?)?
         }
+        Command::Netobs { command } => netobs::run(r, command).await?,
         Command::Vznet {
             command: VznetCommand::Ls { json },
         } => print_vznets(
@@ -3716,6 +3724,12 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
+    if let Command::Netobs { command } = cli.command {
+        // The observer lives in the daemon process: talk to the local daemon's `listen` address.
+        let r = remote::Remote::new(&cfg.listen, cli.server_token.clone());
+        return netobs::run(&r, command).await;
+    }
+
     let m = manager(cfg.clone()).await?;
 
     match cli.command {
@@ -3737,6 +3751,7 @@ async fn main() -> Result<()> {
         | Command::Mcp { .. }
         | Command::Events { .. }
         | Command::Context { .. }
+        | Command::Netobs { .. }
         | Command::Quota { token: Some(_), .. } => unreachable!("handled above"),
         Command::Quota { token: None, name } => {
             println!(

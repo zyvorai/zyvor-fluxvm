@@ -200,6 +200,38 @@ impl Remote {
         Ok(())
     }
 
+    /// Tail an SSE route, calling `on_event(event_name, data)` per event until the server closes the stream.
+    pub async fn follow_sse(
+        &self,
+        path: &str,
+        mut on_event: impl FnMut(&str, &str) -> Result<()>,
+    ) -> Result<()> {
+        let url = format!("{}{path}", self.base);
+        let mut req = self.http.get(&url);
+        if let Some(t) = &self.token {
+            req = req.bearer_auth(t);
+        }
+        let mut resp = req.send().await.with_context(|| format!("GET {url}"))?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            bail!(
+                "GET {url}: {status}: {}",
+                resp.text().await.unwrap_or_default()
+            );
+        }
+        let mut buf = String::new();
+        while let Some(chunk) = resp.chunk().await.context("reading event stream")? {
+            buf.push_str(&String::from_utf8_lossy(&chunk));
+            while let Some(end) = buf.find("\n\n") {
+                let block: String = buf.drain(..end + 2).collect();
+                if let Some((kind, data)) = sse_fields(&block) {
+                    on_event(&kind, &data)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Websocket to `path` (bearer token in the handshake).
     pub async fn websocket(
         &self,
@@ -253,6 +285,20 @@ fn parse_sse_block(block: &str) -> Option<SseItem> {
     serde_json::from_str(&data).ok().map(SseItem::Event)
 }
 
+/// `(event, data)` of one SSE block; `None` for comments and blocks without data.
+fn sse_fields(block: &str) -> Option<(String, String)> {
+    let mut kind = "message";
+    let mut data = String::new();
+    for line in block.lines() {
+        if let Some(v) = line.strip_prefix("event:") {
+            kind = v.trim();
+        } else if let Some(v) = line.strip_prefix("data:") {
+            data.push_str(v.trim_start());
+        }
+    }
+    (!data.is_empty()).then(|| (kind.to_string(), data))
+}
+
 pub fn encode_query(s: &str) -> String {
     s.bytes()
         .map(|b| match b {
@@ -280,6 +326,15 @@ mod tests {
         );
         assert!(Remote::new("h", Some(String::new())).token.is_none());
         assert_eq!(encode_query("env=dev,!tmp"), "env%3Ddev%2C%21tmp");
+    }
+
+    #[test]
+    fn sse_fields_split() {
+        assert!(sse_fields(": keepalive\n\n").is_none());
+        assert_eq!(
+            sse_fields("id: 4\nevent: netobs.flow\ndata: {\"a\":1}\n\n"),
+            Some(("netobs.flow".into(), "{\"a\":1}".into()))
+        );
     }
 
     #[test]
