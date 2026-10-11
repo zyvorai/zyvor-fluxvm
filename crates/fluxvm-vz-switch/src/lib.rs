@@ -24,16 +24,57 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
-/// The observation tap, if one was installed (feature `netobs`). Frames a guest sends are copied to it, with the
-/// verdict the switch reached, without ever blocking the switch: a full queue drops and counts.
+/// Where observed frames go: an in-process tap (the switch is embedded in the daemon) or a bridge client that
+/// ships them over a unix socket to the process that owns the observer (the switch runs as its own process, see
+/// `--netobs-socket`). Either way a frame is queued without blocking; a full queue drops and counts.
 #[cfg(feature = "netobs")]
-static TAP: std::sync::OnceLock<(fluxvm_netobs::NetTap, String)> = std::sync::OnceLock::new();
+#[derive(Clone)]
+pub enum TapSink {
+    Local(fluxvm_netobs::NetTap),
+    Bridge(fluxvm_netobs::bridge::BridgeClient),
+}
+
+#[cfg(feature = "netobs")]
+impl TapSink {
+    fn tap_as(
+        &self,
+        id: &std::sync::Arc<fluxvm_netobs::Identity>,
+        direction: fluxvm_netobs::Direction,
+        verdict: fluxvm_netobs::Verdict,
+        frame: &[u8],
+    ) {
+        match self {
+            TapSink::Local(t) => t.tap_as(id, direction, verdict, frame),
+            TapSink::Bridge(b) => b.tap_as(id, direction, verdict, frame),
+        }
+    }
+}
+
+/// The observation sink, if one was installed (feature `netobs`). Frames a guest sends are copied to it, with the
+/// verdict the switch reached, without ever blocking the switch.
+#[cfg(feature = "netobs")]
+static TAP: std::sync::OnceLock<(TapSink, String)> = std::sync::OnceLock::new();
 
 /// Installs the process-wide tap for the network named `network`. Returns false if one is already installed.
 /// Install it at startup: a port picks the tap up when its pump starts.
 #[cfg(feature = "netobs")]
 pub fn set_tap(tap: fluxvm_netobs::NetTap, network: &str) -> bool {
-    TAP.set((tap, network.to_string())).is_ok()
+    TAP.set((TapSink::Local(tap), network.to_string())).is_ok()
+}
+
+/// Installs a bridge client as the process-wide sink (see [`set_tap`]). The client reconnects by itself, so the
+/// observer's process may start later or restart; frames are dropped and counted meanwhile.
+#[cfg(feature = "netobs")]
+pub fn set_bridge(client: fluxvm_netobs::bridge::BridgeClient, network: &str) -> bool {
+    TAP.set((TapSink::Bridge(client), network.to_string())).is_ok()
+}
+
+/// Starts a [`fluxvm_netobs::bridge::BridgeClient`] for `socket` and installs it. Returns false if a sink was
+/// already installed. Never blocks and never fails because the server is not there yet.
+#[cfg(feature = "netobs")]
+pub fn connect_bridge(socket: &Path, network: &str) -> bool {
+    let client = fluxvm_netobs::bridge::BridgeClient::connect(socket, Default::default());
+    set_bridge(client, network)
 }
 
 #[cfg(feature = "netobs")]

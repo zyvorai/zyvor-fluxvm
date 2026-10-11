@@ -9,18 +9,29 @@
 //! [`l7::Redaction`]), maintains RED roll-ups with bounded history ([`rollup`]) and an opt-in, TTL-bound pcap ring
 //! ([`capture`]), and publishes versioned JSON/Prometheus/SSE views ([`export`]).
 //!
+//! Metadata that does not fit in one segment is recovered by bounded reassembly of the first bytes of a stream
+//! ([`reasm`], [`streams`]): TLS Client/ServerHello (with JA3/JA4/JA3S/JA4S), cleartext HTTP/2 heads via HPACK
+//! ([`h2`]), and QUIC v1/v2 client Initials ([`quic`]). A switch running in another process ships its frames over
+//! a versioned unix-socket channel ([`bridge`]).
+//!
 //! Design stance: metadata only by default; packet bytes are retained only by an explicit, filtered, expiring
 //! capture session. Everything is bounded; nothing here panics on hostile input.
 
+pub mod bridge;
 pub mod capture;
 pub mod export;
 pub mod flow;
+pub mod h2;
+mod hpack_huffman;
 pub mod health;
 pub mod l7;
 pub mod observer;
 pub mod packet;
+pub mod quic;
+pub mod reasm;
 pub mod rollup;
 pub mod source;
+pub mod streams;
 
 pub use capture::{CaptureError, CaptureFilter, CaptureManager, CaptureRequest};
 pub use export::{NetEvent, SCHEMA_VERSION, Summary, render_prometheus};

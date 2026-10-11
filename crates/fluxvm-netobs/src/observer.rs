@@ -5,20 +5,32 @@
 //! metadata (redacted), feeds the roll-ups and the capture ring, and publishes events.
 //!
 //! State lives behind one mutex; ingestion is a single bounded pass per frame, and every collection it touches
-//! has a hard cap (flows, events, DNS ring, closed-flow history, roll-up keys and windows, capture sessions).
+//! has a hard cap (flows, events, DNS ring, closed-flow history, roll-up keys and windows, capture sessions,
+//! reassembly bytes).
+//!
+//! Throughput: the lock is not the bottleneck at the rates this observer is fed. On the micro benchmark
+//! (`cargo test -p fluxvm-netobs --release --test ingest_bench -- --ignored --nocapture`) one producer sustains
+//! millions of frames per second; several producers contending per frame cost throughput, which
+//! [`Observer::ingest_batch`] (one lock acquisition per batch, used by the bridge server) recovers. The flow
+//! table is therefore not sharded; if a deployment ever measures otherwise, the table and its LRU are the part to
+//! split by flow-key hash.
 
 use crate::capture::{CaptureError, CaptureManager, CaptureRequest, CaptureStatus};
 use crate::export::{
-    CounterView, DnsRecord, DropRecord, Endpoint, EventKind, FlowView, HttpRecord, NetEvent, RedRow, SCHEMA_VERSION,
-    Summary, TlsRecord, VmSummary,
+    CounterView, DnsRecord, DropRecord, EdnsView, Endpoint, EventKind, FlowView, HttpRecord, HttpsView, NetEvent,
+    RedRow, SCHEMA_VERSION, Summary, TlsRecord, TlsServerRecord, VmSummary,
 };
 use crate::flow::{
     Direction, DropReason, Flow, FlowConfig, FlowKey, FlowL7, FlowTable, FrameMeta, Identity, Verdict, parse_proto,
     proto_name,
 };
+use crate::h2::H2Message;
 use crate::health::{CloseReason, Dir, Health, HealthDelta, IcmpHealth, TcpHealth};
-use crate::l7::{self, Http, Redaction};
-use crate::packet::{self, IPPROTO_ICMP, IPPROTO_ICMPV6, IPPROTO_TCP, L4, Net, Packet, TCP_SYN, TCP_ACK};
+use crate::l7::{self, ClientHello, Http, Redaction, ServerHello};
+use crate::packet::{self, IPPROTO_ICMP, IPPROTO_ICMPV6, IPPROTO_TCP, L4, Net, Packet, TCP_ACK, TCP_SYN, Tcp};
+use crate::quic::QuicFlow;
+use crate::reasm::{DropWhy, ReasmConfig};
+use crate::streams::{FlowStreams, StreamOut};
 use crate::rollup::{Red, Rollup, RollupConfig, RollupKey, Sample};
 use crate::source::{TapStats, now_us};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -41,6 +53,15 @@ pub struct ObserverConfig {
     pub capture_sessions: usize,
     /// Distinct VMs kept in the lifetime per-VM totals.
     pub max_vms: usize,
+    /// Bounded TCP stream reassembly for TLS hellos and HTTP/2 frames.
+    pub reasm: ReasmConfig,
+    /// Host names (and their subdomains) of DNS-over-HTTPS resolvers, matched against the SNI of a hello. A match
+    /// tags the flow `encrypted_dns = "doh"`. Defaults to [`l7::DEFAULT_DOH_HOSTS`].
+    pub doh_hosts: Vec<String>,
+    /// Decode QUIC v1/v2 client Initials (keys derive from public values) for SNI/ALPN/fingerprint.
+    pub quic_initial: bool,
+    /// Decode cleartext HTTP/2 (`h2c`) request and response heads.
+    pub h2: bool,
 }
 
 impl Default for ObserverConfig {
@@ -56,6 +77,10 @@ impl Default for ObserverConfig {
             closed_max_age_us: 3_600_000_000,
             capture_sessions: 8,
             max_vms: 1024,
+            reasm: ReasmConfig::default(),
+            doh_hosts: l7::DEFAULT_DOH_HOSTS.iter().map(|s| s.to_string()).collect(),
+            quic_initial: true,
+            h2: true,
         }
     }
 }
@@ -72,6 +97,18 @@ pub struct Counters {
     pub flows_evicted: u64,
     pub flows_expired: u64,
     pub drops: [u64; 7],
+    /// Segments (or QUIC CRYPTO data) not kept because a reassembly bound was hit.
+    pub reasm_segments_dropped: u64,
+    /// Streams abandoned because the observer-wide reassembly budget was exhausted.
+    pub reasm_streams_abandoned: u64,
+    /// Streams that gave up with a message still incomplete after the per-stream prefix budget.
+    pub reasm_incomplete: u64,
+    /// Overlapping retransmissions whose bytes differed from the first copy.
+    pub reasm_conflicts: u64,
+    /// Flows tagged DoT/DoH/DoQ.
+    pub encrypted_dns_flows: u64,
+    /// QUIC ClientHellos recovered from Initial packets.
+    pub quic_hellos: u64,
 }
 
 /// Filters for [`Observer::flows`].
@@ -162,6 +199,8 @@ struct Inner {
     capture: CaptureManager,
     counters: Counters,
     vm_totals: HashMap<String, Red>,
+    /// Bytes held by reassembly and QUIC hello buffers across all flows (see [`ReasmConfig::max_total_bytes`]).
+    reasm_bytes: usize,
     clock_us: u64,
     last_tick_us: u64,
 }
@@ -177,6 +216,8 @@ fn ep(a: (IpAddr, u16)) -> Endpoint {
 
 impl Inner {
     fn finish(&mut self, now: u64, flow: Flow, reason: CloseReason) {
+        // Whatever the flow still buffered goes back to the reassembly budget.
+        self.reasm_bytes = self.reasm_bytes.saturating_sub(flow_mem(&flow.l7));
         let view = FlowView::from_flow(&flow, Some(reason));
         if self.closed.len() >= self.cfg.closed_flows.max(1) {
             self.closed.pop_front();
@@ -360,9 +401,32 @@ impl Inner {
         }
 
         // L7 metadata.
-        if self.cfg.l7 && !pkt.payload.is_empty() && !delta.retransmit {
-            let red = &self.cfg.redaction;
-            inspect_l7(flow, now, &pkt, red, &mut samples, &mut events, &mut self.dns);
+        if self.cfg.l7 {
+            if let L4::Tcp(t) = &pkt.l4 {
+                if t.has(TCP_SYN) {
+                    flow.l7.isn[dir as usize] = Some(t.seq);
+                }
+                if created && (t.sport == 853 || t.dport == 853) {
+                    // DNS-over-TLS (RFC 7858) lives on a dedicated port.
+                    flow.l7.encrypted_dns = Some("dot");
+                    self.counters.encrypted_dns_flows += 1;
+                }
+            }
+            if !pkt.payload.is_empty() {
+                let mut ctx = L7Ctx {
+                    red: &self.cfg.redaction,
+                    doh_hosts: &self.cfg.doh_hosts,
+                    reasm: &self.cfg.reasm,
+                    quic: self.cfg.quic_initial,
+                    h2: self.cfg.h2,
+                    counters: &mut self.counters,
+                    reasm_bytes: &mut self.reasm_bytes,
+                    dns_ring: &mut self.dns,
+                };
+                // Retransmissions are not re-parsed, except that reassembly must still see them: health calls
+                // reordered segments "retransmits" too, and a late segment may be the one that fills a gap.
+                inspect_l7(flow, now, &pkt, dir, delta.retransmit, &mut ctx, &mut samples, &mut events);
+            }
         }
 
         let ctx = RollupCtx::of(flow);
@@ -386,28 +450,206 @@ impl Inner {
     }
 }
 
+/// What L7 inspection needs from the observer besides the flow, borrowed field by field so the flow-table borrow
+/// can stay alive.
+struct L7Ctx<'a> {
+    red: &'a Redaction,
+    doh_hosts: &'a [String],
+    reasm: &'a ReasmConfig,
+    quic: bool,
+    h2: bool,
+    counters: &'a mut Counters,
+    reasm_bytes: &'a mut usize,
+    dns_ring: &'a mut VecDeque<DnsRecord>,
+}
+
+/// Heap held by a flow's reassembly and QUIC state (what counts against the observer-wide budget).
+fn flow_mem(l7: &FlowL7) -> usize {
+    l7.streams.as_ref().map_or(0, |s| s.mem()) + l7.quic.as_ref().map_or(0, |q| q.mem())
+}
+
+fn track_mem(ctx: &mut L7Ctx<'_>, before: usize, after: usize) {
+    if after >= before {
+        *ctx.reasm_bytes += after - before;
+    } else {
+        *ctx.reasm_bytes = ctx.reasm_bytes.saturating_sub(before - after);
+    }
+}
+
+fn method_static(m: &str) -> &'static str {
+    ["GET", "POST", "PUT", "DELETE", "HEAD", "OPTIONS", "PATCH", "CONNECT", "TRACE"]
+        .into_iter()
+        .find(|k| *k == m)
+        .unwrap_or("OTHER")
+}
+
+/// Records a ClientHello (from TCP or QUIC). Returns the TLS record to publish, or `None` when this flow's hello
+/// was already recorded. The raw SNI is used for encrypted-DNS recognition before redaction; only the redacted
+/// form is stored.
+fn apply_client_hello(
+    flow: &mut Flow,
+    h: &ClientHello,
+    transport: char,
+    ctx: &mut L7Ctx<'_>,
+    samples: &mut Vec<Sample>,
+) -> Option<TlsRecord> {
+    if flow.l7.ja3.is_some() || flow.l7.sni.is_some() {
+        return None;
+    }
+    let red = ctx.red;
+    flow.l7.app = Some(if transport == 'q' { "quic" } else { "tls" });
+    if let Some(raw) = &h.sni {
+        if flow.l7.encrypted_dns.is_none() && l7::sni_is_doh(raw, ctx.doh_hosts) {
+            flow.l7.encrypted_dns = Some("doh");
+            ctx.counters.encrypted_dns_flows += 1;
+        }
+    }
+    flow.l7.sni = h.sni.as_deref().and_then(|s| red.apply(red.tls_sni, s));
+    if red.fingerprints {
+        flow.l7.ja3 = Some(h.ja3());
+        flow.l7.ja4 = Some(h.ja4_for(transport));
+    } else {
+        // Mark the hello as seen so it is not parsed again for every segment.
+        flow.l7.ja3 = Some(String::new());
+    }
+    flow.l7.alpn = h.alpn.first().and_then(|a| std::str::from_utf8(a).ok()).map(str::to_string);
+    samples.push(Sample::TlsHello);
+    Some(TlsRecord {
+        flow_id: flow.id,
+        server: ep(flow.server),
+        sni: flow.l7.sni.clone(),
+        ja3: flow.l7.ja3.clone().filter(|s| !s.is_empty()),
+        ja4: flow.l7.ja4.clone(),
+        alpn: flow.l7.alpn.clone(),
+    })
+}
+
+fn apply_server_hello(flow: &mut Flow, h: &ServerHello, ctx: &mut L7Ctx<'_>) -> Option<TlsServerRecord> {
+    if flow.l7.tls_version.is_some() {
+        return None;
+    }
+    if flow.l7.app.is_none() {
+        flow.l7.app = Some("tls");
+    }
+    flow.l7.tls_version = Some(l7::tls_version_name(h.negotiated_version()));
+    flow.l7.tls_cipher = Some(l7::tls_cipher_name(h.cipher));
+    if ctx.red.fingerprints {
+        flow.l7.ja3s = Some(h.ja3s());
+        flow.l7.ja4s = Some(h.ja4s());
+    }
+    Some(TlsServerRecord {
+        flow_id: flow.id,
+        server: ep(flow.server),
+        version: flow.l7.tls_version.clone().unwrap_or_default(),
+        cipher: flow.l7.tls_cipher.clone().unwrap_or_default(),
+        hello_retry: h.hello_retry,
+        ja3s: flow.l7.ja3s.clone(),
+        ja4s: flow.l7.ja4s.clone(),
+    })
+}
+
+fn apply_h2(
+    flow: &mut Flow,
+    m: &H2Message,
+    ctx: &mut L7Ctx<'_>,
+    samples: &mut Vec<Sample>,
+    events: &mut Vec<EventKind>,
+) {
+    flow.l7.app = Some("h2");
+    let h = &m.headers;
+    let red = ctx.red;
+    if m.from_client {
+        let Some(method) = h.method.as_deref() else { return };
+        flow.l7.http_requests += 1;
+        let host = h.authority.as_deref().and_then(|a| red.apply(red.http_host, a));
+        if host.is_some() {
+            flow.l7.http_host = host.clone();
+        }
+        samples.push(Sample::HttpRequest);
+        events.push(EventKind::Http(HttpRecord {
+            flow_id: flow.id,
+            server: ep(flow.server),
+            request: true,
+            method: Some(method_static(method)),
+            host,
+            status: None,
+            version: "2".to_string(),
+            scheme: h.scheme.clone(),
+            content_type: None,
+        }));
+    } else if let Some(status) = h.status {
+        if status < 200 {
+            return; // interim (1xx) responses are not the answer
+        }
+        flow.l7.http_responses += 1;
+        samples.push(Sample::HttpResponse { status });
+        events.push(EventKind::Http(HttpRecord {
+            flow_id: flow.id,
+            server: ep(flow.server),
+            request: false,
+            method: None,
+            host: None,
+            status: Some(status),
+            version: "2".to_string(),
+            scheme: None,
+            content_type: h.content_type.clone(),
+        }));
+    }
+}
+
+fn apply_stream_out(
+    flow: &mut Flow,
+    out: Vec<StreamOut>,
+    ctx: &mut L7Ctx<'_>,
+    samples: &mut Vec<Sample>,
+    events: &mut Vec<EventKind>,
+) {
+    for o in out {
+        match o {
+            StreamOut::ClientHello(h) => {
+                if let Some(r) = apply_client_hello(flow, &h, 't', ctx, samples) {
+                    events.push(EventKind::Tls(r));
+                }
+            }
+            StreamOut::ServerHello(h) => {
+                if let Some(r) = apply_server_hello(flow, &h, ctx) {
+                    events.push(EventKind::TlsServer(r));
+                }
+            }
+            StreamOut::H2(m) => apply_h2(flow, &m, ctx, samples, events),
+        }
+    }
+}
+
 /// Parsing of L7 metadata for one packet; updates the flow's state and appends samples/events.
 #[allow(clippy::too_many_arguments)]
 fn inspect_l7(
     flow: &mut Flow,
     now: u64,
     pkt: &Packet<'_>,
-    red: &Redaction,
+    dir: Dir,
+    retransmit: bool,
+    ctx: &mut L7Ctx<'_>,
     samples: &mut Vec<Sample>,
     events: &mut Vec<EventKind>,
-    dns_ring: &mut VecDeque<DnsRecord>,
 ) {
     let payload = pkt.payload;
     let (sport, dport) = pkt.ports();
-    let dns = match &pkt.l4 {
-        L4::Udp(_) if sport == 53 || dport == 53 => l7::parse_dns(payload).map(|m| (m, false)),
-        L4::Tcp(_) if sport == 53 || dport == 53 => l7::parse_dns_tcp(payload).map(|m| (m, true)),
-        _ => None,
+    let dns = if retransmit {
+        None
+    } else {
+        match &pkt.l4 {
+            L4::Udp(_) if sport == 53 || dport == 53 => l7::parse_dns(payload).map(|m| (m, false)),
+            L4::Tcp(_) if sport == 53 || dport == 53 => l7::parse_dns_tcp(payload).map(|m| (m, true)),
+            _ => None,
+        }
     };
     if let Some((m, over_tcp)) = dns {
+        let red = ctx.red;
         flow.l7.app = Some("dns");
         let qname = red.apply(red.dns_qname, &m.qname);
         flow.l7.dns_last_qname = qname.clone();
+        let rcode = m.full_rcode();
         let mut latency = None;
         if m.response {
             flow.l7.dns_responses += 1;
@@ -415,7 +657,7 @@ fn inspect_l7(
                 let (_, sent) = flow.l7.dns_pending.remove(i);
                 latency = Some(now.saturating_sub(sent));
             }
-            samples.push(Sample::DnsResponse { error: m.rcode != 0, latency_us: latency });
+            samples.push(Sample::DnsResponse { error: rcode != 0, latency_us: latency });
         } else {
             flow.l7.dns_queries += 1;
             if flow.l7.dns_pending.len() >= 16 {
@@ -424,6 +666,8 @@ fn inspect_l7(
             flow.l7.dns_pending.push((m.id, now));
             samples.push(Sample::DnsQuery);
         }
+        let keep = red.dns_answers;
+        let name_of = |n: &str| if n == "." { Some(".".to_string()) } else { red.apply(red.dns_qname, n) };
         let rec = DnsRecord {
             ts_us: now,
             vm_id: flow.identity.vm_id.to_string(),
@@ -435,100 +679,229 @@ fn inspect_l7(
             response: m.response,
             qname,
             qtype: l7::dns_type_name(m.qtype),
-            rcode: m.response.then(|| l7::dns_rcode_name(m.rcode)),
+            rcode: m.response.then(|| l7::dns_rcode_name_full(rcode)),
             latency_us: latency,
-            answers: if red.dns_answers { m.addrs.iter().map(|a| a.to_string()).collect() } else { Vec::new() },
+            answers: if keep { m.addrs.iter().map(|a| a.to_string()).collect() } else { Vec::new() },
+            answer_types: m.answer_types.iter().map(|t| l7::dns_type_name(*t)).collect(),
+            cnames: if keep { m.cnames.iter().filter_map(|n| name_of(n)).collect() } else { Vec::new() },
+            https: if keep {
+                m.https
+                    .iter()
+                    .map(|h| HttpsView {
+                        priority: h.priority,
+                        target: name_of(&h.target),
+                        alpn: h.alpn.clone(),
+                        port: h.port,
+                        ech: h.ech,
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            },
+            edns: m.edns.as_ref().map(|e| EdnsView {
+                udp_size: e.udp_size,
+                version: e.version,
+                dnssec_ok: e.dnssec_ok,
+            }),
         };
-        dns_ring.push_back(rec.clone());
+        ctx.dns_ring.push_back(rec.clone());
         events.push(EventKind::Dns(rec));
         return;
     }
 
     match &pkt.l4 {
-        L4::Udp(_) => {
-            if payload.len() >= 1200 && payload[0] & 0xc0 == 0xc0 {
-                if let Some(q) = l7::detect_quic_initial(payload) {
-                    if flow.l7.quic_version.is_none() {
-                        flow.l7.app = Some("quic");
-                        flow.l7.quic_version = Some(q.version);
-                        events.push(EventKind::Quic {
-                            flow_id: flow.id,
-                            server: ep(flow.server),
-                            version: q.version,
-                            dcid_len: q.dcid_len,
-                        });
-                    }
-                }
-            }
-        }
-        L4::Tcp(_) => {
-            if payload.len() >= 6 && payload[0] == 0x16 && payload[5] == 1 {
-                if flow.l7.ja3.is_none() && flow.l7.sni.is_none() {
-                    if let Some(h) = l7::parse_client_hello(payload) {
-                        flow.l7.app = Some("tls");
-                        flow.l7.sni = h.sni.as_deref().and_then(|s| red.apply(red.tls_sni, s));
-                        if red.fingerprints {
-                            flow.l7.ja3 = Some(h.ja3());
-                            flow.l7.ja4 = Some(h.ja4());
-                        } else {
-                            // Mark the hello as seen so it is not re-parsed for every segment.
-                            flow.l7.ja3 = Some(String::new());
-                        }
-                        flow.l7.alpn = h
-                            .alpn
-                            .first()
-                            .and_then(|a| std::str::from_utf8(a).ok())
-                            .map(str::to_string);
-                        samples.push(Sample::TlsHello);
-                        events.push(EventKind::Tls(TlsRecord {
-                            flow_id: flow.id,
-                            server: ep(flow.server),
-                            sni: flow.l7.sni.clone(),
-                            ja3: flow.l7.ja3.clone().filter(|s| !s.is_empty()),
-                            ja4: flow.l7.ja4.clone(),
-                            alpn: flow.l7.alpn.clone(),
-                        }));
-                    }
-                }
-            } else if payload[0].is_ascii_uppercase() {
-                if let Some(h) = l7::parse_http(payload) {
-                    flow.l7.app = Some("http");
-                    match h {
-                        Http::Request { method, host, version } => {
-                            flow.l7.http_requests += 1;
-                            let host = host.and_then(|h| red.apply(red.http_host, &h));
-                            if host.is_some() {
-                                flow.l7.http_host = host.clone();
-                            }
-                            samples.push(Sample::HttpRequest);
-                            events.push(EventKind::Http(HttpRecord {
-                                flow_id: flow.id,
-                                server: ep(flow.server),
-                                request: true,
-                                method: Some(method),
-                                host,
-                                status: None,
-                                version,
-                            }));
-                        }
-                        Http::Response { status, version } => {
-                            flow.l7.http_responses += 1;
-                            samples.push(Sample::HttpResponse { status });
-                            events.push(EventKind::Http(HttpRecord {
-                                flow_id: flow.id,
-                                server: ep(flow.server),
-                                request: false,
-                                method: None,
-                                host: None,
-                                status: Some(status),
-                                version,
-                            }));
-                        }
-                    }
-                }
-            }
-        }
+        L4::Udp(_) => inspect_quic(flow, payload, dir, ctx, samples, events),
+        L4::Tcp(t) => inspect_tcp(flow, t, payload, dir, retransmit, ctx, samples, events),
         _ => {}
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn inspect_quic(
+    flow: &mut Flow,
+    payload: &[u8],
+    dir: Dir,
+    ctx: &mut L7Ctx<'_>,
+    samples: &mut Vec<Sample>,
+    events: &mut Vec<EventKind>,
+) {
+    if payload.len() < 1200 || payload[0] & 0xc0 != 0xc0 {
+        return;
+    }
+    let Some(q) = l7::detect_quic_initial(payload) else { return };
+    let first = flow.l7.quic_version.is_none();
+    if first {
+        flow.l7.app = Some("quic");
+        flow.l7.quic_version = Some(q.version);
+        if flow.server.1 == 853 && flow.l7.encrypted_dns.is_none() {
+            flow.l7.encrypted_dns = Some("doq");
+            ctx.counters.encrypted_dns_flows += 1;
+        }
+    }
+    let mut hello = None;
+    if ctx.quic && dir == Dir::ClientToServer && flow.l7.ja3.is_none() && flow.l7.sni.is_none() {
+        let room = ctx.reasm.max_total_bytes.saturating_sub(*ctx.reasm_bytes);
+        let before = flow_mem(&flow.l7);
+        let qf = flow.l7.quic.get_or_insert_with(|| Box::new(QuicFlow::new()));
+        if !qf.is_finished() {
+            let (h, dropped) = qf.on_datagram(payload, room);
+            if dropped {
+                ctx.counters.reasm_segments_dropped += 1;
+            }
+            hello = h;
+        }
+        let after = flow_mem(&flow.l7);
+        track_mem(ctx, before, after);
+    }
+    let rec = hello.and_then(|h| apply_client_hello(flow, &h, 'q', ctx, samples));
+    if rec.is_some() {
+        ctx.counters.quic_hellos += 1;
+    }
+    if first || rec.is_some() {
+        events.push(EventKind::Quic {
+            flow_id: flow.id,
+            server: ep(flow.server),
+            version: q.version,
+            dcid_len: q.dcid_len,
+            scid_len: Some(q.scid_len),
+            sni: rec.as_ref().and_then(|r| r.sni.clone()),
+            alpn: rec.as_ref().and_then(|r| r.alpn.clone()),
+            ja4: rec.as_ref().and_then(|r| r.ja4.clone()),
+        });
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn inspect_tcp(
+    flow: &mut Flow,
+    t: &Tcp,
+    payload: &[u8],
+    dir: Dir,
+    retransmit: bool,
+    ctx: &mut L7Ctx<'_>,
+    samples: &mut Vec<Sample>,
+    events: &mut Vec<EventKind>,
+) {
+    let d = dir as usize;
+    // TLS handshake messages and cleartext HTTP/2 frames, via reassembly of the first bytes of the stream.
+    if !flow.l7.streams_done && !flow.l7.dir_done[d] {
+        let mut out: Vec<StreamOut> = Vec::new();
+        let looks_tls = payload.len() >= 2 && payload[0] == 0x16 && payload[1] == 3;
+        let isn = flow.l7.isn[d];
+        let ooo_first = !flow.l7.data_seen[d] && isn.is_some_and(|i| t.seq != i.wrapping_add(1));
+        // Cleartext HTTP/2 starts with the client preface (possibly cut short by a small first segment).
+        let looks_h2 = ctx.h2
+            && dir == Dir::ClientToServer
+            && (crate::h2::has_preface(payload) || crate::h2::is_preface_prefix(payload));
+        if flow.l7.streams.is_none() {
+            let mut start_stream = false;
+            if looks_tls && !ooo_first && !retransmit {
+                // The common case: the whole hello is in this segment. No buffering at all.
+                match l7::handshake_message(payload) {
+                    l7::Hs::Complete(ty, body) => {
+                        match (dir, ty) {
+                            (Dir::ClientToServer, 1) => {
+                                if let Some(h) = l7::parse_client_hello_body(&body) {
+                                    out.push(StreamOut::ClientHello(Box::new(h)));
+                                }
+                            }
+                            (Dir::ServerToClient, 2) => {
+                                if let Some(h) = l7::parse_server_hello_body(&body) {
+                                    out.push(StreamOut::ServerHello(Box::new(h)));
+                                }
+                            }
+                            _ => {}
+                        }
+                        flow.l7.dir_done[d] = true;
+                    }
+                    l7::Hs::Need => start_stream = ctx.reasm.enabled,
+                    l7::Hs::Not => flow.l7.dir_done[d] = true,
+                }
+                if !start_stream && !flow.l7.dir_done[d] {
+                    flow.l7.dir_done[d] = true;
+                }
+            } else if ctx.reasm.enabled && (looks_tls || ooo_first || looks_h2) {
+                start_stream = true;
+            } else if !looks_h2 {
+                flow.l7.dir_done[d] = true;
+            }
+            if start_stream {
+                flow.l7.streams = Some(Box::new(FlowStreams::new()));
+            }
+        }
+        if let Some(streams) = flow.l7.streams.as_mut() {
+            let before = streams.mem();
+            let room = ctx.reasm.max_total_bytes.saturating_sub(*ctx.reasm_bytes);
+            let st = streams.feed(d, t.seq, payload, isn, ctx.reasm, room, &mut out);
+            let after = streams.mem();
+            // A stream abandoned for lack of budget takes the whole connection's inspection with it: keeping
+            // one direction's state alive would only pin memory the budget has said is not there.
+            let all_done = streams.all_done() || st.dropped == Some(DropWhy::Budget);
+            match st.dropped {
+                Some(DropWhy::PendingFull) => ctx.counters.reasm_segments_dropped += 1,
+                Some(DropWhy::Budget) => {
+                    ctx.counters.reasm_segments_dropped += 1;
+                    ctx.counters.reasm_streams_abandoned += 1;
+                }
+                None => {}
+            }
+            ctx.counters.reasm_conflicts += u64::from(st.conflicts);
+            if st.gave_up {
+                ctx.counters.reasm_incomplete += 1;
+            }
+            if all_done {
+                flow.l7.streams = None;
+                flow.l7.streams_done = true;
+            }
+            track_mem(ctx, before, if all_done { 0 } else { after });
+        }
+        apply_stream_out(flow, out, ctx, samples, events);
+    }
+    flow.l7.data_seen[d] = true;
+
+    // HTTP/1.x: only the first segment's request line and Host header.
+    if retransmit || payload.is_empty() || !payload[0].is_ascii_uppercase() {
+        return;
+    }
+    if let Some(h) = l7::parse_http(payload) {
+        let red = ctx.red;
+        flow.l7.app = Some("http");
+        match h {
+            Http::Request { method, host, version } => {
+                flow.l7.http_requests += 1;
+                let host = host.and_then(|h| red.apply(red.http_host, &h));
+                if host.is_some() {
+                    flow.l7.http_host = host.clone();
+                }
+                samples.push(Sample::HttpRequest);
+                events.push(EventKind::Http(HttpRecord {
+                    flow_id: flow.id,
+                    server: ep(flow.server),
+                    request: true,
+                    method: Some(method),
+                    host,
+                    status: None,
+                    version,
+                    scheme: None,
+                    content_type: None,
+                }));
+            }
+            Http::Response { status, version } => {
+                flow.l7.http_responses += 1;
+                samples.push(Sample::HttpResponse { status });
+                events.push(EventKind::Http(HttpRecord {
+                    flow_id: flow.id,
+                    server: ep(flow.server),
+                    request: false,
+                    method: None,
+                    host: None,
+                    status: Some(status),
+                    version,
+                    scheme: None,
+                    content_type: None,
+                }));
+            }
+        }
     }
 }
 
@@ -588,6 +961,7 @@ impl Observer {
                 capture: CaptureManager::new(cfg.capture_sessions),
                 counters: Counters::default(),
                 vm_totals: HashMap::new(),
+                reasm_bytes: 0,
                 clock_us: 0,
                 last_tick_us: 0,
                 cfg,
@@ -606,6 +980,19 @@ impl Observer {
         self.lock().ingest(frame, meta);
     }
 
+    /// Ingests several frames under one lock acquisition. Semantically the same as calling [`Self::ingest`] for
+    /// each in order, but it keeps a multi-producer feed (a bridge with many connections) from bouncing the
+    /// mutex once per frame.
+    pub fn ingest_batch<'a, I>(&self, items: I)
+    where
+        I: IntoIterator<Item = (&'a [u8], &'a FrameMeta)>,
+    {
+        let mut g = self.lock();
+        for (frame, meta) in items {
+            g.ingest(frame, meta);
+        }
+    }
+
     /// Ages flows and rotates windows. Call periodically when traffic may be idle (the tap pump does).
     pub fn tick(&self, now_us: u64) {
         self.lock().tick(now_us);
@@ -613,6 +1000,16 @@ impl Observer {
 
     pub fn set_tap_stats(&self, s: Arc<TapStats>) {
         *self.tap_stats.lock().unwrap_or_else(|e| e.into_inner()) = Some(s);
+    }
+
+    /// Like [`Self::set_tap_stats`] but leaves an existing registration alone. Returns whether `s` was installed.
+    pub fn set_tap_stats_if_unset(&self, s: Arc<TapStats>) -> bool {
+        let mut g = self.tap_stats.lock().unwrap_or_else(|e| e.into_inner());
+        if g.is_some() {
+            return false;
+        }
+        *g = Some(s);
+        true
     }
 
     pub fn counters(&self) -> Counters {
@@ -641,6 +1038,13 @@ impl Observer {
             drops_by_reason: DropReason::ALL.iter().map(|r| (r.name().to_string(), c.drops[r.index()])).collect(),
             tap_enqueued: tap.as_ref().map_or(0, |t| t.enqueued.load(Ordering::Relaxed)),
             tap_dropped: tap.as_ref().map_or(0, |t| t.dropped.load(Ordering::Relaxed)),
+            reasm_segments_dropped: c.reasm_segments_dropped,
+            reasm_streams_abandoned: c.reasm_streams_abandoned,
+            reasm_incomplete: c.reasm_incomplete,
+            reasm_conflicts: c.reasm_conflicts,
+            reasm_bytes: g.reasm_bytes as u64,
+            encrypted_dns_flows: c.encrypted_dns_flows,
+            quic_hellos: c.quic_hellos,
         };
         let mut per_vm: Vec<VmSummary> = g
             .vm_totals
@@ -1063,6 +1467,404 @@ mod tests {
         assert!(!first.is_empty() && first.iter().all(|e| e.vm_id == "vm-a"));
         let (again, _) = o.events_since(next, Some(&only_a), None, 100);
         assert!(again.is_empty(), "resume point skips what was delivered");
+    }
+
+    // ---- reassembly, TLS server hello, HTTP/2, QUIC, encrypted DNS: end to end through the observer ----------
+
+    fn big_hello(sni: &str) -> Vec<u8> {
+        fixtures::client_hello(
+            0x0303,
+            &[0x1301, 0x1302],
+            &[
+                fixtures::ext_sni(sni),
+                fixtures::ext_alpn(&["h2", "http/1.1"]),
+                fixtures::ext_supported_versions(&[0x0304]),
+                fixtures::ext(0x0015, &vec![0u8; 700]),
+            ],
+        )
+    }
+
+    fn tls_events(o: &Observer, kind: &str) -> usize {
+        o.events_since(0, None, None, 100_000).0.iter().filter(|e| e.kind.name() == kind).count()
+    }
+
+    #[test]
+    fn client_hello_in_three_reordered_retransmitted_segments() {
+        let o = obs();
+        let i = id("vm-a");
+        let hello = big_hello("Split.Example.com");
+        assert!(hello.len() > 700);
+        let (c, s) = ((G, 50100), (S, 443));
+        let isn = 1000u32;
+        let m = |ts| meta(&i, ts, Direction::FromGuest);
+        o.ingest(&tcp_v4(c, s, isn, 0, TCP_SYN, 100, b""), &m(1));
+        let seg = |n: usize| {
+            let at = n * 300;
+            (isn + 1 + at as u32, &hello[at..(at + 300).min(hello.len())])
+        };
+        let parts = hello.len().div_ceil(300);
+        assert!(parts >= 3);
+        // Tail first, then the head, a retransmit of the head, then the middle.
+        let mut order: Vec<usize> = vec![parts - 1, 0, 0];
+        order.extend(1..parts - 1);
+        for (k, n) in order.iter().enumerate() {
+            let (seq, data) = seg(*n);
+            o.ingest(&tcp_v4(c, s, seq, 1, TCP_ACK | TCP_PSH, 100, data), &m(10 + k as u64));
+        }
+        let f = &o.flows(&FlowQuery::default())[0];
+        assert_eq!(f.sni.as_deref(), Some("split.example.com"));
+        assert_eq!(f.app, Some("tls"));
+        assert_eq!(f.alpn.as_deref(), Some("h2"));
+        assert!(f.ja4.as_ref().unwrap().starts_with("t13d0204h2_"), "{:?}", f.ja4);
+        assert_eq!(tls_events(&o, "tls"), 1, "one hello, one event, however many segments");
+        assert_eq!(o.summary(100).counters.reasm_bytes, 0, "buffers are released once parsed");
+        assert_eq!(o.summary(100).per_vm[0].red.tls_handshakes, 1);
+    }
+
+    #[test]
+    fn server_hello_metadata_and_ja3s_ja4s() {
+        let o = obs();
+        let i = id("vm-a");
+        let (c, s) = ((G, 50200), (S, 443));
+        o.ingest(&tcp_v4(c, s, 1, 0, TCP_SYN, 100, b""), &meta(&i, 1, Direction::FromGuest));
+        o.ingest(&tcp_v4(s, c, 9000, 2, TCP_SYN | TCP_ACK, 100, b""), &meta(&i, 2, Direction::ToGuest));
+        let sh = fixtures::server_hello(
+            0x0303,
+            0x1301,
+            &[fixtures::ext(43, &[0x03, 0x04]), fixtures::ext(51, &[0x00, 0x1d, 0x00, 0x00])],
+        );
+        let mut wire = sh.clone();
+        wire.extend_from_slice(&[0x17, 0x03, 0x03, 0x00, 0x20]);
+        wire.extend_from_slice(&[0x99; 32]);
+        let (a, b) = wire.split_at(20);
+        o.ingest(&tcp_v4(s, c, 9001, 2, TCP_ACK | TCP_PSH, 100, a), &meta(&i, 3, Direction::ToGuest));
+        o.ingest(&tcp_v4(s, c, 9001 + 20, 2, TCP_ACK | TCP_PSH, 100, b), &meta(&i, 4, Direction::ToGuest));
+        let f = &o.flows(&FlowQuery::default())[0];
+        assert_eq!(f.tls_version.as_deref(), Some("TLS1.3"));
+        assert_eq!(f.tls_cipher.as_deref(), Some("TLS_AES_128_GCM_SHA256"));
+        assert_eq!(f.ja3s.as_ref().map(String::len), Some(32));
+        assert!(f.ja4s.as_ref().unwrap().starts_with("t130200_1301_"), "{:?}", f.ja4s);
+        assert_eq!(tls_events(&o, "tls_server"), 1);
+        // Only metadata: the opaque application-data bytes never show up anywhere.
+        let json = serde_json::to_string(&o.events_since(0, None, None, 1000).0).unwrap();
+        assert!(json.contains("TLS_AES_128_GCM_SHA256") && !json.contains("153, 153"));
+    }
+
+    #[test]
+    fn reassembly_budget_is_enforced_and_returned() {
+        let o = Observer::new(ObserverConfig {
+            reasm: crate::reasm::ReasmConfig { max_total_bytes: 8 * 1024, ..Default::default() },
+            ..ObserverConfig::default()
+        });
+        let i = id("vm-a");
+        let hello = big_hello("budget.example.com");
+        // Many connections each stuck after the first 300 bytes of a hello.
+        for p in 0..200u16 {
+            let (c, s) = ((G, 40000 + p), (S, 443));
+            o.ingest(&tcp_v4(c, s, 1, 0, TCP_SYN, 100, b""), &meta(&i, 10 + p as u64, Direction::FromGuest));
+            o.ingest(
+                &tcp_v4(c, s, 2, 1, TCP_ACK | TCP_PSH, 100, &hello[..300]),
+                &meta(&i, 10 + p as u64, Direction::FromGuest),
+            );
+        }
+        let c = o.summary(1000).counters;
+        assert!(c.reasm_bytes <= 8 * 1024, "held {} bytes", c.reasm_bytes);
+        assert!(c.reasm_streams_abandoned > 0 && c.reasm_segments_dropped > 0, "{c:?}");
+        // Dropping the flows returns their bytes.
+        o.tick(10 + 400_000_000);
+        assert_eq!(o.summary(10 + 400_000_000).counters.reasm_bytes, 0);
+    }
+
+    #[test]
+    fn reassembly_can_be_disabled() {
+        let o = Observer::new(ObserverConfig {
+            reasm: crate::reasm::ReasmConfig { enabled: false, ..Default::default() },
+            ..ObserverConfig::default()
+        });
+        let i = id("vm-a");
+        let hello = big_hello("off.example.com");
+        let (c, s) = ((G, 50300), (S, 443));
+        o.ingest(&tcp_v4(c, s, 1, 0, TCP_SYN, 100, b""), &meta(&i, 1, Direction::FromGuest));
+        o.ingest(&tcp_v4(c, s, 2, 1, TCP_ACK, 100, &hello[..300]), &meta(&i, 2, Direction::FromGuest));
+        o.ingest(&tcp_v4(c, s, 302, 1, TCP_ACK, 100, &hello[300..]), &meta(&i, 3, Direction::FromGuest));
+        assert_eq!(o.flows(&FlowQuery::default())[0].sni, None);
+        assert_eq!(o.summary(5).counters.reasm_bytes, 0);
+        // A hello that fits in one segment still works.
+        let small = fixtures::client_hello(0x0303, &[0x1301], &[fixtures::ext_sni("one.example.com")]);
+        o.ingest(&tcp_v4((G, 50301), s, 2, 1, TCP_ACK, 100, &small), &meta(&i, 4, Direction::FromGuest));
+        assert!(o.flows(&FlowQuery::default()).iter().any(|f| f.sni.as_deref() == Some("one.example.com")));
+    }
+
+    #[test]
+    fn http2_cleartext_requests_and_responses() {
+        use crate::h2::fixtures as h2;
+        let o = obs();
+        let i = id("vm-a");
+        let (c, s) = ((G, 50400), (S, 8080));
+        let mut req = h2::client_preface();
+        req.extend(h2::headers_frame(1, true, &h2::request_block("POST", "http", "/v1/secret/path?k=v", "Api.Mesh.local:8080")));
+        let mut resp = h2::settings();
+        resp.extend(h2::headers_frame(1, true, &h2::response_block(503, Some("application/json; charset=utf-8"))));
+        o.ingest(&tcp_v4(c, s, 100, 0, TCP_SYN, 100, b""), &meta(&i, 1, Direction::FromGuest));
+        o.ingest(&tcp_v4(s, c, 500, 101, TCP_SYN | TCP_ACK, 100, b""), &meta(&i, 2, Direction::ToGuest));
+        let (a, b) = req.split_at(30);
+        o.ingest(&tcp_v4(c, s, 101, 501, TCP_ACK, 100, a), &meta(&i, 3, Direction::FromGuest));
+        o.ingest(&tcp_v4(c, s, 131, 501, TCP_ACK, 100, b), &meta(&i, 4, Direction::FromGuest));
+        o.ingest(&tcp_v4(s, c, 501, 101 + req.len() as u32, TCP_ACK, 100, &resp), &meta(&i, 5, Direction::ToGuest));
+        let f = &o.flows(&FlowQuery::default())[0];
+        assert_eq!(f.app, Some("h2"));
+        assert_eq!(f.http_host.as_deref(), Some("api.mesh.local:8080"));
+        assert_eq!(f.http_requests, 1);
+        let sum = o.summary(10);
+        assert_eq!((sum.per_vm[0].red.http_requests, sum.per_vm[0].red.http_5xx), (1, 1));
+        let evs = o.events_since(0, None, None, 1000).0;
+        let json = serde_json::to_string(&evs).unwrap();
+        assert!(json.contains("\"version\":\"2\"") && json.contains("application/json") && json.contains("\"scheme\":\"http\""));
+        assert!(!json.contains("secret") && !json.contains("charset"), "path and parameters never leave: {json}");
+        // An h2 connection keeps its (bounded) prefix while it may still carry frames, and gives it back when the
+        // flow ends.
+        let held = o.summary(10).counters.reasm_bytes;
+        assert!(held > 0 && held <= 2 * 16 * 1024, "held {held}");
+        o.tick(10 + 400_000_000);
+        assert_eq!(o.summary(10 + 400_000_000).counters.reasm_bytes, 0);
+    }
+
+    #[test]
+    fn http2_host_redaction_applies() {
+        use crate::h2::fixtures as h2;
+        let o = Observer::new(ObserverConfig {
+            redaction: Redaction { http_host: Redact::Drop, ..Redaction::default() },
+            ..ObserverConfig::default()
+        });
+        let i = id("vm-a");
+        let (c, s) = ((G, 50401), (S, 8080));
+        let mut req = h2::client_preface();
+        req.extend(h2::headers_frame(1, true, &h2::request_block("GET", "http", "/", "private.mesh.local")));
+        o.ingest(&tcp_v4(c, s, 1, 0, TCP_ACK, 100, &req), &meta(&i, 1, Direction::FromGuest));
+        let f = &o.flows(&FlowQuery::default())[0];
+        assert_eq!((f.app, f.http_requests, f.http_host.clone()), (Some("h2"), 1, None));
+        assert!(!serde_json::to_string(&o.events_since(0, None, None, 100).0).unwrap().contains("private.mesh"));
+    }
+
+    fn quic_vector() -> Vec<u8> {
+        use crate::quic::fixtures::*;
+        let hello = handshake_client_hello(&[
+            fixtures::ext_sni("quic.Example.com"),
+            fixtures::ext_alpn(&["h3"]),
+            fixtures::ext_supported_versions(&[0x0304]),
+        ]);
+        client_initial(crate::quic::VERSION_1, &[0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08], &[1, 2], 0, &crypto_frame(0, &hello), 1252)
+    }
+
+    #[test]
+    fn quic_initial_yields_sni_alpn_and_ja4() {
+        let o = obs();
+        let i = id("vm-a");
+        o.ingest(&udp_v4((G, 55000), (S, 443), &quic_vector()), &meta(&i, 1, Direction::FromGuest));
+        let f = &o.flows(&FlowQuery::default())[0];
+        assert_eq!((f.app, f.quic_version), (Some("quic"), Some(1)));
+        assert_eq!(f.sni.as_deref(), Some("quic.example.com"));
+        assert_eq!(f.alpn.as_deref(), Some("h3"));
+        assert!(f.ja4.as_ref().unwrap().starts_with("q13d0203h3_"), "{:?}", f.ja4);
+        let ev = o.events_since(0, None, None, 100).0;
+        assert_eq!(ev.iter().filter(|e| e.kind.name() == "quic").count(), 1);
+        assert_eq!(o.summary(5).counters.quic_hellos, 1);
+        // A second client Initial datagram does not duplicate anything.
+        o.ingest(&udp_v4((G, 55000), (S, 443), &quic_vector()), &meta(&i, 2, Direction::FromGuest));
+        assert_eq!(o.events_since(0, None, None, 100).0.iter().filter(|e| e.kind.name() == "quic").count(), 1);
+    }
+
+    #[test]
+    fn quic_redaction_and_switch_off() {
+        let i = id("vm-a");
+        let strict = Observer::new(ObserverConfig { redaction: Redaction::strict(), ..ObserverConfig::default() });
+        strict.ingest(&udp_v4((G, 55001), (S, 443), &quic_vector()), &meta(&i, 1, Direction::FromGuest));
+        let f = &strict.flows(&FlowQuery::default())[0];
+        assert_eq!((f.sni.clone(), f.ja4.clone()), (None, None));
+        assert!(!serde_json::to_string(&strict.events_since(0, None, None, 100).0).unwrap().to_lowercase().contains("example"));
+
+        let hashed = Observer::new(ObserverConfig {
+            redaction: Redaction { tls_sni: Redact::Hash, ..Redaction::default() },
+            ..ObserverConfig::default()
+        });
+        hashed.ingest(&udp_v4((G, 55002), (S, 443), &quic_vector()), &meta(&i, 1, Direction::FromGuest));
+        assert!(hashed.flows(&FlowQuery::default())[0].sni.as_deref().unwrap().starts_with("h:"));
+
+        let off = Observer::new(ObserverConfig { quic_initial: false, ..ObserverConfig::default() });
+        off.ingest(&udp_v4((G, 55003), (S, 443), &quic_vector()), &meta(&i, 1, Direction::FromGuest));
+        let f = &off.flows(&FlowQuery::default())[0];
+        assert_eq!((f.app, f.sni.clone()), (Some("quic"), None), "detected, not decrypted");
+    }
+
+    #[test]
+    fn encrypted_dns_dot_doh_and_doq() {
+        let i = id("vm-a");
+        let o = obs();
+        // DoT: TCP/853.
+        o.ingest(&tcp_v4((G, 50500), (S, 853), 1, 0, TCP_SYN, 100, b""), &meta(&i, 1, Direction::FromGuest));
+        // DoH: a hello whose SNI is on the list (also a subdomain).
+        for (n, sni) in ["dns.google", "Resolver.Cloudflare-DNS.com", "www.example.com"].into_iter().enumerate() {
+            let hello = fixtures::client_hello(0x0303, &[0x1301], &[fixtures::ext_sni(sni)]);
+            o.ingest(
+                &tcp_v4((G, 50600 + n as u16), (S, 443), 2, 1, TCP_ACK | TCP_PSH, 100, &hello),
+                &meta(&i, 2, Direction::FromGuest),
+            );
+        }
+        // DoQ: QUIC to UDP/853.
+        o.ingest(&udp_v4((G, 50700), (S, 853), &quic_vector()), &meta(&i, 3, Direction::FromGuest));
+        let tags: Vec<(u16, Option<&str>)> = {
+            let mut v: Vec<_> =
+                o.flows(&FlowQuery::default()).iter().map(|f| (f.server.port, f.encrypted_dns)).collect();
+            v.sort();
+            v
+        };
+        assert_eq!(
+            tags,
+            vec![
+                (443, None),
+                (443, Some("doh")),
+                (443, Some("doh")),
+                (853, Some("doq")),
+                (853, Some("dot")),
+            ]
+        );
+        assert_eq!(o.summary(5).counters.encrypted_dns_flows, 4);
+
+        // The list is configurable; with it emptied nothing matches, and redaction does not affect matching.
+        let custom = Observer::new(ObserverConfig {
+            doh_hosts: vec!["doh.corp.internal".into()],
+            redaction: Redaction::strict(),
+            ..ObserverConfig::default()
+        });
+        for (n, sni) in ["dns.google", "x.doh.corp.internal"].into_iter().enumerate() {
+            let hello = fixtures::client_hello(0x0303, &[0x1301], &[fixtures::ext_sni(sni)]);
+            custom.ingest(
+                &tcp_v4((G, 50800 + n as u16), (S, 443), 2, 1, TCP_ACK, 100, &hello),
+                &meta(&i, 1, Direction::FromGuest),
+            );
+        }
+        let f = custom.flows(&FlowQuery::default());
+        assert_eq!(f.iter().filter(|f| f.encrypted_dns == Some("doh")).count(), 1);
+        assert!(f.iter().all(|f| f.sni.is_none()), "the tag does not leak the name under strict redaction");
+    }
+
+    #[test]
+    fn dns_edns_and_typed_answers() {
+        use fixtures::Rr;
+        let o = obs();
+        let i = id("vm-a");
+        let (c, r) = ((G, 5353), (NS, 53));
+        let q = fixtures::dns_query_edns(0x4242, "www.example.com", 65, 1232, true);
+        let a = fixtures::dns_response_rr(
+            0x4242,
+            "www.example.com",
+            65,
+            0,
+            &[
+                Rr::Cname("edge.cdn.example.net"),
+                Rr::A([192, 0, 2, 1]),
+                Rr::Aaaa([0x20, 0x01, 0xd, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]),
+                Rr::Https { priority: 1, target: ".", alpn: &["h3", "h2"], port: Some(8443), ech: true },
+            ],
+            Some((4096, true, 0)),
+        );
+        o.ingest(&udp_v4(c, r, &q), &meta(&i, 1_000, Direction::FromGuest));
+        o.ingest(&udp_v4(r, c, &a), &meta(&i, 3_000, Direction::ToGuest));
+        let d = o.dns(None, None, 10);
+        let resp = d.iter().find(|r| r.response).unwrap();
+        assert_eq!(resp.qtype, "HTTPS");
+        assert_eq!(resp.answer_types, vec!["CNAME", "A", "AAAA", "HTTPS"]);
+        assert_eq!(resp.cnames, vec!["edge.cdn.example.net"]);
+        assert_eq!(resp.answers, vec!["192.0.2.1", "2001:db8::1"]);
+        assert_eq!(resp.https.len(), 1);
+        let h = &resp.https[0];
+        assert_eq!((h.priority, h.target.as_deref(), h.port, h.ech), (1, Some("."), Some(8443), true));
+        assert_eq!(h.alpn, vec!["h3", "h2"]);
+        assert_eq!(resp.edns.as_ref().map(|e| (e.udp_size, e.dnssec_ok)), Some((4096, true)));
+        assert_eq!(resp.latency_us, Some(2_000));
+        let qrec = d.iter().find(|r| !r.response).unwrap();
+        assert_eq!(qrec.edns.as_ref().map(|e| (e.udp_size, e.dnssec_ok)), Some((1232, true)));
+
+        // Answer detail follows the answer redaction setting; names follow the qname setting.
+        let strict = Observer::new(ObserverConfig { redaction: Redaction::strict(), ..ObserverConfig::default() });
+        strict.ingest(&udp_v4(c, r, &q), &meta(&i, 1_000, Direction::FromGuest));
+        strict.ingest(&udp_v4(r, c, &a), &meta(&i, 3_000, Direction::ToGuest));
+        let json = serde_json::to_string(&strict.dns(None, None, 10)).unwrap();
+        assert!(!json.contains("cdn") && !json.contains("192.0.2.1") && !json.contains("h3"), "{json}");
+        let r2 = strict.dns(None, None, 10);
+        assert_eq!(r2.iter().find(|r| r.response).unwrap().answer_types, vec!["CNAME", "A", "AAAA", "HTTPS"]);
+
+        // Extended rcode.
+        let bad = fixtures::dns_response_rr(1, "x.test", 1, 0, &[], Some((512, false, 1)));
+        let m = l7::parse_dns(&bad).unwrap();
+        assert_eq!(m.full_rcode(), 16);
+        assert_eq!(l7::dns_rcode_name_full(m.full_rcode()), "BADVERS");
+    }
+
+    #[test]
+    fn dns_over_tcp_still_works_and_malformed_additional_is_survivable() {
+        let o = obs();
+        let i = id("vm-a");
+        let a = fixtures::dns_response_rr(7, "t.test", 1, 0, &[fixtures::Rr::A([1, 2, 3, 4])], Some((512, false, 0)));
+        for cut in 0..a.len() {
+            let _ = l7::parse_dns(&a[..cut]);
+        }
+        let mut t = (a.len() as u16).to_be_bytes().to_vec();
+        t.extend(&a);
+        o.ingest(&tcp_v4((NS, 53), (G, 40404), 1, 1, TCP_ACK, 100, &t), &meta(&i, 1, Direction::ToGuest));
+        let d = o.dns(None, None, 10);
+        assert_eq!(d.len(), 1);
+        assert!(d[0].tcp && d[0].answers == vec!["1.2.3.4"]);
+    }
+
+    #[test]
+    fn mixed_hostile_l7_traffic_never_panics_or_overruns_the_budget() {
+        let o = Observer::new(ObserverConfig {
+            reasm: crate::reasm::ReasmConfig { max_total_bytes: 64 * 1024, ..Default::default() },
+            ..ObserverConfig::default()
+        });
+        let i = id("vm-a");
+        let mut s = 0x5eed_u64;
+        let mut next = move || {
+            s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (s >> 24) as u32
+        };
+        let seeds: Vec<Vec<u8>> = vec![
+            big_hello("fuzz.example.com"),
+            {
+                let mut v = crate::h2::fixtures::client_preface();
+                v.extend(crate::h2::fixtures::headers_frame(
+                    1,
+                    true,
+                    &crate::h2::fixtures::request_block("GET", "http", "/", "f.test"),
+                ));
+                v
+            },
+            fixtures::server_hello(0x0303, 0x1301, &[fixtures::ext(43, &[3, 4])]),
+            quic_vector(),
+        ];
+        for n in 0..20_000u32 {
+            let seed = &seeds[(next() % 4) as usize];
+            let port = (next() % 64) as u16;
+            let off = (next() as usize) % seed.len();
+            let len = ((next() as usize) % 400).max(1).min(seed.len() - off);
+            let mut chunk = seed[off..off + len].to_vec();
+            if next() % 4 == 0 {
+                let at = next() as usize % chunk.len();
+                chunk[at] = next() as u8;
+            }
+            let seq = if next() % 2 == 0 { off as u32 + 1 } else { next() % 100_000 };
+            let frame = match next() % 3 {
+                0 => udp_v4((G, 40000 + port), (S, 443), seed),
+                1 => tcp_v4((G, 40000 + port), (S, 443), seq, 1, TCP_ACK, 100, &chunk),
+                _ => tcp_v4((S, 443), (G, 40000 + port), seq, 1, TCP_ACK, 100, &chunk),
+            };
+            o.ingest(&frame, &meta(&i, n as u64 * 10, Direction::FromGuest));
+            if n % 1000 == 0 {
+                assert!(o.summary(n as u64 * 10).counters.reasm_bytes <= 64 * 1024);
+            }
+        }
+        assert_eq!(o.counters().frames, 20_000);
     }
 
     #[test]
