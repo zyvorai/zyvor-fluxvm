@@ -266,7 +266,8 @@ impl VmManager {
             .insert(BRANCH_LABEL.to_string(), id.to_string());
         crate::fork::check_vz_forkable(&template, spec.count)?;
         crate::fork::check_fork_network_mode(&template, spec.network)?;
-        self.admit_fork_batch(&template, spec.count).await?;
+        // Held until the children are recorded (or the start failed).
+        let _reservation = self.admit_fork_batch(&template, spec.count, actor).await?;
         let count = spec.count;
         let prefix = spec
             .name_prefix
