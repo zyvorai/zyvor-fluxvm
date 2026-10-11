@@ -1506,11 +1506,47 @@ async fn udp_forward_ipv6_both_ways() {
     assert_eq!((&buf[..n], from), (&b"back6"[..], r.fwd[0]));
 }
 
+/// A different denial reason for the same guest and remote is a different event: a burst of one reason must not
+/// hide another. (On a Linux host without `ping_group_range` the first echo is `icmp-socket-unavailable`; the
+/// `rate-limit` denials that follow were suppressed under the same key and the rate-limit test saw none.)
+#[test]
+fn deny_gate_key_includes_the_reason() {
+    let sa = |s: &str| s.parse::<SocketAddr>().unwrap();
+    let key = |reason: &str| {
+        (
+            Proto::Icmp,
+            sa("10.0.2.15:9"),
+            sa("127.0.0.1:0"),
+            crate::reason_hash(reason),
+        )
+    };
+    let mut seen = HashMap::new();
+    let t0 = Instant::now();
+    assert_eq!(
+        deny_gate(&mut seen, key("icmp-socket-unavailable: x"), t0),
+        Some(0)
+    );
+    assert_eq!(
+        deny_gate(
+            &mut seen,
+            key("icmp-socket-unavailable: x"),
+            t0 + Duration::from_millis(5)
+        ),
+        None,
+        "the same reason is still collapsed"
+    );
+    assert_eq!(
+        deny_gate(&mut seen, key("rate-limit"), t0 + Duration::from_millis(10)),
+        Some(0),
+        "a different reason is published at once"
+    );
+}
+
 #[test]
 fn deny_gate_rate_limits_per_tuple_and_counts_suppressed() {
     let sa = |s: &str| s.parse::<SocketAddr>().unwrap();
-    let k1 = (Proto::Udp, sa("10.0.2.15:4000"), sa("10.1.1.1:53"));
-    let k2 = (Proto::Udp, sa("10.0.2.15:4001"), sa("10.1.1.1:53"));
+    let k1 = (Proto::Udp, sa("10.0.2.15:4000"), sa("10.1.1.1:53"), 7);
+    let k2 = (Proto::Udp, sa("10.0.2.15:4001"), sa("10.1.1.1:53"), 7);
     let mut seen = HashMap::new();
     let t0 = Instant::now();
     assert_eq!(deny_gate(&mut seen, k1, t0), Some(0));
@@ -1550,6 +1586,7 @@ fn deny_gate_rate_limits_per_tuple_and_counts_suppressed() {
             Proto::Tcp,
             sa("10.0.2.15:1"),
             SocketAddr::new(Ipv4Addr::new(9, 9, 9, 9).into(), i),
+            7,
         );
         deny_gate(&mut seen, k, t0 + Duration::from_secs(10));
     }
