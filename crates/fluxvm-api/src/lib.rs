@@ -64,6 +64,13 @@ impl<E: Into<anyhow::Error>> From<E> for ApiError {
                 message: format!("{:#}", e),
             };
         }
+        // A control call that needs a live runner on a VM that is not running: a state conflict.
+        if e.downcast_ref::<fluxvm_scheduler::VmNotLive>().is_some() {
+            return Self {
+                status: StatusCode::CONFLICT,
+                message: format!("{:#}", e),
+            };
+        }
         use fluxvm_scheduler::procbox_sandbox::ProcboxError;
         // Procbox sandboxes fail in ways a plain 400 would hide: a disabled
         // feature, a guest-only route, an unenforceable policy, a too-large
@@ -792,8 +799,9 @@ async fn metrics(State(m): State<Arc<VmManager>>) -> Response {
         .into_response()
 }
 
-/// `fluxvm_vm_runner_rss_bytes` / `fluxvm_vm_runner_cpu_seconds_total` for `vz` VMs: the runner process's resident size
-/// and CPU time, labelled by VM id and name. Empty when there are no samples.
+/// `fluxvm_vm_runner_rss_bytes` / `fluxvm_vm_runner_cpu_seconds_total` for `vz` VMs: resident size and CPU time of the
+/// runner process plus its Virtualization XPC service when that could be attributed (`fluxvm_vm_runner_service_attributed`
+/// says which), labelled by VM id and name. Empty when there are no samples.
 fn render_runner_usage(samples: &[fluxvm_scheduler::vz_devices::VmRunnerUsage]) -> String {
     if samples.is_empty() {
         return String::new();
@@ -805,7 +813,7 @@ fn render_runner_usage(samples: &[fluxvm_scheduler::vz_devices::VmRunnerUsage]) 
     }
     let mut out = String::new();
     out.push_str(
-        "# HELP fluxvm_vm_runner_rss_bytes Resident memory of a vz VM's runner process, bytes (host-side; includes resident guest RAM).\n",
+        "# HELP fluxvm_vm_runner_rss_bytes Resident memory of a vz VM: its runner process plus, when fluxvm_vm_runner_service_attributed is 1, the Virtualization XPC service that runs the guest. With 0 it is the runner process only and the guest's memory is not included.\n",
     );
     out.push_str("# TYPE fluxvm_vm_runner_rss_bytes gauge\n");
     for s in samples {
@@ -817,7 +825,7 @@ fn render_runner_usage(samples: &[fluxvm_scheduler::vz_devices::VmRunnerUsage]) 
         ));
     }
     out.push_str(
-        "# HELP fluxvm_vm_runner_cpu_seconds_total CPU time (user + system) of a vz VM's runner process, seconds.\n",
+        "# HELP fluxvm_vm_runner_cpu_seconds_total CPU time (user + system) of a vz VM: its runner process plus, when fluxvm_vm_runner_service_attributed is 1, the Virtualization XPC service that runs the guest. With 0 it is the runner process only and the guest's CPU is not included.\n",
     );
     out.push_str("# TYPE fluxvm_vm_runner_cpu_seconds_total counter\n");
     for s in samples {
@@ -826,6 +834,18 @@ fn render_runner_usage(samples: &[fluxvm_scheduler::vz_devices::VmRunnerUsage]) 
             s.vm_id,
             esc(&s.name),
             s.cpu_seconds
+        ));
+    }
+    out.push_str(
+        "# HELP fluxvm_vm_runner_service_attributed 1 when the two series above include the Virtualization XPC service that runs the guest, 0 when they are the runner process only.\n",
+    );
+    out.push_str("# TYPE fluxvm_vm_runner_service_attributed gauge\n");
+    for s in samples {
+        out.push_str(&format!(
+            "fluxvm_vm_runner_service_attributed{{vm=\"{}\",name=\"{}\"}} {}\n",
+            s.vm_id,
+            esc(&s.name),
+            u8::from(s.service_attributed)
         ));
     }
     out
@@ -4911,7 +4931,10 @@ mod tests {
             name: "a\"b".into(),
             rss_bytes: 1_073_741_824,
             cpu_seconds: 12.3456,
+            service_attributed: true,
         }]);
+        assert!(out.contains("fluxvm_vm_runner_service_attributed{vm=\"00000000-0000-0000-0000-000000000000\",name=\"a\\\"b\"} 1\n"));
+        assert!(out.contains("the runner process only and the guest's CPU is not included"));
         assert!(out.contains("# TYPE fluxvm_vm_runner_rss_bytes gauge\n"));
         assert!(out.contains("# TYPE fluxvm_vm_runner_cpu_seconds_total counter\n"));
         assert!(out.contains(&format!(
@@ -5788,11 +5811,30 @@ mod tests {
             assert!(body.contains("width"), "{body}");
             // The owner reaches the VM; it is not running, so there is nothing to resize.
             let (st, body) = call(router(m.clone()), "POST", &uri, "acme", Some(ok)).await;
-            assert_eq!(st, StatusCode::BAD_REQUEST);
+            assert_eq!(st, StatusCode::CONFLICT);
             assert!(body.contains("start it first"), "{body}");
             // Missing required fields never reach the handler.
             let (st, _) = call(router(m), "POST", &uri, "acme", Some(r#"{"width":1920}"#)).await;
             assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY);
+        }
+
+        #[tokio::test]
+        async fn runner_controls_on_a_stopped_vm_are_a_readable_conflict() {
+            let m = manager(tenant_tokens());
+            let mut vm = fixture(BackendKind::Vz, VmStatus::Stopped, false);
+            vm.request.tenant = Some("acme".into());
+            let id = vm.id;
+            m.store.insert(vm).await.unwrap();
+            for (method, path) in [
+                ("POST", format!("/v1/vms/{id}/pause")),
+                ("POST", format!("/v1/vms/{id}/resume")),
+                ("GET", format!("/v1/vms/{id}/screenshot")),
+            ] {
+                let (st, body) = call(router(m.clone()), method, &path, "acme", None).await;
+                assert_eq!(st, StatusCode::CONFLICT, "{path}: {body}");
+                assert!(body.contains("start it first"), "{path}: {body}");
+                assert!(!body.contains("os error"), "{path}: {body}");
+            }
         }
 
         #[tokio::test]

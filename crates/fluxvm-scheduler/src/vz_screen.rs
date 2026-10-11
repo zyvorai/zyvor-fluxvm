@@ -9,7 +9,7 @@ use crate::VmManager;
 use anyhow::{Context, Result, bail};
 pub use fluxvm_apple::screen::{InputAction, Screenshot};
 pub use fluxvm_apple::{self_control_socket_path, set_self_control_socket};
-use fluxvm_core::model::{BackendKind, VmRecord, VmStatus};
+use fluxvm_core::model::{BackendKind, VmRecord};
 use uuid::Uuid;
 
 /// Keychain service of the per-VM sign-in items; the account is the VM's UUID.
@@ -76,9 +76,7 @@ impl VmManager {
         if vm.backend != BackendKind::Vz {
             bail!("screenshots and input are a vz backend feature");
         }
-        if vm.status != VmStatus::Running {
-            bail!("the VM is {:?}; start it first", vm.status);
-        }
+        crate::require_live(&vm, false)?;
         Ok(vm)
     }
 

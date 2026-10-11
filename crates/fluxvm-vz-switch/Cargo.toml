@@ -16,8 +16,9 @@ name = "fluxvm-vz-switch"
 path = "src/main.rs"
 
 [features]
-default = []
-# Frame tap for guest-network observability (fluxvm-netobs). Off by default; see `set_tap`.
+default = ["netobs"]
+# Frame tap for guest-network observability (fluxvm-netobs). On by default so a plain build accepts
+# `--netobs-socket`; build with `--no-default-features` for a switch without it (see `set_tap`).
 netobs = ["dep:fluxvm-netobs"]
 
 [dependencies]

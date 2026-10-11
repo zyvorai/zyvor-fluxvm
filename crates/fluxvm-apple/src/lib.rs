@@ -33,7 +33,9 @@ pub use capability::{
     with_self_control_forwarder, with_shared_folder_mounts,
 };
 pub use control::{ControlReply, call as control_call, call_with as control_call_with};
-pub use display::{display_resize, display_resize_request};
+pub use display::{
+    DISPLAY_RESIZE_NOTE, display_resize, display_resize_reply, display_resize_request,
+};
 pub use host_caps::{AppleHostCapabilities, host_capabilities, prime_host_capabilities};
 pub use ipsw::{IpswInfo, latest_ipsw};
 pub use runner::{
@@ -42,7 +44,10 @@ pub use runner::{
     ip_file, oci_meta_dir, read_guest_ip, release_mac, self_control_socket_path,
     set_self_control_socket, snapshot_dir, write_oci_meta_as,
 };
-pub use usage::{RunnerUsage, mach_ticks_to_seconds, runner_usage};
+pub use usage::{
+    RunnerUsage, VmUsage, attribute_services, is_vz_service_path, mach_ticks_to_seconds,
+    runner_usage, vm_usage,
+};
 pub use usb_passthrough::{physical_usb_attach, physical_usb_list};
 
 use anyhow::{Context, Result, bail};

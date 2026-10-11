@@ -2,8 +2,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! `display-resize`: resize a running VM's display through the runner control socket
-//! (`VZGraphicsDisplay.reconfigure(configuration:)`, macOS 14+). UNVERIFIED on hardware: whether the guest
-//! follows the new size depends on its display driver.
+//! (`VZGraphicsDisplay.reconfigure(configuration:)`, macOS 14+). The call only updates the connector's preferred mode on
+//! the host side. Measured on a Debian 13 guest: the DRM connector's preferred mode changes, the active mode and fbcon
+//! `virtual_size` do not; a KMS client (a compositor or `modetest`-style tool) has to switch the active mode, so with
+//! none running (a headless guest) the result is not deterministic.
 
 use anyhow::{Context, Result, bail};
 use fluxvm_core::model::VmRecord;
@@ -45,6 +47,23 @@ pub fn display_resize_request(
     Ok(req)
 }
 
+/// What the resize replies say about the outcome, so no caller reads "ok" as "the guest now runs at this size".
+pub const DISPLAY_RESIZE_NOTE: &str = "the host updated the display's preferred mode; the guest only follows if a KMS client (compositor) switches its active mode, so a headless guest keeps its current mode";
+
+/// The reply of a successful resize: the requested size plus an honest account of what was done.
+pub fn display_resize_reply(width: u32, height: u32, display: u32, ppi: Option<u32>) -> Value {
+    json!({
+        "ok": true,
+        "requested": true,
+        "applied_to_guest": "not confirmed",
+        "width": width,
+        "height": height,
+        "display": display,
+        "ppi": ppi,
+        "note": DISPLAY_RESIZE_NOTE,
+    })
+}
+
 /// Resizes display `display` of a running VM. The runner answers with the applied size or a clear error
 /// (not running, macOS older than 14, no such display).
 pub async fn display_resize(
@@ -72,6 +91,15 @@ pub async fn display_resize(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_reply_does_not_claim_the_guest_followed() {
+        let r = display_resize_reply(1920, 1080, 0, None);
+        assert_eq!(r["requested"], true);
+        assert_eq!(r["applied_to_guest"], "not confirmed");
+        assert_eq!(r["width"], 1920);
+        assert!(r["note"].as_str().unwrap().contains("KMS client"));
+    }
 
     #[test]
     fn encodes_the_control_request() {

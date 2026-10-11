@@ -284,6 +284,30 @@ const GRACEFUL_SHUTDOWN_WAIT: std::time::Duration = std::time::Duration::from_se
 /// legitimately-slow create getting cut off, so this errs long.
 const STUCK_CREATING_GRACE: Duration = Duration::seconds(300);
 
+/// A control operation needs a live runner but the VM is not running (or paused). The API maps it to 409
+/// instead of letting the caller hit a raw "No such file" on the runner's control socket.
+#[derive(Debug)]
+pub struct VmNotLive {
+    pub status: VmStatus,
+}
+
+impl std::fmt::Display for VmNotLive {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "the VM is {:?}; start it first", self.status)
+    }
+}
+
+impl std::error::Error for VmNotLive {}
+
+/// Fails with [`VmNotLive`] unless `vm` has a live runner: `Running`, or `Paused` when `allow_paused`.
+pub fn require_live(vm: &VmRecord, allow_paused: bool) -> Result<()> {
+    match vm.status {
+        VmStatus::Running => Ok(()),
+        VmStatus::Paused if allow_paused => Ok(()),
+        status => Err(VmNotLive { status }.into()),
+    }
+}
+
 pub fn backend(kind: BackendKind) -> Result<Box<dyn VmBackend>> {
     Ok(match kind {
         BackendKind::Qemu => Box::new(fluxvm_qemu::QemuBackend),
@@ -3883,6 +3907,7 @@ impl VmManager {
     pub async fn pause(&self, id: Uuid) -> Result<VmRecord> {
         let mut vm = self.get(id).await?;
         procbox_sandbox::require_guest(&vm, "pausing")?;
+        require_live(&vm, true)?;
         backend(vm.backend)?.pause(&self.cfg, &vm).await?;
         vm.status = VmStatus::Paused;
         self.store.update(vm.clone()).await?;
@@ -3893,6 +3918,7 @@ impl VmManager {
     pub async fn resume(&self, id: Uuid) -> Result<VmRecord> {
         let mut vm = self.get(id).await?;
         procbox_sandbox::require_guest(&vm, "resuming")?;
+        require_live(&vm, true)?;
         backend(vm.backend)?.resume(&self.cfg, &vm).await?;
         vm.status = VmStatus::Running;
         self.store.update(vm.clone()).await?;

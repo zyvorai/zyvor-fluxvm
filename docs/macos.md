@@ -380,8 +380,15 @@ Verified on macOS 27.2 with a Debian 13 guest: a file changed after `self_snapsh
   REST: `POST /v1/vms/{id}/vz/display` with `{"width": 1920, "height": 1080, "display": 0, "ppi": 220}` (`display` and `ppi`
   optional; admin role; tenant-scoped like the other `vz` routes; the size is validated before the VM is looked up), CLI:
   `fluxctl vz display resize <vm> --width 1920 --height 1080 [--display N] [--ppi N]`. The route is covered by API tests against a
-  stopped VM (validation, tenant and role checks); **unverified on hardware**: whether the guest follows the new size depends on
-  its display driver.
+  stopped VM (validation, tenant and role checks).
+- **What a resize does, measured on the M4 with a Debian 13 guest (partial).** The call succeeds and the DRM connector's
+  *preferred* mode in the guest changes to the new size. The *active* mode does not: fbcon's `virtual_size` and the console
+  resolution stay as they were. A headless guest has no KMS client, and switching the active mode takes one (a compositor, or a
+  tool that sets a mode through the DRM/KMS API); without one the guest keeps its mode and what a later modeset picks is not
+  deterministic. So the reply means "the host asked for this size", not "the guest now runs at it": the REST and CLI reply carry
+  `"requested": true`, `"applied_to_guest": "not confirmed"` and a `note` saying so, and `ok` only reports that the runner
+  accepted the call. To get a guest to the new size, run a compositor or set the mode from inside the guest after the resize.
+  macOS guests follow through their own window server and were not measured.
 - Every capability-table entry has a `min_macos` (`None` means the runner floor, macOS 14); for example USB controller and nested
   virtualization 15, vmnet 26, custom Virtio, Secure Boot, ASIF overlay and macOS provisioning 27. When the daemon has probed the
   host (it does so once, before the first `vz` create), `fluxvm_apple::validate_request` refuses with the real requirement
@@ -391,11 +398,21 @@ Verified on macOS 27.2 with a Debian 13 guest: a file changed after `self_snapsh
 
 ### Host-side accounting and memory pressure
 
-- Virtualization.framework reports nothing per VM, so FluxVM reads the runner process (one per VM) with `proc_pid_rusage`:
-  `fluxvm_apple::runner_usage(pid)` returns resident bytes and user/system CPU seconds. `/metrics` exposes them for running or
-  paused `vz` VMs as `fluxvm_vm_runner_rss_bytes{vm,name}` (gauge) and `fluxvm_vm_runner_cpu_seconds_total{vm,name}` (counter).
-  These are host-side numbers for the runner process (resident guest RAM included), not what the guest sees. The macOS reader was
-  run against the test process on macOS 27; the metrics path is unit-tested but not scraped against a live VM.
+- Virtualization.framework reports nothing per VM, and the runner process is not the guest: on macOS the guest's vCPUs and
+  memory live in a separate `com.apple.Virtualization.VirtualMachine` XPC service (parent launchd; its responsible pid is the
+  user's shell, so neither the parent pid nor `responsibility_get_pid_responsible_for_pid` links it to a runner). Measured on an
+  M4 with 2 vCPUs pinned: runner 0.0% CPU and 73 MB RSS against the service at 200% and 710 MB.
+- FluxVM therefore sums the runner and its service. The link is the open files, read with public libproc calls: the service
+  holds the VM's root disk and `efi.bin` open, and those live in the VM's own workspace, so
+  `fluxvm_apple::vm_usage(&[(runner_pid, workspace)])` lists the Virtualization service processes (`proc_listallpids`,
+  `proc_pidpath`, `PROC_PIDLISTFDS`, `PROC_PIDFDVNODEPATHINFO`) and attributes each to the workspace its files sit in (a service
+  matching two workspaces is attributed to none). `/metrics` exposes the result for running or paused `vz` VMs as
+  `fluxvm_vm_runner_rss_bytes{vm,name}` (gauge) and `fluxvm_vm_runner_cpu_seconds_total{vm,name}` (counter), plus
+  `fluxvm_vm_runner_service_attributed{vm,name}` (1 when the service is included, 0 when the numbers are the runner process
+  only and the guest's CPU and memory are not in them). The metric names keep the `runner` prefix for dashboard compatibility.
+  These are host-side numbers, not what the guest sees. Verified against a live Debian 13 guest (service pid found by its
+  open `root.raw`, 542 MB and 7 s CPU against the runner's 58 MB and 0.1 s). Not covered: a guest whose disk is not a file in
+  the workspace and has no `efi.bin` (it falls back to the runner only, flagged by the 0), and a different user's VMs.
 - Memory pressure was already wired before this change: `kern.memorystatus_vm_pressure_level` is sampled (normal, warn,
   critical; also `fluxvm_host_memory_pressure_level` in `/metrics`), and `fluxvm_scheduler::density::reclaim_after_secs` shortens
   the idle time before a sandbox's balloon is inflated to 60 s under warn or critical pressure. Normal pressure leaves the
@@ -499,7 +516,8 @@ on a private layer-2 network that only the guests joining it share (Linux guests
   demand and listening on `/tmp/fluxvm-<uid>/vznet-<name>.sock` (mode 0600). The runner hands it one end of a datagram socket pair
   (`VZFileHandleNetworkDeviceAttachment`). The switch forwards by the MAC each port registered with, drops frames with any other
   source MAC, floods broadcast and multicast, and drops unicast to unknown MACs. It exits 30 s after the last guest leaves; a runner
-  that loses its switch starts it again and reconnects.
+  that loses its switch starts it again and reconnects. A plain build of the switch includes the `netobs` frame export
+  (`--netobs-socket PATH [--network NAME]`, see [netobs](netobs.md)); `--no-default-features` builds one without it.
 - **Isolation:** guests on different networks, or not on one, cannot reach each other. A network belongs to the tenant of the VMs
   already on it. `networks` works with `network.mode = "none"` (an isolated cluster) but not with `egress_allow`, since another guest
   could relay around the proxy.
@@ -658,7 +676,7 @@ These compile against the macOS 27 SDK and are validated at admission. Except fo
 | macOS guests (installed from an IPSW through the API or by hand, then cloned; see above) | live migration, in-place restore of a running VM, direct kernel boot of macOS guests |
 | `apple.usernet` userspace gateway for Linux guests (egress/DNS policy, UDP/TCP forwards, netobs frames; DHCP, DNS, ICMP, IPv6 SLAAC and deny verdicts verified on hardware, **TCP and forwards not yet re-verified after a fix**) | |
 | network observability: `/v1/netobs/*`, `fluxctl netobs`, `/metrics` series, private-network switches bridged into the daemon (see [netobs.md](netobs.md); unit/integration tested with synthetic frames, **unverified with live guest traffic**) | packet payload retention without an explicit, filtered, expiring capture |
-| `POST /v1/vms/{id}/vz/display` and `fluxctl vz display resize` (**unverified on hardware**; guest driver permitting, macOS 14+) | |
+| `POST /v1/vms/{id}/vz/display` and `fluxctl vz display resize` (macOS 14+; **partial on hardware**: the connector's preferred mode changes, the active mode needs a KMS client in the guest) | |
 | `GET /v1/vms/{id}/vz/attestation` and `fluxctl vz attestation verify`: signed boot manifest, host claim only (**not exercised on a booted VM**) | hardware attestation, TPM, measured boot |
 | offline agent-token and SSH-key injection into a private raw root disk (token injection verified on a booted Debian 13 guest; SSH-key injection **unverified on a booted guest**) | injection into a running VM's disk, qcow2, shared storage, or another user's `authorized_keys` |
 | overlay disk exclusivity across VM records (create, attach, start) | protecting an overlay file from processes outside FluxVM |
@@ -682,7 +700,20 @@ What has actually been run, and what has not. One Apple M4, macOS 27.2, 16 GiB, 
 | `apple.usernet`: TCP, host-to-guest forwards | **Failed on first run, fixed, re-verified.** The gateway addressed TCP to `ff:ff:ff:ff:ff:ff` whenever the guest MAC was pinned (which the daemon always does), so Linux dropped every segment. After the fix: `curl` to HTTPS and HTTP sites returned 200, gateway frames are addressed to the guest MAC (zero broadcast-addressed TCP in a capture), a `127.0.0.1:18022 -> 22` forward gave the sshd banner and a full login, and IPv6 `curl -6` reached an IPv6-only host. |
 | `apple.usernet`: TCP egress policy | **Verified.** `deny_cidrs` (1.1.1.1/32) refused immediately while 1.0.0.1 answered; `deny_ports` [25] refused to three public hosts while port 587 connected; `dns_deny` gave NXDOMAIN; every denial appeared as a `deny`/`dns_deny` event in `usernet.log` and as a `denied` flow (`drop_reason: policy`) in `/v1/netobs/flows`. |
 | `apple.usernet`: TCP throughput | Download: 50 MB at about 12 MB/s with no retransmits, four parallel downloads about 12 MB/s total. **Upload was inefficient and is fixed:** 20 MB to a public server ran at 3 to 4 MB/s with about 2100 guest retransmitted segments (about 15% of the data) because the gateway advertised a fixed 256 KiB window while its queue to the host socket drained slower than the guest sent, so in-order segments were dropped unacknowledged and the rest of the burst was dropped as out of order. The window now follows the free room in that queue (zero below one MSS) and reopens when the host writer drains. After the fix, three 20 MB uploads ran at 8.4 to 10.0 MB/s with 0 retransmits, matching the host's own 7.9 to 10.0 MB/s to the same endpoint. IPv4 uploads and one flow at a time only; many concurrent flows were not measured. |
+| `fluxvm-vz-switch` bridge into netobs (`apple.networks`, `--netobs-socket`) | **Verified (PASS).** Guest-to-guest flows between two VMs on a private network appeared in `/v1/netobs/flows`, and when the bridge socket was gone the switch kept forwarding and the daemon fell back to a switch without the flag. Two known defects are listed under "Limits" in [netobs.md](netobs.md): an undercount at multi-Gbit rates is not reported, and the server half of a flow can be oriented as outbound. The switch crate did not build with `netobs` by default, so a plain `cargo build` gave a switch that rejected the flag and the daemon always took the fallback; `netobs` is now a default feature. |
+| Boot attestation end to end (`vz/attestation`, metadata vsock) | **Verified (PASS).** The guest read the signed manifest, the signature verified against the host public key, a tampered payload was rejected, and `vz-attestation.key` was mode 0600. Still a host claim, not hardware attestation. |
+| Loopback TCP vsock (`vsock_tcp`) | **Verified (PASS).** The loopback listener reached the guest service; a non-loopback bind address was refused. |
+| Runner accounting (`fluxvm_vm_runner_rss_bytes`, `fluxvm_vm_runner_cpu_seconds_total`) | **Failed on first run, fixed, re-verified.** The numbers were the runner process only: with 2 vCPUs pinned the runner showed 0.0% CPU and 73 MB RSS while `com.apple.Virtualization.VirtualMachine.xpc` (ppid 1, a separate pid) showed 200% and 710 MB. The XPC service is now attributed to its runner through the VM's open root disk and `efi.bin` and summed in; see "Host-side accounting". The responsible pid (`responsibility_get_pid_responsible_for_pid`) and the parent pid do not identify the runner, and `launchctl procinfo` needs root. |
+| Display resize (`vz/display`) | **Partial.** The API call works and the connector's preferred mode in the guest changes; fbcon `virtual_size` and the active mode do not (a headless guest has no KMS client), so the result is not deterministic without one. The reply no longer claims the guest followed; see "Control preconditions, display resize". |
+| Control preconditions (pause/resume/shutdown/stop, display, devices, snapshot) | **Verified (PASS) except** `pause` and `resume` on a stopped VM, which returned a raw `runner 'pause': connecting to .../<id>.ctl: No such file or directory (os error 2)`. Fixed: pause, resume, balloon, screenshot, input, USB and display now answer `409` `the VM is Stopped; start it first` before touching the runner (API tests; not re-run against hardware). |
 | macOS guest vsock (`apple.macos_vsock`) | **Not run.** Needs an installed macOS guest and about 45 GB of free disk. |
+
+Two things seen in the same runs that matter when you write guest-side tooling or debug a boot:
+
+- The stock Debian 13 arm64 guest's `python3` dies with SIGILL on this M4, so guest-side helpers should use `socat`, `perl` or
+  `curl` instead of Python.
+- Guests with `apple.networks` plus cloud-init were seen to stall in cloud-init in two attempts. **Unconfirmed**: it has not been
+  reproduced on demand and the cause is under investigation.
 
 ## Honest limits
 

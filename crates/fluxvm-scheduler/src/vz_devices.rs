@@ -6,6 +6,7 @@
 
 use crate::{VmManager, audit_event};
 use anyhow::{Result, bail};
+pub use fluxvm_apple::display_resize_reply;
 use fluxvm_core::model::{BackendKind, VmRecord, VmStatus};
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -41,9 +42,7 @@ impl VmManager {
         if vm.backend != BackendKind::Vz {
             bail!("this is a vz backend feature");
         }
-        if vm.status != VmStatus::Running {
-            bail!("the VM is {:?}; start it first", vm.status);
-        }
+        crate::require_live(&vm, false)?;
         Ok(vm)
     }
 
@@ -71,8 +70,8 @@ impl VmManager {
     }
 
     /// Resizes display `display` of a running VM (`VZGraphicsDisplay.reconfigure`, macOS 14+). The request is validated
-    /// before the VM is looked up, so a bad size is reported the same whether or not the VM runs. UNVERIFIED on hardware:
-    /// whether the guest follows the new size depends on its display driver.
+    /// before the VM is looked up, so a bad size is reported the same whether or not the VM runs. This only updates the
+    /// connector's preferred mode: the guest follows when a KMS client switches its active mode (see `DISPLAY_RESIZE_NOTE`).
     pub async fn vz_display_resize(
         &self,
         id: Uuid,
@@ -126,30 +125,46 @@ impl VmManager {
     }
 }
 
-/// Host-side cost of one `vz` VM: its runner process's resident size and CPU time (see `fluxvm_apple::runner_usage`).
+/// Host-side cost of one `vz` VM: the runner process plus, when it can be attributed, the Virtualization XPC service
+/// that actually runs the guest (see `fluxvm_apple::vm_usage`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct VmRunnerUsage {
     pub vm_id: Uuid,
     pub name: String,
     pub rss_bytes: u64,
     pub cpu_seconds: f64,
+    /// Whether the guest's XPC service was found and included; false means the numbers are the runner process only.
+    pub service_attributed: bool,
 }
 
-/// Samples the runner process of every running or paused `vz` VM. A VM whose process cannot be read (just exited,
-/// not macOS) is left out rather than reported as zero.
+/// Samples every running or paused `vz` VM. A VM whose runner cannot be read (just exited, not macOS) is left out
+/// rather than reported as zero.
 pub fn runner_usage_samples(vms: &[VmRecord]) -> Vec<VmRunnerUsage> {
-    vms.iter()
+    let live: Vec<(&VmRecord, u32)> = vms
+        .iter()
         .filter(|vm| {
             vm.backend == BackendKind::Vz
                 && matches!(vm.status, VmStatus::Running | VmStatus::Paused)
         })
-        .filter_map(|vm| {
-            let u = fluxvm_apple::runner_usage(vm.pid?).ok()?;
+        .filter_map(|vm| Some((vm, vm.pid?)))
+        .collect();
+    if live.is_empty() {
+        return Vec::new();
+    }
+    let targets: Vec<(u32, std::path::PathBuf)> = live
+        .iter()
+        .map(|(vm, pid)| (*pid, vm.workspace.clone()))
+        .collect();
+    live.iter()
+        .zip(fluxvm_apple::vm_usage(&targets))
+        .filter_map(|((vm, _), u)| {
+            let u = u?;
             Some(VmRunnerUsage {
                 vm_id: vm.id,
                 name: vm.name.clone(),
-                rss_bytes: u.rss_bytes,
-                cpu_seconds: u.cpu_seconds(),
+                rss_bytes: u.usage.rss_bytes,
+                cpu_seconds: u.usage.cpu_seconds(),
+                service_attributed: !u.service_pids.is_empty(),
             })
         })
         .collect()

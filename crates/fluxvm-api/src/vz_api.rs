@@ -110,13 +110,9 @@ async fn display_resize(
     require_admin(role)?;
     m.vz_display_resize(id, b.width, b.height, b.display, b.ppi)
         .await?;
-    Ok(Json(json!({
-        "ok": true,
-        "width": b.width,
-        "height": b.height,
-        "display": b.display,
-        "ppi": b.ppi,
-    })))
+    Ok(Json(fluxvm_scheduler::vz_devices::display_resize_reply(
+        b.width, b.height, b.display, b.ppi,
+    )))
 }
 
 async fn usb_list(State(m): State<Arc<VmManager>>, Path(id): Path<Uuid>) -> ApiResult<Json<Value>> {
