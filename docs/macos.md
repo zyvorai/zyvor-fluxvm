@@ -712,8 +712,12 @@ Two things seen in the same runs that matter when you write guest-side tooling o
 
 - The stock Debian 13 arm64 guest's `python3` dies with SIGILL on this M4, so guest-side helpers should use `socat`, `perl` or
   `curl` instead of Python.
-- Guests with `apple.networks` plus cloud-init were seen to stall in cloud-init in two attempts. **Unconfirmed**: it has not been
-  reproduced on demand and the cause is under investigation.
+- Guests with `apple.networks` plus cloud-init **took 2 minutes to finish booting** (seen as a stall: no console output, no
+  address reported, SSH refused). Cause, confirmed on hardware: the seed's catch-all DHCP match (`name: e*`) also claimed the
+  private card, which has no DHCP server, so `systemd-networkd-wait-online` waited for it until its 120 s timeout; the card's
+  own `.network` file only arrived with `write_files` and was reloaded in `runcmd`, after `network-online.target`. Private
+  cards now get a static MAC-matched entry in the seed's `network-config` (`CloudInitSpec.static_nics`), which sorts before
+  the DHCP match: `wait-online` takes 1.4 s and the address is reported about 7 s after create (was ≥ 120 s).
 
 ## Honest limits
 

@@ -385,6 +385,19 @@ pub struct CloudInitSpec {
     /// config without needing a custom image build.
     #[serde(default)]
     pub write_files: Vec<CloudInitFile>,
+    /// Additional cards the guest must configure statically and must not run DHCP on (private networks of
+    /// `apple.networks`). They go into the seed's `network-config` so the guest's network stack configures them before
+    /// `network-online.target`; a catch-all DHCP match would otherwise wait on them until its timeout.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub static_nics: Vec<CloudInitNic>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CloudInitNic {
+    /// The card's MAC address, lower case, colon separated.
+    pub mac: String,
+    /// Address with prefix length, e.g. `10.89.7.20/24`.
+    pub address: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

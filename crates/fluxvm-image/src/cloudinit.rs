@@ -78,6 +78,7 @@ fn write_seed_files(
     )?;
 
     let network_config = dir.join("network-config");
+    let nics = static_nic_entries(ci);
     let network_config = if ci.static_network {
         let (cidr, gateway) = static_net
             .context("static_network is set but no address was prepared -- network prep must run before build_seed")?;
@@ -86,7 +87,15 @@ fn write_seed_files(
         // combination assigns isn't known ahead of boot, and this is the
         // netplan-supported way to say "whichever the single real NIC is".
         let netcfg = format!(
-            "network:\n  version: 2\n  ethernets:\n    guestnet0:\n      match:\n        name: en*\n      dhcp4: false\n      addresses:\n        - {cidr}\n      routes:\n        - to: default\n          via: {gateway}\n"
+            "network:\n  version: 2\n  ethernets:\n    guestnet0:\n      match:\n        name: en*\n      dhcp4: false\n      addresses:\n        - {cidr}\n      routes:\n        - to: default\n          via: {gateway}\n{nics}"
+        );
+        fs::write(&network_config, netcfg).context("writing cloud-init network-config")?;
+        Some(network_config)
+    } else if !nics.is_empty() {
+        // The catch-all DHCP match is the one the macOS seed writes by default; the static entries sort before it
+        // (`fluxvm-nic*` < `vz-nic`), so a private card is claimed by its own entry and never runs DHCP.
+        let netcfg = format!(
+            "version: 2\nethernets:\n  vz-nic:\n    match:\n      name: \"e*\"\n    dhcp4: true\n    dhcp-identifier: mac\n{nics}"
         );
         fs::write(&network_config, netcfg).context("writing cloud-init network-config")?;
         Some(network_config)
@@ -94,6 +103,20 @@ fn write_seed_files(
         None
     };
     Ok((user_data, meta_data, network_config))
+}
+
+/// network-config v2 entries for `ci.static_nics`: matched by MAC, one static address, no DHCP, no link-local and no
+/// router advertisements, so the card is configured as soon as networkd starts and is never waited on.
+fn static_nic_entries(ci: &CloudInitSpec) -> String {
+    let mut out = String::new();
+    for (i, nic) in ci.static_nics.iter().enumerate() {
+        out.push_str(&format!(
+            "  fluxvm-nic{i}:\n    match:\n      macaddress: {}\n    dhcp4: false\n    dhcp6: false\n    accept-ra: false\n    link-local: []\n    addresses:\n      - {}\n",
+            yaml_quote(&nic.mac),
+            yaml_quote(&nic.address)
+        ));
+    }
+    out
 }
 
 pub async fn build_seed(
@@ -241,5 +264,43 @@ mod native_tests {
             .output()
             .unwrap();
         assert!(String::from_utf8_lossy(&output.stdout).starts_with("#cloud-config"));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use fluxvm_core::model::CloudInitNic;
+
+    fn spec(nics: Vec<CloudInitNic>) -> CloudInitSpec {
+        CloudInitSpec {
+            static_nics: nics,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn private_cards_get_a_static_entry_and_no_dhcp() {
+        let d = tempfile::tempdir().unwrap();
+        let ci = spec(vec![CloudInitNic {
+            mac: "02:e2:1f:84:d3:72".into(),
+            address: "10.89.7.20/24".into(),
+        }]);
+        let (_, _, nc) = write_seed_files(d.path(), &ci, None).unwrap();
+        let body = fs::read_to_string(nc.expect("a network-config")).unwrap();
+        assert!(body.contains("name: \"e*\"") && body.contains("dhcp4: true"));
+        let nic = body.split("fluxvm-nic0:").nth(1).unwrap();
+        assert!(nic.contains("macaddress: '02:e2:1f:84:d3:72'"));
+        assert!(nic.contains("dhcp4: false") && nic.contains("- '10.89.7.20/24'"));
+        assert!(nic.contains("link-local: []") && nic.contains("accept-ra: false"));
+        // "fluxvm-nic0" sorts before "vz-nic": networkd picks the first file that matches.
+        assert!("fluxvm-nic0" < "vz-nic");
+    }
+
+    #[test]
+    fn without_private_cards_nothing_changes() {
+        let d = tempfile::tempdir().unwrap();
+        let (_, _, nc) = write_seed_files(d.path(), &spec(vec![]), None).unwrap();
+        assert!(nc.is_none());
     }
 }
