@@ -278,8 +278,29 @@ pub struct Gateway {
     config_path: PathBuf,
     vm_id: uuid::Uuid,
     log_path: PathBuf,
+    /// `<workspace>/usernet-forwards.json`, written by the gateway (`--forwards-out`).
+    forwards_path: PathBuf,
     bin: PathBuf,
     mac: [u8; 6],
+}
+
+/// File name of the gateway's bound-forward report inside a VM workspace.
+pub const FORWARDS_FILE: &str = "usernet-forwards.json";
+
+/// Where each of the VM's `apple.usernet` port forwards is really listening, in `port_forwards` order. This is how
+/// a `host_port: 0` forward is discovered. Empty when the VM has no usernet or its gateway has not reported yet.
+/// The file belongs to one gateway process: if the supervisor restarted the gateway the ephemeral ports changed
+/// and the file was rewritten.
+pub fn usernet_forward_addrs(vm: &fluxvm_core::model::VmRecord) -> Result<Vec<fluxvm_usernet::ForwardStatus>> {
+    let p = vm.workspace.join(FORWARDS_FILE);
+    let raw = match std::fs::read(&p) {
+        Ok(r) => r,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e).with_context(|| format!("reading {}", p.display())),
+    };
+    let f: fluxvm_usernet::ForwardStatusFile =
+        serde_json::from_slice(&raw).with_context(|| format!("parsing {}", p.display()))?;
+    Ok(f.forwards)
 }
 
 impl Gateway {
@@ -296,6 +317,9 @@ impl Gateway {
         let config_path = workspace.join("usernet.json");
         std::fs::write(&config_path, serde_json::to_vec_pretty(&cfg)?)
             .with_context(|| format!("writing {}", config_path.display()))?;
+        // A report left by a previous run describes ports that are gone.
+        let forwards_path = workspace.join(FORWARDS_FILE);
+        let _ = std::fs::remove_file(&forwards_path);
         let (guest_end, gw_end) = pair()?;
         set_bufs(guest_end.as_raw_fd());
         set_bufs(gw_end.as_raw_fd());
@@ -313,6 +337,7 @@ impl Gateway {
             config_path,
             vm_id,
             log_path: workspace.join("usernet.log"),
+            forwards_path,
             bin,
             mac,
         })
@@ -396,7 +421,9 @@ impl Gateway {
             .arg("--config")
             .arg(&self.config_path)
             .arg("--watch-pid")
-            .arg(runner_pid.to_string());
+            .arg(runner_pid.to_string())
+            .arg("--forwards-out")
+            .arg(&self.forwards_path);
         let nic = self.gw_end.as_raw_fd();
         let tap = self.tap.as_ref().map(|(tx, _)| tx.as_raw_fd());
         if tap.is_some() {
@@ -491,6 +518,40 @@ mod tests {
         assert_eq!(tap_verdict(200), Verdict::Dropped(DropReason::Other));
     }
     use fluxvm_core::model::AppleUsernetForward;
+
+    fn vm_in(ws: &Path) -> fluxvm_core::model::VmRecord {
+        let mut v: serde_json::Value = serde_json::json!({
+            "id": uuid::Uuid::new_v4(), "name": "t", "backend": "vz", "status": "running",
+            "pid": null, "created_at": "2026-01-01T00:00:00Z", "expires_at": null,
+            "workspace": ws, "disk": "/tmp/d", "seed_disk": null, "tap_name": null,
+            "control_socket": null, "log_path": "/tmp/l", "error": null,
+            "request": {"name": "t", "image": "/tmp/i", "vcpus": 1, "memory_mib": 512},
+        });
+        v["request"]["backend"] = "vz".into();
+        serde_json::from_value(v).expect("VmRecord")
+    }
+
+    #[test]
+    fn forward_addrs_reader_handles_missing_and_present_files() {
+        let ws = std::env::temp_dir().join(format!("fluxvm-apple-fwd-{}", std::process::id()));
+        std::fs::create_dir_all(&ws).unwrap();
+        let vm = vm_in(&ws);
+        assert!(usernet_forward_addrs(&vm).unwrap().is_empty());
+        std::fs::write(
+            ws.join(FORWARDS_FILE),
+            r#"{"pid":7,"forwards":[
+                {"index":0,"proto":"tcp","bound":"127.0.0.1:40123","guest_port":22,"guest_family":"v4"},
+                {"index":1,"proto":"udp","bound":"[::1]:40124","guest_port":53,"guest_family":"v6"}]}"#,
+        )
+        .unwrap();
+        let f = usernet_forward_addrs(&vm).unwrap();
+        assert_eq!(f.len(), 2);
+        assert_eq!(f[0].bound, "127.0.0.1:40123".parse().unwrap());
+        assert_eq!((f[1].proto, f[1].guest_port), (Proto::Udp, 53));
+        std::fs::write(ws.join(FORWARDS_FILE), b"{not json").unwrap();
+        assert!(usernet_forward_addrs(&vm).is_err());
+        std::fs::remove_dir_all(&ws).unwrap();
+    }
 
     fn req(apple: serde_json::Value, network: serde_json::Value) -> CreateVmRequest {
         serde_json::from_value(serde_json::json!({

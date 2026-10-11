@@ -1092,3 +1092,29 @@ async fn udp_forward_ipv6_both_ways() {
     let (n, from) = timeout(Duration::from_secs(5), host.recv_from(&mut buf)).await.unwrap().unwrap();
     assert_eq!((&buf[..n], from), (&b"back6"[..], r.fwd[0]));
 }
+
+#[tokio::test]
+async fn forward_status_file_reports_ephemeral_ports() {
+    let mut cfg = UserNetConfig::default();
+    cfg.forwards = vec![
+        PortForward::new(Proto::Tcp, Ipv4Addr::LOCALHOST.into(), 0, 22),
+        PortForward::new(Proto::Udp, Ipv6Addr::LOCALHOST.into(), 0, 53),
+    ];
+    let (a, _b) = StdUnixDatagram::pair().unwrap();
+    let un = UserNet::new(cfg, a).unwrap();
+    let dir = std::env::temp_dir().join(format!("fluxvm-usernet-fwd-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("usernet-forwards.json");
+    un.write_forward_status(&path).unwrap();
+    let f: ForwardStatusFile = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert_eq!(f.pid, std::process::id());
+    assert_eq!(f.forwards.len(), 2);
+    assert_eq!((f.forwards[0].index, f.forwards[0].proto, f.forwards[0].guest_port), (0, Proto::Tcp, 22));
+    assert!(f.forwards[0].bound.ip().is_ipv4() && f.forwards[0].bound.port() != 0);
+    assert!(f.forwards[1].bound.ip().is_ipv6() && f.forwards[1].bound.port() != 0);
+    assert_eq!(f.forwards[0].bound, un.forward_addrs()[0]);
+    // The ports it reports are really listening.
+    TcpStream::connect(f.forwards[0].bound).await.unwrap();
+    assert!(!dir.join("usernet-forwards.json.tmp").exists());
+    std::fs::remove_dir_all(&dir).unwrap();
+}

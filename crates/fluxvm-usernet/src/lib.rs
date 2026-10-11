@@ -106,6 +106,26 @@ pub struct FlowEvent {
     pub bytes_rx: u64,
 }
 
+/// Where one configured port forward listens (see [`UserNet::forward_status`]).
+#[derive(Clone, Debug, Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct ForwardStatus {
+    /// Index into `UserNetConfig::forwards`.
+    pub index: usize,
+    pub proto: Proto,
+    /// The address the host listener is really bound to (the resolved port when `host_port` was 0).
+    pub bound: SocketAddr,
+    pub guest_port: u16,
+    pub guest_family: GuestFamily,
+}
+
+/// The `--forwards-out` file.
+#[derive(Clone, Debug, Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct ForwardStatusFile {
+    /// The gateway process that bound the listeners (ephemeral ports change when it restarts).
+    pub pid: u32,
+    pub forwards: Vec<ForwardStatus>,
+}
+
 /// Cloneable control surface for a running [`UserNet`].
 #[derive(Clone)]
 pub struct UserNetHandle {
@@ -247,6 +267,37 @@ impl UserNet {
     /// The bound host address of each configured forward, in config order (useful with `host_port: 0`).
     pub fn forward_addrs(&self) -> &[SocketAddr] {
         &self.fwd_addrs
+    }
+
+    /// Where every configured forward actually listens, in config order.
+    pub fn forward_status(&self) -> Vec<ForwardStatus> {
+        self.cfg
+            .forwards
+            .iter()
+            .zip(&self.fwd_addrs)
+            .enumerate()
+            .map(|(index, (f, bound))| ForwardStatus {
+                index,
+                proto: f.proto,
+                bound: *bound,
+                guest_port: f.guest_port,
+                guest_family: f.guest_family,
+            })
+            .collect()
+    }
+
+    /// Writes [`Self::forward_status`] as `{"pid":..,"forwards":[..]}` to `path` (atomically: temp file + rename).
+    /// The listeners are bound in [`UserNet::new`], so the file is complete as soon as the gateway exists.
+    pub fn write_forward_status(&self, path: &std::path::Path) -> io::Result<()> {
+        let file = ForwardStatusFile {
+            pid: std::process::id(),
+            forwards: self.forward_status(),
+        };
+        let mut tmp = path.as_os_str().to_owned();
+        tmp.push(".tmp");
+        let tmp = std::path::PathBuf::from(tmp);
+        std::fs::write(&tmp, serde_json::to_vec_pretty(&file).map_err(io::Error::other)?)?;
+        std::fs::rename(&tmp, path)
     }
 
     /// Serve until [`UserNetHandle::shutdown`] or a fatal socket error. Must run inside a tokio runtime.
