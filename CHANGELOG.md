@@ -17,6 +17,9 @@
 - **Fixed: forked children drew identical random numbers.** All children of one fork resumed the same kernel CRNG state and the
   reset credited entropy without reseeding, so two children got the same machine-id and all of them the same new SSH host key.
   The agent now issues `RNDRESEEDCRNG`. Found by checking uniqueness from inside the guests on an M4.
+- **Post-fork `hooks` and `ready`** (`running`, `agent`, `exec`, `tcp`, `http`) with `ready_timeout_seconds`: hooks run as argv
+  through the agent after the identity reset, readiness is probed inside each child, and a failure deletes the whole batch.
+  `fluxctl fork-vm --hook --ready --ready-timeout`.
 - **Crash recovery adopts a fully finished fork** (every child at `identity-reset` and running) instead of deleting running
   work; any other interrupted fork is still rolled back whole. Fork metrics (`fluxvm_fork_*`) are exported.
 - Verified on an M4: 4 strict children in 3.6 s; 5 of 5 distinct machine-ids, host keys and tokens. A NAT guest still cannot be

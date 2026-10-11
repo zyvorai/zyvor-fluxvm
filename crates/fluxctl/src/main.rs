@@ -291,6 +291,17 @@ enum Command {
         /// Children restored at the same time (vz; default min(count, 8)).
         #[arg(long)]
         parallel: Option<u8>,
+        /// Ready when: `running` (default), `agent`, `exec`, `tcp:<port>` or `http:<port>[/path]`, probed inside
+        /// each child.
+        #[arg(long)]
+        ready: Option<String>,
+        /// Seconds a child may take to become ready, hooks included (default 60).
+        #[arg(long)]
+        ready_timeout: Option<u32>,
+        /// A command to run in each child after its identity reset, split on spaces (no shell); repeatable.
+        /// Use the REST body for arguments that contain spaces.
+        #[arg(long = "hook")]
+        hooks: Vec<String>,
     },
     /// Block until a VM reaches a state: `running`, `stopped`, `paused`,
     /// `failed`, or `agent` (guest agent answers a ping).
@@ -2893,6 +2904,9 @@ async fn run_remote(
             identity,
             network,
             parallel,
+            ready,
+            ready_timeout,
+            hooks,
         } => {
             let mut body = json!({"count": count});
             if let Some(p) = prefix {
@@ -2906,6 +2920,20 @@ async fn run_remote(
             }
             if let Some(p) = parallel {
                 body["parallelism"] = json!(p);
+            }
+            if let Some(r) = ready {
+                body["ready"] = parse_fork_ready(&r)?;
+            }
+            if let Some(t) = ready_timeout {
+                body["ready_timeout_seconds"] = json!(t);
+            }
+            if !hooks.is_empty() {
+                body["hooks"] = json!(
+                    hooks
+                        .iter()
+                        .map(|h| h.split_whitespace().collect::<Vec<_>>())
+                        .collect::<Vec<_>>()
+                );
             }
             pretty(
                 &r.call(Method::POST, &format!("/v1/vms/{id}/fork"), Some(body))
@@ -3935,9 +3963,26 @@ async fn main() -> Result<()> {
             identity,
             network,
             parallel,
+            ready,
+            ready_timeout,
+            hooks,
         } => {
             // The same JSON the REST body carries, so the vocabulary is one thing.
             let mut body = serde_json::json!({"count": count});
+            if let Some(r) = ready {
+                body["ready"] = parse_fork_ready(&r)?;
+            }
+            if let Some(t) = ready_timeout {
+                body["ready_timeout_seconds"] = serde_json::json!(t);
+            }
+            if !hooks.is_empty() {
+                body["hooks"] = serde_json::json!(
+                    hooks
+                        .iter()
+                        .map(|h| h.split_whitespace().collect::<Vec<_>>())
+                        .collect::<Vec<_>>()
+                );
+            }
             if let Some(p) = prefix {
                 body["name_prefix"] = serde_json::json!(p);
             }
@@ -7639,5 +7684,54 @@ mod speculate_density_cli_tests {
             panic!("expected Command::Memory");
         };
         assert_eq!(parsed, id);
+    }
+}
+
+/// `--ready` for `fork-vm`: the JSON form of `fluxvm_scheduler::fork::ForkReady`.
+fn parse_fork_ready(s: &str) -> anyhow::Result<serde_json::Value> {
+    use serde_json::json;
+    let port = |p: &str| -> anyhow::Result<u16> {
+        p.parse::<u16>()
+            .ok()
+            .filter(|p| *p != 0)
+            .ok_or_else(|| anyhow::anyhow!("--ready port must be 1..=65535, got {p:?}"))
+    };
+    Ok(match s {
+        "running" | "agent" | "exec" => json!(s),
+        _ if s.starts_with("tcp:") => json!({"tcp": port(&s[4..])?}),
+        _ if s.starts_with("http:") => {
+            let rest = &s[5..];
+            let (p, path) = match rest.find('/') {
+                Some(i) => (&rest[..i], &rest[i..]),
+                None => (rest, "/"),
+            };
+            json!({"http": {"port": port(p)?, "path": path}})
+        }
+        _ => anyhow::bail!(
+            "--ready is running, agent, exec, tcp:<port> or http:<port>[/path], got {s:?}"
+        ),
+    })
+}
+
+#[cfg(test)]
+mod fork_ready_tests {
+    use super::parse_fork_ready;
+    use serde_json::json;
+
+    #[test]
+    fn ready_forms_parse() {
+        assert_eq!(parse_fork_ready("exec").unwrap(), json!("exec"));
+        assert_eq!(parse_fork_ready("tcp:5432").unwrap(), json!({"tcp": 5432}));
+        assert_eq!(
+            parse_fork_ready("http:8080/health").unwrap(),
+            json!({"http": {"port": 8080, "path": "/health"}})
+        );
+        assert_eq!(
+            parse_fork_ready("http:80").unwrap(),
+            json!({"http": {"port": 80, "path": "/"}})
+        );
+        for bad in ["soon", "tcp:", "tcp:0", "tcp:70000", "http:x"] {
+            assert!(parse_fork_ready(bad).is_err(), "{bad}");
+        }
     }
 }

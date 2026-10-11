@@ -89,6 +89,85 @@ pub struct ForkSpec {
     /// Children restored at the same time (vz only; the KVM path is sequential). 1..=32, default `min(count, 8)`.
     #[serde(default)]
     pub parallelism: Option<u8>,
+    /// Commands run in each child after its identity is reset and before readiness is probed. Each is an argv (no
+    /// shell), run as root through the guest agent, so the guest must have one. A non-zero exit fails the fork.
+    #[serde(default)]
+    pub hooks: Vec<Vec<String>>,
+    /// What "ready" means before a child is reported. Default: running and identity reset.
+    #[serde(default)]
+    pub ready: ForkReady,
+    /// How long a child may take to become ready, in seconds (hooks included). Default 60.
+    #[serde(default)]
+    pub ready_timeout_seconds: Option<u32>,
+}
+
+/// When a fork child counts as ready.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ForkReady {
+    /// Running, identity reset (nothing more is waited for).
+    #[default]
+    Running,
+    /// The guest agent answers a ping.
+    Agent,
+    /// A trivial command runs in the guest (through the agent, or SSH for a vz guest without one).
+    Exec,
+    /// Something accepts TCP connections on `127.0.0.1:<port>` inside the guest.
+    Tcp(u16),
+    /// `GET http://127.0.0.1:<port><path>` inside the guest returns a 2xx.
+    Http {
+        port: u16,
+        #[serde(default = "root_path")]
+        path: String,
+    },
+}
+
+fn root_path() -> String {
+    "/".into()
+}
+
+/// The post-restore steps of a fork, validated once.
+#[derive(Debug, Clone)]
+struct ForkPost {
+    hooks: Vec<Vec<String>>,
+    ready: ForkReady,
+    timeout: std::time::Duration,
+}
+
+impl ForkSpec {
+    fn post(&self) -> Result<ForkPost> {
+        if self.hooks.len() > 8 {
+            bail!("at most 8 fork hooks");
+        }
+        for h in &self.hooks {
+            if h.is_empty() || h.iter().any(|a| a.is_empty() || a.contains('\0')) {
+                bail!("a fork hook is a non-empty argv of non-empty strings");
+            }
+        }
+        match &self.ready {
+            ForkReady::Tcp(0) | ForkReady::Http { port: 0, .. } => {
+                bail!("ready port must be 1..=65535")
+            }
+            ForkReady::Http { path, .. }
+                if !path.starts_with('/')
+                    || path.len() > 256
+                    || !path
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b"/_.-?=&%~".contains(&b)) =>
+            {
+                bail!(
+                    "ready http path must start with / and use only letters, digits and /_.-?=&%~"
+                )
+            }
+            _ => {}
+        }
+        let secs = self.ready_timeout_seconds.unwrap_or(60).clamp(1, 600);
+        Ok(ForkPost {
+            hooks: self.hooks.clone(),
+            ready: self.ready.clone(),
+            timeout: std::time::Duration::from_secs(u64::from(secs)),
+        })
+    }
 }
 
 impl Default for ForkSpec {
@@ -99,6 +178,9 @@ impl Default for ForkSpec {
             identity: ForkIdentityMode::default(),
             network: ForkNetworkMode::default(),
             parallelism: None,
+            hooks: Vec::new(),
+            ready: ForkReady::default(),
+            ready_timeout_seconds: None,
         }
     }
 }
@@ -125,6 +207,10 @@ pub struct ForkChildReport {
     /// `start_from_snapshot`: the runner restoring the saved state.
     pub restore_ms: u64,
     pub identity: IdentityOutcome,
+    /// Post-fork hooks.
+    pub hooks_ms: u64,
+    /// Waiting for the readiness condition.
+    pub ready_ms: u64,
     pub total_ms: u64,
 }
 
@@ -169,6 +255,9 @@ impl VmManager {
             identity: ForkIdentityMode::BestEffort,
             network: ForkNetworkMode::Preserve,
             parallelism: None,
+            hooks: Vec::new(),
+            ready: ForkReady::default(),
+            ready_timeout_seconds: None,
         };
         Ok(self.fork_vm_spec(id, spec, actor).await?.children)
     }
@@ -208,8 +297,9 @@ impl VmManager {
         {
             bail!("parallelism must be between 1 and {MAX_FORK_COUNT}");
         }
+        let post = spec.post()?;
         if src.backend == BackendKind::Vz {
-            return self.fork_vm_vz(src, spec, actor, started).await;
+            return self.fork_vm_vz(src, spec, post, actor, started).await;
         }
         check_forkable(&src, spec.count)?;
         self.admit_fork_batch(&src, spec.count).await?;
@@ -242,7 +332,7 @@ impl VmManager {
         let parent_snapshot_ms = snap_started.elapsed().as_millis() as u64;
         let meta = src.workspace.join("snapshots").join(&tag).join("snap");
         let result = self
-            .fork_children(&src, &meta, &tag, &names, actor, &op, spec.identity)
+            .fork_children(&src, &meta, &tag, &names, actor, &op, spec.identity, &post)
             .await;
         if let Err(e) = self.delete_vm_snapshot(id, &tag).await {
             tracing::warn!(vm = %id, tag, error = %e, "removing fork snapshot failed");
@@ -329,6 +419,7 @@ impl VmManager {
         self: &Arc<Self>,
         src: VmRecord,
         spec: ForkSpec,
+        post: ForkPost,
         actor: Option<&str>,
         started: Instant,
     ) -> Result<ForkReport> {
@@ -371,9 +462,10 @@ impl VmManager {
         let sem = Arc::new(tokio::sync::Semaphore::new(usize::from(parallelism)));
         let mut set = tokio::task::JoinSet::new();
         let src = Arc::new(src);
+        let post = Arc::new(post);
         let actor_owned = actor.map(str::to_owned);
         for name in names {
-            let (this, src, tag, op, sem, created, actor) = (
+            let (this, src, tag, op, sem, created, actor, post) = (
                 Arc::clone(self),
                 Arc::clone(&src),
                 tag.clone(),
@@ -381,12 +473,22 @@ impl VmManager {
                 Arc::clone(&sem),
                 Arc::clone(&created),
                 actor_owned.clone(),
+                Arc::clone(&post),
             );
             let identity = spec.identity;
             set.spawn(async move {
                 let _permit = sem.acquire_owned().await;
                 let r = this
-                    .fork_child_vz(&src, &tag, &name, actor.as_deref(), &op, identity, &created)
+                    .fork_child_vz(
+                        &src,
+                        &tag,
+                        &name,
+                        actor.as_deref(),
+                        &op,
+                        identity,
+                        &post,
+                        &created,
+                    )
                     .await;
                 (name, r)
             });
@@ -464,6 +566,7 @@ impl VmManager {
         actor: Option<&str>,
         op: &OpGuard,
         identity: ForkIdentityMode,
+        post: &ForkPost,
         created: &std::sync::Mutex<Vec<Uuid>>,
     ) -> Result<(VmRecord, ForkChildReport)> {
         let t0 = Instant::now();
@@ -568,6 +671,13 @@ impl VmManager {
             }
         };
         let _ = op.fork_phase(id, ForkPhase::IdentityReset);
+        let (hooks_ms, ready_ms) = match self.fork_post_restore(&vm, post).await {
+            Ok(t) => t,
+            Err(e) => {
+                let _ = self.delete(id).await;
+                return Err(e);
+            }
+        };
         // Re-read: the reset may have rotated the token on the stored record.
         let vm = self.get(id).await.unwrap_or(vm);
         let report = ForkChildReport {
@@ -576,6 +686,8 @@ impl VmManager {
             prepare_ms,
             restore_ms,
             identity: outcome,
+            hooks_ms,
+            ready_ms,
             total_ms: t0.elapsed().as_millis() as u64,
         };
         Ok((vm, report))
@@ -590,6 +702,7 @@ impl VmManager {
         actor: Option<&str>,
         op: &OpGuard,
         identity: ForkIdentityMode,
+        post: &ForkPost,
     ) -> Result<Vec<(VmRecord, ForkChildReport)>> {
         let spec = fluxvm_hypervisor::snapshot::load_spec(meta)?;
         if spec.boot.engine != fluxvm_hypervisor::api::FluxVmEngine::Kvm {
@@ -601,7 +714,7 @@ impl VmManager {
         let mut children = Vec::with_capacity(names.len());
         for name in names {
             match self
-                .fork_child(src, &spec, tag, name, actor, op, identity)
+                .fork_child(src, &spec, tag, name, actor, op, identity, post)
                 .await
             {
                 Ok(child) => children.push(child),
@@ -625,6 +738,7 @@ impl VmManager {
         actor: Option<&str>,
         op: &OpGuard,
         identity: ForkIdentityMode,
+        post: &ForkPost,
     ) -> Result<(VmRecord, ForkChildReport)> {
         let t0 = Instant::now();
         self.admit_fork_child(src).await?;
@@ -740,6 +854,13 @@ impl VmManager {
             }
         };
         let _ = op.fork_phase(id, ForkPhase::IdentityReset);
+        let (hooks_ms, ready_ms) = match self.fork_post_restore(&vm, post).await {
+            Ok(t) => t,
+            Err(e) => {
+                let _ = self.delete(id).await;
+                return Err(e);
+            }
+        };
         let vm = self.get(id).await.unwrap_or(vm);
         let report = ForkChildReport {
             id,
@@ -747,6 +868,8 @@ impl VmManager {
             prepare_ms,
             restore_ms,
             identity: outcome,
+            hooks_ms,
+            ready_ms,
             total_ms: t0.elapsed().as_millis() as u64,
         };
         Ok((vm, report))
@@ -956,6 +1079,73 @@ impl VmManager {
             token_rotated: false,
             ms: t0.elapsed().as_millis() as u64,
         })
+    }
+}
+
+impl VmManager {
+    /// Hooks, then the readiness condition, for one child. Returns `(hooks_ms, ready_ms)`.
+    async fn fork_post_restore(&self, vm: &VmRecord, post: &ForkPost) -> Result<(u64, u64)> {
+        use fluxvm_guest_protocol::{AgentResponse, ExecProcess};
+        let deadline = tokio::time::Instant::now() + post.timeout;
+        let t0 = Instant::now();
+        for argv in &post.hooks {
+            let left = deadline
+                .saturating_duration_since(tokio::time::Instant::now())
+                .as_secs()
+                .max(1);
+            let process = ExecProcess {
+                argv: argv.clone(),
+                ..Default::default()
+            };
+            match self.exec_process(vm.id, process, Some(left)).await {
+                Ok(AgentResponse::Exec { exit_code: 0, .. }) => {}
+                Ok(AgentResponse::Exec {
+                    exit_code, stderr, ..
+                }) => bail!(
+                    "fork hook {:?} exited {exit_code}: {}",
+                    argv.first().map(String::as_str).unwrap_or(""),
+                    stderr.trim()
+                ),
+                Ok(other) => bail!("fork hook {:?} failed: {other:?}", argv.first()),
+                Err(e) => bail!("fork hook {:?} could not run: {e:#}", argv.first()),
+            }
+        }
+        let hooks_ms = t0.elapsed().as_millis() as u64;
+        let t1 = Instant::now();
+        let probe: Option<String> = match &post.ready {
+            ForkReady::Running => None,
+            ForkReady::Agent | ForkReady::Exec => Some("true".to_string()),
+            ForkReady::Tcp(port) => Some(format!(
+                "timeout 2 bash -c 'exec 3<>/dev/tcp/127.0.0.1/{port}' 2>/dev/null"
+            )),
+            ForkReady::Http { port, path } => Some(format!(
+                "curl -fsS -m 2 -o /dev/null http://127.0.0.1:{port}{path} 2>/dev/null \
+                 || wget -q -T 2 -O /dev/null http://127.0.0.1:{port}{path} 2>/dev/null"
+            )),
+        };
+        if let Some(cmd) = probe {
+            let mut last = String::from("no attempt");
+            loop {
+                match self.exec(vm.id, cmd.clone(), Some(5)).await {
+                    Ok(AgentResponse::Exec { exit_code: 0, .. }) => break,
+                    Ok(AgentResponse::Exec { exit_code, .. }) => {
+                        last = format!("probe exited {exit_code}")
+                    }
+                    Ok(other) => last = format!("{other:?}"),
+                    Err(e) => last = format!("{e:#}"),
+                }
+                if tokio::time::Instant::now() >= deadline {
+                    bail!(
+                        "child {} was not ready ({:?}) within {:?}: {last}",
+                        vm.name,
+                        post.ready,
+                        post.timeout
+                    );
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            }
+        }
+        Ok((hooks_ms, t1.elapsed().as_millis() as u64))
     }
 }
 
@@ -1179,6 +1369,43 @@ mod tests {
         // A typo is an error, not a silently ignored (and therefore unsafe) default.
         assert!(serde_json::from_str::<ForkSpec>(r#"{"identiy":"preserve"}"#).is_err());
         assert!(serde_json::from_str::<ForkSpec>(r#"{"identity":"maybe"}"#).is_err());
+    }
+
+    #[test]
+    fn ready_and_hooks_parse_and_are_validated() {
+        let spec: ForkSpec = serde_json::from_str(
+            r#"{"count":2,"ready":{"http":{"port":8080,"path":"/health"}},"hooks":[["systemctl","restart","app"]],"ready_timeout_seconds":30}"#,
+        )
+        .unwrap();
+        let post = spec.post().unwrap();
+        assert_eq!(post.timeout.as_secs(), 30);
+        assert_eq!(post.hooks.len(), 1);
+        assert!(matches!(post.ready, ForkReady::Http { port: 8080, .. }));
+        for (json, ok) in [
+            (r#"{"ready":"exec"}"#, true),
+            (r#"{"ready":{"tcp":5432}}"#, true),
+            (r#"{"ready":{"tcp":0}}"#, false),
+            (r#"{"ready":{"http":{"port":80}}}"#, true),
+            (r#"{"ready":{"http":{"port":80,"path":"/a b"}}}"#, false),
+            (r#"{"ready":{"http":{"port":80,"path":"x"}}}"#, false),
+            (
+                r#"{"ready":{"http":{"port":80,"path":"/x;rm -rf /"}}}"#,
+                false,
+            ),
+            (r#"{"hooks":[[]]}"#, false),
+            (r#"{"hooks":[["ok",""]]}"#, false),
+        ] {
+            let s: ForkSpec = serde_json::from_str(json).unwrap();
+            assert_eq!(s.post().is_ok(), ok, "{json}");
+        }
+        let nine: ForkSpec =
+            serde_json::from_value(serde_json::json!({"hooks": vec![vec!["a"]; 9]})).unwrap();
+        assert!(nine.post().is_err());
+        assert!(serde_json::from_str::<ForkSpec>(r#"{"ready":"soon"}"#).is_err());
+        // Defaults: nothing extra is waited for.
+        let d: ForkSpec = serde_json::from_str("{}").unwrap();
+        assert_eq!(d.ready, ForkReady::Running);
+        assert!(d.hooks.is_empty());
     }
 
     #[test]

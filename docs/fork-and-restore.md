@@ -145,6 +145,20 @@ Not done:
 - A plain snapshot restore of the same VM (`vm_restore.rs`) does not call
   `ResetIdentity`; it only waits for the agent to answer again.
 
+## Hooks and readiness
+
+`hooks` (argv lists, at most 8) run in each child **after** its identity is reset and **before** readiness is probed,
+as root through the guest agent (no shell; they need the agent). A non-zero exit fails the fork. `ready` says what a
+child must do before it is reported: `running` (default: identity reset and nothing more), `agent` (answers a ping),
+`exec` (a trivial command runs, through SSH for a vz guest without an agent), `{"tcp": 5432}` (accepts connections on
+`127.0.0.1` inside the guest) or `{"http": {"port": 8080, "path": "/health"}}` (a 2xx). Probes retry for
+`ready_timeout_seconds` (default 60, hooks included); a child that is not ready fails the whole fork and is deleted.
+`fluxctl fork-vm --hook "systemctl restart app" --ready http:8080/health --ready-timeout 30`. The per-child report has
+`hooks_ms` and `ready_ms`.
+
+This is the place to reset application identity the guest cannot know about (a node id, a session cache): the fork
+copied it. Secrets held in application memory are not rotated.
+
 ## First-command latency: ?ready=exec
 
 `?ready=exec` (or `?wait_first_command=true`) on `POST /v1/vms`,
