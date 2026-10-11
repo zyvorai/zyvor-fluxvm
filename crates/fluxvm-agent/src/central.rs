@@ -1132,8 +1132,6 @@ async fn create_vm_inner(
 
     let (req_vcpus, req_mem) = request_sizes(&body);
     let profile = extract_security_profile(&body)?;
-    let apple_request = apple_placement_request(&body, req_vcpus, req_mem);
-    let macos_guest = apple_request.as_ref().is_some_and(|r| r.macos_guest);
 
     // Who placement acts for: the tenant (own or named by the operator) once tenancy is on, else the caller. The
     // quota is reserved (not just checked) so parallel creates by one tenant cannot overshoot it.
@@ -1156,11 +1154,23 @@ async fn create_vm_inner(
                             .map_err(tenancy_error)?,
                     )
                 };
+                if wants_tenant_vmnet(&body) {
+                    let had = tenancy.tenants.get(t).and_then(|x| x.network_index);
+                    if let Some(net) = tenancy.tenant_vmnet(t) {
+                        body["apple"]["vmnet"] = net;
+                        if had.is_none() {
+                            fleet.persist_tenancy(&tenancy);
+                        }
+                    }
+                }
                 (Caller::Tenant(t.clone()), reservation)
             }
             _ => (caller.clone(), None),
         }
     };
+    // After any tenant network was stamped, so placement asks for a vmnet-capable Mac.
+    let apple_request = apple_placement_request(&body, req_vcpus, req_mem);
+    let macos_guest = apple_request.as_ref().is_some_and(|r| r.macos_guest);
     let placed = place_and_dispatch(
         fleet,
         caller,
@@ -1184,6 +1194,25 @@ async fn create_vm_inner(
         fleet.tenancy.lock().await.release_reservation(id);
     }
     placed
+}
+
+/// Whether a create should join its tenant's isolated vmnet network: a `vz` VM that did not choose its own network
+/// (vmnet, usernet, a bridge, or no network at all).
+fn wants_tenant_vmnet(body: &Value) -> bool {
+    if body.get("backend").and_then(Value::as_str) != Some("vz") {
+        return false;
+    }
+    if body
+        .get("network")
+        .and_then(|n| n.get("mode"))
+        .and_then(Value::as_str)
+        == Some("none")
+    {
+        return false;
+    }
+    let apple = body.get("apple");
+    let set = |k: &str| apple.and_then(|a| a.get(k)).is_some_and(|v| !v.is_null());
+    !(set("vmnet") || set("usernet") || set("bridge_interface"))
 }
 
 /// What [`create_vm_inner`] worked out about a create before placing it.

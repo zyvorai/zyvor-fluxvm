@@ -1433,6 +1433,27 @@ mod tests {
     }
 
     #[test]
+    fn only_vz_vms_without_their_own_network_join_the_tenant_network() {
+        assert!(wants_tenant_vmnet(&json!({"backend": "vz"})));
+        assert!(wants_tenant_vmnet(
+            &json!({"backend": "vz", "apple": {"vmnet": null}})
+        ));
+        assert!(!wants_tenant_vmnet(&json!({"backend": "qemu"})));
+        assert!(!wants_tenant_vmnet(
+            &json!({"backend": "vz", "network": {"mode": "none"}})
+        ));
+        assert!(!wants_tenant_vmnet(
+            &json!({"backend": "vz", "apple": {"usernet": {}}})
+        ));
+        assert!(!wants_tenant_vmnet(
+            &json!({"backend": "vz", "apple": {"bridge_interface": "en0"}})
+        ));
+        let mut body = json!({"backend": "vz"});
+        body["apple"]["vmnet"] = json!({"name": "x"});
+        assert_eq!(body["apple"]["vmnet"]["name"], "x");
+    }
+
+    #[test]
     fn tenancy_errors_map_to_http() {
         assert_eq!(
             tenancy_error(TenancyError::Quota("x".into())).0,
