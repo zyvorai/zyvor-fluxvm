@@ -2527,6 +2527,16 @@ impl VmManager {
                         });
                     }
                     ci.runcmd.extend(runcmd);
+                    ci.static_nics = apple
+                        .networks
+                        .iter()
+                        .filter_map(|n| {
+                            Some(fluxvm_core::model::CloudInitNic {
+                                mac: n.mac.clone()?,
+                                address: n.address.clone()?,
+                            })
+                        })
+                        .collect();
                 }
                 Some(guard)
             }
