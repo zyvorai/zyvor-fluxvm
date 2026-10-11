@@ -2384,6 +2384,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "fluxvm-diskinject"
+version = "0.3.0"
+dependencies = [
+ "fluxvm-guest-protocol",
+ "tempfile",
+]
+
+[[package]]
 name = "fluxvm-firecracker"
 version = "0.4.0"
 dependencies = [
