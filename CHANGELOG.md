@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+### Changed: fork v2 (`POST /v1/vms/{id}/fork`): strict identity, rotated agent token, parallel children
+- **`identity` defaults to `unique`**: the fork fails and every child is deleted unless the guest confirms hostname, machine-id,
+  entropy, SSH host keys, cloud-init, DHCP and network state, and the child's agent token is rotated. Before this a failed reset
+  was only logged. `best-effort` keeps the old behaviour, `preserve` resets nothing. A guest with no (or an old) agent is reset
+  over SSH when reachable, else refused with the missing capability named. **This is a behaviour change for callers whose guests
+  lack the agent**: pass `identity: "best-effort"`.
+- New request fields `identity`, `network` (`auto`, `isolated`, `none`, `preserve`) and `parallelism`; the response gains `fork`
+  with per-child `prepare_ms`, `restore_ms`, identity result and `parent_snapshot_ms`. `fluxctl fork-vm --identity --network
+  --parallel` and the MCP `vm_fork` tool carry them.
+- vz children are restored up to `parallelism` at a time, admission is checked once for the whole batch before the parent is
+  paused, and journal intents recorded from concurrent children no longer race.
+- Guest agent: `ResetIdentity` gains SSH host keys, cloud-init, DHCP and network-state resets and `new_agent_token`.
+- **Fixed: forked children drew identical random numbers.** All children of one fork resumed the same kernel CRNG state and the
+  reset credited entropy without reseeding, so two children got the same machine-id and all of them the same new SSH host key.
+  The agent now issues `RNDRESEEDCRNG`. Found by checking uniqueness from inside the guests on an M4.
+- Verified on an M4: 4 strict children in 3.6 s; 5 of 5 distinct machine-ids, host keys and tokens. A NAT guest still cannot be
+  forked: its state restored onto a usernet NIC leaves the NIC disconnected.
+
 ### Fixed: the host could never choose the macOS guest agent
 - Admission refused `agent.enabled` for every macOS guest ("fluxvm-guest-agent is a Linux binary"), and the sandbox path sets it for
   `apple.macos_vsock` guests, so a macOS agent that answered over vsock was never used. It is now accepted with `macos_vsock`

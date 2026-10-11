@@ -270,6 +270,8 @@ pub struct OpGuard {
     op: OpKind,
     op_id: Uuid,
     finished: bool,
+    /// `record` is a read-modify-write of the intent file; children recorded from concurrent tasks must not interleave.
+    record_lock: std::sync::Mutex<()>,
 }
 
 impl OpGuard {
@@ -300,11 +302,13 @@ impl OpGuard {
             op,
             op_id,
             finished: false,
+            record_lock: std::sync::Mutex::new(()),
         })
     }
 
     /// Appends `resource` to the intent (durably) before it is allocated.
     pub fn record(&self, resource: Resource) -> Result<()> {
+        let _serialise = self.record_lock.lock().unwrap_or_else(|e| e.into_inner());
         let mut intent = read_op(&self.state_dir, self.op, self.op_id)?;
         if !intent.resources.contains(&resource) {
             intent.resources.push(resource);
@@ -339,6 +343,42 @@ impl Drop for OpGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn concurrent_children_are_all_recorded() {
+        let td = tempfile::tempdir().unwrap();
+        let g = std::sync::Arc::new(
+            OpGuard::begin(
+                td.path(),
+                OpKind::Fork,
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                vec![],
+            )
+            .unwrap(),
+        );
+        let ids: Vec<Uuid> = (0..24).map(|_| Uuid::new_v4()).collect();
+        let handles: Vec<_> = ids
+            .iter()
+            .map(|id| {
+                let (g, id) = (std::sync::Arc::clone(&g), *id);
+                std::thread::spawn(move || g.record(Resource::ForkChild { vm_id: id }).unwrap())
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap();
+        }
+        let intents = pending_ops(td.path());
+        assert_eq!(intents.len(), 1);
+        for id in ids {
+            assert!(
+                intents[0]
+                    .resources
+                    .contains(&Resource::ForkChild { vm_id: id }),
+                "a concurrently recorded child was lost"
+            );
+        }
+    }
 
     #[test]
     fn stat_start_time_survives_odd_command_names() {

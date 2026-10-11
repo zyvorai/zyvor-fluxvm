@@ -884,12 +884,15 @@ pub fn tools(remote: Arc<Remote>) -> Vec<Tool> {
         ),
         tool(
             "vm_fork",
-            "Fork a running flux-vm VM into count (1-32) running copies that share its memory snapshot; each child gets a copy-on-write disk. Returns the children.",
+            "Fork a running VM (flux-vm, or a vz Linux guest on apple.usernet or without a network) into count (1-32) running copies from one saved state; each child gets a copy-on-write disk. By default every child's identity (hostname, machine-id, SSH host keys, cloud-init, DHCP, agent token) is reset and the fork fails if that cannot be confirmed. Returns the children and per-phase timings.",
             object(
                 json!({
                     "vm": vm_prop,
                     "count": {"type": "integer", "minimum": 1, "maximum": 32, "description": "children to create, default 1"},
                     "name_prefix": {"type": "string", "description": "child names are <prefix>-<n>; default <vm>-fork"},
+                    "identity": {"type": "string", "enum": ["unique", "best-effort", "preserve"], "description": "unique (default) fails the fork unless each child's identity reset is confirmed; best-effort keeps the child anyway; preserve resets nothing"},
+                    "network": {"type": "string", "enum": ["auto", "isolated", "none", "preserve"], "description": "default auto"},
+                    "parallelism": {"type": "integer", "minimum": 1, "maximum": 32, "description": "children restored at once (vz); default min(count, 8)"},
                 }),
                 &["vm"],
             ),
@@ -905,6 +908,14 @@ pub fn tools(remote: Arc<Remote>) -> Vec<Tool> {
                     let mut body = json!({"count": count});
                     if let Some(p) = str_arg(&args, "name_prefix") {
                         body["namePrefix"] = json!(p);
+                    }
+                    for key in ["identity", "network"] {
+                        if let Some(v) = str_arg(&args, key) {
+                            body[key] = json!(v);
+                        }
+                    }
+                    if let Some(p) = int_arg(&args, "parallelism")? {
+                        body["parallelism"] = json!(p);
                     }
                     let v = r
                         .call(Method::POST, &format!("/v1/vms/{id}/fork"), Some(body))

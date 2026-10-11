@@ -887,12 +887,18 @@ fn fresh_machine_id() -> std::io::Result<String> {
     Ok(b.iter().map(|x| format!("{x:02x}")).collect())
 }
 
-/// Credit `data` to the kernel entropy pool (RNDADDENTROPY, needs root).
+/// Credit `data` to the kernel entropy pool (RNDADDENTROPY, needs root), then reseed the CRNG at once (RNDRESEEDCRNG).
+///
+/// The second step matters for a forked guest: every child resumes the same CRNG state, and crediting the pool does
+/// not by itself make the kernel reseed (it does so on a schedule, at most once a minute), so without it two children
+/// draw identical "random" machine-ids and SSH host keys right after the restore. Found on hardware.
 #[cfg(target_os = "linux")]
 fn add_entropy(data: &[u8]) -> std::io::Result<()> {
     use std::os::fd::AsRawFd;
     // _IOW('R', 0x03, int[2])
     const RNDADDENTROPY: u32 = 0x4008_5203;
+    // _IO('R', 0x07)
+    const RNDRESEEDCRNG: u32 = 0x5207;
     // struct rand_pool_info { int entropy_count; int buf_size; u32 buf[]; }
     let mut buf = Vec::with_capacity(8 + data.len());
     buf.extend_from_slice(&((data.len() * 8) as i32).to_ne_bytes());
@@ -904,6 +910,14 @@ fn add_entropy(data: &[u8]) -> std::io::Result<()> {
     let rc = unsafe { libc::ioctl(f.as_raw_fd(), RNDADDENTROPY as _, buf.as_ptr()) };
     if rc != 0 {
         return Err(std::io::Error::last_os_error());
+    }
+    let rc = unsafe { libc::ioctl(f.as_raw_fd(), RNDRESEEDCRNG as _) };
+    if rc != 0 {
+        let e = std::io::Error::last_os_error();
+        return Err(std::io::Error::new(
+            e.kind(),
+            format!("RNDRESEEDCRNG (the pool was credited but the CRNG was not reseeded): {e}"),
+        ));
     }
     Ok(())
 }

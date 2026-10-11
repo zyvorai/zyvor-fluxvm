@@ -2431,19 +2431,6 @@ async fn restart_vm(
     Ok(Json(json!(m.restart(id).await?)))
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ForkVmRequest {
-    #[serde(default = "default_fork_count")]
-    count: u32,
-    #[serde(default, rename = "namePrefix", alias = "name_prefix")]
-    name_prefix: Option<String>,
-}
-
-fn default_fork_count() -> u32 {
-    1
-}
-
 /// Fork a running flux-vm VM into `count` running children from one memory
 /// snapshot (see `fluxvm_scheduler::fork`).
 async fn fork_vm(
@@ -2452,7 +2439,7 @@ async fn fork_vm(
     Path(id): Path<Uuid>,
     actor: Option<Extension<AuditActor>>,
     Query(rq): Query<ReadyQuery>,
-    Json(req): Json<ForkVmRequest>,
+    Json(req): Json<fluxvm_scheduler::fork::ForkSpec>,
 ) -> ApiResult<impl IntoResponse> {
     require_admin(role)?;
     let actor_name = actor.as_ref().map(|a| a.0.0.as_str());
@@ -2463,10 +2450,19 @@ async fn fork_vm(
             .map_err(|e| ApiError::forbidden(e.to_string()))?;
     }
     let started = std::time::Instant::now();
-    let items = m
-        .fork_vm(id, req.count, req.name_prefix, actor_name)
-        .await?;
-    let mut body = json!({"items": items, "elapsed_ms": started.elapsed().as_millis() as u64});
+    let report = m.fork_vm_spec(id, req, actor_name).await?;
+    let items = report.children.clone();
+    let mut body = json!({
+        "items": items,
+        "elapsed_ms": started.elapsed().as_millis() as u64,
+        "fork": {
+            "identity": report.reports.first().map(|r| r.identity.via.clone()),
+            "parent_snapshot_ms": report.parent_snapshot_ms,
+            "total_ms": report.total_ms,
+            "parallelism": report.parallelism,
+            "children": report.reports,
+        },
+    });
     if rq.wants_exec() {
         let mut tasks = Vec::new();
         for item in &items {

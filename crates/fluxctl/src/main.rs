@@ -271,8 +271,8 @@ enum Command {
         id: Uuid,
         new_name: String,
     },
-    /// Fork a running flux-vm VM into N running copies sharing one memory
-    /// snapshot. REST: `POST /v1/vms/{id}/fork` `{"count": N}`.
+    /// Fork a running VM (flux-vm, or a vz Linux guest on apple.usernet or no network) into N
+    /// running copies from one saved state. REST: `POST /v1/vms/{id}/fork` `{"count": N}`.
     ForkVm {
         #[arg(value_parser = output::parse_vm_ref)]
         id: Uuid,
@@ -281,6 +281,16 @@ enum Command {
         /// Child names are `<prefix>-<n>` (default `<vm>-fork`).
         #[arg(long)]
         prefix: Option<String>,
+        /// `unique` (default): fail the fork unless every child's identity reset is confirmed;
+        /// `best-effort`: log a failed reset and keep the child; `preserve`: reset nothing.
+        #[arg(long, value_parser = ["unique", "best-effort", "preserve"])]
+        identity: Option<String>,
+        /// `auto` (default), `isolated`, `none` or `preserve`; see docs/fork-and-restore.md.
+        #[arg(long, value_parser = ["auto", "isolated", "none", "preserve"])]
+        network: Option<String>,
+        /// Children restored at the same time (vz; default min(count, 8)).
+        #[arg(long)]
+        parallel: Option<u8>,
     },
     /// Block until a VM reaches a state: `running`, `stopped`, `paused`,
     /// `failed`, or `agent` (guest agent answers a ping).
@@ -2876,10 +2886,26 @@ async fn run_remote(
             )
             .await?,
         )?,
-        Command::ForkVm { id, count, prefix } => {
+        Command::ForkVm {
+            id,
+            count,
+            prefix,
+            identity,
+            network,
+            parallel,
+        } => {
             let mut body = json!({"count": count});
             if let Some(p) = prefix {
                 body["namePrefix"] = json!(p);
+            }
+            if let Some(i) = identity {
+                body["identity"] = json!(i);
+            }
+            if let Some(n) = network {
+                body["network"] = json!(n);
+            }
+            if let Some(p) = parallel {
+                body["parallelism"] = json!(p);
             }
             pretty(
                 &r.call(Method::POST, &format!("/v1/vms/{id}/fork"), Some(body))
@@ -3902,11 +3928,41 @@ async fn main() -> Result<()> {
                 serde_json::to_string_pretty(&m.clone_vm(id, new_name, None).await?)?
             );
         }
-        Command::ForkVm { id, count, prefix } => {
-            let items = m.fork_vm(id, count, prefix, None).await?;
+        Command::ForkVm {
+            id,
+            count,
+            prefix,
+            identity,
+            network,
+            parallel,
+        } => {
+            // The same JSON the REST body carries, so the vocabulary is one thing.
+            let mut body = serde_json::json!({"count": count});
+            if let Some(p) = prefix {
+                body["name_prefix"] = serde_json::json!(p);
+            }
+            if let Some(i) = identity {
+                body["identity"] = serde_json::json!(i);
+            }
+            if let Some(n) = network {
+                body["network"] = serde_json::json!(n);
+            }
+            if let Some(p) = parallel {
+                body["parallelism"] = serde_json::json!(p);
+            }
+            let spec: fluxvm_scheduler::fork::ForkSpec = serde_json::from_value(body)?;
+            let report = m.fork_vm_spec(id, spec, None).await?;
             println!(
                 "{}",
-                serde_json::to_string_pretty(&serde_json::json!({"items": items}))?
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "items": report.children,
+                    "fork": {
+                        "parent_snapshot_ms": report.parent_snapshot_ms,
+                        "total_ms": report.total_ms,
+                        "parallelism": report.parallelism,
+                        "children": report.reports,
+                    },
+                }))?
             );
         }
         Command::SnapshotList { id } => {

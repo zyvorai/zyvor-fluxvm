@@ -336,7 +336,7 @@ fn schemas() -> Value {
             "labels": {"type": "object", "additionalProperties": {"type": ["string", "null"]}}
         }},
         "CloneVmRequest": {"type": "object", "required": ["name"], "properties": {"name": {"type": "string"}}},
-        "ForkVmRequest": {"type": "object", "properties": {"count": {"type": "integer", "minimum": 1, "maximum": 32, "default": 1}, "namePrefix": {"type": "string"}}},
+        "ForkVmRequest": {"type": "object", "properties": {"count": {"type": "integer", "minimum": 1, "maximum": 32, "default": 1}, "namePrefix": {"type": "string"}, "identity": {"type": "string", "enum": ["preserve", "best-effort", "unique"], "default": "unique", "description": "unique fails the fork (children rolled back) unless the guest confirms hostname, machine-id, entropy, SSH host keys, cloud-init, DHCP and network state; best-effort logs a failed reset and keeps the child; preserve resets nothing"}, "network": {"type": "string", "enum": ["auto", "isolated", "none", "preserve"], "default": "auto"}, "parallelism": {"type": "integer", "minimum": 1, "maximum": 32, "description": "children restored at once (vz); default min(count, 8)"}}},
         "BackupVmRequest": {"type": "object", "properties": {
             "name": {"type": "string", "description": "Backup name under state_dir/backups; default <vm>-<utc>"},
             "compress": {"type": "boolean"},
