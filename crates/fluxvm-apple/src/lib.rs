@@ -10,6 +10,7 @@
 pub mod blockd;
 mod capability;
 mod control;
+pub mod display;
 mod host_caps;
 pub mod ipsw;
 pub mod macos_install;
@@ -17,16 +18,18 @@ mod runner;
 pub mod screen;
 pub mod ssh;
 mod usb_passthrough;
-pub mod vz27;
 pub mod usernet;
+pub mod vz27;
 pub mod vznet;
 
 pub use capability::{
-    CAPABILITIES, Capability, validate_disk, validate_request, with_egress_forwarder,
-    with_guest_reporting, with_self_control_forwarder, with_shared_folder_mounts,
+    CAPABILITIES, Capability, RUNNER_MIN_MACOS, macos_major, set_host_capabilities, validate_disk,
+    validate_request, validate_request_with_host, with_egress_forwarder, with_guest_reporting,
+    with_self_control_forwarder, with_shared_folder_mounts,
 };
 pub use control::{ControlReply, call as control_call, call_with as control_call_with};
-pub use host_caps::{AppleHostCapabilities, host_capabilities};
+pub use display::{display_resize, display_resize_request};
+pub use host_caps::{AppleHostCapabilities, host_capabilities, prime_host_capabilities};
 pub use ipsw::{IpswInfo, latest_ipsw};
 pub use runner::{
     EGRESS_PORT, ForwardConfig, OneShotVm, RunnerConfig, SELF_CONTROL_PORT, SNAPSHOT_FILES,
@@ -260,7 +263,12 @@ impl VmBackend for AppleBackend {
         };
         // apple.usernet: the NIC socketpair is made here so the runner and the supervised gateway each inherit an end.
         let gateway = match req.apple.as_ref().and_then(|a| a.usernet.as_ref()) {
-            Some(u) => Some(usernet::Gateway::prepare(u, ctx.id, &ctx.workspace, &conf.mac)?),
+            Some(u) => Some(usernet::Gateway::prepare(
+                u,
+                ctx.id,
+                &ctx.workspace,
+                &conf.mac,
+            )?),
             None => None,
         };
         let conf_path = conf.write(&ctx.workspace)?;

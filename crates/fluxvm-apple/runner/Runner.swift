@@ -916,8 +916,12 @@ final class Runner: NSObject, VZVirtualMachineDelegate, NSWindowDelegate {
             switch cmd {
             case "ping": response = ["ok": true]; sem.signal()
             case "status": response = ["ok": true, "state": self.state, "ip": self.ip as Any? ?? NSNull()]; sem.signal()
-            case "pause": self.vm?.pause { r in response = self.result(r, "paused", set: { self.state = "paused" }); sem.signal() }
-            case "resume": self.vm?.resume { r in response = self.result(r, "running", set: { self.state = "running" }); sem.signal() }
+            case "pause":
+                if let why = self.controlPrecondition("pause") { response = ["ok": false, "error": why]; sem.signal(); break }
+                self.vm?.pause { r in response = self.result(r, "paused", set: { self.state = "paused" }); sem.signal() }
+            case "resume":
+                if let why = self.controlPrecondition("resume") { response = ["ok": false, "error": why]; sem.signal(); break }
+                self.vm?.resume { r in response = self.result(r, "running", set: { self.state = "running" }); sem.signal() }
             case "save":
                 // Pauses the guest and writes its memory and device state to `path`. The guest stays paused so the
                 // host can clone the disk at the same instant; `resume` continues it.
@@ -1004,10 +1008,16 @@ final class Runner: NSObject, VZVirtualMachineDelegate, NSWindowDelegate {
                 dev.share = VZSingleDirectoryShare(directory: VZSharedDirectory(url: URL(fileURLWithPath: path), readOnly: (o["read_only"] as? Bool) ?? false))
                 response = ["ok": true]
                 sem.signal()
+            case "display-resize":
+                response = self.displayResize(o)
+                sem.signal()
             case "shutdown":
+                if let why = self.controlPrecondition("shutdown") { response = ["ok": false, "error": why]; sem.signal(); break }
                 do { try self.vm?.requestStop(); response = ["ok": true, "state": "stopping"] } catch { response = ["ok": false, "error": error.localizedDescription] }
                 sem.signal()
-            case "stop": response = ["ok": true]; sem.signal(); self.vm?.stop { _ in self.cleanupAndExit(0) }
+            case "stop":
+                if let why = self.controlPrecondition("stop") { response = ["ok": false, "error": why]; sem.signal(); break }
+                response = ["ok": true]; sem.signal(); self.vm?.stop { _ in self.cleanupAndExit(0) }
             default: sem.signal()
             }
         }

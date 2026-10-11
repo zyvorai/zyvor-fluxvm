@@ -53,6 +53,18 @@ pub fn host_capabilities() -> Result<AppleHostCapabilities> {
     }
 }
 
+/// Probes the host once per process and installs the result for [`crate::validate_request`], so refusals name the
+/// real macOS requirement. A failed probe (no runner, not macOS) leaves only the static table in force.
+pub async fn prime_host_capabilities() {
+    static ONCE: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new();
+    ONCE.get_or_init(|| async {
+        if let Ok(Ok(caps)) = tokio::task::spawn_blocking(host_capabilities).await {
+            crate::set_host_capabilities(Some(caps));
+        }
+    })
+    .await;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

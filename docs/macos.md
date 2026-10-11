@@ -329,6 +329,21 @@ rewound or rebooted; `self_info` then shows whether it worked, and a second one 
 Verified on macOS 27.2 with a Debian 13 guest: a file changed after `self_snapshot` was back to its old content after
 `self_snapshot_restore` (same boot id: memory was restored, not rebooted), and `self_restart` gave a new boot id.
 
+### Control preconditions, display resize and per-feature minimum macOS
+
+- The runner checks `canStart`, `canPause`, `canResume`, `canRequestStop` and `canStop` before `pause`, `resume`, `shutdown` and
+  `stop`, and answers with a plain reason (`cannot pause: the VM is paused; pause needs a running VM`) instead of a Virtualization
+  error from the middle of a transition. **Unverified on hardware** (compiled against the macOS 27 SDK only).
+- `display-resize` on the runner control socket calls `VZGraphicsDisplay.reconfigure(configuration:)` (macOS 14+) on a running or
+  paused VM. From Rust: `fluxvm_apple::display_resize(&vm, width, height, display, ppi)`; `ppi` only applies to macOS guests.
+  **Unverified on hardware**: whether the guest follows the new size depends on its display driver. There is no REST route.
+- Every capability-table entry has a `min_macos` (`None` means the runner floor, macOS 14); for example USB controller and nested
+  virtualization 15, vmnet 26, custom Virtio, Secure Boot, ASIF overlay and macOS provisioning 27. When the daemon has probed the
+  host (it does so once, before the first `vz` create), `fluxvm_apple::validate_request` refuses with the real requirement
+  (`apple.vmnet needs macOS 26 or later; this Mac runs macOS 15 (...)`). Without a probe only the static table applies.
+- NAT MTU is **not** configurable: the macOS 27 SDK has `maximumTransmissionUnit` only on `VZFileHandleNetworkDeviceAttachment`
+  (macOS 13+, the attachment the userspace gateway uses), not on `VZNATNetworkDeviceAttachment`, so `apple.nat_mtu` was not added.
+
 ### Stored sign-in
 
 `fluxctl signin` keeps a guest username and password in the host's login Keychain (service `dev.zyvor.fluxvm.vm-signin`,

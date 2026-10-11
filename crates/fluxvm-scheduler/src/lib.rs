@@ -419,7 +419,12 @@ fn vz_token_disk_injection_eligible(
     if vm_running {
         return Err("VM is running; its disk is never written to");
     }
-    if req.agent.as_ref().and_then(|a| a.token.as_deref()).is_none() {
+    if req
+        .agent
+        .as_ref()
+        .and_then(|a| a.token.as_deref())
+        .is_none()
+    {
         return Err("no agent token");
     }
     let Some(apple) = req.apple.as_ref() else {
@@ -2213,6 +2218,8 @@ impl VmManager {
         req.backend = resolve_backend(&req, &self.cfg);
         if req.backend == BackendKind::Vz {
             self.resolve_macos_ipsw(&mut req).await?;
+            // Installs the live host's macOS version once, so a refusal names the real OS requirement.
+            fluxvm_apple::prime_host_capabilities().await;
             fluxvm_apple::validate_request(&req)?;
         }
         let requested_profile = req.security_profile;
@@ -5465,21 +5472,26 @@ mod tests {
         };
         let r = with_token(req(BackendKind::Vz, None, None));
         assert!(vz_token_disk_injection_eligible(&r, true, false).is_ok());
-        assert!(vz_token_disk_injection_eligible(&r, true, true).is_err(), "running VM");
-        assert!(vz_token_disk_injection_eligible(&r, false, false).is_err(), "not raw");
+        assert!(
+            vz_token_disk_injection_eligible(&r, true, true).is_err(),
+            "running VM"
+        );
+        assert!(
+            vz_token_disk_injection_eligible(&r, false, false).is_err(),
+            "not raw"
+        );
         let q = with_token(req(BackendKind::Qemu, None, None));
         assert!(vz_token_disk_injection_eligible(&q, true, false).is_err());
         let none = req(BackendKind::Vz, None, None);
-        assert!(vz_token_disk_injection_eligible(&none, true, false).is_err(), "no token");
-        let mut mac = with_token(req(BackendKind::Vz, None, None));
-        mac.apple = Some(
-            serde_json::from_value(serde_json::json!({"guest_os": "macos"})).unwrap(),
+        assert!(
+            vz_token_disk_injection_eligible(&none, true, false).is_err(),
+            "no token"
         );
+        let mut mac = with_token(req(BackendKind::Vz, None, None));
+        mac.apple = Some(serde_json::from_value(serde_json::json!({"guest_os": "macos"})).unwrap());
         assert!(vz_token_disk_injection_eligible(&mac, true, false).is_err());
         let mut oci = with_token(req(BackendKind::Vz, None, None));
-        oci.apple = Some(
-            serde_json::from_value(serde_json::json!({"init_config": {}})).unwrap(),
-        );
+        oci.apple = Some(serde_json::from_value(serde_json::json!({"init_config": {}})).unwrap());
         assert!(vz_token_disk_injection_eligible(&oci, true, false).is_err());
         let mut shared = with_token(req(BackendKind::Vz, None, None));
         shared.storage = StorageBackend::Shared;
