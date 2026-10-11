@@ -1,10 +1,14 @@
 # Changelog
 
-## Unreleased
+## 0.4.0 (2026-10-11)
 
 ### Added: native macOS-first VZ base (FluxDisk, usernet, netobs, diskinject, macOS guest agent)
-All of it is unit/protocol tested on a Mac; none of it has been booted against a real VZ guest, so every item is marked
-unverified on hardware in `docs/macos.md`.
+Run on an Apple M4 (macOS 27.x) with a Debian 13 guest; the results, and what was not run, are in the "Hardware verification
+log" of `docs/macos.md`. Verified: offline token injection, FluxDisk `overlay` against VZ's NBD client (persistence, byte-identical
+base, branch, read-only frozen overlay), usernet (DHCP, ARP, DNS and deny, ICMP, IPv6 SLAAC, TCP, forwards, egress policy,
+throughput), netobs through usernet and through the vz-switch bridge (byte-exact on a two-guest iperf3), attestation, loopback
+`tcp` vsock services, and the vsock transport to a macOS 27 guest. Not run on hardware: the macOS LaunchDaemon agent, blockd
+encryption / lazy HTTP base / structured replies on VZ, many-flow usernet, fast fork on vz, and guests with an overlay on macOS.
 - `fluxvm-blockd` (FluxDisk): pure-Rust NBD server for VZ's NBD attachment. Copy-on-write overlays with instant `branch`,
   `rebase`, grow-only `resize`, AES-256-XTS at rest, lazy HTTP range base with a persisted block cache, structured replies and
   parallel requests, IOPS/bandwidth limiter. New `apple.extra_disks` kind `overlay`, served by a supervised blockd per VM.
@@ -18,11 +22,21 @@ unverified on hardware in `docs/macos.md`.
 - `fluxvm-diskinject`: offline ext4 writer for raw Linux guest disks on macOS; the vz agent token is injected before launch
   with a cloud-init fallback.
 - `apple.macos_vsock` (experimental): vsock device for macOS guests plus a macOS-buildable `fluxvm-guest-agent` and LaunchDaemon;
-  SSH remains the fallback.
+  SSH remains the fallback. The vsock transport is verified on a macOS 27.0.1 guest; the LaunchDaemon agent has not been run.
 - `apple.root_caching` / `apple.root_sync`, runner control preconditions, display resize, per-feature minimum macOS in refusals,
   loopback-only `tcp` vsock services (local model server), `fluxvm_vm_runner_*` metrics, a signed boot manifest in the
   `metadata` vsock service (a host claim, not a hardware root of trust).
 - Not done: NAT MTU (not in the SDK for NAT attachments), fast fork on vz (needs hardware).
+
+### Fixed during hardware verification
+- A stopped VM's pause, resume and balloon now answer 409 "start it first" instead of a runner error.
+- VM accounting attributes the `com.apple.Virtualization.VirtualMachine.xpc` service process to its runner.
+- usernet: TCP was sent to the broadcast MAC when the guest's MAC was pinned; upload is paced to the host queue (3-4 MB/s with
+  2100 retransmits became about 9 MB/s with none).
+- netobs: every frame lost between a switch and the observer is counted (`bridge_dropped{reason}`, `switch_forward_dropped`),
+  flows are oriented by the handshake, and a restarted daemon binds its bridge again for a switch that outlived it.
+- Guests with `apple.networks` plus cloud-init took 2 minutes to boot: private cards are now static entries in the seed's
+  `network-config`, so `systemd-networkd-wait-online` no longer waits on them.
 
 ### Verified: `apple.asif_overlay` on a Linux guest
 - `scripts/vz-asif-overlay-live-test.sh`: on macOS 27.2 a 64 MiB guest write grows `disk-overlay.asif` and leaves the base `root.raw`
@@ -55,8 +69,6 @@ unverified on hardware in `docs/macos.md`.
 ### Fixed: `GET /v1/vms/{id}/logs?follow=true` stalls in URLSession clients
 - The stream now sends `X-Content-Type-Options: nosniff` and `Cache-Control: no-cache`. Without them URLSession held back the first
   512 bytes of the `text/plain` body for content sniffing, so a quiet console showed nothing in Swift clients.
-
-## 0.4.0 (2026-10-10)
 
 ### Added: `image: "macos"` installs from Apple's newest restore image
 - With `apple.install`, the image name `macos` (in `image` or `apple.media`) is resolved through the runner's new `latest-ipsw`
