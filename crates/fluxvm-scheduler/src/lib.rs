@@ -1276,6 +1276,55 @@ impl VmManager {
         }
     }
 
+    /// Pins a QEMU VM's vCPU threads to the host CPUs of the NUMA nodes in
+    /// `req.numa` (or legacy `numa_node`). Best-effort like `attach_cgroup`:
+    /// guest memory binding is already enforced by QEMU at launch, and
+    /// `GET /v1/vms/{id}/numa` reports the affinity actually in effect.
+    async fn pin_numa_vcpus(&self, id: Uuid, req: &CreateVmRequest, qmp_socket: &std::path::Path) {
+        if req.backend != BackendKind::Qemu {
+            return;
+        }
+        let plan = fluxvm_qemu::numa::plan(req);
+        if plan.is_empty() {
+            return;
+        }
+        match fluxvm_qemu::numa::pin_vcpus(
+            qmp_socket,
+            &plan,
+            std::path::Path::new("/sys"),
+            std::time::Duration::from_secs(15),
+        )
+        .await
+        {
+            Ok(applied) => {
+                tracing::info!(vm = %id, vcpus = applied.len(), "pinned vCPU threads to host NUMA nodes")
+            }
+            Err(e) => {
+                tracing::warn!(vm = %id, error = %e, "vCPU NUMA pinning failed; guest memory is still bound")
+            }
+        }
+    }
+
+    /// Live NUMA placement of a running QEMU VM.
+    pub async fn numa_status(&self, id: Uuid) -> Result<fluxvm_core::model::VmNumaStatus> {
+        let vm = self.get(id).await?;
+        if vm.backend != BackendKind::Qemu {
+            bail!("NUMA status requires backend qemu");
+        }
+        let pid = match (vm.status, vm.pid) {
+            (VmStatus::Running | VmStatus::Paused, Some(pid)) => pid,
+            _ => bail!("VM is not running"),
+        };
+        let plan = fluxvm_qemu::numa::plan(&vm.request);
+        fluxvm_qemu::numa::status(
+            &vm.workspace.join("qmp.sock"),
+            pid,
+            &plan,
+            std::time::Duration::from_secs(10),
+        )
+        .await
+    }
+
     /// `req.cloud_init` with a mount runcmd appended per `req.shared_folders`
     /// entry — writing a real `/etc/fstab` line (not just a one-shot `mount`
     /// command) so the share keeps working across a later stop/start, since
@@ -2634,6 +2683,10 @@ impl VmManager {
         if !req.data_disks.is_empty() && req.backend != BackendKind::Qemu {
             anyhow::bail!("data_disks requires backend qemu");
         }
+        if !req.numa.is_empty() && req.backend != BackendKind::Qemu {
+            anyhow::bail!("numa requires backend qemu");
+        }
+        req.validate_numa()?;
 
         let result: Result<()> = async {
             if req.storage == StorageBackend::Shared {
@@ -2877,6 +2930,8 @@ impl VmManager {
                 record.qga_socket = Some(workspace.join("qga.sock"));
             }
             self.attach_cgroup(id, launch.pid, &mut record, &req.vfio_devices);
+            self.pin_numa_vcpus(id, &req, &workspace.join("qmp.sock"))
+                .await;
             record.status = VmStatus::Running;
             if req.backend == BackendKind::FluxVm
                 && !self.cfg.sandbox.egress_proxy_listen.is_empty()
@@ -3867,6 +3922,8 @@ impl VmManager {
             }
             let vfio_devices = vm.request.vfio_devices.clone();
             self.attach_cgroup(id, launch.pid, &mut vm, &vfio_devices);
+            self.pin_numa_vcpus(id, &vm.request, &vm.workspace.join("qmp.sock"))
+                .await;
             vm.status = VmStatus::Running;
             vm.error = None;
             live_migration::clear_hotplug_labels(&mut vm.labels);
@@ -5911,6 +5968,7 @@ mod tests {
             cpuset: None,
             hugepages: None,
             vfio_devices: vec![],
+            numa: vec![],
             pod_uid: None,
             secure_boot: None,
             tpm: None,

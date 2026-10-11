@@ -60,6 +60,7 @@ POST   /v1/vms/{uuid}/hotplug/nic
 POST   /v1/vms/{uuid}/hotplug/nic/unplug # {"mac": ...} or {"tap": ...}; extra NICs only
 POST   /v1/vms/{uuid}/hotplug/share
 GET    /v1/vms/{uuid}/cpuset
+GET    /v1/vms/{uuid}/numa               # qemu; guest NUMA nodes, live vCPU thread affinity, memdev binding; see host-topology.md
 POST   /v1/vms/{uuid}/freeze
 POST   /v1/vms/{uuid}/thaw
 GET    /v1/vms/{uuid}/frozen
@@ -679,6 +680,13 @@ Two read-only routes feed a dashboard without scraping `/metrics`:
 - `GET /v1/host/apple/capabilities`: the capability table judged against this Mac: per `feature` `supported`, `note`,
   `min_macos`, `available_here` (`null` when the host has not been probed) and `reason` (macOS version, chip generation,
   missing `com.apple.vm.networking`, missing Rosetta).
+
+### Host topology and NUMA binding (Linux)
+
+- `GET /v1/host/topology`: NUMA nodes (CPUs, thread siblings, memory, hugepage pools, distances) and placeable PCI
+  devices (GPU, NIC, NVMe, accelerator) with NUMA node, PCIe root, IOMMU group and SR-IOV VFs.
+- `POST /v1/host/pci/bind` / `POST /v1/host/pci/release`: `/v1/host/gpus/bind|release` for any PCI function; admin.
+- `CreateVmRequest.numa` binds guest NUMA nodes to host nodes (QEMU only). See [host-topology.md](host-topology.md).
 
 ### Balloon and memory
 

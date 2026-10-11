@@ -361,6 +361,8 @@ pub fn router(manager: Arc<VmManager>) -> Router {
         .route("/v1/host/gpus/preflight", get(host_gpu_preflight))
         .route("/v1/host/gpus/bind", post(bind_host_gpu))
         .route("/v1/host/gpus/release", post(release_host_gpu))
+        .route("/v1/host/pci/bind", post(bind_host_pci))
+        .route("/v1/host/pci/release", post(release_host_pci))
         .route("/v1/vms", post(create_vm).get(list_vms))
         .route(
             "/v1/vms/{id}",
@@ -464,6 +466,7 @@ pub fn router(manager: Arc<VmManager>) -> Router {
         .route("/v1/vms/{id}/hotplug/nic/unplug", post(unplug_vm_nic))
         .route("/v1/vms/{id}/hotplug/share", post(hotplug_vm_share))
         .route("/v1/vms/{id}/cpuset", get(vm_cpuset))
+        .route("/v1/vms/{id}/numa", get(vm_numa))
         .route("/v1/vms/{id}/freeze", post(freeze_vm))
         .route("/v1/vms/{id}/thaw", post(thaw_vm))
         .route("/v1/vms/{id}/frozen", get(vm_frozen))
@@ -2272,6 +2275,42 @@ async fn release_host_gpu(
     )?))
 }
 
+/// Binds any PCI function's IOMMU group to vfio-pci (NIC, NVMe, SR-IOV VF,
+/// accelerator); `/v1/host/gpus/bind` is the GPU-only view of the same.
+async fn bind_host_pci(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Json(req): Json<fluxvm_core::gpu::GpuBindRequest>,
+) -> ApiResult<Json<fluxvm_core::gpu::GpuBindResult>> {
+    require_admin(role)?;
+    let allocated = allocated_vfio_bdfs(&m.list().await);
+    let state_dir = m.cfg.state_dir.clone();
+    Ok(Json(
+        tokio::task::spawn_blocking(move || {
+            fluxvm_core::gpu::bind_gpu_group(&state_dir, &req, &allocated)
+        })
+        .await
+        .map_err(anyhow::Error::from)??,
+    ))
+}
+
+async fn release_host_pci(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Json(req): Json<fluxvm_core::gpu::GpuReleaseRequest>,
+) -> ApiResult<Json<fluxvm_core::gpu::PciReleaseResult>> {
+    require_admin(role)?;
+    let allocated = allocated_vfio_bdfs(&m.list().await);
+    let state_dir = m.cfg.state_dir.clone();
+    Ok(Json(
+        tokio::task::spawn_blocking(move || {
+            fluxvm_core::gpu::release_pci_group(&state_dir, &req, &allocated)
+        })
+        .await
+        .map_err(anyhow::Error::from)??,
+    ))
+}
+
 async fn start_migration(
     State(m): State<Arc<VmManager>>,
     Extension(role): Extension<Role>,
@@ -3987,6 +4026,13 @@ async fn vm_cpuset(
     Ok(Json(json!({"cpus": m.get_cpuset(id).await?})))
 }
 
+async fn vm_numa(
+    State(m): State<Arc<VmManager>>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<fluxvm_core::model::VmNumaStatus>> {
+    Ok(Json(m.numa_status(id).await?))
+}
+
 #[derive(Debug, Deserialize)]
 struct LogsQuery {
     #[serde(default)]
@@ -5155,6 +5201,7 @@ mod tests {
                 cpuset: None,
                 hugepages: None,
                 vfio_devices: vec![],
+                numa: vec![],
                 pod_uid: None,
                 secure_boot: None,
                 tpm: None,

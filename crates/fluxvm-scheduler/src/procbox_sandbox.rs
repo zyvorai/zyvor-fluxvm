@@ -1332,6 +1332,7 @@ fn minimal_request(name: Option<String>, spec: &ProcboxSpec) -> CreateVmRequest 
         cpuset: None,
         hugepages: None,
         vfio_devices: Vec::new(),
+        numa: Vec::new(),
         pod_uid: None,
         secure_boot: None,
         tpm: None,

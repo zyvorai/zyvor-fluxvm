@@ -228,6 +228,24 @@ fn ops() -> Vec<Op> {
             HOST,
         ),
         op(
+            "post",
+            "/v1/host/pci/bind",
+            "Bind a PCI function's whole IOMMU group to vfio-pci (admin)",
+            HOST,
+        ),
+        op(
+            "post",
+            "/v1/host/pci/release",
+            "Release a PCI function's IOMMU group, optionally restoring the host driver (admin)",
+            HOST,
+        ),
+        op(
+            "get",
+            "/v1/vms/{id}/numa",
+            "Live NUMA placement of a QEMU VM: guest nodes, vCPU thread affinity, memory backend binding",
+            VMS,
+        ),
+        op(
             "get",
             "/v1/host/apple/capabilities",
             "The capability table judged against this Mac (available here, and why not)",

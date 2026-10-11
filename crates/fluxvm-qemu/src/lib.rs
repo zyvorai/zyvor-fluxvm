@@ -4,6 +4,7 @@
 pub mod block;
 mod confidential;
 pub mod disks;
+pub mod numa;
 mod qmp;
 pub mod receiver;
 
@@ -214,7 +215,18 @@ pub fn build_args(
     // QEMU's default anonymous allocation — `vhost-user-fs-pci` otherwise
     // fails to attach. `-m` above still sets the *size*; this object is
     // what makes the *backing* shareable with the virtiofsd process(es).
-    if !virtiofs_sockets.is_empty() || req.shared_memory {
+    let numa_plan = numa::plan(req);
+    if !numa_plan.is_empty() {
+        req.validate_numa()?;
+        let backing = if !virtiofs_sockets.is_empty() || req.shared_memory {
+            numa::MemoryBacking::Shared
+        } else if req.hugepages == Some(true) {
+            numa::MemoryBacking::Hugepages
+        } else {
+            numa::MemoryBacking::Ram
+        };
+        a.extend(numa::args(&numa_plan, backing, req.vcpus, max_vcpus));
+    } else if !virtiofs_sockets.is_empty() || req.shared_memory {
         a.extend([
             "-object".into(),
             format!(
@@ -232,16 +244,13 @@ pub fn build_args(
             ),
         ]);
         a.extend(["-numa".into(), "node,memdev=hp_mem".into()]);
-    } else if req.numa_node.is_some() || req.cpuset.is_some() {
+    } else if req.cpuset.is_some() {
         a.extend(["-numa".into(), "node,nodeid=0".into()]);
     }
-    if let Some(cpus) = &req.cpuset {
+    if numa_plan.is_empty()
+        && let Some(cpus) = &req.cpuset
+    {
         a.extend(["-numa".into(), format!("cpu={cpus},node=0")]);
-    } else if req.numa_node.is_some() {
-        a.extend([
-            "-numa".into(),
-            format!("cpu=0-{},node=0", req.vcpus.saturating_sub(1)),
-        ]);
     }
     for host in &req.vfio_devices {
         a.extend(["-device".into(), format!("vfio-pci,host={host}")]);
@@ -852,6 +861,7 @@ mod tests {
             cpuset: None,
             hugepages: None,
             vfio_devices: vec![],
+            numa: vec![],
             pod_uid: None,
             secure_boot: None,
             tpm: None,
@@ -1019,6 +1029,47 @@ mod tests {
             .map(|i| &args[i + 1])
             .unwrap();
         assert_eq!(m, "2048M,slots=4,maxmem=4096M");
+    }
+
+    #[test]
+    fn numa_binds_each_guest_node_to_its_host_node() {
+        let mut r = req(2048);
+        r.vcpus = 2;
+        r.max_vcpus = Some(4);
+        r.numa = vec![
+            fluxvm_core::model::VmNumaNode {
+                host_node: 1,
+                vcpus: vec![0],
+                host_cpus: vec![],
+                memory_mib: 1024,
+            },
+            fluxvm_core::model::VmNumaNode {
+                host_node: 0,
+                vcpus: vec![1],
+                host_cpus: vec![],
+                memory_mib: 1024,
+            },
+        ];
+        let args = build_args(&cfg(), &r, &ctx(), &[]).unwrap();
+        let joined = args.join(" ");
+        assert!(
+            joined.contains("memory-backend-ram,id=numa-mem0,size=1024M,host-nodes=1,policy=bind")
+        );
+        assert!(joined.contains("node,nodeid=1,memdev=numa-mem1,cpus=1-3"));
+
+        r.numa[1].memory_mib = 512;
+        assert!(build_args(&cfg(), &r, &ctx(), &[]).is_err());
+    }
+
+    #[test]
+    fn legacy_numa_node_becomes_one_bound_node() {
+        let mut r = req(1024);
+        r.numa_node = Some(0);
+        r.hugepages = Some(true);
+        let joined = build_args(&cfg(), &r, &ctx(), &[]).unwrap().join(" ");
+        assert!(joined.contains("memory-backend-file,id=numa-mem0,size=1024M,mem-path=/dev/hugepages,share=on,prealloc=on,host-nodes=0,policy=bind"));
+        assert!(joined.contains("node,nodeid=0,memdev=numa-mem0,cpus=0-1"));
+        assert!(!joined.contains("cpu=0"));
     }
 
     #[test]
@@ -1305,6 +1356,7 @@ mod snapshot_save_tests {
                 cpuset: None,
                 hugepages: None,
                 vfio_devices: vec![],
+                numa: vec![],
                 pod_uid: None,
                 secure_boot: None,
                 tpm: None,

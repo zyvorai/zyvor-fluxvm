@@ -394,6 +394,28 @@ pub fn release_gpu_group(
     req: &GpuReleaseRequest,
     allocated_bdfs: &HashSet<String>,
 ) -> Result<HostGpu> {
+    let released = release_pci_group(state_dir, req, allocated_bdfs)?;
+    let gpus = list_host_gpus(state_dir, allocated_bdfs)?;
+    gpus.into_iter()
+        .find(|g| g.bdf == released.bdf)
+        .with_context(|| format!("GPU {} not found after release", released.bdf))
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PciReleaseResult {
+    pub bdf: String,
+    pub iommu_group: u32,
+    pub members: Vec<String>,
+    /// Driver each member is on after the release.
+    pub drivers: BTreeMap<String, String>,
+}
+
+/// `release_gpu_group` for any PCI function (NIC, NVMe, VF, accelerator).
+pub fn release_pci_group(
+    state_dir: &Path,
+    req: &GpuReleaseRequest,
+    allocated_bdfs: &HashSet<String>,
+) -> Result<PciReleaseResult> {
     let bdf = normalize_bdf(&req.bdf)?;
     let (group_id, members) =
         iommu_group_info(&bdf)?.with_context(|| format!("PCI device {bdf} has no IOMMU group"))?;
@@ -417,10 +439,16 @@ pub fn release_gpu_group(
         save_bind_state(state_dir, &state)?;
     }
 
-    let gpus = list_host_gpus(state_dir, allocated_bdfs)?;
-    gpus.into_iter()
-        .find(|g| g.bdf == bdf)
-        .with_context(|| format!("GPU {bdf} not found after release"))
+    let drivers = members
+        .iter()
+        .filter_map(|m| pci_driver_name(m).map(|d| (m.clone(), d)))
+        .collect();
+    Ok(PciReleaseResult {
+        bdf,
+        iommu_group: group_id,
+        members,
+        drivers,
+    })
 }
 
 /// IOMMU / driver preflight checks for a host that will run GPU VMs.
