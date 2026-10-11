@@ -447,6 +447,21 @@ These compile against the macOS 27 SDK and are validated at admission. Except fo
   network's fingerprint includes them. Each runner owns its network unless the VMs name it: `vmnet.name` (macOS 26+) makes them share one network through the `fluxvm-vmnetd` broker over XPC
   ([VMNET_BROKER.md](VMNET_BROKER.md)). **Not verified:** on the test Mac the ad-hoc signed broker was killed at launch (SIP on, `com.apple.vm.networking`), so two runners on one name have not run; with no broker a named VM fails with "vmnetd XPC connection failed". Exclusive with `bridge_interface`. IP discovery and the 127.0.0.1 `network.forwards`
   relay read the NAT lease file, so use `vmnet.forwards` instead.
+- **Userspace gateway (`apple.usernet`, Linux guests, UNVERIFIED on hardware):** replaces the NAT card with a file-handle NIC whose
+  peer is a supervised `fluxvm-usernet` process (ARP, DHCP `10.0.2.15/24`, DNS forwarder, TCP/UDP NAT, egress policy, port forwards).
+  Spec: `"usernet": {"allow_cidrs": ["93.184.216.0/24"], "deny_cidrs": [], "allow_ports": [], "deny_ports": [25],
+  "dns_allow": ["example.com"], "dns_deny": [], "allow_private": false, "mtu": 1500,
+  "port_forwards": [{"protocol": "tcp", "host_addr": "127.0.0.1", "host_port": 8080, "guest_port": 80}]}`. Any `allow_cidrs` or
+  `dns_allow` entry makes egress a strict allow-list; the default is the public internet without private ranges. Admission refuses it for
+  macOS guests and together with `network.mode = "none"`, `bridge_interface`, `vmnet` or `network.forwards`; CIDRs, ports (1-65535), host
+  ports (0 or 1024-65535), forward protocol/address and MTU (576-9000) are checked. The daemon creates the NIC socketpair, the runner
+  and the gateway each inherit an end (runner fd 3, `usernet_fd` in the runner config; gateway `--fd 3`), and the daemon restarts a
+  gateway that dies for as long as the runner lives; the gateway also exits when the runner is gone. The gateway needs `fluxvm-usernet`
+  next to `fluxctl` (or `FLUXVM_USERNET`). With network observability on, the gateway copies each frame to the daemon (`--tap-fd`),
+  so `/v1/netobs/*` sees real frames for the VM (verdict is always `allowed` at the frame level: denials show in the gateway log,
+  `<workspace>/usernet.log`). Frames reach the observer only when the VM is launched by the `fluxctl serve` daemon. IP discovery and
+  the legacy 127.0.0.1 `network.forwards` relay read the NAT lease file and do not work: use `usernet.port_forwards`. Never booted;
+  the file-handle attachment path is the same one private networks use, which is verified.
 - **Custom Virtio (macOS 27+, Linux guests):** `custom_virtio: true` adds a vendor Virtio device (id `0x3F`, PCI `1af4:107f`; an earlier id, `0xFF00`, was outside the range Linux binds) with a host-side provider. Queue 0 is a bounded (1 MiB) versioned JSON control channel (`ping`, `echo`, `capabilities`, `stats`, `map-probe`); queue 1 is the bulk queue (`bulk_zero`, `fill`, `copy`, `crc32`, up to 64 MiB). The guest driver is in `guest/virtio-flux` (`/dev/fluxvm`, `/dev/fluxvm-bulk`, `fluxvm_virtioctl`). **Verified** on the M4 with a Debian 13 guest: `ping`, `echo`, `stats` and `capabilities`. `fluxvm_virtioctl bulk-test`, `bulk-zero-test`, `bulk-copy-test` and `bulk-crc-test` (queue 1, 1 B to 1 MiB) pass after the driver stopped using a stack buffer for its request; the 64 MiB host cap was not tried. See [macos-vz27-full-stack.md](macos-vz27-full-stack.md).
   The device also handles DRIVER_OK, stop, pause, resume and reset, and saves its counters with a VM snapshot (the configuration sets
   `supportsSaveRestore`; without it Virtualization refuses to save a VM with the device). **Verified** on the M4: snapshot, stop and
@@ -514,6 +529,7 @@ These compile against the macOS 27 SDK and are validated at admission. Except fo
 | shared folders (virtiofs), VM snapshots (memory + disk, Linux and macOS guests), pause / resume, graceful shutdown, force stop, EFI Secure Boot (macOS 27+, Linux) | TPM, confidential profiles |
 | guest agent over vsock (proxied like Firecracker; needs the agent in the image) | hotplug of CPU, memory and NICs; cdroms; firmware overrides |
 | macOS guests (installed from an IPSW through the API or by hand, then cloned; see above) | live migration, in-place restore of a running VM, direct kernel boot of macOS guests |
+| `apple.usernet` userspace gateway for Linux guests (egress/DNS policy, UDP/TCP forwards, netobs frames; **unverified on hardware**) | |
 | `apple.macos_vsock` for macOS guests: vsock device plus a LaunchDaemon agent (**experimental, unverified**; SSH remains the fallback) | exec policies in macOS guests (Landlock/seccomp are Linux-only) |
 | extra disks (image, block device, NBD; virtio, NVMe, USB), USB disk hot-attach and detach, private networks, console ports, bridged and vmnet networking, balloon, Rosetta, display, audio | (vmnet forwards may be UDP; NAT forwards are TCP only) |
 

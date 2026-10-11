@@ -82,6 +82,7 @@ struct Config: Decodable {
     let root_sync: String?          // root/seed disk flush mode: full | fsync | none
     let extra_disks: [ExtraDisk]?
     let networks: [PrivateNetwork]?
+    let usernet_fd: Int32?          // inherited datagram socket: the guest NIC's end of a pair whose other end `fluxvm-usernet` serves
     let console_ports: [ConsolePort]?
     let serial_log_max_bytes: UInt64?
     let label: String?              // macOS 27+ VZVirtualMachineConfiguration.label (the VM's name in system services)

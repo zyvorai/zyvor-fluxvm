@@ -17,6 +17,7 @@ pub mod screen;
 pub mod ssh;
 mod usb_passthrough;
 pub mod vz27;
+pub mod usernet;
 pub mod vznet;
 
 pub use capability::{
@@ -245,6 +246,11 @@ impl VmBackend for AppleBackend {
             net.socket = vznet::ensure_switch(&net.name).await?;
             net.switch_bin = vznet::find_switch()?;
         }
+        // apple.usernet: the NIC socketpair is made here so the runner and the supervised gateway each inherit an end.
+        let gateway = match req.apple.as_ref().and_then(|a| a.usernet.as_ref()) {
+            Some(u) => Some(usernet::Gateway::prepare(u, ctx.id, &ctx.workspace, &conf.mac)?),
+            None => None,
+        };
         let conf_path = conf.write(&ctx.workspace)?;
         if install {
             macos_install::run_install(&runner, &conf_path, &ctx.workspace).await?;
@@ -261,10 +267,22 @@ impl VmBackend for AppleBackend {
             .stdout(log.try_clone().context("cloning the runner log")?)
             .stderr(log)
             .process_group(0);
+        if let Some(g) = &gateway {
+            let nic = g.runner_fd();
+            // SAFETY: only async-signal-safe calls (dup2/fcntl) run between fork and exec.
+            unsafe {
+                cmd.pre_exec(move || usernet::install_fd(nic, usernet::RUNNER_NIC_FD));
+            }
+        }
         let mut child = cmd
             .spawn()
             .with_context(|| format!("starting {}", runner.display()))?;
         let pid = child.id().context("runner exited immediately")?;
+        // Dropping `gateway_stop` (a failed launch below, or the runner exiting) stops the gateway.
+        let (gateway_stop, gateway_rx) = tokio::sync::watch::channel(false);
+        if let Some(g) = gateway {
+            g.supervise(pid, gateway_rx);
+        }
 
         // Ready = the control socket answers `status` with a running guest. A runner that exits first has failed.
         let deadline = tokio::time::Instant::now() + START_TIMEOUT;
@@ -293,6 +311,7 @@ impl VmBackend for AppleBackend {
         // Reap the runner in the background; it outlives this call and is stopped through its control socket or SIGTERM.
         tokio::spawn(async move {
             let _ = child.wait().await;
+            drop(gateway_stop);
         });
         Ok(LaunchResult {
             pid,

@@ -58,6 +58,10 @@ pub const CAPABILITIES: &[Capability] = &[
         "macOS 26+ shared/host-only network, DHCP reservation, TCP/UDP forwards; named networks are shared across VMs through the fluxvm-vmnetd broker; unverified on hardware",
     ),
     yes(
+        "usernet gateway",
+        "Linux guests: userspace NAT (fluxvm-usernet) with egress/DNS policy, port forwards and flow observability in /v1/netobs; unverified on hardware",
+    ),
+    yes(
         "custom Virtio device",
         "macOS 27+ Linux guests; provider/delegate, bounded control queue, guest-memory mapping probe",
     ),
@@ -511,6 +515,9 @@ pub fn validate_request(req: &CreateVmRequest) -> Result<()> {
                     );
                 }
             }
+        }
+        if let Some(u) = &apple.usernet {
+            crate::usernet::validate(u, req, apple)?;
         }
         crate::macos_install::validate(req)?;
         if apple.custom_virtio && matches!(apple.guest_os, fluxvm_core::model::AppleGuest::Macos) {

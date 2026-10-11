@@ -20,6 +20,14 @@ extension Runner {
     }
 
     func networkAttachment() throws -> VZNetworkDeviceAttachment {
+        if let fd = cfg.usernet_fd {
+            // apple.usernet: frames go over the inherited datagram socket to the supervised fluxvm-usernet gateway.
+            // UNVERIFIED on hardware. The descriptor stays open for the life of the runner (the VM may be rebuilt).
+            var snd: Int32 = 1 << 20, rcv: Int32 = 4 << 20
+            setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &snd, socklen_t(MemoryLayout<Int32>.size))
+            setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &rcv, socklen_t(MemoryLayout<Int32>.size))
+            return VZFileHandleNetworkDeviceAttachment(fileHandle: FileHandle(fileDescriptor: fd, closeOnDealloc: false))
+        }
         if let spec = cfg.vmnet {
             #if canImport(vmnet)
             if #available(macOS 26.0, *) {

@@ -117,7 +117,12 @@ pub struct UserNet {
     udp_fwd: Vec<(usize, std::net::UdpSocket)>,
     fwd_addrs: Vec<SocketAddr>,
     handle: UserNetHandle,
+    tap: Option<StdUnixDatagram>,
 }
+
+/// First byte of a frame-tap datagram: the frame crossed the guest NIC in this direction. The rest is the Ethernet frame.
+pub const TAP_FROM_GUEST: u8 = 0;
+pub const TAP_TO_GUEST: u8 = 1;
 
 impl UserNet {
     /// `endpoint` is the gateway's end of the frame socketpair (the guest NIC holds the other). Forward listeners
@@ -173,7 +178,16 @@ impl UserNet {
                 log,
                 shutdown: Arc::new(Notify::new()),
             },
+            tap: None,
         })
+    }
+
+    /// Copies every frame the guest sends or receives to `tap` (a `SOCK_DGRAM` Unix socket), one datagram each,
+    /// prefixed by [`TAP_FROM_GUEST`] / [`TAP_TO_GUEST`]. Sends never block; a full tap socket drops the copy.
+    pub fn set_tap(&mut self, tap: StdUnixDatagram) -> io::Result<()> {
+        tap.set_nonblocking(true)?;
+        self.tap = Some(tap);
+        Ok(())
     }
 
     /// Like [`UserNet::new`] from a raw file descriptor (for example one end of a `socketpair` inherited from the
@@ -250,6 +264,7 @@ impl UserNet {
             upstreams: Arc::new(upstreams),
             next_id: 1,
             next_port: 49152,
+            tap: self.tap,
         };
         let r = engine.run_loop(ev_rx, self.handle.shutdown.clone()).await;
         for t in fwd_tasks {
@@ -351,6 +366,7 @@ struct Engine {
     upstreams: Arc<Vec<SocketAddr>>,
     next_id: u64,
     next_port: u16,
+    tap: Option<StdUnixDatagram>,
 }
 
 fn now_ms() -> u64 {
@@ -452,7 +468,10 @@ impl Engine {
                 r = self.sock.recv(&mut buf) => {
                     match r {
                         Ok(0) => {}
-                        Ok(n) => self.on_frame(&buf[..n]),
+                        Ok(n) => {
+                            self.tap_frame(TAP_FROM_GUEST, &buf[..n]);
+                            self.on_frame(&buf[..n]);
+                        }
                         Err(e) if matches!(e.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted) => {}
                         Err(e) => return Err(e),
                     }
@@ -469,6 +488,15 @@ impl Engine {
         let f = wire::build_eth(dst, self.cfg.gateway_mac, ethertype, payload);
         // Datagram semantics: a full socket buffer drops the frame; TCP recovers by retransmission.
         let _ = self.sock.try_send(&f);
+        self.tap_frame(TAP_TO_GUEST, &f);
+    }
+
+    fn tap_frame(&self, dir: u8, frame: &[u8]) {
+        let Some(t) = &self.tap else { return };
+        let mut d = Vec::with_capacity(frame.len() + 1);
+        d.push(dir);
+        d.extend_from_slice(frame);
+        let _ = t.send(&d);
     }
 
     fn send_ip(&self, src: Ipv4Addr, dst: Ipv4Addr, proto: u8, l4: &[u8]) {

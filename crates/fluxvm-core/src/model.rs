@@ -679,6 +679,60 @@ pub struct AppleSpec {
     /// socket name; the guest runs `rosettad` there.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rosetta_cache: Option<String>,
+    /// Linux guests: replace the NAT card with a userspace gateway (`fluxvm-usernet`) that applies this egress policy,
+    /// DNS allow/deny and port forwards, and feeds `/v1/netobs/*`. UNVERIFIED on hardware.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usernet: Option<AppleUsernet>,
+}
+
+/// Userspace gateway settings for a `vz` Linux guest (see [`AppleSpec::usernet`]). Mapped to `fluxvm-usernet`'s
+/// config by the Apple backend; with every list empty the guest gets "the public internet, no private ranges".
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct AppleUsernet {
+    /// IPv4 CIDRs (or bare addresses) the guest may reach. Any entry here, or in `allow_domains`, makes it a strict allow-list.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allow_cidrs: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deny_cidrs: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allow_ports: Vec<u16>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deny_ports: Vec<u16>,
+    /// Domain suffixes the guest may resolve (`example.com` matches itself and subdomains); others get NXDOMAIN.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dns_allow: Vec<String>,
+    /// Names that always get NXDOMAIN.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dns_deny: Vec<String>,
+    /// Let the guest reach private (RFC 1918, loopback, link-local) ranges.
+    #[serde(default)]
+    pub allow_private: bool,
+    /// Publish a guest port on the host.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub port_forwards: Vec<AppleUsernetForward>,
+    /// IP MTU, 576..=9000 (default 1500).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mtu: Option<u16>,
+}
+
+/// One host -> guest port forward of [`AppleUsernet`].
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct AppleUsernetForward {
+    /// `tcp` (default) or `udp`.
+    #[serde(default = "default_usernet_proto")]
+    pub protocol: String,
+    /// Host address to listen on (default 127.0.0.1).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_addr: Option<String>,
+    /// 1024..=65535, or 0 for an ephemeral port.
+    pub host_port: u16,
+    pub guest_port: u16,
+}
+
+fn default_usernet_proto() -> String {
+    "tcp".into()
 }
 
 /// Signatures and platform key for macOS 27 EFI Secure Boot (`VZEFIVariableStore`).
@@ -880,6 +934,7 @@ impl Default for AppleSpec {
             efi_secure_boot: None,
             recovery: false,
             rosetta_cache: None,
+            usernet: None,
         }
     }
 }

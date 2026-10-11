@@ -80,6 +80,9 @@ pub struct RunnerConfig {
     pub extra_disks: Vec<fluxvm_core::model::AppleDisk>,
     /// Private networks: one more network card each, connected to the network's switch.
     pub networks: Vec<NetworkConfig>,
+    /// `apple.usernet`: the inherited descriptor number of the guest NIC's datagram socket (see `crate::usernet`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub usernet_fd: Option<i32>,
     pub console_ports: Vec<ConsolePortConfig>,
     /// The console log is rotated to `<log>.1` past this size (the runner defaults to 16 MiB).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -268,6 +271,7 @@ impl RunnerConfig {
                     })
                 })
                 .collect::<Result<_>>()?,
+            usernet_fd: apple.usernet.as_ref().map(|_| crate::usernet::RUNNER_NIC_FD),
             console_ports: apple
                 .console_ports
                 .iter()

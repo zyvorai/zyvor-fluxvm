@@ -13,6 +13,8 @@ build = "build.rs"
 fluxvm-core = { path = "../fluxvm-core" }
 fluxvm-oci-init = { path = "../fluxvm-oci-init" }
 fluxvm-vz-switch = { path = "../fluxvm-vz-switch" }
+fluxvm-usernet = { path = "../fluxvm-usernet" }
+fluxvm-netobs = { path = "../fluxvm-netobs" }
 anyhow = "1"
 async-trait = "0.1"
 libc = "0.2"

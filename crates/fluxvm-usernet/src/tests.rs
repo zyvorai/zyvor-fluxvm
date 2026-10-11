@@ -732,3 +732,36 @@ async fn guest_is_pinned_to_its_lease_and_shutdown_works() {
     r.handle.shutdown();
     timeout(Duration::from_secs(2), r.task).await.unwrap().unwrap().unwrap();
 }
+
+#[tokio::test]
+async fn frame_tap_sees_both_directions() {
+    let (a, b) = StdUnixDatagram::pair().unwrap();
+    let (tap_tx, tap_rx) = StdUnixDatagram::pair().unwrap();
+    setbufs(&a);
+    setbufs(&b);
+    b.set_nonblocking(true).unwrap();
+    let cfg = UserNetConfig::default();
+    let mut un = UserNet::new(cfg.clone(), a).unwrap();
+    un.set_tap(tap_tx).unwrap();
+    let task = tokio::spawn(un.run());
+    let guest = Guest { s: UnixDatagram::from_std(b).unwrap(), cfg: cfg.clone() };
+    let req = build_arp(1, GMAC, cfg.guest_ip, [0; 6], cfg.gateway_ip);
+    guest.send_eth(BROADCAST, ETH_ARP, &req).await;
+    guest
+        .recv_where("ARP reply", |f| {
+            let e = parse_eth(f)?;
+            (e.ethertype == ETH_ARP).then_some(())
+        })
+        .await;
+    tap_rx.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+    let mut dirs = Vec::new();
+    let mut buf = vec![0u8; 2048];
+    while dirs.len() < 2 {
+        let n = tap_rx.recv(&mut buf).unwrap();
+        let e = parse_eth(&buf[1..n]).expect("tapped datagram is an Ethernet frame");
+        assert_eq!(e.ethertype, ETH_ARP);
+        dirs.push(buf[0]);
+    }
+    assert_eq!(dirs, vec![TAP_FROM_GUEST, TAP_TO_GUEST]);
+    task.abort();
+}
