@@ -1252,10 +1252,11 @@ impl Worker {
                     let mut delta_total = 0u64;
                     let unconfirmed = {
                         let mut g = self.clients.lock().unwrap_or_else(|e| e.into_inner());
-                        if g.len() >= 1024 && !g.contains_key(&client_id) {
-                            if let Some(k) = g.keys().next().copied() {
-                                g.remove(&k);
-                            }
+                        if g.len() >= 1024
+                            && !g.contains_key(&client_id)
+                            && let Some(k) = g.keys().next().copied()
+                        {
+                            g.remove(&k);
                         }
                         let a = g.entry(client_id).or_default();
                         let base = *a

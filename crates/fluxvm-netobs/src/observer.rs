@@ -317,21 +317,19 @@ impl Inner {
             && frame[0] & 1 == 0
         {
             let dst: Mac = [frame[0], frame[1], frame[2], frame[3], frame[4], frame[5]];
-            if dst != meta.identity.mac {
-                if let Some(peer) = self
-                    .peers
-                    .get(&(meta.identity.network.clone(), dst))
-                    .filter(|p| p.vm_id != meta.identity.vm_id)
-                    .cloned()
-                {
-                    let m = FrameMeta {
-                        identity: peer,
-                        ts_us: meta.ts_us,
-                        direction: Direction::ToGuest,
-                        verdict: meta.verdict,
-                    };
-                    self.ingest_view(frame, &m, true);
-                }
+            if let Some(peer) = self
+                .peers
+                .get(&(meta.identity.network.clone(), dst))
+                .filter(|p| p.vm_id != meta.identity.vm_id)
+                .cloned()
+            {
+                let m = FrameMeta {
+                    identity: peer,
+                    ts_us: meta.ts_us,
+                    direction: Direction::ToGuest,
+                    verdict: meta.verdict,
+                };
+                self.ingest_view(frame, &m, true);
             }
         }
     }
