@@ -2638,6 +2638,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "fluxvm-usernet"
+version = "0.3.0"
+dependencies = [
+ "libc",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "fluxvm-vsock-client"
 version = "0.3.0"
 dependencies = [
