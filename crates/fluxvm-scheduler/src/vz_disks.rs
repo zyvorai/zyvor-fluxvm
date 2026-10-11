@@ -450,15 +450,18 @@ mod tests {
             check_overlay_exclusive(
                 &[overlay("/b/base.raw", "/o/other.ovl")],
                 None,
-                &[a.clone()]
+                std::slice::from_ref(&a)
             )
             .is_ok()
         );
         // Same overlay file as a stopped VM: refused, naming it.
-        let err =
-            check_overlay_exclusive(&[overlay("/b/base.raw", "/o/data.ovl")], None, &[a.clone()])
-                .unwrap_err()
-                .to_string();
+        let err = check_overlay_exclusive(
+            &[overlay("/b/base.raw", "/o/data.ovl")],
+            None,
+            std::slice::from_ref(&a),
+        )
+        .unwrap_err()
+        .to_string();
         assert!(err.contains("/o/data.ovl") && err.contains("VM a"), "{err}");
         // A running one too, and `./`/`..` spellings do not hide it.
         let mut r = a.clone();
@@ -483,15 +486,22 @@ mod tests {
             vec![overlay("/b/base.raw", "/o/a.ovl")],
         );
         // Layering on top of an overlay another VM is still writing.
-        let err =
-            check_overlay_exclusive(&[overlay("/o/a.ovl", "/o/child.ovl")], None, &[a.clone()])
-                .unwrap_err()
-                .to_string();
+        let err = check_overlay_exclusive(
+            &[overlay("/o/a.ovl", "/o/child.ovl")],
+            None,
+            std::slice::from_ref(&a),
+        )
+        .unwrap_err()
+        .to_string();
         assert!(err.contains("still write"), "{err}");
         // Writing into another VM's base image.
         assert!(
-            check_overlay_exclusive(&[overlay("/b/x.raw", "/b/base.raw")], None, &[a.clone()])
-                .is_err()
+            check_overlay_exclusive(
+                &[overlay("/b/x.raw", "/b/base.raw")],
+                None,
+                std::slice::from_ref(&a)
+            )
+            .is_err()
         );
         // Another VM's root disk.
         assert!(
