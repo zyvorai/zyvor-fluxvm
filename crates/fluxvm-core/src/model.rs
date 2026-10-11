@@ -1002,6 +1002,90 @@ impl Default for AppleSpec {
     }
 }
 
+/// One guest NUMA node of a QEMU VM and the host node backing it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct VmNumaNode {
+    pub host_node: u32,
+    /// Guest vCPU indexes on this node.
+    pub vcpus: Vec<u32>,
+    /// Host CPUs the node's vCPU threads may run on; empty means every
+    /// CPU of `host_node`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub host_cpus: Vec<u32>,
+    pub memory_mib: u64,
+}
+
+impl CreateVmRequest {
+    /// Checks `numa` against the rest of the request: no mixing with the
+    /// legacy `numa_node`/`cpuset` fields, memory adds up to `memory_mib`,
+    /// and every boot vCPU `0..vcpus` sits on exactly one node.
+    pub fn validate_numa(&self) -> anyhow::Result<()> {
+        if self.numa.is_empty() {
+            return Ok(());
+        }
+        if self.numa_node.is_some() || self.cpuset.is_some() {
+            anyhow::bail!("numa cannot be combined with numa_node or cpuset");
+        }
+        let total: u64 = self.numa.iter().map(|n| n.memory_mib).sum();
+        if total != self.memory_mib {
+            anyhow::bail!(
+                "numa memory_mib adds up to {total} but the VM has {} MiB",
+                self.memory_mib
+            );
+        }
+        let mut seen = vec![false; usize::from(self.vcpus)];
+        for (i, node) in self.numa.iter().enumerate() {
+            if node.memory_mib == 0 {
+                anyhow::bail!("numa[{i}].memory_mib must be > 0");
+            }
+            if node.vcpus.is_empty() {
+                anyhow::bail!("numa[{i}].vcpus must not be empty");
+            }
+            for &v in &node.vcpus {
+                let Some(slot) = seen.get_mut(v as usize) else {
+                    anyhow::bail!("numa[{i}] vCPU {v} is outside 0..{}", self.vcpus);
+                };
+                if *slot {
+                    anyhow::bail!("vCPU {v} is on more than one numa node");
+                }
+                *slot = true;
+            }
+        }
+        if let Some(missing) = seen.iter().position(|s| !s) {
+            anyhow::bail!("vCPU {missing} is not on any numa node");
+        }
+        Ok(())
+    }
+}
+
+/// Where a vCPU thread was pinned at launch.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct VcpuAffinity {
+    pub vcpu: u32,
+    pub thread_id: i32,
+    pub host_node: u32,
+    pub host_cpus: Vec<u32>,
+}
+
+/// A guest memory backend as QEMU reports it (`query-memdev`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MemdevBinding {
+    pub id: String,
+    pub size_mib: u64,
+    pub host_nodes: Vec<u32>,
+    pub policy: String,
+}
+
+/// Live NUMA placement of a running QEMU VM (`GET /v1/vms/{id}/numa`).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct VmNumaStatus {
+    /// The guest NUMA nodes the VM was launched with.
+    pub nodes: Vec<VmNumaNode>,
+    /// Each vCPU thread's current host CPU affinity.
+    pub vcpus: Vec<VcpuAffinity>,
+    pub memdevs: Vec<MemdevBinding>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateVmRequest {
     /// Apple Virtualization.framework options (`backend: "vz"` only).
@@ -1117,6 +1201,13 @@ pub struct CreateVmRequest {
     /// QEMU only: VFIO PCI passthrough device addresses (`host=0000:…`).
     #[serde(default)]
     pub vfio_devices: Vec<String>,
+    /// QEMU only: guest NUMA nodes, each bound to a host NUMA node. Guest
+    /// memory is allocated on the host node (`policy=bind`) and the node's
+    /// vCPU threads are pinned to `host_cpus`. Replaces `numa_node` and
+    /// `cpuset`; memory must add up to `memory_mib` and vCPUs must cover
+    /// `0..vcpus` exactly once.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub numa: Vec<VmNumaNode>,
     /// Set 6S: Kubernetes Pod UID (from the CRI `io.kubernetes.cri.sandbox-uid`
     /// annotation), supplied by `containerd-shim-fluxvm-v2` for Secure
     /// Containers Pods. Mints a stable eBPF Pod identity
@@ -1591,6 +1682,22 @@ pub struct RuntimeCapabilities {
     /// Changed-block-tracking backups to object storage.
     #[serde(default)]
     pub backup: Vec<RuntimeBackupCapability>,
+    /// Host-level placement support.
+    #[serde(default)]
+    pub host: RuntimeHostCapability,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeHostCapability {
+    /// `GET /v1/host/topology` reports NUMA nodes and placeable devices.
+    pub topology: bool,
+    /// `CreateVmRequest.numa` binds guest memory and vCPU threads to host
+    /// NUMA nodes (QEMU).
+    pub numa_binding: bool,
+    /// `POST /v1/host/pci/bind` and `/release` move any IOMMU group to and
+    /// from vfio-pci.
+    pub pci_bind: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

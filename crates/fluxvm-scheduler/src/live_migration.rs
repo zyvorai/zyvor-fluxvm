@@ -303,6 +303,8 @@ impl VmManager {
             .await?;
             let vfio = sreq.vfio_devices.clone();
             self.attach_cgroup(id, launch.pid, &mut record, &vfio);
+            self.pin_numa_vcpus(id, &sreq, &workspace.join("qmp.sock"))
+                .await;
             if let Some(ns) = &record.netns
                 && let Err(e) = fluxvm_network::netns::repair_named_netns(ns, launch.pid).await
             {

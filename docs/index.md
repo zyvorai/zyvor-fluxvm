@@ -77,6 +77,7 @@ Eleven use cases map onto what is implemented today — nothing below is aspirat
 | Guest-network observability (flows, DNS, capture) and FluxDisk overlays (`fluxvm-blockd`) | [docs/netobs.md](netobs.md) · [docs/flux-disk.md](flux-disk.md) |
 | Container (OCI) sandboxes on a Mac, one VM per container | [docs/oci-sandboxes.md](oci-sandboxes.md) |
 | GPUs for sandboxes | [docs/sandbox-gpus.md](sandbox-gpus.md) |
+| Host topology and NUMA binding | [docs/host-topology.md](host-topology.md) |
 | Native KVM, no QEMU (golden template, snapshots, SMP) | [docs/native-kvm-no-qemu.md](native-kvm-no-qemu.md) · [crates/fluxvm-hypervisor/README.md](../crates/fluxvm-hypervisor/README.md) |
 | Egress HTTP method/path ACL and HTTPS interception | [docs/http-acl.md](http-acl.md) |
 | Sandbox file change-set (baseline / changes) | [docs/sandbox-changes.md](sandbox-changes.md) |

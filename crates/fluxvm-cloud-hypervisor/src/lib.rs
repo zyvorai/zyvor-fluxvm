@@ -791,6 +791,7 @@ mod tests {
             cpuset: None,
             hugepages: None,
             vfio_devices: vec![],
+            numa: vec![],
             pod_uid: None,
             secure_boot: None,
             tpm: None,
