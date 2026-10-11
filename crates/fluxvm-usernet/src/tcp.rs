@@ -95,6 +95,11 @@ pub struct TcpConn {
     /// Out-of-order guest data: disjoint, non-adjacent `(seq, bytes)` blocks.
     ooo: Vec<(u32, Vec<u8>)>,
     last_ooo: Option<u32>,
+    /// Room left in the host-bound queue; the advertised window is bounded by it, so the guest is paced by the
+    /// host writer instead of having bytes dropped (and retransmitted) once the queue is full.
+    host_room: usize,
+    /// Window (bytes) last put on the wire, to decide when a window update is worth sending.
+    last_adv: std::cell::Cell<usize>,
     cwnd: usize,
     ssthresh: usize,
     dupacks: u32,
@@ -142,6 +147,8 @@ impl TcpConn {
             fin_pending: None,
             ooo: Vec::new(),
             last_ooo: None,
+            host_room: RCV_WND,
+            last_adv: std::cell::Cell::new(RCV_WND),
             cwnd: 10 * 536,
             ssthresh: usize::MAX / 2,
             dupacks: 0,
@@ -360,11 +367,49 @@ impl TcpConn {
 
     /// Receive window to put in the 16-bit field of a non-SYN segment.
     fn adv_window(&self) -> u16 {
+        let bytes = self.adv_bytes();
+        self.last_adv.set(bytes);
         if self.ws_ok {
-            (RCV_WND >> self.rcv_scale) as u16
+            (bytes >> self.rcv_scale) as u16
         } else {
-            65535
+            bytes as u16
         }
+    }
+
+    /// Receive window in bytes: the host queue's free room, with silly-window avoidance (below one MSS it is
+    /// advertised as zero until a window update).
+    fn adv_bytes(&self) -> usize {
+        let room = self.host_room.min(RCV_WND);
+        let room = if room < self.mss { 0 } else { room };
+        if self.ws_ok {
+            room & !((1usize << self.rcv_scale) - 1)
+        } else {
+            room.min(65535)
+        }
+    }
+
+    /// Bytes beyond `rcv_nxt` we are willing to buffer.
+    fn rcv_window(&self) -> usize {
+        self.host_room.min(RCV_WND)
+    }
+
+    /// The host-bound queue has `room` bytes free. Records it and, when the window has opened enough since the
+    /// last advertisement (from zero, or by a couple of segments), sends a window update.
+    pub fn set_host_room(&mut self, room: usize, out: &mut Vec<TcpOut>) {
+        self.host_room = room;
+        if self.state != State::Established {
+            return;
+        }
+        let last = self.last_adv.get();
+        let now = self.adv_bytes();
+        if now > last && (last == 0 || now >= last + 2 * self.mss || now >= RCV_WND) {
+            out.push(self.ack_only());
+        }
+    }
+
+    /// Update the free room without emitting anything (the segment being processed carries the new window).
+    pub fn note_host_room(&mut self, room: usize) {
+        self.host_room = room;
     }
 
     /// SACK blocks for the out-of-order data held, the block with the most recent segment first.
@@ -620,10 +665,11 @@ impl TcpConn {
 
     fn insert_ooo(&mut self, seq: u32, data: &[u8]) {
         let off = seq.wrapping_sub(self.rcv_nxt) as usize;
-        if off == 0 || off >= RCV_WND || data.is_empty() {
+        let wnd = self.rcv_window();
+        if off == 0 || off >= wnd || data.is_empty() {
             return;
         }
-        let data = &data[..data.len().min(RCV_WND - off)];
+        let data = &data[..data.len().min(wnd - off)];
         self.ooo.push((seq, data.to_vec()));
         self.last_ooo = Some(seq);
         self.normalize_ooo();
@@ -1042,6 +1088,51 @@ mod tests {
         c.push_host_data(&vec![1u8; 300_000], now, &mut out);
         assert_eq!(out.iter().map(|o| o.payload.len()).sum::<usize>(), 7 * 536);
         assert_eq!(out[0].window, 65535);
+    }
+
+    /// Regression: a slow host writer used to make the gateway drop guest bursts unacknowledged (the advertised
+    /// window stayed at RCV_WND while the queue was capped at the same size), so every burst was retransmitted
+    /// (~15% TcpRetransSegs on a 20 MB upload). The window now shrinks with the queue and reopens on drain.
+    #[test]
+    fn window_follows_host_queue_room_and_reopens_on_drain() {
+        let (mut c, now) = established_ws(1000);
+        let mss = c.mss;
+        let mut out = Vec::new();
+        let full = (RCV_WND >> RCV_SCALE) as u16;
+        // Host queue holds all but 3 segments' worth: the guest is told so, and the segment is acked.
+        c.note_host_room(3 * mss);
+        let big = vec![7u8; mss];
+        let s = seg(101, c.snd_nxt, ACK, &big);
+        let r = c.on_segment(&s, true, now, &mut out);
+        assert_eq!(r.data.as_ref().map(Vec::len), Some(mss));
+        let w = out.last().unwrap().window;
+        assert!(
+            usize::from(w) << RCV_SCALE <= 3 * mss && w < full,
+            "window shrinks with the queue"
+        );
+        // Queue full: advertised window is zero, not a silent drop.
+        out.clear();
+        c.note_host_room(0);
+        let s = seg(101 + mss as u32, c.snd_nxt, ACK, &[7u8; 10]);
+        c.on_segment(&s, true, now, &mut out);
+        assert_eq!(out.last().unwrap().window, 0);
+        // Draining reopens it with an unsolicited window update.
+        out.clear();
+        c.set_host_room(0, &mut out);
+        assert!(out.is_empty(), "no update while still closed");
+        c.set_host_room(RCV_WND, &mut out);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].window, full);
+        // An out-of-order segment inside the open window is buffered, one beyond a small window is not.
+        out.clear();
+        let rn = c.rcv_nxt;
+        c.note_host_room(2 * mss);
+        let far = seg(rn + 10 * mss as u32, c.snd_nxt, ACK, &[1u8; 100]);
+        c.on_segment(&far, true, now, &mut out);
+        assert!(out.last().unwrap().sack.is_empty(), "beyond the window");
+        let near = seg(rn + mss as u32, c.snd_nxt, ACK, &[1u8; 100]);
+        c.on_segment(&near, true, now, &mut out);
+        assert_eq!(out.last().unwrap().sack.len(), 1);
     }
 
     #[test]
