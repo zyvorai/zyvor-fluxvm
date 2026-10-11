@@ -2265,6 +2265,7 @@ version = "0.4.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "ed25519-dalek",
  "fluxvm-core",
  "fluxvm-guest-protocol",
  "fluxvm-netobs",
@@ -2274,6 +2275,7 @@ dependencies = [
  "libc",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tempfile",
  "tokio",
  "tracing",

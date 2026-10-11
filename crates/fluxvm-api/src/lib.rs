@@ -779,7 +779,10 @@ fn build_oidc(cfg: &fluxvm_core::config::AuthConfig) -> Option<Arc<oidc::OidcVal
 }
 
 async fn metrics(State(m): State<Arc<VmManager>>) -> Response {
-    let mut body = render_metrics(&m.list().await);
+    let vms = m.list().await;
+    let mut body = render_metrics(&vms);
+    let usage = fluxvm_scheduler::vz_devices::runner_usage_samples(&vms);
+    body.push_str(&render_runner_usage(&usage));
     body.push_str(&netobs_api::prometheus());
     (
         StatusCode::OK,
@@ -787,6 +790,45 @@ async fn metrics(State(m): State<Arc<VmManager>>) -> Response {
         body,
     )
         .into_response()
+}
+
+/// `fluxvm_vm_runner_rss_bytes` / `fluxvm_vm_runner_cpu_seconds_total` for `vz` VMs: the runner process's resident size
+/// and CPU time, labelled by VM id and name. Empty when there are no samples.
+fn render_runner_usage(samples: &[fluxvm_scheduler::vz_devices::VmRunnerUsage]) -> String {
+    if samples.is_empty() {
+        return String::new();
+    }
+    fn esc(s: &str) -> String {
+        s.replace('\\', "\\\\")
+            .replace('"', "\\\"")
+            .replace('\n', "\\n")
+    }
+    let mut out = String::new();
+    out.push_str(
+        "# HELP fluxvm_vm_runner_rss_bytes Resident memory of a vz VM's runner process, bytes (host-side; includes resident guest RAM).\n",
+    );
+    out.push_str("# TYPE fluxvm_vm_runner_rss_bytes gauge\n");
+    for s in samples {
+        out.push_str(&format!(
+            "fluxvm_vm_runner_rss_bytes{{vm=\"{}\",name=\"{}\"}} {}\n",
+            s.vm_id,
+            esc(&s.name),
+            s.rss_bytes
+        ));
+    }
+    out.push_str(
+        "# HELP fluxvm_vm_runner_cpu_seconds_total CPU time (user + system) of a vz VM's runner process, seconds.\n",
+    );
+    out.push_str("# TYPE fluxvm_vm_runner_cpu_seconds_total counter\n");
+    for s in samples {
+        out.push_str(&format!(
+            "fluxvm_vm_runner_cpu_seconds_total{{vm=\"{}\",name=\"{}\"}} {:.3}\n",
+            s.vm_id,
+            esc(&s.name),
+            s.cpu_seconds
+        ));
+    }
+    out
 }
 
 /// Pure text-rendering, kept separate from the handler so it's unit-testable
@@ -4857,6 +4899,25 @@ mod tests {
         assert!(out.contains("fluxvm_vms_by_backend{backend=\"firecracker\"} 1"));
 
         assert!(out.contains("fluxvm_vms_agent_enabled 1"));
+    }
+
+    #[test]
+    fn renders_runner_usage_per_vm() {
+        use fluxvm_scheduler::vz_devices::VmRunnerUsage;
+        assert_eq!(render_runner_usage(&[]), "");
+        let id = Uuid::nil();
+        let out = render_runner_usage(&[VmRunnerUsage {
+            vm_id: id,
+            name: "a\"b".into(),
+            rss_bytes: 1_073_741_824,
+            cpu_seconds: 12.3456,
+        }]);
+        assert!(out.contains("# TYPE fluxvm_vm_runner_rss_bytes gauge\n"));
+        assert!(out.contains("# TYPE fluxvm_vm_runner_cpu_seconds_total counter\n"));
+        assert!(out.contains(&format!(
+            "fluxvm_vm_runner_rss_bytes{{vm=\"{id}\",name=\"a\\\"b\"}} 1073741824\n"
+        )));
+        assert!(out.contains("fluxvm_vm_runner_cpu_seconds_total{vm=\"00000000-0000-0000-0000-000000000000\",name=\"a\\\"b\"} 12.346\n"));
     }
 
     #[test]

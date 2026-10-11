@@ -11,6 +11,56 @@ extension Runner {
         NSError(domain: "fluxvm-vz", code: 2, userInfo: [NSLocalizedDescriptionKey: s])
     }
 
+    /// Why `action` cannot run now, from VZ's own `canStart/canPause/canResume/canRequestStop/canStop`, or nil when it can.
+    /// Gives the control socket a clear string instead of a VZ failure raised mid-transition.
+    func controlPrecondition(_ action: String) -> String? {
+        guard let machine = vm else { return "cannot \(action): the VM has not been created yet (state: \(state))" }
+        let ok: Bool
+        let needs: String
+        switch action {
+        case "start": ok = machine.canStart; needs = "a stopped VM"
+        case "pause": ok = machine.canPause; needs = "a running VM"
+        case "resume": ok = machine.canResume; needs = "a paused VM"
+        case "shutdown": ok = machine.canRequestStop; needs = "a running VM"
+        case "stop": ok = machine.canStop; needs = "a VM that has not already stopped"
+        default: return nil
+        }
+        if ok { return nil }
+        return "cannot \(action): the VM is \(state); \(action) needs \(needs)"
+    }
+
+    /// `display-resize`: `VZGraphicsDisplay.reconfigure(configuration:)` (macOS 14+) for display `display` (default 0).
+    /// UNVERIFIED on hardware: whether the guest honours the new size depends on its driver.
+    func displayResize(_ o: [String: Any]) -> [String: Any] {
+        guard let w = (o["width"] as? NSNumber)?.intValue, let h = (o["height"] as? NSNumber)?.intValue,
+              (800...5120).contains(w), (600...2880).contains(h) else {
+            return ["ok": false, "error": "display-resize needs width 800..=5120 and height 600..=2880"]
+        }
+        let index = (o["display"] as? NSNumber)?.intValue ?? 0
+        guard #available(macOS 14.0, *) else { return ["ok": false, "error": "display-resize needs macOS 14 or later"] }
+        guard let machine = vm else { return ["ok": false, "error": "display-resize needs a created VM (state: \(state))"] }
+        guard state == "running" || state == "paused" else {
+            return ["ok": false, "error": "display-resize needs a started VM, but it is \(state)"]
+        }
+        let displays = machine.graphicsDevices.first?.displays ?? []
+        guard index >= 0, index < displays.count else {
+            return ["ok": false, "error": "display \(index) does not exist (the VM has \(displays.count))"]
+        }
+        let configuration: VZGraphicsDisplayConfiguration
+        if cfg.guest_os == "macos" {
+            let ppi = (o["ppi"] as? NSNumber)?.intValue ?? cfg.display_ppi ?? 220
+            configuration = VZMacGraphicsDisplayConfiguration(widthInPixels: w, heightInPixels: h, pixelsPerInch: ppi)
+        } else {
+            configuration = VZVirtioGraphicsScanoutConfiguration(widthInPixels: w, heightInPixels: h)
+        }
+        do {
+            try displays[index].reconfigure(configuration: configuration)
+            return ["ok": true, "display": index, "width": w, "height": h]
+        } catch {
+            return ["ok": false, "error": "display-resize failed: \(fluxVZErrorDescription(error))"]
+        }
+    }
+
     func macDisplays() -> [VZMacGraphicsDisplayConfiguration] {
         let count = max(1, min(cfg.display_count ?? 1, 8))
         return (0..<count).map { _ in
@@ -90,6 +140,7 @@ extension Runner {
     }
 
     func startMachine(_ machine: VZVirtualMachine) {
+        if let why = controlPrecondition("start") { fail(why) }
         let provision = cfg.provision_username != nil && cfg.provision_full_name != nil && cfg.provision_password_file != nil
         guard cfg.guest_os == "macos", provision || cfg.recovery == true else {
             machine.start { r in

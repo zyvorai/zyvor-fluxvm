@@ -212,7 +212,7 @@ pub fn create_body(a: &CreateArgs) -> Result<Value> {
     Ok(body)
 }
 
-/// `PORT=metadata`, `PORT=telemetry` or `PORT=socket:NAME` → one `apple.vsock_services` entry.
+/// `PORT=metadata`, `PORT=telemetry`, `PORT=socket:NAME` or `PORT=tcp:127.0.0.1:PORT` → one `apple.vsock_services` entry.
 fn parse_vsock_service(s: &str) -> Result<serde_json::Value> {
     let (port, kind) = s
         .split_once('=')
@@ -220,9 +220,12 @@ fn parse_vsock_service(s: &str) -> Result<serde_json::Value> {
     let port: u32 = port
         .parse()
         .with_context(|| format!("--vsock-service {s:?}: {port:?} is not a port"))?;
-    Ok(match kind.strip_prefix("socket:") {
-        Some(name) => json!({"port": port, "socket": name}),
-        None => json!({"port": port, "builtin": kind}),
+    Ok(if let Some(name) = kind.strip_prefix("socket:") {
+        json!({"port": port, "socket": name})
+    } else if let Some(addr) = kind.strip_prefix("tcp:") {
+        json!({"port": port, "tcp": addr})
+    } else {
+        json!({"port": port, "builtin": kind})
     })
 }
 
@@ -266,6 +269,9 @@ mod tests {
         assert_eq!(b["apple"]["vsock_services"][0]["builtin"], "metadata");
         assert_eq!(b["apple"]["vsock_services"][1]["socket"], "echo");
         assert_eq!(b["apple"]["vsock_services"][1]["port"], 5003);
+        let t = parse_vsock_service("5100=tcp:127.0.0.1:11434").unwrap();
+        assert_eq!(t["tcp"], "127.0.0.1:11434");
+        assert!(t.get("builtin").is_none());
         assert!(parse_vsock_service("5001").is_err());
         assert!(parse_vsock_service("x=metadata").is_err());
     }

@@ -296,15 +296,48 @@ restore and restart the VM it runs in through an MCP server at `http://127.0.0.1
 ### Extra guest→host vsock services
 
 `apple.vsock_services` opens more vsock ports from the guest to the host, and only the ports it lists (Linux guests; the guest
-reaches the host at CID 2). Each entry is `{"port": N, "builtin": "metadata" | "telemetry"}` or `{"port": N, "socket": "name"}`:
+reaches the host at CID 2). Each entry is `{"port": N, "builtin": "metadata" | "telemetry"}`, `{"port": N, "socket": "name"}` or `{"port": N, "tcp": "127.0.0.1:PORT"}`:
 
 - `metadata`: the guest connects and reads one JSON line (`id`, `name`, `vcpus`, `memory_mib`); the runner then closes.
 - `telemetry`: the guest writes lines and the runner appends them to `<workspace>/telemetry.log`, up to 8 MiB, then drops the rest.
+- `tcp`: `{"port": N, "tcp": "127.0.0.1:PORT"}` relays the guest's connections to a TCP server on this Mac. Loopback only:
+  the host must be `127.0.0.1` (or `localhost`) and `PORT` 1024-65535; anything else is refused at create time, and the runner
+  receives only a port and connects to the constant `127.0.0.1`. **Unverified on hardware** (validation and the runner config are
+  unit- and contract-tested; the relay itself has not been run). See "Local model server" below.
 - `socket`: connections are relayed to `/tmp/fluxvm-<uid>/<vm id>.svc-<name>`. The host operator runs whatever listens there. The
   name is `[a-z0-9_-]{1,32}`, so a spec cannot point the guest at another host path (such as the daemon's own socket).
 
+#### Local model server (host inference over vsock)
+
+To give a guest an OpenAI-compatible endpoint backed by the Mac's GPU, run MLX (`mlx_lm.server --port 8080`) or llama.cpp
+(`llama-server --port 8080`) on the host, bound to `127.0.0.1`, and create the VM with
+`fluxctl create --vsock-service 5100=tcp:127.0.0.1:8080` (no network card needed). Inside the guest, forward a local port to
+the vsock service (CID 2, port 5100) and point the client at it:
+
+```sh
+# inside the guest; the tcp service is allow-listed, so only this one host port is reachable
+python3 - <<'PY' &
+import socket, threading
+def pump(a, b):
+    try:
+        while (d := a.recv(65536)): b.sendall(d)
+    finally: a.close(); b.close()
+srv = socket.socket(); srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+srv.bind(("127.0.0.1", 8080)); srv.listen(16)
+while True:
+    c, _ = srv.accept()
+    v = socket.socket(socket.AF_VSOCK); v.connect((2, 5100))
+    threading.Thread(target=pump, args=(c, v), daemon=True).start()
+    threading.Thread(target=pump, args=(v, c), daemon=True).start()
+PY
+curl http://127.0.0.1:8080/v1/models     # OPENAI_BASE_URL=http://127.0.0.1:8080/v1 for SDKs
+```
+
+The host server sees every request from the guest, so run it with the model and prompts you are willing to expose to that VM;
+the relay adds no authentication.
+
 Ports must be 1024-65535, not 3128 (egress proxy), 7790 (self-control), 7791 or 22, at most 16 per VM. Create with
-`fluxctl create --vsock-service 5001=metadata --vsock-service 5003=socket:echo`. From a guest with python3:
+`fluxctl create --vsock-service 5001=metadata --vsock-service 5003=socket:echo --vsock-service 5100=tcp:127.0.0.1:8080`. From a guest with python3:
 `s=socket.socket(socket.AF_VSOCK); s.connect((2, 5001)); print(s.recv(4096))`.
 Verified on a Debian 13 guest by `scripts/vz-vsock-services-live-test.sh`.
 
@@ -328,6 +361,58 @@ Snapshot, restore and restart start about a second after they answer, so the rep
 rewound or rebooted; `self_info` then shows whether it worked, and a second one is refused while the first is still running.
 Verified on macOS 27.2 with a Debian 13 guest: a file changed after `self_snapshot` was back to its old content after
 `self_snapshot_restore` (same boot id: memory was restored, not rebooted), and `self_restart` gave a new boot id.
+
+### Control preconditions, display resize and per-feature minimum macOS
+
+- The runner checks `canStart`, `canPause`, `canResume`, `canRequestStop` and `canStop` before `pause`, `resume`, `shutdown` and
+  `stop`, and answers with a plain reason (`cannot pause: the VM is paused; pause needs a running VM`) instead of a Virtualization
+  error from the middle of a transition. **Unverified on hardware** (compiled against the macOS 27 SDK only).
+- `display-resize` on the runner control socket calls `VZGraphicsDisplay.reconfigure(configuration:)` (macOS 14+) on a running or
+  paused VM. From Rust: `fluxvm_apple::display_resize(&vm, width, height, display, ppi)`; `ppi` only applies to macOS guests.
+  **Unverified on hardware**: whether the guest follows the new size depends on its display driver. There is no REST route.
+- Every capability-table entry has a `min_macos` (`None` means the runner floor, macOS 14); for example USB controller and nested
+  virtualization 15, vmnet 26, custom Virtio, Secure Boot, ASIF overlay and macOS provisioning 27. When the daemon has probed the
+  host (it does so once, before the first `vz` create), `fluxvm_apple::validate_request` refuses with the real requirement
+  (`apple.vmnet needs macOS 26 or later; this Mac runs macOS 15 (...)`). Without a probe only the static table applies.
+- NAT MTU is **not** configurable: the macOS 27 SDK has `maximumTransmissionUnit` only on `VZFileHandleNetworkDeviceAttachment`
+  (macOS 13+, the attachment the userspace gateway uses), not on `VZNATNetworkDeviceAttachment`, so `apple.nat_mtu` was not added.
+
+### Host-side accounting and memory pressure
+
+- Virtualization.framework reports nothing per VM, so FluxVM reads the runner process (one per VM) with `proc_pid_rusage`:
+  `fluxvm_apple::runner_usage(pid)` returns resident bytes and user/system CPU seconds. `/metrics` exposes them for running or
+  paused `vz` VMs as `fluxvm_vm_runner_rss_bytes{vm,name}` (gauge) and `fluxvm_vm_runner_cpu_seconds_total{vm,name}` (counter).
+  These are host-side numbers for the runner process (resident guest RAM included), not what the guest sees. The macOS reader was
+  run against the test process on macOS 27; the metrics path is unit-tested but not scraped against a live VM.
+- Memory pressure was already wired before this change: `kern.memorystatus_vm_pressure_level` is sampled (normal, warn,
+  critical; also `fluxvm_host_memory_pressure_level` in `/metrics`), and `fluxvm_scheduler::density::reclaim_after_secs` shortens
+  the idle time before a sandbox's balloon is inflated to 60 s under warn or critical pressure. Normal pressure leaves the
+  configured `sandbox.idle_balloon_secs` unchanged.
+
+### Boot attestation (a host claim, not hardware attestation)
+
+For a VM with a `metadata` vsock service, the document the guest reads gains an `attestation` field: a manifest signed with an
+ed25519 key the daemon keeps in its state directory (`vz-attestation.key`, mode 0600, created on first use; the public half is
+`vz-attestation.pub`). The manifest lists the kernel, initrd, command line (sha256), root disk, runner binary and the `apple`
+spec digest, plus the VM id and the issue time. A root disk or other file over 256 MiB is not hashed; it carries
+`"digest": "skipped"` with its size and mtime. The signature covers the exact `payload` text, so verify it as received:
+
+```rust
+let manifest = fluxvm_apple::verify_attestation_hex(&attestation_json, trusted_public_key_hex)?;
+```
+
+What it does and does not prove:
+
+- It records what the host says it started, signed by a key a file on the host holds. A guest or operator that already trusts
+  that public key can detect a different host key, or a document altered in transit or at rest.
+- It is **not** a hardware root of trust. Virtualization.framework has no TPM and no measured boot, the key is not in the Secure
+  Enclave, and a compromised host (or anyone who can read the key file) can sign anything. Nothing proves the host booted the
+  bytes it listed, and files over the hashing limit (typically the root disk) are only identified by size and mtime.
+- The public key must reach the guest or verifier out of band; the `public_key` field inside the document is informational and
+  is never used to verify.
+- If the manifest cannot be produced (for example an unreadable file) the boot continues and the metadata has no `attestation`
+  field; a verifier must treat a missing field as a failure.
+- Unit-tested (sign, verify, tamper, key file mode); **not exercised** end to end on a booted VM.
 
 ### Stored sign-in
 
@@ -563,4 +648,4 @@ process starts.
 - Container sandboxes need boot artifacts built on Linux arm64 (`scripts/build-oci-boot.sh`, or the `oci-boot` CI workflow's
   artifacts) and take `linux/arm64` images (or `linux/amd64` under Rosetta).
 - Several Linux-only crates still do not build on macOS; CI builds and tests the supported subset by package.
-- Memory is not enforced by FluxVM here; the Mac's own memory pressure applies. Plan for one or two small VMs on a 16 GB Mac.
+- Memory is not enforced by FluxVM here; the Mac's own memory pressure applies (runner RSS is reported, not capped). Plan for one or two small VMs on a 16 GB Mac.
