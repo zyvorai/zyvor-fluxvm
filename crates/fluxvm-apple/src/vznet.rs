@@ -214,6 +214,9 @@ pub fn find_switch() -> Result<PathBuf> {
 pub async fn ensure_switch(name: &str) -> Result<PathBuf> {
     let socket = socket_path(name)?;
     if tokio::net::UnixStream::connect(&socket).await.is_ok() {
+        // A switch that outlived the previous daemon keeps exporting to the bridge socket's path and its client
+        // reconnects by itself, but only once this daemon listens there again.
+        let _ = netobs_bridge_socket();
         return Ok(socket);
     }
     let bin = find_switch()?;
