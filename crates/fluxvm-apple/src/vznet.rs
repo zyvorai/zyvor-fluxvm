@@ -7,7 +7,7 @@ use anyhow::{Context, Result, bail};
 use fluxvm_core::model::AppleNetwork;
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::Ipv4Addr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 /// Networks are `10.89.N.0/24`, one `N` per network name.
@@ -217,20 +217,11 @@ pub async fn ensure_switch(name: &str) -> Result<PathBuf> {
         return Ok(socket);
     }
     let bin = find_switch()?;
-    let log = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(socket.with_extension("log"))
-        .context("opening the switch log")?;
-    let mut child = tokio::process::Command::new(&bin)
-        .arg("--socket")
-        .arg(&socket)
-        .stdin(std::process::Stdio::null())
-        .stdout(log.try_clone()?)
-        .stderr(log)
-        .process_group(0)
-        .spawn()
-        .with_context(|| format!("starting {}", bin.display()))?;
+    // Frames go to the daemon's observer through the bridge when one is installed; a switch built without the
+    // `netobs` feature rejects the flag, so a failed start is retried once without it.
+    let bridge = netobs_bridge_socket();
+    let mut child = spawn_switch(&bin, &socket, name, bridge.as_deref())?;
+    let mut used_bridge = bridge.is_some();
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     loop {
         if tokio::net::UnixStream::connect(&socket).await.is_ok() {
@@ -245,6 +236,12 @@ pub async fn ensure_switch(name: &str) -> Result<PathBuf> {
             if tokio::net::UnixStream::connect(&socket).await.is_ok() {
                 return Ok(socket);
             }
+            if used_bridge {
+                tracing::warn!(network = name, %status, "switch refused the netobs bridge; starting it without");
+                used_bridge = false;
+                child = spawn_switch(&bin, &socket, name, None)?;
+                continue;
+            }
             bail!("the switch for network {name} exited ({status})");
         }
         if tokio::time::Instant::now() >= deadline {
@@ -253,6 +250,53 @@ pub async fn ensure_switch(name: &str) -> Result<PathBuf> {
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
+}
+
+fn spawn_switch(
+    bin: &Path,
+    socket: &Path,
+    name: &str,
+    bridge: Option<&Path>,
+) -> Result<tokio::process::Child> {
+    let log = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(socket.with_extension("log"))
+        .context("opening the switch log")?;
+    let mut cmd = tokio::process::Command::new(bin);
+    cmd.arg("--socket").arg(socket);
+    if let Some(b) = bridge {
+        cmd.arg("--netobs-socket").arg(b).arg("--network").arg(name);
+    }
+    cmd.stdin(std::process::Stdio::null())
+        .stdout(log.try_clone()?)
+        .stderr(log)
+        .process_group(0)
+        .spawn()
+        .with_context(|| format!("starting {}", bin.display()))
+}
+
+/// The daemon-side bridge socket the switches export frames to, started on first use once the process-wide observer
+/// exists (`fluxctl serve` installs it). `None` when observability is off or the socket cannot be bound.
+fn netobs_bridge_socket() -> Option<PathBuf> {
+    static BRIDGE: std::sync::Mutex<Option<(PathBuf, fluxvm_netobs::bridge::BridgeRunning)>> =
+        std::sync::Mutex::new(None);
+    let mut g = BRIDGE.lock().ok()?;
+    if let Some((p, _)) = g.as_ref() {
+        return Some(p.clone());
+    }
+    let obs = fluxvm_netobs::global()?;
+    let path = crate::runner::socket_dir().ok()?.join("netobs-bridge.sock");
+    let server = match fluxvm_netobs::bridge::BridgeServer::bind(&path) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(error = %e, "netobs bridge not started");
+            return None;
+        }
+    };
+    let running = server.spawn(obs);
+    *g = Some((path.clone(), running));
+    Some(path)
 }
 
 /// The cloud-init `write_files` (path, content, mode) and `runcmd` that give a full VM guest its private addresses: a

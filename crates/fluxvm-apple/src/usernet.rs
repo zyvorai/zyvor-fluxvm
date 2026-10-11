@@ -399,7 +399,11 @@ impl Gateway {
         let nic = self.gw_end.as_raw_fd();
         let tap = self.tap.as_ref().map(|(tx, _)| tx.as_raw_fd());
         if tap.is_some() {
-            cmd.arg("--tap-fd").arg(GATEWAY_TAP_FD.to_string());
+            // Tap v2 carries a verdict byte, so policy denials show up in netobs as `Denied`.
+            cmd.arg("--tap-fd")
+                .arg(GATEWAY_TAP_FD.to_string())
+                .arg("--tap-version")
+                .arg(fluxvm_usernet::TAP_VERSION_2.to_string());
         }
         // SAFETY: only async-signal-safe calls (dup2/fcntl) run between fork and exec.
         unsafe {
@@ -426,6 +430,16 @@ pub(crate) fn pid_alive(pid: u32) -> bool {
     rc == 0 || std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
 }
 
+/// Maps the gateway's tap verdict byte to the netobs verdict; unknown values count as a generic drop.
+fn tap_verdict(b: u8) -> fluxvm_netobs::Verdict {
+    use fluxvm_netobs::{DropReason, Verdict};
+    match b {
+        fluxvm_usernet::TAP_VERDICT_PASS => Verdict::Allowed,
+        fluxvm_usernet::TAP_VERDICT_DENIED => Verdict::Denied(DropReason::Policy),
+        _ => Verdict::Dropped(DropReason::Other),
+    }
+}
+
 fn spawn_tap_reader(
     rx: UnixDatagram,
     tap: fluxvm_netobs::NetTap,
@@ -439,14 +453,16 @@ fn spawn_tap_reader(
             let mut buf = vec![0u8; 65_536 + 1];
             while alive.load(Ordering::Relaxed) {
                 match rx.recv(&mut buf) {
-                    Ok(0) => {}
+                    Ok(0 | 1) => {}
                     Ok(n) => {
                         let dir = if buf[0] == fluxvm_usernet::TAP_TO_GUEST {
                             fluxvm_netobs::Direction::ToGuest
                         } else {
                             fluxvm_netobs::Direction::FromGuest
                         };
-                        tap.tap_as(&id, dir, fluxvm_netobs::Verdict::Allowed, &buf[1..n]);
+                        // `[dir][verdict][frame]` (tap version 2).
+                        let verdict = tap_verdict(buf[1]);
+                        tap.tap_as(&id, dir, verdict, &buf[2..n]);
                     }
                     Err(e)
                         if matches!(
@@ -464,6 +480,15 @@ fn spawn_tap_reader(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tap_verdict_bytes_map_to_netobs_verdicts() {
+        use fluxvm_netobs::{DropReason, Verdict};
+        assert_eq!(tap_verdict(fluxvm_usernet::TAP_VERDICT_PASS), Verdict::Allowed);
+        assert_eq!(tap_verdict(fluxvm_usernet::TAP_VERDICT_DENIED), Verdict::Denied(DropReason::Policy));
+        assert_eq!(tap_verdict(fluxvm_usernet::TAP_VERDICT_DROPPED), Verdict::Dropped(DropReason::Other));
+        assert_eq!(tap_verdict(200), Verdict::Dropped(DropReason::Other));
+    }
     use fluxvm_core::model::AppleUsernetForward;
 
     fn req(apple: serde_json::Value, network: serde_json::Value) -> CreateVmRequest {
