@@ -143,6 +143,23 @@ were running keep running, nothing reboots, and the guest address is reported ag
   (`generic-id.bin`) so that holds across launches.
 - Whether a restore survives a FluxVM runner upgrade has not been tested.
 
+### Fork (`POST /v1/vms/{id}/fork`)
+
+`{"count": 2, "name_prefix": "job"}` turns one running Linux guest into `count` running children (up to 32), named
+`job-1`, `job-2`. One runner `save` pauses the parent for a moment and clones its disk; each child gets APFS clones of that
+state and disk, the parent's machine identifier and MAC (the saved device state is bound to them), is restored through the same
+path as `restore`, and carries the label `fluxvm.dev/forked-from`. The parent keeps running. It is all-or-nothing: if one child
+fails, the others are deleted.
+
+- **Each child needs a network of its own**, because it resumes with the parent's MAC and address: `network.mode = none`, or
+  `mode = user` with `apple.usernet` (a private userspace NAT per VM) and no port forwards. The Mac's NAT, vmnet, bridged and
+  private-network guests are refused; so are `apple.usernet.port_forwards` (every child would bind the same host port), extra
+  disks, and macOS guests.
+- A child's MAC is marked shared and is never returned to the MAC pool when the child is deleted.
+- Children continue from the parent's memory, so they share its hostname, machine-id and RNG state until something resets them.
+  With the guest agent enabled the daemon asks it to reset all three; without an agent it logs that it could not.
+- Needs the same unlocked login session as `restore`.
+
 ## macOS guests
 
 Verified by hand on an Apple M4 running macOS 27.2 with macOS 27.0.1 (26A434) as the guest. What works:
@@ -702,6 +719,7 @@ What has actually been run, and what has not. One Apple M4, macOS 27.2, 16 GiB, 
 | `overlay` extra disk against VZ's NBD client | **Verified.** The runner logged `nbd-connected`; the guest saw a 256 MiB `virtio_blk` disk; a 32 MiB random write read back with the same sha256 (also after `drop_caches`); the disk's sha256 was identical across stop and start; the base file stayed byte-identical; `fluxvm-blockd branch` worked. |
 | Frozen overlay as an attached disk | Found: served as writable, so guest writes got EIO. Fixed and **re-verified on hardware**: the guest sees `/sys/block/vdX/ro` = 1, mounts it read-only, reads the parent's data (hash matches), gets `Read-only file system` on writes and `EPERM` on raw writes, with no I/O error or journal abort; an overlay branched from it is writable and reads the parent's data. |
 | blockd encryption and lazy HTTP base through VZ's NBD client | **Verified (once).** Three exports to one Debian 13 guest (release build, M4, macOS 27): plain, `encrypt` with a key file, and a lazy overlay on a Range-capable HTTP base with `sha256=`. `sha256sum` of each guest disk equalled the base's; a 900 KB `O_DIRECT`+`fsync` marker read back identical after `drop_caches` on all three; the encrypted overlay file contained none of the marker, the other two did; the base file was unchanged. The lazy export fetched 6 MiB before any guest read, the rest on demand, and a second full read made no HTTP requests. Not run: structured replies against VZ, rebase and resize under a running guest. |
+| Fork of a running vz guest (`POST /v1/vms/{id}/fork`) | **Verified (once).** Debian 13 guest on `apple.usernet`, a perl loop sending `n=<counter> host mid boot t` over a `telemetry` vsock service every second. `count: 2` returned `201` in 2.2 s with two running children. Both children's first line was `n=7` at the same second, the parent's counter at the fork instant, and they then counted independently (parent n=28, children 27 and 26) while the parent never missed a beat (largest gap 2 s). Deleting both children left the MAC pool empty and the parent running. As expected, all three report the same hostname, machine-id and boot id: the guest had no agent, so no identity reset ran. A bare two-runner spike (restore of one saved state into two concurrent runners) took 1.1 s. Not run: fork with the guest agent (identity reset), fork of a paused VM, more than two children, children surviving a daemon restart. |
 | `apple.usernet`: DHCP, ARP, ping gateway, DNS forwarding and `dns_deny`, ICMP deny, IPv6 SLAAC, netobs flows with `denied` verdicts | **Verified.** The lease was 10.0.2.15/24; denied DNS, ICMP and TCP-port flows appeared in `/v1/netobs/flows` with their reason. |
 | `apple.usernet`: TCP, host-to-guest forwards | **Failed on first run, fixed, re-verified.** The gateway addressed TCP to `ff:ff:ff:ff:ff:ff` whenever the guest MAC was pinned (which the daemon always does), so Linux dropped every segment. After the fix: `curl` to HTTPS and HTTP sites returned 200, gateway frames are addressed to the guest MAC (zero broadcast-addressed TCP in a capture), a `127.0.0.1:18022 -> 22` forward gave the sshd banner and a full login, and IPv6 `curl -6` reached an IPv6-only host. |
 | `apple.usernet`: TCP egress policy | **Verified.** `deny_cidrs` (1.1.1.1/32) refused immediately while 1.0.0.1 answered; `deny_ports` [25] refused to three public hosts while port 587 connected; `dns_deny` gave NXDOMAIN; every denial appeared as a `deny`/`dns_deny` event in `usernet.log` and as a `denied` flow (`drop_reason: policy`) in `/v1/netobs/flows`. |

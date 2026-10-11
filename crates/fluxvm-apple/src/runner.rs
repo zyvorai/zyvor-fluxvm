@@ -466,6 +466,39 @@ pub fn snapshot_dir(workspace: &Path, tag: &str) -> PathBuf {
     workspace.join("snapshots").join(tag)
 }
 
+/// Populates a fork child's workspace `child` from snapshot `tag` of the parent workspace `parent`: the saved state and
+/// its disk and firmware files (so the child can be started from the same tag), a clone of the snapshot disk as its
+/// `root.raw`, and the per-VM files the saved device state is bound to: the machine identifier (`generic-id.bin`), the
+/// MAC (`vz-mac`, marked shared so it is never recycled) and the seed image. All clones are copy-on-write on APFS, so
+/// N children cost no disk until they write. Returns the child's disk path.
+pub fn prepare_fork_child(parent: &Path, tag: &str, child: &Path) -> Result<PathBuf> {
+    let src = snapshot_dir(parent, tag);
+    if !src.join(STATE_FILE).is_file() {
+        bail!("snapshot {tag:?} has no saved state at {}", src.display());
+    }
+    let dst = snapshot_dir(child, tag);
+    fs::create_dir_all(&dst).with_context(|| format!("creating {}", dst.display()))?;
+    for name in std::iter::once(&STATE_FILE).chain(SNAPSHOT_FILES.iter()) {
+        let from = src.join(name);
+        if from.is_file() {
+            clone_file(&from, &dst.join(name))?;
+        }
+    }
+    let disk = child.join("root.raw");
+    clone_file(&src.join("disk.raw"), &disk)?;
+    for name in ["generic-id.bin", MAC_FILE, "seed.img"] {
+        let from = parent.join(name);
+        if from.is_file() {
+            clone_file(&from, &child.join(name))?;
+        }
+    }
+    fs::write(
+        child.join(MAC_SHARED_MARKER),
+        b"shared with the fork parent\n",
+    )?;
+    Ok(disk)
+}
+
 /// Copy-on-write clone on APFS (`cp -c`), a plain copy elsewhere. Replaces `to` if it exists.
 pub fn clone_file(from: &Path, to: &Path) -> Result<()> {
     let _ = fs::remove_file(to);
@@ -531,6 +564,8 @@ fn short_socket(id8: &str, kind: &str, requested: PathBuf) -> PathBuf {
 }
 
 const MAC_FILE: &str = "vz-mac";
+/// Present in a fork child's workspace: its `vz-mac` is shared with the parent and is not returned to the pool.
+const MAC_SHARED_MARKER: &str = "vz-mac.shared";
 
 /// MACs of deleted VMs, shared by every daemon of this user. The Mac's DHCP server keeps a lease per MAC for a day, so a
 /// fresh MAC per VM runs its /24 dry after about 250 creates; a recycled MAC gets its old address back.
@@ -550,6 +585,12 @@ pub fn release_mac(workspace: &Path) {
 }
 
 fn release_mac_to(workspace: &Path, pool: &Path) {
+    // A fork child's MAC is its parent's (the saved device state carries it), so it must never be recycled to a new VM
+    // while the parent may still be running.
+    if workspace.join(MAC_SHARED_MARKER).exists() {
+        let _ = fs::remove_file(workspace.join(MAC_FILE));
+        return;
+    }
     let Ok(m) = fs::read_to_string(workspace.join(MAC_FILE)) else {
         return;
     };
@@ -870,6 +911,63 @@ mod one_shot_tests {
         let conf = RunnerConfig::for_launch(&req, &ctx).unwrap();
         let share = conf.shares.iter().find(|s| s.tag == "fluxvm-meta").unwrap();
         assert!(share.read_only && share.host_path == meta);
+    }
+
+    #[test]
+    fn a_fork_childs_mac_is_never_recycled_while_the_parent_may_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let (parent, child) = (dir.path().join("p"), dir.path().join("c"));
+        for w in [&parent, &child] {
+            fs::create_dir_all(w).unwrap();
+        }
+        let tag = "fork-1";
+        let snap = snapshot_dir(&parent, tag);
+        fs::create_dir_all(&snap).unwrap();
+        fs::write(snap.join(STATE_FILE), b"state").unwrap();
+        fs::write(snap.join("disk.raw"), b"disk").unwrap();
+        fs::write(snap.join("efi.bin"), b"efi").unwrap();
+        fs::write(parent.join("generic-id.bin"), b"machine-id").unwrap();
+        fs::write(parent.join(MAC_FILE), "02:aa:bb:cc:dd:ee").unwrap();
+        fs::write(parent.join("seed.img"), b"seed").unwrap();
+
+        let disk = prepare_fork_child(&parent, tag, &child).unwrap();
+        assert_eq!(disk, child.join("root.raw"));
+        assert_eq!(fs::read(&disk).unwrap(), b"disk");
+        let csnap = snapshot_dir(&child, tag);
+        assert_eq!(fs::read(csnap.join(STATE_FILE)).unwrap(), b"state");
+        assert_eq!(fs::read(csnap.join("efi.bin")).unwrap(), b"efi");
+        assert_eq!(
+            fs::read(child.join("generic-id.bin")).unwrap(),
+            b"machine-id"
+        );
+        assert_eq!(
+            fs::read_to_string(child.join(MAC_FILE)).unwrap(),
+            "02:aa:bb:cc:dd:ee"
+        );
+        assert_eq!(fs::read(child.join("seed.img")).unwrap(), b"seed");
+        // The parent keeps its own files untouched.
+        assert_eq!(fs::read(snap.join("disk.raw")).unwrap(), b"disk");
+
+        let pool = dir.path().join("pool");
+        release_mac_to(&child, &pool);
+        assert!(!child.join(MAC_FILE).exists(), "the child's MAC file goes");
+        assert!(
+            !pool.exists() || fs::read_dir(&pool).unwrap().next().is_none(),
+            "a shared MAC must not enter the pool"
+        );
+        // The parent's own MAC is still recycled as before.
+        release_mac_to(&parent, &pool);
+        assert_eq!(fs::read_dir(&pool).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn fork_child_needs_a_saved_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let (parent, child) = (dir.path().join("p"), dir.path().join("c"));
+        fs::create_dir_all(&parent).unwrap();
+        fs::create_dir_all(&child).unwrap();
+        let err = prepare_fork_child(&parent, "nope", &child).unwrap_err();
+        assert!(format!("{err:#}").contains("no saved state"));
     }
 
     #[test]

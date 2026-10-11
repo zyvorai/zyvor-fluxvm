@@ -176,6 +176,10 @@ pub const CAPABILITIES: &[Capability] = &[
         "snapshots of running VMs",
         "memory, devices and disk; restore from a stopped VM; needs an unlocked login session",
     ),
+    yes(
+        "fork of a running Linux guest (POST /v1/vms/{id}/fork)",
+        "N children restored from one saved state with APFS clones; each needs its own network (mode none, or apple.usernet without port forwards); macOS guests and extra disks are refused; needs an unlocked login session",
+    ),
     no("live migration", "not implemented"),
     no(
         "GPU passthrough",
