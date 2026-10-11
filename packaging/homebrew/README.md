@@ -1,6 +1,6 @@
 # Homebrew package (macOS, Apple silicon)
 
-`fluxvm.rb` installs the prebuilt package from a GitHub release: `fluxctl`, the signed `fluxvm-vz-runner`, `fluxvm-vz-switch` and `fluxvm-blockd` side by side in
+`fluxvm.rb` installs the prebuilt package from a GitHub release: `fluxctl`, the signed `fluxvm-vz-runner`, `fluxvm-vz-switch`, `fluxvm-blockd` and `fluxvm-usernet` side by side in
 `bin`, plus a `brew services` entry for the daemon. The tap is `zyvorai/homebrew-tap` (`Formula/fluxvm.rb`, next to its casks).
 
 ## Cutting a release

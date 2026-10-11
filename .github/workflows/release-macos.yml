@@ -47,7 +47,7 @@ jobs:
         run: |
           D="$(mktemp -d)"; tar -xzf "${{ steps.pkg.outputs.file }}" -C "$D"
           "$D"/fluxvm-*/bin/fluxctl --version
-          for b in fluxvm-vz-runner fluxvm-vz-switch fluxvm-blockd; do test -x "$D"/fluxvm-*/bin/$b || { echo "missing $b"; exit 1; }; done
+          for b in fluxvm-vz-runner fluxvm-vz-switch fluxvm-blockd fluxvm-usernet; do test -x "$D"/fluxvm-*/bin/$b || { echo "missing $b"; exit 1; }; done
           codesign -d --entitlements - "$D"/fluxvm-*/bin/fluxvm-vz-runner 2>&1 | grep com.apple.security.virtualization
       - uses: actions/upload-artifact@v4
         with:
