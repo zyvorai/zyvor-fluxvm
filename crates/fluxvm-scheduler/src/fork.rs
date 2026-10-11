@@ -1018,9 +1018,15 @@ impl VmManager {
         {
             return Ok(o);
         }
+        let runner = runner_log_tail(vm);
         let problem = format!(
-            "{last_problem}; identity=unique needs the vsock agent (or SSH for a vz guest) to confirm {}. Use \
+            "{last_problem}{}; identity=unique needs the vsock agent (or SSH for a vz guest) to confirm {}. Use \
              identity=best-effort or preserve to fork this guest anyway",
+            if runner.is_empty() {
+                String::new()
+            } else {
+                format!(" [runner log: {runner}]")
+            },
             REQUIRED_STEPS.join(", ")
         );
         fluxvm_core::metrics::record_fork_identity_failed();
@@ -1173,6 +1179,20 @@ else step dhcp; fi
 exit 0
 "#
     )
+}
+
+/// The last lines of a vz child's runner log, for an error that would otherwise say only "connection refused" (the
+/// runner has exited, and why is written there).
+fn runner_log_tail(vm: &VmRecord) -> String {
+    if vm.backend != BackendKind::Vz {
+        return String::new();
+    }
+    std::fs::read_to_string(vm.workspace.join("vz-runner.log"))
+        .map(|s| {
+            let lines: Vec<&str> = s.lines().rev().take(4).collect();
+            lines.into_iter().rev().collect::<Vec<_>>().join(" | ")
+        })
+        .unwrap_or_default()
 }
 
 /// `network` against what a vz parent allows.
