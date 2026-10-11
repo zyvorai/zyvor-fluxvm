@@ -9,8 +9,12 @@
 //! cost is no server-side validation beyond "is this valid JSON" — a node's
 //! own `fluxctl serve` still does the real validation.
 
+#[path = "central_cloud.rs"]
+mod cloud;
+
+use crate::tenancy::{Caller, TenancyState};
 use axum::{
-    Json, Router,
+    Extension, Json, Router,
     extract::{Path, Request, State},
     http::{StatusCode, header},
     middleware::{self, Next},
@@ -201,6 +205,19 @@ struct Fleet {
     lock_path: Option<PathBuf>,
     /// Shared secret; when `Some`, all `/fleet/*` routes require Bearer.
     token: Option<String>,
+    /// Tenants, leases, the VM ledger and drain state (`fleet-tenancy.json`). Lock order when both are needed:
+    /// `tenancy` first, then `nodes`.
+    tenancy: Arc<Mutex<TenancyState>>,
+    tenancy_path: Option<PathBuf>,
+}
+
+impl Fleet {
+    /// Writes `fleet-tenancy.json` (no-op for an in-memory test fleet).
+    fn persist_tenancy(&self, state: &TenancyState) {
+        if let (Some(path), Some(lock)) = (&self.tenancy_path, &self.lock_path) {
+            persist_json(path, lock, state);
+        }
+    }
 }
 
 fn constant_time_eq(a: &str, b: &str) -> bool {
@@ -216,25 +233,78 @@ fn constant_time_eq(a: &str, b: &str) -> bool {
     diff == 0
 }
 
-async fn auth_middleware(State(fleet): State<Fleet>, req: Request, next: Next) -> Response {
+/// Resolves the caller from the bearer token and stores it as an `Extension<Caller>` for the handlers.
+///
+/// - The fleet token (`--token`) is the operator ([`Caller::Admin`]); node heartbeats use it too.
+/// - A tenant token (see `POST /fleet/tenants`) is [`Caller::Tenant`], limited to [`tenant_route_allowed`].
+/// - Without a fleet token (lab mode) every caller that does not present a tenant token is the operator, exactly as
+///   before tenants existed. Configure `--token` before creating tenants.
+async fn auth_middleware(State(fleet): State<Fleet>, mut req: Request, next: Next) -> Response {
     if req.uri().path() == "/healthz" {
         return next.run(req).await;
     }
-    let Some(expected) = fleet.token.as_deref() else {
-        return next.run(req).await;
-    };
     let presented = req
         .headers()
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
-        .and_then(|h| h.strip_prefix("Bearer "));
-    match presented {
-        Some(t) if constant_time_eq(t, expected) => next.run(req).await,
-        _ => (
+        .and_then(|h| h.strip_prefix("Bearer "))
+        .map(str::to_owned);
+    let unauthorized = || {
+        (
             StatusCode::UNAUTHORIZED,
             Json(json!({"error": "missing or invalid bearer token"})),
         )
-            .into_response(),
+            .into_response()
+    };
+    let caller = match (fleet.token.as_deref(), presented.as_deref()) {
+        (Some(expected), Some(t)) if constant_time_eq(t, expected) => Caller::Admin,
+        (expected, Some(t)) => {
+            let tenancy = fleet.tenancy.lock().await;
+            match tenancy.authenticate(t) {
+                Some(tenant) if tenant.disabled => {
+                    return (
+                        StatusCode::FORBIDDEN,
+                        Json(json!({"error": format!("tenant '{}' is disabled", tenant.id)})),
+                    )
+                        .into_response();
+                }
+                Some(tenant) => Caller::Tenant(tenant.id.clone()),
+                None if expected.is_none() => Caller::Admin,
+                None => return unauthorized(),
+            }
+        }
+        (None, None) => Caller::Admin,
+        (Some(_), None) => return unauthorized(),
+    };
+    if let Caller::Tenant(t) = &caller
+        && !tenant_route_allowed(req.method(), req.uri().path())
+    {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({"error": format!("tenant '{t}' may not call {} {}", req.method(), req.uri().path())})),
+        )
+            .into_response();
+    }
+    req.extensions_mut().insert(caller);
+    next.run(req).await
+}
+
+/// The routes a tenant token may call; everything else (node registration, cordon, drain, scrub, tenant admin,
+/// policy) is operator-only.
+fn tenant_route_allowed(method: &axum::http::Method, path: &str) -> bool {
+    use axum::http::Method;
+    let get = *method == Method::GET;
+    let post = *method == Method::POST;
+    let delete = *method == Method::DELETE;
+    let seg: Vec<&str> = path.trim_matches('/').split('/').collect();
+    match seg.as_slice() {
+        ["fleet", "capacity"] | ["fleet", "usage"] | ["fleet", "tenants", "me"] => get,
+        ["fleet", "vms"] | ["fleet", "leases"] => get || post,
+        ["fleet", "vms", _, _] => delete,
+        ["fleet", "vms", _, _, "exec"] => post,
+        ["fleet", "leases", _] => get,
+        ["fleet", "leases", _, "release"] => post,
+        _ => false,
     }
 }
 
@@ -256,6 +326,27 @@ fn load_persisted(path: &FsPath) -> HashMap<String, NodeInfo> {
 }
 
 fn persist_nodes(path: &FsPath, lock_path: &FsPath, nodes: &HashMap<String, NodeInfo>) {
+    persist_json(path, lock_path, nodes)
+}
+
+fn load_tenancy(path: &FsPath) -> TenancyState {
+    match fs::read_to_string(path) {
+        Ok(raw) if raw.trim().is_empty() => TenancyState::default(),
+        Ok(raw) => serde_json::from_str(&raw).unwrap_or_else(|e| {
+            // Refuse to silently start with no tenants: that would turn every tenant token into "unknown" and,
+            // without a fleet token, every caller into the operator.
+            panic!(
+                "failed to parse {}: {e}; fix or move the file before starting central",
+                path.display()
+            )
+        }),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => TenancyState::default(),
+        Err(e) => panic!("failed to read {}: {e}", path.display()),
+    }
+}
+
+/// Writes `value` as pretty JSON to `path` atomically (tmp + rename) under an exclusive `flock` on `lock_path`.
+fn persist_json<T: Serialize + ?Sized>(path: &FsPath, lock_path: &FsPath, value: &T) {
     if let Some(parent) = path.parent() {
         let _ = fs::create_dir_all(parent);
     }
@@ -279,7 +370,7 @@ fn persist_nodes(path: &FsPath, lock_path: &FsPath, nodes: &HashMap<String, Node
         return;
     }
     let tmp = path.with_extension("json.tmp");
-    match serde_json::to_vec_pretty(nodes) {
+    match serde_json::to_vec_pretty(value) {
         Ok(bytes) => {
             if let Err(e) = fs::write(&tmp, &bytes) {
                 tracing::warn!(error = %e, "writing fleet registry tmp");
@@ -296,11 +387,15 @@ fn persist_nodes(path: &FsPath, lock_path: &FsPath, nodes: &HashMap<String, Node
 pub struct CentralConfig {
     pub state_dir: PathBuf,
     pub token: Option<String>,
+    /// How often to reconcile the VM ledger against every node and end expired leases (`None`: only on
+    /// `POST /fleet/reconcile`). Needs a Tokio runtime when `router` is called.
+    pub reconcile_interval: Option<std::time::Duration>,
 }
 
 pub fn router(cfg: CentralConfig) -> Router {
     let persist_path = cfg.state_dir.join("fleet-nodes.json");
     let lock_path = cfg.state_dir.join("fleet-nodes.lock");
+    let tenancy_path = cfg.state_dir.join("fleet-tenancy.json");
     let _ = fs::create_dir_all(&cfg.state_dir);
     let initial = load_persisted(&persist_path);
     tracing::info!(
@@ -308,13 +403,27 @@ pub fn router(cfg: CentralConfig) -> Router {
         nodes = initial.len(),
         "loaded fleet registry"
     );
+    let tenancy = load_tenancy(&tenancy_path);
+    if tenancy.enabled() && cfg.token.is_none() {
+        tracing::warn!(
+            tenants = tenancy.tenants.len(),
+            "tenants exist but central has no --token: any caller without a tenant token is treated as the operator"
+        );
+    }
     let fleet = Fleet {
         nodes: Arc::new(Mutex::new(initial)),
         http: reqwest::Client::new(),
         persist_path: Some(persist_path),
         lock_path: Some(lock_path),
         token: cfg.token,
+        tenancy: Arc::new(Mutex::new(tenancy)),
+        tenancy_path: Some(tenancy_path),
     };
+    if let Some(every) = cfg.reconcile_interval
+        && tokio::runtime::Handle::try_current().is_ok()
+    {
+        cloud::spawn_reconciler(fleet.clone(), every);
+    }
     Router::new()
         .route("/healthz", get(|| async { Json(json!({"ok": true})) }))
         .route("/fleet/register", post(register))
@@ -322,10 +431,46 @@ pub fn router(cfg: CentralConfig) -> Router {
         .route("/fleet/nodes/{name}", get(get_node).delete(deregister_node))
         .route("/fleet/nodes/{name}/cordon", post(cordon_node))
         .route("/fleet/nodes/{name}/uncordon", post(uncordon_node))
-        .route("/fleet/vms", post(create_vm).get(list_vms))
+        .route(
+            "/fleet/nodes/{name}/drain",
+            post(cloud::drain_node).get(cloud::drain_status),
+        )
+        .route("/fleet/nodes/{name}/scrub", post(cloud::scrub_node))
+        .route("/fleet/vms", post(create_vm_route).get(list_vms_route))
         .route("/fleet/nodes/{name}/vms", get(node_vms))
-        .route("/fleet/vms/{node}/{id}", axum::routing::delete(delete_vm))
+        .route(
+            "/fleet/vms/{node}/{id}",
+            axum::routing::delete(delete_vm_route),
+        )
+        .route("/fleet/vms/{node}/{id}/exec", post(cloud::exec_vm))
         .route("/fleet/capacity", get(fleet_capacity))
+        .route(
+            "/fleet/tenants",
+            get(cloud::list_tenants).post(cloud::create_tenant),
+        )
+        .route("/fleet/tenants/me", get(cloud::tenant_me))
+        .route(
+            "/fleet/tenants/{id}",
+            get(cloud::get_tenant)
+                .patch(cloud::update_tenant)
+                .delete(cloud::delete_tenant),
+        )
+        .route(
+            "/fleet/tenants/{id}/rotate-token",
+            post(cloud::rotate_tenant_token),
+        )
+        .route(
+            "/fleet/leases",
+            get(cloud::list_leases).post(cloud::create_lease),
+        )
+        .route("/fleet/leases/{id}", get(cloud::get_lease))
+        .route("/fleet/leases/{id}/release", post(cloud::release_lease))
+        .route("/fleet/usage", get(cloud::usage))
+        .route("/fleet/reconcile", post(cloud::reconcile))
+        .route(
+            "/fleet/policy",
+            get(cloud::get_policy).put(cloud::put_policy),
+        )
         .layer(middleware::from_fn_with_state(
             fleet.clone(),
             auth_middleware,
@@ -447,16 +592,26 @@ async fn set_node_cordoned(
     name: String,
     cordoned: bool,
 ) -> Result<Json<Value>, AppError> {
-    let mut nodes = fleet.nodes.lock().await;
-    if set_cordoned(&mut nodes, &name, cordoned).is_none() {
-        return Err(AppError(
-            StatusCode::NOT_FOUND,
-            format!("no registered node named '{name}'"),
-        ));
-    }
-    let updated = node_json(nodes.get(&name).expect("just set"));
-    if let (Some(path), Some(lock)) = (&fleet.persist_path, &fleet.lock_path) {
-        persist_nodes(path, lock, &nodes);
+    let updated = {
+        let mut nodes = fleet.nodes.lock().await;
+        if set_cordoned(&mut nodes, &name, cordoned).is_none() {
+            return Err(AppError(
+                StatusCode::NOT_FOUND,
+                format!("no registered node named '{name}'"),
+            ));
+        }
+        let updated = node_json(nodes.get(&name).expect("just set"));
+        if let (Some(path), Some(lock)) = (&fleet.persist_path, &fleet.lock_path) {
+            persist_nodes(path, lock, &nodes);
+        }
+        updated
+    };
+    // Uncordoning ends a drain too.
+    if !cordoned {
+        let mut tenancy = fleet.tenancy.lock().await;
+        if tenancy.draining.remove(&name) {
+            fleet.persist_tenancy(&tenancy);
+        }
     }
     Ok(Json(updated))
 }
@@ -587,9 +742,34 @@ fn pick_best_capacity_excluding_apple(
     profile: SecurityProfile,
     apple: Option<&ApplePlacementRequest>,
 ) -> Option<NodeInfo> {
+    pick_best_capacity_admitted(
+        nodes,
+        request_vcpus,
+        request_mem,
+        exclude,
+        selector,
+        profile,
+        apple,
+        &|_| true,
+    )
+}
+
+/// [`pick_best_capacity_excluding_apple`] plus an extra per-node admission check (tenancy: leases, scrub).
+#[allow(clippy::too_many_arguments)]
+fn pick_best_capacity_admitted(
+    nodes: &HashMap<String, NodeInfo>,
+    request_vcpus: u32,
+    request_mem: u64,
+    exclude: &HashSet<String>,
+    selector: &HashMap<String, String>,
+    profile: SecurityProfile,
+    apple: Option<&ApplePlacementRequest>,
+    admit: &dyn Fn(&NodeInfo) -> bool,
+) -> Option<NodeInfo> {
     nodes
         .values()
         .filter(|n| !exclude.contains(&n.name))
+        .filter(|n| admit(n))
         .filter(|n| n.matches_selector(selector))
         .filter(|n| n.security.supports(profile).is_ok())
         .filter_map(|n| {
@@ -841,25 +1021,169 @@ async fn dispatch_create(
 /// body identically.
 async fn create_vm(
     State(fleet): State<Fleet>,
-    Json(mut body): Json<Value>,
+    Json(body): Json<Value>,
 ) -> Result<Json<Value>, AppError> {
+    create_vm_inner(&fleet, &Caller::Admin, body, false).await
+}
+
+/// The routed `POST /fleet/vms`: [`create_vm`] for whoever the auth middleware says is calling.
+async fn create_vm_route(
+    State(fleet): State<Fleet>,
+    Extension(caller): Extension<Caller>,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, AppError> {
+    create_vm_inner(&fleet, &caller, body, false).await
+}
+
+fn tenancy_error(e: crate::tenancy::TenancyError) -> AppError {
+    AppError(
+        StatusCode::from_u16(e.status()).unwrap_or(StatusCode::CONFLICT),
+        e.to_string(),
+    )
+}
+
+/// Records a VM central just created in the ledger (quotas, ownership, metering, drain).
+#[allow(clippy::too_many_arguments)]
+async fn record_created_vm(
+    fleet: &Fleet,
+    node: &str,
+    record: &Value,
+    tenant: Option<String>,
+    vcpus: u32,
+    memory_mib: u64,
+    macos_guest: bool,
+    spec: Option<Value>,
+) {
+    let Some(vm_id) = record.get("id").and_then(Value::as_str) else {
+        tracing::warn!(
+            node,
+            "created VM record has no id; not recorded in the ledger"
+        );
+        return;
+    };
+    let mut tenancy = fleet.tenancy.lock().await;
+    tenancy.record_vm(crate::tenancy::VmEntry {
+        node: node.to_owned(),
+        vm_id: vm_id.to_owned(),
+        name: record
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned(),
+        tenant,
+        vcpus,
+        memory_mib,
+        macos_guest,
+        created_at: Utc::now(),
+        ended_at: None,
+        spec,
+    });
+    fleet.persist_tenancy(&tenancy);
+}
+
+/// `POST /fleet/vms` for `caller`. On top of the placement described on [`create_vm`]:
+///
+/// - A tenant's request is stamped with `"tenant": "<id>"` (whatever the body said) and checked against the tenant's
+///   quota. An operator may set `"tenant"` to act for a tenant; placement then follows that tenant's leases.
+/// - Automatic placement only considers nodes [`TenancyState::admit`] allows (leases, scrub) and skips draining
+///   nodes; a tenant naming a node is checked the same way, an operator naming a node is not.
+/// - `"reschedulable": true` (stripped before forwarding) keeps the create body in the ledger so a drain can
+///   recreate the VM elsewhere. Leave it off for bodies that carry secrets.
+/// - `skip_quota` is for a drain recreating a VM the tenant already has.
+async fn create_vm_inner(
+    fleet: &Fleet,
+    caller: &Caller,
+    mut body: Value,
+    skip_quota: bool,
+) -> Result<Json<Value>, AppError> {
+    if !body.is_object() {
+        return Err(AppError(
+            StatusCode::BAD_REQUEST,
+            "request body must be a JSON object".into(),
+        ));
+    }
     let requested_node = body
         .as_object_mut()
         .and_then(|o| o.remove("node"))
         .and_then(|v| v.as_str().map(str::to_string));
     let selector = extract_selector(&mut body);
+    let reschedulable = body
+        .as_object_mut()
+        .and_then(|o| o.remove("reschedulable"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let tenant: Option<String> = match caller {
+        Caller::Tenant(t) => {
+            body["tenant"] = json!(t);
+            Some(t.clone())
+        }
+        Caller::Admin => body
+            .get("tenant")
+            .and_then(Value::as_str)
+            .filter(|t| !t.is_empty())
+            .map(str::to_owned),
+    };
 
     let (req_vcpus, req_mem) = request_sizes(&body);
     let profile = extract_security_profile(&body)?;
     let apple_request = apple_placement_request(&body, req_vcpus, req_mem);
+    let macos_guest = apple_request.as_ref().is_some_and(|r| r.macos_guest);
+
+    // Who placement acts for: the tenant (own or named by the operator) once tenancy is on, else the caller.
+    let effective = {
+        let tenancy = fleet.tenancy.lock().await;
+        match &tenant {
+            Some(t) if tenancy.enabled() => {
+                if *caller == Caller::Admin && !tenancy.tenants.contains_key(t) {
+                    return Err(AppError(
+                        StatusCode::BAD_REQUEST,
+                        format!("no tenant '{t}'"),
+                    ));
+                }
+                if !skip_quota {
+                    tenancy
+                        .check_quota(t, req_vcpus, req_mem)
+                        .map_err(tenancy_error)?;
+                }
+                Caller::Tenant(t.clone())
+            }
+            _ => caller.clone(),
+        }
+    };
+    let spec = reschedulable.then(|| {
+        let mut s = body.clone();
+        if !selector.is_empty() {
+            s["nodeSelector"] = json!(selector);
+        }
+        s
+    });
 
     if let Some(name) = requested_node {
         let target = {
+            let tenancy = fleet.tenancy.lock().await;
+            if *caller != Caller::Admin {
+                tenancy
+                    .admit(&name, &effective, macos_guest, true)
+                    .map_err(tenancy_error)?;
+            }
             let nodes = fleet.nodes.lock().await;
             resolve_target(&nodes, Some(name), req_vcpus, req_mem, &selector, profile)?
         };
-        return match dispatch_create(&fleet, &target, &body).await {
-            Ok(record) => Ok(Json(json!({"node": target.name, "vm": record}))),
+        return match dispatch_create(fleet, &target, &body).await {
+            Ok(record) => {
+                record_created_vm(
+                    fleet,
+                    &target.name,
+                    &record,
+                    tenant,
+                    req_vcpus,
+                    req_mem,
+                    macos_guest,
+                    spec,
+                )
+                .await;
+                Ok(Json(json!({"node": target.name, "vm": record})))
+            }
             Err(DispatchError::Unreachable(msg)) => Err(AppError(StatusCode::BAD_GATEWAY, msg)),
             Err(DispatchError::Rejected(msg)) => Err(AppError(
                 StatusCode::BAD_GATEWAY,
@@ -871,29 +1195,56 @@ async fn create_vm(
     let mut tried: HashSet<String> = HashSet::new();
     let mut last_unreachable: Option<AppError> = None;
     loop {
-        let target = {
+        let (target, tenancy_on) = {
+            let tenancy = fleet.tenancy.lock().await;
             let nodes = fleet.nodes.lock().await;
-            pick_best_capacity_excluding_apple(
-                &nodes,
-                req_vcpus,
-                req_mem,
-                &tried,
-                &selector,
-                profile,
-                apple_request.as_ref(),
+            let admit = |n: &NodeInfo| {
+                !tenancy.draining.contains(&n.name)
+                    && tenancy
+                        .admit(&n.name, &effective, macos_guest, false)
+                        .is_ok()
+            };
+            (
+                pick_best_capacity_admitted(
+                    &nodes,
+                    req_vcpus,
+                    req_mem,
+                    &tried,
+                    &selector,
+                    profile,
+                    apple_request.as_ref(),
+                    &admit,
+                ),
+                tenancy.enabled(),
             )
         };
         let Some(target) = target else {
             return Err(last_unreachable.unwrap_or_else(|| {
-                AppError(
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    no_candidate_message(&selector),
-                )
+                let mut msg = no_candidate_message(&selector);
+                if tenancy_on && macos_guest && effective != Caller::Admin {
+                    msg.push_str(
+                        "; macOS guests run only on Macs the tenant leases: lease one with POST /fleet/leases",
+                    );
+                }
+                AppError(StatusCode::SERVICE_UNAVAILABLE, msg)
             }));
         };
         tried.insert(target.name.clone());
-        match dispatch_create(&fleet, &target, &body).await {
-            Ok(record) => return Ok(Json(json!({"node": target.name, "vm": record}))),
+        match dispatch_create(fleet, &target, &body).await {
+            Ok(record) => {
+                record_created_vm(
+                    fleet,
+                    &target.name,
+                    &record,
+                    tenant,
+                    req_vcpus,
+                    req_mem,
+                    macos_guest,
+                    spec,
+                )
+                .await;
+                return Ok(Json(json!({"node": target.name, "vm": record})));
+            }
             Err(DispatchError::Unreachable(msg)) => {
                 tracing::warn!(
                     node = %target.name,
@@ -929,6 +1280,39 @@ async fn create_vm(
 /// whether the list it just got is complete can check this field is empty;
 /// one that doesn't can ignore it exactly like before.
 async fn list_vms(State(fleet): State<Fleet>) -> Json<Value> {
+    list_vms_as(&fleet, &Caller::Admin).await
+}
+
+/// The routed `GET /fleet/vms`. A tenant sees only its own VMs: the ones the ledger records as its own, or whose
+/// record carries its tenant id.
+async fn list_vms_route(
+    State(fleet): State<Fleet>,
+    Extension(caller): Extension<Caller>,
+) -> Json<Value> {
+    list_vms_as(&fleet, &caller).await
+}
+
+async fn list_vms_as(fleet: &Fleet, caller: &Caller) -> Json<Value> {
+    let Json(mut all) = list_vms_all(fleet).await;
+    if let Caller::Tenant(t) = caller {
+        let tenancy = fleet.tenancy.lock().await;
+        if let Some(items) = all.get_mut("items").and_then(Value::as_array_mut) {
+            items.retain(|vm| {
+                let node = vm.get("node").and_then(Value::as_str).unwrap_or_default();
+                let id = vm.get("id").and_then(Value::as_str).unwrap_or_default();
+                let stamped = vm
+                    .get("request")
+                    .and_then(|r| r.get("tenant"))
+                    .and_then(Value::as_str)
+                    == Some(t.as_str());
+                stamped || tenancy.owns(caller, node, id)
+            });
+        }
+    }
+    Json(all)
+}
+
+async fn list_vms_all(fleet: &Fleet) -> Json<Value> {
     let (targets, mut unreachable): (Vec<NodeInfo>, Vec<Value>) = {
         let nodes = fleet.nodes.lock().await;
         let mut targets = Vec::new();
@@ -1053,9 +1437,44 @@ async fn delete_vm(
     State(fleet): State<Fleet>,
     Path((node, id)): Path<(String, String)>,
 ) -> Result<StatusCode, AppError> {
+    delete_vm_as(&fleet, &Caller::Admin, node, id).await
+}
+
+/// The routed `DELETE /fleet/vms/{node}/{id}`. A tenant may delete only its own VMs (anything else is a 404, so a
+/// tenant learns nothing about other tenants' VMs).
+async fn delete_vm_route(
+    State(fleet): State<Fleet>,
+    Extension(caller): Extension<Caller>,
+    Path((node, id)): Path<(String, String)>,
+) -> Result<StatusCode, AppError> {
+    delete_vm_as(&fleet, &caller, node, id).await
+}
+
+async fn delete_vm_as(
+    fleet: &Fleet,
+    caller: &Caller,
+    node: String,
+    id: String,
+) -> Result<StatusCode, AppError> {
+    if !fleet.tenancy.lock().await.owns(caller, &node, &id) {
+        return Err(AppError(
+            StatusCode::NOT_FOUND,
+            format!("no VM '{id}' on node '{node}'"),
+        ));
+    }
+    let status = delete_vm_on_node(fleet, &node, &id).await?;
+    let mut tenancy = fleet.tenancy.lock().await;
+    if tenancy.end_vm(&node, &id, Utc::now()) {
+        fleet.persist_tenancy(&tenancy);
+    }
+    Ok(status)
+}
+
+/// Deletes one VM on one node through that node's own API; ledger bookkeeping is the caller's.
+async fn delete_vm_on_node(fleet: &Fleet, node: &str, id: &str) -> Result<StatusCode, AppError> {
     let target = {
         let nodes = fleet.nodes.lock().await;
-        nodes.get(&node).cloned().ok_or_else(|| {
+        nodes.get(node).cloned().ok_or_else(|| {
             AppError(
                 StatusCode::BAD_REQUEST,
                 format!("no registered node named '{node}'"),
@@ -1736,7 +2155,17 @@ mod tests {
             persist_path: None,
             lock_path: None,
             token: None,
+            tenancy: Arc::new(Mutex::new(TenancyState::default())),
+            tenancy_path: None,
         }
+    }
+
+    /// [`spawn_fake_create_node`] for the cloud module's tests.
+    pub(super) async fn spawn_fake_create_node_pub(
+        status: StatusCode,
+        body: Value,
+    ) -> (String, Arc<std::sync::atomic::AtomicUsize>) {
+        spawn_fake_create_node(status, body).await
     }
 
     /// Spawns a real, minimal HTTP server on an OS-assigned loopback port

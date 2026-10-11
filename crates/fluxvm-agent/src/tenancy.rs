@@ -1,0 +1,1196 @@
+// Copyright 2026 Zyvor AI Labs · https://zyvor.dev
+// SPDX-License-Identifier: Apache-2.0
+
+//! Tenants, host leases, quotas and the VM ledger behind `fluxvm-agent central`.
+//!
+//! Pure state and rules, no HTTP: `central` owns one [`TenancyState`] behind its mutex, calls the methods here, and
+//! persists the whole thing to `fleet-tenancy.json` after every change.
+//!
+//! # Why host leases
+//!
+//! Apple's macOS licence lets a Mac run at most two extra macOS copies in VMs, and lets a Mac be leased only to one
+//! lessee with sole use for at least 24 consecutive hours. A cloud that hands out macOS VMs per minute on a shared Mac
+//! does not fit that, so this module models the unit a tenant rents as a whole Mac (a [`Lease`], 24 h minimum), and
+//! [`TenancyState::admit`] keeps macOS guests on the tenant's own leased Macs. Linux VMs carry no such restriction and
+//! may still land on shared (unleased) nodes. This is an engineering control, not legal advice: the deploying company
+//! decides its licence posture, and [`Policy`] lets it turn the macOS rule off.
+//!
+//! # Ledger
+//!
+//! Every VM created through central is recorded as a [`VmEntry`] (tenant, node, size, start, end). The ledger answers
+//! quota checks without asking any node, and is the source for metering ([`TenancyState::usage`]). VMs a node deletes on
+//! its own (TTL, `fluxctl delete` on the node) are closed by [`TenancyState::reconcile_node`], which central runs
+//! periodically against each node's `GET /v1/vms`.
+
+use chrono::{DateTime, Duration, Utc};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use sha2::{Digest, Sha256};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
+
+/// Apple's macOS licence: a leased Mac must be leased for at least 24 consecutive hours.
+pub const MIN_LEASE_HOURS: i64 = 24;
+/// A ledger entry younger than this is never closed by reconciliation: the node may not list a VM it is still
+/// creating.
+pub const RECONCILE_GRACE_SECS: i64 = 120;
+/// Upper bound on a tenant id, so ids stay usable as labels and file names.
+const MAX_TENANT_ID_LEN: usize = 63;
+
+/// Who is calling central, resolved from the bearer token by `central`'s auth middleware.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Caller {
+    /// The fleet token (operators and node heartbeats), or any caller when central runs without a token (lab mode).
+    Admin,
+    /// A tenant token.
+    Tenant(String),
+}
+
+impl Caller {
+    pub fn tenant(&self) -> Option<&str> {
+        match self {
+            Caller::Admin => None,
+            Caller::Tenant(t) => Some(t),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Quota {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_vms: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_vcpus: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_memory_mib: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_leased_hosts: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Tenant {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    /// SHA-256 (hex) of the tenant's bearer token. The token itself is returned once, at create or rotate time.
+    pub token_sha256: String,
+    #[serde(default)]
+    pub quota: Quota,
+    #[serde(default)]
+    pub disabled: bool,
+    pub created_at: DateTime<Utc>,
+}
+
+impl Tenant {
+    /// The record as the API shows it: never the token hash.
+    pub fn public_json(&self) -> Value {
+        serde_json::json!({
+            "id": self.id,
+            "display_name": self.display_name,
+            "quota": self.quota,
+            "disabled": self.disabled,
+            "created_at": self.created_at,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LeaseState {
+    Active,
+    Released,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Lease {
+    pub id: String,
+    pub tenant: String,
+    pub node: String,
+    pub started_at: DateTime<Utc>,
+    /// `started_at + MIN_LEASE_HOURS`: the lease cannot be released earlier (see [`TenancyState::release_lease`]),
+    /// and is billed to at least this point even when an operator force-releases it.
+    pub min_end: DateTime<Utc>,
+    /// Requested end; `None` runs until released.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ends_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub released_at: Option<DateTime<Utc>>,
+    pub state: LeaseState,
+}
+
+impl Lease {
+    /// The end used for billing: never before `min_end`.
+    pub fn billable_end(&self, now: DateTime<Utc>) -> DateTime<Utc> {
+        let end = self.released_at.unwrap_or(now);
+        if self.state == LeaseState::Released {
+            end.max(self.min_end)
+        } else {
+            end
+        }
+    }
+}
+
+/// One VM created through central.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VmEntry {
+    pub node: String,
+    pub vm_id: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tenant: Option<String>,
+    pub vcpus: u32,
+    pub memory_mib: u64,
+    #[serde(default)]
+    pub macos_guest: bool,
+    pub created_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ended_at: Option<DateTime<Utc>>,
+    /// The create body, kept only when the caller asked for `"reschedulable": true`, so a drain can recreate the VM
+    /// elsewhere. Never kept otherwise: create bodies can carry secrets.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spec: Option<Value>,
+}
+
+impl VmEntry {
+    pub fn active(&self) -> bool {
+        self.ended_at.is_none()
+    }
+}
+
+/// Fleet-wide rules. Defaults follow the macOS licence; each can be turned off in `fleet-tenancy.json`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Policy {
+    /// A tenant's macOS guest may only run on a Mac that tenant leases.
+    #[serde(default = "yes")]
+    pub require_lease_for_macos: bool,
+    /// A leased Mac only runs its lessee's VMs (sole use).
+    #[serde(default = "yes")]
+    pub exclusive_leased_hosts: bool,
+    /// Minimum lease length in hours; values below [`MIN_LEASE_HOURS`] are raised to it.
+    #[serde(default = "min_lease_hours")]
+    pub min_lease_hours: i64,
+}
+
+fn yes() -> bool {
+    true
+}
+
+fn min_lease_hours() -> i64 {
+    MIN_LEASE_HOURS
+}
+
+impl Default for Policy {
+    fn default() -> Self {
+        Self {
+            require_lease_for_macos: true,
+            exclusive_leased_hosts: true,
+            min_lease_hours: MIN_LEASE_HOURS,
+        }
+    }
+}
+
+impl Policy {
+    fn lease_hours(&self) -> i64 {
+        self.min_lease_hours.max(MIN_LEASE_HOURS)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TenancyError {
+    UnknownTenant(String),
+    TenantDisabled(String),
+    TenantExists(String),
+    InvalidTenantId(String),
+    TenantBusy(String),
+    UnknownLease(String),
+    NodeLeased { node: String, tenant: String },
+    NodeNeedsScrub(String),
+    LeaseTooShort { hours: i64, min: i64 },
+    EarlyRelease { earliest: DateTime<Utc> },
+    LeaseNotActive(String),
+    Quota(String),
+    NotYours(String),
+}
+
+impl TenancyError {
+    /// The HTTP status central answers with.
+    pub fn status(&self) -> u16 {
+        match self {
+            TenancyError::UnknownTenant(_) | TenancyError::UnknownLease(_) => 404,
+            TenancyError::InvalidTenantId(_) | TenancyError::LeaseTooShort { .. } => 400,
+            TenancyError::TenantDisabled(_) | TenancyError::NotYours(_) => 403,
+            TenancyError::Quota(_) => 429,
+            _ => 409,
+        }
+    }
+}
+
+impl std::fmt::Display for TenancyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TenancyError::UnknownTenant(t) => write!(f, "no tenant '{t}'"),
+            TenancyError::TenantDisabled(t) => write!(f, "tenant '{t}' is disabled"),
+            TenancyError::TenantExists(t) => write!(f, "tenant '{t}' already exists"),
+            TenancyError::InvalidTenantId(t) => write!(
+                f,
+                "invalid tenant id '{t}': use 1-{MAX_TENANT_ID_LEN} lowercase letters, digits and '-', starting with a letter or digit"
+            ),
+            TenancyError::TenantBusy(t) => {
+                write!(f, "tenant '{t}' still has active leases or VMs")
+            }
+            TenancyError::UnknownLease(l) => write!(f, "no lease '{l}'"),
+            TenancyError::NodeLeased { node, tenant } => {
+                write!(f, "node '{node}' is leased to tenant '{tenant}'")
+            }
+            TenancyError::NodeNeedsScrub(n) => write!(
+                f,
+                "node '{n}' was released from a lease and must be scrubbed (POST /fleet/nodes/{n}/scrub) before reuse"
+            ),
+            TenancyError::LeaseTooShort { hours, min } => write!(
+                f,
+                "a lease must be at least {min} hours (asked for {hours}); the macOS licence requires a minimum 24 consecutive hours of sole use"
+            ),
+            TenancyError::EarlyRelease { earliest } => write!(
+                f,
+                "lease cannot be released before {earliest} (24-hour minimum); an operator can force it, and it is still billed to that time"
+            ),
+            TenancyError::LeaseNotActive(l) => write!(f, "lease '{l}' is not active"),
+            TenancyError::Quota(m) => write!(f, "quota exceeded: {m}"),
+            TenancyError::NotYours(m) => write!(f, "{m}"),
+        }
+    }
+}
+
+impl std::error::Error for TenancyError {}
+
+pub fn hash_token(token: &str) -> String {
+    format!("{:x}", Sha256::digest(token.as_bytes()))
+}
+
+/// A new random bearer token: 64 hex characters (two v4 UUIDs, 244 random bits) with a recognisable prefix.
+pub fn new_token() -> String {
+    format!(
+        "fvt_{}{}",
+        uuid::Uuid::new_v4().simple(),
+        uuid::Uuid::new_v4().simple()
+    )
+}
+
+fn valid_tenant_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= MAX_TENANT_ID_LEN
+        && id
+            .bytes()
+            .next()
+            .is_some_and(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+}
+
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
+/// Overlap of `[start, end)` with `[from, to)`, in seconds (0 when they do not overlap).
+fn overlap_secs(
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+    from: DateTime<Utc>,
+    to: DateTime<Utc>,
+) -> i64 {
+    let s = start.max(from);
+    let e = end.min(to);
+    (e - s).num_seconds().max(0)
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct TenantUsage {
+    pub tenant: String,
+    pub vm_seconds: i64,
+    pub vcpu_seconds: i64,
+    pub memory_mib_seconds: i64,
+    pub macos_vm_seconds: i64,
+    pub lease_seconds: i64,
+    /// Lease time billed in the window, counting a released lease to at least its 24-hour `min_end`.
+    pub billable_lease_seconds: i64,
+    pub vms_started: u32,
+    pub leases_started: u32,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct UsageReport {
+    pub from: DateTime<Utc>,
+    pub to: DateTime<Utc>,
+    pub tenants: Vec<TenantUsage>,
+}
+
+impl UsageReport {
+    /// One CSV row per tenant, with a header.
+    pub fn to_csv(&self) -> String {
+        let mut out = String::from(
+            "tenant,from,to,vm_hours,vcpu_hours,memory_gib_hours,macos_vm_hours,lease_hours,billable_lease_hours,vms_started,leases_started\n",
+        );
+        let h = |s: i64| format!("{:.4}", s as f64 / 3600.0);
+        for t in &self.tenants {
+            out.push_str(&format!(
+                "{},{},{},{},{},{},{},{},{},{},{}\n",
+                t.tenant,
+                self.from.to_rfc3339(),
+                self.to.to_rfc3339(),
+                h(t.vm_seconds),
+                h(t.vcpu_seconds),
+                format!("{:.4}", t.memory_mib_seconds as f64 / 1024.0 / 3600.0),
+                h(t.macos_vm_seconds),
+                h(t.lease_seconds),
+                h(t.billable_lease_seconds),
+                t.vms_started,
+                t.leases_started,
+            ));
+        }
+        out
+    }
+}
+
+/// Everything persisted in `fleet-tenancy.json`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TenancyState {
+    #[serde(default)]
+    pub policy: Policy,
+    #[serde(default)]
+    pub tenants: BTreeMap<String, Tenant>,
+    #[serde(default)]
+    pub leases: Vec<Lease>,
+    #[serde(default)]
+    pub vms: Vec<VmEntry>,
+    /// Nodes released from a lease that must be scrubbed before anyone else uses them.
+    #[serde(default)]
+    pub scrub_pending: BTreeSet<String>,
+    /// Nodes being drained (`POST /fleet/nodes/{name}/drain`); cleared by uncordon.
+    #[serde(default)]
+    pub draining: BTreeSet<String>,
+}
+
+impl TenancyState {
+    /// True once any tenant exists; until then central behaves exactly as before tenancy existed.
+    pub fn enabled(&self) -> bool {
+        !self.tenants.is_empty()
+    }
+
+    // ---- tenants ----------------------------------------------------------------------------------------------
+
+    /// Creates a tenant and returns its one-time bearer token.
+    pub fn create_tenant(
+        &mut self,
+        id: &str,
+        display_name: Option<String>,
+        quota: Quota,
+        now: DateTime<Utc>,
+    ) -> Result<(Tenant, String), TenancyError> {
+        if !valid_tenant_id(id) {
+            return Err(TenancyError::InvalidTenantId(id.into()));
+        }
+        if self.tenants.contains_key(id) {
+            return Err(TenancyError::TenantExists(id.into()));
+        }
+        let token = new_token();
+        let t = Tenant {
+            id: id.into(),
+            display_name,
+            token_sha256: hash_token(&token),
+            quota,
+            disabled: false,
+            created_at: now,
+        };
+        self.tenants.insert(id.into(), t.clone());
+        Ok((t, token))
+    }
+
+    pub fn rotate_token(&mut self, id: &str) -> Result<String, TenancyError> {
+        let t = self
+            .tenants
+            .get_mut(id)
+            .ok_or_else(|| TenancyError::UnknownTenant(id.into()))?;
+        let token = new_token();
+        t.token_sha256 = hash_token(&token);
+        Ok(token)
+    }
+
+    pub fn update_tenant(
+        &mut self,
+        id: &str,
+        quota: Option<Quota>,
+        disabled: Option<bool>,
+        display_name: Option<String>,
+    ) -> Result<Tenant, TenancyError> {
+        let t = self
+            .tenants
+            .get_mut(id)
+            .ok_or_else(|| TenancyError::UnknownTenant(id.into()))?;
+        if let Some(q) = quota {
+            t.quota = q;
+        }
+        if let Some(d) = disabled {
+            t.disabled = d;
+        }
+        if display_name.is_some() {
+            t.display_name = display_name;
+        }
+        Ok(t.clone())
+    }
+
+    /// Removes a tenant with no active lease and no active VM.
+    pub fn delete_tenant(&mut self, id: &str) -> Result<(), TenancyError> {
+        if !self.tenants.contains_key(id) {
+            return Err(TenancyError::UnknownTenant(id.into()));
+        }
+        let busy = self
+            .leases
+            .iter()
+            .any(|l| l.tenant == id && l.state == LeaseState::Active)
+            || self
+                .vms
+                .iter()
+                .any(|v| v.active() && v.tenant.as_deref() == Some(id));
+        if busy {
+            return Err(TenancyError::TenantBusy(id.into()));
+        }
+        self.tenants.remove(id);
+        Ok(())
+    }
+
+    /// The enabled tenant whose token this is.
+    pub fn authenticate(&self, presented: &str) -> Option<&Tenant> {
+        let h = hash_token(presented);
+        self.tenants
+            .values()
+            .find(|t| constant_time_eq(t.token_sha256.as_bytes(), h.as_bytes()))
+    }
+
+    fn require_tenant(&self, id: &str) -> Result<&Tenant, TenancyError> {
+        let t = self
+            .tenants
+            .get(id)
+            .ok_or_else(|| TenancyError::UnknownTenant(id.into()))?;
+        if t.disabled {
+            return Err(TenancyError::TenantDisabled(id.into()));
+        }
+        Ok(t)
+    }
+
+    // ---- leases -----------------------------------------------------------------------------------------------
+
+    pub fn active_lease_for_node(&self, node: &str) -> Option<&Lease> {
+        self.leases
+            .iter()
+            .find(|l| l.node == node && l.state == LeaseState::Active)
+    }
+
+    pub fn lease(&self, id: &str) -> Option<&Lease> {
+        self.leases.iter().find(|l| l.id == id)
+    }
+
+    /// Whether `node` can take a new lease right now (tenancy rules only; health and capacity are central's job).
+    pub fn leasable(&self, node: &str) -> Result<(), TenancyError> {
+        if let Some(l) = self.active_lease_for_node(node) {
+            return Err(TenancyError::NodeLeased {
+                node: node.into(),
+                tenant: l.tenant.clone(),
+            });
+        }
+        if self.scrub_pending.contains(node) {
+            return Err(TenancyError::NodeNeedsScrub(node.into()));
+        }
+        Ok(())
+    }
+
+    /// Leases `node` to `tenant` from `now` for `hours` (default: until released).
+    pub fn create_lease(
+        &mut self,
+        tenant: &str,
+        node: &str,
+        hours: Option<i64>,
+        now: DateTime<Utc>,
+    ) -> Result<Lease, TenancyError> {
+        let t = self.require_tenant(tenant)?;
+        let min = self.policy.lease_hours();
+        if let Some(h) = hours
+            && h < min
+        {
+            return Err(TenancyError::LeaseTooShort { hours: h, min });
+        }
+        self.leasable(node)?;
+        if let Some(max) = t.quota.max_leased_hosts {
+            let held = self
+                .leases
+                .iter()
+                .filter(|l| l.tenant == tenant && l.state == LeaseState::Active)
+                .count() as u32;
+            if held >= max {
+                return Err(TenancyError::Quota(format!(
+                    "tenant '{tenant}' already holds {held} of {max} leased hosts"
+                )));
+            }
+        }
+        let lease = Lease {
+            id: format!("lease-{}", uuid::Uuid::new_v4().simple()),
+            tenant: tenant.into(),
+            node: node.into(),
+            started_at: now,
+            min_end: now + Duration::hours(min),
+            ends_at: hours.map(|h| now + Duration::hours(h)),
+            released_at: None,
+            state: LeaseState::Active,
+        };
+        self.leases.push(lease.clone());
+        Ok(lease)
+    }
+
+    /// Releases a lease. A tenant (`scope = Some(tenant)`) can release only its own lease and never before
+    /// `min_end`; an operator (`scope = None`) can `force` an early release, which is still billed to `min_end`.
+    /// The node then needs a scrub before it can be leased or used again.
+    pub fn release_lease(
+        &mut self,
+        id: &str,
+        scope: Option<&str>,
+        force: bool,
+        now: DateTime<Utc>,
+    ) -> Result<Lease, TenancyError> {
+        let lease = self
+            .leases
+            .iter_mut()
+            .find(|l| l.id == id)
+            .ok_or_else(|| TenancyError::UnknownLease(id.into()))?;
+        if let Some(t) = scope
+            && lease.tenant != t
+        {
+            // Same answer as a missing lease: a tenant learns nothing about other tenants' leases.
+            return Err(TenancyError::UnknownLease(id.into()));
+        }
+        if lease.state != LeaseState::Active {
+            return Err(TenancyError::LeaseNotActive(id.into()));
+        }
+        let can_force = force && scope.is_none();
+        if now < lease.min_end && !can_force {
+            return Err(TenancyError::EarlyRelease {
+                earliest: lease.min_end,
+            });
+        }
+        lease.state = LeaseState::Released;
+        lease.released_at = Some(now);
+        let out = lease.clone();
+        self.scrub_pending.insert(out.node.clone());
+        Ok(out)
+    }
+
+    /// Ends every active lease whose requested `ends_at` has passed. Returns the leases it ended.
+    pub fn expire_leases(&mut self, now: DateTime<Utc>) -> Vec<Lease> {
+        let mut ended = Vec::new();
+        for l in self.leases.iter_mut() {
+            if l.state == LeaseState::Active && l.ends_at.is_some_and(|e| e <= now) {
+                l.state = LeaseState::Released;
+                l.released_at = l.ends_at;
+                ended.push(l.clone());
+            }
+        }
+        for l in &ended {
+            self.scrub_pending.insert(l.node.clone());
+        }
+        ended
+    }
+
+    pub fn mark_scrubbed(&mut self, node: &str) -> bool {
+        self.scrub_pending.remove(node)
+    }
+
+    // ---- admission --------------------------------------------------------------------------------------------
+
+    /// Whether `caller` may place a VM on `node`. `explicit` is true when the caller named the node: an operator
+    /// naming a node bypasses tenancy (like it bypasses cordon), a tenant never does.
+    pub fn admit(
+        &self,
+        node: &str,
+        caller: &Caller,
+        macos_guest: bool,
+        explicit: bool,
+    ) -> Result<(), TenancyError> {
+        if !self.enabled() {
+            return Ok(());
+        }
+        if explicit && *caller == Caller::Admin {
+            return Ok(());
+        }
+        if self.scrub_pending.contains(node) {
+            return Err(TenancyError::NodeNeedsScrub(node.into()));
+        }
+        let lease = self.active_lease_for_node(node);
+        match (caller, lease) {
+            (Caller::Tenant(t), Some(l)) if &l.tenant == t => Ok(()),
+            (_, Some(l)) if self.policy.exclusive_leased_hosts => Err(TenancyError::NodeLeased {
+                node: node.into(),
+                tenant: l.tenant.clone(),
+            }),
+            (Caller::Tenant(t), _) if macos_guest && self.policy.require_lease_for_macos => {
+                Err(TenancyError::NotYours(format!(
+                    "macOS guests for tenant '{t}' run only on Macs the tenant leases (POST /fleet/leases); node '{node}' is not one"
+                )))
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// Checks a new VM of this size against the tenant's quota.
+    pub fn check_quota(
+        &self,
+        tenant: &str,
+        vcpus: u32,
+        memory_mib: u64,
+    ) -> Result<(), TenancyError> {
+        let t = self.require_tenant(tenant)?;
+        let q = &t.quota;
+        let mine = self
+            .vms
+            .iter()
+            .filter(|v| v.active() && v.tenant.as_deref() == Some(tenant));
+        let (mut n, mut cpu, mut mem) = (0u32, 0u64, 0u64);
+        for v in mine {
+            n += 1;
+            cpu += u64::from(v.vcpus);
+            mem += v.memory_mib;
+        }
+        if let Some(max) = q.max_vms
+            && n + 1 > max
+        {
+            return Err(TenancyError::Quota(format!(
+                "tenant '{tenant}' runs {n} of {max} VMs"
+            )));
+        }
+        if let Some(max) = q.max_vcpus
+            && cpu + u64::from(vcpus) > max
+        {
+            return Err(TenancyError::Quota(format!(
+                "tenant '{tenant}' uses {cpu} of {max} vCPUs; this VM asks for {vcpus}"
+            )));
+        }
+        if let Some(max) = q.max_memory_mib
+            && mem + memory_mib > max
+        {
+            return Err(TenancyError::Quota(format!(
+                "tenant '{tenant}' uses {mem} of {max} MiB; this VM asks for {memory_mib}"
+            )));
+        }
+        Ok(())
+    }
+
+    // ---- ledger -----------------------------------------------------------------------------------------------
+
+    pub fn record_vm(&mut self, entry: VmEntry) {
+        self.vms.push(entry);
+    }
+
+    pub fn vm(&self, node: &str, vm_id: &str) -> Option<&VmEntry> {
+        self.vms
+            .iter()
+            .rev()
+            .find(|v| v.node == node && v.vm_id == vm_id)
+    }
+
+    /// Whether `caller` may act on this VM: operators always; tenants only on VMs the ledger says are theirs.
+    pub fn owns(&self, caller: &Caller, node: &str, vm_id: &str) -> bool {
+        match caller {
+            Caller::Admin => true,
+            Caller::Tenant(t) => self
+                .vm(node, vm_id)
+                .is_some_and(|v| v.tenant.as_deref() == Some(t)),
+        }
+    }
+
+    pub fn end_vm(&mut self, node: &str, vm_id: &str, now: DateTime<Utc>) -> bool {
+        match self
+            .vms
+            .iter_mut()
+            .rev()
+            .find(|v| v.node == node && v.vm_id == vm_id && v.active())
+        {
+            Some(v) => {
+                v.ended_at = Some(now);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Closes every active entry on `node` whose VM the node no longer lists. Entries younger than
+    /// [`RECONCILE_GRACE_SECS`] are left alone. Returns how many it closed.
+    pub fn reconcile_node(
+        &mut self,
+        node: &str,
+        present: &HashSet<String>,
+        now: DateTime<Utc>,
+    ) -> usize {
+        let mut closed = 0;
+        for v in self.vms.iter_mut() {
+            if v.node == node
+                && v.active()
+                && !present.contains(&v.vm_id)
+                && (now - v.created_at).num_seconds() >= RECONCILE_GRACE_SECS
+            {
+                v.ended_at = Some(now);
+                closed += 1;
+            }
+        }
+        closed
+    }
+
+    /// Active ledger entries on `node` belonging to `tenant`.
+    pub fn active_vms_of_on(&self, tenant: &str, node: &str) -> Vec<VmEntry> {
+        self.vms
+            .iter()
+            .filter(|v| v.active() && v.node == node && v.tenant.as_deref() == Some(tenant))
+            .cloned()
+            .collect()
+    }
+
+    /// Drops ended ledger entries and released leases that ended before `before`, keeping the file bounded.
+    /// Usage for windows before `before` is no longer available afterwards: export it first.
+    pub fn compact(&mut self, before: DateTime<Utc>) -> usize {
+        let n = self.vms.len() + self.leases.len();
+        self.vms.retain(|v| v.ended_at.is_none_or(|e| e >= before));
+        self.leases.retain(|l| {
+            l.state == LeaseState::Active
+                || l.released_at.is_none_or(|r| r.max(l.min_end) >= before)
+        });
+        n - (self.vms.len() + self.leases.len())
+    }
+
+    // ---- metering ---------------------------------------------------------------------------------------------
+
+    /// Usage in `[from, to)`, per tenant (VMs created without a tenant are reported under `""`).
+    pub fn usage(
+        &self,
+        from: DateTime<Utc>,
+        to: DateTime<Utc>,
+        only: Option<&str>,
+        now: DateTime<Utc>,
+    ) -> UsageReport {
+        let mut by: BTreeMap<String, TenantUsage> = BTreeMap::new();
+        let keep = |t: &str| only.is_none_or(|o| o == t);
+        for v in &self.vms {
+            let tenant = v.tenant.clone().unwrap_or_default();
+            if !keep(&tenant) {
+                continue;
+            }
+            let secs = overlap_secs(v.created_at, v.ended_at.unwrap_or(now), from, to);
+            let started = v.created_at >= from && v.created_at < to;
+            if secs == 0 && !started {
+                continue;
+            }
+            let u = by.entry(tenant.clone()).or_insert_with(|| TenantUsage {
+                tenant,
+                ..Default::default()
+            });
+            u.vm_seconds += secs;
+            u.vcpu_seconds += secs * i64::from(v.vcpus);
+            u.memory_mib_seconds += secs * v.memory_mib as i64;
+            if v.macos_guest {
+                u.macos_vm_seconds += secs;
+            }
+            if started {
+                u.vms_started += 1;
+            }
+        }
+        for l in &self.leases {
+            if !keep(&l.tenant) {
+                continue;
+            }
+            let actual = overlap_secs(l.started_at, l.released_at.unwrap_or(now), from, to);
+            let billable = overlap_secs(l.started_at, l.billable_end(now), from, to);
+            let started = l.started_at >= from && l.started_at < to;
+            if actual == 0 && billable == 0 && !started {
+                continue;
+            }
+            let u = by.entry(l.tenant.clone()).or_insert_with(|| TenantUsage {
+                tenant: l.tenant.clone(),
+                ..Default::default()
+            });
+            u.lease_seconds += actual;
+            u.billable_lease_seconds += billable;
+            if started {
+                u.leases_started += 1;
+            }
+        }
+        UsageReport {
+            from,
+            to,
+            tenants: by.into_values().collect(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::TimeZone;
+
+    fn t0() -> DateTime<Utc> {
+        Utc.with_ymd_and_hms(2026, 10, 1, 0, 0, 0).unwrap()
+    }
+
+    fn state_with(tenants: &[&str]) -> TenancyState {
+        let mut s = TenancyState::default();
+        for t in tenants {
+            s.create_tenant(t, None, Quota::default(), t0()).unwrap();
+        }
+        s
+    }
+
+    fn vm(node: &str, id: &str, tenant: Option<&str>, at: DateTime<Utc>) -> VmEntry {
+        VmEntry {
+            node: node.into(),
+            vm_id: id.into(),
+            name: id.into(),
+            tenant: tenant.map(str::to_owned),
+            vcpus: 2,
+            memory_mib: 4096,
+            macos_guest: false,
+            created_at: at,
+            ended_at: None,
+            spec: None,
+        }
+    }
+
+    #[test]
+    fn tenant_ids_are_validated_and_unique() {
+        let mut s = TenancyState::default();
+        assert!(matches!(
+            s.create_tenant("Acme", None, Quota::default(), t0()),
+            Err(TenancyError::InvalidTenantId(_))
+        ));
+        assert!(matches!(
+            s.create_tenant("-acme", None, Quota::default(), t0()),
+            Err(TenancyError::InvalidTenantId(_))
+        ));
+        s.create_tenant("acme", None, Quota::default(), t0())
+            .unwrap();
+        assert_eq!(
+            s.create_tenant("acme", None, Quota::default(), t0())
+                .unwrap_err(),
+            TenancyError::TenantExists("acme".into())
+        );
+    }
+
+    #[test]
+    fn tokens_authenticate_only_their_tenant_and_rotate() {
+        let mut s = TenancyState::default();
+        let (_, a) = s.create_tenant("a", None, Quota::default(), t0()).unwrap();
+        let (_, b) = s.create_tenant("b", None, Quota::default(), t0()).unwrap();
+        assert_ne!(a, b);
+        assert!(a.starts_with("fvt_") && a.len() == 68);
+        assert_eq!(s.authenticate(&a).unwrap().id, "a");
+        assert_eq!(s.authenticate(&b).unwrap().id, "b");
+        assert!(s.authenticate("nope").is_none());
+        // The token itself is never stored.
+        assert!(!serde_json::to_string(&s).unwrap().contains(&a));
+        let a2 = s.rotate_token("a").unwrap();
+        assert!(s.authenticate(&a).is_none());
+        assert_eq!(s.authenticate(&a2).unwrap().id, "a");
+    }
+
+    #[test]
+    fn leases_are_at_least_24_hours_and_exclusive() {
+        let mut s = state_with(&["a", "b"]);
+        assert_eq!(
+            s.create_lease("a", "mac1", Some(12), t0()).unwrap_err(),
+            TenancyError::LeaseTooShort { hours: 12, min: 24 }
+        );
+        // A policy asking for less than 24 h is raised to 24.
+        s.policy.min_lease_hours = 1;
+        assert!(s.create_lease("a", "mac1", Some(2), t0()).is_err());
+        let l = s.create_lease("a", "mac1", None, t0()).unwrap();
+        assert_eq!(l.min_end, t0() + Duration::hours(24));
+        assert!(matches!(
+            s.create_lease("b", "mac1", None, t0()),
+            Err(TenancyError::NodeLeased { .. })
+        ));
+    }
+
+    #[test]
+    fn disabled_or_unknown_tenants_cannot_lease() {
+        let mut s = state_with(&["a"]);
+        s.update_tenant("a", None, Some(true), None).unwrap();
+        assert_eq!(
+            s.create_lease("a", "mac1", None, t0()).unwrap_err(),
+            TenancyError::TenantDisabled("a".into())
+        );
+        assert_eq!(
+            s.create_lease("zz", "mac1", None, t0()).unwrap_err(),
+            TenancyError::UnknownTenant("zz".into())
+        );
+    }
+
+    #[test]
+    fn leased_host_quota_is_enforced() {
+        let mut s = state_with(&["a"]);
+        s.update_tenant(
+            "a",
+            Some(Quota {
+                max_leased_hosts: Some(1),
+                ..Default::default()
+            }),
+            None,
+            None,
+        )
+        .unwrap();
+        s.create_lease("a", "mac1", None, t0()).unwrap();
+        assert!(matches!(
+            s.create_lease("a", "mac2", None, t0()),
+            Err(TenancyError::Quota(_))
+        ));
+    }
+
+    #[test]
+    fn early_release_is_refused_for_tenants_and_forced_by_operators() {
+        let mut s = state_with(&["a", "b"]);
+        let l = s.create_lease("a", "mac1", None, t0()).unwrap();
+        let early = t0() + Duration::hours(3);
+        assert!(matches!(
+            s.release_lease(&l.id, Some("a"), true, early),
+            Err(TenancyError::EarlyRelease { .. })
+        ));
+        // Another tenant cannot even see it.
+        assert_eq!(
+            s.release_lease(&l.id, Some("b"), false, early).unwrap_err(),
+            TenancyError::UnknownLease(l.id.clone())
+        );
+        let r = s.release_lease(&l.id, None, true, early).unwrap();
+        assert_eq!(r.state, LeaseState::Released);
+        // Billed to the 24-hour minimum anyway.
+        assert_eq!(r.billable_end(early), t0() + Duration::hours(24));
+        assert!(s.scrub_pending.contains("mac1"));
+        assert!(matches!(
+            s.create_lease("b", "mac1", None, early),
+            Err(TenancyError::NodeNeedsScrub(_))
+        ));
+        assert!(s.mark_scrubbed("mac1"));
+        s.create_lease("b", "mac1", None, early).unwrap();
+    }
+
+    #[test]
+    fn tenant_release_after_minimum_works() {
+        let mut s = state_with(&["a"]);
+        let l = s.create_lease("a", "mac1", None, t0()).unwrap();
+        let later = t0() + Duration::hours(30);
+        let r = s.release_lease(&l.id, Some("a"), false, later).unwrap();
+        assert_eq!(r.billable_end(later), later);
+        assert_eq!(
+            s.release_lease(&l.id, Some("a"), false, later).unwrap_err(),
+            TenancyError::LeaseNotActive(l.id.clone())
+        );
+    }
+
+    #[test]
+    fn leases_with_an_end_expire() {
+        let mut s = state_with(&["a"]);
+        s.create_lease("a", "mac1", Some(48), t0()).unwrap();
+        assert!(s.expire_leases(t0() + Duration::hours(47)).is_empty());
+        let ended = s.expire_leases(t0() + Duration::hours(49));
+        assert_eq!(ended.len(), 1);
+        assert_eq!(ended[0].released_at, Some(t0() + Duration::hours(48)));
+        assert!(s.active_lease_for_node("mac1").is_none());
+        assert!(s.scrub_pending.contains("mac1"));
+    }
+
+    #[test]
+    fn admission_keeps_macos_on_the_tenants_own_leased_macs() {
+        let mut s = state_with(&["a", "b"]);
+        s.create_lease("a", "mac1", None, t0()).unwrap();
+        let a = Caller::Tenant("a".into());
+        let b = Caller::Tenant("b".into());
+        // a: macOS on its own lease, Linux anywhere not leased by someone else.
+        assert!(s.admit("mac1", &a, true, false).is_ok());
+        assert!(s.admit("mac2", &a, true, false).is_err());
+        assert!(s.admit("mac2", &a, false, false).is_ok());
+        // b: never on a's lease, even Linux, even naming the node.
+        assert!(s.admit("mac1", &b, false, false).is_err());
+        assert!(s.admit("mac1", &b, false, true).is_err());
+        // Operators: automatic placement respects leases, an explicit node bypasses them.
+        assert!(s.admit("mac1", &Caller::Admin, false, false).is_err());
+        assert!(s.admit("mac1", &Caller::Admin, false, true).is_ok());
+        assert!(s.admit("mac2", &Caller::Admin, true, false).is_ok());
+    }
+
+    #[test]
+    fn admission_is_off_without_tenants_and_follows_policy() {
+        let s = TenancyState::default();
+        assert!(
+            s.admit("mac1", &Caller::Tenant("x".into()), true, false)
+                .is_ok()
+        );
+        let mut s = state_with(&["a", "b"]);
+        s.create_lease("a", "mac1", None, t0()).unwrap();
+        s.policy.exclusive_leased_hosts = false;
+        s.policy.require_lease_for_macos = false;
+        let b = Caller::Tenant("b".into());
+        assert!(s.admit("mac1", &b, false, false).is_ok());
+        assert!(s.admit("mac2", &b, true, false).is_ok());
+    }
+
+    #[test]
+    fn scrub_pending_nodes_take_no_automatic_placements() {
+        let mut s = state_with(&["a"]);
+        s.scrub_pending.insert("mac1".into());
+        assert!(
+            s.admit("mac1", &Caller::Tenant("a".into()), false, false)
+                .is_err()
+        );
+        assert!(s.admit("mac1", &Caller::Admin, false, false).is_err());
+        assert!(s.admit("mac1", &Caller::Admin, false, true).is_ok());
+    }
+
+    #[test]
+    fn quotas_count_only_active_vms_of_the_tenant() {
+        let mut s = state_with(&["a", "b"]);
+        s.update_tenant(
+            "a",
+            Some(Quota {
+                max_vms: Some(2),
+                max_vcpus: Some(5),
+                max_memory_mib: Some(10_000),
+                max_leased_hosts: None,
+            }),
+            None,
+            None,
+        )
+        .unwrap();
+        s.record_vm(vm("n", "1", Some("a"), t0()));
+        s.record_vm(vm("n", "2", Some("b"), t0()));
+        assert!(s.check_quota("a", 2, 4096).is_ok());
+        assert!(matches!(
+            s.check_quota("a", 4, 1),
+            Err(TenancyError::Quota(_))
+        ));
+        assert!(matches!(
+            s.check_quota("a", 1, 8000),
+            Err(TenancyError::Quota(_))
+        ));
+        s.record_vm(vm("n", "3", Some("a"), t0()));
+        assert!(matches!(
+            s.check_quota("a", 1, 1),
+            Err(TenancyError::Quota(_))
+        ));
+        assert!(s.end_vm("n", "3", t0()));
+        assert!(s.check_quota("a", 1, 1).is_ok());
+    }
+
+    #[test]
+    fn ownership_follows_the_ledger() {
+        let mut s = state_with(&["a", "b"]);
+        s.record_vm(vm("n", "1", Some("a"), t0()));
+        assert!(s.owns(&Caller::Tenant("a".into()), "n", "1"));
+        assert!(!s.owns(&Caller::Tenant("b".into()), "n", "1"));
+        assert!(!s.owns(&Caller::Tenant("a".into()), "n", "unknown"));
+        assert!(s.owns(&Caller::Admin, "n", "unknown"));
+    }
+
+    #[test]
+    fn reconcile_closes_vanished_vms_after_the_grace_period() {
+        let mut s = TenancyState::default();
+        s.record_vm(vm("n", "old", None, t0()));
+        s.record_vm(vm("n", "kept", None, t0()));
+        s.record_vm(vm("n", "new", None, t0() + Duration::seconds(100)));
+        s.record_vm(vm("other", "x", None, t0()));
+        let present: HashSet<String> = ["kept".to_string()].into();
+        let now = t0() + Duration::seconds(150);
+        assert_eq!(s.reconcile_node("n", &present, now), 1);
+        assert!(!s.vm("n", "old").unwrap().active());
+        assert!(s.vm("n", "kept").unwrap().active());
+        assert!(s.vm("n", "new").unwrap().active());
+        assert!(s.vm("other", "x").unwrap().active());
+    }
+
+    #[test]
+    fn usage_clips_to_the_window_and_bills_lease_minimums() {
+        let mut s = state_with(&["a"]);
+        let mut v = vm("n", "1", Some("a"), t0());
+        v.ended_at = Some(t0() + Duration::hours(2));
+        v.macos_guest = true;
+        s.record_vm(v);
+        s.record_vm(vm("n", "2", None, t0() + Duration::hours(1)));
+        let l = s.create_lease("a", "mac1", None, t0()).unwrap();
+        s.release_lease(&l.id, None, true, t0() + Duration::hours(6))
+            .unwrap();
+
+        let from = t0() + Duration::hours(1);
+        let to = t0() + Duration::hours(25);
+        let now = t0() + Duration::hours(26);
+        let r = s.usage(from, to, None, now);
+        assert_eq!(r.tenants.len(), 2);
+        let untenanted = &r.tenants[0];
+        assert_eq!(untenanted.tenant, "");
+        assert_eq!(untenanted.vm_seconds, 24 * 3600);
+        assert_eq!(untenanted.vms_started, 1);
+        let a = &r.tenants[1];
+        assert_eq!(a.vm_seconds, 3600);
+        assert_eq!(a.macos_vm_seconds, 3600);
+        assert_eq!(a.vcpu_seconds, 2 * 3600);
+        assert_eq!(a.memory_mib_seconds, 4096 * 3600);
+        assert_eq!(a.vms_started, 0);
+        assert_eq!(a.lease_seconds, 5 * 3600);
+        // Billed from the window start to the 24-hour minimum.
+        assert_eq!(a.billable_lease_seconds, 23 * 3600);
+        assert_eq!(a.leases_started, 0);
+
+        let only_a = s.usage(from, to, Some("a"), now);
+        assert_eq!(only_a.tenants.len(), 1);
+        let csv = only_a.to_csv();
+        assert!(csv.starts_with("tenant,from,to,vm_hours"));
+        assert!(csv.contains("\na,"));
+        assert!(csv.contains(",1.0000,2.0000,4.0000,1.0000,5.0000,23.0000,0,0\n"));
+    }
+
+    #[test]
+    fn tenants_with_work_cannot_be_deleted() {
+        let mut s = state_with(&["a"]);
+        let l = s.create_lease("a", "mac1", None, t0()).unwrap();
+        assert_eq!(
+            s.delete_tenant("a").unwrap_err(),
+            TenancyError::TenantBusy("a".into())
+        );
+        s.release_lease(&l.id, None, true, t0()).unwrap();
+        s.delete_tenant("a").unwrap();
+        assert!(!s.enabled());
+    }
+
+    #[test]
+    fn compaction_keeps_active_and_recent_records() {
+        let mut s = state_with(&["a"]);
+        let mut old = vm("n", "old", Some("a"), t0());
+        old.ended_at = Some(t0() + Duration::hours(1));
+        s.record_vm(old);
+        s.record_vm(vm("n", "live", Some("a"), t0()));
+        let l = s.create_lease("a", "mac1", None, t0()).unwrap();
+        s.release_lease(&l.id, None, true, t0() + Duration::hours(1))
+            .unwrap();
+        // The released lease is billed to its 24-hour min_end, so it survives a cut before that.
+        assert_eq!(s.compact(t0() + Duration::hours(10)), 1);
+        assert_eq!(s.vms.len(), 1);
+        assert_eq!(s.leases.len(), 1);
+        assert_eq!(s.compact(t0() + Duration::hours(30)), 1);
+        assert!(s.leases.is_empty());
+    }
+
+    #[test]
+    fn state_round_trips_and_old_files_load() {
+        let mut s = state_with(&["a"]);
+        s.create_lease("a", "mac1", None, t0()).unwrap();
+        let raw = serde_json::to_string(&s).unwrap();
+        let back: TenancyState = serde_json::from_str(&raw).unwrap();
+        assert_eq!(back.leases.len(), 1);
+        let empty: TenancyState = serde_json::from_str("{}").unwrap();
+        assert!(empty.policy.require_lease_for_macos);
+        assert_eq!(empty.policy.min_lease_hours, 24);
+    }
+}

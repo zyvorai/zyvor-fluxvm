@@ -220,6 +220,7 @@ mod tests {
         let app = router(CentralConfig {
             state_dir: dir.path().to_path_buf(),
             token: token.map(str::to_string),
+            reconcile_interval: None,
         });
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr: SocketAddr = listener.local_addr().unwrap();

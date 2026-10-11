@@ -37,6 +37,10 @@ enum Command {
         /// Optional TLS private key (PEM).
         #[arg(long, env = "FLUXVM_AGENT_TLS_KEY")]
         tls_key: Option<PathBuf>,
+        /// Seconds between ledger reconciles and lease-expiry checks against every node (0 turns the background
+        /// pass off; `POST /fleet/reconcile` still runs one).
+        #[arg(long, env = "FLUXVM_AGENT_RECONCILE_SECS", default_value = "60")]
+        reconcile_secs: u64,
     },
     /// Run this node's heartbeat client, reporting to a central registry.
     Node {
@@ -90,10 +94,13 @@ async fn main() -> Result<()> {
             token,
             tls_cert,
             tls_key,
+            reconcile_secs,
         } => {
             let app = fluxvm_agent::central::router(fluxvm_agent::central::CentralConfig {
                 state_dir,
                 token,
+                reconcile_interval: (reconcile_secs > 0)
+                    .then(|| Duration::from_secs(reconcile_secs)),
             });
             let addr: SocketAddr = listen
                 .parse()
