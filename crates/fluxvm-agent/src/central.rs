@@ -1019,6 +1019,9 @@ async fn dispatch_create(
 /// `fluxctl serve` and gets an explicit rejection (bad request fields) is
 /// never retried elsewhere, since every other node would reject the same
 /// body identically.
+///
+/// The router serves [`create_vm_route`] (which knows the caller); this operator-only form is what the tests drive.
+#[cfg(test)]
 async fn create_vm(
     State(fleet): State<Fleet>,
     Json(body): Json<Value>,
@@ -1026,7 +1029,7 @@ async fn create_vm(
     create_vm_inner(&fleet, &Caller::Admin, body, false).await
 }
 
-/// The routed `POST /fleet/vms`: [`create_vm`] for whoever the auth middleware says is calling.
+/// The routed `POST /fleet/vms`: `create_vm` for whoever the auth middleware says is calling.
 async fn create_vm_route(
     State(fleet): State<Fleet>,
     Extension(caller): Extension<Caller>,
@@ -1081,7 +1084,7 @@ async fn record_created_vm(
     fleet.persist_tenancy(&tenancy);
 }
 
-/// `POST /fleet/vms` for `caller`. On top of the placement described on [`create_vm`]:
+/// `POST /fleet/vms` for `caller`. On top of the placement described on `create_vm`:
 ///
 /// - A tenant's request is stamped with `"tenant": "<id>"` (whatever the body said) and checked against the tenant's
 ///   quota. An operator may set `"tenant"` to act for a tenant; placement then follows that tenant's leases.
@@ -1161,12 +1164,20 @@ async fn create_vm_inner(
     if let Some(name) = requested_node {
         let target = {
             let tenancy = fleet.tenancy.lock().await;
+            let nodes = fleet.nodes.lock().await;
             if *caller != Caller::Admin {
+                // A tenant naming a node gets the same checks as automatic placement: no cordoned or draining node.
+                if tenancy.draining.contains(&name) || nodes.get(&name).is_some_and(|n| n.cordoned)
+                {
+                    return Err(AppError(
+                        StatusCode::CONFLICT,
+                        format!("node '{name}' is cordoned or draining"),
+                    ));
+                }
                 tenancy
                     .admit(&name, &effective, macos_guest, true)
                     .map_err(tenancy_error)?;
             }
-            let nodes = fleet.nodes.lock().await;
             resolve_target(&nodes, Some(name), req_vcpus, req_mem, &selector, profile)?
         };
         return match dispatch_create(fleet, &target, &body).await {
@@ -1279,6 +1290,9 @@ async fn create_vm_inner(
 /// the single-node case, extended to the aggregate. A caller that cares
 /// whether the list it just got is complete can check this field is empty;
 /// one that doesn't can ignore it exactly like before.
+///
+/// The router serves [`list_vms_route`] (which knows the caller); this operator-only form is what the tests drive.
+#[cfg(test)]
 async fn list_vms(State(fleet): State<Fleet>) -> Json<Value> {
     list_vms_as(&fleet, &Caller::Admin).await
 }
@@ -1431,13 +1445,6 @@ async fn node_vms(
         }
     }
     Ok(Json(json!({"node": target.name, "items": items})))
-}
-
-async fn delete_vm(
-    State(fleet): State<Fleet>,
-    Path((node, id)): Path<(String, String)>,
-) -> Result<StatusCode, AppError> {
-    delete_vm_as(&fleet, &Caller::Admin, node, id).await
 }
 
 /// The routed `DELETE /fleet/vms/{node}/{id}`. A tenant may delete only its own VMs (anything else is a 404, so a

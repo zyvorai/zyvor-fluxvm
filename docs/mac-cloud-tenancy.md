@@ -21,6 +21,7 @@ This is an engineering control, not legal advice. The rules are defaults in `GET
 | `require_lease_for_macos` | `true` | A tenant's macOS guests run only on Macs that tenant leases |
 | `exclusive_leased_hosts` | `true` | A leased Mac runs only its lessee's VMs |
 | `min_lease_hours` | `24` | Values below 24 are raised to 24 |
+| `ledger_retention_days` | `400` | Ended VMs and leases older than this are dropped by the reconciler (`0` keeps all) |
 
 ## Turning it on
 
@@ -124,8 +125,8 @@ Per tenant, for the window:
 
 The CSV reports the same figures in hours. A tenant token always sees only its own row.
 
-The ledger covers VMs created through central. VMs created directly on a node are not metered. Old records can be
-trimmed with `TenancyState::compact`; export usage for that period first.
+The ledger covers VMs created through central. VMs created directly on a node are not metered. Records older than
+`ledger_retention_days` are dropped, so export usage before then.
 
 ## API summary
 
@@ -146,3 +147,7 @@ trimmed with `TenancyState::compact`; export usage for that period first.
 - Host-level scrubbing beyond VM workspaces.
 - A highly available central: the registry is still one process with JSON files.
 - Per-tenant vmnet isolation between a tenant's VMs on different Macs.
+- Quota checks are not atomic with the create, so a burst of parallel creates by one tenant can overshoot its quota
+  slightly.
+- In lab mode (no `--token`), any caller without a tenant token is the operator, even once tenants exist. Central logs
+  a warning at start.

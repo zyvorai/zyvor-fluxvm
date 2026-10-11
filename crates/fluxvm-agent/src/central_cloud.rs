@@ -18,7 +18,7 @@
 //! | `POST /fleet/reconcile`, `GET/PUT /fleet/policy` | ledger reconcile, licence policy |
 
 use super::*;
-use crate::tenancy::{Lease, LeaseState, Policy, Quota, TenancyError};
+use crate::tenancy::{Lease, LeaseState, Policy, Quota};
 use axum::extract::Query;
 use chrono::Duration as ChronoDuration;
 
@@ -130,6 +130,19 @@ pub(super) async fn reconcile_once(fleet: &Fleet) -> Value {
         }
         ended
     };
+    let compacted = {
+        let mut t = fleet.tenancy.lock().await;
+        let days = t.policy.ledger_retention_days;
+        let n = if days > 0 {
+            t.compact(Utc::now() - ChronoDuration::days(days))
+        } else {
+            0
+        };
+        if n > 0 {
+            fleet.persist_tenancy(&t);
+        }
+        n
+    };
     let mut evicted = Vec::new();
     for l in &ended {
         tracing::info!(lease = %l.id, tenant = %l.tenant, node = %l.node, "lease expired");
@@ -163,6 +176,7 @@ pub(super) async fn reconcile_once(fleet: &Fleet) -> Value {
         "expired_leases": ended.iter().map(|l| l.id.clone()).collect::<Vec<_>>(),
         "evicted": evicted,
         "closed_ledger_entries": closed,
+        "compacted_records": compacted,
         "errors": errors,
     })
 }
@@ -479,8 +493,21 @@ pub(super) async fn create_lease(
             )
         })?,
     };
+    // End leases past their `ends_at` first so their Macs show up as released, and evict those tenants' VMs exactly as
+    // the reconciler would (the reconciler only evicts for leases it ends itself).
+    let ended = {
+        let mut t = fleet.tenancy.lock().await;
+        let ended = t.expire_leases(Utc::now());
+        if !ended.is_empty() {
+            fleet.persist_tenancy(&t);
+        }
+        ended
+    };
+    for l in &ended {
+        tracing::info!(lease = %l.id, tenant = %l.tenant, node = %l.node, "lease expired");
+        evict_tenant_vms(&fleet, &l.tenant, &l.node).await;
+    }
     let mut t = fleet.tenancy.lock().await;
-    t.expire_leases(Utc::now());
     let node = {
         let nodes = fleet.nodes.lock().await;
         pick_lease_node(&nodes, &t, &b, admin)?
@@ -929,6 +956,7 @@ pub(super) async fn usage(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tenancy::TenancyError;
     use axum::body::Body;
     use tower::ServiceExt;
 

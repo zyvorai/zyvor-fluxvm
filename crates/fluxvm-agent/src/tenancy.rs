@@ -169,6 +169,13 @@ pub struct Policy {
     /// Minimum lease length in hours; values below [`MIN_LEASE_HOURS`] are raised to it.
     #[serde(default = "min_lease_hours")]
     pub min_lease_hours: i64,
+    /// Ended VMs and leases older than this are dropped by the reconciler (0 keeps everything). Export usage first.
+    #[serde(default = "ledger_retention_days")]
+    pub ledger_retention_days: i64,
+}
+
+fn ledger_retention_days() -> i64 {
+    400
 }
 
 fn yes() -> bool {
@@ -185,6 +192,7 @@ impl Default for Policy {
             require_lease_for_macos: true,
             exclusive_leased_hosts: true,
             min_lease_hours: MIN_LEASE_HOURS,
+            ledger_retention_days: ledger_retention_days(),
         }
     }
 }
@@ -277,7 +285,9 @@ pub fn new_token() -> String {
 }
 
 fn valid_tenant_id(id: &str) -> bool {
-    !id.is_empty()
+    // `me` is the route `GET /fleet/tenants/me`.
+    id != "me"
+        && !id.is_empty()
         && id.len() <= MAX_TENANT_ID_LEN
         && id
             .bytes()
@@ -871,6 +881,10 @@ mod tests {
         ));
         assert!(matches!(
             s.create_tenant("-acme", None, Quota::default(), t0()),
+            Err(TenancyError::InvalidTenantId(_))
+        ));
+        assert!(matches!(
+            s.create_tenant("me", None, Quota::default(), t0()),
             Err(TenancyError::InvalidTenantId(_))
         ));
         s.create_tenant("acme", None, Quota::default(), t0())

@@ -2056,6 +2056,40 @@ enum VmImageCommand {
     Pull { reference: String, dest: PathBuf },
 }
 
+/// `fluxctl vm-image`: client-side only (registry and local files), so it never needs the daemon or a VmManager.
+async fn run_vm_image(command: VmImageCommand) -> Result<()> {
+    let out = match command {
+        VmImageCommand::Push {
+            src,
+            reference,
+            chunk_mib,
+            exclude,
+            os,
+            name,
+        } => {
+            let opts = image::vm_artifact::PushOptions {
+                chunk_size: chunk_mib.map_or(0, |m| m.saturating_mul(1024 * 1024)),
+                exclude,
+                os,
+                name,
+                annotations: Default::default(),
+            };
+            serde_json::to_value(
+                image::vm_artifact::push(&src, &reference, registry_credentials_from_env(), &opts)
+                    .await
+                    .with_context(|| format!("pushing {} to {reference}", src.display()))?,
+            )?
+        }
+        VmImageCommand::Pull { reference, dest } => serde_json::to_value(
+            image::vm_artifact::pull(&reference, &dest, registry_credentials_from_env())
+                .await
+                .with_context(|| format!("pulling {reference}"))?,
+        )?,
+    };
+    println!("{}", serde_json::to_string_pretty(&out)?);
+    Ok(())
+}
+
 fn registry_credentials_from_env() -> Option<image::oci_registry::Credentials> {
     let username = std::env::var("FLUXVM_REGISTRY_USER").ok()?;
     let password = std::env::var("FLUXVM_REGISTRY_PASSWORD").unwrap_or_default();
@@ -4128,6 +4162,9 @@ async fn main() -> Result<()> {
         )
         .await;
     }
+    if let Command::VmImage { command } = cli.command {
+        return run_vm_image(command).await;
+    }
     if !matches!(cli.command, Command::Serve)
         && let Some(r) = remote::endpoint(
             cli.server.clone(),
@@ -5699,42 +5736,7 @@ async fn main() -> Result<()> {
         Command::Vznet {
             command: VznetCommand::Ls { json },
         } => print_vznets(&serde_json::to_value(m.vznets(None).await)?, json)?,
-        Command::VmImage { command } => {
-            let out = match command {
-                VmImageCommand::Push {
-                    src,
-                    reference,
-                    chunk_mib,
-                    exclude,
-                    os,
-                    name,
-                } => {
-                    let opts = image::vm_artifact::PushOptions {
-                        chunk_size: chunk_mib.map_or(0, |m| m.saturating_mul(1024 * 1024)),
-                        exclude,
-                        os,
-                        name,
-                        annotations: Default::default(),
-                    };
-                    serde_json::to_value(
-                        image::vm_artifact::push(
-                            &src,
-                            &reference,
-                            registry_credentials_from_env(),
-                            &opts,
-                        )
-                        .await
-                        .with_context(|| format!("pushing {} to {reference}", src.display()))?,
-                    )?
-                }
-                VmImageCommand::Pull { reference, dest } => serde_json::to_value(
-                    image::vm_artifact::pull(&reference, &dest, registry_credentials_from_env())
-                        .await
-                        .with_context(|| format!("pulling {reference}"))?,
-                )?,
-            };
-            println!("{}", serde_json::to_string_pretty(&out)?);
-        }
+        Command::VmImage { command } => run_vm_image(command).await?,
         Command::Oci { command } => {
             let out = match command {
                 OciCommand::Pull { image, platform } => {
