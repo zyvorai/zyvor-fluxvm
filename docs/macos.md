@@ -239,7 +239,7 @@ Exec over vsock for macOS guests is **experimental and unverified** (next sectio
 IPSW; that download path has not been run end to end (only Apple's metadata lookup was checked on an Apple silicon Mac). Apple
 allows two macOS VMs at a time per Mac.
 
-### Guest agent over vsock (experimental; verified on one M4 and macOS 27.0.1)
+### Guest agent over vsock (experimental; verified on one M4 and macOS 27.0.1, including the host's choice of it)
 
 By default a macOS guest has no vsock device and no FluxVM agent, and is reached over SSH only. `"apple": {"macos_vsock": true}` adds a
 `VZVirtioSocketDeviceConfiguration` to the macOS guest. **Verified on an M4 with a macOS 27.0.1 guest:** a guest program can create
@@ -248,16 +248,24 @@ and the host reaches it through the runner's `CONNECT <port>` proxy (`OK 1024`, 
 returns nothing. **The agent was run too:** `crates/fluxvm-guest-agent/macos/install.sh` put it in the guest as a LaunchDaemon (root, token
 at `/etc/fluxvm-guest-agent.token`, mode 0600), and from the host through the proxy `ping` answered `pong`, a wrong token was
 refused, `exec` ran as root (`Darwin arm64`, `27.0.1`), `put-file` and `get-file` round-tripped, and an exec policy was refused
-with "policy could not be enforced, command not run". Uninstalling removed the daemon, binary and token. Not run: the PTY shell,
-`shutdown`, `reset-identity`, a reboot of the guest with the daemon installed, and `vz_guest` driving it through the daemon.
+with "policy could not be enforced, command not run". Uninstalling removed the daemon, binary and token. The rest of the protocol was run too: `open-shell` gave a root PTY (a command
+ran, `stty size` reported the `Resize` frame's 120x40); `reset-identity` applied the hostname (it sets `HostName`,
+`LocalHostName` and `ComputerName`); `shutdown` powered the guest off and the runner reported `stopped`; and after that power
+cycle the LaunchDaemon started by itself and answered `ping` with no reinstall. Not run: `regenerate_machine_id` and
+`reseed_entropy` (reported as failures on macOS by design) and a guest with FileVault or a locked screen.
 
 - **Guest side.** `fluxvm-guest-agent` builds for macOS (`cargo build -p fluxvm-guest-agent`). The vsock listener, exec, file
   transfer, shell (PTY), shutdown and hostname reset are ported; per-exec policies (Landlock/seccomp) are refused outright because
   they need Linux, and machine-id and entropy reseeding are reported as failures. Install it as a LaunchDaemon with
   `crates/fluxvm-guest-agent/macos/install.sh <binary> <token>` (plist: `dev.zyvor.fluxvm-guest-agent.plist`). A macOS guest has no
   cloud-init, so the token is provisioned there by hand; with no token the agent refuses everything.
-- **Host side.** With the flag, `vz_guest` pings the agent over the runner's vsock proxy (3 s) before each request and uses SSH when
-  it does not answer. Without the flag nothing is attempted. Exec policies and argv exec still need the agent.
+- **Host side.** Create the VM with `apple.macos_vsock: true` **and** `agent: {"enabled": true, "token": "<the token in the guest>"}`
+  (admission used to refuse `agent.enabled` for every macOS guest, so the host could never choose the agent; it now needs
+  `macos_vsock`). `vz_guest` pings the agent over the runner's vsock proxy (3 s) before each request and uses SSH when it does not
+  answer. Verified: a VM created from a template with the daemon installed answered `exec` through the daemon's `/v1/vms/{id}/agent`
+  as `root` and `fluxvm_vz_agent_calls_total` went up; while the guest's daemon was not yet listening every request fell back to
+  SSH (`fluxvm_vz_agent_ssh_fallbacks_total`). On this guest the daemon started several minutes into boot. Exec policies and argv
+  exec need the agent.
 - **Checked:** the flag validates (macOS guests only), the runner config carries it, the Swift runner compiles, the agent's
   macOS build passes its unit tests (file transfer and PTY shell run against a local socketpair, the `sockaddr_vm` layout), and the
   fallback decision is unit-tested. **Checked on hardware:** that a macOS guest boots with the device, that `bind` on `AF_VSOCK`
@@ -741,6 +749,7 @@ What has actually been run, and what has not. One Apple M4, macOS 27.2, 16 GiB, 
 | Display resize (`vz/display`) | **Partial.** The API call works and the connector's preferred mode in the guest changes; fbcon `virtual_size` and the active mode do not (a headless guest has no KMS client), so the result is not deterministic without one. The reply no longer claims the guest followed; see "Control preconditions, display resize". |
 | Control preconditions (pause/resume/shutdown/stop, display, devices, snapshot) | **Verified (PASS) except** `pause` and `resume` on a stopped VM, which returned a raw `runner 'pause': connecting to .../<id>.ctl: No such file or directory (os error 2)`. Fixed: pause, resume, balloon, screenshot, input, USB and display now answer `409` `the VM is Stopped; start it first` before touching the runner (API tests; not re-run against hardware). |
 | macOS guest vsock (`apple.macos_vsock`) | **Verified.** macOS 27.0.1 guest, device configured: a stock `perl` bound `AF_VSOCK` port 1024 and the host's `CONNECT 1024` answered `OK 1024` plus the guest's bytes (a port with no listener returned nothing). The LaunchDaemon agent installed with `install.sh` then answered from the host over the same proxy: `ping` -> `pong`, a wrong token refused, `exec` as root (`Darwin arm64`, `27.0.1`), `put-file`/`get-file` round trip, exec policy refused as Linux-only. Uninstall left nothing behind. **Not run:** PTY shell, `shutdown`, `reset-identity`, a guest reboot with the daemon, and `vz_guest` selecting the agent. |
+| macOS guest agent: PTY shell, reset-identity, shutdown, reboot persistence, host selection | **Verified (once).** On the same macOS 27.0.1 guest: `open-shell` ran commands as root and honoured a resize frame (`stty size` 40 120); `reset-identity` changed `HostName`/`LocalHostName`/`ComputerName` (reverted afterwards); `shutdown` powered the guest off; after the power cycle the LaunchDaemon came up on its own and answered `ping`. A VM created from the template with `macos_vsock` and `agent.enabled` first fell back to SSH for 90 requests while the guest's daemon was not yet listening, then `exec` through the daemon's `/agent` route returned `root` with `fluxvm_vz_agent_calls_total` 0 to 1. Found and fixed: admission rejected `agent.enabled` for macOS guests, so the host could never select the agent. |
 
 Two things seen in the same runs that matter when you write guest-side tooling or debug a boot:
 

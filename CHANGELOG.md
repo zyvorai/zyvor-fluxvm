@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+### Fixed: the host could never choose the macOS guest agent
+- Admission refused `agent.enabled` for every macOS guest ("fluxvm-guest-agent is a Linux binary"), and the sandbox path sets it for
+  `apple.macos_vsock` guests, so a macOS agent that answered over vsock was never used. It is now accepted with `macos_vsock`
+  (still refused without it). Verified on an M4: `exec` through the daemon reached the LaunchDaemon agent as root. Also verified
+  on the guest: the PTY shell (with resize), `reset-identity` (hostname), `shutdown`, and the daemon starting by itself after a
+  power cycle.
+
 ### Added: Homebrew install
 - `brew install zyvorai/tap/fluxvm` installs the 0.4.0 Apple-silicon package (`fluxctl`, the signed runner, `fluxvm-vz-switch`,
   `fluxvm-blockd`, `fluxvm-usernet`). The first v0.4.0 build lacked `fluxvm-usernet`, which `apple.usernet` needs next to

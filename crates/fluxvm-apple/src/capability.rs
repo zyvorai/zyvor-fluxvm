@@ -671,10 +671,16 @@ fn validate_static(req: &CreateVmRequest) -> Result<()> {
                 "apple.rosetta, apple.nested_virtualization and apple.clipboard are Linux-guest features"
             );
         }
+        // The agent is a Linux binary in the image, but a macOS guest can run its own build as a LaunchDaemon over the
+        // experimental vsock device (`apple.macos_vsock`), which the host then probes before falling back to SSH.
         if matches!(apple.guest_os, fluxvm_core::model::AppleGuest::Macos)
+            && !apple.macos_vsock
             && req.agent.as_ref().is_some_and(|a| a.enabled)
         {
-            bail!("agent.enabled needs a Linux guest: fluxvm-guest-agent is a Linux binary");
+            bail!(
+                "agent.enabled on a macOS guest needs apple.macos_vsock: the agent is installed in the guest as a \
+                 LaunchDaemon and reached over vsock (see docs/macos.md)"
+            );
         }
         if apple.bridge_interface.as_deref().is_some_and(str::is_empty) {
             bail!("apple.bridge_interface cannot be empty");
@@ -1436,12 +1442,12 @@ mod tests {
     }
 
     #[test]
-    fn guest_agent_is_linux_only() {
+    fn guest_agent_needs_a_linux_guest_or_a_macos_guest_with_vsock() {
         let agent = r#""agent":{"enabled":true}"#;
         assert!(validate_request(&req(agent)).is_ok());
         let mac = r#""agent":{"enabled":true},"apple":{"guest_os":"macos"}"#;
         let err = validate_request(&req(mac)).unwrap_err().to_string();
-        assert!(err.contains("Linux guest"), "{err}");
+        assert!(err.contains("macos_vsock"), "{err}");
     }
 
     #[test]
@@ -1528,6 +1534,18 @@ mod tests {
         let linux = r#""apple":{"macos_vsock":true}"#;
         let err = validate_request(&req(linux)).unwrap_err().to_string();
         assert!(err.contains("macos_vsock"), "{err}");
+    }
+
+    #[test]
+    fn a_macos_guest_may_enable_the_agent_only_with_macos_vsock() {
+        // The agent is reached over the experimental vsock device; without it nothing could answer.
+        let without = r#""apple":{"guest_os":"macos"},"agent":{"enabled":true}"#;
+        let err = validate_request(&req(without)).unwrap_err().to_string();
+        assert!(err.contains("macos_vsock"), "{err}");
+        let with = r#""apple":{"guest_os":"macos","macos_vsock":true},"agent":{"enabled":true}"#;
+        assert!(validate_request(&req(with)).is_ok());
+        // Linux guests are unaffected.
+        assert!(validate_request(&req(r#""agent":{"enabled":true}"#)).is_ok());
     }
 
     #[test]
