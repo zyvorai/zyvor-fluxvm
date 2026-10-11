@@ -444,9 +444,9 @@ struct VzSshKeyInjection {
 /// root disk, the way the agent token is. `Err` carries the reason it may not, for the log; the cloud-init copy then
 /// stays the only one.
 ///
-/// Offline injection can only write root's `authorized_keys`. The key is therefore injected when cloud-init's `user` is
-/// unset (what `fluxctl ssh` logs in as is root) or `root`, and only in the explicit `root` case does it make the
-/// cloud-init copy redundant. For any other user the keys belong to that account and nothing is injected.
+/// Offline injection can only write root's `authorized_keys`, so the key is injected only when cloud-init's `user` is
+/// explicitly `root`, which also makes the cloud-init copy redundant. For an unset or any other user the keys belong to
+/// that account and nothing is injected.
 fn vz_ssh_key_disk_injection_plan(
     req: &CreateVmRequest,
     disk_is_raw: bool,
@@ -471,9 +471,15 @@ fn vz_ssh_key_disk_injection_plan(
     {
         return Err("an SSH key is not a single non-empty line");
     }
+    // Only an explicit root user: with the user unset cloud-init installs the keys for its default account, and
+    // writing them into root's file would grant a root login nobody asked for.
     let redundant = match ci.user.as_deref() {
-        None => false,
         Some("root") => true,
+        None => {
+            return Err(
+                "cloud-init user is unset; keys belong to the default account, not root",
+            );
+        }
         Some(_) => {
             return Err(
                 "keys are for a non-root user; only root's authorized_keys can be written offline",
@@ -5629,27 +5635,26 @@ mod tests {
         .unwrap();
         assert_eq!(plan.keys, [k, "ssh-rsa BBBB"]);
         assert!(plan.cloud_init_redundant);
-        // Unset user: also written for root, but cloud-init's copy (the default account) is kept.
-        let plan = vz_ssh_key_disk_injection_plan(&keyed(None, &[k]), true, false).unwrap();
-        assert!(!plan.cloud_init_redundant);
+        // Unset user: the keys belong to cloud-init's default account, so root's file is never written.
+        assert!(vz_ssh_key_disk_injection_plan(&keyed(None, &[k]), true, false).is_err());
         // Another account's keys are never put in root's file.
         assert!(vz_ssh_key_disk_injection_plan(&keyed(Some("ubuntu"), &[k]), true, false).is_err());
         // No keys, bad keys, running VM, wrong backend, non-raw disk.
-        assert!(vz_ssh_key_disk_injection_plan(&keyed(None, &[]), true, false).is_err());
-        assert!(vz_ssh_key_disk_injection_plan(&keyed(None, &["a\nb"]), true, false).is_err());
-        assert!(vz_ssh_key_disk_injection_plan(&keyed(None, &[k]), true, true).is_err());
-        assert!(vz_ssh_key_disk_injection_plan(&keyed(None, &[k]), false, false).is_err());
-        let mut q = keyed(None, &[k]);
+        assert!(vz_ssh_key_disk_injection_plan(&keyed(Some("root"), &[]), true, false).is_err());
+        assert!(vz_ssh_key_disk_injection_plan(&keyed(Some("root"), &["a\nb"]), true, false).is_err());
+        assert!(vz_ssh_key_disk_injection_plan(&keyed(Some("root"), &[k]), true, true).is_err());
+        assert!(vz_ssh_key_disk_injection_plan(&keyed(Some("root"), &[k]), false, false).is_err());
+        let mut q = keyed(Some("root"), &[k]);
         q.backend = BackendKind::Qemu;
         assert!(vz_ssh_key_disk_injection_plan(&q, true, false).is_err());
         // The same disk rules as the token: OCI sandboxes, macOS guests, read-only roots, shared storage.
-        let mut oci = keyed(None, &[k]);
+        let mut oci = keyed(Some("root"), &[k]);
         oci.apple = Some(serde_json::from_value(serde_json::json!({"init_config": {}})).unwrap());
         assert!(vz_ssh_key_disk_injection_plan(&oci, true, false).is_err());
-        let mut mac = keyed(None, &[k]);
+        let mut mac = keyed(Some("root"), &[k]);
         mac.apple = Some(serde_json::from_value(serde_json::json!({"guest_os": "macos"})).unwrap());
         assert!(vz_ssh_key_disk_injection_plan(&mac, true, false).is_err());
-        let mut shared = keyed(None, &[k]);
+        let mut shared = keyed(Some("root"), &[k]);
         shared.storage = StorageBackend::Shared;
         assert!(vz_ssh_key_disk_injection_plan(&shared, true, false).is_err());
     }

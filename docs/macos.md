@@ -100,10 +100,9 @@ to the VM log, and records the guest's NAT address.
   root disk's ext4 filesystem by `fluxvm-diskinject` (no seed ISO needed for it), and the request's SSH public keys
   (`cloud_init.ssh_authorized_keys`) are appended to `/root/.ssh/authorized_keys` the same way. Both are skipped, and the
   cloud-init copy stays the only one, for OCI sandboxes, macOS guests, ASIF overlays, a read-only root, non-default storage and
-  non-raw disks. A failed injection also keeps the cloud-init copy. Keys are injected only when `cloud_init.user` is unset (the
-  key is then **also** installed for root, which is what `fluxctl ssh` logs in as; cloud-init still installs it for the default
-  account) or `root` (then the cloud-init copy is dropped once every key is on the disk). Keys for any other user are not
-  injected, because the offline writer can only touch root's file. **Unverified on hardware:** unit-tested decision logic and an
+  non-raw disks. A failed injection also keeps the cloud-init copy. Keys are injected only when `cloud_init.user` is explicitly `root` (then the cloud-init copy is dropped once every key is on the
+  disk). With the user unset or any other account the keys belong to that account, so nothing is written to root's file: the offline
+  writer can only touch root's `authorized_keys`, and writing them there would grant a root login that cloud-init alone does not. **Unverified on hardware:** unit-tested decision logic and an
   ext4 round trip in `fluxvm-diskinject`; not exercised through a booted guest.
 - **Guest address:** macOS offers no usable DHCP-lease or ARP view to a spawned process, so FluxVM adds a small systemd
   service to the cloud-init (when a `cloud_init` is given) that prints `VELORA-IP <addr>` on the serial console; the runner
