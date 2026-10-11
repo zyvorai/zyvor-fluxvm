@@ -31,6 +31,7 @@ mod fleet_client;
 mod launch_agent;
 mod mcp;
 mod mcp_install;
+mod netobs;
 mod output;
 mod remote;
 mod run;
@@ -789,6 +790,12 @@ enum Command {
     Vz {
         #[command(subcommand)]
         command: VzCommand,
+    },
+    /// Guest-network observability: flows, DNS, roll-ups, packet capture. REST: `/v1/netobs/*`. Always talks to the
+    /// daemon (`--server`, the current context, or the local `listen`). See docs/netobs.md.
+    Netobs {
+        #[command(subcommand)]
+        command: netobs::NetobsCommand,
     },
     /// List image catalog entries (machinectl `list-images`).
     ListImages,
@@ -1819,6 +1826,16 @@ enum VzCommand {
         #[arg(value_parser = output::parse_vm_ref)]
         id: Uuid,
     },
+    /// The signed boot attestation of a vz guest's last launch (a host claim, not hardware attestation).
+    Attestation {
+        #[command(subcommand)]
+        command: VzAttestationCommand,
+    },
+    /// Display controls of a running guest.
+    Display {
+        #[command(subcommand)]
+        command: VzDisplayCommand,
+    },
     /// Driver state and counters of the custom Virtio device; `--reset` asks it to re-negotiate.
     CustomVirtio {
         #[arg(value_parser = output::parse_vm_ref)]
@@ -1839,12 +1856,87 @@ enum VzCommand {
 }
 
 #[derive(Subcommand)]
+enum VzAttestationCommand {
+    /// Fetch the VM's attestation and verify its signature. Without `--trusted-key` the key the host serves is used, which
+    /// only proves the document is self-consistent; pass the host key you obtained out of band for a real check.
+    Verify {
+        /// The VM (id, name or unique prefix).
+        #[arg(long = "vm", value_parser = output::parse_vm_ref)]
+        id: Uuid,
+        /// Hex ed25519 public key you already trust.
+        #[arg(long)]
+        trusted_key: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum VzDisplayCommand {
+    /// Resize a display of a running guest (macOS 14+; whether the guest follows depends on its display driver).
+    Resize {
+        #[arg(value_parser = output::parse_vm_ref)]
+        id: Uuid,
+        /// Pixels, 800..=5120.
+        #[arg(long)]
+        width: u32,
+        /// Pixels, 600..=2880.
+        #[arg(long)]
+        height: u32,
+        /// Display index, 0..=7.
+        #[arg(long, default_value_t = 0)]
+        display: u32,
+        /// Pixels per inch, 72..=300 (macOS guests only).
+        #[arg(long)]
+        ppi: Option<u32>,
+    },
+}
+
+#[derive(Subcommand)]
 enum VznetCommand {
     /// Networks in use, their subnets and members (`--json` for the raw `GET /v1/vznets`).
     Ls {
         #[arg(long)]
         json: bool,
     },
+}
+
+/// Verifies the `GET /v1/vms/{id}/vz/attestation` document with `fluxvm_apple::verify_attestation_hex`, against
+/// `trusted_key` when given and otherwise the key the document carries. Errors when the signature does not verify.
+fn vz_attestation_verify(
+    doc: &serde_json::Value,
+    trusted_key: Option<&str>,
+) -> Result<serde_json::Value> {
+    let served = doc["public_key"]
+        .as_str()
+        .context("the response has no public_key")?;
+    let key = trusted_key.unwrap_or(served);
+    let manifest = fluxvm_apple::verify_attestation_hex(&doc["attestation"].to_string(), key)?;
+    let trusted = trusted_key.is_some();
+    let mut out = serde_json::json!({
+        "verified": true,
+        "key_source": if trusted { "trusted-key" } else { "host-served" },
+        "public_key": key,
+        "claim": manifest.claim,
+        "manifest": manifest,
+    });
+    if trusted && !trusted_key.is_some_and(|k| k.trim().eq_ignore_ascii_case(served)) {
+        out["note"] = "the host serves a different public key than --trusted-key; the signature matches the trusted one".into();
+    }
+    if !trusted {
+        out["warning"] =
+            "verified against the key the host itself served: this checks consistency, not trust; \
+                          pass --trusted-key with the host key from an out-of-band source"
+                .into();
+    }
+    Ok(out)
+}
+
+/// Body of `POST /v1/vms/{id}/vz/display`; `ppi` is omitted when unset.
+fn vz_display_body(width: u32, height: u32, display: u32, ppi: Option<u32>) -> serde_json::Value {
+    let mut b = serde_json::json!({"width": width, "height": height, "display": display});
+    if let Some(p) = ppi {
+        b["ppi"] = p.into();
+    }
+    b
 }
 
 /// `fluxctl vznet ls` as a table.
@@ -2724,6 +2816,7 @@ async fn run_remote(
         Command::Get { id } | Command::Status { id: Some(id), .. } => {
             pretty(&r.call(Method::GET, &format!("/v1/vms/{id}"), None).await?)?
         }
+        Command::Netobs { command } => netobs::run(r, command).await?,
         Command::Vznet {
             command: VznetCommand::Ls { json },
         } => print_vznets(
@@ -3044,6 +3137,31 @@ async fn run_remote(
             VzCommand::SecureBoot { id } => pretty(
                 &r.call(Method::GET, &format!("/v1/vms/{id}/vz/secure-boot"), None)
                     .await?,
+            )?,
+            VzCommand::Attestation {
+                command: VzAttestationCommand::Verify { id, trusted_key },
+            } => {
+                let doc = r
+                    .call(Method::GET, &format!("/v1/vms/{id}/vz/attestation"), None)
+                    .await?;
+                pretty(&vz_attestation_verify(&doc, trusted_key.as_deref())?)?
+            }
+            VzCommand::Display {
+                command:
+                    VzDisplayCommand::Resize {
+                        id,
+                        width,
+                        height,
+                        display,
+                        ppi,
+                    },
+            } => pretty(
+                &r.call(
+                    Method::POST,
+                    &format!("/v1/vms/{id}/vz/display"),
+                    Some(vz_display_body(width, height, display, ppi)),
+                )
+                .await?,
             )?,
             VzCommand::CustomVirtio { id, reset: true } => pretty(
                 &r.call(
@@ -3716,6 +3834,12 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
+    if let Command::Netobs { command } = cli.command {
+        // The observer lives in the daemon process: talk to the local daemon's `listen` address.
+        let r = remote::Remote::new(&cfg.listen, cli.server_token.clone());
+        return netobs::run(&r, command).await;
+    }
+
     let m = manager(cfg.clone()).await?;
 
     match cli.command {
@@ -3737,6 +3861,7 @@ async fn main() -> Result<()> {
         | Command::Mcp { .. }
         | Command::Events { .. }
         | Command::Context { .. }
+        | Command::Netobs { .. }
         | Command::Quota { token: Some(_), .. } => unreachable!("handled above"),
         Command::Quota { token: None, name } => {
             println!(
@@ -4168,6 +4293,22 @@ async fn main() -> Result<()> {
                 VzCommand::Host => fluxvm_scheduler::vz_devices::apple_host_capabilities().await?,
                 VzCommand::Ipsw { download } => m.macos_ipsw(download).await?,
                 VzCommand::SecureBoot { id } => m.vz_secure_boot_status(id).await?,
+                VzCommand::Attestation {
+                    command: VzAttestationCommand::Verify { id, trusted_key },
+                } => vz_attestation_verify(&m.vz_attestation(id).await?, trusted_key.as_deref())?,
+                VzCommand::Display {
+                    command:
+                        VzDisplayCommand::Resize {
+                            id,
+                            width,
+                            height,
+                            display,
+                            ppi,
+                        },
+                } => {
+                    m.vz_display_resize(id, width, height, display, ppi).await?;
+                    vz_display_body(width, height, display, ppi)
+                }
                 VzCommand::CustomVirtio { id, reset: true } => {
                     m.vz_custom_virtio_reset(id).await?;
                     serde_json::json!({"ok": true})
@@ -5897,6 +6038,131 @@ mod agent_cli_tests {
         assert!(!path.exists());
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod vz_display_cli_tests {
+    use super::*;
+
+    fn parse(args: &[&str]) -> Command {
+        let mut full = vec!["fluxvm"];
+        full.extend_from_slice(args);
+        Cli::try_parse_from(full).unwrap().command
+    }
+
+    #[test]
+    fn display_resize_parses_with_defaults() {
+        let id = Uuid::nil().to_string();
+        let Command::Vz {
+            command:
+                VzCommand::Display {
+                    command:
+                        VzDisplayCommand::Resize {
+                            width,
+                            height,
+                            display,
+                            ppi,
+                            ..
+                        },
+                },
+        } = parse(&[
+            "vz", "display", "resize", &id, "--width", "1920", "--height", "1080",
+        ])
+        else {
+            panic!("expected vz display resize");
+        };
+        assert_eq!((width, height, display, ppi), (1920, 1080, 0, None));
+    }
+
+    #[test]
+    fn display_resize_requires_a_size() {
+        let id = Uuid::nil().to_string();
+        assert!(Cli::try_parse_from(["fluxvm", "vz", "display", "resize", &id]).is_err());
+        assert!(
+            Cli::try_parse_from(["fluxvm", "vz", "display", "resize", &id, "--width", "1920"])
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn display_body_omits_unset_ppi() {
+        assert_eq!(
+            vz_display_body(1920, 1080, 0, None),
+            serde_json::json!({"width": 1920, "height": 1080, "display": 0})
+        );
+        assert_eq!(vz_display_body(2560, 1600, 1, Some(220))["ppi"], 220);
+    }
+}
+
+#[cfg(test)]
+mod vz_attestation_cli_tests {
+    use super::*;
+
+    fn signed_doc() -> (serde_json::Value, String) {
+        use fluxvm_apple::attest;
+        let dir = tempfile::tempdir().unwrap();
+        let key = attest::load_or_create_host_key(dir.path()).unwrap();
+        let manifest: attest::Manifest = serde_json::from_value(serde_json::json!({
+            "version": 1, "claim": "host-asserted: test", "vm_id": "vm", "issued_at_unix": 1,
+            "kernel": null, "initrd": null, "cmdline_sha256": null,
+            "root_disk": {"path": "/r", "size": 1, "mtime_unix": null, "digest": "00"},
+            "runner": {"path": "/x", "size": 1, "mtime_unix": null, "digest": "11"},
+            "apple_spec_sha256": "22",
+        }))
+        .unwrap();
+        let att = attest::sign(&manifest, &key).unwrap();
+        let pk = att.public_key.clone();
+        (
+            serde_json::json!({"public_key": pk, "attestation": att}),
+            pk,
+        )
+    }
+
+    #[test]
+    fn verify_parses() {
+        let id = Uuid::nil().to_string();
+        assert!(matches!(
+            Cli::try_parse_from(["fluxvm", "vz", "attestation", "verify", "--vm", &id])
+                .unwrap()
+                .command,
+            Command::Vz {
+                command: VzCommand::Attestation {
+                    command: VzAttestationCommand::Verify {
+                        trusted_key: None,
+                        ..
+                    }
+                }
+            }
+        ));
+        assert!(Cli::try_parse_from(["fluxvm", "vz", "attestation", "verify"]).is_err());
+    }
+
+    #[test]
+    fn verifies_against_served_and_trusted_keys() {
+        let (doc, pk) = signed_doc();
+        let out = vz_attestation_verify(&doc, None).unwrap();
+        assert_eq!(out["verified"], true);
+        assert_eq!(out["key_source"], "host-served");
+        assert!(out["warning"].is_string());
+        assert_eq!(out["manifest"]["vm_id"], "vm");
+        let out = vz_attestation_verify(&doc, Some(&pk)).unwrap();
+        assert_eq!(out["key_source"], "trusted-key");
+        assert!(out.get("warning").is_none() && out.get("note").is_none());
+    }
+
+    #[test]
+    fn a_different_trusted_key_or_edit_fails() {
+        let (mut doc, _) = signed_doc();
+        let other = "07".repeat(32);
+        assert!(vz_attestation_verify(&doc, Some(&other)).is_err());
+        let p = doc["attestation"]["payload"]
+            .as_str()
+            .unwrap()
+            .replace("\"vm\"", "\"vm2\"");
+        doc["attestation"]["payload"] = p.into();
+        assert!(vz_attestation_verify(&doc, None).is_err());
+        assert!(vz_attestation_verify(&serde_json::json!({}), None).is_err());
     }
 }
 
