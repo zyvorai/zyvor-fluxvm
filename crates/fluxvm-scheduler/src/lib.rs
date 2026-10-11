@@ -860,6 +860,8 @@ pub struct VmManager {
     sandbox_gpu_lock: AsyncMutex<()>,
     /// Serialises private-network address assignment with the VM record write that reserves it.
     vznet_lock: AsyncMutex<()>,
+    /// Serialises the vz overlay-disk exclusivity check with the record write that claims the overlay file.
+    vz_overlay_lock: AsyncMutex<()>,
     /// Last activity timestamps for AutoPause / wake-on-request (sandbox id → UTC).
     activity: AsyncMutex<HashMap<Uuid, chrono::DateTime<chrono::Utc>>>,
     /// A scheduled-snapshot pass can outlast a reaper tick (savevm is slow).
@@ -896,6 +898,7 @@ impl VmManager {
             sandbox_volume_lock: AsyncMutex::new(()),
             sandbox_gpu_lock: AsyncMutex::new(()),
             vznet_lock: AsyncMutex::new(()),
+            vz_overlay_lock: AsyncMutex::new(()),
             activity: AsyncMutex::new(HashMap::new()),
             scheduled_snapshots_busy: std::sync::atomic::AtomicBool::new(false),
         }))
@@ -2361,6 +2364,24 @@ impl VmManager {
         if needs_cid && req.backend == BackendKind::Vz && !oci_init {
             vz_agent_token_via_cloud_init(&mut req);
         }
+        // An overlay disk file belongs to exactly one VM record: checked under a lock that is held until the record exists.
+        let overlay_disks = req
+            .apple
+            .as_ref()
+            .filter(|_| req.backend == BackendKind::Vz)
+            .map(|a| a.extra_disks.clone())
+            .unwrap_or_default();
+        let overlay_guard = if overlay_disks
+            .iter()
+            .any(|d| d.kind == fluxvm_core::model::AppleDiskKind::Overlay)
+        {
+            let guard = self.vz_overlay_lock.lock().await;
+            self.ensure_vz_overlays_exclusive(&overlay_disks, Some(id))
+                .await?;
+            Some(guard)
+        } else {
+            None
+        };
         // Private-network addresses are decided and reserved (by the record's insert) under one lock.
         let vznet_guard = match req.apple.as_mut() {
             Some(apple) if req.backend == BackendKind::Vz && !apple.networks.is_empty() => {
@@ -2443,6 +2464,7 @@ impl VmManager {
             .insert_with_cid(placeholder, needs_cid, FIRST_GUEST_CID)
             .await?;
         drop(vznet_guard);
+        drop(overlay_guard);
         let guest_cid = record.guest_cid;
 
         if req.qga.as_ref().is_some_and(|q| q.enabled)
@@ -3506,6 +3528,14 @@ impl VmManager {
         let mut vm = self.get(id).await?;
         if vm.status == VmStatus::Running {
             return Ok(vm);
+        }
+        // A record restored or cloned from another VM's request could name an overlay file that VM still owns.
+        if vm.backend == BackendKind::Vz
+            && let Some(a) = vm.request.apple.as_ref()
+        {
+            self.ensure_vz_overlays_exclusive(&a.extra_disks, Some(id))
+                .await
+                .with_context(|| format!("cannot start {id}"))?;
         }
         // A CephRbd disk is a `rbd:pool/image:...` URI, not a real
         // filesystem path — there's nothing on the local filesystem to
