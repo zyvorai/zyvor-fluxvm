@@ -7,9 +7,15 @@ overlay files.
 
 **Status.** The NBD protocol, overlay format, encryption and lazy fetch are covered by in-tree tests against an in-tree client.
 Virtualization.framework's NBD client has been run against it once on an Apple M4 (macOS 27.2, Debian 13 guest): connect,
-read, write, persistence across restart, and an immutable base all held. Not exercised on hardware: encryption, the lazy HTTP
-base, structured replies against VZ, and rebase and resize under a running guest. An overlay that has children is frozen and is
-served read-only.
+read, write, persistence across restart, and an immutable base all held. A second run on an Apple M4 (macOS 27, Debian 13 guest, release build) served three exports to one guest through
+Virtualization.framework's NBD client: a plain overlay, an encrypted overlay (`encrypt`, a key file) and a lazy overlay on an
+HTTP base (`sha256=`). All three read back the base byte-for-byte (the guest's `sha256sum` of each disk equalled the base's); a
+900 KB marker written with `O_DIRECT` and `fsync` read back identical after `drop_caches` on all three; the plain and lazy
+overlay files held the marker in clear and the encrypted overlay file held none; the base file was unchanged. The lazy export
+fetched 6 MiB (in 1 MiB ranges, from a Range-capable server) before the guest read the disk, the rest on demand, and a second
+full read caused no new requests. Not exercised on hardware: structured replies against VZ (not confirmed either way), rebase
+and resize under a running guest, and an encrypted overlay's `branch`. An overlay that has children is frozen and is served
+read-only.
 
 ## Overlays
 

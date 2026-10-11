@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### Verified: FluxDisk encryption and the lazy HTTP base through VZ's NBD client
+- On an Apple M4 with a Debian 13 guest: an encrypted overlay and a lazy overlay on an HTTP base read back the base byte-for-byte,
+  took a 900 KB `O_DIRECT` write that read back identical after `drop_caches`, and the encrypted overlay file held no plaintext.
+  The lazy export fetched 6 MiB before any guest read and nothing on a second read. Structured replies against VZ and
+  rebase/resize under a running guest were not run.
+
 ### Verified: the macOS guest agent over vsock (`apple.macos_vsock`)
 - On an Apple M4 with a macOS 27.0.1 guest: the guest binds `AF_VSOCK`, the host reaches it through the runner's `CONNECT`
   proxy, and the LaunchDaemon agent installed by `crates/fluxvm-guest-agent/macos/install.sh` answers `ping`, enforces its
