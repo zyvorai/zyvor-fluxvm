@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### Added: `GET /v1/host/storage`
+- Where disk space goes: the state volume's free space and, per VM, per branch and for the image cache, allocated and
+  logical bytes (sparse files count what they occupy). Allocated bytes are upper bounds, since copy-on-write clones share
+  blocks; free space is what is really left. Used by the Velora Control Centre's Storage pane.
+
 ### Fixed: fork and branch-start quotas are checked as one atomic batch
 - A fork of N children was priced as N separate checks of one VM against an unchanged ledger (the API loop) for **API
   token quotas**, and host and tenant checks read the ledger without holding anything, so two forks racing each other (or

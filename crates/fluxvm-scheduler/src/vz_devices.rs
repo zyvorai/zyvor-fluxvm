@@ -106,6 +106,23 @@ impl VmManager {
         fluxvm_apple::attest::delivery(&id.to_string(), &vm.workspace, &self.cfg.state_dir)
     }
 
+    /// Where disk space goes: the volume's free space and what each VM, branch and the image cache occupy.
+    pub async fn storage_report(&self) -> Result<crate::storage_report::StorageReport> {
+        let vms = self.list().await;
+        let branches: Vec<(Uuid, String)> = self
+            .list_branches(None)
+            .await
+            .map(|b| b.into_iter().map(|b| (b.id, b.name)).collect())
+            .unwrap_or_default();
+        let dir = self.cfg.state_dir.clone();
+        Ok(
+            tokio::task::spawn_blocking(move || {
+                crate::storage_report::build(&dir, &vms, &branches)
+            })
+            .await?,
+        )
+    }
+
     /// The `apple.usernet` egress policy of VM `id` as it is stored (and, if the gateway runs, as it applies).
     pub async fn vz_usernet_policy(&self, id: Uuid) -> Result<Value> {
         let vm = self.get(id).await?;

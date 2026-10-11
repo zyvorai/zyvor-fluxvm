@@ -40,6 +40,7 @@ pub(crate) fn routes() -> Router<Arc<VmManager>> {
         .route("/v1/host/apple/capabilities", get(host_capabilities))
         .route("/v1/host/overview", get(host_overview))
         .route("/v1/host/history", get(host_history))
+        .route("/v1/host/storage", get(host_storage))
         .route(
             "/v1/vms/{id}/usernet/policy",
             get(usernet_policy).put(usernet_policy_set),
@@ -93,6 +94,16 @@ async fn host_overview(State(m): State<Arc<VmManager>>) -> ApiResult<Json<Value>
         })?;
     body["networking"]["netobs_enabled"] = json!(fluxvm_netobs::global().is_some());
     Ok(Json(body))
+}
+
+/// Where disk space goes: the volume's free space and what each VM, branch and the image cache occupy (allocated bytes,
+/// which count blocks shared with copy-on-write clones in every clone; free space is the truth about what remains).
+async fn host_storage(State(m): State<Arc<VmManager>>) -> ApiResult<Json<Value>> {
+    let r = m.storage_report().await.map_err(|e| ApiError {
+        status: StatusCode::INTERNAL_SERVER_ERROR,
+        message: format!("{e:#}"),
+    })?;
+    Ok(Json(json!(r)))
 }
 
 #[derive(Deserialize)]

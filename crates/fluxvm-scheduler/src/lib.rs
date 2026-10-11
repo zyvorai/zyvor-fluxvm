@@ -50,6 +50,7 @@ pub mod sandbox_density;
 mod sandbox_pool;
 pub mod shared_disk;
 pub mod speculate;
+pub mod storage_report;
 pub mod templates;
 pub mod vm_restore;
 pub mod vz_devices;
