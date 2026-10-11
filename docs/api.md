@@ -676,6 +676,12 @@ Two read-only routes feed a dashboard without scraping `/metrics`:
   once: the daemon rewrites the gateway's config and signals it, and **new** connections and DNS queries follow the new
   policy while open connections are not cut. Reply: the policy plus `applied` and a `note`. Port forwards, MTU and
   addresses are not changed this way.
+- `GET /v1/host/storage`: where disk space goes. `volume` (`path`, `total_bytes`, `free_bytes` of the filesystem holding the
+  state directory), `vms[]` (`vm_id`, `name`, `status`, `disk` and `other` as `{allocated_bytes, logical_bytes, files}`:
+  the root disk, and everything else in the workspace), `branches[]` (`id`, `name`, `usage`), `images` (the image cache) and
+  `state_dir` (everything). **Allocated** is the blocks a file really occupies (a sparse 3 GiB disk holding 700 MiB counts
+  700 MiB), but copy-on-write clones (fork, branches, `vm clone`) share blocks and each clone reports them in full, so the
+  parts can add up to more than the volume holds. `volume.free_bytes` is the truth about what is left.
 - `GET /v1/host/overview`: `daemon` (`version`, `uptime_seconds`), `host` (`os_version`, `cpu_count`, `memory_total_mib`,
   `memory_available_mib`, `memory_pressure` `normal|warn|critical`, `nested_virtualization`, `rosetta`), `vms` (`total`,
   `by_status`, `by_backend`), `branches`, `usage[]`, `helpers` (`runner`, `switch`, `blockd`, `usernet` present or not) and

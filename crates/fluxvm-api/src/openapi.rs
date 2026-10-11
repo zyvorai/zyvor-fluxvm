@@ -229,6 +229,12 @@ fn ops() -> Vec<Op> {
         ),
         op(
             "get",
+            "/v1/host/storage",
+            "Where disk space goes: volume free space and per-VM, per-branch and image-cache allocated bytes",
+            HOST,
+        ),
+        op(
+            "get",
             "/v1/host/history",
             "Last hour of host memory and per-VM runner usage at 5 s spacing (in memory; empty after a daemon restart)",
             HOST,
