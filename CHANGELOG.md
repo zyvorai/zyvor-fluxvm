@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.4.1 (2026-10-11)
 
 ### Added: Flux Branch (`fluxctl branch`, `/v1/vms/{id}/branches`, `/v1/branches`)
 - Named, durable checkpoints of a running vz Linux guest (state and disk as APFS clones, stored outside the VM's workspace),
