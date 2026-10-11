@@ -91,11 +91,15 @@ fn write_seed_files(
         );
         fs::write(&network_config, netcfg).context("writing cloud-init network-config")?;
         Some(network_config)
-    } else if !nics.is_empty() {
+    } else if !nics.is_empty() || ci.mtu.is_some() {
         // The catch-all DHCP match is the one the macOS seed writes by default; the static entries sort before it
         // (`fluxvm-nic*` < `vz-nic`), so a private card is claimed by its own entry and never runs DHCP.
+        let mtu = ci
+            .mtu
+            .map(|m| format!("    mtu: {m}\n"))
+            .unwrap_or_default();
         let netcfg = format!(
-            "version: 2\nethernets:\n  vz-nic:\n    match:\n      name: \"e*\"\n    dhcp4: true\n    dhcp-identifier: mac\n{nics}"
+            "version: 2\nethernets:\n  vz-nic:\n    match:\n      name: \"e*\"\n    dhcp4: true\n    dhcp-identifier: mac\n{mtu}{nics}"
         );
         fs::write(&network_config, netcfg).context("writing cloud-init network-config")?;
         Some(network_config)
@@ -295,6 +299,24 @@ mod tests {
         assert!(nic.contains("link-local: []") && nic.contains("accept-ra: false"));
         // "fluxvm-nic0" sorts before "vz-nic": networkd picks the first file that matches.
         assert!("fluxvm-nic0" < "vz-nic");
+    }
+
+    #[test]
+    fn nat_mtu_goes_into_the_primary_cards_network_config() {
+        let d = tempfile::tempdir().unwrap();
+        let ci = CloudInitSpec {
+            mtu: Some(1400),
+            ..Default::default()
+        };
+        let (_, _, nc) = write_seed_files(d.path(), &ci, None).unwrap();
+        let body = fs::read_to_string(nc.expect("a network-config")).unwrap();
+        assert!(
+            body.contains("dhcp4: true") && body.contains("    mtu: 1400\n"),
+            "{body}"
+        );
+        // Without it the file is unchanged: no network-config at all (the macOS builder writes its own default).
+        let (_, _, none) = write_seed_files(d.path(), &CloudInitSpec::default(), None).unwrap();
+        assert!(none.is_none());
     }
 
     #[test]

@@ -76,7 +76,11 @@ extension Runner {
             var snd: Int32 = 1 << 20, rcv: Int32 = 4 << 20
             setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &snd, socklen_t(MemoryLayout<Int32>.size))
             setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &rcv, socklen_t(MemoryLayout<Int32>.size))
-            return VZFileHandleNetworkDeviceAttachment(fileHandle: FileHandle(fileDescriptor: fd, closeOnDealloc: false))
+            let attachment = VZFileHandleNetworkDeviceAttachment(fileHandle: FileHandle(fileDescriptor: fd, closeOnDealloc: false))
+            // Jumbo frames: the gateway advertises `mtu` to the guest (DHCP option 26); Virtualization drops anything larger than
+            // the attachment's own MTU (default 1500), so the two must agree.
+            if let mtu = cfg.usernet_mtu, mtu > 1500 { attachment.maximumTransmissionUnit = Int(mtu) }
+            return attachment
         }
         if let spec = cfg.vmnet {
             #if canImport(vmnet)

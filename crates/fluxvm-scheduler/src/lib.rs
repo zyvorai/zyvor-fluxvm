@@ -2504,6 +2504,12 @@ impl VmManager {
         } else {
             None
         };
+        // `apple.nat_mtu`: the guest lowers its primary card's MTU through the seed's network-config.
+        if req.backend == BackendKind::Vz
+            && let Some(m) = req.apple.as_ref().and_then(|a| a.nat_mtu)
+        {
+            req.cloud_init.get_or_insert_with(Default::default).mtu = Some(m);
+        }
         // Private-network addresses are decided and reserved (by the record's insert) under one lock.
         let vznet_guard = match req.apple.as_mut() {
             Some(apple) if req.backend == BackendKind::Vz && !apple.networks.is_empty() => {

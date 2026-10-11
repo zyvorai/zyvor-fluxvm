@@ -83,6 +83,10 @@ pub struct RunnerConfig {
     /// `apple.usernet`: the inherited descriptor number of the guest NIC's datagram socket (see `crate::usernet`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub usernet_fd: Option<i32>,
+    /// `apple.usernet.mtu` when it is above 1500: the runner raises the file-handle attachment's
+    /// `maximumTransmissionUnit` to match, otherwise Virtualization drops frames the gateway advertised room for.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub usernet_mtu: Option<u32>,
     pub console_ports: Vec<ConsolePortConfig>,
     /// The console log is rotated to `<log>.1` past this size (the runner defaults to 16 MiB).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -278,6 +282,12 @@ impl RunnerConfig {
                 .usernet
                 .as_ref()
                 .map(|_| crate::usernet::RUNNER_NIC_FD),
+            usernet_mtu: apple
+                .usernet
+                .as_ref()
+                .and_then(|u| u.mtu)
+                .filter(|m| *m > 1500)
+                .map(u32::from),
             console_ports: apple
                 .console_ports
                 .iter()
@@ -911,6 +921,45 @@ mod one_shot_tests {
         let conf = RunnerConfig::for_launch(&req, &ctx).unwrap();
         let share = conf.shares.iter().find(|s| s.tag == "fluxvm-meta").unwrap();
         assert!(share.read_only && share.host_path == meta);
+    }
+
+    #[test]
+    fn a_jumbo_usernet_mtu_reaches_the_runner_and_the_default_does_not() {
+        let launch = |usernet: serde_json::Value| {
+            let dir = tempfile::tempdir().unwrap();
+            let req: CreateVmRequest = serde_json::from_value(serde_json::json!({
+                "name": "m", "backend": "vz", "image": "/r.raw",
+                "apple": {"usernet": usernet},
+            }))
+            .unwrap();
+            let ctx = fluxvm_core::backend::LaunchContext {
+                id: uuid::Uuid::new_v4(),
+                workspace: dir.path().into(),
+                disk: dir.path().join("root.raw"),
+                seed_disk: None,
+                log_path: dir.path().join("console.log"),
+                network: fluxvm_core::backend::PreparedNetwork {
+                    spec: NetworkSpec::None,
+                    tap_name: None,
+                    tap_fd: None,
+                    netns: None,
+                    dhcp_leasefile: None,
+                    guest_ip: None,
+                    guest_cidr: None,
+                    gateway: None,
+                    extra_tap_fds: vec![],
+                },
+                guest_cid: None,
+                vsock_socket: None,
+                disk_format: "raw".into(),
+                nbd_export: None,
+            };
+            RunnerConfig::for_launch(&req, &ctx).unwrap().usernet_mtu
+        };
+        assert_eq!(launch(serde_json::json!({"mtu": 9000})), Some(9000));
+        assert_eq!(launch(serde_json::json!({"mtu": 1500})), None);
+        assert_eq!(launch(serde_json::json!({"mtu": 1400})), None);
+        assert_eq!(launch(serde_json::json!({})), None);
     }
 
     #[test]

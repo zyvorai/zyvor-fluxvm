@@ -550,6 +550,26 @@ fn validate_host(
             );
         }
     }
+    // vmnet and bridged attachments need the restricted `com.apple.vm.networking` entitlement in the runner; without it the
+    // VM starts and then Virtualization reports "Internal Network Error". Refuse up front, and say what to use instead.
+    if host.vm_networking_entitlement == Some(false)
+        && let Some(a) = &req.apple
+    {
+        let what = if a.vmnet.is_some() {
+            Some("apple.vmnet")
+        } else if a.bridge_interface.is_some() {
+            Some("apple.bridge_interface")
+        } else {
+            None
+        };
+        if let Some(what) = what {
+            bail!(
+                "{what} needs a runner signed with com.apple.vm.networking, which this runner does not have (Apple grants it \
+                 only through a provisioning profile; an ad-hoc build that claims it is killed at launch). Use apple.usernet \
+                 for a controlled NAT, or apple.networks for private networks between guests"
+            );
+        }
+    }
     if req.apple.as_ref().is_some_and(|a| a.nested_virtualization)
         && have.is_some()
         && !host.nested_virtualization
@@ -681,6 +701,21 @@ fn validate_static(req: &CreateVmRequest) -> Result<()> {
                 "agent.enabled on a macOS guest needs apple.macos_vsock: the agent is installed in the guest as a \
                  LaunchDaemon and reached over vsock (see docs/macos.md)"
             );
+        }
+        if let Some(m) = apple.nat_mtu {
+            if !(576..=1500).contains(&m) {
+                bail!(
+                    "apple.nat_mtu must be 576..=1500 (Virtualization's NAT attachment has no larger MTU)"
+                );
+            }
+            if matches!(apple.guest_os, fluxvm_core::model::AppleGuest::Macos) {
+                bail!("apple.nat_mtu is applied through cloud-init and needs a Linux guest");
+            }
+            if apple.usernet.is_some() || apple.vmnet.is_some() {
+                bail!(
+                    "apple.nat_mtu is for the Mac's NAT or a bridged card; use apple.usernet.mtu or apple.vmnet.mtu there"
+                );
+            }
         }
         if apple.bridge_interface.as_deref().is_some_and(str::is_empty) {
             bail!("apple.bridge_interface cannot be empty");
@@ -1528,12 +1563,63 @@ mod tests {
     }
 
     #[test]
+    fn vmnet_and_bridged_are_refused_when_the_runner_lacks_the_networking_entitlement() {
+        use crate::host_caps::AppleHostCapabilities;
+        let host = |ent: Option<bool>| AppleHostCapabilities {
+            os_version: "Version 27.2 (Build 26X1)".into(),
+            vm_networking_entitlement: ent,
+            ..Default::default()
+        };
+        let vmnet = r#""apple":{"vmnet":{"mode":"shared","subnet":"192.168.105.0","mask":"255.255.255.0"}}"#;
+        let bridged = r#""apple":{"bridge_interface":"en0"}"#;
+        for json in [vmnet, bridged] {
+            let r = req(json);
+            let err = validate_request_with_host(&r, Some(&host(Some(false))))
+                .unwrap_err()
+                .to_string();
+            assert!(
+                err.contains("com.apple.vm.networking") && err.contains("apple.usernet"),
+                "{err}"
+            );
+            // A runner that has it, or one too old to say, is not second-guessed.
+            assert!(
+                validate_request_with_host(&r, Some(&host(Some(true)))).is_ok(),
+                "{json}"
+            );
+            assert!(
+                validate_request_with_host(&r, Some(&host(None))).is_ok(),
+                "{json}"
+            );
+        }
+        // Guests that use neither are unaffected.
+        let plain = req("");
+        assert!(validate_request_with_host(&plain, Some(&host(Some(false)))).is_ok());
+    }
+
+    #[test]
     fn macos_vsock_is_for_macos_guests_only() {
         let mac = r#""apple":{"guest_os":"macos","macos_vsock":true}"#;
         assert!(validate_request(&req(mac)).is_ok());
         let linux = r#""apple":{"macos_vsock":true}"#;
         let err = validate_request(&req(linux)).unwrap_err().to_string();
         assert!(err.contains("macos_vsock"), "{err}");
+    }
+
+    #[test]
+    fn nat_mtu_admission() {
+        assert!(validate_request(&req(r#""apple":{"nat_mtu":1400}"#)).is_ok());
+        for (json, needle) in [
+            (r#""apple":{"nat_mtu":1501}"#, "576..=1500"),
+            (r#""apple":{"nat_mtu":500}"#, "576..=1500"),
+            (
+                r#""apple":{"nat_mtu":1400,"guest_os":"macos"}"#,
+                "Linux guest",
+            ),
+            (r#""apple":{"nat_mtu":1400,"usernet":{}}"#, "usernet.mtu"),
+        ] {
+            let err = validate_request(&req(json)).expect_err(json).to_string();
+            assert!(err.contains(needle), "{json}: {err}");
+        }
     }
 
     #[test]

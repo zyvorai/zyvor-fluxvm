@@ -27,6 +27,10 @@ pub struct AppleHostCapabilities {
     /// `installed`, `not-installed` or `not-supported`; empty from an older runner.
     #[serde(default)]
     pub rosetta: String,
+    /// Whether the runner carries `com.apple.vm.networking`, which vmnet networks and bridged attachments need. `None` from
+    /// an older runner that does not report it (nothing is refused then).
+    #[serde(default)]
+    pub vm_networking_entitlement: Option<bool>,
 }
 
 /// Query the signed Swift helper without creating a VM. The daemon itself
