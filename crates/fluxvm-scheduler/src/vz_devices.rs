@@ -90,6 +90,34 @@ impl VmManager {
     }
 }
 
+/// Host-side cost of one `vz` VM: its runner process's resident size and CPU time (see `fluxvm_apple::runner_usage`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct VmRunnerUsage {
+    pub vm_id: Uuid,
+    pub name: String,
+    pub rss_bytes: u64,
+    pub cpu_seconds: f64,
+}
+
+/// Samples the runner process of every running or paused `vz` VM. A VM whose process cannot be read (just exited,
+/// not macOS) is left out rather than reported as zero.
+pub fn runner_usage_samples(vms: &[VmRecord]) -> Vec<VmRunnerUsage> {
+    vms.iter()
+        .filter(|vm| {
+            vm.backend == BackendKind::Vz && matches!(vm.status, VmStatus::Running | VmStatus::Paused)
+        })
+        .filter_map(|vm| {
+            let u = fluxvm_apple::runner_usage(vm.pid?).ok()?;
+            Some(VmRunnerUsage {
+                vm_id: vm.id,
+                name: vm.name.clone(),
+                rss_bytes: u.rss_bytes,
+                cpu_seconds: u.cpu_seconds(),
+            })
+        })
+        .collect()
+}
+
 /// What this Mac's Virtualization.framework offers (OS version, vmnet, custom Virtio, Secure Boot, Rosetta...), asked
 /// of the signed runner helper. Errors off macOS.
 pub async fn apple_host_capabilities() -> Result<Value> {

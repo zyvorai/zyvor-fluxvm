@@ -17,6 +17,7 @@ pub mod macos_install;
 mod runner;
 pub mod screen;
 pub mod ssh;
+mod usage;
 mod usb_passthrough;
 pub mod usernet;
 pub mod vz27;
@@ -37,6 +38,7 @@ pub use runner::{
     ip_file, oci_meta_dir, read_guest_ip, release_mac, self_control_socket_path,
     set_self_control_socket, snapshot_dir, write_oci_meta_as,
 };
+pub use usage::{RunnerUsage, mach_ticks_to_seconds, runner_usage};
 pub use usb_passthrough::{physical_usb_attach, physical_usb_list};
 
 use anyhow::{Context, Result, bail};

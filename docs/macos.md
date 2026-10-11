@@ -377,6 +377,18 @@ Verified on macOS 27.2 with a Debian 13 guest: a file changed after `self_snapsh
 - NAT MTU is **not** configurable: the macOS 27 SDK has `maximumTransmissionUnit` only on `VZFileHandleNetworkDeviceAttachment`
   (macOS 13+, the attachment the userspace gateway uses), not on `VZNATNetworkDeviceAttachment`, so `apple.nat_mtu` was not added.
 
+### Host-side accounting and memory pressure
+
+- Virtualization.framework reports nothing per VM, so FluxVM reads the runner process (one per VM) with `proc_pid_rusage`:
+  `fluxvm_apple::runner_usage(pid)` returns resident bytes and user/system CPU seconds. `/metrics` exposes them for running or
+  paused `vz` VMs as `fluxvm_vm_runner_rss_bytes{vm,name}` (gauge) and `fluxvm_vm_runner_cpu_seconds_total{vm,name}` (counter).
+  These are host-side numbers for the runner process (resident guest RAM included), not what the guest sees. The macOS reader was
+  run against the test process on macOS 27; the metrics path is unit-tested but not scraped against a live VM.
+- Memory pressure was already wired before this change: `kern.memorystatus_vm_pressure_level` is sampled (normal, warn,
+  critical; also `fluxvm_host_memory_pressure_level` in `/metrics`), and `fluxvm_scheduler::density::reclaim_after_secs` shortens
+  the idle time before a sandbox's balloon is inflated to 60 s under warn or critical pressure. Normal pressure leaves the
+  configured `sandbox.idle_balloon_secs` unchanged.
+
 ### Stored sign-in
 
 `fluxctl signin` keeps a guest username and password in the host's login Keychain (service `dev.zyvor.fluxvm.vm-signin`,
@@ -611,4 +623,4 @@ process starts.
 - Container sandboxes need boot artifacts built on Linux arm64 (`scripts/build-oci-boot.sh`, or the `oci-boot` CI workflow's
   artifacts) and take `linux/arm64` images (or `linux/amd64` under Rosetta).
 - Several Linux-only crates still do not build on macOS; CI builds and tests the supported subset by package.
-- Memory is not enforced by FluxVM here; the Mac's own memory pressure applies. Plan for one or two small VMs on a 16 GB Mac.
+- Memory is not enforced by FluxVM here; the Mac's own memory pressure applies (runner RSS is reported, not capped). Plan for one or two small VMs on a 16 GB Mac.
