@@ -68,7 +68,9 @@ context the CLI talks to the local daemon's `listen` address, because the observ
 
 `/metrics` gains these series when the observer is installed (empty otherwise): `fluxvm_netobs_frames_total`,
 `_bytes_total`, `_malformed_total`, `_truncated_total`, `_flows_active`, `_flows_created_total`, `_flows_evicted_total`,
-`_flows_expired_total`, `_frame_drops_total` (by reason), `_tap_enqueued_total`, `_tap_dropped_total`, the
+`_flows_expired_total`, `_frame_drops_total` (by reason), `_tap_enqueued_total`, `_tap_dropped_total`, the bridge series
+`_bridge_frames_total`, `_bridge_dropped_total{reason}`, `_bridge_truncated_total`, `_bridge_unconfirmed` (gauge) and
+`_switch_forward_dropped_total` (see "Bridge delivery and loss accounting"), the
 `_reasm_*` family (segments dropped, streams abandoned, incomplete, conflicts, bytes buffered),
 `_encrypted_dns_flows_total`, `_quic_hellos_total`, and per VM `fluxvm_netobs_vm_packets_total` and
 `fluxvm_netobs_vm_tcp_retransmits_total`. An OTLP JSON rendering of the summary exists in the crate (`otlp_metrics_json`);
@@ -100,6 +102,77 @@ Frames reach the observer from two kinds of source:
   exports every guest frame with its verdict over a versioned (`FXNB` v1) unix-stream protocol; it never blocks, drops and counts
   when the queue is full or the daemon is gone, and reconnects with backoff. A switch built without the feature is restarted
   without the flag.
+
+## Bridge delivery and loss accounting
+
+Observation over the bridge is **best effort**: the switch never waits for the observer, so when frames are offered faster
+than the observer side can take them, some observations are lost. What the bridge guarantees is that the loss is
+**counted, never silent**: every frame a switch offers is either ingested or added to exactly one drop counter, so
+`offered = ingested + dropped` (plus `bridge_unconfirmed`, below, which is zero in steady state).
+
+How a frame travels: the switch encodes it into one shared, bounded byte queue (default 32,768 frames or 16 MiB, whichever
+fills first; frames cut to 2048 bytes), a writer thread swaps the whole queue out and writes it with one `write` per batch,
+and the daemon's reader ingests in batches of 64 per observer lock. The first record on each connection is a STATS record that
+gives the daemon a baseline, and STATS is re-sent every 250 ms when anything changed.
+
+Counters (summary `counters.*`, `/v1/netobs/summary`; Prometheus names in the metrics section):
+
+| Counter | Meaning |
+| --- | --- |
+| `bridge_frames` | frames received from switches and ingested |
+| `bridge_dropped` | observations lost, the sum of `bridge_dropped_by_reason` |
+| `bridge_dropped_by_reason` | one entry per fixed reason, see below |
+| `bridge_truncated_to_snaplen` | frames cut to the export snap length; their byte counts are understated |
+| `bridge_unconfirmed` | frames a switch reports as sent that the daemon has not seen: in flight right now, or lost with a connection that died. A value that stays above zero is a loss that no counter could attribute |
+| `switch_forward_dropped` | frames the switch observed but could not hand to the destination guest (full receive queue). Not an observation loss; it is what retransmits in the flows are made of |
+| `tap_enqueued`, `tap_dropped` | totals over all sources: the in-process tap (usernet) plus the bridges |
+
+`bridge_dropped_by_reason` labels (bounded, `reason="..."` in Prometheus):
+
+* `queue_full`: the switch's queue had no room: the datapath outran the writer or the daemon. This is the one that appears
+  under sustained line-rate traffic.
+* `disconnected`: no connection to the daemon when the frame was offered (daemon down or restarting) or while it waited.
+* `write_error`: a socket write failed or stalled past 250 ms; frames of that write that did not fully leave are counted
+  here. The connection is re-made with backoff.
+* `oversize`: the frame or identity could not be encoded (too many identities on one connection, or a name over 255 bytes).
+* `server_rejected`: the daemon received it but could not attribute it (a frame for an identity it was never told about).
+* `unspecified`: a drop reported by a switch too old to give a reason.
+
+`drops_by_reason` (and `fluxvm_netobs_frame_drops_total`) is a different thing: the **datapath's** verdicts on frames
+(`policy`, `spoofed_source`, `unknown_destination`, ...), observed correctly. A frame lost by the bridge shows up in
+`bridge_dropped_by_reason`, never in `drops_by_reason`, and `drops_by_reason.queue_full` is a datapath queue (the usernet
+gateway's), not the bridge's.
+
+### What the residual under-count looks like
+
+Measured over a real unix socket with MTU-size frames (`cargo test -p fluxvm-netobs --release --test bridge_throughput --
+--ignored --nocapture`): a paced 150-500 kpps feed is delivered 99.6-100 % with the rest reported as `queue_full`; an unpaced
+producer far above anything a guest can send (millions of frames per second) is delivered at 5-10 % and the other 90 %
+is reported. Before the accounting fix a 300 kpps run delivered 81 % and reported 0 %.
+
+So at line rate, observation is a **sample with a known size**: packet and byte totals for a VM can be low by
+`bridge_dropped / (bridge_frames + bridge_dropped)`, and `bridge_dropped_by_reason` tells you why. Flow-level facts that need
+only a few packets (the handshake, a DNS query, a ClientHello) are rarely affected; counters of bulk transfers are. TCP
+retransmits are counted among the frames that were observed, so they are also understated under loss.
+
+Paths that cannot be counted: a datagram the guest's socket buffer dropped before the switch read it (invisible to any
+userspace process), and frames the kernel accepted for a connection that died before the daemon read them (these appear in
+`bridge_unconfirmed`, as a total but without a reason).
+
+### Guest-to-guest flows
+
+A switch tap sees each frame once, as sent by one guest. So that both VMs of a guest-to-guest connection get a complete view,
+the observer also accounts an allowed unicast frame in the *receiving* guest's view (`mirror_peer_views`, on by default;
+the receiver is found by its MAC on the same network, learned from frames it has sent). Consequences: each VM's flow is
+oriented from its own side (the server VM sees `direction: inbound`), both directions' packets and bytes count, FIN or RST
+from either side closes the flow, and a VM's per-VM packet totals are its transmit plus its receive on private networks. The
+mirrored copy does not add to the observer-wide `frames` and `bytes`. A guest that has not sent anything yet cannot be found
+as a receiver, so its first received frames (typically the connection's SYN) are not attributed to it; broadcasts are not
+mirrored.
+
+Flows also report `oriented`: `observed` (a SYN or SYN+ACK decided client and server), `first_packet` (UDP/ICMP: the first
+frame seen is the client's) or `guessed` (a TCP flow first seen mid-stream: the server is the endpoint with the well-known,
+else non-ephemeral, else lower port).
 
 ## Honest limits
 
