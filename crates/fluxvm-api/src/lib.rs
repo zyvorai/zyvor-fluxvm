@@ -2606,6 +2606,13 @@ struct VzDiskFields {
     controller: Option<fluxvm_core::model::AppleDiskController>,
     #[serde(default)]
     usb_bus: Option<u8>,
+    /// `kind: overlay`: the overlay file (the request's `path` is the base image).
+    #[serde(default)]
+    overlay: Option<std::path::PathBuf>,
+    #[serde(default)]
+    iops: Option<u64>,
+    #[serde(default)]
+    bps: Option<u64>,
 }
 
 async fn attach_vm_disk(
@@ -2634,6 +2641,9 @@ async fn attach_vm_disk(
             controller: v.controller.unwrap_or_default(),
             block_device_id: None,
             usb_bus: v.usb_bus,
+            overlay: v.overlay,
+            iops: v.iops,
+            bps: v.bps,
         };
         let info = m.attach_vz_disk(id, &req.name, disk, req.size_gib).await?;
         return Ok((StatusCode::CREATED, Json(info)));
@@ -2646,6 +2656,9 @@ async fn attach_vm_disk(
         || v.sync.is_some()
         || v.controller.is_some()
         || v.usb_bus.is_some()
+        || v.overlay.is_some()
+        || v.iops.is_some()
+        || v.bps.is_some()
     {
         return Err(anyhow::anyhow!(
             "kind, url, read_only, caching, sync, controller and usb_bus are vz disk options"

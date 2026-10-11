@@ -305,6 +305,27 @@ pub fn validate_disk(d: &fluxvm_core::model::AppleDisk) -> Result<()> {
                 );
             }
         }
+        AppleDiskKind::Overlay => {
+            let overlay = d.overlay.as_deref().unwrap_or(std::path::Path::new(""));
+            for (what, p) in [("path (the base image)", d.path.as_path()), ("overlay", overlay)] {
+                if !p.is_absolute() {
+                    bail!(
+                        "an overlay disk's {what} must be an absolute path, not {}",
+                        p.display()
+                    );
+                }
+                // `fluxvm-blockd serve --export name=base,overlay=...` is comma separated.
+                if p.to_string_lossy().contains(',') {
+                    bail!("an overlay disk's paths cannot contain a comma: {}", p.display());
+                }
+            }
+            if overlay == d.path {
+                bail!("an overlay disk's overlay must differ from its base path");
+            }
+            if d.iops == Some(0) || d.bps == Some(0) {
+                bail!("iops and bps must be at least 1 (leave them out for no limit)");
+            }
+        }
         AppleDiskKind::Nbd => {
             let url = d.url.as_deref().unwrap_or("");
             let scheme = url.split_once("://").map(|(s, _)| s);
@@ -320,6 +341,11 @@ pub fn validate_disk(d: &fluxvm_core::model::AppleDisk) -> Result<()> {
     }
     if d.kind != AppleDiskKind::Nbd && d.url.is_some() {
         bail!("url is for nbd disks");
+    }
+    if d.kind != AppleDiskKind::Overlay
+        && (d.overlay.is_some() || d.iops.is_some() || d.bps.is_some())
+    {
+        bail!("overlay, iops and bps are for overlay disks");
     }
     if let Some(id) = &d.block_device_id {
         if d.controller != fluxvm_core::model::AppleDiskController::Virtio {
@@ -623,6 +649,15 @@ pub fn validate_request(req: &CreateVmRequest) -> Result<()> {
             validate_disk(d)?;
             if !names.insert(d.name_at(i)) {
                 bail!("apple.extra_disks name {} is used twice", d.name_at(i));
+            }
+        }
+        // Two overlays on one file would have two servers writing it.
+        let mut overlays = std::collections::HashSet::new();
+        for d in &apple.extra_disks {
+            if let Some(o) = &d.overlay
+                && !overlays.insert(o)
+            {
+                bail!("apple.extra_disks overlay {} is used twice", o.display());
             }
         }
         if macos_guest && !apple.tagged_shares.is_empty() {
@@ -1440,5 +1475,42 @@ mod tests {
             let err = format!("{:#}", validate_request(&req(json)).expect_err(json));
             assert!(err.contains(needle), "{json}: {err}");
         }
+    }
+
+    #[test]
+    fn overlay_disks_are_validated() {
+        use fluxvm_core::model::{AppleDisk, AppleDiskKind};
+        let ok = AppleDisk {
+            path: "/data/base.raw".into(),
+            overlay: Some("/data/vm1.ovl".into()),
+            kind: AppleDiskKind::Overlay,
+            iops: Some(500),
+            bps: Some(10 << 20),
+            read_only: false,
+            ..Default::default()
+        };
+        validate_disk(&ok).unwrap();
+        let bad = |f: &dyn Fn(&mut AppleDisk)| {
+            let mut d = ok.clone();
+            f(&mut d);
+            assert!(validate_disk(&d).is_err(), "{d:?}");
+        };
+        bad(&|d| d.overlay = None);
+        bad(&|d| d.overlay = Some("rel.ovl".into()));
+        bad(&|d| d.path = "base.raw".into());
+        bad(&|d| d.overlay = Some(d.path.clone()));
+        bad(&|d| d.iops = Some(0));
+        bad(&|d| d.bps = Some(0));
+        bad(&|d| d.url = Some("nbd://127.0.0.1:1/x".into()));
+        bad(&|d| d.overlay = Some("/data/a,b.ovl".into()));
+        bad(&|d| d.caching = fluxvm_core::model::AppleDiskCaching::Cached);
+        // The overlay fields belong to overlay disks only.
+        let mut img = AppleDisk {
+            path: "/data/x.raw".into(),
+            ..Default::default()
+        };
+        validate_disk(&img).unwrap();
+        img.iops = Some(1);
+        assert!(validate_disk(&img).is_err());
     }
 }

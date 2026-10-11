@@ -405,7 +405,7 @@ A Linux guest takes extra disks in `apple.extra_disks`, or with `fluxctl disk at
 
 | Field | Values |
 |-------|--------|
-| `kind` | `image` (a raw file, default), `block` (a host device, `/dev/diskN`), `nbd` (an NBD export in `url`) |
+| `kind` | `image` (a raw file, default), `block` (a host device, `/dev/diskN`), `nbd` (an NBD export in `url`), `overlay` (copy-on-write overlay on a base image, see below; **UNVERIFIED**) |
 | `caching` | `automatic` (default), `cached`, `uncached`; image files only |
 | `sync` | `full` (default), `fsync` (image files only), `none` (fastest; data can be lost if the host crashes) |
 | `controller` | `virtio` (default, `/dev/vdX`), `nvme` (`/dev/nvmeXn1`), `usb` (`/dev/sdX`) |
@@ -415,6 +415,13 @@ A Linux guest takes extra disks in `apple.extra_disks`, or with `fluxctl disk at
   `policy.allowed_image_dirs` check as QEMU data disks.
 - NBD URLs are `nbd://host:port/export`, `nbds://…` (TLS), or `nbd+unix:///export?socket=/path`. Virtualization.framework
   reconnects when the server drops; a missing server fails the VM's start.
+- `overlay` (**UNVERIFIED** against Virtualization.framework's NBD client): `{"kind": "overlay", "path": "/images/base.raw",
+  "overlay": "/images/vm1.ovl", "read_only": false, "iops": 500, "bps": 10485760}` serves `overlay` (created on top of `path` when
+  missing; `path` is never written) through a `fluxvm-blockd serve` the daemon starts on 127.0.0.1 with an ephemeral port before the
+  runner and stops when the runner exits. The runner sees an ordinary `nbd` disk (`nbd://127.0.0.1:<port>/<disk name>`), so the
+  same macOS 14 requirement and start-time attachment apply. `fluxvm-blockd` is found next to `fluxctl` or through
+  `FLUXVM_BLOCKD`; its output goes to `<workspace>/blockd.log`. An overlay file must not be used by two VMs at once (only repeats
+  inside one request are refused). Paths must be absolute and contain no comma.
 - Virtualization.framework fixes a VM's devices when it starts, so `fluxctl disk attach` and `detach` apply at the next start. The
   exception is a USB image disk on a running guest: attach plugs it in at once (macOS 15), and detach unplugs it at once as long
   as the VM has not restarted since. A new image made with `--size-gib` is deleted on detach once nothing uses it.
@@ -531,7 +538,7 @@ These compile against the macOS 27 SDK and are validated at admission. Except fo
 | macOS guests (installed from an IPSW through the API or by hand, then cloned; see above) | live migration, in-place restore of a running VM, direct kernel boot of macOS guests |
 | `apple.usernet` userspace gateway for Linux guests (egress/DNS policy, UDP/TCP forwards, netobs frames; **unverified on hardware**) | |
 | `apple.macos_vsock` for macOS guests: vsock device plus a LaunchDaemon agent (**experimental, unverified**; SSH remains the fallback) | exec policies in macOS guests (Landlock/seccomp are Linux-only) |
-| extra disks (image, block device, NBD; virtio, NVMe, USB), USB disk hot-attach and detach, private networks, console ports, bridged and vmnet networking, balloon, Rosetta, display, audio | (vmnet forwards may be UDP; NAT forwards are TCP only) |
+| extra disks (image, block device, NBD, blockd overlay (**unverified**); virtio, NVMe, USB), USB disk hot-attach and detach, private networks, console ports, bridged and vmnet networking, balloon, Rosetta, display, audio | (vmnet forwards may be UDP; NAT forwards are TCP only) |
 
 The same table is encoded in `fluxvm_apple::CAPABILITIES`; unsupported requests are refused with a specific message before any
 process starts.

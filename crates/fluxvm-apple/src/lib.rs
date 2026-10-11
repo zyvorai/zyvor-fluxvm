@@ -7,6 +7,7 @@
 //! `fluxvm-vz-runner` (see `runner/Runner.swift`), which the backend supervises over a unix control
 //! socket (one JSON line per request). See `docs/macos.md` for the contract and the capability matrix.
 
+pub mod blockd;
 mod capability;
 mod control;
 mod host_caps;
@@ -246,6 +247,17 @@ impl VmBackend for AppleBackend {
             net.socket = vznet::ensure_switch(&net.name).await?;
             net.switch_bin = vznet::find_switch()?;
         }
+        // Overlay disks: one supervised `fluxvm-blockd` per VM, attached to the runner as `nbd` disks.
+        let blockd = match req.apple.as_ref() {
+            Some(a) if !blockd::exports(&a.extra_disks).is_empty() => {
+                let b = blockd::Blockd::start(blockd::exports(&a.extra_disks), &ctx.workspace)
+                    .await
+                    .context("starting the overlay disk server")?;
+                conf.extra_disks = blockd::runner_disks(&a.extra_disks, b.port);
+                Some(b)
+            }
+            _ => None,
+        };
         // apple.usernet: the NIC socketpair is made here so the runner and the supervised gateway each inherit an end.
         let gateway = match req.apple.as_ref().and_then(|a| a.usernet.as_ref()) {
             Some(u) => Some(usernet::Gateway::prepare(u, ctx.id, &ctx.workspace, &conf.mac)?),
@@ -280,8 +292,12 @@ impl VmBackend for AppleBackend {
         let pid = child.id().context("runner exited immediately")?;
         // Dropping `gateway_stop` (a failed launch below, or the runner exiting) stops the gateway.
         let (gateway_stop, gateway_rx) = tokio::sync::watch::channel(false);
+        // (the same channel stops the overlay disk server)
         if let Some(g) = gateway {
-            g.supervise(pid, gateway_rx);
+            g.supervise(pid, gateway_rx.clone());
+        }
+        if let Some(b) = blockd {
+            b.supervise(pid, gateway_rx);
         }
 
         // Ready = the control socket answers `status` with a running guest. A runner that exits first has failed.

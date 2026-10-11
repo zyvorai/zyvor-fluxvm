@@ -825,6 +825,16 @@ pub struct AppleDisk {
     /// Disks present at boot are placed by Virtualization.framework.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usb_bus: Option<u8>,
+    /// `kind: overlay`: the copy-on-write overlay file (created on top of `path` if missing). Writes land here; `path`
+    /// is never modified.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub overlay: Option<PathBuf>,
+    /// `kind: overlay`: I/O operations per second cap.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub iops: Option<u64>,
+    /// `kind: overlay`: bytes per second cap.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bps: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -836,6 +846,9 @@ pub enum AppleDiskKind {
     Block,
     /// `VZNetworkBlockDeviceStorageDeviceAttachment` (macOS 14).
     Nbd,
+    /// A copy-on-write overlay (`overlay`) on a base image (`path`), served to the guest by a `fluxvm-blockd` the daemon
+    /// supervises on 127.0.0.1 and attached as an `nbd` disk. UNVERIFIED against Virtualization.framework's NBD client.
+    Overlay,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]

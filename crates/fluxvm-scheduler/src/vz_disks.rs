@@ -59,6 +59,7 @@ fn kind_name(k: AppleDiskKind) -> &'static str {
         AppleDiskKind::Image => "raw",
         AppleDiskKind::Block => "block",
         AppleDiskKind::Nbd => "nbd",
+        AppleDiskKind::Overlay => "overlay",
     }
 }
 
@@ -172,6 +173,14 @@ impl VmManager {
             ),
             (None, AppleDiskKind::Image | AppleDiskKind::Block) => {
                 disk.path = self.check_disk_source(&disk.path)?;
+            }
+            (None, AppleDiskKind::Overlay) => {
+                disk.path = self.check_disk_source(&disk.path)?;
+                // The overlay file may not exist yet; its directory is what has to be allowed.
+                let ov = disk.overlay.clone().unwrap_or_default();
+                if let (Some(dir), Some(file)) = (ov.parent(), ov.file_name()) {
+                    disk.overlay = Some(self.check_disk_source(dir)?.join(file));
+                }
             }
             (None, AppleDiskKind::Nbd) => {}
         }

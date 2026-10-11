@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! fluxvm-blockd serve --export name=base[,overlay=path][,ro][,iops=N][,bps=N]
-//!                     [--listen 127.0.0.1:10809]
+//!                     [--listen 127.0.0.1:10809] [--watch-pid P | --watch-pid-file F]
 //! fluxvm-blockd branch --from overlay --to new-overlay
 
 use anyhow::{Context, Result, bail};
@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 const USAGE: &str = "usage:
   fluxvm-blockd serve --export name=base[,overlay=path][,ro][,iops=N][,bps=N] \\
-                      [--export ...] [--listen 127.0.0.1:10809]
+                      [--export ...] [--listen 127.0.0.1:10809] [--watch-pid P | --watch-pid-file F]
   fluxvm-blockd branch --from <overlay> --to <new-overlay>
 
 An overlay that does not exist is created on top of `base`. If `base` is
@@ -60,10 +60,14 @@ async fn main() -> Result<()> {
         Some("serve") => {
             let mut listen = "127.0.0.1:10809".to_string();
             let mut exports = Vec::new();
+            let mut watch_pid: Option<i32> = None;
+            let mut watch_file: Option<PathBuf> = None;
             while let Some(a) = args.next() {
                 match a.as_str() {
                     "--export" => exports.push(parse_export(&args.next().context("--export value")?)?),
                     "--listen" => listen = args.next().context("--listen value")?,
+                    "--watch-pid-file" => watch_file = Some(PathBuf::from(args.next().context("--watch-pid-file value")?)),
+                    "--watch-pid" => watch_pid = Some(args.next().context("--watch-pid value")?.parse::<i32>()?),
                     _ => bail!("unknown argument `{a}`\n{USAGE}"),
                 }
             }
@@ -76,6 +80,32 @@ async fn main() -> Result<()> {
             tokio::select! {
                 r = server.serve(listener) => r?,
                 _ = tokio::signal::ctrl_c() => {}
+                // Exit once the process this serves (the VM runner) is gone. With a pid file, the pid may appear
+                // late (the runner starts after this server); a file that never appears ends the server after 120 s.
+                _ = async {
+                    if watch_pid.is_none() && watch_file.is_none() {
+                        return std::future::pending::<()>().await;
+                    }
+                    let started = std::time::Instant::now();
+                    loop {
+                        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                        let pid = watch_pid.or_else(|| {
+                            std::fs::read_to_string(watch_file.as_ref()?).ok()?.trim().parse::<i32>().ok()
+                        });
+                        match pid {
+                            Some(pid) => {
+                                // SAFETY: signal 0 only probes for existence.
+                                let gone = unsafe { libc::kill(pid, 0) } != 0
+                                    && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH);
+                                if gone {
+                                    break;
+                                }
+                            }
+                            None if started.elapsed() > std::time::Duration::from_secs(120) => break,
+                            None => {}
+                        }
+                    }
+                } => {}
             }
             Ok(())
         }
