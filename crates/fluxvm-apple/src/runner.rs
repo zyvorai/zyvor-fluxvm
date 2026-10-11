@@ -50,6 +50,8 @@ pub struct RunnerConfig {
     pub usb_controller: bool,
     pub vmnet: Option<fluxvm_core::model::AppleVmnetSpec>,
     pub custom_virtio: bool,
+    /// macOS guests only: attach a virtio-socket device (experimental, unverified on hardware).
+    pub macos_vsock: bool,
     /// virtiofs shares, tagged `fs0`, `fs1`, … in request order (the tags the guest-side mount uses).
     pub shares: Vec<ShareConfig>,
     /// Host `127.0.0.1:host_port` listeners that relay TCP to the guest's NAT address.
@@ -184,6 +186,7 @@ impl RunnerConfig {
             usb_controller: apple.usb_controller,
             vmnet: apple.vmnet.clone(),
             custom_virtio: apple.custom_virtio,
+            macos_vsock: apple.macos_vsock,
             restore_state: req
                 .loadvm_tag
                 .as_deref()

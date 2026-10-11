@@ -98,6 +98,10 @@ pub const CAPABILITIES: &[Capability] = &[
         "needs the guest agent in the image; proxied like Firecracker",
     ),
     yes(
+        "guest agent over vsock, macOS guests (apple.macos_vsock)",
+        "EXPERIMENTAL, opt-in, unverified on hardware: adds a virtio-socket device to a macOS guest; whether the guest exposes a usable vsock is a hypothesis. Needs the macOS LaunchDaemon agent (crates/fluxvm-guest-agent/macos); exec and files fall back to SSH when it does not answer",
+    ),
+    yes(
         "macOS guests",
         "installed from an IPSW through the API (apple.install) or cloned from a prepared template; see docs/macos.md",
     ),
@@ -339,6 +343,12 @@ pub fn validate_request(req: &CreateVmRequest) -> Result<()> {
                 bail!("the vz backend does not support {}", $msg);
             }
         };
+    }
+    if let Some(apple) = &req.apple
+        && apple.macos_vsock
+        && !matches!(apple.guest_os, fluxvm_core::model::AppleGuest::Macos)
+    {
+        bail!("apple.macos_vsock is for macOS guests (Linux guests always have a vsock device)");
     }
     if let Some(apple) = &req.apple
         && apple.self_control
@@ -1101,6 +1111,24 @@ mod tests {
             let err = validate_request(&req(json)).expect_err(json).to_string();
             assert!(err.contains(needle), "{json}: {err}");
         }
+    }
+
+    #[test]
+    fn macos_vsock_is_for_macos_guests_only() {
+        let mac = r#""apple":{"guest_os":"macos","macos_vsock":true}"#;
+        assert!(validate_request(&req(mac)).is_ok());
+        let linux = r#""apple":{"macos_vsock":true}"#;
+        let err = validate_request(&req(linux)).unwrap_err().to_string();
+        assert!(err.contains("macos_vsock"), "{err}");
+    }
+
+    #[test]
+    fn macos_vsock_is_listed_as_experimental() {
+        let c = CAPABILITIES
+            .iter()
+            .find(|c| c.feature.contains("macos_vsock"))
+            .expect("capability row");
+        assert!(c.note.contains("EXPERIMENTAL") && c.note.contains("unverified"));
     }
 
     #[test]

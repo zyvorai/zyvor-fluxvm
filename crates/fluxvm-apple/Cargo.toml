@@ -23,4 +23,5 @@ tracing = "0.1"
 uuid = { version = "1", features = ["v4", "serde"] }
 
 [dev-dependencies]
+fluxvm-guest-protocol = { path = "../fluxvm-guest-protocol" }
 tempfile = "3"

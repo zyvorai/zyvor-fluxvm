@@ -195,8 +195,27 @@ The same `snapshot` / `restore` endpoints work for macOS guests (macOS 14+ host)
 (`auxiliary.bin`). Earlier runners ignored the saved state of a macOS guest and cold-booted it; the runner now resumes it the same
 way as for Linux guests. Not yet exercised on a real macOS guest.
 
-Not done: a `macos` image name, downloading an IPSW, and exec over vsock for macOS guests (they have no FluxVM guest agent). Apple
-allows two macOS VMs at a time per Mac.
+Not done: a `macos` image name and downloading an IPSW. Apple allows two macOS VMs at a time per Mac. Exec over vsock for macOS
+guests is **experimental and unverified** (next section).
+
+### Guest agent over vsock (experimental, unverified on hardware)
+
+By default a macOS guest has no vsock device and no FluxVM agent, and is reached over SSH only. `"apple": {"macos_vsock": true}` adds a
+`VZVirtioSocketDeviceConfiguration` to the macOS guest. This is a **hypothesis**: that a macOS guest exposes a usable vsock
+(`AF_VSOCK`, family 40, with Darwin's `sockaddr_vm`) that a guest program can bind. Nothing was booted to check it, and it may turn
+out not to work.
+
+- **Guest side.** `fluxvm-guest-agent` builds for macOS (`cargo build -p fluxvm-guest-agent`). The vsock listener, exec, file
+  transfer, shell (PTY), shutdown and hostname reset are ported; per-exec policies (Landlock/seccomp) are refused outright because
+  they need Linux, and machine-id and entropy reseeding are reported as failures. Install it as a LaunchDaemon with
+  `crates/fluxvm-guest-agent/macos/install.sh <binary> <token>` (plist: `dev.zyvor.fluxvm-guest-agent.plist`). A macOS guest has no
+  cloud-init, so the token is provisioned there by hand; with no token the agent refuses everything.
+- **Host side.** With the flag, `vz_guest` pings the agent over the runner's vsock proxy (3 s) before each request and uses SSH when
+  it does not answer. Without the flag nothing is attempted. Exec policies and argv exec still need the agent.
+- **Checked:** the flag validates (macOS guests only), the runner config carries it, the Swift runner compiles, the agent's
+  macOS build passes its unit tests (file transfer and PTY shell run against a local socketpair, the `sockaddr_vm` layout), and the
+  fallback decision is unit-tested. **Not checked:** that a macOS guest boots with the device, that `bind` on `AF_VSOCK` succeeds
+  there, and that the host's `connect` reaches it.
 
 ## Display, audio, sharing and USB options
 
@@ -457,6 +476,7 @@ These compile against the macOS 27 SDK and are validated at admission. Except fo
 | shared folders (virtiofs), VM snapshots (memory + disk, Linux and macOS guests), pause / resume, graceful shutdown, force stop, EFI Secure Boot (macOS 27+, Linux) | TPM, confidential profiles |
 | guest agent over vsock (proxied like Firecracker; needs the agent in the image) | hotplug of CPU, memory and NICs; cdroms; firmware overrides |
 | macOS guests (installed from an IPSW through the API or by hand, then cloned; see above) | live migration, in-place restore of a running VM, direct kernel boot of macOS guests |
+| `apple.macos_vsock` for macOS guests: vsock device plus a LaunchDaemon agent (**experimental, unverified**; SSH remains the fallback) | exec policies in macOS guests (Landlock/seccomp are Linux-only) |
 | extra disks (image, block device, NBD; virtio, NVMe, USB), USB disk hot-attach and detach, private networks, console ports, bridged and vmnet networking, balloon, Rosetta, display, audio | (vmnet forwards may be UDP; NAT forwards are TCP only) |
 
 The same table is encoded in `fluxvm_apple::CAPABILITIES`; unsupported requests are refused with a specific message before any

@@ -623,6 +623,11 @@ pub struct AppleSpec {
     /// `http://127.0.0.1:7790/mcp` in the guest (relayed to the host over vsock; scoped to this VM only).
     #[serde(default)]
     pub self_control: bool,
+    /// macOS guests: add a virtio-socket (vsock) device so a guest-side agent (a LaunchDaemon) can be reached without SSH.
+    /// EXPERIMENTAL and unverified on hardware: whether a macOS guest exposes a usable vsock device is a hypothesis. When
+    /// the guest does not answer on vsock, exec and file access fall back to SSH. Refused for Linux guests (they always have vsock).
+    #[serde(default)]
+    pub macos_vsock: bool,
     /// Attach the root disk read-only (OCI sandboxes boot an immutable image; writes go to tmpfs).
     #[serde(default)]
     pub root_read_only: bool,
@@ -828,6 +833,7 @@ impl Default for AppleSpec {
             custom_virtio: false,
             egress_allow: Vec::new(),
             self_control: false,
+            macos_vsock: false,
             root_read_only: false,
             extra_disks: Vec::new(),
             tagged_shares: Vec::new(),
