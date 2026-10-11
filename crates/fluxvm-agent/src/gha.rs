@@ -109,6 +109,170 @@ pub struct GhaConfig {
     pub pools: Vec<Pool>,
     #[serde(default = "default_poll")]
     pub poll_interval_secs: u64,
+    /// Optional `workflow_job` webhook listener: queued jobs start a runner at once instead of on the next poll.
+    /// Polling keeps running as a safety net (missed deliveries, restarts).
+    #[serde(default)]
+    pub webhook: Option<WebhookConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WebhookConfig {
+    /// Address for `POST /github/webhook`, e.g. `0.0.0.0:8790` (put TLS in front of it).
+    pub listen: String,
+    /// Environment variable holding the webhook secret; deliveries without a valid `X-Hub-Signature-256` get a 401.
+    #[serde(default = "default_webhook_secret_env")]
+    pub secret_env: String,
+}
+
+fn default_webhook_secret_env() -> String {
+    "GITHUB_WEBHOOK_SECRET".into()
+}
+
+/// Most pages read from one paginated GitHub list (100 items each).
+const MAX_PAGES: usize = 20;
+
+/// The `rel="next"` URL of a GitHub `Link` header.
+pub fn next_link(header: &str) -> Option<String> {
+    header.split(',').find_map(|part| {
+        let (url, params) = part.split_once(';')?;
+        params
+            .split(';')
+            .any(|p| p.trim() == "rel=\"next\"")
+            .then(|| {
+                url.trim()
+                    .trim_start_matches('<')
+                    .trim_end_matches('>')
+                    .to_owned()
+            })
+    })
+}
+
+/// HMAC-SHA256 (RFC 2104) over `data`.
+pub fn hmac_sha256(key: &[u8], data: &[u8]) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+    const BLOCK: usize = 64;
+    let mut k = [0u8; BLOCK];
+    if key.len() > BLOCK {
+        k[..32].copy_from_slice(&Sha256::digest(key));
+    } else {
+        k[..key.len()].copy_from_slice(key);
+    }
+    let mut inner = Sha256::new();
+    inner.update(k.map(|b| b ^ 0x36));
+    inner.update(data);
+    let inner = inner.finalize();
+    let mut outer = Sha256::new();
+    outer.update(k.map(|b| b ^ 0x5c));
+    outer.update(inner);
+    outer.finalize().into()
+}
+
+/// Checks GitHub's `X-Hub-Signature-256: sha256=<hex>` in constant time.
+pub fn verify_signature(secret: &[u8], body: &[u8], header: &str) -> bool {
+    let Some(hex) = header.trim().strip_prefix("sha256=") else {
+        return false;
+    };
+    let want: String = hmac_sha256(secret, body)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    hex.len() == want.len()
+        && hex
+            .bytes()
+            .zip(want.bytes())
+            .fold(0u8, |acc, (a, b)| acc | (a.to_ascii_lowercase() ^ b))
+            == 0
+}
+
+/// A queued job: repository (without owner), job id, labels.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueuedJob {
+    pub repo: String,
+    pub id: u64,
+    pub labels: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WebhookEvent {
+    Queued(QueuedJob),
+    /// A job finished somewhere: worth retiring runners now rather than at the next poll.
+    Completed,
+}
+
+/// Reads a `workflow_job` delivery for one of the watched repositories; anything else is `None`.
+pub fn parse_webhook(
+    event: &str,
+    body: &[u8],
+    owner: &str,
+    repos: &[String],
+) -> Option<WebhookEvent> {
+    if event != "workflow_job" {
+        return None;
+    }
+    let v: Value = serde_json::from_slice(body).ok()?;
+    let full = v["repository"]["full_name"].as_str()?;
+    let (o, repo) = full.split_once('/')?;
+    if !o.eq_ignore_ascii_case(owner) || !repos.iter().any(|r| r.eq_ignore_ascii_case(repo)) {
+        return None;
+    }
+    match v["action"].as_str()? {
+        "queued" => {
+            let job = &v["workflow_job"];
+            Some(WebhookEvent::Queued(QueuedJob {
+                repo: repo.to_owned(),
+                id: job["id"].as_u64()?,
+                labels: job["labels"]
+                    .as_array()?
+                    .iter()
+                    .filter_map(|l| l.as_str().map(str::to_owned))
+                    .collect(),
+            }))
+        }
+        "completed" => Some(WebhookEvent::Completed),
+        _ => None,
+    }
+}
+
+/// `POST /github/webhook`: verifies the signature and forwards `workflow_job` events to the scaler.
+pub fn webhook_router(
+    secret: Vec<u8>,
+    owner: String,
+    repos: Vec<String>,
+    tx: tokio::sync::mpsc::UnboundedSender<WebhookEvent>,
+) -> axum::Router {
+    use axum::{
+        body::Bytes,
+        http::{HeaderMap, StatusCode},
+        routing::post,
+    };
+    let secret = Arc::new(secret);
+    axum::Router::new().route(
+        "/github/webhook",
+        post(move |headers: HeaderMap, body: Bytes| {
+            let (secret, owner, repos, tx) =
+                (secret.clone(), owner.clone(), repos.clone(), tx.clone());
+            async move {
+                let sig = headers
+                    .get("x-hub-signature-256")
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or_default();
+                if !verify_signature(&secret, &body, sig) {
+                    return StatusCode::UNAUTHORIZED;
+                }
+                let event = headers
+                    .get("x-github-event")
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or_default();
+                match parse_webhook(event, &body, &owner, &repos) {
+                    Some(ev) => {
+                        let _ = tx.send(ev);
+                        StatusCode::ACCEPTED
+                    }
+                    None => StatusCode::NO_CONTENT,
+                }
+            }
+        }),
+    )
 }
 
 fn default_api() -> String {
@@ -313,31 +477,73 @@ impl Ctx {
         Ok(serde_json::from_str(&text).unwrap_or(Value::Null))
     }
 
+    /// Every item under `key` of a paginated GitHub list, following `Link: rel="next"` (same API host only, so the
+    /// token never leaves it) for up to [`MAX_PAGES`] pages.
+    async fn gh_paged(&self, path: &str, key: &str) -> Result<Vec<Value>> {
+        let base = self.cfg.github.api_url.trim_end_matches('/').to_owned();
+        let mut url = format!("{base}/{path}");
+        let mut out = Vec::new();
+        for _ in 0..MAX_PAGES {
+            let resp = self
+                .http
+                .get(&url)
+                .bearer_auth(&self.github_token)
+                .header("Accept", "application/vnd.github+json")
+                .header("X-GitHub-Api-Version", GITHUB_API_VERSION)
+                .send()
+                .await
+                .with_context(|| format!("GitHub GET {path}"))?;
+            let status = resp.status();
+            let next = resp
+                .headers()
+                .get("link")
+                .and_then(|v| v.to_str().ok())
+                .and_then(next_link);
+            let text = resp.text().await.unwrap_or_default();
+            ensure!(
+                status.is_success(),
+                "GitHub GET {path}: HTTP {status}: {}",
+                text.chars().take(300).collect::<String>()
+            );
+            let v: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
+            out.extend(v[key].as_array().cloned().unwrap_or_default());
+            match next {
+                Some(n) if n.starts_with(&format!("{base}/")) => url = n,
+                Some(n) => bail!("GitHub pagination pointed off the API host: {n}"),
+                None => return Ok(out),
+            }
+        }
+        tracing::warn!(
+            path,
+            pages = MAX_PAGES,
+            "stopped following GitHub pagination"
+        );
+        Ok(out)
+    }
+
     /// Queued jobs of `repo` as `(job id, labels)`.
     async fn queued_jobs(&self, repo: &str) -> Result<Vec<(u64, Vec<String>)>> {
         let owner = &self.cfg.github.owner;
         let runs = self
-            .gh_json(
-                reqwest::Method::GET,
+            .gh_paged(
                 &format!("repos/{owner}/{repo}/actions/runs?status=queued&per_page=100"),
-                None,
+                "workflow_runs",
             )
             .await?;
         let mut out = Vec::new();
-        for run in runs["workflow_runs"].as_array().into_iter().flatten() {
+        for run in &runs {
             let Some(run_id) = run["id"].as_u64() else {
                 continue;
             };
             let jobs = self
-                .gh_json(
-                    reqwest::Method::GET,
+                .gh_paged(
                     &format!(
                         "repos/{owner}/{repo}/actions/runs/{run_id}/jobs?filter=latest&per_page=100"
                     ),
-                    None,
+                    "jobs",
                 )
                 .await?;
-            for job in jobs["jobs"].as_array().into_iter().flatten() {
+            for job in &jobs {
                 if job["status"].as_str() != Some("queued") {
                     continue;
                 }
@@ -387,17 +593,14 @@ impl Ctx {
 
     /// Runners named with [`NAME_PREFIX`] in one scope: `(id, name)`.
     async fn our_runners(&self, scope_path: &str) -> Result<Vec<(u64, String)>> {
-        let v = self
-            .gh_json(
-                reqwest::Method::GET,
+        let runners = self
+            .gh_paged(
                 &format!("{scope_path}/actions/runners?per_page=100"),
-                None,
+                "runners",
             )
             .await?;
-        Ok(v["runners"]
-            .as_array()
-            .into_iter()
-            .flatten()
+        Ok(runners
+            .iter()
             .filter_map(|r| {
                 let name = r["name"].as_str()?;
                 name.starts_with(NAME_PREFIX)
@@ -668,11 +871,34 @@ impl Scaler {
 
     /// One poll: retire finished or timed-out runners, then start runners for new queued jobs.
     pub async fn tick(&mut self) -> Result<Value> {
+        let retired = self.retire().await;
+        let mut failed = Vec::new();
+        let mut jobs = Vec::new();
+        for repo in self.ctx.cfg.github.repos.clone() {
+            match self.ctx.queued_jobs(&repo).await {
+                Ok(j) => jobs.extend(j.into_iter().map(|(id, labels)| QueuedJob {
+                    repo: repo.clone(),
+                    id,
+                    labels,
+                })),
+                Err(e) => failed.push(json!({"repo": repo, "error": e.to_string()})),
+            }
+        }
+        let (started, start_failed) = self.start_for_jobs(jobs).await;
+        failed.extend(start_failed);
+        Ok(json!({
+            "active": self.runners.len(),
+            "started": started,
+            "retired": retired,
+            "failed": failed,
+        }))
+    }
+
+    /// Deletes the VMs of runners whose job is done (GitHub no longer knows the runner) or that timed out.
+    pub async fn retire(&mut self) -> Vec<Value> {
         let now = Instant::now();
         self.served
             .retain(|_, t| now.duration_since(*t) < SERVED_TTL);
-
-        // Retire.
         let mut retired = Vec::new();
         let mut keep = Vec::new();
         for r in std::mem::take(&mut self.runners) {
@@ -703,41 +929,39 @@ impl Scaler {
             }
         }
         self.runners = keep;
+        retired
+    }
 
-        // Scale up.
+    /// Starts runners for the jobs not served yet, as far as each pool's `max_runners` allows. Returns
+    /// `(started, failed)`; a failed job is forgotten so the next poll (or delivery) tries it again.
+    pub async fn start_for_jobs(&mut self, jobs: Vec<QueuedJob>) -> (Vec<Value>, Vec<Value>) {
+        let now = Instant::now();
         let mut started = Vec::new();
         let mut failed = Vec::new();
-        let repos = self.ctx.cfg.github.repos.clone();
         let mut set = tokio::task::JoinSet::new();
         let mut planned: HashMap<String, usize> = HashMap::new();
-        for repo in &repos {
-            let jobs = match self.ctx.queued_jobs(repo).await {
-                Ok(j) => j,
-                Err(e) => {
-                    failed.push(json!({"repo": repo, "error": e.to_string()}));
-                    continue;
-                }
-            };
-            for (job_id, labels) in jobs {
-                if self.served.contains_key(&job_id) {
-                    continue;
-                }
-                let Some(pool) = pick_pool(&self.ctx.cfg.pools, &labels) else {
-                    tracing::debug!(job_id, ?labels, "no pool matches this job");
-                    continue;
-                };
-                let busy =
-                    self.active_in(&pool.name) + planned.get(&pool.name).copied().unwrap_or(0);
-                if busy >= pool.max_runners {
-                    continue;
-                }
-                *planned.entry(pool.name.clone()).or_default() += 1;
-                self.served.insert(job_id, now);
-                let ctx = self.ctx.clone();
-                let pool = pool.clone();
-                let repo = repo.clone();
-                set.spawn(async move { (job_id, ctx.provision(&pool, &repo).await) });
+        for QueuedJob {
+            repo,
+            id: job_id,
+            labels,
+        } in jobs
+        {
+            if self.served.contains_key(&job_id) {
+                continue;
             }
+            let Some(pool) = pick_pool(&self.ctx.cfg.pools, &labels) else {
+                tracing::debug!(job_id, ?labels, "no pool matches this job");
+                continue;
+            };
+            let busy = self.active_in(&pool.name) + planned.get(&pool.name).copied().unwrap_or(0);
+            if busy >= pool.max_runners {
+                continue;
+            }
+            *planned.entry(pool.name.clone()).or_default() += 1;
+            self.served.insert(job_id, now);
+            let ctx = self.ctx.clone();
+            let pool = pool.clone();
+            set.spawn(async move { (job_id, ctx.provision(&pool, &repo).await) });
         }
         while let Some(res) = set.join_next().await {
             match res {
@@ -757,12 +981,7 @@ impl Scaler {
                 Err(e) => failed.push(json!({"error": e.to_string()})),
             }
         }
-        Ok(json!({
-            "active": self.runners.len(),
-            "started": started,
-            "retired": retired,
-            "failed": failed,
-        }))
+        (started, failed)
     }
 }
 
@@ -774,13 +993,48 @@ pub async fn run(cfg: GhaConfig) -> Result<()> {
         Ok(report) => tracing::info!(%report, "adopted runners from a previous run"),
         Err(e) => tracing::warn!(error = %e, "adopting previous runners failed"),
     }
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    if let Some(w) = &scaler.ctx.cfg.webhook {
+        let secret = std::env::var(&w.secret_env)
+            .with_context(|| format!("{} is not set (webhook secret)", w.secret_env))?;
+        ensure!(!secret.is_empty(), "{} is empty", w.secret_env);
+        let app = webhook_router(
+            secret.into_bytes(),
+            scaler.ctx.cfg.github.owner.clone(),
+            scaler.ctx.cfg.github.repos.clone(),
+            tx,
+        );
+        let listener = tokio::net::TcpListener::bind(&w.listen)
+            .await
+            .with_context(|| format!("binding webhook listener {}", w.listen))?;
+        tracing::info!(listen = %w.listen, "GitHub webhook listener up");
+        tokio::spawn(async move {
+            if let Err(e) = axum::serve(listener, app).await {
+                tracing::error!(error = %e, "webhook listener stopped");
+            }
+        });
+    } else {
+        // Keep the sender alive so `rx` never reports closed.
+        std::mem::forget(tx);
+    }
     let mut tick = tokio::time::interval(every);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
-        tick.tick().await;
-        match scaler.tick().await {
-            Ok(report) => tracing::debug!(%report, "gha poll"),
-            Err(e) => tracing::warn!(error = %e, "gha poll failed"),
+        tokio::select! {
+            _ = tick.tick() => match scaler.tick().await {
+                Ok(report) => tracing::debug!(%report, "gha poll"),
+                Err(e) => tracing::warn!(error = %e, "gha poll failed"),
+            },
+            Some(ev) = rx.recv() => match ev {
+                WebhookEvent::Queued(job) => {
+                    let (started, failed) = scaler.start_for_jobs(vec![job]).await;
+                    tracing::debug!(started = started.len(), failed = failed.len(), "webhook job");
+                }
+                WebhookEvent::Completed => {
+                    let retired = scaler.retire().await;
+                    tracing::debug!(retired = retired.len(), "webhook completion");
+                }
+            },
         }
     }
 }
@@ -864,6 +1118,7 @@ mod tests {
                 ..pool(Launch::Exec)
             }],
             poll_interval_secs: 15,
+            webhook: None,
         };
         assert!(cfg.validate().is_err());
     }
@@ -1028,6 +1283,7 @@ mod tests {
             },
             pools: vec![pool(Launch::CloudInit)],
             poll_interval_secs: 15,
+            webhook: None,
         }
     }
 
@@ -1081,6 +1337,209 @@ mod tests {
         let f = fake.lock().unwrap();
         assert_eq!(f.deleted_vms, vec!["vm-1".to_string()]);
         assert_eq!(f.vms.len(), 1);
+    }
+
+    #[test]
+    fn next_links_are_found() {
+        let h = r#"<https://api.github.com/x?page=2>; rel="next", <https://api.github.com/x?page=9>; rel="last""#;
+        assert_eq!(
+            next_link(h).as_deref(),
+            Some("https://api.github.com/x?page=2")
+        );
+        assert_eq!(
+            next_link(r#"<https://api.github.com/x?page=1>; rel="prev""#),
+            None
+        );
+    }
+
+    #[test]
+    fn hmac_matches_rfc_4231() {
+        let hex: String = hmac_sha256(b"Jefe", b"what do ya want for nothing?")
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        assert_eq!(
+            hex,
+            "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843"
+        );
+        // A key longer than the block is hashed first (RFC 4231 test case 6).
+        let hex: String = hmac_sha256(
+            &[0xaa; 131],
+            b"Test Using Larger Than Block-Size Key - Hash Key First",
+        )
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+        assert_eq!(
+            hex,
+            "60e431591ee0b67f0d8a26aacbf5b77f8e0bc6213728c5140546040f0ee37f54"
+        );
+    }
+
+    fn sign(secret: &[u8], body: &[u8]) -> String {
+        let hex: String = hmac_sha256(secret, body)
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        format!("sha256={hex}")
+    }
+
+    #[test]
+    fn signatures_are_checked() {
+        let sig = sign(b"s3cret", b"{}");
+        assert!(verify_signature(b"s3cret", b"{}", &sig));
+        assert!(verify_signature(
+            b"s3cret",
+            b"{}",
+            &sig.to_uppercase().replacen("SHA256", "sha256", 1)
+        ));
+        assert!(!verify_signature(b"other", b"{}", &sig));
+        assert!(!verify_signature(b"s3cret", b"{ }", &sig));
+        assert!(!verify_signature(b"s3cret", b"{}", "sha1=abc"));
+        assert!(!verify_signature(b"s3cret", b"{}", ""));
+    }
+
+    #[test]
+    fn webhooks_are_parsed_for_watched_repos_only() {
+        let body = |action: &str, repo: &str| {
+            json!({
+                "action": action,
+                "repository": {"full_name": repo},
+                "workflow_job": {"id": 42, "labels": ["self-hosted", "macOS"]},
+            })
+            .to_string()
+        };
+        let repos = vec!["App".to_string()];
+        assert_eq!(
+            parse_webhook(
+                "workflow_job",
+                body("queued", "zyvorai/app").as_bytes(),
+                "zyvorai",
+                &repos
+            ),
+            Some(WebhookEvent::Queued(QueuedJob {
+                repo: "app".into(),
+                id: 42,
+                labels: vec!["self-hosted".into(), "macOS".into()],
+            }))
+        );
+        assert_eq!(
+            parse_webhook(
+                "workflow_job",
+                body("completed", "zyvorai/app").as_bytes(),
+                "zyvorai",
+                &repos
+            ),
+            Some(WebhookEvent::Completed)
+        );
+        assert_eq!(
+            parse_webhook(
+                "workflow_job",
+                body("in_progress", "zyvorai/app").as_bytes(),
+                "zyvorai",
+                &repos
+            ),
+            None
+        );
+        assert_eq!(
+            parse_webhook(
+                "workflow_job",
+                body("queued", "other/app").as_bytes(),
+                "zyvorai",
+                &repos
+            ),
+            None
+        );
+        assert_eq!(
+            parse_webhook(
+                "push",
+                body("queued", "zyvorai/app").as_bytes(),
+                "zyvorai",
+                &repos
+            ),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn the_webhook_endpoint_rejects_bad_signatures_and_forwards_jobs() {
+        use tower::ServiceExt;
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let app = webhook_router(b"s3cret".to_vec(), "zyvorai".into(), vec!["app".into()], tx);
+        let body = json!({
+            "action": "queued",
+            "repository": {"full_name": "zyvorai/app"},
+            "workflow_job": {"id": 7, "labels": ["self-hosted"]},
+        })
+        .to_string();
+        let req = |sig: &str| {
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/github/webhook")
+                .header("x-github-event", "workflow_job")
+                .header("x-hub-signature-256", sig)
+                .body(axum::body::Body::from(body.clone()))
+                .unwrap()
+        };
+        let resp = app.clone().oneshot(req("sha256=00")).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        assert!(rx.try_recv().is_err());
+        let resp = app
+            .clone()
+            .oneshot(req(&sign(b"s3cret", body.as_bytes())))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::ACCEPTED);
+        assert!(matches!(rx.try_recv(), Ok(WebhookEvent::Queued(j)) if j.id == 7));
+    }
+
+    #[tokio::test]
+    async fn paginated_lists_are_followed_on_the_api_host_only() {
+        use axum::extract::Query;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let b2 = base.clone();
+        let app = Router::new()
+            .route(
+                "/orgs/zyvorai/actions/runners",
+                get(move |Query(q): Query<HashMap<String, String>>| {
+                    let base = b2.clone();
+                    async move {
+                        let page: u32 = q.get("page").and_then(|p| p.parse().ok()).unwrap_or(1);
+                        let mut headers = axum::http::HeaderMap::new();
+                        if page < 3 {
+                            let next = format!(
+                                "<{base}/orgs/zyvorai/actions/runners?per_page=100&page={}>; rel=\"next\"",
+                                page + 1
+                            );
+                            headers.insert("link", next.parse().unwrap());
+                        }
+                        let runners = vec![json!({"id": page, "name": format!("{NAME_PREFIX}linux-p{page}")})];
+                        (headers, Json(json!({"runners": runners})))
+                    }
+                }),
+            )
+            .route(
+                "/orgs/evil/actions/runners",
+                get(|| async {
+                    let mut headers = axum::http::HeaderMap::new();
+                    headers.insert(
+                        "link",
+                        "<https://attacker.example/steal>; rel=\"next\"".parse().unwrap(),
+                    );
+                    (headers, Json(json!({"runners": []})))
+                }),
+            );
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        let mut c = cfg(&base);
+        c.github.scope = RunnerScope::Org;
+        let s = Scaler::with_tokens(c, "gh".into(), None).unwrap();
+        let mine = s.ctx.our_runners("orgs/zyvorai").await.unwrap();
+        assert_eq!(mine.len(), 3);
+        let err = s.ctx.our_runners("orgs/evil").await.unwrap_err();
+        assert!(err.to_string().contains("off the API host"), "{err}");
     }
 
     #[tokio::test]
