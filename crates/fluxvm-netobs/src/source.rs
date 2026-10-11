@@ -66,6 +66,72 @@ impl TapStats {
     }
 }
 
+/// Why a frame bound for the observer through a bridge never arrived. A fixed, small label set (Prometheus
+/// cardinality is bounded by construction).
+pub const BRIDGE_DROP_REASONS: [&str; 6] = [
+    // The client's bounded queue had no room (the datapath outran the writer).
+    "queue_full",
+    // No connection to the server when the frame was offered or while it waited.
+    "disconnected",
+    // Over the wire limits (too many identities on one connection, or a name that does not fit).
+    "oversize",
+    // The socket write failed or stalled; frames of that write that did not fully leave are counted.
+    "write_error",
+    // A drop reported by a client too old to say why.
+    "unspecified",
+    // Received by the server but not ingestible (frame for an identity it was never told about).
+    "server_rejected",
+];
+
+/// Index of `unspecified` in [`BRIDGE_DROP_REASONS`].
+pub const REASON_UNSPECIFIED: usize = 4;
+/// Index of `server_rejected` in [`BRIDGE_DROP_REASONS`].
+pub const REASON_SERVER_REJECTED: usize = 5;
+
+/// Loss accounting for frames that travel over a bridge (switch process to daemon). One per
+/// [`crate::bridge::BridgeServer`]; the observer sums every registered one into its summary next to the
+/// in-process tap's [`TapStats`].
+///
+/// The invariant the bridge maintains: every frame a client was offered is either ingested (`frames`) or counted
+/// in exactly one `dropped` bucket, apart from `unconfirmed`: frames a client reports as sent that the server has
+/// not seen (in flight, or lost with a connection that died).
+#[derive(Debug, Default)]
+pub struct BridgeLoss {
+    /// Frames received from clients and ingested.
+    pub frames: AtomicU64,
+    /// Drops by reason, indexed like [`BRIDGE_DROP_REASONS`].
+    pub dropped: [AtomicU64; BRIDGE_DROP_REASONS.len()],
+    /// Frames cut to the client's snap length before export (their byte counts are understated).
+    pub truncated_to_snaplen: AtomicU64,
+    /// Frames the switch observed but could not deliver to the destination guest (a full receiver). Not an
+    /// observation loss: the observer saw them; it explains retransmissions.
+    pub switch_forward_dropped: AtomicU64,
+    /// Per client id: frames reported sent that the server had not seen as of the client's latest STATS.
+    pub unconfirmed: std::sync::Mutex<std::collections::HashMap<u64, u64>>,
+}
+
+impl BridgeLoss {
+    pub fn dropped_total(&self) -> u64 {
+        self.dropped.iter().map(|c| c.load(Ordering::Relaxed)).sum()
+    }
+
+    pub fn dropped_by_reason(&self) -> Vec<(&'static str, u64)> {
+        BRIDGE_DROP_REASONS
+            .iter()
+            .zip(&self.dropped)
+            .map(|(n, c)| (*n, c.load(Ordering::Relaxed)))
+            .collect()
+    }
+
+    pub fn unconfirmed_total(&self) -> u64 {
+        self.unconfirmed
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .values()
+            .sum()
+    }
+}
+
 #[derive(Debug)]
 pub struct TapFrame {
     pub identity: Arc<Identity>,

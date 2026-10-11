@@ -39,6 +39,6 @@ pub use flow::{Direction, DropReason, FrameMeta, Identity, Verdict};
 pub use l7::{Redact, Redaction};
 pub use observer::{FlowQuery, Observer, ObserverConfig, global, install_global};
 pub use source::{
-    FrameSource, NetTap, PumpHandle, Tap, TapReceiver, global_tap, install_global_tap, now_us,
-    spawn_pump,
+    BridgeLoss, FrameSource, NetTap, PumpHandle, Tap, TapReceiver, global_tap, install_global_tap,
+    now_us, spawn_pump,
 };

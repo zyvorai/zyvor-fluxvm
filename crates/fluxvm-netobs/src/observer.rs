@@ -33,7 +33,7 @@ use crate::packet::{
 use crate::quic::QuicFlow;
 use crate::reasm::{DropWhy, ReasmConfig};
 use crate::rollup::{Red, Rollup, RollupConfig, RollupKey, Sample};
-use crate::source::{TapStats, now_us};
+use crate::source::{BridgeLoss, TapStats, now_us};
 use crate::streams::{FlowStreams, StreamOut};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::IpAddr;
@@ -213,6 +213,7 @@ struct Inner {
 pub struct Observer {
     inner: Mutex<Inner>,
     tap_stats: Mutex<Option<Arc<TapStats>>>,
+    bridges: Mutex<Vec<Arc<BridgeLoss>>>,
 }
 
 fn ep(a: (IpAddr, u16)) -> Endpoint {
@@ -1065,6 +1066,7 @@ impl Observer {
                 cfg,
             }),
             tap_stats: Mutex::new(None),
+            bridges: Mutex::new(Vec::new()),
         }
     }
 
@@ -1110,6 +1112,16 @@ impl Observer {
         true
     }
 
+    /// Registers a bridge's loss accounting. Unlike the single in-process tap slot, any number of bridges can
+    /// be registered, and registering never displaces the tap: the summary adds them up. Registering the same
+    /// `Arc` twice is a no-op.
+    pub fn add_bridge_loss(&self, b: Arc<BridgeLoss>) {
+        let mut g = self.bridges.lock().unwrap_or_else(|e| e.into_inner());
+        if !g.iter().any(|x| Arc::ptr_eq(x, &b)) {
+            g.push(b);
+        }
+    }
+
     pub fn counters(&self) -> Counters {
         self.lock().counters.clone()
     }
@@ -1120,6 +1132,27 @@ impl Observer {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone();
+        let bridges: Vec<Arc<BridgeLoss>> = self
+            .bridges
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let mut bridge_by_reason: Vec<(String, u64)> = crate::source::BRIDGE_DROP_REASONS
+            .iter()
+            .map(|r| (r.to_string(), 0))
+            .collect();
+        let (mut bridge_frames, mut bridge_dropped, mut bridge_trunc, mut fwd, mut unconf) =
+            (0u64, 0u64, 0u64, 0u64, 0u64);
+        for b in &bridges {
+            bridge_frames += b.frames.load(Ordering::Relaxed);
+            for (i, (_, n)) in b.dropped_by_reason().into_iter().enumerate() {
+                bridge_by_reason[i].1 += n;
+                bridge_dropped += n;
+            }
+            bridge_trunc += b.truncated_to_snaplen.load(Ordering::Relaxed);
+            fwd += b.switch_forward_dropped.load(Ordering::Relaxed);
+            unconf += b.unconfirmed_total();
+        }
         let mut g = self.lock();
         g.tick(now_us);
         let mut active: HashMap<String, u64> = HashMap::new();
@@ -1141,12 +1174,21 @@ impl Observer {
                 .iter()
                 .map(|r| (r.name().to_string(), c.drops[r.index()]))
                 .collect(),
+            // Totals over every source that feeds the observer: the in-process tap and each bridge.
             tap_enqueued: tap
                 .as_ref()
-                .map_or(0, |t| t.enqueued.load(Ordering::Relaxed)),
+                .map_or(0, |t| t.enqueued.load(Ordering::Relaxed))
+                + bridge_frames,
             tap_dropped: tap
                 .as_ref()
-                .map_or(0, |t| t.dropped.load(Ordering::Relaxed)),
+                .map_or(0, |t| t.dropped.load(Ordering::Relaxed))
+                + bridge_dropped,
+            bridge_frames,
+            bridge_dropped,
+            bridge_dropped_by_reason: bridge_by_reason,
+            bridge_truncated_to_snaplen: bridge_trunc,
+            bridge_unconfirmed: unconf,
+            switch_forward_dropped: fwd,
             reasm_segments_dropped: c.reasm_segments_dropped,
             reasm_streams_abandoned: c.reasm_streams_abandoned,
             reasm_incomplete: c.reasm_incomplete,

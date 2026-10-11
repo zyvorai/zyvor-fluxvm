@@ -48,6 +48,22 @@ impl TapSink {
             TapSink::Bridge(b) => b.tap_as(id, direction, verdict, frame),
         }
     }
+
+    /// The switch could not hand a frame to its destination port (full receive queue).
+    fn note_forward_drop(&self) {
+        if let TapSink::Bridge(b) = self {
+            b.note_forward_drop();
+        }
+    }
+}
+
+/// Frames this process observed and routed but could not deliver because the destination port's queue was
+/// full, whether or not an observation sink is installed. Observation loss is counted by the sink itself.
+static FORWARD_DROPPED: AtomicU64 = AtomicU64::new(0);
+
+/// Total of frames dropped on delivery since the process started (see the pump's note on full receivers).
+pub fn forward_dropped() -> u64 {
+    FORWARD_DROPPED.load(Ordering::Relaxed)
 }
 
 /// The observation sink, if one was installed (feature `netobs`). Frames a guest sends are copied to it, with the
@@ -336,8 +352,10 @@ fn pump(table: Arc<Table>, port: Arc<Port>) {
         match routed {
             Ok(to) => {
                 for p in ports.iter().filter(|p| to.contains(&p.id)) {
-                    // A full receiver drops the frame, as a real switch would; TCP retransmits.
-                    unsafe {
+                    // A full receiver drops the frame, as a real switch would; TCP retransmits. The drop is
+                    // counted (`forward_dropped`, and reported to the observer): the frame was observed above but
+                    // never reached the guest, which is what retransmits in its flows are made of.
+                    let sent = unsafe {
                         libc::send(
                             p.frames.as_raw_fd(),
                             frame.as_ptr().cast(),
@@ -345,6 +363,13 @@ fn pump(table: Arc<Table>, port: Arc<Port>) {
                             libc::MSG_DONTWAIT,
                         )
                     };
+                    if sent < 0 {
+                        FORWARD_DROPPED.fetch_add(1, Ordering::Relaxed);
+                        #[cfg(feature = "netobs")]
+                        if let Some((t, _)) = &tap {
+                            t.note_forward_drop();
+                        }
+                    }
                 }
             }
             Err(why) if why == "spoofed source address" => {
@@ -569,6 +594,46 @@ mod tests {
         send_hello(&stream, &hello, switch_end.as_raw_fd()).unwrap();
         wait_ack(&stream).unwrap();
         (guest, stream)
+    }
+
+    #[test]
+    fn frames_a_full_receiver_cannot_take_are_counted() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("fwd.sock");
+        let s = sock.clone();
+        let server = std::thread::spawn(move || serve(&s, Duration::from_millis(1500)).unwrap());
+        for _ in 0..50 {
+            if UnixStream::connect(&sock).is_ok() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let (a, _a_ctl) = join(&sock, "fwd-a", A);
+        let (_b, _b_ctl) = join(&sock, "fwd-b", B);
+        std::thread::sleep(Duration::from_millis(200));
+        let before = forward_dropped();
+        // `_b` never reads, so its queue fills and the switch has to drop what it cannot hand over.
+        let f = frame(B, A);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while forward_dropped() == before && Instant::now() < deadline {
+            for _ in 0..200 {
+                unsafe {
+                    libc::send(
+                        a.as_raw_fd(),
+                        f.as_ptr().cast(),
+                        f.len(),
+                        libc::MSG_DONTWAIT,
+                    )
+                };
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(
+            forward_dropped() > before,
+            "full-receiver drops are counted"
+        );
+        drop((_a_ctl, _b_ctl));
+        server.join().unwrap();
     }
 
     #[test]
