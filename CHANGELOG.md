@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### Added: fork a running `vz` Linux guest (`POST /v1/vms/{id}/fork`)
+- One runner save plus APFS clones, then each child is restored from the same state with the parent's machine identifier and
+  MAC. Needs `network.mode = none` or `apple.usernet` without port forwards; macOS guests, extra disks, vmnet/bridged/private
+  networks are refused. A child's shared MAC is never recycled. Verified once on an M4: two children in 2.2 s, both resumed at the
+  parent's counter and ran independently, the parent unaffected. Identity reset needs the guest agent (not run).
+
 ### Verified: FluxDisk encryption and the lazy HTTP base through VZ's NBD client
 - On an Apple M4 with a Debian 13 guest: an encrypted overlay and a lazy overlay on an HTTP base read back the base byte-for-byte,
   took a 900 KB `O_DIRECT` write that read back identical after `drop_caches`, and the encrypted overlay file held no plaintext.
