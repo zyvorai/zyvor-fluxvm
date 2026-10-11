@@ -35,7 +35,7 @@ pub mod streams;
 
 pub use capture::{CaptureError, CaptureFilter, CaptureManager, CaptureRequest};
 pub use export::{NetEvent, SCHEMA_VERSION, Summary, render_prometheus};
-pub use flow::{Direction, DropReason, FrameMeta, Identity, Verdict};
+pub use flow::{Direction, DropReason, FrameMeta, Identity, Orientation, Verdict};
 pub use l7::{Redact, Redaction};
 pub use observer::{FlowQuery, Observer, ObserverConfig, global, install_global};
 pub use source::{

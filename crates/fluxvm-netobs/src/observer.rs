@@ -22,13 +22,13 @@ use crate::export::{
 };
 use crate::flow::{
     Direction, DropReason, Flow, FlowConfig, FlowKey, FlowL7, FlowTable, FrameMeta, Identity,
-    Verdict, parse_proto, proto_name,
+    Orientation, Verdict, orient_tcp, parse_proto, proto_name,
 };
 use crate::h2::H2Message;
 use crate::health::{CloseReason, Dir, Health, HealthDelta, IcmpHealth, TcpHealth};
 use crate::l7::{self, ClientHello, Http, Redaction, ServerHello};
 use crate::packet::{
-    self, IPPROTO_ICMP, IPPROTO_ICMPV6, IPPROTO_TCP, L4, Net, Packet, TCP_ACK, TCP_SYN, Tcp,
+    self, IPPROTO_ICMP, IPPROTO_ICMPV6, IPPROTO_TCP, L4, Mac, Net, Packet, TCP_ACK, TCP_SYN, Tcp,
 };
 use crate::quic::QuicFlow;
 use crate::reasm::{DropWhy, ReasmConfig};
@@ -64,6 +64,12 @@ pub struct ObserverConfig {
     pub quic_initial: bool,
     /// Decode cleartext HTTP/2 (`h2c`) request and response heads.
     pub h2: bool,
+    /// A switch-level tap sees each frame once, attributed to the guest that sent it. With this on (the default),
+    /// an allowed unicast frame whose destination MAC belongs to another guest of the same network is also
+    /// accounted in that guest's view as received, so both VMs of a guest-to-guest connection see both
+    /// directions (handshake, byte counts both ways, FIN/RST from either side) with their own orientation.
+    /// The mirrored copy does not count in the observer-wide frame and byte counters.
+    pub mirror_peer_views: bool,
 }
 
 impl Default for ObserverConfig {
@@ -86,6 +92,7 @@ impl Default for ObserverConfig {
                 .collect(),
             quic_initial: true,
             h2: true,
+            mirror_peer_views: true,
         }
     }
 }
@@ -204,6 +211,10 @@ struct Inner {
     capture: CaptureManager,
     counters: Counters,
     vm_totals: HashMap<String, Red>,
+    /// Guests seen sending, by (network, MAC): where a unicast frame's receiving view is found.
+    peers: HashMap<(Arc<str>, Mac), Arc<Identity>>,
+    /// The identity learned last, so a run of frames from one port skips the table.
+    last_peer: Option<Arc<Identity>>,
     /// Bytes held by reassembly and QUIC hello buffers across all flows (see [`ReasmConfig::max_total_bytes`]).
     reasm_bytes: usize,
     clock_us: u64,
@@ -280,20 +291,72 @@ impl Inner {
         }
     }
 
+    /// Ingests one observed frame. A frame a guest sent to another guest on the same private network is also
+    /// accounted in the receiving guest's own view (see [`ObserverConfig::mirror_peer_views`]).
     fn ingest(&mut self, frame: &[u8], meta: &FrameMeta) {
+        if meta.direction == Direction::FromGuest && self.cfg.mirror_peer_views {
+            // Learn which guest owns which MAC on which network. The identity's MAC is the port's MAC, which
+            // the switch enforces as the frame's source.
+            let known = self
+                .last_peer
+                .as_ref()
+                .is_some_and(|p| Arc::ptr_eq(p, &meta.identity));
+            if !known {
+                let k = (meta.identity.network.clone(), meta.identity.mac);
+                if self.peers.len() < self.cfg.max_vms.max(1) || self.peers.contains_key(&k) {
+                    self.peers.insert(k, meta.identity.clone());
+                }
+                self.last_peer = Some(meta.identity.clone());
+            }
+        }
+        self.ingest_view(frame, meta, false);
+        if self.cfg.mirror_peer_views
+            && meta.direction == Direction::FromGuest
+            && meta.verdict.is_allowed()
+            && frame.len() >= 6
+            && frame[0] & 1 == 0
+        {
+            let dst: Mac = [frame[0], frame[1], frame[2], frame[3], frame[4], frame[5]];
+            if dst != meta.identity.mac {
+                if let Some(peer) = self
+                    .peers
+                    .get(&(meta.identity.network.clone(), dst))
+                    .filter(|p| p.vm_id != meta.identity.vm_id)
+                    .cloned()
+                {
+                    let m = FrameMeta {
+                        identity: peer,
+                        ts_us: meta.ts_us,
+                        direction: Direction::ToGuest,
+                        verdict: meta.verdict,
+                    };
+                    self.ingest_view(frame, &m, true);
+                }
+            }
+        }
+    }
+
+    /// Accounts one frame in the view of `meta.identity`. `mirrored` marks the receiving guest's copy of a frame
+    /// that was already counted once as it was sent: it feeds that guest's flows, roll-ups and captures but not
+    /// the observer-wide frame, byte, drop and malformed counters.
+    fn ingest_view(&mut self, frame: &[u8], meta: &FrameMeta, mirrored: bool) {
         let now = meta.ts_us;
-        self.counters.frames += 1;
-        self.counters.bytes += frame.len() as u64;
-        if let Some(r) = meta.verdict.reason() {
-            self.counters.drops[r.index()] += 1;
+        if !mirrored {
+            self.counters.frames += 1;
+            self.counters.bytes += frame.len() as u64;
+            if let Some(r) = meta.verdict.reason() {
+                self.counters.drops[r.index()] += 1;
+            }
         }
         self.tick(now);
 
         let Some(pkt) = packet::parse(frame) else {
-            self.counters.malformed += 1;
+            if !mirrored {
+                self.counters.malformed += 1;
+            }
             return;
         };
-        if pkt.truncated {
+        if pkt.truncated && !mirrored {
             self.counters.truncated += 1;
         }
         if self.capture.has_active() {
@@ -302,11 +365,15 @@ impl Inner {
         let ip = match &pkt.net {
             Net::Ip(ip) => ip.clone(),
             Net::Arp(_) => {
-                self.counters.arp += 1;
+                if !mirrored {
+                    self.counters.arp += 1;
+                }
                 return;
             }
             Net::None => {
-                self.counters.non_ip += 1;
+                if !mirrored {
+                    self.counters.non_ip += 1;
+                }
                 return;
             }
         };
@@ -330,15 +397,26 @@ impl Inner {
         let from_guest = meta.direction == Direction::FromGuest;
         let vlan = pkt.vlan;
         let proto = ip.proto;
+        // Who is the client is decided by the segment that tells (SYN, SYN+ACK), not by who spoke first.
+        let (client, server, oriented) = match &pkt.l4 {
+            L4::Tcp(t) => orient_tcp(t.has(TCP_SYN), t.has(TCP_ACK), src, dst),
+            _ => (src, dst, Orientation::FirstPacket),
+        };
+        let guest_is_client = if client == src {
+            from_guest
+        } else {
+            !from_guest
+        };
         let (flow, created) = self.flows.get_or_insert(
             &key,
             |id| Flow {
                 id,
                 identity,
                 proto,
-                client: src,
-                server: dst,
-                guest_is_client: from_guest,
+                client,
+                server,
+                oriented,
+                guest_is_client,
                 vlan,
                 first_seen_us: now,
                 last_seen_us: now,
@@ -381,6 +459,7 @@ impl Inner {
                 } else {
                     "inbound"
                 },
+                oriented: flow.oriented.name(),
             });
         }
         samples.push(Sample::Packet {
@@ -1060,6 +1139,8 @@ impl Observer {
                 capture: CaptureManager::new(cfg.capture_sessions),
                 counters: Counters::default(),
                 vm_totals: HashMap::new(),
+                peers: HashMap::new(),
+                last_peer: None,
                 reasm_bytes: 0,
                 clock_us: 0,
                 last_tick_us: 0,
@@ -2477,5 +2558,329 @@ mod tests {
         assert_eq!(&pcap[..4], &[0xd4, 0xc3, 0xb2, 0xa1]);
         assert_eq!(o.capture_status()[0].packets, 1);
         assert!(o.capture_disable("vm-a"));
+    }
+
+    // --- Flow orientation and close, on synthetic traces -------------------------------------------------------
+
+    mod orientation {
+        use super::*;
+        use crate::packet::Mac;
+
+        const A: Ipv4Addr = Ipv4Addr::new(10, 89, 50, 2);
+        const B: Ipv4Addr = Ipv4Addr::new(10, 89, 50, 3);
+        const MAC_A: Mac = [2, 0, 0, 0, 0, 0xa];
+        const MAC_B: Mac = [2, 0, 0, 0, 0, 0xb];
+
+        /// Rewrites the Ethernet addresses of a builder frame.
+        fn l2(mut f: Vec<u8>, dst: Mac, src: Mac) -> Vec<u8> {
+            f[..6].copy_from_slice(&dst);
+            f[6..12].copy_from_slice(&src);
+            f
+        }
+
+        fn one(o: &Observer) -> FlowView {
+            let f = o.flows(&FlowQuery::default());
+            assert_eq!(f.len(), 1, "{f:?}");
+            f.into_iter().next().unwrap()
+        }
+
+        fn view(o: &Observer, vm: &str) -> FlowView {
+            let f: Vec<_> = o
+                .flows(&FlowQuery::default())
+                .into_iter()
+                .filter(|f| f.vm_id == vm)
+                .collect();
+            assert_eq!(f.len(), 1, "{vm}: {f:?}");
+            f.into_iter().next().unwrap()
+        }
+
+        #[test]
+        fn full_handshake_observed_in_one_view() {
+            let o = obs();
+            let i = id("vm-a");
+            let (c, s) = ((G, 40000), (S, 5201));
+            let from = |t: u64, f: Vec<u8>| o.ingest(&f, &meta(&i, t, Direction::FromGuest));
+            let to = |t: u64, f: Vec<u8>| o.ingest(&f, &meta(&i, t, Direction::ToGuest));
+            from(1, tcp_v4(c, s, 100, 0, TCP_SYN, 65535, b""));
+            to(2, tcp_v4(s, c, 900, 101, TCP_SYN | TCP_ACK, 65535, b""));
+            from(3, tcp_v4(c, s, 101, 901, TCP_ACK, 65535, b""));
+            let f = one(&o);
+            assert_eq!((f.client.port, f.server.port), (40000, 5201));
+            assert_eq!((f.direction, f.oriented), ("outbound", "observed"));
+            assert_eq!(
+                f.tcp.as_ref().unwrap().state,
+                crate::health::TcpState::Established
+            );
+            assert!(!f.tcp.as_ref().unwrap().midstream);
+        }
+
+        #[test]
+        fn first_seen_syn_ack_makes_the_sender_the_server() {
+            // The server VM's own view when it is the first to be seen: its SYN-ACK. Before the fix this
+            // recorded client=server-side, direction=outbound.
+            let o = obs();
+            let i = id("vm-b");
+            let (server, client) = ((B, 5201), (A, 60856));
+            o.ingest(
+                &tcp_v4(server, client, 900, 101, TCP_SYN | TCP_ACK, 65535, b""),
+                &meta(&i, 1, Direction::FromGuest),
+            );
+            o.ingest(
+                &tcp_v4(client, server, 101, 901, TCP_ACK, 65535, b""),
+                &meta(&i, 2, Direction::ToGuest),
+            );
+            o.ingest(
+                &tcp_v4(
+                    client,
+                    server,
+                    101,
+                    901,
+                    TCP_ACK | TCP_PSH,
+                    65535,
+                    &[7u8; 100],
+                ),
+                &meta(&i, 3, Direction::ToGuest),
+            );
+            o.ingest(
+                &tcp_v4(server, client, 901, 201, TCP_ACK, 65535, b""),
+                &meta(&i, 4, Direction::FromGuest),
+            );
+            let f = one(&o);
+            assert_eq!((f.client.ip.as_str(), f.client.port), ("10.89.50.2", 60856));
+            assert_eq!((f.server.ip.as_str(), f.server.port), ("10.89.50.3", 5201));
+            assert_eq!((f.direction, f.oriented), ("inbound", "observed"));
+            assert_eq!((f.packets_c2s, f.packets_s2c), (2, 2));
+            assert!(f.bytes_c2s > 0 && f.bytes_s2c > 0);
+            let t = f.tcp.unwrap();
+            assert_eq!(t.state, crate::health::TcpState::Established);
+            // Roll-up attribution agrees: this VM served the flow, so it is inbound.
+            let s = o.summary(10);
+            assert!(s.top_talkers.iter().all(|r| r.direction == "inbound"));
+        }
+
+        #[test]
+        fn mid_stream_flows_are_guessed_and_marked() {
+            // Ephemeral to well-known: the well-known port is the server.
+            let o = obs();
+            let i = id("vm-a");
+            o.ingest(
+                &tcp_v4(
+                    (G, 51000),
+                    (S, 443),
+                    5000,
+                    1,
+                    TCP_ACK | TCP_PSH,
+                    100,
+                    &[1u8; 10],
+                ),
+                &meta(&i, 1, Direction::FromGuest),
+            );
+            let f = one(&o);
+            assert_eq!((f.client.port, f.server.port), (51000, 443));
+            assert_eq!((f.direction, f.oriented), ("outbound", "guessed"));
+            assert!(f.tcp.unwrap().midstream);
+
+            // First seen from the server side (the reply of a flow that began before observation).
+            let o = obs();
+            o.ingest(
+                &tcp_v4(
+                    (S, 443),
+                    (G, 51000),
+                    9000,
+                    5010,
+                    TCP_ACK | TCP_PSH,
+                    100,
+                    &[1u8; 10],
+                ),
+                &meta(&i, 1, Direction::FromGuest),
+            );
+            let f = one(&o);
+            assert_eq!((f.client.port, f.server.port), (51000, 443));
+            assert_eq!((f.direction, f.oriented), ("inbound", "guessed"));
+
+            // Neither port well-known: the lower one serves.
+            let o = obs();
+            o.ingest(
+                &tcp_v4((G, 9001), (S, 9000), 1, 1, TCP_ACK, 100, b""),
+                &meta(&i, 1, Direction::FromGuest),
+            );
+            let f = one(&o);
+            assert_eq!(
+                (f.client.port, f.server.port, f.oriented),
+                (9001, 9000, "guessed")
+            );
+
+            // Equal ports: the sender is called the client.
+            let o = obs();
+            o.ingest(
+                &tcp_v4((G, 7000), (S, 7000), 1, 1, TCP_ACK, 100, b""),
+                &meta(&i, 1, Direction::FromGuest),
+            );
+            assert_eq!(one(&o).direction, "outbound");
+
+            // UDP has no handshake: first packet decides and says so.
+            let o = obs();
+            o.ingest(
+                &udp_v4((G, 40000), (NS, 53), b"q"),
+                &meta(&i, 1, Direction::FromGuest),
+            );
+            let f = one(&o);
+            assert_eq!((f.direction, f.oriented), ("outbound", "first_packet"));
+        }
+
+        #[test]
+        fn fin_both_ways_closes_and_stops_being_active() {
+            let o = obs();
+            let i = id("vm-a");
+            let (c, s) = ((G, 40000), (S, 5201));
+            let from = |t: u64, f: Vec<u8>| o.ingest(&f, &meta(&i, t, Direction::FromGuest));
+            let to = |t: u64, f: Vec<u8>| o.ingest(&f, &meta(&i, t, Direction::ToGuest));
+            from(1, tcp_v4(c, s, 100, 0, TCP_SYN, 65535, b""));
+            to(2, tcp_v4(s, c, 900, 101, TCP_SYN | TCP_ACK, 65535, b""));
+            from(3, tcp_v4(c, s, 101, 901, TCP_ACK, 65535, b""));
+            from(
+                4,
+                tcp_v4(c, s, 101, 901, TCP_ACK | TCP_PSH, 65535, &[9u8; 500]),
+            );
+            to(
+                5,
+                tcp_v4(s, c, 901, 601, TCP_ACK | TCP_PSH, 65535, &[8u8; 300]),
+            );
+            from(6, tcp_v4(c, s, 601, 1201, TCP_FIN | TCP_ACK, 65535, b""));
+            let mid = one(&o);
+            assert!(mid.active, "one FIN is not a close");
+            assert_eq!(
+                mid.tcp.as_ref().unwrap().state,
+                crate::health::TcpState::Closing
+            );
+            to(7, tcp_v4(s, c, 1201, 602, TCP_FIN | TCP_ACK, 65535, b""));
+            from(8, tcp_v4(c, s, 602, 1202, TCP_ACK, 65535, b""));
+            let f = one(&o);
+            assert!(!f.active, "{f:?}");
+            assert_eq!(f.close_reason, Some(CloseReason::Fin));
+            assert_eq!(
+                f.tcp.as_ref().unwrap().state,
+                crate::health::TcpState::Closed
+            );
+            assert!(f.bytes_s2c > 0 && f.bytes_c2s > f.bytes_s2c - 1);
+        }
+
+        #[test]
+        fn reset_closes_the_flow() {
+            let o = obs();
+            let i = id("vm-a");
+            let (c, s) = ((G, 40000), (S, 5201));
+            o.ingest(
+                &tcp_v4(c, s, 100, 0, TCP_SYN, 65535, b""),
+                &meta(&i, 1, Direction::FromGuest),
+            );
+            o.ingest(
+                &tcp_v4(s, c, 0, 101, TCP_RST | TCP_ACK, 0, b""),
+                &meta(&i, 2, Direction::ToGuest),
+            );
+            let f = one(&o);
+            assert!(!f.active);
+            assert_eq!(f.close_reason, Some(CloseReason::Reset));
+            assert_eq!(f.tcp.unwrap().reset_by, Some("server"));
+        }
+
+        /// A guest-to-guest connection through a switch-level tap: every frame is seen once, attributed to its
+        /// sender, and each VM must still get its own complete and correctly oriented view.
+        fn guest_to_guest(o: &Observer) -> usize {
+            let ia = Identity::new("vm-a", "net1", "private", MAC_A);
+            let ib = Identity::new("vm-b", "net1", "private", MAC_B);
+            let (ca, sb) = ((A, 60856), (B, 5201));
+            let mut n = 0;
+            let mut t = 1_000u64;
+            let mut send = |from: &Arc<Identity>, f: Vec<u8>| {
+                t += 10;
+                n += 1;
+                o.ingest(&f, &meta(from, t, Direction::FromGuest));
+            };
+            let a2b = |f: Vec<u8>| l2(f, MAC_B, MAC_A);
+            let b2a = |f: Vec<u8>| l2(f, MAC_A, MAC_B);
+            send(&ia, a2b(tcp_v4(ca, sb, 100, 0, TCP_SYN, 65535, b"")));
+            send(
+                &ib,
+                b2a(tcp_v4(sb, ca, 900, 101, TCP_SYN | TCP_ACK, 65535, b"")),
+            );
+            send(&ia, a2b(tcp_v4(ca, sb, 101, 901, TCP_ACK, 65535, b"")));
+            send(
+                &ia,
+                a2b(tcp_v4(
+                    ca,
+                    sb,
+                    101,
+                    901,
+                    TCP_ACK | TCP_PSH,
+                    65535,
+                    &[1u8; 1000],
+                )),
+            );
+            send(&ib, b2a(tcp_v4(sb, ca, 901, 1101, TCP_ACK, 65535, b"")));
+            send(
+                &ia,
+                a2b(tcp_v4(ca, sb, 1101, 901, TCP_FIN | TCP_ACK, 65535, b"")),
+            );
+            send(
+                &ib,
+                b2a(tcp_v4(sb, ca, 901, 1102, TCP_FIN | TCP_ACK, 65535, b"")),
+            );
+            send(&ia, a2b(tcp_v4(ca, sb, 1102, 902, TCP_ACK, 65535, b"")));
+            n
+        }
+
+        #[test]
+        fn guest_to_guest_gives_each_vm_its_own_correct_view() {
+            let o = obs();
+            let n = guest_to_guest(&o);
+            let a = view(&o, "vm-a");
+            let b = view(&o, "vm-b");
+            assert_eq!((a.client.port, a.server.port), (60856, 5201));
+            assert_eq!((b.client.port, b.server.port), (60856, 5201));
+            assert_eq!((a.direction, a.oriented), ("outbound", "observed"));
+            assert_eq!((b.direction, b.oriented), ("inbound", "observed"));
+            // vm-b is learned as a sender only with its SYN-ACK, so it never saw the SYN addressed to it: a
+            // guest's received frames are attributed once the observer has seen that guest send.
+            for (v, c2s) in [(&a, 5), (&b, 4)] {
+                assert_eq!((v.packets_c2s, v.packets_s2c), (c2s, 3), "{}", v.vm_id);
+                assert!(v.bytes_s2c > 0 && v.bytes_c2s > 1000);
+                assert!(!v.active, "{}: both FINs seen, so closed", v.vm_id);
+                assert_eq!(v.close_reason, Some(CloseReason::Fin));
+            }
+            // The observer-wide counters count each frame once.
+            assert_eq!(o.counters().frames, n as u64);
+            // Per-VM roll-ups: the client VM sees outbound traffic, the server VM inbound.
+            let s = o.summary(10_000);
+            assert!(
+                s.top_talkers
+                    .iter()
+                    .any(|r| r.vm_id == "vm-a" && r.direction == "outbound")
+            );
+            assert!(
+                s.top_talkers
+                    .iter()
+                    .any(|r| r.vm_id == "vm-b" && r.direction == "inbound")
+            );
+            assert!(
+                !s.top_talkers
+                    .iter()
+                    .any(|r| r.vm_id == "vm-b" && r.direction == "outbound")
+            );
+        }
+
+        #[test]
+        fn without_mirroring_each_vm_sees_only_what_it_sent() {
+            let o = Observer::new(ObserverConfig {
+                mirror_peer_views: false,
+                ..ObserverConfig::default()
+            });
+            guest_to_guest(&o);
+            let b = view(&o, "vm-b");
+            // Still oriented correctly from its own SYN-ACK, but it only ever sees its own half.
+            assert_eq!((b.direction, b.oriented), ("inbound", "observed"));
+            assert_eq!(b.packets_c2s, 0);
+            assert!(b.active);
+        }
     }
 }

@@ -33,6 +33,9 @@ pub struct FlowView {
     pub server: Endpoint,
     /// "outbound" when the guest opened the flow, "inbound" otherwise.
     pub direction: &'static str,
+    /// How client and server were decided: "observed" (TCP handshake segment), "first_packet" (UDP/ICMP) or
+    /// "guessed" (TCP first seen mid-stream, well-known/lower port heuristic).
+    pub oriented: &'static str,
     pub vlan: Option<u16>,
     pub first_seen_us: u64,
     pub last_seen_us: u64,
@@ -94,6 +97,7 @@ impl FlowView {
             } else {
                 "inbound"
             },
+            oriented: f.oriented.name(),
             vlan: f.vlan,
             first_seen_us: f.first_seen_us,
             last_seen_us: f.last_seen_us,
@@ -237,6 +241,7 @@ pub enum EventKind {
         client: Endpoint,
         server: Endpoint,
         direction: &'static str,
+        oriented: &'static str,
     },
     FlowUpdate {
         flow: Box<FlowView>,

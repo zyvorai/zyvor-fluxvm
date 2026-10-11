@@ -221,15 +221,82 @@ pub struct FlowL7 {
     pub quic: Option<Box<crate::quic::QuicFlow>>,
 }
 
+/// How sure the observer is about which endpoint of a flow is the client.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Orientation {
+    /// A TCP handshake segment decided it: a SYN without ACK is from the client, a SYN+ACK from the server.
+    Observed,
+    /// No handshake exists for the protocol (UDP, ICMP): the sender of the first packet seen is the client.
+    FirstPacket,
+    /// A TCP flow first seen mid-stream: the server is the endpoint with the well-known (else lower) port.
+    Guessed,
+}
+
+impl Orientation {
+    pub fn name(self) -> &'static str {
+        match self {
+            Orientation::Observed => "observed",
+            Orientation::FirstPacket => "first_packet",
+            Orientation::Guessed => "guessed",
+        }
+    }
+}
+
+/// Decides client and server for a new TCP flow from the first segment seen (`src` sent it).
+///
+/// * SYN without ACK: the sender is the client.
+/// * SYN with ACK: the sender is the server (the SYN predates the observation, or went the other way).
+/// * Anything else (first seen mid-stream): the server is the endpoint with the well-known port (below 1024),
+///   else the one outside the ephemeral range (32768 and up), else the lower port; equal ports fall back to the
+///   sender as client. This is a guess and is reported as [`Orientation::Guessed`].
+///
+/// Returns `(client, server, how)`.
+pub fn orient_tcp(
+    syn: bool,
+    ack: bool,
+    src: (IpAddr, u16),
+    dst: (IpAddr, u16),
+) -> ((IpAddr, u16), (IpAddr, u16), Orientation) {
+    match (syn, ack) {
+        (true, false) => (src, dst, Orientation::Observed),
+        (true, true) => (dst, src, Orientation::Observed),
+        _ => {
+            let src_is_server = if src.1 == dst.1 {
+                false
+            } else {
+                let wk = |p: u16| p < 1024;
+                let eph = |p: u16| p >= 32768;
+                match (wk(src.1), wk(dst.1)) {
+                    (true, false) => true,
+                    (false, true) => false,
+                    _ => match (eph(src.1), eph(dst.1)) {
+                        (false, true) => true,
+                        (true, false) => false,
+                        _ => src.1 < dst.1,
+                    },
+                }
+            };
+            if src_is_server {
+                (dst, src, Orientation::Guessed)
+            } else {
+                (src, dst, Orientation::Guessed)
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Flow {
     pub id: u64,
     pub identity: Arc<Identity>,
     pub proto: u8,
-    /// The endpoint that sent the first packet we saw.
+    /// The initiating endpoint: the sender of the SYN for TCP when the handshake was seen, otherwise see
+    /// [`Self::oriented`].
     pub client: (IpAddr, u16),
     pub server: (IpAddr, u16),
-    /// The guest sent the first packet we saw (the flow is outbound from the VM).
+    pub oriented: Orientation,
+    /// The guest is the client (the flow is outbound from the VM).
     pub guest_is_client: bool,
     pub vlan: Option<u16>,
     pub first_seen_us: u64,
@@ -472,6 +539,7 @@ mod tests {
             proto,
             client: ep(1, 1000),
             server: ep(2, 80),
+            oriented: Orientation::FirstPacket,
             guest_is_client: true,
             vlan: None,
             first_seen_us: now,
