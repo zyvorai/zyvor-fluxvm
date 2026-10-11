@@ -42,7 +42,10 @@ pub use runner::{
     ip_file, oci_meta_dir, read_guest_ip, release_mac, self_control_socket_path,
     set_self_control_socket, snapshot_dir, write_oci_meta_as,
 };
-pub use usage::{RunnerUsage, mach_ticks_to_seconds, runner_usage};
+pub use usage::{
+    RunnerUsage, VmUsage, attribute_services, is_vz_service_path, mach_ticks_to_seconds,
+    runner_usage, vm_usage,
+};
 pub use usb_passthrough::{physical_usb_attach, physical_usb_list};
 
 use anyhow::{Context, Result, bail};

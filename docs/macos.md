@@ -391,11 +391,21 @@ Verified on macOS 27.2 with a Debian 13 guest: a file changed after `self_snapsh
 
 ### Host-side accounting and memory pressure
 
-- Virtualization.framework reports nothing per VM, so FluxVM reads the runner process (one per VM) with `proc_pid_rusage`:
-  `fluxvm_apple::runner_usage(pid)` returns resident bytes and user/system CPU seconds. `/metrics` exposes them for running or
-  paused `vz` VMs as `fluxvm_vm_runner_rss_bytes{vm,name}` (gauge) and `fluxvm_vm_runner_cpu_seconds_total{vm,name}` (counter).
-  These are host-side numbers for the runner process (resident guest RAM included), not what the guest sees. The macOS reader was
-  run against the test process on macOS 27; the metrics path is unit-tested but not scraped against a live VM.
+- Virtualization.framework reports nothing per VM, and the runner process is not the guest: on macOS the guest's vCPUs and
+  memory live in a separate `com.apple.Virtualization.VirtualMachine` XPC service (parent launchd; its responsible pid is the
+  user's shell, so neither the parent pid nor `responsibility_get_pid_responsible_for_pid` links it to a runner). Measured on an
+  M4 with 2 vCPUs pinned: runner 0.0% CPU and 73 MB RSS against the service at 200% and 710 MB.
+- FluxVM therefore sums the runner and its service. The link is the open files, read with public libproc calls: the service
+  holds the VM's root disk and `efi.bin` open, and those live in the VM's own workspace, so
+  `fluxvm_apple::vm_usage(&[(runner_pid, workspace)])` lists the Virtualization service processes (`proc_listallpids`,
+  `proc_pidpath`, `PROC_PIDLISTFDS`, `PROC_PIDFDVNODEPATHINFO`) and attributes each to the workspace its files sit in (a service
+  matching two workspaces is attributed to none). `/metrics` exposes the result for running or paused `vz` VMs as
+  `fluxvm_vm_runner_rss_bytes{vm,name}` (gauge) and `fluxvm_vm_runner_cpu_seconds_total{vm,name}` (counter), plus
+  `fluxvm_vm_runner_service_attributed{vm,name}` (1 when the service is included, 0 when the numbers are the runner process
+  only and the guest's CPU and memory are not in them). The metric names keep the `runner` prefix for dashboard compatibility.
+  These are host-side numbers, not what the guest sees. Verified against a live Debian 13 guest (service pid found by its
+  open `root.raw`, 542 MB and 7 s CPU against the runner's 58 MB and 0.1 s). Not covered: a guest whose disk is not a file in
+  the workspace and has no `efi.bin` (it falls back to the runner only, flagged by the 0), and a different user's VMs.
 - Memory pressure was already wired before this change: `kern.memorystatus_vm_pressure_level` is sampled (normal, warn,
   critical; also `fluxvm_host_memory_pressure_level` in `/metrics`), and `fluxvm_scheduler::density::reclaim_after_secs` shortens
   the idle time before a sandbox's balloon is inflated to 60 s under warn or critical pressure. Normal pressure leaves the

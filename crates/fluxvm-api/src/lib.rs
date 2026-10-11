@@ -799,8 +799,9 @@ async fn metrics(State(m): State<Arc<VmManager>>) -> Response {
         .into_response()
 }
 
-/// `fluxvm_vm_runner_rss_bytes` / `fluxvm_vm_runner_cpu_seconds_total` for `vz` VMs: the runner process's resident size
-/// and CPU time, labelled by VM id and name. Empty when there are no samples.
+/// `fluxvm_vm_runner_rss_bytes` / `fluxvm_vm_runner_cpu_seconds_total` for `vz` VMs: resident size and CPU time of the
+/// runner process plus its Virtualization XPC service when that could be attributed (`fluxvm_vm_runner_service_attributed`
+/// says which), labelled by VM id and name. Empty when there are no samples.
 fn render_runner_usage(samples: &[fluxvm_scheduler::vz_devices::VmRunnerUsage]) -> String {
     if samples.is_empty() {
         return String::new();
@@ -812,7 +813,7 @@ fn render_runner_usage(samples: &[fluxvm_scheduler::vz_devices::VmRunnerUsage]) 
     }
     let mut out = String::new();
     out.push_str(
-        "# HELP fluxvm_vm_runner_rss_bytes Resident memory of a vz VM's runner process, bytes (host-side; includes resident guest RAM).\n",
+        "# HELP fluxvm_vm_runner_rss_bytes Resident memory of a vz VM: its runner process plus, when fluxvm_vm_runner_service_attributed is 1, the Virtualization XPC service that runs the guest. With 0 it is the runner process only and the guest's memory is not included.\n",
     );
     out.push_str("# TYPE fluxvm_vm_runner_rss_bytes gauge\n");
     for s in samples {
@@ -824,7 +825,7 @@ fn render_runner_usage(samples: &[fluxvm_scheduler::vz_devices::VmRunnerUsage]) 
         ));
     }
     out.push_str(
-        "# HELP fluxvm_vm_runner_cpu_seconds_total CPU time (user + system) of a vz VM's runner process, seconds.\n",
+        "# HELP fluxvm_vm_runner_cpu_seconds_total CPU time (user + system) of a vz VM: its runner process plus, when fluxvm_vm_runner_service_attributed is 1, the Virtualization XPC service that runs the guest. With 0 it is the runner process only and the guest's CPU is not included.\n",
     );
     out.push_str("# TYPE fluxvm_vm_runner_cpu_seconds_total counter\n");
     for s in samples {
@@ -833,6 +834,18 @@ fn render_runner_usage(samples: &[fluxvm_scheduler::vz_devices::VmRunnerUsage]) 
             s.vm_id,
             esc(&s.name),
             s.cpu_seconds
+        ));
+    }
+    out.push_str(
+        "# HELP fluxvm_vm_runner_service_attributed 1 when the two series above include the Virtualization XPC service that runs the guest, 0 when they are the runner process only.\n",
+    );
+    out.push_str("# TYPE fluxvm_vm_runner_service_attributed gauge\n");
+    for s in samples {
+        out.push_str(&format!(
+            "fluxvm_vm_runner_service_attributed{{vm=\"{}\",name=\"{}\"}} {}\n",
+            s.vm_id,
+            esc(&s.name),
+            u8::from(s.service_attributed)
         ));
     }
     out
@@ -4918,7 +4931,10 @@ mod tests {
             name: "a\"b".into(),
             rss_bytes: 1_073_741_824,
             cpu_seconds: 12.3456,
+            service_attributed: true,
         }]);
+        assert!(out.contains("fluxvm_vm_runner_service_attributed{vm=\"00000000-0000-0000-0000-000000000000\",name=\"a\\\"b\"} 1\n"));
+        assert!(out.contains("the runner process only and the guest's CPU is not included"));
         assert!(out.contains("# TYPE fluxvm_vm_runner_rss_bytes gauge\n"));
         assert!(out.contains("# TYPE fluxvm_vm_runner_cpu_seconds_total counter\n"));
         assert!(out.contains(&format!(
