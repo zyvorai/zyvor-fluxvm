@@ -25,6 +25,24 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
+/// Builds the daemon's observer, installs it as the process-wide one the routes read and starts the pump that drains
+/// the process-wide tap. Returns the pump handle (keep it for the daemon's lifetime), or `None` when disabled by
+/// `netobs.enabled = false` / `FLUXVM_NETOBS=0`, or when an observer is already installed.
+pub fn install_netobs(cfg: &fluxvm_core::config::Config) -> Option<fluxvm_netobs::PumpHandle> {
+    if !cfg.netobs.effective_enabled() {
+        tracing::info!("network observability disabled");
+        return None;
+    }
+    let obs = Arc::new(Observer::new(Default::default()));
+    if !fluxvm_netobs::install_global(obs.clone()) {
+        return None;
+    }
+    let (tap, rx) = fluxvm_netobs::NetTap::new(cfg.netobs.queue_frames, cfg.netobs.snaplen);
+    fluxvm_netobs::install_global_tap(tap);
+    tracing::info!("network observability enabled");
+    Some(fluxvm_netobs::spawn_pump(obs, rx))
+}
+
 fn observer() -> Option<Arc<Observer>> {
     fluxvm_netobs::global()
 }

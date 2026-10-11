@@ -174,6 +174,18 @@ impl Drop for PumpHandle {
     }
 }
 
+static GLOBAL_TAP: std::sync::OnceLock<NetTap> = std::sync::OnceLock::new();
+
+/// Publishes the process-wide tap that in-process datapaths feed (the daemon's pump drains it). False if already set.
+pub fn install_global_tap(tap: NetTap) -> bool {
+    GLOBAL_TAP.set(tap).is_ok()
+}
+
+/// The process-wide tap, if the daemon installed one.
+pub fn global_tap() -> Option<NetTap> {
+    GLOBAL_TAP.get().cloned()
+}
+
 /// Moves frames from `rx` into `obs` on a dedicated thread, and ages flows while the tap is idle.
 pub fn spawn_pump(obs: Arc<Observer>, rx: TapReceiver) -> PumpHandle {
     obs.set_tap_stats(rx.stats());

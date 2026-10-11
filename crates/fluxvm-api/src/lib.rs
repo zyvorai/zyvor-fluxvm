@@ -39,6 +39,7 @@ mod rate_limit;
 #[cfg(target_os = "macos")]
 pub mod self_control;
 mod netobs_api;
+pub use netobs_api::install_netobs;
 mod speculate_api;
 mod vz_api;
 
@@ -5579,6 +5580,27 @@ mod tests {
             if cfg!(target_os = "macos") {
                 assert!(body.contains("\nfluxvm_host_memory_pressure_level "));
                 assert!(body.contains("\nfluxvm_host_mem_available_mib "));
+            }
+        }
+
+        #[tokio::test]
+        async fn daemon_install_enables_netobs_summary() {
+            let cfg = fluxvm_core::config::Config::default();
+            // Another test may have installed the observer first; either way it is installed afterwards.
+            let pump = install_netobs(&cfg);
+            assert!(fluxvm_netobs::global().is_some());
+            let (st, body) = call(
+                router(manager(density_tokens())),
+                "GET",
+                "/v1/netobs/summary",
+                "ops",
+                None,
+            )
+            .await;
+            assert_eq!(st, StatusCode::OK, "{body}");
+            assert!(body.contains("\"enabled\":true"), "{body}");
+            if pump.is_some() {
+                assert!(fluxvm_netobs::global_tap().is_some(), "the install published its tap");
             }
         }
 

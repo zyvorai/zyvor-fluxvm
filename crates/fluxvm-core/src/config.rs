@@ -75,6 +75,42 @@ pub struct Config {
     /// `vz` backend settings (macOS): OCI sandbox boot artifacts and registry access.
     #[serde(default)]
     pub apple: AppleConfig,
+    /// Guest-network observability (`/v1/netobs/*`).
+    #[serde(default)]
+    pub netobs: NetobsConfig,
+}
+
+/// Guest-network observability: the daemon-wide flow/DNS observer behind `/v1/netobs/*`.
+/// `FLUXVM_NETOBS=0` (or `off`/`false`) disables it regardless of `enabled`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct NetobsConfig {
+    pub enabled: bool,
+    /// Frames queued between datapaths and the observer before new ones are dropped (and counted).
+    pub queue_frames: usize,
+    /// Bytes of each frame the observer sees.
+    pub snaplen: usize,
+}
+
+impl Default for NetobsConfig {
+    fn default() -> Self {
+        Self { enabled: true, queue_frames: 4096, snaplen: 2048 }
+    }
+}
+
+impl NetobsConfig {
+    /// `enabled`, unless the `FLUXVM_NETOBS` environment variable switches it off.
+    pub fn effective_enabled(&self) -> bool {
+        self.enabled_with_env(std::env::var("FLUXVM_NETOBS").ok().as_deref())
+    }
+
+    pub fn enabled_with_env(&self, env: Option<&str>) -> bool {
+        let off = matches!(
+            env.map(|v| v.trim().to_ascii_lowercase()).as_deref(),
+            Some("0" | "off" | "false" | "no" | "disabled")
+        );
+        self.enabled && !off
+    }
 }
 
 /// `vz` backend settings. See `docs/oci-sandboxes.md`.
@@ -190,6 +226,7 @@ impl Default for Config {
             sandbox: SandboxConfig::default(),
             fluxvm_engine: FluxVmEngine::default(),
             security: SecurityConfig::default(),
+            netobs: NetobsConfig::default(),
             apple: AppleConfig::default(),
         }
     }
@@ -1148,5 +1185,21 @@ mod primary_dataplane_tests {
         let cilium: Config = toml::from_str("[sandbox.dataplane]\nmode = \"cilium\"").unwrap();
         assert_eq!(cilium.sandbox.dataplane.mode, DataplaneMode::Cilium);
         assert!(cilium.sandbox.dataplane.required);
+    }
+}
+
+#[cfg(test)]
+mod netobs_config_tests {
+    use super::NetobsConfig;
+
+    #[test]
+    fn env_can_only_switch_observability_off() {
+        let on = NetobsConfig::default();
+        assert!(on.enabled_with_env(None));
+        assert!(on.enabled_with_env(Some("1")));
+        assert!(!on.enabled_with_env(Some("0")));
+        assert!(!on.enabled_with_env(Some(" Off ")));
+        let off = NetobsConfig { enabled: false, ..Default::default() };
+        assert!(!off.enabled_with_env(Some("1")));
     }
 }
