@@ -2277,6 +2277,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "fluxvm-blockd"
+version = "0.3.0"
+dependencies = [
+ "anyhow",
+ "libc",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "fluxvm-cgroup"
 version = "0.3.0"
 dependencies = [
