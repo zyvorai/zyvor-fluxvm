@@ -781,8 +781,10 @@ impl Engine {
         v
     }
 
+    /// The guest's MAC: the pinned `cfg.guest_mac` when set (the daemon always pins it), else the one learned from its
+    /// first frame. Only before either is known does a frame go to the broadcast address.
     fn guest_dst_mac(&self) -> Mac {
-        self.guest_mac.unwrap_or(BROADCAST)
+        self.cfg.guest_mac.or(self.guest_mac).unwrap_or(BROADCAST)
     }
 
     /// Send an IP packet to the guest. IPv4 packets over the MTU are fragmented when `df` is false and dropped

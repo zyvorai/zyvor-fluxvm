@@ -118,9 +118,15 @@ impl Export {
         self.limiter = Some(Arc::new(l));
         self
     }
+    /// Read-only by request, or because the backend can no longer be written (a frozen overlay). Evaluated per
+    /// connection and per command, so branching an overlay that is being served takes effect at once.
+    fn is_read_only(&self) -> bool {
+        self.read_only || self.backend.is_read_only()
+    }
+
     fn flags(&self) -> u16 {
         let mut f = FLAG_HAS_FLAGS | FLAG_SEND_FLUSH | FLAG_SEND_FUA | FLAG_SEND_DF;
-        if self.read_only {
+        if self.is_read_only() {
             f |= FLAG_READ_ONLY;
         } else {
             f |= FLAG_SEND_TRIM | FLAG_SEND_WRITE_ZEROES;
@@ -471,7 +477,7 @@ async fn request_loop(
                 }
                 let mut data = vec![0u8; len as usize];
                 rd.read_exact(&mut data).await?;
-                if e.read_only {
+                if e.is_read_only() {
                     send(simple_frame(EPERM, handle, &[])).await;
                     continue;
                 }
@@ -498,7 +504,7 @@ async fn request_loop(
                 });
             }
             CMD_TRIM | CMD_WRITE_ZEROES => {
-                if e.read_only {
+                if e.is_read_only() {
                     send(simple_frame(EPERM, handle, &[])).await;
                     continue;
                 }

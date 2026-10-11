@@ -642,6 +642,41 @@ async fn tcp_nat_echo_bulk_and_close() {
     assert_eq!(close.bytes_rx, 100_005);
 }
 
+/// The daemon always pins the guest MAC (`UserNetConfig::guest_mac`); a frame the gateway originates must then be
+/// unicast to it. Addressed to broadcast, a Linux guest classifies the segment as non-host traffic and drops it, so
+/// every TCP connection and forward silently times out (found booting a real Debian guest).
+#[tokio::test]
+async fn pinned_guest_mac_addresses_gateway_frames_to_the_guest() {
+    let port = tcp_echo_server().await;
+    let mut cfg = cfg_allow_loopback();
+    cfg.guest_mac = Some(GMAC);
+    let r = start(cfg);
+    let remote = IpAddr::from(Ipv4Addr::LOCALHOST);
+    r.guest
+        .send_tcp(
+            remote,
+            40100,
+            port,
+            TcpOut {
+                seq: 100,
+                flags: SYN,
+                window: 65535,
+                mss: Some(1460),
+                ..Default::default()
+            },
+        )
+        .await;
+    let dst = r
+        .guest
+        .recv_where("SYN-ACK", |f| {
+            as_tcp(f)
+                .filter(|s| s.src == remote && s.sport == port && s.dport == 40100)
+                .map(|_| f[0..6].to_vec())
+        })
+        .await;
+    assert_eq!(dst, GMAC.to_vec(), "TCP to the guest must not be sent to the broadcast address");
+}
+
 #[tokio::test]
 async fn tcp_connect_refused_resets_guest() {
     let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();

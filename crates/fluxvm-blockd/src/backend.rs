@@ -25,6 +25,11 @@ pub trait BlockBackend: Send + Sync {
     fn trim(&self, off: u64, len: u64) -> io::Result<()> {
         self.write_zeroes(off, len)
     }
+    /// True when the backend can no longer accept writes (a frozen overlay that has children, a read-only lazy
+    /// base). An export of it is then served read-only, so the guest sees a read-only disk instead of EIO.
+    fn is_read_only(&self) -> bool {
+        false
+    }
 }
 
 pub(crate) fn oob() -> io::Error {

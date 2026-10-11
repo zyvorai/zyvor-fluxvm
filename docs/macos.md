@@ -103,7 +103,7 @@ to the VM log, and records the guest's NAT address.
   non-raw disks. A failed injection also keeps the cloud-init copy. Keys are injected only when `cloud_init.user` is explicitly `root` (then the cloud-init copy is dropped once every key is on the
   disk). With the user unset or any other account the keys belong to that account, so nothing is written to root's file: the offline
   writer can only touch root's `authorized_keys`, and writing them there would grant a root login that cloud-init alone does not. **Unverified on hardware:** unit-tested decision logic and an
-  ext4 round trip in `fluxvm-diskinject`; not exercised through a booted guest.
+  ext4 round trip in `fluxvm-diskinject`; booted once on Debian 13 with a clean ext4 (see the hardware log).
 - **Guest address:** macOS offers no usable DHCP-lease or ARP view to a spawned process, so FluxVM adds a small systemd
   service to the cloud-init (when a `cloud_init` is given) that prints `VELORA-IP <addr>` on the serial console; the runner
   parses it and `GET /v1/vms/{id}` reports it as `guest_ip`. It also turns off OpenSSH's per-source penalties inside the
@@ -519,7 +519,7 @@ A Linux guest takes extra disks in `apple.extra_disks`, or with `fluxctl disk at
 
 | Field | Values |
 |-------|--------|
-| `kind` | `image` (a raw file, default), `block` (a host device, `/dev/diskN`), `nbd` (an NBD export in `url`), `overlay` (copy-on-write overlay on a base image, see below; **UNVERIFIED**) |
+| `kind` | `image` (a raw file, default), `block` (a host device, `/dev/diskN`), `nbd` (an NBD export in `url`), `overlay` (copy-on-write overlay on a base image, see below; verified once on an Apple M4, see the hardware log) |
 | `caching` | `automatic` (default), `cached`, `uncached`; image files only |
 | `sync` | `full` (default), `fsync` (image files only), `none` (fastest; data can be lost if the host crashes) |
 | `controller` | `virtio` (default, `/dev/vdX`), `nvme` (`/dev/nvmeXn1`), `usb` (`/dev/sdX`) |
@@ -529,7 +529,7 @@ A Linux guest takes extra disks in `apple.extra_disks`, or with `fluxctl disk at
   `policy.allowed_image_dirs` check as QEMU data disks.
 - NBD URLs are `nbd://host:port/export`, `nbds://…` (TLS), or `nbd+unix:///export?socket=/path`. Virtualization.framework
   reconnects when the server drops; a missing server fails the VM's start.
-- `overlay` (**UNVERIFIED** against Virtualization.framework's NBD client): `{"kind": "overlay", "path": "/images/base.raw",
+- `overlay` (verified once against Virtualization.framework's NBD client, see the hardware log): `{"kind": "overlay", "path": "/images/base.raw",
   "overlay": "/images/vm1.ovl", "read_only": false, "iops": 500, "bps": 10485760}` serves `overlay` (created on top of `path` when
   missing; `path` is never written) through a `fluxvm-blockd serve` the daemon starts on 127.0.0.1 with an ephemeral port before the
   runner and stops when the runner exits. The runner sees an ordinary `nbd` disk (`nbd://127.0.0.1:<port>/<disk name>`), so the
@@ -572,7 +572,7 @@ These compile against the macOS 27 SDK and are validated at admission. Except fo
   network's fingerprint includes them. Each runner owns its network unless the VMs name it: `vmnet.name` (macOS 26+) makes them share one network through the `fluxvm-vmnetd` broker over XPC
   ([VMNET_BROKER.md](VMNET_BROKER.md)). **Not verified:** on the test Mac the ad-hoc signed broker was killed at launch (SIP on, `com.apple.vm.networking`), so two runners on one name have not run; with no broker a named VM fails with "vmnetd XPC connection failed". Exclusive with `bridge_interface`. IP discovery and the 127.0.0.1 `network.forwards`
   relay read the NAT lease file, so use `vmnet.forwards` instead.
-- **Userspace gateway (`apple.usernet`, Linux guests, UNVERIFIED on hardware):** replaces the NAT card with a file-handle NIC whose
+- **Userspace gateway (`apple.usernet`, Linux guests, PARTLY verified on hardware, see the hardware log):** replaces the NAT card with a file-handle NIC whose
   peer is a supervised `fluxvm-usernet` process (ARP, DHCP `10.0.2.15/24`, DNS forwarder, TCP/UDP NAT, egress policy, port forwards).
   Spec: `"usernet": {"allow_cidrs": ["93.184.216.0/24"], "deny_cidrs": [], "allow_ports": [], "deny_ports": [25],
   "dns_allow": ["example.com"], "dns_deny": [], "allow_private": false, "mtu": 1500,
@@ -656,17 +656,31 @@ These compile against the macOS 27 SDK and are validated at admission. Except fo
 | shared folders (virtiofs), VM snapshots (memory + disk, Linux and macOS guests), pause / resume, graceful shutdown, force stop, EFI Secure Boot (macOS 27+, Linux) | TPM, confidential profiles |
 | guest agent over vsock (proxied like Firecracker; needs the agent in the image) | hotplug of CPU, memory and NICs; cdroms; firmware overrides |
 | macOS guests (installed from an IPSW through the API or by hand, then cloned; see above) | live migration, in-place restore of a running VM, direct kernel boot of macOS guests |
-| `apple.usernet` userspace gateway for Linux guests (egress/DNS policy, UDP/TCP forwards, netobs frames; **unverified on hardware**) | |
+| `apple.usernet` userspace gateway for Linux guests (egress/DNS policy, UDP/TCP forwards, netobs frames; DHCP, DNS, ICMP, IPv6 SLAAC and deny verdicts verified on hardware, **TCP and forwards not yet re-verified after a fix**) | |
 | network observability: `/v1/netobs/*`, `fluxctl netobs`, `/metrics` series, private-network switches bridged into the daemon (see [netobs.md](netobs.md); unit/integration tested with synthetic frames, **unverified with live guest traffic**) | packet payload retention without an explicit, filtered, expiring capture |
 | `POST /v1/vms/{id}/vz/display` and `fluxctl vz display resize` (**unverified on hardware**; guest driver permitting, macOS 14+) | |
 | `GET /v1/vms/{id}/vz/attestation` and `fluxctl vz attestation verify`: signed boot manifest, host claim only (**not exercised on a booted VM**) | hardware attestation, TPM, measured boot |
-| offline agent-token and SSH-key injection into a private raw root disk (**unverified on a booted guest**) | injection into a running VM's disk, qcow2, shared storage, or another user's `authorized_keys` |
+| offline agent-token and SSH-key injection into a private raw root disk (token injection verified on a booted Debian 13 guest; SSH-key injection **unverified on a booted guest**) | injection into a running VM's disk, qcow2, shared storage, or another user's `authorized_keys` |
 | overlay disk exclusivity across VM records (create, attach, start) | protecting an overlay file from processes outside FluxVM |
 | `apple.macos_vsock` for macOS guests: vsock device plus a LaunchDaemon agent (**experimental, unverified**; SSH remains the fallback) | exec policies in macOS guests (Landlock/seccomp are Linux-only) |
-| extra disks (image, block device, NBD, blockd overlay (**unverified**); virtio, NVMe, USB), USB disk hot-attach and detach, private networks, console ports, bridged and vmnet networking, balloon, Rosetta, display, audio | (vmnet forwards may be UDP; NAT forwards are TCP only) |
+| extra disks (image, block device, NBD, blockd overlay (verified once on hardware); virtio, NVMe, USB), USB disk hot-attach and detach, private networks, console ports, bridged and vmnet networking, balloon, Rosetta, display, audio | (vmnet forwards may be UDP; NAT forwards are TCP only) |
 
 The same table is encoded in `fluxvm_apple::CAPABILITIES`; unsupported requests are refused with a specific message before any
 process starts.
+
+## Hardware verification log
+
+What has actually been run, and what has not. One Apple M4, macOS 27.2, 16 GiB, Debian 13 arm64 cloud image (kernel
+6.12.111), VMs launched through `fluxctl serve`, 2026-10-11. Anything not listed here is still unverified on hardware.
+
+| Item | Result |
+| --- | --- |
+| Offline token injection (`fluxvm-diskinject`) | **Verified.** The seed ISO carried no token, `/etc/fluxvm-guest-agent.token` was on the disk (0600, root), the guest booted in about 25 s with a clean `tune2fs` state and no ext4 errors across two boots, and with the agent installed it answered `ping`/`exec` over vsock with that token and refused a wrong one. The image had no SELinux; AppArmor was enabled and did not interfere. The SSH key stayed in cloud-init because `cloud_init.user` was not `root`, as designed. |
+| `overlay` extra disk against VZ's NBD client | **Verified.** The runner logged `nbd-connected`; the guest saw a 256 MiB `virtio_blk` disk; a 32 MiB random write read back with the same sha256 (also after `drop_caches`); the disk's sha256 was identical across stop and start; the base file stayed byte-identical; `fluxvm-blockd branch` worked. |
+| Frozen overlay as an attached disk | Found: served as writable, so guest writes got EIO. Fixed: an export of a frozen overlay is now read-only (flag and `EPERM`). The fix is covered by an in-tree protocol test and not re-run on hardware. |
+| `apple.usernet`: DHCP, ARP, ping gateway, DNS forwarding and `dns_deny`, ICMP deny, IPv6 SLAAC, netobs flows with `denied` verdicts | **Verified.** The lease was 10.0.2.15/24; denied DNS, ICMP and TCP-port flows appeared in `/v1/netobs/flows` with their reason. |
+| `apple.usernet`: TCP, host-to-guest forwards | **Failed on hardware, fixed in-tree, not yet re-verified.** The gateway addressed TCP to `ff:ff:ff:ff:ff:ff` whenever the guest MAC was pinned (which the daemon always does), so Linux dropped every segment. The fix and a regression test are in the tree. |
+| macOS guest vsock (`apple.macos_vsock`) | **Not run.** Needs an installed macOS guest and about 45 GB of free disk. |
 
 ## Honest limits
 

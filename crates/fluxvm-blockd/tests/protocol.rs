@@ -230,6 +230,31 @@ async fn cow_export_over_nbd_with_branch() {
     assert_eq!(b.size(), 1 << 20);
 }
 
+/// A frozen overlay (it has a child) cannot take writes; exporting it must say so (read-only flag, EPERM) rather than
+/// advertise a writable disk whose writes fail with EIO inside the guest (found booting a real Debian guest).
+#[tokio::test]
+async fn frozen_overlay_is_exported_read_only_without_asking() {
+    let d = tempfile::tempdir().unwrap();
+    let base = d.path().join("base.img");
+    std::fs::write(&base, vec![0xABu8; 1 << 20]).unwrap();
+    let a = CowBackend::create(&d.path().join("a.ovl"), &base, None).unwrap();
+    let addr = start(vec![Export::new("a", a.clone())]).await;
+
+    // Writable while it has no children.
+    let mut c = Client::connect(addr).await;
+    let (_, flags) = c.go("a").await.unwrap();
+    assert!(flags & FLAG_READ_ONLY == 0);
+    assert_eq!(c.write(0, b"x").await, 0);
+
+    // Branching freezes it: the same export now advertises and enforces read-only.
+    let _b = a.branch(&d.path().join("b.ovl")).unwrap();
+    assert_eq!(c.write(0, b"y").await, EPERM, "an open connection sees the freeze at once");
+    let mut c2 = Client::connect(addr).await;
+    let (_, flags) = c2.go("a").await.unwrap();
+    assert!(flags & FLAG_READ_ONLY != 0, "new connections get the read-only flag");
+    assert_eq!(c2.read(0, 1).await.unwrap(), b"x");
+}
+
 #[tokio::test]
 async fn limiter_throttles_over_the_wire() {
     let d = tempfile::tempdir().unwrap();
