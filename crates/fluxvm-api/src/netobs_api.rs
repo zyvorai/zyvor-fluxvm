@@ -181,7 +181,7 @@ pub(crate) async fn stream(
             since = next;
             if events.is_empty() {
                 idle += 1;
-                if idle % 20 == 0 {
+                if idle.is_multiple_of(20) {
                     yield Ok(bytes::Bytes::from_static(b": keepalive\n\n"));
                 }
             } else {
