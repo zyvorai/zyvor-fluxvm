@@ -5796,6 +5796,72 @@ mod tests {
         }
 
         #[tokio::test]
+        async fn vz_attestation_is_tenant_scoped_and_served_with_the_host_key() {
+            let m = manager(tenant_tokens());
+            let ws = tempfile::tempdir().unwrap();
+            let mut vm = fixture(BackendKind::Vz, VmStatus::Stopped, false);
+            vm.request.tenant = Some("acme".into());
+            vm.workspace = ws.path().to_path_buf();
+            let id = vm.id;
+            m.store.insert(vm).await.unwrap();
+            let mut qemu = fixture(BackendKind::Qemu, VmStatus::Stopped, false);
+            qemu.request.tenant = Some("acme".into());
+            let qemu_id = qemu.id;
+            m.store.insert(qemu).await.unwrap();
+            let uri = format!("/v1/vms/{id}/vz/attestation");
+
+            // Not launched yet: nothing to serve.
+            let (st, body) = call(router(m.clone()), "GET", &uri, "acme", None).await;
+            assert_eq!(st, StatusCode::BAD_REQUEST);
+            assert!(body.contains("no attestation recorded"), "{body}");
+
+            // What a launch records: the attestation object, and the daemon's public key under state_dir.
+            let payload = json!({
+                "version": 1, "claim": "host-asserted", "vm_id": id.to_string(), "issued_at_unix": 7,
+                "kernel": null, "initrd": null, "cmdline_sha256": null,
+                "root_disk": {"path": "/r", "size": 1, "mtime_unix": null, "digest": "00"},
+                "runner": {"path": "/x", "size": 1, "mtime_unix": null, "digest": "11"},
+                "apple_spec_sha256": "22",
+            })
+            .to_string();
+            let pk = "ab".repeat(32);
+            std::fs::write(
+                ws.path().join("vz-attestation.json"),
+                json!({"alg": "ed25519", "payload": payload, "signature": "cd".repeat(64), "public_key": pk})
+                    .to_string(),
+            )
+            .unwrap();
+            std::fs::create_dir_all(&m.cfg.state_dir).unwrap();
+            std::fs::write(
+                m.cfg.state_dir.join("vz-attestation.pub"),
+                format!("{pk}\n"),
+            )
+            .unwrap();
+
+            let (st, body) = call(router(m.clone()), "GET", &uri, "acme", None).await;
+            assert_eq!(st, StatusCode::OK, "{body}");
+            let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+            assert_eq!(v["public_key"], pk);
+            assert_eq!(v["manifest"]["vm_id"], id.to_string());
+            assert_eq!(v["attestation"]["alg"], "ed25519");
+            assert!(v["claim"].as_str().unwrap().contains("not by hardware"));
+
+            // Another tenant sees no such VM; a non-vz VM has no attestation.
+            let (st, _) = call(router(m.clone()), "GET", &uri, "other", None).await;
+            assert_eq!(st, StatusCode::NOT_FOUND);
+            let (st, body) = call(
+                router(m),
+                "GET",
+                &format!("/v1/vms/{qemu_id}/vz/attestation"),
+                "acme",
+                None,
+            )
+            .await;
+            assert_eq!(st, StatusCode::BAD_REQUEST);
+            assert!(body.contains("vz backend"), "{body}");
+        }
+
+        #[tokio::test]
         async fn procbox_create_is_403_until_an_operator_enables_it() {
             let app = router(procbox_manager(tenant_tokens(), false));
             let (st, body) = call(

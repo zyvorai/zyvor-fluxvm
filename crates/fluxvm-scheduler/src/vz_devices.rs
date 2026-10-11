@@ -96,6 +96,16 @@ impl VmManager {
         Ok(())
     }
 
+    /// The signed boot attestation of the VM's last launch with the host public key, for an out-of-band verifier. A host
+    /// claim, not hardware attestation (see `fluxvm_apple::attest`). Available in any state once the VM has launched.
+    pub async fn vz_attestation(&self, id: Uuid) -> Result<Value> {
+        let vm = self.get(id).await?;
+        if vm.backend != BackendKind::Vz {
+            bail!("this is a vz backend feature");
+        }
+        fluxvm_apple::attest::delivery(&id.to_string(), &vm.workspace, &self.cfg.state_dir)
+    }
+
     /// Host USB accessories the user has granted to FluxVMUSBAccess.app.
     pub async fn vz_usb_physical_list(&self, id: Uuid) -> Result<Vec<Value>> {
         fluxvm_apple::physical_usb_list(&self.vz_running_vm(id).await?).await

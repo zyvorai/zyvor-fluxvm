@@ -264,8 +264,15 @@ impl VmBackend for AppleBackend {
                 )
                 .await
                 {
-                    Ok(with) => with,
+                    Ok(with) => {
+                        // Kept for `GET /v1/vms/{id}/vz/attestation`; failing to keep it does not block the boot.
+                        if let Err(e) = attest::persist(&ctx.workspace, &with) {
+                            tracing::warn!(vm = %ctx.id, error = %e, "boot attestation not recorded");
+                        }
+                        with
+                    }
                     Err(e) => {
+                        attest::clear(&ctx.workspace);
                         tracing::warn!(vm = %ctx.id, error = %e, "boot attestation not produced");
                         meta
                     }

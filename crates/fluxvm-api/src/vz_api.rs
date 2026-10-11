@@ -9,6 +9,7 @@
 //! * `GET  /v1/vms/{id}/vz/secure-boot`
 //! * `GET  /v1/vms/{id}/vz/custom-virtio`
 //! * `POST /v1/vms/{id}/vz/display`
+//! * `GET  /v1/vms/{id}/vz/attestation`
 //! * `POST /v1/vms/{id}/vz/custom-virtio/reset`
 //! * `GET  /v1/vms/{id}/vz/usb`
 //! * `GET|POST /v1/vms/{id}/vz/usb/physical`
@@ -38,6 +39,7 @@ pub(crate) fn routes() -> Router<Arc<VmManager>> {
             post(custom_virtio_reset),
         )
         .route("/v1/vms/{id}/vz/display", post(display_resize))
+        .route("/v1/vms/{id}/vz/attestation", get(attestation))
         .route("/v1/vms/{id}/vz/usb", get(usb_list))
         .route(
             "/v1/vms/{id}/vz/usb/physical",
@@ -77,6 +79,15 @@ async fn custom_virtio_reset(
     require_admin(role)?;
     m.vz_custom_virtio_reset(id).await?;
     Ok(Json(json!({"ok": true})))
+}
+
+/// The signed boot manifest of the VM's last launch and the host public key (hex), for an out-of-band verifier. Read-only;
+/// the tenant guard scopes `{id}`. A host claim, not hardware attestation.
+async fn attestation(
+    State(m): State<Arc<VmManager>>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<Value>> {
+    Ok(Json(m.vz_attestation(id).await?))
 }
 
 #[derive(Deserialize)]

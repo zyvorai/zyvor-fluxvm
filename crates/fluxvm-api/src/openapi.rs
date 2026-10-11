@@ -246,6 +246,12 @@ fn ops() -> Vec<Op> {
             VMS,
         )
         .body("VzDisplayResize"),
+        op(
+            "get",
+            "/v1/vms/{id}/vz/attestation",
+            "Signed boot manifest of the vz guest's last launch and the host public key (a host claim, not hardware attestation)",
+            VMS,
+        ),
         op("get", "/v1/events", "Lifecycle events", EVENTS)
             .returns("EventList")
             .query(&[

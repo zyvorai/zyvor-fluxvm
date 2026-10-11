@@ -298,6 +298,79 @@ pub fn with_attestation(metadata_json: &str, att: &Attestation) -> Result<String
     Ok(doc.to_string())
 }
 
+/// File in a VM's workspace holding the attestation its last launch produced.
+pub const DELIVERY_FILE: &str = "vz-attestation.json";
+
+/// Keeps the `attestation` object of `metadata_json` in `workspace` so the API can hand it to an out-of-band verifier.
+pub fn persist(workspace: &Path, metadata_json: &str) -> Result<()> {
+    let doc: serde_json::Value =
+        serde_json::from_str(metadata_json).context("metadata document is not JSON")?;
+    let att = doc
+        .get("attestation")
+        .context("metadata document has no attestation")?;
+    let path = workspace.join(DELIVERY_FILE);
+    let tmp = workspace.join(format!("{DELIVERY_FILE}.tmp"));
+    fs::write(&tmp, serde_json::to_vec_pretty(att)?)
+        .with_context(|| format!("writing {}", tmp.display()))?;
+    fs::rename(&tmp, &path).with_context(|| format!("writing {}", path.display()))
+}
+
+/// Forgets a previous launch's attestation (this launch produced none), so a stale one is never served.
+pub fn clear(workspace: &Path) {
+    let _ = fs::remove_file(workspace.join(DELIVERY_FILE));
+}
+
+/// The daemon's attestation public key (hex), read from `vz-attestation.pub` or derived from the key file. Never creates one.
+pub fn host_public_key_hex(state_dir: &Path) -> Result<String> {
+    if let Ok(text) = fs::read_to_string(state_dir.join(PUB_FILE)) {
+        let t = text.trim();
+        if unhex(t).is_ok_and(|b| b.len() == 32) {
+            return Ok(t.to_string());
+        }
+    }
+    let text = fs::read_to_string(state_dir.join(KEY_FILE))
+        .context("this host has not produced an attestation key yet")?;
+    let seed: [u8; 32] = unhex(text.trim())?
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("{KEY_FILE} must hold a 32-byte hex seed"))?;
+    Ok(hex(SigningKey::from_bytes(&seed)
+        .verifying_key()
+        .as_bytes()))
+}
+
+/// What `GET /v1/vms/{id}/vz/attestation` serves: the signed attestation of the VM's last launch, the manifest it
+/// carries (decoded for convenience; the signature covers `attestation.payload`), and the host public key.
+///
+/// The key here comes from the same host as the attestation, so checking one against the other only shows they are
+/// consistent. A verifier that needs trust must hold the host key from somewhere else (see the module docs).
+pub fn delivery(vm_id: &str, workspace: &Path, state_dir: &Path) -> Result<serde_json::Value> {
+    let path = workspace.join(DELIVERY_FILE);
+    let text = fs::read_to_string(&path).with_context(|| {
+        format!(
+            "no attestation recorded for this VM (it is produced when the VM starts; {} missing)",
+            path.display()
+        )
+    })?;
+    let att: Attestation =
+        serde_json::from_str(&text).context("recorded attestation is malformed")?;
+    let manifest: Manifest =
+        serde_json::from_str(&att.payload).context("recorded manifest is malformed")?;
+    if manifest.vm_id != vm_id {
+        bail!(
+            "recorded attestation is for VM {}, not {vm_id}; start the VM again",
+            manifest.vm_id
+        );
+    }
+    Ok(serde_json::json!({
+        "vm_id": vm_id,
+        "claim": CLAIM,
+        "issued_at_unix": manifest.issued_at_unix,
+        "attestation": att,
+        "manifest": manifest,
+        "public_key": host_public_key_hex(state_dir)?,
+    }))
+}
+
 /// Collects, signs and attaches the attestation for a launch, off the async runtime (it hashes files).
 pub async fn attach(
     state_dir: PathBuf,
@@ -384,6 +457,54 @@ mod tests {
         let doc: serde_json::Value = serde_json::from_str(&meta).unwrap();
         assert_eq!(doc["id"], "x");
         assert!(doc["attestation"]["payload"].is_string());
+    }
+
+    #[test]
+    fn delivery_serves_the_launch_attestation_and_host_key() {
+        let f = fixture();
+        let key = load_or_create_host_key(&f.state).unwrap();
+        let (m, a) = signed(&f, &key);
+        let ws = f._dir.path().join("ws");
+        fs::create_dir(&ws).unwrap();
+        // Nothing recorded yet.
+        assert!(
+            delivery("vm-1", &ws, &f.state)
+                .unwrap_err()
+                .to_string()
+                .contains("no attestation")
+        );
+        let meta = with_attestation(r#"{"id":"x"}"#, &a).unwrap();
+        persist(&ws, &meta).unwrap();
+        let d = delivery("vm-1", &ws, &f.state).unwrap();
+        assert_eq!(d["public_key"], hex(key.verifying_key().as_bytes()));
+        assert_eq!(d["manifest"]["vm_id"], "vm-1");
+        assert_eq!(d["issued_at_unix"], m.issued_at_unix);
+        // What was served verifies under the served key, as the CLI does it.
+        let got = verify_attestation_hex(
+            &d["attestation"].to_string(),
+            d["public_key"].as_str().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(got, m);
+        // Another VM's id, or a cleared launch, is not served.
+        assert!(delivery("vm-2", &ws, &f.state).is_err());
+        clear(&ws);
+        assert!(delivery("vm-1", &ws, &f.state).is_err());
+        // A metadata document without an attestation records nothing.
+        assert!(persist(&ws, r#"{"id":"x"}"#).is_err());
+    }
+
+    #[test]
+    fn host_key_is_read_not_created() {
+        let f = fixture();
+        assert!(host_public_key_hex(&f.state).is_err());
+        assert!(!f.state.join(KEY_FILE).exists());
+        let key = load_or_create_host_key(&f.state).unwrap();
+        let want = hex(key.verifying_key().as_bytes());
+        assert_eq!(host_public_key_hex(&f.state).unwrap(), want);
+        // Falls back to deriving it from the key file.
+        fs::remove_file(f.state.join(PUB_FILE)).unwrap();
+        assert_eq!(host_public_key_hex(&f.state).unwrap(), want);
     }
 
     #[test]
