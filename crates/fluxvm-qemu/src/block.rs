@@ -129,12 +129,13 @@ pub async fn remove_target(socket: &Path, node: &str, timeout: Duration) -> Resu
 /// What a backup copies.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BackupSync {
-    /// Everything. Any `stale` bitmaps are removed and `bitmap` is created
-    /// in the same transaction, so it tracks writes from this instant.
-    Full { stale: Vec<String> },
-    /// Only clusters set in `bitmap`, which is cleared when every job in
-    /// the group succeeds and kept as it was otherwise.
-    Incremental,
+    /// Everything.
+    Full,
+    /// Only clusters dirty in the parent checkpoint bitmap `from`. The
+    /// bitmap is read, never cleared: it is dropped only once the new
+    /// backup is safely stored, and the new checkpoint merged back into it
+    /// if anything fails, so a failed upload loses no writes.
+    Incremental { from: String },
 }
 
 /// One disk in a backup transaction.
@@ -147,22 +148,19 @@ pub struct DiskBackup {
     pub job_id: String,
 }
 
-/// The `transaction` arguments for a backup of `disks` against `bitmap`.
-pub fn backup_transaction(disks: &[DiskBackup], bitmap: &str, sync: &BackupSync) -> Value {
+/// The `transaction` arguments for a backup of `disks`. Every disk gets the
+/// persistent `checkpoint` bitmap in the same transaction as its copy, so
+/// the checkpoint records exactly the writes after the backup's instant.
+/// Not grouped: QEMU refuses grouped completion next to bitmap actions, and
+/// nothing here clears a bitmap, so a failure on one disk can't leave the
+/// others' bitmaps out of step.
+pub fn backup_transaction(disks: &[DiskBackup], checkpoint: &str, sync: &BackupSync) -> Value {
     let mut actions = Vec::new();
     for d in disks {
-        if let BackupSync::Full { stale } = sync {
-            for name in stale {
-                actions.push(json!({
-                    "type": "block-dirty-bitmap-remove",
-                    "data": {"node": d.node, "name": name},
-                }));
-            }
-            actions.push(json!({
-                "type": "block-dirty-bitmap-add",
-                "data": {"node": d.node, "name": bitmap, "persistent": true},
-            }));
-        }
+        actions.push(json!({
+            "type": "block-dirty-bitmap-add",
+            "data": {"node": d.node, "name": checkpoint, "persistent": true},
+        }));
         let mut backup = json!({
             "device": d.node,
             "target": d.target,
@@ -172,27 +170,35 @@ pub fn backup_transaction(disks: &[DiskBackup], bitmap: &str, sync: &BackupSync)
             "auto-dismiss": false,
         });
         match sync {
-            BackupSync::Full { .. } => backup["sync"] = json!("full"),
-            BackupSync::Incremental => {
+            BackupSync::Full => backup["sync"] = json!("full"),
+            BackupSync::Incremental { from } => {
                 backup["sync"] = json!("bitmap");
-                backup["bitmap"] = json!(bitmap);
-                backup["bitmap-mode"] = json!("on-success");
+                backup["bitmap"] = json!(from);
+                backup["bitmap-mode"] = json!("never");
             }
         }
         actions.push(json!({"type": "blockdev-backup", "data": backup}));
     }
-    match sync {
-        // One failed disk cancels the others, so a bitmap is never cleared
-        // on some disks but not the rest. QEMU only allows grouped
-        // completion when every action is a job, which rules it out for a
-        // full backup's bitmap actions; a failed full is simply retried as
-        // a full.
-        BackupSync::Incremental => json!({
-            "actions": actions,
-            "properties": {"completion-mode": "grouped"},
-        }),
-        BackupSync::Full { .. } => json!({"actions": actions}),
-    }
+    json!({"actions": actions})
+}
+
+/// ORs `sources` into `target` on `node`.
+pub async fn merge_bitmaps(
+    socket: &Path,
+    node: &str,
+    target: &str,
+    sources: &[String],
+    timeout: Duration,
+) -> Result<()> {
+    qmp::execute(
+        socket,
+        "block-dirty-bitmap-merge",
+        Some(json!({"node": node, "target": target, "bitmaps": sources})),
+        timeout,
+    )
+    .await
+    .with_context(|| format!("merging {sources:?} into bitmap {target} on {node}"))?;
+    Ok(())
 }
 
 pub async fn transaction(socket: &Path, args: Value, timeout: Duration) -> Result<()> {
@@ -323,14 +329,8 @@ mod tests {
     }
 
     #[test]
-    fn full_transaction_replaces_stale_bitmaps_and_starts_the_new_one_with_the_copy() {
-        let t = backup_transaction(
-            &disks(),
-            "kairon-cbt-b",
-            &BackupSync::Full {
-                stale: vec!["kairon-cbt-a".into()],
-            },
-        );
+    fn full_transaction_adds_the_checkpoint_with_each_copy() {
+        let t = backup_transaction(&disks(), "kairon-cbt-c-0", &BackupSync::Full);
         assert!(
             t.get("properties").is_none(),
             "QEMU rejects grouped with bitmap actions"
@@ -343,43 +343,42 @@ mod tests {
         assert_eq!(
             kinds,
             [
-                "block-dirty-bitmap-remove",
                 "block-dirty-bitmap-add",
                 "blockdev-backup",
-                "block-dirty-bitmap-remove",
                 "block-dirty-bitmap-add",
                 "blockdev-backup"
             ]
         );
         assert_eq!(
             actions[0]["data"],
-            json!({"node": "root", "name": "kairon-cbt-a"})
+            json!({"node": "root", "name": "kairon-cbt-c-0", "persistent": true})
         );
-        assert_eq!(
-            actions[1]["data"],
-            json!({"node": "root", "name": "kairon-cbt-b", "persistent": true})
-        );
-        let b = &actions[2]["data"];
+        let b = &actions[1]["data"];
         assert_eq!(b["sync"], "full");
         assert_eq!(b["device"], "root");
         assert_eq!(b["target"], "cbt-root");
         assert_eq!(b["compress"], true);
         assert_eq!(b["auto-dismiss"], false);
         assert!(b.get("bitmap").is_none());
+        assert_eq!(actions[2]["data"]["node"], "data-logs");
     }
 
     #[test]
-    fn incremental_transaction_copies_the_bitmap_and_clears_it_only_on_success() {
-        let t = backup_transaction(&disks(), "kairon-cbt-b", &BackupSync::Incremental);
-        assert_eq!(t["properties"]["completion-mode"], "grouped");
+    fn incremental_transaction_reads_the_parent_checkpoint_without_clearing_it() {
+        let t = backup_transaction(
+            &disks(),
+            "kairon-cbt-c-2",
+            &BackupSync::Incremental {
+                from: "kairon-cbt-c-1".into(),
+            },
+        );
         let actions = t["actions"].as_array().unwrap();
-        assert_eq!(actions.len(), 2);
-        for a in actions {
-            assert_eq!(a["type"], "blockdev-backup");
-            assert_eq!(a["data"]["sync"], "bitmap");
-            assert_eq!(a["data"]["bitmap"], "kairon-cbt-b");
-            assert_eq!(a["data"]["bitmap-mode"], "on-success");
-        }
+        assert_eq!(actions.len(), 4);
+        assert_eq!(actions[0]["data"]["name"], "kairon-cbt-c-2");
+        let b = &actions[1]["data"];
+        assert_eq!(b["sync"], "bitmap");
+        assert_eq!(b["bitmap"], "kairon-cbt-c-1");
+        assert_eq!(b["bitmap-mode"], "never");
     }
 
     #[test]
