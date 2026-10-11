@@ -148,7 +148,7 @@ The ledger covers VMs created through central. VMs created directly on a node ar
 
 - A two-Mac hardware run of leases, scrub and drain.
 - Host-level scrubbing beyond VM workspaces.
-- A highly available central: the registry is still one process with JSON files.
+- High availability is in [fleet-ha.md](fleet-ha.md) (several centrals, one Redis), not yet run on real hosts.
 - Tenant networks are per Mac: one tenant's VMs on two Macs are on two separate vmnet networks with the same subnet,
   not one network spanning both Macs. A cross-Mac overlay is still to do. Network isolation also needs macOS 26+ and
   the `fluxvm-vmnetd` broker on every Mac, neither verified on hardware yet.

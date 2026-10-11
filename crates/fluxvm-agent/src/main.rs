@@ -41,6 +41,18 @@ enum Command {
         /// pass off; `POST /fleet/reconcile` still runs one).
         #[arg(long, env = "FLUXVM_AGENT_RECONCILE_SECS", default_value = "60")]
         reconcile_secs: u64,
+        /// Run highly available: several centrals share this Redis, one leads (docs/fleet-ha.md).
+        #[arg(long, env = "FLUXVM_AGENT_HA_REDIS")]
+        ha_redis: Option<String>,
+        /// Name of the HA group (several fleets can share one Redis).
+        #[arg(long, env = "FLUXVM_AGENT_HA_CLUSTER", default_value = "default")]
+        ha_cluster: String,
+        /// This central's URL as clients reach it; its identity in the leader election. Required with --ha-redis.
+        #[arg(long, env = "FLUXVM_AGENT_ADVERTISE_URL")]
+        advertise_url: Option<String>,
+        /// Leader lock TTL: how long a dead leader blocks a takeover.
+        #[arg(long, env = "FLUXVM_AGENT_HA_TTL_SECS", default_value = "10")]
+        ha_ttl_secs: u64,
     },
     /// Run ephemeral GitHub Actions runners on fleet VMs: one VM per queued job, deleted when the job is done.
     /// See docs/github-actions-runners.md.
@@ -54,7 +66,8 @@ enum Command {
         /// This node's name, as it'll appear in `POST /fleet/vms {"node": "..."}`.
         #[arg(long, env = "NODE_NAME")]
         name: String,
-        /// Base URL of the `fluxvm-agent central` instance.
+        /// Base URL of the `fluxvm-agent central` instance; with HA, a comma-separated list of every central (the
+        /// heartbeat goes to whichever one leads).
         #[arg(long, env = "CENTRAL_URL")]
         central: String,
         /// Base URL THIS agent itself uses to reach its local `fluxvm
@@ -102,12 +115,35 @@ async fn main() -> Result<()> {
             tls_cert,
             tls_key,
             reconcile_secs,
+            ha_redis,
+            ha_cluster,
+            advertise_url,
+            ha_ttl_secs,
         } => {
+            let ha = match ha_redis {
+                Some(url) => {
+                    let Some(advertise_url) = advertise_url else {
+                        bail!("--ha-redis needs --advertise-url (this central's own URL)");
+                    };
+                    if token.is_none() {
+                        bail!(
+                            "--ha-redis needs --token: standbys and the leader must share one fleet token"
+                        );
+                    }
+                    Some(fluxvm_agent::ha::HaConfig {
+                        store: fluxvm_agent::ha::HaStore::redis(&url, &ha_cluster).await?,
+                        advertise_url,
+                        ttl: Duration::from_secs(ha_ttl_secs.max(2)),
+                    })
+                }
+                None => None,
+            };
             let app = fluxvm_agent::central::router(fluxvm_agent::central::CentralConfig {
                 state_dir,
                 token,
                 reconcile_interval: (reconcile_secs > 0)
                     .then(|| Duration::from_secs(reconcile_secs)),
+                ha,
             });
             let addr: SocketAddr = listen
                 .parse()

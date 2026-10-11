@@ -38,19 +38,37 @@ pub struct NodeConfig {
 /// a node agent that gave up after one failed request would make a
 /// transient network blip permanently evict an otherwise-fine node).
 pub async fn run(cfg: NodeConfig) {
-    let http = reqwest::Client::new();
+    // No redirects: a standby answers 503 and the next configured central is tried instead, so the bearer token only
+    // ever goes to URLs the operator listed.
+    let http = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
     let mut tick = tokio::time::interval(cfg.interval);
+    let mut preferred = 0usize;
     loop {
         tick.tick().await;
-        if let Err(e) = beat(&http, &cfg).await {
-            tracing::warn!(error = %e, "heartbeat failed, will retry next tick");
-        } else {
-            tracing::debug!(node = %cfg.name, "heartbeat sent");
+        match beat(&http, &cfg, preferred).await {
+            Ok(used) => {
+                preferred = used;
+                tracing::debug!(node = %cfg.name, "heartbeat sent");
+            }
+            Err(e) => tracing::warn!(error = %e, "heartbeat failed, will retry next tick"),
         }
     }
 }
 
-async fn beat(http: &reqwest::Client, cfg: &NodeConfig) -> Result<()> {
+/// The configured centrals: `--central` is one URL or a comma-separated list (HA).
+pub fn central_urls(s: &str) -> Vec<String> {
+    s.split(',')
+        .map(|u| u.trim().trim_end_matches('/').to_owned())
+        .filter(|u| !u.is_empty())
+        .collect()
+}
+
+/// Sends one heartbeat, starting with central `preferred` (the one that answered last time) and trying the others
+/// in order when it is down or a standby. Returns the index of the central that took it.
+async fn beat(http: &reqwest::Client, cfg: &NodeConfig, preferred: usize) -> Result<usize> {
     let local = local_vm_stats(http, &cfg.fluxvm_url)
         .await
         .context("reading local VM inventory")?;
@@ -74,15 +92,37 @@ async fn beat(http: &reqwest::Client, cfg: &NodeConfig) -> Result<()> {
         "density": density,
         "apple": apple,
     });
-    let mut req = http.post(format!("{}/fleet/register", cfg.central_url));
-    if let Some(t) = &cfg.token {
-        req = req.bearer_auth(t);
+    let urls = central_urls(&cfg.central_url);
+    anyhow::ensure!(!urls.is_empty(), "no central URL configured");
+    let mut errors = Vec::new();
+    for k in 0..urls.len() {
+        let i = (preferred + k) % urls.len();
+        let mut req = http.post(format!("{}/fleet/register", urls[i]));
+        if let Some(t) = &cfg.token {
+            req = req.bearer_auth(t);
+        }
+        match req.json(&body).send().await {
+            Ok(resp) if resp.status().is_success() => return Ok(i),
+            Ok(resp) => errors.push(format!("{}: {}", urls[i], resp.status())),
+            Err(e) => errors.push(format!("{}: {e}", urls[i])),
+        }
     }
-    let resp = req.json(&body).send().await.context("sending heartbeat")?;
-    if !resp.status().is_success() {
-        anyhow::bail!("central rejected heartbeat: {}", resp.status());
+    anyhow::bail!("no central took the heartbeat ({})", errors.join("; "))
+}
+
+#[cfg(test)]
+mod central_list_tests {
+    use super::central_urls;
+
+    #[test]
+    fn central_lists_are_split_and_trimmed() {
+        assert_eq!(central_urls("http://a:7799"), ["http://a:7799"]);
+        assert_eq!(
+            central_urls(" http://a:7799/, http://b:7799 ,,"),
+            ["http://a:7799", "http://b:7799"]
+        );
+        assert!(central_urls(" , ").is_empty());
     }
-    Ok(())
 }
 
 async fn fetch_node_security(http: &reqwest::Client, fluxvm_url: &str) -> NodeSecurityCapabilities {
