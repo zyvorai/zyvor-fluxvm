@@ -670,6 +670,109 @@ pub async fn hotplug_memory(socket: &Path, add_memory_mib: u64, timeout: Duratio
     Ok(sum_memory_devices_mib(&after))
 }
 
+/// QOM path of the `virtio-balloon-pci,id=balloon0` device `build_args` adds.
+pub const BALLOON_QOM_PATH: &str = "/machine/peripheral/balloon0";
+
+/// Ask the guest balloon driver to bring guest RAM to `target_bytes`
+/// (QEMU's `balloon` takes the size the guest keeps, not the size taken).
+pub async fn balloon_set(socket: &Path, target_bytes: u64, timeout: Duration) -> Result<()> {
+    execute(
+        socket,
+        "balloon",
+        Some(json!({ "value": target_bytes })),
+        timeout,
+    )
+    .await
+    .context("balloon")?;
+    Ok(())
+}
+
+/// Guest RAM in bytes as the balloon driver currently leaves it.
+pub async fn query_balloon(socket: &Path, timeout: Duration) -> Result<u64> {
+    let v = execute(socket, "query-balloon", None, timeout)
+        .await
+        .context("query-balloon")?;
+    v.get("actual")
+        .and_then(Value::as_u64)
+        .context("query-balloon returned no 'actual'")
+}
+
+/// Guest memory statistics reported through the balloon, in MiB. A field is
+/// `None` when the guest driver did not report it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct GuestMemoryStats {
+    pub total_mib: Option<u64>,
+    pub free_mib: Option<u64>,
+    pub available_mib: Option<u64>,
+    pub disk_caches_mib: Option<u64>,
+    /// Seconds since the epoch of the guest's last report; 0 when none yet.
+    pub last_update: u64,
+}
+
+/// Parse the `guest-stats` QOM property. QEMU reports -1 (as a u64 that
+/// overflows i64, or a negative i64) for statistics the guest never sent.
+pub fn parse_guest_stats(v: &Value) -> GuestMemoryStats {
+    let stat = |name: &str| {
+        v.get("stats")
+            .and_then(|s| s.get(name))
+            .and_then(Value::as_i64)
+            .filter(|n| *n >= 0)
+            .map(|n| n as u64 / (1024 * 1024))
+    };
+    GuestMemoryStats {
+        total_mib: stat("stat-total-memory"),
+        free_mib: stat("stat-free-memory"),
+        available_mib: stat("stat-available-memory"),
+        disk_caches_mib: stat("stat-disk-caches"),
+        last_update: v.get("last-update").and_then(Value::as_u64).unwrap_or(0),
+    }
+}
+
+/// Read guest memory statistics, first turning on polling every
+/// `interval_secs` if it is off. Returns `None` while the guest has not
+/// reported yet.
+pub async fn balloon_guest_stats(
+    socket: &Path,
+    interval_secs: u32,
+    timeout: Duration,
+) -> Result<Option<GuestMemoryStats>> {
+    if interval_secs == 0 {
+        return Ok(None);
+    }
+    let current = execute(
+        socket,
+        "qom-get",
+        Some(json!({ "path": BALLOON_QOM_PATH, "property": "guest-stats-polling-interval" })),
+        timeout,
+    )
+    .await
+    .context("qom-get guest-stats-polling-interval")?;
+    if current.as_u64() != Some(u64::from(interval_secs)) {
+        execute(
+            socket,
+            "qom-set",
+            Some(json!({
+                "path": BALLOON_QOM_PATH,
+                "property": "guest-stats-polling-interval",
+                "value": interval_secs,
+            })),
+            timeout,
+        )
+        .await
+        .context("qom-set guest-stats-polling-interval")?;
+    }
+    let v = execute(
+        socket,
+        "qom-get",
+        Some(json!({ "path": BALLOON_QOM_PATH, "property": "guest-stats" })),
+        timeout,
+    )
+    .await
+    .context("qom-get guest-stats")?;
+    let stats = parse_guest_stats(&v);
+    Ok((stats.last_update > 0).then_some(stats))
+}
+
 /// Attach an existing host TAP as a new virtio-net-pci device on
 /// `hotplug-pcie-{index}`. The TAP must already be up and enslaved to the
 /// guest's bridge; this function only talks QMP.
@@ -1035,7 +1138,7 @@ pub async fn hotplug_virtiofs(
     Ok(())
 }
 
-async fn query_memory_devices(socket: &Path, timeout: Duration) -> Result<Vec<Value>> {
+pub(crate) async fn query_memory_devices(socket: &Path, timeout: Duration) -> Result<Vec<Value>> {
     let value = execute(socket, "query-memory-devices", None, timeout).await?;
     value
         .as_array()
@@ -1043,7 +1146,7 @@ async fn query_memory_devices(socket: &Path, timeout: Duration) -> Result<Vec<Va
         .context("query-memory-devices did not return an array")
 }
 
-fn sum_memory_devices_mib(devices: &[Value]) -> u64 {
+pub(crate) fn sum_memory_devices_mib(devices: &[Value]) -> u64 {
     devices
         .iter()
         .filter_map(|d| d.get("data")?.get("size")?.as_u64())
@@ -1504,6 +1607,78 @@ mod hotplug_tests {
                 .await
                 .unwrap();
         }
+    }
+
+    #[tokio::test]
+    async fn balloon_guest_stats_turns_polling_on_then_reads() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("qmp.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        let stats = json!({
+            "stats": {
+                "stat-total-memory": 2147483648u64,
+                "stat-free-memory": 1073741824u64,
+                "stat-available-memory": 1610612736u64,
+                "stat-disk-caches": -1,
+            },
+            "last-update": 1760000000u64,
+        });
+        let server = tokio::spawn(serve_script(
+            listener,
+            vec![
+                ("qom-get", json!(0)),
+                ("qom-set", json!({})),
+                ("qom-get", stats),
+            ],
+        ));
+        let got = balloon_guest_stats(&path, 5, Duration::from_secs(5))
+            .await
+            .unwrap()
+            .unwrap();
+        server.await.unwrap();
+        assert_eq!(got.total_mib, Some(2048));
+        assert_eq!(got.free_mib, Some(1024));
+        assert_eq!(got.available_mib, Some(1536));
+        assert_eq!(got.disk_caches_mib, None);
+    }
+
+    #[tokio::test]
+    async fn balloon_guest_stats_is_none_before_the_first_report() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("qmp.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        let server = tokio::spawn(serve_script(
+            listener,
+            vec![
+                ("qom-get", json!(5)),
+                ("qom-get", json!({"stats": {}, "last-update": 0})),
+            ],
+        ));
+        let got = balloon_guest_stats(&path, 5, Duration::from_secs(5))
+            .await
+            .unwrap();
+        server.await.unwrap();
+        assert_eq!(got, None);
+    }
+
+    #[tokio::test]
+    async fn query_balloon_reads_actual() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("qmp.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        let server = tokio::spawn(serve_script(
+            listener,
+            vec![
+                ("balloon", json!({})),
+                ("query-balloon", json!({"actual": 1073741824u64})),
+            ],
+        ));
+        balloon_set(&path, 1073741824, Duration::from_secs(5))
+            .await
+            .unwrap();
+        let actual = query_balloon(&path, Duration::from_secs(5)).await.unwrap();
+        server.await.unwrap();
+        assert_eq!(actual, 1073741824);
     }
 
     fn cpu_slot(realized: bool, socket_id: i64, core_id: i64) -> Value {

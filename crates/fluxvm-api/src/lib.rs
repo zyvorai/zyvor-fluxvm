@@ -357,6 +357,7 @@ pub fn router(manager: Arc<VmManager>) -> Router {
         .route("/v1/security/capabilities", get(security_capabilities))
         .route("/v1/host/confidential", get(host_confidential))
         .route("/v1/host/topology", get(host_topology))
+        .route("/v1/host/memory", get(host_memory))
         .route("/v1/host/gpus", get(list_host_gpus))
         .route("/v1/host/gpus/preflight", get(host_gpu_preflight))
         .route("/v1/host/gpus/bind", post(bind_host_gpu))
@@ -2210,6 +2211,7 @@ async fn runtime_capabilities(
             topology: cfg!(target_os = "linux"),
             numa_binding: cfg!(target_os = "linux"),
             pci_bind: cfg!(target_os = "linux"),
+            balloon: cfg!(target_os = "linux"),
         },
     })
 }
@@ -2222,6 +2224,15 @@ fn allocated_vfio_bdfs(vms: &[VmRecord]) -> std::collections::HashSet<String> {
         }
     }
     out
+}
+
+/// Host memory and memory PSI, sampled now.
+async fn host_memory() -> Json<fluxvm_core::pressure_admission::HostPressure> {
+    Json(
+        tokio::task::spawn_blocking(fluxvm_core::pressure_admission::sample_host)
+            .await
+            .unwrap_or_default(),
+    )
 }
 
 async fn host_topology(
@@ -5201,6 +5212,7 @@ mod tests {
                 hugepages: None,
                 vfio_devices: vec![],
                 numa: vec![],
+                balloon: None,
                 pod_uid: None,
                 secure_boot: None,
                 tpm: None,

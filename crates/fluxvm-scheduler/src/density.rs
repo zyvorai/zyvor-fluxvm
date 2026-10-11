@@ -5,7 +5,8 @@
 //! per-VM PSS reporting.
 //!
 //! * Balloon: the in-tree KVM engine's virtio-balloon is driven over the
-//!   hypervisor control socket (`ApiRequest::Balloon`).
+//!   hypervisor control socket (`ApiRequest::Balloon`); a QEMU VM created
+//!   with `balloon` over QMP (`balloon` / `query-balloon`).
 //! * Admission: [`VmManager::admit_under_pressure`] applies the optional
 //!   `[policy]` memory-pressure thresholds on the create path.
 //! * Idle reclaim: [`VmManager::idle_reclaim_tick`] inflates the balloon of
@@ -113,8 +114,12 @@ pub struct VmMemoryReport {
     pub configured_mib: u64,
     /// `None` when the VM has no VMM process or `smaps_rollup` is unreadable.
     pub usage: Option<MemUsage>,
-    /// `None` when the VM has no balloon (not the KVM engine).
+    /// `None` when the VM has no balloon device.
     pub balloon: Option<BalloonStatus>,
+    /// Guest-reported memory statistics (QEMU balloon only); `None` until
+    /// the guest driver reports.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub guest: Option<fluxvm_qemu::GuestMemoryStats>,
 }
 
 impl VmManager {
@@ -153,10 +158,19 @@ impl VmManager {
             }
             None => None,
         };
-        let balloon = if matches!(vm.backend, BackendKind::FluxVm | BackendKind::Vz)
-            && vm.status == VmStatus::Running
-        {
+        let ballooned = match vm.backend {
+            BackendKind::FluxVm | BackendKind::Vz => true,
+            BackendKind::Qemu => vm.request.balloon.is_some(),
+            _ => false,
+        };
+        let running = vm.status == VmStatus::Running;
+        let balloon = if ballooned && running {
             balloon_request(&vm, None).await.ok()
+        } else {
+            None
+        };
+        let guest = if vm.backend == BackendKind::Qemu && running {
+            fluxvm_qemu::balloon_guest_stats(&vm).await.ok().flatten()
         } else {
             None
         };
@@ -165,6 +179,7 @@ impl VmManager {
             configured_mib: vm.request.memory_mib,
             usage,
             balloon,
+            guest,
         })
     }
 
@@ -277,6 +292,15 @@ async fn balloon_request(vm: &VmRecord, balloon_mib: Option<u64>) -> Result<Ball
             memory_mib: s.memory_mib,
             target_mib: s.target_mib,
             actual_mib: s.actual_mib,
+        });
+    }
+    if vm.backend == BackendKind::Qemu {
+        let (memory_mib, target_mib, actual_mib) =
+            fluxvm_qemu::balloon_control(vm, balloon_mib, MIN_GUEST_MIB).await?;
+        return Ok(BalloonStatus {
+            memory_mib,
+            target_mib,
+            actual_mib,
         });
     }
     if vm.backend != BackendKind::FluxVm {

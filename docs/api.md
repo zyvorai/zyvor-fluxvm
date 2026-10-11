@@ -66,7 +66,7 @@ POST   /v1/vms/{uuid}/thaw
 GET    /v1/vms/{uuid}/frozen
 GET    /v1/vms/{uuid}/stats
 GET    /v1/vms/{uuid}/pressure
-GET    /v1/vms/{uuid}/balloon            # flux-vm KVM engine; {memory_mib, target_mib, actual_mib}
+GET    /v1/vms/{uuid}/balloon            # flux-vm KVM engine, vz, qemu with balloon; {memory_mib, target_mib, actual_mib}
 POST   /v1/vms/{uuid}/balloon            # {"balloon_mib": N}; admin; 0 deflates
 GET    /v1/vms/{uuid}/memory             # VMM-process PSS/private/shared + balloon; see memory-density.md
 GET    /v1/vms/{uuid}/logs
@@ -706,9 +706,28 @@ Guide: [memory-density.md](memory-density.md).
 {"memory_mib": 1024, "target_mib": 256, "actual_mib": 192}
 ```
 
-`target_mib` is what was requested; `actual_mib` is what the guest driver has reached so far. Only a
-running VM on the flux-vm backend's KVM engine or the vz backend has a balloon; anything else returns 400, as does a
-balloon that would leave the guest under 64 MiB.
+`target_mib` is what was requested; `actual_mib` is what the guest driver has reached so far. A
+running VM on the flux-vm backend's KVM engine, the vz backend, or the qemu backend created with `balloon` has a
+balloon; anything else returns 400, as does a balloon that would leave the guest under 64 MiB. For QEMU,
+`memory_mib` includes hot-added DIMMs.
+
+`CreateVmRequest.balloon` (QEMU only) adds a `virtio-balloon-pci` device:
+
+```json
+{"balloon": {"free_page_reporting": true, "deflate_on_oom": true, "stats_interval_secs": 5}}
+```
+
+All three fields are optional and default to the values shown. `balloon` is refused with `hugepages`,
+`vfio_devices` and confidential security profiles.
+
+`GET /v1/host/memory` samples the host now:
+
+```json
+{"mem_available_mib": 20480, "mem_total_mib": 31744, "psi_some_avg10": 0.4, "psi_full_avg10": 0.0}
+```
+
+A field is `null` when the host does not expose it (no PSI in the kernel). `host.balloon` in
+`GET /v1/runtime/capabilities` is true when both routes are available.
 
 `GET /v1/vms/{uuid}/memory`:
 
@@ -722,7 +741,9 @@ balloon that would leave the guest under 64 MiB.
 ```
 
 `usage` is `null` when the VM has no VMM process or `/proc/<pid>/smaps_rollup` is unreadable;
-`balloon` is `null` when the VM has no balloon.
+`balloon` is `null` when the VM has no balloon. A ballooned QEMU VM also reports `guest`
+(`total_mib`, `free_mib`, `available_mib`, `disk_caches_mib`, `last_update`) once the guest
+driver has sent statistics; a statistic the guest did not send is `null`.
 
 ### First-command latency: `?ready=exec`
 

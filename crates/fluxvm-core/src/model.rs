@@ -1015,7 +1015,59 @@ pub struct VmNumaNode {
     pub memory_mib: u64,
 }
 
+/// virtio-balloon options of a QEMU VM.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BalloonSpec {
+    /// Guest reports freed pages so the host can drop them without a
+    /// balloon target (`free-page-reporting=on`, guest kernel 5.8+).
+    #[serde(default = "default_true")]
+    pub free_page_reporting: bool,
+    /// The guest may take pages back from the balloon instead of hitting
+    /// its OOM killer (`deflate-on-oom=on`).
+    #[serde(default = "default_true")]
+    pub deflate_on_oom: bool,
+    /// Guest memory statistics polling interval in seconds; 0 disables
+    /// guest stats.
+    #[serde(default = "default_balloon_stats_secs")]
+    pub stats_interval_secs: u32,
+}
+
+fn default_balloon_stats_secs() -> u32 {
+    5
+}
+
+impl Default for BalloonSpec {
+    fn default() -> Self {
+        Self {
+            free_page_reporting: true,
+            deflate_on_oom: true,
+            stats_interval_secs: default_balloon_stats_secs(),
+        }
+    }
+}
+
 impl CreateVmRequest {
+    /// Checks `balloon` against the rest of the request: guest memory that
+    /// is pinned (hugepages, VFIO) or encrypted cannot be ballooned.
+    pub fn validate_balloon(&self) -> anyhow::Result<()> {
+        if self.balloon.is_none() {
+            return Ok(());
+        }
+        if self.hugepages == Some(true) {
+            anyhow::bail!("balloon cannot be combined with hugepages");
+        }
+        if !self.vfio_devices.is_empty() {
+            anyhow::bail!("balloon cannot be combined with vfio_devices");
+        }
+        if self.security_profile.is_confidential() {
+            anyhow::bail!(
+                "balloon cannot be combined with security_profile {}",
+                self.security_profile.as_str()
+            );
+        }
+        Ok(())
+    }
+
     /// Checks `numa` against the rest of the request: no mixing with the
     /// legacy `numa_node`/`cpuset` fields, memory adds up to `memory_mib`,
     /// and every boot vCPU `0..vcpus` sits on exactly one node.
@@ -1208,6 +1260,12 @@ pub struct CreateVmRequest {
     /// `0..vcpus` exactly once.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub numa: Vec<VmNumaNode>,
+    /// QEMU only: attach a virtio-balloon device so guest memory can be
+    /// reclaimed at runtime (`POST /v1/vms/{id}/balloon`). Rejected with
+    /// `hugepages`, `vfio_devices` and confidential profiles, whose guest
+    /// memory is pinned or encrypted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub balloon: Option<BalloonSpec>,
     /// Set 6S: Kubernetes Pod UID (from the CRI `io.kubernetes.cri.sandbox-uid`
     /// annotation), supplied by `containerd-shim-fluxvm-v2` for Secure
     /// Containers Pods. Mints a stable eBPF Pod identity
@@ -1698,6 +1756,10 @@ pub struct RuntimeHostCapability {
     /// `POST /v1/host/pci/bind` and `/release` move any IOMMU group to and
     /// from vfio-pci.
     pub pci_bind: bool,
+    /// `CreateVmRequest.balloon` and `POST /v1/vms/{id}/balloon` work for
+    /// QEMU VMs, and `GET /v1/host/memory` reports host memory pressure.
+    #[serde(default)]
+    pub balloon: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -2541,6 +2603,28 @@ mod create_vm_request_tests {
         assert!(l2ns.unwrap_err().contains("l2-uplink"));
         // Non-tap variants never trip direct validation.
         assert!(check(r#"{"mode":"none"}"#).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod balloon_model_tests {
+    use super::*;
+
+    #[test]
+    fn empty_balloon_object_takes_the_defaults() {
+        let spec: BalloonSpec = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert_eq!(spec, BalloonSpec::default());
+        assert!(spec.free_page_reporting && spec.deflate_on_oom);
+        assert_eq!(spec.stats_interval_secs, 5);
+    }
+
+    #[test]
+    fn host_capability_without_balloon_still_parses() {
+        let cap: RuntimeHostCapability = serde_json::from_value(serde_json::json!({
+            "topology": true, "numaBinding": true, "pciBind": true
+        }))
+        .unwrap();
+        assert!(!cap.balloon);
     }
 }
 
