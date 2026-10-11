@@ -52,6 +52,8 @@ pub struct RunnerConfig {
     pub usb_controllers: u8,
     pub vmnet: Option<fluxvm_core::model::AppleVmnetSpec>,
     pub custom_virtio: bool,
+    /// macOS guests only: attach a virtio-socket device (experimental, unverified on hardware).
+    pub macos_vsock: bool,
     /// virtiofs shares, tagged `fs0`, `fs1`, … in request order (the tags the guest-side mount uses).
     pub shares: Vec<ShareConfig>,
     /// Host `127.0.0.1:host_port` listeners that relay TCP to the guest's NAT address.
@@ -78,6 +80,9 @@ pub struct RunnerConfig {
     pub extra_disks: Vec<fluxvm_core::model::AppleDisk>,
     /// Private networks: one more network card each, connected to the network's switch.
     pub networks: Vec<NetworkConfig>,
+    /// `apple.usernet`: the inherited descriptor number of the guest NIC's datagram socket (see `crate::usernet`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub usernet_fd: Option<i32>,
     pub console_ports: Vec<ConsolePortConfig>,
     /// The console log is rotated to `<log>.1` past this size (the runner defaults to 16 MiB).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -135,6 +140,9 @@ pub struct VsockServiceConfig {
     pub socket: Option<PathBuf>,
     /// `metadata` or `telemetry`, answered by the runner.
     pub builtin: Option<String>,
+    /// Loopback TCP port on this Mac that the guest's connections are relayed to (always 127.0.0.1; the runner has
+    /// no host field to misuse).
+    pub tcp_port: Option<u16>,
 }
 
 /// The host end of VM `id`'s allow-listed vsock service `name` (`apple.vsock_services[].socket`). The host-side service
@@ -210,6 +218,7 @@ impl RunnerConfig {
             usb_controllers: apple.usb_controllers.max(1),
             vmnet: apple.vmnet.clone(),
             custom_virtio: apple.custom_virtio,
+            macos_vsock: apple.macos_vsock,
             restore_state: req
                 .loadvm_tag
                 .as_deref()
@@ -265,6 +274,7 @@ impl RunnerConfig {
                     })
                 })
                 .collect::<Result<_>>()?,
+            usernet_fd: apple.usernet.as_ref().map(|_| crate::usernet::RUNNER_NIC_FD),
             console_ports: apple
                 .console_ports
                 .iter()
@@ -299,6 +309,10 @@ impl RunnerConfig {
                             None => None,
                         },
                         builtin: s.builtin.clone(),
+                        tcp_port: match &s.tcp {
+                            Some(t) => Some(crate::capability::loopback_tcp_port(t)?),
+                            None => None,
+                        },
                     })
                 })
                 .collect::<Result<_>>()?,

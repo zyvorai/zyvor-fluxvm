@@ -1,0 +1,27 @@
+# Copyright 2026 Zyvor AI Labs · https://zyvor.dev
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "fluxvm-blockd"
+version = "0.3.0"
+edition = "2024"
+license = "Apache-2.0"
+description = "Pure-Rust NBD block server with copy-on-write overlays for FluxVM disks"
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "fluxvm-blockd"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+libc = "0.2"
+aes = "0.8"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "blocking"] }
+sha2 = "0.10"
+tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "macros", "time", "signal"] }
+
+[dev-dependencies]
+tempfile = "3"

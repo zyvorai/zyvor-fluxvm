@@ -631,14 +631,19 @@ pub struct AppleSpec {
     /// runs (`socket`, a name resolved under the runner socket directory, never an arbitrary path) or answered by the runner itself (`builtin`: `metadata` or `telemetry`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub vsock_services: Vec<AppleVsockService>,
+    /// macOS guests: add a virtio-socket (vsock) device so a guest-side agent (a LaunchDaemon) can be reached without SSH.
+    /// EXPERIMENTAL and unverified on hardware: whether a macOS guest exposes a usable vsock device is a hypothesis. When
+    /// the guest does not answer on vsock, exec and file access fall back to SSH. Refused for Linux guests (they always have vsock).
+    #[serde(default)]
+    pub macos_vsock: bool,
     /// Attach the root disk read-only (OCI sandboxes boot an immutable image; writes go to tmpfs).
     #[serde(default)]
     pub root_read_only: bool,
     /// Host caching of the root (and seed) disk image; `automatic` is VZ's default.
-    #[serde(default, skip_serializing_if = "is_default")]
+    #[serde(default)]
     pub root_caching: AppleDiskCaching,
     /// Host flush behaviour of the root (and seed) disk image; `full` is VZ's default.
-    #[serde(default, skip_serializing_if = "is_default")]
+    #[serde(default)]
     pub root_sync: AppleDiskSync,
     /// Extra raw disks after the root (and seed) disk, in order: `/dev/vdb`, `/dev/vdc`, … for a direct-boot guest.
     #[serde(default)]
@@ -674,6 +679,60 @@ pub struct AppleSpec {
     /// socket name; the guest runs `rosettad` there.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rosetta_cache: Option<String>,
+    /// Linux guests: replace the NAT card with a userspace gateway (`fluxvm-usernet`) that applies this egress policy,
+    /// DNS allow/deny and port forwards, and feeds `/v1/netobs/*`. UNVERIFIED on hardware.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usernet: Option<AppleUsernet>,
+}
+
+/// Userspace gateway settings for a `vz` Linux guest (see [`AppleSpec::usernet`]). Mapped to `fluxvm-usernet`'s
+/// config by the Apple backend; with every list empty the guest gets "the public internet, no private ranges".
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct AppleUsernet {
+    /// IPv4 CIDRs (or bare addresses) the guest may reach. Any entry here, or in `allow_domains`, makes it a strict allow-list.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allow_cidrs: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deny_cidrs: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allow_ports: Vec<u16>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deny_ports: Vec<u16>,
+    /// Domain suffixes the guest may resolve (`example.com` matches itself and subdomains); others get NXDOMAIN.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dns_allow: Vec<String>,
+    /// Names that always get NXDOMAIN.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dns_deny: Vec<String>,
+    /// Let the guest reach private (RFC 1918, loopback, link-local) ranges.
+    #[serde(default)]
+    pub allow_private: bool,
+    /// Publish a guest port on the host.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub port_forwards: Vec<AppleUsernetForward>,
+    /// IP MTU, 576..=9000 (default 1500).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mtu: Option<u16>,
+}
+
+/// One host -> guest port forward of [`AppleUsernet`].
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct AppleUsernetForward {
+    /// `tcp` (default) or `udp`.
+    #[serde(default = "default_usernet_proto")]
+    pub protocol: String,
+    /// Host address to listen on (default 127.0.0.1).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_addr: Option<String>,
+    /// 1024..=65535, or 0 for an ephemeral port.
+    pub host_port: u16,
+    pub guest_port: u16,
+}
+
+fn default_usernet_proto() -> String {
+    "tcp".into()
 }
 
 /// Signatures and platform key for macOS 27 EFI Secure Boot (`VZEFIVariableStore`).
@@ -720,7 +779,7 @@ pub struct AppleShare {
     pub read_only: bool,
 }
 
-/// One guest→host vsock service (see `AppleSpec::vsock_services`). Exactly one of `socket` and `builtin` is set.
+/// One guest→host vsock service (see `AppleSpec::vsock_services`). Exactly one of `socket`, `builtin` and `tcp` is set.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct AppleVsockService {
     /// The vsock port the guest connects to (1024..=65535; not 3128, 7790 or 7791, which the runner uses itself).
@@ -732,6 +791,11 @@ pub struct AppleVsockService {
     /// `telemetry`: the guest writes lines that the runner appends to `<workspace>/telemetry.log` (capped at 8 MiB).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub builtin: Option<String>,
+    /// Relay to a TCP server on this Mac, `127.0.0.1:<port>` (port 1024..=65535; `localhost` is accepted and means
+    /// 127.0.0.1). Loopback only: any other host is refused. Use it to give a guest an OpenAI-compatible local model
+    /// server (MLX, llama.cpp) without a network card.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tcp: Option<String>,
 }
 
 /// An extra disk for a `vz` Linux guest: a raw image file (default), a host block device, or a network block device
@@ -766,6 +830,16 @@ pub struct AppleDisk {
     /// Disks present at boot are placed by Virtualization.framework.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usb_bus: Option<u8>,
+    /// `kind: overlay`: the copy-on-write overlay file (created on top of `path` if missing). Writes land here; `path`
+    /// is never modified.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub overlay: Option<PathBuf>,
+    /// `kind: overlay`: I/O operations per second cap.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub iops: Option<u64>,
+    /// `kind: overlay`: bytes per second cap.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bps: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -777,6 +851,9 @@ pub enum AppleDiskKind {
     Block,
     /// `VZNetworkBlockDeviceStorageDeviceAttachment` (macOS 14).
     Nbd,
+    /// A copy-on-write overlay (`overlay`) on a base image (`path`), served to the guest by a `fluxvm-blockd` the daemon
+    /// supervises on 127.0.0.1 and attached as an `nbd` disk. UNVERIFIED against Virtualization.framework's NBD client.
+    Overlay,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -862,6 +939,7 @@ impl Default for AppleSpec {
             egress_allow: Vec::new(),
             self_control: false,
             vsock_services: Vec::new(),
+            macos_vsock: false,
             root_read_only: false,
             root_caching: AppleDiskCaching::default(),
             root_sync: AppleDiskSync::default(),
@@ -874,6 +952,7 @@ impl Default for AppleSpec {
             efi_secure_boot: None,
             recovery: false,
             rosetta_cache: None,
+            usernet: None,
         }
     }
 }

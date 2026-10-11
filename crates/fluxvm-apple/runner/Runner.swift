@@ -27,6 +27,7 @@ struct VsockService: Decodable {
     let port: UInt32
     let socket: String?             // host unix socket to relay to
     let builtin: String?            // "metadata" | "telemetry"
+    let tcp_port: UInt16?           // relay to 127.0.0.1:<tcp_port> on this Mac (loopback only; the host is not configurable)
 }
 
 struct Config: Decodable {
@@ -65,6 +66,7 @@ struct Config: Decodable {
     let usb_controllers: Int?       // XHCI controller count (1-4)
     let vmnet: FluxVMNetSpec?       // macOS 26+ per-VM vmnet network (nil: NAT or bridge)
     let custom_virtio: Bool?        // macOS 27+ custom Virtio device hook (Linux guests)
+    let macos_vsock: Bool?          // macOS guests: add a virtio-socket device (experimental, unverified)
     let shares: [Share]?
     let forwards: [Forward]?
     let network_none: Bool?         // attach no network device at all
@@ -81,6 +83,7 @@ struct Config: Decodable {
     let root_sync: String?          // root/seed disk flush mode: full | fsync | none
     let extra_disks: [ExtraDisk]?
     let networks: [PrivateNetwork]?
+    let usernet_fd: Int32?          // inherited datagram socket: the guest NIC's end of a pair whose other end `fluxvm-usernet` serves
     let console_ports: [ConsolePort]?
     let serial_log_max_bytes: UInt64?
     let label: String?              // macOS 27+ VZVirtualMachineConfiguration.label (the VM's name in system services)
@@ -556,6 +559,11 @@ final class Runner: NSObject, VZVirtualMachineDelegate, NSWindowDelegate {
             c.graphicsDevices = [g]
             c.keyboards = [VZMacKeyboardConfiguration()]
             c.pointingDevices = [VZMacTrackpadConfiguration()]
+            // EXPERIMENTAL, opt-in: whether a macOS guest has a usable vsock device is unverified on hardware. Without
+            // the flag a macOS guest keeps no socket device and is reached over SSH only.
+            if cfg.macos_vsock == true {
+                c.socketDevices = [VZVirtioSocketDeviceConfiguration()]
+            }
         } else {
             if let kernel = cfg.kernel {
                 let boot = VZLinuxBootLoader(kernelURL: URL(fileURLWithPath: kernel))
@@ -619,7 +627,7 @@ final class Runner: NSObject, VZVirtualMachineDelegate, NSWindowDelegate {
         ]
         if cfg.guest_os == "linux" {
             if let seed = cfg.seed, FileManager.default.fileExists(atPath: seed) {
-                storage.append(VZVirtioBlockDeviceConfiguration(attachment: try VZDiskImageStorageDeviceAttachment(url: URL(fileURLWithPath: seed), readOnly: true)))
+                storage.append(VZVirtioBlockDeviceConfiguration(attachment: try self.imageAttachment(URL(fileURLWithPath: seed), readOnly: true)))
             }
             if let media = cfg.media, !media.isEmpty {
                 storage.append(VZUSBMassStorageDeviceConfiguration(attachment: try VZDiskImageStorageDeviceAttachment(url: URL(fileURLWithPath: media), readOnly: true)))
@@ -909,8 +917,12 @@ final class Runner: NSObject, VZVirtualMachineDelegate, NSWindowDelegate {
             switch cmd {
             case "ping": response = ["ok": true]; sem.signal()
             case "status": response = ["ok": true, "state": self.state, "ip": self.ip as Any? ?? NSNull()]; sem.signal()
-            case "pause": self.vm?.pause { r in response = self.result(r, "paused", set: { self.state = "paused" }); sem.signal() }
-            case "resume": self.vm?.resume { r in response = self.result(r, "running", set: { self.state = "running" }); sem.signal() }
+            case "pause":
+                if let why = self.controlPrecondition("pause") { response = ["ok": false, "error": why]; sem.signal(); break }
+                self.vm?.pause { r in response = self.result(r, "paused", set: { self.state = "paused" }); sem.signal() }
+            case "resume":
+                if let why = self.controlPrecondition("resume") { response = ["ok": false, "error": why]; sem.signal(); break }
+                self.vm?.resume { r in response = self.result(r, "running", set: { self.state = "running" }); sem.signal() }
             case "save":
                 // Pauses the guest and writes its memory and device state to `path`. The guest stays paused so the
                 // host can clone the disk at the same instant; `resume` continues it.
@@ -997,10 +1009,16 @@ final class Runner: NSObject, VZVirtualMachineDelegate, NSWindowDelegate {
                 dev.share = VZSingleDirectoryShare(directory: VZSharedDirectory(url: URL(fileURLWithPath: path), readOnly: (o["read_only"] as? Bool) ?? false))
                 response = ["ok": true]
                 sem.signal()
+            case "display-resize":
+                response = self.displayResize(o)
+                sem.signal()
             case "shutdown":
+                if let why = self.controlPrecondition("shutdown") { response = ["ok": false, "error": why]; sem.signal(); break }
                 do { try self.vm?.requestStop(); response = ["ok": true, "state": "stopping"] } catch { response = ["ok": false, "error": error.localizedDescription] }
                 sem.signal()
-            case "stop": response = ["ok": true]; sem.signal(); self.vm?.stop { _ in self.cleanupAndExit(0) }
+            case "stop":
+                if let why = self.controlPrecondition("stop") { response = ["ok": false, "error": why]; sem.signal(); break }
+                response = ["ok": true]; sem.signal(); self.vm?.stop { _ in self.cleanupAndExit(0) }
             default: sem.signal()
             }
         }
@@ -1269,6 +1287,8 @@ final class Runner: NSObject, VZVirtualMachineDelegate, NSWindowDelegate {
                             else { finish() }
                         } else if let path = svc.socket, let u = self.connectUnix(path) {
                             splice(fd, u) { close(u); self.release(conn) }
+                        } else if let port = svc.tcp_port, port >= 1024, let u = self.connectLoopback(port) {
+                            splice(fd, u) { close(u); self.release(conn) }
                         } else {
                             finish()
                         }
@@ -1281,6 +1301,26 @@ final class Runner: NSObject, VZVirtualMachineDelegate, NSWindowDelegate {
                 self.serviceDelegates.append(delegate)
             }
         }
+    }
+
+    /// A TCP connection to 127.0.0.1:`port` on this Mac, for `apple.vsock_services[].tcp`. The address is a constant:
+    /// nothing from the spec or the guest can change the host.
+    func connectLoopback(_ port: UInt16) -> Int32? {
+        let s = socket(AF_INET, SOCK_STREAM, 0)
+        guard s >= 0 else { return nil }
+        var a = sockaddr_in()
+        a.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        a.sin_family = sa_family_t(AF_INET)
+        a.sin_port = port.bigEndian
+        a.sin_addr.s_addr = UInt32(0x7f000001).bigEndian
+        let ok = withUnsafePointer(to: &a) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                Darwin.connect(s, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
+        if ok == 0 { return s }
+        close(s)
+        return nil
     }
 
     func hostAllowed(_ host: String, _ rules: [String]) -> Bool {

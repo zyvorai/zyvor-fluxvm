@@ -4004,6 +4004,8 @@ async fn main() -> Result<()> {
             }
             #[cfg(target_os = "macos")]
             api::self_control::spawn(m.clone(), &cfg.state_dir);
+            // Held until the daemon exits: dropping it stops the observer's pump.
+            let _netobs_pump = api::install_netobs(&cfg);
             let app = api::router(m);
             if cfg.tls.enabled() {
                 // rustls 0.23: select a process-wide CryptoProvider (ring) before

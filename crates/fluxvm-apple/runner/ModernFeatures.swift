@@ -11,6 +11,56 @@ extension Runner {
         NSError(domain: "fluxvm-vz", code: 2, userInfo: [NSLocalizedDescriptionKey: s])
     }
 
+    /// Why `action` cannot run now, from VZ's own `canStart/canPause/canResume/canRequestStop/canStop`, or nil when it can.
+    /// Gives the control socket a clear string instead of a VZ failure raised mid-transition.
+    func controlPrecondition(_ action: String) -> String? {
+        guard let machine = vm else { return "cannot \(action): the VM has not been created yet (state: \(state))" }
+        let ok: Bool
+        let needs: String
+        switch action {
+        case "start": ok = machine.canStart; needs = "a stopped VM"
+        case "pause": ok = machine.canPause; needs = "a running VM"
+        case "resume": ok = machine.canResume; needs = "a paused VM"
+        case "shutdown": ok = machine.canRequestStop; needs = "a running VM"
+        case "stop": ok = machine.canStop; needs = "a VM that has not already stopped"
+        default: return nil
+        }
+        if ok { return nil }
+        return "cannot \(action): the VM is \(state); \(action) needs \(needs)"
+    }
+
+    /// `display-resize`: `VZGraphicsDisplay.reconfigure(configuration:)` (macOS 14+) for display `display` (default 0).
+    /// UNVERIFIED on hardware: whether the guest honours the new size depends on its driver.
+    func displayResize(_ o: [String: Any]) -> [String: Any] {
+        guard let w = (o["width"] as? NSNumber)?.intValue, let h = (o["height"] as? NSNumber)?.intValue,
+              (800...5120).contains(w), (600...2880).contains(h) else {
+            return ["ok": false, "error": "display-resize needs width 800..=5120 and height 600..=2880"]
+        }
+        let index = (o["display"] as? NSNumber)?.intValue ?? 0
+        guard #available(macOS 14.0, *) else { return ["ok": false, "error": "display-resize needs macOS 14 or later"] }
+        guard let machine = vm else { return ["ok": false, "error": "display-resize needs a created VM (state: \(state))"] }
+        guard state == "running" || state == "paused" else {
+            return ["ok": false, "error": "display-resize needs a started VM, but it is \(state)"]
+        }
+        let displays = machine.graphicsDevices.first?.displays ?? []
+        guard index >= 0, index < displays.count else {
+            return ["ok": false, "error": "display \(index) does not exist (the VM has \(displays.count))"]
+        }
+        let configuration: VZGraphicsDisplayConfiguration
+        if cfg.guest_os == "macos" {
+            let ppi = (o["ppi"] as? NSNumber)?.intValue ?? cfg.display_ppi ?? 220
+            configuration = VZMacGraphicsDisplayConfiguration(widthInPixels: w, heightInPixels: h, pixelsPerInch: ppi)
+        } else {
+            configuration = VZVirtioGraphicsScanoutConfiguration(widthInPixels: w, heightInPixels: h)
+        }
+        do {
+            try displays[index].reconfigure(configuration: configuration)
+            return ["ok": true, "display": index, "width": w, "height": h]
+        } catch {
+            return ["ok": false, "error": "display-resize failed: \(fluxVZErrorDescription(error))"]
+        }
+    }
+
     func macDisplays() -> [VZMacGraphicsDisplayConfiguration] {
         let count = max(1, min(cfg.display_count ?? 1, 8))
         return (0..<count).map { _ in
@@ -20,6 +70,14 @@ extension Runner {
     }
 
     func networkAttachment() throws -> VZNetworkDeviceAttachment {
+        if let fd = cfg.usernet_fd {
+            // apple.usernet: frames go over the inherited datagram socket to the supervised fluxvm-usernet gateway.
+            // UNVERIFIED on hardware. The descriptor stays open for the life of the runner (the VM may be rebuilt).
+            var snd: Int32 = 1 << 20, rcv: Int32 = 4 << 20
+            setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &snd, socklen_t(MemoryLayout<Int32>.size))
+            setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &rcv, socklen_t(MemoryLayout<Int32>.size))
+            return VZFileHandleNetworkDeviceAttachment(fileHandle: FileHandle(fileDescriptor: fd, closeOnDealloc: false))
+        }
         if let spec = cfg.vmnet {
             #if canImport(vmnet)
             if #available(macOS 26.0, *) {
@@ -57,9 +115,16 @@ extension Runner {
         c.consoleDevices.append(d)
     }
 
+    /// A disk image attachment honouring `root_caching` / `root_sync` (VZ defaults when unset).
+    func imageAttachment(_ url: URL, readOnly: Bool) throws -> VZDiskImageStorageDeviceAttachment {
+        let caching: VZDiskImageCachingMode = cfg.root_caching == "cached" ? .cached : cfg.root_caching == "uncached" ? .uncached : .automatic
+        let sync: VZDiskImageSynchronizationMode = cfg.root_sync == "none" ? .none : cfg.root_sync == "fsync" ? .fsync : .full
+        return try VZDiskImageStorageDeviceAttachment(url: url, readOnly: readOnly, cachingMode: caching, synchronizationMode: sync)
+    }
+
     func rootStorageAttachment() throws -> VZStorageDeviceAttachment {
         let u = URL(fileURLWithPath: cfg.disk)
-        guard cfg.asif_overlay == true else { return try VZDiskImageStorageDeviceAttachment(url: u, readOnly: cfg.root_read_only ?? false) }
+        guard cfg.asif_overlay == true else { return try imageAttachment(u, readOnly: cfg.root_read_only ?? false) }
         #if canImport(DiskImageKit)
         if #available(macOS 27.0, *) {
             let base = try DiskImage(opening: .open(url: u, mode: .readOnly))
@@ -75,6 +140,7 @@ extension Runner {
     }
 
     func startMachine(_ machine: VZVirtualMachine) {
+        if let why = controlPrecondition("start") { fail(why) }
         let provision = cfg.provision_username != nil && cfg.provision_full_name != nil && cfg.provision_password_file != nil
         guard cfg.guest_os == "macos", provision || cfg.recovery == true else {
             machine.start { r in

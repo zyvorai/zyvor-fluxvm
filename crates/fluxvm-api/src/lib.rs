@@ -38,6 +38,8 @@ mod openapi;
 mod rate_limit;
 #[cfg(target_os = "macos")]
 pub mod self_control;
+mod netobs_api;
+pub use netobs_api::install_netobs;
 mod speculate_api;
 mod vz_api;
 
@@ -388,6 +390,18 @@ pub fn router(manager: Arc<VmManager>) -> Router {
         .route("/v1/vms/{id}/cdroms/{name}/eject", post(eject_vm_cdrom))
         .route("/v1/events", get(list_events))
         .route("/v1/events/stream", get(stream_events))
+        .route("/v1/netobs/summary", get(netobs_api::summary))
+        .route("/v1/netobs/flows", get(netobs_api::flows))
+        .route("/v1/netobs/flows/stream", get(netobs_api::stream))
+        .route("/v1/netobs/dns", get(netobs_api::dns))
+        .route("/v1/netobs/history", get(netobs_api::history))
+        .route(
+            "/v1/netobs/capture",
+            get(netobs_api::capture_status)
+                .post(netobs_api::capture_enable)
+                .delete(netobs_api::capture_disable),
+        )
+        .route("/v1/netobs/capture.pcap", get(netobs_api::capture_pcap))
         .route("/v1/quotas/me", get(my_quota))
         .route("/v1/vms/{id}/attest", get(get_vm_evidence))
         .route("/v1/vms/{id}/secrets/release", post(release_vm_secret))
@@ -765,13 +779,56 @@ fn build_oidc(cfg: &fluxvm_core::config::AuthConfig) -> Option<Arc<oidc::OidcVal
 }
 
 async fn metrics(State(m): State<Arc<VmManager>>) -> Response {
-    let body = render_metrics(&m.list().await);
+    let vms = m.list().await;
+    let mut body = render_metrics(&vms);
+    let usage = fluxvm_scheduler::vz_devices::runner_usage_samples(&vms);
+    body.push_str(&render_runner_usage(&usage));
+    body.push_str(&netobs_api::prometheus());
     (
         StatusCode::OK,
         [("content-type", "text/plain; version=0.0.4; charset=utf-8")],
         body,
     )
         .into_response()
+}
+
+/// `fluxvm_vm_runner_rss_bytes` / `fluxvm_vm_runner_cpu_seconds_total` for `vz` VMs: the runner process's resident size
+/// and CPU time, labelled by VM id and name. Empty when there are no samples.
+fn render_runner_usage(samples: &[fluxvm_scheduler::vz_devices::VmRunnerUsage]) -> String {
+    if samples.is_empty() {
+        return String::new();
+    }
+    fn esc(s: &str) -> String {
+        s.replace('\\', "\\\\")
+            .replace('"', "\\\"")
+            .replace('\n', "\\n")
+    }
+    let mut out = String::new();
+    out.push_str(
+        "# HELP fluxvm_vm_runner_rss_bytes Resident memory of a vz VM's runner process, bytes (host-side; includes resident guest RAM).\n",
+    );
+    out.push_str("# TYPE fluxvm_vm_runner_rss_bytes gauge\n");
+    for s in samples {
+        out.push_str(&format!(
+            "fluxvm_vm_runner_rss_bytes{{vm=\"{}\",name=\"{}\"}} {}\n",
+            s.vm_id,
+            esc(&s.name),
+            s.rss_bytes
+        ));
+    }
+    out.push_str(
+        "# HELP fluxvm_vm_runner_cpu_seconds_total CPU time (user + system) of a vz VM's runner process, seconds.\n",
+    );
+    out.push_str("# TYPE fluxvm_vm_runner_cpu_seconds_total counter\n");
+    for s in samples {
+        out.push_str(&format!(
+            "fluxvm_vm_runner_cpu_seconds_total{{vm=\"{}\",name=\"{}\"}} {:.3}\n",
+            s.vm_id,
+            esc(&s.name),
+            s.cpu_seconds
+        ));
+    }
+    out
 }
 
 /// Pure text-rendering, kept separate from the handler so it's unit-testable
@@ -2591,6 +2648,13 @@ struct VzDiskFields {
     controller: Option<fluxvm_core::model::AppleDiskController>,
     #[serde(default)]
     usb_bus: Option<u8>,
+    /// `kind: overlay`: the overlay file (the request's `path` is the base image).
+    #[serde(default)]
+    overlay: Option<std::path::PathBuf>,
+    #[serde(default)]
+    iops: Option<u64>,
+    #[serde(default)]
+    bps: Option<u64>,
 }
 
 async fn attach_vm_disk(
@@ -2619,6 +2683,9 @@ async fn attach_vm_disk(
             controller: v.controller.unwrap_or_default(),
             block_device_id: None,
             usb_bus: v.usb_bus,
+            overlay: v.overlay,
+            iops: v.iops,
+            bps: v.bps,
         };
         let info = m.attach_vz_disk(id, &req.name, disk, req.size_gib).await?;
         return Ok((StatusCode::CREATED, Json(info)));
@@ -2631,6 +2698,9 @@ async fn attach_vm_disk(
         || v.sync.is_some()
         || v.controller.is_some()
         || v.usb_bus.is_some()
+        || v.overlay.is_some()
+        || v.iops.is_some()
+        || v.bps.is_some()
     {
         return Err(anyhow::anyhow!(
             "kind, url, read_only, caching, sync, controller and usb_bus are vz disk options"
@@ -4832,6 +4902,25 @@ mod tests {
     }
 
     #[test]
+    fn renders_runner_usage_per_vm() {
+        use fluxvm_scheduler::vz_devices::VmRunnerUsage;
+        assert_eq!(render_runner_usage(&[]), "");
+        let id = Uuid::nil();
+        let out = render_runner_usage(&[VmRunnerUsage {
+            vm_id: id,
+            name: "a\"b".into(),
+            rss_bytes: 1_073_741_824,
+            cpu_seconds: 12.3456,
+        }]);
+        assert!(out.contains("# TYPE fluxvm_vm_runner_rss_bytes gauge\n"));
+        assert!(out.contains("# TYPE fluxvm_vm_runner_cpu_seconds_total counter\n"));
+        assert!(out.contains(&format!(
+            "fluxvm_vm_runner_rss_bytes{{vm=\"{id}\",name=\"a\\\"b\"}} 1073741824\n"
+        )));
+        assert!(out.contains("fluxvm_vm_runner_cpu_seconds_total{vm=\"00000000-0000-0000-0000-000000000000\",name=\"a\\\"b\"} 12.346\n"));
+    }
+
+    #[test]
     fn empty_fleet_still_renders_zeroed_gauges() {
         let out = render_metrics(&[]);
         assert!(out.contains("fluxvm_vms_total{status=\"running\"} 0"));
@@ -5566,6 +5655,95 @@ mod tests {
                 assert!(body.contains("\nfluxvm_host_memory_pressure_level "));
                 assert!(body.contains("\nfluxvm_host_mem_available_mib "));
             }
+        }
+
+        #[tokio::test]
+        async fn daemon_install_enables_netobs_summary() {
+            let cfg = fluxvm_core::config::Config::default();
+            // Another test may have installed the observer first; either way it is installed afterwards.
+            let pump = install_netobs(&cfg);
+            assert!(fluxvm_netobs::global().is_some());
+            let (st, body) = call(
+                router(manager(density_tokens())),
+                "GET",
+                "/v1/netobs/summary",
+                "ops",
+                None,
+            )
+            .await;
+            assert_eq!(st, StatusCode::OK, "{body}");
+            assert!(body.contains("\"enabled\":true"), "{body}");
+            if pump.is_some() {
+                assert!(fluxvm_netobs::global_tap().is_some(), "the install published its tap");
+            }
+        }
+
+        #[tokio::test]
+        async fn netobs_routes_scope_by_tenant_and_gate_capture() {
+            use fluxvm_netobs::{Direction, FrameMeta, Identity, Observer, Verdict};
+            let obs = match fluxvm_netobs::global() {
+                Some(o) => o,
+                None => {
+                    let o = Arc::new(Observer::new(Default::default()));
+                    fluxvm_netobs::install_global(o);
+                    fluxvm_netobs::global().expect("observer installed")
+                }
+            };
+            let ip = |n| std::net::Ipv4Addr::new(10, 9, 9, n);
+            let frame = fluxvm_netobs::packet::build::udp_v4((ip(1), 5000), (ip(2), 6000), b"x");
+            obs.ingest(
+                &frame,
+                &FrameMeta {
+                    identity: Identity::new("netobs-test-vm", "n", "eth0", [2, 0, 0, 0, 0, 1]),
+                    ts_us: fluxvm_netobs::now_us(),
+                    direction: Direction::FromGuest,
+                    verdict: Verdict::Allowed,
+                },
+            );
+            let m = manager(density_tokens());
+            let app = || router(m.clone());
+
+            let (st, body) = call(app(), "GET", "/v1/netobs/flows", "ops", None).await;
+            assert_eq!(st, StatusCode::OK, "{body}");
+            assert!(body.contains("netobs-test-vm"), "{body}");
+            let (_, body) = call(app(), "GET", "/v1/netobs/flows", "acme", None).await;
+            assert!(!body.contains("netobs-test-vm"), "tenant token saw another VM: {body}");
+
+            let (st, body) = call(app(), "GET", "/v1/netobs/summary", "ops", None).await;
+            assert_eq!(st, StatusCode::OK);
+            assert!(body.contains("\"enabled\":true"), "{body}");
+
+            let (_, body) = call(app(), "GET", "/metrics", "ops", None).await;
+            assert!(body.contains("\nfluxvm_netobs_frames_total "), "{body}");
+
+            // Capture needs a filter, is scoped, and has nothing to download until enabled.
+            let (st, _) = call(
+                app(),
+                "POST",
+                "/v1/netobs/capture",
+                "ops",
+                Some(r#"{"vm":"netobs-test-vm"}"#),
+            )
+            .await;
+            assert_eq!(st, StatusCode::BAD_REQUEST);
+            let (st, _) = call(
+                app(),
+                "POST",
+                "/v1/netobs/capture",
+                "acme",
+                Some(r#"{"vm":"netobs-test-vm","filter":{"port":53}}"#),
+            )
+            .await;
+            assert_eq!(st, StatusCode::NOT_FOUND);
+            let (st, _) = call(
+                app(),
+                "GET",
+                "/v1/netobs/capture.pcap?vm=netobs-test-vm",
+                "ops",
+                None,
+            )
+            .await;
+            assert_eq!(st, StatusCode::NOT_FOUND);
         }
 
         #[tokio::test]

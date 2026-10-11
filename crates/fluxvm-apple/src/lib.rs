@@ -7,24 +7,32 @@
 //! `fluxvm-vz-runner` (see `runner/Runner.swift`), which the backend supervises over a unix control
 //! socket (one JSON line per request). See `docs/macos.md` for the contract and the capability matrix.
 
+pub mod attest;
+pub mod blockd;
 mod capability;
 mod control;
+pub mod display;
 mod host_caps;
 pub mod ipsw;
 pub mod macos_install;
 mod runner;
 pub mod screen;
 pub mod ssh;
+mod usage;
 mod usb_passthrough;
+pub mod usernet;
 pub mod vz27;
 pub mod vznet;
 
+pub use attest::{Attestation, verify_attestation, verify_attestation_hex};
 pub use capability::{
-    CAPABILITIES, Capability, validate_disk, validate_request, with_egress_forwarder,
-    with_guest_reporting, with_self_control_forwarder, with_shared_folder_mounts,
+    CAPABILITIES, Capability, RUNNER_MIN_MACOS, macos_major, set_host_capabilities, validate_disk,
+    validate_request, validate_request_with_host, with_egress_forwarder, with_guest_reporting,
+    with_self_control_forwarder, with_shared_folder_mounts,
 };
 pub use control::{ControlReply, call as control_call, call_with as control_call_with};
-pub use host_caps::{AppleHostCapabilities, host_capabilities};
+pub use display::{display_resize, display_resize_request};
+pub use host_caps::{AppleHostCapabilities, host_capabilities, prime_host_capabilities};
 pub use ipsw::{IpswInfo, latest_ipsw};
 pub use runner::{
     EGRESS_PORT, ForwardConfig, OneShotVm, RunnerConfig, SELF_CONTROL_PORT, SNAPSHOT_FILES,
@@ -32,6 +40,7 @@ pub use runner::{
     ip_file, oci_meta_dir, read_guest_ip, release_mac, self_control_socket_path,
     set_self_control_socket, snapshot_dir, write_oci_meta_as,
 };
+pub use usage::{RunnerUsage, mach_ticks_to_seconds, runner_usage};
 pub use usb_passthrough::{physical_usb_attach, physical_usb_list};
 
 use anyhow::{Context, Result, bail};
@@ -241,10 +250,53 @@ impl VmBackend for AppleBackend {
         let runner = find_runner()?;
         let mut conf = RunnerConfig::for_launch(req, ctx)?;
         conf.serial_log_max_bytes = Some(cfg.apple.serial_log_max_mib.max(1) << 20);
+        // Signed boot manifest in the `metadata` vsock service (a host claim, not hardware attestation; see `attest`).
+        // A failure leaves the metadata without an `attestation` field rather than blocking the boot.
+        if let Some(meta) = conf.vsock_metadata.take() {
+            conf.vsock_metadata = Some(
+                match attest::attach(
+                    cfg.state_dir.clone(),
+                    meta.clone(),
+                    ctx.id.to_string(),
+                    req.clone(),
+                    ctx.disk.clone(),
+                    runner.clone(),
+                )
+                .await
+                {
+                    Ok(with) => with,
+                    Err(e) => {
+                        tracing::warn!(vm = %ctx.id, error = %e, "boot attestation not produced");
+                        meta
+                    }
+                },
+            );
+        }
         for net in &mut conf.networks {
             net.socket = vznet::ensure_switch(&net.name).await?;
             net.switch_bin = vznet::find_switch()?;
         }
+        // Overlay disks: one supervised `fluxvm-blockd` per VM, attached to the runner as `nbd` disks.
+        let blockd = match req.apple.as_ref() {
+            Some(a) if !blockd::exports(&a.extra_disks).is_empty() => {
+                let b = blockd::Blockd::start(blockd::exports(&a.extra_disks), &ctx.workspace)
+                    .await
+                    .context("starting the overlay disk server")?;
+                conf.extra_disks = blockd::runner_disks(&a.extra_disks, b.port);
+                Some(b)
+            }
+            _ => None,
+        };
+        // apple.usernet: the NIC socketpair is made here so the runner and the supervised gateway each inherit an end.
+        let gateway = match req.apple.as_ref().and_then(|a| a.usernet.as_ref()) {
+            Some(u) => Some(usernet::Gateway::prepare(
+                u,
+                ctx.id,
+                &ctx.workspace,
+                &conf.mac,
+            )?),
+            None => None,
+        };
         let conf_path = conf.write(&ctx.workspace)?;
         if install {
             macos_install::run_install(&runner, &conf_path, &ctx.workspace).await?;
@@ -261,10 +313,26 @@ impl VmBackend for AppleBackend {
             .stdout(log.try_clone().context("cloning the runner log")?)
             .stderr(log)
             .process_group(0);
+        if let Some(g) = &gateway {
+            let nic = g.runner_fd();
+            // SAFETY: only async-signal-safe calls (dup2/fcntl) run between fork and exec.
+            unsafe {
+                cmd.pre_exec(move || usernet::install_fd(nic, usernet::RUNNER_NIC_FD));
+            }
+        }
         let mut child = cmd
             .spawn()
             .with_context(|| format!("starting {}", runner.display()))?;
         let pid = child.id().context("runner exited immediately")?;
+        // Dropping `gateway_stop` (a failed launch below, or the runner exiting) stops the gateway.
+        let (gateway_stop, gateway_rx) = tokio::sync::watch::channel(false);
+        // (the same channel stops the overlay disk server)
+        if let Some(g) = gateway {
+            g.supervise(pid, gateway_rx.clone());
+        }
+        if let Some(b) = blockd {
+            b.supervise(pid, gateway_rx);
+        }
 
         // Ready = the control socket answers `status` with a running guest. A runner that exits first has failed.
         let deadline = tokio::time::Instant::now() + START_TIMEOUT;
@@ -293,6 +361,7 @@ impl VmBackend for AppleBackend {
         // Reap the runner in the background; it outlives this call and is stopped through its control socket or SIGTERM.
         tokio::spawn(async move {
             let _ = child.wait().await;
+            drop(gateway_stop);
         });
         Ok(LaunchResult {
             pid,

@@ -56,6 +56,7 @@ const SNAPSHOTS: &str = "snapshots";
 const EVENTS: &str = "events";
 const TEMPLATES: &str = "vm-templates";
 const HOST: &str = "host";
+const NETOBS: &str = "netobs";
 
 fn ops() -> Vec<Op> {
     vec![
@@ -252,6 +253,54 @@ fn ops() -> Vec<Op> {
             "Lifecycle events as Server-Sent Events",
             EVENTS,
         ),
+        op(
+            "get",
+            "/v1/netobs/summary",
+            "Guest-network observability: counters, per-VM RED totals, top talkers and errors",
+            NETOBS,
+        ),
+        op("get", "/v1/netobs/flows", "Live (and optionally closed) guest flows", NETOBS)
+            .query(&[
+                ("vm", "VM id"),
+                ("proto", "tcp, udp, icmp, icmpv6"),
+                ("port", "Either endpoint port"),
+                ("host", "Either endpoint address"),
+                ("verdict", "allowed, denied or dropped"),
+                ("closed", "Include recently closed flows"),
+                ("limit", "Newest N (default 200)"),
+            ]),
+        op(
+            "get",
+            "/v1/netobs/flows/stream",
+            "Flow, DNS, TLS, HTTP and drop metadata as Server-Sent Events (resume with since or Last-Event-ID)",
+            NETOBS,
+        )
+        .query(&[("vm", "VM id"), ("since", "Resume after this event id")]),
+        op("get", "/v1/netobs/dns", "Recent DNS queries and responses", NETOBS)
+            .query(&[("vm", "VM id"), ("limit", "Newest N (default 200)")]),
+        op("get", "/v1/netobs/history", "Retained roll-up windows", NETOBS),
+        op("get", "/v1/netobs/capture", "Capture sessions", NETOBS),
+        op(
+            "post",
+            "/v1/netobs/capture",
+            "Start a filtered, TTL-bound packet capture for a VM (admin)",
+            NETOBS,
+        ),
+        op(
+            "delete",
+            "/v1/netobs/capture",
+            "Stop and discard a VM's capture (admin)",
+            NETOBS,
+        )
+        .query(&[("vm", "VM id")])
+        .status("204"),
+        op(
+            "get",
+            "/v1/netobs/capture.pcap",
+            "Download a VM's capture ring as pcap (admin)",
+            NETOBS,
+        )
+        .query(&[("vm", "VM id")]),
     ]
 }
 
@@ -402,7 +451,7 @@ pub fn spec() -> Value {
         "security": [{"bearer": []}],
         "tags": [
             {"name": VMS}, {"name": SNAPSHOTS}, {"name": DISKS}, {"name": TEMPLATES},
-            {"name": EVENTS}, {"name": HOST}
+            {"name": EVENTS}, {"name": HOST}, {"name": NETOBS}
         ],
         "paths": paths,
         "components": {
