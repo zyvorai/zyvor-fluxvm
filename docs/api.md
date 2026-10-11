@@ -663,8 +663,9 @@ Two read-only routes feed a dashboard without scraping `/metrics`:
   [{code, reason}], predicted: {extra_rss_mib_low, extra_rss_mib_high, extra_rss_basis, disk_logical_bytes_each,
   est_total_ms, est_basis, host_available_mib, host_available_after_low_mib, host_available_after_high_mib}}`. Refusals
   come from the checks the real call runs (`count`, `parallelism`, `hooks`, `forkable`, `network`, `quota`, `name`), all
-  collected. The prediction is a **bound**, not a promise: low is the per-child resident size of this source's running fork
-  children, else the source's own, else a 256 MiB fresh-restore floor; high is every child using all its memory. Children
+  collected. The prediction is a **bound**, not a promise: low is the per-child resident size: the larger of this source's
+  running fork children's average and the source's own (young children understate it), else a 256 MiB fresh-restore floor;
+  high is every child using all its memory. Children
   fault pages back in after a restore, so a child's size grows towards (and on the M4 slightly past) its parent's. The time
   is the median of forks recorded on this Mac and is absent until there is one.
 - `GET /v1/host/overview`: `daemon` (`version`, `uptime_seconds`), `host` (`os_version`, `cpu_count`, `memory_total_mib`,

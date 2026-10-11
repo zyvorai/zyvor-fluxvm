@@ -56,30 +56,39 @@ pub struct ForkPlan {
     pub predicted: Predicted,
 }
 
-/// What the low bound was derived from, in order of preference.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RssBasis {
-    /// The average resident size of this source's running fork children.
-    Children(u64),
-    /// The source's own resident size: a child converges towards its parent's working set.
-    Parent(u64),
-}
-
-/// Memory bounds: the low bound is the per-child resident size the basis gives, capped at the guest's memory (a floor of
-/// a fresh restore when there is no basis); the high bound is every child touching all of its memory.
-pub fn memory_bounds(guest_mib: u64, count: u32, basis: Option<RssBasis>) -> (u64, u64, String) {
-    let (per, basis) = match basis {
-        Some(RssBasis::Children(m)) => (
-            m,
-            format!("average of this source's running fork children ({m} MiB each)"),
-        ),
-        Some(RssBasis::Parent(m)) => (
-            m,
+/// Memory bounds. Per-child low bound: the larger of the source's running fork children's average resident size and the
+/// source's own (a restored child faults its pages back in and converges towards its parent's working set, so young
+/// children understate it), capped at the guest's memory; with neither measurable, a fresh-restore floor. The high bound
+/// is every child touching all of its memory.
+pub fn memory_bounds(
+    guest_mib: u64,
+    count: u32,
+    children_mib: Option<u64>,
+    parent_mib: Option<u64>,
+) -> (u64, u64, String) {
+    let (per, basis) = match (children_mib, parent_mib) {
+        (Some(c), Some(p)) if c >= p => (
+            c,
             format!(
-                "the source's own resident size ({m} MiB): children converge towards it as they fault pages back in"
+                "this source's running fork children ({c} MiB each, above the source's own {p} MiB)"
             ),
         ),
-        None => (
+        (c, Some(p)) => (
+            p,
+            match c {
+                Some(c) => format!(
+                    "the source's own resident size ({p} MiB); its fork children hold {c} MiB so far and converge towards it as they fault pages back in"
+                ),
+                None => format!(
+                    "the source's own resident size ({p} MiB): children converge towards it as they fault pages back in"
+                ),
+            },
+        ),
+        (Some(c), None) => (
+            c,
+            format!("this source's running fork children ({c} MiB each)"),
+        ),
+        (None, None) => (
             FRESH_RESTORE_RSS_MIB,
             format!(
                 "{FRESH_RESTORE_RSS_MIB} MiB per child, the size right after a restore; it grows towards the source's working set"
@@ -252,22 +261,22 @@ impl VmManager {
             })
             .collect();
         let parent = src.clone();
-        let (observed, host) = tokio::task::spawn_blocking(move || {
+        let ((children, parent_rss), host) = tokio::task::spawn_blocking(move || {
+            let mib = |b: u64| b / 1_048_576;
             let rows = crate::vz_devices::runner_usage_samples(&siblings);
-            let basis = if rows.is_empty() {
-                crate::vz_devices::runner_usage_samples(std::slice::from_ref(&parent))
-                    .first()
-                    .map(|r| RssBasis::Parent(r.rss_bytes / 1_048_576))
-            } else {
-                Some(RssBasis::Children(
-                    rows.iter().map(|r| r.rss_bytes).sum::<u64>() / rows.len() as u64 / 1_048_576,
-                ))
-            };
-            (basis, fluxvm_core::pressure_admission::sample_host())
+            let children = (!rows.is_empty())
+                .then(|| mib(rows.iter().map(|r| r.rss_bytes).sum::<u64>() / rows.len() as u64));
+            let parent_rss = crate::vz_devices::runner_usage_samples(std::slice::from_ref(&parent))
+                .first()
+                .map(|r| mib(r.rss_bytes));
+            (
+                (children, parent_rss),
+                fluxvm_core::pressure_admission::sample_host(),
+            )
         })
         .await
-        .unwrap_or((None, Default::default()));
-        let (low, high, basis) = memory_bounds(src.request.memory_mib, count, observed);
+        .unwrap_or(((None, None), Default::default()));
+        let (low, high, basis) = memory_bounds(src.request.memory_mib, count, children, parent_rss);
         let est = crate::events::global()
             .and_then(|l| {
                 l.list(&crate::events::EventFilter {
@@ -321,21 +330,25 @@ mod tests {
 
     #[test]
     fn memory_bounds_use_the_floor_cap_at_the_guest_and_scale_with_count() {
-        let (low, high, basis) = memory_bounds(2048, 4, None);
+        let (low, high, basis) = memory_bounds(2048, 4, None, None);
         assert_eq!((low, high), (4 * 256, 4 * 2048));
         assert!(basis.contains("right after a restore"));
         // A guest smaller than the floor is capped at its own memory.
-        let (low, high, _) = memory_bounds(128, 2, None);
+        let (low, high, _) = memory_bounds(128, 2, None, None);
         assert_eq!((low, high), (256, 256));
-        // The parent's resident size beats the floor; observed children beat the parent.
-        let (low, _, basis) = memory_bounds(2048, 3, Some(RssBasis::Parent(735)));
+        // The parent's resident size beats young children, which understate where they settle.
+        let (low, _, basis) = memory_bounds(2048, 3, Some(221), Some(735));
         assert_eq!(low, 3 * 735);
-        assert!(basis.contains("735") && basis.contains("converge"));
-        let (low, _, basis) = memory_bounds(2048, 3, Some(RssBasis::Children(700)));
-        assert_eq!(low, 2100);
-        assert!(basis.contains("fork children"));
+        assert!(basis.contains("735") && basis.contains("221") && basis.contains("converge"));
+        // Children that have grown past the parent win.
+        let (low, _, basis) = memory_bounds(2048, 3, Some(900), Some(735));
+        assert_eq!(low, 2700);
+        assert!(basis.contains("above the source's own"));
+        // Either alone is used as it is.
+        assert_eq!(memory_bounds(2048, 2, None, Some(500)).0, 1000);
+        assert_eq!(memory_bounds(2048, 2, Some(400), None).0, 800);
         // Never above what the guest could use.
-        assert_eq!(memory_bounds(512, 2, Some(RssBasis::Parent(900))).0, 1024);
+        assert_eq!(memory_bounds(512, 2, None, Some(900)).0, 1024);
     }
 
     #[test]

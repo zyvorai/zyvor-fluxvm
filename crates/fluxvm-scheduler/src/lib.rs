@@ -2949,6 +2949,7 @@ impl VmManager {
             "vm.create",
             &[
                 ("vm_id", &vm_id),
+                ("name", &record.name),
                 ("tenant", &tenant),
                 ("image_sha256", &image_sha256),
                 ("signed_by", &signed_by),
@@ -4977,7 +4978,10 @@ impl VmManager {
         let vm_id = id.to_string();
         fluxvm_core::grants::global().remove_sandbox(&vm_id);
         let tenant = vm.request.tenant.clone().unwrap_or_default();
-        audit_event("vm.delete", &[("vm_id", &vm_id), ("tenant", &tenant)]);
+        audit_event(
+            "vm.delete",
+            &[("vm_id", &vm_id), ("name", &vm.name), ("tenant", &tenant)],
+        );
         Ok(())
     }
 
