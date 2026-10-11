@@ -2266,6 +2266,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "fluxvm-core",
+ "fluxvm-guest-protocol",
  "fluxvm-oci-init",
  "fluxvm-vz-switch",
  "libc",

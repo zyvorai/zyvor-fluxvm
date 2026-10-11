@@ -631,6 +631,11 @@ pub struct AppleSpec {
     /// runs (`socket`, a name resolved under the runner socket directory, never an arbitrary path) or answered by the runner itself (`builtin`: `metadata` or `telemetry`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub vsock_services: Vec<AppleVsockService>,
+    /// macOS guests: add a virtio-socket (vsock) device so a guest-side agent (a LaunchDaemon) can be reached without SSH.
+    /// EXPERIMENTAL and unverified on hardware: whether a macOS guest exposes a usable vsock device is a hypothesis. When
+    /// the guest does not answer on vsock, exec and file access fall back to SSH. Refused for Linux guests (they always have vsock).
+    #[serde(default)]
+    pub macos_vsock: bool,
     /// Attach the root disk read-only (OCI sandboxes boot an immutable image; writes go to tmpfs).
     #[serde(default)]
     pub root_read_only: bool,
@@ -862,6 +867,7 @@ impl Default for AppleSpec {
             egress_allow: Vec::new(),
             self_control: false,
             vsock_services: Vec::new(),
+            macos_vsock: false,
             root_read_only: false,
             root_caching: AppleDiskCaching::default(),
             root_sync: AppleDiskSync::default(),
