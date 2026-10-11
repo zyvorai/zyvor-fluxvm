@@ -11,6 +11,7 @@
 //! talks to one central endpoint instead of knowing which host a VM is on.
 
 pub mod central;
+pub mod gha;
 pub mod node;
 pub mod shared_state;
 pub mod tenancy;

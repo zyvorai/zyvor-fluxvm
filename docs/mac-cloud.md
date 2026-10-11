@@ -94,6 +94,13 @@ same registry: `fluxctl up --fleet http://fleet-registry:7799` ([macos-stacks.md
 | Dev environments | A `fluxvm.toml` with a database, an app and a test runner; `fluxctl up --fleet` | [macos-stacks.md](macos-stacks.md) |
 | GUI automation | Screenshots, keyboard and mouse for any `vz` guest (`fluxctl screenshot`, `fluxctl input`, MCP `vm_screenshot` / `vm_input`), with Keychain-stored sign-in (`fluxctl signin`) | [macos.md](macos.md#agent-screen-and-input) |
 
+## Running it for several teams
+
+- [mac-cloud-tenancy.md](mac-cloud-tenancy.md): tenants and tokens, 24-hour Mac host leases (the macOS licence's
+  leasing rule), quotas, scrub, drain and usage metering in `fluxvm-agent central`.
+- [vm-images.md](vm-images.md): push a golden macOS template or Linux disk to an OCI registry once, pull it on every Mac.
+- [github-actions-runners.md](github-actions-runners.md): one fresh VM per queued GitHub Actions job.
+
 ## Things Mac users will like
 
 - **Rosetta in Linux guests:** `apple.rosetta: true` runs x86_64 Linux binaries in arm64 guests.
