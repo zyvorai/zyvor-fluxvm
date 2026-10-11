@@ -21,6 +21,30 @@ use std::path::{Path, PathBuf};
 pub const ROOT_DISK: &str = "root";
 /// `-drive if=virtio` without an id gets the BlockBackend name `virtio0`.
 const ROOT_BLOCK_DEVICE: &str = "virtio0";
+/// Node name of a local qcow2 root's format node. Persistent dirty bitmaps
+/// live on it, so it has to be the same on every boot. VMs started before
+/// the name was set have an auto-generated one until their next boot.
+pub const ROOT_NODE: &str = "root";
+
+/// The `-drive` value for the root disk. A local qcow2 root names its
+/// format node [`ROOT_NODE`]; the device and BlockBackend (`virtio0`) are
+/// what they always were, so the guest sees no change. Raw and NBD roots
+/// can't hold persistent bitmaps and keep an auto-generated node name.
+pub fn root_drive(disk: &Path, disk_format: &str, nbd_export: Option<&Path>) -> String {
+    match nbd_export {
+        Some(socket) => format!("file=nbd:unix:{},if=virtio,format=raw", socket.display()),
+        // writeback (not cache=none) so QMP `savevm` / internal snapshots work on
+        // CoW overlays — O_DIRECT hangs human-monitor-command savevm indefinitely.
+        None if disk_format == "qcow2" => format!(
+            "file={},if=virtio,format=qcow2,cache=writeback,node-name={ROOT_NODE}",
+            path_arg(disk)
+        ),
+        None => format!(
+            "file={},if=virtio,format={disk_format},cache=writeback",
+            path_arg(disk)
+        ),
+    }
+}
 
 pub fn disks_dir(workspace: &Path) -> PathBuf {
     workspace.join("disks")
@@ -500,6 +524,31 @@ pub async fn detach(vm: &VmRecord, name: &str) -> Result<()> {
     std::fs::remove_file(&path).with_context(|| format!("removing {}", path.display()))
 }
 
+/// `block_resize` for the root: by [`ROOT_NODE`] when the root has it, else
+/// by its `virtio0` device (raw/NBD roots, or VMs booted before the node was
+/// named).
+async fn resize_live_root(qmp_sock: &Path, new_bytes: u64) -> Result<()> {
+    let by_node = qmp::execute(
+        qmp_sock,
+        "block_resize",
+        Some(json!({"node-name": ROOT_NODE, "size": new_bytes})),
+        QMP_TIMEOUT,
+    )
+    .await;
+    if by_node.is_ok() {
+        return Ok(());
+    }
+    qmp::execute(
+        qmp_sock,
+        "block_resize",
+        Some(json!({"device": ROOT_BLOCK_DEVICE, "size": new_bytes})),
+        QMP_TIMEOUT,
+    )
+    .await
+    .context("block_resize")?;
+    Ok(())
+}
+
 /// Grow a disk to `size_gib`. Shrinking is refused.
 pub async fn resize(cfg: &Config, vm: &VmRecord, name: &str, size_gib: u64) -> Result<VmDiskInfo> {
     let (path, bus) = if name == ROOT_DISK {
@@ -525,19 +574,19 @@ pub async fn resize(cfg: &Config, vm: &VmRecord, name: &str, size_gib: u64) -> R
         bail!("disk {name:?} is already {cur} bytes; resize only grows");
     }
     if is_live(vm) {
-        let target = if name == ROOT_DISK {
-            json!({"device": ROOT_BLOCK_DEVICE, "size": new_bytes})
+        let qmp_sock = vm.workspace.join("qmp.sock");
+        if name == ROOT_DISK {
+            resize_live_root(&qmp_sock, new_bytes).await?;
         } else {
-            json!({"node-name": node_name(name), "size": new_bytes})
-        };
-        qmp::execute(
-            &vm.workspace.join("qmp.sock"),
-            "block_resize",
-            Some(target),
-            QMP_TIMEOUT,
-        )
-        .await
-        .context("block_resize")?;
+            qmp::execute(
+                &qmp_sock,
+                "block_resize",
+                Some(json!({"node-name": node_name(name), "size": new_bytes})),
+                QMP_TIMEOUT,
+            )
+            .await
+            .context("block_resize")?;
+        }
     } else {
         let out = tokio::process::Command::new(&cfg.qemu_img_binary)
             .arg("resize")
@@ -566,6 +615,24 @@ mod tests {
         for bad in ["", "root", "-x", "Upper", "a/b", "a.b", &"x".repeat(33)] {
             assert!(validate_disk_name(bad).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn qcow2_root_names_its_format_node_and_keeps_the_virtio_drive() {
+        let d = root_drive(Path::new("/w/root.qcow2"), "qcow2", None);
+        assert_eq!(
+            d,
+            "file=/w/root.qcow2,if=virtio,format=qcow2,cache=writeback,node-name=root"
+        );
+        let raw = root_drive(Path::new("/srv/shared/root.raw"), "raw", None);
+        assert!(!raw.contains("node-name"), "{raw}");
+        assert!(raw.contains("if=virtio,format=raw,cache=writeback"));
+        let nbd = root_drive(
+            Path::new("/w/root.qcow2"),
+            "qcow2",
+            Some(Path::new("/w/nbd.sock")),
+        );
+        assert_eq!(nbd, "file=nbd:unix:/w/nbd.sock,if=virtio,format=raw");
     }
 
     #[test]
