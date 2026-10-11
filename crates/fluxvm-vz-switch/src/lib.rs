@@ -24,6 +24,89 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
+/// Where observed frames go: an in-process tap (the switch is embedded in the daemon) or a bridge client that
+/// ships them over a unix socket to the process that owns the observer (the switch runs as its own process, see
+/// `--netobs-socket`). Either way a frame is queued without blocking; a full queue drops and counts.
+#[cfg(feature = "netobs")]
+#[derive(Clone)]
+pub enum TapSink {
+    Local(fluxvm_netobs::NetTap),
+    Bridge(fluxvm_netobs::bridge::BridgeClient),
+}
+
+#[cfg(feature = "netobs")]
+impl TapSink {
+    fn tap_as(
+        &self,
+        id: &std::sync::Arc<fluxvm_netobs::Identity>,
+        direction: fluxvm_netobs::Direction,
+        verdict: fluxvm_netobs::Verdict,
+        frame: &[u8],
+    ) {
+        match self {
+            TapSink::Local(t) => t.tap_as(id, direction, verdict, frame),
+            TapSink::Bridge(b) => b.tap_as(id, direction, verdict, frame),
+        }
+    }
+
+    /// The switch could not hand a frame to its destination port (full receive queue).
+    fn note_forward_drop(&self) {
+        if let TapSink::Bridge(b) = self {
+            b.note_forward_drop();
+        }
+    }
+}
+
+/// Frames this process observed and routed but could not deliver because the destination port's queue was
+/// full, whether or not an observation sink is installed. Observation loss is counted by the sink itself.
+static FORWARD_DROPPED: AtomicU64 = AtomicU64::new(0);
+
+/// Total of frames dropped on delivery since the process started (see the pump's note on full receivers).
+pub fn forward_dropped() -> u64 {
+    FORWARD_DROPPED.load(Ordering::Relaxed)
+}
+
+/// The observation sink, if one was installed (feature `netobs`). Frames a guest sends are copied to it, with the
+/// verdict the switch reached, without ever blocking the switch.
+#[cfg(feature = "netobs")]
+static TAP: std::sync::OnceLock<(TapSink, String)> = std::sync::OnceLock::new();
+
+/// Installs the process-wide tap for the network named `network`. Returns false if one is already installed.
+/// Install it at startup: a port picks the tap up when its pump starts.
+#[cfg(feature = "netobs")]
+pub fn set_tap(tap: fluxvm_netobs::NetTap, network: &str) -> bool {
+    TAP.set((TapSink::Local(tap), network.to_string())).is_ok()
+}
+
+/// Installs a bridge client as the process-wide sink (see [`set_tap`]). The client reconnects by itself, so the
+/// observer's process may start later or restart; frames are dropped and counted meanwhile.
+#[cfg(feature = "netobs")]
+pub fn set_bridge(client: fluxvm_netobs::bridge::BridgeClient, network: &str) -> bool {
+    TAP.set((TapSink::Bridge(client), network.to_string()))
+        .is_ok()
+}
+
+/// Starts a [`fluxvm_netobs::bridge::BridgeClient`] for `socket` and installs it. Returns false if a sink was
+/// already installed. Never blocks and never fails because the server is not there yet.
+#[cfg(feature = "netobs")]
+pub fn connect_bridge(socket: &Path, network: &str) -> bool {
+    let client = fluxvm_netobs::bridge::BridgeClient::connect(socket, Default::default());
+    set_bridge(client, network)
+}
+
+#[cfg(feature = "netobs")]
+fn tap_verdict(routed: &Result<Vec<u64>, &'static str>) -> fluxvm_netobs::Verdict {
+    use fluxvm_netobs::{DropReason, Verdict};
+    match routed {
+        Ok(_) => Verdict::Allowed,
+        Err("spoofed source address") => Verdict::Dropped(DropReason::SpoofedSource),
+        Err("unknown destination") => Verdict::Dropped(DropReason::UnknownDestination),
+        Err("runt frame") => Verdict::Dropped(DropReason::Runt),
+        Err("oversized frame") => Verdict::Dropped(DropReason::Oversized),
+        Err(_) => Verdict::Dropped(DropReason::Other),
+    }
+}
+
 /// Largest frame accepted: a 1500-byte MTU frame plus headroom for VLAN tags. Bigger datagrams are dropped.
 pub const MAX_FRAME: usize = 1600;
 const ETH_HEADER: usize = 14;
@@ -222,6 +305,11 @@ pub fn send_hello(stream: &UnixStream, hello: &Hello, fd: RawFd) -> Result<()> {
 fn pump(table: Arc<Table>, port: Arc<Port>) {
     let mut buf = vec![0u8; 65536];
     let fd = port.frames.as_raw_fd();
+    #[cfg(feature = "netobs")]
+    let tap = TAP.get().map(|(t, network)| {
+        let id = fluxvm_netobs::Identity::new(&port.vm, network, "private", port.mac);
+        (t.clone(), id)
+    });
     while !port.closed.load(Ordering::Relaxed) {
         let mut pfd = libc::pollfd {
             fd,
@@ -251,11 +339,23 @@ fn pump(table: Arc<Table>, port: Arc<Port>) {
         let frame = &buf[..n as usize];
         let ports = table.snapshot();
         let ids: Vec<(u64, Mac)> = ports.iter().map(|p| (p.id, p.mac)).collect();
-        match targets(&ids, port.id, frame) {
+        let routed = targets(&ids, port.id, frame);
+        #[cfg(feature = "netobs")]
+        if let Some((t, id)) = &tap {
+            t.tap_as(
+                id,
+                fluxvm_netobs::Direction::FromGuest,
+                tap_verdict(&routed),
+                frame,
+            );
+        }
+        match routed {
             Ok(to) => {
                 for p in ports.iter().filter(|p| to.contains(&p.id)) {
-                    // A full receiver drops the frame, as a real switch would; TCP retransmits.
-                    unsafe {
+                    // A full receiver drops the frame, as a real switch would; TCP retransmits. The drop is
+                    // counted (`forward_dropped`, and reported to the observer): the frame was observed above but
+                    // never reached the guest, which is what retransmits in its flows are made of.
+                    let sent = unsafe {
                         libc::send(
                             p.frames.as_raw_fd(),
                             frame.as_ptr().cast(),
@@ -263,6 +363,13 @@ fn pump(table: Arc<Table>, port: Arc<Port>) {
                             libc::MSG_DONTWAIT,
                         )
                     };
+                    if sent < 0 {
+                        FORWARD_DROPPED.fetch_add(1, Ordering::Relaxed);
+                        #[cfg(feature = "netobs")]
+                        if let Some((t, _)) = &tap {
+                            t.note_forward_drop();
+                        }
+                    }
                 }
             }
             Err(why) if why == "spoofed source address" => {
@@ -490,6 +597,46 @@ mod tests {
     }
 
     #[test]
+    fn frames_a_full_receiver_cannot_take_are_counted() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("fwd.sock");
+        let s = sock.clone();
+        let server = std::thread::spawn(move || serve(&s, Duration::from_millis(1500)).unwrap());
+        for _ in 0..50 {
+            if UnixStream::connect(&sock).is_ok() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let (a, _a_ctl) = join(&sock, "fwd-a", A);
+        let (_b, _b_ctl) = join(&sock, "fwd-b", B);
+        std::thread::sleep(Duration::from_millis(200));
+        let before = forward_dropped();
+        // `_b` never reads, so its queue fills and the switch has to drop what it cannot hand over.
+        let f = frame(B, A);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while forward_dropped() == before && Instant::now() < deadline {
+            for _ in 0..200 {
+                unsafe {
+                    libc::send(
+                        a.as_raw_fd(),
+                        f.as_ptr().cast(),
+                        f.len(),
+                        libc::MSG_DONTWAIT,
+                    )
+                };
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(
+            forward_dropped() > before,
+            "full-receiver drops are counted"
+        );
+        drop((_a_ctl, _b_ctl));
+        server.join().unwrap();
+    }
+
+    #[test]
     fn guests_exchange_frames_through_a_running_switch_and_leave_cleanly() {
         let dir = tempfile::tempdir().unwrap();
         let sock = dir.path().join("net.sock");
@@ -531,5 +678,52 @@ mod tests {
         drop((_b_ctl, _c_ctl));
         server.join().unwrap();
         assert!(!sock.exists(), "an idle switch removes its socket");
+    }
+
+    #[cfg(feature = "netobs")]
+    #[test]
+    fn tap_reports_forwarded_and_dropped_frames_with_verdicts() {
+        use fluxvm_netobs::{DropReason, Verdict};
+        // The tap is process-wide, so the pumps of tests running in parallel feed this queue too (the full-receiver
+        // test alone sends hundreds of frames); it must hold all of that or this test's two frames can be dropped.
+        let (tap, rx) = fluxvm_netobs::NetTap::new(8192, 2048);
+        assert!(set_tap(tap, "tapnet"));
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("tap.sock");
+        let s = sock.clone();
+        let server = std::thread::spawn(move || serve(&s, Duration::from_millis(800)).unwrap());
+        for _ in 0..50 {
+            if UnixStream::connect(&sock).is_ok() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let (a, a_ctl) = join(&sock, "tap-a", A);
+        let (b, b_ctl) = join(&sock, "tap-b", B);
+        std::thread::sleep(Duration::from_millis(100));
+        send(&a, &frame(B, A));
+        assert_eq!(
+            recv_timeout(&b, 1000),
+            Some(frame(B, A)),
+            "forwarding is unaffected by the tap"
+        );
+        send(&a, &frame(B, C)); // spoofed source
+        std::thread::sleep(Duration::from_millis(200));
+        let mut seen = Vec::new();
+        while let Some(f) = rx.try_recv() {
+            if &*f.identity.vm_id == "tap-a" {
+                assert_eq!(&*f.identity.network, "tapnet");
+                seen.push(f.verdict);
+            }
+        }
+        assert_eq!(
+            seen,
+            vec![
+                Verdict::Allowed,
+                Verdict::Dropped(DropReason::SpoofedSource)
+            ]
+        );
+        drop((a_ctl, b_ctl));
+        server.join().unwrap();
     }
 }

@@ -3,7 +3,7 @@
 
 [package]
 name = "fluxvm-vz-switch"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2024"
 license = "Apache-2.0"
 description = "Userspace Ethernet switch for private networks between FluxVM vz guests"
@@ -15,7 +15,14 @@ path = "src/lib.rs"
 name = "fluxvm-vz-switch"
 path = "src/main.rs"
 
+[features]
+default = ["netobs"]
+# Frame tap for guest-network observability (fluxvm-netobs). On by default so a plain build accepts
+# `--netobs-socket`; build with `--no-default-features` for a switch without it (see `set_tap`).
+netobs = ["dep:fluxvm-netobs"]
+
 [dependencies]
+fluxvm-netobs = { path = "../fluxvm-netobs", optional = true }
 anyhow = "1"
 libc = "0.2"
 serde = { version = "1", features = ["derive"] }

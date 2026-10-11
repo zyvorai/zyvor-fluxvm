@@ -11,13 +11,28 @@ pub struct Capability {
     pub feature: &'static str,
     pub supported: bool,
     pub note: &'static str,
+    /// Minimum macOS major version of the host for this feature; `None` means the runner floor (macOS 14).
+    pub min_macos: Option<u32>,
 }
+
+/// The macOS major version the runner itself needs.
+pub const RUNNER_MIN_MACOS: u32 = 14;
 
 const fn yes(feature: &'static str, note: &'static str) -> Capability {
     Capability {
         feature,
         supported: true,
         note,
+        min_macos: None,
+    }
+}
+/// A supported feature that needs a newer host than the runner floor.
+const fn yes_min(feature: &'static str, min_macos: u32, note: &'static str) -> Capability {
+    Capability {
+        feature,
+        supported: true,
+        note,
+        min_macos: Some(min_macos),
     }
 }
 const fn no(feature: &'static str, note: &'static str) -> Capability {
@@ -25,6 +40,14 @@ const fn no(feature: &'static str, note: &'static str) -> Capability {
         feature,
         supported: false,
         note,
+        min_macos: None,
+    }
+}
+
+impl Capability {
+    /// The macOS major version this feature needs on the host.
+    pub fn required_macos(&self) -> u32 {
+        self.min_macos.unwrap_or(RUNNER_MIN_MACOS)
     }
 }
 
@@ -53,22 +76,37 @@ pub const CAPABILITIES: &[Capability] = &[
         "1-8 macOS displays, configurable up to 5K each",
     ),
     yes("Linux clipboard", "SPICE port; guest needs spice-vdagent"),
-    yes(
+    yes_min(
         "vmnet custom network",
-        "macOS 26+ shared/host-only network, DHCP reservation, TCP/UDP forwards; one network per VM until the broker lands; unverified on hardware",
+        26,
+        "macOS 26+ shared/host-only network, DHCP reservation, TCP/UDP forwards; named networks are shared across VMs through the fluxvm-vmnetd broker; unverified on hardware",
     ),
     yes(
+        "usernet gateway",
+        "Linux guests: userspace NAT (fluxvm-usernet) with egress/DNS policy, port forwards and flow observability in /v1/netobs; unverified on hardware",
+    ),
+    yes_min(
         "custom Virtio device",
+        27,
         "macOS 27+ Linux guests; provider/delegate, bounded control queue, guest-memory mapping probe",
     ),
     yes(
         "memory balloon",
         "runtime VZ balloon exposed through FluxVM balloon API",
     ),
-    yes("ASIF overlay", "macOS 27+ DiskImageKit sparse write layer"),
-    yes("USB mass-storage hotplug", "macOS 15+ XHCI attach/detach"),
-    yes(
+    yes_min(
+        "ASIF overlay",
+        27,
+        "macOS 27+ DiskImageKit sparse write layer",
+    ),
+    yes_min(
+        "USB mass-storage hotplug",
+        15,
+        "macOS 15+ XHCI attach/detach",
+    ),
+    yes_min(
         "macOS 27 provisioning",
+        27,
         "first-boot user/autologin/Remote Login",
     ),
     yes(
@@ -79,12 +117,14 @@ pub const CAPABILITIES: &[Capability] = &[
         "Linux Rosetta",
         "optional VZLinuxRosettaDirectoryShare; host must have Rosetta available",
     ),
-    yes(
+    yes_min(
         "nested virtualization",
+        15,
         "Linux guests only, when VZGenericPlatformConfiguration reports support",
     ),
-    yes(
+    yes_min(
         "USB controller",
+        15,
         "XHCI controller configured for VZ USB mass-storage/passthrough hotplug",
     ),
     yes("serial console", "VM log and /v1/vms/{id}/serial"),
@@ -96,6 +136,10 @@ pub const CAPABILITIES: &[Capability] = &[
     yes(
         "guest agent over vsock",
         "needs the guest agent in the image; proxied like Firecracker",
+    ),
+    yes(
+        "guest agent over vsock, macOS guests (apple.macos_vsock)",
+        "EXPERIMENTAL, opt-in, unverified on hardware: adds a virtio-socket device to a macOS guest; whether the guest exposes a usable vsock is a hypothesis. Needs the macOS LaunchDaemon agent (crates/fluxvm-guest-agent/macos); exec and files fall back to SSH when it does not answer",
     ),
     yes(
         "macOS guests",
@@ -110,8 +154,9 @@ pub const CAPABILITIES: &[Capability] = &[
         "NUMA, hugepages, cpuset, vfio",
         "no such controls on Apple silicon",
     ),
-    yes(
+    yes_min(
         "EFI Secure Boot",
+        27,
         "macOS 27+ Linux EFI guests: Apple or custom platform key, Microsoft or custom KEK/db/dbx",
     ),
     no(
@@ -120,8 +165,8 @@ pub const CAPABILITIES: &[Capability] = &[
     ),
     no("hotplug (cpu, memory, disks, nics)", "not supported"),
     no(
-        "data disks, cdroms, non-default storage",
-        "not implemented yet",
+        "top-level data_disks and cdroms",
+        "use apple.extra_disks (image, block, NBD; virtio, NVMe, USB) or apple.media instead",
     ),
     no(
         "firmware overrides",
@@ -297,6 +342,33 @@ pub fn validate_disk(d: &fluxvm_core::model::AppleDisk) -> Result<()> {
                 );
             }
         }
+        AppleDiskKind::Overlay => {
+            let overlay = d.overlay.as_deref().unwrap_or(std::path::Path::new(""));
+            for (what, p) in [
+                ("path (the base image)", d.path.as_path()),
+                ("overlay", overlay),
+            ] {
+                if !p.is_absolute() {
+                    bail!(
+                        "an overlay disk's {what} must be an absolute path, not {}",
+                        p.display()
+                    );
+                }
+                // `fluxvm-blockd serve --export name=base,overlay=...` is comma separated.
+                if p.to_string_lossy().contains(',') {
+                    bail!(
+                        "an overlay disk's paths cannot contain a comma: {}",
+                        p.display()
+                    );
+                }
+            }
+            if overlay == d.path {
+                bail!("an overlay disk's overlay must differ from its base path");
+            }
+            if d.iops == Some(0) || d.bps == Some(0) {
+                bail!("iops and bps must be at least 1 (leave them out for no limit)");
+            }
+        }
         AppleDiskKind::Nbd => {
             let url = d.url.as_deref().unwrap_or("");
             let scheme = url.split_once("://").map(|(s, _)| s);
@@ -312,6 +384,11 @@ pub fn validate_disk(d: &fluxvm_core::model::AppleDisk) -> Result<()> {
     }
     if d.kind != AppleDiskKind::Nbd && d.url.is_some() {
         bail!("url is for nbd disks");
+    }
+    if d.kind != AppleDiskKind::Overlay
+        && (d.overlay.is_some() || d.iops.is_some() || d.bps.is_some())
+    {
+        bail!("overlay, iops and bps are for overlay disks");
     }
     if let Some(id) = &d.block_device_id {
         if d.controller != fluxvm_core::model::AppleDiskController::Virtio {
@@ -332,7 +409,174 @@ pub fn validate_disk(d: &fluxvm_core::model::AppleDisk) -> Result<()> {
     Ok(())
 }
 
+/// Ports the runner uses itself, or that a guest's own services expect (sshd over vsock).
+const RESERVED_VSOCK_PORTS: [u32; 4] = [22, 3128, 7790, 7791];
+
+/// The port of an `apple.vsock_services[].tcp` target. Only `127.0.0.1:<port>` (or `localhost:<port>`) with a port of
+/// 1024 or more is accepted, so a guest can never be pointed at another machine, the LAN or a privileged port.
+pub fn loopback_tcp_port(target: &str) -> Result<u16> {
+    let bad = || {
+        anyhow::anyhow!(
+            "apple.vsock_services tcp target {target:?} must be 127.0.0.1:<port> with a port of 1024..=65535 (loopback only)"
+        )
+    };
+    let (host, port) = target.rsplit_once(':').ok_or_else(bad)?;
+    if host != "127.0.0.1" && host != "localhost" {
+        return Err(bad());
+    }
+    if port.is_empty() || !port.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(bad());
+    }
+    match port.parse::<u16>() {
+        Ok(p) if p >= 1024 => Ok(p),
+        _ => Err(bad()),
+    }
+}
+
+fn validate_vsock_services(services: &[fluxvm_core::model::AppleVsockService]) -> Result<()> {
+    if services.len() > 16 {
+        bail!("apple.vsock_services allows at most 16 entries");
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    for s in services {
+        if !(1024..=65535).contains(&s.port) || RESERVED_VSOCK_PORTS.contains(&s.port) {
+            bail!(
+                "apple.vsock_services port {} must be 1024..=65535 and not one of {:?}",
+                s.port,
+                RESERVED_VSOCK_PORTS
+            );
+        }
+        if !seen.insert(s.port) {
+            bail!("apple.vsock_services lists port {} twice", s.port);
+        }
+        match (&s.socket, &s.builtin, &s.tcp) {
+            (None, None, Some(t)) => {
+                loopback_tcp_port(t)?;
+            }
+            (Some(n), None, None) => {
+                if n.is_empty()
+                    || n.len() > 32
+                    || !n.chars().all(|c| {
+                        c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_'
+                    })
+                {
+                    bail!("apple.vsock_services socket name {n:?} must match [a-z0-9_-]{{1,32}}");
+                }
+            }
+            (None, Some(b), None) if b == "metadata" || b == "telemetry" => {}
+            (None, Some(b), None) => {
+                bail!("apple.vsock_services builtin {b:?} is not \"metadata\" or \"telemetry\"")
+            }
+            _ => bail!(
+                "apple.vsock_services port {} needs exactly one of socket, builtin and tcp",
+                s.port
+            ),
+        }
+    }
+    Ok(())
+}
+
+static HOST: std::sync::RwLock<Option<crate::host_caps::AppleHostCapabilities>> =
+    std::sync::RwLock::new(None);
+
+/// Installs (or clears) the live host capabilities that [`validate_request`] consults. The daemon sets them once from
+/// `host_capabilities()`; with none installed, only the static table applies.
+pub fn set_host_capabilities(caps: Option<crate::host_caps::AppleHostCapabilities>) {
+    *HOST.write().unwrap_or_else(|e| e.into_inner()) = caps;
+}
+
+/// The macOS major version in `os_version` as reported by `ProcessInfo` (`"Version 27.2 (Build 25C56)"`).
+pub fn macos_major(os_version: &str) -> Option<u32> {
+    let rest = &os_version[os_version.find(|c: char| c.is_ascii_digit())?..];
+    rest.split(|c: char| !c.is_ascii_digit())
+        .next()?
+        .parse()
+        .ok()
+}
+
+fn min_macos_of(feature: &str) -> u32 {
+    CAPABILITIES
+        .iter()
+        .find(|c| c.feature == feature)
+        .map_or(RUNNER_MIN_MACOS, Capability::required_macos)
+}
+
+/// The table features a request turns on, as `(request field, capability feature)`.
+fn requested_features(req: &CreateVmRequest) -> Vec<(&'static str, &'static str)> {
+    let mut out = Vec::new();
+    if req.secure_boot == Some(true) {
+        out.push(("secure_boot", "EFI Secure Boot"));
+    }
+    let Some(a) = &req.apple else { return out };
+    if a.vmnet.is_some() {
+        out.push(("apple.vmnet", "vmnet custom network"));
+    }
+    if a.custom_virtio {
+        out.push(("apple.custom_virtio", "custom Virtio device"));
+    }
+    if a.asif_overlay {
+        out.push(("apple.asif_overlay", "ASIF overlay"));
+    }
+    if a.nested_virtualization {
+        out.push(("apple.nested_virtualization", "nested virtualization"));
+    }
+    if a.usb_controller || a.usb_controllers > 0 {
+        out.push(("apple.usb_controller", "USB controller"));
+    }
+    if a.provision_username.is_some() || a.provision_auto_login || a.provision_remote_login {
+        out.push(("apple.provision_*", "macOS 27 provisioning"));
+    }
+    out
+}
+
+/// Refuses requested features the host's macOS cannot provide, naming the real OS requirement.
+fn validate_host(
+    req: &CreateVmRequest,
+    host: &crate::host_caps::AppleHostCapabilities,
+) -> Result<()> {
+    let have = macos_major(&host.os_version);
+    for (field, feature) in requested_features(req) {
+        let need = min_macos_of(feature);
+        if let Some(have) = have
+            && have < need
+        {
+            bail!(
+                "{field} needs macOS {need} or later; this Mac runs macOS {have} ({})",
+                host.os_version
+            );
+        }
+    }
+    if req.apple.as_ref().is_some_and(|a| a.nested_virtualization)
+        && have.is_some()
+        && !host.nested_virtualization
+    {
+        bail!(
+            "apple.nested_virtualization is not supported by this Mac (needs an M3 or later and macOS 15+)"
+        );
+    }
+    Ok(())
+}
+
+/// [`validate_request`] against explicit host capabilities (or none), for deterministic checks.
+pub fn validate_request_with_host(
+    req: &CreateVmRequest,
+    host: Option<&crate::host_caps::AppleHostCapabilities>,
+) -> Result<()> {
+    validate_static(req)?;
+    if let Some(h) = host {
+        validate_host(req, h)?;
+    }
+    Ok(())
+}
+
+/// Admission: the static support table, plus the live host's macOS version when it has been installed with
+/// [`set_host_capabilities`].
 pub fn validate_request(req: &CreateVmRequest) -> Result<()> {
+    let host = HOST.read().unwrap_or_else(|e| e.into_inner()).clone();
+    validate_request_with_host(req, host.as_ref())
+}
+
+fn validate_static(req: &CreateVmRequest) -> Result<()> {
     macro_rules! reject {
         ($cond:expr, $msg:expr) => {
             if $cond {
@@ -341,12 +585,35 @@ pub fn validate_request(req: &CreateVmRequest) -> Result<()> {
         };
     }
     if let Some(apple) = &req.apple
+        && apple.macos_vsock
+        && !matches!(apple.guest_os, fluxvm_core::model::AppleGuest::Macos)
+    {
+        bail!("apple.macos_vsock is for macOS guests (Linux guests always have a vsock device)");
+    }
+    if let Some(apple) = &req.apple
         && apple.self_control
         && matches!(apple.guest_os, fluxvm_core::model::AppleGuest::Macos)
     {
         bail!(
             "apple.self_control needs a Linux guest (the in-guest relay is installed by cloud-init)"
         );
+    }
+    if let Some(apple) = &req.apple {
+        validate_vsock_services(&apple.vsock_services)?;
+        if apple.usb_controllers > 4 {
+            bail!("apple.usb_controllers must be 0-4");
+        }
+        let buses = apple.usb_controllers.max(1);
+        for d in &apple.extra_disks {
+            if let Some(b) = d.usb_bus {
+                if d.controller != fluxvm_core::model::AppleDiskController::Usb {
+                    bail!("usb_bus applies to the usb controller only");
+                }
+                if b >= buses {
+                    bail!("usb_bus {b} needs apple.usb_controllers > {b}");
+                }
+            }
+        }
     }
     if let Some(apple) = &req.apple
         && !apple.egress_allow.is_empty()
@@ -441,6 +708,9 @@ pub fn validate_request(req: &CreateVmRequest) -> Result<()> {
                     );
                 }
             }
+        }
+        if let Some(u) = &apple.usernet {
+            crate::usernet::validate(u, req, apple)?;
         }
         crate::macos_install::validate(req)?;
         if apple.custom_virtio && matches!(apple.guest_os, fluxvm_core::model::AppleGuest::Macos) {
@@ -548,6 +818,15 @@ pub fn validate_request(req: &CreateVmRequest) -> Result<()> {
                 bail!("apple.extra_disks name {} is used twice", d.name_at(i));
             }
         }
+        // Two overlays on one file would have two servers writing it.
+        let mut overlays = std::collections::HashSet::new();
+        for d in &apple.extra_disks {
+            if let Some(o) = &d.overlay
+                && !overlays.insert(o)
+            {
+                bail!("apple.extra_disks overlay {} is used twice", o.display());
+            }
+        }
         if macos_guest && !apple.tagged_shares.is_empty() {
             bail!("apple.tagged_shares is a Linux-guest feature");
         }
@@ -631,7 +910,10 @@ pub fn validate_request(req: &CreateVmRequest) -> Result<()> {
             );
         }
     }
-    reject!(!req.data_disks.is_empty(), "data disks");
+    reject!(
+        !req.data_disks.is_empty(),
+        "data_disks (use apple.extra_disks)"
+    );
     reject!(
         !req.cdroms.is_empty(),
         "cdroms (use apple.media for an installer image)"
@@ -815,6 +1097,138 @@ pub fn with_self_control_forwarder(mut ci: CloudInitSpec) -> CloudInitSpec {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn host(os: &str, nested: bool) -> crate::host_caps::AppleHostCapabilities {
+        crate::host_caps::AppleHostCapabilities {
+            os_version: os.into(),
+            nested_virtualization: nested,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn min_macos_is_in_the_table() {
+        let min = |f: &str| {
+            CAPABILITIES
+                .iter()
+                .find(|c| c.feature == f)
+                .unwrap()
+                .min_macos
+        };
+        assert_eq!(min("USB controller"), Some(15));
+        assert_eq!(min("nested virtualization"), Some(15));
+        assert_eq!(min("vmnet custom network"), Some(26));
+        assert_eq!(min("custom Virtio device"), Some(27));
+        assert_eq!(min("EFI Secure Boot"), Some(27));
+        assert_eq!(min("pause / resume"), None);
+        assert_eq!(CAPABILITIES[0].required_macos(), RUNNER_MIN_MACOS);
+    }
+
+    #[test]
+    fn parses_the_macos_major() {
+        assert_eq!(macos_major("Version 27.2 (Build 25C56)"), Some(27));
+        assert_eq!(macos_major("Version 14.6.1 (Build 23G93)"), Some(14));
+        assert_eq!(macos_major("unknown"), None);
+    }
+
+    #[test]
+    fn refusals_name_the_real_os_requirement() {
+        let mk = req;
+        let vmnet =
+            mk(r#""apple":{"vmnet":{"mode":"shared","subnet":"10.9.0.0","mask":"255.255.255.0"}}"#);
+        let sb = mk(r#""secure_boot":true"#);
+        let err = validate_request_with_host(&sb, Some(&host("Version 26.1", false)))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("macOS 27"), "{err}");
+        assert!(validate_request_with_host(&vmnet, None).is_ok());
+        assert!(
+            validate_request_with_host(&vmnet, Some(&host("Version 26.0 (Build x)", false)))
+                .is_ok()
+        );
+        let err = validate_request_with_host(&vmnet, Some(&host("Version 15.4 (Build x)", false)))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("macOS 26") && err.contains("runs macOS 15"),
+            "{err}"
+        );
+
+        let xhci = mk(r#""apple":{"usb_controllers":1}"#);
+        let err = validate_request_with_host(&xhci, Some(&host("Version 14.7 (Build x)", false)))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("macOS 15"), "{err}");
+        assert!(validate_request_with_host(&xhci, Some(&host("Version 15.0", false))).is_ok());
+
+        let nested = mk(r#""apple":{"nested_virtualization":true}"#);
+        let err = validate_request_with_host(&nested, Some(&host("Version 15.2", false)))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("M3"), "{err}");
+        assert!(validate_request_with_host(&nested, Some(&host("Version 15.2", true))).is_ok());
+        // an unparseable OS string never blocks a request
+        assert!(validate_request_with_host(&vmnet, Some(&host("???", false))).is_ok());
+    }
+
+    #[test]
+    fn tcp_vsock_services_are_loopback_only() {
+        for good in ["127.0.0.1:8080", "localhost:11434", "127.0.0.1:1024"] {
+            assert!(loopback_tcp_port(good).is_ok(), "{good}");
+        }
+        for bad in [
+            "127.0.0.1:80",
+            "127.0.0.1:1023",
+            "127.0.0.1:0",
+            "127.0.0.1:65536",
+            "127.0.0.1:",
+            "127.0.0.1",
+            "10.0.0.5:8080",
+            "0.0.0.0:8080",
+            "192.168.64.1:8080",
+            "example.com:8080",
+            "127.0.0.2:8080",
+            "[::1]:8080",
+            "127.0.0.1:80a",
+            "127.0.0.1.evil.com:8080",
+            "",
+        ] {
+            assert!(loopback_tcp_port(bad).is_err(), "{bad}");
+        }
+        let svc = |s: &str| {
+            req(&format!(
+                r#""apple":{{"vsock_services":[{{"port":5100,{s}}}]}}"#
+            ))
+        };
+        assert!(validate_request(&svc(r#""tcp":"127.0.0.1:8080""#)).is_ok());
+        assert!(validate_request(&svc(r#""tcp":"10.0.0.2:8080""#)).is_err());
+        assert!(validate_request(&svc(r#""tcp":"127.0.0.1:80""#)).is_err());
+        // exactly one target kind
+        assert!(validate_request(&svc(r#""tcp":"127.0.0.1:8080","socket":"a""#)).is_err());
+        assert!(validate_request(&svc(r#""tcp":"127.0.0.1:8080","builtin":"metadata""#)).is_err());
+        // reserved guest ports are refused for tcp services like any other
+        let reserved = req(r#""apple":{"vsock_services":[{"port":3128,"tcp":"127.0.0.1:8080"}]}"#);
+        assert!(validate_request(&reserved).is_err());
+        let low = req(r#""apple":{"vsock_services":[{"port":80,"tcp":"127.0.0.1:8080"}]}"#);
+        assert!(validate_request(&low).is_err());
+    }
+
+    #[test]
+    fn vsock_services_are_validated() {
+        let ok = r#""apple":{"vsock_services":[{"port":5000,"socket":"metrics"},{"port":5001,"builtin":"metadata"}]}"#;
+        assert!(validate_request(&req(ok)).is_ok());
+        for bad in [
+            r#""apple":{"vsock_services":[{"port":3128,"builtin":"metadata"}]}"#,
+            r#""apple":{"vsock_services":[{"port":80,"builtin":"metadata"}]}"#,
+            r#""apple":{"vsock_services":[{"port":5000}]}"#,
+            r#""apple":{"vsock_services":[{"port":5000,"socket":"../x"}]}"#,
+            r#""apple":{"vsock_services":[{"port":5000,"builtin":"shell"}]}"#,
+            r#""apple":{"vsock_services":[{"port":5000,"socket":"a","builtin":"metadata"}]}"#,
+            r#""apple":{"vsock_services":[{"port":5000,"socket":"a"},{"port":5000,"socket":"b"}]}"#,
+        ] {
+            assert!(validate_request(&req(bad)).is_err(), "{bad}");
+        }
+    }
 
     #[test]
     fn self_control_is_for_linux_guests_and_installs_the_relay() {
@@ -1104,6 +1518,24 @@ mod tests {
     }
 
     #[test]
+    fn macos_vsock_is_for_macos_guests_only() {
+        let mac = r#""apple":{"guest_os":"macos","macos_vsock":true}"#;
+        assert!(validate_request(&req(mac)).is_ok());
+        let linux = r#""apple":{"macos_vsock":true}"#;
+        let err = validate_request(&req(linux)).unwrap_err().to_string();
+        assert!(err.contains("macos_vsock"), "{err}");
+    }
+
+    #[test]
+    fn macos_vsock_is_listed_as_experimental() {
+        let c = CAPABILITIES
+            .iter()
+            .find(|c| c.feature.contains("macos_vsock"))
+            .expect("capability row");
+        assert!(c.note.contains("EXPERIMENTAL") && c.note.contains("unverified"));
+    }
+
+    #[test]
     fn custom_virtio_is_linux_only() {
         assert!(validate_request(&req(r#""apple":{"custom_virtio":true}"#)).is_ok());
         let mac = r#""apple":{"guest_os":"macos","custom_virtio":true}"#;
@@ -1325,5 +1757,42 @@ mod tests {
             let err = format!("{:#}", validate_request(&req(json)).expect_err(json));
             assert!(err.contains(needle), "{json}: {err}");
         }
+    }
+
+    #[test]
+    fn overlay_disks_are_validated() {
+        use fluxvm_core::model::{AppleDisk, AppleDiskKind};
+        let ok = AppleDisk {
+            path: "/data/base.raw".into(),
+            overlay: Some("/data/vm1.ovl".into()),
+            kind: AppleDiskKind::Overlay,
+            iops: Some(500),
+            bps: Some(10 << 20),
+            read_only: false,
+            ..Default::default()
+        };
+        validate_disk(&ok).unwrap();
+        let bad = |f: &dyn Fn(&mut AppleDisk)| {
+            let mut d = ok.clone();
+            f(&mut d);
+            assert!(validate_disk(&d).is_err(), "{d:?}");
+        };
+        bad(&|d| d.overlay = None);
+        bad(&|d| d.overlay = Some("rel.ovl".into()));
+        bad(&|d| d.path = "base.raw".into());
+        bad(&|d| d.overlay = Some(d.path.clone()));
+        bad(&|d| d.iops = Some(0));
+        bad(&|d| d.bps = Some(0));
+        bad(&|d| d.url = Some("nbd://127.0.0.1:1/x".into()));
+        bad(&|d| d.overlay = Some("/data/a,b.ovl".into()));
+        bad(&|d| d.caching = fluxvm_core::model::AppleDiskCaching::Cached);
+        // The overlay fields belong to overlay disks only.
+        let mut img = AppleDisk {
+            path: "/data/x.raw".into(),
+            ..Default::default()
+        };
+        validate_disk(&img).unwrap();
+        img.iops = Some(1);
+        assert!(validate_disk(&img).is_err());
     }
 }

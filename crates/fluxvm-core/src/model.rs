@@ -385,6 +385,19 @@ pub struct CloudInitSpec {
     /// config without needing a custom image build.
     #[serde(default)]
     pub write_files: Vec<CloudInitFile>,
+    /// Additional cards the guest must configure statically and must not run DHCP on (private networks of
+    /// `apple.networks`). They go into the seed's `network-config` so the guest's network stack configures them before
+    /// `network-online.target`; a catch-all DHCP match would otherwise wait on them until its timeout.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub static_nics: Vec<CloudInitNic>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CloudInitNic {
+    /// The card's MAC address, lower case, colon separated.
+    pub mac: String,
+    /// Address with prefix length, e.g. `10.89.7.20/24`.
+    pub address: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -609,6 +622,10 @@ pub struct AppleSpec {
     /// Opt-in so hosts that still run the supported macOS 14 baseline do not regress.
     #[serde(default)]
     pub usb_controller: bool,
+    /// Number of XHCI controllers (USB buses), 1-4; implies `usb_controller`. 0 keeps the default of one when
+    /// `usb_controller` is set. Hot-plugged USB disks pick a bus with `usb_bus`.
+    #[serde(default, skip_serializing_if = "is_zero_u8")]
+    pub usb_controllers: u8,
     /// macOS 26+ custom vmnet network (shared or host-only) with its own DHCP pool, reservation and port forwards.
     #[serde(default)]
     pub vmnet: Option<AppleVmnetSpec>,
@@ -623,9 +640,24 @@ pub struct AppleSpec {
     /// `http://127.0.0.1:7790/mcp` in the guest (relayed to the host over vsock; scoped to this VM only).
     #[serde(default)]
     pub self_control: bool,
+    /// Extra guest→host vsock services: each guest-facing `port` is relayed either to a host Unix socket the daemon owner
+    /// runs (`socket`, a name resolved under the runner socket directory, never an arbitrary path) or answered by the runner itself (`builtin`: `metadata` or `telemetry`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub vsock_services: Vec<AppleVsockService>,
+    /// macOS guests: add a virtio-socket (vsock) device so a guest-side agent (a LaunchDaemon) can be reached without SSH.
+    /// EXPERIMENTAL and unverified on hardware: whether a macOS guest exposes a usable vsock device is a hypothesis. When
+    /// the guest does not answer on vsock, exec and file access fall back to SSH. Refused for Linux guests (they always have vsock).
+    #[serde(default)]
+    pub macos_vsock: bool,
     /// Attach the root disk read-only (OCI sandboxes boot an immutable image; writes go to tmpfs).
     #[serde(default)]
     pub root_read_only: bool,
+    /// Host caching of the root (and seed) disk image; `automatic` is VZ's default.
+    #[serde(default)]
+    pub root_caching: AppleDiskCaching,
+    /// Host flush behaviour of the root (and seed) disk image; `full` is VZ's default.
+    #[serde(default)]
+    pub root_sync: AppleDiskSync,
     /// Extra raw disks after the root (and seed) disk, in order: `/dev/vdb`, `/dev/vdc`, … for a direct-boot guest.
     #[serde(default)]
     pub extra_disks: Vec<AppleDisk>,
@@ -660,6 +692,74 @@ pub struct AppleSpec {
     /// socket name; the guest runs `rosettad` there.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rosetta_cache: Option<String>,
+    /// Linux guests: replace the NAT card with a userspace gateway (`fluxvm-usernet`) that applies this egress policy,
+    /// DNS allow/deny and port forwards, and feeds `/v1/netobs/*`. UNVERIFIED on hardware.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usernet: Option<AppleUsernet>,
+}
+
+/// Userspace gateway settings for a `vz` Linux guest (see [`AppleSpec::usernet`]). Mapped to `fluxvm-usernet`'s
+/// config by the Apple backend; with every list empty the guest gets "the public internet, no private ranges".
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct AppleUsernet {
+    /// IPv4 CIDRs (or bare addresses) the guest may reach. Any entry here, or in `allow_domains`, makes it a strict allow-list.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allow_cidrs: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deny_cidrs: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allow_ports: Vec<u16>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deny_ports: Vec<u16>,
+    /// Domain suffixes the guest may resolve (`example.com` matches itself and subdomains); others get NXDOMAIN.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dns_allow: Vec<String>,
+    /// Names that always get NXDOMAIN.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dns_deny: Vec<String>,
+    /// Let the guest reach private (RFC 1918, loopback, link-local) ranges.
+    #[serde(default)]
+    pub allow_private: bool,
+    /// Publish a guest port on the host.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub port_forwards: Vec<AppleUsernetForward>,
+    /// IP MTU, 576..=9000 (default 1500).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mtu: Option<u16>,
+    /// Serve IPv6 to the guest (a ULA /64 by SLAAC, with the same egress policy). Off by default.
+    #[serde(default)]
+    pub ipv6: bool,
+    /// IPv6 CIDRs the guest may reach (any entry here makes the policy a strict allow-list, like `allow_cidrs`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allow_cidrs6: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deny_cidrs6: Vec<String>,
+}
+
+/// One host -> guest port forward of [`AppleUsernet`].
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct AppleUsernetForward {
+    /// `tcp` (default) or `udp`.
+    #[serde(default = "default_usernet_proto")]
+    pub protocol: String,
+    /// Host address to listen on (default 127.0.0.1).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_addr: Option<String>,
+    /// 1024..=65535, or 0 for an ephemeral port.
+    pub host_port: u16,
+    pub guest_port: u16,
+    /// `v4` (default) forwards to the guest's lease address; `v6` needs `apple.usernet.ipv6`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guest_family: Option<String>,
+    /// Explicit guest address: for `v6` an address inside the guest /64 (otherwise the last one the guest used).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guest_addr: Option<String>,
+}
+
+fn default_usernet_proto() -> String {
+    "tcp".into()
 }
 
 /// Signatures and platform key for macOS 27 EFI Secure Boot (`VZEFIVariableStore`).
@@ -706,6 +806,25 @@ pub struct AppleShare {
     pub read_only: bool,
 }
 
+/// One guest→host vsock service (see `AppleSpec::vsock_services`). Exactly one of `socket`, `builtin` and `tcp` is set.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct AppleVsockService {
+    /// The vsock port the guest connects to (1024..=65535; not 3128, 7790 or 7791, which the runner uses itself).
+    pub port: u32,
+    /// Relay to the host Unix socket `<runner socket dir>/<vm id>.svc-<socket>`; the name is `[a-z0-9_-]{1,32}`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub socket: Option<String>,
+    /// `metadata`: the guest reads one JSON document (id, name, vcpus, memory_mib) and the runner closes.
+    /// `telemetry`: the guest writes lines that the runner appends to `<workspace>/telemetry.log` (capped at 8 MiB).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub builtin: Option<String>,
+    /// Relay to a TCP server on this Mac, `127.0.0.1:<port>` (port 1024..=65535; `localhost` is accepted and means
+    /// 127.0.0.1). Loopback only: any other host is refused. Use it to give a guest an OpenAI-compatible local model
+    /// server (MLX, llama.cpp) without a network card.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tcp: Option<String>,
+}
+
 /// An extra disk for a `vz` Linux guest: a raw image file (default), a host block device, or a network block device
 /// export, on a virtio, NVMe or USB controller.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -734,6 +853,20 @@ pub struct AppleDisk {
     /// Virtio controller only: the serial the guest sees, for a stable `/dev/disk/by-id/virtio-<id>` (1-20 ASCII).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub block_device_id: Option<String>,
+    /// USB controller, hot-plug only: which XHCI bus (0-based, below `apple.usb_controllers`) a hot-attached disk joins.
+    /// Disks present at boot are placed by Virtualization.framework.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usb_bus: Option<u8>,
+    /// `kind: overlay`: the copy-on-write overlay file (created on top of `path` if missing). Writes land here; `path`
+    /// is never modified.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub overlay: Option<PathBuf>,
+    /// `kind: overlay`: I/O operations per second cap.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub iops: Option<u64>,
+    /// `kind: overlay`: bytes per second cap.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bps: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -745,6 +878,9 @@ pub enum AppleDiskKind {
     Block,
     /// `VZNetworkBlockDeviceStorageDeviceAttachment` (macOS 14).
     Nbd,
+    /// A copy-on-write overlay (`overlay`) on a base image (`path`), served to the guest by a `fluxvm-blockd` the daemon
+    /// supervises on 127.0.0.1 and attached as an `nbd` disk. UNVERIFIED against Virtualization.framework's NBD client.
+    Overlay,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -824,11 +960,16 @@ impl Default for AppleSpec {
             rosetta: false,
             nested_virtualization: false,
             usb_controller: false,
+            usb_controllers: 0,
             vmnet: None,
             custom_virtio: false,
             egress_allow: Vec::new(),
             self_control: false,
+            vsock_services: Vec::new(),
+            macos_vsock: false,
             root_read_only: false,
+            root_caching: AppleDiskCaching::default(),
+            root_sync: AppleDiskSync::default(),
             extra_disks: Vec::new(),
             tagged_shares: Vec::new(),
             init_config: None,
@@ -838,6 +979,7 @@ impl Default for AppleSpec {
             efi_secure_boot: None,
             recovery: false,
             rosetta_cache: None,
+            usernet: None,
         }
     }
 }
@@ -2160,4 +2302,8 @@ mod migration_tls_model_tests {
         .unwrap();
         assert!(value.get("tls").is_some());
     }
+}
+
+fn is_zero_u8(v: &u8) -> bool {
+    *v == 0
 }

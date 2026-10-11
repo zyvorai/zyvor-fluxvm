@@ -5,6 +5,10 @@
 //! for it) is reached over vsock through the runner's `CONNECT` proxy first; when the agent does not answer, and always for
 //! other guests, over SSH (see `fluxvm_apple::ssh`). Container (OCI) sandboxes run no sshd: they are reached only through
 //! the agent.
+//!
+//! macOS guests have no FluxVM agent by default and no vsock device. With `apple.macos_vsock` (EXPERIMENTAL, unverified on
+//! hardware) the runner adds a virtio-socket device and a LaunchDaemon agent (`crates/fluxvm-guest-agent/macos`) may
+//! answer on it; such a guest is probed with a short ping before each agent call, and SSH stays the fallback.
 
 use crate::VmManager;
 use anyhow::{Context, Result, bail};
@@ -20,6 +24,10 @@ pub const DEFAULT_SANDBOX_USER: &str = "sandbox";
 
 /// The image that ships the guest agent (see `docs/agent-micro.md`).
 pub const AGENT_MICRO_IMAGE: &str = "agent-micro";
+
+/// A macOS guest's agent is probed with a ping this long before a real request, so a guest that has the vsock device but no
+/// listening agent falls back to SSH quickly instead of after the full request timeout.
+const MACOS_PROBE_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// How long a request waits on the agent beyond its own timeout before falling back.
 const AGENT_GRACE: Duration = Duration::from_secs(5);
@@ -43,12 +51,53 @@ pub(crate) fn vz_sandbox_agent(create: &CreateVmRequest) -> Option<AgentSpec> {
             enabled: true,
             ..AgentSpec::default()
         }),
+        // A macOS guest that opted in to vsock tries the agent first (SSH remains the fallback).
+        _ if macos_vsock_requested(create) => Some(AgentSpec {
+            enabled: true,
+            ..AgentSpec::default()
+        }),
         _ => None,
     }
 }
 
-fn agent_enabled(vm: &VmRecord) -> bool {
-    vm.request.agent.as_ref().is_some_and(|a| a.enabled)
+/// The request opted a macOS guest in to the experimental vsock device (`apple.macos_vsock`).
+fn macos_vsock_requested(create: &CreateVmRequest) -> bool {
+    create
+        .apple
+        .as_ref()
+        .is_some_and(|a| a.guest_os == fluxvm_core::model::AppleGuest::Macos && a.macos_vsock)
+}
+
+fn is_macos_guest(create: &CreateVmRequest) -> bool {
+    create
+        .apple
+        .as_ref()
+        .is_some_and(|a| a.guest_os == fluxvm_core::model::AppleGuest::Macos)
+}
+
+/// How a request to `create`'s guest should try the agent.
+#[derive(Debug, PartialEq, Eq)]
+enum AgentPath {
+    /// Straight to SSH: no agent, or a macOS guest without a vsock device (nothing could answer).
+    Skip,
+    /// Call the agent, then fall back to SSH on a transport failure.
+    Try,
+    /// A macOS guest on the experimental vsock device: ping with a short timeout first, then SSH if it does not answer.
+    ProbeFirst,
+}
+
+fn agent_path(create: &CreateVmRequest) -> AgentPath {
+    if !create.agent.as_ref().is_some_and(|a| a.enabled) {
+        return AgentPath::Skip;
+    }
+    if is_macos_guest(create) {
+        return if macos_vsock_requested(create) {
+            AgentPath::ProbeFirst
+        } else {
+            AgentPath::Skip
+        };
+    }
+    AgentPath::Try
 }
 
 /// Any answer from the agent, including an error it reports (a missing file), is final; only a transport failure (no
@@ -117,8 +166,18 @@ impl VmManager {
         request: AgentRequest,
         timeout: Duration,
     ) -> Option<AgentResponse> {
-        if !agent_enabled(vm) {
-            return None;
+        match agent_path(&vm.request) {
+            AgentPath::Skip => return None,
+            AgentPath::Try => {}
+            AgentPath::ProbeFirst => {
+                let probe =
+                    fluxvm_vsock_client::call(vm, AgentRequest::Ping, MACOS_PROBE_TIMEOUT).await;
+                if !matches!(probe, Ok(AgentResponse::Pong)) {
+                    SSH_FALLBACKS.fetch_add(1, Ordering::Relaxed);
+                    tracing::debug!(vm = %vm.id, "macOS guest agent did not answer the vsock probe; using SSH");
+                    return None;
+                }
+            }
         }
         let r = fluxvm_vsock_client::call(vm, request, timeout + AGENT_GRACE).await;
         if agent_answered(&r) {
@@ -253,6 +312,51 @@ mod tests {
             ..AgentSpec::default()
         };
         assert!(vz_sandbox_agent(&create("/my.raw", Some(off))).is_none());
+    }
+
+    fn macos(vsock: bool, agent: Option<AgentSpec>) -> CreateVmRequest {
+        let mut r = create("/mac.raw", agent);
+        r.apple = Some(
+            serde_json::from_value(serde_json::json!({"guest_os": "macos", "macos_vsock": vsock}))
+                .unwrap(),
+        );
+        r
+    }
+
+    #[test]
+    fn macos_guests_try_the_agent_only_when_they_opted_in_to_vsock() {
+        // No flag: no vsock device exists, so nothing is attempted and SSH is used directly.
+        assert!(vz_sandbox_agent(&macos(false, None)).is_none());
+        let mut c = macos(
+            false,
+            Some(AgentSpec {
+                enabled: true,
+                ..AgentSpec::default()
+            }),
+        );
+        assert_eq!(agent_path(&c), AgentPath::Skip);
+        // Flag: an agent is enabled by default and probed before use.
+        c = macos(true, None);
+        c.agent = vz_sandbox_agent(&c);
+        assert!(c.agent.is_some());
+        assert_eq!(agent_path(&c), AgentPath::ProbeFirst);
+        // An explicitly disabled agent stays off even with the flag.
+        let off = AgentSpec {
+            enabled: false,
+            ..AgentSpec::default()
+        };
+        assert_eq!(agent_path(&macos(true, Some(off))), AgentPath::Skip);
+    }
+
+    #[test]
+    fn linux_guests_keep_the_plain_agent_path() {
+        let mut c = create("/my.raw", None);
+        assert_eq!(agent_path(&c), AgentPath::Skip);
+        c.agent = Some(AgentSpec {
+            enabled: true,
+            ..AgentSpec::default()
+        });
+        assert_eq!(agent_path(&c), AgentPath::Try);
     }
 
     #[test]

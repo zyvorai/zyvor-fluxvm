@@ -11,7 +11,7 @@ use fluxvm_core::model::{
     AppleDisk, AppleDiskController, AppleDiskKind, AppleGuest, BackendKind, VmDiskInfo, VmRecord,
     VmStatus,
 };
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
 use uuid::Uuid;
 
 /// Most extra disks per VM (virtio and NVMe each take a PCI slot).
@@ -59,6 +59,7 @@ fn kind_name(k: AppleDiskKind) -> &'static str {
         AppleDiskKind::Image => "raw",
         AppleDiskKind::Block => "block",
         AppleDiskKind::Nbd => "nbd",
+        AppleDiskKind::Overlay => "overlay",
     }
 }
 
@@ -104,7 +105,136 @@ pub(crate) fn list(vm: &VmRecord) -> Vec<VmDiskInfo> {
     out
 }
 
+/// A comparable form of `p`: symlinks resolved when the file (or, for an overlay not yet created, its directory) exists,
+/// otherwise the path with `.`/`..` folded away.
+fn canon(p: &Path) -> PathBuf {
+    if let Ok(c) = std::fs::canonicalize(p) {
+        return c;
+    }
+    if let (Some(dir), Some(file)) = (p.parent(), p.file_name())
+        && let Ok(d) = std::fs::canonicalize(dir)
+    {
+        return d.join(file);
+    }
+    let mut out = PathBuf::new();
+    for c in p.components() {
+        match c {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
+}
+
+/// Refuses a disk set whose `overlay` files are not exclusively this VM's. An overlay is written by whichever guest has
+/// it attached, so it must not also be another VM record's overlay, base image, extra image or root disk (running or
+/// not: a stopped record is a start away from corrupting it), nor the base of another overlay of the same VM. Equally,
+/// an overlay's own base must not be a file another VM's overlay writes to (a snapshot chain parent in use).
+///
+/// `this` is the VM the disks belong to (skipped among `others`; `None` for a VM not yet recorded).
+pub(crate) fn check_overlay_exclusive(
+    disks: &[AppleDisk],
+    this: Option<Uuid>,
+    others: &[VmRecord],
+) -> Result<()> {
+    let mine: Vec<(String, PathBuf, PathBuf)> = disks
+        .iter()
+        .enumerate()
+        .filter(|(_, d)| d.kind == AppleDiskKind::Overlay)
+        .filter_map(|(i, d)| Some((d.name_at(i), canon(d.overlay.as_ref()?), canon(&d.path))))
+        .collect();
+    if mine.is_empty() {
+        return Ok(());
+    }
+    for (i, (name, overlay, _)) in mine.iter().enumerate() {
+        for (j, (other, other_overlay, base)) in mine.iter().enumerate() {
+            if i < j && overlay == other_overlay {
+                bail!(
+                    "overlay file {} is used by both disk {name:?} and disk {other:?}",
+                    overlay.display()
+                );
+            }
+            if i != j && overlay == base {
+                bail!(
+                    "overlay file {} of disk {name:?} is the base image of disk {other:?}",
+                    overlay.display()
+                );
+            }
+        }
+    }
+    for vm in others.iter().filter(|v| Some(v.id) != this) {
+        let who = || format!("VM {} ({}, {:?})", vm.name, vm.id, vm.status);
+        for (name, overlay, base) in &mine {
+            if canon(&vm.disk) == *overlay {
+                bail!(
+                    "overlay file {} of disk {name:?} is the root disk of {}",
+                    overlay.display(),
+                    who()
+                );
+            }
+            let theirs = vm
+                .request
+                .apple
+                .as_ref()
+                .map(|a| a.extra_disks.as_slice())
+                .unwrap_or_default();
+            for (j, d) in theirs.iter().enumerate() {
+                let dname = d.name_at(j);
+                if d.kind == AppleDiskKind::Overlay
+                    && let Some(o) = d.overlay.as_ref().map(|o| canon(o))
+                {
+                    if o == *overlay {
+                        bail!(
+                            "overlay file {} of disk {name:?} is already the overlay of disk {dname:?} of {}",
+                            overlay.display(),
+                            who()
+                        );
+                    }
+                    if o == *base {
+                        bail!(
+                            "base image {} of disk {name:?} is the overlay of disk {dname:?} of {}, which may still write to it",
+                            base.display(),
+                            who()
+                        );
+                    }
+                }
+                if matches!(d.kind, AppleDiskKind::Image | AppleDiskKind::Overlay)
+                    && !d.path.as_os_str().is_empty()
+                    && canon(&d.path) == *overlay
+                {
+                    bail!(
+                        "overlay file {} of disk {name:?} is the {} of disk {dname:?} of {}",
+                        overlay.display(),
+                        if d.kind == AppleDiskKind::Image {
+                            "image"
+                        } else {
+                            "base image"
+                        },
+                        who()
+                    );
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 impl VmManager {
+    /// [`check_overlay_exclusive`] against every VM record in the store.
+    pub(crate) async fn ensure_vz_overlays_exclusive(
+        &self,
+        disks: &[AppleDisk],
+        this: Option<Uuid>,
+    ) -> Result<()> {
+        if !disks.iter().any(|d| d.kind == AppleDiskKind::Overlay) {
+            return Ok(());
+        }
+        check_overlay_exclusive(disks, this, &self.store.list().await)
+    }
+
     async fn vz_linux_vm(&self, id: Uuid) -> Result<VmRecord> {
         let vm = self.get(id).await?;
         if vm.backend != BackendKind::Vz {
@@ -173,21 +303,47 @@ impl VmManager {
             (None, AppleDiskKind::Image | AppleDiskKind::Block) => {
                 disk.path = self.check_disk_source(&disk.path)?;
             }
+            (None, AppleDiskKind::Overlay) => {
+                disk.path = self.check_disk_source(&disk.path)?;
+                // The overlay file may not exist yet; its directory is what has to be allowed.
+                let ov = disk.overlay.clone().unwrap_or_default();
+                if let (Some(dir), Some(file)) = (ov.parent(), ov.file_name()) {
+                    disk.overlay = Some(self.check_disk_source(dir)?.join(file));
+                }
+            }
             (None, AppleDiskKind::Nbd) => {}
         }
         fluxvm_apple::validate_disk(&disk)?;
         apple.extra_disks.push(disk.clone());
         fluxvm_apple::validate_request(&vm.request)?;
+        // Serialised with other creates/attaches so two VMs cannot both claim one overlay file.
+        let _overlay_guard = self.vz_overlay_lock.lock().await;
+        if disk.kind == AppleDiskKind::Overlay {
+            let all = vm
+                .request
+                .apple
+                .as_ref()
+                .map(|a| a.extra_disks.clone())
+                .unwrap_or_default();
+            self.ensure_vz_overlays_exclusive(&all, Some(id)).await?;
+        }
         let live = matches!(vm.status, VmStatus::Running | VmStatus::Paused)
             && disk.kind == AppleDiskKind::Image
             && disk.controller == AppleDiskController::Usb;
         if live {
-            let uuid = fluxvm_apple::usb_attach(&vm, &disk.path, disk.read_only)
+            let uuid = fluxvm_apple::usb_attach(&vm, &disk.path, disk.read_only, disk.usb_bus)
                 .await
                 .context("hot-attaching the USB disk")?;
             let mut map = read_hotplug(&vm.workspace);
             map.insert(name.to_owned(), Hotplug { uuid, pid: vm.pid });
             write_hotplug(&vm.workspace, &map)?;
+        }
+        if !live && matches!(vm.status, VmStatus::Running | VmStatus::Paused) {
+            tracing::warn!(
+                vm = %id,
+                disk = name,
+                "vz can only hot-attach USB image disks; this disk applies at the next boot"
+            );
         }
         self.store.update(vm.clone()).await?;
         crate::audit_event(
@@ -258,6 +414,119 @@ impl VmManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fluxvm_core::model::VmStatus;
+
+    fn overlay(base: &str, ovl: &str) -> AppleDisk {
+        serde_json::from_value(serde_json::json!({"kind": "overlay", "path": base, "overlay": ovl}))
+            .unwrap()
+    }
+
+    fn vm(name: &str, status: VmStatus, root: &str, disks: Vec<AppleDisk>) -> VmRecord {
+        let mut v: VmRecord = serde_json::from_value(serde_json::json!({
+            "id": Uuid::new_v4(), "name": name, "backend": "vz", "status": "stopped", "pid": null,
+            "created_at": "2026-01-01T00:00:00Z", "expires_at": null, "workspace": "/nonexistent/w",
+            "disk": root, "seed_disk": null, "tap_name": null, "control_socket": null,
+            "log_path": "/nonexistent/w/console.log", "error": null,
+            "request": {"name": name, "image": "/img", "vcpus": 1, "memory_mib": 512, "backend": "vz"},
+        }))
+        .unwrap();
+        v.status = status;
+        let mut a: fluxvm_core::model::AppleSpec = Default::default();
+        a.extra_disks = disks;
+        v.request.apple = Some(a);
+        v
+    }
+
+    #[test]
+    fn overlay_may_not_be_shared_with_another_vm_running_or_not() {
+        let a = vm(
+            "a",
+            VmStatus::Stopped,
+            "/nonexistent/a.raw",
+            vec![overlay("/b/base.raw", "/o/data.ovl")],
+        );
+        // Another VM, same base, its own overlay: fine.
+        assert!(
+            check_overlay_exclusive(
+                &[overlay("/b/base.raw", "/o/other.ovl")],
+                None,
+                std::slice::from_ref(&a)
+            )
+            .is_ok()
+        );
+        // Same overlay file as a stopped VM: refused, naming it.
+        let err = check_overlay_exclusive(
+            &[overlay("/b/base.raw", "/o/data.ovl")],
+            None,
+            std::slice::from_ref(&a),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("/o/data.ovl") && err.contains("VM a"), "{err}");
+        // A running one too, and `./`/`..` spellings do not hide it.
+        let mut r = a.clone();
+        r.status = VmStatus::Running;
+        assert!(
+            check_overlay_exclusive(&[overlay("/b/base.raw", "/o/x/../data.ovl")], None, &[r])
+                .is_err()
+        );
+        // The VM's own record is not a conflict.
+        assert!(
+            check_overlay_exclusive(&[overlay("/b/base.raw", "/o/data.ovl")], Some(a.id), &[a])
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn chain_parents_and_other_disks_are_protected() {
+        let a = vm(
+            "a",
+            VmStatus::Running,
+            "/nonexistent/a.raw",
+            vec![overlay("/b/base.raw", "/o/a.ovl")],
+        );
+        // Layering on top of an overlay another VM is still writing.
+        let err = check_overlay_exclusive(
+            &[overlay("/o/a.ovl", "/o/child.ovl")],
+            None,
+            std::slice::from_ref(&a),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("still write"), "{err}");
+        // Writing into another VM's base image.
+        assert!(
+            check_overlay_exclusive(
+                &[overlay("/b/x.raw", "/b/base.raw")],
+                None,
+                std::slice::from_ref(&a)
+            )
+            .is_err()
+        );
+        // Another VM's root disk.
+        assert!(
+            check_overlay_exclusive(&[overlay("/b/x.raw", "/nonexistent/a.raw")], None, &[a])
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn a_vm_cannot_reuse_one_overlay_twice() {
+        let two = [
+            overlay("/b/base.raw", "/o/a.ovl"),
+            overlay("/b/base2.raw", "/o/a.ovl"),
+        ];
+        assert!(check_overlay_exclusive(&two, None, &[]).is_err());
+        let chain = [
+            overlay("/b/base.raw", "/o/a.ovl"),
+            overlay("/o/a.ovl", "/o/b.ovl"),
+        ];
+        assert!(check_overlay_exclusive(&chain, None, &[]).is_err());
+        // Non-overlay disks are none of this check's business.
+        let image: AppleDisk =
+            serde_json::from_value(serde_json::json!({"path": "/o/a.ovl"})).unwrap();
+        assert!(check_overlay_exclusive(&[image], None, &[]).is_ok());
+    }
 
     #[test]
     fn listing_names_and_describes_each_disk() {

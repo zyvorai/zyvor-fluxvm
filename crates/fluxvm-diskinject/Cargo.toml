@@ -1,0 +1,15 @@
+# Copyright 2026 Zyvor AI Labs · https://zyvor.dev
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "fluxvm-diskinject"
+version = "0.3.0"
+edition = "2024"
+license = "Apache-2.0"
+description = "Native offline ext4 file injector for raw disk images (no mount, no loop device, no helper VM)"
+
+[dependencies]
+fluxvm-guest-protocol = { path = "../fluxvm-guest-protocol" }
+
+[dev-dependencies]
+tempfile = "3"

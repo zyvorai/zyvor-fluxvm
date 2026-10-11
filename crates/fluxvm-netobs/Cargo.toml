@@ -1,0 +1,29 @@
+# Copyright 2026 Zyvor AI Labs · https://zyvor.dev
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "fluxvm-netobs"
+version = "0.3.0"
+edition = "2024"
+license = "Apache-2.0"
+description = "Native guest-network observability for FluxVM: flows, TCP health, DNS/TLS/HTTP metadata, rollups, pcap ring"
+
+[lib]
+path = "src/lib.rs"
+
+[features]
+default = []
+# OTLP/JSON metric mapping (export::otlp_metrics_json). No extra dependencies.
+otlp = []
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+md-5 = "0.10"
+aes = "0.8"
+aes-gcm = "0.10"
+hkdf = "0.12"
+
+[dev-dependencies]
+tempfile = "3"

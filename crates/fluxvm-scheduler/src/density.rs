@@ -270,12 +270,7 @@ pub fn inflated_balloons() -> usize {
 }
 
 async fn balloon_request(vm: &VmRecord, balloon_mib: Option<u64>) -> Result<BalloonStatus> {
-    if vm.status != VmStatus::Running {
-        bail!(
-            "balloon control needs a running VM (status={:?})",
-            vm.status
-        );
-    }
+    crate::require_live(vm, false)?;
     if vm.backend == BackendKind::Vz {
         let s = fluxvm_apple::balloon_control(vm, balloon_mib).await?;
         return Ok(BalloonStatus {

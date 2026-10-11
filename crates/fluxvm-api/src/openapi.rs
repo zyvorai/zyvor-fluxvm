@@ -56,6 +56,7 @@ const SNAPSHOTS: &str = "snapshots";
 const EVENTS: &str = "events";
 const TEMPLATES: &str = "vm-templates";
 const HOST: &str = "host";
+const NETOBS: &str = "netobs";
 
 fn ops() -> Vec<Op> {
     vec![
@@ -238,6 +239,19 @@ fn ops() -> Vec<Op> {
         .body("InstantiateTemplateRequest")
         .returns("VmRecord")
         .status("201"),
+        op(
+            "post",
+            "/v1/vms/{id}/vz/display",
+            "Ask for a new preferred mode on a display of a running vz guest (admin; macOS 14+). The guest follows only when a KMS client switches its active mode; the reply says the request was made, not that the guest changed",
+            VMS,
+        )
+        .body("VzDisplayResize"),
+        op(
+            "get",
+            "/v1/vms/{id}/vz/attestation",
+            "Signed boot manifest of the vz guest's last launch and the host public key (a host claim, not hardware attestation)",
+            VMS,
+        ),
         op("get", "/v1/events", "Lifecycle events", EVENTS)
             .returns("EventList")
             .query(&[
@@ -252,6 +266,54 @@ fn ops() -> Vec<Op> {
             "Lifecycle events as Server-Sent Events",
             EVENTS,
         ),
+        op(
+            "get",
+            "/v1/netobs/summary",
+            "Guest-network observability: counters, per-VM RED totals, top talkers and errors",
+            NETOBS,
+        ),
+        op("get", "/v1/netobs/flows", "Live (and optionally closed) guest flows", NETOBS)
+            .query(&[
+                ("vm", "VM id"),
+                ("proto", "tcp, udp, icmp, icmpv6"),
+                ("port", "Either endpoint port"),
+                ("host", "Either endpoint address"),
+                ("verdict", "allowed, denied or dropped"),
+                ("closed", "Include recently closed flows"),
+                ("limit", "Newest N (default 200)"),
+            ]),
+        op(
+            "get",
+            "/v1/netobs/flows/stream",
+            "Flow, DNS, TLS, HTTP and drop metadata as Server-Sent Events (resume with since or Last-Event-ID)",
+            NETOBS,
+        )
+        .query(&[("vm", "VM id"), ("since", "Resume after this event id")]),
+        op("get", "/v1/netobs/dns", "Recent DNS queries and responses", NETOBS)
+            .query(&[("vm", "VM id"), ("limit", "Newest N (default 200)")]),
+        op("get", "/v1/netobs/history", "Retained roll-up windows", NETOBS),
+        op("get", "/v1/netobs/capture", "Capture sessions", NETOBS),
+        op(
+            "post",
+            "/v1/netobs/capture",
+            "Start a filtered, TTL-bound packet capture for a VM (admin)",
+            NETOBS,
+        ),
+        op(
+            "delete",
+            "/v1/netobs/capture",
+            "Stop and discard a VM's capture (admin)",
+            NETOBS,
+        )
+        .query(&[("vm", "VM id")])
+        .status("204"),
+        op(
+            "get",
+            "/v1/netobs/capture.pcap",
+            "Download a VM's capture ring as pcap (admin)",
+            NETOBS,
+        )
+        .query(&[("vm", "VM id")]),
     ]
 }
 
@@ -263,6 +325,12 @@ fn schemas() -> Value {
         "VmRecord": obj("A VM: id, name, status, backend, request, labels, workspace, guest_ip, ..."),
         "CreateVmRequest": obj("VM spec: name, backend, image, vcpus, memory_mib, network, cloud_init, ..."),
         "VmList": list("VmRecord"),
+        "VzDisplayResize": {"type": "object", "required": ["width", "height"], "properties": {
+            "width": {"type": "integer", "minimum": 800, "maximum": 5120},
+            "height": {"type": "integer", "minimum": 600, "maximum": 2880},
+            "display": {"type": "integer", "minimum": 0, "maximum": 7, "default": 0},
+            "ppi": {"type": "integer", "minimum": 72, "maximum": 300, "description": "macOS guests only"}
+        }},
         "VmPatch": {"type": "object", "properties": {
             "name": {"type": "string"},
             "labels": {"type": "object", "additionalProperties": {"type": ["string", "null"]}}
@@ -402,7 +470,7 @@ pub fn spec() -> Value {
         "security": [{"bearer": []}],
         "tags": [
             {"name": VMS}, {"name": SNAPSHOTS}, {"name": DISKS}, {"name": TEMPLATES},
-            {"name": EVENTS}, {"name": HOST}
+            {"name": EVENTS}, {"name": HOST}, {"name": NETOBS}
         ],
         "paths": paths,
         "components": {

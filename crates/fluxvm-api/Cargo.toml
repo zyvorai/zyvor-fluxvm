@@ -3,7 +3,7 @@
 
 [package]
 name = "fluxvm-api"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2024"
 license = "Apache-2.0"
 description = "REST API for Zyvor FluxVM"
@@ -13,6 +13,7 @@ fluxvm-core = { path = "../fluxvm-core" }
 fluxvm-scheduler = { path = "../fluxvm-scheduler" }
 fluxvm-image = { path = "../fluxvm-image" }
 fluxvm-network = { path = "../fluxvm-network" }
+fluxvm-netobs = { path = "../fluxvm-netobs" }
 fluxvm-vsock-client = { path = "../fluxvm-vsock-client" }
 fluxvm-guest-protocol = { path = "../fluxvm-guest-protocol" }
 anyhow = "1"

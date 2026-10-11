@@ -7,25 +7,25 @@
 
 mod exec_policy;
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 use anyhow::Context;
 use anyhow::Result;
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 use base64::{Engine, engine::general_purpose::STANDARD as B64};
 use clap::Parser;
 use fluxvm_guest_protocol::DEFAULT_PORT;
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 use fluxvm_guest_protocol::{
     AgentRequest, AgentResponse, DEFAULT_EXEC_TIMEOUT_SECS, Envelope, MAX_FILE_TRANSFER_BYTES,
     TOKEN_FILE_PATH, constant_time_eq, decode_line, encode_line,
 };
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 use std::io::{BufRead, BufReader, Write};
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 use std::process::{Command, Stdio};
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 use std::sync::Arc;
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 use std::time::{Duration, Instant};
 
 /// Set by fluxvm-oci-init (`fluxvm_oci_init::config::POWEROFF_VIA_INIT_ENV`).
@@ -52,7 +52,7 @@ fn main() -> Result<()> {
     run_server(cli.port, &cli.token_file)
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 fn run_server(port: u32, token_file: &str) -> Result<()> {
     use std::os::fd::FromRawFd;
 
@@ -77,34 +77,7 @@ fn run_server(port: u32, token_file: &str) -> Result<()> {
         );
     }
 
-    let listener_fd = unsafe {
-        let fd = libc::socket(libc::AF_VSOCK, libc::SOCK_STREAM, 0);
-        if fd < 0 {
-            anyhow::bail!("socket(AF_VSOCK): {}", std::io::Error::last_os_error());
-        }
-
-        let mut addr: libc::sockaddr_vm = std::mem::zeroed();
-        addr.svm_family = libc::AF_VSOCK as libc::sa_family_t;
-        addr.svm_cid = libc::VMADDR_CID_ANY;
-        addr.svm_port = port;
-
-        if libc::bind(
-            fd,
-            &addr as *const libc::sockaddr_vm as *const libc::sockaddr,
-            std::mem::size_of::<libc::sockaddr_vm>() as libc::socklen_t,
-        ) != 0
-        {
-            anyhow::bail!(
-                "bind(vsock port={port}): {}",
-                std::io::Error::last_os_error()
-            );
-        }
-        if libc::listen(fd, 16) != 0 {
-            anyhow::bail!("listen: {}", std::io::Error::last_os_error());
-        }
-        set_cloexec(fd);
-        fd
-    };
+    let listener_fd = vsock::listen(port)?;
 
     eprintln!("fluxvm-guest-agent listening on vsock port {port}");
 
@@ -125,12 +98,65 @@ fn run_server(port: u32, token_file: &str) -> Result<()> {
     }
 }
 
-#[cfg(not(target_os = "linux"))]
-fn run_server(_port: u32, _token_file: &str) -> Result<()> {
-    anyhow::bail!("fluxvm-guest-agent only supports Linux (AF_VSOCK)")
+/// The AF_VSOCK listener. Linux and Darwin differ only in the `sockaddr_vm` layout (Darwin's carries a length byte and
+/// has no `VMADDR_CID_ANY` in the `libc` crate). The Darwin path is UNVERIFIED on hardware: it assumes a macOS guest
+/// with a virtio-socket device (`apple.macos_vsock`) exposes a bindable AF_VSOCK; nothing here has run in a macOS VM.
+#[cfg(unix)]
+mod vsock {
+    use anyhow::Result;
+
+    /// `VMADDR_CID_ANY`, `(u32)-1`, on both platforms.
+    pub const CID_ANY: u32 = u32::MAX;
+
+    /// The `sockaddr_vm` for `port` on any local CID, and the length to pass to `bind`.
+    pub fn sockaddr(port: u32) -> (libc::sockaddr_vm, libc::socklen_t) {
+        let mut addr: libc::sockaddr_vm = unsafe { std::mem::zeroed() };
+        #[cfg(not(target_os = "linux"))]
+        {
+            addr.svm_len = std::mem::size_of::<libc::sockaddr_vm>() as u8;
+        }
+        addr.svm_family = libc::AF_VSOCK as libc::sa_family_t;
+        addr.svm_cid = CID_ANY;
+        addr.svm_port = port;
+        (
+            addr,
+            std::mem::size_of::<libc::sockaddr_vm>() as libc::socklen_t,
+        )
+    }
+
+    pub fn listen(port: u32) -> Result<i32> {
+        unsafe {
+            let fd = libc::socket(libc::AF_VSOCK, libc::SOCK_STREAM, 0);
+            if fd < 0 {
+                anyhow::bail!("socket(AF_VSOCK): {}", std::io::Error::last_os_error());
+            }
+            let (addr, len) = sockaddr(port);
+            if libc::bind(
+                fd,
+                &addr as *const libc::sockaddr_vm as *const libc::sockaddr,
+                len,
+            ) != 0
+            {
+                anyhow::bail!(
+                    "bind(vsock port={port}): {}",
+                    std::io::Error::last_os_error()
+                );
+            }
+            if libc::listen(fd, 16) != 0 {
+                anyhow::bail!("listen: {}", std::io::Error::last_os_error());
+            }
+            super::set_cloexec(fd);
+            Ok(fd)
+        }
+    }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(not(unix))]
+fn run_server(_port: u32, _token_file: &str) -> Result<()> {
+    anyhow::bail!("fluxvm-guest-agent supports Linux and macOS guests only (AF_VSOCK)")
+}
+
+#[cfg(unix)]
 fn handle_connection(
     file: std::fs::File,
     expected_token: &Option<String>,
@@ -213,15 +239,7 @@ fn handle_connection(
         AgentRequest::Shutdown => {
             writer.write_all(encode_line(&AgentResponse::ShuttingDown)?.as_bytes())?;
             writer.flush()?;
-            // Under fluxvm-oci-init the image's shutdown(8), if any, cannot stop the VM: PID 1 powers off on SIGUSR2.
-            if std::env::var_os(POWEROFF_VIA_INIT_ENV).is_some()
-                || Command::new("shutdown")
-                    .args(["-h", "now"])
-                    .spawn()
-                    .is_err()
-            {
-                unsafe { libc::kill(1, libc::SIGUSR2) };
-            }
+            shutdown_guest();
             return Ok(());
         }
         AgentRequest::ResetIdentity {
@@ -242,6 +260,25 @@ fn handle_connection(
     Ok(())
 }
 
+/// Powers the guest off. Linux: `shutdown -h now`, or under fluxvm-oci-init (which has no shutdown(8)) SIGUSR2 to PID 1.
+#[cfg(target_os = "linux")]
+fn shutdown_guest() {
+    if std::env::var_os(POWEROFF_VIA_INIT_ENV).is_some()
+        || Command::new("shutdown")
+            .args(["-h", "now"])
+            .spawn()
+            .is_err()
+    {
+        unsafe { libc::kill(1, libc::SIGUSR2) };
+    }
+}
+
+/// macOS: `shutdown -h now` (the agent runs as root from a LaunchDaemon). PID 1 is launchd, so there is no signal fallback.
+#[cfg(all(unix, not(target_os = "linux")))]
+fn shutdown_guest() {
+    let _ = Command::new("/sbin/shutdown").args(["-h", "now"]).spawn();
+}
+
 /// Marks `fd` close-on-exec so a later `fork`+`exec` (spawning the shell,
 /// or any other child) doesn't inherit it. `fork()` copies *every* open fd
 /// in the process by default, not just ones the child logically needs —
@@ -249,7 +286,7 @@ fn handle_connection(
 /// connection fd, and the connection would never actually reach EOF even
 /// after every fd this function itself holds is closed, since the kernel
 /// still sees a live reference in the child.
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 fn set_cloexec(fd: std::os::fd::RawFd) {
     unsafe {
         let flags = libc::fcntl(fd, libc::F_GETFD);
@@ -277,7 +314,7 @@ fn set_cloexec(fd: std::os::fd::RawFd) {
 /// agent's own process tree (reparented to the guest's init once its
 /// immediate parent exits, so nothing in the agent ever calls
 /// `wait()`/`kill()` on it either).
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 fn spawn_open_shell_session(
     listener_fd: i32,
     conn: std::fs::File,
@@ -331,7 +368,7 @@ fn spawn_open_shell_session(
 /// Always runs inside its own detached, double-forked process (see
 /// `spawn_open_shell_session`) except in the unit test below, which calls
 /// this directly to exercise the PTY logic in-process.
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 fn open_shell(
     mut conn: std::fs::File,
     mut writer: std::fs::File,
@@ -365,8 +402,21 @@ fn open_shell(
             anyhow::bail!("unlockpt: {}", std::io::Error::last_os_error());
         }
         let mut buf = vec![0u8; 256];
-        if libc::ptsname_r(master_fd, buf.as_mut_ptr() as *mut libc::c_char, buf.len()) != 0 {
-            anyhow::bail!("ptsname_r: {}", std::io::Error::last_os_error());
+        #[cfg(target_os = "linux")]
+        {
+            if libc::ptsname_r(master_fd, buf.as_mut_ptr() as *mut libc::c_char, buf.len()) != 0 {
+                anyhow::bail!("ptsname_r: {}", std::io::Error::last_os_error());
+            }
+        }
+        // Darwin has no ptsname_r; ptsname's static buffer is fine here (open_shell runs in its own detached process).
+        #[cfg(not(target_os = "linux"))]
+        {
+            let p = libc::ptsname(master_fd);
+            if p.is_null() {
+                anyhow::bail!("ptsname: {}", std::io::Error::last_os_error());
+            }
+            buf.clear();
+            buf.extend_from_slice(std::ffi::CStr::from_ptr(p).to_bytes());
         }
         let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
         buf.truncate(end);
@@ -539,7 +589,7 @@ fn open_shell(
 /// the child exits would deadlock on any command whose output exceeds the
 /// pipe buffer before it's done (child blocks writing to a full pipe that
 /// nothing is draining, so it never exits, so `try_wait` never returns).
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 fn exec_with_timeout(command: &str, timeout: Duration) -> AgentResponse {
     let mut cmd = Command::new("/bin/sh");
     cmd.arg("-c").arg(command);
@@ -547,7 +597,7 @@ fn exec_with_timeout(command: &str, timeout: Duration) -> AgentResponse {
 }
 
 /// Runs `process.argv` with execve (no shell), with its environment, directory and identity.
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 fn exec_process(process: &fluxvm_guest_protocol::ExecProcess, timeout: Duration) -> AgentResponse {
     use std::os::unix::process::CommandExt;
     if let Err(message) = process.validate() {
@@ -573,7 +623,7 @@ fn exec_process(process: &fluxvm_guest_protocol::ExecProcess, timeout: Duration)
     run_with_timeout(cmd, timeout)
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 fn run_with_timeout(mut cmd: Command, timeout: Duration) -> AgentResponse {
     let mut child = match cmd
         .stdin(Stdio::null())
@@ -645,7 +695,7 @@ fn run_with_timeout(mut cmd: Command, timeout: Duration) -> AgentResponse {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 fn put_file(path: &str, content_base64: &str, mode: Option<u32>) -> AgentResponse {
     let bytes = match B64.decode(content_base64) {
         Ok(b) => b,
@@ -686,7 +736,7 @@ fn put_file(path: &str, content_base64: &str, mode: Option<u32>) -> AgentRespons
     AgentResponse::FileWritten
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 fn get_file(path: &str) -> AgentResponse {
     let metadata = match std::fs::metadata(path) {
         Ok(m) => m,
@@ -722,7 +772,7 @@ fn get_file(path: &str) -> AgentResponse {
 }
 
 /// Valid hostname: 1..=63 chars of `[A-Za-z0-9-]`, no leading/trailing `-`.
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 fn valid_hostname(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= 63
@@ -843,9 +893,75 @@ fn reset_identity(
     AgentResponse::IdentityReset { applied, failures }
 }
 
-#[cfg(all(test, target_os = "linux"))]
+/// macOS guests: only the hostname is applied (sethostname + scutil). The Linux machine-id, RNDADDENTROPY and `ip neigh`
+/// steps have no macOS equivalent, so a request for them is reported as a failure rather than silently skipped.
+/// UNVERIFIED on hardware.
+#[cfg(all(unix, not(target_os = "linux")))]
+fn reset_identity(
+    hostname: Option<&str>,
+    regenerate_machine_id: bool,
+    reseed_entropy: bool,
+    _entropy_base64: Option<&str>,
+) -> AgentResponse {
+    let mut applied = Vec::new();
+    let mut failures = Vec::new();
+    if reseed_entropy {
+        failures.push("entropy reseed is not supported on macOS guests".to_string());
+    }
+    if regenerate_machine_id {
+        failures.push("machine-id does not exist on macOS guests".to_string());
+    }
+    if let Some(name) = hostname {
+        if !valid_hostname(name) {
+            failures.push(format!("invalid hostname {name:?}"));
+        } else {
+            let rc = unsafe {
+                libc::sethostname(
+                    name.as_ptr() as *const libc::c_char,
+                    name.len() as libc::c_int,
+                )
+            };
+            if rc != 0 {
+                failures.push(format!("sethostname: {}", std::io::Error::last_os_error()));
+            } else {
+                applied.push("hostname".to_string());
+            }
+            for key in ["HostName", "LocalHostName", "ComputerName"] {
+                let ok = Command::new("/usr/sbin/scutil")
+                    .args(["--set", key, name])
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status()
+                    .is_ok_and(|s| s.success());
+                if !ok {
+                    failures.push(format!("scutil --set {key}"));
+                }
+            }
+        }
+    }
+    AgentResponse::IdentityReset { applied, failures }
+}
+
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn vsock_sockaddr_listens_on_any_cid_at_the_requested_port() {
+        let (addr, len) = vsock::sockaddr(17777);
+        // Copy out of the packed struct before comparing.
+        let (family, cid, port) = (addr.svm_family, addr.svm_cid, addr.svm_port);
+        assert_eq!(family as i32, libc::AF_VSOCK);
+        assert_eq!(cid, u32::MAX);
+        assert_eq!(port, 17777);
+        assert_eq!(len as usize, std::mem::size_of::<libc::sockaddr_vm>());
+        #[cfg(target_os = "macos")]
+        {
+            // Darwin's sockaddr_vm is packed: len(1) family(1) reserved(2) port(4) cid(4).
+            assert_eq!(len, 12);
+            assert_eq!(addr.svm_len, 12);
+        }
+    }
 
     #[test]
     fn hostname_validation() {
@@ -921,20 +1037,17 @@ mod tests {
         // just the calling thread's fds), so the agent's read on its own
         // end never sees EOF even after the client side closes — a
         // same-process test artifact, not a real cross-VM vsock bug.
-        let rc = unsafe {
-            libc::socketpair(
-                libc::AF_UNIX,
-                libc::SOCK_STREAM | libc::SOCK_CLOEXEC,
-                0,
-                fds.as_mut_ptr(),
-            )
-        };
+        let rc = unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, fds.as_mut_ptr()) };
         assert_eq!(
             rc,
             0,
             "socketpair failed: {}",
             std::io::Error::last_os_error()
         );
+        // No SOCK_CLOEXEC on Darwin: set it after the fact on both ends.
+        for fd in fds {
+            set_cloexec(fd);
+        }
         unsafe {
             (
                 std::fs::File::from_raw_fd(fds[0]),

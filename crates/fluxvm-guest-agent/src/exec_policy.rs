@@ -91,9 +91,22 @@ pub fn enforcement_to_wire(e: &Enforcement) -> ExecEnforcement {
     }
 }
 
+/// Confinement is Landlock + seccomp, which exist only on Linux. A macOS guest refuses every per-exec policy outright
+/// (even `best_effort`) rather than run the command unconfined; callers that need confinement must use a Linux guest.
+pub fn unsupported_policy_response() -> AgentResponse {
+    AgentResponse::Error {
+        message: "policy could not be enforced, command not run: exec policies (Landlock/seccomp) need a Linux guest; \
+                  macOS guests cannot confine commands"
+            .into(),
+    }
+}
+
 /// Run `command` via `/bin/sh -c` confined by `policy`. Fails closed: if the
 /// confinement cannot be set up the command is not run at all.
 pub fn exec_confined(command: &str, timeout: Duration, policy: &ExecPolicy) -> AgentResponse {
+    if !cfg!(target_os = "linux") {
+        return unsupported_policy_response();
+    }
     let pb = to_procbox(policy, timeout);
     let argv = vec!["/bin/sh".to_string(), "-c".to_string(), command.to_string()];
     match fluxvm_procbox::run(&pb, &argv, &RunOptions { capture: true }) {
@@ -117,6 +130,16 @@ pub fn exec_confined(command: &str, timeout: Duration, policy: &ExecPolicy) -> A
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn unsupported_policy_fails_closed_with_a_clear_message() {
+        match super::unsupported_policy_response() {
+            AgentResponse::Error { message } => {
+                assert!(message.contains("command not run") && message.contains("Linux guest"))
+            }
+            other => panic!("expected an error, got {other:?}"),
+        }
+    }
+
     use super::*;
     use fluxvm_guest_protocol::ExecRunAs;
 

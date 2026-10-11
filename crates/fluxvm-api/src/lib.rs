@@ -33,12 +33,15 @@ use uuid::Uuid;
 
 mod grants;
 mod idempotency;
+mod netobs_api;
 mod oidc;
 mod openapi;
 mod rate_limit;
 #[cfg(target_os = "macos")]
 pub mod self_control;
+pub use netobs_api::install_netobs;
 mod speculate_api;
+mod vz_api;
 
 #[derive(Clone)]
 struct AuthState {
@@ -58,6 +61,13 @@ impl<E: Into<anyhow::Error>> From<E> for ApiError {
         if e.downcast_ref::<fluxvm_core::gpu::GpuShortage>().is_some() {
             return Self {
                 status: StatusCode::SERVICE_UNAVAILABLE,
+                message: format!("{:#}", e),
+            };
+        }
+        // A control call that needs a live runner on a VM that is not running: a state conflict.
+        if e.downcast_ref::<fluxvm_scheduler::VmNotLive>().is_some() {
+            return Self {
+                status: StatusCode::CONFLICT,
                 message: format!("{:#}", e),
             };
         }
@@ -387,6 +397,18 @@ pub fn router(manager: Arc<VmManager>) -> Router {
         .route("/v1/vms/{id}/cdroms/{name}/eject", post(eject_vm_cdrom))
         .route("/v1/events", get(list_events))
         .route("/v1/events/stream", get(stream_events))
+        .route("/v1/netobs/summary", get(netobs_api::summary))
+        .route("/v1/netobs/flows", get(netobs_api::flows))
+        .route("/v1/netobs/flows/stream", get(netobs_api::stream))
+        .route("/v1/netobs/dns", get(netobs_api::dns))
+        .route("/v1/netobs/history", get(netobs_api::history))
+        .route(
+            "/v1/netobs/capture",
+            get(netobs_api::capture_status)
+                .post(netobs_api::capture_enable)
+                .delete(netobs_api::capture_disable),
+        )
+        .route("/v1/netobs/capture.pcap", get(netobs_api::capture_pcap))
         .route("/v1/quotas/me", get(my_quota))
         .route("/v1/vms/{id}/attest", get(get_vm_evidence))
         .route("/v1/vms/{id}/secrets/release", post(release_vm_secret))
@@ -686,6 +708,7 @@ pub fn router(manager: Arc<VmManager>) -> Router {
             idempotency::middleware,
         ))
         .merge(speculate_api::routes())
+        .merge(vz_api::routes())
         .layer(middleware::from_fn_with_state(
             manager.clone(),
             tenant_guard_middleware,
@@ -763,13 +786,69 @@ fn build_oidc(cfg: &fluxvm_core::config::AuthConfig) -> Option<Arc<oidc::OidcVal
 }
 
 async fn metrics(State(m): State<Arc<VmManager>>) -> Response {
-    let body = render_metrics(&m.list().await);
+    let vms = m.list().await;
+    let mut body = render_metrics(&vms);
+    let usage = fluxvm_scheduler::vz_devices::runner_usage_samples(&vms);
+    body.push_str(&render_runner_usage(&usage));
+    body.push_str(&netobs_api::prometheus());
     (
         StatusCode::OK,
         [("content-type", "text/plain; version=0.0.4; charset=utf-8")],
         body,
     )
         .into_response()
+}
+
+/// `fluxvm_vm_runner_rss_bytes` / `fluxvm_vm_runner_cpu_seconds_total` for `vz` VMs: resident size and CPU time of the
+/// runner process plus its Virtualization XPC service when that could be attributed (`fluxvm_vm_runner_service_attributed`
+/// says which), labelled by VM id and name. Empty when there are no samples.
+fn render_runner_usage(samples: &[fluxvm_scheduler::vz_devices::VmRunnerUsage]) -> String {
+    if samples.is_empty() {
+        return String::new();
+    }
+    fn esc(s: &str) -> String {
+        s.replace('\\', "\\\\")
+            .replace('"', "\\\"")
+            .replace('\n', "\\n")
+    }
+    let mut out = String::new();
+    out.push_str(
+        "# HELP fluxvm_vm_runner_rss_bytes Resident memory of a vz VM: its runner process plus, when fluxvm_vm_runner_service_attributed is 1, the Virtualization XPC service that runs the guest. With 0 it is the runner process only and the guest's memory is not included.\n",
+    );
+    out.push_str("# TYPE fluxvm_vm_runner_rss_bytes gauge\n");
+    for s in samples {
+        out.push_str(&format!(
+            "fluxvm_vm_runner_rss_bytes{{vm=\"{}\",name=\"{}\"}} {}\n",
+            s.vm_id,
+            esc(&s.name),
+            s.rss_bytes
+        ));
+    }
+    out.push_str(
+        "# HELP fluxvm_vm_runner_cpu_seconds_total CPU time (user + system) of a vz VM: its runner process plus, when fluxvm_vm_runner_service_attributed is 1, the Virtualization XPC service that runs the guest. With 0 it is the runner process only and the guest's CPU is not included.\n",
+    );
+    out.push_str("# TYPE fluxvm_vm_runner_cpu_seconds_total counter\n");
+    for s in samples {
+        out.push_str(&format!(
+            "fluxvm_vm_runner_cpu_seconds_total{{vm=\"{}\",name=\"{}\"}} {:.3}\n",
+            s.vm_id,
+            esc(&s.name),
+            s.cpu_seconds
+        ));
+    }
+    out.push_str(
+        "# HELP fluxvm_vm_runner_service_attributed 1 when the two series above include the Virtualization XPC service that runs the guest, 0 when they are the runner process only.\n",
+    );
+    out.push_str("# TYPE fluxvm_vm_runner_service_attributed gauge\n");
+    for s in samples {
+        out.push_str(&format!(
+            "fluxvm_vm_runner_service_attributed{{vm=\"{}\",name=\"{}\"}} {}\n",
+            s.vm_id,
+            esc(&s.name),
+            u8::from(s.service_attributed)
+        ));
+    }
+    out
 }
 
 /// Pure text-rendering, kept separate from the handler so it's unit-testable
@@ -2587,6 +2666,15 @@ struct VzDiskFields {
     sync: Option<fluxvm_core::model::AppleDiskSync>,
     #[serde(default)]
     controller: Option<fluxvm_core::model::AppleDiskController>,
+    #[serde(default)]
+    usb_bus: Option<u8>,
+    /// `kind: overlay`: the overlay file (the request's `path` is the base image).
+    #[serde(default)]
+    overlay: Option<std::path::PathBuf>,
+    #[serde(default)]
+    iops: Option<u64>,
+    #[serde(default)]
+    bps: Option<u64>,
 }
 
 async fn attach_vm_disk(
@@ -2614,6 +2702,10 @@ async fn attach_vm_disk(
             sync: v.sync.unwrap_or_default(),
             controller: v.controller.unwrap_or_default(),
             block_device_id: None,
+            usb_bus: v.usb_bus,
+            overlay: v.overlay,
+            iops: v.iops,
+            bps: v.bps,
         };
         let info = m.attach_vz_disk(id, &req.name, disk, req.size_gib).await?;
         return Ok((StatusCode::CREATED, Json(info)));
@@ -2625,9 +2717,13 @@ async fn attach_vm_disk(
         || v.caching.is_some()
         || v.sync.is_some()
         || v.controller.is_some()
+        || v.usb_bus.is_some()
+        || v.overlay.is_some()
+        || v.iops.is_some()
+        || v.bps.is_some()
     {
         return Err(anyhow::anyhow!(
-            "kind, url, read_only, caching, sync and controller are vz disk options"
+            "kind, url, read_only, caching, sync, controller and usb_bus are vz disk options"
         )
         .into());
     }
@@ -3698,9 +3794,12 @@ async fn vm_logs(
         }
     };
 
+    // nosniff: clients that sniff a text/plain body (URLSession buffers 512 bytes for it) would hold back a quiet console.
     Ok(Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
+        .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff")
+        .header(header::CACHE_CONTROL, "no-cache")
         .body(axum::body::Body::from_stream(stream))
         .unwrap())
 }
@@ -4823,6 +4922,28 @@ mod tests {
     }
 
     #[test]
+    fn renders_runner_usage_per_vm() {
+        use fluxvm_scheduler::vz_devices::VmRunnerUsage;
+        assert_eq!(render_runner_usage(&[]), "");
+        let id = Uuid::nil();
+        let out = render_runner_usage(&[VmRunnerUsage {
+            vm_id: id,
+            name: "a\"b".into(),
+            rss_bytes: 1_073_741_824,
+            cpu_seconds: 12.3456,
+            service_attributed: true,
+        }]);
+        assert!(out.contains("fluxvm_vm_runner_service_attributed{vm=\"00000000-0000-0000-0000-000000000000\",name=\"a\\\"b\"} 1\n"));
+        assert!(out.contains("the runner process only and the guest's CPU is not included"));
+        assert!(out.contains("# TYPE fluxvm_vm_runner_rss_bytes gauge\n"));
+        assert!(out.contains("# TYPE fluxvm_vm_runner_cpu_seconds_total counter\n"));
+        assert!(out.contains(&format!(
+            "fluxvm_vm_runner_rss_bytes{{vm=\"{id}\",name=\"a\\\"b\"}} 1073741824\n"
+        )));
+        assert!(out.contains("fluxvm_vm_runner_cpu_seconds_total{vm=\"00000000-0000-0000-0000-000000000000\",name=\"a\\\"b\"} 12.346\n"));
+    }
+
+    #[test]
     fn empty_fleet_still_renders_zeroed_gauges() {
         let out = render_metrics(&[]);
         assert!(out.contains("fluxvm_vms_total{status=\"running\"} 0"));
@@ -5557,6 +5678,229 @@ mod tests {
                 assert!(body.contains("\nfluxvm_host_memory_pressure_level "));
                 assert!(body.contains("\nfluxvm_host_mem_available_mib "));
             }
+        }
+
+        #[tokio::test]
+        async fn daemon_install_enables_netobs_summary() {
+            let cfg = fluxvm_core::config::Config::default();
+            // Another test may have installed the observer first; either way it is installed afterwards.
+            let pump = install_netobs(&cfg);
+            assert!(fluxvm_netobs::global().is_some());
+            let (st, body) = call(
+                router(manager(density_tokens())),
+                "GET",
+                "/v1/netobs/summary",
+                "ops",
+                None,
+            )
+            .await;
+            assert_eq!(st, StatusCode::OK, "{body}");
+            assert!(body.contains("\"enabled\":true"), "{body}");
+            if pump.is_some() {
+                assert!(
+                    fluxvm_netobs::global_tap().is_some(),
+                    "the install published its tap"
+                );
+            }
+        }
+
+        #[tokio::test]
+        async fn netobs_routes_scope_by_tenant_and_gate_capture() {
+            use fluxvm_netobs::{Direction, FrameMeta, Identity, Observer, Verdict};
+            let obs = match fluxvm_netobs::global() {
+                Some(o) => o,
+                None => {
+                    let o = Arc::new(Observer::new(Default::default()));
+                    fluxvm_netobs::install_global(o);
+                    fluxvm_netobs::global().expect("observer installed")
+                }
+            };
+            let ip = |n| std::net::Ipv4Addr::new(10, 9, 9, n);
+            let frame = fluxvm_netobs::packet::build::udp_v4((ip(1), 5000), (ip(2), 6000), b"x");
+            obs.ingest(
+                &frame,
+                &FrameMeta {
+                    identity: Identity::new("netobs-test-vm", "n", "eth0", [2, 0, 0, 0, 0, 1]),
+                    ts_us: fluxvm_netobs::now_us(),
+                    direction: Direction::FromGuest,
+                    verdict: Verdict::Allowed,
+                },
+            );
+            let m = manager(density_tokens());
+            let app = || router(m.clone());
+
+            let (st, body) = call(app(), "GET", "/v1/netobs/flows", "ops", None).await;
+            assert_eq!(st, StatusCode::OK, "{body}");
+            assert!(body.contains("netobs-test-vm"), "{body}");
+            let (_, body) = call(app(), "GET", "/v1/netobs/flows", "acme", None).await;
+            assert!(
+                !body.contains("netobs-test-vm"),
+                "tenant token saw another VM: {body}"
+            );
+
+            let (st, body) = call(app(), "GET", "/v1/netobs/summary", "ops", None).await;
+            assert_eq!(st, StatusCode::OK);
+            assert!(body.contains("\"enabled\":true"), "{body}");
+
+            let (_, body) = call(app(), "GET", "/metrics", "ops", None).await;
+            assert!(body.contains("\nfluxvm_netobs_frames_total "), "{body}");
+
+            // Capture needs a filter, is scoped, and has nothing to download until enabled.
+            let (st, _) = call(
+                app(),
+                "POST",
+                "/v1/netobs/capture",
+                "ops",
+                Some(r#"{"vm":"netobs-test-vm"}"#),
+            )
+            .await;
+            assert_eq!(st, StatusCode::BAD_REQUEST);
+            let (st, _) = call(
+                app(),
+                "POST",
+                "/v1/netobs/capture",
+                "acme",
+                Some(r#"{"vm":"netobs-test-vm","filter":{"port":53}}"#),
+            )
+            .await;
+            assert_eq!(st, StatusCode::NOT_FOUND);
+            let (st, _) = call(
+                app(),
+                "GET",
+                "/v1/netobs/capture.pcap?vm=netobs-test-vm",
+                "ops",
+                None,
+            )
+            .await;
+            assert_eq!(st, StatusCode::NOT_FOUND);
+        }
+
+        #[tokio::test]
+        async fn vz_display_resize_is_tenant_scoped_admin_only_and_validated() {
+            let mut auth = tenant_tokens();
+            auth.tokens.push(ApiToken {
+                token: "ro".into(),
+                role: Role::ReadOnly,
+                name: Some("ro".into()),
+                tenant: None,
+            });
+            let m = manager(auth);
+            let mut vm = fixture(BackendKind::Vz, VmStatus::Stopped, false);
+            vm.request.tenant = Some("acme".into());
+            let id = vm.id;
+            m.store.insert(vm).await.unwrap();
+            let uri = format!("/v1/vms/{id}/vz/display");
+            let ok = r#"{"width":1920,"height":1080}"#;
+
+            // Another tenant sees no such VM.
+            let (st, _) = call(router(m.clone()), "POST", &uri, "other", Some(ok)).await;
+            assert_eq!(st, StatusCode::NOT_FOUND);
+            // A read-only token may not change the display.
+            let (st, _) = call(router(m.clone()), "POST", &uri, "ro", Some(ok)).await;
+            assert_eq!(st, StatusCode::FORBIDDEN);
+            // A bad size is rejected before the VM state matters.
+            let (st, body) = call(
+                router(m.clone()),
+                "POST",
+                &uri,
+                "acme",
+                Some(r#"{"width":100,"height":1080}"#),
+            )
+            .await;
+            assert_eq!(st, StatusCode::BAD_REQUEST);
+            assert!(body.contains("width"), "{body}");
+            // The owner reaches the VM; it is not running, so there is nothing to resize.
+            let (st, body) = call(router(m.clone()), "POST", &uri, "acme", Some(ok)).await;
+            assert_eq!(st, StatusCode::CONFLICT);
+            assert!(body.contains("start it first"), "{body}");
+            // Missing required fields never reach the handler.
+            let (st, _) = call(router(m), "POST", &uri, "acme", Some(r#"{"width":1920}"#)).await;
+            assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY);
+        }
+
+        #[tokio::test]
+        async fn runner_controls_on_a_stopped_vm_are_a_readable_conflict() {
+            let m = manager(tenant_tokens());
+            let mut vm = fixture(BackendKind::Vz, VmStatus::Stopped, false);
+            vm.request.tenant = Some("acme".into());
+            let id = vm.id;
+            m.store.insert(vm).await.unwrap();
+            for (method, path) in [
+                ("POST", format!("/v1/vms/{id}/pause")),
+                ("POST", format!("/v1/vms/{id}/resume")),
+                ("GET", format!("/v1/vms/{id}/screenshot")),
+            ] {
+                let (st, body) = call(router(m.clone()), method, &path, "acme", None).await;
+                assert_eq!(st, StatusCode::CONFLICT, "{path}: {body}");
+                assert!(body.contains("start it first"), "{path}: {body}");
+                assert!(!body.contains("os error"), "{path}: {body}");
+            }
+        }
+
+        #[tokio::test]
+        async fn vz_attestation_is_tenant_scoped_and_served_with_the_host_key() {
+            let m = manager(tenant_tokens());
+            let ws = tempfile::tempdir().unwrap();
+            let mut vm = fixture(BackendKind::Vz, VmStatus::Stopped, false);
+            vm.request.tenant = Some("acme".into());
+            vm.workspace = ws.path().to_path_buf();
+            let id = vm.id;
+            m.store.insert(vm).await.unwrap();
+            let mut qemu = fixture(BackendKind::Qemu, VmStatus::Stopped, false);
+            qemu.request.tenant = Some("acme".into());
+            let qemu_id = qemu.id;
+            m.store.insert(qemu).await.unwrap();
+            let uri = format!("/v1/vms/{id}/vz/attestation");
+
+            // Not launched yet: nothing to serve.
+            let (st, body) = call(router(m.clone()), "GET", &uri, "acme", None).await;
+            assert_eq!(st, StatusCode::BAD_REQUEST);
+            assert!(body.contains("no attestation recorded"), "{body}");
+
+            // What a launch records: the attestation object, and the daemon's public key under state_dir.
+            let payload = json!({
+                "version": 1, "claim": "host-asserted", "vm_id": id.to_string(), "issued_at_unix": 7,
+                "kernel": null, "initrd": null, "cmdline_sha256": null,
+                "root_disk": {"path": "/r", "size": 1, "mtime_unix": null, "digest": "00"},
+                "runner": {"path": "/x", "size": 1, "mtime_unix": null, "digest": "11"},
+                "apple_spec_sha256": "22",
+            })
+            .to_string();
+            let pk = "ab".repeat(32);
+            std::fs::write(
+                ws.path().join("vz-attestation.json"),
+                json!({"alg": "ed25519", "payload": payload, "signature": "cd".repeat(64), "public_key": pk})
+                    .to_string(),
+            )
+            .unwrap();
+            std::fs::create_dir_all(&m.cfg.state_dir).unwrap();
+            std::fs::write(
+                m.cfg.state_dir.join("vz-attestation.pub"),
+                format!("{pk}\n"),
+            )
+            .unwrap();
+
+            let (st, body) = call(router(m.clone()), "GET", &uri, "acme", None).await;
+            assert_eq!(st, StatusCode::OK, "{body}");
+            let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+            assert_eq!(v["public_key"], pk);
+            assert_eq!(v["manifest"]["vm_id"], id.to_string());
+            assert_eq!(v["attestation"]["alg"], "ed25519");
+            assert!(v["claim"].as_str().unwrap().contains("not by hardware"));
+
+            // Another tenant sees no such VM; a non-vz VM has no attestation.
+            let (st, _) = call(router(m.clone()), "GET", &uri, "other", None).await;
+            assert_eq!(st, StatusCode::NOT_FOUND);
+            let (st, body) = call(
+                router(m),
+                "GET",
+                &format!("/v1/vms/{qemu_id}/vz/attestation"),
+                "acme",
+                None,
+            )
+            .await;
+            assert_eq!(st, StatusCode::BAD_REQUEST);
+            assert!(body.contains("vz backend"), "{body}");
         }
 
         #[tokio::test]
