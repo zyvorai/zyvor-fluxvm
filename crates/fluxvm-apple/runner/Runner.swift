@@ -619,7 +619,7 @@ final class Runner: NSObject, VZVirtualMachineDelegate, NSWindowDelegate {
         ]
         if cfg.guest_os == "linux" {
             if let seed = cfg.seed, FileManager.default.fileExists(atPath: seed) {
-                storage.append(VZVirtioBlockDeviceConfiguration(attachment: try VZDiskImageStorageDeviceAttachment(url: URL(fileURLWithPath: seed), readOnly: true)))
+                storage.append(VZVirtioBlockDeviceConfiguration(attachment: try self.imageAttachment(URL(fileURLWithPath: seed), readOnly: true)))
             }
             if let media = cfg.media, !media.isEmpty {
                 storage.append(VZUSBMassStorageDeviceConfiguration(attachment: try VZDiskImageStorageDeviceAttachment(url: URL(fileURLWithPath: media), readOnly: true)))

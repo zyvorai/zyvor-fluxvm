@@ -635,10 +635,10 @@ pub struct AppleSpec {
     #[serde(default)]
     pub root_read_only: bool,
     /// Host caching of the root (and seed) disk image; `automatic` is VZ's default.
-    #[serde(default, skip_serializing_if = "is_default")]
+    #[serde(default)]
     pub root_caching: AppleDiskCaching,
     /// Host flush behaviour of the root (and seed) disk image; `full` is VZ's default.
-    #[serde(default, skip_serializing_if = "is_default")]
+    #[serde(default)]
     pub root_sync: AppleDiskSync,
     /// Extra raw disks after the root (and seed) disk, in order: `/dev/vdb`, `/dev/vdc`, … for a direct-boot guest.
     #[serde(default)]

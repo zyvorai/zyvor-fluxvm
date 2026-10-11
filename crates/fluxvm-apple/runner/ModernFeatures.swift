@@ -57,9 +57,16 @@ extension Runner {
         c.consoleDevices.append(d)
     }
 
+    /// A disk image attachment honouring `root_caching` / `root_sync` (VZ defaults when unset).
+    func imageAttachment(_ url: URL, readOnly: Bool) throws -> VZDiskImageStorageDeviceAttachment {
+        let caching: VZDiskImageCachingMode = cfg.root_caching == "cached" ? .cached : cfg.root_caching == "uncached" ? .uncached : .automatic
+        let sync: VZDiskImageSynchronizationMode = cfg.root_sync == "none" ? .none : cfg.root_sync == "fsync" ? .fsync : .full
+        return try VZDiskImageStorageDeviceAttachment(url: url, readOnly: readOnly, cachingMode: caching, synchronizationMode: sync)
+    }
+
     func rootStorageAttachment() throws -> VZStorageDeviceAttachment {
         let u = URL(fileURLWithPath: cfg.disk)
-        guard cfg.asif_overlay == true else { return try VZDiskImageStorageDeviceAttachment(url: u, readOnly: cfg.root_read_only ?? false) }
+        guard cfg.asif_overlay == true else { return try imageAttachment(u, readOnly: cfg.root_read_only ?? false) }
         #if canImport(DiskImageKit)
         if #available(macOS 27.0, *) {
             let base = try DiskImage(opening: .open(url: u, mode: .readOnly))
