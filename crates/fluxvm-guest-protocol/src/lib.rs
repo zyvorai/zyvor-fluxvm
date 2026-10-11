@@ -102,6 +102,23 @@ pub enum AgentRequest {
         /// what it can gather itself (weaker: same snapshot, same pool).
         #[serde(default)]
         entropy_base64: Option<String>,
+        /// Remove the guest's SSH host keys and generate fresh ones (`ssh-host-keys` in `applied`).
+        #[serde(default)]
+        regenerate_ssh_host_keys: bool,
+        /// Forget the cloud-init instance so the child is a new instance (`cloud-init` in `applied`).
+        #[serde(default)]
+        reset_cloud_init: bool,
+        /// Drop DHCP leases and re-run the client (`dhcp` in `applied`).
+        #[serde(default)]
+        reset_dhcp_identity: bool,
+        /// Flush neighbour, route-cache and connection-tracking state (`network-state` in `applied`).
+        #[serde(default)]
+        flush_network_state: bool,
+        /// Replace the agent's own token with this one (`agent-token` in `applied`). The request itself is
+        /// authorised with the old token; the agent answers, then accepts only the new one (the old one is
+        /// kept for a single request, so a lost reply cannot lock the host out).
+        #[serde(default)]
+        new_agent_token: Option<String>,
     },
 }
 /// A process started with execve: no shell, so arguments stay literal.
@@ -361,6 +378,48 @@ pub fn decode_line<T: for<'de> Deserialize<'de>>(line: &str) -> serde_json::Resu
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reset_identity_keeps_its_old_wire_shape_and_defaults_the_new_steps_off() {
+        // What an older host sends: none of the strict-mode fields.
+        let old = r#"{"op":"reset-identity","hostname":"h","regenerate_machine_id":true,"reseed_entropy":true}"#;
+        let AgentRequest::ResetIdentity {
+            regenerate_ssh_host_keys,
+            reset_cloud_init,
+            reset_dhcp_identity,
+            flush_network_state,
+            new_agent_token,
+            ..
+        } = serde_json::from_str::<AgentRequest>(old).unwrap()
+        else {
+            panic!("not a reset-identity request");
+        };
+        assert!(!regenerate_ssh_host_keys && !reset_cloud_init);
+        assert!(!reset_dhcp_identity && !flush_network_state);
+        assert!(new_agent_token.is_none());
+
+        // And what a new host sends round-trips.
+        let new = AgentRequest::ResetIdentity {
+            hostname: Some("h".into()),
+            regenerate_machine_id: true,
+            reseed_entropy: true,
+            entropy_base64: None,
+            regenerate_ssh_host_keys: true,
+            reset_cloud_init: true,
+            reset_dhcp_identity: true,
+            flush_network_state: true,
+            new_agent_token: Some("t".repeat(20)),
+        };
+        let line = serde_json::to_string(&new).unwrap();
+        assert!(line.contains("\"new_agent_token\""));
+        assert!(matches!(
+            serde_json::from_str::<AgentRequest>(&line).unwrap(),
+            AgentRequest::ResetIdentity {
+                new_agent_token: Some(_),
+                ..
+            }
+        ));
+    }
 
     #[test]
     fn constant_time_eq_matches_only_identical_strings() {

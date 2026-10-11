@@ -22,13 +22,15 @@
 //! agent's `ResetIdentity` so each child gets its own hostname, machine-id and
 //! fresh entropy (best effort: a failure is logged loudly and audited).
 
-use crate::journal::{OpGuard, OpKind, Resource};
+use crate::journal::{ForkPhase, OpGuard, OpKind, Resource};
 use crate::{FIRST_GUEST_CID, VmManager, audit_event, validate_vm_name};
 use anyhow::{Context, Result, bail};
 use chrono::{Duration, Utc};
 use fluxvm_core::model::{BackendKind, NetworkSpec, StorageBackend, VmRecord, VmStatus};
+use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Instant;
 use uuid::Uuid;
 
 /// Upper bound on children per call.
@@ -37,11 +39,209 @@ pub const MAX_FORK_COUNT: u32 = 32;
 /// Label every child carries, naming the VM it was forked from.
 pub const FORKED_FROM_LABEL: &str = "fluxvm.dev/forked-from";
 
+/// How hard a fork tries to make each child a different machine from its parent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ForkIdentityMode {
+    /// Leave the child exactly as the parent was (debugging, deterministic replay).
+    Preserve,
+    /// Try to reset hostname, machine-id, entropy, host keys, cloud-init, DHCP, network state and the agent token;
+    /// a failure is logged and audited and the child is kept (the behaviour before fork v2).
+    BestEffort,
+    /// Every step must be confirmed or the whole fork is rolled back. When the vsock agent is absent or too old to
+    /// confirm the steps, the reset is run over SSH; when that is not possible either, the fork is refused.
+    #[default]
+    Unique,
+}
+
+/// What network each child gets. A child resumes the parent's saved NIC, so the choices are limited to what the saved
+/// device state tolerates; see `check_vz_forkable`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ForkNetworkMode {
+    /// Whatever isolates children: the parent's own per-VM usernet, or none.
+    #[default]
+    Auto,
+    /// Require that every child owns its network (a per-VM usernet or none); refuse otherwise.
+    Isolated,
+    /// Require the parent to have no network.
+    None,
+    /// Accept exactly what the backend's own rules accept, as before fork v2.
+    Preserve,
+}
+
+fn one() -> u32 {
+    1
+}
+
+/// What to fork and how: the request body of `POST /v1/vms/{id}/fork`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ForkSpec {
+    #[serde(default = "one")]
+    pub count: u32,
+    #[serde(default, alias = "namePrefix")]
+    pub name_prefix: Option<String>,
+    #[serde(default)]
+    pub identity: ForkIdentityMode,
+    #[serde(default)]
+    pub network: ForkNetworkMode,
+    /// Children restored at the same time (vz only; the KVM path is sequential). 1..=32, default `min(count, 8)`.
+    #[serde(default)]
+    pub parallelism: Option<u8>,
+    /// Commands run in each child after its identity is reset and before readiness is probed. Each is an argv (no
+    /// shell), run as root through the guest agent, so the guest must have one. A non-zero exit fails the fork.
+    #[serde(default)]
+    pub hooks: Vec<Vec<String>>,
+    /// What "ready" means before a child is reported. Default: running and identity reset.
+    #[serde(default)]
+    pub ready: ForkReady,
+    /// How long a child may take to become ready, in seconds (hooks included). Default 60.
+    #[serde(default)]
+    pub ready_timeout_seconds: Option<u32>,
+}
+
+/// When a fork child counts as ready.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ForkReady {
+    /// Running, identity reset (nothing more is waited for).
+    #[default]
+    Running,
+    /// The guest agent answers a ping.
+    Agent,
+    /// A trivial command runs in the guest (through the agent, or SSH for a vz guest without one).
+    Exec,
+    /// Something accepts TCP connections on `127.0.0.1:<port>` inside the guest.
+    Tcp(u16),
+    /// `GET http://127.0.0.1:<port><path>` inside the guest returns a 2xx.
+    Http {
+        port: u16,
+        #[serde(default = "root_path")]
+        path: String,
+    },
+}
+
+fn root_path() -> String {
+    "/".into()
+}
+
+/// The post-restore steps of a fork, validated once.
+#[derive(Debug, Clone)]
+struct ForkPost {
+    hooks: Vec<Vec<String>>,
+    ready: ForkReady,
+    timeout: std::time::Duration,
+}
+
+impl ForkSpec {
+    fn post(&self) -> Result<ForkPost> {
+        if self.hooks.len() > 8 {
+            bail!("at most 8 fork hooks");
+        }
+        for h in &self.hooks {
+            if h.is_empty() || h.iter().any(|a| a.is_empty() || a.contains('\0')) {
+                bail!("a fork hook is a non-empty argv of non-empty strings");
+            }
+        }
+        match &self.ready {
+            ForkReady::Tcp(0) | ForkReady::Http { port: 0, .. } => {
+                bail!("ready port must be 1..=65535")
+            }
+            ForkReady::Http { path, .. }
+                if !path.starts_with('/')
+                    || path.len() > 256
+                    || !path
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b"/_.-?=&%~".contains(&b)) =>
+            {
+                bail!(
+                    "ready http path must start with / and use only letters, digits and /_.-?=&%~"
+                )
+            }
+            _ => {}
+        }
+        let secs = self.ready_timeout_seconds.unwrap_or(60).clamp(1, 600);
+        Ok(ForkPost {
+            hooks: self.hooks.clone(),
+            ready: self.ready.clone(),
+            timeout: std::time::Duration::from_secs(u64::from(secs)),
+        })
+    }
+}
+
+impl Default for ForkSpec {
+    fn default() -> Self {
+        Self {
+            count: 1,
+            name_prefix: None,
+            identity: ForkIdentityMode::default(),
+            network: ForkNetworkMode::default(),
+            parallelism: None,
+            hooks: Vec::new(),
+            ready: ForkReady::default(),
+            ready_timeout_seconds: None,
+        }
+    }
+}
+
+/// How one child's identity was reset.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct IdentityOutcome {
+    /// `agent`, `ssh`, `preserved`, or `none` when a best-effort reset did not run.
+    pub via: String,
+    /// Steps the guest confirmed.
+    pub applied: Vec<String>,
+    /// Whether the child's agent token was replaced (and the record updated).
+    pub token_rotated: bool,
+    pub ms: u64,
+}
+
+/// Per-child timings and identity result.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ForkChildReport {
+    pub id: Uuid,
+    pub name: String,
+    /// Admission, file cloning and record insertion.
+    pub prepare_ms: u64,
+    /// `start_from_snapshot`: the runner restoring the saved state.
+    pub restore_ms: u64,
+    pub identity: IdentityOutcome,
+    /// Post-fork hooks.
+    pub hooks_ms: u64,
+    /// Waiting for the readiness condition.
+    pub ready_ms: u64,
+    pub total_ms: u64,
+}
+
+/// The result of a fork: the children and where the time went.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ForkReport {
+    pub children: Vec<VmRecord>,
+    pub reports: Vec<ForkChildReport>,
+    /// How long the parent was held for the save and its disk clone (an upper bound on its pause).
+    pub parent_snapshot_ms: u64,
+    pub total_ms: u64,
+    pub parallelism: u8,
+}
+
+/// The identity steps `Unique` requires the guest to confirm.
+const REQUIRED_STEPS: &[&str] = &[
+    "hostname",
+    "machine-id",
+    "entropy",
+    "ssh-host-keys",
+    "cloud-init",
+    "dhcp",
+    "network-state",
+];
+
+/// The address a usernet guest always leases (see `fluxvm-usernet`).
+const USERNET_GUEST_IP: &str = "10.0.2.15";
+
 impl VmManager {
-    /// Fork running VM `id` into `count` new running VMs named
-    /// `{name_prefix}-{n}`, n from 1 (prefix defaults to `{parent}-fork`).
-    /// All-or-nothing: if any child fails, every child created by this call
-    /// is deleted. The parent keeps running throughout.
+    /// Fork running VM `id` into `count` new running VMs named `{name_prefix}-{n}` with the pre-v2 best-effort identity
+    /// reset (internal callers such as speculation). Use [`Self::fork_vm_spec`] for the full contract.
     pub async fn fork_vm(
         self: &Arc<Self>,
         id: Uuid,
@@ -49,12 +249,65 @@ impl VmManager {
         name_prefix: Option<String>,
         actor: Option<&str>,
     ) -> Result<Vec<VmRecord>> {
-        let src = self.get(id).await?;
-        if src.backend == BackendKind::Vz {
-            return self.fork_vm_vz(src, count, name_prefix, actor).await;
+        let spec = ForkSpec {
+            count,
+            name_prefix,
+            identity: ForkIdentityMode::BestEffort,
+            network: ForkNetworkMode::Preserve,
+            parallelism: None,
+            hooks: Vec::new(),
+            ready: ForkReady::default(),
+            ready_timeout_seconds: None,
+        };
+        Ok(self.fork_vm_spec(id, spec, actor).await?.children)
+    }
+
+    /// Fork running VM `id` as `spec` says. All-or-nothing: if any child fails (including a failed identity reset under
+    /// [`ForkIdentityMode::Unique`]), every child created by this call is deleted. The parent keeps running throughout.
+    pub async fn fork_vm_spec(
+        self: &Arc<Self>,
+        id: Uuid,
+        spec: ForkSpec,
+        actor: Option<&str>,
+    ) -> Result<ForkReport> {
+        let r = self.fork_vm_spec_inner(id, spec, actor).await;
+        match &r {
+            Ok(rep) => fluxvm_core::metrics::record_fork(
+                rep.children.len() as u64,
+                rep.parent_snapshot_ms,
+                rep.total_ms,
+                rep.reports.iter().map(|c| c.restore_ms).sum(),
+                rep.reports.iter().map(|c| c.identity.ms).sum(),
+            ),
+            Err(_) => fluxvm_core::metrics::record_fork_failed(),
         }
-        check_forkable(&src, count)?;
-        let prefix = name_prefix.unwrap_or_else(|| format!("{}-fork", src.name));
+        r
+    }
+
+    async fn fork_vm_spec_inner(
+        self: &Arc<Self>,
+        id: Uuid,
+        spec: ForkSpec,
+        actor: Option<&str>,
+    ) -> Result<ForkReport> {
+        let started = Instant::now();
+        let src = self.get(id).await?;
+        if let Some(p) = spec.parallelism
+            && !(1..=MAX_FORK_COUNT as u8).contains(&p)
+        {
+            bail!("parallelism must be between 1 and {MAX_FORK_COUNT}");
+        }
+        let post = spec.post()?;
+        if src.backend == BackendKind::Vz {
+            return self.fork_vm_vz(src, spec, post, actor, started).await;
+        }
+        check_forkable(&src, spec.count)?;
+        self.admit_fork_batch(&src, spec.count).await?;
+        let count = spec.count;
+        let prefix = spec
+            .name_prefix
+            .clone()
+            .unwrap_or_else(|| format!("{}-fork", src.name));
         let names: Vec<String> = (1..=count).map(|n| format!("{prefix}-{n}")).collect();
         for name in &names {
             validate_vm_name(name)?;
@@ -73,17 +326,21 @@ impl VmManager {
             }],
         )
         .context("journaling fork intent")?;
+        op.fork_expect(count).context("journaling fork size")?;
+        let snap_started = Instant::now();
         self.create_vm_snapshot(id, &tag).await?;
+        let parent_snapshot_ms = snap_started.elapsed().as_millis() as u64;
         let meta = src.workspace.join("snapshots").join(&tag).join("snap");
         let result = self
-            .fork_children(&src, &meta, &tag, &names, actor, &op)
+            .fork_children(&src, &meta, &tag, &names, actor, &op, spec.identity, &post)
             .await;
         if let Err(e) = self.delete_vm_snapshot(id, &tag).await {
             tracing::warn!(vm = %id, tag, error = %e, "removing fork snapshot failed");
         }
         // Children are either all running or already deleted by now.
         op.finish();
-        let children = result?;
+        let done = result?;
+        let (children, reports): (Vec<_>, Vec<_>) = done.into_iter().unzip();
         let ids: Vec<String> = children.iter().map(|c| c.id.to_string()).collect();
         audit_event(
             "vm.fork",
@@ -91,14 +348,45 @@ impl VmManager {
                 ("vm_id", &id.to_string()),
                 ("count", &count.to_string()),
                 ("children", &ids.join(",")),
+                ("identity", &format!("{:?}", spec.identity)),
+                ("parent_snapshot_ms", &parent_snapshot_ms.to_string()),
             ],
         );
-        Ok(children)
+        Ok(ForkReport {
+            children,
+            reports,
+            parent_snapshot_ms,
+            total_ms: started.elapsed().as_millis() as u64,
+            parallelism: 1,
+        })
     }
 
     /// Tenant and host admission for one more child of `src` (the same limits a create of that size meets).
     async fn admit_fork_child(&self, src: &VmRecord) -> Result<()> {
-        let ledger = self.store.quota_ledger().await?;
+        self.admit_fork_batch(src, 1).await
+    }
+
+    /// Admission for `count` children at once: the checks a create of that size meets, against the ledger as it would
+    /// be once the first `count - 1` children exist. Done before the parent is paused, so a batch that cannot fit is
+    /// refused up front instead of failing child by child.
+    async fn admit_fork_batch(&self, src: &VmRecord, count: u32) -> Result<()> {
+        let mut ledger = self.store.quota_ledger().await?;
+        let extra = u64::from(count.saturating_sub(1));
+        if extra > 0 {
+            let (v, m) = (
+                u64::from(src.request.vcpus) * extra,
+                src.request.memory_mib * extra,
+            );
+            ledger.host.vms += extra;
+            ledger.host.vcpus += v;
+            ledger.host.memory_mib += m;
+            if let Some(t) = src.request.tenant.as_deref() {
+                let e = ledger.tenants.entry(t.to_string()).or_default();
+                e.vms += extra;
+                e.vcpus += v;
+                e.memory_mib += m;
+            }
+        }
         if let Some(tenant) = src.request.tenant.as_deref()
             && !self.cfg.policy.tenants.is_empty()
         {
@@ -123,60 +411,130 @@ impl VmManager {
     ///
     /// One runner `save` pauses the parent for a moment and clones its disk (`snapshot_save`); every child gets APFS
     /// clones of that state and disk and the parent's machine identifier and MAC (the saved device state is bound to
-    /// them), and is restored through the ordinary `start_from_snapshot`. Children share the parent's MAC and address,
-    /// so each must own its network: `network.mode = none`, or `apple.usernet` (a private userspace NAT per VM).
+    /// them), and is restored through the ordinary `start_from_snapshot`, up to `parallelism` at a time. Children
+    /// share the parent's MAC and address, so each must own its network: `network.mode = none`, or `apple.usernet` (a
+    /// private userspace NAT per VM). Restoring the saved state onto a different attachment than it was saved with
+    /// (the Mac's NAT to a usernet NIC) was tried on hardware: the VM runs but the NIC comes up disconnected.
     async fn fork_vm_vz(
         self: &Arc<Self>,
         src: VmRecord,
-        count: u32,
-        name_prefix: Option<String>,
+        spec: ForkSpec,
+        post: ForkPost,
         actor: Option<&str>,
-    ) -> Result<Vec<VmRecord>> {
-        check_vz_forkable(&src, count)?;
+        started: Instant,
+    ) -> Result<ForkReport> {
+        check_vz_forkable(&src, spec.count)?;
+        check_fork_network_mode(&src, spec.network)?;
+        self.admit_fork_batch(&src, spec.count).await?;
         let id = src.id;
-        let prefix = name_prefix.unwrap_or_else(|| format!("{}-fork", src.name));
+        let count = spec.count;
+        let prefix = spec
+            .name_prefix
+            .clone()
+            .unwrap_or_else(|| format!("{}-fork", src.name));
         let names: Vec<String> = (1..=count).map(|n| format!("{prefix}-{n}")).collect();
         for name in &names {
             validate_vm_name(name)?;
         }
+        let parallelism = spec
+            .parallelism
+            .unwrap_or_else(|| count.min(8) as u8)
+            .clamp(1, MAX_FORK_COUNT as u8);
         let tag = format!("fork-{}", &Uuid::new_v4().simple().to_string()[..12]);
-        let op = OpGuard::begin(
-            &self.cfg.state_dir,
-            OpKind::Fork,
-            Uuid::new_v4(),
-            id,
-            vec![Resource::SnapshotDir {
-                path: src.workspace.join("snapshots").join(&tag),
-            }],
-        )
-        .context("journaling fork intent")?;
+        let op = Arc::new(
+            OpGuard::begin(
+                &self.cfg.state_dir,
+                OpKind::Fork,
+                Uuid::new_v4(),
+                id,
+                vec![Resource::SnapshotDir {
+                    path: src.workspace.join("snapshots").join(&tag),
+                }],
+            )
+            .context("journaling fork intent")?,
+        );
+        op.fork_expect(count).context("journaling fork size")?;
+        let snap_started = Instant::now();
         self.create_vm_snapshot(id, &tag).await?;
-        let mut children: Vec<VmRecord> = Vec::with_capacity(names.len());
-        let mut failure = None;
-        for name in &names {
-            match self.fork_child_vz(&src, &tag, name, actor, &op).await {
-                Ok(child) => children.push(child),
-                Err(e) => {
-                    failure = Some(e.context(format!("forking child {name}")));
-                    break;
+        let parent_snapshot_ms = snap_started.elapsed().as_millis() as u64;
+
+        let created: Arc<std::sync::Mutex<Vec<Uuid>>> = Arc::default();
+        let sem = Arc::new(tokio::sync::Semaphore::new(usize::from(parallelism)));
+        let mut set = tokio::task::JoinSet::new();
+        let src = Arc::new(src);
+        let post = Arc::new(post);
+        let actor_owned = actor.map(str::to_owned);
+        for name in names {
+            let (this, src, tag, op, sem, created, actor, post) = (
+                Arc::clone(self),
+                Arc::clone(&src),
+                tag.clone(),
+                Arc::clone(&op),
+                Arc::clone(&sem),
+                Arc::clone(&created),
+                actor_owned.clone(),
+                Arc::clone(&post),
+            );
+            let identity = spec.identity;
+            set.spawn(async move {
+                let _permit = sem.acquire_owned().await;
+                let r = this
+                    .fork_child_vz(
+                        &src,
+                        &tag,
+                        &name,
+                        actor.as_deref(),
+                        &op,
+                        identity,
+                        &post,
+                        &created,
+                    )
+                    .await;
+                (name, r)
+            });
+        }
+        let mut done: Vec<(VmRecord, ForkChildReport)> = Vec::new();
+        let mut failure: Option<anyhow::Error> = None;
+        while let Some(joined) = set.join_next().await {
+            match joined {
+                Ok((_, Ok(child))) => done.push(child),
+                Ok((name, Err(e))) => {
+                    if failure.is_none() {
+                        failure = Some(e.context(format!("forking child {name}")));
+                        // Children not yet started need not be; the ones in flight finish and are rolled back below.
+                        sem.close();
+                    }
+                }
+                Err(join) => {
+                    if failure.is_none() {
+                        failure = Some(anyhow::anyhow!("a fork task failed: {join}"));
+                        sem.close();
+                    }
                 }
             }
         }
         if let Some(e) = failure {
-            // All-or-nothing, as for the KVM fork.
-            for child in &children {
-                let _ = self.delete(child.id).await;
+            // All-or-nothing, as for the KVM fork: every child this call created, started or not.
+            let ids: Vec<Uuid> = created.lock().map(|g| g.clone()).unwrap_or_default();
+            for child in ids {
+                let _ = self.delete(child).await;
             }
             if let Err(e) = self.delete_vm_snapshot(id, &tag).await {
                 tracing::warn!(vm = %id, tag, error = %e, "removing fork snapshot failed");
             }
-            op.finish();
+            if let Ok(op) = Arc::try_unwrap(op) {
+                op.finish();
+            }
             return Err(e);
         }
         if let Err(e) = self.delete_vm_snapshot(id, &tag).await {
             tracing::warn!(vm = %id, tag, error = %e, "removing fork snapshot failed");
         }
-        op.finish();
+        if let Ok(op) = Arc::try_unwrap(op) {
+            op.finish();
+        }
+        done.sort_by(|a, b| a.0.name.cmp(&b.0.name));
+        let (children, reports): (Vec<_>, Vec<_>) = done.into_iter().unzip();
         let ids: Vec<String> = children.iter().map(|c| c.id.to_string()).collect();
         audit_event(
             "vm.fork",
@@ -185,11 +543,21 @@ impl VmManager {
                 ("count", &count.to_string()),
                 ("children", &ids.join(",")),
                 ("backend", "vz"),
+                ("identity", &format!("{:?}", spec.identity)),
+                ("parallelism", &parallelism.to_string()),
+                ("parent_snapshot_ms", &parent_snapshot_ms.to_string()),
             ],
         );
-        Ok(children)
+        Ok(ForkReport {
+            children,
+            reports,
+            parent_snapshot_ms,
+            total_ms: started.elapsed().as_millis() as u64,
+            parallelism,
+        })
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn fork_child_vz(
         self: &Arc<Self>,
         src: &VmRecord,
@@ -197,11 +565,18 @@ impl VmManager {
         name: &str,
         actor: Option<&str>,
         op: &OpGuard,
-    ) -> Result<VmRecord> {
+        identity: ForkIdentityMode,
+        post: &ForkPost,
+        created: &std::sync::Mutex<Vec<Uuid>>,
+    ) -> Result<(VmRecord, ForkChildReport)> {
+        let t0 = Instant::now();
         self.admit_fork_child(src).await?;
         let id = Uuid::new_v4();
         op.record(Resource::ForkChild { vm_id: id })
             .context("journaling fork child")?;
+        if let Ok(mut g) = created.lock() {
+            g.push(id);
+        }
         let workspace = self.cfg.state_dir.join("instances").join(id.to_string());
         std::fs::create_dir_all(&workspace)?;
         let (parent_ws, child_ws, tag_owned) =
@@ -219,6 +594,18 @@ impl VmManager {
                 return Err(e.context("preparing the child's files"));
             }
         };
+        let usernet = src
+            .request
+            .apple
+            .as_ref()
+            .is_some_and(|a| a.usernet.is_some());
+        if usernet {
+            // The restored guest keeps the lease the gateway gave its parent and does not print it again; tell the host.
+            let _ = std::fs::write(
+                fluxvm_apple::ip_file(&workspace),
+                format!("{USERNET_GUEST_IP}\n"),
+            );
+        }
         let mut req = src.request.clone();
         req.name = name.to_string();
         req.loadvm_tag = None;
@@ -262,18 +649,48 @@ impl VmManager {
             let _ = std::fs::remove_dir_all(&workspace);
             return Err(e);
         }
+        let prepare_ms = t0.elapsed().as_millis() as u64;
+        let _ = op.fork_phase(id, ForkPhase::Prepared);
+        let t1 = Instant::now();
         let started = self.start_from_snapshot(id, tag).await;
         let _ = std::fs::remove_dir_all(workspace.join("snapshots").join(tag));
-        match started {
-            Ok(vm) => {
-                reset_child_identity(&vm, name).await;
-                Ok(vm)
-            }
+        let restore_ms = t1.elapsed().as_millis() as u64;
+        let vm = match started {
+            Ok(vm) => vm,
             Err(e) => {
                 let _ = self.delete(id).await;
-                Err(e)
+                return Err(e);
             }
-        }
+        };
+        let _ = op.fork_phase(id, ForkPhase::Restored);
+        let outcome = match self.reset_child_identity(&vm, name, identity).await {
+            Ok(o) => o,
+            Err(e) => {
+                let _ = self.delete(id).await;
+                return Err(e.context("identity reset"));
+            }
+        };
+        let _ = op.fork_phase(id, ForkPhase::IdentityReset);
+        let (hooks_ms, ready_ms) = match self.fork_post_restore(&vm, post).await {
+            Ok(t) => t,
+            Err(e) => {
+                let _ = self.delete(id).await;
+                return Err(e);
+            }
+        };
+        // Re-read: the reset may have rotated the token on the stored record.
+        let vm = self.get(id).await.unwrap_or(vm);
+        let report = ForkChildReport {
+            id,
+            name: name.to_string(),
+            prepare_ms,
+            restore_ms,
+            identity: outcome,
+            hooks_ms,
+            ready_ms,
+            total_ms: t0.elapsed().as_millis() as u64,
+        };
+        Ok((vm, report))
     }
 
     async fn fork_children(
@@ -284,7 +701,9 @@ impl VmManager {
         names: &[String],
         actor: Option<&str>,
         op: &OpGuard,
-    ) -> Result<Vec<VmRecord>> {
+        identity: ForkIdentityMode,
+        post: &ForkPost,
+    ) -> Result<Vec<(VmRecord, ForkChildReport)>> {
         let spec = fluxvm_hypervisor::snapshot::load_spec(meta)?;
         if spec.boot.engine != fluxvm_hypervisor::api::FluxVmEngine::Kvm {
             bail!(
@@ -294,10 +713,13 @@ impl VmManager {
         }
         let mut children = Vec::with_capacity(names.len());
         for name in names {
-            match self.fork_child(src, &spec, tag, name, actor, op).await {
+            match self
+                .fork_child(src, &spec, tag, name, actor, op, identity, post)
+                .await
+            {
                 Ok(child) => children.push(child),
                 Err(e) => {
-                    for child in &children {
+                    for (child, _) in &children {
                         let _ = self.delete(child.id).await;
                     }
                     return Err(e.context(format!("forking child {name}")));
@@ -315,7 +737,10 @@ impl VmManager {
         name: &str,
         actor: Option<&str>,
         op: &OpGuard,
-    ) -> Result<VmRecord> {
+        identity: ForkIdentityMode,
+        post: &ForkPost,
+    ) -> Result<(VmRecord, ForkChildReport)> {
+        let t0 = Instant::now();
         self.admit_fork_child(src).await?;
 
         let id = Uuid::new_v4();
@@ -407,18 +832,47 @@ impl VmManager {
             return Err(e);
         }
 
+        let prepare_ms = t0.elapsed().as_millis() as u64;
+        let _ = op.fork_phase(id, ForkPhase::Prepared);
+        let t1 = Instant::now();
         let started = self.start_from_snapshot(id, tag).await;
         let _ = std::fs::remove_dir_all(workspace.join("snapshots").join(tag));
-        match started {
-            Ok(vm) => {
-                reset_child_identity(&vm, name).await;
-                Ok(vm)
-            }
+        let restore_ms = t1.elapsed().as_millis() as u64;
+        let vm = match started {
+            Ok(vm) => vm,
             Err(e) => {
                 let _ = self.delete(id).await;
-                Err(e)
+                return Err(e);
             }
-        }
+        };
+        let _ = op.fork_phase(id, ForkPhase::Restored);
+        let outcome = match self.reset_child_identity(&vm, name, identity).await {
+            Ok(o) => o,
+            Err(e) => {
+                let _ = self.delete(id).await;
+                return Err(e.context("identity reset"));
+            }
+        };
+        let _ = op.fork_phase(id, ForkPhase::IdentityReset);
+        let (hooks_ms, ready_ms) = match self.fork_post_restore(&vm, post).await {
+            Ok(t) => t,
+            Err(e) => {
+                let _ = self.delete(id).await;
+                return Err(e);
+            }
+        };
+        let vm = self.get(id).await.unwrap_or(vm);
+        let report = ForkChildReport {
+            id,
+            name: name.to_string(),
+            prepare_ms,
+            restore_ms,
+            identity: outcome,
+            hooks_ms,
+            ready_ms,
+            total_ms: t0.elapsed().as_millis() as u64,
+        };
+        Ok((vm, report))
     }
 }
 
@@ -426,71 +880,343 @@ impl VmManager {
 /// agent starts answering again.
 const IDENTITY_RESET_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
-/// Give a resumed child its own hostname, machine-id and RNG state through
-/// the guest agent. A fork resumes the parent's memory, so without this every
-/// child shares the parent's identity and entropy pool. Failure is not fatal
-/// (the child still runs) but is logged at error level and audited, because a
-/// child with a duplicate identity or RNG state is a correctness problem.
-async fn reset_child_identity(vm: &VmRecord, hostname: &str) {
-    use base64::Engine;
-    use fluxvm_guest_protocol::{AgentRequest, AgentResponse};
+/// How long the SSH fallback waits for sshd before giving up on it.
+const SSH_FALLBACK_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
 
-    if !vm.request.agent.as_ref().is_some_and(|a| a.enabled) {
-        tracing::warn!(vm = %vm.id, "fork child has no guest agent; identity not reset");
-        return;
+impl VmManager {
+    /// Give a resumed child its own identity, as `mode` says, and report how.
+    ///
+    /// A fork resumes the parent's memory, so without this every child shares its hostname, machine-id, SSH host keys,
+    /// cloud-init instance, DHCP identity, RNG state and agent token. [`ForkIdentityMode::Unique`] fails unless the
+    /// guest confirmed every step in `REQUIRED_STEPS` (an older agent ignores the new fields and omits their names,
+    /// which is how it is recognised). The agent path rotates the agent's token too; the stored record changes only
+    /// once the guest confirmed `agent-token`, so the host never holds a token the guest does not.
+    async fn reset_child_identity(
+        self: &Arc<Self>,
+        vm: &VmRecord,
+        hostname: &str,
+        mode: ForkIdentityMode,
+    ) -> Result<IdentityOutcome> {
+        use base64::Engine;
+        use fluxvm_guest_protocol::{AgentRequest, AgentResponse};
+
+        let t0 = Instant::now();
+        if mode == ForkIdentityMode::Preserve {
+            return Ok(IdentityOutcome {
+                via: "preserved".into(),
+                ..Default::default()
+            });
+        }
+        let strict = mode == ForkIdentityMode::Unique;
+        // 32 bytes of host entropy and a fresh token; UUIDs avoid a direct rand dependency.
+        let mut entropy = Vec::with_capacity(32);
+        entropy.extend_from_slice(Uuid::new_v4().as_bytes());
+        entropy.extend_from_slice(Uuid::new_v4().as_bytes());
+        let entropy_b64 = base64::engine::general_purpose::STANDARD.encode(&entropy);
+        let new_token = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
+
+        let mut last_problem = String::new();
+        if vm.request.agent.as_ref().is_some_and(|a| a.enabled) {
+            let request = AgentRequest::ResetIdentity {
+                hostname: Some(hostname.to_string()),
+                regenerate_machine_id: true,
+                reseed_entropy: true,
+                entropy_base64: Some(entropy_b64.clone()),
+                regenerate_ssh_host_keys: true,
+                reset_cloud_init: true,
+                reset_dhcp_identity: true,
+                flush_network_state: true,
+                new_agent_token: Some(new_token.clone()),
+            };
+            let deadline = tokio::time::Instant::now() + IDENTITY_RESET_TIMEOUT;
+            let answer = loop {
+                let attempt = fluxvm_vsock_client::call(
+                    vm,
+                    request.clone(),
+                    std::time::Duration::from_secs(5),
+                )
+                .await;
+                match attempt {
+                    Ok(AgentResponse::IdentityReset { applied, failures }) => {
+                        break Ok((applied, failures));
+                    }
+                    Ok(AgentResponse::Error { message }) => {
+                        break Err(anyhow::anyhow!("guest agent error: {message}"));
+                    }
+                    Ok(other) => break Err(anyhow::anyhow!("unexpected response: {other:?}")),
+                    Err(e) if tokio::time::Instant::now() >= deadline => break Err(e),
+                    Err(_) => tokio::time::sleep(std::time::Duration::from_millis(250)).await,
+                }
+            };
+            match answer {
+                Ok((applied, failures)) => {
+                    // The guest has the new token once it says so, whatever else failed: record it first.
+                    let rotated = applied.iter().any(|s| s == "agent-token");
+                    if rotated && let Ok(mut rec) = self.get(vm.id).await {
+                        if let Some(a) = rec.request.agent.as_mut() {
+                            a.token = Some(new_token.clone());
+                        }
+                        let _ = self.store.update(rec).await;
+                    }
+                    let missing: Vec<&str> = REQUIRED_STEPS
+                        .iter()
+                        .copied()
+                        .filter(|r| !applied.iter().any(|a| a == r))
+                        .collect();
+                    if failures.is_empty() && missing.is_empty() {
+                        let o = IdentityOutcome {
+                            via: "agent".into(),
+                            applied,
+                            token_rotated: rotated,
+                            ms: t0.elapsed().as_millis() as u64,
+                        };
+                        audit_event(
+                            "vm.fork.identity-reset",
+                            &[("vm_id", &vm.id.to_string()), ("via", "agent")],
+                        );
+                        return Ok(o);
+                    }
+                    last_problem = format!(
+                        "the guest agent confirmed {} but not {}{}",
+                        if applied.is_empty() {
+                            "nothing".to_string()
+                        } else {
+                            applied.join(",")
+                        },
+                        if missing.is_empty() {
+                            "(nothing missing)".to_string()
+                        } else {
+                            missing.join(",")
+                        },
+                        if failures.is_empty() {
+                            String::new()
+                        } else {
+                            format!("; failures: {}", failures.join("; "))
+                        }
+                    );
+                    if !strict {
+                        return Ok(IdentityOutcome {
+                            via: "agent".into(),
+                            applied,
+                            token_rotated: rotated,
+                            ms: t0.elapsed().as_millis() as u64,
+                        });
+                    }
+                }
+                Err(e) => last_problem = format!("{e:#}"),
+            }
+        } else {
+            last_problem = "the guest agent is not enabled".into();
+        }
+
+        // Not confirmed over the agent. Under `Unique`, try SSH before giving up.
+        if strict
+            && vm.backend == BackendKind::Vz
+            && let Some(o) = self
+                .reset_identity_over_ssh(vm, hostname, &entropy_b64, t0)
+                .await
+        {
+            return Ok(o);
+        }
+        let runner = runner_log_tail(vm);
+        let problem = format!(
+            "{last_problem}{}; identity=unique needs the vsock agent (or SSH for a vz guest) to confirm {}. Use \
+             identity=best-effort or preserve to fork this guest anyway",
+            if runner.is_empty() {
+                String::new()
+            } else {
+                format!(" [runner log: {runner}]")
+            },
+            REQUIRED_STEPS.join(", ")
+        );
+        fluxvm_core::metrics::record_fork_identity_failed();
+        tracing::error!(vm = %vm.id, error = %problem, "fork child identity reset FAILED");
+        audit_event(
+            "vm.fork.identity-reset-failed",
+            &[("vm_id", &vm.id.to_string()), ("error", &problem)],
+        );
+        if strict {
+            bail!("{problem}");
+        }
+        Ok(IdentityOutcome {
+            via: "none".into(),
+            ms: t0.elapsed().as_millis() as u64,
+            ..Default::default()
+        })
     }
-    // 32 bytes of host entropy; two v4 UUIDs avoid a direct rand dependency.
-    let mut entropy = Vec::with_capacity(32);
-    entropy.extend_from_slice(Uuid::new_v4().as_bytes());
-    entropy.extend_from_slice(Uuid::new_v4().as_bytes());
-    let request = AgentRequest::ResetIdentity {
-        hostname: Some(hostname.to_string()),
-        regenerate_machine_id: true,
-        reseed_entropy: true,
-        entropy_base64: Some(base64::engine::general_purpose::STANDARD.encode(&entropy)),
+
+    /// The SSH fallback of a strict reset: the same steps as a shell script run as root (or through `sudo -n`).
+    /// `None` when sshd cannot be reached or a step is not confirmed. The agent's token is not rotated this way (an
+    /// absent or old agent is exactly why we are here), which is reported through `token_rotated: false`.
+    async fn reset_identity_over_ssh(
+        &self,
+        vm: &VmRecord,
+        hostname: &str,
+        entropy_b64: &str,
+        t0: Instant,
+    ) -> Option<IdentityOutcome> {
+        use fluxvm_apple::ssh;
+        let guest = self.vz_guest(vm).ok()?;
+        ssh::wait_ready(&guest, SSH_FALLBACK_WAIT).await.ok()?;
+        let script = ssh_reset_script(hostname, entropy_b64);
+        let out = ssh::exec(&guest, &script, IDENTITY_RESET_TIMEOUT)
+            .await
+            .ok()?;
+        let applied: Vec<String> = out
+            .stdout
+            .lines()
+            .filter_map(|l| l.strip_prefix("STEP:"))
+            .map(str::to_owned)
+            .collect();
+        let missing = REQUIRED_STEPS
+            .iter()
+            .any(|r| !applied.iter().any(|a| a == r));
+        if out.exit_code != 0 || missing {
+            tracing::warn!(vm = %vm.id, stdout = %out.stdout.trim(), stderr = %out.stderr.trim(), "SSH identity reset incomplete");
+            return None;
+        }
+        audit_event(
+            "vm.fork.identity-reset",
+            &[("vm_id", &vm.id.to_string()), ("via", "ssh")],
+        );
+        Some(IdentityOutcome {
+            via: "ssh".into(),
+            applied,
+            token_rotated: false,
+            ms: t0.elapsed().as_millis() as u64,
+        })
+    }
+}
+
+impl VmManager {
+    /// Hooks, then the readiness condition, for one child. Returns `(hooks_ms, ready_ms)`.
+    async fn fork_post_restore(&self, vm: &VmRecord, post: &ForkPost) -> Result<(u64, u64)> {
+        use fluxvm_guest_protocol::{AgentResponse, ExecProcess};
+        let deadline = tokio::time::Instant::now() + post.timeout;
+        let t0 = Instant::now();
+        for argv in &post.hooks {
+            let left = deadline
+                .saturating_duration_since(tokio::time::Instant::now())
+                .as_secs()
+                .max(1);
+            let process = ExecProcess {
+                argv: argv.clone(),
+                ..Default::default()
+            };
+            match self.exec_process(vm.id, process, Some(left)).await {
+                Ok(AgentResponse::Exec { exit_code: 0, .. }) => {}
+                Ok(AgentResponse::Exec {
+                    exit_code, stderr, ..
+                }) => bail!(
+                    "fork hook {:?} exited {exit_code}: {}",
+                    argv.first().map(String::as_str).unwrap_or(""),
+                    stderr.trim()
+                ),
+                Ok(other) => bail!("fork hook {:?} failed: {other:?}", argv.first()),
+                Err(e) => bail!("fork hook {:?} could not run: {e:#}", argv.first()),
+            }
+        }
+        let hooks_ms = t0.elapsed().as_millis() as u64;
+        let t1 = Instant::now();
+        let probe: Option<String> = match &post.ready {
+            ForkReady::Running => None,
+            ForkReady::Agent | ForkReady::Exec => Some("true".to_string()),
+            ForkReady::Tcp(port) => Some(format!(
+                "timeout 2 bash -c 'exec 3<>/dev/tcp/127.0.0.1/{port}' 2>/dev/null"
+            )),
+            ForkReady::Http { port, path } => Some(format!(
+                "curl -fsS -m 2 -o /dev/null http://127.0.0.1:{port}{path} 2>/dev/null \
+                 || wget -q -T 2 -O /dev/null http://127.0.0.1:{port}{path} 2>/dev/null"
+            )),
+        };
+        if let Some(cmd) = probe {
+            let mut last = String::from("no attempt");
+            loop {
+                match self.exec(vm.id, cmd.clone(), Some(5)).await {
+                    Ok(AgentResponse::Exec { exit_code: 0, .. }) => break,
+                    Ok(AgentResponse::Exec { exit_code, .. }) => {
+                        last = format!("probe exited {exit_code}")
+                    }
+                    Ok(other) => last = format!("{other:?}"),
+                    Err(e) => last = format!("{e:#}"),
+                }
+                if tokio::time::Instant::now() >= deadline {
+                    bail!(
+                        "child {} was not ready ({:?}) within {:?}: {last}",
+                        vm.name,
+                        post.ready,
+                        post.timeout
+                    );
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            }
+        }
+        Ok((hooks_ms, t1.elapsed().as_millis() as u64))
+    }
+}
+
+/// The reset script for the SSH fallback. `hostname` is a validated VM name (`[a-z0-9-]`) and `entropy_b64` is base64,
+/// so neither needs quoting. Each confirmed step prints `STEP:<name>`; a step that cannot be confirmed prints nothing.
+fn ssh_reset_script(hostname: &str, entropy_b64: &str) -> String {
+    format!(
+        r#"set -u
+S=""
+[ "$(id -u)" = 0 ] || S="sudo -n"
+step() {{ echo "STEP:$1"; }}
+printf %s '{entropy_b64}' | base64 -d | $S tee /dev/urandom >/dev/null 2>&1 && step entropy
+{{ $S hostname {hostname} && echo {hostname} | $S tee /etc/hostname >/dev/null; }} 2>/dev/null && step hostname
+$S rm -f /etc/machine-id
+{{ $S systemd-machine-id-setup >/dev/null 2>&1 || {{ tr -d - </proc/sys/kernel/random/uuid | $S tee /etc/machine-id >/dev/null; }}; }} && step machine-id
+if [ -d /etc/ssh ]; then
+  $S sh -c 'rm -f /etc/ssh/ssh_host_*_key /etc/ssh/ssh_host_*_key.pub; ssh-keygen -A >/dev/null 2>&1; systemctl try-reload-or-restart ssh.service sshd.service >/dev/null 2>&1; true' && step ssh-host-keys
+else step ssh-host-keys; fi
+if command -v cloud-init >/dev/null 2>&1; then $S cloud-init clean --logs >/dev/null 2>&1 && step cloud-init; else step cloud-init; fi
+if systemctl is-active --quiet systemd-networkd 2>/dev/null; then
+  $S networkctl reload >/dev/null 2>&1
+  $S networkctl reconfigure $(ls /sys/class/net | grep -v '^lo$') >/dev/null 2>&1 && step dhcp
+else step dhcp; fi
+{{ $S ip neigh flush all; $S ip route flush cache; }} >/dev/null 2>&1 && step network-state
+exit 0
+"#
+    )
+}
+
+/// The last lines of a vz child's runner log, for an error that would otherwise say only "connection refused" (the
+/// runner has exited, and why is written there).
+fn runner_log_tail(vm: &VmRecord) -> String {
+    if vm.backend != BackendKind::Vz {
+        return String::new();
+    }
+    std::fs::read_to_string(vm.workspace.join("vz-runner.log"))
+        .map(|s| {
+            let lines: Vec<&str> = s.lines().rev().take(4).collect();
+            lines.into_iter().rev().collect::<Vec<_>>().join(" | ")
+        })
+        .unwrap_or_default()
+}
+
+/// `network` against what a vz parent allows.
+fn check_fork_network_mode(src: &VmRecord, mode: ForkNetworkMode) -> Result<()> {
+    let isolated = match &src.request.network {
+        NetworkSpec::None => true,
+        NetworkSpec::User { .. } => src
+            .request
+            .apple
+            .as_ref()
+            .is_some_and(|a| a.usernet.is_some()),
+        _ => false,
     };
-    let deadline = tokio::time::Instant::now() + IDENTITY_RESET_TIMEOUT;
-    let outcome: Result<String> = loop {
-        let attempt =
-            fluxvm_vsock_client::call(vm, request.clone(), std::time::Duration::from_secs(5)).await;
-        match attempt {
-            Ok(AgentResponse::IdentityReset { applied, failures }) if failures.is_empty() => {
-                break Ok(format!("applied: {}", applied.join(",")));
-            }
-            Ok(AgentResponse::IdentityReset { applied, failures }) => {
-                break Err(anyhow::anyhow!(
-                    "partial reset (applied: {}); failed: {}",
-                    applied.join(","),
-                    failures.join("; ")
-                ));
-            }
-            Ok(AgentResponse::Error { message }) => {
-                break Err(anyhow::anyhow!("guest agent error: {message}"));
-            }
-            Ok(other) => break Err(anyhow::anyhow!("unexpected response: {other:?}")),
-            Err(e) if tokio::time::Instant::now() >= deadline => break Err(e),
-            Err(_) => tokio::time::sleep(std::time::Duration::from_millis(250)).await,
-        }
-    };
-    match outcome {
-        Ok(detail) => {
-            audit_event(
-                "vm.fork.identity-reset",
-                &[("vm_id", &vm.id.to_string()), ("detail", &detail)],
-            );
-        }
-        Err(e) => {
-            tracing::error!(
-                vm = %vm.id,
-                error = %format!("{e:#}"),
-                "fork child identity reset FAILED: child shares the parent's hostname, \
-                 machine-id and/or RNG state"
-            );
-            audit_event(
-                "vm.fork.identity-reset-failed",
-                &[("vm_id", &vm.id.to_string()), ("error", &format!("{e:#}"))],
-            );
-        }
+    match mode {
+        ForkNetworkMode::Auto | ForkNetworkMode::Preserve => Ok(()),
+        ForkNetworkMode::Isolated if isolated => Ok(()),
+        ForkNetworkMode::Isolated => bail!(
+            "network=isolated needs each child to own its network (a per-VM apple.usernet, or none); this guest is on \
+             the Mac's NAT, so its children would share one MAC and address"
+        ),
+        ForkNetworkMode::None if matches!(src.request.network, NetworkSpec::None) => Ok(()),
+        ForkNetworkMode::None => bail!(
+            "network=none needs a guest created without a network card: a saved state cannot lose its NIC on restore"
+        ),
     }
 }
 
@@ -530,7 +1256,9 @@ pub(crate) fn check_vz_forkable(src: &VmRecord, count: u32) -> Result<()> {
         NetworkSpec::User { .. } => {
             bail!(
                 "fork needs network mode none, or mode user with apple.usernet and no forwards: on the Mac's NAT the \
-                 children would share the parent's MAC and address"
+                 children would share the parent's MAC and address, and a saved state cannot be restored onto a \
+                 different network attachment (tried on hardware: the child runs but its NIC comes up disconnected). \
+                 Create the guest with apple.usernet to make it forkable"
             );
         }
         _ => bail!("fork of a vz guest needs network mode none or user"),
@@ -639,6 +1367,95 @@ mod tests {
             req.insert(k.clone(), v.clone());
         }
         serde_json::from_value(r).unwrap()
+    }
+
+    #[test]
+    fn fork_spec_defaults_are_strict_and_old_bodies_still_parse() {
+        let d: ForkSpec = serde_json::from_str("{}").unwrap();
+        assert_eq!(d.count, 1);
+        assert_eq!(d.identity, ForkIdentityMode::Unique);
+        assert_eq!(d.network, ForkNetworkMode::Auto);
+        assert!(d.parallelism.is_none());
+        // The pre-v2 REST body.
+        let old: ForkSpec = serde_json::from_str(r#"{"count":3,"namePrefix":"w"}"#).unwrap();
+        assert_eq!((old.count, old.name_prefix.as_deref()), (3, Some("w")));
+        let new: ForkSpec = serde_json::from_str(
+            r#"{"count":2,"identity":"best-effort","network":"isolated","parallelism":4}"#,
+        )
+        .unwrap();
+        assert_eq!(new.identity, ForkIdentityMode::BestEffort);
+        assert_eq!(new.network, ForkNetworkMode::Isolated);
+        assert_eq!(new.parallelism, Some(4));
+        // A typo is an error, not a silently ignored (and therefore unsafe) default.
+        assert!(serde_json::from_str::<ForkSpec>(r#"{"identiy":"preserve"}"#).is_err());
+        assert!(serde_json::from_str::<ForkSpec>(r#"{"identity":"maybe"}"#).is_err());
+    }
+
+    #[test]
+    fn ready_and_hooks_parse_and_are_validated() {
+        let spec: ForkSpec = serde_json::from_str(
+            r#"{"count":2,"ready":{"http":{"port":8080,"path":"/health"}},"hooks":[["systemctl","restart","app"]],"ready_timeout_seconds":30}"#,
+        )
+        .unwrap();
+        let post = spec.post().unwrap();
+        assert_eq!(post.timeout.as_secs(), 30);
+        assert_eq!(post.hooks.len(), 1);
+        assert!(matches!(post.ready, ForkReady::Http { port: 8080, .. }));
+        for (json, ok) in [
+            (r#"{"ready":"exec"}"#, true),
+            (r#"{"ready":{"tcp":5432}}"#, true),
+            (r#"{"ready":{"tcp":0}}"#, false),
+            (r#"{"ready":{"http":{"port":80}}}"#, true),
+            (r#"{"ready":{"http":{"port":80,"path":"/a b"}}}"#, false),
+            (r#"{"ready":{"http":{"port":80,"path":"x"}}}"#, false),
+            (
+                r#"{"ready":{"http":{"port":80,"path":"/x;rm -rf /"}}}"#,
+                false,
+            ),
+            (r#"{"hooks":[[]]}"#, false),
+            (r#"{"hooks":[["ok",""]]}"#, false),
+        ] {
+            let s: ForkSpec = serde_json::from_str(json).unwrap();
+            assert_eq!(s.post().is_ok(), ok, "{json}");
+        }
+        let nine: ForkSpec =
+            serde_json::from_value(serde_json::json!({"hooks": vec![vec!["a"]; 9]})).unwrap();
+        assert!(nine.post().is_err());
+        assert!(serde_json::from_str::<ForkSpec>(r#"{"ready":"soon"}"#).is_err());
+        // Defaults: nothing extra is waited for.
+        let d: ForkSpec = serde_json::from_str("{}").unwrap();
+        assert_eq!(d.ready, ForkReady::Running);
+        assert!(d.hooks.is_empty());
+    }
+
+    #[test]
+    fn network_mode_is_checked_against_the_parent() {
+        let un = vz_record(serde_json::json!({"apple": {"usernet": {}}}), "running");
+        let nat = vz_record(serde_json::json!({}), "running");
+        for mode in [ForkNetworkMode::Auto, ForkNetworkMode::Preserve] {
+            assert!(check_fork_network_mode(&un, mode).is_ok());
+            assert!(check_fork_network_mode(&nat, mode).is_ok());
+        }
+        assert!(check_fork_network_mode(&un, ForkNetworkMode::Isolated).is_ok());
+        let err = check_fork_network_mode(&nat, ForkNetworkMode::Isolated).unwrap_err();
+        assert!(format!("{err:#}").contains("NAT"));
+        // `none` only for a guest that has no NIC to lose.
+        assert!(check_fork_network_mode(&un, ForkNetworkMode::None).is_err());
+    }
+
+    #[test]
+    fn the_ssh_reset_script_confirms_every_required_step() {
+        let script = ssh_reset_script("app-fork-1", "QUJD");
+        for step in REQUIRED_STEPS {
+            assert!(
+                script.contains(&format!("step {step}")),
+                "script never confirms {step}"
+            );
+        }
+        // Inputs are validated names and base64, so they may sit unquoted; make sure nothing else is spliced in.
+        assert!(script.contains("hostname app-fork-1"));
+        assert!(script.contains("printf %s 'QUJD'"));
+        assert!(script.starts_with("set -u"));
     }
 
     #[test]

@@ -83,43 +83,81 @@ Two cautions:
 ## Child identity reset
 
 A fork resumes the parent's memory, so every child starts with the parent's
-hostname, `/etc/machine-id` and kernel RNG state. `fork_child` sends the guest
-agent `AgentRequest::ResetIdentity` and retries for up to 15 s (every 250 ms,
-5 s per call) while the resumed agent starts answering.
+hostname, `/etc/machine-id`, SSH host keys, cloud-init instance, DHCP identity,
+kernel RNG state and **agent token**. The request's `identity` says how hard to
+try (`POST /v1/vms/{id}/fork`, `fluxctl fork-vm --identity`, MCP `vm_fork`):
 
-The host sends: the child's name as hostname, `regenerate_machine_id: true`,
-`reseed_entropy: true`, and 32 bytes of host entropy (two v4 UUIDs, base64). The
-agent (`reset_identity`, Linux) does, each step independent and best effort:
+| `identity` | Behaviour |
+|---|---|
+| `unique` (default) | Every step must be confirmed by the guest or the whole fork fails and every child is deleted. When the vsock agent is absent, or too old to confirm the new steps, a vz guest is reset over SSH instead; if that is not reachable either the fork is refused with the missing capability named. |
+| `best-effort` | Try everything; a failed reset is logged (`vm.fork.identity-reset-failed`) and the child is kept. This was the only behaviour before fork v2, and is what speculation uses. |
+| `preserve` | Reset nothing (debugging, deterministic replay). |
 
-1. Entropy first: `RNDADDENTROPY` on `/dev/urandom` with the supplied bytes
-   (at most 512 are used), crediting them to the pool. With no entropy supplied it
-   reports a failure rather than guessing.
-2. Hostname: `sethostname` and `/etc/hostname`, after validating the name
-   (no dots, no leading `-`, at most 63 characters).
-3. Machine id: a fresh random id into `/etc/machine-id`, and
-   `/var/lib/dbus/machine-id` if it is a regular file (a symlink is left alone).
-4. `ip neigh flush all`, dropping the parent's neighbour cache.
+The host sends `AgentRequest::ResetIdentity` (retried for up to 15 s while the
+resumed agent starts answering) with the child's name as hostname, 32 bytes of
+host entropy, a fresh agent token and the flags below. The Linux agent does each
+step independently and reports the ones it confirmed in `applied`:
 
-The response is `IdentityReset { applied, failures }`. A clean reset is audited
-as `vm.fork.identity-reset`. Any failure, or a child with no agent, is **not
-fatal**: the child keeps running, a loud error is logged and
-`vm.fork.identity-reset-failed` is audited. A child that failed the reset shares
-the parent's identity or RNG state, which is a correctness problem.
+1. `entropy`: `RNDADDENTROPY` on `/dev/urandom`, **then `RNDRESEEDCRNG`**. Without the
+   reseed, children restored from one state draw identical "random" machine-ids
+   and SSH host keys for the first moments (crediting the pool does not make the
+   kernel reseed at once; found on hardware, see the macOS hardware log).
+2. `hostname`: `sethostname` and `/etc/hostname`.
+3. `machine-id`: a fresh id into `/etc/machine-id` (and the dbus copy if a file).
+4. `ssh-host-keys`: remove `/etc/ssh/ssh_host_*_key{,.pub}`, `ssh-keygen -A`,
+   reload sshd. Reported applied when there is no sshd.
+5. `cloud-init`: `cloud-init clean --logs`, so the child is a new instance (user
+   modules are not re-run). Reported applied when cloud-init is absent.
+6. `dhcp`: `networkctl reload` and `reconfigure` of the non-loopback links when
+   systemd-networkd is active, so a changed lease is picked up.
+7. `network-state`: neighbour cache, route cache and (if present) conntrack flush;
+   also reported as `neigh-flush` for older callers.
+8. `agent-token`: the agent writes the new token to its token file (0600,
+   atomically) and then accepts only it. The request is authorised with the old
+   token; the old one stays valid for exactly one further request, so a reply the
+   host never saw cannot lock it out. The host stores the new token on the VM
+   record only after the guest confirmed this step.
+
+`unique` requires steps 1 to 7. An older agent ignores the fields it does not
+know and simply omits their names, which is how it is recognised (the wire format
+has no version number, and a new `op` would be a connection-dropping parse error,
+so the existing request was extended with defaulted fields).
+
+The response is `IdentityReset { applied, failures }`. Per child, the fork
+report returns `identity: {via, applied, token_rotated, ms}` where `via` is
+`agent`, `ssh`, `preserved` or `none`. The SSH fallback does not rotate the
+agent token (the absent or old agent is why it is used), so `token_rotated` is
+false there and the child still shares the parent's token.
 
 Not done:
 
 - **Open connections are not touched.** Established TCP connections, listening
   sockets and in-flight requests in the parent are present in the child (the
-  child's netns and tap differ, but the guest believes the old state). Quiesce the
-  parent before forking.
-- The IP and MAC stay the parent's (hence the netns requirement). The child is
-  not re-addressed.
-- No clock step, no per-process re-seeding (an application that already read
-  random bytes keeps them, e.g. a TLS session cache or a language runtime's PRNG
-  state), no SSH host key regeneration, no cloud-init re-run.
-- Not run at all for VMs created without the agent.
+  guest believes the old state). Quiesce the parent before forking.
+- The IP and MAC stay the parent's. On vz every child therefore needs a network
+  of its own (see the macOS guide); on KVM, a netns per child.
+- `boot_id` (`/proc/sys/kernel/random/boot_id`) cannot be changed from user
+  space: every child reports the parent's.
+- No clock step and no per-process re-seeding: an application that already read
+  random bytes keeps them (a TLS session cache, a language runtime's PRNG), and
+  secrets in application memory are copied. Fork does not rotate those.
+- macOS guests are not forkable; the macOS agent only sets the hostname.
 - A plain snapshot restore of the same VM (`vm_restore.rs`) does not call
   `ResetIdentity`; it only waits for the agent to answer again.
+
+## Hooks and readiness
+
+`hooks` (argv lists, at most 8) run in each child **after** its identity is reset and **before** readiness is probed,
+as root through the guest agent (no shell; they need the agent). A non-zero exit fails the fork. `ready` says what a
+child must do before it is reported: `running` (default: identity reset and nothing more), `agent` (answers a ping),
+`exec` (a trivial command runs, through SSH for a vz guest without an agent), `{"tcp": 5432}` (accepts connections on
+`127.0.0.1` inside the guest) or `{"http": {"port": 8080, "path": "/health"}}` (a 2xx). Probes retry for
+`ready_timeout_seconds` (default 60, hooks included); a child that is not ready fails the whole fork and is deleted.
+`fluxctl fork-vm --hook "systemctl restart app" --ready http:8080/health --ready-timeout 30`. The per-child report has
+`hooks_ms` and `ready_ms`.
+
+This is the place to reset application identity the guest cannot know about (a node id, a session cache): the fork
+copied it. Secrets held in application memory are not rotated.
 
 ## First-command latency: ?ready=exec
 

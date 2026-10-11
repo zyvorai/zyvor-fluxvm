@@ -116,9 +116,17 @@ For each intent whose owner is gone:
   through `delete()`, and finally removes the workspace.
 - **snapshot** and **restore**: remove the `snapshot_dir` or `*.restore.tmp`
   file. Nothing else.
-- **fork**: all or nothing. Every child it started is removed (through
-  `delete()` if it has a record; otherwise by killing its VMM, cleaning its
-  netns and policy and removing its workspace), then the parent's fork snapshot.
+- **fork**: all or nothing, in both directions. The intent records how many
+  children were wanted and how far each got (`prepared`, `restored`,
+  `identity-reset`). If **every** child reached `identity-reset` and is still a
+  running VM, the operation only missed its last step (answering the caller):
+  the batch is **adopted**, only the parent's fork snapshot is removed, and
+  `vm.fork.adopted` is audited. In every other case (a child short of
+  `identity-reset`, one missing or dead, fewer recorded than wanted, or an
+  intent written before phases existed) every child it started is removed
+  (through `delete()` if it has a record; otherwise by killing its VMM, cleaning
+  its netns and policy and removing its workspace), then the parent's fork
+  snapshot.
 
 If every step succeeded the intent is cleared. Otherwise `attempts` is
 incremented and written back; after `MAX_ROLLBACK_ATTEMPTS` (5) the intent is
@@ -142,6 +150,11 @@ warning) if it fails:
 Only processes whose `/proc/<pid>/comm` starts with `qemu`, `cloud-hyper`,
 `firecracker`, `jailer`, `virtiofsd`, `swtpm` or `fluxvm` are ever killed on a
 rolled-back VM's behalf.
+
+On macOS there is no `/proc`: the lookup reads `ps` and matches only `fluxvm-vz-runner` processes whose command line
+names the VM's workspace or id (a fork child's runner is stopped this way before its record is deleted, since the record
+may not yet hold the runner's pid). Until this was added, a `kill -9` of the daemon mid-fork left the children's guests
+running with their workspaces deleted.
 
 ### sweep_orphans
 
