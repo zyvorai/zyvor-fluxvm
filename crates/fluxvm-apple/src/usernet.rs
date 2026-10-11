@@ -42,25 +42,9 @@ fn valid_domain(d: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.')
 }
 
-/// Admission checks for `apple.usernet` (the daemon repeats nothing at launch beyond [`to_config`]).
-pub fn validate(u: &AppleUsernet, req: &CreateVmRequest, apple: &AppleSpec) -> Result<()> {
-    if apple.guest_os != AppleGuest::Linux {
-        bail!("apple.usernet is for Linux guests");
-    }
-    if matches!(req.network, NetworkSpec::None) {
-        bail!("apple.usernet needs a network card; network.mode = \"none\" has none");
-    }
-    if apple.bridge_interface.is_some() {
-        bail!("apple.usernet and apple.bridge_interface are mutually exclusive");
-    }
-    if apple.vmnet.is_some() {
-        bail!("apple.usernet and apple.vmnet are mutually exclusive");
-    }
-    if let NetworkSpec::User { forwards } = &req.network
-        && !forwards.is_empty()
-    {
-        bail!("with apple.usernet use apple.usernet.port_forwards, not network.forwards");
-    }
+/// The egress-policy part of the admission checks: entry counts, CIDR syntax, ports and DNS names. Shared by create and by
+/// a live policy change, so a changed policy is held to exactly the same rules.
+pub fn validate_policy(u: &AppleUsernet) -> Result<()> {
     for (what, n) in [
         ("allow_cidrs", u.allow_cidrs.len()),
         ("deny_cidrs", u.deny_cidrs.len()),
@@ -97,6 +81,29 @@ pub fn validate(u: &AppleUsernet, req: &CreateVmRequest, apple: &AppleSpec) -> R
             bail!("apple.usernet DNS entry {d:?} is not a host name or *.suffix");
         }
     }
+    Ok(())
+}
+
+/// Admission checks for `apple.usernet` (the daemon repeats nothing at launch beyond [`to_config`]).
+pub fn validate(u: &AppleUsernet, req: &CreateVmRequest, apple: &AppleSpec) -> Result<()> {
+    if apple.guest_os != AppleGuest::Linux {
+        bail!("apple.usernet is for Linux guests");
+    }
+    if matches!(req.network, NetworkSpec::None) {
+        bail!("apple.usernet needs a network card; network.mode = \"none\" has none");
+    }
+    if apple.bridge_interface.is_some() {
+        bail!("apple.usernet and apple.bridge_interface are mutually exclusive");
+    }
+    if apple.vmnet.is_some() {
+        bail!("apple.usernet and apple.vmnet are mutually exclusive");
+    }
+    if let NetworkSpec::User { forwards } = &req.network
+        && !forwards.is_empty()
+    {
+        bail!("with apple.usernet use apple.usernet.port_forwards, not network.forwards");
+    }
+    validate_policy(u)?;
     if let Some(mtu) = u.mtu
         && !(576..=9000).contains(&mtu)
     {
@@ -328,6 +335,115 @@ pub struct Gateway {
 /// File name of the gateway's bound-forward report inside a VM workspace.
 pub const FORWARDS_FILE: &str = "usernet-forwards.json";
 
+/// The gateway's pid, written by its supervisor after each start, so the daemon can ask it to reload its policy.
+pub const PID_FILE: &str = "usernet.pid";
+
+/// A change to the egress policy of a running or stopped usernet guest. Absent fields keep their value; a present
+/// empty list clears it.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct PolicyPatch {
+    pub allow_cidrs: Option<Vec<String>>,
+    pub deny_cidrs: Option<Vec<String>>,
+    pub allow_ports: Option<Vec<u16>>,
+    pub deny_ports: Option<Vec<u16>>,
+    pub dns_allow: Option<Vec<String>>,
+    pub dns_deny: Option<Vec<String>>,
+    pub allow_private: Option<bool>,
+    pub allow_cidrs6: Option<Vec<String>>,
+    pub deny_cidrs6: Option<Vec<String>>,
+}
+
+impl PolicyPatch {
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+
+    /// Applies the change to `u`; the result must still pass [`to_config`].
+    pub fn apply(&self, u: &mut AppleUsernet) {
+        if let Some(v) = &self.allow_cidrs {
+            u.allow_cidrs = v.clone();
+        }
+        if let Some(v) = &self.deny_cidrs {
+            u.deny_cidrs = v.clone();
+        }
+        if let Some(v) = &self.allow_ports {
+            u.allow_ports = v.clone();
+        }
+        if let Some(v) = &self.deny_ports {
+            u.deny_ports = v.clone();
+        }
+        if let Some(v) = &self.dns_allow {
+            u.dns_allow = v.clone();
+        }
+        if let Some(v) = &self.dns_deny {
+            u.dns_deny = v.clone();
+        }
+        if let Some(v) = self.allow_private {
+            u.allow_private = v;
+        }
+        if let Some(v) = &self.allow_cidrs6 {
+            u.allow_cidrs6 = v.clone();
+        }
+        if let Some(v) = &self.deny_cidrs6 {
+            u.deny_cidrs6 = v.clone();
+        }
+    }
+}
+
+/// What reloading a gateway's policy did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Reload {
+    /// The gateway (pid) was signalled and re-reads its configuration.
+    Signalled(u32),
+    /// No gateway is running for this workspace; the policy applies at the next start.
+    NotRunning(String),
+}
+
+/// Whether `pid` is a running `fluxvm-usernet` (a stale pid file must never make us signal an unrelated process).
+fn is_gateway(pid: u32) -> bool {
+    std::process::Command::new("ps")
+        .args(["-p", &pid.to_string(), "-o", "comm="])
+        .output()
+        .ok()
+        .is_some_and(|o| String::from_utf8_lossy(&o.stdout).contains("fluxvm-usernet"))
+}
+
+/// Writes `u`'s egress policy into `<workspace>/usernet.json` (everything else in the file is kept) and asks the
+/// running gateway to reload it. Validates `u` first, so nothing is written for an invalid policy.
+pub fn reload_policy(workspace: &Path, u: &AppleUsernet) -> Result<Reload> {
+    validate_policy(u)?;
+    let cfg = to_config(u, None)?;
+    let path = workspace.join("usernet.json");
+    let mut doc: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(&path).with_context(|| format!("reading {}", path.display()))?,
+    )
+    .with_context(|| format!("parsing {}", path.display()))?;
+    doc["egress"] = serde_json::to_value(&cfg.egress)?;
+    let tmp = workspace.join("usernet.json.tmp");
+    std::fs::write(&tmp, serde_json::to_vec_pretty(&doc)?)
+        .with_context(|| format!("writing {}", tmp.display()))?;
+    std::fs::rename(&tmp, &path).with_context(|| format!("replacing {}", path.display()))?;
+    let pid = std::fs::read_to_string(workspace.join(PID_FILE))
+        .ok()
+        .and_then(|s| s.trim().parse::<u32>().ok());
+    match pid {
+        Some(pid) if pid_alive(pid) && is_gateway(pid) => {
+            // SAFETY: a plain kill(2) on a pid just verified to be our gateway.
+            let rc = unsafe { libc::kill(pid as i32, libc::SIGHUP) };
+            if rc == 0 {
+                Ok(Reload::Signalled(pid))
+            } else {
+                Err(std::io::Error::last_os_error()).context("signalling fluxvm-usernet")
+            }
+        }
+        Some(_) => Ok(Reload::NotRunning(
+            "the recorded gateway process is gone".into(),
+        )),
+        None => Ok(Reload::NotRunning("no gateway has been started".into())),
+    }
+}
+
 /// Where each of the VM's `apple.usernet` port forwards is really listening, in `port_forwards` order. This is how
 /// a `host_port: 0` forward is discovered. Empty when the VM has no usernet or its gateway has not reported yet.
 /// The file belongs to one gateway process: if the supervisor restarted the gateway the ephemeral ports changed
@@ -418,6 +534,10 @@ impl Gateway {
                         break;
                     }
                 };
+                if let Some(pid) = child.id() {
+                    let pid_file = self.config_path.with_file_name(PID_FILE);
+                    let _ = std::fs::write(&pid_file, pid.to_string());
+                }
                 let exited = tokio::select! {
                     r = child.wait() => Some(r),
                     _ = stop.changed() => None,
@@ -775,5 +895,85 @@ mod tests {
         );
         assert_eq!(parse_mac("aa:bb:cc:dd:ee"), None);
         assert_eq!(parse_mac("aa:bb:cc:dd:ee:gg"), None);
+    }
+
+    #[test]
+    fn a_policy_patch_changes_only_what_it_names_and_must_stay_valid() {
+        let mut u = AppleUsernet {
+            allow_cidrs: vec!["93.184.216.0/24".into()],
+            dns_allow: vec!["example.com".into()],
+            deny_ports: vec![25],
+            ..Default::default()
+        };
+        PolicyPatch {
+            allow_cidrs: Some(vec!["93.184.216.0/24".into(), "1.1.1.1".into()]),
+            ..Default::default()
+        }
+        .apply(&mut u);
+        assert_eq!(u.allow_cidrs.len(), 2);
+        assert_eq!(u.dns_allow, vec!["example.com".to_string()], "untouched");
+        assert_eq!(u.deny_ports, vec![25], "untouched");
+        // A present empty list clears.
+        PolicyPatch {
+            dns_allow: Some(Vec::new()),
+            ..Default::default()
+        }
+        .apply(&mut u);
+        assert!(u.dns_allow.is_empty());
+        assert!(PolicyPatch::default().is_empty());
+        // An invalid result is caught by to_config, which is what the daemon runs before storing anything.
+        let mut bad = u.clone();
+        PolicyPatch {
+            allow_cidrs: Some(vec!["not-a-cidr".into()]),
+            ..Default::default()
+        }
+        .apply(&mut bad);
+        assert!(validate_policy(&bad).is_err() || to_config(&bad, None).is_err());
+        let mut bad_port = u.clone();
+        PolicyPatch {
+            deny_ports: Some(vec![0]),
+            ..Default::default()
+        }
+        .apply(&mut bad_port);
+        assert!(validate_policy(&bad_port).is_err());
+    }
+
+    #[test]
+    fn reloading_rewrites_only_the_egress_and_never_signals_a_stale_pid() {
+        let d = tempfile::tempdir().unwrap();
+        let u = AppleUsernet {
+            mtu: Some(1400),
+            allow_cidrs: vec!["10.0.0.0/8".into()],
+            ..Default::default()
+        };
+        let cfg = to_config(&u, Some([2, 0, 0, 0, 0, 9])).unwrap();
+        std::fs::write(
+            d.path().join("usernet.json"),
+            serde_json::to_vec(&cfg).unwrap(),
+        )
+        .unwrap();
+        // A pid file naming this test process: it is alive but not a gateway, so it must not be signalled.
+        std::fs::write(d.path().join(PID_FILE), std::process::id().to_string()).unwrap();
+        let mut next = u.clone();
+        next.allow_cidrs = vec!["93.184.216.0/24".into()];
+        next.dns_allow = vec!["example.com".into()];
+        let r = reload_policy(d.path(), &next).unwrap();
+        assert!(matches!(r, Reload::NotRunning(_)), "{r:?}");
+        let doc: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(d.path().join("usernet.json")).unwrap()).unwrap();
+        assert_eq!(doc["mtu"], 1400, "the rest of the file is kept");
+        let egress: fluxvm_usernet::EgressPolicy =
+            serde_json::from_value(doc["egress"].clone()).unwrap();
+        assert_eq!(egress.allow_domains, vec!["example.com".to_string()]);
+        assert_eq!(egress.allow_cidrs.len(), 1);
+        // The guest MAC the daemon pinned survives.
+        assert!(!doc["guest_mac"].is_null());
+        // An invalid policy writes nothing.
+        let mut bad = next.clone();
+        bad.deny_ports = vec![0];
+        assert!(reload_policy(d.path(), &bad).is_err());
+        let again: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(d.path().join("usernet.json")).unwrap()).unwrap();
+        assert_eq!(again, doc);
     }
 }

@@ -7,6 +7,7 @@
 use crate::{VmManager, audit_event};
 use anyhow::{Result, bail};
 pub use fluxvm_apple::display_resize_reply;
+pub use fluxvm_apple::usernet::PolicyPatch;
 use fluxvm_core::model::{BackendKind, VmRecord, VmStatus};
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -105,6 +106,80 @@ impl VmManager {
         fluxvm_apple::attest::delivery(&id.to_string(), &vm.workspace, &self.cfg.state_dir)
     }
 
+    /// The `apple.usernet` egress policy of VM `id` as it is stored (and, if the gateway runs, as it applies).
+    pub async fn vz_usernet_policy(&self, id: Uuid) -> Result<Value> {
+        let vm = self.get(id).await?;
+        let u = vm
+            .request
+            .apple
+            .as_ref()
+            .and_then(|a| a.usernet.clone())
+            .filter(|_| vm.backend == BackendKind::Vz)
+            .ok_or_else(|| anyhow::anyhow!("this VM has no apple.usernet gateway"))?;
+        Ok(policy_json(&u))
+    }
+
+    /// Changes the egress policy of a usernet guest. It is stored in the VM record (so a restart, a fork or a branch
+    /// start uses it) and, when the gateway is running, applied to it at once: new connections and DNS queries follow
+    /// it, connections that are already open keep going.
+    pub async fn vz_usernet_policy_set(
+        &self,
+        id: Uuid,
+        patch: PolicyPatch,
+        actor: Option<&str>,
+    ) -> Result<Value> {
+        use fluxvm_apple::usernet::Reload;
+        if patch.is_empty() {
+            bail!("the policy change is empty");
+        }
+        let mut vm = self.get(id).await?;
+        if vm.backend != BackendKind::Vz {
+            bail!("this is a vz backend feature");
+        }
+        let apple = vm
+            .request
+            .apple
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("this VM has no apple.usernet gateway"))?;
+        let u = apple
+            .usernet
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("this VM has no apple.usernet gateway"))?;
+        patch.apply(u);
+        // The same checks as at create; nothing is stored or written for an invalid policy.
+        fluxvm_apple::usernet::validate_policy(u)?;
+        fluxvm_apple::usernet::to_config(u, None)?;
+        let updated = u.clone();
+        let live = matches!(vm.status, VmStatus::Running | VmStatus::Paused);
+        let workspace = vm.workspace.clone();
+        self.store.update(vm).await?;
+        let (applied, note) = if live {
+            match fluxvm_apple::usernet::reload_policy(&workspace, &updated)? {
+                Reload::Signalled(_) => (
+                    true,
+                    "applied to the running gateway; open connections are not cut".to_string(),
+                ),
+                Reload::NotRunning(why) => (false, format!("stored; {why}")),
+            }
+        } else {
+            (false, "stored; applies when the VM starts".to_string())
+        };
+        audit_event(
+            "vm.usernet.policy",
+            &[
+                ("vm_id", &id.to_string()),
+                ("actor", actor.unwrap_or("")),
+                ("applied", &applied.to_string()),
+                ("allow_cidrs", &updated.allow_cidrs.len().to_string()),
+                ("dns_allow", &updated.dns_allow.len().to_string()),
+            ],
+        );
+        let mut out = policy_json(&updated);
+        out["applied"] = json!(applied);
+        out["note"] = json!(note);
+        Ok(out)
+    }
+
     /// Host USB accessories the user has granted to FluxVMUSBAccess.app.
     pub async fn vz_usb_physical_list(&self, id: Uuid) -> Result<Vec<Value>> {
         fluxvm_apple::physical_usb_list(&self.vz_running_vm(id).await?).await
@@ -123,6 +198,20 @@ impl VmManager {
         );
         Ok(uuid)
     }
+}
+
+fn policy_json(u: &fluxvm_core::model::AppleUsernet) -> Value {
+    json!({
+        "allow_cidrs": u.allow_cidrs,
+        "deny_cidrs": u.deny_cidrs,
+        "allow_ports": u.allow_ports,
+        "deny_ports": u.deny_ports,
+        "dns_allow": u.dns_allow,
+        "dns_deny": u.dns_deny,
+        "allow_private": u.allow_private,
+        "allow_cidrs6": u.allow_cidrs6,
+        "deny_cidrs6": u.deny_cidrs6,
+    })
 }
 
 /// Host-side cost of one `vz` VM: the runner process plus, when it can be attributed, the Virtualization XPC service

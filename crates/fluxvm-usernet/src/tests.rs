@@ -1034,3 +1034,70 @@ async fn frame_tap_sees_both_directions() {
 }
 
 mod more;
+
+/// The daemon swaps the policy of a running gateway (SIGHUP after rewriting its config): the next new flow follows
+/// the new policy, in both directions, and the guest keeps its address.
+#[tokio::test]
+async fn egress_policy_is_replaced_while_running() {
+    let port = tcp_echo_server().await;
+    let mut r = start(UserNetConfig::default());
+    {
+        let g = &r.guest;
+        g.send_tcp(
+            Ipv4Addr::LOCALHOST,
+            43000,
+            port,
+            TcpOut {
+                seq: 1,
+                flags: SYN,
+                window: 65535,
+                ..Default::default()
+            },
+        )
+        .await;
+        let s = g
+            .recv_where("RST", |f| as_tcp(f).filter(|s| s.sport == port))
+            .await;
+        assert_eq!(s.flags & RST, RST, "private range is denied by default");
+    }
+    let ev = next_event(&mut r.log, FlowKind::Deny).await;
+    assert_eq!(ev.reason.as_deref(), Some("private-range"));
+
+    // Allow loopback: the same destination now connects and echoes.
+    let mut allow = EgressPolicy::default();
+    allow.allow_cidrs = vec!["127.0.0.0/8".parse().unwrap()];
+    r.handle.set_egress(allow);
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    let mut c = Conn::connect(&r.guest, Ipv4Addr::LOCALHOST, 43001, port).await;
+    c.send(b"after").await;
+    c.read_until(5).await;
+    assert_eq!(c.received, b"after");
+    c.fin().await;
+
+    // And back: deny that port, and a new flow is refused again.
+    let mut deny = EgressPolicy::default();
+    deny.allow_cidrs = vec!["127.0.0.0/8".parse().unwrap()];
+    deny.deny_ports = vec![port];
+    r.handle.set_egress(deny);
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    r.guest
+        .send_tcp(
+            Ipv4Addr::LOCALHOST,
+            43002,
+            port,
+            TcpOut {
+                seq: 1,
+                flags: SYN,
+                window: 65535,
+                ..Default::default()
+            },
+        )
+        .await;
+    let s = r
+        .guest
+        .recv_where("RST", |f| {
+            as_tcp(f).filter(|s| s.sport == port && s.dport == 43002)
+        })
+        .await;
+    assert_eq!(s.flags & RST, RST, "the replaced policy denies the port");
+}

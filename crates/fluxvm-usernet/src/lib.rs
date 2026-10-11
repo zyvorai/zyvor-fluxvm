@@ -144,6 +144,7 @@ pub struct ForwardStatusFile {
 pub struct UserNetHandle {
     log: broadcast::Sender<FlowEvent>,
     shutdown: Arc<Notify>,
+    policy: mpsc::UnboundedSender<EgressPolicy>,
 }
 
 impl UserNetHandle {
@@ -154,6 +155,11 @@ impl UserNetHandle {
     pub fn shutdown(&self) {
         self.shutdown.notify_one();
     }
+    /// Replaces the egress policy of the running gateway. It applies to the next new flow and the next DNS query;
+    /// connections that are already established keep going. An invalid policy is ignored (the old one stays).
+    pub fn set_egress(&self, policy: EgressPolicy) {
+        let _ = self.policy.send(policy);
+    }
 }
 
 pub struct UserNet {
@@ -163,6 +169,7 @@ pub struct UserNet {
     udp_fwd: Vec<(usize, std::net::UdpSocket)>,
     fwd_addrs: Vec<SocketAddr>,
     handle: UserNetHandle,
+    policy_rx: Option<mpsc::UnboundedReceiver<EgressPolicy>>,
     tap: Option<StdUnixDatagram>,
     tap_version: u8,
 }
@@ -229,6 +236,7 @@ impl UserNet {
         }
         // fwd_addrs was filled in config order because each forward pushes exactly one address.
         let (log, _) = broadcast::channel(1024);
+        let (policy_tx, policy_rx) = mpsc::unbounded_channel();
         Ok(Self {
             cfg,
             sock: endpoint,
@@ -238,7 +246,9 @@ impl UserNet {
             handle: UserNetHandle {
                 log,
                 shutdown: Arc::new(Notify::new()),
+                policy: policy_tx,
             },
+            policy_rx: Some(policy_rx),
             tap: None,
             tap_version: TAP_VERSION_1,
         })
@@ -317,7 +327,7 @@ impl UserNet {
     }
 
     /// Serve until [`UserNetHandle::shutdown`] or a fatal socket error. Must run inside a tokio runtime.
-    pub async fn run(self) -> io::Result<()> {
+    pub async fn run(mut self) -> io::Result<()> {
         let sock = UnixDatagram::from_std(self.sock)?;
         let (ev_tx, ev_rx) = mpsc::channel(2048);
         let mut fwd_tasks = Vec::new();
@@ -392,7 +402,13 @@ impl UserNet {
             last_ra: None,
             guest_ip6: None,
         };
-        let r = engine.run_loop(ev_rx, self.handle.shutdown.clone()).await;
+        let policy_rx = self
+            .policy_rx
+            .take()
+            .unwrap_or_else(|| mpsc::unbounded_channel().1);
+        let r = engine
+            .run_loop(ev_rx, self.handle.shutdown.clone(), policy_rx)
+            .await;
         for t in fwd_tasks {
             t.abort();
         }
@@ -729,6 +745,7 @@ impl Engine {
         &mut self,
         mut ev_rx: mpsc::Receiver<Ev>,
         shutdown: Arc<Notify>,
+        mut policy_rx: mpsc::UnboundedReceiver<EgressPolicy>,
     ) -> io::Result<()> {
         let mut buf = vec![0u8; 65536];
         let mut tick = tokio::time::interval(Duration::from_millis(100));
@@ -751,8 +768,19 @@ impl Engine {
                     }
                 }
                 Some(ev) = ev_rx.recv() => self.on_event(ev),
+                Some(p) = policy_rx.recv() => self.apply_egress(p),
                 _ = tick.tick() => self.on_tick(),
             }
+        }
+    }
+
+    /// Swaps the egress policy after validating the configuration it would produce; an invalid policy changes nothing.
+    fn apply_egress(&mut self, policy: EgressPolicy) {
+        let mut candidate = self.cfg.clone();
+        candidate.egress = policy;
+        match candidate.validate() {
+            Ok(()) => self.cfg.egress = candidate.egress,
+            Err(e) => eprintln!("fluxvm-usernet: ignoring an invalid egress policy: {e}"),
         }
     }
 

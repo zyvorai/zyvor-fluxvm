@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### Added: live egress policy for `apple.usernet` guests (`PUT /v1/vms/{id}/usernet/policy`)
+- Change a running usernet guest's allow/deny CIDRs, ports and DNS names without restarting it: the daemon validates the
+  change like create, stores it in the VM record, rewrites the gateway's config and signals it (SIGHUP); new connections and
+  DNS queries follow the new policy, open ones are not cut. `GET` returns the stored policy. A stale pid file never
+  causes a signal to an unrelated process (the pid is checked to be `fluxvm-usernet`).
+
 ### Added: jumbo MTU on private networks (`apple.networks[].mtu`)
 - `mtu` (1280 to 9000, default 1500) is a property of the network: the first member defines it, later members inherit it or
   must agree. The runner raises the card's `maximumTransmissionUnit`, the guest gets the same MTU through its networkd unit,
