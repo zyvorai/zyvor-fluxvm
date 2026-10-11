@@ -146,19 +146,20 @@ pub fn to_config(u: &AppleUsernet, guest_mac: Option<[u8; 6]>) -> Result<UserNet
     }
     c.guest_mac = guest_mac;
     for f in &u.port_forwards {
-        c.forwards.push(PortForward {
-            proto: if f.protocol.eq_ignore_ascii_case("udp") {
+        // The host side may be IPv4 or IPv6 (`host_addr`); the guest side is its IPv4 lease address.
+        c.forwards.push(PortForward::new(
+            if f.protocol.eq_ignore_ascii_case("udp") {
                 Proto::Udp
             } else {
                 Proto::Tcp
             },
-            host_addr: match &f.host_addr {
+            match &f.host_addr {
                 Some(a) => a.parse().context("forward host_addr")?,
                 None => IpAddr::from([127, 0, 0, 1]),
             },
-            host_port: f.host_port,
-            guest_port: f.guest_port,
-        });
+            f.host_port,
+            f.guest_port,
+        ));
     }
     c.validate().map_err(|e| anyhow::anyhow!("apple.usernet: {e}"))?;
     Ok(c)

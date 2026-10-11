@@ -238,7 +238,7 @@ impl TcpConn {
                 self.rttvar = r / 2;
             }
             Some(srtt) => {
-                let delta = if srtt > r { srtt - r } else { r - srtt };
+                let delta = srtt.abs_diff(r);
                 self.rttvar = self.rttvar * 3 / 4 + delta / 4;
                 self.srtt = Some(srtt * 7 / 8 + r / 8);
             }
@@ -1200,7 +1200,7 @@ mod tests {
     }
 
     fn near(a: Duration, b: Duration) -> bool {
-        let d = if a > b { a - b } else { b - a };
+        let d = a.abs_diff(b);
         d < Duration::from_millis(2)
     }
 

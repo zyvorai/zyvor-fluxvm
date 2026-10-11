@@ -710,12 +710,7 @@ async fn dns_answers_teach_the_allow_list() {
 #[tokio::test]
 async fn tcp_port_forward_host_to_guest() {
     let mut cfg = UserNetConfig::default();
-    cfg.forwards = vec![PortForward {
-        proto: Proto::Tcp,
-        host_addr: Ipv4Addr::LOCALHOST.into(),
-        host_port: 0,
-        guest_port: 8080,
-    }];
+    cfg.forwards = vec![PortForward::new(Proto::Tcp, Ipv4Addr::LOCALHOST.into(), 0, 8080)];
     let mut r = start(cfg.clone());
     let addr = r.fwd[0];
     let g = &r.guest;
@@ -774,12 +769,7 @@ fn build_ip_frame(cfg: &UserNetConfig, tcp: Vec<u8>) -> Vec<u8> {
 #[tokio::test]
 async fn udp_port_forward_host_to_guest() {
     let mut cfg = UserNetConfig::default();
-    cfg.forwards = vec![PortForward {
-        proto: Proto::Udp,
-        host_addr: Ipv4Addr::LOCALHOST.into(),
-        host_port: 0,
-        guest_port: 5000,
-    }];
+    cfg.forwards = vec![PortForward::new(Proto::Udp, Ipv4Addr::LOCALHOST.into(), 0, 5000)];
     let r = start(cfg.clone());
     let addr = r.fwd[0];
     let g = &r.guest;

@@ -959,7 +959,7 @@ fn ipv6_config_defaults_json_and_validation() {
     bad.ipv6_prefix = "fd00:1::1:0:0:0".parse().unwrap();
     assert!(bad.validate().is_err(), "prefix must be a /64");
     let mut f = UserNetConfig::default();
-    f.forwards = vec![PortForward { proto: Proto::Icmp, host_addr: Ipv4Addr::LOCALHOST.into(), host_port: 1, guest_port: 1 }];
+    f.forwards = vec![PortForward::new(Proto::Icmp, Ipv4Addr::LOCALHOST.into(), 1, 1)];
     assert!(f.validate().is_err());
     // default policy for v6
     let p = EgressPolicy::default();
@@ -970,4 +970,125 @@ fn ipv6_config_defaults_json_and_validation() {
     assert_eq!(p.check6("2606:4700:4700::1111".parse().unwrap(), Some(443), &l, now), Decision::Allow);
     assert!("::1/129".parse::<Cidr6>().is_err());
     assert_eq!("fd00::/8".parse::<Cidr6>().unwrap().to_string(), "fd00::/8");
+}
+
+// ----- port forwards across address families ------------------------------------------------------------
+
+/// Drive one host -> guest TCP forward end to end: the gateway's SYN must go from `gw` to `guest` on `gport`.
+async fn forward_tcp_roundtrip(g: &Guest, mut host: TcpStream, gw: IpAddr, guest: IpAddr, gport: u16) {
+    let syn = g
+        .recv_where("forward SYN", |f| as_tcp(f).filter(|s| s.flags & (SYN | ACK) == SYN))
+        .await;
+    assert_eq!((syn.src, syn.dst, syn.dport), (gw, guest, gport));
+    g.send_tcp(
+        gw,
+        gport,
+        syn.sport,
+        TcpOut { seq: 5000, ack: syn.seq + 1, flags: SYN | ACK, window: 65535, mss: Some(1200), ..Default::default() },
+    )
+    .await;
+    host.write_all(b"ping").await.unwrap();
+    let data = g
+        .recv_where("forwarded data", |f| as_tcp(f).filter(|s| s.dport == gport && !s.payload.is_empty()))
+        .await;
+    assert_eq!(data.payload, b"ping");
+    g.send_tcp(
+        gw,
+        gport,
+        syn.sport,
+        TcpOut {
+            seq: 5001,
+            ack: data.seq + 4,
+            flags: ACK | PSH,
+            window: 65535,
+            payload: b"pong".to_vec(),
+            ..Default::default()
+        },
+    )
+    .await;
+    let mut buf = [0u8; 4];
+    timeout(Duration::from_secs(5), host.read_exact(&mut buf)).await.unwrap().unwrap();
+    assert_eq!(&buf, b"pong");
+}
+
+#[tokio::test]
+async fn tcp_forward_from_ipv6_host_listener_to_ipv4_guest() {
+    let mut cfg = UserNetConfig::default();
+    cfg.forwards = vec![PortForward::new(Proto::Tcp, Ipv6Addr::LOCALHOST.into(), 0, 8080)];
+    let r = start(cfg.clone());
+    assert!(r.fwd[0].is_ipv6() && r.fwd[0].port() != 0, "bound {}", r.fwd[0]);
+    let host = TcpStream::connect(r.fwd[0]).await.unwrap();
+    forward_tcp_roundtrip(&r.guest, host, cfg.gateway_ip.into(), cfg.guest_ip.into(), 8080).await;
+}
+
+#[tokio::test]
+async fn tcp_forward_to_ipv6_guest_with_explicit_and_learned_address() {
+    // Explicit guest_addr: works before the guest has sent anything, from an IPv4 host listener.
+    let mut cfg = cfg6();
+    let guest6 = {
+        let mut s = cfg.ipv6_prefix.segments();
+        s[7] = 0x1234; // the test guest's address (Guest::ip6)
+        Ipv6Addr::from(s)
+    };
+    let mut f = PortForward::new(Proto::Tcp, Ipv4Addr::LOCALHOST.into(), 0, 9090);
+    f.guest_family = GuestFamily::V6;
+    f.guest_addr = Some(guest6.into());
+    cfg.forwards = vec![f];
+    let r = start(cfg.clone());
+    assert_eq!(r.guest.ip6(), guest6);
+    let host = TcpStream::connect(r.fwd[0]).await.unwrap();
+    forward_tcp_roundtrip(&r.guest, host, cfg.gateway_ip6().into(), guest6.into(), 9090).await;
+
+    // Learned address: refused (and reported) until the guest has used its IPv6 address.
+    let mut cfg = cfg6();
+    let mut f = PortForward::new(Proto::Tcp, Ipv6Addr::LOCALHOST.into(), 0, 9091);
+    f.guest_family = GuestFamily::V6;
+    cfg.forwards = vec![f];
+    let mut r = start(cfg.clone());
+    let mut early = TcpStream::connect(r.fwd[0]).await.unwrap();
+    let ev = next_event(&mut r.log, FlowKind::ConnectFailed).await;
+    assert_eq!(ev.reason.as_deref(), Some("guest-ipv6-unknown"));
+    let mut b = [0u8; 1];
+    let n = timeout(Duration::from_secs(5), early.read(&mut b)).await.unwrap().unwrap_or(0);
+    assert_eq!(n, 0, "the host connection is closed");
+    // Any in-prefix packet teaches the address.
+    let up = udp_echo_server6().await;
+    r.guest.send_udp(Ipv6Addr::LOCALHOST, 42600, up, b"hello").await;
+    r.guest.recv_where("udp6 echo", as_udp6).await;
+    let host = TcpStream::connect(r.fwd[0]).await.unwrap();
+    forward_tcp_roundtrip(&r.guest, host, cfg.gateway_ip6().into(), r.guest.ip6().into(), 9091).await;
+}
+
+#[tokio::test]
+async fn udp_forward_ipv6_both_ways() {
+    // ::1 host listener -> IPv4 guest.
+    let mut cfg = UserNetConfig::default();
+    cfg.forwards = vec![PortForward::new(Proto::Udp, Ipv6Addr::LOCALHOST.into(), 0, 5000)];
+    let r = start(cfg.clone());
+    let host = UdpSocket::bind("[::1]:0").await.unwrap();
+    host.send_to(b"v6 to v4", r.fwd[0]).await.unwrap();
+    let (src, dst, sport, dport, p) = r.guest.recv_where("forwarded udp", as_udp).await;
+    assert_eq!((src, dst, dport, p.as_slice()), (cfg.gateway_ip, cfg.guest_ip, 5000, &b"v6 to v4"[..]));
+    r.guest.send_udp(cfg.gateway_ip, 5000, sport, b"back").await;
+    let mut buf = [0u8; 16];
+    let (n, from) = timeout(Duration::from_secs(5), host.recv_from(&mut buf)).await.unwrap().unwrap();
+    assert_eq!((&buf[..n], from), (&b"back"[..], r.fwd[0]));
+
+    // IPv4 host listener -> IPv6 guest (explicit address), reply over IPv6.
+    let mut cfg = cfg6();
+    let mut s = cfg.ipv6_prefix.segments();
+    s[7] = 0x1234;
+    let guest6 = Ipv6Addr::from(s);
+    let mut f = PortForward::new(Proto::Udp, Ipv4Addr::LOCALHOST.into(), 0, 5001);
+    f.guest_family = GuestFamily::V6;
+    f.guest_addr = Some(guest6.into());
+    cfg.forwards = vec![f];
+    let r = start(cfg.clone());
+    let host = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    host.send_to(b"v4 to v6", r.fwd[0]).await.unwrap();
+    let (src, dst, sport, dport, p) = r.guest.recv_where("forwarded udp6", as_udp6).await;
+    assert_eq!((src, dst, dport, p.as_slice()), (cfg.gateway_ip6(), guest6, 5001, &b"v4 to v6"[..]));
+    r.guest.send_udp(cfg.gateway_ip6(), 5001, sport, b"back6").await;
+    let (n, from) = timeout(Duration::from_secs(5), host.recv_from(&mut buf)).await.unwrap().unwrap();
+    assert_eq!((&buf[..n], from), (&b"back6"[..], r.fwd[0]));
 }
