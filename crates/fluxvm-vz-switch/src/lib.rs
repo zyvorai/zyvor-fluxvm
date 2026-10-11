@@ -684,7 +684,9 @@ mod tests {
     #[test]
     fn tap_reports_forwarded_and_dropped_frames_with_verdicts() {
         use fluxvm_netobs::{DropReason, Verdict};
-        let (tap, rx) = fluxvm_netobs::NetTap::new(64, 2048);
+        // The tap is process-wide, so the pumps of tests running in parallel feed this queue too (the full-receiver
+        // test alone sends hundreds of frames); it must hold all of that or this test's two frames can be dropped.
+        let (tap, rx) = fluxvm_netobs::NetTap::new(8192, 2048);
         assert!(set_tap(tap, "tapnet"));
         let dir = tempfile::tempdir().unwrap();
         let sock = dir.path().join("tap.sock");
