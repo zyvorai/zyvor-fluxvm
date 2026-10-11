@@ -98,6 +98,10 @@ pub struct CbtRestoreRequest {
     pub manifest_key: String,
     #[serde(default)]
     pub encryption: Option<EncryptionKey>,
+    /// Synthetic fulls of this chain; one consolidating a parent replaces
+    /// the rest of the walk.
+    #[serde(default)]
+    pub synthetic_bases: Vec<String>,
 }
 
 #[derive(Clone, Deserialize)]
@@ -114,6 +118,10 @@ pub struct CbtSynthesizeRequest {
     pub encryption: Option<EncryptionKey>,
     #[serde(default)]
     pub retain_until: Option<DateTime<Utc>>,
+    /// Synthetic fulls of this chain; one consolidating a parent replaces
+    /// the rest of the walk.
+    #[serde(default)]
+    pub synthetic_bases: Vec<String>,
 }
 
 #[derive(Clone, Deserialize)]
@@ -302,7 +310,9 @@ pub fn order_chain(mut chain: Vec<Manifest>) -> Result<Vec<Manifest>> {
             .parent
             .as_ref()
             .context("chain continues past a base")?;
-        if want.backup_id != parent.backup_id || want.sequence != parent.sequence {
+        let stands_in = parent.kind == ManifestKind::SyntheticFull
+            && parent.consolidates.contains(&want.backup_id);
+        if (want.backup_id != parent.backup_id && !stands_in) || want.sequence != parent.sequence {
             bail!(
                 "backup {} names parent {} but the chain holds {}",
                 child.backup_id,
@@ -689,14 +699,44 @@ async fn upload_layer(
     Ok((size, sha))
 }
 
+/// The synthetic full among `bases` that consolidates `parent`, if any.
+fn synthetic_for<'a>(
+    bases: &'a [(String, Manifest)],
+    chain: &str,
+    parent: &ParentRef,
+) -> Option<&'a (String, Manifest)> {
+    bases.iter().find(|(_, b)| {
+        b.kind == ManifestKind::SyntheticFull
+            && b.chain_id == chain
+            && b.sequence == parent.sequence
+            && b.consolidates.contains(&parent.backup_id)
+    })
+}
+
 /// Reads the chain ending at `manifest_key`, base first, with each
-/// manifest's key.
+/// manifest's key. The walk stops early at any synthetic full in
+/// `synthetic_bases` that consolidates the parent it is about to read, so
+/// layers a synthetic full replaced may already be deleted.
 async fn read_chain(
     store: &dyn ObjectStore,
     manifest_key: &str,
+    synthetic_bases: &[String],
 ) -> Result<Vec<(String, Manifest)>> {
+    let mut bases = vec![];
+    for key in synthetic_bases {
+        let m = Manifest::from_bytes(
+            &store
+                .get_bytes(key)
+                .await
+                .with_context(|| format!("reading synthetic full manifest {key}"))?,
+        )?;
+        if m.kind != ManifestKind::SyntheticFull {
+            bail!("{key} is not a synthetic full");
+        }
+        bases.push((key.clone(), m));
+    }
     let mut keys = vec![];
-    let mut manifests = vec![];
+    let mut manifests: Vec<Manifest> = vec![];
     let mut key = manifest_key.to_string();
     loop {
         if keys.len() >= MAX_CHAIN {
@@ -708,11 +748,19 @@ async fn read_chain(
                 .await
                 .with_context(|| format!("reading manifest {key}"))?,
         )?;
-        let next = m.parent.as_ref().map(|p| p.manifest_key.clone());
+        let next = m.parent.clone();
+        let chain = m.chain_id.clone();
         keys.push(key);
         manifests.push(m);
         match next {
-            Some(k) => key = k,
+            Some(p) => match synthetic_for(&bases, &chain, &p) {
+                Some((k, base)) => {
+                    keys.push(k.clone());
+                    manifests.push(base.clone());
+                    break;
+                }
+                None => key = p.manifest_key,
+            },
             None => break,
         }
     }
@@ -1128,7 +1176,7 @@ impl VmManager {
     ) -> Result<()> {
         let store = req.target.open()?;
         job.update(|j| j.phase = "downloading".into());
-        let chain = read_chain(store.as_ref(), &req.manifest_key).await?;
+        let chain = read_chain(store.as_ref(), &req.manifest_key, &req.synthetic_bases).await?;
         let (_, top) = chain.last().context("empty chain")?.clone();
         job.update(|j| {
             j.bytes_total = chain.iter().map(|(_, m)| m.stored_bytes()).sum();
@@ -1241,7 +1289,7 @@ impl VmManager {
         let store = req.target.open()?;
         let enc = layer_encryption(req.encryption.as_ref())?;
         job.update(|j| j.phase = "downloading".into());
-        let chain = read_chain(store.as_ref(), &req.manifest_key).await?;
+        let chain = read_chain(store.as_ref(), &req.manifest_key, &req.synthetic_bases).await?;
         let (_, top) = chain.last().context("empty chain")?.clone();
         job.update(|j| j.bytes_total = chain.iter().map(|(_, m)| m.stored_bytes()).sum());
         let dir =
@@ -1535,6 +1583,21 @@ mod tests {
             manifest("s2", 2, ManifestKind::SyntheticFull, None),
         ];
         assert_eq!(order_chain(synthetic_base).unwrap().len(), 2);
+
+        // b3 names b2; a synthetic full consolidating b2 may stand in.
+        let mut stand_in = manifest("s2", 2, ManifestKind::SyntheticFull, None);
+        stand_in.consolidates = vec!["b0".into(), "b1".into(), "b2".into()];
+        let chain = vec![
+            manifest("b3", 3, ManifestKind::Incremental, Some(("b2", 2))),
+            stand_in.clone(),
+        ];
+        assert_eq!(order_chain(chain).unwrap()[0].backup_id, "s2");
+        stand_in.consolidates = vec!["b1".into()];
+        let chain = vec![
+            manifest("b3", 3, ManifestKind::Incremental, Some(("b2", 2))),
+            stand_in,
+        ];
+        assert!(order_chain(chain).is_err());
     }
 
     fn have(bin: &str) -> bool {
@@ -1716,41 +1779,6 @@ mod tests {
             "root changed {changed}"
         );
         assert_eq!(mf.disk("logs").unwrap().changed_bytes, 0);
-        let want = (content(&root), content(&data));
-
-        sh(
-            "qemu-io",
-            &["-c", "write -P 0x33 0 48M", root.to_str().unwrap()],
-        );
-        sh(
-            "qemu-io",
-            &["-c", "write -P 0x55 0 8M", data.to_str().unwrap()],
-        );
-        let restore = |manifest_key: String| CbtRestoreRequest {
-            target: target.clone(),
-            manifest_key,
-            encryption: Some(key.clone()),
-        };
-        let r = wait(
-            &m,
-            m.start_cbt_restore(id, restore(incr.manifest_key.clone().unwrap()))
-                .await
-                .unwrap(),
-        )
-        .await;
-        assert_eq!(r.state, CbtJobState::Succeeded, "{:?}", r.error);
-        assert_eq!((content(&root), content(&data)), want);
-
-        // The restored disks carry no checkpoint.
-        let after = wait(
-            &m,
-            m.start_cbt_backup(id, backup(2, "b2", CbtMode::Incremental, parent_of(&incr)))
-                .await
-                .unwrap(),
-        )
-        .await;
-        assert_eq!(after.state, CbtJobState::Failed);
-        assert!(after.full_required, "{:?}", after.error);
 
         let syn = wait(
             &m,
@@ -1761,6 +1789,7 @@ mod tests {
                 backup_id: "s1".into(),
                 encryption: Some(key.clone()),
                 retain_until: None,
+                synthetic_bases: vec![],
             })
             .unwrap(),
         )
@@ -1769,6 +1798,25 @@ mod tests {
         let smf = syn.manifest.clone().unwrap();
         assert_eq!((smf.kind, smf.sequence), (ManifestKind::SyntheticFull, 1));
         assert_eq!(smf.consolidates, ["b0", "b1"]);
+
+        // The checkpoint survives synthesis: b2 still parents on b1.
+        sh(
+            "qemu-io",
+            &["-c", "write -P 0x77 40M 4M", root.to_str().unwrap()],
+        );
+        sh(
+            "qemu-io",
+            &["-c", "write -P 0x88 8M 1M", data.to_str().unwrap()],
+        );
+        let incr2 = wait(
+            &m,
+            m.start_cbt_backup(id, backup(2, "b2", CbtMode::Incremental, parent_of(&incr)))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(incr2.state, CbtJobState::Succeeded, "{:?}", incr2.error);
+        let want = (content(&root), content(&data));
 
         let deleted = m
             .cbt_delete(CbtDeleteRequest {
@@ -1781,19 +1829,54 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(deleted.deleted.len(), 6, "{deleted:?}");
+
         sh(
             "qemu-io",
-            &["-c", "write -P 0x66 0 8M", root.to_str().unwrap()],
+            &["-c", "write -P 0x33 0 48M", root.to_str().unwrap()],
+        );
+        sh(
+            "qemu-io",
+            &["-c", "write -P 0x55 0 12M", data.to_str().unwrap()],
+        );
+        let restore = |manifest_key: String, bases: Vec<String>| CbtRestoreRequest {
+            target: target.clone(),
+            manifest_key,
+            encryption: Some(key.clone()),
+            synthetic_bases: bases,
+        };
+        let b2 = incr2.manifest_key.clone().unwrap();
+        let broken = wait(
+            &m,
+            m.start_cbt_restore(id, restore(b2.clone(), vec![]))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(
+            broken.state,
+            CbtJobState::Failed,
+            "b1 is gone without the synthetic full"
         );
         let r = wait(
             &m,
-            m.start_cbt_restore(id, restore(syn.manifest_key.clone().unwrap()))
+            m.start_cbt_restore(id, restore(b2, vec![syn.manifest_key.clone().unwrap()]))
                 .await
                 .unwrap(),
         )
         .await;
         assert_eq!(r.state, CbtJobState::Succeeded, "{:?}", r.error);
         assert_eq!((content(&root), content(&data)), want);
+
+        // The restored disks carry no checkpoint.
+        let after = wait(
+            &m,
+            m.start_cbt_backup(id, backup(3, "b3", CbtMode::Incremental, parent_of(&incr2)))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(after.state, CbtJobState::Failed);
+        assert!(after.full_required, "{:?}", after.error);
     }
 
     #[test]

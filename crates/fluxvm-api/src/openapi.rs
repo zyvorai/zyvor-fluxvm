@@ -501,12 +501,14 @@ fn cbt_schemas() -> Value {
         }},
         "CbtRestoreRequest": {"type": "object", "required": ["target", "manifestKey"], "properties": {
             "target": {"$ref": "#/components/schemas/CbtTarget"}, "manifestKey": {"type": "string"},
-            "encryption": {"$ref": "#/components/schemas/CbtEncryption"}
+            "encryption": {"$ref": "#/components/schemas/CbtEncryption"},
+            "syntheticBases": {"type": "array", "items": {"type": "string"}, "description": "Manifest keys of this chain's synthetic fulls; one consolidating a parent replaces the rest of the walk"}
         }},
         "CbtSynthesizeRequest": {"type": "object", "required": ["target", "prefix", "manifestKey", "backupId"], "properties": {
             "target": {"$ref": "#/components/schemas/CbtTarget"}, "prefix": {"type": "string"},
             "manifestKey": {"type": "string"}, "backupId": {"type": "string"},
             "encryption": {"$ref": "#/components/schemas/CbtEncryption"},
+            "syntheticBases": {"type": "array", "items": {"type": "string"}},
             "retainUntil": {"type": "string", "format": "date-time"}
         }},
         "CbtDeleteRequest": {"type": "object", "required": ["target", "manifestKeys"], "properties": {

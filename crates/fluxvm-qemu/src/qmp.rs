@@ -109,17 +109,24 @@ async fn try_handshake(socket: &Path) -> std::io::Result<QmpHalves> {
     write_half
         .write_all(b"{\"execute\":\"qmp_capabilities\"}\n")
         .await?;
-    let mut cap_response = String::new();
-    if reader.read_line(&mut cap_response).await? == 0 {
-        return Err(std::io::Error::new(
-            ErrorKind::UnexpectedEof,
-            "connection closed before qmp_capabilities response",
-        ));
-    }
-    if let Some(err) = serde_json::from_str::<Value>(&cap_response)
-        .ok()
-        .and_then(|v| v.get("error").cloned())
-    {
+    // Events can already arrive ahead of this reply (a running block job
+    // emits JOB_STATUS_CHANGE as soon as the monitor leaves negotiation
+    // mode); taking one for the reply would hand the real reply to the next
+    // command.
+    let cap_response = loop {
+        let mut line = String::new();
+        if reader.read_line(&mut line).await? == 0 {
+            return Err(std::io::Error::new(
+                ErrorKind::UnexpectedEof,
+                "connection closed before qmp_capabilities response",
+            ));
+        }
+        let v = serde_json::from_str::<Value>(&line).ok();
+        if !v.as_ref().is_some_and(|v| v.get("event").is_some()) {
+            break v;
+        }
+    };
+    if let Some(err) = cap_response.and_then(|v| v.get("error").cloned()) {
         return Err(std::io::Error::new(
             ErrorKind::InvalidData,
             format!("qmp_capabilities rejected: {err}"),
@@ -1442,6 +1449,36 @@ mod hotplug_tests {
     /// connection per step -- this serves `steps` in order, each on its own
     /// connection, asserting the expected command name and replying with
     /// the given canned `return` value.
+    #[tokio::test]
+    async fn events_before_the_capabilities_reply_are_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("qmp.sock");
+        let listener = UnixListener::bind(&sock).unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (read_half, mut write_half) = stream.into_split();
+            let mut reader = BufReader::new(read_half);
+            write_half
+                .write_all(b"{\"QMP\":{\"version\":{}}}\n")
+                .await
+                .unwrap();
+            let mut caps = String::new();
+            reader.read_line(&mut caps).await.unwrap();
+            write_half
+                .write_all(b"{\"event\":\"JOB_STATUS_CHANGE\",\"data\":{\"id\":\"j\",\"status\":\"running\"}}\n{\"return\":{}}\n")
+                .await
+                .unwrap();
+            let mut req = String::new();
+            reader.read_line(&mut req).await.unwrap();
+            write_half.write_all(b"{\"return\":[]}\n").await.unwrap();
+        });
+        let v = execute(&sock, "query-jobs", None, Duration::from_secs(5))
+            .await
+            .unwrap();
+        assert_eq!(v, json!([]));
+        server.await.unwrap();
+    }
+
     pub(super) async fn serve_script(listener: UnixListener, steps: Vec<(&'static str, Value)>) {
         for (expect_command, reply) in steps {
             let (stream, _) = listener.accept().await.unwrap();
