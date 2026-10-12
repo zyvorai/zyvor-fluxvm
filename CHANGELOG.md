@@ -2,7 +2,32 @@
 
 ## Unreleased
 
+
+### Added: fleet console as a cloud UX, image catalog, tenant view of leased Macs
+- The `/console` web console is rebuilt as a cloud UX: overview with quota bars and your Macs, My Macs, virtual machines,
+  networks, images to launch from, usage, search and a command bar ([docs/mac-cloud-tenancy.md](docs/mac-cloud-tenancy.md#console)).
+- `GET/PUT/DELETE /fleet/images[/{name}]`: an operator-managed image catalog (tenants read, the operator writes).
+  `GET /fleet/nodes/{name}` for a tenant returns only a Mac it leases, and only size, free capacity and Apple
+  capabilities. The operator tenant list carries each tenant's current use. A tenant's unreachable-node list is limited
+  to its own Macs and carries no error text.
+- Known limit: the catalog returns each image's disk path on the Macs to tenants, because the console puts it in the
+  create request; resolving the name on the server would remove that.
+
+### Added: grow a stopped vz VM's root disk
+- `PATCH /v1/vms/{id}/disks/root` (`fluxctl disk resize <id> root --size-gib N`) now works on the `vz` backend for macOS
+  and Linux guests: the VM must be stopped, the size is an absolute grow-only target, and `apple.asif_overlay` VMs are
+  refused. It extends the sparse file only; the guest still has to grow its own partition or APFS container
+  (`diskutil apfs resizeContainer`), which is not automated and not verified on hardware ([docs/macos.md](docs/macos.md)).
+- A third macOS guest is refused at create and at start with 409 (Apple allows two per Mac); this used to fail late
+  with a raw VZ error.
+
+### Added: simulated Macs and a one-command fleet demo
+- `fluxvm-agent sim-node` registers a simulated Mac with central (capacity, heartbeats, simulated macOS guests, overlay
+  config), and `scripts/fleet-sim.sh` runs a central plus three of them: a tenant leases a Mac, starts two macOS VMs
+  (a third is refused at Apple's two-guest limit), runs a command and creates a private network
+
 pple's two-guest limit), runs a command and creates a private network
+
   ([docs/fleet-quickstart.md](docs/fleet-quickstart.md)). No Macs or real guests are involved, so it exercises central,
   tenancy, scheduling, overlay allocation and the console, not virtualization.
 

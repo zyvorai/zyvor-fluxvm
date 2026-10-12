@@ -27,11 +27,46 @@ This is an engineering control, not legal advice. The rules are defaults in `GET
 
 ## Console
 
-`http://<central>/console` is a web console for the whole fleet. Sign in with a tenant token to see your leases,
-VMs, private networks and usage; you can lease or release a Mac, delete VMs and create networks there. Sign in with
-the fleet token for the operator view, which adds nodes (cordon, drain, scrub), tenants (create, disable, new token)
-and every tenant's usage. The page itself needs no token; it keeps the one you enter in the tab's session storage and
-sends it only to this central.
+`http://<central>/console` is the cloud's web console. The page needs no token: it asks for one, keeps it in the tab's
+session storage and sends it only to this central.
+
+With a **tenant token** you get:
+- **Overview**: a getting-started checklist (lease a Mac, launch a VM, connect VMs), quota meters, your Macs and recent VMs.
+- **My Macs**: each Mac shows its two macOS slots (Apple's licence limit) and how far the lease is through its 24-hour
+  minimum. Select one to launch a VM on it or release it once the minimum is over.
+- **Virtual machines**: search and filter, and a launch sheet that picks an image from the catalog. It suggests a name
+  and size, shows how much quota the VM takes, offers only Macs with a free macOS slot, and can join private networks
+  or delete the VM automatically. Select a VM to run commands in it through the guest agent, or delete it after typing
+  its name.
+- **Networks**: create one across your Macs, see each Mac's address range, add or remove Macs, rotate the key.
+- **Images** (the catalog) and **Usage** (7, 30 or 90 days, with a CSV download).
+
+The **fleet token** adds the operator's pages:
+- every Mac, with what needs attention first (not responding, needs a scrub, finished draining);
+- cordon, drain (with a choice of what happens to running VMs), scrub, and lease a Mac to a tenant;
+- tenants: create with quotas, edit quotas, disable, issue a new token (shown once), delete;
+- catalog editing and the policy.
+
+There is a command palette (⌘K or Ctrl-K) to jump to any page, VM, Mac, network or tenant, and to start any action.
+The console follows the system's light or dark mode unless you pick one, and it works on a phone. Links to a page or
+an item can be shared (`/console#/vms/<mac>/<id>`).
+
+## Image catalog
+
+The catalog lists the images the operator has put on the Macs, so tenants launch by name instead of typing disk paths.
+Central does not copy images: pull each one onto every Mac that should run it (`fluxctl vm-image pull`, see
+[vm-images.md](vm-images.md)), then add it.
+
+```bash
+curl -X PUT $CENTRAL/fleet/images/macos-27-xcode -H "Authorization: Bearer $FLEET_TOKEN" \
+  -H 'content-type: application/json' -d '{
+  "display_name": "macOS 27 with Xcode", "guest_os": "macos",
+  "image": "/Users/fluxvm/vms/macos-27-xcode/disk.raw", "vcpus": 6, "memory_mib": 16384,
+  "source": "ghcr.io/acme/macos-xcode:27"}'
+```
+
+`vcpus` and `memory_mib` are the defaults the console offers (4 and 8192 if omitted). Tenants read the catalog with
+`GET /fleet/images`. Only the operator can add, replace (`PUT`) or remove (`DELETE /fleet/images/{name}`) entries.
 
 ## Turning it on
 
@@ -51,7 +86,11 @@ Central stores only the SHA-256 of a tenant token. `fluxctl fleet tenant rotate-
 
 A tenant token can call only these routes: `POST/GET /fleet/vms`, `DELETE /fleet/vms/{node}/{id}`,
 `POST /fleet/vms/{node}/{id}/exec`, `GET/POST /fleet/leases`, `GET /fleet/leases/{id}`, `POST /fleet/leases/{id}/release`,
-`GET /fleet/usage`, `GET /fleet/tenants/me` and `GET /fleet/capacity`. Everything else is operator-only.
+`GET /fleet/usage`, `GET /fleet/tenants/me`, `GET /fleet/capacity`, `GET /fleet/images`, `GET /fleet/nodes/{name}` (a Mac
+it leases), and its own private networks (`GET/POST /fleet/overlays`, `GET/DELETE /fleet/overlays/{name}`,
+`POST /fleet/overlays/{name}/members`, `DELETE /fleet/overlays/{name}/members/{node}`,
+`POST /fleet/overlays/{name}/rotate`). Everything else is operator-only. In `GET /fleet/vms`, a tenant's
+`unreachable_nodes` names only its own Macs and Macs running its VMs, without the node's error text.
 
 ## Leases
 
@@ -141,6 +180,9 @@ The ledger covers VMs created through central. VMs created directly on a node ar
 
 ## API summary
 
+A tenant can also `GET /fleet/nodes/{name}` for a Mac it leases. It sees the Mac's size, free capacity and Apple
+capabilities, but not its address, labels or security report.
+
 | Route | Who |
 |---|---|
 | `GET/POST /fleet/tenants`, `GET/PATCH/DELETE /fleet/tenants/{id}`, `POST /fleet/tenants/{id}/rotate-token` | operator |
@@ -151,6 +193,9 @@ The ledger covers VMs created through central. VMs created directly on a node ar
 | `POST /fleet/vms/{node}/{id}/exec` (`{"command": "…", "timeout_seconds": N}`) | tenant (own VMs), operator |
 | `GET /fleet/usage?from=&to=&tenant=&format=json\|csv` | tenant (own), operator |
 | `POST /fleet/reconcile`, `GET/PUT /fleet/policy` | operator |
+| `GET /fleet/images` | tenant, operator |
+| `PUT/DELETE /fleet/images/{name}` | operator |
+| `GET /fleet/nodes/{name}` | operator; tenant for a Mac it leases (size, capacity, Apple capabilities only) |
 
 ## Not done yet
 

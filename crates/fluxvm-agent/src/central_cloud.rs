@@ -233,6 +233,81 @@ pub(super) async fn put_policy(
     Ok(Json(t.policy.clone()))
 }
 
+// ---- image catalog ------------------------------------------------------------------------------------------------
+
+/// `GET /fleet/images`: the catalog, for tenants and the operator.
+pub(super) async fn list_images(State(fleet): State<Fleet>) -> Json<Value> {
+    let t = fleet.tenancy.lock().await;
+    Json(json!({ "items": t.images.values().collect::<Vec<_>>() }))
+}
+
+/// `PUT /fleet/images/{name}` (operator): add or replace a catalog entry.
+pub(super) async fn put_image(
+    State(fleet): State<Fleet>,
+    Extension(caller): Extension<Caller>,
+    Path(name): Path<String>,
+    Json(mut image): Json<crate::tenancy::CatalogImage>,
+) -> Result<Json<Value>, AppError> {
+    require_admin(&caller)?;
+    image.name = name;
+    image.updated_at = Some(Utc::now());
+    image
+        .validate()
+        .map_err(|e| AppError(StatusCode::BAD_REQUEST, e))?;
+    let mut t = fleet.tenancy.lock().await;
+    t.images.insert(image.name.clone(), image.clone());
+    fleet.persist_tenancy(&t);
+    Ok(Json(json!(image)))
+}
+
+/// `DELETE /fleet/images/{name}` (operator). VMs made from it are not touched.
+pub(super) async fn delete_image(
+    State(fleet): State<Fleet>,
+    Extension(caller): Extension<Caller>,
+    Path(name): Path<String>,
+) -> Result<StatusCode, AppError> {
+    require_admin(&caller)?;
+    let mut t = fleet.tenancy.lock().await;
+    if t.images.remove(&name).is_none() {
+        return Err(not_found(format!("no image '{name}'")));
+    }
+    fleet.persist_tenancy(&t);
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `GET /fleet/nodes/{name}` for a tenant: only a Mac it leases, and only its size, free capacity and Apple
+/// capabilities (no address, labels or security report).
+pub(super) async fn tenant_node_view(
+    fleet: &Fleet,
+    tenant: &str,
+    name: &str,
+) -> Result<Value, AppError> {
+    let leased = fleet
+        .tenancy
+        .lock()
+        .await
+        .active_lease_for_node(name)
+        .is_some_and(|l| l.tenant == tenant);
+    if !leased {
+        return Err(not_found(format!("you do not lease a Mac named '{name}'")));
+    }
+    let nodes = fleet.nodes.lock().await;
+    let n = nodes
+        .get(name)
+        .ok_or_else(|| not_found(format!("no registered node named '{name}'")))?;
+    Ok(json!({
+        "name": n.name,
+        "healthy": n.healthy(),
+        "vcpus_total": n.vcpus_total,
+        "memory_mib_total": n.memory_mib_total,
+        "free_vcpus": n.free_vcpus(),
+        "free_memory_mib": n.free_memory_mib(),
+        "vm_count": n.vm_count,
+        "last_seen": n.last_seen,
+        "apple": n.apple,
+    }))
+}
+
 // ---- tenants ------------------------------------------------------------------------------------------------------
 
 #[derive(Debug, Deserialize)]
@@ -278,7 +353,12 @@ pub(super) async fn list_tenants(
 ) -> Result<Json<Value>, AppError> {
     require_admin(&caller)?;
     let t = fleet.tenancy.lock().await;
-    let items: Vec<Value> = t.tenants.values().map(|x| x.public_json()).collect();
+    // With what each is using, so a console can show quota use without one call per tenant.
+    let items: Vec<Value> = t
+        .tenants
+        .keys()
+        .filter_map(|id| tenant_view(&t, id))
+        .collect();
     Ok(Json(json!({"items": items})))
 }
 
@@ -1812,5 +1892,93 @@ mod tests {
             .0,
             StatusCode::CONFLICT
         );
+    }
+
+    #[tokio::test]
+    async fn image_catalog_and_a_tenants_view_of_its_macs() {
+        let fleet = fleet_of(
+            vec![mac("mac-a", 32_000, 0), mac("mac-b", 64_000, 0)],
+            TenancyState::default(),
+        );
+        let app = Router::new()
+            .route("/fleet/tenants", post(create_tenant))
+            .route("/fleet/leases", post(create_lease))
+            .route("/fleet/images", get(list_images))
+            .route(
+                "/fleet/images/{name}",
+                axum::routing::put(put_image).delete(delete_image),
+            )
+            .route("/fleet/nodes/{name}", get(super::get_node))
+            .layer(middleware::from_fn_with_state(
+                fleet.clone(),
+                auth_middleware,
+            ))
+            .with_state(fleet);
+
+        let xcode =
+            json!({"guest_os": "macos", "image": "/Users/fluxvm/vms/xcode/disk.raw", "vcpus": 6});
+        let (s, v) = call(
+            &app,
+            "PUT",
+            "/fleet/images/xcode-27",
+            "admin-token",
+            xcode.clone(),
+        )
+        .await;
+        assert_eq!(s, 200, "{v}");
+        assert_eq!(v["memory_mib"], 8192);
+        let (s, _) = call(
+            &app,
+            "PUT",
+            "/fleet/images/Bad%20Name",
+            "admin-token",
+            xcode,
+        )
+        .await;
+        assert_eq!(s, 400);
+        let bad = json!({"guest_os": "windows", "image": "/x"});
+        let (s, _) = call(&app, "PUT", "/fleet/images/win", "admin-token", bad).await;
+        assert_eq!(s, 400);
+
+        let (_, v) = call(
+            &app,
+            "POST",
+            "/fleet/tenants",
+            "admin-token",
+            json!({"id": "acme"}),
+        )
+        .await;
+        let token = v["token"].as_str().unwrap().to_owned();
+        // Tenants read the catalog but cannot change it.
+        let (s, v) = call(&app, "GET", "/fleet/images", &token, json!({})).await;
+        assert_eq!(s, 200);
+        assert_eq!(v["items"][0]["name"], "xcode-27");
+        let (s, _) = call(&app, "DELETE", "/fleet/images/xcode-27", &token, json!({})).await;
+        assert_eq!(s, 403);
+
+        // A tenant sees a Mac only once it leases it, and without its address.
+        let (s, _) = call(&app, "GET", "/fleet/nodes/mac-a", &token, json!({})).await;
+        assert_eq!(s, 404);
+        let (s, v) = call(&app, "POST", "/fleet/leases", &token, json!({})).await;
+        assert_eq!(s, 201, "{v}");
+        let (s, v) = call(&app, "GET", "/fleet/nodes/mac-a", &token, json!({})).await;
+        assert_eq!(s, 200, "{v}");
+        assert!(v.get("fluxvm_url").is_none());
+        assert_eq!(v["free_vcpus"], 10);
+        let (s, _) = call(&app, "GET", "/fleet/nodes/mac-b", &token, json!({})).await;
+        assert_eq!(s, 404);
+        // The operator still gets the full record.
+        let (_, v) = call(&app, "GET", "/fleet/nodes/mac-b", "admin-token", json!({})).await;
+        assert!(v.get("fluxvm_url").is_some());
+
+        let (s, _) = call(
+            &app,
+            "DELETE",
+            "/fleet/images/xcode-27",
+            "admin-token",
+            json!({}),
+        )
+        .await;
+        assert_eq!(s, 204);
     }
 }
