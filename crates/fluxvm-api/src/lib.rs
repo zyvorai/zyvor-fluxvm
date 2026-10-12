@@ -5159,20 +5159,24 @@ mod tests {
     use std::path::PathBuf;
 
     fn fixture(backend: BackendKind, status: VmStatus, agent_enabled: bool) -> VmRecord {
+        // A path that does not exist and is unique to the fixture; a fixed `/tmp/x` broke these tests on any machine
+        // where something (even an empty file) already sat there.
+        let id = Uuid::new_v4();
+        let root = std::env::temp_dir().join(format!("fluxvm-fixture-{id}"));
         VmRecord {
-            id: Uuid::new_v4(),
+            id,
             name: "fixture".into(),
             backend,
             status,
             pid: None,
             created_at: chrono::Utc::now(),
             expires_at: None,
-            workspace: PathBuf::from("/tmp/x"),
-            disk: PathBuf::from("/tmp/x/root.qcow2"),
+            workspace: root.clone(),
+            disk: root.join("root.qcow2"),
             seed_disk: None,
             tap_name: None,
             control_socket: None,
-            log_path: PathBuf::from("/tmp/x/console.log"),
+            log_path: root.join("console.log"),
             error: None,
             request: CreateVmRequest {
                 apple: None,
