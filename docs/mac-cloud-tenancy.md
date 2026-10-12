@@ -25,6 +25,14 @@ This is an engineering control, not legal advice. The rules are defaults in `GET
 | `isolate_tenant_networks` | `false` | Each tenant's `vz` VMs join their own vmnet network (`fluxvm-tenant-<id>`, one /24 each) |
 | `tenant_subnet_prefix` | `10.230` | Tenant n gets `10.230.n.0/24` (indices are assigned once and kept) |
 
+## Console
+
+`http://<central>/console` is a web console for the whole fleet. Sign in with a tenant token to see your leases,
+VMs, private networks and usage; you can lease or release a Mac, delete VMs and create networks there. Sign in with
+the fleet token for the operator view, which adds nodes (cordon, drain, scrub), tenants (create, disable, new token)
+and every tenant's usage. The page itself needs no token; it keeps the one you enter in the tab's session storage and
+sends it only to this central.
+
 ## Turning it on
 
 Tenancy is off until the first tenant exists. Until then central behaves exactly as before. Give central a fleet token

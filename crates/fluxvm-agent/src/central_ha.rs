@@ -372,6 +372,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_console_is_served_without_a_token_with_a_strict_csp() {
+        let d = tempfile::tempdir().unwrap();
+        let app = router(CentralConfig {
+            state_dir: d.path().to_path_buf(),
+            token: Some("admin".into()),
+            reconcile_interval: None,
+            ha: None,
+        });
+        for path in ["/console", "/console/app.js"] {
+            let req = axum::http::Request::builder()
+                .uri(path)
+                .body(Body::empty())
+                .unwrap();
+            let resp = app.clone().oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), 200, "{path}");
+            let csp = resp.headers()["content-security-policy"].to_str().unwrap();
+            assert!(csp.contains("default-src 'none'") && csp.contains("script-src 'self'"));
+        }
+        // The API itself still needs the token.
+        let (s, _) = call(&app, "GET", "/fleet/nodes", "wrong", json!({})).await;
+        assert_eq!(s, 401);
+    }
+
+    #[tokio::test]
     async fn without_ha_everything_is_the_leader() {
         let d = tempfile::tempdir().unwrap();
         let (app, handle) = router_with_handle(CentralConfig {
