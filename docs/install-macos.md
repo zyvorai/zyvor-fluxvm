@@ -137,11 +137,16 @@ cargo build --release -p fluxvm-agent          # needs a Rust toolchain; binary:
 Try it on this Mac with a simulated node (nothing boots, no VM is created):
 
 ```bash
-TOKEN=$(openssl rand -hex 24)                   # the fleet token; keep it out of shell history if you can
-target/release/fluxvm-agent central --listen 127.0.0.1:7799 --state-dir ./central-state --token "$TOKEN" &
+target/release/fluxvm-agent central --listen 127.0.0.1:7799 --state-dir ./central-state &
+# first start prints:  token: fvo_...   (also saved in ./central-state/operator-token, mode 0600)
+TOKEN=$(cat ./central-state/operator-token)
 target/release/fluxvm-agent sim-node --name studio-1 --central http://127.0.0.1:7799 --token "$TOKEN" &
 open http://127.0.0.1:7799/console              # paste the token into the sign-in field
 ```
+
+With no `--token`, central makes a random operator token on its first start and keeps it, so there is always one
+default key. To use your own, pass `--token VALUE` (it always wins); to get a new generated one, stop central, delete
+`central-state/operator-token` and start it again. `--no-auth` turns the check off entirely (lab only).
 
 You land on **Overview** with one Mac. Use the top bar's **Cloud**, **Compute**, **Billing** and **Access** menus (or
 ⌘K) to move around. Stop it with `kill %1 %2`; the state stays in `./central-state`.
@@ -150,7 +155,7 @@ You land on **Overview** with one Mac. Use the top bar's **Cloud**, **Compute**,
 
 | Who | Where the key comes from |
 |---|---|
-| Operator (whole fleet) | The value you gave `--token` (or `FLUXVM_AGENT_TOKEN`) when you started central. Lost it? Restart central with a new one. Without `--token`, auth is **off** (lab only). |
+| Operator (whole fleet) | The `--token` (or `FLUXVM_AGENT_TOKEN`) you gave central, else the generated one printed on first start and kept in `<state-dir>/operator-token`. Lost it? `cat` that file, or restart with `--token NEW`. |
 | Tenant | The operator runs `fluxctl fleet --token "$TOKEN" tenant create acme`; the token is printed **once**. Rotate it later from the console or `fluxctl`. |
 | Sign-up | Shown once after the emailed confirmation link is used (needs `--signup-mail-webhook`, see [mac-cloud-tenancy.md](mac-cloud-tenancy.md)). |
 | SSO | Nobody sees a token: people sign in through the company's identity provider. |

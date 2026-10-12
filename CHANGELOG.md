@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+### Changed: `central` makes an operator token when none is given
+- Starting `fluxvm-agent central` without `--token` used to leave `/fleet/*` open to anyone. It now generates a random
+  operator token (`fvo_…`) on first start, stores it in `<state-dir>/operator-token` (mode 0600), prints it once, and
+  reuses it on later starts. `--token` always wins; deleting the file gets a new one. **Behaviour change:** scripts that
+  started central with no token must now send the printed one, or pass `--no-auth` (or `FLUXVM_AGENT_NO_AUTH=1`) to
+  keep the open lab behaviour. `--ha-redis` still needs an explicit `--token` shared by every central, and
+  `--oidc-issuer` refuses `--no-auth`.
+
 ### Changed: the fleet console has a new look
 - **Netra-style shell.** A 48 px frosted top bar replaces the sidebar: the orange Zyvor Z with "FluxVM", grouped menus
   (**Overview**, **Cloud**: Macs, Networks, Images; **Compute**: Virtual machines, Volumes, Warm pools, Tunnels;

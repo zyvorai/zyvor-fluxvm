@@ -656,6 +656,36 @@ pub fn new_token() -> String {
     )
 }
 
+/// File (in the state directory) holding the operator token central generated when none was given.
+pub const OPERATOR_TOKEN_FILE: &str = "operator-token";
+
+/// The operator token when `--token` was not given: the one stored in `<state_dir>/operator-token`, or a new random
+/// one written there (mode 0600) on first use. The `bool` is true when it was just created, so the caller can show it
+/// once. The operator changes it by passing `--token` (that always wins) or by deleting the file.
+pub fn default_operator_token(state_dir: &std::path::Path) -> std::io::Result<(String, bool)> {
+    use std::io::Write;
+    let file = state_dir.join(OPERATOR_TOKEN_FILE);
+    if let Ok(existing) = std::fs::read_to_string(&file) {
+        let t = existing.trim();
+        if t.len() >= 32 {
+            return Ok((t.to_owned(), false));
+        }
+    }
+    std::fs::create_dir_all(state_dir)?;
+    let token = format!("fvo_{}", &new_token()[4..]);
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    let mut f = opts.open(&file)?;
+    f.write_all(token.as_bytes())?;
+    f.write_all(b"\n")?;
+    Ok((token, true))
+}
+
 fn valid_tenant_id(id: &str) -> bool {
     // `me` is the route `GET /fleet/tenants/me`.
     id != "me"
@@ -2376,6 +2406,31 @@ mod tests {
         let a2 = s.rotate_token("a").unwrap();
         assert!(s.authenticate(&a).is_none());
         assert_eq!(s.authenticate(&a2).unwrap().id, "a");
+    }
+
+    #[test]
+    fn default_operator_token_is_made_once_kept_private_and_reused() {
+        let dir = std::env::temp_dir().join(format!("fluxvm-optok-{}", uuid::Uuid::new_v4()));
+        let (first, created) = default_operator_token(&dir).unwrap();
+        assert!(created && first.starts_with("fvo_") && first.len() == 68);
+        let (again, created) = default_operator_token(&dir).unwrap();
+        assert!(!created);
+        assert_eq!(first, again);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(dir.join(OPERATOR_TOKEN_FILE))
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+        // Deleting the file is how the operator asks for a fresh one.
+        std::fs::remove_file(dir.join(OPERATOR_TOKEN_FILE)).unwrap();
+        let (fresh, created) = default_operator_token(&dir).unwrap();
+        assert!(created);
+        assert_ne!(fresh, first);
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
