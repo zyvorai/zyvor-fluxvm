@@ -2588,7 +2588,8 @@ impl VmManager {
                     .filter_map(|v| v.request.apple)
                     .flat_map(|a| a.networks)
                     .collect();
-                fluxvm_apple::vznet::assign(&mut apple.networks, &existing)?;
+                let overlays = fluxvm_apple::vznet::load_overlays()?;
+                fluxvm_apple::vznet::assign_with(&mut apple.networks, &existing, &overlays)?;
                 if !oci_init {
                     let (files, runcmd) = fluxvm_apple::vznet::cloud_init(&apple.networks);
                     let ci = req.cloud_init.get_or_insert_with(Default::default);
