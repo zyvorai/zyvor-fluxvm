@@ -236,13 +236,21 @@ fn vhost_user_pidfile(workspace: &Path, name: &str) -> PathBuf {
     workspace.join(format!("vub-{name}.pid"))
 }
 
-/// The `qemu-storage-daemon` pid serving data disk `name`, if one was started.
+/// The `qemu-storage-daemon` pid serving data disk `name`, if one is still
+/// running. A pidfile whose pid now belongs to another process (the daemon
+/// exited and the pid was reused) yields `None`.
 pub fn vhost_user_pid(workspace: &Path, name: &str) -> Option<u32> {
-    std::fs::read_to_string(vhost_user_pidfile(workspace, name))
+    let pid: u32 = std::fs::read_to_string(vhost_user_pidfile(workspace, name))
         .ok()?
         .trim()
         .parse()
-        .ok()
+        .ok()?;
+    let cmdline = std::fs::read(format!("/proc/{pid}/cmdline")).ok()?;
+    let socket = vhost_user_socket(workspace, name);
+    let needle = socket.to_string_lossy();
+    String::from_utf8_lossy(&cmdline)
+        .contains(needle.as_ref())
+        .then_some(pid)
 }
 
 fn port_id(port: u8) -> String {
@@ -594,7 +602,9 @@ pub async fn spawn_vhost_user(cfg: &Config, workspace: &Path, name: &str) -> Res
     };
     let io = disk_io(workspace, name);
     let socket = vhost_user_socket(workspace, name);
-    let _ = std::fs::remove_file(&socket);
+    // A daemon left by an earlier boot whose QEMU died holds the disk open;
+    // one daemon per disk, ever.
+    stop_vhost_user(workspace, name).await;
     let log = workspace.join(format!("vub-{name}.log"));
     let args = vhost_user_args(name, &path, &io, &socket);
     let child = fluxvm_core::process::spawn_logged(&cfg.qemu_storage_daemon_binary, &args, &log)

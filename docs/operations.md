@@ -541,6 +541,19 @@ hot-added with `disk attach` comes back on every boot. `resize` only grows
 (`block_resize` live, `qemu-img resize` stopped); the guest still has to grow
 its partition/filesystem. `detach` unplugs and deletes the file.
 
+`disk attach ... --bus virtio-blk|vhost-user-blk --aio io_uring --cache none
+--iothread --queues 4` picks the bus and I/O path per disk (REST: `io`, see
+[api.md](api.md)); `root_disk_io` on create does the same for the root. A live
+VM hot-adds virtio disks onto the `hotplug-disk-N` root ports it reserved at
+create (`disk_hotplug_ports`, default 4). A `vhost-user-blk` disk is served by
+its own `qemu-storage-daemon` (`instances/<uuid>/vub-<name>.{sock,pid,log}`),
+recorded with the VM's sidecar pids so stop and delete end it. A VM with such a
+disk boots with shareable memory; hot-adding one to a running VM needs
+`shared_memory: true` at create. On the eBPF dataplane, a disk on a host block
+device (an NVMe-oF namespace, an RBD map) is added to the VM's device-cgroup
+allowlist before QEMU opens it. That allowlist has 8 entries in total: the 3
+fixed devices, VFIO groups and block devices.
+
 `disk attach <vm> <name> --path <file-or-device>` (REST: `{"name", "path"}`
 instead of `size_gib`) attaches an **existing** qcow2/raw image or block device
 (a CSI volume, an RBD map) as a symlink `disks/<name>.{qcow2,raw}`; block
@@ -1438,6 +1451,8 @@ of a surprise landing somewhere else.
     <uuid>/
       root.qcow2 | root.raw
       disks/<name>.qcow2      (QEMU data disks)
+      disks/<name>.io.json    (a data disk's bus and I/O options, hotplug port)
+      vub-<name>.sock|.pid|.log (qemu-storage-daemon of a vhost-user-blk disk)
       seed.img
       user-data
       meta-data

@@ -1275,6 +1275,7 @@ impl VmManager {
                         id,
                         &cgroup_path,
                         vfio_devices,
+                        &qemu_disk_paths(record),
                     ) {
                         tracing::warn!(vm = %id, error = %e, "Set 7S QEMU cgroup hardening attach failed");
                     }
@@ -2641,6 +2642,34 @@ impl VmManager {
             }
             _ => None,
         };
+        // Before the record exists: hot-add reads the stored port count.
+        if !req.data_disks.is_empty() && req.backend != BackendKind::Qemu {
+            anyhow::bail!("data_disks requires backend qemu");
+        }
+        if req.backend == BackendKind::Qemu {
+            if let Some(io) = &req.root_disk_io {
+                io.validate(true)
+                    .map_err(|e| anyhow::anyhow!("root_disk_io: {e}"))?;
+            }
+            for d in &req.data_disks {
+                if let Some(io) = &d.io {
+                    io.validate(false)
+                        .map_err(|e| anyhow::anyhow!("data disk {:?} io: {e}", d.name))?;
+                }
+            }
+            match req.disk_hotplug_ports {
+                Some(n) if n > fluxvm_qemu::disks::MAX_DISK_HOTPLUG_PORTS => anyhow::bail!(
+                    "disk_hotplug_ports must be at most {}",
+                    fluxvm_qemu::disks::MAX_DISK_HOTPLUG_PORTS
+                ),
+                Some(_) => {}
+                None => {
+                    req.disk_hotplug_ports = Some(fluxvm_qemu::disks::DEFAULT_DISK_HOTPLUG_PORTS)
+                }
+            }
+        } else if req.root_disk_io.is_some() || req.disk_hotplug_ports.is_some() {
+            anyhow::bail!("root_disk_io and disk_hotplug_ports require backend qemu");
+        }
 
         let placeholder = VmRecord {
             id,
@@ -2708,33 +2737,6 @@ impl VmManager {
         // cosmetic no-op.
         if let Some(msg) = secure_boot_or_tpm_backend_error(&req) {
             anyhow::bail!(msg);
-        }
-        if !req.data_disks.is_empty() && req.backend != BackendKind::Qemu {
-            anyhow::bail!("data_disks requires backend qemu");
-        }
-        if req.backend == BackendKind::Qemu {
-            if let Some(io) = &req.root_disk_io {
-                io.validate(true)
-                    .map_err(|e| anyhow::anyhow!("root_disk_io: {e}"))?;
-            }
-            for d in &req.data_disks {
-                if let Some(io) = &d.io {
-                    io.validate(false)
-                        .map_err(|e| anyhow::anyhow!("data disk {:?} io: {e}", d.name))?;
-                }
-            }
-            match req.disk_hotplug_ports {
-                Some(n) if n > fluxvm_qemu::disks::MAX_DISK_HOTPLUG_PORTS => anyhow::bail!(
-                    "disk_hotplug_ports must be at most {}",
-                    fluxvm_qemu::disks::MAX_DISK_HOTPLUG_PORTS
-                ),
-                Some(_) => {}
-                None => {
-                    req.disk_hotplug_ports = Some(fluxvm_qemu::disks::DEFAULT_DISK_HOTPLUG_PORTS)
-                }
-            }
-        } else if req.root_disk_io.is_some() || req.disk_hotplug_ports.is_some() {
-            anyhow::bail!("root_disk_io and disk_hotplug_ports require backend qemu");
         }
         if !req.numa.is_empty() && req.backend != BackendKind::Qemu {
             anyhow::bail!("numa requires backend qemu");
@@ -4585,6 +4587,37 @@ impl VmManager {
             })
     }
 
+    /// Bring a running VM's device allowlist in line with its disks, plus
+    /// `adding` (a source about to be hot-added). A failure is fatal only
+    /// when `adding` is a block device, which QEMU could not open without
+    /// its entry; otherwise it is logged, like `attach_cgroup`.
+    fn allow_vm_disk_devices(&self, vm: &VmRecord, adding: Option<&std::path::Path>) -> Result<()> {
+        if self.cfg.sandbox.dataplane.mode == fluxvm_core::config::DataplaneMode::Legacy
+            || !fluxvm_qemu::disks::is_live_vm(vm)
+        {
+            return Ok(());
+        }
+        let mut disks = qemu_disk_paths(vm);
+        disks.extend(adding.map(std::path::Path::to_path_buf));
+        let Err(e) = fluxvm_network::qemu_cgroup::update(
+            &self.cfg.sandbox.dataplane,
+            vm.id,
+            &vm.request.vfio_devices,
+            &disks,
+        ) else {
+            return Ok(());
+        };
+        let adding_block = adding.is_some_and(|p| {
+            use std::os::unix::fs::FileTypeExt;
+            std::fs::metadata(p).is_ok_and(|m| m.file_type().is_block_device())
+        });
+        if adding_block {
+            return Err(e.context("allowing the block device in the VM's device cgroup"));
+        }
+        tracing::warn!(vm = %vm.id, error = %e, "Set 7S device allowlist update failed");
+        Ok(())
+    }
+
     async fn qemu_vm_for_disks(&self, id: Uuid) -> Result<VmRecord> {
         let vm = self.get(id).await?;
         if vm.backend != BackendKind::Qemu {
@@ -4635,6 +4668,7 @@ impl VmManager {
     ) -> Result<fluxvm_core::model::VmDiskInfo> {
         let vm = self.qemu_vm_for_disks(id).await?;
         let real = self.check_disk_source(source)?;
+        self.allow_vm_disk_devices(&vm, Some(&real))?;
         let info = fluxvm_qemu::disks::attach_existing(&self.cfg, &vm, name, &real, io).await?;
         self.record_vhost_user_pid(id, name).await?;
         audit_event(
@@ -4746,6 +4780,7 @@ impl VmManager {
         let vub_pid = fluxvm_qemu::disks::vhost_user_pid(&vm.workspace, name)
             .filter(|_| fluxvm_qemu::disks::is_vhost_user(&vm.workspace, name));
         fluxvm_qemu::disks::detach(&vm, name).await?;
+        self.allow_vm_disk_devices(&vm, None)?;
         if let Some(pid) = vub_pid {
             let mut vm = self.get(id).await?;
             vm.virtiofsd_pids.retain(|p| *p != pid);
@@ -7488,4 +7523,19 @@ mod scheduled_snapshot_tests {
         let (due, _) = snapshot_schedule_plan(&snaps, 60, 2, now);
         assert!(due);
     }
+}
+
+/// A QEMU VM's root disk and data disk paths (data disks attached from a
+/// block device are symlinks to it).
+fn qemu_disk_paths(vm: &VmRecord) -> Vec<std::path::PathBuf> {
+    if vm.backend != BackendKind::Qemu {
+        return vec![];
+    }
+    std::iter::once(vm.disk.clone())
+        .chain(
+            fluxvm_qemu::disks::data_disks(&vm.workspace)
+                .into_iter()
+                .map(|(_, p)| p),
+        )
+        .collect()
 }

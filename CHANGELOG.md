@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+### Added: per-disk QEMU I/O, virtio-blk and vhost-user-blk data disks
+- `io` on data disks (`POST /v1/vms/{id}/disks`, `data_disks`) and `root_disk_io` on create: `bus` (`scsi`,
+  `virtio-blk`, `vhost-user-blk`), `aio` (`io_uring`, `native`, `threads`), `cache`, `iothread` and `queues`.
+  `fluxctl disk attach --bus --aio --cache --iothread --queues`. Stored per disk in `disks/<name>.io.json`.
+- Live virtio disks hot-add onto root ports reserved at create (`disk_hotplug_ports`, default 4, at most 16). VMs
+  created earlier keep their device layout.
+- A `vhost-user-blk` disk is served by its own `qemu-storage-daemon`, ended with the VM. Live resize and
+  hibernation refuse these disks; live and CBT backups leave them out.
+- `GET /v1/capabilities` reports `host.io_uring`, `host.vhost_user_blk` and `host.nvme_multipath`. The VMM seccomp
+  filter allows io_uring.
+- Disks on host block devices (an NVMe-oF namespace, an RBD map) are put on the VM's device-cgroup allowlist at
+  boot and before a live attach. Before, QEMU got `Operation not permitted` opening them on the eBPF dataplane. An
+  attach that would overflow the 8-entry allowlist is refused.
+- Lab-tested from Kairon (`scripts/lab-nvmeof.sh`, kernel 7.0, QEMU 10.2): booted a VM from an nvme-tcp namespace
+  in place, hot-added a virtio-blk disk (io_uring, cache none, iothread, 2 queues) and a vhost-user-blk disk (2
+  queues), and kept it running through a path loss.
+
 ### Fixed: incident bundle directories were world-readable
 - `diagnostics_dir` and its per-VM and per-bundle directories are now created, and tightened if they exist, with mode
   0700. They inherited the umask (0755), so on a multi-user host other local users could read bundles and guest memory
