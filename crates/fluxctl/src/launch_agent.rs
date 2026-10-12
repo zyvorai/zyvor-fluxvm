@@ -86,9 +86,8 @@ pub fn install(config: Option<&Path>) -> Result<PathBuf> {
         bail!("`fluxctl service` installs a macOS LaunchAgent; on Linux use a systemd unit");
     }
     let home = home()?;
-    let exe = std::env::current_exe()
-        .context("locating fluxctl")?
-        .canonicalize()?;
+    // The Homebrew `opt` path when there is one, so the agent survives `brew upgrade`.
+    let exe = crate::stable_exe::stable_exe().context("locating fluxctl")?;
     let config = match config {
         Some(c) => Some(
             c.canonicalize()

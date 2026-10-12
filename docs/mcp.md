@@ -121,7 +121,11 @@ restart that VM only; see [macOS: guest self-control](macos.md#guest-self-contro
 
 `fluxctl mcp install <client>` adds a `fluxvm` server to the client's own
 config file, pointing at the running `fluxctl` binary, and leaves every
-other entry alone (Codex's TOML keeps its comments and layout):
+other entry alone (Codex's TOML keeps its comments and layout). Installed with
+Homebrew, the entry points at the version-free `/opt/homebrew/opt/fluxvm/bin/fluxctl`
+so it survives `brew upgrade`; 0.4.4 wrote the versioned Cellar path, so re-run
+`fluxctl mcp install` after upgrading from it. The full Homebrew walk-through,
+with what was tested, is [install-macos.md](install-macos.md):
 
 ```sh
 fluxctl mcp install claude-code                 # ~/.claude.json

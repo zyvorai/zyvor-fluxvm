@@ -1981,7 +1981,10 @@ impl VmManager {
         let state_ok = self.cfg.state_dir.exists();
         let health = fluxvm_network::dataplane::health(&self.cfg).ok();
         let dp_ok = health.as_ref().map(|h| h.ok).unwrap_or(true);
-        let required = self.cfg.sandbox.dataplane.required
+        // The eBPF/nftables dataplane is a Linux thing: on macOS (vz) there is none to be ready, and requiring it made
+        // `/readyz` answer 503 on every Mac.
+        let required = cfg!(target_os = "linux")
+            && self.cfg.sandbox.dataplane.required
             && !matches!(
                 self.cfg.sandbox.dataplane.mode,
                 fluxvm_core::config::DataplaneMode::Legacy

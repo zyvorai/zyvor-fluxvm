@@ -261,7 +261,8 @@ pub(super) async fn ssh(
     if !valid_user(&user) {
         bail!("'{user}' is not a login name ssh accepts here (letters, digits, '-', '.', '_')");
     }
-    let exe = std::env::current_exe().context("finding the fluxctl executable for ProxyCommand")?;
+    let exe = crate::stable_exe::stable_exe()
+        .context("finding the fluxctl executable for ProxyCommand")?;
     let exe = exe.to_string_lossy().into_owned();
     let mut args = ssh_args(&exe, central, &node, &id, &name, &user);
     args.extend(extra);

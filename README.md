@@ -54,7 +54,7 @@ fluxctl run                                         # a throwaway Debian 13 VM a
 fluxctl sandbox run alpine:3.22 --rm -- echo hi     # a container in its own VM
 ```
 
-From source instead: `xcode-select --install && brew install hivex && cargo build -p fluxctl` (builds and signs the vz runner).
+Step by step, with what was tested (daemon as a service, first VM, MCP client): [Install on a Mac](docs/install-macos.md). From source instead: `xcode-select --install && brew install hivex && cargo build -p fluxctl` (builds and signs the vz runner).
 
 [**FluxVM on Mac**](https://zyvorai.github.io/zyvor-fluxvm/mac) · [**Build a Mac cloud**](https://zyvorai.github.io/zyvor-fluxvm/mac-cloud) · [Mac guide](docs/macos.md) · [Mac cloud guide](docs/mac-cloud.md) · [Tenancy, leases and roles](docs/mac-cloud-tenancy.md) · [Run central](docs/mac-cloud-operations.md) · [`fluxctl fleet`](docs/fluxctl-fleet.md) · [SDKs and Terraform](docs/fleet-sdk.md) · [Architecture](docs/macos-architecture.md)
 

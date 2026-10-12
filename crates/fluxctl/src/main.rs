@@ -37,6 +37,7 @@ mod output;
 mod remote;
 mod run;
 mod sandbox_run;
+mod stable_exe;
 mod stack;
 mod stack_fleet;
 mod status;
@@ -4820,8 +4821,8 @@ async fn main() -> Result<()> {
                 name,
                 dry_run,
             } => {
-                let exe = std::env::current_exe().context("locating fluxctl")?;
-                let exe = exe.canonicalize().unwrap_or(exe);
+                // The Homebrew `opt` path, not the versioned Cellar one, so the entry survives `brew upgrade`.
+                let exe = stable_exe::stable_exe().context("locating fluxctl")?;
                 let mut args = Vec::new();
                 if let Some(c) = &cli.context {
                     args.extend(["--context".to_owned(), c.clone()]);

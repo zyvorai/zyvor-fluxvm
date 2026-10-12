@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+### Fixed: three rough edges found installing 0.4.4 from the Homebrew tap on a clean Mac
+- `fluxctl mcp install` (and `fluxctl service install`, and the ssh ProxyCommand of `fluxctl fleet ssh`) wrote the versioned
+  Cellar path (`/opt/homebrew/Cellar/fluxvm/0.4.4/bin/fluxctl`), which `brew upgrade` plus `brew cleanup` removes. They now
+  write the version-free `opt` path when there is one.
+- `GET /readyz` answered `503` on every Mac because it required the Linux eBPF dataplane. The dataplane is only required on
+  Linux now.
+- Stopping a VM on a Mac no longer logs `nftables table delete ... running nft (install nftables)`.
+
+### Docs: install on a Mac with Homebrew
+- New `docs/install-macos.md`: install, the service, a first VM, and wiring an MCP client, each tested from the published
+  tap on an M4 from a fresh `HOME`; upgrade and uninstall are marked as not exercised.
+
 ### Added: an agent-sandbox demo with real timings
 - `examples/agent-sandbox-demo/run.sh`: an offline sandbox, a failing test, a fork into four running copies, four fixes
   tried in parallel, the passing one kept. About 4 s to fork and 0.3 s to test on an M4 mini; its README lists what it
