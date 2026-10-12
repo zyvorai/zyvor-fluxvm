@@ -427,12 +427,18 @@ FOO = "bar"
             "net_connect = [0]",
             "seccomp = \"loud\"",
             "max_memory = \"lots\"",
-            "syscall_deny = [\"not_a_syscall\"]",
             "syscall_deny = [\"chmod\"]\nsyscall_allow = [\"chmod\"]",
         ] {
             assert!(Profile::from_toml_str(bad).is_err(), "accepted {bad:?}");
         }
         assert!(Profile::from_toml_str("net_connect = \"any\"\nnet_bind = [0]").is_ok());
+    }
+
+    // Only Linux has a syscall table to check names against (`syscall_known` accepts any name elsewhere).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn unknown_syscall_names_are_rejected() {
+        assert!(Profile::from_toml_str("syscall_deny = [\"not_a_syscall\"]").is_err());
     }
 
     #[test]
