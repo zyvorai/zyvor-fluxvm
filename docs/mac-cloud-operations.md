@@ -30,7 +30,10 @@ fluxvm-agent central \
 ```
 
 Put a TLS-terminating reverse proxy in front (or pass `--tls-cert` and `--tls-key`). `--token` is the operator's
-credential for everything under `/fleet/*`; **without it the registry is open to anyone who can reach it (lab only).**
+credential for everything under `/fleet/*`. If you do not pass one, central makes a random `fvo_…` token on its first
+start, keeps it in `<state-dir>/operator-token` (mode `0600`) and prints it once, so the registry is never open by
+accident. `--token` always wins. Pass `--no-auth` (or `FLUXVM_AGENT_NO_AUTH`) only for a lab: it turns the check off
+for everyone who can reach the port.
 
 ## Flags
 
@@ -42,7 +45,8 @@ Every flag has an environment variable, shown in the second column.
 |---|---|---|---|
 | `--listen ADDR` | `LISTEN` | `0.0.0.0:7799` | Address to serve on. Bind to loopback when a reverse proxy is in front. |
 | `--state-dir DIR` | `FLUXVM_AGENT_STATE_DIR` | `/var/lib/fluxvm-agent` | Where state is kept (below). |
-| `--token TOKEN` | `FLUXVM_AGENT_TOKEN` | none | The operator's bearer token for `/fleet/*`. Omit only in a lab. |
+| `--token TOKEN` | `FLUXVM_AGENT_TOKEN` | generated | The operator's bearer token for `/fleet/*`. When omitted, central generates one on first start and keeps it in `<state-dir>/operator-token` (`0600`). `--ha-redis` still needs an explicit `--token`. |
+| `--no-auth` | `FLUXVM_AGENT_NO_AUTH` | off | Serve `/fleet/*` with no operator check. Lab only; refused together with `--oidc-issuer`. |
 | `--tls-cert PEM`, `--tls-key PEM` | `FLUXVM_AGENT_TLS_CERT`, `FLUXVM_AGENT_TLS_KEY` | none | Serve HTTPS directly. Both are needed together. |
 | `--reconcile-secs N` | `FLUXVM_AGENT_RECONCILE_SECS` | `60` | How often central reconciles its ledger against every Mac and checks lease ends, billing, notifications and warm pools. `0` turns the background pass off (`POST /fleet/reconcile` still runs one). |
 
@@ -130,7 +134,8 @@ Marked ✅ when the code already enforces it, ☐ when it is yours to do.
 
 **Transport and secrets**
 - ☐ TLS in front of central (a reverse proxy or `--tls-cert`/`--tls-key`), and `--public-url` set to its `https` URL.
-- ☐ `--token` set; kept in a secrets manager, not in shell history or unit files. Use the `*-file` flags for the OIDC
+- ☐ Operator token chosen on purpose: pass `--token` (kept in a secrets manager, not in shell history or unit files) or
+  protect `<state-dir>/operator-token`; never `--no-auth` outside a lab. Use the `*-file` flags for the OIDC
   and Stripe secrets.
 - ☐ `--state-dir` readable only by the service user; backups encrypted.
 - ✅ Tokens, keys and session tokens are shown once and stored only as hashes.

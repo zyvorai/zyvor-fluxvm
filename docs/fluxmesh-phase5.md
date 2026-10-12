@@ -136,13 +136,13 @@ The report checks mesh/public state, key/cert files and Unix permissions, requir
 
 | Path | Purpose |
 |---|---|
-| `/var/lib/fluxvm/mesh/public.json` | ingress/DDNS/router/WAN/ACME desired state |
-| `/var/lib/fluxvm/mesh/share.key` | share-link HMAC secret |
-| `/var/lib/fluxvm/mesh/acme-account.pk8` | ACME P-256 account key |
-| `/var/lib/fluxvm/mesh/acme-issued-at` | renewal cadence marker |
-| `/var/lib/fluxvm/mesh/acme-http01/` | transient HTTP-01 challenges |
-| `/var/lib/fluxvm/mesh/tls/fullchain.pem` | ingress certificate chain |
-| `/var/lib/fluxvm/mesh/tls/key.pem` | ingress certificate private key |
+| `<mesh dir>/public.json` | ingress/DDNS/router/WAN/ACME desired state |
+| `<mesh dir>/share.key` | share-link HMAC secret |
+| `<mesh dir>/acme-account.pk8` | ACME P-256 account key |
+| `<mesh dir>/acme-issued-at` | renewal cadence marker |
+| `<mesh dir>/acme-http01/` | transient HTTP-01 challenges |
+| `<mesh dir>/tls/fullchain.pem` | ingress certificate chain |
+| `<mesh dir>/tls/key.pem` | ingress certificate private key |
 
 ## Production notes
 

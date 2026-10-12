@@ -27,6 +27,13 @@
   Pulls `h3`/`h3-quinn` into the workspace. Not in the macOS package, and none of it has run against a real
   browser, CA, resolver or router yet.
 
+### Docs
+- `docs/fluxmesh.md` is now the overview for the whole FluxMesh stack (status, programs, files, ports, quick start);
+  phase docs use `<mesh dir>` instead of hard-coded Linux paths. Network Fabric, cross-Mac networks, proof and
+  status, the docs index and the README point at FluxMesh with its real status (unit-tested, not run on real hosts).
+- Fleet operations and quickstart docs describe the generated operator token and `--no-auth`; the README's
+  "What's new" and status table reflect 0.4.6 and the redesigned console.
+
 ## 0.4.6 (2026-10-13)
 
 The security-review round for the fleet platform: console tunnels end with their person and have a maximum lifetime;

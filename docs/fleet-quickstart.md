@@ -89,7 +89,7 @@ target/debug/fluxvm-agent sim-node --name studio-2 --token $TOKEN --vcpus 24 --m
 |---|---|---|
 | `--name` | (required) | node name |
 | `--central` | `http://127.0.0.1:7799` | central URL, or a comma-separated list with HA |
-| `--token` | — | central's operator token |
+| `--token` | — | central's operator token (central prints a generated one on first start if you gave it none) |
 | `--listen` | `127.0.0.1:0` | where the simulated node API listens (port 0: any free port) |
 | `--vcpus`, `--memory-gib` | 12, 32 | the Mac's size |
 | `--nested` | off | report nested virtualization (M3 or later) |

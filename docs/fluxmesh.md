@@ -1,15 +1,9 @@
 # FluxMesh personal-cloud networking
 
-FluxMesh is FluxVM's host-to-host networking layer for a personal cloud. It is
-deliberately separate from Network Fabric (VM-edge eBPF policy) and Service
-Fabric (node-local Maglev VIPs).
-
-## Why this exists
-
-A VM can already have excellent local networking and still be unusable as a
-personal cloud when its host is behind home NAT, CGNAT, hotel Wi-Fi or a mobile
-network. FluxMesh owns the distributed intent needed to make those machines
-look like one private cloud:
+FluxMesh is FluxVM's host-to-host networking layer for a personal cloud: it makes machines behind home NAT, CGNAT,
+hotel Wi-Fi or a mobile network behave like one private network. It is deliberately separate from Network Fabric
+(VM-edge eBPF policy) and Service Fabric (node-local Maglev VIPs), and from the L2 [Mac networks](cross-mac-networks.md)
+that join Macs on one segment.
 
 ```text
 Mac mini ───── direct LAN / IPv6 / UDP ───── Linux host
@@ -19,21 +13,95 @@ Mac mini ───── direct LAN / IPv6 / UDP ───── Linux host
               cloud node
 ```
 
-Phase 1 in this PR provides the durable core that packet backends consume:
+## Status
 
-- stable overlay IPv4 allocation (`100.96.0.0/11` by default);
-- node identity and peer metadata;
-- endpoint inventory for LAN, public IPv6, UDP, peer-relay and relay:443;
-- NAT mapping classification without pretending it can infer more than the
-  observations prove;
-- deterministic path ranking:
-  LAN -> direct IPv6 -> direct UDP -> peer relay -> relay:443;
-- VM/LAN/host/exit route advertisements and longest-prefix route lookup;
-- atomic state persistence with mode `0600` on Unix;
-- a Linux WireGuard argv plan (no shell invocation/string interpolation);
-- a dependency-free `fluxmesh` operator CLI;
-- unit tests for IPAM, NAT classification, path selection, routing, persistence
-  and WireGuard planning.
+| Area | State |
+|---|---|
+| Control plane (IPAM, catalog, DNS, ACLs, path ranking, enrollment, key rotation, HA planning) | Implemented; unit-tested (`cargo test -p fluxvm-mesh`, 69 tests) |
+| Linux WireGuard reconcile (`fluxmesh-agent`) | Implemented; argv-only, never run against a real interface in CI |
+| macOS | Writes a desired-state plan for the NetworkExtension in `native/fluxmesh-macos`; the extension is **not built or signed** here, so macOS has no packet path yet |
+| Public edge (HTTPS ingress, ACME, DDNS, router mapping, blind relay, HTTP/3, tracing) | Implemented; **not run** against a real browser, CA, resolver or router |
+| Packaging | **Not** in the macOS package or the Homebrew formula; build with `cargo build -p fluxvm-mesh -p fluxctl` |
+
+Treat everything here as pre-production until the runtime checks in [fluxmesh-phase7.md](fluxmesh-phase7.md) have run.
+
+## What it provides
+
+- stable overlay IPv4 allocation (`100.96.0.0/11` by default) and a deterministic dual-stack ULA IPv6 overlay;
+- node identity and peer metadata; endpoint inventory for LAN, public IPv6, UDP, peer-relay and relay:443;
+- NAT mapping classification that does not claim more than the observations prove;
+- deterministic path ranking (LAN, direct IPv6, direct UDP, peer relay, relay:443) with hysteresis;
+- VM/LAN/host/exit route advertisements and longest-prefix lookup;
+- a cross-node service catalog with stable service VIPs, emitted in the Service Fabric backend shape;
+- authoritative private DNS: `<node>.flux`, `<service>.svc.flux`, SRV; no recursion;
+- fail-closed ACLs, compiled to Network Fabric CNP where the semantics can be kept exactly (otherwise rejected);
+- exit-node and subnet-router policy with a FluxMesh-owned nftables table;
+- an authenticated opaque relay (TCP, and native TLS on :443) that only ever carries WireGuard ciphertext;
+- zero-touch enrollment over verified TLS and coordinated WireGuard key rotation;
+- an optional public edge: HTTPS ingress with share links, ACME, DDNS, router mapping, a blind public relay for
+  CGNAT sites, HTTP/3, metrics and tracing.
+
+## Where files live
+
+`<mesh dir>` is `$FLUXMESH_DIR` if set, else `/var/lib/fluxvm/mesh` on Linux and
+`~/Library/Application Support/FluxVM/mesh` on macOS (the daemon runs unprivileged there). Individual files can still
+be moved with `FLUXMESH_STATE`, `FLUXMESH_CATALOG`, `FLUXMESH_RECONCILE_STATE` and `FLUXMESH_MACOS_PLAN`, or with
+each tool's `--state`/`--catalog`/`--key` flags.
+
+| File (in `<mesh dir>`) | Holds | Mode |
+|---|---|---|
+| `state.v1` | nodes, endpoints, routes, observations | `0600` |
+| `catalog.v1` | services, DNS suffix, ACLs, gateways, relays | `0600` |
+| `wireguard.key` | this node's WireGuard private key | `0600` |
+| `enroll.hmac`, `enroll-used/` | invitation authority key and used nonces | `0600` |
+| `keys.v1` | pending key-rotation proposals and acknowledgements | `0600` |
+| `reconcile.v1` | ledger of Service Fabric services FluxMesh created | `0600` |
+| `public.json`, `share.key`, `acme-account.pk8`, `tls/` | public-edge config, share-link secret, ACME account, certificate | `0600` |
+
+## Programs
+
+| Binary | Role | Phase doc |
+|---|---|---|
+| `fluxmesh` | state, IPAM, routes, path ranking, catalog, DNS, ACL, gateway planning | [1](fluxmesh.md), [2](fluxmesh-phase2.md) |
+| `fluxmesh-relay` | opaque WireGuard relay: `serve`, `client`, `serve-tls`, `client-tls` | [2](fluxmesh-phase2.md), [3](fluxmesh-phase3.md) |
+| `fluxmesh-agent` | reconciler: WireGuard, Service Fabric fan-out, STUN, key rotation, macOS plan | [3](fluxmesh-phase3.md) |
+| `fluxmesh-enroll` | enrollment server and `join` client | [4](fluxmesh-phase4.md) |
+| `fluxmesh-dns-ha` | elected FluxDNS replica | [4](fluxmesh-phase4.md) |
+| `fluxmesh-ingress`, `fluxmesh-edge` | HTTPS/H2/H3 ingress; public-edge reconciler (DDNS, ACME, router, WAN) | [5](fluxmesh-phase5.md), [7](fluxmesh-phase7.md) |
+| `fluxmesh-mdns`, `fluxmesh-pd` | overlay mDNS reflection; DHCPv6 prefix delegation | [5](fluxmesh-phase5.md) |
+| `fluxmesh-public-relay` | blind CGNAT relay (server and edge connector) | [6](fluxmesh-phase6.md), [7](fluxmesh-phase7.md) |
+| `fluxmesh-metrics` | Prometheus edge metrics endpoint | [6](fluxmesh-phase6.md) |
+| `fluxctl cloud` | operator flow over all of the above | [4](fluxmesh-phase4.md)-[7](fluxmesh-phase7.md) |
+
+Note that `fluxctl cloud` works on local FluxMesh files (`--state` etc.); it does not use `--server` or
+`--server-token` and does not talk to the FluxVM daemon's REST API.
+
+## Quick start
+
+On the first host, then a second one:
+
+```bash
+fluxctl cloud up home-mac macmini.local              # idempotent; creates state, key and overlay address
+fluxctl cloud status
+fluxctl cloud invite office-mac office.local          # prints a short-lived one-time token
+fluxctl cloud serve-enrollment --cert server.pem --tls-key server.key   # verified-TLS endpoint
+
+# on the joining host: the private key is generated locally and never sent
+fluxctl cloud join CONTROLLER:PORT --server-name cloud.example --ca ca.pem TOKEN
+```
+
+Run `fluxctl cloud up` first: `fluxctl cloud status` on a host with no state prints a bare "No such file or
+directory". Then `fluxmesh-agent run` reconciles WireGuard and the catalog every cycle (Linux).
+
+## Ports
+
+| Port | Used by | Notes |
+|---|---|---|
+| UDP 51820 | WireGuard | default listen port of `fluxmesh-agent` |
+| TCP/UDP 443 | public ingress (H2 over TCP, H3 over QUIC), `serve-tls` relay | privileged port |
+| TCP/UDP 7444 | public relay tunnel (TLS/TCP and QUIC) | example in [phase 7](fluxmesh-phase7.md) |
+| TCP 9468 | `fluxmesh-metrics` | default `127.0.0.1:9468` |
+| UDP 5354 | `fluxmesh dns-serve` example | choose your own; 53 needs privileges |
 
 ## Ownership boundary
 

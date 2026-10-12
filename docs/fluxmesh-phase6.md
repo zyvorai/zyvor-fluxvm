@@ -66,7 +66,7 @@ ambiguous on multi-homed hosts.
 
 ## Telemetry / SLO
 
-`fluxmesh-edge` writes `/var/lib/fluxvm/mesh/edge-telemetry.json` after every
+`fluxmesh-edge` writes `<mesh dir>/edge-telemetry.json` after every
 reconcile. `fluxmesh-metrics` exposes:
 
 - `fluxmesh_edge_reconcile_total`

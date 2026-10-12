@@ -35,7 +35,7 @@ is not a different `mode`; see [production-dataplane.md](production-dataplane.md
 
 `required = true` fail-closes when a host-visible VM edge exists but attach
 fails; `network.mode=none` / user NAT still soft-skip (no edge). Service load
-balancing, BGP, WireGuard, and first-class Cilium endpoint identity belong in
+balancing, BGP, WireGuard (host-to-host overlay lives in [FluxMesh](fluxmesh.md)), and first-class Cilium endpoint identity belong in
 separate projects rather than expanding this blast radius. Virtual networks
 (VNI-isolated eBPF routing with a Geneve overlay, SNAT and floating IPs) are
 their own plane with their own program; see [virtual-network.md](virtual-network.md).
@@ -655,7 +655,9 @@ in independent docs/PRs:
    kairon-node has an announce-only speaker for floating IPs and these ads.
 3. **Virtual networks** — VNI-isolated eBPF routing, a collect-metadata Geneve
    overlay, SNAT and floating IPs ([virtual-network.md](virtual-network.md)).
-4. WireGuard host-to-host VM encryption.
+4. WireGuard host-to-host VM encryption. [FluxMesh](fluxmesh.md) now provides a host-to-host WireGuard overlay
+   above this layer (and compiles its ACLs to Network Fabric policy); wiring VM-edge traffic through it automatically
+   is still open.
 5. First-class Cilium CNI/launcher identities and Hubble attribution.
 6. Migration transfer of connection/NAT state (service maps via conntrack
    export/import, v5 streaming HA deltas, and v6 mutation queue —
