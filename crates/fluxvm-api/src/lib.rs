@@ -42,6 +42,8 @@ pub mod self_control;
 pub use netobs_api::install_netobs;
 mod macos_pool_api;
 mod speculate_api;
+mod tunnel_api;
+mod volumes_api;
 mod vz_api;
 
 #[derive(Clone)]
@@ -696,6 +698,7 @@ pub fn router(manager: Arc<VmManager>) -> Router {
         .route("/v1/vms/{id}/agent/get-file", post(agent_get_file))
         .route("/v1/vms/{id}/console", get(agent_console))
         .route("/v1/vms/{id}/serial", get(serial_console))
+        .route("/v1/vms/{id}/tunnel", get(tunnel_api::vm_tunnel))
         .route("/v1/vms/{id}/ports/{name}", get(console_port))
         .route("/v1/vms/{id}/qga/ping", post(qga_ping))
         .route(
@@ -783,6 +786,7 @@ pub fn router(manager: Arc<VmManager>) -> Router {
         .merge(speculate_api::routes())
         .merge(macos_pool_api::routes())
         .merge(vz_api::routes())
+        .merge(volumes_api::routes())
         .layer(middleware::from_fn_with_state(
             manager.clone(),
             tenant_guard_middleware,
@@ -2587,6 +2591,9 @@ async fn start_vm_from_snapshot(
 #[derive(Debug, serde::Deserialize)]
 struct VmSnapshotRequest {
     tag: String,
+    /// `false`: a disk-only snapshot (vz), which a stopped VM can take too. Default `true`: memory and disk.
+    #[serde(default)]
+    memory: Option<bool>,
 }
 
 async fn snapshot_vm(
@@ -2596,8 +2603,9 @@ async fn snapshot_vm(
     Json(req): Json<VmSnapshotRequest>,
 ) -> ApiResult<Json<serde_json::Value>> {
     require_admin(role)?;
-    m.create_vm_snapshot(id, &req.tag).await?;
-    Ok(Json(json!({"ok": true, "tag": req.tag})))
+    let memory = req.memory.unwrap_or(true);
+    m.create_vm_snapshot_with(id, &req.tag, memory).await?;
+    Ok(Json(json!({"ok": true, "tag": req.tag, "memory": memory})))
 }
 
 /// Restore a VM from a snapshot tag. A running flux-vm VM is restored in place
@@ -2901,6 +2909,9 @@ async fn fork_vm(
 #[derive(Deserialize)]
 struct CloneVmRequest {
     name: String,
+    /// Clone from this snapshot's disk instead of the (stopped) VM's own.
+    #[serde(default)]
+    snapshot: Option<String>,
 }
 
 async fn clone_vm(
@@ -2918,7 +2929,10 @@ async fn clone_vm(
         .map_err(|e| ApiError::forbidden(e.to_string()))?;
     Ok((
         StatusCode::CREATED,
-        Json(m.clone_vm(id, req.name, actor_name).await?),
+        Json(
+            m.clone_vm_from(id, req.name, actor_name, req.snapshot.as_deref())
+                .await?,
+        ),
     ))
 }
 

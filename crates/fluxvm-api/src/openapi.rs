@@ -243,6 +243,12 @@ fn ops() -> Vec<Op> {
         ),
         op(
             "get",
+            "/v1/vms/{id}/tunnel",
+            "TCP tunnel websocket to a guest port (?port=N; binary messages; fleet tunnels)",
+            VMS,
+        ),
+        op(
+            "get",
             "/v1/vms/{id}/console",
             "Guest-agent PTY websocket",
             VMS,
@@ -296,6 +302,12 @@ fn ops() -> Vec<Op> {
             "get",
             "/v1/host/history",
             "Last hour of host memory and per-VM runner usage at 5 s spacing (in memory; empty after a daemon restart)",
+            HOST,
+        ),
+        op(
+            "get",
+            "/v1/stats",
+            "One sample of the host (CPU ticks, memory, disk free, VM counts) and every VM (CPU seconds, memory, disk and network byte counters) for the fleet metrics collector",
             HOST,
         ),
         op(
@@ -443,6 +455,33 @@ fn ops() -> Vec<Op> {
             DISKS,
         )
         .status("204"),
+        // ---- volumes ----
+        op("get", "/v1/volumes", "Persistent volumes on this host (admin)", DISKS).returns("VolumeList"),
+        op(
+            "post",
+            "/v1/volumes",
+            "Create a persistent volume: a sparse raw file that outlives VMs (admin)",
+            DISKS,
+        )
+        .body("CreateVolumeRequest")
+        .returns("VolumeInfo")
+        .status("201"),
+        op("get", "/v1/volumes/{name}", "One volume and the VMs using it (admin)", DISKS).returns("VolumeInfo"),
+        op(
+            "delete",
+            "/v1/volumes/{name}",
+            "Delete a volume; 409 while a VM references it (admin)",
+            DISKS,
+        )
+        .status("204"),
+        op(
+            "post",
+            "/v1/volumes/{name}/resize",
+            "Grow a detached volume (admin)",
+            DISKS,
+        )
+        .body("ResizeDiskRequest")
+        .returns("VolumeInfo"),
         op(
             "post",
             "/v1/vms/{id}/cdroms/{name}/eject",
@@ -603,7 +642,10 @@ fn schemas() -> Value {
             "name": {"type": "string"},
             "labels": {"type": "object", "additionalProperties": {"type": ["string", "null"]}}
         }},
-        "CloneVmRequest": {"type": "object", "required": ["name"], "properties": {"name": {"type": "string"}}},
+        "CloneVmRequest": {"type": "object", "required": ["name"], "properties": {
+            "name": {"type": "string"},
+            "snapshot": {"type": "string", "description": "Clone from this snapshot's disk (vz); the source VM may then be running"}
+        }},
         "ForkVmRequest": {"type": "object", "properties": {"count": {"type": "integer", "minimum": 1, "maximum": 32, "default": 1}, "namePrefix": {"type": "string"}, "identity": {"type": "string", "enum": ["preserve", "best-effort", "unique"], "default": "unique", "description": "unique fails the fork (children rolled back) unless the guest confirms hostname, machine-id, entropy, SSH host keys, cloud-init, DHCP and network state; best-effort logs a failed reset and keeps the child; preserve resets nothing"}, "network": {"type": "string", "enum": ["auto", "isolated", "none", "preserve"], "default": "auto"}, "parallelism": {"type": "integer", "minimum": 1, "maximum": 32, "description": "children restored at once (vz); default min(count, 8)"}, "ready": {"description": "running (default), agent, exec, {\"tcp\": port} or {\"http\": {\"port\": n, \"path\": \"/\"}}, probed inside each child"}, "hooks": {"type": "array", "items": {"type": "array", "items": {"type": "string"}}, "description": "argv commands run in each child after its identity reset (needs the guest agent)"}, "ready_timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 600, "default": 60}}},
         "BackupVmRequest": {"type": "object", "properties": {
             "name": {"type": "string", "description": "Backup name under state_dir/backups; default <vm>-<utc>"},
@@ -648,11 +690,16 @@ fn schemas() -> Value {
             "name": {"type": "string"},
             "labels": {"type": "object", "additionalProperties": {"type": "string"}}
         }},
-        "SnapshotRequest": {"type": "object", "required": ["tag"], "properties": {"tag": {"type": "string"}}},
+        "SnapshotRequest": {"type": "object", "required": ["tag"], "properties": {
+            "tag": {"type": "string"},
+            "memory": {"type": "boolean", "default": true,
+                "description": "false: a disk-only snapshot (vz), which a stopped VM can take too and which restores by booting cold"}
+        }},
         "VmSnapshotInfo": {"type": "object", "properties": {
             "tag": {"type": "string"},
             "created_at": {"type": ["string", "null"], "format": "date-time"},
-            "size_bytes": {"type": "integer"}
+            "size_bytes": {"type": "integer"},
+            "has_memory": {"type": "boolean", "description": "Saved memory and device state (resume) or disk only (cold boot); absent when unknown"}
         }},
         "SnapshotList": list("VmSnapshotInfo"),
         "VmDiskInfo": {"type": "object", "properties": {
@@ -688,7 +735,30 @@ fn schemas() -> Value {
     if let (Some(all), Value::Object(cbt)) = (all.as_object_mut(), cbt_schemas()) {
         all.extend(cbt);
     }
+    if let (Some(all), Value::Object(vols)) = (all.as_object_mut(), volume_schemas()) {
+        all.extend(vols);
+    }
     all
+}
+
+/// Persistent volumes (`/v1/volumes`), kept apart for the same reason as [`cbt_schemas`].
+fn volume_schemas() -> Value {
+    json!({
+        "VolumeInfo": {"type": "object", "properties": {
+            "name": {"type": "string"},
+            "path": {"type": "string", "description": "The raw file; attach it as an apple.extra_disks image"},
+            "format": {"type": "string", "enum": ["raw"]},
+            "size_gib": {"type": "integer"},
+            "size_bytes": {"type": "integer"},
+            "allocated_bytes": {"type": "integer"},
+            "attached_to": {"type": "array", "items": {"type": "string"}}
+        }},
+        "VolumeList": {"type": "object", "properties": {"dir": {"type": "string"}, "items": {"type": "array", "items": {"$ref": "#/components/schemas/VolumeInfo"}}}},
+        "CreateVolumeRequest": {"type": "object", "required": ["name", "size_gib"], "properties": {
+            "name": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,62}$"},
+            "size_gib": {"type": "integer", "minimum": 1, "maximum": 16384}
+        }}
+    })
 }
 
 /// Kept apart from [`schemas`]: one `json!` that size exceeds the macro

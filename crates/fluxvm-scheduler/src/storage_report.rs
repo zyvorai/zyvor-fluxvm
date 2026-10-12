@@ -96,7 +96,7 @@ pub struct StorageReport {
     pub note: &'static str,
 }
 
-fn volume(path: &Path) -> Volume {
+pub(crate) fn volume(path: &Path) -> Volume {
     let mut total = None;
     let mut free = None;
     if let Ok(c) = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()) {

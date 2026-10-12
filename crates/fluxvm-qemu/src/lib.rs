@@ -911,6 +911,7 @@ fn parse_qemu_img_snapshots(json: &[u8]) -> Result<Vec<fluxvm_core::model::VmSna
                 tag,
                 created_at,
                 size_bytes,
+                has_memory: Some(size_bytes > 0),
             })
         })
         .collect())

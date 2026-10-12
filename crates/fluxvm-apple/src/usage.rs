@@ -20,6 +20,11 @@ pub struct RunnerUsage {
     pub cpu_user_seconds: f64,
     /// CPU time spent in the kernel on behalf of the runner (includes Hypervisor.framework exits), seconds.
     pub cpu_system_seconds: f64,
+    /// Bytes read from and written to storage by the process since it started (`ri_diskio_bytesread` /
+    /// `ri_diskio_byteswritten`). For the Virtualization XPC service this is the guest's disk I/O as the host kernel
+    /// accounts it.
+    pub disk_read_bytes: u64,
+    pub disk_write_bytes: u64,
 }
 
 impl RunnerUsage {
@@ -96,6 +101,8 @@ pub fn runner_usage(pid: u32) -> Result<RunnerUsage> {
             rss_bytes: info.ri_resident_size,
             cpu_user_seconds: mach_ticks_to_seconds(info.ri_user_time, tb.numer, tb.denom),
             cpu_system_seconds: mach_ticks_to_seconds(info.ri_system_time, tb.numer, tb.denom),
+            disk_read_bytes: info.ri_diskio_bytesread,
+            disk_write_bytes: info.ri_diskio_byteswritten,
         })
     }
     #[cfg(not(target_os = "macos"))]
@@ -179,6 +186,8 @@ pub fn vm_usage(targets: &[(u32, PathBuf)]) -> Vec<Option<VmUsage>> {
                     usage.rss_bytes += u.rss_bytes;
                     usage.cpu_user_seconds += u.cpu_user_seconds;
                     usage.cpu_system_seconds += u.cpu_system_seconds;
+                    usage.disk_read_bytes += u.disk_read_bytes;
+                    usage.disk_write_bytes += u.disk_write_bytes;
                     used.push(sp);
                 }
             }
@@ -312,6 +321,8 @@ mod tests {
             rss_bytes: 1,
             cpu_user_seconds: 1.5,
             cpu_system_seconds: 0.25,
+            disk_read_bytes: 0,
+            disk_write_bytes: 0,
         };
         assert_eq!(u.cpu_seconds(), 1.75);
     }

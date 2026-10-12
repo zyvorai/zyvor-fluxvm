@@ -7,6 +7,7 @@
 //! * `GET  /v1/host/apple`
 //! * `GET  /v1/host/apple/capabilities`
 //! * `GET  /v1/host/overview`
+//! * `GET  /v1/stats`
 //! * `GET|POST /v1/host/apple/ipsw`
 //! * `GET  /v1/vms/{id}/vz/secure-boot`
 //! * `GET  /v1/vms/{id}/vz/custom-virtio`
@@ -40,6 +41,7 @@ pub(crate) fn routes() -> Router<Arc<VmManager>> {
         .route("/v1/host/apple/capabilities", get(host_capabilities))
         .route("/v1/host/overview", get(host_overview))
         .route("/v1/host/history", get(host_history))
+        .route("/v1/stats", get(node_stats))
         .route("/v1/host/storage", get(host_storage))
         .route(
             "/v1/vms/{id}/usernet/policy",
@@ -121,6 +123,20 @@ async fn host_history(Query(q): Query<HistoryQuery>) -> Json<Value> {
         "capacity": fluxvm_scheduler::history::CAPACITY,
         "items": items,
     }))
+}
+
+/// One sample of this host and every VM on it (CPU, memory, disk and network counters) for the fleet's metrics
+/// collector; see `fluxvm_scheduler::node_stats` for what each backend can report.
+async fn node_stats(State(m): State<Arc<VmManager>>) -> ApiResult<Json<Value>> {
+    let vms = m.list().await;
+    let dir = m.cfg.state_dir.clone();
+    let s = tokio::task::spawn_blocking(move || fluxvm_scheduler::node_stats::sample(&vms, &dir))
+        .await
+        .map_err(|e| ApiError {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            message: format!("stats sampler failed: {e}"),
+        })?;
+    Ok(Json(json!(s)))
 }
 
 /// The egress policy of a usernet guest as stored.
