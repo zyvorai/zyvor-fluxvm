@@ -2,6 +2,50 @@
 
 ## Unreleased
 
+### Added: highly available central (`fluxvm-agent central --ha-redis`)
+- Several centrals can share one Redis (`--ha-redis`, `--advertise-url`, `--ha-ttl-secs`, `--ha-cluster`). A Lua-scripted
+  leader lock with a TTL is renewed every third of it; a standby takes over once a dead leader's lock lapses. Leadership is
+  a lease that ends before the lock does, so a hung Redis or a starved task cannot leave an ex-leader serving. Tenancy and
+  the node registry are mirrored, every write is fenced by the lock in the same Lua step, and a new leader loads the
+  mirrored state before it serves. Standbys answer 503 naming the leader; `GET /fleet/ha` and `/fleet/ha/leader` need no
+  token. `fluxvm-agent node --central a,b` fails over between centrals. See `docs/fleet-ha.md`.
+- Tested with an in-memory store and, with `FLUXVM_TEST_REDIS` set, against real Redis (lock, fencing, hand-over). Redis
+  Cluster and a multi-central failover under load are not verified.
+
+### Added: Developer ID signing, notarization and Tart image import
+- `scripts/package-macos.sh` signs with a Developer ID identity and notarizes when the signing secrets are present, and
+  ships the runner as `FluxVMRunner.app` when a provisioning profile for `com.apple.vm.networking` is supplied
+  (`docs/macos-signing.md`). Without the secrets the package is ad hoc signed as before. Not yet exercised with real
+  certificates.
+- `fluxctl vm-image pull` accepts Tart images and converts them into FluxVM bundles.
+
+### Added: Mac cloud (tenants, 24 h host leases, OCI VM images, GitHub Actions runners, drain, metering)
+- `fluxvm-agent central` can run as a shared Mac cloud: tenants with hashed tokens, quotas and route allow-lists; whole-Mac
+  leases of at least 24 h (the macOS licence's rule); a VM ledger; drain (`cordon`, `evict-ephemeral`, `reschedule`);
+  scrub before reuse; `GET /fleet/usage` metering (JSON or CSV). `fluxctl fleet tenant|lease|drain|usage|...`.
+  See `docs/mac-cloud-tenancy.md`.
+- VM images as OCI artifacts (`fluxctl vm-image push|pull`): zstd chunks, zero chunks skipped, sparse atomic pulls with
+  every digest checked, per-VM identity never pushed (`docs/vm-images.md`).
+- `fluxvm-agent gha-runners`: one fresh VM per queued job through JIT runner configs, deleted after the job; GitHub lists
+  are paginated and an optional `workflow_job` webhook starts and retires runners at once
+  (`docs/github-actions-runners.md`).
+- A create's quota is reserved from the check until the node answers, so parallel creates by one tenant cannot overshoot;
+  with tenants present an unknown token is refused even without `--token`. `policy.isolate_tenant_networks` (off by
+  default) puts each tenant's `vz` VMs on their own vmnet network.
+- Two Macs, GHCR pulls, per-tenant vmnet and webhook mode were not verified on hardware.
+
+### Added: changed-block-tracking backups to S3 (`POST /v1/vms/{id}/cbt-backup`, `cbt-restore`, `/v1/cbt/synthesize`)
+- Incremental QEMU backups with persistent dirty-bitmap checkpoints into zstd qcow2 layers uploaded to an S3 object store
+  (optionally AES-256-GCM encrypted, Object Lock honoured). The parent checkpoint is dropped only after the upload, so a
+  failed run loses no writes. Restore stacks the chain; synthesize consolidates a chain into a synthetic full so retention
+  can delete old layers. Jobs persist and report failed after a restart. Verified against QEMU 10.2.
+
+### Added: balloon, host memory pressure, NUMA and PCI topology (QEMU)
+- `CreateVmRequest.balloon` adds a virtio-balloon with free-page reporting; `POST /v1/vms/{id}/balloon` and
+  `GET /v1/vms/{id}/memory` cover QEMU VMs; `GET /v1/host/memory` reports MemAvailable and memory PSI.
+- `GET /v1/host/topology`: NUMA nodes (CPUs, memory, hugepages, distances) and placeable PCI functions with IOMMU groups.
+  `CreateVmRequest.numa` binds guest nodes to host nodes and pins vCPU threads; `POST /v1/host/pci/bind|release`.
+
 ### Added: `GET /v1/host/storage`
 - Where disk space goes: the state volume's free space and, per VM, per branch and for the image cache, allocated and
   logical bytes (sparse files count what they occupy). Allocated bytes are upper bounds, since copy-on-write clones share
