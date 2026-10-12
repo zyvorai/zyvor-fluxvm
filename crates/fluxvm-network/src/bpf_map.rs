@@ -47,6 +47,7 @@ mod linux {
     use std::os::unix::ffi::OsStrExt;
 
     const BPF_MAP_UPDATE_ELEM: u32 = 2;
+    const BPF_MAP_DELETE_ELEM: u32 = 3;
     const BPF_OBJ_GET: u32 = 7;
     const BPF_OBJ_GET_INFO_BY_FD: u32 = 15;
 
@@ -153,6 +154,25 @@ mod linux {
             bpf(BPF_MAP_UPDATE_ELEM, &mut attr)?;
             Ok(())
         }
+
+        /// Removes `key`; a key that is already absent is not an error.
+        pub fn delete(&self, key: &[u8]) -> io::Result<()> {
+            if key.len() != self.layout.key_size as usize {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "BPF map key size mismatch",
+                ));
+            }
+            let mut attr = ElementAttr {
+                map_fd: self.fd.as_raw_fd() as u32,
+                key: key.as_ptr() as u64,
+                ..Default::default()
+            };
+            match bpf(BPF_MAP_DELETE_ELEM, &mut attr) {
+                Err(e) if e.raw_os_error() == Some(libc::ENOENT) => Ok(()),
+                r => r.map(|_| ()),
+            }
+        }
     }
 
     #[cfg(test)]
@@ -240,6 +260,12 @@ impl PinnedHashMap {
         ))
     }
     pub fn update(&self, _: &[u8], _: &[u8]) -> io::Result<()> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "BPF maps require Linux",
+        ))
+    }
+    pub fn delete(&self, _: &[u8]) -> io::Result<()> {
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
             "BPF maps require Linux",

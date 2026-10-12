@@ -1776,7 +1776,7 @@ pub fn identity_for(id: Uuid) -> u32 {
     raw.max(1)
 }
 
-fn read_ifindex(iface: &str) -> Result<u32> {
+pub(crate) fn read_ifindex(iface: &str) -> Result<u32> {
     if crate::netns_scope::current().is_some() {
         // /sys/class/net shows the namespace sysfs was mounted in, not this thread's, so
         // ask `ip` from inside the scoped namespace instead.
@@ -2673,7 +2673,7 @@ pub(crate) fn require_bpftool() -> Result<()> {
     require_version("bpftool", &["version"])
 }
 
-fn require_tc() -> Result<()> {
+pub(crate) fn require_tc() -> Result<()> {
     require_version("tc", &["-V"])
 }
 
@@ -2709,7 +2709,7 @@ pub(crate) fn raise_memlock() -> Result<()> {
     Ok(())
 }
 
-fn ensure_clsact(iface: &str) -> Result<()> {
+pub(crate) fn ensure_clsact(iface: &str) -> Result<()> {
     let out = crate::netns_scope::command("tc")
         .args(["qdisc", "show", "dev", iface])
         .output()

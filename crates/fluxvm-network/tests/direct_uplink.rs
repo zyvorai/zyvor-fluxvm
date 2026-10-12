@@ -108,6 +108,7 @@ fn spec(tap: &str, mac: &str, nic: &str, ip: &str) -> NetworkSpec {
             mode: DirectMode::L2Uplink,
             guest_ips: vec![ip.into()],
         }),
+        vnet: None,
     }
 }
 

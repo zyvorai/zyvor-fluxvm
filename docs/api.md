@@ -159,6 +159,10 @@ GET    /v1/network/observe
 GET    /v1/network/health
 GET    /v1/network/ipcache
 GET    /v1/network/ipam
+GET    /v1/network/vnets                 # virtual networks applied on this host; see virtual-network.md
+GET    /v1/network/vnets/{vni}
+PUT    /v1/network/vnets/{vni}           # admin; replaces the config for the VNI
+DELETE /v1/network/vnets/{vni}           # admin; refused while a VM here is attached
 POST   /v1/network/refresh-dns
 GET    /console                          # web dashboard (static, no auth; it asks for a token)
 ```
@@ -490,6 +494,19 @@ cannot be combined with `direct`. It requires `sandbox.dataplane.mode = "ebpf"` 
 Cloud Hypervisor (by name, or as a descriptor when it lives in another namespace); **Firecracker and the
 native hypervisor accept only the host-namespace form** because they cannot take a descriptor.
 `Policy.allowed_network_modes` sees it as `tap`.
+
+### Virtual networks (Linux)
+
+A `tap` NIC with `vnet` joins an eBPF-routed virtual network instead of a bridge:
+
+```json
+{"mode":"tap","mac":"52:54:00:12:34:56","vnet":{"vni":100,"ip":"10.50.0.11","prefix_len":24,"gateway":"10.50.0.1"}}
+```
+
+`mac` is required; `bridge`, `netns`, `direct` and `extra` are refused, and NIC hotplug is refused
+on such VMs. The network itself (CIDR, gateway, endpoints on every host, uplink, SNAT address,
+floating IPs) is applied with `PUT /v1/network/vnets/{vni}`. Capability `host.vnet`. See
+[virtual-network.md](virtual-network.md).
 
 ### NIC hotplug (QEMU)
 

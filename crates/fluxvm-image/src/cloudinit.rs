@@ -86,8 +86,12 @@ fn write_seed_files(
         // predictable name (enp0s1, ens3, eth0, ...) a given kernel/udev
         // combination assigns isn't known ahead of boot, and this is the
         // netplan-supported way to say "whichever the single real NIC is".
+        let mtu = ci
+            .mtu
+            .map(|m| format!("      mtu: {m}\n"))
+            .unwrap_or_default();
         let netcfg = format!(
-            "network:\n  version: 2\n  ethernets:\n    guestnet0:\n      match:\n        name: en*\n      dhcp4: false\n      addresses:\n        - {cidr}\n      routes:\n        - to: default\n          via: {gateway}\n{nics}"
+            "network:\n  version: 2\n  ethernets:\n    guestnet0:\n      match:\n        name: en*\n      dhcp4: false\n      addresses:\n        - {cidr}\n      routes:\n        - to: default\n          via: {gateway}\n{mtu}{nics}"
         );
         fs::write(&network_config, netcfg).context("writing cloud-init network-config")?;
         Some(network_config)

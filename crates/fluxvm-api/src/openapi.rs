@@ -57,6 +57,7 @@ const EVENTS: &str = "events";
 const TEMPLATES: &str = "vm-templates";
 const HOST: &str = "host";
 const NETOBS: &str = "netobs";
+const NETWORK: &str = "network";
 
 fn ops() -> Vec<Op> {
     vec![
@@ -430,6 +431,30 @@ fn ops() -> Vec<Op> {
         .query(&[("vm", "VM id"), ("since", "Resume after this event id")]),
         op("get", "/v1/netobs/dns", "Recent DNS queries and responses", NETOBS)
             .query(&[("vm", "VM id"), ("limit", "Newest N (default 200)")]),
+        op(
+            "get",
+            "/v1/network/vnets",
+            "Virtual networks applied on this host (VNI, CIDR, local and remote endpoints)",
+            NETWORK,
+        ),
+        op(
+            "get",
+            "/v1/network/vnets/{vni}",
+            "One virtual network as this host routes it",
+            NETWORK,
+        ),
+        op(
+            "put",
+            "/v1/network/vnets/{vni}",
+            "Apply a virtual network: CIDR, gateway, remote endpoints, uplink, SNAT and floating IPs (admin)",
+            NETWORK,
+        ),
+        op(
+            "delete",
+            "/v1/network/vnets/{vni}",
+            "Remove a virtual network with no VMs attached on this host (admin)",
+            NETWORK,
+        ),
         op("get", "/v1/netobs/history", "Retained roll-up windows", NETOBS),
         op("get", "/v1/netobs/capture", "Capture sessions", NETOBS),
         op(
@@ -679,7 +704,7 @@ pub fn spec() -> Value {
         "security": [{"bearer": []}],
         "tags": [
             {"name": VMS}, {"name": SNAPSHOTS}, {"name": DISKS}, {"name": TEMPLATES},
-            {"name": EVENTS}, {"name": HOST}, {"name": NETOBS}
+            {"name": EVENTS}, {"name": HOST}, {"name": NETOBS}, {"name": NETWORK}
         ],
         "paths": paths,
         "components": {

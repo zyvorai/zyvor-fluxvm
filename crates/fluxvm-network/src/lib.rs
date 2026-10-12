@@ -33,6 +33,7 @@ mod store;
 pub mod tcx;
 pub mod tls_intercept;
 pub mod transparent_redirect;
+pub mod vnet;
 pub mod xdp;
 
 use anyhow::{Context, Result, bail};
@@ -85,6 +86,7 @@ pub async fn prepare(cfg: &Config, id: Uuid, spec: &NetworkSpec) -> Result<Prepa
                     netns: true,
                     extra: prepared_extra,
                     direct: None,
+                    vnet: None,
                 },
                 tap_name: Some(handle.tap_name),
                 tap_fd: None,
@@ -239,6 +241,7 @@ pub async fn prepare(cfg: &Config, id: Uuid, spec: &NetworkSpec) -> Result<Prepa
                     netns: false,
                     extra: prepared_extra,
                     direct: Some(direct.clone()),
+                    vnet: None,
                 },
                 tap_name: Some(tap),
                 tap_fd: made.fd,
@@ -249,6 +252,58 @@ pub async fn prepare(cfg: &Config, id: Uuid, spec: &NetworkSpec) -> Result<Prepa
                 guest_ip: None,
                 guest_cidr: None,
                 gateway: None,
+                extra_tap_fds: Vec::new(),
+            })
+        }
+        NetworkSpec::Tap {
+            tap_name,
+            mac,
+            vnet: Some(attach),
+            ..
+        } => {
+            let tap = tap_name
+                .clone()
+                .unwrap_or_else(|| format!("eph{}", &id.simple().to_string()[..8]));
+            if tap.len() > 15 {
+                bail!("tap interface name must be <= 15 characters");
+            }
+            // The vnet program is the only path in or out of this tap.
+            if cfg.sandbox.dataplane.mode == fluxvm_core::config::DataplaneMode::Legacy {
+                bail!(
+                    "network.vnet requires sandbox.dataplane.mode = ebpf or cilium \
+                     (the virtual network is routed only by eBPF)"
+                );
+            }
+            let mac = mac.clone().context("network.vnet requires a MAC")?;
+            create_tap(&tap).await?;
+            let rec = vnet::PortRecord {
+                attach: attach.clone(),
+                mac: mac.clone(),
+                tap: tap.clone(),
+                ifindex: 0,
+                pin_root: None,
+            };
+            if let Err(e) = vnet::record_port(&cfg.state_dir, id, &rec) {
+                let _ = cleanup_tap(&tap).await;
+                return Err(e);
+            }
+            Ok(PreparedNetwork {
+                spec: NetworkSpec::Tap {
+                    tap_name: Some(tap.clone()),
+                    bridge: None,
+                    mac: Some(mac),
+                    netns: false,
+                    extra: Vec::new(),
+                    direct: None,
+                    vnet: Some(attach.clone()),
+                },
+                tap_name: Some(tap),
+                tap_fd: None,
+                netns: None,
+                dhcp_leasefile: None,
+                guest_ip: Some(attach.ip.clone()),
+                guest_cidr: Some(format!("{}/{}", attach.ip, attach.prefix_len)),
+                gateway: Some(attach.gateway.clone()),
                 extra_tap_fds: Vec::new(),
             })
         }
@@ -321,6 +376,7 @@ pub async fn prepare(cfg: &Config, id: Uuid, spec: &NetworkSpec) -> Result<Prepa
                     netns: false,
                     extra: prepared_extra,
                     direct: None,
+                    vnet: None,
                 },
                 tap_name: Some(tap),
                 tap_fd: None,
@@ -539,6 +595,7 @@ pub async fn cleanup(
     // Config-aware scheduler paths already remove native pins. This fallback
     // catches default-path state after partial failures/crashes.
     let _ = dataplane::remove_sandbox_policy_best_effort(id);
+    vnet::detach_vm(state_dir, id);
     if let Some(iface) = dataplane_interface_name(id, netns_name.is_some(), Some(tap_name)) {
         service::remove_for_vm_best_effort(id, &iface);
     }

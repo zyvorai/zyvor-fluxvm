@@ -101,6 +101,7 @@ pub(crate) async fn plug_direct_nic(
         netns: false,
         extra: vec![],
         direct: Some(direct),
+        vnet: None,
     };
     // prepare() validates the spec, refuses legacy dataplane mode, creates the tap and records the
     // wiring the loader needs.
@@ -176,6 +177,7 @@ fn vm_nic_hotplug_index(vm: &VmRecord) -> u8 {
                 netns: false,
                 extra: extra.clone(),
                 direct: None,
+                vnet: None,
             };
             nic_hotplug_index(&spec)
         }
@@ -205,6 +207,7 @@ fn record_hotplugged_nic(vm: &mut VmRecord, tap: String, bridge: String, mac: Op
             netns,
             extra,
             direct: None,
+            vnet: None,
         },
         NetworkSpec::Tap {
             tap_name,
@@ -213,6 +216,7 @@ fn record_hotplugged_nic(vm: &mut VmRecord, tap: String, bridge: String, mac: Op
             netns,
             mut extra,
             direct,
+            vnet,
         } => {
             let nic = ExtraNic {
                 bridge,
@@ -231,6 +235,7 @@ fn record_hotplugged_nic(vm: &mut VmRecord, tap: String, bridge: String, mac: Op
                 netns,
                 extra,
                 direct,
+                vnet,
             }
         }
         _ => NetworkSpec::Tap {
@@ -240,6 +245,7 @@ fn record_hotplugged_nic(vm: &mut VmRecord, tap: String, bridge: String, mac: Op
             netns: false,
             extra: vec![],
             direct: None,
+            vnet: None,
         },
     };
     // stop/delete tear the network down only for a VM whose record names its primary tap
@@ -1355,10 +1361,19 @@ impl VmManager {
                 ci
             });
         }
-        if req.shared_folders.is_empty() {
+        let vnet = req.network.vnet().is_some();
+        if req.shared_folders.is_empty() && !vnet {
             return req.cloud_init.clone();
         }
         let mut ci = req.cloud_init.clone().unwrap_or_default();
+        if vnet {
+            // The address is fixed by the virtual network, and Geneve needs the smaller MTU.
+            ci.static_network = true;
+            ci.mtu = Some(fluxvm_network::vnet::GUEST_MTU as u16);
+        }
+        if req.shared_folders.is_empty() {
+            return Some(ci);
+        }
         if req.backend == BackendKind::Firecracker {
             // Firecracker has no virtio-fs: shares are packed to ext4 and
             // attached as secondary virtio-block drives. Drive order is
@@ -1519,6 +1534,9 @@ impl VmManager {
                 "NIC hotplug requires network.mode=none (warm-pool template) or tap; \
                  user/macvtap already occupies the primary NIC"
             );
+        }
+        if vm.request.network.vnet().is_some() {
+            bail!("NIC hotplug is not supported next to a virtual network NIC");
         }
         let in_netns = matches!(vm.request.network, NetworkSpec::Tap { netns: true, .. });
         let index = vm_nic_hotplug_index(&vm);
@@ -6307,6 +6325,7 @@ mod tests {
             mac: None,
             netns: true,
             direct: None,
+            vnet: None,
             extra: vec![fluxvm_core::model::ExtraNic {
                 bridge: "br0".into(),
                 mac: None,
@@ -6763,6 +6782,7 @@ mod nic_hotplug_tests {
                 extra,
                 netns,
                 direct,
+                ..
             } => {
                 assert_eq!(tap_name.as_deref(), Some("hn0abcdef"));
                 assert_eq!(bridge.as_deref(), Some("fvbhpod"));

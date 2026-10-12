@@ -71,6 +71,18 @@ pub fn attach(iface: &str, program_pin: &Path, link_pin: &Path) -> Result<Status
     run_json(&["attach", iface, program_pin, link_pin])
 }
 
+/// Like [`attach`], but at the head of the TCX chain, so the program runs
+/// before ones that end the chain with TCX_PASS (Cilium's netdev programs do).
+pub fn attach_first(iface: &str, program_pin: &Path, link_pin: &Path) -> Result<Status> {
+    let program_pin = program_pin
+        .to_str()
+        .context("TCX program pin path is not UTF-8")?;
+    let link_pin = link_pin
+        .to_str()
+        .context("TCX link pin path is not UTF-8")?;
+    run_json(&["attach-first", iface, program_pin, link_pin])
+}
+
 pub fn update(program_pin: &Path, link_pin: &Path, old_program_pin: Option<&Path>) -> Result<()> {
     let program_pin = program_pin
         .to_str()

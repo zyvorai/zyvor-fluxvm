@@ -24,10 +24,11 @@ static void usage(const char *argv0)
             "usage:\n"
             "  %s probe  <iface>\n"
             "  %s attach <iface> <program-pin> <link-pin>\n"
+            "  %s attach-first <iface> <program-pin> <link-pin>\n"
             "  %s update <program-pin> <link-pin> [old-program-pin]\n"
             "  %s status <link-pin>\n"
             "  %s detach <link-pin>\n",
-            argv0, argv0, argv0, argv0, argv0);
+            argv0, argv0, argv0, argv0, argv0, argv0);
 }
 
 static int neg_errno_or(int rc)
@@ -117,7 +118,9 @@ static int cmd_probe(const char *iface)
     return 0;
 }
 
-static int cmd_attach(const char *iface, const char *program_pin, const char *link_pin)
+// `first` puts the program at the head of the chain (BPF_F_BEFORE with no
+// anchor), ahead of programs such as Cilium's that end with TCX_PASS.
+static int cmd_attach(const char *iface, const char *program_pin, const char *link_pin, bool first)
 {
     int ifindex = ifindex_of(iface);
     if (ifindex < 0)
@@ -137,6 +140,8 @@ static int cmd_attach(const char *iface, const char *program_pin, const char *li
     struct bpf_link_create_opts opts = {};
     opts.sz = sizeof(opts);
     opts.tcx.expected_revision = before_revision;
+    if (first)
+        opts.flags = BPF_F_BEFORE;
     int link_fd = bpf_link_create(prog_fd, ifindex, BPF_TCX_INGRESS, &opts);
     if (link_fd < 0) {
         rc = neg_errno_or(link_fd);
@@ -270,7 +275,9 @@ int main(int argc, char **argv)
     if (argc == 3 && strcmp(argv[1], "probe") == 0)
         rc = cmd_probe(argv[2]);
     else if (argc == 5 && strcmp(argv[1], "attach") == 0)
-        rc = cmd_attach(argv[2], argv[3], argv[4]);
+        rc = cmd_attach(argv[2], argv[3], argv[4], false);
+    else if (argc == 5 && strcmp(argv[1], "attach-first") == 0)
+        rc = cmd_attach(argv[2], argv[3], argv[4], true);
     else if ((argc == 4 || argc == 5) && strcmp(argv[1], "update") == 0)
         rc = cmd_update(argv[2], argv[3], argc == 5 ? argv[4] : NULL);
     else if (argc == 3 && strcmp(argv[1], "status") == 0)
