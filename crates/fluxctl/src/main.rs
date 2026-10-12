@@ -1654,6 +1654,25 @@ enum BranchCommand {
     Delete {
         id: Uuid,
     },
+    /// Remove old branches by policy. Shows what would go; nothing is deleted without `--yes`. A branch labelled
+    /// `fluxvm.dev/keep=true` is never removed.
+    Prune {
+        /// Keep the newest N branches (in scope); the rest are candidates.
+        #[arg(long)]
+        keep_last: Option<usize>,
+        /// Only branches older than this: seconds, or with a suffix s, m, h, d (`7d`).
+        #[arg(long, value_parser = parse_age_secs)]
+        older_than: Option<u64>,
+        /// Only branches taken from this VM.
+        #[arg(long, value_parser = output::parse_vm_ref)]
+        source: Option<Uuid>,
+        /// Only branches whose name starts with this.
+        #[arg(long)]
+        name_prefix: Option<String>,
+        /// Actually delete (default is a dry run).
+        #[arg(long, default_value_t = false)]
+        yes: bool,
+    },
     /// Start N new VMs from a branch, as `fork-vm` does (same identity, network and readiness flags).
     Start {
         id: Uuid,
@@ -1675,6 +1694,22 @@ enum BranchCommand {
         #[arg(long = "hook")]
         hooks: Vec<String>,
     },
+}
+
+/// `90`, `90s`, `15m`, `12h` or `7d`, as seconds.
+fn parse_age_secs(s: &str) -> Result<u64, String> {
+    let s = s.trim();
+    let (num, mult) = match s.chars().last() {
+        Some('s') => (&s[..s.len() - 1], 1),
+        Some('m') => (&s[..s.len() - 1], 60),
+        Some('h') => (&s[..s.len() - 1], 3600),
+        Some('d') => (&s[..s.len() - 1], 86_400),
+        _ => (s, 1),
+    };
+    num.parse::<u64>()
+        .ok()
+        .and_then(|n| n.checked_mul(mult))
+        .ok_or_else(|| format!("not a duration: {s} (use seconds or a suffix s, m, h, d)"))
 }
 
 #[derive(Subcommand)]
@@ -3398,6 +3433,26 @@ async fn run_remote(
                     .await?;
                 println!("deleted {id}");
             }
+            BranchCommand::Prune {
+                keep_last,
+                older_than,
+                source,
+                name_prefix,
+                yes,
+            } => pretty(
+                &r.call(
+                    Method::POST,
+                    "/v1/branches/prune",
+                    Some(json!({
+                        "keep_last": keep_last,
+                        "older_than_secs": older_than,
+                        "source_vm": source,
+                        "name_prefix": name_prefix,
+                        "dry_run": !yes,
+                    })),
+                )
+                .await?,
+            )?,
             BranchCommand::Start {
                 id,
                 count,
@@ -4389,6 +4444,22 @@ async fn main() -> Result<()> {
             BranchCommand::Delete { id } => {
                 m.delete_branch(id, None).await?;
                 println!("deleted {id}");
+            }
+            BranchCommand::Prune {
+                keep_last,
+                older_than,
+                source,
+                name_prefix,
+                yes,
+            } => {
+                let policy = fluxvm_scheduler::branch::PrunePolicy {
+                    keep_last,
+                    older_than_secs: older_than,
+                    source_vm: source,
+                    name_prefix,
+                };
+                let report = m.prune_branches(&policy, !yes, None).await?;
+                println!("{}", serde_json::to_string_pretty(&report)?);
             }
             BranchCommand::Start {
                 id,

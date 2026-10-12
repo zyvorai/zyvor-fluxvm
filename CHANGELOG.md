@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Added: `POST /v1/branches/prune` (`fluxctl branch prune`)
+- Remove branches by policy: keep the newest N, older than a cutoff, scoped to a VM or a name prefix. A dry run unless
+  `dry_run: false` (`--yes`); an empty policy is refused; a branch labelled `fluxvm.dev/keep: "true"` is never removed.
+  Verified on an M4 (dry run, keep label, real prune, CLI).
+
+### Fixed
+- Raw base images are cloned with the macOS-safe copy on every backend (`cp --reflink` is GNU-only).
+
 ## 0.4.2 (2026-10-12)
 
 ### Added: cross-Mac private networks (encrypted UDP overlay)

@@ -13,7 +13,8 @@
 //! itself be branched (`parent_branch` records the lineage). Same restrictions as fork: a vz Linux guest on
 //! `apple.usernet` or no network, no extra disks.
 //!
-//! Not here yet: committing a branch's disk back, rebasing, flattening, a disk diff.
+//! `prune_branches` removes branches by policy (dry run first). Not here yet: committing a branch's disk back,
+//! rebasing, flattening, a disk diff.
 
 use crate::fork::{ForkChildReport, ForkIdentityMode, ForkReport, ForkSpec, MAX_FORK_COUNT};
 use crate::journal::{OpGuard, OpKind};
@@ -366,6 +367,246 @@ fn write_private(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
     f.write_all(bytes)?;
     f.sync_all()?;
     Ok(())
+}
+
+/// Label that exempts a branch from pruning: `fluxvm.dev/keep: "true"`.
+pub const KEEP_LABEL: &str = "fluxvm.dev/keep";
+
+/// Which branches a prune may remove. At least one of `keep_last` and `older_than` is required, so an empty policy can
+/// never mean "everything". When both are given a branch must satisfy both (beyond the newest `keep_last` *and* older
+/// than `older_than`), the conservative reading.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PrunePolicy {
+    /// Keep the newest N branches in scope; the rest are candidates.
+    #[serde(default)]
+    pub keep_last: Option<usize>,
+    /// Candidates must be older than this many seconds.
+    #[serde(default)]
+    pub older_than_secs: Option<u64>,
+    /// Limit the scope to branches taken from this VM.
+    #[serde(default)]
+    pub source_vm: Option<Uuid>,
+    /// Limit the scope to branch names starting with this prefix.
+    #[serde(default)]
+    pub name_prefix: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct PruneCandidate {
+    pub id: Uuid,
+    pub name: String,
+    pub created_at: DateTime<Utc>,
+    pub state_bytes: u64,
+    pub reason: String,
+}
+
+/// Pure selection: which of `branches` a prune under `policy` would remove at `now`, and how many in scope were
+/// protected by [`KEEP_LABEL`]. Nothing is deleted here.
+pub fn select_prune(
+    branches: &[VmBranch],
+    policy: &PrunePolicy,
+    now: DateTime<Utc>,
+) -> Result<(Vec<PruneCandidate>, usize)> {
+    if policy.keep_last.is_none() && policy.older_than_secs.is_none() {
+        bail!("give keep_last, older_than_secs or both; an empty policy would match every branch");
+    }
+    if policy.keep_last == Some(0) && policy.older_than_secs.is_none() {
+        bail!(
+            "keep_last of 0 without older_than_secs would remove every branch in scope; use older_than_secs too"
+        );
+    }
+    let mut scope: Vec<&VmBranch> = branches
+        .iter()
+        .filter(|b| policy.source_vm.is_none_or(|v| b.source_vm == v))
+        .filter(|b| {
+            policy
+                .name_prefix
+                .as_deref()
+                .is_none_or(|p| b.name.starts_with(p))
+        })
+        .collect();
+    // Newest first, so the first `keep_last` are kept.
+    scope.sort_by(|a, b| b.created_at.cmp(&a.created_at).then(b.id.cmp(&a.id)));
+    let mut out = Vec::new();
+    let mut protected = 0;
+    for (rank, b) in scope.iter().enumerate() {
+        let beyond = policy.keep_last.is_none_or(|n| rank >= n);
+        let age = (now - b.created_at).num_seconds().max(0) as u64;
+        let old = policy.older_than_secs.is_none_or(|s| age > s);
+        if !(beyond && old) {
+            continue;
+        }
+        if b.labels.get(KEEP_LABEL).is_some_and(|v| v == "true") {
+            protected += 1;
+            continue;
+        }
+        let mut why = Vec::new();
+        if let Some(n) = policy.keep_last {
+            why.push(format!("beyond the newest {n}"));
+        }
+        if let Some(s) = policy.older_than_secs {
+            why.push(format!("older than {s} s ({age} s)"));
+        }
+        out.push(PruneCandidate {
+            id: b.id,
+            name: b.name.clone(),
+            created_at: b.created_at,
+            state_bytes: b.state_bytes,
+            reason: why.join(", "),
+        });
+    }
+    Ok((out, protected))
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PruneReport {
+    pub dry_run: bool,
+    pub selected: Vec<PruneCandidate>,
+    pub deleted: Vec<Uuid>,
+    pub failed: Vec<(Uuid, String)>,
+    pub protected: usize,
+    /// Logical bytes of saved state in the selected branches (disk clones share blocks, so space freed can differ).
+    pub selected_state_bytes: u64,
+}
+
+impl VmManager {
+    /// Selects branches under `policy` and, unless `dry_run`, deletes them one by one (a failure on one is recorded
+    /// and does not stop the rest). VMs started from a pruned branch are independent and keep running.
+    pub async fn prune_branches(
+        &self,
+        policy: &PrunePolicy,
+        dry_run: bool,
+        actor: Option<&str>,
+    ) -> Result<PruneReport> {
+        let all = self.list_branches(None).await?;
+        let (selected, protected) = select_prune(&all, policy, Utc::now())?;
+        let mut deleted = Vec::new();
+        let mut failed = Vec::new();
+        if !dry_run {
+            for c in &selected {
+                match self.delete_branch(c.id, actor).await {
+                    Ok(()) => deleted.push(c.id),
+                    Err(e) => failed.push((c.id, format!("{e:#}"))),
+                }
+            }
+        }
+        Ok(PruneReport {
+            dry_run,
+            selected_state_bytes: selected.iter().map(|c| c.state_bytes).sum(),
+            selected,
+            deleted,
+            failed,
+            protected,
+        })
+    }
+}
+
+#[cfg(test)]
+mod prune_tests {
+    use super::*;
+
+    fn b(name: &str, age_secs: i64, source: u128, keep: bool, now: DateTime<Utc>) -> VmBranch {
+        let mut labels = BTreeMap::new();
+        if keep {
+            labels.insert(KEEP_LABEL.to_string(), "true".to_string());
+        }
+        VmBranch {
+            id: Uuid::new_v4(),
+            name: name.into(),
+            source_vm: Uuid::from_u128(source),
+            source_name: "src".into(),
+            parent_branch: None,
+            created_at: now - chrono::Duration::seconds(age_secs),
+            labels,
+            vcpus: 2,
+            memory_mib: 2048,
+            state_bytes: 100,
+        }
+    }
+
+    fn names(v: &[PruneCandidate]) -> Vec<String> {
+        let mut n: Vec<_> = v.iter().map(|c| c.name.clone()).collect();
+        n.sort();
+        n
+    }
+
+    #[test]
+    fn an_empty_policy_is_refused() {
+        let now = Utc::now();
+        assert!(select_prune(&[b("a", 10, 1, false, now)], &PrunePolicy::default(), now).is_err());
+        let zero = PrunePolicy {
+            keep_last: Some(0),
+            ..Default::default()
+        };
+        assert!(select_prune(&[b("a", 10, 1, false, now)], &zero, now).is_err());
+    }
+
+    #[test]
+    fn keep_last_keeps_the_newest() {
+        let now = Utc::now();
+        let all = vec![
+            b("old", 300, 1, false, now),
+            b("mid", 200, 1, false, now),
+            b("new", 100, 1, false, now),
+        ];
+        let p = PrunePolicy {
+            keep_last: Some(2),
+            ..Default::default()
+        };
+        let (sel, prot) = select_prune(&all, &p, now).unwrap();
+        assert_eq!(names(&sel), vec!["old"]);
+        assert_eq!(prot, 0);
+    }
+
+    #[test]
+    fn both_limits_must_hold() {
+        let now = Utc::now();
+        let all = vec![
+            b("a", 5000, 1, false, now),
+            b("b", 4000, 1, false, now),
+            b("c", 10, 1, false, now),
+        ];
+        // Beyond the newest 1 are a and b; only a is older than 4500 s.
+        let p = PrunePolicy {
+            keep_last: Some(1),
+            older_than_secs: Some(4500),
+            ..Default::default()
+        };
+        let (sel, _) = select_prune(&all, &p, now).unwrap();
+        assert_eq!(names(&sel), vec!["a"]);
+    }
+
+    #[test]
+    fn scope_and_the_keep_label() {
+        let now = Utc::now();
+        let all = vec![
+            b("web-1", 900, 1, false, now),
+            b("web-2", 800, 1, true, now),
+            b("db-1", 900, 2, false, now),
+        ];
+        let p = PrunePolicy {
+            older_than_secs: Some(60),
+            source_vm: Some(Uuid::from_u128(1)),
+            ..Default::default()
+        };
+        let (sel, prot) = select_prune(&all, &p, now).unwrap();
+        assert_eq!(
+            names(&sel),
+            vec!["web-1"],
+            "db-1 is out of scope, web-2 is protected"
+        );
+        assert_eq!(prot, 1);
+        let by_prefix = PrunePolicy {
+            older_than_secs: Some(60),
+            name_prefix: Some("db".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            names(&select_prune(&all, &by_prefix, now).unwrap().0),
+            vec!["db-1"]
+        );
+    }
 }
 
 #[cfg(test)]

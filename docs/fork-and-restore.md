@@ -160,7 +160,17 @@ fluxctl branch delete <branch>
 ```
 
 REST: `POST /v1/vms/{id}/branches {"name", "labels"}`, `GET /v1/vms/{id}/branches`, `GET /v1/branches[/{id}]`,
-`DELETE /v1/branches/{id}`, `POST /v1/branches/{id}/start` (the body and the response are the fork spec and report).
+`DELETE /v1/branches/{id}`, `POST /v1/branches/{id}/start` (the body and the response are the fork spec and report),
+`POST /v1/branches/prune` (below).
+
+**Pruning.** `POST /v1/branches/prune {"keep_last": N, "older_than_secs": S, "source_vm": "<id>", "name_prefix": "nightly-",
+"dry_run": true}` (admin; CLI `fluxctl branch prune --keep-last 3 --older-than 7d [--source vm] [--name-prefix p] [--yes]`).
+It removes branches that are beyond the newest `keep_last` in scope **and** older than `older_than_secs` (a branch must
+satisfy every limit you give; at least one of the two is required, and `keep_last: 0` needs `older_than_secs`). `dry_run`
+defaults to true: the response lists `selected` (with the reason for each), `protected` and `selected_state_bytes` and
+deletes nothing until you send `dry_run: false` (`--yes`). A branch labelled `fluxvm.dev/keep: "true"` is never removed.
+Each deletion is audited as `vm.branch.delete`; a failure on one branch is reported in `failed` and the rest continue.
+VMs started from a pruned branch are independent and keep running.
 
 - **Same machinery as fork.** `start` restores each VM from the checkpoint with the same identity reset (strict by
   default), token rotation, parallel restore, hooks and readiness; the same limits apply (a Linux guest on
