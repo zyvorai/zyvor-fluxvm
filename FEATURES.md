@@ -19,7 +19,7 @@ Exhaustive checklist. For the pitch, see [README.md](README.md); for who this is
 - Restart, rename, labels (`PATCH /v1/vms/{id}`), label selectors (`?label=env=prod,!tmp`) and bulk `start/stop/restart/delete -l`
 - VM names or UUID prefixes accepted wherever fluxctl takes a VM id; `fluxctl wait --for running|stopped|agent`; `-o json|table|wide`; shell completions
 - Clone a stopped VM with its data disks and labels (`fluxctl clone-vm`, `POST /v1/vms/{id}/clone`)
-- QEMU data disks: qcow2 hot-add as `scsi-hd`, live `block_resize` of root or data disks, detach (`fluxctl disk`, `/v1/vms/{id}/disks`)
+- QEMU data disks: qcow2 hot-add as `scsi-hd`, live `block_resize` of root or data disks, detach (`fluxctl disk`, `/v1/vms/{id}/disks`); a stopped `vz` VM's root disk can be grown offline
 - QEMU serial console on a chardev socket teeing into `console.log`; websocket `GET /v1/vms/{id}/serial` + `fluxctl serial`
 - Snapshots: save, list, delete, start-from; label-driven scheduled snapshots with retention (`fluxvm.io/snapshot-every`, `fluxvm.io/snapshot-keep`)
 - Backups to standalone qcow2 (root or `--all-disks`), live via one temporary internal snapshot

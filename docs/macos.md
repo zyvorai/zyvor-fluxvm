@@ -233,6 +233,10 @@ curl -X POST localhost:7788/v1/vms -H 'Content-Type: application/json' -d @examp
   A workspace marker (`macos-installed`) stops a restart from installing again; a failed install leaves no marker and is retried.
 - The installed guest stops at Setup Assistant unless you use the macOS 27 `provision_*` options (see "Mac Studio options"). Stop the
   VM afterwards and use its `root.raw` as a template for clones.
+- **Growing the disk later.** Stop the VM, then `fluxctl disk resize <id> root --size-gib N` (absolute, grow-only; refused with
+  `apple.asif_overlay`). This extends the file only. The guest's APFS container still has to be grown from inside
+  (`diskutil apfs resizeContainer`); FluxVM does not do that, and it is not verified on hardware whether the container can take the
+  new space, since the recovery partition may sit after it.
 
 ### First-boot keys
 

@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+### Added: grow a stopped vz VM's root disk
+- `PATCH /v1/vms/{id}/disks/root` (`fluxctl disk resize <id> root --size-gib N`) now works on the `vz` backend for macOS
+  and Linux guests: the VM must be stopped, the size is an absolute grow-only target, and `apple.asif_overlay` VMs are
+  refused. It extends the sparse file only; the guest still has to grow its own partition or APFS container
+  (`diskutil apfs resizeContainer`), which is not automated and not verified on hardware ([docs/macos.md](docs/macos.md)).
+- A third macOS guest is refused at create and at start with 409 (Apple allows two per Mac); this used to fail late
+  with a raw VZ error.
+
 ### Added: simulated Macs and a one-command fleet demo
 - `fluxvm-agent sim-node` registers a simulated Mac with central (capacity, heartbeats, simulated macOS guests, overlay
   config), and `scripts/fleet-sim.sh` runs a central plus three of them: a tenant leases a Mac, starts two macOS VMs

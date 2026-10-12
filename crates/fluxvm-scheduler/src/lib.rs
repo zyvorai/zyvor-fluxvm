@@ -4642,13 +4642,16 @@ impl VmManager {
         Ok(())
     }
 
-    /// Grow `root` or a data disk (live `block_resize`, else `qemu-img resize`).
+    /// Grow `root` or a data disk (live `block_resize`, else `qemu-img resize`); a `vz` VM's root disk, offline.
     pub async fn resize_vm_disk(
         &self,
         id: Uuid,
         name: &str,
         size_gib: u64,
     ) -> Result<fluxvm_core::model::VmDiskInfo> {
+        if self.get(id).await?.backend == BackendKind::Vz {
+            return self.resize_vz_disk(id, name, size_gib).await;
+        }
         let vm = self.qemu_vm_for_disks(id).await?;
         if name == fluxvm_qemu::disks::ROOT_DISK && vm.request.storage != StorageBackend::Default {
             bail!("root disk resize needs the default qcow2 storage backend");
