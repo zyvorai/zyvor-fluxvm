@@ -538,7 +538,8 @@ impl VirtioNetConfig {
     }
 }
 
-#[cfg(test)]
+// The VMM is KVM-only (guest RAM is a Linux mmap), so these need a Linux host.
+#[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
 

@@ -198,6 +198,8 @@ mod tests {
         .unwrap()
     }
 
+    // Asserts hole preservation of the Linux copy path; APFS reports blocks differently.
+    #[cfg(target_os = "linux")]
     #[test]
     fn clone_cow_copies_content_and_keeps_zero_runs_sparse() {
         use std::os::unix::fs::MetadataExt;
