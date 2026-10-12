@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+### Added: an agent-sandbox demo with real timings
+- `examples/agent-sandbox-demo/run.sh`: an offline sandbox, a failing test, a fork into four running copies, four fixes
+  tried in parallel, the passing one kept. About 4 s to fork and 0.3 s to test on an M4 mini; its README lists what it
+  does not do (a NAT sandbox cannot fork; copies keep the parent's identity; the first create on a fresh daemon took 61 s).
+
 ## 0.4.4 (2026-10-12)
 
 This is the first release since 0.4.1 with a package: the 0.4.2 and 0.4.3 tags were never published, because their macOS
