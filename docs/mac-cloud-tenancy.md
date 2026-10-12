@@ -117,6 +117,10 @@ fluxctl fleet keys revoke ci-github
 - A key acts as its tenant, with the same quotas and visibility. A **read-only** key can only `GET`.
 - Only the primary token (or the operator, with `--tenant` / `/fleet/tenants/{id}/keys`) creates and revokes keys, so a
   leaked key cannot mint more. An expired key is refused like an unknown one.
+- Revoking takes a key's id or its name (an id wins; names may not look like ids). The console revokes by id.
+- Rotating the primary token (`POST /fleet/tenants/{id}/rotate-token`) does **not** revoke named keys: CI keeps
+  working. If the primary token leaked, also list the tenant's keys and revoke any nobody recognises (the activity log
+  shows who created each). Disabling a tenant refuses its keys too; deleting it deletes them.
 - Only a key's hash is stored. `last_used_at` is updated at most once a minute and saved with the next change to the
   tenancy state.
 - The console has an **API keys** page for tenants, and the operator manages keys in a tenant's details.

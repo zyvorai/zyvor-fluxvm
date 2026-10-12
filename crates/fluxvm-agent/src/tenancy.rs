@@ -118,6 +118,12 @@ impl ApiKey {
     }
 }
 
+/// Whether `s` has the shape of an [`ApiKey::id`].
+fn looks_like_key_id(s: &str) -> bool {
+    s.strip_prefix("key_")
+        .is_some_and(|h| h.len() == 12 && h.bytes().all(|b| b.is_ascii_hexdigit()))
+}
+
 /// Most named keys one tenant may hold.
 pub const MAX_KEYS: usize = 50;
 
@@ -731,7 +737,6 @@ impl TenancyState {
         Ok(())
     }
 
-    /// The enabled tenant whose token this is.
     /// Resolves a bearer token to its tenant and key: the primary token, or a named key that has not expired. A key's
     /// `last_used_at` is refreshed at most once a minute.
     pub fn authenticate_key(&mut self, presented: &str, now: DateTime<Utc>) -> Option<KeyMatch> {
@@ -784,6 +789,12 @@ impl TenancyState {
                 "a key needs a name of 1 to 64 characters".into(),
             ));
         }
+        // Revoking takes an id or a name, so a name must never be mistaken for another key's id.
+        if looks_like_key_id(name) {
+            return Err(TenancyError::InvalidKey(
+                "a key's name may not look like a key id (key_ and 12 hex characters)".into(),
+            ));
+        }
         if expires_at.is_some_and(|e| e <= now) {
             return Err(TenancyError::InvalidKey(
                 "a key's expiry must be in the future".into(),
@@ -823,14 +834,17 @@ impl TenancyState {
             .tenants
             .get_mut(tenant)
             .ok_or_else(|| TenancyError::UnknownTenant(tenant.into()))?;
+        // An id first: it is unique and never changes.
         let i = t
             .keys
             .iter()
-            .position(|k| k.id == key || k.name == key)
+            .position(|k| k.id == key)
+            .or_else(|| t.keys.iter().position(|k| k.name == key))
             .ok_or_else(|| TenancyError::UnknownKey(key.into()))?;
         Ok(t.keys.remove(i))
     }
 
+    /// The tenant whose primary token this is (named keys aside; see [`TenancyState::authenticate_key`]).
     pub fn authenticate(&self, presented: &str) -> Option<&Tenant> {
         let h = hash_token(presented);
         self.tenants
@@ -2041,6 +2055,10 @@ mod tests {
         );
         assert!(s.create_key("acme", "ci-github", None, false, now).is_err());
         assert!(s.create_key("acme", " ", None, false, now).is_err());
+        assert!(
+            s.create_key("acme", "key_0123456789ab", None, false, now)
+                .is_err()
+        );
         assert!(
             s.create_key(
                 "acme",

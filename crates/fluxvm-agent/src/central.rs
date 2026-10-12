@@ -253,6 +253,11 @@ fn constant_time_eq(a: &str, b: &str) -> bool {
     diff == 0
 }
 
+/// The tenant's named API key behind a request (`None`: its primary token, or the operator). `auth_middleware` puts
+/// it next to the [`Caller`]; the key routes check it themselves too, so no path spelling gets a key past them.
+#[derive(Debug, Clone, Default)]
+struct KeyUsed(Option<String>);
+
 /// Resolves the caller from the bearer token and stores it as an `Extension<Caller>` for the handlers.
 ///
 /// - The fleet token (`--token`) is the operator ([`Caller::Admin`]); node heartbeats use it too.
@@ -383,6 +388,7 @@ async fn auth_middleware(State(fleet): State<Fleet>, mut req: Request, next: Nex
         }
     }
     req.extensions_mut().insert(caller.clone());
+    req.extensions_mut().insert(KeyUsed(key_used.clone()));
     if !audit::audited(req.method(), req.uri().path()) {
         return next.run(req).await;
     }

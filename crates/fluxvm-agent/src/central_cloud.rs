@@ -325,6 +325,17 @@ fn keys_owner(caller: &Caller, id: &str) -> Result<String, AppError> {
     }
 }
 
+/// Keys are made and revoked with the primary token (or by the operator): a leaked key must not mint more.
+fn refuse_named_key(key: &KeyUsed) -> Result<(), AppError> {
+    match &key.0 {
+        Some(_) => Err(AppError(
+            StatusCode::FORBIDDEN,
+            "API keys are created and revoked with the tenant's primary token".into(),
+        )),
+        None => Ok(()),
+    }
+}
+
 /// `GET /fleet/tenants/{id|me}/keys`.
 pub(super) async fn list_keys(
     State(fleet): State<Fleet>,
@@ -355,9 +366,11 @@ pub(super) struct CreateKeyBody {
 pub(super) async fn create_key(
     State(fleet): State<Fleet>,
     Extension(caller): Extension<Caller>,
+    Extension(key_used): Extension<KeyUsed>,
     Path(id): Path<String>,
     Json(b): Json<CreateKeyBody>,
 ) -> Result<(StatusCode, Json<Value>), AppError> {
+    refuse_named_key(&key_used)?;
     let tenant = keys_owner(&caller, &id)?;
     let now = Utc::now();
     let expires_at = match b.expires_in_days {
@@ -392,8 +405,10 @@ pub(super) async fn create_key(
 pub(super) async fn revoke_key(
     State(fleet): State<Fleet>,
     Extension(caller): Extension<Caller>,
+    Extension(key_used): Extension<KeyUsed>,
     Path((id, key)): Path<(String, String)>,
 ) -> Result<Json<Value>, AppError> {
+    refuse_named_key(&key_used)?;
     let tenant = keys_owner(&caller, &id)?;
     let mut t = fleet.tenancy.lock().await;
     let k = t.revoke_key(&tenant, &key).map_err(tenancy_error)?;
@@ -2143,6 +2158,15 @@ mod tests {
             "/fleet/tenants/me/keys",
             &ci,
             json!({"name": "sneaky"}),
+        )
+        .await;
+        assert_eq!(s, 403);
+        let (s, _) = call(
+            &app,
+            "DELETE",
+            "/fleet/tenants/me/keys/grafana",
+            &ci,
+            json!({}),
         )
         .await;
         assert_eq!(s, 403);

@@ -1007,7 +1007,7 @@ function keyTable(list, owner) {
         h('td', { class: 'hide-sm' }, expired ? status({ text: 'Expired', cls: 'bad' }) : k.expires_at ? rel(k.expires_at) : h('span', { class: 'muted' }, 'Never')),
         h('td', { class: 'r' }, h('button', { class: 'plain danger', onclick: () => confirmAct({
           title: 'Revoke ' + k.name + '?', body: 'Anything using this key stops working at once. Other keys are not affected.',
-          confirm: 'Revoke key', danger: true }, 'DELETE', '/fleet/tenants/' + enc(owner) + '/keys/' + enc(k.name), k.name + ' revoked',
+          confirm: 'Revoke key', danger: true }, 'DELETE', '/fleet/tenants/' + enc(owner) + '/keys/' + enc(k.id), k.name + ' revoked',
         undefined, () => { if (owner !== 'me') delete S.tenantKeys[owner]; }) }, 'Revoke')));
     })));
 }
@@ -1281,7 +1281,7 @@ function tenantKeys(id) {
           + (expired ? 'expired' : k.expires_at ? 'expires ' + rel(k.expires_at) : 'never expires'))),
       h('button', { class: 'plain danger', onclick: () => confirmAct({ title: 'Revoke ' + k.name + '?',
         body: 'Anything using this key stops working at once.', confirm: 'Revoke key', danger: true },
-      'DELETE', '/fleet/tenants/' + enc(id) + '/keys/' + enc(k.name), k.name + ' revoked', undefined, () => { delete S.tenantKeys[id]; }) }, 'Revoke'));
+      'DELETE', '/fleet/tenants/' + enc(id) + '/keys/' + enc(k.id), k.name + ' revoked', undefined, () => { delete S.tenantKeys[id]; }) }, 'Revoke'));
   }));
 }
 
