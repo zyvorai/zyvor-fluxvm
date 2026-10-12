@@ -1,6 +1,17 @@
 # Changelog
 
-## Unreleased
+## 0.4.6 (2026-10-12)
+
+The security-review round for the fleet platform: console tunnels end with their person and have a maximum lifetime;
+viewers no longer get live screens or console logs (and the log view is drawn as a macOS Terminal window); the payment
+gate covers start, restart, resume and snapshot restore; `/auth/login` is rate limited; shared warm pools are off for
+tenants unless the operator allows them; and sign-up confirms the email address by a mailed link (a mail webhook is
+needed before sign-up can be opened). Two defaults changed: see "Behaviour change" below.
+
+Tested before release: `fluxvm-agent` (235) and `fluxctl` (187), the only crates that changed since 0.4.5; a package
+built locally and installed through Homebrew from a throwaway tap (`brew test`, the `service install` guard,
+`/healthz` and `/readyz`, the MCP handshake with a sandbox create, exec and fork, both demo scripts); the packaged
+`fluxctl` against a source-built central for the sign-up confirmation flow; and the docs site build.
 
 ### Changed: `central` makes an operator token when none is given
 - Starting `fluxvm-agent central` without `--token` used to leave `/fleet/*` open to anyone. It now generates a random

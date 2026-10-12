@@ -136,7 +136,7 @@ so the receiver can be a few lines in front of SES, Postmark, Mailgun or an SMTP
 `text` to `to` with `subject`. A non-2xx answer, or no answer in 10 seconds, is logged and not retried; the person is
 told the same thing either way and can ask again after 5 minutes.
 
-`--signup-mail-webhook log` writes the mail, with the link, to central's log at warning level: for trying it out, never
+`--signup-mail-webhook log` prints the mail, with the link, on central's standard error: for trying it out, never
 for real users. Plain `http://` is accepted only with a warning (the links cross the network unencrypted).
 
 Turning `signup_require_email_verification` off restores the earlier behaviour (`201` with the token at once, address
