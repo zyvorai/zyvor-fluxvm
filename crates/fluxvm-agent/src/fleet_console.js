@@ -111,6 +111,12 @@ function vmStatus(v) {
   return { text: s[0].toUpperCase() + s.slice(1), cls };
 }
 
+/** A disk path shortened to its last two parts, for VMs that were not made from a catalog image. */
+function diskName(p) {
+  const parts = String(p || '').split('/').filter(Boolean);
+  return parts.length > 1 ? parts.slice(-2).join('/') : (parts[0] || 'Custom disk');
+}
+
 function imageFor(v) {
   const path = v.request && v.request.image;
   return (S.data.images || []).find((i) => i.image === path);
@@ -334,19 +340,21 @@ function pageHead(title, sub, ...actions) {
 }
 
 function empty(title, text, ...actions) {
-  return h('div', { class: 'panel empty' }, h('h3', {}, title), h('p', {}, text),
+  return h('div', { class: 'panel empty' }, h('div', { class: 'mark', 'aria-hidden': 'true' }, '+'),
+    h('h3', {}, title), h('p', {}, text),
     actions.length ? h('div', { class: 'row', style: { justifyContent: 'center' } }, actions) : null);
 }
 
 const status = (s) => h('span', { class: 'status ' + s.cls }, s.text);
 
-function meter(label, used, max, fmt = String) {
+/** `good`: more is better (healthy Macs), so a full bar is never drawn as a warning. */
+function meter(label, used, max, fmt = String, good = false) {
   const has = max !== undefined && max !== null && max > 0;
   const p = has ? Math.min(1, used / max) : 0;
   return h('div', { class: 'panel meter' },
     h('div', { class: 'muted small' }, label),
     h('div', { class: 'value' }, fmt(used), has ? h('small', {}, ' of ' + fmt(max)) : h('small', {}, ' (no limit)')),
-    has ? h('div', { class: 'track' + (p >= 1 ? ' bad' : p >= 0.8 ? ' warn' : '') },
+    has ? h('div', { class: 'track' + (good ? (p >= 1 ? '' : p >= 0.5 ? ' warn' : ' bad') : (p >= 1 ? ' bad' : p >= 0.8 ? ' warn' : '')) },
       h('i', { style: { width: (p * 100).toFixed(1) + '%' } })) : null);
 }
 
@@ -364,14 +372,33 @@ function chassis(m, big) {
 
 function ring(l, big) {
   const { p, releasable } = leaseProgress(l);
+  const left = Math.max(0, new Date(l.min_end).getTime() - Date.now());
+  const hrs = Math.ceil(left / 3600000);
   return h('span', { class: 'ring' + (releasable ? ' done' : '') + (big ? ' big' : ''), style: { '--p': p.toFixed(3) },
-    role: 'img', 'aria-label': releasable ? 'Minimum lease period over' : Math.round(p * 100) + '% of the minimum lease period' });
+    role: 'img', 'aria-label': releasable ? 'Minimum lease period over' : hrs + ' hours of the minimum lease period left' },
+  h('span', { 'aria-hidden': 'true' }, releasable ? '✓' : hrs + 'h'));
 }
 
 function leaseLine(l) {
   if (!l) return '';
   const { releasable } = leaseProgress(l);
   return releasable ? 'Can be released now' : 'Can be released ' + rel(l.min_end);
+}
+
+/** vCPU and memory in use on a Mac, from what it reports; nothing when it has not reported a size. */
+function capacity(n) {
+  if (!n.vcpus_total || n.free_vcpus === undefined || !n.memory_mib_total || n.free_memory_mib === undefined) return null;
+  const row = (label, used, total, text) => {
+    const p = Math.min(1, Math.max(0, used / total));
+    return h('div', { class: 'cap-row' }, h('span', {}, label),
+      h('div', { class: 'track' + (p >= 0.9 ? ' bad' : p >= 0.7 ? ' warn' : ''), role: 'img',
+        'aria-label': label + ' ' + Math.round(p * 100) + '% in use' }, h('i', { style: { width: (p * 100).toFixed(1) + '%' } })),
+      h('span', { class: 'num' }, text));
+  };
+  return h('div', { class: 'cap' },
+    row('vCPU', n.vcpus_total - n.free_vcpus, n.vcpus_total, (n.vcpus_total - n.free_vcpus) + ' / ' + n.vcpus_total),
+    row('Memory', n.memory_mib_total - n.free_memory_mib, n.memory_mib_total,
+      gib(n.memory_mib_total - n.free_memory_mib) + ' / ' + gib(n.memory_mib_total)));
 }
 
 function macTile(m) {
@@ -382,6 +409,7 @@ function macTile(m) {
     h('div', { class: 'mac-top' }, h('b', { class: 'grow' }, m.name), status(st)),
     m.isMac ? chassis(m) : h('div', { class: 'chassis' }, h('span', { class: 'muted small' }, 'Linux host'),
       h('span', { class: 'led' + (n.healthy !== false ? ' on' : '') })),
+    capacity(n),
     h('div', { class: 'mac-meta' },
       m.lease ? ring(m.lease) : null,
       h('div', { class: 'grow' },
@@ -451,7 +479,7 @@ const VIEWS = {
           onclick: () => go('vms', vmKey(v)), onkeydown: (e) => { if (e.key === 'Enter') go('vms', vmKey(v)); } },
         h('td', {}, h('b', {}, v.name), h('span', { class: 'sub' }, guestName(guestOf(req)))),
         h('td', {}, status(vmStatus(v))),
-        h('td', { class: 'hide-sm' }, img ? img.display_name || img.name : h('span', { class: 'muted' }, 'Custom disk')),
+        h('td', { class: 'hide-sm' }, img ? img.display_name || img.name : h('span', { class: 'muted', title: (v.request && v.request.image) || '' }, diskName(v.request && v.request.image))),
         h('td', {}, v.node),
         h('td', { class: 'r num hide-sm' }, (req.vcpus || '–') + ' vCPUs, ' + gib(req.memory_mib)),
         isOp() ? h('td', { class: 'hide-sm' }, req.tenant || h('span', { class: 'muted' }, 'none')) : null,
@@ -644,7 +672,7 @@ function opOverview() {
     : h('div', { class: 'list' }, h('div', {}, h('span', { class: 'status ok', 'aria-hidden': 'true' }),
       h('span', {}, 'Every Mac is reporting. Nothing needs you right now.')))));
   out.push(h('div', { class: 'section meters' },
-    meter('Healthy Macs', c.nodes_healthy ?? 0, c.nodes_total),
+    meter('Healthy Macs', c.nodes_healthy ?? 0, c.nodes_total, String, true),
     meter('vCPUs in use', (c.vcpus_total || 0) - (c.vcpus_free || 0), c.vcpus_total),
     meter('Memory in use', (c.memory_mib_total || 0) - (c.memory_mib_free || 0), c.memory_mib_total, gib),
     meter('Macs leased', d.leases.filter((l) => l.state === 'active').length, list.filter((m) => m.isMac).length)));
@@ -1503,7 +1531,7 @@ function applyTheme() {
   const t = storage.get('localStorage', THEME_KEY) || 'system';
   if (t === 'system') document.documentElement.removeAttribute('data-theme');
   else document.documentElement.setAttribute('data-theme', t);
-  $('theme').textContent = { system: 'Auto', light: 'Light', dark: 'Dark' }[t];
+  $('theme').textContent = 'Theme: ' + { system: 'Auto', light: 'Light', dark: 'Dark' }[t];
   $('theme').title = 'Theme: ' + t + '. Click to change.';
 }
 function cycleTheme() {

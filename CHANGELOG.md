@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### Changed: console visual polish
+- Status shows as a pill, the lease ring shows the hours left in the 24-hour minimum (it read as an empty disc at the
+  start), each Mac card carries vCPU and memory use bars, tiles lift on hover (not with Reduce Motion), empty states are
+  calmer, VMs without a catalog image show their disk name, and the theme button says what it is ("Theme: Auto").
+- Fixed: "Healthy Macs 3 of 3" drew its full bar red, as if over quota.
 
 ### Added: fleet console as a cloud UX, image catalog, tenant view of leased Macs
 - The `/console` web console is rebuilt as a cloud UX: overview with quota bars and your Macs, My Macs, virtual machines,
