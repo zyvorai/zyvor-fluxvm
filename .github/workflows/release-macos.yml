@@ -88,6 +88,11 @@ jobs:
           "$D"/fluxvm-*/bin/fluxctl --version
           for b in fluxvm-vz-runner fluxvm-vz-switch fluxvm-blockd fluxvm-usernet; do test -x "$D"/fluxvm-*/bin/$b || { echo "missing $b"; exit 1; }; done
           codesign -d --entitlements - "$D"/fluxvm-*/bin/fluxvm-vz-runner 2>&1 | grep com.apple.security.virtualization
+          if [ -d "$D"/fluxvm-*/libexec/FluxVMUSBAccess.app ]; then
+            echo "USB helper: included" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "USB helper: **not included** (this runner's SDK has no AccessoryAccess framework); USB passthrough needs a source build" >> "$GITHUB_STEP_SUMMARY"
+          fi
           for app in "$D"/fluxvm-*/libexec/*.app "$D"/fluxvm-*/bin/*.app; do
             [ -d "$app" ] || continue
             codesign --verify --strict --deep "$app"
