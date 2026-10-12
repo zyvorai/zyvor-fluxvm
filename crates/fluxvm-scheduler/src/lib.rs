@@ -2509,6 +2509,9 @@ impl VmManager {
             audit_event("quota.deny", &[("scope", "host"), ("reason", &reason)]);
             return Err(e);
         }
+        if req.backend == BackendKind::Vz {
+            apple_placement::enforce_macos_guest_limit(&req, &self.store.list().await)?;
+        }
         self.admit_under_pressure(req.memory_mib).await?;
         // Every storage backend except CephRbd points `image` at a real
         // filesystem entry (a file for Default/Nbd, a block device for

@@ -36,6 +36,38 @@ pub struct AppleHostCaps {
 /// Apple's limit on concurrently running macOS guests per host.
 pub const MAX_MACOS_GUESTS: u32 = 2;
 
+/// Admission for one daemon: macOS guests that hold a slot (not stopped or failed), and an error once a new one
+/// would be the third. The kernel enforces this too, but only at start, with an opaque VZ error.
+pub fn enforce_macos_guest_limit(
+    req: &CreateVmRequest,
+    existing: &[fluxvm_core::model::VmRecord],
+) -> anyhow::Result<()> {
+    use fluxvm_core::model::VmStatus;
+    let is_macos = |r: &CreateVmRequest| {
+        r.apple
+            .as_ref()
+            .is_some_and(|a| a.guest_os == AppleGuest::Macos)
+    };
+    if !is_macos(req) {
+        return Ok(());
+    }
+    let active = existing
+        .iter()
+        .filter(|vm| {
+            matches!(
+                vm.status,
+                VmStatus::Creating | VmStatus::Running | VmStatus::Paused
+            ) && is_macos(&vm.request)
+        })
+        .count();
+    if active >= MAX_MACOS_GUESTS as usize {
+        anyhow::bail!(
+            "this Mac already runs {MAX_MACOS_GUESTS} macOS guests (Apple's licence limit); stop one or use a Linux guest"
+        );
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ApplePlacementRequest {
     pub vcpus: u32,
@@ -193,6 +225,58 @@ mod tests {
         };
         assert_eq!(score(&full, &mac), None);
         assert!(score(&full, &small()).is_some());
+    }
+
+    fn vm(guest: &str, status: &str) -> fluxvm_core::model::VmRecord {
+        serde_json::from_value(serde_json::json!({
+            "id": uuid::Uuid::new_v4(),
+            "name": "m",
+            "backend": "vz",
+            "status": status,
+            "pid": null,
+            "created_at": "2026-01-01T00:00:00Z",
+            "expires_at": null,
+            "workspace": "/tmp/w",
+            "disk": "/tmp/w/root.raw",
+            "seed_disk": null,
+            "tap_name": null,
+            "control_socket": null,
+            "log_path": "/tmp/w/console.log",
+            "error": null,
+            "request": {
+                "name": "m", "image": "/img", "vcpus": 1, "memory_mib": 256,
+                "backend": "vz", "apple": {"guest_os": guest}
+            }
+        }))
+        .unwrap()
+    }
+
+    fn create(guest: &str) -> CreateVmRequest {
+        serde_json::from_value(serde_json::json!({
+            "name": "n", "image": "/img", "vcpus": 1, "memory_mib": 256,
+            "backend": "vz", "apple": {"guest_os": guest}
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn daemon_refuses_a_third_running_macos_guest() {
+        let two = [vm("macos", "running"), vm("macos", "paused")];
+        let err = enforce_macos_guest_limit(&create("macos"), &two).unwrap_err();
+        assert!(err.to_string().contains("licence limit"), "{err}");
+        // Linux guests are not counted against, or limited by, the two slots.
+        assert!(enforce_macos_guest_limit(&create("linux"), &two).is_ok());
+    }
+
+    #[test]
+    fn stopped_and_failed_macos_guests_free_their_slot() {
+        let held = [
+            vm("macos", "running"),
+            vm("macos", "stopped"),
+            vm("macos", "failed"),
+            vm("linux", "running"),
+        ];
+        assert!(enforce_macos_guest_limit(&create("macos"), &held).is_ok());
     }
 
     #[test]
