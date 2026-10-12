@@ -34,7 +34,7 @@ have not all been green; see the pull requests for their state.
 **Install with Homebrew** (Apple silicon, macOS 14 or later):
 
 ```bash
-brew install zyvorai/tap/fluxvm
+brew install zyvorai/tap/fluxvm      # step by step, with the MCP client setup: install-macos.md
 fluxctl run                      # a throwaway Debian VM and a shell
 brew services start fluxvm       # the daemon in the background, API on 127.0.0.1:7788
 ```

@@ -954,6 +954,10 @@ fn remove_nftables(id: Uuid) {
 }
 
 pub fn remove_nft_table(table: &str) -> Result<()> {
+    // No nftables off Linux: stopping a VM on a Mac must not warn about a missing `nft`.
+    if !cfg!(target_os = "linux") {
+        return Ok(());
+    }
     match run_nft(&["delete", "table", "inet", table]) {
         Ok(()) => Ok(()),
         Err(e) => {
