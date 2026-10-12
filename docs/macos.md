@@ -384,8 +384,11 @@ reaches the host at CID 2). Each entry is `{"port": N, "builtin": "metadata" | "
 - `telemetry`: the guest writes lines and the runner appends them to `<workspace>/telemetry.log`, up to 8 MiB, then drops the rest.
 - `tcp`: `{"port": N, "tcp": "127.0.0.1:PORT"}` relays the guest's connections to a TCP server on this Mac. Loopback only:
   the host must be `127.0.0.1` (or `localhost`) and `PORT` 1024-65535; anything else is refused at create time, and the runner
-  receives only a port and connects to the constant `127.0.0.1`. **Unverified on hardware** (validation and the runner config are
-  unit- and contract-tested; the relay itself has not been run). See "Local model server" below.
+  receives only a port and connects to the constant `127.0.0.1`. **Verified on an M4 with a stand-in model server**
+  (`examples/agent-sandbox-demo/local-model.sh`: a sandbox with only `lo` reached `/v1/models` and a chat completion on
+  the Mac's loopback and still could not reach the internet), and again against a real `llama-server` serving
+  `SmolLM2-135M-Instruct-Q8_0.gguf`. Not run against MLX (`mlx_lm.server`) or a larger model.
+  See "Local model server" below.
 - `socket`: connections are relayed to `/tmp/fluxvm-<uid>/<vm id>.svc-<name>`. The host operator runs whatever listens there. The
   name is `[a-z0-9_-]{1,32}`, so a spec cannot point the guest at another host path (such as the daemon's own socket).
 

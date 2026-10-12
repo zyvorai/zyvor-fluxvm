@@ -15,6 +15,9 @@
   tap on an M4 from a fresh `HOME`; upgrade and uninstall are marked as not exercised.
 
 ### Added: an agent-sandbox demo with real timings
+- `examples/agent-sandbox-demo/local-model.sh`: a sandbox with no network card reaching a model server on the Mac's
+  loopback through one vsock port; verified on an M4 with a stand-in server (the relay was "unverified on hardware"
+  before), not yet with a real llama.cpp or MLX model.
 - `examples/agent-sandbox-demo/run.sh`: an offline sandbox, a failing test, a fork into four running copies, four fixes
   tried in parallel, the passing one kept. About 4 s to fork and 0.3 s to test on an M4 mini; its README lists what it
   does not do (a NAT sandbox cannot fork; copies keep the parent's identity; the first create on a fresh daemon took 61 s).
