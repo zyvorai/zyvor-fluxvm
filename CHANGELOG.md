@@ -46,7 +46,7 @@
   start), each Mac card carries vCPU and memory use bars, tiles lift on hover (not with Reduce Motion), empty states are
   calmer, VMs without a catalog image show their disk name, and the theme button says what it is ("Theme: Auto").
 - Fixed: "Healthy Macs 3 of 3" drew its full bar red, as if over quota.
-=======
+
 ### Added: `scripts/bench-macos-pool.sh`
 - Times macOS warm-pool checkout and return over N rounds (min/median/max) and samples runner RSS, against a local
   `fluxctl serve` on a Mac. Checked against a stub server only; not yet run against real guests.
