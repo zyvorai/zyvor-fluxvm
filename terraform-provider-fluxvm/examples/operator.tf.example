@@ -1,0 +1,26 @@
+# With the fleet (operator) token: a tenant with quotas.
+# Rename to operator.tf (in a separate configuration from main.tf, which runs as the tenant).
+
+provider "fluxvm" {
+  alias = "operator"
+  token = var.fleet_token
+}
+
+variable "fleet_token" {
+  type      = string
+  sensitive = true
+}
+
+resource "fluxvm_tenant" "acme" {
+  provider         = fluxvm.operator
+  id               = "acme"
+  display_name     = "Acme Mobile"
+  max_leased_hosts = 2
+  max_vms          = 20
+  max_memory_mib   = 98304
+}
+
+output "acme_token" {
+  value     = fluxvm_tenant.acme.token
+  sensitive = true
+}

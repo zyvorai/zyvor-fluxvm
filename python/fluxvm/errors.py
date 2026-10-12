@@ -55,3 +55,11 @@ class RateLimited(ApiError):
                  retry_after: Optional[float] = None):
         super().__init__(status, body, message)
         self.retry_after = retry_after
+
+
+class Conflict(ApiError):
+    """409 from central: a Mac already leased, a lease released before its 24-hour minimum, a name in use."""
+
+
+class ServiceUnavailable(ApiError):
+    """503 from central: no Mac can take it right now, or this central is an HA standby."""

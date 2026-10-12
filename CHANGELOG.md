@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+
 ### Added: node API for volumes, tunnels, usage stats and restore (used by the fleet platform)
 - `fluxvm-api`: persistent volumes (`/v1/volumes`), a TCP tunnel to a VM's port (`GET /v1/vms/{id}/tunnel?port=N`,
   WebSocket, admin only), and the vz usage and storage reports central graphs.
@@ -9,6 +10,20 @@
   guest printed on its own serial console), never to the Mac's LAN or to an address another VM on the node reports.
   Namespace guests may use `169.254.x.y` (never the metadata address), which tunnels refused before.
 - `fluxvm-scheduler`/`fluxvm-apple`: node stats, restore-from-snapshot and the runner/usage plumbing for the above.
+=======
+### Added: fleet SDKs, an OpenAPI description and a Terraform provider
+- `schemas/fleet-openapi.yaml`: OpenAPI 3.1 for central's fleet API (tenants, keys, leases, VMs, networks, images,
+  webhooks, prices, billing, budgets, usage, events, policy), plus the volumes and pools shapes.
+- Go: `github.com/zyvorai/fluxvm/go/fleet`, a typed client with context support, bearer auth, an `APIError` with
+  status and central's message (`errors.Is` with `ErrNotFound`, `ErrConflict`, `ErrQuota`, ...) and retries of
+  idempotent calls on 429/5xx (POSTs are never retried); `go/fleet/fleettest` is a stateful fake central for tests.
+- Python `fluxvm.FleetClient` and TypeScript `FleetClient` with the same calls and retry rules (`Conflict` and
+  `ServiceUnavailable` errors added).
+- `terraform-provider-fluxvm`: resources `fluxvm_tenant`, `fluxvm_api_key`, `fluxvm_lease`, `fluxvm_vm`,
+  `fluxvm_network`, `fluxvm_webhook`, `fluxvm_volume`, `fluxvm_pool`; data sources `fluxvm_images`, `fluxvm_nodes`,
+  `fluxvm_tenant`; import by id or name. Tested over the plugin protocol against the fake central. `fluxvm_volume`
+  and `fluxvm_pool` need a central with volumes and pools. See `docs/fleet-sdk.md`.
+
 
 ### Added: per-disk QEMU I/O, virtio-blk and vhost-user-blk data disks
 - `io` on data disks (`POST /v1/vms/{id}/disks`, `data_disks`) and `root_disk_io` on create: `bus` (`scsi`,
