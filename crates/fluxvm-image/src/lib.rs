@@ -731,16 +731,9 @@ pub async fn clone_for_vm(
             // for a predictable common fast path. Reflink makes raw clones nearly instant on
             // XFS/Btrfs; cp transparently falls back when reflinks are unavailable.
             if base_fmt == "raw" {
-                run_checked(
-                    "cp",
-                    &[
-                        "--reflink=auto".into(),
-                        "--sparse=always".into(),
-                        base.display().to_string(),
-                        out.display().to_string(),
-                    ],
-                )
-                .await?;
+                // `cp --reflink=auto --sparse=always` on Linux; `cp -c` (APFS clone) then plain `cp` on macOS,
+                // whose `cp` rejects the GNU flags.
+                clone_raw_for_apple(base, out).await?;
             } else {
                 convert_image(cfg, base, out, "raw").await?;
             }
