@@ -883,6 +883,10 @@ mod tests {
             ha: None,
             audit: Arc::new(super::audit::AuditLog::memory()),
             notify: Arc::default(),
+            metrics: Arc::default(),
+            tunnels: Arc::default(),
+            sso: Arc::default(),
+            signup: Arc::default(),
         };
         let now = Utc::now();
         fleet.tenancy.lock().await.leases.push(Lease {
@@ -906,6 +910,7 @@ mod tests {
             target: None,
             status,
             key: None,
+            user: None,
         };
         // Refused releases are not news.
         from_change(&fleet, &ev(None, "/fleet/leases/lease-1/release", 409)).await;
