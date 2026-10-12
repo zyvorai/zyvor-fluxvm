@@ -2238,6 +2238,85 @@ pub struct HibernationCheck {
     pub reasons: Vec<String>,
 }
 
+/// Body of `POST /v1/vms/{id}/diagnostics`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiagnosticsRequest {
+    /// Seconds of packet capture on the VM's dataplane interface, 0-30.
+    #[serde(default)]
+    pub pcap_seconds: u32,
+    /// tcpdump filter for the capture.
+    #[serde(default)]
+    pub pcap_filter: String,
+    /// Dump guest memory (QEMU `dump-guest-memory`, ELF). The guest is paused
+    /// while it is written. The dump stays on this host.
+    #[serde(default)]
+    pub memory_dump: bool,
+    /// Replace secrets (tokens, passwords, cloud-init files, secret env)
+    /// with sha256 fingerprints. Default true.
+    #[serde(default = "default_true")]
+    pub redact: bool,
+    /// Console log lines to include. Default 2000, at most 20000.
+    #[serde(default)]
+    pub log_lines: Option<usize>,
+}
+
+impl Default for DiagnosticsRequest {
+    fn default() -> Self {
+        Self {
+            pcap_seconds: 0,
+            pcap_filter: String::new(),
+            memory_dump: false,
+            redact: true,
+            log_lines: None,
+        }
+    }
+}
+
+/// One file (or group of files) in a diagnostics bundle.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DiagnosticsSection {
+    pub name: String,
+    pub ok: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(default)]
+    pub bytes: u64,
+}
+
+/// A guest memory dump kept on the host next to its bundle.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MemoryDumpInfo {
+    pub path: PathBuf,
+    pub format: String,
+    pub size_bytes: u64,
+    pub sha256: String,
+    /// How long the guest was paused while QEMU wrote the dump.
+    pub paused_ms: u64,
+}
+
+/// A diagnostics bundle job. `state` is `running`, `done` or `failed`; the
+/// bundle (`bundle.tar.gz`) is downloadable once `done`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiagnosticsBundle {
+    pub token: String,
+    pub vm_id: Uuid,
+    pub state: String,
+    pub created_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finished_at: Option<DateTime<Utc>>,
+    pub request: DiagnosticsRequest,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(default)]
+    pub sections: Vec<DiagnosticsSection>,
+    #[serde(default)]
+    pub size_bytes: u64,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub sha256: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_dump: Option<MemoryDumpInfo>,
+}
+
 /// Body of `PATCH /v1/vms/{id}`: rename and/or edit labels. A label value of
 /// `None` removes the key.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

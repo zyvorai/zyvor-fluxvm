@@ -245,6 +245,31 @@ enum Command {
         #[arg(value_parser = output::parse_vm_ref)]
         id: Uuid,
     },
+    /// Collect an incident bundle: QMP state, cgroup and PSI, console log,
+    /// network and eBPF state, optionally a packet capture and a guest memory
+    /// dump (kept on the host). See docs/diagnostics-bundle.md.
+    Incident {
+        #[arg(value_parser = output::parse_vm_ref)]
+        id: Uuid,
+        /// Seconds of packet capture on the VM's dataplane interface (0-30).
+        #[arg(long, default_value_t = 0)]
+        pcap_seconds: u32,
+        /// tcpdump filter for the capture.
+        #[arg(long, default_value = "")]
+        pcap_filter: String,
+        /// Dump guest memory (QEMU, ELF); the guest is paused while it is written.
+        #[arg(long)]
+        memory_dump: bool,
+        /// Keep tokens, passwords and cloud-init files instead of fingerprinting them.
+        #[arg(long)]
+        no_redact: bool,
+        /// Console log lines to include (default 2000).
+        #[arg(long)]
+        log_lines: Option<usize>,
+        /// Write the bundle (tar.gz) here once collected.
+        #[arg(long = "out")]
+        output: Option<PathBuf>,
+    },
     /// Delete a VM, or every VM matching `-l` (needs `--yes` for bulk).
     Delete {
         #[command(flatten)]
@@ -2833,6 +2858,22 @@ async fn run_stream_session(stream: tokio::net::UnixStream, what: &str) -> Resul
 }
 
 /// [`run_serial_session`] over the daemon's `/v1/vms/{id}/serial` websocket.
+fn diagnostics_request(
+    pcap_seconds: u32,
+    pcap_filter: String,
+    memory_dump: bool,
+    no_redact: bool,
+    log_lines: Option<usize>,
+) -> fluxvm_core::model::DiagnosticsRequest {
+    fluxvm_core::model::DiagnosticsRequest {
+        pcap_seconds,
+        pcap_filter,
+        memory_dump,
+        redact: !no_redact,
+        log_lines,
+    }
+}
+
 async fn run_remote_serial(r: &remote::Remote, id: Uuid) -> Result<()> {
     run_remote_stream(
         r,
@@ -3392,6 +3433,56 @@ async fn run_remote(
         Command::Pause { id } => pretty(&r.vm_op(id, "pause").await?)?,
         Command::Resume { id } => pretty(&r.vm_op(id, "resume").await?)?,
         Command::Hibernate { id } => pretty(&r.vm_op(id, "hibernate").await?)?,
+        Command::Incident {
+            id,
+            pcap_seconds,
+            pcap_filter,
+            memory_dump,
+            no_redact,
+            log_lines,
+            output,
+        } => {
+            let req =
+                diagnostics_request(pcap_seconds, pcap_filter, memory_dump, no_redact, log_lines);
+            let started = r
+                .call(
+                    Method::POST,
+                    &format!("/v1/vms/{id}/diagnostics"),
+                    Some(serde_json::to_value(&req)?),
+                )
+                .await?;
+            let token = started["token"].as_str().unwrap_or_default().to_string();
+            let job = loop {
+                let job = r
+                    .call(
+                        Method::GET,
+                        &format!("/v1/vms/{id}/diagnostics/{token}"),
+                        None,
+                    )
+                    .await?;
+                if job["state"] != "running" {
+                    break job;
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            };
+            pretty(&job)?;
+            if job["state"] != "done" {
+                anyhow::bail!("diagnostics bundle {token} {}", job["state"]);
+            }
+            if let Some(out) = output {
+                let (status, body) = r
+                    .get_raw(&format!("/v1/vms/{id}/diagnostics/{token}/bundle"))
+                    .await?;
+                if !status.is_success() {
+                    anyhow::bail!(
+                        "bundle download: {status}: {}",
+                        String::from_utf8_lossy(&body)
+                    );
+                }
+                std::fs::write(&out, &body)?;
+                eprintln!("wrote {} bytes to {}", body.len(), out.display());
+            }
+        }
         Command::Label { id, labels } => {
             let labels: serde_json::Map<String, serde_json::Value> =
                 labels.into_iter().map(|(k, v)| (k, json!(v))).collect();
@@ -5095,6 +5186,37 @@ async fn main() -> Result<()> {
         }
         Command::Hibernate { id } => {
             println!("{}", serde_json::to_string_pretty(&m.hibernate(id).await?)?)
+        }
+        Command::Incident {
+            id,
+            pcap_seconds,
+            pcap_filter,
+            memory_dump,
+            no_redact,
+            log_lines,
+            output,
+        } => {
+            let req =
+                diagnostics_request(pcap_seconds, pcap_filter, memory_dump, no_redact, log_lines);
+            let token = m.start_diagnostics(id, req).await?.token;
+            let job = loop {
+                let job = m.get_diagnostics(id, &token).await?;
+                if job.state != fluxvm_scheduler::diagnostics::STATE_RUNNING {
+                    break job;
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            };
+            println!("{}", serde_json::to_string_pretty(&job)?);
+            if job.state != fluxvm_scheduler::diagnostics::STATE_DONE {
+                anyhow::bail!("diagnostics bundle {token} {}", job.state);
+            }
+            if let Some(out) = output {
+                let path = m
+                    .diagnostics_file(id, &token, fluxvm_scheduler::diagnostics::BUNDLE_FILE)
+                    .await?;
+                let n = std::fs::copy(&path, &out)?;
+                eprintln!("wrote {n} bytes to {}", out.display());
+            }
         }
         Command::Freeze { id } => {
             m.freeze(id).await?;

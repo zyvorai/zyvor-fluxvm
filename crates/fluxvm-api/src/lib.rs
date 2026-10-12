@@ -72,6 +72,14 @@ impl<E: Into<anyhow::Error>> From<E> for ApiError {
                 message: format!("{:#}", e),
             };
         }
+        if e.downcast_ref::<fluxvm_scheduler::diagnostics::DiagnosticsBusy>()
+            .is_some()
+        {
+            return Self {
+                status: StatusCode::CONFLICT,
+                message: format!("{:#}", e),
+            };
+        }
         // Apple allows two macOS guests per Mac; it clears when one stops.
         if e.downcast_ref::<fluxvm_scheduler::apple_placement::MacosGuestLimit>()
             .is_some()
@@ -479,6 +487,22 @@ pub fn router(manager: Arc<VmManager>) -> Router {
             axum::routing::delete(discard_vm_hibernation),
         )
         .route("/v1/vms/import-hibernated", post(import_hibernated_vm))
+        .route(
+            "/v1/vms/{id}/diagnostics",
+            get(list_vm_diagnostics).post(start_vm_diagnostics),
+        )
+        .route(
+            "/v1/vms/{id}/diagnostics/{token}",
+            get(get_vm_diagnostics).delete(delete_vm_diagnostics),
+        )
+        .route(
+            "/v1/vms/{id}/diagnostics/{token}/bundle",
+            get(download_vm_diagnostics_bundle),
+        )
+        .route(
+            "/v1/vms/{id}/diagnostics/{token}/memory-dump",
+            get(download_vm_memory_dump),
+        )
         .route("/v1/vms/{id}/stop", post(stop_vm))
         .route("/v1/vms/{id}/pause", post(pause_vm))
         .route("/v1/vms/{id}/resume", post(resume_vm))
@@ -2606,6 +2630,141 @@ async fn hibernate_vm(
 ) -> ApiResult<Json<serde_json::Value>> {
     require_admin(role)?;
     Ok(Json(json!(m.hibernate(id).await?)))
+}
+
+async fn start_vm_diagnostics(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+    body: Option<Json<fluxvm_core::model::DiagnosticsRequest>>,
+) -> ApiResult<(StatusCode, Json<serde_json::Value>)> {
+    require_admin(role)?;
+    let req = body.map(|Json(r)| r).unwrap_or_default();
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(json!(m.start_diagnostics(id, req).await?)),
+    ))
+}
+
+async fn list_vm_diagnostics(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    Ok(Json(json!({"items": m.list_diagnostics(id).await?})))
+}
+
+async fn get_vm_diagnostics(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path((id, token)): Path<(Uuid, String)>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    let job = m.get_diagnostics(id, &token).await.map_err(|e| ApiError {
+        status: StatusCode::NOT_FOUND,
+        message: format!("{e:#}"),
+    })?;
+    Ok(Json(json!(job)))
+}
+
+async fn delete_vm_diagnostics(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path((id, token)): Path<(Uuid, String)>,
+) -> ApiResult<StatusCode> {
+    require_admin(role)?;
+    m.delete_diagnostics(id, &token).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn download_vm_diagnostics_bundle(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path((id, token)): Path<(Uuid, String)>,
+) -> ApiResult<Response> {
+    require_admin(role)?;
+    stream_diagnostics_file(
+        &m,
+        id,
+        &token,
+        fluxvm_scheduler::diagnostics::BUNDLE_FILE,
+        "application/gzip",
+    )
+    .await
+}
+
+async fn download_vm_memory_dump(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path((id, token)): Path<(Uuid, String)>,
+) -> ApiResult<Response> {
+    require_admin(role)?;
+    stream_diagnostics_file(
+        &m,
+        id,
+        &token,
+        fluxvm_scheduler::diagnostics::DUMP_FILE,
+        "application/octet-stream",
+    )
+    .await
+}
+
+/// Streams one file of a finished bundle: 404 for an unknown token or a
+/// missing file, 409 while the bundle is collected or after it failed.
+async fn stream_diagnostics_file(
+    m: &VmManager,
+    id: Uuid,
+    token: &str,
+    file: &str,
+    content_type: &str,
+) -> ApiResult<Response> {
+    let job = m.get_diagnostics(id, token).await.map_err(|e| ApiError {
+        status: StatusCode::NOT_FOUND,
+        message: format!("{e:#}"),
+    })?;
+    if job.state != fluxvm_scheduler::diagnostics::STATE_DONE {
+        return Err(ApiError {
+            status: StatusCode::CONFLICT,
+            message: match &job.error {
+                Some(e) => format!("diagnostics bundle {token} is {}: {e}", job.state),
+                None => format!("diagnostics bundle {token} is {}", job.state),
+            },
+        });
+    }
+    let path = m
+        .diagnostics_file(id, token, file)
+        .await
+        .map_err(|e| ApiError {
+            status: StatusCode::NOT_FOUND,
+            message: format!("{e:#}"),
+        })?;
+    let mut f = tokio::fs::File::open(&path).await?;
+    let len = f.metadata().await?.len();
+    let stream = async_stream::stream! {
+        use tokio::io::AsyncReadExt;
+        let mut buf = vec![0u8; 1 << 20];
+        loop {
+            match f.read(&mut buf).await {
+                Ok(0) => break,
+                Ok(n) => yield Ok::<_, std::io::Error>(bytes::Bytes::copy_from_slice(&buf[..n])),
+                Err(e) => {
+                    yield Err(e);
+                    break;
+                }
+            }
+        }
+    };
+    let name = format!("{id}-{token}-{file}");
+    Ok(Response::builder()
+        .header(header::CONTENT_TYPE, content_type)
+        .header(header::CONTENT_LENGTH, len)
+        .header(
+            header::CONTENT_DISPOSITION,
+            format!("attachment; filename=\"{name}\""),
+        )
+        .header(header::CACHE_CONTROL, "no-store")
+        .body(Body::from_stream(stream))?)
 }
 
 async fn discard_vm_hibernation(

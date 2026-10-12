@@ -3,6 +3,7 @@
 
 pub mod block;
 mod confidential;
+pub mod diagnostics;
 pub mod disks;
 pub mod hibernate;
 pub mod numa;

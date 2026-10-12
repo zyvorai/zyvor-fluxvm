@@ -29,6 +29,7 @@ pub mod cbt;
 pub mod changes;
 pub mod confidential;
 pub mod density;
+pub mod diagnostics;
 pub mod events;
 pub mod fork;
 pub mod fork_plan;
@@ -5059,6 +5060,7 @@ impl VmManager {
         if let Some(h) = &vm.hibernation {
             hibernate::remove_state_dir(&h.dir);
         }
+        diagnostics::remove_vm_dir(&self.cfg, id);
         // Record what must be reclaimed *before* the record that names it is
         // removed; `reconcile()` rolls a leftover intent forward after a crash.
         journal::begin_delete(

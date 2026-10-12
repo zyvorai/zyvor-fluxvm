@@ -58,6 +58,12 @@ DELETE /v1/vms/{uuid}/hibernation        # drop the saved state; next start boot
 POST   /v1/vms/import-hibernated         # {"id"}; adopt a VM hibernated on another node from the shared dir; admin
 GET    /v1/host/hibernation              # {facts: {qemu_version, machine_type, cpu_vendor, cpu_flags, state_dir}}
 POST   /v1/host/hibernation/check        # {"manifest"} -> {compatible, reasons}
+POST   /v1/vms/{uuid}/diagnostics        # {pcap_seconds, pcap_filter, memory_dump, redact, log_lines} -> 202 bundle job; 409 if one is running; admin; see diagnostics-bundle.md
+GET    /v1/vms/{uuid}/diagnostics        # bundles kept for the VM (last 5); admin
+GET    /v1/vms/{uuid}/diagnostics/{token}            # job: state running|done|failed, sections, sha256, memory_dump; admin
+DELETE /v1/vms/{uuid}/diagnostics/{token}            # remove a finished bundle and its dump; 409 while running; admin
+GET    /v1/vms/{uuid}/diagnostics/{token}/bundle     # tar.gz; 409 while running or failed; admin
+GET    /v1/vms/{uuid}/diagnostics/{token}/memory-dump # ELF guest memory dump; admin
 POST   /v1/vms/{uuid}/resources
 POST   /v1/vms/{uuid}/hotplug/cpu
 POST   /v1/vms/{uuid}/hotplug/memory
