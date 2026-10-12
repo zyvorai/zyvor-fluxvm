@@ -1,0 +1,8 @@
+node_modules/
+shots/
+frames/
+prev/
+*.wav
+*.mp4
+sim.out
+package-lock.json

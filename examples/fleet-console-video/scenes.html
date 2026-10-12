@@ -1,0 +1,166 @@
+<!doctype html><html><head><meta charset="utf-8"><title>scenes</title>
+<style>
+*{box-sizing:border-box;margin:0}
+html,body{width:1920px;height:1080px;overflow:hidden;background:#07070d;font-family:-apple-system,"SF Pro Display","SF Pro Text","Helvetica Neue",Arial,sans-serif;color:#f5f5f7}
+#stage{position:relative;width:1920px;height:1080px;overflow:hidden;background:#07070d}
+.glow{position:absolute;border-radius:50%;filter:blur(120px);opacity:.5}
+#g1{width:900px;height:700px;background:#2b2d8f;left:-200px;top:-150px}
+#g2{width:800px;height:700px;background:#0e6e74;right:-180px;top:260px}
+#g3{width:700px;height:500px;background:#7a2a8a;left:640px;top:760px;opacity:.35}
+#grid{position:absolute;inset:0;background-image:radial-gradient(rgba(255,255,255,.07) 1px,transparent 1.2px);background-size:46px 46px;opacity:.5;
+ -webkit-mask-image:radial-gradient(ellipse at 50% 45%,#000 20%,transparent 75%)}
+.scene{position:absolute;inset:0;opacity:0}
+.head{position:absolute;left:0;right:0;top:64px;text-align:center}
+.h{font-size:76px;font-weight:700;letter-spacing:-.035em;line-height:1.05;white-space:nowrap}
+.h .w{display:inline-block;opacity:0;transform:translateY(22px)}
+.h2{background:linear-gradient(90deg,#5eead4,#818cf8 55%,#f472b6);-webkit-background-clip:text;background-clip:text;color:transparent}
+.cap{position:absolute;left:0;right:0;top:172px;text-align:center;font-size:27px;color:#a8a8b8;letter-spacing:-.005em;opacity:0}
+.foot{position:absolute;left:0;right:0;bottom:22px;text-align:center;font-size:15px;color:#6e6e80;letter-spacing:.01em}
+.card{position:absolute;left:320px;top:262px;width:1280px;height:720px;border-radius:18px;overflow:hidden;opacity:0;
+ border:1px solid rgba(255,255,255,.14);box-shadow:0 40px 120px rgba(0,0,0,.65),0 0 0 1px rgba(0,0,0,.4),0 0 90px rgba(94,234,212,.08)}
+.card img{width:100%;height:100%;display:block;transform-origin:50% 40%}
+.title{position:absolute;left:0;right:0;top:330px;text-align:center}
+.zl{width:150px;height:150px}
+.wm{font-size:150px;font-weight:700;letter-spacing:-.045em;margin-top:6px;line-height:1}
+.tag{font-size:50px;font-weight:600;letter-spacing:-.03em;margin-top:26px}
+.pill{display:inline-block;padding:11px 22px;border-radius:99px;background:#f5f5f7;color:#111;font-weight:600;font-size:22px;margin:0 8px}
+.pill.o{background:rgba(255,255,255,.1);color:#f5f5f7;font-weight:500}
+.term{position:absolute;left:1000px;top:330px;width:700px;height:420px;border-radius:14px;background:#0d0d0f;border:1px solid rgba(255,255,255,.14);
+ box-shadow:0 40px 100px rgba(0,0,0,.6);font:22px/1.55 ui-monospace,"SF Mono",Menlo,monospace;color:#d6d6e0;padding:56px 28px 0}
+.term .bar{position:absolute;left:0;right:0;top:0;height:40px;background:#1b1b1e;border-radius:14px 14px 0 0;display:flex;gap:9px;align-items:center;padding-left:16px}
+.term .bar i{width:13px;height:13px;border-radius:50%;display:block}
+.term .ok{color:#5eead4}.term .dim{color:#7c7c8c}.term .key{color:#ffb86b}
+.signin{position:absolute;left:230px;top:300px;width:700px;height:500px;border-radius:18px;overflow:hidden;border:1px solid rgba(255,255,255,.14);box-shadow:0 40px 100px rgba(0,0,0,.6)}
+.signin img{width:100%;height:100%;object-fit:cover;object-position:50% 52%;transform:scale(1.9);transform-origin:50% 55%}
+.out{position:absolute;left:0;right:0;top:300px;text-align:center}
+.out p{font-size:30px;color:#c8c8d4;max-width:1180px;margin:0 auto 20px;line-height:1.45}
+.out ul{list-style:none;display:inline-block;text-align:left;margin-top:14px}
+.out li{font-size:29px;color:#d6d6e0;margin:14px 0;padding-left:34px;position:relative}
+.out li:before{content:"";position:absolute;left:0;top:13px;width:14px;height:14px;border-radius:50%;background:linear-gradient(135deg,#5eead4,#818cf8)}
+#dots{position:absolute;left:0;right:0;bottom:56px;display:flex;justify-content:center;gap:10px}
+#dots i{width:34px;height:4px;border-radius:2px;background:rgba(255,255,255,.14);display:block;overflow:hidden}
+#dots b{display:block;height:100%;width:0;background:linear-gradient(90deg,#5eead4,#818cf8)}
+</style></head><body><div id="stage">
+<div class="glow" id="g1"></div><div class="glow" id="g2"></div><div class="glow" id="g3"></div><div id="grid"></div>
+<div id="scenes"></div><div id="dots"></div>
+</div>
+<script>
+const Z = (s) => `<svg class="zl" style="width:${s}px;height:${s}px" viewBox="0 0 18 18" fill="none" stroke="#ff5a15" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M2 2h14L6.6 16H16"/></svg>`;
+const SC = 10, NS = 9, BEAT = 60 / 96;
+const S = [
+ { kind: 'title', h: ['FluxVM Cloud.', 'Your Macs, one console.'], cap: 'Lease Macs, launch VMs and watch the bill from one page.',
+   foot: 'Preview. Everything shown runs on a simulated fleet: nothing here boots.' },
+ { kind: 'key', h: ['One key.', 'Yours.'], cap: 'No --token? Central makes one, shows it once and keeps it private.',
+   foot: 'The operator token is stored in the state directory, mode 0600. --token always wins and deleting the file makes a new one.' },
+ { h: ['Everything that needs you.', 'Nothing that doesn’t.'], foot: 'A tenant’s Overview on a simulated fleet of three Macs.',
+   shots: [['tenant-overview', 0, 10, 'Healthy Macs, vCPUs, memory and leases at a glance.']] },
+ { h: ['Five groups.', 'Every page.'], foot: 'Light, dark or system theme. Reduced motion is respected.',
+   shots: [['menu-compute', 0, 3.4, 'Cloud, Compute, Billing, Access: hover or click, arrow keys, Esc to close.'],
+           ['menu-access', 3.4, 6.7, 'Operators get Tenants and Policy under Access.'],
+           ['palette', 6.7, 10, 'Or press ⌘K and type.']] },
+ { h: ['Your Macs.', 'Two macOS slots each.'], foot: 'Operator view. Slots, leases and the 24-hour minimum are enforced by central.',
+   shots: [['operator-macs', 0, 3.4, 'Apple’s licence allows two macOS VMs per Mac. The console shows both slots.'],
+           ['operator-networks', 3.4, 6.7, 'Private networks that span Macs.'],
+           ['operator-images', 6.7, 10, 'An image catalog to launch from.']] },
+ { h: ['Launch.', 'Watch. Tunnel.'], foot: 'Simulated nodes: VMs appear at once and nothing boots.',
+   shots: [['tenant-vms', 0, 4, 'Launch from the catalog. Central picks a Mac with a free slot.'],
+           ['tenant-vm-inspector', 4, 10, 'Power controls and live CPU, memory and disk for each VM. SSH and port tunnels too.']] },
+ { h: ['Know the bill', 'before it lands.'], foot: 'Prices shown are demo values. Stripe invoicing needs central’s Stripe keys and is not shown.',
+   shots: [['tenant-billing', 0, 5, 'The statement so far, a monthly budget, a warning at 80%.'],
+           ['tenant-usage', 5, 10, 'Metered Mac hours, VM hours and vCPU hours.']] },
+ { h: ['Teammates, keys,', 'and a paper trail.'], foot: 'Single sign-on needs an identity provider and is not set up in this demo.',
+   shots: [['tenant-members', 0, 3.4, 'People and their roles: viewer, member, admin, owner.'],
+           ['tenant-keys', 3.4, 6.7, 'Named API keys for CI and tools.'],
+           ['tenant-activity', 6.7, 10, 'Every change, recorded.']] },
+ { kind: 'outro', h: ['Preview.', 'Measured, not promised.'],
+   foot: 'Apple, Mac, Mac mini, Mac Studio, macOS and Apple silicon are trademarks of Apple Inc. FluxVM is not affiliated with or endorsed by Apple.' },
+];
+const root = document.getElementById('scenes'), dots = document.getElementById('dots');
+const els = S.map((s, i) => {
+  const d = document.createElement('div'); d.className = 'scene';
+  const words = (t, c) => t.split(' ').map((w) => `<span class="w ${c}">${w}&nbsp;</span>`).join('');
+  let inner = '';
+  if (s.kind === 'title') {
+    inner = `<div class="title" data-title>${Z(150)}<div class="wm">FluxVM</div><div class="tag h" style="font-size:54px">${words(s.h[0] + ' ', '')}<span class="h2">${words(s.h[1], 'h2')}</span></div></div>`;
+    inner += `<div class="cap" style="top:830px;font-size:30px">${s.cap}</div>`;
+  } else {
+    inner = `<div class="head"><div class="h">${words(s.h[0], '')}<span class="h2">${words(s.h[1], 'h2')}</span></div></div>`;
+    if (s.cap) inner += `<div class="cap">${s.cap}</div>`;
+  }
+  if (s.kind === 'key') {
+    inner += `<div class="signin" data-fade><img src="shots/signin.png"></div>
+      <div class="term" data-term><div class="bar"><i style="background:#ff5f57"></i><i style="background:#febc2e"></i><i style="background:#28c840"></i></div><pre id="tp" style="font:inherit;white-space:pre-wrap"></pre></div>`;
+  }
+  if (s.kind === 'outro') {
+    inner += `<div class="out"><div style="margin-bottom:20px">${Z(120)}</div>
+      <p>Operator and tenant roles, warm slots, tunnels and billing are exercised against simulated Macs. Real Stripe, mail delivery, single sign-on and a multi-Mac fleet are not verified yet.</p>
+      <p style="font-size:26px;color:#8e8ea0">Per-command Landlock and seccomp policy needs the guest agent; stock Debian guests use SSH.</p>
+      <div style="margin-top:34px"><span class="pill">github.com/zyvorai/zyvor-fluxvm</span><span class="pill o">Open source · Apache-2.0</span></div></div>`;
+  }
+  (s.shots || []).forEach((sh, j) => { inner += `<div class="card" data-shot="${j}"><img src="shots/${sh[0]}.png"></div>`; });
+  if (s.shots) inner += `<div class="cap" data-shotcap></div>`;
+  inner += `<div class="foot">${s.foot}</div>`;
+  d.innerHTML = inner; root.append(d);
+  const dot = document.createElement('i'); dot.innerHTML = '<b></b>'; dots.append(dot);
+  return d;
+});
+const ease = (x) => 1 - Math.pow(1 - Math.min(1, Math.max(0, x)), 3);
+const cl = (x) => Math.min(1, Math.max(0, x));
+const KEY = ['$ fluxvm-agent central --state-dir ./central-state', '', 'No --token given: generated the operator token (shown once).', '  token: fvo_••••••••••••••••', '  stored in ./central-state/operator-token (mode 0600)', '  change it with --token, or delete that file to get a new one'];
+function seek(t) {
+  const beat = (t / BEAT) % 1, pulse = Math.pow(1 - beat, 3);
+  g1.style.transform = `translate(${Math.sin(t * .21) * 60}px,${Math.cos(t * .17) * 40}px)`;
+  g2.style.transform = `translate(${Math.cos(t * .19) * 70}px,${Math.sin(t * .23) * 50}px)`;
+  g3.style.opacity = .3 + .12 * pulse;
+  const si = Math.min(NS - 1, Math.floor(t / SC)), lt = t - si * SC;
+  els.forEach((e, i) => {
+    const on = i === si;
+    const fin = ease(lt / 0.6), fout = i === NS - 1 ? 1 : 1 - ease((lt - 9.5) / 0.5);
+    e.style.opacity = on ? Math.min(fin, fout) : 0;
+    e.style.display = on ? 'block' : 'none';
+    dots.children[i].firstChild.style.width = (i < si ? 100 : on ? lt / SC * 100 : 0) + '%';
+  });
+  const s = S[si], e = els[si];
+  e.querySelectorAll('.w').forEach((w, k) => { const p = ease((lt - 0.12 - k * 0.09) / 0.55); w.style.opacity = p; w.style.transform = `translateY(${(1 - p) * 22}px)`; });
+  const cap = e.querySelector('.cap');
+  if (s.shots) {
+    e.querySelectorAll('[data-shot]').forEach((c, j) => {
+      const [, a, b] = s.shots[j];
+      const inP = ease((lt - a) / 0.6), outP = j === s.shots.length - 1 ? 1 : 1 - ease((lt - b + 0.35) / 0.35);
+      const vis = lt >= a - 0.01 && lt <= b + 0.01;
+      c.style.opacity = vis ? Math.min(inP, outP) : 0;
+      const k = cl((lt - a) / (b - a));
+      c.style.transform = `translateY(${(1 - ease((lt - a) / 0.7)) * 36}px) scale(${.985 + .015 * ease((lt - a) / .9)})`;
+      c.firstChild.style.transform = `scale(${1 + .045 * k})`;
+      if (vis) { const sc = e.querySelector('[data-shotcap]'); sc.textContent = s.shots[j][3]; sc.className = 'cap'; sc.style.opacity = Math.min(inP, outP); }
+    });
+    const sc = e.querySelector('[data-shotcap]'); if (sc) sc.style.display = 'block';
+  } else if (cap && s.kind !== 'title') cap.style.opacity = ease((lt - 0.7) / 0.6);
+  if (s.kind === 'title') {
+    const tt = e.querySelector('[data-title]'); const z = e.querySelector('svg');
+    z.style.transform = `scale(${.9 + .1 * ease(lt / 1.2)}) rotate(${(1 - ease(lt / 1.4)) * -14}deg)`;
+    e.querySelector('.wm').style.opacity = ease((lt - .2) / .7);
+    cap.style.opacity = ease((lt - 1.6) / .7);
+  }
+  if (s.kind === 'key') {
+    const f = e.querySelector('[data-fade]'); const p = ease((lt - .6) / .8);
+    f.style.opacity = p; f.style.transform = `translateX(${(1 - p) * -40}px)`;
+    const tm = e.querySelector('[data-term]'); const q = ease((lt - 1.0) / .8);
+    tm.style.opacity = q; tm.style.transform = `translateX(${(1 - q) * 40}px)`;
+    // typed text: command types out 1.6-3.4s, then the output lines appear
+    const cmd = KEY[0], ct = Math.floor(cl((lt - 1.8) / 1.6) * cmd.length);
+    let txt = cmd.slice(0, ct);
+    if (lt > 3.6) { const lines = KEY.slice(2); const n = Math.min(lines.length, 1 + Math.floor((lt - 3.6) / 0.55)); txt += '\n\n' + lines.slice(0, n).join('\n'); }
+    const html = txt.replace(/token: fvo_[^\n]*/, (m) => `<span class="key">${m}</span>`).replace(/(No --token[^\n]*)/, '<span class="ok">$1</span>')
+      .replace(/(  stored[^\n]*|  change[^\n]*)/g, '<span class="dim">$1</span>') + (Math.floor(t * 2) % 2 ? '▌' : ' ');
+    document.getElementById('tp').innerHTML = html;
+  }
+  if (s.kind === 'outro') {
+    const o = e.querySelector('.out'); const p = ease((lt - .8) / .9);
+    o.style.opacity = p; o.style.transform = `translateY(${(1 - p) * 20}px)`;
+    if (lt > 8.6) e.style.opacity = Math.min(1, 1 - ease((lt - 9.3) / 0.7)) * 1;
+  }
+}
+window.__seek = seek; window.__ready = Promise.all([...document.images].map((i) => i.decode().catch(() => 0)));
+seek(0);
+</script></body></html>
