@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+### Added: control VMs from the fleet console and `fluxctl fleet`
+- Power: Start, Stop, Restart, Pause and Resume on a VM through central (`POST /fleet/vms/{node}/{id}/{start|stop|
+  restart|pause|resume}`), in the VM details and as `fluxctl fleet start|stop|restart|pause|resume <vm>`. Stop and
+  Restart ask for confirmation in the console.
+- Interactive screen: "Control" in the Screen panel sends clicks, scrolling and typing to the guest
+  (`POST /fleet/vms/{node}/{id}/input`, 1-200 actions per call). Keystrokes are not written to the activity log.
+- Console log: `GET /fleet/vms/{node}/{id}/logs` (capped at 4 MiB), in the VM details and `fluxctl fleet logs <vm>`.
+- Same rules as the rest of `/fleet`: a tenant reaches only its own VMs (404 otherwise) and read-only API keys can read
+  logs but not control anything. The simulated Mac (`sim-node`) powers VMs, draws typed text and has a log.
+
 ### Added: prices, statements, budgets, notifications and signed webhooks (fleet)
 - The operator sets a price list (Mac classes, VM time on shared hosts); central turns metered use into monthly
   statements per tenant (`GET /fleet/billing`, CSV with spreadsheet-formula guard, forecast for the current month) and
