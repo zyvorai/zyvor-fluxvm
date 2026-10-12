@@ -1,6 +1,10 @@
 # Changelog
 
-## Unreleased
+## 0.4.7 (2026-10-13)
+
+This release is about FluxMesh. It adds a new crate, `fluxvm-mesh`, and `fluxctl cloud`; **nothing in the macOS package
+changes** except the version number, because the FluxMesh binaries are not packaged yet. Build them from source with
+`cargo build -p fluxvm-mesh -p fluxctl`. Everything below is unit-tested only; none of it has run on real hosts.
 
 ### Added
 - **FluxMesh core** (`fluxvm-mesh`, phases 1-3): a personal-cloud overlay control plane that sits above Network
@@ -27,12 +31,21 @@
   Pulls `h3`/`h3-quinn` into the workspace. Not in the macOS package, and none of it has run against a real
   browser, CA, resolver or router yet.
 
+### Fixed
+- `fluxctl cloud serve-enrollment` declared `--tls-key` twice, so clap's debug assertion failed and the CLI test
+  `every_subcommand_has_consistent_arguments` was red on `main`. It now uses the shared `--tls-key` option
+  (`FLUXMESH_TLS_KEY`, default `<mesh dir>/tls/key.pem`).
+
 ### Docs
 - `docs/fluxmesh.md` is now the overview for the whole FluxMesh stack (status, programs, files, ports, quick start);
   phase docs use `<mesh dir>` instead of hard-coded Linux paths. Network Fabric, cross-Mac networks, proof and
   status, the docs index and the README point at FluxMesh with its real status (unit-tested, not run on real hosts).
 - Fleet operations and quickstart docs describe the generated operator token and `--no-auth`; the README's
   "What's new" and status table reflect 0.4.6 and the redesigned console.
+
+### Repository
+- `packaging/homebrew/fluxvm.rb` follows the published 0.4.6 package, and `examples/fleet-console-video/` holds the
+  generator for the console demo video.
 
 ## 0.4.6 (2026-10-13)
 
