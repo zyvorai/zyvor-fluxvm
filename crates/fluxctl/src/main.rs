@@ -238,6 +238,12 @@ enum Command {
         #[arg(value_parser = output::parse_vm_ref)]
         id: Uuid,
     },
+    /// Save a QEMU VM's RAM/CPU/device state and stop it; `start` resumes.
+    /// See docs/hibernation.md.
+    Hibernate {
+        #[arg(value_parser = output::parse_vm_ref)]
+        id: Uuid,
+    },
     /// Delete a VM, or every VM matching `-l` (needs `--yes` for bulk).
     Delete {
         #[command(flatten)]
@@ -3210,6 +3216,7 @@ async fn run_remote(
         Command::Delete { target } => bulk(target, "delete").await?,
         Command::Pause { id } => pretty(&r.vm_op(id, "pause").await?)?,
         Command::Resume { id } => pretty(&r.vm_op(id, "resume").await?)?,
+        Command::Hibernate { id } => pretty(&r.vm_op(id, "hibernate").await?)?,
         Command::Label { id, labels } => {
             let labels: serde_json::Map<String, serde_json::Value> =
                 labels.into_iter().map(|(k, v)| (k, json!(v))).collect();
@@ -4902,6 +4909,9 @@ async fn main() -> Result<()> {
         Command::Pause { id } => println!("{}", serde_json::to_string_pretty(&m.pause(id).await?)?),
         Command::Resume { id } => {
             println!("{}", serde_json::to_string_pretty(&m.resume(id).await?)?)
+        }
+        Command::Hibernate { id } => {
+            println!("{}", serde_json::to_string_pretty(&m.hibernate(id).await?)?)
         }
         Command::Freeze { id } => {
             m.freeze(id).await?;

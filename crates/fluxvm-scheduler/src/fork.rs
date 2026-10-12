@@ -896,6 +896,7 @@ impl VmManager {
             achieved_security_profile: src.achieved_security_profile,
             security_evidence: None,
             labels,
+            hibernation: None,
         };
         let needs_cid = src.guest_cid.is_some();
         let mut record = self

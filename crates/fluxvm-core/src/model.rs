@@ -1996,6 +1996,10 @@ pub struct RuntimeHostCapability {
     /// virtual networks over Geneve (eBPF dataplane).
     #[serde(default)]
     pub vnet: bool,
+    /// `POST /v1/vms/{id}/hibernate`, resume on `start`,
+    /// `POST /v1/vms/import-hibernated` and `/v1/host/hibernation` (QEMU).
+    #[serde(default)]
+    pub hibernate: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -2110,6 +2114,128 @@ pub struct VmRecord {
     /// Operator key/value labels, editable after create via `PATCH /v1/vms/{id}`.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub labels: std::collections::BTreeMap<String, String>,
+    /// Set while the VM is hibernated: its RAM/CPU/device state sits in
+    /// `dir` and the next `start` restores it instead of booting.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hibernation: Option<HibernationInfo>,
+}
+
+/// Version of the on-disk hibernation layout (`manifest.json`, `state.bin`,
+/// `record.json`, `ovmf_vars.fd`, `seed.img`).
+pub const HIBERNATION_FORMAT: u32 = 1;
+
+/// Where a hibernated VM's state lives and what it needs to resume.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HibernationInfo {
+    pub dir: PathBuf,
+    pub manifest: HibernationManifest,
+}
+
+/// `manifest.json`: written next to the saved state, checked before any
+/// node restores it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HibernationManifest {
+    pub format: u32,
+    pub vm_id: Uuid,
+    pub hibernated_at: DateTime<Utc>,
+    /// Hostname of the node that wrote the state.
+    pub node: String,
+    pub fluxvm_version: String,
+    pub host: HostHibernationFacts,
+    pub vcpus: u8,
+    pub memory_mib: u64,
+    pub state_bytes: u64,
+    /// Whether the root disk is on storage another node can open at the
+    /// same path (`storage: shared` or Ceph RBD).
+    pub shared_storage: bool,
+}
+
+/// The parts of a host that a saved QEMU state depends on.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HostHibernationFacts {
+    /// `qemu-system-x86_64 --version`, e.g. `10.2.1`.
+    pub qemu_version: String,
+    /// The versioned machine type `q35` resolves to, e.g. `pc-q35-10.2`.
+    pub machine_type: String,
+    /// `vendor_id` from `/proc/cpuinfo`.
+    pub cpu_vendor: String,
+    /// `flags` from `/proc/cpuinfo`, sorted. Guests run with `-cpu host`, so
+    /// a target must offer every flag the source did.
+    pub cpu_flags: Vec<String>,
+    /// The effective hibernation directory on this host.
+    pub state_dir: PathBuf,
+}
+
+/// Why `manifest` cannot be restored on a host with `host`'s facts; empty
+/// when it can.
+pub fn hibernation_incompatibilities(
+    manifest: &HibernationManifest,
+    host: &HostHibernationFacts,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    if manifest.format != HIBERNATION_FORMAT {
+        out.push(format!(
+            "state format {} (this host reads {HIBERNATION_FORMAT})",
+            manifest.format
+        ));
+    }
+    let src = &manifest.host;
+    if src.qemu_version != host.qemu_version {
+        out.push(format!(
+            "QEMU {} saved the state, this host has {}",
+            src.qemu_version, host.qemu_version
+        ));
+    }
+    if src.machine_type != host.machine_type {
+        out.push(format!(
+            "machine type {} saved, this host's q35 is {}",
+            src.machine_type, host.machine_type
+        ));
+    }
+    if src.cpu_vendor != host.cpu_vendor {
+        out.push(format!(
+            "CPU vendor {} saved, this host is {}",
+            src.cpu_vendor, host.cpu_vendor
+        ));
+    }
+    let have: std::collections::BTreeSet<&str> =
+        host.cpu_flags.iter().map(String::as_str).collect();
+    let missing: Vec<&str> = src
+        .cpu_flags
+        .iter()
+        .map(String::as_str)
+        .filter(|f| !have.contains(f))
+        .collect();
+    if !missing.is_empty() {
+        out.push(format!("CPU lacks flags: {}", missing.join(" ")));
+    }
+    out
+}
+
+/// Body of `POST /v1/vms/import-hibernated`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImportHibernatedRequest {
+    pub id: Uuid,
+}
+
+/// `GET /v1/host/hibernation`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HostHibernationReport {
+    pub facts: HostHibernationFacts,
+}
+
+/// Body of `POST /v1/host/hibernation/check`; the answer is
+/// [`HibernationCheck`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HibernationCheckRequest {
+    pub manifest: HibernationManifest,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HibernationCheck {
+    pub compatible: bool,
+    #[serde(default)]
+    pub reasons: Vec<String>,
 }
 
 /// Body of `PATCH /v1/vms/{id}`: rename and/or edit labels. A label value of
@@ -3156,5 +3282,66 @@ mod vnet_model_tests {
         let mut c = config();
         c.gateway = "10.21.0.1".into();
         assert!(c.validate().is_err());
+    }
+}
+
+#[cfg(test)]
+mod hibernation_tests {
+    use super::*;
+
+    fn facts(flags: &[&str]) -> HostHibernationFacts {
+        HostHibernationFacts {
+            qemu_version: "10.2.1".into(),
+            machine_type: "pc-q35-10.2".into(),
+            cpu_vendor: "GenuineIntel".into(),
+            cpu_flags: flags.iter().map(|s| s.to_string()).collect(),
+            state_dir: "/var/lib/fluxvm/hibernation".into(),
+        }
+    }
+
+    fn manifest(host: HostHibernationFacts) -> HibernationManifest {
+        HibernationManifest {
+            format: HIBERNATION_FORMAT,
+            vm_id: Uuid::nil(),
+            hibernated_at: Utc::now(),
+            node: "a".into(),
+            fluxvm_version: "0".into(),
+            host,
+            vcpus: 2,
+            memory_mib: 2048,
+            state_bytes: 1,
+            shared_storage: true,
+        }
+    }
+
+    #[test]
+    fn identical_host_is_compatible() {
+        let m = manifest(facts(&["sse4_2", "avx2"]));
+        assert!(hibernation_incompatibilities(&m, &facts(&["avx2", "sse4_2"])).is_empty());
+    }
+
+    #[test]
+    fn superset_flags_are_compatible() {
+        let m = manifest(facts(&["sse4_2"]));
+        assert!(hibernation_incompatibilities(&m, &facts(&["sse4_2", "avx512f"])).is_empty());
+    }
+
+    #[test]
+    fn mismatches_are_reported() {
+        let m = manifest(facts(&["sse4_2", "avx512f"]));
+        let mut host = facts(&["sse4_2"]);
+        host.qemu_version = "9.2.0".into();
+        host.machine_type = "pc-q35-9.2".into();
+        host.cpu_vendor = "AuthenticAMD".into();
+        let r = hibernation_incompatibilities(&m, &host);
+        assert_eq!(r.len(), 4, "{r:?}");
+        assert!(r[3].contains("avx512f"));
+    }
+
+    #[test]
+    fn newer_format_is_rejected() {
+        let mut m = manifest(facts(&[]));
+        m.format = HIBERNATION_FORMAT + 1;
+        assert_eq!(hibernation_incompatibilities(&m, &facts(&[])).len(), 1);
     }
 }

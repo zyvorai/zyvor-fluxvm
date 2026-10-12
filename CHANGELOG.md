@@ -2,25 +2,7 @@
 
 ## Unreleased
 
-### Added: macOS warm pool (`fluxctl macos-pool`)
-- Up to two slot-bound macOS guests: `enroll` a running, set-up, logged-in guest (saves a `warm` snapshot, stops it),
-  `checkout` restores a free slot, `return` stops it so the next checkout starts pristine again. REST:
-  `GET /v1/macos-pool`, `POST /v1/macos-pool/checkout`, `POST /v1/macos-pool/{id}/enroll|return`; checkout is 409
-  when no slot is free. A macOS guest cannot be forked or branched, so slots are reused rather than consumed. Not
-  verified on hardware; restore needs an unlocked login session ([docs/macos.md](docs/macos.md#macos-warm-pool)).
-
-### Added: grow a stopped vz VM's root disk
-- `PATCH /v1/vms/{id}/disks/root` (`fluxctl disk resize <id> root --size-gib N`) now works on the `vz` backend for macOS
-  and Linux guests: the VM must be stopped, the size is an absolute grow-only target, and `apple.asif_overlay` VMs are
-  refused. It extends the sparse file only; the guest still has to grow its own partition or APFS container
-  (`diskutil apfs resizeContainer`), which is not automated and not verified on hardware ([docs/macos.md](docs/macos.md)).
-- A third macOS guest is refused at create and at start with 409 (Apple allows two per Mac); this used to fail late
-  with a raw VZ error.
-
-### Added: simulated Macs and a one-command fleet demo
-- `fluxvm-agent sim-node` registers a simulated Mac with central (capacity, heartbeats, simulated macOS guests, overlay
-  config), and `scripts/fleet-sim.sh` runs a central plus three of them: a tenant leases a Mac, starts two macOS VMs
-  (a third is refused at Apple's two-guest limit), runs a command and creates a private network
+pple's two-guest limit), runs a command and creates a private network
   ([docs/fleet-quickstart.md](docs/fleet-quickstart.md)). No Macs or real guests are involved, so it exercises central,
   tenancy, scheduling, overlay allocation and the console, not virtualization.
 
@@ -49,6 +31,7 @@
 
 ### Fixed
 - Raw base images are cloned with the macOS-safe copy on every backend (`cp --reflink` is GNU-only).
+
 
 ### Added: virtual networks (eBPF routing, Geneve overlay, SNAT, floating IPs)
 - A `tap` NIC with `vnet` (`{vni, ip, prefix_len, gateway}`) joins a VNI-isolated IPv4 network routed entirely in eBPF:
