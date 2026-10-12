@@ -11,7 +11,7 @@ use crate::fleet_client::{self, HttpError, call, query};
 use crate::output::OutputFormat;
 use crate::{
     FleetCommand, FleetImageCommand, FleetKeyCommand, FleetLeaseCommand, FleetNetworkCommand,
-    FleetTenantCommand,
+    FleetTenantCommand, FleetWebhookCommand,
 };
 use anstyle::{AnsiColor, Style};
 use anyhow::{Context, Result, bail};
@@ -868,6 +868,159 @@ async fn dispatch(
             }
             Ok(())
         }
+        FleetCommand::Notifications { limit } => {
+            let v = get(
+                central,
+                token,
+                &format!("/fleet/notifications?limit={limit}"),
+            )
+            .await?;
+            if !out.human {
+                return out.json(&v);
+            }
+            let list = items(&v);
+            if list.is_empty() {
+                println!("No notifications.");
+                return Ok(());
+            }
+            for n in &list {
+                let kind = s(n, "type");
+                let mark = if kind.contains("over")
+                    || kind.contains("down")
+                    || kind.contains("ended")
+                {
+                    out.red("●")
+                } else if kind.contains("near") || kind.contains("ending") || kind.contains("scrub")
+                {
+                    out.yellow("●")
+                } else {
+                    out.dim("●")
+                };
+                println!(
+                    "{mark} {}  {}",
+                    s(n, "title"),
+                    out.dim(time(n, "time").map(rel).unwrap_or_default())
+                );
+                if !s(n, "detail").is_empty() {
+                    println!("  {}", out.dim(s(n, "detail")));
+                }
+            }
+            Ok(())
+        }
+        FleetCommand::Webhooks { command } => match command.unwrap_or(FleetWebhookCommand::List) {
+            FleetWebhookCommand::List => {
+                let v = get(central, token, "/fleet/webhooks").await?;
+                if !out.human {
+                    return out.json(&v);
+                }
+                let list = items(&v);
+                if list.is_empty() {
+                    println!("No webhooks.");
+                    out.next("fluxctl fleet webhooks add https://hooks.example.com/fluxvm --event lease.ending");
+                    return Ok(());
+                }
+                let mut t = Table::new(vec!["ID", "URL", "EVENTS", "LAST DELIVERY"]);
+                for w in &list {
+                    let events: Vec<&str> = w
+                        .get("events")
+                        .and_then(Value::as_array)
+                        .map(|a| a.iter().filter_map(Value::as_str).collect())
+                        .unwrap_or_default();
+                    let last = w.pointer("/deliveries/0").cloned();
+                    t.row(vec![
+                        ct(s(w, "id"), Tone::Dim),
+                        c(s(w, "url")),
+                        c(if events.is_empty() {
+                            "all".to_owned()
+                        } else {
+                            events.join(",")
+                        }),
+                        match last {
+                            Some(d) if d.get("ok").and_then(Value::as_bool) == Some(true) => ct(
+                                format!("ok {}", time(&d, "time").map(rel).unwrap_or_default()),
+                                Tone::Ok,
+                            ),
+                            Some(d) => ct(format!("failing: {}", s(&d, "error")), Tone::Bad),
+                            None => ct("none yet", Tone::Dim),
+                        },
+                    ]);
+                }
+                t.print(&out);
+                Ok(())
+            }
+            FleetWebhookCommand::Add { url, events } => {
+                let v = call(
+                    central,
+                    token,
+                    Method::POST,
+                    "/fleet/webhooks",
+                    Some(json!({"url": url, "events": events})),
+                )
+                .await?;
+                if !out.human {
+                    return out.json(&v);
+                }
+                out.done(format!(
+                    "Added webhook {}.",
+                    s(v.get("webhook").unwrap_or(&Value::Null), "id")
+                ));
+                println!();
+                println!("  {}  {}", out.dim("Secret"), out.bold(s(&v, "secret")));
+                println!();
+                println!(
+                    "  Verify X-FluxVM-Signature (sha256=HMAC of the body) with it. It is shown only this once."
+                );
+                out.next(format!(
+                    "fluxctl fleet webhooks test {}",
+                    s(v.get("webhook").unwrap_or(&Value::Null), "id")
+                ));
+                Ok(())
+            }
+            FleetWebhookCommand::Rm { id } => {
+                call(
+                    central,
+                    token,
+                    Method::DELETE,
+                    &format!("/fleet/webhooks/{}", esc(&id)),
+                    None,
+                )
+                .await?;
+                if !out.human {
+                    return out.json(&json!({"ok": true}));
+                }
+                out.done(format!("Deleted webhook {id}."));
+                Ok(())
+            }
+            FleetWebhookCommand::Test { id } => {
+                let v = call(
+                    central,
+                    token,
+                    Method::POST,
+                    &format!("/fleet/webhooks/{}/test", esc(&id)),
+                    None,
+                )
+                .await?;
+                if !out.human {
+                    return out.json(&v);
+                }
+                let d = v.get("delivery").cloned().unwrap_or_default();
+                if d.get("ok").and_then(Value::as_bool) == Some(true) {
+                    out.done(format!(
+                        "Delivered: the endpoint answered {}.",
+                        u(&d, "status")
+                    ));
+                    Ok(())
+                } else {
+                    bail!(
+                        "the test was not delivered: {}",
+                        match s(&d, "error") {
+                            "" => format!("status {}", u(&d, "status")),
+                            e => e.to_owned(),
+                        }
+                    )
+                }
+            }
+        },
         FleetCommand::Images { command } => images(central, token, &out, command).await,
         FleetCommand::Networks { command } => networks(central, token, &out, command).await,
         FleetCommand::Tenant { command } => tenant(central, token, &out, command).await,

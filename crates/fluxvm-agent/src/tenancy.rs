@@ -127,6 +127,34 @@ fn looks_like_key_id(s: &str) -> bool {
         .is_some_and(|h| h.len() == 12 && h.bytes().all(|b| b.is_ascii_hexdigit()))
 }
 
+/// A URL that receives notifications as signed JSON. A tenant's webhook gets that tenant's events; the operator's
+/// (`owner: None`) gets every event.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Webhook {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
+    pub url: String,
+    /// Event kinds to send; empty sends all.
+    #[serde(default)]
+    pub events: Vec<String>,
+    /// HMAC-SHA256 key for `X-FluxVM-Signature`. Shown once, at creation.
+    pub secret: String,
+    pub created_at: DateTime<Utc>,
+}
+
+impl Webhook {
+    pub fn public_json(&self) -> Value {
+        serde_json::json!({
+            "id": self.id,
+            "owner": self.owner,
+            "url": self.url,
+            "events": self.events,
+            "created_at": self.created_at,
+        })
+    }
+}
+
 /// Most named keys one tenant may hold.
 pub const MAX_KEYS: usize = 50;
 
@@ -641,6 +669,9 @@ pub struct TenancyState {
     /// The image catalog: VM images the operator has put on the Macs, which tenants pick from in the console.
     #[serde(default)]
     pub images: BTreeMap<String, CatalogImage>,
+    /// Webhooks that receive notifications (`/fleet/webhooks`).
+    #[serde(default)]
+    pub webhooks: Vec<Webhook>,
     /// Prices for leases and VM time (`GET/PUT /fleet/prices`).
     #[serde(default)]
     pub prices: crate::billing::PriceList,

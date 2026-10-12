@@ -91,6 +91,7 @@ Next: fluxctl fleet run macos-27-xcode-1 -- sw_vers
 | `fleet events [--limit N]` | The activity log (with the API key used) |
 | `fleet keys [create\|revoke]` | A tenant's named API keys |
 | `fleet prices [--set FILE]`, `fleet bill`, `fleet budget [AMOUNT]` | Prices, monthly statements, budgets |
+| `fleet notifications`, `fleet webhooks [add\|rm\|test]` | Notifications and webhooks |
 | `fleet rm VM` | Delete a VM by name (asks on a terminal; `-y` to skip) |
 | `fleet vms`, `fleet nodes`, `fleet node M` | VMs and Macs, with macOS slots (`●○`) and when each lease can be released |
 | `fleet lease create\|list\|get\|release` | Leases (`create --hours 72 --min-vcpus 16 --nested`) |
@@ -137,6 +138,41 @@ fluxctl fleet budget 500                    # a tenant's own monthly budget
   over, and `fleet bill` says so. Nothing is stopped.
 - The console shows month-to-date spend on a tenant's Overview, a cost estimate when leasing a Mac or launching a VM,
   a Billing page with statements and the budget, and (for the operator) the price list and every tenant's statement.
+
+## Notifications and webhooks
+
+Central turns what happens into notifications, shown under the console's bell and on its Notifications page, and
+sends them to webhooks.
+
+| Event | Who | When |
+|---|---|---|
+| `vm.created`, `vm.deleted` | tenant | a VM is launched or deleted through central |
+| `lease.created`, `lease.released` | tenant | a Mac is leased or released |
+| `lease.ending` | tenant | a lease with an end time has 24 hours left, then 1 hour |
+| `lease.ended` | tenant | the reconciler ended a lease at its end time |
+| `budget.near`, `budget.over` | tenant | the month's spend reaches 80%, then 100% of the budget |
+| `node.down`, `node.scrub`, `drain.done` | operator | a Mac stops reporting, needs a scrub, finishes draining |
+
+Time-based events are found by the reconciler (every `--reconcile-secs`, 60 by default) and sent once. The record of
+what was sent lives in memory, so after a restart an event that is still true may be sent once more.
+
+```bash
+fluxctl fleet webhooks add https://hooks.example.com/fluxvm --event lease.ending --event budget.over
+fluxctl fleet webhooks test whk_51a0c2e9b3f1
+fluxctl fleet notifications
+```
+
+A webhook receives a `POST` with the notification as JSON (`id`, `type`, `time`, `tenant`, `title`, `detail`, `link`)
+and the headers `X-FluxVM-Event`, `X-FluxVM-Delivery` and `X-FluxVM-Signature: sha256=<hex>` (HMAC-SHA256 of the body
+with the webhook's secret, the same scheme as GitHub's). A delivery is tried up to three times (at once, after 2 s,
+after 10 s more); a 2xx answer is success. The last 20 deliveries per webhook are shown in the console.
+
+- A tenant's webhooks get only that tenant's events; the operator's get everything. Each owner has at most 10.
+- A tenant's webhook must use `https` and reach a public address. The host is resolved at every delivery: if any of
+  its addresses is loopback, private, link-local or otherwise non-public the delivery is refused, and the connection
+  is pinned to the address that was checked, so the webhook cannot be turned against the network central runs in.
+  Redirects are not followed. The operator's webhooks may point anywhere.
+- Secrets are stored in the tenancy state (mode 0600, mirrored with HA) and shown once, at creation.
 
 ## API keys
 
@@ -321,6 +357,8 @@ capabilities, but not its address, labels or security report.
 | `GET /fleet/prices` | tenant, operator; `PUT` operator |
 | `GET /fleet/billing[?month=YYYY-MM&tenant=T&format=csv]` | tenant (own), operator |
 | `PUT /fleet/tenants/me/budget`, `PUT /fleet/tenants/{id}/budget` | tenant (primary token or a full key), operator |
+| `GET /fleet/notifications[?limit=N]` | tenant (own), operator |
+| `GET/POST /fleet/webhooks`, `DELETE /fleet/webhooks/{id}`, `POST /fleet/webhooks/{id}/test` | tenant (own), operator |
 | `GET /fleet/events[?limit=N&tenant=T]` | tenant (own actions), operator (all, or one tenant's) |
 | `PUT/DELETE /fleet/images/{name}` | operator |
 | `GET /fleet/nodes/{name}` | operator; tenant for a Mac it leases (size, capacity, Apple capabilities only) |

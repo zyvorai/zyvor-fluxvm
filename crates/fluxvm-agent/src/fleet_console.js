@@ -127,6 +127,7 @@ const S = {
   tenantKeys: {}, // operator: tenant id -> its API keys, loaded when its details open
   billMonth: null,
   billView: null,
+  hooks: null, // webhooks, loaded on the Notifications page
   billLoading: null,
   lastViewKey: '',
   lastInspKey: '',
@@ -210,10 +211,11 @@ async function load() {
     soft(api('GET', '/fleet/overlays'), { items: [] }),
     soft(api('GET', '/fleet/images'), { items: [] }),
   ]);
-  const [events, prices, bill] = await Promise.all([
+  const [events, prices, bill, ntfs] = await Promise.all([
     soft(api('GET', '/fleet/events?limit=300'), { items: [] }),
     soft(api('GET', '/fleet/prices'), null),
     soft(api('GET', '/fleet/billing'), null),
+    soft(api('GET', '/fleet/notifications?limit=50'), { items: [] }),
   ]);
   const d = {
     leases: (leases.items || []).sort((a, b) => (a.state === b.state ? b.started_at.localeCompare(a.started_at)
@@ -222,6 +224,7 @@ async function load() {
     unreachable: vms.unreachable_nodes || [],
     overlays: overlays.items || [],
     events: events.items || [],
+    notifications: ntfs.items || [],
     prices,
     bill,
     images: (images.items || []).sort((a, b) => (a.guest_os === b.guest_os ? a.name.localeCompare(b.name) : a.guest_os === 'macos' ? -1 : 1)),
@@ -326,6 +329,7 @@ const PAGES = () => [
   { id: 'billing', label: 'Billing' },
   { id: 'usage', label: 'Usage' },
   { id: 'activity', label: 'Activity' },
+  { id: 'notifications', label: 'Notifications' },
   ...(isOp() ? [] : [{ id: 'keys', label: 'API keys', count: () => (S.data.keys || []).length }]),
   ...(isOp() ? [{ id: 'policy', label: 'Policy' }] : []),
 ];
@@ -347,9 +351,10 @@ function render(force) {
   document.title = page.label + ' · FluxVM Cloud';
   $('signout').hidden = !token();
   renderBanners();
+  renderBell();
   tick();
 
-  const viewKey = JSON.stringify([page.id, r.id, S.data, S.me, S.usage, S.usageDays, S.policy, S.vmFilter, S.query, S.billMonth, S.billView]);
+  const viewKey = JSON.stringify([page.id, r.id, S.data, S.me, S.usage, S.usageDays, S.policy, S.vmFilter, S.query, S.billMonth, S.billView, S.hooks]);
   if (force || viewKey !== S.lastViewKey) {
     S.lastViewKey = viewKey;
     const view = $('view');
@@ -684,6 +689,17 @@ const VIEWS = {
       out.push(statementPanel(st));
     }
     if (!isOp()) out.push(budgetPanel(stmts[0]));
+    return out;
+  },
+
+  notifications() {
+    const list = S.data.notifications || [];
+    const out = [pageHead('Notifications', 'Events worth knowing about, newest first. Send them to Slack, PagerDuty or your own '
+      + 'service with a webhook.', h('button', { class: 'primary', onclick: webhookSheet }, 'Add webhook'))];
+    out.push(h('div', { class: 'panel' }, list.length ? h('div', { class: 'list' }, list.map(ntfRow))
+      : h('div', { class: 'empty' }, h('h3', {}, 'Nothing yet'), h('p', {}, isOp() ? 'Macs that stop reporting, finished drains, leases and budgets show up here.'
+        : 'Leases ending soon, budget warnings and VM changes show up here.'))));
+    out.push(h('div', { class: 'section' }, h('div', { class: 'section-head' }, h('h2', { class: 'grow' }, 'Webhooks')), webhookList()));
     return out;
   },
 
@@ -1227,6 +1243,110 @@ function priceSheet() {
   });
 }
 
+// ---- notifications --------------------------------------------------------------------------------------------------
+
+const SEEN_KEY = 'fluxvm.console.seen';
+const tone = (kind) => (/over|down|ended/.test(kind) ? 'bad' : /near|ending|scrub/.test(kind) ? 'warn' : '');
+function seenAt() { return Number(storage.get('localStorage', SEEN_KEY + '.' + (isOp() ? 'op' : S.me.id)) || 0); }
+function markSeen() { storage.set('localStorage', SEEN_KEY + '.' + (isOp() ? 'op' : S.me.id), String(Date.now())); renderBell(); }
+
+function ntfRow(n) {
+  const fresh = new Date(n.time).getTime() > seenAt();
+  return h(n.link ? 'a' : 'div', { href: n.link || null, style: { color: 'inherit', textDecoration: 'none' } },
+    h('span', { class: 'ntf-dot ' + (tone(n.type) || (fresh ? 'new' : '')), 'aria-hidden': 'true' }),
+    h('div', { class: 'grow' }, h('div', { style: { fontWeight: fresh ? 600 : 400 } }, n.title),
+      n.detail ? h('div', { class: 'small muted' }, n.detail) : null,
+      h('div', { class: 'small muted' }, rel(n.time) + (isOp() && n.tenant ? ', ' + n.tenant : ''))));
+}
+
+function renderBell() {
+  if (!S.data) return;
+  const list = S.data.notifications || [];
+  const seen = seenAt();
+  const unread = list.filter((n) => new Date(n.time).getTime() > seen).length;
+  $('bell-count').hidden = !unread;
+  $('bell-count').textContent = unread > 9 ? '9+' : String(unread);
+  $('bell').setAttribute('aria-label', unread ? unread + ' new notifications' : 'Notifications');
+  const panel = $('bell-panel');
+  if (panel.hidden) return;
+  panel.replaceChildren(
+    h('div', { class: 'row', style: { padding: '14px 16px 6px' } }, h('h3', { class: 'grow' }, 'Notifications'),
+      h('a', { href: '#/notifications', class: 'small', onclick: () => toggleBell(false) }, 'All and webhooks')),
+    list.length ? h('div', { class: 'list' }, list.slice(0, 8).map(ntfRow))
+      : h('p', { class: 'muted small', style: { padding: '8px 16px 16px' } }, 'Nothing yet.'));
+}
+
+function toggleBell(open) {
+  const panel = $('bell-panel');
+  const show = open === undefined ? panel.hidden : open;
+  panel.hidden = !show;
+  $('bell').setAttribute('aria-expanded', String(show));
+  if (show) { renderBell(); setTimeout(markSeen, 1500); }
+}
+
+function webhookList() {
+  if (!S.hooks) {
+    api('GET', '/fleet/webhooks').then((r) => { S.hooks = r; S.lastViewKey = ''; render(); })
+      .catch((e) => { S.hooks = { items: [], kinds: [] }; toast(e.message, true); });
+    return h('p', { class: 'muted' }, 'Loading…');
+  }
+  const items = S.hooks.items || [];
+  if (!items.length) {
+    return h('div', { class: 'panel empty' }, h('h3', {}, 'No webhooks'), h('p', {}, 'A webhook receives each event as JSON, signed with your '
+      + 'secret, so a chat channel or pager hears about it right away.'), h('button', { class: 'primary', onclick: webhookSheet }, 'Add webhook'));
+  }
+  return h('div', { class: 'stack' }, items.map((w) => {
+    const last = (w.deliveries || [])[0];
+    return h('div', { class: 'panel pad' },
+      h('div', { class: 'row' }, h('div', { class: 'grow', style: { minWidth: 0 } }, h('code', { style: { overflowWrap: 'anywhere' } }, w.url),
+        h('div', { class: 'small muted' }, (w.events && w.events.length ? w.events.join(', ') : 'Every event') + (isOp() && w.owner ? ', tenant ' + w.owner : ''))),
+      last ? status(last.ok ? { text: 'Delivered ' + rel(last.time), cls: 'ok' } : { text: 'Failing', cls: 'bad' }) : h('span', { class: 'muted small' }, 'Nothing sent yet')),
+      (w.deliveries || []).length ? h('details', { class: 'adv', style: { marginTop: '10px' } }, h('summary', {}, 'Recent deliveries'),
+        h('div', { class: 'table-wrap' }, h('table', {}, h('tbody', {}, w.deliveries.map((d) => h('tr', {},
+          h('td', { class: 'muted small' }, rel(d.time)), h('td', { class: 'small' }, d.type),
+          h('td', {}, status(d.ok ? { text: String(d.status), cls: 'ok' } : { text: d.error || 'failed', cls: 'bad' })),
+          h('td', { class: 'small muted' }, 'attempt ' + d.attempt))))))) : null,
+      h('div', { class: 'row', style: { marginTop: '12px' } },
+        h('button', { onclick: async (e) => {
+          e.target.disabled = true;
+          try {
+            const r = await api('POST', '/fleet/webhooks/' + enc(w.id) + '/test');
+            toast(r.delivery.ok ? 'Test delivered (' + r.delivery.status + ')' : 'Test failed: ' + (r.delivery.error || r.delivery.status), !r.delivery.ok);
+          } catch (err) { toast(err.message, true); }
+          S.hooks = null; render();
+        } }, 'Send test'),
+        h('button', { class: 'plain danger', onclick: () => confirmAct({ title: 'Delete this webhook?', body: w.url + ' stops getting events.',
+          confirm: 'Delete webhook', danger: true }, 'DELETE', '/fleet/webhooks/' + enc(w.id), 'Webhook deleted', undefined, () => { S.hooks = null; }) }, 'Delete')));
+  }));
+}
+
+function webhookSheet() {
+  const kinds = (S.hooks && S.hooks.kinds && S.hooks.kinds.length) ? S.hooks.kinds
+    : ['vm.created', 'vm.deleted', 'lease.created', 'lease.released', 'lease.ending', 'lease.ended', 'budget.near', 'budget.over'];
+  const label = { 'vm.created': 'VM launched', 'vm.deleted': 'VM deleted', 'lease.created': 'Mac leased', 'lease.released': 'Lease released',
+    'lease.ending': 'Lease ending soon', 'lease.ended': 'Lease ended', 'budget.near': 'Budget at 80%', 'budget.over': 'Over budget',
+    'node.down': 'Mac stopped reporting', 'node.scrub': 'Mac needs a scrub', 'drain.done': 'Drain finished', test: 'Test' };
+  openSheet({
+    title: 'Add a webhook', intro: 'Each event is POSTed as JSON with an X-FluxVM-Signature header (HMAC-SHA256 of the body with your secret).',
+    body: [
+      h('label', { class: 'field' }, h('span', {}, 'URL'), h('input', { name: 'url', type: 'url', required: true, placeholder: 'https://hooks.example.com/fluxvm', class: 'mono' }),
+        h('div', { class: 'hint' }, isOp() ? 'Any URL, including internal ones.' : 'An https address on the public internet.')),
+      h('div', {}, h('span', { class: 'field-label' }, 'Events'), h('p', { class: 'hint', style: { margin: '0 0 6px' } }, 'Leave all unticked to get every event.'),
+        h('div', { class: 'grid2' }, kinds.filter((k) => k !== 'test').map((k) => h('label', { class: 'check' }, h('input', { type: 'checkbox', name: 'ev', value: k }),
+          h('span', {}, label[k] || k))))),
+    ],
+    submit: 'Add webhook',
+    onSubmit: async (f) => {
+      const r = await api('POST', '/fleet/webhooks', { body: { url: String(f.get('url')).trim(), events: f.getAll('ev') } });
+      S.hooks = null;
+      refresh({ force: true });
+      setTimeout(() => openSheet({ title: 'Webhook secret', intro: 'Verify each delivery with it. This is the only time it is shown.',
+        body: [h('div', { class: 'token-box' }, r.secret), h('button', { type: 'button', onclick: () => copy(r.secret, 'Secret') }, 'Copy secret')],
+        submit: 'Done', cancel: null, onSubmit: async () => {} }), 0);
+    },
+  });
+}
+
 // ---- API keys -------------------------------------------------------------------------------------------------------
 
 function keyTable(list, owner) {
@@ -1380,6 +1500,8 @@ function describe(e) {
   if (a === 'nodes' && m === 'DELETE') return 'Forgot node ' + b;
   if (a === 'images') return (m === 'DELETE' ? 'Removed image ' : 'Saved image ') + b;
   if (a === 'policy') return 'Changed the policy';
+  if (a === 'prices') return 'Changed the price list';
+  if (a === 'webhooks') return c === 'test' ? 'Sent a test to a webhook' : m === 'DELETE' ? 'Deleted a webhook' : 'Added a webhook';
   if (a === 'reconcile') return 'Reconciled the fleet';
   return m + ' ' + e.path;
 }
@@ -2082,6 +2204,9 @@ function cycleTheme() {
 }
 
 $('theme').addEventListener('click', cycleTheme);
+$('bell').addEventListener('click', (e) => { e.stopPropagation(); toggleBell(); });
+document.addEventListener('click', (e) => { if (!$('bell-panel').hidden && !$('bell-panel').contains(e.target)) toggleBell(false); });
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !$('bell-panel').hidden) toggleBell(false); });
 $('refresh').addEventListener('click', () => refresh({ force: true }));
 $('signout').addEventListener('click', () => {
   storage.del('sessionStorage', TOKEN_KEY);
@@ -2099,7 +2224,7 @@ $('signin-form').addEventListener('submit', (e) => {
   storage.set('sessionStorage', TOKEN_KEY, t);
   $('signin-token').value = '';
   // Nothing from the previous token's session carries over.
-  Object.assign(S, { role: null, me: null, data: null, error: null, usage: null, policy: null, exec: {}, tenantKeys: {}, billMonth: null, billView: null, billLoading: null, query: '',
+  Object.assign(S, { role: null, me: null, data: null, error: null, usage: null, policy: null, exec: {}, tenantKeys: {}, billMonth: null, billView: null, billLoading: null, hooks: null, query: '',
     lastViewKey: '', lastInspKey: '', loadedAt: 0 });
   stopScreen();
   $('search').value = '';

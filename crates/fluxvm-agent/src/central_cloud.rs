@@ -133,6 +133,7 @@ pub(super) async fn reconcile_once(fleet: &Fleet) -> Value {
         }
         ended
     };
+    super::notify::scan(fleet, &ended).await;
     let rotated = {
         let mut t = fleet.tenancy.lock().await;
         let days = t.policy.overlay_key_rotation_days;
@@ -1573,6 +1574,7 @@ mod tests {
             tenancy_path: None,
             ha: None,
             audit: Arc::new(super::super::audit::AuditLog::memory()),
+            notify: Arc::default(),
         }
     }
 
@@ -2449,5 +2451,132 @@ mod tests {
                 .starts_with("tenant,from,to,description"),
             "{v}"
         );
+    }
+
+    #[tokio::test]
+    async fn webhooks_get_signed_events() {
+        // A receiver that keeps what it gets.
+        let got: Arc<Mutex<Vec<(String, String, Vec<u8>)>>> = Arc::default();
+        let sink = got.clone();
+        let receiver = Router::new().route(
+            "/hook",
+            post(
+                move |headers: axum::http::HeaderMap, body: axum::body::Bytes| {
+                    let sink = sink.clone();
+                    async move {
+                        let h = |k: &str| {
+                            headers
+                                .get(k)
+                                .and_then(|v| v.to_str().ok())
+                                .unwrap_or_default()
+                                .to_owned()
+                        };
+                        sink.lock().await.push((
+                            h("x-fluxvm-event"),
+                            h("x-fluxvm-signature"),
+                            body.to_vec(),
+                        ));
+                        StatusCode::NO_CONTENT
+                    }
+                },
+            ),
+        );
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let hook_url = format!("http://{}/hook", l.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(l, receiver).await.unwrap() });
+
+        let fleet = fleet_of(vec![mac("mac-a", 32_768, 0)], TenancyState::default());
+        let app = Router::new()
+            .route("/fleet/tenants", post(create_tenant))
+            .route("/fleet/leases", post(create_lease))
+            .route(
+                "/fleet/webhooks",
+                get(super::super::notify::list_webhooks).post(super::super::notify::create_webhook),
+            )
+            .route(
+                "/fleet/webhooks/{id}/test",
+                post(super::super::notify::test_webhook),
+            )
+            .route(
+                "/fleet/notifications",
+                get(super::super::notify::notifications),
+            )
+            .layer(middleware::from_fn_with_state(
+                fleet.clone(),
+                auth_middleware,
+            ))
+            .with_state(fleet.clone());
+        let (_, v) = call(
+            &app,
+            "POST",
+            "/fleet/tenants",
+            "admin-token",
+            json!({"id": "acme"}),
+        )
+        .await;
+        let token = v["token"].as_str().unwrap().to_owned();
+
+        // A tenant may not point a webhook at a private address or plain http.
+        for bad in [
+            hook_url.as_str(),
+            "https://10.0.0.1/x",
+            "https://127.0.0.1/x",
+        ] {
+            let (s, v) = call(&app, "POST", "/fleet/webhooks", &token, json!({"url": bad})).await;
+            assert_eq!(s, 400, "{bad}: {v}");
+        }
+        let (s, _) = call(
+            &app,
+            "POST",
+            "/fleet/webhooks",
+            &token,
+            json!({"url": "https://example.com/x", "events": ["node.down"]}),
+        )
+        .await;
+        assert_eq!(s, 400, "operator events are not for tenants");
+
+        // The operator's hook (internal URLs allowed) gets the tenant's lease, signed.
+        let (s, v) = call(
+            &app,
+            "POST",
+            "/fleet/webhooks",
+            "admin-token",
+            json!({"url": hook_url, "events": ["lease.created", "test"]}),
+        )
+        .await;
+        assert_eq!(s, 201, "{v}");
+        let secret = v["secret"].as_str().unwrap().to_owned();
+        let id = v["webhook"]["id"].as_str().unwrap().to_owned();
+        let (s, _) = call(&app, "POST", "/fleet/leases", &token, json!({})).await;
+        assert_eq!(s, 201);
+        let mut delivered = false;
+        for _ in 0..100 {
+            if !got.lock().await.is_empty() {
+                delivered = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert!(delivered, "no delivery");
+        let (kind, sig, body) = got.lock().await[0].clone();
+        assert_eq!(kind, "lease.created");
+        assert!(crate::gha::verify_signature(secret.as_bytes(), &body, &sig));
+        let event: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(event["tenant"], "acme");
+
+        // A test delivery reports its result; the tenant sees the notification but not the operator's hook.
+        let (s, v) = call(
+            &app,
+            "POST",
+            &format!("/fleet/webhooks/{id}/test"),
+            "admin-token",
+            json!({}),
+        )
+        .await;
+        assert_eq!((s, v["delivery"]["ok"].as_bool()), (200, Some(true)), "{v}");
+        let (_, v) = call(&app, "GET", "/fleet/webhooks", &token, json!({})).await;
+        assert!(v["items"].as_array().unwrap().is_empty());
+        let (_, v) = call(&app, "GET", "/fleet/notifications", &token, json!({})).await;
+        assert_eq!(v["items"][0]["type"], "lease.created");
     }
 }

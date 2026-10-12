@@ -1187,6 +1187,16 @@ enum FleetCommand {
         #[arg(long)]
         tenant: Option<String>,
     },
+    /// Recent notifications: leases ending, budgets, VM changes (and, for the operator, Macs down, drains, scrubs).
+    Notifications {
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+    },
+    /// Webhooks that receive notifications as signed JSON: list (default), add, rm, test.
+    Webhooks {
+        #[command(subcommand)]
+        command: Option<FleetWebhookCommand>,
+    },
     /// The image catalog: list (default), add or remove (operator).
     Images {
         #[command(subcommand)]
@@ -1312,6 +1322,25 @@ enum FleetCommand {
         timeout: Option<u64>,
         #[arg(trailing_var_arg = true, required = true)]
         command: Vec<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum FleetWebhookCommand {
+    List,
+    /// Add a webhook; prints its signing secret once.
+    Add {
+        url: String,
+        /// Only these events (repeatable), e.g. `--event lease.ending --event budget.over`. Default: all.
+        #[arg(long = "event")]
+        events: Vec<String>,
+    },
+    Rm {
+        id: String,
+    },
+    /// Send a test event and show what the endpoint answered.
+    Test {
+        id: String,
     },
 }
 
