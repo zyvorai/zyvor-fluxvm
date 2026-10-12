@@ -148,3 +148,7 @@ NetworkExtension desired-state contract.
 
 The tests are all unprivileged. They do not create interfaces or modify host
 routes.
+
+## Phase 4 — zero-touch cloud
+
+Phase 4 adds HMAC-signed enrollment, coordinated WireGuard key rotation, deterministic ULA IPv6, FluxDNS replica election, geo/load-aware relay HA, multi-home failover, a native macOS NetworkExtension bridge, and one-command cloud bootstrap. See [fluxmesh-phase4.md](fluxmesh-phase4.md).

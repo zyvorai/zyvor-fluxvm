@@ -9,19 +9,27 @@
 //! NAT observations, direct-vs-relay path selection, durable state and a
 //! WireGuard command plan that a privileged host service can apply.
 //!
-//! The first release is dependency-free on purpose. The state model is usable
-//! from Linux and macOS, while packet/tunnel backends can evolve independently.
+//! The durable state model stays intentionally small and portable across Linux
+//! and macOS while transport, enrollment and platform backends evolve independently.
 
 pub mod acl;
 pub mod agent;
 pub mod catalog;
+pub mod cloud;
 pub mod dns;
+pub mod dns_ha;
+pub mod enroll;
+pub mod enroll_tls;
 pub mod fabric;
 pub mod gateway;
 pub mod http;
+pub mod ipv6;
+pub mod keydist;
 pub mod macos;
+pub mod multihome;
 pub mod reconcile;
 pub mod relay;
+pub mod relay_ha;
 pub mod service;
 pub mod stun;
 pub mod tls_relay;
@@ -30,7 +38,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs;
 use std::io;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -683,6 +691,7 @@ impl MeshState {
         Ok(WireGuardPlan {
             interface: interface.into(),
             local_address: local.overlay_ip,
+            local_ipv6: None,
             listen_port,
             private_key_file: private_key_file.into(),
             peers,
@@ -703,6 +712,8 @@ pub struct WireGuardPeerPlan {
 pub struct WireGuardPlan {
     pub interface: String,
     pub local_address: Ipv4Addr,
+    /// Optional deterministic ULA host address, populated by Phase 4.
+    pub local_ipv6: Option<Ipv6Addr>,
     pub listen_port: u16,
     pub private_key_file: PathBuf,
     pub peers: Vec<WireGuardPeerPlan>,
@@ -730,16 +741,27 @@ impl WireGuardPlan {
                 "dev".into(),
                 self.interface.clone(),
             ],
-            vec![
-                "wg".into(),
-                "set".into(),
-                self.interface.clone(),
-                "listen-port".into(),
-                self.listen_port.to_string(),
-                "private-key".into(),
-                self.private_key_file.display().to_string(),
-            ],
         ];
+        if let Some(ipv6) = self.local_ipv6 {
+            commands.push(vec![
+                "ip".into(),
+                "-6".into(),
+                "address".into(),
+                "replace".into(),
+                format!("{ipv6}/128"),
+                "dev".into(),
+                self.interface.clone(),
+            ]);
+        }
+        commands.push(vec![
+            "wg".into(),
+            "set".into(),
+            self.interface.clone(),
+            "listen-port".into(),
+            self.listen_port.to_string(),
+            "private-key".into(),
+            self.private_key_file.display().to_string(),
+        ]);
 
         for peer in &self.peers {
             let mut cmd = vec![
@@ -770,14 +792,18 @@ impl WireGuardPlan {
         ]);
         for peer in &self.peers {
             for prefix in &peer.allowed_ips {
-                commands.push(vec![
-                    "ip".into(),
+                let mut route = vec!["ip".into()];
+                if prefix.contains(':') {
+                    route.push("-6".into());
+                }
+                route.extend([
                     "route".into(),
                     "replace".into(),
                     prefix.clone(),
                     "dev".into(),
                     self.interface.clone(),
                 ]);
+                commands.push(route);
             }
         }
         commands

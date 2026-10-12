@@ -33,6 +33,7 @@ OPTIONS (once/run):\n\
   --interface NAME          WireGuard interface (default fluxmesh0)\n\
   --listen-port PORT        WireGuard port (default 51820)\n\
   --key PATH                WireGuard private key file\n\
+  --keydist PATH            two-phase public-key distribution state\n\
   --interval SECONDS        run-loop interval (default 15)\n\
   --key-max-age-days DAYS   opt-in local WG key rotation (0 disables)\n\
   --stun-bind ADDR          STUN source address; use :51820 only before WG owns it\n\
@@ -216,6 +217,10 @@ fn parse_agent_config(args: Vec<String>) -> Result<AgentConfig, Box<dyn std::err
                 cfg.private_key_file = PathBuf::from(value(i)?);
                 i += 2;
             }
+            "--keydist" => {
+                cfg.keydist_path = PathBuf::from(value(i)?);
+                i += 2;
+            }
             "--interval" => {
                 cfg.interval = Duration::from_secs(value(i)?.parse()?);
                 i += 2;
@@ -283,7 +288,8 @@ fn parse_agent_config(args: Vec<String>) -> Result<AgentConfig, Box<dyn std::err
 #[allow(dead_code)]
 fn _print_wg_dry_run(cfg: &AgentConfig) -> Result<(), Box<dyn std::error::Error>> {
     let mesh = StateStore::new(&cfg.state_path).load()?;
-    let plan = mesh.wireguard_plan(&cfg.interface, cfg.listen_port, &cfg.private_key_file)?;
+    let mut plan = mesh.wireguard_plan(&cfg.interface, cfg.listen_port, &cfg.private_key_file)?;
+    fluxvm_mesh::ipv6::augment_wireguard_plan(&mesh, &mut plan)?;
     let report = reconcile_linux(&plan, true)?;
     for argv in report.commands {
         println!("{}", argv.join(" "));

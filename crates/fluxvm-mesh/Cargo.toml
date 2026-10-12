@@ -23,7 +23,16 @@ path = "src/relay_main.rs"
 name = "fluxmesh-agent"
 path = "src/agent_main.rs"
 
+[[bin]]
+name = "fluxmesh-dns-ha"
+path = "src/dns_ha_main.rs"
+
+[[bin]]
+name = "fluxmesh-enroll"
+path = "src/enroll_main.rs"
+
 [dependencies]
+ring = "0.17"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 rustls-pemfile = "2"
 tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "sync", "time", "macros"] }

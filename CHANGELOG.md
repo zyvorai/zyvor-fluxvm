@@ -12,6 +12,12 @@
   `docs/fluxmesh*.md`. State lives in `/var/lib/fluxvm/mesh` on Linux and
   `~/Library/Application Support/FluxVM/mesh` on macOS (`FLUXMESH_DIR` to move it). Not packaged in the macOS
   release yet, and the WireGuard/DNS/relay paths have only unit-test coverage; no multi-host run has been done.
+- **FluxMesh enrollment and operator UX** (phase 4): zero-touch enrollment over verified TLS with short-lived,
+  replay-protected HMAC invitations (the joiner generates its WireGuard key locally and sends only the public key),
+  coordinated distributed key rotation with ack-before-activate and rollback, a dual-stack ULA overlay, rendezvous-hash
+  FluxDNS HA, relay HA with multi-home failover and hysteresis, the `fluxctl cloud` flow (`up`, `status`, `invite`,
+  `accept`, `serve-enrollment`), and the macOS NetworkExtension contract in `native/fluxmesh-macos` (not built or
+  signed here). `fluxctl cloud` uses its own `--state` paths and does not use `--server`/`--server-token`.
 
 ## 0.4.6 (2026-10-13)
 
