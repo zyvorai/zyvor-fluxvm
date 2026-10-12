@@ -302,6 +302,25 @@ fn ops() -> Vec<Op> {
             SNAPSHOTS,
         ),
         op(
+            "get",
+            "/v1/branches/{a}/diff/{b}",
+            "Compare two branches: saved sizes, lineage, labels",
+            SNAPSHOTS,
+        ),
+        op(
+            "post",
+            "/v1/branches/{id}/export",
+            "Write a branch to a bundle directory on the host (admin)",
+            SNAPSHOTS,
+        ),
+        op(
+            "post",
+            "/v1/branches/import",
+            "Import an exported bundle as a new branch (admin)",
+            SNAPSHOTS,
+        )
+        .status("201"),
+        op(
             "post",
             "/v1/branches/{id}/start",
             "Start new VMs from a branch (the body is the fork spec)",

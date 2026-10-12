@@ -19,6 +19,12 @@
   `dry_run: false` (`--yes`); an empty policy is refused; a branch labelled `fluxvm.dev/keep: "true"` is never removed.
   Verified on an M4 (dry run, keep label, real prune, CLI).
 
+### Added: `branch diff`, `branch export`, `branch import`
+- `GET /v1/branches/{a}/diff/{b}` compares two branches (sizes, lineage, labels). `POST /v1/branches/{id}/export` writes
+  a branch to an owner-only bundle directory and `POST /v1/branches/import` makes a new branch from one (both admin).
+  The bundle carries the agent token like the disk; a saved state restores only on a Mac of the same model and a
+  compatible macOS. Round trip covered by unit tests; not tried across two Macs.
+
 ### Fixed
 - Raw base images are cloned with the macOS-safe copy on every backend (`cp --reflink` is GNU-only).
 

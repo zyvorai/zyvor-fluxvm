@@ -502,6 +502,217 @@ impl VmManager {
     }
 }
 
+/// How branch `b` differs from branch `a`: the saved sizes, the lineage between them and the labels.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct BranchDiff {
+    pub a: Uuid,
+    pub b: Uuid,
+    pub a_name: String,
+    pub b_name: String,
+    pub same_source_vm: bool,
+    /// `a` is `b`'s parent, `b` is `a`'s parent, or neither (directly).
+    pub lineage: &'static str,
+    /// Seconds `b` was taken after `a` (negative when before).
+    pub seconds_apart: i64,
+    pub vcpus: (u8, u8),
+    pub memory_mib: (u64, u64),
+    pub state_bytes: (u64, u64),
+    pub labels_added: BTreeMap<String, String>,
+    pub labels_removed: BTreeMap<String, String>,
+    /// key -> (value in `a`, value in `b`)
+    pub labels_changed: BTreeMap<String, (String, String)>,
+}
+
+/// Pure comparison of two branches' public views.
+pub fn diff_branches(a: &VmBranch, b: &VmBranch) -> BranchDiff {
+    let lineage = if b.parent_branch == Some(a.id) {
+        "a-is-parent-of-b"
+    } else if a.parent_branch == Some(b.id) {
+        "b-is-parent-of-a"
+    } else if a.parent_branch.is_some() && a.parent_branch == b.parent_branch {
+        "siblings"
+    } else {
+        "unrelated"
+    };
+    let mut added = BTreeMap::new();
+    let mut changed = BTreeMap::new();
+    for (k, v) in &b.labels {
+        match a.labels.get(k) {
+            None => {
+                added.insert(k.clone(), v.clone());
+            }
+            Some(old) if old != v => {
+                changed.insert(k.clone(), (old.clone(), v.clone()));
+            }
+            _ => {}
+        }
+    }
+    let removed = a
+        .labels
+        .iter()
+        .filter(|(k, _)| !b.labels.contains_key(*k))
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    BranchDiff {
+        a: a.id,
+        b: b.id,
+        a_name: a.name.clone(),
+        b_name: b.name.clone(),
+        same_source_vm: a.source_vm == b.source_vm,
+        lineage,
+        seconds_apart: (b.created_at - a.created_at).num_seconds(),
+        vcpus: (a.vcpus, b.vcpus),
+        memory_mib: (a.memory_mib, b.memory_mib),
+        state_bytes: (a.state_bytes, b.state_bytes),
+        labels_added: added,
+        labels_removed: removed,
+        labels_changed: changed,
+    }
+}
+
+/// Copies directory `from` to `to` file by file, copy-on-write where the filesystem allows, owner-only permissions.
+fn clone_tree(from: &std::path::Path, to: &std::path::Path) -> Result<()> {
+    std::fs::create_dir_all(to).with_context(|| format!("creating {}", to.display()))?;
+    set_private(to);
+    for e in std::fs::read_dir(from).with_context(|| format!("reading {}", from.display()))? {
+        let e = e?;
+        let (src, dst) = (e.path(), to.join(e.file_name()));
+        let ty = e.file_type()?;
+        if ty.is_dir() {
+            clone_tree(&src, &dst)?;
+        } else if ty.is_file() {
+            fluxvm_apple::clone_file(&src, &dst)?;
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&dst, std::fs::Permissions::from_mode(0o600));
+        } else {
+            bail!("{} is not a regular file or directory", src.display());
+        }
+    }
+    Ok(())
+}
+
+impl VmManager {
+    /// Writes branch `id` to the new directory `dest` as a self-contained bundle (the saved state, disk clones and
+    /// `branch.json`). The bundle carries the guest's agent token, like the disk does, so it is owner-only: treat it as
+    /// the VM's disk. `dest` must not exist.
+    pub async fn export_branch(
+        &self,
+        id: Uuid,
+        dest: &std::path::Path,
+        actor: Option<&str>,
+    ) -> Result<std::path::PathBuf> {
+        let file = self.read_branch_file(id)?;
+        if dest.exists() {
+            bail!("{} already exists", dest.display());
+        }
+        let parent = dest
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or_else(|| std::path::Path::new("."));
+        if !parent.is_dir() {
+            bail!("{} is not a directory", parent.display());
+        }
+        let name = dest
+            .file_name()
+            .context("the destination needs a name")?
+            .to_string_lossy()
+            .into_owned();
+        let partial = parent.join(format!(".{name}.partial"));
+        let _ = std::fs::remove_dir_all(&partial);
+        let (from, p) = (self.branch_dir(id), partial.clone());
+        let cloned = tokio::task::spawn_blocking(move || clone_tree(&from, &p))
+            .await
+            .context("branch export panicked")?;
+        if let Err(e) =
+            cloned.and_then(|()| std::fs::rename(&partial, dest).context("publishing the bundle"))
+        {
+            let _ = std::fs::remove_dir_all(&partial);
+            return Err(e);
+        }
+        audit_event(
+            "vm.branch.export",
+            &[
+                ("branch_id", &id.to_string()),
+                ("name", &file.branch.name),
+                ("dest", &dest.display().to_string()),
+                ("actor", actor.unwrap_or("")),
+            ],
+        );
+        Ok(dest.to_path_buf())
+    }
+
+    /// Imports a bundle written by [`export_branch`] as a new branch with a fresh id (and `name`, if given). The
+    /// parent link is dropped: the parent need not exist here. A saved state restores only on a Mac of the same
+    /// hardware model and a compatible macOS; the import cannot check that, a start reports it.
+    pub async fn import_branch(
+        &self,
+        src: &std::path::Path,
+        name: Option<String>,
+        actor: Option<&str>,
+    ) -> Result<VmBranch> {
+        let raw = std::fs::read(src.join(BRANCH_FILE))
+            .with_context(|| format!("{} is not a branch bundle", src.display()))?;
+        let mut file: BranchFile =
+            serde_json::from_slice(&raw).context("reading the bundle's branch.json")?;
+        let state = fluxvm_apple::snapshot_dir(src, CKPT_TAG).join(fluxvm_apple::STATE_FILE);
+        if !state.is_file() {
+            bail!("the bundle has no saved state");
+        }
+        let name = name.unwrap_or_else(|| file.branch.name.clone());
+        validate_vm_name(&name)?;
+        if self
+            .list_branches(Some(file.branch.source_vm))
+            .await?
+            .iter()
+            .any(|b| b.name == name)
+        {
+            bail!(
+                "VM {} already has a branch named {name:?}; pass another name",
+                file.branch.source_vm
+            );
+        }
+        let id = Uuid::new_v4();
+        let dir = self.branch_dir(id);
+        let partial = self.branches_dir().join(format!(".{id}.partial"));
+        std::fs::create_dir_all(self.branches_dir())?;
+        set_private(&self.branches_dir());
+        let (from, p) = (src.to_path_buf(), partial.clone());
+        tokio::task::spawn_blocking(move || clone_tree(&from, &p))
+            .await
+            .context("branch import panicked")??;
+
+        let old_ws = file.record.workspace.clone();
+        file.branch.id = id;
+        file.branch.name = name;
+        file.branch.parent_branch = None;
+        file.record.workspace = dir.clone();
+        if let Ok(rel) = file.record.disk.strip_prefix(&old_ws) {
+            file.record.disk = dir.join(rel);
+        }
+        let written = (|| -> Result<()> {
+            let path = partial.join(BRANCH_FILE);
+            std::fs::remove_file(&path)?;
+            write_private(&path, &serde_json::to_vec_pretty(&file)?)?;
+            std::fs::rename(&partial, &dir).context("publishing the branch")?;
+            Ok(())
+        })();
+        if let Err(e) = written {
+            let _ = std::fs::remove_dir_all(&partial);
+            return Err(e);
+        }
+        audit_event(
+            "vm.branch.import",
+            &[
+                ("branch_id", &id.to_string()),
+                ("name", &file.branch.name),
+                ("from", &src.display().to_string()),
+                ("actor", actor.unwrap_or("")),
+            ],
+        );
+        Ok(file.branch)
+    }
+}
+
 #[cfg(test)]
 mod prune_tests {
     use super::*;
@@ -722,5 +933,84 @@ mod tests {
             .await
             .unwrap_err();
         assert!(format!("{err:#}").contains("name"), "{err:#}");
+    }
+
+    fn with_state(m: &VmManager, id: Uuid) {
+        let st = fluxvm_apple::snapshot_dir(&m.branch_dir(id), CKPT_TAG);
+        std::fs::create_dir_all(&st).unwrap();
+        std::fs::write(st.join(fluxvm_apple::STATE_FILE), b"state").unwrap();
+        std::fs::write(m.branch_dir(id).join("root.raw"), b"disk").unwrap();
+    }
+
+    #[tokio::test]
+    async fn export_then_import_makes_an_independent_branch() {
+        let dir = tempfile::tempdir().unwrap();
+        let m = manager(dir.path());
+        let id = put(&m, "clean", Uuid::new_v4(), 10);
+        with_state(&m, id);
+        let out = dir.path().join("bundle");
+        m.export_branch(id, &out, None).await.unwrap();
+        // Refuses to overwrite.
+        assert!(m.export_branch(id, &out, None).await.is_err());
+        // Same source VM and name: refused until renamed.
+        let err = m.import_branch(&out, None, None).await.unwrap_err();
+        assert!(err.to_string().contains("already has a branch"), "{err}");
+        let imp = m
+            .import_branch(&out, Some("clean-copy".into()), None)
+            .await
+            .unwrap();
+        assert_ne!(imp.id, id);
+        assert_eq!(imp.name, "clean-copy");
+        let f = m.read_branch_file(imp.id).unwrap();
+        assert_eq!(f.record.workspace, m.branch_dir(imp.id));
+        assert_eq!(f.record.disk, m.branch_dir(imp.id).join("root.raw"));
+        assert!(
+            fluxvm_apple::snapshot_dir(&m.branch_dir(imp.id), CKPT_TAG)
+                .join(fluxvm_apple::STATE_FILE)
+                .is_file()
+        );
+        // Deleting the import leaves the original alone.
+        m.delete_branch(imp.id, None).await.unwrap();
+        assert!(m.get_branch(id).await.is_ok());
+        // A directory that is not a bundle is refused.
+        assert!(m.import_branch(dir.path(), None, None).await.is_err());
+    }
+
+    #[test]
+    fn diff_reports_sizes_lineage_and_labels() {
+        let mk = |name: &str, parent: Option<Uuid>, mem: u64, labels: &[(&str, &str)]| VmBranch {
+            id: Uuid::new_v4(),
+            name: name.into(),
+            source_vm: Uuid::nil(),
+            source_name: "src".into(),
+            parent_branch: parent,
+            created_at: Utc::now(),
+            labels: labels
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+            vcpus: 2,
+            memory_mib: mem,
+            state_bytes: mem * 10,
+        };
+        let a = mk("a", None, 512, &[("env", "dev"), ("gone", "1")]);
+        let b = mk("b", Some(a.id), 1024, &[("env", "prod"), ("new", "2")]);
+        let d = diff_branches(&a, &b);
+        assert_eq!(d.lineage, "a-is-parent-of-b");
+        assert_eq!(d.memory_mib, (512, 1024));
+        assert!(d.same_source_vm);
+        assert_eq!(d.labels_added.get("new").map(String::as_str), Some("2"));
+        assert_eq!(d.labels_removed.get("gone").map(String::as_str), Some("1"));
+        assert_eq!(
+            d.labels_changed.get("env"),
+            Some(&("dev".to_string(), "prod".to_string()))
+        );
+        assert_eq!(diff_branches(&b, &a).lineage, "b-is-parent-of-a");
+        let c = mk("c", Some(a.id), 512, &[]);
+        assert_eq!(diff_branches(&b, &c).lineage, "siblings");
+        assert_eq!(
+            diff_branches(&a, &mk("z", None, 1, &[])).lineage,
+            "unrelated"
+        );
     }
 }
