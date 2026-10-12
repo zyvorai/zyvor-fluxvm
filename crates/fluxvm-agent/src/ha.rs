@@ -221,32 +221,38 @@ pub struct HaConfig {
 mod tests {
     use super::*;
 
-    #[tokio::test]
-    async fn one_leader_at_a_time_and_takeover_after_the_ttl() {
-        let store = HaStore::memory("t");
-        let ttl = Duration::from_millis(200);
+    /// The same semantics are checked against the in-memory store and, when `FLUXVM_TEST_REDIS` names a server
+    /// (`FLUXVM_TEST_REDIS=redis://127.0.0.1:6379 cargo test -p fluxvm-agent ha:: -- --ignored`), against real Redis.
+    async fn real_redis(tag: &str) -> HaStore {
+        let url = std::env::var("FLUXVM_TEST_REDIS")
+            .expect("set FLUXVM_TEST_REDIS to run the Redis tests");
+        // A cluster name unique to the run keeps parallel and repeated runs from sharing keys.
+        let cluster = format!("t-{tag}-{}", std::process::id());
+        HaStore::redis(&url, &cluster).await.unwrap()
+    }
+
+    async fn takeover_after_the_ttl(store: HaStore) {
+        let ttl = Duration::from_millis(400);
         assert_eq!(store.acquire("a", ttl).await.unwrap(), "a");
         assert_eq!(store.acquire("b", ttl).await.unwrap(), "a");
         // Renewal keeps it.
-        tokio::time::sleep(Duration::from_millis(120)).await;
+        tokio::time::sleep(Duration::from_millis(240)).await;
         assert_eq!(store.acquire("a", ttl).await.unwrap(), "a");
-        tokio::time::sleep(Duration::from_millis(120)).await;
+        tokio::time::sleep(Duration::from_millis(240)).await;
         assert_eq!(store.acquire("b", ttl).await.unwrap(), "a");
         // a stops renewing: b takes over once the TTL lapses.
-        tokio::time::sleep(Duration::from_millis(250)).await;
+        tokio::time::sleep(Duration::from_millis(500)).await;
         assert_eq!(store.acquire("b", ttl).await.unwrap(), "b");
         assert_eq!(store.acquire("a", ttl).await.unwrap(), "b");
     }
 
-    #[tokio::test]
-    async fn writes_are_fenced_by_the_lock() {
-        let store = HaStore::memory("t");
-        let ttl = Duration::from_millis(100);
+    async fn fenced_writes(store: HaStore) {
+        let ttl = Duration::from_millis(300);
         store.acquire("a", ttl).await.unwrap();
         assert!(store.put_fenced("a", "tenancy", "v1").await.unwrap());
         assert!(!store.put_fenced("b", "tenancy", "evil").await.unwrap());
         // a is paused past its TTL, b takes over; a's late write is refused.
-        tokio::time::sleep(Duration::from_millis(150)).await;
+        tokio::time::sleep(Duration::from_millis(450)).await;
         store.acquire("b", ttl).await.unwrap();
         assert!(store.put_fenced("b", "tenancy", "v2").await.unwrap());
         assert!(!store.put_fenced("a", "tenancy", "stale").await.unwrap());
@@ -254,14 +260,45 @@ mod tests {
         assert_eq!(store.get("nodes").await.unwrap(), None);
     }
 
-    #[tokio::test]
-    async fn release_hands_over_at_once() {
-        let store = HaStore::memory("t");
+    async fn release_hands_over(store: HaStore) {
         let ttl = Duration::from_secs(60);
         store.acquire("a", ttl).await.unwrap();
         store.release("b").await.unwrap();
         assert_eq!(store.acquire("b", ttl).await.unwrap(), "a");
         store.release("a").await.unwrap();
         assert_eq!(store.acquire("b", ttl).await.unwrap(), "b");
+    }
+
+    #[tokio::test]
+    async fn one_leader_at_a_time_and_takeover_after_the_ttl() {
+        takeover_after_the_ttl(HaStore::memory("t")).await;
+    }
+
+    #[tokio::test]
+    async fn writes_are_fenced_by_the_lock() {
+        fenced_writes(HaStore::memory("t")).await;
+    }
+
+    #[tokio::test]
+    async fn release_hands_over_at_once() {
+        release_hands_over(HaStore::memory("t")).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "needs FLUXVM_TEST_REDIS"]
+    async fn redis_one_leader_at_a_time_and_takeover_after_the_ttl() {
+        takeover_after_the_ttl(real_redis("take").await).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "needs FLUXVM_TEST_REDIS"]
+    async fn redis_writes_are_fenced_by_the_lock() {
+        fenced_writes(real_redis("fence").await).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "needs FLUXVM_TEST_REDIS"]
+    async fn redis_release_hands_over_at_once() {
+        release_hands_over(real_redis("rel").await).await;
     }
 }
