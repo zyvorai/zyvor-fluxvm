@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+### Fixed: `fluxctl service install` no longer starts a second daemon beside Homebrew's
+- It refuses, before writing the plist, when it runs from a Homebrew install, when a `brew services` plist for `fluxvm`
+  exists, or when something already accepts connections on the configured `listen` address, and says what to do
+  (`brew services start zyvorai/tap/fluxvm`, or a separate `listen` and `state_dir`). Both agents defaulted to
+  `127.0.0.1:7788` and the same state directory, so the second one exited with `Address already in use` after it had
+  opened the state directory. `--force` overrides; a reinstall over its own loaded agent is not treated as a clash.
+
 ### Fixed: three rough edges found installing 0.4.4 from the Homebrew tap on a clean Mac
 - `fluxctl mcp install` (and `fluxctl service install`, and the ssh ProxyCommand of `fluxctl fleet ssh`) wrote the versioned
   Cellar path (`/opt/homebrew/Cellar/fluxvm/0.4.4/bin/fluxctl`), which `brew upgrade` plus `brew cleanup` removes. They now

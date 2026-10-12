@@ -80,12 +80,82 @@ fn launchctl(args: &[&str]) -> Result<std::process::Output> {
         .context("running /bin/launchctl (launchd is macOS only)")
 }
 
-/// Writes the plist (replacing an older one) and (re)loads it.
-pub fn install(config: Option<&Path>) -> Result<PathBuf> {
+/// Whether `exe` is a Homebrew install (a path through `Cellar`, as `current_exe` gives for a brew-installed binary).
+pub fn is_homebrew_exe(exe: &Path) -> bool {
+    exe.components().any(|c| c.as_os_str() == "Cellar")
+}
+
+/// The LaunchAgent plist files Homebrew's `brew services` writes for the `fluxvm` formula (the label changed between
+/// Homebrew versions).
+fn brew_service_plists(home: &Path) -> [PathBuf; 2] {
+    let dir = home.join("Library/LaunchAgents");
+    [
+        dir.join("sh.brew.fluxvm.plist"),
+        dir.join("homebrew.mxcl.fluxvm.plist"),
+    ]
+}
+
+/// Whether something already accepts connections on `listen` (`host:port`). A `listen` that is not a socket address
+/// (a name, a malformed value) is not checked.
+pub fn port_in_use(listen: &str) -> bool {
+    use std::net::{SocketAddr, TcpStream};
+    use std::time::Duration;
+    let Ok(addr) = listen.parse::<SocketAddr>() else {
+        return false;
+    };
+    // An unspecified address (0.0.0.0) is reached through loopback.
+    let addr = if addr.ip().is_unspecified() {
+        SocketAddr::new(std::net::Ipv4Addr::LOCALHOST.into(), addr.port())
+    } else {
+        addr
+    };
+    TcpStream::connect_timeout(&addr, Duration::from_millis(400)).is_ok()
+}
+
+/// Refuses an install that would start a second daemon beside one that already runs, unless `force`:
+/// a daemon managed by Homebrew, or anything already listening on the configured address. Both end with the new
+/// agent exiting on `Address already in use`, after it has already opened the same state directory.
+fn guard(home: &Path, exe: &Path, listen: &str, force: bool, own_agent_loaded: bool) -> Result<()> {
+    if force {
+        return Ok(());
+    }
+    if is_homebrew_exe(exe) || brew_service_plists(home).iter().any(|p| p.exists()) {
+        bail!(
+            "FluxVM is managed by Homebrew on this Mac: use `brew services start zyvorai/tap/fluxvm` (and \
+             `brew services stop zyvorai/tap/fluxvm` to stop it). A second LaunchAgent would run `fluxctl serve` \
+             on the same address and state directory and exit with `Address already in use`. \
+             Pass --force to install it anyway."
+        );
+    }
+    if !own_agent_loaded && port_in_use(listen) {
+        bail!(
+            "something already listens on {listen}: another FluxVM daemon (`curl http://{listen}/healthz`)? Stop it \
+             first, or give this one its own `listen` and `state_dir` in the --config file. A second daemon on the \
+             same state directory is not safe. Pass --force to install anyway."
+        );
+    }
+    Ok(())
+}
+
+/// Whether this agent is already loaded in launchd (a reinstall replaces it, and its own port is not a conflict).
+fn own_agent_loaded() -> bool {
+    launchctl(&["print", &format!("{}/{LABEL}", domain())])
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// Writes the plist (replacing an older one) and (re)loads it. Refuses when a daemon is already managed by Homebrew
+/// or listening on `listen`, unless `force`.
+pub fn install(config: Option<&Path>, listen: &str, force: bool) -> Result<PathBuf> {
     if !cfg!(target_os = "macos") {
         bail!("`fluxctl service` installs a macOS LaunchAgent; on Linux use a systemd unit");
     }
     let home = home()?;
+    let real_exe = std::env::current_exe()
+        .ok()
+        .and_then(|e| e.canonicalize().ok())
+        .unwrap_or_default();
+    guard(&home, &real_exe, listen, force, own_agent_loaded())?;
     // The Homebrew `opt` path when there is one, so the agent survives `brew upgrade`.
     let exe = crate::stable_exe::stable_exe().context("locating fluxctl")?;
     let config = match config {
@@ -157,6 +227,65 @@ pub fn status() -> Result<serde_json::Value> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn homebrew_paths_are_recognised() {
+        assert!(is_homebrew_exe(Path::new(
+            "/opt/homebrew/Cellar/fluxvm/0.4.4/bin/fluxctl"
+        )));
+        assert!(is_homebrew_exe(Path::new(
+            "/usr/local/Cellar/fluxvm/0.4.4/bin/fluxctl"
+        )));
+        assert!(!is_homebrew_exe(Path::new("/usr/local/bin/fluxctl")));
+        assert!(!is_homebrew_exe(Path::new(
+            "/Users/me/src/target/release/fluxctl"
+        )));
+    }
+
+    #[test]
+    fn a_listening_address_is_detected_and_a_free_one_is_not() {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let busy = l.local_addr().unwrap().to_string();
+        assert!(port_in_use(&busy));
+        drop(l);
+        assert!(!port_in_use(&busy));
+        assert!(!port_in_use("not-an-address"));
+    }
+
+    #[test]
+    fn the_guard_refuses_homebrew_and_busy_ports_unless_forced() {
+        let home = std::env::temp_dir().join(format!("fluxvm-guard-{}", std::process::id()));
+        std::fs::create_dir_all(home.join("Library/LaunchAgents")).unwrap();
+        let free = {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            l.local_addr().unwrap().to_string()
+        };
+        let src = Path::new("/Users/me/src/target/release/fluxctl");
+        let brew = Path::new("/opt/homebrew/Cellar/fluxvm/0.4.4/bin/fluxctl");
+
+        // A plain build and a free port: allowed.
+        assert!(guard(&home, src, &free, false, false).is_ok());
+        // Homebrew's binary: refused, with the brew instruction; --force allows it.
+        let e = guard(&home, brew, &free, false, false)
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("brew services start"), "{e}");
+        assert!(guard(&home, brew, &free, true, false).is_ok());
+        // A brew service plist alone is enough.
+        std::fs::write(home.join("Library/LaunchAgents/sh.brew.fluxvm.plist"), "").unwrap();
+        assert!(guard(&home, src, &free, false, false).is_err());
+        std::fs::remove_file(home.join("Library/LaunchAgents/sh.brew.fluxvm.plist")).unwrap();
+        // A busy port: refused, unless this agent already owns it (a reinstall) or --force.
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let busy = l.local_addr().unwrap().to_string();
+        let e = guard(&home, src, &busy, false, false)
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("already listens"), "{e}");
+        assert!(guard(&home, src, &busy, false, true).is_ok());
+        assert!(guard(&home, src, &busy, true, false).is_ok());
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
     use super::*;
 
     #[test]

@@ -110,7 +110,12 @@ struct StackFleet {
 #[derive(Subcommand)]
 enum ServiceCommand {
     /// Write ~/Library/LaunchAgents/dev.zyvor.fluxvm.plist (with the global --config, if given) and load it.
-    Install,
+    /// Refuses when Homebrew manages the daemon (`brew services`) or something already listens on `listen`.
+    Install {
+        /// Install even if Homebrew manages a FluxVM service here or the address is already in use.
+        #[arg(long)]
+        force: bool,
+    },
     /// Unload and delete it.
     Uninstall,
     /// Whether it is installed and running.
@@ -4876,8 +4881,9 @@ async fn main() -> Result<()> {
     }
     if let Command::Service { command } = &cli.command {
         let out = match command {
-            ServiceCommand::Install => {
-                let plist = launch_agent::install(cli.config.as_deref())?;
+            ServiceCommand::Install { force } => {
+                let listen = Config::load(cli.config.as_deref())?.listen;
+                let plist = launch_agent::install(cli.config.as_deref(), &listen, *force)?;
                 serde_json::json!({"ok": true, "plist": plist, "label": launch_agent::LABEL})
             }
             ServiceCommand::Uninstall => {
