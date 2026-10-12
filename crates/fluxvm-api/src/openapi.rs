@@ -113,6 +113,43 @@ fn ops() -> Vec<Op> {
             VMS,
         )
         .returns("VmRecord"),
+        op(
+            "post",
+            "/v1/vms/{id}/diagnostics",
+            "Start an incident bundle job: QMP state, cgroup and PSI, console log, network and eBPF state, optional pcap and guest memory dump",
+            VMS,
+        )
+        .body("DiagnosticsRequest")
+        .returns("DiagnosticsBundle")
+        .status("202"),
+        op("get", "/v1/vms/{id}/diagnostics", "Diagnostics bundles kept for a VM", VMS)
+            .returns("DiagnosticsBundleList"),
+        op(
+            "get",
+            "/v1/vms/{id}/diagnostics/{token}",
+            "One diagnostics bundle job",
+            VMS,
+        )
+        .returns("DiagnosticsBundle"),
+        op(
+            "delete",
+            "/v1/vms/{id}/diagnostics/{token}",
+            "Delete a finished bundle and its memory dump",
+            VMS,
+        )
+        .status("204"),
+        op(
+            "get",
+            "/v1/vms/{id}/diagnostics/{token}/bundle",
+            "Download a finished bundle (tar.gz); 409 while it is collected",
+            VMS,
+        ),
+        op(
+            "get",
+            "/v1/vms/{id}/diagnostics/{token}/memory-dump",
+            "Download a bundle's guest memory dump (ELF)",
+            VMS,
+        ),
         op("post", "/v1/vms/{id}/restart", "Stop then start a VM", VMS).returns("VmRecord"),
         op("post", "/v1/vms/{id}/pause", "Pause vCPUs", VMS).returns("VmRecord"),
         op("post", "/v1/vms/{id}/resume", "Resume vCPUs", VMS).returns("VmRecord"),
@@ -689,6 +726,25 @@ fn cbt_schemas() -> Value {
             "notFound": {"type": "array", "items": {"type": "string"}},
             "retentionHeld": {"type": "array", "items": {"type": "string"}}
         }},
+        "DiagnosticsRequest": {"type": "object", "properties": {
+            "pcap_seconds": {"type": "integer", "minimum": 0, "maximum": 30, "default": 0},
+            "pcap_filter": {"type": "string"},
+            "memory_dump": {"type": "boolean", "default": false, "description": "QEMU only; pauses the guest while the dump is written"},
+            "redact": {"type": "boolean", "default": true},
+            "log_lines": {"type": "integer", "minimum": 0, "maximum": 20000, "default": 2000}
+        }},
+        "DiagnosticsBundle": {"type": "object", "properties": {
+            "token": {"type": "string"}, "vm_id": {"type": "string", "format": "uuid"},
+            "state": {"type": "string", "enum": ["running", "done", "failed"]},
+            "created_at": {"type": "string", "format": "date-time"},
+            "finished_at": {"type": "string", "format": "date-time"},
+            "request": {"$ref": "#/components/schemas/DiagnosticsRequest"},
+            "error": {"type": "string"},
+            "sections": {"type": "array", "items": {"type": "object", "description": "name, ok, error, bytes"}},
+            "size_bytes": {"type": "integer"}, "sha256": {"type": "string"},
+            "memory_dump": {"type": "object", "description": "path, format, size_bytes, sha256, paused_ms"}
+        }},
+        "DiagnosticsBundleList": {"type": "object", "properties": {"items": {"type": "array", "items": {"$ref": "#/components/schemas/DiagnosticsBundle"}}}},
         "CbtJob": {"type": "object", "properties": {
             "id": {"type": "string", "format": "uuid"},
             "kind": {"type": "string", "enum": ["backup", "restore", "synthesize"]},

@@ -87,6 +87,15 @@ pub struct Config {
     /// and another node can resume the VM via `POST /v1/vms/import-hibernated`.
     #[serde(default)]
     pub hibernation_dir: Option<PathBuf>,
+    /// Where `POST /v1/vms/{id}/diagnostics` writes incident bundles and
+    /// guest memory dumps (`<dir>/<id>/<token>/`). Defaults to
+    /// `<state_dir>/diagnostics`.
+    #[serde(default)]
+    pub diagnostics_dir: Option<PathBuf>,
+    /// Largest guest (by configured memory) a diagnostics bundle may dump the
+    /// memory of. Defaults to 16384 MiB; 0 disables memory dumps.
+    #[serde(default)]
+    pub diagnostics_max_memory_dump_mib: Option<u64>,
 }
 
 impl Config {
@@ -95,6 +104,18 @@ impl Config {
         self.hibernation_dir
             .clone()
             .unwrap_or_else(|| self.state_dir.join("hibernation"))
+    }
+
+    /// The effective diagnostics directory.
+    pub fn diagnostics_dir(&self) -> PathBuf {
+        self.diagnostics_dir
+            .clone()
+            .unwrap_or_else(|| self.state_dir.join("diagnostics"))
+    }
+
+    /// The effective memory dump size limit in MiB.
+    pub fn diagnostics_max_memory_dump_mib(&self) -> u64 {
+        self.diagnostics_max_memory_dump_mib.unwrap_or(16384)
     }
 }
 
@@ -252,6 +273,8 @@ impl Default for Config {
             netobs: NetobsConfig::default(),
             apple: AppleConfig::default(),
             hibernation_dir: None,
+            diagnostics_dir: None,
+            diagnostics_max_memory_dump_mib: None,
         }
     }
 }

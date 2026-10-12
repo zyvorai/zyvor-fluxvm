@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+### Added: incident bundles
+- `POST /v1/vms/{id}/diagnostics` starts a job that collects the VM record, cgroup and PSI files, the console log,
+  QMP state (status, CPUs, memory, block, migration, PCI, chardevs and more), dataplane status, flows, drops, tc and
+  BPF state of the VM's interface, host memory and info, and optionally a packet capture into
+  `<diagnostics_dir>/<id>/<token>/bundle.tar.gz`. `GET .../diagnostics/{token}` reports the job with per-section
+  results; `.../bundle` downloads it. `fluxctl incident`.
+- `memory_dump: true` writes a QEMU `dump-guest-memory` ELF next to the bundle (guest paused while it is written),
+  reports its size, sha256 and pause time, and serves it at `.../memory-dump`. Limited by
+  `diagnostics_max_memory_dump_mib` (default 16384) and free space.
+- Secrets are fingerprinted by default (`redact: false` keeps them). The last five bundles per VM are kept. See
+  `docs/diagnostics-bundle.md`.
+
 
 ### Added: virtual networks (eBPF routing, Geneve overlay, SNAT, floating IPs)
 - A `tap` NIC with `vnet` (`{vni, ip, prefix_len, gateway}`) joins a VNI-isolated IPv4 network routed entirely in eBPF:
