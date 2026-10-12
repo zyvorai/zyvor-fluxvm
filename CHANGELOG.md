@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+### Added: fleet web console, overlay key rotation, HA lock release
+- `GET /console` on central is a web console for the fleet: a tenant token shows your leases, VMs, private networks and
+  usage (lease or release a Mac, delete VMs, create networks); the fleet token adds nodes (cordon, drain, scrub),
+  tenants and every tenant's usage ([docs/mac-cloud-tenancy.md](docs/mac-cloud-tenancy.md#console)).
+- Cross-Mac overlay keys have epochs. `POST /fleet/overlays/{name}/rotate` issues a new key and the reconciler rotates
+  keys older than `overlay_key_rotation_days` (default 30, `0` disables); the previous key stays valid until the next
+  rotation, and the switch reloads keys without restarting. The epoch is authenticated, and replays are checked at send
+  time ([docs/cross-mac-networks.md](docs/cross-mac-networks.md#key-rotation)).
+- A leader central releases the HA lock on Ctrl-C or SIGTERM, so a standby takes over at once instead of after the TTL.
+  Not verified across two Macs.
+
 
 ### Added: `POST /v1/branches/prune` (`fluxctl branch prune`)
 - Remove branches by policy: keep the newest N, older than a cutoff, scoped to a VM or a name prefix. A dry run unless
