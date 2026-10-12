@@ -2,6 +2,13 @@
 
 ## 0.4.2 (2026-10-12)
 
+### Added: cross-Mac private networks (encrypted UDP overlay)
+- One `apple.networks` private network can span several Macs: the `fluxvm-vz-switch` of the same network on each Mac
+  forms a full mesh and carries Ethernet frames over UDP sealed with AES-256-GCM under the network's key (replay window,
+  authenticated peers only, MAC learning with split horizon, no MAC spoofing). Central allocates the subnet, key and peers
+  per tenant and node agents sync them into a per-Mac `overlay.json`. Use an `mtu` of at most 1440 on a 1500-byte
+  underlay (60 bytes of overhead). See `docs/cross-mac-networks.md`. Unit-tested; not verified between two real Macs.
+
 ### Added: highly available central (`fluxvm-agent central --ha-redis`)
 - Several centrals can share one Redis (`--ha-redis`, `--advertise-url`, `--ha-ttl-secs`, `--ha-cluster`). A Lua-scripted
   leader lock with a TTL is renewed every third of it; a standby takes over once a dead leader's lock lapses. Leadership is
