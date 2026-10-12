@@ -1314,6 +1314,7 @@ async fn dispatch(
             email,
             name,
         } => signup::signup(central, &out, tenant_id, email, name).await,
+        FleetCommand::SignupVerify { token: t } => signup::signup_verify(central, &out, t).await,
         FleetCommand::Invoices { month, tenant } => {
             signup::invoices(central, token, &out, month, tenant).await
         }

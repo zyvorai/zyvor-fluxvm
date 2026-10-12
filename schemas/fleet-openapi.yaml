@@ -1284,6 +1284,7 @@ paths:
                 type: object
                 properties:
                   open: {type: boolean}
+                  email_confirmation: {type: boolean}
                   require_payment_method: {type: boolean}
                   payments: {type: boolean}
                   allowed_email_domains: {type: array, items: {type: string}}
@@ -1293,10 +1294,13 @@ paths:
       operationId: signup
       tags: [signup]
       security: []
-      summary: Create a tenant with the policy's default quota; the token is returned once.
+      summary: Start a sign-up (email confirmation, the default) or create the tenant at once (confirmation off).
       description: |
-        Only when sign-up is open (off by default). Limited per client address and globally per hour; the email is
-        **not verified**: the first SSO sign-in with that address becomes the tenant's owner and then rotates the token.
+        Only when sign-up is open (off by default). Limited per client address and globally per hour. With email
+        confirmation (policy `signup_require_email_verification`, on by default) nothing is created: a link is mailed
+        through the operator's mail webhook and the answer is `202`, the same whether or not the address has an
+        account. The tenant and its token come from `POST /signup/verify`. With confirmation off (labs) the answer is
+        `201` with the token, and the address is **unconfirmed**.
       requestBody:
         required: true
         content:
@@ -1309,7 +1313,37 @@ paths:
                 email: {type: string}
               required: [tenant_id, email]
       responses:
+        '202': {description: "A confirmation link was sent if the address can be used.", content: {application/json: {schema: {type: object, properties: {ok: {type: boolean}, email_confirmation: {type: boolean}, message: {type: string}}}}}}
+        '201': {description: "Created (confirmation off); the body has the tenant and its token (shown once).", content: {application/json: {schema: {type: object, additionalProperties: true}}}}
+        default: {$ref: '#/components/responses/Error'}
+  /signup/verify:
+    get:
+      operationId: signupVerifyPage
+      tags: [signup]
+      security: []
+      summary: "The page the mailed link opens; it shows the sign-up and a Confirm button and creates nothing."
+      parameters:
+        - {name: token, in: query, required: true, schema: {type: string}}
+      responses:
+        '200': {description: "The confirmation page (HTML)."}
+        '400': {description: "The link is not valid or has expired (HTML)."}
+    post:
+      operationId: signupVerify
+      tags: [signup]
+      security: []
+      summary: "Confirm a sign-up with the mailed token: creates the tenant and returns its token, once."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                token: {type: string, description: "The fvv_ token in the mailed link."}
+              required: [token]
+      responses:
         '201': {description: Created; the body has the tenant and its token (shown once)., content: {application/json: {schema: {type: object, additionalProperties: true}}}}
+        '400': {description: "The link has expired or was already used."}
         default: {$ref: '#/components/responses/Error'}
   /stripe/webhook:
     post:

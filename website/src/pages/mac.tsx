@@ -731,8 +731,8 @@ function Honest(): ReactNode {
               </li>
               <li>
                 The published package installs from the tap, and its service, upgrade and uninstall were run on
-                the M4. Self-service sign-up and Stripe in the fleet central are off by default and should stay
-                off until the sign-up email is verified.
+                the M4. Self-service sign-up and Stripe in the fleet central are off by default; sign-up confirms
+                the address by a mailed link and cannot be opened without a mail webhook.
               </li>
             </ul>
             <p style={{marginTop: '0.75rem', marginBottom: 0}}>

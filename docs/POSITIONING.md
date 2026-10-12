@@ -103,7 +103,7 @@ FluxVM's sandboxed-execution use case (Firecracker jailer + cgroups + netns + vs
 - Leading with "FluxVM is the engine under Fabric" — that undersells it as standalone-adoptable and buries the libvirt-replacement pitch, which is the strongest concrete differentiator this project has
 - Claiming feature parity with Kata Containers or gVisor — the honest claim is isolation-shape similarity, not compatibility
 - Claiming the Mac cloud platform is proven at fleet scale: it was run against simulated Macs, not several real ones
-- Advertising self-service sign-up or Stripe billing as ready: both are off by default until sign-up email verification exists
+- Advertising self-service sign-up or Stripe billing as proven: both are off by default, sign-up confirms the address through the operator's mail webhook (not run against a real mail service), and Stripe has only been run against a mock
 - Citing unpublished boot-latency, density, or throughput numbers — measure first; see [capability-figures.md](capability-figures.md)
 - Softening the MVP/multi-tenant-security-boundary caveat to sound more finished than it is
 - Presenting Secure Containers as Kata-equivalent or claiming unrestricted hostPath — GA with documented scope boundaries

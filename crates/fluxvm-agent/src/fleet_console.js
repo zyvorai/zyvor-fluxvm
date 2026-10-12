@@ -3849,6 +3849,8 @@ function signupSheet() {
           placeholder: domains.length ? 'you@' + domains[0] : 'you@company.com' }),
         h('div', { class: 'hint' }, domains.length ? 'Sign-up here is for addresses at ' + domains.join(', ') + '.'
           : 'For invoices and notices about your account.')),
+      cfg.email_confirmation ? h('p', { class: 'note' }, 'We email you a confirmation link. The account is created, and '
+        + 'its access token shown, when you open it.') : null,
       cfg.require_payment_method ? h('p', { class: 'note' }, 'Next, you add a payment method with Stripe. You are billed '
         + 'monthly, only for what you use.') : null,
     ],
@@ -3866,8 +3868,26 @@ function signupSheet() {
         if (e.status === 403 && /closed/.test(e.message)) { S.signup.cfg = { open: false }; $('signup-cta').hidden = true; }
         throw e;
       }
+      // With email confirmation (the default) nothing exists yet: the link in the mail creates the account.
+      if (r && r.email_confirmation) { setTimeout(() => signupCheckEmail(body.email), 0); return; }
       setTimeout(() => signupDone(r), 0);
     },
+  });
+}
+
+/** After a sign-up that needs its address confirmed: where to look, and what happens next. */
+function signupCheckEmail(email) {
+  openSheet({
+    title: 'Check your email',
+    intro: 'If ' + email + ' can be used, a confirmation link is on its way. It is valid for 24 hours.',
+    body: [
+      h('p', { class: 'small muted' }, 'Opening the link and confirming creates the account and shows its access token '
+        + 'once. Nothing is created until then. If nothing arrives, check spam, or start again: a new link replaces the '
+        + 'old one after five minutes.'),
+    ],
+    submit: 'Done',
+    cancel: null,
+    onSubmit: async () => {},
   });
 }
 

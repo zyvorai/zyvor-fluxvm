@@ -75,6 +75,15 @@ enum Command {
         /// (shared with single sign-on).
         #[arg(long, env = "STRIPE_API_BASE", default_value = fluxvm_agent::stripe::DEFAULT_API_BASE)]
         stripe_api_base: String,
+        /// Where self-service sign-up confirmation mail goes: an `https://` URL that central POSTs JSON to
+        /// (`{type, to, subject, text, link}`) and that sends the mail, or `log` to write the mail to this log (labs).
+        /// Needs `--public-url` (the link's base). Without it sign-up cannot be opened while email confirmation is
+        /// required (the policy default). See docs/mac-cloud-billing.md.
+        #[arg(long, env = "FLUXVM_SIGNUP_MAIL_WEBHOOK")]
+        signup_mail_webhook: Option<String>,
+        /// File with a secret that signs each mail webhook POST (`X-FluxVM-Signature: sha256=…`, HMAC-SHA256 of the body).
+        #[arg(long, env = "FLUXVM_SIGNUP_MAIL_SECRET_FILE")]
+        signup_mail_secret_file: Option<PathBuf>,
     },
     /// Run ephemeral GitHub Actions runners on fleet VMs: one VM per queued job, deleted when the job is done.
     /// See docs/github-actions-runners.md.
@@ -195,6 +204,8 @@ async fn main() -> Result<()> {
             stripe_secret_key_file,
             stripe_webhook_secret_file,
             stripe_api_base,
+            signup_mail_webhook,
+            signup_mail_secret_file,
         } => {
             // `--public-url` is declared once (in the SSO flags) and used by Stripe Checkout too.
             let public_url = sso
@@ -235,10 +246,42 @@ async fn main() -> Result<()> {
                     secret_key,
                     webhook_secret,
                     api_base: stripe_api_base,
-                    public_url,
+                    public_url: public_url.clone(),
                 };
                 tracing::info!(mode = cfg.mode(), "Stripe payments on");
                 fluxvm_agent::central::configure_stripe(cfg);
+            }
+            if let Some(url) = signup_mail_webhook
+                .map(|u| u.trim().to_owned())
+                .filter(|u| !u.is_empty())
+            {
+                if url != "log" && !(url.starts_with("https://") || url.starts_with("http://")) {
+                    bail!("--signup-mail-webhook must be an http(s) URL, or `log`");
+                }
+                if url.starts_with("http://")
+                    && !(url.starts_with("http://127.") || url.starts_with("http://localhost"))
+                {
+                    tracing::warn!(
+                        "the sign-up mail webhook is plain http: confirmation links cross the network unencrypted"
+                    );
+                }
+                let Some(base) = public_url.clone() else {
+                    bail!(
+                        "--signup-mail-webhook needs --public-url: it is the base of the confirmation link"
+                    );
+                };
+                let secret = match signup_mail_secret_file {
+                    Some(f) => Some(
+                        fluxvm_agent::stripe::read_secret_file(&f).map_err(anyhow::Error::msg)?,
+                    ),
+                    None => None,
+                };
+                tracing::info!("sign-up confirmation mail on");
+                fluxvm_agent::central::configure_mail(fluxvm_agent::central::MailConfig {
+                    url,
+                    secret,
+                    public_url: base,
+                });
             }
             let ha = match ha_redis {
                 Some(url) => {

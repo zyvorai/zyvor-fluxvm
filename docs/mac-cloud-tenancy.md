@@ -24,6 +24,8 @@ This is an engineering control, not legal advice. The rules are defaults in `GET
 | `ledger_retention_days` | `400` | Ended VMs and leases older than this are dropped by the reconciler (`0` keeps all) |
 | `isolate_tenant_networks` | `false` | Each tenant's `vz` VMs join their own vmnet network (`fluxvm-tenant-<id>`, one /24 each) |
 | `tenant_subnet_prefix` | `10.230` | Tenant n gets `10.230.n.0/24` (indices are assigned once and kept) |
+| `allow_shared_pool_claims` | `false` | Tenants may take VMs from shared warm pools (the operator's). Off: their VMs share a network and image credentials between tenants ([warm-pools.md](warm-pools.md#limits)) |
+| `signup_require_email_verification` | `true` | A self-service sign-up is created only after a mailed link is confirmed ([mac-cloud-billing.md](mac-cloud-billing.md#email-confirmation)) |
 
 ## Console
 
@@ -409,10 +411,11 @@ a role cannot do, and central refuses it anyway (`403` with the reason). New ten
 default: a feature that wants members to use it adds its path in `role_refusal` (`crates/fluxvm-agent/src/central_sso.rs`).
 
 Someone who signed up (`POST /signup`) becomes their tenant's owner the first time they sign in with SSO with the same
-email, as long as the tenant has no members yet (sign-up does not verify the email, so it is not made a member before
-the identity provider has verified it; the sign-up's token works meanwhile). **At that moment the tenant's primary token
-is rotated and its named API keys and webhooks are removed**, because whoever held the sign-up token may not be that
-person (anyone can sign up with someone else's address). The new owner mints a new token and keys from the console.
+email, as long as the tenant has no members yet (it is not made a member before the identity provider has verified the
+address; the sign-up's token works meanwhile). With email confirmation on (the default) the address was already
+confirmed by a mailed link, so the token, keys and webhooks stay. **Without confirmation, at that moment the tenant's
+primary token is rotated and its named API keys and webhooks are removed**, because whoever held the sign-up token may
+not be that person (anyone can sign up with someone else's address); the new owner mints new ones from the console.
 
 ### Members
 

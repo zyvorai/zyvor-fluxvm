@@ -63,6 +63,7 @@ In the console, Policy, Sign-up (or `PUT /fleet/policy`):
 | Policy field | Default | Meaning |
 |---|---|---|
 | `signup_enabled` | `false` | Anyone can create an account; a "Create an account" link appears on the sign-in page |
+| `signup_require_email_verification` | `true` | The account is created only when the person opens a link mailed to their address (see [Email confirmation](#email-confirmation)). `false` is for labs: anyone can then sign up as anyone |
 | `signup_default_quota` | 1 Mac, 2 VMs, 8 vCPUs, 16 GiB | The quota a signed-up tenant starts with |
 | `signup_require_payment_method` | `false` | A new tenant saves a card before it may `POST /fleet/leases` or `POST /fleet/vms` (`402` until then) |
 | `signup_allowed_email_domains` | any | Only these domains (exact match, e.g. `["acme.io"]`) |
@@ -70,8 +71,9 @@ In the console, Policy, Sign-up (or `PUT /fleet/policy`):
 | `billing_suspend_unpaid` | `false` | Disable a tenant whose invoice is still unpaid `billing_suspend_after_days` after it was sent |
 | `billing_suspend_after_days` | `14` | |
 
-Sign-up stays closed, whatever the policy, when central runs without `--token` (tenants need it), and when a payment
-method is required but Stripe is not set up. `GET /signup/config` tells the console which it is.
+Sign-up stays closed, whatever the policy, when central runs without `--token` (tenants need it), when a payment
+method is required but Stripe is not set up, and when email confirmation is required but central has no mail webhook.
+`GET /signup/config` tells the console which it is (`open`, `email_confirmation`, `payments`).
 
 What a sign-up does:
 
@@ -79,16 +81,66 @@ What a sign-up does:
   reserved), the email's shape and domain, and that no tenant already has that email.
 - Limits sign-ups to 5 an hour per client address (IPv6 per /64; behind a reverse proxy on the same machine, the last
   `X-Forwarded-For` entry) and 100 an hour in all. Invalid requests are refused before they count.
-- Creates the tenant with `signup_default_quota`, stores the email as `owner_email` (the SSO feature makes that person
-  the owner), turns invoicing on when Stripe is set up, and creates the Stripe customer (if Stripe is down, it is
-  created later, with the first invoice or card).
-- Answers `201` with the token, once. The console shows it on a screen that cannot be dismissed until the person says
-  they stored it, with Copy and Download, then signs them in.
+- With email confirmation (the default) it records a **pending** sign-up and mails a link; nothing else exists yet
+  (no tenant, no token, no Stripe customer). Answers `202`.
+- Creates the tenant (at confirmation, or at once when confirmation is off) with `signup_default_quota`, stores the
+  email as `owner_email` (the SSO feature makes that person the owner), turns invoicing on when Stripe is set up, and
+  creates the Stripe customer (if Stripe is down, it is created later, with the first invoice or card).
+- Answers `201` with the token, once, from the confirmation (or from `POST /signup` when confirmation is off). The
+  console shows it on a screen that cannot be dismissed until the person says they stored it, with Copy and Download,
+  then signs them in.
 
 ```bash
 fluxctl fleet --central https://cloud.example.com signup acme --email ops@acme.io --name "Acme Mobile"
+# ...open the link in the mail, or:
+fluxctl fleet --central https://cloud.example.com signup-verify fvv_...
 fluxctl fleet payment-method        # with the new token: a Stripe Checkout link
 ```
+
+## Email confirmation
+
+An address nobody confirmed proves nothing: anyone could sign up as someone else and receive the invoices (and, through
+Stripe, mail from your brand) meant for them. So by default a sign-up is a request, and the account exists only after
+the person opens the link mailed to that address.
+
+1. `POST /signup` validates the request, records it as pending (24 hours; at most 2000 at once) and answers `202`. The
+   answer is the same whether or not the address already has an account; an address that does gets a different mail
+   ("you already have an account") so the form cannot be used to find out who is registered. A tenant ID that is taken
+   is said plainly (an ID is not a secret). A second request for one address within 5 minutes sends nothing more.
+2. Central POSTs the mail to **your mail webhook** (below). Central does not speak SMTP.
+3. The link (`{--public-url}/signup/verify?token=fvv_…`) opens a page that shows the account and an
+   **Confirm** button. Only the button's `POST` creates the account, so a mail scanner that fetches every link does not
+   use it up. The token is stored only as its SHA-256 and works once.
+4. Confirming creates the tenant with `owner_email_verified` set (so the first SSO sign-in of that person does **not**
+   rotate the token, unlike an unconfirmed sign-up) and shows the access token once. The same step as JSON:
+   `POST /signup/verify {"token": "fvv_…"}` (`fluxctl fleet signup-verify`).
+
+### The mail webhook
+
+```bash
+fluxvm-agent central --token "$TOKEN" --public-url https://cloud.example.com \
+  --signup-mail-webhook https://mailer.internal/send --signup-mail-secret-file /etc/fluxvm/mail-secret
+```
+
+Central sends `POST` with `Content-Type: application/json`, and `X-FluxVM-Signature: sha256=<hex>` (HMAC-SHA256 of the
+body with the secret file's contents) when a secret is set:
+
+```json
+{"type": "signup.verify", "to": "ops@acme.io", "tenant_id": "acme",
+ "link": "https://cloud.example.com/signup/verify?token=fvv_…", "expires_in_hours": 24,
+ "subject": "Confirm your FluxVM Cloud account", "text": "…the message, with the link…"}
+```
+
+`type` is `signup.verify` or `signup.exists` (no link; a `console` URL instead). `subject` and `text` are ready to send,
+so the receiver can be a few lines in front of SES, Postmark, Mailgun or an SMTP relay: verify the signature, then send
+`text` to `to` with `subject`. A non-2xx answer, or no answer in 10 seconds, is logged and not retried; the person is
+told the same thing either way and can ask again after 5 minutes.
+
+`--signup-mail-webhook log` writes the mail, with the link, to central's log at warning level: for trying it out, never
+for real users. Plain `http://` is accepted only with a warning (the links cross the network unencrypted).
+
+Turning `signup_require_email_verification` off restores the earlier behaviour (`201` with the token at once, address
+unconfirmed): for a closed lab only.
 
 ## Invoices
 
@@ -148,12 +200,13 @@ Tenant records gain `owner_email`, `stripe_customer_id`, `billing_enabled`, `has
 - Taxes, coupons and credit notes: do them in Stripe on the invoice.
 - Refunds and disputes are handled in the Stripe dashboard; central only follows the invoice status.
 - The webhook-event dedup list and the sign-up rate limits are in memory, per central.
-- **The sign-up email is not verified.** Anyone can sign up with someone else's address; nothing is mailed to confirm
-  it. What that means today: the address is shown as the tenant's owner, Stripe's invoice emails (when a tenant has no
-  saved card, `send_invoice`) go to it, and the first SSO sign-in with it takes the tenant over and rotates the sign-up
-  token. Until you add a verification step, keep sign-up closed, restrict it with `signup_allowed_email_domains`, or
-  require a saved payment method (`signup_require_payment_method`) before a tenant can launch anything.
-- Payment gating covers creating VMs, leases, clones, volumes (and growing one) and warm pools (and resizing one);
-  restoring a snapshot, and starting or restarting a stopped VM, are not blocked for a tenant without a payment method.
+- **Email confirmation depends on your mail path.** Central hands the message to your webhook and does not retry or
+  see delivery: a lost mail means the person asks again. Pending sign-ups and their rate limits live in central's
+  state and memory (pending ones survive a restart; the rate limits do not).
+- With confirmation turned off (`signup_require_email_verification: false`) the address is unconfirmed: it is shown as
+  the owner, Stripe's invoice emails go to it, and the first SSO sign-in with it takes the tenant over and rotates the
+  sign-up token. Keep that to labs.
+- Payment gating covers creating VMs, leases, clones, volumes (and growing one), warm pools (and resizing one), and
+  starting, restarting, resuming and snapshot restore, for a tenant without a payment method.
 - A sign-up is limited to 5 per client address and 100 in total per hour. One caller spread over many addresses can use up
   the 100 and lock real sign-ups out for that hour.

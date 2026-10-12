@@ -345,9 +345,9 @@ function Honest(): ReactNode {
                 has run across several real Macs, against real Stripe, or with a real identity provider.
               </li>
               <li>
-                Self-service sign-up and Stripe are off by default and should stay off until sign-up email
-                verification exists. Shared warm pools share a
-                network and image credentials: see <Link to="/docs/mac-cloud-operations">the operations guide</Link>.
+                Self-service sign-up and Stripe are off by default. Sign-up confirms the address by a mailed link and
+                needs a mail webhook before it can be opened; shared warm pools are off for tenants unless the
+                operator allows them: see <Link to="/docs/mac-cloud-operations">the operations guide</Link>.
               </li>
               <li>Thunderbolt RDMA, the shared vmnet broker and physical USB passthrough are not verified.</li>
             </ul>

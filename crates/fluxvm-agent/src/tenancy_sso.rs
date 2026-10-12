@@ -196,15 +196,22 @@ impl TenancyState {
             .clone();
         self.add_member(&id, email, MemberRole::Owner, Some("signup".into()), now)
             .ok()?;
-        // Sign-up did not verify the address, so whoever holds the sign-up token may not be this person (anyone can
-        // sign up with someone else's email). Now that the verified owner is in, what that token could have left
-        // behind goes: the token itself, named keys and webhooks. The owner mints new ones from the console.
-        let _ = self.rotate_token(&id);
-        if let Some(t) = self.tenants.get_mut(&id) {
-            t.keys.clear();
+        // Without email confirmation, sign-up did not verify the address, so whoever holds the sign-up token may not
+        // be this person (anyone can sign up with someone else's email). Now that the verified owner is in, what that
+        // token could have left behind goes: the token itself, named keys and webhooks. The owner mints new ones from
+        // the console. A sign-up that confirmed its address by a mailed link already belongs to this person.
+        let confirmed = self
+            .tenants
+            .get(&id)
+            .is_some_and(|t| t.owner_email_verified);
+        if !confirmed {
+            let _ = self.rotate_token(&id);
+            if let Some(t) = self.tenants.get_mut(&id) {
+                t.keys.clear();
+            }
+            self.webhooks
+                .retain(|w| w.owner.as_deref() != Some(id.as_str()));
         }
-        self.webhooks
-            .retain(|w| w.owner.as_deref() != Some(id.as_str()));
         Some(id)
     }
 
@@ -452,6 +459,28 @@ mod tests {
         s.remove_member("acme", "ops@acme.io").unwrap();
         assert_eq!(s.adopt_signup_owner("ops@acme.io", t0()), None);
         assert!(s.member("acme", "ops@acme.io").is_none());
+    }
+
+    /// A sign-up that confirmed its address by a mailed link keeps its token, keys and webhooks when its owner first
+    /// signs in with SSO: the person holding them is already that person.
+    #[test]
+    fn a_confirmed_sign_up_keeps_its_token_on_adoption() {
+        let mut s = state();
+        {
+            let t = s.tenants.get_mut("acme").unwrap();
+            t.owner_email = Some("ops@acme.io".into());
+            t.owner_email_verified = true;
+        }
+        let before = s.tenants["acme"].token_sha256.clone();
+        assert_eq!(
+            s.adopt_signup_owner("ops@acme.io", t0()).as_deref(),
+            Some("acme")
+        );
+        assert_eq!(s.tenants["acme"].token_sha256, before);
+        assert_eq!(
+            s.member("acme", "ops@acme.io").map(|m| m.role),
+            Some(MemberRole::Owner)
+        );
     }
 
     #[test]
