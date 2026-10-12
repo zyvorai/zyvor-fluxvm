@@ -397,6 +397,9 @@ pub fn router(manager: Arc<VmManager>) -> Router {
         )
         .route("/v1/branches", get(list_branches))
         .route("/v1/branches/prune", post(prune_branches))
+        .route("/v1/branches/import", post(import_branch))
+        .route("/v1/branches/{a}/diff/{b}", get(diff_branches))
+        .route("/v1/branches/{id}/export", post(export_branch))
         .route("/v1/branches/{id}", get(get_branch).delete(delete_branch))
         .route("/v1/branches/{id}/start", post(start_branch))
         .route("/v1/vms/{id}/cbt-backup", post(cbt_backup))
@@ -2765,6 +2768,58 @@ async fn prune_branches(
         .prune_branches(&req.policy, req.dry_run, actor_name)
         .await?;
     Ok(Json(json!(report)))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ExportBranchRequest {
+    /// A directory that does not exist yet; the bundle is written there.
+    path: std::path::PathBuf,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ImportBranchRequest {
+    /// A bundle written by export.
+    path: std::path::PathBuf,
+    /// Defaults to the bundle's own name.
+    name: Option<String>,
+}
+
+/// How branch `b` differs from `a`: saved sizes, lineage and labels.
+async fn diff_branches(
+    State(m): State<Arc<VmManager>>,
+    Path((a, b)): Path<(Uuid, Uuid)>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let (x, y) = (m.get_branch(a).await?, m.get_branch(b).await?);
+    Ok(Json(json!(fluxvm_scheduler::branch::diff_branches(&x, &y))))
+}
+
+/// Writes a branch to a bundle directory on the host (owner-only; it carries the guest's agent token like its disk).
+async fn export_branch(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+    actor: Option<Extension<AuditActor>>,
+    Json(req): Json<ExportBranchRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    let actor_name = actor.as_ref().map(|a| a.0.0.as_str());
+    let path = m.export_branch(id, &req.path, actor_name).await?;
+    Ok(Json(json!({"branch": id, "path": path})))
+}
+
+/// Imports an exported bundle as a new branch (new id, parent link dropped).
+async fn import_branch(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    actor: Option<Extension<AuditActor>>,
+    Json(req): Json<ImportBranchRequest>,
+) -> ApiResult<impl IntoResponse> {
+    require_admin(role)?;
+    let actor_name = actor.as_ref().map(|a| a.0.0.as_str());
+    let b = m.import_branch(&req.path, req.name, actor_name).await?;
+    Ok((StatusCode::CREATED, Json(json!(b))))
 }
 
 async fn get_branch(

@@ -172,6 +172,16 @@ deletes nothing until you send `dry_run: false` (`--yes`). A branch labelled `fl
 Each deletion is audited as `vm.branch.delete`; a failure on one branch is reported in `failed` and the rest continue.
 VMs started from a pruned branch are independent and keep running.
 
+**Diff, export and import.** `GET /v1/branches/{a}/diff/{b}` (`fluxctl branch diff A B`) compares two branches' saved
+vCPUs, memory and state size, their lineage (parent, sibling or unrelated) and labels (added, removed, changed). It
+compares what the branch records, not guest file contents. `POST /v1/branches/{id}/export {"path"}` (`fluxctl branch
+export ID DIR`, admin) writes the branch to a new directory on the host: the saved state, copy-on-write disk clones and
+`branch.json`. `POST /v1/branches/import {"path", "name"}` (`fluxctl branch import DIR [--name n]`, admin) makes a new
+branch from such a directory, with a new id and no parent link; a name already used by a branch of the same source VM is
+refused. Limits: the bundle carries the guest's agent token (as its disk does), so it is owner-only and you should treat
+it like the VM's disk; a saved state restores only on a Mac of the same hardware model and a compatible macOS, which
+import cannot check and a start reports; the bundle is a directory, not a single archive.
+
 - **Same machinery as fork.** `start` restores each VM from the checkpoint with the same identity reset (strict by
   default), token rotation, parallel restore, hooks and readiness; the same limits apply (a Linux guest on
   `apple.usernet` or no network, no extra disks).

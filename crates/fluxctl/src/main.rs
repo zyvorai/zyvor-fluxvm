@@ -1654,6 +1654,26 @@ enum BranchCommand {
     Delete {
         id: Uuid,
     },
+    /// Compare two branches: saved sizes, lineage and labels. REST: `GET /v1/branches/{a}/diff/{b}`.
+    Diff {
+        a: Uuid,
+        b: Uuid,
+    },
+    /// Write a branch to a new directory on this host as a bundle. The bundle holds the guest's agent token like its
+    /// disk does, so it is owner-only. REST: `POST /v1/branches/{id}/export`.
+    Export {
+        id: Uuid,
+        /// Directory to create (must not exist).
+        path: std::path::PathBuf,
+    },
+    /// Import a bundle as a new branch. A saved state restores only on a Mac of the same hardware model and a
+    /// compatible macOS. REST: `POST /v1/branches/import`.
+    Import {
+        path: std::path::PathBuf,
+        /// Name for the imported branch (default: the bundle's).
+        #[arg(long)]
+        name: Option<String>,
+    },
     /// Remove old branches by policy. Shows what would go; nothing is deleted without `--yes`. A branch labelled
     /// `fluxvm.dev/keep=true` is never removed.
     Prune {
@@ -3433,6 +3453,26 @@ async fn run_remote(
                     .await?;
                 println!("deleted {id}");
             }
+            BranchCommand::Diff { a, b } => pretty(
+                &r.call(Method::GET, &format!("/v1/branches/{a}/diff/{b}"), None)
+                    .await?,
+            )?,
+            BranchCommand::Export { id, path } => pretty(
+                &r.call(
+                    Method::POST,
+                    &format!("/v1/branches/{id}/export"),
+                    Some(json!({"path": path})),
+                )
+                .await?,
+            )?,
+            BranchCommand::Import { path, name } => pretty(
+                &r.call(
+                    Method::POST,
+                    "/v1/branches/import",
+                    Some(json!({"path": path, "name": name})),
+                )
+                .await?,
+            )?,
             BranchCommand::Prune {
                 keep_last,
                 older_than,
@@ -4444,6 +4484,21 @@ async fn main() -> Result<()> {
             BranchCommand::Delete { id } => {
                 m.delete_branch(id, None).await?;
                 println!("deleted {id}");
+            }
+            BranchCommand::Diff { a, b } => {
+                let d = fluxvm_scheduler::branch::diff_branches(
+                    &m.get_branch(a).await?,
+                    &m.get_branch(b).await?,
+                );
+                println!("{}", serde_json::to_string_pretty(&d)?);
+            }
+            BranchCommand::Export { id, path } => {
+                let out = m.export_branch(id, &path, None).await?;
+                println!("exported {id} to {}", out.display());
+            }
+            BranchCommand::Import { path, name } => {
+                let b = m.import_branch(&path, name, None).await?;
+                println!("{}", serde_json::to_string_pretty(&b)?);
             }
             BranchCommand::Prune {
                 keep_last,
