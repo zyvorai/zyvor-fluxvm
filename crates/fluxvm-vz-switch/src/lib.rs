@@ -13,6 +13,8 @@
 //! (no spoofing), unicast goes only to the port owning the destination, unknown unicast is dropped, and broadcast and
 //! multicast go to every other port. One process serves one network, so networks cannot see each other.
 
+pub mod overlay;
+
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -178,6 +180,8 @@ struct Port {
 struct Table {
     ports: RwLock<Vec<Arc<Port>>>,
     next: AtomicU64,
+    /// Peers on other Macs carrying the same network (see [`overlay`]).
+    overlay: std::sync::OnceLock<Arc<overlay::Overlay>>,
 }
 
 impl Table {
@@ -213,6 +217,61 @@ impl Table {
 
     fn is_empty(&self) -> bool {
         self.ports.read().unwrap().is_empty()
+    }
+
+    fn local_macs(&self) -> Vec<Mac> {
+        self.ports.read().unwrap().iter().map(|p| p.mac).collect()
+    }
+}
+
+/// Where a frame from a remote peer goes on this switch: unicast to the guest owning the destination, broadcast and
+/// multicast to every guest, anything else nowhere. Never back out to peers (split horizon).
+pub fn remote_targets(ports: &[(u64, Mac)], frame: &[u8]) -> Vec<u64> {
+    if frame.len() < ETH_HEADER || frame.len() > MAX_FRAME {
+        return Vec::new();
+    }
+    let dst = &frame[0..6];
+    if dst[0] & 1 == 1 {
+        return ports.iter().map(|(id, _)| *id).collect();
+    }
+    ports
+        .iter()
+        .filter(|(_, m)| m == dst)
+        .map(|(id, _)| *id)
+        .collect()
+}
+
+/// Whether a locally sent frame also goes to the overlay: broadcast, multicast, and unicast to no local guest.
+fn goes_to_overlay(routed: &Result<Vec<u64>, &'static str>, frame: &[u8]) -> bool {
+    match routed {
+        Ok(_) => frame.first().is_some_and(|b| b & 1 == 1),
+        Err(why) => *why == "unknown destination",
+    }
+}
+
+/// Delivers frames arriving from peers to this switch's guests.
+fn overlay_receiver(table: Arc<Table>, ov: Arc<overlay::Overlay>) {
+    loop {
+        let local = table.local_macs();
+        let Some(inbound) = ov.recv(&local) else {
+            continue;
+        };
+        let ports = table.snapshot();
+        let ids: Vec<(u64, Mac)> = ports.iter().map(|p| (p.id, p.mac)).collect();
+        let to = remote_targets(&ids, &inbound.frame);
+        for p in ports.iter().filter(|p| to.contains(&p.id)) {
+            let sent = unsafe {
+                libc::send(
+                    p.frames.as_raw_fd(),
+                    inbound.frame.as_ptr().cast(),
+                    inbound.frame.len(),
+                    libc::MSG_DONTWAIT,
+                )
+            };
+            if sent < 0 {
+                FORWARD_DROPPED.fetch_add(1, Ordering::Relaxed);
+            }
+        }
     }
 }
 
@@ -341,7 +400,16 @@ fn pump(table: Arc<Table>, port: Arc<Port>) {
         let frame = &buf[..n as usize];
         let ports = table.snapshot();
         let ids: Vec<(u64, Mac)> = ports.iter().map(|p| (p.id, p.mac)).collect();
-        let routed = targets(&ids, port.id, frame);
+        let mut routed = targets(&ids, port.id, frame);
+        if let Some(ov) = table.overlay.get()
+            && goes_to_overlay(&routed, frame)
+        {
+            ov.forward(frame);
+            if routed.is_err() {
+                // Sent to the peers instead: not a drop.
+                routed = Ok(Vec::new());
+            }
+        }
         #[cfg(feature = "netobs")]
         if let Some((t, id)) = &tap {
             t.tap_as(
@@ -432,6 +500,15 @@ fn serve_port(table: Arc<Table>, stream: UnixStream) -> Result<()> {
 
 /// Serves the network on `socket` until no guest has been connected for `idle`.
 pub fn serve(socket: &Path, idle: Duration) -> Result<()> {
+    serve_with_overlay(socket, idle, None)
+}
+
+/// [`serve`], also carrying the network to peers on other Macs when `overlay` is given (see [`overlay`]).
+pub fn serve_with_overlay(
+    socket: &Path,
+    idle: Duration,
+    overlay: Option<Arc<overlay::Overlay>>,
+) -> Result<()> {
     if socket.exists() {
         if UnixStream::connect(socket).is_ok() {
             eprintln!("fluxvm-vz-switch: {} is already served", socket.display());
@@ -455,6 +532,16 @@ pub fn serve(socket: &Path, idle: Duration) -> Result<()> {
     }
     listener.set_nonblocking(true)?;
     let table = Arc::new(Table::default());
+    if let Some(ov) = overlay {
+        eprintln!(
+            "fluxvm-vz-switch: overlay on {:?} with {} peer(s)",
+            ov.local_addr(),
+            ov.peer_count()
+        );
+        let _ = table.overlay.set(ov.clone());
+        let t = table.clone();
+        std::thread::spawn(move || overlay_receiver(t, ov));
+    }
     let mut last_busy = Instant::now();
     loop {
         match listener.accept() {
@@ -636,6 +723,73 @@ mod tests {
         );
         drop((_a_ctl, _b_ctl));
         server.join().unwrap();
+    }
+
+    fn free_udp_port() -> std::net::SocketAddr {
+        std::net::UdpSocket::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+    }
+
+    fn overlay_switch(
+        sock: &Path,
+        listen: std::net::SocketAddr,
+        peer: std::net::SocketAddr,
+    ) -> std::thread::JoinHandle<()> {
+        let ov = overlay::Overlay::bind(
+            overlay::OverlayConfig {
+                network: "acme".into(),
+                listen,
+                peers: vec![peer],
+            },
+            Box::new(overlay::tests::Toy(42)),
+        )
+        .unwrap();
+        let s = sock.to_path_buf();
+        let h = std::thread::spawn(move || {
+            serve_with_overlay(&s, Duration::from_millis(1500), Some(Arc::new(ov))).unwrap()
+        });
+        for _ in 0..50 {
+            if UnixStream::connect(sock).is_ok() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        h
+    }
+
+    #[test]
+    fn guests_on_two_switches_talk_through_the_overlay() {
+        let dir = tempfile::tempdir().unwrap();
+        let (s1, s2) = (dir.path().join("mac1.sock"), dir.path().join("mac2.sock"));
+        let (p1, p2) = (free_udp_port(), free_udp_port());
+        let h1 = overlay_switch(&s1, p1, p2);
+        let h2 = overlay_switch(&s2, p2, p1);
+        let (a, a_ctl) = join(&s1, "on-mac1", A);
+        let (b, b_ctl) = join(&s2, "on-mac2", B);
+        let (c, c_ctl) = join(&s2, "also-on-mac2", C);
+        std::thread::sleep(Duration::from_millis(200));
+
+        // Broadcast crosses to every guest on the other Mac.
+        send(&a, &frame([0xff; 6], A));
+        assert_eq!(recv_timeout(&b, 2000), Some(frame([0xff; 6], A)));
+        assert_eq!(recv_timeout(&c, 2000), Some(frame([0xff; 6], A)));
+        // Unicast to a remote guest reaches only that guest.
+        send(&a, &frame(B, A));
+        assert_eq!(recv_timeout(&b, 2000), Some(frame(B, A)));
+        assert_eq!(recv_timeout(&c, 300), None);
+        // And back: mac2 learned where A is.
+        send(&b, &frame(A, B));
+        assert_eq!(recv_timeout(&a, 2000), Some(frame(A, B)));
+        // Local traffic on mac2 stays local and still works.
+        send(&b, &frame(C, B));
+        assert_eq!(recv_timeout(&c, 2000), Some(frame(C, B)));
+        assert_eq!(recv_timeout(&a, 300), None);
+
+        drop((a_ctl, b_ctl, c_ctl));
+        h1.join().unwrap();
+        h2.join().unwrap();
     }
 
     #[test]

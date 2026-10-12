@@ -96,8 +96,87 @@ pub const DEFAULT_MTU: u32 = 1500;
 pub const MIN_MTU: u32 = 1280;
 pub const MAX_MTU: u32 = 9000;
 
+/// One private network's reach to the same network on other Macs (see `fluxvm_vz_switch::overlay`). Written per Mac,
+/// usually by `fluxvm-agent node` from the fleet's allocation (`POST /fleet/overlays`).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct NetworkOverlay {
+    /// The fleet-wide `N` of `10.89.N.0/24`: every Mac in the network uses the same subnet.
+    pub subnet: u8,
+    /// This Mac's slice of host numbers, inclusive: Macs get disjoint slices so no two guests share an address.
+    pub hosts: [u8; 2],
+    /// UDP address this Mac's switch listens on, e.g. `0.0.0.0:47101`.
+    pub listen: String,
+    /// The switches of the same network on the other Macs.
+    pub peers: Vec<String>,
+    /// File holding the network key (64 hex characters).
+    pub key_file: PathBuf,
+    /// Network MTU; 1400 leaves room for the 60-byte encapsulation on a 1500-byte underlay.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mtu: Option<u32>,
+}
+
+/// Everything in `overlay.json`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct OverlayFile {
+    #[serde(default)]
+    pub networks: BTreeMap<String, NetworkOverlay>,
+}
+
+/// `FLUXVM_VZ_OVERLAY_CONFIG`, else `~/.config/fluxvm/overlay.json`.
+pub fn overlay_config_path() -> PathBuf {
+    if let Some(p) = std::env::var_os("FLUXVM_VZ_OVERLAY_CONFIG") {
+        return PathBuf::from(p);
+    }
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_default();
+    home.join(".config/fluxvm/overlay.json")
+}
+
+/// This Mac's overlays; none when the file does not exist.
+pub fn load_overlays() -> Result<BTreeMap<String, NetworkOverlay>> {
+    let path = overlay_config_path();
+    let raw = match std::fs::read_to_string(&path) {
+        Ok(r) => r,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(BTreeMap::new()),
+        Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
+    };
+    let file: OverlayFile =
+        serde_json::from_str(&raw).with_context(|| format!("parsing {}", path.display()))?;
+    for (name, o) in &file.networks {
+        if !valid_name(name) {
+            bail!("{}: bad network name {name:?}", path.display());
+        }
+        if o.hosts[0] < 2 || o.hosts[1] > 254 || o.hosts[0] > o.hosts[1] {
+            bail!(
+                "{}: network {name}: hosts must be a range within 2-254",
+                path.display()
+            );
+        }
+        if let Some(m) = o.mtu
+            && !(MIN_MTU..=MAX_MTU).contains(&m)
+        {
+            bail!(
+                "{}: network {name}: mtu {m} is out of range",
+                path.display()
+            );
+        }
+    }
+    Ok(file.networks)
+}
+
 /// Fills in each network's `address` and `mac`. `existing` are the networks of the VMs that already exist.
 pub fn assign(networks: &mut [AppleNetwork], existing: &[AppleNetwork]) -> Result<()> {
+    assign_with(networks, existing, &BTreeMap::new())
+}
+
+/// [`assign`], where a network listed in `overlays` takes its fleet-wide subnet and this Mac's host slice from there
+/// (and its MTU, when the request gives none and no member exists yet).
+pub fn assign_with(
+    networks: &mut [AppleNetwork],
+    existing: &[AppleNetwork],
+    overlays: &BTreeMap<String, NetworkOverlay>,
+) -> Result<()> {
     validate(networks)?;
     // Subnet of each network, and the hosts and MACs in use.
     let mut subnet: BTreeMap<&str, u8> = BTreeMap::new();
@@ -131,18 +210,65 @@ pub fn assign(networks: &mut [AppleNetwork], existing: &[AppleNetwork]) -> Resul
                 _ => {}
             }
         }
-        let n = match subnet.get(net.name.as_str()).or(new_subnets.get(&net.name)) {
-            Some(n) => *n,
+        let ov = overlays.get(&net.name);
+        if let Some(o) = ov
+            && net.mtu.is_none()
+            && !net_mtu.contains_key(net.name.as_str())
+        {
+            net.mtu = o.mtu;
+        }
+        let known = subnet
+            .get(net.name.as_str())
+            .or(new_subnets.get(&net.name))
+            .copied();
+        if let (Some(o), Some(k)) = (ov, known)
+            && k != o.subnet
+        {
+            bail!(
+                "network {:?} is {} here but {} across the fleet; recreate its local members",
+                net.name,
+                format_address(k, 0),
+                format_address(o.subnet, 0)
+            );
+        }
+        let known = known.or_else(|| {
+            ov.map(|o| o.subnet).filter(|n| {
+                // Claim the fleet-wide subnet unless another local network already has it.
+                !subnet.values().chain(new_subnets.values()).any(|x| x == n)
+            })
+        });
+        if let (Some(o), None) = (ov, known) {
+            bail!(
+                "network {:?}: its fleet subnet {} is taken by another network on this Mac",
+                net.name,
+                format_address(o.subnet, 0)
+            );
+        }
+        if let (Some(o), Some(n)) = (ov, known)
+            && !new_subnets.contains_key(&net.name)
+            && !subnet.contains_key(net.name.as_str())
+        {
+            debug_assert_eq!(o.subnet, n);
+            new_subnets.insert(net.name.clone(), n);
+        }
+        let n = match known {
+            Some(n) => n,
             None => {
                 let taken: BTreeSet<u8> = subnet
                     .values()
                     .chain(new_subnets.values())
                     .copied()
                     .collect();
+                // Subnets this Mac's overlay networks will claim are not handed to a local network.
+                let reserved: BTreeSet<u8> = overlays
+                    .iter()
+                    .filter(|(name, _)| **name != net.name)
+                    .map(|(_, o)| o.subnet)
+                    .collect();
                 let n = match &net.address {
                     Some(a) => parse_address(a)?.0,
                     None => (0..=255u8)
-                        .find(|n| !taken.contains(n))
+                        .find(|n| !taken.contains(n) && !reserved.contains(n))
                         .context("all 256 private networks are in use")?,
                 };
                 if taken.contains(&n) {
@@ -171,10 +297,24 @@ pub fn assign(networks: &mut [AppleNetwork], existing: &[AppleNetwork]) -> Resul
                 }
                 h
             }
-            None => (2..=254u8)
-                .find(|h| !used.contains(&(n, *h)))
-                .with_context(|| format!("network {:?} is full", net.name))?,
+            None => {
+                let (lo, hi) = ov.map_or((2, 254), |o| (o.hosts[0], o.hosts[1]));
+                (lo..=hi)
+                    .find(|h| !used.contains(&(n, *h)))
+                    .with_context(|| format!("network {:?} is full on this Mac", net.name))?
+            }
         };
+        if let Some(o) = ov
+            && !(o.hosts[0]..=o.hosts[1]).contains(&h)
+        {
+            bail!(
+                "network {:?}: {} is outside this Mac's slice {}-{}",
+                net.name,
+                format_address(n, h),
+                o.hosts[0],
+                o.hosts[1]
+            );
+        }
         used.insert((n, h));
         net.address = Some(format_address(n, h));
         match &net.mac {
@@ -300,7 +440,29 @@ fn spawn_switch(
     let mut cmd = tokio::process::Command::new(bin);
     cmd.arg("--socket").arg(socket);
     if let Some(b) = bridge {
-        cmd.arg("--netobs-socket").arg(b).arg("--network").arg(name);
+        cmd.arg("--netobs-socket").arg(b);
+    }
+    // The name is also the overlay's associated data, so it must be the network's own name on every Mac.
+    cmd.arg("--network").arg(name);
+    match load_overlays() {
+        Ok(ovs) => {
+            if let Some(o) = ovs.get(name) {
+                cmd.arg("--overlay-listen").arg(&o.listen);
+                for p in &o.peers {
+                    // The switch refuses to start on a peer that is not IP:port; skip such a peer instead.
+                    if p.parse::<std::net::SocketAddr>().is_ok() {
+                        cmd.arg("--overlay-peer").arg(p);
+                    } else {
+                        tracing::warn!(network = name, peer = %p, "overlay peer is not IP:port; skipped");
+                    }
+                }
+                cmd.arg("--overlay-key-file").arg(&o.key_file);
+                cmd.arg("--overlay-config").arg(overlay_config_path());
+            }
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, network = name, "overlay config unreadable; network stays on this Mac")
+        }
     }
     cmd.stdin(std::process::Stdio::null())
         .stdout(log.try_clone()?)
@@ -444,6 +606,111 @@ pub fn summarize<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn ov(subnet: u8, lo: u8, hi: u8) -> BTreeMap<String, NetworkOverlay> {
+        [(
+            "acme".to_string(),
+            NetworkOverlay {
+                subnet,
+                hosts: [lo, hi],
+                listen: "0.0.0.0:47101".into(),
+                peers: vec!["10.0.0.2:47101".into()],
+                key_file: "/k".into(),
+                mtu: Some(1400),
+            },
+        )]
+        .into()
+    }
+
+    #[test]
+    fn overlay_networks_use_the_fleet_subnet_and_this_macs_slice() {
+        let o = ov(40, 64, 66);
+        let mut nets = vec![net("acme")];
+        assign_with(&mut nets, &[], &o).unwrap();
+        assert_eq!(nets[0].address.as_deref(), Some("10.89.40.64/24"));
+        assert_eq!(nets[0].mtu, Some(1400));
+        let existing = nets.clone();
+        let mut more = vec![net("acme")];
+        assign_with(&mut more, &existing, &o).unwrap();
+        assert_eq!(more[0].address.as_deref(), Some("10.89.40.65/24"));
+        // The slice runs out rather than spilling into another Mac's addresses.
+        let taken: Vec<AppleNetwork> = (64..=66)
+            .map(|h| AppleNetwork {
+                address: Some(format!("10.89.40.{h}/24")),
+                mac: Some(format!("02:00:00:00:00:{h:02x}")),
+                ..net("acme")
+            })
+            .collect();
+        let mut full = vec![net("acme")];
+        let err = assign_with(&mut full, &taken, &o).unwrap_err();
+        assert!(err.to_string().contains("full on this Mac"), "{err}");
+        // An explicit address outside the slice is refused.
+        let mut out = vec![AppleNetwork {
+            address: Some("10.89.40.100/24".into()),
+            ..net("acme")
+        }];
+        assert!(assign_with(&mut out, &[], &o).is_err());
+        // A non-overlay network still gets its own subnet, never the overlay's.
+        let mut other = vec![net("acme"), net("lab")];
+        assign_with(&mut other, &[], &o).unwrap();
+        assert!(
+            !other[1]
+                .address
+                .as_deref()
+                .unwrap()
+                .starts_with("10.89.40.")
+        );
+        // A local network created first never takes the subnet an overlay network will claim.
+        let mut first = vec![net("lab"), net("acme")];
+        assign_with(&mut first, &[], &ov(0, 2, 10)).unwrap();
+        assert_eq!(first[0].address.as_deref(), Some("10.89.1.2/24"));
+        assert_eq!(first[1].address.as_deref(), Some("10.89.0.2/24"));
+    }
+
+    #[test]
+    fn a_local_subnet_that_disagrees_with_the_fleet_is_refused() {
+        let local = AppleNetwork {
+            address: Some("10.89.3.2/24".into()),
+            ..net("acme")
+        };
+        let mut nets = vec![net("acme")];
+        let err = assign_with(&mut nets, &[local], &ov(40, 2, 10)).unwrap_err();
+        assert!(err.to_string().contains("across the fleet"), "{err}");
+        // Another local network already holding the fleet subnet.
+        let lab = AppleNetwork {
+            address: Some("10.89.40.2/24".into()),
+            ..net("lab")
+        };
+        let mut nets = vec![net("acme")];
+        assert!(assign_with(&mut nets, &[lab], &ov(40, 2, 10)).is_err());
+    }
+
+    #[test]
+    fn overlay_files_load_and_validate() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("overlay.json");
+        // SAFETY: tests in this module that touch the variable run in this one test.
+        unsafe { std::env::set_var("FLUXVM_VZ_OVERLAY_CONFIG", &p) };
+        assert!(
+            load_overlays().unwrap().is_empty(),
+            "a missing file is no overlays"
+        );
+        let file = OverlayFile {
+            networks: ov(40, 2, 10),
+        };
+        std::fs::write(&p, serde_json::to_string(&file).unwrap()).unwrap();
+        assert_eq!(load_overlays().unwrap()["acme"].subnet, 40);
+        std::fs::write(
+            &p,
+            serde_json::to_string(&OverlayFile {
+                networks: ov(40, 10, 2),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(load_overlays().is_err());
+        unsafe { std::env::remove_var("FLUXVM_VZ_OVERLAY_CONFIG") };
+    }
 
     fn net(name: &str) -> AppleNetwork {
         AppleNetwork {

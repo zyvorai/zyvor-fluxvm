@@ -160,6 +160,82 @@ impl VmEntry {
     }
 }
 
+/// A private network that spans Macs (`fluxvm_vz_switch::overlay`): one subnet, one UDP port and one key fleet-wide,
+/// and a disjoint slice of host numbers per member Mac.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OverlayNet {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tenant: Option<String>,
+    /// `N` of `10.89.N.0/24`.
+    pub subnet: u8,
+    pub port: u16,
+    /// The network key, 64 hex characters. Secret: only member nodes are ever given it.
+    pub key_hex: String,
+    pub mtu: u32,
+    pub hosts_per_node: u8,
+    /// Member node -> its host slice (inclusive).
+    pub members: BTreeMap<String, [u8; 2]>,
+    pub created_at: DateTime<Utc>,
+}
+
+impl OverlayNet {
+    /// The record as the API shows it: never the key.
+    pub fn public_json(&self) -> Value {
+        serde_json::json!({
+            "name": self.name,
+            "tenant": self.tenant,
+            "subnet": format!("10.89.{}.0/24", self.subnet),
+            "port": self.port,
+            "mtu": self.mtu,
+            "members": self.members,
+            "created_at": self.created_at,
+        })
+    }
+
+    /// The next free slice of `hosts_per_node` addresses within 2-254.
+    fn free_slice(&self) -> Option<[u8; 2]> {
+        let size = u16::from(self.hosts_per_node.max(1));
+        let mut lo = 2u16;
+        while lo + size - 1 <= 254 {
+            let hi = lo + size - 1;
+            let overlaps = self
+                .members
+                .values()
+                .any(|[a, b]| u16::from(*a) <= hi && lo <= u16::from(*b));
+            if !overlaps {
+                return Some([lo as u8, hi as u8]);
+            }
+            lo += size;
+        }
+        None
+    }
+}
+
+/// First UDP port handed out to overlays.
+pub const OVERLAY_PORT_BASE: u16 = 47100;
+/// Encapsulation adds 60 bytes over IPv4; 1400 also leaves room for IPv6 and tunnels in the underlay.
+pub const OVERLAY_DEFAULT_MTU: u32 = 1400;
+
+fn random_key_hex() -> Option<String> {
+    use std::io::Read;
+    let mut b = [0u8; 32];
+    std::fs::File::open("/dev/urandom")
+        .ok()?
+        .read_exact(&mut b)
+        .ok()?;
+    Some(b.iter().map(|x| format!("{x:02x}")).collect())
+}
+
+fn valid_network_name(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 40
+        && !s.starts_with('-')
+        && !s.ends_with('-')
+        && s.bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+}
+
 /// Fleet-wide rules. Defaults follow the macOS licence; each can be turned off in `fleet-tenancy.json`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Policy {
@@ -234,6 +310,7 @@ pub enum TenancyError {
     LeaseNotActive(String),
     Quota(String),
     NotYours(String),
+    Overlay(String),
 }
 
 impl TenancyError {
@@ -244,6 +321,7 @@ impl TenancyError {
             TenancyError::InvalidTenantId(_) | TenancyError::LeaseTooShort { .. } => 400,
             TenancyError::TenantDisabled(_) | TenancyError::NotYours(_) => 403,
             TenancyError::Quota(_) => 429,
+            TenancyError::Overlay(_) => 409,
             _ => 409,
         }
     }
@@ -281,6 +359,7 @@ impl std::fmt::Display for TenancyError {
             TenancyError::LeaseNotActive(l) => write!(f, "lease '{l}' is not active"),
             TenancyError::Quota(m) => write!(f, "quota exceeded: {m}"),
             TenancyError::NotYours(m) => write!(f, "{m}"),
+            TenancyError::Overlay(m) => write!(f, "{m}"),
         }
     }
 }
@@ -398,6 +477,9 @@ pub struct TenancyState {
     /// Nodes being drained (`POST /fleet/nodes/{name}/drain`); cleared by uncordon.
     #[serde(default)]
     pub draining: BTreeSet<String>,
+    /// Private networks spanning Macs, by name.
+    #[serde(default)]
+    pub overlays: BTreeMap<String, OverlayNet>,
     /// Quota held by creates that are in flight (between the quota check and the node's answer). In memory only: a
     /// restart drops them, and the requests they belonged to are gone with it.
     #[serde(skip)]
@@ -500,6 +582,7 @@ impl TenancyState {
         if busy {
             return Err(TenancyError::TenantBusy(id.into()));
         }
+        self.overlays.retain(|_, o| o.tenant.as_deref() != Some(id));
         self.tenants.remove(id);
         Ok(())
     }
@@ -625,6 +708,7 @@ impl TenancyState {
         lease.released_at = Some(now);
         let out = lease.clone();
         self.scrub_pending.insert(out.node.clone());
+        self.drop_tenant_overlay_member(&out.tenant, &out.node);
         Ok(out)
     }
 
@@ -640,6 +724,7 @@ impl TenancyState {
         }
         for l in &ended {
             self.scrub_pending.insert(l.node.clone());
+            self.drop_tenant_overlay_member(&l.tenant, &l.node);
         }
         ended
     }
@@ -764,6 +849,152 @@ impl TenancyState {
             "subnet": format!("{prefix}.{index}.0"),
             "mask": "255.255.255.0",
         }))
+    }
+
+    /// Creates a private network spanning `nodes`: the lowest free subnet and UDP port, a fresh key, and a host
+    /// slice per node.
+    pub fn create_overlay(
+        &mut self,
+        name: &str,
+        tenant: Option<&str>,
+        nodes: &[String],
+        hosts_per_node: u8,
+        mtu: u32,
+        now: DateTime<Utc>,
+    ) -> Result<OverlayNet, TenancyError> {
+        if !valid_network_name(name) {
+            return Err(TenancyError::Overlay(format!(
+                "bad network name {name:?}: 1-40 lowercase letters, digits and '-'"
+            )));
+        }
+        if self.overlays.contains_key(name) {
+            return Err(TenancyError::Overlay(format!(
+                "network {name:?} already exists"
+            )));
+        }
+        if let Some(t) = tenant {
+            self.require_tenant(t)?;
+        }
+        if !(2..=126).contains(&hosts_per_node) {
+            return Err(TenancyError::Overlay("hosts_per_node must be 2-126".into()));
+        }
+        if !(1280..=9000).contains(&mtu) {
+            return Err(TenancyError::Overlay("mtu must be 1280-9000".into()));
+        }
+        let subnets: BTreeSet<u8> = self.overlays.values().map(|o| o.subnet).collect();
+        // Leave low subnets to Mac-local networks, which allocate from 0 upwards.
+        let subnet = (128..=255u8)
+            .find(|n| !subnets.contains(n))
+            .ok_or_else(|| TenancyError::Overlay("all overlay subnets are in use".into()))?;
+        let ports: BTreeSet<u16> = self.overlays.values().map(|o| o.port).collect();
+        let port = (OVERLAY_PORT_BASE..OVERLAY_PORT_BASE + 1000)
+            .find(|p| !ports.contains(p))
+            .ok_or_else(|| TenancyError::Overlay("no free overlay port".into()))?;
+        let key_hex = random_key_hex().ok_or_else(|| {
+            TenancyError::Overlay("could not read random bytes for the key".into())
+        })?;
+        let mut net = OverlayNet {
+            name: name.to_owned(),
+            tenant: tenant.map(str::to_owned),
+            subnet,
+            port,
+            key_hex,
+            mtu,
+            hosts_per_node,
+            members: BTreeMap::new(),
+            created_at: now,
+        };
+        for n in nodes {
+            self.check_overlay_member(&net, n)?;
+            let slice = net.free_slice().ok_or_else(|| {
+                TenancyError::Overlay(format!("network {name:?} has no room for more Macs"))
+            })?;
+            net.members.insert(n.clone(), slice);
+        }
+        self.overlays.insert(name.to_owned(), net.clone());
+        Ok(net)
+    }
+
+    /// A tenant's network may only include Macs that tenant leases.
+    fn check_overlay_member(&self, net: &OverlayNet, node: &str) -> Result<(), TenancyError> {
+        if let Some(t) = &net.tenant
+            && self
+                .active_lease_for_node(node)
+                .is_none_or(|l| &l.tenant != t)
+        {
+            return Err(TenancyError::NotYours(format!(
+                "node {node:?} is not leased to tenant {t:?}, so it cannot join its network"
+            )));
+        }
+        Ok(())
+    }
+
+    /// The overlay `name` as `caller` may see it.
+    pub fn overlay_for(&self, caller: &Caller, name: &str) -> Result<&OverlayNet, TenancyError> {
+        let o = self
+            .overlays
+            .get(name)
+            .ok_or_else(|| TenancyError::Overlay(format!("no network {name:?}")))?;
+        match caller.tenant() {
+            Some(t) if o.tenant.as_deref() != Some(t) => {
+                Err(TenancyError::Overlay(format!("no network {name:?}")))
+            }
+            _ => Ok(o),
+        }
+    }
+
+    pub fn add_overlay_member(
+        &mut self,
+        caller: &Caller,
+        name: &str,
+        node: &str,
+    ) -> Result<OverlayNet, TenancyError> {
+        let net = self.overlay_for(caller, name)?.clone();
+        if net.members.contains_key(node) {
+            return Ok(net);
+        }
+        self.check_overlay_member(&net, node)?;
+        let slice = net.free_slice().ok_or_else(|| {
+            TenancyError::Overlay(format!("network {name:?} has no room for more Macs"))
+        })?;
+        let entry = self.overlays.get_mut(name).expect("checked above");
+        entry.members.insert(node.to_owned(), slice);
+        Ok(entry.clone())
+    }
+
+    pub fn remove_overlay_member(
+        &mut self,
+        caller: &Caller,
+        name: &str,
+        node: &str,
+    ) -> Result<OverlayNet, TenancyError> {
+        self.overlay_for(caller, name)?;
+        let entry = self.overlays.get_mut(name).expect("checked above");
+        entry.members.remove(node);
+        Ok(entry.clone())
+    }
+
+    pub fn delete_overlay(&mut self, caller: &Caller, name: &str) -> Result<(), TenancyError> {
+        self.overlay_for(caller, name)?;
+        self.overlays.remove(name);
+        Ok(())
+    }
+
+    /// The networks `node` belongs to.
+    pub fn overlays_of_node(&self, node: &str) -> Vec<&OverlayNet> {
+        self.overlays
+            .values()
+            .filter(|o| o.members.contains_key(node))
+            .collect()
+    }
+
+    /// Takes `node` out of every network of `tenant` (its lease ended).
+    fn drop_tenant_overlay_member(&mut self, tenant: &str, node: &str) {
+        for o in self.overlays.values_mut() {
+            if o.tenant.as_deref() == Some(tenant) {
+                o.members.remove(node);
+            }
+        }
     }
 
     /// Checks the quota and, if it fits, holds that much for an in-flight create, so parallel creates by one tenant
@@ -1251,6 +1482,85 @@ mod tests {
         assert!(s.tenant_vmnet("nobody").is_none());
         s.policy.tenant_subnet_prefix = "10.300".into();
         assert!(s.tenant_vmnet("b").is_none());
+    }
+
+    #[test]
+    fn overlays_get_unique_subnets_ports_keys_and_disjoint_slices() {
+        let mut s = state_with(&["a"]);
+        s.create_lease("a", "mac1", None, t0()).unwrap();
+        s.create_lease("a", "mac2", None, t0()).unwrap();
+        let nodes = vec!["mac1".to_string(), "mac2".to_string()];
+        let n1 = s
+            .create_overlay("a-net", Some("a"), &nodes, 30, 1400, t0())
+            .unwrap();
+        assert_eq!(n1.subnet, 128);
+        assert_eq!(n1.port, OVERLAY_PORT_BASE);
+        assert_eq!(n1.key_hex.len(), 64);
+        assert_eq!(n1.members["mac1"], [2, 31]);
+        assert_eq!(n1.members["mac2"], [32, 61]);
+        assert!(
+            !n1.public_json().to_string().contains(&n1.key_hex),
+            "the key never leaves in public JSON"
+        );
+        let n2 = s.create_overlay("lab", None, &[], 30, 1400, t0()).unwrap();
+        assert_ne!(n2.subnet, n1.subnet);
+        assert_ne!(n2.port, n1.port);
+        assert_ne!(n2.key_hex, n1.key_hex);
+        assert!(s.create_overlay("lab", None, &[], 30, 1400, t0()).is_err());
+        assert!(
+            s.create_overlay("Bad_Name", None, &[], 30, 1400, t0())
+                .is_err()
+        );
+        assert_eq!(s.overlays_of_node("mac1").len(), 1);
+    }
+
+    #[test]
+    fn tenant_overlays_follow_leases() {
+        let mut s = state_with(&["a", "b"]);
+        s.create_lease("a", "mac1", None, t0()).unwrap();
+        let l2 = s.create_lease("a", "mac2", None, t0()).unwrap();
+        s.create_lease("b", "mac3", None, t0()).unwrap();
+        // Only leased Macs may join.
+        assert!(
+            s.create_overlay("a-net", Some("a"), &["mac3".into()], 30, 1400, t0())
+                .is_err()
+        );
+        s.create_overlay("a-net", Some("a"), &["mac1".into()], 30, 1400, t0())
+            .unwrap();
+        let a = Caller::Tenant("a".into());
+        let b = Caller::Tenant("b".into());
+        assert_eq!(
+            s.add_overlay_member(&a, "a-net", "mac2").unwrap().members["mac2"],
+            [32, 61]
+        );
+        assert!(s.add_overlay_member(&a, "a-net", "mac3").is_err());
+        // Another tenant cannot see or change it.
+        assert!(s.overlay_for(&b, "a-net").is_err());
+        assert!(s.add_overlay_member(&b, "a-net", "mac3").is_err());
+        assert!(s.delete_overlay(&b, "a-net").is_err());
+        // The lease ends: the Mac leaves the network.
+        s.release_lease(&l2.id, None, true, t0()).unwrap();
+        assert!(!s.overlays["a-net"].members.contains_key("mac2"));
+        // A freed slice is reused.
+        s.create_lease("a", "mac4", None, t0()).unwrap();
+        assert_eq!(
+            s.add_overlay_member(&a, "a-net", "mac4").unwrap().members["mac4"],
+            [32, 61]
+        );
+        s.delete_overlay(&a, "a-net").unwrap();
+        assert!(s.overlays.is_empty());
+    }
+
+    #[test]
+    fn slices_run_out_cleanly() {
+        let mut s = TenancyState::default();
+        let nodes: Vec<String> = (0..3).map(|i| format!("m{i}")).collect();
+        let n = s
+            .create_overlay("big", None, &nodes[..2], 126, 1400, t0())
+            .unwrap();
+        assert_eq!(n.members["m0"], [2, 127]);
+        assert_eq!(n.members["m1"], [128, 253]);
+        assert!(s.add_overlay_member(&Caller::Admin, "big", "m2").is_err());
     }
 
     #[test]

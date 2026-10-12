@@ -100,6 +100,7 @@ same registry: `fluxctl up --fleet http://fleet-registry:7799` ([macos-stacks.md
   leasing rule), quotas, scrub, drain and usage metering in `fluxvm-agent central`.
 - [vm-images.md](vm-images.md): push a golden macOS template or Linux disk to an OCI registry once, pull it on every Mac.
 - [github-actions-runners.md](github-actions-runners.md): one fresh VM per queued GitHub Actions job.
+- [cross-mac-networks.md](cross-mac-networks.md): one private network spanning several Macs (encrypted overlay).
 - [fleet-ha.md](fleet-ha.md): run two or three registries against one Redis, so the fleet survives losing one.
 - [macos-signing.md](macos-signing.md): Developer ID signing, which vmnet, bridged networking and USB passthrough need.
 

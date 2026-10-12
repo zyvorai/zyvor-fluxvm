@@ -149,8 +149,7 @@ The ledger covers VMs created through central. VMs created directly on a node ar
 - A two-Mac hardware run of leases, scrub and drain.
 - Host-level scrubbing beyond VM workspaces.
 - High availability is in [fleet-ha.md](fleet-ha.md) (several centrals, one Redis), not yet run on real hosts.
-- Tenant networks are per Mac: one tenant's VMs on two Macs are on two separate vmnet networks with the same subnet,
-  not one network spanning both Macs. A cross-Mac overlay is still to do. Network isolation also needs macOS 26+ and
-  the `fluxvm-vmnetd` broker on every Mac, neither verified on hardware yet.
+- Tenant vmnet networks (`isolate_tenant_networks`) are per Mac. For one network spanning a tenant's Macs, use an
+  overlay: [cross-mac-networks.md](cross-mac-networks.md).
 - Lab mode (no `--token`) and tenants do not mix: central refuses to create tenants without `--token`, and if tenants
   exist when it starts without one, every caller except a tenant gets a `401` (node heartbeats included).

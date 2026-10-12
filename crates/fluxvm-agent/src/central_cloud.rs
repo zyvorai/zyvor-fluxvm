@@ -863,6 +863,215 @@ pub(super) async fn drain_status(
     })))
 }
 
+// ---- overlays (private networks across Macs) ----------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+pub(super) struct CreateOverlayBody {
+    name: String,
+    /// Operator only: the tenant the network belongs to (a tenant's own networks always belong to it).
+    #[serde(default)]
+    tenant: Option<String>,
+    /// Member Macs; a tenant's default is every Mac it leases.
+    #[serde(default)]
+    nodes: Option<Vec<String>>,
+    #[serde(default = "default_hosts_per_node")]
+    hosts_per_node: u8,
+    #[serde(default = "default_overlay_mtu")]
+    mtu: u32,
+}
+
+fn default_hosts_per_node() -> u8 {
+    30
+}
+
+fn default_overlay_mtu() -> u32 {
+    crate::tenancy::OVERLAY_DEFAULT_MTU
+}
+
+async fn require_registered(fleet: &Fleet, nodes: &[String]) -> Result<(), AppError> {
+    let known = fleet.nodes.lock().await;
+    match nodes.iter().find(|n| !known.contains_key(*n)) {
+        Some(n) => Err(AppError(
+            StatusCode::BAD_REQUEST,
+            format!("no registered node named '{n}'"),
+        )),
+        None => Ok(()),
+    }
+}
+
+/// `POST /fleet/overlays` (*tenant*): a private network spanning Macs. Each member Mac's `fluxvm-agent node` picks it
+/// up on its next heartbeat and writes the Mac's `overlay.json`; guests then join it with `apple.networks: [{name}]`.
+pub(super) async fn create_overlay(
+    State(fleet): State<Fleet>,
+    Extension(caller): Extension<Caller>,
+    Json(b): Json<CreateOverlayBody>,
+) -> Result<(StatusCode, Json<Value>), AppError> {
+    let tenant = match &caller {
+        Caller::Tenant(t) => Some(t.clone()),
+        Caller::Admin => b.tenant.clone(),
+    };
+    let mut t = fleet.tenancy.lock().await;
+    let nodes = match (&b.nodes, &tenant) {
+        (Some(n), _) => n.clone(),
+        (None, Some(tn)) => t
+            .leases
+            .iter()
+            .filter(|l| &l.tenant == tn && l.state == LeaseState::Active)
+            .map(|l| l.node.clone())
+            .collect(),
+        (None, None) => Vec::new(),
+    };
+    require_registered(&fleet, &nodes).await?;
+    let net = t
+        .create_overlay(
+            &b.name,
+            tenant.as_deref(),
+            &nodes,
+            b.hosts_per_node,
+            b.mtu,
+            Utc::now(),
+        )
+        .map_err(tenancy_error)?;
+    fleet.persist_tenancy(&t);
+    tracing::info!(network = %net.name, subnet = net.subnet, members = net.members.len(), "overlay created");
+    Ok((StatusCode::CREATED, Json(net.public_json())))
+}
+
+pub(super) async fn list_overlays(
+    State(fleet): State<Fleet>,
+    Extension(caller): Extension<Caller>,
+) -> Json<Value> {
+    let t = fleet.tenancy.lock().await;
+    let items: Vec<Value> = t
+        .overlays
+        .values()
+        .filter(|o| {
+            caller
+                .tenant()
+                .is_none_or(|c| o.tenant.as_deref() == Some(c))
+        })
+        .map(|o| o.public_json())
+        .collect();
+    Json(json!({"items": items}))
+}
+
+pub(super) async fn get_overlay(
+    State(fleet): State<Fleet>,
+    Extension(caller): Extension<Caller>,
+    Path(name): Path<String>,
+) -> Result<Json<Value>, AppError> {
+    let t = fleet.tenancy.lock().await;
+    let o = t
+        .overlay_for(&caller, &name)
+        .map_err(|e| not_found(e.to_string()))?;
+    Ok(Json(o.public_json()))
+}
+
+pub(super) async fn delete_overlay(
+    State(fleet): State<Fleet>,
+    Extension(caller): Extension<Caller>,
+    Path(name): Path<String>,
+) -> Result<StatusCode, AppError> {
+    let mut t = fleet.tenancy.lock().await;
+    t.delete_overlay(&caller, &name)
+        .map_err(|e| not_found(e.to_string()))?;
+    fleet.persist_tenancy(&t);
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct MemberBody {
+    node: String,
+}
+
+pub(super) async fn add_overlay_member(
+    State(fleet): State<Fleet>,
+    Extension(caller): Extension<Caller>,
+    Path(name): Path<String>,
+    Json(b): Json<MemberBody>,
+) -> Result<Json<Value>, AppError> {
+    require_registered(&fleet, std::slice::from_ref(&b.node)).await?;
+    let mut t = fleet.tenancy.lock().await;
+    let net = t
+        .add_overlay_member(&caller, &name, &b.node)
+        .map_err(tenancy_error)?;
+    fleet.persist_tenancy(&t);
+    Ok(Json(net.public_json()))
+}
+
+pub(super) async fn remove_overlay_member(
+    State(fleet): State<Fleet>,
+    Extension(caller): Extension<Caller>,
+    Path((name, node)): Path<(String, String)>,
+) -> Result<Json<Value>, AppError> {
+    let mut t = fleet.tenancy.lock().await;
+    let net = t
+        .remove_overlay_member(&caller, &name, &node)
+        .map_err(tenancy_error)?;
+    fleet.persist_tenancy(&t);
+    Ok(Json(net.public_json()))
+}
+
+/// The address other Macs reach `n`'s overlay on: the `fluxvm.dev/overlay-ip` label, else the host of its advertised
+/// URL.
+fn overlay_host(n: &NodeInfo) -> Option<String> {
+    if let Some(ip) = n.labels.get("fluxvm.dev/overlay-ip") {
+        return Some(ip.clone());
+    }
+    let rest = n
+        .fluxvm_url
+        .split_once("://")
+        .map_or(n.fluxvm_url.as_str(), |(_, r)| r);
+    let authority = rest.split('/').next()?;
+    if let Some(v6) = authority.strip_prefix('[') {
+        return v6.split_once(']').map(|(h, _)| format!("[{h}]"));
+    }
+    let host = authority.rsplit_once(':').map_or(authority, |(h, _)| h);
+    (!host.is_empty()).then(|| host.to_owned())
+}
+
+/// `GET /fleet/nodes/{name}/overlays` (operator token, which node agents use): the node's `overlay.json`, keys
+/// included. Peers whose address cannot be worked out are left out (and named in `unresolved`).
+pub(super) async fn node_overlays(
+    State(fleet): State<Fleet>,
+    Extension(caller): Extension<Caller>,
+    Path(name): Path<String>,
+) -> Result<Json<Value>, AppError> {
+    require_admin(&caller)?;
+    let t = fleet.tenancy.lock().await;
+    let nodes = fleet.nodes.lock().await;
+    let mut networks = serde_json::Map::new();
+    let mut unresolved = Vec::new();
+    for o in t.overlays_of_node(&name) {
+        let peers: Vec<String> = o
+            .members
+            .keys()
+            .filter(|m| **m != name)
+            .filter_map(|m| match nodes.get(m).and_then(overlay_host) {
+                Some(h) => Some(format!("{h}:{}", o.port)),
+                None => {
+                    unresolved.push(json!({"network": o.name, "node": m}));
+                    None
+                }
+            })
+            .collect();
+        networks.insert(
+            o.name.clone(),
+            json!({
+                "subnet": o.subnet,
+                "hosts": o.members[&name],
+                "listen": format!("0.0.0.0:{}", o.port),
+                "peers": peers,
+                "key": o.key_hex,
+                "mtu": o.mtu,
+            }),
+        );
+    }
+    Ok(Json(
+        json!({"networks": networks, "unresolved": unresolved}),
+    ))
+}
+
 // ---- exec ---------------------------------------------------------------------------------------------------------
 
 /// `POST /fleet/vms/{node}/{id}/exec` (*tenant*): forwards `{"command": "...", "timeout_seconds": N}` to the node's
@@ -1459,6 +1668,91 @@ mod tests {
         let mut body = json!({"backend": "vz"});
         body["apple"]["vmnet"] = json!({"name": "x"});
         assert_eq!(body["apple"]["vmnet"]["name"], "x");
+    }
+
+    #[test]
+    fn overlay_hosts_come_from_labels_or_the_advertised_url() {
+        let mut n = mac("m", 1, 0);
+        n.fluxvm_url = "http://studio-1.local:7788".into();
+        assert_eq!(overlay_host(&n).as_deref(), Some("studio-1.local"));
+        n.fluxvm_url = "http://[fd00::5]:7788/".into();
+        assert_eq!(overlay_host(&n).as_deref(), Some("[fd00::5]"));
+        n.fluxvm_url = "http://10.0.0.5".into();
+        assert_eq!(overlay_host(&n).as_deref(), Some("10.0.0.5"));
+        n.labels
+            .insert("fluxvm.dev/overlay-ip".into(), "192.168.50.5".into());
+        assert_eq!(overlay_host(&n).as_deref(), Some("192.168.50.5"));
+    }
+
+    #[tokio::test]
+    async fn tenant_overlays_reach_their_member_macs_with_keys() {
+        let mut a = mac("mac-a", 32_000, 0);
+        a.fluxvm_url = "http://10.0.0.1:7788".into();
+        let mut b = mac("mac-b", 32_000, 0);
+        b.fluxvm_url = "http://10.0.0.2:7788".into();
+        let fleet = fleet_of(vec![a, b], TenancyState::default());
+        let app = Router::new()
+            .route("/fleet/tenants", post(create_tenant))
+            .route("/fleet/leases", post(create_lease))
+            .route("/fleet/overlays", get(list_overlays).post(create_overlay))
+            .route("/fleet/nodes/{name}/overlays", get(node_overlays))
+            .layer(middleware::from_fn_with_state(
+                fleet.clone(),
+                auth_middleware,
+            ))
+            .with_state(fleet.clone());
+        let (_, v) = call(
+            &app,
+            "POST",
+            "/fleet/tenants",
+            "admin-token",
+            json!({"id": "acme"}),
+        )
+        .await;
+        let token = v["token"].as_str().unwrap().to_owned();
+        for node in ["mac-a", "mac-b"] {
+            let (s, v) = call(&app, "POST", "/fleet/leases", &token, json!({"node": node})).await;
+            assert_eq!(s, 201, "{v}");
+        }
+        // Defaults to every Mac the tenant leases; the key is never in the tenant's view.
+        let (s, v) = call(
+            &app,
+            "POST",
+            "/fleet/overlays",
+            &token,
+            json!({"name": "acme-net"}),
+        )
+        .await;
+        assert_eq!(s, 201, "{v}");
+        assert_eq!(v["members"].as_object().unwrap().len(), 2);
+        assert!(v.get("key").is_none() && v.get("key_hex").is_none());
+        // The node agent's view (operator token): its slice, the other Mac as peer, and the key.
+        let (s, v) = call(
+            &app,
+            "GET",
+            "/fleet/nodes/mac-a/overlays",
+            "admin-token",
+            json!({}),
+        )
+        .await;
+        assert_eq!(s, 200, "{v}");
+        let net = &v["networks"]["acme-net"];
+        assert_eq!(
+            net["peers"],
+            json!([format!("10.0.0.2:{}", crate::tenancy::OVERLAY_PORT_BASE)])
+        );
+        assert_eq!(net["hosts"], json!([2, 31]));
+        assert_eq!(net["key"].as_str().unwrap().len(), 64);
+        // A tenant cannot read node configs.
+        let (s, _) = call(
+            &app,
+            "GET",
+            "/fleet/nodes/mac-a/overlays",
+            &token,
+            json!({}),
+        )
+        .await;
+        assert_eq!(s, 403);
     }
 
     #[test]

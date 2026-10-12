@@ -340,6 +340,10 @@ fn tenant_route_allowed(method: &axum::http::Method, path: &str) -> bool {
         ["fleet", "vms", _, _, "exec"] => post,
         ["fleet", "leases", _] => get,
         ["fleet", "leases", _, "release"] => post,
+        ["fleet", "overlays"] => get || post,
+        ["fleet", "overlays", _] => get || delete,
+        ["fleet", "overlays", _, "members"] => post,
+        ["fleet", "overlays", _, "members", _] => delete,
         _ => false,
     }
 }
@@ -411,6 +415,14 @@ fn persist_json<T: Serialize + ?Sized>(path: &FsPath, lock_path: &FsPath, value:
             if let Err(e) = fs::write(&tmp, &bytes) {
                 tracing::warn!(error = %e, "writing fleet registry tmp");
                 return;
+            }
+            // The tenancy state holds overlay network keys: owner-only.
+            {
+                use std::os::unix::fs::PermissionsExt;
+                if let Err(e) = fs::set_permissions(&tmp, fs::Permissions::from_mode(0o600)) {
+                    tracing::warn!(error = %e, "restricting fleet registry tmp");
+                    return;
+                }
             }
             if let Err(e) = fs::rename(&tmp, path) {
                 tracing::warn!(error = %e, "renaming fleet registry");
@@ -522,6 +534,23 @@ pub fn router_with_handle(cfg: CentralConfig) -> (Router, Option<HaHandle>) {
         .route("/fleet/leases/{id}", get(cloud::get_lease))
         .route("/fleet/leases/{id}/release", post(cloud::release_lease))
         .route("/fleet/usage", get(cloud::usage))
+        .route(
+            "/fleet/overlays",
+            get(cloud::list_overlays).post(cloud::create_overlay),
+        )
+        .route(
+            "/fleet/overlays/{name}",
+            get(cloud::get_overlay).delete(cloud::delete_overlay),
+        )
+        .route(
+            "/fleet/overlays/{name}/members",
+            post(cloud::add_overlay_member),
+        )
+        .route(
+            "/fleet/overlays/{name}/members/{node}",
+            axum::routing::delete(cloud::remove_overlay_member),
+        )
+        .route("/fleet/nodes/{name}/overlays", get(cloud::node_overlays))
         .route("/fleet/reconcile", post(cloud::reconcile))
         .route(
             "/fleet/policy",

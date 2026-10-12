@@ -30,6 +30,9 @@ pub struct NodeConfig {
     /// every heartbeat -- see `central::NodeInfo::labels` for what they're
     /// used for (`nodeSelector`-based placement).
     pub labels: HashMap<String, String>,
+    /// Where to write this Mac's `overlay.json` (private networks spanning Macs) after each heartbeat; `None` turns
+    /// the sync off.
+    pub overlay_config: Option<std::path::PathBuf>,
 }
 
 /// Runs forever, heartbeating every `cfg.interval`. Logs and keeps going on
@@ -52,6 +55,18 @@ pub async fn run(cfg: NodeConfig) {
             Ok(used) => {
                 preferred = used;
                 tracing::debug!(node = %cfg.name, "heartbeat sent");
+                if let Some(path) = &cfg.overlay_config {
+                    let central = central_urls(&cfg.central_url)[used].clone();
+                    match sync_overlays(&http, &central, cfg.token.as_deref(), &cfg.name, path)
+                        .await
+                    {
+                        Ok(true) => {
+                            tracing::info!(path = %path.display(), "overlay config updated")
+                        }
+                        Ok(false) => {}
+                        Err(e) => tracing::warn!(error = %e, "overlay sync failed"),
+                    }
+                }
             }
             Err(e) => tracing::warn!(error = %e, "heartbeat failed, will retry next tick"),
         }
@@ -108,6 +123,180 @@ async fn beat(http: &reqwest::Client, cfg: &NodeConfig, preferred: usize) -> Res
         }
     }
     anyhow::bail!("no central took the heartbeat ({})", errors.join("; "))
+}
+
+/// Writes this Mac's `overlay.json` (and one key file per network, mode 0600, next to it under `overlay-keys/`) from
+/// the fleet's allocation. Returns whether anything changed. Key files of networks this Mac left are removed.
+pub async fn sync_overlays(
+    http: &reqwest::Client,
+    central: &str,
+    token: Option<&str>,
+    node: &str,
+    path: &std::path::Path,
+) -> Result<bool> {
+    let mut req = http.get(format!("{central}/fleet/nodes/{node}/overlays"));
+    if let Some(t) = token {
+        req = req.bearer_auth(t);
+    }
+    let resp = req.send().await.context("fetching overlays")?;
+    anyhow::ensure!(
+        resp.status().is_success(),
+        "central refused the overlay list: {}",
+        resp.status()
+    );
+    let body: serde_json::Value = resp.json().await.context("parsing overlays")?;
+    // File writes and peer name lookups block; keep them off the runtime's workers.
+    let path = path.to_path_buf();
+    tokio::task::spawn_blocking(move || apply_overlays(&body, &path))
+        .await
+        .context("overlay sync task")?
+}
+
+/// A peer as the switch takes it: `IP:port`. Central gives a host name when a node advertises one; it is looked up
+/// here (IPv4 first, since the switch listens on `0.0.0.0`). `None` when it cannot be resolved.
+fn resolve_peer(p: &str) -> Option<String> {
+    use std::net::{SocketAddr, ToSocketAddrs};
+    if p.parse::<SocketAddr>().is_ok() {
+        return Some(p.to_owned());
+    }
+    let addrs: Vec<SocketAddr> = p.to_socket_addrs().ok()?.collect();
+    addrs
+        .iter()
+        .find(|a| a.is_ipv4())
+        .or(addrs.first())
+        .map(|a| a.to_string())
+}
+
+/// The file-writing half of [`sync_overlays`], separate so it can be tested without a central.
+pub fn apply_overlays(body: &serde_json::Value, path: &std::path::Path) -> Result<bool> {
+    use fluxvm_apple::vznet::{NetworkOverlay, OverlayFile};
+    use std::os::unix::fs::PermissionsExt;
+    let dir = path
+        .parent()
+        .context("overlay config path has no directory")?;
+    let keys = dir.join("overlay-keys");
+    std::fs::create_dir_all(&keys)?;
+    std::fs::set_permissions(&keys, std::fs::Permissions::from_mode(0o700))?;
+    let mut changed = false;
+    let mut file = OverlayFile::default();
+    let empty = serde_json::Map::new();
+    let networks = body["networks"].as_object().unwrap_or(&empty);
+    for (name, n) in networks {
+        anyhow::ensure!(
+            fluxvm_apple::vznet::valid_name(name),
+            "central sent a bad network name {name:?}"
+        );
+        let key = n["key"].as_str().context("overlay without a key")?;
+        anyhow::ensure!(
+            key.len() == 64 && key.bytes().all(|b| b.is_ascii_hexdigit()),
+            "central sent a malformed key for {name}"
+        );
+        let key_file = keys.join(format!("{name}.key"));
+        if std::fs::read_to_string(&key_file).ok().as_deref() != Some(key) {
+            let tmp = key_file.with_extension("key.tmp");
+            std::fs::write(&tmp, key)?;
+            std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))?;
+            std::fs::rename(&tmp, &key_file)?;
+            changed = true;
+        }
+        let hosts = n["hosts"].as_array().context("overlay without hosts")?;
+        let h = |i: usize| -> Result<u8> {
+            hosts
+                .get(i)
+                .and_then(|v| v.as_u64())
+                .and_then(|v| u8::try_from(v).ok())
+                .context("bad host slice")
+        };
+        file.networks.insert(
+            name.clone(),
+            NetworkOverlay {
+                subnet: n["subnet"]
+                    .as_u64()
+                    .and_then(|v| u8::try_from(v).ok())
+                    .context("bad subnet")?,
+                hosts: [h(0)?, h(1)?],
+                listen: n["listen"]
+                    .as_str()
+                    .context("no listen address")?
+                    .to_owned(),
+                peers: n["peers"]
+                    .as_array()
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|p| {
+                                let p = p.as_str()?;
+                                let r = resolve_peer(p);
+                                if r.is_none() {
+                                    tracing::warn!(network = %name, peer = p, "overlay peer does not resolve; left out");
+                                }
+                                r
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+                key_file,
+                mtu: n["mtu"].as_u64().and_then(|v| u32::try_from(v).ok()),
+            },
+        );
+    }
+    // Forget keys of networks this Mac no longer belongs to.
+    for entry in std::fs::read_dir(&keys)? {
+        let entry = entry?;
+        let stem = entry
+            .path()
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned());
+        if let Some(stem) = stem
+            && !file.networks.contains_key(&stem)
+        {
+            std::fs::remove_file(entry.path())?;
+            changed = true;
+        }
+    }
+    let json = serde_json::to_string_pretty(&file)?;
+    if std::fs::read_to_string(path).ok().as_deref() != Some(json.as_str()) {
+        let tmp = path.with_extension("json.tmp");
+        std::fs::write(&tmp, &json)?;
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))?;
+        std::fs::rename(&tmp, path)?;
+        changed = true;
+    }
+    Ok(changed)
+}
+
+#[cfg(test)]
+mod overlay_sync_tests {
+    use super::apply_overlays;
+    use serde_json::json;
+
+    #[test]
+    fn overlays_are_written_with_private_keys_and_cleaned_up() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tempfile::tempdir().unwrap();
+        let path = d.path().join("overlay.json");
+        let key = "ab".repeat(32);
+        let body = json!({"networks": {"acme-net": {
+            "subnet": 128, "hosts": [2, 31], "listen": "0.0.0.0:47100",
+            "peers": ["10.0.0.2:47100"], "key": key, "mtu": 1400}}});
+        assert!(apply_overlays(&body, &path).unwrap());
+        assert!(
+            !apply_overlays(&body, &path).unwrap(),
+            "nothing changed the second time"
+        );
+        let file: fluxvm_apple::vznet::OverlayFile =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let n = &file.networks["acme-net"];
+        assert_eq!(n.hosts, [2, 31]);
+        assert_eq!(std::fs::read_to_string(&n.key_file).unwrap(), key);
+        let mode = std::fs::metadata(&n.key_file).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+        // The Mac leaves the network: its key goes too.
+        assert!(apply_overlays(&json!({"networks": {}}), &path).unwrap());
+        assert!(!n.key_file.exists());
+        // Hostile input is refused.
+        let bad = json!({"networks": {"../x": {"key": key}}});
+        assert!(apply_overlays(&bad, &path).is_err());
+    }
 }
 
 #[cfg(test)]
