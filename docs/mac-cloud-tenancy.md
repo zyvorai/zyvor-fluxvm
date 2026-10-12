@@ -104,8 +104,9 @@ quota, a standby names the leader, and an unreachable central says how to point 
 
 Central records every change made through it: the time, who (`operator` or the tenant), the method and path, the
 name or id from the request body if there is one (a VM name, a tenant id), and the HTTP status. Reads and node
-heartbeats are not recorded, and nothing else from a request is kept, so the log never holds a VM spec, a token or a
-key. The newest 5000 events are served by `GET /fleet/events`; all of them are appended to `fleet-audit.jsonl` (mode
+heartbeats are not recorded, a command's body is never read, and nothing else from a request is kept, so the log never
+holds a VM spec, a command, a token or a key. A tenant's refused attempt at an operator route (403) is recorded too;
+calls without a valid token are not. The newest 5000 events are served by `GET /fleet/events`; all of them are appended to `fleet-audit.jsonl` (mode
 0600) in the state directory, which rotates to `fleet-audit.jsonl.1` at 16 MiB. A tenant sees only its own actions.
 With HA, each central keeps its own log, so the log of a central that was leader for a while covers that while.
 

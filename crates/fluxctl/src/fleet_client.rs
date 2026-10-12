@@ -293,7 +293,6 @@ pub async fn call(
     Ok(serde_json::from_str(&text).unwrap_or(Value::String(text)))
 }
 
-/// Percent-encodes a query value (RFC 3986 unreserved characters pass through).
 /// `GET {path}` returning the raw body and its content type (images).
 pub async fn get_bytes(
     central: &str,
@@ -316,6 +315,7 @@ pub async fn get_bytes(
     Ok((ctype, bytes.to_vec()))
 }
 
+/// Percent-encodes a query value (RFC 3986 unreserved characters pass through).
 pub fn query_escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for b in s.bytes() {

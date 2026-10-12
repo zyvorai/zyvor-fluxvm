@@ -6,8 +6,8 @@
 //!
 //! Events are kept in memory (the newest [`KEEP`]) and appended to `fleet-audit.jsonl` (mode 0600) in the state
 //! directory, which is rotated to `fleet-audit.jsonl.1` at [`ROTATE_BYTES`]. Reads (`GET`) and node heartbeats are
-//! not recorded. Request bodies are not stored, except a VM's, tenant's, image's or network's `name`/`id`, so the log
-//! never holds a VM spec, a token or a key.
+//! not recorded. Request bodies are not stored, except a VM's, tenant's or network's `name`/`id`/`node` (never a
+//! command's body), so the log never holds a VM spec, a command, a token or a key.
 
 use super::*;
 use std::collections::VecDeque;
@@ -17,8 +17,11 @@ use std::io::Write as _;
 const KEEP: usize = 5000;
 /// Size at which `fleet-audit.jsonl` is rotated.
 const ROTATE_BYTES: u64 = 16 * 1024 * 1024;
-/// Largest request body read to find the target's name; bigger bodies are refused (central's own bodies are small).
-const MAX_BODY: usize = 1024 * 1024;
+/// Largest request body read to find the target's name; bigger bodies are refused. The same as axum's default `Json`
+/// limit, so no route refuses a body it would otherwise have taken.
+const MAX_BODY: usize = 2 * 1024 * 1024;
+/// Longest target kept; a longer name is cut.
+const MAX_TARGET: usize = 128;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(super) struct AuditEvent {
@@ -43,6 +46,7 @@ pub(super) struct AuditLog {
 
 impl AuditLog {
     /// An in-memory log (tests).
+    #[cfg(test)]
     pub(super) fn memory() -> Self {
         AuditLog {
             events: std::sync::Mutex::new(VecDeque::new()),
@@ -69,6 +73,8 @@ impl AuditLog {
         }
     }
 
+    /// Appends `e`. The lock is held across the (small, appending) file write so the file keeps the memory order; central
+    /// records only changes, which are rare next to reads.
     pub(super) fn record(&self, e: AuditEvent) {
         let mut events = self.events.lock().unwrap_or_else(|p| p.into_inner());
         if let Some(path) = &self.path
@@ -118,20 +124,52 @@ pub(super) fn audited(method: &axum::http::Method, path: &str) -> bool {
     !matches!(*method, Method::GET | Method::HEAD | Method::OPTIONS) && path != "/fleet/register"
 }
 
-/// Reads a JSON body to find its `name` or `id`, and returns the request rebuilt with the same body.
+/// An event for `caller`'s `method path` that ended with `status`.
+pub(super) fn event(
+    caller: &Caller,
+    method: String,
+    path: String,
+    target: Option<String>,
+    status: StatusCode,
+) -> AuditEvent {
+    let (actor, tenant) = match caller {
+        Caller::Admin => ("operator".to_owned(), None),
+        Caller::Tenant(t) => (t.clone(), Some(t.clone())),
+    };
+    AuditEvent {
+        time: Utc::now(),
+        actor,
+        tenant,
+        method,
+        path,
+        target,
+        status: status.as_u16(),
+    }
+}
+
+/// Reads a JSON body to find its `name`, `id` or `node`, and returns the request rebuilt with the same body. A command
+/// (`.../exec`) body is the guest's input, so it is neither read nor searched.
 pub(super) async fn target_of(req: Request) -> Result<(Request, Option<String>), Response> {
+    if req.uri().path().ends_with("/exec") {
+        return Ok((req, None));
+    }
     let (parts, body) = req.into_parts();
     let bytes = axum::body::to_bytes(body, MAX_BODY).await.map_err(|_| {
         (
             StatusCode::PAYLOAD_TOO_LARGE,
-            Json(json!({"error": "request body over 1 MiB"})),
+            Json(json!({"error": "request body over 2 MiB, or not fully sent"})),
         )
             .into_response()
     })?;
     let target = serde_json::from_slice::<Value>(&bytes).ok().and_then(|v| {
-        ["name", "id", "node"]
-            .iter()
-            .find_map(|k| v.get(*k).and_then(Value::as_str).map(str::to_owned))
+        ["name", "id", "node"].iter().find_map(|k| {
+            v.as_object()?.get(*k).and_then(Value::as_str).map(|s| {
+                s.chars()
+                    .filter(|c| !c.is_control())
+                    .take(MAX_TARGET)
+                    .collect::<String>()
+            })
+        })
     });
     Ok((
         Request::from_parts(parts, axum::body::Body::from(bytes)),
@@ -219,8 +257,21 @@ pub(super) async fn screen(
         ));
     }
     let mut headers = axum::http::HeaderMap::new();
+    // Only an image type is passed on (the console shows it from a blob: URL), and never sniffed into anything else.
+    let ctype = resp
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .filter(|t| t.starts_with("image/"))
+        .unwrap_or("application/octet-stream");
+    if let Ok(v) = axum::http::HeaderValue::from_str(ctype) {
+        headers.insert(header::CONTENT_TYPE, v);
+    }
+    headers.insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        axum::http::HeaderValue::from_static("nosniff"),
+    );
     for name in [
-        "content-type",
         "x-fluxvm-screen-width",
         "x-fluxvm-screen-height",
         "x-fluxvm-screen-blank",
@@ -316,5 +367,16 @@ mod tests {
         assert_eq!(target.as_deref(), Some("ios-1"));
         let body = axum::body::to_bytes(req.into_body(), 1024).await.unwrap();
         assert_eq!(&body[..], br#"{"name":"ios-1","image":"/x"}"#);
+    }
+
+    #[tokio::test]
+    async fn a_command_body_is_not_read() {
+        let req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/fleet/vms/mac-1/abc/exec")
+            .body(axum::body::Body::from(r#"{"name":"secret","command":"x"}"#))
+            .unwrap();
+        let (_, target) = target_of(req).await.unwrap();
+        assert_eq!(target, None);
     }
 }

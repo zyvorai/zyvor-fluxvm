@@ -620,7 +620,7 @@ async fn dispatch(
             std::fs::write(&path, &bytes).with_context(|| format!("writing {}", path.display()))?;
             if !out.human {
                 return out
-                    .json(&json!({"file": path, "bytes": bytes.len(), "content_type": ctype}));
+                    .json(&json!({"file": path.display().to_string(), "bytes": bytes.len(), "content_type": ctype}));
             }
             out.done(format!("Saved the screen of {name} to {}.", path.display()));
             Ok(())

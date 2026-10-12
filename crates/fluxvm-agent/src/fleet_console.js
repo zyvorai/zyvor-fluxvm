@@ -802,9 +802,10 @@ function renderInspector(page, id, force) {
   const insp = $('inspector');
   let content = null;
   let key = null;
+  let vmShown = false;
   if (id) {
     if (page === 'macs') { const m = macs().find((x) => x.name === id); key = m && JSON.stringify(m); content = m ? () => macInspector(m) : null; }
-    if (page === 'vms') { const v = S.data.vms.find((x) => vmKey(x) === id); key = v && JSON.stringify([v, S.data.images]); content = v ? () => vmInspector(v) : null; }
+    if (page === 'vms') { const v = S.data.vms.find((x) => vmKey(x) === id); key = v && JSON.stringify([v, S.data.images]); content = v ? () => vmInspector(v) : null; vmShown = !!v; }
     if (page === 'networks') { const n = S.data.overlays.find((x) => x.name === id); key = n && JSON.stringify([n, S.data.leases]); content = n ? () => netInspector(n) : null; }
     if (page === 'tenants') { const t = (S.data.tenants || []).find((x) => x.id === id); key = t && JSON.stringify([t, S.data.leases]); content = t ? () => tenantInspector(t) : null; }
     if (!content) {
@@ -813,7 +814,7 @@ function renderInspector(page, id, force) {
         h('p', { class: 'muted' }, 'It may have been deleted, or it belongs to someone else.')];
     }
   }
-  if (page !== 'vms' || !content) stopScreen();
+  if (!vmShown) stopScreen();
   $('app').classList.toggle('with-inspector', !!content);
   insp.hidden = !content;
   if (!content) { S.lastInspKey = ''; return; }
@@ -961,6 +962,7 @@ function stopScreen() {
   clearTimeout(screen.timer);
   screen.timer = null;
   if (screen.url) URL.revokeObjectURL(screen.url);
+  screen.seq++; // a fetch still in flight is dropped
   Object.assign(screen, { key: null, el: null, img: null, url: null, paused: false });
 }
 
@@ -985,13 +987,17 @@ function screenPanel(v, running) {
     fetchScreen(k);
   }
   screen.toggle.hidden = !running;
+  if (!running) screen.note.textContent = 'The VM is not running, so it has no screen.';
   return screen.el;
 }
 
 async function fetchScreen(k) {
   clearTimeout(screen.timer);
   if (screen.key !== k) return;
-  const again = (ms) => { screen.timer = setTimeout(() => fetchScreen(k), ms); };
+  // The panel leaves the page without stopScreen when the inspector is replaced by another view; stop polling then.
+  const again = (ms) => {
+    screen.timer = setTimeout(() => { if (screen.el && screen.el.isConnected) fetchScreen(k); else stopScreen(); }, ms);
+  };
   if (!screen.running || screen.paused) return;
   if (document.visibilityState !== 'visible') { again(4000); return; }
   const [node, id] = k.split('/');
@@ -1030,7 +1036,8 @@ async function fetchScreen(k) {
 
 /** What an activity-log entry did, in words. */
 function describe(e) {
-  const p = e.path.split('/').filter(Boolean).map(decodeURIComponent).slice(1); // after "fleet"
+  const dec = (x) => { try { return decodeURIComponent(x); } catch (_) { return x; } };
+  const p = e.path.split('/').filter(Boolean).map(dec).slice(1); // after "fleet"
   const t = e.target ? ' ' + e.target : '';
   const m = e.method;
   const [a, b, c, d] = p;
@@ -1047,7 +1054,8 @@ function describe(e) {
   if (a === 'tenants' && c === 'rotate-token') return 'Issued a new token for ' + b;
   if (a === 'tenants' && m === 'PATCH') return 'Changed tenant ' + b;
   if (a === 'tenants' && m === 'DELETE') return 'Deleted tenant ' + b;
-  if (a === 'nodes' && c) return { cordon: 'Cordoned ', uncordon: 'Uncordoned ', drain: 'Drained ', scrub: 'Scrubbed ' }[c] + b;
+  const nodeVerb = { cordon: 'Cordoned ', uncordon: 'Uncordoned ', drain: 'Drained ', scrub: 'Scrubbed ' }[c];
+  if (a === 'nodes' && nodeVerb) return nodeVerb + b;
   if (a === 'nodes' && m === 'DELETE') return 'Forgot node ' + b;
   if (a === 'images') return (m === 'DELETE' ? 'Removed image ' : 'Saved image ') + b;
   if (a === 'policy') return 'Changed the policy';

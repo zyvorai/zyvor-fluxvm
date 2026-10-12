@@ -293,9 +293,19 @@ async fn auth_middleware(State(fleet): State<Fleet>, mut req: Request, next: Nex
             let tenancy = fleet.tenancy.lock().await;
             match tenancy.authenticate(t) {
                 Some(tenant) if tenant.disabled => {
+                    let id = tenant.id.clone();
+                    if audit::audited(req.method(), req.uri().path()) {
+                        fleet.audit.record(audit::event(
+                            &Caller::Tenant(id.clone()),
+                            req.method().to_string(),
+                            req.uri().path().to_owned(),
+                            None,
+                            StatusCode::FORBIDDEN,
+                        ));
+                    }
                     return (
                         StatusCode::FORBIDDEN,
-                        Json(json!({"error": format!("tenant '{}' is disabled", tenant.id)})),
+                        Json(json!({"error": format!("tenant '{id}' is disabled")})),
                     )
                         .into_response();
                 }
@@ -320,9 +330,20 @@ async fn auth_middleware(State(fleet): State<Fleet>, mut req: Request, next: Nex
         }
         (Some(_), None) => return unauthorized(),
     };
+    // A tenant reaching for an operator route is worth knowing about, so it is recorded; unauthenticated callers are not
+    // (anyone could fill the log).
     if let Caller::Tenant(t) = &caller
         && !tenant_route_allowed(req.method(), req.uri().path())
     {
+        if audit::audited(req.method(), req.uri().path()) {
+            fleet.audit.record(audit::event(
+                &caller,
+                req.method().to_string(),
+                req.uri().path().to_owned(),
+                None,
+                StatusCode::FORBIDDEN,
+            ));
+        }
         return (
             StatusCode::FORBIDDEN,
             Json(json!({"error": format!("tenant '{t}' may not call {} {}", req.method(), req.uri().path())})),
@@ -340,19 +361,9 @@ async fn auth_middleware(State(fleet): State<Fleet>, mut req: Request, next: Nex
         Err(resp) => return resp,
     };
     let resp = next.run(req).await;
-    let (actor, tenant) = match &caller {
-        Caller::Admin => ("operator".to_owned(), None),
-        Caller::Tenant(t) => (t.clone(), Some(t.clone())),
-    };
-    fleet.audit.record(audit::AuditEvent {
-        time: Utc::now(),
-        actor,
-        tenant,
-        method,
-        path,
-        target,
-        status: resp.status().as_u16(),
-    });
+    fleet
+        .audit
+        .record(audit::event(&caller, method, path, target, resp.status()));
     resp
 }
 
