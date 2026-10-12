@@ -30,6 +30,24 @@ const IDLE: &str = "idle";
 const LEASED: &str = "leased";
 pub const WARM_TAG: &str = "warm";
 
+/// Every slot is leased (or none is enrolled). The API maps it to 409: it clears when a slot is returned.
+#[derive(Debug)]
+pub struct NoFreeSlot {
+    pub enrolled: usize,
+}
+
+impl std::fmt::Display for NoFreeSlot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "no free macOS pool slot ({} enrolled); return one or enrol a guest",
+            self.enrolled
+        )
+    }
+}
+
+impl std::error::Error for NoFreeSlot {}
+
 /// Serialises enrolling and checking out, so two callers never take the same slot.
 static POOL_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
@@ -64,6 +82,11 @@ fn label(state: &str) -> BTreeMap<String, Option<String>> {
 }
 
 impl VmManager {
+    /// The enrolled slots, idle and leased.
+    pub async fn macos_pool_list(&self) -> Vec<VmRecord> {
+        self.list().await.into_iter().filter(is_slot).collect()
+    }
+
     /// Turns a prepared, running macOS guest into a pool slot: saves its `warm` snapshot, stops it and marks it idle.
     /// At most [`MAX_MACOS_GUESTS`] slots exist; more could never run at once.
     pub async fn macos_pool_enroll(self: &Arc<Self>, id: Uuid) -> Result<VmRecord> {
@@ -109,8 +132,10 @@ impl VmManager {
         let _guard = POOL_LOCK.lock().await;
         let all = self.list().await;
         let Some(slot) = pick_idle(&all) else {
-            let slots = all.iter().filter(|v| is_slot(v)).count();
-            bail!("no free macOS pool slot ({slots} enrolled); return one or enrol a guest");
+            return Err(NoFreeSlot {
+                enrolled: all.iter().filter(|v| is_slot(v)).count(),
+            }
+            .into());
         };
         let id = slot.id;
         if !self

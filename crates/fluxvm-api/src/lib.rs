@@ -40,6 +40,7 @@ mod rate_limit;
 #[cfg(target_os = "macos")]
 pub mod self_control;
 pub use netobs_api::install_netobs;
+mod macos_pool_api;
 mod speculate_api;
 mod vz_api;
 
@@ -748,6 +749,7 @@ pub fn router(manager: Arc<VmManager>) -> Router {
             idempotency::middleware,
         ))
         .merge(speculate_api::routes())
+        .merge(macos_pool_api::routes())
         .merge(vz_api::routes())
         .layer(middleware::from_fn_with_state(
             manager.clone(),

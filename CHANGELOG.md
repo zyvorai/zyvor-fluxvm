@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+### Added: macOS warm pool (`fluxctl macos-pool`)
+- Up to two slot-bound macOS guests: `enroll` a running, set-up, logged-in guest (saves a `warm` snapshot, stops it),
+  `checkout` restores a free slot, `return` stops it so the next checkout starts pristine again. REST:
+  `GET /v1/macos-pool`, `POST /v1/macos-pool/checkout`, `POST /v1/macos-pool/{id}/enroll|return`; checkout is 409
+  when no slot is free. A macOS guest cannot be forked or branched, so slots are reused rather than consumed. Not
+  verified on hardware; restore needs an unlocked login session ([docs/macos.md](docs/macos.md#macos-warm-pool)).
+
 ### Added: grow a stopped vz VM's root disk
 - `PATCH /v1/vms/{id}/disks/root` (`fluxctl disk resize <id> root --size-gib N`) now works on the `vz` backend for macOS
   and Linux guests: the VM must be stopped, the size is an absolute grow-only target, and `apple.asif_overlay` VMs are
