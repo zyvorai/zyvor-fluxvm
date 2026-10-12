@@ -89,3 +89,11 @@ a missing file reported cleanly, an offline sandbox with only `lo` (DNS and rout
 With the pool: 2 warm slots built in about 15 s after the first create; two concurrent creates took 1.7 s and 3.6 s (7.6 s cold), got
 different addresses and did not see each other's files; a create after the pool was consumed and refilled took 1.9 s.
 `scripts/macos-live-test.sh` covers the REST path.
+
+## Fork an offline sandbox: try four fixes in parallel
+
+A sandbox with no network (`"offline": true`) can be forked into running copies that share its memory snapshot, which
+is how an agent tries several approaches from one saved state and keeps the one that works. On an M4 mini it takes
+about 4 s to fork into four, and the four tests of the demo ran in 0.3 s. The runnable walk-through, with its timings
+and limits (a default NAT sandbox cannot be forked; the copies keep the parent's identity), is
+[examples/agent-sandbox-demo](../examples/agent-sandbox-demo/README.md).
