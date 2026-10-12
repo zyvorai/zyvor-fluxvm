@@ -240,6 +240,34 @@
     .mac:hover:not(:disabled) { transform:none; }
   }
 
+
+  input[type="checkbox"] { -webkit-appearance:none; appearance:none; width:18px; height:18px; padding:0; margin:2px 0 0;
+    flex:none; border:1.5px solid var(--line); border-radius:5px; background:var(--surface); display:inline-grid;
+    place-content:center; cursor:pointer; }
+  input[type="checkbox"]:checked { background:var(--accent); border-color:var(--accent); }
+  input[type="checkbox"]:checked::before { content:""; width:9px; height:5px; margin-top:-2px; border:2px solid var(--accent-ink);
+    border-top:0; border-right:0; transform:rotate(-45deg); }
+  input[type="checkbox"]:disabled { opacity:.5; cursor:not-allowed; }
+  /* Polish 2: pickers, copy fields, usage split. */
+  .choices { grid-template-columns:repeat(auto-fill, minmax(176px, 1fr)); }
+  .choice { min-height:64px; padding:12px 34px 12px 14px; transition:border-color .12s ease, box-shadow .12s ease; }
+  .choice:hover:not(:has(input:disabled)) { border-color:color-mix(in srgb, var(--accent) 55%, var(--line)); }
+  .choice::after { content:""; position:absolute; top:12px; right:12px; width:16px; height:16px; border-radius:50%;
+                   border:1.5px solid var(--line); }
+  .choice:has(input:checked)::after { content:"✓"; background:var(--accent); border-color:var(--accent);
+                   color:var(--accent-ink); font-size:11px; font-weight:700; line-height:13px; text-align:center; }
+  .copy-field code { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .chips { display:flex; flex-wrap:wrap; gap:6px; }
+  .split { display:flex; height:12px; border-radius:6px; overflow:hidden; background:var(--hair); margin-top:12px; }
+  .split i { display:block; height:100%; }
+  .split i.a { background:var(--accent); } .split i.b { background:color-mix(in srgb, var(--accent) 35%, var(--hair)); }
+  .legend { display:flex; gap:16px; margin-top:8px; font-size:12.5px; color:var(--muted); }
+  .legend span::before { content:""; display:inline-block; width:8px; height:8px; border-radius:2px; margin-right:6px;
+                         background:var(--accent); }
+  .legend span.b::before { background:color-mix(in srgb, var(--accent) 35%, var(--hair)); }
+  .note { color:var(--muted); font-size:14px; margin-top:16px; }
+  @media (prefers-reduced-motion: reduce) { .choice { transition:none; } }
+
   /* Inspector */
   .inspector { position:sticky; top:0; height:100vh; overflow-y:auto; background:var(--surface);
                border-left:1px solid var(--hair); padding:20px 22px 40px; }

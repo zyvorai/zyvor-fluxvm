@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+
 ### Added: live VM screen and an activity log, in the console and `fluxctl fleet`
 - `GET /fleet/vms/{node}/{id}/screen` returns a picture of a VM's display through central (the owner or the operator
   only, image types only, never cached), shown live in the console's VM panel and saved by `fluxctl fleet screen`.
@@ -10,6 +11,12 @@
   `tenant`. Request bodies are not stored (only the name of what was created), command text is never recorded, and
   page views are not logged. The log is a file in central's state directory (`fleet-audit.jsonl`).
   Tried against the three-Mac simulation, with two tenants for the isolation checks; not on real Macs.
+
+### Changed: console pickers, networks and usage
+- Image and network choices are larger cards with a selected mark, checkboxes are drawn properly (they rendered as a
+  dark block), Macs on a network are chips, and Usage shows where VM hours went (macOS or Linux), two decimals under an
+  hour so a short run is not `0.0`, and a note that a lease in progress adds its 24-hour minimum when released.
+
 
 ### Added: `fluxctl fleet` for tenants and operators
 - `fluxctl fleet status` (a tenant's quota, Macs and next step, or the operator's fleet health), `launch --image` from the
