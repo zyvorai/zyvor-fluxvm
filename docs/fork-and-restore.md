@@ -199,6 +199,23 @@ child must do before it is reported: `running` (default: identity reset and noth
 This is the place to reset application identity the guest cannot know about (a node id, a session cache): the fork
 copied it. Secrets held in application memory are not rotated.
 
+### Secrets: what each fork mode does
+
+There is no separate `--secrets` switch; the controls are `identity` and `hooks`, and they are explicit about what they
+cover.
+
+| You want | Use | What actually happens |
+| --- | --- | --- |
+| Rotate what FluxVM manages | `identity: unique` (default) | New machine-id, SSH host keys, kernel RNG seed and **agent token** in every child; the old token is valid for one more request only. |
+| Keep everything as the parent had it | `identity: preserve` | Nothing is reset; the child shares the parent's agent token and host keys. |
+| Reset secrets FluxVM does not manage | `hooks` | Run your own rotation after identity reset, for example `--hook "rm -f /root/.aws/credentials"` or `--hook "/usr/local/bin/fetch-credentials"`. A failing hook fails the fork. |
+| Remove files | a `rm` hook, as above | Deletes the on-disk copy in the child. |
+
+Not covered, and not claimed: secrets already loaded into a process's memory are copied into every child and survive a
+file delete; rotate or restart that process in a hook (`systemctl restart app`). Credentials issued by a cloud provider
+or an identity service need that service's own revocation. Fork cannot know which of a guest's secrets are
+machine-specific.
+
 ## First-command latency: ?ready=exec
 
 `?ready=exec` (or `?wait_first_command=true`) on `POST /v1/vms`,
