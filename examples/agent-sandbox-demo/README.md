@@ -39,3 +39,20 @@ On an Apple M4 mini (16 GB, macOS 27.2), `debian-13` guest, daemon on loopback, 
 - **The first sandbox on a fresh daemon was slow:** 61 s with an empty state directory (image preparation and a cold
   boot), against 4.5 s afterwards. Warm the daemon (or `fluxctl sandbox warm --count N`) before timing anything.
 - Memory per sandbox is measured separately: [docs/agent-density.md](../../docs/agent-density.md).
+
+## A local model, with no network card
+
+`local-model.sh` shows the other half of the privacy story: a sandbox with **no network device** (only `lo`) that still
+reaches an OpenAI-compatible server on the Mac, through one vsock port relayed to `127.0.0.1:PORT`
+(`apple.vsock_services`, `tcp`). Inside the guest it starts a ten-line relay, asks `/v1/models` and a chat completion,
+and then shows the internet is still unreachable.
+
+```bash
+llama-server -m model.gguf --port 8080 &        # or mlx_lm.server --port 8080
+examples/agent-sandbox-demo/local-model.sh
+STAND_IN=1 examples/agent-sandbox-demo/local-model.sh   # no model: a stub server, proves the path not inference
+```
+
+Verified on the M4 with `STAND_IN=1`: models and chat answered through the relay, `internet: unreachable`. It has **not**
+been run against a real model: this host had `llama-server` but no model file, and a model is not something the script
+downloads for you. The relay adds no authentication, so the model server sees every request from the guest.
