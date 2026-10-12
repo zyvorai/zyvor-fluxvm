@@ -694,6 +694,8 @@ pub(super) async fn delete_tenant(
     let mut t = fleet.tenancy.lock().await;
     t.delete_tenant(&id).map_err(tenancy_error)?;
     fleet.persist_tenancy(&t);
+    fleet.notify.keep_deliveries(&t.webhooks);
+    fleet.notify.forget_tenant(&id);
     Ok(StatusCode::NO_CONTENT)
 }
 

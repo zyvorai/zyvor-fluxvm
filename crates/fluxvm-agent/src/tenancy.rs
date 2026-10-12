@@ -780,6 +780,8 @@ impl TenancyState {
             return Err(TenancyError::TenantBusy(id.into()));
         }
         self.overlays.retain(|_, o| o.tenant.as_deref() != Some(id));
+        // Its webhooks go too: a tenant created later with the same id must not inherit them.
+        self.webhooks.retain(|h| h.owner.as_deref() != Some(id));
         self.tenants.remove(id);
         Ok(())
     }

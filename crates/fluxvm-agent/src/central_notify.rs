@@ -24,6 +24,8 @@ const KEEP: usize = 1000;
 const KEEP_DELIVERIES: usize = 20;
 /// Webhooks per tenant (and for the operator).
 const MAX_HOOKS: usize = 10;
+/// Deliveries in flight at once (each with its retries); past this, an event is logged as dropped for that hook.
+const MAX_IN_FLIGHT: usize = 256;
 
 /// Every kind of event; `operator` ones never reach a tenant.
 pub(super) const KINDS: &[(&str, bool)] = &[
@@ -78,6 +80,30 @@ pub(super) struct Notifier {
     deliveries: std::sync::Mutex<HashMap<String, VecDeque<Delivery>>>,
     /// Keys of time-based events already sent.
     sent: std::sync::Mutex<HashSet<String>>,
+    /// Delivery tasks running now.
+    in_flight: std::sync::atomic::AtomicUsize,
+}
+
+/// Counts a delivery task as running until dropped.
+struct InFlight(Arc<Notifier>);
+
+impl InFlight {
+    fn start(n: &Arc<Notifier>) -> Option<Self> {
+        use std::sync::atomic::Ordering;
+        if n.in_flight.fetch_add(1, Ordering::AcqRel) >= MAX_IN_FLIGHT {
+            n.in_flight.fetch_sub(1, Ordering::AcqRel);
+            return None;
+        }
+        Some(InFlight(n.clone()))
+    }
+}
+
+impl Drop for InFlight {
+    fn drop(&mut self) {
+        self.0
+            .in_flight
+            .fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+    }
 }
 
 fn lock<T>(m: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -129,6 +155,21 @@ impl Notifier {
     fn clear(&self, key: &str) {
         lock(&self.sent).remove(key);
     }
+
+    /// Forgets "already sent" keys that can no longer fire, so the set does not grow forever.
+    fn prune(&self, keep: impl Fn(&str) -> bool) {
+        lock(&self.sent).retain(|k| keep(k.as_str()));
+    }
+
+    /// Drops the delivery logs of webhooks that no longer exist.
+    pub(super) fn keep_deliveries(&self, hooks: &[Webhook]) {
+        lock(&self.deliveries).retain(|id, _| hooks.iter().any(|h| &h.id == id));
+    }
+
+    /// Drops a deleted tenant's notifications, so a new tenant with the same id never sees them.
+    pub(super) fn forget_tenant(&self, tenant: &str) {
+        lock(&self.items).retain(|n| n.tenant.as_deref() != Some(tenant));
+    }
 }
 
 fn operator_only(kind: &str) -> bool {
@@ -175,9 +216,25 @@ pub(super) async fn emit(
         return;
     }
     for hook in hooks {
+        let Some(running) = InFlight::start(&fleet.notify) else {
+            fleet.notify.record_delivery(
+                &hook.id,
+                Delivery {
+                    notification: n.id.clone(),
+                    kind: n.kind.clone(),
+                    time: Utc::now(),
+                    attempt: 0,
+                    status: None,
+                    ok: false,
+                    error: Some("dropped: too many deliveries in flight".into()),
+                },
+            );
+            continue;
+        };
         let notifier = fleet.notify.clone();
         let n = n.clone();
         tokio::spawn(async move {
+            let _running = running;
             for (attempt, wait) in [(1u32, 0u64), (2, 2), (3, 10)] {
                 if wait > 0 {
                     tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
@@ -229,12 +286,31 @@ pub(super) fn is_public(ip: IpAddr) -> bool {
                 return is_public(IpAddr::V4(v4));
             }
             let s = v.segments();
-            !(v.is_loopback()
-                || v.is_unspecified()
+            let v4 = |hi: u16, lo: u16| {
+                IpAddr::V4(std::net::Ipv4Addr::new(
+                    (hi >> 8) as u8,
+                    hi as u8,
+                    (lo >> 8) as u8,
+                    lo as u8,
+                ))
+            };
+            // NAT64 (64:ff9b::/96) and 6to4 (2002::/16) reach the IPv4 address inside them.
+            if s[0] == 0x64 && s[1] == 0xff9b && s[2..6] == [0; 4] {
+                return is_public(v4(s[6], s[7]));
+            }
+            if s[0] == 0x2002 {
+                return is_public(v4(s[1], s[2]));
+            }
+            !(s[..6] == [0; 6] // ::/96: unspecified, loopback, IPv4-compatible
                 || v.is_multicast()
-                || (s[0] & 0xfe00) == 0xfc00
-                || (s[0] & 0xffc0) == 0xfe80
-                || s[0] == 0x2001 && s[1] == 0x0db8)
+                || (s[0] & 0xfe00) == 0xfc00 // unique local
+                || (s[0] & 0xffc0) == 0xfe80 // link-local
+                || (s[0] & 0xffc0) == 0xfec0 // site-local
+                || (s[0] == 0x64 && s[1] == 0xff9b) // local-use NAT64 (64:ff9b:1::/48)
+                || (s[0] == 0x100 && s[1..4] == [0; 3]) // discard
+                || (s[0] == 0x2001 && s[1] == 0) // Teredo
+                || (s[0] == 0x2001 && s[1] == 0x0db8)
+                || (s[0] == 0x3fff && s[1] < 0x1000))
         }
     }
 }
@@ -298,7 +374,15 @@ async fn send(hook: &Webhook, n: &Notification) -> Result<u16, String> {
     let mut builder = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .timeout(std::time::Duration::from_secs(10));
+    // An IP literal was checked by `check_url`; a name is resolved here.
+    let named = url
+        .host_str()
+        .is_some_and(|h| h.trim_matches(['[', ']']).parse::<IpAddr>().is_err());
     if hook.owner.is_some() {
+        // No proxy from the environment: a proxy would resolve the host itself, past the check below.
+        builder = builder.no_proxy();
+    }
+    if hook.owner.is_some() && named {
         // Resolve now, refuse non-public addresses, and pin the connection to the address that was checked, so a DNS
         // answer that changes between check and connect cannot reach the internal network.
         let host = url.host_str().unwrap_or_default().to_owned();
@@ -412,10 +496,10 @@ pub(super) async fn scan(fleet: &Fleet, ended: &[crate::tenancy::Lease]) {
             Some("#/macs".into()),
         ));
     }
+    let (from, to) = crate::billing::month_of(now);
+    let month = from.format("%Y-%m").to_string();
     let (budgets, leases, scrub, draining) = {
         let t = fleet.tenancy.lock().await;
-        let (from, to) = crate::billing::month_of(now);
-        let month = from.format("%Y-%m").to_string();
         let budgets: Vec<(String, String, f64, f64, String)> = t
             .tenants
             .values()
@@ -464,6 +548,7 @@ pub(super) async fn scan(fleet: &Fleet, ended: &[crate::tenancy::Lease]) {
             Some("#/billing".into()),
         ));
     }
+    let active: HashSet<String> = leases.iter().map(|l| l.id.clone()).collect();
     for l in leases {
         let Some(end) = l.ends_at else { continue };
         let left = (end - now).num_minutes();
@@ -536,6 +621,18 @@ pub(super) async fn scan(fleet: &Fleet, ended: &[crate::tenancy::Lease]) {
             emit(fleet, kind, tenant, title, detail, link).await;
         }
     }
+    // Keys for leases no longer active, past months, Macs no longer registered, and ended leases (reported once, by
+    // the reconciler that ended them) can never fire again.
+    let this_month = format!(":{month}:");
+    fleet.notify.prune(|k| {
+        let (kind, rest) = k.split_once(':').unwrap_or((k, ""));
+        match kind {
+            "ending1" | "ending24" => active.contains(rest),
+            "budget" => rest.contains(&this_month),
+            "down" | "scrub" | "drained" => nodes.iter().any(|n| n.name == rest),
+            _ => false,
+        }
+    });
 }
 
 // ---- API ----------------------------------------------------------------------------------------------------------
@@ -658,6 +755,7 @@ pub(super) async fn delete_webhook(
     own_hook(&t, &caller, &id)?;
     t.webhooks.retain(|h| h.id != id);
     fleet.persist_tenancy(&t);
+    fleet.notify.keep_deliveries(&t.webhooks);
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -747,6 +845,22 @@ mod tests {
         assert!(is_public("8.8.8.8".parse().unwrap()));
         assert!(!is_public("100.64.1.1".parse().unwrap()));
         assert!(!is_public("::ffff:192.168.1.1".parse().unwrap()));
+        for ip in [
+            "0.0.0.0",
+            "::",
+            "::127.0.0.1",
+            "64:ff9b::a00:1",
+            "64:ff9b:1::1",
+            "2002:c0a8:101::1",
+            "2001::1",
+            "fec0::1",
+            "224.0.0.1",
+            "ff02::1",
+        ] {
+            assert!(!is_public(ip.parse().unwrap()), "{ip}");
+        }
+        assert!(is_public("64:ff9b::808:808".parse().unwrap()));
+        assert!(is_public("2606:4700::1111".parse().unwrap()));
     }
 
     #[test]

@@ -1247,8 +1247,14 @@ function priceSheet() {
 
 const SEEN_KEY = 'fluxvm.console.seen';
 const tone = (kind) => (/over|down|ended/.test(kind) ? 'bad' : /near|ending|scrub/.test(kind) ? 'warn' : '');
-function seenAt() { return Number(storage.get('localStorage', SEEN_KEY + '.' + (isOp() ? 'op' : S.me.id)) || 0); }
-function markSeen() { storage.set('localStorage', SEEN_KEY + '.' + (isOp() ? 'op' : S.me.id), String(Date.now())); renderBell(); }
+const seenKey = () => SEEN_KEY + '.' + (isOp() ? 'op' : (S.me && S.me.id) || 'tenant');
+function seenAt() { return Number(storage.get('localStorage', seenKey()) || 0); }
+// The newest notification's own (server) time, not this browser's clock, so a skewed clock neither hides nor repeats any.
+function markSeen() {
+  const newest = Math.max(seenAt(), ...((S.data && S.data.notifications) || []).map((n) => new Date(n.time).getTime() || 0));
+  storage.set('localStorage', seenKey(), String(newest));
+  renderBell();
+}
 
 function ntfRow(n) {
   const fresh = new Date(n.time).getTime() > seenAt();
@@ -1281,13 +1287,17 @@ function toggleBell(open) {
   const show = open === undefined ? panel.hidden : open;
   panel.hidden = !show;
   $('bell').setAttribute('aria-expanded', String(show));
-  if (show) { renderBell(); setTimeout(markSeen, 1500); }
+  clearTimeout(S.seenTimer);
+  if (show) { renderBell(); S.seenTimer = setTimeout(markSeen, 1500); }
 }
 
 function webhookList() {
   if (!S.hooks) {
-    api('GET', '/fleet/webhooks').then((r) => { S.hooks = r; S.lastViewKey = ''; render(); })
-      .catch((e) => { S.hooks = { items: [], kinds: [] }; toast(e.message, true); });
+    if (!S.hooksLoading) {
+      S.hooksLoading = api('GET', '/fleet/webhooks').then((r) => { S.hooks = r; })
+        .catch((e) => { S.hooks = { items: [], kinds: [] }; toast(e.message, true); })
+        .finally(() => { S.hooksLoading = null; S.lastViewKey = ''; render(); });
+    }
     return h('p', { class: 'muted' }, 'Loading…');
   }
   const items = S.hooks.items || [];
@@ -2205,7 +2215,11 @@ function cycleTheme() {
 
 $('theme').addEventListener('click', cycleTheme);
 $('bell').addEventListener('click', (e) => { e.stopPropagation(); toggleBell(); });
-document.addEventListener('click', (e) => { if (!$('bell-panel').hidden && !$('bell-panel').contains(e.target)) toggleBell(false); });
+// Closes on a click outside it, or on a link inside it (a notification or "All and webhooks").
+document.addEventListener('click', (e) => {
+  const panel = $('bell-panel');
+  if (!panel.hidden && (!panel.contains(e.target) || e.target.closest('a'))) toggleBell(false);
+});
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !$('bell-panel').hidden) toggleBell(false); });
 $('refresh').addEventListener('click', () => refresh({ force: true }));
 $('signout').addEventListener('click', () => {
@@ -2224,7 +2238,7 @@ $('signin-form').addEventListener('submit', (e) => {
   storage.set('sessionStorage', TOKEN_KEY, t);
   $('signin-token').value = '';
   // Nothing from the previous token's session carries over.
-  Object.assign(S, { role: null, me: null, data: null, error: null, usage: null, policy: null, exec: {}, tenantKeys: {}, billMonth: null, billView: null, billLoading: null, hooks: null, query: '',
+  Object.assign(S, { role: null, me: null, data: null, error: null, usage: null, policy: null, exec: {}, tenantKeys: {}, billMonth: null, billView: null, billLoading: null, hooks: null, hooksLoading: null, query: '',
     lastViewKey: '', lastInspKey: '', loadedAt: 0 });
   stopScreen();
   $('search').value = '';
