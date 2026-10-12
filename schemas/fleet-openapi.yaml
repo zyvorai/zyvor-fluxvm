@@ -1137,6 +1137,7 @@ paths:
                   items: {type: array, items: {type: object, additionalProperties: true}}
                   max_per_tenant: {type: integer}
                   idle_timeout_minutes: {type: integer}
+                  max_lifetime_minutes: {type: integer}
                   ports: {type: array, items: {type: string}}
                 required: [items]
         default: {$ref: '#/components/responses/Error'}

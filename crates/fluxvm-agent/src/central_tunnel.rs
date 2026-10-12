@@ -42,6 +42,8 @@ pub(super) struct Tunnel {
     id: String,
     tenant: Option<String>,
     key: Option<String>,
+    /// The console session's email when it was opened from a cookie session; its role is re-checked while it is open.
+    user: Option<String>,
     node: String,
     vm_id: String,
     vm_name: String,
@@ -82,6 +84,7 @@ impl Tunnel {
             "id": self.id,
             "tenant": self.tenant,
             "key": self.key,
+            "user": self.user,
             "node": self.node,
             "vm_id": self.vm_id,
             "vm_name": self.vm_name,
@@ -254,6 +257,7 @@ pub(super) async fn open_tunnel(
     State(fleet): State<Fleet>,
     Extension(caller): Extension<Caller>,
     Extension(key): Extension<KeyUsed>,
+    Extension(who): Extension<sso::Who>,
     Path((node, id)): Path<(String, String)>,
     Query(q): Query<HashMap<String, String>>,
     ws: Result<WebSocketUpgrade, WebSocketUpgradeRejection>,
@@ -373,6 +377,7 @@ pub(super) async fn open_tunnel(
                 id: new_tunnel_id(),
                 tenant: caller.tenant().map(str::to_owned),
                 key: key.clone(),
+                user: who.0.as_ref().map(|u| u.email.clone()),
                 node: node.clone(),
                 vm_id: id.clone(),
                 vm_name: vm_name.clone(),
@@ -426,11 +431,12 @@ pub(super) async fn open_tunnel(
         StatusCode::SWITCHING_PROTOCOLS,
     );
     let idle = policy.idle_timeout();
+    let lifetime = policy.max_lifetime();
     Ok(ws
         .max_message_size(MAX_MESSAGE)
         .max_frame_size(MAX_MESSAGE)
         .on_upgrade(move |client| async move {
-            relay(fleet, caller, slot, client, node_ws, idle).await;
+            relay(fleet, caller, slot, client, node_ws, idle, lifetime).await;
         }))
 }
 
@@ -505,6 +511,7 @@ async fn relay(
     client: WebSocket,
     node: NodeSocket,
     idle: Duration,
+    lifetime: Duration,
 ) {
     let t = slot.tunnel.clone();
     let (mut c_tx, mut c_rx) = client.split();
@@ -554,8 +561,11 @@ async fn relay(
             if t.idle_for() >= idle {
                 return "idle timeout";
             }
+            if (Utc::now() - t.opened_at).to_std().unwrap_or_default() >= lifetime {
+                return "maximum lifetime reached";
+            }
             if !still_allowed(&fleet, &t).await {
-                return "access was revoked (the VM ended, or the tenant or key was disabled)";
+                return "access was revoked (the VM ended, or the tenant, key or member was disabled or demoted)";
             }
         }
     };
@@ -623,6 +633,16 @@ async fn still_allowed(fleet: &Fleet, t: &Tunnel) -> bool {
             return false;
         }
     }
+    // A tunnel opened from a console session belongs to that person: removing them or demoting them to a viewer
+    // (who may not open tunnels) ends it.
+    if let Some(email) = &t.user {
+        let may = s
+            .member(tenant, email)
+            .is_some_and(|m| m.role >= crate::tenancy::MemberRole::Member);
+        if !may {
+            return false;
+        }
+    }
     s.vm(&t.node, &t.vm_id)
         .is_some_and(|v| v.active() && v.tenant.as_deref() == Some(tenant))
 }
@@ -643,6 +663,7 @@ pub(super) async fn list_tunnels(
         "items": items,
         "max_per_tenant": policy.max_per_tenant,
         "idle_timeout_minutes": policy.idle_timeout_minutes,
+        "max_lifetime_minutes": policy.max_lifetime_minutes,
         "ports": policy.ports,
         "enabled": policy.enabled,
     }))
@@ -676,6 +697,7 @@ mod tests {
             id: new_tunnel_id(),
             tenant: tenant.map(str::to_owned),
             key: None,
+            user: None,
             node: "mac".into(),
             vm_id: "vm".into(),
             vm_name: "vm".into(),
@@ -687,6 +709,107 @@ mod tests {
             close: tokio::sync::Notify::new(),
             closed_by: std::sync::Mutex::new(None),
         }
+    }
+
+    fn fleet() -> Fleet {
+        Fleet {
+            nodes: Default::default(),
+            http: reqwest::Client::new(),
+            persist_path: None,
+            lock_path: None,
+            token: None,
+            tenancy: Default::default(),
+            tenancy_path: None,
+            ha: None,
+            audit: Arc::new(super::audit::AuditLog::memory()),
+            notify: Arc::default(),
+            metrics: Arc::default(),
+            tunnels: Arc::default(),
+            sso: Arc::default(),
+            signup: Arc::default(),
+        }
+    }
+
+    /// A tunnel opened from a console session ends when its person is removed or demoted to a viewer.
+    #[tokio::test]
+    async fn a_session_tunnel_follows_its_members_role() {
+        use crate::tenancy::{MemberRole, Quota, VmEntry};
+        let fleet = fleet();
+        let now = Utc::now();
+        {
+            let mut t = fleet.tenancy.lock().await;
+            t.create_tenant("acme", None, Quota::default(), now)
+                .unwrap();
+            t.add_member("acme", "dev@acme.io", MemberRole::Member, None, now)
+                .unwrap();
+            t.vms.push(VmEntry {
+                node: "mac".into(),
+                vm_id: "vm".into(),
+                name: "vm".into(),
+                tenant: Some("acme".into()),
+                vcpus: 2,
+                memory_mib: 2048,
+                macos_guest: false,
+                created_at: now,
+                ended_at: None,
+                spec: None,
+                warm_pool: None,
+                claimed_at: None,
+                expires_at: None,
+                billed_from: None,
+            });
+        }
+        let mut tun = tunnel(Some("acme"));
+        tun.user = Some("dev@acme.io".into());
+        assert!(still_allowed(&fleet, &tun).await, "a member keeps it");
+        fleet
+            .tenancy
+            .lock()
+            .await
+            .set_member_role("acme", "dev@acme.io", MemberRole::Viewer)
+            .unwrap();
+        assert!(
+            !still_allowed(&fleet, &tun).await,
+            "a viewer may not hold a tunnel"
+        );
+        {
+            let mut t = fleet.tenancy.lock().await;
+            t.set_member_role("acme", "dev@acme.io", MemberRole::Member)
+                .unwrap();
+            // Another owner so the member can be removed.
+            t.add_member("acme", "boss@acme.io", MemberRole::Owner, None, now)
+                .unwrap();
+            t.remove_member("acme", "dev@acme.io").unwrap();
+        }
+        assert!(
+            !still_allowed(&fleet, &tun).await,
+            "a removed member loses it"
+        );
+        // A token-opened tunnel (no console user) is not tied to any member.
+        assert!(still_allowed(&fleet, &tunnel(Some("acme"))).await);
+    }
+
+    #[test]
+    fn the_lifetime_policy_is_bounded_and_old_policies_get_the_default() {
+        assert_eq!(
+            TunnelPolicy::default().max_lifetime(),
+            Duration::from_secs(8 * 3600)
+        );
+        for bad in [0, 7 * 24 * 60 + 1] {
+            let p = TunnelPolicy {
+                max_lifetime_minutes: bad,
+                ..TunnelPolicy::default()
+            };
+            assert!(p.validate().is_err(), "{bad} was accepted");
+        }
+        let week = TunnelPolicy {
+            max_lifetime_minutes: 7 * 24 * 60,
+            ..TunnelPolicy::default()
+        };
+        assert!(week.validate().is_ok());
+        // Policy JSON saved before the field existed loads with the default.
+        let old: TunnelPolicy = serde_json::from_str(r#"{"enabled": true}"#).unwrap();
+        assert_eq!(old.max_lifetime_minutes, 480);
     }
 
     #[test]
