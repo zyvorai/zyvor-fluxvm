@@ -33,6 +33,17 @@ pub struct NodeConfig {
     /// Where to write this Mac's `overlay.json` (private networks spanning Macs) after each heartbeat; `None` turns
     /// the sync off.
     pub overlay_config: Option<std::path::PathBuf>,
+    /// Report this simulated host instead of the real one (`fluxvm-agent sim-node`).
+    pub sim: Option<SimHost>,
+}
+
+/// What a simulated Mac reports: its size and its Virtualization.framework capabilities.
+#[derive(Debug, Clone)]
+pub struct SimHost {
+    pub vcpus: u32,
+    pub memory_mib: u64,
+    pub nested_virtualization: bool,
+    pub vmnet: bool,
 }
 
 /// Runs forever, heartbeating every `cfg.interval`. Logs and keeps going on
@@ -88,13 +99,21 @@ async fn beat(http: &reqwest::Client, cfg: &NodeConfig, preferred: usize) -> Res
         .await
         .context("reading local VM inventory")?;
     let vm_count = local.count;
-    let vcpus_total = std::thread::available_parallelism()
-        .map(|n| n.get() as u32)
-        .unwrap_or(1);
-    let memory_mib_total = total_memory_mib().unwrap_or(0);
+    let (vcpus_total, memory_mib_total) = match &cfg.sim {
+        Some(h) => (h.vcpus, h.memory_mib),
+        None => (
+            std::thread::available_parallelism()
+                .map(|n| n.get() as u32)
+                .unwrap_or(1),
+            total_memory_mib().unwrap_or(0),
+        ),
+    };
     let security = fetch_node_security(http, &cfg.fluxvm_url).await;
     let density = fetch_density(http, &cfg.fluxvm_url).await;
-    let apple = fetch_apple_caps(vcpus_total, memory_mib_total, local).await;
+    let apple = match &cfg.sim {
+        Some(h) => Some(sim_apple_caps(h, local)),
+        None => fetch_apple_caps(vcpus_total, memory_mib_total, local).await,
+    };
 
     let body = json!({
         "name": cfg.name,
@@ -409,6 +428,24 @@ async fn local_vm_stats(http: &reqwest::Client, fluxvm_url: &str) -> Result<Loca
         count: items.len(),
         macos_guests,
     })
+}
+
+fn sim_apple_caps(h: &SimHost, local: LocalVmStats) -> AppleHostCaps {
+    AppleHostCaps {
+        free_cpu: h
+            .vcpus
+            .saturating_sub((local.count as u32).saturating_mul(2)),
+        free_memory_mib: h
+            .memory_mib
+            .saturating_sub((local.count as u64).saturating_mul(2048)),
+        nested_virtualization: h.nested_virtualization,
+        vmnet: h.vmnet,
+        custom_virtio: true,
+        bridged_interfaces: vec!["en0".into()],
+        macos_guests: local.macos_guests,
+        secure_boot: true,
+        rosetta: true,
+    }
 }
 
 #[cfg(target_os = "macos")]

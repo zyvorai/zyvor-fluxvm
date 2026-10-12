@@ -15,4 +15,5 @@ pub mod gha;
 pub mod ha;
 pub mod node;
 pub mod shared_state;
+pub mod sim;
 pub mod tenancy;
