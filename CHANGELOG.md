@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+### Added: simulated Macs and a one-command fleet demo
+- `fluxvm-agent sim-node` registers a simulated Mac with central (capacity, heartbeats, simulated macOS guests, overlay
+  config), and `scripts/fleet-sim.sh` runs a central plus three of them: a tenant leases a Mac, starts two macOS VMs
+  (a third is refused at Apple's two-guest limit), runs a command and creates a private network
+  ([docs/fleet-quickstart.md](docs/fleet-quickstart.md)). No Macs or real guests are involved, so it exercises central,
+  tenancy, scheduling, overlay allocation and the console, not virtualization.
+
 ### Added: fleet web console, overlay key rotation, HA lock release
 - `GET /console` on central is a web console for the fleet: a tenant token shows your leases, VMs, private networks and
   usage (lease or release a Mac, delete VMs, create networks); the fleet token adds nodes (cordon, drain, scrub),
