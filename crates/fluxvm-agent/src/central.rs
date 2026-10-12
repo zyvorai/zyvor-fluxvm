@@ -287,13 +287,16 @@ async fn auth_middleware(State(fleet): State<Fleet>, mut req: Request, next: Nex
         )
             .into_response()
     };
+    // The tenant's named API key, when one was used, and whether it may only read.
+    let mut key_used: Option<String> = None;
+    let mut read_only = false;
     let caller = match (fleet.token.as_deref(), presented.as_deref()) {
         (Some(expected), Some(t)) if constant_time_eq(t, expected) => Caller::Admin,
         (expected, Some(t)) => {
-            let tenancy = fleet.tenancy.lock().await;
-            match tenancy.authenticate(t) {
-                Some(tenant) if tenant.disabled => {
-                    let id = tenant.id.clone();
+            let mut tenancy = fleet.tenancy.lock().await;
+            match tenancy.authenticate_key(t, Utc::now()) {
+                Some(m) if m.disabled => {
+                    let id = m.tenant.clone();
                     if audit::audited(req.method(), req.uri().path()) {
                         fleet.audit.record(audit::event(
                             &Caller::Tenant(id.clone()),
@@ -301,6 +304,7 @@ async fn auth_middleware(State(fleet): State<Fleet>, mut req: Request, next: Nex
                             req.uri().path().to_owned(),
                             None,
                             StatusCode::FORBIDDEN,
+                            m.key.clone(),
                         ));
                     }
                     return (
@@ -309,7 +313,11 @@ async fn auth_middleware(State(fleet): State<Fleet>, mut req: Request, next: Nex
                     )
                         .into_response();
                 }
-                Some(tenant) => Caller::Tenant(tenant.id.clone()),
+                Some(m) => {
+                    key_used = m.key;
+                    read_only = m.read_only;
+                    Caller::Tenant(m.tenant)
+                }
                 // Lab mode keeps ignoring stray tokens, but only until tenants exist: after that an unknown token is
                 // a mistyped tenant token and must not quietly become the operator.
                 None if expected.is_none() && !tenancy.enabled() => Caller::Admin,
@@ -342,6 +350,7 @@ async fn auth_middleware(State(fleet): State<Fleet>, mut req: Request, next: Nex
                 req.uri().path().to_owned(),
                 None,
                 StatusCode::FORBIDDEN,
+                key_used.clone(),
             ));
         }
         return (
@@ -349,6 +358,29 @@ async fn auth_middleware(State(fleet): State<Fleet>, mut req: Request, next: Nex
             Json(json!({"error": format!("tenant '{t}' may not call {} {}", req.method(), req.uri().path())})),
         )
             .into_response();
+    }
+    // A read-only key only reads, and only the primary token manages keys (a leaked CI key must not mint more).
+    if let Some(name) = &key_used {
+        let changes = audit::audited(req.method(), req.uri().path());
+        let keys_route = req.uri().path().starts_with("/fleet/tenants/me/keys");
+        let refusal = if read_only && changes {
+            Some(format!("API key '{name}' is read-only"))
+        } else if keys_route && changes {
+            Some("API keys are created and revoked with the tenant's primary token".to_owned())
+        } else {
+            None
+        };
+        if let Some(msg) = refusal {
+            fleet.audit.record(audit::event(
+                &caller,
+                req.method().to_string(),
+                req.uri().path().to_owned(),
+                None,
+                StatusCode::FORBIDDEN,
+                key_used.clone(),
+            ));
+            return (StatusCode::FORBIDDEN, Json(json!({"error": msg}))).into_response();
+        }
     }
     req.extensions_mut().insert(caller.clone());
     if !audit::audited(req.method(), req.uri().path()) {
@@ -361,9 +393,14 @@ async fn auth_middleware(State(fleet): State<Fleet>, mut req: Request, next: Nex
         Err(resp) => return resp,
     };
     let resp = next.run(req).await;
-    fleet
-        .audit
-        .record(audit::event(&caller, method, path, target, resp.status()));
+    fleet.audit.record(audit::event(
+        &caller,
+        method,
+        path,
+        target,
+        resp.status(),
+        key_used,
+    ));
     resp
 }
 
@@ -377,6 +414,8 @@ fn tenant_route_allowed(method: &axum::http::Method, path: &str) -> bool {
     let seg: Vec<&str> = path.trim_matches('/').split('/').collect();
     match seg.as_slice() {
         ["fleet", "capacity"] | ["fleet", "usage"] | ["fleet", "tenants", "me"] => get,
+        ["fleet", "tenants", "me", "keys"] => get || post,
+        ["fleet", "tenants", "me", "keys", _] => delete,
         ["fleet", "vms"] | ["fleet", "leases"] => get || post,
         ["fleet", "vms", _, _] => delete,
         ["fleet", "vms", _, _, "exec"] => post,
@@ -575,6 +614,14 @@ pub fn router_with_handle(cfg: CentralConfig) -> (Router, Option<HaHandle>) {
             get(cloud::get_tenant)
                 .patch(cloud::update_tenant)
                 .delete(cloud::delete_tenant),
+        )
+        .route(
+            "/fleet/tenants/{id}/keys",
+            get(cloud::list_keys).post(cloud::create_key),
+        )
+        .route(
+            "/fleet/tenants/{id}/keys/{key}",
+            axum::routing::delete(cloud::revoke_key),
         )
         .route(
             "/fleet/tenants/{id}/rotate-token",

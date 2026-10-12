@@ -88,7 +88,8 @@ Next: fluxctl fleet run macos-27-xcode-1 -- sw_vers
 | `fleet launch [NAME] --image I` | Launch from the catalog (or `--disk PATH --guest macos`); `--mac`, `--network` (repeatable), `--ttl 8h`, `--vcpus`, `--memory-gib` |
 | `fleet run VM -- CMD…` | Run a command in a VM found by name or ID prefix; prints the guest's output and exits with its code |
 | `fleet screen VM [-f out.png]` | Save a picture of a VM's display |
-| `fleet events [--limit N]` | The activity log |
+| `fleet events [--limit N]` | The activity log (with the API key used) |
+| `fleet keys [create\\|revoke]` | A tenant's named API keys |
 | `fleet rm VM` | Delete a VM by name (asks on a terminal; `-y` to skip) |
 | `fleet vms`, `fleet nodes`, `fleet node M` | VMs and Macs, with macOS slots (`●○`) and when each lease can be released |
 | `fleet lease create\|list\|get\|release` | Leases (`create --hours 72 --min-vcpus 16 --nested`) |
@@ -99,6 +100,26 @@ Next: fluxctl fleet run macos-27-xcode-1 -- sw_vers
 
 A refused call shows central's own message plus a hint: a 401 says which flag carries the token, a 429 points at the
 quota, a standby names the leader, and an unreachable central says how to point `--central` at it.
+
+## API keys
+
+A tenant's primary token is the one the operator hands over. Besides it, a tenant can hold up to 50 named API keys:
+one per person, CI system or tool, so the activity log says which one did what and one can be revoked without
+breaking the others.
+
+```bash
+fluxctl fleet keys create ci-github                   # full access, expires in 90 days; prints the key once
+fluxctl fleet keys create grafana --read-only --expires-days 0
+fluxctl fleet keys                                    # name, access, last used, expiry
+fluxctl fleet keys revoke ci-github
+```
+
+- A key acts as its tenant, with the same quotas and visibility. A **read-only** key can only `GET`.
+- Only the primary token (or the operator, with `--tenant` / `/fleet/tenants/{id}/keys`) creates and revokes keys, so a
+  leaked key cannot mint more. An expired key is refused like an unknown one.
+- Only a key's hash is stored. `last_used_at` is updated at most once a minute and saved with the next change to the
+  tenancy state.
+- The console has an **API keys** page for tenants, and the operator manages keys in a tenant's details.
 
 ## Activity log
 
@@ -254,6 +275,8 @@ capabilities, but not its address, labels or security report.
 | `POST /fleet/reconcile`, `GET/PUT /fleet/policy` | operator |
 | `GET /fleet/images` | tenant, operator |
 | `GET /fleet/vms/{node}/{id}/screen[?max_width=N]` | tenant (own VMs), operator: the display as PNG; `409` when the VM has none |
+| `GET/POST /fleet/tenants/me/keys`, `DELETE /fleet/tenants/me/keys/{id or name}` | tenant (primary token for changes) |
+| `GET/POST /fleet/tenants/{id}/keys`, `DELETE …/keys/{key}` | operator |
 | `GET /fleet/events[?limit=N&tenant=T]` | tenant (own actions), operator (all, or one tenant's) |
 | `PUT/DELETE /fleet/images/{name}` | operator |
 | `GET /fleet/nodes/{name}` | operator; tenant for a Mac it leases (size, capacity, Apple capabilities only) |

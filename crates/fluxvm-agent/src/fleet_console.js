@@ -96,6 +96,7 @@ const S = {
   vmFilter: 'all',
   query: '',
   exec: {}, // vm key -> { draft, log: [] }
+  tenantKeys: {}, // operator: tenant id -> its API keys, loaded when its details open
   lastViewKey: '',
   lastInspKey: '',
 };
@@ -204,7 +205,11 @@ async function load() {
     d.nodes.forEach((n, i) => { d.drains[n.name] = drains[i]; });
   } else {
     const active = d.leases.filter((l) => l.state === 'active');
-    const views = await Promise.all(active.map((l) => soft(api('GET', '/fleet/nodes/' + enc(l.node)), { name: l.node })));
+    const [views, keys] = await Promise.all([
+      Promise.all(active.map((l) => soft(api('GET', '/fleet/nodes/' + enc(l.node)), { name: l.node }))),
+      soft(api('GET', '/fleet/tenants/me/keys'), { items: [] }),
+    ]);
+    d.keys = keys.items || [];
     active.forEach((l, i) => { d.leasedNodes[l.node] = views[i]; });
   }
   S.data = d;
@@ -283,6 +288,7 @@ const PAGES = () => [
   ...(isOp() ? [{ id: 'tenants', label: 'Tenants', count: () => (S.data.tenants || []).length }] : []),
   { id: 'usage', label: 'Usage' },
   { id: 'activity', label: 'Activity' },
+  ...(isOp() ? [] : [{ id: 'keys', label: 'API keys', count: () => (S.data.keys || []).length }]),
   ...(isOp() ? [{ id: 'policy', label: 'Policy' }] : []),
 ];
 
@@ -592,6 +598,21 @@ const VIEWS = {
         ...[t.vm_seconds, t.vcpu_seconds].map((s) => h('td', { class: 'r num' }, hrs(s))),
         h('td', { class: 'r num' }, (t.memory_mib_seconds / 1024 / 3600).toFixed(1)),
         ...[t.macos_vm_seconds, t.lease_seconds, t.billable_lease_seconds].map((s) => h('td', { class: 'r num' }, hrs(s)))))))));
+    return out;
+  },
+
+  keys() {
+    const list = S.data.keys || [];
+    const out = [pageHead('API keys', 'Give each person, CI system or tool its own key, so you can see who did what and revoke '
+      + 'one without breaking the others.', h('button', { class: 'primary', onclick: () => keySheet('me') }, 'Create key'))];
+    out.push(h('p', { class: 'note', style: { marginBottom: '16px' } }, 'Your primary token, from your operator, signs in here and '
+      + 'is the only one that can create or revoke keys. A key that leaks cannot make more keys.'));
+    if (!list.length) {
+      out.push(empty('No API keys yet', 'Create one for your CI system (for example the GitHub Actions runner scaler) or for '
+        + 'each engineer who uses fluxctl. Read-only keys suit dashboards and support.', h('button', { class: 'primary', onclick: () => keySheet('me') }, 'Create key')));
+      return out;
+    }
+    out.push(h('div', { class: 'panel table-wrap' }, keyTable(list, 'me')));
     return out;
   },
 
@@ -970,6 +991,50 @@ function vmInspector(v) {
   return out;
 }
 
+// ---- API keys -------------------------------------------------------------------------------------------------------
+
+function keyTable(list, owner) {
+  return h('table', {},
+    h('thead', {}, h('tr', {}, h('th', {}, 'Name'), h('th', {}, 'Access'), h('th', { class: 'hide-sm' }, 'Created'),
+      h('th', {}, 'Last used'), h('th', { class: 'hide-sm' }, 'Expires'), h('th', {}))),
+    h('tbody', {}, list.map((k) => {
+      const expired = k.expires_at && new Date(k.expires_at).getTime() <= Date.now();
+      return h('tr', {},
+        h('td', {}, h('b', {}, k.name), h('span', { class: 'sub mono' }, k.id)),
+        h('td', {}, k.read_only ? h('span', { class: 'tag' }, 'Read-only') : h('span', { class: 'tag accent' }, 'Full')),
+        h('td', { class: 'hide-sm muted' }, rel(k.created_at)),
+        h('td', { class: 'muted' }, k.last_used_at ? rel(k.last_used_at) : 'Never'),
+        h('td', { class: 'hide-sm' }, expired ? status({ text: 'Expired', cls: 'bad' }) : k.expires_at ? rel(k.expires_at) : h('span', { class: 'muted' }, 'Never')),
+        h('td', { class: 'r' }, h('button', { class: 'plain danger', onclick: () => confirmAct({
+          title: 'Revoke ' + k.name + '?', body: 'Anything using this key stops working at once. Other keys are not affected.',
+          confirm: 'Revoke key', danger: true }, 'DELETE', '/fleet/tenants/' + enc(owner) + '/keys/' + enc(k.name), k.name + ' revoked',
+        undefined, () => { if (owner !== 'me') delete S.tenantKeys[owner]; }) }, 'Revoke')));
+    })));
+}
+
+function keySheet(owner) {
+  openSheet({
+    title: 'Create an API key', intro: 'You get the key once, on the next screen.',
+    body: [
+      h('label', { class: 'field' }, h('span', {}, 'Name'), h('input', { name: 'name', required: true, maxlength: '64', placeholder: 'ci-github', autocomplete: 'off' }),
+        h('div', { class: 'hint' }, 'Who or what uses it. It shows in the activity log.')),
+      h('label', { class: 'field' }, h('span', {}, 'Expires'), h('select', { name: 'days' },
+        h('option', { value: '90' }, 'In 90 days'), h('option', { value: '30' }, 'In 30 days'), h('option', { value: '365' }, 'In a year'),
+        h('option', { value: '' }, 'Never'))),
+      check('read_only', false, 'Read-only', 'It can look at Macs, VMs, networks and usage, but not change anything.'),
+    ],
+    submit: 'Create key',
+    onSubmit: async (f) => {
+      const body = { name: String(f.get('name')).trim(), read_only: f.has('read_only') };
+      if (f.get('days')) body.expires_in_days = Number(f.get('days'));
+      const r = await api('POST', '/fleet/tenants/' + enc(owner) + '/keys', { body });
+      if (owner !== 'me') delete S.tenantKeys[owner];
+      refresh({ force: true });
+      setTimeout(() => tokenDialog(r.key.name, r.token, true), 0);
+    },
+  });
+}
+
 // ---- the VM's screen -------------------------------------------------------------------------------------------------
 
 // One live screen at a time: the VM open in the inspector. Its elements survive re-renders, so the picture does not
@@ -1070,6 +1135,7 @@ function describe(e) {
   if (a === 'overlays' && c === 'members') return (m === 'DELETE' ? 'Removed ' + d + ' from ' : 'Added' + t + ' to ') + b;
   if (a === 'overlays' && m === 'DELETE') return 'Deleted network ' + b;
   if (a === 'tenants' && p.length === 1) return 'Created tenant' + t;
+  if (a === 'tenants' && c === 'keys') return (m === 'DELETE' ? 'Revoked API key ' + d : 'Created API key' + t) + (b === 'me' ? '' : ' for ' + b);
   if (a === 'tenants' && c === 'rotate-token') return 'Issued a new token for ' + b;
   if (a === 'tenants' && m === 'PATCH') return 'Changed tenant ' + b;
   if (a === 'tenants' && m === 'DELETE') return 'Deleted tenant ' + b;
@@ -1092,7 +1158,8 @@ function activityRows(list) {
     const ok = e.status < 400;
     return h('tr', {},
       h('td', { class: 'muted', title: when(e.time) }, rel(e.time)),
-      h('td', {}, e.actor === 'operator' ? h('span', { class: 'tag' }, 'Operator') : e.actor),
+      h('td', {}, e.actor === 'operator' ? h('span', { class: 'tag' }, 'Operator') : e.actor,
+        e.key ? h('span', { class: 'sub' }, 'key ' + e.key) : null),
       h('td', {}, describe(e)),
       h('td', {}, status(ok ? { text: 'Done', cls: 'ok' } : { text: 'Refused (' + e.status + ')', cls: 'bad' })));
   });
@@ -1182,6 +1249,9 @@ function tenantInspector(t) {
       : h('p', { class: 'muted small' }, 'None.'),
     h('button', { class: 'plain', style: { marginTop: '8px' }, onclick: () => leaseSheet({ tenant: t.id }) }, 'Lease a Mac to ' + t.id + '…')),
     h('section', {}, h('h3', {}, 'Quota'), h('p', { class: 'hint', style: { marginBottom: '10px' } }, 'Leave a field empty for no limit.'), quotaForm),
+    h('section', {}, h('div', { class: 'row' }, h('h3', { class: 'grow' }, 'API keys'),
+      h('button', { class: 'plain', onclick: () => keySheet(t.id) }, 'Create key')),
+    tenantKeys(t.id)),
     h('section', {}, h('div', { class: 'actions-col' },
       h('button', { onclick: () => doAct('PATCH', '/fleet/tenants/' + id, t.id + (t.disabled ? ' enabled' : ' disabled'), { disabled: !t.disabled }) },
         t.disabled ? 'Enable tenant' : 'Disable tenant'),
@@ -1193,6 +1263,26 @@ function tenantInspector(t) {
         body: 'The tenant can no longer sign in. Its usage records are kept.', confirm: 'Delete tenant', danger: true, type: t.id },
       'DELETE', '/fleet/tenants/' + id, t.id + ' deleted', undefined, () => go('tenants')) }, 'Delete tenant…'))),
   ];
+}
+
+function tenantKeys(id) {
+  const keys = S.tenantKeys[id];
+  if (!keys) {
+    api('GET', '/fleet/tenants/' + enc(id) + '/keys').then((r) => { S.tenantKeys[id] = r.items || []; S.lastInspKey = ''; render(); })
+      .catch((e) => { S.tenantKeys[id] = []; toast(e.message, true); });
+    return h('p', { class: 'muted small' }, 'Loading…');
+  }
+  if (!keys.length) return h('p', { class: 'muted small' }, 'Only the primary token.');
+  return h('div', { class: 'stack' }, keys.map((k) => {
+    const expired = k.expires_at && new Date(k.expires_at).getTime() <= Date.now();
+    return h('div', { class: 'row' },
+      h('div', { class: 'grow' }, h('div', {}, k.name, ' ', h('span', { class: 'tag' + (k.read_only ? '' : ' accent') }, k.read_only ? 'Read-only' : 'Full')),
+        h('div', { class: 'small muted' }, (k.last_used_at ? 'Used ' + rel(k.last_used_at) : 'Never used') + ', '
+          + (expired ? 'expired' : k.expires_at ? 'expires ' + rel(k.expires_at) : 'never expires'))),
+      h('button', { class: 'plain danger', onclick: () => confirmAct({ title: 'Revoke ' + k.name + '?',
+        body: 'Anything using this key stops working at once.', confirm: 'Revoke key', danger: true },
+      'DELETE', '/fleet/tenants/' + enc(id) + '/keys/' + enc(k.name), k.name + ' revoked', undefined, () => { delete S.tenantKeys[id]; }) }, 'Revoke'));
+  }));
 }
 
 function quotaFields(q = {}) {
@@ -1313,12 +1403,14 @@ function confirmDialog({ title, body, confirm, danger, type }) {
   });
 }
 
-function tokenDialog(id, tok) {
+function tokenDialog(id, tok, isKey) {
   openSheet({
-    title: 'Token for ' + id,
-    intro: 'Send it to the tenant over a private channel. This is the only time it is shown: central keeps only its hash.',
-    body: [h('div', { class: 'token-box' }, tok), h('button', { type: 'button', onclick: () => copy(tok, 'Token') }, 'Copy token'),
-      h('p', { class: 'small muted' }, 'The tenant signs in at ' + location.origin + '/console with it.')],
+    title: (isKey ? 'API key ' : 'Token for ') + id,
+    intro: (isKey ? 'Put it in your CI secrets or password manager now.' : 'Send it to the tenant over a private channel.')
+      + ' This is the only time it is shown: central keeps only its hash.',
+    body: [h('div', { class: 'token-box' }, tok), h('button', { type: 'button', onclick: () => copy(tok, isKey ? 'Key' : 'Token') }, isKey ? 'Copy key' : 'Copy token'),
+      h('p', { class: 'small muted' }, isKey ? 'Use it with fluxctl as FLUXVM_AGENT_TOKEN, or sign in to ' + location.origin + '/console with it.'
+        : 'The tenant signs in at ' + location.origin + '/console with it.')],
     submit: 'Done', cancel: null, onSubmit: async () => {},
   });
 }
@@ -1735,7 +1827,7 @@ $('signin-form').addEventListener('submit', (e) => {
   storage.set('sessionStorage', TOKEN_KEY, t);
   $('signin-token').value = '';
   // Nothing from the previous token's session carries over.
-  Object.assign(S, { role: null, me: null, data: null, error: null, usage: null, policy: null, exec: {}, query: '',
+  Object.assign(S, { role: null, me: null, data: null, error: null, usage: null, policy: null, exec: {}, tenantKeys: {}, query: '',
     lastViewKey: '', lastInspKey: '', loadedAt: 0 });
   stopScreen();
   $('search').value = '';
