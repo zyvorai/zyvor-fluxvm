@@ -40,8 +40,8 @@ pub use display::{
 pub use host_caps::{AppleHostCapabilities, host_capabilities, prime_host_capabilities};
 pub use ipsw::{IpswInfo, latest_ipsw};
 pub use runner::{
-    EGRESS_PORT, ForwardConfig, OneShotVm, RunnerConfig, SELF_CONTROL_PORT, SNAPSHOT_FILES,
-    STATE_FILE, ShareConfig, adopt_macos_template, clone_file, console_port_socket,
+    EGRESS_PORT, ForwardConfig, MACOS_TEMPLATE_FILES, OneShotVm, RunnerConfig, SELF_CONTROL_PORT,
+    SNAPSHOT_FILES, STATE_FILE, ShareConfig, adopt_macos_template, clone_file, console_port_socket,
     export_checkpoint, find_runner, ip_file, oci_meta_dir, prepare_fork_child, read_guest_ip,
     release_mac, self_control_socket_path, set_self_control_socket, snapshot_dir,
     write_oci_meta_as,
@@ -319,7 +319,12 @@ impl VmBackend for AppleBackend {
         }
         // A restarted VM must not report the previous boot's address.
         // (A restore keeps it: the restored guest does not announce its address again.)
-        if req.loadvm_tag.is_none() {
+        // A disk-only snapshot boots cold, so it announces its address again like any start.
+        if !req
+            .loadvm_tag
+            .as_deref()
+            .is_some_and(|tag| snapshot_has_state(&ctx.workspace, tag))
+        {
             let _ = std::fs::remove_file(ip_file(&ctx.workspace));
         }
         let log = runner::open_runner_log(&ctx.workspace)?;
@@ -420,11 +425,15 @@ async fn send(vm: &VmRecord, cmd: &str) -> Result<()> {
     }
 }
 
-/// Puts the disk and EFI variables from snapshot `tag` back in place, ahead of resuming the saved state.
+/// Puts the disk and EFI variables from snapshot `tag` back in place, ahead of resuming the saved state (or of a cold
+/// boot, for a disk-only snapshot).
 fn restore_files(workspace: &std::path::Path, disk: &std::path::Path, tag: &str) -> Result<()> {
     let dir = snapshot_dir(workspace, tag);
-    if !dir.join(STATE_FILE).is_file() {
-        bail!("snapshot {tag:?} has no saved state at {}", dir.display());
+    if !dir.join(STATE_FILE).is_file() && !dir.join("disk.raw").is_file() {
+        bail!(
+            "snapshot {tag:?} has no saved state or disk at {}",
+            dir.display()
+        );
     }
     for name in SNAPSHOT_FILES {
         let src = dir.join(name);
@@ -499,6 +508,39 @@ pub async fn snapshot_save(vm: &VmRecord, tag: &str) -> Result<()> {
     outcome
 }
 
+/// Whether snapshot `tag` of this workspace carries saved memory and device state (a disk-only snapshot does not).
+pub fn snapshot_has_state(workspace: &std::path::Path, tag: &str) -> bool {
+    snapshot_dir(workspace, tag).join(STATE_FILE).is_file()
+}
+
+/// Takes a disk-only snapshot under `<workspace>/snapshots/<tag>/`: an APFS clone of the disk and firmware files, no
+/// memory. A running guest (`running`) is paused while the files are cloned, so the copy is crash-consistent, and then
+/// resumed; a stopped or already paused guest is left as it is. Restoring it boots the guest cold from that disk.
+pub async fn snapshot_save_disk(vm: &VmRecord, tag: &str, running: bool) -> Result<()> {
+    let dir = snapshot_dir(&vm.workspace, tag);
+    if dir.exists() {
+        bail!("snapshot {tag:?} already exists for this VM");
+    }
+    std::fs::create_dir_all(&dir)?;
+    let mut paused = false;
+    if running {
+        if let Err(e) = send(vm, "pause").await {
+            let _ = std::fs::remove_dir_all(&dir);
+            return Err(e.context("pausing the guest for a consistent disk copy"));
+        }
+        paused = true;
+    }
+    let outcome = save_files(&vm.workspace, &vm.disk, &dir);
+    if paused {
+        // Even after a failure, the guest must not be left paused.
+        let _ = send(vm, "resume").await;
+    }
+    if outcome.is_err() {
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    outcome
+}
+
 #[cfg(test)]
 mod snapshot_tests {
     use super::*;
@@ -547,6 +589,19 @@ mod snapshot_tests {
             (s.memory_mib, s.target_mib, s.actual_mib),
             (8192, 2048, 2048)
         );
+    }
+
+    #[test]
+    fn a_disk_only_snapshot_restores_its_disk_and_has_no_state() {
+        let ws = tempfile::tempdir().unwrap();
+        let dir = snapshot_dir(ws.path(), "d1");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("disk.raw"), b"disk at snapshot").unwrap();
+        let disk = ws.path().join("disk.raw");
+        std::fs::write(&disk, b"disk now").unwrap();
+        assert!(!snapshot_has_state(ws.path(), "d1"));
+        restore_files(ws.path(), &disk, "d1").unwrap();
+        assert_eq!(std::fs::read(&disk).unwrap(), b"disk at snapshot");
     }
 
     #[test]

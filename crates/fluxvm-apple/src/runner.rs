@@ -228,7 +228,9 @@ impl RunnerConfig {
             restore_state: req
                 .loadvm_tag
                 .as_deref()
-                .map(|tag| snapshot_dir(&ctx.workspace, tag).join(STATE_FILE)),
+                .map(|tag| snapshot_dir(&ctx.workspace, tag).join(STATE_FILE))
+                // A disk-only snapshot has no saved state: its disk is put back and the guest boots cold.
+                .filter(|state| state.is_file()),
             shares: req
                 .shared_folders
                 .iter()

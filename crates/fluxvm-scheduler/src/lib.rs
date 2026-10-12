@@ -41,6 +41,7 @@ pub mod idempotency;
 pub mod journal;
 pub mod live_migration;
 mod migration_relay;
+pub mod node_stats;
 pub mod oci_images;
 mod oci_pool;
 pub use oci_pool::{WARM_LABEL as OCI_WARM_LABEL, listed as vm_listed};
@@ -847,6 +848,34 @@ fn validate_policy(req: &CreateVmRequest, cfg: &Config) -> Result<()> {
                 req.image.display(),
                 dirs
             );
+        }
+        // A vz extra disk is a host file too: it must sit under the same directories (or be one of this host's
+        // persistent volumes, `<state_dir>/volumes`), and a block device under /dev, as for a hot attach.
+        if let Some(a) = &req.apple {
+            let volumes = cfg.state_dir.join("volumes");
+            let allowed = |path: &std::path::Path| {
+                fluxvm_core::policy::image_within_allowed(path, dirs)
+                    || fluxvm_core::policy::path_within(path, &volumes)
+            };
+            for d in &a.extra_disks {
+                use fluxvm_core::model::AppleDiskKind;
+                let ok = match d.kind {
+                    AppleDiskKind::Image | AppleDiskKind::Overlay => {
+                        allowed(d.path.as_path()) && d.overlay.as_deref().is_none_or(allowed)
+                    }
+                    AppleDiskKind::Block => {
+                        fluxvm_core::policy::path_within(&d.path, std::path::Path::new("/dev"))
+                    }
+                    AppleDiskKind::Nbd => true,
+                };
+                if !ok {
+                    bail!(
+                        "extra disk {} is not under any policy allowed_image_dirs {:?} (or this host's volumes)",
+                        d.path.display(),
+                        dirs
+                    );
+                }
+            }
         }
     }
     if let Some(modes) = &p.allowed_network_modes {
@@ -2574,12 +2603,23 @@ impl VmManager {
             .filter(|_| req.backend == BackendKind::Vz)
             .map(|a| a.extra_disks.clone())
             .unwrap_or_default();
-        let overlay_guard = if overlay_disks
+        // So does a persistent volume (`<state_dir>/volumes`): it serves one VM at a time.
+        let volumes_dir = self.cfg.state_dir.join("volumes");
+        let volume_disks: Vec<std::path::PathBuf> = overlay_disks
             .iter()
-            .any(|d| d.kind == fluxvm_core::model::AppleDiskKind::Overlay)
+            .filter(|d| d.kind == fluxvm_core::model::AppleDiskKind::Image)
+            .filter(|d| fluxvm_core::policy::path_within(&d.path, &volumes_dir))
+            .map(|d| d.path.clone())
+            .collect();
+        let overlay_guard = if !volume_disks.is_empty()
+            || overlay_disks
+                .iter()
+                .any(|d| d.kind == fluxvm_core::model::AppleDiskKind::Overlay)
         {
             let guard = self.vz_overlay_lock.lock().await;
             self.ensure_vz_overlays_exclusive(&overlay_disks, Some(id))
+                .await?;
+            self.ensure_volumes_exclusive(&volume_disks, Some(id))
                 .await?;
             Some(guard)
         } else {
@@ -3818,12 +3858,59 @@ impl VmManager {
     /// Firecracker write under `<workspace>/snapshots/<tag>/`; FluxVm uses the
     /// hypervisor control SnapshotSave path (same layout as sandbox snaps).
     pub async fn create_vm_snapshot(self: &Arc<Self>, id: Uuid, tag: &str) -> Result<()> {
+        self.create_vm_snapshot_with(id, tag, true).await
+    }
+
+    /// [`Self::create_vm_snapshot`], or with `memory: false` a disk-only snapshot: a clone of the disk and firmware
+    /// files without saved memory, which a stopped VM can take too and which restores by booting cold. Disk-only
+    /// snapshots are implemented for the vz backend.
+    pub async fn create_vm_snapshot_with(
+        self: &Arc<Self>,
+        id: Uuid,
+        tag: &str,
+        memory: bool,
+    ) -> Result<()> {
         validate_snapshot_tag(tag)?;
         let op = self.begin_snapshot_op(id, tag).await?;
-        self.create_vm_snapshot_inner(id, tag).await?;
+        if memory {
+            self.create_vm_snapshot_inner(id, tag).await?;
+        } else {
+            self.create_vm_disk_snapshot_inner(id, tag).await?;
+        }
         op.finish();
-        audit_event("vm.snapshot", &[("vm_id", &id.to_string()), ("tag", tag)]);
+        audit_event(
+            "vm.snapshot",
+            &[
+                ("vm_id", &id.to_string()),
+                ("tag", tag),
+                ("memory", if memory { "true" } else { "false" }),
+            ],
+        );
         Ok(())
+    }
+
+    async fn create_vm_disk_snapshot_inner(self: &Arc<Self>, id: Uuid, tag: &str) -> Result<()> {
+        let vm = self.get(id).await?;
+        fluxvm_core::security::check_operation(
+            vm.requested_security_profile,
+            fluxvm_core::security::VmOperation::SnapshotSave,
+        )?;
+        if vm.backend != BackendKind::Vz {
+            bail!(
+                "disk-only snapshots are implemented for the vz backend; this VM uses {:?}",
+                vm.backend
+            );
+        }
+        if !matches!(
+            vm.status,
+            VmStatus::Running | VmStatus::Paused | VmStatus::Stopped
+        ) {
+            bail!(
+                "snapshot requires a running, paused or stopped VM (status={:?})",
+                vm.status
+            );
+        }
+        fluxvm_apple::snapshot_save_disk(&vm, tag, vm.status == VmStatus::Running).await
     }
 
     async fn create_vm_snapshot_inner(self: &Arc<Self>, id: Uuid, tag: &str) -> Result<()> {
@@ -4260,10 +4347,14 @@ impl VmManager {
             if !meta.is_dir() {
                 continue;
             }
+            let tag = e.file_name().to_string_lossy().into_owned();
+            let has_memory = (vm.backend == BackendKind::Vz)
+                .then(|| fluxvm_apple::snapshot_has_state(&vm.workspace, &tag));
             out.push(fluxvm_core::model::VmSnapshotInfo {
-                tag: e.file_name().to_string_lossy().into_owned(),
+                tag,
                 created_at: meta.modified().ok().map(chrono::DateTime::<Utc>::from),
                 size_bytes: dir_size(&e.path()),
+                has_memory,
             });
         }
         out.sort_by_key(|s| s.created_at);
@@ -5301,6 +5392,41 @@ impl VmManager {
         Ok(req)
     }
 
+    /// Refuses `volumes` (files under `<state_dir>/volumes`) that another VM record on this host already names as an
+    /// extra disk: two guests writing one raw disk would corrupt it.
+    async fn ensure_volumes_exclusive(
+        &self,
+        volumes: &[std::path::PathBuf],
+        this: Option<Uuid>,
+    ) -> Result<()> {
+        if volumes.is_empty() {
+            return Ok(());
+        }
+        let canon = |p: &std::path::Path| fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+        let mine: Vec<std::path::PathBuf> = volumes.iter().map(|p| canon(p.as_path())).collect();
+        for vm in self.store.list().await {
+            if Some(vm.id) == this {
+                continue;
+            }
+            let Some(a) = vm.request.apple.as_ref() else {
+                continue;
+            };
+            if let Some(d) = a
+                .extra_disks
+                .iter()
+                .find(|d| mine.contains(&canon(d.path.as_path())))
+            {
+                bail!(
+                    "volume {} is already attached to VM {} ({}); a volume serves one VM at a time",
+                    d.path.display(),
+                    vm.name,
+                    vm.id
+                );
+            }
+        }
+        Ok(())
+    }
+
     fn clone_base_dir(&self) -> std::path::PathBuf {
         self.cfg.state_dir.join("images").join("clones")
     }
@@ -5323,6 +5449,13 @@ impl VmManager {
                 tracing::warn!(image = %image.display(), error = %e, "failed to remove clone base");
             }
         }
+        // A macOS clone's base is a directory of its own (disk, hardware model, auxiliary storage).
+        if let Some(d) = image.parent()
+            && d != self.clone_base_dir()
+            && d.starts_with(self.clone_base_dir())
+        {
+            let _ = fs::remove_dir_all(d);
+        }
     }
 
     /// Copy a stopped VM into a new VM: flatten its disk (backing chain
@@ -5334,51 +5467,113 @@ impl VmManager {
         name: String,
         actor: Option<&str>,
     ) -> Result<VmRecord> {
+        self.clone_vm_from(id, name, actor, None).await
+    }
+
+    /// [`Self::clone_vm`], or with `snapshot` a new VM from that snapshot's disk (vz): the source may then be in any
+    /// state, since the snapshot's disk does not change. Only the root disk is taken from a snapshot.
+    pub async fn clone_vm_from(
+        self: &Arc<Self>,
+        id: Uuid,
+        name: String,
+        actor: Option<&str>,
+        snapshot: Option<&str>,
+    ) -> Result<VmRecord> {
         validate_vm_name(&name)?;
         let src = self.get(id).await?;
-        if src.status != VmStatus::Stopped {
-            bail!(
-                "clone needs a stopped VM for a consistent disk (status={:?}); stop it first",
-                src.status
-            );
-        }
-        if src.request.storage != StorageBackend::Default || !src.disk.is_file() {
+        let disk = match snapshot {
+            Some(tag) => {
+                validate_snapshot_tag(tag)?;
+                if src.backend != BackendKind::Vz {
+                    bail!(
+                        "a clone from a snapshot is implemented for the vz backend; stop the VM and clone it instead"
+                    );
+                }
+                let d = fluxvm_apple::snapshot_dir(&src.workspace, tag).join("disk.raw");
+                if !d.is_file() {
+                    bail!("snapshot {tag:?} not found for VM {id}");
+                }
+                d
+            }
+            None => {
+                if src.status != VmStatus::Stopped {
+                    bail!(
+                        "clone needs a stopped VM for a consistent disk (status={:?}); stop it first, or clone from a snapshot",
+                        src.status
+                    );
+                }
+                src.disk.clone()
+            }
+        };
+        if src.request.storage != StorageBackend::Default || !disk.is_file() {
             bail!("clone supports local file-backed disks only");
         }
         let vz = src.backend == BackendKind::Vz;
-        if vz
+        let macos = vz
             && src
                 .request
                 .apple
                 .as_ref()
-                .is_some_and(|a| a.guest_os == fluxvm_core::model::AppleGuest::Macos)
-        {
-            // Its auxiliary storage and machine identifier live in the workspace, and `create` would reinstall from the IPSW.
-            bail!(
-                "clone of macOS vz guests is not supported; create a VM from a template's disk.raw instead (docs/macos.md)"
-            );
-        }
+                .is_some_and(|a| a.guest_os == fluxvm_core::model::AppleGuest::Macos);
         let dir = self.clone_base_dir();
         tokio::fs::create_dir_all(&dir).await?;
-        let base = dir.join(format!(
-            "{name}-{}.{}",
-            &Uuid::new_v4().simple().to_string()[..8],
-            if vz { "raw" } else { "qcow2" }
-        ));
+        let id8 = Uuid::new_v4().simple().to_string()[..8].to_owned();
+        let base = if macos {
+            // A macOS guest is its disk plus its hardware model and auxiliary storage (NVRAM): the base gets a directory
+            // of its own laid out like a prepared template, which `create` adopts (`adopt_macos_template`). The machine
+            // identifier is not copied, so the clone is a machine of its own.
+            let tdir = dir.join(format!("{name}-{id8}"));
+            tokio::fs::create_dir_all(&tdir).await?;
+            let snap_dir = snapshot.map(|tag| fluxvm_apple::snapshot_dir(&src.workspace, tag));
+            for f in fluxvm_apple::MACOS_TEMPLATE_FILES {
+                let from = snap_dir
+                    .as_ref()
+                    .map(|d| d.join(f))
+                    .filter(|p| p.is_file())
+                    .unwrap_or_else(|| src.workspace.join(f));
+                if !from.is_file() {
+                    let _ = fs::remove_dir_all(&tdir);
+                    bail!(
+                        "cannot clone this macOS guest: its {f} is missing from {}",
+                        src.workspace.display()
+                    );
+                }
+                if let Err(e) = fluxvm_apple::clone_file(&from, &tdir.join(f)) {
+                    let _ = fs::remove_dir_all(&tdir);
+                    return Err(e);
+                }
+            }
+            tdir.join("disk.raw")
+        } else {
+            dir.join(format!("{name}-{id8}.{}", if vz { "raw" } else { "qcow2" }))
+        };
+        // Removes what a failed clone left under `images/clones/` (the base file, or a macOS base's directory).
+        let discard_base = |base: &std::path::Path| {
+            if macos {
+                if let Some(d) = base.parent() {
+                    let _ = fs::remove_dir_all(d);
+                }
+            } else {
+                let _ = fs::remove_file(base);
+            }
+        };
         if vz {
             // vz disks are raw: an APFS clone is instant and needs no qemu-img on the Mac.
             let out = tokio::process::Command::new("cp")
                 .arg("-c")
-                .arg(&src.disk)
+                .arg(&disk)
                 .arg(&base)
                 .output()
                 .await
                 .context("running cp -c")?;
             if !out.status.success() {
                 let _ = fs::remove_file(&base);
-                tokio::fs::copy(&src.disk, &base)
-                    .await
-                    .with_context(|| format!("copying {}", src.disk.display()))?;
+                if let Err(e) = tokio::fs::copy(&disk, &base).await {
+                    discard_base(&base);
+                    return Err(
+                        anyhow::Error::new(e).context(format!("copying {}", disk.display()))
+                    );
+                }
             }
         } else {
             let out = tokio::process::Command::new(&self.cfg.qemu_img_binary)
@@ -5397,6 +5592,12 @@ impl VmManager {
             }
         }
         let mut req = src.request.clone();
+        // A persistent volume serves one VM at a time: it stays with the source, the clone does not get it.
+        let volumes_dir = self.cfg.state_dir.join("volumes");
+        if let Some(a) = req.apple.as_mut() {
+            a.extra_disks
+                .retain(|d| !fluxvm_core::policy::path_within(&d.path, &volumes_dir));
+        }
         // A clone that kept the source's cloud-init hostname would answer to the old name on the network.
         if let Some(ci) = req.cloud_init.as_mut()
             && ci.hostname.as_deref() == Some(src.name.as_str())
@@ -5415,6 +5616,10 @@ impl VmManager {
         if let NetworkSpec::Tap { mac, .. } = &mut req.network {
             *mac = None;
         }
+        // The base is an installed guest: the clone boots it, it does not install again.
+        if let Some(a) = req.apple.as_mut() {
+            a.install = false;
+        }
         let before: std::collections::HashSet<Uuid> =
             self.store.list().await.iter().map(|v| v.id).collect();
         let clone_name = req.name.clone();
@@ -5428,11 +5633,16 @@ impl VmManager {
                         let _ = self.delete(vm.id).await;
                     }
                 }
-                let _ = fs::remove_file(&base);
+                discard_base(&base);
                 return Err(e);
             }
         };
-        let data = fluxvm_qemu::disks::data_disks(&src.workspace);
+        // A snapshot holds the root disk only; the live data disks would not match it.
+        let data = if snapshot.is_some() {
+            Vec::new()
+        } else {
+            fluxvm_qemu::disks::data_disks(&src.workspace)
+        };
         if !data.is_empty() {
             let dst_dir = fluxvm_qemu::disks::disks_dir(&created.workspace);
             tokio::fs::create_dir_all(&dst_dir).await?;
@@ -5472,7 +5682,11 @@ impl VmManager {
         };
         audit_event(
             "vm.clone",
-            &[("vm_id", &vm.id.to_string()), ("source", &id.to_string())],
+            &[
+                ("vm_id", &vm.id.to_string()),
+                ("source", &id.to_string()),
+                ("snapshot", snapshot.unwrap_or("")),
+            ],
         );
         Ok(vm)
     }
@@ -6602,6 +6816,54 @@ mod tests {
         assert!(validate_policy(&inside, &cfg).is_ok());
     }
 
+    #[test]
+    fn policy_restricts_vz_extra_disks_like_images() {
+        use fluxvm_core::model::{AppleDisk, AppleDiskKind};
+        let mut cfg = Config::default();
+        cfg.state_dir = "/var/lib/fluxvm".into();
+        cfg.policy.allowed_image_dirs = Some(vec!["/var/lib/fluxvm/images".into()]);
+        let with_disk = |path: &str, kind: AppleDiskKind| {
+            let mut r = req_with(
+                1,
+                512,
+                None,
+                None,
+                BackendKind::Vz,
+                "/var/lib/fluxvm/images/base.raw",
+            );
+            r.apple.get_or_insert_with(Default::default).extra_disks = vec![AppleDisk {
+                path: path.into(),
+                kind,
+                ..Default::default()
+            }];
+            r
+        };
+        for ok in [
+            ("/var/lib/fluxvm/images/data.raw", AppleDiskKind::Image),
+            ("/var/lib/fluxvm/volumes/vol-1.raw", AppleDiskKind::Image),
+            ("/dev/disk4", AppleDiskKind::Block),
+        ] {
+            assert!(
+                validate_policy(&with_disk(ok.0, ok.1), &cfg).is_ok(),
+                "{ok:?}"
+            );
+        }
+        for bad in [
+            ("/etc/master.passwd", AppleDiskKind::Image),
+            (
+                "/var/lib/fluxvm/images/../../../etc/hosts",
+                AppleDiskKind::Image,
+            ),
+            ("/Users/someone/disk.raw", AppleDiskKind::Overlay),
+            ("/etc/hosts", AppleDiskKind::Block),
+        ] {
+            assert!(
+                validate_policy(&with_disk(bad.0, bad.1), &cfg).is_err(),
+                "{bad:?}"
+            );
+        }
+    }
+
     fn tenant_vm(tenant: &str, vcpus: u8, memory_mib: u64) -> VmRecord {
         let mut request = req(BackendKind::Qemu, None, None);
         request.tenant = Some(tenant.to_string());
@@ -7485,6 +7747,7 @@ mod scheduled_snapshot_tests {
             tag: tag.into(),
             created_at: Some(now - Duration::seconds(secs_ago)),
             size_bytes: 0,
+            has_memory: None,
         }
     }
 

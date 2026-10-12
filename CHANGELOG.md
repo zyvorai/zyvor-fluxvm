@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+### Added: node API for volumes, tunnels, usage stats and restore (used by the fleet platform)
+- `fluxvm-api`: persistent volumes (`/v1/volumes`), a TCP tunnel to a VM's port (`GET /v1/vms/{id}/tunnel?port=N`,
+  WebSocket, admin only), and the vz usage and storage reports central graphs.
+- Tunnels to a vz guest connect only to an address on this Mac's vmnet `bridge*` interfaces (the address is what the
+  guest printed on its own serial console), never to the Mac's LAN or to an address another VM on the node reports.
+  Namespace guests may use `169.254.x.y` (never the metadata address), which tunnels refused before.
+- `fluxvm-scheduler`/`fluxvm-apple`: node stats, restore-from-snapshot and the runner/usage plumbing for the above.
+
 ### Added: per-disk QEMU I/O, virtio-blk and vhost-user-blk data disks
 - `io` on data disks (`POST /v1/vms/{id}/disks`, `data_disks`) and `root_disk_io` on create: `bus` (`scsi`,
   `virtio-blk`, `vhost-user-blk`), `aio` (`io_uring`, `native`, `threads`), `cache`, `iothread` and `queues`.

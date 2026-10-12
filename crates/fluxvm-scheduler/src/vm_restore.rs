@@ -113,9 +113,11 @@ pub(crate) fn retarget_metadata(raw: &[u8], disk: &std::path::Path) -> Result<(V
 
 impl VmManager {
     /// Restore a VM from a snapshot tag. A running or paused flux-vm VM is
-    /// restored in place (memory, CPU, devices and disk); a stopped VM of any
-    /// backend takes the existing relaunch path; other running backends must
-    /// be stopped first.
+    /// restored in place (memory, CPU, devices and disk); a vz VM is stopped if
+    /// it runs, gets the snapshot's disk and firmware back and is started again
+    /// (resuming the saved memory when the snapshot has it, booting cold when it
+    /// is disk-only); a stopped VM of any other backend takes the existing
+    /// relaunch path; other running backends must be stopped first.
     pub async fn restore_vm_snapshot(self: &Arc<Self>, id: Uuid, tag: &str) -> Result<VmRecord> {
         crate::validate_snapshot_tag(tag)?;
         let vm = self.get(id).await?;
@@ -133,6 +135,29 @@ impl VmManager {
             return Err(RestoreError::Unsupported(e).into());
         }
         let running = matches!(vm.status, VmStatus::Running | VmStatus::Paused);
+        if vm.backend == BackendKind::Vz {
+            // vz: stop, put the snapshot's disk and firmware back, start (resuming the saved state if it has one).
+            let dir = fluxvm_apple::snapshot_dir(&vm.workspace, tag);
+            if !dir.join(fluxvm_apple::STATE_FILE).is_file() && !dir.join("disk.raw").is_file() {
+                return Err(
+                    RestoreError::NoSnapshot(format!("VM {id} has no snapshot {tag:?}")).into(),
+                );
+            }
+            let _guard = BusyGuard::acquire(id)?;
+            if running {
+                self.stop(id)
+                    .await
+                    .with_context(|| format!("stopping {id} before the restore"))?;
+            }
+            let out = self.start_from_snapshot(id, tag).await;
+            if out.is_ok() {
+                crate::audit_event(
+                    "vm.snapshot.restore",
+                    &[("vm_id", &id.to_string()), ("tag", tag)],
+                );
+            }
+            return out;
+        }
         if !running {
             return self.start_from_snapshot(id, tag).await;
         }
