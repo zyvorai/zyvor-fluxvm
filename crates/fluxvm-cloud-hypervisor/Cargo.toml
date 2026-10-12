@@ -3,7 +3,7 @@
 
 [package]
 name = "fluxvm-cloud-hypervisor"
-version = "0.4.3"
+version = "0.4.4"
 edition = "2024"
 license = "Apache-2.0"
 description = "Cloud Hypervisor VmBackend implementation for Zyvor FluxVM"
