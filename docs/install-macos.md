@@ -64,8 +64,8 @@ fluxctl serve --listen 127.0.0.1:7789 --state-dir /tmp/try   # or run one in the
 The guard checks the address you pass, so a second agent on a free port is accepted. Two daemons must never share a state
 directory.
 
-> `/readyz` answers `503` on a Mac in 0.4.4: it still asked for the Linux eBPF dataplane. It is fixed in the release
-> after 0.4.4. Use `/healthz` for liveness.
+> `/readyz` answered `503` on a Mac in 0.4.4: it still asked for the Linux eBPF dataplane. It answers `200` from 0.4.5
+> (checked on a Homebrew install of the 0.4.5 package). Use `/healthz` for liveness on 0.4.4.
 
 ## 3. Run something
 
@@ -104,7 +104,7 @@ agent loop with real timings is in [examples/agent-sandbox-demo](https://github.
 > **After `brew upgrade`:** an MCP entry (or `fluxctl service install` plist) written by 0.4.4 or earlier points at the
 > versioned path (`/opt/homebrew/Cellar/fluxvm/0.4.4/bin/fluxctl`). Homebrew removes the old version on upgrade, and the
 > entry then points at nothing: tested, an entry written by 0.4.1 was dead right after upgrading to 0.4.4. Re-run
-> `fluxctl mcp install`, or edit the entry to `/opt/homebrew/opt/fluxvm/bin/fluxctl`. Releases after 0.4.4 write the `opt`
+> `fluxctl mcp install`, or edit the entry to `/opt/homebrew/opt/fluxvm/bin/fluxctl`. 0.4.5 and later write the `opt`
 > path themselves.
 
 ## 5. Update and remove
@@ -128,7 +128,7 @@ and binaries gone, no LaunchAgent or daemon left behind).
 
 | Symptom | Cause and fix |
 |---|---|
-| `curl 127.0.0.1:7788/readyz` gives `503` | Expected on 0.4.4 (see above); `/healthz` is the check. |
+| `curl 127.0.0.1:7788/readyz` gives `503` | Expected on 0.4.4 only (see above); upgrade, or use `/healthz`. |
 | `the Apple runner fluxvm-vz-runner was not found (looked at: …/target/debug/…)` | A VM record from a development build points at a path that no longer exists. Delete the VM (`fluxctl delete <id>`) and create it again. |
 | Snapshot restore or a warm slot fails | The login session is locked or absent. Unlock it, or set up the dedicated auto-login user. |
 | `brew services` shows `Running: false` and the log says `Address already in use` | A `fluxctl service install` agent (from a version before the guard, or installed with `--force`) already holds port 7788: `fluxctl service uninstall`, then `brew services restart zyvorai/tap/fluxvm`. |
