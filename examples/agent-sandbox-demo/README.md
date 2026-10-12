@@ -53,6 +53,8 @@ examples/agent-sandbox-demo/local-model.sh
 STAND_IN=1 examples/agent-sandbox-demo/local-model.sh   # no model: a stub server, proves the path not inference
 ```
 
-Verified on the M4 with `STAND_IN=1`: models and chat answered through the relay, `internet: unreachable`. It has **not**
-been run against a real model: this host had `llama-server` but no model file, and a model is not something the script
-downloads for you. The relay adds no authentication, so the model server sees every request from the guest.
+Verified on the M4 twice: with `STAND_IN=1`, and with a real model, `llama-server` (llama.cpp build 11146) serving
+`SmolLM2-135M-Instruct-Q8_0.gguf` (145 MB, a deliberately tiny model, so its answers are weak): `/v1/models` and a real chat
+completion came back through the relay and the guest's internet was still `unreachable`. That run took 59 s end to end on
+a fresh state directory, mostly the cold sandbox boot. The script never downloads a model. The relay adds no
+authentication, so the model server sees every request from the guest.
