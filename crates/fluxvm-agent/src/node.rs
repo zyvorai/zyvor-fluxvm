@@ -408,13 +408,24 @@ async fn local_vm_stats(http: &reqwest::Client, fluxvm_url: &str) -> Result<Loca
         .and_then(|v| v.as_array())
         .cloned()
         .unwrap_or_default();
-    let macos_guests = items
+    let macos_guests = count_active_macos_guests(&items);
+    Ok(LocalVmStats {
+        count: items.len(),
+        macos_guests,
+    })
+}
+
+/// macOS guests that hold one of Apple's two slots: not stopped or failed. `GET /v1/vms` items are `VmRecord`s, which
+/// carry `status` (`creating`, `running`, `paused`, `stopped`, `failed`); `state` is only what the simulator adds.
+fn count_active_macos_guests(items: &[serde_json::Value]) -> u32 {
+    items
         .iter()
         .filter(|vm| {
-            let active = vm
-                .get("state")
-                .and_then(|v| v.as_str())
-                .is_some_and(|s| matches!(s, "running" | "paused" | "starting"));
+            let status = vm
+                .get("status")
+                .or_else(|| vm.get("state"))
+                .and_then(|v| v.as_str());
+            let active = status.is_some_and(|s| matches!(s, "creating" | "running" | "paused"));
             let request = vm.get("request").unwrap_or(vm);
             let mac = request
                 .get("apple")
@@ -423,11 +434,7 @@ async fn local_vm_stats(http: &reqwest::Client, fluxvm_url: &str) -> Result<Loca
                 == Some("macos");
             active && mac
         })
-        .count() as u32;
-    Ok(LocalVmStats {
-        count: items.len(),
-        macos_guests,
-    })
+        .count() as u32
 }
 
 fn sim_apple_caps(h: &SimHost, local: LocalVmStats) -> AppleHostCaps {
@@ -511,4 +518,45 @@ fn total_memory_mib() -> Option<u64> {
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 fn total_memory_mib() -> Option<u64> {
     None
+}
+
+#[cfg(test)]
+mod macos_guest_count_tests {
+    use super::count_active_macos_guests;
+    use serde_json::json;
+
+    fn vm(status_key: &str, status: &str, guest: &str) -> serde_json::Value {
+        json!({status_key: status, "request": {"apple": {"guest_os": guest}}})
+    }
+
+    #[test]
+    fn a_real_daemon_record_with_only_status_is_counted() {
+        // `GET /v1/vms` items are VmRecords: `status`, no `state`.
+        let items = [
+            vm("status", "running", "macos"),
+            vm("status", "creating", "macos"),
+            vm("status", "paused", "macos"),
+        ];
+        assert_eq!(count_active_macos_guests(&items), 3);
+    }
+
+    #[test]
+    fn stopped_failed_and_linux_guests_hold_no_slot() {
+        let items = [
+            vm("status", "stopped", "macos"),
+            vm("status", "failed", "macos"),
+            vm("status", "running", "linux"),
+            json!({"status": "running", "request": {}}),
+            vm("status", "running", "macos"),
+        ];
+        assert_eq!(count_active_macos_guests(&items), 1);
+    }
+
+    #[test]
+    fn the_simulators_state_key_still_works() {
+        assert_eq!(
+            count_active_macos_guests(&[vm("state", "running", "macos")]),
+            1
+        );
+    }
 }

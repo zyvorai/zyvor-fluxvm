@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### Fixed: a Mac's heartbeat reported zero macOS guests
+- `fluxvm-agent node` counted macOS guests from a `state` field that `GET /v1/vms` does not return (it returns `status`),
+  and looked for a `starting` value that does not exist (`creating` does), so a real Mac always reported 0 and central's
+  two-guest placement limit never applied to real nodes. The simulator emitted both keys, which hid it. The count now reads
+  `status` (`creating`, `running`, `paused`).
+
 
 ### Added: fleet console as a cloud UX, image catalog, tenant view of leased Macs
 - The `/console` web console is rebuilt as a cloud UX: overview with quota bars and your Macs, My Macs, virtual machines,
