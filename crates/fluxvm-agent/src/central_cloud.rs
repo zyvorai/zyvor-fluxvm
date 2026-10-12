@@ -133,11 +133,25 @@ pub(super) async fn reconcile_once(fleet: &Fleet) -> Value {
         }
         ended
     };
+    let rotated = {
+        let mut t = fleet.tenancy.lock().await;
+        let days = t.policy.overlay_key_rotation_days;
+        // `try_days`: an absurd policy value must not panic the reconciler (`days` panics out of range).
+        let r = match ChronoDuration::try_days(days) {
+            Some(max_age) if days > 0 => t.rotate_due_overlays(max_age, Utc::now()),
+            _ => Vec::new(),
+        };
+        if !r.is_empty() {
+            tracing::info!(networks = ?r, "overlay keys rotated");
+            fleet.persist_tenancy(&t);
+        }
+        r
+    };
     let compacted = {
         let mut t = fleet.tenancy.lock().await;
         let days = t.policy.ledger_retention_days;
         let n = if days > 0 {
-            t.compact(Utc::now() - ChronoDuration::days(days))
+            ChronoDuration::try_days(days).map_or(0, |d| t.compact(Utc::now() - d))
         } else {
             0
         };
@@ -180,6 +194,7 @@ pub(super) async fn reconcile_once(fleet: &Fleet) -> Value {
         "evicted": evicted,
         "closed_ledger_entries": closed,
         "compacted_records": compacted,
+        "rotated_overlay_keys": rotated,
         "errors": errors,
     })
 }
@@ -967,6 +982,27 @@ pub(super) async fn get_overlay(
     Ok(Json(o.public_json()))
 }
 
+/// `POST /fleet/overlays/{name}/rotate` (*tenant*): a new network key. Member Macs pick it up within a heartbeat;
+/// the previous key keeps working meanwhile.
+pub(super) async fn rotate_overlay(
+    State(fleet): State<Fleet>,
+    Extension(caller): Extension<Caller>,
+    Path(name): Path<String>,
+) -> Result<Json<Value>, AppError> {
+    let mut t = fleet.tenancy.lock().await;
+    let net = t
+        .rotate_overlay(&caller, &name, Utc::now())
+        .map_err(|e| match &e {
+            crate::tenancy::TenancyError::Overlay(m) if m.starts_with("no network") => {
+                not_found(e.to_string())
+            }
+            _ => tenancy_error(e),
+        })?;
+    fleet.persist_tenancy(&t);
+    tracing::info!(network = %name, epoch = net.epoch, "overlay key rotated");
+    Ok(Json(net.public_json()))
+}
+
 pub(super) async fn delete_overlay(
     State(fleet): State<Fleet>,
     Extension(caller): Extension<Caller>,
@@ -1063,6 +1099,8 @@ pub(super) async fn node_overlays(
                 "listen": format!("0.0.0.0:{}", o.port),
                 "peers": peers,
                 "key": o.key_hex,
+                "epoch": o.epoch,
+                "previous": o.previous.as_ref().map(|(e, k)| json!({"epoch": e, "key": k})),
                 "mtu": o.mtu,
             }),
         );
@@ -1743,6 +1781,8 @@ mod tests {
         );
         assert_eq!(net["hosts"], json!([2, 31]));
         assert_eq!(net["key"].as_str().unwrap().len(), 64);
+        assert_eq!(net["epoch"], 1);
+        assert!(net["previous"].is_null());
         // A tenant cannot read node configs.
         let (s, _) = call(
             &app,

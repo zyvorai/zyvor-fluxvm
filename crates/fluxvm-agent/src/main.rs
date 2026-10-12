@@ -97,6 +97,22 @@ enum Command {
     },
 }
 
+/// Resolves on Ctrl-C or SIGTERM.
+async fn shutdown_signal() {
+    let ctrl_c = tokio::signal::ctrl_c();
+    let mut term = match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+        Ok(s) => s,
+        Err(_) => {
+            let _ = ctrl_c.await;
+            return;
+        }
+    };
+    tokio::select! {
+        _ = ctrl_c => {}
+        _ = term.recv() => {}
+    }
+}
+
 /// Parses one `--label key=value` argument. Splits on the FIRST `=` only,
 /// so a value containing `=` (unusual, but not invalid) still round-trips.
 fn parse_label(s: &str) -> Result<(String, String), String> {
@@ -141,13 +157,27 @@ async fn main() -> Result<()> {
                 }
                 None => None,
             };
-            let app = fluxvm_agent::central::router(fluxvm_agent::central::CentralConfig {
-                state_dir,
-                token,
-                reconcile_interval: (reconcile_secs > 0)
-                    .then(|| Duration::from_secs(reconcile_secs)),
-                ha,
-            });
+            let (app, ha_handle) =
+                fluxvm_agent::central::router_with_handle(fluxvm_agent::central::CentralConfig {
+                    state_dir,
+                    token,
+                    reconcile_interval: (reconcile_secs > 0)
+                        .then(|| Duration::from_secs(reconcile_secs)),
+                    ha,
+                });
+            // On Ctrl-C or SIGTERM (launchd, systemd), hand the leader lock over before exiting.
+            if let Some(h) = ha_handle {
+                tokio::spawn(async move {
+                    shutdown_signal().await;
+                    match h.release().await {
+                        Ok(()) => tracing::info!("released the fleet leader lock"),
+                        Err(e) => {
+                            tracing::warn!(error = %e, "could not release the fleet leader lock")
+                        }
+                    }
+                    std::process::exit(0);
+                });
+            }
             let addr: SocketAddr = listen
                 .parse()
                 .with_context(|| format!("parsing listen address {listen}"))?;

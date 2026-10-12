@@ -63,6 +63,7 @@ unhealthy.
 - Each central keeps its local JSON files as well, so a single central keeps working if `--ha-redis` is removed.
 - Keys are `fluxvm:fleet:{<cluster>}:leader` and `…:state:<name>`. The braces are a hash tag, so this works on Redis
   Cluster too.
-- A clean shutdown does not release the lock yet, so the standby takes over after the TTL either way.
+- On Ctrl-C or SIGTERM (launchd, systemd) a leader releases the lock before exiting, so a standby takes over at its
+  next renewal (a third of the TTL) instead of after the full TTL. A crash still waits out the TTL.
 - The node registry is mirrored on each renewal. A cordon or deregistration in the last third of a TTL before a leader
   crash can be lost. Tenancy changes are mirrored immediately.
