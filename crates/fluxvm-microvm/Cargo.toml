@@ -3,7 +3,7 @@
 
 [package]
 name = "fluxvm-microvm"
-version = "0.4.4"
+version = "0.4.5"
 edition = "2024"
 license = "Apache-2.0"
 description = "FluxVM MicroVM — Kubernetes-native MicroVM compute without KubeVirt"
