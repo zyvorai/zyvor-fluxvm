@@ -1322,6 +1322,8 @@ fn minimal_request(name: Option<String>, spec: &ProcboxSpec) -> CreateVmRequest 
         ttl_seconds: None,
         extra_args: Vec::new(),
         shared_memory: false,
+        root_disk_io: None,
+        disk_hotplug_ports: None,
         agent: None,
         qga: None,
         hyperv: false,

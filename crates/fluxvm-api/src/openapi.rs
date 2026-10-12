@@ -658,7 +658,7 @@ fn schemas() -> Value {
         "VmDiskInfo": {"type": "object", "properties": {
             "name": {"type": "string"},
             "path": {"type": "string"},
-            "bus": {"type": "string", "enum": ["virtio", "scsi"]},
+            "bus": {"type": "string", "enum": ["virtio", "scsi", "virtio-blk", "vhost-user-blk"], "description": "virtio is the root disk"},
             "format": {"type": "string"},
             "size_bytes": {"type": "integer"},
             "allocated_bytes": {"type": "integer"}
@@ -668,7 +668,15 @@ fn schemas() -> Value {
             "name": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,31}$"},
             "size_gib": {"type": "integer", "minimum": 1, "description": "Create a new qcow2 disk of this size"},
             "path": {"type": "string", "description": "Attach this existing qcow2/raw file or block device; detach leaves it in place"},
-            "backing": {"type": "string", "description": "Create a qcow2 overlay on this qcow2/raw image, which is never written; detach deletes the overlay"}
+            "backing": {"type": "string", "description": "Create a qcow2 overlay on this qcow2/raw image, which is never written; detach deletes the overlay"},
+            "io": {"$ref": "#/components/schemas/DiskIo"}
+        }},
+        "DiskIo": {"type": "object", "description": "QEMU disk I/O settings; every field is optional", "properties": {
+            "bus": {"type": "string", "enum": ["scsi", "virtio-blk", "vhost-user-blk"], "description": "Data disks only; default scsi. vhost-user-blk is served by a per-disk qemu-storage-daemon"},
+            "aio": {"type": "string", "enum": ["io_uring", "native", "threads"], "description": "native needs cache none or directsync"},
+            "cache": {"type": "string", "enum": ["none", "writeback", "writethrough", "directsync", "unsafe"], "description": "Default writeback"},
+            "iothread": {"type": "boolean", "description": "Dedicated iothread (virtio-blk, vhost-user-blk, root)"},
+            "queues": {"type": "integer", "minimum": 1, "maximum": 64, "description": "virtio queues (virtio-blk, vhost-user-blk, root)"}
         }},
         "ResizeDiskRequest": {"type": "object", "required": ["size_gib"], "properties": {
             "size_gib": {"type": "integer", "minimum": 1}

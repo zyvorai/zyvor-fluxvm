@@ -85,7 +85,19 @@ pub fn build_args(
     // export this VM owns. Every other storage backend (including the
     // Default qcow2 overlay) opens `ctx.disk` directly, just with a format
     // that varies by backend (see `fluxvm_image::storage::disk_format`).
-    let disk_drive = disks::root_drive(&ctx.disk, &ctx.disk_format, ctx.nbd_export.as_deref());
+    let root_args = disks::root_args(
+        &ctx.disk,
+        &ctx.disk_format,
+        ctx.nbd_export.as_deref(),
+        req.root_disk_io.as_ref(),
+    )?;
+    let disk_ports = req.disk_hotplug_ports.unwrap_or(0);
+    if disk_ports > disks::MAX_DISK_HOTPLUG_PORTS {
+        anyhow::bail!(
+            "disk_hotplug_ports must be at most {}",
+            disks::MAX_DISK_HOTPLUG_PORTS
+        );
+    }
     // Reserve hotplug headroom by default so `device_add` (CPU) and
     // `device_add pc-dimm` (memory) have somewhere to land -- found live:
     // with a bare `-smp N`/`-m N`, `query-hotpluggable-cpus` reports zero
@@ -155,9 +167,8 @@ pub fn build_args(
         ),
         "-serial".into(),
         "chardev:serial0".into(),
-        "-drive".into(),
-        disk_drive,
     ];
+    a.extend(root_args);
     if let Some(fw) = &effective_firmware {
         // Split code/vars pflash: `unit=0` (read-only, admin-provided
         // OVMF_CODE.fd) + `unit=1` (writable, this VM's own per-workspace
@@ -192,6 +203,11 @@ pub fn build_args(
             ),
         ]);
     }
+    a.extend(disks::disk_port_args(
+        disk_ports,
+        HOTPLUG_PCIE_PORTS + 1,
+        HOTPLUG_PCIE_PORTS,
+    ));
     // A virtio-scsi controller for disk hotplug with bus="scsi" -- unlike
     // the PCIe root ports above (one device per port), a single
     // virtio-scsi-pci controller can host many hot-added scsi-hd devices
@@ -220,9 +236,19 @@ pub fn build_args(
     a.extend(disks::cdrom_args(&req.cdroms));
 
     if let Some(seed) = &ctx.seed_disk {
+        // An explicit root drive owns the `virtio0` id an unindexed
+        // `if=virtio` seed would also take.
+        let index = if req.root_disk_io.is_some() {
+            ",index=1"
+        } else {
+            ""
+        };
         a.extend([
             "-drive".into(),
-            format!("file={},if=virtio,format=raw,readonly=on", path_arg(seed)),
+            format!(
+                "file={},if=virtio,format=raw,readonly=on{index}",
+                path_arg(seed)
+            ),
         ]);
     }
 
@@ -230,10 +256,13 @@ pub fn build_args(
     // QEMU's default anonymous allocation — `vhost-user-fs-pci` otherwise
     // fails to attach. `-m` above still sets the *size*; this object is
     // what makes the *backing* shareable with the virtiofsd process(es).
+    // vhost-user-blk data disks need the same shareable backing.
+    let shared_memory =
+        !virtiofs_sockets.is_empty() || req.shared_memory || disks::has_vhost_user(&ctx.workspace);
     let numa_plan = numa::plan(req);
     if !numa_plan.is_empty() {
         req.validate_numa()?;
-        let backing = if !virtiofs_sockets.is_empty() || req.shared_memory {
+        let backing = if shared_memory {
             numa::MemoryBacking::Shared
         } else if req.hugepages == Some(true) {
             numa::MemoryBacking::Hugepages
@@ -241,7 +270,7 @@ pub fn build_args(
             numa::MemoryBacking::Ram
         };
         a.extend(numa::args(&numa_plan, backing, req.vcpus, max_vcpus));
-    } else if !virtiofs_sockets.is_empty() || req.shared_memory {
+    } else if shared_memory {
         a.extend([
             "-object".into(),
             format!(
@@ -483,7 +512,7 @@ impl VmBackend for QemuBackend {
         req: &CreateVmRequest,
         ctx: &LaunchContext,
     ) -> Result<LaunchResult> {
-        let (virtiofsd_pids, virtiofs_sockets) =
+        let (mut virtiofsd_pids, virtiofs_sockets) =
             match spawn_virtiofsd_instances(cfg, req, ctx).await {
                 Ok(v) => v,
                 Err(e) => {
@@ -491,6 +520,16 @@ impl VmBackend for QemuBackend {
                     return Err(e);
                 }
             };
+        // vhost-user-blk daemons ride along with the virtiofsd pids: both are
+        // per-boot sidecars stop and delete terminate.
+        match disks::spawn_vhost_user_all(cfg, &ctx.workspace).await {
+            Ok(pids) => virtiofsd_pids.extend(pids),
+            Err(e) => {
+                kill_pids(&virtiofsd_pids);
+                ctx.network.close_launch_fds();
+                return Err(e);
+            }
+        }
 
         let effective_firmware = req.firmware.clone().or_else(|| cfg.qemu_ovmf_code.clone());
         if req.secure_boot.unwrap_or(false) {
@@ -948,6 +987,8 @@ mod tests {
             ttl_seconds: None,
             extra_args: vec![],
             shared_memory: false,
+            root_disk_io: None,
+            disk_hotplug_ports: None,
             agent: None,
             qga: None,
             hyperv: false,
@@ -1009,6 +1050,65 @@ mod tests {
         assert!(!args.iter().any(|a| a.contains("memory-backend-memfd")));
         assert!(!args.iter().any(|a| a.contains("vhost-user-fs-pci")));
         assert!(args.iter().any(|a| a.starts_with("2048M,slots=")));
+    }
+
+    #[test]
+    fn root_without_io_keeps_the_plain_virtio_drive() {
+        let args = build_args(&cfg(), &req(2048), &ctx(), &[]).unwrap();
+        assert!(
+            args.iter()
+                .any(|a| a.starts_with("file=/tmp/eph-fixture/root.qcow2,if=virtio,"))
+        );
+        assert!(!args.iter().any(|a| a.contains("hotplug-disk-")));
+        assert!(!args.iter().any(|a| a.contains("iothread")));
+    }
+
+    #[test]
+    fn root_io_splits_drive_and_device_and_moves_the_seed() {
+        use fluxvm_core::model::{DiskAio, DiskCache, DiskIo};
+        let mut r = req(2048);
+        r.root_disk_io = Some(DiskIo {
+            aio: Some(DiskAio::IoUring),
+            cache: Some(DiskCache::None),
+            iothread: true,
+            queues: Some(4),
+            ..Default::default()
+        });
+        r.disk_hotplug_ports = Some(2);
+        let mut c = ctx();
+        c.seed_disk = Some("/tmp/eph-fixture/seed.img".into());
+        let args = build_args(&cfg(), &r, &c, &[]).unwrap();
+        let j = args.join(" ");
+        assert!(j.contains(
+            "file=/tmp/eph-fixture/root.qcow2,if=none,id=virtio0,format=qcow2,cache=none,aio=io_uring,node-name=root"
+        ));
+        assert!(j.contains("-object iothread,id=io-root"));
+        assert!(j.contains(
+            "virtio-blk-pci,drive=virtio0,id=disk-root,bus=pcie.0,iothread=io-root,num-queues=4"
+        ));
+        assert!(j.contains("if=virtio,format=raw,readonly=on,index=1"));
+        assert!(j.contains("pcie-root-port,id=hotplug-disk-0,bus=pcie.0,chassis=9,slot=8"));
+        assert!(j.contains("pcie-root-port,id=hotplug-disk-1,bus=pcie.0,chassis=10,slot=9"));
+        assert!(!j.contains("hotplug-disk-2"));
+    }
+
+    #[test]
+    fn root_io_rejects_bad_combinations() {
+        use fluxvm_core::model::{DiskAio, DiskBus, DiskIo};
+        let mut r = req(2048);
+        r.root_disk_io = Some(DiskIo {
+            aio: Some(DiskAio::Native),
+            ..Default::default()
+        });
+        assert!(build_args(&cfg(), &r, &ctx(), &[]).is_err());
+        r.root_disk_io = Some(DiskIo {
+            bus: Some(DiskBus::Scsi),
+            ..Default::default()
+        });
+        assert!(build_args(&cfg(), &r, &ctx(), &[]).is_err());
+        r.root_disk_io = None;
+        r.disk_hotplug_ports = Some(17);
+        assert!(build_args(&cfg(), &r, &ctx(), &[]).is_err());
     }
 
     #[test]
@@ -1486,6 +1586,8 @@ mod snapshot_save_tests {
                 ttl_seconds: None,
                 extra_args: vec![],
                 shared_memory: false,
+                root_disk_io: None,
+                disk_hotplug_ports: None,
                 agent: None,
                 qga: None,
                 hyperv: false,

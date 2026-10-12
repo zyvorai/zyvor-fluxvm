@@ -41,7 +41,7 @@ POST   /v1/vms/{uuid}/restore            # {"tag": "..."}; admin; running flux-v
 GET    /v1/vms/{uuid}/snapshots
 DELETE /v1/vms/{uuid}/snapshots/{tag}
 GET    /v1/vms/{uuid}/disks
-POST   /v1/vms/{uuid}/disks              # {"name": "data", "size_gib": 10}, {"name": "pvc", "path": "/dev/rbd0"} or {"name": "disk1", "backing": "/var/lib/fluxvm/images/imported/web01/disk1.raw"} (qcow2 overlay)
+POST   /v1/vms/{uuid}/disks              # {"name": "data", "size_gib": 10}, {"name": "pvc", "path": "/dev/rbd0"} or {"name": "disk1", "backing": "/var/lib/fluxvm/images/imported/web01/disk1.raw"} (qcow2 overlay); optional "io" (QEMU disk I/O, below)
 PATCH  /v1/vms/{uuid}/disks/{name}       # {"size_gib": 20}; name "root" = boot disk
 DELETE /v1/vms/{uuid}/disks/{name}       # deletes the file (or overlay); only unlinks a path-attached disk
                                          # vz: also "kind" (image|block|nbd), "url", "read_only", "caching", "sync", "controller"
@@ -393,6 +393,41 @@ Optional `data_disks` (QEMU only), e.g. `[{"name": "disk1", "backing": "/var/lib
 creates each disk as a per-VM qcow2 overlay on `backing` before the first boot. `backing` is
 checked like a `POST /v1/vms/{uuid}/disks` `path` and never written to. An image import's
 `suggested` body fills it for every disk after the boot disk.
+
+**QEMU disk I/O.** A data disk's `io` (in `data_disks` or on `POST /v1/vms/{uuid}/disks`) and the
+create body's `root_disk_io` take the same object; every field is optional:
+
+```json
+{"bus": "virtio-blk", "aio": "io_uring", "cache": "none", "iothread": true, "queues": 4}
+```
+
+- `bus`: `scsi` (default for data disks), `virtio-blk`, or `vhost-user-blk`. The root disk is always
+  virtio-blk, so `root_disk_io.bus` must be unset or `virtio-blk`.
+- `aio`: `io_uring`, `native` (needs `cache` `none` or `directsync`) or `threads`.
+- `cache`: `none`, `writeback` (QEMU's default), `writethrough`, `directsync` or `unsafe`.
+- `iothread`: a dedicated QEMU iothread for the disk (virtio buses).
+- `queues`: virtio queues, 1-64 (virtio buses).
+
+A `vhost-user-blk` disk is opened by a per-disk `qemu-storage-daemon`, not by QEMU. Its queues and
+iothread are the daemon's. Hot-adding one needs shareable guest memory, so create the VM with
+`"shared_memory": true`. A stopped VM gets it at the next boot either way. These disks carry no serial
+number. Live resize and hibernation refuse them. CBT backups and live backups leave them out; CBT
+lists them as skipped.
+
+Hot-added virtio-blk and vhost-user-blk disks go onto PCIe root ports reserved when the VM is created:
+`disk_hotplug_ports` (default 4, at most 16). VMs created before this field existed have none, so their
+device layout, live migration and saved state are unchanged. They can still attach virtio disks while
+stopped. SCSI disks need no port.
+
+The QEMU options are stored next to the disk as `disks/<name>.io.json`, so a disk keeps them across
+reboots. `GET /v1/capabilities` reports `host.io_uring` (the kernel allows io_uring),
+`host.vhost_user_blk` (`qemu-storage-daemon` is installed) and `host.nvme_multipath` (native NVMe
+multipath is on, so an NVMe-oF namespace with several paths is a single `/dev/nvmeXnY`).
+
+A disk on a host block device (a `path` under `/dev`, or a `storage: shared` root on one) is added to
+the VM's device-cgroup allowlist on the eBPF dataplane. This happens at boot, and also before a live
+attach. The allowlist holds 8 entries: `/dev/kvm`, `/dev/vhost-vsock`, `/dev/net/tun`, one per VFIO
+group, then one per block device. An attach that would overflow it is refused.
 
 Optional `cdroms` (QEMU only, at most 4), e.g.
 `[{"name": "install", "path": "/var/lib/fluxvm/images/win2022.iso"}, {"name": "virtio", "path": "/var/lib/fluxvm/images/virtio-win.iso"}]`,

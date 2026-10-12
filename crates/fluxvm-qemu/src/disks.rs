@@ -9,12 +9,21 @@
 //! A disk attached with a backing image is a qcow2 overlay in `disks/`, so
 //! several VMs can start from one shared image (an imported OVA's data
 //! disks) without writing to it.
+//!
+//! A disk attached with I/O settings ([`DiskIo`]) has a `<name>.io.json`
+//! sidecar next to it. Its bus is `scsi` (default), `virtio-blk` (its own
+//! PCIe device, optionally with an iothread and several queues) or
+//! `vhost-user-blk` (served by a per-disk `qemu-storage-daemon` QEMU talks to
+//! over `vub-<name>.sock`). A virtio disk hot-added live takes one of the
+//! `hotplug-disk-N` root ports, recorded in the sidecar so it comes back on
+//! the same port at the next boot and the device layout stays stable.
 
 use crate::{QMP_TIMEOUT, qmp};
 use anyhow::{Context, Result, bail};
 use fluxvm_core::backend::path_arg;
 use fluxvm_core::config::Config;
-use fluxvm_core::model::{VmDiskInfo, VmRecord, VmStatus};
+use fluxvm_core::model::{DiskBus, DiskIo, VmDiskInfo, VmRecord, VmStatus};
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::path::{Path, PathBuf};
 
@@ -46,8 +55,233 @@ pub fn root_drive(disk: &Path, disk_format: &str, nbd_export: Option<&Path>) -> 
     }
 }
 
+/// The root disk's QEMU arguments. Without `io` this is the plain
+/// [`root_drive`] (`-drive if=virtio`) every VM has always had. With it the
+/// drive is split into `-drive if=none,id=virtio0` and an explicit
+/// `virtio-blk-pci`, so the BlockBackend keeps its `virtio0` name (resize,
+/// backups) while the device gets an iothread and queues.
+pub fn root_args(
+    disk: &Path,
+    disk_format: &str,
+    nbd_export: Option<&Path>,
+    io: Option<&DiskIo>,
+) -> Result<Vec<String>> {
+    let Some(io) = io else {
+        return Ok(vec![
+            "-drive".into(),
+            root_drive(disk, disk_format, nbd_export),
+        ]);
+    };
+    io.validate(true).map_err(anyhow::Error::msg)?;
+    let mut a = Vec::new();
+    let mut drive = match nbd_export {
+        Some(socket) => {
+            if io.aio.is_some() {
+                bail!("root_disk_io.aio does not apply to an NBD root");
+            }
+            format!(
+                "file=nbd:unix:{},if=none,id={ROOT_BLOCK_DEVICE},format=raw",
+                socket.display()
+            )
+        }
+        None => format!(
+            "file={},if=none,id={ROOT_BLOCK_DEVICE},format={disk_format}",
+            path_arg(disk)
+        ),
+    };
+    drive.push_str(&format!(",cache={}", io.cache().as_str()));
+    if let Some(aio) = io.aio {
+        drive.push_str(&format!(",aio={}", aio.as_str()));
+    }
+    if nbd_export.is_none() && disk_format == "qcow2" {
+        drive.push_str(&format!(",node-name={ROOT_NODE}"));
+    }
+    let mut dev = format!("virtio-blk-pci,drive={ROOT_BLOCK_DEVICE},id=disk-root,bus=pcie.0");
+    if io.iothread {
+        a.extend(["-object".into(), "iothread,id=io-root".into()]);
+        dev.push_str(",iothread=io-root");
+    }
+    if let Some(q) = io.queues {
+        dev.push_str(&format!(",num-queues={q}"));
+    }
+    a.extend(["-drive".into(), drive, "-device".into(), dev]);
+    Ok(a)
+}
+
+/// What this host's kernel and QEMU install support for disk I/O.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct HostIoSupport {
+    pub io_uring: bool,
+    pub vhost_user_blk: bool,
+    pub nvme_multipath: bool,
+}
+
+pub fn host_io_support(cfg: &Config) -> HostIoSupport {
+    if !cfg!(target_os = "linux") {
+        return HostIoSupport::default();
+    }
+    let read = |p: &str| std::fs::read_to_string(p).map(|s| s.trim().to_string());
+    HostIoSupport {
+        // 0 allows everyone, 1 only CAP_SYS_ADMIN (the daemon), 2 nobody.
+        io_uring: read("/proc/sys/kernel/io_uring_disabled").map_or(true, |v| v != "2"),
+        vhost_user_blk: binary_on_path(&cfg.qemu_storage_daemon_binary),
+        nvme_multipath: read("/sys/module/nvme_core/parameters/multipath").is_ok_and(|v| v == "Y"),
+    }
+}
+
+fn binary_on_path(bin: &str) -> bool {
+    if bin.contains('/') {
+        return Path::new(bin).is_file();
+    }
+    std::env::var_os("PATH")
+        .is_some_and(|p| std::env::split_paths(&p).any(|d| d.join(bin).is_file()))
+}
+
 pub fn disks_dir(workspace: &Path) -> PathBuf {
     workspace.join("disks")
+}
+
+/// Root port id prefix for hot-added virtio data disks (`hotplug-disk-0..N`).
+pub const DISK_PORT_PREFIX: &str = "hotplug-disk-";
+/// Root ports a new QEMU VM reserves for virtio data disk hotplug.
+pub const DEFAULT_DISK_HOTPLUG_PORTS: u8 = 4;
+/// Most root ports a VM can reserve for virtio data disk hotplug.
+pub const MAX_DISK_HOTPLUG_PORTS: u8 = 16;
+
+/// What `disks/<name>.io.json` holds.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+struct Sidecar {
+    #[serde(default)]
+    io: DiskIo,
+    /// `hotplug-disk-N` the disk was hot-added on; `None` for a disk present
+    /// at boot, which sits on `pcie.0`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    port: Option<u8>,
+}
+
+fn sidecar_path(workspace: &Path, name: &str) -> PathBuf {
+    disks_dir(workspace).join(format!("{name}.io.json"))
+}
+
+fn read_sidecar(workspace: &Path, name: &str) -> Sidecar {
+    std::fs::read(sidecar_path(workspace, name))
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default()
+}
+
+fn write_sidecar(workspace: &Path, name: &str, sc: &Sidecar) -> Result<()> {
+    let path = sidecar_path(workspace, name);
+    if *sc == Sidecar::default() {
+        let _ = std::fs::remove_file(&path);
+        return Ok(());
+    }
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, serde_json::to_vec_pretty(sc)?)
+        .with_context(|| format!("writing {}", tmp.display()))?;
+    std::fs::rename(&tmp, &path).with_context(|| format!("writing {}", path.display()))
+}
+
+/// The I/O settings data disk `name` was attached with (defaults if none).
+pub fn disk_io(workspace: &Path, name: &str) -> DiskIo {
+    read_sidecar(workspace, name).io
+}
+
+/// Record `io` for data disk `name` before its first boot.
+pub fn set_disk_io(workspace: &Path, name: &str, io: &DiskIo) -> Result<()> {
+    io.validate(false).map_err(anyhow::Error::msg)?;
+    write_sidecar(
+        workspace,
+        name,
+        &Sidecar {
+            io: io.clone(),
+            port: None,
+        },
+    )
+}
+
+/// Copy `name`'s I/O settings to another workspace (a clone). The port is
+/// not copied: the clone boots the disk on `pcie.0`.
+pub fn copy_disk_io(src: &Path, dst: &Path, name: &str) -> Result<()> {
+    let io = disk_io(src, name);
+    write_sidecar(dst, name, &Sidecar { io, port: None })
+}
+
+fn bus_name(bus: DiskBus) -> &'static str {
+    match bus {
+        DiskBus::Scsi => "scsi",
+        DiskBus::VirtioBlk => "virtio-blk",
+        DiskBus::VhostUserBlk => "vhost-user-blk",
+    }
+}
+
+/// True when data disk `name` is served by a `qemu-storage-daemon`.
+pub fn is_vhost_user(workspace: &Path, name: &str) -> bool {
+    disk_io(workspace, name).bus() == DiskBus::VhostUserBlk
+}
+
+/// True when any data disk is vhost-user-blk, which needs shareable guest
+/// memory.
+pub fn has_vhost_user(workspace: &Path) -> bool {
+    data_disks(workspace)
+        .iter()
+        .any(|(n, _)| is_vhost_user(workspace, n))
+}
+
+fn vhost_user_socket(workspace: &Path, name: &str) -> PathBuf {
+    workspace.join(format!("vub-{name}.sock"))
+}
+
+fn vhost_user_pidfile(workspace: &Path, name: &str) -> PathBuf {
+    workspace.join(format!("vub-{name}.pid"))
+}
+
+/// The `qemu-storage-daemon` pid serving data disk `name`, if one is still
+/// running. A pidfile whose pid now belongs to another process (the daemon
+/// exited and the pid was reused) yields `None`.
+pub fn vhost_user_pid(workspace: &Path, name: &str) -> Option<u32> {
+    let pid: u32 = std::fs::read_to_string(vhost_user_pidfile(workspace, name))
+        .ok()?
+        .trim()
+        .parse()
+        .ok()?;
+    let cmdline = std::fs::read(format!("/proc/{pid}/cmdline")).ok()?;
+    let socket = vhost_user_socket(workspace, name);
+    let needle = socket.to_string_lossy();
+    String::from_utf8_lossy(&cmdline)
+        .contains(needle.as_ref())
+        .then_some(pid)
+}
+
+fn port_id(port: u8) -> String {
+    format!("{DISK_PORT_PREFIX}{port}")
+}
+
+/// Lowest `hotplug-disk-N` (below `ports`) no data disk holds.
+fn free_port(workspace: &Path, ports: u8) -> Option<u8> {
+    let used: Vec<u8> = data_disks(workspace)
+        .iter()
+        .filter_map(|(n, _)| read_sidecar(workspace, n).port)
+        .collect();
+    (0..ports.min(MAX_DISK_HOTPLUG_PORTS)).find(|p| !used.contains(p))
+}
+
+/// Boot-time root ports for hot-added virtio data disks. `first_chassis` and
+/// `first_slot` follow the ports the VM already has.
+pub fn disk_port_args(ports: u8, first_chassis: u8, first_slot: u8) -> Vec<String> {
+    (0..ports.min(MAX_DISK_HOTPLUG_PORTS))
+        .flat_map(|i| {
+            [
+                "-device".to_string(),
+                format!(
+                    "pcie-root-port,id={},bus=pcie.0,chassis={},slot={}",
+                    port_id(i),
+                    first_chassis + i,
+                    first_slot + i
+                ),
+            ]
+        })
+        .collect()
 }
 
 pub fn validate_disk_name(name: &str) -> Result<()> {
@@ -201,28 +435,232 @@ pub fn is_live_vm(vm: &VmRecord) -> bool {
     is_live(vm)
 }
 
-/// Boot-time `-blockdev`/`-device` pairs for every data disk.
+fn iothread_id(name: &str) -> String {
+    format!("io-{name}")
+}
+
+fn chardev_id(name: &str) -> String {
+    format!("vub-{name}")
+}
+
+/// `-blockdev` value for a data disk opened by QEMU itself.
+fn blockdev_arg(name: &str, path: &Path, io: &DiskIo) -> String {
+    let cache = io.cache();
+    let mut s = format!(
+        "driver={},node-name={},cache.direct={}",
+        disk_format(path),
+        node_name(name),
+        if cache.direct() { "on" } else { "off" }
+    );
+    if cache == fluxvm_core::model::DiskCache::Unsafe {
+        s.push_str(",cache.no-flush=on");
+    }
+    s.push_str(&format!(
+        ",file.driver={},file.filename={}",
+        file_driver(path),
+        path_arg(path)
+    ));
+    if let Some(aio) = io.aio {
+        s.push_str(&format!(",file.aio={}", aio.as_str()));
+    }
+    s
+}
+
+/// `,write-cache=` for a disk whose cache mode was chosen explicitly.
+fn write_cache_prop(io: &DiskIo) -> String {
+    match io.cache {
+        Some(c) => format!(
+            ",write-cache={}",
+            if c.guest_write_cache() { "on" } else { "off" }
+        ),
+        None => String::new(),
+    }
+}
+
+fn virtio_device(name: &str, io: &DiskIo, port: Option<u8>) -> String {
+    let bus = port.map(port_id).unwrap_or_else(|| "pcie.0".into());
+    let mut d = match io.bus() {
+        DiskBus::VhostUserBlk => format!(
+            "vhost-user-blk-pci,chardev={},id={},bus={bus}",
+            chardev_id(name),
+            device_id(name)
+        ),
+        _ => format!(
+            "virtio-blk-pci,drive={},id={},serial={name},bus={bus}{}",
+            node_name(name),
+            device_id(name),
+            write_cache_prop(io)
+        ),
+    };
+    if io.iothread && io.bus() == DiskBus::VirtioBlk {
+        d.push_str(&format!(",iothread={}", iothread_id(name)));
+    }
+    if let Some(q) = io.queues {
+        d.push_str(&format!(",num-queues={q}"));
+    }
+    d
+}
+
+/// Boot-time arguments for every data disk. vhost-user-blk disks expect
+/// their `qemu-storage-daemon` to be listening already
+/// ([`spawn_vhost_user_all`]).
 pub fn boot_args(workspace: &Path) -> Vec<String> {
     let mut a = Vec::new();
     for (name, path) in data_disks(workspace) {
-        a.extend([
-            "-blockdev".into(),
-            format!(
-                "driver={},node-name={},cache.direct=off,file.driver={},file.filename={}",
-                disk_format(&path),
-                node_name(&name),
-                file_driver(&path),
-                path_arg(&path)
-            ),
-            "-device".into(),
-            format!(
-                "scsi-hd,bus=scsi0.0,drive={},id={},serial={name}",
-                node_name(&name),
-                device_id(&name)
-            ),
-        ]);
+        let sc = read_sidecar(workspace, &name);
+        let io = &sc.io;
+        match io.bus() {
+            DiskBus::Scsi => a.extend([
+                "-blockdev".into(),
+                blockdev_arg(&name, &path, io),
+                "-device".into(),
+                format!(
+                    "scsi-hd,bus=scsi0.0,drive={},id={},serial={name}{}",
+                    node_name(&name),
+                    device_id(&name),
+                    write_cache_prop(io)
+                ),
+            ]),
+            DiskBus::VirtioBlk => {
+                if io.iothread {
+                    a.extend([
+                        "-object".into(),
+                        format!("iothread,id={}", iothread_id(&name)),
+                    ]);
+                }
+                a.extend([
+                    "-blockdev".into(),
+                    blockdev_arg(&name, &path, io),
+                    "-device".into(),
+                    virtio_device(&name, io, sc.port),
+                ]);
+            }
+            DiskBus::VhostUserBlk => a.extend([
+                "-chardev".into(),
+                format!(
+                    "socket,id={},path={}",
+                    chardev_id(&name),
+                    path_arg(&vhost_user_socket(workspace, &name))
+                ),
+                "-device".into(),
+                virtio_device(&name, io, sc.port),
+            ]),
+        }
     }
     a
+}
+
+/// `qemu-storage-daemon` arguments exporting `path` as vhost-user-blk on
+/// `socket`.
+fn vhost_user_args(name: &str, path: &Path, io: &DiskIo, socket: &Path) -> Vec<String> {
+    let cache = io.cache();
+    let mut file = format!(
+        "driver={},node-name=file-{name},filename={},cache.direct={}",
+        file_driver(path),
+        path_arg(path),
+        if cache.direct() { "on" } else { "off" }
+    );
+    if let Some(aio) = io.aio {
+        file.push_str(&format!(",aio={}", aio.as_str()));
+    }
+    let mut fmt = format!(
+        "driver={},node-name={},file=file-{name}",
+        disk_format(path),
+        node_name(name)
+    );
+    if cache == fluxvm_core::model::DiskCache::Unsafe {
+        fmt.push_str(",cache.no-flush=on");
+    }
+    let mut a = vec!["--blockdev".into(), file, "--blockdev".into(), fmt];
+    let mut export = format!(
+        "type=vhost-user-blk,id=exp-{name},node-name={},addr.type=unix,addr.path={},writable=on",
+        node_name(name),
+        path_arg(socket)
+    );
+    if !cache.guest_write_cache() {
+        export.push_str(",writethrough=on");
+    }
+    if let Some(q) = io.queues {
+        export.push_str(&format!(",num-queues={q}"));
+    }
+    if io.iothread {
+        a.extend([
+            "--object".into(),
+            format!("iothread,id={}", iothread_id(name)),
+        ]);
+        export.push_str(&format!(",iothread={}", iothread_id(name)));
+    }
+    a.extend(["--export".into(), export]);
+    a
+}
+
+/// Start the `qemu-storage-daemon` serving data disk `name` and wait for its
+/// socket. Its pid is written to `vub-<name>.pid`.
+pub async fn spawn_vhost_user(cfg: &Config, workspace: &Path, name: &str) -> Result<u32> {
+    let Some(path) = find_disk(workspace, name) else {
+        bail!("disk {name:?} not found");
+    };
+    let io = disk_io(workspace, name);
+    let socket = vhost_user_socket(workspace, name);
+    // A daemon left by an earlier boot whose QEMU died holds the disk open;
+    // one daemon per disk, ever.
+    stop_vhost_user(workspace, name).await;
+    let log = workspace.join(format!("vub-{name}.log"));
+    let args = vhost_user_args(name, &path, &io, &socket);
+    let child = fluxvm_core::process::spawn_logged(&cfg.qemu_storage_daemon_binary, &args, &log)
+        .await
+        .with_context(|| format!("starting qemu-storage-daemon for disk {name:?}"))?;
+    let Some(pid) = child.id() else {
+        bail!("qemu-storage-daemon for disk {name:?} exited before its pid was known");
+    };
+    std::fs::write(vhost_user_pidfile(workspace, name), pid.to_string())
+        .context("writing the qemu-storage-daemon pidfile")?;
+    if let Err(e) = fluxvm_core::process::wait_for_socket_ready(
+        pid,
+        &socket,
+        std::time::Duration::from_secs(10),
+        &format!("qemu-storage-daemon for disk {name:?}"),
+        &log,
+    )
+    .await
+    {
+        stop_vhost_user(workspace, name).await;
+        return Err(e);
+    }
+    Ok(pid)
+}
+
+/// Start a `qemu-storage-daemon` for every vhost-user-blk data disk. On
+/// failure the ones already started are stopped.
+pub async fn spawn_vhost_user_all(cfg: &Config, workspace: &Path) -> Result<Vec<u32>> {
+    let mut pids = Vec::new();
+    for (name, _) in data_disks(workspace) {
+        if !is_vhost_user(workspace, &name) {
+            continue;
+        }
+        match spawn_vhost_user(cfg, workspace, &name).await {
+            Ok(pid) => pids.push(pid),
+            Err(e) => {
+                for (n, _) in data_disks(workspace) {
+                    if is_vhost_user(workspace, &n) {
+                        stop_vhost_user(workspace, &n).await;
+                    }
+                }
+                return Err(e);
+            }
+        }
+    }
+    Ok(pids)
+}
+
+/// Stop the `qemu-storage-daemon` for data disk `name` (SIGTERM, which
+/// flushes, then SIGKILL) and remove its socket and pidfile.
+pub async fn stop_vhost_user(workspace: &Path, name: &str) {
+    if let Some(pid) = vhost_user_pid(workspace, name) {
+        let _ = fluxvm_core::process::terminate_pid(pid).await;
+    }
+    let _ = std::fs::remove_file(vhost_user_pidfile(workspace, name));
+    let _ = std::fs::remove_file(vhost_user_socket(workspace, name));
 }
 
 async fn qemu_img(cfg: &Config, args: &[&str], path: &Path) -> Result<Vec<u8>> {
@@ -275,7 +713,8 @@ async fn disk_info(cfg: &Config, name: &str, path: &Path, bus: &str) -> Result<V
 pub async fn list(cfg: &Config, vm: &VmRecord) -> Result<Vec<VmDiskInfo>> {
     let mut out = vec![disk_info(cfg, ROOT_DISK, &vm.disk, "virtio").await?];
     for (name, path) in data_disks(&vm.workspace) {
-        out.push(disk_info(cfg, &name, &path, "scsi").await?);
+        let bus = bus_name(disk_io(&vm.workspace, &name).bus());
+        out.push(disk_info(cfg, &name, &path, bus).await?);
     }
     Ok(out)
 }
@@ -285,8 +724,15 @@ fn is_live(vm: &VmRecord) -> bool {
 }
 
 /// Create a new qcow2 data disk and, when the VM is live, hot-add it.
-pub async fn attach(cfg: &Config, vm: &VmRecord, name: &str, size_gib: u64) -> Result<VmDiskInfo> {
+pub async fn attach(
+    cfg: &Config,
+    vm: &VmRecord,
+    name: &str,
+    size_gib: u64,
+    io: &DiskIo,
+) -> Result<VmDiskInfo> {
     validate_disk_name(name)?;
+    io.validate(false).map_err(anyhow::Error::msg)?;
     if size_gib == 0 || size_gib > 16 * 1024 {
         bail!("disk size must be 1..=16384 GiB");
     }
@@ -310,13 +756,11 @@ pub async fn attach(cfg: &Config, vm: &VmRecord, name: &str, size_gib: u64) -> R
             String::from_utf8_lossy(&out.stderr).trim()
         );
     }
-    if is_live(vm)
-        && let Err(e) = hot_add(vm, name, &path).await
-    {
+    if let Err(e) = add(cfg, vm, name, &path, io).await {
         let _ = std::fs::remove_file(&path);
         return Err(e);
     }
-    disk_info(cfg, name, &path, "scsi").await
+    disk_info(cfg, name, &path, bus_name(io.bus())).await
 }
 
 /// Attach an existing qcow2/raw image or block device as data disk `name`
@@ -327,8 +771,10 @@ pub async fn attach_existing(
     vm: &VmRecord,
     name: &str,
     source: &Path,
+    io: &DiskIo,
 ) -> Result<VmDiskInfo> {
     validate_disk_name(name)?;
+    io.validate(false).map_err(anyhow::Error::msg)?;
     if !source.is_absolute() {
         bail!("disk source {} must be an absolute path", source.display());
     }
@@ -359,13 +805,11 @@ pub async fn attach_existing(
     let link = dir.join(format!("{name}.{format}"));
     std::os::unix::fs::symlink(&real, &link)
         .with_context(|| format!("linking {} -> {}", link.display(), real.display()))?;
-    if is_live(vm)
-        && let Err(e) = hot_add(vm, name, &link).await
-    {
+    if let Err(e) = add(cfg, vm, name, &link, io).await {
         let _ = std::fs::remove_file(&link);
         return Err(e);
     }
-    disk_info(cfg, name, &link, "scsi").await
+    disk_info(cfg, name, &link, bus_name(io.bus())).await
 }
 
 /// Create data disk `name` as a qcow2 overlay on top of `backing` (a qcow2
@@ -376,15 +820,15 @@ pub async fn attach_overlay(
     vm: &VmRecord,
     name: &str,
     backing: &Path,
+    io: &DiskIo,
 ) -> Result<VmDiskInfo> {
+    io.validate(false).map_err(anyhow::Error::msg)?;
     let path = create_overlay(cfg, &vm.workspace, name, backing).await?;
-    if is_live(vm)
-        && let Err(e) = hot_add(vm, name, &path).await
-    {
+    if let Err(e) = add(cfg, vm, name, &path, io).await {
         let _ = std::fs::remove_file(&path);
         return Err(e);
     }
-    disk_info(cfg, name, &path, "scsi").await
+    disk_info(cfg, name, &path, bus_name(io.bus())).await
 }
 
 /// Create `disks/<name>.qcow2` in `workspace` as an overlay on `backing`.
@@ -441,34 +885,166 @@ pub async fn create_overlay(
     Ok(path)
 }
 
-async fn hot_add(vm: &VmRecord, name: &str, path: &Path) -> Result<()> {
+/// Record `io` for a newly placed disk file and, when the VM is live,
+/// hot-add it. On error the sidecar is gone again; the caller removes the
+/// file.
+async fn add(cfg: &Config, vm: &VmRecord, name: &str, path: &Path, io: &DiskIo) -> Result<()> {
+    let mut sc = Sidecar {
+        io: io.clone(),
+        port: None,
+    };
+    if is_live(vm) && io.bus() != DiskBus::Scsi {
+        let ports = vm.request.disk_hotplug_ports.unwrap_or(0);
+        let Some(port) = free_port(&vm.workspace, ports) else {
+            bail!(
+                "no free hotplug-disk root port ({ports} reserved at create); attach {} disks while the VM is stopped",
+                bus_name(io.bus())
+            );
+        };
+        sc.port = Some(port);
+    }
+    write_sidecar(&vm.workspace, name, &sc)?;
+    if is_live(vm)
+        && let Err(e) = hot_add(cfg, vm, name, path, &sc).await
+    {
+        let _ = std::fs::remove_file(sidecar_path(&vm.workspace, name));
+        return Err(e);
+    }
+    Ok(())
+}
+
+fn blockdev_add_args(name: &str, path: &Path, io: &DiskIo) -> serde_json::Value {
+    let cache = io.cache();
+    let mut file = json!({"driver": file_driver(path), "filename": path.to_string_lossy()});
+    if let Some(aio) = io.aio {
+        file["aio"] = json!(aio.as_str());
+    }
+    json!({
+        "driver": disk_format(path),
+        "node-name": node_name(name),
+        "cache": {
+            "direct": cache.direct(),
+            "no-flush": cache == fluxvm_core::model::DiskCache::Unsafe,
+        },
+        "file": file,
+    })
+}
+
+/// True when the running QEMU's guest RAM is shareable (memfd or file with
+/// `share=on`), which vhost-user devices need.
+async fn has_shared_memory(sock: &Path) -> bool {
+    qmp::execute(sock, "query-memdev", None, QMP_TIMEOUT)
+        .await
+        .ok()
+        .and_then(|v| v.as_array().cloned())
+        .is_some_and(|m| {
+            m.iter()
+                .any(|d| d.get("share").and_then(|s| s.as_bool()) == Some(true))
+        })
+}
+
+async fn hot_add(cfg: &Config, vm: &VmRecord, name: &str, path: &Path, sc: &Sidecar) -> Result<()> {
     let sock = vm.workspace.join("qmp.sock");
-    qmp::execute(
+    let io = &sc.io;
+    let bus = sc.port.map(port_id);
+    if io.bus() == DiskBus::VhostUserBlk {
+        if !has_shared_memory(&sock).await {
+            bail!(
+                "the VM booted without shareable memory, which vhost-user-blk needs; attach the disk while it is stopped, or create it with shared_memory"
+            );
+        }
+        spawn_vhost_user(cfg, &vm.workspace, name).await?;
+        let socket = vhost_user_socket(&vm.workspace, name);
+        let added = qmp::execute(
+            &sock,
+            "chardev-add",
+            Some(json!({
+                "id": chardev_id(name),
+                "backend": {"type": "socket", "data": {
+                    "addr": {"type": "unix", "data": {"path": socket.to_string_lossy()}},
+                    "server": false,
+                }},
+            })),
+            QMP_TIMEOUT,
+        )
+        .await
+        .context("chardev-add");
+        if let Err(e) = added {
+            stop_vhost_user(&vm.workspace, name).await;
+            return Err(e);
+        }
+        let mut dev = json!({
+            "driver": "vhost-user-blk-pci",
+            "chardev": chardev_id(name),
+            "id": device_id(name),
+            "bus": bus,
+        });
+        if let Some(q) = io.queues {
+            dev["num-queues"] = json!(q);
+        }
+        if let Err(e) = qmp::execute(&sock, "device_add", Some(dev), QMP_TIMEOUT).await {
+            let _ = qmp::execute(
+                &sock,
+                "chardev-remove",
+                Some(json!({"id": chardev_id(name)})),
+                QMP_TIMEOUT,
+            )
+            .await;
+            stop_vhost_user(&vm.workspace, name).await;
+            return Err(e).context("device_add vhost-user-blk-pci");
+        }
+        return Ok(());
+    }
+    if io.iothread {
+        qmp::execute(
+            &sock,
+            "object-add",
+            Some(json!({"qom-type": "iothread", "id": iothread_id(name)})),
+            QMP_TIMEOUT,
+        )
+        .await
+        .context("object-add iothread")?;
+    }
+    if let Err(e) = qmp::execute(
         &sock,
         "blockdev-add",
-        Some(json!({
-            "driver": disk_format(path),
-            "node-name": node_name(name),
-            "file": {"driver": file_driver(path), "filename": path.to_string_lossy()},
-        })),
+        Some(blockdev_add_args(name, path, io)),
         QMP_TIMEOUT,
     )
     .await
-    .context("blockdev-add")?;
-    if let Err(e) = qmp::execute(
-        &sock,
-        "device_add",
-        Some(json!({
+    {
+        del_iothread(&sock, name, io).await;
+        return Err(e).context("blockdev-add");
+    }
+    let mut dev = match io.bus() {
+        DiskBus::Scsi => json!({
             "driver": "scsi-hd",
             "bus": "scsi0.0",
             "drive": node_name(name),
             "id": device_id(name),
             "serial": name,
-        })),
-        QMP_TIMEOUT,
-    )
-    .await
-    {
+        }),
+        _ => {
+            let mut d = json!({
+                "driver": "virtio-blk-pci",
+                "drive": node_name(name),
+                "id": device_id(name),
+                "serial": name,
+                "bus": bus,
+            });
+            if io.iothread {
+                d["iothread"] = json!(iothread_id(name));
+            }
+            if let Some(q) = io.queues {
+                d["num-queues"] = json!(q);
+            }
+            d
+        }
+    };
+    if let Some(c) = io.cache {
+        dev["write-cache"] = json!(if c.guest_write_cache() { "on" } else { "off" });
+    }
+    if let Err(e) = qmp::execute(&sock, "device_add", Some(dev), QMP_TIMEOUT).await {
         let _ = qmp::execute(
             &sock,
             "blockdev-del",
@@ -476,9 +1052,45 @@ async fn hot_add(vm: &VmRecord, name: &str, path: &Path) -> Result<()> {
             QMP_TIMEOUT,
         )
         .await;
-        return Err(e).context("device_add scsi-hd");
+        del_iothread(&sock, name, io).await;
+        return Err(e).context("device_add");
     }
     Ok(())
+}
+
+async fn del_iothread(sock: &Path, name: &str, io: &DiskIo) {
+    if io.iothread {
+        let _ = qmp::execute(
+            sock,
+            "object-del",
+            Some(json!({"id": iothread_id(name)})),
+            QMP_TIMEOUT,
+        )
+        .await;
+    }
+}
+
+/// Retry `command` until it succeeds: unplug finishes asynchronously, and
+/// the backend stays "in use" until the guest lets the device go. PCIe
+/// unplug waits for the guest's hotplug driver (Linux pciehp waits ~5s).
+async fn retry_until_unplugged(
+    sock: &Path,
+    command: &str,
+    args: serde_json::Value,
+    attempts: u32,
+) -> Result<()> {
+    let mut last = None;
+    for _ in 0..attempts {
+        match qmp::execute(sock, command, Some(args.clone()), QMP_TIMEOUT).await {
+            Ok(_) => return Ok(()),
+            Err(e) => last = Some(e),
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    match last {
+        Some(e) => Err(e).context(format!("{command} after device_del")),
+        None => Ok(()),
+    }
 }
 
 /// Detach (hot-unplug when live) and delete a data disk's file, or only the
@@ -488,6 +1100,7 @@ pub async fn detach(vm: &VmRecord, name: &str) -> Result<()> {
     let Some(path) = find_disk(&vm.workspace, name) else {
         bail!("disk {name:?} not found");
     };
+    let io = disk_io(&vm.workspace, name);
     if is_live(vm) {
         let sock = vm.workspace.join("qmp.sock");
         qmp::execute(
@@ -498,30 +1111,41 @@ pub async fn detach(vm: &VmRecord, name: &str) -> Result<()> {
         )
         .await
         .context("device_del")?;
-        // SCSI unplug completes asynchronously; blockdev-del fails with
-        // "in use" until the device is gone.
-        let mut last = None;
-        for _ in 0..50 {
-            match qmp::execute(
-                &sock,
-                "blockdev-del",
-                Some(json!({"node-name": node_name(name)})),
-                QMP_TIMEOUT,
-            )
-            .await
-            {
-                Ok(_) => {
-                    last = None;
-                    break;
-                }
-                Err(e) => last = Some(e),
+        match io.bus() {
+            DiskBus::Scsi => {
+                retry_until_unplugged(
+                    &sock,
+                    "blockdev-del",
+                    json!({"node-name": node_name(name)}),
+                    50,
+                )
+                .await?
             }
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        }
-        if let Some(e) = last {
-            return Err(e).context("blockdev-del after device_del");
+            DiskBus::VirtioBlk => {
+                retry_until_unplugged(
+                    &sock,
+                    "blockdev-del",
+                    json!({"node-name": node_name(name)}),
+                    300,
+                )
+                .await?;
+                del_iothread(&sock, name, &io).await;
+            }
+            DiskBus::VhostUserBlk => {
+                retry_until_unplugged(
+                    &sock,
+                    "chardev-remove",
+                    json!({"id": chardev_id(name)}),
+                    300,
+                )
+                .await?;
+            }
         }
     }
+    if io.bus() == DiskBus::VhostUserBlk {
+        stop_vhost_user(&vm.workspace, name).await;
+    }
+    let _ = std::fs::remove_file(sidecar_path(&vm.workspace, name));
     std::fs::remove_file(&path).with_context(|| format!("removing {}", path.display()))
 }
 
@@ -562,7 +1186,11 @@ pub async fn resize(cfg: &Config, vm: &VmRecord, name: &str, size_gib: u64) -> R
         if is_external(&path) {
             bail!("disk {name:?} is attached from an existing image; resize its source");
         }
-        (path, "scsi")
+        let bus = disk_io(&vm.workspace, name).bus();
+        if bus == DiskBus::VhostUserBlk && is_live(vm) {
+            bail!("disk {name:?} is vhost-user-blk; resize it while the VM is stopped");
+        }
+        (path, bus_name(bus))
     };
     if !path.is_file() {
         bail!("disk {name:?} not found");
@@ -686,6 +1314,152 @@ mod tests {
         assert!(args.contains("scsi-hd,bus=scsi0.0,drive=data-a,id=disk-a,serial=a"));
         assert!(!args.contains("bad") && !args.contains("data-c"));
         std::fs::remove_dir_all(&tmp).unwrap();
+    }
+
+    #[test]
+    fn sidecars_pick_the_bus_and_io_options() {
+        use fluxvm_core::model::{DiskAio, DiskCache};
+        let tmp = std::env::temp_dir().join(format!("fluxvm-disks-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(disks_dir(&tmp)).unwrap();
+        for n in ["fast", "plain", "vub", "hot"] {
+            std::fs::write(disks_dir(&tmp).join(format!("{n}.qcow2")), b"").unwrap();
+        }
+        set_disk_io(
+            &tmp,
+            "fast",
+            &DiskIo {
+                bus: Some(DiskBus::VirtioBlk),
+                aio: Some(DiskAio::Native),
+                cache: Some(DiskCache::None),
+                iothread: true,
+                queues: Some(4),
+            },
+        )
+        .unwrap();
+        set_disk_io(
+            &tmp,
+            "vub",
+            &DiskIo {
+                bus: Some(DiskBus::VhostUserBlk),
+                queues: Some(2),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        write_sidecar(
+            &tmp,
+            "hot",
+            &Sidecar {
+                io: DiskIo {
+                    bus: Some(DiskBus::VirtioBlk),
+                    ..Default::default()
+                },
+                port: Some(1),
+            },
+        )
+        .unwrap();
+        set_disk_io(&tmp, "plain", &DiskIo::default()).unwrap();
+        assert!(!sidecar_path(&tmp, "plain").exists());
+
+        let args = boot_args(&tmp).join(" ");
+        assert!(args.contains("-object iothread,id=io-fast"));
+        assert!(args.contains(
+            "driver=qcow2,node-name=data-fast,cache.direct=on,file.driver=file,file.filename="
+        ));
+        assert!(args.contains(",file.aio=native"));
+        assert!(args.contains(
+            "virtio-blk-pci,drive=data-fast,id=disk-fast,serial=fast,bus=pcie.0,write-cache=on,iothread=io-fast,num-queues=4"
+        ));
+        assert!(
+            args.contains(
+                "virtio-blk-pci,drive=data-hot,id=disk-hot,serial=hot,bus=hotplug-disk-1"
+            )
+        );
+        assert!(args.contains("scsi-hd,bus=scsi0.0,drive=data-plain,id=disk-plain,serial=plain -"));
+        assert!(args.contains(&format!(
+            "-chardev socket,id=vub-vub,path={}",
+            tmp.join("vub-vub.sock").display()
+        )));
+        assert!(
+            args.contains("vhost-user-blk-pci,chardev=vub-vub,id=disk-vub,bus=pcie.0,num-queues=2")
+        );
+        assert!(!args.contains("node-name=data-vub"));
+        assert!(has_vhost_user(&tmp));
+        assert!(is_vhost_user(&tmp, "vub") && !is_vhost_user(&tmp, "fast"));
+        assert_eq!(free_port(&tmp, 4), Some(0));
+        assert_eq!(free_port(&tmp, 1), Some(0));
+        write_sidecar(
+            &tmp,
+            "fast",
+            &Sidecar {
+                io: disk_io(&tmp, "fast"),
+                port: Some(0),
+            },
+        )
+        .unwrap();
+        assert_eq!(free_port(&tmp, 4), Some(2));
+        assert_eq!(free_port(&tmp, 2), None);
+        assert_eq!(free_port(&tmp, 0), None);
+
+        let dst = tmp.join("clone");
+        std::fs::create_dir_all(disks_dir(&dst)).unwrap();
+        copy_disk_io(&tmp, &dst, "fast").unwrap();
+        assert_eq!(read_sidecar(&dst, "fast").port, None);
+        assert_eq!(disk_io(&dst, "fast").queues, Some(4));
+        std::fs::remove_dir_all(&tmp).unwrap();
+    }
+
+    #[test]
+    fn vhost_user_daemon_args() {
+        use fluxvm_core::model::{DiskAio, DiskCache};
+        let io = DiskIo {
+            bus: Some(DiskBus::VhostUserBlk),
+            aio: Some(DiskAio::IoUring),
+            cache: Some(DiskCache::Writethrough),
+            iothread: true,
+            queues: Some(4),
+        };
+        let a = vhost_user_args(
+            "d",
+            Path::new("/w/disks/d.qcow2"),
+            &io,
+            Path::new("/w/vub-d.sock"),
+        )
+        .join(" ");
+        assert!(a.contains(
+            "--blockdev driver=file,node-name=file-d,filename=/w/disks/d.qcow2,cache.direct=off,aio=io_uring"
+        ));
+        assert!(a.contains("--blockdev driver=qcow2,node-name=data-d,file=file-d"));
+        assert!(a.contains("--object iothread,id=io-d"));
+        assert!(a.contains(
+            "--export type=vhost-user-blk,id=exp-d,node-name=data-d,addr.type=unix,addr.path=/w/vub-d.sock,writable=on,writethrough=on,num-queues=4,iothread=io-d"
+        ));
+    }
+
+    #[test]
+    fn disk_io_validation() {
+        use fluxvm_core::model::{DiskAio, DiskCache};
+        let ok = DiskIo {
+            bus: Some(DiskBus::VirtioBlk),
+            aio: Some(DiskAio::Native),
+            cache: Some(DiskCache::Directsync),
+            iothread: true,
+            queues: Some(64),
+        };
+        assert!(ok.validate(false).is_ok());
+        let mut bad = ok.clone();
+        bad.cache = None;
+        assert!(bad.validate(false).is_err(), "native without O_DIRECT");
+        let mut bad = ok.clone();
+        bad.queues = Some(0);
+        assert!(bad.validate(false).is_err());
+        let mut bad = ok.clone();
+        bad.bus = None;
+        assert!(bad.validate(false).is_err(), "iothread on scsi");
+        assert!(ok.validate(true).is_ok(), "virtio-blk is the root's bus");
+        let mut root = ok;
+        root.bus = Some(DiskBus::VhostUserBlk);
+        assert!(root.validate(true).is_err(), "vhost-user-blk root");
     }
 
     #[test]

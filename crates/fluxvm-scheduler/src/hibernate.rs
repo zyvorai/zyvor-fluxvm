@@ -56,6 +56,11 @@ pub fn hibernate_unsupported(record: &VmRecord) -> Option<String> {
     if req.security_profile.is_confidential() {
         return Some("confidential VMs cannot hibernate".into());
     }
+    if fluxvm_qemu::disks::has_vhost_user(&record.workspace) {
+        return Some(
+            "VMs with vhost-user-blk disks cannot hibernate (the disk lives in qemu-storage-daemon)".into(),
+        );
+    }
     None
 }
 

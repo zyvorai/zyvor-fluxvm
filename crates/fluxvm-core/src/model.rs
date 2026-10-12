@@ -672,6 +672,122 @@ pub struct SharedFolder {
 pub struct DataDiskSpec {
     pub name: String,
     pub backing: PathBuf,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub io: Option<DiskIo>,
+}
+
+/// QEMU only: how one disk is attached and how QEMU does its I/O. Every field
+/// is optional; an unset field keeps FluxVM's default (SCSI for data disks,
+/// writeback cache, the thread pool, no iothread).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct DiskIo {
+    /// `scsi` (default), `virtio-blk`, or `vhost-user-blk` (served by a
+    /// per-disk `qemu-storage-daemon`). Data disks only; the root is always
+    /// virtio-blk.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bus: Option<DiskBus>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aio: Option<DiskAio>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache: Option<DiskCache>,
+    /// A dedicated iothread for this disk (virtio-blk, vhost-user-blk and the
+    /// root).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub iothread: bool,
+    /// virtio queues, 1-64 (virtio-blk, vhost-user-blk and the root).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queues: Option<u16>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum DiskBus {
+    Scsi,
+    VirtioBlk,
+    VhostUserBlk,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DiskAio {
+    IoUring,
+    Native,
+    Threads,
+}
+
+impl DiskAio {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            DiskAio::IoUring => "io_uring",
+            DiskAio::Native => "native",
+            DiskAio::Threads => "threads",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum DiskCache {
+    None,
+    Writeback,
+    Writethrough,
+    Directsync,
+    Unsafe,
+}
+
+impl DiskCache {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            DiskCache::None => "none",
+            DiskCache::Writeback => "writeback",
+            DiskCache::Writethrough => "writethrough",
+            DiskCache::Directsync => "directsync",
+            DiskCache::Unsafe => "unsafe",
+        }
+    }
+
+    /// O_DIRECT on the host file or device.
+    pub fn direct(self) -> bool {
+        matches!(self, DiskCache::None | DiskCache::Directsync)
+    }
+
+    /// The guest sees a write-back cache it has to flush.
+    pub fn guest_write_cache(self) -> bool {
+        !matches!(self, DiskCache::Writethrough | DiskCache::Directsync)
+    }
+}
+
+impl DiskIo {
+    pub fn bus(&self) -> DiskBus {
+        self.bus.unwrap_or(DiskBus::Scsi)
+    }
+
+    pub fn cache(&self) -> DiskCache {
+        self.cache.unwrap_or(DiskCache::Writeback)
+    }
+
+    /// Rejects combinations QEMU refuses or that would silently do nothing.
+    /// `root` is the boot disk, which is always virtio-blk.
+    pub fn validate(&self, root: bool) -> Result<(), String> {
+        if root && matches!(self.bus, Some(DiskBus::Scsi | DiskBus::VhostUserBlk)) {
+            return Err("the root disk is always virtio-blk; bus applies to data disks".into());
+        }
+        if self.aio == Some(DiskAio::Native) && !self.cache().direct() {
+            return Err("aio native needs cache none or directsync (O_DIRECT)".into());
+        }
+        if let Some(q) = self.queues
+            && !(1..=64).contains(&q)
+        {
+            return Err(format!("queues must be 1-64 (got {q})"));
+        }
+        if !root && self.bus() == DiskBus::Scsi && (self.iothread || self.queues.is_some()) {
+            return Err(
+                "iothread and queues need bus virtio-blk or vhost-user-blk (SCSI disks share one controller)".into(),
+            );
+        }
+        Ok(())
+    }
 }
 
 /// One `CreateVmRequest::cdroms` entry: a read-only ISO attached as a SATA
@@ -1448,6 +1564,16 @@ pub struct CreateVmRequest {
     /// is booted before any Pod exists, so its per-Pod shares can only arrive after it is claimed.
     #[serde(default)]
     pub shared_memory: bool,
+    /// QEMU only: I/O settings for the root disk (`bus` must be unset or
+    /// `virtio-blk`). Unset keeps the plain `-drive if=virtio` root.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub root_disk_io: Option<DiskIo>,
+    /// QEMU only: PCIe root ports reserved for hot-adding virtio-blk and
+    /// vhost-user-blk data disks. Set when the VM is created; VMs created
+    /// before these ports existed have none, which keeps their device layout
+    /// (and live migration and saved state) unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk_hotplug_ports: Option<u8>,
     #[serde(default)]
     pub agent: Option<AgentSpec>,
     /// Enable QEMU guest-agent virtio-serial channel (QEMU backend only).
@@ -2000,6 +2126,17 @@ pub struct RuntimeHostCapability {
     /// `POST /v1/vms/import-hibernated` and `/v1/host/hibernation` (QEMU).
     #[serde(default)]
     pub hibernate: bool,
+    /// The kernel allows io_uring, so `DiskIo.aio: io_uring` works (QEMU).
+    #[serde(default)]
+    pub io_uring: bool,
+    /// `qemu-storage-daemon` is installed, so `DiskIo.bus: vhost-user-blk`
+    /// data disks work (QEMU).
+    #[serde(default)]
+    pub vhost_user_blk: bool,
+    /// The kernel's native NVMe multipath is on: an NVMe-oF namespace
+    /// reached over several paths shows up as one `/dev/nvmeXnY`.
+    #[serde(default)]
+    pub nvme_multipath: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

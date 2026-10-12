@@ -707,6 +707,8 @@ impl VmManager {
             loadvm_tag: None,
             extra_args: Vec::new(),
             shared_memory: false,
+            root_disk_io: None,
+            disk_hotplug_ports: None,
             agent: Some(fluxvm_core::model::AgentSpec {
                 enabled: true,
                 port: 17777,
@@ -879,6 +881,8 @@ mod tests {
             ttl_seconds: None,
             extra_args: vec![],
             shared_memory: false,
+            root_disk_io: None,
+            disk_hotplug_ports: None,
             agent: None,
             qga: None,
             hyperv: false,

@@ -1275,6 +1275,7 @@ impl VmManager {
                         id,
                         &cgroup_path,
                         vfio_devices,
+                        &qemu_disk_paths(record),
                     ) {
                         tracing::warn!(vm = %id, error = %e, "Set 7S QEMU cgroup hardening attach failed");
                     }
@@ -2641,6 +2642,34 @@ impl VmManager {
             }
             _ => None,
         };
+        // Before the record exists: hot-add reads the stored port count.
+        if !req.data_disks.is_empty() && req.backend != BackendKind::Qemu {
+            anyhow::bail!("data_disks requires backend qemu");
+        }
+        if req.backend == BackendKind::Qemu {
+            if let Some(io) = &req.root_disk_io {
+                io.validate(true)
+                    .map_err(|e| anyhow::anyhow!("root_disk_io: {e}"))?;
+            }
+            for d in &req.data_disks {
+                if let Some(io) = &d.io {
+                    io.validate(false)
+                        .map_err(|e| anyhow::anyhow!("data disk {:?} io: {e}", d.name))?;
+                }
+            }
+            match req.disk_hotplug_ports {
+                Some(n) if n > fluxvm_qemu::disks::MAX_DISK_HOTPLUG_PORTS => anyhow::bail!(
+                    "disk_hotplug_ports must be at most {}",
+                    fluxvm_qemu::disks::MAX_DISK_HOTPLUG_PORTS
+                ),
+                Some(_) => {}
+                None => {
+                    req.disk_hotplug_ports = Some(fluxvm_qemu::disks::DEFAULT_DISK_HOTPLUG_PORTS)
+                }
+            }
+        } else if req.root_disk_io.is_some() || req.disk_hotplug_ports.is_some() {
+            anyhow::bail!("root_disk_io and disk_hotplug_ports require backend qemu");
+        }
 
         let placeholder = VmRecord {
             id,
@@ -2708,9 +2737,6 @@ impl VmManager {
         // cosmetic no-op.
         if let Some(msg) = secure_boot_or_tpm_backend_error(&req) {
             anyhow::bail!(msg);
-        }
-        if !req.data_disks.is_empty() && req.backend != BackendKind::Qemu {
-            anyhow::bail!("data_disks requires backend qemu");
         }
         if !req.numa.is_empty() && req.backend != BackendKind::Qemu {
             anyhow::bail!("numa requires backend qemu");
@@ -2848,6 +2874,10 @@ impl VmManager {
                 fluxvm_qemu::disks::create_overlay(&self.cfg, &workspace, &d.name, &backing)
                     .await
                     .with_context(|| format!("creating data disk {:?}", d.name))?;
+                if let Some(io) = &d.io {
+                    fluxvm_qemu::disks::set_disk_io(&workspace, &d.name, io)
+                        .with_context(|| format!("data disk {:?} io", d.name))?;
+                }
             }
             // Network prep runs before the cloud-init seed: a static
             // network-config (CloudInitSpec.static_network) needs the
@@ -3486,6 +3516,10 @@ impl VmManager {
     /// `(major, minor)` of the configured QEMU binary, when it can be probed.
     pub fn qemu_version(&self) -> Option<(u32, u32)> {
         fluxvm_qemu::qemu_version(&self.cfg)
+    }
+
+    pub fn host_io_support(&self) -> fluxvm_qemu::disks::HostIoSupport {
+        fluxvm_qemu::disks::host_io_support(&self.cfg)
     }
 
     /// Changes bandwidth, downtime limit or auto-converge throttle of an
@@ -4307,9 +4341,13 @@ impl VmManager {
         // Linked images and block devices belong to someone else, the same
         // reason restore skips them.
         let data = if all_disks {
+            // A live backup reads an internal QEMU snapshot, which a
+            // vhost-user-blk disk (opened by qemu-storage-daemon) never gets.
+            let live = matches!(vm.status, VmStatus::Running | VmStatus::Paused);
             fluxvm_qemu::disks::data_disks(&vm.workspace)
                 .into_iter()
                 .filter(|(_, p)| !fluxvm_qemu::disks::is_external(p))
+                .filter(|(n, _)| !(live && fluxvm_qemu::disks::is_vhost_user(&vm.workspace, n)))
                 .collect()
         } else {
             vec![]
@@ -4549,6 +4587,37 @@ impl VmManager {
             })
     }
 
+    /// Bring a running VM's device allowlist in line with its disks, plus
+    /// `adding` (a source about to be hot-added). A failure is fatal only
+    /// when `adding` is a block device, which QEMU could not open without
+    /// its entry; otherwise it is logged, like `attach_cgroup`.
+    fn allow_vm_disk_devices(&self, vm: &VmRecord, adding: Option<&std::path::Path>) -> Result<()> {
+        if self.cfg.sandbox.dataplane.mode == fluxvm_core::config::DataplaneMode::Legacy
+            || !fluxvm_qemu::disks::is_live_vm(vm)
+        {
+            return Ok(());
+        }
+        let mut disks = qemu_disk_paths(vm);
+        disks.extend(adding.map(std::path::Path::to_path_buf));
+        let Err(e) = fluxvm_network::qemu_cgroup::update(
+            &self.cfg.sandbox.dataplane,
+            vm.id,
+            &vm.request.vfio_devices,
+            &disks,
+        ) else {
+            return Ok(());
+        };
+        let adding_block = adding.is_some_and(|p| {
+            use std::os::unix::fs::FileTypeExt;
+            std::fs::metadata(p).is_ok_and(|m| m.file_type().is_block_device())
+        });
+        if adding_block {
+            return Err(e.context("allowing the block device in the VM's device cgroup"));
+        }
+        tracing::warn!(vm = %vm.id, error = %e, "Set 7S device allowlist update failed");
+        Ok(())
+    }
+
     async fn qemu_vm_for_disks(&self, id: Uuid) -> Result<VmRecord> {
         let vm = self.get(id).await?;
         if vm.backend != BackendKind::Qemu {
@@ -4571,9 +4640,11 @@ impl VmManager {
         id: Uuid,
         name: &str,
         size_gib: u64,
+        io: &fluxvm_core::model::DiskIo,
     ) -> Result<fluxvm_core::model::VmDiskInfo> {
         let vm = self.qemu_vm_for_disks(id).await?;
-        let info = fluxvm_qemu::disks::attach(&self.cfg, &vm, name, size_gib).await?;
+        let info = fluxvm_qemu::disks::attach(&self.cfg, &vm, name, size_gib, io).await?;
+        self.record_vhost_user_pid(id, name).await?;
         audit_event(
             "vm.disk.attach",
             &[
@@ -4593,10 +4664,13 @@ impl VmManager {
         id: Uuid,
         name: &str,
         source: &std::path::Path,
+        io: &fluxvm_core::model::DiskIo,
     ) -> Result<fluxvm_core::model::VmDiskInfo> {
         let vm = self.qemu_vm_for_disks(id).await?;
         let real = self.check_disk_source(source)?;
-        let info = fluxvm_qemu::disks::attach_existing(&self.cfg, &vm, name, &real).await?;
+        self.allow_vm_disk_devices(&vm, Some(&real))?;
+        let info = fluxvm_qemu::disks::attach_existing(&self.cfg, &vm, name, &real, io).await?;
+        self.record_vhost_user_pid(id, name).await?;
         audit_event(
             "vm.disk.attach",
             &[
@@ -4615,10 +4689,12 @@ impl VmManager {
         id: Uuid,
         name: &str,
         backing: &std::path::Path,
+        io: &fluxvm_core::model::DiskIo,
     ) -> Result<fluxvm_core::model::VmDiskInfo> {
         let vm = self.qemu_vm_for_disks(id).await?;
         let real = self.check_disk_source(backing)?;
-        let info = fluxvm_qemu::disks::attach_overlay(&self.cfg, &vm, name, &real).await?;
+        let info = fluxvm_qemu::disks::attach_overlay(&self.cfg, &vm, name, &real, io).await?;
+        self.record_vhost_user_pid(id, name).await?;
         audit_event(
             "vm.disk.attach",
             &[
@@ -4628,6 +4704,23 @@ impl VmManager {
             ],
         );
         Ok(info)
+    }
+
+    /// A live-attached vhost-user-blk disk's `qemu-storage-daemon` joins the
+    /// VM's sidecar pids, so stop and delete terminate it.
+    async fn record_vhost_user_pid(&self, id: Uuid, name: &str) -> Result<()> {
+        let mut vm = self.get(id).await?;
+        if !fluxvm_qemu::disks::is_live_vm(&vm) {
+            return Ok(());
+        }
+        if let Some(pid) = fluxvm_qemu::disks::vhost_user_pid(&vm.workspace, name)
+            && fluxvm_qemu::disks::is_vhost_user(&vm.workspace, name)
+            && !vm.virtiofsd_pids.contains(&pid)
+        {
+            vm.virtiofsd_pids.push(pid);
+            self.store.update(vm).await?;
+        }
+        Ok(())
     }
 
     /// Canonical path of a disk source: a block device under `/dev`, or a
@@ -4684,7 +4777,15 @@ impl VmManager {
             return self.detach_vz_disk(id, name).await;
         }
         let vm = self.qemu_vm_for_disks(id).await?;
+        let vub_pid = fluxvm_qemu::disks::vhost_user_pid(&vm.workspace, name)
+            .filter(|_| fluxvm_qemu::disks::is_vhost_user(&vm.workspace, name));
         fluxvm_qemu::disks::detach(&vm, name).await?;
+        self.allow_vm_disk_devices(&vm, None)?;
+        if let Some(pid) = vub_pid {
+            let mut vm = self.get(id).await?;
+            vm.virtiofsd_pids.retain(|p| *p != pid);
+            self.store.update(vm).await?;
+        }
         audit_event(
             "vm.disk.detach",
             &[("vm_id", &id.to_string()), ("disk", name)],
@@ -5350,6 +5451,7 @@ impl VmManager {
                         String::from_utf8_lossy(&out.stderr).trim()
                     );
                 }
+                fluxvm_qemu::disks::copy_disk_io(&src.workspace, &created.workspace, &disk)?;
             }
         }
         let vm = if src.labels.is_empty() {
@@ -6054,6 +6156,8 @@ mod tests {
             ttl_seconds: None,
             extra_args: vec![],
             shared_memory: false,
+            root_disk_io: None,
+            disk_hotplug_ports: None,
             agent: None,
             qga: None,
             hyperv: false,
@@ -7419,4 +7523,19 @@ mod scheduled_snapshot_tests {
         let (due, _) = snapshot_schedule_plan(&snaps, 60, 2, now);
         assert!(due);
     }
+}
+
+/// A QEMU VM's root disk and data disk paths (data disks attached from a
+/// block device are symlinks to it).
+fn qemu_disk_paths(vm: &VmRecord) -> Vec<std::path::PathBuf> {
+    if vm.backend != BackendKind::Qemu {
+        return vec![];
+    }
+    std::iter::once(vm.disk.clone())
+        .chain(
+            fluxvm_qemu::disks::data_disks(&vm.workspace)
+                .into_iter()
+                .map(|(_, p)| p),
+        )
+        .collect()
 }
