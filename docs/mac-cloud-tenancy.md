@@ -41,6 +41,10 @@ With a **tenant token** you get:
 - **Networks**: create one across your Macs, see each Mac's address range, add or remove Macs, rotate the key.
 - **Screen**: a VM's details show its display, refreshed every 2 seconds while open, so you can watch macOS boot,
   finish setup or see why a job hangs, without VNC. It comes through central from the node's screenshot API.
+- **Power and control**: Start, Stop, Restart, Pause and Resume in a VM's details. **Control** opens the screen in a
+  large view where your clicks, scrolling and typing go to the guest (macOS VMs), with a box for pasting text and
+  buttons for Return, Esc, Tab and ⌘ Space, enough to get through Setup Assistant or a stuck dialog. The console log is
+  one click away.
 - **Activity**: every change made with your token (launches, deletes, leases, networks, commands) and whether it worked.
 - **Images** (the catalog) and **Usage** (7, 30 or 90 days, with a CSV download).
 
@@ -90,6 +94,10 @@ Next: fluxctl fleet run macos-27-xcode-1 -- sw_vers
 | `fleet screen VM [-f out.png]` | Save a picture of a VM's display |
 | `fleet events [--limit N]` | The activity log (with the API key used) |
 | `fleet keys [create\|revoke]` | A tenant's named API keys |
+| `fleet prices [--set FILE]`, `fleet bill`, `fleet budget [AMOUNT]` | Prices, monthly statements, budgets |
+| `fleet notifications`, `fleet webhooks [add\|rm\|test]` | Notifications and webhooks |
+| `fleet start\|stop\|restart\|pause\|resume VM` | Power a VM (stop and restart ask first on a terminal) |
+| `fleet logs VM [--lines N]` | The end of a VM's console log |
 | `fleet rm VM` | Delete a VM by name (asks on a terminal; `-y` to skip) |
 | `fleet vms`, `fleet nodes`, `fleet node M` | VMs and Macs, with macOS slots (`●○`) and when each lease can be released |
 | `fleet lease create\|list\|get\|release` | Leases (`create --hours 72 --min-vcpus 16 --nested`) |
@@ -100,6 +108,77 @@ Next: fluxctl fleet run macos-27-xcode-1 -- sw_vers
 
 A refused call shows central's own message plus a hint: a 401 says which flag carries the token, a 429 points at the
 quota, a standby names the leader, and an unreachable central says how to point `--central` at it.
+
+## Prices and billing
+
+The operator sets a price list; central turns metered use into a statement per tenant per month.
+
+```bash
+fluxctl fleet prices --set prices.json      # operator
+fluxctl fleet bill                          # this month; --month 2026-09, --csv for invoicing
+fluxctl fleet budget 500                    # a tenant's own monthly budget
+```
+
+```json
+{"currency": "USD",
+ "mac_classes": [{"name": "Mac mini", "min_vcpus": 8, "min_memory_gib": 16, "per_hour": 0.85},
+                 {"name": "Mac Studio", "min_vcpus": 20, "min_memory_gib": 64, "per_hour": 1.95}],
+ "mac_per_hour": 0.60,
+ "vm_per_hour": 0.01, "vcpu_per_hour": 0.02, "memory_gib_per_hour": 0.004, "macos_vm_per_hour": 0.10,
+ "charge_vms_on_leased_macs": false}
+```
+
+- **Leases** are priced by the Mac's class: the largest class (by minimum vCPUs and memory) the Mac meets, else
+  `mac_per_hour`. The price is fixed when the lease starts and stored on it, so a price change never re-prices a
+  running lease. A lease is billed for at least 24 hours, as before.
+- **VMs** are charged only on shared hosts (`vm_per_hour` + `vcpu_per_hour` × vCPUs + `memory_gib_per_hour` × GiB, plus
+  `macos_vm_per_hour` for a macOS guest), because a lease already covers everything on the Mac: only the hours a VM
+  runs inside the tenant's lease of its Mac are free, any time before or after the lease is charged. Set
+  `charge_vms_on_leased_macs` to charge them there too.
+- **Statements** (`GET /fleet/billing?month=YYYY-MM[&tenant=T][&format=csv]`) have a line per lease and per kind of VM
+  time, a total, and for the current month a forecast at the same rate. Amounts are computed in millionths of the
+  currency and rounded to cents only for display, so lines add up exactly. An active lease is billed up to its
+  `ends_at` at most. In the CSV, a field that starts with `=`, `+`, `-` or `@` gets a leading `'` so a spreadsheet
+  never runs it as a formula.
+- **Budgets** are the tenant's own (`PUT /fleet/tenants/me/budget {"monthly": 500}`): the console warns at 80% and when
+  over, and `fleet bill` says so. Nothing is stopped.
+- The console shows month-to-date spend on a tenant's Overview, a cost estimate when leasing a Mac or launching a VM,
+  a Billing page with statements and the budget, and (for the operator) the price list and every tenant's statement.
+
+## Notifications and webhooks
+
+Central turns what happens into notifications, shown under the console's bell and on its Notifications page, and
+sends them to webhooks.
+
+| Event | Who | When |
+|---|---|---|
+| `vm.created`, `vm.deleted` | tenant | a VM is launched or deleted through central |
+| `lease.created`, `lease.released` | tenant | a Mac is leased or released |
+| `lease.ending` | tenant | a lease with an end time has 24 hours left, then 1 hour |
+| `lease.ended` | tenant | the reconciler ended a lease at its end time |
+| `budget.near`, `budget.over` | tenant | the month's spend reaches 80%, then 100% of the budget |
+| `node.down`, `node.scrub`, `drain.done` | operator | a Mac stops reporting, needs a scrub, finishes draining |
+
+Time-based events are found by the reconciler (every `--reconcile-secs`, 60 by default) and sent once. The record of
+what was sent lives in memory, so after a restart an event that is still true may be sent once more.
+
+```bash
+fluxctl fleet webhooks add https://hooks.example.com/fluxvm --event lease.ending --event budget.over
+fluxctl fleet webhooks test whk_51a0c2e9b3f1
+fluxctl fleet notifications
+```
+
+A webhook receives a `POST` with the notification as JSON (`id`, `type`, `time`, `tenant`, `title`, `detail`, `link`)
+and the headers `X-FluxVM-Event`, `X-FluxVM-Delivery` and `X-FluxVM-Signature: sha256=<hex>` (HMAC-SHA256 of the body
+with the webhook's secret, the same scheme as GitHub's). A delivery is tried up to three times (at once, after 2 s,
+after 10 s more); a 2xx answer is success. The last 20 deliveries per webhook are shown in the console.
+
+- A tenant's webhooks get only that tenant's events; the operator's get everything. Each owner has at most 10.
+- A tenant's webhook must use `https` and reach a public address. The host is resolved at every delivery: if any of
+  its addresses is loopback, private, link-local or otherwise non-public the delivery is refused, and the connection
+  is pinned to the address that was checked, so the webhook cannot be turned against the network central runs in.
+  Redirects are not followed. The operator's webhooks may point anywhere.
+- Secrets are stored in the tenancy state (mode 0600, mirrored with HA) and shown once, at creation.
 
 ## API keys
 
@@ -278,9 +357,17 @@ capabilities, but not its address, labels or security report.
 | `GET /fleet/usage?from=&to=&tenant=&format=json\|csv` | tenant (own), operator |
 | `POST /fleet/reconcile`, `GET/PUT /fleet/policy` | operator |
 | `GET /fleet/images` | tenant, operator |
+| `POST /fleet/vms/{node}/{id}/{start,stop,restart,pause,resume}` | tenant (own VMs), operator |
+| `POST /fleet/vms/{node}/{id}/input` (`{"actions": [...]}`, as the node's `/v1/vms/{id}/input`) | tenant (own VMs; not with a read-only key), operator; not written to the activity log per event |
+| `GET /fleet/vms/{node}/{id}/logs[?lines=N]` | tenant (own VMs), operator |
 | `GET /fleet/vms/{node}/{id}/screen[?max_width=N]` | tenant (own VMs), operator: the display as PNG; `409` when the VM has none |
 | `GET/POST /fleet/tenants/me/keys`, `DELETE /fleet/tenants/me/keys/{id or name}` | tenant (primary token for changes) |
 | `GET/POST /fleet/tenants/{id}/keys`, `DELETE …/keys/{key}` | operator |
+| `GET /fleet/prices` | tenant, operator; `PUT` operator |
+| `GET /fleet/billing[?month=YYYY-MM&tenant=T&format=csv]` | tenant (own), operator |
+| `PUT /fleet/tenants/me/budget`, `PUT /fleet/tenants/{id}/budget` | tenant (primary token or a full key), operator |
+| `GET /fleet/notifications[?limit=N]` | tenant (own), operator |
+| `GET/POST /fleet/webhooks`, `DELETE /fleet/webhooks/{id}`, `POST /fleet/webhooks/{id}/test` | tenant (own), operator |
 | `GET /fleet/events[?limit=N&tenant=T]` | tenant (own actions), operator (all, or one tenant's) |
 | `PUT/DELETE /fleet/images/{name}` | operator |
 | `GET /fleet/nodes/{name}` | operator; tenant for a Mac it leases (size, capacity, Apple capabilities only) |

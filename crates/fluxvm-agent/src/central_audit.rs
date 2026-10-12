@@ -155,7 +155,7 @@ pub(super) fn event(
 /// Reads a JSON body to find its `name`, `id` or `node`, and returns the request rebuilt with the same body. A command
 /// (`.../exec`) body is the guest's input, so it is neither read nor searched.
 pub(super) async fn target_of(req: Request) -> Result<(Request, Option<String>), Response> {
-    if req.uri().path().ends_with("/exec") {
+    if req.uri().path().ends_with("/exec") || req.uri().path().ends_with("/input") {
         return Ok((req, None));
     }
     let (parts, body) = req.into_parts();

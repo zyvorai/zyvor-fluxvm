@@ -19,6 +19,30 @@
   in place, hot-added a virtio-blk disk (io_uring, cache none, iothread, 2 queues) and a vhost-user-blk disk (2
   queues), and kept it running through a path loss.
 
+### Added: control VMs from the fleet console and `fluxctl fleet`
+- Power: Start, Stop, Restart, Pause and Resume on a VM through central (`POST /fleet/vms/{node}/{id}/{start|stop|
+  restart|pause|resume}`), in the VM details and as `fluxctl fleet start|stop|restart|pause|resume <vm>`. Stop and
+  Restart ask for confirmation in the console.
+- Interactive screen: "Control" in the Screen panel sends clicks, scrolling and typing to the guest
+  (`POST /fleet/vms/{node}/{id}/input`, 1-200 actions per call). Keystrokes are not written to the activity log.
+- Console log: `GET /fleet/vms/{node}/{id}/logs` (capped at 4 MiB), in the VM details and `fluxctl fleet logs <vm>`.
+- Same rules as the rest of `/fleet`: a tenant reaches only its own VMs (404 otherwise) and read-only API keys can read
+  logs but not control anything. The simulated Mac (`sim-node`) powers VMs, draws typed text and has a log.
+
+### Added: prices, statements, budgets, notifications and signed webhooks (fleet)
+- The operator sets a price list (Mac classes, VM time on shared hosts); central turns metered use into monthly
+  statements per tenant (`GET /fleet/billing`, CSV with spreadsheet-formula guard, forecast for the current month) and
+  tenants set a monthly budget that warns at 80% and when over. A lease keeps the price it started with.
+- Central records notifications (`vm.*`, `lease.*`, `budget.*`, operator-only `node.*`/`drain.done`) and sends them to
+  webhooks signed with HMAC-SHA256 (`X-FluxVM-Signature`), retried three times. Tenant webhooks must be `https` and
+  reach a public address, pinned at connect time; operator webhooks may go anywhere.
+- `fluxctl fleet prices|bill|budget|notifications|webhooks`, and console pages for each. See `docs/mac-cloud-tenancy.md`.
+
+### Fixed: an operator's forced lease release did not notify the tenant
+- `lease.released` took its tenant from the caller, so a release by the operator had none and reached neither the
+  tenant's bell nor its webhooks. It now takes the lease's tenant.
+
+
 ### Fixed: incident bundle directories were world-readable
 - `diagnostics_dir` and its per-VM and per-bundle directories are now created, and tightened if they exist, with mode
   0700. They inherited the umask (0755), so on a multi-user host other local users could read bundles and guest memory

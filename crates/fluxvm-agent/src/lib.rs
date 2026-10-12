@@ -10,6 +10,7 @@
 //! fluxvm) — this is the non-Kubernetes multi-host story: a caller
 //! talks to one central endpoint instead of knowing which host a VM is on.
 
+pub mod billing;
 pub mod central;
 pub mod gha;
 pub mod ha;

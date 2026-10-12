@@ -40,6 +40,34 @@ const enc = encodeURIComponent;
 
 const gib = (mib) => (mib === undefined || mib === null ? '–'
   : (mib / 1024).toFixed(mib % 1024 ? 1 : 0).replace(/\.0$/, '') + ' GiB');
+/** An amount in the price list's currency. */
+function money(n, cur, price) {
+  const c = cur || (S.data && S.data.prices && S.data.prices.currency) || 'USD';
+  // Unit prices keep their small fractions ($0.004 per GiB-hour); amounts round to cents.
+  const opts = price ? { style: 'currency', currency: c, maximumFractionDigits: 4 } : { style: 'currency', currency: c };
+  try { return new Intl.NumberFormat(undefined, opts).format(n || 0); } catch (_) { return (n || 0).toFixed(price ? 4 : 2) + ' ' + c; }
+}
+const pricesSet = () => !!(S.data && S.data.bill && S.data.bill.prices_set);
+/** Hourly price of a Mac of this size, from the price list (the largest class it meets). */
+function macRate(vcpus, memMib) {
+  const p = S.data.prices || {};
+  const fits = (p.mac_classes || []).filter((c) => vcpus >= (c.min_vcpus || 0) && memMib >= (c.min_memory_gib || 0) * 1024);
+  fits.sort((a, b) => (b.min_vcpus - a.min_vcpus) || (b.min_memory_gib - a.min_memory_gib));
+  return fits.length ? { rate: fits[0].per_hour, cls: fits[0].name } : { rate: p.mac_per_hour || 0, cls: null };
+}
+/** The lowest hourly price of a Mac with at least this size. */
+function macRateFrom(minVcpus, minMemMib) {
+  const p = S.data.prices || {};
+  const rates = (p.mac_classes || []).filter((c) => (c.min_vcpus || 0) >= minVcpus || (c.min_memory_gib || 0) * 1024 >= minMemMib).map((c) => c.per_hour);
+  if (!rates.length) rates.push(...(p.mac_classes || []).map((c) => c.per_hour), p.mac_per_hour || 0);
+  return Math.min(...rates.filter((r) => r > 0), Infinity);
+}
+function vmRate(vcpus, memMib, macos) {
+  const p = S.data.prices || {};
+  return (p.vm_per_hour || 0) + (p.vcpu_per_hour || 0) * vcpus + (p.memory_gib_per_hour || 0) * memMib / 1024 + (macos ? p.macos_vm_per_hour || 0 : 0);
+}
+const myStatement = () => (S.data.bill && (S.data.bill.statements || [])[0]) || null;
+
 const plural = (n, one, many) => n + ' ' + (n === 1 ? one : (many || one + 's'));
 const rtf = new Intl.RelativeTimeFormat(undefined, { numeric: 'auto' });
 function rel(t) {
@@ -97,6 +125,11 @@ const S = {
   query: '',
   exec: {}, // vm key -> { draft, log: [] }
   tenantKeys: {}, // operator: tenant id -> its API keys, loaded when its details open
+  logs: {}, // vm key -> the last console log text shown
+  billMonth: null,
+  billView: null,
+  hooks: null, // webhooks, loaded on the Notifications page
+  billLoading: null,
   lastViewKey: '',
   lastInspKey: '',
 };
@@ -179,7 +212,12 @@ async function load() {
     soft(api('GET', '/fleet/overlays'), { items: [] }),
     soft(api('GET', '/fleet/images'), { items: [] }),
   ]);
-  const events = await soft(api('GET', '/fleet/events?limit=300'), { items: [] });
+  const [events, prices, bill, ntfs] = await Promise.all([
+    soft(api('GET', '/fleet/events?limit=300'), { items: [] }),
+    soft(api('GET', '/fleet/prices'), null),
+    soft(api('GET', '/fleet/billing'), null),
+    soft(api('GET', '/fleet/notifications?limit=50'), { items: [] }),
+  ]);
   const d = {
     leases: (leases.items || []).sort((a, b) => (a.state === b.state ? b.started_at.localeCompare(a.started_at)
       : a.state === 'active' ? -1 : 1)),
@@ -187,6 +225,9 @@ async function load() {
     unreachable: vms.unreachable_nodes || [],
     overlays: overlays.items || [],
     events: events.items || [],
+    notifications: ntfs.items || [],
+    prices,
+    bill,
     images: (images.items || []).sort((a, b) => (a.guest_os === b.guest_os ? a.name.localeCompare(b.name) : a.guest_os === 'macos' ? -1 : 1)),
     leasedNodes: {},
     drains: {},
@@ -286,8 +327,10 @@ const PAGES = () => [
   { id: 'images', label: 'Images', count: () => S.data.images.length },
   { sep: true },
   ...(isOp() ? [{ id: 'tenants', label: 'Tenants', count: () => (S.data.tenants || []).length }] : []),
+  { id: 'billing', label: 'Billing' },
   { id: 'usage', label: 'Usage' },
   { id: 'activity', label: 'Activity' },
+  { id: 'notifications', label: 'Notifications' },
   ...(isOp() ? [] : [{ id: 'keys', label: 'API keys', count: () => (S.data.keys || []).length }]),
   ...(isOp() ? [{ id: 'policy', label: 'Policy' }] : []),
 ];
@@ -309,9 +352,10 @@ function render(force) {
   document.title = page.label + ' · FluxVM Cloud';
   $('signout').hidden = !token();
   renderBanners();
+  renderBell();
   tick();
 
-  const viewKey = JSON.stringify([page.id, r.id, S.data, S.me, S.usage, S.usageDays, S.policy, S.vmFilter, S.query]);
+  const viewKey = JSON.stringify([page.id, r.id, S.data, S.me, S.usage, S.usageDays, S.policy, S.vmFilter, S.query, S.billMonth, S.billView, S.hooks]);
   if (force || viewKey !== S.lastViewKey) {
     S.lastViewKey = viewKey;
     const view = $('view');
@@ -601,6 +645,65 @@ const VIEWS = {
     return out;
   },
 
+  billing() {
+    const cur = new Date().toISOString().slice(0, 7);
+    const month = S.billMonth || cur;
+    const view = S.billView && S.billView.month === month ? S.billView : null;
+    // This month comes with every refresh; another month (or this one, when that failed) is fetched once.
+    const data = (month === cur && S.data.bill) || (view && view.data);
+    if (!data) {
+      if (view && view.error) {
+        return [pageHead('Billing'), h('p', { class: 'note warn' }, 'Could not load billing: ' + view.error + ' ',
+          h('button', { onclick: () => { S.billView = null; render(); } }, 'Try again'))];
+      }
+      if (S.billLoading !== month) loadBill(month);
+      return [pageHead('Billing'), h('p', { class: 'muted' }, 'Loading…')];
+    }
+    const b = { month, data };
+    const months = [];
+    const d = new Date();
+    for (let i = 0; i < 4; i++) {
+      const m = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() - i, 1));
+      months.push(m.toISOString().slice(0, 7));
+    }
+    const label = (m) => new Date(m + '-01T00:00:00Z').toLocaleDateString(undefined, { month: 'long', year: 'numeric', timeZone: 'UTC' });
+    const pick = h('select', { 'aria-label': 'Month', style: { width: 'auto' }, onchange: (e) => { S.billMonth = e.target.value; render(); } },
+      months.map((m) => h('option', { value: m, selected: m === month }, label(m))));
+    const out = [pageHead('Billing', isOp() ? 'What each tenant owes for the month, from the price list. A lease keeps the price it started with.'
+      : 'What your Macs and VMs cost this month. A lease is billed for at least 24 hours.', pick,
+    h('button', { onclick: downloadBill }, 'Download CSV'))];
+    if (isOp()) out.push(priceListPanel());
+    if (!b.data.prices_set) {
+      out.push(empty('No prices yet', isOp() ? 'Set a price list to turn usage into statements.' : 'Your operator has not set prices, so nothing is charged.',
+        isOp() ? h('button', { class: 'primary', onclick: priceSheet }, 'Set prices') : null));
+      return out;
+    }
+    const stmts = b.data.statements || [];
+    if (isOp()) {
+      const total = stmts.reduce((a, x) => a + x.total, 0);
+      out.push(h('div', { class: 'meters section' },
+        h('div', { class: 'panel meter' }, h('div', { class: 'muted small' }, 'Billed in ' + label(b.month)), h('div', { class: 'value' }, money(total, b.data.currency))),
+        h('div', { class: 'panel meter' }, h('div', { class: 'muted small' }, 'Tenants with charges'), h('div', { class: 'value' }, stmts.filter((x) => x.total > 0).length))));
+    }
+    for (const st of stmts) {
+      if (isOp() && !st.lines.length) continue;
+      out.push(statementPanel(st));
+    }
+    if (!isOp()) out.push(budgetPanel(stmts[0]));
+    return out;
+  },
+
+  notifications() {
+    const list = S.data.notifications || [];
+    const out = [pageHead('Notifications', 'Events worth knowing about, newest first. Send them to Slack, PagerDuty or your own '
+      + 'service with a webhook.', h('button', { class: 'primary', onclick: webhookSheet }, 'Add webhook'))];
+    out.push(h('div', { class: 'panel' }, list.length ? h('div', { class: 'list' }, list.map(ntfRow))
+      : h('div', { class: 'empty' }, h('h3', {}, 'Nothing yet'), h('p', {}, isOp() ? 'Macs that stop reporting, finished drains, leases and budgets show up here.'
+        : 'Leases ending soon, budget warnings and VM changes show up here.'))));
+    out.push(h('div', { class: 'section' }, h('div', { class: 'section-head' }, h('h2', { class: 'grow' }, 'Webhooks')), webhookList()));
+    return out;
+  },
+
   keys() {
     const list = S.data.keys || [];
     const out = [pageHead('API keys', 'Give each person, CI system or tool its own key, so you can see who did what and revoke '
@@ -691,7 +794,21 @@ function tenantOverview() {
         step(hasNet, 3, 'Connect your VMs', 'Optional: a private network across your Macs.',
           h('button', { onclick: networkSheet }, 'Create network')))));
   }
+  const st = myStatement();
+  if (st && st.budget && st.budget.state !== 'ok') {
+    out.push(h('div', { class: 'note ' + (st.budget.state === 'over' ? 'warn' : ''), style: { marginBottom: '16px' } },
+      st.budget.state === 'over' ? 'You are over this month\'s budget of ' + money(st.budget.monthly, st.currency) + '. '
+        : 'You have used ' + Math.round(st.budget.used * 100) + '% of this month\'s budget of ' + money(st.budget.monthly, st.currency) + '. ',
+      h('a', { href: '#/billing' }, 'See billing')));
+  }
   out.push(h('div', { class: 'section meters' },
+    pricesSet() && st ? h('a', { class: 'panel meter', href: '#/billing', style: { color: 'inherit', textDecoration: 'none' } },
+      h('div', { class: 'muted small' }, 'Spent this month'),
+      h('div', { class: 'value' }, money(st.total, st.currency)),
+      st.budget ? h('div', { class: 'track' + (st.budget.used >= 1 ? ' bad' : st.budget.used >= 0.8 ? ' warn' : '') },
+        h('i', { style: { width: Math.min(100, st.budget.used * 100).toFixed(1) + '%' } })) : null,
+      h('div', { class: 'small muted', style: { marginTop: '6px' } }, st.budget ? 'of ' + money(st.budget.monthly, st.currency) + ' budget'
+        : st.forecast !== undefined && st.forecast !== null ? 'About ' + money(st.forecast, st.currency) + ' by month end' : '')) : null,
     meter('Macs leased', u.leased_hosts || 0, q.max_leased_hosts),
     meter('VMs', u.vms || 0, q.max_vms),
     meter('vCPUs', u.vcpus || 0, q.max_vcpus),
@@ -955,7 +1072,8 @@ function vmInspector(v) {
   const ex = S.exec[k] = S.exec[k] || { draft: '', log: [] };
   const nets = ((req.apple || {}).networks || []).map((n) => n.name);
   const running = vmStatus(v).text === 'Running';
-  const out = [h('div', { class: 'head' }, h('div', { class: 'grow' }, h('h2', {}, v.name), status(vmStatus(v))), closeBtn('vms'))];
+  const out = [h('div', { class: 'head' }, h('div', { class: 'grow' }, h('h2', {}, v.name), status(vmStatus(v))), closeBtn('vms')),
+    powerRow(v)];
   out.push(h('section', {}, facts([
     ['Mac', h('a', { href: '#/macs/' + enc(v.node) }, v.node)],
     ['Guest', guestName(guestOf(req))],
@@ -985,10 +1103,261 @@ function vmInspector(v) {
       h('div', { class: 'grow' }, input), h('button', { type: 'submit', disabled: !running }, 'Run')),
     running ? null : h('p', { class: 'hint' }, 'The VM has to be running.'),
     out2));
+  out.push(logsPanel(v));
   out.push(h('section', {}, h('h3', {}, 'Delete'),
     h('p', { class: 'small muted', style: { marginBottom: '10px' } }, 'Stops the VM and deletes its disk. This cannot be undone.'),
     h('button', { class: 'danger', onclick: () => deleteVm(v) }, 'Delete VM…')));
   return out;
+}
+
+// ---- billing --------------------------------------------------------------------------------------------------------
+
+async function loadBill(month) {
+  S.billLoading = month;
+  try {
+    const data = await api('GET', '/fleet/billing?month=' + enc(month));
+    S.billView = { month, data };
+  } catch (e) {
+    // Kept, so the page shows the failure instead of asking again on every render.
+    S.billView = { month, error: e.message };
+  }
+  S.billLoading = null;
+  render();
+}
+
+async function downloadBill() {
+  try {
+    const month = S.billMonth || new Date().toISOString().slice(0, 7);
+    const csv = await api('GET', '/fleet/billing?format=csv&month=' + enc(month), { text: true });
+    const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv' }));
+    const a = h('a', { href: url, download: 'fluxvm-billing-' + month + '.csv' });
+    document.body.append(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 60000);
+    toast('Downloaded the statement for ' + month);
+  } catch (e) { toast(e.message, true); }
+}
+
+function statementPanel(st) {
+  const t = (S.data.tenants || []).find((x) => x.id === st.tenant);
+  return h('div', { class: 'panel section' },
+    h('div', { class: 'row', style: { padding: '16px 18px 4px' } },
+      h('h2', { class: 'grow' }, isOp() ? (t && t.display_name) || st.tenant : 'Statement'),
+      h('span', { class: 'muted small' }, st.forecast !== undefined && st.forecast !== null ? 'About ' + money(st.forecast, st.currency) + ' by month end' : '')),
+    h('div', { class: 'table-wrap' }, h('table', {},
+      h('thead', {}, h('tr', {}, h('th', {}, 'Item'), h('th', { class: 'r' }, 'Quantity'), h('th', { class: 'r hide-sm' }, 'Price'), h('th', { class: 'r' }, 'Amount'))),
+      h('tbody', {}, st.lines.length ? st.lines.map((l) => h('tr', {},
+        h('td', {}, l.description),
+        h('td', { class: 'r num' }, l.quantity.toLocaleString() + ' ' + l.unit),
+        h('td', { class: 'r num hide-sm muted' }, money(l.unit_price, st.currency, true) + ' / ' + l.unit.replace(/s$/, '').replace('hour', 'h')),
+        h('td', { class: 'r num' }, money(l.amount, st.currency))))
+        : h('tr', {}, h('td', { colspan: '4', class: 'muted' }, 'Nothing charged in this month.')),
+      h('tr', {}, h('td', { colspan: '3' }, h('b', {}, 'Total')), h('td', { class: 'r num' }, h('b', {}, money(st.total, st.currency))))))));
+}
+
+function budgetPanel(st) {
+  const b = st && st.budget;
+  return h('form', { class: 'panel pad section stack', onsubmit: async (e) => {
+    e.preventDefault();
+    const v = Number(new FormData(e.target).get('monthly') || 0);
+    try {
+      await api('PUT', '/fleet/tenants/me/budget', { body: { monthly: v > 0 ? v : null } });
+      toast(v > 0 ? 'Budget set to ' + money(v, st && st.currency) + ' a month' : 'Budget removed');
+      refresh({ force: true });
+    } catch (err) { toast(err.message, true); }
+  } },
+  h('h2', {}, 'Monthly budget'),
+  h('p', { class: 'muted small' }, 'You get a warning on the Overview at 80% and when you go over. Nothing is stopped.'),
+  b ? h('div', {}, h('div', { class: 'small' }, Math.round(b.used * 100) + '% used'),
+    h('div', { class: 'track' + (b.used >= 1 ? ' bad' : b.used >= 0.8 ? ' warn' : '') }, h('i', { style: { width: Math.min(100, b.used * 100).toFixed(1) + '%' } }))) : null,
+  h('div', { class: 'row' }, h('label', { class: 'field grow', style: { maxWidth: '260px' } }, h('span', {}, 'Budget per month (' + ((st && st.currency) || 'USD') + ')'),
+    h('input', { name: 'monthly', type: 'number', min: '0', step: '1', value: b ? String(b.monthly) : '', placeholder: 'No budget' })),
+  h('button', { type: 'submit', style: { alignSelf: 'flex-end' } }, 'Save budget')));
+}
+
+function priceListPanel() {
+  const p = S.data.prices || {};
+  const cur = p.currency || 'USD';
+  const rows = [
+    ...(p.mac_classes || []).map((c) => ['Leased Mac, ' + c.name + ' (' + (c.min_vcpus || 0) + '+ vCPUs, ' + (c.min_memory_gib || 0) + '+ GiB)', c.per_hour]),
+    ['Leased Mac, any other', p.mac_per_hour],
+    ['VM on a shared host', p.vm_per_hour], ['vCPU on a shared host', p.vcpu_per_hour],
+    ['GiB of memory on a shared host', p.memory_gib_per_hour], ['macOS guest on a shared host (extra)', p.macos_vm_per_hour],
+  ].filter(([, v]) => v);
+  return h('div', { class: 'panel pad' },
+    h('div', { class: 'row' }, h('h2', { class: 'grow' }, 'Price list'), h('button', { onclick: priceSheet }, 'Edit prices')),
+    rows.length ? h('dl', { class: 'facts', style: { marginTop: '12px' } }, rows.map(([k, v]) => [h('dt', {}, k), h('dd', { class: 'num' }, money(v, cur, true) + ' an hour')]))
+      : h('p', { class: 'muted small', style: { marginTop: '8px' } }, 'Everything is free until you set prices.'),
+    p.charge_vms_on_leased_macs ? h('p', { class: 'hint' }, 'VMs on leased Macs are charged too.') : null);
+}
+
+function priceSheet() {
+  const p = JSON.parse(JSON.stringify(S.data.prices || {}));
+  const classes = p.mac_classes && p.mac_classes.length ? p.mac_classes : [{ name: 'Mac mini', min_vcpus: 8, min_memory_gib: 16, per_hour: 0 }, { name: 'Mac Studio', min_vcpus: 20, min_memory_gib: 64, per_hour: 0 }];
+  const list = h('div', { class: 'stack' });
+  const classRow = (c) => {
+    const row = h('div', { class: 'row', 'data-class': '1' },
+      h('input', { name: 'c_name', value: c.name || '', placeholder: 'Class name', 'aria-label': 'Class name', style: { flex: '2 1 120px' } }),
+      h('input', { name: 'c_vcpus', type: 'number', min: '0', value: String(c.min_vcpus || 0), 'aria-label': 'Minimum vCPUs', title: 'Minimum vCPUs', style: { flex: '1 1 60px' } }),
+      h('input', { name: 'c_mem', type: 'number', min: '0', value: String(c.min_memory_gib || 0), 'aria-label': 'Minimum memory GiB', title: 'Minimum memory (GiB)', style: { flex: '1 1 60px' } }),
+      h('input', { name: 'c_price', type: 'number', min: '0', step: '0.01', value: String(c.per_hour || 0), 'aria-label': 'Price per hour', title: 'Price per hour', style: { flex: '1 1 80px' } }),
+      h('button', { type: 'button', class: 'icon', 'aria-label': 'Remove class', onclick: () => row.remove() }, 'Remove'));
+    return row;
+  };
+  list.append(h('div', { class: 'row small muted', 'aria-hidden': 'true' },
+    h('span', { style: { flex: '2 1 120px' } }, 'Class'), h('span', { style: { flex: '1 1 60px' } }, 'Min vCPUs'),
+    h('span', { style: { flex: '1 1 60px' } }, 'Min GiB'), h('span', { style: { flex: '1 1 80px' } }, 'Per hour'),
+    h('span', { style: { width: '62px' } })));
+  classes.forEach((c) => list.append(classRow(c)));
+  const num = (name, label, value, hint) => h('label', { class: 'field' }, h('span', {}, label),
+    h('input', { name, type: 'number', min: '0', step: '0.001', value: String(value || 0) }), hint ? h('div', { class: 'hint' }, hint) : null);
+  openSheet({
+    title: 'Price list', intro: 'Prices per hour. New leases take the price of their Mac\'s class when they start; running leases keep theirs.',
+    wide: true,
+    body: [
+      h('label', { class: 'field', style: { maxWidth: '160px' } }, h('span', {}, 'Currency'), h('input', { name: 'currency', value: p.currency || 'USD', pattern: '[A-Z]{3}', maxlength: '3' })),
+      h('div', {}, h('span', { class: 'field-label' }, 'Leased Macs by class'),
+        h('p', { class: 'hint', style: { margin: '0 0 8px' } }, 'A Mac takes the largest class it meets.'),
+        list, h('button', { type: 'button', class: 'plain', onclick: () => list.append(classRow({})) }, 'Add class')),
+      num('mac_per_hour', 'A leased Mac in no class', p.mac_per_hour),
+      h('div', { class: 'grid2' }, num('vm_per_hour', 'Each VM on a shared host', p.vm_per_hour), num('vcpu_per_hour', 'Each vCPU', p.vcpu_per_hour),
+        num('memory_gib_per_hour', 'Each GiB of memory', p.memory_gib_per_hour), num('macos_vm_per_hour', 'Extra for a macOS guest', p.macos_vm_per_hour)),
+      check('charge_vms_on_leased_macs', !!p.charge_vms_on_leased_macs, 'Also charge VMs on leased Macs', 'Normally the lease covers everything that runs on the Mac.'),
+    ],
+    submit: 'Save prices',
+    onSubmit: async (f, form) => {
+      const body = {
+        currency: String(f.get('currency') || 'USD').toUpperCase(),
+        mac_classes: [...form.querySelectorAll('[data-class]')].map((r) => ({
+          name: r.querySelector('[name=c_name]').value.trim(),
+          min_vcpus: Number(r.querySelector('[name=c_vcpus]').value || 0),
+          min_memory_gib: Number(r.querySelector('[name=c_mem]').value || 0),
+          per_hour: Number(r.querySelector('[name=c_price]').value || 0),
+        })).filter((c) => c.name),
+        charge_vms_on_leased_macs: f.has('charge_vms_on_leased_macs'),
+      };
+      for (const k of ['mac_per_hour', 'vm_per_hour', 'vcpu_per_hour', 'memory_gib_per_hour', 'macos_vm_per_hour']) body[k] = Number(f.get(k) || 0);
+      await api('PUT', '/fleet/prices', { body });
+      toast('Prices saved');
+      S.billView = null;
+      await refresh({ force: true });
+    },
+  });
+}
+
+// ---- notifications --------------------------------------------------------------------------------------------------
+
+const SEEN_KEY = 'fluxvm.console.seen';
+const tone = (kind) => (/over|down|ended/.test(kind) ? 'bad' : /near|ending|scrub/.test(kind) ? 'warn' : '');
+const seenKey = () => SEEN_KEY + '.' + (isOp() ? 'op' : (S.me && S.me.id) || 'tenant');
+function seenAt() { return Number(storage.get('localStorage', seenKey()) || 0); }
+// The newest notification's own (server) time, not this browser's clock, so a skewed clock neither hides nor repeats any.
+function markSeen() {
+  const newest = Math.max(seenAt(), ...((S.data && S.data.notifications) || []).map((n) => new Date(n.time).getTime() || 0));
+  storage.set('localStorage', seenKey(), String(newest));
+  renderBell();
+}
+
+function ntfRow(n) {
+  const fresh = new Date(n.time).getTime() > seenAt();
+  return h(n.link ? 'a' : 'div', { href: n.link || null, style: { color: 'inherit', textDecoration: 'none' } },
+    h('span', { class: 'ntf-dot ' + (tone(n.type) || (fresh ? 'new' : '')), 'aria-hidden': 'true' }),
+    h('div', { class: 'grow' }, h('div', { style: { fontWeight: fresh ? 600 : 400 } }, n.title),
+      n.detail ? h('div', { class: 'small muted' }, n.detail) : null,
+      h('div', { class: 'small muted' }, rel(n.time) + (isOp() && n.tenant ? ', ' + n.tenant : ''))));
+}
+
+function renderBell() {
+  if (!S.data) return;
+  const list = S.data.notifications || [];
+  const seen = seenAt();
+  const unread = list.filter((n) => new Date(n.time).getTime() > seen).length;
+  $('bell-count').hidden = !unread;
+  $('bell-count').textContent = unread > 9 ? '9+' : String(unread);
+  $('bell').setAttribute('aria-label', unread ? unread + ' new notifications' : 'Notifications');
+  const panel = $('bell-panel');
+  if (panel.hidden) return;
+  panel.replaceChildren(
+    h('div', { class: 'row', style: { padding: '14px 16px 6px' } }, h('h3', { class: 'grow' }, 'Notifications'),
+      h('a', { href: '#/notifications', class: 'small', onclick: () => toggleBell(false) }, 'All and webhooks')),
+    list.length ? h('div', { class: 'list' }, list.slice(0, 8).map(ntfRow))
+      : h('p', { class: 'muted small', style: { padding: '8px 16px 16px' } }, 'Nothing yet.'));
+}
+
+function toggleBell(open) {
+  const panel = $('bell-panel');
+  const show = open === undefined ? panel.hidden : open;
+  panel.hidden = !show;
+  $('bell').setAttribute('aria-expanded', String(show));
+  clearTimeout(S.seenTimer);
+  if (show) { renderBell(); S.seenTimer = setTimeout(markSeen, 1500); }
+}
+
+function webhookList() {
+  if (!S.hooks) {
+    if (!S.hooksLoading) {
+      S.hooksLoading = api('GET', '/fleet/webhooks').then((r) => { S.hooks = r; })
+        .catch((e) => { S.hooks = { items: [], kinds: [] }; toast(e.message, true); })
+        .finally(() => { S.hooksLoading = null; S.lastViewKey = ''; render(); });
+    }
+    return h('p', { class: 'muted' }, 'Loading…');
+  }
+  const items = S.hooks.items || [];
+  if (!items.length) {
+    return h('div', { class: 'panel empty' }, h('h3', {}, 'No webhooks'), h('p', {}, 'A webhook receives each event as JSON, signed with your '
+      + 'secret, so a chat channel or pager hears about it right away.'), h('button', { class: 'primary', onclick: webhookSheet }, 'Add webhook'));
+  }
+  return h('div', { class: 'stack' }, items.map((w) => {
+    const last = (w.deliveries || [])[0];
+    return h('div', { class: 'panel pad' },
+      h('div', { class: 'row' }, h('div', { class: 'grow', style: { minWidth: 0 } }, h('code', { style: { overflowWrap: 'anywhere' } }, w.url),
+        h('div', { class: 'small muted' }, (w.events && w.events.length ? w.events.join(', ') : 'Every event') + (isOp() && w.owner ? ', tenant ' + w.owner : ''))),
+      last ? status(last.ok ? { text: 'Delivered ' + rel(last.time), cls: 'ok' } : { text: 'Failing', cls: 'bad' }) : h('span', { class: 'muted small' }, 'Nothing sent yet')),
+      (w.deliveries || []).length ? h('details', { class: 'adv', style: { marginTop: '10px' } }, h('summary', {}, 'Recent deliveries'),
+        h('div', { class: 'table-wrap' }, h('table', {}, h('tbody', {}, w.deliveries.map((d) => h('tr', {},
+          h('td', { class: 'muted small' }, rel(d.time)), h('td', { class: 'small' }, d.type),
+          h('td', {}, status(d.ok ? { text: String(d.status), cls: 'ok' } : { text: d.error || 'failed', cls: 'bad' })),
+          h('td', { class: 'small muted' }, 'attempt ' + d.attempt))))))) : null,
+      h('div', { class: 'row', style: { marginTop: '12px' } },
+        h('button', { onclick: async (e) => {
+          e.target.disabled = true;
+          try {
+            const r = await api('POST', '/fleet/webhooks/' + enc(w.id) + '/test');
+            toast(r.delivery.ok ? 'Test delivered (' + r.delivery.status + ')' : 'Test failed: ' + (r.delivery.error || r.delivery.status), !r.delivery.ok);
+          } catch (err) { toast(err.message, true); }
+          S.hooks = null; render();
+        } }, 'Send test'),
+        h('button', { class: 'plain danger', onclick: () => confirmAct({ title: 'Delete this webhook?', body: w.url + ' stops getting events.',
+          confirm: 'Delete webhook', danger: true }, 'DELETE', '/fleet/webhooks/' + enc(w.id), 'Webhook deleted', undefined, () => { S.hooks = null; }) }, 'Delete')));
+  }));
+}
+
+function webhookSheet() {
+  const kinds = (S.hooks && S.hooks.kinds && S.hooks.kinds.length) ? S.hooks.kinds
+    : ['vm.created', 'vm.deleted', 'lease.created', 'lease.released', 'lease.ending', 'lease.ended', 'budget.near', 'budget.over'];
+  const label = { 'vm.created': 'VM launched', 'vm.deleted': 'VM deleted', 'lease.created': 'Mac leased', 'lease.released': 'Lease released',
+    'lease.ending': 'Lease ending soon', 'lease.ended': 'Lease ended', 'budget.near': 'Budget at 80%', 'budget.over': 'Over budget',
+    'node.down': 'Mac stopped reporting', 'node.scrub': 'Mac needs a scrub', 'drain.done': 'Drain finished', test: 'Test' };
+  openSheet({
+    title: 'Add a webhook', intro: 'Each event is POSTed as JSON with an X-FluxVM-Signature header (HMAC-SHA256 of the body with your secret).',
+    body: [
+      h('label', { class: 'field' }, h('span', {}, 'URL'), h('input', { name: 'url', type: 'url', required: true, placeholder: 'https://hooks.example.com/fluxvm', class: 'mono' }),
+        h('div', { class: 'hint' }, isOp() ? 'Any URL, including internal ones.' : 'An https address on the public internet.')),
+      h('div', {}, h('span', { class: 'field-label' }, 'Events'), h('p', { class: 'hint', style: { margin: '0 0 6px' } }, 'Leave all unticked to get every event.'),
+        h('div', { class: 'grid2' }, kinds.filter((k) => k !== 'test').map((k) => h('label', { class: 'check' }, h('input', { type: 'checkbox', name: 'ev', value: k }),
+          h('span', {}, label[k] || k))))),
+    ],
+    submit: 'Add webhook',
+    onSubmit: async (f) => {
+      const r = await api('POST', '/fleet/webhooks', { body: { url: String(f.get('url')).trim(), events: f.getAll('ev') } });
+      S.hooks = null;
+      refresh({ force: true });
+      setTimeout(() => openSheet({ title: 'Webhook secret', intro: 'Verify each delivery with it. This is the only time it is shown.',
+        body: [h('div', { class: 'token-box' }, r.secret), h('button', { type: 'button', onclick: () => copy(r.secret, 'Secret') }, 'Copy secret')],
+        submit: 'Done', cancel: null, onSubmit: async () => {} }), 0);
+    },
+  });
 }
 
 // ---- API keys -------------------------------------------------------------------------------------------------------
@@ -1035,6 +1404,49 @@ function keySheet(owner) {
   });
 }
 
+// ---- VM power and logs ---------------------------------------------------------------------------------------------
+
+function powerRow(v) {
+  const st = vmStatus(v).text.toLowerCase();
+  const path = '/fleet/vms/' + enc(v.node) + '/' + enc(v.id) + '/';
+  const act = (action, label, done, confirmBody) => h('button', { onclick: async (e) => {
+    if (confirmBody && !await confirmDialog({ title: label + ' ' + v.name + '?', body: confirmBody, confirm: label })) return;
+    e.target.disabled = true;
+    await doAct('POST', path + action, v.name + ' ' + done);
+  } }, label);
+  const buttons = [];
+  if (st === 'stopped' || st === 'failed') buttons.push(act('start', 'Start', 'started'));
+  if (st === 'running') {
+    buttons.push(act('stop', 'Stop', 'stopped', 'The guest is shut down. Its disk is kept, and you can start it again.'));
+    buttons.push(act('restart', 'Restart', 'restarted', 'The guest restarts. Anything not saved inside it is lost.'));
+    buttons.push(act('pause', 'Pause', 'paused'));
+  }
+  if (st === 'paused') {
+    buttons.push(act('resume', 'Resume', 'resumed'));
+    buttons.push(act('stop', 'Stop', 'stopped', 'The guest is shut down. Its disk is kept.'));
+  }
+  return buttons.length ? h('div', { class: 'row', style: { marginBottom: '8px' } }, buttons) : null;
+}
+
+function logsPanel(v) {
+  const k = vmKey(v);
+  const pre = h('div', { class: 'term', hidden: !S.logs[k] }, S.logs[k] || '');
+  const btn = h('button', { class: 'plain' }, S.logs[k] ? 'Refresh' : 'Show log');
+  btn.addEventListener('click', async () => {
+    btn.disabled = true;
+    try {
+      const text = await api('GET', '/fleet/vms/' + enc(v.node) + '/' + enc(v.id) + '/logs?lines=300', { text: true });
+      S.logs[k] = typeof text === 'string' && text.trim() ? text : 'The log is empty.';
+    } catch (e) { S.logs[k] = 'The log could not be loaded: ' + e.message; }
+    btn.disabled = false;
+    btn.textContent = 'Refresh';
+    pre.textContent = S.logs[k];
+    pre.hidden = false;
+    pre.scrollTop = pre.scrollHeight;
+  });
+  return h('section', {}, h('div', { class: 'row' }, h('h3', { class: 'grow' }, 'Console log'), btn), pre);
+}
+
 // ---- the VM's screen -------------------------------------------------------------------------------------------------
 
 // One live screen at a time: the VM open in the inspector. Its elements survive re-renders, so the picture does not
@@ -1042,12 +1454,153 @@ function keySheet(owner) {
 const screen = { key: null, running: false, el: null, img: null, note: null, link: null, toggle: null, url: null,
   timer: null, paused: false, seq: 0 };
 
+function setControl(on) {
+  if (!screen.img) return;
+  screen.control = on;
+  screen.ctl.setAttribute('aria-pressed', String(on));
+  screen.ctl.textContent = on ? 'Stop control' : 'Control';
+  screen.bar.hidden = !on;
+  screen.img.classList.toggle('controlling', on);
+  screen.el.classList.toggle('screen-full', on);
+  // The full window lives at the top of the page (the inspector would trap it under its own stacking order); the
+  // inspector shows a stub meanwhile.
+  if (on && !screen.backdrop) {
+    screen.backdrop = h('div', { class: 'screen-backdrop', 'aria-hidden': 'true', onclick: () => setControl(false) });
+    screen.stub = h('section', {}, h('h3', {}, 'Screen'), h('p', { class: 'hint' }, 'You are controlling this VM in the large view.'));
+    if (screen.el.isConnected) screen.el.replaceWith(screen.stub);
+    document.body.append(screen.backdrop, screen.el);
+  } else if (!on && screen.backdrop) {
+    screen.backdrop.remove();
+    screen.backdrop = null;
+    if (screen.stub && screen.stub.isConnected) screen.stub.replaceWith(screen.el); else screen.el.remove();
+    screen.stub = null;
+  }
+  if (on) {
+    screen.img.tabIndex = 0;
+    screen.img.focus();
+    if (screen.paused) { screen.paused = false; screen.toggle.textContent = 'Pause'; }
+    fetchScreen(screen.key);
+  } else screen.img.removeAttribute('tabindex');
+}
+
+/** Where a pointer event falls in the screenshot's own pixels (the image is letterboxed by object-fit: contain). */
+function screenPoint(img, e) {
+  const r = img.getBoundingClientRect();
+  const nw = img.naturalWidth || 1;
+  const nh = img.naturalHeight || 1;
+  const scale = Math.min(r.width / nw, r.height / nh);
+  const x = (e.clientX - r.left - (r.width - nw * scale) / 2) / scale;
+  const y = (e.clientY - r.top - (r.height - nh * scale) / 2) / scale;
+  if (x < 0 || y < 0 || x > nw || y > nh) return null;
+  return { x: Math.round(x), y: Math.round(y), screen_width: nw };
+}
+
+let inputQueue = [];
+let inputTimer = null;
+let inputBusy = false;
+function sendInput(actions) {
+  inputQueue.push(...actions);
+  clearTimeout(inputTimer);
+  inputTimer = setTimeout(flushInput, 80);
+}
+async function flushInput() {
+  const k = screen.key;
+  if (inputBusy || !k || !inputQueue.length) return;
+  inputBusy = true;
+  const actions = inputQueue.splice(0, 200);
+  // Consecutive type actions become one.
+  const merged = [];
+  for (const a of actions) {
+    const last = merged[merged.length - 1];
+    if (a.action === 'type' && last && last.action === 'type' && last.text.length + a.text.length <= 4096) last.text += a.text;
+    else merged.push({ ...a });
+  }
+  const [node, id] = k.split('/');
+  try {
+    await api('POST', '/fleet/vms/' + enc(node) + '/' + enc(id) + '/input', { body: { actions: merged } });
+  } catch (e) { toast(e.message, true); }
+  inputBusy = false;
+  if (screen.key !== k) { inputQueue = []; return; }
+  clearTimeout(screen.timer);
+  screen.timer = setTimeout(() => fetchScreen(k), 250);
+  if (inputQueue.length) flushInput();
+}
+
+const NAMED = { Enter: 'return', Tab: 'tab', Escape: 'escape', Backspace: 'backspace', Delete: 'delete', ArrowUp: 'up', ArrowDown: 'down',
+  ArrowLeft: 'left', ArrowRight: 'right', Home: 'home', End: 'end', PageUp: 'page_up', PageDown: 'page_down', ' ': 'space' };
+
+// The guest types printable ASCII, newline and tab (US layout); anything else would fail the whole batch.
+const typable = (t) => /^[\x20-\x7e\n\t]*$/.test(t);
+
+/** The key a shortcut names: the physical letter or digit, so Option+E is `e` rather than the accent it would type. */
+function shortcutKey(e) {
+  if (/^Key[A-Z]$/.test(e.code)) return e.code.slice(3).toLowerCase();
+  if (/^Digit[0-9]$/.test(e.code)) return e.code.slice(5);
+  return e.key.length === 1 && typable(e.key) && e.key !== ' ' ? e.key.toLowerCase() : null;
+}
+
+function wireScreenInput(img) {
+  const at = (e, action) => {
+    if (!screen.control) return null;
+    const p = screenPoint(img, e);
+    if (p) sendInput([{ action, ...p }]);
+    return p;
+  };
+  // A double click would otherwise reach the guest as a click and then a double click (three clicks); a single click
+  // waits briefly to see whether a second one follows.
+  let pendingClick = null;
+  img.addEventListener('click', (e) => {
+    if (!screen.control || e.detail > 1) return;
+    const p = screenPoint(img, e);
+    if (!p) return;
+    clearTimeout(pendingClick);
+    pendingClick = setTimeout(() => { pendingClick = null; if (screen.control) sendInput([{ action: 'click', ...p }]); }, 250);
+  });
+  img.addEventListener('dblclick', (e) => {
+    clearTimeout(pendingClick);
+    pendingClick = null;
+    at(e, 'double_click');
+  });
+  img.addEventListener('contextmenu', (e) => { if (screen.control) { e.preventDefault(); at(e, 'right_click'); } });
+  let wheelAt = 0;
+  img.addEventListener('wheel', (e) => {
+    if (!screen.control) return;
+    e.preventDefault();
+    if (Date.now() - wheelAt < 60) return;
+    wheelAt = Date.now();
+    const p = screenPoint(img, e) || {};
+    const notches = (d) => Math.sign(d) * Math.min(5, Math.ceil(Math.abs(d) / 40));
+    sendInput([{ action: 'scroll', dx: notches(e.deltaX), dy: notches(e.deltaY), ...p }]);
+  }, { passive: false });
+  img.addEventListener('keydown', (e) => {
+    if (!screen.control) return;
+    // Every key belongs to the VM while controlling: Escape, / and ⌘K must not reach the console's own shortcuts.
+    e.stopPropagation();
+    if (e.isComposing || ['Shift', 'Control', 'Alt', 'Meta', 'CapsLock', 'Dead', 'Unidentified', 'Process'].includes(e.key)) return;
+    e.preventDefault();
+    const modifiers = [e.metaKey && 'command', e.ctrlKey && 'control', e.altKey && 'option', e.shiftKey && 'shift'].filter(Boolean);
+    const plain = !e.metaKey && !e.ctrlKey && !e.altKey;
+    if (e.key.length === 1 && plain) {
+      if (typable(e.key)) sendInput([{ action: 'type', text: e.key }]);
+      return;
+    }
+    const named = NAMED[e.key] || (/^F([1-9]|1[0-2])$/.test(e.key) ? e.key.toLowerCase() : null);
+    if (named) { sendInput([{ action: 'key', key: named, modifiers: plain ? modifiers.filter((m) => m === 'shift') : modifiers }]); return; }
+    const key = plain ? null : shortcutKey(e);
+    if (key) sendInput([{ action: 'key', key, modifiers }]);
+  });
+}
+
 function stopScreen() {
   clearTimeout(screen.timer);
   screen.timer = null;
   if (screen.url) URL.revokeObjectURL(screen.url);
   screen.seq++; // a fetch still in flight is dropped
-  Object.assign(screen, { key: null, el: null, img: null, url: null, paused: false });
+  inputQueue = [];
+  if (screen.backdrop) { screen.backdrop.remove(); screen.backdrop = null; }
+  if (screen.el && screen.el.parentNode === document.body) screen.el.remove();
+  screen.stub = null;
+  Object.assign(screen, { key: null, el: null, img: null, url: null, paused: false, control: false });
 }
 
 function screenPanel(v, running) {
@@ -1066,13 +1619,29 @@ function screenPanel(v, running) {
       screen.toggle.textContent = screen.paused ? 'Resume' : 'Pause';
       if (!screen.paused) fetchScreen(screen.key);
     } }, 'Pause');
-    screen.el = h('section', {}, h('div', { class: 'row' }, h('h3', { class: 'grow' }, 'Screen'), screen.link, screen.toggle),
-      screen.img, screen.note);
+    screen.control = false;
+    screen.ctl = h('button', { class: 'plain', type: 'button', 'aria-pressed': 'false', title: 'Send your clicks and typing to the VM',
+      onclick: () => setControl(!screen.control) }, 'Control');
+    screen.typeIn = h('input', { placeholder: 'Type or paste text…', 'aria-label': 'Text to type into the VM', class: 'grow', style: { width: 'auto' } });
+    const keyBtn = (label, key, modifiers) => h('button', { type: 'button', class: 'icon', onclick: () => sendInput([{ action: 'key', key, modifiers: modifiers || [] }]) }, label);
+    screen.bar = h('form', { class: 'row', hidden: true, style: { marginTop: '8px' }, onsubmit: (e) => {
+      e.preventDefault();
+      const text = screen.typeIn.value.replace(/\r\n?/g, '\n');
+      if (!text) return;
+      if (!typable(text)) { toast('Only plain ASCII text, newlines and tabs can be typed into the VM (US keyboard).', true); return; }
+      sendInput([{ action: 'type', text: text.slice(0, 4096) }]);
+      screen.typeIn.value = '';
+    } }, screen.typeIn, h('button', { type: 'submit' }, 'Type'),
+    keyBtn('Return', 'return'), keyBtn('Esc', 'escape'), keyBtn('Tab', 'tab'), keyBtn('⌘ Space', 'space', ['command']));
+    wireScreenInput(screen.img);
+    screen.el = h('section', {}, h('div', { class: 'row' }, h('h3', { class: 'grow' }, 'Screen'), screen.link, screen.ctl, screen.toggle),
+      screen.img, screen.bar, screen.note);
     fetchScreen(k);
   }
   screen.toggle.hidden = !running;
-  if (!running) screen.note.textContent = 'The VM is not running, so it has no screen.';
-  return screen.el;
+  screen.ctl.hidden = !running || guestOf(v.request) !== 'macos';
+  if (!running) { screen.note.textContent = 'The VM is not running, so it has no screen.'; setControl(false); }
+  return screen.control && screen.stub ? screen.stub : screen.el;
 }
 
 async function fetchScreen(k) {
@@ -1088,7 +1657,7 @@ async function fetchScreen(k) {
   const seq = ++screen.seq;
   try {
     const headers = token() ? { Authorization: 'Bearer ' + token() } : {};
-    const r = await fetch('/fleet/vms/' + enc(node) + '/' + enc(id) + '/screen?max_width=960', { headers, cache: 'no-store' });
+    const r = await fetch('/fleet/vms/' + enc(node) + '/' + enc(id) + '/screen?max_width=' + (screen.control ? 1600 : 960), { headers, cache: 'no-store' });
     if (screen.key !== k || seq !== screen.seq) return;
     if (!r.ok) {
       const body = await r.json().catch(() => ({}));
@@ -1108,9 +1677,11 @@ async function fetchScreen(k) {
     const blank = r.headers.get('x-fluxvm-screen-blank') === 'true';
     const w = r.headers.get('x-fluxvm-screen-width');
     const hgt = r.headers.get('x-fluxvm-screen-height');
-    screen.note.textContent = (blank ? 'Nothing is drawn yet (the guest is still starting). ' : '')
-      + (w && hgt ? w + ' × ' + hgt + '. ' : '') + 'Updates every 2 seconds while this panel is open.';
-    again(2000);
+    screen.note.textContent = screen.control
+      ? 'Controlling the VM: clicks, scrolling and keys go to it. Press Stop control when you are done.'
+      : (blank ? 'Nothing is drawn yet (the guest is still starting). ' : '')
+        + (w && hgt ? w + ' × ' + hgt + '. ' : '') + 'Updates every 2 seconds while this panel is open.';
+    again(screen.control ? 700 : 2000);
   } catch (_) {
     if (screen.key === k) { screen.note.textContent = 'Central is not reachable; retrying.'; again(6000); }
   }
@@ -1128,6 +1699,9 @@ function describe(e) {
   if (a === 'vms' && p.length === 1 && m === 'POST') return 'Launched VM' + t;
   if (a === 'vms' && p.length === 3 && m === 'DELETE') return 'Deleted VM ' + (vmName(b, c) || c.slice(0, 8)) + ' on ' + b;
   if (a === 'vms' && d === 'exec') return 'Ran a command in ' + (vmName(b, c) || c.slice(0, 8));
+  if (a === 'vms' && ['start', 'stop', 'restart', 'pause', 'resume'].includes(d)) {
+    return { start: 'Started ', stop: 'Stopped ', restart: 'Restarted ', pause: 'Paused ', resume: 'Resumed ' }[d] + (vmName(b, c) || c.slice(0, 8));
+  }
   if (a === 'leases' && p.length === 1) return 'Leased a Mac' + (e.target ? ' (' + e.target + ')' : '');
   if (a === 'leases' && c === 'release') return 'Released a lease';
   if (a === 'overlays' && p.length === 1) return 'Created network' + t;
@@ -1144,6 +1718,8 @@ function describe(e) {
   if (a === 'nodes' && m === 'DELETE') return 'Forgot node ' + b;
   if (a === 'images') return (m === 'DELETE' ? 'Removed image ' : 'Saved image ') + b;
   if (a === 'policy') return 'Changed the policy';
+  if (a === 'prices') return 'Changed the price list';
+  if (a === 'webhooks') return c === 'test' ? 'Sent a test to a webhook' : m === 'DELETE' ? 'Deleted a webhook' : 'Added a webhook';
   if (a === 'reconcile') return 'Reconciled the fleet';
   return m + ' ' + e.path;
 }
@@ -1450,8 +2026,31 @@ function leaseSheet(pre = {}) {
     choice('hours', '72', false, '3 days'),
     choice('hours', '168', false, '1 week'),
     choice('hours', '', false, 'Until released', 'At least 24 hours'))));
-  body.push(h('p', { class: 'note' }, 'A lease is billed for at least 24 hours, even if it is released sooner. Apple\'s macOS licence requires it.'));
-  openSheet({
+  const estimate = h('p', { class: 'note' });
+  body.push(estimate);
+  const showEstimate = (form) => {
+    const f = new FormData(form);
+    const base = 'A lease is billed for at least 24 hours, even if it is released sooner. Apple\'s macOS licence requires it.';
+    if (!pricesSet()) { estimate.textContent = base; return; }
+    let rate;
+    let exact = true;
+    if (op && f.get('node')) {
+      const m = avail.find((x) => x.name === f.get('node'));
+      rate = m ? macRate(m.node.vcpus_total || 0, m.node.memory_mib_total || 0).rate : 0;
+    } else if (op) {
+      const rs = avail.map((m) => macRate(m.node.vcpus_total || 0, m.node.memory_mib_total || 0).rate);
+      rate = rs.length ? Math.min(...rs) : 0;
+    } else {
+      const size = f.get('size');
+      rate = macRateFrom(size === 'l' ? 16 : size === 'm' ? 8 : 0, size === 'l' ? 48 * 1024 : size === 'm' ? 24 * 1024 : 0);
+      exact = false;
+    }
+    if (!rate || !Number.isFinite(rate)) { estimate.textContent = base; return; }
+    const hrs = Number(f.get('hours') || 24);
+    estimate.textContent = (exact ? '' : 'From ') + money(rate, null, true) + ' an hour: about ' + money(rate * hrs) + ' for '
+      + (f.get('hours') ? hrs + ' hours' : 'the 24-hour minimum, then ' + money(rate * 24) + ' a day until released') + '. ' + base;
+  };
+  const sheet = openSheet({
     title: op ? 'Lease a Mac to a tenant' : 'Lease a Mac',
     intro: op ? null : 'The Mac is yours alone: only your VMs run on it, up to two of them macOS.',
     body, submit: 'Lease Mac',
@@ -1469,11 +2068,14 @@ function leaseSheet(pre = {}) {
       }
       const r = await api('POST', '/fleet/leases', { body: b });
       const node = r.lease && r.lease.node;
-      toast('Leased ' + node + (op ? ' to ' + b.tenant : ''));
+      const at = r.lease && r.lease.rate_micros ? ' at ' + money(r.lease.rate_micros / 1e6, null, true) + ' an hour' : '';
+      toast('Leased ' + node + (op ? ' to ' + b.tenant : '') + at);
       await refresh({ force: true });
       if (node) go('macs', node);
     },
   });
+  sheet.form.addEventListener('change', () => showEstimate(sheet.form));
+  showEstimate(sheet.form);
 }
 
 function launchSheet(pre = {}) {
@@ -1551,7 +2153,17 @@ function launchSheet(pre = {}) {
     const parts = [];
     if (leftCpu !== null) parts.push(c + ' of your ' + leftCpu + ' remaining vCPUs');
     if (leftMem !== null) parts.push(gib(mem) + ' of your ' + gib(leftMem) + ' remaining memory');
-    summary.textContent = parts.length ? 'Uses ' + parts.join(' and ') + '.' : '';
+    let costLine = '';
+    if (pricesSet()) {
+      const chosen = macSel.value ? targets.find((m) => m.name === macSel.value) : null;
+      const onLease = chosen ? !!chosen.lease : !op && leased.length > 0 && guest === 'macos';
+      const maybeShared = !chosen && !(guest === 'macos' && leased.length > 0);
+      const p = S.data.prices || {};
+      const r = vmRate(c, mem, guest === 'macos');
+      if (onLease && !p.charge_vms_on_leased_macs) costLine = ' Included in your lease.';
+      else if (r > 0) costLine = ' About ' + money(r, null, true) + ' an hour' + (onLease ? ' on top of the lease.' : maybeShared && leased.length ? ' if it runs on a shared host; free on a Mac you lease.' : '.');
+    }
+    summary.textContent = (parts.length ? 'Uses ' + parts.join(' and ') + '.' : '') + costLine;
     summary.style.color = (leftCpu !== null && c > leftCpu) || (leftMem !== null && mem > leftMem) ? 'var(--bad)' : '';
   };
 
@@ -1810,6 +2422,13 @@ function cycleTheme() {
 }
 
 $('theme').addEventListener('click', cycleTheme);
+$('bell').addEventListener('click', (e) => { e.stopPropagation(); toggleBell(); });
+// Closes on a click outside it, or on a link inside it (a notification or "All and webhooks").
+document.addEventListener('click', (e) => {
+  const panel = $('bell-panel');
+  if (!panel.hidden && (!panel.contains(e.target) || e.target.closest('a'))) toggleBell(false);
+});
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !$('bell-panel').hidden) toggleBell(false); });
 $('refresh').addEventListener('click', () => refresh({ force: true }));
 $('signout').addEventListener('click', () => {
   storage.del('sessionStorage', TOKEN_KEY);
@@ -1827,7 +2446,7 @@ $('signin-form').addEventListener('submit', (e) => {
   storage.set('sessionStorage', TOKEN_KEY, t);
   $('signin-token').value = '';
   // Nothing from the previous token's session carries over.
-  Object.assign(S, { role: null, me: null, data: null, error: null, usage: null, policy: null, exec: {}, tenantKeys: {}, query: '',
+  Object.assign(S, { role: null, me: null, data: null, error: null, usage: null, policy: null, exec: {}, tenantKeys: {}, billMonth: null, billView: null, billLoading: null, hooks: null, hooksLoading: null, logs: {}, query: '',
     lastViewKey: '', lastInspKey: '', loadedAt: 0 });
   stopScreen();
   $('search').value = '';

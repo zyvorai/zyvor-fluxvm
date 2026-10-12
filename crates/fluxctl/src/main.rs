@@ -1129,6 +1129,30 @@ enum FleetCommand {
         #[arg(trailing_var_arg = true, required = true)]
         command: Vec<String>,
     },
+    /// Start a stopped VM (by name or ID prefix).
+    Start { vm: String },
+    /// Shut a VM down; its disk is kept (asks first on a terminal).
+    Stop {
+        vm: String,
+        #[arg(long, short = 'y')]
+        yes: bool,
+    },
+    /// Restart a VM (asks first on a terminal).
+    Restart {
+        vm: String,
+        #[arg(long, short = 'y')]
+        yes: bool,
+    },
+    /// Pause a running VM (its memory is kept; it does not run).
+    Pause { vm: String },
+    /// Resume a paused VM.
+    Resume { vm: String },
+    /// The end of a VM's console log.
+    Logs {
+        vm: String,
+        #[arg(long, default_value_t = 100)]
+        lines: usize,
+    },
     /// Delete a VM, found by name or ID prefix. Asks first on a terminal.
     Rm {
         vm: String,
@@ -1162,6 +1186,40 @@ enum FleetCommand {
         tenant: Option<String>,
         #[command(subcommand)]
         command: Option<FleetKeyCommand>,
+    },
+    /// The price list. `--set FILE` (operator) replaces it with a JSON file shaped like `fleet prices -o json`.
+    Prices {
+        #[arg(long)]
+        set: Option<PathBuf>,
+    },
+    /// A month's statement: what leases and VMs cost. A tenant sees its own; the operator every tenant's.
+    Bill {
+        /// `2026-10` (default: this month).
+        #[arg(long)]
+        month: Option<String>,
+        /// Operator only: one tenant.
+        #[arg(long)]
+        tenant: Option<String>,
+        #[arg(long)]
+        csv: bool,
+    },
+    /// Show or set a tenant's monthly budget (a warning at 80% and when over; nothing is stopped).
+    Budget {
+        /// The monthly amount; `0` removes it. Omit to show the current budget and spend.
+        amount: Option<f64>,
+        /// Operator only: whose budget.
+        #[arg(long)]
+        tenant: Option<String>,
+    },
+    /// Recent notifications: leases ending, budgets, VM changes (and, for the operator, Macs down, drains, scrubs).
+    Notifications {
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+    },
+    /// Webhooks that receive notifications as signed JSON: list (default), add, rm, test.
+    Webhooks {
+        #[command(subcommand)]
+        command: Option<FleetWebhookCommand>,
     },
     /// The image catalog: list (default), add or remove (operator).
     Images {
@@ -1288,6 +1346,25 @@ enum FleetCommand {
         timeout: Option<u64>,
         #[arg(trailing_var_arg = true, required = true)]
         command: Vec<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum FleetWebhookCommand {
+    List,
+    /// Add a webhook; prints its signing secret once.
+    Add {
+        url: String,
+        /// Only these events (repeatable), e.g. `--event lease.ending --event budget.over`. Default: all.
+        #[arg(long = "event")]
+        events: Vec<String>,
+    },
+    Rm {
+        id: String,
+    },
+    /// Send a test event and show what the endpoint answered.
+    Test {
+        id: String,
     },
 }
 

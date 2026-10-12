@@ -60,6 +60,8 @@
   button.danger.solid { background:var(--bad); border-color:var(--bad); color:#fff; }
   button.plain { border-color:transparent; background:transparent; color:var(--accent); padding:6px 8px; }
   button.plain:hover:not(:disabled) { background:var(--accent-soft); }
+  button.plain.danger { color:var(--bad); }
+  button.plain.danger:hover:not(:disabled) { background:var(--bad-soft); }
   button.icon { padding:6px 9px; border-color:transparent; background:transparent; color:var(--muted); }
   button.icon:hover:not(:disabled) { background:var(--hover); color:var(--ink); }
   input, select, textarea { font:inherit; font-size:15px; color:var(--ink); background:var(--surface);
@@ -105,6 +107,15 @@
   .bar .search { max-width:280px; padding-left:12px; border-radius:980px; background:var(--surface); }
   .kbd { font:12px var(--mono); color:var(--muted); border:1px solid var(--line); border-radius:5px; padding:0 5px; }
   .updated { font-size:12px; color:var(--muted); white-space:nowrap; }
+  .bell-wrap { position:relative; }
+  .badge { display:inline-block; min-width:18px; padding:0 5px; margin-left:6px; border-radius:980px; background:var(--bad);
+           color:#fff; font-size:11px; line-height:18px; text-align:center; font-variant-numeric:tabular-nums; }
+  .popover { position:absolute; right:0; top:calc(100% + 8px); width:min(380px, calc(100vw - 32px)); max-height:70vh; overflow-y:auto;
+             background:var(--raised); border:1px solid var(--hair); border-radius:var(--radius-l); box-shadow:var(--shadow); z-index:30; }
+  .popover .list > * { align-items:flex-start; }
+  .ntf-dot { width:8px; height:8px; border-radius:50%; margin-top:7px; flex:none; background:var(--hair); }
+  .ntf-dot.new { background:var(--accent); }
+  .ntf-dot.bad { background:var(--bad); } .ntf-dot.warn { background:var(--warn); }
   .view { padding:8px 32px 64px; max-width:1180px; width:100%; }
   .page-head { display:flex; align-items:flex-end; gap:12px; flex-wrap:wrap; margin:6px 0 22px; }
   .page-head p { color:var(--muted); margin-top:4px; max-width:62ch; }
@@ -284,6 +295,12 @@
   .copy-field { display:flex; gap:6px; align-items:center; }
   .copy-field code { flex:1; min-width:0; background:var(--canvas); border-radius:var(--radius-s); padding:7px 10px;
                      overflow-x:auto; white-space:nowrap; }
+  .screen.controlling { outline:2px solid var(--accent); outline-offset:2px; cursor:crosshair; }
+  /* While controlling, the screen takes over the window so the guest is big enough to work in. */
+  section.screen-full { position:fixed; inset:max(16px, 3vh) max(16px, 3vw); z-index:60; background:var(--raised); padding:16px 20px;
+    border-radius:var(--radius-l); box-shadow:0 24px 80px rgba(0,0,0,.35); display:flex; flex-direction:column; gap:8px; border-top:0; }
+  section.screen-full .screen { flex:1; min-height:0; aspect-ratio:auto; width:100%; height:100%; }
+  .screen-backdrop { position:fixed; inset:0; z-index:59; background:rgba(0,0,0,.4); }
   .screen { display:block; width:100%; aspect-ratio:16/10; object-fit:contain; background:#000; border-radius:var(--radius);
             margin-top:4px; }
   pre.snippet { background:var(--canvas); border-radius:var(--radius-s); padding:10px 12px; margin:8px 0 0; overflow-x:auto;
@@ -422,6 +439,10 @@
       <input id="search" class="search" type="search" placeholder="Search" aria-label="Search VMs, Macs, networks"/>
       <span class="kbd" title="Command palette">⌘K</span>
       <span class="updated" id="updated" aria-live="off"></span>
+      <div class="bell-wrap">
+        <button class="icon" id="bell" type="button" aria-haspopup="true" aria-expanded="false" aria-controls="bell-panel">Alerts<span id="bell-count" class="badge" hidden></span></button>
+        <div id="bell-panel" class="popover" hidden role="dialog" aria-label="Notifications"></div>
+      </div>
       <button class="icon" id="refresh" type="button" title="Refresh now">Refresh</button>
     </div>
     <div id="banners"></div>
