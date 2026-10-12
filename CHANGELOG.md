@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+
 ### Added: `POST /v1/branches/prune` (`fluxctl branch prune`)
 - Remove branches by policy: keep the newest N, older than a cutoff, scoped to a VM or a name prefix. A dry run unless
   `dry_run: false` (`--yes`); an empty policy is refused; a branch labelled `fluxvm.dev/keep: "true"` is never removed.
@@ -9,6 +10,22 @@
 
 ### Fixed
 - Raw base images are cloned with the macOS-safe copy on every backend (`cp --reflink` is GNU-only).
+
+### Added: virtual networks (eBPF routing, Geneve overlay, SNAT, floating IPs)
+- A `tap` NIC with `vnet` (`{vni, ip, prefix_len, gateway}`) joins a VNI-isolated IPv4 network routed entirely in eBPF:
+  no bridge, no per-network device, no iptables. Same-host guests are routed tap to tap; other hosts are reached through
+  one collect-metadata Geneve device (`fvgnv0`, UDP 6081). The gateway exists on every host and answers ARP and ping.
+  Guests can only send from their own address. The guest gets its address, gateway and MTU 1450 through cloud-init.
+- `PUT /v1/network/vnets/{vni}` applies a network (CIDR, gateway, endpoints on every host, uplink, SNAT address,
+  floating IPs); `GET` lists and `DELETE` removes it (refused while a VM here is attached). Capability `host.vnet`.
+- Egress SNAT to the uplink address (ports 61000-65534, LRU flow table, no TCP state machine) and 1:1 floating IPs. The
+  uplink program runs first in the TCX chain (`fluxvm-tcx attach-first`, ahead of Cilium's `cil_from_netdev`), passes
+  everything else untouched, and is detached with the last network that uses it.
+- IPv4 only, no TTL decrement, no load balancing inside a network, no VM-edge policy on vnet VMs, NIC hotplug refused.
+  The root-gated `vnet_netns` test covers two netns-simulated hosts over Geneve; same-host routing, isolation and SNAT
+  also ran with real QEMU guests through Kairon on one node. Cross-host on real hardware has not run. See
+  `docs/virtual-network.md`.
+
 
 ## 0.4.2 (2026-10-12)
 

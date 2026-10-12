@@ -63,6 +63,12 @@ pub enum NetworkSpec {
         /// field existed, which keeps meaning "bridged tap".
         #[serde(default, skip_serializing_if = "Option::is_none")]
         direct: Option<DirectSpec>,
+        /// Virtual network attach: the tap joins overlay network `vnet.vni`
+        /// with a fixed address and no bridge; the vnet eBPF datapath routes
+        /// it (see [`VnetAttach`] and `docs/virtual-network.md`). Needs `mac`
+        /// and excludes `bridge`, `netns`, `direct` and `extra`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        vnet: Option<VnetAttach>,
     },
     /// A macvtap device on `parent`, giving the VM its own MAC directly on
     /// that link with no host bridge involved. Supported by the QEMU and
@@ -176,6 +182,7 @@ impl NetworkSpec {
     /// Validates the bridge-less options of a `Tap` spec. Other variants and
     /// bridged taps always pass.
     pub fn validate_direct(&self) -> Result<(), String> {
+        self.validate_vnet()?;
         let NetworkSpec::Tap {
             direct: Some(d),
             bridge,
@@ -215,6 +222,231 @@ impl NetworkSpec {
         }
         Ok(())
     }
+}
+
+impl NetworkSpec {
+    /// Validates a `Tap` spec's virtual network attach. Other variants and
+    /// taps without `vnet` always pass.
+    pub fn validate_vnet(&self) -> Result<(), String> {
+        let NetworkSpec::Tap {
+            vnet: Some(v),
+            bridge,
+            netns,
+            direct,
+            extra,
+            mac,
+            ..
+        } = self
+        else {
+            return Ok(());
+        };
+        v.validate()?;
+        if mac.as_deref().unwrap_or("").is_empty() {
+            return Err("network.vnet needs network.mac".into());
+        }
+        if bridge.is_some() || *netns || direct.is_some() || !extra.is_empty() {
+            return Err(
+                "network.vnet excludes network.bridge, network.netns, network.direct and network.extra"
+                    .into(),
+            );
+        }
+        Ok(())
+    }
+
+    /// The virtual network attach of a `Tap` spec, if any.
+    pub fn vnet(&self) -> Option<&VnetAttach> {
+        match self {
+            NetworkSpec::Tap { vnet, .. } => vnet.as_ref(),
+            _ => None,
+        }
+    }
+}
+
+/// Largest Geneve VNI (24 bits).
+pub const MAX_VNI: u32 = 0x00ff_ffff;
+
+/// A guest NIC's place on a virtual network: overlay `vni`, its address and
+/// the network's gateway. The gateway is distributed: every host answers for
+/// it with the same MAC ([`vnet_gateway_mac`]), so a VM keeps its gateway when
+/// it moves.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct VnetAttach {
+    pub vni: u32,
+    /// Guest IPv4 address.
+    pub ip: String,
+    /// Prefix length of the network the address is on.
+    pub prefix_len: u8,
+    /// Gateway IPv4 address on that network.
+    pub gateway: String,
+}
+
+impl VnetAttach {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.vni == 0 || self.vni > MAX_VNI {
+            return Err(format!("vnet.vni must be 1..={MAX_VNI}"));
+        }
+        if !(8..=30).contains(&self.prefix_len) {
+            return Err("vnet.prefix_len must be 8..=30".into());
+        }
+        let ip: std::net::Ipv4Addr = self
+            .ip
+            .parse()
+            .map_err(|_| format!("vnet.ip {:?} is not an IPv4 address", self.ip))?;
+        let gw: std::net::Ipv4Addr = self
+            .gateway
+            .parse()
+            .map_err(|_| format!("vnet.gateway {:?} is not an IPv4 address", self.gateway))?;
+        let mask = u32::MAX << (32 - u32::from(self.prefix_len));
+        if u32::from(ip) & mask != u32::from(gw) & mask {
+            return Err("vnet.ip and vnet.gateway must be on the same network".into());
+        }
+        if ip == gw {
+            return Err("vnet.ip must differ from vnet.gateway".into());
+        }
+        Ok(())
+    }
+}
+
+/// The distributed gateway MAC of virtual network `vni`: locally
+/// administered, the same on every host.
+pub fn vnet_gateway_mac(vni: u32) -> [u8; 6] {
+    [
+        0x02,
+        0x66,
+        0x76,
+        (vni >> 16) as u8,
+        (vni >> 8) as u8,
+        vni as u8,
+    ]
+}
+
+/// `PUT /v1/network/vnets/{vni}`: one virtual network as this host should
+/// route it. Replaces any earlier config for the same VNI.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct VnetConfig {
+    pub vni: u32,
+    /// Network CIDR, e.g. `10.20.0.0/24`.
+    pub cidr: String,
+    pub gateway: String,
+    /// Host interface for traffic leaving the network (SNAT) and for floating
+    /// IPs arriving. Required with `snat_address` or `floating_ips`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uplink: Option<String>,
+    /// Source address for outbound traffic from guests without a floating
+    /// IP. No SNAT, and no outbound traffic, when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snat_address: Option<String>,
+    #[serde(default)]
+    pub floating_ips: Vec<VnetFloatingIp>,
+    /// Every guest on the network, on any host. Guests attached on this host
+    /// are routed locally whatever `node_ip` says.
+    #[serde(default)]
+    pub endpoints: Vec<VnetEndpoint>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct VnetEndpoint {
+    pub ip: String,
+    pub mac: String,
+    /// Underlay IPv4 address of the host running the guest.
+    pub node_ip: String,
+}
+
+/// A public address translated 1:1 to a guest address.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct VnetFloatingIp {
+    pub address: String,
+    pub ip: String,
+}
+
+/// Parses `a.b.c.d/n` into the network address and prefix length.
+pub fn parse_ipv4_cidr(cidr: &str) -> Result<(std::net::Ipv4Addr, u8), String> {
+    let (ip, len) = cidr
+        .split_once('/')
+        .ok_or_else(|| format!("CIDR {cidr:?} needs a /prefix"))?;
+    let ip: std::net::Ipv4Addr = ip
+        .parse()
+        .map_err(|_| format!("CIDR {cidr:?} is not IPv4"))?;
+    let len: u8 = len
+        .parse()
+        .map_err(|_| format!("CIDR {cidr:?} has a bad prefix"))?;
+    if !(8..=30).contains(&len) {
+        return Err(format!("CIDR {cidr:?}: prefix must be 8..=30"));
+    }
+    let mask = u32::MAX << (32 - u32::from(len));
+    if u32::from(ip) & !mask != 0 {
+        return Err(format!("CIDR {cidr:?} has host bits set"));
+    }
+    Ok((ip, len))
+}
+
+impl VnetConfig {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.vni == 0 || self.vni > MAX_VNI {
+            return Err(format!("vni must be 1..={MAX_VNI}"));
+        }
+        let (net, len) = parse_ipv4_cidr(&self.cidr)?;
+        let mask = u32::MAX << (32 - u32::from(len));
+        let inside = |what: &str, raw: &str| -> Result<std::net::Ipv4Addr, String> {
+            let ip: std::net::Ipv4Addr = raw
+                .parse()
+                .map_err(|_| format!("{what} {raw:?} is not an IPv4 address"))?;
+            if u32::from(ip) & mask != u32::from(net) {
+                return Err(format!("{what} {raw} is outside {}", self.cidr));
+            }
+            Ok(ip)
+        };
+        inside("gateway", &self.gateway)?;
+        let needs_uplink = self.snat_address.is_some() || !self.floating_ips.is_empty();
+        match &self.uplink {
+            Some(u) if u.is_empty() || u.len() > 15 => {
+                return Err("uplink must be 1..=15 characters".into());
+            }
+            None if needs_uplink => {
+                return Err("snat_address and floating_ips need an uplink".into());
+            }
+            _ => {}
+        }
+        if let Some(a) = &self.snat_address {
+            a.parse::<std::net::Ipv4Addr>()
+                .map_err(|_| format!("snat_address {a:?} is not an IPv4 address"))?;
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        for e in &self.endpoints {
+            inside("endpoint", &e.ip)?;
+            e.node_ip
+                .parse::<std::net::Ipv4Addr>()
+                .map_err(|_| format!("endpoint {} node_ip {:?} is not IPv4", e.ip, e.node_ip))?;
+            if e.mac.split(':').count() != 6 {
+                return Err(format!("endpoint {} mac {:?} is not a MAC", e.ip, e.mac));
+            }
+            if !seen.insert(e.ip.as_str()) {
+                return Err(format!("endpoint {} listed twice", e.ip));
+            }
+        }
+        let mut public = std::collections::BTreeSet::new();
+        for f in &self.floating_ips {
+            f.address
+                .parse::<std::net::Ipv4Addr>()
+                .map_err(|_| format!("floating IP {:?} is not IPv4", f.address))?;
+            inside("floating IP target", &f.ip)?;
+            if !public.insert(f.address.as_str()) {
+                return Err(format!("floating IP {} listed twice", f.address));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// One virtual network as `GET /v1/network/vnets` reports it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct VnetStatus {
+    pub config: VnetConfig,
+    /// Guests of this network attached on this host.
+    pub local_endpoints: Vec<String>,
+    /// Endpoints routed through the Geneve overlay.
+    pub remote_endpoints: usize,
+    pub gateway_mac: String,
 }
 
 /// One extra guest NIC — either on a host bridge or bridge-less direct.
@@ -1760,6 +1992,10 @@ pub struct RuntimeHostCapability {
     /// QEMU VMs, and `GET /v1/host/memory` reports host memory pressure.
     #[serde(default)]
     pub balloon: bool,
+    /// `NetworkSpec::Tap.vnet` and `/v1/network/vnets` route isolated
+    /// virtual networks over Geneve (eBPF dataplane).
+    #[serde(default)]
+    pub vnet: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -2788,4 +3024,137 @@ mod migration_tls_model_tests {
 
 fn is_zero_u8(v: &u8) -> bool {
     *v == 0
+}
+
+#[cfg(test)]
+mod vnet_model_tests {
+    use super::*;
+
+    fn tap(vnet: VnetAttach) -> NetworkSpec {
+        NetworkSpec::Tap {
+            tap_name: None,
+            bridge: None,
+            mac: Some("52:54:00:00:00:02".into()),
+            netns: false,
+            extra: vec![],
+            direct: None,
+            vnet: Some(vnet),
+        }
+    }
+
+    fn attach() -> VnetAttach {
+        VnetAttach {
+            vni: 42,
+            ip: "10.20.0.5".into(),
+            prefix_len: 24,
+            gateway: "10.20.0.1".into(),
+        }
+    }
+
+    #[test]
+    fn a_vnet_tap_validates_and_round_trips() {
+        let spec = tap(attach());
+        spec.validate_direct().unwrap();
+        let json = serde_json::to_value(&spec).unwrap();
+        assert_eq!(json["vnet"]["vni"], 42);
+        let back: NetworkSpec = serde_json::from_value(json).unwrap();
+        assert_eq!(back.vnet(), Some(&attach()));
+    }
+
+    #[test]
+    fn a_tap_without_vnet_omits_the_field() {
+        let spec: NetworkSpec = serde_json::from_value(serde_json::json!({"mode": "tap"})).unwrap();
+        assert!(spec.vnet().is_none());
+        assert!(serde_json::to_value(&spec).unwrap().get("vnet").is_none());
+    }
+
+    #[test]
+    fn vnet_attach_rejects_bad_addresses() {
+        for bad in [
+            VnetAttach { vni: 0, ..attach() },
+            VnetAttach {
+                vni: MAX_VNI + 1,
+                ..attach()
+            },
+            VnetAttach {
+                prefix_len: 31,
+                ..attach()
+            },
+            VnetAttach {
+                ip: "10.21.0.5".into(),
+                ..attach()
+            },
+            VnetAttach {
+                ip: "10.20.0.1".into(),
+                ..attach()
+            },
+            VnetAttach {
+                gateway: "fd00::1".into(),
+                ..attach()
+            },
+        ] {
+            assert!(bad.validate().is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn vnet_excludes_bridges_and_needs_a_mac() {
+        let mut no_mac = tap(attach());
+        if let NetworkSpec::Tap { mac, .. } = &mut no_mac {
+            *mac = None;
+        }
+        assert!(no_mac.validate_vnet().is_err());
+        let mut bridged = tap(attach());
+        if let NetworkSpec::Tap { bridge, .. } = &mut bridged {
+            *bridge = Some("br0".into());
+        }
+        assert!(bridged.validate_direct().is_err());
+    }
+
+    #[test]
+    fn gateway_mac_is_local_and_encodes_the_vni() {
+        assert_eq!(
+            vnet_gateway_mac(0x0a0b0c),
+            [0x02, 0x66, 0x76, 0x0a, 0x0b, 0x0c]
+        );
+    }
+
+    fn config() -> VnetConfig {
+        VnetConfig {
+            vni: 7,
+            cidr: "10.20.0.0/24".into(),
+            gateway: "10.20.0.1".into(),
+            uplink: Some("eth0".into()),
+            snat_address: Some("192.0.2.10".into()),
+            floating_ips: vec![VnetFloatingIp {
+                address: "198.51.100.7".into(),
+                ip: "10.20.0.5".into(),
+            }],
+            endpoints: vec![VnetEndpoint {
+                ip: "10.20.0.5".into(),
+                mac: "52:54:00:00:00:05".into(),
+                node_ip: "192.168.1.2".into(),
+            }],
+        }
+    }
+
+    #[test]
+    fn vnet_config_validates() {
+        config().validate().unwrap();
+        let mut c = config();
+        c.uplink = None;
+        assert!(c.validate().unwrap_err().contains("uplink"));
+        let mut c = config();
+        c.cidr = "10.20.0.1/24".into();
+        assert!(c.validate().unwrap_err().contains("host bits"));
+        let mut c = config();
+        c.endpoints.push(c.endpoints[0].clone());
+        assert!(c.validate().unwrap_err().contains("twice"));
+        let mut c = config();
+        c.floating_ips[0].ip = "10.30.0.5".into();
+        assert!(c.validate().unwrap_err().contains("outside"));
+        let mut c = config();
+        c.gateway = "10.21.0.1".into();
+        assert!(c.validate().is_err());
+    }
 }

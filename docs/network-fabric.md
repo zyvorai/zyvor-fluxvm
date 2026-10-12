@@ -36,7 +36,9 @@ is not a different `mode`; see [production-dataplane.md](production-dataplane.md
 `required = true` fail-closes when a host-visible VM edge exists but attach
 fails; `network.mode=none` / user NAT still soft-skip (no edge). Service load
 balancing, BGP, WireGuard, and first-class Cilium endpoint identity belong in
-separate projects rather than expanding this blast radius.
+separate projects rather than expanding this blast radius. Virtual networks
+(VNI-isolated eBPF routing with a Geneve overlay, SNAT and floating IPs) are
+their own plane with their own program; see [virtual-network.md](virtual-network.md).
 
 **Keep / strict sandboxes:** set `deny_udp: true` on `VmNetworkPolicy` so TC
 drops UDP and SCTP after DHCP (WebRTC/QUIC kill switch; drop reason `udp-deny`).
@@ -649,11 +651,14 @@ in independent docs/PRs:
    [service-fabric.md](service-fabric.md) · [phase 5](service-fabric-phase5.md) ·
    [phase 6](service-fabric-phase6.md).
 2. **BGP speaker** — Fabric FRR/BIRD/File adapters consume FluxVM ads; not embedded
-   in FluxVM ([service-fabric-phase4.md](service-fabric-phase4.md)).
-3. WireGuard host-to-host VM encryption.
-4. First-class Cilium CNI/launcher identities and Hubble attribution.
-5. Migration transfer of connection/NAT state (service maps via conntrack
+   in FluxVM ([service-fabric-phase4.md](service-fabric-phase4.md)). Kairon's
+   kairon-node has an announce-only speaker for floating IPs and these ads.
+3. **Virtual networks** — VNI-isolated eBPF routing, a collect-metadata Geneve
+   overlay, SNAT and floating IPs ([virtual-network.md](virtual-network.md)).
+4. WireGuard host-to-host VM encryption.
+5. First-class Cilium CNI/launcher identities and Hubble attribution.
+6. Migration transfer of connection/NAT state (service maps via conntrack
    export/import, v5 streaming HA deltas, and v6 mutation queue —
    [phase 5](service-fabric-phase5.md) · [phase 6](service-fabric-phase6.md)).
-6. Dedicated libbpf ring-buffer/SSE streaming daemon if sub-second events are
+7. Dedicated libbpf ring-buffer/SSE streaming daemon if sub-second events are
    required at scale.

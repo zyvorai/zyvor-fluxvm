@@ -737,6 +737,7 @@ mod tests {
                 tap_name: Some("tap1".into()),
                 direct: None,
             }],
+            vnet: None,
         };
         let args = build_args(&cfg(), &req(), &c, &[]).unwrap();
         let nets: Vec<_> = args
@@ -1333,6 +1334,7 @@ mod tests {
                 guest_ips: vec![],
             }),
             extra: vec![],
+            vnet: None,
         };
         c.network.tap_fd = Some(9);
         let args = build_args(&cfg(), &req(), &c, &[]).unwrap();

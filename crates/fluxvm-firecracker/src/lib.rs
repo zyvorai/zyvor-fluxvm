@@ -623,6 +623,7 @@ mod tests {
             netns: false,
             direct: None,
             extra: vec![],
+            vnet: None,
         };
         let paths = ResourcePaths {
             kernel: PathBuf::from("/vmlinux"),
@@ -655,6 +656,7 @@ mod tests {
                 tap_name: Some("tap1".into()),
                 direct: None,
             }],
+            vnet: None,
         };
         let paths = ResourcePaths {
             kernel: PathBuf::from("/vmlinux"),
@@ -722,6 +724,7 @@ mod tests {
                 guest_ips: vec![],
             }),
             extra: vec![],
+            vnet: None,
         };
         ctx.network.tap_fd = Some(9);
         let paths = ResourcePaths {

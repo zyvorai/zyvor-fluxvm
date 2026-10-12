@@ -352,6 +352,11 @@ pub fn apply_sandbox_policy(
     extra_allow_cidrs: &[String],
     pod_uid: Option<&str>,
 ) -> Result<()> {
+    // A vnet NIC is routed by the virtual network program alone; the VM edge
+    // policy program would sit on the same hook and is not combined with it.
+    if crate::vnet::attach_vm(cfg, id)? {
+        return Ok(());
+    }
     // Set 6S: mint (or recall) a stable Pod identity when the caller knows
     // this VM belongs to a Kubernetes Pod (Secure Containers). `0` means "no
     // Pod-scoped policy" throughout the eBPF layer, matching every other

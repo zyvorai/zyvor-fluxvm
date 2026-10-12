@@ -225,6 +225,7 @@ async fn direct_tap_is_wired_by_the_loader_and_carries_traffic() {
             mode: DirectMode::PeerVeth,
             guest_ips: vec![],
         }),
+        vnet: None,
     };
     let prepared = fluxvm_network::prepare(&cfg, id, &spec)
         .await

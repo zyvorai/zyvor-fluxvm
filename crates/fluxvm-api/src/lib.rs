@@ -536,6 +536,11 @@ pub fn router(manager: Arc<VmManager>) -> Router {
             "/v1/vms/{id}/network/effective",
             get(get_vm_network_effective),
         )
+        .route("/v1/network/vnets", get(list_vnets))
+        .route(
+            "/v1/network/vnets/{vni}",
+            get(get_vnet).put(put_vnet).delete(delete_vnet),
+        )
         .route(
             "/v1/network/groups",
             get(list_network_groups).post(upsert_network_group),
@@ -2213,6 +2218,7 @@ async fn runtime_capabilities(
             numa_binding: cfg!(target_os = "linux"),
             pci_bind: cfg!(target_os = "linux"),
             balloon: cfg!(target_os = "linux"),
+            vnet: cfg!(target_os = "linux"),
         },
     })
 }
@@ -3808,6 +3814,65 @@ async fn delete_network_service(
     Ok(Json(json!({"deleted": name})))
 }
 
+async fn list_vnets(State(m): State<Arc<VmManager>>) -> ApiResult<Json<serde_json::Value>> {
+    let cfg = m.cfg.clone();
+    let items = tokio::task::spawn_blocking(move || fluxvm_network::vnet::list(&cfg)).await?;
+    Ok(Json(json!({"items": items})))
+}
+
+async fn get_vnet(
+    State(m): State<Arc<VmManager>>,
+    Path(vni): Path<u32>,
+) -> ApiResult<Json<fluxvm_core::model::VnetStatus>> {
+    let cfg = m.cfg.clone();
+    tokio::task::spawn_blocking(move || fluxvm_network::vnet::status(&cfg, vni))
+        .await?
+        .map(Json)
+        .ok_or_else(|| ApiError {
+            status: StatusCode::NOT_FOUND,
+            message: format!("virtual network {vni} is not configured on this host"),
+        })
+}
+
+async fn put_vnet(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(vni): Path<u32>,
+    Json(config): Json<fluxvm_core::model::VnetConfig>,
+) -> ApiResult<Json<fluxvm_core::model::VnetStatus>> {
+    require_admin(role)?;
+    if config.vni != vni {
+        return Err(ApiError::from(anyhow::anyhow!(
+            "body vni {} does not match the path vni {vni}",
+            config.vni
+        )));
+    }
+    let cfg = m.cfg.clone();
+    let status =
+        tokio::task::spawn_blocking(move || fluxvm_network::vnet::apply_config(&cfg, &config))
+            .await??;
+    Ok(Json(status))
+}
+
+async fn delete_vnet(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(vni): Path<u32>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    let cfg = m.cfg.clone();
+    let removed =
+        tokio::task::spawn_blocking(move || fluxvm_network::vnet::remove_config(&cfg, vni))
+            .await??;
+    if !removed {
+        return Err(ApiError {
+            status: StatusCode::NOT_FOUND,
+            message: format!("virtual network {vni} is not configured on this host"),
+        });
+    }
+    Ok(Json(json!({"deleted": vni})))
+}
+
 async fn list_network_groups(
     State(m): State<Arc<VmManager>>,
 ) -> ApiResult<Json<serde_json::Value>> {
@@ -5190,20 +5255,24 @@ mod tests {
     use std::path::PathBuf;
 
     fn fixture(backend: BackendKind, status: VmStatus, agent_enabled: bool) -> VmRecord {
+        // A path that does not exist and is unique to the fixture; a fixed `/tmp/x` broke these tests on any machine
+        // where something (even an empty file) already sat there.
+        let id = Uuid::new_v4();
+        let root = std::env::temp_dir().join(format!("fluxvm-fixture-{id}"));
         VmRecord {
-            id: Uuid::new_v4(),
+            id,
             name: "fixture".into(),
             backend,
             status,
             pid: None,
             created_at: chrono::Utc::now(),
             expires_at: None,
-            workspace: PathBuf::from("/tmp/x"),
-            disk: PathBuf::from("/tmp/x/root.qcow2"),
+            workspace: root.clone(),
+            disk: root.join("root.qcow2"),
             seed_disk: None,
             tap_name: None,
             control_socket: None,
-            log_path: PathBuf::from("/tmp/x/console.log"),
+            log_path: root.join("console.log"),
             error: None,
             request: CreateVmRequest {
                 apple: None,

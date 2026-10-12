@@ -1031,6 +1031,7 @@ mod tests {
             netns: false,
             direct: None,
             extra: vec![],
+            vnet: None,
         };
         let args = build_args(&cfg(), &req(2048), &c, &[]).unwrap();
         let dev = args
@@ -1064,6 +1065,7 @@ mod tests {
                     direct: None,
                 },
             ],
+            vnet: None,
         };
         let args = build_args(&cfg(), &req(2048), &c, &[]).unwrap();
         assert!(args.iter().any(|a| {
@@ -1374,6 +1376,7 @@ mod tests {
                 guest_ips: vec![],
             }),
             extra: vec![],
+            vnet: None,
         };
         c.network.tap_fd = Some(9);
         let args = build_args(&cfg(), &req(2048), &c, &[]).unwrap();
@@ -1399,6 +1402,7 @@ mod tests {
                 tap_name: Some("hn1abcdef".into()),
                 direct: None,
             }],
+            vnet: None,
         };
         c.network.extra_tap_fds = vec![Some(11)];
         let args = build_args(&cfg(), &req(2048), &c, &[]).unwrap();
@@ -1423,6 +1427,7 @@ mod tests {
             netns: false,
             direct: None,
             extra: vec![],
+            vnet: None,
         };
         c.network.tap_fd = None;
         let args = build_args(&cfg(), &req(2048), &c, &[]).unwrap();
