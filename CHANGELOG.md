@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.4.2 (2026-10-12)
 
 ### Added: highly available central (`fluxvm-agent central --ha-redis`)
 - Several centrals can share one Redis (`--ha-redis`, `--advertise-url`, `--ha-ttl-secs`, `--ha-cluster`). A Lua-scripted
