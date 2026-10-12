@@ -8,11 +8,14 @@
 use crate::VmManager;
 use anyhow::{Context, Result, bail};
 use fluxvm_core::model::{
-    AppleDisk, AppleDiskController, AppleDiskKind, AppleGuest, BackendKind, VmDiskInfo, VmRecord,
-    VmStatus,
+    AppleDisk, AppleDiskController, AppleDiskKind, AppleGuest, BackendKind, StorageBackend,
+    VmDiskInfo, VmRecord, VmStatus,
 };
 use std::path::{Component, Path, PathBuf};
 use uuid::Uuid;
+
+/// Largest disk a vz create-time attach or a root grow may name.
+const MAX_DISK_GIB: u64 = 16 * 1024;
 
 /// Most extra disks per VM (virtio and NVMe each take a PCI slot).
 const MAX_EXTRA_DISKS: usize = 16;
@@ -279,8 +282,8 @@ impl VmManager {
         }
         match (size_gib, disk.kind) {
             (Some(gib), AppleDiskKind::Image) if disk.path.as_os_str().is_empty() => {
-                if gib == 0 || gib > 16 * 1024 {
-                    bail!("size_gib must be 1-16384");
+                if gib == 0 || gib > MAX_DISK_GIB {
+                    bail!("size_gib must be 1-{MAX_DISK_GIB}");
                 }
                 fluxvm_apple::validate_disk(&AppleDisk {
                     path: "/placeholder".into(),
@@ -364,6 +367,23 @@ impl VmManager {
 
     /// Removes extra disk `name`: at once when it was hot-attached to the running guest, otherwise at the next start. A new
     /// image made by `attach_vz_disk` is deleted with it once nothing uses it.
+    /// Grows a stopped `vz` VM's root disk (`PATCH /v1/vms/{id}/disks/root`) to `size_gib`, macOS or Linux guest.
+    /// Grow-only. This extends the file only: the guest still has to grow its own partition or APFS container
+    /// (`diskutil apfs resizeContainer` for macOS), which is not automated.
+    pub async fn resize_vz_disk(&self, id: Uuid, name: &str, size_gib: u64) -> Result<VmDiskInfo> {
+        let vm = self.get(id).await?;
+        let info = grow_root_disk(&vm, name, size_gib)?;
+        crate::audit_event(
+            "vm.disk.resize",
+            &[
+                ("vm_id", &id.to_string()),
+                ("disk", "root"),
+                ("size_gib", &size_gib.to_string()),
+            ],
+        );
+        Ok(info)
+    }
+
     pub async fn detach_vz_disk(&self, id: Uuid, name: &str) -> Result<()> {
         let mut vm = self.vz_linux_vm(id).await?;
         let mut hotplug = read_hotplug(&vm.workspace);
@@ -409,6 +429,49 @@ impl VmManager {
         );
         Ok(())
     }
+}
+
+/// The checks and the `set_len` behind [`VmManager::resize_vz_disk`].
+fn grow_root_disk(vm: &VmRecord, name: &str, size_gib: u64) -> Result<VmDiskInfo> {
+    if vm.backend != BackendKind::Vz {
+        bail!("not a vz VM");
+    }
+    if name != "root" {
+        bail!("only the root disk of a vz VM can be grown (disk {name:?})");
+    }
+    if !matches!(vm.status, VmStatus::Stopped | VmStatus::Failed) {
+        bail!(
+            "stop the VM first: a vz root disk is grown offline (status={:?})",
+            vm.status
+        );
+    }
+    if vm.request.apple.as_ref().is_some_and(|a| a.asif_overlay) {
+        bail!(
+            "root disk resize is not supported with apple.asif_overlay: the overlay layer is sized separately"
+        );
+    }
+    if vm.request.storage != StorageBackend::Default || !vm.disk.is_file() {
+        bail!("root disk resize needs a local file-backed disk");
+    }
+    if !(1..=MAX_DISK_GIB).contains(&size_gib) {
+        bail!("size_gib must be 1-{MAX_DISK_GIB}");
+    }
+    let new_bytes = size_gib << 30;
+    let current = std::fs::metadata(&vm.disk)
+        .with_context(|| format!("reading {}", vm.disk.display()))?
+        .len();
+    if new_bytes <= current {
+        bail!(
+            "resize only grows: the disk is already {} bytes, asked for {new_bytes}",
+            current
+        );
+    }
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&vm.disk)
+        .and_then(|f| f.set_len(new_bytes))
+        .with_context(|| format!("growing {}", vm.disk.display()))?;
+    Ok(list(vm).remove(0))
 }
 
 #[cfg(test)]
@@ -561,5 +624,41 @@ mod tests {
             ]
         );
         assert_eq!(l[2].path, Path::new("nbd://h:10809/v"));
+    }
+
+    fn grow_fixture(status: VmStatus, gib: u64) -> (tempfile::TempDir, VmRecord) {
+        let dir = tempfile::tempdir().unwrap();
+        let disk = dir.path().join("disk.raw");
+        std::fs::File::create(&disk)
+            .unwrap()
+            .set_len(gib << 30)
+            .unwrap();
+        (dir, vm("g", status, disk.to_str().unwrap(), vec![]))
+    }
+
+    #[test]
+    fn a_stopped_root_disk_grows_and_never_shrinks() {
+        let (_d, v) = grow_fixture(VmStatus::Stopped, 1);
+        let info = grow_root_disk(&v, "root", 2).unwrap();
+        assert_eq!(info.size_bytes, 2 << 30);
+        assert_eq!(std::fs::metadata(&v.disk).unwrap().len(), 2 << 30);
+        for same_or_less in [2, 1] {
+            let err = grow_root_disk(&v, "root", same_or_less).unwrap_err();
+            assert!(err.to_string().contains("only grows"), "{err}");
+        }
+    }
+
+    #[test]
+    fn grow_is_refused_while_running_for_data_disks_and_with_an_asif_overlay() {
+        let (_d, mut v) = grow_fixture(VmStatus::Running, 1);
+        let err = grow_root_disk(&v, "root", 2).unwrap_err().to_string();
+        assert!(err.contains("stop the VM first"), "{err}");
+        v.status = VmStatus::Stopped;
+        let err = grow_root_disk(&v, "data", 2).unwrap_err().to_string();
+        assert!(err.contains("only the root disk"), "{err}");
+        v.request.apple.as_mut().unwrap().asif_overlay = true;
+        let err = grow_root_disk(&v, "root", 2).unwrap_err().to_string();
+        assert!(err.contains("asif_overlay"), "{err}");
+        assert_eq!(std::fs::metadata(&v.disk).unwrap().len(), 1 << 30);
     }
 }

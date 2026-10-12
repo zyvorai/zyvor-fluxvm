@@ -2509,6 +2509,9 @@ impl VmManager {
             audit_event("quota.deny", &[("scope", "host"), ("reason", &reason)]);
             return Err(e);
         }
+        if req.backend == BackendKind::Vz {
+            apple_placement::enforce_macos_guest_limit(&req, &self.store.list().await)?;
+        }
         self.admit_under_pressure(req.memory_mib).await?;
         // Every storage backend except CephRbd points `image` at a real
         // filesystem entry (a file for Default/Nbd, a block device for
@@ -3847,6 +3850,16 @@ impl VmManager {
             self.ensure_vz_overlays_exclusive(&a.extra_disks, Some(id))
                 .await
                 .with_context(|| format!("cannot start {id}"))?;
+            // A stopped macOS guest holds no slot, so starting it can make a third.
+            let others: Vec<_> = self
+                .store
+                .list()
+                .await
+                .into_iter()
+                .filter(|r| r.id != id)
+                .collect();
+            apple_placement::enforce_macos_guest_limit(&vm.request, &others)
+                .with_context(|| format!("cannot start {id}"))?;
         }
         // A CephRbd disk is a `rbd:pool/image:...` URI, not a real
         // filesystem path — there's nothing on the local filesystem to
@@ -4629,13 +4642,16 @@ impl VmManager {
         Ok(())
     }
 
-    /// Grow `root` or a data disk (live `block_resize`, else `qemu-img resize`).
+    /// Grow `root` or a data disk (live `block_resize`, else `qemu-img resize`); a `vz` VM's root disk, offline.
     pub async fn resize_vm_disk(
         &self,
         id: Uuid,
         name: &str,
         size_gib: u64,
     ) -> Result<fluxvm_core::model::VmDiskInfo> {
+        if self.get(id).await?.backend == BackendKind::Vz {
+            return self.resize_vz_disk(id, name, size_gib).await;
+        }
         let vm = self.qemu_vm_for_disks(id).await?;
         if name == fluxvm_qemu::disks::ROOT_DISK && vm.request.storage != StorageBackend::Default {
             bail!("root disk resize needs the default qcow2 storage backend");
