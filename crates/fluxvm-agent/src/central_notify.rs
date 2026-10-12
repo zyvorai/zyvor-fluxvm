@@ -868,6 +868,69 @@ mod tests {
         }
     }
 
+    /// An operator's force-release carries no tenant of its own; the notification must still be the lease's tenant's.
+    #[tokio::test]
+    async fn forced_release_by_the_operator_notifies_the_leases_tenant() {
+        use crate::tenancy::{Lease, LeaseState};
+        let fleet = Fleet {
+            nodes: Default::default(),
+            http: reqwest::Client::new(),
+            persist_path: None,
+            lock_path: None,
+            token: None,
+            tenancy: Default::default(),
+            tenancy_path: None,
+            ha: None,
+            audit: Arc::new(super::audit::AuditLog::memory()),
+            notify: Arc::default(),
+        };
+        let now = Utc::now();
+        fleet.tenancy.lock().await.leases.push(Lease {
+            id: "lease-1".into(),
+            tenant: "acme".into(),
+            node: "mac-1".into(),
+            started_at: now,
+            min_end: now,
+            ends_at: None,
+            released_at: None,
+            state: LeaseState::Active,
+            rate_micros: None,
+            price_class: None,
+        });
+        let ev = |tenant: Option<&str>, path: &str, status: u16| super::audit::AuditEvent {
+            time: now,
+            actor: tenant.unwrap_or("operator").into(),
+            tenant: tenant.map(str::to_owned),
+            method: "POST".into(),
+            path: path.into(),
+            target: None,
+            status,
+            key: None,
+        };
+        // Refused releases are not news.
+        from_change(&fleet, &ev(None, "/fleet/leases/lease-1/release", 409)).await;
+        assert!(fleet.notify.list(None, 10).is_empty());
+        // The operator forces it: acme hears, with the operator named.
+        from_change(&fleet, &ev(None, "/fleet/leases/lease-1/release", 200)).await;
+        let acme = fleet.notify.list(Some("acme"), 10);
+        assert_eq!(acme.len(), 1);
+        assert_eq!(acme[0].kind, "lease.released");
+        assert_eq!(acme[0].detail.as_deref(), Some("By the operator."));
+        // A lease nobody owns is not attributed to anyone; another tenant never sees it.
+        from_change(&fleet, &ev(None, "/fleet/leases/nope/release", 200)).await;
+        assert_eq!(fleet.notify.list(Some("globex"), 10).len(), 0);
+        // A tenant releasing its own lease still names itself.
+        from_change(
+            &fleet,
+            &ev(Some("acme"), "/fleet/leases/lease-1/release", 200),
+        )
+        .await;
+        assert_eq!(
+            fleet.notify.list(Some("acme"), 10)[0].detail.as_deref(),
+            Some("By acme.")
+        );
+    }
+
     #[test]
     fn who_gets_what() {
         // A tenant's hook: its own events, never operator ones or another tenant's.
