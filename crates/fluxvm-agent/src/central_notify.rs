@@ -473,15 +473,19 @@ pub(super) async fn from_change(fleet: &Fleet, e: &super::audit::AuditEvent) {
         ),
         _ => return,
     };
-    emit(
-        fleet,
-        kind,
-        e.tenant.clone(),
-        title,
-        Some(format!("By {who}.")),
-        link,
-    )
-    .await;
+    // An operator's (forced) release is the tenant's news too: the lease says whose it is.
+    let tenant = match (&e.tenant, kind, seg.as_slice()) {
+        (None, "lease.released", ["fleet", "leases", id, _]) => fleet
+            .tenancy
+            .lock()
+            .await
+            .leases
+            .iter()
+            .find(|l| l.id == *id)
+            .map(|l| l.tenant.clone()),
+        _ => e.tenant.clone(),
+    };
+    emit(fleet, kind, tenant, title, Some(format!("By {who}.")), link).await;
 }
 
 // ---- events from time ---------------------------------------------------------------------------------------------

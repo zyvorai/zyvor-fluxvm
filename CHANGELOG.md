@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+### Added: prices, statements, budgets, notifications and signed webhooks (fleet)
+- The operator sets a price list (Mac classes, VM time on shared hosts); central turns metered use into monthly
+  statements per tenant (`GET /fleet/billing`, CSV with spreadsheet-formula guard, forecast for the current month) and
+  tenants set a monthly budget that warns at 80% and when over. A lease keeps the price it started with.
+- Central records notifications (`vm.*`, `lease.*`, `budget.*`, operator-only `node.*`/`drain.done`) and sends them to
+  webhooks signed with HMAC-SHA256 (`X-FluxVM-Signature`), retried three times. Tenant webhooks must be `https` and
+  reach a public address, pinned at connect time; operator webhooks may go anywhere.
+- `fluxctl fleet prices|bill|budget|notifications|webhooks`, and console pages for each. See `docs/mac-cloud-tenancy.md`.
+
+### Fixed: an operator's forced lease release did not notify the tenant
+- `lease.released` took its tenant from the caller, so a release by the operator had none and reached neither the
+  tenant's bell nor its webhooks. It now takes the lease's tenant.
+
 ### Fixed: incident bundle directories were world-readable
 - `diagnostics_dir` and its per-VM and per-bundle directories are now created, and tightened if they exist, with mode
   0700. They inherited the umask (0755), so on a multi-user host other local users could read bundles and guest memory
