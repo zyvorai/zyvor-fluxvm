@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+### Docs: Mac cloud operations guide, `fluxctl fleet` reference, node API and OpenAPI coverage
+- New `docs/mac-cloud-operations.md`: every `fluxvm-agent central` flag, what central keeps on disk, which paths are
+  public and why, a pre-launch checklist, and upgrade notes. New `docs/fluxctl-fleet.md`: all 65 `fluxctl fleet` commands,
+  generated from the binary's `--help`.
+- `docs/api.md`: node stats (`GET /v1/stats`), volumes (`/v1/volumes`) and tunnels (`GET /v1/vms/{id}/tunnel`), including
+  which addresses a vz tunnel may reach.
+- `schemas/fleet-openapi.yaml`: tunnels, metrics (`/fleet/metrics/*`, `/metrics`), pool status, members, sign-up,
+  Stripe webhook, invoices and payment method, and the console sign-in routes (75 paths, 98 operations).
+- Tenancy, warm-pool and billing docs now say what is not covered: viewers see screens and logs, tunnels outlive a
+  sign-out, shared warm pools share credentials and a network, the sign-up email is not verified.
+- `docs/fleet-quickstart.md`: the tenant commands that were run against the simulator for snapshots, volumes, power,
+  logs, pools and tunnels.
+
 
 ### Added: node API for volumes, tunnels, usage stats and restore (used by the fleet platform)
 - `fluxvm-api`: persistent volumes (`/v1/volumes`), a TCP tunnel to a VM's port (`GET /v1/vms/{id}/tunnel?port=N`,

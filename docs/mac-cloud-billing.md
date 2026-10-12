@@ -148,3 +148,12 @@ Tenant records gain `owner_email`, `stripe_customer_id`, `billing_enabled`, `has
 - Taxes, coupons and credit notes: do them in Stripe on the invoice.
 - Refunds and disputes are handled in the Stripe dashboard; central only follows the invoice status.
 - The webhook-event dedup list and the sign-up rate limits are in memory, per central.
+- **The sign-up email is not verified.** Anyone can sign up with someone else's address; nothing is mailed to confirm
+  it. What that means today: the address is shown as the tenant's owner, Stripe's invoice emails (when a tenant has no
+  saved card, `send_invoice`) go to it, and the first SSO sign-in with it takes the tenant over and rotates the sign-up
+  token. Until you add a verification step, keep sign-up closed, restrict it with `signup_allowed_email_domains`, or
+  require a saved payment method (`signup_require_payment_method`) before a tenant can launch anything.
+- Payment gating covers creating VMs, leases, clones, volumes (and growing one) and warm pools (and resizing one);
+  restoring a snapshot, and starting or restarting a stopped VM, are not blocked for a tenant without a payment method.
+- A sign-up is limited to 5 per client address and 100 in total per hour. One caller spread over many addresses can use up
+  the 100 and lock real sign-ups out for that hour.

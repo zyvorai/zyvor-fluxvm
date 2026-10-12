@@ -1,13 +1,13 @@
 # Try the Mac cloud without Macs
 
-`fluxvm-agent sim-node` is a simulated Mac. It answers the node API that central uses (create, list, delete and exec
-VMs) from memory, and heartbeats to central like a real `fluxvm-agent node`, reporting a Mac's Virtualization.framework
-capabilities. VMs "run" as soon as they are created; nothing boots. Apple's limit of two macOS guests per Mac is
-enforced as on a real Mac.
+`fluxvm-agent sim-node` is a simulated Mac. It answers the node API that central uses from memory, and heartbeats to
+central like a real `fluxvm-agent node`, reporting a Mac's Virtualization.framework capabilities. VMs "run" as soon as
+they are created; nothing boots. Apple's limit of two macOS guests per Mac is enforced as on a real Mac.
 
 With it you can run the whole control plane on any Linux or macOS laptop: tenants, leases, quotas, placement, drain
-and scrub, metering, private networks across Macs, the fleet console, and the GitHub Actions scaler (its runners never
-pick up a job, of course).
+and scrub, metering, private networks across Macs, the fleet console, the GitHub Actions scaler (its runners never
+pick up a job, of course), and the rest of what a tenant does with a VM: power, screen and typed input, console logs,
+snapshots and clones, persistent volumes, warm pools, tunnels (every port echoes), usage graphs, API keys and webhooks.
 
 ## One command
 
@@ -40,6 +40,40 @@ fluxctl fleet launch --image debian-13
 fluxctl fleet run debian-13-1 -- uname -a
 ```
 
+## Try the rest as a tenant
+
+Everything below was run against `sim-node` with the real `fluxctl`. Set the tenant's token once (the operator makes it:
+`fluxctl fleet --token $TOKEN tenant create acme`, which prints the token once):
+
+```bash
+export CENTRAL_URL=http://127.0.0.1:7799
+export FLUXVM_AGENT_TOKEN=fvt_...                  # the tenant's token, not the operator's
+
+fluxctl fleet lease create                         # rent a whole Mac for at least 24 hours
+fluxctl fleet launch --image debian-13 web-1       # the image catalog needs an entry first (the demo script adds two)
+
+fluxctl fleet snapshot web-1 --name clean          # save the VM; add --memory to include its memory
+fluxctl fleet clone web-1 web-2 --snapshot clean   # a new VM from that snapshot
+fluxctl fleet restore web-1 clean                  # roll web-1 back to it
+fluxctl fleet snapshots web-1
+
+fluxctl fleet volume-create data --size 20         # a disk that outlives VMs (GiB)
+fluxctl fleet volume-resize data --size 40         # grow only
+fluxctl fleet volumes
+
+fluxctl fleet stop web-1 --yes                     # --yes skips the question on a terminal
+fluxctl fleet start web-1
+fluxctl fleet pause web-1 && fluxctl fleet resume web-1
+fluxctl fleet logs web-1                           # the console log
+
+fluxctl fleet pool-create ci --image debian-13 --min-ready 1   # keep a booted VM waiting
+fluxctl fleet top                                  # usage per VM (fills after the first 15-second sample)
+fluxctl fleet tunnels                              # open tunnels and the port policy
+```
+
+Add `-o json` for scripts (the output is JSON automatically when piped). The console at `/console` shows the same, with
+a screen you can click and type into. Each command is in [fluxctl-fleet.md](fluxctl-fleet.md).
+
 ## By hand
 
 ```bash
@@ -68,8 +102,9 @@ To try failover, run two centrals with `--ha-redis` ([fleet-ha.md](fleet-ha.md))
 
 ## What it does not simulate
 
-- Booting, disks, images, screens, the guest agent beyond echoing the command, and the network: overlay.json is
-  written but no switch runs.
+- Booting, real disks and images, the guest agent beyond echoing the command, and the network: overlay.json is
+  written but no switch runs. The screen is a drawn picture that shows what you typed and where you clicked; a
+  volume is a name and a size (nothing is written); a tunnel is a local echo on every port.
 - Resource use: free CPU and memory are the Mac's size minus 2 vCPUs and 2 GiB per VM, as a real node reports them.
 - VM state survives only as long as the process; restarting a sim node empties it, which the reconciler then sees as
   VMs that vanished.

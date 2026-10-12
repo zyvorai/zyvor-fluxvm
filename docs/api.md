@@ -56,6 +56,13 @@ POST   /v1/vms/{uuid}/resume
 POST   /v1/vms/{uuid}/hibernate          # qemu; save RAM/CPU/devices, stop QEMU; next start resumes; admin; see hibernation.md
 DELETE /v1/vms/{uuid}/hibernation        # drop the saved state; next start boots from disk; admin
 POST   /v1/vms/import-hibernated         # {"id"}; adopt a VM hibernated on another node from the shared dir; admin
+GET    /v1/stats                         # one sample of this host and every VM (cumulative counters) for the fleet's metrics collector; see "Node stats"
+GET    /v1/volumes                       # persistent volumes on this host; admin; see "Volumes and tunnels (fleet platform)"
+POST   /v1/volumes                       # {"name": "data", "size_gib": 50}; sparse raw file; 201; 409 when the name is taken; admin
+GET    /v1/volumes/{name}                # admin
+DELETE /v1/volumes/{name}                # 409 while any VM on this host references it; admin
+POST   /v1/volumes/{name}/resize         # {"size_gib": 100}; grow only, and only while no VM references it; admin
+GET    /v1/vms/{uuid}/tunnel?port=N      # websocket: one TCP connection to port N of a running VM (binary messages); admin; see "Volumes and tunnels (fleet platform)"
 GET    /v1/host/hibernation              # {facts: {qemu_version, machine_type, cpu_vendor, cpu_flags, state_dir}}
 POST   /v1/host/hibernation/check        # {"manifest"} -> {compatible, reasons}
 POST   /v1/vms/{uuid}/diagnostics        # {pcap_seconds, pcap_filter, memory_dump, redact, log_lines} -> 202 bundle job; 409 if one is running; admin; see diagnostics-bundle.md
@@ -756,6 +763,54 @@ Two read-only routes feed a dashboard without scraping `/metrics`:
 - `GET /v1/host/apple/capabilities`: the capability table judged against this Mac: per `feature` `supported`, `note`,
   `min_macos`, `available_here` (`null` when the host has not been probed) and `reason` (macOS version, chip generation,
   missing `com.apple.vm.networking`, missing Rosetta).
+
+### Node stats
+
+`GET /v1/stats` is one cheap sample of this host and every VM on it, for the fleet's metrics collector
+([fleet-metrics.md](fleet-metrics.md)); anything that moves is a **cumulative counter**, so a reader takes two samples and
+divides by the time between them. Gauges (memory, disk free) are as of now, and a figure this host cannot measure is
+`null`, never a made-up zero.
+
+- `host`: `cpus`, `cpu_busy_ticks` and `cpu_total_ticks` (only the ratio of two samples' differences means anything),
+  `memory_total_mib`, `memory_available_mib`, `disk_total_bytes` and `disk_free_bytes` of the volume holding the state
+  directory, `vm_count`, `vms_running`.
+- `ts` is the sample time. Per VM: `id`, `name`, `status`, `backend`, `vcpus`, `memory_mib`, `cpu_seconds_total`,
+  `memory_used_bytes`, `disk_read_bytes_total`, `disk_write_bytes_total`, `net_rx_bytes_total`, `net_tx_bytes_total`
+  and a `source` that says which of these it can supply. `vz-process` (a `vz` guest, read from the runner
+  plus its Virtualization XPC service: CPU, resident memory, disk bytes, no network because Virtualization.framework
+  has no per-VM counters), `vz-runner` (the XPC service could not be attributed, so the runner process only),
+  `cgroup` (a Linux backend, from the VM's cgroup v2 and its TAP device) or `none` (stopped, or nothing readable).
+
+### Volumes and tunnels (fleet platform)
+
+These routes are the node half of fleet [volumes](mac-cloud-tenancy.md#volumes) and
+[tunnels](mac-cloud-tenancy.md#ssh-and-port-tunnels). They are admin-only: tenants reach them through
+`fluxvm-agent central`, which authenticates the tenant, applies quotas and policy, and calls them with the fleet token.
+
+**Volumes** (`/v1/volumes`) are sparse raw disk files under `<state_dir>/volumes/` that outlive the VMs using them. A volume
+is `{name, path, format: "raw", size_gib, size_bytes, allocated_bytes, attached_to: [vm ids]}`.
+
+- `POST` takes `{"name", "size_gib"}`. A name is 1 to 63 lowercase letters, digits and `-`, starting with a letter or digit
+  (it becomes a file name); `size_gib` is 1 to 16384. At most 1024 volumes per host.
+- A VM uses a volume as an `apple.extra_disks` image disk (`path` is what it names). `attached_to` lists the VM records
+  that reference the file; `DELETE` and `resize` answer `409` while it is not empty. A resize only grows.
+- Deleting the VM leaves the volume alone: that is the point of it.
+
+**Tunnels** (`GET /v1/vms/{uuid}/tunnel?port=N`) upgrade to a WebSocket that carries one TCP connection to port `N` of a
+running VM; each binary message is raw bytes (at most 64 KiB from the guest, 256 KiB from the caller), and each direction
+waits for its write, so a slow end slows the other. The node connects only to the VM:
+
+- an `apple.usernet` VM: the host listener of its own TCP port forward for that guest port (`409` when it publishes none;
+  add one to `apple.usernet.port_forwards`);
+- a `tap` + `netns` VM: from inside its network namespace, to the address its dnsmasq leased (link-local `169.254.x.y`
+  is allowed there; the cloud metadata address is not);
+- a `vz` VM on the shared network: to the address the guest reported on its serial console, **only if it lies on this Mac's
+  own VM network** (a `bridge*` interface's subnet) and no other VM on the node reports the same address. The address comes
+  from the guest, so anything outside that (the Mac's LAN, another network) is refused with `409`.
+
+Loopback, unspecified, multicast and the node's own interface addresses are always refused, so a tunnel never reaches the
+node's own services. The VM must be running (`409` otherwise) and the port 1 to 65535; central applies the tenant's port
+policy before it connects here.
 
 ### Host topology and NUMA binding (Linux)
 

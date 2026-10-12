@@ -22,7 +22,8 @@ info:
     shapes here are the SDK contract for them.
 
     Not described: the node-agent routes (`POST /fleet/register`, `GET /fleet/nodes/{name}/overlays`, which carry
-    network keys) and the HA probes (`/fleet/ha`, `/fleet/ha/leader`).
+    network keys), the HA probes (`/fleet/ha`, `/fleet/ha/leader`) and the console's own files (`/console*`). The
+    browser sign-in routes (`/auth/*`) are listed for completeness; scripts use tokens.
 
     The VM create body is a node's `CreateVmRequest` (opaque to central) plus central's placement fields; only the
     commonly used fields are described.
@@ -49,6 +50,14 @@ tags:
     description: Requires central with volumes.
   - name: pools
     description: Requires central with warm pools.
+  - name: tunnels
+  - name: metrics
+  - name: members
+    description: SSO members and roles (viewer, member, admin, owner).
+  - name: signup
+    description: Self-service sign-up; off unless the operator turns it on.
+  - name: auth
+    description: Console SSO (OpenID Connect); for browsers.
 
 paths:
   /healthz:
@@ -1095,6 +1104,312 @@ paths:
         '200': {description: Deleted.}
         default: {$ref: '#/components/responses/Error'}
 
+  /fleet/vms/{node}/{id}/tunnel:
+    parameters:
+      - {name: node, in: path, required: true, schema: {type: string}}
+      - {name: id, in: path, required: true, schema: {type: string}}
+    get:
+      operationId: openTunnel
+      tags: [tunnels]
+      summary: One TCP connection to a VM's port, over a WebSocket.
+      description: |
+        Upgrades to a WebSocket (binary messages carry the bytes) relayed through central and the VM's node. Tenants
+        may open tunnels to their own VMs only, with a key that may make changes; the port must pass the policy's
+        tunnel port rules. `fluxctl fleet ssh` and `port-forward` use this.
+      parameters:
+        - {name: port, in: query, schema: {type: integer, minimum: 1, maximum: 65535, default: 22}}
+      responses:
+        '101': {description: Switching protocols; the WebSocket carries the TCP connection.}
+        default: {$ref: '#/components/responses/Error'}
+  /fleet/tunnels:
+    get:
+      operationId: listTunnels
+      tags: [tunnels]
+      summary: Open tunnels, newest first, with bytes each way and idle time.
+      responses:
+        '200':
+          description: "The caller's open tunnels (the operator's: all)."
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items: {type: array, items: {type: object, additionalProperties: true}}
+                  max_per_tenant: {type: integer}
+                  idle_timeout_minutes: {type: integer}
+                  ports: {type: array, items: {type: string}}
+                required: [items]
+        default: {$ref: '#/components/responses/Error'}
+  /fleet/tunnels/{id}:
+    parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+    delete:
+      operationId: closeTunnel
+      tags: [tunnels]
+      summary: Close a tunnel now.
+      responses:
+        '200': {description: Closed.}
+        default: {$ref: '#/components/responses/Error'}
+  /fleet/metrics/summary:
+    get:
+      operationId: metricsSummary
+      tags: [metrics]
+      summary: "Utilisation now and over the last hour (the operator: the fleet; a tenant: its leased Macs and own VMs)."
+      responses:
+        '200': {description: The summary., content: {application/json: {schema: {type: object, additionalProperties: true}}}}
+        default: {$ref: '#/components/responses/Error'}
+  /fleet/metrics/vms:
+    get:
+      operationId: metricsVms
+      tags: [metrics]
+      summary: The latest sample of every VM the caller may see (what `fluxctl fleet top` shows).
+      responses:
+        '200': {description: Samples., content: {application/json: {schema: {type: object, additionalProperties: true}}}}
+        default: {$ref: '#/components/responses/Error'}
+  /fleet/metrics/vms/{node}/{id}:
+    parameters:
+      - {name: node, in: path, required: true, schema: {type: string}}
+      - {name: id, in: path, required: true, schema: {type: string}}
+      - {name: range, in: query, schema: {type: string, enum: ['1h', '6h', '24h'], default: '1h'}}
+    get:
+      operationId: metricsVm
+      tags: [metrics]
+      summary: One VM's graphs. A tenant sees only its own VMs (404 otherwise).
+      responses:
+        '200': {description: The series., content: {application/json: {schema: {type: object, additionalProperties: true}}}}
+        default: {$ref: '#/components/responses/Error'}
+  /fleet/metrics/nodes/{name}:
+    parameters:
+      - {name: name, in: path, required: true, schema: {type: string}}
+      - {name: range, in: query, schema: {type: string, enum: ['1h', '6h', '24h'], default: '1h'}}
+    get:
+      operationId: metricsNode
+      tags: [metrics]
+      summary: "One Mac's graphs (a tenant: only a Mac it leases now)."
+      responses:
+        '200': {description: The series., content: {application/json: {schema: {type: object, additionalProperties: true}}}}
+        default: {$ref: '#/components/responses/Error'}
+  /fleet/metrics/collect:
+    post:
+      operationId: metricsCollect
+      tags: [metrics, operator]
+      summary: Sample every node now instead of waiting for the next tick (operator).
+      responses:
+        '200': {description: Collected., content: {application/json: {schema: {type: object, additionalProperties: true}}}}
+        default: {$ref: '#/components/responses/Error'}
+  /metrics:
+    get:
+      operationId: prometheus
+      tags: [metrics]
+      summary: The fleet in the Prometheus text format.
+      description: Needs the fleet token or `--metrics-token`; a tenant token gets `401`.
+      responses:
+        '200': {description: Prometheus text exposition format., content: {text/plain: {schema: {type: string}}}}
+        '401': {$ref: '#/components/responses/Error'}
+  /fleet/pools/{name}/status:
+    parameters: [{name: name, in: path, required: true, schema: {type: string}}]
+    get:
+      operationId: poolStatus
+      tags: [pools]
+      summary: Ready and booting VMs, claims in the last 24 hours and their average time.
+      responses:
+        '200': {description: The pool's status., content: {application/json: {schema: {type: object, additionalProperties: true}}}}
+        default: {$ref: '#/components/responses/Error'}
+  /fleet/tenants/{id}/members:
+    parameters: [{name: id, in: path, required: true, description: "A tenant id, or `me`.", schema: {type: string}}]
+    get:
+      operationId: listMembers
+      tags: [members]
+      summary: The tenant's SSO members and their roles.
+      responses:
+        '200': {description: Members., content: {application/json: {schema: {type: object, properties: {items: {type: array, items: {$ref: '#/components/schemas/Member'}}}, required: [items]}}}}
+        default: {$ref: '#/components/responses/Error'}
+    post:
+      operationId: addMember
+      tags: [members]
+      summary: Invite a person by email (role `member` unless given).
+      description: Changes need an admin or owner session, or the tenant's primary token; the operator may use a tenant's id.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                email: {type: string}
+                role: {$ref: '#/components/schemas/MemberRole'}
+              required: [email]
+      responses:
+        '201': {description: Added., content: {application/json: {schema: {$ref: '#/components/schemas/Member'}}}}
+        default: {$ref: '#/components/responses/Error'}
+  /fleet/tenants/{id}/members/{email}:
+    parameters:
+      - {name: id, in: path, required: true, description: "A tenant id, or `me`.", schema: {type: string}}
+      - {name: email, in: path, required: true, schema: {type: string}}
+    patch:
+      operationId: setMemberRole
+      tags: [members]
+      summary: Change a member's role. The last owner cannot be demoted.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                role: {$ref: '#/components/schemas/MemberRole'}
+              required: [role]
+      responses:
+        '200': {description: Updated., content: {application/json: {schema: {$ref: '#/components/schemas/Member'}}}}
+        default: {$ref: '#/components/responses/Error'}
+    delete:
+      operationId: removeMember
+      tags: [members]
+      summary: Remove a member and end their sessions for this tenant. The last owner cannot be removed.
+      responses:
+        '204': {description: Removed.}
+        default: {$ref: '#/components/responses/Error'}
+  /signup/config:
+    get:
+      operationId: signupConfig
+      tags: [signup]
+      security: []
+      summary: Whether self-service sign-up is open, and what it asks for.
+      responses:
+        '200':
+          description: The sign-up settings.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  open: {type: boolean}
+                  require_payment_method: {type: boolean}
+                  payments: {type: boolean}
+                  allowed_email_domains: {type: array, items: {type: string}}
+                required: [open, require_payment_method, payments, allowed_email_domains]
+  /signup:
+    post:
+      operationId: signup
+      tags: [signup]
+      security: []
+      summary: Create a tenant with the policy's default quota; the token is returned once.
+      description: |
+        Only when sign-up is open (off by default). Limited per client address and globally per hour; the email is
+        **not verified**: the first SSO sign-in with that address becomes the tenant's owner and then rotates the token.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                tenant_id: {type: string}
+                display_name: {type: string}
+                email: {type: string}
+              required: [tenant_id, email]
+      responses:
+        '201': {description: Created; the body has the tenant and its token (shown once)., content: {application/json: {schema: {type: object, additionalProperties: true}}}}
+        default: {$ref: '#/components/responses/Error'}
+  /stripe/webhook:
+    post:
+      operationId: stripeWebhook
+      tags: [billing]
+      security: []
+      summary: Stripe's callbacks (signed; not for clients).
+      description: Verified with `Stripe-Signature` (HMAC-SHA256 of `t.body`, 5 minutes tolerance); `503` when no webhook secret is configured.
+      responses:
+        '200': {description: Accepted.}
+        default: {$ref: '#/components/responses/Error'}
+  /fleet/billing/invoices:
+    get:
+      operationId: listInvoices
+      tags: [billing]
+      summary: Stripe invoice records (a tenant's own).
+      parameters:
+        - {name: month, in: query, schema: {type: string, pattern: '^\d{4}-\d{2}$'}}
+        - {name: tenant, in: query, description: Operator only., schema: {type: string}}
+      responses:
+        '200': {description: Invoices., content: {application/json: {schema: {type: object, additionalProperties: true}}}}
+        default: {$ref: '#/components/responses/Error'}
+    post:
+      operationId: runInvoices
+      tags: [billing, operator]
+      summary: Create the month's invoices now (operator); idempotent per tenant and month.
+      parameters:
+        - {name: month, in: query, required: true, schema: {type: string, pattern: '^\d{4}-\d{2}$'}}
+        - {name: tenant, in: query, schema: {type: string}}
+      responses:
+        '200': {description: Per-tenant outcomes., content: {application/json: {schema: {type: object, additionalProperties: true}}}}
+        default: {$ref: '#/components/responses/Error'}
+  /fleet/billing/payment-method:
+    post:
+      operationId: paymentMethod
+      tags: [billing]
+      summary: "Start saving a card: returns the URL of a Stripe Checkout session in setup mode."
+      responses:
+        '200': {description: The Checkout URL., content: {application/json: {schema: {type: object, properties: {url: {type: string}}, required: [url]}}}}
+        default: {$ref: '#/components/responses/Error'}
+  /fleet/tenants/{id}/billing:
+    parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+    put:
+      operationId: setTenantBilling
+      tags: [billing, operator]
+      summary: Turn invoicing on for a tenant and say whether it must hold a payment method (operator).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                enabled: {type: boolean}
+                payment_method_required: {type: boolean}
+      responses:
+        '200': {description: Updated., content: {application/json: {schema: {type: object, additionalProperties: true}}}}
+        default: {$ref: '#/components/responses/Error'}
+  /auth/config:
+    get:
+      operationId: authConfig
+      tags: [auth]
+      security: []
+      summary: Whether console SSO is on, and the sign-in button's text.
+      responses:
+        '200': {description: The SSO settings., content: {application/json: {schema: {type: object, additionalProperties: true}}}}
+  /auth/login:
+    get:
+      operationId: authLogin
+      tags: [auth]
+      security: []
+      summary: Start an OpenID Connect sign-in (redirects to the identity provider; browsers only).
+      parameters:
+        - {name: tenant, in: query, description: "Pick a tenant when the person is a member of several.", schema: {type: string}}
+      responses:
+        '302': {description: Redirect to the provider.}
+  /auth/callback:
+    get:
+      operationId: authCallback
+      tags: [auth]
+      security: []
+      summary: The redirect URI registered at the provider; ends the sign-in and sets the session cookie.
+      responses:
+        '302': {description: Redirect to /console.}
+  /auth/session:
+    get:
+      operationId: authSession
+      tags: [auth]
+      security: []
+      summary: Who the session cookie is (email, tenant, role), or that there is none.
+      responses:
+        '200': {description: The session., content: {application/json: {schema: {type: object, additionalProperties: true}}}}
+  /auth/logout:
+    post:
+      operationId: authLogout
+      tags: [auth]
+      security: []
+      summary: End the console session.
+      responses:
+        '200': {description: Signed out.}
+
 components:
   securitySchemes:
     bearer:
@@ -1161,6 +1476,22 @@ components:
           schema: {$ref: '#/components/schemas/Pool'}
 
   schemas:
+    MemberRole:
+      type: string
+      enum: [viewer, member, admin, owner]
+      description: |
+        `viewer` looks at everything and changes nothing; `member` manages VMs, volumes, snapshots and networks (not leases,
+        API keys, members, the budget or webhooks); `admin` does every tenant action except anything about owners;
+        `owner` everything.
+    Member:
+      type: object
+      properties:
+        email: {type: string}
+        role: {$ref: '#/components/schemas/MemberRole'}
+        added_at: {type: string, format: date-time}
+        last_sign_in: {type: [string, 'null'], format: date-time}
+        added_by: {type: [string, 'null'], description: "An email, `operator` or `token`."}
+      required: [email, role]
     Error:
       type: object
       properties: {error: {type: string}}

@@ -295,9 +295,13 @@ its write before reading again (backpressure, bounded memory). The node connects
 - a VM on `apple.usernet` through the host listener of its own TCP forward for that guest port (add one to
   `apple.usernet.port_forwards`; the guest network is not routable from the Mac);
 - a `tap` + `netns` VM from inside its network namespace;
-- any other VM at the address the node knows for it: the NAT address the vz runner reports, or its DHCP lease.
+- any other VM at the address the node knows for it: the NAT address the vz runner reports, or its DHCP lease. A vz
+  guest's address is what the guest itself printed on its serial console, so it is used only when it lies on one of that
+  Mac's own VM networks (a `bridge*` interface's subnet) and no other VM on the node reports the same address. A guest
+  that announces a LAN host or another tenant's VM gets `409`, not a connection.
 
-Loopback, unspecified and multicast addresses are refused, and central only ever connects to a registered node's API,
+Loopback, unspecified and multicast addresses are refused, and so are link-local ones (cloud metadata services live
+there), except the `169.254.x.y` a VM in its own network namespace is given. Central only ever connects to a registered node's API,
 so a tunnel cannot reach central's or a Mac's own services. If a node's `fluxctl serve` requires tokens, give it the
 fleet token as an admin token, or central's tunnels to it are refused (`502`).
 
@@ -318,6 +322,12 @@ operator) are written to the activity log. `GET /fleet/tunnels` lists the open t
 the policy's limits; `DELETE /fleet/tunnels/{id}` closes one at once. The console's **Tunnels** page shows them per
 tenant with a Close action. Tunnels live in the memory of the central that relays them: restarting it, or a failover
 to another central, ends them, and clients connect again.
+
+What ends a tunnel: either side closing, the idle timeout, an operator or the tenant closing it, the VM stopping, or
+central restarting. What does **not** end one: signing out of the console, a member being demoted or removed, or the
+tenant's token being rotated: a tunnel is checked for the tenant and the VM, not re-authorised per byte, and there is
+no absolute lifetime (steady traffic keeps it open). To cut a person off at once, close their tunnels from the
+**Tunnels** page (or `DELETE /fleet/tunnels/{id}`) when you remove them.
 ## Sign-in with SSO and team members
 
 People can sign in to the console with the company's identity provider (OpenID Connect: Okta, Microsoft Entra ID,
@@ -384,7 +394,7 @@ an `Origin`, come from the public URL; otherwise it is refused with `403`.
 
 | Role | May |
 |---|---|
-| `viewer` | Look at everything of the tenant (usage graphs, invoices and open tunnels included); change nothing, and open no tunnel. |
+| `viewer` | Look at everything of the tenant (usage graphs, invoices and open tunnels included), **including live VM screens and console logs**, which can contain secrets; change nothing, and open no tunnel. |
 | `member` | Also launch, control, run commands in and delete VMs, take, restore and delete snapshots, clone VMs, open SSH and port tunnels, and manage volumes and private networks. |
 | `admin` | Every tenant action: also leases, warm pools, closing tunnels, payment methods, API keys, members, the budget and webhooks. Cannot change or remove an owner, or make someone an owner. |
 | `owner` | Everything, including other owners. The last owner cannot be demoted, or removed while others remain. |
@@ -396,7 +406,9 @@ default: a feature that wants members to use it adds its path in `role_refusal` 
 
 Someone who signed up (`POST /signup`) becomes their tenant's owner the first time they sign in with SSO with the same
 email, as long as the tenant has no members yet (sign-up does not verify the email, so it is not made a member before
-the identity provider has verified it; the sign-up's token works meanwhile).
+the identity provider has verified it; the sign-up's token works meanwhile). **At that moment the tenant's primary token
+is rotated and its named API keys and webhooks are removed**, because whoever held the sign-up token may not be that
+person (anyone can sign up with someone else's address). The new owner mints a new token and keys from the console.
 
 ### Members
 

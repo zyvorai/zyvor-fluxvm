@@ -52,6 +52,14 @@ Eleven use cases map onto what is implemented today — nothing below is aspirat
 |-------|-----|
 | Product positioning (who/why/when-not) | [docs/POSITIONING.md](POSITIONING.md) |
 | Build a Mac cloud (Mac mini and Mac Studio fleet on `vz`) | [docs/mac-cloud.md](mac-cloud.md) |
+| Mac cloud: tenants, leases, quotas, snapshots and clones, volumes, tunnels, SSO and roles, API keys, webhooks | [docs/mac-cloud-tenancy.md](mac-cloud-tenancy.md) |
+| Mac cloud: run central in production (flags, state, exposure, checklist) | [docs/mac-cloud-operations.md](mac-cloud-operations.md) |
+| Mac cloud: prices, statements, self-service sign-up and Stripe | [docs/mac-cloud-billing.md](mac-cloud-billing.md) |
+| Mac cloud: graphs, `fluxctl fleet top` and Prometheus | [docs/fleet-metrics.md](fleet-metrics.md) |
+| Mac cloud: warm pools (CI jobs start in seconds) | [docs/warm-pools.md](warm-pools.md) |
+| Mac cloud: `fluxctl fleet` command reference | [docs/fluxctl-fleet.md](fluxctl-fleet.md) |
+| Mac cloud: Go, Python and TypeScript clients, OpenAPI, Terraform provider | [docs/fleet-sdk.md](fleet-sdk.md) |
+| Mac cloud on one laptop with simulated Macs | [docs/fleet-quickstart.md](fleet-quickstart.md) |
 | Product overview + metrics | [docs/PRODUCT_OVERVIEW.md](PRODUCT_OVERVIEW.md) |
 | Exhaustive feature checklist | [FEATURES.md](../FEATURES.md) |
 | Concrete use cases (CI runners, golden images, sandboxes, fleets) | [docs/use-cases.md](use-cases.md) |

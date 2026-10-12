@@ -9,9 +9,13 @@
 //! - an `apple.usernet` VM through the host listener of its own TCP port forward for that guest port (the guest is on
 //!   a private user-mode network the host cannot route to);
 //! - a `tap` + `netns` VM from inside its network namespace, to the address its dnsmasq leased;
-//! - any other VM to the address the node knows for it (the vz runner's NAT address, a DHCP lease).
+//! - any other VM to the address the node knows for it (the vz runner's NAT address, a DHCP lease). For a `vz` guest
+//!   that address is what the guest printed on its own serial console, so it is used only when it lies on one of this
+//!   Mac's `bridge*` (vmnet) subnets and no other VM on the node reports the same address.
 //!
 //! Loopback, unspecified and multicast guest addresses are refused, so a tunnel never reaches the node's own services.
+//! Link-local addresses are refused too, except `169.254.x.y` of a VM in its own network namespace (never the
+//! metadata address).
 //! Binary messages carry the bytes, at most 64 KiB each; each direction waits for its write before reading again, so a
 //! slow end slows the other instead of filling memory.
 
