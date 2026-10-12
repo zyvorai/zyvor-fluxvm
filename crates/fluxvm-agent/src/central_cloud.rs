@@ -133,6 +133,7 @@ pub(super) async fn reconcile_once(fleet: &Fleet) -> Value {
         }
         ended
     };
+    super::notify::scan(fleet, &ended).await;
     let rotated = {
         let mut t = fleet.tenancy.lock().await;
         let days = t.policy.overlay_key_rotation_days;
@@ -306,6 +307,136 @@ pub(super) async fn tenant_node_view(
         "last_seen": n.last_seen,
         "apple": n.apple,
     }))
+}
+
+// ---- prices and billing -------------------------------------------------------------------------------------------
+
+/// `GET /fleet/prices`: the price list (tenants too, so they can see what things cost).
+pub(super) async fn get_prices(State(fleet): State<Fleet>) -> Json<crate::billing::PriceList> {
+    Json(fleet.tenancy.lock().await.prices.clone())
+}
+
+/// `PUT /fleet/prices` (operator). Running leases keep the price they started with.
+pub(super) async fn put_prices(
+    State(fleet): State<Fleet>,
+    Extension(caller): Extension<Caller>,
+    Json(prices): Json<crate::billing::PriceList>,
+) -> Result<Json<crate::billing::PriceList>, AppError> {
+    require_admin(&caller)?;
+    prices
+        .validate()
+        .map_err(|e| AppError(StatusCode::BAD_REQUEST, e))?;
+    let mut t = fleet.tenancy.lock().await;
+    t.prices = prices;
+    fleet.persist_tenancy(&t);
+    Ok(Json(t.prices.clone()))
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub(super) struct BillingQuery {
+    /// `2026-10`; default the current month.
+    #[serde(default)]
+    month: Option<String>,
+    /// Operator: one tenant (default: every tenant).
+    #[serde(default)]
+    tenant: Option<String>,
+    /// `json` (default) or `csv`.
+    #[serde(default)]
+    format: Option<String>,
+}
+
+/// `GET /fleet/billing[?month=YYYY-MM&tenant=T&format=csv]`: statements, one per tenant. A tenant gets its own.
+pub(super) async fn billing(
+    State(fleet): State<Fleet>,
+    Extension(caller): Extension<Caller>,
+    Query(q): Query<BillingQuery>,
+) -> Result<Response, AppError> {
+    let now = Utc::now();
+    let (from, to) = match &q.month {
+        Some(m) => crate::billing::parse_month(m).ok_or_else(|| {
+            AppError(
+                StatusCode::BAD_REQUEST,
+                format!("month must look like 2026-10, not '{m}'"),
+            )
+        })?,
+        None => crate::billing::month_of(now),
+    };
+    let t = fleet.tenancy.lock().await;
+    let ids: Vec<String> = match (caller.tenant(), &q.tenant) {
+        (Some(me), _) => vec![me.to_owned()],
+        (None, Some(one)) => vec![one.clone()],
+        (None, None) => t.tenants.keys().cloned().collect(),
+    };
+    let statements: Vec<crate::billing::Statement> = ids
+        .iter()
+        .filter(|id| t.tenants.contains_key(id.as_str()))
+        .map(|id| crate::billing::statement(&t, id, from, to, now))
+        .collect();
+    let currency = t.prices.currency.clone();
+    let free = t.prices.is_free();
+    drop(t);
+    Ok(match q.format.as_deref() {
+        Some("csv") => {
+            // One header for the whole file, even when there is no statement.
+            let mut csv = String::from(crate::billing::CSV_HEADER);
+            for s in &statements {
+                let text = s.to_csv();
+                csv.push_str(text.split_once('\n').map_or("", |(_, rest)| rest));
+            }
+            ([(header::CONTENT_TYPE, "text/csv; charset=utf-8")], csv).into_response()
+        }
+        None | Some("json") => Json(json!({
+            "from": from,
+            "to": to,
+            "currency": currency,
+            "prices_set": !free,
+            "statements": statements,
+        }))
+        .into_response(),
+        Some(other) => {
+            return Err(AppError(
+                StatusCode::BAD_REQUEST,
+                format!("unknown format '{other}' (json, csv)"),
+            ));
+        }
+    })
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct BudgetBody {
+    /// Monthly amount in the price list's currency; `null` or 0 removes it.
+    #[serde(default)]
+    monthly: Option<f64>,
+}
+
+/// `PUT /fleet/tenants/{id|me}/budget`: a tenant's monthly budget (warnings only).
+pub(super) async fn put_budget(
+    State(fleet): State<Fleet>,
+    Extension(caller): Extension<Caller>,
+    Path(id): Path<String>,
+    Json(b): Json<BudgetBody>,
+) -> Result<Json<Value>, AppError> {
+    let tenant = keys_owner(&caller, &id)?;
+    let monthly = match b.monthly {
+        None => None,
+        Some(m) if m == 0.0 => None,
+        Some(m) if m.is_finite() && m > 0.0 && m <= 1e9 => Some(m),
+        Some(_) => {
+            return Err(AppError(
+                StatusCode::BAD_REQUEST,
+                "a budget is a positive amount".into(),
+            ));
+        }
+    };
+    let mut t = fleet.tenancy.lock().await;
+    let rec = t
+        .tenants
+        .get_mut(&tenant)
+        .ok_or_else(|| not_found(format!("no tenant '{tenant}'")))?;
+    rec.monthly_budget = monthly;
+    let out = rec.public_json();
+    fleet.persist_tenancy(&t);
+    Ok(Json(out))
 }
 
 // ---- API keys -----------------------------------------------------------------------------------------------------
@@ -563,6 +694,8 @@ pub(super) async fn delete_tenant(
     let mut t = fleet.tenancy.lock().await;
     t.delete_tenant(&id).map_err(tenancy_error)?;
     fleet.persist_tenancy(&t);
+    fleet.notify.keep_deliveries(&t.webhooks);
+    fleet.notify.forget_tenant(&id);
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -728,6 +861,10 @@ pub(super) async fn create_lease(
     let lease = t
         .create_lease(&tenant, &node.name, b.hours, Utc::now())
         .map_err(tenancy_error)?;
+    // The hourly price is fixed now, from the Mac's size and today's price list.
+    let lease = t
+        .price_lease(&lease.id, node.vcpus_total, node.memory_mib_total)
+        .unwrap_or(lease);
     fleet.persist_tenancy(&t);
     tracing::info!(lease = %lease.id, tenant = %tenant, node = %node.name, "lease created");
     Ok((
@@ -1439,6 +1576,7 @@ mod tests {
             tenancy_path: None,
             ha: None,
             audit: Arc::new(super::super::audit::AuditLog::memory()),
+            notify: Arc::default(),
         }
     }
 
@@ -2207,5 +2345,243 @@ mod tests {
         assert_eq!((s, v["items"].as_array().unwrap().len()), (200, 1));
         let (s, _) = call(&app, "GET", "/fleet/tenants/acme/keys", &primary, json!({})).await;
         assert_eq!(s, 403);
+    }
+
+    #[tokio::test]
+    async fn prices_statements_and_budgets() {
+        let fleet = fleet_of(vec![mac("mac-a", 32_768, 0)], TenancyState::default());
+        let app = Router::new()
+            .route("/fleet/tenants", post(create_tenant))
+            .route("/fleet/leases", post(create_lease))
+            .route("/fleet/prices", get(get_prices).put(put_prices))
+            .route("/fleet/billing", get(billing))
+            .route("/fleet/tenants/{id}/budget", axum::routing::put(put_budget))
+            .layer(middleware::from_fn_with_state(
+                fleet.clone(),
+                auth_middleware,
+            ))
+            .with_state(fleet.clone());
+        let (_, v) = call(
+            &app,
+            "POST",
+            "/fleet/tenants",
+            "admin-token",
+            json!({"id": "acme"}),
+        )
+        .await;
+        let token = v["token"].as_str().unwrap().to_owned();
+
+        // Only the operator sets prices; nonsense is refused; tenants can read them.
+        let list = json!({"currency": "EUR", "mac_per_hour": 0.5,
+            "mac_classes": [{"name": "mini", "min_vcpus": 8, "per_hour": 1.25}]});
+        assert_eq!(
+            call(&app, "PUT", "/fleet/prices", &token, list.clone())
+                .await
+                .0,
+            403
+        );
+        assert_eq!(
+            call(
+                &app,
+                "PUT",
+                "/fleet/prices",
+                "admin-token",
+                json!({"currency": "euro"})
+            )
+            .await
+            .0,
+            400
+        );
+        assert_eq!(
+            call(&app, "PUT", "/fleet/prices", "admin-token", list)
+                .await
+                .0,
+            200
+        );
+        let (s, v) = call(&app, "GET", "/fleet/prices", &token, json!({})).await;
+        assert_eq!((s, v["currency"].as_str()), (200, Some("EUR")));
+
+        // A lease takes its class's price when it starts.
+        let (s, v) = call(&app, "POST", "/fleet/leases", &token, json!({})).await;
+        assert_eq!(s, 201, "{v}");
+        assert_eq!(v["lease"]["price_class"], "mini");
+        assert_eq!(v["lease"]["rate_micros"], 1_250_000);
+
+        // Statements bill whole seconds, so let the lease accrue one before reading it.
+        tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+
+        // The tenant sees its statement; a budget shows up on it.
+        let (s, _) = call(
+            &app,
+            "PUT",
+            "/fleet/tenants/me/budget",
+            &token,
+            json!({"monthly": 500}),
+        )
+        .await;
+        assert_eq!(s, 200);
+        let (s, v) = call(&app, "GET", "/fleet/billing", &token, json!({})).await;
+        assert_eq!(s, 200, "{v}");
+        let st = &v["statements"][0];
+        assert_eq!(st["tenant"], "acme");
+        assert_eq!(st["currency"], "EUR");
+        assert!(
+            st["lines"][0]["description"]
+                .as_str()
+                .unwrap()
+                .contains("mac-a")
+        );
+        assert_eq!(st["budget"]["monthly"], 500.0);
+        let (s, _) = call(
+            &app,
+            "GET",
+            "/fleet/billing?month=2026-13",
+            &token,
+            json!({}),
+        )
+        .await;
+        assert_eq!(s, 400);
+        let (s, v) = call(
+            &app,
+            "GET",
+            "/fleet/billing?format=csv",
+            "admin-token",
+            json!({}),
+        )
+        .await;
+        assert_eq!(s, 200);
+        assert!(
+            v.as_str()
+                .unwrap()
+                .starts_with("tenant,from,to,description"),
+            "{v}"
+        );
+    }
+
+    #[tokio::test]
+    async fn webhooks_get_signed_events() {
+        // A receiver that keeps what it gets.
+        let got: Arc<Mutex<Vec<(String, String, Vec<u8>)>>> = Arc::default();
+        let sink = got.clone();
+        let receiver = Router::new().route(
+            "/hook",
+            post(
+                move |headers: axum::http::HeaderMap, body: axum::body::Bytes| {
+                    let sink = sink.clone();
+                    async move {
+                        let h = |k: &str| {
+                            headers
+                                .get(k)
+                                .and_then(|v| v.to_str().ok())
+                                .unwrap_or_default()
+                                .to_owned()
+                        };
+                        sink.lock().await.push((
+                            h("x-fluxvm-event"),
+                            h("x-fluxvm-signature"),
+                            body.to_vec(),
+                        ));
+                        StatusCode::NO_CONTENT
+                    }
+                },
+            ),
+        );
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let hook_url = format!("http://{}/hook", l.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(l, receiver).await.unwrap() });
+
+        let fleet = fleet_of(vec![mac("mac-a", 32_768, 0)], TenancyState::default());
+        let app = Router::new()
+            .route("/fleet/tenants", post(create_tenant))
+            .route("/fleet/leases", post(create_lease))
+            .route(
+                "/fleet/webhooks",
+                get(super::super::notify::list_webhooks).post(super::super::notify::create_webhook),
+            )
+            .route(
+                "/fleet/webhooks/{id}/test",
+                post(super::super::notify::test_webhook),
+            )
+            .route(
+                "/fleet/notifications",
+                get(super::super::notify::notifications),
+            )
+            .layer(middleware::from_fn_with_state(
+                fleet.clone(),
+                auth_middleware,
+            ))
+            .with_state(fleet.clone());
+        let (_, v) = call(
+            &app,
+            "POST",
+            "/fleet/tenants",
+            "admin-token",
+            json!({"id": "acme"}),
+        )
+        .await;
+        let token = v["token"].as_str().unwrap().to_owned();
+
+        // A tenant may not point a webhook at a private address or plain http.
+        for bad in [
+            hook_url.as_str(),
+            "https://10.0.0.1/x",
+            "https://127.0.0.1/x",
+        ] {
+            let (s, v) = call(&app, "POST", "/fleet/webhooks", &token, json!({"url": bad})).await;
+            assert_eq!(s, 400, "{bad}: {v}");
+        }
+        let (s, _) = call(
+            &app,
+            "POST",
+            "/fleet/webhooks",
+            &token,
+            json!({"url": "https://example.com/x", "events": ["node.down"]}),
+        )
+        .await;
+        assert_eq!(s, 400, "operator events are not for tenants");
+
+        // The operator's hook (internal URLs allowed) gets the tenant's lease, signed.
+        let (s, v) = call(
+            &app,
+            "POST",
+            "/fleet/webhooks",
+            "admin-token",
+            json!({"url": hook_url, "events": ["lease.created", "test"]}),
+        )
+        .await;
+        assert_eq!(s, 201, "{v}");
+        let secret = v["secret"].as_str().unwrap().to_owned();
+        let id = v["webhook"]["id"].as_str().unwrap().to_owned();
+        let (s, _) = call(&app, "POST", "/fleet/leases", &token, json!({})).await;
+        assert_eq!(s, 201);
+        let mut delivered = false;
+        for _ in 0..100 {
+            if !got.lock().await.is_empty() {
+                delivered = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert!(delivered, "no delivery");
+        let (kind, sig, body) = got.lock().await[0].clone();
+        assert_eq!(kind, "lease.created");
+        assert!(crate::gha::verify_signature(secret.as_bytes(), &body, &sig));
+        let event: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(event["tenant"], "acme");
+
+        // A test delivery reports its result; the tenant sees the notification but not the operator's hook.
+        let (s, v) = call(
+            &app,
+            "POST",
+            &format!("/fleet/webhooks/{id}/test"),
+            "admin-token",
+            json!({}),
+        )
+        .await;
+        assert_eq!((s, v["delivery"]["ok"].as_bool()), (200, Some(true)), "{v}");
+        let (_, v) = call(&app, "GET", "/fleet/webhooks", &token, json!({})).await;
+        assert!(v["items"].as_array().unwrap().is_empty());
+        let (_, v) = call(&app, "GET", "/fleet/notifications", &token, json!({})).await;
+        assert_eq!(v["items"][0]["type"], "lease.created");
     }
 }

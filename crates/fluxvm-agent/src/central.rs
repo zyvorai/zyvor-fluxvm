@@ -15,6 +15,8 @@ mod audit;
 mod cloud;
 #[path = "central_ha.rs"]
 mod ha_rt;
+#[path = "central_notify.rs"]
+mod notify;
 
 pub use ha_rt::HaHandle;
 
@@ -219,6 +221,8 @@ struct Fleet {
     ha: Option<Arc<ha_rt::HaRuntime>>,
     /// The activity log (`GET /fleet/events`).
     audit: Arc<audit::AuditLog>,
+    /// Notifications and webhook deliveries.
+    notify: Arc<notify::Notifier>,
 }
 
 impl Fleet {
@@ -399,14 +403,9 @@ async fn auth_middleware(State(fleet): State<Fleet>, mut req: Request, next: Nex
         Err(resp) => return resp,
     };
     let resp = next.run(req).await;
-    fleet.audit.record(audit::event(
-        &caller,
-        method,
-        path,
-        target,
-        resp.status(),
-        key_used,
-    ));
+    let event = audit::event(&caller, method, path, target, resp.status(), key_used);
+    notify::from_change(&fleet, &event).await;
+    fleet.audit.record(event);
     resp
 }
 
@@ -422,6 +421,11 @@ fn tenant_route_allowed(method: &axum::http::Method, path: &str) -> bool {
         ["fleet", "capacity"] | ["fleet", "usage"] | ["fleet", "tenants", "me"] => get,
         ["fleet", "tenants", "me", "keys"] => get || post,
         ["fleet", "tenants", "me", "keys", _] => delete,
+        ["fleet", "prices"] | ["fleet", "billing"] | ["fleet", "notifications"] => get,
+        ["fleet", "webhooks"] => get || post,
+        ["fleet", "webhooks", _] => delete,
+        ["fleet", "webhooks", _, "test"] => post,
+        ["fleet", "tenants", "me", "budget"] => *method == Method::PUT,
         ["fleet", "vms"] | ["fleet", "leases"] => get || post,
         ["fleet", "vms", _, _] => delete,
         ["fleet", "vms", _, _, "exec"] => post,
@@ -567,6 +571,7 @@ pub fn router_with_handle(cfg: CentralConfig) -> (Router, Option<HaHandle>) {
         audit: Arc::new(audit::AuditLog::open(
             cfg.state_dir.join("fleet-audit.jsonl"),
         )),
+        notify: Arc::default(),
     };
     let mut fleet = fleet;
     let mut handle = None;
@@ -620,6 +625,25 @@ pub fn router_with_handle(cfg: CentralConfig) -> (Router, Option<HaHandle>) {
             get(cloud::get_tenant)
                 .patch(cloud::update_tenant)
                 .delete(cloud::delete_tenant),
+        )
+        .route(
+            "/fleet/prices",
+            get(cloud::get_prices).put(cloud::put_prices),
+        )
+        .route("/fleet/billing", get(cloud::billing))
+        .route("/fleet/notifications", get(notify::notifications))
+        .route(
+            "/fleet/webhooks",
+            get(notify::list_webhooks).post(notify::create_webhook),
+        )
+        .route(
+            "/fleet/webhooks/{id}",
+            axum::routing::delete(notify::delete_webhook),
+        )
+        .route("/fleet/webhooks/{id}/test", post(notify::test_webhook))
+        .route(
+            "/fleet/tenants/{id}/budget",
+            axum::routing::put(cloud::put_budget),
         )
         .route(
             "/fleet/tenants/{id}/keys",
@@ -2554,6 +2578,7 @@ mod tests {
             tenancy_path: None,
             ha: None,
             audit: Arc::new(audit::AuditLog::memory()),
+            notify: Arc::default(),
         }
     }
 
