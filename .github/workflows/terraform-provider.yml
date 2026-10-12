@@ -1,0 +1,42 @@
+# Copyright 2026 Zyvor AI Labs · https://zyvor.dev
+# SPDX-License-Identifier: Apache-2.0
+#
+# The Terraform provider for the Mac cloud (terraform-provider-fluxvm), built on the Go fleet client in go/fleet.
+# Its tests drive the provider over the plugin protocol against an in-memory fake central: no Terraform, no Macs.
+name: terraform-provider
+
+on:
+  pull_request:
+    paths:
+      - 'terraform-provider-fluxvm/**'
+      - 'go/**'
+      - '.github/workflows/terraform-provider.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'terraform-provider-fluxvm/**'
+      - 'go/**'
+      - '.github/workflows/terraform-provider.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  provider:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: terraform-provider-fluxvm
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: stable
+      - name: gofmt
+        run: test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
+      - name: go vet
+        run: go vet ./...
+      - name: go test
+        run: go test -race ./...
+      - name: build
+        run: go build -o terraform-provider-fluxvm .

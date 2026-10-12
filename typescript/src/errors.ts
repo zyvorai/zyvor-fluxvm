@@ -57,3 +57,9 @@ export class RateLimited extends ApiError {
     this.retryAfter = retryAfter;
   }
 }
+
+/** 409 from central: a Mac already leased, a lease released before its 24-hour minimum, a name in use. */
+export class Conflict extends ApiError {}
+
+/** 503 from central: no Mac can take it right now, or this central is an HA standby. */
+export class ServiceUnavailable extends ApiError {}
