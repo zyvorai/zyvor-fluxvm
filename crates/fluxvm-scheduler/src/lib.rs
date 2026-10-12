@@ -43,6 +43,7 @@ mod migration_relay;
 pub mod oci_images;
 mod oci_pool;
 pub use oci_pool::{WARM_LABEL as OCI_WARM_LABEL, listed as vm_listed};
+pub mod macos_pool;
 pub mod oci_sandbox;
 pub mod procbox_sandbox;
 mod recovery;

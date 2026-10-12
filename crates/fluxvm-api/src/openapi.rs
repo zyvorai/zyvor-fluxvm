@@ -312,6 +312,10 @@ fn ops() -> Vec<Op> {
         .returns("CapabilityReport"),
         op("get", "/v1/host/apple", "Apple host capabilities (runner probe)", HOST),
         op("get", "/v1/vznets", "Private vz networks and their members", HOST),
+        op("get", "/v1/macos-pool", "Enrolled macOS warm-pool slots", VMS).returns("VmList"),
+        op("post", "/v1/macos-pool/checkout", "Restore a free macOS pool slot (409 when none is free)", VMS).returns("VmRecord"),
+        op("post", "/v1/macos-pool/{id}/enroll", "Make a running, set-up macOS guest a pool slot", VMS).returns("VmRecord"),
+        op("post", "/v1/macos-pool/{id}/return", "Stop a leased pool slot", VMS).returns("VmRecord"),
         op("get", "/v1/vms/{id}/balloon", "Memory balloon status", VMS),
         op("post", "/v1/vms/{id}/balloon", "Set the memory balloon target", VMS),
         op(
