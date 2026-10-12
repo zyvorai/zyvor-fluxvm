@@ -34,8 +34,8 @@ On an Apple M4 mini (16 GB, macOS 27.2), `debian-13` guest, daemon on loopback, 
   forkable. That is also the safer shape for an agent.
 - **The children keep the parent's identity.** The demo forks with `"identity": "best-effort"`, which applied nothing: an
   offline sandbox has no guest agent over SSH, so the daemon cannot reset the hostname, machine-id or SSH host keys. All
-  four copies report the same `machine-id`. That is fine for throwaway attempts and wrong for anything that must be
-  distinct (anything that registers itself somewhere).
+  four copies carry the parent's (the fork reply says `identity.via: none, applied: []` for every child). That is fine
+  for throwaway attempts and wrong for anything that must be distinct (anything that registers itself somewhere).
 - **The first sandbox on a fresh daemon was slow:** 61 s with an empty state directory (image preparation and a cold
   boot), against 4.5 s afterwards. Warm the daemon (or `fluxctl sandbox warm --count N`) before timing anything.
 - Memory per sandbox is measured separately: [docs/agent-density.md](../../docs/agent-density.md).
