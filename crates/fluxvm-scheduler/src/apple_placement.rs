@@ -36,6 +36,21 @@ pub struct AppleHostCaps {
 /// Apple's limit on concurrently running macOS guests per host.
 pub const MAX_MACOS_GUESTS: u32 = 2;
 
+/// This Mac already runs [`MAX_MACOS_GUESTS`] macOS guests. The API maps it to 409: it clears when one stops.
+#[derive(Debug)]
+pub struct MacosGuestLimit;
+
+impl std::fmt::Display for MacosGuestLimit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "this Mac already runs {MAX_MACOS_GUESTS} macOS guests (Apple's licence limit); stop one or use a Linux guest"
+        )
+    }
+}
+
+impl std::error::Error for MacosGuestLimit {}
+
 /// Admission for one daemon: macOS guests that hold a slot (not stopped or failed), and an error once a new one
 /// would be the third. The kernel enforces this too, but only at start, with an opaque VZ error.
 pub fn enforce_macos_guest_limit(
@@ -61,9 +76,7 @@ pub fn enforce_macos_guest_limit(
         })
         .count();
     if active >= MAX_MACOS_GUESTS as usize {
-        anyhow::bail!(
-            "this Mac already runs {MAX_MACOS_GUESTS} macOS guests (Apple's licence limit); stop one or use a Linux guest"
-        );
+        return Err(MacosGuestLimit.into());
     }
     Ok(())
 }
@@ -263,6 +276,7 @@ mod tests {
     fn daemon_refuses_a_third_running_macos_guest() {
         let two = [vm("macos", "running"), vm("macos", "paused")];
         let err = enforce_macos_guest_limit(&create("macos"), &two).unwrap_err();
+        assert!(err.downcast_ref::<MacosGuestLimit>().is_some(), "{err}");
         assert!(err.to_string().contains("licence limit"), "{err}");
         // Linux guests are not counted against, or limited by, the two slots.
         assert!(enforce_macos_guest_limit(&create("linux"), &two).is_ok());

@@ -3850,6 +3850,16 @@ impl VmManager {
             self.ensure_vz_overlays_exclusive(&a.extra_disks, Some(id))
                 .await
                 .with_context(|| format!("cannot start {id}"))?;
+            // A stopped macOS guest holds no slot, so starting it can make a third.
+            let others: Vec<_> = self
+                .store
+                .list()
+                .await
+                .into_iter()
+                .filter(|r| r.id != id)
+                .collect();
+            apple_placement::enforce_macos_guest_limit(&vm.request, &others)
+                .with_context(|| format!("cannot start {id}"))?;
         }
         // A CephRbd disk is a `rbd:pool/image:...` URI, not a real
         // filesystem path — there's nothing on the local filesystem to

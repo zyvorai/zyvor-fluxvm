@@ -71,6 +71,15 @@ impl<E: Into<anyhow::Error>> From<E> for ApiError {
                 message: format!("{:#}", e),
             };
         }
+        // Apple allows two macOS guests per Mac; it clears when one stops.
+        if e.downcast_ref::<fluxvm_scheduler::apple_placement::MacosGuestLimit>()
+            .is_some()
+        {
+            return Self {
+                status: StatusCode::CONFLICT,
+                message: format!("{:#}", e),
+            };
+        }
         use fluxvm_scheduler::procbox_sandbox::ProcboxError;
         // Procbox sandboxes fail in ways a plain 400 would hide: a disabled
         // feature, a guest-only route, an unenforceable policy, a too-large
