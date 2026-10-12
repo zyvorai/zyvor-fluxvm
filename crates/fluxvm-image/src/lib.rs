@@ -14,6 +14,7 @@ mod qcow2;
 pub mod qga;
 pub mod raw_ext4;
 pub mod storage;
+pub mod tart;
 pub mod vm_artifact;
 mod vmdk;
 mod vmdk_descriptor;

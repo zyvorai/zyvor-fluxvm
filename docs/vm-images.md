@@ -20,6 +20,32 @@ fluxctl vm-image pull ghcr.io/acme/vm/macos:27-xcode-27.1 ~/vms/macos-27-xcode
 fluxctl vm-image push /images/debian-13.raw ghcr.io/acme/vm/debian:13
 ```
 
+## Tart images
+
+`pull` also reads images published for Cirrus Labs' [Tart](https://tart.run), and converts them into a FluxVM bundle:
+
+```bash
+fluxctl vm-image pull ghcr.io/cirruslabs/macos-sequoia-xcode:latest ~/vms/sequoia-xcode
+```
+
+| Tart | FluxVM bundle |
+|---|---|
+| `disk.img` (512 MiB slices, Apple LZ4) | `disk.raw`, sparse |
+| `nvram.bin` (macOS auxiliary storage) | `auxiliary.bin` |
+| `nvram.bin` (Linux EFI variables) | `efi.bin` |
+| `hardwareModel` in the VM config | `hardware.bin` |
+| `ecid` (machine identifier) | dropped: every clone gets its own |
+
+Each slice is checked against its compressed digest and its uncompressed digest. The importer refuses:
+- stacked images (ASIF overlay layers) and ASIF disks: pull a flat, raw image instead;
+- Tart's legacy `disk.v1` format;
+- `amd64` images.
+
+Tart's CPU and memory settings are kept as annotations in the pull report. The guest user and password are whatever
+the image's publisher set (for Cirrus Labs images, `admin`/`admin`), so change them before exposing a clone.
+
+Status: tested against an in-process registry with hand-built Tart layers. Not yet run against a real Tart image.
+
 ## How it is stored
 
 - Each file is cut into chunks (64 MiB by default, `--chunk-mib 1-512`). Each chunk is compressed with zstd and stored as
@@ -60,4 +86,4 @@ Templates should not be signed in.
 - Streaming upload of chunks larger than memory. Chunks are held in memory, so keep `--chunk-mib` modest.
 - Using a pulled image as a read-only DiskImageKit base layer with an ASIF cache layer on each Mac (macOS 27), instead
   of a full local copy.
-- Reading Tart's OCI image format.
+- Pushing in Tart's format, and Tart's stacked (ASIF overlay) images.
