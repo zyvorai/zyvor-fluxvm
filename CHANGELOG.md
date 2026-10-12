@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+
+### Docs: Mac cloud operations guide, `fluxctl fleet` reference, node API and OpenAPI coverage
+- New `docs/mac-cloud-operations.md`: every `fluxvm-agent central` flag, what central keeps on disk, which paths are
+  public and why, a pre-launch checklist, and upgrade notes. New `docs/fluxctl-fleet.md`: all 65 `fluxctl fleet` commands,
+  generated from the binary's `--help`.
+- `docs/api.md`: node stats (`GET /v1/stats`), volumes (`/v1/volumes`) and tunnels (`GET /v1/vms/{id}/tunnel`), including
+  which addresses a vz tunnel may reach.
+- `schemas/fleet-openapi.yaml`: tunnels, metrics (`/fleet/metrics/*`, `/metrics`), pool status, members, sign-up,
+  Stripe webhook, invoices and payment method, and the console sign-in routes (75 paths, 98 operations).
+- Tenancy, warm-pool and billing docs now say what is not covered: viewers see screens and logs, tunnels outlive a
+  sign-out, shared warm pools share credentials and a network, the sign-up email is not verified.
+- `docs/fleet-quickstart.md`: the tenant commands that were run against the simulator for snapshots, volumes, power,
+  logs, pools and tunnels.
+
 ### Added: vGPU (mediated devices) and GPU health
 - `GET /v1/host/mdev` lists mdev parents, profiles (free instances, framebuffer size, MIG slices from MIG-backed
   profile names) and instances, with whether a VM lists or holds each. `POST /v1/host/mdev` creates an instance,
@@ -16,6 +30,7 @@
 - Lab-tested from Kairon (`scripts/lab-vgpu.sh`, kernel 7.0, QEMU 10.2) with the kernel's `mbochs` sample driver:
   a VM booted with an instance by UUID, the guest saw it, and the instance was removed after stop. NVIDIA vGPU and
   MIG are unit-tested only. See `docs/vgpu.md`.
+
 
 
 ### Added: node API for volumes, tunnels, usage stats and restore (used by the fleet platform)

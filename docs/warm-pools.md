@@ -162,6 +162,11 @@ is the fleet token), and keep `min_ready` at about the number of jobs that usual
 
 ## Limits
 
+- A **shared** pool's VMs are all booted from one image, so they carry the same baked credentials and SSH host keys, and
+  they sit on the host's shared network (a shared pool is refused while `isolate_tenant_networks` is on). A tenant that
+  takes one can reach the pool's other warm VMs, and the VMs later taken by other tenants, as it could any VM on a
+  shared network. Use tenant pools (a lease, or `isolate_tenant_networks` with the tenant's own pool) for workloads
+  that must not see each other, and bake no secrets into a shared pool's image.
 - A warm VM is booted once and handed over as it is: whatever the image does at first boot has happened, with no
   per-launch cloud-init, networks or disks.
 - Readiness is "the node says running", not "the guest agent answers": a claim can land a moment before the guest is

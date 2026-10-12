@@ -113,6 +113,9 @@ same registry: `fluxctl up --fleet http://fleet-registry:7799` ([macos-stacks.md
 - [mac-cloud-billing.md](mac-cloud-billing.md): self-service sign-up, Stripe invoices and payment methods.
 - [fleet-sdk.md](fleet-sdk.md): Go, Python and TypeScript clients, the OpenAPI description
   (`schemas/fleet-openapi.yaml`) and the Terraform provider (`terraform-provider-fluxvm`).
+- [mac-cloud-operations.md](mac-cloud-operations.md): running central in production: every flag, what it keeps on disk, what
+  it exposes, a pre-launch checklist.
+- [fluxctl-fleet.md](fluxctl-fleet.md): every `fluxctl fleet` command, generated from the binary's own `--help`.
 - [fleet-quickstart.md](fleet-quickstart.md): run the whole cloud on one laptop with simulated Macs (`scripts/fleet-sim.sh`).
 - [macos-signing.md](macos-signing.md): Developer ID signing, which vmnet, bridged networking and USB passthrough need.
 

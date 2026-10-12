@@ -56,7 +56,7 @@ fluxctl sandbox run alpine:3.22 --rm -- echo hi     # a container in its own VM
 
 From source instead: `xcode-select --install && brew install hivex && cargo build -p fluxctl` (builds and signs the vz runner).
 
-[**FluxVM on Mac**](https://zyvorai.github.io/zyvor-fluxvm/mac) · [**Build a Mac cloud**](https://zyvorai.github.io/zyvor-fluxvm/mac-cloud) · [Mac guide](docs/macos.md) · [Mac cloud guide](docs/mac-cloud.md) · [Architecture](docs/macos-architecture.md)
+[**FluxVM on Mac**](https://zyvorai.github.io/zyvor-fluxvm/mac) · [**Build a Mac cloud**](https://zyvorai.github.io/zyvor-fluxvm/mac-cloud) · [Mac guide](docs/macos.md) · [Mac cloud guide](docs/mac-cloud.md) · [Tenancy, leases and roles](docs/mac-cloud-tenancy.md) · [Run central](docs/mac-cloud-operations.md) · [`fluxctl fleet`](docs/fluxctl-fleet.md) · [SDKs and Terraform](docs/fleet-sdk.md) · [Architecture](docs/macos-architecture.md)
 
 Measured on one Apple M4 with macOS 27.2. Multi-Mac fleets are not yet verified on real hardware; see [Native macOS](#native-macos-apple-silicon) below for the full list.
 
