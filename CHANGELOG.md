@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+### Docs and site: agent sandboxes and the Mac cloud platform, with their evidence labels
+- New `/agents` page on the docs site: the fork-into-four demo with its real output, the offline and local-model story,
+  the measured memory table and the MCP setup, with the caveats (only offline sandboxes fork; copies keep the parent's
+  identity; first create on a fresh daemon took 61 s).
+- `/mac-cloud` now shows what a team gets (leases and tenants, snapshots, volumes, tunnels, warm pools, metrics, SSO,
+  billing, SDKs), each card tagged with what it was run against; its steps use `fluxctl fleet`. `/mac` fixes the stale
+  Homebrew tab (`brew install zyvorai/tap/fluxvm`) and drops the removed capacity estimates for the measured figures.
+  The home page replaces its illustrative terminal and numbers with measured ones.
+- README, POSITIONING and PRODUCT_OVERVIEW gain the agent-sandbox and platform rows; a PR-time `Docs site check`
+  workflow builds the site before merge.
+
 ### Fixed: `fluxctl service install` no longer starts a second daemon beside Homebrew's
 - It refuses, before writing the plist, when it runs from a Homebrew install, when a `brew services` plist for `fluxvm`
   exists, or when something already accepts connections on the configured `listen` address, and says what to do
@@ -23,12 +34,15 @@
 
 ### Docs: install on a Mac with Homebrew
 - New `docs/install-macos.md`: install, the service, a first VM, and wiring an MCP client, each tested from the published
-  tap on an M4 from a fresh `HOME`; upgrade and uninstall are marked as not exercised.
+  tap on an M4 from a fresh `HOME`. `fluxctl service install`, a real `brew upgrade` (0.4.1 to 0.4.4) and `brew
+  uninstall` were run too; the page records the clash with `brew services` and that an MCP entry written by 0.4.4 or
+  earlier is dead after an upgrade.
 
 ### Added: an agent-sandbox demo with real timings
 - `examples/agent-sandbox-demo/local-model.sh`: a sandbox with no network card reaching a model server on the Mac's
-  loopback through one vsock port; verified on an M4 with a stand-in server (the relay was "unverified on hardware"
-  before), not yet with a real llama.cpp or MLX model.
+  loopback through one vsock port. The relay was "unverified on hardware"; it is now verified on an M4 with a stand-in
+  server and with a real `llama-server` model (SmolLM2-135M, a deliberately tiny model); not yet with MLX or a larger
+  model.
 - `examples/agent-sandbox-demo/run.sh`: an offline sandbox, a failing test, a fork into four running copies, four fixes
   tried in parallel, the passing one kept. About 4 s to fork and 0.3 s to test on an M4 mini; its README lists what it
   does not do (a NAT sandbox cannot fork; copies keep the parent's identity; the first create on a fresh daemon took 61 s).

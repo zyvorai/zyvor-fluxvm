@@ -22,8 +22,8 @@ const USE_CASES: UseCase[] = [
     icon: 'AI',
     hue: 'linear-gradient(135deg,#5e5ce6,#bf5af2)',
     title: 'An agent farm',
-    body: 'Disposable Linux sandboxes for coding agents through MCP: TTL, offline or allow-listed egress, changesets, and a warm pool that restores in about 2 s.',
-    to: '/docs/macos-sandboxes',
+    body: 'Disposable Linux sandboxes for coding agents through MCP: offline or allow-listed, forked into running copies in about 4 s, with a warm pool that restores in about 2 s.',
+    to: '/agents',
   },
   {
     icon: 'OCI',
@@ -45,34 +45,99 @@ const STEPS: {n: number; title: string; body: string; code: string}[] = [
   {
     n: 1,
     title: 'Run FluxVM on every Mac',
-    body: 'A LaunchAgent in a logged-in session, so warm starts and snapshot restore keep working after a reboot.',
-    code: 'fluxctl --config ~/.config/fluxvm/fluxvm.toml service install',
+    body: 'The daemon as a service in a logged-in session, so warm starts and snapshot restore survive a reboot.',
+    code: ['brew install zyvorai/tap/fluxvm', 'brew services start zyvorai/tap/fluxvm'].join('\n'),
   },
   {
     n: 2,
-    title: 'Start one fleet registry',
-    body: 'Any Mac (or Linux host) can be the registry. It proxies creates and lists to the right node.',
-    code: 'fluxvm-agent central --listen 0.0.0.0:7799',
+    title: 'Start one central',
+    body: 'The fleet registry and API. Built from source today (cargo build -p fluxvm-agent); it is not in the Homebrew package yet.',
+    code: [
+      'TOKEN=$(openssl rand -hex 16)',
+      'fluxvm-agent central --listen 127.0.0.1:7799 --token $TOKEN \\',
+      '  --public-url https://cloud.example.com',
+    ].join('\n'),
   },
   {
     n: 3,
     title: 'Register each Mac',
-    body: 'Every 10 s the node reports free CPU and memory, its macOS guest count and what Virtualization.framework can do on that Mac.',
+    body: 'Each node reports free CPU and memory, its macOS guest count and what Virtualization.framework can do there.',
     code: [
       'fluxvm-agent node --name studio-1 \\',
-      '  --central http://fleet-registry:7799 \\',
+      '  --central http://fleet-registry:7799 --token $TOKEN \\',
       '  --advertise-url http://studio-1.local:7788',
     ].join('\n'),
   },
   {
     n: 4,
-    title: 'Ask the fleet, not a Mac',
-    body: 'With backend vz, the Apple scorer skips Macs that lack the feature or already run two macOS guests, and packs small VMs tightly.',
+    title: 'Give a team a tenant',
+    body: 'A tenant gets its own token, quotas and Mac leases, and uses the fleet like one big machine.',
     code: [
-      'curl -X POST fleet-registry:7799/fleet/vms \\',
-      '  -H \'Content-Type: application/json\' \\',
-      '  -d \'{"name":"ci-1","backend":"vz","image":"debian-13"}\'',
+      'fluxctl fleet --token $TOKEN tenant create acme --max-vms 8',
+      'fluxctl fleet lease create          # rent a whole Mac, 24 h minimum',
+      'fluxctl fleet launch --image debian-13 web-1',
+      'fluxctl fleet ssh web-1             # through central; no route to the Mac',
     ].join('\n'),
+  },
+];
+
+type Feature = {title: string; body: string; to: string; tag: string};
+// Every item below was run against central plus simulated Macs (fluxvm-agent sim-node) and covered by unit tests;
+// none has run across several real Macs. Sources: docs/mac-cloud-tenancy.md, docs/fleet-quickstart.md.
+const FEATURES: Feature[] = [
+  {
+    title: 'Mac leases and tenants',
+    body: 'A tenant rents a whole, empty Mac for at least 24 hours (Apple\u2019s licence rule), with quotas, scrub-on-release and drain.',
+    to: '/docs/mac-cloud-tenancy',
+    tag: 'Tested against simulated Macs',
+  },
+  {
+    title: 'Snapshots and clones',
+    body: 'Save a VM with or without memory, roll back while it runs, and clone it into a new VM under the same quota.',
+    to: '/docs/mac-cloud-tenancy#snapshots-and-clones',
+    tag: 'Tested against simulated Macs',
+  },
+  {
+    title: 'Persistent volumes',
+    body: 'Disks that outlive a VM. A VM that uses one is placed on its Mac, and two VMs never share one.',
+    to: '/docs/mac-cloud-tenancy#volumes',
+    tag: 'Tested against simulated Macs',
+  },
+  {
+    title: 'SSH without exposing the Mac',
+    body: 'fluxctl fleet ssh and port-forward go through central, so tenants never need a route to a Mac.',
+    to: '/docs/mac-cloud-tenancy#ssh-and-port-tunnels',
+    tag: 'Tested against simulated Macs',
+  },
+  {
+    title: 'Warm pools',
+    body: 'Booted VMs waiting, so a CI job starts in seconds; the pool boots a replacement after each claim.',
+    to: '/docs/warm-pools',
+    tag: 'Tested against simulated Macs',
+  },
+  {
+    title: 'Graphs and Prometheus',
+    body: 'CPU, memory and disk per VM and per Mac, fluxctl fleet top, and a /metrics endpoint with a scrape-only token.',
+    to: '/docs/fleet-metrics',
+    tag: 'Tested against simulated Macs',
+  },
+  {
+    title: 'SSO and roles',
+    body: 'Console sign-in through your OIDC provider, with viewer, member, admin and owner roles.',
+    to: '/docs/mac-cloud-tenancy#sign-in-with-sso-and-team-members',
+    tag: 'Implemented; no real identity provider run',
+  },
+  {
+    title: 'Prices, statements, budgets',
+    body: 'A price list, monthly statements per tenant (CSV too), budgets that warn at 80%, and signed webhooks.',
+    to: '/docs/mac-cloud-billing',
+    tag: 'Tested against simulated Macs',
+  },
+  {
+    title: 'Go, Python, TypeScript, Terraform',
+    body: 'Typed clients for the fleet API, an OpenAPI description and a Terraform provider.',
+    to: '/docs/fleet-sdk',
+    tag: 'Tested against fakes',
   },
 ];
 
@@ -98,6 +163,9 @@ function Hero() {
         <div className={styles.buttons}>
           <Link className="button button--primary button--lg" to="/docs/mac-cloud">
             Read the guide
+          </Link>
+          <Link className="button button--outline button--lg button--secondary" to="/docs/mac-cloud-operations">
+            Run it for real
           </Link>
           <Link className="button button--outline button--lg button--secondary" to="/mac">
             FluxVM on one Mac
@@ -139,6 +207,38 @@ function UseCases() {
   );
 }
 
+function Features() {
+  return (
+    <section className={styles.section}>
+      <div className="container">
+        <Reveal>
+          <div className="text--center">
+            <p className={styles.kicker}>What your team gets</p>
+            <Heading as="h2" className={styles.h2}>
+              A cloud, not a shelf
+            </Heading>
+            <p className={styles.lead}>
+              Tenants and leases, snapshots, volumes, tunnels, graphs and a console, in one API. Each card says what
+              it has actually been run against.
+            </p>
+          </div>
+          <div className={styles.grid3}>
+            {FEATURES.map((f) => (
+              <div key={f.title} className={styles.card}>
+                <Heading as="h3">
+                  <Link to={f.to}>{f.title}</Link>
+                </Heading>
+                <p>{f.body}</p>
+                <span className={clsx(styles.tag, styles.tagWarn)}>{f.tag}</span>
+              </div>
+            ))}
+          </div>
+        </Reveal>
+      </div>
+    </section>
+  );
+}
+
 function Steps() {
   return (
     <section className={styles.section}>
@@ -147,7 +247,7 @@ function Steps() {
           <div className="text--center">
             <p className={styles.kicker}>Four steps</p>
             <Heading as="h2" className={styles.h2}>
-              From a shelf of Macs to one API
+              From a shelf of Macs to a team&rsquo;s cloud
             </Heading>
           </div>
           <div className={styles.grid4}>
@@ -240,6 +340,15 @@ function Honest(): ReactNode {
                 <code>vz</code> placement in <code>fluxvm-agent central</code> was checked with one
                 real Mac and simulated nodes. No multi-Mac fleet has run on real hardware yet.
               </li>
+              <li>
+                The platform features above were run against central plus simulated Macs and covered by tests; none
+                has run across several real Macs, against real Stripe, or with a real identity provider.
+              </li>
+              <li>
+                Self-service sign-up and Stripe are off by default and should stay off until sign-up email
+                verification exists. Console viewers can see live screens and logs, and shared warm pools share a
+                network and image credentials: see <Link to="/docs/mac-cloud-operations">the operations guide</Link>.
+              </li>
               <li>Thunderbolt RDMA, the shared vmnet broker and physical USB passthrough are not verified.</li>
             </ul>
             <p style={{marginTop: '0.75rem', marginBottom: 0}}>
@@ -260,6 +369,7 @@ export default function MacCloudPage(): ReactNode {
       <Hero />
       <main>
         <UseCases />
+        <Features />
         <Steps />
         <Checklist />
         <Honest />

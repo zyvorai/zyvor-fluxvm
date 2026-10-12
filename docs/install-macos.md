@@ -99,7 +99,7 @@ Tested end to end from a fresh `HOME`: the entry is written, then `fluxctl mcp s
 | `vm_delete` | deleted |
 
 Write tools (`--allow-write`) can create, run commands in and delete VMs: leave them off for a read-only agent. A runnable
-agent loop with real timings is in [examples/agent-sandbox-demo](../examples/agent-sandbox-demo/README.md).
+agent loop with real timings is in [examples/agent-sandbox-demo](https://github.com/zyvorai/zyvor-fluxvm/tree/main/examples/agent-sandbox-demo).
 
 > **After `brew upgrade`:** an MCP entry (or `fluxctl service install` plist) written by 0.4.4 or earlier points at the
 > versioned path (`/opt/homebrew/Cellar/fluxvm/0.4.4/bin/fluxctl`). Homebrew removes the old version on upgrade, and the

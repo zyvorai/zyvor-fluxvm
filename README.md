@@ -47,6 +47,7 @@ FluxVM runs natively on Apple silicon. Its `vz` backend drives Apple's **Virtual
 | **Keychain sign-in** | `fluxctl signin` keeps a guest password in your login Keychain and types it; the API never returns it |
 | **launchd** | `fluxctl service install` writes a LaunchAgent, so a headless Mac mini serves VMs after every reboot |
 | **Agents see the screen** | Screenshots, keyboard and mouse for any `vz` guest, with no Screen Recording permission on the host |
+| **A throwaway computer per agent task** | An offline sandbox (no network card) is ready in about 4.5 s and forks into four running copies in about 4 s; a local model stays reachable over one vsock port. [Demo](examples/agent-sandbox-demo/README.md) · [Agents page](https://zyvorai.github.io/zyvor-fluxvm/agents) |
 
 ```bash
 brew install zyvorai/tap/fluxvm                     # prebuilt, Apple silicon, macOS 14+
@@ -66,6 +67,9 @@ From the 0.4.0 (unreleased) section of the [CHANGELOG](CHANGELOG.md) and recent 
 
 | Feature | What it does |
 |---|---|
+| **Agent sandboxes you can fork** | `sandbox_create {"offline": true}`, then `vm_fork`: four running copies in about 4 s, four fixes tested in 0.3 s, the passing one kept ([demo](examples/agent-sandbox-demo/README.md); measured on an M4 mini, copies keep the parent's identity) |
+| **Fleet platform** | Tenants and 24-hour Mac leases, snapshots and clones, volumes, SSH and port tunnels, SSO and roles, metrics and Prometheus, warm pools, prices and signed webhooks, Go/Python/TypeScript clients and a Terraform provider ([guide](docs/mac-cloud-tenancy.md), [run it](docs/mac-cloud-operations.md); tested against simulated Macs, not a real multi-Mac fleet) |
+| **Install with Homebrew** | `brew install zyvorai/tap/fluxvm`, then `brew services start zyvorai/tap/fluxvm` and `fluxctl mcp install claude-code`; install, service, upgrade and uninstall were run for real ([install guide](docs/install-macos.md)) |
 | **MCP server for AI agents** | `fluxctl mcp serve` speaks the Model Context Protocol over stdio; read tools by default, `--allow-write` adds VM create, clone, exec, snapshot, delete, power and capture, backups, pools and sandboxes ([docs/mcp.md](docs/mcp.md)) |
 | **VM fork** | `POST /v1/vms/{id}/fork` / `fluxctl fork-vm`: snapshot a running FluxVM-engine VM once and restore N children with a shared read-only memory file and reflinked rootfs |
 | **VM import** | `POST /v1/images/import` / `fluxctl import-image`: OVA/OVF/VMDK/VHD(X)/qcow2 to raw disks, with offline GuestKit repair of the boot disk for virtio |

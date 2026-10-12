@@ -601,12 +601,13 @@ are single-machine figures, not benchmarks, and a few are approximate in the sou
 | First boot of a macOS clone from a USB drive | about 5 minutes to SSH at 37 MB/s | [macos.md](macos.md#macos-guests) |
 | macOS restore image / installed disk | 26.6 GB / about 24 GB (plan for 55 GB or more free) | [macos.md](macos.md#macos-guests) |
 
-**Estimates, not measurements.** [agent-density.md](agent-density.md#rough-capacity) gives rough counts of active `tiny` sandboxes:
-4 to 8 on a 16 GB Mac mini, 12 to 20 on a 36 GB Mac Studio, 25 to 40 on a 64 GB or larger Mac Studio. The source states they are
-estimates that host load, the guest image and what the agents run will change.
+**Measured, on one machine.** [agent-density.md](agent-density.md#what-a-sandbox-costs-on-a-real-mac) reports the resident size of
+21 idle sandboxes on a 16 GB M4 mini: 205 to 788 MiB each, varying with profile, cold boot against warm claim, and time since boot.
+Plan on about 800 MiB per active sandbox. The "roughly a dozen on a 16 GB Mac" figure there is an estimate, and no Mac Studio size
+was measured.
 
-**Not measured.** There is no per-sandbox memory measurement in the repository, so this page does not quote one. The `agent-micro`
-boot time and image size on a Mac are also unmeasured.
+**Not measured.** Guests doing real work, eight or more sandboxes at once, and Mac Studio sizes. The `agent-micro` boot time and
+image size on a Mac are also unmeasured.
 
 ## Where to go next
 

@@ -48,6 +48,10 @@ The exhaustive, line-by-line checklist lives in **[FEATURES.md](../FEATURES.md)*
 
 **Secure Containers** *(GA)* — containerd runtime-v2 shim (`containerd-shim-fluxvm-v2`) mapping a Pod/task group onto one FluxVM microVM, with CNI L2, cgroup-v2 stats, VSOCK stdio/TTY, namespaces, device passthrough, guest AppArmor/SELinux/seccomp, and Sentinel NetworkPolicy. Supported profile + flip runbook: [secure-containers-supported-profile.md](secure-containers-supported-profile.md), [secure-containers-flip-runtimeclass.md](secure-containers-flip-runtimeclass.md). Not Kata-equivalent — see [secure-containers.md](secure-containers.md).
 
+**Agent sandboxes on a Mac** — an offline `vz` sandbox (no network card; commands and files over vsock) ready in about 4.5 s, forked into four running copies in about 4 s, with the four tests run in 0.3 s; a local model reachable through one vsock port. Measured on one Apple M4 mini (macOS 27.2): [examples/agent-sandbox-demo](https://github.com/zyvorai/zyvor-fluxvm/tree/main/examples/agent-sandbox-demo); memory per sandbox 205 to 788 MiB resident, plan on about 800 MiB ([agent-density.md](agent-density.md#what-a-sandbox-costs-on-a-real-mac)). Only offline or no-NAT sandboxes fork, and the copies keep the parent's identity. Install: [install-macos.md](install-macos.md).
+
+**Mac cloud platform** — tenants and 24-hour Mac leases, quotas, snapshots and clones, persistent volumes, SSH and port tunnels through central, SSO with roles, graphs and Prometheus, warm pools, prices, statements and signed webhooks, Go/Python/TypeScript clients and a Terraform provider ([mac-cloud-tenancy.md](mac-cloud-tenancy.md), [mac-cloud-operations.md](mac-cloud-operations.md)). Tested against simulated Macs and unit tests; no multi-Mac fleet, real Stripe or identity provider has been run, and self-service sign-up stays off until sign-up email verification exists.
+
 **Sentinel** — eBPF host + guest policy/observability for Secure Containers and the Network Fabric edge; buyer wedge: [sentinel-wedge.md](sentinel-wedge.md).
 
 ---
