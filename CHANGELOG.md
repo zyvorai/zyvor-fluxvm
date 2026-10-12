@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### Changed: console pickers, networks and usage
+- Image and network choices are larger cards with a selected mark, checkboxes are drawn properly (they rendered as a
+  dark block), Macs on a network are chips, and Usage shows where VM hours went (macOS or Linux), two decimals under an
+  hour so a short run is not `0.0`, and a note that a lease in progress adds its 24-hour minimum when released.
+
 ### Added: `fluxctl fleet` for tenants and operators
 - `fluxctl fleet status` (a tenant's quota, Macs and next step, or the operator's fleet health), `launch --image` from the
   catalog, `run <vm> -- cmd`, `rm`, `images` and `networks` (list, show, create, delete, rotate, add-mac, remove-mac),
