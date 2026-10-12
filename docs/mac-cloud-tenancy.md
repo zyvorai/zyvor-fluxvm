@@ -60,7 +60,8 @@ The **fleet token** adds the operator's pages:
 - catalog editing and the policy.
 
 There is a command palette (⌘K or Ctrl-K) to jump to any page, VM, Mac, network or tenant, and to start any action.
-The console follows the system's light or dark mode unless you pick one, and it works on a phone. Links to a page or
+Pages are reached from the top bar's grouped menus (Overview, Cloud, Compute, Billing, Access); ⌘K opens search and
+the account menu holds sign-out and team switching. The console follows the system's light or dark mode unless you pick one, and it works on a phone. Links to a page or
 an item can be shared (`/console#/vms/<mac>/<id>`).
 
 ## Command line
