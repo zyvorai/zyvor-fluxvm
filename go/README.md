@@ -93,6 +93,12 @@ if _, err := sb.Changes(ctx, nil); errors.Is(err, fluxvm.ErrNotFound) {
 - **`Changes`** reports changes only. To roll a sandbox back use snapshot and
   restore.
 
+## Fleet (Mac cloud) client
+
+`github.com/zyvorai/fluxvm/go/fleet` talks to central's `/fleet/*` API (tenants, keys, leases, VMs, networks,
+images, webhooks, billing, volumes, pools), and `go/fleet/fleettest` is a fake central for tests. See
+[docs/fleet-sdk.md](../docs/fleet-sdk.md).
+
 ## Tests
 
 ```bash

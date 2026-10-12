@@ -84,6 +84,12 @@ and validation, to **400** with `{"error": "…"}`). Subclasses: `AuthError` (40
 Interactive shell/PTY, the WebSocket proxy (`…/ws/{port}/…`), and the change-set
 routes are not wrapped.
 
+## Fleet (Mac cloud) client
+
+`FleetClient(base_url, token)` talks to central's `/fleet/*` API: `create_lease`, `launch_from_catalog`, `exec_vm`,
+`create_key`, `create_webhook`, `billing`, `create_volume`, `create_pool` and more. Answers are dicts; errors add
+`Conflict` (409) and `ServiceUnavailable` (503). See [docs/fleet-sdk.md](../docs/fleet-sdk.md).
+
 ## Tests
 
 ```bash

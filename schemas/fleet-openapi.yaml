@@ -1,0 +1,1600 @@
+openapi: 3.1.0
+info:
+  title: FluxVM fleet API (central)
+  version: 0.1.0
+  summary: The Mac cloud's control plane, served by `fluxvm-agent central`.
+  description: |
+    Tenants, API keys, Mac leases, VMs, private networks (overlays), the image catalog, webhooks and notifications,
+    prices, billing, budgets, usage, the activity log, volumes and warm pools.
+
+    **Auth.** Every route except `/healthz` (and `/fleet/ha*`, `/console*`) needs `Authorization: Bearer <token>`:
+    the fleet token (the operator, also used by node heartbeats), a tenant's primary token (`fvt_…`), or one of the
+    tenant's named API keys. A tenant may call only the routes marked *tenant* below; anything else is a `403`.
+    A read-only key may only `GET`. Only the primary token (or the operator) creates and revokes API keys.
+
+    **Errors** are `{"error": "<message>"}` with these statuses: `400` bad input, `401` no or unknown token,
+    `403` not allowed (operator route, read-only key, disabled tenant), `404` not found (also for another tenant's
+    resources), `409` conflict (a Mac already leased, a lease released before its 24-hour minimum, a tenant still in
+    use), `429` quota exceeded, `502` a node rejected or did not answer, `503` no Mac can take it, or this central is
+    an HA standby.
+
+    **Volumes and pools** (`/fleet/volumes*`, `/fleet/pools*`) require a central with volumes and warm pools; the
+    shapes here are the SDK contract for them.
+
+    Not described: the node-agent routes (`POST /fleet/register`, `GET /fleet/nodes/{name}/overlays`, which carry
+    network keys) and the HA probes (`/fleet/ha`, `/fleet/ha/leader`).
+
+    The VM create body is a node's `CreateVmRequest` (opaque to central) plus central's placement fields; only the
+    commonly used fields are described.
+  license:
+    name: Apache-2.0
+servers:
+  - url: http://127.0.0.1:7799
+    description: A local central (`fluxvm-agent central`, default port 7799).
+security:
+  - bearer: []
+tags:
+  - name: tenants
+  - name: keys
+  - name: nodes
+  - name: leases
+  - name: vms
+  - name: networks
+  - name: images
+  - name: notifications
+  - name: billing
+  - name: activity
+  - name: operator
+  - name: volumes
+    description: Requires central with volumes.
+  - name: pools
+    description: Requires central with warm pools.
+
+paths:
+  /healthz:
+    get:
+      operationId: health
+      security: []
+      responses:
+        '200':
+          description: Central is up.
+          content:
+            application/json:
+              schema: {type: object, properties: {ok: {type: boolean}}, required: [ok]}
+
+  # ---- tenants --------------------------------------------------------------------------------------------------
+  /fleet/tenants:
+    get:
+      operationId: listTenants
+      tags: [tenants]
+      description: Operator. Every tenant with what it uses now.
+      responses:
+        '200': {$ref: '#/components/responses/TenantList'}
+        default: {$ref: '#/components/responses/Error'}
+    post:
+      operationId: createTenant
+      tags: [tenants]
+      description: Operator. Refused (409) when central runs without `--token`. The token is shown once.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/CreateTenantRequest'}
+      responses:
+        '201':
+          description: Created.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/CreatedTenant'}
+        default: {$ref: '#/components/responses/Error'}
+  /fleet/tenants/me:
+    get:
+      operationId: getMe
+      tags: [tenants]
+      description: Tenant. The calling tenant's record and use. `400` for the operator token.
+      responses:
+        '200': {$ref: '#/components/responses/TenantView'}
+        default: {$ref: '#/components/responses/Error'}
+  /fleet/tenants/{id}:
+    parameters: [{$ref: '#/components/parameters/TenantId'}]
+    get:
+      operationId: getTenant
+      tags: [tenants]
+      description: Operator.
+      responses:
+        '200': {$ref: '#/components/responses/TenantView'}
+        default: {$ref: '#/components/responses/Error'}
+    patch:
+      operationId: updateTenant
+      tags: [tenants]
+      description: Operator. Omitted fields are left alone.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/UpdateTenantRequest'}
+      responses:
+        '200':
+          description: The tenant.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Tenant'}
+        default: {$ref: '#/components/responses/Error'}
+    delete:
+      operationId: deleteTenant
+      tags: [tenants]
+      description: Operator. `409` while the tenant has active leases or VMs. Deletes its keys and webhooks.
+      responses:
+        '204': {description: Deleted.}
+        default: {$ref: '#/components/responses/Error'}
+  /fleet/tenants/{id}/rotate-token:
+    parameters: [{$ref: '#/components/parameters/TenantId'}]
+    post:
+      operationId: rotateTenantToken
+      tags: [tenants]
+      description: Operator. A new primary token (shown once); named API keys keep working.
+      responses:
+        '200':
+          description: The new token.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: {tenant: {type: string}, token: {type: string}}
+                required: [tenant, token]
+        default: {$ref: '#/components/responses/Error'}
+  /fleet/tenants/{id}/budget:
+    parameters: [{$ref: '#/components/parameters/TenantIdOrMe'}]
+    put:
+      operationId: setBudget
+      tags: [billing]
+      description: Tenant (`me`, primary token or a full key) or operator (any id). Warnings only; nothing is stopped.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                monthly:
+                  type: [number, 'null']
+                  description: In the price list's currency, up to 1e9; `null` or 0 removes the budget.
+      responses:
+        '200':
+          description: The tenant.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Tenant'}
+        default: {$ref: '#/components/responses/Error'}
+
+  # ---- API keys -------------------------------------------------------------------------------------------------
+  /fleet/tenants/{id}/keys:
+    parameters: [{$ref: '#/components/parameters/TenantIdOrMe'}]
+    get:
+      operationId: listKeys
+      tags: [keys]
+      description: Tenant (`me`) or operator (any id).
+      responses:
+        '200':
+          description: The keys (never their hashes).
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: {items: {type: array, items: {$ref: '#/components/schemas/ApiKey'}}}
+                required: [items]
+        default: {$ref: '#/components/responses/Error'}
+    post:
+      operationId: createKey
+      tags: [keys]
+      description: Tenant primary token (`me`) or operator. A named key cannot create keys (403). At most 50 per tenant.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/CreateKeyRequest'}
+      responses:
+        '201':
+          description: Created; the token is shown once.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/CreatedKey'}
+        default: {$ref: '#/components/responses/Error'}
+  /fleet/tenants/{id}/keys/{key}:
+    parameters:
+      - {$ref: '#/components/parameters/TenantIdOrMe'}
+      - {name: key, in: path, required: true, description: The key's id (`key_…`) or name; an id wins., schema: {type: string}}
+    delete:
+      operationId: revokeKey
+      tags: [keys]
+      description: Tenant primary token (`me`) or operator. The token stops working at once.
+      responses:
+        '200':
+          description: The revoked key.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: {revoked: {$ref: '#/components/schemas/ApiKey'}}
+                required: [revoked]
+        default: {$ref: '#/components/responses/Error'}
+
+  # ---- nodes ----------------------------------------------------------------------------------------------------
+  /fleet/nodes:
+    get:
+      operationId: listNodes
+      tags: [nodes]
+      description: Operator.
+      responses:
+        '200':
+          description: Every registered node.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: {items: {type: array, items: {$ref: '#/components/schemas/Node'}}}
+                required: [items]
+        default: {$ref: '#/components/responses/Error'}
+  /fleet/nodes/{name}:
+    parameters: [{$ref: '#/components/parameters/NodeName'}]
+    get:
+      operationId: getNode
+      tags: [nodes]
+      description: |
+        Operator: the full record. Tenant: only a Mac it leases, and only `name`, `healthy`, `vcpus_total`,
+        `memory_mib_total`, `free_vcpus`, `free_memory_mib`, `vm_count`, `last_seen` and `apple`.
+      responses:
+        '200':
+          description: The node.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Node'}
+        default: {$ref: '#/components/responses/Error'}
+    delete:
+      operationId: deregisterNode
+      tags: [operator]
+      responses:
+        '204': {description: Deregistered.}
+        default: {$ref: '#/components/responses/Error'}
+  /fleet/nodes/{name}/cordon:
+    parameters: [{$ref: '#/components/parameters/NodeName'}]
+    post:
+      operationId: cordonNode
+      tags: [operator]
+      responses:
+        '200': {$ref: '#/components/responses/AnyObject'}
+        default: {$ref: '#/components/responses/Error'}
+  /fleet/nodes/{name}/uncordon:
+    parameters: [{$ref: '#/components/parameters/NodeName'}]
+    post:
+      operationId: uncordonNode
+      tags: [operator]
+      description: Also ends a drain.
+      responses:
+        '200': {$ref: '#/components/responses/AnyObject'}
+        default: {$ref: '#/components/responses/Error'}
+  /fleet/nodes/{name}/drain:
+    parameters: [{$ref: '#/components/parameters/NodeName'}]
+    post:
+      operationId: drainNode
+      tags: [operator]
+      parameters:
+        - {name: mode, in: query, schema: {type: string, enum: [cordon, evict-ephemeral, reschedule], default: cordon}}
+        - {name: force, in: query, description: Needed for a leased Mac., schema: {type: boolean}}
+      responses:
+        '200': {$ref: '#/components/responses/AnyObject'}
+        default: {$ref: '#/components/responses/Error'}
+    get:
+      operationId: drainStatus
+      tags: [operator]
+      responses:
+        '200': {$ref: '#/components/responses/AnyObject'}
+        default: {$ref: '#/components/responses/Error'}
+  /fleet/nodes/{name}/scrub:
+    parameters: [{$ref: '#/components/parameters/NodeName'}]
+    post:
+      operationId: scrubNode
+      tags: [operator]
+      description: Make a Mac released from a lease usable again. `409` while it lists VMs, unless `force` deletes them.
+      parameters:
+        - {name: force, in: query, schema: {type: boolean}}
+      responses:
+        '200': {$ref: '#/components/responses/AnyObject'}
+        default: {$ref: '#/components/responses/Error'}
+  /fleet/nodes/{name}/vms:
+    parameters: [{$ref: '#/components/parameters/NodeName'}]
+    get:
+      operationId: nodeVms
+      tags: [operator]
+      responses:
+        '200':
+          description: The VMs on one node.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  node: {type: string}
+                  items: {type: array, items: {$ref: '#/components/schemas/Vm'}}
+        default: {$ref: '#/components/responses/Error'}
+  /fleet/capacity:
+    get:
+      operationId: capacity
+      tags: [nodes]
+      description: Tenant, operator. From the nodes' last heartbeats; used figures are estimates.
+      responses:
+        '200':
+          description: Fleet-wide capacity.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Capacity'}
+        default: {$ref: '#/components/responses/Error'}
+
+  # ---- leases ---------------------------------------------------------------------------------------------------
+  /fleet/leases:
+    get:
+      operationId: listLeases
+      tags: [leases]
+      description: Tenant (its own), operator.
+      parameters:
+        - {name: tenant, in: query, description: Operator only., schema: {type: string}}
+        - {name: state, in: query, schema: {type: string, enum: [active, released]}}
+      responses:
+        '200':
+          description: Leases.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: {items: {type: array, items: {$ref: '#/components/schemas/Lease'}}}
+                required: [items]
+        default: {$ref: '#/components/responses/Error'}
+    post:
+      operationId: createLease
+      tags: [leases]
+      description: |
+        Tenant, operator (with `tenant`). Leases the named Mac, or the smallest eligible one: healthy, not cordoned or
+        draining, not leased, scrubbed, running no VMs, large enough, matching `nodeSelector`. `503` when none is free;
+        `409` when the named one cannot be leased.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/CreateLeaseRequest'}
+      responses:
+        '201':
+          description: Leased.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  lease: {$ref: '#/components/schemas/Lease'}
+                  node: {$ref: '#/components/schemas/Node'}
+                required: [lease, node]
+        default: {$ref: '#/components/responses/Error'}
+  /fleet/leases/{id}:
+    parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+    get:
+      operationId: getLease
+      tags: [leases]
+      responses:
+        '200':
+          description: The lease.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Lease'}
+        default: {$ref: '#/components/responses/Error'}
+  /fleet/leases/{id}/release:
+    parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+    post:
+      operationId: releaseLease
+      tags: [leases]
+      description: |
+        Tenant, operator. `409` before `min_end` unless the operator forces it (still billed to the minimum). Deletes
+        the tenant's VMs on that Mac and marks it for scrubbing.
+      parameters:
+        - {name: force, in: query, description: Operator only., schema: {type: boolean}}
+      responses:
+        '200':
+          description: Released.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  lease: {$ref: '#/components/schemas/Lease'}
+                  evicted: {type: array, items: {type: object}}
+                  scrub_required: {type: boolean}
+                required: [lease, evicted, scrub_required]
+        default: {$ref: '#/components/responses/Error'}
+
+  # ---- VMs ------------------------------------------------------------------------------------------------------
+  /fleet/vms:
+    get:
+      operationId: listVms
+      tags: [vms]
+      description: |
+        Tenant (its own VMs), operator. Nodes that did not answer are named in `unreachable_nodes` (for a tenant only
+        its own Macs, with the reason "did not answer"). There is no single-VM GET: find a VM here by node and id.
+      responses:
+        '200':
+          description: VMs across the fleet.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items: {type: array, items: {$ref: '#/components/schemas/Vm'}}
+                  unreachable_nodes:
+                    type: array
+                    items:
+                      type: object
+                      properties: {node: {type: string}, reason: {type: string}}
+                required: [items, unreachable_nodes]
+        default: {$ref: '#/components/responses/Error'}
+    post:
+      operationId: launchVm
+      tags: [vms]
+      description: |
+        Tenant, operator. Places the VM (the named `node`, or automatic placement with failover) and forwards the
+        create to that node. A tenant's body is stamped with its `tenant` and checked against its quota (`429`).
+        A tenant's macOS guest runs only on a Mac it leases (`503` otherwise).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/LaunchRequest'}
+      responses:
+        '200':
+          description: Created.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  node: {type: string}
+                  vm: {$ref: '#/components/schemas/Vm'}
+                required: [node, vm]
+        default: {$ref: '#/components/responses/Error'}
+  /fleet/vms/{node}/{id}:
+    parameters: [{$ref: '#/components/parameters/VmNode'}, {$ref: '#/components/parameters/VmId'}]
+    delete:
+      operationId: deleteVm
+      tags: [vms]
+      description: Tenant (own VMs; others are 404), operator. Deletes the VM's disks and workspace.
+      responses:
+        '204': {description: Deleted.}
+        default: {$ref: '#/components/responses/Error'}
+  /fleet/vms/{node}/{id}/exec:
+    parameters: [{$ref: '#/components/parameters/VmNode'}, {$ref: '#/components/parameters/VmId'}]
+    post:
+      operationId: execVm
+      tags: [vms]
+      description: Tenant (own VMs), operator. Runs a command through the guest agent.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                command: {type: string}
+                timeout_seconds: {type: [integer, 'null'], minimum: 1}
+              required: [command]
+      responses:
+        '200':
+          description: The guest agent's answer.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  exit_code: {type: integer}
+                  stdout: {type: string}
+                  stderr: {type: string}
+                additionalProperties: true
+        default: {$ref: '#/components/responses/Error'}
+  /fleet/vms/{node}/{id}/{action}:
+    parameters:
+      - {$ref: '#/components/parameters/VmNode'}
+      - {$ref: '#/components/parameters/VmId'}
+      - {name: action, in: path, required: true, schema: {type: string, enum: [start, stop, restart, pause, resume]}}
+    post:
+      operationId: powerVm
+      tags: [vms]
+      description: Tenant (own VMs), operator. `409` when the node refuses (wrong state), `502` when it fails.
+      responses:
+        '200':
+          description: The node's VM record.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Vm'}
+        default: {$ref: '#/components/responses/Error'}
+  /fleet/vms/{node}/{id}/input:
+    parameters: [{$ref: '#/components/parameters/VmNode'}, {$ref: '#/components/parameters/VmId'}]
+    post:
+      operationId: vmInput
+      tags: [vms]
+      description: Tenant (own VMs; not a read-only key), operator. Keyboard and mouse input, as the node's `/v1/vms/{id}/input`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {type: object, description: '`{"action": …}` or `{"actions": […]}`'}
+      responses:
+        '200': {$ref: '#/components/responses/AnyObject'}
+        default: {$ref: '#/components/responses/Error'}
+  /fleet/vms/{node}/{id}/logs:
+    parameters: [{$ref: '#/components/parameters/VmNode'}, {$ref: '#/components/parameters/VmId'}]
+    get:
+      operationId: vmLogs
+      tags: [vms]
+      parameters:
+        - {name: lines, in: query, schema: {type: integer, minimum: 1, maximum: 5000, default: 200}}
+      responses:
+        '200':
+          description: The end of the console log.
+          content:
+            text/plain: {schema: {type: string}}
+        default: {$ref: '#/components/responses/Error'}
+  /fleet/vms/{node}/{id}/screen:
+    parameters: [{$ref: '#/components/parameters/VmNode'}, {$ref: '#/components/parameters/VmId'}]
+    get:
+      operationId: vmScreen
+      tags: [vms]
+      parameters:
+        - {name: max_width, in: query, schema: {type: integer}}
+      responses:
+        '200':
+          description: The display.
+          content:
+            image/png: {schema: {type: string, contentEncoding: binary}}
+        '409': {$ref: '#/components/responses/Error'}
+        default: {$ref: '#/components/responses/Error'}
+
+  # ---- snapshots and clones --------------------------------------------------------------------------------------
+  /fleet/vms/{node}/{id}/snapshots:
+    parameters: [{$ref: '#/components/parameters/VmNode'}, {$ref: '#/components/parameters/VmId'}]
+    get:
+      operationId: listSnapshots
+      tags: [vms]
+      responses:
+        '200':
+          description: The VM's snapshots, newest first, and how many it may keep.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  node: {type: string}
+                  vm: {type: string}
+                  items: {type: array, items: {$ref: '#/components/schemas/Snapshot'}}
+                  limit: {type: integer, description: Snapshots kept per VM (0 turns them off).}
+        default: {$ref: '#/components/responses/Error'}
+    post:
+      operationId: createSnapshot
+      tags: [vms]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                name: {type: string, description: 'Default `snap-<UTC time>`. 1-64 of letters, digits, `.`, `_`, `-`.'}
+                include_memory: {type: boolean, default: false, description: Needs a running or paused VM.}
+      responses:
+        '201':
+          description: Taken.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  node: {type: string}
+                  vm: {type: string}
+                  snapshot: {$ref: '#/components/schemas/Snapshot'}
+        '409': {$ref: '#/components/responses/Error'}
+        '429': {$ref: '#/components/responses/Error'}
+        default: {$ref: '#/components/responses/Error'}
+  /fleet/vms/{node}/{id}/snapshots/{snapshot}:
+    parameters:
+      - {$ref: '#/components/parameters/VmNode'}
+      - {$ref: '#/components/parameters/VmId'}
+      - {name: snapshot, in: path, required: true, schema: {type: string}}
+    delete:
+      operationId: deleteSnapshot
+      tags: [vms]
+      responses:
+        '204': {description: Deleted.}
+        default: {$ref: '#/components/responses/Error'}
+  /fleet/vms/{node}/{id}/snapshots/{snapshot}/restore:
+    parameters:
+      - {$ref: '#/components/parameters/VmNode'}
+      - {$ref: '#/components/parameters/VmId'}
+      - {name: snapshot, in: path, required: true, schema: {type: string}}
+    post:
+      operationId: restoreSnapshot
+      tags: [vms]
+      description: Stops the VM, puts the snapshot back and starts it again.
+      responses:
+        '200':
+          description: Restored.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  node: {type: string}
+                  vm: {type: object, additionalProperties: true}
+                  snapshot: {type: string}
+        default: {$ref: '#/components/responses/Error'}
+  /fleet/vms/{node}/{id}/clone:
+    parameters: [{$ref: '#/components/parameters/VmNode'}, {$ref: '#/components/parameters/VmId'}]
+    post:
+      operationId: cloneVm
+      tags: [vms]
+      description: A new VM on the same Mac from a snapshot, or from the stopped VM's disk; counted against the quota.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                name: {type: string}
+                snapshot: {type: string, description: Without it the VM must be stopped.}
+              required: [name]
+      responses:
+        '201':
+          description: The new VM, like a create.
+          content:
+            application/json: {schema: {type: object, additionalProperties: true}}
+        default: {$ref: '#/components/responses/Error'}
+
+  # ---- networks (overlays) --------------------------------------------------------------------------------------
+  /fleet/overlays:
+    get:
+      operationId: listNetworks
+      tags: [networks]
+      description: Tenant (its own), operator.
+      responses:
+        '200':
+          description: Networks.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: {items: {type: array, items: {$ref: '#/components/schemas/Network'}}}
+                required: [items]
+        default: {$ref: '#/components/responses/Error'}
+    post:
+      operationId: createNetwork
+      tags: [networks]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/CreateNetworkRequest'}
+      responses:
+        '201': {$ref: '#/components/responses/Network'}
+        default: {$ref: '#/components/responses/Error'}
+  /fleet/overlays/{name}:
+    parameters: [{$ref: '#/components/parameters/NetworkName'}]
+    get:
+      operationId: getNetwork
+      tags: [networks]
+      responses:
+        '200': {$ref: '#/components/responses/Network'}
+        default: {$ref: '#/components/responses/Error'}
+    delete:
+      operationId: deleteNetwork
+      tags: [networks]
+      responses:
+        '204': {description: Deleted.}
+        default: {$ref: '#/components/responses/Error'}
+  /fleet/overlays/{name}/members:
+    parameters: [{$ref: '#/components/parameters/NetworkName'}]
+    post:
+      operationId: addNetworkMember
+      tags: [networks]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {type: object, properties: {node: {type: string}}, required: [node]}
+      responses:
+        '200': {$ref: '#/components/responses/Network'}
+        default: {$ref: '#/components/responses/Error'}
+  /fleet/overlays/{name}/members/{node}:
+    parameters: [{$ref: '#/components/parameters/NetworkName'}, {$ref: '#/components/parameters/VmNode'}]
+    delete:
+      operationId: removeNetworkMember
+      tags: [networks]
+      responses:
+        '200': {$ref: '#/components/responses/Network'}
+        default: {$ref: '#/components/responses/Error'}
+  /fleet/overlays/{name}/rotate:
+    parameters: [{$ref: '#/components/parameters/NetworkName'}]
+    post:
+      operationId: rotateNetworkKey
+      tags: [networks]
+      description: A new key (at most once every 5 minutes); the previous one keeps working until Macs pick it up.
+      responses:
+        '200': {$ref: '#/components/responses/Network'}
+        default: {$ref: '#/components/responses/Error'}
+
+  # ---- images ---------------------------------------------------------------------------------------------------
+  /fleet/images:
+    get:
+      operationId: listImages
+      tags: [images]
+      description: Tenant, operator.
+      responses:
+        '200':
+          description: The catalog.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: {items: {type: array, items: {$ref: '#/components/schemas/Image'}}}
+                required: [items]
+        default: {$ref: '#/components/responses/Error'}
+  /fleet/images/{name}:
+    parameters: [{name: name, in: path, required: true, schema: {type: string, pattern: '^[a-z0-9._-]{1,63}$'}}]
+    put:
+      operationId: putImage
+      tags: [images]
+      description: Operator. Add or replace an entry (the path's name wins over the body's).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/Image'}
+      responses:
+        '200':
+          description: The entry.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Image'}
+        default: {$ref: '#/components/responses/Error'}
+    delete:
+      operationId: deleteImage
+      tags: [images]
+      description: Operator. VMs made from it are not touched.
+      responses:
+        '204': {description: Removed.}
+        default: {$ref: '#/components/responses/Error'}
+
+  # ---- notifications and webhooks -------------------------------------------------------------------------------
+  /fleet/notifications:
+    get:
+      operationId: notifications
+      tags: [notifications]
+      parameters:
+        - {name: limit, in: query, schema: {type: integer, minimum: 1, default: 50}}
+      responses:
+        '200':
+          description: Newest first; a tenant sees its own.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: {items: {type: array, items: {$ref: '#/components/schemas/Notification'}}}
+                required: [items]
+        default: {$ref: '#/components/responses/Error'}
+  /fleet/webhooks:
+    get:
+      operationId: listWebhooks
+      tags: [notifications]
+      responses:
+        '200':
+          description: Webhooks (never their secrets) and the event types the caller may subscribe to.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items: {type: array, items: {$ref: '#/components/schemas/Webhook'}}
+                  kinds: {type: array, items: {$ref: '#/components/schemas/EventType'}}
+                required: [items, kinds]
+        default: {$ref: '#/components/responses/Error'}
+    post:
+      operationId: createWebhook
+      tags: [notifications]
+      description: |
+        A tenant's webhook must use https and resolve to public addresses only (checked at every delivery); at most
+        10 per owner. The secret is shown once.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                url: {type: string, format: uri}
+                events: {type: array, items: {$ref: '#/components/schemas/EventType'}, description: Empty sends all.}
+              required: [url]
+      responses:
+        '201':
+          description: Created.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  webhook: {$ref: '#/components/schemas/Webhook'}
+                  secret: {type: string, description: '`whsec_…`, the HMAC-SHA256 key for `X-FluxVM-Signature`.'}
+                  note: {type: string}
+                required: [webhook, secret]
+        default: {$ref: '#/components/responses/Error'}
+  /fleet/webhooks/{id}:
+    parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+    delete:
+      operationId: deleteWebhook
+      tags: [notifications]
+      responses:
+        '204': {description: Deleted.}
+        default: {$ref: '#/components/responses/Error'}
+  /fleet/webhooks/{id}/test:
+    parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+    post:
+      operationId: testWebhook
+      tags: [notifications]
+      responses:
+        '200':
+          description: One delivery of a `test` event.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: {delivery: {$ref: '#/components/schemas/Delivery'}}
+                required: [delivery]
+        default: {$ref: '#/components/responses/Error'}
+
+  # ---- prices, billing, usage -----------------------------------------------------------------------------------
+  /fleet/prices:
+    get:
+      operationId: getPrices
+      tags: [billing]
+      responses:
+        '200':
+          description: The price list.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/PriceList'}
+        default: {$ref: '#/components/responses/Error'}
+    put:
+      operationId: putPrices
+      tags: [billing]
+      description: Operator. Running leases keep the price they started with.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/PriceList'}
+      responses:
+        '200':
+          description: The price list.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/PriceList'}
+        default: {$ref: '#/components/responses/Error'}
+  /fleet/billing:
+    get:
+      operationId: billing
+      tags: [billing]
+      description: Statements, one per tenant (a tenant gets its own).
+      parameters:
+        - {name: month, in: query, description: '`YYYY-MM`; default this month.', schema: {type: string, pattern: '^\d{4}-\d{2}$'}}
+        - {name: tenant, in: query, description: Operator only., schema: {type: string}}
+        - {name: format, in: query, schema: {type: string, enum: [json, csv], default: json}}
+      responses:
+        '200':
+          description: Statements.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  from: {type: string, format: date-time}
+                  to: {type: string, format: date-time}
+                  currency: {type: string}
+                  prices_set: {type: boolean}
+                  statements: {type: array, items: {$ref: '#/components/schemas/Statement'}}
+                required: [from, to, currency, prices_set, statements]
+            text/csv: {schema: {type: string}}
+        default: {$ref: '#/components/responses/Error'}
+  /fleet/usage:
+    get:
+      operationId: usage
+      tags: [billing]
+      parameters:
+        - {name: from, in: query, description: RFC 3339; default 30 days before `to`., schema: {type: string, format: date-time}}
+        - {name: to, in: query, description: RFC 3339; default now., schema: {type: string, format: date-time}}
+        - {name: tenant, in: query, description: Operator only., schema: {type: string}}
+        - {name: format, in: query, schema: {type: string, enum: [json, csv], default: json}}
+      responses:
+        '200':
+          description: Metered use per tenant.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/UsageReport'}
+            text/csv: {schema: {type: string}}
+        default: {$ref: '#/components/responses/Error'}
+
+  # ---- activity log ---------------------------------------------------------------------------------------------
+  /fleet/events:
+    get:
+      operationId: events
+      tags: [activity]
+      parameters:
+        - {name: limit, in: query, schema: {type: integer, minimum: 1, default: 200}}
+        - {name: tenant, in: query, description: Operator only., schema: {type: string}}
+      responses:
+        '200':
+          description: The activity log, newest first; a tenant sees its own actions.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: {items: {type: array, items: {$ref: '#/components/schemas/AuditEvent'}}}
+                required: [items]
+        default: {$ref: '#/components/responses/Error'}
+
+  # ---- operator -------------------------------------------------------------------------------------------------
+  /fleet/policy:
+    get:
+      operationId: getPolicy
+      tags: [operator]
+      responses:
+        '200':
+          description: The policy.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Policy'}
+        default: {$ref: '#/components/responses/Error'}
+    put:
+      operationId: putPolicy
+      tags: [operator]
+      description: '`min_lease_hours` below 24 is raised to 24.'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/Policy'}
+      responses:
+        '200':
+          description: The policy.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Policy'}
+        default: {$ref: '#/components/responses/Error'}
+  /fleet/reconcile:
+    post:
+      operationId: reconcile
+      tags: [operator]
+      responses:
+        '200': {$ref: '#/components/responses/AnyObject'}
+        default: {$ref: '#/components/responses/Error'}
+
+  # ---- volumes (requires central with volumes) ------------------------------------------------------------------
+  /fleet/volumes:
+    get:
+      operationId: listVolumes
+      tags: [volumes]
+      responses:
+        '200':
+          description: Volumes (a tenant's own).
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: {items: {type: array, items: {$ref: '#/components/schemas/Volume'}}}
+                required: [items]
+        default: {$ref: '#/components/responses/Error'}
+    post:
+      operationId: createVolume
+      tags: [volumes]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: {type: string}
+                size_gib: {type: integer, minimum: 1}
+                node: {type: string, description: Optional; otherwise central picks a Mac.}
+              required: [name, size_gib]
+      responses:
+        '201': {$ref: '#/components/responses/Volume'}
+        default: {$ref: '#/components/responses/Error'}
+  /fleet/volumes/{name}:
+    parameters: [{name: name, in: path, required: true, schema: {type: string}}]
+    get:
+      operationId: getVolume
+      tags: [volumes]
+      responses:
+        '200': {$ref: '#/components/responses/Volume'}
+        default: {$ref: '#/components/responses/Error'}
+    delete:
+      operationId: deleteVolume
+      tags: [volumes]
+      description: Refused while the volume is attached to a VM.
+      responses:
+        '204': {description: Deleted.}
+        default: {$ref: '#/components/responses/Error'}
+  /fleet/volumes/{name}/resize:
+    parameters: [{name: name, in: path, required: true, schema: {type: string}}]
+    post:
+      operationId: resizeVolume
+      tags: [volumes]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {type: object, properties: {size_gib: {type: integer, minimum: 1}}, required: [size_gib]}
+      responses:
+        '200': {$ref: '#/components/responses/Volume'}
+        default: {$ref: '#/components/responses/Error'}
+
+  # ---- warm pools (requires central with pools) -----------------------------------------------------------------
+  /fleet/pools:
+    get:
+      operationId: listPools
+      tags: [pools]
+      responses:
+        '200':
+          description: Pools.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: {items: {type: array, items: {$ref: '#/components/schemas/Pool'}}}
+                required: [items]
+        default: {$ref: '#/components/responses/Error'}
+    post:
+      operationId: createPool
+      tags: [pools]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/CreatePoolRequest'}
+      responses:
+        '201': {$ref: '#/components/responses/Pool'}
+        default: {$ref: '#/components/responses/Error'}
+  /fleet/pools/{name}:
+    parameters: [{name: name, in: path, required: true, schema: {type: string}}]
+    get:
+      operationId: getPool
+      tags: [pools]
+      responses:
+        '200': {$ref: '#/components/responses/Pool'}
+        default: {$ref: '#/components/responses/Error'}
+    patch:
+      operationId: updatePool
+      tags: [pools]
+      description: Omitted fields are left alone.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/UpdatePoolRequest'}
+      responses:
+        '200': {$ref: '#/components/responses/Pool'}
+        default: {$ref: '#/components/responses/Error'}
+    delete:
+      operationId: deletePool
+      tags: [pools]
+      description: Deletes the pool and its warm VMs; VMs already claimed keep running.
+      responses:
+        '200': {description: Deleted.}
+        default: {$ref: '#/components/responses/Error'}
+
+components:
+  securitySchemes:
+    bearer:
+      type: http
+      scheme: bearer
+      description: The fleet token, a tenant's primary token (`fvt_…`) or a named API key.
+
+  parameters:
+    TenantId:
+      {name: id, in: path, required: true, schema: {type: string, pattern: '^[a-z0-9][a-z0-9-]{0,62}$'}}
+    TenantIdOrMe:
+      name: id
+      in: path
+      required: true
+      description: '`me` for the calling tenant; another id needs the operator.'
+      schema: {type: string}
+    NodeName:
+      {name: name, in: path, required: true, schema: {type: string}}
+    VmNode:
+      {name: node, in: path, required: true, description: The node (Mac) name., schema: {type: string}}
+    VmId:
+      {name: id, in: path, required: true, description: The VM's id on that node (a UUID)., schema: {type: string}}
+    NetworkName:
+      {name: name, in: path, required: true, schema: {type: string, pattern: '^[a-z0-9]([a-z0-9-]{0,38}[a-z0-9])?$'}}
+
+  responses:
+    Error:
+      description: An error.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+    AnyObject:
+      description: A JSON object.
+      content:
+        application/json:
+          schema: {type: object, additionalProperties: true}
+    TenantList:
+      description: Tenants.
+      content:
+        application/json:
+          schema:
+            type: object
+            properties: {items: {type: array, items: {$ref: '#/components/schemas/TenantView'}}}
+            required: [items]
+    TenantView:
+      description: A tenant and what it uses now.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/TenantView'}
+    Network:
+      description: The network.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Network'}
+    Volume:
+      description: The volume.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Volume'}
+    Pool:
+      description: The pool.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Pool'}
+
+  schemas:
+    Error:
+      type: object
+      properties: {error: {type: string}}
+      required: [error]
+
+    Quota:
+      type: object
+      description: Unset fields are unlimited.
+      properties:
+        max_vms: {type: integer, minimum: 0}
+        max_vcpus: {type: integer, minimum: 0}
+        max_memory_mib: {type: integer, minimum: 0}
+        max_leased_hosts: {type: integer, minimum: 0}
+    Tenant:
+      type: object
+      properties:
+        id: {type: string}
+        display_name: {type: [string, 'null']}
+        quota: {$ref: '#/components/schemas/Quota'}
+        disabled: {type: boolean}
+        created_at: {type: string, format: date-time}
+        monthly_budget: {type: [number, 'null']}
+      required: [id, quota, disabled, created_at]
+    TenantView:
+      allOf:
+        - {$ref: '#/components/schemas/Tenant'}
+        - type: object
+          properties:
+            in_use:
+              type: object
+              properties:
+                vms: {type: integer}
+                vcpus: {type: integer}
+                memory_mib: {type: integer}
+                leased_hosts: {type: integer}
+            active_leases: {type: array, items: {$ref: '#/components/schemas/Lease'}}
+    CreateTenantRequest:
+      type: object
+      properties:
+        id: {type: string, pattern: '^[a-z0-9][a-z0-9-]{0,62}$', not: {const: me}}
+        display_name: {type: string}
+        quota: {$ref: '#/components/schemas/Quota'}
+      required: [id]
+    CreatedTenant:
+      type: object
+      properties:
+        tenant: {$ref: '#/components/schemas/Tenant'}
+        token: {type: string, description: Shown once; central keeps only its SHA-256.}
+        note: {type: string}
+      required: [tenant, token]
+    UpdateTenantRequest:
+      type: object
+      properties:
+        quota: {$ref: '#/components/schemas/Quota'}
+        disabled: {type: boolean}
+        display_name: {type: string}
+
+    ApiKey:
+      type: object
+      properties:
+        id: {type: string, pattern: '^key_[0-9a-f]{12}$'}
+        name: {type: string}
+        created_at: {type: string, format: date-time}
+        expires_at: {type: [string, 'null'], format: date-time}
+        read_only: {type: boolean}
+        last_used_at: {type: [string, 'null'], format: date-time, description: Updated at most once a minute.}
+      required: [id, name, created_at, read_only]
+    CreateKeyRequest:
+      type: object
+      properties:
+        name: {type: string, description: Unique within the tenant; may not look like a key id.}
+        expires_in_days: {type: integer, minimum: 1, maximum: 3650, description: Omitted never expires.}
+        read_only: {type: boolean, default: false}
+      required: [name]
+    CreatedKey:
+      type: object
+      properties:
+        key: {$ref: '#/components/schemas/ApiKey'}
+        token: {type: string, description: Shown once.}
+        note: {type: string}
+      required: [key, token]
+
+    Node:
+      type: object
+      properties:
+        name: {type: string}
+        fluxvm_url: {type: string, description: Operator only.}
+        vcpus_total: {type: integer}
+        memory_mib_total: {type: integer}
+        vm_count: {type: integer}
+        last_seen: {type: string, format: date-time}
+        healthy: {type: boolean}
+        cordoned: {type: boolean, description: Operator only.}
+        labels: {type: object, additionalProperties: {type: string}, description: Operator only.}
+        free_vcpus: {type: integer}
+        free_memory_mib: {type: integer}
+        security: {type: object, description: Operator only.}
+        density: {type: [object, 'null'], description: Operator only.}
+        apple:
+          type: [object, 'null']
+          description: Virtualization.framework capabilities; null for a Linux host.
+          properties:
+            nested_virtualization: {type: boolean}
+          additionalProperties: true
+      required: [name, vcpus_total, memory_mib_total, vm_count, healthy]
+    Capacity:
+      type: object
+      properties:
+        nodes_total: {type: integer}
+        nodes_healthy: {type: integer}
+        nodes_cordoned: {type: integer}
+        nodes_schedulable: {type: integer}
+        vm_count: {type: integer}
+        vcpus_total: {type: integer}
+        vcpus_used: {type: integer}
+        vcpus_free: {type: integer}
+        memory_mib_total: {type: integer}
+        memory_mib_used: {type: integer}
+        memory_mib_free: {type: integer}
+
+    Lease:
+      type: object
+      properties:
+        id: {type: string}
+        tenant: {type: string}
+        node: {type: string}
+        started_at: {type: string, format: date-time}
+        min_end: {type: string, format: date-time, description: 'started_at + 24 h: the earliest release, and the minimum billed.'}
+        ends_at: {type: string, format: date-time, description: Present when the lease was made with `hours`.}
+        released_at: {type: string, format: date-time}
+        state: {type: string, enum: [active, released]}
+        rate_micros: {type: integer, description: Hourly price fixed at start, in millionths of the currency.}
+        price_class: {type: string}
+      required: [id, tenant, node, started_at, min_end, state]
+    CreateLeaseRequest:
+      type: object
+      properties:
+        tenant: {type: string, description: Operator only (required for the operator).}
+        node: {type: string}
+        nodeSelector: {type: object, additionalProperties: {type: string}}
+        hours: {type: integer, minimum: 24, description: Omitted runs until released.}
+        min_vcpus: {type: integer, minimum: 0}
+        min_memory_mib: {type: integer, minimum: 0}
+        nested_virtualization: {type: boolean}
+        any_node: {type: boolean, description: Operator only; allows a Linux host.}
+        allow_busy: {type: boolean, description: Operator only; allows a node that still runs VMs.}
+
+    Vm:
+      type: object
+      description: The node's VM record (`VmRecord`), plus `node` in fleet lists.
+      properties:
+        id: {type: string, format: uuid}
+        name: {type: string}
+        node: {type: string}
+        backend: {type: string, examples: [vz]}
+        status: {type: string, enum: [creating, running, paused, stopped, failed]}
+        pid: {type: [integer, 'null']}
+        created_at: {type: string, format: date-time}
+        expires_at: {type: [string, 'null'], format: date-time}
+        error: {type: [string, 'null']}
+        request: {type: object, description: The stored create request (with `tenant`)., additionalProperties: true}
+      additionalProperties: true
+      required: [id, name, status]
+    LaunchRequest:
+      type: object
+      description: A node `CreateVmRequest` plus central's placement fields. Other request fields pass through.
+      properties:
+        name: {type: string}
+        backend: {type: string, default: vz, description: '`vz` on Macs.'}
+        image: {type: string, description: The disk's path on the node (see the image catalog).}
+        vcpus: {type: integer, minimum: 1, maximum: 255}
+        memory_mib: {type: integer, minimum: 512}
+        disk_size_gib: {type: integer}
+        ttl_seconds: {type: integer, description: The node deletes the VM after this long.}
+        apple:
+          type: object
+          properties:
+            guest_os: {type: string, enum: [macos, linux]}
+            networks:
+              type: array
+              description: Private networks (overlays) to join.
+              items: {type: object, properties: {name: {type: string}}, required: [name]}
+          additionalProperties: true
+        node: {type: string, description: Central. Pin to this node (no failover).}
+        nodeSelector: {type: object, additionalProperties: {type: string}, description: Central. Exact label match.}
+        reschedulable: {type: boolean, description: Central. Keep the spec so a drain can recreate the VM.}
+        tenant: {type: string, description: Central. Operator acting for a tenant; overwritten for tenant tokens.}
+        volumes: {type: array, items: {type: string}, description: Volume names to attach (requires central with volumes).}
+      additionalProperties: true
+      required: [name, backend, image]
+
+    Network:
+      type: object
+      properties:
+        name: {type: string}
+        tenant: {type: [string, 'null']}
+        subnet: {type: string, examples: [10.89.3.0/24]}
+        port: {type: integer}
+        mtu: {type: integer}
+        members:
+          type: object
+          description: Member node to its inclusive host-number range.
+          additionalProperties: {type: array, items: {type: integer}, minItems: 2, maxItems: 2}
+        key_epoch: {type: integer}
+        key_rotated_at: {type: string, format: date-time}
+        created_at: {type: string, format: date-time}
+      required: [name, subnet, port, mtu, members, key_epoch, created_at]
+    CreateNetworkRequest:
+      type: object
+      properties:
+        name: {type: string, pattern: '^[a-z0-9]([a-z0-9-]{0,38}[a-z0-9])?$'}
+        tenant: {type: string, description: Operator only.}
+        nodes: {type: array, items: {type: string}, description: Default for a tenant is every Mac it leases.}
+        hosts_per_node: {type: integer, minimum: 1, maximum: 253, default: 30}
+        mtu: {type: integer, default: 1400}
+      required: [name]
+
+    Image:
+      type: object
+      properties:
+        name: {type: string, pattern: '^[a-z0-9._-]{1,63}$'}
+        display_name: {type: [string, 'null']}
+        description: {type: [string, 'null']}
+        guest_os: {type: string, enum: [macos, linux]}
+        image: {type: string, description: The disk's path on each Mac.}
+        vcpus: {type: integer, minimum: 1, default: 4}
+        memory_mib: {type: integer, minimum: 512, default: 8192}
+        disk_size_gib: {type: [integer, 'null']}
+        source: {type: [string, 'null'], description: Where it came from (an OCI reference).}
+        updated_at: {type: [string, 'null'], format: date-time}
+      required: [guest_os, image]
+
+    EventType:
+      type: string
+      enum: [vm.created, vm.deleted, lease.created, lease.released, lease.ending, lease.ended, budget.near, budget.over,
+             node.down, node.scrub, drain.done, test]
+      description: '`node.*` and `drain.done` are operator events.'
+    Notification:
+      type: object
+      properties:
+        id: {type: string}
+        time: {type: string, format: date-time}
+        type: {$ref: '#/components/schemas/EventType'}
+        tenant: {type: string}
+        title: {type: string}
+        detail: {type: string}
+        link: {type: string, description: A console route.}
+      required: [id, time, type, title]
+    Delivery:
+      type: object
+      properties:
+        notification: {type: string}
+        type: {type: string}
+        time: {type: string, format: date-time}
+        attempt: {type: integer}
+        status: {type: [integer, 'null']}
+        ok: {type: boolean}
+        error: {type: string}
+      required: [notification, type, time, attempt, ok]
+    Webhook:
+      type: object
+      properties:
+        id: {type: string}
+        owner: {type: [string, 'null'], description: The tenant; null for the operator's.}
+        url: {type: string}
+        events: {type: array, items: {type: string}}
+        created_at: {type: string, format: date-time}
+        deliveries: {type: array, items: {$ref: '#/components/schemas/Delivery'}, description: The last 20.}
+      required: [id, url, events, created_at]
+
+    MacClass:
+      type: object
+      properties:
+        name: {type: string}
+        min_vcpus: {type: integer}
+        min_memory_gib: {type: integer}
+        per_hour: {type: number}
+      required: [name, per_hour]
+    PriceList:
+      type: object
+      properties:
+        currency: {type: string, default: USD}
+        mac_classes: {type: array, items: {$ref: '#/components/schemas/MacClass'}}
+        mac_per_hour: {type: number}
+        vm_per_hour: {type: number}
+        vcpu_per_hour: {type: number}
+        memory_gib_per_hour: {type: number}
+        macos_vm_per_hour: {type: number}
+        charge_vms_on_leased_macs: {type: boolean}
+    Statement:
+      type: object
+      properties:
+        tenant: {type: string}
+        currency: {type: string}
+        from: {type: string, format: date-time}
+        to: {type: string, format: date-time}
+        lines:
+          type: array
+          items:
+            type: object
+            properties:
+              description: {type: string}
+              quantity: {type: number}
+              unit: {type: string}
+              unit_price: {type: number}
+              amount_micros: {type: integer}
+              amount: {type: number}
+        total_micros: {type: integer}
+        total: {type: number}
+        forecast: {type: number, description: The current month only.}
+        budget:
+          type: object
+          properties:
+            monthly: {type: number}
+            used: {type: number}
+            state: {type: string, enum: [ok, near, over]}
+      required: [tenant, currency, from, to, lines, total_micros, total]
+    UsageReport:
+      type: object
+      properties:
+        from: {type: string, format: date-time}
+        to: {type: string, format: date-time}
+        tenants:
+          type: array
+          items:
+            type: object
+            properties:
+              tenant: {type: string}
+              vm_seconds: {type: integer}
+              vcpu_seconds: {type: integer}
+              memory_mib_seconds: {type: integer}
+              macos_vm_seconds: {type: integer}
+              lease_seconds: {type: integer}
+              billable_lease_seconds: {type: integer}
+              vms_started: {type: integer}
+              leases_started: {type: integer}
+
+    AuditEvent:
+      type: object
+      properties:
+        time: {type: string, format: date-time}
+        actor: {type: string, description: '`operator` or the tenant id.'}
+        tenant: {type: string}
+        method: {type: string}
+        path: {type: string}
+        target: {type: string, description: The name or id from the request body, if any.}
+        status: {type: integer}
+        key: {type: string, description: The named API key used.}
+      required: [time, actor, method, path, status]
+
+    Policy:
+      type: object
+      properties:
+        require_lease_for_macos: {type: boolean, default: true}
+        exclusive_leased_hosts: {type: boolean, default: true}
+        min_lease_hours: {type: integer, minimum: 24, default: 24}
+        ledger_retention_days: {type: integer, default: 400}
+        isolate_tenant_networks: {type: boolean, default: false}
+        tenant_subnet_prefix: {type: string, default: '10.230'}
+        overlay_key_rotation_days: {type: integer, default: 30}
+
+    Volume:
+      type: object
+      description: Requires central with volumes.
+      properties:
+        id: {type: string}
+        name: {type: string}
+        tenant: {type: [string, 'null']}
+        node: {type: string}
+        size_gib: {type: integer}
+        attached_to: {type: [string, 'null'], description: The VM id.}
+        created_at: {type: string, format: date-time}
+      required: [id, name, node, size_gib, created_at]
+
+    Snapshot:
+      type: object
+      properties:
+        name: {type: string}
+        created_at: {type: string, format: date-time}
+        size_bytes: {type: integer}
+        memory: {type: boolean, description: Holds the guest's memory too (a restore resumes it).}
+      required: [name]
+
+    Pool:
+      type: object
+      description: Requires central with warm pools. `node_selector`, `nodes` and `warm` are shown to whoever manages it.
+      properties:
+        name: {type: string}
+        owner: {type: string, description: '`operator` (a shared pool) or the tenant id.'}
+        tenant: {type: [string, 'null']}
+        image: {type: string}
+        image_display_name: {type: [string, 'null']}
+        guest_os: {type: [string, 'null']}
+        size:
+          type: object
+          properties:
+            vcpus: {type: integer}
+            memory_mib: {type: integer}
+        min_ready: {type: integer, minimum: 0}
+        max_total: {type: integer}
+        node_selector: {type: object, additionalProperties: {type: string}}
+        nodes: {type: array, items: {type: string}}
+        created_at: {type: string, format: date-time}
+        status:
+          type: object
+          additionalProperties: true
+          properties:
+            state: {type: string, enum: [ready, filling, paused, backing_off]}
+            ready: {type: integer}
+            booting: {type: integer}
+            claimed_running: {type: integer}
+            claimed_24h: {type: integer}
+            avg_claim_ms: {type: [number, 'null']}
+            last_error: {type: [string, 'null']}
+      additionalProperties: true
+      required: [name, image, size, min_ready, max_total]
+    CreatePoolRequest:
+      type: object
+      properties:
+        name: {type: string}
+        image: {type: string, description: A catalog image name.}
+        vcpus: {type: integer}
+        memory_mib: {type: integer}
+        min_ready: {type: integer, minimum: 0}
+        max_total: {type: integer}
+        nodes: {type: array, items: {type: string}}
+      required: [name, image, min_ready]
+    UpdatePoolRequest:
+      type: object
+      description: '`image`, `vcpus` and `memory_mib` may be sent back unchanged, not changed.'
+      properties:
+        image: {type: string}
+        vcpus: {type: integer}
+        memory_mib: {type: integer}
+        min_ready: {type: integer, minimum: 0}
+        max_total: {type: integer}
+        nodes: {type: array, items: {type: string}}

@@ -52,6 +52,12 @@ Same behaviour as the Python client:
 - Errors: `ConnectionFailed`, `RequestTimeout`, and `ApiError` with `AuthError` (401), `ForbiddenError` (403, also an
   `AuthError`), `NotFound` (404, and the server's 400 "VM not found"), `RateLimited` (429, with `retryAfter`).
 
+## Fleet (Mac cloud) client
+
+`new FleetClient({ baseUrl, token })` talks to central's `/fleet/*` API: `createLease`, `launchFromCatalog`, `execVm`,
+`createKey`, `createWebhook`, `billing`, `createVolume`, `createPool` and more, with typed answers. Errors add
+`Conflict` (409) and `ServiceUnavailable` (503). See [docs/fleet-sdk.md](../docs/fleet-sdk.md).
+
 ## Tests
 
 `npm test` builds and runs the unit tests against a local mock server (`test/client.test.ts`). It has not been run
