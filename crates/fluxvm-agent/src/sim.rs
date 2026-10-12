@@ -61,6 +61,13 @@ impl SimNode {
             .route("/v1/vms/{id}", get(get_vm).delete(delete_vm))
             .route("/v1/vms/{id}/agent", post(exec_vm))
             .route("/v1/vms/{id}/screenshot", get(screenshot))
+            .route("/v1/vms/{id}/input", post(input))
+            .route("/v1/vms/{id}/logs", get(logs))
+            .route("/v1/vms/{id}/start", post(|s, p| power(s, p, "running")))
+            .route("/v1/vms/{id}/restart", post(|s, p| power(s, p, "running")))
+            .route("/v1/vms/{id}/resume", post(|s, p| power(s, p, "running")))
+            .route("/v1/vms/{id}/stop", post(|s, p| power(s, p, "stopped")))
+            .route("/v1/vms/{id}/pause", post(|s, p| power(s, p, "paused")))
             .with_state(self.clone())
     }
 
@@ -165,6 +172,97 @@ async fn delete_vm(
     }
 }
 
+/// Start, stop, restart, pause and resume: the VM's status changes at once.
+async fn power(
+    State(node): State<SimNode>,
+    Path(id): Path<String>,
+    status: &'static str,
+) -> (StatusCode, Json<Value>) {
+    let mut vms = node.vms.lock().await;
+    let Some(vm) = vms.get_mut(&id) else {
+        return error(StatusCode::NOT_FOUND, format!("no VM '{id}'"));
+    };
+    vm["status"] = json!(status);
+    vm["state"] = json!(status);
+    (StatusCode::OK, Json(vm.clone()))
+}
+
+/// Keyboard and mouse input: typed text and the last click show on the drawn screen.
+async fn input(
+    State(node): State<SimNode>,
+    Path(id): Path<String>,
+    Json(body): Json<Value>,
+) -> (StatusCode, Json<Value>) {
+    let mut vms = node.vms.lock().await;
+    let Some(vm) = vms.get_mut(&id) else {
+        return error(StatusCode::NOT_FOUND, format!("no VM '{id}'"));
+    };
+    if vm.get("status").and_then(Value::as_str) != Some("running") {
+        return error(StatusCode::CONFLICT, "the VM is not running");
+    }
+    let actions: Vec<Value> = match body.get("actions").and_then(Value::as_array) {
+        Some(a) => a.clone(),
+        None => vec![body.clone()],
+    };
+    let mut typed = vm
+        .get("sim_typed")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_owned();
+    for a in &actions {
+        match a.get("action").and_then(Value::as_str) {
+            Some("type") => typed.push_str(a.get("text").and_then(Value::as_str).unwrap_or("")),
+            Some("key") => match a.get("key").and_then(Value::as_str) {
+                Some("backspace" | "delete") => {
+                    typed.pop();
+                }
+                Some("enter" | "return") => typed.clear(),
+                Some(k) if k.chars().count() == 1 => typed.push_str(k),
+                _ => {}
+            },
+            Some("click" | "double_click" | "right_click") => {
+                let scale = a
+                    .get("screen_width")
+                    .and_then(Value::as_f64)
+                    .map_or(1.0, |w| 1280.0 / w.max(1.0));
+                let x = a.get("x").and_then(Value::as_f64).unwrap_or(0.0) * scale;
+                let y = a.get("y").and_then(Value::as_f64).unwrap_or(0.0) * scale;
+                vm["sim_click"] = json!([x.round(), y.round()]);
+            }
+            _ => {}
+        }
+    }
+    let keep: String = typed
+        .chars()
+        .rev()
+        .take(48)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    vm["sim_typed"] = json!(keep);
+    (StatusCode::OK, Json(json!({ "sent": actions.len() })))
+}
+
+/// A few log lines, like a guest's console log.
+async fn logs(State(node): State<SimNode>, Path(id): Path<String>) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let Some(vm) = node.vms.lock().await.get(&id).cloned() else {
+        return error(StatusCode::NOT_FOUND, format!("no VM '{id}'")).into_response();
+    };
+    let name = vm.get("name").and_then(Value::as_str).unwrap_or("vm");
+    let created = vm.get("created_at").and_then(Value::as_str).unwrap_or("");
+    let status = vm
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    format!(
+        "{created} fluxvm: creating {name} (simulated)\n{created} vz: boot loader started\n{created} vz: guest agent connected\n{} fluxvm: {name} is {status}\n",
+        Utc::now().to_rfc3339()
+    )
+    .into_response()
+}
+
 /// A drawn stand-in for the guest's display (SVG, 1280x800): a desktop with the VM's name and the time, so the console's
 /// screen view has something to show.
 async fn screenshot(
@@ -184,6 +282,23 @@ async fn screenshot(
         .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
         .collect();
     let now = Utc::now().format("%H:%M:%S");
+    // Only characters that are safe inside SVG text.
+    let typed: String = vm
+        .get("sim_typed")
+        .and_then(Value::as_str)
+        .unwrap_or("sw_vers")
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || " -_.,:/=+()".contains(*c))
+        .collect();
+    let click = vm
+        .get("sim_click")
+        .and_then(Value::as_array)
+        .map(|p| {
+            let x = p.first().and_then(Value::as_f64).unwrap_or(0.0);
+            let y = p.get(1).and_then(Value::as_f64).unwrap_or(0.0);
+            format!(r##"<circle cx="{x}" cy="{y}" r="10" fill="none" stroke="#ffcc00" stroke-width="3"/>"##)
+        })
+        .unwrap_or_default();
     let svg = if vm.get("request").is_some_and(is_macos) {
         format!(
             r##"<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="800" viewBox="0 0 1280 800">
@@ -195,7 +310,7 @@ async fn screenshot(
 <rect x="340" y="220" width="600" height="320" rx="12" fill="#1e1e1e" fill-opacity="0.92"/>
 <circle cx="364" cy="244" r="6" fill="#ff5f57"/><circle cx="384" cy="244" r="6" fill="#febc2e"/><circle cx="404" cy="244" r="6" fill="#28c840"/>
 <text x="364" y="300" font-family="Menlo, monospace" font-size="16" fill="#e6e6e6">{name} (simulated)</text>
-<text x="364" y="330" font-family="Menlo, monospace" font-size="16" fill="#8fc7ff">$ sw_vers</text>
+<text x="364" y="330" font-family="Menlo, monospace" font-size="16" fill="#8fc7ff">$ {typed}</text>{click}
 <text x="364" y="356" font-family="Menlo, monospace" font-size="16" fill="#e6e6e6">ProductName: macOS</text>
 <text x="364" y="382" font-family="Menlo, monospace" font-size="16" fill="#e6e6e6">ProductVersion: 27.0</text>
 <rect x="490" y="740" width="300" height="44" rx="12" fill="#fff" fill-opacity="0.25"/>
@@ -530,6 +645,49 @@ mod tests {
         .unwrap();
         assert_eq!(r.status(), 200);
         assert_eq!(r.headers()["content-type"], "image/svg+xml");
+
+        // Power, input and logs go through central too.
+        for (action, want) in [("stop", "stopped"), ("start", "running")] {
+            let r = req(
+                reqwest::Method::POST,
+                &format!("/fleet/vms/sim-mac/{}/{action}", ids[0]),
+                &token,
+                Value::Null,
+            )
+            .await
+            .unwrap();
+            assert_eq!(r.status(), 200, "{action}");
+            let v: Value = r.json().await.unwrap();
+            assert_eq!(v["status"], want);
+        }
+        let r = req(
+            reqwest::Method::POST,
+            &format!("/fleet/vms/sim-mac/{}/input", ids[0]),
+            &token,
+            json!({"actions": [{"action": "type", "text": "hello"}, {"action": "click", "x": 10, "y": 10}]}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(r.status(), 200);
+        let r = req(
+            reqwest::Method::GET,
+            &format!("/fleet/vms/sim-mac/{}/logs?lines=50", ids[0]),
+            &token,
+            Value::Null,
+        )
+        .await
+        .unwrap();
+        assert_eq!(r.status(), 200);
+        assert!(r.text().await.unwrap().contains("m1"));
+        let r = req(
+            reqwest::Method::POST,
+            &format!("/fleet/vms/sim-mac/{}/explode", ids[0]),
+            &token,
+            Value::Null,
+        )
+        .await
+        .unwrap();
+        assert!(!r.status().is_success(), "unknown actions are refused");
 
         // Every change was recorded; the tenant sees its own, with the VM's name and no request body.
         let v: Value = req(reqwest::Method::GET, "/fleet/events", &token, Value::Null)

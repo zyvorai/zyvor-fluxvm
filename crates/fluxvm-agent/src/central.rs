@@ -403,6 +403,10 @@ async fn auth_middleware(State(fleet): State<Fleet>, mut req: Request, next: Nex
         Err(resp) => return resp,
     };
     let resp = next.run(req).await;
+    // Screen input (every click and keystroke) is not recorded one by one; who may control a screen is.
+    if path.ends_with("/input") {
+        return resp;
+    }
     let event = audit::event(&caller, method, path, target, resp.status(), key_used);
     notify::from_change(&fleet, &event).await;
     fleet.audit.record(event);
@@ -429,6 +433,14 @@ fn tenant_route_allowed(method: &axum::http::Method, path: &str) -> bool {
         ["fleet", "vms"] | ["fleet", "leases"] => get || post,
         ["fleet", "vms", _, _] => delete,
         ["fleet", "vms", _, _, "exec"] => post,
+        [
+            "fleet",
+            "vms",
+            _,
+            _,
+            "start" | "stop" | "restart" | "pause" | "resume" | "input",
+        ] => post,
+        ["fleet", "vms", _, _, "logs"] => get,
         ["fleet", "vms", _, _, "screen"] | ["fleet", "events"] => get,
         ["fleet", "leases", _] => get,
         ["fleet", "leases", _, "release"] => post,
@@ -612,6 +624,9 @@ pub fn router_with_handle(cfg: CentralConfig) -> (Router, Option<HaHandle>) {
             axum::routing::delete(delete_vm_route),
         )
         .route("/fleet/vms/{node}/{id}/exec", post(cloud::exec_vm))
+        .route("/fleet/vms/{node}/{id}/input", post(cloud::vm_input))
+        .route("/fleet/vms/{node}/{id}/logs", get(cloud::vm_logs))
+        .route("/fleet/vms/{node}/{id}/{action}", post(cloud::vm_power))
         .route("/fleet/vms/{node}/{id}/screen", get(audit::screen))
         .route("/fleet/events", get(audit::events))
         .route("/fleet/capacity", get(fleet_capacity))

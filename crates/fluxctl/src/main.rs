@@ -1129,6 +1129,34 @@ enum FleetCommand {
         #[arg(trailing_var_arg = true, required = true)]
         command: Vec<String>,
     },
+    /// Start a stopped VM (by name or ID prefix).
+    Start {
+        vm: String,
+    },
+    /// Shut a VM down; its disk is kept (asks first on a terminal).
+    Stop {
+        vm: String,
+        #[arg(long, short = 'y')]
+        yes: bool,
+    },
+    /// Restart a VM (asks first on a terminal).
+    Restart {
+        vm: String,
+        #[arg(long, short = 'y')]
+        yes: bool,
+    },
+    Pause {
+        vm: String,
+    },
+    Resume {
+        vm: String,
+    },
+    /// The end of a VM's console log.
+    Logs {
+        vm: String,
+        #[arg(long, default_value_t = 100)]
+        lines: usize,
+    },
     /// Delete a VM, found by name or ID prefix. Asks first on a terminal.
     Rm {
         vm: String,
@@ -1214,21 +1242,29 @@ enum FleetCommand {
     /// has, without fetching and filtering the whole fleet just to check one
     /// node's `healthy`/`cordoned`/free-capacity state. REST equivalent:
     /// `GET /fleet/nodes/{name}`.
-    Node { name: String },
+    Node {
+        name: String,
+    },
     /// Exclude a node from automatic (residual-capacity) placement without
     /// touching any VM already on it or deregistering the node — same
     /// semantics as `kubectl cordon`. REST equivalent:
     /// `POST /fleet/nodes/{name}/cordon`.
-    Cordon { name: String },
+    Cordon {
+        name: String,
+    },
     /// Clear a node's cordon, re-admitting it to automatic placement. REST
     /// equivalent: `POST /fleet/nodes/{name}/uncordon`.
-    Uncordon { name: String },
+    Uncordon {
+        name: String,
+    },
     /// Permanently forget a decommissioned node's registry entry. Only
     /// works once the node's heartbeat has already gone stale — the
     /// registry rejects deregistering a still-healthy node (409), since its
     /// very next heartbeat would just re-add it. REST equivalent:
     /// `DELETE /fleet/nodes/{name}`.
-    Deregister { name: String },
+    Deregister {
+        name: String,
+    },
     /// Fleet-wide capacity summary computed from each node's last
     /// heartbeat — no proxy calls to any node's own `fluxctl serve`. REST
     /// equivalent: `GET /fleet/capacity`.
@@ -1264,10 +1300,15 @@ enum FleetCommand {
     /// rather than filtered out of the fleet-wide list — works even when
     /// other nodes in the fleet are unreachable. REST equivalent:
     /// `GET /fleet/nodes/{name}/vms`.
-    NodeVms { name: String },
+    NodeVms {
+        name: String,
+    },
     /// Delete a VM on a specific node through the fleet proxy. REST
     /// equivalent: `DELETE /fleet/vms/{node}/{id}`.
-    Delete { node: String, id: Uuid },
+    Delete {
+        node: String,
+        id: Uuid,
+    },
     /// Tenants (operator): create, list, quota, disable, rotate token. See docs/mac-cloud-tenancy.md.
     Tenant {
         #[command(subcommand)]
@@ -1290,7 +1331,9 @@ enum FleetCommand {
         force: bool,
     },
     /// Drain progress and lease/scrub state of a node. REST: `GET /fleet/nodes/{name}/drain`.
-    DrainStatus { name: String },
+    DrainStatus {
+        name: String,
+    },
     /// Clear a node released from a lease for reuse (refused while it runs VMs unless `--force` deletes them).
     /// REST: `POST /fleet/nodes/{name}/scrub`.
     Scrub {

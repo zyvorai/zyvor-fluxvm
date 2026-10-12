@@ -1438,6 +1438,167 @@ pub(super) async fn node_overlays(
 
 // ---- exec ---------------------------------------------------------------------------------------------------------
 
+/// `POST /fleet/vms/{node}/{id}/{start|stop|restart|pause|resume}`: power a VM through its node. A tenant can power
+/// only its own VMs.
+pub(super) async fn vm_power(
+    State(fleet): State<Fleet>,
+    Extension(caller): Extension<Caller>,
+    Path((node, id, action)): Path<(String, String, String)>,
+) -> Result<Json<Value>, AppError> {
+    if !matches!(
+        action.as_str(),
+        "start" | "stop" | "restart" | "pause" | "resume"
+    ) {
+        return Err(not_found(format!("no VM action '{action}'")));
+    }
+    if !fleet.tenancy.lock().await.owns(&caller, &node, &id) {
+        return Err(not_found(format!("no VM '{id}' on node '{node}'")));
+    }
+    let target = node_by_name(&fleet, &node).await?;
+    let resp = fleet
+        .http
+        .post(format!(
+            "{}/v1/vms/{}/{action}",
+            target.fluxvm_url,
+            path_segment(&id)
+        ))
+        .send()
+        .await?;
+    let status = resp.status();
+    let out: Value = resp.json().await.unwrap_or(Value::Null);
+    if status.is_success() {
+        Ok(Json(out))
+    } else {
+        let msg = out
+            .get("error")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .unwrap_or_else(|| out.to_string());
+        Err(AppError(
+            if status.is_client_error() {
+                StatusCode::CONFLICT
+            } else {
+                StatusCode::BAD_GATEWAY
+            },
+            format!("could not {action} the VM: {msg}"),
+        ))
+    }
+}
+
+/// `POST /fleet/vms/{node}/{id}/input`: keyboard and mouse input for the VM's display (`{"action": ...}` or
+/// `{"actions": [...]}`, as the node's `POST /v1/vms/{id}/input`). Not written to the activity log one event at a time.
+pub(super) async fn vm_input(
+    State(fleet): State<Fleet>,
+    Extension(caller): Extension<Caller>,
+    Path((node, id)): Path<(String, String)>,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, AppError> {
+    if !fleet.tenancy.lock().await.owns(&caller, &node, &id) {
+        return Err(not_found(format!("no VM '{id}' on node '{node}'")));
+    }
+    let n = body
+        .get("actions")
+        .and_then(Value::as_array)
+        .map_or(1, Vec::len);
+    if n == 0 || n > 200 {
+        return Err(AppError(
+            StatusCode::BAD_REQUEST,
+            "send 1 to 200 input actions at a time".into(),
+        ));
+    }
+    let target = node_by_name(&fleet, &node).await?;
+    let resp = fleet
+        .http
+        .post(format!(
+            "{}/v1/vms/{}/input",
+            target.fluxvm_url,
+            path_segment(&id)
+        ))
+        .json(&body)
+        .send()
+        .await?;
+    let status = resp.status();
+    let out: Value = resp.json().await.unwrap_or(Value::Null);
+    if status.is_success() {
+        Ok(Json(out))
+    } else {
+        Err(AppError(
+            if status.is_client_error() {
+                StatusCode::BAD_REQUEST
+            } else {
+                StatusCode::BAD_GATEWAY
+            },
+            format!(
+                "the VM did not take the input: {}",
+                out.get("error")
+                    .and_then(Value::as_str)
+                    .unwrap_or("no reason given")
+            ),
+        ))
+    }
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub(super) struct LogsQuery {
+    #[serde(default)]
+    lines: Option<usize>,
+}
+
+/// `GET /fleet/vms/{node}/{id}/logs[?lines=N]`: the end of the VM's console log, as text.
+pub(super) async fn vm_logs(
+    State(fleet): State<Fleet>,
+    Extension(caller): Extension<Caller>,
+    Path((node, id)): Path<(String, String)>,
+    Query(q): Query<LogsQuery>,
+) -> Result<Response, AppError> {
+    if !fleet.tenancy.lock().await.owns(&caller, &node, &id) {
+        return Err(not_found(format!("no VM '{id}' on node '{node}'")));
+    }
+    let lines = q.lines.unwrap_or(200).clamp(1, 5000);
+    let target = node_by_name(&fleet, &node).await?;
+    let resp = fleet
+        .http
+        .get(format!(
+            "{}/v1/vms/{}/logs?lines={lines}",
+            target.fluxvm_url,
+            path_segment(&id)
+        ))
+        .timeout(std::time::Duration::from_secs(15))
+        .send()
+        .await?;
+    let status = resp.status();
+    // The node streams; without `follow` the stream ends after the last line. Cap what is read.
+    let bytes = resp.bytes().await?;
+    let text = String::from_utf8_lossy(&bytes[..bytes.len().min(4 << 20)]).into_owned();
+    if !status.is_success() {
+        return Err(AppError(
+            StatusCode::BAD_GATEWAY,
+            format!("node '{node}' did not return the log: {}", text.trim()),
+        ));
+    }
+    Ok((
+        [
+            (header::CONTENT_TYPE, "text/plain; charset=utf-8"),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
+        text,
+    )
+        .into_response())
+}
+
+/// A VM id as one URL path segment (ids are UUIDs; anything else is escaped rather than trusted).
+fn path_segment(id: &str) -> String {
+    id.bytes()
+        .map(|b| {
+            if b.is_ascii_alphanumeric() || b == b'-' {
+                (b as char).to_string()
+            } else {
+                format!("%{b:02X}")
+            }
+        })
+        .collect()
+}
+
 /// `POST /fleet/vms/{node}/{id}/exec` (*tenant*): forwards `{"command": "...", "timeout_seconds": N}` to the node's
 /// guest agent (`POST /v1/vms/{id}/agent`). A tenant can exec only in its own VMs.
 pub(super) async fn exec_vm(

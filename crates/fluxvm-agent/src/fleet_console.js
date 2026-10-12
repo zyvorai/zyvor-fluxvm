@@ -125,6 +125,7 @@ const S = {
   query: '',
   exec: {}, // vm key -> { draft, log: [] }
   tenantKeys: {}, // operator: tenant id -> its API keys, loaded when its details open
+  logs: {}, // vm key -> the last console log text shown
   billMonth: null,
   billView: null,
   hooks: null, // webhooks, loaded on the Notifications page
@@ -1071,7 +1072,8 @@ function vmInspector(v) {
   const ex = S.exec[k] = S.exec[k] || { draft: '', log: [] };
   const nets = ((req.apple || {}).networks || []).map((n) => n.name);
   const running = vmStatus(v).text === 'Running';
-  const out = [h('div', { class: 'head' }, h('div', { class: 'grow' }, h('h2', {}, v.name), status(vmStatus(v))), closeBtn('vms'))];
+  const out = [h('div', { class: 'head' }, h('div', { class: 'grow' }, h('h2', {}, v.name), status(vmStatus(v))), closeBtn('vms')),
+    powerRow(v)];
   out.push(h('section', {}, facts([
     ['Mac', h('a', { href: '#/macs/' + enc(v.node) }, v.node)],
     ['Guest', guestName(guestOf(req))],
@@ -1101,6 +1103,7 @@ function vmInspector(v) {
       h('div', { class: 'grow' }, input), h('button', { type: 'submit', disabled: !running }, 'Run')),
     running ? null : h('p', { class: 'hint' }, 'The VM has to be running.'),
     out2));
+  out.push(logsPanel(v));
   out.push(h('section', {}, h('h3', {}, 'Delete'),
     h('p', { class: 'small muted', style: { marginBottom: '10px' } }, 'Stops the VM and deletes its disk. This cannot be undone.'),
     h('button', { class: 'danger', onclick: () => deleteVm(v) }, 'Delete VM…')));
@@ -1401,6 +1404,49 @@ function keySheet(owner) {
   });
 }
 
+// ---- VM power and logs ---------------------------------------------------------------------------------------------
+
+function powerRow(v) {
+  const st = vmStatus(v).text.toLowerCase();
+  const path = '/fleet/vms/' + enc(v.node) + '/' + enc(v.id) + '/';
+  const act = (action, label, done, confirmBody) => h('button', { onclick: async (e) => {
+    if (confirmBody && !await confirmDialog({ title: label + ' ' + v.name + '?', body: confirmBody, confirm: label })) return;
+    e.target.disabled = true;
+    await doAct('POST', path + action, v.name + ' ' + done);
+  } }, label);
+  const buttons = [];
+  if (st === 'stopped' || st === 'failed') buttons.push(act('start', 'Start', 'started'));
+  if (st === 'running') {
+    buttons.push(act('stop', 'Stop', 'stopped', 'The guest is shut down. Its disk is kept, and you can start it again.'));
+    buttons.push(act('restart', 'Restart', 'restarted', 'The guest restarts. Anything not saved inside it is lost.'));
+    buttons.push(act('pause', 'Pause', 'paused'));
+  }
+  if (st === 'paused') {
+    buttons.push(act('resume', 'Resume', 'resumed'));
+    buttons.push(act('stop', 'Stop', 'stopped', 'The guest is shut down. Its disk is kept.'));
+  }
+  return buttons.length ? h('div', { class: 'row', style: { marginBottom: '8px' } }, buttons) : null;
+}
+
+function logsPanel(v) {
+  const k = vmKey(v);
+  const pre = h('div', { class: 'term', hidden: !S.logs[k] }, S.logs[k] || '');
+  const btn = h('button', { class: 'plain' }, S.logs[k] ? 'Refresh' : 'Show log');
+  btn.addEventListener('click', async () => {
+    btn.disabled = true;
+    try {
+      const text = await api('GET', '/fleet/vms/' + enc(v.node) + '/' + enc(v.id) + '/logs?lines=300', { text: true });
+      S.logs[k] = typeof text === 'string' && text.trim() ? text : 'The log is empty.';
+    } catch (e) { S.logs[k] = 'The log could not be loaded: ' + e.message; }
+    btn.disabled = false;
+    btn.textContent = 'Refresh';
+    pre.textContent = S.logs[k];
+    pre.hidden = false;
+    pre.scrollTop = pre.scrollHeight;
+  });
+  return h('section', {}, h('div', { class: 'row' }, h('h3', { class: 'grow' }, 'Console log'), btn), pre);
+}
+
 // ---- the VM's screen -------------------------------------------------------------------------------------------------
 
 // One live screen at a time: the VM open in the inspector. Its elements survive re-renders, so the picture does not
@@ -1408,12 +1454,122 @@ function keySheet(owner) {
 const screen = { key: null, running: false, el: null, img: null, note: null, link: null, toggle: null, url: null,
   timer: null, paused: false, seq: 0 };
 
+function setControl(on) {
+  if (!screen.img) return;
+  screen.control = on;
+  screen.ctl.setAttribute('aria-pressed', String(on));
+  screen.ctl.textContent = on ? 'Stop control' : 'Control';
+  screen.bar.hidden = !on;
+  screen.img.classList.toggle('controlling', on);
+  screen.el.classList.toggle('screen-full', on);
+  // The full window lives at the top of the page (the inspector would trap it under its own stacking order); the
+  // inspector shows a stub meanwhile.
+  if (on && !screen.backdrop) {
+    screen.backdrop = h('div', { class: 'screen-backdrop', 'aria-hidden': 'true' });
+    screen.stub = h('section', {}, h('h3', {}, 'Screen'), h('p', { class: 'hint' }, 'You are controlling this VM in the large view.'));
+    if (screen.el.isConnected) screen.el.replaceWith(screen.stub);
+    document.body.append(screen.backdrop, screen.el);
+  } else if (!on && screen.backdrop) {
+    screen.backdrop.remove();
+    screen.backdrop = null;
+    if (screen.stub && screen.stub.isConnected) screen.stub.replaceWith(screen.el); else screen.el.remove();
+    screen.stub = null;
+  }
+  if (on) {
+    screen.img.tabIndex = 0;
+    screen.img.focus();
+    if (screen.paused) { screen.paused = false; screen.toggle.textContent = 'Pause'; }
+    fetchScreen(screen.key);
+  } else screen.img.removeAttribute('tabindex');
+}
+
+/** Where a pointer event falls in the screenshot's own pixels (the image is letterboxed by object-fit: contain). */
+function screenPoint(img, e) {
+  const r = img.getBoundingClientRect();
+  const nw = img.naturalWidth || 1;
+  const nh = img.naturalHeight || 1;
+  const scale = Math.min(r.width / nw, r.height / nh);
+  const x = (e.clientX - r.left - (r.width - nw * scale) / 2) / scale;
+  const y = (e.clientY - r.top - (r.height - nh * scale) / 2) / scale;
+  if (x < 0 || y < 0 || x > nw || y > nh) return null;
+  return { x: Math.round(x), y: Math.round(y), screen_width: nw };
+}
+
+let inputQueue = [];
+let inputTimer = null;
+let inputBusy = false;
+function sendInput(actions) {
+  inputQueue.push(...actions);
+  clearTimeout(inputTimer);
+  inputTimer = setTimeout(flushInput, 80);
+}
+async function flushInput() {
+  const k = screen.key;
+  if (inputBusy || !k || !inputQueue.length) return;
+  inputBusy = true;
+  const actions = inputQueue.splice(0, 200);
+  // Consecutive type actions become one.
+  const merged = [];
+  for (const a of actions) {
+    const last = merged[merged.length - 1];
+    if (a.action === 'type' && last && last.action === 'type' && last.text.length + a.text.length <= 4096) last.text += a.text;
+    else merged.push({ ...a });
+  }
+  const [node, id] = k.split('/');
+  try {
+    await api('POST', '/fleet/vms/' + enc(node) + '/' + enc(id) + '/input', { body: { actions: merged } });
+  } catch (e) { toast(e.message, true); }
+  inputBusy = false;
+  if (screen.key !== k) { inputQueue = []; return; }
+  clearTimeout(screen.timer);
+  screen.timer = setTimeout(() => fetchScreen(k), 250);
+  if (inputQueue.length) flushInput();
+}
+
+const NAMED = { Enter: 'return', Tab: 'tab', Escape: 'escape', Backspace: 'backspace', Delete: 'delete', ArrowUp: 'up', ArrowDown: 'down',
+  ArrowLeft: 'left', ArrowRight: 'right', Home: 'home', End: 'end', PageUp: 'page_up', PageDown: 'page_down', ' ': 'space' };
+
+function wireScreenInput(img) {
+  const at = (e, action) => {
+    if (!screen.control) return;
+    const p = screenPoint(img, e);
+    if (p) sendInput([{ action, ...p }]);
+  };
+  img.addEventListener('click', (e) => { if (e.detail <= 1) at(e, 'click'); });
+  img.addEventListener('dblclick', (e) => at(e, 'double_click'));
+  img.addEventListener('contextmenu', (e) => { if (screen.control) { e.preventDefault(); at(e, 'right_click'); } });
+  let wheelAt = 0;
+  img.addEventListener('wheel', (e) => {
+    if (!screen.control) return;
+    e.preventDefault();
+    if (Date.now() - wheelAt < 60) return;
+    wheelAt = Date.now();
+    const p = screenPoint(img, e) || {};
+    const notches = (d) => Math.sign(d) * Math.min(5, Math.ceil(Math.abs(d) / 40));
+    sendInput([{ action: 'scroll', dx: notches(e.deltaX), dy: notches(e.deltaY), ...p }]);
+  }, { passive: false });
+  img.addEventListener('keydown', (e) => {
+    if (!screen.control || ['Shift', 'Control', 'Alt', 'Meta', 'CapsLock'].includes(e.key)) return;
+    e.preventDefault();
+    const modifiers = [e.metaKey && 'command', e.ctrlKey && 'control', e.altKey && 'option', e.shiftKey && 'shift'].filter(Boolean);
+    const plain = !e.metaKey && !e.ctrlKey && !e.altKey;
+    if (e.key.length === 1 && plain) { sendInput([{ action: 'type', text: e.key }]); return; }
+    const named = NAMED[e.key] || (/^F([1-9]|1[0-2])$/.test(e.key) ? e.key.toLowerCase() : null);
+    if (named) { sendInput([{ action: 'key', key: named, modifiers: plain ? modifiers.filter((m) => m === 'shift') : modifiers }]); return; }
+    if (e.key.length === 1) sendInput([{ action: 'key', key: e.key.toLowerCase(), modifiers }]);
+  });
+}
+
 function stopScreen() {
   clearTimeout(screen.timer);
   screen.timer = null;
   if (screen.url) URL.revokeObjectURL(screen.url);
   screen.seq++; // a fetch still in flight is dropped
-  Object.assign(screen, { key: null, el: null, img: null, url: null, paused: false });
+  inputQueue = [];
+  if (screen.backdrop) { screen.backdrop.remove(); screen.backdrop = null; }
+  if (screen.el && screen.el.parentNode === document.body) screen.el.remove();
+  screen.stub = null;
+  Object.assign(screen, { key: null, el: null, img: null, url: null, paused: false, control: false });
 }
 
 function screenPanel(v, running) {
@@ -1432,13 +1588,27 @@ function screenPanel(v, running) {
       screen.toggle.textContent = screen.paused ? 'Resume' : 'Pause';
       if (!screen.paused) fetchScreen(screen.key);
     } }, 'Pause');
-    screen.el = h('section', {}, h('div', { class: 'row' }, h('h3', { class: 'grow' }, 'Screen'), screen.link, screen.toggle),
-      screen.img, screen.note);
+    screen.control = false;
+    screen.ctl = h('button', { class: 'plain', type: 'button', 'aria-pressed': 'false', title: 'Send your clicks and typing to the VM',
+      onclick: () => setControl(!screen.control) }, 'Control');
+    screen.typeIn = h('input', { placeholder: 'Type or paste text…', 'aria-label': 'Text to type into the VM', class: 'grow', style: { width: 'auto' } });
+    const keyBtn = (label, key, modifiers) => h('button', { type: 'button', class: 'icon', onclick: () => sendInput([{ action: 'key', key, modifiers: modifiers || [] }]) }, label);
+    screen.bar = h('form', { class: 'row', hidden: true, style: { marginTop: '8px' }, onsubmit: (e) => {
+      e.preventDefault();
+      const text = screen.typeIn.value;
+      if (text) sendInput([{ action: 'type', text: text.slice(0, 4096) }]);
+      screen.typeIn.value = '';
+    } }, screen.typeIn, h('button', { type: 'submit' }, 'Type'),
+    keyBtn('Return', 'return'), keyBtn('Esc', 'escape'), keyBtn('Tab', 'tab'), keyBtn('⌘ Space', 'space', ['command']));
+    wireScreenInput(screen.img);
+    screen.el = h('section', {}, h('div', { class: 'row' }, h('h3', { class: 'grow' }, 'Screen'), screen.link, screen.ctl, screen.toggle),
+      screen.img, screen.bar, screen.note);
     fetchScreen(k);
   }
   screen.toggle.hidden = !running;
-  if (!running) screen.note.textContent = 'The VM is not running, so it has no screen.';
-  return screen.el;
+  screen.ctl.hidden = !running || guestOf(v.request) !== 'macos';
+  if (!running) { screen.note.textContent = 'The VM is not running, so it has no screen.'; setControl(false); }
+  return screen.control && screen.stub ? screen.stub : screen.el;
 }
 
 async function fetchScreen(k) {
@@ -1454,7 +1624,7 @@ async function fetchScreen(k) {
   const seq = ++screen.seq;
   try {
     const headers = token() ? { Authorization: 'Bearer ' + token() } : {};
-    const r = await fetch('/fleet/vms/' + enc(node) + '/' + enc(id) + '/screen?max_width=960', { headers, cache: 'no-store' });
+    const r = await fetch('/fleet/vms/' + enc(node) + '/' + enc(id) + '/screen?max_width=' + (screen.control ? 1600 : 960), { headers, cache: 'no-store' });
     if (screen.key !== k || seq !== screen.seq) return;
     if (!r.ok) {
       const body = await r.json().catch(() => ({}));
@@ -1474,9 +1644,11 @@ async function fetchScreen(k) {
     const blank = r.headers.get('x-fluxvm-screen-blank') === 'true';
     const w = r.headers.get('x-fluxvm-screen-width');
     const hgt = r.headers.get('x-fluxvm-screen-height');
-    screen.note.textContent = (blank ? 'Nothing is drawn yet (the guest is still starting). ' : '')
-      + (w && hgt ? w + ' × ' + hgt + '. ' : '') + 'Updates every 2 seconds while this panel is open.';
-    again(2000);
+    screen.note.textContent = screen.control
+      ? 'Controlling the VM: clicks, scrolling and keys go to it. Press Stop control when you are done.'
+      : (blank ? 'Nothing is drawn yet (the guest is still starting). ' : '')
+        + (w && hgt ? w + ' × ' + hgt + '. ' : '') + 'Updates every 2 seconds while this panel is open.';
+    again(screen.control ? 700 : 2000);
   } catch (_) {
     if (screen.key === k) { screen.note.textContent = 'Central is not reachable; retrying.'; again(6000); }
   }
@@ -1494,6 +1666,9 @@ function describe(e) {
   if (a === 'vms' && p.length === 1 && m === 'POST') return 'Launched VM' + t;
   if (a === 'vms' && p.length === 3 && m === 'DELETE') return 'Deleted VM ' + (vmName(b, c) || c.slice(0, 8)) + ' on ' + b;
   if (a === 'vms' && d === 'exec') return 'Ran a command in ' + (vmName(b, c) || c.slice(0, 8));
+  if (a === 'vms' && ['start', 'stop', 'restart', 'pause', 'resume'].includes(d)) {
+    return { start: 'Started ', stop: 'Stopped ', restart: 'Restarted ', pause: 'Paused ', resume: 'Resumed ' }[d] + (vmName(b, c) || c.slice(0, 8));
+  }
   if (a === 'leases' && p.length === 1) return 'Leased a Mac' + (e.target ? ' (' + e.target + ')' : '');
   if (a === 'leases' && c === 'release') return 'Released a lease';
   if (a === 'overlays' && p.length === 1) return 'Created network' + t;
@@ -2238,7 +2413,7 @@ $('signin-form').addEventListener('submit', (e) => {
   storage.set('sessionStorage', TOKEN_KEY, t);
   $('signin-token').value = '';
   // Nothing from the previous token's session carries over.
-  Object.assign(S, { role: null, me: null, data: null, error: null, usage: null, policy: null, exec: {}, tenantKeys: {}, billMonth: null, billView: null, billLoading: null, hooks: null, hooksLoading: null, query: '',
+  Object.assign(S, { role: null, me: null, data: null, error: null, usage: null, policy: null, exec: {}, tenantKeys: {}, billMonth: null, billView: null, billLoading: null, hooks: null, hooksLoading: null, logs: {}, query: '',
     lastViewKey: '', lastInspKey: '', loadedAt: 0 });
   stopScreen();
   $('search').value = '';

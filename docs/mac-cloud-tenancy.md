@@ -41,6 +41,10 @@ With a **tenant token** you get:
 - **Networks**: create one across your Macs, see each Mac's address range, add or remove Macs, rotate the key.
 - **Screen**: a VM's details show its display, refreshed every 2 seconds while open, so you can watch macOS boot,
   finish setup or see why a job hangs, without VNC. It comes through central from the node's screenshot API.
+- **Power and control**: Start, Stop, Restart, Pause and Resume in a VM's details. **Control** opens the screen in a
+  large view where your clicks, scrolling and typing go to the guest (macOS VMs), with a box for pasting text and
+  buttons for Return, Esc, Tab and ⌘ Space, enough to get through Setup Assistant or a stuck dialog. The console log is
+  one click away.
 - **Activity**: every change made with your token (launches, deletes, leases, networks, commands) and whether it worked.
 - **Images** (the catalog) and **Usage** (7, 30 or 90 days, with a CSV download).
 
@@ -92,6 +96,8 @@ Next: fluxctl fleet run macos-27-xcode-1 -- sw_vers
 | `fleet keys [create\|revoke]` | A tenant's named API keys |
 | `fleet prices [--set FILE]`, `fleet bill`, `fleet budget [AMOUNT]` | Prices, monthly statements, budgets |
 | `fleet notifications`, `fleet webhooks [add\|rm\|test]` | Notifications and webhooks |
+| `fleet start\|stop\|restart\|pause\|resume VM` | Power a VM (stop and restart ask first on a terminal) |
+| `fleet logs VM [--lines N]` | The end of a VM's console log |
 | `fleet rm VM` | Delete a VM by name (asks on a terminal; `-y` to skip) |
 | `fleet vms`, `fleet nodes`, `fleet node M` | VMs and Macs, with macOS slots (`●○`) and when each lease can be released |
 | `fleet lease create\|list\|get\|release` | Leases (`create --hours 72 --min-vcpus 16 --nested`) |
@@ -351,6 +357,9 @@ capabilities, but not its address, labels or security report.
 | `GET /fleet/usage?from=&to=&tenant=&format=json\|csv` | tenant (own), operator |
 | `POST /fleet/reconcile`, `GET/PUT /fleet/policy` | operator |
 | `GET /fleet/images` | tenant, operator |
+| `POST /fleet/vms/{node}/{id}/{start,stop,restart,pause,resume}` | tenant (own VMs), operator |
+| `POST /fleet/vms/{node}/{id}/input` (`{"actions": [...]}`, as the node's `/v1/vms/{id}/input`) | tenant (own VMs; not with a read-only key), operator; not written to the activity log per event |
+| `GET /fleet/vms/{node}/{id}/logs[?lines=N]` | tenant (own VMs), operator |
 | `GET /fleet/vms/{node}/{id}/screen[?max_width=N]` | tenant (own VMs), operator: the display as PNG; `409` when the VM has none |
 | `GET/POST /fleet/tenants/me/keys`, `DELETE /fleet/tenants/me/keys/{id or name}` | tenant (primary token for changes) |
 | `GET/POST /fleet/tenants/{id}/keys`, `DELETE …/keys/{key}` | operator |
