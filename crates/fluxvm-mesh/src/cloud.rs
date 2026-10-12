@@ -7,7 +7,9 @@ use crate::catalog::{CatalogStore, CloudCatalog};
 use crate::enroll::{EnrollmentAuthority, UsedNonceStore, apply_join};
 use crate::ipv6::Ipv6Overlay;
 use crate::keydist::{KeyDistributionStore, default_keydist_path};
+use crate::public::{PublicConfigStore, default_public_config_path};
 use crate::reconcile::rotate_wireguard_key;
+use crate::share::{ShareAuthority, default_share_secret_path};
 use crate::{DEFAULT_POOL, MeshError, MeshState, Result, StateStore};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -20,6 +22,13 @@ pub struct CloudPaths {
     pub enroll_secret: PathBuf,
     pub used_nonces: PathBuf,
     pub keydist: PathBuf,
+    pub public_config: PathBuf,
+    pub share_secret: PathBuf,
+    pub acme_account_key: PathBuf,
+    pub acme_marker: PathBuf,
+    pub tls_cert: PathBuf,
+    pub tls_key: PathBuf,
+    pub challenge_dir: PathBuf,
 }
 
 impl Default for CloudPaths {
@@ -31,6 +40,13 @@ impl Default for CloudPaths {
             enroll_secret: crate::enroll::default_secret_path(),
             used_nonces: crate::enroll::default_nonce_path(),
             keydist: default_keydist_path(),
+            public_config: default_public_config_path(),
+            share_secret: default_share_secret_path(),
+            acme_account_key: crate::acme::default_account_key_path(),
+            acme_marker: crate::acme::default_issued_marker_path(),
+            tls_cert: crate::acme::default_certificate_path(),
+            tls_key: crate::acme::default_certificate_key_path(),
+            challenge_dir: crate::ingress::default_challenge_dir(),
         }
     }
 }
@@ -44,6 +60,7 @@ pub struct CloudStatus {
     pub services: usize,
     pub relays: usize,
     pub pending_key_rotations: usize,
+    pub public_routes: usize,
 }
 
 pub fn up(
@@ -69,6 +86,7 @@ pub fn status(paths: &CloudPaths) -> Result<CloudStatus> {
     let catalog = CatalogStore::new(&paths.catalog).load(&mesh)?;
     let keys = KeyDistributionStore::new(&paths.keydist).load()?;
     let local = mesh.node(&mesh.local_node)?;
+    let public = PublicConfigStore::new(&paths.public_config).load()?;
     let ipv6 = Ipv6Overlay::for_mesh(&mesh).address_for(&mesh.local_node)?;
     Ok(CloudStatus {
         local_node: mesh.local_node.clone(),
@@ -78,6 +96,7 @@ pub fn status(paths: &CloudPaths) -> Result<CloudStatus> {
         services: catalog.services.services.len(),
         relays: catalog.relays.relays.len(),
         pending_key_rotations: keys.proposals.len(),
+        public_routes: public.ingress.len(),
     })
 }
 
@@ -125,6 +144,12 @@ pub fn ensure_paths(paths: &CloudPaths) -> Result<()> {
         &paths.enroll_secret,
         &paths.used_nonces,
         &paths.keydist,
+        &paths.public_config,
+        &paths.share_secret,
+        &paths.acme_account_key,
+        &paths.acme_marker,
+        &paths.tls_cert,
+        &paths.tls_key,
     ] {
         let parent = path
             .parent()
@@ -132,6 +157,14 @@ pub fn ensure_paths(paths: &CloudPaths) -> Result<()> {
         std::fs::create_dir_all(parent)?;
     }
     Ok(())
+}
+
+pub fn issue_share_token(paths: &CloudPaths, route: &str, ttl: Duration) -> Result<String> {
+    ShareAuthority::load_or_create(&paths.share_secret)?.issue(route, ttl)
+}
+
+pub fn public_store(paths: &CloudPaths) -> PublicConfigStore {
+    PublicConfigStore::new(&paths.public_config)
 }
 
 pub fn key_path(paths: &CloudPaths) -> &Path {

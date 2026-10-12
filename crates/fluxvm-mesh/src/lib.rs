@@ -13,26 +13,43 @@
 //! and macOS while transport, enrollment and platform backends evolve independently.
 
 pub mod acl;
+pub mod acme;
 pub mod agent;
 pub mod catalog;
 pub mod cloud;
+pub mod ddns;
+pub mod diagnose;
 pub mod dns;
+pub mod dns01;
 pub mod dns_ha;
+pub mod dnssec;
+pub mod edge;
 pub mod enroll;
 pub mod enroll_tls;
 pub mod fabric;
 pub mod gateway;
 pub mod http;
+pub mod http3;
+pub mod ingress;
 pub mod ipv6;
 pub mod keydist;
 pub mod macos;
+pub mod mdns;
 pub mod multihome;
+pub mod pd;
+pub mod public;
+pub mod public_relay;
 pub mod reconcile;
 pub mod relay;
 pub mod relay_ha;
+pub mod router;
 pub mod service;
+pub mod share;
 pub mod stun;
+pub mod telemetry;
 pub mod tls_relay;
+pub mod trace;
+pub mod wan;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -1071,7 +1088,7 @@ pub fn default_state_path() -> PathBuf {
     if let Ok(path) = std::env::var("FLUXMESH_STATE") {
         return PathBuf::from(path);
     }
-    mesh_dir().join("state.v1")
+    crate::mesh_dir().join("state.v1")
 }
 
 pub fn endpoint_addr_family(endpoint: &Endpoint) -> &'static str {

@@ -31,8 +31,44 @@ path = "src/dns_ha_main.rs"
 name = "fluxmesh-enroll"
 path = "src/enroll_main.rs"
 
+[[bin]]
+name = "fluxmesh-ingress"
+path = "src/ingress_main.rs"
+
+[[bin]]
+name = "fluxmesh-mdns"
+path = "src/mdns_main.rs"
+
+[[bin]]
+name = "fluxmesh-pd"
+path = "src/pd_main.rs"
+
+[[bin]]
+name = "fluxmesh-edge"
+path = "src/edge_main.rs"
+
+[[bin]]
+name = "fluxmesh-public-relay"
+path = "src/public_relay_main.rs"
+
+[[bin]]
+name = "fluxmesh-metrics"
+path = "src/metrics_main.rs"
+
 [dependencies]
+h3 = "0.0.8"
+h3-quinn = "0.0.10"
+http = "1"
+quinn = { version = "0.11.12", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
+hyper-util = { version = "0.1", features = ["tokio", "server-auto", "http1", "http2"] }
+hyper = { version = "1", features = ["server", "http1", "http2"] }
+http-body-util = "0.1"
+bytes = "1"
 ring = "0.17"
+rcgen = { version = "0.13", default-features = false, features = ["ring", "pem"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 rustls-pemfile = "2"
 tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "sync", "time", "macros"] }

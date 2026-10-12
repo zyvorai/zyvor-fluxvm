@@ -1,0 +1,16 @@
+# Copyright 2026 Zyvor AI Labs · https://zyvor.dev
+# SPDX-License-Identifier: Apache-2.0
+[Unit]
+Description=FluxMesh mDNS overlay reflector
+After=network-online.target fluxmesh-agent.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/fluxmesh-mdns --state /var/lib/fluxvm/mesh/state.v1
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target
