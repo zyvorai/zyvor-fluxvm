@@ -258,6 +258,8 @@ pub(super) struct Sso {
     cfg: Option<SsoConfig>,
     http: reqwest::Client,
     pending: std::sync::Mutex<HashMap<String, Pending>>,
+    /// Sign-in starts per client address in the last minute (see [`LOGINS_PER_ADDRESS_PER_MINUTE`]).
+    logins: std::sync::Mutex<HashMap<std::net::IpAddr, std::collections::VecDeque<Instant>>>,
     provider: tokio::sync::Mutex<Option<(Instant, Provider)>>,
     jwks: tokio::sync::Mutex<Jwks>,
 }
@@ -268,7 +270,45 @@ impl Default for Sso {
     }
 }
 
+/// Sign-in starts one client address may make in a minute. `/auth/login` is public and each start holds a pending
+/// sign-in (the oldest is dropped past [`MAX_PENDING`]), so without this one caller could evict everyone's.
+const LOGINS_PER_ADDRESS_PER_MINUTE: usize = 20;
+/// Client addresses remembered at once; past this, an address not yet seen is refused until the window clears.
+const MAX_LOGIN_ADDRESSES: usize = 10_000;
+
 impl Sso {
+    /// Counts one sign-in start from `addr`; `false` when it has made too many in the last minute.
+    pub(super) fn allow_login(&self, addr: std::net::IpAddr, now: Instant) -> bool {
+        let window = StdDuration::from_secs(60);
+        let mut map = self.logins.lock().unwrap_or_else(|e| e.into_inner());
+        if !map.contains_key(&addr) && map.len() >= MAX_LOGIN_ADDRESSES {
+            map.retain(|_, q| {
+                while q
+                    .front()
+                    .is_some_and(|t| now.saturating_duration_since(*t) >= window)
+                {
+                    q.pop_front();
+                }
+                !q.is_empty()
+            });
+            if map.len() >= MAX_LOGIN_ADDRESSES {
+                return false;
+            }
+        }
+        let q = map.entry(addr).or_default();
+        while q
+            .front()
+            .is_some_and(|t| now.saturating_duration_since(*t) >= window)
+        {
+            q.pop_front();
+        }
+        if q.len() >= LOGINS_PER_ADDRESS_PER_MINUTE {
+            return false;
+        }
+        q.push_back(now);
+        true
+    }
+
     pub(super) fn new(cfg: Option<SsoConfig>) -> Self {
         Sso {
             cfg,
@@ -278,6 +318,7 @@ impl Sso {
                 .build()
                 .unwrap_or_default(),
             pending: std::sync::Mutex::new(HashMap::new()),
+            logins: std::sync::Mutex::new(HashMap::new()),
             provider: tokio::sync::Mutex::new(None),
             jwks: tokio::sync::Mutex::new(Jwks::default()),
         }
@@ -792,10 +833,25 @@ pub(super) struct LoginQuery {
 }
 
 /// `GET /auth/login`: sends the browser to the identity provider.
-pub(super) async fn login(State(fleet): State<Fleet>, Query(q): Query<LoginQuery>) -> Response {
+pub(super) async fn login(State(fleet): State<Fleet>, req: Request) -> Response {
     let Some(cfg) = fleet.sso.cfg.as_ref() else {
         return sso_off();
     };
+    let q = Query::<LoginQuery>::try_from_uri(req.uri())
+        .map(|Query(q)| q)
+        .unwrap_or_default();
+    // Rate limit per client address (behind a proxy on this machine, the address it forwarded). Without a peer
+    // address (an in-process test) there is nothing to count.
+    if let Some(addr) = super::signup::client_addr(&req)
+        && !fleet.sso.allow_login(addr, Instant::now())
+    {
+        return page(
+            StatusCode::TOO_MANY_REQUESTS,
+            "Too many sign-in attempts",
+            "Wait a minute and try again.",
+            false,
+        );
+    }
     let provider = match fleet.sso.provider().await {
         Ok(p) => p,
         Err(e) => {
@@ -1258,7 +1314,16 @@ pub(super) fn role_refusal(role: MemberRole, method: &Method, path: &str) -> Opt
     let seg: Vec<&str> = path.trim_matches('/').split('/').collect();
     // A tunnel is opened with a GET (a WebSocket upgrade), but it reaches into the VM: it counts as a change.
     let tunnel = matches!(seg.as_slice(), ["fleet", "vms", _, _, "tunnel"]);
+    // A live screen and a console log can hold secrets (a typed password, an environment dump), so a viewer, who
+    // otherwise sees everything, does not get them.
+    let live = matches!(seg.as_slice(), ["fleet", "vms", _, _, "screen" | "logs"]);
     if matches!(*method, Method::GET | Method::HEAD | Method::OPTIONS) && !tunnel {
+        if live && role == MemberRole::Viewer {
+            return Some(
+                "viewers cannot see live screens or console logs, which can hold secrets; ask an admin of your team for the member role"
+                    .into(),
+            );
+        }
         return None;
     }
     match role {
@@ -1722,6 +1787,14 @@ mod tests {
                 [false, false, true, true],
             ),
             (&get, "/fleet/billing/invoices", [true, true, true, true]),
+            // Live screens and console logs can hold secrets: not for viewers.
+            (
+                &get,
+                "/fleet/vms/mac-1/abc/screen",
+                [false, true, true, true],
+            ),
+            (&get, "/fleet/vms/mac-1/abc/logs", [false, true, true, true]),
+            (&get, "/fleet/vms", [true, true, true, true]),
         ];
         for &(method, path, want) in cases {
             for (role, ok) in [Viewer, Member, Admin, Owner].into_iter().zip(want) {
@@ -1734,6 +1807,24 @@ mod tests {
         }
         assert!(role_refusal(Member, &post, "/fleet/webhooks").is_some());
         assert!(role_refusal(Member, &delete, "/fleet/webhooks/whk_1").is_some());
+    }
+
+    #[test]
+    fn sign_in_starts_are_limited_per_address_per_minute() {
+        let sso = Sso::new(None);
+        let a: std::net::IpAddr = "203.0.113.7".parse().unwrap();
+        let b: std::net::IpAddr = "203.0.113.8".parse().unwrap();
+        let t0 = Instant::now();
+        for _ in 0..LOGINS_PER_ADDRESS_PER_MINUTE {
+            assert!(sso.allow_login(a, t0));
+        }
+        assert!(
+            !sso.allow_login(a, t0),
+            "the next one from the same address is refused"
+        );
+        assert!(sso.allow_login(b, t0), "another address is unaffected");
+        // The window slides: a minute later the first address may start again.
+        assert!(sso.allow_login(a, t0 + StdDuration::from_secs(61)));
     }
 
     #[test]
