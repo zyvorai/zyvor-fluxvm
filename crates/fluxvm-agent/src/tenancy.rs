@@ -482,6 +482,69 @@ impl UsageReport {
     }
 }
 
+/// One entry of the image catalog (`GET /fleet/images`). Central does not move images: the operator puts the disk at
+/// `image` on every Mac that should run it (`fluxctl vm-image pull`), and the console fills a create request from the
+/// entry.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CatalogImage {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub display_name: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+    /// `macos` or `linux`.
+    pub guest_os: String,
+    /// The disk's path on each Mac (the request's `image`).
+    pub image: String,
+    #[serde(default = "default_image_vcpus")]
+    pub vcpus: u8,
+    #[serde(default = "default_image_memory")]
+    pub memory_mib: u64,
+    #[serde(default)]
+    pub disk_size_gib: Option<u64>,
+    /// Where it came from (an OCI reference), for display.
+    #[serde(default)]
+    pub source: Option<String>,
+    #[serde(default)]
+    pub updated_at: Option<DateTime<Utc>>,
+}
+
+fn default_image_vcpus() -> u8 {
+    4
+}
+
+fn default_image_memory() -> u64 {
+    8192
+}
+
+impl CatalogImage {
+    /// Checks an entry before it is stored.
+    pub fn validate(&self) -> Result<(), String> {
+        if !valid_image_name(&self.name) {
+            return Err("image names are 1-63 characters of a-z, 0-9, '-', '.' and '_'".into());
+        }
+        if !matches!(self.guest_os.as_str(), "macos" | "linux") {
+            return Err("guest_os must be 'macos' or 'linux'".into());
+        }
+        if self.image.trim().is_empty() {
+            return Err("image (the disk's path on the Macs) is required".into());
+        }
+        if self.vcpus == 0 || self.memory_mib < 512 {
+            return Err("an image needs at least 1 vCPU and 512 MiB".into());
+        }
+        Ok(())
+    }
+}
+
+fn valid_image_name(n: &str) -> bool {
+    !n.is_empty()
+        && n.len() <= 63
+        && n.bytes().all(|b| {
+            b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'-' | b'.' | b'_')
+        })
+}
+
 /// Everything persisted in `fleet-tenancy.json`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TenancyState {
@@ -502,6 +565,9 @@ pub struct TenancyState {
     /// Private networks spanning Macs, by name.
     #[serde(default)]
     pub overlays: BTreeMap<String, OverlayNet>,
+    /// The image catalog: VM images the operator has put on the Macs, which tenants pick from in the console.
+    #[serde(default)]
+    pub images: BTreeMap<String, CatalogImage>,
     /// Quota held by creates that are in flight (between the quota check and the node's answer). In memory only: a
     /// restart drops them, and the requests they belonged to are gone with it.
     #[serde(skip)]

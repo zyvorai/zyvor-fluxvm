@@ -344,6 +344,8 @@ fn tenant_route_allowed(method: &axum::http::Method, path: &str) -> bool {
         ["fleet", "vms", _, _, "exec"] => post,
         ["fleet", "leases", _] => get,
         ["fleet", "leases", _, "release"] => post,
+        ["fleet", "images"] => get,
+        ["fleet", "nodes", _] => get,
         ["fleet", "overlays"] => get || post,
         ["fleet", "overlays", _] => get || delete,
         ["fleet", "overlays", _, "members"] | ["fleet", "overlays", _, "rotate"] => post,
@@ -559,6 +561,11 @@ pub fn router_with_handle(cfg: CentralConfig) -> (Router, Option<HaHandle>) {
             axum::routing::delete(cloud::remove_overlay_member),
         )
         .route("/fleet/nodes/{name}/overlays", get(cloud::node_overlays))
+        .route("/fleet/images", get(cloud::list_images))
+        .route(
+            "/fleet/images/{name}",
+            axum::routing::put(cloud::put_image).delete(cloud::delete_image),
+        )
         .route("/fleet/reconcile", post(cloud::reconcile))
         .route(
             "/fleet/policy",
@@ -677,8 +684,14 @@ async fn list_nodes(State(fleet): State<Fleet>) -> Json<Value> {
 /// missing *resource*.
 async fn get_node(
     State(fleet): State<Fleet>,
+    Extension(caller): Extension<Caller>,
     Path(name): Path<String>,
 ) -> Result<Json<Value>, AppError> {
+    if let Caller::Tenant(tenant) = &caller {
+        return cloud::tenant_node_view(&fleet, tenant, &name)
+            .await
+            .map(Json);
+    }
     let nodes = fleet.nodes.lock().await;
     match nodes.get(&name) {
         Some(n) => Ok(Json(node_json(n))),
@@ -2386,7 +2399,13 @@ mod tests {
         nodes.insert("a".to_string(), node("a", 3, 0));
         nodes.insert("b".to_string(), node("b", 0, 0));
         let fleet = test_fleet(nodes);
-        let Json(body) = get_node(State(fleet), Path("a".to_string())).await.unwrap();
+        let Json(body) = get_node(
+            State(fleet),
+            Extension(Caller::Admin),
+            Path("a".to_string()),
+        )
+        .await
+        .unwrap();
         assert_eq!(body["name"], "a");
         assert_eq!(body["vm_count"], 3);
         assert_eq!(body["healthy"], true);
@@ -2396,9 +2415,13 @@ mod tests {
     #[tokio::test]
     async fn get_node_not_found_for_unknown_node() {
         let fleet = test_fleet(HashMap::new());
-        let err = get_node(State(fleet), Path("ghost".to_string()))
-            .await
-            .unwrap_err();
+        let err = get_node(
+            State(fleet),
+            Extension(Caller::Admin),
+            Path("ghost".to_string()),
+        )
+        .await
+        .unwrap_err();
         assert_eq!(err.0, StatusCode::NOT_FOUND);
         assert!(err.1.contains("ghost"));
     }
