@@ -6,8 +6,9 @@
 //!
 //! Events are kept in memory (the newest [`KEEP`]) and appended to `fleet-audit.jsonl` (mode 0600) in the state
 //! directory, which is rotated to `fleet-audit.jsonl.1` at [`ROTATE_BYTES`]. Reads (`GET`) and node heartbeats are
-//! not recorded. Request bodies are not stored, except a VM's, tenant's or network's `name`/`id`/`node` (never a
-//! command's body), so the log never holds a VM spec, a command, a token or a key.
+//! not recorded. Request bodies are not stored, except a VM's, tenant's or network's `name`/`id`/`node` or a member's
+//! `email` (never a command's body), so the log never holds a VM spec, a command, a token or a key. A change made in
+//! an SSO console session also records the person's email (`user`).
 
 use super::*;
 use std::collections::VecDeque;
@@ -40,6 +41,9 @@ pub(super) struct AuditEvent {
     /// The tenant's named API key that made the call (`None`: the primary token, or the operator).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub key: Option<String>,
+    /// The person behind the call when it came from an SSO console session (their email).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user: Option<String>,
 }
 
 pub(super) struct AuditLog {
@@ -149,6 +153,7 @@ pub(super) fn event(
         target,
         status: status.as_u16(),
         key,
+        user: None,
     }
 }
 
@@ -167,7 +172,7 @@ pub(super) async fn target_of(req: Request) -> Result<(Request, Option<String>),
             .into_response()
     })?;
     let target = serde_json::from_slice::<Value>(&bytes).ok().and_then(|v| {
-        ["name", "id", "node"].iter().find_map(|k| {
+        ["name", "id", "node", "email"].iter().find_map(|k| {
             v.as_object()?.get(*k).and_then(Value::as_str).map(|s| {
                 s.chars()
                     .filter(|c| !c.is_control())
@@ -176,6 +181,8 @@ pub(super) async fn target_of(req: Request) -> Result<(Request, Option<String>),
             })
         })
     });
+    // ---- snapshots ----
+    let target = target.or_else(|| super::snapshots::path_target(parts.uri.path()));
     Ok((
         Request::from_parts(parts, axum::body::Body::from(bytes)),
         target,
@@ -312,6 +319,7 @@ mod tests {
             target: None,
             status: 201,
             key: None,
+            user: None,
         }
     }
 

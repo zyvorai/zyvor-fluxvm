@@ -64,6 +64,21 @@ runs-on: [self-hosted, macOS, ARM64, fluxvm]
 | `webhook.listen` | (off) | Listen for GitHub `workflow_job` webhooks at `POST /github/webhook`; queued jobs start a runner at once |
 | `webhook.secret_env` | `GITHUB_WEBHOOK_SECRET` | The webhook secret. Deliveries without a valid `X-Hub-Signature-256` get a `401` |
 
+### Warm pools
+
+A macOS VM takes a minute or more to boot, and with one VM per job every job waits for it. Name a central warm pool
+([warm-pools.md](warm-pools.md)) in the pool's `vm` body and each job takes a VM that is already booted:
+
+```json
+{"name": "macos", "labels": ["self-hosted", "macOS", "fluxvm"], "launch": "exec", "vm": {"pool": "ios-ci"}}
+```
+
+The VM is renamed to the runner's name and the runner starts through the guest agent within seconds; central boots a
+replacement meanwhile. A warm VM has already booted, so the scaler refuses a pool that names a warm pool with
+`launch: cloud-init` or a `cloud_init` in `vm`. Create the warm pool with the same tenant token the scaler uses
+(`fluxctl fleet pool-create ios-ci --image macos-27-xcode --min-ready 2`). When no warm VM is ready, the job's VM boots
+from the pool's image the usual way.
+
 ### Webhook mode
 
 Polling alone starts a runner up to `poll_interval_secs` after a job is queued. With `webhook` set, a `queued` delivery
@@ -90,5 +105,5 @@ Deliveries for repositories that are not in `github.repos` are ignored.
 
 ## Not done yet
 
-- Warm pools: a VM restored from a snapshot already waiting for a job.
+- Warm VMs restored from a snapshot instead of booted (warm pools keep booted VMs; see above).
 - GitLab and Buildkite.

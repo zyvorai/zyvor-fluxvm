@@ -19,6 +19,11 @@
 //! The JIT config is a credential for one runner registration. It travels in the create body (cloud-init) or the exec
 //! call; it is never logged, and VMs are created without `"reschedulable"`, so central never stores it.
 //!
+//! A pool can take its VMs from a central warm pool (`/fleet/pools`) by naming it in its `vm` body: `"vm": {"pool":
+//! "macos-ci"}` with `"launch": "exec"`. Each job's create then gets an already-booted VM in seconds, renamed to the
+//! runner's name, and the runner starts through the guest agent; central boots a replacement in the background. A warm
+//! VM has already booted, so it cannot take cloud-init: such a pool must use `exec` and carry no `cloud_init`.
+//!
 //! On start the scaler adopts what a previous run left: a fleet VM named `fluxvm-gha-*` whose GitHub runner still
 //! exists is tracked again; one without a runner is deleted, as is a `fluxvm-gha-*` runner registration without a VM.
 
@@ -333,6 +338,14 @@ impl GhaConfig {
                 "pool {:?}: vm must be a JSON object",
                 p.name
             );
+            // ---- warmpool ----
+            if p.vm.get("pool").is_some_and(|v| !v.is_null()) {
+                ensure!(
+                    p.launch == Launch::Exec && p.vm.get("cloud_init").is_none_or(Value::is_null),
+                    "pool {:?}: VMs from a warm pool are already booted, so cloud-init cannot start the runner: use \"launch\": \"exec\" and no cloud_init",
+                    p.name
+                );
+            }
             ensure!(
                 shell_safe(&p.runner_dir),
                 "pool {:?}: runner_dir {:?} has unsupported characters",
@@ -1120,6 +1133,26 @@ mod tests {
             poll_interval_secs: 15,
             webhook: None,
         };
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn warm_pool_runners_must_start_through_the_guest_agent() {
+        let mut cfg: GhaConfig = serde_json::from_value(json!({
+            "github": {"owner": "zyvorai", "repos": ["app"]},
+            "fleet": {"url": "http://fleet:7799"},
+            "pools": [{"name": "macos", "labels": ["self-hosted", "macOS"], "launch": "exec",
+                       "vm": {"pool": "macos-ci"}}]
+        }))
+        .unwrap();
+        cfg.validate().unwrap();
+        let b = vm_body(&cfg.pools[0], "fluxvm-gha-macos-1", "QUJD").unwrap();
+        assert_eq!(b["pool"], "macos-ci");
+        assert!(b.get("cloud_init").is_none());
+        cfg.pools[0].launch = Launch::CloudInit;
+        assert!(cfg.validate().is_err());
+        cfg.pools[0].launch = Launch::Exec;
+        cfg.pools[0].vm["cloud_init"] = json!({"runcmd": []});
         assert!(cfg.validate().is_err());
     }
 

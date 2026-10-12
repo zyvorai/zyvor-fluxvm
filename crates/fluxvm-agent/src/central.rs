@@ -15,10 +15,29 @@ mod audit;
 mod cloud;
 #[path = "central_ha.rs"]
 mod ha_rt;
+#[path = "central_metrics.rs"]
+mod metrics;
 #[path = "central_notify.rs"]
 mod notify;
+#[path = "central_warmpool.rs"]
+mod pools;
+#[path = "central_signup.rs"]
+mod signup;
+#[path = "central_snapshots.rs"]
+mod snapshots;
+#[path = "central_sso.rs"]
+mod sso;
+#[path = "central_tunnel.rs"]
+mod tunnel;
+#[path = "central_volumes.rs"]
+mod vols;
 
 pub use ha_rt::HaHandle;
+pub use metrics::{
+    DEFAULT_INTERVAL as DEFAULT_METRICS_INTERVAL, MetricsSettings, configure as configure_metrics,
+};
+pub use signup::configure_stripe;
+pub use sso::{SsoArgs, SsoConfig};
 
 use crate::tenancy::{Caller, TenancyState};
 use axum::{
@@ -223,6 +242,14 @@ struct Fleet {
     audit: Arc<audit::AuditLog>,
     /// Notifications and webhook deliveries.
     notify: Arc<notify::Notifier>,
+    /// Usage history and counters (`/fleet/metrics/*`, `GET /metrics`).
+    metrics: Arc<metrics::MetricsStore>,
+    /// Open tunnels to VMs (`/fleet/tunnels`), in memory only.
+    tunnels: Arc<tunnel::Tunnels>,
+    /// Console single sign-on (OIDC) and its in-flight sign-ins.
+    sso: Arc<sso::Sso>,
+    /// Self-service sign-up and Stripe (rate limits, the Stripe config).
+    signup: Arc<signup::Runtime>,
 }
 
 impl Fleet {
@@ -283,6 +310,14 @@ async fn auth_middleware(State(fleet): State<Fleet>, mut req: Request, next: Nex
     {
         return ha_rt::not_leader(ha);
     }
+    // ---- sso ---- (the sign-in routes are public; they check the session cookie themselves)
+    if path.starts_with("/auth/") {
+        return next.run(req).await;
+    }
+    // ---- signup ---- (sign-up and the Stripe webhook, which is signed)
+    if signup::PUBLIC_PATHS.contains(&path) {
+        return next.run(req).await;
+    }
     let presented = req
         .headers()
         .get(header::AUTHORIZATION)
@@ -299,7 +334,22 @@ async fn auth_middleware(State(fleet): State<Fleet>, mut req: Request, next: Nex
     // The tenant's named API key, when one was used, and whether it may only read.
     let mut key_used: Option<String> = None;
     let mut read_only = false;
+    // ---- sso ---- a console session cookie, used only when no bearer token was sent.
+    let mut user: Option<sso::SessionUser> = None;
+    let mut session_caller: Option<Caller> = None;
+    if presented.is_none() && fleet.sso.enabled() {
+        let (method, headers) = (req.method().clone(), req.headers().clone());
+        match sso::caller_from_cookie(&fleet, &method, &headers).await {
+            sso::FromCookie::Absent => {}
+            sso::FromCookie::Reject(resp) => return resp,
+            sso::FromCookie::User(c, u) => {
+                session_caller = Some(c);
+                user = Some(u);
+            }
+        }
+    }
     let caller = match (fleet.token.as_deref(), presented.as_deref()) {
+        _ if session_caller.is_some() => session_caller.clone().unwrap_or(Caller::Admin),
         (Some(expected), Some(t)) if constant_time_eq(t, expected) => Caller::Admin,
         (expected, Some(t)) => {
             let mut tenancy = fleet.tenancy.lock().await;
@@ -391,8 +441,32 @@ async fn auth_middleware(State(fleet): State<Fleet>, mut req: Request, next: Nex
             return (StatusCode::FORBIDDEN, Json(json!({"error": msg}))).into_response();
         }
     }
+    // ---- sso ---- a member's role decides what they may change.
+    if let Some(u) = &user
+        && let Some(role) = u.role
+        && let Some(msg) = sso::role_refusal(role, req.method(), req.uri().path())
+    {
+        let mut ev = audit::event(
+            &caller,
+            req.method().to_string(),
+            req.uri().path().to_owned(),
+            None,
+            StatusCode::FORBIDDEN,
+            None,
+        );
+        ev.user = Some(u.email.clone());
+        fleet.audit.record(ev);
+        return (StatusCode::FORBIDDEN, Json(json!({"error": msg}))).into_response();
+    }
+    // ---- signup ----
+    if let Caller::Tenant(t) = &caller
+        && let Some(refusal) = signup::payment_gate(&fleet, t, req.method(), req.uri().path()).await
+    {
+        return refusal;
+    }
     req.extensions_mut().insert(caller.clone());
     req.extensions_mut().insert(KeyUsed(key_used.clone()));
+    req.extensions_mut().insert(sso::Who(user.clone()));
     if !audit::audited(req.method(), req.uri().path()) {
         return next.run(req).await;
     }
@@ -407,7 +481,8 @@ async fn auth_middleware(State(fleet): State<Fleet>, mut req: Request, next: Nex
     if path.ends_with("/input") {
         return resp;
     }
-    let event = audit::event(&caller, method, path, target, resp.status(), key_used);
+    let mut event = audit::event(&caller, method, path, target, resp.status(), key_used);
+    event.user = user.map(|u| u.email);
     notify::from_change(&fleet, &event).await;
     fleet.audit.record(event);
     resp
@@ -450,6 +525,30 @@ fn tenant_route_allowed(method: &axum::http::Method, path: &str) -> bool {
         ["fleet", "overlays", _] => get || delete,
         ["fleet", "overlays", _, "members"] | ["fleet", "overlays", _, "rotate"] => post,
         ["fleet", "overlays", _, "members", _] => delete,
+        // ---- metrics ----
+        ["fleet", "metrics", "summary"] | ["fleet", "metrics", "vms"] => get,
+        ["fleet", "metrics", "vms", _, _] | ["fleet", "metrics", "nodes", _] => get,
+        // ---- snapshots ----
+        ["fleet", "vms", _, _, "snapshots"] => get || post,
+        ["fleet", "vms", _, _, "snapshots", _] => delete,
+        ["fleet", "vms", _, _, "snapshots", _, "restore"] | ["fleet", "vms", _, _, "clone"] => post,
+        // ---- volumes ----
+        ["fleet", "volumes"] => get || post,
+        ["fleet", "volumes", _] => get || delete,
+        ["fleet", "volumes", _, "resize"] => post,
+        // ---- tunnel ----
+        ["fleet", "vms", _, _, "tunnel"] | ["fleet", "tunnels"] => get,
+        ["fleet", "tunnels", _] => delete,
+        // ---- warmpool ----
+        ["fleet", "pools"] => get || post,
+        ["fleet", "pools", _] => get || delete || *method == Method::PATCH,
+        ["fleet", "pools", _, "status"] => get,
+        // ---- sso ----
+        ["fleet", "tenants", "me", "members"] => get || post,
+        ["fleet", "tenants", "me", "members", _] => *method == Method::PATCH || delete,
+        // ---- signup ----
+        ["fleet", "billing", "invoices"] => get,
+        ["fleet", "billing", "payment-method"] => post,
         _ => false,
     }
 }
@@ -554,6 +653,14 @@ pub fn router(cfg: CentralConfig) -> Router {
 
 /// [`router`], plus a handle on this central's leader election when HA is on.
 pub fn router_with_handle(cfg: CentralConfig) -> (Router, Option<HaHandle>) {
+    router_with_sso(cfg, None)
+}
+
+/// [`router_with_handle`] with console single sign-on (`None`: off).
+pub fn router_with_sso(
+    cfg: CentralConfig,
+    sso_cfg: Option<SsoConfig>,
+) -> (Router, Option<HaHandle>) {
     let persist_path = cfg.state_dir.join("fleet-nodes.json");
     let lock_path = cfg.state_dir.join("fleet-nodes.lock");
     let tenancy_path = cfg.state_dir.join("fleet-tenancy.json");
@@ -584,6 +691,10 @@ pub fn router_with_handle(cfg: CentralConfig) -> (Router, Option<HaHandle>) {
             cfg.state_dir.join("fleet-audit.jsonl"),
         )),
         notify: Arc::default(),
+        metrics: Arc::new(metrics::MetricsStore::configured()),
+        tunnels: Arc::default(),
+        sso: Arc::new(sso::Sso::new(sso_cfg)),
+        signup: Arc::new(signup::Runtime::new(signup::boot_config())),
     };
     let mut fleet = fleet;
     let mut handle = None;
@@ -599,6 +710,17 @@ pub fn router_with_handle(cfg: CentralConfig) -> (Router, Option<HaHandle>) {
         && tokio::runtime::Handle::try_current().is_ok()
     {
         cloud::spawn_reconciler(fleet.clone(), every);
+    }
+    // ---- metrics ----
+    if tokio::runtime::Handle::try_current().is_ok() {
+        metrics::spawn_collector(fleet.clone());
+    }
+    // ---- warmpool ----
+    if cfg.reconcile_interval.is_some() && tokio::runtime::Handle::try_current().is_ok() {
+        pools::spawn_reconciler(fleet.clone(), pools::interval());
+    }
+    if tokio::runtime::Handle::try_current().is_ok() {
+        signup::spawn_billing_job(fleet.clone());
     }
     let app = Router::new()
         .route("/console", get(console_html))
@@ -707,9 +829,80 @@ pub fn router_with_handle(cfg: CentralConfig) -> (Router, Option<HaHandle>) {
             "/fleet/policy",
             get(cloud::get_policy).put(cloud::put_policy),
         )
+        // ---- metrics ----
+        .route("/fleet/metrics/summary", get(metrics::summary))
+        .route("/fleet/metrics/vms", get(metrics::vm_latest))
+        .route("/fleet/metrics/vms/{node}/{id}", get(metrics::vm_series))
+        .route("/fleet/metrics/nodes/{name}", get(metrics::node_series))
+        .route("/fleet/metrics/collect", post(metrics::collect_now))
+        // ---- snapshots ----
+        .route(
+            "/fleet/vms/{node}/{id}/snapshots",
+            get(snapshots::list).post(snapshots::create),
+        )
+        .route(
+            "/fleet/vms/{node}/{id}/snapshots/{snap}",
+            axum::routing::delete(snapshots::delete),
+        )
+        .route(
+            "/fleet/vms/{node}/{id}/snapshots/{snap}/restore",
+            post(snapshots::restore),
+        )
+        .route("/fleet/vms/{node}/{id}/clone", post(snapshots::clone_vm))
+        // ---- volumes ----
+        .route(
+            "/fleet/volumes",
+            get(vols::list_volumes).post(vols::create_volume),
+        )
+        .route(
+            "/fleet/volumes/{name}",
+            get(vols::get_volume).delete(vols::delete_volume),
+        )
+        .route("/fleet/volumes/{name}/resize", post(vols::resize_volume))
+        // ---- tunnel ----
+        .route("/fleet/vms/{node}/{id}/tunnel", get(tunnel::open_tunnel))
+        .route("/fleet/tunnels", get(tunnel::list_tunnels))
+        .route(
+            "/fleet/tunnels/{id}",
+            axum::routing::delete(tunnel::close_tunnel),
+        )
+        // ---- warmpool ----
+        .route(
+            "/fleet/pools",
+            get(pools::list_pools).post(pools::create_pool),
+        )
+        .route(
+            "/fleet/pools/{name}",
+            get(pools::get_pool)
+                .patch(pools::patch_pool)
+                .delete(pools::delete_pool),
+        )
+        .route("/fleet/pools/{name}/status", get(pools::pool_status))
+        // ---- sso ----
+        .route("/auth/config", get(sso::config))
+        .route("/auth/login", get(sso::login))
+        .route("/auth/callback", get(sso::callback))
+        .route("/auth/logout", post(sso::logout))
+        .route("/auth/session", get(sso::session))
+        .route(
+            "/fleet/tenants/{id}/members",
+            get(sso::list_members).post(sso::add_member),
+        )
+        .route(
+            "/fleet/tenants/{id}/members/{email}",
+            axum::routing::patch(sso::set_member_role).delete(sso::remove_member),
+        )
+        // ---- signup ----
+        .merge(signup::routes())
         .layer(middleware::from_fn_with_state(
             fleet.clone(),
             auth_middleware,
+        ))
+        // ---- metrics ---- (after the auth layer: `GET /metrics` checks its own tokens, and every request is counted)
+        .route("/metrics", get(metrics::prometheus))
+        .layer(middleware::from_fn_with_state(
+            fleet.clone(),
+            metrics::count_requests,
         ))
         .with_state(fleet);
     (app, handle)
@@ -1354,6 +1547,10 @@ async fn record_created_vm(
         created_at: Utc::now(),
         ended_at: None,
         spec,
+        warm_pool: None,
+        claimed_at: None,
+        expires_at: None,
+        billed_from: None,
     });
     fleet.persist_tenancy(&tenancy);
 }
@@ -1379,10 +1576,19 @@ async fn create_vm_inner(
             "request body must be a JSON object".into(),
         ));
     }
-    let requested_node = body
+    // ---- warmpool ---- (a launch a warm pool can answer takes a booted VM; a drain's recreate never does)
+    if !skip_quota {
+        body = match pools::claim_or_pass(fleet, caller, body).await? {
+            pools::Launch::Claimed(v) => return Ok(Json(v)),
+            pools::Launch::Create(b) => b,
+        };
+    }
+    let mut requested_node = body
         .as_object_mut()
         .and_then(|o| o.remove("node"))
         .and_then(|v| v.as_str().map(str::to_string));
+    let volumes = vols::take_volumes(&mut body)?;
+    vols::refuse_tenant_extra_disks(caller, &body)?;
     let selector = extract_selector(&mut body);
     let reschedulable = body
         .as_object_mut()
@@ -1444,6 +1650,16 @@ async fn create_vm_inner(
         fleet,
         id: reservation,
     };
+    // Volumes pin the launch to their Mac and become extra disks; settled (attached or freed) once placement answered.
+    let claim = vols::claim_for_launch(
+        fleet,
+        &effective,
+        &volumes,
+        &mut body,
+        &mut requested_node,
+        reschedulable,
+    )
+    .await?;
     // After any tenant network was stamped, so placement asks for a vmnet-capable Mac.
     let apple_request = apple_placement_request(&body, req_vcpus, req_mem);
     let macos_guest = apple_request.as_ref().is_some_and(|r| r.macos_guest);
@@ -1465,6 +1681,7 @@ async fn create_vm_inner(
         },
     )
     .await;
+    claim.settle(&placed).await;
     if let Some(id) = hold.id.take() {
         // A successful create is already in the ledger, so the quota stays held without a gap.
         fleet.tenancy.lock().await.release_reservation(id);
@@ -1707,6 +1924,7 @@ async fn list_vms_route(
 
 async fn list_vms_as(fleet: &Fleet, caller: &Caller) -> Json<Value> {
     let Json(mut all) = list_vms_all(fleet).await;
+    pools::annotate(fleet, &mut all).await; // ---- warmpool ----
     if let Caller::Tenant(t) = caller {
         let tenancy = fleet.tenancy.lock().await;
         if let Some(items) = all.get_mut("items").and_then(Value::as_array_mut) {
@@ -2594,6 +2812,10 @@ mod tests {
             ha: None,
             audit: Arc::new(audit::AuditLog::memory()),
             notify: Arc::default(),
+            metrics: Arc::default(),
+            tunnels: Arc::default(),
+            sso: Arc::default(),
+            signup: Arc::default(),
         }
     }
 

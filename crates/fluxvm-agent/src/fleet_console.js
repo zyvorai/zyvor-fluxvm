@@ -92,7 +92,7 @@ class ApiError extends Error {
 }
 
 async function api(method, path, { body, text = false } = {}) {
-  const headers = {};
+  const headers = { 'X-FluxVM-Console': '1' };
   const t = token();
   if (t) headers.Authorization = 'Bearer ' + t;
   if (body !== undefined) headers['Content-Type'] = 'application/json';
@@ -206,6 +206,7 @@ async function detectRole() {
 async function load() {
   if (!S.role) await detectRole();
   else if (S.role === 'tenant') S.me = await api('GET', '/fleet/tenants/me');
+  const tunnelsP = api('GET', '/fleet/tunnels').catch(() => ({ items: [] })); // ---- tunnel ----
   const [leases, vms, overlays, images] = await Promise.all([
     api('GET', '/fleet/leases'),
     api('GET', '/fleet/vms'),
@@ -232,6 +233,7 @@ async function load() {
     leasedNodes: {},
     drains: {},
   };
+  { const t = await tunnelsP; d.tunnels = t.items || []; d.tunnelPolicy = t; } // ---- tunnel ----
   if (isOp()) {
     const [nodes, tenants, capacity] = await Promise.all([
       api('GET', '/fleet/nodes'),
@@ -253,6 +255,9 @@ async function load() {
     d.keys = keys.items || [];
     active.forEach((l, i) => { d.leasedNodes[l.node] = views[i]; });
   }
+  d.metricsSummary = await soft(api('GET', '/fleet/metrics/summary'), null);
+  d.volumes = (await soft(api('GET', '/fleet/volumes'), { items: [] })).items || [];
+  d.pools = await loadPools(); // ---- warmpool ----
   S.data = d;
 }
 
@@ -279,7 +284,7 @@ async function refresh({ force = false } = {}) {
     showApp();
   } catch (e) {
     if (e.status === 401) {
-      showSignin(token() ? 'That token was not accepted. Check it and try again.' : '');
+      showSignin(token() ? 'That token was not accepted. Check it and try again.' : S.user ? 'Your session has ended. Sign in again.' : '');
       signedOut = true;
     } else if (e.status === 403 && !S.data) {
       showSignin('This tenant is disabled. Ask your operator to enable it.');
@@ -303,6 +308,7 @@ function showSignin(msg) {
   $('signin').hidden = false;
   $('signin-error').textContent = msg || '';
   $('signin-token').focus();
+  signupOffer();
 }
 function showApp() {
   $('signin').hidden = true;
@@ -324,14 +330,18 @@ const PAGES = () => [
   { id: 'macs', label: isOp() ? 'Macs' : 'My Macs', count: () => macs().length },
   { id: 'vms', label: 'Virtual machines', count: () => S.data.vms.length },
   { id: 'networks', label: 'Networks', count: () => S.data.overlays.length },
+  { id: 'volumes', label: 'Volumes', count: () => (S.data.volumes || []).length },
   { id: 'images', label: 'Images', count: () => S.data.images.length },
+  { id: 'pools', label: 'Warm pools', count: () => (S.data.pools || []).length }, // ---- warmpool ----
   { sep: true },
   ...(isOp() ? [{ id: 'tenants', label: 'Tenants', count: () => (S.data.tenants || []).length }] : []),
   { id: 'billing', label: 'Billing' },
   { id: 'usage', label: 'Usage' },
   { id: 'activity', label: 'Activity' },
+  { id: 'tunnels', label: 'Tunnels', count: () => (S.data.tunnels || []).length }, // ---- tunnel ----
   { id: 'notifications', label: 'Notifications' },
-  ...(isOp() ? [] : [{ id: 'keys', label: 'API keys', count: () => (S.data.keys || []).length }]),
+  ...(isOp() || !can('admin') ? [] : [{ id: 'keys', label: 'API keys', count: () => (S.data.keys || []).length }]),
+  ...(isOp() ? [] : [{ id: 'members', label: 'Members' }]),
   ...(isOp() ? [{ id: 'policy', label: 'Policy' }] : []),
 ];
 
@@ -350,7 +360,8 @@ function render(force) {
   $('role').textContent = isOp() ? 'Fleet token' : 'Tenant ' + S.me.id;
   $('bar-title').textContent = page.label;
   document.title = page.label + ' · FluxVM Cloud';
-  $('signout').hidden = !token();
+  $('signout').hidden = !token() && !S.user;
+  renderWho();
   renderBanners();
   renderBell();
   tick();
@@ -371,11 +382,13 @@ function renderBanners() {
     out.push(h('div', { class: 'banner warn', role: 'status' },
       h('span', {}, 'This central is on standby, so changes are refused here. The leader is ', link, '.')));
   }
+  if (S.user && S.user.role === 'viewer') out.push(h('div', { class: 'banner info', role: 'status' }, h('span', {}, roleNote())));
   if (S.error) {
     out.push(h('div', { class: 'banner bad', role: 'alert' },
       h('span', { class: 'grow' }, S.error.message + (S.loadedAt ? ' Showing what was loaded ' + rel(S.loadedAt) + '.' : '')),
       h('button', { onclick: () => refresh({ force: true }) }, 'Try again')));
   }
+  out.push(...signupBanners());
   $('banners').replaceChildren(...out);
 }
 
@@ -480,10 +493,10 @@ const VIEWS = {
     const list = macs();
     if (!isOp()) {
       return [pageHead('My Macs', 'A leased Mac is yours alone: only your VMs run on it, up to two of them macOS. '
-          + 'Leases last at least 24 hours, as Apple\'s macOS licence requires.', h('button', { class: 'primary', onclick: leaseSheet }, 'Lease a Mac')),
+          + 'Leases last at least 24 hours, as Apple\'s macOS licence requires.', need('admin', h('button', { class: 'primary', onclick: leaseSheet }, 'Lease a Mac'))),
       list.length ? h('div', { class: 'macs' }, list.map(macTile))
         : empty('You have no Macs yet', 'Lease a Mac to run macOS VMs. It is yours alone until you release it, '
-          + 'and you can release it once the 24-hour minimum is over.', h('button', { class: 'primary', onclick: leaseSheet }, 'Lease a Mac'))];
+          + 'and you can release it once the 24-hour minimum is over.', need('admin', h('button', { class: 'primary', onclick: leaseSheet }, 'Lease a Mac')))];
     }
     return [pageHead('Macs', 'Every host that reports to this central. Select one to cordon, drain, scrub or lease it.',
       h('button', { onclick: leaseSheet }, 'Lease a Mac to a tenant')),
@@ -504,7 +517,7 @@ const VIEWS = {
     });
     const sel = route().id;
     const out = [pageHead('Virtual machines', isOp() ? 'Every VM created through this central, on every Mac.'
-      : 'Your VMs, on the Macs you lease and on shared hosts.', h('button', { class: 'primary', onclick: () => launchSheet() }, 'Launch VM'))];
+      : 'Your VMs, on the Macs you lease and on shared hosts.', need('change', h('button', { class: 'primary', onclick: () => launchSheet() }, 'Launch VM')))];
     if (S.data.unreachable.length) {
       out.push(h('div', { class: 'note warn', style: { marginBottom: '16px' } },
         'Not listed because they did not answer: ' + S.data.unreachable.map((u) => u.node).join(', ') + '.'));
@@ -513,8 +526,8 @@ const VIEWS = {
       out.push(empty('No virtual machines yet', isOp() ? 'VMs appear here as tenants launch them.'
         : (S.data.leases.some((l) => l.state === 'active') ? 'Launch a VM from an image in the catalog.'
           : 'macOS VMs run on Macs you lease. Lease one, then launch a VM on it.'),
-      !isOp() && !S.data.leases.some((l) => l.state === 'active') ? h('button', { onclick: leaseSheet }, 'Lease a Mac') : null,
-      h('button', { class: 'primary', onclick: () => launchSheet() }, 'Launch VM')));
+      !isOp() && !S.data.leases.some((l) => l.state === 'active') ? need('admin', h('button', { onclick: leaseSheet }, 'Lease a Mac')) : null,
+      need('change', h('button', { class: 'primary', onclick: () => launchSheet() }, 'Launch VM'))));
       return out;
     }
     out.push(h('div', { class: 'row', style: { marginBottom: '12px' } },
@@ -531,7 +544,7 @@ const VIEWS = {
         return h('tr', { class: 'link' + (sel === vmKey(v) ? ' selected' : ''), tabindex: '0',
           onclick: () => go('vms', vmKey(v)), onkeydown: (e) => { if (e.key === 'Enter') go('vms', vmKey(v)); } },
         h('td', {}, h('b', {}, v.name), h('span', { class: 'sub' }, guestName(guestOf(req)))),
-        h('td', {}, status(vmStatus(v))),
+        h('td', {}, status(vmStatus(v)), warmTag(v)),
         h('td', { class: 'hide-sm' }, img ? img.display_name || img.name : h('span', { class: 'muted', title: (v.request && v.request.image) || '' }, diskName(v.request && v.request.image))),
         h('td', {}, v.node),
         h('td', { class: 'r num hide-sm' }, (req.vcpus || '–') + ' vCPUs, ' + gib(req.memory_mib)),
@@ -544,10 +557,10 @@ const VIEWS = {
   networks() {
     const list = S.data.overlays;
     const out = [pageHead('Private networks', 'A private network connects your VMs across Macs as if they shared one '
-      + 'switch. Traffic between Macs is encrypted.', h('button', { class: 'primary', onclick: networkSheet }, 'Create network'))];
+      + 'switch. Traffic between Macs is encrypted.', need('change', h('button', { class: 'primary', onclick: networkSheet }, 'Create network')))];
     if (!list.length) {
       out.push(empty('No private networks', 'Create one, then pick it when you launch a VM. VMs on it reach each '
-        + 'other by IP on any of its Macs.', h('button', { class: 'primary', onclick: networkSheet }, 'Create network')));
+        + 'other by IP on any of its Macs.', need('change', h('button', { class: 'primary', onclick: networkSheet }, 'Create network'))));
       return out;
     }
     const sel = route().id;
@@ -673,6 +686,7 @@ const VIEWS = {
       : 'What your Macs and VMs cost this month. A lease is billed for at least 24 hours.', pick,
     h('button', { onclick: downloadBill }, 'Download CSV'))];
     if (isOp()) out.push(priceListPanel());
+    out.push(...billingTop());
     if (!b.data.prices_set) {
       out.push(empty('No prices yet', isOp() ? 'Set a price list to turn usage into statements.' : 'Your operator has not set prices, so nothing is charged.',
         isOp() ? h('button', { class: 'primary', onclick: priceSheet }, 'Set prices') : null));
@@ -689,14 +703,15 @@ const VIEWS = {
       if (isOp() && !st.lines.length) continue;
       out.push(statementPanel(st));
     }
-    if (!isOp()) out.push(budgetPanel(stmts[0]));
+    out.push(...billingBottom());
+    if (!isOp() && can('admin')) out.push(budgetPanel(stmts[0]));
     return out;
   },
 
   notifications() {
     const list = S.data.notifications || [];
     const out = [pageHead('Notifications', 'Events worth knowing about, newest first. Send them to Slack, PagerDuty or your own '
-      + 'service with a webhook.', h('button', { class: 'primary', onclick: webhookSheet }, 'Add webhook'))];
+      + 'service with a webhook.', need('admin', h('button', { class: 'primary', onclick: webhookSheet }, 'Add webhook')))];
     out.push(h('div', { class: 'panel' }, list.length ? h('div', { class: 'list' }, list.map(ntfRow))
       : h('div', { class: 'empty' }, h('h3', {}, 'Nothing yet'), h('p', {}, isOp() ? 'Macs that stop reporting, finished drains, leases and budgets show up here.'
         : 'Leases ending soon, budget warnings and VM changes show up here.'))));
@@ -767,7 +782,7 @@ const VIEWS = {
 
   policy() {
     if (!S.policy) { loadPolicy(); return [pageHead('Policy'), h('p', { class: 'muted' }, 'Loading…')]; }
-    return policyView();
+    return [...policyView(), signupPolicyPanel()];
   },
 };
 
@@ -788,11 +803,11 @@ function tenantOverview() {
     out.push(h('div', { class: 'panel pad' }, h('h2', { style: { marginBottom: '6px' } }, 'Get started'),
       h('ol', { class: 'steps' },
         step(hasLease, 1, 'Lease a Mac', 'A whole Mac for you alone, for at least 24 hours.',
-          h('button', { class: 'primary', onclick: leaseSheet }, 'Lease a Mac')),
+          need('admin', h('button', { class: 'primary', onclick: leaseSheet }, 'Lease a Mac'))),
         step(hasVm, 2, 'Launch a VM', 'Pick an image; it starts in seconds on your Mac.',
-          h('button', { class: hasLease ? 'primary' : '', onclick: () => launchSheet() }, 'Launch VM')),
+          need('change', h('button', { class: hasLease ? 'primary' : '', onclick: () => launchSheet() }, 'Launch VM'))),
         step(hasNet, 3, 'Connect your VMs', 'Optional: a private network across your Macs.',
-          h('button', { onclick: networkSheet }, 'Create network')))));
+          need('change', h('button', { onclick: networkSheet }, 'Create network'))))));
   }
   const st = myStatement();
   if (st && st.budget && st.budget.state !== 'ok') {
@@ -813,9 +828,10 @@ function tenantOverview() {
     meter('VMs', u.vms || 0, q.max_vms),
     meter('vCPUs', u.vcpus || 0, q.max_vcpus),
     meter('Memory', u.memory_mib || 0, q.max_memory_mib, gib)));
+  out.push(...usageTiles());
   if (list.length) {
     out.push(h('div', { class: 'section' }, h('div', { class: 'section-head' }, h('h2', { class: 'grow' }, 'Your Macs'),
-      h('button', { class: 'plain', onclick: leaseSheet }, 'Lease another')), h('div', { class: 'macs' }, list.map(macTile))));
+      need('admin', h('button', { class: 'plain', onclick: leaseSheet }, 'Lease another'))), h('div', { class: 'macs' }, list.map(macTile))));
   }
   if ((S.data.events || []).length) {
     out.push(h('div', { class: 'section' }, h('div', { class: 'section-head' }, h('h2', { class: 'grow' }, 'Recent activity'),
@@ -858,6 +874,7 @@ function opOverview() {
     meter('vCPUs in use', (c.vcpus_total || 0) - (c.vcpus_free || 0), c.vcpus_total),
     meter('Memory in use', (c.memory_mib_total || 0) - (c.memory_mib_free || 0), c.memory_mib_total, gib),
     meter('Macs leased', d.leases.filter((l) => l.state === 'active').length, list.filter((m) => m.isMac).length)));
+  out.push(...usageTiles());
   out.push(h('div', { class: 'section' }, h('div', { class: 'section-head' }, h('h2', { class: 'grow' }, 'Macs'),
     h('a', { href: '#/macs' }, 'Manage')),
   list.length ? h('div', { class: 'macs' }, list.map(macTile))
@@ -909,7 +926,9 @@ function policyView() {
       ledger_retention_days: Number(f.get('ledger_retention_days')),
       overlay_key_rotation_days: Number(f.get('overlay_key_rotation_days')),
       tenant_subnet_prefix: String(f.get('tenant_subnet_prefix')).trim(),
+      tunnels: readTunnelPolicy(f, p), // ---- tunnel ----
     };
+    next.max_snapshots_per_vm = Number(f.get('max_snapshots_per_vm'));
     const btn = e.submitter;
     btn.disabled = true;
     try { S.policy = await api('PUT', '/fleet/policy', { body: next }); toast('Policy saved'); render(true); } catch (err) { toast(err.message, true); btn.disabled = false; }
@@ -934,6 +953,10 @@ function policyView() {
   h('label', { class: 'field', style: { maxWidth: '260px' } }, h('span', {}, 'Keep VM and lease records for'),
     h('input', { name: 'ledger_retention_days', type: 'number', min: '1', value: String(p.ledger_retention_days) }),
     h('div', { class: 'hint' }, 'Days. Usage reports cannot reach further back.')),
+  h('label', { class: 'field', style: { maxWidth: '260px' } }, h('span', {}, 'Snapshots kept per VM'),
+    h('input', { name: 'max_snapshots_per_vm', type: 'number', min: '0', max: '1000', value: String(p.max_snapshots_per_vm ?? 20) }),
+    h('div', { class: 'hint' }, 'A tenant\'s quota can change it. 0 turns snapshots off.')),
+  tunnelPolicyFields(p), // ---- tunnel ----
   h('div', { class: 'row', style: { paddingTop: '8px' } }, h('span', { class: 'grow' }),
     h('button', { type: 'button', onclick: reconcileNow }, 'Reconcile now'),
     h('button', { class: 'primary', type: 'submit' }, 'Save changes')));
@@ -962,8 +985,9 @@ function renderInspector(page, id, force) {
   let vmShown = false;
   if (id) {
     if (page === 'macs') { const m = macs().find((x) => x.name === id); key = m && JSON.stringify(m); content = m ? () => macInspector(m) : null; }
-    if (page === 'vms') { const v = S.data.vms.find((x) => vmKey(x) === id); key = v && JSON.stringify([v, S.data.images]); content = v ? () => vmInspector(v) : null; vmShown = !!v; }
+    if (page === 'vms') { const v = S.data.vms.find((x) => vmKey(x) === id); key = v && JSON.stringify([v, S.data.images, tunnelsFor(v).length, (S.data.tunnelPolicy || {}).enabled]); content = v ? () => vmInspector(v) : null; vmShown = !!v; }
     if (page === 'networks') { const n = S.data.overlays.find((x) => x.name === id); key = n && JSON.stringify([n, S.data.leases]); content = n ? () => netInspector(n) : null; }
+    if (page === 'volumes') { const x = (S.data.volumes || []).find((v) => v.id === id); key = x && JSON.stringify([x, S.data.vms]); content = x ? () => volumeInspector(x) : null; }
     if (page === 'tenants') { const t = (S.data.tenants || []).find((x) => x.id === id); key = t && JSON.stringify([t, S.data.leases]); content = t ? () => tenantInspector(t) : null; }
     if (!content) {
       key = 'gone:' + page + id;
@@ -1019,6 +1043,7 @@ function macInspector(m) {
       h('div', { class: 'small', style: { marginTop: '12px' } }, gib(usedM) + ' of ' + gib(n.memory_mib_total) + ' memory in use'),
       h('div', { class: 'track' }, h('i', { style: { width: (100 * usedM / Math.max(1, n.memory_mib_total)).toFixed(1) + '%' } }))));
   }
+  out.push(macUsage(m));
   if (l) {
     const { releasable } = leaseProgress(l);
     out.push(h('section', {}, h('h3', {}, 'Lease'),
@@ -1047,8 +1072,8 @@ function macInspector(m) {
 
   const acts = [];
   if (!isOp()) {
-    acts.push(h('button', { class: 'primary', onclick: () => launchSheet({ node: m.name }) }, 'Launch VM on this Mac'));
-    if (l) {
+    if (can('change')) acts.push(h('button', { class: 'primary', onclick: () => launchSheet({ node: m.name }) }, 'Launch VM on this Mac'));
+    if (l && can('admin')) {
       const { releasable } = leaseProgress(l);
       acts.push(h('button', { class: 'danger', disabled: !releasable, title: releasable ? null : 'Available ' + rel(l.min_end),
         onclick: () => releaseLease(l, m) }, 'Release Mac'));
@@ -1080,6 +1105,7 @@ function vmInspector(v) {
     ['Image', img ? img.display_name || img.name : h('code', {}, req.image || '–')],
     ['Size', (req.vcpus || '–') + ' vCPUs, ' + gib(req.memory_mib)],
     nets.length ? ['Networks', nets.join(', ')] : null,
+    volumesOfVm(v).length ? ['Volumes', h('div', { class: 'chips' }, volumesOfVm(v).map((x) => h('a', { class: 'tag', href: '#/volumes/' + enc(x.id) }, x.name + ', ' + volumeGib(x.size_gib))))] : null,
     isOp() ? ['Tenant', req.tenant ? h('a', { href: '#/tenants/' + enc(req.tenant) }, req.tenant) : 'none'] : null,
     ['Created', when(v.created_at)],
     v.expires_at ? ['Deleted', rel(v.expires_at) + ' (automatically)'] : null,
@@ -1097,16 +1123,22 @@ function vmInspector(v) {
   const input = h('input', { id: 'exec-input', class: 'mono', placeholder: guestOf(req) === 'macos' ? 'sw_vers' : 'uname -a',
     value: ex.draft, autocomplete: 'off', spellcheck: 'false', disabled: !running, 'aria-label': 'Command',
     oninput: (e) => { ex.draft = e.target.value; } });
+  out.push(vmUsage(v));
   out.push(screenPanel(v, running));
+  out.push(connectPanel(v, running)); // ---- tunnel ----
   out.push(h('section', {}, h('h3', {}, 'Run a command'),
     h('form', { class: 'row', onsubmit: (e) => { e.preventDefault(); runCommand(v, ex); } },
-      h('div', { class: 'grow' }, input), h('button', { type: 'submit', disabled: !running }, 'Run')),
+      h('div', { class: 'grow' }, input), h('button', { type: 'submit', disabled: !running || !can('change') }, 'Run')),
     running ? null : h('p', { class: 'hint' }, 'The VM has to be running.'),
     out2));
   out.push(logsPanel(v));
-  out.push(h('section', {}, h('h3', {}, 'Delete'),
-    h('p', { class: 'small muted', style: { marginBottom: '10px' } }, 'Stops the VM and deletes its disk. This cannot be undone.'),
-    h('button', { class: 'danger', onclick: () => deleteVm(v) }, 'Delete VM…')));
+  out.push(...snapshotSections(v).filter(Boolean));
+  if (can('change')) {
+    out.push(h('section', {}, h('h3', {}, 'Delete'),
+      h('p', { class: 'small muted', style: { marginBottom: '10px' } }, 'Stops the VM and deletes its disk. This cannot be undone.'
+        + (volumesOfVm(v).length ? ' Its volumes are detached and keep their data.' : '')),
+      h('button', { class: 'danger', onclick: () => deleteVm(v) }, 'Delete VM…')));
+  }
   return out;
 }
 
@@ -1184,6 +1216,8 @@ function priceListPanel() {
     ['Leased Mac, any other', p.mac_per_hour],
     ['VM on a shared host', p.vm_per_hour], ['vCPU on a shared host', p.vcpu_per_hour],
     ['GiB of memory on a shared host', p.memory_gib_per_hour], ['macOS guest on a shared host (extra)', p.macos_vm_per_hour],
+    ['GiB of snapshot storage', p.snapshot_gib_per_hour],
+    ['GiB of volume storage', p.volume_gib_per_hour],
   ].filter(([, v]) => v);
   return h('div', { class: 'panel pad' },
     h('div', { class: 'row' }, h('h2', { class: 'grow' }, 'Price list'), h('button', { onclick: priceSheet }, 'Edit prices')),
@@ -1223,7 +1257,9 @@ function priceSheet() {
       num('mac_per_hour', 'A leased Mac in no class', p.mac_per_hour),
       h('div', { class: 'grid2' }, num('vm_per_hour', 'Each VM on a shared host', p.vm_per_hour), num('vcpu_per_hour', 'Each vCPU', p.vcpu_per_hour),
         num('memory_gib_per_hour', 'Each GiB of memory', p.memory_gib_per_hour), num('macos_vm_per_hour', 'Extra for a macOS guest', p.macos_vm_per_hour)),
+      num('volume_gib_per_hour', 'Each GiB of volume storage', p.volume_gib_per_hour, 'Charged for as long as a volume exists, attached or not.'),
       check('charge_vms_on_leased_macs', !!p.charge_vms_on_leased_macs, 'Also charge VMs on leased Macs', 'Normally the lease covers everything that runs on the Mac.'),
+      num('snapshot_gib_per_hour', 'Each GiB of snapshot storage', p.snapshot_gib_per_hour, 'Charged for every snapshot, on leased Macs too, for as long as it is kept.'),
     ],
     submit: 'Save prices',
     onSubmit: async (f, form) => {
@@ -1237,7 +1273,8 @@ function priceSheet() {
         })).filter((c) => c.name),
         charge_vms_on_leased_macs: f.has('charge_vms_on_leased_macs'),
       };
-      for (const k of ['mac_per_hour', 'vm_per_hour', 'vcpu_per_hour', 'memory_gib_per_hour', 'macos_vm_per_hour']) body[k] = Number(f.get(k) || 0);
+      for (const k of ['mac_per_hour', 'vm_per_hour', 'vcpu_per_hour', 'memory_gib_per_hour', 'macos_vm_per_hour', 'volume_gib_per_hour']) body[k] = Number(f.get(k) || 0);
+      body.snapshot_gib_per_hour = Number(f.get('snapshot_gib_per_hour') || 0);
       await api('PUT', '/fleet/prices', { body });
       toast('Prices saved');
       S.billView = null;
@@ -1249,7 +1286,7 @@ function priceSheet() {
 // ---- notifications --------------------------------------------------------------------------------------------------
 
 const SEEN_KEY = 'fluxvm.console.seen';
-const tone = (kind) => (/over|down|ended/.test(kind) ? 'bad' : /near|ending|scrub/.test(kind) ? 'warn' : '');
+const tone = (kind) => (/over|down|ended|failed|suspended/.test(kind) ? 'bad' : /near|ending|scrub/.test(kind) ? 'warn' : '');
 const seenKey = () => SEEN_KEY + '.' + (isOp() ? 'op' : (S.me && S.me.id) || 'tenant');
 function seenAt() { return Number(storage.get('localStorage', seenKey()) || 0); }
 // The newest notification's own (server) time, not this browser's clock, so a skewed clock neither hides nor repeats any.
@@ -1306,7 +1343,7 @@ function webhookList() {
   const items = S.hooks.items || [];
   if (!items.length) {
     return h('div', { class: 'panel empty' }, h('h3', {}, 'No webhooks'), h('p', {}, 'A webhook receives each event as JSON, signed with your '
-      + 'secret, so a chat channel or pager hears about it right away.'), h('button', { class: 'primary', onclick: webhookSheet }, 'Add webhook'));
+      + 'secret, so a chat channel or pager hears about it right away.'), need('admin', h('button', { class: 'primary', onclick: webhookSheet }, 'Add webhook')));
   }
   return h('div', { class: 'stack' }, items.map((w) => {
     const last = (w.deliveries || [])[0];
@@ -1334,11 +1371,15 @@ function webhookList() {
 }
 
 function webhookSheet() {
+  if (!allowed('admin')) return;
   const kinds = (S.hooks && S.hooks.kinds && S.hooks.kinds.length) ? S.hooks.kinds
     : ['vm.created', 'vm.deleted', 'lease.created', 'lease.released', 'lease.ending', 'lease.ended', 'budget.near', 'budget.over'];
   const label = { 'vm.created': 'VM launched', 'vm.deleted': 'VM deleted', 'lease.created': 'Mac leased', 'lease.released': 'Lease released',
     'lease.ending': 'Lease ending soon', 'lease.ended': 'Lease ended', 'budget.near': 'Budget at 80%', 'budget.over': 'Over budget',
-    'node.down': 'Mac stopped reporting', 'node.scrub': 'Mac needs a scrub', 'drain.done': 'Drain finished', test: 'Test' };
+    'node.down': 'Mac stopped reporting', 'node.scrub': 'Mac needs a scrub', 'drain.done': 'Drain finished', test: 'Test',
+    'volume.created': 'Volume created', 'volume.deleted': 'Volume deleted',
+    'billing.payment_failed': 'Payment failed', 'billing.suspended': 'Suspended for an unpaid invoice' };
+  Object.assign(label, SNAP_KINDS);
   openSheet({
     title: 'Add a webhook', intro: 'Each event is POSTed as JSON with an X-FluxVM-Signature header (HMAC-SHA256 of the body with your secret).',
     body: [
@@ -1382,6 +1423,7 @@ function keyTable(list, owner) {
 }
 
 function keySheet(owner) {
+  if (!allowed('admin')) return;
   openSheet({
     title: 'Create an API key', intro: 'You get the key once, on the next screen.',
     body: [
@@ -1425,7 +1467,7 @@ function powerRow(v) {
     buttons.push(act('resume', 'Resume', 'resumed'));
     buttons.push(act('stop', 'Stop', 'stopped', 'The guest is shut down. Its disk is kept.'));
   }
-  return buttons.length ? h('div', { class: 'row', style: { marginBottom: '8px' } }, buttons) : null;
+  return buttons.length && can('change') ? h('div', { class: 'row', style: { marginBottom: '8px' } }, buttons) : null;
 }
 
 function logsPanel(v) {
@@ -1445,6 +1487,279 @@ function logsPanel(v) {
     pre.scrollTop = pre.scrollHeight;
   });
   return h('section', {}, h('div', { class: 'row' }, h('h3', { class: 'grow' }, 'Console log'), btn), pre);
+}
+
+// ---- metrics --------------------------------------------------------------------------------------------------------
+// Usage graphs from central's collector (GET /fleet/metrics/*). No chart library: the plot is an SVG stretched to its
+// box (lines keep a 2px stroke), and the text, end markers, crosshair and tooltip are HTML laid over it.
+
+const RANGES = [['1h', 3600], ['6h', 21600], ['24h', 86400]];
+const RANGE_KEY = 'fluxvm.console.range';
+const M = { range: storage.get('sessionStorage', RANGE_KEY) || '1h', cache: {}, live: [] };
+if (!RANGES.some(([r]) => r === M.range)) M.range = '1h';
+const SVGNS = 'http://www.w3.org/2000/svg';
+function svgEl(tag, attrs) {
+  const e = document.createElementNS(SVGNS, tag);
+  for (const [k, v] of Object.entries(attrs || {})) if (v !== undefined && v !== null) e.setAttribute(k, v);
+  return e;
+}
+const num = (x) => typeof x === 'number' && Number.isFinite(x);
+const fmtPct = (x) => (num(x) ? (x > 0 && x < 10 ? x.toFixed(1) : String(Math.round(x))) + '%' : '–');
+const fmtMib = (x) => (num(x) ? (x >= 1024 ? (x / 1024).toFixed(1) + ' GiB' : Math.round(x) + ' MiB') : '–');
+const fmtCount = (x) => (num(x) ? String(Math.round(x)) : '–');
+function fmtRate(x) {
+  if (!num(x)) return '–';
+  const u = [[1e9, 'GB/s'], [1e6, 'MB/s'], [1e3, 'kB/s']].find(([d]) => x >= d);
+  return u ? (x / u[0]).toFixed(1) + ' ' + u[1] : Math.round(x) + ' B/s';
+}
+const clock = (t) => new Date(t * 1000).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+const clockDay = (t) => new Date(t * 1000).toLocaleString(undefined, { weekday: 'short', hour: '2-digit', minute: '2-digit' });
+const spanText = (s) => RANGES.find(([, x]) => x === s)[0].replace('h', ' hours').replace(/^1 hours/, 'hour');
+
+/** The smallest 1, 2 or 5 × 10ⁿ at or above `v`. */
+function niceMax(v) {
+  if (!(v > 0)) return 1;
+  const p = Math.pow(10, Math.floor(Math.log10(v)));
+  return [1, 2, 5, 10].map((m) => m * p).find((m) => m >= v * 0.999);
+}
+
+/**
+ * A line chart over the last `span` seconds. `series`: [{ key, label, color }]; `points`: [{ t, [key]: number|null }],
+ * one a minute. `max`: a fixed top (100 for percent, a VM's memory size); otherwise a round number above the data and
+ * at least `floor`, so a quiet line stays low instead of filling the box. Gaps (nothing measured, minutes missing)
+ * break the line. Hover or arrow keys show every series' value at a minute.
+ */
+function lineChart({ title, sub, series, points, span, fmt, max, floor = 0, compact = false }) {
+  const now = Date.now() / 1000;
+  const step = 60;
+  const t0 = now - span;
+  const vals = points.flatMap((p) => series.map((s) => p[s.key])).filter(num);
+  const top = max > 0 ? Math.max(max, ...vals) : niceMax(Math.max(floor, ...vals, 0));
+  const X = (t) => Math.max(0, Math.min(1000, ((t + step / 2 - t0) / span) * 1000));
+  const Y = (v) => 100 - (Math.max(0, Math.min(top, v)) / top) * 100;
+  const plot = svgEl('svg', { viewBox: '0 0 1000 100', preserveAspectRatio: 'none', 'aria-hidden': 'true', class: 'chart-svg', focusable: 'false' });
+  if (!compact) for (const g of [0, 50]) plot.append(svgEl('line', { x1: 0, x2: 1000, y1: g, y2: g, class: 'chart-grid' }));
+  const last = {};
+  const stats = {};
+  for (const s of series) {
+    const runs = [];
+    let run = [];
+    let prevT = null;
+    const seen = [];
+    for (const p of points) {
+      const v = p[s.key];
+      if (!num(v) || (prevT !== null && p.t - prevT > step * 2.5)) { if (run.length) runs.push(run); run = []; }
+      if (num(v)) { run.push([X(p.t), Y(v)]); last[s.key] = { t: p.t, v }; seen.push(v); }
+      prevT = p.t;
+    }
+    if (run.length) runs.push(run);
+    if (seen.length) stats[s.key] = { avg: seen.reduce((a, b) => a + b, 0) / seen.length, max: Math.max(...seen) };
+    for (const r of runs) {
+      const d = r.map(([x, y], i) => (i ? 'L' : 'M') + x.toFixed(1) + ' ' + y.toFixed(2)).join('');
+      if (series.length === 1 && r.length > 1) {
+        plot.append(svgEl('path', { d: d + 'L' + r[r.length - 1][0].toFixed(1) + ' 100L' + r[0][0].toFixed(1) + ' 100Z', class: 'chart-area', style: 'fill:' + s.color }));
+      }
+      plot.append(svgEl('path', { d: r.length === 1 ? d + 'l0.01 0' : d, class: 'chart-line', style: 'stroke:' + s.color }));
+    }
+  }
+  const label = title + ', last ' + spanText(span) + ': ' + series.map((s) => (series.length > 1 ? s.label + ' ' : '')
+    + (stats[s.key] ? 'now ' + fmt(last[s.key].v) + ', average ' + fmt(stats[s.key].avg) + ', highest ' + fmt(stats[s.key].max) : 'not measured')).join('; ');
+  const box = h('div', { class: 'chart-plot', tabindex: '0', role: 'img', 'aria-label': label });
+  box.append(plot);
+  for (const s of series) {
+    const l = last[s.key];
+    if (l) box.append(h('i', { class: 'chart-dot', style: { left: X(l.t) / 10 + '%', top: Y(l.v) + '%', '--c': s.color } }));
+  }
+  if (!compact) box.append(h('span', { class: 'chart-ymax', 'aria-hidden': 'true' }, fmt(top)));
+  const cross = h('i', { class: 'chart-cross', hidden: true });
+  const tip = h('div', { class: 'chart-tip', hidden: true, 'aria-live': 'polite' });
+  box.append(cross, tip);
+  let at = -1;
+  const show = (i) => {
+    if (i < 0 || i >= points.length) { cross.hidden = true; tip.hidden = true; at = -1; return; }
+    at = i;
+    const p = points[i];
+    const x = X(p.t) / 10;
+    cross.hidden = false;
+    cross.style.left = x + '%';
+    tip.replaceChildren(h('div', { class: 'chart-tip-t' }, span > 6 * 3600 ? clockDay(p.t) : clock(p.t)),
+      ...series.map((s) => h('div', { class: 'chart-tip-row' }, h('b', {}, fmt(p[s.key])),
+        series.length > 1 ? h('span', { class: 'key', style: { '--c': s.color } }, s.label) : null)));
+    tip.hidden = false;
+    tip.classList.toggle('flip', x > 55);
+    tip.style.left = x + '%';
+  };
+  const nearest = (frac) => {
+    const t = t0 + frac * span - step / 2;
+    let best = -1;
+    let bd = Infinity;
+    points.forEach((p, i) => { const dd = Math.abs(p.t - t); if (dd < bd) { bd = dd; best = i; } });
+    return best;
+  };
+  box.addEventListener('pointermove', (e) => { const r = box.getBoundingClientRect(); show(nearest((e.clientX - r.left) / Math.max(1, r.width))); });
+  box.addEventListener('pointerleave', () => { if (document.activeElement !== box) show(-1); });
+  box.addEventListener('focus', () => show(points.length - 1));
+  box.addEventListener('blur', () => show(-1));
+  box.addEventListener('keydown', (e) => {
+    const move = { ArrowLeft: -1, ArrowRight: 1 }[e.key];
+    const end = points.length - 1;
+    if (move) show(Math.max(0, Math.min(end, (at < 0 ? end : at) + move)));
+    else if (e.key === 'Home') show(0);
+    else if (e.key === 'End') show(end);
+    else return;
+    e.preventDefault();
+  });
+  if (compact) return h('div', { class: 'chart compact' }, box);
+  const head = h('div', { class: 'chart-head' }, h('span', { class: 'chart-title' }, title), sub ? h('span', { class: 'chart-sub' }, sub) : null,
+    series.length > 1
+      ? h('span', { class: 'chart-legend' }, series.map((s) => h('span', { class: 'key', style: { '--c': s.color } }, s.label + ' ', h('b', {}, fmt(last[s.key] && last[s.key].v)))))
+      : h('span', { class: 'chart-now num' }, fmt(last[series[0].key] && last[series[0].key].v)));
+  const axis = h('div', { class: 'chart-x', 'aria-hidden': 'true' }, h('span', {}, span > 6 * 3600 ? clockDay(t0) : clock(t0)),
+    h('span', {}, span > 6 * 3600 ? clockDay(t0 + span / 2) : clock(t0 + span / 2)), h('span', {}, 'now'));
+  return h('figure', { class: 'chart' }, head, box, axis);
+}
+
+/** A chart's place when its series has no values: what is missing and why, in the same footprint. */
+function chartEmpty(title, text) {
+  return h('figure', { class: 'chart' }, h('div', { class: 'chart-head' }, h('span', { class: 'chart-title' }, title),
+    h('span', { class: 'chart-now muted' }, '–')), h('div', { class: 'chart-empty' }, text));
+}
+
+/**
+ * The "Usage" section of an inspector: a range toggle above the charts, drawn from a cache at once and refreshed in
+ * place (the old drawing stays, dimmed, while new data loads). `draw(data, span)` returns the charts.
+ */
+function usagePanel(kind, id, path, draw) {
+  const body = h('div', { class: 'charts' });
+  const keyNow = () => kind + ':' + id + ':' + M.range;
+  const spanNow = () => RANGES.find(([r]) => r === M.range)[1];
+  let busy = false;
+  const fill = async (force) => {
+    const key = keyNow();
+    const c = M.cache[key];
+    if (c) body.replaceChildren(...draw(c.data, spanNow()));
+    else if (!body.childElementCount) body.replaceChildren(h('p', { class: 'small muted' }, 'Loading usage…'));
+    if (busy || (!force && c && Date.now() - c.at < 20000)) return;
+    busy = true;
+    body.classList.add('stale');
+    try {
+      const data = await api('GET', path + '?range=' + M.range);
+      M.cache[key] = { data, at: Date.now() };
+      if (key === keyNow()) body.replaceChildren(...draw(data, spanNow()));
+    } catch (e) {
+      if (key === keyNow() && !M.cache[key]) {
+        body.replaceChildren(h('p', { class: 'small muted' }, e.status === 404 || e.status === 405
+          ? 'Usage graphs are not available from this central yet.' : 'Usage could not be loaded: ' + e.message));
+      }
+    } finally {
+      busy = false;
+      body.classList.remove('stale');
+    }
+  };
+  const seg = h('div', { class: 'seg', role: 'group', 'aria-label': 'Time range' }, RANGES.map(([r]) => h('button', {
+    type: 'button', 'aria-pressed': String(r === M.range), title: 'Last ' + spanText(RANGES.find(([x]) => x === r)[1]),
+    onclick: () => {
+      M.range = r;
+      storage.set('sessionStorage', RANGE_KEY, r);
+      for (const b of seg.children) b.setAttribute('aria-pressed', String(b.textContent === r));
+      fill(false);
+    },
+  }, r)));
+  const sec = h('section', { class: 'usage' }, h('div', { class: 'row', style: { marginBottom: '12px' } },
+    h('h3', { class: 'grow', style: { margin: 0 } }, 'Usage'), seg), body);
+  sec.refreshUsage = () => fill(true);
+  M.live = M.live.filter((x) => x.isConnected);
+  M.live.push(sec);
+  fill(false);
+  return sec;
+}
+setInterval(() => {
+  if (document.visibilityState !== 'visible') return;
+  M.live = M.live.filter((x) => x.isConnected);
+  for (const s of M.live) s.refreshUsage();
+}, 30000);
+
+/** When history starts later than the range does (central keeps it in memory since it started). */
+function coverage(points, span) {
+  if (!points.length) return null;
+  const from = points[0].t;
+  return from > Date.now() / 1000 - span * 0.85
+    ? h('p', { class: 'hint' }, 'Collected since ' + clock(from) + '. Central keeps up to 24 hours, in memory.') : null;
+}
+
+function vmUsage(v) {
+  const req = v.request || {};
+  return usagePanel('vm', vmKey(v), '/fleet/metrics/vms/' + enc(v.node) + '/' + enc(v.id), (d, span) => {
+    const pts = d.points || [];
+    if (!pts.length) return [h('div', { class: 'chart-empty' }, d.note || 'No samples yet.')];
+    const has = (...keys) => pts.some((p) => keys.some((k) => num(p[k])));
+    if (!has('cpu_percent', 'memory_used_mib', 'disk_read_bps', 'disk_write_bps', 'net_rx_bps', 'net_tx_bps')) {
+      return [h('div', { class: 'chart-empty' }, d.note || 'Nothing was measured in this range.')];
+    }
+    const vcpus = d.vcpus || req.vcpus;
+    const mem = d.memory_mib || req.memory_mib;
+    const out = [
+      has('cpu_percent') ? lineChart({ title: 'CPU', sub: vcpus ? 'of ' + plural(vcpus, 'vCPU') : null, span, points: pts, fmt: fmtPct, max: 100,
+        series: [{ key: 'cpu_percent', label: 'CPU', color: 'var(--series-1)' }] })
+        : chartEmpty('CPU', 'Not measured yet. CPU needs two samples a few seconds apart.'),
+      has('memory_used_mib') ? lineChart({ title: 'Memory', sub: mem ? 'of ' + gib(mem) : null, span, points: pts, fmt: fmtMib, max: mem,
+        series: [{ key: 'memory_used_mib', label: 'Memory', color: 'var(--series-1)' }] })
+        : chartEmpty('Memory', 'Not measured.'),
+      has('disk_read_bps', 'disk_write_bps') ? lineChart({ title: 'Disk', span, points: pts, fmt: fmtRate, floor: 1e5,
+        series: [{ key: 'disk_read_bps', label: 'Read', color: 'var(--series-1)' }, { key: 'disk_write_bps', label: 'Write', color: 'var(--series-2)' }] })
+        : chartEmpty('Disk', 'Not measured for this VM.'),
+      has('net_rx_bps', 'net_tx_bps') ? lineChart({ title: 'Network', span, points: pts, fmt: fmtRate, floor: 1e4,
+        series: [{ key: 'net_rx_bps', label: 'In', color: 'var(--series-1)' }, { key: 'net_tx_bps', label: 'Out', color: 'var(--series-2)' }] })
+        : chartEmpty('Network', /network/i.test(d.note || '') ? d.note : 'Not measured for this VM.'),
+    ];
+    // A note about network traffic already sits in the empty network chart.
+    if (d.note && !(/network/i.test(d.note) && !has('net_rx_bps', 'net_tx_bps'))) out.push(h('p', { class: 'hint' }, d.note));
+    const cov = coverage(pts, span);
+    if (cov) out.push(cov);
+    return out;
+  });
+}
+
+function macUsage(m) {
+  return usagePanel('mac', m.name, '/fleet/metrics/nodes/' + enc(m.name), (d, span) => {
+    const pts = d.points || [];
+    if (!pts.length) return [h('div', { class: 'chart-empty' }, d.note || 'No samples yet.')];
+    const has = (k) => pts.some((p) => num(p[k]));
+    const memTotal = d.memory_total_mib || m.node.memory_mib_total;
+    const out = [
+      has('cpu_percent') ? lineChart({ title: 'CPU', sub: d.cpus ? plural(d.cpus, 'core') : null, span, points: pts, fmt: fmtPct, max: 100,
+        series: [{ key: 'cpu_percent', label: 'CPU', color: 'var(--series-1)' }] })
+        : chartEmpty('CPU', 'Not measured yet. CPU needs two samples a few seconds apart.'),
+      has('memory_used_mib') ? lineChart({ title: 'Memory', sub: memTotal ? 'of ' + gib(memTotal) : null, span, points: pts, fmt: fmtMib, max: memTotal,
+        series: [{ key: 'memory_used_mib', label: 'Memory', color: 'var(--series-1)' }] })
+        : chartEmpty('Memory', 'This Mac does not report its memory.'),
+      lineChart({ title: 'VMs', sub: 'on this Mac', span, points: pts, fmt: fmtCount, floor: 2,
+        series: [{ key: 'vms', label: 'VMs', color: 'var(--series-1)' }] }),
+    ];
+    const free = d.latest && d.latest.disk_free_bytes;
+    if (num(free)) out.push(h('p', { class: 'hint' }, (free / 1e9).toFixed(0) + ' GB free on the disk that holds its VMs.'));
+    const cov = coverage(pts, span);
+    if (cov) out.push(cov);
+    return out;
+  });
+}
+
+/** Overview tiles: CPU and memory in use now across the fleet (or the tenant's Macs), with the last hour. */
+function usageTiles() {
+  const s = S.data.metricsSummary;
+  if (!s || (!isOp() && !s.nodes_reporting)) return [];
+  const pts = s.points || [];
+  // The trend is scaled to the data (at least 0-50%) so an hour's movement shows; the tooltip gives exact values.
+  const tile = (label, pct, sub, key) => h('div', { class: 'panel meter usage-tile' },
+    h('div', { class: 'usage-tile-text' }, h('div', { class: 'muted small' }, label),
+      h('div', { class: 'value' }, num(pct) ? fmtPct(pct) : '–'),
+      h('div', { class: 'small muted' }, sub)),
+    pts.some((p) => num(p[key])) ? lineChart({ title: label, series: [{ key, label, color: 'var(--series-1)' }], points: pts, span: 3600, fmt: fmtPct, floor: 25, compact: true }) : null);
+  const waiting = 'Waiting for the first sample from the Macs';
+  return [h('div', { class: 'section meters' },
+    tile(isOp() ? 'Fleet CPU' : 'CPU on your Macs', s.cpu_percent, s.nodes_reporting ? 'Last hour, ' + plural(Math.round(s.cpus), 'core') : waiting, 'cpu_percent'),
+    tile(isOp() ? 'Fleet memory' : 'Memory on your Macs', s.memory_percent,
+      s.memory_total_mib ? gib(s.memory_used_mib) + ' of ' + gib(s.memory_total_mib) + ' in use' : waiting, 'memory_percent'))];
 }
 
 // ---- the VM's screen -------------------------------------------------------------------------------------------------
@@ -1620,7 +1935,7 @@ function screenPanel(v, running) {
       if (!screen.paused) fetchScreen(screen.key);
     } }, 'Pause');
     screen.control = false;
-    screen.ctl = h('button', { class: 'plain', type: 'button', 'aria-pressed': 'false', title: 'Send your clicks and typing to the VM',
+    screen.ctl = h('button', { class: 'plain', type: 'button', 'aria-pressed': 'false', title: 'Send your clicks and typing to the VM', hidden: !can('change'),
       onclick: () => setControl(!screen.control) }, 'Control');
     screen.typeIn = h('input', { placeholder: 'Type or paste text…', 'aria-label': 'Text to type into the VM', class: 'grow', style: { width: 'auto' } });
     const keyBtn = (label, key, modifiers) => h('button', { type: 'button', class: 'icon', onclick: () => sendInput([{ action: 'key', key, modifiers: modifiers || [] }]) }, label);
@@ -1687,6 +2002,343 @@ async function fetchScreen(k) {
   }
 }
 
+// ---- snapshots ------------------------------------------------------------------------------------------------------
+// A VM's snapshots (taken, restored and deleted from its inspector) and clones (a new VM on the same Mac from a snapshot
+// or from the stopped VM's disk).
+
+const SNAPS = {}; // vm key -> { items, limit, at, loading, error }
+const SNAP_NAME = '[A-Za-z0-9][A-Za-z0-9._\\-]{0,63}';
+const SNAP_KINDS = { 'vm.snapshot': 'Snapshot taken', 'vm.restored': 'VM restored', 'vm.cloned': 'VM cloned' };
+const snapPath = (v, rest) => '/fleet/vms/' + enc(v.node) + '/' + enc(v.id) + '/' + rest;
+const bytes = (n) => (!n ? '–' : n >= 2 ** 30 ? (n / 2 ** 30).toFixed(n >= 100 * 2 ** 30 ? 0 : 1).replace(/\.0$/, '') + ' GiB'
+  : Math.max(1, Math.round(n / 2 ** 20)) + ' MiB');
+const pad2 = (n) => String(n).padStart(2, '0');
+
+async function loadSnaps(v) {
+  const k = vmKey(v);
+  const st = SNAPS[k] = SNAPS[k] || {};
+  if (st.loading) return;
+  st.loading = true;
+  try {
+    const r = await api('GET', snapPath(v, 'snapshots'));
+    Object.assign(st, { items: r.items || [], limit: r.limit, error: null });
+  } catch (e) { st.error = e.message; }
+  st.loading = false;
+  st.at = Date.now();
+  S.lastInspKey = '';
+  render();
+}
+
+/** The Snapshots and Clone sections of a VM's inspector. */
+function snapshotSections(v) {
+  const k = vmKey(v);
+  const st = SNAPS[k];
+  if (!st || (!st.loading && Date.now() - (st.at || 0) > 30000)) loadSnaps(v);
+  const items = st && st.items;
+  const limit = st && st.limit;
+  const full = !!items && limit !== undefined && items.length >= limit;
+  const take = h('button', { class: 'plain', disabled: !items || full, title: full ? (limit ? 'This VM keeps at most ' + limit + ' snapshots. Delete one first.' : 'Snapshots are turned off for this VM.') : null,
+    onclick: () => snapshotSheet(v) }, 'Take snapshot');
+  let body;
+  if (!items && st && st.error) {
+    body = h('div', {}, h('p', { class: 'small sheet-error' }, 'The snapshots could not be loaded: ' + st.error),
+      h('button', { class: 'plain', onclick: () => { st.at = 0; loadSnaps(v); } }, 'Try again'));
+  } else if (!items) {
+    body = h('p', { class: 'muted small' }, 'Loading…');
+  } else if (!items.length) {
+    body = h('p', { class: 'muted small' }, 'No snapshots yet. A snapshot keeps this VM\'s disk as it is now, and its memory too if you like, so you can come back to this moment or start new VMs from it.');
+  } else {
+    body = h('div', { class: 'snaps' }, items.map((s) => h('div', { class: 'snap' },
+      h('div', { class: 'row' }, h('b', { class: 'grow snap-name' }, s.name),
+        s.memory ? h('span', { class: 'tag accent', title: 'Restoring resumes the VM where it was' }, 'Disk + memory')
+          : h('span', { class: 'tag', title: 'Restoring starts the VM from this disk' }, 'Disk')),
+      h('div', { class: 'small muted', title: when(s.created_at) }, rel(s.created_at) + ' · ' + bytes(s.size_bytes)),
+      can('change') ? h('div', { class: 'row snap-acts' },
+        h('button', { class: 'plain', onclick: () => restoreSnapshot(v, s) }, 'Restore…'),
+        h('button', { class: 'plain', onclick: () => cloneSheet(v, s.name) }, 'New VM from this…'),
+        h('span', { class: 'grow' }),
+        h('button', { class: 'plain danger', 'aria-label': 'Delete snapshot ' + s.name, onclick: () => deleteSnapshot(v, s) }, 'Delete…')) : null)));
+  }
+  const stopped = vmStatus(v).text === 'Stopped';
+  return [
+    h('section', { id: 'snapshots' }, h('div', { class: 'row', style: { marginBottom: '10px' } }, h('h3', { class: 'grow' }, 'Snapshots'), need('change', take)),
+      body,
+      items && items.length ? h('p', { class: 'hint' }, items.length + ' of ' + limit + ' kept for this VM.'
+        + (pricesSet() && (S.data.prices || {}).snapshot_gib_per_hour ? ' Storage is ' + money(S.data.prices.snapshot_gib_per_hour, null, true) + ' per GiB an hour.' : '')) : null),
+    !can('change') ? null : h('section', {}, h('h3', {}, 'Clone'),
+      h('p', { class: 'small muted', style: { marginBottom: '10px' } }, stopped
+        ? 'A new VM on ' + v.node + ' with a copy of this VM\'s disk, or of one of its snapshots.'
+        : 'A new VM on ' + v.node + ' from one of this VM\'s snapshots. To copy its disk as it is now, stop it first.'),
+      h('button', { onclick: () => cloneSheet(v) }, 'Clone VM…')),
+  ];
+}
+
+function snapshotSheet(v) {
+  if (!allowed('change')) return;
+  const st = vmStatus(v).text;
+  const live = st === 'Running' || st === 'Paused';
+  const d = new Date();
+  const name = 'snap-' + d.getFullYear() + pad2(d.getMonth() + 1) + pad2(d.getDate()) + '-' + pad2(d.getHours()) + pad2(d.getMinutes());
+  const note = h('p', { class: 'note' });
+  const describeChoice = (mem) => {
+    note.textContent = mem
+      ? 'The VM pauses while its memory is written out, then carries on. A restore resumes it exactly here.'
+      : live ? 'The VM pauses for a moment while its disk is copied. A restore starts it from this disk, like after a power cut.'
+        : 'A restore starts the VM from this disk.';
+  };
+  describeChoice(false);
+  const { form } = openSheet({
+    title: 'Take a snapshot of ' + v.name,
+    intro: 'A copy-on-write copy of the VM, kept on ' + v.node + '. It takes seconds and only uses space as the VM changes afterwards.',
+    body: [
+      h('label', { class: 'field' }, h('span', {}, 'Name'),
+        h('input', { name: 'name', value: name, required: true, pattern: SNAP_NAME, maxlength: '64', autocomplete: 'off', spellcheck: 'false', class: 'mono' }),
+        h('div', { class: 'hint' }, 'Something you will recognise later, like before-upgrade. Letters, digits, ".", "_" and "-".')),
+      h('div', {}, h('span', { class: 'field-label' }, 'What to keep'),
+        h('div', { class: 'choices' },
+          choice('memory', 'no', true, 'Disk only', 'Works whether the VM runs or not'),
+          choice('memory', 'yes', false, 'Disk and memory', live ? 'Also what is running right now' : 'Needs a running or paused VM', !live))),
+      note,
+    ],
+    submit: 'Take snapshot',
+    onSubmit: async (f) => {
+      const n = String(f.get('name') || '').trim();
+      const mem = f.get('memory') === 'yes';
+      await api('POST', snapPath(v, 'snapshots'), { body: { name: n, include_memory: mem } });
+      toast('Snapshot ' + n + ' of ' + v.name + ' taken');
+      loadSnaps(v);
+    },
+  });
+  form.addEventListener('change', (e) => { if (e.target.name === 'memory') describeChoice(e.target.value === 'yes'); });
+}
+
+async function restoreSnapshot(v, s) {
+  const ok = await confirmDialog({
+    title: 'Restore ' + v.name + ' to ' + s.name + '?',
+    body: 'The VM is stopped, its disk is put back to how it was ' + rel(s.created_at) + ' (' + when(s.created_at) + '), and it starts again'
+      + (s.memory ? ', resuming right where it was. ' : '. ') + 'Anything written since then is lost; take a snapshot first if you want to keep it.',
+    confirm: 'Restore', danger: true,
+  });
+  if (!ok) return;
+  toast('Restoring ' + v.name + '…');
+  try {
+    await api('POST', snapPath(v, 'snapshots/' + enc(s.name) + '/restore'));
+    toast(v.name + ' restored to ' + s.name);
+  } catch (e) { toast(e.message, true); }
+  refresh({ force: true });
+}
+
+async function deleteSnapshot(v, s) {
+  await confirmAct({ title: 'Delete snapshot ' + s.name + '?',
+    body: v.name + ' can no longer be restored to it, and no new VMs can be made from it. This cannot be undone.',
+    confirm: 'Delete snapshot', danger: true },
+  'DELETE', snapPath(v, 'snapshots/' + enc(s.name)), 'Snapshot ' + s.name + ' deleted', undefined, () => loadSnaps(v));
+}
+
+function cloneSheet(v, snap) {
+  if (!allowed('change')) return;
+  const items = (SNAPS[vmKey(v)] || {}).items || [];
+  const stopped = vmStatus(v).text === 'Stopped';
+  const taken = new Set((S.data.vms || []).map((x) => x.name));
+  let name = v.name + '-copy';
+  for (let i = 2; taken.has(name); i++) name = v.name + '-copy-' + i;
+  const pick = snap || (stopped ? '' : items.length ? items[0].name : '');
+  const source = h('select', { name: 'source' },
+    h('option', { value: '', disabled: !stopped, selected: pick === '' }, stopped ? 'Its disk, as it is now' : 'Its disk now (stop the VM first)'),
+    items.map((s) => h('option', { value: s.name, selected: pick === s.name }, 'Snapshot ' + s.name + ' (' + rel(s.created_at) + ')')));
+  const macos = guestOf(v.request) === 'macos';
+  const mac = macos ? macs().find((m) => m.name === v.node) : null;
+  const slotsFull = !!mac && mac.macosGuests >= 2;
+  openSheet({
+    title: 'New VM from ' + v.name,
+    intro: 'It runs on ' + v.node + ' with the same size, settings and networks, and counts against your quota.',
+    body: [
+      h('label', { class: 'field' }, h('span', {}, 'Name of the new VM'),
+        h('input', { name: 'name', value: name, required: true, maxlength: '63', pattern: '[A-Za-z0-9][A-Za-z0-9._\\-]{0,62}', autocomplete: 'off', spellcheck: 'false' })),
+      h('label', { class: 'field' }, h('span', {}, 'Copy from'), source,
+        h('div', { class: 'hint' }, 'A snapshot can be cloned while the VM runs. Its memory is not copied: the new VM starts from the disk.')),
+      !stopped && !items.length ? h('p', { class: 'note warn' }, 'Stop ' + v.name + ', or take a snapshot of it first: a running VM\'s disk changes while it is copied.') : null,
+      macos ? h('p', { class: 'note' + (slotsFull ? ' warn' : '') }, slotsFull
+        ? v.node + ' already runs two macOS VMs, the most Apple\'s licence allows. Stop or delete one of them first.'
+        : 'Apple\'s licence allows two macOS VMs per Mac, so this works only if ' + v.node + ' has a free slot.') : null,
+    ],
+    submit: 'Create VM',
+    onSubmit: async (f) => {
+      const n = String(f.get('name') || '').trim();
+      const from = String(f.get('source') || '');
+      if (!from && !stopped) throw new Error('Stop ' + v.name + ' first, or pick one of its snapshots.');
+      const r = await api('POST', snapPath(v, 'clone'), { body: { name: n, snapshot: from || undefined } });
+      toast(n + ' created from ' + (from ? 'snapshot ' + from : v.name));
+      await refresh({ force: true });
+      if (r && r.vm && r.vm.id) go('vms', r.node + '/' + r.vm.id);
+    },
+  });
+}
+
+/** The tenant quota's snapshot field (`f` is quotaFields' field maker). Empty means the policy's limit, not none. */
+function snapQuotaField(f, q) {
+  const el = f('max_snapshots_per_vm', 'Snapshots per VM', q.max_snapshots_per_vm, 'Empty: the policy\'s limit.');
+  el.querySelector('input').placeholder = 'Policy default';
+  return el;
+}
+
+/** Activity-log wording for snapshot and clone entries; `null` for anything else. */
+function describeSnapshot(p, m, target) {
+  const [a, b, c, d, e5, f6] = p;
+  if (a !== 'vms' || !(d === 'snapshots' || d === 'clone')) return null;
+  const vm = vmName(b, c) || c.slice(0, 8);
+  if (d === 'clone') return 'Cloned ' + vm + (target ? ' as ' + target : '');
+  if (p.length === 4) return 'Took snapshot' + (target ? ' ' + target : '') + ' of ' + vm;
+  if (f6 === 'restore') return 'Restored ' + vm + ' to snapshot ' + e5;
+  if (m === 'DELETE') return 'Deleted snapshot ' + e5 + ' of ' + vm;
+  return null;
+}
+// ---- tunnel ----------------------------------------------------------------------------------------------------------
+// SSH and port tunnels through central: the VM inspector's Connect section, the Tunnels page and the policy fields.
+
+/** The open tunnels to one VM. */
+function tunnelsFor(v) {
+  return (S.data.tunnels || []).filter((t) => t.node === v.node && t.vm_id === v.id);
+}
+
+/** The login name of the VM's image, as `fluxctl fleet ssh` picks it. */
+const sshUser = (v) => (imageFor(v) || {}).ssh_user || 'admin';
+/** How commands name the VM: its name when the shell and ssh can take it as is, otherwise node/id. */
+const vmArg = (v) => (/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(v.name || '') ? v.name : v.node + '/' + v.id);
+
+function fmtBytes(n) {
+  const u = ['B', 'KiB', 'MiB', 'GiB', 'TiB'];
+  let v = Number(n) || 0;
+  let i = 0;
+  while (v >= 1024 && i < u.length - 1) { v /= 1024; i += 1; }
+  return i ? v.toFixed(1) + ' ' + u[i] : v + ' B';
+}
+const portsText = (pol) => ((pol.ports || []).length ? pol.ports.join(', ') : 'none');
+/** The tunnel rules: from GET /fleet/tunnels, or the policy the operator just saved. */
+const tunnelPol = () => ({ ...(S.data.tunnelPolicy || {}), ...((isOp() && S.policy && S.policy.tunnels) || {}) });
+
+/** A labelled command with a Copy button; long commands wrap instead of being cut off. */
+function cmdField(label, text, what) {
+  const f = copyField(text, what);
+  Object.assign(f.querySelector('code').style, { whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', textOverflow: 'clip' });
+  return h('div', {}, h('div', { class: 'small muted', style: { marginBottom: '4px' } }, label), f);
+}
+
+function connectPanel(v, running) {
+  const pol = tunnelPol();
+  const open = tunnelsFor(v);
+  const head = h('div', { class: 'row' }, h('h3', { class: 'grow' }, 'Connect'),
+    open.length ? h('a', { class: 'small', href: '#/tunnels' }, plural(open.length, 'open tunnel')) : null);
+  if (pol.enabled === false) {
+    return h('section', {}, head, h('p', { class: 'small muted' }, 'Tunnels are turned off in this cloud\'s policy. '
+      + (isOp() ? 'Turn them on in Policy.' : 'Ask your operator to turn them on.')));
+  }
+  const arg = vmArg(v);
+  const alias = /^[A-Za-z0-9._-]+$/.test(v.name || '') ? v.name : 'fluxvm-' + v.id.slice(0, 8);
+  const config = 'Host ' + alias + '\n'
+    + '  User ' + sshUser(v) + '\n'
+    + '  HostKeyAlias fluxvm-' + v.id + '\n'
+    + '  ProxyCommand fluxctl fleet --central ' + location.origin + ' tunnel-stdio ' + v.node + '/' + v.id + ' %p\n';
+  return h('section', {}, head,
+    h('p', { class: 'small muted', style: { marginBottom: '12px' } }, 'SSH and port forwards run through central with your '
+      + 'token, so the Mac never has to be reachable from your network.'),
+    h('div', { class: 'stack' },
+      cmdField('SSH', 'fluxctl fleet ssh ' + arg, 'SSH command'),
+      cmdField('Forward a port', 'fluxctl fleet port-forward ' + arg + ' 8080:80', 'Port-forward command'),
+      cmdField('Set up once', 'export CENTRAL_URL=' + location.origin, 'CENTRAL_URL')),
+    h('p', { class: 'hint' }, 'fluxctl reads your token from FLUXVM_AGENT_TOKEN. Ports open to tunnels: ' + portsText(pol) + '.'),
+    h('details', { class: 'adv', style: { marginTop: '12px' } },
+      h('summary', {}, 'SSH config for scp, rsync and editors'),
+      h('pre', { class: 'snippet', style: { whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' } }, config),
+      h('div', { class: 'row', style: { marginTop: '8px' } },
+        h('span', { class: 'hint grow', style: { marginTop: 0 } }, 'Add it to ~/.ssh/config, then: ssh ' + alias),
+        h('button', { class: 'plain', onclick: () => copy(config, 'SSH config') }, 'Copy'))),
+    running ? null : h('p', { class: 'hint' }, 'The VM has to be running to connect.'));
+}
+
+function closeTunnel(t) {
+  return confirmAct({ title: 'Close the tunnel to ' + t.vm_name + ' port ' + t.port + '?',
+    body: 'The connection drops at once: an SSH session on it ends and a port forward loses this connection. '
+      + 'Nothing changes in the VM, and the client can connect again.', confirm: 'Close tunnel', danger: true },
+  'DELETE', '/fleet/tunnels/' + enc(t.id), 'Tunnel to ' + t.vm_name + ' port ' + t.port + ' closed');
+}
+
+VIEWS.tunnels = function tunnelsView() {
+  const list = [...(S.data.tunnels || [])].sort((a, b) => String(a.tenant || '').localeCompare(String(b.tenant || ''))
+    || String(b.opened_at).localeCompare(String(a.opened_at)));
+  const pol = tunnelPol();
+  const out = [pageHead('Tunnels', isOp() ? 'Every SSH and port tunnel open through this central. Closing one disconnects it at once.'
+    : 'Your open SSH and port tunnels to your VMs. They go through central, so no Mac is exposed.')];
+  const rules = pol.enabled === false ? 'Tunnels are turned off in the policy.'
+    : 'Ports ' + portsText(pol) + '. At most ' + (pol.max_per_tenant || '–') + ' open per tenant; closed after '
+      + (pol.idle_timeout_minutes || '–') + ' minutes without traffic.';
+  if (!list.length) {
+    out.push(empty('No open tunnels', 'Connect to a VM with fluxctl fleet ssh, or forward one of its ports with fluxctl fleet '
+      + 'port-forward. Open tunnels appear here while they are in use.', h('button', { class: 'primary', onclick: () => go('vms') }, 'Go to VMs')));
+    out.push(h('p', { class: 'hint', style: { marginTop: '12px' } }, rules));
+    return out;
+  }
+  if (isOp()) {
+    const per = {};
+    for (const t of list) per[t.tenant || ''] = (per[t.tenant || ''] || 0) + 1;
+    out.push(h('div', { class: 'row', style: { marginBottom: '12px', flexWrap: 'wrap' } },
+      Object.entries(per).map(([k, n]) => h('span', { class: 'tag' + (n >= (pol.max_per_tenant || Infinity) ? ' accent' : '') },
+        (k || 'Operator') + ' · ' + n + (pol.max_per_tenant ? ' of ' + pol.max_per_tenant : '')))));
+  }
+  out.push(h('div', { class: 'panel table-wrap' }, h('table', {},
+    h('thead', {}, h('tr', {}, h('th', {}, 'VM'), h('th', {}, 'Port'), isOp() ? h('th', {}, 'Tenant') : null,
+      h('th', { class: 'hide-sm' }, 'Opened'), h('th', { class: 'hide-sm' }, 'Idle'), h('th', { class: 'r' }, 'Traffic'), h('th', {}))),
+    h('tbody', {}, list.map((t) => h('tr', {},
+      h('td', {}, h('a', { href: '#/vms/' + enc(t.node) + '/' + enc(t.vm_id) }, h('b', {}, t.vm_name)), h('span', { class: 'sub' }, t.node)),
+      h('td', { class: 'num' }, String(t.port), t.port === 22 ? h('span', { class: 'sub' }, 'SSH') : null),
+      isOp() ? h('td', {}, t.tenant || h('span', { class: 'tag' }, 'Operator'), t.key ? h('span', { class: 'sub' }, 'key ' + t.key) : null) : null,
+      h('td', { class: 'hide-sm muted', title: when(t.opened_at) }, rel(t.opened_at)),
+      h('td', { class: 'hide-sm muted' }, t.idle_seconds < 60 ? 'Active' : dur(t.idle_seconds)),
+      h('td', { class: 'r num', title: 'Sent to the VM / received from it' }, '↑ ' + fmtBytes(t.bytes_sent) + '  ↓ ' + fmtBytes(t.bytes_received)),
+      h('td', { class: 'r' }, need('admin', h('button', { class: 'plain danger', onclick: () => closeTunnel(t) }, 'Close')))))))));
+  out.push(h('p', { class: 'hint', style: { marginTop: '12px' } }, rules));
+  return out;
+};
+
+/** An activity-log entry about a tunnel (`OPEN`/`CLOSE` on the VM's tunnel path, or a `DELETE` of one). */
+function describeTunnel(e, node, id) {
+  if (e.path.startsWith('/fleet/tunnels')) return 'Closed a tunnel';
+  const t = e.target || ((vmName(node, id) || String(id).slice(0, 8)) + ' tunnel');
+  if (e.method === 'CLOSE') {
+    const i = t.indexOf(': ');
+    return i < 0 ? 'Tunnel to ' + t + ' ended' : 'Tunnel to ' + t.slice(0, i) + ' ended (' + t.slice(i + 2) + ')';
+  }
+  return (e.status < 400 ? 'Opened a tunnel to ' : 'Was refused a tunnel to ') + t;
+}
+
+function tunnelPolicyFields(p) {
+  const t = p.tunnels || { enabled: true, ports: ['22', '1024-65535'], idle_timeout_minutes: 60, max_per_tenant: 20 };
+  return h('div', { class: 'stack' },
+    h('h2', { style: { paddingTop: '12px' } }, 'Tunnels'),
+    check('tunnels_enabled', t.enabled !== false, 'Allow SSH and port tunnels to VMs',
+      'Tenants reach their VMs\' ports through central with fluxctl fleet ssh and port-forward. The Macs stay unexposed.'),
+    h('label', { class: 'field' }, h('span', {}, 'Ports open to tunnels'),
+      h('input', { name: 'tunnel_ports', value: (t.ports || []).join(', '), placeholder: '22, 1024-65535', class: 'mono' }),
+      h('div', { class: 'hint' }, 'Single ports and ranges, separated by commas.')),
+    h('div', { class: 'grid2' },
+      h('label', { class: 'field' }, h('span', {}, 'Close idle tunnels after'),
+        h('input', { name: 'tunnel_idle', type: 'number', min: '1', max: '1440', value: String(t.idle_timeout_minutes) }),
+        h('div', { class: 'hint' }, 'Minutes without traffic either way.')),
+      h('label', { class: 'field' }, h('span', {}, 'Open tunnels per tenant'),
+        h('input', { name: 'tunnel_max', type: 'number', min: '1', max: '1000', value: String(t.max_per_tenant) }),
+        h('div', { class: 'hint' }, 'More are refused until one closes.'))));
+}
+
+function readTunnelPolicy(f, p) {
+  return {
+    ...(p.tunnels || {}),
+    enabled: f.has('tunnels_enabled'),
+    ports: String(f.get('tunnel_ports') || '').split(/[\s,]+/).map((x) => x.trim()).filter(Boolean),
+    idle_timeout_minutes: Number(f.get('tunnel_idle')),
+    max_per_tenant: Number(f.get('tunnel_max')),
+  };
+}
+
 // ---- activity -------------------------------------------------------------------------------------------------------
 
 /** What an activity-log entry did, in words. */
@@ -1696,8 +2348,10 @@ function describe(e) {
   const t = e.target ? ' ' + e.target : '';
   const m = e.method;
   const [a, b, c, d] = p;
+  { const snap = describeSnapshot(p, m, e.target); if (snap) return snap; }
   if (a === 'vms' && p.length === 1 && m === 'POST') return 'Launched VM' + t;
   if (a === 'vms' && p.length === 3 && m === 'DELETE') return 'Deleted VM ' + (vmName(b, c) || c.slice(0, 8)) + ' on ' + b;
+  if ((a === 'vms' && d === 'tunnel') || a === 'tunnels') return describeTunnel(e, b, c); // ---- tunnel ----
   if (a === 'vms' && d === 'exec') return 'Ran a command in ' + (vmName(b, c) || c.slice(0, 8));
   if (a === 'vms' && ['start', 'stop', 'restart', 'pause', 'resume'].includes(d)) {
     return { start: 'Started ', stop: 'Stopped ', restart: 'Restarted ', pause: 'Paused ', resume: 'Resumed ' }[d] + (vmName(b, c) || c.slice(0, 8));
@@ -1711,6 +2365,8 @@ function describe(e) {
   if (a === 'tenants' && p.length === 1) return 'Created tenant' + t;
   if (a === 'tenants' && c === 'keys') return (m === 'DELETE' ? 'Revoked API key ' + d : 'Created API key' + t) + (b === 'me' ? '' : ' for ' + b);
   if (a === 'tenants' && c === 'rotate-token') return 'Issued a new token for ' + b;
+  if (a === 'tenants' && c === 'members') return (m === 'POST' ? 'Added member' + t : m === 'PATCH' ? 'Changed the role of ' + d : 'Removed member ' + d) + (b === 'me' ? '' : ' of ' + b);
+  if (e.path === '/auth/session') return 'Signed in with SSO';
   if (a === 'tenants' && m === 'PATCH') return 'Changed tenant ' + b;
   if (a === 'tenants' && m === 'DELETE') return 'Deleted tenant ' + b;
   const nodeVerb = { cordon: 'Cordoned ', uncordon: 'Uncordoned ', drain: 'Drained ', scrub: 'Scrubbed ' }[c];
@@ -1721,6 +2377,12 @@ function describe(e) {
   if (a === 'prices') return 'Changed the price list';
   if (a === 'webhooks') return c === 'test' ? 'Sent a test to a webhook' : m === 'DELETE' ? 'Deleted a webhook' : 'Added a webhook';
   if (a === 'reconcile') return 'Reconciled the fleet';
+  if (a === 'pools') return describePool(e, p); // ---- warmpool ----
+  if (a === 'volumes') return p.length === 1 ? 'Created volume' + t : c === 'resize' ? 'Resized volume ' + b : 'Deleted volume ' + b;
+  if (e.path === '/signup') return 'Signed up' + t;
+  if (a === 'billing' && b === 'invoices') return 'Created invoices' + t;
+  if (a === 'billing' && b === 'payment-method') return 'Started adding a payment method';
+  if (a === 'tenants' && c === 'billing') return 'Changed invoicing for ' + b;
   return m + ' ' + e.path;
 }
 
@@ -1735,7 +2397,7 @@ function activityRows(list) {
     return h('tr', {},
       h('td', { class: 'muted', title: when(e.time) }, rel(e.time)),
       h('td', {}, e.actor === 'operator' ? h('span', { class: 'tag' }, 'Operator') : e.actor,
-        e.key ? h('span', { class: 'sub' }, 'key ' + e.key) : null),
+        e.key ? h('span', { class: 'sub' }, 'key ' + e.key) : null, e.user ? h('span', { class: 'sub' }, e.user) : null),
       h('td', {}, describe(e)),
       h('td', {}, status(ok ? { text: 'Done', cls: 'ok' } : { text: 'Refused (' + e.status + ')', cls: 'bad' })));
   });
@@ -1825,9 +2487,13 @@ function tenantInspector(t) {
       : h('p', { class: 'muted small' }, 'None.'),
     h('button', { class: 'plain', style: { marginTop: '8px' }, onclick: () => leaseSheet({ tenant: t.id }) }, 'Lease a Mac to ' + t.id + '…')),
     h('section', {}, h('h3', {}, 'Quota'), h('p', { class: 'hint', style: { marginBottom: '10px' } }, 'Leave a field empty for no limit.'), quotaForm),
+    tenantBillingSection(t),
     h('section', {}, h('div', { class: 'row' }, h('h3', { class: 'grow' }, 'API keys'),
       h('button', { class: 'plain', onclick: () => keySheet(t.id) }, 'Create key')),
     tenantKeys(t.id)),
+    h('section', {}, h('div', { class: 'row' }, h('h3', { class: 'grow' }, 'Members'),
+      h('button', { class: 'plain', onclick: () => memberSheet(t.id) }, 'Add member')),
+    tenantMembers(t.id)),
     h('section', {}, h('div', { class: 'actions-col' },
       h('button', { onclick: () => doAct('PATCH', '/fleet/tenants/' + id, t.id + (t.disabled ? ' enabled' : ' disabled'), { disabled: !t.disabled }) },
         t.disabled ? 'Enable tenant' : 'Disable tenant'),
@@ -1869,15 +2535,204 @@ function quotaFields(q = {}) {
     f('max_leased_hosts', 'Macs', q.max_leased_hosts),
     f('max_vms', 'VMs', q.max_vms),
     f('max_vcpus', 'vCPUs', q.max_vcpus),
-    f('max_memory_gib', 'Memory (GiB)', q.max_memory_mib ? q.max_memory_mib / 1024 : undefined));
+    f('max_memory_gib', 'Memory (GiB)', q.max_memory_mib ? q.max_memory_mib / 1024 : undefined),
+    f('max_volume_gib', 'Volume storage (GiB)', q.max_volume_gib),
+    snapQuotaField(f, q));
 }
 
 function readQuota(f) {
   const n = (k) => { const v = String(f.get(k) || '').trim(); return v === '' ? undefined : Number(v); };
   const quota = {};
-  for (const k of ['max_leased_hosts', 'max_vms', 'max_vcpus']) if (n(k) !== undefined) quota[k] = n(k);
+  for (const k of ['max_leased_hosts', 'max_vms', 'max_vcpus', 'max_volume_gib']) if (n(k) !== undefined) quota[k] = n(k);
   if (n('max_memory_gib') !== undefined) quota.max_memory_mib = Math.round(n('max_memory_gib') * 1024);
+  if (n('max_snapshots_per_vm') !== undefined) quota.max_snapshots_per_vm = n('max_snapshots_per_vm');
   return quota;
+}
+
+// ---- sso ------------------------------------------------------------------------------------------------------------
+// Single sign-on: the "Sign in with …" button, the signed-in person in the side footer, roles, and the Members page.
+// A console signed in with SSO has no token: the browser sends central's HttpOnly session cookie, and every call
+// carries X-FluxVM-Console (central refuses changes made with the cookie without it).
+
+const ROLES = [
+  ['viewer', 'Viewer', 'Sees everything, changes nothing.'],
+  ['member', 'Member', 'Launches and manages VMs and networks.'],
+  ['admin', 'Admin', 'Also leases Macs and manages keys, members, budget and webhooks.'],
+  ['owner', 'Owner', 'Everything, including other owners.'],
+];
+const roleName = (r) => (ROLES.find((x) => x[0] === r) || [r, r])[1];
+
+/** What the signed-in member may do: 'change' (VMs, networks) or 'admin' (leases, keys, members, budget, webhooks).
+ *  A token or the operator may do everything (central decides in the end). */
+function can(what) {
+  const r = S.user && S.user.role;
+  if (!r || r === 'owner' || r === 'admin') return true;
+  return r === 'member' && what === 'change';
+}
+const need = (what, el) => (can(what) ? el : null);
+function roleNote(what) {
+  return S.user && S.user.role === 'viewer'
+    ? 'You are a viewer: you can look around but not change anything. Ask an admin of your team for the member role.'
+    : 'Members manage VMs, snapshots, volumes and networks. ' + (what === 'admin' ? 'Leases, warm pools, API keys, members, billing, the budget and webhooks need an admin.' : '');
+}
+/** Guards an action; explains instead when the role does not allow it. */
+function allowed(what) {
+  if (can(what)) return true;
+  toast(roleNote(what), true);
+  return false;
+}
+
+async function ssoBoot() {
+  try { S.sso = await fetch('/auth/config', { cache: 'no-store' }).then((r) => r.json()); } catch (_) { S.sso = { enabled: false }; }
+  const btn = $('signin-sso');
+  if (S.sso && S.sso.enabled) {
+    btn.hidden = false;
+    $('signin-sso-btn').textContent = 'Sign in with ' + (S.sso.provider || 'SSO');
+  }
+  S.user = null;
+  if (S.sso && S.sso.enabled && !token()) {
+    try {
+      const r = await fetch('/auth/session', { cache: 'no-store' });
+      if (r.ok) S.user = await r.json();
+    } catch (_) { /* not signed in */ }
+  }
+}
+
+async function signOut() {
+  if (S.user) {
+    try { await fetch('/auth/logout', { method: 'POST', headers: { 'X-FluxVM-Console': '1' } }); } catch (_) { /* gone anyway */ }
+  }
+  storage.del('sessionStorage', TOKEN_KEY);
+  location.hash = '';
+  location.reload();
+}
+
+function renderWho() {
+  if (!S.user) return;
+  const u = S.user;
+  $('who').textContent = u.email;
+  $('who').title = u.email;
+  const team = u.tenant ? ((u.tenants || []).find((t) => t.id === u.tenant) || {}).display_name || u.tenant : null;
+  $('role').textContent = u.operator ? 'Operator, signed in with ' + ((S.sso && S.sso.provider) || 'SSO') : roleName(u.role) + ' · ' + team;
+  const switchable = (u.tenants || []).length + (u.can_be_operator ? 1 : 0) > 1;
+  $('switch-team').hidden = !switchable;
+}
+
+function switchSheet() {
+  const u = S.user;
+  const opts = (u.tenants || []).map((t) => h('a', { class: 'choice', href: '/auth/login?tenant=' + enc(t.id) },
+    h('b', {}, t.display_name || t.id), h('small', {}, roleName(t.role) + (t.id === u.tenant ? ' · current' : ''))));
+  if (u.can_be_operator) {
+    opts.unshift(h('a', { class: 'choice', href: '/auth/login' }, h('b', {}, 'Operator'), h('small', {}, u.operator ? 'Current' : 'The whole fleet')));
+  }
+  openSheet({ title: 'Switch team', intro: 'You belong to more than one. Switching signs you in again with ' + ((S.sso && S.sso.provider) || 'SSO')
+    + ', usually without asking for your password.', body: [h('div', { class: 'choices' }, opts)], submit: 'Close', cancel: null, onSubmit: async () => {} });
+}
+
+/** Members of `owner` ('me' or a tenant id): a table (or a compact list for the details pane), with role changes and
+ *  removal when allowed. */
+function memberTable(list, owner, compact) {
+  const myRole = S.user && S.user.role;
+  const full = !S.user || isOp() || myRole === 'owner'; // a token, the operator or an owner
+  const manage = isOp() || can('admin');
+  const path = (m) => '/fleet/tenants/' + enc(owner) + '/members/' + enc(m.email);
+  const after = () => { if (owner === 'me') S.members = null; else delete (S.tenantMembers || {})[owner]; };
+  const parts = (m) => {
+    const me = S.user && S.user.email === m.email;
+    const editable = manage && (full || m.role !== 'owner');
+    const role = editable
+      ? h('select', { 'aria-label': 'Role of ' + m.email, style: { width: 'auto' }, onchange: (e) => {
+        const to = e.target.value;
+        doAct('PATCH', path(m), m.email + ' is now ' + roleName(to).toLowerCase(), { role: to }, after);
+      } }, ROLES.filter((r) => full || r[0] !== 'owner').map(([v, label]) => h('option', { value: v, selected: v === m.role }, label)))
+      : h('span', { class: 'tag' + (m.role === 'owner' || m.role === 'admin' ? ' accent' : '') }, roleName(m.role));
+    const remove = editable ? h('button', { class: 'plain danger', onclick: () => confirmAct({
+      title: (me ? 'Leave ' : 'Remove ' + m.email + ' from ') + (owner === 'me' ? 'the team' : owner) + '?',
+      body: me ? 'You are signed out right away and cannot sign in to this team again unless someone adds you back.'
+        : 'They are signed out right away and can no longer sign in. Their past activity stays in the log.',
+      confirm: me ? 'Leave team' : 'Remove member', danger: true }, 'DELETE', path(m), m.email + ' removed', undefined, after) }, me ? 'Leave' : 'Remove') : null;
+    return { me, role, remove, seen: m.last_sign_in ? 'Signed in ' + rel(m.last_sign_in) : 'Not signed in yet' };
+  };
+  if (compact) {
+    return h('div', { class: 'stack' }, list.map((m) => {
+      const x = parts(m);
+      return h('div', { class: 'row' }, h('div', { class: 'grow', style: { minWidth: 0 } }, h('div', { style: { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }, title: m.email }, m.email),
+        h('div', { class: 'small muted' }, x.seen)), x.role, x.remove);
+    }));
+  }
+  return h('table', {},
+    h('thead', {}, h('tr', {}, h('th', {}, 'Person'), h('th', {}, 'Role'), h('th', { class: 'hide-sm' }, 'Added'),
+      h('th', { class: 'hide-sm' }, 'Last sign-in'), h('th', {}))),
+    h('tbody', {}, list.map((m) => {
+      const x = parts(m);
+      return h('tr', {},
+        h('td', {}, h('b', {}, m.email), h('span', { class: 'sub' }, x.me ? 'You' : m.added_by ? 'Added by ' + m.added_by : '')),
+        h('td', {}, x.role),
+        h('td', { class: 'hide-sm muted' }, rel(m.added_at)),
+        h('td', { class: 'muted hide-sm' }, m.last_sign_in ? rel(m.last_sign_in) : 'Not yet'),
+        h('td', { class: 'r' }, x.remove));
+    })));
+}
+
+function memberSheet(owner) {
+  if (!isOp() && !allowed('admin')) return;
+  const full = !S.user || isOp() || S.user.role === 'owner';
+  openSheet({
+    title: 'Add a member', intro: 'They sign in with ' + ((S.sso && S.sso.enabled && S.sso.provider) || 'single sign-on')
+      + ' using this email. Nothing is sent to them: tell them the console address.',
+    body: [
+      h('label', { class: 'field' }, h('span', {}, 'Work email'), h('input', { name: 'email', type: 'email', required: true, maxlength: '254',
+        placeholder: 'alex@example.com', autocomplete: 'off', spellcheck: 'false' }),
+      h('div', { class: 'hint' }, 'It has to match the email your identity provider has verified for them.')),
+      h('div', { class: 'field' }, h('span', {}, 'Role'), h('div', { class: 'choices' },
+        ROLES.map(([v, label, text]) => choice('role', v, v === 'member', label, text, v === 'owner' && !full)))),
+    ],
+    submit: 'Add member',
+    onSubmit: async (f) => {
+      const r = await api('POST', '/fleet/tenants/' + enc(owner) + '/members', { body: { email: String(f.get('email')).trim(), role: f.get('role') } });
+      if (owner === 'me') S.members = null; else delete (S.tenantMembers || {})[owner];
+      toast(r.member.email + ' can now sign in as ' + roleName(r.member.role).toLowerCase());
+      refresh({ force: true });
+    },
+  });
+}
+
+function loadMembers() {
+  if (S.membersLoading) return;
+  S.membersLoading = api('GET', '/fleet/tenants/me/members').then((r) => { S.members = r.items || []; S.membersSso = r.sso; })
+    .catch((e) => { S.members = []; toast(e.message, true); })
+    .finally(() => { S.membersLoading = null; S.lastViewKey = ''; render(); });
+}
+
+VIEWS.members = function membersView() {
+  const add = need('admin', h('button', { class: 'primary', onclick: () => memberSheet('me') }, 'Add member'));
+  const out = [pageHead('Members', 'The people of your team who sign in to this console, and what each of them may do.', add)];
+  if (!S.members) { loadMembers(); out.push(h('p', { class: 'muted' }, 'Loading…')); return out; }
+  if (!(S.sso && S.sso.enabled)) {
+    out.push(h('p', { class: 'note warn', style: { marginBottom: '16px' } }, 'Single sign-on is not set up on this central yet, so members cannot '
+      + 'sign in until your operator configures it. You can add them now.'));
+  }
+  if (!S.members.length) {
+    out.push(empty('Just your token so far', 'Add the people of your team by their work email. They sign in with your company\'s '
+      + 'single sign-on and get the role you pick: viewer, member, admin or owner.', add));
+    return out;
+  }
+  out.push(h('div', { class: 'panel table-wrap' }, memberTable(S.members, 'me')));
+  out.push(h('div', { class: 'grid2 section' }, ROLES.map(([, label, text]) => h('p', { class: 'small muted' }, h('b', {}, label + ': '), text))));
+  return out;
+};
+
+/** Operator: a tenant's members in its details pane. */
+function tenantMembers(id) {
+  S.tenantMembers = S.tenantMembers || {};
+  const list = S.tenantMembers[id];
+  if (!list) {
+    api('GET', '/fleet/tenants/' + enc(id) + '/members').then((r) => { S.tenantMembers[id] = r.items || []; S.lastInspKey = ''; render(); })
+      .catch((e) => { S.tenantMembers[id] = []; toast(e.message, true); });
+    return h('p', { class: 'muted small' }, 'Loading…');
+  }
+  if (!list.length) return h('p', { class: 'muted small' }, 'Nobody yet. Add the tenant\'s first owner so they can sign in with SSO.');
+  return memberTable(list, id, true);
 }
 
 // ---- actions --------------------------------------------------------------------------------------------------------
@@ -1916,7 +2771,10 @@ async function scrubMac(m) {
 }
 
 async function deleteVm(v) {
-  await confirmAct({ title: 'Delete ' + v.name + '?', body: 'The VM stops and its disk is deleted. This cannot be undone.',
+  const kept = volumesOfVm(v).map((x) => x.name);
+  await confirmAct({ title: 'Delete ' + v.name + '?', body: 'The VM stops and its disk is deleted. This cannot be undone.'
+    + (kept.length === 1 ? ' Its volume ' + kept[0] + ' keeps its data and can be attached to another VM.'
+      : kept.length ? ' Its volumes ' + kept.join(', ') + ' keep their data and can be attached to another VM.' : ''),
     confirm: 'Delete VM', danger: true, type: v.name },
   'DELETE', '/fleet/vms/' + enc(v.node) + '/' + enc(v.id), v.name + ' deleted', undefined, () => go('vms'));
 }
@@ -1997,6 +2855,7 @@ function choice(name, value, checked, title, sub, disabled) {
 }
 
 function leaseSheet(pre = {}) {
+  if (!allowed('admin')) return;
   const op = isOp();
   const avail = op ? macs().filter((m) => m.isMac && !m.lease && !m.vms.length && !m.node.cordoned && !m.drain.scrub_pending && m.node.healthy !== false) : [];
   const tenants = op ? (S.data.tenants || []).filter((t) => !t.disabled) : [];
@@ -2079,6 +2938,7 @@ function leaseSheet(pre = {}) {
 }
 
 function launchSheet(pre = {}) {
+  if (!allowed('change')) return;
   const op = isOp();
   const images = S.data.images;
   const leased = macs().filter((m) => m.lease);
@@ -2104,6 +2964,7 @@ function launchSheet(pre = {}) {
   const notice = h('div');
   const summary = h('p', { class: 'small muted' });
   const nets = S.data.overlays;
+  const volPick = volumePicker(pre);
 
   const current = () => {
     const f = new FormData(formRef.form);
@@ -2138,6 +2999,7 @@ function launchSheet(pre = {}) {
         m.name + ' (' + (full ? 'no macOS slot free' : slots + free) + ')'));
     }
     macSel.replaceChildren(...opts);
+    volPick.sync(guest, macSel);
     // What will stop it
     const msgs = [];
     if (!op && guest === 'macos' && !leased.length) {
@@ -2177,6 +3039,7 @@ function launchSheet(pre = {}) {
     nets.length ? h('div', {}, h('span', { class: 'field-label' }, 'Private networks'),
       nets.map((n) => h('label', { class: 'check' }, h('input', { type: 'checkbox', name: 'net', value: n.name }),
         h('span', {}, n.name, h('span', { class: 'hint', style: { display: 'block' } }, n.subnet + ' on ' + (Object.keys(n.members || {}).join(', ') || 'no Macs yet')))))) : null,
+    volPick,
     h('label', { class: 'field' }, h('span', {}, 'Delete automatically'), h('select', { name: 'ttl' },
       h('option', { value: '' }, 'Never'), h('option', { value: '3600' }, 'After 1 hour'), h('option', { value: '28800' }, 'After 8 hours'),
       h('option', { value: '86400' }, 'After 24 hours'), h('option', { value: '604800' }, 'After 7 days')),
@@ -2200,8 +3063,9 @@ function launchSheet(pre = {}) {
       if (netNames.length) req.apple.networks = netNames.map((name) => ({ name }));
       if (f.get('ttl')) req.ttl_seconds = Number(f.get('ttl'));
       if (f.get('node')) req.node = f.get('node');
+      if (f.getAll('volume').length) req.volumes = f.getAll('volume');
       const r = await api('POST', '/fleet/vms', { body: req });
-      toast('Launched ' + req.name + ' on ' + r.node);
+      toast(r.warm ? 'Started instantly from warm pool ' + r.pool : 'Launched ' + req.name + ' on ' + r.node);
       await refresh({ force: true });
       if (r.vm && r.vm.id) go('vms', r.node + '/' + r.vm.id);
     },
@@ -2213,6 +3077,7 @@ function launchSheet(pre = {}) {
 }
 
 function networkSheet() {
+  if (!allowed('change')) return;
   const op = isOp();
   const leased = S.data.leases.filter((l) => l.state === 'active').map((l) => l.node);
   const nodes = op ? (S.data.nodes || []).filter((n) => n.apple).map((n) => n.name) : leased;
@@ -2293,13 +3158,14 @@ function imageSheet(i) {
         h('label', { class: 'field' }, h('span', {}, 'Default vCPUs'), h('input', { name: 'vcpus', type: 'number', min: '1', max: '64', value: String(i.vcpus), required: true })),
         h('label', { class: 'field' }, h('span', {}, 'Default memory (GiB)'), h('input', { name: 'memory_gib', type: 'number', min: '1', value: String(Math.round(i.memory_mib / 1024)), required: true }))),
       h('label', { class: 'field' }, h('span', {}, 'Description (optional)'), h('input', { name: 'description', value: i.description || '', placeholder: 'Xcode 27, Homebrew and the GitHub runner' })),
+      h('label', { class: 'field' }, h('span', {}, 'SSH user (optional)'), h('input', { name: 'ssh_user', value: i.ssh_user || '', placeholder: 'admin', pattern: '[A-Za-z0-9._][A-Za-z0-9._\\-]{0,31}', autocomplete: 'off' }), h('div', { class: 'hint' }, 'The login name fluxctl fleet ssh uses for VMs from this image. Default: admin.')), // ---- tunnel ----
     ],
     submit: editing ? 'Save changes' : 'Add image',
     onSubmit: async (f) => {
       const s = (k) => { const v = String(f.get(k) || '').trim(); return v || undefined; };
       const body = { guest_os: f.get('guest_os'), image: s('image'), vcpus: Number(f.get('vcpus')),
         memory_mib: Math.round(Number(f.get('memory_gib')) * 1024), display_name: s('display_name'), description: s('description'),
-        source: s('source'), disk_size_gib: i.disk_size_gib };
+        source: s('source'), disk_size_gib: i.disk_size_gib, ssh_user: s('ssh_user') };
       const r = await api('PUT', '/fleet/images/' + enc(s('name')), { body });
       toast((editing ? 'Saved ' : 'Added ') + (r.display_name || r.name));
       refresh({ force: true });
@@ -2333,6 +3199,869 @@ function drainSheet(m) {
   });
 }
 
+// ---- volumes --------------------------------------------------------------------------------------------------------
+// Persistent volumes: disks that outlive VMs. One lives on one Mac and attaches to one Linux VM at a time, on that Mac.
+
+const volumes = () => S.data.volumes || [];
+const volumesOfVm = (v) => volumes().filter((x) => x.attached_to === v.id && x.node === v.node);
+const vmOfVolume = (x) => (x.attached_to ? S.data.vms.find((v) => v.id === x.attached_to && v.node === x.node) : null);
+const volumeGib = (n) => (n >= 1024 && n % 1024 === 0 ? n / 1024 + ' TiB' : n + ' GiB');
+const MAX_VOLUME_GIB = 2048;
+
+function volumeStatus(x) {
+  return { creating: { text: 'Creating', cls: 'warn' }, attaching: { text: 'Attaching', cls: 'warn' },
+    attached: { text: 'In use', cls: 'ok' } }[x.status] || { text: 'Available', cls: 'idle' };
+}
+
+/** A volume's monthly price at today's list, or null when volumes are free. */
+function volumeMonthly(gibs) {
+  const r = (S.data.prices || {}).volume_gib_per_hour || 0;
+  return pricesSet() && r > 0 ? r * gibs * 730 : null;
+}
+
+function vmLink(x) {
+  const v = vmOfVolume(x);
+  if (!x.attached_to) return null;
+  return v ? h('a', { href: '#/vms/' + enc(v.node) + '/' + enc(v.id), onclick: (e) => e.stopPropagation() }, v.name)
+    : h('code', { title: x.attached_to }, x.attached_to.slice(0, 8));
+}
+
+VIEWS.volumes = function volumesView() {
+  const list = volumes();
+  const create = need('change', h('button', { class: 'primary', onclick: () => volumeSheet() }, 'Create volume'));
+  const out = [pageHead('Volumes', 'Disks that keep their data when a VM is deleted. A volume lives on one Mac and serves one '
+    + 'Linux VM at a time on that Mac.', create)];
+  if (!list.length) {
+    out.push(empty('No volumes yet', 'Put a database, a build cache or a home directory on a volume. Delete the VM whenever you '
+      + 'like: the data stays, and the next VM you launch with the volume picks up where the last one left off.',
+    need('change', h('button', { class: 'primary', onclick: () => volumeSheet() }, 'Create volume'))));
+    return out;
+  }
+  const total = list.reduce((a, x) => a + x.size_gib, 0);
+  const q = isOp() ? {} : (S.me.quota || {});
+  const inUse = list.filter((x) => x.attached_to).length;
+  const monthly = isOp() ? null : volumeMonthly(total);
+  out.push(h('div', { class: 'meters', style: { marginBottom: '16px' } },
+    isOp() ? h('div', { class: 'panel meter' }, h('div', { class: 'muted small' }, 'Volume storage in the fleet'),
+      h('div', { class: 'value' }, volumeGib(total), h('small', {}, ' on ' + plural(new Set(list.map((x) => x.node)).size, 'Mac'))))
+      : meter('Your volume storage', total, q.max_volume_gib, volumeGib),
+    h('div', { class: 'panel meter' }, h('div', { class: 'muted small' }, 'Attached to a VM'),
+      h('div', { class: 'value' }, inUse, h('small', {}, ' of ' + plural(list.length, 'volume')))),
+    monthly !== null ? h('div', { class: 'panel meter' }, h('div', { class: 'muted small' }, 'At today\'s prices'),
+      h('div', { class: 'value' }, money(monthly), h('small', {}, ' a month'))) : null));
+  const sel = route().id;
+  out.push(h('div', { class: 'panel table-wrap' }, h('table', {},
+    h('thead', {}, h('tr', {}, h('th', {}, 'Name'), h('th', { class: 'r' }, 'Size'), h('th', {}, 'Mac'), h('th', {}, 'Status'),
+      h('th', { class: 'hide-sm' }, 'Attached to'), isOp() ? h('th', { class: 'hide-sm' }, 'Tenant') : null,
+      h('th', { class: 'hide-sm' }, 'Created'))),
+    h('tbody', {}, list.map((x) => h('tr', { class: 'link' + (sel === x.id ? ' selected' : ''), tabindex: '0',
+      onclick: () => go('volumes', x.id), onkeydown: (e) => { if (e.key === 'Enter') go('volumes', x.id); } },
+    h('td', {}, h('b', {}, x.name), h('span', { class: 'sub mono hide-sm' }, x.id)),
+    h('td', { class: 'r num' }, volumeGib(x.size_gib)),
+    h('td', {}, x.node),
+    h('td', {}, status(volumeStatus(x))),
+    h('td', { class: 'hide-sm' }, vmLink(x) || h('span', { class: 'muted' }, '–')),
+    isOp() ? h('td', { class: 'hide-sm' }, x.tenant || h('span', { class: 'muted' }, 'operator')) : null,
+    h('td', { class: 'hide-sm muted' }, rel(x.created_at))))))));
+  out.push(h('p', { class: 'hint', style: { marginTop: '12px' } }, 'A volume shows up in its VM as /dev/disk/by-id/virtio-<ID>. '
+    + 'Format it the first time (mkfs.ext4), then mount it.'));
+  return out;
+};
+
+function volumeInspector(x) {
+  const vm = vmOfVolume(x);
+  const busy = !!x.attached_to || x.status === 'attaching' || x.status === 'creating';
+  const leased = !isOp() && macs().some((m) => m.name === x.node);
+  const out = [h('div', { class: 'head' }, h('div', { class: 'grow' }, h('h2', {}, x.name), status(volumeStatus(x))), closeBtn('volumes'))];
+  out.push(h('section', {}, facts([
+    ['Size', volumeGib(x.size_gib) + ' (' + x.format + ', grows as it fills)'],
+    ['Mac', isOp() || leased ? h('a', { href: '#/macs/' + enc(x.node) }, x.node) : x.node],
+    ['Attached to', vmLink(x) || 'Nothing'],
+    isOp() ? ['Tenant', x.tenant ? h('a', { href: '#/tenants/' + enc(x.tenant) }, x.tenant) : 'operator'] : null,
+    ['Created', when(x.created_at)],
+    volumeMonthly(x.size_gib) !== null ? ['Costs', 'About ' + money(volumeMonthly(x.size_gib)) + ' a month, attached or not'] : null,
+    ['ID', copyField(x.id, 'Volume ID')],
+  ])));
+  out.push(h('section', {}, h('h3', {}, 'In the guest'),
+    copyField('/dev/disk/by-id/virtio-' + x.id, 'Device path'),
+    h('p', { class: 'hint' }, 'The first time, make a file system on it (sudo mkfs.ext4 on that path). Every VM after that just mounts it.')));
+  if (vm || x.attached_to) {
+    out.push(h('section', {}, h('h3', {}, 'In use'),
+      h('p', { class: 'small' }, 'Attached to ', vmLink(x), '. Delete that VM to free the volume: it keeps its data.')));
+  } else if (x.status === 'available' && can('change')) {
+    out.push(h('section', {}, h('button', { class: 'primary', style: { width: '100%' },
+      onclick: () => launchSheet({ volume: x.id, image: (S.data.images.find((i) => i.guest_os === 'linux') || {}).name }) }, 'Launch a VM with this volume'),
+    h('p', { class: 'hint' }, 'The VM runs on ' + x.node + ', where the volume is. Linux guests only.')));
+  }
+  if (can('change')) out.push(h('section', {}, h('div', { class: 'actions-col' },
+    h('button', { disabled: busy, title: busy ? 'Detach it first: delete the VM using it' : null, onclick: () => resizeVolumeSheet(x) }, 'Resize…'),
+    h('button', { class: 'danger', disabled: busy, title: busy ? 'Detach it first: delete the VM using it' : null, onclick: () => deleteVolume(x) }, 'Delete volume…')),
+  busy && x.attached_to ? h('p', { class: 'hint' }, 'A volume in use can be neither resized nor deleted.') : null));
+  return out;
+}
+
+function volumeSheet() {
+  if (!allowed('change')) return;
+  const op = isOp();
+  const q = op ? {} : (S.me.quota || {});
+  const held = op ? 0 : volumes().reduce((a, x) => a + x.size_gib, 0);
+  const left = q.max_volume_gib === undefined || q.max_volume_gib === null ? null : Math.max(0, q.max_volume_gib - held);
+  if (left === 0) { toast('You have used your volume quota of ' + volumeGib(q.max_volume_gib) + '. Delete a volume or ask your operator for more.', true); return; }
+  const targets = op ? macs().filter((m) => m.isMac && m.node.healthy !== false && !m.node.cordoned) : macs();
+  const sizeIn = h('input', { name: 'size_gib', type: 'number', min: '1', max: String(Math.min(MAX_VOLUME_GIB, left || MAX_VOLUME_GIB)), step: '1', value: String(Math.min(20, left || 20)), required: true });
+  const summary = h('p', { class: 'small muted' });
+  const showSummary = () => {
+    const g = Number(sizeIn.value || 0);
+    const parts = [];
+    if (left !== null) parts.push('Uses ' + volumeGib(g) + ' of your ' + volumeGib(left) + ' left.');
+    const m = volumeMonthly(g);
+    if (m !== null) parts.push('About ' + money(m) + ' a month, attached or not.');
+    parts.push('Space is only taken on the Mac as the guest writes.');
+    summary.textContent = parts.join(' ');
+  };
+  const body = [
+    h('div', { class: 'grid2' },
+      h('label', { class: 'field' }, h('span', {}, 'Name'), h('input', { name: 'name', required: true, pattern: '[a-z0-9]([a-z0-9\\-]{0,38}[a-z0-9])?', placeholder: 'pg-data', autocomplete: 'off', spellcheck: 'false' }),
+        h('div', { class: 'hint' }, 'Lowercase letters, digits and dashes.')),
+      h('label', { class: 'field' }, h('span', {}, 'Size (GiB)'), sizeIn, h('div', { class: 'hint' }, 'Up to ' + volumeGib(MAX_VOLUME_GIB) + '. You can grow it later.'))),
+    summary,
+    h('label', { class: 'field' }, h('span', {}, 'Mac'), h('select', { name: 'node' },
+      h('option', { value: '' }, op ? 'Choose automatically' : 'Choose automatically (a Mac you lease first)'),
+      targets.map((m) => h('option', { value: m.name }, m.name + (m.lease && op ? ' (leased to ' + m.lease.tenant + ')' : '')))),
+    h('div', { class: 'hint' }, 'A volume stays on this Mac. VMs that use it run here, so pick the Mac you will launch on.')),
+    op ? h('label', { class: 'field' }, h('span', {}, 'Tenant'), h('select', { name: 'tenant' },
+      h('option', { value: '' }, 'None (an operator volume)'),
+      (S.data.tenants || []).filter((t) => !t.disabled).map((t) => h('option', { value: t.id }, t.display_name || t.id))),
+    h('div', { class: 'hint' }, 'Only that tenant can attach, resize or delete it.')) : null,
+  ];
+  const sheet = openSheet({
+    title: 'Create a volume', intro: 'A disk that keeps its data when the VM using it is deleted.',
+    body, submit: 'Create volume',
+    onSubmit: async (f) => {
+      const b = { name: String(f.get('name')).trim(), size_gib: Number(f.get('size_gib')) };
+      if (f.get('node')) b.node = f.get('node');
+      if (op && f.get('tenant')) b.tenant = f.get('tenant');
+      const x = await api('POST', '/fleet/volumes', { body: b });
+      toast('Created ' + x.name + ' (' + volumeGib(x.size_gib) + ') on ' + x.node);
+      await refresh({ force: true });
+      go('volumes', x.id);
+    },
+  });
+  sheet.form.addEventListener('input', showSummary);
+  showSummary();
+}
+
+function resizeVolumeSheet(x) {
+  const q = isOp() ? {} : (S.me.quota || {});
+  const held = isOp() ? 0 : volumes().reduce((a, v) => a + v.size_gib, 0);
+  const room = q.max_volume_gib === undefined || q.max_volume_gib === null ? MAX_VOLUME_GIB : Math.min(MAX_VOLUME_GIB, x.size_gib + q.max_volume_gib - held);
+  if (room <= x.size_gib) { toast(x.size_gib >= MAX_VOLUME_GIB ? x.name + ' is already as large as a volume gets.' : 'Your volume quota has no room to grow ' + x.name + '.', true); return; }
+  openSheet({
+    title: 'Resize ' + x.name, intro: 'Volumes only grow. The data stays where it is.',
+    body: [
+      h('label', { class: 'field' }, h('span', {}, 'New size (GiB)'),
+        h('input', { name: 'size_gib', type: 'number', min: String(x.size_gib + 1), max: String(room), step: '1', value: String(Math.min(room, x.size_gib * 2)), required: true }),
+        h('div', { class: 'hint' }, 'Now ' + volumeGib(x.size_gib) + '; at most ' + volumeGib(room) + '.')),
+      h('p', { class: 'note' }, 'Next time it is attached, grow the file system inside the guest too: sudo resize2fs on the device (ext4) or xfs_growfs on the mount point (XFS).'),
+    ],
+    submit: 'Resize volume',
+    onSubmit: async (f) => {
+      const r = await api('POST', '/fleet/volumes/' + enc(x.id) + '/resize', { body: { size_gib: Number(f.get('size_gib')) } });
+      toast(x.name + ' is now ' + volumeGib(r.size_gib));
+      refresh({ force: true });
+    },
+  });
+}
+
+async function deleteVolume(x) {
+  await confirmAct({ title: 'Delete ' + x.name + '?', body: 'Its ' + volumeGib(x.size_gib) + ' of data are deleted from ' + x.node + '. This cannot be undone.',
+    confirm: 'Delete volume', danger: true, type: x.name },
+  'DELETE', '/fleet/volumes/' + enc(x.id), x.name + ' deleted', undefined, () => go('volumes'));
+}
+
+/** The Launch sheet's volume picker. `sync(guest, macSel)` runs on every change of the sheet. */
+function volumePicker(pre) {
+  const wrap = h('div');
+  const boxes = volumes().map((x) => {
+    const free = x.status === 'available';
+    const vm = vmOfVolume(x);
+    const box = h('input', { type: 'checkbox', name: 'volume', value: x.id, checked: free && (pre.volume === x.id || pre.volume === x.name), disabled: !free });
+    box.dataset.node = x.node;
+    const sub = free ? volumeGib(x.size_gib) + ' on ' + x.node + (isOp() && x.tenant ? ', ' + x.tenant : '')
+      : (x.attached_to ? 'In use by ' + (vm ? vm.name : 'another VM') : 'Not ready yet');
+    return { box, row: h('label', { class: 'check' }, box, h('span', {}, x.name, h('span', { class: 'hint', style: { display: 'block' } }, sub))) };
+  });
+  const note = h('p', { class: 'hint' });
+  wrap.sync = (guest, macSel) => {
+    const linux = guest === 'linux';
+    wrap.hidden = !boxes.length;
+    if (!boxes.length) return;
+    const picked = boxes.filter((b) => b.box.checked && !b.box.disabled);
+    const node = picked.length ? picked[0].box.dataset.node : null;
+    for (const b of boxes) {
+      if (!linux) b.box.checked = false;
+      b.box.disabled = !linux || volumes().find((x) => x.id === b.box.value).status !== 'available' || (node !== null && b.box.dataset.node !== node);
+    }
+    wrap.replaceChildren(h('span', { class: 'field-label' }, 'Volumes'), note, ...(linux ? boxes.map((b) => b.row) : []));
+    if (!linux) { note.textContent = 'Volumes attach to Linux VMs only.'; macSel.disabled = false; return; }
+    if (node) {
+      macSel.value = node;
+      macSel.disabled = true;
+      macSel.title = 'Set by the volume: a VM runs on the Mac its volumes are on';
+      note.textContent = 'It runs on ' + node + ', where ' + (picked.length === 1 ? 'the volume is' : 'its volumes are') + '. A volume serves one VM at a time.';
+    } else {
+      macSel.disabled = false;
+      macSel.title = '';
+      note.textContent = 'Attach a volume to keep data when this VM is deleted.';
+    }
+  };
+  return wrap;
+}
+// ---- warmpool -------------------------------------------------------------------------------------------------------
+// Warm pools (/fleet/pools): VMs booted ahead of time, so a launch of their image starts in seconds. The view, the
+// cards' min-ready stepper, the create and launch sheets, and the bits other views use (the VM list's tag, activity).
+
+async function loadPools() {
+  const r = await soft(api('GET', '/fleet/pools'), { items: [] });
+  return (r.items || []).sort((a, b) => a.name.localeCompare(b.name));
+}
+
+/** Pool name -> { min, timer }: a min-ready change shown at once and sent after the clicks settle. */
+const poolPending = {};
+const poolMine = (p) => isOp() || (S.me && p.tenant === S.me.id);
+const MAX_MIN_READY = 32;
+
+function warmTag(v) {
+  if (!v.warm_pool) return null;
+  const ready = v.warm_state === 'ready';
+  return h('span', { class: 'tag warm' + (ready ? ' ready' : ''),
+    title: 'Booted ahead of time by warm pool ' + v.warm_pool + '. The next launch of its image takes it.' },
+  ready ? 'Warm, ready' : 'Warm, booting');
+}
+
+function poolState(p) {
+  const st = (p.status || {}).state;
+  return { ready: { text: 'Ready', cls: 'ok' }, filling: { text: 'Filling', cls: 'warn' },
+    backing_off: { text: 'Retrying soon', cls: 'bad' }, paused: { text: 'Paused', cls: 'idle' } }[st]
+    || { text: st || 'Unknown', cls: 'idle' };
+}
+
+function poolImageName(p) {
+  const img = (S.data.images || []).find((i) => i.name === p.image);
+  return (img && (img.display_name || img.name)) || p.image_display_name || p.image;
+}
+
+const fmtMs = (ms) => (ms < 1000 ? Math.round(ms) + ' ms' : (ms / 1000).toFixed(ms < 10000 ? 1 : 0) + ' s');
+
+function poolsView() {
+  const list = S.data.pools || [];
+  const createBtn = () => need('admin', h('button', { class: 'primary', onclick: () => poolSheet() }, 'Create pool'));
+  const out = [pageHead('Warm pools', isOp()
+    ? 'VMs booted ahead of time. A launch of a pool\'s image takes a ready VM and starts in seconds; the pool then boots a '
+      + 'replacement. Shared pools run on Macs nobody leases, a tenant\'s pool on the Macs it leases.'
+    : 'VMs booted ahead of time on the Macs you lease. Launch the pool\'s image, or name the pool from CI, and a ready VM '
+      + 'starts in seconds; the pool then boots a replacement.', createBtn())];
+  if (!list.length) {
+    const noImages = !S.data.images.length;
+    out.push(empty('No warm pools yet', (isOp()
+      ? 'A pool keeps VMs of one image booted and idle, so launches start in seconds instead of waiting for a boot. '
+        + 'macOS pools belong on a tenant\'s leased Macs: Apple allows two macOS VMs per Mac.'
+      : 'A pool keeps VMs of one image booted and idle on your Macs, so CI jobs start in seconds instead of waiting for '
+        + 'macOS to boot. Waiting VMs count against your quota.') + (noImages ? ' First, the catalog needs an image.' : ''),
+    noImages ? (isOp() ? h('button', { class: 'primary', onclick: () => imageSheet() }, 'Add image') : null) : createBtn()));
+    return out;
+  }
+  out.push(h('div', { class: 'pools' }, list.map(poolCard)));
+  return out;
+}
+
+function poolCard(p) {
+  const st = p.status || {};
+  const mine = poolMine(p) && can('admin');
+  const pend = poolPending[p.name];
+  const min = pend ? pend.min : p.min_ready;
+  const ready = st.ready || 0;
+  const booting = st.booting || 0;
+  const slots = Math.min(24, Math.max(min, ready + booting));
+  const dots = [];
+  for (let i = 0; i < slots; i++) {
+    const kind = i < ready ? 'ready' : i < ready + booting ? 'booting' : 'slot';
+    dots.push(h('span', { class: 'wdot ' + kind, title: { ready: 'Ready to launch', booting: 'Booting', slot: 'Not booted yet' }[kind] }));
+  }
+  const owner = p.owner === 'operator' ? (isOp() ? 'Shared' : 'Shared by your operator') : (isOp() ? 'Tenant ' + p.owner : 'Yours');
+  const stepper = mine ? h('div', { class: 'stepper', role: 'group', 'aria-label': 'VMs to keep ready' },
+    h('button', { type: 'button', 'aria-label': 'Keep one fewer ready', disabled: min <= 0, onclick: () => stepPool(p, min - 1) }, '−'),
+    h('output', { 'aria-live': 'polite' }, String(min)),
+    h('button', { type: 'button', 'aria-label': 'Keep one more ready', disabled: min >= MAX_MIN_READY, onclick: () => stepPool(p, min + 1) }, '+'))
+    : h('b', {}, String(min));
+  const claims = st.claimed_24h || 0;
+  let problem = null;
+  if (st.last_error) {
+    const retry = st.state === 'backing_off' && st.backoff_until ? 'Retrying ' + rel(st.backoff_until) + '. ' : '';
+    problem = h('p', { class: 'note warn', style: { margin: 0 } }, retry + st.last_error[0].toUpperCase() + st.last_error.slice(1) + '.');
+  }
+  return h('div', { class: 'panel pad pool-card' },
+    h('div', { class: 'pool-top' },
+      h('div', { class: 'grow' }, h('h3', {}, p.name),
+        h('div', { class: 'pool-sub' }, poolImageName(p) + ' · ' + p.size.vcpus + ' vCPUs, ' + gib(p.size.memory_mib))),
+      status(poolState(p))),
+    h('div', { class: 'warm-row' },
+      h('div', { class: 'warm-dots', role: 'img', 'aria-label': ready + ' ready, ' + booting + ' booting, ' + min + ' wanted' }, dots),
+      h('span', { class: 'warm-count' }, ready + ' ready' + (booting ? ' · ' + booting + ' booting' : ''))),
+    h('div', { class: 'row' },
+      h('div', { class: 'grow' }, h('div', { class: 'small' }, 'Keep ready'),
+        h('div', { class: 'small muted' }, min === 0 ? 'Paused: nothing is kept booted' : 'Up to ' + Math.max(p.max_total, min) + ' alive at once, launched ones included')),
+      stepper),
+    h('div', { class: 'pool-stats' },
+      h('div', {}, h('b', {}, String(claims)), 'launches in 24 hours'),
+      h('div', {}, h('b', {}, st.avg_claim_ms === undefined || st.avg_claim_ms === null ? '–' : fmtMs(st.avg_claim_ms)), 'average start')),
+    problem,
+    h('div', { class: 'pool-foot' },
+      h('span', { class: 'tag' + (p.owner === 'operator' ? '' : ' accent') }, owner),
+      h('span', { class: 'grow' }),
+      need('change', h('button', { onclick: () => poolLaunchSheet(p) }, 'Launch')),
+      mine ? h('button', { class: 'plain danger', onclick: () => deletePool(p) }, 'Delete') : null));
+}
+
+function stepPool(p, n) {
+  if (n < 0 || n > MAX_MIN_READY) return;
+  const pend = poolPending[p.name] || (poolPending[p.name] = {});
+  pend.min = n;
+  clearTimeout(pend.timer);
+  render(true);
+  pend.timer = setTimeout(async () => {
+    const want = pend.min;
+    try {
+      await api('PATCH', '/fleet/pools/' + enc(p.name), { body: { min_ready: want } });
+      toast(want === 0 ? p.name + ' paused: its waiting VMs are deleted' : p.name + ' keeps ' + plural(want, 'VM') + ' ready');
+    } catch (e) { toast(e.message, true); }
+    if (poolPending[p.name] === pend) delete poolPending[p.name];
+    refresh({ force: true });
+  }, 700);
+}
+
+async function deletePool(p) {
+  const st = p.status || {};
+  const warm = (st.ready || 0) + (st.booting || 0);
+  await confirmAct({ title: 'Delete warm pool ' + p.name + '?',
+    body: (warm ? plural(warm, 'waiting VM') + ' in it ' + (warm === 1 ? 'is' : 'are') + ' deleted. ' : '')
+      + 'VMs already launched from it keep running.', confirm: 'Delete pool', danger: true },
+  'DELETE', '/fleet/pools/' + enc(p.name), p.name + ' deleted');
+}
+
+function poolSheet() {
+  if (!allowed('admin')) return;
+  const op = isOp();
+  const images = S.data.images;
+  if (!images.length) {
+    toast(op ? 'Add an image to the catalog first: a pool boots VMs of a catalog image' : 'Your operator has not added any images yet', true);
+    return;
+  }
+  const taken = new Set((S.data.pools || []).map((x) => x.name));
+  const suggest = (img) => {
+    const base = img.name.replace(/[^a-z0-9-]/g, '-').slice(0, 30).replace(/-+$/, '') + '-warm';
+    for (let i = 1; ; i++) { const n = i === 1 ? base : base + '-' + i; if (!taken.has(n)) return n; }
+  };
+  const imgChoices = h('div', { class: 'choices' }, images.map((i, n) => choice('image', i.name, n === 0, i.display_name || i.name,
+    guestName(i.guest_os) + ', ' + i.vcpus + ' vCPUs, ' + gib(i.memory_mib))));
+  const nameIn = h('input', { name: 'name', required: true, pattern: '[a-z0-9]([a-z0-9\\-]{0,38}[a-z0-9])?', autocomplete: 'off', spellcheck: 'false' });
+  let touched = false;
+  nameIn.addEventListener('input', () => { touched = true; });
+  const cpuIn = h('input', { name: 'vcpus', type: 'number', min: '1', max: '64', required: true });
+  const memIn = h('input', { name: 'memory_gib', type: 'number', min: '1', max: '1024', step: '1', required: true });
+  const ownerSel = op ? h('select', { name: 'tenant' }, h('option', { value: '' }, 'Shared: Macs nobody leases'),
+    (S.data.tenants || []).filter((t) => !t.disabled).map((t) => h('option', { value: t.id }, (t.display_name || t.id) + ': its leased Macs'))) : null;
+  const notice = h('div');
+  const leased = (S.data.leases || []).some((l) => l.state === 'active');
+  let formRef = null;
+  const update = (fromImage) => {
+    const f = new FormData(formRef.form);
+    const img = images.find((i) => i.name === f.get('image'));
+    if (!img) return;
+    if (fromImage) {
+      cpuIn.value = img.vcpus;
+      memIn.value = Math.max(1, Math.round(img.memory_mib / 1024));
+      if (!touched) nameIn.value = suggest(img);
+    }
+    const msgs = [];
+    const shared = op && !f.get('tenant');
+    if (img.guest_os === 'macos') {
+      if (!op && !leased) {
+        msgs.push(h('div', { class: 'note warn row' }, h('span', { class: 'grow' }, 'macOS VMs run on Macs you lease. The pool fills once you lease one.'),
+          h('button', { type: 'button', onclick: () => { $('sheet').close(); leaseSheet(); } }, 'Lease a Mac')));
+      }
+      if (shared && !(S.policy && S.policy.require_lease_for_macos === false)) {
+        msgs.push(h('p', { class: 'note warn' }, 'Under the macOS licence tenants run macOS only on Macs they lease, so they cannot take VMs '
+          + 'from a shared macOS pool. Pick a tenant above to give it its own pool, or keep this one for your own launches.'));
+      }
+      msgs.push(h('p', { class: 'note' }, 'Apple allows two macOS VMs per Mac, and each VM kept ready uses one of them.'));
+    } else if (shared) {
+      msgs.push(h('p', { class: 'note' }, 'Tenants launching this image on a shared host get a ready VM, billed from the moment they take it.'));
+    }
+    notice.replaceChildren(...msgs);
+  };
+  formRef = openSheet({
+    title: 'Create a warm pool', wide: true,
+    intro: op ? 'Central keeps this many VMs booted and idle. A launch of the image takes one and starts in seconds.'
+      : 'Central keeps this many VMs booted and idle on your Macs. A launch of the image takes one and starts in seconds.',
+    body: [
+      h('div', {}, h('span', { class: 'field-label' }, 'Image'), imgChoices),
+      h('label', { class: 'field' }, h('span', {}, 'Name'), nameIn, h('div', { class: 'hint' }, 'Lowercase letters, digits and dashes. CI names the pool with "pool": "<name>".')),
+      h('div', { class: 'grid2' },
+        h('label', { class: 'field' }, h('span', {}, 'Keep ready'), h('input', { name: 'min_ready', type: 'number', min: '0', max: String(MAX_MIN_READY), value: '1', required: true }),
+          h('div', { class: 'hint' }, 'Booted, idle VMs waiting for a launch.')),
+        h('label', { class: 'field' }, h('span', {}, 'Most alive at once'), h('input', { name: 'max_total', type: 'number', min: '1', max: '100', placeholder: 'Automatic' }),
+          h('div', { class: 'hint' }, 'Waiting plus launched VMs from this pool. Empty: 4 × keep ready.'))),
+      h('div', { class: 'grid2' }, h('label', { class: 'field' }, h('span', {}, 'vCPUs'), cpuIn), h('label', { class: 'field' }, h('span', {}, 'Memory (GiB)'), memIn)),
+      ownerSel ? h('label', { class: 'field' }, h('span', {}, 'Owner'), ownerSel,
+        h('div', { class: 'hint' }, 'A tenant\'s pool counts against its quota and bill; a shared pool\'s VMs are billed to whoever takes one, from then on.')) : null,
+      notice,
+    ],
+    submit: 'Create pool',
+    onSubmit: async (f) => {
+      const b = { name: String(f.get('name')).trim(), image: f.get('image'), min_ready: Number(f.get('min_ready')),
+        vcpus: Number(f.get('vcpus')), memory_mib: Math.round(Number(f.get('memory_gib')) * 1024) };
+      if (String(f.get('max_total') || '').trim()) b.max_total = Number(f.get('max_total'));
+      if (op && f.get('tenant')) b.tenant = f.get('tenant');
+      const r = await api('POST', '/fleet/pools', { body: b });
+      toast('Created ' + r.name + (b.min_ready ? ': booting ' + plural(b.min_ready, 'VM') + ' now' : ''));
+      if (r.note) setTimeout(() => toast(r.note), 600);
+      await refresh({ force: true });
+      go('pools');
+    },
+  });
+  formRef.form.addEventListener('change', (e) => update(e.target.name === 'image'));
+  update(true);
+}
+
+function poolLaunchSheet(p) {
+  const st = p.status || {};
+  const names = new Set((S.data.vms || []).map((v) => v.name));
+  let n = 1;
+  while (names.has(p.name + '-' + n)) n++;
+  openSheet({
+    title: 'Launch from ' + p.name,
+    intro: st.ready ? 'A VM is booted and waiting: it is yours in seconds.' : 'No VM is ready right now, so this one boots the usual way.',
+    body: [
+      facts([['Image', poolImageName(p)], ['Size', p.size.vcpus + ' vCPUs, ' + gib(p.size.memory_mib)], ['Ready now', String(st.ready || 0)]]),
+      h('label', { class: 'field' }, h('span', {}, 'Name'), h('input', { name: 'name', required: true, value: p.name + '-' + n,
+        pattern: '[A-Za-z0-9][A-Za-z0-9._\\-]{0,62}', autocomplete: 'off', spellcheck: 'false' })),
+      h('label', { class: 'field' }, h('span', {}, 'Delete automatically'), h('select', { name: 'ttl' },
+        h('option', { value: '' }, 'Never'), h('option', { value: '3600' }, 'After 1 hour'), h('option', { value: '28800' }, 'After 8 hours'),
+        h('option', { value: '86400' }, 'After 24 hours'), h('option', { value: '604800' }, 'After 7 days'))),
+    ],
+    submit: 'Launch VM',
+    onSubmit: async (f) => {
+      const req = { name: String(f.get('name')).trim(), pool: p.name };
+      if (f.get('ttl')) req.ttl_seconds = Number(f.get('ttl'));
+      if (isOp() && p.tenant) req.tenant = p.tenant;
+      const r = await api('POST', '/fleet/vms', { body: req });
+      toast(r.warm ? 'Started instantly from warm pool ' + r.pool : 'Launched ' + req.name + ' on ' + r.node + ' (no warm VM was ready)');
+      await refresh({ force: true });
+      if (r.vm && r.vm.id) go('vms', r.node + '/' + r.vm.id);
+    },
+  });
+}
+
+/** Activity-log text for /fleet/pools changes and the pool reconciler's own entries. */
+function describePool(e, p) {
+  const [, b, c] = p;
+  const t = e.target;
+  if (p.length === 1) return 'Created warm pool' + (t ? ' ' + t : '');
+  if (c === 'replace') return 'Replaced a warm VM in ' + b + (t ? ' (' + t + ')' : '');
+  if (c === 'fill') return 'Could not boot a warm VM for ' + b + (t ? ': ' + t : '');
+  if (c === 'claim') return 'Could not hand over a warm VM from ' + b;
+  if (e.method === 'PATCH') return 'Changed warm pool ' + b;
+  if (e.method === 'DELETE') return 'Deleted warm pool ' + b;
+  return e.method + ' ' + e.path;
+}
+
+VIEWS.pools = poolsView;
+// ---- signup ---------------------------------------------------------------------------------------------------------
+// Self-service sign-up on the sign-in screen; Stripe invoices and payment methods on the Billing page, the tenant
+// details and the policy.
+
+S.signup = { cfg: null, cfgAt: 0, invoices: null, invFor: null, invAt: 0, invLoading: false };
+
+/** A call without the bearer token (the sign-up routes need none). */
+async function publicCall(method, path, body) {
+  let r;
+  try {
+    r = await fetch(path, { method, cache: 'no-store', headers: body ? { 'Content-Type': 'application/json' } : {},
+      body: body ? JSON.stringify(body) : undefined });
+  } catch (_) {
+    throw new ApiError(0, 'Central is not reachable. Check your connection and try again.');
+  }
+  const out = await r.json().catch(() => ({}));
+  if (!r.ok) throw new ApiError(r.status, (out && out.error) || r.status + ' ' + r.statusText, out);
+  return out;
+}
+
+/** Shows "Create an account" on the sign-in screen when this central takes sign-ups. */
+async function signupOffer() {
+  if (!S.signup.cfg || Date.now() - S.signup.cfgAt > 60000) {
+    try { S.signup.cfg = await publicCall('GET', '/signup/config'); } catch (_) { S.signup.cfg = { open: false }; }
+    S.signup.cfgAt = Date.now();
+  }
+  $('signup-cta').hidden = !S.signup.cfg.open;
+}
+
+const slugify = (s) => String(s).toLowerCase().normalize('NFKD').replace(/[̀-ͯ]/g, '')
+  .replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40).replace(/-+$/, '');
+
+function signupSheet() {
+  const cfg = S.signup.cfg || {};
+  const domains = cfg.allowed_email_domains || [];
+  let idEdited = false;
+  const idInput = h('input', { name: 'tenant_id', required: true, pattern: '[a-z0-9][a-z0-9\\-]{0,62}', maxlength: '63',
+    placeholder: 'acme', autocomplete: 'off', spellcheck: 'false', oninput: () => { idEdited = true; } });
+  const nameInput = h('input', { name: 'display_name', placeholder: 'Acme Mobile', maxlength: '80', autocomplete: 'organization',
+    oninput: (e) => { if (!idEdited) idInput.value = slugify(e.target.value); } });
+  openSheet({
+    title: 'Create your account',
+    intro: 'Lease whole Macs by the day and run macOS and Linux VMs on them, from this console or fluxctl.',
+    body: [
+      h('label', { class: 'field' }, h('span', {}, 'Company or team'), nameInput),
+      h('label', { class: 'field' }, h('span', {}, 'Account ID'), idInput,
+        h('div', { class: 'hint' }, 'Lowercase letters, digits and dashes. It is part of URLs and network names and cannot be changed later.')),
+      h('label', { class: 'field' }, h('span', {}, 'Work email'),
+        h('input', { name: 'email', type: 'email', required: true, maxlength: '254', autocomplete: 'email',
+          placeholder: domains.length ? 'you@' + domains[0] : 'you@company.com' }),
+        h('div', { class: 'hint' }, domains.length ? 'Sign-up here is for addresses at ' + domains.join(', ') + '.'
+          : 'For invoices and notices about your account.')),
+      cfg.require_payment_method ? h('p', { class: 'note' }, 'Next, you add a payment method with Stripe. You are billed '
+        + 'monthly, only for what you use.') : null,
+    ],
+    submit: 'Create account',
+    onSubmit: async (f) => {
+      const body = { tenant_id: String(f.get('tenant_id')).trim(), email: String(f.get('email')).trim() };
+      const dn = String(f.get('display_name') || '').trim();
+      if (dn) body.display_name = dn;
+      let r;
+      try {
+        r = await publicCall('POST', '/signup', body);
+      } catch (e) {
+        if (e.status === 409 && /already exists/.test(e.message)) throw new Error('The account ID “' + body.tenant_id + '” is taken. Try another one.');
+        if (e.status === 429) throw new Error('Too many sign-ups from your network right now. Try again in an hour.');
+        if (e.status === 403 && /closed/.test(e.message)) { S.signup.cfg = { open: false }; $('signup-cta').hidden = true; }
+        throw e;
+      }
+      setTimeout(() => signupDone(r), 0);
+    },
+  });
+}
+
+/** The new account's token, shown once, then straight into the console with it. */
+function signupDone(r) {
+  const tok = r.token;
+  const id = (r.tenant && r.tenant.id) || 'account';
+  const ack = h('input', { type: 'checkbox', name: 'ack' });
+  let finished = false;
+  const { dlg, btn } = openSheet({
+    title: 'Your account is ready',
+    intro: 'This is your access token. It is shown only this once: central keeps just a fingerprint of it.',
+    body: [
+      h('div', { class: 'token-box' }, tok),
+      h('div', { class: 'row' },
+        h('button', { type: 'button', onclick: () => copy(tok, 'Token') }, 'Copy token'),
+        h('button', { type: 'button', onclick: () => saveToken(id, tok) }, 'Download')),
+      h('p', { class: 'small muted' }, 'Sign in with it here, or use it with fluxctl as FLUXVM_AGENT_TOKEN. Keep it in a '
+        + 'password manager: if you lose it, your operator has to issue a new one.'),
+      h('label', { class: 'check' }, ack, h('span', {}, 'I have stored my token somewhere safe')),
+    ],
+    submit: r.payment_method_required ? 'Continue to add a payment method' : 'Continue to the console',
+    cancel: null,
+    onSubmit: async () => {
+      finished = true;
+      if (r.payment_method_required) location.hash = '#/billing';
+      // Sign in exactly as the form does, so nothing from before carries over.
+      $('signin-token').value = tok;
+      $('signin-form').requestSubmit();
+    },
+  });
+  btn.disabled = true;
+  ack.addEventListener('change', () => { btn.disabled = !ack.checked; });
+  // Escape or a click outside must not throw the only copy of the token away: the sheet stays (or comes back) until
+  // the token is acknowledged.
+  const keep = (e) => { if (e.type === 'cancel' || e.target === dlg) { e.preventDefault(); e.stopImmediatePropagation(); } };
+  const reopen = () => {
+    if (!finished) { if (!dlg.open) dlg.showModal(); return; }
+    dlg.removeEventListener('cancel', keep);
+    dlg.removeEventListener('click', keep, true);
+    dlg.removeEventListener('close', reopen);
+  };
+  dlg.addEventListener('cancel', keep);
+  dlg.addEventListener('click', keep, true);
+  dlg.addEventListener('close', reopen);
+}
+
+function saveToken(id, tok) {
+  const url = URL.createObjectURL(new Blob(['FluxVM Cloud access token for ' + id + '\n' + location.origin + '/console\n\n' + tok + '\n'], { type: 'text/plain' }));
+  const a = h('a', { href: url, download: 'fluxvm-' + id + '-token.txt' });
+  document.body.append(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 60000);
+}
+
+$('signup-link').addEventListener('click', (e) => { e.preventDefault(); signupSheet(); });
+
+// Back from Stripe Checkout: say what happened and drop the query from the address bar.
+(function paymentReturn() {
+  const pm = new URLSearchParams(location.search).get('payment_method');
+  if (!pm) return;
+  history.replaceState(null, '', location.pathname + location.hash);
+  setTimeout(() => toast(pm === 'added' ? 'Payment method saved. It shows here once Stripe confirms it, usually within seconds.'
+    : 'No payment method was added.', pm !== 'added'), 400);
+}());
+
+async function addPaymentMethod(btn) {
+  if (btn) btn.disabled = true;
+  try {
+    const r = await api('POST', '/fleet/billing/payment-method');
+    if (!/^https?:\/\//.test(r.url || '')) throw new Error('Stripe did not return a page to open.');
+    toast('Opening Stripe…');
+    location.assign(r.url);
+  } catch (e) {
+    toast(e.message, true);
+    if (btn) btn.disabled = false;
+  }
+}
+
+async function loadInvoices() {
+  if (S.signup.invLoading) return;
+  S.signup.invLoading = true;
+  const who = token();
+  let next;
+  try { next = await api('GET', '/fleet/billing/invoices'); } catch (e) { next = { items: [], billing: { payments: false }, error: e.message }; }
+  S.signup.invLoading = false;
+  if (token() !== who) return;
+  const changed = JSON.stringify(next) !== JSON.stringify(S.signup.invoices) || S.signup.invFor !== who;
+  Object.assign(S.signup, { invoices: next, invFor: who, invAt: Date.now() });
+  if (changed) { S.lastViewKey = ''; S.lastInspKey = ''; render(); }
+}
+
+/** Invoices for whoever is signed in; loads them (again after 30 seconds) in the background. */
+function invoicesData() {
+  const mine = S.signup.invoices && S.signup.invFor === token();
+  if (!mine || Date.now() - S.signup.invAt > 30000) loadInvoices();
+  return mine ? S.signup.invoices : null;
+}
+
+function invoiceStatus(inv) {
+  if (inv.status === 'paid') return { text: 'Paid', cls: 'ok' };
+  if (inv.status === 'open' && inv.payment_failed) return { text: 'Payment failed', cls: 'bad' };
+  if (inv.status === 'open') return { text: 'Due', cls: 'warn' };
+  if (inv.status === 'draft') return { text: 'Being prepared', cls: 'idle' };
+  if (inv.status === 'void') return { text: 'Void', cls: 'idle' };
+  if (inv.status === 'uncollectible') return { text: 'Uncollectible', cls: 'bad' };
+  return { text: String(inv.status || 'Unknown'), cls: 'idle' };
+}
+const monthName = (m) => new Date(m + '-01T00:00:00Z').toLocaleDateString(undefined, { month: 'long', year: 'numeric', timeZone: 'UTC' });
+const invoiceLink = (inv) => (/^https:\/\//.test(inv.hosted_invoice_url || '') ? inv.hosted_invoice_url : null);
+
+function signupBanners() {
+  // The Billing page has its own, larger prompt.
+  if (isOp() || !S.me || !S.me.payment_method_pending || route().page === 'billing') return [];
+  return [h('div', { class: 'banner warn', role: 'status' },
+    h('span', { class: 'grow' }, 'Add a payment method to lease Macs and launch VMs. You are billed monthly, only for what you use.'),
+    need('admin', h('button', { class: 'primary', onclick: (e) => addPaymentMethod(e.currentTarget) }, 'Add payment method')))];
+}
+
+/** Top of the Billing page: the tenant's payment method, or the operator's invoice run. */
+function billingTop() {
+  const d = invoicesData();
+  if (!d) return [];
+  const b = d.billing || {};
+  if (isOp()) return [opInvoicePanel(d, b)];
+  if (!b.payments) return [];
+  if (b.payment_method_pending) {
+    return [h('div', { class: 'panel pad section pm-panel' }, h('div', { class: 'row', style: { gap: '16px' } },
+      h('div', { class: 'grow', style: { minWidth: '240px' } }, h('h2', {}, 'Add a payment method to get started'),
+        h('p', { class: 'muted small', style: { marginTop: '4px' } }, 'You need one before you can lease a Mac or launch a VM. Card '
+          + 'details go straight to Stripe and never reach this site.')),
+      need('admin', h('button', { class: 'primary', onclick: (e) => addPaymentMethod(e.currentTarget) }, 'Add payment method'))))];
+  }
+  return [h('div', { class: 'panel pad section' }, h('div', { class: 'row', style: { gap: '16px' } },
+    h('div', { class: 'grow', style: { minWidth: '240px' } }, h('h2', {}, 'Payment method'),
+      h('p', { class: 'muted small', style: { marginTop: '4px' } }, b.has_payment_method
+        ? 'Saved with Stripe. Invoices are charged to it automatically.'
+        : 'None saved: invoices arrive by email and you pay each one online. Add one to pay automatically.')),
+    need('admin', h('button', { onclick: (e) => addPaymentMethod(e.currentTarget) }, b.has_payment_method ? 'Replace…' : 'Add payment method'))))];
+}
+
+/** Bottom of the tenant's Billing page: invoices with a Pay link. */
+function billingBottom() {
+  if (isOp()) return [];
+  const d = invoicesData();
+  if (!d || !(d.billing || {}).payments) return [];
+  const list = d.items || [];
+  return [h('div', { class: 'panel section' },
+    h('div', { class: 'row', style: { padding: '16px 18px 4px' } }, h('h2', { class: 'grow' }, 'Invoices')),
+    list.length ? h('div', { class: 'table-wrap' }, h('table', {},
+      h('thead', {}, h('tr', {}, h('th', {}, 'Month'), h('th', {}, 'Status'), h('th', { class: 'r' }, 'Amount'), h('th', { class: 'r' }, ''))),
+      h('tbody', {}, list.map((inv) => {
+        const link = invoiceLink(inv);
+        return h('tr', {},
+          h('td', {}, monthName(inv.month), inv.number ? h('span', { class: 'inv-num' }, inv.number) : null),
+          h('td', {}, status(invoiceStatus(inv))),
+          h('td', { class: 'r num' }, money(inv.amount, inv.currency)),
+          h('td', { class: 'r' }, link ? h('a', { class: 'btn small' + (inv.status === 'open' ? ' primary' : ''), href: link, target: '_blank',
+            rel: 'noopener noreferrer' }, inv.status === 'open' ? 'Pay' : 'View') : null));
+      }))))
+      : h('p', { class: 'muted small', style: { padding: '4px 18px 18px' } }, 'No invoices yet. Early each month, last month\'s '
+        + 'statement becomes an invoice here, with a link to pay it.'))];
+}
+
+function opInvoicePanel(d, b) {
+  const cur = new Date().toISOString().slice(0, 7);
+  const now = new Date();
+  const prev = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 1, 1)).toISOString().slice(0, 7);
+  const sel = S.billMonth || cur;
+  const month = sel < cur ? sel : prev;
+  if (!b.payments) {
+    return h('div', { class: 'panel pad section' }, h('h2', {}, 'Invoices'),
+      h('p', { class: 'muted small', style: { marginTop: '6px' } }, 'Stripe is not set up, so statements are not invoiced. Start '
+        + 'central with --stripe-secret-key-file and --stripe-webhook-secret-file to send monthly invoices (docs/mac-cloud-billing.md).'));
+  }
+  const tenants = S.data.tenants || [];
+  const billed = tenants.filter((t) => t.billing_enabled);
+  const recs = (d.items || []).filter((r) => r.month === month);
+  const ids = [...new Set([...billed.map((t) => t.id), ...recs.map((r) => r.tenant)])].sort();
+  const name = (id) => { const t = tenants.find((x) => x.id === id); return (t && t.display_name) || id; };
+  const head = h('div', { class: 'row', style: { padding: '16px 18px 8px', gap: '12px' } },
+    h('div', { class: 'grow' }, h('h2', {}, 'Invoices for ' + monthName(month), b.mode === 'test' ? [' ', h('span', { class: 'tag' }, 'Stripe test mode')] : null),
+      h('p', { class: 'muted small', style: { marginTop: '2px' } }, sel >= cur ? 'This month is still running, so this is last month.'
+        : 'Pick another month above to see its invoices.')),
+    h('button', { class: 'primary', disabled: !billed.length, title: billed.length ? null : 'No tenant has invoicing on',
+      onclick: () => runInvoices(month) }, 'Create invoices for ' + monthName(month).split(' ')[0]));
+  const notes = [];
+  if (!b.webhooks) notes.push(h('p', { class: 'note warn', style: { margin: '0 18px 12px' } }, 'No webhook secret is set, so payments '
+    + 'and saved cards do not show up here. Add the endpoint ' + location.origin + '/stripe/webhook in Stripe and start central with --stripe-webhook-secret-file.'));
+  const table = ids.length ? h('div', { class: 'table-wrap' }, h('table', {},
+    h('thead', {}, h('tr', {}, h('th', {}, 'Tenant'), h('th', {}, 'Status'), h('th', { class: 'r' }, 'Amount'), h('th', { class: 'hide-sm' }, 'Details'))),
+    h('tbody', {}, ids.map((id) => {
+      const r = recs.find((x) => x.tenant === id);
+      const link = r && invoiceLink(r);
+      return h('tr', { class: 'link', tabindex: '0', onclick: () => go('tenants', id), onkeydown: (e) => { if (e.key === 'Enter') go('tenants', id); } },
+        h('td', {}, h('b', {}, name(id)), name(id) !== id ? h('span', { class: 'sub' }, id) : null),
+        h('td', {}, status(r ? invoiceStatus(r) : { text: 'Not invoiced', cls: 'idle' })),
+        h('td', { class: 'r num' }, r ? money(r.amount, r.currency) : '–'),
+        h('td', { class: 'hide-sm small' }, r && r.last_error ? h('span', { style: { color: 'var(--bad)' } }, r.last_error)
+          : link ? h('a', { href: link, target: '_blank', rel: 'noopener noreferrer', onclick: (e) => e.stopPropagation() }, r.number || 'Open invoice')
+            : h('span', { class: 'muted' }, r ? '' : 'Nothing sent yet')));
+    }))))
+    : h('p', { class: 'muted small', style: { padding: '0 18px 18px' } }, 'No tenant has invoicing on. Accounts that sign up get it '
+      + 'automatically; turn it on for others in their details under Tenants.');
+  return h('div', { class: 'panel section' }, head, notes, table,
+    h('p', { class: 'hint', style: { padding: '0 18px 16px' } }, b.auto_invoice ? 'Invoices are also created automatically on the 1st of each month.'
+      : 'To invoice automatically on the 1st of each month, turn it on in Policy.'));
+}
+
+async function runInvoices(month) {
+  if (!await confirmDialog({ title: 'Create invoices for ' + monthName(month) + '?',
+    body: 'Every tenant with invoicing on gets a Stripe invoice for its ' + monthName(month) + ' statement. Stripe charges saved '
+      + 'payment methods and emails everyone else a link to pay. Running this again never bills anyone twice.',
+    confirm: 'Create invoices' })) return;
+  try {
+    const r = await api('POST', '/fleet/billing/invoices?month=' + enc(month));
+    const parts = [r.created && plural(r.created, 'invoice') + ' created', r.existing && r.existing + ' already invoiced',
+      r.skipped && r.skipped + ' with nothing to bill'].filter(Boolean);
+    toast(parts.length ? monthName(month) + ': ' + parts.join(', ') : 'Nobody to invoice for ' + monthName(month));
+    if (r.failed) {
+      const first = (r.results || []).find((x) => x.outcome === 'failed') || {};
+      toast(plural(r.failed, 'invoice') + ' failed (' + (first.tenant || '') + ': ' + (first.reason || 'unknown') + '). Run it again to retry.', true);
+    }
+  } catch (e) { toast(e.message, true); }
+  S.signup.invAt = 0;
+  loadInvoices();
+}
+
+/** Operator: the tenant's billing in its details. */
+function tenantBillingSection(t) {
+  const d = invoicesData();
+  const b = (d && d.billing) || {};
+  const cus = t.stripe_customer_id;
+  const pm = t.has_payment_method ? 'Saved' : t.payment_method_pending ? 'Required, not added yet' : 'None';
+  return h('section', {}, h('h3', {}, 'Billing'),
+    facts([
+      t.owner_email ? ['Owner', h('a', { href: 'mailto:' + t.owner_email }, t.owner_email)] : null,
+      ['Invoices', t.billing_enabled ? 'Monthly, through Stripe' : 'Off'],
+      ['Stripe customer', cus ? (b.dashboard ? h('a', { href: b.dashboard + 'customers/' + enc(cus), target: '_blank', rel: 'noopener noreferrer' }, cus)
+        : h('code', {}, cus)) : 'None yet'],
+      ['Payment method', pm],
+      t.self_service ? ['Account', 'Signed up on its own'] : null,
+      t.suspended_for_nonpayment ? ['Suspended', status({ text: 'Unpaid invoice', cls: 'bad' })] : null,
+    ]),
+    b.payments ? h('div', { class: 'row', style: { marginTop: '10px' } },
+      h('button', { class: 'plain', onclick: () => setTenantBilling(t, { enabled: !t.billing_enabled }) },
+        t.billing_enabled ? 'Turn invoicing off…' : 'Turn invoicing on'),
+      t.payment_method_pending ? h('button', { class: 'plain', onclick: () => setTenantBilling(t, { payment_method_required: false }) },
+        'Waive payment method') : null)
+      : d ? h('p', { class: 'hint' }, 'Stripe is not set up on this central.') : null);
+}
+
+async function setTenantBilling(t, body) {
+  if (body.enabled === false && !await confirmDialog({ title: 'Turn invoicing off for ' + (t.display_name || t.id) + '?',
+    body: 'Their usage is still metered and shown under Billing, but no Stripe invoices are created for them. Invoices already sent are not changed.',
+    confirm: 'Turn invoicing off' })) return;
+  const msg = body.enabled === true ? 'Invoicing on for ' + t.id + '; a Stripe customer was set up'
+    : body.enabled === false ? 'Invoicing off for ' + t.id : t.id + ' can lease and launch without a payment method';
+  await doAct('PUT', '/fleet/tenants/' + enc(t.id) + '/billing', msg, body, () => { S.signup.invAt = 0; });
+}
+
+/** Policy: who may sign up, and how invoicing runs. */
+function signupPolicyPanel() {
+  const p = S.policy;
+  const form = h('form', { class: 'panel pad stack section', onsubmit: async (e) => {
+    e.preventDefault();
+    const f = new FormData(e.target);
+    const domains = String(f.get('signup_allowed_email_domains') || '').split(/[\s,]+/)
+      .map((x) => x.trim().replace(/^@/, '').toLowerCase()).filter(Boolean);
+    const next = {
+      ...S.policy,
+      signup_enabled: f.has('signup_enabled'),
+      signup_require_payment_method: f.has('signup_require_payment_method'),
+      signup_allowed_email_domains: domains,
+      signup_default_quota: readQuota(f),
+      billing_auto_invoice: f.has('billing_auto_invoice'),
+      billing_suspend_unpaid: f.has('billing_suspend_unpaid'),
+      billing_suspend_after_days: Math.max(1, Number(f.get('billing_suspend_after_days')) || 14),
+    };
+    const btn = e.submitter;
+    btn.disabled = true;
+    try {
+      S.policy = await api('PUT', '/fleet/policy', { body: next });
+      S.signup.cfg = null;
+      toast(next.signup_enabled ? 'Saved. Sign-up is open at ' + location.origin + '/console' : 'Saved. Sign-up is closed.');
+      render(true);
+    } catch (err) { toast(err.message, true); btn.disabled = false; }
+  } },
+  h('h2', {}, 'Sign-up'),
+  check('signup_enabled', p.signup_enabled, 'Anyone can create an account',
+    'A “Create an account” link appears on the sign-in page. Each sign-up is a new tenant with the quota below. Central needs --token for this.'),
+  check('signup_require_payment_method', p.signup_require_payment_method, 'Require a payment method',
+    'New accounts save a card with Stripe before they can lease a Mac or launch a VM. Needs Stripe to be set up.'),
+  h('label', { class: 'field' }, h('span', {}, 'Only these email domains'),
+    h('input', { name: 'signup_allowed_email_domains', value: (p.signup_allowed_email_domains || []).join(', '), placeholder: 'Any domain',
+      autocomplete: 'off', spellcheck: 'false' }),
+    h('div', { class: 'hint' }, 'Separate several with commas, e.g. acme.io, example.com. Empty allows any address.')),
+  h('div', {}, h('span', { class: 'field-label' }, 'Quota for new accounts'),
+    h('p', { class: 'hint', style: { margin: '0 0 8px' } }, 'Raise it per tenant later. An empty field means no limit, which is risky for self-service.'),
+    quotaFields(p.signup_default_quota || {})),
+  h('h2', { style: { paddingTop: '12px' } }, 'Invoices'),
+  check('billing_auto_invoice', p.billing_auto_invoice, 'Invoice automatically on the 1st',
+    'Last month\'s statements become Stripe invoices for every tenant with invoicing on. You can always do it by hand on the Billing page.'),
+  check('billing_suspend_unpaid', p.billing_suspend_unpaid, 'Suspend tenants with unpaid invoices',
+    'A tenant is disabled once an invoice stays unpaid for the days below, and enabled again as soon as it is paid.'),
+  h('label', { class: 'field', style: { maxWidth: '260px' } }, h('span', {}, 'Suspend after'),
+    h('input', { name: 'billing_suspend_after_days', type: 'number', min: '1', max: '365', value: String(p.billing_suspend_after_days || 14) }),
+    h('div', { class: 'hint' }, 'Days after the invoice is sent.')),
+  h('div', { class: 'row', style: { paddingTop: '8px' } }, h('span', { class: 'grow' }),
+    h('button', { class: 'primary', type: 'submit' }, 'Save sign-up and invoices')));
+  return form;
+}
+
 // ---- toasts ---------------------------------------------------------------------------------------------------------
 
 function toast(msg, bad) {
@@ -2351,6 +4080,8 @@ function paletteCommands() {
   cmds.push({ label: 'Launch VM', hint: 'Action', run: () => launchSheet() });
   cmds.push({ label: isOp() ? 'Lease a Mac to a tenant' : 'Lease a Mac', hint: 'Action', run: () => leaseSheet() });
   cmds.push({ label: 'Create network', hint: 'Action', run: networkSheet });
+  cmds.push({ label: 'Create volume', hint: 'Action', run: () => volumeSheet() });
+  cmds.push({ label: 'Create warm pool', hint: 'Action', run: () => poolSheet() }); // ---- warmpool ----
   if (isOp()) {
     cmds.push({ label: 'Create tenant', hint: 'Action', run: tenantSheet });
     cmds.push({ label: 'Add image', hint: 'Action', run: () => imageSheet() });
@@ -2360,6 +4091,7 @@ function paletteCommands() {
   for (const v of S.data.vms) cmds.push({ label: v.name, hint: 'VM on ' + v.node, run: () => go('vms', vmKey(v)) });
   for (const m of macs()) cmds.push({ label: m.name, hint: 'Mac', run: () => go('macs', m.name) });
   for (const n of S.data.overlays) cmds.push({ label: n.name, hint: 'Network', run: () => go('networks', n.name) });
+  for (const x of S.data.volumes || []) cmds.push({ label: x.name, hint: 'Volume on ' + x.node, run: () => go('volumes', x.id) });
   for (const t of S.data.tenants || []) cmds.push({ label: t.display_name || t.id, hint: 'Tenant', run: () => go('tenants', t.id) });
   return cmds;
 }
@@ -2430,11 +4162,9 @@ document.addEventListener('click', (e) => {
 });
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !$('bell-panel').hidden) toggleBell(false); });
 $('refresh').addEventListener('click', () => refresh({ force: true }));
-$('signout').addEventListener('click', () => {
-  storage.del('sessionStorage', TOKEN_KEY);
-  location.hash = '';
-  location.reload();
-});
+$('signout').addEventListener('click', signOut);
+$('switch-team').addEventListener('click', switchSheet);
+$('signin-sso-btn').addEventListener('click', () => { location.href = '/auth/login'; });
 $('search').addEventListener('input', (e) => {
   S.query = e.target.value;
   if (route().page !== 'vms' && route().page !== 'activity') go('vms'); else render();
@@ -2444,6 +4174,7 @@ $('signin-form').addEventListener('submit', (e) => {
   const t = $('signin-token').value.trim();
   if (!t) return;
   storage.set('sessionStorage', TOKEN_KEY, t);
+  S.user = null; // a token wins over an SSO session
   $('signin-token').value = '';
   // Nothing from the previous token's session carries over.
   Object.assign(S, { role: null, me: null, data: null, error: null, usage: null, policy: null, exec: {}, tenantKeys: {}, billMonth: null, billView: null, billLoading: null, hooks: null, hooksLoading: null, logs: {}, query: '',
@@ -2455,4 +4186,4 @@ $('signin-form').addEventListener('submit', (e) => {
 window.addEventListener('scroll', () => $('bar').classList.toggle('scrolled', window.scrollY > 4), { passive: true });
 
 applyTheme();
-refresh({ force: true });
+ssoBoot().then(() => refresh({ force: true }));

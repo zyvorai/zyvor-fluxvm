@@ -1119,6 +1119,10 @@ enum FleetCommand {
         /// Delete the VM automatically after this long (`30m`, `8h`, `7d`).
         #[arg(long, value_parser = fleet_cli::parse_duration)]
         ttl: Option<u64>,
+        /// Attach a persistent volume (`fluxctl fleet volumes`), by name or id. Repeatable. The VM runs on the
+        /// volumes' Mac; Linux guests only.
+        #[arg(long)]
+        volume: Vec<String>,
     },
     /// Run a command in a VM, found by name or ID prefix. Output and exit code are the guest's.
     /// Example: `fluxctl fleet run ios-build-1 -- xcodebuild -version`.
@@ -1347,6 +1351,251 @@ enum FleetCommand {
         #[arg(trailing_var_arg = true, required = true)]
         command: Vec<String>,
     },
+    /// The busiest VMs right now: CPU (share of each VM's vCPUs), memory, disk and network from central's last
+    /// sample. Example: `fluxctl fleet top --sort mem -n 10`.
+    Top {
+        /// Order by `cpu` (default) or `mem`.
+        #[arg(long, default_value = "cpu", value_parser = ["cpu", "mem"])]
+        sort: String,
+        /// Show only the first N VMs.
+        #[arg(long, short = 'n')]
+        limit: Option<usize>,
+    },
+    /// A VM's CPU, memory, disk and network over the last hour (or `--range 6h|24h`), found by name or ID prefix.
+    /// Example: `fluxctl fleet metrics ios-build-1 --range 6h`.
+    Metrics {
+        vm: String,
+        #[arg(long, default_value = "1h", value_parser = ["1h", "6h", "24h"])]
+        range: String,
+    },
+    // ---- snapshots ----
+    /// Snapshot a VM (by name or ID prefix): a copy-on-write clone of its disk, in any state. `--memory` also saves
+    /// what is running (the VM must be running or paused), so a restore resumes it there.
+    /// Example: `fluxctl fleet snapshot ios-build-1 --name before-upgrade`.
+    Snapshot {
+        vm: String,
+        /// Snapshot name (default: `snap-<UTC time>`).
+        #[arg(long)]
+        name: Option<String>,
+        /// Save the guest's memory and device state too.
+        #[arg(long)]
+        memory: bool,
+    },
+    /// A VM's snapshots, newest first, with their size and whether they hold memory.
+    Snapshots { vm: String },
+    /// Put a VM back to a snapshot: it is stopped, its disk swapped back from the snapshot, and started again. Asks
+    /// first on a terminal.
+    Restore {
+        vm: String,
+        snapshot: String,
+        #[arg(long, short = 'y')]
+        yes: bool,
+    },
+    /// Delete one of a VM's snapshots. Asks first on a terminal.
+    SnapshotRm {
+        vm: String,
+        snapshot: String,
+        #[arg(long, short = 'y')]
+        yes: bool,
+    },
+    /// A new VM on the same Mac, from one of a VM's snapshots or (without `--snapshot`) from the stopped VM itself.
+    /// It counts against your quota. Example: `fluxctl fleet clone ios-build-1 ios-build-2 --snapshot before-upgrade`.
+    #[command(name = "clone")]
+    CloneVm {
+        vm: String,
+        new_name: String,
+        #[arg(long)]
+        snapshot: Option<String>,
+    },
+    // ---- volumes ----
+    /// Persistent volumes: disks that keep their data when the VM using them is deleted. A tenant sees its own.
+    Volumes {
+        /// Operator only: one tenant's volumes.
+        #[arg(long)]
+        tenant: Option<String>,
+    },
+    /// Create a persistent volume on one Mac. Example: `fluxctl fleet volume-create pg-data --size 50`, then
+    /// `fluxctl fleet launch --image debian-13 --volume pg-data`.
+    VolumeCreate {
+        name: String,
+        /// Size in GiB (1-2048). The file is sparse: space is used on the Mac as the guest writes.
+        #[arg(long)]
+        size: u64,
+        /// The Mac to put it on (default: one you lease, else the one with the most free memory).
+        #[arg(long)]
+        node: Option<String>,
+        /// Operator only: the tenant that owns it.
+        #[arg(long)]
+        tenant: Option<String>,
+    },
+    /// Delete a volume and its data (refused while a VM uses it). Asks first on a terminal.
+    VolumeRm {
+        name: String,
+        #[arg(long, short = 'y')]
+        yes: bool,
+    },
+    /// Grow a detached volume to `--size` GiB. Grow the file system in the guest afterwards.
+    VolumeResize {
+        name: String,
+        #[arg(long)]
+        size: u64,
+    },
+    // ---- tunnel ----
+    /// SSH into a VM through central, without reaching its Mac: runs your `ssh` with a ProxyCommand tunnel, so keys,
+    /// agents and ssh_config work as usual. The user is `-l`, `user@vm`, the image's `ssh_user`, or `admin`.
+    /// Example: `fluxctl fleet ssh web-1 -- -L 5432:localhost:5432`.
+    Ssh {
+        /// `[user@]vm`: a VM name, id or id prefix (or `node/id`).
+        vm: String,
+        /// Login name on the VM.
+        #[arg(short = 'l', long)]
+        user: Option<String>,
+        /// Passed to ssh after the host: options, or a command to run.
+        #[arg(last = true)]
+        args: Vec<String>,
+    },
+    /// Relay stdin/stdout through a tunnel to a port of a VM, for `ssh -o ProxyCommand="fluxctl fleet tunnel-stdio
+    /// <vm> %p"`. REST: `GET /fleet/vms/{node}/{id}/tunnel?port=N` (WebSocket).
+    TunnelStdio {
+        /// VM name, id or id prefix, or `node/id`.
+        vm: String,
+        port: u16,
+    },
+    /// Forward a local port to a port of a VM through central; every connection gets its own tunnel. Example:
+    /// `fluxctl fleet port-forward web-1 8080:80`.
+    PortForward {
+        vm: String,
+        /// `local:remote`, or `remote` for the same port on both ends.
+        ports: String,
+        /// Local address to listen on.
+        #[arg(long, default_value = "127.0.0.1")]
+        address: String,
+    },
+    /// Open tunnels (a tenant sees its own) and closing them. REST: `GET /fleet/tunnels`, `DELETE /fleet/tunnels/{id}`.
+    Tunnels {
+        #[command(subcommand)]
+        command: Option<fleet_cli::tunnel::TunnelsCommand>,
+    },
+    // ---- warmpool ----
+    /// Warm pools: VMs booted ahead of time, so a launch of their image starts in seconds. Shows ready and booting
+    /// VMs and the last day's claims. REST: `GET /fleet/pools`.
+    Pools,
+    /// Create a warm pool. Example: `fluxctl fleet pool-create ios-ci --image macos-27-xcode --min-ready 2`. A tenant's
+    /// pool runs on the Macs it leases; the operator's is shared (Macs nobody leases) unless `--tenant` is given.
+    PoolCreate {
+        name: String,
+        /// Catalog image (`fluxctl fleet images`).
+        #[arg(long)]
+        image: String,
+        /// VMs kept booted and idle.
+        #[arg(long, default_value_t = 1)]
+        min_ready: u32,
+        /// Most VMs from the pool alive at once, warm plus claimed (default: 4 x min-ready, at least min-ready + 4).
+        #[arg(long)]
+        max: Option<u32>,
+        /// vCPUs per VM (default: the image's).
+        #[arg(long)]
+        vcpus: Option<u32>,
+        /// Memory per VM: `16` or `16G` (GiB), `4096M` (default: the image's).
+        #[arg(long, value_parser = fleet_cli::warmpool::parse_memory)]
+        memory: Option<u64>,
+        /// Operator only: the tenant that owns the pool.
+        #[arg(long)]
+        tenant: Option<String>,
+        /// Only nodes with this label, as `key=value`. Repeatable.
+        #[arg(long = "node-selector", value_parser = parse_label)]
+        node_selector: Vec<(String, String)>,
+        /// Only this node. Repeatable.
+        #[arg(long = "node")]
+        nodes: Vec<String>,
+    },
+    /// Change how many VMs a pool keeps ready (`0` pauses it) or its maximum. REST: `PATCH /fleet/pools/{name}`.
+    PoolSet {
+        name: String,
+        #[arg(long)]
+        min_ready: Option<u32>,
+        #[arg(long)]
+        max: Option<u32>,
+    },
+    /// Delete a pool and its warm VMs; VMs already claimed keep running. Asks first on a terminal.
+    PoolRm {
+        name: String,
+        #[arg(long, short = 'y')]
+        yes: bool,
+    },
+    // ---- sso ----
+    /// The people who sign in to the console with SSO, and their roles. A tenant sees its own team; the operator
+    /// passes `--tenant`.
+    Members {
+        /// Operator only: whose members.
+        #[arg(long)]
+        tenant: Option<String>,
+    },
+    /// Invite a person by email: they can then sign in to the console with SSO. Roles: viewer (reads), member
+    /// (VMs and networks), admin (also leases, keys, members, budget, webhooks), owner (everything).
+    MemberAdd {
+        email: String,
+        #[arg(long, default_value = "member", value_parser = ["owner", "admin", "member", "viewer"])]
+        role: String,
+        /// Operator only: the tenant.
+        #[arg(long)]
+        tenant: Option<String>,
+    },
+    /// Remove a member; their console sessions end at once.
+    MemberRm {
+        email: String,
+        /// Operator only: the tenant.
+        #[arg(long)]
+        tenant: Option<String>,
+        /// Do not ask for confirmation.
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Change a member's role (owner, admin, member or viewer).
+    MemberRole {
+        email: String,
+        #[arg(value_parser = ["owner", "admin", "member", "viewer"])]
+        role: String,
+        /// Operator only: the tenant.
+        #[arg(long)]
+        tenant: Option<String>,
+    },
+    // ---- signup ----
+    /// Create an account on a central with self-service sign-up on; needs no token and prints the account's token
+    /// once. Example: `fluxctl fleet --central https://cloud.example.com signup acme --email you@acme.io`.
+    Signup {
+        /// Account ID: lowercase letters, digits and '-', used in URLs and network names.
+        tenant_id: String,
+        #[arg(long)]
+        email: String,
+        /// Name shown in the console (default: the ID).
+        #[arg(long)]
+        name: Option<String>,
+    },
+    /// Invoices with their status and a link to pay. A tenant sees its own; the operator everyone's.
+    Invoices {
+        /// `2026-09` (default: every month).
+        #[arg(long)]
+        month: Option<String>,
+        /// Operator only: one tenant.
+        #[arg(long)]
+        tenant: Option<String>,
+    },
+    /// Operator: turn a finished month's statements into Stripe invoices, one per tenant with billing on. Safe to run
+    /// again: a tenant already invoiced for the month is skipped.
+    InvoiceRun {
+        /// `2026-09`.
+        #[arg(long)]
+        month: String,
+        /// Only this tenant.
+        #[arg(long)]
+        tenant: Option<String>,
+        /// Do not ask.
+        #[arg(long, short = 'y')]
+        yes: bool,
+    },
+    /// A Stripe Checkout link to save a payment method for your invoices (tenant).
+    PaymentMethod,
 }
 
 #[derive(Subcommand)]
@@ -1502,6 +1751,9 @@ struct FleetQuotaArgs {
     max_memory_mib: Option<u64>,
     #[arg(long)]
     max_leased_hosts: Option<u32>,
+    /// Total GiB of persistent volumes.
+    #[arg(long)]
+    max_volume_gib: Option<u64>,
 }
 
 impl FleetQuotaArgs {
@@ -1510,6 +1762,7 @@ impl FleetQuotaArgs {
             && self.max_vcpus.is_none()
             && self.max_memory_mib.is_none()
             && self.max_leased_hosts.is_none()
+            && self.max_volume_gib.is_none()
     }
 
     fn to_json(&self) -> serde_json::Value {
@@ -1518,6 +1771,7 @@ impl FleetQuotaArgs {
             "max_vcpus": self.max_vcpus,
             "max_memory_mib": self.max_memory_mib,
             "max_leased_hosts": self.max_leased_hosts,
+            "max_volume_gib": self.max_volume_gib,
         })
     }
 }
