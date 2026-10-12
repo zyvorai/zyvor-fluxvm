@@ -308,6 +308,140 @@ pub(super) async fn tenant_node_view(
     }))
 }
 
+// ---- prices and billing -------------------------------------------------------------------------------------------
+
+/// `GET /fleet/prices`: the price list (tenants too, so they can see what things cost).
+pub(super) async fn get_prices(State(fleet): State<Fleet>) -> Json<crate::billing::PriceList> {
+    Json(fleet.tenancy.lock().await.prices.clone())
+}
+
+/// `PUT /fleet/prices` (operator). Running leases keep the price they started with.
+pub(super) async fn put_prices(
+    State(fleet): State<Fleet>,
+    Extension(caller): Extension<Caller>,
+    Json(prices): Json<crate::billing::PriceList>,
+) -> Result<Json<crate::billing::PriceList>, AppError> {
+    require_admin(&caller)?;
+    prices
+        .validate()
+        .map_err(|e| AppError(StatusCode::BAD_REQUEST, e))?;
+    let mut t = fleet.tenancy.lock().await;
+    t.prices = prices;
+    fleet.persist_tenancy(&t);
+    Ok(Json(t.prices.clone()))
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub(super) struct BillingQuery {
+    /// `2026-10`; default the current month.
+    #[serde(default)]
+    month: Option<String>,
+    /// Operator: one tenant (default: every tenant).
+    #[serde(default)]
+    tenant: Option<String>,
+    /// `json` (default) or `csv`.
+    #[serde(default)]
+    format: Option<String>,
+}
+
+/// `GET /fleet/billing[?month=YYYY-MM&tenant=T&format=csv]`: statements, one per tenant. A tenant gets its own.
+pub(super) async fn billing(
+    State(fleet): State<Fleet>,
+    Extension(caller): Extension<Caller>,
+    Query(q): Query<BillingQuery>,
+) -> Result<Response, AppError> {
+    let now = Utc::now();
+    let (from, to) = match &q.month {
+        Some(m) => crate::billing::parse_month(m).ok_or_else(|| {
+            AppError(
+                StatusCode::BAD_REQUEST,
+                format!("month must look like 2026-10, not '{m}'"),
+            )
+        })?,
+        None => crate::billing::month_of(now),
+    };
+    let t = fleet.tenancy.lock().await;
+    let ids: Vec<String> = match (caller.tenant(), &q.tenant) {
+        (Some(me), _) => vec![me.to_owned()],
+        (None, Some(one)) => vec![one.clone()],
+        (None, None) => t.tenants.keys().cloned().collect(),
+    };
+    let statements: Vec<crate::billing::Statement> = ids
+        .iter()
+        .filter(|id| t.tenants.contains_key(id.as_str()))
+        .map(|id| crate::billing::statement(&t, id, from, to, now))
+        .collect();
+    let currency = t.prices.currency.clone();
+    let free = t.prices.is_free();
+    drop(t);
+    Ok(match q.format.as_deref() {
+        Some("csv") => {
+            let mut csv = String::new();
+            for (i, s) in statements.iter().enumerate() {
+                let text = s.to_csv();
+                // One header for the whole file.
+                csv.push_str(if i == 0 {
+                    text.as_str()
+                } else {
+                    text.split_once('\n').map_or("", |(_, rest)| rest)
+                });
+            }
+            ([(header::CONTENT_TYPE, "text/csv; charset=utf-8")], csv).into_response()
+        }
+        None | Some("json") => Json(json!({
+            "from": from,
+            "to": to,
+            "currency": currency,
+            "prices_set": !free,
+            "statements": statements,
+        }))
+        .into_response(),
+        Some(other) => {
+            return Err(AppError(
+                StatusCode::BAD_REQUEST,
+                format!("unknown format '{other}' (json, csv)"),
+            ));
+        }
+    })
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct BudgetBody {
+    /// Monthly amount in the price list's currency; `null` or 0 removes it.
+    #[serde(default)]
+    monthly: Option<f64>,
+}
+
+/// `PUT /fleet/tenants/{id|me}/budget`: a tenant's monthly budget (warnings only).
+pub(super) async fn put_budget(
+    State(fleet): State<Fleet>,
+    Extension(caller): Extension<Caller>,
+    Path(id): Path<String>,
+    Json(b): Json<BudgetBody>,
+) -> Result<Json<Value>, AppError> {
+    let tenant = keys_owner(&caller, &id)?;
+    let monthly = match b.monthly {
+        None => None,
+        Some(m) if m == 0.0 => None,
+        Some(m) if m.is_finite() && m > 0.0 && m <= 1e9 => Some(m),
+        Some(_) => {
+            return Err(AppError(
+                StatusCode::BAD_REQUEST,
+                "a budget is a positive amount".into(),
+            ));
+        }
+    };
+    let mut t = fleet.tenancy.lock().await;
+    let rec = t
+        .tenants
+        .get_mut(&tenant)
+        .ok_or_else(|| not_found(format!("no tenant '{tenant}'")))?;
+    rec.monthly_budget = monthly;
+    let out = rec.public_json();
+    fleet.persist_tenancy(&t);
+    Ok(Json(out))
+}
+
 // ---- API keys -----------------------------------------------------------------------------------------------------
 
 /// The tenant a keys route is about: `me` is the calling tenant; another id needs the operator.
@@ -728,6 +862,10 @@ pub(super) async fn create_lease(
     let lease = t
         .create_lease(&tenant, &node.name, b.hours, Utc::now())
         .map_err(tenancy_error)?;
+    // The hourly price is fixed now, from the Mac's size and today's price list.
+    let lease = t
+        .price_lease(&lease.id, node.vcpus_total, node.memory_mib_total)
+        .unwrap_or(lease);
     fleet.persist_tenancy(&t);
     tracing::info!(lease = %lease.id, tenant = %tenant, node = %node.name, "lease created");
     Ok((
@@ -2207,5 +2345,113 @@ mod tests {
         assert_eq!((s, v["items"].as_array().unwrap().len()), (200, 1));
         let (s, _) = call(&app, "GET", "/fleet/tenants/acme/keys", &primary, json!({})).await;
         assert_eq!(s, 403);
+    }
+
+    #[tokio::test]
+    async fn prices_statements_and_budgets() {
+        let fleet = fleet_of(vec![mac("mac-a", 32_768, 0)], TenancyState::default());
+        let app = Router::new()
+            .route("/fleet/tenants", post(create_tenant))
+            .route("/fleet/leases", post(create_lease))
+            .route("/fleet/prices", get(get_prices).put(put_prices))
+            .route("/fleet/billing", get(billing))
+            .route("/fleet/tenants/{id}/budget", axum::routing::put(put_budget))
+            .layer(middleware::from_fn_with_state(
+                fleet.clone(),
+                auth_middleware,
+            ))
+            .with_state(fleet.clone());
+        let (_, v) = call(
+            &app,
+            "POST",
+            "/fleet/tenants",
+            "admin-token",
+            json!({"id": "acme"}),
+        )
+        .await;
+        let token = v["token"].as_str().unwrap().to_owned();
+
+        // Only the operator sets prices; nonsense is refused; tenants can read them.
+        let list = json!({"currency": "EUR", "mac_per_hour": 0.5,
+            "mac_classes": [{"name": "mini", "min_vcpus": 8, "per_hour": 1.25}]});
+        assert_eq!(
+            call(&app, "PUT", "/fleet/prices", &token, list.clone())
+                .await
+                .0,
+            403
+        );
+        assert_eq!(
+            call(
+                &app,
+                "PUT",
+                "/fleet/prices",
+                "admin-token",
+                json!({"currency": "euro"})
+            )
+            .await
+            .0,
+            400
+        );
+        assert_eq!(
+            call(&app, "PUT", "/fleet/prices", "admin-token", list)
+                .await
+                .0,
+            200
+        );
+        let (s, v) = call(&app, "GET", "/fleet/prices", &token, json!({})).await;
+        assert_eq!((s, v["currency"].as_str()), (200, Some("EUR")));
+
+        // A lease takes its class's price when it starts.
+        let (s, v) = call(&app, "POST", "/fleet/leases", &token, json!({})).await;
+        assert_eq!(s, 201, "{v}");
+        assert_eq!(v["lease"]["price_class"], "mini");
+        assert_eq!(v["lease"]["rate_micros"], 1_250_000);
+
+        // The tenant sees its statement; a budget shows up on it.
+        let (s, _) = call(
+            &app,
+            "PUT",
+            "/fleet/tenants/me/budget",
+            &token,
+            json!({"monthly": 500}),
+        )
+        .await;
+        assert_eq!(s, 200);
+        let (s, v) = call(&app, "GET", "/fleet/billing", &token, json!({})).await;
+        assert_eq!(s, 200, "{v}");
+        let st = &v["statements"][0];
+        assert_eq!(st["tenant"], "acme");
+        assert_eq!(st["currency"], "EUR");
+        assert!(
+            st["lines"][0]["description"]
+                .as_str()
+                .unwrap()
+                .contains("mac-a")
+        );
+        assert_eq!(st["budget"]["monthly"], 500.0);
+        let (s, _) = call(
+            &app,
+            "GET",
+            "/fleet/billing?month=2026-13",
+            &token,
+            json!({}),
+        )
+        .await;
+        assert_eq!(s, 400);
+        let (s, v) = call(
+            &app,
+            "GET",
+            "/fleet/billing?format=csv",
+            "admin-token",
+            json!({}),
+        )
+        .await;
+        assert_eq!(s, 200);
+        assert!(
+            v.as_str()
+                .unwrap()
+                .starts_with("tenant,from,to,description"),
+            "{v}"
+        );
     }
 }

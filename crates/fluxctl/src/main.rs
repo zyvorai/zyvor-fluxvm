@@ -1163,6 +1163,30 @@ enum FleetCommand {
         #[command(subcommand)]
         command: Option<FleetKeyCommand>,
     },
+    /// The price list. `--set FILE` (operator) replaces it with a JSON file shaped like `fleet prices -o json`.
+    Prices {
+        #[arg(long)]
+        set: Option<PathBuf>,
+    },
+    /// A month's statement: what leases and VMs cost. A tenant sees its own; the operator every tenant's.
+    Bill {
+        /// `2026-10` (default: this month).
+        #[arg(long)]
+        month: Option<String>,
+        /// Operator only: one tenant.
+        #[arg(long)]
+        tenant: Option<String>,
+        #[arg(long)]
+        csv: bool,
+    },
+    /// Show or set a tenant's monthly budget (a warning at 80% and when over; nothing is stopped).
+    Budget {
+        /// The monthly amount; `0` removes it. Omit to show the current budget and spend.
+        amount: Option<f64>,
+        /// Operator only: whose budget.
+        #[arg(long)]
+        tenant: Option<String>,
+    },
     /// The image catalog: list (default), add or remove (operator).
     Images {
         #[command(subcommand)]

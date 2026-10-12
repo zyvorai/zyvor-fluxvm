@@ -90,6 +90,7 @@ Next: fluxctl fleet run macos-27-xcode-1 -- sw_vers
 | `fleet screen VM [-f out.png]` | Save a picture of a VM's display |
 | `fleet events [--limit N]` | The activity log (with the API key used) |
 | `fleet keys [create\|revoke]` | A tenant's named API keys |
+| `fleet prices [--set FILE]`, `fleet bill`, `fleet budget [AMOUNT]` | Prices, monthly statements, budgets |
 | `fleet rm VM` | Delete a VM by name (asks on a terminal; `-y` to skip) |
 | `fleet vms`, `fleet nodes`, `fleet node M` | VMs and Macs, with macOS slots (`●○`) and when each lease can be released |
 | `fleet lease create\|list\|get\|release` | Leases (`create --hours 72 --min-vcpus 16 --nested`) |
@@ -100,6 +101,39 @@ Next: fluxctl fleet run macos-27-xcode-1 -- sw_vers
 
 A refused call shows central's own message plus a hint: a 401 says which flag carries the token, a 429 points at the
 quota, a standby names the leader, and an unreachable central says how to point `--central` at it.
+
+## Prices and billing
+
+The operator sets a price list; central turns metered use into a statement per tenant per month.
+
+```bash
+fluxctl fleet prices --set prices.json      # operator
+fluxctl fleet bill                          # this month; --month 2026-09, --csv for invoicing
+fluxctl fleet budget 500                    # a tenant's own monthly budget
+```
+
+```json
+{"currency": "USD",
+ "mac_classes": [{"name": "Mac mini", "min_vcpus": 8, "min_memory_gib": 16, "per_hour": 0.85},
+                 {"name": "Mac Studio", "min_vcpus": 20, "min_memory_gib": 64, "per_hour": 1.95}],
+ "mac_per_hour": 0.60,
+ "vm_per_hour": 0.01, "vcpu_per_hour": 0.02, "memory_gib_per_hour": 0.004, "macos_vm_per_hour": 0.10,
+ "charge_vms_on_leased_macs": false}
+```
+
+- **Leases** are priced by the Mac's class: the largest class (by minimum vCPUs and memory) the Mac meets, else
+  `mac_per_hour`. The price is fixed when the lease starts and stored on it, so a price change never re-prices a
+  running lease. A lease is billed for at least 24 hours, as before.
+- **VMs** are charged only on shared hosts (`vm_per_hour` + `vcpu_per_hour` × vCPUs + `memory_gib_per_hour` × GiB, plus
+  `macos_vm_per_hour` for a macOS guest), because a lease already covers everything on the Mac. Set
+  `charge_vms_on_leased_macs` to charge them there too.
+- **Statements** (`GET /fleet/billing?month=YYYY-MM[&tenant=T][&format=csv]`) have a line per lease and per kind of VM
+  time, a total, and for the current month a forecast at the same rate. Amounts are computed in millionths of the
+  currency and rounded to cents only for display, so lines add up exactly.
+- **Budgets** are the tenant's own (`PUT /fleet/tenants/me/budget {"monthly": 500}`): the console warns at 80% and when
+  over, and `fleet bill` says so. Nothing is stopped.
+- The console shows month-to-date spend on a tenant's Overview, a cost estimate when leasing a Mac or launching a VM,
+  a Billing page with statements and the budget, and (for the operator) the price list and every tenant's statement.
 
 ## API keys
 
@@ -281,6 +315,9 @@ capabilities, but not its address, labels or security report.
 | `GET /fleet/vms/{node}/{id}/screen[?max_width=N]` | tenant (own VMs), operator: the display as PNG; `409` when the VM has none |
 | `GET/POST /fleet/tenants/me/keys`, `DELETE /fleet/tenants/me/keys/{id or name}` | tenant (primary token for changes) |
 | `GET/POST /fleet/tenants/{id}/keys`, `DELETE …/keys/{key}` | operator |
+| `GET /fleet/prices` | tenant, operator; `PUT` operator |
+| `GET /fleet/billing[?month=YYYY-MM&tenant=T&format=csv]` | tenant (own), operator |
+| `PUT /fleet/tenants/me/budget`, `PUT /fleet/tenants/{id}/budget` | tenant (primary token or a full key), operator |
 | `GET /fleet/events[?limit=N&tenant=T]` | tenant (own actions), operator (all, or one tenant's) |
 | `PUT/DELETE /fleet/images/{name}` | operator |
 | `GET /fleet/nodes/{name}` | operator; tenant for a Mac it leases (size, capacity, Apple capabilities only) |

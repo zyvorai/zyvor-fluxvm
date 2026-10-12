@@ -662,6 +662,212 @@ async fn dispatch(
             Ok(())
         }
         FleetCommand::Keys { tenant, command } => keys(central, token, &out, tenant, command).await,
+        FleetCommand::Prices { set } => {
+            let v = match set {
+                Some(path) => {
+                    let body: Value = serde_json::from_slice(
+                        &std::fs::read(&path)
+                            .with_context(|| format!("reading {}", path.display()))?,
+                    )
+                    .with_context(|| format!("parsing {}", path.display()))?;
+                    call(central, token, Method::PUT, "/fleet/prices", Some(body)).await?
+                }
+                None => get(central, token, "/fleet/prices").await?,
+            };
+            if !out.human {
+                return out.json(&v);
+            }
+            let cur = s(&v, "currency").to_owned();
+            let price = |x: f64| format!("{x} {cur}/h");
+            let mut t = Table::new(vec!["WHAT", "PRICE"]);
+            for cls in v
+                .get("mac_classes")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+            {
+                t.row(vec![
+                    c(format!(
+                        "Leased Mac, {} ({}+ vCPUs, {}+ GiB)",
+                        s(cls, "name"),
+                        u(cls, "min_vcpus"),
+                        u(cls, "min_memory_gib")
+                    )),
+                    c(price(
+                        cls.get("per_hour").and_then(Value::as_f64).unwrap_or(0.0),
+                    )),
+                ]);
+            }
+            for (k, label) in [
+                ("mac_per_hour", "Leased Mac, any other"),
+                ("vm_per_hour", "VM on a shared host"),
+                ("vcpu_per_hour", "vCPU on a shared host"),
+                ("memory_gib_per_hour", "GiB of memory on a shared host"),
+                ("macos_vm_per_hour", "macOS guest on a shared host (extra)"),
+            ] {
+                let x = v.get(k).and_then(Value::as_f64).unwrap_or(0.0);
+                if x > 0.0 {
+                    t.row(vec![c(label), c(price(x))]);
+                }
+            }
+            if t.rows.is_empty() {
+                println!("No prices are set: nothing is charged.");
+            } else {
+                t.print(&out);
+            }
+            Ok(())
+        }
+        FleetCommand::Bill { month, tenant, csv } => {
+            let q = query(&[
+                ("month", month),
+                ("tenant", tenant),
+                ("format", csv.then(|| "csv".to_string())),
+            ]);
+            let v = get(central, token, &format!("/fleet/billing{q}")).await?;
+            if let Value::String(text) = &v {
+                print!("{text}");
+                return Ok(());
+            }
+            if !out.human {
+                return out.json(&v);
+            }
+            if v.get("prices_set").and_then(Value::as_bool) == Some(false) {
+                println!("No prices are set, so nothing is charged.");
+                return Ok(());
+            }
+            for st in v
+                .get("statements")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+            {
+                let lines = st
+                    .get("lines")
+                    .and_then(Value::as_array)
+                    .cloned()
+                    .unwrap_or_default();
+                if lines.is_empty()
+                    && v.get("statements")
+                        .and_then(Value::as_array)
+                        .is_some_and(|a| a.len() > 1)
+                {
+                    continue;
+                }
+                let cur = s(st, "currency");
+                println!(
+                    "{}  {}",
+                    out.bold(s(st, "tenant")),
+                    out.dim(format!(
+                        "{} to {}",
+                        &s(st, "from")[..10.min(s(st, "from").len())],
+                        &s(st, "to")[..10.min(s(st, "to").len())]
+                    ))
+                );
+                let mut t = Table::new(vec!["ITEM", "QUANTITY", "AMOUNT"]);
+                for l in &lines {
+                    t.row(vec![
+                        c(s(l, "description")),
+                        ct(
+                            format!(
+                                "{} {}",
+                                l.get("quantity").and_then(Value::as_f64).unwrap_or(0.0),
+                                s(l, "unit")
+                            ),
+                            Tone::Dim,
+                        ),
+                        c(format!(
+                            "{:.2} {cur}",
+                            l.get("amount").and_then(Value::as_f64).unwrap_or(0.0)
+                        )),
+                    ]);
+                }
+                t.row(vec![
+                    ct("Total", Tone::Plain),
+                    c(""),
+                    ct(
+                        format!(
+                            "{:.2} {cur}",
+                            st.get("total").and_then(Value::as_f64).unwrap_or(0.0)
+                        ),
+                        Tone::Ok,
+                    ),
+                ]);
+                t.print(&out);
+                if let Some(f) = st.get("forecast").and_then(Value::as_f64) {
+                    println!(
+                        "{}",
+                        out.dim(format!(
+                            "About {f:.2} {cur} by the end of the month at this rate."
+                        ))
+                    );
+                }
+                if let Some(b) = st.get("budget") {
+                    let used = b.get("used").and_then(Value::as_f64).unwrap_or(0.0);
+                    let msg = format!(
+                        "Budget {:.2} {cur}: {:.0}% used",
+                        b.get("monthly").and_then(Value::as_f64).unwrap_or(0.0),
+                        used * 100.0
+                    );
+                    match s(b, "state") {
+                        "over" => println!("{}", out.red(msg + ", over budget")),
+                        "near" => println!("{}", out.yellow(msg)),
+                        _ => println!("{}", out.dim(msg)),
+                    }
+                }
+                println!();
+            }
+            Ok(())
+        }
+        FleetCommand::Budget { amount, tenant } => {
+            let who = tenant.unwrap_or_else(|| "me".to_owned());
+            if let Some(a) = amount {
+                let monthly = if a > 0.0 { Some(a) } else { None };
+                let body = json!({ "monthly": monthly });
+                let v = call(
+                    central,
+                    token,
+                    Method::PUT,
+                    &format!("/fleet/tenants/{}/budget", esc(&who)),
+                    Some(body),
+                )
+                .await?;
+                if !out.human {
+                    return out.json(&v);
+                }
+                if a > 0.0 {
+                    out.done(format!(
+                        "Monthly budget set to {a:.2}. You get a warning at 80% and when over."
+                    ));
+                } else {
+                    out.done("Monthly budget removed.");
+                }
+                return Ok(());
+            }
+            let q = if who == "me" {
+                String::new()
+            } else {
+                format!("?tenant={}", esc(&who))
+            };
+            let v = get(central, token, &format!("/fleet/billing{q}")).await?;
+            let st = v.pointer("/statements/0").cloned().unwrap_or_default();
+            if !out.human {
+                return out.json(&st);
+            }
+            match st.get("budget") {
+                Some(b) => println!(
+                    "{:.2} {} spent of a {:.2} budget this month ({:.0}%).",
+                    st.get("total").and_then(Value::as_f64).unwrap_or(0.0),
+                    s(&st, "currency"),
+                    b.get("monthly").and_then(Value::as_f64).unwrap_or(0.0),
+                    b.get("used").and_then(Value::as_f64).unwrap_or(0.0) * 100.0
+                ),
+                None => {
+                    println!("No monthly budget.");
+                    out.next("fluxctl fleet budget 500");
+                }
+            }
+            Ok(())
+        }
         FleetCommand::Images { command } => images(central, token, &out, command).await,
         FleetCommand::Networks { command } => networks(central, token, &out, command).await,
         FleetCommand::Tenant { command } => tenant(central, token, &out, command).await,

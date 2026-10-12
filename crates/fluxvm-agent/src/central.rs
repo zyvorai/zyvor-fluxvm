@@ -422,6 +422,8 @@ fn tenant_route_allowed(method: &axum::http::Method, path: &str) -> bool {
         ["fleet", "capacity"] | ["fleet", "usage"] | ["fleet", "tenants", "me"] => get,
         ["fleet", "tenants", "me", "keys"] => get || post,
         ["fleet", "tenants", "me", "keys", _] => delete,
+        ["fleet", "prices"] | ["fleet", "billing"] => get,
+        ["fleet", "tenants", "me", "budget"] => *method == Method::PUT,
         ["fleet", "vms"] | ["fleet", "leases"] => get || post,
         ["fleet", "vms", _, _] => delete,
         ["fleet", "vms", _, _, "exec"] => post,
@@ -620,6 +622,15 @@ pub fn router_with_handle(cfg: CentralConfig) -> (Router, Option<HaHandle>) {
             get(cloud::get_tenant)
                 .patch(cloud::update_tenant)
                 .delete(cloud::delete_tenant),
+        )
+        .route(
+            "/fleet/prices",
+            get(cloud::get_prices).put(cloud::put_prices),
+        )
+        .route("/fleet/billing", get(cloud::billing))
+        .route(
+            "/fleet/tenants/{id}/budget",
+            axum::routing::put(cloud::put_budget),
         )
         .route(
             "/fleet/tenants/{id}/keys",

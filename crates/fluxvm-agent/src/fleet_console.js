@@ -40,6 +40,34 @@ const enc = encodeURIComponent;
 
 const gib = (mib) => (mib === undefined || mib === null ? '–'
   : (mib / 1024).toFixed(mib % 1024 ? 1 : 0).replace(/\.0$/, '') + ' GiB');
+/** An amount in the price list's currency. */
+function money(n, cur, price) {
+  const c = cur || (S.data && S.data.prices && S.data.prices.currency) || 'USD';
+  // Unit prices keep their small fractions ($0.004 per GiB-hour); amounts round to cents.
+  const opts = price ? { style: 'currency', currency: c, maximumFractionDigits: 4 } : { style: 'currency', currency: c };
+  try { return new Intl.NumberFormat(undefined, opts).format(n || 0); } catch (_) { return (n || 0).toFixed(price ? 4 : 2) + ' ' + c; }
+}
+const pricesSet = () => !!(S.data && S.data.bill && S.data.bill.prices_set);
+/** Hourly price of a Mac of this size, from the price list (the largest class it meets). */
+function macRate(vcpus, memMib) {
+  const p = S.data.prices || {};
+  const fits = (p.mac_classes || []).filter((c) => vcpus >= (c.min_vcpus || 0) && memMib >= (c.min_memory_gib || 0) * 1024);
+  fits.sort((a, b) => (b.min_vcpus - a.min_vcpus) || (b.min_memory_gib - a.min_memory_gib));
+  return fits.length ? { rate: fits[0].per_hour, cls: fits[0].name } : { rate: p.mac_per_hour || 0, cls: null };
+}
+/** The lowest hourly price of a Mac with at least this size. */
+function macRateFrom(minVcpus, minMemMib) {
+  const p = S.data.prices || {};
+  const rates = (p.mac_classes || []).filter((c) => (c.min_vcpus || 0) >= minVcpus || (c.min_memory_gib || 0) * 1024 >= minMemMib).map((c) => c.per_hour);
+  if (!rates.length) rates.push(...(p.mac_classes || []).map((c) => c.per_hour), p.mac_per_hour || 0);
+  return Math.min(...rates.filter((r) => r > 0), Infinity);
+}
+function vmRate(vcpus, memMib, macos) {
+  const p = S.data.prices || {};
+  return (p.vm_per_hour || 0) + (p.vcpu_per_hour || 0) * vcpus + (p.memory_gib_per_hour || 0) * memMib / 1024 + (macos ? p.macos_vm_per_hour || 0 : 0);
+}
+const myStatement = () => (S.data.bill && (S.data.bill.statements || [])[0]) || null;
+
 const plural = (n, one, many) => n + ' ' + (n === 1 ? one : (many || one + 's'));
 const rtf = new Intl.RelativeTimeFormat(undefined, { numeric: 'auto' });
 function rel(t) {
@@ -97,6 +125,8 @@ const S = {
   query: '',
   exec: {}, // vm key -> { draft, log: [] }
   tenantKeys: {}, // operator: tenant id -> its API keys, loaded when its details open
+  billMonth: null,
+  billView: null,
   lastViewKey: '',
   lastInspKey: '',
 };
@@ -179,7 +209,11 @@ async function load() {
     soft(api('GET', '/fleet/overlays'), { items: [] }),
     soft(api('GET', '/fleet/images'), { items: [] }),
   ]);
-  const events = await soft(api('GET', '/fleet/events?limit=300'), { items: [] });
+  const [events, prices, bill] = await Promise.all([
+    soft(api('GET', '/fleet/events?limit=300'), { items: [] }),
+    soft(api('GET', '/fleet/prices'), null),
+    soft(api('GET', '/fleet/billing'), null),
+  ]);
   const d = {
     leases: (leases.items || []).sort((a, b) => (a.state === b.state ? b.started_at.localeCompare(a.started_at)
       : a.state === 'active' ? -1 : 1)),
@@ -187,6 +221,8 @@ async function load() {
     unreachable: vms.unreachable_nodes || [],
     overlays: overlays.items || [],
     events: events.items || [],
+    prices,
+    bill,
     images: (images.items || []).sort((a, b) => (a.guest_os === b.guest_os ? a.name.localeCompare(b.name) : a.guest_os === 'macos' ? -1 : 1)),
     leasedNodes: {},
     drains: {},
@@ -286,6 +322,7 @@ const PAGES = () => [
   { id: 'images', label: 'Images', count: () => S.data.images.length },
   { sep: true },
   ...(isOp() ? [{ id: 'tenants', label: 'Tenants', count: () => (S.data.tenants || []).length }] : []),
+  { id: 'billing', label: 'Billing' },
   { id: 'usage', label: 'Usage' },
   { id: 'activity', label: 'Activity' },
   ...(isOp() ? [] : [{ id: 'keys', label: 'API keys', count: () => (S.data.keys || []).length }]),
@@ -311,7 +348,7 @@ function render(force) {
   renderBanners();
   tick();
 
-  const viewKey = JSON.stringify([page.id, r.id, S.data, S.me, S.usage, S.usageDays, S.policy, S.vmFilter, S.query]);
+  const viewKey = JSON.stringify([page.id, r.id, S.data, S.me, S.usage, S.usageDays, S.policy, S.vmFilter, S.query, S.billMonth, S.billView]);
   if (force || viewKey !== S.lastViewKey) {
     S.lastViewKey = viewKey;
     const view = $('view');
@@ -601,6 +638,48 @@ const VIEWS = {
     return out;
   },
 
+  billing() {
+    const cur = new Date().toISOString().slice(0, 7);
+    const month = S.billMonth || cur;
+    const data = month === cur ? S.data.bill : (S.billView && S.billView.month === month ? S.billView.data : null);
+    if (!data) {
+      if (S.billLoading !== month) loadBill(month);
+      return [pageHead('Billing'), h('p', { class: 'muted' }, 'Loading…')];
+    }
+    const b = { month, data };
+    const months = [];
+    const d = new Date();
+    for (let i = 0; i < 4; i++) {
+      const m = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() - i, 1));
+      months.push(m.toISOString().slice(0, 7));
+    }
+    const label = (m) => new Date(m + '-01T00:00:00Z').toLocaleDateString(undefined, { month: 'long', year: 'numeric', timeZone: 'UTC' });
+    const pick = h('select', { 'aria-label': 'Month', style: { width: 'auto' }, onchange: (e) => { S.billMonth = e.target.value; render(); } },
+      months.map((m) => h('option', { value: m, selected: m === month }, label(m))));
+    const out = [pageHead('Billing', isOp() ? 'What each tenant owes for the month, from the price list. A lease keeps the price it started with.'
+      : 'What your Macs and VMs cost this month. A lease is billed for at least 24 hours.', pick,
+    h('button', { onclick: downloadBill }, 'Download CSV'))];
+    if (isOp()) out.push(priceListPanel());
+    if (!b.data.prices_set) {
+      out.push(empty('No prices yet', isOp() ? 'Set a price list to turn usage into statements.' : 'Your operator has not set prices, so nothing is charged.',
+        isOp() ? h('button', { class: 'primary', onclick: priceSheet }, 'Set prices') : null));
+      return out;
+    }
+    const stmts = b.data.statements || [];
+    if (isOp()) {
+      const total = stmts.reduce((a, x) => a + x.total, 0);
+      out.push(h('div', { class: 'meters section' },
+        h('div', { class: 'panel meter' }, h('div', { class: 'muted small' }, 'Billed in ' + label(b.month)), h('div', { class: 'value' }, money(total, b.data.currency))),
+        h('div', { class: 'panel meter' }, h('div', { class: 'muted small' }, 'Tenants with charges'), h('div', { class: 'value' }, stmts.filter((x) => x.total > 0).length))));
+    }
+    for (const st of stmts) {
+      if (isOp() && !st.lines.length) continue;
+      out.push(statementPanel(st));
+    }
+    if (!isOp()) out.push(budgetPanel(stmts[0]));
+    return out;
+  },
+
   keys() {
     const list = S.data.keys || [];
     const out = [pageHead('API keys', 'Give each person, CI system or tool its own key, so you can see who did what and revoke '
@@ -691,7 +770,21 @@ function tenantOverview() {
         step(hasNet, 3, 'Connect your VMs', 'Optional: a private network across your Macs.',
           h('button', { onclick: networkSheet }, 'Create network')))));
   }
+  const st = myStatement();
+  if (st && st.budget && st.budget.state !== 'ok') {
+    out.push(h('div', { class: 'note ' + (st.budget.state === 'over' ? 'warn' : ''), style: { marginBottom: '16px' } },
+      st.budget.state === 'over' ? 'You are over this month\'s budget of ' + money(st.budget.monthly, st.currency) + '. '
+        : 'You have used ' + Math.round(st.budget.used * 100) + '% of this month\'s budget of ' + money(st.budget.monthly, st.currency) + '. ',
+      h('a', { href: '#/billing' }, 'See billing')));
+  }
   out.push(h('div', { class: 'section meters' },
+    pricesSet() && st ? h('a', { class: 'panel meter', href: '#/billing', style: { color: 'inherit', textDecoration: 'none' } },
+      h('div', { class: 'muted small' }, 'Spent this month'),
+      h('div', { class: 'value' }, money(st.total, st.currency)),
+      st.budget ? h('div', { class: 'track' + (st.budget.used >= 1 ? ' bad' : st.budget.used >= 0.8 ? ' warn' : '') },
+        h('i', { style: { width: Math.min(100, st.budget.used * 100).toFixed(1) + '%' } })) : null,
+      h('div', { class: 'small muted', style: { marginTop: '6px' } }, st.budget ? 'of ' + money(st.budget.monthly, st.currency) + ' budget'
+        : st.forecast !== undefined && st.forecast !== null ? 'About ' + money(st.forecast, st.currency) + ' by month end' : '')) : null,
     meter('Macs leased', u.leased_hosts || 0, q.max_leased_hosts),
     meter('VMs', u.vms || 0, q.max_vms),
     meter('vCPUs', u.vcpus || 0, q.max_vcpus),
@@ -989,6 +1082,139 @@ function vmInspector(v) {
     h('p', { class: 'small muted', style: { marginBottom: '10px' } }, 'Stops the VM and deletes its disk. This cannot be undone.'),
     h('button', { class: 'danger', onclick: () => deleteVm(v) }, 'Delete VM…')));
   return out;
+}
+
+// ---- billing --------------------------------------------------------------------------------------------------------
+
+async function loadBill(month) {
+  S.billLoading = month;
+  try {
+    const data = await api('GET', '/fleet/billing?month=' + enc(month));
+    S.billView = { month, data };
+  } catch (e) { toast(e.message, true); }
+  S.billLoading = null;
+  render();
+}
+
+async function downloadBill() {
+  try {
+    const month = S.billMonth || new Date().toISOString().slice(0, 7);
+    const csv = await api('GET', '/fleet/billing?format=csv&month=' + enc(month), { text: true });
+    const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv' }));
+    const a = h('a', { href: url, download: 'fluxvm-billing-' + month + '.csv' });
+    document.body.append(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 60000);
+    toast('Downloaded the statement for ' + month);
+  } catch (e) { toast(e.message, true); }
+}
+
+function statementPanel(st) {
+  const t = (S.data.tenants || []).find((x) => x.id === st.tenant);
+  return h('div', { class: 'panel section' },
+    h('div', { class: 'row', style: { padding: '16px 18px 4px' } },
+      h('h2', { class: 'grow' }, isOp() ? (t && t.display_name) || st.tenant : 'Statement'),
+      h('span', { class: 'muted small' }, st.forecast !== undefined && st.forecast !== null ? 'About ' + money(st.forecast, st.currency) + ' by month end' : '')),
+    h('div', { class: 'table-wrap' }, h('table', {},
+      h('thead', {}, h('tr', {}, h('th', {}, 'Item'), h('th', { class: 'r' }, 'Quantity'), h('th', { class: 'r hide-sm' }, 'Price'), h('th', { class: 'r' }, 'Amount'))),
+      h('tbody', {}, st.lines.length ? st.lines.map((l) => h('tr', {},
+        h('td', {}, l.description),
+        h('td', { class: 'r num' }, l.quantity.toLocaleString() + ' ' + l.unit),
+        h('td', { class: 'r num hide-sm muted' }, money(l.unit_price, st.currency, true) + ' / ' + l.unit.replace(/s$/, '').replace('hour', 'h')),
+        h('td', { class: 'r num' }, money(l.amount, st.currency))))
+        : h('tr', {}, h('td', { colspan: '4', class: 'muted' }, 'Nothing charged in this month.')),
+      h('tr', {}, h('td', { colspan: '3' }, h('b', {}, 'Total')), h('td', { class: 'r num' }, h('b', {}, money(st.total, st.currency))))))));
+}
+
+function budgetPanel(st) {
+  const b = st && st.budget;
+  return h('form', { class: 'panel pad section stack', onsubmit: async (e) => {
+    e.preventDefault();
+    const v = Number(new FormData(e.target).get('monthly') || 0);
+    try {
+      await api('PUT', '/fleet/tenants/me/budget', { body: { monthly: v > 0 ? v : null } });
+      toast(v > 0 ? 'Budget set to ' + money(v, st && st.currency) + ' a month' : 'Budget removed');
+      refresh({ force: true });
+    } catch (err) { toast(err.message, true); }
+  } },
+  h('h2', {}, 'Monthly budget'),
+  h('p', { class: 'muted small' }, 'You get a warning on the Overview at 80% and when you go over. Nothing is stopped.'),
+  b ? h('div', {}, h('div', { class: 'small' }, Math.round(b.used * 100) + '% used'),
+    h('div', { class: 'track' + (b.used >= 1 ? ' bad' : b.used >= 0.8 ? ' warn' : '') }, h('i', { style: { width: Math.min(100, b.used * 100).toFixed(1) + '%' } }))) : null,
+  h('div', { class: 'row' }, h('label', { class: 'field grow', style: { maxWidth: '260px' } }, h('span', {}, 'Budget per month (' + ((st && st.currency) || 'USD') + ')'),
+    h('input', { name: 'monthly', type: 'number', min: '0', step: '1', value: b ? String(b.monthly) : '', placeholder: 'No budget' })),
+  h('button', { type: 'submit', style: { alignSelf: 'flex-end' } }, 'Save budget')));
+}
+
+function priceListPanel() {
+  const p = S.data.prices || {};
+  const cur = p.currency || 'USD';
+  const rows = [
+    ...(p.mac_classes || []).map((c) => ['Leased Mac, ' + c.name + ' (' + (c.min_vcpus || 0) + '+ vCPUs, ' + (c.min_memory_gib || 0) + '+ GiB)', c.per_hour]),
+    ['Leased Mac, any other', p.mac_per_hour],
+    ['VM on a shared host', p.vm_per_hour], ['vCPU on a shared host', p.vcpu_per_hour],
+    ['GiB of memory on a shared host', p.memory_gib_per_hour], ['macOS guest on a shared host (extra)', p.macos_vm_per_hour],
+  ].filter(([, v]) => v);
+  return h('div', { class: 'panel pad' },
+    h('div', { class: 'row' }, h('h2', { class: 'grow' }, 'Price list'), h('button', { onclick: priceSheet }, 'Edit prices')),
+    rows.length ? h('dl', { class: 'facts', style: { marginTop: '12px' } }, rows.map(([k, v]) => [h('dt', {}, k), h('dd', { class: 'num' }, money(v, cur, true) + ' an hour')]))
+      : h('p', { class: 'muted small', style: { marginTop: '8px' } }, 'Everything is free until you set prices.'),
+    p.charge_vms_on_leased_macs ? h('p', { class: 'hint' }, 'VMs on leased Macs are charged too.') : null);
+}
+
+function priceSheet() {
+  const p = JSON.parse(JSON.stringify(S.data.prices || {}));
+  const classes = p.mac_classes && p.mac_classes.length ? p.mac_classes : [{ name: 'Mac mini', min_vcpus: 8, min_memory_gib: 16, per_hour: 0 }, { name: 'Mac Studio', min_vcpus: 20, min_memory_gib: 64, per_hour: 0 }];
+  const list = h('div', { class: 'stack' });
+  const classRow = (c) => {
+    const row = h('div', { class: 'row', 'data-class': '1' },
+      h('input', { name: 'c_name', value: c.name || '', placeholder: 'Class name', 'aria-label': 'Class name', style: { flex: '2 1 120px' } }),
+      h('input', { name: 'c_vcpus', type: 'number', min: '0', value: String(c.min_vcpus || 0), 'aria-label': 'Minimum vCPUs', title: 'Minimum vCPUs', style: { flex: '1 1 60px' } }),
+      h('input', { name: 'c_mem', type: 'number', min: '0', value: String(c.min_memory_gib || 0), 'aria-label': 'Minimum memory GiB', title: 'Minimum memory (GiB)', style: { flex: '1 1 60px' } }),
+      h('input', { name: 'c_price', type: 'number', min: '0', step: '0.01', value: String(c.per_hour || 0), 'aria-label': 'Price per hour', title: 'Price per hour', style: { flex: '1 1 80px' } }),
+      h('button', { type: 'button', class: 'icon', 'aria-label': 'Remove class', onclick: () => row.remove() }, 'Remove'));
+    return row;
+  };
+  list.append(h('div', { class: 'row small muted', 'aria-hidden': 'true' },
+    h('span', { style: { flex: '2 1 120px' } }, 'Class'), h('span', { style: { flex: '1 1 60px' } }, 'Min vCPUs'),
+    h('span', { style: { flex: '1 1 60px' } }, 'Min GiB'), h('span', { style: { flex: '1 1 80px' } }, 'Per hour'),
+    h('span', { style: { width: '62px' } })));
+  classes.forEach((c) => list.append(classRow(c)));
+  const num = (name, label, value, hint) => h('label', { class: 'field' }, h('span', {}, label),
+    h('input', { name, type: 'number', min: '0', step: '0.001', value: String(value || 0) }), hint ? h('div', { class: 'hint' }, hint) : null);
+  openSheet({
+    title: 'Price list', intro: 'Prices per hour. New leases take the price of their Mac\'s class when they start; running leases keep theirs.',
+    wide: true,
+    body: [
+      h('label', { class: 'field', style: { maxWidth: '160px' } }, h('span', {}, 'Currency'), h('input', { name: 'currency', value: p.currency || 'USD', pattern: '[A-Z]{3}', maxlength: '3' })),
+      h('div', {}, h('span', { class: 'field-label' }, 'Leased Macs by class'),
+        h('p', { class: 'hint', style: { margin: '0 0 8px' } }, 'A Mac takes the largest class it meets.'),
+        list, h('button', { type: 'button', class: 'plain', onclick: () => list.append(classRow({})) }, 'Add class')),
+      num('mac_per_hour', 'A leased Mac in no class', p.mac_per_hour),
+      h('div', { class: 'grid2' }, num('vm_per_hour', 'Each VM on a shared host', p.vm_per_hour), num('vcpu_per_hour', 'Each vCPU', p.vcpu_per_hour),
+        num('memory_gib_per_hour', 'Each GiB of memory', p.memory_gib_per_hour), num('macos_vm_per_hour', 'Extra for a macOS guest', p.macos_vm_per_hour)),
+      check('charge_vms_on_leased_macs', !!p.charge_vms_on_leased_macs, 'Also charge VMs on leased Macs', 'Normally the lease covers everything that runs on the Mac.'),
+    ],
+    submit: 'Save prices',
+    onSubmit: async (f, form) => {
+      const body = {
+        currency: String(f.get('currency') || 'USD').toUpperCase(),
+        mac_classes: [...form.querySelectorAll('[data-class]')].map((r) => ({
+          name: r.querySelector('[name=c_name]').value.trim(),
+          min_vcpus: Number(r.querySelector('[name=c_vcpus]').value || 0),
+          min_memory_gib: Number(r.querySelector('[name=c_mem]').value || 0),
+          per_hour: Number(r.querySelector('[name=c_price]').value || 0),
+        })).filter((c) => c.name),
+        charge_vms_on_leased_macs: f.has('charge_vms_on_leased_macs'),
+      };
+      for (const k of ['mac_per_hour', 'vm_per_hour', 'vcpu_per_hour', 'memory_gib_per_hour', 'macos_vm_per_hour']) body[k] = Number(f.get(k) || 0);
+      await api('PUT', '/fleet/prices', { body });
+      toast('Prices saved');
+      S.billView = null;
+      await refresh({ force: true });
+    },
+  });
 }
 
 // ---- API keys -------------------------------------------------------------------------------------------------------
@@ -1450,8 +1676,31 @@ function leaseSheet(pre = {}) {
     choice('hours', '72', false, '3 days'),
     choice('hours', '168', false, '1 week'),
     choice('hours', '', false, 'Until released', 'At least 24 hours'))));
-  body.push(h('p', { class: 'note' }, 'A lease is billed for at least 24 hours, even if it is released sooner. Apple\'s macOS licence requires it.'));
-  openSheet({
+  const estimate = h('p', { class: 'note' });
+  body.push(estimate);
+  const showEstimate = (form) => {
+    const f = new FormData(form);
+    const base = 'A lease is billed for at least 24 hours, even if it is released sooner. Apple\'s macOS licence requires it.';
+    if (!pricesSet()) { estimate.textContent = base; return; }
+    let rate;
+    let exact = true;
+    if (op && f.get('node')) {
+      const m = avail.find((x) => x.name === f.get('node'));
+      rate = m ? macRate(m.node.vcpus_total || 0, m.node.memory_mib_total || 0).rate : 0;
+    } else if (op) {
+      const rs = avail.map((m) => macRate(m.node.vcpus_total || 0, m.node.memory_mib_total || 0).rate);
+      rate = rs.length ? Math.min(...rs) : 0;
+    } else {
+      const size = f.get('size');
+      rate = macRateFrom(size === 'l' ? 16 : size === 'm' ? 8 : 0, size === 'l' ? 48 * 1024 : size === 'm' ? 24 * 1024 : 0);
+      exact = false;
+    }
+    if (!rate || !Number.isFinite(rate)) { estimate.textContent = base; return; }
+    const hrs = Number(f.get('hours') || 24);
+    estimate.textContent = (exact ? '' : 'From ') + money(rate, null, true) + ' an hour: about ' + money(rate * hrs) + ' for '
+      + (f.get('hours') ? hrs + ' hours' : 'the 24-hour minimum, then ' + money(rate * 24) + ' a day until released') + '. ' + base;
+  };
+  const sheet = openSheet({
     title: op ? 'Lease a Mac to a tenant' : 'Lease a Mac',
     intro: op ? null : 'The Mac is yours alone: only your VMs run on it, up to two of them macOS.',
     body, submit: 'Lease Mac',
@@ -1469,11 +1718,14 @@ function leaseSheet(pre = {}) {
       }
       const r = await api('POST', '/fleet/leases', { body: b });
       const node = r.lease && r.lease.node;
+      if (r.lease && r.lease.rate_micros) toast('Leased ' + node + ' at ' + money(r.lease.rate_micros / 1e6) + ' an hour');
       toast('Leased ' + node + (op ? ' to ' + b.tenant : ''));
       await refresh({ force: true });
       if (node) go('macs', node);
     },
   });
+  sheet.form.addEventListener('change', () => showEstimate(sheet.form));
+  showEstimate(sheet.form);
 }
 
 function launchSheet(pre = {}) {
@@ -1551,7 +1803,17 @@ function launchSheet(pre = {}) {
     const parts = [];
     if (leftCpu !== null) parts.push(c + ' of your ' + leftCpu + ' remaining vCPUs');
     if (leftMem !== null) parts.push(gib(mem) + ' of your ' + gib(leftMem) + ' remaining memory');
-    summary.textContent = parts.length ? 'Uses ' + parts.join(' and ') + '.' : '';
+    let costLine = '';
+    if (pricesSet()) {
+      const chosen = macSel.value ? targets.find((m) => m.name === macSel.value) : null;
+      const onLease = chosen ? !!chosen.lease : !op && leased.length > 0 && guest === 'macos';
+      const maybeShared = !chosen && !(guest === 'macos' && leased.length > 0);
+      const p = S.data.prices || {};
+      const r = vmRate(c, mem, guest === 'macos');
+      if (onLease && !p.charge_vms_on_leased_macs) costLine = ' Included in your lease.';
+      else if (r > 0) costLine = ' About ' + money(r, null, true) + ' an hour' + (onLease ? ' on top of the lease.' : maybeShared && leased.length ? ' if it runs on a shared host; free on a Mac you lease.' : '.');
+    }
+    summary.textContent = (parts.length ? 'Uses ' + parts.join(' and ') + '.' : '') + costLine;
     summary.style.color = (leftCpu !== null && c > leftCpu) || (leftMem !== null && mem > leftMem) ? 'var(--bad)' : '';
   };
 
@@ -1827,7 +2089,7 @@ $('signin-form').addEventListener('submit', (e) => {
   storage.set('sessionStorage', TOKEN_KEY, t);
   $('signin-token').value = '';
   // Nothing from the previous token's session carries over.
-  Object.assign(S, { role: null, me: null, data: null, error: null, usage: null, policy: null, exec: {}, tenantKeys: {}, query: '',
+  Object.assign(S, { role: null, me: null, data: null, error: null, usage: null, policy: null, exec: {}, tenantKeys: {}, billMonth: null, billView: null, query: '',
     lastViewKey: '', lastInspKey: '', loadedAt: 0 });
   stopScreen();
   $('search').value = '';

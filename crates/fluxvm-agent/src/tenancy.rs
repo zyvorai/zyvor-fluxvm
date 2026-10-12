@@ -81,6 +81,9 @@ pub struct Tenant {
     /// The tenant's /24 under `Policy::tenant_subnet_prefix` when network isolation is on (assigned on first use).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub network_index: Option<u8>,
+    /// The tenant's own monthly spending budget, in the price list's currency (warnings only, nothing is stopped).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub monthly_budget: Option<f64>,
     /// Named API keys besides the primary token: one per person, CI system or tool, each revocable on its own.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub keys: Vec<ApiKey>,
@@ -146,6 +149,7 @@ impl Tenant {
             "quota": self.quota,
             "disabled": self.disabled,
             "created_at": self.created_at,
+            "monthly_budget": self.monthly_budget,
         })
     }
 }
@@ -172,6 +176,13 @@ pub struct Lease {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub released_at: Option<DateTime<Utc>>,
     pub state: LeaseState,
+    /// The hourly price fixed when the lease started (micro-units of the price list's currency); see
+    /// [`crate::billing`]. `None` (leases from before pricing) bills at the list's default Mac price.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rate_micros: Option<i64>,
+    /// The Mac's price class at that time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub price_class: Option<String>,
 }
 
 impl Lease {
@@ -629,6 +640,9 @@ pub struct TenancyState {
     /// The image catalog: VM images the operator has put on the Macs, which tenants pick from in the console.
     #[serde(default)]
     pub images: BTreeMap<String, CatalogImage>,
+    /// Prices for leases and VM time (`GET/PUT /fleet/prices`).
+    #[serde(default)]
+    pub prices: crate::billing::PriceList,
     /// Quota held by creates that are in flight (between the quota check and the node's answer). In memory only: a
     /// restart drops them, and the requests they belonged to are gone with it.
     #[serde(skip)]
@@ -677,6 +691,7 @@ impl TenancyState {
             disabled: false,
             created_at: now,
             network_index: None,
+            monthly_budget: None,
             keys: Vec::new(),
         };
         self.tenants.insert(id.into(), t.clone());
@@ -926,9 +941,20 @@ impl TenancyState {
             ends_at: hours.map(|h| now + Duration::hours(h)),
             released_at: None,
             state: LeaseState::Active,
+            rate_micros: None,
+            price_class: None,
         };
         self.leases.push(lease.clone());
         Ok(lease)
+    }
+
+    /// Fixes a new lease's hourly price from the current price list and the Mac's size. Returns the updated lease.
+    pub fn price_lease(&mut self, lease_id: &str, vcpus: u32, memory_mib: u64) -> Option<Lease> {
+        let (class, rate) = self.prices.mac_rate(vcpus, memory_mib);
+        let l = self.leases.iter_mut().find(|l| l.id == lease_id)?;
+        l.rate_micros = Some(rate);
+        l.price_class = class;
+        Some(l.clone())
     }
 
     /// Releases a lease. A tenant (`scope = Some(tenant)`) can release only its own lease and never before
