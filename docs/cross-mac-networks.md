@@ -77,4 +77,14 @@ When a tenant's lease on a Mac ends, that Mac leaves the tenant's networks.
 - The mesh is full, so every Mac sends broadcast and unknown unicast to every other. That is fine for tens of Macs,
   not hundreds.
 - Each Mac's slice is fixed at creation (`hosts_per_node`, default 30 guests per Mac per network, up to 8 Macs at 30).
-- Guest IPs are IPv4 only, like Mac-local private networks.
+- Guest IPs are IPv4 only, like Mac-local private networks. Peers are matched on their exact IP, so there must be no
+  NAT between Macs. Switches listen on IPv4 (`0.0.0.0`).
+- Replay windows live in memory, so a captured datagram stream could be replayed once to a switch that just
+  restarted. A key epoch in the protocol would close this.
+- Every member shares the network key, so a compromised member Mac could impersonate another member's guests.
+  Treat member Macs as one trust domain (they belong to one tenant).
+- Recreating a network under the same name changes its key and subnet. Running switches pick that up only when they
+  restart; peer lists reload live.
+- An operator network with no tenant is not tied to leases: any VM on a member Mac can join it by name. Give tenant
+  networks a tenant.
+- Keys are stored in central's `fleet-tenancy.json` (mode 0600) and its HA mirror. Protect the Redis accordingly.

@@ -4,10 +4,11 @@
 //! One private network across several Macs: the switches of the same network on different hosts form a full mesh and
 //! carry each other's Ethernet frames over UDP, sealed with AES-256-GCM under the network's key.
 //!
-//! - **Wire format.** `"FXO1"` ‖ sender id (u32, random per switch start) ‖ counter (u64) ‖ AES-256-GCM ciphertext and
-//!   tag of the Ethernet frame. The 12-byte nonce is sender id ‖ counter, so a switch never reuses one; the associated
-//!   data is the 16-byte header plus the network name, so a datagram cannot be replayed into another network that
-//!   happens to share a key.
+//! - **Wire format.** `"FXO1"` ‖ sender id (u32, random per switch start) ‖ counter (u64, from a random start below
+//!   2^62) ‖ AES-256-GCM ciphertext and tag of the Ethernet frame. The 12-byte nonce is sender id ‖ counter, so a switch
+//!   never reuses one, and two switch starts under the same key would need both a 32-bit sender id and a 62-bit
+//!   counter range to collide before they could share a nonce; the associated data is the 16-byte header plus the
+//!   network name, so a datagram cannot be replayed into another network that happens to share a key.
 //! - **Replay.** Each sender id has a 1024-packet sliding window; anything older or seen before is dropped.
 //! - **Who may send.** Only configured peer IP addresses are accepted, and only datagrams that authenticate.
 //! - **Forwarding.** A switch learns which peer each remote MAC sits behind from authenticated frames. Unicast to a
@@ -87,10 +88,10 @@ pub fn parse_key(text: &str) -> Option<[u8; 32]> {
     Some(key)
 }
 
-/// A random u32 from the OS (the sender id).
-fn random_u32() -> u32 {
+/// A random u64 from the OS (sender id and counter start).
+fn random_u64() -> u64 {
     use std::io::Read;
-    let mut b = [0u8; 4];
+    let mut b = [0u8; 8];
     if std::fs::File::open("/dev/urandom")
         .and_then(|mut f| f.read_exact(&mut b))
         .is_err()
@@ -100,9 +101,9 @@ fn random_u32() -> u32 {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos() as u64)
             .unwrap_or(0);
-        return (t ^ (u64::from(std::process::id()) << 16)) as u32;
+        return t ^ (u64::from(std::process::id()) << 32) ^ u64::from(std::process::id());
     }
-    u32::from_be_bytes(b)
+    u64::from_be_bytes(b)
 }
 
 /// Sliding anti-replay window (RFC 4303 style) for one sender.
@@ -187,8 +188,9 @@ impl Overlay {
             peers: std::sync::RwLock::new(cfg.peers.clone()),
             cfg,
             cipher,
-            sender: random_u32(),
-            counter: AtomicU64::new(0),
+            sender: random_u64() as u32,
+            // A random start (below 2^62, so it never wraps) keeps nonces apart even if two starts draw one sender id.
+            counter: AtomicU64::new(random_u64() >> 2),
             windows: Mutex::new(HashMap::new()),
             learned: Mutex::new(HashMap::new()),
             socket: None,
@@ -246,8 +248,10 @@ impl Overlay {
         Some(out)
     }
 
-    fn peer_ip_allowed(&self, ip: IpAddr) -> bool {
-        self.peers().iter().any(|p| p.ip() == ip)
+    /// The configured peer at `ip`, if any. Learning records this address, never the datagram's source port, so a
+    /// spoofed or replayed datagram cannot make the switch send to an arbitrary port.
+    fn peer_at(&self, ip: IpAddr) -> Option<SocketAddr> {
+        self.peers().into_iter().find(|p| p.ip() == ip)
     }
 
     /// Checks and opens one datagram from `from`. `local` are the MACs of this switch's own guests, which no peer may
@@ -257,8 +261,10 @@ impl Overlay {
             self.dropped.fetch_add(1, Ordering::Relaxed);
             None
         };
-        if !self.peer_ip_allowed(from.ip())
-            || datagram.len() < HEADER + TAG + 14
+        let Some(peer) = self.peer_at(from.ip()) else {
+            return reject();
+        };
+        if datagram.len() < HEADER + TAG + 14
             || datagram.len() > MAX_DATAGRAM
             || &datagram[..4] != MAGIC
         {
@@ -296,7 +302,7 @@ impl Overlay {
         self.learned
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .insert(src, (from, Instant::now()));
+            .insert(src, (peer, Instant::now()));
         Some(Inbound { frame, from })
     }
 
@@ -406,6 +412,10 @@ pub(crate) mod tests {
         // Unknown unicast and broadcast go to every peer.
         assert_eq!(b.destinations(&frame([2, 9, 9, 9, 9, 9], B)), vec![a_addr]);
         assert_eq!(b.destinations(&frame([0xff; 6], B)), vec![a_addr]);
+        // A datagram from the peer's IP but another port still teaches the configured address, not that port.
+        let d = a.seal(&frame(B, A)).unwrap();
+        assert!(b.open(&d, "10.0.0.1:5555".parse().unwrap(), &[B]).is_some());
+        assert_eq!(b.destinations(&frame(A, B)), vec![a_addr]);
     }
 
     #[test]

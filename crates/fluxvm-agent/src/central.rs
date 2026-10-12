@@ -416,6 +416,14 @@ fn persist_json<T: Serialize + ?Sized>(path: &FsPath, lock_path: &FsPath, value:
                 tracing::warn!(error = %e, "writing fleet registry tmp");
                 return;
             }
+            // The tenancy state holds overlay network keys: owner-only.
+            {
+                use std::os::unix::fs::PermissionsExt;
+                if let Err(e) = fs::set_permissions(&tmp, fs::Permissions::from_mode(0o600)) {
+                    tracing::warn!(error = %e, "restricting fleet registry tmp");
+                    return;
+                }
+            }
             if let Err(e) = fs::rename(&tmp, path) {
                 tracing::warn!(error = %e, "renaming fleet registry");
             }

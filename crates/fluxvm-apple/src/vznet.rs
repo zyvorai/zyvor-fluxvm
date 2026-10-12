@@ -259,10 +259,16 @@ pub fn assign_with(
                     .chain(new_subnets.values())
                     .copied()
                     .collect();
+                // Subnets this Mac's overlay networks will claim are not handed to a local network.
+                let reserved: BTreeSet<u8> = overlays
+                    .iter()
+                    .filter(|(name, _)| **name != net.name)
+                    .map(|(_, o)| o.subnet)
+                    .collect();
                 let n = match &net.address {
                     Some(a) => parse_address(a)?.0,
                     None => (0..=255u8)
-                        .find(|n| !taken.contains(n))
+                        .find(|n| !taken.contains(n) && !reserved.contains(n))
                         .context("all 256 private networks are in use")?,
                 };
                 if taken.contains(&n) {
@@ -443,7 +449,12 @@ fn spawn_switch(
             if let Some(o) = ovs.get(name) {
                 cmd.arg("--overlay-listen").arg(&o.listen);
                 for p in &o.peers {
-                    cmd.arg("--overlay-peer").arg(p);
+                    // The switch refuses to start on a peer that is not IP:port; skip such a peer instead.
+                    if p.parse::<std::net::SocketAddr>().is_ok() {
+                        cmd.arg("--overlay-peer").arg(p);
+                    } else {
+                        tracing::warn!(network = name, peer = %p, "overlay peer is not IP:port; skipped");
+                    }
                 }
                 cmd.arg("--overlay-key-file").arg(&o.key_file);
                 cmd.arg("--overlay-config").arg(overlay_config_path());
@@ -611,15 +622,6 @@ mod tests {
         .into()
     }
 
-    fn net(name: &str) -> AppleNetwork {
-        AppleNetwork {
-            name: name.into(),
-            address: None,
-            mac: None,
-            mtu: None,
-        }
-    }
-
     #[test]
     fn overlay_networks_use_the_fleet_subnet_and_this_macs_slice() {
         let o = ov(40, 64, 66);
@@ -658,6 +660,11 @@ mod tests {
                 .unwrap()
                 .starts_with("10.89.40.")
         );
+        // A local network created first never takes the subnet an overlay network will claim.
+        let mut first = vec![net("lab"), net("acme")];
+        assign_with(&mut first, &[], &ov(0, 2, 10)).unwrap();
+        assert_eq!(first[0].address.as_deref(), Some("10.89.1.2/24"));
+        assert_eq!(first[1].address.as_deref(), Some("10.89.0.2/24"));
     }
 
     #[test]

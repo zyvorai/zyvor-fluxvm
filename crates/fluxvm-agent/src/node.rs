@@ -145,7 +145,26 @@ pub async fn sync_overlays(
         resp.status()
     );
     let body: serde_json::Value = resp.json().await.context("parsing overlays")?;
-    apply_overlays(&body, path)
+    // File writes and peer name lookups block; keep them off the runtime's workers.
+    let path = path.to_path_buf();
+    tokio::task::spawn_blocking(move || apply_overlays(&body, &path))
+        .await
+        .context("overlay sync task")?
+}
+
+/// A peer as the switch takes it: `IP:port`. Central gives a host name when a node advertises one; it is looked up
+/// here (IPv4 first, since the switch listens on `0.0.0.0`). `None` when it cannot be resolved.
+fn resolve_peer(p: &str) -> Option<String> {
+    use std::net::{SocketAddr, ToSocketAddrs};
+    if p.parse::<SocketAddr>().is_ok() {
+        return Some(p.to_owned());
+    }
+    let addrs: Vec<SocketAddr> = p.to_socket_addrs().ok()?.collect();
+    addrs
+        .iter()
+        .find(|a| a.is_ipv4())
+        .or(addrs.first())
+        .map(|a| a.to_string())
 }
 
 /// The file-writing half of [`sync_overlays`], separate so it can be tested without a central.
@@ -204,7 +223,14 @@ pub fn apply_overlays(body: &serde_json::Value, path: &std::path::Path) -> Resul
                     .as_array()
                     .map(|a| {
                         a.iter()
-                            .filter_map(|p| p.as_str().map(str::to_owned))
+                            .filter_map(|p| {
+                                let p = p.as_str()?;
+                                let r = resolve_peer(p);
+                                if r.is_none() {
+                                    tracing::warn!(network = %name, peer = p, "overlay peer does not resolve; left out");
+                                }
+                                r
+                            })
                             .collect()
                     })
                     .unwrap_or_default(),
