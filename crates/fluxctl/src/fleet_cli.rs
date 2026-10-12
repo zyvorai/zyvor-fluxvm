@@ -619,7 +619,7 @@ async fn dispatch(
                 s(&v, "mode"),
                 count("evicted"),
                 count("rescheduled"),
-                count("kept")
+                u(&v, "remaining")
             ));
             for f in actions.iter().filter(|x| s(x, "action") == "failed") {
                 out.warn(format!(
@@ -2266,7 +2266,12 @@ async fn lease(
             )
             .await
             .map_err(|e| {
-                if status_of(&e) == Some(409) {
+                // 409 is also "not active"; only the 24-hour minimum gets this hint.
+                let early = e
+                    .chain()
+                    .find_map(|c| c.downcast_ref::<HttpError>())
+                    .is_some_and(|h| h.status.as_u16() == 409 && h.message.contains("24-hour minimum"));
+                if early {
                     e.context("the 24-hour minimum is not over yet\nhint: see when with `fluxctl fleet lease get <id>`; an operator can pass --force (still billed to 24 hours)")
                 } else {
                     e
