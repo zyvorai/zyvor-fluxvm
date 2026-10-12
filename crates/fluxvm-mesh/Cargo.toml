@@ -1,0 +1,30 @@
+# Copyright 2026 Zyvor AI Labs · https://zyvor.dev
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "fluxvm-mesh"
+version = "0.4.6"
+edition = "2024"
+license = "Apache-2.0"
+description = "FluxMesh personal-cloud overlay control plane for FluxVM"
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "fluxmesh"
+path = "src/main.rs"
+
+[[bin]]
+name = "fluxmesh-relay"
+path = "src/relay_main.rs"
+
+[[bin]]
+name = "fluxmesh-agent"
+path = "src/agent_main.rs"
+
+[dependencies]
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+rustls-pemfile = "2"
+tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "sync", "time", "macros"] }
+tokio-rustls = "0.26"

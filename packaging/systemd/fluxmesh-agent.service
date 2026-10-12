@@ -1,0 +1,22 @@
+[Unit]
+Description=FluxMesh personal-cloud reconciler
+Documentation=https://github.com/zyvorai/zyvor-fluxvm/blob/main/docs/fluxmesh-phase3.md
+After=network-online.target fluxvm.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/fluxmesh-agent run --api http://127.0.0.1:7788 --interface fluxmesh0 --key /var/lib/fluxvm/mesh/wireguard.key
+EnvironmentFile=-/etc/fluxvm/fluxmesh.env
+Restart=always
+RestartSec=2
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/fluxvm/mesh
+AmbientCapabilities=CAP_NET_ADMIN
+CapabilityBoundingSet=CAP_NET_ADMIN
+
+[Install]
+WantedBy=multi-user.target
