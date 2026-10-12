@@ -1,0 +1,18 @@
+[Unit]
+Description=FluxMesh private DNS HA replica
+After=network-online.target fluxmesh-agent.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/fluxmesh-dns-ha 100.96.0.1:53 2
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/fluxvm/mesh
+
+[Install]
+WantedBy=multi-user.target

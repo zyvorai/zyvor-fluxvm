@@ -14,6 +14,7 @@ fluxvm-scheduler = { path = "../fluxvm-scheduler" }
 fluxvm-api = { path = "../fluxvm-api" }
 fluxvm-image = { path = "../fluxvm-image" }
 fluxvm-network = { path = "../fluxvm-network" }
+fluxvm-mesh = { path = "../fluxvm-mesh" }
 fluxvm-intelligence = { path = "../fluxvm-intelligence" }
 fluxvm-guest-protocol = { path = "../fluxvm-guest-protocol" }
 anyhow = "1"

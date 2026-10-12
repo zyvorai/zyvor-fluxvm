@@ -24,6 +24,7 @@ use tokio::net::TcpListener;
 use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
 
+mod cloud;
 mod compose;
 mod contexts;
 mod create;
@@ -190,6 +191,9 @@ enum McpCommand {
 
 #[derive(Subcommand)]
 enum Command {
+    #[command(next_help_heading = "Basic Commands")]
+    /// Bootstrap, enroll and inspect the FluxMesh personal cloud.
+    Cloud(cloud::CloudArgs),
     #[command(next_help_heading = "Basic Commands")]
     /// Start the FluxVM control-plane daemon (REST API).
     Serve,
@@ -5067,6 +5071,7 @@ async fn main() -> Result<()> {
     let m = manager(cfg.clone()).await?;
 
     match cli.command {
+        Command::Cloud(args) => cloud::run(args).await?,
         Command::Status {
             verbose: _,
             id: Some(id),

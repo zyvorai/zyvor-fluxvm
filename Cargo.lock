@@ -2215,6 +2215,7 @@ dependencies = [
  "fluxvm-guest-protocol",
  "fluxvm-image",
  "fluxvm-intelligence",
+ "fluxvm-mesh",
  "fluxvm-network",
  "fluxvm-scheduler",
  "futures-util",
@@ -2590,6 +2591,7 @@ dependencies = [
 name = "fluxvm-mesh"
 version = "0.4.6"
 dependencies = [
+ "ring",
  "rustls",
  "rustls-pemfile",
  "tokio",

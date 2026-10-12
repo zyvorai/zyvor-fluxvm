@@ -9,6 +9,7 @@
 //! utun lifecycle and the userspace WireGuard engine; the cross-platform mesh
 //! control plane remains identical.
 
+use crate::ipv6::augment_wireguard_plan;
 use crate::{MeshState, Result};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -29,6 +30,7 @@ pub struct MacTunnelPlan {
     pub version: u32,
     pub local_node: String,
     pub local_address: String,
+    pub local_ipv6: Option<String>,
     pub listen_port: u16,
     pub mtu: u16,
     pub dns_suffix: String,
@@ -41,12 +43,14 @@ impl MacTunnelPlan {
         listen_port: u16,
         dns_suffix: impl Into<String>,
     ) -> Result<Self> {
-        let wg =
+        let mut wg =
             mesh.wireguard_plan("utun", listen_port, PathBuf::from("network-extension-key"))?;
+        augment_wireguard_plan(mesh, &mut wg)?;
         Ok(Self {
             version: MAC_PLAN_VERSION,
             local_node: mesh.local_node.clone(),
             local_address: format!("{}/32", wg.local_address),
+            local_ipv6: wg.local_ipv6.map(|v| format!("{v}/128")),
             listen_port,
             mtu: 1280,
             dns_suffix: dns_suffix.into(),
@@ -91,11 +95,17 @@ impl MacTunnelPlan {
             })
             .collect::<Vec<_>>()
             .join(",");
+        let local_ipv6 = self
+            .local_ipv6
+            .as_ref()
+            .map(|value| format!("\"{}\"", json_escape(value)))
+            .unwrap_or_else(|| "null".into());
         format!(
-            "{{\"version\":{},\"local_node\":\"{}\",\"local_address\":\"{}\",\"listen_port\":{},\"mtu\":{},\"dns_suffix\":\"{}\",\"peers\":[{}]}}",
+            "{{\"version\":{},\"local_node\":\"{}\",\"local_address\":\"{}\",\"local_ipv6\":{},\"listen_port\":{},\"mtu\":{},\"dns_suffix\":\"{}\",\"peers\":[{}]}}",
             self.version,
             json_escape(&self.local_node),
             json_escape(&self.local_address),
+            local_ipv6,
             self.listen_port,
             self.mtu,
             json_escape(&self.dns_suffix),

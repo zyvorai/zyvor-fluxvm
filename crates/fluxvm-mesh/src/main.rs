@@ -5,7 +5,13 @@ use fluxvm_mesh::acl::{
     AclAction, AclContext, AclProtocol, AclRule, DestinationSelector, SourceSelector, evaluate,
 };
 use fluxvm_mesh::catalog::{CatalogStore, CloudCatalog, default_catalog_path};
+use fluxvm_mesh::cloud::{
+    CloudPaths, accept_join_token, issue_join_token, issue_open_join_token, status as cloud_status,
+    up as cloud_up,
+};
 use fluxvm_mesh::dns::PrivateDns;
+use fluxvm_mesh::ipv6::Ipv6Overlay;
+use fluxvm_mesh::keydist::{KeyDistributionStore, default_keydist_path};
 use fluxvm_mesh::relay::{RelayRecord, RelayTransport};
 use fluxvm_mesh::service::{EndpointHealth, ServiceEndpoint, ServiceProtocol};
 use fluxvm_mesh::{
@@ -16,6 +22,7 @@ use std::env;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 use std::str::FromStr;
+use std::time::Duration;
 
 fn usage() -> ! {
     eprintln!(
@@ -51,6 +58,15 @@ USAGE:\n\
   fluxmesh relay-add [--state PATH] [--catalog PATH] ID udp|tcp443 IP:PORT [PRIORITY]\n\
   fluxmesh relay-health [--state PATH] [--catalog PATH] ID up|down [LOAD_PERCENT]\n\
   fluxmesh relay-select [--state PATH] [--catalog PATH] udp|tcp443\n\n\
+  # Phase 4: zero-touch personal cloud\n\
+  fluxmesh cloud-up [--state PATH] [--catalog PATH] [--key PATH] NODE HOSTNAME [POOL]\n\
+  fluxmesh cloud-status [--state PATH] [--catalog PATH]\n\
+  fluxmesh enroll-token [--state PATH] NODE HOSTNAME PUBLIC_KEY [TTL_SECONDS]\n\
+  fluxmesh enroll-accept [--state PATH] TOKEN\n\
+  fluxmesh key-propose [--state PATH] NODE PUBLIC_KEY\n\
+  fluxmesh key-ack [--state PATH] OWNER GENERATION PEER\n\
+  fluxmesh key-activate [--state PATH] OWNER\n\
+  fluxmesh ipv6-status [--state PATH]\n\n\
 KIND:\n\
   endpoint: lan | public_ipv6 | public_udp | peer_relay | relay443\n\
   route:    host | vm_subnet | lan_subnet | exit\n\n\
@@ -147,6 +163,13 @@ fn real_main() -> fluxvm_mesh::Result<()> {
     }
     let state_path = take_path(&mut args, "--state", default_state_path);
     let catalog_path = take_path(&mut args, "--catalog", default_catalog_path);
+    let key_path = take_path(&mut args, "--key", || {
+        fluxvm_mesh::mesh_dir().join("wireguard.key")
+    });
+    let mut cloud_paths = CloudPaths::default();
+    cloud_paths.state = state_path.clone();
+    cloud_paths.catalog = catalog_path.clone();
+    cloud_paths.key = key_path;
 
     match command.as_str() {
         "init" => {
@@ -248,9 +271,133 @@ fn real_main() -> fluxvm_mesh::Result<()> {
             }
             let listen_port = parse::<u16>(&args[1], "listen port")?;
             let state = load(&state_path)?;
-            let plan = state.wireguard_plan(&args[0], listen_port, &args[2])?;
+            let mut plan = state.wireguard_plan(&args[0], listen_port, &args[2])?;
+            fluxvm_mesh::ipv6::augment_wireguard_plan(&state, &mut plan)?;
             for argv in plan.linux_argv() {
                 println!("{}", shell_preview(&argv));
+            }
+        }
+        "cloud-up" => {
+            if !(2..=3).contains(&args.len()) {
+                usage();
+            }
+            let status = cloud_up(
+                &cloud_paths,
+                &args[0],
+                &args[1],
+                args.get(2).map(String::as_str),
+            )?;
+            println!(
+                "cloud={} ipv4={} ipv6={} nodes={} services={} relays={}",
+                status.local_node,
+                status.ipv4,
+                status.ipv6,
+                status.nodes,
+                status.services,
+                status.relays
+            );
+        }
+        "cloud-status" => {
+            if !args.is_empty() {
+                usage();
+            }
+            let status = cloud_status(&cloud_paths)?;
+            println!(
+                "cloud={} ipv4={} ipv6={} nodes={} services={} relays={} pending_keys={}",
+                status.local_node,
+                status.ipv4,
+                status.ipv6,
+                status.nodes,
+                status.services,
+                status.relays,
+                status.pending_key_rotations
+            );
+        }
+        "enroll-token" => {
+            if !(3..=4).contains(&args.len()) {
+                usage();
+            }
+            let ttl = args
+                .get(3)
+                .map(|v| parse::<u64>(v, "TTL seconds"))
+                .transpose()?
+                .unwrap_or(900);
+            println!(
+                "{}",
+                issue_join_token(
+                    &cloud_paths,
+                    &args[0],
+                    &args[1],
+                    &args[2],
+                    Duration::from_secs(ttl)
+                )?
+            );
+        }
+        "enroll-invite" => {
+            if !(2..=3).contains(&args.len()) {
+                usage();
+            }
+            let ttl = args
+                .get(2)
+                .map(|v| parse::<u64>(v, "TTL seconds"))
+                .transpose()?
+                .unwrap_or(900);
+            println!(
+                "{}",
+                issue_open_join_token(&cloud_paths, &args[0], &args[1], Duration::from_secs(ttl))?
+            );
+        }
+        "enroll-accept" => {
+            if args.len() != 1 {
+                usage();
+            }
+            let ip = accept_join_token(&cloud_paths, &args[0])?;
+            println!("enrolled ipv4={ip}");
+        }
+        "key-propose" => {
+            if args.len() != 2 {
+                usage();
+            }
+            let mesh = load(&state_path)?;
+            let store = KeyDistributionStore::new(default_keydist_path());
+            let mut keys = store.load()?;
+            let generation = keys.propose(&mesh, &args[0], args[1].clone())?;
+            store.save(&keys)?;
+            println!("owner={} generation={generation}", args[0]);
+        }
+        "key-ack" => {
+            if args.len() != 3 {
+                usage();
+            }
+            let mesh = load(&state_path)?;
+            let store = KeyDistributionStore::new(default_keydist_path());
+            let mut keys = store.load()?;
+            keys.acknowledge(&mesh, &args[0], parse(&args[1], "generation")?, &args[2])?;
+            store.save(&keys)?;
+            println!("acknowledged");
+        }
+        "key-activate" => {
+            if args.len() != 1 {
+                usage();
+            }
+            let state_store = StateStore::new(&state_path);
+            let mut mesh = state_store.load()?;
+            let store = KeyDistributionStore::new(default_keydist_path());
+            let mut keys = store.load()?;
+            let public_key = keys.activate(&mut mesh, &args[0])?;
+            store.save(&keys)?;
+            state_store.save(&mesh)?;
+            println!("activated owner={} public_key={public_key}", args[0]);
+        }
+        "ipv6-status" => {
+            if !args.is_empty() {
+                usage();
+            }
+            let mesh = load(&state_path)?;
+            let overlay = Ipv6Overlay::for_mesh(&mesh);
+            println!("prefix={}", overlay.cidr());
+            for node in mesh.nodes.keys() {
+                println!("{}\t{}", node, overlay.address_for(node)?);
             }
         }
         "catalog-status" => {

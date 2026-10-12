@@ -85,6 +85,17 @@ pub fn build_linux_reconcile_commands(
         "dev".into(),
         plan.interface.clone(),
     ]);
+    if let Some(ipv6) = plan.local_ipv6 {
+        commands.push(vec![
+            "ip".into(),
+            "-6".into(),
+            "address".into(),
+            "replace".into(),
+            format!("{ipv6}/128"),
+            "dev".into(),
+            plan.interface.clone(),
+        ]);
+    }
     commands.push(vec![
         "wg".into(),
         "set".into(),
@@ -164,24 +175,10 @@ pub fn build_linux_reconcile_commands(
         .flat_map(|peer| peer.allowed_ips.iter().cloned())
         .collect::<BTreeSet<_>>();
     for stale in current_routes.difference(&desired_routes) {
-        commands.push(vec![
-            "ip".into(),
-            "route".into(),
-            "del".into(),
-            stale.clone(),
-            "dev".into(),
-            plan.interface.clone(),
-        ]);
+        commands.push(route_argv("del", stale, &plan.interface));
     }
     for prefix in &desired_routes {
-        commands.push(vec![
-            "ip".into(),
-            "route".into(),
-            "replace".into(),
-            prefix.clone(),
-            "dev".into(),
-            plan.interface.clone(),
-        ]);
+        commands.push(route_argv("replace", prefix, &plan.interface));
     }
     commands
 }
@@ -229,20 +226,40 @@ pub fn read_current_peers(interface: &str) -> io::Result<BTreeMap<String, Curren
 }
 
 pub fn read_interface_routes(interface: &str) -> io::Result<BTreeSet<String>> {
-    let output = Command::new("ip")
-        .args(["-4", "route", "show", "dev", interface])
-        .output()?;
-    if !output.status.success() {
-        return Err(io::Error::other(
-            String::from_utf8_lossy(&output.stderr).trim().to_owned(),
-        ));
+    let mut out = BTreeSet::new();
+    for family in ["-4", "-6"] {
+        let output = Command::new("ip")
+            .args([family, "route", "show", "dev", interface])
+            .output()?;
+        if !output.status.success() {
+            return Err(io::Error::other(
+                String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+            ));
+        }
+        out.extend(
+            String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .filter_map(|line| line.split_whitespace().next())
+                .filter(|prefix| *prefix != "default" && !prefix.starts_with("fe80:"))
+                .map(str::to_owned),
+        );
     }
-    Ok(String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .filter_map(|line| line.split_whitespace().next())
-        .filter(|prefix| *prefix != "default")
-        .map(str::to_owned)
-        .collect())
+    Ok(out)
+}
+
+fn route_argv(action: &str, prefix: &str, interface: &str) -> Vec<String> {
+    let mut argv = vec!["ip".into()];
+    if prefix.contains(':') {
+        argv.push("-6".into());
+    }
+    argv.extend([
+        "route".into(),
+        action.into(),
+        prefix.into(),
+        "dev".into(),
+        interface.into(),
+    ]);
+    argv
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -263,25 +280,18 @@ pub fn key_rotation_due(path: &Path, max_age: Duration, now: SystemTime) -> bool
         .unwrap_or(false)
 }
 
-pub fn rotate_wireguard_key(path: &Path) -> Result<String> {
-    let private = Command::new("wg")
-        .arg("genkey")
-        .output()
-        .map_err(MeshError::Io)?;
-    if !private.status.success() {
-        return Err(MeshError::Io(io::Error::other(
-            String::from_utf8_lossy(&private.stderr).trim().to_owned(),
-        )));
-    }
-    let private_key = String::from_utf8(private.stdout)
-        .map_err(|_| MeshError::InvalidState("wg genkey returned non-UTF8 output".into()))?;
-    let private_key = private_key.trim().to_owned();
+pub fn wireguard_public_key(path: &Path) -> Result<String> {
+    let private_key = fs::read_to_string(path)?;
+    let private_key = private_key.trim();
     if private_key.is_empty() {
         return Err(MeshError::InvalidState(
-            "wg genkey returned an empty key".into(),
+            "WireGuard private key file is empty".into(),
         ));
     }
+    public_key_from_private(private_key)
+}
 
+fn public_key_from_private(private_key: &str) -> Result<String> {
     let mut child = Command::new("wg")
         .arg("pubkey")
         .stdin(Stdio::piped())
@@ -308,6 +318,33 @@ pub fn rotate_wireguard_key(path: &Path) -> Result<String> {
         .map_err(|_| MeshError::InvalidState("wg pubkey returned non-UTF8 output".into()))?
         .trim()
         .to_owned();
+    if public_key.is_empty() {
+        return Err(MeshError::InvalidState(
+            "wg pubkey returned an empty key".into(),
+        ));
+    }
+    Ok(public_key)
+}
+
+pub fn rotate_wireguard_key(path: &Path) -> Result<String> {
+    let private = Command::new("wg")
+        .arg("genkey")
+        .output()
+        .map_err(MeshError::Io)?;
+    if !private.status.success() {
+        return Err(MeshError::Io(io::Error::other(
+            String::from_utf8_lossy(&private.stderr).trim().to_owned(),
+        )));
+    }
+    let private_key = String::from_utf8(private.stdout)
+        .map_err(|_| MeshError::InvalidState("wg genkey returned non-UTF8 output".into()))?;
+    let private_key = private_key.trim().to_owned();
+    if private_key.is_empty() {
+        return Err(MeshError::InvalidState(
+            "wg genkey returned an empty key".into(),
+        ));
+    }
+    let public_key = public_key_from_private(&private_key)?;
 
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
