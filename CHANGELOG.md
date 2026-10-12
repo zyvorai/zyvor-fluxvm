@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Added: `scripts/bench-macos-pool.sh`
+- Times macOS warm-pool checkout and return over N rounds (min/median/max) and samples runner RSS, against a local
+  `fluxctl serve` on a Mac. Checked against a stub server only; not yet run against real guests.
+
 
 ### Added: fleet console as a cloud UX, image catalog, tenant view of leased Macs
 - The `/console` web console is rebuilt as a cloud UX: overview with quota bars and your Macs, My Macs, virtual machines,
