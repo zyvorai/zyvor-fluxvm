@@ -35,6 +35,56 @@ const storage = {
   set(kind, k, v) { try { window[kind].setItem(k, v); } catch (_) { /* private mode */ } },
   del(kind, k) { try { window[kind].removeItem(k); } catch (_) { /* private mode */ } },
 };
+// A small inline icon set (24px grid, 1.75 stroke, currentColor), so the console needs no icon font or asset.
+const ICONS = {
+  bell: 'M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9M10.3 21a1.94 1.94 0 0 0 3.4 0',
+  refresh: 'M21 12a9 9 0 1 1-3-6.7L21 8M21 3v5h-5',
+  sun: 'M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4',
+  moon: 'M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z',
+  auto: 'M4 5h16a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1M8 21h8M12 17v4',
+  menu: 'M4 6h16M4 12h16M4 18h16',
+  x: 'M18 6 6 18M6 6l12 12',
+  check: 'M20 6 9 17l-5-5',
+  alert: 'M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0ZM12 9v4M12 17h.01',
+  info: 'M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20M12 16v-4M12 8h.01',
+  chev: 'm6 9 6 6 6-6',
+  plus: 'M12 5v14M5 12h14',
+  home: 'M3 11 12 3l9 8M5 10v10h5v-6h4v6h5V10',
+  mac: 'M5 4h14a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2M8 21h8M12 17v4',
+  vm: 'M21 8 12 3 3 8v8l9 5 9-5V8ZM3 8l9 5 9-5M12 13v8',
+  network: 'M9 2h6v6H9zM2 16h6v6H2zM16 16h6v6h-6zM5 16v-3a1 1 0 0 1 1-1h12a1 1 0 0 1 1 1v3M12 12V8',
+  disk: 'M22 12H2M5.5 5.1 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.5-6.9A2 2 0 0 0 16.7 4H7.3a2 2 0 0 0-1.8 1.1ZM6 16h.01M10 16h.01',
+  image: 'M5 3h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2M9 8.5a.5.5 0 1 0 0 1 .5.5 0 0 0 0-1M21 15l-3.1-3.1a2 2 0 0 0-2.8 0L6 21',
+  zap: 'M13 2 3 14h9l-1 8 10-12h-9l1-8Z',
+  users: 'M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2M9 3a4 4 0 1 0 0 8 4 4 0 0 0 0-8M22 21v-2a4 4 0 0 0-3-3.9M16 3.1a4 4 0 0 1 0 7.8',
+  card: 'M4 5h16a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2M2 10h20',
+  chart: 'M3 3v18h18M7 16v-5M12 16V7M17 16v-8',
+  pulse: 'M22 12h-4l-3 9L9 3l-3 9H2',
+  term: 'm4 17 6-6-6-6M12 19h8',
+  key: 'M7.5 11a4.5 4.5 0 1 0 0 9 4.5 4.5 0 0 0 0-9M10.7 12.3 21 2M16 7l3 3M14 9l2 2',
+  shield: 'M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10Z',
+  building: 'M6 2h12a2 2 0 0 1 2 2v18H4V4a2 2 0 0 1 2-2M9 22v-4h6v4M8 6h.01M12 6h.01M16 6h.01M8 10h.01M12 10h.01M16 10h.01M8 14h.01M12 14h.01M16 14h.01',
+  bellring: 'M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9M10.3 21a1.94 1.94 0 0 0 3.4 0',
+};
+function icon(name, size) {
+  const NS = 'http://www.w3.org/2000/svg';
+  const svg = document.createElementNS(NS, 'svg');
+  svg.setAttribute('viewBox', '0 0 24 24');
+  svg.setAttribute('fill', 'none');
+  svg.setAttribute('stroke', 'currentColor');
+  svg.setAttribute('stroke-width', '1.75');
+  svg.setAttribute('stroke-linecap', 'round');
+  svg.setAttribute('stroke-linejoin', 'round');
+  svg.setAttribute('aria-hidden', 'true');
+  svg.setAttribute('width', String(size || 18));
+  svg.setAttribute('height', String(size || 18));
+  svg.classList.add('ico');
+  const path = document.createElementNS(NS, 'path');
+  path.setAttribute('d', ICONS[name] || ICONS.info);
+  svg.append(path);
+  return svg;
+}
+
 const token = () => storage.get('sessionStorage', TOKEN_KEY);
 const enc = encodeURIComponent;
 
@@ -326,24 +376,107 @@ const go = (page, id) => { location.hash = '#/' + page + (id ? '/' + id.split('/
 window.addEventListener('hashchange', () => render(true));
 
 const PAGES = () => [
-  { id: 'overview', label: 'Overview' },
-  { id: 'macs', label: isOp() ? 'Macs' : 'My Macs', count: () => macs().length },
-  { id: 'vms', label: 'Virtual machines', count: () => S.data.vms.length },
-  { id: 'networks', label: 'Networks', count: () => S.data.overlays.length },
-  { id: 'volumes', label: 'Volumes', count: () => (S.data.volumes || []).length },
-  { id: 'images', label: 'Images', count: () => S.data.images.length },
-  { id: 'pools', label: 'Warm pools', count: () => (S.data.pools || []).length }, // ---- warmpool ----
-  { sep: true },
-  ...(isOp() ? [{ id: 'tenants', label: 'Tenants', count: () => (S.data.tenants || []).length }] : []),
-  { id: 'billing', label: 'Billing' },
-  { id: 'usage', label: 'Usage' },
-  { id: 'activity', label: 'Activity' },
-  { id: 'tunnels', label: 'Tunnels', count: () => (S.data.tunnels || []).length }, // ---- tunnel ----
-  { id: 'notifications', label: 'Notifications' },
-  ...(isOp() || !can('admin') ? [] : [{ id: 'keys', label: 'API keys', count: () => (S.data.keys || []).length }]),
-  ...(isOp() ? [] : [{ id: 'members', label: 'Members' }]),
-  ...(isOp() ? [{ id: 'policy', label: 'Policy' }] : []),
+  { id: 'overview', label: 'Overview', group: 'overview', icon: 'home', blurb: 'What is running and what needs you' },
+  { id: 'macs', label: isOp() ? 'Macs' : 'My Macs', count: () => macs().length, group: 'cloud', icon: 'mac',
+    blurb: isOp() ? 'Every Mac in the fleet' : 'The Macs you lease' },
+  { id: 'networks', label: 'Networks', count: () => S.data.overlays.length, group: 'cloud', icon: 'network', blurb: 'Private networks across Macs' },
+  { id: 'images', label: 'Images', count: () => S.data.images.length, group: 'cloud', icon: 'image', blurb: 'What you can launch' },
+  { id: 'vms', label: 'Virtual machines', count: () => S.data.vms.length, group: 'compute', icon: 'vm', blurb: 'Launch, control and watch VMs' },
+  { id: 'volumes', label: 'Volumes', count: () => (S.data.volumes || []).length, group: 'compute', icon: 'disk', blurb: 'Disks that outlive a VM' },
+  { id: 'pools', label: 'Warm pools', count: () => (S.data.pools || []).length, group: 'compute', icon: 'zap', blurb: 'VMs booted ahead of time' }, // ---- warmpool ----
+  { id: 'tunnels', label: 'Tunnels', count: () => (S.data.tunnels || []).length, group: 'compute', icon: 'term', blurb: 'SSH and port tunnels' }, // ---- tunnel ----
+  { id: 'billing', label: 'Billing', group: 'billing', icon: 'card', blurb: 'Statements, budget and payment' },
+  { id: 'usage', label: 'Usage', group: 'billing', icon: 'chart', blurb: 'Metered use and graphs' },
+  ...(isOp() ? [{ id: 'tenants', label: 'Tenants', count: () => (S.data.tenants || []).length, group: 'access', icon: 'building', blurb: 'Accounts, quotas and leases' }] : []),
+  ...(isOp() ? [] : [{ id: 'members', label: 'Members', group: 'access', icon: 'users', blurb: 'People and their roles' }]),
+  ...(isOp() || !can('admin') ? [] : [{ id: 'keys', label: 'API keys', count: () => (S.data.keys || []).length, group: 'access', icon: 'key', blurb: 'Keys for CI and tools' }]),
+  { id: 'activity', label: 'Activity', group: 'access', icon: 'pulse', blurb: 'Who changed what' },
+  { id: 'notifications', label: 'Notifications', group: 'access', icon: 'bell', blurb: 'Alerts and webhooks' },
+  ...(isOp() ? [{ id: 'policy', label: 'Policy', group: 'access', icon: 'shield', blurb: 'Rules for the whole cloud' }] : []),
 ];
+
+const NAV_GROUPS = [
+  { id: 'overview', label: 'Overview' },
+  { id: 'cloud', label: 'Cloud' },
+  { id: 'compute', label: 'Compute' },
+  { id: 'billing', label: 'Billing' },
+  { id: 'access', label: 'Access' },
+];
+
+// The top bar's grouped menus. Rebuilt only when what it shows changes, so an open menu is not closed by a refresh.
+let navOpen = null;
+let navTimer = null;
+function closeNav(focusBtn) {
+  const was = navOpen;
+  navOpen = null;
+  document.querySelectorAll('#nav .mega').forEach((m) => { m.hidden = true; });
+  document.querySelectorAll('#nav .navbtn[aria-haspopup]').forEach((b) => b.setAttribute('aria-expanded', 'false'));
+  if (focusBtn && was) { const b = document.getElementById('navbtn-' + was); if (b) b.focus(); }
+}
+function openNav(id, focusFirst) {
+  closeNav();
+  const btn = document.getElementById('navbtn-' + id);
+  const panel = document.getElementById('mega-' + id);
+  if (!btn || !panel) return;
+  navOpen = id;
+  panel.hidden = false;
+  btn.setAttribute('aria-expanded', 'true');
+  if (focusFirst) { const a = panel.querySelector('a'); if (a) a.focus(); }
+}
+function buildNav(pages, current) {
+  const li = [];
+  for (const g of NAV_GROUPS) {
+    const items = pages.filter((p) => p.group === g.id);
+    if (!items.length) continue;
+    const active = items.some((p) => p.id === current.id);
+    if (items.length === 1 && g.id === 'overview') {
+      li.push(h('li', {}, h('a', { class: 'navbtn', href: '#/' + items[0].id, 'aria-current': active ? 'page' : null }, g.label)));
+      continue;
+    }
+    const btn = h('button', { class: 'navbtn', id: 'navbtn-' + g.id, type: 'button', 'aria-haspopup': 'true',
+      'aria-expanded': 'false', 'aria-controls': 'mega-' + g.id, 'aria-current': active ? 'page' : null },
+    g.label, icon('chev', 12));
+    btn.querySelector('svg').classList.add('chev');
+    const panel = h('div', { class: 'mega', id: 'mega-' + g.id, hidden: true, role: 'region', 'aria-label': g.label },
+      items.map((p) => h('a', { class: 'mega-item', href: '#/' + p.id, 'aria-current': p.id === current.id ? 'page' : null },
+        icon(p.icon, 18),
+        h('span', {}, h('span', { class: 'mi-title' }, p.label, p.count ? h('span', { class: 'count' }, p.count()) : null),
+          h('span', { class: 'mi-blurb' }, p.blurb)))));
+    const wrap = h('li', {}, btn, panel);
+    btn.addEventListener('click', (e) => { e.stopPropagation(); navOpen === g.id ? closeNav() : openNav(g.id); });
+    btn.addEventListener('keydown', (e) => {
+      if (e.key === 'ArrowDown') { e.preventDefault(); openNav(g.id, true); }
+      if (e.key === 'ArrowRight' || e.key === 'ArrowLeft') {
+        const btns = [...document.querySelectorAll('#nav .navbtn')];
+        const n = btns[(btns.indexOf(btn) + (e.key === 'ArrowRight' ? 1 : btns.length - 1)) % btns.length];
+        if (n) { n.focus(); if (navOpen && n.id.startsWith('navbtn-')) openNav(n.id.slice(7)); }
+      }
+    });
+    // Hover opens after a short delay and closes a little later, so moving from the button to the panel is forgiving.
+    wrap.addEventListener('mouseenter', () => {
+      if (!window.matchMedia('(hover: hover) and (min-width: 861px)').matches) return;
+      clearTimeout(navTimer);
+      navTimer = setTimeout(() => openNav(g.id), 120);
+    });
+    wrap.addEventListener('mouseleave', () => {
+      if (!window.matchMedia('(hover: hover) and (min-width: 861px)').matches) return;
+      clearTimeout(navTimer);
+      navTimer = setTimeout(() => { if (navOpen === g.id) closeNav(); }, 450);
+    });
+    panel.addEventListener('keydown', (e) => {
+      const links = [...panel.querySelectorAll('a')];
+      const at = links.indexOf(document.activeElement);
+      if (e.key === 'ArrowDown' || e.key === 'ArrowRight') { e.preventDefault(); links[(at + 1) % links.length].focus(); }
+      if (e.key === 'ArrowUp' || e.key === 'ArrowLeft') { e.preventDefault(); links[(at + links.length - 1) % links.length].focus(); }
+      if (e.key === 'Escape') { e.stopPropagation(); closeNav(true); }
+    });
+    panel.addEventListener('click', (e) => { if (e.target.closest('a')) { closeNav(); document.body.classList.remove('nav-open'); } });
+    li.push(wrap);
+  }
+  return li;
+}
+document.addEventListener('click', (e) => { if (navOpen && !e.target.closest('#nav')) closeNav(); });
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && navOpen) closeNav(true); });
 
 // ---- render ---------------------------------------------------------------------------------------------------------
 
@@ -353,11 +486,16 @@ function render(force) {
   const pages = PAGES();
   const page = pages.find((p) => p.id === r.page) || pages[0];
 
-  $('nav').replaceChildren(...pages.map((p) => (p.sep ? h('li', { class: 'sep-li' }, h('div', { class: 'sep' }))
-    : h('li', {}, h('a', { href: '#/' + p.id, 'aria-current': p.id === page.id ? 'page' : null },
-      h('span', {}, p.label), p.count ? h('span', { class: 'count' }, p.count()) : null)))));
+  const navKey = JSON.stringify([pages.map((p) => [p.id, p.label, p.count ? p.count() : null]), page.id, isOp()]);
+  if (navKey !== S.lastNavKey) {
+    S.lastNavKey = navKey;
+    const reopen = navOpen;
+    $('nav').replaceChildren(...buildNav(pages, page));
+    if (reopen) openNav(reopen);
+  }
   $('who').textContent = isOp() ? 'Operator' : (S.me.display_name || S.me.id);
   $('role').textContent = isOp() ? 'Fleet token' : 'Tenant ' + S.me.id;
+  $('acct').textContent = ((isOp() ? 'O' : (S.me.display_name || S.me.id || '?')).trim()[0] || '?').toUpperCase();
   $('bar-title').textContent = page.label;
   document.title = page.label + ' · FluxVM Cloud';
   $('signout').hidden = !token() && !S.user;
@@ -4283,8 +4421,9 @@ function applyTheme() {
   const t = storage.get('localStorage', THEME_KEY) || 'system';
   if (t === 'system') document.documentElement.removeAttribute('data-theme');
   else document.documentElement.setAttribute('data-theme', t);
-  $('theme').textContent = 'Theme: ' + { system: 'Auto', light: 'Light', dark: 'Dark' }[t];
-  $('theme').title = 'Theme: ' + t + '. Click to change.';
+  const label = { system: 'Auto', light: 'Light', dark: 'Dark' }[t];
+  $('theme').replaceChildren(icon({ system: 'auto', light: 'sun', dark: 'moon' }[t]), h('span', { class: 'sr' }, 'Theme: ' + label));
+  $('theme').title = 'Theme: ' + label + '. Click to change.';
 }
 function cycleTheme() {
   const order = ['system', 'light', 'dark'];
@@ -4324,6 +4463,28 @@ $('signin-form').addEventListener('submit', (e) => {
   refresh({ force: true });
 });
 window.addEventListener('scroll', () => $('bar').classList.toggle('scrolled', window.scrollY > 4), { passive: true });
+
+// Icon buttons and the account / mobile menus.
+$('bell').prepend(icon('bell'));
+$('refresh').append(icon('refresh'));
+$('menu-toggle').append(icon('menu'));
+$('menu-toggle').addEventListener('click', () => {
+  const open = !document.body.classList.contains('nav-open');
+  document.body.classList.toggle('nav-open', open);
+  $('menu-toggle').setAttribute('aria-expanded', String(open));
+  if (open) NAV_GROUPS.forEach((g) => { const m = document.getElementById('mega-' + g.id); if (m) m.hidden = false; });
+  else closeNav();
+});
+function toggleAcct(show) {
+  const panel = $('acct-panel');
+  show = show === undefined ? panel.hidden : show;
+  panel.hidden = !show;
+  $('acct').setAttribute('aria-expanded', String(show));
+}
+$('acct').addEventListener('click', (e) => { e.stopPropagation(); toggleAcct(); });
+document.addEventListener('click', (e) => { if (!$('acct-panel').hidden && !e.target.closest('.acct-wrap')) toggleAcct(false); });
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !$('acct-panel').hidden) toggleAcct(false); });
+window.addEventListener('hashchange', () => { closeNav(); document.body.classList.remove('nav-open'); $('menu-toggle').setAttribute('aria-expanded', 'false'); });
 
 applyTheme();
 ssoBoot().then(() => refresh({ force: true }));

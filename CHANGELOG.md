@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+### Changed: the fleet console has a new look
+- **Netra-style shell.** A 48 px frosted top bar replaces the sidebar: the orange Zyvor Z with "FluxVM", grouped menus
+  (**Overview**, **Cloud**: Macs, Networks, Images; **Compute**: Virtual machines, Volumes, Warm pools, Tunnels;
+  **Billing**: Billing, Usage; **Access**: Members, API keys, Activity, Notifications, and for operators Tenants and
+  Policy), search and ⌘K, alerts, refresh, a theme icon and an account menu. Menus open on hover or click, close with
+  Esc or an outside click, and move with the arrow keys. Below 860 px the groups sit behind a menu button.
+- Netra's colours, hairline cards, pill buttons and focus ring in light and dark; icons are inline SVG (no icon font);
+  the favicon is the Z. Routes (`#/vms/<mac>/<id>`), roles, SSO and the content security policy are unchanged.
+
 ### Added: sign-up confirms the email address; shared warm pools are opt-in
 - **Sign-up email confirmation (policy `signup_require_email_verification`, on by default).** `POST /signup` records a
   pending sign-up (24 hours) and mails a link through the operator's **mail webhook** (`--signup-mail-webhook URL|log`,
