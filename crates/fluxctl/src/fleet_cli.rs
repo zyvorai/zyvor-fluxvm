@@ -218,6 +218,10 @@ fn items(v: &Value) -> Vec<Value> {
         .unwrap_or_default()
 }
 
+fn num(x: u64) -> String {
+    x.to_string()
+}
+
 fn gib(mib: u64) -> String {
     if mib % 1024 == 0 {
         format!("{} GiB", mib / 1024)
@@ -948,7 +952,6 @@ async fn tenant_status(
         Some(m) => meter(out, used, m, fmt),
         None => format!("{}  {}", fmt(used), out.dim("(no limit)")),
     };
-    let num = |x: u64| x.to_string();
     kv(
         out,
         &[
@@ -2061,7 +2064,6 @@ fn tenant_detail(out: &Out, v: &Value) {
         Some(m) => meter(out, u(&used, k), m, f),
         None => format!("{}  {}", f(u(&used, k)), out.dim("(no limit)")),
     };
-    let num = |x: u64| x.to_string();
     kv(
         out,
         &[
