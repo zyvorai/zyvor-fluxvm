@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+### Docs and site: agent sandboxes and the Mac cloud platform, with their evidence labels
+- New `/agents` page on the docs site: the fork-into-four demo with its real output, the offline and local-model story,
+  the measured memory table and the MCP setup, with the caveats (only offline sandboxes fork; copies keep the parent's
+  identity; first create on a fresh daemon took 61 s).
+- `/mac-cloud` now shows what a team gets (leases and tenants, snapshots, volumes, tunnels, warm pools, metrics, SSO,
+  billing, SDKs), each card tagged with what it was run against; its steps use `fluxctl fleet`. `/mac` fixes the stale
+  Homebrew tab (`brew install zyvorai/tap/fluxvm`) and drops the removed capacity estimates for the measured figures.
+  The home page replaces its illustrative terminal and numbers with measured ones.
+- README, POSITIONING and PRODUCT_OVERVIEW gain the agent-sandbox and platform rows; a PR-time `Docs site check`
+  workflow builds the site before merge.
+
 ### Fixed: three rough edges found installing 0.4.4 from the Homebrew tap on a clean Mac
 - `fluxctl mcp install` (and `fluxctl service install`, and the ssh ProxyCommand of `fluxctl fleet ssh`) wrote the versioned
   Cellar path (`/opt/homebrew/Cellar/fluxvm/0.4.4/bin/fluxctl`), which `brew upgrade` plus `brew cleanup` removes. They now

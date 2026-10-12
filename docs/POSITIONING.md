@@ -29,6 +29,8 @@ hand-rolling XML for `virsh`.** Everything else in this doc builds on that.
 | **Platform/infra engineer evaluating a libvirt replacement** | Owns host-local VM lifecycle tooling | A real API instead of XML + `virsh`, without adopting a whole private-cloud platform | Drop-in command mapping (`fluxctl create` ≈ `virsh define`+`start`, etc.) — see [README: vs. libvirt/virsh](vs-libvirt.md#vs-libvirtvirsh) |
 | **CI/platform engineer building ephemeral infra** | Needs VM-per-job isolation that actually cleans up | TTL-guaranteed cleanup, no network path for untrusted code, cheap CoW cloning | Optional `ttl_seconds`, `network.mode: "none"` + vsock `exec`, qcow2 overlays — see [Use cases](index.md#use-cases) |
 | **Kubernetes platform engineer wanting VMs without KubeVirt** | Runs a K8s cluster, needs real VMs for some workloads | A lighter-weight, non-KubeVirt path that still feels Kubernetes-native | `DisposableVm` CRD + `fluxvm-kube` operator, or `fluxvm-microvm` for scheduler-driven placement — see [docs/microvm.md](../docs/microvm.md) |
+| **AI-agent builder who wants a disposable machine per task, on a Mac** | Runs coding agents (Claude Code, Cursor, Codex) locally or on a few Macs | Code and prompts that never leave the machine, a clean VM per attempt, trying several fixes in parallel | `fluxctl mcp install` plus offline sandboxes that fork into running copies in about 4 s (measured on an M4 mini; [agent-sandbox-demo](https://github.com/zyvorai/zyvor-fluxvm/tree/main/examples/agent-sandbox-demo)) |
+| **Mac team lead with a shelf of Mac minis and Studios** | Runs CI and shared dev machines | One API, tenants and leases, quotas, volumes, SSH without exposing the Macs, graphs | The fleet platform ([mac-cloud-tenancy.md](mac-cloud-tenancy.md)); tested against simulated Macs, not yet a real multi-Mac fleet |
 | **Economic buyer evaluating build-vs-adopt for a host-local VM layer** | Deciding whether to build this in-house or adopt FluxVM | Whether the maturity level matches the use case, whether it's a maintained open project or a dead end | Apache-2.0, actively developed, but read the [maturity caveat](proof-and-status.md#maturity-whats-real-today) honestly before committing — this is not yet a finished multi-tenant security boundary |
 
 The economic-buyer row matters here specifically because FluxVM is explicit about *not* being finished in one dimension (multi-tenant security hardening) while being solid in others (core VM lifecycle, Network Fabric GA, k3s-verified Kubernetes operator). A buyer should read the [maturity caveat](proof-and-status.md#maturity-whats-real-today) as the actual scoping tool, not a boilerplate disclaimer.
@@ -90,6 +92,7 @@ FluxVM's sandboxed-execution use case (Firecracker jailer + cgroups + netns + vs
 
 - "FluxVM — Rust-native VM control plane, standalone or as another product's VM backend"
 - "Host-local libvirt replacement with a real REST API"
+- "A throwaway computer for every agent task on your Mac: offline by default, forked into running copies in seconds" (cite the measured demo and its caveats)
 - "The same binary and API whether you run it directly or through Fabric/Ragnarok"
 - **Supports disposable / short-lived workloads via TTL and CoW when you need them**
 - "Firecracker isolation layering for production hosts; density figures optional for microVM packing" ([capability-figures.md](capability-figures.md))
@@ -99,6 +102,8 @@ FluxVM's sandboxed-execution use case (Firecracker jailer + cgroups + netns + vs
 - Leading with "Disposable Compute Engine" or defining FluxVM *as* disposable-only — disposable is a use pattern, not the category
 - Leading with "FluxVM is the engine under Fabric" — that undersells it as standalone-adoptable and buries the libvirt-replacement pitch, which is the strongest concrete differentiator this project has
 - Claiming feature parity with Kata Containers or gVisor — the honest claim is isolation-shape similarity, not compatibility
+- Claiming the Mac cloud platform is proven at fleet scale: it was run against simulated Macs, not several real ones
+- Advertising self-service sign-up or Stripe billing as ready: both are off by default until sign-up email verification exists
 - Citing unpublished boot-latency, density, or throughput numbers — measure first; see [capability-figures.md](capability-figures.md)
 - Softening the MVP/multi-tenant-security-boundary caveat to sound more finished than it is
 - Presenting Secure Containers as Kata-equivalent or claiming unrestricted hostPath — GA with documented scope boundaries

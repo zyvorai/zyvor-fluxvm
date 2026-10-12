@@ -144,4 +144,4 @@ more can exist; they are limited by disk. Run `scripts/bench-sandbox-mac.sh` on 
 ## Unattended hosts
 
 Snapshot restore (warm slots, hibernate) needs an unlocked login session. On a headless Mac: a dedicated user with automatic login,
-the daemon started by launchd in that user's session, and the screen lock off. See [deploy/launchd-notes.md](../deploy/launchd-notes.md).
+the daemon started by launchd in that user's session, and the screen lock off. See [deploy/launchd-notes.md](https://github.com/zyvorai/zyvor-fluxvm/blob/main/deploy/launchd-notes.md).

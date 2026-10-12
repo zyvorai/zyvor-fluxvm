@@ -96,4 +96,4 @@ A sandbox with no network (`"offline": true`) can be forked into running copies 
 is how an agent tries several approaches from one saved state and keeps the one that works. On an M4 mini it takes
 about 4 s to fork into four, and the four tests of the demo ran in 0.3 s. The runnable walk-through, with its timings
 and limits (a default NAT sandbox cannot be forked; the copies keep the parent's identity), is
-[examples/agent-sandbox-demo](../examples/agent-sandbox-demo/README.md).
+[examples/agent-sandbox-demo](https://github.com/zyvorai/zyvor-fluxvm/tree/main/examples/agent-sandbox-demo).
