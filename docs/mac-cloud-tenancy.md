@@ -89,7 +89,7 @@ Next: fluxctl fleet run macos-27-xcode-1 -- sw_vers
 | `fleet run VM -- CMD…` | Run a command in a VM found by name or ID prefix; prints the guest's output and exits with its code |
 | `fleet screen VM [-f out.png]` | Save a picture of a VM's display |
 | `fleet events [--limit N]` | The activity log (with the API key used) |
-| `fleet keys [create\\|revoke]` | A tenant's named API keys |
+| `fleet keys [create\|revoke]` | A tenant's named API keys |
 | `fleet rm VM` | Delete a VM by name (asks on a terminal; `-y` to skip) |
 | `fleet vms`, `fleet nodes`, `fleet node M` | VMs and Macs, with macOS slots (`●○`) and when each lease can be released |
 | `fleet lease create\|list\|get\|release` | Leases (`create --hours 72 --min-vcpus 16 --nested`) |
