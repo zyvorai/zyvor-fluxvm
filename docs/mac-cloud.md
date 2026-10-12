@@ -102,6 +102,7 @@ same registry: `fluxctl up --fleet http://fleet-registry:7799` ([macos-stacks.md
 - [github-actions-runners.md](github-actions-runners.md): one fresh VM per queued GitHub Actions job.
 - [cross-mac-networks.md](cross-mac-networks.md): one private network spanning several Macs (encrypted overlay).
 - [fleet-ha.md](fleet-ha.md): run two or three registries against one Redis, so the fleet survives losing one.
+- [fleet-quickstart.md](fleet-quickstart.md): run the whole cloud on one laptop with simulated Macs (`scripts/fleet-sim.sh`).
 - [macos-signing.md](macos-signing.md): Developer ID signing, which vmnet, bridged networking and USB passthrough need.
 
 ## Things Mac users will like

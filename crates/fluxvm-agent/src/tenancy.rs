@@ -172,6 +172,15 @@ pub struct OverlayNet {
     pub port: u16,
     /// The network key, 64 hex characters. Secret: only member nodes are ever given it.
     pub key_hex: String,
+    /// Epoch of `key_hex`; bumped by every rotation.
+    #[serde(default)]
+    pub epoch: u32,
+    /// The key before the last rotation, kept so Macs that have not picked up the new key yet still talk.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous: Option<(u32, String)>,
+    /// When the key was last set (creation or rotation).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rotated_at: Option<DateTime<Utc>>,
     pub mtu: u32,
     pub hosts_per_node: u8,
     /// Member node -> its host slice (inclusive).
@@ -189,6 +198,8 @@ impl OverlayNet {
             "port": self.port,
             "mtu": self.mtu,
             "members": self.members,
+            "key_epoch": self.epoch,
+            "key_rotated_at": self.rotated_at.unwrap_or(self.created_at),
             "created_at": self.created_at,
         })
     }
@@ -211,6 +222,9 @@ impl OverlayNet {
         None
     }
 }
+
+/// Shortest time between two key rotations of one network.
+pub const MIN_ROTATION_MINUTES: i64 = 5;
 
 /// First UDP port handed out to overlays.
 pub const OVERLAY_PORT_BASE: u16 = 47100;
@@ -258,6 +272,13 @@ pub struct Policy {
     /// First two octets of the tenant /24s, e.g. `10.230` gives tenant n `10.230.n.0/24`.
     #[serde(default = "tenant_subnet_prefix")]
     pub tenant_subnet_prefix: String,
+    /// Overlay network keys older than this are rotated by the reconciler (0 never rotates automatically).
+    #[serde(default = "overlay_key_rotation_days")]
+    pub overlay_key_rotation_days: i64,
+}
+
+fn overlay_key_rotation_days() -> i64 {
+    30
 }
 
 fn tenant_subnet_prefix() -> String {
@@ -285,6 +306,7 @@ impl Default for Policy {
             ledger_retention_days: ledger_retention_days(),
             isolate_tenant_networks: false,
             tenant_subnet_prefix: tenant_subnet_prefix(),
+            overlay_key_rotation_days: overlay_key_rotation_days(),
         }
     }
 }
@@ -899,6 +921,9 @@ impl TenancyState {
             subnet,
             port,
             key_hex,
+            epoch: 1,
+            previous: None,
+            rotated_at: Some(now),
             mtu,
             hosts_per_node,
             members: BTreeMap::new(),
@@ -972,6 +997,52 @@ impl TenancyState {
         let entry = self.overlays.get_mut(name).expect("checked above");
         entry.members.remove(node);
         Ok(entry.clone())
+    }
+
+    /// A new key at the next epoch; the old one stays as `previous` until the next rotation, so traffic keeps flowing
+    /// while member Macs pick the new key up (within a heartbeat).
+    pub fn rotate_overlay(
+        &mut self,
+        caller: &Caller,
+        name: &str,
+        now: DateTime<Utc>,
+    ) -> Result<OverlayNet, TenancyError> {
+        let o = self.overlay_for(caller, name)?;
+        // Switches keep sealing with the old key for a minute after loading a new one, and reach peers within about
+        // 20 s; a second rotation inside that would retire a key some Mac may still be sealing with.
+        if let Some(at) = o.rotated_at
+            && now - at < Duration::minutes(MIN_ROTATION_MINUTES)
+        {
+            return Err(TenancyError::Overlay(format!(
+                "network {name:?} was rotated less than {MIN_ROTATION_MINUTES} minutes ago"
+            )));
+        }
+        let key = random_key_hex().ok_or_else(|| {
+            TenancyError::Overlay("could not read random bytes for the key".into())
+        })?;
+        let o = self.overlays.get_mut(name).expect("checked above");
+        let old = std::mem::replace(&mut o.key_hex, key);
+        o.previous = Some((o.epoch, old));
+        o.epoch = o.epoch.wrapping_add(1);
+        o.rotated_at = Some(now);
+        Ok(o.clone())
+    }
+
+    /// Rotates every network whose key is older than `max_age`. Returns the names rotated.
+    pub fn rotate_due_overlays(
+        &mut self,
+        max_age: chrono::Duration,
+        now: DateTime<Utc>,
+    ) -> Vec<String> {
+        let due: Vec<String> = self
+            .overlays
+            .values()
+            .filter(|o| now - o.rotated_at.unwrap_or(o.created_at) >= max_age)
+            .map(|o| o.name.clone())
+            .collect();
+        due.into_iter()
+            .filter(|n| self.rotate_overlay(&Caller::Admin, n, now).is_ok())
+            .collect()
     }
 
     pub fn delete_overlay(&mut self, caller: &Caller, name: &str) -> Result<(), TenancyError> {
@@ -1549,6 +1620,46 @@ mod tests {
         );
         s.delete_overlay(&a, "a-net").unwrap();
         assert!(s.overlays.is_empty());
+    }
+
+    #[test]
+    fn overlay_keys_rotate_and_keep_the_previous_one() {
+        let mut s = TenancyState::default();
+        let n = s.create_overlay("lab", None, &[], 30, 1400, t0()).unwrap();
+        assert_eq!(n.epoch, 1);
+        assert!(n.previous.is_none());
+        let r = s
+            .rotate_overlay(&Caller::Admin, "lab", t0() + Duration::days(1))
+            .unwrap();
+        assert_eq!(r.epoch, 2);
+        assert_eq!(r.previous, Some((1, n.key_hex.clone())));
+        assert_ne!(r.key_hex, n.key_hex);
+        assert!(!r.public_json().to_string().contains(&r.key_hex));
+        // Automatic rotation only for keys older than the limit.
+        assert!(
+            s.rotate_due_overlays(Duration::days(30), t0() + Duration::days(10))
+                .is_empty()
+        );
+        assert_eq!(
+            s.rotate_due_overlays(Duration::days(30), t0() + Duration::days(32)),
+            vec!["lab".to_string()]
+        );
+        assert_eq!(s.overlays["lab"].epoch, 3);
+        assert_eq!(s.overlays["lab"].previous.as_ref().unwrap().0, 2);
+        // Not twice within a few minutes.
+        assert!(
+            s.rotate_overlay(
+                &Caller::Admin,
+                "lab",
+                t0() + Duration::days(32) + Duration::minutes(1)
+            )
+            .is_err()
+        );
+        // A tenant cannot rotate someone else's network.
+        assert!(
+            s.rotate_overlay(&Caller::Tenant("x".into()), "lab", t0())
+                .is_err()
+        );
     }
 
     #[test]

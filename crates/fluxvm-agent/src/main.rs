@@ -61,6 +61,35 @@ enum Command {
         #[arg(long, env = "FLUXVM_GHA_CONFIG")]
         config: PathBuf,
     },
+    /// Run a simulated Mac: an in-memory node API plus a heartbeat reporting Virtualization.framework capabilities.
+    /// For trying the fleet (leases, tenants, overlays, the console) on any machine. Nothing boots.
+    /// See docs/fleet-quickstart.md.
+    SimNode {
+        #[arg(long)]
+        name: String,
+        /// Central URL; with HA, a comma-separated list.
+        #[arg(long, env = "CENTRAL_URL", default_value = "http://127.0.0.1:7799")]
+        central: String,
+        /// Where the simulated node API listens; port 0 picks a free one.
+        #[arg(long, default_value = "127.0.0.1:0")]
+        listen: std::net::SocketAddr,
+        #[arg(long, env = "FLUXVM_AGENT_TOKEN")]
+        token: Option<String>,
+        #[arg(long, default_value = "12")]
+        vcpus: u32,
+        #[arg(long, default_value = "32")]
+        memory_gib: u64,
+        /// Report nested virtualization (an M3 or later Mac).
+        #[arg(long)]
+        nested: bool,
+        #[arg(long = "label", value_parser = parse_label)]
+        labels: Vec<(String, String)>,
+        #[arg(long, default_value = "10")]
+        interval_secs: u64,
+        /// Write the overlay.json this Mac would get here (default: none, no overlay sync).
+        #[arg(long)]
+        overlay_config: Option<PathBuf>,
+    },
     /// Run this node's heartbeat client, reporting to a central registry.
     Node {
         /// This node's name, as it'll appear in `POST /fleet/vms {"node": "..."}`.
@@ -95,6 +124,22 @@ enum Command {
         #[arg(long)]
         no_overlay_sync: bool,
     },
+}
+
+/// Resolves on Ctrl-C or SIGTERM.
+async fn shutdown_signal() {
+    let ctrl_c = tokio::signal::ctrl_c();
+    let mut term = match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+        Ok(s) => s,
+        Err(_) => {
+            let _ = ctrl_c.await;
+            return;
+        }
+    };
+    tokio::select! {
+        _ = ctrl_c => {}
+        _ = term.recv() => {}
+    }
 }
 
 /// Parses one `--label key=value` argument. Splits on the FIRST `=` only,
@@ -141,13 +186,27 @@ async fn main() -> Result<()> {
                 }
                 None => None,
             };
-            let app = fluxvm_agent::central::router(fluxvm_agent::central::CentralConfig {
-                state_dir,
-                token,
-                reconcile_interval: (reconcile_secs > 0)
-                    .then(|| Duration::from_secs(reconcile_secs)),
-                ha,
-            });
+            let (app, ha_handle) =
+                fluxvm_agent::central::router_with_handle(fluxvm_agent::central::CentralConfig {
+                    state_dir,
+                    token,
+                    reconcile_interval: (reconcile_secs > 0)
+                        .then(|| Duration::from_secs(reconcile_secs)),
+                    ha,
+                });
+            // On Ctrl-C or SIGTERM (launchd, systemd), hand the leader lock over before exiting.
+            if let Some(h) = ha_handle {
+                tokio::spawn(async move {
+                    shutdown_signal().await;
+                    match h.release().await {
+                        Ok(()) => tracing::info!("released the fleet leader lock"),
+                        Err(e) => {
+                            tracing::warn!(error = %e, "could not release the fleet leader lock")
+                        }
+                    }
+                    std::process::exit(0);
+                });
+            }
             let addr: SocketAddr = listen
                 .parse()
                 .with_context(|| format!("parsing listen address {listen}"))?;
@@ -179,6 +238,35 @@ async fn main() -> Result<()> {
                 .with_context(|| format!("parsing {}", config.display()))?;
             fluxvm_agent::gha::run(cfg).await?;
         }
+        Command::SimNode {
+            name,
+            central,
+            listen,
+            token,
+            vcpus,
+            memory_gib,
+            nested,
+            labels,
+            interval_secs,
+            overlay_config,
+        } => {
+            fluxvm_agent::sim::run(fluxvm_agent::sim::SimConfig {
+                name,
+                central_url: central,
+                token,
+                listen,
+                host: fluxvm_agent::node::SimHost {
+                    vcpus,
+                    memory_mib: memory_gib.saturating_mul(1024),
+                    nested_virtualization: nested,
+                    vmnet: true,
+                },
+                labels: labels.into_iter().collect(),
+                interval: Duration::from_secs(interval_secs.max(1)),
+                overlay_config,
+            })
+            .await?;
+        }
         Command::Node {
             name,
             central,
@@ -199,6 +287,7 @@ async fn main() -> Result<()> {
                 token,
                 labels: labels.into_iter().collect(),
                 overlay_config: (!no_overlay_sync).then(fluxvm_apple::vznet::overlay_config_path),
+                sim: None,
             })
             .await;
         }

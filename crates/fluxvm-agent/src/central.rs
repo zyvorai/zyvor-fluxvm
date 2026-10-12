@@ -258,7 +258,11 @@ fn constant_time_eq(a: &str, b: &str) -> bool {
 ///   to create tenants without `--token`.
 async fn auth_middleware(State(fleet): State<Fleet>, mut req: Request, next: Next) -> Response {
     let path = req.uri().path();
-    if path == "/healthz" || path == "/fleet/ha" || path == "/fleet/ha/leader" {
+    if path == "/healthz"
+        || path == "/fleet/ha"
+        || path == "/fleet/ha/leader"
+        || CONSOLE_PATHS.contains(&path)
+    {
         return next.run(req).await;
     }
     if let Some(ha) = &fleet.ha
@@ -342,7 +346,7 @@ fn tenant_route_allowed(method: &axum::http::Method, path: &str) -> bool {
         ["fleet", "leases", _, "release"] => post,
         ["fleet", "overlays"] => get || post,
         ["fleet", "overlays", _] => get || delete,
-        ["fleet", "overlays", _, "members"] => post,
+        ["fleet", "overlays", _, "members"] | ["fleet", "overlays", _, "rotate"] => post,
         ["fleet", "overlays", _, "members", _] => delete,
         _ => false,
     }
@@ -491,6 +495,9 @@ pub fn router_with_handle(cfg: CentralConfig) -> (Router, Option<HaHandle>) {
         cloud::spawn_reconciler(fleet.clone(), every);
     }
     let app = Router::new()
+        .route("/console", get(console_html))
+        .route("/console/", get(console_html))
+        .route("/console/app.js", get(console_js))
         .route("/fleet/ha", get(ha_rt::ha_status))
         .route("/fleet/ha/leader", get(ha_rt::ha_leader_check))
         .route("/healthz", get(|| async { Json(json!({"ok": true})) }))
@@ -546,6 +553,7 @@ pub fn router_with_handle(cfg: CentralConfig) -> (Router, Option<HaHandle>) {
             "/fleet/overlays/{name}/members",
             post(cloud::add_overlay_member),
         )
+        .route("/fleet/overlays/{name}/rotate", post(cloud::rotate_overlay))
         .route(
             "/fleet/overlays/{name}/members/{node}",
             axum::routing::delete(cloud::remove_overlay_member),
@@ -562,6 +570,37 @@ pub fn router_with_handle(cfg: CentralConfig) -> (Router, Option<HaHandle>) {
         ))
         .with_state(fleet);
     (app, handle)
+}
+
+// ---- the fleet console: two static files, no auth to fetch them (the page asks for a token and calls the API) ----
+
+const CONSOLE_PATHS: [&str; 3] = ["/console", "/console/", "/console/app.js"];
+const CONSOLE_HTML: &str = include_str!("fleet_console.html");
+const CONSOLE_JS: &str = include_str!("fleet_console.js");
+const CONSOLE_CSP: &str = "default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; connect-src 'self'; \
+     img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
+
+fn console_file(content_type: &'static str, body: &'static str) -> Response {
+    (
+        [
+            (header::CONTENT_TYPE, content_type),
+            (header::CONTENT_SECURITY_POLICY, CONSOLE_CSP),
+            (header::X_FRAME_OPTIONS, "DENY"),
+            (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+            (header::REFERRER_POLICY, "no-referrer"),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
+        body,
+    )
+        .into_response()
+}
+
+async fn console_html() -> Response {
+    console_file("text/html; charset=utf-8", CONSOLE_HTML)
+}
+
+async fn console_js() -> Response {
+    console_file("text/javascript; charset=utf-8", CONSOLE_JS)
 }
 
 /// Insert/update a node from a heartbeat. A brand-new node starts

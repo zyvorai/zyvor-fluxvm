@@ -71,6 +71,15 @@ impl<E: Into<anyhow::Error>> From<E> for ApiError {
                 message: format!("{:#}", e),
             };
         }
+        // Apple allows two macOS guests per Mac; it clears when one stops.
+        if e.downcast_ref::<fluxvm_scheduler::apple_placement::MacosGuestLimit>()
+            .is_some()
+        {
+            return Self {
+                status: StatusCode::CONFLICT,
+                message: format!("{:#}", e),
+            };
+        }
         use fluxvm_scheduler::procbox_sandbox::ProcboxError;
         // Procbox sandboxes fail in ways a plain 400 would hide: a disabled
         // feature, a guest-only route, an unenforceable policy, a too-large
@@ -398,6 +407,10 @@ pub fn router(manager: Arc<VmManager>) -> Router {
             get(list_vm_branches).post(create_branch),
         )
         .route("/v1/branches", get(list_branches))
+        .route("/v1/branches/prune", post(prune_branches))
+        .route("/v1/branches/import", post(import_branch))
+        .route("/v1/branches/{a}/diff/{b}", get(diff_branches))
+        .route("/v1/branches/{id}/export", post(export_branch))
         .route("/v1/branches/{id}", get(get_branch).delete(delete_branch))
         .route("/v1/branches/{id}/start", post(start_branch))
         .route("/v1/vms/{id}/cbt-backup", post(cbt_backup))
@@ -2787,6 +2800,88 @@ async fn list_vm_branches(
 
 async fn list_branches(State(m): State<Arc<VmManager>>) -> ApiResult<Json<serde_json::Value>> {
     Ok(Json(json!({"items": m.list_branches(None).await?})))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PruneBranchesRequest {
+    #[serde(flatten)]
+    policy: fluxvm_scheduler::branch::PrunePolicy,
+    /// Defaults to true: nothing is deleted unless the caller sends `"dry_run": false`.
+    #[serde(default = "default_true")]
+    dry_run: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// Remove branches by policy (newest N kept, older than a cutoff, scoped to a VM or name prefix; branches labelled
+/// `fluxvm.dev/keep: "true"` are never removed). A dry run by default.
+async fn prune_branches(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    actor: Option<Extension<AuditActor>>,
+    Json(req): Json<PruneBranchesRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    let actor_name = actor.as_ref().map(|a| a.0.0.as_str());
+    let report = m
+        .prune_branches(&req.policy, req.dry_run, actor_name)
+        .await?;
+    Ok(Json(json!(report)))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ExportBranchRequest {
+    /// A directory that does not exist yet; the bundle is written there.
+    path: std::path::PathBuf,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ImportBranchRequest {
+    /// A bundle written by export.
+    path: std::path::PathBuf,
+    /// Defaults to the bundle's own name.
+    name: Option<String>,
+}
+
+/// How branch `b` differs from `a`: saved sizes, lineage and labels.
+async fn diff_branches(
+    State(m): State<Arc<VmManager>>,
+    Path((a, b)): Path<(Uuid, Uuid)>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let (x, y) = (m.get_branch(a).await?, m.get_branch(b).await?);
+    Ok(Json(json!(fluxvm_scheduler::branch::diff_branches(&x, &y))))
+}
+
+/// Writes a branch to a bundle directory on the host (owner-only; it carries the guest's agent token like its disk).
+async fn export_branch(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+    actor: Option<Extension<AuditActor>>,
+    Json(req): Json<ExportBranchRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    let actor_name = actor.as_ref().map(|a| a.0.0.as_str());
+    let path = m.export_branch(id, &req.path, actor_name).await?;
+    Ok(Json(json!({"branch": id, "path": path})))
+}
+
+/// Imports an exported bundle as a new branch (new id, parent link dropped).
+async fn import_branch(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    actor: Option<Extension<AuditActor>>,
+    Json(req): Json<ImportBranchRequest>,
+) -> ApiResult<impl IntoResponse> {
+    require_admin(role)?;
+    let actor_name = actor.as_ref().map(|a| a.0.0.as_str());
+    let b = m.import_branch(&req.path, req.name, actor_name).await?;
+    Ok((StatusCode::CREATED, Json(json!(b))))
 }
 
 async fn get_branch(
@@ -5277,20 +5372,24 @@ mod tests {
     use std::path::PathBuf;
 
     fn fixture(backend: BackendKind, status: VmStatus, agent_enabled: bool) -> VmRecord {
+        // A path that does not exist and is unique to the fixture; a fixed `/tmp/x` broke these tests on any machine
+        // where something (even an empty file) already sat there.
+        let id = Uuid::new_v4();
+        let root = std::env::temp_dir().join(format!("fluxvm-fixture-{id}"));
         VmRecord {
-            id: Uuid::new_v4(),
+            id,
             name: "fixture".into(),
             backend,
             status,
             pid: None,
             created_at: chrono::Utc::now(),
             expires_at: None,
-            workspace: PathBuf::from("/tmp/x"),
-            disk: PathBuf::from("/tmp/x/root.qcow2"),
+            workspace: root.clone(),
+            disk: root.join("root.qcow2"),
             seed_disk: None,
             tap_name: None,
             control_socket: None,
-            log_path: PathBuf::from("/tmp/x/console.log"),
+            log_path: root.join("console.log"),
             error: None,
             request: CreateVmRequest {
                 apple: None,
