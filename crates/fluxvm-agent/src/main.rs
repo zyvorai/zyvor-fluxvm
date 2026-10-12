@@ -91,6 +91,9 @@ enum Command {
         /// e.g. `--label zone=us-east --label gpu=true`.
         #[arg(long = "label", value_parser = parse_label)]
         labels: Vec<(String, String)>,
+        /// Do not write this Mac's overlay.json (private networks spanning Macs) from the fleet's allocation.
+        #[arg(long)]
+        no_overlay_sync: bool,
     },
 }
 
@@ -184,6 +187,7 @@ async fn main() -> Result<()> {
             interval_secs,
             token,
             labels,
+            no_overlay_sync,
         } => {
             let advertise_url = advertise_url.unwrap_or_else(|| fluxvm_url.clone());
             fluxvm_agent::node::run(fluxvm_agent::node::NodeConfig {
@@ -194,6 +198,7 @@ async fn main() -> Result<()> {
                 interval: Duration::from_secs(interval_secs.max(1)),
                 token,
                 labels: labels.into_iter().collect(),
+                overlay_config: (!no_overlay_sync).then(fluxvm_apple::vznet::overlay_config_path),
             })
             .await;
         }

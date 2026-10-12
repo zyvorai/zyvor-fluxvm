@@ -507,7 +507,7 @@ pub fn serve(socket: &Path, idle: Duration) -> Result<()> {
 pub fn serve_with_overlay(
     socket: &Path,
     idle: Duration,
-    overlay: Option<overlay::Overlay>,
+    overlay: Option<Arc<overlay::Overlay>>,
 ) -> Result<()> {
     if socket.exists() {
         if UnixStream::connect(socket).is_ok() {
@@ -533,7 +533,6 @@ pub fn serve_with_overlay(
     listener.set_nonblocking(true)?;
     let table = Arc::new(Table::default());
     if let Some(ov) = overlay {
-        let ov = Arc::new(ov);
         eprintln!(
             "fluxvm-vz-switch: overlay on {:?} with {} peer(s)",
             ov.local_addr(),
@@ -749,7 +748,7 @@ mod tests {
         .unwrap();
         let s = sock.to_path_buf();
         let h = std::thread::spawn(move || {
-            serve_with_overlay(&s, Duration::from_millis(1500), Some(ov)).unwrap()
+            serve_with_overlay(&s, Duration::from_millis(1500), Some(Arc::new(ov))).unwrap()
         });
         for _ in 0..50 {
             if UnixStream::connect(sock).is_ok() {

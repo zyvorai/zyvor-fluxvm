@@ -169,6 +169,8 @@ pub struct Inbound {
 /// The overlay half of one switch.
 pub struct Overlay {
     cfg: OverlayConfig,
+    /// Current peers; starts as `cfg.peers` and can change while the switch runs ([`Overlay::set_peers`]).
+    peers: std::sync::RwLock<Vec<SocketAddr>>,
     cipher: Box<dyn FrameCipher>,
     sender: u32,
     counter: AtomicU64,
@@ -182,6 +184,7 @@ impl Overlay {
     /// An overlay that only seals and opens (no socket): for tests and tools.
     pub fn detached(cfg: OverlayConfig, cipher: Box<dyn FrameCipher>) -> Self {
         Self {
+            peers: std::sync::RwLock::new(cfg.peers.clone()),
             cfg,
             cipher,
             sender: random_u32(),
@@ -203,7 +206,20 @@ impl Overlay {
     }
 
     pub fn peer_count(&self) -> usize {
-        self.cfg.peers.len()
+        self.peers().len()
+    }
+
+    pub fn peers(&self) -> Vec<SocketAddr> {
+        self.peers.read().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// Replaces the peers (a Mac joined or left the network). MACs learned behind a removed peer are forgotten.
+    pub fn set_peers(&self, peers: Vec<SocketAddr>) {
+        self.learned
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|_, (p, _)| peers.contains(p));
+        *self.peers.write().unwrap_or_else(|e| e.into_inner()) = peers;
     }
 
     pub fn local_addr(&self) -> Option<SocketAddr> {
@@ -231,7 +247,7 @@ impl Overlay {
     }
 
     fn peer_ip_allowed(&self, ip: IpAddr) -> bool {
-        self.cfg.peers.iter().any(|p| p.ip() == ip)
+        self.peers().iter().any(|p| p.ip() == ip)
     }
 
     /// Checks and opens one datagram from `from`. `local` are the MACs of this switch's own guests, which no peer may
@@ -297,7 +313,7 @@ impl Overlay {
                 None => {}
             }
         }
-        self.cfg.peers.clone()
+        self.peers()
     }
 
     /// Seals `frame` and sends it to its peers. Never blocks the switch: a full socket drops the datagram.
@@ -449,6 +465,25 @@ pub(crate) mod tests {
         // A jump wider than the window clears every slot.
         assert!(w.accept(10_000));
         assert!(w.accept(9_990));
+    }
+
+    #[test]
+    fn peers_can_change_while_running() {
+        let (a, b, a_addr, _) = pair(7, 7);
+        assert!(
+            b.open(&a.seal(&frame(B, A)).unwrap(), a_addr, &[B])
+                .is_some()
+        );
+        assert_eq!(b.destinations(&frame(A, B)), vec![a_addr]);
+        // a leaves the network: its datagrams are refused and what was learned behind it is forgotten.
+        let c_addr: SocketAddr = "10.0.0.3:47000".parse().unwrap();
+        b.set_peers(vec![c_addr]);
+        assert!(
+            b.open(&a.seal(&frame(B, A)).unwrap(), a_addr, &[B])
+                .is_none()
+        );
+        assert_eq!(b.destinations(&frame(A, B)), vec![c_addr]);
+        assert_eq!(b.peer_count(), 1);
     }
 
     #[test]

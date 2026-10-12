@@ -18,7 +18,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 const USAGE: &str = "usage: fluxvm-vz-switch --socket PATH [--idle-exit-secs N] [--netobs-socket PATH [--network NAME]] \
-[--overlay-listen ADDR --overlay-peer ADDR... --overlay-key-file PATH]";
+[--overlay-listen ADDR --overlay-peer ADDR... --overlay-key-file PATH [--overlay-config PATH]]";
 
 fn main() {
     let mut socket: Option<PathBuf> = None;
@@ -28,6 +28,7 @@ fn main() {
     let mut overlay_listen: Option<std::net::SocketAddr> = None;
     let mut overlay_peers: Vec<std::net::SocketAddr> = Vec::new();
     let mut overlay_key: Option<PathBuf> = None;
+    let mut overlay_config: Option<PathBuf> = None;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
@@ -51,6 +52,10 @@ fn main() {
                 Some(a) => overlay_peers.push(a),
                 None => usage(),
             },
+            "--overlay-config" => match args.next() {
+                Some(p) => overlay_config = Some(PathBuf::from(p)),
+                None => usage(),
+            },
             "--overlay-key-file" => match args.next() {
                 Some(p) => overlay_key = Some(PathBuf::from(p)),
                 None => usage(),
@@ -71,7 +76,11 @@ fn main() {
     let overlay = match (overlay_listen, overlay_key) {
         (None, None) if overlay_peers.is_empty() => None,
         (Some(listen), Some(key_file)) => {
-            Some(open_overlay(&network, listen, overlay_peers, &key_file))
+            let ov = std::sync::Arc::new(open_overlay(&network, listen, overlay_peers, &key_file));
+            if let Some(path) = overlay_config {
+                watch_peers(path, network.clone(), ov.clone());
+            }
+            Some(ov)
         }
         _ => {
             eprintln!(
@@ -84,6 +93,42 @@ fn main() {
         eprintln!("fluxvm-vz-switch: {e:#}");
         std::process::exit(1);
     }
+}
+
+/// Re-reads this network's peers from the Mac's `overlay.json` every 10 s, so Macs joining or leaving the network
+/// take effect without restarting the switch (and its guests' links).
+fn watch_peers(
+    path: PathBuf,
+    network: String,
+    ov: std::sync::Arc<fluxvm_vz_switch::overlay::Overlay>,
+) {
+    std::thread::spawn(move || {
+        loop {
+            std::thread::sleep(Duration::from_secs(10));
+            let Ok(raw) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) else {
+                continue;
+            };
+            let Some(list) = v["networks"][network.as_str()]["peers"].as_array() else {
+                // The network left this Mac's file: keep running for the guests still attached, with no peers.
+                if ov.peer_count() > 0 {
+                    eprintln!("fluxvm-vz-switch: {network} no longer has peers");
+                    ov.set_peers(Vec::new());
+                }
+                continue;
+            };
+            let peers: Vec<std::net::SocketAddr> = list
+                .iter()
+                .filter_map(|p| p.as_str()?.parse().ok())
+                .collect();
+            if peers != ov.peers() {
+                eprintln!("fluxvm-vz-switch: {network} peers now {peers:?}");
+                ov.set_peers(peers);
+            }
+        }
+    });
 }
 
 fn open_overlay(

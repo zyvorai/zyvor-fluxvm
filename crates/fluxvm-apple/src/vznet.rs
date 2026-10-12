@@ -446,6 +446,7 @@ fn spawn_switch(
                     cmd.arg("--overlay-peer").arg(p);
                 }
                 cmd.arg("--overlay-key-file").arg(&o.key_file);
+                cmd.arg("--overlay-config").arg(overlay_config_path());
             }
         }
         Err(e) => {
