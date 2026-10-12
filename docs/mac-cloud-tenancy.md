@@ -398,7 +398,7 @@ an `Origin`, come from the public URL; otherwise it is refused with `403`.
 
 | Role | May |
 |---|---|
-| `viewer` | Look at everything of the tenant (usage graphs, invoices and open tunnels included), **including live VM screens and console logs**, which can contain secrets; change nothing, and open no tunnel. |
+| `viewer` | Look at the tenant's VMs, usage graphs, invoices and open tunnels; change nothing, open no tunnel, and **no live VM screens or console logs** (both can contain secrets: a typed password, an environment dump). |
 | `member` | Also launch, control, run commands in and delete VMs, take, restore and delete snapshots, clone VMs, open SSH and port tunnels, and manage volumes and private networks. |
 | `admin` | Every tenant action: also leases, warm pools, closing tunnels, payment methods, API keys, members, the budget and webhooks. Cannot change or remove an owner, or make someone an owner. |
 | `owner` | Everything, including other owners. The last owner cannot be demoted, or removed while others remain. |

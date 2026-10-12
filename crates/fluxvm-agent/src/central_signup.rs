@@ -183,13 +183,18 @@ impl Limiter {
 
 /// The address a request came from: the peer, or, behind a reverse proxy on this machine, the address it appended
 /// to `X-Forwarded-For`. IPv6 addresses count per /64, which is what one customer usually gets.
-fn client_addr(req: &Request) -> Option<IpAddr> {
+pub(super) fn client_addr(req: &Request) -> Option<IpAddr> {
     let peer = req
         .extensions()
         .get::<ConnectInfo<SocketAddr>>()
         .map(|c| c.0.ip())?;
+    Some(client_ip(peer, req.headers()))
+}
+
+/// [`client_addr`] from the peer address and the request headers (for handlers that extract those).
+fn client_ip(peer: IpAddr, headers: &axum::http::HeaderMap) -> IpAddr {
     let ip = if peer.is_loopback() {
-        req.headers()
+        headers
             .get("x-forwarded-for")
             .and_then(|v| v.to_str().ok())
             .and_then(|v| v.rsplit(',').next())
@@ -198,7 +203,7 @@ fn client_addr(req: &Request) -> Option<IpAddr> {
     } else {
         peer
     };
-    Some(match ip {
+    match ip {
         IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
             Some(v4) => IpAddr::V4(v4),
             None => {
@@ -207,7 +212,7 @@ fn client_addr(req: &Request) -> Option<IpAddr> {
             }
         },
         v4 => v4,
-    })
+    }
 }
 
 // ---- validation ---------------------------------------------------------------------------------------------------
@@ -311,6 +316,9 @@ pub(super) async fn payment_gate(
         ["fleet", "vms"]
         | ["fleet", "leases"]
         | ["fleet", "vms", _, _, "clone"]
+        // Bringing a stopped VM back, or rolling one back, bills again as much as creating one.
+        | ["fleet", "vms", _, _, "start" | "restart" | "resume"]
+        | ["fleet", "vms", _, _, "snapshots", _, "restore"]
         | ["fleet", "volumes"]
         | ["fleet", "volumes", _, "resize"]
         | ["fleet", "pools"] => *method == Method::POST,
@@ -1507,6 +1515,61 @@ mod tests {
             .body(Body::from(body))
             .unwrap();
         app.clone().oneshot(req).await.unwrap().status()
+    }
+
+    /// Every route that starts or restores billable VM time is held back for a tenant that still owes a payment method,
+    /// and nothing else is.
+    #[tokio::test]
+    async fn the_payment_gate_covers_start_restart_resume_and_snapshot_restore() {
+        use axum::http::Method;
+        let (fleet, _app, _calls) = setup().await;
+        {
+            let mut t = fleet.tenancy.lock().await;
+            t.create_tenant("acme", None, Default::default(), Utc::now())
+                .unwrap();
+            t.tenants.get_mut("acme").unwrap().payment_method_pending = true;
+        }
+        let held = [
+            (Method::POST, "/fleet/vms"),
+            (Method::POST, "/fleet/leases"),
+            (Method::POST, "/fleet/vms/mac-1/abc/clone"),
+            (Method::POST, "/fleet/vms/mac-1/abc/start"),
+            (Method::POST, "/fleet/vms/mac-1/abc/restart"),
+            (Method::POST, "/fleet/vms/mac-1/abc/resume"),
+            (Method::POST, "/fleet/vms/mac-1/abc/snapshots/clean/restore"),
+        ];
+        for (m, p) in &held {
+            assert!(
+                payment_gate(&fleet, "acme", m, p).await.is_some(),
+                "{m} {p} should be held"
+            );
+        }
+        let free = [
+            (Method::GET, "/fleet/vms"),
+            (Method::POST, "/fleet/vms/mac-1/abc/stop"),
+            (Method::POST, "/fleet/vms/mac-1/abc/pause"),
+            (Method::DELETE, "/fleet/vms/mac-1/abc"),
+            (Method::GET, "/fleet/vms/mac-1/abc/snapshots"),
+            (Method::POST, "/fleet/billing/payment-method"),
+        ];
+        for (m, p) in &free {
+            assert!(
+                payment_gate(&fleet, "acme", m, p).await.is_none(),
+                "{m} {p} should pass"
+            );
+        }
+        // Once the payment method exists, nothing is held.
+        fleet
+            .tenancy
+            .lock()
+            .await
+            .tenants
+            .get_mut("acme")
+            .unwrap()
+            .payment_method_pending = false;
+        for (m, p) in &held {
+            assert!(payment_gate(&fleet, "acme", m, p).await.is_none());
+        }
     }
 
     #[tokio::test]

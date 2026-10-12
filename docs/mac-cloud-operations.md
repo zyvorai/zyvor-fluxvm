@@ -159,8 +159,8 @@ Marked ✅ when the code already enforces it, ☐ when it is yours to do.
 - ✅ Invoices are idempotent per tenant and month, and never bill twice across restarts or failovers.
 
 **Console and tunnels**
-- ☐ Decide whether viewers may see live screens and console logs (they can: both are reads). Either accept that or give
-  those people the member role in a tenant that does not hold secrets.
+- ✅ Viewers get neither live screens nor console logs (`403` from central, and the console says so): both can hold
+  secrets. Give someone the member role if they need them.
 - ☐ Remember that a tunnel opened from a console session is not closed by logging out or by rotating the tenant's token;
   removing or demoting the member does end it, and so do the idle timeout (60 minutes) and the maximum lifetime (8 hours
   by default). To cut access off at once, delete it (`DELETE /fleet/tunnels/{id}`) or remove the tenant's VM.

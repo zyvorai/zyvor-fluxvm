@@ -346,7 +346,7 @@ function Honest(): ReactNode {
               </li>
               <li>
                 Self-service sign-up and Stripe are off by default and should stay off until sign-up email
-                verification exists. Console viewers can see live screens and logs, and shared warm pools share a
+                verification exists. Shared warm pools share a
                 network and image credentials: see <Link to="/docs/mac-cloud-operations">the operations guide</Link>.
               </li>
               <li>Thunderbolt RDMA, the shared vmnet broker and physical USB passthrough are not verified.</li>

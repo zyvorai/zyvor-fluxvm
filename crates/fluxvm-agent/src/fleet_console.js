@@ -1470,10 +1470,125 @@ function powerRow(v) {
   return buttons.length && can('change') ? h('div', { class: 'row', style: { marginBottom: '8px' } }, buttons) : null;
 }
 
+// A console log drawn like a macOS Terminal window: traffic lights, a title, line numbers, and colour. Colour comes
+// from ANSI escapes in the log itself, or, for the plain "<time> <source>: <message>" lines the daemon writes, from the
+// shape of the line. Everything goes through text nodes: log text is guest-controlled and never reaches innerHTML.
+const ANSI_COLORS = ['black', 'red', 'green', 'yellow', 'blue', 'magenta', 'cyan', 'white'];
+const LOG_SOURCE_COLORS = ['cyan', 'magenta', 'blue', 'orange', 'green', 'yellow'];
+
+function logSpan(cls, text) {
+  return h('span', cls ? { class: cls } : {}, text);
+}
+
+// Splits `line` on SGR escapes (`ESC[31m` ...) into coloured spans; null when the line has none.
+function ansiLine(line) {
+  if (line.indexOf('\x1b[') < 0) return null;
+  const out = [];
+  let cls = [];
+  let last = 0;
+  const re = /\x1b\[([0-9;]*)m/g;
+  let m;
+  const push = (text) => { if (text) out.push(logSpan(cls.join(' '), text)); };
+  while ((m = re.exec(line))) {
+    push(line.slice(last, m.index));
+    last = re.lastIndex;
+    const codes = m[1] === '' ? [0] : m[1].split(';').map((n) => parseInt(n, 10));
+    for (const c of codes) {
+      if (c === 0) cls = [];
+      else if (c === 1) cls = cls.filter((x) => x !== 'b').concat('b');
+      else if (c === 2) cls = cls.filter((x) => x !== 'dim').concat('dim');
+      else if (c === 22) cls = cls.filter((x) => x !== 'b' && x !== 'dim');
+      else if (c >= 30 && c <= 37) cls = cls.filter((x) => !x.startsWith('c-')).concat('c-' + ANSI_COLORS[c - 30]);
+      else if (c >= 90 && c <= 97) cls = cls.filter((x) => !x.startsWith('c-')).concat('c-' + ANSI_COLORS[c - 90] + ' bright');
+      else if (c === 39) cls = cls.filter((x) => !x.startsWith('c-') && x !== 'bright');
+    }
+  }
+  push(line.slice(last).replace(/\x1b\[[0-9;?]*[A-Za-z]/g, ''));
+  return out;
+}
+
+function sourceColor(name) {
+  let n = 0;
+  for (let i = 0; i < name.length; i++) n = (n * 31 + name.charCodeAt(i)) >>> 0;
+  return LOG_SOURCE_COLORS[n % LOG_SOURCE_COLORS.length];
+}
+
+// Colours the words that matter in a plain log line, leaving everything else untouched.
+function keywordSpans(text) {
+  const out = [];
+  const re = /\b(error|errors|fatal|failed|failure|panic|panicked|traceback|denied|refused|timed out|oom)\b|\b(warn|warning|deprecated|retrying)\b|\b(ok|ready|running|started|connected|success|succeeded|passed|listening)\b/gi;
+  let last = 0;
+  let m;
+  while ((m = re.exec(text))) {
+    if (m.index > last) out.push(text.slice(last, m.index));
+    out.push(logSpan(m[1] ? 'lv-err' : m[2] ? 'lv-warn' : 'lv-ok', m[0]));
+    last = re.lastIndex;
+  }
+  if (last < text.length) out.push(text.slice(last));
+  return out;
+}
+
+function plainLine(line) {
+  const out = [];
+  let rest = line;
+  const ts = /^(\d{4}-\d{2}-\d{2}[T ][0-9:.]+(?:Z|[+-]\d\d:?\d\d)?)\s+/.exec(rest);
+  if (ts) {
+    // Just the time of day, to the millisecond: the date and offset are on hover (the panes are narrow).
+    const t = /[T ](\d\d:\d\d:\d\d(?:\.\d{1,3})?)/.exec(ts[1]);
+    const s = h('span', { class: 'ts', title: ts[1] }, t ? t[1] : ts[1]);
+    out.push(s, ' ');
+    rest = rest.slice(ts[0].length);
+  }
+  const src = /^([A-Za-z][\w.-]{0,31})(\[\d+\])?:\s+/.exec(rest);
+  if (src) {
+    out.push(logSpan('src c-' + sourceColor(src[1]), src[1] + (src[2] || '') + ':'), ' ');
+    rest = rest.slice(src[0].length);
+  }
+  const bracket = /^\[\s*(OK|FAILED|SKIP|WARN)\s*\]\s*/.exec(rest);
+  if (bracket) {
+    const cls = bracket[1] === 'OK' ? 'lv-ok' : bracket[1] === 'FAILED' ? 'lv-err' : 'lv-warn';
+    out.push(logSpan(cls + ' b', '[ ' + bracket[1] + ' ]'), ' ');
+    rest = rest.slice(bracket[0].length);
+  }
+  return out.concat(keywordSpans(rest));
+}
+
+// The window: `text` is the raw log. Returns the element and a function that swaps the text in place.
+function termWindow(title, text) {
+  const body = h('div', { class: 'mterm-body', tabindex: '0', role: 'log', 'aria-label': title });
+  const count = h('span', { class: 'mterm-meta' });
+  const fill = (raw) => {
+    body.textContent = '';
+    const lines = String(raw).replace(/\r\n?/g, '\n').replace(/\n+$/, '').split('\n');
+    for (const line of lines) body.append(h('div', { class: 'mterm-line' }, ansiLine(line) || plainLine(line)));
+    body.append(h('div', { class: 'mterm-line mterm-cursor', 'aria-hidden': 'true' }, h('span', { class: 'caret' }, ' ')));
+    count.textContent = lines.length + (lines.length === 1 ? ' line' : ' lines');
+    body.scrollTop = body.scrollHeight;
+  };
+  fill(text || '');
+  const el = h('div', { class: 'mterm' },
+    h('div', { class: 'mterm-bar' },
+      h('span', { class: 'mterm-dots', 'aria-hidden': 'true' }, h('i', { class: 'r' }), h('i', { class: 'y' }), h('i', { class: 'g' })),
+      h('span', { class: 'mterm-title' }, title), count),
+    body);
+  return { el, fill };
+}
+
 function logsPanel(v) {
   const k = vmKey(v);
-  const pre = h('div', { class: 'term', hidden: !S.logs[k] }, S.logs[k] || '');
+  // A console log can hold secrets (an environment dump, a typed password): the server refuses viewers, so say why.
+  if (S.user && S.user.role === 'viewer') {
+    return h('section', {}, h('h3', {}, 'Console log'),
+      h('p', { class: 'hint' }, 'Console logs and live screens can hold secrets, so viewers do not get them. Ask an admin of your team for the member role.'));
+  }
+  const win = termWindow(v.name + ' \u2014 console log', S.logs[k] || '');
+  win.el.hidden = !S.logs[k];
   const btn = h('button', { class: 'plain' }, S.logs[k] ? 'Refresh' : 'Show log');
+  const copy = h('button', { class: 'plain', hidden: !S.logs[k] }, 'Copy');
+  copy.addEventListener('click', async () => {
+    try { await navigator.clipboard.writeText(S.logs[k] || ''); copy.textContent = 'Copied'; } catch (e) { copy.textContent = 'Not copied'; }
+    setTimeout(() => { copy.textContent = 'Copy'; }, 1400);
+  });
   btn.addEventListener('click', async () => {
     btn.disabled = true;
     try {
@@ -1482,11 +1597,11 @@ function logsPanel(v) {
     } catch (e) { S.logs[k] = 'The log could not be loaded: ' + e.message; }
     btn.disabled = false;
     btn.textContent = 'Refresh';
-    pre.textContent = S.logs[k];
-    pre.hidden = false;
-    pre.scrollTop = pre.scrollHeight;
+    copy.hidden = false;
+    win.fill(S.logs[k]);
+    win.el.hidden = false;
   });
-  return h('section', {}, h('div', { class: 'row' }, h('h3', { class: 'grow' }, 'Console log'), btn), pre);
+  return h('section', {}, h('div', { class: 'row' }, h('h3', { class: 'grow' }, 'Console log'), copy, btn), win.el);
 }
 
 // ---- metrics --------------------------------------------------------------------------------------------------------
@@ -1919,6 +2034,11 @@ function stopScreen() {
 }
 
 function screenPanel(v, running) {
+  // The server refuses viewers a live screen (it can show secrets); say so instead of showing a broken picture.
+  if (S.user && S.user.role === 'viewer') {
+    return h('section', {}, h('h3', {}, 'Screen'),
+      h('p', { class: 'hint' }, 'Live screens and console logs can hold secrets, so viewers do not get them. Ask an admin of your team for the member role.'));
+  }
   const k = vmKey(v);
   const wasRunning = screen.running;
   screen.running = running;
@@ -2555,7 +2675,7 @@ function readQuota(f) {
 // carries X-FluxVM-Console (central refuses changes made with the cookie without it).
 
 const ROLES = [
-  ['viewer', 'Viewer', 'Sees everything, changes nothing.'],
+  ['viewer', 'Viewer', 'Sees the tenant and its graphs, changes nothing, and does not get live screens or console logs.'],
   ['member', 'Member', 'Launches and manages VMs and networks.'],
   ['admin', 'Admin', 'Also leases Macs and manages keys, members, budget and webhooks.'],
   ['owner', 'Owner', 'Everything, including other owners.'],

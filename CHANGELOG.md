@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+### Changed: viewers no longer get live screens or console logs; console log viewer redrawn
+- `GET /fleet/vms/{node}/{id}/screen` and `/logs` now answer `403` for the `viewer` role (both can hold secrets);
+  members, admins, owners, API keys and the operator are unchanged. The console says why instead of showing a broken
+  picture.
+- The console's log view is drawn like a macOS Terminal window: traffic lights, a title, line numbers, a blinking
+  cursor, times compacted to `HH:MM:SS.mmm` (full value on hover), sources and keywords in colour, and ANSI colour
+  codes honoured. All log text goes through text nodes.
+
+### Fixed: payment gate and sign-in flooding
+- Start, restart, resume and snapshot restore are held for a tenant that still owes a payment method, like create and
+  clone already were.
+- `GET /auth/login` is limited to 20 sign-in starts per client address per minute (behind a proxy on the same machine,
+  the forwarded address), so one caller can no longer evict everyone's pending sign-ins.
+
 ### Fixed: console tunnels outlived their person and had no end
 - A tunnel opened from a console session is now ended (within 30 seconds) when that person is removed from the tenant or
   demoted to a viewer; before, only the tenant being disabled, the API key or the VM ending closed it.
