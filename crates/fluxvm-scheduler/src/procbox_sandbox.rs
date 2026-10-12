@@ -1292,6 +1292,7 @@ fn make_record(
         achieved_security_profile: Default::default(),
         security_evidence: None,
         labels: Default::default(),
+        hibernation: None,
     }
 }
 

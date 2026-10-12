@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+### Added: hibernation (QEMU)
+- `POST /v1/vms/{id}/hibernate` pauses the guest, writes its RAM, vCPU and device state through QMP `migrate` to
+  `file:<hibernation_dir>/<id>/state.bin` with a `manifest.json` and `record.json`, then quits QEMU and frees the VM's
+  CPU and memory. The next `start` launches QEMU with `-incoming defer`, loads the file and continues the guest in the
+  same boot; the state is removed once it runs. A failed resume keeps the state for a retry.
+  `DELETE /v1/vms/{id}/hibernation` drops the state. `fluxctl hibernate`.
+- `hibernation_dir` (default `<state_dir>/hibernation`) can sit on shared storage: `POST /v1/vms/import-hibernated`
+  registers a VM hibernated on another node (shared root disk only) under the same id. Every resume checks the manifest
+  against the host (QEMU version, q35 machine type, CPU vendor, CPU flag superset); `GET /v1/host/hibernation` and
+  `POST /v1/host/hibernation/check` expose the same check. Capability `host.hibernate`.
+- Refused for vTPM, VFIO, virtiofs, confidential and hot-plugged VMs. Hibernate, resume and import ran with a real
+  Ubuntu guest on one host (RAM marker and boot id survived); import between two real hosts has not run. See
+  `docs/hibernation.md`.
+
 ### Added: virtual networks (eBPF routing, Geneve overlay, SNAT, floating IPs)
 - A `tap` NIC with `vnet` (`{vni, ip, prefix_len, gateway}`) joins a VNI-isolated IPv4 network routed entirely in eBPF:
   no bridge, no per-network device, no iptables. Same-host guests are routed tap to tap; other hosts are reached through

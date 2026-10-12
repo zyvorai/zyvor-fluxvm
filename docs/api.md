@@ -53,6 +53,11 @@ GET    /v1/vms/{uuid}/ports/{name}       # websocket, raw bytes to and from a vz
 POST   /v1/vms/{uuid}/stop
 POST   /v1/vms/{uuid}/pause
 POST   /v1/vms/{uuid}/resume
+POST   /v1/vms/{uuid}/hibernate          # qemu; save RAM/CPU/devices, stop QEMU; next start resumes; admin; see hibernation.md
+DELETE /v1/vms/{uuid}/hibernation        # drop the saved state; next start boots from disk; admin
+POST   /v1/vms/import-hibernated         # {"id"}; adopt a VM hibernated on another node from the shared dir; admin
+GET    /v1/host/hibernation              # {facts: {qemu_version, machine_type, cpu_vendor, cpu_flags, state_dir}}
+POST   /v1/host/hibernation/check        # {"manifest"} -> {compatible, reasons}
 POST   /v1/vms/{uuid}/resources
 POST   /v1/vms/{uuid}/hotplug/cpu
 POST   /v1/vms/{uuid}/hotplug/memory

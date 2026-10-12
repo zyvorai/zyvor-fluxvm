@@ -174,6 +174,7 @@ impl VmManager {
             achieved_security_profile: source.achieved_security_profile,
             security_evidence: source.security_evidence.clone(),
             labels,
+            hibernation: None,
         };
         let needs_cid = sreq.agent.as_ref().is_some_and(|a| a.enabled);
         let mut record = self
