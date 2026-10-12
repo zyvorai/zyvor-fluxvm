@@ -78,15 +78,20 @@ fn resolve_device(path: &str) -> Result<Option<(u32, u32)>> {
     }
 }
 
-/// Resolves `/dev/vfio/<group>` for a PCI BDF address (`0000:01:00.0`-style,
-/// as used in `CreateVmRequest::vfio_devices`/`-device vfio-pci,host=...`)
-/// via its `iommu_group` sysfs symlink. Returns `None` rather than erroring
+/// Resolves `/dev/vfio/<group>` for a `CreateVmRequest::vfio_devices` entry
+/// (a PCI BDF such as `0000:01:00.0`, or a mediated device UUID) via its
+/// `iommu_group` sysfs symlink. Returns `None` rather than erroring
 /// when the device or its group can't be resolved: a broken passthrough
 /// device should fail loudly at the actual `-device vfio-pci` QEMU argument
 /// (`crates/fluxvm-qemu`), not silently as a missing device-cgroup allowlist
 /// entry that a caller might not even notice.
-fn resolve_vfio_group_device(pci_bdf: &str) -> Option<String> {
-    let link = format!("/sys/bus/pci/devices/{pci_bdf}/iommu_group");
+fn resolve_vfio_group_device(dev: &str) -> Option<String> {
+    let dev = dev.trim().to_ascii_lowercase();
+    let link = if fluxvm_core::mdev::valid_mdev_uuid(&dev) {
+        format!("/sys/bus/mdev/devices/{dev}/iommu_group")
+    } else {
+        format!("/sys/bus/pci/devices/{dev}/iommu_group")
+    };
     let target = fs::read_link(link).ok()?;
     let group = target.file_name()?.to_str()?;
     Some(format!("/dev/vfio/{group}"))
@@ -112,7 +117,7 @@ fn check_device_count(rules: &[DevRule]) -> Result<()> {
 }
 
 /// The allowlist for a VM: the fixed character devices, its VFIO groups and
-/// the host block devices its disks are (a root disk or data disk on
+/// the VFIO container when it has any, and the host block devices its disks are (a root disk or data disk on
 /// `/dev/...`, directly or through a symlink).
 fn collect_device_rules(vfio_devices: &[String], disks: &[PathBuf]) -> Result<Vec<DevRule>> {
     let mut rules = Vec::new();
@@ -131,6 +136,13 @@ fn collect_device_rules(vfio_devices: &[String], disks: &[PathBuf]) -> Result<Ve
         {
             rules.push(DevRule::char(rule));
         }
+    }
+    // QEMU opens the VFIO container before any group, so a VM with
+    // passthrough needs it as well.
+    if !vfio_devices.is_empty()
+        && let Some(rule) = resolve_device("/dev/vfio/vfio")?
+    {
+        rules.push(DevRule::char(rule));
     }
     for disk in disks {
         if let Some(dev) = resolve_block_device(disk) {

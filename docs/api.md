@@ -763,6 +763,12 @@ Two read-only routes feed a dashboard without scraping `/metrics`:
   devices (GPU, NIC, NVMe, accelerator) with NUMA node, PCIe root, IOMMU group and SR-IOV VFs.
 - `POST /v1/host/pci/bind` / `POST /v1/host/pci/release`: `/v1/host/gpus/bind|release` for any PCI function; admin.
 - `CreateVmRequest.numa` binds guest NUMA nodes to host nodes (QEMU only). See [host-topology.md](host-topology.md).
+- `GET /v1/host/mdev`: mediated device parents, their profiles (free instances, framebuffer, MIG slices) and
+  existing instances. `POST /v1/host/mdev` (admin, `{"parent", "type", "uuid"?}`) creates an instance (`201`; `409`
+  for a UUID on another parent or type, `503` when the profile has none free). `DELETE /v1/host/mdev/{uuid}` (admin,
+  `204`) refuses an instance a VM lists or holds. `vfio_devices` takes instance UUIDs. See [vgpu.md](vgpu.md).
+- `GET /v1/host/gpus/health`: per GPU `healthy`, `degraded` or `unhealthy` with reasons, AER counters, PCIe link and
+  `nvidia-smi` counters when installed.
 
 ### Balloon and memory
 
