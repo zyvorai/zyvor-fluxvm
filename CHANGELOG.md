@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+
 ### Added: fleet console as a cloud UX, image catalog, tenant view of leased Macs
 - The `/console` web console is rebuilt as a cloud UX: overview with quota bars and your Macs, My Macs, virtual machines,
   networks, images to launch from, usage, search and a command bar ([docs/mac-cloud-tenancy.md](docs/mac-cloud-tenancy.md#console)).
@@ -24,6 +25,9 @@
 - `fluxvm-agent sim-node` registers a simulated Mac with central (capacity, heartbeats, simulated macOS guests, overlay
   config), and `scripts/fleet-sim.sh` runs a central plus three of them: a tenant leases a Mac, starts two macOS VMs
   (a third is refused at Apple's two-guest limit), runs a command and creates a private network
+
+pple's two-guest limit), runs a command and creates a private network
+
   ([docs/fleet-quickstart.md](docs/fleet-quickstart.md)). No Macs or real guests are involved, so it exercises central,
   tenancy, scheduling, overlay allocation and the console, not virtualization.
 
@@ -52,6 +56,7 @@
 
 ### Fixed
 - Raw base images are cloned with the macOS-safe copy on every backend (`cp --reflink` is GNU-only).
+
 
 ### Added: virtual networks (eBPF routing, Geneve overlay, SNAT, floating IPs)
 - A `tap` NIC with `vnet` (`{vni, ip, prefix_len, gateway}`) joins a VNI-isolated IPv4 network routed entirely in eBPF:

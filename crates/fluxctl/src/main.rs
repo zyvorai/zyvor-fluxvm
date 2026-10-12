@@ -238,6 +238,12 @@ enum Command {
         #[arg(value_parser = output::parse_vm_ref)]
         id: Uuid,
     },
+    /// Save a QEMU VM's RAM/CPU/device state and stop it; `start` resumes.
+    /// See docs/hibernation.md.
+    Hibernate {
+        #[arg(value_parser = output::parse_vm_ref)]
+        id: Uuid,
+    },
     /// Delete a VM, or every VM matching `-l` (needs `--yes` for bulk).
     Delete {
         #[command(flatten)]
@@ -517,6 +523,11 @@ enum Command {
     Context {
         #[command(subcommand)]
         command: ContextCommand,
+    },
+    /// Warm pool of up to two slot-bound macOS guests: enrol, checkout, return. REST: `/v1/macos-pool`.
+    MacosPool {
+        #[command(subcommand)]
+        command: MacosPoolCommand,
     },
     /// Data disks (QEMU): list, attach, resize, detach. REST:
     /// `/v1/vms/{id}/disks[/{name}]`.
@@ -1921,6 +1932,24 @@ enum DiskCommand {
 }
 
 #[derive(Subcommand)]
+enum MacosPoolCommand {
+    /// The enrolled slots.
+    List,
+    /// Save a running, set-up, logged-in macOS guest's state as the slot's pristine copy, then stop it.
+    Enroll {
+        #[arg(value_parser = output::parse_vm_ref)]
+        id: Uuid,
+    },
+    /// Restore a free slot (409 when none is free). Needs an unlocked login session on the Mac.
+    Checkout,
+    /// Stop a checked-out slot; the next checkout restores the pristine state again.
+    Return {
+        #[arg(value_parser = output::parse_vm_ref)]
+        id: Uuid,
+    },
+}
+
+#[derive(Subcommand)]
 enum CnpCommand {
     List,
     Get {
@@ -3187,6 +3216,7 @@ async fn run_remote(
         Command::Delete { target } => bulk(target, "delete").await?,
         Command::Pause { id } => pretty(&r.vm_op(id, "pause").await?)?,
         Command::Resume { id } => pretty(&r.vm_op(id, "resume").await?)?,
+        Command::Hibernate { id } => pretty(&r.vm_op(id, "hibernate").await?)?,
         Command::Label { id, labels } => {
             let labels: serde_json::Map<String, serde_json::Value> =
                 labels.into_iter().map(|(k, v)| (k, json!(v))).collect();
@@ -3337,6 +3367,21 @@ async fn run_remote(
             )
             .await?,
         )?,
+        Command::MacosPool { command } => match command {
+            MacosPoolCommand::List => pretty(&r.call(Method::GET, "/v1/macos-pool", None).await?)?,
+            MacosPoolCommand::Enroll { id } => pretty(
+                &r.call(Method::POST, &format!("/v1/macos-pool/{id}/enroll"), None)
+                    .await?,
+            )?,
+            MacosPoolCommand::Checkout => pretty(
+                &r.call(Method::POST, "/v1/macos-pool/checkout", None)
+                    .await?,
+            )?,
+            MacosPoolCommand::Return { id } => pretty(
+                &r.call(Method::POST, &format!("/v1/macos-pool/{id}/return"), None)
+                    .await?,
+            )?,
+        },
         Command::Disk { command } => match command {
             DiskCommand::List { id } => {
                 let v = r
@@ -4635,6 +4680,19 @@ async fn main() -> Result<()> {
             "{}",
             serde_json::to_string_pretty(&m.restore_backup(id, &name).await?)?
         ),
+        Command::MacosPool { command } => {
+            let out = match command {
+                MacosPoolCommand::List => serde_json::to_value(m.macos_pool_list().await)?,
+                MacosPoolCommand::Enroll { id } => {
+                    serde_json::to_value(m.macos_pool_enroll(id).await?)?
+                }
+                MacosPoolCommand::Checkout => serde_json::to_value(m.macos_pool_checkout().await?)?,
+                MacosPoolCommand::Return { id } => {
+                    serde_json::to_value(m.macos_pool_return(id).await?)?
+                }
+            };
+            println!("{}", serde_json::to_string_pretty(&out)?)
+        }
         Command::Disk { command } => match command {
             DiskCommand::List { id } => {
                 output::print_list(format, &m.list_vm_disks(id).await?, output::DISK_COLUMNS)?;
@@ -4851,6 +4909,9 @@ async fn main() -> Result<()> {
         Command::Pause { id } => println!("{}", serde_json::to_string_pretty(&m.pause(id).await?)?),
         Command::Resume { id } => {
             println!("{}", serde_json::to_string_pretty(&m.resume(id).await?)?)
+        }
+        Command::Hibernate { id } => {
+            println!("{}", serde_json::to_string_pretty(&m.hibernate(id).await?)?)
         }
         Command::Freeze { id } => {
             m.freeze(id).await?;
@@ -8280,6 +8341,19 @@ mod tier2_cli_tests {
             }
         ));
         assert!(cli(&["disk", "attach", &id, "data"]).is_err());
+        assert!(matches!(
+            cli(&["macos-pool", "checkout"]).unwrap().command,
+            Command::MacosPool {
+                command: MacosPoolCommand::Checkout
+            }
+        ));
+        assert!(matches!(
+            cli(&["macos-pool", "return", &id]).unwrap().command,
+            Command::MacosPool {
+                command: MacosPoolCommand::Return { .. }
+            }
+        ));
+        assert!(cli(&["macos-pool", "enroll"]).is_err());
         assert!(matches!(
             cli(&["disk", "list", &id]).unwrap().command,
             Command::Disk {

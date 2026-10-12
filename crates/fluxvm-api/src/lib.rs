@@ -40,6 +40,7 @@ mod rate_limit;
 #[cfg(target_os = "macos")]
 pub mod self_control;
 pub use netobs_api::install_netobs;
+mod macos_pool_api;
 mod speculate_api;
 mod vz_api;
 
@@ -367,6 +368,8 @@ pub fn router(manager: Arc<VmManager>) -> Router {
         .route("/v1/host/confidential", get(host_confidential))
         .route("/v1/host/topology", get(host_topology))
         .route("/v1/host/memory", get(host_memory))
+        .route("/v1/host/hibernation", get(host_hibernation))
+        .route("/v1/host/hibernation/check", post(check_hibernation))
         .route("/v1/host/gpus", get(list_host_gpus))
         .route("/v1/host/gpus/preflight", get(host_gpu_preflight))
         .route("/v1/host/gpus/bind", post(bind_host_gpu))
@@ -470,6 +473,12 @@ pub fn router(manager: Arc<VmManager>) -> Router {
             "/v1/migration/receivers/{id}",
             axum::routing::delete(delete_migration_receiver),
         )
+        .route("/v1/vms/{id}/hibernate", post(hibernate_vm))
+        .route(
+            "/v1/vms/{id}/hibernation",
+            axum::routing::delete(discard_vm_hibernation),
+        )
+        .route("/v1/vms/import-hibernated", post(import_hibernated_vm))
         .route("/v1/vms/{id}/stop", post(stop_vm))
         .route("/v1/vms/{id}/pause", post(pause_vm))
         .route("/v1/vms/{id}/resume", post(resume_vm))
@@ -748,6 +757,7 @@ pub fn router(manager: Arc<VmManager>) -> Router {
             idempotency::middleware,
         ))
         .merge(speculate_api::routes())
+        .merge(macos_pool_api::routes())
         .merge(vz_api::routes())
         .layer(middleware::from_fn_with_state(
             manager.clone(),
@@ -2231,6 +2241,7 @@ async fn runtime_capabilities(
             pci_bind: cfg!(target_os = "linux"),
             balloon: cfg!(target_os = "linux"),
             vnet: cfg!(target_os = "linux"),
+            hibernate: cfg!(target_os = "linux"),
         },
     })
 }
@@ -2584,6 +2595,50 @@ async fn stop_vm(
 ) -> ApiResult<Json<serde_json::Value>> {
     require_admin(role)?;
     Ok(Json(json!(m.stop(id).await?)))
+}
+
+/// Save RAM/CPU/device state to the hibernation directory and stop QEMU; the
+/// next `start` resumes. See docs/hibernation.md.
+async fn hibernate_vm(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    Ok(Json(json!(m.hibernate(id).await?)))
+}
+
+async fn discard_vm_hibernation(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    Ok(Json(json!(m.discard_hibernation(id).await?)))
+}
+
+async fn import_hibernated_vm(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Json(req): Json<fluxvm_core::model::ImportHibernatedRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    Ok(Json(json!(m.import_hibernated(req.id).await?)))
+}
+
+async fn host_hibernation(
+    State(m): State<Arc<VmManager>>,
+) -> ApiResult<Json<fluxvm_core::model::HostHibernationReport>> {
+    Ok(Json(fluxvm_core::model::HostHibernationReport {
+        facts: m.host_hibernation_facts().await?,
+    }))
+}
+
+async fn check_hibernation(
+    State(m): State<Arc<VmManager>>,
+    Json(req): Json<fluxvm_core::model::HibernationCheckRequest>,
+) -> ApiResult<Json<fluxvm_core::model::HibernationCheck>> {
+    Ok(Json(m.check_hibernation(&req.manifest).await?))
 }
 
 async fn restart_vm(
@@ -5404,6 +5459,7 @@ mod tests {
             achieved_security_profile: Default::default(),
             security_evidence: None,
             labels: Default::default(),
+            hibernation: None,
         }
     }
 

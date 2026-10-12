@@ -34,6 +34,7 @@ pub mod fork;
 pub mod fork_plan;
 pub mod grants;
 pub mod guest_exec;
+pub mod hibernate;
 pub mod history;
 pub mod idempotency;
 pub mod journal;
@@ -42,6 +43,7 @@ mod migration_relay;
 pub mod oci_images;
 mod oci_pool;
 pub use oci_pool::{WARM_LABEL as OCI_WARM_LABEL, listed as vm_listed};
+pub mod macos_pool;
 pub mod oci_sandbox;
 pub mod procbox_sandbox;
 mod recovery;
@@ -2671,6 +2673,7 @@ impl VmManager {
             achieved_security_profile: fluxvm_core::security::SecurityProfile::default(),
             security_evidence: None,
             labels: Default::default(),
+            hibernation: None,
         };
         // Deciding the CID and reserving it happen as one atomic, locked
         // operation in the store — see fluxvm-storage::Store::insert_with_cid
@@ -3871,6 +3874,17 @@ impl VmManager {
                 vm.disk.display()
             );
         }
+        let resume_state = match &vm.hibernation {
+            Some(_) if loadvm_tag.is_some() => bail!(
+                "cannot start {id} from a snapshot while it is hibernated; discard the hibernation first"
+            ),
+            Some(_) => Some(
+                self.prepare_resume(&vm)
+                    .await
+                    .with_context(|| format!("cannot resume {id}"))?,
+            ),
+            None => None,
+        };
 
         let result: Result<()> = async {
             if vm.request.storage == StorageBackend::Shared {
@@ -3948,6 +3962,11 @@ impl VmManager {
             // too, long after the snapshot it names is stale.
             let mut launch_req = vm.request.clone();
             launch_req.loadvm_tag = loadvm_tag.map(String::from);
+            if resume_state.is_some() {
+                launch_req
+                    .extra_args
+                    .extend(["-incoming".to_string(), "defer".to_string()]);
+            }
             let launch = backend(vm.backend)?
                 .launch(&self.cfg, &launch_req, &ctx)
                 .await?;
@@ -3964,6 +3983,9 @@ impl VmManager {
             self.attach_cgroup(id, launch.pid, &mut vm, &vfio_devices);
             self.pin_numa_vcpus(id, &vm.request, &vm.workspace.join("qmp.sock"))
                 .await;
+            if let Some(state) = &resume_state {
+                self.finish_resume(&vm, launch.pid, state).await?;
+            }
             vm.status = VmStatus::Running;
             vm.error = None;
             live_migration::clear_hotplug_labels(&mut vm.labels);
@@ -3982,6 +4004,18 @@ impl VmManager {
         .await;
 
         if let Err(e) = result {
+            if resume_state.is_some() {
+                if let Some(pid) = vm.pid.take()
+                    && process::process_alive(pid).await
+                {
+                    let _ = process::terminate_pid(pid).await;
+                }
+                if let Some(cgroup_path) = vm.cgroup_path.take()
+                    && let Ok(mgr) = fluxvm_cgroup::CgroupManager::from_path(cgroup_path)
+                {
+                    let _ = mgr.remove();
+                }
+            }
             let _ = fluxvm_network::dataplane::remove_sandbox_policy(&self.cfg, id);
             if let Some(tap) = &vm.tap_name {
                 let _ = fluxvm_network::cleanup(
@@ -3996,10 +4030,19 @@ impl VmManager {
             if vm.request.storage == StorageBackend::Shared {
                 self.release_shared_disk(&vm.disk, id);
             }
-            vm.status = VmStatus::Failed;
+            // A failed resume keeps the saved state so it can be retried.
+            vm.status = if resume_state.is_some() {
+                VmStatus::Stopped
+            } else {
+                VmStatus::Failed
+            };
             vm.error = Some(format!("{e:#}"));
             self.store.update(vm.clone()).await?;
             return Err(e);
+        }
+        if let Some(h) = vm.hibernation.take() {
+            hibernate::remove_state_dir(&h.dir);
+            audit_event("vm.resume_hibernated", &[("vm_id", &id.to_string())]);
         }
         self.store.update(vm.clone()).await?;
         metrics::record_vm_start(started.elapsed().as_millis() as u64);
@@ -4012,16 +4055,22 @@ impl VmManager {
     }
 
     pub async fn stop(&self, id: Uuid) -> Result<VmRecord> {
+        self.stop_with(id, true).await
+    }
+
+    /// `graceful` asks the guest to shut down before the VMM is killed.
+    pub(crate) async fn stop_with(&self, id: Uuid, graceful: bool) -> Result<VmRecord> {
         let mut vm = self.get(id).await?;
         if let Some(pid) = vm.pid {
             if process::process_alive(pid).await {
                 // Ask the VMM to shut the guest down cleanly first; only
                 // force-kill if it doesn't exit within the grace period (or
                 // the VMM's control channel didn't respond at all).
-                let asked_nicely = match backend(vm.backend) {
-                    Ok(b) => b.graceful_shutdown(&self.cfg, &vm).await.is_ok(),
-                    Err(_) => false,
-                };
+                let asked_nicely = graceful
+                    && match backend(vm.backend) {
+                        Ok(b) => b.graceful_shutdown(&self.cfg, &vm).await.is_ok(),
+                        Err(_) => false,
+                    };
                 let exited = asked_nicely
                     && process::wait_for_exit(
                         pid,
@@ -5006,6 +5055,9 @@ impl VmManager {
             if process::process_alive(pid).await {
                 bail!("refusing to delete {id}: pid {pid} is still alive after stop");
             }
+        }
+        if let Some(h) = &vm.hibernation {
+            hibernate::remove_state_dir(&h.dir);
         }
         // Record what must be reclaimed *before* the record that names it is
         // removed; `reconcile()` rolls a leftover intent forward after a crash.
@@ -6481,6 +6533,7 @@ mod tests {
             achieved_security_profile: Default::default(),
             security_evidence: None,
             labels: Default::default(),
+            hibernation: None,
         }
     }
 
@@ -6633,6 +6686,7 @@ mod tests {
                 achieved_security_profile: Default::default(),
                 security_evidence: None,
                 labels: Default::default(),
+                hibernation: None,
             }
         }
 

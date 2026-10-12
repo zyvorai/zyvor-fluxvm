@@ -81,6 +81,21 @@ pub struct Config {
     /// Guest-network observability (`/v1/netobs/*`).
     #[serde(default)]
     pub netobs: NetobsConfig,
+    /// Where `POST /v1/vms/{id}/hibernate` writes a VM's RAM/CPU/device state
+    /// (`<dir>/<id>/`). Defaults to `<state_dir>/hibernation`. Put it on
+    /// storage every node mounts at the same path, next to shared root disks,
+    /// and another node can resume the VM via `POST /v1/vms/import-hibernated`.
+    #[serde(default)]
+    pub hibernation_dir: Option<PathBuf>,
+}
+
+impl Config {
+    /// The effective hibernation state directory.
+    pub fn hibernation_dir(&self) -> PathBuf {
+        self.hibernation_dir
+            .clone()
+            .unwrap_or_else(|| self.state_dir.join("hibernation"))
+    }
 }
 
 /// Guest-network observability: the daemon-wide flow/DNS observer behind `/v1/netobs/*`.
@@ -236,6 +251,7 @@ impl Default for Config {
             security: SecurityConfig::default(),
             netobs: NetobsConfig::default(),
             apple: AppleConfig::default(),
+            hibernation_dir: None,
         }
     }
 }

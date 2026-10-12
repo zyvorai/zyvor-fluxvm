@@ -92,6 +92,27 @@ fn ops() -> Vec<Op> {
         op("delete", "/v1/vms/{id}", "Delete a VM", VMS).status("204"),
         op("post", "/v1/vms/{id}/start", "Start a VM", VMS).returns("VmRecord"),
         op("post", "/v1/vms/{id}/stop", "Stop a VM", VMS).returns("VmRecord"),
+        op(
+            "post",
+            "/v1/vms/{id}/hibernate",
+            "Save RAM/CPU/device state to the hibernation directory and stop QEMU; the next start resumes",
+            VMS,
+        )
+        .returns("VmRecord"),
+        op(
+            "delete",
+            "/v1/vms/{id}/hibernation",
+            "Discard a hibernated VM's saved state; the next start boots from disk",
+            VMS,
+        )
+        .returns("VmRecord"),
+        op(
+            "post",
+            "/v1/vms/import-hibernated",
+            "Register a VM hibernated on another node from the shared hibernation directory",
+            VMS,
+        )
+        .returns("VmRecord"),
         op("post", "/v1/vms/{id}/restart", "Stop then start a VM", VMS).returns("VmRecord"),
         op("post", "/v1/vms/{id}/pause", "Pause vCPUs", VMS).returns("VmRecord"),
         op("post", "/v1/vms/{id}/resume", "Resume vCPUs", VMS).returns("VmRecord"),
@@ -248,6 +269,18 @@ fn ops() -> Vec<Op> {
         ),
         op(
             "get",
+            "/v1/host/hibernation",
+            "QEMU version, q35 machine type, CPU vendor and flags a hibernated state depends on",
+            HOST,
+        ),
+        op(
+            "post",
+            "/v1/host/hibernation/check",
+            "Whether a hibernation manifest can be resumed on this host, and why not",
+            HOST,
+        ),
+        op(
+            "get",
             "/v1/host/topology",
             "Host hardware graph: NUMA nodes (CPUs, memory, hugepages) and placeable PCI devices with NUMA node, PCIe root and IOMMU group",
             HOST,
@@ -279,6 +312,10 @@ fn ops() -> Vec<Op> {
         .returns("CapabilityReport"),
         op("get", "/v1/host/apple", "Apple host capabilities (runner probe)", HOST),
         op("get", "/v1/vznets", "Private vz networks and their members", HOST),
+        op("get", "/v1/macos-pool", "Enrolled macOS warm-pool slots", VMS).returns("VmList"),
+        op("post", "/v1/macos-pool/checkout", "Restore a free macOS pool slot (409 when none is free)", VMS).returns("VmRecord"),
+        op("post", "/v1/macos-pool/{id}/enroll", "Make a running, set-up macOS guest a pool slot", VMS).returns("VmRecord"),
+        op("post", "/v1/macos-pool/{id}/return", "Stop a leased pool slot", VMS).returns("VmRecord"),
         op("get", "/v1/vms/{id}/balloon", "Memory balloon status", VMS),
         op("post", "/v1/vms/{id}/balloon", "Set the memory balloon target", VMS),
         op(
