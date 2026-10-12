@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+### Added
+- **FluxMesh core** (`fluxvm-mesh`, phases 1-3): a personal-cloud overlay control plane that sits above Network
+  Fabric and Service Fabric without replacing either. Deterministic overlay IPAM, node/peer identity, NAT
+  classification from multi-observer mappings, direct-before-relay path ranking, a cross-node service catalog,
+  authoritative FluxDNS (`*.flux`, A and SRV), fail-closed ACLs compiled to Network Fabric CNP, exit-node and
+  subnet-router policy, an authenticated relay (plain and native TLS on :443), a STUN client, and a Linux
+  WireGuard reconciler (`fluxmesh-agent`). Binaries: `fluxmesh`, `fluxmesh-relay`, `fluxmesh-agent`. Docs in
+  `docs/fluxmesh*.md`. State lives in `/var/lib/fluxvm/mesh` on Linux and
+  `~/Library/Application Support/FluxVM/mesh` on macOS (`FLUXMESH_DIR` to move it). Not packaged in the macOS
+  release yet, and the WireGuard/DNS/relay paths have only unit-test coverage; no multi-host run has been done.
+
 ## 0.4.6 (2026-10-13)
 
 The security-review round for the fleet platform: console tunnels end with their person and have a maximum lifetime;
