@@ -57,6 +57,23 @@ mod styles;
 struct Cli {
     #[arg(long, env = "FLUXVM_CONFIG", help_heading = "Global Flags")]
     config: Option<PathBuf>,
+    /// Address `fluxctl serve` listens on (`host:port`), overriding `listen` in the config. With `service install`
+    /// it is written into the LaunchAgent, so a second daemon is one command.
+    #[arg(
+        long,
+        env = "FLUXVM_LISTEN",
+        global = true,
+        help_heading = "Global Flags"
+    )]
+    listen: Option<String>,
+    /// State directory, overriding `state_dir` in the config. A second daemon needs its own.
+    #[arg(
+        long,
+        env = "FLUXVM_STATE_DIR",
+        global = true,
+        help_heading = "Global Flags"
+    )]
+    state_dir: Option<PathBuf>,
     /// Output format for list-style commands (`list`, `list-images`,
     /// `snapshot-list`, `events`, `sandbox list`).
     #[arg(
@@ -3228,6 +3245,23 @@ fn diagnostics_request(
     }
 }
 
+/// The config file (or defaults) with `--listen` / `--state-dir` (or `FLUXVM_LISTEN` / `FLUXVM_STATE_DIR`) applied.
+fn load_cfg(cli: &Cli) -> Result<Config> {
+    let mut cfg = Config::load(cli.config.as_deref())?;
+    if let Some(l) = cli.listen.as_deref() {
+        let l = l.trim();
+        anyhow::ensure!(
+            !l.is_empty(),
+            "--listen is empty; give host:port, for example 127.0.0.1:7789"
+        );
+        cfg.listen = l.to_owned();
+    }
+    if let Some(d) = &cli.state_dir {
+        cfg.state_dir = d.clone();
+    }
+    Ok(cfg)
+}
+
 async fn run_remote_serial(r: &remote::Remote, id: Uuid) -> Result<()> {
     run_remote_stream(
         r,
@@ -4882,8 +4916,14 @@ async fn main() -> Result<()> {
     if let Command::Service { command } = &cli.command {
         let out = match command {
             ServiceCommand::Install { force } => {
-                let listen = Config::load(cli.config.as_deref())?.listen;
-                let plist = launch_agent::install(cli.config.as_deref(), &listen, *force)?;
+                let listen = load_cfg(&cli)?.listen;
+                let plist = launch_agent::install(
+                    cli.config.as_deref(),
+                    cli.listen.as_deref(),
+                    cli.state_dir.as_deref(),
+                    &listen,
+                    *force,
+                )?;
                 serde_json::json!({"ok": true, "plist": plist, "label": launch_agent::LABEL})
             }
             ServiceCommand::Uninstall => {
@@ -4906,7 +4946,7 @@ async fn main() -> Result<()> {
         )? {
             Some(r) => r,
             None => {
-                let cfg = Config::load(cli.config.as_deref())?;
+                let cfg = load_cfg(&cli)?;
                 remote::Remote::new(&cfg.listen, cli.server_token.clone())
             }
         };
@@ -4919,7 +4959,7 @@ async fn main() -> Result<()> {
         let base = match remote::endpoint(cli.server.clone(), None, cli.context.as_deref())? {
             Some(r) => r.base().to_owned(),
             None => {
-                let listen = Config::load(cli.config.as_deref())?.listen;
+                let listen = load_cfg(&cli)?.listen;
                 let listen = listen
                     .replace("0.0.0.0", "127.0.0.1")
                     .replace("[::]", "[::1]");
@@ -4960,7 +5000,7 @@ async fn main() -> Result<()> {
     {
         return run_remote(&r, cli.command, format).await;
     }
-    let cfg = Config::load(cli.config.as_deref())?;
+    let cfg = load_cfg(&cli)?;
     if let Command::Events {
         vm,
         event,

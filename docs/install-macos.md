@@ -50,8 +50,19 @@ both ways: `fluxctl service install` writes `~/Library/LaunchAgents/dev.zyvor.fl
 `/healthz`; starting `brew services` while it runs makes the Homebrew one exit with `Address already in use`;
 `fluxctl service uninstall` removes the plist and stops the daemon. Pick one: `fluxctl service install` now refuses
 (before writing anything) when it runs from a Homebrew install, when a `brew services` plist exists, or when something
-already listens on the configured address, and points you at `brew services start`. `--force` overrides it; a second
-daemon needs its own `listen` and `state_dir` in the `--config` file.
+already listens on the configured address, and points you at `brew services start`. `--force` overrides it.
+
+A second daemon (a separate FluxVM for another purpose) needs its own address and its own state directory; both are
+flags (or `FLUXVM_LISTEN` and `FLUXVM_STATE_DIR`) and `service install` writes them into the LaunchAgent:
+
+```bash
+fluxctl service install --listen 127.0.0.1:7789 --state-dir ~/fluxvm-second
+fluxctl --server http://127.0.0.1:7789 list          # point the CLI (and MCP, via --server) at it
+fluxctl serve --listen 127.0.0.1:7789 --state-dir /tmp/try   # or run one in the foreground
+```
+
+The guard checks the address you pass, so a second agent on a free port is accepted. Two daemons must never share a state
+directory.
 
 > `/readyz` answers `503` on a Mac in 0.4.4: it still asked for the Linux eBPF dataplane. It is fixed in the release
 > after 0.4.4. Use `/healthz` for liveness.

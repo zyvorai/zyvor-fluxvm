@@ -8,6 +8,10 @@
   (`brew services start zyvorai/tap/fluxvm`, or a separate `listen` and `state_dir`). Both agents defaulted to
   `127.0.0.1:7788` and the same state directory, so the second one exited with `Address already in use` after it had
   opened the state directory. `--force` overrides; a reinstall over its own loaded agent is not treated as a clash.
+- New global `--listen HOST:PORT` and `--state-dir DIR` flags (and `FLUXVM_LISTEN`, `FLUXVM_STATE_DIR`) override `listen`
+  and `state_dir` from the config, before or after the subcommand; `service install` writes them into the LaunchAgent, so
+  a second daemon is `fluxctl service install --listen 127.0.0.1:7789 --state-dir ~/fluxvm-second`. The guard checks the
+  overridden address.
 
 ### Fixed: three rough edges found installing 0.4.4 from the Homebrew tap on a clean Mac
 - `fluxctl mcp install` (and `fluxctl service install`, and the ssh ProxyCommand of `fluxctl fleet ssh`) wrote the versioned

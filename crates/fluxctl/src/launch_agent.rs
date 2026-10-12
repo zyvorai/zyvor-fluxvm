@@ -30,11 +30,25 @@ fn xml_escape(s: &str) -> String {
 
 /// The LaunchAgent: `fluxctl [--config FILE] serve`, started at login and restarted if it exits. No token or secret
 /// is written into it; the daemon reads its config file.
-pub fn render_plist(fluxctl: &Path, config: Option<&Path>, log: &Path) -> String {
+pub fn render_plist(
+    fluxctl: &Path,
+    config: Option<&Path>,
+    listen: Option<&str>,
+    state_dir: Option<&Path>,
+    log: &Path,
+) -> String {
     let mut args = vec![fluxctl.display().to_string()];
     if let Some(c) = config {
         args.push("--config".into());
         args.push(c.display().to_string());
+    }
+    if let Some(l) = listen {
+        args.push("--listen".into());
+        args.push(l.to_owned());
+    }
+    if let Some(d) = state_dir {
+        args.push("--state-dir".into());
+        args.push(d.display().to_string());
     }
     args.push("serve".into());
     let args: String = args
@@ -144,9 +158,16 @@ fn own_agent_loaded() -> bool {
         .unwrap_or(false)
 }
 
-/// Writes the plist (replacing an older one) and (re)loads it. Refuses when a daemon is already managed by Homebrew
-/// or listening on `listen`, unless `force`.
-pub fn install(config: Option<&Path>, listen: &str, force: bool) -> Result<PathBuf> {
+/// Writes the plist (replacing an older one) and (re)loads it. `listen_override` and `state_dir_override` are the
+/// `--listen` and `--state-dir` flags, written into the agent; `listen` is the effective address (those, else the
+/// config's). Refuses when a daemon is already managed by Homebrew or listening on `listen`, unless `force`.
+pub fn install(
+    config: Option<&Path>,
+    listen_override: Option<&str>,
+    state_dir_override: Option<&Path>,
+    listen: &str,
+    force: bool,
+) -> Result<PathBuf> {
     if !cfg!(target_os = "macos") {
         bail!("`fluxctl service` installs a macOS LaunchAgent; on Linux use a systemd unit");
     }
@@ -170,8 +191,17 @@ pub fn install(config: Option<&Path>, listen: &str, force: bool) -> Result<PathB
     for dir in [plist.parent(), log.parent()].into_iter().flatten() {
         std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     }
-    std::fs::write(&plist, render_plist(&exe, config.as_deref(), &log))
-        .with_context(|| format!("writing {}", plist.display()))?;
+    std::fs::write(
+        &plist,
+        render_plist(
+            &exe,
+            config.as_deref(),
+            listen_override,
+            state_dir_override,
+            &log,
+        ),
+    )
+    .with_context(|| format!("writing {}", plist.display()))?;
     let target = format!("{}/{LABEL}", domain());
     // Replacing a loaded agent: unload the old definition first; it is fine if none was loaded.
     let _ = launchctl(&["bootout", &target]);
@@ -293,14 +323,29 @@ mod tests {
         let p = render_plist(
             Path::new("/opt/homebrew/bin/fluxctl"),
             Some(Path::new("/Users/a&b/fluxvm.toml")),
+            None,
+            None,
             Path::new("/Users/a&b/Library/Logs/fluxvm.log"),
         );
         assert!(p.contains("<string>/opt/homebrew/bin/fluxctl</string>\n    <string>--config</string>\n    <string>/Users/a&amp;b/fluxvm.toml</string>\n    <string>serve</string>"));
         assert!(p.contains("<key>KeepAlive</key><true/>"));
         assert!(p.contains(&format!("<string>{LABEL}</string>")));
         assert!(!p.contains("a&b"));
-        let bare = render_plist(Path::new("/f"), None, Path::new("/l"));
-        assert!(!bare.contains("--config"));
+        let bare = render_plist(Path::new("/f"), None, None, None, Path::new("/l"));
+        assert!(
+            !bare.contains("--config")
+                && !bare.contains("--listen")
+                && !bare.contains("--state-dir")
+        );
+        // A second daemon: its own address and state directory, passed as flags before `serve`.
+        let second = render_plist(
+            Path::new("/f"),
+            None,
+            Some("127.0.0.1:7789"),
+            Some(Path::new("/Users/me/fluxvm-second")),
+            Path::new("/l"),
+        );
+        assert!(second.contains("<string>--listen</string>\n    <string>127.0.0.1:7789</string>\n    <string>--state-dir</string>\n    <string>/Users/me/fluxvm-second</string>\n    <string>serve</string>"));
         assert_eq!(
             plist_path(Path::new("/Users/me")),
             Path::new("/Users/me/Library/LaunchAgents/dev.zyvor.fluxvm.plist")
