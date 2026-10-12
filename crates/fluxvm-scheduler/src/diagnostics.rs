@@ -211,6 +211,19 @@ fn free_bytes(path: &Path) -> Option<u64> {
     Some((vfs.f_bavail as u64).saturating_mul(vfs.f_frsize as u64))
 }
 
+/// Creates `dir` readable by FluxVM only (bundles and memory dumps hold guest
+/// secrets) and tightens it if it already exists.
+fn private_dir(dir: &Path, recursive: bool) -> Result<()> {
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+    fs::DirBuilder::new()
+        .recursive(recursive)
+        .mode(0o700)
+        .create(dir)
+        .with_context(|| format!("creating {}", dir.display()))?;
+    fs::set_permissions(dir, fs::Permissions::from_mode(0o700))
+        .with_context(|| format!("restricting {}", dir.display()))
+}
+
 static STARTING: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// Refuses a second running job for the VM, prunes old bundles and records
@@ -235,7 +248,7 @@ fn start_job(
     {
         let _ = fs::remove_dir_all(base.join(&old.token));
     }
-    fs::create_dir(dir).with_context(|| format!("creating {}", dir.display()))?;
+    private_dir(dir, false)?;
     write_job(dir, bundle)
 }
 
@@ -255,7 +268,8 @@ impl VmManager {
         }
         fluxvm_network::edge_capture::validate("diag", &req.pcap_filter)?;
         let base = vm_dir(&self.cfg, id);
-        fs::create_dir_all(&base).with_context(|| format!("creating {}", base.display()))?;
+        private_dir(&self.cfg.diagnostics_dir(), true)?;
+        private_dir(&base, true)?;
         if req.memory_dump {
             if let Some(why) = memory_dump_unsupported(&self.cfg, &vm) {
                 bail!("{why}");
@@ -1052,6 +1066,14 @@ mod tests {
             memory_dump: None,
         };
         start_job(&cfg, id, &base, &base.join("aaaa"), &job("aaaa")).unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(base.join("aaaa"))
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o700);
+        }
         let err = start_job(&cfg, id, &base, &base.join("bbbb"), &job("bbbb")).unwrap_err();
         assert!(err.downcast_ref::<DiagnosticsBusy>().is_some());
         assert!(!base.join("bbbb").exists());

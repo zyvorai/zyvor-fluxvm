@@ -74,6 +74,7 @@ From the 0.4.0 (unreleased) section of the [CHANGELOG](CHANGELOG.md) and recent 
 | **GPUs for sandboxes** | `gpus: N` on `POST /v1/sandboxes` passes free VFIO-bound GPUs to a QEMU-backed sandbox; supported in all three SDKs |
 | **Kairon VM edge, enforced** | Anti-spoof, learn-IP, DNS and SNI allow lists and an egress token bucket loaded into the VM's TC program |
 | **VM-edge packet capture** | A bounded `tcpdump` on the VM's dataplane interface with pcap download |
+| **Incident bundles** | `POST /v1/vms/{id}/diagnostics` / `fluxctl incident`: one redacted tar.gz with QMP state, cgroup and PSI, the console log, dataplane state and an optional pcap, plus an opt-in QEMU guest memory dump ([docs/diagnostics-bundle.md](docs/diagnostics-bundle.md)) |
 
 ## Why FluxVM
 
