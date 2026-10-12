@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+### Added: `fluxctl fleet` for tenants and operators
+- `fluxctl fleet status` (a tenant's quota, Macs and next step, or the operator's fleet health), `launch --image` from the
+  catalog, `run <vm> -- cmd`, `rm`, `images` and `networks` (list, show, create, delete, rotate, add-mac, remove-mac),
+  with human output on a terminal and JSON when piped. VMs are found by name or ID prefix. Point it at central with
+  `--central`/`CENTRAL_URL` and `--token`/`FLUXVM_AGENT_TOKEN` ([docs/mac-cloud-tenancy.md](docs/mac-cloud-tenancy.md)).
+  Tried against the three-Mac simulation (`scripts/fleet-sim.sh`) as tenant and operator, not against real Macs.
+
 ### Fixed: a Mac's heartbeat reported zero macOS guests
 - `fluxvm-agent node` counted macOS guests from a `state` field that `GET /v1/vms` does not return (it returns `status`),
   and looked for a `starting` value that does not exist (`creating` does), so a real Mac always reported 0 and central's
