@@ -148,3 +148,31 @@ NetworkExtension desired-state contract.
 
 The tests are all unprivileged. They do not create interfaces or modify host
 routes.
+
+## Phase 4 — zero-touch cloud
+
+Phase 4 adds HMAC-signed enrollment, coordinated WireGuard key rotation, deterministic ULA IPv6, FluxDNS replica election, geo/load-aware relay HA, multi-home failover, a native macOS NetworkExtension bridge, and one-command cloud bootstrap. See [fluxmesh-phase4.md](fluxmesh-phase4.md).
+
+## Phase 5 — public personal-cloud edge
+
+Phase 5 adds native HTTPS ingress, ACME HTTP-01 certificate lifecycle, expiring share links, DDNS, PCP/NAT-PMP/UPnP mapping, overlay mDNS, DHCPv6 prefix delegation, multi-WAN policy routing, the `fluxmesh-edge` reconciler, and `fluxctl cloud diagnose`. See [fluxmesh-phase5.md](fluxmesh-phase5.md).
+
+## Phase 6 public edge
+
+Phase 6 adds an optional blind public relay for CGNAT sites, DNS-01 wildcard
+ACME, HTTP/2 ALPN/proxying, IPv6 mDNS reflection and edge Prometheus/SLO
+telemetry. See [fluxmesh-phase6.md](fluxmesh-phase6.md). The relay is not a TLS
+termination point: SNI is used only for site selection and the visitor's TLS
+ciphertext terminates at the personal-cloud edge.
+
+## Phase 7 standards / production edge
+
+Phase 7 adds standards-compliant browser HTTP/3 over QUIC, QUIC-first
+edge-to-relay transport with TLS/TCP fallback, active/active relay leases with
+rendezvous selection, DNSSEC-aware DNS-01 verification through a trusted
+validating resolver, certificate hot reload for new QUIC connections, and
+OTLP/HTTP ingress/reconcile spans. See [fluxmesh-phase7.md](fluxmesh-phase7.md).
+
+Browser HTTP/3 remains a direct UDP/443 path. The CGNAT relay stays blind TLS
+passthrough and does not claim to translate browser QUIC through a TCP visitor
+listener.

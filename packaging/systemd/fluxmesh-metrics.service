@@ -1,0 +1,16 @@
+[Unit]
+Description=FluxMesh public-edge metrics endpoint
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/fluxmesh-metrics --listen 127.0.0.1:9468
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadOnlyPaths=/var/lib/fluxvm/mesh
+
+[Install]
+WantedBy=multi-user.target

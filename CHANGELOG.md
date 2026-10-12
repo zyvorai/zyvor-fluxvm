@@ -12,6 +12,20 @@
   `docs/fluxmesh*.md`. State lives in `/var/lib/fluxvm/mesh` on Linux and
   `~/Library/Application Support/FluxVM/mesh` on macOS (`FLUXMESH_DIR` to move it). Not packaged in the macOS
   release yet, and the WireGuard/DNS/relay paths have only unit-test coverage; no multi-host run has been done.
+- **FluxMesh enrollment and operator UX** (phase 4): zero-touch enrollment over verified TLS with short-lived,
+  replay-protected HMAC invitations (the joiner generates its WireGuard key locally and sends only the public key),
+  coordinated distributed key rotation with ack-before-activate and rollback, a dual-stack ULA overlay, rendezvous-hash
+  FluxDNS HA, relay HA with multi-home failover and hysteresis, the `fluxctl cloud` flow (`up`, `status`, `invite`,
+  `accept`, `serve-enrollment`), and the macOS NetworkExtension contract in `native/fluxmesh-macos` (not built or
+  signed here). `fluxctl cloud` uses its own `--state` paths and does not use `--server`/`--server-token`.
+- **FluxMesh public edge** (phases 5-7): an optional HTTPS ingress (rustls, HTTP/2, direct HTTP/3 on QUIC) with
+  route-bound short-lived share links, native ACME v2 (HTTP-01 and DNS-01 including wildcards, with optional
+  DNSSEC-AD verification), dynamic DNS (Cloudflare and a webhook), PCP/NAT-PMP/UPnP router mapping, overlay mDNS
+  reflection, and a blind public relay for CGNAT sites (QUIC first, TLS/TCP fallback, active-standby or
+  active-active) that never sees application plaintext or a site's certificate key. Adds Prometheus-style edge
+  metrics, SLO diagnostics and OTLP span export. Binaries: `fluxmesh-{ingress,edge,mdns,pd,public-relay,metrics}`.
+  Pulls `h3`/`h3-quinn` into the workspace. Not in the macOS package, and none of it has run against a real
+  browser, CA, resolver or router yet.
 
 ## 0.4.6 (2026-10-13)
 

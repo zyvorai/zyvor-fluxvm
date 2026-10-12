@@ -10,8 +10,12 @@
 use crate::catalog::{CatalogStore, default_catalog_path};
 use crate::fabric::{default_ledger_path, reconcile_fluxvm_fabrics};
 use crate::http::HttpEndpoint;
+use crate::ipv6::augment_wireguard_plan;
+use crate::keydist::{
+    KeyDistributionStore, RotationStep, coordinated_local_rotation, default_keydist_path,
+};
 use crate::macos::{MacTunnelPlan, default_plan_path};
-use crate::reconcile::{reconcile_linux, rotate_local_key_if_due};
+use crate::reconcile::reconcile_linux;
 use crate::stun::{StunReport, probe_many};
 use crate::{Endpoint, EndpointKind, MeshState, Result, StateStore, default_state_path};
 use std::collections::BTreeMap;
@@ -31,6 +35,7 @@ pub struct AgentConfig {
     pub private_key_file: PathBuf,
     pub interval: Duration,
     pub key_max_age: Option<Duration>,
+    pub keydist_path: PathBuf,
     pub stun_bind: SocketAddr,
     pub stun_servers: Vec<SocketAddr>,
     pub stun_timeout: Duration,
@@ -56,6 +61,7 @@ impl Default for AgentConfig {
             // Rotation is opt-in until the deployment has a key-distribution
             // control plane. Unilateral default rotation would strand peers.
             key_max_age: None,
+            keydist_path: default_keydist_path(),
             stun_bind: "0.0.0.0:0".parse().expect("valid STUN bind"),
             stun_servers: Vec::new(),
             stun_timeout: Duration::from_secs(2),
@@ -85,13 +91,23 @@ pub fn reconcile_once(cfg: &AgentConfig) -> Result<AgentReport> {
 
     if cfg!(target_os = "linux") {
         if let Some(max_age) = cfg.key_max_age {
-            if !cfg.dry_run {
-                let rotated =
-                    rotate_local_key_if_due(&cfg.state_path, &cfg.private_key_file, max_age)?;
-                report.key_rotated = rotated.rotated;
-                if rotated.rotated {
-                    mesh = store.load()?;
+            let key_store = KeyDistributionStore::new(&cfg.keydist_path);
+            match coordinated_local_rotation(
+                &store,
+                &key_store,
+                &cfg.private_key_file,
+                max_age,
+                cfg.dry_run,
+            )? {
+                RotationStep::Activated { .. } => {
+                    report.key_rotated = true;
+                    if !cfg.dry_run {
+                        mesh = store.load()?;
+                    }
                 }
+                RotationStep::NotDue
+                | RotationStep::Proposed { .. }
+                | RotationStep::AwaitingAcks { .. } => {}
             }
         }
 
@@ -121,6 +137,7 @@ pub fn reconcile_once(cfg: &AgentConfig) -> Result<AgentReport> {
             cfg.listen_port,
             cfg.private_key_file.clone(),
         )?;
+        augment_wireguard_plan(&mesh, &mut plan)?;
         for peer in &mut plan.peers {
             if let Some(endpoint) = cfg.relay_bindings.get(&peer.node_id) {
                 peer.endpoint = Some(*endpoint);
