@@ -38,8 +38,70 @@ async fn check_success(resp: reqwest::Response, what: &str) -> Result<reqwest::R
     }
     let status = resp.status();
     let body = resp.text().await.unwrap_or_default();
-    anyhow::bail!("{what} failed ({status}): {body}");
+    Err(HttpError::new(what, status, &body).into())
 }
+
+/// A refused `/fleet` call: the status, central's own message, and what to do about it.
+#[derive(Debug)]
+pub struct HttpError {
+    pub status: reqwest::StatusCode,
+    pub message: String,
+    what: String,
+    hint: Option<String>,
+}
+
+impl HttpError {
+    fn new(what: &str, status: reqwest::StatusCode, body: &str) -> Self {
+        let parsed: Option<Value> = serde_json::from_str(body).ok();
+        let message = parsed
+            .as_ref()
+            .and_then(|v| v.get("error"))
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .unwrap_or_else(|| body.trim().to_owned());
+        let leader = parsed
+            .as_ref()
+            .and_then(|v| v.get("leader"))
+            .and_then(Value::as_str);
+        let hint = match status.as_u16() {
+            401 => Some(
+                "pass the fleet token or a tenant token with --token or FLUXVM_AGENT_TOKEN".to_owned(),
+            ),
+            403 => Some("this needs the operator's fleet token, or the tenant is disabled".to_owned()),
+            429 => Some(
+                "the tenant is at its quota: see `fluxctl fleet tenant me`, or ask the operator to raise it"
+                    .to_owned(),
+            ),
+            503 if leader.is_some() => Some(format!(
+                "this central is a standby; point --central at the leader, {}",
+                leader.unwrap_or_default()
+            )),
+            _ => None,
+        };
+        HttpError {
+            status,
+            message,
+            what: what.to_owned(),
+            hint,
+        }
+    }
+}
+
+impl std::fmt::Display for HttpError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} failed ({}): {}",
+            self.what, self.status, self.message
+        )?;
+        if let Some(h) = &self.hint {
+            write!(f, "\nhint: {h}")?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for HttpError {}
 
 /// `GET /fleet/nodes`.
 pub async fn list_nodes(central: &str, token: Option<&str>) -> Result<Value> {
