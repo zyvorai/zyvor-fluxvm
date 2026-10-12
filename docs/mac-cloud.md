@@ -98,10 +98,21 @@ same registry: `fluxctl up --fleet http://fleet-registry:7799` ([macos-stacks.md
 
 - [mac-cloud-tenancy.md](mac-cloud-tenancy.md): tenants and tokens, 24-hour Mac host leases (the macOS licence's
   leasing rule), quotas, scrub, drain and usage metering in `fluxvm-agent central`.
+- [SSH and port tunnels](mac-cloud-tenancy.md#ssh-and-port-tunnels): `fluxctl fleet ssh <vm>` and `port-forward`
+  through central, so tenants never need a route to the Macs.
 - [vm-images.md](vm-images.md): push a golden macOS template or Linux disk to an OCI registry once, pull it on every Mac.
 - [github-actions-runners.md](github-actions-runners.md): one fresh VM per queued GitHub Actions job.
 - [cross-mac-networks.md](cross-mac-networks.md): one private network spanning several Macs (encrypted overlay).
+- [mac-cloud-tenancy.md#volumes](mac-cloud-tenancy.md#volumes): persistent volumes, disks that outlive VMs (Linux guests).
 - [fleet-ha.md](fleet-ha.md): run two or three registries against one Redis, so the fleet survives losing one.
+- [fleet-metrics.md](fleet-metrics.md): CPU, memory, disk and network graphs per VM and per Mac, `fluxctl fleet top`, and a
+  Prometheus endpoint (`GET /metrics`, with a scrape-only `--metrics-token`).
+- [mac-cloud-tenancy.md](mac-cloud-tenancy.md#sign-in-with-sso-and-team-members): console sign-in with your
+  identity provider (OIDC), and team members with viewer, member, admin and owner roles.
+- [warm-pools.md](warm-pools.md): VMs booted ahead of time, so launches (macOS CI jobs above all) start in seconds.
+- [mac-cloud-billing.md](mac-cloud-billing.md): self-service sign-up, Stripe invoices and payment methods.
+- [fleet-sdk.md](fleet-sdk.md): Go, Python and TypeScript clients, the OpenAPI description
+  (`schemas/fleet-openapi.yaml`) and the Terraform provider (`terraform-provider-fluxvm`).
 - [fleet-quickstart.md](fleet-quickstart.md): run the whole cloud on one laptop with simulated Macs (`scripts/fleet-sim.sh`).
 - [macos-signing.md](macos-signing.md): Developer ID signing, which vmnet, bridged networking and USB passthrough need.
 
@@ -112,6 +123,8 @@ same registry: `fluxctl up --fleet http://fleet-registry:7799` ([macos-stacks.md
 - **Keychain:** guest passwords for `fluxctl signin` live in your login Keychain, never in the API.
 - **Retina displays:** guest displays up to 5120 x 2880 at 220 ppi, with audio.
 - **APFS clones:** disks and snapshots are copy-on-write; a throwaway VM costs almost nothing until it writes.
+  Through the fleet, a tenant snapshots a VM (disk, or disk and memory), restores it and clones it from the console or
+  `fluxctl fleet snapshot|restore|clone` ([mac-cloud-tenancy.md](mac-cloud-tenancy.md#snapshots-and-clones)).
 - **launchd:** `fluxctl service install`, `status` and `uninstall`.
 
 ## Limits

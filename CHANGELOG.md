@@ -25,6 +25,154 @@
   and `fluxvm_pool` need a central with volumes and pools. See `docs/fleet-sdk.md`.
 
 
+### Security: review fixes in the cloud platform round
+- A sign-up owner's first SSO sign-in now rotates the tenant's primary token and clears its named keys and webhooks.
+  Sign-up does not verify the email, so whoever held the sign-up token may not be that person.
+- Stripe invoices are created with `auto_advance=false` and set to true when finalized, so a crash between the draft
+  and its items cannot leave Stripe to finalize and charge a half-filled invoice.
+- The default sign-up quota caps volumes at 100 GiB.
+- Tunnels to a vz guest connect only to an address on this Mac's vmnet bridges (the address comes from the guest's own
+  serial console), and never to an address another VM on the node reports. Namespace guests may use `169.254.x.y`
+  (not the metadata address), which tunnels refused before.
+
+### Added: usage graphs per VM and per Mac, `fluxctl fleet top`, and a Prometheus endpoint (fleet)
+- Nodes serve `GET /v1/stats`: host CPU ticks, memory, free disk and VM counts, and per VM CPU seconds, memory and
+  disk bytes (plus network bytes where the host can see them). `vz` guests are measured with `proc_pid_rusage` on the
+  runner and the Virtualization XPC service that runs the guest; Linux backends from their cgroup and TAP device.
+  `vz` guests have no network numbers (Virtualization.framework exposes none); every sample says where its numbers
+  come from.
+- Central samples every healthy Mac every 15 s (`--metrics-interval-secs`; 16 at a time, 5 s timeout, leader only)
+  and keeps one-minute points for 24 hours in memory, bounded to 1000 VM and 500 Mac series; deleted VMs lose their
+  series at once.
+- `GET /fleet/metrics/vms/{node}/{id}`, `/fleet/metrics/nodes/{name}` (`?range=1h|6h|24h`), `/fleet/metrics/vms`,
+  `/fleet/metrics/summary` and `POST /fleet/metrics/collect`. Tenants see only their own VMs and the Macs they lease.
+- `GET /metrics` in the Prometheus text format: fleet, node, VM and tenant gauges and counters, leases, the HA leader,
+  webhook deliveries and requests by route and status. It takes the fleet token or a scrape-only `--metrics-token`.
+- Console: CPU, memory, disk and network charts with a 1h/6h/24h toggle and hover/keyboard tooltips in the VM details;
+  CPU, memory and VM count in the Mac details; fleet CPU and memory tiles on the overview. Plain SVG, no library.
+- `fluxctl fleet top [--sort cpu|mem]` and `fluxctl fleet metrics <vm> [--range]`. The simulated Mac reports varying
+  usage. See `docs/fleet-metrics.md`.
+
+### Added: VM snapshots and clones through the fleet
+- `GET/POST /fleet/vms/{node}/{id}/snapshots`, `DELETE …/snapshots/{name}`, `POST …/snapshots/{name}/restore` and
+  `POST /fleet/vms/{node}/{id}/clone`. A snapshot is an APFS clone of the disk and firmware files, plus with
+  `include_memory` the guest's saved state (Virtualization.framework `saveMachineStateTo`); restore stops the VM, puts
+  the snapshot back and starts it; a clone is a new VM on the same Mac from a snapshot or a stopped VM's disk, owned by
+  the source's tenant and counted against its quota. Owners only (404 otherwise); read-only keys only list.
+- Per-VM snapshot limit: `max_snapshots_per_vm` in the policy (default 20, 0 turns snapshots off) and per tenant in its
+  quota. Optional `snapshot_gib_per_hour` price adds a "Snapshot storage" line to statements.
+- Activity log targets name the snapshot; new notifications `vm.snapshot`, `vm.restored`, `vm.cloned`.
+- Console: a Snapshots section in the VM details (take, list with time and size, restore and delete with confirmation,
+  new VM from a snapshot) and a Clone sheet; snapshot fields in the price list, tenant quota and policy.
+- `fluxctl fleet snapshot|snapshots|restore|snapshot-rm|clone`.
+- Node (`fluxctl serve`): disk-only `vz` snapshots (`POST /v1/vms/{id}/snapshot {"memory": false}`, any VM state),
+  which restore by booting cold; restoring a running `vz` VM stops and restarts it instead of refusing; clones from a
+  snapshot (`POST /v1/vms/{id}/clone {"snapshot": …}`), and clones of macOS `vz` guests (hardware model and auxiliary
+  storage copied, new machine identifier); snapshot lists say whether each has memory (`has_memory`). The simulated
+  Mac (`sim-node`) supports all of it.
+
+### Added: persistent volumes (fleet)
+- Disks that keep their data when the VM using them is deleted. `POST /fleet/volumes` (`name`, `size_gib` 1-2048,
+  optional `node`) makes a sparse raw file on one Mac through its `fluxctl serve` (new `/v1/volumes` routes); a launch
+  with `"volumes": ["name"]` lands on that Mac and gets each volume as a virtio disk the guest finds at
+  `/dev/disk/by-id/virtio-<volume id>`. Deleting the VM detaches it. Linux `vz` guests only.
+- A volume in use cannot be deleted, resized or attached twice (`409`); resize only grows, while detached. Tenants see
+  only their own volumes; `max_volume_gib` caps a tenant's total; the price list's `volume_gib_per_hour` bills them;
+  `volume.created` and `volume.deleted` notifications.
+- `fluxctl fleet volumes|volume-create|volume-rm|volume-resize` and `fleet launch --volume NAME`; a Volumes page in the
+  console (create, resize, type-the-name delete) and a volume picker in Launch VM. The simulated Mac serves volumes
+  too. See `docs/mac-cloud-tenancy.md#volumes`.
+- Security: a tenant's launch may no longer name `apple.extra_disks` (any host file, device or NBD server on the Mac);
+  tenants attach storage as volumes. On the node, `policy.allowed_image_dirs` now applies to extra disks at create too
+  (the host's volumes directory is allowed), a volume file already used by another VM is refused, and a clone does not
+  take its source's volumes.
+
+### Added: SSH and port tunnels to VMs through central
+- `fluxctl fleet ssh [user@]<vm> [-- ssh args]` runs the system `ssh` with a `tunnel-stdio` ProxyCommand;
+  `fluxctl fleet tunnel-stdio <vm> <port>` relays stdin/stdout; `fluxctl fleet port-forward <vm> <local>:<remote>`
+  opens a tunnel per local connection; `fluxctl fleet tunnels [close <id>]` lists and closes them.
+- Central: `GET /fleet/vms/{node}/{id}/tunnel?port=N` (WebSocket; owner only, not read-only keys), relayed to the
+  node's new `GET /v1/vms/{id}/tunnel` with the fleet token; `GET /fleet/tunnels` and `DELETE /fleet/tunnels/{id}`.
+  The node connects only to the guest (usernet forward, netns, or the guest's NAT/DHCP address), never to loopback.
+- Policy `tunnels`: allowed ports (default 22 and 1024-65535), idle timeout (60 minutes), open tunnels per tenant
+  (20). Opening and closing, with bytes each way, are in the activity log. Catalog images take an `ssh_user`.
+- Console: a Connect section in the VM details (copyable commands and an SSH config block), a Tunnels page (per tenant
+  for the operator, with Close), and the tunnel rules on the Policy page. The simulated Mac echoes tunnel bytes.
+
+### Added: warm pools, so launches (macOS CI jobs above all) start in seconds
+- A pool keeps `min_ready` VMs of a catalog image booted and idle (`/fleet/pools`). A `POST /fleet/vms` that names a
+  pool (`"pool"`), or whose image and size match one the caller may use, takes a ready VM instead of booting one: central
+  renames it, applies the launch's TTL and answers with `"warm": true`; the pool boots a replacement. The pick is atomic
+  under the tenancy lock, so concurrent launches never share a VM. Launches that need cloud-init, networks or disks boot
+  as before.
+- Tenant pools run on the tenant's leased Macs and count against its quota; shared (operator) pools run on Macs nobody
+  leases, are in no quota, and are billed to whoever takes a VM from the moment it is taken (`billed_from` in the
+  ledger, used by metering and statements). Tenants cannot take macOS VMs from shared pools while
+  `require_lease_for_macos` is on, or any while `isolate_tenant_networks` is on.
+- A reconciler on the HA leader (every 5 s, `FLUXVM_WARM_POOL_INTERVAL_SECS`) replaces warm VMs that fail, stall or sit
+  on a Mac the pool may no longer use, trims extras, respects leases, drains, scrubs and Apple's two macOS guests per
+  Mac, backs off after failures, deletes taken VMs whose TTL ran out, and logs replacements and failures as `warm-pool`.
+- `GET /fleet/pools/{name}[/status]`: ready, booting, claims in the last 24 hours and average claim time. `GET
+  /fleet/vms` marks warm (`warm_pool`, `warm_state`) and taken (`claimed_from`) VMs.
+- `fluxctl fleet pools|pool-create|pool-set|pool-rm`; the console's Warm pools page (cards with ready/booting dots, a
+  min-ready stepper, claim stats, create and launch sheets, delete with confirmation), "Warm, ready" tags in the VM
+  list and "Started instantly from warm pool …" on launch. `gha-runners` pools take VMs from a warm pool with
+  `"vm": {"pool": "…"}` and `launch: exec`. The simulated Mac supports `PATCH /v1/vms/{id}`. See `docs/warm-pools.md`.
+
+### Added: console sign-in with SSO, and team members with roles (fleet)
+- `fluxvm-agent central --oidc-issuer … --oidc-client-id … --public-url …` turns on OpenID Connect sign-in for the
+  console: authorization code flow with PKCE, `state` bound to the browser, ID token verified against the provider's
+  JWKS (RS256/384/512, PS256/384/512, ES256/384) with `iss`, `aud`/`azp`, `exp`, `nonce` and `email_verified` checks.
+  Routes `GET /auth/config|login|callback|session`, `POST /auth/logout`.
+- Sessions: random token stored hashed in the tenancy state (survives restarts and HA failover), sent as an `HttpOnly`,
+  `SameSite=Lax` (and `Secure` over https) cookie, 12 hours by default. Changes made with the cookie need the console's
+  `X-FluxVM-Console` header and a same-origin `Origin`.
+- Members per tenant with roles `viewer`, `member`, `admin`, `owner`, enforced by central on every request and applied
+  at once (`GET/POST /fleet/tenants/{id|me}/members`, `PATCH/DELETE …/members/{email}`). Operators sign in with the
+  emails given by `--sso-operator` or the policy's `operator_emails`. An email nobody added is refused with a page.
+- The activity log records the person's email (`user`) for changes made in a session, and each sign-in.
+- Console: **Sign in with …**, the signed-in person and **Switch team** in the side footer, a **Members** page (add with
+  a role, change a role, remove), members in a tenant's details for the operator, and actions a role cannot take hidden.
+- `fluxctl fleet members | member-add <email> --role | member-role <email> <role> | member-rm <email>`.
+  See `docs/mac-cloud-tenancy.md`.
+
+### Added: self-service sign-up and Stripe invoices (fleet)
+- Sign-up: with `signup_enabled` in the policy, anyone can create a tenant from the console's sign-in page or
+  `fluxctl fleet signup` (`POST /signup`, no token). It gets `signup_default_quota`, its email is kept as
+  `owner_email`, and the token is shown once. Checks the ID, email shape and optional allowed domains; one account per
+  email; 5 sign-ups an hour per client address and 100 in all. `GET /signup/config` says whether it is open.
+- Stripe (`--stripe-secret-key-file` or `STRIPE_SECRET_KEY`, `--stripe-webhook-secret-file`, `--public-url`): a
+  customer per tenant, created at sign-up or when the operator turns invoicing on (`PUT /fleet/tenants/{id}/billing`).
+  `POST /fleet/billing/invoices?month=YYYY-MM` (operator, `fluxctl fleet invoice-run`) turns each statement into an
+  invoice, amounts in the currency's smallest unit (zero-decimal currencies such as JPY handled), with an idempotency
+  key per tenant, month and step and a stored record, so a second run bills nobody twice. Optional run on the 1st
+  (`billing_auto_invoice`, off by default).
+- Tenants list invoices with a Pay link (`GET /fleet/billing/invoices`, `fluxctl fleet invoices`) and save a card with
+  Stripe Checkout in setup mode (`POST /fleet/billing/payment-method`). `signup_require_payment_method` holds new
+  tenants' leases and VM launches (`402`) until they do.
+- `POST /stripe/webhook` checks `Stripe-Signature` (HMAC-SHA256, 5 minutes tolerance) and follows invoice status;
+  a failed payment notifies the tenant (`billing.payment_failed`). Optional suspension of tenants with invoices unpaid
+  for N days (`billing_suspend_unpaid`, off by default), lifted when paid.
+- Console: "Create an account" on the sign-in page, the sign-up sheet and a token screen that cannot be dismissed
+  before the token is stored; Invoices and Payment method on Billing; "Create invoices for <month>" with per-tenant
+  status for the operator; owner email, Stripe customer link and invoicing switch in the tenant details; Sign-up and
+  Invoices settings in Policy. See `docs/mac-cloud-billing.md`.
+- Central now serves with the client address available (`ConnectInfo`), for the sign-up rate limit.
+
+### Changed: the cloud platform features work together (fleet)
+- Central's request checks run in one order: public routes (`/auth/*`, `/signup*`, `/stripe/webhook`; `GET /metrics`
+  checks its own token), then the token, API key or SSO session, operator-only routes, read-only keys, the member's
+  role, and the sign-up payment-method requirement, which now also covers clones, volumes and warm pools.
+- SSO roles know the new routes: members take snapshots, clone, open tunnels and manage volumes; warm pools, closing
+  tunnels and payment methods need an admin; viewers see usage graphs and invoices but open no tunnel. The console
+  hides those actions by role too.
+- A sign-up's email becomes the tenant's owner on its first SSO sign-in, while the tenant has no members yet.
+- A launch with volumes never takes a warm VM; a tenant with a warm pool cannot be deleted until the pool is, and its
+  console sessions end with it.
+- SDK and Terraform: `fleet.Pool` reads central's `size` and `status` (`VCPUs`, `MemoryMiB`, `Ready`, `Total` are filled
+  from them); `fluxvm_pool` replaces the pool when `image`, `vcpus` or `memory_mib` change and checks names of 1-40;
+  `fluxvm_volume` checks 1-2048 GiB and central's name rule. Snapshots and clones are in `schemas/fleet-openapi.yaml`.
+
 ### Added: per-disk QEMU I/O, virtio-blk and vhost-user-blk data disks
 - `io` on data disks (`POST /v1/vms/{id}/disks`, `data_disks`) and `root_disk_io` on create: `bus` (`scsi`,
   `virtio-blk`, `vhost-user-blk`), `aio` (`io_uring`, `native`, `threads`), `cache`, `iothread` and `queues`.

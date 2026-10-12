@@ -131,6 +131,7 @@
             align-items:center; }
   .banner.warn { background:var(--warn-soft); color:var(--ink); border:1px solid color-mix(in srgb, var(--warn) 30%, transparent); }
   .banner.bad { background:var(--bad-soft); border:1px solid color-mix(in srgb, var(--bad) 30%, transparent); }
+  .banner.info { background:var(--accent-soft); color:var(--ink); }
 
   .panel { background:var(--surface); border-radius:var(--radius-l); box-shadow:var(--shadow); }
   .panel.pad { padding:20px 22px; }
@@ -372,6 +373,24 @@
   .signin .brand { padding:0 0 24px; }
   .signin h1 { font-size:24px; margin-bottom:8px; }
   .signin p { color:var(--muted); font-size:14px; margin-bottom:20px; }
+  .signin-sso #signin-sso-btn { width:100%; justify-content:center; padding:10px 16px; font-size:15px; }
+  .signin-sso p.small { margin:8px 0 18px; text-align:center; font-size:12px; }
+  .signin-sso .or { display:flex; align-items:center; gap:10px; color:var(--muted); font-size:12px; margin:0 0 16px; }
+  .signin-sso .or::before, .signin-sso .or::after { content:""; flex:1; height:1px; background:var(--hair); }
+  .side-foot .switch-team { padding:2px 0; font-size:12px; }
+  a.choice { color:inherit; text-decoration:none; }
+
+  /* ---- signup ---- */
+  .signin .signup-cta { margin:22px 0 0; padding-top:18px; border-top:1px solid var(--hair); text-align:center;
+                        color:var(--muted); font-size:14px; }
+  .pm-panel { box-shadow:var(--shadow), inset 0 0 0 1px color-mix(in srgb, var(--accent) 40%, transparent);
+              background:linear-gradient(180deg, var(--accent-soft), var(--surface) 70%); }
+  a.btn { display:inline-block; text-decoration:none; color:var(--ink); }
+  a.btn:hover { background:var(--hover); text-decoration:none; }
+  a.btn.primary { background:var(--accent); border-color:var(--accent); color:var(--accent-ink); font-weight:500; }
+  a.btn.primary:hover { filter:brightness(1.08); background:var(--accent); }
+  a.btn.small { font-size:13px; padding:3px 12px; }
+  .inv-num { display:block; font-size:12px; color:var(--muted); }
 
   .mobile-only { display:none; }
   @media (max-width: 1100px) {
@@ -391,7 +410,7 @@
     nav a { white-space:nowrap; }
     nav .count { display:none; }
     .side-foot { margin:0 0 0 auto; padding:0; }
-    .side-foot .who, .side-foot .role { display:none; }
+    .side-foot .who, .side-foot .role, .side-foot .switch-team { display:none; }
     .side-foot .row { margin:0; }
     .bar { padding:10px 16px; }
     .bar .search, .bar .kbd, .updated { display:none; }
@@ -403,6 +422,83 @@
     .hide-sm { display:none; }
     .app.with-inspector .inspector { width:100vw; }
   }
+
+  /* ---- metrics ---- usage charts: an SVG plot stretched to its box (strokes keep their width); text, end markers,
+     crosshair and tooltip are HTML on top. Series colours are validated for colour-blind separation on both themes. */
+  :root { --series-1:var(--accent); --series-2:#eb6834; }
+  @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --series-2:#d95926; } }
+  :root[data-theme="dark"] { --series-2:#d95926; }
+  .charts { display:grid; gap:20px; transition:opacity .2s ease; }
+  .charts.stale { opacity:.55; }
+  .chart { margin:0; min-width:0; }
+  .chart-head { display:flex; align-items:baseline; gap:8px; margin-bottom:8px; font-size:13px; min-width:0; }
+  .chart-title { color:var(--ink); font-weight:500; white-space:nowrap; }
+  .chart-sub { color:var(--muted); font-size:12px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .chart-now { margin-left:auto; font-size:15px; font-weight:600; white-space:nowrap; }
+  .chart-legend { margin-left:auto; display:flex; gap:12px; color:var(--muted); font-size:12px; white-space:nowrap; }
+  .chart-legend b, .chart-tip b { color:var(--ink); font-weight:600; font-variant-numeric:tabular-nums; }
+  .key::before { content:""; display:inline-block; width:12px; height:2px; border-radius:1px; background:var(--c);
+                 vertical-align:middle; margin:-2px 6px 0 0; }
+  .chart-plot { position:relative; height:84px; border-bottom:1px solid var(--line); cursor:crosshair; touch-action:pan-y; }
+  .chart-plot:focus-visible { outline-offset:4px; }
+  .chart.compact .chart-plot { height:40px; border-bottom:0; margin-top:8px; }
+  .chart-svg { position:absolute; inset:0; width:100%; height:100%; overflow:visible; }
+  .chart-grid { stroke:var(--hair); stroke-width:1; vector-effect:non-scaling-stroke; }
+  .chart-line { fill:none; stroke-width:2; stroke-linejoin:round; stroke-linecap:round; vector-effect:non-scaling-stroke; }
+  .chart-area { fill-opacity:.1; stroke:none; }
+  .chart-dot { position:absolute; width:8px; height:8px; margin:-4px 0 0 -4px; border-radius:50%; background:var(--c);
+               box-shadow:0 0 0 2px var(--surface); pointer-events:none; }
+  .chart-ymax { position:absolute; left:0; top:-7px; padding-right:6px; font-size:11px; line-height:14px; color:var(--muted);
+                background:var(--surface); pointer-events:none; font-variant-numeric:tabular-nums; }
+  .chart-cross { position:absolute; top:0; bottom:0; width:1px; margin-left:-.5px; background:var(--muted); pointer-events:none; }
+  .chart-tip { position:absolute; top:4px; z-index:3; transform:translateX(10px); padding:6px 9px; border-radius:8px;
+               background:var(--raised); border:1px solid var(--hair); box-shadow:var(--shadow); font-size:12px;
+               line-height:1.45; white-space:nowrap; pointer-events:none; color:var(--muted); }
+  .chart-tip.flip { transform:translateX(calc(-100% - 10px)); }
+  .chart-tip .chart-tip-t { color:var(--muted); margin-bottom:2px; }
+  .chart-tip-row { display:flex; align-items:center; gap:8px; justify-content:space-between; }
+  .chart-x { display:flex; justify-content:space-between; margin-top:4px; font-size:11px; color:var(--muted);
+             font-variant-numeric:tabular-nums; }
+  .chart-empty { height:84px; display:flex; align-items:center; justify-content:center; text-align:center; padding:0 16px;
+                 border:1px dashed var(--line); border-radius:var(--radius); font-size:13px; color:var(--muted); }
+  .usage-tile { display:flex; align-items:center; gap:24px; }
+  .usage-tile-text { flex:none; }
+  .usage-tile .chart { flex:1; min-width:0; }
+  .usage-tile .chart.compact .chart-plot { height:56px; margin-top:0; }
+  @media (prefers-reduced-motion: reduce) { .charts { transition:none; } }
+  /* ---- snapshots ---- */
+  .snaps { border:1px solid var(--hair); border-radius:var(--radius); }
+  .snap { padding:10px 12px 6px; }
+  .snap + .snap { border-top:1px solid var(--hair); }
+  .snap-name { font-weight:500; min-width:0; overflow-wrap:anywhere; }
+  .snap-acts { gap:2px; margin:4px -8px 0; }
+  .snap-acts button { font-size:13px; padding:4px 8px; }
+  /* ---- warmpool ---- */
+  .pools { display:grid; grid-template-columns:repeat(auto-fill, minmax(300px, 1fr)); gap:16px; }
+  .pool-card { display:flex; flex-direction:column; gap:14px; }
+  .pool-card .pool-top { display:flex; align-items:flex-start; gap:10px; }
+  .pool-card .pool-top h3 { font-size:17px; letter-spacing:-0.01em; overflow-wrap:anywhere; }
+  .pool-card .pool-sub { font-size:13px; color:var(--muted); margin-top:2px; }
+  .warm-row { display:flex; align-items:center; gap:12px; padding:12px 14px; border-radius:var(--radius);
+              background:var(--canvas); }
+  .warm-dots { display:flex; flex-wrap:wrap; gap:6px; flex:1; min-width:0; }
+  .wdot { width:14px; height:14px; border-radius:50%; flex:none; }
+  .wdot.ready { background:var(--ok); box-shadow:0 0 0 3px color-mix(in srgb, var(--ok) 18%, transparent); }
+  .wdot.booting { border:2px solid var(--warn); background:color-mix(in srgb, var(--warn) 22%, transparent); }
+  .wdot.slot { border:1.5px dashed var(--line); }
+  .warm-count { font-size:13px; color:var(--ink-2); white-space:nowrap; font-variant-numeric:tabular-nums; }
+  .stepper { display:inline-flex; align-items:center; border:1px solid var(--line); border-radius:980px; background:var(--surface); }
+  .stepper button { border:0; background:transparent; width:32px; height:30px; padding:0; font-size:17px; line-height:1;
+                    border-radius:980px; color:var(--accent); }
+  .stepper output { min-width:28px; text-align:center; font-weight:600; font-variant-numeric:tabular-nums; }
+  .pool-stats { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
+  .pool-stats div { font-size:12px; color:var(--muted); }
+  .pool-stats b { display:block; font-size:17px; color:var(--ink); font-weight:600; font-variant-numeric:tabular-nums; }
+  .pool-foot { display:flex; align-items:center; gap:8px; margin-top:auto; padding-top:2px; flex-wrap:wrap; }
+  .tag.warm { background:var(--warn-soft); color:var(--warn); margin-left:6px; }
+  .tag.warm.ready { background:var(--ok-soft); color:var(--ok); }
+  @media (prefers-reduced-motion: no-preference) { .wdot.booting { animation:warm-pulse 1.4s ease-in-out infinite; } }
+  @keyframes warm-pulse { 50% { opacity:.45; } }
 </style>
 </head>
 <body>
@@ -410,12 +506,18 @@
   <form id="signin-form" class="panel">
     <div class="brand"><span class="brand-mark" aria-hidden="true"></span><div><b>FluxVM Cloud</b><small>Macs on demand</small></div></div>
     <h1>Sign in</h1>
+    <div id="signin-sso" class="signin-sso" hidden>
+      <button class="primary" id="signin-sso-btn" type="button">Sign in with SSO</button>
+      <p class="small muted">With your work account. Your team's admin adds you on the Members page.</p>
+      <div class="or" aria-hidden="true"><span>or use an access token</span></div>
+    </div>
     <p>Use the access token your operator gave you. Operators use the fleet token
       (<code>fluxvm-agent central --token</code>). The token stays in this browser tab only.</p>
     <label class="field"><span>Access token</span>
       <input id="signin-token" type="password" autocomplete="off" spellcheck="false" required/></label>
     <p id="signin-error" class="sheet-error" role="alert" style="margin:10px 0 0"></p>
     <div class="row" style="margin-top:20px"><span class="grow"></span><button class="primary" type="submit">Sign in</button></div>
+    <p id="signup-cta" class="signup-cta" hidden>New to FluxVM Cloud? <a href="#" id="signup-link">Create an account</a></p>
   </form>
 </div>
 
@@ -426,6 +528,7 @@
     <div class="side-foot">
       <div class="who" id="who"></div>
       <div class="muted role" id="role"></div>
+      <button class="plain switch-team" id="switch-team" type="button" hidden>Switch team</button>
       <div class="row">
         <button class="icon" id="theme" type="button" title="Theme">Theme</button>
         <button class="icon" id="signout" type="button">Sign out</button>

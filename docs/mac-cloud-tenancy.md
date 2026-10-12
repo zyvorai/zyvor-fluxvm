@@ -45,6 +45,9 @@ With a **tenant token** you get:
   large view where your clicks, scrolling and typing go to the guest (macOS VMs), with a box for pasting text and
   buttons for Return, Esc, Tab and ⌘ Space, enough to get through Setup Assistant or a stuck dialog. The console log is
   one click away.
+- **Snapshots and clones**: a VM's details list its snapshots (when, how big, disk only or disk and memory). **Take
+  snapshot** names one; **Restore…** puts the VM back to it after asking; **Delete…** asks too; **New VM from this…**
+  and **Clone VM…** make a new VM on the same Mac. See [Snapshots and clones](#snapshots-and-clones).
 - **Activity**: every change made with your token (launches, deletes, leases, networks, commands) and whether it worked.
 - **Images** (the catalog) and **Usage** (7, 30 or 90 days, with a CSV download).
 
@@ -98,6 +101,9 @@ Next: fluxctl fleet run macos-27-xcode-1 -- sw_vers
 | `fleet notifications`, `fleet webhooks [add\|rm\|test]` | Notifications and webhooks |
 | `fleet start\|stop\|restart\|pause\|resume VM` | Power a VM (stop and restart ask first on a terminal) |
 | `fleet logs VM [--lines N]` | The end of a VM's console log |
+| `fleet snapshot VM [--name N] [--memory]`, `fleet snapshots VM` | Take a snapshot (disk, plus memory with `--memory`); list them |
+| `fleet restore VM SNAPSHOT [-y]`, `fleet snapshot-rm VM SNAPSHOT [-y]` | Put a VM back to a snapshot; delete one (both ask on a terminal) |
+| `fleet clone VM NEW-NAME [--snapshot S]` | A new VM on the same Mac, from a snapshot or the stopped VM |
 | `fleet rm VM` | Delete a VM by name (asks on a terminal; `-y` to skip) |
 | `fleet vms`, `fleet nodes`, `fleet node M` | VMs and Macs, with macOS slots (`●○`) and when each lease can be released |
 | `fleet lease create\|list\|get\|release` | Leases (`create --hours 72 --min-vcpus 16 --nested`) |
@@ -105,6 +111,7 @@ Next: fluxctl fleet run macos-27-xcode-1 -- sw_vers
 | `fleet networks [show\|create\|delete\|rotate\|add-mac\|remove-mac]` | Private networks across Macs |
 | `fleet tenant create\|list\|get\|me\|update\|rotate-token\|delete` | Tenants (the token is printed once) |
 | `fleet drain`, `drain-status`, `scrub`, `cordon`, `uncordon`, `usage`, `reconcile` | Operator tasks |
+| `fleet volumes`, `volume-create NAME --size GiB [--node M]`, `volume-resize NAME --size GiB`, `volume-rm NAME` | Persistent volumes; `fleet launch --volume NAME` attaches one (see [Volumes](#volumes)) |
 
 A refused call shows central's own message plus a hint: a 401 says which flag carries the token, a 429 points at the
 quota, a standby names the leader, and an unreachable central says how to point `--central` at it.
@@ -145,6 +152,54 @@ fluxctl fleet budget 500                    # a tenant's own monthly budget
 - The console shows month-to-date spend on a tenant's Overview, a cost estimate when leasing a Mac or launching a VM,
   a Billing page with statements and the budget, and (for the operator) the price list and every tenant's statement.
 
+### Self-service sign-up and Stripe invoices
+
+Central can let people create their own account from the sign-in page (`POST /signup`) and send each tenant's monthly
+statement as a Stripe invoice (`POST /fleet/billing/invoices?month=…`), with Stripe Checkout to save a card and a signed
+webhook for payment status. Both are off by default; see [mac-cloud-billing.md](mac-cloud-billing.md).
+
+## Snapshots and clones
+
+```bash
+fluxctl fleet snapshot ios-build-1 --name before-upgrade            # disk only, in any state
+fluxctl fleet snapshot ios-build-1 --name warm --memory             # disk and memory: the VM must run (or be paused)
+fluxctl fleet snapshots ios-build-1
+fluxctl fleet restore ios-build-1 before-upgrade                    # asks first
+fluxctl fleet clone ios-build-1 ios-build-2 --snapshot warm         # a new VM on the same Mac
+fluxctl fleet snapshot-rm ios-build-1 warm
+```
+
+A snapshot is taken by the VM's Mac and stays there, under the VM's workspace (`snapshots/<name>/`):
+
+- **Disk only** (the default): an APFS clone (`clonefile`, `cp -c`) of the disk and firmware files. It takes seconds
+  and uses space only as the VM changes afterwards. A stopped VM is copied as it is; a running one is paused for the
+  copy and resumed, so the copy is crash-consistent. Restoring boots the VM cold from it.
+- **Disk and memory** (`include_memory`, `--memory`): Virtualization.framework also saves the guest's memory and device
+  state (`saveMachineStateTo`, macOS 14 or later). The VM has to be running or paused. Restoring resumes it exactly
+  where it was.
+
+**Restore** stops the VM, puts the snapshot's disk and firmware back, and starts it (resuming the saved memory, if any).
+Everything written since the snapshot is lost; the snapshot itself is unchanged and can be restored again. **Clone**
+makes a new VM on the same Mac with the source's settings, size and networks, from a snapshot's disk (the source may be
+running) or from the source's own disk (it must be stopped). A macOS clone gets the source's hardware model and
+auxiliary storage but a machine identifier of its own, and needs a free macOS slot on that Mac. A clone belongs to the
+source VM's tenant and counts against its quota like a launch; a tenant cannot clone onto a cordoned or draining Mac.
+
+Names are 1-64 letters, digits, `.`, `_` and `-`, starting with a letter or digit (default `snap-<UTC time>`), and
+unique per VM. Each VM keeps at most `max_snapshots_per_vm` snapshots: 20 by default, set in the policy (0 turns
+snapshots off) and overridable per tenant in its quota (`"quota": {"max_snapshots_per_vm": 5}`). Taking one over the
+limit is a `429`; taking one with memory of a stopped VM is a `409`. A snapshot is deleted with its VM.
+
+Central keeps a record of each snapshot (VM, tenant, size, when it was taken and deleted) for the limit and for
+billing: with `snapshot_gib_per_hour` in the price list, statements get a **Snapshot storage** line (GiB-hours of each
+snapshot's size, as its Mac last reported it, for as long as it was kept, on leased Macs too). Listing a VM's snapshots
+brings the record in line with the Mac. Taking, restoring and deleting snapshots and cloning are in the activity log
+(with the snapshot's or new VM's name) and send `vm.snapshot`, `vm.restored` and `vm.cloned` notifications.
+
+On the Mac, these are the node API's `POST /v1/vms/{id}/snapshot` (`{"tag", "memory": false}` for disk only),
+`GET /v1/vms/{id}/snapshots`, `DELETE /v1/vms/{id}/snapshots/{tag}`, `POST /v1/vms/{id}/restore` and
+`POST /v1/vms/{id}/clone` (`{"name", "snapshot"}`).
+
 ## Notifications and webhooks
 
 Central turns what happens into notifications, shown under the console's bell and on its Notifications page, and
@@ -158,6 +213,7 @@ sends them to webhooks.
 | `lease.ended` | tenant | the reconciler ended a lease at its end time |
 | `budget.near`, `budget.over` | tenant | the month's spend reaches 80%, then 100% of the budget |
 | `node.down`, `node.scrub`, `drain.done` | operator | a Mac stops reporting, needs a scrub, finishes draining |
+| `volume.created`, `volume.deleted` | tenant | a volume is created or deleted through central |
 
 Time-based events are found by the reconciler (every `--reconcile-secs`, 60 by default) and sent once. The record of
 what was sent lives in memory, so after a restart an event that is still true may be sent once more.
@@ -204,6 +260,161 @@ fluxctl fleet keys revoke ci-github
   tenancy state.
 - The console has an **API keys** page for tenants, and the operator manages keys in a tenant's details.
 
+## SSH and port tunnels
+
+Tenants reach their VMs' SSH and other TCP ports through central, so no Mac and no node API has to be reachable from
+the tenant's network. Central is the only thing they connect to, with the same token as for everything else.
+
+```bash
+export CENTRAL_URL=https://cloud.example.com FLUXVM_AGENT_TOKEN=fvt_…
+fluxctl fleet ssh web-1                              # the system ssh, as the image's ssh_user (or admin)
+fluxctl fleet ssh debian@web-1 -- -L 5432:localhost:5432
+fluxctl fleet port-forward web-1 8080:80             # 127.0.0.1:8080 -> port 80 of web-1; --address to change
+fluxctl fleet tunnels                                # open tunnels: VM, port, traffic, idle time
+fluxctl fleet tunnels close tun_5c1e09a2b7f4
+```
+
+`fluxctl fleet ssh` runs your own `ssh` with `-o ProxyCommand="fluxctl fleet --central … tunnel-stdio <node>/<id> %p"`
+and `HostKeyAlias=fluxvm-<id>`, so keys, agents, `scp`, `rsync -e ssh` and `~/.ssh/config` work as usual; the token
+reaches the ProxyCommand through the environment, never a command line. The VM inspector in the console shows the
+commands and an SSH config block to paste into `~/.ssh/config`:
+
+```
+Host web-1
+  User admin
+  HostKeyAlias fluxvm-<vm id>
+  ProxyCommand fluxctl fleet --central https://cloud.example.com tunnel-stdio <node>/<vm id> %p
+```
+
+How it works: the client opens a WebSocket to `GET /fleet/vms/{node}/{id}/tunnel?port=N` (default 22) with its bearer
+token. Central checks that the caller owns the VM (404 otherwise), that the key is not read-only, that the port is
+allowed and that the tenant has a tunnel to spare. Then it opens a WebSocket to the node's own
+`GET /v1/vms/{id}/tunnel?port=N` with the fleet token and relays binary messages both ways, each direction waiting for
+its write before reading again (backpressure, bounded memory). The node connects to the guest only:
+
+- a VM on `apple.usernet` through the host listener of its own TCP forward for that guest port (add one to
+  `apple.usernet.port_forwards`; the guest network is not routable from the Mac);
+- a `tap` + `netns` VM from inside its network namespace;
+- any other VM at the address the node knows for it: the NAT address the vz runner reports, or its DHCP lease.
+
+Loopback, unspecified and multicast addresses are refused, and central only ever connects to a registered node's API,
+so a tunnel cannot reach central's or a Mac's own services. If a node's `fluxctl serve` requires tokens, give it the
+fleet token as an admin token, or central's tunnels to it are refused (`502`).
+
+The policy (`GET/PUT /fleet/policy`, **Policy** page in the console) has a `tunnels` block:
+
+```json
+"tunnels": {"enabled": true, "ports": ["22", "1024-65535"], "idle_timeout_minutes": 60, "max_per_tenant": 20}
+```
+
+- `ports`: single ports and inclusive ranges (at most 64 entries). Other ports get `403`.
+- `idle_timeout_minutes` (1-1440): a tunnel with no bytes either way for this long is closed. `ServerAliveInterval` in
+  ssh keeps an idle shell open.
+- `max_per_tenant` (1-1000): more open tunnels get `429` until one closes. The operator counts as one more tenant.
+
+Opening (method `OPEN`, status `101`, or the refusal's status) and closing (`CLOSE`, with bytes sent and received, how
+long, and why: the client disconnected, the VM closed the connection, idle timeout, closed by the tenant or the
+operator) are written to the activity log. `GET /fleet/tunnels` lists the open tunnels (a tenant sees its own) with
+the policy's limits; `DELETE /fleet/tunnels/{id}` closes one at once. The console's **Tunnels** page shows them per
+tenant with a Close action. Tunnels live in the memory of the central that relays them: restarting it, or a failover
+to another central, ends them, and clients connect again.
+## Sign-in with SSO and team members
+
+People can sign in to the console with the company's identity provider (OpenID Connect: Okta, Microsoft Entra ID,
+Google, Keycloak, Auth0, ...) instead of pasting a token, and each person gets a role in their tenant. Tokens and API
+keys keep working as before, and `fluxctl` keeps using them.
+
+### Turn it on
+
+Register an application (web, authorization code) at the provider with the redirect URI
+`https://<central>/auth/callback` and the scopes `openid email profile`, then start central with:
+
+```bash
+fluxvm-agent central --token "$FLEET_TOKEN" \
+  --public-url https://cloud.example.com \
+  --oidc-issuer https://acme.okta.com --oidc-client-id 0oa1b2c3 \
+  --oidc-client-secret-file /etc/fluxvm/oidc-secret \
+  --oidc-provider-name Okta \
+  --sso-operator ops@example.com            # repeatable; these emails sign in as the operator
+```
+
+| Flag (environment) | Meaning |
+|---|---|
+| `--oidc-issuer` (`FLUXVM_OIDC_ISSUER`) | The issuer; discovery is read from `{issuer}/.well-known/openid-configuration`. https only (http for localhost). |
+| `--oidc-client-id`, `--oidc-client-secret` / `--oidc-client-secret-file` | The application. Without a secret central is a public client; PKCE is used either way. |
+| `--public-url` (`FLUXVM_PUBLIC_URL`) | Central's URL as browsers reach it. With https, the session cookie is `Secure`. |
+| `--oidc-provider-name` | The button's label: "Sign in with Okta". |
+| `--sso-operator` (`FLUXVM_SSO_OPERATORS`, comma-separated) | Operator emails. `operator_emails` in the policy (`PUT /fleet/policy`) adds more without a restart. |
+| `--session-hours` (default 12) | How long a console session lasts. |
+
+SSO needs `--token`. The console shows **Sign in with ...** when `GET /auth/config` says SSO is on.
+
+### How a sign-in works
+
+`GET /auth/login` sends the browser to the provider with the authorization code flow and PKCE (S256). `state`,
+`nonce` and the PKCE verifier stay in central's memory for ten minutes, and `state` is also bound to the browser by a
+short-lived cookie, so a sign-in link cannot be finished in another browser. `GET /auth/callback` swaps the code at the
+provider's token endpoint and verifies the ID token:
+
+- the signature, with the provider's JWKS (fetched from discovery, cached for an hour, fetched again for an unknown key
+  id at most every 30 seconds): RS256/384/512, PS256/384/512, ES256/384; never `none` or HMAC;
+- `iss` is the configured issuer, `aud` contains the client id (and `azp` is the client id when there are several
+  audiences), `exp` has not passed (60 seconds of clock skew), `nonce` is this sign-in's;
+- `email` is present and `email_verified` is true (providers that do not send `email_verified` are refused).
+
+The verified email decides where the person lands: an operator email signs in as the operator; a member of a tenant
+signs in to that tenant with their role (`/auth/login?tenant=acme` picks one for someone in several teams, which the
+console's **Switch team** does); anyone else gets a page saying they have no access and whom to ask. Nobody is created
+on the fly. Signing in again does not need the password at most providers, since the provider has its own session.
+
+### Sessions
+
+A sign-in issues a session: a random token, stored only as its SHA-256 in the tenancy state (so it survives a restart
+and follows HA failover), sent as the `fluxvm_session` cookie (`HttpOnly`, `SameSite=Lax`, `Secure` with an https
+public URL, 12 hours by default). Who the person is is looked up again on every request, so a role change applies at
+once, and removing a member, deleting their tenant or removing an operator email ends their sessions. Sign-out
+(`POST /auth/logout`) deletes the session; it does not sign the person out of the provider. Each person keeps at most
+20 sessions (the oldest go first).
+
+A request with a bearer token ignores the cookie. A change (anything but `GET`) made with the cookie must carry the
+`X-FluxVM-Console` header, which the console sends and a cross-site form or `fetch` cannot, and, when the browser sends
+an `Origin`, come from the public URL; otherwise it is refused with `403`.
+
+### Roles
+
+| Role | May |
+|---|---|
+| `viewer` | Look at everything of the tenant (usage graphs, invoices and open tunnels included); change nothing, and open no tunnel. |
+| `member` | Also launch, control, run commands in and delete VMs, take, restore and delete snapshots, clone VMs, open SSH and port tunnels, and manage volumes and private networks. |
+| `admin` | Every tenant action: also leases, warm pools, closing tunnels, payment methods, API keys, members, the budget and webhooks. Cannot change or remove an owner, or make someone an owner. |
+| `owner` | Everything, including other owners. The last owner cannot be demoted, or removed while others remain. |
+
+The tenant's primary token acts as an owner; a named API key acts as an admin (a read-only key only reads) but cannot
+change members, the same way it cannot change keys, so a leaked CI key cannot invite its holder. The console hides what
+a role cannot do, and central refuses it anyway (`403` with the reason). New tenant routes are closed to members by
+default: a feature that wants members to use it adds its path in `role_refusal` (`crates/fluxvm-agent/src/central_sso.rs`).
+
+Someone who signed up (`POST /signup`) becomes their tenant's owner the first time they sign in with SSO with the same
+email, as long as the tenant has no members yet (sign-up does not verify the email, so it is not made a member before
+the identity provider has verified it; the sign-up's token works meanwhile).
+
+### Members
+
+```bash
+fluxctl fleet member-add alex@example.com --role admin      # a tenant's primary token, or the operator with --tenant
+fluxctl fleet members                                        # email, role, last sign-in, who added them
+fluxctl fleet member-role alex@example.com viewer
+fluxctl fleet member-rm alex@example.com
+```
+
+The operator adds a new tenant's first owner (console: the tenant's details, **Members**); from then on the team
+manages itself on its **Members** page. Adding someone sends nothing: tell them the console's address. A tenant has at
+most 500 members, emails are matched lowercase, and one person can be in several tenants.
+
+Every change made in a session is in the activity log with the person's email (`user`), and so is each sign-in
+(`POST /auth/session`). A first sign-in by an email nobody added is refused; a self-service sign-up would hook in at
+that point (`access_for` in `central_sso.rs`), and is not built.
+
 ## Activity log
 
 Central records every change made through it: the time, who (`operator` or the tenant), the method and path, the
@@ -228,7 +439,8 @@ curl -X PUT $CENTRAL/fleet/images/macos-27-xcode -H "Authorization: Bearer $FLEE
   "source": "ghcr.io/acme/macos-xcode:27"}'
 ```
 
-`vcpus` and `memory_mib` are the defaults the console offers (4 and 8192 if omitted). Tenants read the catalog with
+`vcpus` and `memory_mib` are the defaults the console offers (4 and 8192 if omitted). `ssh_user` (optional) is the
+image's login name, which `fluxctl fleet ssh` and the console's SSH config use (`admin` if omitted). Tenants read the catalog with
 `GET /fleet/images`. Only the operator can add, replace (`PUT`) or remove (`DELETE /fleet/images/{name}`) entries.
 
 ## Turning it on
@@ -292,7 +504,8 @@ you scrub.
 ## Quotas and ownership
 
 Every VM created through central is recorded in a ledger with its tenant, node, size and start and end times. Quotas
-(`max_vms`, `max_vcpus`, `max_memory_mib`, `max_leased_hosts`) are checked against the ledger before placement, and a
+(`max_vms`, `max_vcpus`, `max_memory_mib`, `max_leased_hosts`, and `max_snapshots_per_vm`, see
+[Snapshots and clones](#snapshots-and-clones)) are checked against the ledger before placement, and a
 breach returns `429`. A create in flight holds its share of the quota until the node answers, so a burst of parallel
 creates cannot overshoot. A tenant's create is always stamped with `"tenant": "<id>"`. Tenants see, delete and exec only VMs
 the ledger records as theirs; anything else is a `404`.
@@ -341,7 +554,58 @@ The CSV reports the same figures in hours. A tenant token always sees only its o
 The ledger covers VMs created through central. VMs created directly on a node are not metered. Records older than
 `ledger_retention_days` are dropped, so export usage before then.
 
+## Volumes
+
+A volume is a disk that keeps its data when the VM using it is deleted: put a database, a build cache or a home
+directory on it, delete the VM whenever you like, and launch the next one with the same volume.
+
+```bash
+fluxctl fleet volume-create pg-data --size 50          # on a Mac you lease, else the one with the most free memory
+fluxctl fleet launch --image debian-13 --volume pg-data
+fluxctl fleet volumes
+fluxctl fleet rm debian-13-1                           # the VM goes; pg-data keeps its data
+fluxctl fleet volume-resize pg-data --size 100         # grow only, while detached
+fluxctl fleet volume-rm pg-data                        # asks first; refused while attached
+```
+
+- **Where it lives.** A volume is a sparse raw file on one Mac (`<state_dir>/volumes/<id>.raw`, mode 0600, made by that
+  Mac's `fluxctl serve`), so it uses space only as the guest writes, and a VM that uses it runs on that Mac. A launch
+  with `"volumes": ["pg-data"]` is pinned to the volume's Mac; naming another Mac, or volumes on two Macs, is refused
+  (`409`) before anything is created. The Mac must take the VM like any other placement (a tenant cannot use a Mac
+  that is cordoned, draining or leased to someone else).
+- **In the guest.** Each volume is a virtio disk whose serial is the volume id, so it is always
+  `/dev/disk/by-id/virtio-vol-…` however many disks the VM has. Make a file system on it the first time
+  (`mkfs.ext4`), then mount it. Volumes attach to `vz` Linux guests only: Virtualization.framework gives macOS guests
+  no extra disks here.
+- **One VM at a time.** Attaching marks the volume as in use; deleting the VM (through central, by a drain, a lease
+  ending or the reconciler noticing the VM is gone) frees it. A volume in use cannot be deleted, resized or attached
+  to a second VM (`409`). A VM with volumes cannot be `reschedulable`: its volumes do not move.
+- **Names and sizes.** Names are 1-40 lowercase letters, digits and `-`, unique per tenant; the routes take the name or
+  the id (`vol-` and 12 hex characters). Sizes are 1-2048 GiB. Resizing only grows, and only while detached; grow the
+  file system inside the guest afterwards (`resize2fs`, `xfs_growfs`).
+- **Quota and billing.** `max_volume_gib` caps the GiB of volumes a tenant holds (`429` beyond it; no limit when unset,
+  `fluxctl fleet tenant update acme --max-volume-gib 500`). The price list's `volume_gib_per_hour` charges each GiB for as
+  long as the volume exists, attached or not, at its current size. A tenant that still has volumes cannot be deleted.
+- **Isolation.** A tenant sees and touches only its own volumes (another tenant's is a `404`); the Mac-local path is
+  shown to the operator only. A create body that names a volume's file in `apple.extra_disks` directly is refused, and a tenant may not name
+  `apple.extra_disks` at all (those are host files, devices or NBD servers on the Mac): tenants attach storage as volumes.
+  On the node, `policy.allowed_image_dirs` (when set) applies to every extra disk of a create as it does to `image`, with
+  the host's volumes directory allowed too; a volume file is refused when another VM on the Mac already uses it, and a
+  clone does not take its source's volumes.
+  `volume.created` and `volume.deleted` notifications go to the tenant.
+- **On the Mac.** `GET/POST /v1/volumes`, `GET/DELETE /v1/volumes/{name}` and `POST /v1/volumes/{name}/resize` on
+  `fluxctl serve` (admin only). The node refuses to delete or resize a file that any VM record on it still names.
+
+## Warm pools
+
+A tenant (or the operator) can keep VMs of a catalog image booted and idle, so a launch of that image takes one and
+starts in seconds. A tenant's pool runs on the Macs it leases and counts against its quota; a shared pool runs on Macs
+nobody leases and is billed to whoever takes a VM, from then on. See [warm-pools.md](warm-pools.md).
+
 ## API summary
+
+The API is described in `schemas/fleet-openapi.yaml`; to script it from Go, Python, TypeScript or Terraform see
+[fleet-sdk.md](fleet-sdk.md).
 
 A tenant can also `GET /fleet/nodes/{name}` for a Mac it leases. It sees the Mac's size, free capacity and Apple
 capabilities, but not its address, labels or security report.
@@ -360,6 +624,9 @@ capabilities, but not its address, labels or security report.
 | `POST /fleet/vms/{node}/{id}/{start,stop,restart,pause,resume}` | tenant (own VMs), operator |
 | `POST /fleet/vms/{node}/{id}/input` (`{"actions": [...]}`, as the node's `/v1/vms/{id}/input`) | tenant (own VMs; not with a read-only key), operator; not written to the activity log per event |
 | `GET /fleet/vms/{node}/{id}/logs[?lines=N]` | tenant (own VMs), operator |
+| `GET/POST /fleet/vms/{node}/{id}/snapshots` (`{"name": "…", "include_memory": false}`) | tenant (own VMs; `POST` not with a read-only key), operator |
+| `DELETE /fleet/vms/{node}/{id}/snapshots/{name}`, `POST …/snapshots/{name}/restore` | tenant (own VMs), operator |
+| `POST /fleet/vms/{node}/{id}/clone` (`{"name": "…", "snapshot": "…"}`) | tenant (own VMs; counts against its quota), operator |
 | `GET /fleet/vms/{node}/{id}/screen[?max_width=N]` | tenant (own VMs), operator: the display as PNG; `409` when the VM has none |
 | `GET/POST /fleet/tenants/me/keys`, `DELETE /fleet/tenants/me/keys/{id or name}` | tenant (primary token for changes) |
 | `GET/POST /fleet/tenants/{id}/keys`, `DELETE …/keys/{key}` | operator |
@@ -371,6 +638,16 @@ capabilities, but not its address, labels or security report.
 | `GET /fleet/events[?limit=N&tenant=T]` | tenant (own actions), operator (all, or one tenant's) |
 | `PUT/DELETE /fleet/images/{name}` | operator |
 | `GET /fleet/nodes/{name}` | operator; tenant for a Mac it leases (size, capacity, Apple capabilities only) |
+| `GET/POST /fleet/volumes[?tenant=T]`, `GET/DELETE /fleet/volumes/{name or id}`, `POST /fleet/volumes/{name}/resize` | tenant (own), operator |
+| `GET /fleet/vms/{node}/{id}/tunnel?port=N` (WebSocket) | tenant (own VMs; not with a read-only key), operator |
+| `GET /fleet/tunnels`, `DELETE /fleet/tunnels/{id}` | tenant (own), operator (all) |
+| `GET/POST /fleet/pools`, `GET/PATCH/DELETE /fleet/pools/{name}`, `GET …/{name}/status` | tenant (own pools; shared pools it may use, read-only), operator. See [warm-pools.md](warm-pools.md) |
+| `GET /auth/config`, `GET /auth/login[?tenant=T]`, `GET /auth/callback`, `GET /auth/session`, `POST /auth/logout` | anyone (the browser sign-in; see "Sign-in with SSO") |
+| `GET/POST /fleet/tenants/me/members`, `PATCH/DELETE /fleet/tenants/me/members/{email}` (`{"email", "role"}`, `{"role"}`) | tenant (changes: an admin or owner session, or the primary token) |
+| `GET/POST /fleet/tenants/{id}/members`, `PATCH/DELETE …/members/{email}` | operator |
+| `GET /signup/config`, `POST /signup`, `POST /stripe/webhook` | anyone (sign-up when open; the webhook is signed); see [mac-cloud-billing.md](mac-cloud-billing.md) |
+| `GET /fleet/billing/invoices`, `POST /fleet/billing/payment-method` | tenant (own), operator (invoices) |
+| `POST /fleet/billing/invoices?month=`, `PUT /fleet/tenants/{id}/billing` | operator |
 
 ## Not done yet
 
