@@ -2,7 +2,8 @@
 
 The quickest way to a working FluxVM on Apple silicon: one `brew install`, the daemon as a background service, and
 an AI agent client wired to it over MCP. Everything on this page was run on an Apple M4 mini (macOS 27.2) against the
-published `v0.4.4` package, from the tap, unless a line says otherwise.
+published `v0.4.4` package, from the tap, unless a line says otherwise. Install, service, upgrade (from 0.4.1) and uninstall
+were run for real; a real model was run through the local-model relay on the agent-sandbox demo branch.
 
 ## Before you start
 
@@ -44,7 +45,10 @@ tail -f /opt/homebrew/var/log/fluxvm.log
 ```
 
 The API listens on `127.0.0.1:7788`. Use `brew services` for the background service, not `fluxctl service install`:
-both register a LaunchAgent for the same daemon, and Homebrew's is the one `brew upgrade` manages.
+both register a LaunchAgent for the same daemon on port 7788, and Homebrew's is the one `brew upgrade` manages. Tested
+both ways: `fluxctl service install` writes `~/Library/LaunchAgents/dev.zyvor.fluxvm.plist`, starts it and serves
+`/healthz`; starting `brew services` while it runs makes the Homebrew one exit with `Address already in use`;
+`fluxctl service uninstall` removes the plist and stops the daemon. Pick one.
 
 > `/readyz` answers `503` on a Mac in 0.4.4: it still asked for the Linux eBPF dataplane. It is fixed in the release
 > after 0.4.4. Use `/healthz` for liveness.
@@ -83,10 +87,11 @@ Tested end to end from a fresh `HOME`: the entry is written, then `fluxctl mcp s
 Write tools (`--allow-write`) can create, run commands in and delete VMs: leave them off for a read-only agent. A runnable
 agent loop with real timings is in [examples/agent-sandbox-demo](../examples/agent-sandbox-demo/README.md).
 
-> **After `brew upgrade` in 0.4.4:** the MCP entry (and `fluxctl service install`) points at the versioned path
-> `/opt/homebrew/Cellar/fluxvm/0.4.4/bin/fluxctl`, which `brew cleanup` removes. Re-run `fluxctl mcp install` after an
-> upgrade, or edit the entry to `/opt/homebrew/opt/fluxvm/bin/fluxctl`. The release after 0.4.4 writes the `opt` path
-> itself.
+> **After `brew upgrade`:** an MCP entry (or `fluxctl service install` plist) written by 0.4.4 or earlier points at the
+> versioned path (`/opt/homebrew/Cellar/fluxvm/0.4.4/bin/fluxctl`). Homebrew removes the old version on upgrade, and the
+> entry then points at nothing: tested, an entry written by 0.4.1 was dead right after upgrading to 0.4.4. Re-run
+> `fluxctl mcp install`, or edit the entry to `/opt/homebrew/opt/fluxvm/bin/fluxctl`. Releases after 0.4.4 write the `opt`
+> path themselves.
 
 ## 5. Update and remove
 
@@ -98,8 +103,12 @@ brew services stop zyvorai/tap/fluxvm
 brew uninstall zyvorai/tap/fluxvm
 ```
 
-State (VMs, images, snapshots) stays in `~/Library/Application Support/FluxVM`; remove it yourself if you want it gone.
-*Upgrade and uninstall are the standard Homebrew steps and were not exercised for this page.*
+State (VMs, images, snapshots) stays in `~/Library/Application Support/FluxVM`, and the log in
+`/opt/homebrew/var/log/fluxvm.log`; remove them yourself if you want them gone.
+
+Both were run for real: 0.4.1 installed from the tap, then `brew upgrade` to 0.4.4 (Homebrew removed 0.4.1, the running
+service kept serving until `brew services restart` started the new binary), and `brew uninstall` (formula, `opt` link
+and binaries gone, no LaunchAgent or daemon left behind).
 
 ## Troubleshooting
 
@@ -108,6 +117,7 @@ State (VMs, images, snapshots) stays in `~/Library/Application Support/FluxVM`; 
 | `curl 127.0.0.1:7788/readyz` gives `503` | Expected on 0.4.4 (see above); `/healthz` is the check. |
 | `the Apple runner fluxvm-vz-runner was not found (looked at: …/target/debug/…)` | A VM record from a development build points at a path that no longer exists. Delete the VM (`fluxctl delete <id>`) and create it again. |
 | Snapshot restore or a warm slot fails | The login session is locked or absent. Unlock it, or set up the dedicated auto-login user. |
-| `brew services start` says it is already loaded | A leftover `fluxctl service install` agent: `fluxctl service uninstall`, then start the Homebrew one. |
+| `brew services` shows `Running: false` and the log says `Address already in use` | A `fluxctl service install` agent already holds port 7788: `fluxctl service uninstall`, then `brew services restart zyvorai/tap/fluxvm`. |
+| The MCP client lost the `fluxvm` tools after `brew upgrade` | The entry points at the removed versioned path: re-run `fluxctl mcp install <client>`. |
 | The client does not list the `fluxvm` tools | Restart the client; `fluxctl mcp status` shows whether the entry is written. |
 | A VM needs vmnet, bridged networking or USB | Not available in the ad hoc package; see [macos-signing.md](macos-signing.md). |
