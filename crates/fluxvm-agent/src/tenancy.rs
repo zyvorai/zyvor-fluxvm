@@ -81,6 +81,60 @@ pub struct Tenant {
     /// The tenant's /24 under `Policy::tenant_subnet_prefix` when network isolation is on (assigned on first use).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub network_index: Option<u8>,
+    /// Named API keys besides the primary token: one per person, CI system or tool, each revocable on its own.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub keys: Vec<ApiKey>,
+}
+
+/// A named API key of a tenant. Like the primary token, only its hash is stored.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApiKey {
+    /// `key_` and 12 hex characters; what revoking names.
+    pub id: String,
+    pub name: String,
+    pub token_sha256: String,
+    pub created_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<DateTime<Utc>>,
+    /// Only reads (`GET`): for dashboards, monitoring and support.
+    #[serde(default)]
+    pub read_only: bool,
+    /// Updated at most once a minute, and saved with the next change to the tenancy state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_used_at: Option<DateTime<Utc>>,
+}
+
+impl ApiKey {
+    /// The key as the API shows it: never the hash.
+    pub fn public_json(&self) -> Value {
+        serde_json::json!({
+            "id": self.id,
+            "name": self.name,
+            "created_at": self.created_at,
+            "expires_at": self.expires_at,
+            "read_only": self.read_only,
+            "last_used_at": self.last_used_at,
+        })
+    }
+}
+
+/// Whether `s` has the shape of an [`ApiKey::id`].
+fn looks_like_key_id(s: &str) -> bool {
+    s.strip_prefix("key_")
+        .is_some_and(|h| h.len() == 12 && h.bytes().all(|b| b.is_ascii_hexdigit()))
+}
+
+/// Most named keys one tenant may hold.
+pub const MAX_KEYS: usize = 50;
+
+/// Who a presented bearer token belongs to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeyMatch {
+    pub tenant: String,
+    pub disabled: bool,
+    /// The named key used, or `None` for the tenant's primary token.
+    pub key: Option<String>,
+    pub read_only: bool,
 }
 
 impl Tenant {
@@ -325,6 +379,8 @@ pub enum TenancyError {
     InvalidTenantId(String),
     TenantBusy(String),
     UnknownLease(String),
+    UnknownKey(String),
+    InvalidKey(String),
     NodeLeased { node: String, tenant: String },
     NodeNeedsScrub(String),
     LeaseTooShort { hours: i64, min: i64 },
@@ -339,7 +395,10 @@ impl TenancyError {
     /// The HTTP status central answers with.
     pub fn status(&self) -> u16 {
         match self {
-            TenancyError::UnknownTenant(_) | TenancyError::UnknownLease(_) => 404,
+            TenancyError::UnknownTenant(_)
+            | TenancyError::UnknownLease(_)
+            | TenancyError::UnknownKey(_) => 404,
+            TenancyError::InvalidKey(_) => 400,
             TenancyError::InvalidTenantId(_) | TenancyError::LeaseTooShort { .. } => 400,
             TenancyError::TenantDisabled(_) | TenancyError::NotYours(_) => 403,
             TenancyError::Quota(_) => 429,
@@ -363,6 +422,8 @@ impl std::fmt::Display for TenancyError {
                 write!(f, "tenant '{t}' still has active leases or VMs")
             }
             TenancyError::UnknownLease(l) => write!(f, "no lease '{l}'"),
+            TenancyError::UnknownKey(k) => write!(f, "no API key '{k}'"),
+            TenancyError::InvalidKey(m) => write!(f, "{m}"),
             TenancyError::NodeLeased { node, tenant } => {
                 write!(f, "node '{node}' is leased to tenant '{tenant}'")
             }
@@ -482,6 +543,69 @@ impl UsageReport {
     }
 }
 
+/// One entry of the image catalog (`GET /fleet/images`). Central does not move images: the operator puts the disk at
+/// `image` on every Mac that should run it (`fluxctl vm-image pull`), and the console fills a create request from the
+/// entry.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CatalogImage {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub display_name: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+    /// `macos` or `linux`.
+    pub guest_os: String,
+    /// The disk's path on each Mac (the request's `image`).
+    pub image: String,
+    #[serde(default = "default_image_vcpus")]
+    pub vcpus: u8,
+    #[serde(default = "default_image_memory")]
+    pub memory_mib: u64,
+    #[serde(default)]
+    pub disk_size_gib: Option<u64>,
+    /// Where it came from (an OCI reference), for display.
+    #[serde(default)]
+    pub source: Option<String>,
+    #[serde(default)]
+    pub updated_at: Option<DateTime<Utc>>,
+}
+
+fn default_image_vcpus() -> u8 {
+    4
+}
+
+fn default_image_memory() -> u64 {
+    8192
+}
+
+impl CatalogImage {
+    /// Checks an entry before it is stored.
+    pub fn validate(&self) -> Result<(), String> {
+        if !valid_image_name(&self.name) {
+            return Err("image names are 1-63 characters of a-z, 0-9, '-', '.' and '_'".into());
+        }
+        if !matches!(self.guest_os.as_str(), "macos" | "linux") {
+            return Err("guest_os must be 'macos' or 'linux'".into());
+        }
+        if self.image.trim().is_empty() {
+            return Err("image (the disk's path on the Macs) is required".into());
+        }
+        if self.vcpus == 0 || self.memory_mib < 512 {
+            return Err("an image needs at least 1 vCPU and 512 MiB".into());
+        }
+        Ok(())
+    }
+}
+
+fn valid_image_name(n: &str) -> bool {
+    !n.is_empty()
+        && n.len() <= 63
+        && n.bytes().all(|b| {
+            b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'-' | b'.' | b'_')
+        })
+}
+
 /// Everything persisted in `fleet-tenancy.json`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TenancyState {
@@ -502,6 +626,9 @@ pub struct TenancyState {
     /// Private networks spanning Macs, by name.
     #[serde(default)]
     pub overlays: BTreeMap<String, OverlayNet>,
+    /// The image catalog: VM images the operator has put on the Macs, which tenants pick from in the console.
+    #[serde(default)]
+    pub images: BTreeMap<String, CatalogImage>,
     /// Quota held by creates that are in flight (between the quota check and the node's answer). In memory only: a
     /// restart drops them, and the requests they belonged to are gone with it.
     #[serde(skip)]
@@ -550,6 +677,7 @@ impl TenancyState {
             disabled: false,
             created_at: now,
             network_index: None,
+            keys: Vec::new(),
         };
         self.tenants.insert(id.into(), t.clone());
         Ok((t, token))
@@ -609,7 +737,114 @@ impl TenancyState {
         Ok(())
     }
 
-    /// The enabled tenant whose token this is.
+    /// Resolves a bearer token to its tenant and key: the primary token, or a named key that has not expired. A key's
+    /// `last_used_at` is refreshed at most once a minute.
+    pub fn authenticate_key(&mut self, presented: &str, now: DateTime<Utc>) -> Option<KeyMatch> {
+        let h = hash_token(presented);
+        for t in self.tenants.values_mut() {
+            if constant_time_eq(t.token_sha256.as_bytes(), h.as_bytes()) {
+                return Some(KeyMatch {
+                    tenant: t.id.clone(),
+                    disabled: t.disabled,
+                    key: None,
+                    read_only: false,
+                });
+            }
+            if let Some(k) = t
+                .keys
+                .iter_mut()
+                .find(|k| constant_time_eq(k.token_sha256.as_bytes(), h.as_bytes()))
+            {
+                if k.expires_at.is_some_and(|e| e <= now) {
+                    return None;
+                }
+                if k.last_used_at
+                    .is_none_or(|u| now - u >= chrono::Duration::seconds(60))
+                {
+                    k.last_used_at = Some(now);
+                }
+                return Some(KeyMatch {
+                    tenant: t.id.clone(),
+                    disabled: t.disabled,
+                    key: Some(k.name.clone()),
+                    read_only: k.read_only,
+                });
+            }
+        }
+        None
+    }
+
+    /// Adds a named key and returns it with its one-time token.
+    pub fn create_key(
+        &mut self,
+        tenant: &str,
+        name: &str,
+        expires_at: Option<DateTime<Utc>>,
+        read_only: bool,
+        now: DateTime<Utc>,
+    ) -> Result<(ApiKey, String), TenancyError> {
+        let name = name.trim();
+        if name.is_empty() || name.chars().count() > 64 || name.chars().any(|c| c.is_control()) {
+            return Err(TenancyError::InvalidKey(
+                "a key needs a name of 1 to 64 characters".into(),
+            ));
+        }
+        // Revoking takes an id or a name, so a name must never be mistaken for another key's id.
+        if looks_like_key_id(name) {
+            return Err(TenancyError::InvalidKey(
+                "a key's name may not look like a key id (key_ and 12 hex characters)".into(),
+            ));
+        }
+        if expires_at.is_some_and(|e| e <= now) {
+            return Err(TenancyError::InvalidKey(
+                "a key's expiry must be in the future".into(),
+            ));
+        }
+        let t = self
+            .tenants
+            .get_mut(tenant)
+            .ok_or_else(|| TenancyError::UnknownTenant(tenant.into()))?;
+        if t.keys.iter().any(|k| k.name == name) {
+            return Err(TenancyError::InvalidKey(format!(
+                "a key named '{name}' already exists; revoke it first or pick another name"
+            )));
+        }
+        if t.keys.len() >= MAX_KEYS {
+            return Err(TenancyError::InvalidKey(format!(
+                "a tenant can hold at most {MAX_KEYS} keys; revoke one first"
+            )));
+        }
+        let token = new_token();
+        let key = ApiKey {
+            id: format!("key_{}", &uuid::Uuid::new_v4().simple().to_string()[..12]),
+            name: name.to_owned(),
+            token_sha256: hash_token(&token),
+            created_at: now,
+            expires_at,
+            read_only,
+            last_used_at: None,
+        };
+        t.keys.push(key.clone());
+        Ok((key, token))
+    }
+
+    /// Revokes a named key by id or name; its token stops working at once.
+    pub fn revoke_key(&mut self, tenant: &str, key: &str) -> Result<ApiKey, TenancyError> {
+        let t = self
+            .tenants
+            .get_mut(tenant)
+            .ok_or_else(|| TenancyError::UnknownTenant(tenant.into()))?;
+        // An id first: it is unique and never changes.
+        let i = t
+            .keys
+            .iter()
+            .position(|k| k.id == key)
+            .or_else(|| t.keys.iter().position(|k| k.name == key))
+            .ok_or_else(|| TenancyError::UnknownKey(key.into()))?;
+        Ok(t.keys.remove(i))
+    }
+
+    /// The tenant whose primary token this is (named keys aside; see [`TenancyState::authenticate_key`]).
     pub fn authenticate(&self, presented: &str) -> Option<&Tenant> {
         let h = hash_token(presented);
         self.tenants
@@ -1781,5 +2016,73 @@ mod tests {
         let empty: TenancyState = serde_json::from_str("{}").unwrap();
         assert!(empty.policy.require_lease_for_macos);
         assert_eq!(empty.policy.min_lease_hours, 24);
+    }
+
+    #[test]
+    fn named_keys_authenticate_expire_and_revoke() {
+        let now = Utc::now();
+        let mut s = TenancyState::default();
+        let (_, primary) = s
+            .create_tenant("acme", None, Quota::default(), now)
+            .unwrap();
+        let (ci, ci_token) = s.create_key("acme", "ci-github", None, false, now).unwrap();
+        let (_, ro_token) = s.create_key("acme", "grafana", None, true, now).unwrap();
+        let (_, old_token) = s
+            .create_key(
+                "acme",
+                "temp",
+                Some(now + chrono::Duration::hours(1)),
+                false,
+                now,
+            )
+            .unwrap();
+
+        let m = s.authenticate_key(&primary, now).unwrap();
+        assert_eq!(
+            (m.tenant.as_str(), m.key, m.read_only),
+            ("acme", None, false)
+        );
+        let m = s.authenticate_key(&ci_token, now).unwrap();
+        assert_eq!(m.key.as_deref(), Some("ci-github"));
+        assert!(!m.read_only);
+        assert!(s.authenticate_key(&ro_token, now).unwrap().read_only);
+        assert!(s.tenants["acme"].keys[0].last_used_at.is_some());
+
+        // Expired keys stop working; names are unique; bad names and past expiries are refused.
+        assert!(
+            s.authenticate_key(&old_token, now + chrono::Duration::hours(2))
+                .is_none()
+        );
+        assert!(s.create_key("acme", "ci-github", None, false, now).is_err());
+        assert!(s.create_key("acme", " ", None, false, now).is_err());
+        assert!(
+            s.create_key("acme", "key_0123456789ab", None, false, now)
+                .is_err()
+        );
+        assert!(
+            s.create_key(
+                "acme",
+                "x",
+                Some(now - chrono::Duration::hours(1)),
+                false,
+                now
+            )
+            .is_err()
+        );
+
+        // Revoking by id or name; the token stops working, the others keep working.
+        s.revoke_key("acme", &ci.id).unwrap();
+        assert!(s.authenticate_key(&ci_token, now).is_none());
+        s.revoke_key("acme", "grafana").unwrap();
+        assert!(s.authenticate_key(&ro_token, now).is_none());
+        assert!(s.authenticate_key(&primary, now).is_some());
+        assert!(matches!(
+            s.revoke_key("acme", "nope"),
+            Err(TenancyError::UnknownKey(_))
+        ));
+
+        // The hash never shows.
+        let k = s.create_key("acme", "k", None, false, now).unwrap().0;
+        assert!(!k.public_json().to_string().contains(&k.token_sha256));
     }
 }

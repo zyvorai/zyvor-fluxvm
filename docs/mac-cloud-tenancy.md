@@ -27,11 +27,130 @@ This is an engineering control, not legal advice. The rules are defaults in `GET
 
 ## Console
 
-`http://<central>/console` is a web console for the whole fleet. Sign in with a tenant token to see your leases,
-VMs, private networks and usage; you can lease or release a Mac, delete VMs and create networks there. Sign in with
-the fleet token for the operator view, which adds nodes (cordon, drain, scrub), tenants (create, disable, new token)
-and every tenant's usage. The page itself needs no token; it keeps the one you enter in the tab's session storage and
-sends it only to this central.
+`http://<central>/console` is the cloud's web console. The page needs no token: it asks for one, keeps it in the tab's
+session storage and sends it only to this central.
+
+With a **tenant token** you get:
+- **Overview**: a getting-started checklist (lease a Mac, launch a VM, connect VMs), quota meters, your Macs and recent VMs.
+- **My Macs**: each Mac shows its two macOS slots (Apple's licence limit) and how far the lease is through its 24-hour
+  minimum. Select one to launch a VM on it or release it once the minimum is over.
+- **Virtual machines**: search and filter, and a launch sheet that picks an image from the catalog. It suggests a name
+  and size, shows how much quota the VM takes, offers only Macs with a free macOS slot, and can join private networks
+  or delete the VM automatically. Select a VM to run commands in it through the guest agent, or delete it after typing
+  its name.
+- **Networks**: create one across your Macs, see each Mac's address range, add or remove Macs, rotate the key.
+- **Screen**: a VM's details show its display, refreshed every 2 seconds while open, so you can watch macOS boot,
+  finish setup or see why a job hangs, without VNC. It comes through central from the node's screenshot API.
+- **Activity**: every change made with your token (launches, deletes, leases, networks, commands) and whether it worked.
+- **Images** (the catalog) and **Usage** (7, 30 or 90 days, with a CSV download).
+
+The **fleet token** adds the operator's pages:
+- every Mac, with what needs attention first (not responding, needs a scrub, finished draining);
+- cordon, drain (with a choice of what happens to running VMs), scrub, and lease a Mac to a tenant;
+- tenants: create with quotas, edit quotas, disable, issue a new token (shown once), delete;
+- catalog editing and the policy.
+
+There is a command palette (⌘K or Ctrl-K) to jump to any page, VM, Mac, network or tenant, and to start any action.
+The console follows the system's light or dark mode unless you pick one, and it works on a phone. Links to a page or
+an item can be shared (`/console#/vms/<mac>/<id>`).
+
+## Command line
+
+`fluxctl fleet` talks to the same API (`--central`, default `http://127.0.0.1:7799`, or `CENTRAL_URL`; `--token` or
+`FLUXVM_AGENT_TOKEN`). On a terminal it prints tables, short confirmations and the next command to run. Piped, or
+with `-o json`, it prints the API's JSON unchanged, so scripts keep working. `-o table` and `-o wide` force the tables
+(`wide` adds IDs, labels, addresses and disk paths).
+
+```text
+$ fluxctl fleet status
+Acme Mobile  tenant acme, http://fleet:7799
+
+Macs    ████████████░░░░  2 of 3
+VMs     ████████░░░░░░░░  5 of 10
+vCPUs   ███████░░░░░░░░░  20 of 48
+Memory  ████░░░░░░░░░░░░  48 GiB of 192 GiB
+
+MAC       LEASE                MACOS  VMS  FREE
+studio-1  releasable now       ●●     3    10 vCPUs, 156 GiB
+mini-1    releasable in 19h    ●○     2    6 vCPUs, 20 GiB
+
+Next: fluxctl fleet vms
+
+$ fluxctl fleet launch --image macos-27-xcode --ttl 8h
+✓ Launched macos-27-xcode-1 on mini-1 (macOS 27 with Xcode, 6 vCPUs, 16 GiB)
+  ID  0b9c…
+Next: fluxctl fleet run macos-27-xcode-1 -- sw_vers
+```
+
+| Command | What |
+|---|---|
+| `fleet status` | A tenant's quota, Macs and next step; for the operator, fleet health and what needs attention |
+| `fleet launch [NAME] --image I` | Launch from the catalog (or `--disk PATH --guest macos`); `--mac`, `--network` (repeatable), `--ttl 8h`, `--vcpus`, `--memory-gib` |
+| `fleet run VM -- CMD…` | Run a command in a VM found by name or ID prefix; prints the guest's output and exits with its code |
+| `fleet screen VM [-f out.png]` | Save a picture of a VM's display |
+| `fleet events [--limit N]` | The activity log (with the API key used) |
+| `fleet keys [create\|revoke]` | A tenant's named API keys |
+| `fleet rm VM` | Delete a VM by name (asks on a terminal; `-y` to skip) |
+| `fleet vms`, `fleet nodes`, `fleet node M` | VMs and Macs, with macOS slots (`●○`) and when each lease can be released |
+| `fleet lease create\|list\|get\|release` | Leases (`create --hours 72 --min-vcpus 16 --nested`) |
+| `fleet images [add\|remove]` | The image catalog |
+| `fleet networks [show\|create\|delete\|rotate\|add-mac\|remove-mac]` | Private networks across Macs |
+| `fleet tenant create\|list\|get\|me\|update\|rotate-token\|delete` | Tenants (the token is printed once) |
+| `fleet drain`, `drain-status`, `scrub`, `cordon`, `uncordon`, `usage`, `reconcile` | Operator tasks |
+
+A refused call shows central's own message plus a hint: a 401 says which flag carries the token, a 429 points at the
+quota, a standby names the leader, and an unreachable central says how to point `--central` at it.
+
+## API keys
+
+A tenant's primary token is the one the operator hands over. Besides it, a tenant can hold up to 50 named API keys:
+one per person, CI system or tool, so the activity log says which one did what and one can be revoked without
+breaking the others.
+
+```bash
+fluxctl fleet keys create ci-github                   # full access, expires in 90 days; prints the key once
+fluxctl fleet keys create grafana --read-only --expires-days 0
+fluxctl fleet keys                                    # name, access, last used, expiry
+fluxctl fleet keys revoke ci-github
+```
+
+- A key acts as its tenant, with the same quotas and visibility. A **read-only** key can only `GET`.
+- Only the primary token (or the operator, with `--tenant` / `/fleet/tenants/{id}/keys`) creates and revokes keys, so a
+  leaked key cannot mint more. An expired key is refused like an unknown one.
+- Revoking takes a key's id or its name (an id wins; names may not look like ids). The console revokes by id.
+- Rotating the primary token (`POST /fleet/tenants/{id}/rotate-token`) does **not** revoke named keys: CI keeps
+  working. If the primary token leaked, also list the tenant's keys and revoke any nobody recognises (the activity log
+  shows who created each). Disabling a tenant refuses its keys too; deleting it deletes them.
+- Only a key's hash is stored. `last_used_at` is updated at most once a minute and saved with the next change to the
+  tenancy state.
+- The console has an **API keys** page for tenants, and the operator manages keys in a tenant's details.
+
+## Activity log
+
+Central records every change made through it: the time, who (`operator` or the tenant), the method and path, the
+name or id from the request body if there is one (a VM name, a tenant id), and the HTTP status. Reads and node
+heartbeats are not recorded, a command's body is never read, and nothing else from a request is kept, so the log never
+holds a VM spec, a command, a token or a key. A tenant's refused attempt at an operator route (403) is recorded too;
+calls without a valid token are not. The newest 5000 events are served by `GET /fleet/events`; all of them are appended to `fleet-audit.jsonl` (mode
+0600) in the state directory, which rotates to `fleet-audit.jsonl.1` at 16 MiB. A tenant sees only its own actions.
+With HA, each central keeps its own log, so the log of a central that was leader for a while covers that while.
+
+## Image catalog
+
+The catalog lists the images the operator has put on the Macs, so tenants launch by name instead of typing disk paths.
+Central does not copy images: pull each one onto every Mac that should run it (`fluxctl vm-image pull`, see
+[vm-images.md](vm-images.md)), then add it.
+
+```bash
+curl -X PUT $CENTRAL/fleet/images/macos-27-xcode -H "Authorization: Bearer $FLEET_TOKEN" \
+  -H 'content-type: application/json' -d '{
+  "display_name": "macOS 27 with Xcode", "guest_os": "macos",
+  "image": "/Users/fluxvm/vms/macos-27-xcode/disk.raw", "vcpus": 6, "memory_mib": 16384,
+  "source": "ghcr.io/acme/macos-xcode:27"}'
+```
+
+`vcpus` and `memory_mib` are the defaults the console offers (4 and 8192 if omitted). Tenants read the catalog with
+`GET /fleet/images`. Only the operator can add, replace (`PUT`) or remove (`DELETE /fleet/images/{name}`) entries.
 
 ## Turning it on
 
@@ -51,7 +170,11 @@ Central stores only the SHA-256 of a tenant token. `fluxctl fleet tenant rotate-
 
 A tenant token can call only these routes: `POST/GET /fleet/vms`, `DELETE /fleet/vms/{node}/{id}`,
 `POST /fleet/vms/{node}/{id}/exec`, `GET/POST /fleet/leases`, `GET /fleet/leases/{id}`, `POST /fleet/leases/{id}/release`,
-`GET /fleet/usage`, `GET /fleet/tenants/me` and `GET /fleet/capacity`. Everything else is operator-only.
+`GET /fleet/usage`, `GET /fleet/tenants/me`, `GET /fleet/capacity`, `GET /fleet/images`, `GET /fleet/nodes/{name}` (a Mac
+it leases), and its own private networks (`GET/POST /fleet/overlays`, `GET/DELETE /fleet/overlays/{name}`,
+`POST /fleet/overlays/{name}/members`, `DELETE /fleet/overlays/{name}/members/{node}`,
+`POST /fleet/overlays/{name}/rotate`). Everything else is operator-only. In `GET /fleet/vms`, a tenant's
+`unreachable_nodes` names only its own Macs and Macs running its VMs, without the node's error text.
 
 ## Leases
 
@@ -141,6 +264,9 @@ The ledger covers VMs created through central. VMs created directly on a node ar
 
 ## API summary
 
+A tenant can also `GET /fleet/nodes/{name}` for a Mac it leases. It sees the Mac's size, free capacity and Apple
+capabilities, but not its address, labels or security report.
+
 | Route | Who |
 |---|---|
 | `GET/POST /fleet/tenants`, `GET/PATCH/DELETE /fleet/tenants/{id}`, `POST /fleet/tenants/{id}/rotate-token` | operator |
@@ -151,6 +277,13 @@ The ledger covers VMs created through central. VMs created directly on a node ar
 | `POST /fleet/vms/{node}/{id}/exec` (`{"command": "…", "timeout_seconds": N}`) | tenant (own VMs), operator |
 | `GET /fleet/usage?from=&to=&tenant=&format=json\|csv` | tenant (own), operator |
 | `POST /fleet/reconcile`, `GET/PUT /fleet/policy` | operator |
+| `GET /fleet/images` | tenant, operator |
+| `GET /fleet/vms/{node}/{id}/screen[?max_width=N]` | tenant (own VMs), operator: the display as PNG; `409` when the VM has none |
+| `GET/POST /fleet/tenants/me/keys`, `DELETE /fleet/tenants/me/keys/{id or name}` | tenant (primary token for changes) |
+| `GET/POST /fleet/tenants/{id}/keys`, `DELETE …/keys/{key}` | operator |
+| `GET /fleet/events[?limit=N&tenant=T]` | tenant (own actions), operator (all, or one tenant's) |
+| `PUT/DELETE /fleet/images/{name}` | operator |
+| `GET /fleet/nodes/{name}` | operator; tenant for a Mac it leases (size, capacity, Apple capabilities only) |
 
 ## Not done yet
 

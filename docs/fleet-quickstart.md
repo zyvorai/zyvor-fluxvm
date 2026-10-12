@@ -31,6 +31,15 @@ It then prints the console URL and both tokens, and keeps running until Ctrl-C. 
 and paste the operator token to see the fleet, or the tenant token to see what `acme` sees. `FLUXVM_SIM_PORT` moves the
 port. State and logs go to a temporary directory, printed at the end.
 
+From another terminal, the CLI works against it too (it defaults to `http://127.0.0.1:7799`):
+
+```bash
+export FLUXVM_AGENT_TOKEN=<tenant token printed by the script>
+fluxctl fleet status
+fluxctl fleet launch --image debian-13
+fluxctl fleet run debian-13-1 -- uname -a
+```
+
 ## By hand
 
 ```bash

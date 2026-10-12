@@ -27,6 +27,7 @@ use uuid::Uuid;
 mod compose;
 mod contexts;
 mod create;
+mod fleet_cli;
 mod fleet_client;
 mod launch_agent;
 mod mcp;
@@ -549,6 +550,11 @@ enum Command {
         #[command(subcommand)]
         command: ContextCommand,
     },
+    /// Warm pool of up to two slot-bound macOS guests: enrol, checkout, return. REST: `/v1/macos-pool`.
+    MacosPool {
+        #[command(subcommand)]
+        command: MacosPoolCommand,
+    },
     /// Data disks (QEMU): list, attach, resize, detach. REST:
     /// `/v1/vms/{id}/disks[/{name}]`.
     Disk {
@@ -1056,7 +1062,7 @@ enum Command {
     Fleet {
         /// Base URL of the `fluxvm-agent central` instance, e.g.
         /// `http://fleet-registry:7799`.
-        #[arg(long, env = "CENTRAL_URL")]
+        #[arg(long, env = "CENTRAL_URL", default_value = "http://127.0.0.1:7799")]
         central: String,
         /// Bearer token matching `fluxvm-agent central --token`. Omit if
         /// the registry has no token configured.
@@ -1083,6 +1089,90 @@ struct Target {
 
 #[derive(Subcommand)]
 enum FleetCommand {
+    /// What you have and what needs attention: a tenant's quota, Macs and next step, or the operator's fleet
+    /// health. Start here.
+    Status,
+    /// Launch a VM from the image catalog (or a disk path on the Mac). Picks a name, the image's default size and
+    /// a Mac with room; `--mac` pins one. Example: `fluxctl fleet launch --image macos-27-xcode --ttl 8h`.
+    Launch {
+        /// VM name (default: the image name plus a number).
+        name: Option<String>,
+        /// Catalog image (`fluxctl fleet images`).
+        #[arg(long, required_unless_present = "disk")]
+        image: Option<String>,
+        /// A disk path on the Mac instead of a catalog image.
+        #[arg(long, conflicts_with = "image")]
+        disk: Option<String>,
+        /// Guest OS for `--disk`.
+        #[arg(long, value_parser = ["macos", "linux"])]
+        guest: Option<String>,
+        #[arg(long)]
+        vcpus: Option<u8>,
+        #[arg(long)]
+        memory_gib: Option<u64>,
+        /// The Mac to run on.
+        #[arg(long)]
+        mac: Option<String>,
+        /// Join a private network across Macs (`fluxctl fleet networks`). Repeatable.
+        #[arg(long)]
+        network: Vec<String>,
+        /// Delete the VM automatically after this long (`30m`, `8h`, `7d`).
+        #[arg(long, value_parser = fleet_cli::parse_duration)]
+        ttl: Option<u64>,
+    },
+    /// Run a command in a VM, found by name or ID prefix. Output and exit code are the guest's.
+    /// Example: `fluxctl fleet run ios-build-1 -- xcodebuild -version`.
+    Run {
+        vm: String,
+        #[arg(long)]
+        timeout: Option<u64>,
+        #[arg(trailing_var_arg = true, required = true)]
+        command: Vec<String>,
+    },
+    /// Delete a VM, found by name or ID prefix. Asks first on a terminal.
+    Rm {
+        vm: String,
+        /// Do not ask.
+        #[arg(long, short = 'y')]
+        yes: bool,
+    },
+    /// Save a picture of a VM's display (found by name or ID prefix). Example: `fluxctl fleet screen ios-build-1`.
+    Screen {
+        vm: String,
+        /// Where to write it (default: `<vm>.png`, or `.svg` from a simulated Mac).
+        #[arg(long, short = 'f')]
+        file: Option<PathBuf>,
+        /// Largest width in pixels.
+        #[arg(long, default_value_t = 1920)]
+        max_width: u32,
+    },
+    /// The activity log: every change made through central, newest first. A tenant sees its own.
+    Events {
+        #[arg(long, default_value_t = 50)]
+        limit: usize,
+        /// Operator only: one tenant's actions.
+        #[arg(long)]
+        tenant: Option<String>,
+    },
+    /// A tenant's named API keys: list (default), create, revoke. Keys are made and revoked with the tenant's primary
+    /// token (or by the operator with `--tenant`).
+    Keys {
+        /// Operator only: whose keys.
+        #[arg(long, global = true)]
+        tenant: Option<String>,
+        #[command(subcommand)]
+        command: Option<FleetKeyCommand>,
+    },
+    /// The image catalog: list (default), add or remove (operator).
+    Images {
+        #[command(subcommand)]
+        command: Option<FleetImageCommand>,
+    },
+    /// Private networks across Macs: list (default), show, create, delete, rotate, add-mac, remove-mac.
+    Networks {
+        #[command(subcommand)]
+        command: Option<FleetNetworkCommand>,
+    },
     /// List every registered node, each with its live `healthy`/`cordoned`
     /// state and free capacity. REST equivalent: `GET /fleet/nodes`.
     Nodes,
@@ -1198,6 +1288,96 @@ enum FleetCommand {
         timeout: Option<u64>,
         #[arg(trailing_var_arg = true, required = true)]
         command: Vec<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum FleetKeyCommand {
+    List,
+    /// Create a key; prints its token once.
+    Create {
+        name: String,
+        /// Days until it stops working (default 90; 0 never expires).
+        #[arg(long, default_value_t = 90)]
+        expires_days: i64,
+        /// It can only read.
+        #[arg(long)]
+        read_only: bool,
+    },
+    /// Revoke a key by name or id; anything using it stops working at once.
+    Revoke {
+        key: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum FleetImageCommand {
+    List,
+    /// Add or replace an image (operator). Put the disk on the Macs first (`fluxctl vm-image pull`).
+    Add {
+        name: String,
+        /// The disk's path on every Mac that runs it.
+        #[arg(long)]
+        path: String,
+        #[arg(long, value_parser = ["macos", "linux"])]
+        guest: String,
+        /// Default vCPUs.
+        #[arg(long, default_value_t = 4)]
+        vcpus: u8,
+        /// Default memory.
+        #[arg(long, default_value_t = 8)]
+        memory_gib: u64,
+        #[arg(long)]
+        display_name: Option<String>,
+        #[arg(long)]
+        description: Option<String>,
+        /// Where it came from, e.g. an OCI reference (shown to tenants).
+        #[arg(long)]
+        source: Option<String>,
+    },
+    /// Remove an image from the catalog (VMs made from it keep running).
+    Remove {
+        name: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum FleetNetworkCommand {
+    List,
+    Show {
+        name: String,
+    },
+    /// Create a network; members default to every Mac the tenant leases.
+    Create {
+        name: String,
+        /// A member Mac. Repeatable.
+        #[arg(long)]
+        mac: Vec<String>,
+        /// Operator only: the tenant that owns it.
+        #[arg(long)]
+        tenant: Option<String>,
+        /// Guest addresses each Mac gets.
+        #[arg(long, default_value_t = 30)]
+        vms_per_mac: u8,
+        #[arg(long, default_value_t = 1400)]
+        mtu: u32,
+    },
+    Delete {
+        name: String,
+        #[arg(long, short = 'y')]
+        yes: bool,
+    },
+    /// Issue a new key; Macs switch over without dropping traffic.
+    Rotate {
+        name: String,
+    },
+    AddMac {
+        name: String,
+        mac: String,
+    },
+    RemoveMac {
+        name: String,
+        mac: String,
     },
 }
 
@@ -1948,6 +2128,24 @@ enum DiskCommand {
         #[arg(value_parser = output::parse_vm_ref)]
         id: Uuid,
         name: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum MacosPoolCommand {
+    /// The enrolled slots.
+    List,
+    /// Save a running, set-up, logged-in macOS guest's state as the slot's pristine copy, then stop it.
+    Enroll {
+        #[arg(value_parser = output::parse_vm_ref)]
+        id: Uuid,
+    },
+    /// Restore a free slot (409 when none is free). Needs an unlocked login session on the Mac.
+    Checkout,
+    /// Stop a checked-out slot; the next checkout restores the pristine state again.
+    Return {
+        #[arg(value_parser = output::parse_vm_ref)]
+        id: Uuid,
     },
 }
 
@@ -3435,6 +3633,21 @@ async fn run_remote(
             )
             .await?,
         )?,
+        Command::MacosPool { command } => match command {
+            MacosPoolCommand::List => pretty(&r.call(Method::GET, "/v1/macos-pool", None).await?)?,
+            MacosPoolCommand::Enroll { id } => pretty(
+                &r.call(Method::POST, &format!("/v1/macos-pool/{id}/enroll"), None)
+                    .await?,
+            )?,
+            MacosPoolCommand::Checkout => pretty(
+                &r.call(Method::POST, "/v1/macos-pool/checkout", None)
+                    .await?,
+            )?,
+            MacosPoolCommand::Return { id } => pretty(
+                &r.call(Method::POST, &format!("/v1/macos-pool/{id}/return"), None)
+                    .await?,
+            )?,
+        },
         Command::Disk { command } => match command {
             DiskCommand::List { id } => {
                 let v = r
@@ -4185,7 +4398,7 @@ async fn main() -> Result<()> {
     if let Some(r) = remote::from_argv_env() {
         output::seed_vm_index(r.vm_index().await);
     }
-    let cli = {
+    let (cli, output_explicit) = {
         let color = if std::env::var_os("NO_COLOR").is_some() {
             ColorChoice::Never
         } else if std::env::var_os("FORCE_COLOR").is_some()
@@ -4205,7 +4418,15 @@ async fn main() -> Result<()> {
             // only command listing; parsing/completions are unaffected.
             .mut_subcommands(|s| s.hide(true));
         let matches = cmd.get_matches_mut();
-        Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit())
+        // `fleet` prints tables on a terminal unless `-o`/`FLUXCTL_OUTPUT` asks for a format.
+        let explicit = !matches!(
+            matches.value_source("output_format"),
+            None | Some(clap::parser::ValueSource::DefaultValue)
+        );
+        (
+            Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit()),
+            explicit,
+        )
     };
     if let Command::Completions { shell } = &cli.command {
         use std::io::Write;
@@ -4733,6 +4954,19 @@ async fn main() -> Result<()> {
             "{}",
             serde_json::to_string_pretty(&m.restore_backup(id, &name).await?)?
         ),
+        Command::MacosPool { command } => {
+            let out = match command {
+                MacosPoolCommand::List => serde_json::to_value(m.macos_pool_list().await)?,
+                MacosPoolCommand::Enroll { id } => {
+                    serde_json::to_value(m.macos_pool_enroll(id).await?)?
+                }
+                MacosPoolCommand::Checkout => serde_json::to_value(m.macos_pool_checkout().await?)?,
+                MacosPoolCommand::Return { id } => {
+                    serde_json::to_value(m.macos_pool_return(id).await?)?
+                }
+            };
+            println!("{}", serde_json::to_string_pretty(&out)?)
+        }
         Command::Disk { command } => match command {
             DiskCommand::List { id } => {
                 output::print_list(format, &m.list_vm_disks(id).await?, output::DISK_COLUMNS)?;
@@ -6207,368 +6441,13 @@ async fn main() -> Result<()> {
             token,
             command,
         } => {
-            let token = token.as_deref();
-            match command {
-                FleetCommand::Nodes => {
-                    println!(
-                        "{}",
-                        serde_json::to_string_pretty(
-                            &fleet_client::list_nodes(&central, token).await?
-                        )?
-                    );
-                }
-                FleetCommand::Node { name } => {
-                    println!(
-                        "{}",
-                        serde_json::to_string_pretty(
-                            &fleet_client::get_node(&central, token, &name).await?
-                        )?
-                    );
-                }
-                FleetCommand::Cordon { name } => {
-                    println!(
-                        "{}",
-                        serde_json::to_string_pretty(
-                            &fleet_client::cordon(&central, token, &name).await?
-                        )?
-                    );
-                }
-                FleetCommand::Uncordon { name } => {
-                    println!(
-                        "{}",
-                        serde_json::to_string_pretty(
-                            &fleet_client::uncordon(&central, token, &name).await?
-                        )?
-                    );
-                }
-                FleetCommand::Deregister { name } => {
-                    fleet_client::deregister(&central, token, &name).await?;
-                    println!("{{\"ok\":true}}");
-                }
-                FleetCommand::Capacity => {
-                    println!(
-                        "{}",
-                        serde_json::to_string_pretty(
-                            &fleet_client::capacity(&central, token).await?
-                        )?
-                    );
-                }
-                FleetCommand::Create {
-                    spec,
-                    node,
-                    node_selector,
-                } => {
-                    let body: serde_json::Value = serde_json::from_slice(&std::fs::read(&spec)?)
-                        .with_context(|| format!("parsing {}", spec.display()))?;
-                    println!(
-                        "{}",
-                        serde_json::to_string_pretty(
-                            &fleet_client::create_vm(
-                                &central,
-                                token,
-                                body,
-                                node,
-                                node_selector.into_iter().collect(),
-                            )
-                            .await?
-                        )?
-                    );
-                }
-                FleetCommand::Vms => {
-                    println!(
-                        "{}",
-                        serde_json::to_string_pretty(
-                            &fleet_client::list_vms(&central, token).await?
-                        )?
-                    );
-                }
-                FleetCommand::NodeVms { name } => {
-                    println!(
-                        "{}",
-                        serde_json::to_string_pretty(
-                            &fleet_client::node_vms(&central, token, &name).await?
-                        )?
-                    );
-                }
-                FleetCommand::Tenant { command } => {
-                    use reqwest::Method;
-                    let out = match command {
-                        FleetTenantCommand::Create {
-                            id,
-                            display_name,
-                            quota,
-                        } => {
-                            fleet_client::call(
-                                &central,
-                                token,
-                                Method::POST,
-                                "/fleet/tenants",
-                                Some(serde_json::json!({
-                                    "id": id,
-                                    "display_name": display_name,
-                                    "quota": quota.to_json(),
-                                })),
-                            )
-                            .await?
-                        }
-                        FleetTenantCommand::List => {
-                            fleet_client::call(&central, token, Method::GET, "/fleet/tenants", None)
-                                .await?
-                        }
-                        FleetTenantCommand::Get { id } => {
-                            fleet_client::call(
-                                &central,
-                                token,
-                                Method::GET,
-                                &format!("/fleet/tenants/{id}"),
-                                None,
-                            )
-                            .await?
-                        }
-                        FleetTenantCommand::Me => {
-                            fleet_client::call(
-                                &central,
-                                token,
-                                Method::GET,
-                                "/fleet/tenants/me",
-                                None,
-                            )
-                            .await?
-                        }
-                        FleetTenantCommand::Update {
-                            id,
-                            quota,
-                            disable,
-                            enable,
-                        } => {
-                            let mut body = serde_json::json!({});
-                            if !quota.is_empty() {
-                                // Merge the given flags into the current quota.
-                                let current = fleet_client::call(
-                                    &central,
-                                    token,
-                                    Method::GET,
-                                    &format!("/fleet/tenants/{id}"),
-                                    None,
-                                )
-                                .await?;
-                                let mut q = current
-                                    .get("quota")
-                                    .cloned()
-                                    .unwrap_or_else(|| serde_json::json!({}));
-                                if let (Some(qo), Some(new)) =
-                                    (q.as_object_mut(), quota.to_json().as_object())
-                                {
-                                    for (k, v) in new {
-                                        if !v.is_null() {
-                                            qo.insert(k.clone(), v.clone());
-                                        }
-                                    }
-                                }
-                                body["quota"] = q;
-                            }
-                            if disable || enable {
-                                body["disabled"] = serde_json::json!(disable);
-                            }
-                            fleet_client::call(
-                                &central,
-                                token,
-                                Method::PATCH,
-                                &format!("/fleet/tenants/{id}"),
-                                Some(body),
-                            )
-                            .await?
-                        }
-                        FleetTenantCommand::Delete { id } => {
-                            fleet_client::call(
-                                &central,
-                                token,
-                                Method::DELETE,
-                                &format!("/fleet/tenants/{id}"),
-                                None,
-                            )
-                            .await?
-                        }
-                        FleetTenantCommand::RotateToken { id } => {
-                            fleet_client::call(
-                                &central,
-                                token,
-                                Method::POST,
-                                &format!("/fleet/tenants/{id}/rotate-token"),
-                                None,
-                            )
-                            .await?
-                        }
-                    };
-                    println!("{}", serde_json::to_string_pretty(&out)?);
-                }
-                FleetCommand::Lease { command } => {
-                    use reqwest::Method;
-                    let out = match command {
-                        FleetLeaseCommand::Create {
-                            tenant,
-                            node,
-                            hours,
-                            min_vcpus,
-                            min_memory_mib,
-                            nested,
-                            node_selector,
-                        } => {
-                            let selector: std::collections::HashMap<String, String> =
-                                node_selector.into_iter().collect();
-                            fleet_client::call(
-                                &central,
-                                token,
-                                Method::POST,
-                                "/fleet/leases",
-                                Some(serde_json::json!({
-                                    "tenant": tenant,
-                                    "node": node,
-                                    "hours": hours,
-                                    "min_vcpus": min_vcpus.unwrap_or(0),
-                                    "min_memory_mib": min_memory_mib.unwrap_or(0),
-                                    "nested_virtualization": nested,
-                                    "nodeSelector": selector,
-                                })),
-                            )
-                            .await?
-                        }
-                        FleetLeaseCommand::List { tenant, state } => {
-                            let q = fleet_client::query(&[("tenant", tenant), ("state", state)]);
-                            fleet_client::call(
-                                &central,
-                                token,
-                                Method::GET,
-                                &format!("/fleet/leases{q}"),
-                                None,
-                            )
-                            .await?
-                        }
-                        FleetLeaseCommand::Get { id } => {
-                            fleet_client::call(
-                                &central,
-                                token,
-                                Method::GET,
-                                &format!("/fleet/leases/{id}"),
-                                None,
-                            )
-                            .await?
-                        }
-                        FleetLeaseCommand::Release { id, force } => {
-                            let q = fleet_client::query(&[(
-                                "force",
-                                force.then(|| "true".to_string()),
-                            )]);
-                            fleet_client::call(
-                                &central,
-                                token,
-                                Method::POST,
-                                &format!("/fleet/leases/{id}/release{q}"),
-                                None,
-                            )
-                            .await?
-                        }
-                    };
-                    println!("{}", serde_json::to_string_pretty(&out)?);
-                }
-                FleetCommand::Drain { name, mode, force } => {
-                    let q = fleet_client::query(&[
-                        ("mode", Some(mode)),
-                        ("force", force.then(|| "true".to_string())),
-                    ]);
-                    let out = fleet_client::call(
-                        &central,
-                        token,
-                        reqwest::Method::POST,
-                        &format!("/fleet/nodes/{name}/drain{q}"),
-                        None,
-                    )
-                    .await?;
-                    println!("{}", serde_json::to_string_pretty(&out)?);
-                }
-                FleetCommand::DrainStatus { name } => {
-                    let out = fleet_client::call(
-                        &central,
-                        token,
-                        reqwest::Method::GET,
-                        &format!("/fleet/nodes/{name}/drain"),
-                        None,
-                    )
-                    .await?;
-                    println!("{}", serde_json::to_string_pretty(&out)?);
-                }
-                FleetCommand::Scrub { name, force } => {
-                    let q = fleet_client::query(&[("force", force.then(|| "true".to_string()))]);
-                    let out = fleet_client::call(
-                        &central,
-                        token,
-                        reqwest::Method::POST,
-                        &format!("/fleet/nodes/{name}/scrub{q}"),
-                        None,
-                    )
-                    .await?;
-                    println!("{}", serde_json::to_string_pretty(&out)?);
-                }
-                FleetCommand::Usage {
-                    from,
-                    to,
-                    tenant,
-                    csv,
-                } => {
-                    let q = fleet_client::query(&[
-                        ("from", from),
-                        ("to", to),
-                        ("tenant", tenant),
-                        ("format", csv.then(|| "csv".to_string())),
-                    ]);
-                    let out = fleet_client::call(
-                        &central,
-                        token,
-                        reqwest::Method::GET,
-                        &format!("/fleet/usage{q}"),
-                        None,
-                    )
-                    .await?;
-                    match out {
-                        serde_json::Value::String(text) => print!("{text}"),
-                        v => println!("{}", serde_json::to_string_pretty(&v)?),
-                    }
-                }
-                FleetCommand::Reconcile => {
-                    let out = fleet_client::call(
-                        &central,
-                        token,
-                        reqwest::Method::POST,
-                        "/fleet/reconcile",
-                        None,
-                    )
-                    .await?;
-                    println!("{}", serde_json::to_string_pretty(&out)?);
-                }
-                FleetCommand::Exec {
-                    node,
-                    id,
-                    timeout,
-                    command,
-                } => {
-                    let out = fleet_client::call(
-                        &central,
-                        token,
-                        reqwest::Method::POST,
-                        &format!("/fleet/vms/{node}/{id}/exec"),
-                        Some(serde_json::json!({
-                            "command": command.join(" "),
-                            "timeout_seconds": timeout,
-                        })),
-                    )
-                    .await?;
-                    println!("{}", serde_json::to_string_pretty(&out)?);
-                }
-                FleetCommand::Delete { node, id } => {
-                    fleet_client::delete_vm(&central, token, &node, id).await?;
-                    println!("{{\"ok\":true}}");
-                }
-            }
+            fleet_cli::run(
+                &central,
+                token.as_deref(),
+                command,
+                fleet_cli::Out::new(format, output_explicit),
+            )
+            .await?;
         }
     }
     Ok(())
@@ -8412,6 +8291,19 @@ mod tier2_cli_tests {
             }
         ));
         assert!(cli(&["disk", "attach", &id, "data"]).is_err());
+        assert!(matches!(
+            cli(&["macos-pool", "checkout"]).unwrap().command,
+            Command::MacosPool {
+                command: MacosPoolCommand::Checkout
+            }
+        ));
+        assert!(matches!(
+            cli(&["macos-pool", "return", &id]).unwrap().command,
+            Command::MacosPool {
+                command: MacosPoolCommand::Return { .. }
+            }
+        ));
+        assert!(cli(&["macos-pool", "enroll"]).is_err());
         assert!(matches!(
             cli(&["disk", "list", &id]).unwrap().command,
             Command::Disk {

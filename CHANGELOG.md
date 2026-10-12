@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+
 ### Added: incident bundles
 - `POST /v1/vms/{id}/diagnostics` starts a job that collects the VM record, cgroup and PSI files, the console log,
   QMP state (status, CPUs, memory, block, migration, PCI, chardevs and more), dataplane status, flows, drops, tc and
@@ -13,6 +14,112 @@
   `diagnostics_max_memory_dump_mib` (default 16384) and free space.
 - Secrets are fingerprinted by default (`redact: false` keeps them). The last five bundles per VM are kept. See
   `docs/diagnostics-bundle.md`.
+
+### Added: named API keys per tenant
+- A tenant can hold up to 50 named keys besides its primary token (`GET/POST /fleet/tenants/me/keys`,
+  `DELETE .../keys/{id|name}`; `fluxctl fleet keys`; an API keys page in the console). Each has a name, an optional
+  expiry and a read-only flag, is shown once and stored only as a hash, and is revoked on its own. The activity log
+  names the key behind each action. Only the primary token (or the operator) creates and revokes keys, so a leaked CI
+  key cannot mint more; a read-only key is refused every change with 403.
+  Tried against the three-Mac simulation (read-only, expiry-free and revoked keys, key-minting-key and
+  `/fleet/register` attempts all refused as intended); not on real Macs.
+
+
+### Added: live VM screen and an activity log, in the console and `fluxctl fleet`
+- `GET /fleet/vms/{node}/{id}/screen` returns a picture of a VM's display through central (the owner or the operator
+  only, image types only, never cached), shown live in the console's VM panel and saved by `fluxctl fleet screen`.
+- `GET /fleet/events` is an activity log of every change made through central: who, what was created or deleted, and
+  the result, including refused attempts at operator routes. A tenant sees only its own; the operator can filter by
+  `tenant`. Request bodies are not stored (only the name of what was created), command text is never recorded, and
+  page views are not logged. The log is a file in central's state directory (`fleet-audit.jsonl`).
+  Tried against the three-Mac simulation, with two tenants for the isolation checks; not on real Macs.
+
+### Changed: console pickers, networks and usage
+- Image and network choices are larger cards with a selected mark, checkboxes are drawn properly (they rendered as a
+  dark block), Macs on a network are chips, and Usage shows where VM hours went (macOS or Linux), two decimals under an
+  hour so a short run is not `0.0`, and a note that a lease in progress adds its 24-hour minimum when released.
+
+
+### Added: `fluxctl fleet` for tenants and operators
+- `fluxctl fleet status` (a tenant's quota, Macs and next step, or the operator's fleet health), `launch --image` from the
+  catalog, `run <vm> -- cmd`, `rm`, `images` and `networks` (list, show, create, delete, rotate, add-mac, remove-mac),
+  with human output on a terminal and JSON when piped. VMs are found by name or ID prefix. Point it at central with
+  `--central`/`CENTRAL_URL` and `--token`/`FLUXVM_AGENT_TOKEN` ([docs/mac-cloud-tenancy.md](docs/mac-cloud-tenancy.md)).
+  Tried against the three-Mac simulation (`scripts/fleet-sim.sh`) as tenant and operator, not against real Macs.
+
+### Fixed: a Mac's heartbeat reported zero macOS guests
+- `fluxvm-agent node` counted macOS guests from a `state` field that `GET /v1/vms` does not return (it returns `status`),
+  and looked for a `starting` value that does not exist (`creating` does), so a real Mac always reported 0 and central's
+  two-guest placement limit never applied to real nodes. The simulator emitted both keys, which hid it. The count now reads
+  `status` (`creating`, `running`, `paused`).
+
+
+### Changed: console visual polish
+- Status shows as a pill, the lease ring shows the hours left in the 24-hour minimum (it read as an empty disc at the
+  start), each Mac card carries vCPU and memory use bars, tiles lift on hover (not with Reduce Motion), empty states are
+  calmer, VMs without a catalog image show their disk name, and the theme button says what it is ("Theme: Auto").
+- Fixed: "Healthy Macs 3 of 3" drew its full bar red, as if over quota.
+
+### Added: `scripts/bench-macos-pool.sh`
+- Times macOS warm-pool checkout and return over N rounds (min/median/max) and samples runner RSS, against a local
+  `fluxctl serve` on a Mac. Checked against a stub server only; not yet run against real guests.
+
+
+
+### Added: fleet console as a cloud UX, image catalog, tenant view of leased Macs
+- The `/console` web console is rebuilt as a cloud UX: overview with quota bars and your Macs, My Macs, virtual machines,
+  networks, images to launch from, usage, search and a command bar ([docs/mac-cloud-tenancy.md](docs/mac-cloud-tenancy.md#console)).
+- `GET/PUT/DELETE /fleet/images[/{name}]`: an operator-managed image catalog (tenants read, the operator writes).
+  `GET /fleet/nodes/{name}` for a tenant returns only a Mac it leases, and only size, free capacity and Apple
+  capabilities. The operator tenant list carries each tenant's current use. A tenant's unreachable-node list is limited
+  to its own Macs and carries no error text.
+- Known limit: the catalog returns each image's disk path on the Macs to tenants, because the console puts it in the
+  create request; resolving the name on the server would remove that.
+
+### Added: grow a stopped vz VM's root disk
+- `PATCH /v1/vms/{id}/disks/root` (`fluxctl disk resize <id> root --size-gib N`) now works on the `vz` backend for macOS
+  and Linux guests: the VM must be stopped, the size is an absolute grow-only target, and `apple.asif_overlay` VMs are
+  refused. It extends the sparse file only; the guest still has to grow its own partition or APFS container
+  (`diskutil apfs resizeContainer`), which is not automated and not verified on hardware ([docs/macos.md](docs/macos.md)).
+- A third macOS guest is refused at create and at start with 409 (Apple allows two per Mac); this used to fail late
+  with a raw VZ error.
+
+### Added: simulated Macs and a one-command fleet demo
+- `fluxvm-agent sim-node` registers a simulated Mac with central (capacity, heartbeats, simulated macOS guests, overlay
+  config), and `scripts/fleet-sim.sh` runs a central plus three of them: a tenant leases a Mac, starts two macOS VMs
+  (a third is refused at Apple's two-guest limit), runs a command and creates a private network
+
+pple's two-guest limit), runs a command and creates a private network
+
+  ([docs/fleet-quickstart.md](docs/fleet-quickstart.md)). No Macs or real guests are involved, so it exercises central,
+  tenancy, scheduling, overlay allocation and the console, not virtualization.
+
+### Added: fleet web console, overlay key rotation, HA lock release
+- `GET /console` on central is a web console for the fleet: a tenant token shows your leases, VMs, private networks and
+  usage (lease or release a Mac, delete VMs, create networks); the fleet token adds nodes (cordon, drain, scrub),
+  tenants and every tenant's usage ([docs/mac-cloud-tenancy.md](docs/mac-cloud-tenancy.md#console)).
+- Cross-Mac overlay keys have epochs. `POST /fleet/overlays/{name}/rotate` issues a new key and the reconciler rotates
+  keys older than `overlay_key_rotation_days` (default 30, `0` disables); the previous key stays valid until the next
+  rotation, and the switch reloads keys without restarting. The epoch is authenticated, and replays are checked at send
+  time ([docs/cross-mac-networks.md](docs/cross-mac-networks.md#key-rotation)).
+- A leader central releases the HA lock on Ctrl-C or SIGTERM, so a standby takes over at once instead of after the TTL.
+  Not verified across two Macs.
+
+
+### Added: `POST /v1/branches/prune` (`fluxctl branch prune`)
+- Remove branches by policy: keep the newest N, older than a cutoff, scoped to a VM or a name prefix. A dry run unless
+  `dry_run: false` (`--yes`); an empty policy is refused; a branch labelled `fluxvm.dev/keep: "true"` is never removed.
+  Verified on an M4 (dry run, keep label, real prune, CLI).
+
+### Added: `branch diff`, `branch export`, `branch import`
+- `GET /v1/branches/{a}/diff/{b}` compares two branches (sizes, lineage, labels). `POST /v1/branches/{id}/export` writes
+  a branch to an owner-only bundle directory and `POST /v1/branches/import` makes a new branch from one (both admin).
+  The bundle carries the agent token like the disk; a saved state restores only on a Mac of the same model and a
+  compatible macOS. Round trip covered by unit tests; not tried across two Macs.
+
+### Fixed
+- Raw base images are cloned with the macOS-safe copy on every backend (`cp --reflink` is GNU-only).
+
 
 
 ### Added: virtual networks (eBPF routing, Geneve overlay, SNAT, floating IPs)

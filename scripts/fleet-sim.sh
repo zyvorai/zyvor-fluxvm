@@ -101,6 +101,10 @@ except Exception:
 done
 echo "    $n Macs registered"
 
+echo "==> Operator: add two images to the catalog"
+api PUT /fleet/images/macos-27-xcode "$ADMIN_TOKEN" '{"display_name":"macOS 27 with Xcode","guest_os":"macos","image":"/Users/fluxvm/vms/macos-27-xcode/disk.raw","vcpus":4,"memory_mib":8192,"description":"Xcode, Homebrew and the GitHub runner"}' >/dev/null
+api PUT /fleet/images/debian-13 "$ADMIN_TOKEN" '{"display_name":"Debian 13","guest_os":"linux","image":"/Users/fluxvm/vms/debian-13/disk.raw","vcpus":2,"memory_mib":4096,"description":"ARM64 cloud image with cloud-init"}' >/dev/null
+
 echo "==> Operator: create tenant 'acme' (quota: 2 leased Macs, 4 VMs)"
 TENANT_TOKEN="$(api POST /fleet/tenants "$ADMIN_TOKEN" \
   '{"id":"acme","quota":{"max_leased_hosts":2,"max_vms":4}}' | field token)"

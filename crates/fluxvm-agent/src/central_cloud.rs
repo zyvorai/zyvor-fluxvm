@@ -233,6 +233,190 @@ pub(super) async fn put_policy(
     Ok(Json(t.policy.clone()))
 }
 
+// ---- image catalog ------------------------------------------------------------------------------------------------
+
+/// `GET /fleet/images`: the catalog, for tenants and the operator.
+pub(super) async fn list_images(State(fleet): State<Fleet>) -> Json<Value> {
+    let t = fleet.tenancy.lock().await;
+    Json(json!({ "items": t.images.values().collect::<Vec<_>>() }))
+}
+
+/// `PUT /fleet/images/{name}` (operator): add or replace a catalog entry.
+pub(super) async fn put_image(
+    State(fleet): State<Fleet>,
+    Extension(caller): Extension<Caller>,
+    Path(name): Path<String>,
+    Json(mut image): Json<crate::tenancy::CatalogImage>,
+) -> Result<Json<Value>, AppError> {
+    require_admin(&caller)?;
+    image.name = name;
+    image.updated_at = Some(Utc::now());
+    image
+        .validate()
+        .map_err(|e| AppError(StatusCode::BAD_REQUEST, e))?;
+    let mut t = fleet.tenancy.lock().await;
+    t.images.insert(image.name.clone(), image.clone());
+    fleet.persist_tenancy(&t);
+    Ok(Json(json!(image)))
+}
+
+/// `DELETE /fleet/images/{name}` (operator). VMs made from it are not touched.
+pub(super) async fn delete_image(
+    State(fleet): State<Fleet>,
+    Extension(caller): Extension<Caller>,
+    Path(name): Path<String>,
+) -> Result<StatusCode, AppError> {
+    require_admin(&caller)?;
+    let mut t = fleet.tenancy.lock().await;
+    if t.images.remove(&name).is_none() {
+        return Err(not_found(format!("no image '{name}'")));
+    }
+    fleet.persist_tenancy(&t);
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `GET /fleet/nodes/{name}` for a tenant: only a Mac it leases, and only its size, free capacity and Apple
+/// capabilities (no address, labels or security report).
+pub(super) async fn tenant_node_view(
+    fleet: &Fleet,
+    tenant: &str,
+    name: &str,
+) -> Result<Value, AppError> {
+    let leased = fleet
+        .tenancy
+        .lock()
+        .await
+        .active_lease_for_node(name)
+        .is_some_and(|l| l.tenant == tenant);
+    if !leased {
+        return Err(not_found(format!("you do not lease a Mac named '{name}'")));
+    }
+    let nodes = fleet.nodes.lock().await;
+    let n = nodes
+        .get(name)
+        .ok_or_else(|| not_found(format!("no registered node named '{name}'")))?;
+    Ok(json!({
+        "name": n.name,
+        "healthy": n.healthy(),
+        "vcpus_total": n.vcpus_total,
+        "memory_mib_total": n.memory_mib_total,
+        "free_vcpus": n.free_vcpus(),
+        "free_memory_mib": n.free_memory_mib(),
+        "vm_count": n.vm_count,
+        "last_seen": n.last_seen,
+        "apple": n.apple,
+    }))
+}
+
+// ---- API keys -----------------------------------------------------------------------------------------------------
+
+/// The tenant a keys route is about: `me` is the calling tenant; another id needs the operator.
+fn keys_owner(caller: &Caller, id: &str) -> Result<String, AppError> {
+    match (caller, id) {
+        (Caller::Tenant(t), "me") => Ok(t.clone()),
+        (Caller::Admin, "me") => Err(AppError(
+            StatusCode::BAD_REQUEST,
+            "the operator token is not a tenant; use /fleet/tenants/{id}/keys".into(),
+        )),
+        (_, id) => {
+            require_admin(caller)?;
+            Ok(id.to_owned())
+        }
+    }
+}
+
+/// Keys are made and revoked with the primary token (or by the operator): a leaked key must not mint more.
+fn refuse_named_key(key: &KeyUsed) -> Result<(), AppError> {
+    match &key.0 {
+        Some(_) => Err(AppError(
+            StatusCode::FORBIDDEN,
+            "API keys are created and revoked with the tenant's primary token".into(),
+        )),
+        None => Ok(()),
+    }
+}
+
+/// `GET /fleet/tenants/{id|me}/keys`.
+pub(super) async fn list_keys(
+    State(fleet): State<Fleet>,
+    Extension(caller): Extension<Caller>,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, AppError> {
+    let tenant = keys_owner(&caller, &id)?;
+    let t = fleet.tenancy.lock().await;
+    let rec = t
+        .tenants
+        .get(&tenant)
+        .ok_or_else(|| not_found(format!("no tenant '{tenant}'")))?;
+    let items: Vec<Value> = rec.keys.iter().map(|k| k.public_json()).collect();
+    Ok(Json(json!({ "items": items })))
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct CreateKeyBody {
+    name: String,
+    /// Days until it stops working (1 to 3650); omitted never expires.
+    #[serde(default)]
+    expires_in_days: Option<i64>,
+    #[serde(default)]
+    read_only: bool,
+}
+
+/// `POST /fleet/tenants/{id|me}/keys`: a new named key; its token is in the answer, once.
+pub(super) async fn create_key(
+    State(fleet): State<Fleet>,
+    Extension(caller): Extension<Caller>,
+    Extension(key_used): Extension<KeyUsed>,
+    Path(id): Path<String>,
+    Json(b): Json<CreateKeyBody>,
+) -> Result<(StatusCode, Json<Value>), AppError> {
+    refuse_named_key(&key_used)?;
+    let tenant = keys_owner(&caller, &id)?;
+    let now = Utc::now();
+    let expires_at = match b.expires_in_days {
+        None => None,
+        Some(d) if (1..=3650).contains(&d) => {
+            ChronoDuration::try_days(d).and_then(|d| now.checked_add_signed(d))
+        }
+        Some(_) => {
+            return Err(AppError(
+                StatusCode::BAD_REQUEST,
+                "expires_in_days must be between 1 and 3650".into(),
+            ));
+        }
+    };
+    let mut t = fleet.tenancy.lock().await;
+    let (key, token) = t
+        .create_key(&tenant, &b.name, expires_at, b.read_only, now)
+        .map_err(tenancy_error)?;
+    fleet.persist_tenancy(&t);
+    tracing::info!(tenant = %tenant, key = %key.name, "API key created");
+    Ok((
+        StatusCode::CREATED,
+        Json(json!({
+            "key": key.public_json(),
+            "token": token,
+            "note": "store this token now; central keeps only its hash and cannot show it again",
+        })),
+    ))
+}
+
+/// `DELETE /fleet/tenants/{id|me}/keys/{key}` (key id or name): the token stops working at once.
+pub(super) async fn revoke_key(
+    State(fleet): State<Fleet>,
+    Extension(caller): Extension<Caller>,
+    Extension(key_used): Extension<KeyUsed>,
+    Path((id, key)): Path<(String, String)>,
+) -> Result<Json<Value>, AppError> {
+    refuse_named_key(&key_used)?;
+    let tenant = keys_owner(&caller, &id)?;
+    let mut t = fleet.tenancy.lock().await;
+    let k = t.revoke_key(&tenant, &key).map_err(tenancy_error)?;
+    fleet.persist_tenancy(&t);
+    tracing::info!(tenant = %tenant, key = %k.name, "API key revoked");
+    Ok(Json(json!({ "revoked": k.public_json() })))
+}
+
 // ---- tenants ------------------------------------------------------------------------------------------------------
 
 #[derive(Debug, Deserialize)]
@@ -278,7 +462,12 @@ pub(super) async fn list_tenants(
 ) -> Result<Json<Value>, AppError> {
     require_admin(&caller)?;
     let t = fleet.tenancy.lock().await;
-    let items: Vec<Value> = t.tenants.values().map(|x| x.public_json()).collect();
+    // With what each is using, so a console can show quota use without one call per tenant.
+    let items: Vec<Value> = t
+        .tenants
+        .keys()
+        .filter_map(|id| tenant_view(&t, id))
+        .collect();
     Ok(Json(json!({"items": items})))
 }
 
@@ -1249,6 +1438,7 @@ mod tests {
             tenancy: Arc::new(Mutex::new(tenancy)),
             tenancy_path: None,
             ha: None,
+            audit: Arc::new(super::super::audit::AuditLog::memory()),
         }
     }
 
@@ -1812,5 +2002,210 @@ mod tests {
             .0,
             StatusCode::CONFLICT
         );
+    }
+
+    #[tokio::test]
+    async fn image_catalog_and_a_tenants_view_of_its_macs() {
+        let fleet = fleet_of(
+            vec![mac("mac-a", 32_000, 0), mac("mac-b", 64_000, 0)],
+            TenancyState::default(),
+        );
+        let app = Router::new()
+            .route("/fleet/tenants", post(create_tenant))
+            .route("/fleet/leases", post(create_lease))
+            .route("/fleet/images", get(list_images))
+            .route(
+                "/fleet/images/{name}",
+                axum::routing::put(put_image).delete(delete_image),
+            )
+            .route("/fleet/nodes/{name}", get(super::get_node))
+            .layer(middleware::from_fn_with_state(
+                fleet.clone(),
+                auth_middleware,
+            ))
+            .with_state(fleet);
+
+        let xcode =
+            json!({"guest_os": "macos", "image": "/Users/fluxvm/vms/xcode/disk.raw", "vcpus": 6});
+        let (s, v) = call(
+            &app,
+            "PUT",
+            "/fleet/images/xcode-27",
+            "admin-token",
+            xcode.clone(),
+        )
+        .await;
+        assert_eq!(s, 200, "{v}");
+        assert_eq!(v["memory_mib"], 8192);
+        let (s, _) = call(
+            &app,
+            "PUT",
+            "/fleet/images/Bad%20Name",
+            "admin-token",
+            xcode,
+        )
+        .await;
+        assert_eq!(s, 400);
+        let bad = json!({"guest_os": "windows", "image": "/x"});
+        let (s, _) = call(&app, "PUT", "/fleet/images/win", "admin-token", bad).await;
+        assert_eq!(s, 400);
+
+        let (_, v) = call(
+            &app,
+            "POST",
+            "/fleet/tenants",
+            "admin-token",
+            json!({"id": "acme"}),
+        )
+        .await;
+        let token = v["token"].as_str().unwrap().to_owned();
+        // Tenants read the catalog but cannot change it.
+        let (s, v) = call(&app, "GET", "/fleet/images", &token, json!({})).await;
+        assert_eq!(s, 200);
+        assert_eq!(v["items"][0]["name"], "xcode-27");
+        let (s, _) = call(&app, "DELETE", "/fleet/images/xcode-27", &token, json!({})).await;
+        assert_eq!(s, 403);
+
+        // A tenant sees a Mac only once it leases it, and without its address.
+        let (s, _) = call(&app, "GET", "/fleet/nodes/mac-a", &token, json!({})).await;
+        assert_eq!(s, 404);
+        let (s, v) = call(&app, "POST", "/fleet/leases", &token, json!({})).await;
+        assert_eq!(s, 201, "{v}");
+        let (s, v) = call(&app, "GET", "/fleet/nodes/mac-a", &token, json!({})).await;
+        assert_eq!(s, 200, "{v}");
+        assert!(v.get("fluxvm_url").is_none());
+        assert_eq!(v["free_vcpus"], 10);
+        let (s, _) = call(&app, "GET", "/fleet/nodes/mac-b", &token, json!({})).await;
+        assert_eq!(s, 404);
+        // The operator still gets the full record.
+        let (_, v) = call(&app, "GET", "/fleet/nodes/mac-b", "admin-token", json!({})).await;
+        assert!(v.get("fluxvm_url").is_some());
+
+        let (s, _) = call(
+            &app,
+            "DELETE",
+            "/fleet/images/xcode-27",
+            "admin-token",
+            json!({}),
+        )
+        .await;
+        assert_eq!(s, 204);
+    }
+
+    #[tokio::test]
+    async fn api_keys_scopes_and_audit() {
+        let fleet = fleet_of(vec![mac("mac-a", 32_000, 0)], TenancyState::default());
+        let app = Router::new()
+            .route("/fleet/tenants", post(create_tenant))
+            .route("/fleet/tenants/me", get(tenant_me))
+            .route("/fleet/tenants/{id}/keys", get(list_keys).post(create_key))
+            .route(
+                "/fleet/tenants/{id}/keys/{key}",
+                axum::routing::delete(revoke_key),
+            )
+            .route("/fleet/leases", get(list_leases).post(create_lease))
+            .layer(middleware::from_fn_with_state(
+                fleet.clone(),
+                auth_middleware,
+            ))
+            .with_state(fleet.clone());
+        let (_, v) = call(
+            &app,
+            "POST",
+            "/fleet/tenants",
+            "admin-token",
+            json!({"id": "acme"}),
+        )
+        .await;
+        let primary = v["token"].as_str().unwrap().to_owned();
+
+        // The primary token makes keys; the token comes back once and the list never shows it.
+        let (s, v) = call(
+            &app,
+            "POST",
+            "/fleet/tenants/me/keys",
+            &primary,
+            json!({"name": "ci", "expires_in_days": 90}),
+        )
+        .await;
+        assert_eq!(s, 201, "{v}");
+        let ci = v["token"].as_str().unwrap().to_owned();
+        assert!(v["key"]["expires_at"].is_string());
+        let (_, v) = call(
+            &app,
+            "POST",
+            "/fleet/tenants/me/keys",
+            &primary,
+            json!({"name": "grafana", "read_only": true}),
+        )
+        .await;
+        let ro = v["token"].as_str().unwrap().to_owned();
+        let (s, v) = call(&app, "GET", "/fleet/tenants/me/keys", &primary, json!({})).await;
+        assert_eq!(s, 200);
+        assert_eq!(v["items"].as_array().unwrap().len(), 2);
+        assert!(!v.to_string().contains("sha256"));
+
+        // A named key acts as the tenant; a read-only key only reads; keys cannot make keys.
+        let (s, v) = call(&app, "GET", "/fleet/tenants/me", &ci, json!({})).await;
+        assert_eq!((s, v["id"].as_str()), (200, Some("acme")));
+        let (s, _) = call(&app, "GET", "/fleet/leases", &ro, json!({})).await;
+        assert_eq!(s, 200);
+        let (s, v) = call(&app, "POST", "/fleet/leases", &ro, json!({})).await;
+        assert_eq!(s, 403, "{v}");
+        let (s, _) = call(
+            &app,
+            "POST",
+            "/fleet/tenants/me/keys",
+            &ci,
+            json!({"name": "sneaky"}),
+        )
+        .await;
+        assert_eq!(s, 403);
+        let (s, _) = call(
+            &app,
+            "DELETE",
+            "/fleet/tenants/me/keys/grafana",
+            &ci,
+            json!({}),
+        )
+        .await;
+        assert_eq!(s, 403);
+        let (s, _) = call(&app, "POST", "/fleet/leases", &ci, json!({})).await;
+        assert_eq!(s, 201);
+
+        // The activity log names the key.
+        let events = fleet.audit.query(Some("acme"), 50);
+        assert!(events.iter().any(|e| e.path == "/fleet/leases"
+            && e.status == 201
+            && e.key.as_deref() == Some("ci")));
+        assert!(
+            events
+                .iter()
+                .any(|e| e.status == 403 && e.key.as_deref() == Some("grafana"))
+        );
+
+        // Revoked keys stop working; the operator manages any tenant's keys.
+        let (s, _) = call(
+            &app,
+            "DELETE",
+            "/fleet/tenants/me/keys/ci",
+            &primary,
+            json!({}),
+        )
+        .await;
+        assert_eq!(s, 200);
+        let (s, _) = call(&app, "GET", "/fleet/tenants/me", &ci, json!({})).await;
+        assert_eq!(s, 401);
+        let (s, v) = call(
+            &app,
+            "GET",
+            "/fleet/tenants/acme/keys",
+            "admin-token",
+            json!({}),
+        )
+        .await;
+        assert_eq!((s, v["items"].as_array().unwrap().len()), (200, 1));
+        let (s, _) = call(&app, "GET", "/fleet/tenants/acme/keys", &primary, json!({})).await;
+        assert_eq!(s, 403);
     }
 }

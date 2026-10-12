@@ -9,6 +9,8 @@
 //! cost is no server-side validation beyond "is this valid JSON" — a node's
 //! own `fluxctl serve` still does the real validation.
 
+#[path = "central_audit.rs"]
+mod audit;
 #[path = "central_cloud.rs"]
 mod cloud;
 #[path = "central_ha.rs"]
@@ -215,6 +217,8 @@ struct Fleet {
     tenancy_path: Option<PathBuf>,
     /// Leader election when several centrals share a store (`--ha-redis`); `None` is a single central.
     ha: Option<Arc<ha_rt::HaRuntime>>,
+    /// The activity log (`GET /fleet/events`).
+    audit: Arc<audit::AuditLog>,
 }
 
 impl Fleet {
@@ -248,6 +252,11 @@ fn constant_time_eq(a: &str, b: &str) -> bool {
     }
     diff == 0
 }
+
+/// The tenant's named API key behind a request (`None`: its primary token, or the operator). `auth_middleware` puts
+/// it next to the [`Caller`]; the key routes check it themselves too, so no path spelling gets a key past them.
+#[derive(Debug, Clone, Default)]
+struct KeyUsed(Option<String>);
 
 /// Resolves the caller from the bearer token and stores it as an `Extension<Caller>` for the handlers.
 ///
@@ -283,19 +292,37 @@ async fn auth_middleware(State(fleet): State<Fleet>, mut req: Request, next: Nex
         )
             .into_response()
     };
+    // The tenant's named API key, when one was used, and whether it may only read.
+    let mut key_used: Option<String> = None;
+    let mut read_only = false;
     let caller = match (fleet.token.as_deref(), presented.as_deref()) {
         (Some(expected), Some(t)) if constant_time_eq(t, expected) => Caller::Admin,
         (expected, Some(t)) => {
-            let tenancy = fleet.tenancy.lock().await;
-            match tenancy.authenticate(t) {
-                Some(tenant) if tenant.disabled => {
+            let mut tenancy = fleet.tenancy.lock().await;
+            match tenancy.authenticate_key(t, Utc::now()) {
+                Some(m) if m.disabled => {
+                    let id = m.tenant.clone();
+                    if audit::audited(req.method(), req.uri().path()) {
+                        fleet.audit.record(audit::event(
+                            &Caller::Tenant(id.clone()),
+                            req.method().to_string(),
+                            req.uri().path().to_owned(),
+                            None,
+                            StatusCode::FORBIDDEN,
+                            m.key.clone(),
+                        ));
+                    }
                     return (
                         StatusCode::FORBIDDEN,
-                        Json(json!({"error": format!("tenant '{}' is disabled", tenant.id)})),
+                        Json(json!({"error": format!("tenant '{id}' is disabled")})),
                     )
                         .into_response();
                 }
-                Some(tenant) => Caller::Tenant(tenant.id.clone()),
+                Some(m) => {
+                    key_used = m.key;
+                    read_only = m.read_only;
+                    Caller::Tenant(m.tenant)
+                }
                 // Lab mode keeps ignoring stray tokens, but only until tenants exist: after that an unknown token is
                 // a mistyped tenant token and must not quietly become the operator.
                 None if expected.is_none() && !tenancy.enabled() => Caller::Admin,
@@ -316,17 +343,71 @@ async fn auth_middleware(State(fleet): State<Fleet>, mut req: Request, next: Nex
         }
         (Some(_), None) => return unauthorized(),
     };
+    // A tenant reaching for an operator route is worth knowing about, so it is recorded; unauthenticated callers are not
+    // (anyone could fill the log).
     if let Caller::Tenant(t) = &caller
         && !tenant_route_allowed(req.method(), req.uri().path())
     {
+        if audit::audited(req.method(), req.uri().path()) {
+            fleet.audit.record(audit::event(
+                &caller,
+                req.method().to_string(),
+                req.uri().path().to_owned(),
+                None,
+                StatusCode::FORBIDDEN,
+                key_used.clone(),
+            ));
+        }
         return (
             StatusCode::FORBIDDEN,
             Json(json!({"error": format!("tenant '{t}' may not call {} {}", req.method(), req.uri().path())})),
         )
             .into_response();
     }
-    req.extensions_mut().insert(caller);
-    next.run(req).await
+    // A read-only key only reads, and only the primary token manages keys (a leaked CI key must not mint more).
+    if let Some(name) = &key_used {
+        let changes = audit::audited(req.method(), req.uri().path());
+        let keys_route = req.uri().path().starts_with("/fleet/tenants/me/keys");
+        let refusal = if read_only && changes {
+            Some(format!("API key '{name}' is read-only"))
+        } else if keys_route && changes {
+            Some("API keys are created and revoked with the tenant's primary token".to_owned())
+        } else {
+            None
+        };
+        if let Some(msg) = refusal {
+            fleet.audit.record(audit::event(
+                &caller,
+                req.method().to_string(),
+                req.uri().path().to_owned(),
+                None,
+                StatusCode::FORBIDDEN,
+                key_used.clone(),
+            ));
+            return (StatusCode::FORBIDDEN, Json(json!({"error": msg}))).into_response();
+        }
+    }
+    req.extensions_mut().insert(caller.clone());
+    req.extensions_mut().insert(KeyUsed(key_used.clone()));
+    if !audit::audited(req.method(), req.uri().path()) {
+        return next.run(req).await;
+    }
+    let method = req.method().to_string();
+    let path = req.uri().path().to_owned();
+    let (req, target) = match audit::target_of(req).await {
+        Ok(x) => x,
+        Err(resp) => return resp,
+    };
+    let resp = next.run(req).await;
+    fleet.audit.record(audit::event(
+        &caller,
+        method,
+        path,
+        target,
+        resp.status(),
+        key_used,
+    ));
+    resp
 }
 
 /// The routes a tenant token may call; everything else (node registration, cordon, drain, scrub, tenant admin,
@@ -339,11 +420,16 @@ fn tenant_route_allowed(method: &axum::http::Method, path: &str) -> bool {
     let seg: Vec<&str> = path.trim_matches('/').split('/').collect();
     match seg.as_slice() {
         ["fleet", "capacity"] | ["fleet", "usage"] | ["fleet", "tenants", "me"] => get,
+        ["fleet", "tenants", "me", "keys"] => get || post,
+        ["fleet", "tenants", "me", "keys", _] => delete,
         ["fleet", "vms"] | ["fleet", "leases"] => get || post,
         ["fleet", "vms", _, _] => delete,
         ["fleet", "vms", _, _, "exec"] => post,
+        ["fleet", "vms", _, _, "screen"] | ["fleet", "events"] => get,
         ["fleet", "leases", _] => get,
         ["fleet", "leases", _, "release"] => post,
+        ["fleet", "images"] => get,
+        ["fleet", "nodes", _] => get,
         ["fleet", "overlays"] => get || post,
         ["fleet", "overlays", _] => get || delete,
         ["fleet", "overlays", _, "members"] | ["fleet", "overlays", _, "rotate"] => post,
@@ -478,6 +564,9 @@ pub fn router_with_handle(cfg: CentralConfig) -> (Router, Option<HaHandle>) {
         tenancy: Arc::new(Mutex::new(tenancy)),
         tenancy_path: Some(tenancy_path),
         ha: None,
+        audit: Arc::new(audit::AuditLog::open(
+            cfg.state_dir.join("fleet-audit.jsonl"),
+        )),
     };
     let mut fleet = fleet;
     let mut handle = None;
@@ -518,6 +607,8 @@ pub fn router_with_handle(cfg: CentralConfig) -> (Router, Option<HaHandle>) {
             axum::routing::delete(delete_vm_route),
         )
         .route("/fleet/vms/{node}/{id}/exec", post(cloud::exec_vm))
+        .route("/fleet/vms/{node}/{id}/screen", get(audit::screen))
+        .route("/fleet/events", get(audit::events))
         .route("/fleet/capacity", get(fleet_capacity))
         .route(
             "/fleet/tenants",
@@ -529,6 +620,14 @@ pub fn router_with_handle(cfg: CentralConfig) -> (Router, Option<HaHandle>) {
             get(cloud::get_tenant)
                 .patch(cloud::update_tenant)
                 .delete(cloud::delete_tenant),
+        )
+        .route(
+            "/fleet/tenants/{id}/keys",
+            get(cloud::list_keys).post(cloud::create_key),
+        )
+        .route(
+            "/fleet/tenants/{id}/keys/{key}",
+            axum::routing::delete(cloud::revoke_key),
         )
         .route(
             "/fleet/tenants/{id}/rotate-token",
@@ -559,6 +658,11 @@ pub fn router_with_handle(cfg: CentralConfig) -> (Router, Option<HaHandle>) {
             axum::routing::delete(cloud::remove_overlay_member),
         )
         .route("/fleet/nodes/{name}/overlays", get(cloud::node_overlays))
+        .route("/fleet/images", get(cloud::list_images))
+        .route(
+            "/fleet/images/{name}",
+            axum::routing::put(cloud::put_image).delete(cloud::delete_image),
+        )
         .route("/fleet/reconcile", post(cloud::reconcile))
         .route(
             "/fleet/policy",
@@ -578,7 +682,7 @@ const CONSOLE_PATHS: [&str; 3] = ["/console", "/console/", "/console/app.js"];
 const CONSOLE_HTML: &str = include_str!("fleet_console.html");
 const CONSOLE_JS: &str = include_str!("fleet_console.js");
 const CONSOLE_CSP: &str = "default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; connect-src 'self'; \
-     img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
+     img-src 'self' data: blob:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
 
 fn console_file(content_type: &'static str, body: &'static str) -> Response {
     (
@@ -677,8 +781,14 @@ async fn list_nodes(State(fleet): State<Fleet>) -> Json<Value> {
 /// missing *resource*.
 async fn get_node(
     State(fleet): State<Fleet>,
+    Extension(caller): Extension<Caller>,
     Path(name): Path<String>,
 ) -> Result<Json<Value>, AppError> {
+    if let Caller::Tenant(tenant) = &caller {
+        return cloud::tenant_node_view(&fleet, tenant, &name)
+            .await
+            .map(Json);
+    }
     let nodes = fleet.nodes.lock().await;
     match nodes.get(&name) {
         Some(n) => Ok(Json(node_json(n))),
@@ -1572,6 +1682,24 @@ async fn list_vms_as(fleet: &Fleet, caller: &Caller) -> Json<Value> {
                 stamped || tenancy.owns(caller, node, id)
             });
         }
+        // Other tenants' Macs are none of this tenant's business, and a node's error text can carry its address.
+        if let Some(down) = all
+            .get_mut("unreachable_nodes")
+            .and_then(Value::as_array_mut)
+        {
+            down.retain(|u| {
+                let node = u.get("node").and_then(Value::as_str).unwrap_or_default();
+                tenancy
+                    .active_lease_for_node(node)
+                    .is_some_and(|l| l.tenant == *t)
+                    || tenancy.vms.iter().any(|v| {
+                        v.active() && v.node == node && v.tenant.as_deref() == Some(t.as_str())
+                    })
+            });
+            for u in down.iter_mut() {
+                u["reason"] = json!("did not answer");
+            }
+        }
     }
     Json(all)
 }
@@ -2386,7 +2514,13 @@ mod tests {
         nodes.insert("a".to_string(), node("a", 3, 0));
         nodes.insert("b".to_string(), node("b", 0, 0));
         let fleet = test_fleet(nodes);
-        let Json(body) = get_node(State(fleet), Path("a".to_string())).await.unwrap();
+        let Json(body) = get_node(
+            State(fleet),
+            Extension(Caller::Admin),
+            Path("a".to_string()),
+        )
+        .await
+        .unwrap();
         assert_eq!(body["name"], "a");
         assert_eq!(body["vm_count"], 3);
         assert_eq!(body["healthy"], true);
@@ -2396,9 +2530,13 @@ mod tests {
     #[tokio::test]
     async fn get_node_not_found_for_unknown_node() {
         let fleet = test_fleet(HashMap::new());
-        let err = get_node(State(fleet), Path("ghost".to_string()))
-            .await
-            .unwrap_err();
+        let err = get_node(
+            State(fleet),
+            Extension(Caller::Admin),
+            Path("ghost".to_string()),
+        )
+        .await
+        .unwrap_err();
         assert_eq!(err.0, StatusCode::NOT_FOUND);
         assert!(err.1.contains("ghost"));
     }
@@ -2415,6 +2553,7 @@ mod tests {
             tenancy: Arc::new(Mutex::new(TenancyState::default())),
             tenancy_path: None,
             ha: None,
+            audit: Arc::new(audit::AuditLog::memory()),
         }
     }
 

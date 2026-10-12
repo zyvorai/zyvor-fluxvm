@@ -21,7 +21,7 @@ for the private-inference cluster with Velora and Kairon, see [macos-cluster.md]
 | Mac Studio (M5 Max, up to 128 GB) | Team CI, many sandboxes, macOS guests | 10 GbE and Thunderbolt 5; 25 to 40 active tiny sandboxes estimated at 64 GB or more |
 | Mac Studio (M5 Ultra, up to 512 GB) | macOS guests next to large models | Unified memory is shared by macOS, models and every guest |
 
-Capacity figures are estimates, not measurements. FluxVM does not cap guest memory on a Mac, so size for the sum of macOS, your
+Capacity figures are estimates, not measurements. `scripts/bench-macos-pool.sh` measures macOS warm-pool checkout and return latency and runner memory on a real Mac; record the model and macOS build with any numbers you publish. FluxVM does not cap guest memory on a Mac, so size for the sum of macOS, your
 models and every guest. Apple allows **two macOS guests running at once per Mac**: add Macs to add macOS CI lanes.
 
 ## Network

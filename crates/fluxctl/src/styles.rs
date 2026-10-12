@@ -196,7 +196,7 @@ pub fn after_help() -> String {
                 ("migrate", "Live VM migration (QEMU / Cloud Hypervisor)"),
                 (
                     "fleet",
-                    "Manage a multi-host fleet via the central registry",
+                    "Your Mac cloud: status, launch, leases, tenants (start with `fleet status`)",
                 ),
             ],
         ),
