@@ -4,6 +4,7 @@
 pub mod block;
 mod confidential;
 pub mod disks;
+pub mod hibernate;
 pub mod numa;
 mod qmp;
 pub use qmp::GuestMemoryStats;
@@ -1524,6 +1525,7 @@ mod snapshot_save_tests {
             achieved_security_profile: Default::default(),
             security_evidence: None,
             labels: Default::default(),
+            hibernation: None,
         }
     }
 

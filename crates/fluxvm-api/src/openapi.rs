@@ -92,6 +92,27 @@ fn ops() -> Vec<Op> {
         op("delete", "/v1/vms/{id}", "Delete a VM", VMS).status("204"),
         op("post", "/v1/vms/{id}/start", "Start a VM", VMS).returns("VmRecord"),
         op("post", "/v1/vms/{id}/stop", "Stop a VM", VMS).returns("VmRecord"),
+        op(
+            "post",
+            "/v1/vms/{id}/hibernate",
+            "Save RAM/CPU/device state to the hibernation directory and stop QEMU; the next start resumes",
+            VMS,
+        )
+        .returns("VmRecord"),
+        op(
+            "delete",
+            "/v1/vms/{id}/hibernation",
+            "Discard a hibernated VM's saved state; the next start boots from disk",
+            VMS,
+        )
+        .returns("VmRecord"),
+        op(
+            "post",
+            "/v1/vms/import-hibernated",
+            "Register a VM hibernated on another node from the shared hibernation directory",
+            VMS,
+        )
+        .returns("VmRecord"),
         op("post", "/v1/vms/{id}/restart", "Stop then start a VM", VMS).returns("VmRecord"),
         op("post", "/v1/vms/{id}/pause", "Pause vCPUs", VMS).returns("VmRecord"),
         op("post", "/v1/vms/{id}/resume", "Resume vCPUs", VMS).returns("VmRecord"),
@@ -244,6 +265,18 @@ fn ops() -> Vec<Op> {
             "get",
             "/v1/host/memory",
             "Host memory now: MemTotal, MemAvailable and memory PSI some/full avg10",
+            HOST,
+        ),
+        op(
+            "get",
+            "/v1/host/hibernation",
+            "QEMU version, q35 machine type, CPU vendor and flags a hibernated state depends on",
+            HOST,
+        ),
+        op(
+            "post",
+            "/v1/host/hibernation/check",
+            "Whether a hibernation manifest can be resumed on this host, and why not",
             HOST,
         ),
         op(

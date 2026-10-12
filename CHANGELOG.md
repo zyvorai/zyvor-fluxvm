@@ -2,46 +2,6 @@
 
 ## Unreleased
 
-### Added: grow a stopped vz VM's root disk
-- `PATCH /v1/vms/{id}/disks/root` (`fluxctl disk resize <id> root --size-gib N`) now works on the `vz` backend for macOS
-  and Linux guests: the VM must be stopped, the size is an absolute grow-only target, and `apple.asif_overlay` VMs are
-  refused. It extends the sparse file only; the guest still has to grow its own partition or APFS container
-  (`diskutil apfs resizeContainer`), which is not automated and not verified on hardware ([docs/macos.md](docs/macos.md)).
-- A third macOS guest is refused at create and at start with 409 (Apple allows two per Mac); this used to fail late
-  with a raw VZ error.
-
-### Added: simulated Macs and a one-command fleet demo
-- `fluxvm-agent sim-node` registers a simulated Mac with central (capacity, heartbeats, simulated macOS guests, overlay
-  config), and `scripts/fleet-sim.sh` runs a central plus three of them: a tenant leases a Mac, starts two macOS VMs
-  (a third is refused at Apple's two-guest limit), runs a command and creates a private network
-  ([docs/fleet-quickstart.md](docs/fleet-quickstart.md)). No Macs or real guests are involved, so it exercises central,
-  tenancy, scheduling, overlay allocation and the console, not virtualization.
-
-### Added: fleet web console, overlay key rotation, HA lock release
-- `GET /console` on central is a web console for the fleet: a tenant token shows your leases, VMs, private networks and
-  usage (lease or release a Mac, delete VMs, create networks); the fleet token adds nodes (cordon, drain, scrub),
-  tenants and every tenant's usage ([docs/mac-cloud-tenancy.md](docs/mac-cloud-tenancy.md#console)).
-- Cross-Mac overlay keys have epochs. `POST /fleet/overlays/{name}/rotate` issues a new key and the reconciler rotates
-  keys older than `overlay_key_rotation_days` (default 30, `0` disables); the previous key stays valid until the next
-  rotation, and the switch reloads keys without restarting. The epoch is authenticated, and replays are checked at send
-  time ([docs/cross-mac-networks.md](docs/cross-mac-networks.md#key-rotation)).
-- A leader central releases the HA lock on Ctrl-C or SIGTERM, so a standby takes over at once instead of after the TTL.
-  Not verified across two Macs.
-
-
-### Added: `POST /v1/branches/prune` (`fluxctl branch prune`)
-- Remove branches by policy: keep the newest N, older than a cutoff, scoped to a VM or a name prefix. A dry run unless
-  `dry_run: false` (`--yes`); an empty policy is refused; a branch labelled `fluxvm.dev/keep: "true"` is never removed.
-  Verified on an M4 (dry run, keep label, real prune, CLI).
-
-### Added: `branch diff`, `branch export`, `branch import`
-- `GET /v1/branches/{a}/diff/{b}` compares two branches (sizes, lineage, labels). `POST /v1/branches/{id}/export` writes
-  a branch to an owner-only bundle directory and `POST /v1/branches/import` makes a new branch from one (both admin).
-  The bundle carries the agent token like the disk; a saved state restores only on a Mac of the same model and a
-  compatible macOS. Round trip covered by unit tests; not tried across two Macs.
-
-### Fixed
-- Raw base images are cloned with the macOS-safe copy on every backend (`cp --reflink` is GNU-only).
 
 ### Added: virtual networks (eBPF routing, Geneve overlay, SNAT, floating IPs)
 - A `tap` NIC with `vnet` (`{vni, ip, prefix_len, gateway}`) joins a VNI-isolated IPv4 network routed entirely in eBPF:
