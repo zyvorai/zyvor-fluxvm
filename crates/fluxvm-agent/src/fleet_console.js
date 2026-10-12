@@ -505,7 +505,9 @@ const VIEWS = {
         onclick: () => go('networks', n.name), onkeydown: (e) => { if (e.key === 'Enter') go('networks', n.name); } },
       h('td', {}, h('b', {}, n.name)),
       h('td', {}, h('code', {}, n.subnet)),
-      h('td', {}, Object.keys(n.members || {}).join(', ') || h('span', { class: 'muted' }, 'none yet')),
+      h('td', {}, Object.keys(n.members || {}).length
+        ? h('div', { class: 'chips' }, Object.keys(n.members).map((m) => h('span', { class: 'tag' }, m)))
+        : h('span', { class: 'muted' }, 'none yet')),
       isOp() ? h('td', { class: 'hide-sm' }, n.tenant || h('span', { class: 'muted' }, 'operator')) : null,
       h('td', { class: 'hide-sm muted' }, rel(n.key_rotated_at))))))));
     return out;
@@ -539,7 +541,8 @@ const VIEWS = {
   usage() {
     if (!S.usage) { loadUsage(); return [pageHead('Usage'), h('p', { class: 'muted' }, 'Loading…')]; }
     const rows = (S.usage.tenants || []).filter((t) => isOp() || t.tenant === S.me.id);
-    const hrs = (s) => (s / 3600).toFixed(1);
+    // Under an hour two decimals, so a short run does not read as 0.0.
+    const hrs = (s) => (s > 0 && s < 3600 ? (s / 3600).toFixed(2) : (s / 3600).toFixed(1));
     const seg = h('div', { class: 'seg', role: 'group', 'aria-label': 'Period' }, [7, 30, 90].map((d) =>
       h('button', { 'aria-pressed': S.usageDays === d ? 'true' : 'false', onclick: () => { S.usageDays = d; S.usage = null; render(); } },
         d + ' days')));
@@ -554,6 +557,22 @@ const VIEWS = {
         h('div', { class: 'panel meter' }, h('div', { class: 'muted small' }, 'VM hours'), h('div', { class: 'value' }, hrs(t.vm_seconds)),
           h('div', { class: 'small muted' }, hrs(t.macos_vm_seconds) + ' of them macOS')),
         h('div', { class: 'panel meter' }, h('div', { class: 'muted small' }, 'vCPU hours'), h('div', { class: 'value' }, hrs(t.vcpu_seconds)))));
+      if (t.vm_seconds > 0) {
+        const mac = Math.min(t.macos_vm_seconds || 0, t.vm_seconds);
+        const pct = (100 * mac / t.vm_seconds).toFixed(1);
+        out.push(h('div', { class: 'panel pad section' }, h('h3', {}, 'Where your VM hours went'),
+          h('div', { class: 'split', role: 'img', 'aria-label': hrs(mac) + ' macOS VM hours of ' + hrs(t.vm_seconds) },
+            h('i', { class: 'a', style: { width: pct + '%' } }), h('i', { class: 'b', style: { width: (100 - pct) + '%' } })),
+          h('div', { class: 'legend' }, h('span', {}, 'macOS ' + hrs(mac) + ' h'),
+            h('span', { class: 'b' }, 'Linux ' + hrs(t.vm_seconds - mac) + ' h'))));
+      } else if (!t.lease_seconds) {
+        out.push(h('p', { class: 'note' }, 'Nothing recorded in the last ' + S.usageDays + ' days. Hours appear here once a VM '
+          + 'runs or a Mac is leased.'));
+      }
+      if ((S.data.leases || []).some((l) => l.state === 'active')) {
+        out.push(h('p', { class: 'note' }, 'A lease in progress is counted as it runs. Its 24-hour minimum is added to '
+          + 'Billable Mac hours once you release it.'));
+      }
       return out;
     }
     const max = Math.max(1, ...rows.map((t) => t.billable_lease_seconds));
