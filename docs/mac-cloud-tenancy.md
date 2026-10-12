@@ -51,6 +51,50 @@ There is a command palette (⌘K or Ctrl-K) to jump to any page, VM, Mac, networ
 The console follows the system's light or dark mode unless you pick one, and it works on a phone. Links to a page or
 an item can be shared (`/console#/vms/<mac>/<id>`).
 
+## Command line
+
+`fluxctl fleet` talks to the same API (`--central`, default `http://127.0.0.1:7799`, or `CENTRAL_URL`; `--token` or
+`FLUXVM_AGENT_TOKEN`). On a terminal it prints tables, short confirmations and the next command to run. Piped, or
+with `-o json`, it prints the API's JSON unchanged, so scripts keep working. `-o table` and `-o wide` force the tables
+(`wide` adds IDs, labels, addresses and disk paths).
+
+```text
+$ fluxctl fleet status
+Acme Mobile  tenant acme, http://fleet:7799
+
+Macs    ████████████░░░░  2 of 3
+VMs     ████████░░░░░░░░  5 of 10
+vCPUs   ███████░░░░░░░░░  20 of 48
+Memory  ████░░░░░░░░░░░░  48 GiB of 192 GiB
+
+MAC       LEASE                MACOS  VMS  FREE
+studio-1  releasable now       ●●     3    10 vCPUs, 156 GiB
+mini-1    releasable in 19h    ●○     2    6 vCPUs, 20 GiB
+
+Next: fluxctl fleet vms
+
+$ fluxctl fleet launch --image macos-27-xcode --ttl 8h
+✓ Launched macos-27-xcode-1 on mini-1 (macOS 27 with Xcode, 6 vCPUs, 16 GiB)
+  ID  0b9c…
+Next: fluxctl fleet run macos-27-xcode-1 -- sw_vers
+```
+
+| Command | What |
+|---|---|
+| `fleet status` | A tenant's quota, Macs and next step; for the operator, fleet health and what needs attention |
+| `fleet launch [NAME] --image I` | Launch from the catalog (or `--disk PATH --guest macos`); `--mac`, `--network` (repeatable), `--ttl 8h`, `--vcpus`, `--memory-gib` |
+| `fleet run VM -- CMD…` | Run a command in a VM found by name or ID prefix; prints the guest's output and exits with its code |
+| `fleet rm VM` | Delete a VM by name (asks on a terminal; `-y` to skip) |
+| `fleet vms`, `fleet nodes`, `fleet node M` | VMs and Macs, with macOS slots (`●○`) and when each lease can be released |
+| `fleet lease create\|list\|get\|release` | Leases (`create --hours 72 --min-vcpus 16 --nested`) |
+| `fleet images [add\|remove]` | The image catalog |
+| `fleet networks [show\|create\|delete\|rotate\|add-mac\|remove-mac]` | Private networks across Macs |
+| `fleet tenant create\|list\|get\|me\|update\|rotate-token\|delete` | Tenants (the token is printed once) |
+| `fleet drain`, `drain-status`, `scrub`, `cordon`, `uncordon`, `usage`, `reconcile` | Operator tasks |
+
+A refused call shows central's own message plus a hint: a 401 says which flag carries the token, a 429 points at the
+quota, a standby names the leader, and an unreachable central says how to point `--central` at it.
+
 ## Image catalog
 
 The catalog lists the images the operator has put on the Macs, so tenants launch by name instead of typing disk paths.
