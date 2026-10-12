@@ -2769,6 +2769,7 @@ dependencies = [
 name = "fluxvm-vz-switch"
 version = "0.4.1"
 dependencies = [
+ "aes-gcm",
  "anyhow",
  "fluxvm-netobs",
  "libc",
