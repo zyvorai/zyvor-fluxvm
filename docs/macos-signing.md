@@ -29,13 +29,20 @@ fluxvm-<version>-macos-arm64/
   bin/fluxvm-vz-runner                  virtualization entitlement only (always works)
   bin/FluxVMRunner.app                  only with a runner profile: + com.apple.vm.networking
   libexec/FluxVMNetworking.app          the vmnet broker (+ vm.networking with its profile)
-  libexec/FluxVMUSBAccess.app           the USB consent helper (+ accessory access with its profile)
+  libexec/FluxVMUSBAccess.app           the USB consent helper (+ accessory access with its profile); only when the build
+                                        SDK has the AccessoryAccess framework
   share/launchd/*.plist                 launch agents for the two helpers (__PREFIX__ = the unpacked package)
 ```
 
 The daemon picks `bin/FluxVMRunner.app/Contents/MacOS/fluxvm-vz-runner` when it exists and falls back to the plain
 runner. `FLUXVM_VZ_RUNNER` still overrides both. Without a profile, a bundle is signed without its restricted
 entitlement: it is shipped, starts, and admission refuses the features above with a clear error, exactly as today.
+
+**The USB helper is optional in a package.** It links Apple's `AccessoryAccess` framework, which is in the macOS 27 SDK
+but not in every Xcode a hosted CI runner has. `scripts/package-macos.sh` checks that the SDK can import it and, when it
+cannot (or with `FLUXVM_SKIP_USBD=1`), builds the package without `FluxVMUSBAccess.app` and its launch agent and says so;
+the release workflow's summary notes it too. Everything else in the package is unchanged, and USB passthrough then
+needs `crates/fluxvm-apple/macos/usbd/build-install.sh` on a Mac with the SDK (and, for claiming devices, a profile).
 
 ## One-time Apple setup
 

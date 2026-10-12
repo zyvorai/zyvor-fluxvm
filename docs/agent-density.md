@@ -103,19 +103,43 @@ hold their memory, so `oci_warm_resident_mib` is not part of `resident_estimate_
 `resident_estimate_mib` is the configured memory of running and paused sandboxes (a balloon gives some of it back). `/metrics` adds
 `fluxvm_sandbox_warm_hits_total` and `fluxvm_sandbox_warm_misses_total`.
 
-## Rough capacity
+## What a sandbox costs on a real Mac
 
-Active `tiny` sandboxes, leaving room for macOS:
+Measured on one Apple M4 Mac mini (10 CPUs, 16 GB, macOS 27.2) with `scripts/bench-sandbox-mac.sh`, a `debian-13` guest and
+the daemon on loopback. Each figure is the resident size macOS reports for the sandbox's runner plus its Virtualization XPC
+service (`usage[].rss_bytes` of `GET /v1/host/overview`), sampled after the sandboxes had idled for 20 to 45 seconds.
 
-| Mac                  | Active tiny sandboxes |
-|----------------------|-----------------------|
-| Mac mini, 16 GB      | 4-8                   |
-| Mac Studio, 36 GB    | 12-20                 |
-| Mac Studio, 64 GB+   | 25-40                 |
+| Profile (configured) | Sandboxes | Create, each | RSS per sandbox, MiB: lowest / mean / highest seen |
+|---|---|---|---|
+| `tiny` (512 MiB, cold boot) | 1 | 10 s | 498 |
+| `tiny` | 2 | 7 s | 770 / 775 / 779 |
+| `tiny` | 4 | 6 s | 347 / 520 / 628 |
+| `standard` (2 GiB, claims a warm slot) | 1 | 1 s | 712 |
+| `standard` | 2 | 1 s | 248 / 275 / 303 |
+| `standard` | 4 | 12 s (2 warm slots, 2 cold) | 205 / 460 / 687 |
+| `small` (1 GiB, cold boot) | 1 | 8 s | 785 |
+| `small` | 2 | 6 s | 784 / 786 / 788 |
+| `small` | 4 | 7 s | 623 / 704 / 786 |
 
-Hibernated sandboxes hold no memory, so many more can exist; they are limited by disk. These are estimates, not measurements; host
-load, the guest image and what the agents run change them. `scripts/density-smoke.sh` creates a batch and prints the report, which
-is the quickest way to find the real number for a host.
+What these numbers say, and what they do not:
+
+- **They vary a lot** (205 to 788 MiB across 21 sandboxes), and the same sandbox changes with time: one `tiny` sandbox sat at
+  779 MiB for the first minute and 704 MiB at 90 s; a warm-claimed `standard` one started at 716 MiB and settled at 485 MiB
+  within 15 s. macOS compresses and reclaims guest memory, and a cold boot touches more pages than a restored snapshot.
+- **A sandbox's resident size is not its configured size.** A `tiny` (512 MiB) sandbox held more than 512 MiB at times,
+  because the runner and the Virtualization service add their own footprint to the guest's pages.
+- **The lowest figure is a floor, not a plan.** Sizing a Mac on 205 MiB would overstate what fits: sandboxes that boot or
+  run work sit near the highest figure, about 790 MiB here. Use roughly 800 MiB per *active* sandbox when deciding how many
+  to run, and expect idle, hibernated and warm-restored ones to cost less.
+- **The "host available" drop was too noisy to publish.** The Mac was running other work: available memory moved by more
+  than 1 GiB between samples with no sandbox change, so the script's drop column is only meaningful on a quiet Mac.
+- **Not measured:** a guest doing real work (these were idle), Mac Studio sizes, 8 or more sandboxes at once, and the memory
+  of the daemon itself. Memory pressure stayed `normal` throughout.
+
+A reasoned estimate from those figures, not a measurement: a 16 GB Mac that keeps about 6 GB for macOS and other apps runs
+roughly a dozen active sandboxes of these shapes (10 GB at about 800 MiB each). Hibernated sandboxes hold no memory, so many
+more can exist; they are limited by disk. Run `scripts/bench-sandbox-mac.sh` on your own host for its real number; the older
+`scripts/density-smoke.sh` creates a batch, runs a command in each and prints the density report.
 
 ## Unattended hosts
 
