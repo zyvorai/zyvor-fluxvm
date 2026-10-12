@@ -2182,6 +2182,7 @@ async fn runtime_capabilities(
     };
     // Persistent bitmaps, bitmap-mode and zstd qcow2 clusters need QEMU 5.1.
     let cbt = m.qemu_version().is_some_and(|v| v >= (5, 1));
+    let io = m.host_io_support();
     Json(RuntimeCapabilities {
         api_version: "runtime.fluxvm.zyvor.io/v1".into(),
         scope: "node-local".into(),
@@ -2266,6 +2267,9 @@ async fn runtime_capabilities(
             balloon: cfg!(target_os = "linux"),
             vnet: cfg!(target_os = "linux"),
             hibernate: cfg!(target_os = "linux"),
+            io_uring: io.io_uring,
+            vhost_user_blk: io.vhost_user_blk,
+            nvme_multipath: io.nvme_multipath,
         },
     })
 }
@@ -3298,6 +3302,9 @@ struct AttachDiskRequest {
     path: Option<std::path::PathBuf>,
     #[serde(default)]
     backing: Option<std::path::PathBuf>,
+    /// QEMU: bus (scsi, virtio-blk, vhost-user-blk), aio, cache, iothread, queues.
+    #[serde(default)]
+    io: Option<fluxvm_core::model::DiskIo>,
     #[serde(flatten)]
     vz: VzDiskFields,
 }
@@ -3341,6 +3348,12 @@ async fn attach_vm_disk(
             )
             .into());
         }
+        if req.io.is_some() {
+            return Err(anyhow::anyhow!(
+                "io applies to QEMU disks; a vz disk takes caching and sync"
+            )
+            .into());
+        }
         let v = req.vz;
         let disk = fluxvm_core::model::AppleDisk {
             name: None,
@@ -3377,10 +3390,14 @@ async fn attach_vm_disk(
         )
         .into());
     }
+    let io = req.io.unwrap_or_default();
     let info = match (req.size_gib, req.path, req.backing) {
-        (Some(size), None, None) => m.attach_vm_disk(id, &req.name, size).await?,
-        (None, Some(path), None) => m.attach_existing_vm_disk(id, &req.name, &path).await?,
-        (None, None, Some(backing)) => m.attach_overlay_vm_disk(id, &req.name, &backing).await?,
+        (Some(size), None, None) => m.attach_vm_disk(id, &req.name, size, &io).await?,
+        (None, Some(path), None) => m.attach_existing_vm_disk(id, &req.name, &path, &io).await?,
+        (None, None, Some(backing)) => {
+            m.attach_overlay_vm_disk(id, &req.name, &backing, &io)
+                .await?
+        }
         _ => {
             return Err(anyhow::anyhow!("set exactly one of size_gib, path or backing").into());
         }
@@ -5574,6 +5591,8 @@ mod tests {
                 ttl_seconds: None,
                 extra_args: vec![],
                 shared_memory: false,
+                root_disk_io: None,
+                disk_hotplug_ports: None,
                 agent: agent_enabled.then_some(AgentSpec {
                     enabled: true,
                     port: 17777,

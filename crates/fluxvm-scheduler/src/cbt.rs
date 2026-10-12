@@ -493,7 +493,9 @@ fn cbt_disks(vm: &VmRecord) -> (Vec<(String, String, PathBuf)>, Vec<SkippedDisk>
     )];
     let mut skipped = vec![];
     for (name, path) in fluxvm_qemu::disks::data_disks(&vm.workspace) {
-        let reason = if fluxvm_qemu::disks::is_external(&path) {
+        let reason = if fluxvm_qemu::disks::is_vhost_user(&vm.workspace, &name) {
+            Some("vhost-user-blk disks are served by qemu-storage-daemon, outside QEMU")
+        } else if fluxvm_qemu::disks::is_external(&path) {
             Some("attached from an existing image or volume")
         } else if backup::data_disk_format(&path) != "qcow2" {
             Some("raw disks have no persistent dirty bitmaps")

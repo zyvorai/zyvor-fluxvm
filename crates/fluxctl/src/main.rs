@@ -2071,6 +2071,7 @@ fn parse_quiesce(s: &str) -> Result<fluxvm_core::model::BackupQuiesce, String> {
 }
 
 #[derive(Subcommand)]
+#[allow(clippy::large_enum_variant)]
 enum DiskCommand {
     /// Root disk plus every data disk.
     List {
@@ -2114,6 +2115,22 @@ enum DiskCommand {
         /// vz, usb controller, hot-attach only: the XHCI bus (0-based; see `create --usb-controllers`).
         #[arg(long)]
         usb_bus: Option<u8>,
+        /// QEMU: scsi (default), virtio-blk, or vhost-user-blk (served by
+        /// qemu-storage-daemon; needs shareable guest memory to hot-add).
+        #[arg(long, value_parser = ["scsi", "virtio-blk", "vhost-user-blk"])]
+        bus: Option<String>,
+        /// QEMU: io_uring, native (needs --cache none|directsync) or threads.
+        #[arg(long, value_parser = ["io_uring", "native", "threads"])]
+        aio: Option<String>,
+        /// QEMU: host cache mode (default writeback).
+        #[arg(long, value_parser = ["none", "writeback", "writethrough", "directsync", "unsafe"])]
+        cache: Option<String>,
+        /// QEMU virtio-blk/vhost-user-blk: a dedicated iothread.
+        #[arg(long)]
+        iothread: bool,
+        /// QEMU virtio-blk/vhost-user-blk: virtio queues (1-64).
+        #[arg(long)]
+        queues: Option<u16>,
     },
     /// Grow `root` or a data disk (live or stopped).
     Resize {
@@ -3668,9 +3685,26 @@ async fn run_remote(
                 sync,
                 controller,
                 usb_bus,
+                bus,
+                aio,
+                cache,
+                iothread,
+                queues,
             } => {
                 let mut body =
                     json!({"name": name, "size_gib": size_gib, "path": path, "backing": backing});
+                let io = json!({"bus": bus, "aio": aio, "cache": cache,
+                    "iothread": iothread.then_some(true), "queues": queues});
+                let io: serde_json::Map<_, _> = io
+                    .as_object()
+                    .into_iter()
+                    .flatten()
+                    .filter(|(_, v)| !v.is_null())
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect();
+                if !io.is_empty() {
+                    body["io"] = serde_json::Value::Object(io);
+                }
                 let vz = json!({"kind": kind, "url": url, "read_only": read_only.then_some(true),
                     "caching": caching, "sync": sync, "controller": controller,
                     "usb_bus": usb_bus});
@@ -4984,8 +5018,21 @@ async fn main() -> Result<()> {
                 sync,
                 controller,
                 usb_bus,
+                bus,
+                aio,
+                cache,
+                iothread,
+                queues,
             } => {
+                let io: fluxvm_core::model::DiskIo = serde_json::from_value(serde_json::json!({
+                    "bus": bus, "aio": aio, "cache": cache, "iothread": iothread, "queues": queues,
+                }))?;
                 if m.get(id).await?.backend == fluxvm_core::model::BackendKind::Vz {
+                    if io != fluxvm_core::model::DiskIo::default() {
+                        anyhow::bail!(
+                            "--bus, --aio, --cache, --iothread and --queues are QEMU options"
+                        );
+                    }
                     let disk: fluxvm_core::model::AppleDisk = serde_json::from_value(
                         serde_json::json!({
                             "path": path.unwrap_or_default(), "kind": kind.as_deref().unwrap_or("image"),
@@ -5001,11 +5048,11 @@ async fn main() -> Result<()> {
                     return Ok(());
                 }
                 let info = match (size_gib, path, backing) {
-                    (_, Some(path), _) => m.attach_existing_vm_disk(id, &name, &path).await?,
+                    (_, Some(path), _) => m.attach_existing_vm_disk(id, &name, &path, &io).await?,
                     (_, None, Some(backing)) => {
-                        m.attach_overlay_vm_disk(id, &name, &backing).await?
+                        m.attach_overlay_vm_disk(id, &name, &backing, &io).await?
                     }
-                    (Some(size), None, None) => m.attach_vm_disk(id, &name, size).await?,
+                    (Some(size), None, None) => m.attach_vm_disk(id, &name, size, &io).await?,
                     (None, None, None) => anyhow::bail!("set --size-gib, --path or --backing"),
                 };
                 println!("{}", serde_json::to_string_pretty(&info)?)
