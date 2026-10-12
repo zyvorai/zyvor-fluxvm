@@ -651,12 +651,13 @@ async fn start_verification(
 /// the person is told the same thing either way.
 async fn send_mail(fleet: &Fleet, mail: &MailConfig, payload: Value) {
     if mail.url == "log" {
-        // Warn level: log mode is for labs and must show up at the default log level.
-        tracing::warn!(
-            to = %payload["to"].as_str().unwrap_or(""),
-            kind = %payload["type"].as_str().unwrap_or(""),
-            link = %payload["link"].as_str().unwrap_or(""),
-            "sign-up mail (log mode)"
+        // Written straight to stderr: central's default log filter shows errors only, and this mode exists so a person
+        // can copy the link out of the terminal.
+        eprintln!(
+            "sign-up mail (log mode): to={} type={} link={}",
+            payload["to"].as_str().unwrap_or(""),
+            payload["type"].as_str().unwrap_or(""),
+            payload["link"].as_str().unwrap_or("")
         );
         return;
     }
