@@ -1021,6 +1021,27 @@ async fn dispatch(
                 }
             }
         },
+        FleetCommand::Start { vm } => power(central, token, &out, &vm, "start", true).await,
+        FleetCommand::Stop { vm, yes } => power(central, token, &out, &vm, "stop", yes).await,
+        FleetCommand::Restart { vm, yes } => power(central, token, &out, &vm, "restart", yes).await,
+        FleetCommand::Pause { vm } => power(central, token, &out, &vm, "pause", true).await,
+        FleetCommand::Resume { vm } => power(central, token, &out, &vm, "resume", true).await,
+        FleetCommand::Logs { vm, lines } => {
+            let (node, id, _) = resolve_vm(central, token, &vm).await?;
+            // The log is text; read it as bytes so a log that happens to parse as JSON is not reinterpreted.
+            let (_, bytes) = fleet_client::get_bytes(
+                central,
+                token,
+                &format!("/fleet/vms/{}/{}/logs?lines={lines}", esc(&node), esc(&id)),
+            )
+            .await?;
+            let text = String::from_utf8_lossy(&bytes);
+            if !out.human {
+                return out.json(&json!({"node": node, "id": id, "log": text}));
+            }
+            print!("{text}");
+            Ok(())
+        }
         FleetCommand::Images { command } => images(central, token, &out, command).await,
         FleetCommand::Networks { command } => networks(central, token, &out, command).await,
         FleetCommand::Tenant { command } => tenant(central, token, &out, command).await,
@@ -1770,6 +1791,49 @@ async fn resolve_vm(
             )
         }
     }
+}
+
+/// Starts, stops, restarts, pauses or resumes a VM found by name; stop and restart ask first on a terminal.
+async fn power(
+    central: &str,
+    token: Option<&str>,
+    out: &Out,
+    vm: &str,
+    action: &str,
+    yes: bool,
+) -> Result<()> {
+    let (node, id, name) = resolve_vm(central, token, vm).await?;
+    if out.human && !yes {
+        let what = if action == "stop" {
+            format!("Stop {name}? The guest shuts down; its disk is kept.")
+        } else {
+            format!("Restart {name}? Anything not saved inside it is lost.")
+        };
+        if !confirm(&what)? {
+            println!("Left {name} as it was.");
+            return Ok(());
+        }
+    }
+    let v = call(
+        central,
+        token,
+        Method::POST,
+        &format!("/fleet/vms/{}/{}/{action}", esc(&node), esc(&id)),
+        None,
+    )
+    .await?;
+    if !out.human {
+        return out.json(&v);
+    }
+    let done = match action {
+        "start" => "started",
+        "stop" => "stopped",
+        "restart" => "restarted",
+        "pause" => "paused",
+        _ => "resumed",
+    };
+    out.done(format!("{name} {done}."));
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]

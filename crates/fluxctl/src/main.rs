@@ -1129,6 +1129,30 @@ enum FleetCommand {
         #[arg(trailing_var_arg = true, required = true)]
         command: Vec<String>,
     },
+    /// Start a stopped VM (by name or ID prefix).
+    Start { vm: String },
+    /// Shut a VM down; its disk is kept (asks first on a terminal).
+    Stop {
+        vm: String,
+        #[arg(long, short = 'y')]
+        yes: bool,
+    },
+    /// Restart a VM (asks first on a terminal).
+    Restart {
+        vm: String,
+        #[arg(long, short = 'y')]
+        yes: bool,
+    },
+    /// Pause a running VM (its memory is kept; it does not run).
+    Pause { vm: String },
+    /// Resume a paused VM.
+    Resume { vm: String },
+    /// The end of a VM's console log.
+    Logs {
+        vm: String,
+        #[arg(long, default_value_t = 100)]
+        lines: usize,
+    },
     /// Delete a VM, found by name or ID prefix. Asks first on a terminal.
     Rm {
         vm: String,
