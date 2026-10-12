@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+### Fixed: console tunnels outlived their person and had no end
+- A tunnel opened from a console session is now ended (within 30 seconds) when that person is removed from the tenant or
+  demoted to a viewer; before, only the tenant being disabled, the API key or the VM ending closed it.
+- New policy field `tunnels.max_lifetime_minutes` (default 480, 1 to 10080): a tunnel closes that long after it opened,
+  however busy; before, steady traffic kept one open for ever. Policies saved earlier load with the default. Signing out
+  of the console and rotating the primary token still do not end open tunnels (documented).
+
 ## 0.4.5 (2026-10-12)
 
 The first release after 0.4.4 that fixes what installing 0.4.4 from the Homebrew tap on a clean Mac turned up, and adds

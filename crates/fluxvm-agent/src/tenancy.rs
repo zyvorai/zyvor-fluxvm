@@ -2076,6 +2076,10 @@ pub struct TunnelPolicy {
     /// Open tunnels per tenant (the operator counts as one more tenant).
     #[serde(default = "default_tunnels_per_tenant")]
     pub max_per_tenant: u32,
+    /// A tunnel is closed this long after it opened, however busy it is (steady traffic would otherwise keep it, and
+    /// the access it was opened with, alive for ever).
+    #[serde(default = "default_tunnel_lifetime_minutes")]
+    pub max_lifetime_minutes: u32,
 }
 
 /// Most entries `TunnelPolicy::ports` may hold.
@@ -2084,6 +2088,8 @@ pub const MAX_TUNNEL_PORT_RULES: usize = 64;
 pub const MAX_TUNNEL_IDLE_MINUTES: u32 = 24 * 60;
 /// Most tunnels a tenant may be allowed.
 pub const MAX_TUNNELS_PER_TENANT: u32 = 1000;
+/// Longest tunnel lifetime: a week.
+pub const MAX_TUNNEL_LIFETIME_MINUTES: u32 = 7 * 24 * 60;
 
 fn default_tunnel_ports() -> Vec<String> {
     vec!["22".into(), "1024-65535".into()]
@@ -2097,6 +2103,10 @@ fn default_tunnels_per_tenant() -> u32 {
     20
 }
 
+fn default_tunnel_lifetime_minutes() -> u32 {
+    8 * 60
+}
+
 impl Default for TunnelPolicy {
     fn default() -> Self {
         Self {
@@ -2104,6 +2114,7 @@ impl Default for TunnelPolicy {
             ports: default_tunnel_ports(),
             idle_timeout_minutes: default_tunnel_idle_minutes(),
             max_per_tenant: default_tunnels_per_tenant(),
+            max_lifetime_minutes: default_tunnel_lifetime_minutes(),
         }
     }
 }
@@ -2139,6 +2150,11 @@ impl TunnelPolicy {
                 "tunnels.idle_timeout_minutes is 1 to {MAX_TUNNEL_IDLE_MINUTES}"
             ));
         }
+        if !(1..=MAX_TUNNEL_LIFETIME_MINUTES).contains(&self.max_lifetime_minutes) {
+            return Err(format!(
+                "tunnels.max_lifetime_minutes is 1 to {MAX_TUNNEL_LIFETIME_MINUTES}"
+            ));
+        }
         if !(1..=MAX_TUNNELS_PER_TENANT).contains(&self.max_per_tenant) {
             return Err(format!(
                 "tunnels.max_per_tenant is 1 to {MAX_TUNNELS_PER_TENANT}"
@@ -2155,6 +2171,14 @@ impl TunnelPolicy {
                 .iter()
                 .filter_map(|r| parse_port_rule(r))
                 .any(|(a, b)| (a..=b).contains(&port))
+    }
+
+    /// The longest a tunnel may stay open, kept within its bounds even if the stored value is not.
+    pub fn max_lifetime(&self) -> std::time::Duration {
+        let m = self
+            .max_lifetime_minutes
+            .clamp(1, MAX_TUNNEL_LIFETIME_MINUTES);
+        std::time::Duration::from_secs(u64::from(m) * 60)
     }
 
     /// The idle timeout, kept within its bounds even if the stored value is not.

@@ -308,12 +308,14 @@ fleet token as an admin token, or central's tunnels to it are refused (`502`).
 The policy (`GET/PUT /fleet/policy`, **Policy** page in the console) has a `tunnels` block:
 
 ```json
-"tunnels": {"enabled": true, "ports": ["22", "1024-65535"], "idle_timeout_minutes": 60, "max_per_tenant": 20}
+"tunnels": {"enabled": true, "ports": ["22", "1024-65535"], "idle_timeout_minutes": 60, "max_lifetime_minutes": 480, "max_per_tenant": 20}
 ```
 
 - `ports`: single ports and inclusive ranges (at most 64 entries). Other ports get `403`.
 - `idle_timeout_minutes` (1-1440): a tunnel with no bytes either way for this long is closed. `ServerAliveInterval` in
   ssh keeps an idle shell open.
+- `max_lifetime_minutes` (1-10080, default 480): a tunnel is closed this long after it opened, however busy it is, so
+  steady traffic cannot keep one (and the access it was opened with) alive for ever. Reconnect to continue.
 - `max_per_tenant` (1-1000): more open tunnels get `429` until one closes. The operator counts as one more tenant.
 
 Opening (method `OPEN`, status `101`, or the refusal's status) and closing (`CLOSE`, with bytes sent and received, how
@@ -323,11 +325,13 @@ the policy's limits; `DELETE /fleet/tunnels/{id}` closes one at once. The consol
 tenant with a Close action. Tunnels live in the memory of the central that relays them: restarting it, or a failover
 to another central, ends them, and clients connect again.
 
-What ends a tunnel: either side closing, the idle timeout, an operator or the tenant closing it, the VM stopping, or
-central restarting. What does **not** end one: signing out of the console, a member being demoted or removed, or the
-tenant's token being rotated: a tunnel is checked for the tenant and the VM, not re-authorised per byte, and there is
-no absolute lifetime (steady traffic keeps it open). To cut a person off at once, close their tunnels from the
-**Tunnels** page (or `DELETE /fleet/tunnels/{id}`) when you remove them.
+What ends a tunnel: either side closing, the idle timeout, the maximum lifetime, an operator or the tenant closing it,
+the VM stopping, the tenant or the API key it was opened with being disabled, expired or made read-only, the person who
+opened it from the console being removed or demoted to a viewer (checked every 30 seconds), or central restarting.
+What does **not** end one: signing out of the console, or the tenant's primary token being rotated: a tunnel is
+re-checked for the tenant, the key, the member's role and the VM, not re-authorised per byte, and it is not tied to a
+session token. To cut such access off at once, close the tunnels from the **Tunnels** page (or
+`DELETE /fleet/tunnels/{id}`); otherwise the lifetime ends them within eight hours by default.
 ## Sign-in with SSO and team members
 
 People can sign in to the console with the company's identity provider (OpenID Connect: Okta, Microsoft Entra ID,
