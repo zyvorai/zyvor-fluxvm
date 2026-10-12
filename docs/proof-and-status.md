@@ -19,6 +19,11 @@ We only claim what has been run. Every row links to how it was verified.
 | **Network Fabric** (TC/eBPF, schema v4) | **GA, primary default** (`mode = "ebpf"`, `required = true`; nftables via explicit `mode = "legacy"`). Deny-by-default policy: `sudo ./scripts/enable-network-fabric-ga.sh --restart` — [docs/primary-ebpf.md](primary-ebpf.md), — [docs/network-fabric.md](network-fabric.md) |
 | **Bridge-less direct datapath** cuts the forwarding path | Measured host forwarding cost vs the bridge chain with the same policy program: **−31% latency, +60% 64 B packet rate** (Pod case). A veth stand-in on a shared node, TCP deltas within noise, no real guest — [method and raw data](direct-datapath.md#-measured-forwarding-cost) |
 
+**FluxMesh (host-to-host personal cloud)** is built and unit-tested (`cargo test -p fluxvm-mesh`, 69 tests; the phase
+scripts), but **not yet run on real hosts**: WireGuard reconcile, FluxDNS answers, enrollment between machines, key
+rotation across peers, ACME against a CA, browser HTTP/3, router mapping and relay fallback with UDP blocked are all
+unverified. It is not in the macOS package. See [docs/fluxmesh.md](fluxmesh.md#status).
+
 **Know before you commit.** These are the boundaries, stated up front so you can size the fit:
 
 - **Multi-tenant controls are opt-in, not a public-cloud boundary.** Create-path quotas use an O(1) ledger, `policy.require_catalog_names` rejects unsigned images, QEMU/Cloud Hypervisor children can take a log-mode seccomp filter (`FLUXVM_VMM_SECCOMP`), and AppArmor/SELinux profiles ship under `deploy/`. Per-tenant Firecracker uids need `[jailer] uid_range_start` / `uid_range_len`. Pause, resume, and delete do not hash images or scan the fleet. See [docs/PRODUCTION.md](PRODUCTION.md).

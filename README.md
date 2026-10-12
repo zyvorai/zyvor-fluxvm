@@ -63,12 +63,15 @@ Measured on one Apple M4 with macOS 27.2. Multi-Mac fleets are not yet verified 
 
 ## What's new
 
-From the 0.4.0 (unreleased) section of the [CHANGELOG](CHANGELOG.md) and recent commits:
+From the [CHANGELOG](CHANGELOG.md) (0.4.x, current release 0.4.6) and recent commits:
 
 | Feature | What it does |
 |---|---|
 | **Agent sandboxes you can fork** | `sandbox_create {"offline": true}`, then `vm_fork`: four running copies in about 4 s, four fixes tested in 0.3 s, the passing one kept ([demo](examples/agent-sandbox-demo/README.md); measured on an M4 mini, copies keep the parent's identity) |
 | **Fleet platform** | Tenants and 24-hour Mac leases, snapshots and clones, volumes, SSH and port tunnels, SSO and roles, metrics and Prometheus, warm pools, prices and signed webhooks, Go/Python/TypeScript clients and a Terraform provider ([guide](docs/mac-cloud-tenancy.md), [run it](docs/mac-cloud-operations.md); tested against simulated Macs, not a real multi-Mac fleet) |
+| **Fleet console, redesigned** | One top bar with grouped menus (Overview, Cloud, Compute, Billing, Access), light and dark, served by central at `/console`; operators and tenants sign in with their key ([install guide](docs/install-macos.md#optional-the-fleet-console)) |
+| **No open registry by accident** | `central` makes a random operator token on first start, keeps it in `<state-dir>/operator-token` (`0600`) and prints it once; `--token` always wins, `--no-auth` is the explicit lab switch ([operations](docs/mac-cloud-operations.md)) |
+| **FluxMesh personal cloud** | A host-to-host WireGuard overlay across home NAT/CGNAT: overlay IPAM, private DNS (`*.flux`), fail-closed ACLs compiled to Network Fabric, relay fallback, zero-touch enrollment (`fluxctl cloud`) and an optional public HTTPS/HTTP3 edge. Unit-tested, **not yet run on real hosts**, not in the macOS package ([docs/fluxmesh.md](docs/fluxmesh.md)) |
 | **Install with Homebrew** | `brew install zyvorai/tap/fluxvm`, then `brew services start zyvorai/tap/fluxvm` and `fluxctl mcp install claude-code`; install, service, upgrade and uninstall were run for real ([install guide](docs/install-macos.md)) |
 | **MCP server for AI agents** | `fluxctl mcp serve` speaks the Model Context Protocol over stdio; read tools by default, `--allow-write` adds VM create, clone, exec, snapshot, delete, power and capture, backups, pools and sandboxes ([docs/mcp.md](docs/mcp.md)) |
 | **VM fork** | `POST /v1/vms/{id}/fork` / `fluxctl fork-vm`: snapshot a running FluxVM-engine VM once and restore N children with a shared read-only memory file and reflinked rootfs |
@@ -267,7 +270,8 @@ Every one maps onto what is implemented today. [All eleven](docs/index.md#use-ca
 | Status | Areas |
 |---|---|
 | **GA** | Network Fabric (TC/eBPF, the default dataplane; nftables via explicit `mode = "legacy"`) · Secure Containers (containerd runtime-v2, not a Kata-equivalence claim) |
-| **Unreleased (0.4.0)** | MCP server, sandbox GPUs, enforced Kairon VM edge, VM-edge capture, VM fork, VM import, quiesced backups |
+| **Released (0.4.x)** | MCP server, sandbox GPUs, enforced Kairon VM edge, VM-edge capture, VM fork, VM import, quiesced backups, fleet console |
+| **Built, not yet run on real hosts** | FluxMesh (overlay, DNS, relay, enrollment, public edge): unit tests only; see [Proof & status](docs/proof-and-status.md) |
 | **Not by design** | KubeVirt compatibility |
 
 ---

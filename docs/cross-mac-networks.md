@@ -85,6 +85,11 @@ A datagram's epoch is authenticated, so it cannot be moved to another key. Rotat
 - **Encryption.** Traffic is encrypted and authenticated between Macs. The underlay itself (10 GbE, a VLAN, or
   WireGuard between sites) needs no extra protection for this network.
 
+## Across sites
+
+This network joins Macs on one L2 segment. To join hosts across homes, offices and NAT/CGNAT with a WireGuard
+overlay, private DNS and relay fallback, see [FluxMesh](fluxmesh.md).
+
 ## Limits
 
 - The mesh is full, so every Mac sends broadcast and unknown unicast to every other. That is fine for tens of Macs,

@@ -202,7 +202,7 @@ ledger.
 Default ledger:
 
 ```text
-/var/lib/fluxvm/mesh/reconcile.v1
+<mesh dir>/reconcile.v1
 ```
 
 The reconciler intentionally accepts an `http://` API endpoint only. The normal
@@ -230,7 +230,7 @@ The JSON document includes:
 - keepalive values.
 
 When `fluxmesh-agent run` executes on macOS it writes this contract atomically
-to `FLUXMESH_MACOS_PLAN` (or `/var/lib/fluxvm/mesh/macos-tunnel.v1.json`).
+to `FLUXMESH_MACOS_PLAN` (or `<mesh dir>/macos-tunnel.v1.json`).
 
 This PR **does not claim a signed Apple NetworkExtension or a native macOS
 WireGuard crypto engine is hardware-verified**. The handoff is the stable
