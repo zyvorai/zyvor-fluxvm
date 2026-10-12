@@ -346,7 +346,7 @@ fn tenant_route_allowed(method: &axum::http::Method, path: &str) -> bool {
         ["fleet", "leases", _, "release"] => post,
         ["fleet", "overlays"] => get || post,
         ["fleet", "overlays", _] => get || delete,
-        ["fleet", "overlays", _, "members"] => post,
+        ["fleet", "overlays", _, "members"] | ["fleet", "overlays", _, "rotate"] => post,
         ["fleet", "overlays", _, "members", _] => delete,
         _ => false,
     }
@@ -553,6 +553,7 @@ pub fn router_with_handle(cfg: CentralConfig) -> (Router, Option<HaHandle>) {
             "/fleet/overlays/{name}/members",
             post(cloud::add_overlay_member),
         )
+        .route("/fleet/overlays/{name}/rotate", post(cloud::rotate_overlay))
         .route(
             "/fleet/overlays/{name}/members/{node}",
             axum::routing::delete(cloud::remove_overlay_member),

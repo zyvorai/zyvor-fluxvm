@@ -191,10 +191,24 @@ pub fn apply_overlays(body: &serde_json::Value, path: &std::path::Path) -> Resul
             key.len() == 64 && key.bytes().all(|b| b.is_ascii_hexdigit()),
             "central sent a malformed key for {name}"
         );
+        let hex64 = |k: &str| k.len() == 64 && k.bytes().all(|b| b.is_ascii_hexdigit());
+        // `<epoch> <key>` lines, the current first, then the previous one (still accepted while Macs roll over).
+        let mut content = match n["epoch"].as_u64() {
+            Some(e) => format!("{e} {key}\n"),
+            None => format!("{key}\n"),
+        };
+        if let (Some(e), Some(k)) = (
+            n["previous"]["epoch"].as_u64(),
+            n["previous"]["key"].as_str(),
+        ) && n["epoch"].as_u64().is_some()
+        {
+            anyhow::ensure!(hex64(k), "central sent a malformed previous key for {name}");
+            content.push_str(&format!("{e} {k}\n"));
+        }
         let key_file = keys.join(format!("{name}.key"));
-        if std::fs::read_to_string(&key_file).ok().as_deref() != Some(key) {
+        if std::fs::read_to_string(&key_file).ok().as_deref() != Some(content.as_str()) {
             let tmp = key_file.with_extension("key.tmp");
-            std::fs::write(&tmp, key)?;
+            std::fs::write(&tmp, &content)?;
             std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))?;
             std::fs::rename(&tmp, &key_file)?;
             changed = true;
@@ -287,7 +301,20 @@ mod overlay_sync_tests {
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         let n = &file.networks["acme-net"];
         assert_eq!(n.hosts, [2, 31]);
-        assert_eq!(std::fs::read_to_string(&n.key_file).unwrap(), key);
+        assert_eq!(
+            std::fs::read_to_string(&n.key_file).unwrap(),
+            format!("{key}\n")
+        );
+        // With epochs (rotation), both keys are written, the current first.
+        let old = "cd".repeat(32);
+        let rotated = json!({"networks": {"acme-net": {
+            "subnet": 128, "hosts": [2, 31], "listen": "0.0.0.0:47100", "peers": ["10.0.0.2:47100"],
+            "key": key, "epoch": 2, "previous": {"epoch": 1, "key": old}, "mtu": 1400}}});
+        assert!(apply_overlays(&rotated, &path).unwrap());
+        assert_eq!(
+            std::fs::read_to_string(&n.key_file).unwrap(),
+            format!("2 {key}\n1 {old}\n")
+        );
         let mode = std::fs::metadata(&n.key_file).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);
         // The Mac leaves the network: its key goes too.

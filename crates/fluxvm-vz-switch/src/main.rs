@@ -77,9 +77,12 @@ fn main() {
         (None, None) if overlay_peers.is_empty() => None,
         (Some(listen), Some(key_file)) => {
             let ov = std::sync::Arc::new(open_overlay(&network, listen, overlay_peers, &key_file));
-            if let Some(path) = overlay_config {
-                watch_peers(path, network.clone(), ov.clone());
-            }
+            watch_overlay(
+                overlay_config,
+                key_file.clone(),
+                network.clone(),
+                ov.clone(),
+            );
             Some(ov)
         }
         _ => {
@@ -95,17 +98,43 @@ fn main() {
     }
 }
 
-/// Re-reads this network's peers from the Mac's `overlay.json` every 10 s, so Macs joining or leaving the network
-/// take effect without restarting the switch (and its guests' links).
-fn watch_peers(
-    path: PathBuf,
+/// The ciphers for a key file's keys, the current first.
+fn load_keys(
+    key_file: &std::path::Path,
+) -> Option<Vec<(u32, Box<dyn fluxvm_vz_switch::overlay::FrameCipher>)>> {
+    use fluxvm_vz_switch::overlay::{AesGcm, FrameCipher, parse_keys};
+    let text = std::fs::read_to_string(key_file).ok()?;
+    let keys = parse_keys(&text)?;
+    Some(
+        keys.into_iter()
+            .map(|(e, k)| (e, Box::new(AesGcm::new(&k)) as Box<dyn FrameCipher>))
+            .collect(),
+    )
+}
+
+/// Every 10 s: re-reads the key file (a rotation takes effect without a restart) and, with `--overlay-config`, this
+/// network's peers from the Mac's `overlay.json` (Macs joining or leaving take effect without restarting the switch
+/// and its guests' links).
+fn watch_overlay(
+    config: Option<PathBuf>,
+    key_file: PathBuf,
     network: String,
     ov: std::sync::Arc<fluxvm_vz_switch::overlay::Overlay>,
 ) {
     std::thread::spawn(move || {
         loop {
             std::thread::sleep(Duration::from_secs(10));
-            let Ok(raw) = std::fs::read_to_string(&path) else {
+            if let Some(keys) = load_keys(&key_file) {
+                let epochs: Vec<u32> = keys.iter().map(|(e, _)| *e).collect();
+                if epochs != ov.epochs() {
+                    eprintln!("fluxvm-vz-switch: {network} keys now at epochs {epochs:?}");
+                    ov.set_keys(keys);
+                }
+            }
+            let Some(path) = &config else {
+                continue;
+            };
+            let Ok(raw) = std::fs::read_to_string(path) else {
                 continue;
             };
             let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) else {
@@ -137,21 +166,23 @@ fn open_overlay(
     peers: Vec<std::net::SocketAddr>,
     key_file: &std::path::Path,
 ) -> fluxvm_vz_switch::overlay::Overlay {
-    use fluxvm_vz_switch::overlay::{AesGcm, Overlay, OverlayConfig, parse_key};
+    use fluxvm_vz_switch::overlay::{Overlay, OverlayConfig};
     fn fail(msg: String) -> ! {
         eprintln!("fluxvm-vz-switch: {msg}");
         std::process::exit(1);
     }
-    let text = std::fs::read_to_string(key_file)
-        .unwrap_or_else(|e| fail(format!("reading {}: {e}", key_file.display())));
-    let key = parse_key(&text)
-        .unwrap_or_else(|| fail(format!("{} is not 64 hex characters", key_file.display())));
+    let keys = load_keys(key_file).unwrap_or_else(|| {
+        fail(format!(
+            "{} must hold a key (64 hex characters) or lines of `<epoch> <key>`",
+            key_file.display()
+        ))
+    });
     let cfg = OverlayConfig {
         network: network.to_string(),
         listen,
         peers,
     };
-    Overlay::bind(cfg, Box::new(AesGcm::new(&key)))
+    Overlay::bind_keyed(cfg, keys)
         .unwrap_or_else(|e| fail(format!("binding the overlay on {listen}: {e}")))
 }
 

@@ -133,6 +133,20 @@ pub(super) async fn reconcile_once(fleet: &Fleet) -> Value {
         }
         ended
     };
+    let rotated = {
+        let mut t = fleet.tenancy.lock().await;
+        let days = t.policy.overlay_key_rotation_days;
+        let r = if days > 0 {
+            t.rotate_due_overlays(ChronoDuration::days(days), Utc::now())
+        } else {
+            Vec::new()
+        };
+        if !r.is_empty() {
+            tracing::info!(networks = ?r, "overlay keys rotated");
+            fleet.persist_tenancy(&t);
+        }
+        r
+    };
     let compacted = {
         let mut t = fleet.tenancy.lock().await;
         let days = t.policy.ledger_retention_days;
@@ -180,6 +194,7 @@ pub(super) async fn reconcile_once(fleet: &Fleet) -> Value {
         "evicted": evicted,
         "closed_ledger_entries": closed,
         "compacted_records": compacted,
+        "rotated_overlay_keys": rotated,
         "errors": errors,
     })
 }
@@ -967,6 +982,22 @@ pub(super) async fn get_overlay(
     Ok(Json(o.public_json()))
 }
 
+/// `POST /fleet/overlays/{name}/rotate` (*tenant*): a new network key. Member Macs pick it up within a heartbeat;
+/// the previous key keeps working meanwhile.
+pub(super) async fn rotate_overlay(
+    State(fleet): State<Fleet>,
+    Extension(caller): Extension<Caller>,
+    Path(name): Path<String>,
+) -> Result<Json<Value>, AppError> {
+    let mut t = fleet.tenancy.lock().await;
+    let net = t
+        .rotate_overlay(&caller, &name, Utc::now())
+        .map_err(|e| not_found(e.to_string()))?;
+    fleet.persist_tenancy(&t);
+    tracing::info!(network = %name, epoch = net.epoch, "overlay key rotated");
+    Ok(Json(net.public_json()))
+}
+
 pub(super) async fn delete_overlay(
     State(fleet): State<Fleet>,
     Extension(caller): Extension<Caller>,
@@ -1063,6 +1094,8 @@ pub(super) async fn node_overlays(
                 "listen": format!("0.0.0.0:{}", o.port),
                 "peers": peers,
                 "key": o.key_hex,
+                "epoch": o.epoch,
+                "previous": o.previous.as_ref().map(|(e, k)| json!({"epoch": e, "key": k})),
                 "mtu": o.mtu,
             }),
         );
@@ -1743,6 +1776,8 @@ mod tests {
         );
         assert_eq!(net["hosts"], json!([2, 31]));
         assert_eq!(net["key"].as_str().unwrap().len(), 64);
+        assert_eq!(net["epoch"], 1);
+        assert!(net["previous"].is_null());
         // A tenant cannot read node configs.
         let (s, _) = call(
             &app,

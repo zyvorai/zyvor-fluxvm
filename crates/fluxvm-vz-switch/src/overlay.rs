@@ -4,30 +4,37 @@
 //! One private network across several Macs: the switches of the same network on different hosts form a full mesh and
 //! carry each other's Ethernet frames over UDP, sealed with AES-256-GCM under the network's key.
 //!
-//! - **Wire format.** `"FXO1"` ‖ sender id (u32, random per switch start) ‖ counter (u64, from a random start below
-//!   2^62) ‖ AES-256-GCM ciphertext and tag of the Ethernet frame. The 12-byte nonce is sender id ‖ counter, so a switch
-//!   never reuses one, and two switch starts under the same key would need both a 32-bit sender id and a 62-bit
-//!   counter range to collide before they could share a nonce; the associated data is the 16-byte header plus the
-//!   network name, so a datagram cannot be replayed into another network that happens to share a key.
-//! - **Replay.** Each sender id has a 1024-packet sliding window; anything older or seen before is dropped.
+//! - **Wire format.** `"FXO2"` ‖ sender id (u32, random per switch start) ‖ counter (u64, from a random start below
+//!   2^62) ‖ key epoch (u32) ‖ send time (u32, Unix seconds) ‖ AES-256-GCM ciphertext and tag of the Ethernet frame.
+//!   The 12-byte nonce is sender id ‖ counter, so a switch never reuses one, and two switch starts under the same key
+//!   would need both a 32-bit sender id and a 62-bit counter range to collide before they could share a nonce; the
+//!   associated data is the 24-byte header plus the network name, so a datagram cannot be replayed into another
+//!   network that happens to share a key, nor have its epoch or time altered.
+//! - **Keys and rotation.** A switch seals with its current key and opens with the current or the previous one (by
+//!   epoch), so a rotation rolls across Macs without dropping traffic. Keys reload from the key file while running.
+//! - **Replay.** Each (epoch, sender) has a 1024-packet sliding window, and a datagram whose send time is more than
+//!   [`MAX_SKEW_SECS`] away from the receiver's clock is dropped, so a stream captured earlier cannot be replayed to a
+//!   switch that restarted (its windows are empty). Macs need roughly synchronised clocks (NTP).
 //! - **Who may send.** Only configured peer IP addresses are accepted, and only datagrams that authenticate.
 //! - **Forwarding.** A switch learns which peer each remote MAC sits behind from authenticated frames. Unicast to a
 //!   learned MAC goes to that peer; unknown unicast, broadcast and multicast go to every peer. Frames from a peer are
 //!   delivered to local guests only, never to other peers (split horizon: full mesh, no loops).
 //! - **Anti-spoof.** A peer can never claim a MAC that belongs to a guest on this switch, nor a multicast source.
 //!
-//! The underlay must carry the overhead: 60 bytes over IPv4 (IP 20 + UDP 8 + header 16 + tag 16), so use an `mtu` of
-//! at most 1440 on a 1500-byte underlay (1400 leaves room for IPv6 and tunnels), or a jumbo-frame underlay.
+//! The underlay must carry the overhead: 68 bytes over IPv4 (IP 20 + UDP 8 + header 24 + tag 16), so use an `mtu` of
+//! at most 1432 on a 1500-byte underlay (1400 leaves room for IPv6 and tunnels), or a jumbo-frame underlay.
 
 use crate::{MAX_FRAME, Mac};
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr, UdpSocket};
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
-pub const MAGIC: &[u8; 4] = b"FXO1";
-pub const HEADER: usize = 16;
+pub const MAGIC: &[u8; 4] = b"FXO2";
+pub const HEADER: usize = 24;
+/// Largest accepted difference between a datagram's send time and the receiver's clock.
+pub const MAX_SKEW_SECS: i64 = 120;
 pub const TAG: usize = 16;
 /// Largest datagram a peer may send.
 pub const MAX_DATAGRAM: usize = HEADER + MAX_FRAME + TAG;
@@ -75,7 +82,7 @@ impl FrameCipher for AesGcm {
     }
 }
 
-/// Reads a key file: 64 hex characters (optionally surrounded by whitespace).
+/// One key as 64 hex characters.
 pub fn parse_key(text: &str) -> Option<[u8; 32]> {
     let t = text.trim();
     if t.len() != 64 {
@@ -86,6 +93,35 @@ pub fn parse_key(text: &str) -> Option<[u8; 32]> {
         *k = u8::from_str_radix(t.get(2 * i..2 * i + 2)?, 16).ok()?;
     }
     Some(key)
+}
+
+/// Reads a key file: either a single key (epoch 0), or lines of `<epoch> <64 hex>`, the current key first and
+/// optionally the previous one second.
+pub fn parse_keys(text: &str) -> Option<Vec<(u32, [u8; 32])>> {
+    let lines: Vec<&str> = text
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect();
+    if lines.len() == 1 && !lines[0].contains(char::is_whitespace) {
+        return Some(vec![(0, parse_key(lines[0])?)]);
+    }
+    if lines.is_empty() || lines.len() > 2 {
+        return None;
+    }
+    let mut out = Vec::new();
+    for l in lines {
+        let (epoch, key) = l.split_once(char::is_whitespace)?;
+        out.push((epoch.parse().ok()?, parse_key(key)?));
+    }
+    (out.len() < 2 || out[0].0 != out[1].0).then_some(out)
+}
+
+fn now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 /// A random u64 from the OS (sender id and counter start).
@@ -171,23 +207,29 @@ pub struct Inbound {
 pub struct Overlay {
     cfg: OverlayConfig,
     /// Current peers; starts as `cfg.peers` and can change while the switch runs ([`Overlay::set_peers`]).
-    peers: std::sync::RwLock<Vec<SocketAddr>>,
-    cipher: Box<dyn FrameCipher>,
+    peers: RwLock<Vec<SocketAddr>>,
+    /// Keys by epoch, the current (sealing) one first.
+    keys: RwLock<Vec<(u32, Arc<dyn FrameCipher>)>>,
     sender: u32,
     counter: AtomicU64,
-    windows: Mutex<HashMap<u32, ReplayWindow>>,
+    windows: Mutex<HashMap<(u32, u32), ReplayWindow>>,
     learned: Mutex<HashMap<Mac, (SocketAddr, Instant)>>,
     socket: Option<UdpSocket>,
     pub dropped: AtomicU64,
 }
 
 impl Overlay {
-    /// An overlay that only seals and opens (no socket): for tests and tools.
+    /// An overlay that only seals and opens (no socket), with one key at epoch 0: for tests and tools.
     pub fn detached(cfg: OverlayConfig, cipher: Box<dyn FrameCipher>) -> Self {
+        Self::detached_keyed(cfg, vec![(0, cipher)])
+    }
+
+    /// [`Overlay::detached`] with keys by epoch, the current one first.
+    pub fn detached_keyed(cfg: OverlayConfig, keys: Vec<(u32, Box<dyn FrameCipher>)>) -> Self {
         Self {
-            peers: std::sync::RwLock::new(cfg.peers.clone()),
+            peers: RwLock::new(cfg.peers.clone()),
+            keys: RwLock::new(keys.into_iter().map(|(e, k)| (e, Arc::from(k))).collect()),
             cfg,
-            cipher,
             sender: random_u64() as u32,
             // A random start (below 2^62, so it never wraps) keeps nonces apart even if two starts draw one sender id.
             counter: AtomicU64::new(random_u64() >> 2),
@@ -198,13 +240,51 @@ impl Overlay {
         }
     }
 
-    /// Binds the UDP socket.
+    /// Binds the UDP socket (one key at epoch 0).
     pub fn bind(cfg: OverlayConfig, cipher: Box<dyn FrameCipher>) -> std::io::Result<Self> {
+        Self::bind_keyed(cfg, vec![(0, cipher)])
+    }
+
+    /// Binds the UDP socket, with keys by epoch, the current one first.
+    pub fn bind_keyed(
+        cfg: OverlayConfig,
+        keys: Vec<(u32, Box<dyn FrameCipher>)>,
+    ) -> std::io::Result<Self> {
         let socket = UdpSocket::bind(cfg.listen)?;
         socket.set_read_timeout(Some(Duration::from_millis(500)))?;
-        let mut o = Self::detached(cfg, cipher);
+        let mut o = Self::detached_keyed(cfg, keys);
         o.socket = Some(socket);
         Ok(o)
+    }
+
+    /// Replaces the keys (a rotation): the first seals from now on, any of them opens.
+    pub fn set_keys(&self, keys: Vec<(u32, Box<dyn FrameCipher>)>) {
+        let keys: Vec<(u32, Arc<dyn FrameCipher>)> =
+            keys.into_iter().map(|(e, k)| (e, Arc::from(k))).collect();
+        let live: Vec<u32> = keys.iter().map(|(e, _)| *e).collect();
+        self.windows
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|(epoch, _), _| live.contains(epoch));
+        *self.keys.write().unwrap_or_else(|e| e.into_inner()) = keys;
+    }
+
+    /// Epochs of the keys in use, the current first.
+    pub fn epochs(&self) -> Vec<u32> {
+        self.keys
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .map(|(e, _)| *e)
+            .collect()
+    }
+
+    fn key(&self, epoch: Option<u32>) -> Option<(u32, Arc<dyn FrameCipher>)> {
+        let keys = self.keys.read().unwrap_or_else(|e| e.into_inner());
+        match epoch {
+            None => keys.first().cloned(),
+            Some(want) => keys.iter().find(|(e, _)| *e == want).cloned(),
+        }
     }
 
     pub fn peer_count(&self) -> usize {
@@ -234,15 +314,22 @@ impl Overlay {
         aad
     }
 
-    /// Seals one frame into a datagram.
+    /// Seals one frame into a datagram under the current key.
     pub fn seal(&self, frame: &[u8]) -> Option<Vec<u8>> {
+        self.seal_at(frame, now_secs())
+    }
+
+    fn seal_at(&self, frame: &[u8], time: i64) -> Option<Vec<u8>> {
+        let (epoch, cipher) = self.key(None)?;
         let n = self.counter.fetch_add(1, Ordering::Relaxed);
         let mut header = [0u8; HEADER];
         header[..4].copy_from_slice(MAGIC);
         header[4..8].copy_from_slice(&self.sender.to_be_bytes());
-        header[8..].copy_from_slice(&n.to_be_bytes());
+        header[8..16].copy_from_slice(&n.to_be_bytes());
+        header[16..20].copy_from_slice(&epoch.to_be_bytes());
+        header[20..24].copy_from_slice(&(time as u32).to_be_bytes());
         let nonce: [u8; 12] = header[4..16].try_into().ok()?;
-        let sealed = self.cipher.seal(&nonce, &self.aad(&header), frame)?;
+        let sealed = cipher.seal(&nonce, &self.aad(&header), frame)?;
         let mut out = header.to_vec();
         out.extend_from_slice(&sealed);
         Some(out)
@@ -273,15 +360,23 @@ impl Overlay {
         let header = &datagram[..HEADER];
         let sender = u32::from_be_bytes(header[4..8].try_into().ok()?);
         let counter = u64::from_be_bytes(header[8..16].try_into().ok()?);
+        let epoch = u32::from_be_bytes(header[16..20].try_into().ok()?);
+        let time = i64::from(u32::from_be_bytes(header[20..24].try_into().ok()?));
         if sender == self.sender {
             // Our own datagram reflected back.
             return reject();
         }
+        // Unix seconds wrap a u32 in 2106; compare modulo 2^32.
+        let now = now_secs() & 0xffff_ffff;
+        let skew = (now - time).rem_euclid(1 << 32);
+        if skew.min((1i64 << 32) - skew) > MAX_SKEW_SECS {
+            return reject();
+        }
+        let Some((_, cipher)) = self.key(Some(epoch)) else {
+            return reject();
+        };
         let nonce: [u8; 12] = header[4..16].try_into().ok()?;
-        let Some(frame) = self
-            .cipher
-            .open(&nonce, &self.aad(header), &datagram[HEADER..])
-        else {
+        let Some(frame) = cipher.open(&nonce, &self.aad(header), &datagram[HEADER..]) else {
             return reject();
         };
         // Only authenticated datagrams move the replay window.
@@ -289,7 +384,7 @@ impl Overlay {
             .windows
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .entry(sender)
+            .entry((epoch, sender))
             .or_default()
             .accept(counter);
         if !fresh || frame.len() < 14 {
@@ -494,6 +589,91 @@ pub(crate) mod tests {
         );
         assert_eq!(b.destinations(&frame(A, B)), vec![c_addr]);
         assert_eq!(b.peer_count(), 1);
+    }
+
+    fn k(epoch: u32, key: u8) -> (u32, Box<dyn FrameCipher>) {
+        (epoch, Box::new(Toy(key)))
+    }
+
+    #[test]
+    fn keys_rotate_without_dropping_traffic() {
+        let a_addr: SocketAddr = "10.0.0.1:47000".parse().unwrap();
+        let b_addr: SocketAddr = "10.0.0.2:47000".parse().unwrap();
+        let cfg = |listen, peer| OverlayConfig {
+            network: "acme".into(),
+            listen,
+            peers: vec![peer],
+        };
+        let a = Overlay::detached_keyed(cfg(a_addr, b_addr), vec![k(1, 1)]);
+        let b = Overlay::detached_keyed(cfg(b_addr, a_addr), vec![k(1, 1)]);
+        assert!(
+            b.open(&a.seal(&frame(B, A)).unwrap(), a_addr, &[B])
+                .is_some()
+        );
+        // b rotates first: it seals with epoch 2 and still opens a's epoch-1 datagrams.
+        b.set_keys(vec![k(2, 2), k(1, 1)]);
+        assert_eq!(b.epochs(), vec![2, 1]);
+        assert!(
+            b.open(&a.seal(&frame(B, A)).unwrap(), a_addr, &[B])
+                .is_some()
+        );
+        // a has not rotated yet, so b's epoch-2 datagram is refused until it does.
+        assert!(
+            a.open(&b.seal(&frame(A, B)).unwrap(), b_addr, &[A])
+                .is_none()
+        );
+        a.set_keys(vec![k(2, 2), k(1, 1)]);
+        assert!(
+            a.open(&b.seal(&frame(A, B)).unwrap(), b_addr, &[A])
+                .is_some()
+        );
+        // The old key retired everywhere: epoch-1 datagrams are refused.
+        let old = Overlay::detached_keyed(cfg(a_addr, b_addr), vec![k(1, 1)]);
+        b.set_keys(vec![k(3, 3), k(2, 2)]);
+        assert!(
+            b.open(&old.seal(&frame(B, A)).unwrap(), a_addr, &[B])
+                .is_none()
+        );
+        // A datagram cannot claim another epoch: the epoch is authenticated.
+        let mut d = a.seal(&frame(B, A)).unwrap();
+        d[19] = 3;
+        assert!(b.open(&d, a_addr, &[B]).is_none());
+    }
+
+    #[test]
+    fn stale_or_future_datagrams_are_dropped() {
+        let (a, b, a_addr, _) = pair(7, 7);
+        let now = now_secs();
+        assert!(
+            b.open(&a.seal_at(&frame(B, A), now - 60).unwrap(), a_addr, &[B])
+                .is_some()
+        );
+        assert!(
+            b.open(&a.seal_at(&frame(B, A), now - 600).unwrap(), a_addr, &[B])
+                .is_none()
+        );
+        assert!(
+            b.open(&a.seal_at(&frame(B, A), now + 600).unwrap(), a_addr, &[B])
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn key_files_parse_with_epochs() {
+        let k1 = "11".repeat(32);
+        let k2 = "22".repeat(32);
+        assert_eq!(parse_keys(&k1).unwrap(), vec![(0, [0x11; 32])]);
+        assert_eq!(
+            parse_keys(&format!("5 {k2}\n4 {k1}\n")).unwrap(),
+            vec![(5, [0x22; 32]), (4, [0x11; 32])]
+        );
+        assert!(
+            parse_keys(&format!("5 {k2}\n5 {k1}")).is_none(),
+            "duplicate epoch"
+        );
+        assert!(parse_keys(&format!("1 {k1}\n2 {k1}\n3 {k1}")).is_none());
+        assert!(parse_keys("").is_none());
+        assert!(parse_keys("x zz").is_none());
     }
 
     #[test]
