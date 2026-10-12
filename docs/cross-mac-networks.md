@@ -69,8 +69,9 @@ reconciler rotates any key older than `overlay_key_rotation_days` (policy, defau
 key stays valid until the next rotation:
 
 1. each member Mac's agent writes both keys within a heartbeat;
-2. each switch reloads them within 10 s and seals with the new one;
-3. switches still open datagrams under either key, so traffic keeps flowing while Macs roll over.
+2. each switch reloads them within 10 s, opens datagrams under either key at once, and keeps sealing with the old
+   key for another 60 s;
+3. by then every Mac opens the new key, so switches seal with it and traffic keeps flowing while Macs roll over.
 
 A datagram's epoch is authenticated, so it cannot be moved to another key. Rotating twice retires a key completely.
 

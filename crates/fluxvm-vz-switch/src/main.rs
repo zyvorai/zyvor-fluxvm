@@ -102,9 +102,13 @@ fn main() {
 fn load_keys(
     key_file: &std::path::Path,
 ) -> Option<Vec<(u32, Box<dyn fluxvm_vz_switch::overlay::FrameCipher>)>> {
+    ciphers(&std::fs::read_to_string(key_file).ok()?)
+}
+
+/// The ciphers for a key file's text, the current first.
+fn ciphers(text: &str) -> Option<Vec<(u32, Box<dyn fluxvm_vz_switch::overlay::FrameCipher>)>> {
     use fluxvm_vz_switch::overlay::{AesGcm, FrameCipher, parse_keys};
-    let text = std::fs::read_to_string(key_file).ok()?;
-    let keys = parse_keys(&text)?;
+    let keys = parse_keys(text)?;
     Some(
         keys.into_iter()
             .map(|(e, k)| (e, Box::new(AesGcm::new(&k)) as Box<dyn FrameCipher>))
@@ -122,14 +126,21 @@ fn watch_overlay(
     ov: std::sync::Arc<fluxvm_vz_switch::overlay::Overlay>,
 ) {
     std::thread::spawn(move || {
+        // Compare the file's text, not just the epochs: a bare key file replaced by hand keeps epoch 0. The first pass
+        // reloads unconditionally (same keys, windows kept), so a change right after startup is not missed.
+        let mut loaded: Option<String> = None;
         loop {
             std::thread::sleep(Duration::from_secs(10));
-            if let Some(keys) = load_keys(&key_file) {
+            if let Ok(text) = std::fs::read_to_string(&key_file)
+                && loaded.as_deref() != Some(text.as_str())
+                && let Some(keys) = ciphers(&text)
+            {
                 let epochs: Vec<u32> = keys.iter().map(|(e, _)| *e).collect();
-                if epochs != ov.epochs() {
-                    eprintln!("fluxvm-vz-switch: {network} keys now at epochs {epochs:?}");
-                    ov.set_keys(keys);
+                if loaded.is_some() || epochs != ov.epochs() {
+                    eprintln!("fluxvm-vz-switch: {network} keys reloaded, epochs {epochs:?}");
                 }
+                ov.set_keys(keys);
+                loaded = Some(text);
             }
             let Some(path) = &config else {
                 continue;

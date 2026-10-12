@@ -11,7 +11,9 @@
 //!   associated data is the 24-byte header plus the network name, so a datagram cannot be replayed into another
 //!   network that happens to share a key, nor have its epoch or time altered.
 //! - **Keys and rotation.** A switch seals with its current key and opens with the current or the previous one (by
-//!   epoch), so a rotation rolls across Macs without dropping traffic. Keys reload from the key file while running.
+//!   epoch). After a rotation it keeps sealing with the old key for [`SEAL_DELAY`] while already opening both, so
+//!   every peer has the new key before it is used and the rotation rolls across Macs without dropping traffic. Keys
+//!   reload from the key file while running.
 //! - **Replay.** Each (epoch, sender) has a 1024-packet sliding window, and a datagram whose send time is more than
 //!   [`MAX_SKEW_SECS`] away from the receiver's clock is dropped, so a stream captured earlier cannot be replayed to a
 //!   switch that restarted (its windows are empty). Macs need roughly synchronised clocks (NTP).
@@ -33,6 +35,9 @@ use std::time::{Duration, Instant};
 
 pub const MAGIC: &[u8; 4] = b"FXO2";
 pub const HEADER: usize = 24;
+/// After a rotation, how long a switch keeps sealing with the old key: longer than a node heartbeat (10 s) plus the
+/// switch's key reload (10 s), so every peer can open the new key before it is used.
+pub const SEAL_DELAY: Duration = Duration::from_secs(60);
 /// Largest accepted difference between a datagram's send time and the receiver's clock.
 pub const MAX_SKEW_SECS: i64 = 120;
 pub const TAG: usize = 16;
@@ -210,6 +215,9 @@ pub struct Overlay {
     peers: RwLock<Vec<SocketAddr>>,
     /// Keys by epoch, the current (sealing) one first.
     keys: RwLock<Vec<(u32, Arc<dyn FrameCipher>)>>,
+    /// After a rotation, keep sealing with this (the old) epoch until the instant, so peers that have not loaded the
+    /// new key yet can still open what this switch sends.
+    seal_hold: Mutex<Option<(u32, Instant)>>,
     sender: u32,
     counter: AtomicU64,
     windows: Mutex<HashMap<(u32, u32), ReplayWindow>>,
@@ -229,6 +237,7 @@ impl Overlay {
         Self {
             peers: RwLock::new(cfg.peers.clone()),
             keys: RwLock::new(keys.into_iter().map(|(e, k)| (e, Arc::from(k))).collect()),
+            seal_hold: Mutex::new(None),
             cfg,
             sender: random_u64() as u32,
             // A random start (below 2^62, so it never wraps) keeps nonces apart even if two starts draw one sender id.
@@ -257,8 +266,15 @@ impl Overlay {
         Ok(o)
     }
 
-    /// Replaces the keys (a rotation): the first seals from now on, any of them opens.
+    /// Replaces the keys (a rotation): any of them opens at once; the first seals after [`SEAL_DELAY`] if the
+    /// previous sealing key is still among them (peers pick the new key up within a heartbeat and a reload), else at
+    /// once.
     pub fn set_keys(&self, keys: Vec<(u32, Box<dyn FrameCipher>)>) {
+        self.set_keys_with_delay(keys, SEAL_DELAY);
+    }
+
+    /// [`Overlay::set_keys`] with a given delay before the new key seals.
+    pub fn set_keys_with_delay(&self, keys: Vec<(u32, Box<dyn FrameCipher>)>, delay: Duration) {
         let keys: Vec<(u32, Arc<dyn FrameCipher>)> =
             keys.into_iter().map(|(e, k)| (e, Arc::from(k))).collect();
         let live: Vec<u32> = keys.iter().map(|(e, _)| *e).collect();
@@ -266,6 +282,15 @@ impl Overlay {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .retain(|(epoch, _), _| live.contains(epoch));
+        let hold = match self.key(None) {
+            Some((old, _))
+                if live.first() != Some(&old) && live.contains(&old) && !delay.is_zero() =>
+            {
+                Some((old, Instant::now() + delay))
+            }
+            _ => None,
+        };
+        *self.seal_hold.lock().unwrap_or_else(|e| e.into_inner()) = hold;
         *self.keys.write().unwrap_or_else(|e| e.into_inner()) = keys;
     }
 
@@ -279,11 +304,21 @@ impl Overlay {
             .collect()
     }
 
+    /// The key for `epoch`, or with `None` the one to seal with (the held old one right after a rotation).
     fn key(&self, epoch: Option<u32>) -> Option<(u32, Arc<dyn FrameCipher>)> {
+        // Lock order: `seal_hold` is never held while taking `keys`.
+        let want =
+            epoch.or_else(
+                || match *self.seal_hold.lock().unwrap_or_else(|e| e.into_inner()) {
+                    Some((e, until)) if Instant::now() < until => Some(e),
+                    _ => None,
+                },
+            );
         let keys = self.keys.read().unwrap_or_else(|e| e.into_inner());
+        let found = want.and_then(|w| keys.iter().find(|(e, _)| *e == w));
         match epoch {
-            None => keys.first().cloned(),
-            Some(want) => keys.iter().find(|(e, _)| *e == want).cloned(),
+            Some(_) => found.cloned(),
+            None => found.or(keys.first()).cloned(),
         }
     }
 
@@ -610,19 +645,25 @@ pub(crate) mod tests {
             b.open(&a.seal(&frame(B, A)).unwrap(), a_addr, &[B])
                 .is_some()
         );
-        // b rotates first: it seals with epoch 2 and still opens a's epoch-1 datagrams.
+        // b rotates first: it still opens a's epoch-1 datagrams, and keeps sealing with epoch 1 for a while, so a
+        // (not rotated yet) still opens what b sends.
         b.set_keys(vec![k(2, 2), k(1, 1)]);
         assert_eq!(b.epochs(), vec![2, 1]);
         assert!(
             b.open(&a.seal(&frame(B, A)).unwrap(), a_addr, &[B])
                 .is_some()
         );
-        // a has not rotated yet, so b's epoch-2 datagram is refused until it does.
+        assert!(
+            a.open(&b.seal(&frame(A, B)).unwrap(), b_addr, &[A])
+                .is_some()
+        );
+        // Once b seals with epoch 2, a refuses it until a rotates too.
+        b.set_keys_with_delay(vec![k(2, 2), k(1, 1)], Duration::ZERO);
         assert!(
             a.open(&b.seal(&frame(A, B)).unwrap(), b_addr, &[A])
                 .is_none()
         );
-        a.set_keys(vec![k(2, 2), k(1, 1)]);
+        a.set_keys_with_delay(vec![k(2, 2), k(1, 1)], Duration::ZERO);
         assert!(
             a.open(&b.seal(&frame(A, B)).unwrap(), b_addr, &[A])
                 .is_some()

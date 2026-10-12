@@ -223,6 +223,9 @@ impl OverlayNet {
     }
 }
 
+/// Shortest time between two key rotations of one network.
+pub const MIN_ROTATION_MINUTES: i64 = 5;
+
 /// First UDP port handed out to overlays.
 pub const OVERLAY_PORT_BASE: u16 = 47100;
 /// Encapsulation adds 60 bytes over IPv4; 1400 also leaves room for IPv6 and tunnels in the underlay.
@@ -1004,7 +1007,16 @@ impl TenancyState {
         name: &str,
         now: DateTime<Utc>,
     ) -> Result<OverlayNet, TenancyError> {
-        self.overlay_for(caller, name)?;
+        let o = self.overlay_for(caller, name)?;
+        // Switches keep sealing with the old key for a minute after loading a new one, and reach peers within about
+        // 20 s; a second rotation inside that would retire a key some Mac may still be sealing with.
+        if let Some(at) = o.rotated_at
+            && now - at < Duration::minutes(MIN_ROTATION_MINUTES)
+        {
+            return Err(TenancyError::Overlay(format!(
+                "network {name:?} was rotated less than {MIN_ROTATION_MINUTES} minutes ago"
+            )));
+        }
         let key = random_key_hex().ok_or_else(|| {
             TenancyError::Overlay("could not read random bytes for the key".into())
         })?;
@@ -1634,6 +1646,15 @@ mod tests {
         );
         assert_eq!(s.overlays["lab"].epoch, 3);
         assert_eq!(s.overlays["lab"].previous.as_ref().unwrap().0, 2);
+        // Not twice within a few minutes.
+        assert!(
+            s.rotate_overlay(
+                &Caller::Admin,
+                "lab",
+                t0() + Duration::days(32) + Duration::minutes(1)
+            )
+            .is_err()
+        );
         // A tenant cannot rotate someone else's network.
         assert!(
             s.rotate_overlay(&Caller::Tenant("x".into()), "lab", t0())

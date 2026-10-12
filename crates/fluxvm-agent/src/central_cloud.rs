@@ -136,10 +136,10 @@ pub(super) async fn reconcile_once(fleet: &Fleet) -> Value {
     let rotated = {
         let mut t = fleet.tenancy.lock().await;
         let days = t.policy.overlay_key_rotation_days;
-        let r = if days > 0 {
-            t.rotate_due_overlays(ChronoDuration::days(days), Utc::now())
-        } else {
-            Vec::new()
+        // `try_days`: an absurd policy value must not panic the reconciler (`days` panics out of range).
+        let r = match ChronoDuration::try_days(days) {
+            Some(max_age) if days > 0 => t.rotate_due_overlays(max_age, Utc::now()),
+            _ => Vec::new(),
         };
         if !r.is_empty() {
             tracing::info!(networks = ?r, "overlay keys rotated");
@@ -151,7 +151,7 @@ pub(super) async fn reconcile_once(fleet: &Fleet) -> Value {
         let mut t = fleet.tenancy.lock().await;
         let days = t.policy.ledger_retention_days;
         let n = if days > 0 {
-            t.compact(Utc::now() - ChronoDuration::days(days))
+            ChronoDuration::try_days(days).map_or(0, |d| t.compact(Utc::now() - d))
         } else {
             0
         };
@@ -992,7 +992,12 @@ pub(super) async fn rotate_overlay(
     let mut t = fleet.tenancy.lock().await;
     let net = t
         .rotate_overlay(&caller, &name, Utc::now())
-        .map_err(|e| not_found(e.to_string()))?;
+        .map_err(|e| match &e {
+            crate::tenancy::TenancyError::Overlay(m) if m.starts_with("no network") => {
+                not_found(e.to_string())
+            }
+            _ => tenancy_error(e),
+        })?;
     fleet.persist_tenancy(&t);
     tracing::info!(network = %name, epoch = net.epoch, "overlay key rotated");
     Ok(Json(net.public_json()))

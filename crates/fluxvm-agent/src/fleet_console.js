@@ -307,6 +307,10 @@ async function networks() {
       el('td', { class: 'muted' }, members || 'no Macs yet'),
       el('td', {}, n.mtu),
       el('td', { class: 'actions' }, el('button', {
+        title: 'key epoch ' + n.key_epoch + ', set ' + fmtTime(n.key_rotated_at),
+        onclick: () => act(() => api('POST', '/fleet/overlays/' + encodeURIComponent(n.name) + '/rotate'),
+          'Issue a new key for ' + n.name + '? Member Macs switch over within a minute or two without dropping traffic.'),
+      }, 'Rotate key'), el('button', {
         class: 'danger',
         onclick: () => act(() => api('DELETE', '/fleet/overlays/' + encodeURIComponent(n.name)),
           'Delete network ' + n.name + '? Guests on it lose their links to other Macs.'),
@@ -333,10 +337,12 @@ async function usage() {
 async function downloadCsv() {
   try {
     const csv = await api('GET', '/fleet/usage?format=csv', { text: true });
-    const a = el('a', { href: URL.createObjectURL(new Blob([csv], { type: 'text/csv' })), download: 'fluxvm-usage.csv' });
+    const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv' }));
+    const a = el('a', { href: url, download: 'fluxvm-usage.csv' });
     document.body.append(a);
     a.click();
     a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 60000);
   } catch (e) {
     showError(e);
   }
@@ -346,6 +352,8 @@ async function downloadCsv() {
 
 async function refresh() {
   clearTimeout(timer);
+  // Offer to forget the token even when it fails (a disabled tenant gets 403, not the sign-in form).
+  $('logout').hidden = !sessionStorage.getItem(TOKEN_KEY);
   await haStatus();
   try {
     await detectRole();
@@ -356,6 +364,8 @@ async function refresh() {
   } catch (e) {
     showError(e);
   }
+  // Another refresh (a button, an action) may have run meanwhile and set its own timer: keep only one loop.
+  clearTimeout(timer);
   if ($('auto').checked) timer = setTimeout(refresh, 10000);
 }
 
