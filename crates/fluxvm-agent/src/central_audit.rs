@@ -37,6 +37,9 @@ pub(super) struct AuditEvent {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target: Option<String>,
     pub status: u16,
+    /// The tenant's named API key that made the call (`None`: the primary token, or the operator).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
 }
 
 pub(super) struct AuditLog {
@@ -131,6 +134,7 @@ pub(super) fn event(
     path: String,
     target: Option<String>,
     status: StatusCode,
+    key: Option<String>,
 ) -> AuditEvent {
     let (actor, tenant) = match caller {
         Caller::Admin => ("operator".to_owned(), None),
@@ -144,6 +148,7 @@ pub(super) fn event(
         path,
         target,
         status: status.as_u16(),
+        key,
     }
 }
 
@@ -306,6 +311,7 @@ mod tests {
             path: path.into(),
             target: None,
             status: 201,
+            key: None,
         }
     }
 

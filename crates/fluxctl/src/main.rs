@@ -1129,6 +1129,15 @@ enum FleetCommand {
         #[arg(long)]
         tenant: Option<String>,
     },
+    /// A tenant's named API keys: list (default), create, revoke. Keys are made and revoked with the tenant's primary
+    /// token (or by the operator with `--tenant`).
+    Keys {
+        /// Operator only: whose keys.
+        #[arg(long, global = true)]
+        tenant: Option<String>,
+        #[command(subcommand)]
+        command: Option<FleetKeyCommand>,
+    },
     /// The image catalog: list (default), add or remove (operator).
     Images {
         #[command(subcommand)]
@@ -1254,6 +1263,25 @@ enum FleetCommand {
         timeout: Option<u64>,
         #[arg(trailing_var_arg = true, required = true)]
         command: Vec<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum FleetKeyCommand {
+    List,
+    /// Create a key; prints its token once.
+    Create {
+        name: String,
+        /// Days until it stops working (default 90; 0 never expires).
+        #[arg(long, default_value_t = 90)]
+        expires_days: i64,
+        /// It can only read.
+        #[arg(long)]
+        read_only: bool,
+    },
+    /// Revoke a key by name or id; anything using it stops working at once.
+    Revoke {
+        key: String,
     },
 }
 

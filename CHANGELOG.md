@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+### Added: named API keys per tenant
+- A tenant can hold up to 50 named keys besides its primary token (`GET/POST /fleet/tenants/me/keys`,
+  `DELETE .../keys/{id|name}`; `fluxctl fleet keys`; an API keys page in the console). Each has a name, an optional
+  expiry and a read-only flag, is shown once and stored only as a hash, and is revoked on its own. The activity log
+  names the key behind each action. Only the primary token (or the operator) creates and revokes keys, so a leaked CI
+  key cannot mint more; a read-only key is refused every change with 403.
+  Tried against the three-Mac simulation (read-only, expiry-free and revoked keys, key-minting-key and
+  `/fleet/register` attempts all refused as intended); not on real Macs.
+
 
 ### Added: live VM screen and an activity log, in the console and `fluxctl fleet`
 - `GET /fleet/vms/{node}/{id}/screen` returns a picture of a VM's display through central (the owner or the operator
@@ -37,7 +46,7 @@
   start), each Mac card carries vCPU and memory use bars, tiles lift on hover (not with Reduce Motion), empty states are
   calmer, VMs without a catalog image show their disk name, and the theme button says what it is ("Theme: Auto").
 - Fixed: "Healthy Macs 3 of 3" drew its full bar red, as if over quota.
-=======
+
 ### Added: `scripts/bench-macos-pool.sh`
 - Times macOS warm-pool checkout and return over N rounds (min/median/max) and samples runner RSS, against a local
   `fluxctl serve` on a Mac. Checked against a stub server only; not yet run against real guests.

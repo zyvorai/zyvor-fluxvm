@@ -10,7 +10,8 @@
 use crate::fleet_client::{self, HttpError, call, query};
 use crate::output::OutputFormat;
 use crate::{
-    FleetCommand, FleetImageCommand, FleetLeaseCommand, FleetNetworkCommand, FleetTenantCommand,
+    FleetCommand, FleetImageCommand, FleetKeyCommand, FleetLeaseCommand, FleetNetworkCommand,
+    FleetTenantCommand,
 };
 use anstyle::{AnsiColor, Style};
 use anyhow::{Context, Result, bail};
@@ -645,7 +646,10 @@ async fn dispatch(
                 };
                 t.row(vec![
                     ct(time(e, "time").map(rel).unwrap_or_default(), Tone::Dim),
-                    c(s(e, "actor")),
+                    c(match s(e, "key") {
+                        "" => s(e, "actor").to_owned(),
+                        k => format!("{} (key {k})", s(e, "actor")),
+                    }),
                     c(format!("{} {}{target}", s(e, "method"), s(e, "path"))),
                     if code < 400 {
                         ct("done", Tone::Ok)
@@ -657,6 +661,7 @@ async fn dispatch(
             t.print(&out);
             Ok(())
         }
+        FleetCommand::Keys { tenant, command } => keys(central, token, &out, tenant, command).await,
         FleetCommand::Images { command } => images(central, token, &out, command).await,
         FleetCommand::Networks { command } => networks(central, token, &out, command).await,
         FleetCommand::Tenant { command } => tenant(central, token, &out, command).await,
@@ -1609,6 +1614,106 @@ fn launched(out: &Out, v: &Value, detail: Option<String>) {
         "uname -a"
     };
     out.next(format!("fluxctl fleet run {name} -- {probe}"));
+}
+
+// ---- API keys -----------------------------------------------------------------------------------------------------
+
+async fn keys(
+    central: &str,
+    token: Option<&str>,
+    out: &Out,
+    tenant: Option<String>,
+    command: Option<FleetKeyCommand>,
+) -> Result<()> {
+    let owner = tenant.unwrap_or_else(|| "me".to_owned());
+    let base = format!("/fleet/tenants/{}/keys", esc(&owner));
+    match command.unwrap_or(FleetKeyCommand::List) {
+        FleetKeyCommand::List => {
+            let v = get(central, token, &base).await?;
+            if !out.human {
+                return out.json(&v);
+            }
+            let list = items(&v);
+            if list.is_empty() {
+                println!("No API keys: only the primary token.");
+                out.next("fluxctl fleet keys create ci-github");
+                return Ok(());
+            }
+            let mut t = Table::new(vec!["NAME", "ACCESS", "LAST USED", "EXPIRES", "ID"]);
+            for k in &list {
+                let expires = time(k, "expires_at");
+                let expired = expires.is_some_and(|e| e <= Utc::now());
+                t.row(vec![
+                    c(s(k, "name")),
+                    if k.get("read_only").and_then(Value::as_bool) == Some(true) {
+                        ct("read-only", Tone::Dim)
+                    } else {
+                        c("full")
+                    },
+                    ct(
+                        time(k, "last_used_at")
+                            .map(rel)
+                            .unwrap_or_else(|| "never".into()),
+                        Tone::Dim,
+                    ),
+                    match expires {
+                        _ if expired => ct("expired", Tone::Bad),
+                        Some(e) => c(rel(e)),
+                        None => ct("never", Tone::Dim),
+                    },
+                    ct(s(k, "id"), Tone::Dim),
+                ]);
+            }
+            t.print(out);
+            Ok(())
+        }
+        FleetKeyCommand::Create {
+            name,
+            expires_days,
+            read_only,
+        } => {
+            let mut body = json!({"name": name, "read_only": read_only});
+            if expires_days > 0 {
+                body["expires_in_days"] = json!(expires_days);
+            }
+            let v = call(central, token, Method::POST, &base, Some(body)).await?;
+            if !out.human {
+                return out.json(&v);
+            }
+            let k = v.get("key").cloned().unwrap_or_default();
+            out.done(format!(
+                "Created API key {}{}{}.",
+                out.bold(s(&k, "name")),
+                if read_only { ", read-only" } else { "" },
+                time(&k, "expires_at")
+                    .map(|e| format!(", expires {}", local(e)))
+                    .unwrap_or_default()
+            ));
+            println!();
+            println!("  {}  {}", out.dim("Key"), out.bold(s(&v, "token")));
+            println!();
+            println!("  Store it now: it is shown only this once. Use it as FLUXVM_AGENT_TOKEN.");
+            Ok(())
+        }
+        FleetKeyCommand::Revoke { key } => {
+            let v = call(
+                central,
+                token,
+                Method::DELETE,
+                &format!("{base}/{}", esc(&key)),
+                None,
+            )
+            .await?;
+            if !out.human {
+                return out.json(&v);
+            }
+            out.done(format!(
+                "Revoked {}: anything using it stopped working.",
+                s(v.get("revoked").unwrap_or(&Value::Null), "name")
+            ));
+            Ok(())
+        }
+    }
 }
 
 // ---- images -------------------------------------------------------------------------------------------------------
