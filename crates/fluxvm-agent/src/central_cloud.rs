@@ -1567,9 +1567,19 @@ pub(super) async fn vm_logs(
         .send()
         .await?;
     let status = resp.status();
-    // The node streams; without `follow` the stream ends after the last line. Cap what is read.
-    let bytes = resp.bytes().await?;
-    let text = String::from_utf8_lossy(&bytes[..bytes.len().min(4 << 20)]).into_owned();
+    // The node streams; without `follow` (it defaults to off) the stream ends after the last line. Only the last 4 MiB
+    // is kept in memory however much the node sends; the timeout bounds how long it may send.
+    const KEEP: usize = 4 << 20;
+    let mut resp = resp;
+    let mut buf: Vec<u8> = Vec::new();
+    while let Some(chunk) = resp.chunk().await? {
+        buf.extend_from_slice(&chunk);
+        if buf.len() > 2 * KEEP {
+            buf.drain(..buf.len() - KEEP);
+        }
+    }
+    let start = buf.len().saturating_sub(KEEP);
+    let text = String::from_utf8_lossy(&buf[start..]).into_owned();
     if !status.is_success() {
         return Err(AppError(
             StatusCode::BAD_GATEWAY,
@@ -1613,7 +1623,11 @@ pub(super) async fn exec_vm(
     let target = node_by_name(&fleet, &node).await?;
     let resp = fleet
         .http
-        .post(format!("{}/v1/vms/{id}/agent", target.fluxvm_url))
+        .post(format!(
+            "{}/v1/vms/{}/agent",
+            target.fluxvm_url,
+            path_segment(&id)
+        ))
         .json(&body)
         .send()
         .await?;

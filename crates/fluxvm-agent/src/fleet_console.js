@@ -1465,7 +1465,7 @@ function setControl(on) {
   // The full window lives at the top of the page (the inspector would trap it under its own stacking order); the
   // inspector shows a stub meanwhile.
   if (on && !screen.backdrop) {
-    screen.backdrop = h('div', { class: 'screen-backdrop', 'aria-hidden': 'true' });
+    screen.backdrop = h('div', { class: 'screen-backdrop', 'aria-hidden': 'true', onclick: () => setControl(false) });
     screen.stub = h('section', {}, h('h3', {}, 'Screen'), h('p', { class: 'hint' }, 'You are controlling this VM in the large view.'));
     if (screen.el.isConnected) screen.el.replaceWith(screen.stub);
     document.body.append(screen.backdrop, screen.el);
@@ -1529,14 +1529,38 @@ async function flushInput() {
 const NAMED = { Enter: 'return', Tab: 'tab', Escape: 'escape', Backspace: 'backspace', Delete: 'delete', ArrowUp: 'up', ArrowDown: 'down',
   ArrowLeft: 'left', ArrowRight: 'right', Home: 'home', End: 'end', PageUp: 'page_up', PageDown: 'page_down', ' ': 'space' };
 
+// The guest types printable ASCII, newline and tab (US layout); anything else would fail the whole batch.
+const typable = (t) => /^[\x20-\x7e\n\t]*$/.test(t);
+
+/** The key a shortcut names: the physical letter or digit, so Option+E is `e` rather than the accent it would type. */
+function shortcutKey(e) {
+  if (/^Key[A-Z]$/.test(e.code)) return e.code.slice(3).toLowerCase();
+  if (/^Digit[0-9]$/.test(e.code)) return e.code.slice(5);
+  return e.key.length === 1 && typable(e.key) && e.key !== ' ' ? e.key.toLowerCase() : null;
+}
+
 function wireScreenInput(img) {
   const at = (e, action) => {
-    if (!screen.control) return;
+    if (!screen.control) return null;
     const p = screenPoint(img, e);
     if (p) sendInput([{ action, ...p }]);
+    return p;
   };
-  img.addEventListener('click', (e) => { if (e.detail <= 1) at(e, 'click'); });
-  img.addEventListener('dblclick', (e) => at(e, 'double_click'));
+  // A double click would otherwise reach the guest as a click and then a double click (three clicks); a single click
+  // waits briefly to see whether a second one follows.
+  let pendingClick = null;
+  img.addEventListener('click', (e) => {
+    if (!screen.control || e.detail > 1) return;
+    const p = screenPoint(img, e);
+    if (!p) return;
+    clearTimeout(pendingClick);
+    pendingClick = setTimeout(() => { pendingClick = null; if (screen.control) sendInput([{ action: 'click', ...p }]); }, 250);
+  });
+  img.addEventListener('dblclick', (e) => {
+    clearTimeout(pendingClick);
+    pendingClick = null;
+    at(e, 'double_click');
+  });
   img.addEventListener('contextmenu', (e) => { if (screen.control) { e.preventDefault(); at(e, 'right_click'); } });
   let wheelAt = 0;
   img.addEventListener('wheel', (e) => {
@@ -1549,14 +1573,21 @@ function wireScreenInput(img) {
     sendInput([{ action: 'scroll', dx: notches(e.deltaX), dy: notches(e.deltaY), ...p }]);
   }, { passive: false });
   img.addEventListener('keydown', (e) => {
-    if (!screen.control || ['Shift', 'Control', 'Alt', 'Meta', 'CapsLock'].includes(e.key)) return;
+    if (!screen.control) return;
+    // Every key belongs to the VM while controlling: Escape, / and ⌘K must not reach the console's own shortcuts.
+    e.stopPropagation();
+    if (e.isComposing || ['Shift', 'Control', 'Alt', 'Meta', 'CapsLock', 'Dead', 'Unidentified', 'Process'].includes(e.key)) return;
     e.preventDefault();
     const modifiers = [e.metaKey && 'command', e.ctrlKey && 'control', e.altKey && 'option', e.shiftKey && 'shift'].filter(Boolean);
     const plain = !e.metaKey && !e.ctrlKey && !e.altKey;
-    if (e.key.length === 1 && plain) { sendInput([{ action: 'type', text: e.key }]); return; }
+    if (e.key.length === 1 && plain) {
+      if (typable(e.key)) sendInput([{ action: 'type', text: e.key }]);
+      return;
+    }
     const named = NAMED[e.key] || (/^F([1-9]|1[0-2])$/.test(e.key) ? e.key.toLowerCase() : null);
     if (named) { sendInput([{ action: 'key', key: named, modifiers: plain ? modifiers.filter((m) => m === 'shift') : modifiers }]); return; }
-    if (e.key.length === 1) sendInput([{ action: 'key', key: e.key.toLowerCase(), modifiers }]);
+    const key = plain ? null : shortcutKey(e);
+    if (key) sendInput([{ action: 'key', key, modifiers }]);
   });
 }
 
@@ -1595,8 +1626,10 @@ function screenPanel(v, running) {
     const keyBtn = (label, key, modifiers) => h('button', { type: 'button', class: 'icon', onclick: () => sendInput([{ action: 'key', key, modifiers: modifiers || [] }]) }, label);
     screen.bar = h('form', { class: 'row', hidden: true, style: { marginTop: '8px' }, onsubmit: (e) => {
       e.preventDefault();
-      const text = screen.typeIn.value;
-      if (text) sendInput([{ action: 'type', text: text.slice(0, 4096) }]);
+      const text = screen.typeIn.value.replace(/\r\n?/g, '\n');
+      if (!text) return;
+      if (!typable(text)) { toast('Only plain ASCII text, newlines and tabs can be typed into the VM (US keyboard).', true); return; }
+      sendInput([{ action: 'type', text: text.slice(0, 4096) }]);
       screen.typeIn.value = '';
     } }, screen.typeIn, h('button', { type: 'submit' }, 'Type'),
     keyBtn('Return', 'return'), keyBtn('Esc', 'escape'), keyBtn('Tab', 'tab'), keyBtn('⌘ Space', 'space', ['command']));

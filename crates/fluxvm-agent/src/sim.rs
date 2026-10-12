@@ -63,11 +63,26 @@ impl SimNode {
             .route("/v1/vms/{id}/screenshot", get(screenshot))
             .route("/v1/vms/{id}/input", post(input))
             .route("/v1/vms/{id}/logs", get(logs))
-            .route("/v1/vms/{id}/start", post(|s, p| power(s, p, "running")))
-            .route("/v1/vms/{id}/restart", post(|s, p| power(s, p, "running")))
-            .route("/v1/vms/{id}/resume", post(|s, p| power(s, p, "running")))
-            .route("/v1/vms/{id}/stop", post(|s, p| power(s, p, "stopped")))
-            .route("/v1/vms/{id}/pause", post(|s, p| power(s, p, "paused")))
+            .route(
+                "/v1/vms/{id}/start",
+                post(|s: State<SimNode>, p: Path<String>| power(s, p, "running")),
+            )
+            .route(
+                "/v1/vms/{id}/restart",
+                post(|s: State<SimNode>, p: Path<String>| power(s, p, "running")),
+            )
+            .route(
+                "/v1/vms/{id}/resume",
+                post(|s: State<SimNode>, p: Path<String>| power(s, p, "running")),
+            )
+            .route(
+                "/v1/vms/{id}/stop",
+                post(|s: State<SimNode>, p: Path<String>| power(s, p, "stopped")),
+            )
+            .route(
+                "/v1/vms/{id}/pause",
+                post(|s: State<SimNode>, p: Path<String>| power(s, p, "paused")),
+            )
             .with_state(self.clone())
     }
 

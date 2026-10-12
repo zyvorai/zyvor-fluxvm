@@ -1028,17 +1028,18 @@ async fn dispatch(
         FleetCommand::Resume { vm } => power(central, token, &out, &vm, "resume", true).await,
         FleetCommand::Logs { vm, lines } => {
             let (node, id, _) = resolve_vm(central, token, &vm).await?;
-            let v = get(
+            // The log is text; read it as bytes so a log that happens to parse as JSON is not reinterpreted.
+            let (_, bytes) = fleet_client::get_bytes(
                 central,
                 token,
                 &format!("/fleet/vms/{}/{}/logs?lines={lines}", esc(&node), esc(&id)),
             )
             .await?;
-            match v {
-                Value::String(text) => print!("{text}"),
-                other if !out.human => out.json(&other)?,
-                other => println!("{other}"),
+            let text = String::from_utf8_lossy(&bytes);
+            if !out.human {
+                return out.json(&json!({"node": node, "id": id, "log": text}));
             }
+            print!("{text}");
             Ok(())
         }
         FleetCommand::Images { command } => images(central, token, &out, command).await,
