@@ -11,6 +11,10 @@
 
 #[path = "central_cloud.rs"]
 mod cloud;
+#[path = "central_ha.rs"]
+mod ha_rt;
+
+pub use ha_rt::HaHandle;
 
 use crate::tenancy::{Caller, TenancyState};
 use axum::{
@@ -209,6 +213,8 @@ struct Fleet {
     /// `tenancy` first, then `nodes`.
     tenancy: Arc<Mutex<TenancyState>>,
     tenancy_path: Option<PathBuf>,
+    /// Leader election when several centrals share a store (`--ha-redis`); `None` is a single central.
+    ha: Option<Arc<ha_rt::HaRuntime>>,
 }
 
 impl Fleet {
@@ -217,6 +223,16 @@ impl Fleet {
         if let (Some(path), Some(lock)) = (&self.tenancy_path, &self.lock_path) {
             persist_json(path, lock, state);
         }
+        if let Some(ha) = &self.ha
+            && let Ok(json) = serde_json::to_string(state)
+        {
+            ha.mirror("tenancy", json);
+        }
+    }
+
+    /// Whether this central serves fleet requests (always, without HA).
+    fn leading(&self) -> bool {
+        self.ha.as_ref().is_none_or(|h| h.is_leader())
     }
 }
 
@@ -241,8 +257,14 @@ fn constant_time_eq(a: &str, b: &str) -> bool {
 ///   but only while no tenant exists: once one does, anonymous callers and unknown tokens get a 401. Central refuses
 ///   to create tenants without `--token`.
 async fn auth_middleware(State(fleet): State<Fleet>, mut req: Request, next: Next) -> Response {
-    if req.uri().path() == "/healthz" {
+    let path = req.uri().path();
+    if path == "/healthz" || path == "/fleet/ha" || path == "/fleet/ha/leader" {
         return next.run(req).await;
+    }
+    if let Some(ha) = &fleet.ha
+        && !ha.is_leader()
+    {
+        return ha_rt::not_leader(ha);
     }
     let presented = req
         .headers()
@@ -404,9 +426,16 @@ pub struct CentralConfig {
     /// How often to reconcile the VM ledger against every node and end expired leases (`None`: only on
     /// `POST /fleet/reconcile`). Needs a Tokio runtime when `router` is called.
     pub reconcile_interval: Option<std::time::Duration>,
+    /// Run as one of several centrals sharing a store; see [`crate::ha`].
+    pub ha: Option<crate::ha::HaConfig>,
 }
 
 pub fn router(cfg: CentralConfig) -> Router {
+    router_with_handle(cfg).0
+}
+
+/// [`router`], plus a handle on this central's leader election when HA is on.
+pub fn router_with_handle(cfg: CentralConfig) -> (Router, Option<HaHandle>) {
     let persist_path = cfg.state_dir.join("fleet-nodes.json");
     let lock_path = cfg.state_dir.join("fleet-nodes.lock");
     let tenancy_path = cfg.state_dir.join("fleet-tenancy.json");
@@ -432,13 +461,26 @@ pub fn router(cfg: CentralConfig) -> Router {
         token: cfg.token,
         tenancy: Arc::new(Mutex::new(tenancy)),
         tenancy_path: Some(tenancy_path),
+        ha: None,
     };
+    let mut fleet = fleet;
+    let mut handle = None;
+    if let Some(ha_cfg) = cfg.ha {
+        let (rt, rx) = ha_rt::HaRuntime::new(ha_cfg);
+        fleet.ha = Some(rt.clone());
+        handle = Some(HaHandle(rt.clone()));
+        if tokio::runtime::Handle::try_current().is_ok() {
+            ha_rt::spawn(fleet.clone(), rt, rx);
+        }
+    }
     if let Some(every) = cfg.reconcile_interval
         && tokio::runtime::Handle::try_current().is_ok()
     {
         cloud::spawn_reconciler(fleet.clone(), every);
     }
-    Router::new()
+    let app = Router::new()
+        .route("/fleet/ha", get(ha_rt::ha_status))
+        .route("/fleet/ha/leader", get(ha_rt::ha_leader_check))
         .route("/healthz", get(|| async { Json(json!({"ok": true})) }))
         .route("/fleet/register", post(register))
         .route("/fleet/nodes", get(list_nodes))
@@ -489,7 +531,8 @@ pub fn router(cfg: CentralConfig) -> Router {
             fleet.clone(),
             auth_middleware,
         ))
-        .with_state(fleet)
+        .with_state(fleet);
+    (app, handle)
 }
 
 /// Insert/update a node from a heartbeat. A brand-new node starts
@@ -2303,6 +2346,7 @@ mod tests {
             token: None,
             tenancy: Arc::new(Mutex::new(TenancyState::default())),
             tenancy_path: None,
+            ha: None,
         }
     }
 

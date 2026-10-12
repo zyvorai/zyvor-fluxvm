@@ -114,6 +114,9 @@ pub(super) fn spawn_reconciler(fleet: Fleet, every: std::time::Duration) {
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             tick.tick().await;
+            if !fleet.leading() {
+                continue;
+            }
             let report = reconcile_once(&fleet).await;
             tracing::debug!(%report, "fleet reconcile");
         }
@@ -998,6 +1001,7 @@ mod tests {
             token: Some("admin-token".into()),
             tenancy: Arc::new(Mutex::new(tenancy)),
             tenancy_path: None,
+            ha: None,
         }
     }
 
