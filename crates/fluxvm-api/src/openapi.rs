@@ -297,6 +297,12 @@ fn ops() -> Vec<Op> {
         op("delete", "/v1/branches/{id}", "Delete a branch", SNAPSHOTS),
         op(
             "post",
+            "/v1/branches/prune",
+            "Remove branches by policy (dry run unless dry_run is false)",
+            SNAPSHOTS,
+        ),
+        op(
+            "post",
             "/v1/branches/{id}/start",
             "Start new VMs from a branch (the body is the fork spec)",
             SNAPSHOTS,

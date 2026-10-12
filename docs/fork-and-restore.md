@@ -160,7 +160,17 @@ fluxctl branch delete <branch>
 ```
 
 REST: `POST /v1/vms/{id}/branches {"name", "labels"}`, `GET /v1/vms/{id}/branches`, `GET /v1/branches[/{id}]`,
-`DELETE /v1/branches/{id}`, `POST /v1/branches/{id}/start` (the body and the response are the fork spec and report).
+`DELETE /v1/branches/{id}`, `POST /v1/branches/{id}/start` (the body and the response are the fork spec and report),
+`POST /v1/branches/prune` (below).
+
+**Pruning.** `POST /v1/branches/prune {"keep_last": N, "older_than_secs": S, "source_vm": "<id>", "name_prefix": "nightly-",
+"dry_run": true}` (admin; CLI `fluxctl branch prune --keep-last 3 --older-than 7d [--source vm] [--name-prefix p] [--yes]`).
+It removes branches that are beyond the newest `keep_last` in scope **and** older than `older_than_secs` (a branch must
+satisfy every limit you give; at least one of the two is required, and `keep_last: 0` needs `older_than_secs`). `dry_run`
+defaults to true: the response lists `selected` (with the reason for each), `protected` and `selected_state_bytes` and
+deletes nothing until you send `dry_run: false` (`--yes`). A branch labelled `fluxvm.dev/keep: "true"` is never removed.
+Each deletion is audited as `vm.branch.delete`; a failure on one branch is reported in `failed` and the rest continue.
+VMs started from a pruned branch are independent and keep running.
 
 - **Same machinery as fork.** `start` restores each VM from the checkpoint with the same identity reset (strict by
   default), token rotation, parallel restore, hooks and readiness; the same limits apply (a Linux guest on
@@ -188,6 +198,23 @@ child must do before it is reported: `running` (default: identity reset and noth
 
 This is the place to reset application identity the guest cannot know about (a node id, a session cache): the fork
 copied it. Secrets held in application memory are not rotated.
+
+### Secrets: what each fork mode does
+
+There is no separate `--secrets` switch; the controls are `identity` and `hooks`, and they are explicit about what they
+cover.
+
+| You want | Use | What actually happens |
+| --- | --- | --- |
+| Rotate what FluxVM manages | `identity: unique` (default) | New machine-id, SSH host keys, kernel RNG seed and **agent token** in every child; the old token is valid for one more request only. |
+| Keep everything as the parent had it | `identity: preserve` | Nothing is reset; the child shares the parent's agent token and host keys. |
+| Reset secrets FluxVM does not manage | `hooks` | Run your own rotation after identity reset, for example `--hook "rm -f /root/.aws/credentials"` or `--hook "/usr/local/bin/fetch-credentials"`. A failing hook fails the fork. |
+| Remove files | a `rm` hook, as above | Deletes the on-disk copy in the child. |
+
+Not covered, and not claimed: secrets already loaded into a process's memory are copied into every child and survive a
+file delete; rotate or restart that process in a hook (`systemctl restart app`). Credentials issued by a cloud provider
+or an identity service need that service's own revocation. Fork cannot know which of a guest's secrets are
+machine-specific.
 
 ## First-command latency: ?ready=exec
 

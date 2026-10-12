@@ -396,6 +396,7 @@ pub fn router(manager: Arc<VmManager>) -> Router {
             get(list_vm_branches).post(create_branch),
         )
         .route("/v1/branches", get(list_branches))
+        .route("/v1/branches/prune", post(prune_branches))
         .route("/v1/branches/{id}", get(get_branch).delete(delete_branch))
         .route("/v1/branches/{id}/start", post(start_branch))
         .route("/v1/vms/{id}/cbt-backup", post(cbt_backup))
@@ -2734,6 +2735,36 @@ async fn list_vm_branches(
 
 async fn list_branches(State(m): State<Arc<VmManager>>) -> ApiResult<Json<serde_json::Value>> {
     Ok(Json(json!({"items": m.list_branches(None).await?})))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PruneBranchesRequest {
+    #[serde(flatten)]
+    policy: fluxvm_scheduler::branch::PrunePolicy,
+    /// Defaults to true: nothing is deleted unless the caller sends `"dry_run": false`.
+    #[serde(default = "default_true")]
+    dry_run: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// Remove branches by policy (newest N kept, older than a cutoff, scoped to a VM or name prefix; branches labelled
+/// `fluxvm.dev/keep: "true"` are never removed). A dry run by default.
+async fn prune_branches(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    actor: Option<Extension<AuditActor>>,
+    Json(req): Json<PruneBranchesRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    let actor_name = actor.as_ref().map(|a| a.0.0.as_str());
+    let report = m
+        .prune_branches(&req.policy, req.dry_run, actor_name)
+        .await?;
+    Ok(Json(json!(report)))
 }
 
 async fn get_branch(

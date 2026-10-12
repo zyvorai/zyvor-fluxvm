@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+
+### Added: `POST /v1/branches/prune` (`fluxctl branch prune`)
+- Remove branches by policy: keep the newest N, older than a cutoff, scoped to a VM or a name prefix. A dry run unless
+  `dry_run: false` (`--yes`); an empty policy is refused; a branch labelled `fluxvm.dev/keep: "true"` is never removed.
+  Verified on an M4 (dry run, keep label, real prune, CLI).
+
+### Fixed
+- Raw base images are cloned with the macOS-safe copy on every backend (`cp --reflink` is GNU-only).
+
 ### Added: virtual networks (eBPF routing, Geneve overlay, SNAT, floating IPs)
 - A `tap` NIC with `vnet` (`{vni, ip, prefix_len, gateway}`) joins a VNI-isolated IPv4 network routed entirely in eBPF:
   no bridge, no per-network device, no iptables. Same-host guests are routed tap to tap; other hosts are reached through
@@ -16,6 +25,7 @@
   The root-gated `vnet_netns` test covers two netns-simulated hosts over Geneve; same-host routing, isolation and SNAT
   also ran with real QEMU guests through Kairon on one node. Cross-host on real hardware has not run. See
   `docs/virtual-network.md`.
+
 
 ## 0.4.2 (2026-10-12)
 
