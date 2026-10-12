@@ -186,13 +186,14 @@ pub struct Lease {
 }
 
 impl Lease {
-    /// The end used for billing: never before `min_end`.
+    /// The end used for billing: never before `min_end`, and for an active lease never past its `ends_at` (the
+    /// reconciler releases it at exactly that time, so the bill does not grow while it has yet to run).
     pub fn billable_end(&self, now: DateTime<Utc>) -> DateTime<Utc> {
         let end = self.released_at.unwrap_or(now);
         if self.state == LeaseState::Released {
             end.max(self.min_end)
         } else {
-            end
+            self.ends_at.map_or(end, |e| end.min(e))
         }
     }
 }

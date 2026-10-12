@@ -376,15 +376,11 @@ pub(super) async fn billing(
     drop(t);
     Ok(match q.format.as_deref() {
         Some("csv") => {
-            let mut csv = String::new();
-            for (i, s) in statements.iter().enumerate() {
+            // One header for the whole file, even when there is no statement.
+            let mut csv = String::from(crate::billing::CSV_HEADER);
+            for s in &statements {
                 let text = s.to_csv();
-                // One header for the whole file.
-                csv.push_str(if i == 0 {
-                    text.as_str()
-                } else {
-                    text.split_once('\n').map_or("", |(_, rest)| rest)
-                });
+                csv.push_str(text.split_once('\n').map_or("", |(_, rest)| rest));
             }
             ([(header::CONTENT_TYPE, "text/csv; charset=utf-8")], csv).into_response()
         }

@@ -125,11 +125,14 @@ fluxctl fleet budget 500                    # a tenant's own monthly budget
   `mac_per_hour`. The price is fixed when the lease starts and stored on it, so a price change never re-prices a
   running lease. A lease is billed for at least 24 hours, as before.
 - **VMs** are charged only on shared hosts (`vm_per_hour` + `vcpu_per_hour` × vCPUs + `memory_gib_per_hour` × GiB, plus
-  `macos_vm_per_hour` for a macOS guest), because a lease already covers everything on the Mac. Set
+  `macos_vm_per_hour` for a macOS guest), because a lease already covers everything on the Mac: only the hours a VM
+  runs inside the tenant's lease of its Mac are free, any time before or after the lease is charged. Set
   `charge_vms_on_leased_macs` to charge them there too.
 - **Statements** (`GET /fleet/billing?month=YYYY-MM[&tenant=T][&format=csv]`) have a line per lease and per kind of VM
   time, a total, and for the current month a forecast at the same rate. Amounts are computed in millionths of the
-  currency and rounded to cents only for display, so lines add up exactly.
+  currency and rounded to cents only for display, so lines add up exactly. An active lease is billed up to its
+  `ends_at` at most. In the CSV, a field that starts with `=`, `+`, `-` or `@` gets a leading `'` so a spreadsheet
+  never runs it as a formula.
 - **Budgets** are the tenant's own (`PUT /fleet/tenants/me/budget {"monthly": 500}`): the console warns at 80% and when
   over, and `fleet bill` says so. Nothing is stopped.
 - The console shows month-to-date spend on a tenant's Overview, a cost estimate when leasing a Mac or launching a VM,

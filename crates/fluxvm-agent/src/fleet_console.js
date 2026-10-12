@@ -127,6 +127,7 @@ const S = {
   tenantKeys: {}, // operator: tenant id -> its API keys, loaded when its details open
   billMonth: null,
   billView: null,
+  billLoading: null,
   lastViewKey: '',
   lastInspKey: '',
 };
@@ -641,8 +642,14 @@ const VIEWS = {
   billing() {
     const cur = new Date().toISOString().slice(0, 7);
     const month = S.billMonth || cur;
-    const data = month === cur ? S.data.bill : (S.billView && S.billView.month === month ? S.billView.data : null);
+    const view = S.billView && S.billView.month === month ? S.billView : null;
+    // This month comes with every refresh; another month (or this one, when that failed) is fetched once.
+    const data = (month === cur && S.data.bill) || (view && view.data);
     if (!data) {
+      if (view && view.error) {
+        return [pageHead('Billing'), h('p', { class: 'note warn' }, 'Could not load billing: ' + view.error + ' ',
+          h('button', { onclick: () => { S.billView = null; render(); } }, 'Try again'))];
+      }
       if (S.billLoading !== month) loadBill(month);
       return [pageHead('Billing'), h('p', { class: 'muted' }, 'Loading…')];
     }
@@ -1091,7 +1098,10 @@ async function loadBill(month) {
   try {
     const data = await api('GET', '/fleet/billing?month=' + enc(month));
     S.billView = { month, data };
-  } catch (e) { toast(e.message, true); }
+  } catch (e) {
+    // Kept, so the page shows the failure instead of asking again on every render.
+    S.billView = { month, error: e.message };
+  }
   S.billLoading = null;
   render();
 }
@@ -1718,8 +1728,8 @@ function leaseSheet(pre = {}) {
       }
       const r = await api('POST', '/fleet/leases', { body: b });
       const node = r.lease && r.lease.node;
-      if (r.lease && r.lease.rate_micros) toast('Leased ' + node + ' at ' + money(r.lease.rate_micros / 1e6) + ' an hour');
-      toast('Leased ' + node + (op ? ' to ' + b.tenant : ''));
+      const at = r.lease && r.lease.rate_micros ? ' at ' + money(r.lease.rate_micros / 1e6, null, true) + ' an hour' : '';
+      toast('Leased ' + node + (op ? ' to ' + b.tenant : '') + at);
       await refresh({ force: true });
       if (node) go('macs', node);
     },
@@ -2089,7 +2099,7 @@ $('signin-form').addEventListener('submit', (e) => {
   storage.set('sessionStorage', TOKEN_KEY, t);
   $('signin-token').value = '';
   // Nothing from the previous token's session carries over.
-  Object.assign(S, { role: null, me: null, data: null, error: null, usage: null, policy: null, exec: {}, tenantKeys: {}, billMonth: null, billView: null, query: '',
+  Object.assign(S, { role: null, me: null, data: null, error: null, usage: null, policy: null, exec: {}, tenantKeys: {}, billMonth: null, billView: null, billLoading: null, query: '',
     lastViewKey: '', lastInspKey: '', loadedAt: 0 });
   stopScreen();
   $('search').value = '';

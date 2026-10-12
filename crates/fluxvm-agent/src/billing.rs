@@ -104,8 +104,12 @@ impl PriceList {
         {
             return Err("prices must be between 0 and 1,000,000 per hour".into());
         }
-        if self.mac_classes.iter().any(|c| c.name.trim().is_empty()) {
-            return Err("every Mac class needs a name".into());
+        if self
+            .mac_classes
+            .iter()
+            .any(|c| c.name.trim().is_empty() || c.name.chars().count() > 64)
+        {
+            return Err("every Mac class needs a name of at most 64 characters".into());
         }
         Ok(())
     }
@@ -270,13 +274,26 @@ pub fn statement(
             lease_rate(prices, l),
         ));
     }
-    // VM time, on shared hosts only unless the price list says otherwise.
-    let leased_during = |node: &str, s: DateTime<Utc>, e: DateTime<Utc>| {
-        state.leases.iter().any(|l| {
-            l.tenant == tenant
-                && l.node == node
-                && overlap(l.started_at, l.billable_end(now), s, e) > 0
-        })
+    // VM time, on shared hosts only unless the price list says otherwise: the part of a VM's life that falls in one
+    // of this tenant's leases of its node is covered by the lease; the rest (before the lease, after it) is not.
+    let leased_secs = |node: &str, s: DateTime<Utc>, e: DateTime<Utc>| {
+        let mut spans: Vec<(DateTime<Utc>, DateTime<Utc>)> = state
+            .leases
+            .iter()
+            .filter(|l| l.tenant == tenant && l.node == node)
+            .map(|l| (l.started_at.max(s), l.billable_end(now).min(e)))
+            .filter(|(a, b)| a < b)
+            .collect();
+        spans.sort();
+        let (mut total, mut reach) = (0i64, s);
+        for (a, b) in spans {
+            let a = a.max(reach);
+            if b > a {
+                total += (b - a).num_seconds();
+                reach = b;
+            }
+        }
+        total
     };
     let (mut vm, mut vcpu, mut mem, mut mac) = (0i64, 0i64, 0i64, 0i64);
     let mut mem_cost = 0i64;
@@ -286,11 +303,12 @@ pub fn statement(
         .filter(|v| v.tenant.as_deref() == Some(tenant))
     {
         let end = v.ended_at.unwrap_or(now);
-        let secs = overlap(v.created_at, end, from, to);
-        if secs == 0 {
-            continue;
+        let (s, e) = (v.created_at.max(from), end.min(to));
+        let mut secs = overlap(v.created_at, end, from, to);
+        if secs > 0 && !prices.charge_vms_on_leased_macs {
+            secs -= leased_secs(&v.node, s, e);
         }
-        if !prices.charge_vms_on_leased_macs && leased_during(&v.node, v.created_at, end) {
+        if secs <= 0 {
             continue;
         }
         vm += secs;
@@ -372,11 +390,24 @@ pub fn statement(
     }
 }
 
+/// A quoted CSV field. Text a spreadsheet would read as a formula (`=`, `+`, `-`, `@`, tab, CR) gets a leading `'`.
+fn csv_field(s: &str) -> String {
+    let guard = if s.starts_with(['=', '+', '-', '@', '\t', '\r']) {
+        "'"
+    } else {
+        ""
+    };
+    format!("\"{guard}{}\"", s.replace('"', "\"\""))
+}
+
+/// The header line of [`Statement::to_csv`].
+pub const CSV_HEADER: &str =
+    "tenant,from,to,description,quantity,unit,unit_price,amount,currency\n";
+
 impl Statement {
     pub fn to_csv(&self) -> String {
-        let mut out =
-            String::from("tenant,from,to,description,quantity,unit,unit_price,amount,currency\n");
-        let q = |s: &str| format!("\"{}\"", s.replace('"', "\"\""));
+        let mut out = String::from(CSV_HEADER);
+        let q = csv_field;
         for l in &self.lines {
             out.push_str(&format!(
                 "{},{},{},{},{},{},{},{:.2},{}\n",
@@ -519,6 +550,45 @@ mod tests {
             statement(&s, "acme", from, to, now).budget.unwrap().state,
             "over"
         );
+    }
+
+    #[test]
+    fn a_vm_is_free_only_while_its_mac_is_leased() {
+        let mut s = TenancyState::default();
+        s.prices = prices();
+        s.create_tenant("acme", None, Quota::default(), t0())
+            .unwrap();
+        // The VM runs 48 hours on mac-1; the tenant leases mac-1 for the 24 hours in the middle.
+        s.vms.push(VmEntry {
+            node: "mac-1".into(),
+            vm_id: "a".into(),
+            name: "a".into(),
+            tenant: Some("acme".into()),
+            vcpus: 1,
+            memory_mib: 0,
+            macos_guest: false,
+            created_at: t0(),
+            ended_at: Some(t0() + Duration::hours(48)),
+            spec: None,
+        });
+        let l = s
+            .create_lease("acme", "mac-1", None, t0() + Duration::hours(12))
+            .unwrap();
+        s.release_lease(&l.id, None, false, t0() + Duration::hours(36))
+            .unwrap();
+        let now = t0() + Duration::hours(50);
+        let (from, to) = month_of(now);
+        let st = statement(&s, "acme", from, to, now);
+        let vcpu = st.lines.iter().find(|l| l.unit == "vCPU-hours").unwrap();
+        assert_eq!(vcpu.quantity, 24.0, "{st:?}");
+        assert!(st.forecast.is_some());
+    }
+
+    #[test]
+    fn csv_fields_never_start_a_formula() {
+        assert_eq!(csv_field("=cmd()"), "\"'=cmd()\"");
+        assert_eq!(csv_field("a \"b\""), "\"a \"\"b\"\"\"");
+        assert_eq!(csv_field("acme"), "\"acme\"");
     }
 
     #[test]
