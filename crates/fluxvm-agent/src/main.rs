@@ -28,9 +28,13 @@ enum Command {
             default_value = "/var/lib/fluxvm-agent"
         )]
         state_dir: PathBuf,
-        /// Shared bearer token for `/fleet/*` (omit to leave auth off — lab only).
+        /// Operator bearer token for `/fleet/*`. Omit it and central makes one on first start, keeps it in
+        /// `<state-dir>/operator-token` (mode 0600) and prints it once; `--token` always wins and changes it.
         #[arg(long, env = "FLUXVM_AGENT_TOKEN")]
         token: Option<String>,
+        /// Leave `/fleet/*` open with no token at all (lab only; the old behaviour of omitting `--token`).
+        #[arg(long, env = "FLUXVM_AGENT_NO_AUTH", conflicts_with = "token")]
+        no_auth: bool,
         /// Optional TLS certificate (PEM). Requires `--tls-key`.
         #[arg(long, env = "FLUXVM_AGENT_TLS_CERT")]
         tls_cert: Option<PathBuf>,
@@ -191,6 +195,7 @@ async fn main() -> Result<()> {
             listen,
             state_dir,
             token,
+            no_auth,
             tls_cert,
             tls_key,
             reconcile_secs,
@@ -218,9 +223,38 @@ async fn main() -> Result<()> {
                 token: metrics_token,
             });
             let sso = sso.into_config()?;
-            if sso.is_some() && token.is_none() {
-                bail!("--oidc-issuer needs --token: without it every caller is the operator");
+            if sso.is_some() && no_auth {
+                bail!(
+                    "--oidc-issuer cannot be combined with --no-auth: every caller would be the operator"
+                );
             }
+            // The token was given on the command line (or the environment), as opposed to made here: standbys in an
+            // HA group must be started with the same explicit one.
+            let token_given = token.is_some();
+            let token = match token {
+                Some(t) => Some(t),
+                None if no_auth => {
+                    tracing::warn!("--no-auth: /fleet/* is open to anyone who can reach this port");
+                    None
+                }
+                None => {
+                    let (t, created) = fluxvm_agent::tenancy::default_operator_token(&state_dir)
+                        .with_context(|| {
+                            format!("creating the operator token in {}", state_dir.display())
+                        })?;
+                    let file = state_dir.join(fluxvm_agent::tenancy::OPERATOR_TOKEN_FILE);
+                    if created {
+                        // Printed with println! (not tracing): central's default log filter shows errors only.
+                        println!("No --token given: generated the operator token (shown once).");
+                        println!("  token: {t}");
+                        println!("  stored in {} (mode 0600)", file.display());
+                        println!("  change it with --token, or delete that file to get a new one");
+                    } else {
+                        println!("Using the operator token stored in {}", file.display());
+                    }
+                    Some(t)
+                }
+            };
             // ---- signup ----
             let secret = |file: Option<PathBuf>, var: &str| -> Result<Option<String>> {
                 match file {
@@ -288,7 +322,7 @@ async fn main() -> Result<()> {
                     let Some(advertise_url) = advertise_url else {
                         bail!("--ha-redis needs --advertise-url (this central's own URL)");
                     };
-                    if token.is_none() {
+                    if !token_given {
                         bail!(
                             "--ha-redis needs --token: standbys and the leader must share one fleet token"
                         );
