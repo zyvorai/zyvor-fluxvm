@@ -146,6 +146,15 @@ open http://127.0.0.1:7799/console              # paste the token into the sign-
 You land on **Overview** with one Mac. Use the top bar's **Cloud**, **Compute**, **Billing** and **Access** menus (or
 ⌘K) to move around. Stop it with `kill %1 %2`; the state stays in `./central-state`.
 
+**Which key do I paste?** Central does not make one up for you:
+
+| Who | Where the key comes from |
+|---|---|
+| Operator (whole fleet) | The value you gave `--token` (or `FLUXVM_AGENT_TOKEN`) when you started central. Lost it? Restart central with a new one. Without `--token`, auth is **off** (lab only). |
+| Tenant | The operator runs `fluxctl fleet --token "$TOKEN" tenant create acme`; the token is printed **once**. Rotate it later from the console or `fluxctl`. |
+| Sign-up | Shown once after the emailed confirmation link is used (needs `--signup-mail-webhook`, see [mac-cloud-tenancy.md](mac-cloud-tenancy.md)). |
+| SSO | Nobody sees a token: people sign in through the company's identity provider. |
+
 For real Macs, run `fluxvm-agent central` on one host (with `--tls-cert/--tls-key` or behind a TLS proxy, and
 `--public-url`), then point each Mac's agent at it; see [fleet-quickstart.md](fleet-quickstart.md) and
 [mac-cloud-tenancy.md](mac-cloud-tenancy.md#console) for tenants, sign-in and what each page does.
