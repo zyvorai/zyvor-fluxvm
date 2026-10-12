@@ -36,7 +36,7 @@ pub use ha_rt::HaHandle;
 pub use metrics::{
     DEFAULT_INTERVAL as DEFAULT_METRICS_INTERVAL, MetricsSettings, configure as configure_metrics,
 };
-pub use signup::configure_stripe;
+pub use signup::{MailConfig, configure_mail, configure_stripe};
 pub use sso::{SsoArgs, SsoConfig};
 
 use crate::tenancy::{Caller, TenancyState};
@@ -694,7 +694,9 @@ pub fn router_with_sso(
         metrics: Arc::new(metrics::MetricsStore::configured()),
         tunnels: Arc::default(),
         sso: Arc::new(sso::Sso::new(sso_cfg)),
-        signup: Arc::new(signup::Runtime::new(signup::boot_config())),
+        signup: Arc::new(
+            signup::Runtime::new(signup::boot_config()).with_mail(signup::boot_mail()),
+        ),
     };
     let mut fleet = fleet;
     let mut handle = None;

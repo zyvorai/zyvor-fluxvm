@@ -1595,6 +1595,12 @@ enum FleetCommand {
         #[arg(long)]
         name: Option<String>,
     },
+    /// Confirm a sign-up from the token in the mailed link (the link's page does the same) and print the account's
+    /// token, once. Example: `fluxctl fleet --central https://cloud.example.com signup-verify fvv_...`.
+    SignupVerify {
+        /// The token from the confirmation link (or the whole link).
+        token: String,
+    },
     /// Invoices with their status and a link to pay. A tenant sees its own; the operator everyone's.
     Invoices {
         /// `2026-09` (default: every month).

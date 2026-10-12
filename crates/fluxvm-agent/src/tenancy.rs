@@ -105,6 +105,9 @@ pub struct Tenant {
     /// The email the tenant signed up with (self-service sign-up); the SSO feature makes this person the owner.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner_email: Option<String>,
+    /// The sign-up confirmed `owner_email` by a mailed link, so the person who holds the token is that person.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub owner_email_verified: bool,
     /// Stripe customer (`cus_…`), created at sign-up or when the operator turns billing on.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stripe_customer_id: Option<String>,
@@ -424,6 +427,13 @@ pub struct Policy {
     /// Mac never share a network. Needs macOS 26+ and the `fluxvm-vmnetd` broker on every Mac. Off by default.
     #[serde(default)]
     pub isolate_tenant_networks: bool,
+    /// Let tenants claim VMs from **shared** warm pools (the operator's, owned by no tenant). Off by default: those
+    /// VMs are booted from one image, so they carry the same baked credentials and host keys, and they sit on one
+    /// network, so a tenant that holds one can reach the pool's other VMs and plant something in a warm one that a
+    /// different tenant claims next. Tenants use pools of their own instead. Turn it on only for tenants that trust
+    /// each other.
+    #[serde(default)]
+    pub allow_shared_pool_claims: bool,
     /// First two octets of the tenant /24s, e.g. `10.230` gives tenant n `10.230.n.0/24`.
     #[serde(default = "tenant_subnet_prefix")]
     pub tenant_subnet_prefix: String,
@@ -444,6 +454,11 @@ pub struct Policy {
     /// Anyone may create a tenant with `POST /signup` (off by default).
     #[serde(default)]
     pub signup_enabled: bool,
+    /// A sign-up must confirm its email address (a link mailed through the operator's mail webhook) before the account
+    /// exists or any token is issued. On by default; sign-up cannot be opened without a mail path unless this is
+    /// turned off, which is for labs only (anyone can then sign up as anyone).
+    #[serde(default = "yes")]
+    pub signup_require_email_verification: bool,
     /// The quota a signed-up tenant starts with.
     #[serde(default = "signup_default_quota")]
     pub signup_default_quota: Quota,
@@ -516,12 +531,14 @@ impl Default for Policy {
             min_lease_hours: MIN_LEASE_HOURS,
             ledger_retention_days: ledger_retention_days(),
             isolate_tenant_networks: false,
+            allow_shared_pool_claims: false,
             tenant_subnet_prefix: tenant_subnet_prefix(),
             overlay_key_rotation_days: overlay_key_rotation_days(),
             max_snapshots_per_vm: max_snapshots_per_vm(),
             tunnels: TunnelPolicy::default(),
             operator_emails: Vec::new(),
             signup_enabled: false,
+            signup_require_email_verification: true,
             signup_default_quota: signup_default_quota(),
             signup_require_payment_method: false,
             signup_allowed_email_domains: Vec::new(),
@@ -819,6 +836,9 @@ pub struct TenancyState {
     /// Webhooks that receive notifications (`/fleet/webhooks`).
     #[serde(default)]
     pub webhooks: Vec<Webhook>,
+    /// Sign-ups waiting for their email link. Only the SHA-256 of each link's token is kept.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending_signups: Vec<PendingSignup>,
     /// Prices for leases and VM time (`GET/PUT /fleet/prices`).
     #[serde(default)]
     pub prices: crate::billing::PriceList,
@@ -890,6 +910,7 @@ impl TenancyState {
             keys: Vec::new(),
             members: Vec::new(),
             owner_email: None,
+            owner_email_verified: false,
             stripe_customer_id: None,
             billing_enabled: false,
             has_payment_method: false,
@@ -2059,6 +2080,98 @@ pub fn valid_ssh_user(u: &str) -> bool {
         && !u.starts_with('-')
         && u.bytes()
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_'))
+}
+
+/// A self-service sign-up that has not confirmed its email address yet. Nothing exists for it but this record: no
+/// tenant, no token, no Stripe customer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingSignup {
+    pub tenant_id: String,
+    pub email: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    /// SHA-256 of the confirmation token mailed to `email`.
+    pub token_sha256: String,
+    pub created_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+}
+
+/// How long a confirmation link stays valid.
+pub const SIGNUP_LINK_HOURS: i64 = 24;
+/// Pending sign-ups kept at once; past this, new ones are refused (the oldest expire on their own).
+pub const MAX_PENDING_SIGNUPS: usize = 2000;
+/// A second link for the same address is not mailed sooner than this (mail-bombing a stranger).
+pub const SIGNUP_RESEND_MINUTES: i64 = 5;
+
+impl TenancyState {
+    /// Drops sign-ups whose link has expired.
+    pub fn prune_pending_signups(&mut self, now: DateTime<Utc>) {
+        self.pending_signups.retain(|p| p.expires_at > now);
+    }
+
+    /// Records a sign-up and returns its token (shown only in the mailed link). `None`: too soon after the last link
+    /// for this address, the tenant ID is already waiting for another address, or the table is full.
+    pub fn add_pending_signup(
+        &mut self,
+        tenant_id: &str,
+        email: &str,
+        display_name: Option<String>,
+        now: DateTime<Utc>,
+    ) -> Option<String> {
+        self.prune_pending_signups(now);
+        if self.pending_signups.iter().any(|p| {
+            p.email.eq_ignore_ascii_case(email)
+                && now - p.created_at < chrono::Duration::minutes(SIGNUP_RESEND_MINUTES)
+        }) {
+            return None;
+        }
+        if self
+            .pending_signups
+            .iter()
+            .any(|p| p.tenant_id == tenant_id && !p.email.eq_ignore_ascii_case(email))
+            || self.pending_signups.len() >= MAX_PENDING_SIGNUPS
+        {
+            return None;
+        }
+        // A newer link for the same address replaces the older one.
+        self.pending_signups
+            .retain(|p| !p.email.eq_ignore_ascii_case(email));
+        let token = format!(
+            "fvv_{}{}",
+            uuid::Uuid::new_v4().simple(),
+            uuid::Uuid::new_v4().simple()
+        );
+        self.pending_signups.push(PendingSignup {
+            tenant_id: tenant_id.to_owned(),
+            email: email.to_owned(),
+            display_name,
+            token_sha256: hash_token(&token),
+            created_at: now,
+            expires_at: now + chrono::Duration::hours(SIGNUP_LINK_HOURS),
+        });
+        Some(token)
+    }
+
+    /// The pending sign-up a (still valid) token belongs to, without consuming it.
+    pub fn pending_signup(&self, token: &str, now: DateTime<Utc>) -> Option<&PendingSignup> {
+        let h = hash_token(token.trim());
+        self.pending_signups.iter().find(|p| {
+            p.expires_at > now && constant_time_eq(p.token_sha256.as_bytes(), h.as_bytes())
+        })
+    }
+
+    /// Consumes a token: the sign-up it belongs to, removed so the link works once.
+    pub fn take_pending_signup(
+        &mut self,
+        token: &str,
+        now: DateTime<Utc>,
+    ) -> Option<PendingSignup> {
+        let h = hash_token(token.trim());
+        let i = self.pending_signups.iter().position(|p| {
+            p.expires_at > now && constant_time_eq(p.token_sha256.as_bytes(), h.as_bytes())
+        })?;
+        Some(self.pending_signups.remove(i))
+    }
 }
 
 /// Rules for tunnels to VMs through central (`Policy::tunnels`).

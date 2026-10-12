@@ -86,6 +86,10 @@ fn is_macos(t: &TenancyState, pool: &Pool) -> bool {
 fn shared_refusal(t: &TenancyState, macos: bool) -> Option<&'static str> {
     if !t.enabled() {
         None
+    } else if !t.policy.allow_shared_pool_claims {
+        Some(
+            "shared pools are off in this cloud's policy (their VMs share a network and the image's credentials between tenants): use a pool of your own",
+        )
     } else if t.policy.isolate_tenant_networks {
         Some(
             "tenant networks are isolated, and a shared pool's VMs were booted on no tenant's network: use a pool of your own",
@@ -1341,11 +1345,50 @@ mod tests {
         ));
     }
 
+    /// Tenants do not see or claim shared pools unless the operator turns that on; the owner of a pool always does.
+    #[test]
+    fn shared_pools_are_off_for_tenants_until_the_operator_allows_them() {
+        let mut t = TenancyState::default();
+        t.create_tenant("acme", None, Quota::default(), Utc::now())
+            .unwrap();
+        let shared = Pool {
+            name: "linux".into(),
+            tenant: None,
+            image: "debian-13".into(),
+            size: crate::warmpool::PoolSize {
+                vcpus: 2,
+                memory_mib: 2048,
+            },
+            min_ready: 1,
+            max_total: 4,
+            node_selector: Default::default(),
+            nodes: vec![],
+            created_at: Utc::now(),
+            runtime: Default::default(),
+        };
+        let own = Pool {
+            name: "mine".into(),
+            tenant: Some("acme".into()),
+            ..shared.clone()
+        };
+        let acme = Caller::Tenant("acme".into());
+        let why = shared_refusal(&t, false).expect("refused by default");
+        assert!(why.contains("off in this cloud's policy"), "{why}");
+        assert!(!sees(&t, &acme, &shared));
+        assert!(sees(&t, &acme, &own), "a tenant always sees its own pool");
+        assert!(sees(&t, &Caller::Admin, &shared));
+        t.policy.allow_shared_pool_claims = true;
+        assert!(shared_refusal(&t, false).is_none());
+        assert!(sees(&t, &acme, &shared));
+    }
+
     #[tokio::test]
     async fn a_shared_pool_fills_hands_out_each_warm_vm_once_and_refills() {
         let mac = sim_mac("mac-1").await;
         let mut t = TenancyState::default();
         catalog(&mut t);
+        // Off by default: the operator has to turn shared claims on.
+        t.policy.allow_shared_pool_claims = true;
         t.create_tenant("acme", None, Quota::default(), Utc::now())
             .unwrap();
         let fleet = fleet_of(vec![mac.clone()], t);

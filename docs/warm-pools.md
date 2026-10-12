@@ -25,10 +25,11 @@ on a leased Mac can only ever belong to that tenant. Pools come in two kinds:
 | Quota | warm VMs count against the tenant's quota | not in anyone's quota until taken |
 | Billing | billed to the tenant like any of its VMs (free on a leased Mac unless prices say otherwise) | billed to whoever takes a VM, from the moment it is taken |
 
-A tenant can take VMs from a shared pool only where its VMs could run on a shared host anyway: not for macOS guests
-while `require_lease_for_macos` is on (the default), and not at all while `isolate_tenant_networks` is on, because a
-warm VM was booted on no tenant's network. Such shared pools are hidden from tenants; creating one returns a `note`
-saying so. For macOS CI, give each tenant its own pool.
+A tenant can take VMs from a shared pool **only when the operator turns it on**: the policy field
+`allow_shared_pool_claims` is `false` by default (see Limits for why). Even then, not for macOS guests while
+`require_lease_for_macos` is on (the default), and not at all while `isolate_tenant_networks` is on, because a warm VM
+was booted on no tenant's network. Shared pools a tenant may not use are hidden from it; creating one returns a `note`
+saying why. For macOS CI, and by default, give each tenant its own pool.
 
 ## What takes a warm VM
 
@@ -162,11 +163,13 @@ is the fleet token), and keep `min_ready` at about the number of jobs that usual
 
 ## Limits
 
-- A **shared** pool's VMs are all booted from one image, so they carry the same baked credentials and SSH host keys, and
-  they sit on the host's shared network (a shared pool is refused while `isolate_tenant_networks` is on). A tenant that
-  takes one can reach the pool's other warm VMs, and the VMs later taken by other tenants, as it could any VM on a
-  shared network. Use tenant pools (a lease, or `isolate_tenant_networks` with the tenant's own pool) for workloads
-  that must not see each other, and bake no secrets into a shared pool's image.
+- A **shared** pool is **off for tenants by default** (`allow_shared_pool_claims`). Its VMs are all booted from one
+  image, so they carry the same baked credentials and SSH host keys, and they sit on the host's shared network. A tenant
+  that takes one can reach the pool's other warm VMs, can plant something in a warm one that a *different* tenant
+  claims next (a rotation at claim time cannot undo that), and can reach the VMs other tenants already took. Neither
+  isolating the network (a warm VM was booted on no tenant's network) nor per-claim secrets fixes that, so the safe
+  setup is a pool per tenant on its leased Macs. Turn shared claims on only for tenants that trust each other, and bake
+  no secrets into a shared pool's image.
 - A warm VM is booted once and handed over as it is: whatever the image does at first boot has happened, with no
   per-launch cloud-init, networks or disks.
 - Readiness is "the node says running", not "the guest agent answers": a claim can land a moment before the guest is

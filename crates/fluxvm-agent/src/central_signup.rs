@@ -6,7 +6,8 @@
 //! | Route | Who | What |
 //! |---|---|---|
 //! | `GET /signup/config` | anyone | whether sign-up is open, and what it asks for |
-//! | `POST /signup` | anyone | `{tenant_id, display_name, email}` creates a tenant; its token is in the answer, once |
+//! | `POST /signup` | anyone | `{tenant_id, display_name, email}`: with email confirmation (the default) mails a link and answers `202`; without it, creates the tenant and answers its token, once |
+//! | `GET/POST /signup/verify` | anyone with the mailed token | the confirmation page and the step that creates the tenant; the token is in the answer, once |
 //! | `POST /stripe/webhook` | Stripe (signed) | invoice paid / payment failed, payment method saved |
 //! | `GET /fleet/billing/invoices` | tenant, operator | invoices with their status and pay links |
 //! | `POST /fleet/billing/invoices?month=YYYY-MM` | operator | turn each billed tenant's statement into a Stripe invoice |
@@ -28,7 +29,12 @@ use std::net::{IpAddr, SocketAddr};
 use std::time::{Duration as StdDuration, Instant};
 
 /// Routes that need no token: the auth middleware lets these through untouched.
-pub(super) const PUBLIC_PATHS: [&str; 3] = ["/signup", "/signup/config", "/stripe/webhook"];
+pub(super) const PUBLIC_PATHS: [&str; 4] = [
+    "/signup",
+    "/signup/config",
+    "/signup/verify",
+    "/stripe/webhook",
+];
 
 /// Sign-ups one client address may make in an hour.
 const SIGNUPS_PER_ADDRESS_PER_HOUR: usize = 5;
@@ -75,10 +81,33 @@ pub(super) fn boot_config() -> Option<StripeConfig> {
     BOOT.get().cloned()
 }
 
+/// Where sign-up confirmation mail goes: the operator's mail webhook. Central does not speak SMTP; it POSTs JSON
+/// (`{type, to, subject, text, link, ...}`, signed with `secret` as `X-FluxVM-Signature` when set) to this URL, and
+/// whatever receives it sends the mail. The URL `log` writes the mail to central's log instead (labs).
+#[derive(Debug, Clone)]
+pub struct MailConfig {
+    pub url: String,
+    pub secret: Option<String>,
+    /// This central's URL as browsers reach it: the base of the confirmation link.
+    pub public_url: String,
+}
+
+static BOOT_MAIL: std::sync::OnceLock<MailConfig> = std::sync::OnceLock::new();
+
+/// Sets the sign-up mail webhook central starts with (`--signup-mail-webhook`). Call it before [`super::router`].
+pub fn configure_mail(cfg: MailConfig) {
+    let _ = BOOT_MAIL.set(cfg);
+}
+
+pub(super) fn boot_mail() -> Option<MailConfig> {
+    BOOT_MAIL.get().cloned()
+}
+
 /// Sign-up and Stripe state that lives only in memory.
 #[derive(Default)]
 pub(super) struct Runtime {
     stripe: Option<StripeConfig>,
+    mail: Option<MailConfig>,
     limiter: std::sync::Mutex<Limiter>,
     seen_events: std::sync::Mutex<VecDeque<String>>,
     /// One invoice run at a time (the operator's and the monthly job's).
@@ -91,6 +120,11 @@ impl Runtime {
             stripe,
             ..Default::default()
         }
+    }
+
+    pub(super) fn with_mail(mut self, mail: Option<MailConfig>) -> Self {
+        self.mail = mail;
+        self
     }
 }
 
@@ -282,6 +316,8 @@ fn signup_open(fleet: &Fleet, p: &crate::tenancy::Policy) -> bool {
     p.signup_enabled
         && fleet.token.is_some()
         && (!p.signup_require_payment_method || fleet.signup.stripe.is_some())
+        // Confirming the address needs a way to send the link.
+        && (!p.signup_require_email_verification || fleet.signup.mail.is_some())
 }
 
 // ---- routes -------------------------------------------------------------------------------------------------------
@@ -290,6 +326,7 @@ pub(super) fn routes() -> Router<Fleet> {
     Router::new()
         .route("/signup", post(signup))
         .route("/signup/config", get(signup_config))
+        .route("/signup/verify", get(verify_page).post(verify_signup))
         .route("/stripe/webhook", post(stripe_webhook))
         .route(
             "/fleet/billing/invoices",
@@ -352,6 +389,7 @@ async fn signup_config(State(fleet): State<Fleet>) -> Json<Value> {
     Json(json!({
         "open": signup_open(&fleet, p),
         "require_payment_method": p.signup_require_payment_method,
+        "email_confirmation": p.signup_require_email_verification,
         "payments": fleet.signup.stripe.is_some(),
         "allowed_email_domains": p.signup_allowed_email_domains,
     }))
@@ -406,46 +444,72 @@ async fn signup(
     lock(&fleet.signup.limiter)
         .allow(addr, Instant::now())
         .map_err(|e| err(StatusCode::TOO_MANY_REQUESTS, e))?;
-    let (tenant, token) = {
-        let mut t = fleet.tenancy.lock().await;
-        if t.tenants.values().any(|x| {
-            x.owner_email
-                .as_deref()
-                .is_some_and(|e| e.eq_ignore_ascii_case(&email))
-        }) {
-            return Err(err(
-                StatusCode::CONFLICT,
-                "that email already has an account; sign in with its token, or ask the operator",
-            ));
-        }
-        let (_, token) = t
-            .create_tenant(
-                &id,
-                display_name,
-                policy.signup_default_quota.clone(),
-                Utc::now(),
-            )
-            .map_err(tenancy_error)?;
-        let rec = t
-            .tenants
-            .get_mut(&id)
-            .ok_or_else(|| err(StatusCode::INTERNAL_SERVER_ERROR, "tenant vanished"))?;
-        rec.owner_email = Some(email.clone());
-        rec.self_service = true;
-        rec.billing_enabled = fleet.signup.stripe.is_some();
-        rec.payment_method_pending = policy.signup_require_payment_method;
-        // The email is not verified here, so it is not made a member now (anyone could sign up with someone else's
-        // address and appear in their SSO sign-in as a team they own). The first SSO sign-in with that verified email
-        // makes them the owner instead ([`TenancyState::adopt_signup_owner`]); the token works meanwhile.
-        let tenant = t
-            .tenants
-            .get(&id)
-            .cloned()
-            .ok_or_else(|| err(StatusCode::INTERNAL_SERVER_ERROR, "tenant vanished"))?;
-        fleet.persist_tenancy(&t);
-        (tenant, token)
-    };
-    tracing::info!(tenant = %tenant.id, "tenant signed up");
+    if policy.signup_require_email_verification {
+        return start_verification(&fleet, id, email, display_name).await;
+    }
+    // Email confirmation is turned off (a lab): the account exists at once, with an address nobody confirmed.
+    let (tenant, token) =
+        create_signed_up_tenant(&fleet, &policy, &id, &email, display_name, false).await?;
+    finish_signup(&fleet, tenant, token).await
+}
+
+/// Creates the tenant of a sign-up with the policy's default quota and returns it with its token. `verified` says the
+/// address was confirmed by a mailed link.
+async fn create_signed_up_tenant(
+    fleet: &Fleet,
+    policy: &crate::tenancy::Policy,
+    id: &str,
+    email: &str,
+    display_name: Option<String>,
+    verified: bool,
+) -> Result<(crate::tenancy::Tenant, String), AppError> {
+    let mut t = fleet.tenancy.lock().await;
+    if t.tenants.values().any(|x| {
+        x.owner_email
+            .as_deref()
+            .is_some_and(|e| e.eq_ignore_ascii_case(email))
+    }) {
+        return Err(err(
+            StatusCode::CONFLICT,
+            "that email already has an account; sign in with its token, or ask the operator",
+        ));
+    }
+    let (_, token) = t
+        .create_tenant(
+            id,
+            display_name,
+            policy.signup_default_quota.clone(),
+            Utc::now(),
+        )
+        .map_err(tenancy_error)?;
+    let rec = t
+        .tenants
+        .get_mut(id)
+        .ok_or_else(|| err(StatusCode::INTERNAL_SERVER_ERROR, "tenant vanished"))?;
+    rec.owner_email = Some(email.to_owned());
+    rec.owner_email_verified = verified;
+    rec.self_service = true;
+    rec.billing_enabled = fleet.signup.stripe.is_some();
+    rec.payment_method_pending = policy.signup_require_payment_method;
+    // An address that was not confirmed is not made a member now (anyone could sign up with someone else's address and
+    // appear in their SSO sign-in as a team they own). The first SSO sign-in with that verified email makes them the
+    // owner instead ([`TenancyState::adopt_signup_owner`]), and the sign-up token is rotated then.
+    let tenant = t
+        .tenants
+        .get(id)
+        .cloned()
+        .ok_or_else(|| err(StatusCode::INTERNAL_SERVER_ERROR, "tenant vanished"))?;
+    fleet.persist_tenancy(&t);
+    Ok((tenant, token))
+}
+
+/// The audit entry, the Stripe customer and the answer of a sign-up that created its tenant.
+async fn finish_signup(
+    fleet: &Fleet,
+    tenant: crate::tenancy::Tenant,
+    token: String,
+) -> Result<(StatusCode, Json<Value>), AppError> {
+    tracing::info!(tenant = %tenant.id, verified = tenant.owner_email_verified, "tenant signed up");
     fleet.audit.record(audit::event(
         &Caller::Tenant(tenant.id.clone()),
         "POST".into(),
@@ -458,7 +522,7 @@ async fn signup(
     // first invoice or payment method.
     let mut public = tenant.public_json();
     if fleet.signup.stripe.is_some() {
-        match ensure_customer(&fleet, &tenant.id).await {
+        match ensure_customer(fleet, &tenant.id).await {
             Ok(c) => public["stripe_customer_id"] = json!(c),
             Err(e) => {
                 tracing::warn!(tenant = %tenant.id, error = %e.1, "creating the Stripe customer at sign-up")
@@ -474,6 +538,304 @@ async fn signup(
             "note": "store this token now; central keeps only its hash and cannot show it again",
         })),
     ))
+}
+
+// ---- email confirmation -------------------------------------------------------------------------------------------
+
+/// Records a pending sign-up and mails its link. The answer is the same whether or not the address already has an
+/// account, so the form cannot be used to find out who is registered; a tenant ID that is taken is said plainly (an
+/// ID is not a secret and the person needs to pick another).
+async fn start_verification(
+    fleet: &Fleet,
+    id: String,
+    email: String,
+    display_name: Option<String>,
+) -> Result<(StatusCode, Json<Value>), AppError> {
+    let Some(mail) = fleet.signup.mail.clone() else {
+        return Err(err(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "sign-up needs email confirmation, but this central has no mail webhook configured",
+        ));
+    };
+    enum Next {
+        Link(String),
+        Exists,
+        Nothing,
+    }
+    let now = Utc::now();
+    let next = {
+        let mut t = fleet.tenancy.lock().await;
+        t.prune_pending_signups(now);
+        let has_account = t.tenants.values().any(|x| {
+            x.owner_email
+                .as_deref()
+                .is_some_and(|e| e.eq_ignore_ascii_case(&email))
+        });
+        if has_account {
+            Next::Exists
+        } else if t.tenants.contains_key(&id) {
+            return Err(err(
+                StatusCode::CONFLICT,
+                format!("'{id}' is taken; pick another account ID"),
+            ));
+        } else {
+            match t.add_pending_signup(&id, &email, display_name, now) {
+                Some(token) => {
+                    fleet.persist_tenancy(&t);
+                    Next::Link(token)
+                }
+                None => Next::Nothing,
+            }
+        }
+    };
+    // Mailed in the background, so how long this answer takes does not say which case it was.
+    let f = fleet.clone();
+    tokio::spawn(async move {
+        match next {
+            Next::Link(token) => {
+                let link = format!(
+                    "{}/signup/verify?token={token}",
+                    mail.public_url.trim_end_matches('/')
+                );
+                send_mail(
+                    &f,
+                    &mail,
+                    json!({
+                        "type": "signup.verify",
+                        "to": email,
+                        "tenant_id": id,
+                        "link": link,
+                        "expires_in_hours": crate::tenancy::SIGNUP_LINK_HOURS,
+                        "subject": "Confirm your FluxVM Cloud account",
+                        "text": format!(
+                            "Someone asked for the FluxVM Cloud account '{id}' with this address.\n\nConfirm it, and get \
+                             its access token, within {} hours:\n{link}\n\nIf that was not you, ignore this message; \
+                             nothing was created.",
+                            crate::tenancy::SIGNUP_LINK_HOURS
+                        ),
+                    }),
+                )
+                .await;
+            }
+            Next::Exists => {
+                send_mail(
+                    &f,
+                    &mail,
+                    json!({
+                        "type": "signup.exists",
+                        "to": email,
+                        "console": format!("{}/console", mail.public_url.trim_end_matches('/')),
+                        "subject": "You already have a FluxVM Cloud account",
+                        "text": "Someone tried to sign up with this address, which already has a FluxVM Cloud \
+                                 account. Sign in with its access token or your identity provider; if it was not you, \
+                                 ignore this message.",
+                    }),
+                )
+                .await;
+            }
+            Next::Nothing => {}
+        }
+    });
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(json!({
+            "ok": true,
+            "email_confirmation": true,
+            "message": "If that address can be used, a confirmation link has been sent. It is valid for 24 hours; the \
+                        account is created, and its token shown, when you confirm.",
+        })),
+    ))
+}
+
+/// Delivers one mail through the operator's webhook (or logs it, in `log` mode). Failures are logged, never shown:
+/// the person is told the same thing either way.
+async fn send_mail(fleet: &Fleet, mail: &MailConfig, payload: Value) {
+    if mail.url == "log" {
+        // Warn level: log mode is for labs and must show up at the default log level.
+        tracing::warn!(
+            to = %payload["to"].as_str().unwrap_or(""),
+            kind = %payload["type"].as_str().unwrap_or(""),
+            link = %payload["link"].as_str().unwrap_or(""),
+            "sign-up mail (log mode)"
+        );
+        return;
+    }
+    let Ok(body) = serde_json::to_vec(&payload) else {
+        return;
+    };
+    let mut req = fleet
+        .http
+        .post(&mail.url)
+        .header("content-type", "application/json")
+        .header("user-agent", "fluxvm-central")
+        .timeout(StdDuration::from_secs(10));
+    if let Some(secret) = &mail.secret {
+        req = req.header(
+            "x-fluxvm-signature",
+            super::notify::signature(secret, &body),
+        );
+    }
+    match req.body(body).send().await {
+        Ok(r) if r.status().is_success() => {}
+        Ok(r) => {
+            tracing::warn!(status = %r.status(), "the sign-up mail webhook refused the message")
+        }
+        Err(e) => tracing::warn!(error = %e, "the sign-up mail webhook could not be reached"),
+    }
+}
+
+fn esc(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
+}
+
+/// A small standalone page (no scripts, no external loads) for the confirmation steps.
+fn confirm_page(status: StatusCode, title: &str, body_html: &str) -> Response {
+    let html = format!(
+        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" \
+         content=\"width=device-width,initial-scale=1\"><title>{t}</title><style>\
+         :root{{color-scheme:light dark}}body{{font:16px/1.5 -apple-system,\"SF Pro Text\",system-ui,sans-serif;\
+         margin:0;display:grid;place-items:center;min-height:100vh;background:Canvas;color:CanvasText}}\
+         main{{max-width:34rem;padding:2rem}}h1{{font-size:1.5rem;margin:0 0 1rem}}\
+         code{{display:block;padding:.75rem;border-radius:8px;background:rgba(127,127,127,.15);overflow-wrap:anywhere;\
+         font:13px/1.4 ui-monospace,\"SF Mono\",Menlo,monospace}}button{{font:inherit;padding:.6rem 1.2rem;\
+         border-radius:999px;border:0;background:#0a84ff;color:#fff;cursor:pointer}}\
+         .note{{opacity:.7;font-size:.9rem}}</style></head><body><main><h1>{t}</h1>{b}</main></body></html>",
+        t = esc(title),
+        b = body_html
+    );
+    (
+        status,
+        [
+            (header::CONTENT_TYPE, "text/html; charset=utf-8"),
+            (header::CACHE_CONTROL, "no-store"),
+            (header::REFERRER_POLICY, "no-referrer"),
+            (
+                header::CONTENT_SECURITY_POLICY,
+                "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+            ),
+        ],
+        html,
+    )
+        .into_response()
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct VerifyQuery {
+    #[serde(default)]
+    token: String,
+}
+
+/// `GET /signup/verify?token=…`: the page the mailed link opens. It only *shows* the sign-up; the account is created
+/// by the `POST` its button sends, so a mail scanner that fetches every link cannot use one up.
+async fn verify_page(State(fleet): State<Fleet>, Query(q): Query<VerifyQuery>) -> Response {
+    let now = Utc::now();
+    let pending = {
+        let t = fleet.tenancy.lock().await;
+        t.pending_signup(&q.token, now).cloned()
+    };
+    let Some(p) = pending else {
+        return confirm_page(
+            StatusCode::BAD_REQUEST,
+            "This link is not valid",
+            "<p>The confirmation link has expired or was already used. Start the sign-up again to get a new one.</p>",
+        );
+    };
+    confirm_page(
+        StatusCode::OK,
+        "Confirm your account",
+        &format!(
+            "<p>Create the FluxVM Cloud account <strong>{id}</strong> for <strong>{email}</strong>?</p>\
+             <form method=\"post\" action=\"/signup/verify\"><input type=\"hidden\" name=\"token\" value=\"{tok}\">\
+             <button type=\"submit\">Confirm and create the account</button></form>\
+             <p class=\"note\">The access token is shown once, on the next page.</p>",
+            id = esc(&p.tenant_id),
+            email = esc(&p.email),
+            tok = esc(q.token.trim()),
+        ),
+    )
+}
+
+/// `POST /signup/verify` (`{"token": "…"}` as JSON, or the form of the confirmation page): consumes the link, creates
+/// the tenant with its address marked confirmed, and answers with its token, once.
+async fn verify_signup(State(fleet): State<Fleet>, req: Request) -> Response {
+    let json_client = req
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.starts_with("application/json"));
+    let fail = |status: StatusCode, msg: &str| -> Response {
+        if json_client {
+            (status, Json(json!({"error": msg}))).into_response()
+        } else {
+            confirm_page(status, "This did not work", &format!("<p>{}</p>", esc(msg)))
+        }
+    };
+    let Ok(bytes) = axum::body::to_bytes(req.into_body(), MAX_SIGNUP_BODY).await else {
+        return fail(StatusCode::PAYLOAD_TOO_LARGE, "request body too large");
+    };
+    let token = if json_client {
+        serde_json::from_slice::<VerifyQuery>(&bytes)
+            .map(|b| b.token)
+            .unwrap_or_default()
+    } else {
+        reqwest::Url::parse(&format!("http://x/?{}", String::from_utf8_lossy(&bytes)))
+            .ok()
+            .and_then(|u| {
+                u.query_pairs()
+                    .find(|(k, _)| k == "token")
+                    .map(|(_, v)| v.into_owned())
+            })
+            .unwrap_or_default()
+    };
+    let policy = fleet.tenancy.lock().await.policy.clone();
+    let taken = {
+        let mut t = fleet.tenancy.lock().await;
+        t.take_pending_signup(&token, Utc::now())
+    };
+    let Some(p) = taken else {
+        return fail(
+            StatusCode::BAD_REQUEST,
+            "this confirmation link has expired or was already used; sign up again",
+        );
+    };
+    match create_signed_up_tenant(
+        &fleet,
+        &policy,
+        &p.tenant_id,
+        &p.email,
+        p.display_name.clone(),
+        true,
+    )
+    .await
+    {
+        Ok((tenant, token)) => match finish_signup(&fleet, tenant.clone(), token.clone()).await {
+            Ok((status, Json(body))) if json_client => (status, Json(body)).into_response(),
+            Ok(_) => confirm_page(
+                StatusCode::CREATED,
+                "Your account is ready",
+                &format!(
+                    "<p>Account <strong>{id}</strong> exists. This is its access token, shown only once:</p>\
+                     <code>{tok}</code>\
+                     <p>Store it now (a password manager, or your CI secrets), then use it with <code>fluxctl</code> \
+                     (<code>FLUXVM_AGENT_TOKEN</code>) or sign in to the <a href=\"/console\">console</a>.</p>\
+                     {pay}",
+                    id = esc(&tenant.id),
+                    tok = esc(&token),
+                    pay = if tenant.payment_method_pending {
+                        "<p>Add a payment method before you lease a Mac or launch a VM.</p>"
+                    } else {
+                        ""
+                    },
+                ),
+            ),
+            Err(e) => fail(e.0, &e.1),
+        },
+        Err(e) => fail(e.0, &e.1),
+    }
 }
 
 /// The tenant's Stripe customer, created on first use.
@@ -1436,6 +1798,36 @@ mod tests {
     const SECRET: &str = "whsec_mock";
 
     async fn setup() -> (Fleet, Router, Calls) {
+        setup_with(None).await
+    }
+
+    /// Where the tests' sign-up mail goes: every JSON body POSTed to it, in order.
+    async fn mail_sink() -> (String, Arc<std::sync::Mutex<Vec<(Value, Option<String>)>>>) {
+        let got: Arc<std::sync::Mutex<Vec<(Value, Option<String>)>>> = Arc::default();
+        let g = got.clone();
+        let app = Router::new().route(
+            "/",
+            post(move |headers: HeaderMap, body: axum::body::Bytes| {
+                let g = g.clone();
+                async move {
+                    let sig = headers
+                        .get("x-fluxvm-signature")
+                        .and_then(|v| v.to_str().ok())
+                        .map(str::to_owned);
+                    g.lock()
+                        .unwrap()
+                        .push((serde_json::from_slice(&body).unwrap_or(Value::Null), sig));
+                    StatusCode::OK
+                }
+            }),
+        );
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/", l.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
+        (url, got)
+    }
+
+    async fn setup_with(mail: Option<MailConfig>) -> (Fleet, Router, Calls) {
         let calls: Calls = Arc::default();
         let mock = Router::new()
             .fallback(mock_stripe)
@@ -1457,12 +1849,15 @@ mod tests {
             metrics: Arc::default(),
             tunnels: Arc::default(),
             sso: Arc::default(),
-            signup: Arc::new(Runtime::new(Some(StripeConfig {
-                secret_key: "sk_test_mock".into(),
-                webhook_secret: Some(SECRET.into()),
-                api_base: base,
-                public_url: Some("https://cloud.example.com/".into()),
-            }))),
+            signup: Arc::new(
+                Runtime::new(Some(StripeConfig {
+                    secret_key: "sk_test_mock".into(),
+                    webhook_secret: Some(SECRET.into()),
+                    api_base: base,
+                    public_url: Some("https://cloud.example.com/".into()),
+                }))
+                .with_mail(mail),
+            ),
         };
         let app = routes()
             .route("/fleet/tenants/me", get(super::super::cloud::tenant_me))
@@ -1519,6 +1914,192 @@ mod tests {
 
     /// Every route that starts or restores billable VM time is held back for a tenant that still owes a payment method,
     /// and nothing else is.
+    /// Email confirmation: nothing exists until the mailed link is confirmed, the link works once, and a sign-up
+    /// that could not be told apart from a taken address gets the same answer.
+    #[tokio::test]
+    async fn the_account_exists_only_after_its_link_is_confirmed() {
+        let (url, mail) = mail_sink().await;
+        let (fleet, app, _) = setup_with(Some(MailConfig {
+            url,
+            secret: Some("mail-secret".into()),
+            public_url: "https://cloud.example.com".into(),
+        }))
+        .await;
+        fleet.tenancy.lock().await.policy.signup_enabled = true;
+        let (s, cfg) = send(&app, "GET", "/signup/config", None, None).await;
+        assert_eq!(s, StatusCode::OK);
+        assert_eq!(
+            (cfg["open"].clone(), cfg["email_confirmation"].clone()),
+            (json!(true), json!(true))
+        );
+
+        let body = json!({"tenant_id": "acme", "email": "Ops@Acme.io"});
+        let (s, v) = send(&app, "POST", "/signup", None, Some(body.clone())).await;
+        assert_eq!(s, StatusCode::ACCEPTED, "{v}");
+        assert!(v.get("token").is_none(), "no token before the link: {v}");
+        // The mail goes out in the background.
+        for _ in 0..50 {
+            if !mail.lock().unwrap().is_empty() {
+                break;
+            }
+            tokio::time::sleep(StdDuration::from_millis(20)).await;
+        }
+        let (payload, sig) = mail.lock().unwrap()[0].clone();
+        assert_eq!(payload["type"], "signup.verify");
+        assert_eq!(payload["to"], "Ops@acme.io");
+        assert!(
+            sig.unwrap().starts_with("sha256="),
+            "the mail webhook is signed"
+        );
+        let link = payload["link"].as_str().unwrap().to_owned();
+        assert!(
+            link.starts_with("https://cloud.example.com/signup/verify?token=fvv_"),
+            "{link}"
+        );
+        let token = link.split("token=").nth(1).unwrap().to_owned();
+        // Nothing exists yet, and the address is not an account.
+        assert!(fleet.tenancy.lock().await.tenants.is_empty());
+        assert_eq!(fleet.tenancy.lock().await.pending_signups.len(), 1);
+
+        // A second request for the same address inside the resend window sends nothing more.
+        let (s, _) = send(&app, "POST", "/signup", None, Some(body)).await;
+        assert_eq!(s, StatusCode::ACCEPTED);
+        tokio::time::sleep(StdDuration::from_millis(100)).await;
+        assert_eq!(mail.lock().unwrap().len(), 1);
+
+        // The link's page shows the sign-up without using it up; a wrong token is refused.
+        let page = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/signup/verify?token={token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(page.status(), StatusCode::OK);
+        let html = String::from_utf8(
+            axum::body::to_bytes(page.into_body(), usize::MAX)
+                .await
+                .unwrap()
+                .to_vec(),
+        )
+        .unwrap();
+        assert!(html.contains("acme") && html.contains("Ops@acme.io") && !html.contains("fvt_"));
+        assert!(
+            fleet.tenancy.lock().await.tenants.is_empty(),
+            "viewing the link creates nothing"
+        );
+        let (s, _) = send(
+            &app,
+            "POST",
+            "/signup/verify",
+            None,
+            Some(json!({"token": "fvv_nope"})),
+        )
+        .await;
+        assert_eq!(s, StatusCode::BAD_REQUEST);
+
+        // Confirming creates the tenant, with its address marked confirmed, and answers with the token once.
+        let (s, v) = send(
+            &app,
+            "POST",
+            "/signup/verify",
+            None,
+            Some(json!({"token": token})),
+        )
+        .await;
+        assert_eq!(s, StatusCode::CREATED, "{v}");
+        let tok = v["token"].as_str().unwrap().to_owned();
+        assert!(tok.starts_with("fvt_"));
+        {
+            let t = fleet.tenancy.lock().await;
+            let acme = &t.tenants["acme"];
+            assert!(acme.owner_email_verified && acme.self_service);
+            assert_eq!(acme.owner_email.as_deref(), Some("Ops@acme.io"));
+            assert!(t.pending_signups.is_empty());
+        }
+        let (s, me) = send(&app, "GET", "/fleet/tenants/me", Some(&tok), None).await;
+        assert_eq!((s, me["id"].clone()), (StatusCode::OK, json!("acme")));
+        // The link works once.
+        let (s, _) = send(
+            &app,
+            "POST",
+            "/signup/verify",
+            None,
+            Some(json!({"token": token})),
+        )
+        .await;
+        assert_eq!(s, StatusCode::BAD_REQUEST);
+
+        // The same address again: the same answer, and a different mail (so the form leaks nothing).
+        let (s, _) = send(
+            &app,
+            "POST",
+            "/signup",
+            None,
+            Some(json!({"tenant_id": "acme2", "email": "ops@acme.io"})),
+        )
+        .await;
+        assert_eq!(s, StatusCode::ACCEPTED);
+        for _ in 0..50 {
+            if mail.lock().unwrap().len() >= 2 {
+                break;
+            }
+            tokio::time::sleep(StdDuration::from_millis(20)).await;
+        }
+        assert_eq!(mail.lock().unwrap()[1].0["type"], "signup.exists");
+        assert!(fleet.tenancy.lock().await.pending_signups.is_empty());
+        // A taken tenant ID is said plainly: an ID is not a secret and the person must pick another.
+        let (s, _) = send(
+            &app,
+            "POST",
+            "/signup",
+            None,
+            Some(json!({"tenant_id": "acme", "email": "other@acme.io"})),
+        )
+        .await;
+        assert_eq!(s, StatusCode::CONFLICT);
+    }
+
+    /// Sign-up cannot be opened while confirmation is required and central has no way to send the link; a link that
+    /// expired is gone.
+    #[tokio::test]
+    async fn sign_up_stays_closed_without_a_mail_path_and_links_expire() {
+        let (fleet, app, _) = setup().await;
+        fleet.tenancy.lock().await.policy.signup_enabled = true;
+        let (_, cfg) = send(&app, "GET", "/signup/config", None, None).await;
+        assert_eq!(cfg["open"], json!(false));
+        let (s, _) = send(
+            &app,
+            "POST",
+            "/signup",
+            None,
+            Some(json!({"tenant_id": "acme", "email": "ops@acme.io"})),
+        )
+        .await;
+        assert_eq!(s, StatusCode::FORBIDDEN);
+
+        // An expired pending sign-up is not valid and is dropped.
+        let past = Utc::now() - chrono::Duration::hours(25);
+        let token = {
+            let mut t = fleet.tenancy.lock().await;
+            t.add_pending_signup("late", "late@acme.io", None, past)
+                .unwrap()
+        };
+        let (s, _) = send(
+            &app,
+            "POST",
+            "/signup/verify",
+            None,
+            Some(json!({"token": token})),
+        )
+        .await;
+        assert_eq!(s, StatusCode::BAD_REQUEST);
+        assert!(fleet.tenancy.lock().await.tenants.is_empty());
+    }
+
     #[tokio::test]
     async fn the_payment_gate_covers_start_restart_resume_and_snapshot_restore() {
         use axum::http::Method;
@@ -1586,6 +2167,7 @@ mod tests {
         {
             let mut t = fleet.tenancy.lock().await;
             t.policy.signup_enabled = true;
+            t.policy.signup_require_email_verification = false;
             t.policy.signup_require_payment_method = true;
         }
         let (_, cfg) = send(&app, "GET", "/signup/config", None, None).await;
@@ -1858,7 +2440,11 @@ mod tests {
     #[tokio::test]
     async fn sign_ups_from_one_address_are_rate_limited() {
         let (fleet, app, _) = setup().await;
-        fleet.tenancy.lock().await.policy.signup_enabled = true;
+        {
+            let mut t = fleet.tenancy.lock().await;
+            t.policy.signup_enabled = true;
+            t.policy.signup_require_email_verification = false;
+        }
         let mut last = StatusCode::OK;
         for i in 0..=SIGNUPS_PER_ADDRESS_PER_HOUR {
             let mut req = Request::builder()
@@ -1999,6 +2585,7 @@ mod tests {
         {
             let mut t = fleet.tenancy.lock().await;
             t.policy.signup_enabled = true;
+            t.policy.signup_require_email_verification = false;
             t.policy.signup_require_payment_method = true;
         }
         // A required payment method that cannot be collected keeps sign-up closed.

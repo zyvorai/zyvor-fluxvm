@@ -150,9 +150,11 @@ Marked ✅ when the code already enforces it, ☐ when it is yours to do.
   [image catalog](mac-cloud-tenancy.md#image-catalog) avoids it.
 
 **Sign-up and payments**
-- ☐ Keep self-service sign-up **off** until you have decided how to verify email addresses: sign-up does not verify the
-  address it is given. A sign-up owner's first SSO sign-in rotates the sign-up token and clears its keys and webhooks, and
-  Stripe `send_invoice` mails invoices to that unverified address.
+- ✅ Sign-up confirms the address by a mailed link before anything exists (`signup_require_email_verification`, on by
+  default), and cannot be opened without a mail path: set `--signup-mail-webhook` and `--public-url`
+  ([mac-cloud-billing.md](mac-cloud-billing.md#email-confirmation)). Test the mail path before opening sign-up.
+- ☐ Keep `signup_require_email_verification` on outside a closed lab: off, anyone can sign up as anyone, and Stripe
+  `send_invoice` mails invoices to that unconfirmed address.
 - ☐ Set a signup default quota you are comfortable giving anonymous accounts (volumes are capped at 100 GiB by default).
 - ☐ Require a payment method (`signup_require_payment_method`) before accounts can launch VMs.
 - ☐ A Stripe **restricted** key with only the permissions in [mac-cloud-billing.md](mac-cloud-billing.md#setting-up-stripe).
@@ -188,6 +190,7 @@ Marked ✅ when the code already enforces it, ☐ when it is yours to do.
 ## Not done yet
 
 - Real-hardware runs of the multi-Mac paths (cross-Mac overlay and key rotation, leases across several real Macs).
-- Email verification at sign-up, and a "sign out everywhere" action for console sessions.
+- A "sign out everywhere" action for console sessions, and mail delivery with retries and bounces (central hands the
+  message to your webhook and does not see the result).
 - Sessions of tunnels and screens are not tied to console login state; there is no per-tenant absolute tunnel lifetime.
 - An allow-list of directories for disk images that central itself enforces (today the Mac does).

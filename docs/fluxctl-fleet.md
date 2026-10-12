@@ -1084,6 +1084,18 @@ Options:
       --name <NAME>    Name shown in the console (default: the ID)
 ```
 
+### `fluxctl fleet signup-verify`
+
+Confirm a sign-up from the token in the mailed link (the link's page does the same) and print the account's token,
+once. Example: `fluxctl fleet --central https://cloud.example.com signup-verify fvv_...`.
+
+```text
+Usage: fluxctl fleet signup-verify <TOKEN>
+
+Arguments:
+  <TOKEN>  The token from the confirmation link (or the whole link)
+```
+
 ### `fluxctl fleet invoices`
 
 Invoices with their status and a link to pay. A tenant sees its own; the operator everyone's

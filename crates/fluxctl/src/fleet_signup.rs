@@ -37,8 +37,60 @@ pub(super) async fn signup(
     if !out.human {
         return out.json(&v);
     }
-    let token = s(&v, "token");
-    out.done(format!("Account {} created.", out.bold(&tenant_id)));
+    // Email confirmation (the default): the account is created when the mailed link is confirmed.
+    if v.get("email_confirmation").and_then(Value::as_bool) == Some(true) {
+        out.done(format!(
+            "A confirmation link was sent to {}.",
+            out.bold(&email)
+        ));
+        println!(
+            "It is valid for 24 hours. Open it (or run the command below with its token) to create the account"
+        );
+        println!("and see its access token, once.");
+        out.next("fluxctl fleet signup-verify <TOKEN FROM THE LINK>");
+        return Ok(());
+    }
+    print_account(out, central, &tenant_id, &v);
+    Ok(())
+}
+
+/// `fleet signup-verify TOKEN`: confirms a sign-up from the token in the mailed link and prints the account's token,
+/// once. The same thing the link's page does.
+pub(super) async fn signup_verify(central: &str, out: &Out, token: String) -> Result<()> {
+    let token = token
+        .rsplit("token=")
+        .next()
+        .unwrap_or(&token)
+        .trim()
+        .to_owned();
+    let v = call(
+        central,
+        None,
+        Method::POST,
+        "/signup/verify",
+        Some(json!({ "token": token })),
+    )
+    .await
+    .map_err(|e| match status_of(&e) {
+        Some(400) => e.context("that link has expired or was already used; sign up again"),
+        _ => e,
+    })?;
+    if !out.human {
+        return out.json(&v);
+    }
+    let id = v
+        .get("tenant")
+        .and_then(|t| t.get("id"))
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_owned();
+    print_account(out, central, &id, &v);
+    Ok(())
+}
+
+fn print_account(out: &Out, central: &str, tenant_id: &str, v: &Value) {
+    let token = s(v, "token");
+    out.done(format!("Account {} created.", out.bold(tenant_id)));
     println!();
     kv(out, &[("Token", token.to_owned())]);
     println!();
@@ -57,7 +109,6 @@ pub(super) async fn signup(
     } else {
         out.next("fluxctl fleet status");
     }
-    Ok(())
 }
 
 fn status_cell(inv: &Value) -> Cell {

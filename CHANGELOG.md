@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+### Added: sign-up confirms the email address; shared warm pools are opt-in
+- **Sign-up email confirmation (policy `signup_require_email_verification`, on by default).** `POST /signup` records a
+  pending sign-up (24 hours) and mails a link through the operator's **mail webhook** (`--signup-mail-webhook URL|log`,
+  `--signup-mail-secret-file`, needs `--public-url`; central does not speak SMTP). The answer is `202`, the same whether
+  or not the address has an account. The link opens a page whose button (`POST /signup/verify`, also JSON, also
+  `fluxctl fleet signup-verify`) creates the tenant with `owner_email_verified` and shows its token once, so a mail
+  scanner cannot use a link up. The Stripe customer is made then. A confirmed owner's first SSO sign-in no longer
+  rotates the token. Sign-up cannot be opened while confirmation is required and no mail webhook is set.
+  `GET /signup/config` reports `email_confirmation`; the console's sign-up sheet says "check your email".
+  **Behaviour change:** a central that had `signup_enabled` and no mail webhook now keeps sign-up closed until one is set
+  (or confirmation is turned off, for labs).
+- **Shared warm pools are off for tenants (policy `allow_shared_pool_claims`, default `false`).** Their VMs share a
+  network and the image's credentials between tenants, and a tenant could plant something in a warm VM that another
+  claims next; neither network isolation nor per-claim secrets fixes that. Tenants use pools of their own; the operator
+  can allow shared claims for tenants that trust each other. **Behaviour change** for operators using shared pools.
+
 ### Changed: viewers no longer get live screens or console logs; console log viewer redrawn
 - `GET /fleet/vms/{node}/{id}/screen` and `/logs` now answer `403` for the `viewer` role (both can hold secrets);
   members, admins, owners, API keys and the operator are unchanged. The console says why instead of showing a broken
