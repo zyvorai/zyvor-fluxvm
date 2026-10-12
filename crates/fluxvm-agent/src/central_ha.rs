@@ -90,6 +90,13 @@ impl HaHandle {
     pub fn is_leader(&self) -> bool {
         self.0.is_leader()
     }
+
+    /// Clean shutdown: stops serving and electing, then releases the lock (if held) so a standby takes over at once
+    /// instead of after the TTL.
+    pub async fn release(&self) -> anyhow::Result<()> {
+        self.kill();
+        self.0.cfg.store.release(&self.0.cfg.advertise_url).await
+    }
 }
 
 /// Loads the mirrored state into this central (on promotion, before it serves anything).
@@ -393,6 +400,41 @@ mod tests {
         // The API itself still needs the token.
         let (s, _) = call(&app, "GET", "/fleet/nodes", "wrong", json!({})).await;
         assert_eq!(s, 401);
+    }
+
+    #[tokio::test]
+    async fn a_clean_shutdown_hands_over_at_once() {
+        let store = HaStore::memory("test");
+        let (da, db) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        // A long TTL: without the release, the standby would wait a minute.
+        let mk = |url: &str, dir: &std::path::Path| {
+            let (_, h) = router_with_handle(CentralConfig {
+                state_dir: dir.to_path_buf(),
+                token: Some("admin".into()),
+                reconcile_interval: None,
+                ha: Some(HaConfig {
+                    store: store.clone(),
+                    advertise_url: url.into(),
+                    ttl: std::time::Duration::from_secs(60),
+                }),
+            });
+            h.unwrap()
+        };
+        let a = mk("http://central-a:7799", da.path());
+        wait_for(|| a.is_leader()).await;
+        let b = mk("http://central-b:7799", db.path());
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert!(!b.is_leader());
+        a.release().await.unwrap();
+        assert!(!a.is_leader());
+        // b's next renewal (every TTL/3 = 20 s) would be slow for a test; ask the store directly instead.
+        assert_eq!(
+            store
+                .acquire("http://central-b:7799", std::time::Duration::from_secs(60))
+                .await
+                .unwrap(),
+            "http://central-b:7799"
+        );
     }
 
     #[tokio::test]
