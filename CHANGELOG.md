@@ -13,6 +13,17 @@
 - README, POSITIONING and PRODUCT_OVERVIEW gain the agent-sandbox and platform rows; a PR-time `Docs site check`
   workflow builds the site before merge.
 
+### Fixed: `fluxctl service install` no longer starts a second daemon beside Homebrew's
+- It refuses, before writing the plist, when it runs from a Homebrew install, when a `brew services` plist for `fluxvm`
+  exists, or when something already accepts connections on the configured `listen` address, and says what to do
+  (`brew services start zyvorai/tap/fluxvm`, or a separate `listen` and `state_dir`). Both agents defaulted to
+  `127.0.0.1:7788` and the same state directory, so the second one exited with `Address already in use` after it had
+  opened the state directory. `--force` overrides; a reinstall over its own loaded agent is not treated as a clash.
+- New global `--listen HOST:PORT` and `--state-dir DIR` flags (and `FLUXVM_LISTEN`, `FLUXVM_STATE_DIR`) override `listen`
+  and `state_dir` from the config, before or after the subcommand; `service install` writes them into the LaunchAgent, so
+  a second daemon is `fluxctl service install --listen 127.0.0.1:7789 --state-dir ~/fluxvm-second`. The guard checks the
+  overridden address.
+
 ### Fixed: three rough edges found installing 0.4.4 from the Homebrew tap on a clean Mac
 - `fluxctl mcp install` (and `fluxctl service install`, and the ssh ProxyCommand of `fluxctl fleet ssh`) wrote the versioned
   Cellar path (`/opt/homebrew/Cellar/fluxvm/0.4.4/bin/fluxctl`), which `brew upgrade` plus `brew cleanup` removes. They now
@@ -23,12 +34,15 @@
 
 ### Docs: install on a Mac with Homebrew
 - New `docs/install-macos.md`: install, the service, a first VM, and wiring an MCP client, each tested from the published
-  tap on an M4 from a fresh `HOME`; upgrade and uninstall are marked as not exercised.
+  tap on an M4 from a fresh `HOME`. `fluxctl service install`, a real `brew upgrade` (0.4.1 to 0.4.4) and `brew
+  uninstall` were run too; the page records the clash with `brew services` and that an MCP entry written by 0.4.4 or
+  earlier is dead after an upgrade.
 
 ### Added: an agent-sandbox demo with real timings
 - `examples/agent-sandbox-demo/local-model.sh`: a sandbox with no network card reaching a model server on the Mac's
-  loopback through one vsock port; verified on an M4 with a stand-in server (the relay was "unverified on hardware"
-  before), not yet with a real llama.cpp or MLX model.
+  loopback through one vsock port. The relay was "unverified on hardware"; it is now verified on an M4 with a stand-in
+  server and with a real `llama-server` model (SmolLM2-135M, a deliberately tiny model); not yet with MLX or a larger
+  model.
 - `examples/agent-sandbox-demo/run.sh`: an offline sandbox, a failing test, a fork into four running copies, four fixes
   tried in parallel, the passing one kept. About 4 s to fork and 0.3 s to test on an M4 mini; its README lists what it
   does not do (a NAT sandbox cannot fork; copies keep the parent's identity; the first create on a fresh daemon took 61 s).

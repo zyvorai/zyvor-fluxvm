@@ -48,7 +48,21 @@ The API listens on `127.0.0.1:7788`. Use `brew services` for the background serv
 both register a LaunchAgent for the same daemon on port 7788, and Homebrew's is the one `brew upgrade` manages. Tested
 both ways: `fluxctl service install` writes `~/Library/LaunchAgents/dev.zyvor.fluxvm.plist`, starts it and serves
 `/healthz`; starting `brew services` while it runs makes the Homebrew one exit with `Address already in use`;
-`fluxctl service uninstall` removes the plist and stops the daemon. Pick one.
+`fluxctl service uninstall` removes the plist and stops the daemon. Pick one: `fluxctl service install` now refuses
+(before writing anything) when it runs from a Homebrew install, when a `brew services` plist exists, or when something
+already listens on the configured address, and points you at `brew services start`. `--force` overrides it.
+
+A second daemon (a separate FluxVM for another purpose) needs its own address and its own state directory; both are
+flags (or `FLUXVM_LISTEN` and `FLUXVM_STATE_DIR`) and `service install` writes them into the LaunchAgent:
+
+```bash
+fluxctl service install --listen 127.0.0.1:7789 --state-dir ~/fluxvm-second
+fluxctl --server http://127.0.0.1:7789 list          # point the CLI (and MCP, via --server) at it
+fluxctl serve --listen 127.0.0.1:7789 --state-dir /tmp/try   # or run one in the foreground
+```
+
+The guard checks the address you pass, so a second agent on a free port is accepted. Two daemons must never share a state
+directory.
 
 > `/readyz` answers `503` on a Mac in 0.4.4: it still asked for the Linux eBPF dataplane. It is fixed in the release
 > after 0.4.4. Use `/healthz` for liveness.
@@ -117,7 +131,8 @@ and binaries gone, no LaunchAgent or daemon left behind).
 | `curl 127.0.0.1:7788/readyz` gives `503` | Expected on 0.4.4 (see above); `/healthz` is the check. |
 | `the Apple runner fluxvm-vz-runner was not found (looked at: …/target/debug/…)` | A VM record from a development build points at a path that no longer exists. Delete the VM (`fluxctl delete <id>`) and create it again. |
 | Snapshot restore or a warm slot fails | The login session is locked or absent. Unlock it, or set up the dedicated auto-login user. |
-| `brew services` shows `Running: false` and the log says `Address already in use` | A `fluxctl service install` agent already holds port 7788: `fluxctl service uninstall`, then `brew services restart zyvorai/tap/fluxvm`. |
+| `brew services` shows `Running: false` and the log says `Address already in use` | A `fluxctl service install` agent (from a version before the guard, or installed with `--force`) already holds port 7788: `fluxctl service uninstall`, then `brew services restart zyvorai/tap/fluxvm`. |
+| `fluxctl service install` says FluxVM is managed by Homebrew, or that something already listens | The guard working: use `brew services start zyvorai/tap/fluxvm`, or stop the other daemon. `--force` installs anyway. |
 | The MCP client lost the `fluxvm` tools after `brew upgrade` | The entry points at the removed versioned path: re-run `fluxctl mcp install <client>`. |
 | The client does not list the `fluxvm` tools | Restart the client; `fluxctl mcp status` shows whether the entry is written. |
 | A VM needs vmnet, bridged networking or USB | Not available in the ad hoc package; see [macos-signing.md](macos-signing.md). |
