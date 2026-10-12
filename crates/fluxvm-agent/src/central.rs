@@ -1585,6 +1585,24 @@ async fn list_vms_as(fleet: &Fleet, caller: &Caller) -> Json<Value> {
                 stamped || tenancy.owns(caller, node, id)
             });
         }
+        // Other tenants' Macs are none of this tenant's business, and a node's error text can carry its address.
+        if let Some(down) = all
+            .get_mut("unreachable_nodes")
+            .and_then(Value::as_array_mut)
+        {
+            down.retain(|u| {
+                let node = u.get("node").and_then(Value::as_str).unwrap_or_default();
+                tenancy
+                    .active_lease_for_node(node)
+                    .is_some_and(|l| l.tenant == *t)
+                    || tenancy.vms.iter().any(|v| {
+                        v.active() && v.node == node && v.tenant.as_deref() == Some(t.as_str())
+                    })
+            });
+            for u in down.iter_mut() {
+                u["reason"] = json!("did not answer");
+            }
+        }
     }
     Json(all)
 }

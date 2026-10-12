@@ -15,7 +15,10 @@ function h(tag, attrs, ...children) {
   for (const [k, v] of Object.entries(attrs || {})) {
     if (v === undefined || v === null || v === false) continue;
     if (k === 'class') e.className = v;
-    else if (k === 'style' && typeof v === 'object') Object.assign(e.style, v);
+    else if (k === 'style' && typeof v === 'object') {
+      // Custom properties (`--p`) are not plain properties of CSSStyleDeclaration: they need setProperty.
+      for (const [p, x] of Object.entries(v)) if (p.startsWith('--')) e.style.setProperty(p, x); else e.style[p] = x;
+    }
     else if (k.startsWith('on')) e.addEventListener(k.slice(2), v);
     else if (v === true) e.setAttribute(k, '');
     else e.setAttribute(k, v);
@@ -208,10 +211,12 @@ async function haStatus() {
 
 let timer = null;
 let loading = false;
+let again = false; // a refresh was asked for while one was loading (after an action, or a new sign-in)
 async function refresh({ force = false } = {}) {
   clearTimeout(timer);
-  if (loading) return;
+  if (loading) { again = true; return; }
   loading = true;
+  let signedOut = false;
   try {
     await haStatus();
     await load();
@@ -219,13 +224,21 @@ async function refresh({ force = false } = {}) {
     S.loadedAt = Date.now();
     showApp();
   } catch (e) {
-    if (e.status === 401) { showSignin(token() ? 'That token was not accepted. Check it and try again.' : ''); loading = false; return; }
-    if (e.status === 403 && !S.data) { showSignin('This tenant is disabled. Ask your operator to enable it.'); loading = false; return; }
-    S.error = e;
-    if (S.data) showApp(); else showSignin(e.message);
+    if (e.status === 401) {
+      showSignin(token() ? 'That token was not accepted. Check it and try again.' : '');
+      signedOut = true;
+    } else if (e.status === 403 && !S.data) {
+      showSignin('This tenant is disabled. Ask your operator to enable it.');
+      signedOut = true;
+    } else {
+      S.error = e;
+      if (S.data) showApp(); else showSignin(e.message);
+    }
   } finally {
     loading = false;
   }
+  if (again) { again = false; return refresh({ force: true }); }
+  if (signedOut) return;
   render(force);
   if (document.visibilityState === 'visible') timer = setTimeout(refresh, 10000);
 }
@@ -1300,7 +1313,7 @@ function networkSheet() {
     return;
   }
   const body = [
-    h('label', { class: 'field' }, h('span', {}, 'Name'), h('input', { name: 'name', required: true, pattern: '[a-z0-9][a-z0-9\\-]{0,30}', placeholder: 'backend', autocomplete: 'off' }),
+    h('label', { class: 'field' }, h('span', {}, 'Name'), h('input', { name: 'name', required: true, pattern: '[a-z0-9]([a-z0-9\\-]{0,38}[a-z0-9])?', placeholder: 'backend', autocomplete: 'off' }),
       h('div', { class: 'hint' }, 'Lowercase letters, digits and dashes. VMs join it by this name.')),
     op ? h('label', { class: 'field' }, h('span', {}, 'Tenant'), h('select', { name: 'tenant' },
       h('option', { value: '' }, 'None (an operator network)'),
@@ -1311,7 +1324,7 @@ function networkSheet() {
     h('details', { class: 'adv' }, h('summary', {}, 'Advanced'), h('div', { class: 'grid2' },
       h('label', { class: 'field' }, h('span', {}, 'VMs per Mac'), h('input', { name: 'hosts_per_node', type: 'number', min: '2', max: '126', value: '30' }),
         h('div', { class: 'hint' }, 'Addresses each Mac gets on this network.')),
-      h('label', { class: 'field' }, h('span', {}, 'MTU'), h('input', { name: 'mtu', type: 'number', min: '576', max: '9000', value: '1400' }),
+      h('label', { class: 'field' }, h('span', {}, 'MTU'), h('input', { name: 'mtu', type: 'number', min: '1280', max: '9000', value: '1400' }),
         h('div', { class: 'hint' }, 'Raise it only on a jumbo-frame network.')))),
   ];
   openSheet({
@@ -1402,9 +1415,11 @@ function drainSheet(m) {
     onSubmit: async (f) => {
       if (leased && !f.has('force')) throw new Error('Tick “Drain anyway” to drain a leased Mac.');
       const r = await api('POST', '/fleet/nodes/' + enc(m.name) + '/drain?mode=' + enc(f.get('mode')) + (f.has('force') ? '&force=true' : ''));
-      const n = (k) => (Array.isArray(r[k]) ? r[k].length : 0);
-      toast(m.name + ' draining: ' + [n('deleted') && n('deleted') + ' deleted', n('rescheduled') && n('rescheduled') + ' moved', n('kept') && n('kept') + ' kept running']
-        .filter(Boolean).join(', ') || m.name + ' cordoned');
+      const acts = Array.isArray(r.actions) ? r.actions : [];
+      const n = (a) => acts.filter((x) => x.action === a).length;
+      const parts = [n('evicted') && n('evicted') + ' deleted', n('rescheduled') && n('rescheduled') + ' moved',
+        n('kept') && n('kept') + ' kept running', n('failed') && n('failed') + ' failed'].filter(Boolean);
+      toast(m.name + (parts.length ? ' draining: ' + parts.join(', ') : ' cordoned') + (r.done ? '. Nothing left on it.' : ''), n('failed') > 0);
       refresh({ force: true });
     },
   });
@@ -1515,8 +1530,10 @@ $('signin-form').addEventListener('submit', (e) => {
   if (!t) return;
   storage.set('sessionStorage', TOKEN_KEY, t);
   $('signin-token').value = '';
-  S.role = null;
-  S.data = null;
+  // Nothing from the previous token's session carries over.
+  Object.assign(S, { role: null, me: null, data: null, error: null, usage: null, policy: null, exec: {}, query: '',
+    lastViewKey: '', lastInspKey: '', loadedAt: 0 });
+  $('search').value = '';
   refresh({ force: true });
 });
 window.addEventListener('scroll', () => $('bar').classList.toggle('scrolled', window.scrollY > 4), { passive: true });

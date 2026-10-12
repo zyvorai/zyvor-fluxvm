@@ -58,7 +58,8 @@ Central does not copy images: pull each one onto every Mac that should run it (`
 [vm-images.md](vm-images.md)), then add it.
 
 ```bash
-curl -X PUT $CENTRAL/fleet/images/macos-27-xcode -H "Authorization: Bearer $FLEET_TOKEN" -d '{
+curl -X PUT $CENTRAL/fleet/images/macos-27-xcode -H "Authorization: Bearer $FLEET_TOKEN" \
+  -H 'content-type: application/json' -d '{
   "display_name": "macOS 27 with Xcode", "guest_os": "macos",
   "image": "/Users/fluxvm/vms/macos-27-xcode/disk.raw", "vcpus": 6, "memory_mib": 16384,
   "source": "ghcr.io/acme/macos-xcode:27"}'
@@ -85,7 +86,11 @@ Central stores only the SHA-256 of a tenant token. `fluxctl fleet tenant rotate-
 
 A tenant token can call only these routes: `POST/GET /fleet/vms`, `DELETE /fleet/vms/{node}/{id}`,
 `POST /fleet/vms/{node}/{id}/exec`, `GET/POST /fleet/leases`, `GET /fleet/leases/{id}`, `POST /fleet/leases/{id}/release`,
-`GET /fleet/usage`, `GET /fleet/tenants/me` and `GET /fleet/capacity`. Everything else is operator-only.
+`GET /fleet/usage`, `GET /fleet/tenants/me`, `GET /fleet/capacity`, `GET /fleet/images`, `GET /fleet/nodes/{name}` (a Mac
+it leases), and its own private networks (`GET/POST /fleet/overlays`, `GET/DELETE /fleet/overlays/{name}`,
+`POST /fleet/overlays/{name}/members`, `DELETE /fleet/overlays/{name}/members/{node}`,
+`POST /fleet/overlays/{name}/rotate`). Everything else is operator-only. In `GET /fleet/vms`, a tenant's
+`unreachable_nodes` names only its own Macs and Macs running its VMs, without the node's error text.
 
 ## Leases
 
