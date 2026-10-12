@@ -69,6 +69,16 @@ pub struct QemuBackend;
 /// `req.shared_folders` (`tag` is always `"fs{index}"`).
 pub type VirtiofsSocket = (String, PathBuf);
 
+/// The `-device` value for one validated `vfio_devices` entry.
+fn vfio_device_arg(dev: &str) -> String {
+    let dev = dev.trim().to_ascii_lowercase();
+    if fluxvm_core::mdev::valid_mdev_uuid(&dev) {
+        format!("vfio-pci,sysfsdev=/sys/bus/mdev/devices/{dev}")
+    } else {
+        format!("vfio-pci,host={dev}")
+    }
+}
+
 pub fn build_args(
     cfg: &Config,
     req: &CreateVmRequest,
@@ -296,8 +306,9 @@ pub fn build_args(
     {
         a.extend(["-numa".into(), format!("cpu={cpus},node=0")]);
     }
-    for host in &req.vfio_devices {
-        a.extend(["-device".into(), format!("vfio-pci,host={host}")]);
+    req.validate_vfio_devices()?;
+    for dev in &req.vfio_devices {
+        a.extend(["-device".into(), vfio_device_arg(dev)]);
     }
     for (i, (tag, socket)) in virtiofs_sockets.iter().enumerate() {
         a.extend([
@@ -1232,6 +1243,35 @@ mod tests {
         assert!(build_args(&cfg(), &r, &ctx(), &[]).is_err());
         r.hugepages = None;
         r.vfio_devices = vec!["0000:01:00.0".into()];
+        assert!(build_args(&cfg(), &r, &ctx(), &[]).is_err());
+    }
+
+    #[test]
+    fn mdev_uuids_pass_through_by_sysfs_path() {
+        let mut r = req(2048);
+        r.vfio_devices = vec![
+            "0000:01:00.0".into(),
+            "5A3C1D2E-0000-4000-8000-000000000001".into(),
+        ];
+        let args = build_args(&cfg(), &r, &ctx(), &[]).unwrap();
+        assert!(args.iter().any(|a| a == "vfio-pci,host=0000:01:00.0"));
+        assert!(
+            args.iter().any(|a| a
+                == "vfio-pci,sysfsdev=/sys/bus/mdev/devices/5a3c1d2e-0000-4000-8000-000000000001")
+        );
+    }
+
+    #[test]
+    fn vfio_entries_that_are_not_an_address_or_uuid_are_refused() {
+        for bad in ["0000:01:00.0,x-igd-opregion=on", "../../etc", ""] {
+            let mut r = req(2048);
+            r.vfio_devices = vec![bad.into()];
+            assert!(build_args(&cfg(), &r, &ctx(), &[]).is_err(), "{bad:?}");
+        }
+        let mut r = req(2048);
+        r.vfio_devices = vec!["01:00.0".into()];
+        assert!(build_args(&cfg(), &r, &ctx(), &[]).is_ok());
+        r.vfio_devices = vec!["0000:01:00.0".into(), "0000:01:00.0".into()];
         assert!(build_args(&cfg(), &r, &ctx(), &[]).is_err());
     }
 

@@ -52,6 +52,7 @@ fn conflict(msg: impl Into<String>) -> Response {
 
 /// An address a tunnel may connect to as the guest's: not loopback, not link-local (cloud metadata services live
 /// there), not a group. The address can come from the guest itself, so it is never trusted further than this.
+#[cfg(test)]
 fn usable_guest_ip(ip: IpAddr) -> bool {
     usable_ip(ip, false)
 }

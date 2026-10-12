@@ -86,6 +86,7 @@ Eleven use cases map onto what is implemented today — nothing below is aspirat
 | Container (OCI) sandboxes on a Mac, one VM per container | [docs/oci-sandboxes.md](oci-sandboxes.md) |
 | GPUs for sandboxes | [docs/sandbox-gpus.md](sandbox-gpus.md) |
 | Host topology and NUMA binding | [docs/host-topology.md](host-topology.md) |
+| vGPU (mediated devices) and GPU health | [docs/vgpu.md](vgpu.md) |
 | Virtual networks (eBPF routing, Geneve, SNAT, floating IPs) | [docs/virtual-network.md](virtual-network.md) |
 | Native KVM, no QEMU (golden template, snapshots, SMP) | [docs/native-kvm-no-qemu.md](native-kvm-no-qemu.md) · [crates/fluxvm-hypervisor/README.md](../crates/fluxvm-hypervisor/README.md) |
 | Egress HTTP method/path ACL and HTTPS interception | [docs/http-acl.md](http-acl.md) |

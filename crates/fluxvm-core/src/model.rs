@@ -1416,6 +1416,25 @@ impl CreateVmRequest {
         Ok(())
     }
 
+    /// Every `vfio_devices` entry must be a PCI address (`0000:01:00.0` or
+    /// `01:00.0`) or a mediated device UUID, each listed once: the value
+    /// becomes part of a QEMU `-device` argument.
+    pub fn validate_vfio_devices(&self) -> anyhow::Result<()> {
+        let mut seen = std::collections::HashSet::new();
+        for d in &self.vfio_devices {
+            let key = d.trim().to_ascii_lowercase();
+            let short_bdf = key.len() == 7 && crate::gpu::valid_pci_bdf(&format!("0000:{key}"));
+            if !crate::gpu::valid_pci_bdf(&key) && !short_bdf && !crate::mdev::valid_mdev_uuid(&key)
+            {
+                anyhow::bail!("vfio_devices entry {d:?} is neither a PCI address nor an mdev UUID");
+            }
+            if !seen.insert(key) {
+                anyhow::bail!("vfio_devices lists {d:?} twice");
+            }
+        }
+        Ok(())
+    }
+
     /// Checks `numa` against the rest of the request: no mixing with the
     /// legacy `numa_node`/`cpuset` fields, memory adds up to `memory_mib`,
     /// and every boot vCPU `0..vcpus` sits on exactly one node.
@@ -1608,7 +1627,9 @@ pub struct CreateVmRequest {
     /// -mem-path /dev/hugepages/...` when set true).
     #[serde(default)]
     pub hugepages: Option<bool>,
-    /// QEMU only: VFIO PCI passthrough device addresses (`host=0000:…`).
+    /// QEMU only: VFIO passthrough devices. Each is a PCI address
+    /// (`0000:01:00.0`, passed as `host=`) or a mediated device UUID from
+    /// `POST /v1/host/mdev` (passed as `sysfsdev=`), e.g. a vGPU.
     #[serde(default)]
     pub vfio_devices: Vec<String>,
     /// QEMU only: guest NUMA nodes, each bound to a host NUMA node. Guest
@@ -2137,6 +2158,13 @@ pub struct RuntimeHostCapability {
     /// reached over several paths shows up as one `/dev/nvmeXnY`.
     #[serde(default)]
     pub nvme_multipath: bool,
+    /// `/v1/host/mdev` lists, creates and removes mediated devices (vGPU),
+    /// and `vfio_devices` accepts their UUIDs (QEMU).
+    #[serde(default)]
+    pub mdev: bool,
+    /// `GET /v1/host/gpus/health` reports per-GPU health.
+    #[serde(default)]
+    pub gpu_health: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

@@ -2786,6 +2786,7 @@ impl VmManager {
             anyhow::bail!("balloon requires backend qemu");
         }
         req.validate_balloon()?;
+        req.validate_vfio_devices()?;
 
         let result: Result<()> = async {
             if req.storage == StorageBackend::Shared {

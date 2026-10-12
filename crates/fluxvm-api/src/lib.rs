@@ -61,14 +61,20 @@ impl<E: Into<anyhow::Error>> From<E> for ApiError {
     fn from(e: E) -> Self {
         let e: anyhow::Error = e.into();
         // Not enough free GPUs is a capacity condition the caller can retry, not a bad request.
-        if e.downcast_ref::<fluxvm_core::gpu::GpuShortage>().is_some() {
+        if e.downcast_ref::<fluxvm_core::gpu::GpuShortage>().is_some()
+            || e.downcast_ref::<fluxvm_core::mdev::MdevShortage>()
+                .is_some()
+        {
             return Self {
                 status: StatusCode::SERVICE_UNAVAILABLE,
                 message: format!("{:#}", e),
             };
         }
         // A control call that needs a live runner on a VM that is not running: a state conflict.
-        if e.downcast_ref::<fluxvm_scheduler::VmNotLive>().is_some() {
+        if e.downcast_ref::<fluxvm_scheduler::VmNotLive>().is_some()
+            || e.downcast_ref::<fluxvm_core::mdev::MdevConflict>()
+                .is_some()
+        {
             return Self {
                 status: StatusCode::CONFLICT,
                 message: format!("{:#}", e),
@@ -384,6 +390,9 @@ pub fn router(manager: Arc<VmManager>) -> Router {
         .route("/v1/host/gpus/preflight", get(host_gpu_preflight))
         .route("/v1/host/gpus/bind", post(bind_host_gpu))
         .route("/v1/host/gpus/release", post(release_host_gpu))
+        .route("/v1/host/gpus/health", get(host_gpu_health))
+        .route("/v1/host/mdev", get(list_host_mdev).post(create_host_mdev))
+        .route("/v1/host/mdev/{uuid}", delete(remove_host_mdev))
         .route("/v1/host/pci/bind", post(bind_host_pci))
         .route("/v1/host/pci/release", post(release_host_pci))
         .route("/v1/vms", post(create_vm).get(list_vms))
@@ -2274,6 +2283,8 @@ async fn runtime_capabilities(
             io_uring: io.io_uring,
             vhost_user_blk: io.vhost_user_blk,
             nvme_multipath: io.nvme_multipath,
+            mdev: cfg!(target_os = "linux"),
+            gpu_health: cfg!(target_os = "linux"),
         },
     })
 }
@@ -2315,6 +2326,52 @@ async fn list_host_gpus(State(m): State<Arc<VmManager>>) -> ApiResult<Json<serde
     let allocated = allocated_vfio_bdfs(&m.list().await);
     let gpus = fluxvm_core::gpu::list_host_gpus(&m.cfg.state_dir, &allocated)?;
     Ok(Json(json!({ "items": gpus })))
+}
+
+async fn host_gpu_health() -> Json<serde_json::Value> {
+    let items = tokio::task::spawn_blocking(fluxvm_core::gpu_health::discover_host)
+        .await
+        .unwrap_or_default();
+    Json(json!({ "items": items }))
+}
+
+async fn list_host_mdev(State(m): State<Arc<VmManager>>) -> Json<fluxvm_core::mdev::MdevInventory> {
+    let allocated = allocated_vfio_bdfs(&m.list().await);
+    Json(
+        tokio::task::spawn_blocking(move || fluxvm_core::mdev::discover_host(&allocated))
+            .await
+            .unwrap_or_default(),
+    )
+}
+
+async fn create_host_mdev(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Json(req): Json<fluxvm_core::mdev::MdevCreateRequest>,
+) -> ApiResult<impl IntoResponse> {
+    require_admin(role)?;
+    let allocated = allocated_vfio_bdfs(&m.list().await);
+    let inst = tokio::task::spawn_blocking(move || {
+        fluxvm_core::mdev::create(std::path::Path::new("/"), &req, &allocated)
+    })
+    .await
+    .map_err(anyhow::Error::from)??;
+    Ok((StatusCode::CREATED, Json(inst)))
+}
+
+async fn remove_host_mdev(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(uuid): Path<String>,
+) -> ApiResult<StatusCode> {
+    require_admin(role)?;
+    let allocated = allocated_vfio_bdfs(&m.list().await);
+    tokio::task::spawn_blocking(move || {
+        fluxvm_core::mdev::remove(std::path::Path::new("/"), &uuid, &allocated)
+    })
+    .await
+    .map_err(anyhow::Error::from)??;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn host_gpu_preflight(

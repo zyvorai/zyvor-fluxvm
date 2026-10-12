@@ -12,6 +12,8 @@
 #                            adds bin/FluxVMRunner.app, the runner that can use vmnet and bridged networking
 #   FLUXVM_PROFILE_VMNETD    profile for dev.zyvor.fluxvm.vmnetd (com.apple.vm.networking)
 #   FLUXVM_PROFILE_USBD      profile for dev.zyvor.fluxvm.usbd (com.apple.developer.accessory-access.usb)
+#   FLUXVM_SKIP_USBD=1       leave out the USB Accessory Access helper (done automatically when the SDK lacks the
+#                            AccessoryAccess framework, as on hosted CI runners)
 #   FLUXVM_NOTARIZE=1        notarize (needs FLUXVM_NOTARY_PROFILE or FLUXVM_NOTARY_KEY/_KEY_ID/_ISSUER) and staple
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -71,22 +73,40 @@ cp "$HELPERS/fluxvm-vmnetd" "$STAGE/libexec/FluxVMNetworking.app/Contents/MacOS/
 fs_sign_bundle "$STAGE/libexec/FluxVMNetworking.app" dev.zyvor.fluxvm.vmnetd "${FLUXVM_PROFILE_VMNETD:-}" \
   com.apple.security.virtualization com.apple.vm.networking
 
-# USB Accessory Access helper (macOS 27+): owns the user's consent for physical USB passthrough.
+# USB Accessory Access helper (macOS 27+): owns the user's consent for physical USB passthrough. It needs the
+# AccessoryAccess framework of the macOS 27 SDK, which hosted CI runners' Xcode may not have: then the package is built
+# without it (USB passthrough stays a source build; docs/macos-signing.md) instead of failing the whole release.
+# FLUXVM_SKIP_USBD=1 forces that.
+USBD=0
+if [[ "${FLUXVM_SKIP_USBD:-0}" != 1 ]]; then
+  PROBE="$(mktemp -d)"
+  echo 'import AccessoryAccess' > "$PROBE/probe.swift"
+  if xcrun swiftc -swift-version 5 -target arm64-apple-macosx27.0 -typecheck "$PROBE/probe.swift" >/dev/null 2>&1; then
+    USBD=1
+  fi
+  rm -rf "$PROBE"
+fi
 rm -rf "$STAGE/libexec/FluxVMUSBAccess.app"
-mkdir -p "$STAGE/libexec/FluxVMUSBAccess.app/Contents/MacOS"
-cp "$APPLE/macos/usbd/Info.plist" "$STAGE/libexec/FluxVMUSBAccess.app/Contents/Info.plist"
-xcrun swiftc -swift-version 5 -O -target arm64-apple-macosx27.0 "$APPLE/macos/usbd/main.swift" \
-  -framework AppKit -framework Foundation -framework AccessoryAccess \
-  -o "$STAGE/libexec/FluxVMUSBAccess.app/Contents/MacOS/FluxVMUSBAccess"
-fs_sign_bundle "$STAGE/libexec/FluxVMUSBAccess.app" dev.zyvor.fluxvm.usbd "${FLUXVM_PROFILE_USBD:-}" \
-  com.apple.developer.accessory-access.usb
+if [[ "$USBD" == 1 ]]; then
+  mkdir -p "$STAGE/libexec/FluxVMUSBAccess.app/Contents/MacOS"
+  cp "$APPLE/macos/usbd/Info.plist" "$STAGE/libexec/FluxVMUSBAccess.app/Contents/Info.plist"
+  xcrun swiftc -swift-version 5 -O -target arm64-apple-macosx27.0 "$APPLE/macos/usbd/main.swift" \
+    -framework AppKit -framework Foundation -framework AccessoryAccess \
+    -o "$STAGE/libexec/FluxVMUSBAccess.app/Contents/MacOS/FluxVMUSBAccess"
+  fs_sign_bundle "$STAGE/libexec/FluxVMUSBAccess.app" dev.zyvor.fluxvm.usbd "${FLUXVM_PROFILE_USBD:-}" \
+    com.apple.developer.accessory-access.usb
+else
+  echo "package-macos: the AccessoryAccess framework is not in this SDK (or FLUXVM_SKIP_USBD=1): building without the USB helper" >&2
+fi
 
 # Launch agents pointing into the bundles; the helper install scripts (FLUXVM_PACKAGE_DIR=… build-install.sh)
 # substitute __PREFIX__ with where the package was unpacked.
 sed 's#/usr/local/libexec/fluxvm-vmnetd#__PREFIX__/libexec/FluxVMNetworking.app/Contents/MacOS/fluxvm-vmnetd#' \
   "$APPLE/macos/vmnetd/dev.zyvor.fluxvm.vmnetd.plist" > "$STAGE/share/launchd/dev.zyvor.fluxvm.vmnetd.plist"
-sed 's#/Applications/FluxVMUSBAccess.app#__PREFIX__/libexec/FluxVMUSBAccess.app#' \
-  "$APPLE/macos/usbd/dev.zyvor.fluxvm.usbd.plist" > "$STAGE/share/launchd/dev.zyvor.fluxvm.usbd.plist"
+if [[ "$USBD" == 1 ]]; then
+  sed 's#/Applications/FluxVMUSBAccess.app#__PREFIX__/libexec/FluxVMUSBAccess.app#' \
+    "$APPLE/macos/usbd/dev.zyvor.fluxvm.usbd.plist" > "$STAGE/share/launchd/dev.zyvor.fluxvm.usbd.plist"
+fi
 
 # The networking runner: only with a profile granting com.apple.vm.networking (Apple's approval), because an ad hoc
 # runner claiming it is killed at launch. The daemon prefers bin/FluxVMRunner.app over bin/fluxvm-vz-runner.

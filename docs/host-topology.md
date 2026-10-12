@@ -57,7 +57,8 @@ cpuset, which can override the pinning.
 `POST /v1/host/pci/bind` with `{"bdf": "0000:3b:00.0"}` binds the device's whole IOMMU group to `vfio-pci`, refusing a
 group that is held or allocated to a VM. `POST /v1/host/pci/release` with `{"bdf": ..., "restore_driver": true}` puts the
 previous host driver back. Both require the admin role. The GPU routes (`/v1/host/gpus/bind|release`) are the same
-operation for GPUs.
+operation for GPUs. Slices of a GPU (vGPU, mediated devices) are listed, created and passed through by UUID; see
+[vgpu.md](vgpu.md).
 
 ## Tested
 
