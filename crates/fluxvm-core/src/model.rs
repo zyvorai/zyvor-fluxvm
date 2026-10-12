@@ -2547,6 +2547,10 @@ pub struct VmSnapshotInfo {
     pub tag: String,
     pub created_at: Option<DateTime<Utc>>,
     pub size_bytes: u64,
+    /// Whether the snapshot carries saved memory and device state (restoring resumes the guest where it was) or
+    /// only the disk (restoring boots it cold). `None` when the backend does not say.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub has_memory: Option<bool>,
 }
 
 /// One entry of `GET /v1/vms/{id}/disks`. `name` is `root` for the boot disk.
