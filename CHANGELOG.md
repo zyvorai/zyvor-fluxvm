@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+### Added: vGPU (mediated devices) and GPU health
+- `GET /v1/host/mdev` lists mdev parents, profiles (free instances, framebuffer size, MIG slices from MIG-backed
+  profile names) and instances, with whether a VM lists or holds each. `POST /v1/host/mdev` creates an instance,
+  idempotent for the same UUID, parent and type; `DELETE /v1/host/mdev/{uuid}` removes one a VM does not use. Both
+  admin.
+- `vfio_devices` takes mdev UUIDs next to PCI addresses; QEMU gets `vfio-pci,sysfsdev=/sys/bus/mdev/devices/<uuid>`.
+  Entries that are neither, or listed twice, are refused at create.
+- `GET /v1/host/gpus/health` judges each GPU from AER counters, PCIe link width and `nvidia-smi` (ECC, retired pages,
+  temperature, MIG mode) when installed. `GET /v1/capabilities` reports `host.mdev` and `host.gpu_health`.
+- Fixed: a VM with `vfio_devices` failed to start on the eBPF dataplane with `Could not open '/dev/vfio/vfio':
+  Operation not permitted`; the VFIO container is now on its device-cgroup allowlist.
+- Lab-tested from Kairon (`scripts/lab-vgpu.sh`, kernel 7.0, QEMU 10.2) with the kernel's `mbochs` sample driver:
+  a VM booted with an instance by UUID, the guest saw it, and the instance was removed after stop. NVIDIA vGPU and
+  MIG are unit-tested only. See `docs/vgpu.md`.
+
 
 ### Added: node API for volumes, tunnels, usage stats and restore (used by the fleet platform)
 - `fluxvm-api`: persistent volumes (`/v1/volumes`), a TCP tunnel to a VM's port (`GET /v1/vms/{id}/tunnel?port=N`,
@@ -10,7 +25,7 @@
   guest printed on its own serial console), never to the Mac's LAN or to an address another VM on the node reports.
   Namespace guests may use `169.254.x.y` (never the metadata address), which tunnels refused before.
 - `fluxvm-scheduler`/`fluxvm-apple`: node stats, restore-from-snapshot and the runner/usage plumbing for the above.
-=======
+
 ### Added: fleet SDKs, an OpenAPI description and a Terraform provider
 - `schemas/fleet-openapi.yaml`: OpenAPI 3.1 for central's fleet API (tenants, keys, leases, VMs, networks, images,
   webhooks, prices, billing, budgets, usage, events, policy), plus the volumes and pools shapes.

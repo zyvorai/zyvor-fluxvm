@@ -335,6 +335,30 @@ fn ops() -> Vec<Op> {
             HOST,
         ),
         op(
+            "get",
+            "/v1/host/gpus/health",
+            "Per-GPU health: config-space response, PCIe AER counters and link width, and nvidia-smi ECC, temperature, memory and MIG mode when installed",
+            HOST,
+        ),
+        op(
+            "get",
+            "/v1/host/mdev",
+            "Mediated device (vGPU) parents with their types, free instances, framebuffer and MIG geometry, and the instances that exist",
+            HOST,
+        ),
+        op(
+            "post",
+            "/v1/host/mdev",
+            "Create a mediated device of a type on a parent; idempotent for the same UUID, parent and type (admin)",
+            HOST,
+        ),
+        op(
+            "delete",
+            "/v1/host/mdev/{uuid}",
+            "Remove a mediated device no VM lists and no process holds; absent is success (admin)",
+            HOST,
+        ),
+        op(
             "post",
             "/v1/host/pci/bind",
             "Bind a PCI function's whole IOMMU group to vfio-pci (admin)",
