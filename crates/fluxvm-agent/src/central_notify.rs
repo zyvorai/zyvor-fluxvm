@@ -378,6 +378,17 @@ async fn send(hook: &Webhook, n: &Notification) -> Result<u16, String> {
     let named = url
         .host_str()
         .is_some_and(|h| h.trim_matches(['[', ']']).parse::<IpAddr>().is_err());
+    // An operator webhook to this machine or an internal address goes direct: a proxy from the environment (HTTP_PROXY)
+    // could not reach it anyway.
+    let direct = url.host_str().is_some_and(|h| {
+        h.eq_ignore_ascii_case("localhost")
+            || h.trim_matches(['[', ']'])
+                .parse::<IpAddr>()
+                .is_ok_and(|ip| !is_public(ip))
+    });
+    if direct {
+        builder = builder.no_proxy();
+    }
     if hook.owner.is_some() {
         // No proxy from the environment: a proxy would resolve the host itself, past the check below.
         builder = builder.no_proxy();
