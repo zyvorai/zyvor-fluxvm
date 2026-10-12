@@ -53,6 +53,28 @@ enum Command {
         /// Leader lock TTL: how long a dead leader blocks a takeover.
         #[arg(long, env = "FLUXVM_AGENT_HA_TTL_SECS", default_value = "10")]
         ha_ttl_secs: u64,
+        /// A token that may only scrape `GET /metrics` (Prometheus), so the scraper does not need the fleet token.
+        #[arg(long, env = "FLUXVM_AGENT_METRICS_TOKEN", hide_env_values = true)]
+        metrics_token: Option<String>,
+        /// Seconds between the metrics collector's samples of every node (graphs and `GET /metrics`).
+        #[arg(long, env = "FLUXVM_AGENT_METRICS_INTERVAL_SECS", default_value = "15")]
+        metrics_interval_secs: u64,
+        /// Console single sign-on (OpenID Connect). See docs/mac-cloud-tenancy.md.
+        #[command(flatten)]
+        sso: fluxvm_agent::central::SsoArgs,
+        // ---- signup ----
+        /// File with the Stripe secret key (`sk_live_…`, or a restricted `rk_…` key); turns on payments
+        /// (docs/mac-cloud-billing.md). The `STRIPE_SECRET_KEY` environment variable can hold the key instead.
+        #[arg(long, env = "STRIPE_SECRET_KEY_FILE")]
+        stripe_secret_key_file: Option<PathBuf>,
+        /// File with the signing secret (`whsec_…`) of the Stripe webhook endpoint `POST /stripe/webhook`. The
+        /// `STRIPE_WEBHOOK_SECRET` environment variable can hold it instead.
+        #[arg(long, env = "STRIPE_WEBHOOK_SECRET_FILE")]
+        stripe_webhook_secret_file: Option<PathBuf>,
+        /// Stripe API base URL (a local mock for testing). Stripe Checkout sends people back to `--public-url`
+        /// (shared with single sign-on).
+        #[arg(long, env = "STRIPE_API_BASE", default_value = fluxvm_agent::stripe::DEFAULT_API_BASE)]
+        stripe_api_base: String,
     },
     /// Run ephemeral GitHub Actions runners on fleet VMs: one VM per queued job, deleted when the job is done.
     /// See docs/github-actions-runners.md.
@@ -167,7 +189,57 @@ async fn main() -> Result<()> {
             ha_cluster,
             advertise_url,
             ha_ttl_secs,
+            metrics_token,
+            metrics_interval_secs,
+            sso,
+            stripe_secret_key_file,
+            stripe_webhook_secret_file,
+            stripe_api_base,
         } => {
+            // `--public-url` is declared once (in the SSO flags) and used by Stripe Checkout too.
+            let public_url = sso
+                .public_url
+                .as_deref()
+                .map(|u| u.trim().trim_end_matches('/').to_owned())
+                .filter(|u| !u.is_empty());
+            fluxvm_agent::central::configure_metrics(fluxvm_agent::central::MetricsSettings {
+                interval: Some(Duration::from_secs(metrics_interval_secs.max(1))),
+                token: metrics_token,
+            });
+            let sso = sso.into_config()?;
+            if sso.is_some() && token.is_none() {
+                bail!("--oidc-issuer needs --token: without it every caller is the operator");
+            }
+            // ---- signup ----
+            let secret = |file: Option<PathBuf>, var: &str| -> Result<Option<String>> {
+                match file {
+                    Some(f) => fluxvm_agent::stripe::read_secret_file(&f)
+                        .map(Some)
+                        .map_err(anyhow::Error::msg),
+                    None => Ok(std::env::var(var).ok().filter(|v| !v.trim().is_empty())),
+                }
+            };
+            if let Some(secret_key) = secret(stripe_secret_key_file, "STRIPE_SECRET_KEY")? {
+                let webhook_secret = secret(stripe_webhook_secret_file, "STRIPE_WEBHOOK_SECRET")?;
+                if webhook_secret.is_none() {
+                    tracing::warn!(
+                        "Stripe is on but no webhook secret is set: invoice status and saved payment methods are not updated"
+                    );
+                }
+                if let Some(u) = &public_url
+                    && !(u.starts_with("https://") || u.starts_with("http://"))
+                {
+                    bail!("--public-url must be an http(s) URL");
+                }
+                let cfg = fluxvm_agent::stripe::StripeConfig {
+                    secret_key,
+                    webhook_secret,
+                    api_base: stripe_api_base,
+                    public_url,
+                };
+                tracing::info!(mode = cfg.mode(), "Stripe payments on");
+                fluxvm_agent::central::configure_stripe(cfg);
+            }
             let ha = match ha_redis {
                 Some(url) => {
                     let Some(advertise_url) = advertise_url else {
@@ -186,14 +258,16 @@ async fn main() -> Result<()> {
                 }
                 None => None,
             };
-            let (app, ha_handle) =
-                fluxvm_agent::central::router_with_handle(fluxvm_agent::central::CentralConfig {
+            let (app, ha_handle) = fluxvm_agent::central::router_with_sso(
+                fluxvm_agent::central::CentralConfig {
                     state_dir,
                     token,
                     reconcile_interval: (reconcile_secs > 0)
                         .then(|| Duration::from_secs(reconcile_secs)),
                     ha,
-                });
+                },
+                sso,
+            );
             // On Ctrl-C or SIGTERM (launchd, systemd), hand the leader lock over before exiting.
             if let Some(h) = ha_handle {
                 tokio::spawn(async move {
@@ -217,7 +291,7 @@ async fn main() -> Result<()> {
                         .context("loading TLS cert/key")?;
                     tracing::info!(listen = %listen, tls = true, "fleet registry listening");
                     axum_server::bind_rustls(addr, config)
-                        .serve(app.into_make_service())
+                        .serve(app.into_make_service_with_connect_info::<SocketAddr>())
                         .await
                         .context("serving TLS")?;
                 }
@@ -226,7 +300,12 @@ async fn main() -> Result<()> {
                         .await
                         .with_context(|| format!("binding {listen}"))?;
                     tracing::info!(listen = %listen, tls = false, "fleet registry listening");
-                    axum::serve(listener, app).await.context("serving")?;
+                    axum::serve(
+                        listener,
+                        app.into_make_service_with_connect_info::<SocketAddr>(),
+                    )
+                    .await
+                    .context("serving")?;
                 }
                 _ => bail!("both --tls-cert and --tls-key are required together"),
             }

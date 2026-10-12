@@ -225,6 +225,11 @@ pub(super) async fn put_policy(
     Json(policy): Json<Policy>,
 ) -> Result<Json<Policy>, AppError> {
     require_admin(&caller)?;
+    // ---- tunnel ----
+    policy
+        .tunnels
+        .validate()
+        .map_err(|e| AppError(StatusCode::BAD_REQUEST, e))?;
     let mut t = fleet.tenancy.lock().await;
     t.policy = policy;
     if t.policy.min_lease_hours < crate::tenancy::MIN_LEASE_HOURS {
@@ -627,6 +632,7 @@ fn tenant_view(t: &TenancyState, id: &str) -> Option<Value> {
         "memory_mib": mem,
         "leased_hosts": leases.len(),
     });
+    out["in_use"]["volume_gib"] = json!(t.volume_gib_of(id));
     out["active_leases"] = json!(leases);
     Some(out)
 }
@@ -1752,6 +1758,10 @@ mod tests {
             ha: None,
             audit: Arc::new(super::super::audit::AuditLog::memory()),
             notify: Arc::default(),
+            metrics: Arc::default(),
+            tunnels: Arc::default(),
+            sso: Arc::default(),
+            signup: Arc::default(),
         }
     }
 

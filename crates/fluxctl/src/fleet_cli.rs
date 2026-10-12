@@ -22,6 +22,24 @@ use std::collections::HashMap;
 use std::fmt::Display;
 use std::io::{IsTerminal, Write};
 
+#[path = "fleet_metrics.rs"]
+mod metrics;
+#[path = "fleet_snapshots.rs"]
+mod snapshots;
+#[path = "fleet_volumes.rs"]
+mod volumes;
+// ---- tunnel ----
+#[path = "fleet_tunnel.rs"]
+pub(crate) mod tunnel;
+#[path = "fleet_warmpool.rs"]
+pub(crate) mod warmpool;
+// ---- sso ----
+#[path = "fleet_sso.rs"]
+mod sso;
+// ---- signup ----
+#[path = "fleet_signup.rs"]
+mod signup;
+
 // ---- output -------------------------------------------------------------------------------------------------------
 
 #[derive(Clone, Copy, Debug)]
@@ -488,6 +506,7 @@ async fn dispatch(
             mac,
             network,
             ttl,
+            volume,
         } => {
             launch(
                 central,
@@ -503,6 +522,7 @@ async fn dispatch(
                     mac,
                     network,
                     ttl,
+                    volume,
                 },
             )
             .await
@@ -585,6 +605,10 @@ async fn dispatch(
             timeout,
             command,
         } => exec(central, token, &out, &node, &id, timeout, command.join(" ")).await,
+        FleetCommand::Top { sort, limit } => metrics::top(central, token, &out, &sort, limit).await,
+        FleetCommand::Metrics { vm, range } => {
+            metrics::show(central, token, &out, &vm, &range).await
+        }
         FleetCommand::Run {
             vm,
             timeout,
@@ -662,6 +686,11 @@ async fn dispatch(
             Ok(())
         }
         FleetCommand::Keys { tenant, command } => keys(central, token, &out, tenant, command).await,
+        // ---- sso ----
+        cmd @ (FleetCommand::Members { .. }
+        | FleetCommand::MemberAdd { .. }
+        | FleetCommand::MemberRm { .. }
+        | FleetCommand::MemberRole { .. }) => sso::members(central, token, &out, cmd).await,
         FleetCommand::Prices { set } => {
             let v = match set {
                 Some(path) => {
@@ -1182,6 +1211,51 @@ async fn dispatch(
                 }
             }
         }
+        // ---- snapshots ----
+        cmd @ (FleetCommand::Snapshot { .. }
+        | FleetCommand::Snapshots { .. }
+        | FleetCommand::Restore { .. }
+        | FleetCommand::SnapshotRm { .. }
+        | FleetCommand::CloneVm { .. }) => snapshots::run(central, token, &out, cmd).await,
+        // ---- warmpool ----
+        FleetCommand::Pools => warmpool::list(central, token, &out).await,
+        FleetCommand::PoolCreate {
+            name,
+            image,
+            min_ready,
+            max,
+            vcpus,
+            memory,
+            tenant,
+            node_selector,
+            nodes,
+        } => {
+            warmpool::create(
+                central,
+                token,
+                &out,
+                warmpool::NewPool {
+                    name,
+                    image,
+                    min_ready,
+                    max,
+                    vcpus,
+                    memory_mib: memory,
+                    tenant,
+                    node_selector,
+                    nodes,
+                },
+            )
+            .await
+        }
+        FleetCommand::PoolSet {
+            name,
+            min_ready,
+            max,
+        } => warmpool::set(central, token, &out, &name, min_ready, max).await,
+        FleetCommand::PoolRm { name, yes } => {
+            warmpool::remove(central, token, &out, &name, yes).await
+        }
         FleetCommand::Reconcile => {
             let v = call(central, token, Method::POST, "/fleet/reconcile", None).await?;
             if !out.human {
@@ -1211,6 +1285,42 @@ async fn dispatch(
             }
             Ok(())
         }
+        // ---- volumes ----
+        FleetCommand::Volumes { tenant } => volumes::list(central, token, &out, tenant).await,
+        FleetCommand::VolumeCreate {
+            name,
+            size,
+            node,
+            tenant,
+        } => volumes::create(central, token, &out, name, size, node, tenant).await,
+        FleetCommand::VolumeRm { name, yes } => {
+            volumes::remove(central, token, &out, &name, yes).await
+        }
+        FleetCommand::VolumeResize { name, size } => {
+            volumes::resize(central, token, &out, &name, size).await
+        }
+        // ---- tunnel ----
+        FleetCommand::Ssh { vm, user, args } => tunnel::ssh(central, token, &vm, user, args).await,
+        FleetCommand::TunnelStdio { vm, port } => {
+            tunnel::tunnel_stdio(central, token, &vm, port).await
+        }
+        FleetCommand::PortForward { vm, ports, address } => {
+            tunnel::port_forward(central, token, &out, &vm, &ports, &address).await
+        }
+        FleetCommand::Tunnels { command } => tunnel::tunnels(central, token, &out, command).await,
+        // ---- signup ----
+        FleetCommand::Signup {
+            tenant_id,
+            email,
+            name,
+        } => signup::signup(central, &out, tenant_id, email, name).await,
+        FleetCommand::Invoices { month, tenant } => {
+            signup::invoices(central, token, &out, month, tenant).await
+        }
+        FleetCommand::InvoiceRun { month, tenant, yes } => {
+            signup::invoice_run(central, token, &out, month, tenant, yes).await
+        }
+        FleetCommand::PaymentMethod => signup::payment_method(central, token, &out).await,
     }
 }
 
@@ -1881,6 +1991,7 @@ struct LaunchArgs {
     mac: Option<String>,
     network: Vec<String>,
     ttl: Option<u64>,
+    volume: Vec<String>,
 }
 
 async fn launch(central: &str, token: Option<&str>, out: &Out, a: LaunchArgs) -> Result<()> {
@@ -1990,6 +2101,9 @@ async fn launch(central: &str, token: Option<&str>, out: &Out, a: LaunchArgs) ->
     if let Some(t) = a.ttl {
         body["ttl_seconds"] = json!(t);
     }
+    if !a.volume.is_empty() {
+        body["volumes"] = json!(a.volume);
+    }
     let r = fleet_client::create_vm(central, token, body, a.mac, HashMap::new()).await;
     let v = match r {
         Ok(v) => v,
@@ -2030,6 +2144,7 @@ fn launched(out: &Out, v: &Value, detail: Option<String>) {
         out.bold(name),
         detail.map(|d| format!(" ({d})")).unwrap_or_default()
     ));
+    warmpool::note_warm(out, v); // ---- warmpool ----
     kv(out, &[("  ID", s(&vm, "id").to_owned())]);
     let probe = if guest(&vm) == "macOS" {
         "sw_vers"
@@ -3035,6 +3150,7 @@ mod tests {
                 mac: None,
                 network: vec![],
                 ttl: None,
+                volume: vec![],
             },
         )
         .await
@@ -3056,6 +3172,7 @@ mod tests {
                 mac: None,
                 network: vec![],
                 ttl: Some(3600),
+                volume: vec![],
             },
         )
         .await

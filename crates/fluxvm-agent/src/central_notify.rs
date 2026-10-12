@@ -31,6 +31,9 @@ const MAX_IN_FLIGHT: usize = 256;
 pub(super) const KINDS: &[(&str, bool)] = &[
     ("vm.created", false),
     ("vm.deleted", false),
+    ("vm.snapshot", false),
+    ("vm.restored", false),
+    ("vm.cloned", false),
     ("lease.created", false),
     ("lease.released", false),
     ("lease.ending", false),
@@ -41,6 +44,12 @@ pub(super) const KINDS: &[(&str, bool)] = &[
     ("node.scrub", true),
     ("drain.done", true),
     ("test", false),
+    // ---- volumes ----
+    ("volume.created", false),
+    ("volume.deleted", false),
+    // ---- signup ----
+    ("billing.payment_failed", false),
+    ("billing.suspended", false),
 ];
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -82,6 +91,9 @@ pub(super) struct Notifier {
     sent: std::sync::Mutex<HashSet<String>>,
     /// Delivery tasks running now.
     in_flight: std::sync::atomic::AtomicUsize,
+    /// Deliveries recorded since start, by outcome (`fluxvm_central_webhook_deliveries_total`).
+    delivered_ok: std::sync::atomic::AtomicU64,
+    delivered_failed: std::sync::atomic::AtomicU64,
 }
 
 /// Counts a delivery task as running until dropped.
@@ -131,6 +143,12 @@ impl Notifier {
     }
 
     fn record_delivery(&self, hook: &str, d: Delivery) {
+        let counter = if d.ok {
+            &self.delivered_ok
+        } else {
+            &self.delivered_failed
+        };
+        counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let mut all = lock(&self.deliveries);
         let q = all.entry(hook.to_owned()).or_default();
         if q.len() == KEEP_DELIVERIES {
@@ -159,6 +177,15 @@ impl Notifier {
     /// Forgets "already sent" keys that can no longer fire, so the set does not grow forever.
     fn prune(&self, keep: impl Fn(&str) -> bool) {
         lock(&self.sent).retain(|k| keep(k.as_str()));
+    }
+
+    /// Webhook deliveries so far: (succeeded, failed).
+    pub(super) fn delivery_counts(&self) -> (u64, u64) {
+        use std::sync::atomic::Ordering::Relaxed;
+        (
+            self.delivered_ok.load(Relaxed),
+            self.delivered_failed.load(Relaxed),
+        )
     }
 
     /// Drops the delivery logs of webhooks that no longer exist.
@@ -470,6 +497,25 @@ pub(super) async fn from_change(fleet: &Fleet, e: &super::audit::AuditEvent) {
             "lease.released",
             "A lease was released".to_owned(),
             Some("#/macs".to_owned()),
+        ),
+        // ---- snapshots ----
+        ("POST", ["fleet", "vms", _, _, "snapshots" | "clone"])
+        | ("POST", ["fleet", "vms", _, _, "snapshots", _, "restore"]) => {
+            match super::snapshots::notice(fleet, &seg, &target).await {
+                Some(n) => n,
+                None => return,
+            }
+        }
+        // ---- volumes ----
+        ("POST", ["fleet", "volumes"]) => (
+            "volume.created",
+            format!("Volume {target} created"),
+            Some("#/volumes".to_owned()),
+        ),
+        ("DELETE", ["fleet", "volumes", name]) => (
+            "volume.deleted",
+            format!("Volume {name} deleted"),
+            Some("#/volumes".to_owned()),
         ),
         _ => return,
     };

@@ -49,6 +49,12 @@ pub struct PriceList {
     /// Also charge VM prices for VMs on a Mac the tenant leases (normally the lease covers them).
     #[serde(default)]
     pub charge_vms_on_leased_macs: bool,
+    /// Snapshot storage, per GiB-hour, wherever the VM runs (0: snapshots are free).
+    #[serde(default)]
+    pub snapshot_gib_per_hour: f64,
+    /// Persistent volumes (`/fleet/volumes`), per GiB of size per hour, attached or not.
+    #[serde(default)]
+    pub volume_gib_per_hour: f64,
 }
 
 fn default_currency() -> String {
@@ -66,6 +72,8 @@ impl Default for PriceList {
             memory_gib_per_hour: 0.0,
             macos_vm_per_hour: 0.0,
             charge_vms_on_leased_macs: false,
+            snapshot_gib_per_hour: 0.0,
+            volume_gib_per_hour: 0.0,
         }
     }
 }
@@ -96,6 +104,8 @@ impl PriceList {
             self.vcpu_per_hour,
             self.memory_gib_per_hour,
             self.macos_vm_per_hour,
+            self.snapshot_gib_per_hour,
+            self.volume_gib_per_hour,
         ];
         if prices
             .iter()
@@ -144,6 +154,8 @@ impl PriceList {
                 self.vcpu_per_hour,
                 self.memory_gib_per_hour,
                 self.macos_vm_per_hour,
+                self.snapshot_gib_per_hour,
+                self.volume_gib_per_hour,
             ]
             .iter()
             .all(|p| *p == 0.0)
@@ -303,8 +315,9 @@ pub fn statement(
         .filter(|v| v.tenant.as_deref() == Some(tenant))
     {
         let end = v.ended_at.unwrap_or(now);
-        let (s, e) = (v.created_at.max(from), end.min(to));
-        let mut secs = overlap(v.created_at, end, from, to);
+        let start = v.billable_start();
+        let (s, e) = (start.max(from), end.min(to));
+        let mut secs = overlap(start, end, from, to);
         if secs > 0 && !prices.charge_vms_on_leased_macs {
             secs -= leased_secs(&v.node, s, e);
         }
@@ -350,6 +363,29 @@ pub fn statement(
             amount: round_cents(mem_cost),
         });
     }
+    if let Some(l) = snapshot_line(state, tenant, from, to, now) {
+        lines.push(l);
+    }
+    // ---- volumes ----
+    // Billed at their current size for as long as they exist, attached or not.
+    let volume_gib_secs: i64 = state
+        .volumes
+        .iter()
+        .filter(|v| v.tenant.as_deref() == Some(tenant) && !v.creating)
+        .map(|v| {
+            overlap(v.created_at, v.deleted_at.unwrap_or(now), from, to)
+                .saturating_mul(v.size_gib as i64)
+        })
+        .fold(0i64, i64::saturating_add);
+    if volume_gib_secs > 0 && prices.volume_gib_per_hour > 0.0 {
+        lines.push(line(
+            "Volumes".into(),
+            volume_gib_secs,
+            1.0,
+            "GiB-hours",
+            micros(prices.volume_gib_per_hour),
+        ));
+    }
     let total: i64 = lines.iter().map(|l| l.amount_micros).sum();
     let (month_start, month_end) = month_of(now);
     let current = from == month_start && to >= now && now < month_end;
@@ -388,6 +424,43 @@ pub fn statement(
         forecast,
         budget,
     }
+}
+
+/// Snapshot storage in `[from, to)`: each snapshot's size (as its node last reported it) for as long as it existed.
+fn snapshot_line(
+    state: &TenancyState,
+    tenant: &str,
+    from: DateTime<Utc>,
+    to: DateTime<Utc>,
+    now: DateTime<Utc>,
+) -> Option<Line> {
+    const GIB: i128 = 1 << 30;
+    let price = state.prices.snapshot_gib_per_hour;
+    if price <= 0.0 {
+        return None;
+    }
+    // Byte-seconds, so many small snapshots add up exactly.
+    let mut byte_secs: i128 = 0;
+    for x in state
+        .snapshots
+        .iter()
+        .filter(|x| x.tenant.as_deref() == Some(tenant))
+    {
+        let end = state.snapshot_end(x).unwrap_or(now);
+        byte_secs += x.size_bytes as i128 * overlap(x.created_at, end, from, to) as i128;
+    }
+    if byte_secs == 0 {
+        return None;
+    }
+    let amount = (micros(price) as i128 * byte_secs / (GIB * 3600)) as i64;
+    Some(Line {
+        description: "Snapshot storage".into(),
+        quantity: (byte_secs as f64 / (GIB * 3600) as f64 * 100.0).round() / 100.0,
+        unit: "GiB-hours",
+        unit_price: price,
+        amount_micros: amount,
+        amount: round_cents(amount),
+    })
 }
 
 /// A quoted CSV field. Text a spreadsheet would read as a formula (`=`, `+`, `-`, `@`, tab, CR) gets a leading `'`.
@@ -524,6 +597,10 @@ mod tests {
                 created_at: t0(),
                 ended_at: Some(t0() + Duration::hours(10)),
                 spec: None,
+                warm_pool: None,
+                claimed_at: None,
+                expires_at: None,
+                billed_from: None,
             });
         }
         let now = t0() + Duration::hours(30);
@@ -570,6 +647,10 @@ mod tests {
             created_at: t0(),
             ended_at: Some(t0() + Duration::hours(48)),
             spec: None,
+            warm_pool: None,
+            claimed_at: None,
+            expires_at: None,
+            billed_from: None,
         });
         let l = s
             .create_lease("acme", "mac-1", None, t0() + Duration::hours(12))
@@ -582,6 +663,38 @@ mod tests {
         let vcpu = st.lines.iter().find(|l| l.unit == "vCPU-hours").unwrap();
         assert_eq!(vcpu.quantity, 24.0, "{st:?}");
         assert!(st.forecast.is_some());
+    }
+
+    #[test]
+    fn volumes_are_billed_per_gib_hour_while_they_exist() {
+        let mut s = TenancyState::default();
+        s.prices = PriceList {
+            volume_gib_per_hour: 0.0001,
+            ..Default::default()
+        };
+        assert!(!s.prices.is_free());
+        s.create_tenant("acme", None, Quota::default(), t0())
+            .unwrap();
+        // 100 GiB for 10 hours, then deleted; 50 GiB still there 20 hours in.
+        let a = s
+            .begin_volume(Some("acme"), "a", 100, "mac-1", t0())
+            .unwrap();
+        s.finish_volume(&a.id, "/v/a.raw".into());
+        s.mark_volume_deleted(&a.id, t0() + Duration::hours(10));
+        let b = s
+            .begin_volume(Some("acme"), "b", 50, "mac-1", t0())
+            .unwrap();
+        s.finish_volume(&b.id, "/v/b.raw".into());
+        let now = t0() + Duration::hours(20);
+        let (from, to) = month_of(now);
+        let st = statement(&s, "acme", from, to, now);
+        let l = st
+            .lines
+            .iter()
+            .find(|l| l.description == "Volumes")
+            .unwrap();
+        assert_eq!(l.quantity, 2000.0, "{st:?}"); // 100 × 10 + 50 × 20
+        assert_eq!(l.amount, 0.2);
     }
 
     #[test]
@@ -598,5 +711,74 @@ mod tests {
         assert_eq!(b, Utc.with_ymd_and_hms(2027, 1, 1, 0, 0, 0).unwrap());
         assert!(parse_month("2026-13").is_none());
         assert!(parse_month("soon").is_none());
+    }
+}
+
+#[cfg(test)]
+mod snapshot_billing_tests {
+    use super::*;
+    use crate::tenancy::{Quota, VmEntry};
+    use chrono::Duration;
+
+    fn t0() -> DateTime<Utc> {
+        Utc.with_ymd_and_hms(2026, 10, 1, 0, 0, 0).unwrap()
+    }
+
+    #[test]
+    fn snapshot_storage_is_billed_per_gib_hour_while_it_exists() {
+        let mut s = TenancyState::default();
+        s.create_tenant("acme", None, Quota::default(), t0())
+            .unwrap();
+        s.record_vm(VmEntry {
+            node: "mac".into(),
+            vm_id: "v1".into(),
+            name: "build".into(),
+            tenant: Some("acme".into()),
+            vcpus: 2,
+            memory_mib: 4096,
+            macos_guest: false,
+            created_at: t0(),
+            ended_at: None,
+            spec: None,
+            warm_pool: None,
+            claimed_at: None,
+            expires_at: None,
+            billed_from: None,
+        });
+        let now = t0() + Duration::hours(30);
+        let (from, to) = month_of(now);
+        // Free until a price is set.
+        s.begin_snapshot("mac", "v1", "a", Some("acme".into()), false, t0())
+            .unwrap();
+        s.snapshots[0].size_bytes = 10 << 30;
+        assert!(statement(&s, "acme", from, to, now).lines.is_empty());
+        s.prices.snapshot_gib_per_hour = 0.0001;
+        assert!(s.prices.validate().is_ok());
+        assert!(!s.prices.is_free());
+        // 10 GiB for 10 hours (deleted then), and 2 GiB for 4 hours until its VM was deleted.
+        s.end_snapshot("mac", "v1", "a", t0() + Duration::hours(10));
+        s.begin_snapshot(
+            "mac",
+            "v1",
+            "b",
+            Some("acme".into()),
+            true,
+            t0() + Duration::hours(20),
+        )
+        .unwrap();
+        s.snapshots[1].size_bytes = 2 << 30;
+        s.end_vm("mac", "v1", t0() + Duration::hours(24));
+        let st = statement(&s, "acme", from, to, now);
+        let l = st
+            .lines
+            .iter()
+            .find(|l| l.description == "Snapshot storage")
+            .expect("a snapshot line");
+        assert_eq!(l.quantity, 108.0, "{st:?}");
+        assert_eq!(l.amount_micros, 10_800);
+        // Another tenant's statement does not carry it.
+        s.create_tenant("globex", None, Quota::default(), t0())
+            .unwrap();
+        assert!(statement(&s, "globex", from, to, now).lines.is_empty());
     }
 }

@@ -28,6 +28,11 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
+// ---- sso ----
+#[path = "tenancy_sso.rs"]
+mod sso;
+pub use sso::{MAX_MEMBERS, Member, MemberError, MemberRole, Session, normalize_email};
+
 /// Apple's macOS licence: a leased Mac must be leased for at least 24 consecutive hours.
 pub const MIN_LEASE_HOURS: i64 = 24;
 /// A ledger entry younger than this is never closed by reconciliation: the node may not list a VM it is still
@@ -64,6 +69,12 @@ pub struct Quota {
     pub max_memory_mib: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_leased_hosts: Option<u32>,
+    /// Snapshots kept per VM; overrides [`Policy::max_snapshots_per_vm`] for this tenant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_snapshots_per_vm: Option<u32>,
+    /// Total GiB of persistent volumes (`/fleet/volumes`) the tenant may hold.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_volume_gib: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -87,6 +98,32 @@ pub struct Tenant {
     /// Named API keys besides the primary token: one per person, CI system or tool, each revocable on its own.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub keys: Vec<ApiKey>,
+    /// People who sign in to the console with SSO, each with a role (see [`Member`]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub members: Vec<Member>,
+    // ---- signup ----
+    /// The email the tenant signed up with (self-service sign-up); the SSO feature makes this person the owner.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_email: Option<String>,
+    /// Stripe customer (`cus_…`), created at sign-up or when the operator turns billing on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stripe_customer_id: Option<String>,
+    /// Monthly invoices go to Stripe for this tenant.
+    #[serde(default)]
+    pub billing_enabled: bool,
+    /// A payment method is saved in Stripe (set by the Checkout webhook).
+    #[serde(default)]
+    pub has_payment_method: bool,
+    /// Signed up while the policy requires a payment method, and has not added one: may look around, but not lease
+    /// Macs or launch VMs.
+    #[serde(default)]
+    pub payment_method_pending: bool,
+    /// Created through `POST /signup`.
+    #[serde(default)]
+    pub self_service: bool,
+    /// Disabled by central for an unpaid invoice (re-enabled when it is paid), as opposed to by the operator.
+    #[serde(default)]
+    pub suspended_for_nonpayment: bool,
 }
 
 /// A named API key of a tenant. Like the primary token, only its hash is stored.
@@ -178,6 +215,13 @@ impl Tenant {
             "disabled": self.disabled,
             "created_at": self.created_at,
             "monthly_budget": self.monthly_budget,
+            "owner_email": self.owner_email,
+            "stripe_customer_id": self.stripe_customer_id,
+            "billing_enabled": self.billing_enabled,
+            "has_payment_method": self.has_payment_method,
+            "payment_method_pending": self.payment_method_pending,
+            "self_service": self.self_service,
+            "suspended_for_nonpayment": self.suspended_for_nonpayment,
         })
     }
 }
@@ -246,11 +290,28 @@ pub struct VmEntry {
     /// elsewhere. Never kept otherwise: create bodies can carry secrets.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spec: Option<Value>,
+    /// The warm pool this VM was booted for (`crate::warmpool`); with `claimed_at` unset it is still warm and idle.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub warm_pool: Option<String>,
+    /// When a launch claimed this warm VM.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claimed_at: Option<DateTime<Utc>>,
+    /// When central deletes it (a claimed warm VM's TTL: the node booted it without one).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<DateTime<Utc>>,
+    /// Billing and metering start here instead of `created_at` (a shared pool's warm VM is billed from its claim).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub billed_from: Option<DateTime<Utc>>,
 }
 
 impl VmEntry {
     pub fn active(&self) -> bool {
         self.ended_at.is_none()
+    }
+
+    /// Where billing and metering start: `billed_from` when set, else `created_at`.
+    pub fn billable_start(&self) -> DateTime<Utc> {
+        self.billed_from.unwrap_or(self.created_at)
     }
 }
 
@@ -369,6 +430,62 @@ pub struct Policy {
     /// Overlay network keys older than this are rotated by the reconciler (0 never rotates automatically).
     #[serde(default = "overlay_key_rotation_days")]
     pub overlay_key_rotation_days: i64,
+    /// Snapshots kept per VM (a tenant's quota can override it); at most [`MAX_SNAPSHOTS_PER_VM`]. 0 turns snapshots
+    /// off.
+    #[serde(default = "max_snapshots_per_vm")]
+    pub max_snapshots_per_vm: u32,
+    /// SSH and port tunnels to VMs through central (`GET /fleet/vms/{node}/{id}/tunnel`).
+    #[serde(default)]
+    pub tunnels: TunnelPolicy,
+    /// Emails that sign in with SSO as the operator (besides `fluxvm-agent central --sso-operator`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub operator_emails: Vec<String>,
+    // ---- signup ----
+    /// Anyone may create a tenant with `POST /signup` (off by default).
+    #[serde(default)]
+    pub signup_enabled: bool,
+    /// The quota a signed-up tenant starts with.
+    #[serde(default = "signup_default_quota")]
+    pub signup_default_quota: Quota,
+    /// A signed-up tenant must save a payment method (Stripe Checkout) before it leases a Mac or launches a VM.
+    #[serde(default)]
+    pub signup_require_payment_method: bool,
+    /// Only emails at these domains may sign up (empty: any).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub signup_allowed_email_domains: Vec<String>,
+    /// On the 1st of each month, invoice last month in Stripe for every tenant with billing on (off by default;
+    /// `POST /fleet/billing/invoices` does it on demand).
+    #[serde(default)]
+    pub billing_auto_invoice: bool,
+    /// Disable a tenant whose invoice is still unpaid `billing_suspend_after_days` after it was sent (off by default);
+    /// it is enabled again when paid.
+    #[serde(default)]
+    pub billing_suspend_unpaid: bool,
+    #[serde(default = "billing_suspend_after_days")]
+    pub billing_suspend_after_days: u32,
+}
+
+/// The most snapshots any VM may keep, whatever the policy or a quota says.
+pub const MAX_SNAPSHOTS_PER_VM: u32 = 1000;
+
+fn max_snapshots_per_vm() -> u32 {
+    20
+}
+
+fn signup_default_quota() -> Quota {
+    Quota {
+        max_vms: Some(2),
+        max_vcpus: Some(8),
+        max_memory_mib: Some(16 * 1024),
+        max_leased_hosts: Some(1),
+        // Anonymous sign-ups do not get unbounded disk.
+        max_volume_gib: Some(100),
+        ..Quota::default()
+    }
+}
+
+fn billing_suspend_after_days() -> u32 {
+    14
 }
 
 fn overlay_key_rotation_days() -> i64 {
@@ -401,6 +518,16 @@ impl Default for Policy {
             isolate_tenant_networks: false,
             tenant_subnet_prefix: tenant_subnet_prefix(),
             overlay_key_rotation_days: overlay_key_rotation_days(),
+            max_snapshots_per_vm: max_snapshots_per_vm(),
+            tunnels: TunnelPolicy::default(),
+            operator_emails: Vec::new(),
+            signup_enabled: false,
+            signup_default_quota: signup_default_quota(),
+            signup_require_payment_method: false,
+            signup_allowed_email_domains: Vec::new(),
+            billing_auto_invoice: false,
+            billing_suspend_unpaid: false,
+            billing_suspend_after_days: billing_suspend_after_days(),
         }
     }
 }
@@ -429,6 +556,8 @@ pub enum TenancyError {
     Quota(String),
     NotYours(String),
     Overlay(String),
+    InvalidSnapshot(String),
+    SnapshotExists(String),
 }
 
 impl TenancyError {
@@ -443,6 +572,7 @@ impl TenancyError {
             TenancyError::TenantDisabled(_) | TenancyError::NotYours(_) => 403,
             TenancyError::Quota(_) => 429,
             TenancyError::Overlay(_) => 409,
+            TenancyError::InvalidSnapshot(_) => 400,
             _ => 409,
         }
     }
@@ -459,7 +589,10 @@ impl std::fmt::Display for TenancyError {
                 "invalid tenant id '{t}': use 1-{MAX_TENANT_ID_LEN} lowercase letters, digits and '-', starting with a letter or digit"
             ),
             TenancyError::TenantBusy(t) => {
-                write!(f, "tenant '{t}' still has active leases or VMs")
+                write!(
+                    f,
+                    "tenant '{t}' still has active leases, VMs, volumes or warm pools"
+                )
             }
             TenancyError::UnknownLease(l) => write!(f, "no lease '{l}'"),
             TenancyError::UnknownKey(k) => write!(f, "no API key '{k}'"),
@@ -483,6 +616,10 @@ impl std::fmt::Display for TenancyError {
             TenancyError::Quota(m) => write!(f, "quota exceeded: {m}"),
             TenancyError::NotYours(m) => write!(f, "{m}"),
             TenancyError::Overlay(m) => write!(f, "{m}"),
+            TenancyError::InvalidSnapshot(m) => write!(f, "{m}"),
+            TenancyError::SnapshotExists(n) => {
+                write!(f, "this VM already has a snapshot named '{n}'")
+            }
         }
     }
 }
@@ -609,6 +746,9 @@ pub struct CatalogImage {
     pub source: Option<String>,
     #[serde(default)]
     pub updated_at: Option<DateTime<Utc>>,
+    /// The login user of the image, for `fluxctl fleet ssh` and the console's SSH config (`admin` when unset).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ssh_user: Option<String>,
 }
 
 fn default_image_vcpus() -> u8 {
@@ -633,6 +773,13 @@ impl CatalogImage {
         }
         if self.vcpus == 0 || self.memory_mib < 512 {
             return Err("an image needs at least 1 vCPU and 512 MiB".into());
+        }
+        if let Some(u) = &self.ssh_user
+            && !valid_ssh_user(u)
+        {
+            return Err(
+                "ssh_user is 1-32 characters of a-z, A-Z, 0-9, '-', '.' and '_', not starting with '-'".into(),
+            );
         }
         Ok(())
     }
@@ -675,12 +822,28 @@ pub struct TenancyState {
     /// Prices for leases and VM time (`GET/PUT /fleet/prices`).
     #[serde(default)]
     pub prices: crate::billing::PriceList,
+    /// Persistent volumes (`/fleet/volumes`), including deleted ones until compaction (billing needs their lifetime).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub volumes: Vec<crate::volumes::Volume>,
+    /// Snapshots taken through central (`/fleet/vms/{node}/{id}/snapshots`), for the per-VM limit and storage billing.
+    #[serde(default)]
+    pub snapshots: Vec<SnapshotEntry>,
     /// Quota held by creates that are in flight (between the quota check and the node's answer). In memory only: a
     /// restart drops them, and the requests they belonged to are gone with it.
     #[serde(skip)]
     reservations: Vec<Reservation>,
     #[serde(skip)]
     next_reservation: u64,
+    /// Warm pools by name (`/fleet/pools`, see [`crate::warmpool`]).
+    #[serde(default)]
+    pub pools: BTreeMap<String, crate::warmpool::Pool>,
+    /// Console sign-in sessions (SSO), by the SHA-256 of their token.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub sessions: BTreeMap<String, Session>,
+    // ---- signup ----
+    /// Stripe invoices, one per tenant and month (`/fleet/billing/invoices`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub invoices: Vec<crate::stripe::InvoiceRecord>,
 }
 
 /// Quota held by one in-flight create.
@@ -725,6 +888,14 @@ impl TenancyState {
             network_index: None,
             monthly_budget: None,
             keys: Vec::new(),
+            members: Vec::new(),
+            owner_email: None,
+            stripe_customer_id: None,
+            billing_enabled: false,
+            has_payment_method: false,
+            payment_method_pending: false,
+            self_service: false,
+            suspended_for_nonpayment: false,
         };
         self.tenants.insert(id.into(), t.clone());
         Ok((t, token))
@@ -775,13 +946,20 @@ impl TenancyState {
             || self
                 .vms
                 .iter()
-                .any(|v| v.active() && v.tenant.as_deref() == Some(id));
+                .any(|v| v.active() && v.tenant.as_deref() == Some(id))
+            || self.has_volumes(id)
+            // A warm pool keeps booting VMs for the tenant: it is deleted first, like volumes.
+            || self.pools.values().any(|p| p.tenant.as_deref() == Some(id));
         if busy {
             return Err(TenancyError::TenantBusy(id.into()));
         }
         self.overlays.retain(|_, o| o.tenant.as_deref() != Some(id));
+        // Console sessions signed in to it end (its members go with the tenant record).
+        self.sessions.retain(|_, s| s.tenant.as_deref() != Some(id));
         // Its webhooks go too: a tenant created later with the same id must not inherit them.
         self.webhooks.retain(|h| h.owner.as_deref() != Some(id));
+        // Its invoice records too (Stripe keeps the invoices themselves).
+        self.invoices.retain(|r| r.tenant != id);
         self.tenants.remove(id);
         Ok(())
     }
@@ -1414,7 +1592,7 @@ impl TenancyState {
     }
 
     pub fn end_vm(&mut self, node: &str, vm_id: &str, now: DateTime<Utc>) -> bool {
-        match self
+        let ended = match self
             .vms
             .iter_mut()
             .rev()
@@ -1425,7 +1603,11 @@ impl TenancyState {
                 true
             }
             None => false,
+        };
+        if ended {
+            self.detach_volumes_of(node, vm_id);
         }
+        ended
     }
 
     /// Closes every active entry on `node` whose VM the node no longer lists. Entries younger than
@@ -1447,6 +1629,7 @@ impl TenancyState {
                 closed += 1;
             }
         }
+        self.detach_ended_vm_volumes(node);
         closed
     }
 
@@ -1462,13 +1645,31 @@ impl TenancyState {
     /// Drops ended ledger entries and released leases that ended before `before`, keeping the file bounded.
     /// Usage for windows before `before` is no longer available afterwards: export it first.
     pub fn compact(&mut self, before: DateTime<Utc>) -> usize {
-        let n = self.vms.len() + self.leases.len();
+        // Snapshots first: whether one has ended can depend on its VM's (soon dropped) entry.
+        let snaps = self.snapshots.len();
+        let ends: Vec<Option<DateTime<Utc>>> = self
+            .snapshots
+            .iter()
+            .map(|x| self.snapshot_end(x))
+            .collect();
+        let mut i = 0;
+        self.snapshots.retain(|_| {
+            let keep = ends[i].is_none_or(|e| e >= before);
+            i += 1;
+            keep
+        });
+        let n = self.vms.len()
+            + self.leases.len()
+            + self.volumes.len()
+            + (snaps - self.snapshots.len());
         self.vms.retain(|v| v.ended_at.is_none_or(|e| e >= before));
+        self.volumes
+            .retain(|v| v.deleted_at.is_none_or(|e| e >= before));
         self.leases.retain(|l| {
             l.state == LeaseState::Active
                 || l.released_at.is_none_or(|r| r.max(l.min_end) >= before)
         });
-        n - (self.vms.len() + self.leases.len())
+        n - (self.vms.len() + self.leases.len() + self.volumes.len())
     }
 
     // ---- metering ---------------------------------------------------------------------------------------------
@@ -1488,8 +1689,9 @@ impl TenancyState {
             if !keep(&tenant) {
                 continue;
             }
-            let secs = overlap_secs(v.created_at, v.ended_at.unwrap_or(now), from, to);
-            let started = v.created_at >= from && v.created_at < to;
+            let start = v.billable_start();
+            let secs = overlap_secs(start, v.ended_at.unwrap_or(now), from, to);
+            let started = start >= from && start < to;
             if secs == 0 && !started {
                 continue;
             }
@@ -1535,6 +1737,433 @@ impl TenancyState {
     }
 }
 
+// ---- snapshots ------------------------------------------------------------------------------------------------
+
+/// A snapshot taken through central. Its name is also the tag on the node (`<workspace>/snapshots/<name>`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SnapshotEntry {
+    pub node: String,
+    pub vm_id: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tenant: Option<String>,
+    /// Saved memory and device state too (restoring resumes the guest), not just the disk.
+    #[serde(default)]
+    pub memory: bool,
+    /// As the node last reported it; what storage is billed on.
+    #[serde(default)]
+    pub size_bytes: u64,
+    pub created_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deleted_at: Option<DateTime<Utc>>,
+}
+
+/// Whether `name` can be a snapshot name: 1-64 of `[A-Za-z0-9._-]`, starting with a letter or digit. It becomes a
+/// directory name on the node.
+pub fn valid_snapshot_name(name: &str) -> bool {
+    (1..=64).contains(&name.len())
+        && name
+            .bytes()
+            .next()
+            .is_some_and(|b| b.is_ascii_alphanumeric())
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_'))
+}
+
+impl TenancyState {
+    /// When a snapshot stopped existing: deleted, or gone with its VM. `None` while it exists.
+    pub fn snapshot_end(&self, s: &SnapshotEntry) -> Option<DateTime<Utc>> {
+        s.deleted_at
+            .or_else(|| self.vm(&s.node, &s.vm_id).and_then(|v| v.ended_at))
+    }
+
+    /// The snapshots of one VM that still exist, oldest first.
+    pub fn snapshots_of(&self, node: &str, vm_id: &str) -> Vec<&SnapshotEntry> {
+        self.snapshots
+            .iter()
+            .filter(|s| s.node == node && s.vm_id == vm_id && s.deleted_at.is_none())
+            .collect()
+    }
+
+    /// How many snapshots a VM of `tenant` (or of no tenant) may keep.
+    pub fn snapshot_limit(&self, tenant: Option<&str>) -> u32 {
+        tenant
+            .and_then(|t| self.tenants.get(t))
+            .and_then(|t| t.quota.max_snapshots_per_vm)
+            .unwrap_or(self.policy.max_snapshots_per_vm)
+            .min(MAX_SNAPSHOTS_PER_VM)
+    }
+
+    /// Records a snapshot about to be taken, after checking its name is free and the VM is under its limit. The entry
+    /// counts at once, so parallel snapshots of one VM cannot overshoot; drop it with [`Self::forget_snapshot`] if the
+    /// node refuses.
+    pub fn begin_snapshot(
+        &mut self,
+        node: &str,
+        vm_id: &str,
+        name: &str,
+        tenant: Option<String>,
+        memory: bool,
+        now: DateTime<Utc>,
+    ) -> Result<(), TenancyError> {
+        if !valid_snapshot_name(name) {
+            return Err(TenancyError::InvalidSnapshot(format!(
+                "invalid snapshot name '{name}': use 1-64 letters, digits, '.', '_' and '-', starting with a letter or digit"
+            )));
+        }
+        let existing = self.snapshots_of(node, vm_id);
+        if existing.iter().any(|s| s.name == name) {
+            return Err(TenancyError::SnapshotExists(name.to_owned()));
+        }
+        let limit = self.snapshot_limit(tenant.as_deref());
+        if existing.len() as u32 >= limit {
+            return Err(TenancyError::Quota(if limit == 0 {
+                "snapshots are turned off for this VM".to_owned()
+            } else {
+                format!(
+                    "this VM keeps {} of {limit} snapshots; delete one first",
+                    existing.len()
+                )
+            }));
+        }
+        self.snapshots.push(SnapshotEntry {
+            node: node.to_owned(),
+            vm_id: vm_id.to_owned(),
+            name: name.to_owned(),
+            tenant,
+            memory,
+            size_bytes: 0,
+            created_at: now,
+            deleted_at: None,
+        });
+        Ok(())
+    }
+
+    /// Drops an entry [`Self::begin_snapshot`] made for a snapshot the node did not take.
+    pub fn forget_snapshot(&mut self, node: &str, vm_id: &str, name: &str) {
+        self.snapshots.retain(|s| {
+            !(s.node == node && s.vm_id == vm_id && s.name == name && s.deleted_at.is_none())
+        });
+    }
+
+    /// Marks a snapshot deleted. Returns whether one was found.
+    pub fn end_snapshot(
+        &mut self,
+        node: &str,
+        vm_id: &str,
+        name: &str,
+        now: DateTime<Utc>,
+    ) -> bool {
+        match self.snapshots.iter_mut().find(|s| {
+            s.node == node && s.vm_id == vm_id && s.name == name && s.deleted_at.is_none()
+        }) {
+            Some(s) => {
+                s.deleted_at = Some(now);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Brings one VM's entries in line with what its node lists (`name` → size in bytes): sizes are updated, and
+    /// entries the node no longer has are closed, except ones younger than [`RECONCILE_GRACE_SECS`] (still being
+    /// taken). Returns whether anything changed.
+    pub fn sync_snapshots(
+        &mut self,
+        node: &str,
+        vm_id: &str,
+        present: &BTreeMap<String, u64>,
+        now: DateTime<Utc>,
+    ) -> bool {
+        let mut changed = false;
+        for s in self
+            .snapshots
+            .iter_mut()
+            .filter(|s| s.node == node && s.vm_id == vm_id && s.deleted_at.is_none())
+        {
+            match present.get(&s.name) {
+                Some(size) if *size != s.size_bytes => {
+                    s.size_bytes = *size;
+                    changed = true;
+                }
+                Some(_) => {}
+                None if (now - s.created_at).num_seconds() >= RECONCILE_GRACE_SECS => {
+                    s.deleted_at = Some(now);
+                    changed = true;
+                }
+                None => {}
+            }
+        }
+        changed
+    }
+}
+
+#[cfg(test)]
+mod snapshot_tests {
+    use super::*;
+    use chrono::TimeZone;
+
+    fn t0() -> DateTime<Utc> {
+        Utc.with_ymd_and_hms(2026, 10, 1, 0, 0, 0).unwrap()
+    }
+
+    fn state() -> TenancyState {
+        let mut s = TenancyState::default();
+        s.create_tenant("acme", None, Quota::default(), t0())
+            .unwrap();
+        s.record_vm(VmEntry {
+            node: "mac".into(),
+            vm_id: "v1".into(),
+            name: "build".into(),
+            tenant: Some("acme".into()),
+            vcpus: 2,
+            memory_mib: 4096,
+            macos_guest: false,
+            created_at: t0(),
+            ended_at: None,
+            spec: None,
+            warm_pool: None,
+            claimed_at: None,
+            expires_at: None,
+            billed_from: None,
+        });
+        s
+    }
+
+    #[test]
+    fn names_are_checked() {
+        for ok in ["a", "before-upgrade", "v1.2_3", "x".repeat(64).as_str()] {
+            assert!(valid_snapshot_name(ok), "{ok}");
+        }
+        for bad in [
+            "",
+            ".hidden",
+            "-x",
+            "a/b",
+            "a b",
+            "..",
+            "x".repeat(65).as_str(),
+            "ü",
+        ] {
+            assert!(!valid_snapshot_name(bad), "{bad}");
+        }
+        let mut s = state();
+        assert_eq!(
+            s.begin_snapshot("mac", "v1", "../x", Some("acme".into()), false, t0())
+                .unwrap_err()
+                .status(),
+            400
+        );
+    }
+
+    #[test]
+    fn the_limit_counts_live_snapshots_per_vm() {
+        let mut s = state();
+        s.policy.max_snapshots_per_vm = 2;
+        let acme = || Some("acme".to_owned());
+        s.begin_snapshot("mac", "v1", "a", acme(), true, t0())
+            .unwrap();
+        assert_eq!(
+            s.begin_snapshot("mac", "v1", "a", acme(), true, t0()),
+            Err(TenancyError::SnapshotExists("a".into()))
+        );
+        s.begin_snapshot("mac", "v1", "b", acme(), false, t0())
+            .unwrap();
+        let err = s
+            .begin_snapshot("mac", "v1", "c", acme(), false, t0())
+            .unwrap_err();
+        assert_eq!(err.status(), 429, "{err}");
+        // Another VM has its own count.
+        s.begin_snapshot("mac", "v2", "c", acme(), false, t0())
+            .unwrap();
+        // A deleted snapshot frees its slot, and its name.
+        assert!(s.end_snapshot("mac", "v1", "a", t0()));
+        s.begin_snapshot("mac", "v1", "a", acme(), false, t0())
+            .unwrap();
+        // The tenant's quota overrides the policy; 0 turns snapshots off.
+        s.tenants
+            .get_mut("acme")
+            .unwrap()
+            .quota
+            .max_snapshots_per_vm = Some(0);
+        let err = s
+            .begin_snapshot("mac", "v9", "z", acme(), false, t0())
+            .unwrap_err();
+        assert!(err.to_string().contains("turned off"), "{err}");
+        // A refused snapshot is forgotten.
+        s.tenants
+            .get_mut("acme")
+            .unwrap()
+            .quota
+            .max_snapshots_per_vm = Some(5);
+        s.begin_snapshot("mac", "v1", "c", acme(), false, t0())
+            .unwrap();
+        s.forget_snapshot("mac", "v1", "c");
+        assert_eq!(s.snapshots_of("mac", "v1").len(), 2);
+    }
+
+    #[test]
+    fn sync_updates_sizes_and_closes_what_the_node_lost() {
+        let mut s = state();
+        s.begin_snapshot("mac", "v1", "a", None, true, t0())
+            .unwrap();
+        s.begin_snapshot("mac", "v1", "b", None, true, t0())
+            .unwrap();
+        let later = t0() + Duration::minutes(10);
+        s.begin_snapshot("mac", "v1", "new", None, true, later)
+            .unwrap();
+        let present = BTreeMap::from([("a".to_owned(), 5u64 << 30)]);
+        assert!(s.sync_snapshots("mac", "v1", &present, later));
+        let live: Vec<&str> = s
+            .snapshots_of("mac", "v1")
+            .iter()
+            .map(|x| x.name.as_str())
+            .collect();
+        // "b" is gone from the node; "new" is still being taken.
+        assert_eq!(live, ["a", "new"]);
+        assert_eq!(s.snapshots_of("mac", "v1")[0].size_bytes, 5 << 30);
+        assert!(!s.sync_snapshots("mac", "v1", &present, later));
+    }
+
+    #[test]
+    fn a_snapshot_ends_with_its_vm_and_is_compacted_later() {
+        let mut s = state();
+        s.begin_snapshot("mac", "v1", "a", None, true, t0())
+            .unwrap();
+        let end = t0() + Duration::hours(5);
+        s.end_vm("mac", "v1", end);
+        assert_eq!(s.snapshot_end(&s.snapshots[0]), Some(end));
+        assert_eq!(s.compact(end), 0);
+        assert_eq!(s.compact(end + Duration::seconds(1)), 2);
+        assert!(s.snapshots.is_empty());
+    }
+
+    #[test]
+    fn old_state_files_load_with_the_defaults() {
+        let s: TenancyState = serde_json::from_str(r#"{"policy": {}, "tenants": {}}"#).unwrap();
+        assert_eq!(s.policy.max_snapshots_per_vm, 20);
+        assert!(s.snapshots.is_empty());
+        assert_eq!(s.snapshot_limit(None), 20);
+    }
+}
+// ---- tunnel ----
+
+/// The login name `fluxctl fleet ssh` uses when the VM's image names none.
+pub const DEFAULT_SSH_USER: &str = "admin";
+
+/// A login name safe to pass to `ssh -l` and to show in an SSH config.
+pub fn valid_ssh_user(u: &str) -> bool {
+    !u.is_empty()
+        && u.len() <= 32
+        && !u.starts_with('-')
+        && u.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_'))
+}
+
+/// Rules for tunnels to VMs through central (`Policy::tunnels`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TunnelPolicy {
+    /// Allow tunnels at all.
+    #[serde(default = "yes")]
+    pub enabled: bool,
+    /// Guest ports a tunnel may reach: single ports (`"22"`) and inclusive ranges (`"1024-65535"`).
+    #[serde(default = "default_tunnel_ports")]
+    pub ports: Vec<String>,
+    /// A tunnel with no traffic either way for this long is closed.
+    #[serde(default = "default_tunnel_idle_minutes")]
+    pub idle_timeout_minutes: u32,
+    /// Open tunnels per tenant (the operator counts as one more tenant).
+    #[serde(default = "default_tunnels_per_tenant")]
+    pub max_per_tenant: u32,
+}
+
+/// Most entries `TunnelPolicy::ports` may hold.
+pub const MAX_TUNNEL_PORT_RULES: usize = 64;
+/// Longest idle timeout: a day.
+pub const MAX_TUNNEL_IDLE_MINUTES: u32 = 24 * 60;
+/// Most tunnels a tenant may be allowed.
+pub const MAX_TUNNELS_PER_TENANT: u32 = 1000;
+
+fn default_tunnel_ports() -> Vec<String> {
+    vec!["22".into(), "1024-65535".into()]
+}
+
+fn default_tunnel_idle_minutes() -> u32 {
+    60
+}
+
+fn default_tunnels_per_tenant() -> u32 {
+    20
+}
+
+impl Default for TunnelPolicy {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            ports: default_tunnel_ports(),
+            idle_timeout_minutes: default_tunnel_idle_minutes(),
+            max_per_tenant: default_tunnels_per_tenant(),
+        }
+    }
+}
+
+/// One `TunnelPolicy::ports` entry as an inclusive range.
+pub fn parse_port_rule(rule: &str) -> Option<(u16, u16)> {
+    let rule = rule.trim();
+    let (a, b) = match rule.split_once('-') {
+        Some((a, b)) => (a.trim(), b.trim()),
+        None => (rule, rule),
+    };
+    let a: u16 = a.parse().ok()?;
+    let b: u16 = b.parse().ok()?;
+    (a >= 1 && a <= b).then_some((a, b))
+}
+
+impl TunnelPolicy {
+    /// Checks the rules before they are stored.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.ports.len() > MAX_TUNNEL_PORT_RULES {
+            return Err(format!(
+                "tunnels.ports holds at most {MAX_TUNNEL_PORT_RULES} entries"
+            ));
+        }
+        if let Some(bad) = self.ports.iter().find(|r| parse_port_rule(r).is_none()) {
+            return Err(format!(
+                "tunnels.ports entry '{}' is not a port (1-65535) or a range like 1024-65535",
+                bad.chars().take(32).collect::<String>()
+            ));
+        }
+        if !(1..=MAX_TUNNEL_IDLE_MINUTES).contains(&self.idle_timeout_minutes) {
+            return Err(format!(
+                "tunnels.idle_timeout_minutes is 1 to {MAX_TUNNEL_IDLE_MINUTES}"
+            ));
+        }
+        if !(1..=MAX_TUNNELS_PER_TENANT).contains(&self.max_per_tenant) {
+            return Err(format!(
+                "tunnels.max_per_tenant is 1 to {MAX_TUNNELS_PER_TENANT}"
+            ));
+        }
+        Ok(())
+    }
+
+    /// Whether a tunnel may reach guest port `port`.
+    pub fn allows_port(&self, port: u16) -> bool {
+        port != 0
+            && self
+                .ports
+                .iter()
+                .filter_map(|r| parse_port_rule(r))
+                .any(|(a, b)| (a..=b).contains(&port))
+    }
+
+    /// The idle timeout, kept within its bounds even if the stored value is not.
+    pub fn idle_timeout(&self) -> std::time::Duration {
+        let m = self.idle_timeout_minutes.clamp(1, MAX_TUNNEL_IDLE_MINUTES);
+        std::time::Duration::from_secs(u64::from(m) * 60)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1564,6 +2193,10 @@ mod tests {
             created_at: at,
             ended_at: None,
             spec: None,
+            warm_pool: None,
+            claimed_at: None,
+            expires_at: None,
+            billed_from: None,
         }
     }
 
@@ -1769,6 +2402,7 @@ mod tests {
                 max_vcpus: Some(5),
                 max_memory_mib: Some(10_000),
                 max_leased_hosts: None,
+                ..Quota::default()
             }),
             None,
             None,
@@ -2044,8 +2678,23 @@ mod tests {
             TenancyError::TenantBusy("a".into())
         );
         s.release_lease(&l.id, None, true, t0()).unwrap();
+        // A warm pool of its own holds it too; its console sessions end with it.
+        let pool: crate::warmpool::Pool = serde_json::from_value(serde_json::json!({
+            "name": "ci", "tenant": "a", "image": "debian-13", "size": {"vcpus": 2, "memory_mib": 2048},
+            "min_ready": 0, "max_total": 1, "created_at": t0(),
+        }))
+        .unwrap();
+        s.pools.insert("ci".into(), pool);
+        assert_eq!(
+            s.delete_tenant("a").unwrap_err(),
+            TenancyError::TenantBusy("a".into())
+        );
+        s.pools.clear();
+        s.create_session("ops@a.io", Some("a"), chrono::Duration::hours(1), t0());
+        s.create_session("root@op.io", None, chrono::Duration::hours(1), t0());
         s.delete_tenant("a").unwrap();
         assert!(!s.enabled());
+        assert_eq!(s.sessions.len(), 1);
     }
 
     #[test]
