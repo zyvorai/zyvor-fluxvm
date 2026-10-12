@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+### Added: fleet console as a cloud UX, image catalog, tenant view of leased Macs
+- The `/console` web console is rebuilt as a cloud UX: overview with quota bars and your Macs, My Macs, virtual machines,
+  networks, images to launch from, usage, search and a command bar ([docs/mac-cloud-tenancy.md](docs/mac-cloud-tenancy.md#console)).
+- `GET/PUT/DELETE /fleet/images[/{name}]`: an operator-managed image catalog (tenants read, the operator writes).
+  `GET /fleet/nodes/{name}` for a tenant returns only a Mac it leases, and only size, free capacity and Apple
+  capabilities. The operator tenant list carries each tenant's current use. A tenant's unreachable-node list is limited
+  to its own Macs and carries no error text.
+- Known limit: the catalog returns each image's disk path on the Macs to tenants, because the console puts it in the
+  create request; resolving the name on the server would remove that.
+
 ### Added: grow a stopped vz VM's root disk
 - `PATCH /v1/vms/{id}/disks/root` (`fluxctl disk resize <id> root --size-gib N`) now works on the `vz` backend for macOS
   and Linux guests: the VM must be stopped, the size is an absolute grow-only target, and `apple.asif_overlay` VMs are
