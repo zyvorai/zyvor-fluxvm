@@ -3,7 +3,7 @@
 
 [package]
 name = "fluxvm-backup-s3"
-version = "0.4.3"
+version = "0.4.4"
 edition = "2024"
 license = "Apache-2.0"
 description = "Backup chain storage for Zyvor FluxVM: manifests, S3 and directory object stores, layer encryption"

@@ -1,6 +1,15 @@
 # Changelog
 
-## Unreleased
+## 0.4.4 (2026-10-12)
+
+This is the first release since 0.4.1 with a package: the 0.4.2 and 0.4.3 tags were never published, because their macOS
+package builds failed on the hosted runner (the USB helper could not import `AccessoryAccess`). Everything in 0.4.2 and
+0.4.3 below ships here, together with the fleet platform and the fix.
+
+### Fixed: the macOS package builds on hosted runners
+- `scripts/package-macos.sh` leaves out `FluxVMUSBAccess.app` and its launch agent when the SDK has no `AccessoryAccess`
+  framework (or with `FLUXVM_SKIP_USBD=1`) and says so; the release workflow summary notes it. USB passthrough then
+  needs a source build (`docs/macos-signing.md`). Packages built where the framework exists are unchanged.
 
 
 ### Docs: Mac cloud operations guide, `fluxctl fleet` reference, node API and OpenAPI coverage
