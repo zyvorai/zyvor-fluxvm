@@ -12,6 +12,8 @@
 #
 #   examples/agent-sandbox-demo/run.sh            # FLUXVM_URL (default http://127.0.0.1:7788), FLUXVM_TOKEN if auth is on
 # Needs a running daemon on Apple silicon with the default Linux image, curl and jq. Everything it makes is deleted.
+# The single-quoted commands below are meant to expand inside the guest (for example $HOME), not here.
+# shellcheck disable=SC2016
 set -euo pipefail
 
 URL="${FLUXVM_URL:-http://127.0.0.1:7788}"
@@ -21,11 +23,8 @@ command -v jq >/dev/null || { echo "jq is required" >&2; exit 2; }
 call() { curl -sf ${AUTH[@]+"${AUTH[@]}"} -H 'Content-Type: application/json' "$@"; }
 now() { python3 -c 'import time; print(time.time())'; }
 since() { python3 -c "import time; print(f'{time.time() - $1:.1f}')"; }
-exec_in() { # id command -> stdout, exit code in $RC
-  local out
-  out="$(call -X POST "$URL/v1/sandboxes/$1/process" -d "$(jq -n --arg c "$2" '{command: $c}')")"
-  RC="$(echo "$out" | jq -r .exit_code)"
-  echo "$out" | jq -r '.stdout'
+exec_in() { # id command -> the command's stdout (it echoes its own exit status where one is needed)
+  call -X POST "$URL/v1/sandboxes/$1/process" -d "$(jq -n --arg c "$2" '{command: $c}')" | jq -r '.stdout'
 }
 
 ids=()

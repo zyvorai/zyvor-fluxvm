@@ -1,6 +1,12 @@
 # Changelog
 
-## Unreleased
+## 0.4.5 (2026-10-12)
+
+The first release after 0.4.4 that fixes what installing 0.4.4 from the Homebrew tap on a clean Mac turned up, and adds
+the guard and flags for running a second daemon. Tested before release: the whole workspace per crate (2151 tests, none
+failing; the two Linux-only crates do not build on macOS), a package built locally and installed through Homebrew from a
+throwaway tap (`brew test`, the service, `/readyz`, the MCP handshake and a sandbox round trip, a second daemon beside
+Homebrew's, both demo scripts), and the docs site build.
 
 ### Docs and site: agent sandboxes and the Mac cloud platform, with their evidence labels
 - New `/agents` page on the docs site: the fork-into-four demo with its real output, the offline and local-model story,
