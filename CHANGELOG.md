@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+### Fixed: incident bundle directories were world-readable
+- `diagnostics_dir` and its per-VM and per-bundle directories are now created, and tightened if they exist, with mode
+  0700. They inherited the umask (0755), so on a multi-user host other local users could read bundles and guest memory
+  dumps. Incident bundles are now also in the README feature table, `docs/index.md` and `docs/operations.md`.
+
 ## 0.4.3 (2026-10-12)
 
 

@@ -74,6 +74,7 @@ packet capture and memory dump are never redacted.
 ## Storage
 
 `diagnostics_dir` in `/etc/fluxvm.toml` (default `<state_dir>/diagnostics`) holds `<id>/<token>/` with `job.json`,
-`bundle.tar.gz` and `memory.elf`. FluxVM keeps the last five bundles per VM, deleting the oldest when a new one starts,
+`bundle.tar.gz` and `memory.elf`. FluxVM creates these directories (and the root) mode 0700, since bundles and dumps
+hold guest secrets. FluxVM keeps the last five bundles per VM, deleting the oldest when a new one starts,
 and removes them all when the VM is deleted. One bundle per VM runs at a time; another start gets 409. A bundle still running when FluxVM
 restarts reads as failed.

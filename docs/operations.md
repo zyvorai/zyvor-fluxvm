@@ -727,6 +727,22 @@ itself (the code this command calls) was already proven against real `memory.max
 by `scripts/test-cgroup-resources.sh` when `resources` first landed as a REST route; this change adds
 no new behavior to that path, only a CLI front end for it.
 
+## Incident bundles
+
+When a VM misbehaves, collect its state before restarting it:
+
+```bash
+fluxctl incident <id> --out vm-incident.tar.gz                  # QMP, cgroup/PSI, console, dataplane, host
+fluxctl incident <id> --pcap-seconds 10 --pcap-filter 'tcp port 443'
+fluxctl incident <id> --memory-dump                             # + ELF guest memory dump (QEMU; pauses the guest)
+```
+
+The job runs asynchronously (`POST /v1/vms/{id}/diagnostics`, admin only); `fluxctl incident` polls it and downloads
+the bundle. Secrets are fingerprinted unless `--no-redact`. Bundles and dumps live under `diagnostics_dir` (default
+`<state_dir>/diagnostics`), the last five per VM, and go away with the VM. Size the directory for a guest's memory plus
+1 GiB if you take dumps, and cap them with `diagnostics_max_memory_dump_mib`. Layout, redaction and limits:
+[diagnostics-bundle.md](diagnostics-bundle.md).
+
 ## Warm VM pools
 
 A pool keeps `size` VMs booted from a template sitting `Paused`, ready to be handed out on `claim` in
