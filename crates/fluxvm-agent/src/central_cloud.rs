@@ -1329,6 +1329,7 @@ mod tests {
             tenancy: Arc::new(Mutex::new(tenancy)),
             tenancy_path: None,
             ha: None,
+            audit: Arc::new(super::super::audit::AuditLog::memory()),
         }
     }
 

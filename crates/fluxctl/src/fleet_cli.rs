@@ -592,6 +592,71 @@ async fn dispatch(
             let (node, id, _) = resolve_vm(central, token, &vm).await?;
             exec(central, token, &out, &node, &id, timeout, command.join(" ")).await
         }
+        FleetCommand::Screen {
+            vm,
+            file,
+            max_width,
+        } => {
+            let (node, id, name) = resolve_vm(central, token, &vm).await?;
+            let (ctype, bytes) = fleet_client::get_bytes(
+                central,
+                token,
+                &format!(
+                    "/fleet/vms/{}/{}/screen?max_width={max_width}",
+                    esc(&node),
+                    esc(&id)
+                ),
+            )
+            .await
+            .map_err(|e| {
+                if status_of(&e) == Some(409) {
+                    e.context(format!("{name} has no screen to show (it needs to be a running vz VM with a display)"))
+                } else {
+                    e
+                }
+            })?;
+            let ext = if ctype.contains("svg") { "svg" } else { "png" };
+            let path = file.unwrap_or_else(|| std::path::PathBuf::from(format!("{name}.{ext}")));
+            std::fs::write(&path, &bytes).with_context(|| format!("writing {}", path.display()))?;
+            if !out.human {
+                return out
+                    .json(&json!({"file": path.display().to_string(), "bytes": bytes.len(), "content_type": ctype}));
+            }
+            out.done(format!("Saved the screen of {name} to {}.", path.display()));
+            Ok(())
+        }
+        FleetCommand::Events { limit, tenant } => {
+            let q = query(&[("limit", Some(limit.to_string())), ("tenant", tenant)]);
+            let v = get(central, token, &format!("/fleet/events{q}")).await?;
+            if !out.human {
+                return out.json(&v);
+            }
+            let list = items(&v);
+            if list.is_empty() {
+                println!("Nothing has happened yet.");
+                return Ok(());
+            }
+            let mut t = Table::new(vec!["WHEN", "WHO", "WHAT", "RESULT"]);
+            for e in &list {
+                let code = u(e, "status");
+                let target = match s(e, "target") {
+                    "" => String::new(),
+                    x => format!(" {x}"),
+                };
+                t.row(vec![
+                    ct(time(e, "time").map(rel).unwrap_or_default(), Tone::Dim),
+                    c(s(e, "actor")),
+                    c(format!("{} {}{target}", s(e, "method"), s(e, "path"))),
+                    if code < 400 {
+                        ct("done", Tone::Ok)
+                    } else {
+                        ct(format!("refused ({code})"), Tone::Bad)
+                    },
+                ]);
+            }
+            t.print(&out);
+            Ok(())
+        }
         FleetCommand::Images { command } => images(central, token, &out, command).await,
         FleetCommand::Networks { command } => networks(central, token, &out, command).await,
         FleetCommand::Tenant { command } => tenant(central, token, &out, command).await,

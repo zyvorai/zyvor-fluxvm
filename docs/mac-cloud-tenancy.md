@@ -39,6 +39,9 @@ With a **tenant token** you get:
   or delete the VM automatically. Select a VM to run commands in it through the guest agent, or delete it after typing
   its name.
 - **Networks**: create one across your Macs, see each Mac's address range, add or remove Macs, rotate the key.
+- **Screen**: a VM's details show its display, refreshed every 2 seconds while open, so you can watch macOS boot,
+  finish setup or see why a job hangs, without VNC. It comes through central from the node's screenshot API.
+- **Activity**: every change made with your token (launches, deletes, leases, networks, commands) and whether it worked.
 - **Images** (the catalog) and **Usage** (7, 30 or 90 days, with a CSV download).
 
 The **fleet token** adds the operator's pages:
@@ -84,6 +87,8 @@ Next: fluxctl fleet run macos-27-xcode-1 -- sw_vers
 | `fleet status` | A tenant's quota, Macs and next step; for the operator, fleet health and what needs attention |
 | `fleet launch [NAME] --image I` | Launch from the catalog (or `--disk PATH --guest macos`); `--mac`, `--network` (repeatable), `--ttl 8h`, `--vcpus`, `--memory-gib` |
 | `fleet run VM -- CMD…` | Run a command in a VM found by name or ID prefix; prints the guest's output and exits with its code |
+| `fleet screen VM [-f out.png]` | Save a picture of a VM's display |
+| `fleet events [--limit N]` | The activity log |
 | `fleet rm VM` | Delete a VM by name (asks on a terminal; `-y` to skip) |
 | `fleet vms`, `fleet nodes`, `fleet node M` | VMs and Macs, with macOS slots (`●○`) and when each lease can be released |
 | `fleet lease create\|list\|get\|release` | Leases (`create --hours 72 --min-vcpus 16 --nested`) |
@@ -94,6 +99,16 @@ Next: fluxctl fleet run macos-27-xcode-1 -- sw_vers
 
 A refused call shows central's own message plus a hint: a 401 says which flag carries the token, a 429 points at the
 quota, a standby names the leader, and an unreachable central says how to point `--central` at it.
+
+## Activity log
+
+Central records every change made through it: the time, who (`operator` or the tenant), the method and path, the
+name or id from the request body if there is one (a VM name, a tenant id), and the HTTP status. Reads and node
+heartbeats are not recorded, a command's body is never read, and nothing else from a request is kept, so the log never
+holds a VM spec, a command, a token or a key. A tenant's refused attempt at an operator route (403) is recorded too;
+calls without a valid token are not. The newest 5000 events are served by `GET /fleet/events`; all of them are appended to `fleet-audit.jsonl` (mode
+0600) in the state directory, which rotates to `fleet-audit.jsonl.1` at 16 MiB. A tenant sees only its own actions.
+With HA, each central keeps its own log, so the log of a central that was leader for a while covers that while.
 
 ## Image catalog
 
@@ -238,6 +253,8 @@ capabilities, but not its address, labels or security report.
 | `GET /fleet/usage?from=&to=&tenant=&format=json\|csv` | tenant (own), operator |
 | `POST /fleet/reconcile`, `GET/PUT /fleet/policy` | operator |
 | `GET /fleet/images` | tenant, operator |
+| `GET /fleet/vms/{node}/{id}/screen[?max_width=N]` | tenant (own VMs), operator: the display as PNG; `409` when the VM has none |
+| `GET /fleet/events[?limit=N&tenant=T]` | tenant (own actions), operator (all, or one tenant's) |
 | `PUT/DELETE /fleet/images/{name}` | operator |
 | `GET /fleet/nodes/{name}` | operator; tenant for a Mac it leases (size, capacity, Apple capabilities only) |
 

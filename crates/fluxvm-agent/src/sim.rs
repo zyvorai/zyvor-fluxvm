@@ -60,6 +60,7 @@ impl SimNode {
             .route("/v1/vms", get(list_vms).post(create_vm))
             .route("/v1/vms/{id}", get(get_vm).delete(delete_vm))
             .route("/v1/vms/{id}/agent", post(exec_vm))
+            .route("/v1/vms/{id}/screenshot", get(screenshot))
             .with_state(self.clone())
     }
 
@@ -162,6 +163,75 @@ async fn delete_vm(
         Some(_) => (StatusCode::OK, Json(json!({ "deleted": id }))),
         None => error(StatusCode::NOT_FOUND, format!("no VM '{id}'")),
     }
+}
+
+/// A drawn stand-in for the guest's display (SVG, 1280x800): a desktop with the VM's name and the time, so the console's
+/// screen view has something to show.
+async fn screenshot(
+    State(node): State<SimNode>,
+    Path(id): Path<String>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    node.reap().await;
+    let Some(vm) = node.vms.lock().await.get(&id).cloned() else {
+        return error(StatusCode::NOT_FOUND, format!("no VM '{id}'")).into_response();
+    };
+    let name: String = vm
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or("vm")
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+        .collect();
+    let now = Utc::now().format("%H:%M:%S");
+    let svg = if vm.get("request").is_some_and(is_macos) {
+        format!(
+            r##"<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="800" viewBox="0 0 1280 800">
+<defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#2b5876"/><stop offset="1" stop-color="#4e4376"/></linearGradient></defs>
+<rect width="1280" height="800" fill="url(#g)"/>
+<rect width="1280" height="28" fill="#000" fill-opacity="0.35"/>
+<text x="18" y="19" font-family="Helvetica, Arial" font-size="14" fill="#fff">Finder   File   Edit   View   Go   Window   Help</text>
+<text x="1262" y="19" font-family="Helvetica, Arial" font-size="14" fill="#fff" text-anchor="end">{now}</text>
+<rect x="340" y="220" width="600" height="320" rx="12" fill="#1e1e1e" fill-opacity="0.92"/>
+<circle cx="364" cy="244" r="6" fill="#ff5f57"/><circle cx="384" cy="244" r="6" fill="#febc2e"/><circle cx="404" cy="244" r="6" fill="#28c840"/>
+<text x="364" y="300" font-family="Menlo, monospace" font-size="16" fill="#e6e6e6">{name} (simulated)</text>
+<text x="364" y="330" font-family="Menlo, monospace" font-size="16" fill="#8fc7ff">$ sw_vers</text>
+<text x="364" y="356" font-family="Menlo, monospace" font-size="16" fill="#e6e6e6">ProductName: macOS</text>
+<text x="364" y="382" font-family="Menlo, monospace" font-size="16" fill="#e6e6e6">ProductVersion: 27.0</text>
+<rect x="490" y="740" width="300" height="44" rx="12" fill="#fff" fill-opacity="0.25"/>
+</svg>"##
+        )
+    } else {
+        format!(
+            r##"<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="640" viewBox="0 0 1024 640">
+<rect width="1024" height="640" fill="#101010"/>
+<text x="16" y="28" font-family="Menlo, monospace" font-size="16" fill="#d0d0d0">{name} login: fluxvm (simulated)</text>
+<text x="16" y="54" font-family="Menlo, monospace" font-size="16" fill="#d0d0d0">Last login: {now}</text>
+<text x="16" y="80" font-family="Menlo, monospace" font-size="16" fill="#8fe388">fluxvm@{name}:~$ _</text>
+</svg>"##
+        )
+    };
+    let (w, hgt) = if vm.get("request").is_some_and(is_macos) {
+        ("1280", "800")
+    } else {
+        ("1024", "640")
+    };
+    (
+        [
+            (axum::http::header::CONTENT_TYPE, "image/svg+xml"),
+            (axum::http::header::CACHE_CONTROL, "no-store"),
+            (
+                axum::http::HeaderName::from_static("x-fluxvm-screen-width"),
+                w,
+            ),
+            (
+                axum::http::HeaderName::from_static("x-fluxvm-screen-height"),
+                hgt,
+            ),
+        ],
+        svg,
+    )
+        .into_response()
 }
 
 /// Answers like a guest agent that ran the command and printed it back.
@@ -271,6 +341,24 @@ mod tests {
         assert!(s.is_success());
         let (s, _) = call(&app, "GET", &format!("/v1/vms/{id}"), Value::Null).await;
         assert_eq!(s, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn screenshot_draws_the_vm() {
+        let app = SimNode::default().router();
+        let (_, vm) = call(&app, "POST", "/v1/vms", macos("m1")).await;
+        let id = vm["id"].as_str().unwrap();
+        let req = Request::builder()
+            .uri(format!("/v1/vms/{id}/screenshot"))
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(resp.headers()["content-type"], "image/svg+xml");
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert!(String::from_utf8_lossy(&bytes).contains("m1"));
     }
 
     #[tokio::test]
@@ -430,5 +518,55 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
         assert!(synced, "overlay.json was never written");
+
+        // The VM's screen comes through central, and only for its owner.
+        let r = req(
+            reqwest::Method::GET,
+            &format!("/fleet/vms/sim-mac/{}/screen", ids[0]),
+            &token,
+            Value::Null,
+        )
+        .await
+        .unwrap();
+        assert_eq!(r.status(), 200);
+        assert_eq!(r.headers()["content-type"], "image/svg+xml");
+
+        // Every change was recorded; the tenant sees its own, with the VM's name and no request body.
+        let v: Value = req(reqwest::Method::GET, "/fleet/events", &token, Value::Null)
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let events = v["items"].as_array().unwrap();
+        assert!(events.iter().all(|e| e["actor"] == "acme"), "{v}");
+        assert!(
+            events
+                .iter()
+                .any(|e| e["path"] == "/fleet/vms" && e["target"] == "m1" && e["status"] == 200),
+            "{v}"
+        );
+        assert!(
+            events.iter().any(|e| e["status"].as_u64() >= Some(400)),
+            "the refused third VM is recorded: {v}"
+        );
+        let v: Value = req(reqwest::Method::GET, "/fleet/events", "admin", Value::Null)
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert!(
+            v["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|e| e["actor"] == "operator"),
+            "{v}"
+        );
+        assert!(
+            !v.to_string().contains("/fleet/register"),
+            "heartbeats are not recorded"
+        );
     }
 }
