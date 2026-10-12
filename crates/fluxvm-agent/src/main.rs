@@ -61,6 +61,35 @@ enum Command {
         #[arg(long, env = "FLUXVM_GHA_CONFIG")]
         config: PathBuf,
     },
+    /// Run a simulated Mac: an in-memory node API plus a heartbeat reporting Virtualization.framework capabilities.
+    /// For trying the fleet (leases, tenants, overlays, the console) on any machine. Nothing boots.
+    /// See docs/fleet-quickstart.md.
+    SimNode {
+        #[arg(long)]
+        name: String,
+        /// Central URL; with HA, a comma-separated list.
+        #[arg(long, env = "CENTRAL_URL", default_value = "http://127.0.0.1:7799")]
+        central: String,
+        /// Where the simulated node API listens; port 0 picks a free one.
+        #[arg(long, default_value = "127.0.0.1:0")]
+        listen: std::net::SocketAddr,
+        #[arg(long, env = "FLUXVM_AGENT_TOKEN")]
+        token: Option<String>,
+        #[arg(long, default_value = "12")]
+        vcpus: u32,
+        #[arg(long, default_value = "32")]
+        memory_gib: u64,
+        /// Report nested virtualization (an M3 or later Mac).
+        #[arg(long)]
+        nested: bool,
+        #[arg(long = "label", value_parser = parse_label)]
+        labels: Vec<(String, String)>,
+        #[arg(long, default_value = "10")]
+        interval_secs: u64,
+        /// Write the overlay.json this Mac would get here (default: none, no overlay sync).
+        #[arg(long)]
+        overlay_config: Option<PathBuf>,
+    },
     /// Run this node's heartbeat client, reporting to a central registry.
     Node {
         /// This node's name, as it'll appear in `POST /fleet/vms {"node": "..."}`.
@@ -209,6 +238,35 @@ async fn main() -> Result<()> {
                 .with_context(|| format!("parsing {}", config.display()))?;
             fluxvm_agent::gha::run(cfg).await?;
         }
+        Command::SimNode {
+            name,
+            central,
+            listen,
+            token,
+            vcpus,
+            memory_gib,
+            nested,
+            labels,
+            interval_secs,
+            overlay_config,
+        } => {
+            fluxvm_agent::sim::run(fluxvm_agent::sim::SimConfig {
+                name,
+                central_url: central,
+                token,
+                listen,
+                host: fluxvm_agent::node::SimHost {
+                    vcpus,
+                    memory_mib: memory_gib.saturating_mul(1024),
+                    nested_virtualization: nested,
+                    vmnet: true,
+                },
+                labels: labels.into_iter().collect(),
+                interval: Duration::from_secs(interval_secs.max(1)),
+                overlay_config,
+            })
+            .await?;
+        }
         Command::Node {
             name,
             central,
@@ -229,6 +287,7 @@ async fn main() -> Result<()> {
                 token,
                 labels: labels.into_iter().collect(),
                 overlay_config: (!no_overlay_sync).then(fluxvm_apple::vznet::overlay_config_path),
+                sim: None,
             })
             .await;
         }
