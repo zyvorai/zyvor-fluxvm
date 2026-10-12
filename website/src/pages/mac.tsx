@@ -35,10 +35,10 @@ const CAPABILITIES: Capability[] = [
   },
   {
     title: 'Agent sandboxes',
-    body: 'Disposable machines for coding agents: TTL, exec and files, speculate-and-approve changesets, offline or allow-listed egress, and a warm pool.',
+    body: 'Disposable machines for coding agents: TTL, exec and files, offline sandboxes you can fork into four running copies in about 4 s, a local model reachable with no network card, and a warm pool.',
     status: 'ok',
     tag: 'Verified on M4',
-    to: '/docs/macos-sandboxes',
+    to: '/agents',
   },
   {
     title: 'Container sandboxes',
@@ -80,13 +80,13 @@ const MACS: MacRow[] = [
     name: 'Mac mini',
     role: 'M6 (up to 32 GB) or M5 Pro (up to 64 GB). Three Thunderbolt ports (4 on M6, 5 on M5 Pro), 2.5 GbE with a 10 GbE option.',
     fluxvm:
-      'A quiet, always-on host for one to a few Linux VMs and a handful of small agent sandboxes. The estimate for a 16 GB mini is 4 to 8 active tiny sandboxes; a 64 GB M5 Pro leaves room for macOS guest templates.',
+      'A quiet, always-on host for one to a few Linux VMs and a handful of small agent sandboxes. Measured on a 16 GB M4 mini, an idle sandbox holds 205 to 788 MiB, so plan on about 800 MiB each; a 64 GB M5 Pro leaves room for macOS guest templates.',
   },
   {
     name: 'Mac Studio',
     role: 'M5 Max (up to 128 GB) or M5 Ultra (up to 512 GB, the 512 GB option ships late October). Four Thunderbolt 5 ports (six on M5 Ultra), 10 GbE.',
     fluxvm:
-      'The team host: CI runners, many agent sandboxes and macOS guests next to large models in unified memory. The estimate for 64 GB or more is 25 to 40 active tiny sandboxes. 10 GbE and Thunderbolt 5 suit a fleet; multi-Mac clusters are not yet verified.',
+      'The team host: CI runners, many agent sandboxes and macOS guests next to large models in unified memory. Sandbox memory was measured on a 16 GB mini only, so no count is quoted for this size. 10 GbE and Thunderbolt 5 suit a fleet; multi-Mac clusters are not yet verified.',
   },
   {
     name: 'MacBook Pro',
@@ -392,11 +392,17 @@ const INSTALL_TABS: {id: string; label: string; note: ReactNode; code: string}[]
     label: 'Homebrew',
     note: (
       <>
-        Each version tag builds a Homebrew package; the tap is not published yet. See{' '}
-        <a href={`${REPO}/tree/main/packaging/homebrew`}>packaging/homebrew</a>.
+        The prebuilt package (Apple silicon, macOS 14 or newer) is in the tap. It is ad hoc signed and leaves out
+        the USB helper; vmnet and bridged networking need a Developer ID build. Install, upgrade and uninstall were
+        run for real: <Link to="/docs/install-macos">Install on a Mac</Link>.
       </>
     ),
-    code: ['brew install zyvorai/fluxvm/fluxvm   # once the tap is published', 'brew services start fluxvm'].join('\n'),
+    code: [
+      'brew install zyvorai/tap/fluxvm',
+      'brew services start zyvorai/tap/fluxvm   # the daemon, API on 127.0.0.1:7788',
+      'fluxctl run -- uname -a                  # a throwaway Debian VM, one command',
+      'fluxctl mcp install claude-code --allow-write   # wire up an agent',
+    ].join('\n'),
   },
   {
     id: 'first',
@@ -719,9 +725,14 @@ function Honest(): ReactNode {
                 USB are not verified.
               </li>
               <li>
-                The fleet registry now places <code>vz</code> requests with the Apple scorer, using the
+                The fleet registry places <code>vz</code> requests with the Apple scorer, using the
                 capabilities each node reports. It was checked on one Mac plus simulated nodes; no
                 second Mac has been used.
+              </li>
+              <li>
+                The published package installs from the tap, and its service, upgrade and uninstall were run on
+                the M4. Self-service sign-up and Stripe in the fleet central are off by default and should stay
+                off until the sign-up email is verified.
               </li>
             </ul>
             <p style={{marginTop: '0.75rem', marginBottom: 0}}>

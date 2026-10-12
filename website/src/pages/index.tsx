@@ -37,8 +37,8 @@ function Hero() {
           <Link className={styles.pillPrimary} to="/mac">
             Explore Mac
           </Link>
-          <Link className={styles.pillGhost} href={`${REPO}#quickstart`}>
-            Get started
+          <Link className={styles.pillGhost} to="/agents">
+            Agent sandboxes
           </Link>
         </div>
       </div>
@@ -85,9 +85,9 @@ function ProductTiles() {
           <Heading as="h2" className={styles.tileTitle}>
             Agent sandboxes
           </Heading>
-          <p className={styles.tileSub}>A clean machine for every task.</p>
+          <p className={styles.tileSub}>A clean machine for every task. Fork it into four.</p>
           <div className={styles.tileLinks}>
-            <Chevron to="/docs/macos-sandboxes">Learn more</Chevron>
+            <Chevron to="/agents">See the loop</Chevron>
             <Chevron to="/docs/mcp">Use with MCP</Chevron>
           </div>
         </div>
@@ -98,11 +98,14 @@ function ProductTiles() {
             <span />
           </div>
           <pre>
-            <span className={styles.ok}>$</span> fluxctl sandbox create --ttl 15m --offline{'\n'}
-            <span className={styles.dim}>  ready in 2.1 s (warm pool)</span>
+            <span className={styles.ok}>$</span> examples/agent-sandbox-demo/run.sh{'\n'}
+            <span className={styles.dim}>  offline sandbox ready in 4.4 s</span>
             {'\n'}
-            <span className={styles.ok}>$</span> fluxctl exec sb1 -- make test{'\n'}
-            <span className={styles.ok}>  &#10003; 128 passed</span>
+            <span className={styles.dim}>  4 copies running in 4.0 s</span>
+            {'\n'}
+            <span className={styles.ok}>  &#10003; attempt-1: tests PASS</span>
+            {'\n'}
+            <span className={styles.dim}>  attempts 2-4: fail, deleted</span>
           </pre>
         </div>
       </Reveal>
@@ -144,10 +147,10 @@ function Statement() {
 }
 
 const NUMBERS = [
-  {value: '~2 s', label: 'Warm start on a Mac', note: 'restore a saved VM instead of booting'},
+  {value: '~4 s', label: 'Fork into 4 running copies', note: 'an offline sandbox; the four tests then take 0.3 s'},
+  {value: '4.5 s', label: 'A fresh offline sandbox', note: 'cold boot with no network card; ~1 s from a warm slot'},
   {value: '0.7 s', label: 'Snapshot', note: 'a running VM, APFS-cloned disk'},
-  {value: '5', label: 'Backends', note: 'four on Linux, vz on a Mac'},
-  {value: '3', label: 'SDKs', note: 'Python, Go and TypeScript'},
+  {value: '~800 MiB', label: 'Plan on, per active sandbox', note: 'measured 205 to 788 MiB; the sizing is an estimate'},
 ];
 
 function Numbers() {
@@ -164,7 +167,7 @@ function Numbers() {
           ))}
         </div>
         <p className={styles.numbersFoot}>
-          Mac figures measured on one Apple M4 with macOS 27.2.{' '}
+          Measured on one Apple M4 mini with macOS 27.2; your Mac will differ.{' '}
           <Link to="/docs/macos#what-is-verified">What is verified</Link>
         </p>
       </Reveal>
@@ -220,10 +223,18 @@ function Platform() {
         <div className={styles.platformCard}>
           <Heading as="h3">For AI agents</Heading>
           <p>
-            An MCP server, egress allow-lists on method, host and path, file change-sets and VM fork for
-            disposable machines.
+            An MCP server for seven agent clients, offline or allow-listed sandboxes, file change-sets and VM
+            fork for disposable machines, with a local model reachable over one vsock port.
           </p>
-          <Chevron to="/docs/mcp">MCP server</Chevron>
+          <Chevron to="/agents">Agent sandboxes</Chevron>
+        </div>
+        <div className={styles.platformCard}>
+          <Heading as="h3">Your own Mac cloud</Heading>
+          <p>
+            Tenants, 24-hour Mac leases, snapshots and clones, volumes, SSH without exposing the Mac, SSO,
+            metrics and warm pools behind one API: <code>fluxctl</code>, Go, Python, TypeScript or Terraform.
+          </p>
+          <Chevron to="/mac-cloud">Build a Mac cloud</Chevron>
         </div>
         <div className={styles.platformCard}>
           <Heading as="h3">Open source</Heading>
@@ -249,8 +260,8 @@ function Closing() {
           with one Mac.
         </Heading>
         <div className={styles.heroCtas}>
-          <Link className={styles.pillPrimary} href={`${REPO}#your-own-mac-cloud`}>
-            Get started
+          <Link className={styles.pillPrimary} to="/docs/install-macos">
+            Install on a Mac
           </Link>
           <Link className={styles.pillGhost} href="mailto:sales@zyvor.dev">
             Talk to Zyvor

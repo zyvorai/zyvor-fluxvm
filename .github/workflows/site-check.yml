@@ -1,0 +1,23 @@
+# Builds the docs site on pull requests, so a broken page or a TypeScript error shows up before the merge that would
+# deploy it (pages.yml only builds on push to main). No deploy happens here.
+name: Docs site check
+on:
+  pull_request:
+    paths: ['website/**', 'docs/**', '.github/workflows/site-check.yml']
+permissions:
+  contents: read
+concurrency:
+  group: site-check-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v7
+    - uses: actions/setup-node@v7
+      with: {node-version: '22', cache: npm, cache-dependency-path: website/package-lock.json}
+    - run: npm --prefix website ci
+    - name: Typecheck
+      run: npm --prefix website run typecheck
+    - name: Build
+      run: npm --prefix website run build

@@ -75,6 +75,7 @@ const config: Config = {
       hideOnScroll: false,
       items: [
         {to: '/mac', label: 'Mac', position: 'right'},
+        {to: '/agents', label: 'Agents', position: 'right'},
         {to: '/mac-cloud', label: 'Mac cloud', position: 'right'},
         {
           type: 'docSidebar',
@@ -95,10 +96,14 @@ const config: Config = {
         {
           title: 'Docs',
           items: [
-            {label: 'Quick start', href: 'https://github.com/zyvorai/zyvor-fluxvm#quick-start'},
+            {label: 'Install on a Mac', to: '/docs/install-macos'},
             {label: 'FluxVM on Mac', to: '/mac'},
+            {label: 'Agent sandboxes', to: '/agents'},
             {label: 'Build a Mac cloud', to: '/mac-cloud'},
             {label: 'Mac cloud guide', to: '/docs/mac-cloud'},
+            {label: 'Run central in production', to: '/docs/mac-cloud-operations'},
+            {label: 'fluxctl fleet reference', to: '/docs/fluxctl-fleet'},
+            {label: 'SDKs and Terraform', to: '/docs/fleet-sdk'},
             {label: 'How it works on a Mac', to: '/docs/macos-architecture'},
             {label: 'Use cases', to: '/docs/use-cases'},
             {label: 'Product overview', to: '/docs/PRODUCT_OVERVIEW'},

@@ -16,9 +16,9 @@ for the private-inference cluster with Velora and Kairon, see [macos-cluster.md]
 
 | Mac | Good for | Notes |
 | --- | --- | --- |
-| Mac mini (M6, up to 32 GB) | Agent sandboxes, small Linux VMs, a home lab | Quiet and always on. The estimate for 16 GB is 4 to 8 active tiny sandboxes ([agent-density.md](agent-density.md)) |
+| Mac mini (M6, up to 32 GB) | Agent sandboxes, small Linux VMs, a home lab | Quiet and always on. Measured on a 16 GB M4 mini: 205 to 788 MiB resident per idle sandbox, so plan on about 800 MiB each ([agent-density.md](agent-density.md#what-a-sandbox-costs-on-a-real-mac)) |
 | Mac mini (M5 Pro, up to 64 GB) | Container VMs, CI runners, one macOS template | 10 GbE option; room for a macOS guest next to Linux work |
-| Mac Studio (M5 Max, up to 128 GB) | Team CI, many sandboxes, macOS guests | 10 GbE and Thunderbolt 5; 25 to 40 active tiny sandboxes estimated at 64 GB or more |
+| Mac Studio (M5 Max, up to 128 GB) | Team CI, many sandboxes, macOS guests | 10 GbE and Thunderbolt 5; sandbox memory was measured on a 16 GB mini only, so Studio counts are not quoted |
 | Mac Studio (M5 Ultra, up to 512 GB) | macOS guests next to large models | Unified memory is shared by macOS, models and every guest |
 
 Capacity figures are estimates, not measurements. `scripts/bench-macos-pool.sh` measures macOS warm-pool checkout and return latency and runner memory on a real Mac; record the model and macOS build with any numbers you publish. FluxVM does not cap guest memory on a Mac, so size for the sum of macOS, your
