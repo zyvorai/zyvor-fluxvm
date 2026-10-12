@@ -15,10 +15,14 @@ pick up a job, of course).
 scripts/fleet-sim.sh
 ```
 
-It builds `fluxvm-agent`, starts a central on `127.0.0.1:7799` and three simulated Macs, then plays a tenant:
+It needs cargo, curl and python3, and, like any build of this workspace, a sibling `guestkit` checkout (cargo reads
+every member's manifest even for `-p fluxvm-agent`; guestkit itself is not compiled). It runs under macOS's bash 3.2.
+
+It builds `fluxvm-agent`, starts a central on `127.0.0.1:7799` and three simulated Macs (`studio-1` 12 vCPUs/32 GiB,
+`studio-2` 24 vCPUs/64 GiB with nested virtualization, `mini-1` 8 vCPUs/16 GiB), then plays a tenant:
 
 1. the operator creates tenant `acme` (2 leased Macs, 4 VMs);
-2. `acme` leases a Mac (24 h minimum);
+2. `acme` leases a Mac (24 h minimum; central picks the smallest free one, `mini-1`);
 3. `acme` starts two macOS VMs on it, and a third is refused;
 4. `acme` runs `sw_vers` in a VM through central;
 5. `acme` creates a private network `acme-net`, and the leased Mac's `overlay.json` appears within a heartbeat.

@@ -1,3 +1,6 @@
+// Copyright 2026 Zyvor AI Labs · https://zyvor.dev
+// SPDX-License-Identifier: Apache-2.0
+
 //! A simulated Mac for trying the fleet without any Macs: `fluxvm-agent sim-node`.
 //!
 //! It serves the slice of a node's `fluxctl serve` API that central uses (`/v1/vms` list, create, show, delete and
@@ -67,7 +70,7 @@ impl SimNode {
             vm.get("expires_at")
                 .and_then(Value::as_str)
                 .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
-                .is_none_or(|t| t > now)
+                .is_none_or(|t| t.with_timezone(&Utc) > now)
         });
     }
 }
