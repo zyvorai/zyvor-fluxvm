@@ -80,8 +80,8 @@ enum CloudCommand {
         listen: SocketAddr,
         #[arg(long)]
         cert: PathBuf,
-        #[arg(long)]
-        tls_key: PathBuf,
+        /// The private key comes from the shared `--tls-key` path option
+        /// (`FLUXMESH_TLS_KEY`, default `<mesh dir>/tls/key.pem`).
         #[command(flatten)]
         paths: PathArgs,
     },
@@ -429,14 +429,13 @@ pub async fn run(args: CloudArgs) -> Result<()> {
         CloudCommand::ServeEnrollment {
             listen,
             cert,
-            tls_key,
             paths,
         } => {
             let paths = paths.resolve();
             enroll_tls::serve(
                 listen,
                 &cert,
-                &tls_key,
+                &paths.tls_key,
                 paths.state,
                 paths.enroll_secret,
                 paths.used_nonces,
