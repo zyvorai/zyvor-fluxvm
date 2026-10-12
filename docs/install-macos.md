@@ -124,6 +124,32 @@ Both were run for real: 0.4.1 installed from the tap, then `brew upgrade` to 0.4
 service kept serving until `brew services restart` started the new binary), and `brew uninstall` (formula, `opt` link
 and binaries gone, no LaunchAgent or daemon left behind).
 
+## Optional: the fleet console
+
+The web console (`/console`) is served by `fluxvm-agent central`, the multi-Mac control plane. The Homebrew package
+installs `fluxd`, `fluxctl` and friends but **not** `fluxvm-agent`, so build it from a checkout:
+
+```bash
+git clone https://github.com/zyvorai/zyvor-fluxvm && cd zyvor-fluxvm
+cargo build --release -p fluxvm-agent          # needs a Rust toolchain; binary: target/release/fluxvm-agent
+```
+
+Try it on this Mac with a simulated node (nothing boots, no VM is created):
+
+```bash
+TOKEN=$(openssl rand -hex 24)                   # the fleet token; keep it out of shell history if you can
+target/release/fluxvm-agent central --listen 127.0.0.1:7799 --state-dir ./central-state --token "$TOKEN" &
+target/release/fluxvm-agent sim-node --name studio-1 --central http://127.0.0.1:7799 --token "$TOKEN" &
+open http://127.0.0.1:7799/console              # paste the token into the sign-in field
+```
+
+You land on **Overview** with one Mac. Use the top bar's **Cloud**, **Compute**, **Billing** and **Access** menus (or
+⌘K) to move around. Stop it with `kill %1 %2`; the state stays in `./central-state`.
+
+For real Macs, run `fluxvm-agent central` on one host (with `--tls-cert/--tls-key` or behind a TLS proxy, and
+`--public-url`), then point each Mac's agent at it; see [fleet-quickstart.md](fleet-quickstart.md) and
+[mac-cloud-tenancy.md](mac-cloud-tenancy.md#console) for tenants, sign-in and what each page does.
+
 ## Troubleshooting
 
 | Symptom | Cause and fix |
