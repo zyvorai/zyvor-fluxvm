@@ -1111,6 +1111,24 @@ enum FleetCommand {
         #[arg(long, short = 'y')]
         yes: bool,
     },
+    /// Save a picture of a VM's display (found by name or ID prefix). Example: `fluxctl fleet screen ios-build-1`.
+    Screen {
+        vm: String,
+        /// Where to write it (default: `<vm>.png`, or `.svg` from a simulated Mac).
+        #[arg(long, short = 'f')]
+        file: Option<PathBuf>,
+        /// Largest width in pixels.
+        #[arg(long, default_value_t = 1920)]
+        max_width: u32,
+    },
+    /// The activity log: every change made through central, newest first. A tenant sees its own.
+    Events {
+        #[arg(long, default_value_t = 50)]
+        limit: usize,
+        /// Operator only: one tenant's actions.
+        #[arg(long)]
+        tenant: Option<String>,
+    },
     /// The image catalog: list (default), add or remove (operator).
     Images {
         #[command(subcommand)]

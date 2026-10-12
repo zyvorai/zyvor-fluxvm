@@ -9,6 +9,8 @@
 //! cost is no server-side validation beyond "is this valid JSON" — a node's
 //! own `fluxctl serve` still does the real validation.
 
+#[path = "central_audit.rs"]
+mod audit;
 #[path = "central_cloud.rs"]
 mod cloud;
 #[path = "central_ha.rs"]
@@ -215,6 +217,8 @@ struct Fleet {
     tenancy_path: Option<PathBuf>,
     /// Leader election when several centrals share a store (`--ha-redis`); `None` is a single central.
     ha: Option<Arc<ha_rt::HaRuntime>>,
+    /// The activity log (`GET /fleet/events`).
+    audit: Arc<audit::AuditLog>,
 }
 
 impl Fleet {
@@ -325,8 +329,31 @@ async fn auth_middleware(State(fleet): State<Fleet>, mut req: Request, next: Nex
         )
             .into_response();
     }
-    req.extensions_mut().insert(caller);
-    next.run(req).await
+    req.extensions_mut().insert(caller.clone());
+    if !audit::audited(req.method(), req.uri().path()) {
+        return next.run(req).await;
+    }
+    let method = req.method().to_string();
+    let path = req.uri().path().to_owned();
+    let (req, target) = match audit::target_of(req).await {
+        Ok(x) => x,
+        Err(resp) => return resp,
+    };
+    let resp = next.run(req).await;
+    let (actor, tenant) = match &caller {
+        Caller::Admin => ("operator".to_owned(), None),
+        Caller::Tenant(t) => (t.clone(), Some(t.clone())),
+    };
+    fleet.audit.record(audit::AuditEvent {
+        time: Utc::now(),
+        actor,
+        tenant,
+        method,
+        path,
+        target,
+        status: resp.status().as_u16(),
+    });
+    resp
 }
 
 /// The routes a tenant token may call; everything else (node registration, cordon, drain, scrub, tenant admin,
@@ -342,6 +369,7 @@ fn tenant_route_allowed(method: &axum::http::Method, path: &str) -> bool {
         ["fleet", "vms"] | ["fleet", "leases"] => get || post,
         ["fleet", "vms", _, _] => delete,
         ["fleet", "vms", _, _, "exec"] => post,
+        ["fleet", "vms", _, _, "screen"] | ["fleet", "events"] => get,
         ["fleet", "leases", _] => get,
         ["fleet", "leases", _, "release"] => post,
         ["fleet", "images"] => get,
@@ -480,6 +508,9 @@ pub fn router_with_handle(cfg: CentralConfig) -> (Router, Option<HaHandle>) {
         tenancy: Arc::new(Mutex::new(tenancy)),
         tenancy_path: Some(tenancy_path),
         ha: None,
+        audit: Arc::new(audit::AuditLog::open(
+            cfg.state_dir.join("fleet-audit.jsonl"),
+        )),
     };
     let mut fleet = fleet;
     let mut handle = None;
@@ -520,6 +551,8 @@ pub fn router_with_handle(cfg: CentralConfig) -> (Router, Option<HaHandle>) {
             axum::routing::delete(delete_vm_route),
         )
         .route("/fleet/vms/{node}/{id}/exec", post(cloud::exec_vm))
+        .route("/fleet/vms/{node}/{id}/screen", get(audit::screen))
+        .route("/fleet/events", get(audit::events))
         .route("/fleet/capacity", get(fleet_capacity))
         .route(
             "/fleet/tenants",
@@ -585,7 +618,7 @@ const CONSOLE_PATHS: [&str; 3] = ["/console", "/console/", "/console/app.js"];
 const CONSOLE_HTML: &str = include_str!("fleet_console.html");
 const CONSOLE_JS: &str = include_str!("fleet_console.js");
 const CONSOLE_CSP: &str = "default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; connect-src 'self'; \
-     img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
+     img-src 'self' data: blob:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
 
 fn console_file(content_type: &'static str, body: &'static str) -> Response {
     (
@@ -2456,6 +2489,7 @@ mod tests {
             tenancy: Arc::new(Mutex::new(TenancyState::default())),
             tenancy_path: None,
             ha: None,
+            audit: Arc::new(audit::AuditLog::memory()),
         }
     }
 

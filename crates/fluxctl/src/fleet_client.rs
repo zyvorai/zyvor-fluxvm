@@ -294,6 +294,28 @@ pub async fn call(
 }
 
 /// Percent-encodes a query value (RFC 3986 unreserved characters pass through).
+/// `GET {path}` returning the raw body and its content type (images).
+pub async fn get_bytes(
+    central: &str,
+    token: Option<&str>,
+    path: &str,
+) -> Result<(String, Vec<u8>)> {
+    let http = reqwest::Client::new();
+    let resp = authed(http.get(format!("{central}{path}")), token)
+        .send()
+        .await
+        .with_context(|| format!("GET {path}"))?;
+    let resp = check_success(resp, &format!("GET {path}")).await?;
+    let ctype = resp
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("application/octet-stream")
+        .to_owned();
+    let bytes = resp.bytes().await.context("reading the response")?;
+    Ok((ctype, bytes.to_vec()))
+}
+
 pub fn query_escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for b in s.bytes() {

@@ -178,12 +178,14 @@ async function load() {
     soft(api('GET', '/fleet/overlays'), { items: [] }),
     soft(api('GET', '/fleet/images'), { items: [] }),
   ]);
+  const events = await soft(api('GET', '/fleet/events?limit=300'), { items: [] });
   const d = {
     leases: (leases.items || []).sort((a, b) => (a.state === b.state ? b.started_at.localeCompare(a.started_at)
       : a.state === 'active' ? -1 : 1)),
     vms: (vms.items || []).sort((a, b) => String(a.name).localeCompare(String(b.name))),
     unreachable: vms.unreachable_nodes || [],
     overlays: overlays.items || [],
+    events: events.items || [],
     images: (images.items || []).sort((a, b) => (a.guest_os === b.guest_os ? a.name.localeCompare(b.name) : a.guest_os === 'macos' ? -1 : 1)),
     leasedNodes: {},
     drains: {},
@@ -280,6 +282,7 @@ const PAGES = () => [
   { sep: true },
   ...(isOp() ? [{ id: 'tenants', label: 'Tenants', count: () => (S.data.tenants || []).length }] : []),
   { id: 'usage', label: 'Usage' },
+  { id: 'activity', label: 'Activity' },
   ...(isOp() ? [{ id: 'policy', label: 'Policy' }] : []),
 ];
 
@@ -573,6 +576,23 @@ const VIEWS = {
     return out;
   },
 
+  activity() {
+    const q = S.query.trim().toLowerCase();
+    const list = (S.data.events || []).filter((e) => !q || (describe(e) + ' ' + e.actor).toLowerCase().includes(q));
+    const out = [pageHead('Activity', isOp() ? 'Every change made through this central: who, what, when, and whether it worked.'
+      : 'Everything your team changed: launches, deletes, leases, networks and commands.')];
+    if (!(S.data.events || []).length) {
+      out.push(empty('Nothing has happened yet', 'Changes appear here as soon as anyone makes one.'));
+      return out;
+    }
+    out.push(h('div', { class: 'panel table-wrap' }, h('table', {},
+      h('thead', {}, h('tr', {}, h('th', {}, 'When'), h('th', {}, 'Who'), h('th', {}, 'What'), h('th', {}, 'Result'))),
+      h('tbody', {}, list.length ? activityRows(list) : h('tr', {}, h('td', { colspan: '4', class: 'muted' }, 'Nothing matches.'))))));
+    out.push(h('p', { class: 'hint', style: { marginTop: '12px' } }, 'Viewing pages is not recorded. Request bodies are not '
+      + 'stored, only the name of what was created.'));
+    return out;
+  },
+
   tenants() {
     const list = S.data.tenants || [];
     const out = [pageHead('Tenants', 'Each tenant signs in with its own token and sees only its own Macs, VMs and networks.',
@@ -639,6 +659,11 @@ function tenantOverview() {
   if (list.length) {
     out.push(h('div', { class: 'section' }, h('div', { class: 'section-head' }, h('h2', { class: 'grow' }, 'Your Macs'),
       h('button', { class: 'plain', onclick: leaseSheet }, 'Lease another')), h('div', { class: 'macs' }, list.map(macTile))));
+  }
+  if ((S.data.events || []).length) {
+    out.push(h('div', { class: 'section' }, h('div', { class: 'section-head' }, h('h2', { class: 'grow' }, 'Recent activity'),
+      h('a', { href: '#/activity' }, 'All activity')),
+    h('div', { class: 'panel table-wrap' }, h('table', {}, h('tbody', {}, activityRows(S.data.events.slice(0, 5)))))));
   }
   if (S.data.vms.length) {
     out.push(h('div', { class: 'section' }, h('div', { class: 'section-head' }, h('h2', { class: 'grow' }, 'Recent VMs'),
@@ -788,6 +813,7 @@ function renderInspector(page, id, force) {
         h('p', { class: 'muted' }, 'It may have been deleted, or it belongs to someone else.')];
     }
   }
+  if (page !== 'vms' || !content) stopScreen();
   $('app').classList.toggle('with-inspector', !!content);
   insp.hidden = !content;
   if (!content) { S.lastInspKey = ''; return; }
@@ -912,6 +938,7 @@ function vmInspector(v) {
   const input = h('input', { id: 'exec-input', class: 'mono', placeholder: guestOf(req) === 'macos' ? 'sw_vers' : 'uname -a',
     value: ex.draft, autocomplete: 'off', spellcheck: 'false', disabled: !running, 'aria-label': 'Command',
     oninput: (e) => { ex.draft = e.target.value; } });
+  out.push(screenPanel(v, running));
   out.push(h('section', {}, h('h3', {}, 'Run a command'),
     h('form', { class: 'row', onsubmit: (e) => { e.preventDefault(); runCommand(v, ex); } },
       h('div', { class: 'grow' }, input), h('button', { type: 'submit', disabled: !running }, 'Run')),
@@ -921,6 +948,127 @@ function vmInspector(v) {
     h('p', { class: 'small muted', style: { marginBottom: '10px' } }, 'Stops the VM and deletes its disk. This cannot be undone.'),
     h('button', { class: 'danger', onclick: () => deleteVm(v) }, 'Delete VM…')));
   return out;
+}
+
+// ---- the VM's screen -------------------------------------------------------------------------------------------------
+
+// One live screen at a time: the VM open in the inspector. Its elements survive re-renders, so the picture does not
+// flicker while the rest of the inspector refreshes.
+const screen = { key: null, running: false, el: null, img: null, note: null, link: null, toggle: null, url: null,
+  timer: null, paused: false, seq: 0 };
+
+function stopScreen() {
+  clearTimeout(screen.timer);
+  screen.timer = null;
+  if (screen.url) URL.revokeObjectURL(screen.url);
+  Object.assign(screen, { key: null, el: null, img: null, url: null, paused: false });
+}
+
+function screenPanel(v, running) {
+  const k = vmKey(v);
+  const wasRunning = screen.running;
+  screen.running = running;
+  if (screen.key === k && running && !wasRunning) fetchScreen(k);
+  if (screen.key !== k) {
+    stopScreen();
+    screen.key = k;
+    screen.img = h('img', { class: 'screen', alt: 'The screen of ' + v.name, hidden: true });
+    screen.note = h('p', { class: 'hint' }, running ? 'Connecting…' : 'The VM is not running, so it has no screen.');
+    screen.link = h('a', { class: 'small', target: '_blank', rel: 'noopener', hidden: true }, 'Open full size');
+    screen.toggle = h('button', { class: 'plain', type: 'button', onclick: () => {
+      screen.paused = !screen.paused;
+      screen.toggle.textContent = screen.paused ? 'Resume' : 'Pause';
+      if (!screen.paused) fetchScreen(screen.key);
+    } }, 'Pause');
+    screen.el = h('section', {}, h('div', { class: 'row' }, h('h3', { class: 'grow' }, 'Screen'), screen.link, screen.toggle),
+      screen.img, screen.note);
+    fetchScreen(k);
+  }
+  screen.toggle.hidden = !running;
+  return screen.el;
+}
+
+async function fetchScreen(k) {
+  clearTimeout(screen.timer);
+  if (screen.key !== k) return;
+  const again = (ms) => { screen.timer = setTimeout(() => fetchScreen(k), ms); };
+  if (!screen.running || screen.paused) return;
+  if (document.visibilityState !== 'visible') { again(4000); return; }
+  const [node, id] = k.split('/');
+  const seq = ++screen.seq;
+  try {
+    const headers = token() ? { Authorization: 'Bearer ' + token() } : {};
+    const r = await fetch('/fleet/vms/' + enc(node) + '/' + enc(id) + '/screen?max_width=960', { headers, cache: 'no-store' });
+    if (screen.key !== k || seq !== screen.seq) return;
+    if (!r.ok) {
+      const body = await r.json().catch(() => ({}));
+      screen.note.textContent = r.status === 409 ? 'No screen for this VM. ' + (body.error || '')
+        : 'The screen could not be loaded: ' + (body.error || r.status + ' ' + r.statusText);
+      again(r.status === 409 ? 15000 : 6000);
+      return;
+    }
+    const blob = await r.blob();
+    const url = URL.createObjectURL(blob);
+    if (screen.url) URL.revokeObjectURL(screen.url);
+    screen.url = url;
+    screen.img.src = url;
+    screen.img.hidden = false;
+    screen.link.href = url;
+    screen.link.hidden = false;
+    const blank = r.headers.get('x-fluxvm-screen-blank') === 'true';
+    const w = r.headers.get('x-fluxvm-screen-width');
+    const hgt = r.headers.get('x-fluxvm-screen-height');
+    screen.note.textContent = (blank ? 'Nothing is drawn yet (the guest is still starting). ' : '')
+      + (w && hgt ? w + ' × ' + hgt + '. ' : '') + 'Updates every 2 seconds while this panel is open.';
+    again(2000);
+  } catch (_) {
+    if (screen.key === k) { screen.note.textContent = 'Central is not reachable; retrying.'; again(6000); }
+  }
+}
+
+// ---- activity -------------------------------------------------------------------------------------------------------
+
+/** What an activity-log entry did, in words. */
+function describe(e) {
+  const p = e.path.split('/').filter(Boolean).map(decodeURIComponent).slice(1); // after "fleet"
+  const t = e.target ? ' ' + e.target : '';
+  const m = e.method;
+  const [a, b, c, d] = p;
+  if (a === 'vms' && p.length === 1 && m === 'POST') return 'Launched VM' + t;
+  if (a === 'vms' && p.length === 3 && m === 'DELETE') return 'Deleted VM ' + (vmName(b, c) || c.slice(0, 8)) + ' on ' + b;
+  if (a === 'vms' && d === 'exec') return 'Ran a command in ' + (vmName(b, c) || c.slice(0, 8));
+  if (a === 'leases' && p.length === 1) return 'Leased a Mac' + (e.target ? ' (' + e.target + ')' : '');
+  if (a === 'leases' && c === 'release') return 'Released a lease';
+  if (a === 'overlays' && p.length === 1) return 'Created network' + t;
+  if (a === 'overlays' && c === 'rotate') return 'Rotated the key of ' + b;
+  if (a === 'overlays' && c === 'members') return (m === 'DELETE' ? 'Removed ' + d + ' from ' : 'Added' + t + ' to ') + b;
+  if (a === 'overlays' && m === 'DELETE') return 'Deleted network ' + b;
+  if (a === 'tenants' && p.length === 1) return 'Created tenant' + t;
+  if (a === 'tenants' && c === 'rotate-token') return 'Issued a new token for ' + b;
+  if (a === 'tenants' && m === 'PATCH') return 'Changed tenant ' + b;
+  if (a === 'tenants' && m === 'DELETE') return 'Deleted tenant ' + b;
+  if (a === 'nodes' && c) return { cordon: 'Cordoned ', uncordon: 'Uncordoned ', drain: 'Drained ', scrub: 'Scrubbed ' }[c] + b;
+  if (a === 'nodes' && m === 'DELETE') return 'Forgot node ' + b;
+  if (a === 'images') return (m === 'DELETE' ? 'Removed image ' : 'Saved image ') + b;
+  if (a === 'policy') return 'Changed the policy';
+  if (a === 'reconcile') return 'Reconciled the fleet';
+  return m + ' ' + e.path;
+}
+
+function vmName(node, id) {
+  const v = (S.data.vms || []).find((x) => x.node === node && x.id === id);
+  return v && v.name;
+}
+
+function activityRows(list) {
+  return list.map((e) => {
+    const ok = e.status < 400;
+    return h('tr', {},
+      h('td', { class: 'muted', title: when(e.time) }, rel(e.time)),
+      h('td', {}, e.actor === 'operator' ? h('span', { class: 'tag' }, 'Operator') : e.actor),
+      h('td', {}, describe(e)),
+      h('td', {}, status(ok ? { text: 'Done', cls: 'ok' } : { text: 'Refused (' + e.status + ')', cls: 'bad' })));
+  });
 }
 
 async function runCommand(v, ex) {
@@ -939,6 +1087,7 @@ async function runCommand(v, ex) {
   }
   entry.pending = false;
   render(true);
+  refresh();
   const t = document.querySelector('.term');
   if (t) t.scrollTop = t.scrollHeight;
   const i = $('exec-input');
@@ -1550,7 +1699,7 @@ $('signout').addEventListener('click', () => {
 });
 $('search').addEventListener('input', (e) => {
   S.query = e.target.value;
-  if (route().page !== 'vms') go('vms'); else render();
+  if (route().page !== 'vms' && route().page !== 'activity') go('vms'); else render();
 });
 $('signin-form').addEventListener('submit', (e) => {
   e.preventDefault();
@@ -1561,6 +1710,7 @@ $('signin-form').addEventListener('submit', (e) => {
   // Nothing from the previous token's session carries over.
   Object.assign(S, { role: null, me: null, data: null, error: null, usage: null, policy: null, exec: {}, query: '',
     lastViewKey: '', lastInspKey: '', loadedAt: 0 });
+  stopScreen();
   $('search').value = '';
   refresh({ force: true });
 });
