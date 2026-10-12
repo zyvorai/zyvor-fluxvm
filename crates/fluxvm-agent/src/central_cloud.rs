@@ -2407,6 +2407,9 @@ mod tests {
         assert_eq!(v["lease"]["price_class"], "mini");
         assert_eq!(v["lease"]["rate_micros"], 1_250_000);
 
+        // Statements bill whole seconds, so let the lease accrue one before reading it.
+        tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+
         // The tenant sees its statement; a budget shows up on it.
         let (s, _) = call(
             &app,
