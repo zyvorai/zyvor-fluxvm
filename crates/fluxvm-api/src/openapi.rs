@@ -318,6 +318,12 @@ fn ops() -> Vec<Op> {
         ),
         op(
             "get",
+            "/v1/host/pressure",
+            "Whole-host PSI now from /proc/pressure: cpu_some, memory_some/full, io_some/full (avg10, avg60, avg300, total), same shape as /v1/vms/{id}/pressure",
+            HOST,
+        ),
+        op(
+            "get",
             "/v1/host/hibernation",
             "QEMU version, q35 machine type, CPU vendor and flags a hibernated state depends on",
             HOST,

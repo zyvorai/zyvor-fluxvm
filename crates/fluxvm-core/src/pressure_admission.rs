@@ -292,6 +292,32 @@ pub fn sample_from(meminfo: &Path, psi: &Path) -> HostPressure {
     out
 }
 
+/// Whole-host PSI from `/proc/pressure/{cpu,memory,io}`, shaped like a VM's
+/// [`crate::model::VmPressure`]. A field is `None` when the kernel has no
+/// such file (non-Linux, booted with `psi=0`).
+pub fn sample_host_psi() -> crate::model::VmPressure {
+    sample_psi_from(Path::new("/proc/pressure"))
+}
+
+/// [`sample_host_psi`] reading from `dir`, for tests.
+pub fn sample_psi_from(dir: &Path) -> crate::model::VmPressure {
+    let read = |name: &str| {
+        let path = dir.join(name);
+        let text = std::fs::read_to_string(&path).ok()?;
+        fluxvm_cgroup::pressure::parse_pressure(&path, &text).ok()
+    };
+    let cpu = read("cpu");
+    let mem = read("memory");
+    let io = read("io");
+    crate::model::VmPressure {
+        cpu_some: cpu.map(|p| p.some),
+        memory_some: mem.as_ref().map(|p| p.some.clone()),
+        memory_full: mem.and_then(|p| p.full),
+        io_some: io.as_ref().map(|p| p.some.clone()),
+        io_full: io.and_then(|p| p.full),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -436,5 +462,25 @@ mod tests {
         assert_eq!(s.psi_full_avg10, Some(1.5));
         let none = sample_from(&dir.path().join("x"), &dir.path().join("y"));
         assert_eq!(none, HostPressure::default());
+    }
+
+    #[test]
+    fn samples_host_psi_from_files() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("cpu"),
+            "some avg10=20.78 avg60=19.86 avg300=18.66 total=7\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("io"),
+            "some avg10=40.67 avg60=30.67 avg300=25.89 total=2\nfull avg10=22.75 avg60=15.68 avg300=14.50 total=1\n",
+        )
+        .unwrap();
+        let p = sample_psi_from(dir.path());
+        assert_eq!(p.cpu_some.map(|r| r.avg60), Some(19.86));
+        assert_eq!(p.io_some.map(|r| r.avg60), Some(30.67));
+        assert_eq!(p.io_full.map(|r| r.avg10), Some(22.75));
+        assert!(p.memory_some.is_none() && p.memory_full.is_none());
     }
 }

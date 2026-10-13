@@ -7,6 +7,8 @@
   (total or read/write, with optional bursts), applied by `block_set_io_throttle` when QEMU starts, on a migration
   target and on hot-add. `PUT /v1/vms/{id}/disks/{name}/throttle` and `fluxctl disk throttle` change them live and
   keep them for later starts; `GET /v1/vms/{id}/disks` reports them. vhost-user-blk disks are refused.
+- **Host PSI.** `GET /v1/host/pressure` returns whole-host CPU, memory and IO pressure from `/proc/pressure`, in the
+  same shape as `GET /v1/vms/{id}/pressure`. Kairon's DRS uses it to move Machines off hosts that are stalling.
 
 ## 0.4.7 (2026-10-13)
 

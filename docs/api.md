@@ -869,6 +869,23 @@ All three fields are optional and default to the values shown. `balloon` is refu
 A field is `null` when the host does not expose it (no PSI in the kernel). `host.balloon` in
 `GET /v1/runtime/capabilities` is true when both routes are available.
 
+`GET /v1/host/pressure` samples whole-host PSI from `/proc/pressure` now, in the same shape as
+`GET /v1/vms/{uuid}/pressure`:
+
+```json
+{
+  "cpu_some": {"avg10": 20.78, "avg60": 19.86, "avg300": 18.66, "total": 76804200790},
+  "memory_some": {"avg10": 0.0, "avg60": 0.0, "avg300": 0.0, "total": 6194},
+  "memory_full": {"avg10": 0.0, "avg60": 0.0, "avg300": 0.0, "total": 6164},
+  "io_some": {"avg10": 40.67, "avg60": 30.67, "avg300": 25.89, "total": 286750114310},
+  "io_full": {"avg10": 22.75, "avg60": 15.68, "avg300": 14.5, "total": 220501129495}
+}
+```
+
+Averages are percentages of wall time some (or all) tasks stalled on the resource; `total` is
+microseconds. A field is `null` when the kernel has no PSI. Kairon's kairon-node publishes these on
+its Node for DRS.
+
 `GET /v1/vms/{uuid}/memory`:
 
 ```json
