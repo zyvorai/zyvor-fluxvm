@@ -1636,6 +1636,13 @@ export LESS="-R $LESS"
 export LESS_TERMCAP_md=$'\e[1;36m' LESS_TERMCAP_us=$'\e[4;32m' LESS_TERMCAP_so=$'\e[1;30;43m'
 export LESS_TERMCAP_me=$'\e[0m' LESS_TERMCAP_ue=$'\e[0m' LESS_TERMCAP_se=$'\e[0m'
 export GCC_COLORS='error=01;31:warning=01;35:note=01;36:caret=01;32:locus=01:quote=01'
+if [ "$TERM_PROGRAM" = FluxVM ] && [ -n "$BASH_VERSION" ]; then
+  # OSC 133 prompt marks for the web terminal: A = prompt start, C = command start, D;<exit> = finished.
+  __fx_precmd() { printf '\033]133;D;%s\007' "$?"; }
+  PROMPT_COMMAND="__fx_precmd${PROMPT_COMMAND:+;$PROMPT_COMMAND}"
+  PS1='\[\033]133;A\007\]'"$PS1"
+  PS0='\033]133;C\007'"$PS0"
+fi
 "#;
 
 /// Connection details for plain `ssh` (WezTerm's ssh domains, scp, rsync, port forwards). The key is
@@ -3067,6 +3074,8 @@ mod tests {
             "a one-off command does not get the rc file"
         );
         assert!(PTY_RC.contains("--color=auto") && PTY_RC.contains("LESS_TERMCAP_md"));
+        // prompt marks are only emitted for the FluxVM web terminal, never for another emulator
+        assert!(PTY_RC.contains(r#""$TERM_PROGRAM" = FluxVM"#) && PTY_RC.contains("133;A"));
         // the client's terminal program is passed on only as a plain word
         let w = PtyLook::from_query(&PtyQuery {
             term_program: Some("WezTerm".into()),

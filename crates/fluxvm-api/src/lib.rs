@@ -7199,6 +7199,69 @@ assert.deepStrictEqual(t.shortcut(key({{ key: "T", ctrlKey: true, shiftKey: true
 for (const e of [key({{ key: "t" }}), key({{ key: "c", ctrlKey: true }}), key({{ key: "w", ctrlKey: true }}),
   key({{ key: "t", ctrlKey: true }}), key({{ key: "a", metaKey: true }})]) assert.strictEqual(t.shortcut(e, true), null, JSON.stringify(e));
 assert.strictEqual(t.shortcut(key({{ key: "t", metaKey: true }}), false), null);
+// search, palette, copy mode, quick select and prompt jumps
+assert.deepStrictEqual(t.shortcut(key({{ key: "f", metaKey: true }}), true), {{ action: "search" }});
+assert.deepStrictEqual(t.shortcut(key({{ key: "P", metaKey: true, shiftKey: true }}), true), {{ action: "palette" }});
+assert.deepStrictEqual(t.shortcut(key({{ key: "X", ctrlKey: true, shiftKey: true }}), true), {{ action: "copy-mode" }});
+assert.deepStrictEqual(t.shortcut(key({{ key: " ", ctrlKey: true, shiftKey: true }}), true), {{ action: "quick-select" }});
+assert.deepStrictEqual(t.shortcut(key({{ key: "ArrowUp", metaKey: true }}), true), {{ action: "prompt", dir: -1 }});
+assert.strictEqual(t.shortcut(key({{ key: "f", ctrlKey: true }}), true), null, "Ctrl-F stays the shell's");
+assert.strictEqual(t.shortcut(key({{ key: "ArrowUp" }}), true), null, "history stays the shell's");
+// quick select
+const q = t.quickMatches([
+  "see https://example.com/a/b?x=1, and /etc/hosts or ~/src/app.rs",
+  "commit 3f2a9c1d4e at 10.0.0.12:8080 id 123e4567-e89b-12d3-a456-426614174000 pid 48213",
+  "plain words only and 12",
+]);
+const kinds = q.map((m) => m.kind + ":" + m.text);
+assert.deepStrictEqual(kinds, [
+  "url:https://example.com/a/b?x=1", "path:/etc/hosts", "path:~/src/app.rs",
+  "hash:3f2a9c1d4e", "ipv4:10.0.0.12:8080", "uuid:123e4567-e89b-12d3-a456-426614174000", "number:48213",
+], JSON.stringify(kinds));
+assert.deepStrictEqual(q[0], {{ row: 0, col: 4, len: 27, text: "https://example.com/a/b?x=1", kind: "url" }});
+assert.strictEqual(t.quickMatches(["a/b"]).length, 0, "a bare relative word is not a path");
+assert.strictEqual(t.quickMatches(["deadbeef cafebabe"]).length, 0, "words made only of hex letters are not hashes");
+assert.deepStrictEqual(t.hintLabels(3), ["a", "s", "d"]);
+assert.strictEqual(t.hintLabels(26).length, 26);
+const many = t.hintLabels(40);
+assert.strictEqual(new Set(many).size, 40);
+assert(many.every((l) => l.length === 2), "two letters each once they no longer fit in one");
+for (const a of many) for (const b of many) if (a !== b) assert(!b.startsWith(a), "prefix-free");
+// copy mode
+const L = ["alpha beta  gamma", "", "x.y z"];
+const mv = (st, ...ks) => ks.reduce((s, k) => t.copyMove(s, k, L), st);
+let st = {{ row: 0, col: 0, mode: null, anchor: null }};
+assert.deepStrictEqual(mv(st, "w"), {{ ...st, col: 6 }});
+assert.deepStrictEqual(mv(st, "w", "w"), {{ ...st, col: 12 }});
+assert.deepStrictEqual(mv(st, "w", "w", "w"), {{ ...st, row: 1, col: 0 }}, "w crosses a line break");
+assert.deepStrictEqual(mv(st, "$"), {{ ...st, col: 16 }});
+assert.deepStrictEqual(mv(st, "$", "b"), {{ ...st, col: 12 }});
+assert.deepStrictEqual(mv(st, "$", "b", "b"), {{ ...st, col: 6 }});
+assert.deepStrictEqual(mv(st, "j", "j"), {{ ...st, row: 2, col: 0 }});
+assert.deepStrictEqual(mv(st, "k", "h"), st, "stays inside the buffer");
+assert.deepStrictEqual(mv(st, "G"), {{ ...st, row: 2, col: 0 }});
+assert.deepStrictEqual(mv(st, "G", "g"), st);
+assert.strictEqual(mv(st, "$", "j").col, 0, "an empty line clamps the column");
+// visual selection and yank
+let v = mv(st, "v", "w");
+assert.strictEqual(t.copyText(v, L), "alpha b");
+assert.strictEqual(t.copyText(mv(st, "V", "j", "j"), L), "alpha beta  gamma\n\nx.y z");
+assert.strictEqual(t.copyText(mv(st, "j", "j", "v", "k", "k"), L), "alpha beta  gamma\n\nx");
+assert.strictEqual(t.copyText(st, L), "", "nothing without a selection");
+assert.strictEqual(mv(st, "v", "v").mode, null, "v again leaves visual mode");
+// prompt marks
+assert.strictEqual(t.promptJump([4, 20, 9], 10, -1), 9);
+assert.strictEqual(t.promptJump([4, 20, 9], 10, 1), 20);
+assert.strictEqual(t.promptJump([4, 20, 9], 9, -1), 4);
+assert.strictEqual(t.promptJump([4], 0, -1), null);
+assert.strictEqual(t.promptJump([-1, 4], 0, 1), 4, "disposed markers (line -1) are ignored");
+// palette
+assert(t.ACTIONS.length > 10);
+assert.deepStrictEqual(t.filterActions(t.ACTIONS, "split").map((a) => a.run.dir), ["h", "v"]);
+assert.strictEqual(t.filterActions(t.ACTIONS, "THEME dracula").length, 1);
+assert.strictEqual(t.filterActions(t.ACTIONS, "").length, t.ACTIONS.length);
+assert.strictEqual(t.filterActions(t.ACTIONS, "zzzz").length, 0);
+for (const a of t.ACTIONS) if (a.run.action === "theme") assert(t.THEMES[a.run.name], a.title);
 "##
             );
             let dir = tempfile::tempdir().unwrap();

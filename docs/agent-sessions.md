@@ -119,12 +119,22 @@ The page's own CSP is `script-src 'self' 'wasm-unsafe-eval'` (the sixel decoder 
   bar cursor 2 px wide, bell flash, a `HH:MM:SS` clock), plus macOS Pro, macOS Basic, Tokyo Night, Dracula and Solarized
   Dark. Font stack: Hack / MesloLGS / FiraCode / 0xProto Nerd Fonts if installed, then SF Mono, Menlo. Choice and text
   size are remembered per browser.
-- **Not built yet:** search, copy mode, quick select and prompt marks; window blur; ligatures. The Velora native window
-  is a separate change. The cursor blink rate is the library's, not WezTerm's 400 ms.
+- **Search, copy mode, quick select, prompt marks, palette.** `⌘F` search bar over the scrollback (Enter / `⇧Enter`
+  step, Esc closes); `⌃⇧X` copy mode (vi-like: `h j k l` `w b` `0 $` `g G`, `v` / `V` visual, `y` copy, `/` search,
+  Esc); `⌃⇧Space` quick select (URLs, paths, UUIDs, IPv4, git-style hashes and 4+ digit numbers **on the visible
+  screen** get letters; typing one copies it, with Shift a URL opens); `⌘↑` / `⌘↓` jump between prompts; `⌘⇧P` a
+  command palette listing every action and theme. Prompt marks are OSC 133 sequences that the daemon's bash rc file
+  emits **only when the client says `TERM_PROGRAM=FluxVM`** (this page), so other terminals see no change; a gutter bar
+  marks each prompt and the status line shows the last non-zero exit. Limits: quick select reads screen rows, so a
+  match wrapped across two rows is missed; marks need the rc-file bash shell (not `--plain`, not zsh); no kitty
+  graphics, no ligatures; the cursor blink rate is the library's.
+- **Not built yet:** window blur; "new session" from the picker. The Velora native window is a separate change.
 - **Run** (Chrome headless on this M4, offline session): prompt, WebGL, typing, `TERM`/`COLORTERM`/`TERM_PROGRAM` in the
   guest, the guest tty size following the window (24x152 to 24x95), a 24-bit foreground kept as RGB, an OSC 8 link, a sixel
-  adding an image canvas, `⌘T`, `⌘D`, `⌘⌃h`, `⌘1`, the bottom tab bar, the accent colour and gradient, and the exit code.
-  **Not run:** Safari/WebKit (that is the Velora window's job), Firefox, a real WezTerm to compare against.
+  adding an image canvas, `⌘T`, `⌘D`, `⌘⌃h`, `⌘1`, the bottom tab bar, the accent colour and gradient, and the exit code;
+  then prompt marks arriving from the guest, `⌘↑`/`⌘↓` moving the viewport between them, "last exit 1" after `false`,
+  `⌘F` finding text, quick select labelling a URL, a path and a hash and copying the URL, copy mode `v`+`w`+`y`
+  selecting and copying "alpha b", and the palette switching the theme. **Not run:** Safari/WebKit (that is the Velora window's job), Firefox, a real WezTerm to compare against.
 
 **Looks.** The terminal takes its look from yours: `fluxctl` sends its own `TERM` (the guest falls back to
 `xterm-256color` when it lacks that terminfo) and, when your `COLORTERM` is `truecolor`/`24bit`, sets it in the guest so

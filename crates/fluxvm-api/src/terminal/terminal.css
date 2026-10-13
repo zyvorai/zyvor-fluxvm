@@ -58,3 +58,22 @@ select option { background: #1d1f2b; color: #e6e6e6; }
 #left-status { font-size: 12px; white-space: nowrap; }
 #clock { color: var(--accent); font-variant-numeric: tabular-nums; white-space: nowrap; }
 [hidden] { display: none !important; }
+
+/* copy mode, quick select, prompt marks, search bar, command palette */
+.quick-layer { position: absolute; inset: 0; pointer-events: none; z-index: 5; }
+.quick-hit { position: absolute; border-bottom: 2px solid var(--accent); background: color-mix(in srgb, var(--accent) 22%, transparent); }
+.quick-hit b { position: absolute; left: 0; top: 0; padding: 0 .3ch; background: var(--accent); color: var(--tab-active-fg);
+               font: 700 12px/1.3 ui-monospace, Menlo, monospace; border-radius: 3px; text-transform: lowercase; }
+.prompt-mark { border-left: 3px solid var(--accent); opacity: .85; }
+#searchbar { position: absolute; top: .5rem; right: 1rem; z-index: 20; display: flex; gap: .3rem; align-items: center;
+             padding: .35rem .5rem; background: var(--tab-bg); border: 1px solid var(--accent); border-radius: 8px; }
+#searchq { width: 18ch; }
+#palette { position: absolute; inset: 0; z-index: 30; display: flex; justify-content: center; align-items: flex-start;
+           padding-top: 12vh; background: color-mix(in srgb, #000 35%, transparent); }
+.palette-box { width: min(560px, calc(100% - 2rem)); background: var(--tab-bg); border: 1px solid var(--accent);
+               border-radius: 10px; padding: .6rem; }
+#paletteq { width: 100%; padding: .45rem .6rem; }
+#paletteitems { max-height: 50vh; overflow: auto; margin-top: .4rem; }
+.palette-row { display: flex; justify-content: space-between; gap: 1rem; padding: .35rem .6rem; border-radius: 6px; cursor: pointer; }
+.palette-row.sel, .palette-row:hover { background: var(--accent); color: var(--tab-active-fg); }
+.palette-row kbd { font: 12px ui-monospace, Menlo, monospace; opacity: .8; }

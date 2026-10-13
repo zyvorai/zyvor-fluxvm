@@ -32,6 +32,19 @@
     <p id="pickerr" class="bad"></p>
   </section>
   <div id="workspace" hidden><div id="panes"></div></div>
+  <div id="searchbar" hidden>
+    <input id="searchq" type="search" placeholder="Search scrollback" aria-label="Search scrollback" autocomplete="off"/>
+    <button id="searchprev" title="Previous (⇧Enter)" aria-label="Previous match">↑</button>
+    <button id="searchnext" title="Next (Enter)" aria-label="Next match">↓</button>
+    <span id="searchcount" class="muted"></span>
+    <button id="searchclose" title="Close (Esc)" aria-label="Close search">✕</button>
+  </div>
+  <div id="palette" hidden>
+    <div class="palette-box" role="dialog" aria-label="Command palette">
+      <input id="paletteq" type="text" placeholder="Type a command" aria-label="Command" autocomplete="off"/>
+      <div id="paletteitems"></div>
+    </div>
+  </div>
 </div>
 <div id="tabbar">
   <div id="tabs" role="tablist"></div>
@@ -42,6 +55,7 @@
 <script src="/console/terminal/xterm.js"></script>
 <script src="/console/terminal/addon-fit.js"></script>
 <script src="/console/terminal/addon-unicode11.js"></script>
+<script src="/console/terminal/addon-search.js"></script>
 <script src="/console/terminal/addon-web-links.js"></script>
 <script src="/console/terminal/addon-image.js"></script>
 <script src="/console/terminal/addon-clipboard.js"></script>

@@ -202,6 +202,16 @@ function shortcut(e, mac) {
     if (e.key === '"' || e.key === "'") return { action: 'split', dir: 'v' };
     if (e.key === '%' || e.key === '5') return { action: 'split', dir: 'h' };
   }
+  if (e.ctrlKey && e.shiftKey && !e.altKey && !e.metaKey) {
+    if (k === 'x') return { action: 'copy-mode' };
+    if (e.key === ' ') return { action: 'quick-select' };
+  }
+  if (meta && !e.altKey && !(mac && e.ctrlKey)) {
+    if (e.key === 'ArrowUp') return { action: 'prompt', dir: -1 };
+    if (e.key === 'ArrowDown') return { action: 'prompt', dir: 1 };
+    if (k === 'f' && !e.shiftKey) return { action: 'search' };
+    if (k === 'p' && e.shiftKey) return { action: 'palette' };
+  }
   if (meta && !e.altKey && !(mac && e.ctrlKey)) {
     if (k === 't') return { action: 'new-tab' };
     if (k === 'w') return { action: 'close' };
@@ -215,10 +225,154 @@ function shortcut(e, mac) {
   return null;
 }
 
+// ---- quick select: what is worth copying on screen, and the letters that pick it ----
+
+// In priority order: when two patterns match the same text the earlier one wins.
+const QUICK_PATTERNS = [
+  ['url', /\bhttps?:\/\/[^\s<>"'`)\]]+/gi],
+  ['uuid', /\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi],
+  ['ipv4', /\b(?:\d{1,3}\.){3}\d{1,3}(?::\d+)?\b/g],
+  ['path', /(?<![\w.@+~\/-])(?:~|\.{1,2})?\/[\w.@+~-]+(?:\/[\w.@+~-]+)*\/?/g],
+  ['hash', /\b(?=[0-9a-f]*\d)(?=[0-9a-f]*[a-f])[0-9a-f]{7,64}\b/gi],
+  ['number', /\b\d{4,}\b/g],
+];
+const HINT_KEYS = 'asdfqwerzxcvjklmiuopghtybn';
+
+/** Matches in `lines` (array of strings, one per screen row): [{row, col, len, text, kind}] in reading order. */
+function quickMatches(lines) {
+  const out = [];
+  lines.forEach((line, row) => {
+    const taken = [];
+    for (const [kind, re] of QUICK_PATTERNS) {
+      re.lastIndex = 0;
+      let m;
+      while ((m = re.exec(line)) !== null) {
+        let text = m[0];
+        if (kind === 'url') text = text.replace(/[.,;:!?]+$/, '');
+        if (!text) { re.lastIndex++; continue; }
+        const col = m.index, end = col + text.length;
+        // a path that is only "/" or part of a longer match found earlier is not a new match
+        if (kind === 'path' && text.length < 2) continue;
+        if (taken.some(([a, b]) => col < b && end > a)) continue;
+        taken.push([col, end]);
+        out.push({ row, col, len: text.length, text, kind });
+      }
+    }
+  });
+  return out.sort((a, b) => a.row - b.row || a.col - b.col);
+}
+
+/** `n` distinct prefix-free labels: one letter each when they fit, else two letters each (at most 676). */
+function hintLabels(n) {
+  const k = HINT_KEYS.length;
+  if (n <= k) return [...HINT_KEYS].slice(0, n);
+  const out = [];
+  for (const a of HINT_KEYS) for (const b of HINT_KEYS) { if (out.length < n) out.push(a + b); }
+  return out;
+}
+
+// ---- copy mode: vi-like motions over the buffer (lines are strings, rows are absolute) ----
+
+const charClass = (c) => (c === undefined || /\s/.test(c) ? 0 : /\w/.test(c) ? 1 : 2);
+
+/** The state after one key. `st` is {row, col, mode: null|'char'|'line', anchor}; `lines` the whole buffer. */
+function copyMove(st, key, lines) {
+  const last = Math.max(0, lines.length - 1);
+  const s = { ...st };
+  const len = (r) => Math.max(0, lines[r].length);
+  const clampCol = () => { s.col = Math.max(0, Math.min(s.col, Math.max(0, len(s.row) - 1))); };
+  switch (key) {
+    case 'h': case 'ArrowLeft': s.col = Math.max(0, s.col - 1); break;
+    case 'l': case 'ArrowRight': s.col += 1; clampCol(); break;
+    case 'j': case 'ArrowDown': s.row = Math.min(last, s.row + 1); clampCol(); break;
+    case 'k': case 'ArrowUp': s.row = Math.max(0, s.row - 1); clampCol(); break;
+    case '0': s.col = 0; break;
+    case '$': s.col = Math.max(0, len(s.row) - 1); break;
+    case 'g': s.row = 0; s.col = 0; break;
+    case 'G': s.row = last; s.col = 0; break;
+    case 'w': {
+      let { row, col } = s;
+      const cls = charClass(lines[row][col]);
+      while (col < len(row) && cls !== 0 && charClass(lines[row][col]) === cls) col++;
+      for (;;) {
+        while (col < len(row) && charClass(lines[row][col]) === 0) col++;
+        if (col < len(row) || row === last) break;
+        row++; col = 0;
+        if (len(row) === 0) break;   // like vi, an empty line is a stop
+      }
+      s.row = row; s.col = col; clampCol();
+      break;
+    }
+    case 'b': {
+      let { row, col } = s;
+      const step = () => {
+        if (col > 0) { col--; return true; }
+        if (row === 0) return false;
+        row--; col = Math.max(0, len(row) - 1);
+        return true;
+      };
+      if (!step()) break;
+      while (charClass(lines[row][col]) === 0 && step()) { /* skip space */ }
+      const cls = charClass(lines[row][col]);
+      while (col > 0 && charClass(lines[row][col - 1]) === cls) col--;
+      s.row = row; s.col = col;
+      break;
+    }
+    case 'v': s.mode = s.mode === 'char' ? null : 'char'; s.anchor = { row: s.row, col: s.col }; break;
+    case 'V': s.mode = s.mode === 'line' ? null : 'line'; s.anchor = { row: s.row, col: s.col }; break;
+    default: break;
+  }
+  return s;
+}
+
+/** The text a yank takes: the selection between anchor and cursor, or '' outside visual mode. */
+function copyText(st, lines) {
+  if (!st.mode || !st.anchor) return '';
+  const [a, b] = [st.anchor, { row: st.row, col: st.col }]
+    .sort((x, y) => x.row - y.row || x.col - y.col);
+  if (st.mode === 'line') return lines.slice(a.row, b.row + 1).join('\n');
+  if (a.row === b.row) return lines[a.row].slice(a.col, b.col + 1);
+  return [lines[a.row].slice(a.col), ...lines.slice(a.row + 1, b.row), lines[b.row].slice(0, b.col + 1)].join('\n');
+}
+
+/** The prompt line to jump to from `current`: nearest mark above (dir -1) or below (dir 1), else null. */
+function promptJump(marks, current, dir) {
+  const ok = marks.filter((l) => Number.isInteger(l) && l >= 0).sort((a, b) => a - b);
+  if (dir < 0) { const c = ok.filter((l) => l < current); return c.length ? c[c.length - 1] : null; }
+  const c = ok.filter((l) => l > current);
+  return c.length ? c[0] : null;
+}
+
+// ---- command palette: every action by name, narrowed by what was typed ----
+
+const ACTIONS = [
+  { title: 'New tab', keys: '⌘T', run: { action: 'new-tab' } },
+  { title: 'Close pane', keys: '⌘W', run: { action: 'close' } },
+  { title: 'Split pane right', keys: '⌘D', run: { action: 'split', dir: 'h' } },
+  { title: 'Split pane down', keys: '⌘⇧D', run: { action: 'split', dir: 'v' } },
+  { title: 'Search scrollback', keys: '⌘F', run: { action: 'search' } },
+  { title: 'Copy mode', keys: '⌃⇧X', run: { action: 'copy-mode' } },
+  { title: 'Quick select', keys: '⌃⇧Space', run: { action: 'quick-select' } },
+  { title: 'Previous prompt', keys: '⌘↑', run: { action: 'prompt', dir: -1 } },
+  { title: 'Next prompt', keys: '⌘↓', run: { action: 'prompt', dir: 1 } },
+  { title: 'Clear scrollback', keys: '⌘K', run: { action: 'clear' } },
+  { title: 'Larger text', keys: '⌘+', run: { action: 'font', delta: 1 } },
+  { title: 'Smaller text', keys: '⌘−', run: { action: 'font', delta: -1 } },
+  { title: 'Reset text size', keys: '⌘0', run: { action: 'font', delta: 0 } },
+  ...Object.keys(THEMES).map((name) => ({ title: 'Theme: ' + name, keys: '', run: { action: 'theme', name } })),
+];
+
+/** Actions whose title contains every word of `query` (case-insensitive); all of them for an empty query. */
+function filterActions(items, query) {
+  const words = String(query || '').toLowerCase().split(/\s+/).filter(Boolean);
+  return items.filter((a) => words.every((w) => a.title.toLowerCase().includes(w)));
+}
+
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
     THEMES, FONT_STACK, pickTheme, contrast, chromeFor, ptyUrl, exitCode, clampSize, DEFAULT_DARK, DEFAULT_LIGHT,
     leaves, splitLeaf, removeLeaf, layoutRects, neighbour, tabTitle, clock, shortcut,
+    quickMatches, hintLabels, copyMove, copyText, promptJump, ACTIONS, filterActions,
   };
 }
 
@@ -308,7 +462,9 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined' && document
       term.loadAddon(new WebLinksAddon.WebLinksAddon());
       term.loadAddon(new ImageAddon.ImageAddon());
       term.loadAddon(new ClipboardAddon.ClipboardAddon());
-      const pane = { id: newId(), el, inner, term, fit, ws: null, tab, closing: false, exited: null };
+      const search = new SearchAddon.SearchAddon();
+      term.loadAddon(search);
+      const pane = { id: newId(), el, inner, term, fit, search, ws: null, tab, closing: false, exited: null, marks: [], lastExit: null };
       term.open(inner);
       try {
         const gl = new WebglAddon.WebglAddon();
@@ -319,8 +475,26 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined' && document
       el.addEventListener('mousedown', () => focusPane(tab, pane.id));
       term.onBell(() => { el.classList.add('bell'); setTimeout(() => el.classList.remove('bell'), 220); });
       term.onTitleChange((t) => { pane.title = t; renderTabs(); });
+      // OSC 133 prompt marks: A = a prompt starts (remember its line), D;<n> = a command finished.
+      term.parser.registerOscHandler(133, (data) => {
+        const [kind, arg] = data.split(';');
+        if (kind === 'A') {
+          const m = term.registerMarker(0);
+          if (m) {
+            pane.marks.push(m);
+            m.onDispose(() => { const i = pane.marks.indexOf(m); if (i >= 0) pane.marks.splice(i, 1); });
+            const d = term.registerDecoration({ marker: m, x: 0, width: 1, layer: 'top' });
+            if (d) d.onRender((node) => node.classList.add('prompt-mark'));
+          }
+        } else if (kind === 'D' && arg !== undefined && /^-?\d+$/.test(arg)) {
+          pane.lastExit = Number(arg);
+          updateStatus();
+        }
+        return true;
+      });
       term.attachCustomKeyEventHandler((e) => {
         if (e.type !== 'keydown') return true;
+        if (modal && modal.pane === pane) { e.preventDefault(); modalKey(e); return false; }
         const s = shortcut(e, mac);
         if (!s) return true;
         e.preventDefault();
@@ -409,6 +583,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined' && document
       for (const p of tab.panes.values()) p.el.classList.toggle('inactive', p.id !== id);
       const p = tab.panes.get(id);
       window.__fluxTerm = p.term;
+      window.__fluxMarks = () => p.marks.map((m) => m.line);
       p.term.focus();
       updateStatus();
     }
@@ -455,6 +630,16 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined' && document
       else if (a.action === 'split') split(a.dir);
       else if (a.action === 'font') setSize(a.delta === 0 ? 0 : fontSize + a.delta);
       else if (a.action === 'clear') { const p = active.panes.get(active.focus); p.term.clear(); }
+      else if (a.action === 'theme') { themeName = a.name; sel.value = a.name; store.set(THEME_KEY, a.name); applyTheme(); }
+      else if (a.action === 'search') openSearch();
+      else if (a.action === 'copy-mode') startCopyMode(active.panes.get(active.focus));
+      else if (a.action === 'quick-select') startQuickSelect(active.panes.get(active.focus));
+      else if (a.action === 'palette') openPalette();
+      else if (a.action === 'prompt') {
+        const p = active.panes.get(active.focus);
+        const to = promptJump(p.marks.map((m) => m.line), p.term.buffer.active.viewportY, a.dir);
+        if (to !== null) p.term.scrollToLine(to);
+      }
       else if (a.action === 'focus') {
         const host = $('panes').getBoundingClientRect();
         const rects = {};
@@ -466,6 +651,191 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined' && document
         if (to !== null) focusPane(active, Number(to));
       }
     }
+
+    // ---- modes that take the keyboard: copy mode and quick select ----
+    let modal = null;   // {type: 'copy'|'quick', pane, ...}
+    const bufferLines = (term) => {
+      const b = term.buffer.active, out = [];
+      for (let i = 0; i < b.length; i++) { const l = b.getLine(i); out.push(l ? l.translateToString(true) : ''); }
+      return out;
+    };
+    function copyToClipboard(text) {
+      const done = () => status(`copied ${text.length} characters`);
+      const fallback = () => {
+        const ta = document.createElement('textarea');
+        ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
+        document.body.appendChild(ta); ta.select();
+        try { document.execCommand('copy'); done(); } catch { status('copy was refused by the browser'); }
+        ta.remove();
+      };
+      if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(text).then(done, fallback);
+      else fallback();
+    }
+    function endModal() {
+      if (!modal) return;
+      const { pane } = modal;
+      pane.term.clearSelection();
+      if (modal.layer) modal.layer.remove();
+      modal = null;
+      updateStatus();
+      pane.term.focus();
+    }
+    function modalKey(e) {
+      if (e.key === 'Escape' || (e.key === 'c' && e.ctrlKey)) { endModal(); return; }
+      if (['Shift', 'Control', 'Alt', 'Meta'].includes(e.key)) return;
+      if (modal.type === 'copy') copyKey(e);
+      else quickKey(e);
+    }
+
+    function startCopyMode(pane) {
+      if (!pane || modal) return;
+      const b = pane.term.buffer.active;
+      modal = { type: 'copy', pane, st: { row: b.baseY + b.cursorY, col: b.cursorX, mode: null, anchor: null } };
+      drawCopy();
+    }
+    function drawCopy() {
+      const { pane, st } = modal, term = pane.term;
+      if (!st.mode) term.select(st.col, st.row, 1);
+      else {
+        const [a, c] = [st.anchor, { row: st.row, col: st.col }].sort((x, y) => x.row - y.row || x.col - y.col);
+        if (st.mode === 'line') term.selectLines(a.row, c.row);
+        else term.select(a.col, a.row, (c.row - a.row) * term.cols + (c.col - a.col) + 1);
+      }
+      const top = term.buffer.active.viewportY;
+      if (st.row < top || st.row >= top + term.rows) term.scrollToLine(Math.max(0, st.row - Math.floor(term.rows / 2)));
+      status(`COPY MODE${st.mode ? ' · ' + (st.mode === 'line' ? 'LINE' : 'VISUAL') : ''} · hjkl w b 0 $ g G · v V · y copy · Esc`);
+    }
+    function copyKey(e) {
+      const lines = bufferLines(modal.pane.term);
+      if (e.key === 'y' || e.key === 'Enter') {
+        const text = copyText(modal.st, lines);
+        endModal();
+        if (text) copyToClipboard(text);
+        return;
+      }
+      if (e.key === '/') { const p = modal.pane; endModal(); openSearch(p); return; }
+      const key = e.key.length === 1 || e.key.startsWith('Arrow') ? e.key : '';
+      if (key) { modal.st = copyMove(modal.st, key, lines); drawCopy(); }
+    }
+
+    function startQuickSelect(pane) {
+      if (!pane || modal) return;
+      const term = pane.term, b = term.buffer.active;
+      const rows = [];
+      for (let r = 0; r < term.rows; r++) { const l = b.getLine(b.viewportY + r); rows.push(l ? l.translateToString(true) : ''); }
+      const found = quickMatches(rows);
+      if (!found.length) { status('quick select: nothing to pick on screen'); return; }
+      const labels = hintLabels(found.length);
+      const layer = document.createElement('div');
+      layer.className = 'quick-layer';
+      const screen = pane.inner.querySelector('.xterm-screen') || pane.inner;
+      const sr = screen.getBoundingClientRect(), pr = pane.el.getBoundingClientRect();
+      const cw = sr.width / term.cols, ch = sr.height / term.rows;
+      found.slice(0, labels.length).forEach((m, i) => {
+        const box = document.createElement('span');
+        box.className = 'quick-hit';
+        box.style.left = (sr.left - pr.left + m.col * cw) + 'px';
+        box.style.top = (sr.top - pr.top + m.row * ch) + 'px';
+        box.style.width = (m.len * cw) + 'px'; box.style.height = ch + 'px';
+        const tag = document.createElement('b');
+        tag.textContent = labels[i];
+        box.appendChild(tag);
+        layer.appendChild(box);
+        m.label = labels[i];
+      });
+      pane.el.appendChild(layer);
+      modal = { type: 'quick', pane, layer, found: found.slice(0, labels.length), typed: '' };
+      status(`QUICK SELECT · ${modal.found.length} matches · type a label to copy · Shift opens a URL · Esc`);
+    }
+    function quickKey(e) {
+      if (e.key.length !== 1) return;
+      const typed = modal.typed + e.key.toLowerCase();
+      const hit = modal.found.find((m) => m.label === typed);
+      if (hit) {
+        const open = e.shiftKey && hit.kind === 'url';
+        endModal();
+        if (open) window.open(hit.text, '_blank', 'noopener,noreferrer');
+        else copyToClipboard(hit.text);
+        return;
+      }
+      if (modal.found.some((m) => m.label.startsWith(typed))) {
+        modal.typed = typed;
+        for (const node of modal.layer.children) {
+          const lab = node.firstChild.textContent;
+          node.hidden = !lab.startsWith(typed);
+        }
+      } else endModal();
+    }
+
+    // ---- search bar (per active pane) and command palette ----
+    function openSearch(p) {
+      const pane = p || active.panes.get(active.focus);
+      $('searchbar').hidden = false;
+      $('searchbar').dataset.pane = String(pane.id);
+      $('searchq').focus();
+      $('searchq').select();
+    }
+    function closeSearch() {
+      $('searchbar').hidden = true;
+      const id = Number($('searchbar').dataset.pane);
+      const pane = active && active.panes.get(id);
+      if (pane) { pane.search.clearDecorations(); pane.term.focus(); }
+    }
+    const searchOpts = {
+      incremental: false,
+      decorations: {
+        matchBackground: '#3b4261', matchBorder: '#7aa2f7', matchOverviewRuler: '#7aa2f7',
+        activeMatchBackground: '#e0af68', activeMatchBorder: '#e0af68', activeMatchColorOverviewRuler: '#e0af68',
+      },
+    };
+    function searchStep(back) {
+      const pane = active.panes.get(Number($('searchbar').dataset.pane));
+      const q = $('searchq').value;
+      if (!pane || !q) return;
+      const found = back ? pane.search.findPrevious(q, searchOpts) : pane.search.findNext(q, searchOpts);
+      $('searchcount').textContent = found ? '' : 'no match';
+    }
+    $('searchq').addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') closeSearch();
+      else if (e.key === 'Enter') { e.preventDefault(); searchStep(e.shiftKey); }
+    });
+    $('searchq').addEventListener('input', () => searchStep(false));
+    $('searchprev').addEventListener('click', () => searchStep(true));
+    $('searchnext').addEventListener('click', () => searchStep(false));
+    $('searchclose').addEventListener('click', closeSearch);
+
+    let paletteSel = 0, paletteItems = [];
+    function renderPalette() {
+      paletteItems = filterActions(ACTIONS, $('paletteq').value);
+      paletteSel = Math.min(paletteSel, Math.max(0, paletteItems.length - 1));
+      const box = $('paletteitems');
+      box.textContent = '';
+      paletteItems.forEach((a, i) => {
+        const row = document.createElement('div');
+        row.className = 'palette-row' + (i === paletteSel ? ' sel' : '');
+        const t = document.createElement('span'); t.textContent = a.title;
+        const k = document.createElement('kbd'); k.textContent = a.keys;
+        row.append(t, k);
+        row.addEventListener('click', () => runPalette(a));
+        box.appendChild(row);
+      });
+    }
+    function openPalette() { $('palette').hidden = false; $('paletteq').value = ''; paletteSel = 0; renderPalette(); $('paletteq').focus(); }
+    function closePalette() { $('palette').hidden = true; if (active) focusPane(active, active.focus); }
+    function runPalette(a) { closePalette(); runAction(a.run); }
+    $('paletteq').addEventListener('input', () => { paletteSel = 0; renderPalette(); });
+    $('paletteq').addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') closePalette();
+      else if (e.key === 'ArrowDown') { e.preventDefault(); paletteSel = Math.min(paletteItems.length - 1, paletteSel + 1); renderPalette(); }
+      else if (e.key === 'ArrowUp') { e.preventDefault(); paletteSel = Math.max(0, paletteSel - 1); renderPalette(); }
+      else if (e.key === 'Enter' && paletteItems[paletteSel]) { e.preventDefault(); runPalette(paletteItems[paletteSel]); }
+    });
+    // The shortcuts also work while focus is in the page chrome (search box, palette), not only in a pane.
+    document.addEventListener('keydown', (e) => {
+      if (e.target && e.target.closest && e.target.closest('.xterm')) return;
+      const s = shortcut(e, mac);
+      if (s && (s.action === 'palette' || s.action === 'search')) { e.preventDefault(); runAction(s); }
+    });
 
     // ---- tab bar (bottom) and status ----
     function renderTabs() {
@@ -494,7 +864,9 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined' && document
     function updateStatus() {
       if (!active) return;
       const p = active.panes.get(active.focus);
-      if (p) status(`session ${sessionId.slice(0, 8)} · ${p.term.cols}×${p.term.rows} · ${window.__terminalRenderer || ''}`);
+      if (modal) return;
+      const exit = p && p.lastExit !== null && p.lastExit !== 0 ? ` · last exit ${p.lastExit}` : '';
+      if (p) status(`session ${sessionId.slice(0, 8)} · ${p.term.cols}×${p.term.rows} · ${window.__terminalRenderer || ''}${exit}`);
     }
     setInterval(() => { $('clock').textContent = '🕒 ' + clock(new Date()); }, 1000);
     $('clock').textContent = '🕒 ' + clock(new Date());
