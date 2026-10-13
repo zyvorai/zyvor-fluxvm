@@ -2,10 +2,16 @@
 
 ## Unreleased
 
+- **Browser terminal: search, copy mode, quick select, prompt marks, command palette.** `⌘F` search, `⌃⇧X` vi-like copy
+  mode, `⌃⇧Space` quick select (URLs, paths, UUIDs, IPv4, hashes, numbers on screen), `⌘↑`/`⌘↓` between prompts,
+  `⌘⇧P` palette. Prompt marks are OSC 133 from the bash rc file, emitted only for `TERM_PROGRAM=FluxVM`. Node tests
+  cover the matcher, hint labels, motions, yank, prompt jumps and palette filter; each was also driven in headless
+  Chrome on a vz session. Quick select misses matches wrapped across rows; not run in Safari or Firefox.
+
 - **Browser terminal.** `/console/terminal?session=<id>` and `fluxctl agent shell --web`: xterm.js (vendored, MIT) with
   WebGL, tabs and split panes, themes (default "Neon Storm" after the author's WezTerm config), inline images
   (sixel, iTerm2), links, a clock, and WezTerm-style keys. Auth for the WebSocket is a 30 s single-use in-memory ticket
-  (`POST /v1/agents/sessions/{id}/pty-ticket`). No search, copy mode or quick select yet. Run in headless Chrome on vz.
+  (`POST /v1/agents/sessions/{id}/pty-ticket`). Run in headless Chrome on vz.
 
 - **Plain ssh into a session and terminal-program forwarding.** `fluxctl agent ssh-config <session> [--name N]`
   (`GET .../ssh`) prints an OpenSSH `Host` block (address, or a `vsock-proxy` ProxyCommand for an offline guest) so
