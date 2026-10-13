@@ -20,6 +20,9 @@
 //! * `GET    /v1/agents/sessions/{id}/previews`      list live preview URLs
 //! * `DELETE /v1/agents/sessions/{id}/preview/{token}` revoke one
 //! * `ANY    /preview/{token}/{*path}`               the preview itself (the token is the credential)
+//! * `POST   /v1/agents/sessions/{id}/jobs`          start a detached command
+//! * `GET    /v1/agents/sessions/{id}/jobs/{job}`    its state and output from `?offset=`
+//! * `DELETE /v1/agents/sessions/{id}/jobs/{job}`    stop it
 //!
 //! Records live in `<state_dir>/agent-sessions/<id>.json` and `<id>.ledger.jsonl`, so a
 //! session survives a daemon restart. What is *not* here: promote, replay, sandbox-scoped PTY,
@@ -63,6 +66,11 @@ pub(crate) fn routes() -> Router<Arc<VmManager>> {
         .route(
             "/v1/agents/sessions/{id}/preview/{token}",
             axum::routing::delete(revoke_preview),
+        )
+        .route("/v1/agents/sessions/{id}/jobs", post(job_start))
+        .route(
+            "/v1/agents/sessions/{id}/jobs/{job}",
+            get(job_read).delete(job_kill),
         )
         .route("/preview/{token}", any(preview_root))
         .route("/preview/{token}/", any(preview_root))
@@ -936,108 +944,6 @@ async fn artifacts(
     })))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn pol(v: Value) -> PolicyBody {
-        serde_json::from_value(v).unwrap()
-    }
-
-    #[test]
-    fn presets_compile_to_existing_sandbox_fields() {
-        let r = compile_policy(Some(pol(json!({"preset": "offline"})))).unwrap();
-        assert!(r.offline && r.allow_hosts.is_empty());
-        let r = compile_policy(Some(pol(json!({"preset": "developer-safe"})))).unwrap();
-        assert!(!r.offline);
-        assert!(r.allow_hosts.contains(&"crates.io".to_string()));
-        let r = compile_policy(None).unwrap();
-        assert!(!r.offline && r.allow_hosts.is_empty());
-    }
-
-    #[test]
-    fn deny_by_default_with_an_allow_list() {
-        let r = compile_policy(Some(pol(json!({
-            "network": {"default": "deny", "allow": ["github.com", {"host": "api.github.com"}, "github.com"]}
-        }))))
-        .unwrap();
-        assert_eq!(r.allow_hosts, vec!["api.github.com", "github.com"]);
-        assert!(!r.offline);
-        // deny with nothing allowed is offline
-        let r = compile_policy(Some(pol(json!({"network": {"default": "deny"}})))).unwrap();
-        assert!(r.offline);
-    }
-
-    #[test]
-    fn what_is_not_supported_is_refused_not_ignored() {
-        assert!(
-            compile_policy(Some(pol(
-                json!({"network": {"allow": [{"host": "a.b", "methods": ["GET"]}]}})
-            )))
-            .is_err(),
-            "method/path rules must be refused until they are enforced"
-        );
-        assert!(compile_policy(Some(pol(json!({"preset": "nope"})))).is_err());
-        assert!(
-            compile_policy(Some(pol(
-                json!({"network": {"default": "allow", "allow": ["a.b"]}})
-            )))
-            .is_err()
-        );
-        let r = compile_policy(Some(pol(json!({
-            "filesystem": {"write": ["/workspace/**"]}, "process": {"allow": ["git"]}
-        }))))
-        .unwrap();
-        assert_eq!(r.unenforced, vec!["filesystem", "process"]);
-    }
-
-    #[test]
-    fn inputs_that_reach_a_shell_are_validated() {
-        assert!(valid_git_url("https://github.com/zyvorai/zyvor-fluxvm"));
-        assert!(!valid_git_url("git@github.com:a/b.git"));
-        assert!(!valid_git_url("https://x y"));
-        assert!(!valid_git_url("https://-oProxyCommand=x"));
-        assert!(valid_guest_path("/workspace"));
-        assert!(!valid_guest_path("/workspace/../etc"));
-        assert!(!valid_guest_path("/a b"));
-        assert!(!valid_guest_path("relative"));
-        assert!(valid_tag("after-build.1"));
-        assert!(!valid_tag("a/b"));
-        assert_eq!(shell_quote("it's"), "'it'\\''s'");
-    }
-
-    #[test]
-    fn capabilities_follow_the_backend_and_never_claim_fork_on_a_nat_session() {
-        assert!(capabilities_for("flux-vm", false).fork);
-        // vz forks only without a NIC of its own: offline or allow-listed sessions.
-        let nat = capabilities_for("vz", false);
-        assert!(nat.snapshot && !nat.fork && !nat.pty);
-        assert!(capabilities_for("vz", true).fork);
-        assert!(!capabilities_for("cloud-hypervisor", true).snapshot);
-        assert!(!capabilities_for("qemu", true).fork);
-    }
-
-    #[test]
-    fn the_ledger_reads_back_in_order_and_filters_by_time() {
-        let dir = std::env::temp_dir().join(format!("fluxvm-ledger-{}", Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let p = dir.join("x.ledger.jsonl");
-        let t0 = Utc::now();
-        let l1 = json!({"ts": t0, "kind": "exec", "detail": {}});
-        let l2 =
-            json!({"ts": t0 + chrono::Duration::seconds(5), "kind": "checkpoint", "detail": {}});
-        std::fs::write(&p, format!("{l1}\nnot json\n{l2}\n")).unwrap();
-        let text = std::fs::read_to_string(&p).unwrap();
-        let all: Vec<Value> = text
-            .lines()
-            .filter_map(|l| serde_json::from_str(l).ok())
-            .collect();
-        assert_eq!(all.len(), 2, "a corrupt line is skipped, not fatal");
-        assert_eq!(all[0]["kind"], "exec");
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-}
-
 // ---------------------------------------------------------------------------------------
 // Preview URLs: an expiring, revocable capability to one guest port of one session. The token
 // is 256 random bits kept in `<state_dir>/agent-previews/<token>.json`; whoever holds the URL
@@ -1238,4 +1144,323 @@ async fn preview_serve(
         axum::http::HeaderValue::from_static("no-store"),
     );
     resp
+}
+
+// ---------------------------------------------------------------------------------------
+// Jobs: a command that outlives the request. It runs detached in the guest (`setsid`), its
+// output goes to a file, and the caller reads that file from a byte offset. This is built on
+// the ordinary exec path, so each read costs one exec; it is polling, not a stream. There is
+// no stdin and no TTY.
+
+const JOBS_DIR: &str = "/tmp/fluxvm-jobs";
+const JOB_READ_MAX: usize = 65_536;
+
+#[derive(Debug, Deserialize)]
+struct JobBody {
+    command: String,
+}
+
+/// The guest-side shell line that starts a job. Pure, so it is unit-tested.
+fn job_start_script(job: Uuid, command: &str) -> String {
+    let f = format!("{JOBS_DIR}/{job}");
+    let out = shell_quote(&format!("{f}.out"));
+    let exit = shell_quote(&format!("{f}.exit"));
+    let pid = shell_quote(&format!("{f}.pid"));
+    // The inner shell records its pid (== process group, because of setsid), runs the command
+    // with output to a file, and records the exit code last, so "exit file exists" means the
+    // output file is complete.
+    format!(
+        "mkdir -p {dir} && (setsid sh -c 'echo $$ > \"$1\"; sh -c \"$2\" > \"$3\" 2>&1 < /dev/null; echo $? > \"$4\"' _ {pid} {cmd} {out} {exit} > /dev/null 2>&1 &) ; echo started",
+        dir = shell_quote(JOBS_DIR),
+        cmd = shell_quote(command),
+    )
+}
+
+/// The guest-side line that reads a job: exit code first, then output from `offset`, so an
+/// exit seen here means the output read after it is complete.
+fn job_read_script(job: Uuid, offset: u64) -> String {
+    let f = format!("{JOBS_DIR}/{job}");
+    format!(
+        "e=$(cat {exit} 2>/dev/null); if [ ! -e {out} ]; then echo MISSING; exit 0; fi; \
+         echo \"EXIT:$e\"; tail -c +{from} {out} | head -c {max} | base64 | tr -d '\\n'; echo",
+        exit = shell_quote(&format!("{f}.exit")),
+        out = shell_quote(&format!("{f}.out")),
+        from = offset + 1,
+        max = JOB_READ_MAX,
+    )
+}
+
+fn base64_decode(s: &str) -> Vec<u8> {
+    let val = |c: u8| -> Option<u32> {
+        match c {
+            b'A'..=b'Z' => Some((c - b'A') as u32),
+            b'a'..=b'z' => Some((c - b'a') as u32 + 26),
+            b'0'..=b'9' => Some((c - b'0') as u32 + 52),
+            b'+' => Some(62),
+            b'/' => Some(63),
+            _ => None,
+        }
+    };
+    let mut out = Vec::with_capacity(s.len() / 4 * 3);
+    let (mut acc, mut bits) = (0u32, 0u32);
+    for c in s.bytes() {
+        let Some(v) = val(c) else { continue };
+        acc = (acc << 6) | v;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((acc >> bits) as u8);
+            acc &= (1 << bits) - 1;
+        }
+    }
+    out
+}
+
+async fn job_start(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    token_tenant: Option<Extension<TokenTenant>>,
+    Path(id): Path<Uuid>,
+    Json(body): Json<JobBody>,
+) -> ApiResult<(StatusCode, Json<Value>)> {
+    require_admin(role)?;
+    let s = load(&m, id, &caller_tenant(&token_tenant)).await?;
+    running(&s)?;
+    if body.command.trim().is_empty() {
+        return Err(ApiError {
+            status: StatusCode::BAD_REQUEST,
+            message: "command is required".into(),
+        });
+    }
+    m.ensure_running_for_request(s.sandbox_id).await?;
+    let job = Uuid::new_v4();
+    let res = m
+        .exec_with_policy(
+            s.sandbox_id,
+            job_start_script(job, &body.command),
+            Some(30),
+            None,
+        )
+        .await?;
+    let out = json!(res);
+    if out["exit_code"].as_i64() != Some(0) {
+        return Err(ApiError {
+            status: StatusCode::BAD_GATEWAY,
+            message: format!(
+                "could not start the job: {}",
+                out["stderr"].as_str().unwrap_or("")
+            ),
+        });
+    }
+    record(
+        &m,
+        id,
+        "job.start",
+        json!({"job": job, "command": body.command}),
+    );
+    Ok((
+        StatusCode::CREATED,
+        Json(json!({"job": job, "state": "running"})),
+    ))
+}
+
+#[derive(Debug, Deserialize)]
+struct JobQuery {
+    #[serde(default)]
+    offset: u64,
+}
+
+async fn job_read(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    token_tenant: Option<Extension<TokenTenant>>,
+    Path((id, job)): Path<(Uuid, Uuid)>,
+    Query(q): Query<JobQuery>,
+) -> ApiResult<Json<Value>> {
+    require_admin(role)?;
+    let s = load(&m, id, &caller_tenant(&token_tenant)).await?;
+    running(&s)?;
+    m.ensure_running_for_request(s.sandbox_id).await?;
+    let res = m
+        .exec_with_policy(s.sandbox_id, job_read_script(job, q.offset), Some(30), None)
+        .await?;
+    let out = json!(res);
+    let stdout = out["stdout"].as_str().unwrap_or("");
+    let mut lines = stdout.lines();
+    let head = lines.next().unwrap_or("");
+    if head == "MISSING" {
+        return Err(ApiError {
+            status: StatusCode::NOT_FOUND,
+            message: format!("job {job} not found in session {id}"),
+        });
+    }
+    let exit = head
+        .strip_prefix("EXIT:")
+        .map(str::trim)
+        .filter(|e| !e.is_empty())
+        .and_then(|e| e.parse::<i64>().ok());
+    let bytes = base64_decode(lines.next().unwrap_or(""));
+    let next = q.offset + bytes.len() as u64;
+    Ok(Json(json!({
+        "job": job,
+        "state": if exit.is_some() { "exited" } else { "running" },
+        "exit_code": exit,
+        "output": String::from_utf8_lossy(&bytes),
+        "offset": q.offset,
+        "next_offset": next,
+        // true when more output was waiting than one read returns; read again from next_offset
+        "more": bytes.len() >= JOB_READ_MAX,
+    })))
+}
+
+async fn job_kill(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    token_tenant: Option<Extension<TokenTenant>>,
+    Path((id, job)): Path<(Uuid, Uuid)>,
+) -> ApiResult<StatusCode> {
+    require_admin(role)?;
+    let s = load(&m, id, &caller_tenant(&token_tenant)).await?;
+    running(&s)?;
+    let pid = shell_quote(&format!("{JOBS_DIR}/{job}.pid"));
+    let exit = shell_quote(&format!("{JOBS_DIR}/{job}.exit"));
+    // Negative pid = the whole process group the job started in. That group includes the wrapper
+    // that would have written the exit file, so a killed job gets the conventional 143 here.
+    let cmd = format!(
+        "p=$(cat {pid} 2>/dev/null) && [ -n \"$p\" ] && kill -TERM -- \"-$p\" 2>/dev/null; \
+         sleep 0.3; [ -e {exit} ] || echo 143 > {exit}; true"
+    );
+    m.exec_with_policy(s.sandbox_id, cmd, Some(30), None)
+        .await?;
+    record(&m, id, "job.kill", json!({"job": job}));
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pol(v: Value) -> PolicyBody {
+        serde_json::from_value(v).unwrap()
+    }
+
+    #[test]
+    fn presets_compile_to_existing_sandbox_fields() {
+        let r = compile_policy(Some(pol(json!({"preset": "offline"})))).unwrap();
+        assert!(r.offline && r.allow_hosts.is_empty());
+        let r = compile_policy(Some(pol(json!({"preset": "developer-safe"})))).unwrap();
+        assert!(!r.offline);
+        assert!(r.allow_hosts.contains(&"crates.io".to_string()));
+        let r = compile_policy(None).unwrap();
+        assert!(!r.offline && r.allow_hosts.is_empty());
+    }
+
+    #[test]
+    fn deny_by_default_with_an_allow_list() {
+        let r = compile_policy(Some(pol(json!({
+            "network": {"default": "deny", "allow": ["github.com", {"host": "api.github.com"}, "github.com"]}
+        }))))
+        .unwrap();
+        assert_eq!(r.allow_hosts, vec!["api.github.com", "github.com"]);
+        assert!(!r.offline);
+        // deny with nothing allowed is offline
+        let r = compile_policy(Some(pol(json!({"network": {"default": "deny"}})))).unwrap();
+        assert!(r.offline);
+    }
+
+    #[test]
+    fn what_is_not_supported_is_refused_not_ignored() {
+        assert!(
+            compile_policy(Some(pol(
+                json!({"network": {"allow": [{"host": "a.b", "methods": ["GET"]}]}})
+            )))
+            .is_err(),
+            "method/path rules must be refused until they are enforced"
+        );
+        assert!(compile_policy(Some(pol(json!({"preset": "nope"})))).is_err());
+        assert!(
+            compile_policy(Some(pol(
+                json!({"network": {"default": "allow", "allow": ["a.b"]}})
+            )))
+            .is_err()
+        );
+        let r = compile_policy(Some(pol(json!({
+            "filesystem": {"write": ["/workspace/**"]}, "process": {"allow": ["git"]}
+        }))))
+        .unwrap();
+        assert_eq!(r.unenforced, vec!["filesystem", "process"]);
+    }
+
+    #[test]
+    fn inputs_that_reach_a_shell_are_validated() {
+        assert!(valid_git_url("https://github.com/zyvorai/zyvor-fluxvm"));
+        assert!(!valid_git_url("git@github.com:a/b.git"));
+        assert!(!valid_git_url("https://x y"));
+        assert!(!valid_git_url("https://-oProxyCommand=x"));
+        assert!(valid_guest_path("/workspace"));
+        assert!(!valid_guest_path("/workspace/../etc"));
+        assert!(!valid_guest_path("/a b"));
+        assert!(!valid_guest_path("relative"));
+        assert!(valid_tag("after-build.1"));
+        assert!(!valid_tag("a/b"));
+        assert_eq!(shell_quote("it's"), "'it'\\''s'");
+    }
+
+    #[test]
+    fn capabilities_follow_the_backend_and_never_claim_fork_on_a_nat_session() {
+        assert!(capabilities_for("flux-vm", false).fork);
+        // vz forks only without a NIC of its own: offline or allow-listed sessions.
+        let nat = capabilities_for("vz", false);
+        assert!(nat.snapshot && !nat.fork && !nat.pty);
+        assert!(capabilities_for("vz", true).fork);
+        assert!(!capabilities_for("cloud-hypervisor", true).snapshot);
+        assert!(!capabilities_for("qemu", true).fork);
+    }
+
+    #[test]
+    fn the_ledger_reads_back_in_order_and_filters_by_time() {
+        let dir = std::env::temp_dir().join(format!("fluxvm-ledger-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("x.ledger.jsonl");
+        let t0 = Utc::now();
+        let l1 = json!({"ts": t0, "kind": "exec", "detail": {}});
+        let l2 =
+            json!({"ts": t0 + chrono::Duration::seconds(5), "kind": "checkpoint", "detail": {}});
+        std::fs::write(&p, format!("{l1}\nnot json\n{l2}\n")).unwrap();
+        let text = std::fs::read_to_string(&p).unwrap();
+        let all: Vec<Value> = text
+            .lines()
+            .filter_map(|l| serde_json::from_str(l).ok())
+            .collect();
+        assert_eq!(all.len(), 2, "a corrupt line is skipped, not fatal");
+        assert_eq!(all[0]["kind"], "exec");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_job_is_started_detached_and_read_exit_first() {
+        let job = Uuid::nil();
+        let start = job_start_script(job, "echo 'hi there'; sleep 1");
+        assert!(start.contains("setsid"), "{start}");
+        assert!(start.contains("/tmp/fluxvm-jobs/00000000-0000-0000-0000-000000000000.out"));
+        // The command arrives as one quoted argument, never spliced into the line.
+        assert!(
+            start.contains("'echo '\\''hi there'\\''; sleep 1'"),
+            "{start}"
+        );
+        let read = job_read_script(job, 10);
+        // The exit file is read before the output, and the offset is 1-based for tail.
+        assert!(
+            read.find(".exit").unwrap() < read.find("tail -c +11").unwrap(),
+            "{read}"
+        );
+    }
+
+    #[test]
+    fn base64_decoding_matches_the_guest_encoder() {
+        assert_eq!(base64_decode("aGVsbG8gd29ybGQ="), b"hello world");
+        assert_eq!(base64_decode(""), b"");
+        assert_eq!(base64_decode("/+8="), vec![0xff, 0xef]);
+        assert_eq!(base64_decode("AAEC"), vec![0, 1, 2]);
+    }
 }

@@ -7028,6 +7028,40 @@ mod tests {
         }
 
         #[tokio::test]
+        async fn agent_session_jobs_are_tenant_scoped_and_validated() {
+            let m = procbox_manager(tenant_tokens(), false);
+            let id = seed_session(&m, Some("acme"), "vz", "running");
+            let app = router(m);
+            let base = format!("/v1/agents/sessions/{id}/jobs");
+            let job = Uuid::new_v4();
+            // Another tenant sees a 404 on every job route, like the session itself.
+            for (method, uri, body) in [
+                ("POST", base.clone(), Some(r#"{"command":"true"}"#)),
+                ("GET", format!("{base}/{job}"), None),
+                ("DELETE", format!("{base}/{job}"), None),
+            ] {
+                let (st, _) = call(app.clone(), method, &uri, "other", body).await;
+                assert_eq!(st, StatusCode::NOT_FOUND, "{method} {uri}");
+            }
+            // An empty command is refused before anything reaches a guest.
+            let (st, _) = call(
+                app.clone(),
+                "POST",
+                &base,
+                "acme",
+                Some(r#"{"command":"  "}"#),
+            )
+            .await;
+            assert_eq!(st, StatusCode::BAD_REQUEST);
+            // A job id that is not a UUID never becomes a guest path.
+            let (st, _) = call(app, "GET", &format!("{base}/..%2F..%2Fetc"), "acme", None).await;
+            assert!(
+                st == StatusCode::BAD_REQUEST || st == StatusCode::NOT_FOUND,
+                "{st}"
+            );
+        }
+
+        #[tokio::test]
         async fn agent_session_fork_is_refused_for_a_session_on_the_nat() {
             let m = procbox_manager(tenant_tokens(), false);
             let id = seed_session(&m, Some("acme"), "vz", "running");

@@ -71,6 +71,26 @@ A policy is compiled into fields the sandbox already enforces. The response repo
 
 `GET /v1/agents/sessions/{id}` reports `capabilities` for the session's backend so a client can decide without trying.
 
+### Background jobs
+
+A command that outlives the request, with output you read incrementally:
+
+```bash
+J=$(fluxctl agent bg <session> -- 'npm run dev' | jq -r .job)
+fluxctl agent logs <session> $J -f      # follows until exit, exits with the job's exit code
+fluxctl agent kill <session> $J         # SIGTERM to its process group; exit code reads 143
+```
+
+`POST .../jobs` starts it (`setsid`, output to `/tmp/fluxvm-jobs/<job>.out`, exit code written last);
+`GET .../jobs/{job}?offset=N` returns `state`, `exit_code`, `output`, `next_offset` and `more`; `DELETE .../jobs/{job}`
+stops it. MCP: `session_job_start`, `session_job_read`, `session_job_kill`.
+
+Run live (M4, `vz`, NAT session): a 4-second job followed to its exit code 7; a `sleep 300` job killed (143); a
+200 000-byte output read back whole across several pages; an unknown job id returned 404. **This is polling over the
+ordinary exec path, not a stream**: each read costs one exec (0.1 s on a NAT session, about 0.4 s offline), `-f` polls
+twice a second, and there is no stdin or TTY. A job lives in the guest's `/tmp`, so it is gone after a disk-only
+restore or a reboot, and output is not rotated.
+
 ### Preview URLs
 
 A session can hand out an expiring URL that reaches **one TCP port** of its guest, for a dev server or a web app an
@@ -147,7 +167,7 @@ Each item says why it is not in the MVP.
 | Workspace overlay mode, read-only mounts | `mode: "overlay"` is refused; clone is the only writable mode |
 | Filesystem and process policy enforcement | procbox has Landlock/seccomp; wiring it into VM sessions is not done |
 | HTTP method/path rules through the session policy | the egress proxy supports them on QEMU/KVM; not exposed here |
-| Streaming PTY for a session | the `console` route is VM-level and admin-only; no sandbox-scoped PTY |
+| Streaming PTY / stdin for a session | background **jobs** (above) cover long-running commands with polled output; there is still no stdin, no TTY and no push stream; the `console` route is VM-level and admin-only |
 | Replay | the ledger is a log, not a recording |
 | Preview URLs: WebSocket upgrades, large or streamed responses | the preview route is plain HTTP through the existing sandbox proxy; WebSocket and streaming bodies were not run through it (`/v1/sandboxes/{id}/ws/{port}/*` is separate and auth-gated) |
 | Browser / computer-use profile | vz display and input exist; no CDP/Playwright profile |
