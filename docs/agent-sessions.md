@@ -206,8 +206,9 @@ Run live (M4, `vz`, NAT session): a file with spaces in its name written into ne
 removed; 1 MiB written and read back byte-identical (about 0.12 s each way); a missing path 404, `..` and `/etc` 400.
 Writing under a directory that did not exist first created it with `sudo` and left it root-owned, which blocked later
 writes; the daemon now hands the directories it creates to the guest user (found by this run, fixed, re-run).
-**Limits:** a single write is capped by the daemon's request-body limit, about 1.5 MiB of file (a 4 MiB write was
-reset by the connection, not answered with a clean 413); there is no chunked upload yet. Reads are whole files. List
+**Limits:** a single write is capped by the daemon's request-body limit, 1,500,000 bytes of file. The daemon drops the
+connection on a larger body (a reset, not a clean 413), so `fluxctl agent put` and the MCP tool refuse first with a
+message; a raw REST client still sees the reset. There is no chunked upload yet. Reads are whole files. List
 entries come from GNU `find`, so a guest without it (busybox) is not supported.
 
 ### Background jobs

@@ -724,6 +724,7 @@ pub async fn run(r: &Remote, cmd: AgentCommand) -> Result<()> {
             use base64::Engine as _;
             let bytes =
                 std::fs::read(&local).with_context(|| format!("read {}", local.display()))?;
+            check_file_write_size(bytes.len(), &local.display().to_string())?;
             let mut body = json!({
                 "path": remote,
                 "content_base64": base64::engine::general_purpose::STANDARD.encode(&bytes),
@@ -984,6 +985,21 @@ pub(crate) fn web_terminal_url(base: &str, id: Uuid) -> String {
         "{}/console/terminal?session={id}",
         base.trim_end_matches('/')
     )
+}
+
+/// The most one file write may carry: the daemon's request body limit is 2 MiB and the file travels
+/// base64 inside JSON. Past it the server drops the connection (a reset, not a clean 413), so the
+/// client refuses first with a message that says what to do.
+pub(crate) const MAX_FILE_WRITE_BYTES: usize = 1_500_000;
+
+pub(crate) fn check_file_write_size(len: usize, what: &str) -> Result<()> {
+    if len > MAX_FILE_WRITE_BYTES {
+        anyhow::bail!(
+            "{what} is {len} bytes; one write is limited to {MAX_FILE_WRITE_BYTES} bytes. Split it \
+             (`split -b 1000000`) and write the pieces, or put it somewhere the guest can fetch it from"
+        );
+    }
+    Ok(())
 }
 
 /// The `&term=&colorterm=&plain=` part of the terminal URL for this client. Pure, so it is
@@ -1403,6 +1419,19 @@ mod tests {
         );
         assert!(ssh_config_block("bad name", &json!({})).is_err());
         assert!(ssh_config_block("ok", &json!({"user": "u", "identity_file": "k"})).is_err());
+    }
+
+    #[test]
+    fn an_oversize_write_is_refused_before_it_is_sent() {
+        assert!(check_file_write_size(MAX_FILE_WRITE_BYTES, "f").is_ok());
+        let e = check_file_write_size(MAX_FILE_WRITE_BYTES + 1, "big.bin").unwrap_err();
+        let m = e.to_string();
+        assert!(
+            m.contains("big.bin") && m.contains("limited to") && m.contains("split"),
+            "{m}"
+        );
+        // the limit leaves room for base64 (x4/3) and the JSON around it inside 2 MiB
+        assert!(MAX_FILE_WRITE_BYTES * 4 / 3 + 1024 < 2 * 1024 * 1024);
     }
 
     #[test]

@@ -1733,6 +1733,7 @@ pub fn tools(remote: Arc<Remote>) -> Vec<Tool> {
                         .ok_or_else(|| anyhow::anyhow!("path is required"))?;
                     let content = str_arg(&args, "content")
                         .ok_or_else(|| anyhow::anyhow!("content is required"))?;
+                    crate::agent_session::check_file_write_size(content.len(), "content")?;
                     let mut body = json!({
                         "path": path,
                         "content_base64": base64::engine::general_purpose::STANDARD.encode(content),
