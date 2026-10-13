@@ -181,6 +181,10 @@ pub enum AgentCommand {
     /// session with `--cmd-allow/--cmd-deny` rules. REST: `GET .../pty` (WebSocket).
     Shell {
         id: Uuid,
+        /// Open the browser terminal for this session (tabs, themes, images) instead of using
+        /// this terminal. Prints the URL and opens it on macOS; sign in with your token there.
+        #[arg(long)]
+        web: bool,
         /// Start the login shell as it is, without the colour aliases and coloured man pages.
         #[arg(long)]
         plain: bool,
@@ -519,7 +523,17 @@ pub async fn run(r: &Remote, cmd: AgentCommand) -> Result<()> {
             print!("{}", ssh_config_block(&alias, &v)?);
             Ok(())
         }
-        AgentCommand::Shell { id, plain, command } => shell(r, id, &command, plain).await,
+        AgentCommand::Shell { id, web: true, .. } => {
+            let url = web_terminal_url(r.base(), id);
+            println!("{url}");
+            if cfg!(target_os = "macos") {
+                let _ = std::process::Command::new("open").arg(&url).status();
+            }
+            Ok(())
+        }
+        AgentCommand::Shell {
+            id, plain, command, ..
+        } => shell(r, id, &command, plain).await,
         AgentCommand::Export {
             id,
             out,
@@ -964,6 +978,14 @@ pub(crate) fn ssh_config_block(alias: &str, v: &Value) -> Result<String> {
     Ok(out)
 }
 
+/// The browser terminal for a session. The token is never part of it: the page asks for one.
+pub(crate) fn web_terminal_url(base: &str, id: Uuid) -> String {
+    format!(
+        "{}/console/terminal?session={id}",
+        base.trim_end_matches('/')
+    )
+}
+
 /// The `&term=&colorterm=&plain=` part of the terminal URL for this client. Pure, so it is
 /// unit-tested; the daemon validates `term` again.
 pub(crate) fn pty_look_query(term: Option<&str>, colorterm: Option<&str>, plain: bool) -> String {
@@ -1332,6 +1354,15 @@ mod tests {
             "'sh' '-c' 'uname -a; exit 3'"
         );
         assert_eq!(guest_command(&v(&["echo", "it's"])), "'echo' 'it'\\''s'");
+    }
+
+    #[test]
+    fn the_web_terminal_url_has_no_token() {
+        let id = Uuid::nil();
+        assert_eq!(
+            web_terminal_url("http://127.0.0.1:7788/", id),
+            format!("http://127.0.0.1:7788/console/terminal?session={id}")
+        );
     }
 
     #[test]

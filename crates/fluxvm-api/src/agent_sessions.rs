@@ -16,6 +16,8 @@
 //! * `POST   /v1/agents/sessions/{id}/fork`          fork into child sessions (in-tree KVM only)
 //! * `GET    /v1/agents/sessions/{id}/events`        ledger plus the sandbox's VM events
 //! * `GET    /v1/agents/sessions/{id}/artifacts`     workspace changes since the baseline
+//! * `POST   /v1/agents/sessions/{id}/pty-ticket`    a 30 s single-use ticket for a browser terminal
+//! * `GET    /console/pty/{ticket}`                  the terminal WebSocket for that ticket (no bearer: the ticket is it)
 //! * `GET    /v1/agents/sessions/{id}/ssh`           how to reach the guest with plain ssh (same host as the daemon)
 //! * `GET    /v1/agents/sessions/{id}/pty`           WebSocket: an interactive shell on a pseudo-terminal
 //! * `GET    /v1/agents/sessions/{id}/trajectory`    ledger and VM events merged into one ordered list
@@ -75,6 +77,8 @@ pub(crate) fn routes() -> Router<Arc<VmManager>> {
         .route("/v1/agents/sessions/{id}/artifacts", get(artifacts))
         .route("/v1/agents/sessions/{id}/trajectory", get(trajectory))
         .route("/v1/agents/sessions/{id}/pty", get(pty))
+        .route("/v1/agents/sessions/{id}/pty-ticket", post(pty_ticket))
+        .route("/console/pty/{ticket}", get(pty_by_ticket))
         .route("/v1/agents/sessions/{id}/ssh", get(ssh_target))
         .route("/v1/agents/sessions/{id}/preview", post(create_preview))
         .route("/v1/agents/sessions/{id}/previews", get(list_previews))
@@ -1752,6 +1756,76 @@ fn parse_resize(text: &str) -> Option<(u16, u16)> {
     ((1..=500).contains(&cols) && (1..=300).contains(&rows)).then_some((cols, rows))
 }
 
+/// Single-use terminal tickets for browsers, which cannot put `Authorization` on a WebSocket. A
+/// ticket is 256 random bits, lives 30 seconds, is consumed by the first use, and exists only in
+/// memory: it is never written to disk or to the ledger.
+const PTY_TICKET_SECS: u64 = 30;
+const MAX_PTY_TICKETS: usize = 256;
+
+fn pty_tickets()
+-> &'static std::sync::Mutex<std::collections::HashMap<String, (Uuid, std::time::Instant)>> {
+    static T: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, (Uuid, std::time::Instant)>>,
+    > = std::sync::OnceLock::new();
+    T.get_or_init(Default::default)
+}
+
+/// Mints a ticket for `session`; `None` when too many are outstanding (a flood, not a person).
+fn mint_pty_ticket(session: Uuid) -> Option<String> {
+    let now = std::time::Instant::now();
+    let mut t = pty_tickets().lock().unwrap_or_else(|e| e.into_inner());
+    t.retain(|_, (_, exp)| *exp > now);
+    if t.len() >= MAX_PTY_TICKETS {
+        return None;
+    }
+    let ticket = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
+    t.insert(
+        ticket.clone(),
+        (
+            session,
+            now + std::time::Duration::from_secs(PTY_TICKET_SECS),
+        ),
+    );
+    Some(ticket)
+}
+
+/// Consumes a ticket: the session it was minted for, once, if it has not expired.
+fn take_pty_ticket(ticket: &str) -> Option<Uuid> {
+    let mut t = pty_tickets().lock().unwrap_or_else(|e| e.into_inner());
+    let (session, exp) = t.remove(ticket)?;
+    (exp > std::time::Instant::now()).then_some(session)
+}
+
+async fn pty_ticket(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    token_tenant: Option<Extension<TokenTenant>>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<Value>> {
+    require_admin(role)?;
+    let s = load(&m, id, &caller_tenant(&token_tenant)).await?;
+    running(&s)?;
+    check_pty_allowed(&s)?;
+    let ticket = mint_pty_ticket(id).ok_or(ApiError {
+        status: StatusCode::TOO_MANY_REQUESTS,
+        message: "too many terminal tickets outstanding".into(),
+    })?;
+    Ok(Json(
+        json!({"ticket": ticket, "expires_in": PTY_TICKET_SECS}),
+    ))
+}
+
+/// A terminal would walk around command rules, so a session that has them refuses one.
+fn check_pty_allowed(s: &Session) -> Result<(), ApiError> {
+    if s.policy.process.is_some() {
+        return Err(ApiError {
+            status: StatusCode::FORBIDDEN,
+            message: "this session has process rules, and a terminal would bypass them".into(),
+        });
+    }
+    Ok(())
+}
+
 async fn pty(
     State(m): State<Arc<VmManager>>,
     Extension(role): Extension<Role>,
@@ -1760,16 +1834,38 @@ async fn pty(
     Query(q): Query<PtyQuery>,
     ws: axum::extract::ws::WebSocketUpgrade,
 ) -> Result<axum::response::Response, ApiError> {
-    use axum::response::IntoResponse as _;
     require_admin(role)?;
     let s = load(&m, id, &caller_tenant(&token_tenant)).await?;
+    open_pty(m, s, q, ws).await
+}
+
+/// `GET /console/pty/{ticket}`: the browser's terminal. The ticket stands in for the bearer token
+/// and was minted by an authenticated, tenant-checked request; the session is loaded again here
+/// so a session deleted or changed since is refused.
+async fn pty_by_ticket(
+    State(m): State<Arc<VmManager>>,
+    Path(ticket): Path<String>,
+    Query(q): Query<PtyQuery>,
+    ws: axum::extract::ws::WebSocketUpgrade,
+) -> Result<axum::response::Response, ApiError> {
+    let id = take_pty_ticket(&ticket).ok_or(ApiError {
+        status: StatusCode::NOT_FOUND,
+        message: "terminal ticket not found".into(),
+    })?;
+    let s = load(&m, id, &None).await?;
+    open_pty(m, s, q, ws).await
+}
+
+async fn open_pty(
+    m: Arc<VmManager>,
+    s: Session,
+    q: PtyQuery,
+    ws: axum::extract::ws::WebSocketUpgrade,
+) -> Result<axum::response::Response, ApiError> {
+    use axum::response::IntoResponse as _;
+    let id = s.id;
     running(&s)?;
-    if s.policy.process.is_some() {
-        return Err(ApiError {
-            status: StatusCode::FORBIDDEN,
-            message: "this session has process rules, and a terminal would bypass them".into(),
-        });
-    }
+    check_pty_allowed(&s)?;
     let (cols, rows) = (q.cols.unwrap_or(80), q.rows.unwrap_or(24));
     if !(1..=500).contains(&cols) || !(1..=300).contains(&rows) {
         return Err(ApiError {
@@ -2902,6 +2998,25 @@ mod tests {
         assert!(c.contains("exec sh -c 'echo '\\''a b'\\''; ls'"), "{c}");
         assert!(!c.contains("cd "));
         assert!(s.contains("tty > '/tmp/.fluxvm-pty-x'"));
+    }
+
+    #[test]
+    fn terminal_tickets_are_single_use_and_only_for_their_session() {
+        let a = Uuid::new_v4();
+        let t = mint_pty_ticket(a).unwrap();
+        assert_eq!(t.len(), 64, "256 bits as hex");
+        assert_eq!(take_pty_ticket("not-a-ticket"), None);
+        assert_eq!(take_pty_ticket(&t), Some(a));
+        assert_eq!(take_pty_ticket(&t), None, "a ticket works once");
+        let u = mint_pty_ticket(a).unwrap();
+        assert_ne!(t, u);
+        // an expired ticket is gone: age it by editing its deadline
+        {
+            let mut m = pty_tickets().lock().unwrap();
+            m.get_mut(&u).unwrap().1 =
+                std::time::Instant::now() - std::time::Duration::from_secs(1);
+        }
+        assert_eq!(take_pty_ticket(&u), None);
     }
 
     #[test]
