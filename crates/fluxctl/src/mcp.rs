@@ -1476,6 +1476,43 @@ pub fn tools(remote: Arc<Remote>) -> Vec<Tool> {
             },
         ),
         tool(
+            "session_preview",
+            "Mint an expiring URL that reaches one TCP port of a session's guest (a dev server, a web app). The URL is the credential: share it only with who should see the app.",
+            object(
+                json!({
+                    "session": {"type": "string"},
+                    "port": {"type": "integer", "description": "guest TCP port, 1-65535"},
+                    "ttl_seconds": {"type": "integer", "description": "1-86400, default 3600"},
+                }),
+                &["session", "port"],
+            ),
+            true,
+            &remote,
+            |r, args| async move {
+                timed(CALL_TIMEOUT, async {
+                    let id = session_id(&args)?;
+                    let port = int_arg(&args, "port")?
+                        .ok_or_else(|| anyhow::anyhow!("port is required"))?;
+                    let mut body = json!({"port": port});
+                    if let Some(t) = int_arg(&args, "ttl_seconds")? {
+                        body["ttl_seconds"] = json!(t);
+                    }
+                    let mut v = r
+                        .call(
+                            Method::POST,
+                            &format!("/v1/agents/sessions/{id}/preview"),
+                            Some(body),
+                        )
+                        .await?;
+                    if let Some(path) = v["url"].as_str() {
+                        v["url"] = json!(format!("{}{}", r.base().trim_end_matches('/'), path));
+                    }
+                    pretty(&v)
+                })
+                .await
+            },
+        ),
+        tool(
             "session_delete",
             "End an agent session and delete its sandbox.",
             object(json!({"session": {"type": "string"}}), &["session"]),

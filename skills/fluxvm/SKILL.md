@@ -20,8 +20,10 @@ and stop; do not try to install anything yourself.
 2. `session_exec` to work. One shell string per call. Output and the exit code come back; a non-zero exit is data, not
    an error. Work under `/workspace` (created for you) so `session_artifacts` can report what changed.
 3. `session_checkpoint` before any step you might want to undo; `session_restore` to go back.
-4. `session_artifacts` to see added/modified/deleted files under `/workspace` before reporting the result.
-5. `session_delete` when done. Sessions also expire by TTL.
+4. `session_preview` (port) when you start a web server the user should see: it returns an expiring URL; share it
+   only with who should see the app. Offline sessions have no address to preview.
+5. `session_artifacts` to see added/modified/deleted files under `/workspace` before reporting the result.
+6. `session_delete` when done. Sessions also expire by TTL.
 
 ## Trying several approaches
 

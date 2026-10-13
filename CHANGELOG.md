@@ -3,10 +3,18 @@
 ## Unreleased
 
 ### Added
+- **Preview URLs for agent sessions.** `fluxctl agent expose|previews|unexpose`, MCP `session_preview`, and
+  `POST/GET/DELETE /v1/agents/sessions/{id}/preview[s]` plus a token-gated `/preview/{token}/...` route: an expiring,
+  revocable URL to one guest TCP port. Run on a `vz` NAT session on an M4; WebSocket, streaming and Linux not run.
 - **Per-disk I/O throttling (QEMU).** `io.throttle` on data disks and `root_disk_io` sets IOPS and bandwidth limits
   (total or read/write, with optional bursts), applied by `block_set_io_throttle` when QEMU starts, on a migration
   target and on hot-add. `PUT /v1/vms/{id}/disks/{name}/throttle` and `fluxctl disk throttle` change them live and
   keep them for later starts; `GET /v1/vms/{id}/disks` reports them. vhost-user-blk disks are refused.
+
+### Fixed
+- **The sandbox HTTP proxy now works on macOS.** It connected through the guest's Linux network namespace and failed
+  on `vz` with "network namespaces are only available on Linux"; on non-Linux hosts it now connects to the guest's NAT
+  address directly (`/v1/sandboxes/{id}/http/{port}/*`).
 
 ## 0.4.7 (2026-10-13)
 
