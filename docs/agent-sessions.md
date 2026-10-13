@@ -100,7 +100,7 @@ daemon runs `ssh -tt` to the guest (the vsock proxy for an offline session), so 
 job control and full-screen programs work. The size is set when it opens, and a resize is a text frame
 `{"resize":{"cols":N,"rows":N}}` (`fluxctl` sends one on SIGWINCH): the daemon sets the guest tty's window size from a
 second SSH exec, so the foreground program gets SIGWINCH after about a round trip. The close frame's reason is `exit=<code>` and the CLI exits with it. Opens and closes (duration, byte
-counts, exit code, never the content) are ledgered as `pty.open`/`pty.close`. At most 16 at once on a host, one hour
+counts, exit code, never the content) are ledgered as `pty.open`/`pty.close`. A session with `process` rules or a `filesystem` policy refuses the terminal and `ssh` (`403`): both are an SSH shell, which the guest confinement does not cover. At most 16 at once on a host, one hour
 each. A session with `policy.process` rules is **refused (403)**: a shell would bypass them.
 
 **Browser terminal.** `fluxctl agent shell <session> --web` (or `/console/terminal?session=<id>` on the daemon) opens a

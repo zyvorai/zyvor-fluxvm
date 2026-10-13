@@ -1800,6 +1800,7 @@ async fn ssh_target(
     }
     let s = load(&m, id, &None).await?;
     running(&s)?;
+    check_pty_allowed(&s)?;
     let vm = m.ensure_running_for_request(s.sandbox_id).await?;
     let g = m.ssh_target(&vm).map_err(|e| ApiError {
         status: StatusCode::CONFLICT,
@@ -1957,12 +1958,19 @@ async fn pty_ticket(
     ))
 }
 
-/// A terminal would walk around command rules, so a session that has them refuses one.
+/// A terminal would walk around command rules and the guest confinement (it is an SSH shell,
+/// not an exec), so a session that has either refuses one.
 fn check_pty_allowed(s: &Session) -> Result<(), ApiError> {
     if s.policy.process.is_some() {
         return Err(ApiError {
             status: StatusCode::FORBIDDEN,
             message: "this session has process rules, and a terminal would bypass them".into(),
+        });
+    }
+    if s.policy.exec.is_some() {
+        return Err(ApiError {
+            status: StatusCode::FORBIDDEN,
+            message: "this session has a filesystem policy, and a terminal would bypass it".into(),
         });
     }
     Ok(())
