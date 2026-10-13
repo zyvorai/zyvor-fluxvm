@@ -108,7 +108,7 @@ Two ways, depending on the backend:
   Apply refuses with a conflict if the files changed since.
 - **A forkable session** (offline or allow-listed on a Mac, or in-tree KVM on Linux): `fluxctl agent fork <id> --count 4`
   creates children that start from the parent's exact state and diverge; run a candidate in each, keep the winner,
-  delete the rest. [examples/agent-sandbox-demo](../../examples/agent-sandbox-demo/README.md) does this at the sandbox
+  delete the rest. [examples/agent-sandbox-demo](https://github.com/zyvorai/zyvor-fluxvm/blob/main/examples/agent-sandbox-demo/README.md) does this at the sandbox
   level (4 copies in about 4 s on an M4 mini). A session on the Mac's NAT answers `409` with the reason and creates
   nothing. Children are independent sessions: copying a winner's files back into the parent is not built yet.
 
@@ -133,7 +133,7 @@ recorded under `policy.unenforced`. See [agent-sessions.md](../agent-sessions.md
 | disk-only restore | **Run**: it cold-boots, and exec returned 255 until the guest had finished booting; do not rely on it for quick rollback |
 | workspace baseline and artifacts diff | **Run** live (an added file reported) |
 | git clone into the workspace | **Run**: failed as designed on the stock image (no `git`, reported in `workspace.note`); success path not run |
-| network allow-list | the compile step is tested; the proxy enforcement is documented in [macos-sandboxes.md](../macos-sandboxes.md), **Run** there |
+| network allow-list | **Run** live through a session (`--allow example.com`): that host answered 200 over the proxy, `example.org` was refused, a direct connection to an IP had no route |
 | tenant isolation (404 across tenants) | router tests, not a multi-tenant daemon |
 | fork | **Run** live on `vz`: an offline session into 2 children, which inherited the parent's state and diverged; `409` for a NAT session. The in-tree KVM fork is **Not run** on hardware |
 | MCP tools, Go and Python SDKs | mock-server tests; the CLI path is the one run live |

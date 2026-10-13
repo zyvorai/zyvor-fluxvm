@@ -162,6 +162,11 @@
   color: #ff9f0a;
 }
 
+.tagBehind {
+  border-color: #ff453a;
+  color: #ff453a;
+}
+
 .diagram {
   display: block;
   width: 100%;

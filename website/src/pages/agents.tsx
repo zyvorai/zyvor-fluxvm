@@ -18,7 +18,7 @@ const PROOF: Stat[] = [
   {value: '4.5 s', label: 'A fresh offline sandbox', note: 'cold boot, no network card; a default sandbox claiming a warm slot takes about 1 s'},
   {value: '~4 s', label: 'Fork into 4 running copies', note: 'they share the parent’s memory snapshot'},
   {value: '0.3 s', label: 'Four fixes tried and tested', note: 'in parallel, one in each copy'},
-  {value: '31', label: 'MCP tools', note: 'create, run, fork, snapshot, delete; read-only unless you allow writes'},
+  {value: '31', label: 'MCP tools in 0.4.7', note: 'create, run, fork, snapshot, delete; read-only unless you allow writes (session and changeset tools are newer)'},
 ];
 
 const LOOP = [
@@ -61,6 +61,79 @@ const MCP_STEPS = [
   '#   sandbox_exec {"vm": id, "command": "pytest -q"}',
   '#   vm_fork {"vm": id, "count": 4}   ...   vm_delete',
 ].join('\n');
+
+// Install variants. The script and the Homebrew line drive the same formula; the session API and `fluxctl agent` are
+// newer than the 0.4.7 package, so the third tab builds from source. See docs/agent-platform/README.md.
+const INSTALL_TABS = [
+  {
+    id: 'brew',
+    label: 'Homebrew',
+    body: [
+      'brew install zyvorai/tap/fluxvm',
+      'brew services start zyvorai/tap/fluxvm',
+      'curl -s http://127.0.0.1:7788/healthz     # {"ok":true}',
+      '',
+      '# let an agent drive it',
+      'fluxctl mcp install claude-code --allow-write',
+    ].join('\n'),
+  },
+  {
+    id: 'script',
+    label: 'One line',
+    body: [
+      'curl -fsSL https://zyvorai.github.io/zyvor-fluxvm/install.sh | bash',
+      '# or, wiring an MCP client in the same step:',
+      'curl -fsSL https://zyvorai.github.io/zyvor-fluxvm/install.sh | bash -s -- --client claude-code',
+      '',
+      '# it only runs brew install, brew services start and fluxctl mcp install;',
+      '# --dry-run prints those and stops; --uninstall reverses them.',
+    ].join('\n'),
+  },
+  {
+    id: 'source',
+    label: 'From source (sessions)',
+    body: [
+      'git clone https://github.com/zyvorai/zyvor-fluxvm && cd zyvor-fluxvm',
+      'xcode-select --install && brew install hivex',
+      'cargo build -p fluxctl',
+      'FLUXVM_VZ_RUNNER=/opt/homebrew/opt/fluxvm/bin/fluxvm-vz-runner \\',
+      '  target/debug/fluxctl serve',
+    ].join('\n'),
+  },
+];
+
+// Abridged from a live run on the M4 mini (offline session, `vz`); timings are from scripts/bench-agent-session.sh.
+const SESSION_LOOP = [
+  '$ fluxctl agent run codex --policy offline --ttl-seconds 900',
+  '  session 14bd10ba  backend vz  capabilities {snapshot: true, fork: true, pty: false}',
+  "$ fluxctl agent exec 14bd10ba -- 'echo parent > /tmp/p'",
+  '$ fluxctl agent checkpoint 14bd10ba --tag before',
+  '$ fluxctl agent fork 14bd10ba --count 2',
+  '  2 children running in 2.5 s (identity: best-effort)',
+  "$ fluxctl agent exec <child-1> -- 'cat /tmp/p; echo child1 > /tmp/who'",
+  '  parent',
+  "$ fluxctl agent exec 14bd10ba -- 'cat /tmp/who'",
+  '  cat: /tmp/who: No such file or directory      # the parent never saw it',
+  '$ fluxctl agent timeline 14bd10ba',
+  '  session.create · exec · checkpoint · fork',
+].join('\n');
+
+type Cmp = {cap: string; them: string; us: string; status: 'ok' | 'warn' | 'behind'; label: string};
+// microsandbox cells are what its README and v0.7.x release notes say; FluxVM cells link to docs/vs-microsandbox.md.
+// Nothing here was measured against microsandbox.
+const COMPARE: Cmp[] = [
+  {cap: 'Isolation', them: 'microVMs (libkrun)', us: 'vz on a Mac; KVM, Firecracker, Cloud Hypervisor, QEMU on Linux', status: 'ok', label: 'Run on vz'},
+  {cap: 'Startup', them: 'under 100 ms guest boot (their M1 figure)', us: '4.6 s offline, 6.8 s on the NAT (M4, debug build)', status: 'behind', label: 'Behind'},
+  {cap: 'Fork a running sandbox', them: 'yes', us: 'offline vz sessions and in-tree KVM; not a NAT sandbox', status: 'ok', label: 'Run on vz'},
+  {cap: 'Checkpoint / restore', them: 'full snapshots, branches, --cow-mem', us: 'memory+disk or disk-only per session', status: 'ok', label: 'Run on vz'},
+  {cap: 'Review before apply', them: 'not documented', us: 'speculate, changeset, approve, apply', status: 'warn', label: 'Tests'},
+  {cap: 'Network policy', them: 'host allow-list, CONNECT proxy', us: 'host allow-list; eBPF CIDR/DNS/rate rules on Linux', status: 'ok', label: 'Run on vz; eBPF not run'},
+  {cap: 'Secrets kept out of the VM', them: 'yes (TLS interception)', us: 'credential broker with per-sandbox grants', status: 'warn', label: 'Tests'},
+  {cap: 'Embeddable, no daemon', them: 'yes', us: 'no: needs fluxctl serve', status: 'behind', label: 'Behind'},
+  {cap: 'SDKs', them: 'TS, Rust, Python, Go, Ruby', us: 'Go, Python, TypeScript (sessions: Go, Python)', status: 'behind', label: 'Behind'},
+  {cap: 'Windows host', them: 'yes (WHP)', us: 'no', status: 'behind', label: 'Behind'},
+  {cap: 'Fleet of Macs, tenants', them: 'not documented', us: 'central, leases, FluxMesh', status: 'warn', label: 'Simulator only'},
+];
 
 function Hero() {
   const [copied, setCopied] = useState(false);
@@ -236,9 +309,10 @@ function Offline() {
               <Heading as="h3">Allow-listed</Heading>
               <p>
                 <code>allow_hosts</code> opens ports 80 and 443 to the names you list, through a proxy on the host
-                that refuses everything else.
+                that refuses everything else. Run through a session: the listed host answered 200, another host was
+                refused, and a direct connection had no route.
               </p>
-              <span className={clsx(styles.tag, styles.tagWarn)}>Implemented, not yet hardware-verified</span>
+              <span className={clsx(styles.tag, styles.tagOk)}>Verified on M4</span>
             </div>
             <div className={styles.card}>
               <Heading as="h3">A local model, one port</Heading>
@@ -348,6 +422,168 @@ function PlugIn() {
   );
 }
 
+function Install() {
+  const [tab, setTab] = useState(INSTALL_TABS[0].id);
+  const cur = INSTALL_TABS.find((t) => t.id === tab) ?? INSTALL_TABS[0];
+  return (
+    <section className={clsx(styles.section, styles.alt)}>
+      <div className="container">
+        <Reveal>
+          <div className="text--center">
+            <p className={styles.kicker}>Install</p>
+            <Heading as="h2" className={styles.h2}>
+              Apple silicon, macOS 14 or newer
+            </Heading>
+            <p className={styles.lead}>
+              Homebrew installs the five signed binaries and runs the daemon as a background service. The session
+              commands on this page are newer than the 0.4.7 package, so they are the third tab until the next release.
+            </p>
+          </div>
+          <div className={styles.terminal} style={{maxWidth: 760, margin: '0 auto'}}>
+            <div className={styles.windowBar}>
+              <span className={styles.dotRed} />
+              <span className={styles.dotYellow} />
+              <span className={styles.dotGreen} />
+              <div className={styles.tabs} role="tablist">
+                {INSTALL_TABS.map((t) => (
+                  <button
+                    key={t.id}
+                    type="button"
+                    role="tab"
+                    aria-selected={t.id === tab}
+                    className={clsx(styles.tabBtn, t.id === tab && styles.tabActive)}
+                    onClick={() => setTab(t.id)}>
+                    {t.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <pre className={styles.terminalBody}>{cur.body}</pre>
+          </div>
+          <p className={clsx(styles.footnote, 'text--center')}>
+            Linux hosts are built from source; no Linux package is published.{' '}
+            <Link to="/docs/install-macos">Full macOS install notes</Link>
+          </p>
+        </Reveal>
+      </div>
+    </section>
+  );
+}
+
+function Sessions() {
+  return (
+    <section className={styles.section}>
+      <div className="container">
+        <Reveal>
+          <div className="text--center">
+            <p className={styles.kicker}>Agent sessions</p>
+            <Heading as="h2" className={styles.h2}>
+              One handle, not five primitives
+            </Heading>
+            <p className={styles.lead}>
+              A session wraps a sandbox with a workspace, a network policy, checkpoints and a ledger of what was done.
+              It adds no new isolation: it composes the sandbox, snapshot, fork and changeset calls that already exist.
+            </p>
+          </div>
+          <div className={styles.terminal} style={{maxWidth: 860, margin: '0 auto'}}>
+            <div className={styles.windowBar}>
+              <span className={styles.dotRed} />
+              <span className={styles.dotYellow} />
+              <span className={styles.dotGreen} />
+              <span className={styles.windowTitle}>fluxctl agent &mdash; M4 mini, abridged</span>
+            </div>
+            <pre className={styles.terminalBody}>{SESSION_LOOP}</pre>
+          </div>
+          <div className={styles.grid3} style={{marginTop: '2rem'}}>
+            <div className={styles.card}>
+              <Heading as="h3">Policy, compiled</Heading>
+              <p>
+                <code>offline</code>, <code>developer-safe</code> or your own host list, turned into the allow-list the
+                host already enforces. Method and path rules are refused, not ignored.
+              </p>
+              <span className={clsx(styles.tag, styles.tagOk)}>Verified on M4</span>
+            </div>
+            <div className={styles.card}>
+              <Heading as="h3">Checkpoint and roll back</Heading>
+              <p>
+                A memory checkpoint reverted a file change on restore. Restore takes seconds, not milliseconds; a
+                disk-only checkpoint is smaller but cold-boots.
+              </p>
+              <span className={clsx(styles.tag, styles.tagOk)}>Verified on M4</span>
+            </div>
+            <div className={styles.card}>
+              <Heading as="h3">A ledger, not a recording</Heading>
+              <p>
+                Every exec, checkpoint, restore and fork made through the session is logged with its exit code and
+                duration. Replay, streaming terminals and preview URLs are not built.
+              </p>
+              <span className={clsx(styles.tag, styles.tagWarn)}>MVP</span>
+            </div>
+          </div>
+          <p className={clsx(styles.footnote, 'text--center')}>
+            Create 4.6 s, first exec 0.4 s, checkpoint 0.7 s, restore 3.9 s, fork into 2 running children 2.5 s: median
+            of 5 runs on one M4 mini, debug build, offline session.{' '}
+            <Link to="/docs/benchmarks/agent-session">The tables</Link> ·{' '}
+            <Link to="/docs/agent-platform/">Agent README</Link> · <Link to="/docs/agent-sessions">API</Link>
+          </p>
+        </Reveal>
+      </div>
+    </section>
+  );
+}
+
+function Compare() {
+  const tag = (s: Cmp['status']) =>
+    s === 'ok' ? styles.tagOk : s === 'warn' ? styles.tagWarn : styles.tagBehind;
+  return (
+    <section className={clsx(styles.section, styles.alt)}>
+      <div className="container">
+        <Reveal>
+          <div className="text--center">
+            <p className={styles.kicker}>Versus microsandbox</p>
+            <Heading as="h2" className={styles.h2}>
+              Where we are ahead, and where we are not
+            </Heading>
+            <p className={styles.lead}>
+              microsandbox is a good, fast, embeddable runtime. The left column is what its README and releases say;
+              the right is what we ran. We have not benchmarked them against each other.
+            </p>
+          </div>
+          <div className={styles.tableWrap}>
+            <table className={styles.macTable}>
+              <thead>
+                <tr>
+                  <th>Capability</th>
+                  <th>microsandbox (documented)</th>
+                  <th>FluxVM</th>
+                  <th>Status</th>
+                </tr>
+              </thead>
+              <tbody>
+                {COMPARE.map((r) => (
+                  <tr key={r.cap}>
+                    <td>{r.cap}</td>
+                    <td>{r.them}</td>
+                    <td>{r.us}</td>
+                    <td>
+                      <span className={clsx(styles.tag, tag(r.status))}>{r.label}</span>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <p className={clsx(styles.footnote, 'text--center')}>
+            We are behind on startup time, embeddability, SDK languages and Windows. We are different in running one
+            control plane over several VMMs with a fleet layer, and in ending a speculative run as a changeset you can
+            review. <Link to="/docs/vs-microsandbox">The full comparison, with sources</Link>
+          </p>
+        </Reveal>
+      </div>
+    </section>
+  );
+}
+
 function Honest(): ReactNode {
   return (
     <section className={clsx(styles.section, styles.alt)}>
@@ -421,8 +657,11 @@ export default function AgentsPage(): ReactNode {
       <Hero />
       <main>
         <Proof />
+        <Install />
         <Loop />
+        <Sessions />
         <Offline />
+        <Compare />
         <Cost />
         <PlugIn />
         <Honest />
