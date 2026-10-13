@@ -48,6 +48,15 @@ fork, then exec in every child in parallel, then delete the children (`--keep` k
   `workspace.note` (for example *git is not installed in the guest image*; the stock `debian-13` has none).
 - A baseline of the workspace is recorded at the end of create, which is what `artifacts` diffs against.
 - `runtime.image` follows the sandbox rules (`agent-micro` gives the vsock agent; another image cold-boots).
+- `runtime.volumes: [{"name", "path"}]` (`fluxctl agent run --volume NAME:/mnt/data`) attaches a named host volume
+  (`POST /v1/volumes`) as a virtio disk, formats it ext4 **only when `blkid` reports no file system**, mounts it at
+  `path` (under `/mnt`, `/data`, `/srv`, `/opt`, `/workspace`, `/home` or `/root`), makes the mount point the guest
+  user's and adds a `nofail` fstab line. vz only, at most 2. A volume is one disk: a second session naming an attached
+  volume gets `409`, and **a session with a volume cannot fork**. Volumes are host-wide, so a tenant token is refused
+  (`403`). Data survives deleting the session. Run live on vz: written in one session, read in the next; second attach
+  `409`; fork `409`. A memory restore on a session with a volume brought the volume back to the checkpoint's content
+  in that run, so treat a restore as rolling the volume back too. Not run: Linux (QEMU volumes are separate virtiofs
+  directories), concurrent readers, volume resize while attached.
 
 ### Policy
 

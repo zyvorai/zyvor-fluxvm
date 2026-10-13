@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- **Volumes for vz agent sessions.** `runtime.volumes` / `fluxctl agent run --volume NAME:/path` attaches a named
+  host volume as a virtio disk, formats it ext4 only when `blkid` says it is empty, mounts it and persists an fstab
+  line. One VM at a time (`409` otherwise), no fork for such a session, tenant tokens refused. New sandbox create
+  field `extra_disks` (vz). Run live on vz: data written in one session was read in the next.
+
 - **Rollouts.** `fluxctl agent rollout <session> --count N -- <cmd>` (MCP `session_rollout`) forks N children, runs
   the command in each in parallel, returns every exit code and output, then deletes the children (`--keep` to keep
   them). It is composed client-side from fork, exec and delete, so it follows fork's rules (in-tree KVM, or a vz

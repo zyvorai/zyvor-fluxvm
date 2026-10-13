@@ -38,6 +38,10 @@ pub enum AgentCommand {
         /// Host the session may reach (repeatable); everything else is refused.
         #[arg(long = "allow")]
         allow: Vec<String>,
+        /// Attach a named volume (`fluxctl`/REST `POST /v1/volumes`) as `NAME:/guest/path`
+        /// (repeatable, vz only). Formatted ext4 on first use. Such a session cannot fork.
+        #[arg(long = "volume")]
+        volume: Vec<String>,
         /// Command pattern the session may run (repeatable, `*` wildcard); with any given, other
         /// commands are refused. A guardrail on the command string, not a security boundary.
         #[arg(long = "cmd-allow")]
@@ -337,6 +341,7 @@ pub async fn run(r: &Remote, cmd: AgentCommand) -> Result<()> {
             memory_mb,
             policy,
             allow,
+            volume,
             cmd_allow,
             cmd_deny,
             ttl_seconds,
@@ -353,6 +358,7 @@ pub async fn run(r: &Remote, cmd: AgentCommand) -> Result<()> {
                 ttl_seconds,
             );
             add_process_rules(&mut body, &cmd_allow, &cmd_deny);
+            add_volumes(&mut body, &volume)?;
             show(
                 &r.call(Method::POST, "/v1/agents/sessions", Some(body))
                     .await?,
@@ -805,6 +811,23 @@ fn guest_command(args: &[String]) -> String {
 }
 
 /// The `POST /v1/agents/sessions` body for `agent run` flags.
+/// Add `runtime.volumes` from `NAME:/guest/path` specs.
+pub(crate) fn add_volumes(body: &mut Value, specs: &[String]) -> Result<()> {
+    if specs.is_empty() {
+        return Ok(());
+    }
+    let mut vols = Vec::new();
+    for spec in specs {
+        let (name, path) = spec
+            .split_once(':')
+            .filter(|(n, p)| !n.is_empty() && p.starts_with('/'))
+            .with_context(|| format!("volume {spec:?} must be NAME:/absolute/guest/path"))?;
+        vols.push(json!({"name": name, "path": path}));
+    }
+    body["runtime"]["volumes"] = json!(vols);
+    Ok(())
+}
+
 /// Attach `policy.process` command rules to a create body when any were given.
 pub(crate) fn add_process_rules(body: &mut Value, allow: &[String], deny: &[String]) {
     if allow.is_empty() && deny.is_empty() {
@@ -885,6 +908,22 @@ mod tests {
             "'sh' '-c' 'uname -a; exit 3'"
         );
         assert_eq!(guest_command(&v(&["echo", "it's"])), "'echo' 'it'\\''s'");
+    }
+
+    #[test]
+    fn volume_specs_become_runtime_volumes() {
+        let mut b = json!({"agent": "custom", "runtime": {"image": "x"}});
+        add_volumes(&mut b, &[]).unwrap();
+        assert!(b["runtime"].get("volumes").is_none());
+        add_volumes(&mut b, &["data:/mnt/data".into()]).unwrap();
+        assert_eq!(b["runtime"]["volumes"][0]["name"], "data");
+        assert_eq!(b["runtime"]["volumes"][0]["path"], "/mnt/data");
+        assert_eq!(b["runtime"]["image"], "x");
+        assert!(add_volumes(&mut b, &["nopath".into()]).is_err());
+        assert!(add_volumes(&mut b, &["a:relative".into()]).is_err());
+        let mut c = json!({"agent": "custom"});
+        add_volumes(&mut c, &["v:/data".into()]).unwrap();
+        assert_eq!(c["runtime"]["volumes"][0]["path"], "/data");
     }
 
     #[test]

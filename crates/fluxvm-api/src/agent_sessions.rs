@@ -233,6 +233,8 @@ struct Session {
     policy: PolicyReport,
     workspace: Option<WorkspaceState>,
     checkpoints: Vec<Checkpoint>,
+    #[serde(default)]
+    volumes: Vec<VolumeMount>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -504,12 +506,58 @@ struct WorkspaceBody {
 
 #[derive(Debug, Deserialize)]
 struct RuntimeBody {
+    /// Named host volumes (`POST /v1/volumes`) attached as disks. vz only; see `docs/agent-sessions.md`.
+    #[serde(default)]
+    volumes: Vec<VolumeBody>,
     #[serde(default)]
     image: Option<String>,
     #[serde(default)]
     cpus: Option<u8>,
     #[serde(default)]
     memory_mb: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct VolumeBody {
+    name: String,
+    /// Absolute guest mount point under /mnt, /data, /srv, /opt, /workspace, /home or /root.
+    path: String,
+}
+
+/// A volume mounted into the session; recorded so fork is refused and the docs/ledger are honest.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct VolumeMount {
+    name: String,
+    path: String,
+}
+
+const MOUNT_ROOTS: &[&str] = &["mnt", "data", "srv", "opt", "workspace", "home", "root"];
+const MAX_SESSION_VOLUMES: usize = 2;
+
+fn valid_mount_path(p: &str) -> bool {
+    valid_guest_path(p)
+        && !p.contains(|c: char| c.is_whitespace() || "'\"$`\\;&|<>*?".contains(c))
+        && p.trim_start_matches('/')
+            .split('/')
+            .next()
+            .is_some_and(|top| MOUNT_ROOTS.contains(&top))
+        && p.trim_end_matches('/').len() > 1
+}
+
+/// Make the volume's disk usable: wait for the device, format it only when blkid says it has no
+/// file system (exit 2; any other failure aborts rather than risk wiping data),
+/// mount it, make the mount point the guest user's, and persist it in fstab (`nofail`).
+fn mount_script(serial: &str, path: &str) -> String {
+    let dev = format!("/dev/disk/by-id/virtio-{serial}");
+    let (d, p) = (shell_quote(&dev), shell_quote(path));
+    format!(
+        "set -e; for i in $(seq 1 40); do [ -e {d} ] && break; sleep 0.25; done; [ -e {d} ] || {{ echo device missing >&2; exit 3; }}; \
+         rc=0; sudo -n blkid {d} >/dev/null 2>&1 || rc=$?; \
+         if [ $rc -eq 2 ]; then sudo -n mkfs.ext4 -q -F -L fluxvol {d}; elif [ $rc -ne 0 ]; then echo blkid failed >&2; exit 4; fi; \
+         sudo -n mkdir -p {p}; mountpoint -q {p} || sudo -n mount {d} {p}; \
+         sudo -n chown \"$(id -u):$(id -g)\" {p}; \
+         grep -qF {d} /etc/fstab || printf '%s %s ext4 defaults,nofail 0 2\\n' {d} {p} | sudo -n tee -a /etc/fstab >/dev/null"
+    )
 }
 
 fn shell_quote(s: &str) -> String {
@@ -551,6 +599,12 @@ fn capabilities_for(backend: &str, offline: bool) -> Capabilities {
 
 /// Why a session cannot fork, for the 409 body. `None` when it can.
 fn fork_refusal(s: &Session) -> Option<String> {
+    if !s.volumes.is_empty() {
+        return Some(
+            "a session with a volume cannot fork: the children would share one disk and corrupt it"
+                .to_string(),
+        );
+    }
     if s.capabilities.fork {
         return None;
     }
@@ -611,6 +665,70 @@ async fn create_session(
     let policy = compile_policy(body.policy)?;
 
     let tenant = caller_tenant(&token_tenant);
+    let want_volumes = body
+        .runtime
+        .as_ref()
+        .map(|r| r.volumes.as_slice())
+        .unwrap_or_default();
+    let mut extra_disks = Vec::new();
+    let mut mounts: Vec<(String, VolumeMount)> = Vec::new();
+    if !want_volumes.is_empty() {
+        if !cfg!(target_os = "macos") {
+            return Err(bad(
+                "runtime.volumes are only supported on vz (macOS) sessions",
+            ));
+        }
+        if tenant.is_some() {
+            return Err(ApiError {
+                status: StatusCode::FORBIDDEN,
+                message: "volumes are host-wide and not tenant-scoped yet; a tenant token cannot attach one"
+                    .into(),
+            });
+        }
+        if want_volumes.len() > MAX_SESSION_VOLUMES {
+            return Err(bad("at most 2 volumes per session"));
+        }
+        let refs = super::volumes_api::refs_of(&m).await;
+        let vdir = super::volumes_api::volume_dir(&m);
+        for (i, v) in want_volumes.iter().enumerate() {
+            if !valid_mount_path(&v.path) {
+                return Err(bad(
+                    "volume path must be an absolute guest path under /mnt, /data, /srv, /opt, /workspace, /home or /root",
+                ));
+            }
+            if want_volumes.iter().filter(|o| o.path == v.path).count() > 1
+                || want_volumes.iter().filter(|o| o.name == v.name).count() > 1
+            {
+                return Err(bad("each volume name and path may be used once"));
+            }
+            let info = super::volumes_api::info(&vdir, &v.name, &refs)
+                .map_err(super::volumes_api::api_err)?;
+            if !info.attached_to.is_empty() {
+                return Err(ApiError {
+                    status: StatusCode::CONFLICT,
+                    message: format!(
+                        "volume {:?} is attached to VM {}; a volume is one disk and attaches to one VM at a time",
+                        v.name,
+                        info.attached_to.join(", ")
+                    ),
+                });
+            }
+            let serial = format!("fluxvol{i}");
+            extra_disks.push(fluxvm_core::model::AppleDisk {
+                name: Some(format!("vol-{}", v.name)),
+                path: info.path,
+                block_device_id: Some(serial.clone()),
+                ..Default::default()
+            });
+            mounts.push((
+                serial,
+                VolumeMount {
+                    name: v.name.clone(),
+                    path: v.path.clone(),
+                },
+            ));
+        }
+    }
     let actor_name = actor.as_ref().map(|a| a.0.0.as_str());
     let id = Uuid::new_v4();
     let req = fluxvm_scheduler::SandboxCreateRequest {
@@ -621,6 +739,7 @@ async fn create_session(
         memory_mib: body.runtime.as_ref().and_then(|r| r.memory_mb),
         offline: policy.offline,
         allow_hosts: policy.allow_hosts.clone(),
+        extra_disks,
         ..serde_json::from_value(json!({})).map_err(anyhow::Error::from)?
     };
     let rec = m.create_sandbox(req, tenant.as_deref(), actor_name).await?;
@@ -644,6 +763,7 @@ async fn create_session(
         policy,
         workspace: None,
         checkpoints: Vec::new(),
+        volumes: Vec::new(),
     };
     record(
         &m,
@@ -651,6 +771,48 @@ async fn create_session(
         "session.create",
         json!({"agent": session.agent, "sandbox": rec.id, "backend": session.backend, "policy": session.policy}),
     );
+
+    // Volumes first, so a workspace under a volume path lands on the volume.
+    for (serial, mnt) in &mounts {
+        let res = match m.ensure_running_for_request(rec.id).await {
+            Ok(_) => m
+                .exec_with_policy(rec.id, mount_script(serial, &mnt.path), Some(120), None)
+                .await
+                .map_err(|e| format!("{e:#}")),
+            Err(e) => Err(format!("{e:#}")),
+        };
+        let code = res
+            .as_ref()
+            .ok()
+            .and_then(|r| serde_json::to_value(r).ok())
+            .and_then(|v| v["exit_code"].as_i64());
+        if code != Some(0) {
+            let why = match &res {
+                Err(e) => e.clone(),
+                Ok(r) => serde_json::to_value(r)
+                    .ok()
+                    .and_then(|v| v["stderr"].as_str().map(|s| s.trim().to_string()))
+                    .unwrap_or_default(),
+            };
+            // Nothing was promised yet: remove the sandbox so the volume is free again.
+            let _ = m.delete(rec.id).await;
+            let _ = std::fs::remove_file(session_path(&m, id));
+            return Err(ApiError {
+                status: StatusCode::BAD_GATEWAY,
+                message: format!(
+                    "could not mount volume {:?} at {} (exit {code:?}): {why}",
+                    mnt.name, mnt.path
+                ),
+            });
+        }
+        record(
+            &m,
+            id,
+            "volume.mount",
+            json!({"volume": mnt.name, "path": mnt.path}),
+        );
+        session.volumes.push(mnt.clone());
+    }
 
     if let Some(w) = ws {
         let mut state = WorkspaceState {
@@ -996,6 +1158,7 @@ async fn fork(
             capabilities: s.capabilities.clone(),
             policy: s.policy.clone(),
             workspace: s.workspace.clone(),
+            volumes: Vec::new(),
             checkpoints: Vec::new(),
         };
         save(&m, &cs).await?;
@@ -2208,6 +2371,36 @@ mod tests {
         assert!(compile_policy(Some(pol(json!({"process": {"ask": ["x"]}})))).is_err());
         assert!(compile_policy(Some(pol(json!({"process": {"nope": []}})))).is_err());
         assert!(compile_policy(Some(pol(json!({"process": {"deny": "rm"}})))).is_err());
+    }
+
+    #[test]
+    fn mount_paths_stay_under_data_roots() {
+        assert!(valid_mount_path("/mnt/data"));
+        assert!(valid_mount_path("/data"));
+        assert!(valid_mount_path("/workspace/cache"));
+        for bad in [
+            "/",
+            "/etc",
+            "/etc/x",
+            "/mnt/../etc",
+            "mnt/x",
+            "/mnt/a b",
+            "/mnt/$x",
+            "/mnt/a;b",
+            "/mnt/'x",
+            "/usr/lib",
+        ] {
+            assert!(!valid_mount_path(bad), "{bad}");
+        }
+    }
+
+    #[test]
+    fn mount_script_formats_only_when_blkid_says_empty() {
+        let s = mount_script("fluxvol0", "/mnt/data");
+        assert!(s.contains("virtio-fluxvol0"));
+        assert!(s.contains("[ $rc -eq 2 ]"), "{s}");
+        assert!(s.contains("exit 4"));
+        assert!(s.contains("nofail"));
     }
 
     #[test]
