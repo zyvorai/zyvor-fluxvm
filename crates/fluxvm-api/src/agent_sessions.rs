@@ -126,8 +126,95 @@ struct PolicyReport {
     preset: Option<String>,
     offline: bool,
     allow_hosts: Vec<String>,
-    /// `filesystem` and `process` rules are stored but nothing enforces them in this MVP.
+    /// Command rules enforced on exec and job start; `None` when the session has none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    process: Option<CommandRules>,
+    /// `filesystem` rules are stored but nothing enforces them yet.
     unenforced: Vec<String>,
+}
+
+/// Glob rules over the command strings an agent submits (`*` matches any run of characters).
+/// A command is split on `;`, `&&`, `||`, `|`, `&` and newlines and every piece is checked: any
+/// piece matching `deny` refuses the whole command; with a non-empty `allow` every piece must
+/// match one of its patterns. This stops an agent running what you listed by accident; it is not
+/// a security boundary, because a shell can build a command in ways the string never shows
+/// (`sh -c`, `$(...)`, variables, scripts it wrote itself). Quote and backslash characters are
+/// dropped before matching, so the CLI's quoted argv (`'touch' '/x'`) matches `touch *`.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+struct CommandRules {
+    #[serde(default)]
+    allow: Vec<String>,
+    #[serde(default)]
+    deny: Vec<String>,
+}
+
+fn glob_match(pat: &str, text: &str) -> bool {
+    let p: Vec<char> = pat.chars().collect();
+    let t: Vec<char> = text.chars().collect();
+    let (mut pi, mut ti, mut star, mut mark) = (0, 0, None, 0);
+    while ti < t.len() {
+        if pi < p.len() && p[pi] == '*' {
+            star = Some(pi);
+            mark = ti;
+            pi += 1;
+        } else if pi < p.len() && p[pi] == t[ti] {
+            pi += 1;
+            ti += 1;
+        } else if let Some(sp) = star {
+            pi = sp + 1;
+            mark += 1;
+            ti = mark;
+        } else {
+            return false;
+        }
+    }
+    while pi < p.len() && p[pi] == '*' {
+        pi += 1;
+    }
+    pi == p.len()
+}
+
+fn command_pieces(cmd: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    for c in cmd.chars() {
+        if matches!(c, ';' | '&' | '|' | '\n') {
+            out.push(std::mem::take(&mut cur));
+        } else if !matches!(c, '\'' | '"' | '\\') {
+            // Quotes and backslashes are dropped so `'touch' '/x'` and `t"o"uch /x` match `touch *`.
+            cur.push(c);
+        }
+    }
+    out.push(cur);
+    out.into_iter()
+        .map(|p| p.trim().to_string())
+        .filter(|p| !p.is_empty())
+        .collect()
+}
+
+impl CommandRules {
+    /// `Err(reason)` when the command is refused.
+    fn check(&self, cmd: &str) -> Result<(), String> {
+        for piece in command_pieces(cmd) {
+            if let Some(d) = self.deny.iter().find(|d| glob_match(d, &piece)) {
+                return Err(format!("`{piece}` matches the deny rule `{d}`"));
+            }
+            if !self.allow.is_empty() && !self.allow.iter().any(|a| glob_match(a, &piece)) {
+                return Err(format!("`{piece}` matches no allow rule"));
+            }
+        }
+        Ok(())
+    }
+}
+
+fn enforce_rules(s: &Session, cmd: &str) -> Result<(), ApiError> {
+    match s.policy.process.as_ref().map(|r| r.check(cmd)) {
+        Some(Err(why)) => Err(ApiError {
+            status: StatusCode::FORBIDDEN,
+            message: format!("refused by the session's process policy: {why}"),
+        }),
+        _ => Ok(()),
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -345,8 +432,36 @@ fn compile_policy(p: Option<PolicyBody>) -> Result<PolicyReport, ApiError> {
     if p.filesystem.is_some() {
         r.unenforced.push("filesystem".into());
     }
-    if p.process.is_some() {
-        r.unenforced.push("process".into());
+    if let Some(v) = p.process {
+        let obj = v
+            .as_object()
+            .ok_or_else(|| bad("process must be an object with allow and/or deny".into()))?;
+        let mut rules = CommandRules::default();
+        for (k, val) in obj {
+            let list = match k.as_str() {
+                "allow" => &mut rules.allow,
+                "deny" => &mut rules.deny,
+                "ask" => {
+                    return Err(bad(
+                        "process.ask is not supported yet: there is no per-command approval flow"
+                            .into(),
+                    ));
+                }
+                other => return Err(bad(format!("unknown process rule `{other}`"))),
+            };
+            for e in val
+                .as_array()
+                .ok_or_else(|| bad(format!("process.{k} must be a list of patterns")))?
+            {
+                let pat = e
+                    .as_str()
+                    .map(str::trim)
+                    .filter(|x| !x.is_empty() && x.len() <= 256)
+                    .ok_or_else(|| bad(format!("process.{k} entries are non-empty strings")))?;
+                list.push(pat.to_string());
+            }
+        }
+        r.process = Some(rules);
     }
     r.allow_hosts.sort();
     r.allow_hosts.dedup();
@@ -699,6 +814,15 @@ async fn exec_session(
             status: StatusCode::BAD_REQUEST,
             message: "command is required".into(),
         });
+    }
+    if let Err(e) = enforce_rules(&s, &body.command) {
+        record(
+            &m,
+            id,
+            "exec.refused",
+            json!({"command": body.command, "reason": e.message}),
+        );
+        return Err(e);
     }
     m.ensure_running_for_request(s.sandbox_id).await?;
     let started = std::time::Instant::now();
@@ -1322,6 +1446,15 @@ async fn job_start(
             status: StatusCode::BAD_REQUEST,
             message: "command is required".into(),
         });
+    }
+    if let Err(e) = enforce_rules(&s, &body.command) {
+        record(
+            &m,
+            id,
+            "job.refused",
+            json!({"command": body.command, "reason": e.message}),
+        );
+        return Err(e);
     }
     m.ensure_running_for_request(s.sandbox_id).await?;
     let job = Uuid::new_v4();
@@ -2069,7 +2202,37 @@ mod tests {
             "filesystem": {"write": ["/workspace/**"]}, "process": {"allow": ["git"]}
         }))))
         .unwrap();
-        assert_eq!(r.unenforced, vec!["filesystem", "process"]);
+        assert_eq!(r.unenforced, vec!["filesystem"]);
+        let rules = r.process.unwrap();
+        assert_eq!(rules.allow, vec!["git"]);
+        assert!(compile_policy(Some(pol(json!({"process": {"ask": ["x"]}})))).is_err());
+        assert!(compile_policy(Some(pol(json!({"process": {"nope": []}})))).is_err());
+        assert!(compile_policy(Some(pol(json!({"process": {"deny": "rm"}})))).is_err());
+    }
+
+    #[test]
+    fn command_rules_check_every_piece_of_a_compound_command() {
+        let r = CommandRules {
+            allow: vec![],
+            deny: vec!["rm *".into(), "sudo*".into(), "curl *|*".into()],
+        };
+        assert!(r.check("ls -la && cargo test").is_ok());
+        assert!(r.check("echo hi; rm -rf /workspace").is_err());
+        assert!(r.check("true || sudo reboot").is_err());
+        assert!(r.check("cat x\nrm y").is_err());
+        let a = CommandRules {
+            allow: vec!["git *".into(), "ls".into(), "cargo *".into()],
+            deny: vec!["git push*".into()],
+        };
+        assert!(a.check("git status && ls").is_ok());
+        assert!(a.check("git push origin main").is_err());
+        assert!(a.check("ls | wc -l").is_err(), "wc is not allowed");
+        assert!(a.check("python3 x.py").is_err());
+        assert!(r.check("'rm' '-rf' 'x'").is_err(), "CLI-quoted argv");
+        assert!(r.check("r\"m\" x").is_err());
+        assert!(glob_match("a*c", "abbbc"));
+        assert!(!glob_match("a*c", "abbbd"));
+        assert!(glob_match("*", ""));
     }
 
     #[test]

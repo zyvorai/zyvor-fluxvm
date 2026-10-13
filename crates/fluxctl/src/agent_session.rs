@@ -38,6 +38,13 @@ pub enum AgentCommand {
         /// Host the session may reach (repeatable); everything else is refused.
         #[arg(long = "allow")]
         allow: Vec<String>,
+        /// Command pattern the session may run (repeatable, `*` wildcard); with any given, other
+        /// commands are refused. A guardrail on the command string, not a security boundary.
+        #[arg(long = "cmd-allow")]
+        cmd_allow: Vec<String>,
+        /// Command pattern the session may not run (repeatable, `*` wildcard).
+        #[arg(long = "cmd-deny")]
+        cmd_deny: Vec<String>,
         #[arg(long)]
         ttl_seconds: Option<u64>,
     },
@@ -233,25 +240,27 @@ pub async fn run(r: &Remote, cmd: AgentCommand) -> Result<()> {
             memory_mb,
             policy,
             allow,
+            cmd_allow,
+            cmd_deny,
             ttl_seconds,
-        } => show(
-            &r.call(
-                Method::POST,
-                "/v1/agents/sessions",
-                Some(create_body(
-                    agent,
-                    repo,
-                    workspace_path,
-                    image,
-                    cpus,
-                    memory_mb,
-                    policy,
-                    allow,
-                    ttl_seconds,
-                )),
+        } => {
+            let mut body = create_body(
+                agent,
+                repo,
+                workspace_path,
+                image,
+                cpus,
+                memory_mb,
+                policy,
+                allow,
+                ttl_seconds,
+            );
+            add_process_rules(&mut body, &cmd_allow, &cmd_deny);
+            show(
+                &r.call(Method::POST, "/v1/agents/sessions", Some(body))
+                    .await?,
             )
-            .await?,
-        ),
+        }
         AgentCommand::Ls => show(&r.call(Method::GET, "/v1/agents/sessions", None).await?),
         AgentCommand::Get { id } => show(
             &r.call(Method::GET, &format!("/v1/agents/sessions/{id}"), None)
@@ -680,6 +689,21 @@ fn guest_command(args: &[String]) -> String {
 }
 
 /// The `POST /v1/agents/sessions` body for `agent run` flags.
+/// Attach `policy.process` command rules to a create body when any were given.
+pub(crate) fn add_process_rules(body: &mut Value, allow: &[String], deny: &[String]) {
+    if allow.is_empty() && deny.is_empty() {
+        return;
+    }
+    let mut rules = json!({});
+    if !allow.is_empty() {
+        rules["allow"] = json!(allow);
+    }
+    if !deny.is_empty() {
+        rules["deny"] = json!(deny);
+    }
+    body["policy"]["process"] = rules;
+}
+
 #[allow(clippy::too_many_arguments)]
 fn create_body(
     agent: String,
@@ -745,6 +769,16 @@ mod tests {
             "'sh' '-c' 'uname -a; exit 3'"
         );
         assert_eq!(guest_command(&v(&["echo", "it's"])), "'echo' 'it'\\''s'");
+    }
+
+    #[test]
+    fn command_rules_land_under_policy_process() {
+        let mut b = json!({"agent": "custom"});
+        add_process_rules(&mut b, &[], &[]);
+        assert!(b.get("policy").is_none());
+        add_process_rules(&mut b, &["git *".into()], &["git push*".into()]);
+        assert_eq!(b["policy"]["process"]["allow"][0], "git *");
+        assert_eq!(b["policy"]["process"]["deny"][0], "git push*");
     }
 
     #[test]
