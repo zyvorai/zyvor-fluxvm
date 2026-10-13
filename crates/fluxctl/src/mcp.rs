@@ -1266,6 +1266,7 @@ pub fn tools(remote: Arc<Remote>) -> Vec<Tool> {
                     "policy": {"type": "string", "enum": ["offline", "developer-safe", "open"]},
                     "allow": {"type": "array", "items": {"type": "string"}, "description": "host names the session may reach; everything else is refused"},
                     "image": {"type": "string", "description": "guest image, e.g. agent-micro"},
+                    "require_ready": {"type": "boolean", "description": "fail the create unless the workspace directory exists and the repo clone succeeded (default: the session is made and workspace.note says why not)"},
                     "volumes": {"type": "array", "items": {"type": "string"}, "description": "named host volumes as NAME:/guest/path (vz only; formatted ext4 on first use; the session cannot fork)"},
                     "allow_commands": {"type": "array", "items": {"type": "string"}, "description": "command patterns (* wildcard) session_exec may run; other commands are refused. A guardrail on the command string, not a security boundary"},
                     "deny_commands": {"type": "array", "items": {"type": "string"}, "description": "command patterns (* wildcard) session_exec refuses"},
@@ -1285,6 +1286,9 @@ pub fn tools(remote: Arc<Remote>) -> Vec<Tool> {
                     let mut body = json!({"agent": str_arg(&args, "agent").unwrap_or("custom")});
                     if let Some(g) = str_arg(&args, "repo") {
                         body["workspace"] = json!({"git": g});
+                        if args["require_ready"].as_bool().unwrap_or(false) {
+                            body["workspace"]["require_ready"] = json!(true);
+                        }
                     }
                     if let Some(i) = str_arg(&args, "image") {
                         body["runtime"] = json!({"image": i});
@@ -1609,6 +1613,27 @@ pub fn tools(remote: Arc<Remote>) -> Vec<Tool> {
                         None => format!("/v1/agents/sessions/{id}/grants"),
                     };
                     pretty(&r.call(Method::DELETE, &path, None).await?)
+                })
+                .await
+            },
+        ),
+        tool(
+            "session_probe",
+            "Which tools a session's guest image has (git, sha256sum, node, python, cargo, a browser, socat, playwright) and which features that enables: git, promote (needs sha256sum), build toolchains, browser_cdp. Run it before relying on the image.",
+            object(json!({"session": {"type": "string"}}), &["session"]),
+            false,
+            &remote,
+            |r, args| async move {
+                timed(CALL_TIMEOUT, async {
+                    let id = session_id(&args)?;
+                    pretty(
+                        &r.call(
+                            Method::GET,
+                            &format!("/v1/agents/sessions/{id}/probe"),
+                            None,
+                        )
+                        .await?,
+                    )
                 })
                 .await
             },

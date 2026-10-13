@@ -25,6 +25,10 @@ pub enum AgentCommand {
         /// Guest path of the workspace.
         #[arg(long)]
         workspace_path: Option<String>,
+        /// Fail the create (and remove the sandbox) unless the workspace directory exists and the
+        /// `--repo` clone succeeded; by default the session is made and `workspace.note` says why not.
+        #[arg(long)]
+        require_ready: bool,
         /// Guest image, for example `agent-micro`.
         #[arg(long)]
         image: Option<String>,
@@ -270,6 +274,9 @@ pub enum AgentCommand {
         #[arg(long)]
         identity: Option<String>,
     },
+    /// Which tools the guest image has (git, sha256sum for promote, node, a browser, playwright ...)
+    /// and which session features that makes possible. REST: `GET /v1/agents/sessions/{id}/probe`.
+    Probe { id: Uuid },
     /// Mint an expiring token that works on this one session and only for the listed operations
     /// (read, exec, jobs, files.read, files.write, git, checkpoint, preview). Prints it once; use it as
     /// the bearer token for `fluxctl --token` or REST. REST: `POST /v1/agents/sessions/{id}/tokens`.
@@ -683,6 +690,7 @@ pub async fn run(r: &Remote, cmd: AgentCommand) -> Result<()> {
             agent,
             repo,
             workspace_path,
+            require_ready,
             image,
             cpus,
             memory_mb,
@@ -731,6 +739,9 @@ pub async fn run(r: &Remote, cmd: AgentCommand) -> Result<()> {
                     ("max_children", max_children),
                 ],
             );
+            if require_ready && body.get("workspace").is_some() {
+                body["workspace"]["require_ready"] = json!(true);
+            }
             add_volumes(&mut body, &volume)?;
             show(
                 &r.call(Method::POST, "/v1/agents/sessions", Some(body))
@@ -858,6 +869,14 @@ pub async fn run(r: &Remote, cmd: AgentCommand) -> Result<()> {
                 .await?,
             )
         }
+        AgentCommand::Probe { id } => show(
+            &r.call(
+                Method::GET,
+                &format!("/v1/agents/sessions/{id}/probe"),
+                None,
+            )
+            .await?,
+        ),
         AgentCommand::Grants { id } => show(
             &r.call(
                 Method::GET,

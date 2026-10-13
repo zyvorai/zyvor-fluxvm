@@ -453,6 +453,34 @@ through the authenticated `/v1/sandboxes/{sandbox_id}/ws/{port}/{path}`. **Not r
 headful or GPU, a window/computer-use display (vz display and input exist separately), a prebuilt browser image
 (Chromium adds ~600 MB to the 2.8 GB stock root; the install above fits but leaves little free).
 
+### Image readiness
+
+`GET .../probe` (`fluxctl agent probe`, MCP `session_probe`) runs one short command in the guest, under the session's
+confinement, and reports which tools exist (`git`, `sha256sum`, `python3`, `node`/`npm`, `cargo`, `go`, `gcc`/`make`,
+`chromium`/`google-chrome`, `socat`, `playwright`, a Playwright browser cache) and what that makes possible:
+
+| `ready_for` | needs |
+|---|---|
+| `git` | `git` (workspace clones, the git verbs) |
+| `promote` | `sha256sum` (fork promotion compares content by sha256) |
+| `build_node` / `build_python` / `build_rust` / `build_c` | `node`+`npm` / `python3` / `cargo` / `make` and `gcc` or `cc` |
+| `browser_cdp` | a Chromium or Chrome |
+| `browser_cdp_through_preview` | a browser **and** `socat` (Chrome binds DevTools to 127.0.0.1; see Browser) |
+| `playwright` | a `playwright` CLI or a Playwright browser cache |
+
+`workspace.require_ready` at create (`fluxctl agent run --require-ready`) turns a workspace that did not initialize
+(directory not created, clone failed) from a session with a `workspace.note` into a `502` that removes the sandbox.
+
+**DevTools URLs through a preview are rewritten.** A preview of Chrome's DevTools port answers `/json`, `/json/list`,
+`/json/version` and `/json/new` with `webSocketDebuggerUrl` and `devtoolsFrontendUrl` pointing at the daemon and under
+`/preview/<token>` (`wss` when the request came with `X-Forwarded-Proto: https`), so a client that follows them, such as
+Playwright `connectOverCDP`, reaches the page. The rewrite is unit-tested on Chrome's document shape; **not run** against
+a live Chrome through a preview, nor with a real Playwright client.
+
+**No versioned coding or browser image is shipped by this change.** Building one needs an image pipeline and a registry,
+not an API; what is added is the probe to verify any image against these needs, and the readiness gate. Until an image
+exists, the Browser recipe above is how you get one.
+
 ### Ledger
 
 An append-only JSON-lines file per session records the API-level actions taken *through the session*: `session.create`,
