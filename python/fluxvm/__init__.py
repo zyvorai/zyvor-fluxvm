@@ -16,6 +16,7 @@ from .errors import (
     ServiceUnavailable,
 )
 from .fleet import FleetClient
+from .sessions import Session
 from .models import BaselineSummary, ChangeSet, ExecResult, FileContent, HttpResponse, SandboxInfo, Volume
 
 __version__ = "0.1.0"
@@ -24,5 +25,5 @@ __all__ = [
     "FluxVM", "Sandbox", "SandboxInfo", "ExecResult", "BaselineSummary", "ChangeSet", "FileContent",
     "HttpResponse", "Volume", "FluxVMError", "ApiError", "AuthError",
     "ForbiddenError", "NotFound", "RateLimited", "RequestTimeout",
-    "ConnectionFailed", "Conflict", "ServiceUnavailable", "FleetClient",
+    "ConnectionFailed", "Conflict", "ServiceUnavailable", "FleetClient", "Session",
 ]
