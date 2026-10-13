@@ -64,6 +64,21 @@ pub enum AgentCommand {
         /// `capabilities.confinement` then says whether it did).
         #[arg(long)]
         confine_best_effort: bool,
+        /// Budget: most commands (`exec`) the session may run.
+        #[arg(long)]
+        max_execs: Option<u64>,
+        /// Budget: most wall-clock seconds spent in commands, summed.
+        #[arg(long)]
+        max_exec_seconds: Option<u64>,
+        /// Budget: most background jobs started.
+        #[arg(long)]
+        max_jobs: Option<u64>,
+        /// Budget: most background jobs running at once.
+        #[arg(long)]
+        max_concurrent_jobs: Option<u64>,
+        /// Budget: most fork children created. Children start with what is left of the others.
+        #[arg(long)]
+        max_children: Option<u64>,
         #[arg(long)]
         ttl_seconds: Option<u64>,
     },
@@ -659,6 +674,11 @@ pub async fn run(r: &Remote, cmd: AgentCommand) -> Result<()> {
             fs_read,
             fs_write,
             confine_best_effort,
+            max_execs,
+            max_exec_seconds,
+            max_jobs,
+            max_concurrent_jobs,
+            max_children,
             ttl_seconds,
         } => {
             let mut body = create_body(
@@ -679,6 +699,16 @@ pub async fn run(r: &Remote, cmd: AgentCommand) -> Result<()> {
                 &fs_read,
                 &fs_write,
                 confine_best_effort,
+            );
+            add_budget(
+                &mut body,
+                [
+                    ("max_execs", max_execs),
+                    ("max_exec_seconds", max_exec_seconds),
+                    ("max_jobs", max_jobs),
+                    ("max_concurrent_jobs", max_concurrent_jobs),
+                    ("max_children", max_children),
+                ],
             );
             add_volumes(&mut body, &volume)?;
             show(
@@ -1698,6 +1728,15 @@ pub(crate) fn promote_body(
     b
 }
 
+/// Attach `budget` to a create body when any limit was given.
+pub(crate) fn add_budget<const N: usize>(body: &mut Value, limits: [(&str, Option<u64>); N]) {
+    for (name, v) in limits {
+        if let Some(n) = v {
+            body["budget"][name] = json!(n);
+        }
+    }
+}
+
 /// Attach `policy.filesystem` (guest confinement) to a create body when `confine` is set.
 pub(crate) fn add_filesystem(
     body: &mut Value,
@@ -2021,6 +2060,17 @@ mod tests {
         };
         assert!(no_test.passed());
         assert_eq!(pick_winner(&[no_test]), Some(0));
+    }
+
+    #[test]
+    fn budget_flags_land_under_budget_and_only_when_given() {
+        let mut b = json!({"agent": "custom"});
+        add_budget(&mut b, [("max_execs", None), ("max_jobs", None)]);
+        assert!(b.get("budget").is_none());
+        add_budget(&mut b, [("max_execs", Some(50)), ("max_children", Some(4))]);
+        assert_eq!(b["budget"]["max_execs"], 50);
+        assert_eq!(b["budget"]["max_children"], 4);
+        assert!(b["budget"].get("max_jobs").is_none());
     }
 
     #[test]

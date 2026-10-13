@@ -1272,6 +1272,7 @@ pub fn tools(remote: Arc<Remote>) -> Vec<Tool> {
                     "confine": {"type": "boolean", "description": "confine every command, job, file and git call in the guest with Landlock + seccomp: system directories read-only, /tmp and the workspace writable. Fails if the guest cannot enforce it (macOS guests cannot); a terminal and ssh are refused on such a session"},
                     "read_paths": {"type": "array", "items": {"type": "string"}, "description": "extra absolute paths a confined session may read (implies confine)"},
                     "write_paths": {"type": "array", "items": {"type": "string"}, "description": "extra absolute paths a confined session may write (implies confine)"},
+                    "budget": {"type": "object", "description": "limits on the session: max_execs, max_exec_seconds (summed wall time of commands), max_jobs, max_concurrent_jobs, max_children (fork children). Fork children start with what is left. Exceeding one refuses the call with 403", "properties": {"max_execs": {"type": "integer", "minimum": 1}, "max_exec_seconds": {"type": "integer", "minimum": 1}, "max_jobs": {"type": "integer", "minimum": 1}, "max_concurrent_jobs": {"type": "integer", "minimum": 1}, "max_children": {"type": "integer", "minimum": 1}}},
                     "confine_best_effort": {"type": "boolean", "description": "create the session even if the guest cannot enforce confinement; capabilities.confinement says whether it did (implies confine)"},
                     "ttl_seconds": {"type": "integer", "minimum": 30},
                 }),
@@ -1315,6 +1316,9 @@ pub fn tools(remote: Arc<Remote>) -> Vec<Tool> {
                         &strs("allow_commands"),
                         &strs("deny_commands"),
                     );
+                    if args["budget"].is_object() {
+                        body["budget"] = args["budget"].clone();
+                    }
                     let best_effort = args["confine_best_effort"].as_bool().unwrap_or(false);
                     let (rp, wp) = (strs("read_paths"), strs("write_paths"));
                     crate::agent_session::add_filesystem(

@@ -84,6 +84,42 @@ file modes are kept, symlinks and ownership are not. Ledgered as `promote` on th
 
 Not run on a live guest: the plan is unit-tested and the route's refusals are router-tested, the transfer itself is not.
 
+### Budgets
+
+`budget` at create limits what a session may consume; every field is optional.
+
+```json
+{"budget": {"max_execs": 200, "max_exec_seconds": 1800, "max_jobs": 10, "max_concurrent_jobs": 2, "max_children": 8}}
+```
+
+- `max_execs` commands through `exec`; `max_exec_seconds` the summed wall time of commands, and a command is also given
+  at most the seconds left as its timeout; `max_jobs` started and `max_concurrent_jobs` running at once;
+  `max_children` fork children (a rollout or `evaluate` spends it).
+- Exceeding one is `403` with the limit and the amount used. Usage (`execs`, `exec_ms`, `jobs`, `children`) is returned
+  as `usage` on `GET .../{id}`; it is kept in its own file, so counting never changes `revision`.
+- A fork child starts with what is **left** of its parent's budget, so forking cannot multiply it. A fork that fails
+  gives its children back.
+- `max_exec_seconds` is checked when a command starts; commands running in parallel can overshoot it. Jobs are not
+  counted against `max_exec_seconds`.
+
+Not done: token, output-size and storage budgets. Tokens need usage reports from the model client or gateway, which the
+daemon never sees; output and storage need guest-side accounting.
+
+### Evaluating candidates
+
+`fluxctl agent evaluate <session> --candidate 'cmd A' --candidate 'cmd B' --test 'make test'` (MCP
+`session_evaluate`) is "try several fixes in isolated machines, test each, review the winner, apply it":
+
+1. forks one child per candidate (same forkability rules as `fork`, and `max_children` is spent);
+2. in each child runs the candidate and then, if it exited 0, the test command, all children in parallel;
+3. scores each: **100** passed (the test exited 0, or with no `--test` the candidate did), **10** ran cleanly but failed
+   its test, **0** failed or never ran; ties go to the shortest, then the lowest index;
+4. deletes the losers (unless `--keep-all`) and prints every result with output tails and the `winner`.
+
+A winner exists only if something passed, so a failing result is never offered. Then
+`fluxctl agent promote <winner> --dry-run` and apply, as above. It is client-side orchestration over fork, exec and
+delete (like `rollout`); it needs a running session with a workspace baseline to be promotable.
+
 ### Lifecycle guarantees
 
 - **Conflicting operations are refused, not interleaved.** Checkpoint, restore, fork and delete take the session's

@@ -7336,6 +7336,30 @@ mod tests {
         }
 
         #[tokio::test]
+        async fn a_bad_budget_is_refused_before_any_sandbox_is_made() {
+            let m = procbox_manager(tenant_tokens(), false);
+            let app = router(m);
+            for body in [
+                r#"{"budget":{"max_execs":0}}"#,
+                r#"{"budget":{"max_jobs":99999999999}}"#,
+                r#"{"budget":{"max_execs":"many"}}"#,
+            ] {
+                let (st, b) = call(
+                    app.clone(),
+                    "POST",
+                    "/v1/agents/sessions",
+                    "acme",
+                    Some(body),
+                )
+                .await;
+                assert!(
+                    st == StatusCode::BAD_REQUEST || st == StatusCode::UNPROCESSABLE_ENTITY,
+                    "{body}: {st} {b}"
+                );
+            }
+        }
+
+        #[tokio::test]
         async fn the_terminal_page_needs_no_token_and_the_ticket_is_scoped_to_its_session() {
             use tower::ServiceExt as _;
             let m = procbox_manager(tenant_tokens(), false);
