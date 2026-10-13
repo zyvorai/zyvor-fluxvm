@@ -29,7 +29,7 @@ vz · KVM · Firecracker · Cloud Hypervisor · QEMU
 macOS, Apple Silicon, macOS 14 or newer:
 
 ```bash
-curl -fsSL https://zyvorai.github.io/zyvor-fluxvm/install.sh | bash    # the same three steps below, via Homebrew only
+curl -fsSL https://raw.githubusercontent.com/zyvorai/zyvor-fluxvm/main/scripts/install.sh | bash    # the same three steps below, via Homebrew only
 # or by hand:
 brew install zyvorai/tap/fluxvm
 brew services start zyvorai/tap/fluxvm      # the API on 127.0.0.1:7788

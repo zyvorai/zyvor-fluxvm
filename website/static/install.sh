@@ -4,8 +4,8 @@
 #
 # Install FluxVM on a Mac the way docs/install-macos.md describes, in one command:
 #
-#   curl -fsSL https://zyvorai.github.io/zyvor-fluxvm/install.sh | bash
-#   curl -fsSL https://zyvorai.github.io/zyvor-fluxvm/install.sh | bash -s -- --client claude-code
+#   curl -fsSL https://raw.githubusercontent.com/zyvorai/zyvor-fluxvm/main/scripts/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/zyvorai/zyvor-fluxvm/main/scripts/install.sh | bash -s -- --client claude-code
 #
 # It only drives Homebrew (`brew install zyvorai/tap/fluxvm`, `brew services`) and, when asked, `fluxctl mcp install`.
 # It needs no sudo, downloads nothing itself, and changes nothing outside Homebrew and your MCP client's config.
