@@ -47,7 +47,7 @@ FluxVM runs natively on Apple silicon. Its `vz` backend drives Apple's **Virtual
 | **Keychain sign-in** | `fluxctl signin` keeps a guest password in your login Keychain and types it; the API never returns it |
 | **launchd** | `fluxctl service install` writes a LaunchAgent, so a headless Mac mini serves VMs after every reboot |
 | **Agents see the screen** | Screenshots, keyboard and mouse for any `vz` guest, with no Screen Recording permission on the host |
-| **A throwaway computer per agent task** | An offline sandbox (no network card) is ready in about 4.5 s and forks into four running copies in about 4 s; a local model stays reachable over one vsock port. [Demo](examples/agent-sandbox-demo/README.md) · [Agents page](https://zyvorai.github.io/zyvor-fluxvm/agents) |
+| **A throwaway computer per agent task** | An offline sandbox (no network card) is ready in about 4.5 s and forks into four running copies in about 4 s; a local model stays reachable over one vsock port. [Demo](examples/agent-sandbox-demo/README.md) · [Agent sessions](docs/agent-platform/README.md) · [Agents page](https://zyvorai.github.io/zyvor-fluxvm/agents) |
 
 ```bash
 brew install zyvorai/tap/fluxvm                     # prebuilt, Apple silicon, macOS 14+
@@ -239,6 +239,7 @@ Every one maps onto what is implemented today. [All eleven](docs/index.md#use-ca
 | Day-2 operations | [docs/operations.md](docs/operations.md) |
 | Native KVM, no QEMU | [docs/native-kvm-no-qemu.md](docs/native-kvm-no-qemu.md) |
 | Native macOS: the `vz` backend, sandboxes, container sandboxes, a Mac cloud | [docs/macos.md](docs/macos.md) · [docs/mac-cloud.md](docs/mac-cloud.md) · [docs/macos-sandboxes.md](docs/macos-sandboxes.md) · [docs/oci-sandboxes.md](docs/oci-sandboxes.md) |
+| AI-agent sessions: install, quickstart, MCP, comparison | [docs/agent-platform/](docs/agent-platform/README.md) · [docs/agent-sessions.md](docs/agent-sessions.md) · [vs microsandbox](docs/vs-microsandbox.md) |
 | Agent sandboxes, procbox and the SDKs | [docs/agent-sandbox-gaps.md](docs/agent-sandbox-gaps.md) · [python/](python/README.md) · [go/](go/README.md) · [typescript/](typescript/README.md) |
 | Network Fabric and Service Fabric | [docs/network-fabric.md](docs/network-fabric.md) · [docs/service-fabric.md](docs/service-fabric.md) |
 | Secure Containers and MicroVM | [docs/secure-containers.md](docs/secure-containers.md) · [docs/microvm.md](docs/microvm.md) |

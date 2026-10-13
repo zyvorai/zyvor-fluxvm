@@ -24,6 +24,7 @@ use tokio::net::TcpListener;
 use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
 
+mod agent_session;
 mod cloud;
 mod compose;
 mod contexts;
@@ -894,6 +895,13 @@ enum Command {
     Netobs {
         #[command(subcommand)]
         command: netobs::NetobsCommand,
+    },
+    /// AI-agent sessions: a sandbox with a workspace, a network policy, checkpoints and a ledger.
+    /// REST: `/v1/agents/sessions/*`. Always talks to the daemon (`--server`, the current context, or the
+    /// local `listen`). See docs/agent-sessions.md.
+    Agent {
+        #[command(subcommand)]
+        command: agent_session::AgentCommand,
     },
     /// List image catalog entries (machinectl `list-images`).
     ListImages,
@@ -3871,6 +3879,7 @@ async fn run_remote(
             pretty(&r.call(Method::GET, &format!("/v1/vms/{id}"), None).await?)?
         }
         Command::Netobs { command } => netobs::run(r, command).await?,
+        Command::Agent { command } => agent_session::run(r, command).await?,
         Command::Vznet {
             command: VznetCommand::Ls { json },
         } => print_vznets(
@@ -5154,6 +5163,11 @@ async fn main() -> Result<()> {
         return netobs::run(&r, command).await;
     }
 
+    if let Command::Agent { command } = cli.command {
+        let r = remote::Remote::new(&cfg.listen, cli.server_token.clone());
+        return agent_session::run(&r, command).await;
+    }
+
     let m = manager(cfg.clone()).await?;
 
     match cli.command {
@@ -5177,6 +5191,7 @@ async fn main() -> Result<()> {
         | Command::Events { .. }
         | Command::Context { .. }
         | Command::Netobs { .. }
+        | Command::Agent { .. }
         | Command::Quota { token: Some(_), .. } => unreachable!("handled above"),
         Command::Quota { token: None, name } => {
             println!(
@@ -8990,6 +9005,39 @@ mod tier2_cli_tests {
         assert!(matches!(
             cli(&["context", "use", "lab"]).unwrap().command,
             Command::Context { command: ContextCommand::Use { name } } if name == "lab"
+        ));
+    }
+}
+
+#[cfg(test)]
+mod agent_session_cli_tests {
+    use super::*;
+
+    fn parse(args: &[&str]) -> Command {
+        let mut full = vec!["fluxvm"];
+        full.extend_from_slice(args);
+        Cli::try_parse_from(full).unwrap().command
+    }
+
+    #[test]
+    fn agent_run_and_exec_parse() {
+        assert!(matches!(
+            parse(&["agent", "run", "codex", "--repo", "https://x/y", "--allow", "a.b", "--allow", "c.d"]),
+            Command::Agent { command: agent_session::AgentCommand::Run { agent, allow, .. } }
+                if agent == "codex" && allow.len() == 2
+        ));
+        let id = Uuid::nil();
+        assert!(matches!(
+            parse(&["agent", "exec", &id.to_string(), "--timeout-seconds", "5", "ls", "-la"]),
+            Command::Agent { command: agent_session::AgentCommand::Exec { timeout_seconds: Some(5), command, .. } }
+                if command == vec!["ls".to_string(), "-la".to_string()]
+        ));
+        assert!(Cli::try_parse_from(["fluxvm", "agent", "restore", &id.to_string()]).is_err());
+        assert!(matches!(
+            parse(&["agent", "fork", &id.to_string(), "--count", "4"]),
+            Command::Agent {
+                command: agent_session::AgentCommand::Fork { count: 4, .. }
+            }
         ));
     }
 }

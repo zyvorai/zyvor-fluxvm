@@ -15,6 +15,7 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, Union
 from .errors import (
     ApiError,
     AuthError,
+    Conflict,
     ConnectionFailed,
     FluxVMError,
     ForbiddenError,
@@ -73,6 +74,8 @@ def _error_from_response(status: int, raw: bytes, headers: Mapping[str, str]) ->
     # (the server maps most handler errors to 400), not 404.
     if status == 400 and message.strip().lower() == "vm not found":
         return NotFound(status, body, message)
+    if status == 409:
+        return Conflict(status, body, message)
     if status == 429:
         retry_after = None
         value = headers.get("Retry-After")
@@ -182,6 +185,24 @@ class FluxVM:
     def openapi(self) -> Dict[str, Any]:
         """``GET /v1/openapi.json`` (no auth needed)."""
         return self._json("GET", "/v1/openapi.json")
+
+    def create_session(self, agent: str = "custom", **kwargs: Any) -> "Any":
+        """``POST /v1/agents/sessions``: an agent session (sandbox + workspace + policy). See
+        :func:`fluxvm.sessions.create_session` for the keyword arguments."""
+        from .sessions import create_session
+        return create_session(self, agent, **kwargs)
+
+    def get_session(self, session_id: str) -> "Any":
+        """``GET /v1/agents/sessions/{id}``."""
+        from .sessions import Session
+        info = self._json(
+            "GET", "/v1/agents/sessions/" + urllib.parse.quote(session_id, safe=""))
+        return Session(self, info)
+
+    def list_sessions(self) -> List["Any"]:
+        """``GET /v1/agents/sessions``: the caller's sessions, oldest first."""
+        from .sessions import Session
+        return [Session(self, i) for i in self._json("GET", "/v1/agents/sessions")["items"]]
 
     def host_confidential(self) -> Dict[str, Any]:
         """``GET /v1/host/confidential``: what the host offers for confidential guests."""
