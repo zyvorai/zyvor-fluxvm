@@ -7360,6 +7360,54 @@ mod tests {
         }
 
         #[tokio::test]
+        async fn session_grants_are_admin_only_and_tenant_scoped() {
+            let m = procbox_manager(tenant_tokens(), false);
+            let id = seed_session(&m, Some("acme"), "vz", "running");
+            let app = router(m);
+            let base = format!("/v1/agents/sessions/{id}/grants");
+            let body = r#"{"secret_ref":"gh","value":"s3cret","hosts":["api.github.com"]}"#;
+            // Another tenant: 404 on every verb.
+            for (method, uri, b) in [
+                ("POST", base.clone(), Some(body)),
+                ("GET", base.clone(), None),
+                ("DELETE", base.clone(), None),
+                ("DELETE", format!("{base}/g1"), None),
+            ] {
+                let (st, _) = call(app.clone(), method, &uri, "other", b).await;
+                assert_eq!(st, StatusCode::NOT_FOUND, "{method} {uri}");
+            }
+            // A session token, whatever it was granted, cannot give itself a credential.
+            let (_, minted) = call(
+                app.clone(),
+                "POST",
+                &format!("/v1/agents/sessions/{id}/tokens"),
+                "acme",
+                Some(
+                    r#"{"ops":["read","exec","files.write","git","jobs","checkpoint","preview"]}"#,
+                ),
+            )
+            .await;
+            let v: serde_json::Value = serde_json::from_str(&minted).unwrap();
+            let tok = v["token"].as_str().unwrap();
+            for (method, uri, b) in [
+                ("POST", base.clone(), Some(body)),
+                ("GET", base.clone(), None),
+                ("DELETE", base.clone(), None),
+            ] {
+                let (st, _) = call(app.clone(), method, &uri, tok, b).await;
+                assert_eq!(st, StatusCode::FORBIDDEN, "{method} {uri}");
+            }
+            // The owner is let in (the seeded sandbox does not exist, so the broker answers 400),
+            // and no response echoes a secret.
+            let (st, b) = call(app.clone(), "GET", &base, "acme", None).await;
+            assert!(
+                st != StatusCode::FORBIDDEN && st != StatusCode::UNAUTHORIZED,
+                "{st} {b}"
+            );
+            assert!(!b.contains("s3cret"));
+        }
+
+        #[tokio::test]
         async fn the_terminal_page_needs_no_token_and_the_ticket_is_scoped_to_its_session() {
             use tower::ServiceExt as _;
             let m = procbox_manager(tenant_tokens(), false);

@@ -284,6 +284,27 @@ pub enum AgentCommand {
         #[arg(long)]
         label: Option<String>,
     },
+    /// Give the session a brokered credential: the egress proxy injects it as an `Authorization`
+    /// header for the named hosts, so the agent never holds the secret. It ends with the session
+    /// and is not inherited by fork children. REST: `POST /v1/agents/sessions/{id}/grants`.
+    Grant {
+        id: Uuid,
+        /// Name of the secret; without `--value` it is read from the daemon's `FLUXVM_SECRET_<REF>`.
+        #[arg(long)]
+        secret_ref: String,
+        /// Destination host (repeatable; exact or domain suffix) the secret may be sent to.
+        #[arg(long = "host", required = true)]
+        hosts: Vec<String>,
+        /// The full header value, for example `Bearer abc`. Prefer a daemon-side secret_ref.
+        #[arg(long, env = "FLUXVM_GRANT_VALUE", hide_env_values = true)]
+        value: Option<String>,
+        #[arg(long)]
+        ttl_seconds: Option<i64>,
+    },
+    /// List the session's live grants (never the secrets). REST: `GET .../grants`.
+    Grants { id: Uuid },
+    /// Revoke one grant, or every grant of the session with no id. REST: `DELETE .../grants[/{grant}]`.
+    Ungrant { id: Uuid, grant: Option<String> },
     /// List a session's live tokens (never the secrets). REST: `GET .../tokens`.
     Tokens { id: Uuid },
     /// Revoke one session token by its id. REST: `DELETE .../tokens/{token}`.
@@ -813,6 +834,44 @@ pub async fn run(r: &Remote, cmd: AgentCommand) -> Result<()> {
                 )
                 .await?,
             )
+        }
+        AgentCommand::Grant {
+            id,
+            secret_ref,
+            hosts,
+            value,
+            ttl_seconds,
+        } => {
+            let mut body = json!({"secret_ref": secret_ref, "hosts": hosts});
+            if let Some(v) = value {
+                body["value"] = json!(v);
+            }
+            if let Some(t) = ttl_seconds {
+                body["ttl_seconds"] = json!(t);
+            }
+            show(
+                &r.call(
+                    Method::POST,
+                    &format!("/v1/agents/sessions/{id}/grants"),
+                    Some(body),
+                )
+                .await?,
+            )
+        }
+        AgentCommand::Grants { id } => show(
+            &r.call(
+                Method::GET,
+                &format!("/v1/agents/sessions/{id}/grants"),
+                None,
+            )
+            .await?,
+        ),
+        AgentCommand::Ungrant { id, grant } => {
+            let path = match grant {
+                Some(g) => format!("/v1/agents/sessions/{id}/grants/{g}"),
+                None => format!("/v1/agents/sessions/{id}/grants"),
+            };
+            show(&r.call(Method::DELETE, &path, None).await?)
         }
         AgentCommand::Tokens { id } => show(
             &r.call(

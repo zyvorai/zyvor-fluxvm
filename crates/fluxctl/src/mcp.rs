@@ -1557,6 +1557,63 @@ pub fn tools(remote: Arc<Remote>) -> Vec<Tool> {
             },
         ),
         tool(
+            "session_grant",
+            "Give a session a brokered credential: the egress proxy injects it as an Authorization header for the named hosts only, so the agent never sees the secret. secret_ref names a secret held by the daemon (FLUXVM_SECRET_<REF>). It ends with the session and is not inherited by fork children (grant each child explicitly).",
+            object(
+                json!({
+                    "session": {"type": "string"},
+                    "secret_ref": {"type": "string", "description": "name of the daemon-held secret"},
+                    "hosts": {"type": "array", "items": {"type": "string"}, "minItems": 1, "description": "destination hosts (exact or domain suffix)"},
+                    "ttl_seconds": {"type": "integer", "minimum": 1},
+                }),
+                &["session", "secret_ref", "hosts"],
+            ),
+            true,
+            &remote,
+            |r, args| async move {
+                timed(CALL_TIMEOUT, async {
+                    let id = session_id(&args)?;
+                    let mut body = json!({
+                        "secret_ref": str_arg(&args, "secret_ref").unwrap_or_default(),
+                        "hosts": args["hosts"],
+                    });
+                    if let Some(t) = int_arg(&args, "ttl_seconds")? {
+                        body["ttl_seconds"] = json!(t);
+                    }
+                    pretty(
+                        &r.call(
+                            Method::POST,
+                            &format!("/v1/agents/sessions/{id}/grants"),
+                            Some(body),
+                        )
+                        .await?,
+                    )
+                })
+                .await
+            },
+        ),
+        tool(
+            "session_revoke_grants",
+            "Revoke one credential grant of a session (grant id), or all of them.",
+            object(
+                json!({"session": {"type": "string"}, "grant": {"type": "string", "description": "grant id; omit to revoke all"}}),
+                &["session"],
+            ),
+            true,
+            &remote,
+            |r, args| async move {
+                timed(CALL_TIMEOUT, async {
+                    let id = session_id(&args)?;
+                    let path = match str_arg(&args, "grant") {
+                        Some(g) => format!("/v1/agents/sessions/{id}/grants/{g}"),
+                        None => format!("/v1/agents/sessions/{id}/grants"),
+                    };
+                    pretty(&r.call(Method::DELETE, &path, None).await?)
+                })
+                .await
+            },
+        ),
+        tool(
             "session_events",
             "What an agent session did: its ledger (exec, checkpoint, restore, fork, ...) and the sandbox's VM events. since is an RFC 3339 time.",
             object(

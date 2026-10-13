@@ -84,6 +84,31 @@ file modes are kept, symlinks and ownership are not. Ledgered as `promote` on th
 
 Not run on a live guest: the plan is unit-tested and the route's refusals are router-tested, the transfer itself is not.
 
+### Credential grants
+
+The sandbox credential broker (`/v1/sandboxes/{id}/grants`) through the session, so an agent can call an authenticated
+API without ever holding the secret: the egress proxy injects the `Authorization` header for the named hosts, for traffic
+from this sandbox's address only.
+
+```bash
+fluxctl agent grant <session> --secret-ref gh-token --host api.github.com --ttl-seconds 1800
+fluxctl agent grants <session>          # id, secret_ref, hosts, expiry, bound; never the value
+fluxctl agent ungrant <session> [<grant id>]
+```
+
+- Admin only, and a session token cannot grant itself one. The secret is the request's own `value`, or the daemon's
+  `FLUXVM_SECRET_<REF>`; the value is never ledgered or returned.
+- **Bounded by the session**: a grant's expiry is capped at the session's, and deleting the session revokes them.
+- **Not inherited**: a fork child starts with no grants. Grant each child you want to have one (a rollout of untrusted
+  candidates therefore cannot use the parent's credentials by default).
+- **Re-bound after restore**: a restored machine may come back on another guest address. `restore` re-binds the
+  session's grants to the current one, so the old address stops matching at once; if the new address is already bound to
+  a different sandbox's grants, this session's grants are **revoked** rather than left on a stale address
+  (`grants_rebound` in the restore response, `grant.revoked` in the ledger). A grant with an unknown address matches
+  nothing.
+- The existing broker's limits (a TTL cap, a grant count per sandbox) apply. Not run live: the broker and the re-bind
+  are unit-tested, not driven through the egress proxy from a guest.
+
 ### Budgets
 
 `budget` at create limits what a session may consume; every field is optional.

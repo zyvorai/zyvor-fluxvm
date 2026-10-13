@@ -11,6 +11,7 @@
 //! * `GET    /v1/agents/sessions/{id}`               one session and its capabilities
 //! * `DELETE /v1/agents/sessions/{id}`               delete the session and its sandbox
 //! * `POST   /v1/agents/sessions/{id}/exec`          run a command
+//! * `POST   /v1/agents/sessions/{id}/grants`        give the session a brokered credential for named hosts (also GET, DELETE)
 //! * `POST   /v1/agents/sessions/{id}/tokens`        mint an expiring token scoped to this session (also GET, DELETE .../{token})
 //! * `POST   /v1/agents/sessions/{id}/checkpoint`    snapshot under a tag
 //! * `POST   /v1/agents/sessions/{id}/restore`       restore a checkpoint
@@ -77,6 +78,14 @@ pub(crate) fn routes() -> Router<Arc<VmManager>> {
             get(get_session).delete(delete_session),
         )
         .route("/v1/agents/sessions/{id}/exec", post(exec_session))
+        .route(
+            "/v1/agents/sessions/{id}/grants",
+            post(grant_create).get(grant_list).delete(grant_revoke_all),
+        )
+        .route(
+            "/v1/agents/sessions/{id}/grants/{grant}",
+            axum::routing::delete(grant_revoke),
+        )
         .route(
             "/v1/agents/sessions/{id}/tokens",
             post(mint_token).get(list_tokens),
@@ -1455,9 +1464,100 @@ async fn delete_session(
         record(&m, id, "session.delete", json!({}));
     }
     agent_session_auth::purge(&m.cfg.state_dir, id).await;
+    let _ = m.revoke_grant(s.sandbox_id, None).await;
     let _ = tokio::fs::remove_file(job_meta_path(&m, id)).await;
     let _ = tokio::fs::remove_file(usage_path(&m, id)).await;
     Ok(StatusCode::NO_CONTENT)
+}
+
+// ---------------------------------------------------------------------------------------
+// Credential grants: the sandbox credential broker, through the session. The agent never holds
+// the secret: the egress proxy injects it for the named hosts, from this sandbox's address only.
+// A grant ends with the session and never outlives its expiry; a fork child starts with none.
+
+/// `POST .../grants`: same body as `POST /v1/sandboxes/{id}/grants`. Admin only (a scoped
+/// session token cannot grant itself credentials).
+async fn grant_create(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    token_tenant: Option<Extension<TokenTenant>>,
+    Path(id): Path<Uuid>,
+    Json(mut req): Json<fluxvm_core::grants::GrantRequest>,
+) -> ApiResult<(StatusCode, Json<Value>)> {
+    require_admin(role)?;
+    let s = load(&m, id, &caller_tenant(&token_tenant)).await?;
+    running(&s)?;
+    // A grant never outlives the session.
+    if let Some(end) = s.expires_at {
+        let now = Utc::now();
+        let wanted = match (req.expires_at, req.ttl_seconds) {
+            (Some(at), _) => at,
+            (None, Some(ttl)) if ttl > 0 => now + chrono::Duration::seconds(ttl),
+            _ => end,
+        };
+        let at = wanted.min(end);
+        if at <= now {
+            return Err(ApiError {
+                status: StatusCode::CONFLICT,
+                message: format!("agent session {id} has expired"),
+            });
+        }
+        req.expires_at = Some(at);
+        req.ttl_seconds = None;
+    }
+    m.ensure_running_for_request(s.sandbox_id).await?;
+    let info = m.add_grant(s.sandbox_id, req).await?;
+    // Names and hosts, never the value.
+    record(
+        &m,
+        id,
+        "grant.create",
+        json!({"grant": info.id, "secret_ref": info.secret_ref, "hosts": info.hosts,
+               "expires_at": info.expires_at, "bound": info.bound}),
+    );
+    Ok((StatusCode::CREATED, Json(json!(info))))
+}
+
+async fn grant_list(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    token_tenant: Option<Extension<TokenTenant>>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<Value>> {
+    require_admin(role)?;
+    let s = load(&m, id, &caller_tenant(&token_tenant)).await?;
+    Ok(Json(json!({"grants": m.list_grants(s.sandbox_id).await?})))
+}
+
+async fn grant_revoke_all(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    token_tenant: Option<Extension<TokenTenant>>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<Value>> {
+    require_admin(role)?;
+    let s = load(&m, id, &caller_tenant(&token_tenant)).await?;
+    let revoked = m.revoke_grant(s.sandbox_id, None).await?;
+    record(&m, id, "grant.revoke", json!({"grant": "all"}));
+    Ok(Json(json!({"revoked": revoked})))
+}
+
+async fn grant_revoke(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    token_tenant: Option<Extension<TokenTenant>>,
+    Path((id, grant)): Path<(Uuid, String)>,
+) -> ApiResult<Json<Value>> {
+    require_admin(role)?;
+    let s = load(&m, id, &caller_tenant(&token_tenant)).await?;
+    if !m.revoke_grant(s.sandbox_id, Some(&grant)).await? {
+        return Err(ApiError {
+            status: StatusCode::NOT_FOUND,
+            message: "grant not found".into(),
+        });
+    }
+    record(&m, id, "grant.revoke", json!({"grant": grant}));
+    Ok(Json(json!({"revoked": true})))
 }
 
 #[derive(Debug, Deserialize)]
@@ -1748,7 +1848,18 @@ async fn restore(
         .await
         .map_err(change_error)?;
     record(&m, id, "restore", json!({"tag": body.tag}));
-    Ok(Json(json!({"restored": body.tag, "vm": vm})))
+    // The restored machine may have another guest address: re-bind its credential grants to it
+    // (or drop them if that address is taken), so a grant never follows someone else's traffic.
+    let grants_rebound = match m.rebind_grants(s.sandbox_id).await {
+        Ok(has) => has,
+        Err(e) => {
+            record(&m, id, "grant.revoked", json!({"reason": format!("{e:#}")}));
+            false
+        }
+    };
+    Ok(Json(
+        json!({"restored": body.tag, "vm": vm, "grants_rebound": grants_rebound}),
+    ))
 }
 
 #[derive(Debug, Deserialize, Default)]
