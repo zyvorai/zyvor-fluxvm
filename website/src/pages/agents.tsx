@@ -515,7 +515,7 @@ function Sessions() {
               <Heading as="h3">A ledger, not a recording</Heading>
               <p>
                 Every exec, checkpoint, restore and fork made through the session is logged with its exit code and
-                duration. Replay, streaming terminals and preview URLs are not built.
+                duration. Replay and streaming terminals are not built; preview URLs are (run on the Mac NAT).
               </p>
               <span className={clsx(styles.tag, styles.tagWarn)}>MVP</span>
             </div>

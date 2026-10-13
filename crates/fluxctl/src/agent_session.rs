@@ -84,6 +84,20 @@ pub enum AgentCommand {
     },
     /// Workspace changes since the baseline, checkpoints and children. REST: `GET .../artifacts`.
     Artifacts { id: Uuid },
+    /// Mint an expiring preview URL for a guest port: whoever holds the URL reaches that port and
+    /// nothing else. REST: `POST .../preview`.
+    Expose {
+        id: Uuid,
+        /// The guest TCP port a server listens on.
+        port: u16,
+        /// Seconds until the URL stops working (1-86400).
+        #[arg(long, default_value_t = 3600)]
+        ttl: u64,
+    },
+    /// Live preview URLs of a session. REST: `GET .../previews`.
+    Previews { id: Uuid },
+    /// Revoke a preview URL by its token. REST: `DELETE .../preview/{token}`.
+    Unexpose { id: Uuid, token: String },
     /// Delete the session and its sandbox. REST: `DELETE /v1/agents/sessions/{id}`.
     Rm { id: Uuid },
 }
@@ -230,6 +244,39 @@ pub async fn run(r: &Remote, cmd: AgentCommand) -> Result<()> {
             .await
             .context("artifacts")?,
         ),
+        AgentCommand::Expose { id, port, ttl } => {
+            let mut v = r
+                .call(
+                    Method::POST,
+                    &format!("/v1/agents/sessions/{id}/preview"),
+                    Some(json!({"port": port, "ttl_seconds": ttl})),
+                )
+                .await
+                .context("preview")?;
+            // The daemon answers with a path; the full URL is the daemon's address plus that path.
+            if let Some(path) = v["url"].as_str() {
+                v["url"] = json!(format!("{}{}", r.base().trim_end_matches('/'), path));
+            }
+            show(&v)
+        }
+        AgentCommand::Previews { id } => show(
+            &r.call(
+                Method::GET,
+                &format!("/v1/agents/sessions/{id}/previews"),
+                None,
+            )
+            .await?,
+        ),
+        AgentCommand::Unexpose { id, token } => {
+            r.call(
+                Method::DELETE,
+                &format!("/v1/agents/sessions/{id}/preview/{token}"),
+                None,
+            )
+            .await?;
+            println!("{}", json!({"ok": true, "revoked": token}));
+            Ok(())
+        }
         AgentCommand::Rm { id } => {
             r.call(Method::DELETE, &format!("/v1/agents/sessions/{id}"), None)
                 .await?;

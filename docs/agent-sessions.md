@@ -71,6 +71,35 @@ A policy is compiled into fields the sandbox already enforces. The response repo
 
 `GET /v1/agents/sessions/{id}` reports `capabilities` for the session's backend so a client can decide without trying.
 
+### Preview URLs
+
+A session can hand out an expiring URL that reaches **one TCP port** of its guest, for a dev server or a web app an
+agent started:
+
+```bash
+fluxctl agent expose <session> 8000 --ttl 600      # -> {"url": "http://127.0.0.1:7788/preview/<64 hex>/", ...}
+fluxctl agent previews <session>
+fluxctl agent unexpose <session> <token>
+```
+
+| Route | |
+|---|---|
+| `POST /v1/agents/sessions/{id}/preview` `{port, ttl_seconds}` | mint (1-86400 s, default 3600); admin, tenant-scoped |
+| `GET  /v1/agents/sessions/{id}/previews` | live ones |
+| `DELETE /v1/agents/sessions/{id}/preview/{token}` | revoke |
+| `ANY  /preview/{token}/{*path}` | the preview; **no bearer token**, the URL is the credential |
+
+The token is 256 random bits stored under `<state_dir>/agent-previews/`. The guest sees the path with the
+`/preview/{token}` prefix removed. A token stops working when it expires, is revoked, or its session is deleted, and
+all three look the same (404). The token never enters the ledger. Responses carry `Referrer-Policy: no-referrer` and
+`Cache-Control: no-store`.
+
+What was run: on this M4 (`vz`, NAT session, `python3 -m http.server` in the guest) the URL returned the page and a
+sub-path, a made-up token and a revoked token returned 404; router tests cover expiry, revocation, tenant scoping and
+the ledger. **Not run:** Linux (the route reuses the netns proxy there), WebSocket, streaming or large bodies, and
+HTTPS (the URL is as private as the daemon's own address: put it behind TLS yourself). An **offline** session has no
+network address, so it has nothing to preview.
+
 ### Ledger
 
 An append-only JSON-lines file per session records the API-level actions taken *through the session*: `session.create`,
@@ -120,6 +149,6 @@ Each item says why it is not in the MVP.
 | HTTP method/path rules through the session policy | the egress proxy supports them on QEMU/KVM; not exposed here |
 | Streaming PTY for a session | the `console` route is VM-level and admin-only; no sandbox-scoped PTY |
 | Replay | the ledger is a log, not a recording |
-| Preview URLs | `/v1/sandboxes/{id}/http/{port}/*` exists (auth-gated); no signed public URL |
+| Preview URLs: WebSocket upgrades, large or streamed responses | the preview route is plain HTTP through the existing sandbox proxy; WebSocket and streaming bodies were not run through it (`/v1/sandboxes/{id}/ws/{port}/*` is separate and auth-gated) |
 | Browser / computer-use profile | vz display and input exist; no CDP/Playwright profile |
 | Secretless credentials | the credential broker (`docs/credential-broker.md`) is per sandbox; not bound to sessions |

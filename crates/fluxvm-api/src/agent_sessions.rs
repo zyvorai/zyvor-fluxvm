@@ -16,17 +16,21 @@
 //! * `POST   /v1/agents/sessions/{id}/fork`          fork into child sessions (in-tree KVM only)
 //! * `GET    /v1/agents/sessions/{id}/events`        ledger plus the sandbox's VM events
 //! * `GET    /v1/agents/sessions/{id}/artifacts`     workspace changes since the baseline
+//! * `POST   /v1/agents/sessions/{id}/preview`       mint an expiring preview URL for a guest port
+//! * `GET    /v1/agents/sessions/{id}/previews`      list live preview URLs
+//! * `DELETE /v1/agents/sessions/{id}/preview/{token}` revoke one
+//! * `ANY    /preview/{token}/{*path}`               the preview itself (the token is the credential)
 //!
 //! Records live in `<state_dir>/agent-sessions/<id>.json` and `<id>.ledger.jsonl`, so a
 //! session survives a daemon restart. What is *not* here: promote, replay, sandbox-scoped PTY,
-//! preview URLs and browser profiles (see `docs/agent-sessions.md`, "Roadmap").
+//! browser profiles (see `docs/agent-sessions.md`, "Roadmap").
 
 use super::{ApiError, ApiResult, AuditActor, TokenTenant, change_error, require_admin};
 use axum::{
     Extension, Json, Router,
     extract::{Path, Query, State},
     http::StatusCode,
-    routing::{get, post},
+    routing::{any, get, post},
 };
 use chrono::{DateTime, Utc};
 use fluxvm_core::config::Role;
@@ -54,6 +58,15 @@ pub(crate) fn routes() -> Router<Arc<VmManager>> {
         .route("/v1/agents/sessions/{id}/fork", post(fork))
         .route("/v1/agents/sessions/{id}/events", get(events))
         .route("/v1/agents/sessions/{id}/artifacts", get(artifacts))
+        .route("/v1/agents/sessions/{id}/preview", post(create_preview))
+        .route("/v1/agents/sessions/{id}/previews", get(list_previews))
+        .route(
+            "/v1/agents/sessions/{id}/preview/{token}",
+            axum::routing::delete(revoke_preview),
+        )
+        .route("/preview/{token}", any(preview_root))
+        .route("/preview/{token}/", any(preview_root))
+        .route("/preview/{token}/{*path}", any(preview_path))
 }
 
 // ---------------------------------------------------------------------------------------
@@ -1023,4 +1036,206 @@ mod tests {
         assert_eq!(all[0]["kind"], "exec");
         let _ = std::fs::remove_dir_all(&dir);
     }
+}
+
+// ---------------------------------------------------------------------------------------
+// Preview URLs: an expiring, revocable capability to one guest port of one session. The token
+// is 256 random bits kept in `<state_dir>/agent-previews/<token>.json`; whoever holds the URL
+// can reach that port and nothing else, until it expires, is revoked, or the session ends.
+
+#[derive(Debug, Serialize, Deserialize)]
+struct Preview {
+    token: String,
+    session: Uuid,
+    sandbox: Uuid,
+    port: u16,
+    created_at: DateTime<Utc>,
+    expires_at: DateTime<Utc>,
+}
+
+const PREVIEW_DEFAULT_TTL: u64 = 3600;
+const PREVIEW_MAX_TTL: u64 = 86_400;
+
+fn previews_dir(m: &VmManager) -> PathBuf {
+    m.cfg.state_dir.join("agent-previews")
+}
+
+fn valid_token(t: &str) -> bool {
+    t.len() == 64 && t.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+fn read_preview(m: &VmManager, token: &str) -> Option<Preview> {
+    if !valid_token(token) {
+        return None;
+    }
+    let bytes = std::fs::read(previews_dir(m).join(format!("{token}.json"))).ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+#[derive(Debug, Deserialize)]
+struct PreviewBody {
+    port: u16,
+    #[serde(default)]
+    ttl_seconds: Option<u64>,
+}
+
+async fn create_preview(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    token_tenant: Option<Extension<TokenTenant>>,
+    Path(id): Path<Uuid>,
+    Json(body): Json<PreviewBody>,
+) -> ApiResult<(StatusCode, Json<Value>)> {
+    require_admin(role)?;
+    let s = load(&m, id, &caller_tenant(&token_tenant)).await?;
+    running(&s)?;
+    let bad = |msg: &str| ApiError {
+        status: StatusCode::BAD_REQUEST,
+        message: msg.to_string(),
+    };
+    if body.port == 0 {
+        return Err(bad("port must be 1-65535"));
+    }
+    let ttl = body.ttl_seconds.unwrap_or(PREVIEW_DEFAULT_TTL);
+    if ttl == 0 || ttl > PREVIEW_MAX_TTL {
+        return Err(bad("ttl_seconds must be 1-86400"));
+    }
+    let token = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
+    let now = Utc::now();
+    let p = Preview {
+        token: token.clone(),
+        session: id,
+        sandbox: s.sandbox_id,
+        port: body.port,
+        created_at: now,
+        expires_at: now + chrono::Duration::seconds(ttl as i64),
+    };
+    let d = previews_dir(&m);
+    tokio::fs::create_dir_all(&d)
+        .await
+        .map_err(anyhow::Error::from)?;
+    let bytes = serde_json::to_vec_pretty(&p).map_err(anyhow::Error::from)?;
+    tokio::fs::write(d.join(format!("{token}.json")), bytes)
+        .await
+        .map_err(anyhow::Error::from)?;
+    // The token is a credential: the ledger gets the port and expiry, never the token.
+    record(
+        &m,
+        id,
+        "preview.create",
+        json!({"port": p.port, "expires_at": p.expires_at}),
+    );
+    Ok((
+        StatusCode::CREATED,
+        Json(json!({
+            "token": token,
+            "url": format!("/preview/{token}/"),
+            "port": p.port,
+            "expires_at": p.expires_at,
+        })),
+    ))
+}
+
+async fn list_previews(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    token_tenant: Option<Extension<TokenTenant>>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<Value>> {
+    require_admin(role)?;
+    load(&m, id, &caller_tenant(&token_tenant)).await?;
+    let now = Utc::now();
+    let mut items = Vec::new();
+    if let Ok(rd) = std::fs::read_dir(previews_dir(&m)) {
+        for e in rd.flatten() {
+            let Ok(b) = std::fs::read(e.path()) else {
+                continue;
+            };
+            if let Ok(p) = serde_json::from_slice::<Preview>(&b)
+                && p.session == id
+                && p.expires_at > now
+            {
+                items.push(json!({
+                    "token": p.token, "port": p.port,
+                    "created_at": p.created_at, "expires_at": p.expires_at,
+                }));
+            }
+        }
+    }
+    Ok(Json(json!({"items": items})))
+}
+
+async fn revoke_preview(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    token_tenant: Option<Extension<TokenTenant>>,
+    Path((id, token)): Path<(Uuid, String)>,
+) -> ApiResult<StatusCode> {
+    require_admin(role)?;
+    load(&m, id, &caller_tenant(&token_tenant)).await?;
+    match read_preview(&m, &token) {
+        Some(p) if p.session == id => {
+            let _ = tokio::fs::remove_file(previews_dir(&m).join(format!("{token}.json"))).await;
+            record(&m, id, "preview.revoke", json!({"port": p.port}));
+            Ok(StatusCode::NO_CONTENT)
+        }
+        _ => Err(ApiError {
+            status: StatusCode::NOT_FOUND,
+            message: "preview not found".into(),
+        }),
+    }
+}
+
+async fn preview_root(
+    State(m): State<Arc<VmManager>>,
+    Path(token): Path<String>,
+    req: axum::extract::Request,
+) -> axum::response::Response {
+    preview_serve(m, token, String::new(), req).await
+}
+
+async fn preview_path(
+    State(m): State<Arc<VmManager>>,
+    Path((token, path)): Path<(String, String)>,
+    req: axum::extract::Request,
+) -> axum::response::Response {
+    preview_serve(m, token, path, req).await
+}
+
+async fn preview_serve(
+    m: Arc<VmManager>,
+    token: String,
+    path: String,
+    req: axum::extract::Request,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    // Unknown, expired and revoked tokens are indistinguishable on purpose.
+    let gone = || (StatusCode::NOT_FOUND, "preview not found").into_response();
+    let Some(p) = read_preview(&m, &token) else {
+        return gone();
+    };
+    if p.expires_at <= Utc::now() {
+        let _ = std::fs::remove_file(previews_dir(&m).join(format!("{token}.json")));
+        return gone();
+    }
+    // The session must still be running: deleting it ends every preview.
+    let alive = std::fs::read(session_path(&m, p.session))
+        .ok()
+        .and_then(|b| serde_json::from_slice::<Session>(&b).ok())
+        .is_some_and(|s| s.state == "running");
+    if !alive {
+        return gone();
+    }
+    let mut resp = super::sandbox_proxy_inner(m, p.sandbox, p.port, path, req).await;
+    // A preview is somebody else's app: never let a browser leak the token via Referer or cache it.
+    let h = resp.headers_mut();
+    h.insert(
+        axum::http::header::REFERRER_POLICY,
+        axum::http::HeaderValue::from_static("no-referrer"),
+    );
+    h.insert(
+        axum::http::header::CACHE_CONTROL,
+        axum::http::HeaderValue::from_static("no-store"),
+    );
+    resp
 }

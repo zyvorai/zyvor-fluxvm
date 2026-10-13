@@ -141,9 +141,12 @@ async fn auth_middleware(State(auth): State<AuthState>, mut req: Request, next: 
     let method = req.method().clone();
     // Liveness/readiness probes must work without auth (Kubernetes convention);
     // the API description is public so tooling can fetch it before a token.
+    // `/preview/{token}/...` is the signed, expiring preview URL of an agent session: the token
+    // in the path is the credential (see agent_sessions.rs), so no bearer token is required.
     if path == "/healthz"
         || path == "/readyz"
         || path == "/v1/openapi.json"
+        || path.starts_with("/preview/")
         || ((method == Method::GET || method == Method::HEAD)
             && CONSOLE_PATHS.contains(&path.as_str()))
     {
@@ -1708,14 +1711,13 @@ async fn connect_in_netns(
             }
             std::net::TcpStream::connect_timeout(&addr, Duration::from_secs(5))
         }
-        // Network namespaces are a Linux kernel feature; a netns sandbox cannot exist elsewhere.
+        // Network namespaces are a Linux kernel feature. Elsewhere (macOS `vz`) a sandbox's NAT
+        // address (vmnet, e.g. 192.168.64.x) is routable from the host itself, so connect directly.
+        // A guest with no network card has no `guest_ip` and never reaches this point.
         #[cfg(not(target_os = "linux"))]
         {
-            let _ = (pid, addr);
-            Err(std::io::Error::new(
-                std::io::ErrorKind::Unsupported,
-                "network namespaces are only available on Linux",
-            ))
+            let _ = pid;
+            std::net::TcpStream::connect_timeout(&addr, Duration::from_secs(5))
         }
     }
     let (tx, rx) = tokio::sync::oneshot::channel();
@@ -1861,7 +1863,7 @@ async fn proxy_over_tcp(
         .unwrap_or_else(|_| StatusCode::BAD_GATEWAY.into_response())
 }
 
-async fn sandbox_proxy_inner(
+pub(crate) async fn sandbox_proxy_inner(
     m: Arc<VmManager>,
     id: Uuid,
     port: u16,
@@ -6883,6 +6885,146 @@ mod tests {
             }
             let (_, list) = call(app, "GET", "/v1/agents/sessions", "other", None).await;
             assert!(!list.contains(&id.to_string()), "{list}");
+        }
+
+        #[tokio::test]
+        async fn agent_session_preview_urls_are_tokens_that_expire_and_can_be_revoked() {
+            let m = procbox_manager(tenant_tokens(), false);
+            let id = seed_session(&m, Some("acme"), "vz", "running");
+            let app = router(m.clone());
+            let base = format!("/v1/agents/sessions/{id}");
+            // Bad input is refused before anything is minted.
+            for body in [
+                r#"{"port":0}"#,
+                r#"{"port":8000,"ttl_seconds":0}"#,
+                r#"{"port":8000,"ttl_seconds":86401}"#,
+            ] {
+                let (st, msg) = call(
+                    app.clone(),
+                    "POST",
+                    &format!("{base}/preview"),
+                    "acme",
+                    Some(body),
+                )
+                .await;
+                assert_eq!(st, StatusCode::BAD_REQUEST, "{body} -> {msg}");
+            }
+            // Another tenant cannot mint one for this session.
+            let (st, _) = call(
+                app.clone(),
+                "POST",
+                &format!("{base}/preview"),
+                "other",
+                Some(r#"{"port":8000}"#),
+            )
+            .await;
+            assert_eq!(st, StatusCode::NOT_FOUND);
+
+            let (st, body) = call(
+                app.clone(),
+                "POST",
+                &format!("{base}/preview"),
+                "acme",
+                Some(r#"{"port":8000,"ttl_seconds":60}"#),
+            )
+            .await;
+            assert_eq!(st, StatusCode::CREATED, "{body}");
+            let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+            let token = v["token"].as_str().unwrap().to_string();
+            assert_eq!(token.len(), 64);
+            assert_eq!(v["url"], format!("/preview/{token}/"));
+            // The token never reaches the ledger.
+            let ledger = std::fs::read_to_string(
+                m.cfg
+                    .state_dir
+                    .join("agent-sessions")
+                    .join(format!("{id}.ledger.jsonl")),
+            )
+            .unwrap();
+            assert!(
+                ledger.contains("preview.create") && !ledger.contains(&token),
+                "{ledger}"
+            );
+
+            // The preview needs no bearer token: it gets past auth and fails at the sandbox (which
+            // this test never booted), not with 401/404.
+            let st = status_for(
+                app.clone(),
+                "GET",
+                &format!("/preview/{token}/index.html"),
+                None,
+            )
+            .await;
+            assert_ne!(st, StatusCode::UNAUTHORIZED);
+            assert_ne!(st, StatusCode::NOT_FOUND);
+            // Unknown and malformed tokens are 404 and say nothing else.
+            for t in [
+                "0".repeat(64),
+                "short".to_string(),
+                "../../etc/passwd".to_string(),
+            ] {
+                let st = status_for(app.clone(), "GET", &format!("/preview/{t}/"), None).await;
+                assert_eq!(st, StatusCode::NOT_FOUND, "{t}");
+            }
+            // Another tenant cannot list or revoke it.
+            let (st, _) = call(
+                app.clone(),
+                "GET",
+                &format!("{base}/previews"),
+                "other",
+                None,
+            )
+            .await;
+            assert_eq!(st, StatusCode::NOT_FOUND);
+            let (st, list) = call(
+                app.clone(),
+                "GET",
+                &format!("{base}/previews"),
+                "acme",
+                None,
+            )
+            .await;
+            assert_eq!(st, StatusCode::OK);
+            assert!(list.contains(&token), "{list}");
+
+            // Revoked means gone.
+            let (st, _) = call(
+                app.clone(),
+                "DELETE",
+                &format!("{base}/preview/{token}"),
+                "acme",
+                None,
+            )
+            .await;
+            assert_eq!(st, StatusCode::NO_CONTENT);
+            let st = status_for(app.clone(), "GET", &format!("/preview/{token}/"), None).await;
+            assert_eq!(st, StatusCode::NOT_FOUND);
+
+            // Expired means gone, and the file is cleaned up.
+            let (_, body) = call(
+                app.clone(),
+                "POST",
+                &format!("{base}/preview"),
+                "acme",
+                Some(r#"{"port":8000}"#),
+            )
+            .await;
+            let t2 = serde_json::from_str::<serde_json::Value>(&body).unwrap()["token"]
+                .as_str()
+                .unwrap()
+                .to_string();
+            let f = m
+                .cfg
+                .state_dir
+                .join("agent-previews")
+                .join(format!("{t2}.json"));
+            let mut rec: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&f).unwrap()).unwrap();
+            rec["expires_at"] = json!(chrono::Utc::now() - chrono::Duration::seconds(1));
+            std::fs::write(&f, rec.to_string()).unwrap();
+            let st = status_for(app, "GET", &format!("/preview/{t2}/"), None).await;
+            assert_eq!(st, StatusCode::NOT_FOUND);
+            assert!(!f.exists());
         }
 
         #[tokio::test]
