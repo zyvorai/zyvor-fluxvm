@@ -12,7 +12,7 @@ do with `/v1/sandboxes` and `/v1/vms` it can now do through one id.
 
 ## API
 
-All routes need an `admin` token and are tenant-scoped (a tenant token only ever sees its own sessions; another
+All routes need an `admin` token (or a [session token](#session-tokens) for the operations it was minted with) and are tenant-scoped (a tenant token only ever sees its own sessions; another
 tenant's id answers `404`, not `403`).
 
 | Route | What it does |
@@ -22,6 +22,7 @@ tenant's id answers `404`, not `403`).
 | `GET /v1/agents/sessions/{id}` | One session: backend, capabilities, policy, workspace, checkpoints, children. |
 | `DELETE /v1/agents/sessions/{id}` | Delete the session and its sandbox. Idempotent (`204`). |
 | `POST /v1/agents/sessions/{id}/exec` | `{command, timeout_seconds?}` through the sandbox's guest path. Recorded in the ledger. |
+| `POST /v1/agents/sessions/{id}/tokens` | `{ops, ttl_seconds?, label?}`: mint a [session token](#session-tokens). `GET` lists live ones (no secrets); `DELETE .../tokens/{token}` revokes. Admin only. |
 | `POST /v1/agents/sessions/{id}/checkpoint` | `{tag?, memory?}`; `memory:false` is disk-only. |
 | `POST /v1/agents/sessions/{id}/restore` | `{tag}`; only tags this session took. |
 | `POST /v1/agents/sessions/{id}/fork` | `{count, identity?}` (1-32) into child sessions that start from the current state. `identity` is `best-effort` (default), `unique` or `preserve`. **`409` with the reason when the session cannot fork; nothing is created.** |
@@ -57,6 +58,32 @@ fork, then exec in every child in parallel, then delete the children (`--keep` k
   `409`; fork `409`. A memory restore on a session with a volume brought the volume back to the checkpoint's content
   in that run, so treat a restore as rolling the volume back too. Not run: Linux (QEMU volumes are separate virtiofs
   directories), concurrent readers, volume resize while attached.
+
+### Session tokens
+
+An admin mints a bearer token that works on **one session** and only for the operations it names, so an agent can
+run commands and read its workspace without VM-management access.
+
+```json
+POST /v1/agents/sessions/{id}/tokens
+{"ops": ["exec", "files.read", "files.write", "git", "jobs"], "ttl_seconds": 3600, "label": "claude-code"}
+```
+
+The response carries `token` (`fxst_…`) **once**; the store keeps only its SHA-256. Grantable operations: `read`
+(session record, events, trajectory, artifacts, preview list), `exec`, `jobs`, `files.read`, `files.write`, `git`,
+`checkpoint`, `preview`. Not grantable, so admin-only: create, list, delete, restore, fork, terminals and `ssh`, and
+minting tokens (a session token cannot mint another).
+
+- A token reaches only `/v1/agents/sessions/{its id}…`; any other path (another session, `/v1/vms`, the session list)
+  is `403`. An operation it was not granted is `403`; an expired, revoked or unknown token is `401`.
+- Lifetime is `ttl_seconds` (default 3600, at most 86400), capped at the session's own expiry. Deleting the session
+  revokes every token. At most 32 live tokens per session. Tokens are ledgered as `token.mint` / `token.revoke`
+  (never the secret) and calls are audited as `session-token:<id>`.
+- A scoped caller sees the session as the session's tenant does. The process and filesystem policy applies to its
+  `exec`, jobs, files and git calls exactly as to an admin's.
+
+Not done: the CLI and MCP tools do not mint or use these yet (`fluxctl` still takes one bearer token), and tokens are
+not narrowed by path or by git repository.
 
 ### Policy
 
