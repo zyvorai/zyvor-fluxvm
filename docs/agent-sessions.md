@@ -205,6 +205,18 @@ a recording of the guest: commands an agent ran inside a shell it opened are one
 `<state_dir>/agent-sessions/<id>.json` and `<id>.ledger.jsonl`, so sessions survive a daemon restart; a sandbox that
 expired by TTL leaves the session record behind until `DELETE`.
 
+### Trajectory and OpenTelemetry traces
+
+`GET /v1/agents/sessions/{id}/trajectory` merges the ledger and the sandbox's VM events into one numbered,
+time-ordered list. `fluxctl agent export <session> [--out file]` writes it as JSON Lines (a session header, then one
+step per line). `--otlp http://collector:4318 [--otlp-header KEY=VALUE]` also sends it as an OTLP/HTTP JSON trace to
+`<endpoint>/v1/traces`: one root span `agent.session`, one child span per step, trace id = the session's UUID, an
+`exec` span covering its `duration_ms`, other steps as instants, and status error for a non-zero exit or a refused
+command. It is built client-side from what the ledger records, after the fact: **no live streaming, no agent
+reasoning or tool-call content** (FluxVM does not see it). Run: a session with a good exec, a failing exec and a
+refused command, posted to a stub receiver that checked the path, content type and header and the 7 spans. **Not
+run:** a real OpenTelemetry Collector or backend, OTLP/gRPC or protobuf.
+
 ## Clients
 
 ```bash

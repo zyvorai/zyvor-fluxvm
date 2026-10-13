@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- **OTLP trace export.** `fluxctl agent export <session> --otlp http://collector:4318 [--otlp-header K=V]` sends a
+  session's trajectory as one OTLP/HTTP JSON trace (root span plus a span per step). After-the-fact, built from the
+  ledger: no live stream, no reasoning content. Checked against a stub receiver, not a real collector.
+
 - **Volumes for vz agent sessions.** `runtime.volumes` / `fluxctl agent run --volume NAME:/path` attaches a named
   host volume as a virtio disk, formats it ext4 only when `blkid` says it is empty, mounts it and persists an fstab
   line. One VM at a time (`409` otherwise), no fork for such a session, tenant tokens refused. New sandbox create
