@@ -26,8 +26,10 @@ and stop; do not try to install anything yourself.
    with the `next_offset` it returned; `session_job_kill` to stop it. There is no stdin.
 6. `session_file_write` / `session_file_read` / `session_files` to move files in and out and to look around; they
    are faster and safer than `cat`/heredocs through `session_exec`. About 1.5 MiB per write.
-7. `session_artifacts` to see added/modified/deleted files under `/workspace` before reporting the result.
-8. `session_delete` when done. Sessions also expire by TTL.
+7. `session_git` (`status`, `diff`, `commit`, `branch`, `log`) for the workspace repo. If it answers that git is not
+   installed, install it first (`sudo -n apt-get install -y git`; needs a session with network access). It never pushes.
+8. `session_artifacts` to see added/modified/deleted files under `/workspace` before reporting the result.
+9. `session_delete` when done. Sessions also expire by TTL.
 
 ## Trying several approaches
 

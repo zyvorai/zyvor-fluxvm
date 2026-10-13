@@ -84,6 +84,12 @@ pub enum AgentCommand {
     },
     /// Workspace changes since the baseline, checkpoints and children. REST: `GET .../artifacts`.
     Artifacts { id: Uuid },
+    /// Git in the session's workspace repo (needs git in the guest). REST: `.../git/*`.
+    Git {
+        id: Uuid,
+        #[command(subcommand)]
+        op: GitOp,
+    },
     /// List a directory in the guest (or stat a file). REST: `GET .../files?path=`.
     Files { id: Uuid, path: String },
     /// Print a guest file to stdout. REST: `GET .../files/content?path=`.
@@ -145,6 +151,62 @@ pub enum AgentCommand {
     Unexpose { id: Uuid, token: String },
     /// Delete the session and its sandbox. REST: `DELETE /v1/agents/sessions/{id}`.
     Rm { id: Uuid },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum GitOp {
+    /// Branch and changed paths.
+    Status {
+        /// Repository directory in the guest (default: the session workspace).
+        #[arg(long)]
+        repo: Option<String>,
+    },
+    /// The working-tree diff (or `--staged`).
+    Diff {
+        #[arg(long)]
+        repo: Option<String>,
+        #[arg(long)]
+        staged: bool,
+        /// Limit to one path, relative to the repository.
+        path: Option<String>,
+    },
+    /// Recent commits.
+    Log {
+        #[arg(long)]
+        repo: Option<String>,
+        #[arg(short = 'n', long)]
+        limit: Option<u32>,
+    },
+    /// Stage everything (unless `--staged-only`) and commit.
+    Commit {
+        message: String,
+        #[arg(long)]
+        repo: Option<String>,
+        /// Commit only what is already staged.
+        #[arg(long)]
+        staged_only: bool,
+    },
+    /// Create a branch and switch to it.
+    Branch {
+        name: String,
+        #[arg(long)]
+        repo: Option<String>,
+    },
+}
+
+fn git_query(repo: &Option<String>, extra: &[(&str, String)]) -> String {
+    let mut parts = Vec::new();
+    if let Some(r) = repo {
+        parts.push(format!("repo={}", crate::remote::encode_query(r)));
+    }
+    for (k, v) in extra {
+        parts.push(format!("{k}={}", crate::remote::encode_query(v)));
+    }
+    if parts.is_empty() {
+        String::new()
+    } else {
+        format!("?{}", parts.join("&"))
+    }
 }
 
 fn show(v: &Value) -> Result<()> {
@@ -289,6 +351,89 @@ pub async fn run(r: &Remote, cmd: AgentCommand) -> Result<()> {
             .await
             .context("artifacts")?,
         ),
+        AgentCommand::Git { id, op } => {
+            let base = format!("/v1/agents/sessions/{id}/git");
+            match op {
+                GitOp::Status { repo } => show(
+                    &r.call(
+                        Method::GET,
+                        &format!("{base}/status{}", git_query(&repo, &[])),
+                        None,
+                    )
+                    .await
+                    .context("git status")?,
+                ),
+                GitOp::Diff { repo, staged, path } => {
+                    let mut extra = Vec::new();
+                    if staged {
+                        extra.push(("staged", "true".to_string()));
+                    }
+                    if let Some(p) = path {
+                        extra.push(("path", p));
+                    }
+                    let v = r
+                        .call(
+                            Method::GET,
+                            &format!("{base}/diff{}", git_query(&repo, &extra)),
+                            None,
+                        )
+                        .await
+                        .context("git diff")?;
+                    // The diff itself is what you want on stdout, ready for `| less` or `| git apply`.
+                    print!("{}", v["diff"].as_str().unwrap_or(""));
+                    if v["truncated"].as_bool() == Some(true) {
+                        eprintln!("[diff truncated at 256 KiB]");
+                    }
+                    Ok(())
+                }
+                GitOp::Log { repo, limit } => {
+                    let extra: Vec<(&str, String)> = limit
+                        .map(|n| ("limit", n.to_string()))
+                        .into_iter()
+                        .collect();
+                    let v = r
+                        .call(
+                            Method::GET,
+                            &format!("{base}/log{}", git_query(&repo, &extra)),
+                            None,
+                        )
+                        .await
+                        .context("git log")?;
+                    for c in v["commits"].as_array().into_iter().flatten() {
+                        println!(
+                            "{} {} {} {}",
+                            c["commit"].as_str().unwrap_or("").get(..8).unwrap_or(""),
+                            c["date"].as_str().unwrap_or(""),
+                            c["author"].as_str().unwrap_or(""),
+                            c["subject"].as_str().unwrap_or("")
+                        );
+                    }
+                    Ok(())
+                }
+                GitOp::Commit {
+                    message,
+                    repo,
+                    staged_only,
+                } => show(
+                    &r.call(
+                        Method::POST,
+                        &format!("{base}/commit"),
+                        Some(json!({"message": message, "repo": repo, "all": !staged_only})),
+                    )
+                    .await
+                    .context("git commit")?,
+                ),
+                GitOp::Branch { name, repo } => show(
+                    &r.call(
+                        Method::POST,
+                        &format!("{base}/branch"),
+                        Some(json!({"name": name, "repo": repo})),
+                    )
+                    .await
+                    .context("git branch")?,
+                ),
+            }
+        }
         AgentCommand::Files { id, path } => show(
             &r.call(
                 Method::GET,
