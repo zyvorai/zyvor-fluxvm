@@ -71,7 +71,7 @@ A policy is compiled into fields the sandbox already enforces. The response repo
 | `network.allow` entries with `methods` or `paths` | **refused (`400`)** | not supported yet; HTTP method/path rules exist for the QEMU/KVM egress proxy, not through this API |
 | `process: {allow: [glob…], deny: [glob…]}` | `policy.process` | the API, on `exec` and job start (`403`, ledgered as `exec.refused` / `job.refused`). A guardrail on the command string, **not a security boundary**: see below |
 | `process.ask` | **refused (`400`)** | there is no per-command approval flow yet |
-| `filesystem` | stored, listed under `policy.unenforced` | **nothing enforces it yet** |
+| `filesystem: {read, write, enforcement?}` | `policy.exec`: a guest Landlock + seccomp policy (system dirs read-only, `/tmp` and the workspace/volumes writable, plus your `read`/`write` paths; a trailing `/**` means the directory) | the guest agent, on `exec`, jobs, file and git verbs. Linux guests only (including Linux on Apple VZ). **Create probes enforcement and returns `400` if the guest cannot give it** (macOS guest, procbox sandbox); `enforcement: "best-effort"` creates the session anyway and `capabilities.confinement` says `false`. Network reach is still the sandbox's (no NIC / egress proxy). Not run live yet |
 
 `process` rules match the command string as submitted, with `*` as the only wildcard. A command is split on
 `; && || | &` and newlines and every piece is checked: a piece matching `deny` refuses the whole command, and with a
@@ -100,7 +100,7 @@ daemon runs `ssh -tt` to the guest (the vsock proxy for an offline session), so 
 job control and full-screen programs work. The size is set when it opens, and a resize is a text frame
 `{"resize":{"cols":N,"rows":N}}` (`fluxctl` sends one on SIGWINCH): the daemon sets the guest tty's window size from a
 second SSH exec, so the foreground program gets SIGWINCH after about a round trip. The close frame's reason is `exit=<code>` and the CLI exits with it. Opens and closes (duration, byte
-counts, exit code, never the content) are ledgered as `pty.open`/`pty.close`. At most 16 at once on a host, one hour
+counts, exit code, never the content) are ledgered as `pty.open`/`pty.close`. A session with `process` rules or a `filesystem` policy refuses the terminal and `ssh` (`403`): both are an SSH shell, which the guest confinement does not cover. At most 16 at once on a host, one hour
 each. A session with `policy.process` rules is **refused (403)**: a shell would bypass them.
 
 **Browser terminal.** `fluxctl agent shell <session> --web` (or `/console/terminal?session=<id>` on the daemon) opens a
@@ -354,7 +354,7 @@ Each item says why it is not in the MVP.
 | Promote a child's change set into its parent | children are independent sandboxes; copying the winner's files back needs a cross-sandbox transfer that is not built. `speculate` + `changesets/{cs}/apply` (MCP: `sandbox_speculate`, `sandbox_changeset_decide`) cover the single-sandbox case |
 | Lazy memory restore (sub-second claim/fork) | a restore engine change, not an API change; not started |
 | Workspace overlay mode, read-only mounts | `mode: "overlay"` is refused; clone is the only writable mode |
-| Filesystem and process policy enforcement | procbox has Landlock/seccomp; wiring it into VM sessions is not done |
+| Process policy as a security boundary | `process` rules are still string globs; filesystem confinement is wired, command confinement beyond it is not |
 | HTTP method/path rules through the session policy | the egress proxy supports them on QEMU/KVM; not exposed here |
 | Streaming exec output | `exec` is still buffered and jobs are polled; the terminal (`shell`) streams |
 | Replay | the ledger is a log, not a recording |
