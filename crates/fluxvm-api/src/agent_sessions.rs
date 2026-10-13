@@ -296,6 +296,10 @@ struct Session {
     checkpoints: Vec<Checkpoint>,
     #[serde(default)]
     volumes: Vec<VolumeMount>,
+    /// Bumped by every save. `If-Match: <revision>` on checkpoint, restore, fork and delete
+    /// makes the call fail with 412 when the session changed since the caller read it.
+    #[serde(default)]
+    revision: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -330,7 +334,8 @@ fn not_found(id: Uuid) -> ApiError {
     }
 }
 
-async fn save(m: &VmManager, s: &Session) -> ApiResult<()> {
+async fn save(m: &VmManager, s: &mut Session) -> ApiResult<()> {
+    s.revision += 1;
     let d = dir(m);
     tokio::fs::create_dir_all(&d)
         .await
@@ -346,15 +351,150 @@ async fn save(m: &VmManager, s: &Session) -> ApiResult<()> {
     Ok(())
 }
 
+// ---------------------------------------------------------------------------------------
+// Lifecycle gate: conflicting operations on one session are refused, not interleaved.
+
+#[derive(Default)]
+struct Gate {
+    /// The lifecycle operation in flight (checkpoint, restore, fork or delete).
+    lifecycle: Option<&'static str>,
+    /// Commands, jobs and mutating file/git calls currently running.
+    work: u32,
+}
+
+static GATES: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<Uuid, Gate>>> =
+    std::sync::OnceLock::new();
+
+fn with_gate<R>(id: Uuid, f: impl FnOnce(&mut Gate) -> R) -> R {
+    let mut map = GATES
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let g = map.entry(id).or_default();
+    let out = f(g);
+    if g.lifecycle.is_none() && g.work == 0 {
+        map.remove(&id);
+    }
+    out
+}
+
+fn gate_conflict(message: String) -> ApiError {
+    ApiError {
+        status: StatusCode::CONFLICT,
+        message,
+    }
+}
+
+/// Held while a checkpoint, restore, fork or delete runs.
+struct LifecycleGuard(Uuid);
+
+impl Drop for LifecycleGuard {
+    fn drop(&mut self) {
+        with_gate(self.0, |g| g.lifecycle = None);
+    }
+}
+
+/// Takes the session's lifecycle slot, or `409` naming what holds it. Restore and fork also
+/// refuse while commands run (they would replace the machine under them); a checkpoint does
+/// not, and delete does not either (it is how a stuck session is ended).
+fn begin_lifecycle(id: Uuid, kind: &'static str) -> ApiResult<LifecycleGuard> {
+    with_gate(id, |g| {
+        if let Some(k) = g.lifecycle {
+            return Err(gate_conflict(format!(
+                "a {k} is already in progress on this session; retry when it finishes"
+            )));
+        }
+        if matches!(kind, "restore" | "fork") && g.work > 0 {
+            return Err(gate_conflict(format!(
+                "{} command(s) are still running on this session; a {kind} would replace the machine under them",
+                g.work
+            )));
+        }
+        g.lifecycle = Some(kind);
+        Ok(LifecycleGuard(id))
+    })
+}
+
+/// Held while a command, job start or mutating file/git call runs.
+struct WorkGuard(Uuid);
+
+impl Drop for WorkGuard {
+    fn drop(&mut self) {
+        with_gate(self.0, |g| g.work = g.work.saturating_sub(1));
+    }
+}
+
+fn begin_work(id: Uuid) -> ApiResult<WorkGuard> {
+    with_gate(id, |g| {
+        if let Some(k) = g.lifecycle {
+            return Err(gate_conflict(format!(
+                "a {k} is in progress on this session; retry shortly"
+            )));
+        }
+        g.work += 1;
+        Ok(WorkGuard(id))
+    })
+}
+
+/// `If-Match: <revision>` (quoted or not, or `*`): `412` when the session moved on.
+fn check_if_match(h: &axum::http::HeaderMap, s: &Session) -> ApiResult<()> {
+    let Some(v) = h.get(axum::http::header::IF_MATCH) else {
+        return Ok(());
+    };
+    let raw = v.to_str().unwrap_or("").trim().trim_matches('"');
+    if raw == "*" {
+        return Ok(());
+    }
+    let want: u64 = raw.parse().map_err(|_| ApiError {
+        status: StatusCode::BAD_REQUEST,
+        message: "If-Match must be the session's revision number".into(),
+    })?;
+    if want != s.revision {
+        return Err(ApiError {
+            status: StatusCode::PRECONDITION_FAILED,
+            message: format!(
+                "the session changed: it is at revision {}, the request expected {want}",
+                s.revision
+            ),
+        });
+    }
+    Ok(())
+}
+
+/// Brings a stored session in line with what the daemon knows. A session past its expiry is
+/// persisted as `expired`; every route sees that. With `probe`, a sandbox the manager no longer
+/// has is also reported as `gone`, in the response only: that lookup can fail for reasons that
+/// are not the sandbox being deleted, so it is never written back and never changes what the
+/// other routes do. Only the session record and the listing ask for it.
+async fn reconcile(m: &VmManager, s: &mut Session, probe: bool) {
+    if s.state != "running" {
+        return;
+    }
+    if s.expires_at.is_some_and(|e| e <= Utc::now()) {
+        s.state = "expired".into();
+        if save(m, s).await.is_ok() {
+            record(
+                m,
+                s.id,
+                "session.expire",
+                json!({"expired_at": s.expires_at}),
+            );
+        }
+    } else if probe && m.get(s.sandbox_id).await.is_err() {
+        s.state = "gone".into();
+    }
+}
+
 async fn load(m: &VmManager, id: Uuid, tenant: &Option<String>) -> ApiResult<Session> {
     let bytes = tokio::fs::read(session_path(m, id))
         .await
         .map_err(|_| not_found(id))?;
-    let s: Session = serde_json::from_slice(&bytes).map_err(anyhow::Error::from)?;
+    let mut s: Session = serde_json::from_slice(&bytes).map_err(anyhow::Error::from)?;
     // A tenant-scoped token only ever sees its own sessions (404, not 403, like sandboxes).
     if &s.tenant != tenant {
         return Err(not_found(id));
     }
+    reconcile(m, &mut s, false).await;
     Ok(s)
 }
 
@@ -877,6 +1017,7 @@ async fn create_session(
         workspace: None,
         checkpoints: Vec::new(),
         volumes: Vec::new(),
+        revision: 0,
     };
     record(
         &m,
@@ -1038,7 +1179,7 @@ async fn create_session(
         }
         session.capabilities.confinement = enforced;
     }
-    save(&m, &session).await?;
+    save(&m, &mut session).await?;
     Ok((StatusCode::CREATED, Json(json!(session))))
 }
 
@@ -1057,9 +1198,10 @@ async fn list_sessions(
                 continue;
             }
             if let Ok(b) = tokio::fs::read(e.path()).await
-                && let Ok(s) = serde_json::from_slice::<Session>(&b)
+                && let Ok(mut s) = serde_json::from_slice::<Session>(&b)
                 && s.tenant == tenant
             {
+                reconcile(&m, &mut s, true).await;
                 items.push(s);
             }
         }
@@ -1076,7 +1218,8 @@ async fn get_session(
     Path(id): Path<Uuid>,
 ) -> ApiResult<Json<Value>> {
     authorize(role, &scope, id, Op::Read)?;
-    let s = load(&m, id, &caller_tenant(&token_tenant)).await?;
+    let mut s = load(&m, id, &caller_tenant(&token_tenant)).await?;
+    reconcile(&m, &mut s, true).await;
     Ok(Json(json!(s)))
 }
 
@@ -1085,16 +1228,19 @@ async fn delete_session(
     Extension(role): Extension<Role>,
     token_tenant: Option<Extension<TokenTenant>>,
     Path(id): Path<Uuid>,
+    headers: axum::http::HeaderMap,
 ) -> ApiResult<StatusCode> {
     require_admin(role)?;
+    let _gate = begin_lifecycle(id, "delete")?;
     let mut s = load(&m, id, &caller_tenant(&token_tenant)).await?;
+    check_if_match(&headers, &s)?;
     if s.state != "deleted" {
         // The sandbox may already be gone (TTL); the session is still closed.
         if let Err(e) = m.delete(s.sandbox_id).await {
             tracing::warn!(session = %id, error = %format!("{e:#}"), "agent session: sandbox delete");
         }
         s.state = "deleted".into();
-        save(&m, &s).await?;
+        save(&m, &mut s).await?;
         record(&m, id, "session.delete", json!({}));
     }
     agent_session_auth::purge(&m.cfg.state_dir, id).await;
@@ -1255,6 +1401,7 @@ async fn exec_session(
     Json(body): Json<ExecBody>,
 ) -> ApiResult<Json<Value>> {
     authorize(role, &scope, id, Op::Exec)?;
+    let _work = begin_work(id)?;
     let s = load(&m, id, &caller_tenant(&token_tenant)).await?;
     running(&s)?;
     if body.command.trim().is_empty() {
@@ -1311,10 +1458,13 @@ async fn checkpoint(
     scope: Option<Extension<SessionScope>>,
     token_tenant: Option<Extension<TokenTenant>>,
     Path(id): Path<Uuid>,
+    headers: axum::http::HeaderMap,
     body: Option<Json<CheckpointBody>>,
 ) -> ApiResult<Json<Value>> {
     authorize(role, &scope, id, Op::Checkpoint)?;
+    let _gate = begin_lifecycle(id, "checkpoint")?;
     let mut s = load(&m, id, &caller_tenant(&token_tenant)).await?;
+    check_if_match(&headers, &s)?;
     running(&s)?;
     let body = body.map(|Json(b)| b).unwrap_or_default();
     let tag = body
@@ -1342,7 +1492,7 @@ async fn checkpoint(
     };
     s.checkpoints.retain(|c| c.tag != tag);
     s.checkpoints.push(cp.clone());
-    save(&m, &s).await?;
+    save(&m, &mut s).await?;
     record(&m, id, "checkpoint", json!({"tag": tag, "memory": memory}));
     Ok(Json(json!(cp)))
 }
@@ -1357,10 +1507,13 @@ async fn restore(
     Extension(role): Extension<Role>,
     token_tenant: Option<Extension<TokenTenant>>,
     Path(id): Path<Uuid>,
+    headers: axum::http::HeaderMap,
     Json(body): Json<RestoreBody>,
 ) -> ApiResult<Json<Value>> {
     require_admin(role)?;
+    let _gate = begin_lifecycle(id, "restore")?;
     let s = load(&m, id, &caller_tenant(&token_tenant)).await?;
+    check_if_match(&headers, &s)?;
     running(&s)?;
     if !s.checkpoints.iter().any(|c| c.tag == body.tag) {
         return Err(ApiError {
@@ -1392,10 +1545,13 @@ async fn fork(
     actor: Option<Extension<AuditActor>>,
     token_tenant: Option<Extension<TokenTenant>>,
     Path(id): Path<Uuid>,
+    headers: axum::http::HeaderMap,
     body: Option<Json<ForkBody>>,
 ) -> ApiResult<(StatusCode, Json<Value>)> {
     require_admin(role)?;
+    let _gate = begin_lifecycle(id, "fork")?;
     let mut s = load(&m, id, &caller_tenant(&token_tenant)).await?;
+    check_if_match(&headers, &s)?;
     running(&s)?;
     if let Some(why) = fork_refusal(&s) {
         // Never a silent fallback: a caller that forks to explore in parallel must know.
@@ -1431,7 +1587,7 @@ async fn fork(
     let mut kids = Vec::new();
     for child in &report.children {
         let cid = Uuid::new_v4();
-        let cs = Session {
+        let mut cs = Session {
             id: cid,
             agent: s.agent.clone(),
             sandbox_id: child.id,
@@ -1447,13 +1603,14 @@ async fn fork(
             workspace: s.workspace.clone(),
             volumes: Vec::new(),
             checkpoints: Vec::new(),
+            revision: 0,
         };
-        save(&m, &cs).await?;
+        save(&m, &mut cs).await?;
         record(&m, cid, "session.fork_child", json!({"parent": id}));
         s.children.push(cid);
         kids.push(cs);
     }
-    save(&m, &s).await?;
+    save(&m, &mut s).await?;
     record(
         &m,
         id,
@@ -2416,6 +2573,7 @@ async fn job_start(
     Json(body): Json<JobBody>,
 ) -> ApiResult<(StatusCode, Json<Value>)> {
     authorize(role, &scope, id, Op::Jobs)?;
+    let _work = begin_work(id)?;
     let s = load(&m, id, &caller_tenant(&token_tenant)).await?;
     running(&s)?;
     if body.command.trim().is_empty() {
@@ -2707,6 +2865,7 @@ async fn files_write(
     Json(body): Json<WriteBody>,
 ) -> ApiResult<Json<Value>> {
     authorize(role, &scope, id, Op::FilesWrite)?;
+    let _work = begin_work(id)?;
     let s = load(&m, id, &caller_tenant(&token_tenant)).await?;
     running(&s)?;
     path_arg(&body.path)?;
@@ -2767,6 +2926,7 @@ async fn files_delete(
     Query(q): Query<PathQuery>,
 ) -> ApiResult<StatusCode> {
     authorize(role, &scope, id, Op::FilesWrite)?;
+    let _work = begin_work(id)?;
     let s = load(&m, id, &caller_tenant(&token_tenant)).await?;
     running(&s)?;
     path_arg(&q.path)?;
@@ -3041,6 +3201,7 @@ async fn git_commit(
     Json(body): Json<CommitBody>,
 ) -> ApiResult<Json<Value>> {
     authorize(role, &scope, id, Op::Git)?;
+    let _work = begin_work(id)?;
     let s = load(&m, id, &caller_tenant(&token_tenant)).await?;
     running(&s)?;
     let repo = repo_dir(&s, &body.repo)?;
@@ -3102,6 +3263,7 @@ async fn git_branch(
     Json(body): Json<BranchBody>,
 ) -> ApiResult<Json<Value>> {
     authorize(role, &scope, id, Op::Git)?;
+    let _work = begin_work(id)?;
     let s = load(&m, id, &caller_tenant(&token_tenant)).await?;
     running(&s)?;
     if !valid_branch(&body.name) {
@@ -3226,6 +3388,76 @@ mod tests {
         assert!(fs(json!({"enforcement": "maybe"})).is_err());
         assert!(fs(json!("x")).is_err());
         assert!(compile_policy(None).unwrap().exec.is_none());
+    }
+
+    fn fixture_session() -> Session {
+        Session {
+            id: Uuid::new_v4(),
+            agent: "t".into(),
+            sandbox_id: Uuid::new_v4(),
+            backend: "vz".into(),
+            parent: None,
+            children: Vec::new(),
+            tenant: None,
+            state: "running".into(),
+            created_at: Utc::now(),
+            expires_at: None,
+            capabilities: capabilities_for("vz", false),
+            policy: PolicyReport::default(),
+            workspace: None,
+            checkpoints: Vec::new(),
+            volumes: Vec::new(),
+            revision: 0,
+        }
+    }
+
+    #[test]
+    fn conflicting_lifecycle_operations_are_refused_not_interleaved() {
+        let id = Uuid::new_v4();
+        let ck = begin_lifecycle(id, "checkpoint").unwrap();
+        // A second lifecycle op and any new work are refused while one runs.
+        assert!(begin_lifecycle(id, "restore").is_err());
+        assert!(begin_lifecycle(id, "delete").is_err());
+        assert!(begin_work(id).is_err());
+        drop(ck);
+        // Work in flight blocks restore and fork, but not a checkpoint or a delete.
+        let w = begin_work(id).unwrap();
+        assert!(begin_lifecycle(id, "restore").is_err());
+        assert!(begin_lifecycle(id, "fork").is_err());
+        drop(begin_lifecycle(id, "checkpoint").unwrap());
+        drop(begin_lifecycle(id, "delete").unwrap());
+        drop(w);
+        drop(begin_lifecycle(id, "restore").unwrap());
+        // Another session is unaffected, and an idle gate leaves no entry behind.
+        let other = Uuid::new_v4();
+        let _held = begin_lifecycle(id, "fork").unwrap();
+        assert!(begin_work(other).is_ok());
+        drop(_held);
+        assert!(!GATES.get().unwrap().lock().unwrap().contains_key(&id));
+    }
+
+    #[test]
+    fn if_match_compares_the_revision() {
+        use axum::http::{HeaderMap, HeaderValue, header::IF_MATCH};
+        let mut s = fixture_session();
+        s.revision = 4;
+        let h = |v: &str| {
+            let mut m = HeaderMap::new();
+            m.insert(IF_MATCH, HeaderValue::from_str(v).unwrap());
+            m
+        };
+        assert!(check_if_match(&HeaderMap::new(), &s).is_ok());
+        assert!(check_if_match(&h("4"), &s).is_ok());
+        assert!(check_if_match(&h("\"4\""), &s).is_ok());
+        assert!(check_if_match(&h("*"), &s).is_ok());
+        assert_eq!(
+            check_if_match(&h("3"), &s).unwrap_err().status,
+            StatusCode::PRECONDITION_FAILED
+        );
+        assert_eq!(
+            check_if_match(&h("x"), &s).unwrap_err().status,
+            StatusCode::BAD_REQUEST
+        );
     }
 
     #[test]

@@ -59,6 +59,25 @@ fork, then exec in every child in parallel, then delete the children (`--keep` k
   in that run, so treat a restore as rolling the volume back too. Not run: Linux (QEMU volumes are separate virtiofs
   directories), concurrent readers, volume resize while attached.
 
+### Lifecycle guarantees
+
+- **Conflicting operations are refused, not interleaved.** Checkpoint, restore, fork and delete take the session's
+  lifecycle slot; a second one, or any new `exec`, job start, file write/delete or git commit/branch while one runs,
+  gets `409` naming what is in flight. Restore and fork also refuse while commands are running on the session (they
+  would replace the machine under them); a checkpoint and a delete do not (delete is how a stuck session is ended).
+  The gate is in the daemon's memory: it protects one daemon process, and a restart clears it.
+- **Revisions.** The session record carries `revision`, bumped by every save. `If-Match: <revision>` (`*` always
+  matches) on checkpoint, restore, fork and delete returns `412` when the session changed since you read it.
+- **Idempotency.** `Idempotency-Key` is honoured on session create, `checkpoint`, `restore`, `fork`, `exec` and `jobs`
+  (not on `tokens`, whose response holds a secret), with the semantics of the VM routes: a retry with the same key and
+  body replays the first 2xx response, a different body is `422`, a key still running is `409`, records last 24 h.
+- **Expiry.** A session past its `expires_at` is persisted as `expired` the next time anything reads it (every route
+  refuses it with `409`; delete still works). The record and listing also report `gone` when the daemon no longer has
+  the sandbox; that is shown, not saved. There is no background sweep: reconciliation happens on access, so it also
+  covers a daemon restart.
+
+Not done: the gate and replay store are per daemon; reads (`files`, `git status`, `job read`) are not gated.
+
 ### Session tokens
 
 An admin mints a bearer token that works on **one session** and only for the operations it names, so an agent can

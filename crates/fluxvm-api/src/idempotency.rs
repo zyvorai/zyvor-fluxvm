@@ -44,6 +44,18 @@ pub(crate) fn is_idempotent_route(method: &Method, path: &str) -> bool {
         ("POST", ["v1", "vms"]) => true,
         ("DELETE", ["v1", "vms", id]) => Uuid::parse_str(id).is_ok(),
         ("POST", ["v1", "vms", id, "snapshot" | "fork"]) => Uuid::parse_str(id).is_ok(),
+        // Agent sessions. Not `tokens`: the stored response would hold the secret.
+        ("POST", ["v1", "agents", "sessions"]) => true,
+        (
+            "POST",
+            [
+                "v1",
+                "agents",
+                "sessions",
+                id,
+                "checkpoint" | "restore" | "fork" | "exec" | "jobs",
+            ],
+        ) => Uuid::parse_str(id).is_ok(),
         _ => false,
     }
 }
@@ -205,7 +217,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn only_the_four_mutating_routes_qualify() {
+    fn only_the_listed_mutating_routes_qualify() {
         let id = Uuid::new_v4();
         let yes = [
             (Method::POST, "/v1/vms".to_string()),
@@ -213,6 +225,12 @@ mod tests {
             (Method::DELETE, format!("/v1/vms/{id}")),
             (Method::POST, format!("/v1/vms/{id}/snapshot")),
             (Method::POST, format!("/v1/vms/{id}/fork")),
+            (Method::POST, "/v1/agents/sessions".to_string()),
+            (Method::POST, format!("/v1/agents/sessions/{id}/checkpoint")),
+            (Method::POST, format!("/v1/agents/sessions/{id}/restore")),
+            (Method::POST, format!("/v1/agents/sessions/{id}/fork")),
+            (Method::POST, format!("/v1/agents/sessions/{id}/exec")),
+            (Method::POST, format!("/v1/agents/sessions/{id}/jobs")),
         ];
         for (m, p) in &yes {
             assert!(is_idempotent_route(m, p), "{m} {p}");
@@ -227,6 +245,13 @@ mod tests {
             (Method::DELETE, format!("/v1/vms/{id}/snapshot")),
             (Method::POST, "/v1/vmsx".to_string()),
             (Method::POST, "/v1/sandboxes".to_string()),
+            (Method::POST, format!("/v1/agents/sessions/{id}/tokens")),
+            (Method::POST, format!("/v1/agents/sessions/{id}/pty-ticket")),
+            (Method::GET, format!("/v1/agents/sessions/{id}/checkpoint")),
+            (
+                Method::POST,
+                "/v1/agents/sessions/not-a-uuid/exec".to_string(),
+            ),
         ];
         for (m, p) in &no {
             assert!(!is_idempotent_route(m, p), "{m} {p}");

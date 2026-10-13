@@ -836,7 +836,13 @@ pub fn router(manager: Arc<VmManager>) -> Router {
             idempotency::middleware,
         ))
         .merge(speculate_api::routes())
-        .merge(agent_sessions::routes())
+        // Its own `Idempotency-Key` layer: the one above only wraps routes added before it.
+        .merge(
+            agent_sessions::routes().layer(middleware::from_fn_with_state(
+                manager.clone(),
+                idempotency::middleware,
+            )),
+        )
         .merge(macos_pool_api::routes())
         .merge(vz_api::routes())
         .merge(volumes_api::routes())
@@ -7139,6 +7145,88 @@ mod tests {
             assert_eq!(st, StatusCode::NO_CONTENT);
             let (st, _) = call(app, "GET", &uri, &scoped, None).await;
             assert_eq!(st, StatusCode::UNAUTHORIZED);
+        }
+
+        #[tokio::test]
+        async fn an_expired_session_is_persisted_as_expired_and_refuses_work() {
+            let m = procbox_manager(tenant_tokens(), false);
+            let id = seed_session(&m, Some("acme"), "vz", "running");
+            let path = m
+                .cfg
+                .state_dir
+                .join("agent-sessions")
+                .join(format!("{id}.json"));
+            let mut rec: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            rec["expires_at"] = json!(chrono::Utc::now() - chrono::Duration::seconds(5));
+            std::fs::write(&path, rec.to_string()).unwrap();
+            let app = router(m);
+            let uri = format!("/v1/agents/sessions/{id}");
+            let (st, b) = call(app.clone(), "GET", &uri, "acme", None).await;
+            assert_eq!(st, StatusCode::OK, "{b}");
+            assert!(b.contains(r#""state":"expired""#), "{b}");
+            // Persisted: the record on disk says so, and ledgered once.
+            let on_disk = std::fs::read_to_string(&path).unwrap();
+            assert!(on_disk.contains(r#""state": "expired""#), "{on_disk}");
+            let (st, b) = call(
+                app.clone(),
+                "POST",
+                &format!("{uri}/exec"),
+                "acme",
+                Some(r#"{"command":"id"}"#),
+            )
+            .await;
+            assert_eq!(st, StatusCode::CONFLICT, "{b}");
+            assert!(b.contains("expired"), "{b}");
+            // The listing agrees.
+            let (_, list) = call(app, "GET", "/v1/agents/sessions", "acme", None).await;
+            assert!(list.contains(r#""state":"expired""#), "{list}");
+        }
+
+        #[tokio::test]
+        async fn if_match_stops_a_stale_lifecycle_call_and_the_session_reports_its_revision() {
+            let m = procbox_manager(tenant_tokens(), false);
+            let id = seed_session(&m, Some("acme"), "vz", "running");
+            let app = router(m);
+            let uri = format!("/v1/agents/sessions/{id}");
+            for suffix in ["/checkpoint", "/restore", "/fork"] {
+                let resp = app
+                    .clone()
+                    .oneshot(
+                        Request::builder()
+                            .method("POST")
+                            .uri(format!("{uri}{suffix}"))
+                            .header(header::AUTHORIZATION, "Bearer acme")
+                            .header(header::CONTENT_TYPE, "application/json")
+                            .header(header::IF_MATCH, "41")
+                            .body(Body::from(r#"{"tag":"t","count":1}"#))
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(resp.status(), StatusCode::PRECONDITION_FAILED, "{suffix}");
+            }
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("DELETE")
+                        .uri(&uri)
+                        .header(header::AUTHORIZATION, "Bearer acme")
+                        .header(header::IF_MATCH, "41")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::PRECONDITION_FAILED);
+            // A refused call changed nothing.
+            let (st, b) = call(app, "GET", &uri, "acme", None).await;
+            assert_eq!(st, StatusCode::OK, "{b}");
+            assert!(
+                b.contains(r#""state":"running""#) || b.contains(r#""state":"gone""#),
+                "{b}"
+            );
         }
 
         #[tokio::test]
