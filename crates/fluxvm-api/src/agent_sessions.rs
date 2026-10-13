@@ -51,6 +51,7 @@ use axum::{
 };
 use chrono::{DateTime, Utc};
 use fluxvm_core::config::Role;
+use fluxvm_guest_protocol::{ExecPolicy, ExecTcpRule};
 use fluxvm_scheduler::VmManager;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -127,6 +128,10 @@ struct Capabilities {
     /// `GET .../pty` works: vz Linux sessions (the guest is reached over SSH). A session with
     /// `policy.process` rules is refused at the route even where this is true.
     pty: bool,
+    /// The guest enforced the session's filesystem confinement when probed at create. False
+    /// for sessions without a `filesystem` policy.
+    #[serde(default)]
+    confinement: bool,
 }
 
 /// The policy as compiled, including the parts that are accepted but not enforced yet.
@@ -138,8 +143,45 @@ struct PolicyReport {
     /// Command rules enforced on exec and job start; `None` when the session has none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     process: Option<CommandRules>,
-    /// `filesystem` rules are stored but nothing enforces them yet.
+    /// Parts of the policy that are accepted but not enforced.
     unenforced: Vec<String>,
+    /// The guest confinement (Landlock + seccomp) applied to exec, jobs, files and git. Present
+    /// only when the policy has a `filesystem` section.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    exec: Option<ExecPolicy>,
+    /// `strict` (default): create fails if the guest cannot enforce the filesystem rules.
+    /// `best-effort`: the session is created and `capabilities.confinement` says what happened.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    enforcement: Option<String>,
+}
+
+/// Paths every confined command may read: enough for a shell, a toolchain and `/proc`.
+const CONFINED_READ: &[&str] = &[
+    "/usr", "/bin", "/sbin", "/lib", "/lib32", "/lib64", "/etc", "/opt", "/proc", "/sys", "/dev",
+    "/run",
+];
+/// Paths every confined command may write: scratch space (job logs live under `/tmp`) and the
+/// harmless device files shells open.
+const CONFINED_WRITE: &[&str] = &["/tmp", "/var/tmp", "/dev/null", "/dev/tty", "/dev/shm"];
+
+/// One `filesystem.read` / `filesystem.write` entry: an absolute path with no `..`. A trailing
+/// `/**` or `/*` is accepted and means the directory (Landlock rules are subtree rules).
+fn confine_path(raw: &str) -> Option<String> {
+    let t = raw.trim();
+    let t = t
+        .strip_suffix("/**")
+        .or_else(|| t.strip_suffix("/*"))
+        .unwrap_or(t);
+    let t = if t.len() > 1 {
+        t.trim_end_matches('/')
+    } else {
+        t
+    };
+    let ok = t.starts_with('/')
+        && t.len() <= 512
+        && !t.split('/').any(|c| c == "..")
+        && !t.chars().any(|c| c.is_control() || "*?[]{}".contains(c));
+    ok.then(|| t.to_string())
 }
 
 /// Glob rules over the command strings an agent submits (`*` matches any run of characters).
@@ -440,8 +482,58 @@ fn compile_policy(p: Option<PolicyBody>) -> Result<PolicyReport, ApiError> {
             r.offline = true;
         }
     }
-    if p.filesystem.is_some() {
-        r.unenforced.push("filesystem".into());
+    if let Some(v) = p.filesystem {
+        let obj = v
+            .as_object()
+            .ok_or_else(|| bad("filesystem must be an object with read and/or write".into()))?;
+        let mut exec = ExecPolicy {
+            read: CONFINED_READ.iter().map(|s| s.to_string()).collect(),
+            write: CONFINED_WRITE.iter().map(|s| s.to_string()).collect(),
+            // Network reach is the sandbox's job (no NIC, or the host egress proxy); Landlock
+            // port rules would only break the proxy path, so the guest policy leaves it open.
+            tcp_connect: ExecTcpRule::Any,
+            tcp_bind: ExecTcpRule::Any,
+            allow_unix: true,
+            allow_udp: true,
+            // Missing optional paths (/lib32, /dev/shm) are skipped and reported, not fatal.
+            best_effort: true,
+            ..Default::default()
+        };
+        for (k, val) in obj {
+            let list = match k.as_str() {
+                "read" => &mut exec.read,
+                "write" => &mut exec.write,
+                "enforcement" => {
+                    match val.as_str() {
+                        Some(m @ ("strict" | "best-effort")) => r.enforcement = Some(m.into()),
+                        _ => {
+                            return Err(bad(
+                                "filesystem.enforcement must be strict or best-effort".into(),
+                            ));
+                        }
+                    }
+                    continue;
+                }
+                other => return Err(bad(format!("unknown filesystem rule `{other}`"))),
+            };
+            for e in val
+                .as_array()
+                .ok_or_else(|| bad(format!("filesystem.{k} must be a list of paths")))?
+            {
+                let path = e.as_str().and_then(confine_path).ok_or_else(|| {
+                    bad(format!(
+                        "filesystem.{k} entries are absolute paths without `..` or wildcards \
+                         (a trailing /** means the directory)"
+                    ))
+                })?;
+                list.push(path);
+            }
+        }
+        exec.read.sort();
+        exec.read.dedup();
+        exec.write.sort();
+        exec.write.dedup();
+        r.exec = Some(exec);
     }
     if let Some(v) = p.process {
         let obj = v
@@ -604,6 +696,7 @@ fn capabilities_for(backend: &str, offline: bool) -> Capabilities {
         fork: backend == "flux-vm" || (backend == "vz" && offline),
         // `GET .../pty` reaches the guest over SSH, which only the vz path has.
         pty: backend == "vz",
+        confinement: false,
     }
 }
 
@@ -893,6 +986,48 @@ async fn create_session(
         }
         session.workspace = Some(state);
     }
+    if session.policy.exec.is_some() {
+        // The workspace and volumes are the agent's to write; they are known only now. The setup
+        // above ran unconfined: it executed fixed scripts before the policy applied.
+        if let Some(e) = session.policy.exec.as_mut() {
+            if let Some(w) = &session.workspace {
+                e.write.push(w.path.clone());
+            }
+            e.write
+                .extend(session.volumes.iter().map(|v| v.path.clone()));
+            e.write.sort();
+            e.write.dedup();
+        }
+        let probe = match m.ensure_running_for_request(rec.id).await {
+            Ok(_) => m
+                .exec_with_policy(rec.id, "true".into(), Some(30), session.policy.exec.clone())
+                .await
+                .ok(),
+            Err(_) => None,
+        };
+        let enforcement = probe
+            .and_then(|r| serde_json::to_value(r).ok())
+            .map(|v| v["enforcement"].clone());
+        let enforced = enforcement
+            .as_ref()
+            .and_then(|e| e["filesystem"].as_bool())
+            .unwrap_or(false);
+        record(&m, id, "policy.probe", json!({"enforcement": enforcement}));
+        if !enforced && session.policy.enforcement.as_deref() != Some("best-effort") {
+            let _ = m.delete(rec.id).await;
+            let _ = std::fs::remove_file(session_path(&m, id));
+            return Err(ApiError {
+                status: StatusCode::BAD_REQUEST,
+                message: format!(
+                    "the guest cannot enforce the filesystem policy on backend {} (needs a Linux guest \
+                     with Landlock and the fluxvm guest agent: macOS guests and procbox sandboxes refuse). \
+                     Set filesystem.enforcement to best-effort to create the session without it",
+                    session.backend
+                ),
+            });
+        }
+        session.capabilities.confinement = enforced;
+    }
     save(&m, &session).await?;
     Ok((StatusCode::CREATED, Json(json!(session))))
 }
@@ -1003,7 +1138,7 @@ async fn exec_session(
             s.sandbox_id,
             body.command.clone(),
             body.timeout_seconds,
-            None,
+            s.policy.exec.clone(),
         )
         .await?;
     let out = json!(res);
@@ -2148,7 +2283,7 @@ async fn job_start(
             s.sandbox_id,
             job_start_script(job, &body.command),
             Some(30),
-            None,
+            s.policy.exec.clone(),
         )
         .await?;
     let out = json!(res);
@@ -2322,7 +2457,7 @@ fn list_script(path: &str) -> String {
 async fn guest_exec(m: &Arc<VmManager>, s: &Session, cmd: String) -> ApiResult<Value> {
     m.ensure_running_for_request(s.sandbox_id).await?;
     let res = m
-        .exec_with_policy(s.sandbox_id, cmd, Some(30), None)
+        .exec_with_policy(s.sandbox_id, cmd, Some(30), s.policy.exec.clone())
         .await?;
     Ok(json!(res))
 }
@@ -2887,12 +3022,42 @@ mod tests {
             "filesystem": {"write": ["/workspace/**"]}, "process": {"allow": ["git"]}
         }))))
         .unwrap();
-        assert_eq!(r.unenforced, vec!["filesystem"]);
+        assert!(r.unenforced.is_empty());
+        let e = r.exec.expect("filesystem compiles to a guest policy");
+        assert!(e.write.contains(&"/tmp".to_string()));
+        assert!(e.read.contains(&"/usr".to_string()));
+        assert!(e.write.contains(&"/workspace".to_string()));
+        assert!(e.best_effort && e.allow_udp);
         let rules = r.process.unwrap();
         assert_eq!(rules.allow, vec!["git"]);
         assert!(compile_policy(Some(pol(json!({"process": {"ask": ["x"]}})))).is_err());
         assert!(compile_policy(Some(pol(json!({"process": {"nope": []}})))).is_err());
         assert!(compile_policy(Some(pol(json!({"process": {"deny": "rm"}})))).is_err());
+    }
+
+    #[test]
+    fn filesystem_rules_are_validated_paths() {
+        let fs = |v: Value| compile_policy(Some(pol(json!({"filesystem": v}))));
+        let r = fs(
+            json!({"read": ["/home/u/src/"], "write": ["/work/**"], "enforcement": "best-effort"}),
+        )
+        .unwrap();
+        let e = r.exec.unwrap();
+        assert!(e.read.contains(&"/home/u/src".to_string()));
+        assert!(e.write.contains(&"/work".to_string()));
+        assert_eq!(r.enforcement.as_deref(), Some("best-effort"));
+        for bad in [
+            json!(["rel/path"]),
+            json!(["/a/../b"]),
+            json!(["/a/*/b"]),
+            json!([1]),
+        ] {
+            assert!(fs(json!({"write": bad})).is_err());
+        }
+        assert!(fs(json!({"nope": []})).is_err());
+        assert!(fs(json!({"enforcement": "maybe"})).is_err());
+        assert!(fs(json!("x")).is_err());
+        assert!(compile_policy(None).unwrap().exec.is_none());
     }
 
     #[test]
