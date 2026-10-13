@@ -174,3 +174,10 @@ http_proxy_default_port = 8080
   repo var `FLUXVM_CI_KVM_OPTIONAL=1`), the static musl guest agent, and, on the self-hosted lab runner
   (repo var `FLUXVM_NATIVE_KVM_LIVE_CI=1`, dispatch/weekly), the golden-template gate through `fluxctl create`.
 - `all-features.yml` runs the portable jobs on every push to `main`.
+
+## Agent sessions (MVP)
+
+| Feature | Status |
+|---------|--------|
+| **`/v1/agents/sessions`**: sandbox + workspace + compiled network policy + checkpoints + ledger, `fluxctl agent`, MCP `session_*`, Go and Python SDKs — [agent-sessions.md](agent-sessions.md) | Yes (run live on `vz`: create, exec, memory checkpoint/restore, artifacts, delete; fork run live on an offline `vz` session, 409 for a NAT one; lifecycle timings in [benchmarks/agent-session.md](benchmarks/agent-session.md)) |
+| Promote a fork's changes into its parent, filesystem/process policy enforcement, streaming PTY, replay, preview URLs, browser profile, sub-second restore | No — see the roadmap in [agent-sessions.md](agent-sessions.md#roadmap) |

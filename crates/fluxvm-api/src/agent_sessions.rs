@@ -378,12 +378,33 @@ fn valid_tag(t: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || "._-".contains(c))
 }
 
-fn capabilities_for(backend: &str) -> Capabilities {
+/// What a session can do on its backend. Fork: the in-tree KVM engine, or a `vz` Linux guest
+/// that has no network card of its own to restore onto (an offline or allow-listed sandbox);
+/// a `vz` sandbox on the Mac's NAT cannot be forked (see `fork::check_vz_forkable`).
+fn capabilities_for(backend: &str, offline: bool) -> Capabilities {
     Capabilities {
         snapshot: matches!(backend, "vz" | "flux-vm" | "qemu" | "firecracker"),
-        fork: backend == "flux-vm",
+        fork: backend == "flux-vm" || (backend == "vz" && offline),
         pty: false,
     }
+}
+
+/// Why a session cannot fork, for the 409 body. `None` when it can.
+fn fork_refusal(s: &Session) -> Option<String> {
+    if s.capabilities.fork {
+        return None;
+    }
+    Some(if s.backend == "vz" {
+        "fork on vz needs a session with no network card of its own: create it with policy offline \
+         or a host allow-list (a sandbox on the Mac's NAT cannot be forked)"
+            .to_string()
+    } else {
+        format!(
+            "fork is not available on backend {}: it needs the in-tree KVM engine (flux-vm) on Linux, \
+             or an offline vz session",
+            s.backend
+        )
+    })
 }
 
 async fn create_session(
@@ -452,7 +473,7 @@ async fn create_session(
         id,
         agent: body.agent,
         sandbox_id: rec.id,
-        capabilities: capabilities_for(&backend),
+        capabilities: capabilities_for(&backend, policy.offline || !policy.allow_hosts.is_empty()),
         backend,
         parent: None,
         children: Vec::new(),
@@ -741,6 +762,10 @@ async fn restore(
 struct ForkBody {
     #[serde(default)]
     count: Option<u32>,
+    /// `best-effort` (default), `unique` or `preserve`. `unique` refuses to fork a guest that has
+    /// neither the vsock agent nor SSH to confirm each child's identity reset.
+    #[serde(default)]
+    identity: Option<String>,
 }
 
 async fn fork(
@@ -754,17 +779,22 @@ async fn fork(
     require_admin(role)?;
     let mut s = load(&m, id, &caller_tenant(&token_tenant)).await?;
     running(&s)?;
-    if !s.capabilities.fork {
+    if let Some(why) = fork_refusal(&s) {
         // Never a silent fallback: a caller that forks to explore in parallel must know.
         return Err(ApiError {
             status: StatusCode::CONFLICT,
-            message: format!(
-                "fork is not available on backend {}: it needs the in-tree KVM engine (flux-vm) on Linux",
-                s.backend
-            ),
+            message: why,
         });
     }
-    let count = body.and_then(|Json(b)| b.count).unwrap_or(1);
+    let body = body.map(|Json(b)| b).unwrap_or_default();
+    let count = body.count.unwrap_or(1);
+    let identity = body.identity.unwrap_or_else(|| "best-effort".into());
+    if !["best-effort", "unique", "preserve"].contains(&identity.as_str()) {
+        return Err(ApiError {
+            status: StatusCode::BAD_REQUEST,
+            message: "identity must be best-effort, unique or preserve".into(),
+        });
+    }
     if count == 0 || count > 32 {
         return Err(ApiError {
             status: StatusCode::BAD_REQUEST,
@@ -774,6 +804,7 @@ async fn fork(
     let spec: fluxvm_scheduler::fork::ForkSpec = serde_json::from_value(json!({
         "count": count,
         "name_prefix": format!("agent-{}-fork", &id.to_string()[..8]),
+        "identity": identity,
     }))
     .map_err(anyhow::Error::from)?;
     let actor_name = actor.as_ref().map(|a| a.0.0.as_str());
@@ -812,9 +843,12 @@ async fn fork(
     );
     Ok((
         StatusCode::CREATED,
-        Json(
-            json!({"items": kids, "total_ms": report.total_ms, "parent_snapshot_ms": report.parent_snapshot_ms}),
-        ),
+        Json(json!({
+            "items": kids,
+            "identity": identity,
+            "total_ms": report.total_ms,
+            "parent_snapshot_ms": report.parent_snapshot_ms,
+        })),
     ))
 }
 
@@ -960,11 +994,14 @@ mod tests {
     }
 
     #[test]
-    fn capabilities_follow_the_backend_and_never_claim_fork_on_vz() {
-        assert!(capabilities_for("flux-vm").fork);
-        let vz = capabilities_for("vz");
-        assert!(vz.snapshot && !vz.fork && !vz.pty);
-        assert!(!capabilities_for("cloud-hypervisor").snapshot);
+    fn capabilities_follow_the_backend_and_never_claim_fork_on_a_nat_session() {
+        assert!(capabilities_for("flux-vm", false).fork);
+        // vz forks only without a NIC of its own: offline or allow-listed sessions.
+        let nat = capabilities_for("vz", false);
+        assert!(nat.snapshot && !nat.fork && !nat.pty);
+        assert!(capabilities_for("vz", true).fork);
+        assert!(!capabilities_for("cloud-hypervisor", true).snapshot);
+        assert!(!capabilities_for("qemu", true).fork);
     }
 
     #[test]

@@ -8,7 +8,8 @@
 #   FLUXVM_URL=http://127.0.0.1:7788 scripts/bench-agent-session.sh [runs=5] [policy=open]
 #
 # Works with macOS's bash 3.2. Needs curl and python3. It creates and deletes real sandboxes.
-# Fork is not measured: it is only available on the in-tree KVM engine, not on vz.
+# With policy=offline (or developer-safe) a fork of 2 children is timed too, then the children are deleted:
+# fork needs a session with no network card of its own, so it is skipped for policy=open.
 set -euo pipefail
 
 URL="${FLUXVM_URL:-http://127.0.0.1:7788}"
@@ -31,7 +32,7 @@ req() {
   fi
 }
 
-: > "$WORK/create"; : > "$WORK/exec"; : > "$WORK/checkpoint"; : > "$WORK/restore"; : > "$WORK/delete"
+: > "$WORK/create"; : > "$WORK/exec"; : > "$WORK/checkpoint"; : > "$WORK/restore"; : > "$WORK/fork"; : > "$WORK/delete"
 for i in $(seq 1 "$RUNS"); do
   t=$(req POST /v1/agents/sessions "{\"agent\":\"bench\",\"policy\":{\"preset\":\"$POLICY\"},\"ttl_seconds\":600}" "$WORK/s.json")
   ID=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["id"])' "$WORK/s.json")
@@ -39,6 +40,12 @@ for i in $(seq 1 "$RUNS"); do
   echo "$(req POST "/v1/agents/sessions/$ID/exec" '{"command":"true"}' "$WORK/e.json")" >> "$WORK/exec"
   echo "$(req POST "/v1/agents/sessions/$ID/checkpoint" '{"tag":"b1"}' "$WORK/c.json")" >> "$WORK/checkpoint"
   echo "$(req POST "/v1/agents/sessions/$ID/restore" '{"tag":"b1"}' "$WORK/r.json")" >> "$WORK/restore"
+  if [ "$POLICY" != "open" ]; then
+    echo "$(req POST "/v1/agents/sessions/$ID/fork" '{"count":2}' "$WORK/f.json")" >> "$WORK/fork"
+    for kid in $(python3 -c 'import json,sys;print(" ".join(c["id"] for c in json.load(open(sys.argv[1])).get("items", [])))' "$WORK/f.json"); do
+      req DELETE "/v1/agents/sessions/$kid" '' "$WORK/k.json" >/dev/null
+    done
+  fi
   echo "$(req DELETE "/v1/agents/sessions/$ID" '' "$WORK/d.json")" >> "$WORK/delete"
   echo "run $i/$RUNS done" >&2
 done
@@ -47,7 +54,10 @@ python3 - "$WORK" "$RUNS" "$POLICY" <<'PY'
 import sys, statistics
 work, runs, policy = sys.argv[1], int(sys.argv[2]), sys.argv[3]
 print(f"AgentSession lifecycle, {runs} runs, policy={policy} (seconds; median / worst)")
-for step in ("create", "exec", "checkpoint", "restore", "delete"):
+for step in ("create", "exec", "checkpoint", "restore", "fork", "delete"):
     xs = [float(l) for l in open(f"{work}/{step}") if l.strip()]
+    if not xs:
+        print(f"  {step:<11}     n/a (not measured for this policy)")
+        continue
     print(f"  {step:<11} {statistics.median(xs):7.3f} / {max(xs):7.3f}")
 PY

@@ -6862,7 +6862,7 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn agent_session_fork_is_refused_where_the_backend_cannot_do_it() {
+        async fn agent_session_fork_is_refused_for_a_session_on_the_nat() {
             let m = procbox_manager(tenant_tokens(), false);
             let id = seed_session(&m, Some("acme"), "vz", "running");
             let (st, body) = call(
@@ -6874,7 +6874,7 @@ mod tests {
             )
             .await;
             assert_eq!(st, StatusCode::CONFLICT, "{body}");
-            assert!(body.contains("not available on backend vz"), "{body}");
+            assert!(body.contains("no network card of its own"), "{body}");
         }
 
         #[tokio::test]

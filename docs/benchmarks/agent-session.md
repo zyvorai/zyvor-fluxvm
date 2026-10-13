@@ -19,6 +19,23 @@ README and the website may quote; anything else is a target, not a result.
 | restore that checkpoint | 4.1 s | 4.4 s |
 | delete | 3.5 s | 4.1 s |
 
+## Same host, `policy=offline` (no network card; the sandbox can be forked)
+
+5 runs; the fork is 2 children with `identity=best-effort` and the children are deleted afterwards.
+
+| Step | Median | Worst |
+|---|---|---|
+| create session | 4.6 s | 5.1 s |
+| first exec (`true`) | 0.39 s | 0.40 s |
+| checkpoint (memory + disk) | 0.68 s | 0.72 s |
+| restore | 3.9 s | 4.3 s |
+| fork into 2 running children | 2.5 s | 2.5 s |
+| delete | 1.6 s | 1.6 s |
+
+An offline guest has no NAT path, so exec goes over vsock to the guest's sshd and costs more per call (0.39 s vs 0.12 s).
+A live check ran a command in each of two children and in the parent: all three started from the parent's state, wrote
+different files, and the parent saw none of them.
+
 ## How to read this
 
 - **Create is seconds, not milliseconds.** The worst run (26.9 s) was the first one, which had no warm slot to claim and
@@ -27,7 +44,7 @@ README and the website may quote; anything else is a target, not a result.
 - **Exec is fast** because the daemon already holds an SSH connection path to the guest; this is the per-command cost,
   not boot.
 - **Restore is also seconds**: on `vz` it relaunches the VM from the saved state.
-- **Fork is not measured.** It exists only on the in-tree KVM engine (Linux), which this host does not have, and
-  `POST /v1/agents/sessions/{id}/fork` returns 409 on `vz`.
+- **Fork** works on `vz` for a session with no network card of its own (the offline table above); it returned 409 for
+  the NAT sessions of the `open` table, by design. The in-tree KVM fork (Linux) was not measured: this host has no KVM.
 - One host, one guest image, a debug build, 5 runs: treat the table as an order of magnitude, not a benchmark suite.
   The script prints the same table for your own hardware.

@@ -50,7 +50,7 @@ class _Handler(BaseHTTPRequestHandler):
         if p.endswith("/restore"):
             return self._send(200, {"restored": body["tag"]})
         if p.endswith("/fork"):
-            return self._send(409, {"error": "fork is not available on backend vz"})
+            return self._send(409, {"error": "fork on vz needs a session with no network card of its own"})
         if p.endswith("/events"):
             return self._send(200, {"ledger": [{"kind": "exec"}], "vm_events": []})
         if p.endswith("/artifacts"):
@@ -113,7 +113,7 @@ class SessionTests(unittest.TestCase):
         s = self.client.get_session("s1")
         with self.assertRaises(Conflict) as cm:
             s.fork(2)
-        self.assertIn("not available on backend vz", str(cm.exception))
+        self.assertIn("no network card of its own", str(cm.exception))
 
     def test_context_manager_deletes(self):
         with self.client.get_session("s1"):

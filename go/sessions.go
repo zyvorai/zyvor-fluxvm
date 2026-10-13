@@ -11,8 +11,9 @@ import (
 	"time"
 )
 
-// SessionCapabilities says what a session can do on its backend. Fork is true only on the
-// in-tree KVM engine; check it instead of calling Fork and handling the 409.
+// SessionCapabilities says what a session can do on its backend. Fork is true on the in-tree
+// KVM engine and on a vz session with no network card of its own (offline or allow-listed);
+// check it instead of calling Fork and handling the 409.
 type SessionCapabilities struct {
 	Snapshot bool `json:"snapshot"`
 	Fork     bool `json:"fork"`
@@ -189,13 +190,19 @@ func (s *Session) Restore(ctx context.Context, tag string) error {
 	return s.client.call(ctx, http.MethodPost, s.path("/restore"), map[string]string{"tag": tag}, nil, 5*time.Minute)
 }
 
-// Fork creates count child sessions from the current state. It fails with a 409 APIError,
-// and creates nothing, when the backend cannot fork (check Info.Capabilities.Fork first).
-func (s *Session) Fork(ctx context.Context, count int) ([]SessionInfo, error) {
+// Fork creates count child sessions from the current state. identity is "best-effort" (the
+// default when empty), "unique" (refused when the guest cannot confirm the reset) or "preserve".
+// It fails with a 409 APIError, and creates nothing, when the session cannot fork (check
+// Info.Capabilities.Fork first).
+func (s *Session) Fork(ctx context.Context, count int, identity string) ([]SessionInfo, error) {
 	var out struct {
 		Items []SessionInfo `json:"items"`
 	}
-	if err := s.client.call(ctx, http.MethodPost, s.path("/fork"), map[string]int{"count": count}, &out, 5*time.Minute, http.StatusCreated); err != nil {
+	payload := map[string]interface{}{"count": count}
+	if identity != "" {
+		payload["identity"] = identity
+	}
+	if err := s.client.call(ctx, http.MethodPost, s.path("/fork"), payload, &out, 5*time.Minute, http.StatusCreated); err != nil {
 		return nil, err
 	}
 	return out.Items, nil

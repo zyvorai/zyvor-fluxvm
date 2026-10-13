@@ -1398,9 +1398,13 @@ pub fn tools(remote: Arc<Remote>) -> Vec<Tool> {
         ),
         tool(
             "session_fork",
-            "Fork an agent session into COUNT child sessions that start from its current state, to try approaches in parallel. Only the in-tree KVM engine can fork; elsewhere this fails with the reason and nothing is created.",
+            "Fork an agent session into COUNT child sessions that start from its current state, to try approaches in parallel. Needs a forkable session: the in-tree KVM engine, or a vz session with no network card (policy offline or a host allow-list). Otherwise this fails with the reason and nothing is created.",
             object(
-                json!({"session": {"type": "string"}, "count": {"type": "integer", "minimum": 1, "maximum": 32}}),
+                json!({
+                    "session": {"type": "string"},
+                    "count": {"type": "integer", "minimum": 1, "maximum": 32},
+                    "identity": {"type": "string", "enum": ["best-effort", "unique", "preserve"], "description": "default best-effort; unique refuses guests that cannot confirm the identity reset"},
+                }),
                 &["session"],
             ),
             true,
@@ -1412,11 +1416,15 @@ pub fn tools(remote: Arc<Remote>) -> Vec<Tool> {
                     if !(1..=32).contains(&count) {
                         bail!("count must be 1-32");
                     }
+                    let mut body = json!({"count": count});
+                    if let Some(i) = str_arg(&args, "identity") {
+                        body["identity"] = json!(i);
+                    }
                     pretty(
                         &r.call(
                             Method::POST,
                             &format!("/v1/agents/sessions/{id}/fork"),
-                            Some(json!({"count": count})),
+                            Some(body),
                         )
                         .await?,
                     )
@@ -1960,7 +1968,7 @@ mod tests {
                 post(|Path(_): Path<Uuid>, Json(b): Json<Value>| async move {
                     (
                         axum::http::StatusCode::CONFLICT,
-                        Json(json!({"error": format!("fork is not available on backend vz (count {})", b["count"])})),
+                        Json(json!({"error": format!("fork on vz needs a session with no network card of its own (count {})", b["count"])})),
                     )
                 }),
             )
@@ -2009,7 +2017,7 @@ mod tests {
         let (t, err) = text(&got["3"]);
         assert!(err && t.contains("session must be a session id"), "{t}");
         let (t, err) = text(&got["4"]);
-        assert!(err && t.contains("not available on backend vz"), "{t}");
+        assert!(err && t.contains("no network card of its own"), "{t}");
         let (t, err) = text(&got["5"]);
         assert!(err && t.contains("1-32"), "{t}");
         let (t, err) = text(&got["6"]);

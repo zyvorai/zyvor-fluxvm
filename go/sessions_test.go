@@ -42,7 +42,7 @@ func sessionServer(t *testing.T) (*Client, *[]string) {
 			io.WriteString(w, `{"restored":"cp-1"}`)
 		case strings.HasSuffix(r.URL.Path, "/fork"):
 			w.WriteHeader(409)
-			io.WriteString(w, `{"error":"fork is not available on backend vz"}`)
+			io.WriteString(w, `{"error":"fork on vz needs a session with no network card of its own"}`)
 		case strings.HasSuffix(r.URL.Path, "/events"):
 			io.WriteString(w, `{"ledger":[{"kind":"exec"}],"vm_events":[]}`)
 		case strings.HasSuffix(r.URL.Path, "/artifacts"):
@@ -118,9 +118,9 @@ func TestSessionForkRefusalIsATypedError(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = s.Fork(context.Background(), 2)
+	_, err = s.Fork(context.Background(), 2, "")
 	var ae *APIError
-	if !errors.As(err, &ae) || ae.Status != 409 || !strings.Contains(ae.Message, "not available on backend vz") {
+	if !errors.As(err, &ae) || ae.Status != 409 || !strings.Contains(ae.Message, "no network card of its own") {
 		t.Fatalf("want a 409 APIError, got %v", err)
 	}
 }

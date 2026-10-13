@@ -64,12 +64,16 @@ pub enum AgentCommand {
     },
     /// Restore a checkpoint. REST: `POST /v1/agents/sessions/{id}/restore`.
     Restore { id: Uuid, tag: String },
-    /// Fork into COUNT child sessions (in-tree KVM engine only; refused elsewhere with the reason).
+    /// Fork into COUNT child sessions (in-tree KVM, or a vz session with no NIC: policy offline or an
+    /// allow-list; refused otherwise with the reason).
     /// REST: `POST /v1/agents/sessions/{id}/fork`.
     Fork {
         id: Uuid,
         #[arg(long, default_value_t = 1)]
         count: u32,
+        /// How hard to make each child a different machine: best-effort (default), unique, preserve.
+        #[arg(long)]
+        identity: Option<String>,
     },
     /// What the session did: the ledger plus the sandbox's VM events. REST: `GET .../events`.
     Timeline {
@@ -177,14 +181,24 @@ pub async fn run(r: &Remote, cmd: AgentCommand) -> Result<()> {
             )
             .await?,
         ),
-        AgentCommand::Fork { id, count } => show(
-            &r.call(
-                Method::POST,
-                &format!("/v1/agents/sessions/{id}/fork"),
-                Some(json!({ "count": count })),
+        AgentCommand::Fork {
+            id,
+            count,
+            identity,
+        } => {
+            let mut body = json!({ "count": count });
+            if let Some(i) = identity {
+                body["identity"] = json!(i);
+            }
+            show(
+                &r.call(
+                    Method::POST,
+                    &format!("/v1/agents/sessions/{id}/fork"),
+                    Some(body),
+                )
+                .await?,
             )
-            .await?,
-        ),
+        }
         AgentCommand::Timeline { id, since } => {
             let mut path = format!("/v1/agents/sessions/{id}/events");
             if let Some(s) = since {
