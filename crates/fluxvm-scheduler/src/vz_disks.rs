@@ -81,6 +81,7 @@ pub(crate) fn list(vm: &VmRecord) -> Vec<VmDiskInfo> {
         format: "raw".into(),
         size_bytes: size,
         allocated_bytes: allocated,
+        throttle: None,
     }];
     let extra = vm
         .request
@@ -103,6 +104,7 @@ pub(crate) fn list(vm: &VmRecord) -> Vec<VmDiskInfo> {
             format: kind_name(d.kind).into(),
             size_bytes,
             allocated_bytes,
+            throttle: None,
         });
     }
     out

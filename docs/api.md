@@ -44,6 +44,7 @@ GET    /v1/vms/{uuid}/disks
 POST   /v1/vms/{uuid}/disks              # {"name": "data", "size_gib": 10}, {"name": "pvc", "path": "/dev/rbd0"} or {"name": "disk1", "backing": "/var/lib/fluxvm/images/imported/web01/disk1.raw"} (qcow2 overlay); optional "io" (QEMU disk I/O, below)
 PATCH  /v1/vms/{uuid}/disks/{name}       # {"size_gib": 20}; name "root" = boot disk
 DELETE /v1/vms/{uuid}/disks/{name}       # deletes the file (or overlay); only unlinks a path-attached disk
+PUT    /v1/vms/{uuid}/disks/{name}/throttle  # {"throttle": {"iops_total": 500}}; null lifts the limits (QEMU)
                                          # vz: also "kind" (image|block|nbd), "url", "read_only", "caching", "sync", "controller"
                                          # (virtio|nvme|usb); applies at the next start (a USB image disk at once); see macos.md#extra-disks
 POST   /v1/vms/{uuid}/cdroms/{name}/eject # remove install media (live when running); the empty drive stays
@@ -414,6 +415,15 @@ create body's `root_disk_io` take the same object; every field is optional:
 - `cache`: `none`, `writeback` (QEMU's default), `writethrough`, `directsync` or `unsafe`.
 - `iothread`: a dedicated QEMU iothread for the disk (virtio buses).
 - `queues`: virtio queues, 1-64 (virtio buses).
+- `throttle`: IOPS and bandwidth limits QEMU enforces (`block_set_io_throttle`) on `scsi`,
+  `virtio-blk` and root disks: `iops_total`, `iops_read`, `iops_write`, `bps_total`, `bps_read`,
+  `bps_write` (bytes/s), plus `iops_total_max`/`bps_total_max` bursts lasting `burst_seconds`
+  (default 1). A `*_total` limit excludes its read/write pair. Limits are set right after QEMU
+  starts (including on a migration target, since QEMU does not migrate them; a failure stops the
+  launch) and when a disk is hot-added. `PUT /v1/vms/{uuid}/disks/{name}/throttle` changes them
+  live and keeps them for later starts. A root throttle alone keeps the root's `if=virtio` drive,
+  so adding one does not move the guest's PCI layout. `GET .../disks` reports the configured
+  `throttle`. vhost-user-blk disks are refused: their I/O does not pass QEMU's block layer.
 
 A `vhost-user-blk` disk is opened by a per-disk `qemu-storage-daemon`, not by QEMU. Its queues and
 iothread are the daemon's. Hot-adding one needs shareable guest memory, so create the VM with

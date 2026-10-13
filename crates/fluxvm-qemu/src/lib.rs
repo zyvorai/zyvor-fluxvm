@@ -29,6 +29,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 const QMP_TIMEOUT: Duration = Duration::from_secs(10);
+/// A just-spawned QEMU may take a while to open its QMP socket.
+const QMP_BOOT_TIMEOUT: Duration = Duration::from_secs(30);
 /// `savevm` writes guest RAM+device state into the qcow2 — can take well over
 /// 10s on multi-GB cloud images, so use a longer budget than other QMP ops.
 const QMP_SAVEVM_TIMEOUT: Duration = Duration::from_secs(120);
@@ -248,7 +250,7 @@ pub fn build_args(
     if let Some(seed) = &ctx.seed_disk {
         // An explicit root drive owns the `virtio0` id an unindexed
         // `if=virtio` seed would also take.
-        let index = if req.root_disk_io.is_some() {
+        let index = if disks::root_is_split(req.root_disk_io.as_ref()) {
             ",index=1"
         } else {
             ""
@@ -622,6 +624,14 @@ impl VmBackend for QemuBackend {
             kill_pids(&sidecar_pids);
             anyhow::bail!("QEMU exited before PID was available");
         };
+        if let Err(e) =
+            disks::apply_boot_throttles(&ctx.workspace, req.root_disk_io.as_ref(), QMP_BOOT_TIMEOUT)
+                .await
+        {
+            kill_pids(&[pid]);
+            kill_pids(&sidecar_pids);
+            return Err(e.context("applying disk throttles"));
+        }
         Ok(LaunchResult {
             pid,
             control_socket: Some(ctx.workspace.join("qmp.sock")),

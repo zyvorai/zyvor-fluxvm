@@ -22,7 +22,7 @@ use crate::{QMP_TIMEOUT, qmp};
 use anyhow::{Context, Result, bail};
 use fluxvm_core::backend::path_arg;
 use fluxvm_core::config::Config;
-use fluxvm_core::model::{DiskBus, DiskIo, VmDiskInfo, VmRecord, VmStatus};
+use fluxvm_core::model::{DiskBus, DiskIo, DiskThrottle, VmDiskInfo, VmRecord, VmStatus};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::path::{Path, PathBuf};
@@ -66,13 +66,15 @@ pub fn root_args(
     nbd_export: Option<&Path>,
     io: Option<&DiskIo>,
 ) -> Result<Vec<String>> {
-    let Some(io) = io else {
+    if let Some(io) = io {
+        io.validate(true).map_err(anyhow::Error::msg)?;
+    }
+    let Some(io) = io.filter(|io| io.has_device_settings()) else {
         return Ok(vec![
             "-drive".into(),
             root_drive(disk, disk_format, nbd_export),
         ]);
     };
-    io.validate(true).map_err(anyhow::Error::msg)?;
     let mut a = Vec::new();
     let mut drive = match nbd_export {
         Some(socket) => {
@@ -106,6 +108,94 @@ pub fn root_args(
     }
     a.extend(["-drive".into(), drive, "-device".into(), dev]);
     Ok(a)
+}
+
+/// True when [`root_args`] gives the root an explicit `disk-root` device.
+pub fn root_is_split(io: Option<&DiskIo>) -> bool {
+    io.is_some_and(DiskIo::has_device_settings)
+}
+
+/// `block_set_io_throttle` arguments for `target` (`{"id": ..}` or
+/// `{"device": ..}`); `None` lifts every limit.
+fn throttle_args(target: serde_json::Value, t: Option<&DiskThrottle>) -> serde_json::Value {
+    let t = t.cloned().unwrap_or_default();
+    let v = |x: Option<u64>| x.unwrap_or(0);
+    let mut a = json!({
+        "iops": v(t.iops_total),
+        "iops_rd": v(t.iops_read),
+        "iops_wr": v(t.iops_write),
+        "bps": v(t.bps_total),
+        "bps_rd": v(t.bps_read),
+        "bps_wr": v(t.bps_write),
+        "iops_max": v(t.iops_total_max),
+        "bps_max": v(t.bps_total_max),
+    });
+    if let Some(s) = t.burst_seconds {
+        if t.iops_total_max.is_some() {
+            a["iops_max_length"] = json!(s);
+        }
+        if t.bps_total_max.is_some() {
+            a["bps_max_length"] = json!(s);
+        }
+    }
+    if let (Some(m), Some(o)) = (a.as_object_mut(), target.as_object()) {
+        m.extend(o.clone());
+    }
+    a
+}
+
+/// The `block_set_io_throttle` target of the root: its `disk-root` device
+/// when split, else the `virtio0` BlockBackend.
+fn root_throttle_target(split: bool) -> serde_json::Value {
+    if split {
+        json!({"id": "disk-root"})
+    } else {
+        json!({"device": ROOT_BLOCK_DEVICE})
+    }
+}
+
+/// `(target, throttle)` for every disk of a just-launched VM that has limits.
+fn boot_throttles(
+    workspace: &Path,
+    root_io: Option<&DiskIo>,
+) -> Vec<(serde_json::Value, DiskThrottle)> {
+    let mut out = Vec::new();
+    if let Some(t) = root_io.and_then(DiskIo::throttle) {
+        out.push((root_throttle_target(root_is_split(root_io)), t.clone()));
+    }
+    for (name, _) in data_disks(workspace) {
+        let io = disk_io(workspace, &name);
+        if io.bus() == DiskBus::VhostUserBlk {
+            continue;
+        }
+        if let Some(t) = io.throttle() {
+            out.push((json!({"id": device_id(&name)}), t.clone()));
+        }
+    }
+    out
+}
+
+/// Applies every configured disk throttle to a QEMU that was just launched.
+/// QEMU keeps throttles out of the migration stream, so this also runs on a
+/// migration target.
+pub async fn apply_boot_throttles(
+    workspace: &Path,
+    root_io: Option<&DiskIo>,
+    timeout: std::time::Duration,
+) -> Result<()> {
+    let sock = workspace.join("qmp.sock");
+    for (target, t) in boot_throttles(workspace, root_io) {
+        let what = target.to_string();
+        qmp::execute(
+            &sock,
+            "block_set_io_throttle",
+            Some(throttle_args(target, Some(&t))),
+            timeout,
+        )
+        .await
+        .with_context(|| format!("block_set_io_throttle {what}"))?;
+    }
+    Ok(())
 }
 
 /// What this host's kernel and QEMU install support for disk I/O.
@@ -692,7 +782,13 @@ async fn virtual_size(cfg: &Config, path: &Path) -> Result<(u64, String)> {
     ))
 }
 
-async fn disk_info(cfg: &Config, name: &str, path: &Path, bus: &str) -> Result<VmDiskInfo> {
+async fn disk_info(
+    cfg: &Config,
+    name: &str,
+    path: &Path,
+    bus: &str,
+    throttle: Option<&DiskThrottle>,
+) -> Result<VmDiskInfo> {
     let (size_bytes, format) = virtual_size(cfg, path).await?;
     let allocated_bytes = std::fs::metadata(path)
         .map(|m| {
@@ -707,16 +803,77 @@ async fn disk_info(cfg: &Config, name: &str, path: &Path, bus: &str) -> Result<V
         format,
         size_bytes,
         allocated_bytes,
+        throttle: throttle.cloned(),
     })
 }
 
+fn root_throttle(vm: &VmRecord) -> Option<&DiskThrottle> {
+    vm.request.root_disk_io.as_ref().and_then(DiskIo::throttle)
+}
+
 pub async fn list(cfg: &Config, vm: &VmRecord) -> Result<Vec<VmDiskInfo>> {
-    let mut out = vec![disk_info(cfg, ROOT_DISK, &vm.disk, "virtio").await?];
+    let mut out = vec![disk_info(cfg, ROOT_DISK, &vm.disk, "virtio", root_throttle(vm)).await?];
     for (name, path) in data_disks(&vm.workspace) {
-        let bus = bus_name(disk_io(&vm.workspace, &name).bus());
-        out.push(disk_info(cfg, &name, &path, bus).await?);
+        let io = disk_io(&vm.workspace, &name);
+        out.push(disk_info(cfg, &name, &path, bus_name(io.bus()), io.throttle()).await?);
     }
     Ok(out)
+}
+
+/// Changes the limits of `root` or a data disk. The new setting is returned
+/// for the caller to store: a data disk's in its sidecar here, the root's in
+/// the VM record (`request.root_disk_io`) by the caller. A live VM gets it
+/// at once; otherwise it applies at the next start.
+pub async fn set_throttle(
+    vm: &VmRecord,
+    name: &str,
+    throttle: Option<DiskThrottle>,
+) -> Result<Option<DiskThrottle>> {
+    let throttle = throttle.filter(|t| !t.is_empty());
+    if let Some(t) = &throttle {
+        t.validate().map_err(anyhow::Error::msg)?;
+    }
+    let target = if name == ROOT_DISK {
+        root_throttle_target(root_is_split(vm.request.root_disk_io.as_ref()))
+    } else {
+        validate_disk_name(name)?;
+        if find_disk(&vm.workspace, name).is_none() {
+            bail!("disk {name:?} not found");
+        }
+        let mut sc = read_sidecar(&vm.workspace, name);
+        if sc.io.bus() == DiskBus::VhostUserBlk {
+            bail!(
+                "disk {name:?} is vhost-user-blk, which bypasses QEMU's block layer; it cannot be throttled"
+            );
+        }
+        sc.io.throttle = throttle.clone();
+        sc.io.validate(false).map_err(anyhow::Error::msg)?;
+        if is_live(vm) {
+            apply_throttle(vm, json!({"id": device_id(name)}), throttle.as_ref()).await?;
+        }
+        write_sidecar(&vm.workspace, name, &sc)?;
+        return Ok(throttle);
+    };
+    if is_live(vm) {
+        apply_throttle(vm, target, throttle.as_ref()).await?;
+    }
+    Ok(throttle)
+}
+
+async fn apply_throttle(
+    vm: &VmRecord,
+    target: serde_json::Value,
+    t: Option<&DiskThrottle>,
+) -> Result<()> {
+    qmp::execute(
+        &vm.workspace.join("qmp.sock"),
+        "block_set_io_throttle",
+        Some(throttle_args(target, t)),
+        QMP_TIMEOUT,
+    )
+    .await
+    .context("block_set_io_throttle")?;
+    Ok(())
 }
 
 fn is_live(vm: &VmRecord) -> bool {
@@ -760,7 +917,7 @@ pub async fn attach(
         let _ = std::fs::remove_file(&path);
         return Err(e);
     }
-    disk_info(cfg, name, &path, bus_name(io.bus())).await
+    disk_info(cfg, name, &path, bus_name(io.bus()), io.throttle()).await
 }
 
 /// Attach an existing qcow2/raw image or block device as data disk `name`
@@ -809,7 +966,7 @@ pub async fn attach_existing(
         let _ = std::fs::remove_file(&link);
         return Err(e);
     }
-    disk_info(cfg, name, &link, bus_name(io.bus())).await
+    disk_info(cfg, name, &link, bus_name(io.bus()), io.throttle()).await
 }
 
 /// Create data disk `name` as a qcow2 overlay on top of `backing` (a qcow2
@@ -828,7 +985,7 @@ pub async fn attach_overlay(
         let _ = std::fs::remove_file(&path);
         return Err(e);
     }
-    disk_info(cfg, name, &path, bus_name(io.bus())).await
+    disk_info(cfg, name, &path, bus_name(io.bus()), io.throttle()).await
 }
 
 /// Create `disks/<name>.qcow2` in `workspace` as an overlay on `backing`.
@@ -1055,6 +1212,12 @@ async fn hot_add(cfg: &Config, vm: &VmRecord, name: &str, path: &Path, sc: &Side
         del_iothread(&sock, name, io).await;
         return Err(e).context("device_add");
     }
+    if let Some(t) = io.throttle()
+        && let Err(e) = apply_throttle(vm, json!({"id": device_id(name)}), Some(t)).await
+    {
+        let _ = detach(vm, name).await;
+        return Err(e);
+    }
     Ok(())
 }
 
@@ -1176,8 +1339,8 @@ async fn resize_live_root(qmp_sock: &Path, new_bytes: u64) -> Result<()> {
 
 /// Grow a disk to `size_gib`. Shrinking is refused.
 pub async fn resize(cfg: &Config, vm: &VmRecord, name: &str, size_gib: u64) -> Result<VmDiskInfo> {
-    let (path, bus) = if name == ROOT_DISK {
-        (vm.disk.clone(), "virtio")
+    let (path, bus, throttle) = if name == ROOT_DISK {
+        (vm.disk.clone(), "virtio", root_throttle(vm).cloned())
     } else {
         validate_disk_name(name)?;
         let Some(path) = find_disk(&vm.workspace, name) else {
@@ -1186,11 +1349,12 @@ pub async fn resize(cfg: &Config, vm: &VmRecord, name: &str, size_gib: u64) -> R
         if is_external(&path) {
             bail!("disk {name:?} is attached from an existing image; resize its source");
         }
-        let bus = disk_io(&vm.workspace, name).bus();
+        let io = disk_io(&vm.workspace, name);
+        let bus = io.bus();
         if bus == DiskBus::VhostUserBlk && is_live(vm) {
             bail!("disk {name:?} is vhost-user-blk; resize it while the VM is stopped");
         }
-        (path, bus_name(bus))
+        (path, bus_name(bus), io.throttle().cloned())
     };
     if !path.is_file() {
         bail!("disk {name:?} not found");
@@ -1231,7 +1395,7 @@ pub async fn resize(cfg: &Config, vm: &VmRecord, name: &str, size_gib: u64) -> R
             );
         }
     }
-    disk_info(cfg, name, &path, bus).await
+    disk_info(cfg, name, &path, bus, throttle.as_ref()).await
 }
 
 #[cfg(test)]
@@ -1333,6 +1497,7 @@ mod tests {
                 cache: Some(DiskCache::None),
                 iothread: true,
                 queues: Some(4),
+                throttle: None,
             },
         )
         .unwrap();
@@ -1418,6 +1583,7 @@ mod tests {
             cache: Some(DiskCache::Writethrough),
             iothread: true,
             queues: Some(4),
+            throttle: None,
         };
         let a = vhost_user_args(
             "d",
@@ -1445,6 +1611,7 @@ mod tests {
             cache: Some(DiskCache::Directsync),
             iothread: true,
             queues: Some(64),
+            throttle: None,
         };
         assert!(ok.validate(false).is_ok());
         let mut bad = ok.clone();
@@ -1479,5 +1646,120 @@ mod tests {
         assert_eq!(find_disk(&tmp, "pvc"), Some(link));
         assert_eq!(find_disk(&tmp, "nope"), None);
         std::fs::remove_dir_all(&tmp).unwrap();
+    }
+
+    #[test]
+    fn throttle_args_fill_every_limit_and_the_burst_length() {
+        let t = DiskThrottle {
+            iops_total: Some(500),
+            bps_write: Some(1 << 20),
+            iops_total_max: Some(1000),
+            burst_seconds: Some(5),
+            ..Default::default()
+        };
+        let a = throttle_args(json!({"id": "disk-d"}), Some(&t));
+        assert_eq!(a["id"], "disk-d");
+        assert_eq!(a["iops"], 500);
+        assert_eq!(a["bps_wr"], 1 << 20);
+        assert_eq!(a["bps"], 0);
+        assert_eq!(a["iops_max"], 1000);
+        assert_eq!(a["iops_max_length"], 5);
+        assert!(a.get("bps_max_length").is_none());
+        let cleared = throttle_args(json!({"device": "virtio0"}), None);
+        assert_eq!(cleared["device"], "virtio0");
+        for k in ["iops", "iops_rd", "iops_wr", "bps", "bps_rd", "bps_wr"] {
+            assert_eq!(cleared[k], 0, "{k}");
+        }
+    }
+
+    #[test]
+    fn a_throttle_alone_keeps_the_root_drive_whole() {
+        let io = DiskIo {
+            throttle: Some(DiskThrottle {
+                iops_total: Some(100),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert!(!root_is_split(Some(&io)));
+        let a = root_args(Path::new("/w/root.qcow2"), "qcow2", None, Some(&io)).unwrap();
+        assert_eq!(a.len(), 2);
+        assert!(a[1].contains("if=virtio"));
+        assert_eq!(root_throttle_target(false), json!({"device": "virtio0"}));
+        let split = DiskIo {
+            iothread: true,
+            ..io
+        };
+        assert!(root_is_split(Some(&split)));
+        assert_eq!(root_throttle_target(true), json!({"id": "disk-root"}));
+    }
+
+    #[test]
+    fn boot_throttles_cover_the_root_and_throttled_data_disks() {
+        let tmp = std::env::temp_dir().join(format!("fluxvm-disks-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(disks_dir(&tmp)).unwrap();
+        for n in ["a", "b", "v"] {
+            std::fs::write(disks_dir(&tmp).join(format!("{n}.qcow2")), b"").unwrap();
+        }
+        let t = DiskThrottle {
+            bps_total: Some(10 << 20),
+            ..Default::default()
+        };
+        set_disk_io(
+            &tmp,
+            "a",
+            &DiskIo {
+                throttle: Some(t.clone()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let vub = DiskIo {
+            bus: Some(DiskBus::VhostUserBlk),
+            throttle: Some(t.clone()),
+            ..Default::default()
+        };
+        assert!(set_disk_io(&tmp, "v", &vub).is_err(), "vhost-user-blk");
+        let root = DiskIo {
+            throttle: Some(t.clone()),
+            ..Default::default()
+        };
+        let got = boot_throttles(&tmp, Some(&root));
+        assert_eq!(
+            got,
+            vec![
+                (json!({"device": "virtio0"}), t.clone()),
+                (json!({"id": "disk-a"}), t.clone()),
+            ]
+        );
+        std::fs::remove_dir_all(&tmp).unwrap();
+    }
+
+    #[test]
+    fn throttle_validation() {
+        let ok = DiskThrottle {
+            iops_read: Some(100),
+            iops_write: Some(50),
+            bps_total: Some(1 << 20),
+            bps_total_max: Some(2 << 20),
+            burst_seconds: Some(10),
+            ..Default::default()
+        };
+        assert!(ok.validate().is_ok());
+        let mut bad = ok.clone();
+        bad.iops_total = Some(10);
+        assert!(bad.validate().is_err(), "total with read/write");
+        let mut bad = ok.clone();
+        bad.bps_total_max = Some(1);
+        assert!(bad.validate().is_err(), "max below base");
+        let mut bad = ok.clone();
+        bad.iops_total_max = Some(10);
+        assert!(bad.validate().is_err(), "max without base");
+        let mut bad = ok.clone();
+        bad.bps_total_max = None;
+        assert!(bad.validate().is_err(), "burst_seconds without a max");
+        let mut bad = ok;
+        bad.iops_read = Some(0);
+        assert!(bad.validate().is_err(), "zero");
     }
 }

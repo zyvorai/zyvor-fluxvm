@@ -4867,6 +4867,39 @@ impl VmManager {
         Ok(vm)
     }
 
+    /// Set or clear (`None`) the IOPS/bandwidth limits of `root` or a data
+    /// disk; live on a running VM, and kept for every later start.
+    pub async fn set_vm_disk_throttle(
+        &self,
+        id: Uuid,
+        name: &str,
+        throttle: Option<fluxvm_core::model::DiskThrottle>,
+    ) -> Result<Option<fluxvm_core::model::DiskThrottle>> {
+        let mut vm = self.qemu_vm_for_disks(id).await?;
+        let set = fluxvm_qemu::disks::set_throttle(&vm, name, throttle).await?;
+        if name == fluxvm_qemu::disks::ROOT_DISK {
+            let io = vm.request.root_disk_io.get_or_insert_with(Default::default);
+            io.throttle = set.clone();
+            if *io == fluxvm_core::model::DiskIo::default() {
+                vm.request.root_disk_io = None;
+            }
+            self.store.update(vm).await?;
+        }
+        let limits = set
+            .as_ref()
+            .map(|t| serde_json::to_string(t).unwrap_or_default())
+            .unwrap_or_else(|| "none".into());
+        audit_event(
+            "vm.disk.throttle",
+            &[
+                ("vm_id", &id.to_string()),
+                ("disk", name),
+                ("limits", &limits),
+            ],
+        );
+        Ok(set)
+    }
+
     pub async fn detach_vm_disk(&self, id: Uuid, name: &str) -> Result<()> {
         if self.get(id).await?.backend == BackendKind::Vz {
             return self.detach_vz_disk(id, name).await;

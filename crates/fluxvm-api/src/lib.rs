@@ -8,7 +8,7 @@ use axum::{
     http::{Method, StatusCode, header},
     middleware::{self, Next},
     response::{IntoResponse, Response},
-    routing::{any, delete, get, post},
+    routing::{any, delete, get, post, put},
 };
 use fluxvm_core::{
     config::{Role, constant_time_eq},
@@ -447,6 +447,10 @@ pub fn router(manager: Arc<VmManager>) -> Router {
         .route(
             "/v1/vms/{id}/disks/{name}",
             delete(detach_vm_disk).patch(resize_vm_disk),
+        )
+        .route(
+            "/v1/vms/{id}/disks/{name}/throttle",
+            put(set_vm_disk_throttle),
         )
         .route("/v1/vms/{id}/cdroms/{name}/eject", post(eject_vm_cdrom))
         .route("/v1/events", get(list_events))
@@ -3484,6 +3488,26 @@ async fn resize_vm_disk(
 ) -> ApiResult<Json<fluxvm_core::model::VmDiskInfo>> {
     require_admin(role)?;
     Ok(Json(m.resize_vm_disk(id, &name, req.size_gib).await?))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DiskThrottleRequest {
+    #[serde(default)]
+    throttle: Option<fluxvm_core::model::DiskThrottle>,
+}
+
+async fn set_vm_disk_throttle(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path((id, name)): Path<(Uuid, String)>,
+    Json(req): Json<DiskThrottleRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    let throttle = m.set_vm_disk_throttle(id, &name, req.throttle).await?;
+    Ok(Json(
+        serde_json::json!({"name": name, "throttle": throttle}),
+    ))
 }
 
 async fn eject_vm_cdrom(
