@@ -946,8 +946,22 @@ async fn shell(r: &Remote, id: Uuid, command: &[String]) -> Result<()> {
     let mut stdout = std::io::stdout();
     let mut exit = None;
     let mut stdin_open = true;
+    // A resize of the local terminal is told to the daemon, which sets the guest tty's size.
+    let mut winch = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::window_change())
+        .context("watching for terminal resizes")?;
+    let mut last_size = (cols, rows);
     loop {
         tokio::select! {
+            _ = winch.recv() => {
+                let now = terminal_size();
+                if now != last_size {
+                    last_size = now;
+                    let msg = json!({"resize": {"cols": now.0, "rows": now.1}}).to_string();
+                    if ws.send(Message::Text(msg.into())).await.is_err() {
+                        break;
+                    }
+                }
+            },
             key = key_rx.recv(), if stdin_open => match key {
                 Some(bytes) => {
                     if ws.send(Message::Binary(bytes.into())).await.is_err() {

@@ -1565,7 +1565,13 @@ struct PtyQuery {
 }
 
 /// The remote shell line that sizes the terminal and starts the shell or command. Pure.
-fn pty_script(cols: u16, rows: u16, cwd: Option<&str>, command: Option<&str>) -> String {
+fn pty_script(
+    cols: u16,
+    rows: u16,
+    cwd: Option<&str>,
+    command: Option<&str>,
+    tty_file: &str,
+) -> String {
     let cd = cwd
         .map(|c| format!("cd {} 2>/dev/null; ", shell_quote(c)))
         .unwrap_or_default();
@@ -1573,7 +1579,32 @@ fn pty_script(cols: u16, rows: u16, cwd: Option<&str>, command: Option<&str>) ->
         Some(c) => format!("exec sh -c {}", shell_quote(c)),
         None => "exec \"${SHELL:-/bin/sh}\" -l".to_string(),
     };
-    format!("stty cols {cols} rows {rows} 2>/dev/null; export TERM=xterm-256color; {cd}{run}")
+    // The tty's path is kept in a file so a later resize can address it from another connection.
+    format!(
+        "stty cols {cols} rows {rows} 2>/dev/null; tty > {f} 2>/dev/null; export TERM=xterm-256color; {cd}{run}",
+        f = shell_quote(tty_file)
+    )
+}
+
+/// The guest-side file holding a terminal's tty path. `token` is a UUID we generated.
+fn pty_tty_file(token: Uuid) -> String {
+    format!("/tmp/.fluxvm-pty-{token}")
+}
+
+/// Resize a running terminal by setting the window size on its tty; the kernel then signals the
+/// foreground process group (SIGWINCH). Pure so it is unit-tested.
+fn pty_resize_script(tty_file: &str, cols: u16, rows: u16) -> String {
+    let f = shell_quote(tty_file);
+    format!("t=$(cat {f}) && stty -F \"$t\" cols {cols} rows {rows}")
+}
+
+/// `{"resize": {"cols": N, "rows": N}}` as a text frame, within the limits `open` enforces.
+fn parse_resize(text: &str) -> Option<(u16, u16)> {
+    let v: Value = serde_json::from_str(text).ok()?;
+    let r = v.get("resize")?;
+    let cols = u16::try_from(r.get("cols")?.as_u64()?).ok()?;
+    let rows = u16::try_from(r.get("rows")?.as_u64()?).ok()?;
+    ((1..=500).contains(&cols) && (1..=300).contains(&rows)).then_some((cols, rows))
 }
 
 async fn pty(
@@ -1608,7 +1639,9 @@ async fn pty(
         });
     }
     let cwd = s.workspace.as_ref().map(|w| w.path.clone());
-    let script = pty_script(cols, rows, cwd.as_deref(), q.command.as_deref());
+    let token = Uuid::new_v4();
+    let tty_file = pty_tty_file(token);
+    let script = pty_script(cols, rows, cwd.as_deref(), q.command.as_deref(), &tty_file);
     // Spawn before upgrading so a missing ssh or an unreachable guest is an HTTP error.
     let vm = m.ensure_running_for_request(s.sandbox_id).await?;
     let child = m.pty_spawn(&vm, &script).map_err(|e| ApiError {
@@ -1622,13 +1655,15 @@ async fn pty(
         json!({"cols": cols, "rows": rows, "command": q.command}),
     );
     Ok(ws
-        .on_upgrade(move |socket| relay_pty(m, id, socket, child))
+        .on_upgrade(move |socket| relay_pty(m, id, s.sandbox_id, tty_file, socket, child))
         .into_response())
 }
 
 async fn relay_pty(
     m: Arc<VmManager>,
     id: Uuid,
+    sandbox: Uuid,
+    tty_file: String,
     socket: axum::extract::ws::WebSocket,
     mut child: tokio::process::Child,
 ) {
@@ -1648,11 +1683,30 @@ async fn relay_pty(
     let bytes_out = Arc::new(std::sync::atomic::AtomicU64::new(0));
     let (bi, bo) = (bytes_in.clone(), bytes_out.clone());
 
+    let (resize_m, resize_file) = (m.clone(), tty_file.clone());
     let up = async move {
         while let Some(Ok(msg)) = rx.next().await {
             let data: Vec<u8> = match msg {
                 Message::Binary(b) => b.to_vec(),
-                Message::Text(t) => t.as_bytes().to_vec(),
+                // A text frame is a control message when it parses as one; anything else is input.
+                Message::Text(t) => {
+                    if let Some((cols, rows)) = parse_resize(t.as_str()) {
+                        let (m, f) = (resize_m.clone(), resize_file.clone());
+                        // Off the relay: it is an exec, and keystrokes must not wait for it.
+                        tokio::spawn(async move {
+                            let _ = m
+                                .exec_with_policy(
+                                    sandbox,
+                                    pty_resize_script(&f, cols, rows),
+                                    Some(10),
+                                    None,
+                                )
+                                .await;
+                        });
+                        continue;
+                    }
+                    t.as_bytes().to_vec()
+                }
                 Message::Close(_) => break,
                 _ => continue,
             };
@@ -1717,6 +1771,9 @@ async fn relay_pty(
             .await;
     }
     OPEN_PTYS.fetch_sub(1, Ordering::SeqCst);
+    // Best effort: a file left behind in /tmp is harmless and is gone on reboot.
+    let rm = format!("rm -f {}", shell_quote(&tty_file));
+    let _ = m.exec_with_policy(sandbox, rm, Some(10), None).await;
     record(
         &m,
         id,
@@ -2664,13 +2721,34 @@ mod tests {
 
     #[test]
     fn the_terminal_script_sizes_the_tty_and_quotes_the_command() {
-        let s = pty_script(120, 40, Some("/workspace"), None);
+        let s = pty_script(120, 40, Some("/workspace"), None, "/tmp/.fluxvm-pty-x");
         assert!(s.starts_with("stty cols 120 rows 40"));
         assert!(s.contains("cd '/workspace'"));
         assert!(s.contains("exec \"${SHELL:-/bin/sh}\" -l"));
-        let c = pty_script(80, 24, None, Some("echo 'a b'; ls"));
+        let c = pty_script(80, 24, None, Some("echo 'a b'; ls"), "/tmp/.fluxvm-pty-x");
         assert!(c.contains("exec sh -c 'echo '\\''a b'\\''; ls'"), "{c}");
         assert!(!c.contains("cd "));
+        assert!(s.contains("tty > '/tmp/.fluxvm-pty-x'"));
+    }
+
+    #[test]
+    fn resize_messages_are_parsed_strictly() {
+        assert_eq!(
+            parse_resize(r#"{"resize":{"cols":132,"rows":43}}"#),
+            Some((132, 43))
+        );
+        for bad in [
+            "ls -l",
+            r#"{"resize":{"cols":0,"rows":10}}"#,
+            r#"{"resize":{"cols":501,"rows":10}}"#,
+            r#"{"resize":{"cols":80}}"#,
+            r#"{"resize":{"cols":-1,"rows":5}}"#,
+            r#"{"other":1}"#,
+        ] {
+            assert_eq!(parse_resize(bad), None, "{bad}");
+        }
+        let cmd = pty_resize_script("/tmp/.fluxvm-pty-x", 100, 30);
+        assert!(cmd.contains("cat '/tmp/.fluxvm-pty-x'") && cmd.contains("cols 100 rows 30"));
     }
 
     #[test]
