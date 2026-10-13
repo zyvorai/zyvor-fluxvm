@@ -1450,6 +1450,49 @@ pub fn tools(remote: Arc<Remote>) -> Vec<Tool> {
             },
         ),
         tool(
+            "session_rollout",
+            "Try one command several times at once: fork the session into COUNT children, run COMMAND in every child in parallel, return each child's exit code and output, then delete the children unless keep is true. Same forkability rules as session_fork. Each child is a full sandbox, so keep COUNT small.",
+            object(
+                json!({
+                    "session": {"type": "string"},
+                    "command": {"type": "string", "description": "shell command run in every child"},
+                    "count": {"type": "integer", "minimum": 1, "maximum": 32},
+                    "timeout_seconds": {"type": "integer", "minimum": 1},
+                    "keep": {"type": "boolean", "description": "keep the children (default false: they are deleted)"},
+                }),
+                &["session", "command"],
+            ),
+            true,
+            &remote,
+            |r, args| async move {
+                timed(Duration::from_secs(600), async {
+                    let id = session_id(&args)?;
+                    let count = int_arg(&args, "count")?.unwrap_or(2);
+                    if !(1..=32).contains(&count) {
+                        bail!("count must be 1-32");
+                    }
+                    let command = str_arg(&args, "command")
+                        .filter(|c| !c.trim().is_empty())
+                        .ok_or_else(|| anyhow::anyhow!("command is required"))?;
+                    let timeout = int_arg(&args, "timeout_seconds")?;
+                    let keep = args["keep"].as_bool().unwrap_or(false);
+                    pretty(
+                        &crate::agent_session::rollout(
+                            &r,
+                            id,
+                            count as u32,
+                            command,
+                            timeout,
+                            keep,
+                            None,
+                        )
+                        .await?,
+                    )
+                })
+                .await
+            },
+        ),
+        tool(
             "session_events",
             "What an agent session did: its ledger (exec, checkpoint, restore, fork, ...) and the sandbox's VM events. since is an RFC 3339 time.",
             object(

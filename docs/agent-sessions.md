@@ -28,6 +28,9 @@ tenant's id answers `404`, not `403`).
 | `GET /v1/agents/sessions/{id}/events` | `?since=` RFC 3339. `{ledger, vm_events}`. |
 | `GET /v1/agents/sessions/{id}/artifacts` | Workspace changes since the baseline, checkpoints, children, counters. |
 
+`fluxctl agent rollout <session> --count N -- <cmd>` and MCP `session_rollout` are not a separate endpoint: they call
+fork, then exec in every child in parallel, then delete the children (`--keep` keeps them), so they follow fork's rules.
+
 ### Create
 
 ```json
@@ -206,7 +209,7 @@ fluxctl agent rm <id>
 ```
 
 - **MCP** (`fluxctl mcp serve --allow-write`): `session_create`, `session_exec`, `session_checkpoint`, `session_restore`,
-  `session_fork`, `session_events`, `session_artifacts`, `session_delete`, plus `sandbox_speculate`, `sandbox_changesets`
+  `session_fork`, `session_rollout`, `session_events`, `session_artifacts`, `session_delete`, plus `sandbox_speculate`, `sandbox_changesets`
   and `sandbox_changeset_decide`.
 - **Go**: `client.CreateSession(ctx, fluxvm.CreateSessionRequest{…})`, then `Exec`, `Checkpoint`, `Restore`, `Fork`,
   `Events`, `Artifacts`, `Delete` (`go/sessions.go`).

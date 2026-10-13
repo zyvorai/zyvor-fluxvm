@@ -2,11 +2,15 @@
 
 ## Unreleased
 
+- **Rollouts.** `fluxctl agent rollout <session> --count N -- <cmd>` (MCP `session_rollout`) forks N children, runs
+  the command in each in parallel, returns every exit code and output, then deletes the children (`--keep` to keep
+  them). It is composed client-side from fork, exec and delete, so it follows fork's rules (in-tree KVM, or a vz
+  session with no NIC) and each child is a full sandbox. Run live on vz: 3 children, fork 2.5 s, parallel exec 129 ms
+  wall; each child saw the parent's file. Not a reward/RL harness: no scoring, no reset-to-checkpoint verb.
 - **Process rules enforced.** A session's `policy.process: {allow, deny}` (glob patterns over the command string) is
   now checked on `exec` and job start: a refused command is `403` and ledgered as `exec.refused`/`job.refused`.
   Compound commands are split and each piece checked. This is a guardrail against accidents, not a sandbox
   boundary. `process.ask` is refused at create (no approval flow yet); `filesystem` rules are still unenforced.
-
 - **Trajectory export.** `GET /v1/agents/sessions/{id}/trajectory` merges the session ledger and the sandbox's VM
   events into one time-ordered, numbered list; `fluxctl agent export <session> [--out file]` writes it as JSON Lines
   (a header line, then one step per line). It records what the API and hypervisor layer did, not the agent's
