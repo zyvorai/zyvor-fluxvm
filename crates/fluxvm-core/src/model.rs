@@ -3008,7 +3008,7 @@ pub struct VmMetrics {
 
 /// PSI (Pressure Stall Information) for a VM's cgroup — see
 /// `fluxvm_cgroup::PressureStats` for field semantics.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct VmPressure {
     pub cpu_some: Option<fluxvm_cgroup::PressureRecord>,
     pub memory_some: Option<fluxvm_cgroup::PressureRecord>,

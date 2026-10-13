@@ -388,6 +388,7 @@ pub fn router(manager: Arc<VmManager>) -> Router {
         .route("/v1/host/confidential", get(host_confidential))
         .route("/v1/host/topology", get(host_topology))
         .route("/v1/host/memory", get(host_memory))
+        .route("/v1/host/pressure", get(host_pressure))
         .route("/v1/host/hibernation", get(host_hibernation))
         .route("/v1/host/hibernation/check", post(check_hibernation))
         .route("/v1/host/gpus", get(list_host_gpus))
@@ -2311,6 +2312,15 @@ fn allocated_vfio_bdfs(vms: &[VmRecord]) -> std::collections::HashSet<String> {
 async fn host_memory() -> Json<fluxvm_core::pressure_admission::HostPressure> {
     Json(
         tokio::task::spawn_blocking(fluxvm_core::pressure_admission::sample_host)
+            .await
+            .unwrap_or_default(),
+    )
+}
+
+/// Whole-host CPU, memory and IO PSI, sampled now.
+async fn host_pressure() -> Json<fluxvm_core::model::VmPressure> {
+    Json(
+        tokio::task::spawn_blocking(fluxvm_core::pressure_admission::sample_host_psi)
             .await
             .unwrap_or_default(),
     )
