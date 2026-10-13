@@ -81,9 +81,9 @@ const INSTALL_TABS = [
     id: 'script',
     label: 'One line',
     body: [
-      'curl -fsSL https://zyvorai.github.io/zyvor-fluxvm/install.sh | bash',
+      'curl -fsSL https://raw.githubusercontent.com/zyvorai/zyvor-fluxvm/main/scripts/install.sh | bash',
       '# or, wiring an MCP client in the same step:',
-      'curl -fsSL https://zyvorai.github.io/zyvor-fluxvm/install.sh | bash -s -- --client claude-code',
+      'curl -fsSL https://raw.githubusercontent.com/zyvorai/zyvor-fluxvm/main/scripts/install.sh | bash -s -- --client claude-code',
       '',
       '# it only runs brew install, brew services start and fluxctl mcp install;',
       '# --dry-run prints those and stops; --uninstall reverses them.',
