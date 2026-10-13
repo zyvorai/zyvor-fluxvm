@@ -49,6 +49,21 @@ pub enum AgentCommand {
         /// Command pattern the session may not run (repeatable, `*` wildcard).
         #[arg(long = "cmd-deny")]
         cmd_deny: Vec<String>,
+        /// Confine every command, job, file and git call in the guest (Landlock + seccomp):
+        /// system directories read-only, `/tmp` and the workspace writable. Create fails when the
+        /// guest cannot enforce it, unless `--confine-best-effort`. Linux guests only.
+        #[arg(long)]
+        confine: bool,
+        /// Extra path the session may read when confined (repeatable, absolute; implies `--confine`).
+        #[arg(long = "fs-read")]
+        fs_read: Vec<String>,
+        /// Extra path the session may write when confined (repeatable, absolute; implies `--confine`).
+        #[arg(long = "fs-write")]
+        fs_write: Vec<String>,
+        /// Create the session even if the guest cannot enforce the confinement (implies `--confine`;
+        /// `capabilities.confinement` then says whether it did).
+        #[arg(long)]
+        confine_best_effort: bool,
         #[arg(long)]
         ttl_seconds: Option<u64>,
     },
@@ -203,6 +218,43 @@ pub enum AgentCommand {
     },
     /// Delete the session and its sandbox. REST: `DELETE /v1/agents/sessions/{id}`.
     Rm { id: Uuid },
+    /// Mint an expiring token that works on this one session and only for the listed operations
+    /// (read, exec, jobs, files.read, files.write, git, checkpoint, preview). Prints it once; use it as
+    /// the bearer token for `fluxctl --token` or REST. REST: `POST /v1/agents/sessions/{id}/tokens`.
+    Token {
+        id: Uuid,
+        /// Operations to grant (comma separated or repeated).
+        #[arg(long, value_delimiter = ',', required = true)]
+        ops: Vec<String>,
+        /// Lifetime in seconds (default 3600, at most 86400; never past the session's own expiry).
+        #[arg(long)]
+        ttl_seconds: Option<u64>,
+        #[arg(long)]
+        label: Option<String>,
+    },
+    /// List a session's live tokens (never the secrets). REST: `GET .../tokens`.
+    Tokens { id: Uuid },
+    /// Revoke one session token by its id. REST: `DELETE .../tokens/{token}`.
+    Untoken { id: Uuid, token: Uuid },
+    /// Apply a fork child's workspace changes to its parent as a three-way merge. `--dry-run`
+    /// prints the plan and its `plan_id`; apply with `--plan-id` to pin what you reviewed. The
+    /// parent is checkpointed first and conflicting paths are never overwritten.
+    /// REST: `POST /v1/agents/sessions/{id}/promote`.
+    Promote {
+        /// The child session.
+        id: Uuid,
+        #[arg(long)]
+        dry_run: bool,
+        /// The `plan_id` from a dry run; the apply is refused if the plan differs now.
+        #[arg(long)]
+        plan_id: Option<String>,
+        /// Apply the paths that merge cleanly and skip conflicting ones.
+        #[arg(long)]
+        skip_conflicts: bool,
+        /// Only this file or directory inside the workspace (repeatable).
+        #[arg(long = "path")]
+        paths: Vec<String>,
+    },
     /// Fork COUNT children, run the same command in each in parallel, print every result, then
     /// delete the children (unless `--keep`). Composed from fork, exec and delete; each child is
     /// a full sandbox, so COUNT is bounded by the host. Same forkability rules as `fork`.
@@ -377,6 +429,10 @@ pub async fn run(r: &Remote, cmd: AgentCommand) -> Result<()> {
             volume,
             cmd_allow,
             cmd_deny,
+            confine,
+            fs_read,
+            fs_write,
+            confine_best_effort,
             ttl_seconds,
         } => {
             let mut body = create_body(
@@ -391,6 +447,13 @@ pub async fn run(r: &Remote, cmd: AgentCommand) -> Result<()> {
                 ttl_seconds,
             );
             add_process_rules(&mut body, &cmd_allow, &cmd_deny);
+            add_filesystem(
+                &mut body,
+                confine || confine_best_effort || !fs_read.is_empty() || !fs_write.is_empty(),
+                &fs_read,
+                &fs_write,
+                confine_best_effort,
+            );
             add_volumes(&mut body, &volume)?;
             show(
                 &r.call(Method::POST, "/v1/agents/sessions", Some(body))
@@ -473,6 +536,58 @@ pub async fn run(r: &Remote, cmd: AgentCommand) -> Result<()> {
                 .await?,
             )
         }
+        AgentCommand::Token {
+            id,
+            ops,
+            ttl_seconds,
+            label,
+        } => {
+            let mut body = json!({ "ops": ops });
+            if let Some(t) = ttl_seconds {
+                body["ttl_seconds"] = json!(t);
+            }
+            if let Some(l) = label {
+                body["label"] = json!(l);
+            }
+            show(
+                &r.call(
+                    Method::POST,
+                    &format!("/v1/agents/sessions/{id}/tokens"),
+                    Some(body),
+                )
+                .await?,
+            )
+        }
+        AgentCommand::Tokens { id } => show(
+            &r.call(
+                Method::GET,
+                &format!("/v1/agents/sessions/{id}/tokens"),
+                None,
+            )
+            .await?,
+        ),
+        AgentCommand::Untoken { id, token } => show(
+            &r.call(
+                Method::DELETE,
+                &format!("/v1/agents/sessions/{id}/tokens/{token}"),
+                None,
+            )
+            .await?,
+        ),
+        AgentCommand::Promote {
+            id,
+            dry_run,
+            plan_id,
+            skip_conflicts,
+            paths,
+        } => show(
+            &r.call(
+                Method::POST,
+                &format!("/v1/agents/sessions/{id}/promote"),
+                Some(promote_body(dry_run, plan_id, skip_conflicts, &paths)),
+            )
+            .await?,
+        ),
         AgentCommand::Timeline { id, since } => {
             let mut path = format!("/v1/agents/sessions/{id}/events");
             if let Some(s) = since {
@@ -1290,6 +1405,53 @@ pub(crate) fn add_volumes(body: &mut Value, specs: &[String]) -> Result<()> {
     Ok(())
 }
 
+/// The `promote` request body; only what was asked for, so the daemon's defaults apply otherwise.
+pub(crate) fn promote_body(
+    dry_run: bool,
+    plan_id: Option<String>,
+    skip_conflicts: bool,
+    paths: &[String],
+) -> Value {
+    let mut b = json!({});
+    if dry_run {
+        b["dry_run"] = json!(true);
+    }
+    if let Some(p) = plan_id {
+        b["plan_id"] = json!(p);
+    }
+    if skip_conflicts {
+        b["skip_conflicts"] = json!(true);
+    }
+    if !paths.is_empty() {
+        b["paths"] = json!(paths);
+    }
+    b
+}
+
+/// Attach `policy.filesystem` (guest confinement) to a create body when `confine` is set.
+pub(crate) fn add_filesystem(
+    body: &mut Value,
+    confine: bool,
+    read: &[String],
+    write: &[String],
+    best_effort: bool,
+) {
+    if !confine {
+        return;
+    }
+    let mut fs = json!({});
+    if !read.is_empty() {
+        fs["read"] = json!(read);
+    }
+    if !write.is_empty() {
+        fs["write"] = json!(write);
+    }
+    if best_effort {
+        fs["enforcement"] = json!("best-effort");
+    }
+    body["policy"]["filesystem"] = fs;
+}
+
 /// Attach `policy.process` command rules to a create body when any were given.
 pub(crate) fn add_process_rules(body: &mut Value, allow: &[String], deny: &[String]) {
     if allow.is_empty() && deny.is_empty() {
@@ -1536,6 +1698,31 @@ mod tests {
         add_process_rules(&mut b, &["git *".into()], &["git push*".into()]);
         assert_eq!(b["policy"]["process"]["allow"][0], "git *");
         assert_eq!(b["policy"]["process"]["deny"][0], "git push*");
+    }
+
+    #[test]
+    fn confinement_flags_land_under_policy_filesystem_and_only_when_asked() {
+        let mut b = json!({"agent": "custom"});
+        add_filesystem(&mut b, false, &[], &[], false);
+        assert!(b.get("policy").is_none());
+        add_filesystem(&mut b, true, &[], &[], false);
+        assert_eq!(b["policy"]["filesystem"], json!({}));
+        let mut c = json!({"agent": "custom", "policy": {"preset": "offline"}});
+        add_filesystem(&mut c, true, &["/data".into()], &["/out".into()], true);
+        assert_eq!(c["policy"]["preset"], "offline");
+        assert_eq!(c["policy"]["filesystem"]["read"][0], "/data");
+        assert_eq!(c["policy"]["filesystem"]["write"][0], "/out");
+        assert_eq!(c["policy"]["filesystem"]["enforcement"], "best-effort");
+    }
+
+    #[test]
+    fn promote_body_carries_only_what_was_asked_for() {
+        assert_eq!(promote_body(false, None, false, &[]), json!({}));
+        let b = promote_body(true, Some("abc".into()), true, &["/workspace/src".into()]);
+        assert_eq!(b["dry_run"], true);
+        assert_eq!(b["plan_id"], "abc");
+        assert_eq!(b["skip_conflicts"], true);
+        assert_eq!(b["paths"][0], "/workspace/src");
     }
 
     #[test]

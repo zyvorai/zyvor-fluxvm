@@ -1269,6 +1269,10 @@ pub fn tools(remote: Arc<Remote>) -> Vec<Tool> {
                     "volumes": {"type": "array", "items": {"type": "string"}, "description": "named host volumes as NAME:/guest/path (vz only; formatted ext4 on first use; the session cannot fork)"},
                     "allow_commands": {"type": "array", "items": {"type": "string"}, "description": "command patterns (* wildcard) session_exec may run; other commands are refused. A guardrail on the command string, not a security boundary"},
                     "deny_commands": {"type": "array", "items": {"type": "string"}, "description": "command patterns (* wildcard) session_exec refuses"},
+                    "confine": {"type": "boolean", "description": "confine every command, job, file and git call in the guest with Landlock + seccomp: system directories read-only, /tmp and the workspace writable. Fails if the guest cannot enforce it (macOS guests cannot); a terminal and ssh are refused on such a session"},
+                    "read_paths": {"type": "array", "items": {"type": "string"}, "description": "extra absolute paths a confined session may read (implies confine)"},
+                    "write_paths": {"type": "array", "items": {"type": "string"}, "description": "extra absolute paths a confined session may write (implies confine)"},
+                    "confine_best_effort": {"type": "boolean", "description": "create the session even if the guest cannot enforce confinement; capabilities.confinement says whether it did (implies confine)"},
                     "ttl_seconds": {"type": "integer", "minimum": 30},
                 }),
                 &[],
@@ -1310,6 +1314,18 @@ pub fn tools(remote: Arc<Remote>) -> Vec<Tool> {
                         &mut body,
                         &strs("allow_commands"),
                         &strs("deny_commands"),
+                    );
+                    let best_effort = args["confine_best_effort"].as_bool().unwrap_or(false);
+                    let (rp, wp) = (strs("read_paths"), strs("write_paths"));
+                    crate::agent_session::add_filesystem(
+                        &mut body,
+                        args["confine"].as_bool().unwrap_or(false)
+                            || best_effort
+                            || !rp.is_empty()
+                            || !wp.is_empty(),
+                        &rp,
+                        &wp,
+                        best_effort,
                     );
                     if let Some(t) = int_arg(&args, "ttl_seconds")? {
                         body["ttl_seconds"] = json!(t);
@@ -1836,6 +1852,86 @@ pub fn tools(remote: Arc<Remote>) -> Vec<Tool> {
                         }
                         other => anyhow::bail!("unknown op {other:?}"),
                     }
+                })
+                .await
+            },
+        ),
+        tool(
+            "session_promote",
+            "Apply a fork child's workspace file changes to its parent session as a three-way merge. Call with dry_run true first: it returns the plan (paths to apply, already applied, conflicts) and a plan_id. Then call again with that plan_id to apply exactly what was reviewed. The parent is checkpointed first (the checkpoint tag is returned) and a path the parent also changed is a conflict, never overwritten. Workspace files only; the child must have been forked from a session with a workspace.",
+            object(
+                json!({
+                    "session": {"type": "string", "description": "the child session id"},
+                    "dry_run": {"type": "boolean", "description": "return the plan and plan_id; change nothing"},
+                    "plan_id": {"type": "string", "description": "plan_id from a dry run; refused if the plan is different now"},
+                    "skip_conflicts": {"type": "boolean", "description": "apply the clean paths and leave conflicting ones (default: any conflict refuses everything)"},
+                    "paths": {"type": "array", "items": {"type": "string"}, "description": "only these files or directories inside the workspace"},
+                }),
+                &["session"],
+            ),
+            true,
+            &remote,
+            |r, args| async move {
+                timed(Duration::from_secs(300), async {
+                    let id = session_id(&args)?;
+                    let paths: Vec<String> = args["paths"]
+                        .as_array()
+                        .map(|a| {
+                            a.iter()
+                                .filter_map(|v| v.as_str().map(str::to_string))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    let body = crate::agent_session::promote_body(
+                        args["dry_run"].as_bool().unwrap_or(false),
+                        str_arg(&args, "plan_id").map(str::to_string),
+                        args["skip_conflicts"].as_bool().unwrap_or(false),
+                        &paths,
+                    );
+                    pretty(
+                        &r.call(
+                            Method::POST,
+                            &format!("/v1/agents/sessions/{id}/promote"),
+                            Some(body),
+                        )
+                        .await?,
+                    )
+                })
+                .await
+            },
+        ),
+        tool(
+            "session_token",
+            "Mint an expiring bearer token that works on this one session and only for the listed operations, to hand to a less-trusted agent. The token is shown once. Grantable: read, exec, jobs, files.read, files.write, git, checkpoint, preview; restore, fork, delete, terminals and promote stay with the caller.",
+            object(
+                json!({
+                    "session": {"type": "string"},
+                    "ops": {"type": "array", "items": {"type": "string", "enum": ["read", "exec", "jobs", "files.read", "files.write", "git", "checkpoint", "preview"]}, "minItems": 1},
+                    "ttl_seconds": {"type": "integer", "minimum": 1, "maximum": 86400},
+                    "label": {"type": "string"},
+                }),
+                &["session", "ops"],
+            ),
+            true,
+            &remote,
+            |r, args| async move {
+                timed(CALL_TIMEOUT, async {
+                    let id = session_id(&args)?;
+                    let mut body = json!({"ops": args["ops"]});
+                    if let Some(t) = int_arg(&args, "ttl_seconds")? {
+                        body["ttl_seconds"] = json!(t);
+                    }
+                    if let Some(l) = str_arg(&args, "label") {
+                        body["label"] = json!(l);
+                    }
+                    pretty(
+                        &r.call(
+                            Method::POST,
+                            &format!("/v1/agents/sessions/{id}/tokens"),
+                            Some(body),
+                        )
+                        .await?,
+                    )
                 })
                 .await
             },

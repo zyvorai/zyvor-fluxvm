@@ -126,8 +126,12 @@ minting tokens (a session token cannot mint another).
 - A scoped caller sees the session as the session's tenant does. The process and filesystem policy applies to its
   `exec`, jobs, files and git calls exactly as to an admin's.
 
-Not done: the CLI and MCP tools do not mint or use these yet (`fluxctl` still takes one bearer token), and tokens are
-not narrowed by path or by git repository.
+From the CLI: `fluxctl agent token <session> --ops exec,files.read,git --ttl-seconds 1800`, `fluxctl agent tokens
+<session>`, `fluxctl agent untoken <session> <token id>`; MCP `session_token`. A session token is an ordinary bearer
+token to the client, so hand it over as `FLUXVM_TOKEN` and `fluxctl agent exec|files|cat|put|git|bg|logs|checkpoint …`
+work against that one session. Verbs the token does not grant, and `agent run`/`ls`/`fork`/`promote`, answer `403`.
+
+Not done: tokens are not narrowed by path or by git repository.
 
 ### Policy
 
@@ -398,10 +402,14 @@ fluxctl agent restore <id> before-refactor
 fluxctl agent timeline <id>
 fluxctl agent artifacts <id>
 fluxctl agent rm <id>
+fluxctl agent run claude-code --confine --fs-write /data/out        # guest confinement (Linux guests)
+fluxctl agent token <id> --ops exec,files.read,git --ttl-seconds 1800
+fluxctl agent promote <child> --dry-run                              # review, then --plan-id <id> to apply
 ```
 
 - **MCP** (`fluxctl mcp serve --allow-write`): `session_create`, `session_exec`, `session_checkpoint`, `session_restore`,
-  `session_fork`, `session_rollout`, `session_events`, `session_artifacts`, `session_delete`, plus `sandbox_speculate`, `sandbox_changesets`
+  `session_fork`, `session_promote`, `session_token`, `session_rollout`, `session_events`, `session_artifacts`,
+  `session_delete`, plus `sandbox_speculate`, `sandbox_changesets`
   and `sandbox_changeset_decide`.
 - **Go**: `client.CreateSession(ctx, fluxvm.CreateSessionRequest{…})`, then `Exec`, `Checkpoint`, `Restore`, `Fork`,
   `Events`, `Artifacts`, `Delete` (`go/sessions.go`).
