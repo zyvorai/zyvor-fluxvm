@@ -387,6 +387,12 @@ async fn timed<T>(d: Duration, fut: impl Future<Output = Result<T>>) -> Result<T
         .map_err(|_| anyhow!("timed out after {}s", d.as_secs()))?
 }
 
+/// The `session` argument as a UUID, so a typo is an error here and not a path on the server.
+fn session_id(args: &Value) -> Result<Uuid> {
+    let raw = str_arg(args, "session").unwrap_or_default();
+    Uuid::parse_str(raw).map_err(|_| anyhow!("session must be a session id (UUID), got {raw:?}"))
+}
+
 pub fn tools(remote: Arc<Remote>) -> Vec<Tool> {
     let vm_prop = json!({"type": "string", "description": "VM name, UUID or unique UUID prefix"});
     vec![
@@ -1250,6 +1256,324 @@ pub fn tools(remote: Arc<Remote>) -> Vec<Tool> {
                 .await
             },
         ),
+        tool(
+            "session_create",
+            "Start an agent session: a sandbox with an optional git workspace and a network policy. Returns the session (id, backend, capabilities such as whether fork works, policy, workspace).",
+            object(
+                json!({
+                    "agent": {"type": "string", "description": "which agent this is for, e.g. claude-code"},
+                    "repo": {"type": "string", "description": "https git URL cloned into /workspace (the image needs git and the policy must allow the host)"},
+                    "policy": {"type": "string", "enum": ["offline", "developer-safe", "open"]},
+                    "allow": {"type": "array", "items": {"type": "string"}, "description": "host names the session may reach; everything else is refused"},
+                    "image": {"type": "string", "description": "guest image, e.g. agent-micro"},
+                    "ttl_seconds": {"type": "integer", "minimum": 30},
+                }),
+                &[],
+            ),
+            true,
+            &remote,
+            |r, args| async move {
+                timed(Duration::from_secs(300), async {
+                    let mut body = json!({"agent": str_arg(&args, "agent").unwrap_or("custom")});
+                    if let Some(g) = str_arg(&args, "repo") {
+                        body["workspace"] = json!({"git": g});
+                    }
+                    if let Some(i) = str_arg(&args, "image") {
+                        body["runtime"] = json!({"image": i});
+                    }
+                    let allow: Vec<Value> = args["allow"].as_array().cloned().unwrap_or_default();
+                    let mut policy = json!({});
+                    if let Some(p) = str_arg(&args, "policy") {
+                        policy["preset"] = json!(p);
+                    }
+                    if !allow.is_empty() {
+                        policy["network"] = json!({"default": "deny", "allow": allow});
+                    }
+                    if policy != json!({}) {
+                        body["policy"] = policy;
+                    }
+                    if let Some(t) = int_arg(&args, "ttl_seconds")? {
+                        body["ttl_seconds"] = json!(t);
+                    }
+                    pretty(
+                        &r.call(Method::POST, "/v1/agents/sessions", Some(body))
+                            .await?,
+                    )
+                })
+                .await
+            },
+        ),
+        tool(
+            "session_exec",
+            "Run a shell command in an agent session; returns exit code, stdout and stderr. The action is recorded in the session's ledger.",
+            object(
+                json!({
+                    "session": {"type": "string", "description": "session id"},
+                    "command": {"type": "string"},
+                    "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 600, "description": "default 60"},
+                }),
+                &["session", "command"],
+            ),
+            true,
+            &remote,
+            |r, args| async move {
+                let timeout = int_arg(&args, "timeout_seconds")?.unwrap_or(60).min(600);
+                timed(Duration::from_secs(timeout + 30), async {
+                    let id = session_id(&args)?;
+                    let body = json!({
+                        "command": str_arg(&args, "command").unwrap_or_default(),
+                        "timeout_seconds": timeout,
+                    });
+                    pretty(
+                        &r.call(
+                            Method::POST,
+                            &format!("/v1/agents/sessions/{id}/exec"),
+                            Some(body),
+                        )
+                        .await?,
+                    )
+                })
+                .await
+            },
+        ),
+        tool(
+            "session_checkpoint",
+            "Snapshot an agent session under a tag so it can be restored later. disk_only skips memory (much smaller; restore then cold-boots).",
+            object(
+                json!({
+                    "session": {"type": "string"},
+                    "tag": {"type": "string", "description": "[A-Za-z0-9._-], default cp-N"},
+                    "disk_only": {"type": "boolean"},
+                }),
+                &["session"],
+            ),
+            true,
+            &remote,
+            |r, args| async move {
+                timed(Duration::from_secs(300), async {
+                    let id = session_id(&args)?;
+                    let mut body = json!({});
+                    if let Some(t) = str_arg(&args, "tag") {
+                        body["tag"] = json!(t);
+                    }
+                    if args["disk_only"].as_bool() == Some(true) {
+                        body["memory"] = json!(false);
+                    }
+                    pretty(
+                        &r.call(
+                            Method::POST,
+                            &format!("/v1/agents/sessions/{id}/checkpoint"),
+                            Some(body),
+                        )
+                        .await?,
+                    )
+                })
+                .await
+            },
+        ),
+        tool(
+            "session_restore",
+            "Restore an agent session to one of its checkpoints (discards everything since).",
+            object(
+                json!({"session": {"type": "string"}, "tag": {"type": "string"}}),
+                &["session", "tag"],
+            ),
+            true,
+            &remote,
+            |r, args| async move {
+                timed(Duration::from_secs(300), async {
+                    let id = session_id(&args)?;
+                    let body = json!({"tag": str_arg(&args, "tag").unwrap_or_default()});
+                    pretty(
+                        &r.call(
+                            Method::POST,
+                            &format!("/v1/agents/sessions/{id}/restore"),
+                            Some(body),
+                        )
+                        .await?,
+                    )
+                })
+                .await
+            },
+        ),
+        tool(
+            "session_fork",
+            "Fork an agent session into COUNT child sessions that start from its current state, to try approaches in parallel. Only the in-tree KVM engine can fork; elsewhere this fails with the reason and nothing is created.",
+            object(
+                json!({"session": {"type": "string"}, "count": {"type": "integer", "minimum": 1, "maximum": 32}}),
+                &["session"],
+            ),
+            true,
+            &remote,
+            |r, args| async move {
+                timed(Duration::from_secs(300), async {
+                    let id = session_id(&args)?;
+                    let count = int_arg(&args, "count")?.unwrap_or(1);
+                    if !(1..=32).contains(&count) {
+                        bail!("count must be 1-32");
+                    }
+                    pretty(
+                        &r.call(
+                            Method::POST,
+                            &format!("/v1/agents/sessions/{id}/fork"),
+                            Some(json!({"count": count})),
+                        )
+                        .await?,
+                    )
+                })
+                .await
+            },
+        ),
+        tool(
+            "session_events",
+            "What an agent session did: its ledger (exec, checkpoint, restore, fork, ...) and the sandbox's VM events. since is an RFC 3339 time.",
+            object(
+                json!({"session": {"type": "string"}, "since": {"type": "string"}}),
+                &["session"],
+            ),
+            false,
+            &remote,
+            |r, args| async move {
+                timed(CALL_TIMEOUT, async {
+                    let id = session_id(&args)?;
+                    let mut path = format!("/v1/agents/sessions/{id}/events");
+                    if let Some(s) = str_arg(&args, "since") {
+                        path.push_str("?since=");
+                        path.push_str(&encode_query(s));
+                    }
+                    pretty(&r.call(Method::GET, &path, None).await?)
+                })
+                .await
+            },
+        ),
+        tool(
+            "session_artifacts",
+            "The workspace changes a session made since it started (added/modified/deleted files), plus its checkpoints and forks.",
+            object(json!({"session": {"type": "string"}}), &["session"]),
+            false,
+            &remote,
+            |r, args| async move {
+                timed(CALL_TIMEOUT, async {
+                    let id = session_id(&args)?;
+                    pretty(
+                        &r.call(
+                            Method::GET,
+                            &format!("/v1/agents/sessions/{id}/artifacts"),
+                            None,
+                        )
+                        .await?,
+                    )
+                })
+                .await
+            },
+        ),
+        tool(
+            "session_delete",
+            "End an agent session and delete its sandbox.",
+            object(json!({"session": {"type": "string"}}), &["session"]),
+            true,
+            &remote,
+            |r, args| async move {
+                timed(Duration::from_secs(120), async {
+                    let id = session_id(&args)?;
+                    r.call(Method::DELETE, &format!("/v1/agents/sessions/{id}"), None)
+                        .await?;
+                    pretty(&json!({"ok": true, "deleted": id}))
+                })
+                .await
+            },
+        ),
+        tool(
+            "sandbox_speculate",
+            "Run a command in an isolated copy of a sandbox and keep the result as a pending changeset; the sandbox itself is not touched until the changeset is approved and applied. paths bounds what is diffed.",
+            object(
+                json!({
+                    "vm": vm_prop,
+                    "command": {"type": "string"},
+                    "paths": {"type": "array", "items": {"type": "string"}, "description": "absolute guest directories to diff"},
+                    "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 600},
+                    "ttl_seconds": {"type": "integer", "minimum": 30},
+                }),
+                &["vm", "command"],
+            ),
+            true,
+            &remote,
+            |r, args| async move {
+                timed(Duration::from_secs(660), async {
+                    let id = resolve(&r, str_arg(&args, "vm").unwrap_or_default()).await?;
+                    let mut body =
+                        json!({"command": str_arg(&args, "command").unwrap_or_default()});
+                    for k in ["paths", "timeout_seconds", "ttl_seconds"] {
+                        if !args[k].is_null() {
+                            body[k] = args[k].clone();
+                        }
+                    }
+                    pretty(
+                        &r.call(
+                            Method::POST,
+                            &format!("/v1/sandboxes/{id}/speculate"),
+                            Some(body),
+                        )
+                        .await?,
+                    )
+                })
+                .await
+            },
+        ),
+        tool(
+            "sandbox_changesets",
+            "List a sandbox's changesets (newest first), or one with its file contents when changeset is given.",
+            object(
+                json!({"vm": vm_prop, "changeset": {"type": "string", "description": "changeset id"}}),
+                &["vm"],
+            ),
+            false,
+            &remote,
+            |r, args| async move {
+                timed(CALL_TIMEOUT, async {
+                    let id = resolve(&r, str_arg(&args, "vm").unwrap_or_default()).await?;
+                    let path = match str_arg(&args, "changeset") {
+                        Some(cs) => format!("/v1/sandboxes/{id}/changesets/{}", encode_query(cs)),
+                        None => format!("/v1/sandboxes/{id}/changesets"),
+                    };
+                    pretty(&r.call(Method::GET, &path, None).await?)
+                })
+                .await
+            },
+        ),
+        tool(
+            "sandbox_changeset_decide",
+            "Approve, reject or apply a pending changeset. Apply needs it approved first and fails with a conflict if the files changed meanwhile.",
+            object(
+                json!({
+                    "vm": vm_prop,
+                    "changeset": {"type": "string"},
+                    "action": {"type": "string", "enum": ["approve", "reject", "apply"]},
+                }),
+                &["vm", "changeset", "action"],
+            ),
+            true,
+            &remote,
+            |r, args| async move {
+                timed(Duration::from_secs(120), async {
+                    let id = resolve(&r, str_arg(&args, "vm").unwrap_or_default()).await?;
+                    let action = str_arg(&args, "action").unwrap_or_default();
+                    if !["approve", "reject", "apply"].contains(&action) {
+                        bail!("action must be approve, reject or apply");
+                    }
+                    let cs = encode_query(str_arg(&args, "changeset").unwrap_or_default());
+                    pretty(
+                        &r.call(
+                            Method::POST,
+                            &format!("/v1/sandboxes/{id}/changesets/{cs}/{action}"),
+                            None,
+                        )
+                        .await?,
+                    )
+                })
+                .await
+            },
+        ),
     ]
 }
 
@@ -1612,6 +1936,87 @@ mod tests {
         png.extend(800u32.to_be_bytes());
         assert_eq!(png_size(&png), Some((1280, 800)));
         assert_eq!(png_size(b"not a png at all, really no"), None);
+    }
+
+    #[tokio::test]
+    async fn session_and_changeset_tools_drive_the_rest_api() {
+        use axum::{Json, Router, extract::Path, routing::get, routing::post};
+        let sid = Uuid::new_v4();
+        let app = Router::new()
+            .route(
+                "/v1/agents/sessions",
+                post(move |Json(b): Json<Value>| async move {
+                    Json(json!({"id": sid, "agent": b["agent"], "policy": b["policy"], "workspace": b["workspace"]}))
+                }),
+            )
+            .route(
+                "/v1/agents/sessions/{id}/exec",
+                post(|Path(_): Path<Uuid>, Json(b): Json<Value>| async move {
+                    Json(json!({"exit_code": 0, "stdout": b["command"], "timeout": b["timeout_seconds"]}))
+                }),
+            )
+            .route(
+                "/v1/agents/sessions/{id}/fork",
+                post(|Path(_): Path<Uuid>, Json(b): Json<Value>| async move {
+                    (
+                        axum::http::StatusCode::CONFLICT,
+                        Json(json!({"error": format!("fork is not available on backend vz (count {})", b["count"])})),
+                    )
+                }),
+            )
+            .route(
+                "/v1/sandboxes/{id}/changesets/{cs}/{action}",
+                post(|Path((_, cs, action)): Path<(Uuid, String, String)>| async move {
+                    Json(json!({"changeset": cs, "state": action}))
+                }),
+            )
+            .route(
+                "/v1/agents/sessions/{id}/artifacts",
+                get(|Path(_): Path<Uuid>| async move { Json(json!({"changes": {"added": ["/workspace/a"]}})) }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let remote = Arc::new(Remote::new(&addr.to_string(), None));
+        let mut s = Server::new("fluxvm", "0", true);
+        s.add(tools(remote));
+        let vm = Uuid::new_v4();
+        let calls = [
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"session_create","arguments":{"agent":"codex","policy":"developer-safe","allow":["a.example"],"repo":"https://x/y"}}}"#.to_string(),
+            format!(r#"{{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{{"name":"session_exec","arguments":{{"session":"{sid}","command":"ls","timeout_seconds":9}}}}}}"#),
+            r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"session_exec","arguments":{"session":"not-a-uuid","command":"ls"}}}"#.to_string(),
+            format!(r#"{{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{{"name":"session_fork","arguments":{{"session":"{sid}","count":2}}}}}}"#),
+            format!(r#"{{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{{"name":"session_fork","arguments":{{"session":"{sid}","count":99}}}}}}"#),
+            format!(r#"{{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{{"name":"sandbox_changeset_decide","arguments":{{"vm":"{vm}","changeset":"c1","action":"apply"}}}}}}"#),
+            format!(r#"{{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{{"name":"sandbox_changeset_decide","arguments":{{"vm":"{vm}","changeset":"c1","action":"delete"}}}}}}"#),
+            format!(r#"{{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{{"name":"session_artifacts","arguments":{{"session":"{sid}"}}}}}}"#),
+        ];
+        let refs: Vec<&str> = calls.iter().map(String::as_str).collect();
+        let got = run(s, &refs).await;
+        let (t, err) = text(&got["1"]);
+        assert!(
+            !err && t.contains("codex")
+                && t.contains("developer-safe")
+                && t.contains("a.example")
+                && t.contains("https://x/y"),
+            "{t}"
+        );
+        let (t, err) = text(&got["2"]);
+        assert!(
+            !err && t.contains("\"timeout\": 9") && t.contains("ls"),
+            "{t}"
+        );
+        let (t, err) = text(&got["3"]);
+        assert!(err && t.contains("session must be a session id"), "{t}");
+        let (t, err) = text(&got["4"]);
+        assert!(err && t.contains("not available on backend vz"), "{t}");
+        let (t, err) = text(&got["5"]);
+        assert!(err && t.contains("1-32"), "{t}");
+        let (t, err) = text(&got["6"]);
+        assert!(!err && t.contains("\"state\": \"apply\""), "{t}");
+        let (t, err) = text(&got["7"]);
+        assert!(err && t.contains("approve, reject or apply"), "{t}");
+        assert!(text(&got["8"]).0.contains("/workspace/a"));
     }
 
     #[tokio::test]
