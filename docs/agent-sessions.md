@@ -112,6 +112,19 @@ the guest's own. For a bash login shell the daemon also starts it with a small r
 your terminal, so the result is whatever your Terminal profile makes of them: run in this session was a check that
 the variables and aliases arrive, not a screenshot of Terminal.app.
 
+**WezTerm, iTerm2 and other modern terminals.** The terminal is a transparent byte pipe, so whatever your emulator
+renders (24-bit colour, OSC 8 hyperlinks, inline images by the iTerm2, sixel or kitty protocols, mouse reporting,
+bracketed paste, ligatures, scrollback search) works with guest programs that emit it. `fluxctl` also forwards your
+`TERM_PROGRAM`/`TERM_PROGRAM_VERSION` (and sets `LC_TERMINAL=iTerm2` for iTerm.app) so tools that sniff the terminal
+pick the right image protocol. Those sequences were sent from the guest and arrived byte for byte through the daemon,
+the WebSocket and `fluxctl`; **no real WezTerm or iTerm2 was run here** to draw them, and the guest image has no image
+or multiplexer tools (`chafa`, `imgcat`, `tmux`) unless you install them.
+For WezTerm's own panes, tabs and domains, use plain ssh: `fluxctl agent ssh-config <session> --name demo >> ~/.ssh/config`
+then `wezterm ssh demo` (or `ssh`, `scp`, `rsync`, port forwards). The block carries the shared sandbox key and, for an
+offline guest, a `vsock-proxy` ProxyCommand through this binary, so it works only on the machine running the daemon
+and is refused to tenant tokens (that key opens every sandbox on the host). Run: `ssh` and `scp` through the generated
+config into an offline session.
+
 Run on this M4 (`vz`, stock `debian-13`, offline session): `tty` printed `/dev/pts/0`, `isatty` was true for stdin and
 stdout, `TERM` was `xterm-256color`, exit codes 0, 3, 5 and 7 came back, and a terminal opened at 120x33 reported
 `stty size` `33 120` after typing into it through a local pseudo-terminal (raw mode on); resizing that terminal to

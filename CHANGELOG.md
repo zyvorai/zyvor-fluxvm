@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- **Plain ssh into a session and terminal-program forwarding.** `fluxctl agent ssh-config <session> [--name N]`
+  (`GET .../ssh`) prints an OpenSSH `Host` block (address, or a `vsock-proxy` ProxyCommand for an offline guest) so
+  `ssh`, `scp`, `rsync` and WezTerm's `wezterm ssh` work; local machine only, refused to tenant tokens.
+  `fluxctl agent shell` forwards `TERM_PROGRAM` and its version. Hyperlink, inline-image (iTerm2, sixel, kitty), mouse
+  and 24-bit colour sequences were checked to arrive intact; no real WezTerm was available to draw them.
+
 - **Terminal look.** `fluxctl agent shell` forwards the local `TERM` and truecolor `COLORTERM` to the guest and, for a
   bash login shell, adds colour for `grep`/`diff`/`ip`, `ll`/`la`, coloured man pages and compiler messages (`--plain`
   turns it off). Checked by variables and aliases in the guest, not by a Terminal.app screenshot.

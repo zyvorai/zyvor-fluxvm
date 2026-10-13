@@ -16,6 +16,7 @@
 //! * `POST   /v1/agents/sessions/{id}/fork`          fork into child sessions (in-tree KVM only)
 //! * `GET    /v1/agents/sessions/{id}/events`        ledger plus the sandbox's VM events
 //! * `GET    /v1/agents/sessions/{id}/artifacts`     workspace changes since the baseline
+//! * `GET    /v1/agents/sessions/{id}/ssh`           how to reach the guest with plain ssh (same host as the daemon)
 //! * `GET    /v1/agents/sessions/{id}/pty`           WebSocket: an interactive shell on a pseudo-terminal
 //! * `GET    /v1/agents/sessions/{id}/trajectory`    ledger and VM events merged into one ordered list
 //! * `POST   /v1/agents/sessions/{id}/preview`       mint an expiring preview URL for a guest port
@@ -74,6 +75,7 @@ pub(crate) fn routes() -> Router<Arc<VmManager>> {
         .route("/v1/agents/sessions/{id}/artifacts", get(artifacts))
         .route("/v1/agents/sessions/{id}/trajectory", get(trajectory))
         .route("/v1/agents/sessions/{id}/pty", get(pty))
+        .route("/v1/agents/sessions/{id}/ssh", get(ssh_target))
         .route("/v1/agents/sessions/{id}/preview", post(create_preview))
         .route("/v1/agents/sessions/{id}/previews", get(list_previews))
         .route(
@@ -1571,6 +1573,12 @@ struct PtyQuery {
     /// Do not add the colour aliases and prompt-friendly defaults to the login shell.
     #[serde(default)]
     plain: bool,
+    /// The client terminal's `TERM_PROGRAM` / `TERM_PROGRAM_VERSION` (WezTerm, iTerm.app,
+    /// Apple_Terminal, ghostty...), so guest tools can tell which graphics and link protocols it has.
+    #[serde(default)]
+    term_program: Option<String>,
+    #[serde(default)]
+    term_program_version: Option<String>,
 }
 
 /// How the terminal should look: what the client's terminal can do, and whether to dress the shell.
@@ -1579,6 +1587,7 @@ struct PtyLook {
     term: String,
     truecolor: bool,
     plain: bool,
+    program: Option<(String, Option<String>)>,
 }
 
 impl PtyLook {
@@ -1589,6 +1598,8 @@ impl PtyLook {
                 && t.bytes()
                     .all(|b| b.is_ascii_alphanumeric() || b"._+-".contains(&b))
         };
+        // program names and versions: the same characters (e.g. `iTerm.app`, `20240203-110809-5046fc22`)
+        let word = ok;
         Self {
             term: q
                 .term
@@ -1598,6 +1609,15 @@ impl PtyLook {
                 .to_string(),
             truecolor: matches!(q.colorterm.as_deref(), Some("truecolor" | "24bit")),
             plain: q.plain,
+            program: q.term_program.as_deref().filter(|p| word(p)).map(|p| {
+                (
+                    p.to_string(),
+                    q.term_program_version
+                        .as_deref()
+                        .filter(|v| word(v))
+                        .map(str::to_string),
+                )
+            }),
         }
     }
 }
@@ -1613,6 +1633,40 @@ export LESS_TERMCAP_md=$'\e[1;36m' LESS_TERMCAP_us=$'\e[4;32m' LESS_TERMCAP_so=$
 export LESS_TERMCAP_me=$'\e[0m' LESS_TERMCAP_ue=$'\e[0m' LESS_TERMCAP_se=$'\e[0m'
 export GCC_COLORS='error=01;31:warning=01;35:note=01;36:caret=01;32:locus=01:quote=01'
 "#;
+
+/// Connection details for plain `ssh` (WezTerm's ssh domains, scp, rsync, port forwards). The key is
+/// the host's shared sandbox key, so this is for a client on the daemon's own machine and is refused
+/// to tenant tokens, which must not receive a key that opens every sandbox.
+async fn ssh_target(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    token_tenant: Option<Extension<TokenTenant>>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<Value>> {
+    require_admin(role)?;
+    if caller_tenant(&token_tenant).is_some() {
+        return Err(ApiError {
+            status: StatusCode::FORBIDDEN,
+            message:
+                "the ssh key is shared by every sandbox on this host; a tenant token cannot have it"
+                    .into(),
+        });
+    }
+    let s = load(&m, id, &None).await?;
+    running(&s)?;
+    let vm = m.ensure_running_for_request(s.sandbox_id).await?;
+    let g = m.ssh_target(&vm).map_err(|e| ApiError {
+        status: StatusCode::CONFLICT,
+        message: format!("{e:#}"),
+    })?;
+    Ok(Json(json!({
+        "user": g.user,
+        "host": if g.vsock.is_some() { Value::Null } else { json!(g.ip) },
+        "identity_file": g.key,
+        "vsock_socket": g.vsock,
+        "note": "valid on the machine running the daemon; the vsock proxy is `fluxctl vsock-proxy <socket> 22`",
+    })))
+}
 
 /// The remote shell line that sizes the terminal and starts the shell or command. Pure.
 fn pty_script(
@@ -1632,8 +1686,23 @@ fn pty_script(
         "export TERM={t}; infocmp \"$TERM\" >/dev/null 2>&1 || export TERM=xterm-256color;",
         t = shell_quote(&look.term)
     );
+    let program = look
+        .program
+        .as_ref()
+        .map(|(p, v)| {
+            let mut out = format!("export TERM_PROGRAM={};", shell_quote(p));
+            if let Some(v) = v {
+                out.push_str(&format!(" export TERM_PROGRAM_VERSION={};", shell_quote(v)));
+            }
+            // iTerm2's own marker, which image tools look for first
+            if p == "iTerm.app" {
+                out.push_str(" export LC_TERMINAL=iTerm2;");
+            }
+            out
+        })
+        .unwrap_or_default();
     let color = format!(
-        "{ct} export CLICOLOR=1;",
+        "{ct} export CLICOLOR=1; {program}",
         ct = if look.truecolor {
             "export COLORTERM=truecolor;"
         } else {
@@ -2883,6 +2952,25 @@ mod tests {
             "a one-off command does not get the rc file"
         );
         assert!(PTY_RC.contains("--color=auto") && PTY_RC.contains("LESS_TERMCAP_md"));
+        // the client's terminal program is passed on only as a plain word
+        let w = PtyLook::from_query(&PtyQuery {
+            term_program: Some("WezTerm".into()),
+            term_program_version: Some("20240203-110809-5046fc22".into()),
+            ..Default::default()
+        });
+        let ws = pty_script(80, 24, None, None, "/t", "/rc", &w);
+        assert!(ws.contains("export TERM_PROGRAM='WezTerm';"));
+        assert!(ws.contains("export TERM_PROGRAM_VERSION='20240203-110809-5046fc22';"));
+        let it = PtyLook::from_query(&PtyQuery {
+            term_program: Some("iTerm.app".into()),
+            ..Default::default()
+        });
+        assert!(pty_script(80, 24, None, None, "/t", "/rc", &it).contains("LC_TERMINAL=iTerm2"));
+        let evil = PtyLook::from_query(&PtyQuery {
+            term_program: Some("x; reboot".into()),
+            ..Default::default()
+        });
+        assert_eq!(evil.program, None);
     }
 
     #[test]
