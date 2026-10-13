@@ -181,6 +181,9 @@ pub enum AgentCommand {
     /// session with `--cmd-allow/--cmd-deny` rules. REST: `GET .../pty` (WebSocket).
     Shell {
         id: Uuid,
+        /// Start the login shell as it is, without the colour aliases and coloured man pages.
+        #[arg(long)]
+        plain: bool,
         /// Run this on the terminal instead of a login shell.
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         command: Vec<String>,
@@ -498,7 +501,7 @@ pub async fn run(r: &Remote, cmd: AgentCommand) -> Result<()> {
             )
             .await?,
         ),
-        AgentCommand::Shell { id, command } => shell(r, id, &command).await,
+        AgentCommand::Shell { id, plain, command } => shell(r, id, &command, plain).await,
         AgentCommand::Export {
             id,
             out,
@@ -910,14 +913,38 @@ pub(crate) fn pty_url(base: &str, id: Uuid, cols: u16, rows: u16, command: Optio
     url
 }
 
-async fn shell(r: &Remote, id: Uuid, command: &[String]) -> Result<()> {
+/// The `&term=&colorterm=&plain=` part of the terminal URL for this client. Pure, so it is
+/// unit-tested; the daemon validates `term` again.
+pub(crate) fn pty_look_query(term: Option<&str>, colorterm: Option<&str>, plain: bool) -> String {
+    let mut q = String::new();
+    if let Some(t) = term.filter(|t| !t.is_empty() && *t != "dumb") {
+        q.push_str("&term=");
+        q.push_str(&crate::remote::encode_query(t));
+    }
+    if let Some(c) = colorterm.filter(|c| matches!(*c, "truecolor" | "24bit")) {
+        q.push_str("&colorterm=");
+        q.push_str(c);
+    }
+    if plain {
+        q.push_str("&plain=true");
+    }
+    q
+}
+
+async fn shell(r: &Remote, id: Uuid, command: &[String], plain: bool) -> Result<()> {
     use futures_util::{SinkExt, StreamExt};
     use std::io::Write as _;
     use tokio_tungstenite::tungstenite::{Message, client::IntoClientRequest};
 
     let (cols, rows) = terminal_size();
     let cmd = (!command.is_empty()).then(|| guest_command(command));
-    let url = pty_url(r.base(), id, cols, rows, cmd.as_deref());
+    let mut url = pty_url(r.base(), id, cols, rows, cmd.as_deref());
+    // Tell the guest what this terminal is, so colours and keys match what the user is looking at.
+    url.push_str(&pty_look_query(
+        std::env::var("TERM").ok().as_deref(),
+        std::env::var("COLORTERM").ok().as_deref(),
+        plain,
+    ));
     let mut req = url.as_str().into_client_request().context("terminal url")?;
     if let Some(t) = r.bearer() {
         req.headers_mut().insert(
@@ -1231,6 +1258,21 @@ mod tests {
             "'sh' '-c' 'uname -a; exit 3'"
         );
         assert_eq!(guest_command(&v(&["echo", "it's"])), "'echo' 'it'\\''s'");
+    }
+
+    #[test]
+    fn the_terminal_look_is_taken_from_this_terminal() {
+        assert_eq!(pty_look_query(None, None, false), "");
+        assert_eq!(pty_look_query(Some("dumb"), None, false), "");
+        assert_eq!(
+            pty_look_query(Some("xterm-256color"), Some("truecolor"), false),
+            "&term=xterm-256color&colorterm=truecolor"
+        );
+        // an unknown COLORTERM value is not forwarded; the shell never sees raw client text
+        assert_eq!(
+            pty_look_query(Some("a b"), Some("rm"), true),
+            "&term=a%20b&plain=true"
+        );
     }
 
     #[test]

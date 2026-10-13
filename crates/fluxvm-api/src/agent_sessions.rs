@@ -1562,7 +1562,57 @@ struct PtyQuery {
     /// Run this instead of a login shell (still on a terminal).
     #[serde(default)]
     command: Option<String>,
+    /// The client's own `TERM` (kept only when it is a plain terminfo name the guest knows).
+    #[serde(default)]
+    term: Option<String>,
+    /// `truecolor` or `24bit` when the client's terminal does 24-bit colour.
+    #[serde(default)]
+    colorterm: Option<String>,
+    /// Do not add the colour aliases and prompt-friendly defaults to the login shell.
+    #[serde(default)]
+    plain: bool,
 }
+
+/// How the terminal should look: what the client's terminal can do, and whether to dress the shell.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PtyLook {
+    term: String,
+    truecolor: bool,
+    plain: bool,
+}
+
+impl PtyLook {
+    fn from_query(q: &PtyQuery) -> Self {
+        let ok = |t: &str| {
+            !t.is_empty()
+                && t.len() <= 40
+                && t.bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"._+-".contains(&b))
+        };
+        Self {
+            term: q
+                .term
+                .as_deref()
+                .filter(|t| ok(t))
+                .unwrap_or("xterm-256color")
+                .to_string(),
+            truecolor: matches!(q.colorterm.as_deref(), Some("truecolor" | "24bit")),
+            plain: q.plain,
+        }
+    }
+}
+
+/// An rc file for the login shell: the usual profile, then colour for the tools that have it
+/// off by default on Debian, and coloured man pages. Written to the guest by the start script.
+const PTY_RC: &str = r#"[ -r /etc/profile ] && . /etc/profile
+for f in "$HOME/.bash_profile" "$HOME/.bash_login" "$HOME/.profile"; do [ -r "$f" ] && { . "$f"; break; }; done
+alias grep='grep --color=auto'; alias egrep='egrep --color=auto'; alias fgrep='fgrep --color=auto'
+alias diff='diff --color=auto'; alias ip='ip -color=auto'; alias ll='ls -lAh'; alias la='ls -A'
+export LESS="-R $LESS"
+export LESS_TERMCAP_md=$'\e[1;36m' LESS_TERMCAP_us=$'\e[4;32m' LESS_TERMCAP_so=$'\e[1;30;43m'
+export LESS_TERMCAP_me=$'\e[0m' LESS_TERMCAP_ue=$'\e[0m' LESS_TERMCAP_se=$'\e[0m'
+export GCC_COLORS='error=01;31:warning=01;35:note=01;36:caret=01;32:locus=01:quote=01'
+"#;
 
 /// The remote shell line that sizes the terminal and starts the shell or command. Pure.
 fn pty_script(
@@ -1571,19 +1621,45 @@ fn pty_script(
     cwd: Option<&str>,
     command: Option<&str>,
     tty_file: &str,
+    rc_file: &str,
+    look: &PtyLook,
 ) -> String {
     let cd = cwd
         .map(|c| format!("cd {} 2>/dev/null; ", shell_quote(c)))
         .unwrap_or_default();
+    // The client's TERM only if the guest has its terminfo; otherwise the widely known one.
+    let term = format!(
+        "export TERM={t}; infocmp \"$TERM\" >/dev/null 2>&1 || export TERM=xterm-256color;",
+        t = shell_quote(&look.term)
+    );
+    let color = format!(
+        "{ct} export CLICOLOR=1;",
+        ct = if look.truecolor {
+            "export COLORTERM=truecolor;"
+        } else {
+            ""
+        }
+    );
     let run = match command {
         Some(c) => format!("exec sh -c {}", shell_quote(c)),
+        // bash gets the colour rc file; any other shell is started as a plain login shell.
+        None if !look.plain => format!(
+            "case \"${{SHELL##*/}}\" in bash) printf %s {rc} > {f}; exec bash --rcfile {f} -i;; esac; exec \"${{SHELL:-/bin/sh}}\" -l",
+            rc = shell_quote(PTY_RC),
+            f = shell_quote(rc_file)
+        ),
         None => "exec \"${SHELL:-/bin/sh}\" -l".to_string(),
     };
     // The tty's path is kept in a file so a later resize can address it from another connection.
     format!(
-        "stty cols {cols} rows {rows} 2>/dev/null; tty > {f} 2>/dev/null; export TERM=xterm-256color; {cd}{run}",
-        f = shell_quote(tty_file)
+        "stty cols {cols} rows {rows} 2>/dev/null; tty > {tf} 2>/dev/null; {term} {color} {cd}{run}",
+        tf = shell_quote(tty_file)
     )
+}
+
+/// The guest-side colour rc file of a terminal.
+fn pty_rc_file(token: Uuid) -> String {
+    format!("/tmp/.fluxvm-rc-{token}")
 }
 
 /// The guest-side file holding a terminal's tty path. `token` is a UUID we generated.
@@ -1641,7 +1717,17 @@ async fn pty(
     let cwd = s.workspace.as_ref().map(|w| w.path.clone());
     let token = Uuid::new_v4();
     let tty_file = pty_tty_file(token);
-    let script = pty_script(cols, rows, cwd.as_deref(), q.command.as_deref(), &tty_file);
+    let look = PtyLook::from_query(&q);
+    let rc_file = pty_rc_file(token);
+    let script = pty_script(
+        cols,
+        rows,
+        cwd.as_deref(),
+        q.command.as_deref(),
+        &tty_file,
+        &rc_file,
+        &look,
+    );
     // Spawn before upgrading so a missing ssh or an unreachable guest is an HTTP error.
     let vm = m.ensure_running_for_request(s.sandbox_id).await?;
     let child = m.pty_spawn(&vm, &script).map_err(|e| ApiError {
@@ -1655,7 +1741,7 @@ async fn pty(
         json!({"cols": cols, "rows": rows, "command": q.command}),
     );
     Ok(ws
-        .on_upgrade(move |socket| relay_pty(m, id, s.sandbox_id, tty_file, socket, child))
+        .on_upgrade(move |socket| relay_pty(m, id, s.sandbox_id, tty_file, rc_file, socket, child))
         .into_response())
 }
 
@@ -1664,6 +1750,7 @@ async fn relay_pty(
     id: Uuid,
     sandbox: Uuid,
     tty_file: String,
+    rc_file: String,
     socket: axum::extract::ws::WebSocket,
     mut child: tokio::process::Child,
 ) {
@@ -1772,7 +1859,7 @@ async fn relay_pty(
     }
     OPEN_PTYS.fetch_sub(1, Ordering::SeqCst);
     // Best effort: a file left behind in /tmp is harmless and is gone on reboot.
-    let rm = format!("rm -f {}", shell_quote(&tty_file));
+    let rm = format!("rm -f {} {}", shell_quote(&tty_file), shell_quote(&rc_file));
     let _ = m.exec_with_policy(sandbox, rm, Some(10), None).await;
     record(
         &m,
@@ -2721,14 +2808,81 @@ mod tests {
 
     #[test]
     fn the_terminal_script_sizes_the_tty_and_quotes_the_command() {
-        let s = pty_script(120, 40, Some("/workspace"), None, "/tmp/.fluxvm-pty-x");
+        let look = PtyLook::from_query(&PtyQuery::default());
+        let s = pty_script(
+            120,
+            40,
+            Some("/workspace"),
+            None,
+            "/tmp/.fluxvm-pty-x",
+            "/tmp/.fluxvm-rc-x",
+            &look,
+        );
         assert!(s.starts_with("stty cols 120 rows 40"));
         assert!(s.contains("cd '/workspace'"));
         assert!(s.contains("exec \"${SHELL:-/bin/sh}\" -l"));
-        let c = pty_script(80, 24, None, Some("echo 'a b'; ls"), "/tmp/.fluxvm-pty-x");
+        let c = pty_script(
+            80,
+            24,
+            None,
+            Some("echo 'a b'; ls"),
+            "/tmp/.fluxvm-pty-x",
+            "/tmp/.fluxvm-rc-x",
+            &look,
+        );
         assert!(c.contains("exec sh -c 'echo '\\''a b'\\''; ls'"), "{c}");
         assert!(!c.contains("cd "));
         assert!(s.contains("tty > '/tmp/.fluxvm-pty-x'"));
+    }
+
+    #[test]
+    fn the_terminal_look_follows_the_client_and_stays_safe() {
+        let q = |term: Option<&str>, ct: Option<&str>, plain: bool| PtyQuery {
+            term: term.map(String::from),
+            colorterm: ct.map(String::from),
+            plain,
+            ..Default::default()
+        };
+        let d = PtyLook::from_query(&q(None, None, false));
+        assert_eq!(d.term, "xterm-256color");
+        assert!(!d.truecolor && !d.plain);
+        let l = PtyLook::from_query(&q(Some("xterm-ghostty"), Some("truecolor"), false));
+        assert_eq!(l.term, "xterm-ghostty");
+        assert!(l.truecolor);
+        assert!(PtyLook::from_query(&q(None, Some("24bit"), false)).truecolor);
+        // anything that is not a plain terminfo name falls back; nothing reaches the shell
+        for bad in ["a b", "x;rm -rf /", "$(id)", "", &"t".repeat(41)] {
+            assert_eq!(
+                PtyLook::from_query(&q(Some(bad), None, false)).term,
+                "xterm-256color",
+                "{bad}"
+            );
+        }
+        assert!(!PtyLook::from_query(&q(None, Some("yes"), false)).truecolor);
+        // the script: truecolor only when asked, rc file only for a shell and not when plain
+        let on = pty_script(80, 24, None, None, "/t", "/rc", &l);
+        assert!(on.contains("export COLORTERM=truecolor;"));
+        assert!(on.contains("bash --rcfile '/rc' -i"));
+        assert!(
+            on.contains("infocmp \"$TERM\""),
+            "falls back when the guest lacks the terminfo"
+        );
+        let plain = pty_script(
+            80,
+            24,
+            None,
+            None,
+            "/t",
+            "/rc",
+            &PtyLook::from_query(&q(None, None, true)),
+        );
+        assert!(!plain.contains("--rcfile") && !plain.contains("COLORTERM"));
+        let cmd = pty_script(80, 24, None, Some("ls"), "/t", "/rc", &l);
+        assert!(
+            !cmd.contains("--rcfile"),
+            "a one-off command does not get the rc file"
+        );
+        assert!(PTY_RC.contains("--color=auto") && PTY_RC.contains("LESS_TERMCAP_md"));
     }
 
     #[test]

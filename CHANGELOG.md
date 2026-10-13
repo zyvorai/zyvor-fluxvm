@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- **Terminal look.** `fluxctl agent shell` forwards the local `TERM` and truecolor `COLORTERM` to the guest and, for a
+  bash login shell, adds colour for `grep`/`diff`/`ip`, `ll`/`la`, coloured man pages and compiler messages (`--plain`
+  turns it off). Checked by variables and aliases in the guest, not by a Terminal.app screenshot.
+
 ## 0.4.8 (2026-10-13)
 
 This release adds **AgentSession**, a single object an agent drives instead of assembling VM, sandbox, snapshot and

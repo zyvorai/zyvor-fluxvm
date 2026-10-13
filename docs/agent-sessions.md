@@ -103,6 +103,15 @@ second SSH exec, so the foreground program gets SIGWINCH after about a round tri
 counts, exit code, never the content) are ledgered as `pty.open`/`pty.close`. At most 16 at once on a host, one hour
 each. A session with `policy.process` rules is **refused (403)**: a shell would bypass them.
 
+**Looks.** The terminal takes its look from yours: `fluxctl` sends its own `TERM` (the guest falls back to
+`xterm-256color` when it lacks that terminfo) and, when your `COLORTERM` is `truecolor`/`24bit`, sets it in the guest so
+24-bit-colour programs use it. The Debian prompt (green `user@host`, blue path), coloured `ls` and UTF-8 (`C.UTF-8`) are
+the guest's own. For a bash login shell the daemon also starts it with a small rc file after the normal profile:
+`grep`/`egrep`/`fgrep`/`diff`/`ip` colour, `ll` and `la`, `less -R`, coloured man pages and compiler messages.
+`--plain` turns that off; a one-off command (`shell -- cmd`) never gets it. Colours are the guest's output rendered by
+your terminal, so the result is whatever your Terminal profile makes of them: run in this session was a check that
+the variables and aliases arrive, not a screenshot of Terminal.app.
+
 Run on this M4 (`vz`, stock `debian-13`, offline session): `tty` printed `/dev/pts/0`, `isatty` was true for stdin and
 stdout, `TERM` was `xterm-256color`, exit codes 0, 3, 5 and 7 came back, and a terminal opened at 120x33 reported
 `stty size` `33 120` after typing into it through a local pseudo-terminal (raw mode on); resizing that terminal to
