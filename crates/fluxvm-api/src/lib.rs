@@ -7062,6 +7062,44 @@ mod tests {
         }
 
         #[tokio::test]
+        async fn agent_session_files_are_tenant_scoped_and_paths_validated() {
+            let m = procbox_manager(tenant_tokens(), false);
+            let id = seed_session(&m, Some("acme"), "vz", "running");
+            let app = router(m);
+            let base = format!("/v1/agents/sessions/{id}/files");
+            for (method, uri, body) in [
+                ("GET", format!("{base}?path=/workspace"), None),
+                ("GET", format!("{base}/content?path=/workspace/a"), None),
+                (
+                    "PUT",
+                    format!("{base}/content"),
+                    Some(r#"{"path":"/workspace/a","content_base64":"YQ=="}"#),
+                ),
+                ("DELETE", format!("{base}?path=/workspace/a"), None),
+            ] {
+                let (st, _) = call(app.clone(), method, &uri, "other", body).await;
+                assert_eq!(st, StatusCode::NOT_FOUND, "{method} {uri}");
+            }
+            // Paths that are relative, climb out, or name a directory to write are refused before
+            // anything reaches a guest.
+            for (method, uri, body) in [
+                ("GET", format!("{base}?path=workspace"), None),
+                ("GET", format!("{base}?path=/workspace/../etc"), None),
+                ("GET", format!("{base}/content?path=/a/../b"), None),
+                (
+                    "PUT",
+                    format!("{base}/content"),
+                    Some(r#"{"path":"/workspace/dir/","content_base64":"YQ=="}"#),
+                ),
+                ("DELETE", format!("{base}?path=/etc&recursive=true"), None),
+                ("DELETE", format!("{base}?path=/"), None),
+            ] {
+                let (st, msg) = call(app.clone(), method, &uri, "acme", body).await;
+                assert_eq!(st, StatusCode::BAD_REQUEST, "{method} {uri} -> {msg}");
+            }
+        }
+
+        #[tokio::test]
         async fn agent_session_fork_is_refused_for_a_session_on_the_nat() {
             let m = procbox_manager(tenant_tokens(), false);
             let id = seed_session(&m, Some("acme"), "vz", "running");

@@ -71,6 +71,35 @@ A policy is compiled into fields the sandbox already enforces. The response repo
 
 `GET /v1/agents/sessions/{id}` reports `capabilities` for the session's backend so a client can decide without trying.
 
+### Files
+
+```bash
+fluxctl agent put   <session> ./local.txt /workspace/dir/file.txt --mode 755   # parents are created
+fluxctl agent files <session> /workspace                                        # list (or stat a file)
+fluxctl agent cat   <session> /workspace/dir/file.txt
+fluxctl agent pull  <session> /workspace/out.bin ./out.bin
+fluxctl agent rm-file <session> /workspace/dir -r
+```
+
+| Route | |
+|---|---|
+| `GET /v1/agents/sessions/{id}/files?path=` | list a directory (`kind: dir`) or stat a file (`kind: file`): name, type, size, mtime, mode |
+| `GET /v1/agents/sessions/{id}/files/content?path=` | `content_base64`, `mode` |
+| `PUT /v1/agents/sessions/{id}/files/content` `{path, content_base64, mode?, parents?}` | write; parents are created by default |
+| `DELETE /v1/agents/sessions/{id}/files?path=&recursive=` | remove; `/` and one-component paths are refused |
+
+MCP: `session_files`, `session_file_read`, `session_file_write`. Paths must be absolute, without `..`, newline or NUL
+(400 otherwise); another tenant's session is a 404; writes and removals go to the ledger as `file.write` and
+`file.delete` (path and size, never content).
+
+Run live (M4, `vz`, NAT session): a file with spaces in its name written into new nested directories, listed, cat'd and
+removed; 1 MiB written and read back byte-identical (about 0.12 s each way); a missing path 404, `..` and `/etc` 400.
+Writing under a directory that did not exist first created it with `sudo` and left it root-owned, which blocked later
+writes; the daemon now hands the directories it creates to the guest user (found by this run, fixed, re-run).
+**Limits:** a single write is capped by the daemon's request-body limit, about 1.5 MiB of file (a 4 MiB write was
+reset by the connection, not answered with a clean 413); there is no chunked upload yet. Reads are whole files. List
+entries come from GNU `find`, so a guest without it (busybox) is not supported.
+
 ### Background jobs
 
 A command that outlives the request, with output you read incrementally:

@@ -1595,6 +1595,102 @@ pub fn tools(remote: Arc<Remote>) -> Vec<Tool> {
             },
         ),
         tool(
+            "session_files",
+            "List a directory in a session's guest, or stat one file. Entries have name, type, size, mtime, mode.",
+            object(
+                json!({"session": {"type": "string"}, "path": {"type": "string", "description": "absolute guest path"}}),
+                &["session", "path"],
+            ),
+            false,
+            &remote,
+            |r, args| async move {
+                timed(CALL_TIMEOUT, async {
+                    let id = session_id(&args)?;
+                    let path = str_arg(&args, "path")
+                        .ok_or_else(|| anyhow::anyhow!("path is required"))?;
+                    pretty(
+                        &r.call(
+                            Method::GET,
+                            &format!("/v1/agents/sessions/{id}/files?path={}", encode_query(path)),
+                            None,
+                        )
+                        .await?,
+                    )
+                })
+                .await
+            },
+        ),
+        tool(
+            "session_file_read",
+            "Read a file from a session's guest as base64 (content_base64).",
+            object(
+                json!({"session": {"type": "string"}, "path": {"type": "string"}}),
+                &["session", "path"],
+            ),
+            false,
+            &remote,
+            |r, args| async move {
+                timed(CALL_TIMEOUT, async {
+                    let id = session_id(&args)?;
+                    let path = str_arg(&args, "path")
+                        .ok_or_else(|| anyhow::anyhow!("path is required"))?;
+                    pretty(
+                        &r.call(
+                            Method::GET,
+                            &format!(
+                                "/v1/agents/sessions/{id}/files/content?path={}",
+                                encode_query(path)
+                            ),
+                            None,
+                        )
+                        .await?,
+                    )
+                })
+                .await
+            },
+        ),
+        tool(
+            "session_file_write",
+            "Write a text file into a session's guest (parent directories are created). Use content for text; for binary use the CLI or REST with content_base64. About 1.5 MiB per call.",
+            object(
+                json!({
+                    "session": {"type": "string"},
+                    "path": {"type": "string"},
+                    "content": {"type": "string"},
+                    "mode": {"type": "integer", "description": "decimal file mode, e.g. 493 for 0755"},
+                }),
+                &["session", "path", "content"],
+            ),
+            true,
+            &remote,
+            |r, args| async move {
+                timed(CALL_TIMEOUT, async {
+                    use base64::Engine as _;
+                    let id = session_id(&args)?;
+                    let path = str_arg(&args, "path")
+                        .ok_or_else(|| anyhow::anyhow!("path is required"))?;
+                    let content = str_arg(&args, "content")
+                        .ok_or_else(|| anyhow::anyhow!("content is required"))?;
+                    let mut body = json!({
+                        "path": path,
+                        "content_base64": base64::engine::general_purpose::STANDARD.encode(content),
+                    });
+                    if let Some(m) = int_arg(&args, "mode")? {
+                        body["mode"] = json!(m);
+                    }
+                    pretty(
+                        &r.call(
+                            Method::PUT,
+                            &format!("/v1/agents/sessions/{id}/files/content"),
+                            Some(body),
+                        )
+                        .await?,
+                    )
+                })
+                .await
+            },
+        ),
+        tool(
             "session_delete",
             "End an agent session and delete its sandbox.",
             object(json!({"session": {"type": "string"}}), &["session"]),

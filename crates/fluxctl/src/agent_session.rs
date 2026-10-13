@@ -84,6 +84,32 @@ pub enum AgentCommand {
     },
     /// Workspace changes since the baseline, checkpoints and children. REST: `GET .../artifacts`.
     Artifacts { id: Uuid },
+    /// List a directory in the guest (or stat a file). REST: `GET .../files?path=`.
+    Files { id: Uuid, path: String },
+    /// Print a guest file to stdout. REST: `GET .../files/content?path=`.
+    Cat { id: Uuid, path: String },
+    /// Copy a local file into the guest (parents are created). REST: `PUT .../files/content`.
+    Put {
+        id: Uuid,
+        local: std::path::PathBuf,
+        remote: String,
+        /// File mode in octal, e.g. 755.
+        #[arg(long)]
+        mode: Option<String>,
+    },
+    /// Copy a guest file to a local path (stdout when omitted).
+    Pull {
+        id: Uuid,
+        remote: String,
+        local: Option<std::path::PathBuf>,
+    },
+    /// Remove a guest file; `-r` for a directory. REST: `DELETE .../files?path=`.
+    RmFile {
+        id: Uuid,
+        path: String,
+        #[arg(short = 'r', long)]
+        recursive: bool,
+    },
     /// Start a command that keeps running after this call returns; prints the job id. Read it with
     /// `agent logs`. No stdin, no TTY. REST: `POST .../jobs`.
     Bg {
@@ -263,6 +289,97 @@ pub async fn run(r: &Remote, cmd: AgentCommand) -> Result<()> {
             .await
             .context("artifacts")?,
         ),
+        AgentCommand::Files { id, path } => show(
+            &r.call(
+                Method::GET,
+                &format!(
+                    "/v1/agents/sessions/{id}/files?path={}",
+                    crate::remote::encode_query(&path)
+                ),
+                None,
+            )
+            .await
+            .context("list files")?,
+        ),
+        AgentCommand::Cat { id, path }
+        | AgentCommand::Pull {
+            id,
+            remote: path,
+            local: None,
+        } => {
+            use base64::Engine as _;
+            use std::io::Write as _;
+            let v = read_guest_file(r, id, &path).await?;
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(v["content_base64"].as_str().unwrap_or(""))
+                .context("decode content")?;
+            std::io::stdout().write_all(&bytes)?;
+            Ok(())
+        }
+        AgentCommand::Pull {
+            id,
+            remote,
+            local: Some(local),
+        } => {
+            use base64::Engine as _;
+            let v = read_guest_file(r, id, &remote).await?;
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(v["content_base64"].as_str().unwrap_or(""))
+                .context("decode content")?;
+            std::fs::write(&local, &bytes).with_context(|| format!("write {}", local.display()))?;
+            println!(
+                "{}",
+                json!({"path": remote, "bytes": bytes.len(), "to": local})
+            );
+            Ok(())
+        }
+        AgentCommand::Put {
+            id,
+            local,
+            remote,
+            mode,
+        } => {
+            use base64::Engine as _;
+            let bytes =
+                std::fs::read(&local).with_context(|| format!("read {}", local.display()))?;
+            let mut body = json!({
+                "path": remote,
+                "content_base64": base64::engine::general_purpose::STANDARD.encode(&bytes),
+            });
+            if let Some(m) = mode {
+                body["mode"] = json!(
+                    u32::from_str_radix(m.trim_start_matches("0o"), 8)
+                        .map_err(|_| anyhow::anyhow!("--mode must be octal, e.g. 755"))?
+                );
+            }
+            show(
+                &r.call(
+                    Method::PUT,
+                    &format!("/v1/agents/sessions/{id}/files/content"),
+                    Some(body),
+                )
+                .await
+                .context("write file")?,
+            )
+        }
+        AgentCommand::RmFile {
+            id,
+            path,
+            recursive,
+        } => {
+            r.call(
+                Method::DELETE,
+                &format!(
+                    "/v1/agents/sessions/{id}/files?path={}&recursive={recursive}",
+                    crate::remote::encode_query(&path)
+                ),
+                None,
+            )
+            .await
+            .context("remove file")?;
+            println!("{}", json!({"ok": true, "removed": path}));
+            Ok(())
+        }
         AgentCommand::Bg { id, command } => {
             let v = r
                 .call(
@@ -355,6 +472,19 @@ pub async fn run(r: &Remote, cmd: AgentCommand) -> Result<()> {
             Ok(())
         }
     }
+}
+
+async fn read_guest_file(r: &Remote, id: Uuid, path: &str) -> Result<Value> {
+    r.call(
+        Method::GET,
+        &format!(
+            "/v1/agents/sessions/{id}/files/content?path={}",
+            crate::remote::encode_query(path)
+        ),
+        None,
+    )
+    .await
+    .context("read file")
 }
 
 /// One argument is a shell line, as typed (`agent exec ID -- 'cd /w && make'`); several are an

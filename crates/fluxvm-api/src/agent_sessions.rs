@@ -23,6 +23,10 @@
 //! * `POST   /v1/agents/sessions/{id}/jobs`          start a detached command
 //! * `GET    /v1/agents/sessions/{id}/jobs/{job}`    its state and output from `?offset=`
 //! * `DELETE /v1/agents/sessions/{id}/jobs/{job}`    stop it
+//! * `GET    /v1/agents/sessions/{id}/files?path=`   list a directory (or stat a file)
+//! * `GET    /v1/agents/sessions/{id}/files/content?path=` read a file
+//! * `PUT    /v1/agents/sessions/{id}/files/content` write a file
+//! * `DELETE /v1/agents/sessions/{id}/files?path=`   remove a file or directory
 //!
 //! Records live in `<state_dir>/agent-sessions/<id>.json` and `<id>.ledger.jsonl`, so a
 //! session survives a daemon restart. What is *not* here: promote, replay, sandbox-scoped PTY,
@@ -66,6 +70,14 @@ pub(crate) fn routes() -> Router<Arc<VmManager>> {
         .route(
             "/v1/agents/sessions/{id}/preview/{token}",
             axum::routing::delete(revoke_preview),
+        )
+        .route(
+            "/v1/agents/sessions/{id}/files",
+            get(files_list).delete(files_delete),
+        )
+        .route(
+            "/v1/agents/sessions/{id}/files/content",
+            get(files_read).put(files_write),
         )
         .route("/v1/agents/sessions/{id}/jobs", post(job_start))
         .route(
@@ -1336,6 +1348,260 @@ async fn job_kill(
     Ok(StatusCode::NO_CONTENT)
 }
 
+// ---------------------------------------------------------------------------------------
+// Files: list, read, write and remove paths in a session's guest. Read and write go through the
+// sandbox file API the daemon already has; list and remove run a short command in the guest.
+
+fn valid_file_path(p: &str) -> bool {
+    p.starts_with('/')
+        && p.len() <= 4096
+        && !p.contains(['\0', '\n'])
+        && !p.split('/').any(|c| c == "..")
+}
+
+#[derive(Debug, Deserialize)]
+struct PathQuery {
+    path: String,
+    #[serde(default)]
+    recursive: bool,
+}
+
+fn path_arg(p: &str) -> ApiResult<()> {
+    if valid_file_path(p) {
+        return Ok(());
+    }
+    Err(ApiError {
+        status: StatusCode::BAD_REQUEST,
+        message: "path must be absolute, at most 4096 characters, with no '..', newline or NUL"
+            .into(),
+    })
+}
+
+/// One directory entry as `find -printf '%y\t%s\t%T@\t%m\t%f\0'` prints it.
+fn parse_listing(bytes: &[u8]) -> (String, Vec<Value>) {
+    let mut kind = String::from("unknown");
+    let mut entries = Vec::new();
+    for (i, rec) in bytes
+        .split(|b| *b == 0)
+        .filter(|r| !r.is_empty())
+        .enumerate()
+    {
+        let text = String::from_utf8_lossy(rec);
+        if i == 0 {
+            kind = match text.as_ref() {
+                "D" => "dir".into(),
+                "F" => "file".into(),
+                _ => "unknown".into(),
+            };
+            continue;
+        }
+        let mut f = text.splitn(5, '\t');
+        let (Some(ty), Some(size), Some(mtime), Some(mode), Some(name)) =
+            (f.next(), f.next(), f.next(), f.next(), f.next())
+        else {
+            continue;
+        };
+        entries.push(json!({
+            "name": name,
+            "type": match ty { "f" => "file", "d" => "dir", "l" => "symlink", _ => "other" },
+            "size": size.parse::<u64>().unwrap_or(0),
+            "mtime": mtime.split('.').next().and_then(|t| t.parse::<i64>().ok()),
+            "mode": u32::from_str_radix(mode, 8).ok(),
+        }));
+    }
+    (kind, entries)
+}
+
+fn list_script(path: &str) -> String {
+    let p = shell_quote(path);
+    let fmt = "'%y\\t%s\\t%T@\\t%m\\t%f\\0'";
+    format!(
+        "[ -e {p} ] || [ -L {p} ] || exit 44; {{ if [ -d {p} ]; then printf 'D\\0'; \
+         find {p} -mindepth 1 -maxdepth 1 -printf {fmt}; \
+         else printf 'F\\0'; find {p} -maxdepth 0 -printf {fmt}; fi; }} | base64 | tr -d '\\n'"
+    )
+}
+
+async fn guest_exec(m: &Arc<VmManager>, s: &Session, cmd: String) -> ApiResult<Value> {
+    m.ensure_running_for_request(s.sandbox_id).await?;
+    let res = m
+        .exec_with_policy(s.sandbox_id, cmd, Some(30), None)
+        .await?;
+    Ok(json!(res))
+}
+
+async fn files_list(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    token_tenant: Option<Extension<TokenTenant>>,
+    Path(id): Path<Uuid>,
+    Query(q): Query<PathQuery>,
+) -> ApiResult<Json<Value>> {
+    require_admin(role)?;
+    let s = load(&m, id, &caller_tenant(&token_tenant)).await?;
+    running(&s)?;
+    path_arg(&q.path)?;
+    let out = guest_exec(&m, &s, list_script(&q.path)).await?;
+    match out["exit_code"].as_i64() {
+        Some(0) => {}
+        Some(44) => {
+            return Err(ApiError {
+                status: StatusCode::NOT_FOUND,
+                message: format!("{} does not exist", q.path),
+            });
+        }
+        other => {
+            return Err(ApiError {
+                status: StatusCode::BAD_GATEWAY,
+                message: format!(
+                    "listing failed (exit {other:?}): {}",
+                    out["stderr"].as_str().unwrap_or("")
+                ),
+            });
+        }
+    }
+    let (kind, mut entries) =
+        parse_listing(&base64_decode(out["stdout"].as_str().unwrap_or("").trim()));
+    entries.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
+    Ok(Json(
+        json!({"path": q.path, "kind": kind, "entries": entries}),
+    ))
+}
+
+async fn files_read(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    token_tenant: Option<Extension<TokenTenant>>,
+    Path(id): Path<Uuid>,
+    Query(q): Query<PathQuery>,
+) -> ApiResult<Json<Value>> {
+    require_admin(role)?;
+    let s = load(&m, id, &caller_tenant(&token_tenant)).await?;
+    running(&s)?;
+    path_arg(&q.path)?;
+    m.ensure_running_for_request(s.sandbox_id).await?;
+    let res = m
+        .get_file(s.sandbox_id, q.path.clone())
+        .await
+        .map_err(|e| ApiError {
+            status: StatusCode::NOT_FOUND,
+            message: format!("{}: {e:#}", q.path),
+        })?;
+    Ok(Json(json!(res)))
+}
+
+#[derive(Debug, Deserialize)]
+struct WriteBody {
+    path: String,
+    content_base64: String,
+    #[serde(default)]
+    mode: Option<u32>,
+    /// Create missing parent directories first (default true).
+    #[serde(default = "yes")]
+    parents: bool,
+}
+
+fn yes() -> bool {
+    true
+}
+
+async fn files_write(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    token_tenant: Option<Extension<TokenTenant>>,
+    Path(id): Path<Uuid>,
+    Json(body): Json<WriteBody>,
+) -> ApiResult<Json<Value>> {
+    require_admin(role)?;
+    let s = load(&m, id, &caller_tenant(&token_tenant)).await?;
+    running(&s)?;
+    path_arg(&body.path)?;
+    if body.path.ends_with('/') {
+        return Err(ApiError {
+            status: StatusCode::BAD_REQUEST,
+            message: "path must name a file".into(),
+        });
+    }
+    if body.parents
+        && let Some(dir) = std::path::Path::new(&body.path)
+            .parent()
+            .and_then(|d| d.to_str())
+        && dir != "/"
+    {
+        let out = guest_exec(
+            &m,
+            &s,
+            // The guest user is not root on stock images: fall back to sudo, then hand the topmost
+            // directory that had to be created to that user, so this and later writes succeed.
+            format!(
+                "t={0}; u=; while [ ! -e \"$t\" ]; do u=\"$t\"; t=$(dirname \"$t\"); done; \
+                 mkdir -p {0} 2>/dev/null || (sudo -n mkdir -p {0} && sudo -n chown -R \"$(id -u):$(id -g)\" \"$u\")",
+                shell_quote(dir)
+            ),
+        )
+        .await?;
+        if out["exit_code"].as_i64() != Some(0) {
+            return Err(ApiError {
+                status: StatusCode::BAD_REQUEST,
+                message: format!("could not create {dir}"),
+            });
+        }
+    }
+    let bytes = base64_decode(&body.content_base64).len();
+    m.put_file(
+        s.sandbox_id,
+        body.path.clone(),
+        body.content_base64,
+        body.mode,
+    )
+    .await?;
+    record(
+        &m,
+        id,
+        "file.write",
+        json!({"path": body.path, "bytes": bytes}),
+    );
+    Ok(Json(json!({"path": body.path, "bytes": bytes})))
+}
+
+async fn files_delete(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    token_tenant: Option<Extension<TokenTenant>>,
+    Path(id): Path<Uuid>,
+    Query(q): Query<PathQuery>,
+) -> ApiResult<StatusCode> {
+    require_admin(role)?;
+    let s = load(&m, id, &caller_tenant(&token_tenant)).await?;
+    running(&s)?;
+    path_arg(&q.path)?;
+    // `/` and one-component paths (`/etc`, `/usr`) are never a sensible thing to remove.
+    if q.path.trim_end_matches('/').matches('/').count() < 2 {
+        return Err(ApiError {
+            status: StatusCode::BAD_REQUEST,
+            message: "refusing to remove a top-level path".into(),
+        });
+    }
+    let flag = if q.recursive { "-rf" } else { "-f" };
+    let out = guest_exec(&m, &s, format!("rm {flag} -- {}", shell_quote(&q.path))).await?;
+    if out["exit_code"].as_i64() != Some(0) {
+        return Err(ApiError {
+            status: StatusCode::BAD_REQUEST,
+            message: format!(
+                "remove failed: {} (a directory needs recursive=true)",
+                out["stderr"].as_str().unwrap_or("")
+            ),
+        });
+    }
+    record(
+        &m,
+        id,
+        "file.delete",
+        json!({"path": q.path, "recursive": q.recursive}),
+    );
+    Ok(StatusCode::NO_CONTENT)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1462,5 +1728,33 @@ mod tests {
         assert_eq!(base64_decode(""), b"");
         assert_eq!(base64_decode("/+8="), vec![0xff, 0xef]);
         assert_eq!(base64_decode("AAEC"), vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn a_listing_parses_names_with_spaces_and_distinguishes_dir_from_file() {
+        let raw = b"D\0f\t12\t1760000000.5\t644\ta file.txt\0d\t4096\t1760000001.0\t755\tsub\0";
+        let (kind, e) = parse_listing(raw);
+        assert_eq!(kind, "dir");
+        assert_eq!(e.len(), 2);
+        assert_eq!(e[0]["name"], "a file.txt");
+        assert_eq!(e[0]["type"], "file");
+        assert_eq!(e[0]["size"], 12);
+        assert_eq!(e[0]["mode"], 0o644);
+        assert_eq!(e[1]["type"], "dir");
+        assert_eq!(parse_listing(b"F\0f\t1\t1.0\t600\tx\0").0, "file");
+    }
+
+    #[test]
+    fn file_paths_must_be_absolute_and_free_of_traversal() {
+        assert!(valid_file_path("/workspace/a b/c.txt"));
+        for bad in [
+            "rel/x",
+            "/a/../b",
+            "/a\nb",
+            "/a\0b",
+            &format!("/{}", "x".repeat(5000)),
+        ] {
+            assert!(!valid_file_path(bad), "{bad:?}");
+        }
     }
 }
