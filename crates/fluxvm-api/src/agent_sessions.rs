@@ -16,6 +16,7 @@
 //! * `POST   /v1/agents/sessions/{id}/fork`          fork into child sessions (in-tree KVM only)
 //! * `GET    /v1/agents/sessions/{id}/events`        ledger plus the sandbox's VM events
 //! * `GET    /v1/agents/sessions/{id}/artifacts`     workspace changes since the baseline
+//! * `GET    /v1/agents/sessions/{id}/trajectory`    ledger and VM events merged into one ordered list
 //! * `POST   /v1/agents/sessions/{id}/preview`       mint an expiring preview URL for a guest port
 //! * `GET    /v1/agents/sessions/{id}/previews`      list live preview URLs
 //! * `DELETE /v1/agents/sessions/{id}/preview/{token}` revoke one
@@ -70,6 +71,7 @@ pub(crate) fn routes() -> Router<Arc<VmManager>> {
         .route("/v1/agents/sessions/{id}/fork", post(fork))
         .route("/v1/agents/sessions/{id}/events", get(events))
         .route("/v1/agents/sessions/{id}/artifacts", get(artifacts))
+        .route("/v1/agents/sessions/{id}/trajectory", get(trajectory))
         .route("/v1/agents/sessions/{id}/preview", post(create_preview))
         .route("/v1/agents/sessions/{id}/previews", get(list_previews))
         .route(
@@ -926,6 +928,73 @@ async fn events(
         None => Vec::new(),
     };
     Ok(Json(json!({"ledger": ledger, "vm_events": vm_events})))
+}
+
+/// Ledger entries and the sandbox's VM events as one list ordered by time, each step numbered
+/// and tagged with where it came from. The ledger is what the API did; VM events are what the
+/// hypervisor layer saw. Both are what we already record: nothing here is a transcript of the
+/// agent's reasoning, which FluxVM never sees.
+/// Order steps by time (stable, so equal timestamps keep their input order) and number them.
+fn number_steps(mut steps: Vec<(DateTime<Utc>, Value)>) -> Vec<Value> {
+    steps.sort_by_key(|(ts, _)| *ts);
+    steps
+        .into_iter()
+        .enumerate()
+        .map(|(i, (ts, mut v))| {
+            v["seq"] = json!(i);
+            v["ts"] = json!(ts);
+            v
+        })
+        .collect()
+}
+
+async fn trajectory(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    token_tenant: Option<Extension<TokenTenant>>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<Value>> {
+    require_admin(role)?;
+    let s = load(&m, id, &caller_tenant(&token_tenant)).await?;
+    let mut steps: Vec<(DateTime<Utc>, Value)> = Vec::new();
+    for e in read_ledger(&m, id, None) {
+        let Some(ts) = e["ts"]
+            .as_str()
+            .and_then(|t| t.parse::<DateTime<Utc>>().ok())
+        else {
+            continue;
+        };
+        steps.push((
+            ts,
+            json!({"source": "ledger", "kind": e["kind"], "detail": e["detail"]}),
+        ));
+    }
+    if let Some(log) = fluxvm_scheduler::events::global() {
+        let filter = fluxvm_scheduler::EventFilter {
+            vm: Some(s.sandbox_id),
+            since: None,
+            event: None,
+            limit: Some(5000),
+        };
+        for e in log.list(&filter).unwrap_or_default() {
+            steps.push((
+                e.ts,
+                json!({"source": "vm", "kind": e.event, "detail": e.fields}),
+            ));
+        }
+    }
+    let steps = number_steps(steps);
+    Ok(Json(json!({
+        "session": {
+            "id": s.id,
+            "sandbox_id": s.sandbox_id,
+            "agent": s.agent,
+            "backend": s.backend,
+            "state": s.state,
+            "created_at": s.created_at,
+        },
+        "steps": steps,
+    })))
 }
 
 async fn artifacts(
@@ -2027,6 +2096,20 @@ mod tests {
         assert!(capabilities_for("vz", true).fork);
         assert!(!capabilities_for("cloud-hypervisor", true).snapshot);
         assert!(!capabilities_for("qemu", true).fork);
+    }
+
+    #[test]
+    fn trajectory_steps_are_ordered_and_numbered() {
+        let t = |s: &str| s.parse::<DateTime<Utc>>().unwrap();
+        let out = number_steps(vec![
+            (t("2026-01-01T00:00:02Z"), json!({"kind": "c"})),
+            (t("2026-01-01T00:00:01Z"), json!({"kind": "a"})),
+            (t("2026-01-01T00:00:01Z"), json!({"kind": "b"})),
+        ]);
+        let kinds: Vec<_> = out.iter().map(|v| v["kind"].as_str().unwrap()).collect();
+        assert_eq!(kinds, ["a", "b", "c"]);
+        assert_eq!(out[2]["seq"], 2);
+        assert_eq!(out[0]["ts"], "2026-01-01T00:00:01Z");
     }
 
     #[test]

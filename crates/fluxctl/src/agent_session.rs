@@ -82,6 +82,14 @@ pub enum AgentCommand {
         #[arg(long)]
         since: Option<String>,
     },
+    /// Write the session's trajectory (ledger + VM events, ordered) as JSON Lines: one header
+    /// line, then one line per step. REST: `GET .../trajectory`.
+    Export {
+        id: Uuid,
+        /// File to write; stdout when omitted.
+        #[arg(long)]
+        out: Option<std::path::PathBuf>,
+    },
     /// Workspace changes since the baseline, checkpoints and children. REST: `GET .../artifacts`.
     Artifacts { id: Uuid },
     /// Git in the session's workspace repo (needs git in the guest). REST: `.../git/*`.
@@ -339,6 +347,33 @@ pub async fn run(r: &Remote, cmd: AgentCommand) -> Result<()> {
             let vm = v["vm_events"].as_array().map_or(0, Vec::len);
             if vm > 0 {
                 println!("({vm} VM events: fluxctl events --vm <sandbox id>)");
+            }
+            Ok(())
+        }
+        AgentCommand::Export { id, out } => {
+            use std::io::Write as _;
+            let v = r
+                .call(
+                    Method::GET,
+                    &format!("/v1/agents/sessions/{id}/trajectory"),
+                    None,
+                )
+                .await
+                .context("trajectory")?;
+            let mut buf = Vec::new();
+            writeln!(
+                buf,
+                "{}",
+                json!({"type": "session", "session": v["session"]})
+            )?;
+            for step in v["steps"].as_array().into_iter().flatten() {
+                writeln!(buf, "{step}")?;
+            }
+            match out {
+                Some(p) => {
+                    std::fs::write(&p, &buf).with_context(|| format!("write {}", p.display()))?
+                }
+                None => std::io::stdout().write_all(&buf)?,
             }
             Ok(())
         }

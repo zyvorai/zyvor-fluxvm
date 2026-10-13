@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- **Trajectory export.** `GET /v1/agents/sessions/{id}/trajectory` merges the session ledger and the sandbox's VM
+  events into one time-ordered, numbered list; `fluxctl agent export <session> [--out file]` writes it as JSON Lines
+  (a header line, then one step per line). It records what the API and hypervisor layer did, not the agent's
+  reasoning, which FluxVM never sees. No OTLP trace export yet.
+
 ## 0.4.8 (2026-10-13)
 
 This release adds **AgentSession**, a single object an agent drives instead of assembling VM, sandbox, snapshot and
