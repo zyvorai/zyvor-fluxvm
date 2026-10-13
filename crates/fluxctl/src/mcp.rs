@@ -1511,6 +1511,48 @@ pub fn tools(remote: Arc<Remote>) -> Vec<Tool> {
             },
         ),
         tool(
+            "session_evaluate",
+            "Try several candidate fixes in isolated forks and keep the best: forks one child per candidate command, runs the candidate and then the test command in it, scores each (passed only if the test exits 0), deletes the losing children and returns the winner. Then review it with session_promote dry_run and apply. Needs a forkable session (see session_fork); each child is a full sandbox, so keep candidates few.",
+            object(
+                json!({
+                    "session": {"type": "string"},
+                    "candidates": {"type": "array", "items": {"type": "string"}, "minItems": 1, "maxItems": 32, "description": "one shell command per candidate, each run in its own child"},
+                    "test": {"type": "string", "description": "shell command that decides a candidate passed (exit 0); without it, the candidate's own exit code decides"},
+                    "timeout_seconds": {"type": "integer", "minimum": 1},
+                    "keep_all": {"type": "boolean", "description": "keep losing children too (default false)"},
+                }),
+                &["session", "candidates"],
+            ),
+            true,
+            &remote,
+            |r, args| async move {
+                timed(Duration::from_secs(1800), async {
+                    let id = session_id(&args)?;
+                    let candidates: Vec<String> = args["candidates"]
+                        .as_array()
+                        .map(|a| {
+                            a.iter()
+                                .filter_map(|v| v.as_str().map(str::to_string))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    pretty(
+                        &crate::agent_session::evaluate(
+                            &r,
+                            id,
+                            &candidates,
+                            str_arg(&args, "test").filter(|t| !t.trim().is_empty()),
+                            int_arg(&args, "timeout_seconds")?,
+                            args["keep_all"].as_bool().unwrap_or(false),
+                            None,
+                        )
+                        .await?,
+                    )
+                })
+                .await
+            },
+        ),
+        tool(
             "session_events",
             "What an agent session did: its ledger (exec, checkpoint, restore, fork, ...) and the sandbox's VM events. since is an RFC 3339 time.",
             object(

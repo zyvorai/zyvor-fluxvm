@@ -233,6 +233,28 @@ pub enum AgentCommand {
     },
     /// Delete the session and its sandbox. REST: `DELETE /v1/agents/sessions/{id}`.
     Rm { id: Uuid },
+    /// Try several candidate fixes in isolated forks, test each, rank them and keep the winner:
+    /// forks one child per `--candidate`, runs the candidate and then `--test` in it, scores every
+    /// result, deletes the losers and prints the winner. Review and apply it with
+    /// `agent promote <winner> --dry-run`. Same forkability rules as `fork`.
+    Evaluate {
+        id: Uuid,
+        /// A candidate command (repeatable, 1-32): what to try in one child.
+        #[arg(long = "candidate", required = true)]
+        candidates: Vec<String>,
+        /// Command that decides whether a candidate passes (exit 0). Without it a candidate passes
+        /// when it exits 0.
+        #[arg(long)]
+        test: Option<String>,
+        /// Per-command timeout in seconds.
+        #[arg(long)]
+        timeout_seconds: Option<u64>,
+        /// Keep the losing children too (their ids are in the output).
+        #[arg(long)]
+        keep_all: bool,
+        #[arg(long)]
+        identity: Option<String>,
+    },
     /// Mint an expiring token that works on this one session and only for the listed operations
     /// (read, exec, jobs, files.read, files.write, git, checkpoint, preview). Prints it once; use it as
     /// the bearer token for `fluxctl --token` or REST. REST: `POST /v1/agents/sessions/{id}/tokens`.
@@ -427,6 +449,195 @@ pub(crate) async fn rollout(
         "results": results,
         "children_kept": keep,
         "children_deleted": deleted,
+    }))
+}
+
+/// One candidate's outcome, as far as ranking is concerned.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Outcome {
+    pub candidate_exit: Option<i64>,
+    pub test_exit: Option<i64>,
+    pub had_test: bool,
+    pub duration_ms: u64,
+}
+
+impl Outcome {
+    /// Passed: the test exited 0 (or, with no test, the candidate did).
+    pub(crate) fn passed(&self) -> bool {
+        if self.had_test {
+            self.candidate_exit == Some(0) && self.test_exit == Some(0)
+        } else {
+            self.candidate_exit == Some(0)
+        }
+    }
+
+    /// 100 passed; 10 ran cleanly but failed its test; 0 failed or never ran.
+    pub(crate) fn score(&self) -> u32 {
+        if self.passed() {
+            100
+        } else if self.candidate_exit == Some(0) {
+            10
+        } else {
+            0
+        }
+    }
+}
+
+/// Index of the best outcome: highest score, then shortest, then lowest index. `None` when
+/// nothing passed, because a winner that fails its test must not be offered for promotion.
+pub(crate) fn pick_winner(outcomes: &[Outcome]) -> Option<usize> {
+    outcomes
+        .iter()
+        .enumerate()
+        .filter(|(_, o)| o.passed())
+        .min_by_key(|(i, o)| (std::cmp::Reverse(o.score()), o.duration_ms, *i))
+        .map(|(i, _)| i)
+}
+
+fn tail(v: &Value, n: usize) -> String {
+    let s = v.as_str().unwrap_or("");
+    let skip = s.chars().count().saturating_sub(n);
+    s.chars().skip(skip).collect()
+}
+
+/// Fork one child per candidate, run candidate then test in each, rank, keep the winner.
+/// A child that errors is a result with `error`, never an abort of the others.
+pub(crate) async fn evaluate(
+    r: &Remote,
+    id: Uuid,
+    candidates: &[String],
+    test: Option<&str>,
+    timeout_seconds: Option<u64>,
+    keep_all: bool,
+    identity: Option<&str>,
+) -> Result<Value> {
+    if candidates.is_empty() || candidates.len() > 32 {
+        anyhow::bail!("give 1-32 candidates");
+    }
+    if candidates.iter().any(|c| c.trim().is_empty()) {
+        anyhow::bail!("a candidate command is empty");
+    }
+    let mut fork_body = json!({"count": candidates.len()});
+    if let Some(i) = identity {
+        fork_body["identity"] = json!(i);
+    }
+    let forked = r
+        .call(
+            Method::POST,
+            &format!("/v1/agents/sessions/{id}/fork"),
+            Some(fork_body),
+        )
+        .await
+        .context("fork")?;
+    let kids: Vec<String> = forked["items"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|c| c["id"].as_str().map(str::to_string))
+        .collect();
+    if kids.len() != candidates.len() {
+        // Do not leave a half-made fork behind.
+        for cid in &kids {
+            let _ = r
+                .call(Method::DELETE, &format!("/v1/agents/sessions/{cid}"), None)
+                .await;
+        }
+        anyhow::bail!(
+            "asked for {} children, got {}; they were deleted",
+            candidates.len(),
+            kids.len()
+        );
+    }
+    let exec = |cid: &str, cmd: &str| {
+        let mut body = json!({"command": cmd});
+        if let Some(t) = timeout_seconds {
+            body["timeout_seconds"] = json!(t);
+        }
+        let path = format!("/v1/agents/sessions/{cid}/exec");
+        async move { r.call(Method::POST, &path, Some(body)).await }
+    };
+    let runs = kids.iter().zip(candidates).map(|(cid, cmd)| {
+        let exec = &exec;
+        async move {
+            let t0 = std::time::Instant::now();
+            let cand = match exec(cid, cmd).await {
+                Ok(v) => v,
+                Err(e) => {
+                    return (
+                        Outcome {
+                            candidate_exit: None,
+                            test_exit: None,
+                            had_test: test.is_some(),
+                            duration_ms: t0.elapsed().as_millis() as u64,
+                        },
+                        json!({"session": cid, "command": cmd, "error": format!("{e:#}")}),
+                    );
+                }
+            };
+            let cand_exit = cand["exit_code"].as_i64();
+            let mut test_exit = None;
+            let mut test_v = Value::Null;
+            // A candidate that did not exit cleanly is not worth testing.
+            if let (Some(t), Some(0)) = (test, cand_exit) {
+                match exec(cid, t).await {
+                    Ok(v) => {
+                        test_exit = v["exit_code"].as_i64();
+                        test_v = v;
+                    }
+                    Err(e) => test_v = json!({"error": format!("{e:#}")}),
+                }
+            }
+            let o = Outcome {
+                candidate_exit: cand_exit,
+                test_exit,
+                had_test: test.is_some(),
+                duration_ms: t0.elapsed().as_millis() as u64,
+            };
+            let detail = json!({
+                "session": cid,
+                "command": cmd,
+                "candidate_exit": cand_exit,
+                "test_exit": test_exit,
+                "passed": o.passed(),
+                "score": o.score(),
+                "duration_ms": o.duration_ms,
+                "stdout_tail": tail(&cand["stdout"], 2000),
+                "stderr_tail": tail(&cand["stderr"], 2000),
+                "test_stdout_tail": tail(&test_v["stdout"], 2000),
+                "test_stderr_tail": tail(&test_v["stderr"], 2000),
+            });
+            (o, detail)
+        }
+    });
+    let done = futures_util::future::join_all(runs).await;
+    let outcomes: Vec<Outcome> = done.iter().map(|(o, _)| o.clone()).collect();
+    let winner = pick_winner(&outcomes);
+    let mut results: Vec<Value> = Vec::new();
+    for (i, (_, mut d)) in done.into_iter().enumerate() {
+        d["index"] = json!(i);
+        results.push(d);
+    }
+    let mut deleted = 0;
+    for (i, cid) in kids.iter().enumerate() {
+        if keep_all || Some(i) == winner {
+            continue;
+        }
+        if r.call(Method::DELETE, &format!("/v1/agents/sessions/{cid}"), None)
+            .await
+            .is_ok()
+        {
+            deleted += 1;
+        }
+    }
+    let winner_session = winner.map(|i| kids[i].clone());
+    Ok(json!({
+        "parent": id,
+        "fork_ms": forked["total_ms"],
+        "results": results,
+        "winner": winner_session,
+        "winner_index": winner,
+        "children_deleted": deleted,
+        "next": winner_session.as_ref().map(|w| format!("fluxctl agent promote {w} --dry-run")),
     }))
 }
 
@@ -640,6 +851,25 @@ pub async fn run(r: &Remote, cmd: AgentCommand) -> Result<()> {
                 &guest_command(&command),
                 timeout_seconds,
                 keep,
+                identity.as_deref(),
+            )
+            .await?,
+        ),
+        AgentCommand::Evaluate {
+            id,
+            candidates,
+            test,
+            timeout_seconds,
+            keep_all,
+            identity,
+        } => show(
+            &evaluate(
+                r,
+                id,
+                &candidates,
+                test.as_deref(),
+                timeout_seconds,
+                keep_all,
                 identity.as_deref(),
             )
             .await?,
@@ -1753,6 +1983,44 @@ mod tests {
         assert_eq!(c["policy"]["filesystem"]["read"][0], "/data");
         assert_eq!(c["policy"]["filesystem"]["write"][0], "/out");
         assert_eq!(c["policy"]["filesystem"]["enforcement"], "best-effort");
+    }
+
+    #[test]
+    fn the_winner_passes_first_then_is_fastest_and_nothing_failing_is_offered() {
+        let o = |c: Option<i64>, t: Option<i64>, ms: u64| Outcome {
+            candidate_exit: c,
+            test_exit: t,
+            had_test: true,
+            duration_ms: ms,
+        };
+        // 1 and 3 pass; 3 is faster. 0 failed its test, 2 failed to run cleanly.
+        let all = [
+            o(Some(0), Some(1), 10),
+            o(Some(0), Some(0), 900),
+            o(Some(2), None, 5),
+            o(Some(0), Some(0), 400),
+        ];
+        assert_eq!(pick_winner(&all), Some(3));
+        assert_eq!(all[0].score(), 10);
+        assert_eq!(all[2].score(), 0);
+        assert_eq!(all[3].score(), 100);
+        // Ties on score and time go to the lowest index.
+        let tie = [o(Some(0), Some(0), 7), o(Some(0), Some(0), 7)];
+        assert_eq!(pick_winner(&tie), Some(0));
+        // Nothing passed: no winner, so nothing is offered for promotion.
+        assert_eq!(
+            pick_winner(&[o(Some(0), Some(1), 1), o(None, None, 1)]),
+            None
+        );
+        // No test command: exiting 0 is passing.
+        let no_test = Outcome {
+            candidate_exit: Some(0),
+            test_exit: None,
+            had_test: false,
+            duration_ms: 3,
+        };
+        assert!(no_test.passed());
+        assert_eq!(pick_winner(&[no_test]), Some(0));
     }
 
     #[test]
