@@ -698,6 +698,96 @@ pub struct DiskIo {
     /// virtio queues, 1-64 (virtio-blk, vhost-user-blk and the root).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub queues: Option<u16>,
+    /// IOPS and bandwidth limits QEMU enforces on this disk (`scsi`,
+    /// `virtio-blk` and the root; a vhost-user-blk disk bypasses QEMU's block
+    /// layer). Applied when QEMU starts and changeable live.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub throttle: Option<DiskThrottle>,
+}
+
+/// Most a single throttle limit may be (QEMU's `THROTTLE_VALUE_MAX`).
+pub const DISK_THROTTLE_MAX: u64 = 1_000_000_000_000_000;
+
+/// Per-disk I/O limits. A `*_total` limit and its `*_read`/`*_write` pair
+/// are mutually exclusive. `*_total_max` lets the disk burst above
+/// `*_total` for up to `burst_seconds` (default 1).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct DiskThrottle {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub iops_total: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub iops_read: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub iops_write: Option<u64>,
+    /// Bytes per second.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bps_total: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bps_read: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bps_write: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub iops_total_max: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bps_total_max: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub burst_seconds: Option<u64>,
+}
+
+impl DiskThrottle {
+    pub fn is_empty(&self) -> bool {
+        *self == DiskThrottle::default()
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        let all = [
+            ("iops_total", self.iops_total),
+            ("iops_read", self.iops_read),
+            ("iops_write", self.iops_write),
+            ("bps_total", self.bps_total),
+            ("bps_read", self.bps_read),
+            ("bps_write", self.bps_write),
+            ("iops_total_max", self.iops_total_max),
+            ("bps_total_max", self.bps_total_max),
+        ];
+        for (k, v) in all {
+            if let Some(v) = v
+                && !(1..=DISK_THROTTLE_MAX).contains(&v)
+            {
+                return Err(format!(
+                    "throttle.{k} must be 1-{DISK_THROTTLE_MAX} (got {v})"
+                ));
+            }
+        }
+        if self.iops_total.is_some() && (self.iops_read.is_some() || self.iops_write.is_some()) {
+            return Err("throttle.iops_total excludes iops_read and iops_write".into());
+        }
+        if self.bps_total.is_some() && (self.bps_read.is_some() || self.bps_write.is_some()) {
+            return Err("throttle.bps_total excludes bps_read and bps_write".into());
+        }
+        for (max, base, k) in [
+            (self.iops_total_max, self.iops_total, "iops_total"),
+            (self.bps_total_max, self.bps_total, "bps_total"),
+        ] {
+            match (max, base) {
+                (Some(_), None) => return Err(format!("throttle.{k}_max needs {k}")),
+                (Some(m), Some(b)) if m < b => {
+                    return Err(format!("throttle.{k}_max ({m}) is below {k} ({b})"));
+                }
+                _ => {}
+            }
+        }
+        if let Some(s) = self.burst_seconds {
+            if self.iops_total_max.is_none() && self.bps_total_max.is_none() {
+                return Err("throttle.burst_seconds needs iops_total_max or bps_total_max".into());
+            }
+            if !(1..=86_400).contains(&s) {
+                return Err(format!("throttle.burst_seconds must be 1-86400 (got {s})"));
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -786,7 +876,29 @@ impl DiskIo {
                 "iothread and queues need bus virtio-blk or vhost-user-blk (SCSI disks share one controller)".into(),
             );
         }
+        if let Some(t) = &self.throttle {
+            if !root && self.bus() == DiskBus::VhostUserBlk {
+                return Err(
+                    "throttle needs bus scsi or virtio-blk (vhost-user-blk bypasses QEMU's block layer)".into(),
+                );
+            }
+            t.validate()?;
+        }
         Ok(())
+    }
+
+    /// The throttle, unless it sets no limit.
+    pub fn throttle(&self) -> Option<&DiskThrottle> {
+        self.throttle.as_ref().filter(|t| !t.is_empty())
+    }
+
+    /// True when anything besides the throttle is set; only then does the
+    /// root get an explicit `virtio-blk-pci` device.
+    pub fn has_device_settings(&self) -> bool {
+        DiskIo {
+            throttle: None,
+            ..self.clone()
+        } != DiskIo::default()
     }
 }
 
@@ -2590,6 +2702,9 @@ pub struct VmDiskInfo {
     pub format: String,
     pub size_bytes: u64,
     pub allocated_bytes: u64,
+    /// The configured limits (QEMU).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub throttle: Option<DiskThrottle>,
 }
 
 /// A named template for a warm pool: `size` VMs matching `template` are

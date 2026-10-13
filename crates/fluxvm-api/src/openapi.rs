@@ -479,6 +479,14 @@ fn ops() -> Vec<Op> {
             DISKS,
         )
         .status("204"),
+        op(
+            "put",
+            "/v1/vms/{id}/disks/{name}/throttle",
+            "Set or clear a disk's IOPS/bandwidth limits (name `root` for the boot disk); live when running",
+            DISKS,
+        )
+        .body("DiskThrottleRequest")
+        .returns("DiskThrottleResult"),
         // ---- volumes ----
         op("get", "/v1/volumes", "Persistent volumes on this host (admin)", DISKS).returns("VolumeList"),
         op(
@@ -732,7 +740,8 @@ fn schemas() -> Value {
             "bus": {"type": "string", "enum": ["virtio", "scsi", "virtio-blk", "vhost-user-blk"], "description": "virtio is the root disk"},
             "format": {"type": "string"},
             "size_bytes": {"type": "integer"},
-            "allocated_bytes": {"type": "integer"}
+            "allocated_bytes": {"type": "integer"},
+            "throttle": {"$ref": "#/components/schemas/DiskThrottle"}
         }},
         "DiskList": list("VmDiskInfo"),
         "AttachDiskRequest": {"type": "object", "required": ["name"], "description": "Exactly one of size_gib, path or backing", "properties": {
@@ -747,7 +756,8 @@ fn schemas() -> Value {
             "aio": {"type": "string", "enum": ["io_uring", "native", "threads"], "description": "native needs cache none or directsync"},
             "cache": {"type": "string", "enum": ["none", "writeback", "writethrough", "directsync", "unsafe"], "description": "Default writeback"},
             "iothread": {"type": "boolean", "description": "Dedicated iothread (virtio-blk, vhost-user-blk, root)"},
-            "queues": {"type": "integer", "minimum": 1, "maximum": 64, "description": "virtio queues (virtio-blk, vhost-user-blk, root)"}
+            "queues": {"type": "integer", "minimum": 1, "maximum": 64, "description": "virtio queues (virtio-blk, vhost-user-blk, root)"},
+            "throttle": {"$ref": "#/components/schemas/DiskThrottle"}
         }},
         "ResizeDiskRequest": {"type": "object", "required": ["size_gib"], "properties": {
             "size_gib": {"type": "integer", "minimum": 1}
@@ -756,6 +766,9 @@ fn schemas() -> Value {
         "EventList": list("VmEvent"),
         "Error": {"type": "object", "properties": {"error": {"type": "string"}}}
     });
+    if let (Some(all), Value::Object(t)) = (all.as_object_mut(), throttle_schemas()) {
+        all.extend(t);
+    }
     if let (Some(all), Value::Object(cbt)) = (all.as_object_mut(), cbt_schemas()) {
         all.extend(cbt);
     }
@@ -781,6 +794,30 @@ fn volume_schemas() -> Value {
         "CreateVolumeRequest": {"type": "object", "required": ["name", "size_gib"], "properties": {
             "name": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,62}$"},
             "size_gib": {"type": "integer", "minimum": 1, "maximum": 16384}
+        }}
+    })
+}
+
+/// Apart from [`schemas`] for the same reason as [`cbt_schemas`].
+fn throttle_schemas() -> Value {
+    json!({
+        "DiskThrottle": {"type": "object", "description": "IOPS and bytes/s limits (scsi, virtio-blk, root). A *_total limit excludes its *_read/*_write pair; *_total_max bursts for burst_seconds", "properties": {
+            "iops_total": {"type": "integer", "minimum": 1},
+            "iops_read": {"type": "integer", "minimum": 1},
+            "iops_write": {"type": "integer", "minimum": 1},
+            "bps_total": {"type": "integer", "minimum": 1},
+            "bps_read": {"type": "integer", "minimum": 1},
+            "bps_write": {"type": "integer", "minimum": 1},
+            "iops_total_max": {"type": "integer", "minimum": 1},
+            "bps_total_max": {"type": "integer", "minimum": 1},
+            "burst_seconds": {"type": "integer", "minimum": 1, "maximum": 86400}
+        }},
+        "DiskThrottleRequest": {"type": "object", "properties": {
+            "throttle": {"$ref": "#/components/schemas/DiskThrottle"}
+        }, "description": "Omit or null throttle to lift every limit"},
+        "DiskThrottleResult": {"type": "object", "properties": {
+            "name": {"type": "string"},
+            "throttle": {"$ref": "#/components/schemas/DiskThrottle"}
         }}
     })
 }

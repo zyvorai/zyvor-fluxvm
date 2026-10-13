@@ -494,7 +494,7 @@ prefix (4+ hex chars). Ambiguous names/prefixes are rejected with the matching i
 | Filter by labels | `fluxctl list -l env=prod,!tmp` | `GET /v1/vms?label=env%3Dprod` |
 | Bulk lifecycle | `fluxctl start\|stop\|restart -l <sel>`, `fluxctl delete -l <sel> --yes` | per-VM calls |
 | Clone a stopped VM | `fluxctl clone-vm <vm> <new-name>` | `POST /v1/vms/{id}/clone` `{"name": "..."}` |
-| Disks | `fluxctl disk list\|attach\|resize\|detach <vm> ...` | `GET/POST /v1/vms/{id}/disks`, `PATCH/DELETE /v1/vms/{id}/disks/{name}` |
+| Disks | `fluxctl disk list\|attach\|resize\|detach\|throttle <vm> ...` | `GET/POST /v1/vms/{id}/disks`, `PATCH/DELETE /v1/vms/{id}/disks/{name}`, `PUT /v1/vms/{id}/disks/{name}/throttle` |
 | Serial console | `fluxctl serial <vm>` (Ctrl-] detaches) | websocket `GET /v1/vms/{id}/serial` |
 | Backup root disk | `fluxctl backup <vm> [--compress] [--dest PATH]` | `POST /v1/vms/{id}/backup` `{"compress": true}` |
 | Backup root + data disks | `fluxctl backup <vm> --all-disks` | `POST /v1/vms/{id}/backup` `{"all_disks": true}` |
@@ -553,6 +553,13 @@ disk boots with shareable memory; hot-adding one to a running VM needs
 device (an NVMe-oF namespace, an RBD map) is added to the VM's device-cgroup
 allowlist before QEMU opens it. That allowlist has 8 entries in total: the 3
 fixed devices, VFIO groups and block devices.
+
+`disk throttle <vm> <disk|root> --iops-total 500 --bps-total 52428800` caps a
+QEMU disk's IOPS and bandwidth (`--iops-read/--iops-write`, `--bps-read/--bps-write`,
+bursts with `--iops-total-max/--bps-total-max --burst-seconds`). It applies
+live through `block_set_io_throttle` and is kept for every later start, a
+migration target included; no limit flags lifts them. `io.throttle` on attach
+or create sets them up front. vhost-user-blk disks cannot be throttled.
 
 `disk attach <vm> <name> --path <file-or-device>` (REST: `{"name", "path"}`
 instead of `size_gib`) attaches an **existing** qcow2/raw image or block device

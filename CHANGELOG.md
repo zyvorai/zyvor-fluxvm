@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+### Added
+- **Per-disk I/O throttling (QEMU).** `io.throttle` on data disks and `root_disk_io` sets IOPS and bandwidth limits
+  (total or read/write, with optional bursts), applied by `block_set_io_throttle` when QEMU starts, on a migration
+  target and on hot-add. `PUT /v1/vms/{id}/disks/{name}/throttle` and `fluxctl disk throttle` change them live and
+  keep them for later starts; `GET /v1/vms/{id}/disks` reports them. vhost-user-blk disks are refused.
+
 ## 0.4.7 (2026-10-13)
 
 This release is about FluxMesh. It adds a new crate, `fluxvm-mesh`, and `fluxctl cloud`; **nothing in the macOS package

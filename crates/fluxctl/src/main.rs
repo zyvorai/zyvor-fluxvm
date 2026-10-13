@@ -2429,6 +2429,33 @@ enum ContextCommand {
     },
 }
 
+/// The limits `disk throttle` asks for; `None` when every flag is unset.
+#[allow(clippy::too_many_arguments)]
+fn disk_throttle(
+    iops_total: Option<u64>,
+    iops_read: Option<u64>,
+    iops_write: Option<u64>,
+    bps_total: Option<u64>,
+    bps_read: Option<u64>,
+    bps_write: Option<u64>,
+    iops_total_max: Option<u64>,
+    bps_total_max: Option<u64>,
+    burst_seconds: Option<u64>,
+) -> Option<fluxvm_core::model::DiskThrottle> {
+    let t = fluxvm_core::model::DiskThrottle {
+        iops_total,
+        iops_read,
+        iops_write,
+        bps_total,
+        bps_read,
+        bps_write,
+        iops_total_max,
+        bps_total_max,
+        burst_seconds,
+    };
+    (!t.is_empty()).then_some(t)
+}
+
 fn parse_quiesce(s: &str) -> Result<fluxvm_core::model::BackupQuiesce, String> {
     serde_json::from_value(serde_json::Value::String(s.to_string()))
         .map_err(|_| format!("{s:?}: use auto, required or never"))
@@ -2509,6 +2536,32 @@ enum DiskCommand {
         #[arg(value_parser = output::parse_vm_ref)]
         id: Uuid,
         name: String,
+    },
+    /// QEMU: set the IOPS/bandwidth limits of `root` or a data disk (live
+    /// when running). No limit flags lifts them all.
+    Throttle {
+        #[arg(value_parser = output::parse_vm_ref)]
+        id: Uuid,
+        name: String,
+        #[arg(long)]
+        iops_total: Option<u64>,
+        #[arg(long)]
+        iops_read: Option<u64>,
+        #[arg(long)]
+        iops_write: Option<u64>,
+        /// Bytes per second.
+        #[arg(long)]
+        bps_total: Option<u64>,
+        #[arg(long)]
+        bps_read: Option<u64>,
+        #[arg(long)]
+        bps_write: Option<u64>,
+        #[arg(long)]
+        iops_total_max: Option<u64>,
+        #[arg(long)]
+        bps_total_max: Option<u64>,
+        #[arg(long)]
+        burst_seconds: Option<u64>,
     },
 }
 
@@ -4112,6 +4165,39 @@ async fn run_remote(
                     .await?;
                 println!("{}", json!({"ok": true, "detached": name}));
             }
+            DiskCommand::Throttle {
+                id,
+                name,
+                iops_total,
+                iops_read,
+                iops_write,
+                bps_total,
+                bps_read,
+                bps_write,
+                iops_total_max,
+                bps_total_max,
+                burst_seconds,
+            } => {
+                let throttle = disk_throttle(
+                    iops_total,
+                    iops_read,
+                    iops_write,
+                    bps_total,
+                    bps_read,
+                    bps_write,
+                    iops_total_max,
+                    bps_total_max,
+                    burst_seconds,
+                );
+                pretty(
+                    &r.call(
+                        Method::PUT,
+                        &format!("/v1/vms/{id}/disks/{name}/throttle"),
+                        Some(json!({"throttle": throttle})),
+                    )
+                    .await?,
+                )?
+            }
         },
         Command::Events {
             vm,
@@ -5453,6 +5539,38 @@ async fn main() -> Result<()> {
             DiskCommand::Detach { id, name } => {
                 m.detach_vm_disk(id, &name).await?;
                 println!("{}", serde_json::json!({"ok": true, "detached": name}));
+            }
+            DiskCommand::Throttle {
+                id,
+                name,
+                iops_total,
+                iops_read,
+                iops_write,
+                bps_total,
+                bps_read,
+                bps_write,
+                iops_total_max,
+                bps_total_max,
+                burst_seconds,
+            } => {
+                let throttle = disk_throttle(
+                    iops_total,
+                    iops_read,
+                    iops_write,
+                    bps_total,
+                    bps_read,
+                    bps_write,
+                    iops_total_max,
+                    bps_total_max,
+                    burst_seconds,
+                );
+                let set = m.set_vm_disk_throttle(id, &name, throttle).await?;
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(
+                        &serde_json::json!({"name": name, "throttle": set})
+                    )?
+                );
             }
         },
         Command::Serve => {
