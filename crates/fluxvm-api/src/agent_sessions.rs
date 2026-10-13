@@ -15,6 +15,7 @@
 //! * `POST   /v1/agents/sessions/{id}/checkpoint`    snapshot under a tag
 //! * `POST   /v1/agents/sessions/{id}/restore`       restore a checkpoint
 //! * `POST   /v1/agents/sessions/{id}/fork`          fork into child sessions (in-tree KVM only)
+//! * `POST   /v1/agents/sessions/{id}/promote`       apply a fork child's workspace changes to its parent (dry run, review, apply)
 //! * `GET    /v1/agents/sessions/{id}/events`        ledger plus the sandbox's VM events
 //! * `GET    /v1/agents/sessions/{id}/artifacts`     workspace changes since the baseline
 //! * `POST   /v1/agents/sessions/{id}/pty-ticket`    a 30 s single-use ticket for a browser terminal
@@ -84,6 +85,7 @@ pub(crate) fn routes() -> Router<Arc<VmManager>> {
         .route("/v1/agents/sessions/{id}/checkpoint", post(checkpoint))
         .route("/v1/agents/sessions/{id}/restore", post(restore))
         .route("/v1/agents/sessions/{id}/fork", post(fork))
+        .route("/v1/agents/sessions/{id}/promote", post(promote))
         .route("/v1/agents/sessions/{id}/events", get(events))
         .route("/v1/agents/sessions/{id}/artifacts", get(artifacts))
         .route("/v1/agents/sessions/{id}/trajectory", get(trajectory))
@@ -404,7 +406,7 @@ fn begin_lifecycle(id: Uuid, kind: &'static str) -> ApiResult<LifecycleGuard> {
                 "a {k} is already in progress on this session; retry when it finishes"
             )));
         }
-        if matches!(kind, "restore" | "fork") && g.work > 0 {
+        if matches!(kind, "restore" | "fork" | "promote") && g.work > 0 {
             return Err(gate_conflict(format!(
                 "{} command(s) are still running on this session; a {kind} would replace the machine under them",
                 g.work
@@ -1582,6 +1584,17 @@ async fn fork(
     }))
     .map_err(anyhow::Error::from)?;
     let actor_name = actor.as_ref().map(|a| a.0.0.as_str());
+    // The parent's files at the fork instant are every child's starting point, so they become
+    // each child's baseline: a child's `artifacts` and a later `promote` then see exactly what it
+    // did since the fork. The lifecycle gate means nothing is running on the parent meanwhile.
+    let seed = match &s.workspace {
+        Some(w) if w.baseline => m
+            .sandbox_manifest(s.sandbox_id, vec![w.path.clone()])
+            .await
+            .ok()
+            .map(|mf| (w.path.clone(), mf)),
+        _ => None,
+    };
     let report = m.fork_vm_spec(s.sandbox_id, spec, actor_name).await?;
 
     let mut kids = Vec::new();
@@ -1605,6 +1618,16 @@ async fn fork(
             checkpoints: Vec::new(),
             revision: 0,
         };
+        let seeded = match &seed {
+            Some((path, mf)) => m
+                .sandbox_baseline_seed(child.id, vec![path.clone()], mf.clone())
+                .await
+                .is_ok(),
+            None => false,
+        };
+        if let Some(w) = cs.workspace.as_mut() {
+            w.baseline = seeded;
+        }
         save(&m, &mut cs).await?;
         record(&m, cid, "session.fork_child", json!({"parent": id}));
         s.children.push(cid);
@@ -1626,6 +1649,282 @@ async fn fork(
             "parent_snapshot_ms": report.parent_snapshot_ms,
         })),
     ))
+}
+
+// ---------------------------------------------------------------------------------------
+// Promote: apply what a fork child did to its workspace onto its parent.
+
+const MAX_PROMOTE_CHANGES: usize = 2000;
+
+#[derive(Debug, Deserialize, Default)]
+struct PromoteBody {
+    /// Compute and return the plan; change nothing.
+    #[serde(default)]
+    dry_run: bool,
+    /// The `plan_id` of a plan you reviewed: the apply is refused if the plan is different now.
+    #[serde(default)]
+    plan_id: Option<String>,
+    /// Apply the paths that merge cleanly and leave conflicting ones alone (default: any
+    /// conflict refuses the whole promotion).
+    #[serde(default)]
+    skip_conflicts: bool,
+    /// Only these files or directories (absolute, inside the workspace).
+    #[serde(default)]
+    paths: Option<Vec<String>>,
+}
+
+/// A digest of a plan, so an apply can say "the plan I reviewed".
+fn plan_digest(plan: &fluxvm_scheduler::changes::PromotionPlan) -> String {
+    use sha2::{Digest, Sha256};
+    let mut text = String::new();
+    for c in &plan.apply {
+        text.push_str(&format!("apply\t{}\t{}\n", c.kind, c.path));
+    }
+    for p in &plan.already_applied {
+        text.push_str(&format!("already\t{p}\n"));
+    }
+    for c in &plan.conflicts {
+        text.push_str(&format!("conflict\t{}\t{}\n", c.reason, c.path));
+    }
+    Sha256::digest(text.as_bytes())
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+/// `POST .../{child}/promote`: three-way merge of the child's workspace changes onto its parent.
+/// Admin only. The parent gets a disk checkpoint first; a path the parent also changed is a
+/// conflict, never overwritten.
+async fn promote(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    token_tenant: Option<Extension<TokenTenant>>,
+    Path(id): Path<Uuid>,
+    body: Option<Json<PromoteBody>>,
+) -> ApiResult<Json<Value>> {
+    require_admin(role)?;
+    let body = body.map(|Json(b)| b).unwrap_or_default();
+    let conflict = |message: String| ApiError {
+        status: StatusCode::CONFLICT,
+        message,
+    };
+    let tenant = caller_tenant(&token_tenant);
+    let _child_gate = begin_lifecycle(id, "promote")?;
+    let child = load(&m, id, &tenant).await?;
+    running(&child)?;
+    let parent_id = child.parent.ok_or_else(|| {
+        conflict("this session is not a fork child: there is no parent to promote into".into())
+    })?;
+    let _parent_gate = begin_lifecycle(parent_id, "promote")?;
+    let mut parent = load(&m, parent_id, &tenant).await?;
+    running(&parent)?;
+    let ws = match (&child.workspace, &parent.workspace) {
+        (Some(c), Some(p)) if c.baseline && c.path == p.path => c.path.clone(),
+        _ => {
+            return Err(conflict(
+                "promotion needs a workspace with a baseline on both sides; the child's baseline is \
+                 recorded at fork time, so a child forked before this was available cannot be promoted"
+                    .into(),
+            ));
+        }
+    };
+    let filter: Option<Vec<String>> = match body.paths {
+        Some(ps) => {
+            let mut out = Vec::new();
+            for p in ps {
+                let t = p.trim_end_matches('/').to_string();
+                if !valid_file_path(&t) || !(t == ws || t.starts_with(&format!("{ws}/"))) {
+                    return Err(ApiError {
+                        status: StatusCode::BAD_REQUEST,
+                        message: format!("paths entries must be absolute and inside {ws}"),
+                    });
+                }
+                out.push(t);
+            }
+            Some(out)
+        }
+        None => None,
+    };
+    m.ensure_running_for_request(child.sandbox_id).await?;
+    m.ensure_running_for_request(parent.sandbox_id).await?;
+    let mut plan = m
+        .sandbox_promotion_plan(child.sandbox_id, parent.sandbox_id, vec![ws.clone()])
+        .await
+        .map_err(change_error)?;
+    // Paths come from the guest's own file listing: only ones inside the workspace and plainly
+    // nameable are ever transferred. The rest are reported, not moved.
+    let safe = |p: &str| valid_file_path(p) && p.starts_with(&format!("{ws}/"));
+    let (ok, unsafe_): (Vec<_>, Vec<_>) = plan.apply.drain(..).partition(|c| safe(&c.path));
+    plan.apply = ok;
+    for c in unsafe_ {
+        plan.conflicts
+            .push(fluxvm_scheduler::changes::PromotionConflict {
+                path: c.path,
+                reason: "path is not safe to transfer",
+            });
+    }
+    if let Some(f) = &filter {
+        let inside = |p: &str| f.iter().any(|r| p == r || p.starts_with(&format!("{r}/")));
+        plan.apply.retain(|c| inside(&c.path));
+        plan.conflicts.retain(|c| inside(&c.path));
+        plan.already_applied.retain(|p| inside(p));
+    }
+    if plan.apply.len() > MAX_PROMOTE_CHANGES {
+        return Err(ApiError {
+            status: StatusCode::PAYLOAD_TOO_LARGE,
+            message: format!(
+                "{} changes to apply; narrow it with `paths` (at most {MAX_PROMOTE_CHANGES} at once)",
+                plan.apply.len()
+            ),
+        });
+    }
+    let plan_id = plan_digest(&plan);
+    if body.dry_run {
+        return Ok(Json(json!({
+            "session": id, "into": parent_id, "dry_run": true, "applied": false,
+            "plan_id": plan_id, "plan": plan,
+        })));
+    }
+    if let Some(want) = &body.plan_id
+        && want != &plan_id
+    {
+        return Err(conflict(
+            "the plan is different from the one you reviewed (a side changed); dry-run again"
+                .into(),
+        ));
+    }
+    if !plan.conflicts.is_empty() && !body.skip_conflicts {
+        return Err(ApiError {
+            status: StatusCode::CONFLICT,
+            message: format!(
+                "{} conflicting path(s), nothing was changed: {}; resolve them or pass skip_conflicts",
+                plan.conflicts.len(),
+                plan.conflicts
+                    .iter()
+                    .take(5)
+                    .map(|c| format!("{} ({})", c.path, c.reason))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        });
+    }
+    if plan.apply.is_empty() {
+        return Ok(Json(json!({
+            "session": id, "into": parent_id, "applied": false, "plan_id": plan_id,
+            "plan": plan, "note": "nothing to apply",
+        })));
+    }
+    if !parent.capabilities.snapshot {
+        return Err(conflict(format!(
+            "backend {} cannot checkpoint the parent, and promotion never writes without one",
+            parent.backend
+        )));
+    }
+    // The way back: a disk checkpoint of the parent immediately before the first write.
+    let tag = format!(
+        "pre-promote-{}-{}",
+        &id.to_string()[..8],
+        Utc::now().format("%H%M%S")
+    );
+    m.create_vm_snapshot_with(parent.sandbox_id, &tag, false)
+        .await?;
+    parent.checkpoints.push(Checkpoint {
+        tag: tag.clone(),
+        memory: false,
+        created_at: Utc::now(),
+    });
+    save(&m, &mut parent).await?;
+
+    let mut applied: Vec<Value> = Vec::new();
+    let fail = |applied: &[Value], path: &str, why: String| ApiError {
+        status: StatusCode::BAD_GATEWAY,
+        message: format!(
+            "promotion stopped at {path}: {why}. {} path(s) were already applied; restore the parent's \
+             checkpoint {tag:?} to undo them",
+            applied.len()
+        ),
+    };
+    for c in &plan.apply {
+        let step: Result<(), String> = async {
+            if c.kind == "deleted" {
+                let out = m
+                    .exec_with_policy(
+                        parent.sandbox_id,
+                        format!("rm -f -- {}", shell_quote(&c.path)),
+                        Some(30),
+                        None,
+                    )
+                    .await
+                    .map_err(|e| format!("{e:#}"))?;
+                return match serde_json::to_value(&out)
+                    .ok()
+                    .and_then(|v| v["exit_code"].as_i64())
+                {
+                    Some(0) => Ok(()),
+                    code => Err(format!("rm exited {code:?}")),
+                };
+            }
+            let (content, mode) = match m
+                .get_file(child.sandbox_id, c.path.clone())
+                .await
+                .map_err(|e| format!("reading from the child: {e:#}"))?
+            {
+                fluxvm_guest_protocol::AgentResponse::FileContent {
+                    content_base64,
+                    mode,
+                } => (content_base64, mode),
+                other => return Err(format!("unexpected guest response: {other:?}")),
+            };
+            if let Some(dir) = std::path::Path::new(&c.path)
+                .parent()
+                .and_then(|d| d.to_str())
+            {
+                m.exec_with_policy(
+                    parent.sandbox_id,
+                    format!("mkdir -p -- {}", shell_quote(dir)),
+                    Some(30),
+                    None,
+                )
+                .await
+                .map_err(|e| format!("creating {dir}: {e:#}"))?;
+            }
+            m.put_file(parent.sandbox_id, c.path.clone(), content, Some(mode))
+                .await
+                .map_err(|e| format!("writing to the parent: {e:#}"))?;
+            Ok(())
+        }
+        .await;
+        match step {
+            Ok(()) => applied.push(json!({"path": c.path, "kind": c.kind})),
+            Err(why) => {
+                record(
+                    &m,
+                    parent_id,
+                    "promote.failed",
+                    json!({"child": id, "path": c.path, "reason": why, "applied": applied.len(), "checkpoint": tag}),
+                );
+                return Err(fail(&applied, &c.path, why));
+            }
+        }
+    }
+    record(
+        &m,
+        parent_id,
+        "promote",
+        json!({"child": id, "applied": applied.len(), "already_applied": plan.already_applied.len(),
+               "skipped_conflicts": plan.conflicts.len(), "checkpoint": tag, "plan_id": plan_id}),
+    );
+    record(
+        &m,
+        id,
+        "promote.out",
+        json!({"into": parent_id, "applied": applied.len(), "plan_id": plan_id}),
+    );
+    Ok(Json(json!({
+        "session": id, "into": parent_id, "applied": true, "plan_id": plan_id,
+        "checkpoint": tag, "changes": applied,
+        "already_applied": plan.already_applied, "skipped_conflicts": plan.conflicts,
+    })))
 }
 
 #[derive(Debug, Deserialize, Default)]

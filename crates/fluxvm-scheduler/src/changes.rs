@@ -280,6 +280,84 @@ struct StoredBaseline {
     manifest: Manifest,
 }
 
+/// One path a promotion would write to (or remove from) the parent.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct PlannedChange {
+    pub path: String,
+    /// `added`, `modified` or `deleted`, as the child changed it.
+    pub kind: &'static str,
+}
+
+/// A path the promotion cannot apply without overwriting something the parent did.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct PromotionConflict {
+    pub path: String,
+    pub reason: &'static str,
+}
+
+/// What promoting a child's changes into its parent would do, from a three-way comparison of the
+/// fork-point baseline, the child now and the parent now.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct PromotionPlan {
+    pub apply: Vec<PlannedChange>,
+    /// The child changed these, and the parent already has the same content.
+    pub already_applied: Vec<String>,
+    pub conflicts: Vec<PromotionConflict>,
+    /// Files the child did not touch.
+    pub untouched: usize,
+}
+
+/// Three-way plan. For each path the child changed relative to `base`: the parent holding the
+/// child's content is already applied; the parent still holding the base content applies
+/// cleanly; anything else is a conflict. Pure; all three manifests must share a fingerprint mode,
+/// and the caller should insist on sha256 because `size:mtime` cannot compare two machines.
+pub fn plan_promotion(
+    base: &Manifest,
+    child: &Manifest,
+    parent: &Manifest,
+) -> Result<PromotionPlan, ChangeError> {
+    for other in [child, parent] {
+        if other.mode != base.mode {
+            return Err(ChangeError::ModeMismatch {
+                baseline: base.mode,
+                current: other.mode,
+            });
+        }
+    }
+    let paths: BTreeSet<&String> = base.files.keys().chain(child.files.keys()).collect();
+    let mut plan = PromotionPlan::default();
+    for p in paths {
+        let (b, c, q) = (base.files.get(p), child.files.get(p), parent.files.get(p));
+        if b == c {
+            plan.untouched += 1;
+        } else if q == c {
+            plan.already_applied.push(p.clone());
+        } else if q == b {
+            let kind = match (b, c) {
+                (None, _) => "added",
+                (_, None) => "deleted",
+                _ => "modified",
+            };
+            plan.apply.push(PlannedChange {
+                path: p.clone(),
+                kind,
+            });
+        } else {
+            let reason = match (b, c, q) {
+                (None, _, _) => "added in both with different content",
+                (_, None, _) => "deleted in the child, changed in the parent",
+                (_, _, None) => "changed in the child, deleted in the parent",
+                _ => "changed in both",
+            };
+            plan.conflicts.push(PromotionConflict {
+                path: p.clone(),
+                reason,
+            });
+        }
+    }
+    Ok(plan)
+}
+
 /// Summary returned when a baseline is recorded.
 #[derive(Debug, Serialize)]
 pub struct BaselineSummary {
@@ -361,6 +439,72 @@ impl VmManager {
         })
     }
 
+    /// The current manifest of regular files under `paths`, for callers that compare machines.
+    pub async fn sandbox_manifest(&self, id: Uuid, paths: Vec<String>) -> Result<Manifest> {
+        let paths = validate_paths(&paths)?;
+        self.take_manifest(id, &paths).await
+    }
+
+    /// Records `manifest` as `id`'s baseline. A fork child starts from its parent's files, so the
+    /// parent's manifest taken at fork time is the child's baseline: its later changes are then
+    /// exactly what it did since the fork.
+    pub async fn sandbox_baseline_seed(
+        &self,
+        id: Uuid,
+        paths: Vec<String>,
+        manifest: Manifest,
+    ) -> Result<()> {
+        let paths = validate_paths(&paths)?;
+        let vm = self.get(id).await?;
+        let stored = StoredBaseline {
+            taken_at_unix: now_unix(),
+            paths,
+            manifest,
+        };
+        let file = vm.workspace.join(BASELINE_FILE);
+        let tmp = vm.workspace.join(format!("{BASELINE_FILE}.tmp"));
+        tokio::fs::write(&tmp, serde_json::to_vec(&stored)?)
+            .await
+            .context("writing baseline")?;
+        tokio::fs::rename(&tmp, &file)
+            .await
+            .context("committing baseline")?;
+        Ok(())
+    }
+
+    /// The three-way plan for promoting `child`'s changes under `paths` into `parent`, using the
+    /// child's baseline as the common ancestor. Refuses when the guests cannot fingerprint with
+    /// sha256: size and mtime cannot say two machines hold the same content.
+    pub async fn sandbox_promotion_plan(
+        &self,
+        child: Uuid,
+        parent: Uuid,
+        paths: Vec<String>,
+    ) -> Result<PromotionPlan> {
+        let paths = validate_paths(&paths)?;
+        let vm = self.get(child).await?;
+        let raw = match tokio::fs::read(vm.workspace.join(BASELINE_FILE)).await {
+            Ok(raw) => raw,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Err(ChangeError::NoBaseline.into());
+            }
+            Err(e) => return Err(e).context("reading baseline"),
+        };
+        let stored: StoredBaseline =
+            serde_json::from_slice(&raw).context("baseline file is corrupt")?;
+        let base = stored.manifest.restrict_to(&paths);
+        let (cur, par) = (
+            self.take_manifest(child, &paths).await?,
+            self.take_manifest(parent, &paths).await?,
+        );
+        if base.mode != FingerprintMode::Sha256 {
+            bail!(
+                "promotion needs sha256sum in the guest image: size and mtime cannot compare two machines"
+            );
+        }
+        Ok(plan_promotion(&base, &cur, &par)?)
+    }
+
     /// Diff the sandbox's files against its baseline. `paths` narrows the
     /// comparison to a subset of the baseline's directories; when omitted the
     /// baseline's own directories are used.
@@ -434,6 +578,93 @@ mod tests {
         assert_eq!(d.modified, vec!["/w/edit"]);
         assert_eq!(d.deleted, vec!["/w/gone"]);
         assert_eq!(d.unchanged, 1);
+    }
+
+    #[test]
+    fn promotion_is_a_three_way_merge_that_never_overwrites_the_parent() {
+        let base = m(
+            FingerprintMode::Sha256,
+            &[
+                ("/w/same", H1),
+                ("/w/edit", H1),
+                ("/w/del", H1),
+                ("/w/both", H1),
+                ("/w/pre", H1),
+            ],
+        );
+        let child = m(
+            FingerprintMode::Sha256,
+            &[
+                ("/w/same", H1),
+                ("/w/edit", H2),
+                ("/w/new", H2),
+                ("/w/both", H2),
+                ("/w/pre", H2),
+            ],
+        );
+        // The parent edited `both` differently, already has the child's `pre`, and left the rest.
+        let parent = m(
+            FingerprintMode::Sha256,
+            &[
+                ("/w/same", H1),
+                ("/w/edit", H1),
+                ("/w/del", H1),
+                (
+                    "/w/both",
+                    "3333333333333333333333333333333333333333333333333333333333333333",
+                ),
+                ("/w/pre", H2),
+            ],
+        );
+        let p = plan_promotion(&base, &child, &parent).unwrap();
+        let apply: Vec<(&str, &str)> = p.apply.iter().map(|c| (c.path.as_str(), c.kind)).collect();
+        assert_eq!(
+            apply,
+            vec![
+                ("/w/del", "deleted"),
+                ("/w/edit", "modified"),
+                ("/w/new", "added")
+            ]
+        );
+        assert_eq!(p.already_applied, vec!["/w/pre"]);
+        assert_eq!(p.conflicts.len(), 1);
+        assert_eq!(p.conflicts[0].path, "/w/both");
+        assert_eq!(p.conflicts[0].reason, "changed in both");
+        assert_eq!(p.untouched, 1);
+    }
+
+    #[test]
+    fn promotion_conflicts_name_what_each_side_did() {
+        let base = m(FingerprintMode::Sha256, &[("/w/a", H1), ("/w/b", H1)]);
+        // child: deletes a, edits b, adds c
+        let child = m(FingerprintMode::Sha256, &[("/w/b", H2), ("/w/c", H1)]);
+        // parent: edits a, deletes b, adds a different c
+        let parent = m(FingerprintMode::Sha256, &[("/w/a", H2), ("/w/c", H2)]);
+        let p = plan_promotion(&base, &child, &parent).unwrap();
+        assert!(p.apply.is_empty());
+        let r: Vec<(&str, &str)> = p
+            .conflicts
+            .iter()
+            .map(|c| (c.path.as_str(), c.reason))
+            .collect();
+        assert_eq!(
+            r,
+            vec![
+                ("/w/a", "deleted in the child, changed in the parent"),
+                ("/w/b", "changed in the child, deleted in the parent"),
+                ("/w/c", "added in both with different content"),
+            ]
+        );
+    }
+
+    #[test]
+    fn promotion_refuses_mixed_fingerprint_modes() {
+        let a = m(FingerprintMode::Sha256, &[("/w/a", H1)]);
+        let b = m(FingerprintMode::Stat, &[("/w/a", "1:2")]);
+        assert!(matches!(
+            plan_promotion(&a, &a, &b),
+            Err(ChangeError::ModeMismatch { .. })
+        ));
     }
 
     #[test]
