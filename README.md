@@ -50,12 +50,14 @@ FluxVM runs natively on Apple silicon. Its `vz` backend drives Apple's **Virtual
 | **A throwaway computer per agent task** | An offline sandbox (no network card) is ready in about 4.5 s and forks into four running copies in about 4 s; a local model stays reachable over one vsock port. [Demo](examples/agent-sandbox-demo/README.md) · [Agent sessions](docs/agent-platform/README.md) · [Agents page](https://zyvorai.github.io/zyvor-fluxvm/agents) |
 
 ```bash
+curl -fsSL https://zyvorai.github.io/zyvor-fluxvm/install.sh | bash   # drives Homebrew, starts the service, checks healthz
+# or by hand:
 brew install zyvorai/tap/fluxvm                     # prebuilt, Apple silicon, macOS 14+
 fluxctl run                                         # a throwaway Debian 13 VM and a shell
 fluxctl sandbox run alpine:3.22 --rm -- echo hi     # a container in its own VM
 ```
 
-Step by step, with what was tested (daemon as a service, first VM, MCP client): [Install on a Mac](docs/install-macos.md). From source instead: `xcode-select --install && brew install hivex && cargo build -p fluxctl` (builds and signs the vz runner).
+The script only runs `brew install zyvorai/tap/fluxvm` and `brew services start`, optionally wires an MCP client (`bash -s -- --client claude-code`), and has `--dry-run` and `--uninstall`; read it first at [`scripts/install.sh`](scripts/install.sh). Step by step, with what was tested (daemon as a service, first VM, MCP client): [Install on a Mac](docs/install-macos.md). From source instead: `xcode-select --install && brew install hivex && cargo build -p fluxctl` (builds and signs the vz runner).
 
 [**FluxVM on Mac**](https://zyvorai.github.io/zyvor-fluxvm/mac) · [**Build a Mac cloud**](https://zyvorai.github.io/zyvor-fluxvm/mac-cloud) · [Mac guide](docs/macos.md) · [Mac cloud guide](docs/mac-cloud.md) · [Tenancy, leases and roles](docs/mac-cloud-tenancy.md) · [Run central](docs/mac-cloud-operations.md) · [`fluxctl fleet`](docs/fluxctl-fleet.md) · [SDKs and Terraform](docs/fleet-sdk.md) · [Architecture](docs/macos-architecture.md)
 
