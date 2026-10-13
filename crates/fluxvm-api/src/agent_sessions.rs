@@ -11,6 +11,7 @@
 //! * `GET    /v1/agents/sessions/{id}`               one session and its capabilities
 //! * `DELETE /v1/agents/sessions/{id}`               delete the session and its sandbox
 //! * `POST   /v1/agents/sessions/{id}/exec`          run a command
+//! * `POST   /v1/agents/sessions/{id}/tokens`        mint an expiring token scoped to this session (also GET, DELETE .../{token})
 //! * `POST   /v1/agents/sessions/{id}/checkpoint`    snapshot under a tag
 //! * `POST   /v1/agents/sessions/{id}/restore`       restore a checkpoint
 //! * `POST   /v1/agents/sessions/{id}/fork`          fork into child sessions (in-tree KVM only)
@@ -42,6 +43,7 @@
 //! session survives a daemon restart. What is *not* here: promote, replay, sandbox-scoped PTY,
 //! browser profiles (see `docs/agent-sessions.md`, "Roadmap").
 
+use super::agent_session_auth::{self, Op, SessionScope, authorize};
 use super::{ApiError, ApiResult, AuditActor, TokenTenant, change_error, require_admin};
 use axum::{
     Extension, Json, Router,
@@ -71,6 +73,14 @@ pub(crate) fn routes() -> Router<Arc<VmManager>> {
             get(get_session).delete(delete_session),
         )
         .route("/v1/agents/sessions/{id}/exec", post(exec_session))
+        .route(
+            "/v1/agents/sessions/{id}/tokens",
+            post(mint_token).get(list_tokens),
+        )
+        .route(
+            "/v1/agents/sessions/{id}/tokens/{token}",
+            axum::routing::delete(revoke_token),
+        )
         .route("/v1/agents/sessions/{id}/checkpoint", post(checkpoint))
         .route("/v1/agents/sessions/{id}/restore", post(restore))
         .route("/v1/agents/sessions/{id}/fork", post(fork))
@@ -1061,10 +1071,11 @@ async fn list_sessions(
 async fn get_session(
     State(m): State<Arc<VmManager>>,
     Extension(role): Extension<Role>,
+    scope: Option<Extension<SessionScope>>,
     token_tenant: Option<Extension<TokenTenant>>,
     Path(id): Path<Uuid>,
 ) -> ApiResult<Json<Value>> {
-    require_admin(role)?;
+    authorize(role, &scope, id, Op::Read)?;
     let s = load(&m, id, &caller_tenant(&token_tenant)).await?;
     Ok(Json(json!(s)))
 }
@@ -1086,6 +1097,135 @@ async fn delete_session(
         save(&m, &s).await?;
         record(&m, id, "session.delete", json!({}));
     }
+    agent_session_auth::purge(&m.cfg.state_dir, id).await;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Debug, Deserialize)]
+struct MintTokenBody {
+    /// Operations to grant: read, exec, jobs, files.read, files.write, git, checkpoint, preview.
+    ops: Vec<String>,
+    #[serde(default)]
+    ttl_seconds: Option<u64>,
+    #[serde(default)]
+    label: Option<String>,
+}
+
+/// `POST .../tokens`: mint an expiring credential that works on this session only. Admin only,
+/// and a scoped token can never mint another (the role it carries is read-only).
+async fn mint_token(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    token_tenant: Option<Extension<TokenTenant>>,
+    Path(id): Path<Uuid>,
+    Json(body): Json<MintTokenBody>,
+) -> ApiResult<(StatusCode, Json<Value>)> {
+    require_admin(role)?;
+    let bad = |message: String| ApiError {
+        status: StatusCode::BAD_REQUEST,
+        message,
+    };
+    let s = load(&m, id, &caller_tenant(&token_tenant)).await?;
+    running(&s)?;
+    if body.ops.is_empty() {
+        return Err(bad("ops must name at least one operation".into()));
+    }
+    let mut ops = Vec::new();
+    for o in &body.ops {
+        let op = Op::parse(o).ok_or_else(|| {
+            bad(format!(
+                "unknown operation {o:?}; grantable: {}",
+                Op::ALL.map(Op::as_str).join(", ")
+            ))
+        })?;
+        if !ops.contains(&op) {
+            ops.push(op);
+        }
+    }
+    let ttl = body
+        .ttl_seconds
+        .unwrap_or(agent_session_auth::DEFAULT_TTL_SECS);
+    if ttl == 0 || ttl > agent_session_auth::MAX_TTL_SECS {
+        return Err(bad(format!(
+            "ttl_seconds must be 1-{}",
+            agent_session_auth::MAX_TTL_SECS
+        )));
+    }
+    let label = match body.label {
+        Some(l) if l.trim().is_empty() || l.len() > 100 || l.chars().any(char::is_control) => {
+            return Err(bad("label is 1-100 printable characters".into()));
+        }
+        l => l,
+    };
+    // A token never outlives its session's sandbox.
+    let mut expires_at = Utc::now() + chrono::Duration::seconds(ttl as i64);
+    if let Some(e) = s.expires_at {
+        expires_at = expires_at.min(e);
+    }
+    if expires_at <= Utc::now() {
+        return Err(ApiError {
+            status: StatusCode::CONFLICT,
+            message: format!("agent session {id} has expired"),
+        });
+    }
+    let minted = agent_session_auth::mint(
+        &m.cfg.state_dir,
+        id,
+        s.tenant.clone(),
+        ops,
+        label,
+        expires_at,
+    )
+    .await?;
+    // The ledger gets what was granted and until when, never the credential.
+    record(
+        &m,
+        id,
+        "token.mint",
+        json!({"token": minted.record.id, "ops": minted.record.ops, "expires_at": minted.record.expires_at}),
+    );
+    Ok((
+        StatusCode::CREATED,
+        Json(json!({
+            "id": minted.record.id,
+            "token": minted.secret_token,
+            "session": id,
+            "ops": minted.record.ops,
+            "label": minted.record.label,
+            "expires_at": minted.record.expires_at,
+            "note": "shown once; use as `Authorization: Bearer <token>` on /v1/agents/sessions/{id}/...",
+        })),
+    ))
+}
+
+async fn list_tokens(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    token_tenant: Option<Extension<TokenTenant>>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<Value>> {
+    require_admin(role)?;
+    load(&m, id, &caller_tenant(&token_tenant)).await?;
+    Ok(Json(json!({
+        "items": agent_session_auth::list(&m.cfg.state_dir, id).await
+    })))
+}
+
+async fn revoke_token(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    token_tenant: Option<Extension<TokenTenant>>,
+    Path((id, token)): Path<(Uuid, Uuid)>,
+) -> ApiResult<StatusCode> {
+    require_admin(role)?;
+    load(&m, id, &caller_tenant(&token_tenant)).await?;
+    if !agent_session_auth::revoke(&m.cfg.state_dir, id, token).await? {
+        return Err(ApiError {
+            status: StatusCode::NOT_FOUND,
+            message: "token not found".into(),
+        });
+    }
+    record(&m, id, "token.revoke", json!({"token": token}));
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1109,11 +1249,12 @@ struct ExecBody {
 async fn exec_session(
     State(m): State<Arc<VmManager>>,
     Extension(role): Extension<Role>,
+    scope: Option<Extension<SessionScope>>,
     token_tenant: Option<Extension<TokenTenant>>,
     Path(id): Path<Uuid>,
     Json(body): Json<ExecBody>,
 ) -> ApiResult<Json<Value>> {
-    require_admin(role)?;
+    authorize(role, &scope, id, Op::Exec)?;
     let s = load(&m, id, &caller_tenant(&token_tenant)).await?;
     running(&s)?;
     if body.command.trim().is_empty() {
@@ -1167,11 +1308,12 @@ struct CheckpointBody {
 async fn checkpoint(
     State(m): State<Arc<VmManager>>,
     Extension(role): Extension<Role>,
+    scope: Option<Extension<SessionScope>>,
     token_tenant: Option<Extension<TokenTenant>>,
     Path(id): Path<Uuid>,
     body: Option<Json<CheckpointBody>>,
 ) -> ApiResult<Json<Value>> {
-    require_admin(role)?;
+    authorize(role, &scope, id, Op::Checkpoint)?;
     let mut s = load(&m, id, &caller_tenant(&token_tenant)).await?;
     running(&s)?;
     let body = body.map(|Json(b)| b).unwrap_or_default();
@@ -1338,11 +1480,12 @@ struct EventsQuery {
 async fn events(
     State(m): State<Arc<VmManager>>,
     Extension(role): Extension<Role>,
+    scope: Option<Extension<SessionScope>>,
     token_tenant: Option<Extension<TokenTenant>>,
     Path(id): Path<Uuid>,
     Query(q): Query<EventsQuery>,
 ) -> ApiResult<Json<Value>> {
-    require_admin(role)?;
+    authorize(role, &scope, id, Op::Read)?;
     let s = load(&m, id, &caller_tenant(&token_tenant)).await?;
     let ledger = read_ledger(&m, id, q.since);
     let vm_events = match fluxvm_scheduler::events::global() {
@@ -1383,10 +1526,11 @@ fn number_steps(mut steps: Vec<(DateTime<Utc>, Value)>) -> Vec<Value> {
 async fn trajectory(
     State(m): State<Arc<VmManager>>,
     Extension(role): Extension<Role>,
+    scope: Option<Extension<SessionScope>>,
     token_tenant: Option<Extension<TokenTenant>>,
     Path(id): Path<Uuid>,
 ) -> ApiResult<Json<Value>> {
-    require_admin(role)?;
+    authorize(role, &scope, id, Op::Read)?;
     let s = load(&m, id, &caller_tenant(&token_tenant)).await?;
     let mut steps: Vec<(DateTime<Utc>, Value)> = Vec::new();
     for e in read_ledger(&m, id, None) {
@@ -1432,10 +1576,11 @@ async fn trajectory(
 async fn artifacts(
     State(m): State<Arc<VmManager>>,
     Extension(role): Extension<Role>,
+    scope: Option<Extension<SessionScope>>,
     token_tenant: Option<Extension<TokenTenant>>,
     Path(id): Path<Uuid>,
 ) -> ApiResult<Json<Value>> {
-    require_admin(role)?;
+    authorize(role, &scope, id, Op::Read)?;
     let s = load(&m, id, &caller_tenant(&token_tenant)).await?;
     let ledger = read_ledger(&m, id, None);
     let execs = ledger.iter().filter(|e| e["kind"] == "exec").count();
@@ -1511,11 +1656,12 @@ struct PreviewBody {
 async fn create_preview(
     State(m): State<Arc<VmManager>>,
     Extension(role): Extension<Role>,
+    scope: Option<Extension<SessionScope>>,
     token_tenant: Option<Extension<TokenTenant>>,
     Path(id): Path<Uuid>,
     Json(body): Json<PreviewBody>,
 ) -> ApiResult<(StatusCode, Json<Value>)> {
-    require_admin(role)?;
+    authorize(role, &scope, id, Op::Preview)?;
     let s = load(&m, id, &caller_tenant(&token_tenant)).await?;
     running(&s)?;
     let bad = |msg: &str| ApiError {
@@ -1568,10 +1714,11 @@ async fn create_preview(
 async fn list_previews(
     State(m): State<Arc<VmManager>>,
     Extension(role): Extension<Role>,
+    scope: Option<Extension<SessionScope>>,
     token_tenant: Option<Extension<TokenTenant>>,
     Path(id): Path<Uuid>,
 ) -> ApiResult<Json<Value>> {
-    require_admin(role)?;
+    authorize(role, &scope, id, Op::Read)?;
     load(&m, id, &caller_tenant(&token_tenant)).await?;
     let now = Utc::now();
     let mut items = Vec::new();
@@ -1597,10 +1744,11 @@ async fn list_previews(
 async fn revoke_preview(
     State(m): State<Arc<VmManager>>,
     Extension(role): Extension<Role>,
+    scope: Option<Extension<SessionScope>>,
     token_tenant: Option<Extension<TokenTenant>>,
     Path((id, token)): Path<(Uuid, String)>,
 ) -> ApiResult<StatusCode> {
-    require_admin(role)?;
+    authorize(role, &scope, id, Op::Preview)?;
     load(&m, id, &caller_tenant(&token_tenant)).await?;
     match read_preview(&m, &token) {
         Some(p) if p.session == id => {
@@ -2262,11 +2410,12 @@ fn base64_decode(s: &str) -> Vec<u8> {
 async fn job_start(
     State(m): State<Arc<VmManager>>,
     Extension(role): Extension<Role>,
+    scope: Option<Extension<SessionScope>>,
     token_tenant: Option<Extension<TokenTenant>>,
     Path(id): Path<Uuid>,
     Json(body): Json<JobBody>,
 ) -> ApiResult<(StatusCode, Json<Value>)> {
-    require_admin(role)?;
+    authorize(role, &scope, id, Op::Jobs)?;
     let s = load(&m, id, &caller_tenant(&token_tenant)).await?;
     running(&s)?;
     if body.command.trim().is_empty() {
@@ -2325,11 +2474,12 @@ struct JobQuery {
 async fn job_read(
     State(m): State<Arc<VmManager>>,
     Extension(role): Extension<Role>,
+    scope: Option<Extension<SessionScope>>,
     token_tenant: Option<Extension<TokenTenant>>,
     Path((id, job)): Path<(Uuid, Uuid)>,
     Query(q): Query<JobQuery>,
 ) -> ApiResult<Json<Value>> {
-    require_admin(role)?;
+    authorize(role, &scope, id, Op::Jobs)?;
     let s = load(&m, id, &caller_tenant(&token_tenant)).await?;
     running(&s)?;
     m.ensure_running_for_request(s.sandbox_id).await?;
@@ -2368,10 +2518,11 @@ async fn job_read(
 async fn job_kill(
     State(m): State<Arc<VmManager>>,
     Extension(role): Extension<Role>,
+    scope: Option<Extension<SessionScope>>,
     token_tenant: Option<Extension<TokenTenant>>,
     Path((id, job)): Path<(Uuid, Uuid)>,
 ) -> ApiResult<StatusCode> {
-    require_admin(role)?;
+    authorize(role, &scope, id, Op::Jobs)?;
     let s = load(&m, id, &caller_tenant(&token_tenant)).await?;
     running(&s)?;
     let pid = shell_quote(&format!("{JOBS_DIR}/{job}.pid"));
@@ -2473,11 +2624,12 @@ async fn guest_exec(m: &Arc<VmManager>, s: &Session, cmd: String) -> ApiResult<V
 async fn files_list(
     State(m): State<Arc<VmManager>>,
     Extension(role): Extension<Role>,
+    scope: Option<Extension<SessionScope>>,
     token_tenant: Option<Extension<TokenTenant>>,
     Path(id): Path<Uuid>,
     Query(q): Query<PathQuery>,
 ) -> ApiResult<Json<Value>> {
-    require_admin(role)?;
+    authorize(role, &scope, id, Op::FilesRead)?;
     let s = load(&m, id, &caller_tenant(&token_tenant)).await?;
     running(&s)?;
     path_arg(&q.path)?;
@@ -2511,11 +2663,12 @@ async fn files_list(
 async fn files_read(
     State(m): State<Arc<VmManager>>,
     Extension(role): Extension<Role>,
+    scope: Option<Extension<SessionScope>>,
     token_tenant: Option<Extension<TokenTenant>>,
     Path(id): Path<Uuid>,
     Query(q): Query<PathQuery>,
 ) -> ApiResult<Json<Value>> {
-    require_admin(role)?;
+    authorize(role, &scope, id, Op::FilesRead)?;
     let s = load(&m, id, &caller_tenant(&token_tenant)).await?;
     running(&s)?;
     path_arg(&q.path)?;
@@ -2548,11 +2701,12 @@ fn yes() -> bool {
 async fn files_write(
     State(m): State<Arc<VmManager>>,
     Extension(role): Extension<Role>,
+    scope: Option<Extension<SessionScope>>,
     token_tenant: Option<Extension<TokenTenant>>,
     Path(id): Path<Uuid>,
     Json(body): Json<WriteBody>,
 ) -> ApiResult<Json<Value>> {
-    require_admin(role)?;
+    authorize(role, &scope, id, Op::FilesWrite)?;
     let s = load(&m, id, &caller_tenant(&token_tenant)).await?;
     running(&s)?;
     path_arg(&body.path)?;
@@ -2607,11 +2761,12 @@ async fn files_write(
 async fn files_delete(
     State(m): State<Arc<VmManager>>,
     Extension(role): Extension<Role>,
+    scope: Option<Extension<SessionScope>>,
     token_tenant: Option<Extension<TokenTenant>>,
     Path(id): Path<Uuid>,
     Query(q): Query<PathQuery>,
 ) -> ApiResult<StatusCode> {
-    require_admin(role)?;
+    authorize(role, &scope, id, Op::FilesWrite)?;
     let s = load(&m, id, &caller_tenant(&token_tenant)).await?;
     running(&s)?;
     path_arg(&q.path)?;
@@ -2772,11 +2927,12 @@ fn truncate_output(s: String) -> (String, bool) {
 async fn git_status(
     State(m): State<Arc<VmManager>>,
     Extension(role): Extension<Role>,
+    scope: Option<Extension<SessionScope>>,
     token_tenant: Option<Extension<TokenTenant>>,
     Path(id): Path<Uuid>,
     Query(q): Query<GitQuery>,
 ) -> ApiResult<Json<Value>> {
-    require_admin(role)?;
+    authorize(role, &scope, id, Op::Git)?;
     let s = load(&m, id, &caller_tenant(&token_tenant)).await?;
     running(&s)?;
     let repo = repo_dir(&s, &q.repo)?;
@@ -2793,11 +2949,12 @@ async fn git_status(
 async fn git_diff(
     State(m): State<Arc<VmManager>>,
     Extension(role): Extension<Role>,
+    scope: Option<Extension<SessionScope>>,
     token_tenant: Option<Extension<TokenTenant>>,
     Path(id): Path<Uuid>,
     Query(q): Query<GitQuery>,
 ) -> ApiResult<Json<Value>> {
-    require_admin(role)?;
+    authorize(role, &scope, id, Op::Git)?;
     let s = load(&m, id, &caller_tenant(&token_tenant)).await?;
     running(&s)?;
     let repo = repo_dir(&s, &q.repo)?;
@@ -2832,11 +2989,12 @@ async fn git_diff(
 async fn git_log(
     State(m): State<Arc<VmManager>>,
     Extension(role): Extension<Role>,
+    scope: Option<Extension<SessionScope>>,
     token_tenant: Option<Extension<TokenTenant>>,
     Path(id): Path<Uuid>,
     Query(q): Query<GitQuery>,
 ) -> ApiResult<Json<Value>> {
-    require_admin(role)?;
+    authorize(role, &scope, id, Op::Git)?;
     let s = load(&m, id, &caller_tenant(&token_tenant)).await?;
     running(&s)?;
     let repo = repo_dir(&s, &q.repo)?;
@@ -2877,11 +3035,12 @@ struct CommitBody {
 async fn git_commit(
     State(m): State<Arc<VmManager>>,
     Extension(role): Extension<Role>,
+    scope: Option<Extension<SessionScope>>,
     token_tenant: Option<Extension<TokenTenant>>,
     Path(id): Path<Uuid>,
     Json(body): Json<CommitBody>,
 ) -> ApiResult<Json<Value>> {
-    require_admin(role)?;
+    authorize(role, &scope, id, Op::Git)?;
     let s = load(&m, id, &caller_tenant(&token_tenant)).await?;
     running(&s)?;
     let repo = repo_dir(&s, &body.repo)?;
@@ -2937,11 +3096,12 @@ struct BranchBody {
 async fn git_branch(
     State(m): State<Arc<VmManager>>,
     Extension(role): Extension<Role>,
+    scope: Option<Extension<SessionScope>>,
     token_tenant: Option<Extension<TokenTenant>>,
     Path(id): Path<Uuid>,
     Json(body): Json<BranchBody>,
 ) -> ApiResult<Json<Value>> {
-    require_admin(role)?;
+    authorize(role, &scope, id, Op::Git)?;
     let s = load(&m, id, &caller_tenant(&token_tenant)).await?;
     running(&s)?;
     if !valid_branch(&body.name) {
