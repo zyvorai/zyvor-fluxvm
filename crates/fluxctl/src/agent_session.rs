@@ -176,6 +176,15 @@ pub enum AgentCommand {
     Previews { id: Uuid },
     /// Revoke a preview URL by its token. REST: `DELETE .../preview/{token}`.
     Unexpose { id: Uuid, token: String },
+    /// Open an interactive shell in the session on a real terminal (WebSocket, `ssh -tt` in the
+    /// daemon). Starts at this terminal's size; a later resize is not forwarded. Refused for a
+    /// session with `--cmd-allow/--cmd-deny` rules. REST: `GET .../pty` (WebSocket).
+    Shell {
+        id: Uuid,
+        /// Run this on the terminal instead of a login shell.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        command: Vec<String>,
+    },
     /// Delete the session and its sandbox. REST: `DELETE /v1/agents/sessions/{id}`.
     Rm { id: Uuid },
     /// Fork COUNT children, run the same command in each in parallel, print every result, then
@@ -489,6 +498,7 @@ pub async fn run(r: &Remote, cmd: AgentCommand) -> Result<()> {
             )
             .await?,
         ),
+        AgentCommand::Shell { id, command } => shell(r, id, &command).await,
         AgentCommand::Export {
             id,
             out,
@@ -837,6 +847,148 @@ fn guest_command(args: &[String]) -> String {
 }
 
 /// The `POST /v1/agents/sessions` body for `agent run` flags.
+/// Puts the local terminal in raw mode and restores it on drop. `None` when stdin is not a tty.
+struct RawMode {
+    orig: libc::termios,
+}
+
+impl RawMode {
+    fn enter() -> Option<Self> {
+        // SAFETY: plain termios calls on fd 0 with a zeroed struct that tcgetattr fills.
+        unsafe {
+            if libc::isatty(0) == 0 {
+                return None;
+            }
+            let mut t: libc::termios = std::mem::zeroed();
+            if libc::tcgetattr(0, &mut t) != 0 {
+                return None;
+            }
+            let orig = t;
+            libc::cfmakeraw(&mut t);
+            if libc::tcsetattr(0, libc::TCSAFLUSH, &t) != 0 {
+                return None;
+            }
+            Some(Self { orig })
+        }
+    }
+}
+
+impl Drop for RawMode {
+    fn drop(&mut self) {
+        // SAFETY: restores the attributes read in `enter`.
+        unsafe {
+            libc::tcsetattr(0, libc::TCSAFLUSH, &self.orig);
+        }
+    }
+}
+
+fn terminal_size() -> (u16, u16) {
+    // SAFETY: TIOCGWINSZ fills a winsize; a failure leaves the zeroed value, handled below.
+    unsafe {
+        let mut w: libc::winsize = std::mem::zeroed();
+        if libc::ioctl(1, libc::TIOCGWINSZ, &mut w) == 0 && w.ws_col > 0 && w.ws_row > 0 {
+            return (w.ws_col, w.ws_row);
+        }
+    }
+    (80, 24)
+}
+
+/// The `ws://` URL of a session's terminal. Pure, so it is unit-tested.
+pub(crate) fn pty_url(base: &str, id: Uuid, cols: u16, rows: u16, command: Option<&str>) -> String {
+    let ws = if let Some(rest) = base.strip_prefix("https://") {
+        format!("wss://{rest}")
+    } else if let Some(rest) = base.strip_prefix("http://") {
+        format!("ws://{rest}")
+    } else {
+        format!("ws://{base}")
+    };
+    let mut url = format!("{ws}/v1/agents/sessions/{id}/pty?cols={cols}&rows={rows}");
+    if let Some(c) = command {
+        url.push_str("&command=");
+        url.push_str(&crate::remote::encode_query(c));
+    }
+    url
+}
+
+async fn shell(r: &Remote, id: Uuid, command: &[String]) -> Result<()> {
+    use futures_util::{SinkExt, StreamExt};
+    use std::io::Write as _;
+    use tokio_tungstenite::tungstenite::{Message, client::IntoClientRequest};
+
+    let (cols, rows) = terminal_size();
+    let cmd = (!command.is_empty()).then(|| guest_command(command));
+    let url = pty_url(r.base(), id, cols, rows, cmd.as_deref());
+    let mut req = url.as_str().into_client_request().context("terminal url")?;
+    if let Some(t) = r.bearer() {
+        req.headers_mut().insert(
+            "authorization",
+            format!("Bearer {t}").parse().context("bearer token")?,
+        );
+    }
+    let (mut ws, _) = tokio_tungstenite::connect_async(req).await.context(
+        "opening the terminal (is the session running, and does it have no command rules?)",
+    )?;
+
+    // Keys are read on a thread: a blocking read on stdin must not stall the runtime.
+    let (key_tx, mut key_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+    std::thread::spawn(move || {
+        use std::io::Read as _;
+        let mut buf = [0u8; 1024];
+        let mut stdin = std::io::stdin().lock();
+        while let Ok(n) = stdin.read(&mut buf) {
+            if n == 0 || key_tx.send(buf[..n].to_vec()).is_err() {
+                break;
+            }
+        }
+    });
+
+    let raw = RawMode::enter();
+    let mut stdout = std::io::stdout();
+    let mut exit = None;
+    let mut stdin_open = true;
+    loop {
+        tokio::select! {
+            key = key_rx.recv(), if stdin_open => match key {
+                Some(bytes) => {
+                    if ws.send(Message::Binary(bytes.into())).await.is_err() {
+                        break;
+                    }
+                }
+                // Piped input ended: send the terminal's end-of-file (^D) so the shell finishes what
+                // it was given and exits, and keep reading its output until it closes.
+                None => {
+                    stdin_open = false;
+                    if ws.send(Message::Binary(vec![0x04].into())).await.is_err() {
+                        break;
+                    }
+                }
+            },
+            msg = ws.next() => match msg {
+                Some(Ok(Message::Binary(b))) => {
+                    stdout.write_all(&b)?;
+                    stdout.flush()?;
+                }
+                Some(Ok(Message::Text(t))) => {
+                    stdout.write_all(t.as_bytes())?;
+                    stdout.flush()?;
+                }
+                Some(Ok(Message::Close(frame))) => {
+                    exit = frame
+                        .and_then(|f| f.reason.strip_prefix("exit=").and_then(|c| c.parse::<i32>().ok()));
+                    break;
+                }
+                Some(Ok(_)) => {}
+                Some(Err(_)) | None => break,
+            },
+        }
+    }
+    drop(raw);
+    match exit {
+        Some(0) | None => Ok(()),
+        Some(code) => std::process::exit(code.clamp(1, 255)),
+    }
+}
+
 fn span_id(session: &str, tag: &str) -> String {
     use sha2::{Digest, Sha256};
     let h = Sha256::digest(format!("{session}:{tag}"));
@@ -1065,6 +1217,17 @@ mod tests {
             "'sh' '-c' 'uname -a; exit 3'"
         );
         assert_eq!(guest_command(&v(&["echo", "it's"])), "'echo' 'it'\\''s'");
+    }
+
+    #[test]
+    fn the_terminal_url_follows_the_server_scheme() {
+        let id = Uuid::nil();
+        assert_eq!(
+            pty_url("http://127.0.0.1:7788", id, 100, 30, None),
+            format!("ws://127.0.0.1:7788/v1/agents/sessions/{id}/pty?cols=100&rows=30")
+        );
+        assert!(pty_url("https://h", id, 80, 24, Some("ls -l")).starts_with("wss://h/"));
+        assert!(pty_url("https://h", id, 80, 24, Some("ls -l")).ends_with("&command=ls%20-l"));
     }
 
     #[test]
