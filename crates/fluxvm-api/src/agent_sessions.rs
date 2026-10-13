@@ -480,6 +480,26 @@ async fn create_session(
             baseline: false,
             note: None,
         };
+        // The workspace directory exists whether or not a clone happens, so a baseline can be
+        // recorded and an agent has somewhere to work.
+        if m.ensure_running_for_request(rec.id).await.is_ok() {
+            // The guest user is not root on stock images, so `/workspace` needs sudo to exist.
+            let p = shell_quote(&ws_path);
+            let mk = format!(
+                "mkdir -p {p} 2>/dev/null || (sudo -n mkdir -p {p} && sudo -n chown \"$(id -u):$(id -g)\" {p})"
+            );
+            let code = m
+                .exec_with_policy(rec.id, mk, Some(30), None)
+                .await
+                .ok()
+                .and_then(|r| serde_json::to_value(&r).ok())
+                .and_then(|v| v["exit_code"].as_i64());
+            if code != Some(0) {
+                state.note = Some(format!(
+                    "could not create the workspace directory {ws_path} (exit {code:?})"
+                ));
+            }
+        }
         if let Some(url) = &w.git {
             m.ensure_running_for_request(rec.id).await?;
             let cmd = format!(
@@ -494,9 +514,12 @@ async fn create_session(
                         .and_then(|v| v["exit_code"].as_i64());
                     state.cloned = code == Some(0);
                     if !state.cloned {
-                        state.note = Some(format!(
-                            "git clone exited {code:?}; the policy may not allow the host"
-                        ));
+                        state.note = Some(match code {
+                            Some(127) => "git is not installed in the guest image; use an image that has it (the stock debian-13 does not)".to_string(),
+                            other => format!(
+                                "git clone exited {other:?}; the policy may not allow the host, or the directory is not empty"
+                            ),
+                        });
                     }
                 }
                 Err(e) => state.note = Some(format!("git clone failed: {e:#}")),
@@ -505,7 +528,7 @@ async fn create_session(
                 &m,
                 id,
                 "workspace.clone",
-                json!({"git": url, "path": ws_path, "ok": state.cloned}),
+                json!({"git": url, "path": ws_path, "ok": state.cloned, "note": state.note}),
             );
         }
         // A baseline makes `artifacts` report what the agent changed. Best effort.

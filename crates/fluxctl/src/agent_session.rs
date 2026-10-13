@@ -129,7 +129,7 @@ pub async fn run(r: &Remote, cmd: AgentCommand) -> Result<()> {
             timeout_seconds,
             command,
         } => {
-            let mut body = json!({ "command": command.join(" ") });
+            let mut body = json!({ "command": guest_command(&command) });
             if let Some(t) = timeout_seconds {
                 body["timeout_seconds"] = json!(t);
             }
@@ -225,6 +225,18 @@ pub async fn run(r: &Remote, cmd: AgentCommand) -> Result<()> {
     }
 }
 
+/// One argument is a shell line, as typed (`agent exec ID -- 'cd /w && make'`); several are an
+/// argv, so each word is single-quoted and `-- sh -c 'a; b'` keeps its script in one piece.
+fn guest_command(args: &[String]) -> String {
+    if let [one] = args {
+        return one.clone();
+    }
+    args.iter()
+        .map(|a| format!("'{}'", a.replace('\'', "'\\''")))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// The `POST /v1/agents/sessions` body for `agent run` flags.
 #[allow(clippy::too_many_arguments)]
 fn create_body(
@@ -281,6 +293,17 @@ fn create_body(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn exec_keeps_a_script_in_one_piece() {
+        let v = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(guest_command(&v(&["cd /w && make"])), "cd /w && make");
+        assert_eq!(
+            guest_command(&v(&["sh", "-c", "uname -a; exit 3"])),
+            "'sh' '-c' 'uname -a; exit 3'"
+        );
+        assert_eq!(guest_command(&v(&["echo", "it's"])), "'echo' 'it'\\''s'");
+    }
 
     #[test]
     fn run_flags_become_the_create_body() {

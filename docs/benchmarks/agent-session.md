@@ -1,0 +1,33 @@
+# AgentSession lifecycle timings
+
+Measured with `scripts/bench-agent-session.sh` against a real `fluxctl serve`. These are the only numbers the agent
+README and the website may quote; anything else is a target, not a result.
+
+| | |
+|---|---|
+| Date | 2026-10-13 |
+| Host | Apple M4 Mac mini, 16 GB, macOS 27.2 |
+| FluxVM | 0.4.7 + the AgentSession branch, **debug build** of `fluxctl serve` (release builds will be faster) |
+| Guest | the default sandbox: `debian-13`, 2 vCPU, 2 GiB, `vz`, SSH exec (no vsock agent) |
+| Runs | 5, `policy=open`, snapshots are memory+disk, state dir already holding the image and a warm slot |
+
+| Step | Median | Worst |
+|---|---|---|
+| create session (sandbox ready for commands) | 6.8 s | 26.9 s |
+| first exec (`true`) | 0.12 s | 0.13 s |
+| checkpoint (memory + disk) | 0.72 s | 0.78 s |
+| restore that checkpoint | 4.1 s | 4.4 s |
+| delete | 3.5 s | 4.1 s |
+
+## How to read this
+
+- **Create is seconds, not milliseconds.** The worst run (26.9 s) was the first one, which had no warm slot to claim and
+  paid a cold boot plus the pool refill; the median is dominated by claiming a warm slot and restoring it. The goal of
+  sub-second claim/restore in `docs/agent-sessions.md` is a **target** and is not met on `vz` today.
+- **Exec is fast** because the daemon already holds an SSH connection path to the guest; this is the per-command cost,
+  not boot.
+- **Restore is also seconds**: on `vz` it relaunches the VM from the saved state.
+- **Fork is not measured.** It exists only on the in-tree KVM engine (Linux), which this host does not have, and
+  `POST /v1/agents/sessions/{id}/fork` returns 409 on `vz`.
+- One host, one guest image, a debug build, 5 runs: treat the table as an order of magnitude, not a benchmark suite.
+  The script prints the same table for your own hardware.
