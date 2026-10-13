@@ -26,16 +26,25 @@ curl -fsS ${AUTH[@]+"${AUTH[@]}"} "$URL/healthz" >/dev/null || { echo "no daemon
 req() {
   local method="$1" path="$2" body="${3:-}" out="$4"
   if [ -n "$body" ]; then
-    curl -sS ${AUTH[@]+"${AUTH[@]}"} -o "$out" -w '%{time_total}' -X "$method" -H 'Content-Type: application/json' -d "$body" "$URL$path"
+    curl -sS ${AUTH[@]+"${AUTH[@]}"} -o "$out" -m 180 -w '%{time_total}' -X "$method" -H 'Content-Type: application/json' -d "$body" "$URL$path"
   else
-    curl -sS ${AUTH[@]+"${AUTH[@]}"} -o "$out" -w '%{time_total}' -X "$method" "$URL$path"
+    curl -sS ${AUTH[@]+"${AUTH[@]}"} -o "$out" -m 180 -w '%{time_total}' -X "$method" "$URL$path"
   fi
 }
 
+FAILS=0
 : > "$WORK/create"; : > "$WORK/exec"; : > "$WORK/checkpoint"; : > "$WORK/restore"; : > "$WORK/fork"; : > "$WORK/delete"
 for i in $(seq 1 "$RUNS"); do
   t=$(req POST /v1/agents/sessions "{\"agent\":\"bench\",\"policy\":{\"preset\":\"$POLICY\"},\"ttl_seconds\":600}" "$WORK/s.json")
-  ID=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["id"])' "$WORK/s.json")
+  ID=$(python3 -c 'import json,sys
+try: print(json.load(open(sys.argv[1]))["id"])
+except Exception: print("")' "$WORK/s.json")
+  if [ -z "$ID" ]; then
+    # A failed create is a result, not a reason to stop: count it and show why.
+    FAILS=$((FAILS + 1))
+    echo "run $i/$RUNS: create failed after ${t}s: $(head -c 300 "$WORK/s.json")" >&2
+    continue
+  fi
   echo "$t" >> "$WORK/create"
   echo "$(req POST "/v1/agents/sessions/$ID/exec" '{"command":"true"}' "$WORK/e.json")" >> "$WORK/exec"
   echo "$(req POST "/v1/agents/sessions/$ID/checkpoint" '{"tag":"b1"}' "$WORK/c.json")" >> "$WORK/checkpoint"
@@ -50,10 +59,10 @@ for i in $(seq 1 "$RUNS"); do
   echo "run $i/$RUNS done" >&2
 done
 
-python3 - "$WORK" "$RUNS" "$POLICY" <<'PY'
+python3 - "$WORK" "$RUNS" "$POLICY" "$FAILS" <<'PY'
 import sys, statistics
-work, runs, policy = sys.argv[1], int(sys.argv[2]), sys.argv[3]
-print(f"AgentSession lifecycle, {runs} runs, policy={policy} (seconds; median / worst)")
+work, runs, policy, fails = sys.argv[1], int(sys.argv[2]), sys.argv[3], int(sys.argv[4])
+print(f"AgentSession lifecycle, {runs} runs, policy={policy} (seconds; median / worst; {fails} create failures)")
 for step in ("create", "exec", "checkpoint", "restore", "fork", "delete"):
     xs = [float(l) for l in open(f"{work}/{step}") if l.strip()]
     if not xs:
