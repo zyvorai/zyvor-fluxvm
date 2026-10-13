@@ -227,6 +227,16 @@ impl VmManager {
         })
     }
 
+    /// Starts an interactive shell (or `script`) in a vz Linux guest on a pseudo-terminal over SSH. The child's stdin
+    /// and stdout are the terminal. Container (OCI) sandboxes run no sshd and cannot.
+    pub fn pty_spawn(&self, vm: &VmRecord, script: &str) -> Result<tokio::process::Child> {
+        if vm.backend != fluxvm_core::model::BackendKind::Vz || crate::oci_sandbox::is_oci(vm) {
+            bail!("an interactive terminal needs a vz Linux sandbox reached over SSH");
+        }
+        let g = self.vz_guest(vm)?;
+        ssh::pty_spawn(&g, script)
+    }
+
     pub(crate) async fn vz_get_file(&self, vm: &VmRecord, path: String) -> Result<AgentResponse> {
         let request = AgentRequest::GetFile { path: path.clone() };
         if crate::oci_sandbox::is_oci(vm) {

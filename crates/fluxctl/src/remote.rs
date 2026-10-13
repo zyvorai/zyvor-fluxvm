@@ -72,6 +72,11 @@ impl Remote {
         &self.base
     }
 
+    /// The bearer token, for a request this type does not make itself (a WebSocket upgrade).
+    pub fn bearer(&self) -> Option<&str> {
+        self.token.as_deref()
+    }
+
     pub async fn call(&self, method: Method, path: &str, body: Option<Value>) -> Result<Value> {
         let url = format!("{}{path}", self.base);
         let mut req = self.http.request(method.clone(), &url);

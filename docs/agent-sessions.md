@@ -84,13 +84,28 @@ commands and are not matched against them.
 
 | Backend | snapshot / restore | fork | PTY |
 |---|---|---|---|
-| `vz` (macOS), offline or allow-listed session | yes (memory restore verified live; a disk-only restore cold-boots) | **yes** (run live: 2 children, 2.5 s) | no (VM-level `console` route is admin-only) |
-| `vz`, session on the Mac's NAT (policy `open`) | yes | **no**: children would share one MAC and address | no |
+| `vz` (macOS), offline or allow-listed session | yes (memory restore verified live; a disk-only restore cold-boots) | **yes** (run live: 2 children, 2.5 s) | **yes** (`shell`, below) |
+| `vz`, session on the Mac's NAT (policy `open`) | yes | **no**: children would share one MAC and address | **yes** |
 | `flux-vm` (in-tree KVM, Linux) | yes | yes (not verified on hardware) | no |
 | `qemu`, `firecracker` | yes | no | no |
 | `cloud-hypervisor` | not confirmed | no | no |
 
 `GET /v1/agents/sessions/{id}` reports `capabilities` for the session's backend so a client can decide without trying.
+
+### Terminal (PTY)
+
+`fluxctl agent shell <session> [-- command…]` opens an interactive shell on a real terminal; REST is a WebSocket,
+`GET /v1/agents/sessions/{id}/pty?cols=&rows=&command=`, whose binary frames are raw terminal bytes both ways. The
+daemon runs `ssh -tt` to the guest (the vsock proxy for an offline session), so the guest sees a tty: line editing,
+job control and full-screen programs work. The terminal size is set once when it opens; **a later resize is not
+forwarded**. The close frame's reason is `exit=<code>` and the CLI exits with it. Opens and closes (duration, byte
+counts, exit code, never the content) are ledgered as `pty.open`/`pty.close`. At most 16 at once on a host, one hour
+each. A session with `policy.process` rules is **refused (403)**: a shell would bypass them.
+
+Run on this M4 (`vz`, stock `debian-13`, offline session): `tty` printed `/dev/pts/0`, `isatty` was true for stdin and
+stdout, `TERM` was `xterm-256color`, exit codes 0, 3, 5 and 7 came back, and a terminal opened at 120x33 reported
+`stty size` `33 120` after typing into it through a local pseudo-terminal (raw mode on). **Not run:** `vim`/`top`,
+Windows terminals, TLS (`wss`), `--server` over a network, a client other than `fluxctl`, Linux.
 
 ### Git
 
@@ -283,7 +298,7 @@ Each item says why it is not in the MVP.
 | Workspace overlay mode, read-only mounts | `mode: "overlay"` is refused; clone is the only writable mode |
 | Filesystem and process policy enforcement | procbox has Landlock/seccomp; wiring it into VM sessions is not done |
 | HTTP method/path rules through the session policy | the egress proxy supports them on QEMU/KVM; not exposed here |
-| Streaming PTY / stdin for a session | background **jobs** (above) cover long-running commands with polled output; there is still no stdin, no TTY and no push stream; the `console` route is VM-level and admin-only |
+| Terminal resize, streaming exec output | a PTY exists (`shell`) but resize is not forwarded; `exec` is still buffered and jobs are polled |
 | Replay | the ledger is a log, not a recording |
 | Preview URLs: large or streamed responses | WebSocket upgrades are bridged (run with Chrome DevTools); large and streamed bodies were not run through the preview route |
 | Browser / computer-use profile | a CDP recipe works on the stock image (see Browser above); no prebuilt browser image, no Playwright client run, no computer-use display profile |

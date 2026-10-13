@@ -16,6 +16,7 @@
 //! * `POST   /v1/agents/sessions/{id}/fork`          fork into child sessions (in-tree KVM only)
 //! * `GET    /v1/agents/sessions/{id}/events`        ledger plus the sandbox's VM events
 //! * `GET    /v1/agents/sessions/{id}/artifacts`     workspace changes since the baseline
+//! * `GET    /v1/agents/sessions/{id}/pty`           WebSocket: an interactive shell on a pseudo-terminal
 //! * `GET    /v1/agents/sessions/{id}/trajectory`    ledger and VM events merged into one ordered list
 //! * `POST   /v1/agents/sessions/{id}/preview`       mint an expiring preview URL for a guest port
 //! * `GET    /v1/agents/sessions/{id}/previews`      list live preview URLs
@@ -72,6 +73,7 @@ pub(crate) fn routes() -> Router<Arc<VmManager>> {
         .route("/v1/agents/sessions/{id}/events", get(events))
         .route("/v1/agents/sessions/{id}/artifacts", get(artifacts))
         .route("/v1/agents/sessions/{id}/trajectory", get(trajectory))
+        .route("/v1/agents/sessions/{id}/pty", get(pty))
         .route("/v1/agents/sessions/{id}/preview", post(create_preview))
         .route("/v1/agents/sessions/{id}/previews", get(list_previews))
         .route(
@@ -116,7 +118,8 @@ struct Checkpoint {
 struct Capabilities {
     snapshot: bool,
     fork: bool,
-    /// Always false here: the PTY route is VM-level and admin-only (`/v1/vms/{id}/console`).
+    /// `GET .../pty` works: vz Linux sessions (the guest is reached over SSH). A session with
+    /// `policy.process` rules is refused at the route even where this is true.
     pty: bool,
 }
 
@@ -593,7 +596,8 @@ fn capabilities_for(backend: &str, offline: bool) -> Capabilities {
     Capabilities {
         snapshot: matches!(backend, "vz" | "flux-vm" | "qemu" | "firecracker"),
         fork: backend == "flux-vm" || (backend == "vz" && offline),
-        pty: false,
+        // `GET .../pty` reaches the guest over SSH, which only the vz path has.
+        pty: backend == "vz",
     }
 }
 
@@ -1540,6 +1544,193 @@ async fn preview_serve(
 }
 
 // ---------------------------------------------------------------------------------------
+// PTY: an interactive shell over a WebSocket. The guest is reached with `ssh -tt`, so the guest
+// sees a real terminal; frames carry raw bytes in both directions. The terminal size is set once
+// at start (`cols`, `rows`); a later resize is not forwarded. Not available to a session with
+// `policy.process` rules, because a shell would walk straight around them.
+
+static OPEN_PTYS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+const MAX_OPEN_PTYS: usize = 16;
+const PTY_MAX_SECONDS: u64 = 3600;
+
+#[derive(Debug, Deserialize, Default)]
+struct PtyQuery {
+    #[serde(default)]
+    cols: Option<u16>,
+    #[serde(default)]
+    rows: Option<u16>,
+    /// Run this instead of a login shell (still on a terminal).
+    #[serde(default)]
+    command: Option<String>,
+}
+
+/// The remote shell line that sizes the terminal and starts the shell or command. Pure.
+fn pty_script(cols: u16, rows: u16, cwd: Option<&str>, command: Option<&str>) -> String {
+    let cd = cwd
+        .map(|c| format!("cd {} 2>/dev/null; ", shell_quote(c)))
+        .unwrap_or_default();
+    let run = match command {
+        Some(c) => format!("exec sh -c {}", shell_quote(c)),
+        None => "exec \"${SHELL:-/bin/sh}\" -l".to_string(),
+    };
+    format!("stty cols {cols} rows {rows} 2>/dev/null; export TERM=xterm-256color; {cd}{run}")
+}
+
+async fn pty(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    token_tenant: Option<Extension<TokenTenant>>,
+    Path(id): Path<Uuid>,
+    Query(q): Query<PtyQuery>,
+    ws: axum::extract::ws::WebSocketUpgrade,
+) -> Result<axum::response::Response, ApiError> {
+    use axum::response::IntoResponse as _;
+    require_admin(role)?;
+    let s = load(&m, id, &caller_tenant(&token_tenant)).await?;
+    running(&s)?;
+    if s.policy.process.is_some() {
+        return Err(ApiError {
+            status: StatusCode::FORBIDDEN,
+            message: "this session has process rules, and a terminal would bypass them".into(),
+        });
+    }
+    let (cols, rows) = (q.cols.unwrap_or(80), q.rows.unwrap_or(24));
+    if !(1..=500).contains(&cols) || !(1..=300).contains(&rows) {
+        return Err(ApiError {
+            status: StatusCode::BAD_REQUEST,
+            message: "cols must be 1-500 and rows 1-300".into(),
+        });
+    }
+    if OPEN_PTYS.load(std::sync::atomic::Ordering::SeqCst) >= MAX_OPEN_PTYS {
+        return Err(ApiError {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            message: format!("at most {MAX_OPEN_PTYS} terminals at once on this host"),
+        });
+    }
+    let cwd = s.workspace.as_ref().map(|w| w.path.clone());
+    let script = pty_script(cols, rows, cwd.as_deref(), q.command.as_deref());
+    // Spawn before upgrading so a missing ssh or an unreachable guest is an HTTP error.
+    let vm = m.ensure_running_for_request(s.sandbox_id).await?;
+    let child = m.pty_spawn(&vm, &script).map_err(|e| ApiError {
+        status: StatusCode::CONFLICT,
+        message: format!("{e:#}"),
+    })?;
+    record(
+        &m,
+        id,
+        "pty.open",
+        json!({"cols": cols, "rows": rows, "command": q.command}),
+    );
+    Ok(ws
+        .on_upgrade(move |socket| relay_pty(m, id, socket, child))
+        .into_response())
+}
+
+async fn relay_pty(
+    m: Arc<VmManager>,
+    id: Uuid,
+    socket: axum::extract::ws::WebSocket,
+    mut child: tokio::process::Child,
+) {
+    use axum::extract::ws::{CloseFrame, Message};
+    use futures::{SinkExt, StreamExt};
+    use std::sync::atomic::Ordering;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    OPEN_PTYS.fetch_add(1, Ordering::SeqCst);
+    let started = std::time::Instant::now();
+    let (mut tx, mut rx) = socket.split();
+    let (Some(mut stdin), Some(mut stdout)) = (child.stdin.take(), child.stdout.take()) else {
+        OPEN_PTYS.fetch_sub(1, Ordering::SeqCst);
+        return;
+    };
+    let bytes_in = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let bytes_out = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let (bi, bo) = (bytes_in.clone(), bytes_out.clone());
+
+    let up = async move {
+        while let Some(Ok(msg)) = rx.next().await {
+            let data: Vec<u8> = match msg {
+                Message::Binary(b) => b.to_vec(),
+                Message::Text(t) => t.as_bytes().to_vec(),
+                Message::Close(_) => break,
+                _ => continue,
+            };
+            bi.fetch_add(data.len() as u64, Ordering::Relaxed);
+            if stdin.write_all(&data).await.is_err() {
+                break;
+            }
+        }
+    };
+    let down = async {
+        let mut buf = vec![0u8; 8192];
+        loop {
+            match stdout.read(&mut buf).await {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    bo.fetch_add(n as u64, Ordering::Relaxed);
+                    if tx
+                        .send(Message::Binary(buf[..n].to_vec().into()))
+                        .await
+                        .is_err()
+                    {
+                        return false;
+                    }
+                }
+            }
+        }
+        true
+    };
+    // Whichever side ends first ends the session; the hour cap bounds a forgotten terminal.
+    let client_alive = {
+        use futures::future::{Either, select};
+        let (up, down) = (Box::pin(up), Box::pin(down));
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(PTY_MAX_SECONDS),
+            select(up, down),
+        )
+        .await
+        {
+            Ok(Either::Left(_)) => false,
+            Ok(Either::Right((alive, _))) => alive,
+            Err(_) => true,
+        }
+    };
+    // The shell ended on its own: its status is ssh's exit code, so let ssh finish rather than kill
+    // it (a killed ssh has no code). A client that left takes the shell down with it.
+    if !client_alive {
+        let _ = child.start_kill();
+    }
+    let code = match tokio::time::timeout(std::time::Duration::from_secs(5), child.wait()).await {
+        Ok(st) => st.ok().and_then(|s| s.code()),
+        Err(_) => {
+            let _ = child.start_kill();
+            None
+        }
+    };
+    if client_alive {
+        let _ = tx
+            .send(Message::Close(Some(CloseFrame {
+                code: 1000,
+                reason: format!("exit={}", code.unwrap_or(-1)).into(),
+            })))
+            .await;
+    }
+    OPEN_PTYS.fetch_sub(1, Ordering::SeqCst);
+    record(
+        &m,
+        id,
+        "pty.close",
+        json!({
+            "duration_ms": started.elapsed().as_millis() as u64,
+            "bytes_in": bytes_in.load(Ordering::Relaxed),
+            "bytes_out": bytes_out.load(Ordering::Relaxed),
+            "exit_code": code,
+        }),
+    );
+}
+
+// ---------------------------------------------------------------------------------------
 // Jobs: a command that outlives the request. It runs detached in the guest (`setsid`), its
 // output goes to a file, and the caller reads that file from a byte offset. This is built on
 // the ordinary exec path, so each read costs one exec; it is polling, not a stream. There is
@@ -2463,10 +2654,23 @@ mod tests {
         assert!(capabilities_for("flux-vm", false).fork);
         // vz forks only without a NIC of its own: offline or allow-listed sessions.
         let nat = capabilities_for("vz", false);
-        assert!(nat.snapshot && !nat.fork && !nat.pty);
+        assert!(nat.snapshot && !nat.fork && nat.pty);
+        assert!(capabilities_for("vz", true).pty);
+        assert!(!capabilities_for("flux-vm", false).pty && !capabilities_for("qemu", false).pty);
         assert!(capabilities_for("vz", true).fork);
         assert!(!capabilities_for("cloud-hypervisor", true).snapshot);
         assert!(!capabilities_for("qemu", true).fork);
+    }
+
+    #[test]
+    fn the_terminal_script_sizes_the_tty_and_quotes_the_command() {
+        let s = pty_script(120, 40, Some("/workspace"), None);
+        assert!(s.starts_with("stty cols 120 rows 40"));
+        assert!(s.contains("cd '/workspace'"));
+        assert!(s.contains("exec \"${SHELL:-/bin/sh}\" -l"));
+        let c = pty_script(80, 24, None, Some("echo 'a b'; ls"));
+        assert!(c.contains("exec sh -c 'echo '\\''a b'\\''; ls'"), "{c}");
+        assert!(!c.contains("cd "));
     }
 
     #[test]

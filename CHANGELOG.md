@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- **Interactive terminal for agent sessions.** `fluxctl agent shell <session> [-- cmd]` (WebSocket
+  `GET /v1/agents/sessions/{id}/pty`) gives a real pty over `ssh -tt`, on offline sessions too (vsock proxy). Exit
+  codes propagate; open/close are ledgered (counts, not content). Size is fixed at open, **no resize**; refused for
+  sessions with command rules; `capabilities.pty` is now true on vz. Run live on vz with a local pseudo-terminal.
+
 
 - **OTLP trace export.** `fluxctl agent export <session> --otlp http://collector:4318 [--otlp-header K=V]` sends a
   session's trajectory as one OTLP/HTTP JSON trace (root span plus a span per step). After-the-fact, built from the
