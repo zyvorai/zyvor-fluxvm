@@ -1,0 +1,13 @@
+Vendored, unmodified apart from removing the trailing `//# sourceMappingURL=` comment:
+
+  @xterm/xterm            6.0.0   MIT   https://github.com/xtermjs/xterm.js
+  @xterm/addon-webgl      0.19.0  MIT
+  @xterm/addon-fit        0.11.0  MIT
+  @xterm/addon-search     0.16.0  MIT
+  @xterm/addon-web-links  0.12.0  MIT
+  @xterm/addon-image      0.9.0   MIT
+  @xterm/addon-unicode11  0.9.0   MIT
+  @xterm/addon-clipboard  0.2.0   MIT
+
+Copyright (c) The xterm.js authors. See LICENSE-xterm (the same MIT text ships in every package above).
+Fetched with `npm pack <name>@<version>`; SHA256SUMS records the files as vendored and a test checks them.

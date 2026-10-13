@@ -103,6 +103,29 @@ second SSH exec, so the foreground program gets SIGWINCH after about a round tri
 counts, exit code, never the content) are ledgered as `pty.open`/`pty.close`. At most 16 at once on a host, one hour
 each. A session with `policy.process` rules is **refused (403)**: a shell would bypass them.
 
+**Browser terminal.** `fluxctl agent shell <session> --web` (or `/console/terminal?session=<id>` on the daemon) opens a
+terminal page built on xterm.js (MIT, vendored under `crates/fluxvm-api/src/terminal/vendor/`, checksums in
+`SHA256SUMS`): WebGL rendering with a DOM fallback, 24-bit colour, Unicode 11, OSC 8 and plain-URL links, sixel and iTerm2
+inline images, clipboard (OSC 52), 15,000 lines of scrollback. The WebSocket is opened with a **30-second single-use
+ticket** (`POST .../pty-ticket`, then `GET /console/pty/{ticket}`), because a browser WebSocket cannot send
+`Authorization`; the ticket lives in memory only, is never ledgered, and is refused for sessions with command rules.
+The page's own CSP is `script-src 'self' 'wasm-unsafe-eval'` (the sixel decoder is WebAssembly; no string `eval`).
+- **Tabs and panes** like WezTerm: a pill tab bar at the bottom with the tab index and the shell's own title, `+` for a
+  new tab, split panes, the inactive pane dimmed. Keys: `⌘T` new tab, `⌘W` close pane/tab, `⌘1-9` tab, `⌘D` / `⌘⇧D`
+  split, `⌃⇧⌥"` / `⌃⇧⌥%` split, `⌘⌃h/j/k/l` move focus, `⌘+` / `⌘-` / `⌘0` text size, `⌘K` clear. Off macOS the
+  same keys are `Ctrl+Shift+…`. Every tab or pane is another shell in the same session.
+- **Themes:** "Neon Storm" (default in a dark browser; taken from the author's `~/.wezterm.lua`: Tokyo Night Storm
+  palette, `#82aaff` accent, `#16161e` chrome, a 135° `#16161e → #2a2b3b → #16161e` window gradient at 0.94 opacity,
+  bar cursor 2 px wide, bell flash, a `HH:MM:SS` clock), plus macOS Pro, macOS Basic, Tokyo Night, Dracula and Solarized
+  Dark. Font stack: Hack / MesloLGS / FiraCode / 0xProto Nerd Fonts if installed, then SF Mono, Menlo. Choice and text
+  size are remembered per browser.
+- **Not built yet:** search, copy mode, quick select and prompt marks; window blur; ligatures. The Velora native window
+  is a separate change. The cursor blink rate is the library's, not WezTerm's 400 ms.
+- **Run** (Chrome headless on this M4, offline session): prompt, WebGL, typing, `TERM`/`COLORTERM`/`TERM_PROGRAM` in the
+  guest, the guest tty size following the window (24x152 to 24x95), a 24-bit foreground kept as RGB, an OSC 8 link, a sixel
+  adding an image canvas, `⌘T`, `⌘D`, `⌘⌃h`, `⌘1`, the bottom tab bar, the accent colour and gradient, and the exit code.
+  **Not run:** Safari/WebKit (that is the Velora window's job), Firefox, a real WezTerm to compare against.
+
 **Looks.** The terminal takes its look from yours: `fluxctl` sends its own `TERM` (the guest falls back to
 `xterm-256color` when it lacks that terminfo) and, when your `COLORTERM` is `truecolor`/`24bit`, sets it in the guest so
 24-bit-colour programs use it. The Debian prompt (green `user@host`, blue path), coloured `ls` and UTF-8 (`C.UTF-8`) are

@@ -148,7 +148,10 @@ async fn auth_middleware(State(auth): State<AuthState>, mut req: Request, next: 
         || path == "/v1/openapi.json"
         || path.starts_with("/preview/")
         || ((method == Method::GET || method == Method::HEAD)
-            && CONSOLE_PATHS.contains(&path.as_str()))
+            && (CONSOLE_PATHS.contains(&path.as_str()) || path.starts_with("/console/terminal")))
+        // A browser WebSocket cannot send `Authorization`: the single-use ticket in the path is the
+        // credential (minted by an authenticated `POST .../pty-ticket`, see agent_sessions.rs).
+        || (method == Method::GET && path.starts_with("/console/pty/"))
     {
         return next.run(req).await;
     }
@@ -768,6 +771,9 @@ pub fn router(manager: Arc<VmManager>) -> Router {
         .route("/console", get(console_ui))
         .route("/console/", get(console_ui))
         .route("/console/app.js", get(console_js))
+        .route("/console/terminal", get(terminal_page))
+        .route("/console/terminal/", get(terminal_page))
+        .route("/console/terminal/{file}", get(terminal_asset))
         .route("/v1/images/build", post(build_image))
         .route("/v1/images/import", post(import_image))
         .route("/v1/images/catalog", post(add_catalog_entry))
@@ -2150,11 +2156,26 @@ async fn egress_nftables() -> impl IntoResponse {
 const CONSOLE_CSP: &str = "default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; connect-src 'self'; \
      img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
 
+/// The terminal page needs three things the read-only console does not: its own stylesheets
+/// (`style-src 'self'`), WebAssembly for the sixel decoder (`'wasm-unsafe-eval'`, which allows
+/// compiling wasm but not `eval` of strings), and `blob:` images for inline-image protocols.
+const TERMINAL_CSP: &str = "default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; \
+     style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data: blob:; \
+     font-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
+
 fn console_file(content_type: &'static str, body: &'static str) -> Response {
+    console_file_with(content_type, body, CONSOLE_CSP)
+}
+
+fn console_file_with(
+    content_type: &'static str,
+    body: &'static str,
+    csp: &'static str,
+) -> Response {
     (
         [
             (header::CONTENT_TYPE, content_type),
-            (header::CONTENT_SECURITY_POLICY, CONSOLE_CSP),
+            (header::CONTENT_SECURITY_POLICY, csp),
             (header::X_FRAME_OPTIONS, "DENY"),
             (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
             (header::REFERRER_POLICY, "no-referrer"),
@@ -2171,6 +2192,77 @@ async fn console_ui() -> Response {
 
 async fn console_js() -> Response {
     console_file("text/javascript; charset=utf-8", CONSOLE_JS)
+}
+
+/// The terminal page and its vendored xterm.js files (`terminal/vendor/NOTICE`, checked by `SHA256SUMS`).
+const TERMINAL_FILES: &[(&str, &str, &str)] = &[
+    (
+        "terminal.js",
+        "text/javascript; charset=utf-8",
+        include_str!("terminal/terminal.js"),
+    ),
+    (
+        "terminal.css",
+        "text/css; charset=utf-8",
+        include_str!("terminal/terminal.css"),
+    ),
+    (
+        "xterm.js",
+        "text/javascript; charset=utf-8",
+        include_str!("terminal/vendor/xterm.js"),
+    ),
+    (
+        "xterm.css",
+        "text/css; charset=utf-8",
+        include_str!("terminal/vendor/xterm.css"),
+    ),
+    (
+        "addon-fit.js",
+        "text/javascript; charset=utf-8",
+        include_str!("terminal/vendor/addon-fit.js"),
+    ),
+    (
+        "addon-search.js",
+        "text/javascript; charset=utf-8",
+        include_str!("terminal/vendor/addon-search.js"),
+    ),
+    (
+        "addon-web-links.js",
+        "text/javascript; charset=utf-8",
+        include_str!("terminal/vendor/addon-web-links.js"),
+    ),
+    (
+        "addon-image.js",
+        "text/javascript; charset=utf-8",
+        include_str!("terminal/vendor/addon-image.js"),
+    ),
+    (
+        "addon-unicode11.js",
+        "text/javascript; charset=utf-8",
+        include_str!("terminal/vendor/addon-unicode11.js"),
+    ),
+    (
+        "addon-clipboard.js",
+        "text/javascript; charset=utf-8",
+        include_str!("terminal/vendor/addon-clipboard.js"),
+    ),
+    (
+        "addon-webgl.js",
+        "text/javascript; charset=utf-8",
+        include_str!("terminal/vendor/addon-webgl.js"),
+    ),
+];
+const TERMINAL_HTML: &str = include_str!("terminal/terminal.html");
+
+async fn terminal_page() -> Response {
+    console_file_with("text/html; charset=utf-8", TERMINAL_HTML, TERMINAL_CSP)
+}
+
+async fn terminal_asset(Path(file): Path<String>) -> Response {
+    match TERMINAL_FILES.iter().find(|(name, _, _)| *name == file) {
+        Some((_, ct, body)) => console_file_with(ct, body, TERMINAL_CSP),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
 }
 
 const CONSOLE_HTML: &str = include_str!("console.html");
@@ -6907,6 +6999,248 @@ mod tests {
             }
             let (_, list) = call(app, "GET", "/v1/agents/sessions", "other", None).await;
             assert!(!list.contains(&id.to_string()), "{list}");
+        }
+
+        #[tokio::test]
+        async fn the_terminal_page_needs_no_token_and_the_ticket_is_scoped_to_its_session() {
+            use tower::ServiceExt as _;
+            let m = procbox_manager(tenant_tokens(), false);
+            let id = seed_session(&m, Some("acme"), "vz", "running");
+            let app = router(m.clone());
+            // The page and its vendored files load without a bearer token and carry the console CSP.
+            for (uri, ct) in [
+                ("/console/terminal", "text/html"),
+                ("/console/terminal/", "text/html"),
+                ("/console/terminal/terminal.js", "text/javascript"),
+                ("/console/terminal/xterm.js", "text/javascript"),
+                ("/console/terminal/xterm.css", "text/css"),
+            ] {
+                let resp = app
+                    .clone()
+                    .oneshot(
+                        Request::builder()
+                            .method("GET")
+                            .uri(uri)
+                            .body(Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(resp.status(), StatusCode::OK, "{uri}");
+                let h = resp.headers();
+                assert!(
+                    h[header::CONTENT_TYPE].to_str().unwrap().starts_with(ct),
+                    "{uri}"
+                );
+                let csp = h[header::CONTENT_SECURITY_POLICY].to_str().unwrap();
+                // wasm may compile (the sixel decoder); strings may not be eval'd; nothing loads from elsewhere
+                assert!(
+                    csp.contains("script-src 'self' 'wasm-unsafe-eval'"),
+                    "{csp}"
+                );
+                assert!(
+                    !csp.contains("'unsafe-eval'") && !csp.contains("http"),
+                    "{csp}"
+                );
+                assert!(
+                    csp.contains("default-src 'none'") && csp.contains("frame-ancestors 'none'"),
+                    "{csp}"
+                );
+            }
+            let st = status_for(app.clone(), "GET", "/console/terminal/nope.js", None).await;
+            assert_eq!(st, StatusCode::NOT_FOUND);
+            // Only GET gets past auth for the page.
+            let st = status_for(app.clone(), "POST", "/console/terminal", None).await;
+            assert_eq!(st, StatusCode::UNAUTHORIZED);
+
+            // Minting a ticket needs a token, and another tenant cannot mint one.
+            let st = status_for(
+                app.clone(),
+                "POST",
+                &format!("/v1/agents/sessions/{id}/pty-ticket"),
+                None,
+            )
+            .await;
+            assert_eq!(st, StatusCode::UNAUTHORIZED);
+            let (st, _) = call(
+                app.clone(),
+                "POST",
+                &format!("/v1/agents/sessions/{id}/pty-ticket"),
+                "other",
+                None,
+            )
+            .await;
+            assert_eq!(st, StatusCode::NOT_FOUND);
+            let (st, body) = call(
+                app.clone(),
+                "POST",
+                &format!("/v1/agents/sessions/{id}/pty-ticket"),
+                "acme",
+                None,
+            )
+            .await;
+            assert_eq!(st, StatusCode::OK, "{body}");
+            let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+            assert_eq!(v["ticket"].as_str().unwrap().len(), 64);
+            assert_eq!(v["expires_in"], 30);
+            // The ticket route needs no bearer: a plain GET gets past auth and fails at the missing
+            // WebSocket upgrade (400), never 401.
+            let st = status_for(app.clone(), "GET", "/console/pty/anything", None).await;
+            assert_ne!(st, StatusCode::UNAUTHORIZED);
+
+            // A session with command rules refuses a terminal at the ticket, not later.
+            let ruled = seed_session(&m, Some("acme"), "vz", "running");
+            let path = m
+                .cfg
+                .state_dir
+                .join("agent-sessions")
+                .join(format!("{ruled}.json"));
+            let mut rec: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            rec["policy"]["process"] = json!({"allow": ["ls"], "deny": []});
+            std::fs::write(&path, rec.to_string()).unwrap();
+            let (st, _) = call(
+                app,
+                "POST",
+                &format!("/v1/agents/sessions/{ruled}/pty-ticket"),
+                "acme",
+                None,
+            )
+            .await;
+            assert_eq!(st, StatusCode::FORBIDDEN);
+        }
+
+        /// The page's pure helpers and palettes, run under node when it is installed.
+        #[test]
+        fn the_terminal_page_helpers_and_themes_hold() {
+            let Ok(node) = std::process::Command::new("node").arg("--version").output() else {
+                eprintln!("node is not installed; skipping");
+                return;
+            };
+            assert!(node.status.success());
+            let file = concat!(env!("CARGO_MANIFEST_DIR"), "/src/terminal/terminal.js");
+            let script = format!(
+                r##"
+const assert = require("assert");
+const t = require({file:?});
+const keys = ["foreground","background","cursor","cursorAccent","selectionBackground","black","red","green","yellow",
+  "blue","magenta","cyan","white","brightBlack","brightRed","brightGreen","brightYellow","brightBlue","brightMagenta",
+  "brightCyan","brightWhite"];
+assert(Object.keys(t.THEMES).length >= 5);
+for (const [name, th] of Object.entries(t.THEMES)) {{
+  for (const k of keys) assert(/^#[0-9a-f]{{6}}$/i.test(th[k]), name + "." + k + " = " + th[k]);
+  assert.strictEqual(typeof th.dark, "boolean", name);
+  assert(t.contrast(th.foreground, th.background) >= 4.5, name + " text contrast " + t.contrast(th.foreground, th.background));
+  // dark themes have a dark background and light ones a light one
+  assert.strictEqual(t.contrast(th.background, "#000000") < t.contrast(th.background, "#ffffff"), th.dark, name);
+}}
+assert.strictEqual(t.pickTheme("Dracula", false), "Dracula");
+assert.strictEqual(t.pickTheme("nope", true), t.DEFAULT_DARK);
+assert.strictEqual(t.pickTheme(null, false), t.DEFAULT_LIGHT);
+assert.strictEqual(t.pickTheme("__proto__", true), t.DEFAULT_DARK);
+const u = t.ptyUrl({{ protocol: "http:", host: "127.0.0.1:7788" }}, "ab12", 100, 30);
+assert(u.startsWith("ws://127.0.0.1:7788/console/pty/ab12?"), u);
+assert(u.includes("cols=100") && u.includes("rows=30") && u.includes("term_program=FluxVM") && u.includes("colorterm=truecolor"), u);
+assert(t.ptyUrl({{ protocol: "https:", host: "h" }}, "x/y", 1, 1).startsWith("wss://h/console/pty/x%2Fy?"));
+assert.strictEqual(t.exitCode("exit=3"), 3);
+assert.strictEqual(t.exitCode("exit=-1"), -1);
+assert.strictEqual(t.exitCode(""), null);
+assert.strictEqual(t.exitCode("exit=3; rm"), null);
+assert.strictEqual(t.clampSize(2), 9);
+assert.strictEqual(t.clampSize(99), 32);
+assert.strictEqual(t.clampSize("14"), 14);
+assert.strictEqual(t.clampSize("x"), 16);
+assert.strictEqual(t.clampSize(99), 32);
+// the WezTerm-style theme: neon accent, a gradient window and dimmed inactive panes
+const neon = t.THEMES["Neon Storm"], c = t.chromeFor(neon);
+assert.strictEqual(t.DEFAULT_DARK, "Neon Storm");
+assert.strictEqual(c.accent, "#82aaff"); assert.strictEqual(c.tabActiveBg, "#82aaff");
+assert.deepStrictEqual(c.gradient, ["#16161e", "#2a2b3b", "#16161e"]);
+assert.strictEqual(c.opacity, 0.94); assert.strictEqual(c.paneDim.brightness, 0.7);
+assert(t.contrast(c.tabActiveFg, c.tabActiveBg) >= 4.5, "active tab text");
+assert(t.contrast(c.tabInactiveFg, c.tabInactiveBg) >= 4.5, "inactive tab text");
+const plain = t.chromeFor(t.THEMES["Dracula"]);
+assert.strictEqual(plain.gradient, null); assert.strictEqual(plain.opacity, 1);
+// layout tree
+let tree = {{ leaf: 1 }};
+tree = t.splitLeaf(tree, 1, "h", 2);        // 1 | 2
+tree = t.splitLeaf(tree, 2, "v", 3);        // 1 | (2 over 3)
+assert.deepStrictEqual(t.leaves(tree), [1, 2, 3]);
+assert.deepStrictEqual(t.leaves(t.splitLeaf(tree, 99, "h", 4)), [1, 2, 3], "unknown pane changes nothing");
+const rects = t.layoutRects(tree, {{ x: 0, y: 0, w: 100, h: 60 }});
+assert.deepStrictEqual(rects[1], {{ x: 0, y: 0, w: 50, h: 60 }});
+assert.deepStrictEqual(rects[2], {{ x: 50, y: 0, w: 50, h: 30 }});
+assert.deepStrictEqual(rects[3], {{ x: 50, y: 30, w: 50, h: 30 }});
+assert.strictEqual(t.neighbour(rects, 1, "right"), "2");
+assert.strictEqual(t.neighbour(rects, 3, "left"), "1");
+assert.strictEqual(t.neighbour(rects, 2, "down"), "3");
+assert.strictEqual(t.neighbour(rects, 3, "up"), "2");
+assert.strictEqual(t.neighbour(rects, 1, "left"), null);
+assert.strictEqual(t.neighbour(rects, 1, "up"), null);
+assert.deepStrictEqual(t.leaves(t.removeLeaf(tree, 2)), [1, 3]);
+assert.deepStrictEqual(t.removeLeaf(t.removeLeaf(tree, 2), 3), {{ leaf: 1 }});
+assert.strictEqual(t.removeLeaf({{ leaf: 1 }}, 1), null, "closing the last pane leaves nothing");
+assert.deepStrictEqual(t.removeLeaf({{ leaf: 1 }}, 7), {{ leaf: 1 }});
+// titles and clock
+assert.strictEqual(t.tabTitle("  sandbox@host:   ~  ", "x", 24), "sandbox@host: ~");
+assert.strictEqual(t.tabTitle("", "fallback", 24), "fallback");
+assert.strictEqual(t.tabTitle("a".repeat(40), "x", 10), "aaaaaaaaa…");
+assert.strictEqual(t.clock(new Date(2026, 0, 2, 3, 4, 5)), "03:04:05");
+// keys: the user's bindings (⌘T ⌘W ⌘⌃hjkl) plus WezTerm's split keys; nothing else is taken
+const key = (o) => Object.assign({{ key: "", metaKey: false, ctrlKey: false, shiftKey: false, altKey: false }}, o);
+assert.deepStrictEqual(t.shortcut(key({{ key: "t", metaKey: true }}), true), {{ action: "new-tab" }});
+assert.deepStrictEqual(t.shortcut(key({{ key: "w", metaKey: true }}), true), {{ action: "close" }});
+assert.deepStrictEqual(t.shortcut(key({{ key: "h", metaKey: true, ctrlKey: true }}), true), {{ action: "focus", dir: "left" }});
+assert.deepStrictEqual(t.shortcut(key({{ key: "j", metaKey: true, ctrlKey: true }}), true), {{ action: "focus", dir: "down" }});
+assert.deepStrictEqual(t.shortcut(key({{ key: "3", metaKey: true }}), true), {{ action: "tab", index: 2 }});
+assert.deepStrictEqual(t.shortcut(key({{ key: '"', ctrlKey: true, shiftKey: true, altKey: true }}), true), {{ action: "split", dir: "v" }});
+assert.deepStrictEqual(t.shortcut(key({{ key: "T", ctrlKey: true, shiftKey: true }}), false), {{ action: "new-tab" }});
+// plain typing, Ctrl-C/Ctrl-W/Ctrl-T for the shell and bare Cmd on a non-mac are left alone
+for (const e of [key({{ key: "t" }}), key({{ key: "c", ctrlKey: true }}), key({{ key: "w", ctrlKey: true }}),
+  key({{ key: "t", ctrlKey: true }}), key({{ key: "a", metaKey: true }})]) assert.strictEqual(t.shortcut(e, true), null, JSON.stringify(e));
+assert.strictEqual(t.shortcut(key({{ key: "t", metaKey: true }}), false), null);
+"##
+            );
+            let dir = tempfile::tempdir().unwrap();
+            let js = dir.path().join("t.js");
+            std::fs::write(&js, script).unwrap();
+            let out = std::process::Command::new("node")
+                .arg(&js)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "{}{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+
+        #[test]
+        fn the_vendored_terminal_files_match_their_checksums() {
+            use sha2::{Digest, Sha256};
+            let sums = include_str!("terminal/vendor/SHA256SUMS");
+            let mut seen = 0;
+            for line in sums.lines().filter(|l| !l.trim().is_empty()) {
+                let (want, name) = line.split_once("  ").expect("sha256sum format");
+                let body = TERMINAL_FILES
+                    .iter()
+                    .find(|(n, _, _)| *n == name)
+                    .map(|(_, _, b)| *b);
+                let Some(body) = body else {
+                    assert_eq!(name, "LICENSE-xterm", "{name} is listed but not served");
+                    continue;
+                };
+                let got: String = Sha256::digest(body.as_bytes())
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect();
+                assert_eq!(got, want, "{name} differs from what was vendored");
+                seen += 1;
+            }
+            // xterm.js, xterm.css and the seven add-ons; terminal.js and terminal.css are ours.
+            assert_eq!(seen, 9, "every vendored file is checksummed");
+            assert!(!sums.contains("sourceMappingURL"));
         }
 
         #[tokio::test]

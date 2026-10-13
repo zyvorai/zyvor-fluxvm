@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- **Browser terminal.** `/console/terminal?session=<id>` and `fluxctl agent shell --web`: xterm.js (vendored, MIT) with
+  WebGL, tabs and split panes, themes (default "Neon Storm" after the author's WezTerm config), inline images
+  (sixel, iTerm2), links, a clock, and WezTerm-style keys. Auth for the WebSocket is a 30 s single-use in-memory ticket
+  (`POST /v1/agents/sessions/{id}/pty-ticket`). No search, copy mode or quick select yet. Run in headless Chrome on vz.
+
 - **Plain ssh into a session and terminal-program forwarding.** `fluxctl agent ssh-config <session> [--name N]`
   (`GET .../ssh`) prints an OpenSSH `Host` block (address, or a `vsock-proxy` ProxyCommand for an offline guest) so
   `ssh`, `scp`, `rsync` and WezTerm's `wezterm ssh` work; local machine only, refused to tenant tokens.
