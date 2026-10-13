@@ -227,6 +227,15 @@ impl VmManager {
         })
     }
 
+    /// How to reach a vz Linux guest with plain `ssh`: the user, the address (or `vsock` with the runner's proxy
+    /// socket for a guest with no network card) and the shared sandbox key on this host.
+    pub fn ssh_target(&self, vm: &VmRecord) -> Result<GuestSsh> {
+        if vm.backend != fluxvm_core::model::BackendKind::Vz || crate::oci_sandbox::is_oci(vm) {
+            bail!("only a vz Linux sandbox is reached over SSH");
+        }
+        self.vz_guest(vm)
+    }
+
     /// Starts an interactive shell (or `script`) in a vz Linux guest on a pseudo-terminal over SSH. The child's stdin
     /// and stdout are the terminal. Container (OCI) sandboxes run no sshd and cannot.
     pub fn pty_spawn(&self, vm: &VmRecord, script: &str) -> Result<tokio::process::Child> {

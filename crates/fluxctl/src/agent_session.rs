@@ -181,9 +181,21 @@ pub enum AgentCommand {
     /// session with `--cmd-allow/--cmd-deny` rules. REST: `GET .../pty` (WebSocket).
     Shell {
         id: Uuid,
+        /// Start the login shell as it is, without the colour aliases and coloured man pages.
+        #[arg(long)]
+        plain: bool,
         /// Run this on the terminal instead of a login shell.
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         command: Vec<String>,
+    },
+    /// Print an OpenSSH config block for the session's guest, so any ssh client works with it:
+    /// `ssh`, `scp`, `rsync`, port forwards, and WezTerm's panes and tabs (`wezterm ssh HOST`).
+    /// Only valid on the machine running the daemon (the key is that host's). REST: `GET .../ssh`.
+    SshConfig {
+        id: Uuid,
+        /// Host alias; `fluxvm-<first 8 of the session id>` when left out.
+        #[arg(long)]
+        name: Option<String>,
     },
     /// Delete the session and its sandbox. REST: `DELETE /v1/agents/sessions/{id}`.
     Rm { id: Uuid },
@@ -498,7 +510,16 @@ pub async fn run(r: &Remote, cmd: AgentCommand) -> Result<()> {
             )
             .await?,
         ),
-        AgentCommand::Shell { id, command } => shell(r, id, &command).await,
+        AgentCommand::SshConfig { id, name } => {
+            let v = r
+                .call(Method::GET, &format!("/v1/agents/sessions/{id}/ssh"), None)
+                .await
+                .context("ssh details")?;
+            let alias = name.unwrap_or_else(|| format!("fluxvm-{}", &id.to_string()[..8]));
+            print!("{}", ssh_config_block(&alias, &v)?);
+            Ok(())
+        }
+        AgentCommand::Shell { id, plain, command } => shell(r, id, &command, plain).await,
         AgentCommand::Export {
             id,
             out,
@@ -910,14 +931,94 @@ pub(crate) fn pty_url(base: &str, id: Uuid, cols: u16, rows: u16, command: Optio
     url
 }
 
-async fn shell(r: &Remote, id: Uuid, command: &[String]) -> Result<()> {
+/// An OpenSSH `Host` block from `GET .../ssh`. The guest is new every session, so host keys are
+/// not recorded; a vsock guest goes through this binary's `vsock-proxy`. Pure, so it is unit-tested.
+pub(crate) fn ssh_config_block(alias: &str, v: &Value) -> Result<String> {
+    if alias.is_empty()
+        || !alias
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+    {
+        anyhow::bail!("host alias {alias:?} may use letters, digits, '.', '_' and '-'");
+    }
+    let user = v["user"].as_str().context("no user in the answer")?;
+    let key = v["identity_file"]
+        .as_str()
+        .context("no identity file in the answer")?;
+    let mut out = format!("Host {alias}\n");
+    match (v["host"].as_str(), v["vsock_socket"].as_str()) {
+        (Some(host), _) => out.push_str(&format!("  HostName {host}\n")),
+        (None, Some(sock)) => {
+            let exe = std::env::current_exe().unwrap_or_else(|_| "fluxctl".into());
+            out.push_str("  HostName vsock\n");
+            out.push_str(&format!(
+                "  ProxyCommand {}\n",
+                fluxvm_apple::ssh::proxy_command(&exe, std::path::Path::new(sock))
+            ));
+        }
+        (None, None) => anyhow::bail!("the daemon returned neither an address nor a vsock socket"),
+    }
+    out.push_str(&format!(
+        "  User {user}\n  IdentityFile {key}\n  IdentitiesOnly yes\n  StrictHostKeyChecking no\n  UserKnownHostsFile /dev/null\n  LogLevel ERROR\n"
+    ));
+    Ok(out)
+}
+
+/// The `&term=&colorterm=&plain=` part of the terminal URL for this client. Pure, so it is
+/// unit-tested; the daemon validates `term` again.
+pub(crate) fn pty_look_query(term: Option<&str>, colorterm: Option<&str>, plain: bool) -> String {
+    let mut q = String::new();
+    if let Some(t) = term.filter(|t| !t.is_empty() && *t != "dumb") {
+        q.push_str("&term=");
+        q.push_str(&crate::remote::encode_query(t));
+    }
+    if let Some(c) = colorterm.filter(|c| matches!(*c, "truecolor" | "24bit")) {
+        q.push_str("&colorterm=");
+        q.push_str(c);
+    }
+    if plain {
+        q.push_str("&plain=true");
+    }
+    q
+}
+
+/// `&term_program=&term_program_version=` from this terminal (WezTerm, iTerm.app, ...).
+pub(crate) fn pty_program_query(program: Option<&str>, version: Option<&str>) -> String {
+    let ok = |s: &str| {
+        !s.is_empty()
+            && s.len() <= 40
+            && s.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"._+-".contains(&b))
+    };
+    let Some(p) = program.filter(|p| ok(p)) else {
+        return String::new();
+    };
+    let mut q = format!("&term_program={}", crate::remote::encode_query(p));
+    if let Some(v) = version.filter(|v| ok(v)) {
+        q.push_str("&term_program_version=");
+        q.push_str(&crate::remote::encode_query(v));
+    }
+    q
+}
+
+async fn shell(r: &Remote, id: Uuid, command: &[String], plain: bool) -> Result<()> {
     use futures_util::{SinkExt, StreamExt};
     use std::io::Write as _;
     use tokio_tungstenite::tungstenite::{Message, client::IntoClientRequest};
 
     let (cols, rows) = terminal_size();
     let cmd = (!command.is_empty()).then(|| guest_command(command));
-    let url = pty_url(r.base(), id, cols, rows, cmd.as_deref());
+    let mut url = pty_url(r.base(), id, cols, rows, cmd.as_deref());
+    // Tell the guest what this terminal is, so colours and keys match what the user is looking at.
+    url.push_str(&pty_look_query(
+        std::env::var("TERM").ok().as_deref(),
+        std::env::var("COLORTERM").ok().as_deref(),
+        plain,
+    ));
+    url.push_str(&pty_program_query(
+        std::env::var("TERM_PROGRAM").ok().as_deref(),
+        std::env::var("TERM_PROGRAM_VERSION").ok().as_deref(),
+    ));
     let mut req = url.as_str().into_client_request().context("terminal url")?;
     if let Some(t) = r.bearer() {
         req.headers_mut().insert(
@@ -1231,6 +1332,61 @@ mod tests {
             "'sh' '-c' 'uname -a; exit 3'"
         );
         assert_eq!(guest_command(&v(&["echo", "it's"])), "'echo' 'it'\\''s'");
+    }
+
+    #[test]
+    fn the_terminal_program_is_forwarded_as_plain_words() {
+        assert_eq!(pty_program_query(None, None), "");
+        assert_eq!(
+            pty_program_query(Some("WezTerm"), Some("20240203-110809-5046fc22")),
+            "&term_program=WezTerm&term_program_version=20240203-110809-5046fc22"
+        );
+        assert_eq!(
+            pty_program_query(Some("iTerm.app"), None),
+            "&term_program=iTerm.app"
+        );
+        assert_eq!(pty_program_query(Some("a b"), Some("1")), "");
+        assert_eq!(pty_program_query(Some("x"), Some("a;b")), "&term_program=x");
+    }
+
+    #[test]
+    fn an_ssh_config_block_covers_an_address_and_a_vsock_guest() {
+        let nat = ssh_config_block(
+            "fluxvm-ab12cd34",
+            &json!({"user": "sandbox", "host": "192.168.64.6", "identity_file": "/k/id", "vsock_socket": null}),
+        )
+        .unwrap();
+        assert!(nat.starts_with("Host fluxvm-ab12cd34\n"));
+        assert!(nat.contains("HostName 192.168.64.6") && nat.contains("User sandbox"));
+        assert!(nat.contains("IdentityFile /k/id") && nat.contains("StrictHostKeyChecking no"));
+        assert!(!nat.contains("ProxyCommand"));
+        let off = ssh_config_block(
+            "w",
+            &json!({"user": "sandbox", "host": null, "identity_file": "/k/id", "vsock_socket": "/s/vsock.sock"}),
+        )
+        .unwrap();
+        assert!(
+            off.contains("ProxyCommand")
+                && off.contains("vsock-proxy")
+                && off.contains("'/s/vsock.sock' 22")
+        );
+        assert!(ssh_config_block("bad name", &json!({})).is_err());
+        assert!(ssh_config_block("ok", &json!({"user": "u", "identity_file": "k"})).is_err());
+    }
+
+    #[test]
+    fn the_terminal_look_is_taken_from_this_terminal() {
+        assert_eq!(pty_look_query(None, None, false), "");
+        assert_eq!(pty_look_query(Some("dumb"), None, false), "");
+        assert_eq!(
+            pty_look_query(Some("xterm-256color"), Some("truecolor"), false),
+            "&term=xterm-256color&colorterm=truecolor"
+        );
+        // an unknown COLORTERM value is not forwarded; the shell never sees raw client text
+        assert_eq!(
+            pty_look_query(Some("a b"), Some("rm"), true),
+            "&term=a%20b&plain=true"
+        );
     }
 
     #[test]
