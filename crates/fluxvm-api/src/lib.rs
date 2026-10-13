@@ -40,6 +40,7 @@ mod rate_limit;
 #[cfg(target_os = "macos")]
 pub mod self_control;
 pub use netobs_api::install_netobs;
+mod agent_sessions;
 mod macos_pool_api;
 mod speculate_api;
 mod tunnel_api;
@@ -793,6 +794,7 @@ pub fn router(manager: Arc<VmManager>) -> Router {
             idempotency::middleware,
         ))
         .merge(speculate_api::routes())
+        .merge(agent_sessions::routes())
         .merge(macos_pool_api::routes())
         .merge(vz_api::routes())
         .merge(volumes_api::routes())
@@ -6801,6 +6803,168 @@ mod tests {
             .await;
             assert_eq!(st, StatusCode::BAD_REQUEST);
             assert!(body.contains("vz backend"), "{body}");
+        }
+
+        /// Writes a session record the way `agent_sessions::save` does, so the routes can be exercised
+        /// without booting a sandbox.
+        fn seed_session(m: &VmManager, tenant: Option<&str>, backend: &str, state: &str) -> Uuid {
+            let id = Uuid::new_v4();
+            let dir = m.cfg.state_dir.join("agent-sessions");
+            std::fs::create_dir_all(&dir).unwrap();
+            let rec = json!({
+                "id": id, "agent": "claude-code", "sandbox_id": Uuid::new_v4(), "backend": backend,
+                "parent": null, "children": [], "tenant": tenant, "state": state,
+                "created_at": chrono::Utc::now(), "expires_at": null,
+                "capabilities": {"snapshot": true, "fork": backend == "flux-vm", "pty": false},
+                "policy": {"preset": null, "offline": false, "allow_hosts": [], "unenforced": []},
+                "workspace": null, "checkpoints": [],
+            });
+            std::fs::write(dir.join(format!("{id}.json")), rec.to_string()).unwrap();
+            std::fs::write(
+                dir.join(format!("{id}.ledger.jsonl")),
+                format!(
+                    "{}\n",
+                    json!({"ts": chrono::Utc::now(), "kind": "exec", "detail": {"command": "true"}})
+                ),
+            )
+            .unwrap();
+            id
+        }
+
+        #[tokio::test]
+        async fn agent_sessions_are_tenant_scoped() {
+            let m = procbox_manager(tenant_tokens(), false);
+            let id = seed_session(&m, Some("acme"), "vz", "running");
+            let app = router(m);
+            let uri = format!("/v1/agents/sessions/{id}");
+            let (st, body) = call(app.clone(), "GET", &uri, "acme", None).await;
+            assert_eq!(st, StatusCode::OK, "{body}");
+            assert!(body.contains(r#""fork":false"#), "{body}");
+            // Another tenant gets a 404 on every route, not a 403 that confirms the id.
+            for (method, suffix) in [
+                ("GET", ""),
+                ("GET", "/events"),
+                ("GET", "/artifacts"),
+                ("DELETE", ""),
+            ] {
+                let (st, _) = call(
+                    app.clone(),
+                    method,
+                    &format!("{uri}{suffix}"),
+                    "other",
+                    None,
+                )
+                .await;
+                assert_eq!(st, StatusCode::NOT_FOUND, "{method} {suffix}");
+            }
+            let (_, list) = call(app, "GET", "/v1/agents/sessions", "other", None).await;
+            assert!(!list.contains(&id.to_string()), "{list}");
+        }
+
+        #[tokio::test]
+        async fn agent_session_fork_is_refused_where_the_backend_cannot_do_it() {
+            let m = procbox_manager(tenant_tokens(), false);
+            let id = seed_session(&m, Some("acme"), "vz", "running");
+            let (st, body) = call(
+                router(m),
+                "POST",
+                &format!("/v1/agents/sessions/{id}/fork"),
+                "acme",
+                Some(r#"{"count":2}"#),
+            )
+            .await;
+            assert_eq!(st, StatusCode::CONFLICT, "{body}");
+            assert!(body.contains("not available on backend vz"), "{body}");
+        }
+
+        #[tokio::test]
+        async fn agent_session_inputs_are_validated_before_any_sandbox_is_made() {
+            let m = procbox_manager(tenant_tokens(), false);
+            let app = router(m.clone());
+            for body in [
+                r#"{"policy":{"preset":"nope"}}"#,
+                r#"{"policy":{"network":{"allow":[{"host":"a.b","methods":["GET"]}]}}}"#,
+                r#"{"workspace":{"git":"git@github.com:a/b.git"}}"#,
+                r#"{"workspace":{"path":"/a/../b"}}"#,
+                r#"{"workspace":{"mode":"overlay"}}"#,
+                r#"{"agent":"bad agent"}"#,
+            ] {
+                let (st, msg) = call(
+                    app.clone(),
+                    "POST",
+                    "/v1/agents/sessions",
+                    "acme",
+                    Some(body),
+                )
+                .await;
+                assert_eq!(st, StatusCode::BAD_REQUEST, "{body} -> {msg}");
+            }
+            assert!(
+                !m.cfg.state_dir.join("agent-sessions").exists(),
+                "a refused request must leave no session behind"
+            );
+            let id = seed_session(&m, Some("acme"), "vz", "running");
+            let base = format!("/v1/agents/sessions/{id}");
+            let (st, _) = call(
+                app.clone(),
+                "POST",
+                &format!("{base}/checkpoint"),
+                "acme",
+                Some(r#"{"tag":"a/b"}"#),
+            )
+            .await;
+            assert_eq!(st, StatusCode::BAD_REQUEST);
+            let (st, body) = call(
+                app.clone(),
+                "POST",
+                &format!("{base}/restore"),
+                "acme",
+                Some(r#"{"tag":"nope"}"#),
+            )
+            .await;
+            assert_eq!(st, StatusCode::NOT_FOUND, "{body}");
+            let (st, _) = call(
+                app,
+                "POST",
+                &format!("{base}/exec"),
+                "acme",
+                Some(r#"{"command":"  "}"#),
+            )
+            .await;
+            assert_eq!(st, StatusCode::BAD_REQUEST);
+        }
+
+        #[tokio::test]
+        async fn agent_session_delete_is_idempotent_and_closes_the_session() {
+            let m = procbox_manager(tenant_tokens(), false);
+            let id = seed_session(&m, Some("acme"), "vz", "running");
+            let app = router(m);
+            let base = format!("/v1/agents/sessions/{id}");
+            // The seeded sandbox does not exist: the delete is logged, the session still closes.
+            for _ in 0..2 {
+                let (st, body) = call(app.clone(), "DELETE", &base, "acme", None).await;
+                assert_eq!(st, StatusCode::NO_CONTENT, "{body}");
+            }
+            let (_, body) = call(app.clone(), "GET", &base, "acme", None).await;
+            assert!(body.contains(r#""state":"deleted""#), "{body}");
+            let (st, _) = call(
+                app.clone(),
+                "POST",
+                &format!("{base}/exec"),
+                "acme",
+                Some(r#"{"command":"true"}"#),
+            )
+            .await;
+            assert_eq!(
+                st,
+                StatusCode::CONFLICT,
+                "a deleted session cannot run commands"
+            );
+            let (_, ev) = call(app, "GET", &format!("{base}/events"), "acme", None).await;
+            assert!(
+                ev.contains("session.delete") && ev.contains(r#""kind":"exec""#),
+                "{ev}"
+            );
         }
 
         #[tokio::test]
