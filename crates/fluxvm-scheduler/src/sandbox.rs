@@ -39,6 +39,11 @@ pub struct SandboxCreateRequest {
     /// belongs to the caller's tenant and can be attached to one VM at a time.
     #[serde(default)]
     pub volumes: Vec<SandboxVolume>,
+    /// vz only: raw disks appended to the sandbox's `apple.extra_disks` (virtio). The caller owns
+    /// what they point at; they must sit under this host's volumes directory or an allowed image
+    /// directory like any extra disk. Agent sessions use this to attach a named volume.
+    #[serde(default)]
+    pub extra_disks: Vec<fluxvm_core::model::AppleDisk>,
     /// Override the template's vCPU count. Must not exceed the template's own
     /// `max_vcpus` when it sets one.
     #[serde(default)]
@@ -283,12 +288,17 @@ impl VmManager {
             && req.spec.is_none()
             && req.image.is_none()
             && req.volumes.is_empty()
+            && req.extra_disks.is_empty()
             && vcpus.is_none()
             && memory_mib.is_none()
             && gpus == 0
             && !req.offline
             && req.allow_hosts.is_empty()
             && token_tenant.is_none();
+        let extra_disks = req.extra_disks.clone();
+        if !extra_disks.is_empty() && !cfg!(target_os = "macos") {
+            bail!("extra_disks are only supported on the vz backend (macOS)");
+        }
         let (claim_name, claim_ttl) = (req.name.clone(), req.ttl_seconds);
         let allow_hosts = req.allow_hosts.clone();
         let offline = req.offline || !allow_hosts.is_empty();
@@ -308,6 +318,13 @@ impl VmManager {
             bail!("sandbox create requires `template` or `spec`");
         };
         apply_resources(&mut create, vcpus, memory_mib)?;
+        if !extra_disks.is_empty() {
+            create
+                .apple
+                .get_or_insert_with(Default::default)
+                .extra_disks
+                .extend(extra_disks);
+        }
         enforce_sandbox_tenant(&mut create, token_tenant)?;
         create.created_by_token = created_by_token.map(String::from);
         // On a Mac the only backend that runs is Apple's (`vz`), so a spec that did not ask for another one gets it.

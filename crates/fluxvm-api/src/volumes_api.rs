@@ -63,7 +63,7 @@ pub(crate) enum VolumeError {
     Io(String),
 }
 
-fn api_err(e: VolumeError) -> ApiError {
+pub(crate) fn api_err(e: VolumeError) -> ApiError {
     let (status, message) = match e {
         VolumeError::Invalid(m) => (StatusCode::BAD_REQUEST, m),
         VolumeError::NotFound(m) => (StatusCode::NOT_FOUND, m),
@@ -287,11 +287,11 @@ pub(crate) fn grow_in(
     info(dir, name, refs)
 }
 
-fn volume_dir(m: &VmManager) -> PathBuf {
+pub(crate) fn volume_dir(m: &VmManager) -> PathBuf {
     m.cfg.state_dir.join("volumes")
 }
 
-async fn refs_of(m: &VmManager) -> Vec<(String, PathBuf)> {
+pub(crate) async fn refs_of(m: &VmManager) -> Vec<(String, PathBuf)> {
     references(&m.list().await)
 }
 

@@ -1266,6 +1266,7 @@ pub fn tools(remote: Arc<Remote>) -> Vec<Tool> {
                     "policy": {"type": "string", "enum": ["offline", "developer-safe", "open"]},
                     "allow": {"type": "array", "items": {"type": "string"}, "description": "host names the session may reach; everything else is refused"},
                     "image": {"type": "string", "description": "guest image, e.g. agent-micro"},
+                    "volumes": {"type": "array", "items": {"type": "string"}, "description": "named host volumes as NAME:/guest/path (vz only; formatted ext4 on first use; the session cannot fork)"},
                     "allow_commands": {"type": "array", "items": {"type": "string"}, "description": "command patterns (* wildcard) session_exec may run; other commands are refused. A guardrail on the command string, not a security boundary"},
                     "deny_commands": {"type": "array", "items": {"type": "string"}, "description": "command patterns (* wildcard) session_exec refuses"},
                     "ttl_seconds": {"type": "integer", "minimum": 30},
@@ -1304,6 +1305,7 @@ pub fn tools(remote: Arc<Remote>) -> Vec<Tool> {
                             })
                             .unwrap_or_default()
                     };
+                    crate::agent_session::add_volumes(&mut body, &strs("volumes"))?;
                     crate::agent_session::add_process_rules(
                         &mut body,
                         &strs("allow_commands"),

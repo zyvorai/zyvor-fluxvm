@@ -24,7 +24,7 @@ Sources for microsandbox: its README and release notes (v0.7.x, October 2026; th
 | Network allow-list | host allow-list in config; CONNECT proxy; 403 denial bodies; published ports | host allow-list via the egress proxy on `vz` ([macos-sandboxes.md](macos-sandboxes.md)); eBPF fabric with CIDR/port/DNS/rate rules on Linux ([network-fabric.md](network-fabric.md)); HTTP method/path ACL ([http-acl.md](http-acl.md)) | allow-list **Run** on `vz` (through a session: allowed host 200, other host refused, direct connection no route); eBPF fabric **Not run** on a real host in this repo |
 | Secrets that never enter the VM | yes: host-scoped placeholders, TLS interception, header-scoped | credential broker: per-sandbox header grants injected by the egress proxy ([credential-broker.md](credential-broker.md)) | **Tests**; "not yet verified on hardware" per that doc |
 | Rootless process sandbox | not documented | `fluxvm-procbox` Landlock + seccomp with a `learn` mode ([procbox.md](procbox.md)) | **Tests** (Linux) |
-| Volumes | yes | named volumes on QEMU templates and container sandboxes; not for `vz` VM sandboxes ([macos-sandboxes.md](macos-sandboxes.md)) | partial |
+| Volumes | yes | named volumes on QEMU templates and container sandboxes; agent sessions on `vz` attach a named raw-disk volume (`--volume`, one VM at a time, no fork). Plain `vz` VM sandboxes do not take `volumes` ([macos-sandboxes.md](macos-sandboxes.md)) | partial |
 | GPUs | not mentioned | VFIO GPU sandboxes on QEMU ([sandbox-gpus.md](sandbox-gpus.md)) | **Not run** on real GPUs |
 | Config file for a sandbox | YAML with scripts | JSON create specs; session policy presets | **Behind** (no YAML/script format) |
 | Install a sandbox as a command | `msb install` | no | **Behind** |
