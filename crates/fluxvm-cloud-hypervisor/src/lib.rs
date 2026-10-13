@@ -222,7 +222,7 @@ pub fn build_args(
     for (tag, socket) in virtiofs_sockets {
         a.extend([
             "--fs".into(),
-            format!("tag={tag},socket={},dax=off", path_arg(socket)),
+            format!("tag={tag},socket={}", path_arg(socket)),
         ]);
     }
 
@@ -363,7 +363,7 @@ pub async fn hotplug_virtiofs(
     let (pid, socket) =
         fluxvm_core::virtiofs::spawn_virtiofsd_one(cfg, &vm.workspace, index, host_path).await?;
     let api = vm.workspace.join("ch-api.sock");
-    let fs_arg = format!("tag={tag},socket={},dax=off", path_arg(&socket));
+    let fs_arg = format!("tag={tag},socket={}", path_arg(&socket));
     let result = run_checked_timeout(
         &cfg.ch_remote_binary,
         &[
@@ -1060,6 +1060,22 @@ mod tests {
         let vm = vm_record(dir.path().to_path_buf());
         let err = hotplug_memory(&cfg, &vm, 0).await.unwrap_err();
         assert!(format!("{err:#}").contains("greater than zero"));
+    }
+
+    #[test]
+    fn virtiofs_shares_pass_only_tag_and_socket() {
+        let socks = [(
+            "fs0".to_string(),
+            std::path::PathBuf::from("/w/virtiofs-0.sock"),
+        )];
+        let args = build_args(&cfg(), &req(), &ctx(), &socks).unwrap();
+        let fs = args
+            .iter()
+            .position(|a| a == "--fs")
+            .map(|i| &args[i + 1])
+            .unwrap();
+        // Cloud Hypervisor dropped DAX; current releases refuse a `dax` option.
+        assert_eq!(fs, "tag=fs0,socket=/w/virtiofs-0.sock");
     }
 
     #[test]

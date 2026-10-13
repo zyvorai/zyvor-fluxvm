@@ -109,6 +109,11 @@ a real daemon, Linux, a real OpenTelemetry collector and a successful `git clone
   on `vz` with "network namespaces are only available on Linux"; on non-Linux hosts it now connects to the guest's NAT
   address directly (`/v1/sandboxes/{id}/http/{port}/*`).
 
+### Fixed
+- **Cloud Hypervisor virtiofs shares.** The `--fs` argument (boot and hot-add) no longer passes `dax=off`. Cloud
+  Hypervisor dropped DAX and current releases (v53 here) refuse the option, so a VM with a share exited at start while
+  FluxVM reported it running.
+
 ## 0.4.7 (2026-10-13)
 
 This release is about FluxMesh. It adds a new crate, `fluxvm-mesh`, and `fluxctl cloud`; **nothing in the macOS package
