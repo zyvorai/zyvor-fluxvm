@@ -166,6 +166,24 @@ pub enum AgentCommand {
     Unexpose { id: Uuid, token: String },
     /// Delete the session and its sandbox. REST: `DELETE /v1/agents/sessions/{id}`.
     Rm { id: Uuid },
+    /// Fork COUNT children, run the same command in each in parallel, print every result, then
+    /// delete the children (unless `--keep`). Composed from fork, exec and delete; each child is
+    /// a full sandbox, so COUNT is bounded by the host. Same forkability rules as `fork`.
+    Rollout {
+        id: Uuid,
+        #[arg(long, default_value_t = 2)]
+        count: u32,
+        /// Per-command timeout in seconds.
+        #[arg(long)]
+        timeout_seconds: Option<u64>,
+        /// Keep the children (their ids are in the output) instead of deleting them.
+        #[arg(long)]
+        keep: bool,
+        #[arg(long)]
+        identity: Option<String>,
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, required = true)]
+        command: Vec<String>,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -227,6 +245,85 @@ fn git_query(repo: &Option<String>, extra: &[(&str, String)]) -> String {
 fn show(v: &Value) -> Result<()> {
     println!("{}", serde_json::to_string_pretty(v)?);
     Ok(())
+}
+
+/// Fork, run `command` in every child at once, collect the results, delete the children unless
+/// `keep`. A child that fails to exec is reported in its own entry; it never aborts the others.
+pub(crate) async fn rollout(
+    r: &Remote,
+    id: Uuid,
+    count: u32,
+    command: &str,
+    timeout_seconds: Option<u64>,
+    keep: bool,
+    identity: Option<&str>,
+) -> Result<Value> {
+    let mut fork_body = json!({"count": count});
+    if let Some(i) = identity {
+        fork_body["identity"] = json!(i);
+    }
+    let forked = r
+        .call(
+            Method::POST,
+            &format!("/v1/agents/sessions/{id}/fork"),
+            Some(fork_body),
+        )
+        .await
+        .context("fork")?;
+    let kids: Vec<String> = forked["items"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|c| c["id"].as_str().map(str::to_string))
+        .collect();
+    let started = std::time::Instant::now();
+    let runs = kids.iter().map(|cid| async move {
+        let mut body = json!({"command": command});
+        if let Some(t) = timeout_seconds {
+            body["timeout_seconds"] = json!(t);
+        }
+        let t0 = std::time::Instant::now();
+        match r
+            .call(
+                Method::POST,
+                &format!("/v1/agents/sessions/{cid}/exec"),
+                Some(body),
+            )
+            .await
+        {
+            Ok(v) => json!({
+                "session": cid,
+                "exit_code": v["exit_code"],
+                "stdout": v["stdout"],
+                "stderr": v["stderr"],
+                "duration_ms": t0.elapsed().as_millis() as u64,
+            }),
+            Err(e) => json!({"session": cid, "error": format!("{e:#}")}),
+        }
+    });
+    let results = futures_util::future::join_all(runs).await;
+    let exec_ms = started.elapsed().as_millis() as u64;
+    let mut deleted = 0;
+    if !keep {
+        let dels = kids.iter().map(|cid| async move {
+            r.call(Method::DELETE, &format!("/v1/agents/sessions/{cid}"), None)
+                .await
+                .is_ok()
+        });
+        deleted = futures_util::future::join_all(dels)
+            .await
+            .into_iter()
+            .filter(|ok| *ok)
+            .count();
+    }
+    Ok(json!({
+        "parent": id,
+        "fork_ms": forked["total_ms"],
+        "exec_wall_ms": exec_ms,
+        "results": results,
+        "children_kept": keep,
+        "children_deleted": deleted,
+    }))
 }
 
 pub async fn run(r: &Remote, cmd: AgentCommand) -> Result<()> {
@@ -359,6 +456,25 @@ pub async fn run(r: &Remote, cmd: AgentCommand) -> Result<()> {
             }
             Ok(())
         }
+        AgentCommand::Rollout {
+            id,
+            count,
+            timeout_seconds,
+            keep,
+            identity,
+            command,
+        } => show(
+            &rollout(
+                r,
+                id,
+                count,
+                &guest_command(&command),
+                timeout_seconds,
+                keep,
+                identity.as_deref(),
+            )
+            .await?,
+        ),
         AgentCommand::Export { id, out } => {
             use std::io::Write as _;
             let v = r
