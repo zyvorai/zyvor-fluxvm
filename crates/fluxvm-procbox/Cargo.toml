@@ -3,7 +3,7 @@
 
 [package]
 name = "fluxvm-procbox"
-version = "0.4.7"
+version = "0.4.8"
 edition = "2021"
 license = "Apache-2.0"
 description = "Rootless Landlock + seccomp process sandbox (lightweight tier under FluxVM microVMs)"
