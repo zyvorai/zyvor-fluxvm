@@ -97,9 +97,17 @@ pub enum AgentCommand {
     /// line, then one line per step. REST: `GET .../trajectory`.
     Export {
         id: Uuid,
-        /// File to write; stdout when omitted.
+        /// File to write; stdout when omitted (and no `--otlp`).
         #[arg(long)]
         out: Option<std::path::PathBuf>,
+        /// Also send the trajectory as OpenTelemetry traces (OTLP/HTTP JSON) to this collector,
+        /// e.g. `http://localhost:4318`; `/v1/traces` is appended unless already there. With
+        /// `--otlp` and no `--out`, nothing is printed.
+        #[arg(long)]
+        otlp: Option<String>,
+        /// Header sent to the collector, `KEY=VALUE` (repeatable), e.g. an auth token.
+        #[arg(long = "otlp-header")]
+        otlp_header: Vec<String>,
     },
     /// Workspace changes since the baseline, checkpoints and children. REST: `GET .../artifacts`.
     Artifacts { id: Uuid },
@@ -481,7 +489,12 @@ pub async fn run(r: &Remote, cmd: AgentCommand) -> Result<()> {
             )
             .await?,
         ),
-        AgentCommand::Export { id, out } => {
+        AgentCommand::Export {
+            id,
+            out,
+            otlp,
+            otlp_header,
+        } => {
             use std::io::Write as _;
             let v = r
                 .call(
@@ -491,6 +504,19 @@ pub async fn run(r: &Remote, cmd: AgentCommand) -> Result<()> {
                 )
                 .await
                 .context("trajectory")?;
+            if let Some(endpoint) = &otlp {
+                let doc = otlp_traces(&v)?;
+                send_otlp(endpoint, &otlp_header, &doc).await?;
+                eprintln!(
+                    "sent {} spans to {endpoint}",
+                    doc["resourceSpans"][0]["scopeSpans"][0]["spans"]
+                        .as_array()
+                        .map_or(0, Vec::len)
+                );
+                if out.is_none() {
+                    return Ok(());
+                }
+            }
             let mut buf = Vec::new();
             writeln!(
                 buf,
@@ -811,6 +837,137 @@ fn guest_command(args: &[String]) -> String {
 }
 
 /// The `POST /v1/agents/sessions` body for `agent run` flags.
+fn span_id(session: &str, tag: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let h = Sha256::digest(format!("{session}:{tag}"));
+    let mut id = u64::from_be_bytes(h[..8].try_into().expect("8 bytes"));
+    if id == 0 {
+        id = 1; // an all-zero span id is invalid in OTLP
+    }
+    format!("{id:016x}")
+}
+
+fn otlp_attr(key: &str, v: &Value) -> Option<Value> {
+    let value = match v {
+        Value::String(s) => json!({"stringValue": s}),
+        Value::Bool(b) => json!({"boolValue": b}),
+        Value::Number(n) if n.is_i64() => json!({"intValue": n.to_string()}),
+        Value::Number(n) => json!({"doubleValue": n}),
+        Value::Null => return None,
+        other => json!({"stringValue": other.to_string()}),
+    };
+    Some(json!({"key": key, "value": value}))
+}
+
+/// Turn a session trajectory (`GET .../trajectory`) into an OTLP/JSON trace: one root span for
+/// the session and one child per step. The trace id is the session's UUID. The ledger stamps an
+/// `exec` when it finishes, so an exec's span ends at its stamp and starts `duration_ms` earlier;
+/// every other step is an instant (start == end). Pure, so it is unit-tested.
+pub(crate) fn otlp_traces(traj: &Value) -> Result<Value> {
+    let session = traj["session"]["id"]
+        .as_str()
+        .context("trajectory has no session id")?;
+    let trace_id = session.replace('-', "");
+    if trace_id.len() != 32 {
+        anyhow::bail!("session id {session:?} is not a UUID");
+    }
+    let nanos = |ts: &str| -> Result<i128> {
+        let t = chrono::DateTime::parse_from_rfc3339(ts)
+            .with_context(|| format!("bad timestamp {ts:?}"))?;
+        Ok(t.timestamp_nanos_opt().map(i128::from).unwrap_or(0))
+    };
+    let root_id = span_id(session, "root");
+    let steps = traj["steps"].as_array().cloned().unwrap_or_default();
+    let mut spans = Vec::new();
+    let (mut first, mut last) = (i128::MAX, 0i128);
+    for st in &steps {
+        let end = nanos(st["ts"].as_str().unwrap_or(""))?;
+        let dur_ms = st["detail"]["duration_ms"].as_u64().unwrap_or(0) as i128;
+        let start = end - dur_ms * 1_000_000;
+        first = first.min(start);
+        last = last.max(end);
+        let source = st["source"].as_str().unwrap_or("-");
+        let kind = st["kind"].as_str().unwrap_or("-");
+        let mut attrs = vec![
+            json!({"key": "fluxvm.source", "value": {"stringValue": source}}),
+            json!({"key": "fluxvm.step", "value": {"intValue": st["seq"].as_u64().unwrap_or(0).to_string()}}),
+        ];
+        if let Some(d) = st["detail"].as_object() {
+            for (k, v) in d {
+                if let Some(a) = otlp_attr(&format!("fluxvm.{k}"), v) {
+                    attrs.push(a);
+                }
+            }
+        }
+        let failed = st["detail"]["exit_code"].as_i64().is_some_and(|c| c != 0)
+            || kind.ends_with(".refused");
+        spans.push(json!({
+            "traceId": trace_id,
+            "spanId": span_id(session, &st["seq"].to_string()),
+            "parentSpanId": root_id,
+            "name": kind,
+            "kind": 1,
+            "startTimeUnixNano": start.to_string(),
+            "endTimeUnixNano": end.to_string(),
+            "attributes": attrs,
+            "status": if failed { json!({"code": 2}) } else { json!({"code": 0}) },
+        }));
+    }
+    if first == i128::MAX {
+        first = nanos(traj["session"]["created_at"].as_str().unwrap_or(""))?;
+        last = first;
+    }
+    let mut root_attrs = Vec::new();
+    for k in ["agent", "backend", "state", "sandbox_id"] {
+        if let Some(a) = otlp_attr(&format!("fluxvm.session.{k}"), &traj["session"][k]) {
+            root_attrs.push(a);
+        }
+    }
+    spans.insert(
+        0,
+        json!({
+            "traceId": trace_id,
+            "spanId": root_id,
+            "name": "agent.session",
+            "kind": 1,
+            "startTimeUnixNano": first.to_string(),
+            "endTimeUnixNano": last.to_string(),
+            "attributes": root_attrs,
+            "status": {"code": 0},
+        }),
+    );
+    Ok(json!({"resourceSpans": [{
+        "resource": {"attributes": [
+            {"key": "service.name", "value": {"stringValue": "fluxvm"}},
+        ]},
+        "scopeSpans": [{"scope": {"name": "fluxctl agent export"}, "spans": spans}],
+    }]}))
+}
+
+async fn send_otlp(endpoint: &str, headers: &[String], doc: &Value) -> Result<()> {
+    let url = if endpoint.trim_end_matches('/').ends_with("/v1/traces") {
+        endpoint.to_string()
+    } else {
+        format!("{}/v1/traces", endpoint.trim_end_matches('/'))
+    };
+    let mut req = reqwest::Client::new()
+        .post(&url)
+        .timeout(std::time::Duration::from_secs(15))
+        .json(doc);
+    for h in headers {
+        let (k, v) = h
+            .split_once('=')
+            .filter(|(k, _)| !k.is_empty())
+            .with_context(|| format!("--otlp-header {h:?} must be KEY=VALUE"))?;
+        req = req.header(k, v);
+    }
+    let resp = req.send().await.with_context(|| format!("POST {url}"))?;
+    if !resp.status().is_success() {
+        anyhow::bail!("collector answered {} for {url}", resp.status());
+    }
+    Ok(())
+}
+
 /// Add `runtime.volumes` from `NAME:/guest/path` specs.
 pub(crate) fn add_volumes(body: &mut Value, specs: &[String]) -> Result<()> {
     if specs.is_empty() {
@@ -908,6 +1065,58 @@ mod tests {
             "'sh' '-c' 'uname -a; exit 3'"
         );
         assert_eq!(guest_command(&v(&["echo", "it's"])), "'echo' 'it'\\''s'");
+    }
+
+    #[test]
+    fn a_trajectory_becomes_one_trace() {
+        let traj = json!({
+            "session": {"id": "4de0d044-b7a3-46e3-b2c7-f6279110cabd", "agent": "custom",
+                        "backend": "vz", "state": "running", "sandbox_id": "x",
+                        "created_at": "2026-10-13T09:30:00Z"},
+            "steps": [
+                {"seq": 0, "ts": "2026-10-13T09:30:10Z", "source": "vm", "kind": "vm.create", "detail": {"name": "a"}},
+                {"seq": 1, "ts": "2026-10-13T09:30:12.500Z", "source": "ledger", "kind": "exec",
+                 "detail": {"command": "ls", "exit_code": 2, "duration_ms": 500}},
+                {"seq": 2, "ts": "2026-10-13T09:30:13Z", "source": "ledger", "kind": "exec.refused", "detail": {"command": "rm"}},
+            ],
+        });
+        let doc = otlp_traces(&traj).unwrap();
+        let spans = doc["resourceSpans"][0]["scopeSpans"][0]["spans"]
+            .as_array()
+            .unwrap();
+        assert_eq!(spans.len(), 4, "root + 3 steps");
+        assert_eq!(spans[0]["name"], "agent.session");
+        assert_eq!(spans[0]["traceId"], "4de0d044b7a346e3b2c7f6279110cabd");
+        // Every child hangs off the root and shares the trace.
+        for s in &spans[1..] {
+            assert_eq!(s["parentSpanId"], spans[0]["spanId"]);
+            assert_eq!(s["traceId"], spans[0]["traceId"]);
+            assert_eq!(s["spanId"].as_str().unwrap().len(), 16);
+        }
+        // The exec ended at its stamp and started duration_ms earlier; non-zero exit is an error.
+        let exec = &spans[2];
+        let end: i128 = exec["endTimeUnixNano"].as_str().unwrap().parse().unwrap();
+        let start: i128 = exec["startTimeUnixNano"].as_str().unwrap().parse().unwrap();
+        assert_eq!(end - start, 500_000_000);
+        assert_eq!(exec["status"]["code"], 2);
+        assert_eq!(
+            spans[3]["status"]["code"], 2,
+            "a refused command is an error"
+        );
+        assert_eq!(spans[1]["status"]["code"], 0);
+        // The root covers every step.
+        let root_start: i128 = spans[0]["startTimeUnixNano"]
+            .as_str()
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!(root_start <= start);
+        let ids: std::collections::HashSet<_> = spans
+            .iter()
+            .map(|s| s["spanId"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids.len(), 4, "span ids are unique");
+        assert!(otlp_traces(&json!({"session": {"id": "nope"}, "steps": []})).is_err());
     }
 
     #[test]
