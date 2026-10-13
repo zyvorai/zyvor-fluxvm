@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- **Process rules enforced.** A session's `policy.process: {allow, deny}` (glob patterns over the command string) is
+  now checked on `exec` and job start: a refused command is `403` and ledgered as `exec.refused`/`job.refused`.
+  Compound commands are split and each piece checked. This is a guardrail against accidents, not a sandbox
+  boundary. `process.ask` is refused at create (no approval flow yet); `filesystem` rules are still unenforced.
+
 - **Trajectory export.** `GET /v1/agents/sessions/{id}/trajectory` merges the session ledger and the sandbox's VM
   events into one time-ordered, numbered list; `fluxctl agent export <session> [--out file]` writes it as JSON Lines
   (a header line, then one step per line). It records what the API and hypervisor layer did, not the agent's

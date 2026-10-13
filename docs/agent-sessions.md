@@ -57,7 +57,16 @@ A policy is compiled into fields the sandbox already enforces. The response repo
 | `preset: "open"` or no policy | nothing | n/a |
 | `network.default: "deny"` + `allow: [host…]` | `allow_hosts` (merged, de-duplicated); `offline` when nothing is allowed | as above |
 | `network.allow` entries with `methods` or `paths` | **refused (`400`)** | not supported yet; HTTP method/path rules exist for the QEMU/KVM egress proxy, not through this API |
-| `filesystem`, `process` | stored, listed under `policy.unenforced` | **nothing enforces them yet** |
+| `process: {allow: [glob…], deny: [glob…]}` | `policy.process` | the API, on `exec` and job start (`403`, ledgered as `exec.refused` / `job.refused`). A guardrail on the command string, **not a security boundary**: see below |
+| `process.ask` | **refused (`400`)** | there is no per-command approval flow yet |
+| `filesystem` | stored, listed under `policy.unenforced` | **nothing enforces it yet** |
+
+`process` rules match the command string as submitted, with `*` as the only wildcard. A command is split on
+`; && || | &` and newlines and every piece is checked: a piece matching `deny` refuses the whole command, and with a
+non-empty `allow` every piece must match one of its patterns. A shell can build a command the string never shows
+(`sh -c`, `$(...)`, variables, a script the agent wrote), so this stops accidents, not an adversary. For that, use the
+network policy and `speculate`/changesets. The rules cover `exec` and jobs; the git, file and MCP verbs run fixed
+commands and are not matched against them.
 
 ### Capabilities by backend
 
