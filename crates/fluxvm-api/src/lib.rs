@@ -1961,6 +1961,18 @@ async fn sandbox_ws_proxy(
     if let Err(e) = require_admin(role) {
         return e.into_response();
     }
+    sandbox_ws_inner(m, id, port, path, ws).await
+}
+
+/// The WebSocket bridge itself, with no authorisation: the caller decided who may use it (the
+/// admin route above, or a preview token).
+pub(crate) async fn sandbox_ws_inner(
+    m: Arc<VmManager>,
+    id: Uuid,
+    port: u16,
+    path: String,
+    ws: axum::extract::ws::WebSocketUpgrade,
+) -> Response {
     let vm = match m.ensure_running_for_request(id).await {
         Ok(v) => v,
         Err(e) => {
