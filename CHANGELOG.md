@@ -2,9 +2,16 @@
 
 ## Unreleased
 
+
 - **OTLP trace export.** `fluxctl agent export <session> --otlp http://collector:4318 [--otlp-header K=V]` sends a
   session's trajectory as one OTLP/HTTP JSON trace (root span plus a span per step). After-the-fact, built from the
   ledger: no live stream, no reasoning content. Checked against a stub receiver, not a real collector.
+
+- **Preview URLs carry WebSockets.** A WebSocket upgrade on `/preview/{token}/...` is now bridged to the guest with
+  the same token check (it used to answer `101` and then drop). Run live on vz with Chrome DevTools: navigate,
+  evaluate, screenshot. Docs gain a Chromium/CDP recipe for the stock image (needs `socat` because Chrome binds
+  DevTools to localhost). No browser image, no Playwright client run.
+
 
 - **Volumes for vz agent sessions.** `runtime.volumes` / `fluxctl agent run --volume NAME:/path` attaches a named
   host volume as a virtio disk, formats it ext4 only when `blkid` says it is empty, mounts it and persists an fstab
