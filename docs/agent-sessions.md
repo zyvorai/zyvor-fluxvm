@@ -71,6 +71,33 @@ A policy is compiled into fields the sandbox already enforces. The response repo
 
 `GET /v1/agents/sessions/{id}` reports `capabilities` for the session's backend so a client can decide without trying.
 
+### Git
+
+```bash
+fluxctl agent git <session> status
+fluxctl agent git <session> diff [--staged] [path]      # unified diff on stdout
+fluxctl agent git <session> commit "message"            # stages everything unless --staged-only
+fluxctl agent git <session> branch agent/try-1          # create and switch
+fluxctl agent git <session> log -n 5
+```
+
+REST: `GET .../git/status|diff|log`, `POST .../git/commit|branch`; MCP: one tool, `session_git` with `op`
+(`status|diff|log|commit|branch`; it needs `--allow-write` because it can commit). The repository is the session's
+workspace path unless `repo` is given. Each call runs `git` in the guest through the ordinary exec path.
+
+- **The guest needs git.** The stock `debian-13` has none: a call answers `409` and says so. A session with network
+  access can install it (`sudo -n apt-get install -y git` ran live: git 2.47.3); an `offline` session cannot, so for
+  offline work use an image that already has git.
+- Commits use the repo's `user.name`/`user.email` when set, else `FluxVM Agent <agent@fluxvm.local>`, with signing off.
+  The message goes to the ledger as `git.commit` with the commit id.
+- Branch names and diff paths that could be read as options or climb out of the repository are refused (400).
+  A diff is cut at 256 KiB (`truncated: true`).
+
+Run live (M4, `vz`, NAT session with git installed through apt): status on a fresh repo, commit, "nothing to commit"
+(409), edit then diff of one path, branch, second commit, log, "branch already exists" (409), a missing repo directory
+(404), and on an offline session without git the 409 above. **Not built:** push/pull/fetch (a push is a network and
+credential action that belongs behind an approval), merge and rebase, checkout of an existing branch, stash.
+
 ### Files
 
 ```bash

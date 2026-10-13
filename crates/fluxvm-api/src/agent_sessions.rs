@@ -27,6 +27,11 @@
 //! * `GET    /v1/agents/sessions/{id}/files/content?path=` read a file
 //! * `PUT    /v1/agents/sessions/{id}/files/content` write a file
 //! * `DELETE /v1/agents/sessions/{id}/files?path=`   remove a file or directory
+//! * `GET    /v1/agents/sessions/{id}/git/status`    branch and changed paths of the workspace repo
+//! * `GET    /v1/agents/sessions/{id}/git/diff`      the workspace diff
+//! * `GET    /v1/agents/sessions/{id}/git/log`       recent commits
+//! * `POST   /v1/agents/sessions/{id}/git/commit`    stage and commit
+//! * `POST   /v1/agents/sessions/{id}/git/branch`    create (and switch to) a branch
 //!
 //! Records live in `<state_dir>/agent-sessions/<id>.json` and `<id>.ledger.jsonl`, so a
 //! session survives a daemon restart. What is *not* here: promote, replay, sandbox-scoped PTY,
@@ -79,6 +84,11 @@ pub(crate) fn routes() -> Router<Arc<VmManager>> {
             "/v1/agents/sessions/{id}/files/content",
             get(files_read).put(files_write),
         )
+        .route("/v1/agents/sessions/{id}/git/status", get(git_status))
+        .route("/v1/agents/sessions/{id}/git/diff", get(git_diff))
+        .route("/v1/agents/sessions/{id}/git/log", get(git_log))
+        .route("/v1/agents/sessions/{id}/git/commit", post(git_commit))
+        .route("/v1/agents/sessions/{id}/git/branch", post(git_branch))
         .route("/v1/agents/sessions/{id}/jobs", post(job_start))
         .route(
             "/v1/agents/sessions/{id}/jobs/{job}",
@@ -1602,6 +1612,342 @@ async fn files_delete(
     Ok(StatusCode::NO_CONTENT)
 }
 
+// ---------------------------------------------------------------------------------------
+// Git: status, diff, log, commit and branch for the repository in a session's workspace. Each
+// call runs `git` in the guest through the ordinary exec path, so the guest image must have git
+// (the stock debian-13 does not; a session with network access can `sudo apt-get install -y git`).
+
+const GIT_OUTPUT_MAX: usize = 262_144;
+
+#[derive(Debug, Deserialize, Default)]
+struct GitQuery {
+    /// Repository directory; defaults to the session's workspace path.
+    #[serde(default)]
+    repo: Option<String>,
+    #[serde(default)]
+    staged: bool,
+    #[serde(default)]
+    path: Option<String>,
+    #[serde(default)]
+    limit: Option<u32>,
+}
+
+fn repo_dir(s: &Session, repo: &Option<String>) -> ApiResult<String> {
+    let dir = repo
+        .clone()
+        .or_else(|| s.workspace.as_ref().map(|w| w.path.clone()))
+        .unwrap_or_else(|| "/workspace".to_string());
+    path_arg(&dir)?;
+    Ok(dir)
+}
+
+/// Branch names git itself would accept, minus anything that could be read as an option.
+fn valid_branch(b: &str) -> bool {
+    !b.is_empty()
+        && b.len() <= 200
+        && !b.starts_with(['-', '/', '.'])
+        && !b.ends_with(['/', '.'])
+        && !b.contains("..")
+        && !b.contains("//")
+        && !b.contains("@{")
+        && !b.ends_with(".lock")
+        && b.chars()
+            .all(|c| c.is_ascii_alphanumeric() || "-_./".contains(c))
+}
+
+/// Runs `git <args>` in `repo`. `Ok` carries the exit code and both streams; a guest without
+/// git is a 409 that says how to fix it.
+async fn run_git(
+    m: &Arc<VmManager>,
+    s: &Session,
+    repo: &str,
+    args: &str,
+) -> ApiResult<(i64, String, String)> {
+    let cmd = format!(
+        "command -v git >/dev/null 2>&1 || exit 127; cd {} 2>/dev/null || exit 126; \
+         git -c core.quotepath=false -c safe.directory='*' {args}",
+        shell_quote(repo)
+    );
+    let out = guest_exec(m, s, cmd).await?;
+    let code = out["exit_code"].as_i64().unwrap_or(-1);
+    match code {
+        127 => Err(ApiError {
+            status: StatusCode::CONFLICT,
+            message: "git is not installed in the guest. On a session with network access: \
+                      sudo apt-get install -y git (the stock debian-13 image has none)"
+                .into(),
+        }),
+        126 => Err(ApiError {
+            status: StatusCode::NOT_FOUND,
+            message: format!("{repo} does not exist in the guest"),
+        }),
+        _ => Ok((
+            code,
+            out["stdout"].as_str().unwrap_or("").to_string(),
+            out["stderr"].as_str().unwrap_or("").to_string(),
+        )),
+    }
+}
+
+fn git_failed(what: &str, code: i64, stderr: &str) -> ApiError {
+    let not_repo = stderr.contains("not a git repository");
+    ApiError {
+        status: if not_repo {
+            StatusCode::CONFLICT
+        } else {
+            StatusCode::BAD_REQUEST
+        },
+        message: format!("git {what} failed (exit {code}): {}", stderr.trim()),
+    }
+}
+
+/// `git status --porcelain=v1 -b -z` -> (branch line, entries). Renames and copies carry the old
+/// path in the following NUL-separated record.
+fn parse_status(out: &str) -> (String, Vec<Value>) {
+    let mut recs = out.split('\0').filter(|r| !r.is_empty());
+    let branch = recs
+        .next()
+        .and_then(|r| r.strip_prefix("## "))
+        .unwrap_or("")
+        .to_string();
+    let mut entries = Vec::new();
+    while let Some(r) = recs.next() {
+        if r.len() < 4 {
+            continue;
+        }
+        let (xy, path) = r.split_at(2);
+        let path = path.trim_start();
+        let mut e = json!({"index": &xy[..1], "worktree": &xy[1..2], "path": path});
+        if matches!(&xy[..1], "R" | "C")
+            && let Some(old) = recs.next()
+        {
+            e["from"] = json!(old);
+        }
+        entries.push(e);
+    }
+    (branch, entries)
+}
+
+fn truncate_output(s: String) -> (String, bool) {
+    if s.len() <= GIT_OUTPUT_MAX {
+        return (s, false);
+    }
+    let mut end = GIT_OUTPUT_MAX;
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    (s[..end].to_string(), true)
+}
+
+async fn git_status(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    token_tenant: Option<Extension<TokenTenant>>,
+    Path(id): Path<Uuid>,
+    Query(q): Query<GitQuery>,
+) -> ApiResult<Json<Value>> {
+    require_admin(role)?;
+    let s = load(&m, id, &caller_tenant(&token_tenant)).await?;
+    running(&s)?;
+    let repo = repo_dir(&s, &q.repo)?;
+    let (code, out, err) = run_git(&m, &s, &repo, "status --porcelain=v1 -b -z").await?;
+    if code != 0 {
+        return Err(git_failed("status", code, &err));
+    }
+    let (branch, entries) = parse_status(&out);
+    Ok(Json(
+        json!({"repo": repo, "branch": branch, "clean": entries.is_empty(), "entries": entries}),
+    ))
+}
+
+async fn git_diff(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    token_tenant: Option<Extension<TokenTenant>>,
+    Path(id): Path<Uuid>,
+    Query(q): Query<GitQuery>,
+) -> ApiResult<Json<Value>> {
+    require_admin(role)?;
+    let s = load(&m, id, &caller_tenant(&token_tenant)).await?;
+    running(&s)?;
+    let repo = repo_dir(&s, &q.repo)?;
+    let mut args = String::from("diff --no-color --no-ext-diff");
+    if q.staged {
+        args.push_str(" --staged");
+    }
+    if let Some(p) = &q.path {
+        // Relative to the repo; never an option and never outside it.
+        if p.is_empty()
+            || p.starts_with(['-', '/'])
+            || p.split('/').any(|c| c == "..")
+            || p.contains(['\0', '\n'])
+        {
+            return Err(ApiError {
+                status: StatusCode::BAD_REQUEST,
+                message: "path must be relative to the repository, without '..'".into(),
+            });
+        }
+        args.push_str(&format!(" -- {}", shell_quote(p)));
+    }
+    let (code, out, err) = run_git(&m, &s, &repo, &args).await?;
+    if code != 0 {
+        return Err(git_failed("diff", code, &err));
+    }
+    let (diff, truncated) = truncate_output(out);
+    Ok(Json(
+        json!({"repo": repo, "staged": q.staged, "diff": diff, "truncated": truncated}),
+    ))
+}
+
+async fn git_log(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    token_tenant: Option<Extension<TokenTenant>>,
+    Path(id): Path<Uuid>,
+    Query(q): Query<GitQuery>,
+) -> ApiResult<Json<Value>> {
+    require_admin(role)?;
+    let s = load(&m, id, &caller_tenant(&token_tenant)).await?;
+    running(&s)?;
+    let repo = repo_dir(&s, &q.repo)?;
+    let limit = q.limit.unwrap_or(20).clamp(1, 200);
+    let args = format!("log -n {limit} --format=%H%x1f%an%x1f%aI%x1f%s%x1e");
+    let (code, out, err) = run_git(&m, &s, &repo, &args).await?;
+    if code != 0 {
+        // A fresh repository with no commit yet is an empty log, not an error.
+        if err.contains("does not have any commits") {
+            return Ok(Json(json!({"repo": repo, "commits": []})));
+        }
+        return Err(git_failed("log", code, &err));
+    }
+    let commits: Vec<Value> = out
+        .split('\x1e')
+        .map(str::trim)
+        .filter(|r| !r.is_empty())
+        .filter_map(|r| {
+            let mut f = r.splitn(4, '\x1f');
+            Some(json!({
+                "commit": f.next()?, "author": f.next()?, "date": f.next()?, "subject": f.next()?,
+            }))
+        })
+        .collect();
+    Ok(Json(json!({"repo": repo, "commits": commits})))
+}
+
+#[derive(Debug, Deserialize)]
+struct CommitBody {
+    message: String,
+    #[serde(default)]
+    repo: Option<String>,
+    /// Stage everything first (`git add -A`); default true. False commits what is staged.
+    #[serde(default = "yes")]
+    all: bool,
+}
+
+async fn git_commit(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    token_tenant: Option<Extension<TokenTenant>>,
+    Path(id): Path<Uuid>,
+    Json(body): Json<CommitBody>,
+) -> ApiResult<Json<Value>> {
+    require_admin(role)?;
+    let s = load(&m, id, &caller_tenant(&token_tenant)).await?;
+    running(&s)?;
+    let repo = repo_dir(&s, &body.repo)?;
+    let message = body.message.trim();
+    if message.is_empty() || message.len() > 4000 {
+        return Err(ApiError {
+            status: StatusCode::BAD_REQUEST,
+            message: "message is required (at most 4000 characters)".into(),
+        });
+    }
+    if body.all {
+        let (code, _, err) = run_git(&m, &s, &repo, "add -A").await?;
+        if code != 0 {
+            return Err(git_failed("add", code, &err));
+        }
+    }
+    // A committer identity is required; use a clearly synthetic one unless the repo has its own.
+    let args = format!(
+        "-c user.name=\"$(git config user.name || echo 'FluxVM Agent')\" \
+         -c user.email=\"$(git config user.email || echo 'agent@fluxvm.local')\" \
+         commit -m {} --no-gpg-sign",
+        shell_quote(message)
+    );
+    let (code, out, err) = run_git(&m, &s, &repo, &args).await?;
+    if code != 0 {
+        let text = format!("{out}{err}");
+        if text.contains("nothing to commit") || text.contains("no changes added") {
+            return Err(ApiError {
+                status: StatusCode::CONFLICT,
+                message: "nothing to commit".into(),
+            });
+        }
+        return Err(git_failed("commit", code, &text));
+    }
+    let (_, head, _) = run_git(&m, &s, &repo, "rev-parse HEAD").await?;
+    let commit = head.trim().to_string();
+    record(
+        &m,
+        id,
+        "git.commit",
+        json!({"repo": repo, "commit": commit, "message": message}),
+    );
+    Ok(Json(json!({"repo": repo, "commit": commit})))
+}
+
+#[derive(Debug, Deserialize)]
+struct BranchBody {
+    name: String,
+    #[serde(default)]
+    repo: Option<String>,
+}
+
+async fn git_branch(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    token_tenant: Option<Extension<TokenTenant>>,
+    Path(id): Path<Uuid>,
+    Json(body): Json<BranchBody>,
+) -> ApiResult<Json<Value>> {
+    require_admin(role)?;
+    let s = load(&m, id, &caller_tenant(&token_tenant)).await?;
+    running(&s)?;
+    if !valid_branch(&body.name) {
+        return Err(ApiError {
+            status: StatusCode::BAD_REQUEST,
+            message: "invalid branch name".into(),
+        });
+    }
+    let repo = repo_dir(&s, &body.repo)?;
+    let (code, _, err) = run_git(
+        &m,
+        &s,
+        &repo,
+        &format!("switch -c {}", shell_quote(&body.name)),
+    )
+    .await?;
+    if code != 0 {
+        let status = if err.contains("already exists") {
+            StatusCode::CONFLICT
+        } else {
+            StatusCode::BAD_REQUEST
+        };
+        return Err(ApiError {
+            status,
+            message: format!("git switch failed (exit {code}): {}", err.trim()),
+        });
+    }
+    record(
+        &m,
+        id,
+        "git.branch",
+        json!({"repo": repo, "branch": body.name}),
+    );
+    Ok(Json(json!({"repo": repo, "branch": body.name})))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1755,6 +2101,36 @@ mod tests {
             &format!("/{}", "x".repeat(5000)),
         ] {
             assert!(!valid_file_path(bad), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn status_output_parses_branch_entries_and_renames() {
+        let out =
+            "## feature...origin/feature [ahead 1]\0 M src/a.rs\0?? new file.txt\0R  b.rs\0a.rs\0";
+        let (branch, e) = parse_status(out);
+        assert_eq!(branch, "feature...origin/feature [ahead 1]");
+        assert_eq!(e.len(), 3);
+        assert_eq!(e[0]["worktree"], "M");
+        assert_eq!(e[0]["path"], "src/a.rs");
+        assert_eq!(e[1]["index"], "?");
+        assert_eq!(e[1]["path"], "new file.txt");
+        assert_eq!(e[2]["path"], "b.rs");
+        assert_eq!(e[2]["from"], "a.rs");
+        let (b, e) = parse_status("## main\0");
+        assert_eq!(b, "main");
+        assert!(e.is_empty());
+    }
+
+    #[test]
+    fn branch_names_cannot_be_read_as_options_or_escape() {
+        for ok in ["main", "feature/x-1", "agent_2.0"] {
+            assert!(valid_branch(ok), "{ok}");
+        }
+        for bad in [
+            "", "-D", "--detach", "a..b", "a b", "a;b", "/x", "x/", ".x", "x.lock", "a@{1}", "a//b",
+        ] {
+            assert!(!valid_branch(bad), "{bad}");
         }
     }
 }

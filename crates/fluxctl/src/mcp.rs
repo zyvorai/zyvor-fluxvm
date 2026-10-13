@@ -1691,6 +1691,93 @@ pub fn tools(remote: Arc<Remote>) -> Vec<Tool> {
             },
         ),
         tool(
+            "session_git",
+            "Git in a session's workspace repository (the guest needs git; offline sessions cannot install it). op: status | diff | log | commit | branch. commit stages everything first unless all=false.",
+            object(
+                json!({
+                    "session": {"type": "string"},
+                    "op": {"type": "string", "enum": ["status", "diff", "log", "commit", "branch"]},
+                    "repo": {"type": "string", "description": "guest directory; default the session workspace"},
+                    "message": {"type": "string", "description": "commit message (commit)"},
+                    "name": {"type": "string", "description": "branch name (branch)"},
+                    "staged": {"type": "boolean", "description": "diff only staged changes"},
+                    "path": {"type": "string", "description": "diff one path, relative to the repo"},
+                    "limit": {"type": "integer", "description": "log length, default 20"},
+                    "all": {"type": "boolean", "description": "commit: stage everything first (default true)"},
+                }),
+                &["session", "op"],
+            ),
+            true,
+            &remote,
+            |r, args| async move {
+                timed(CALL_TIMEOUT, async {
+                    let id = session_id(&args)?;
+                    let base = format!("/v1/agents/sessions/{id}/git");
+                    let mut q = Vec::new();
+                    for k in ["repo", "path"] {
+                        if let Some(v) = str_arg(&args, k) {
+                            q.push(format!("{k}={}", encode_query(v)));
+                        }
+                    }
+                    if args["staged"].as_bool() == Some(true) {
+                        q.push("staged=true".to_string());
+                    }
+                    if let Some(n) = int_arg(&args, "limit")? {
+                        q.push(format!("limit={n}"));
+                    }
+                    let qs = if q.is_empty() {
+                        String::new()
+                    } else {
+                        format!("?{}", q.join("&"))
+                    };
+                    match str_arg(&args, "op").unwrap_or("") {
+                        "status" => pretty(
+                            &r.call(Method::GET, &format!("{base}/status{qs}"), None)
+                                .await?,
+                        ),
+                        "diff" => pretty(
+                            &r.call(Method::GET, &format!("{base}/diff{qs}"), None)
+                                .await?,
+                        ),
+                        "log" => pretty(
+                            &r.call(Method::GET, &format!("{base}/log{qs}"), None)
+                                .await?,
+                        ),
+                        "commit" => {
+                            let message = str_arg(&args, "message")
+                                .ok_or_else(|| anyhow::anyhow!("message is required for commit"))?;
+                            pretty(
+                                &r.call(
+                                    Method::POST,
+                                    &format!("{base}/commit"),
+                                    Some(json!({
+                                        "message": message,
+                                        "repo": str_arg(&args, "repo"),
+                                        "all": args["all"].as_bool().unwrap_or(true),
+                                    })),
+                                )
+                                .await?,
+                            )
+                        }
+                        "branch" => {
+                            let name = str_arg(&args, "name")
+                                .ok_or_else(|| anyhow::anyhow!("name is required for branch"))?;
+                            pretty(
+                                &r.call(
+                                    Method::POST,
+                                    &format!("{base}/branch"),
+                                    Some(json!({"name": name, "repo": str_arg(&args, "repo")})),
+                                )
+                                .await?,
+                            )
+                        }
+                        other => anyhow::bail!("unknown op {other:?}"),
+                    }
+                })
+                .await
+            },
+        ),
+        tool(
             "session_delete",
             "End an agent session and delete its sandbox.",
             object(json!({"session": {"type": "string"}}), &["session"]),

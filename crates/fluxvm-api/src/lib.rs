@@ -7110,6 +7110,45 @@ mod tests {
         }
 
         #[tokio::test]
+        async fn agent_session_git_is_tenant_scoped_and_inputs_validated() {
+            let m = procbox_manager(tenant_tokens(), false);
+            let id = seed_session(&m, Some("acme"), "vz", "running");
+            let app = router(m);
+            let base = format!("/v1/agents/sessions/{id}/git");
+            for (method, uri, body) in [
+                ("GET", format!("{base}/status"), None),
+                ("GET", format!("{base}/diff"), None),
+                ("GET", format!("{base}/log"), None),
+                ("POST", format!("{base}/commit"), Some(r#"{"message":"x"}"#)),
+                ("POST", format!("{base}/branch"), Some(r#"{"name":"x"}"#)),
+            ] {
+                let (st, _) = call(app.clone(), method, &uri, "other", body).await;
+                assert_eq!(st, StatusCode::NOT_FOUND, "{method} {uri}");
+            }
+            // Refused before anything runs in a guest.
+            for (method, uri, body) in [
+                ("GET", format!("{base}/status?repo=relative"), None),
+                ("GET", format!("{base}/diff?path=../etc/passwd"), None),
+                ("GET", format!("{base}/diff?path=-p"), None),
+                ("GET", format!("{base}/diff?path=/etc/passwd"), None),
+                (
+                    "POST",
+                    format!("{base}/commit"),
+                    Some(r#"{"message":"  "}"#),
+                ),
+                (
+                    "POST",
+                    format!("{base}/branch"),
+                    Some(r#"{"name":"--detach"}"#),
+                ),
+                ("POST", format!("{base}/branch"), Some(r#"{"name":"a b"}"#)),
+            ] {
+                let (st, msg) = call(app.clone(), method, &uri, "acme", body).await;
+                assert_eq!(st, StatusCode::BAD_REQUEST, "{method} {uri} -> {msg}");
+            }
+        }
+
+        #[tokio::test]
         async fn agent_session_fork_is_refused_for_a_session_on_the_nat() {
             let m = procbox_manager(tenant_tokens(), false);
             let id = seed_session(&m, Some("acme"), "vz", "running");
