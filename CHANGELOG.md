@@ -2,7 +2,24 @@
 
 ## Unreleased
 
+## 0.4.8 (2026-10-13)
+
+This release adds **AgentSession**, a single object an agent drives instead of assembling VM, sandbox, snapshot and
+fork itself, plus preview URLs for guest ports and per-disk I/O throttling on QEMU. Session behaviour below was run on
+an Apple M4 (`vz`, stock `debian-13`); the in-tree KVM fork, tenant tokens against a real daemon, Linux previews and a
+successful `git clone` were not run.
+
 ### Added
+- **AgentSession API and CLI.** `POST/GET /v1/agents/sessions`, `GET|DELETE .../{id}`, `.../exec`, `.../checkpoint`,
+  `.../restore`, `.../fork`, `GET .../events`, `GET .../artifacts`. `fluxctl agent run|ls|get|exec|checkpoint|restore|
+  fork|timeline|artifacts|rm`. Sessions are tenant-scoped, survive a daemon restart, and keep an action ledger. Policy
+  presets (`offline`, `developer-safe`, `open`) and host allow-lists are enforced; filesystem and process rules are
+  recorded as `unenforced`. Fork works on `vz` for offline or allow-listed Linux guests and is refused with a reason
+  (409) on NAT sessions. Timings and targets: `docs/benchmarks/agent-session.md`.
+- **MCP tools** `session_*`, `sandbox_speculate`, `sandbox_changesets`, `sandbox_changeset_decide` (writes need
+  `--allow-write`); **Go and Python SDK** session clients; `skills/fluxvm/SKILL.md`.
+- **`scripts/install.sh`** (Homebrew-only; `--client`, `--no-service`, `--uninstall`, `--dry-run`); `/agents` page with
+  install tabs and the microsandbox comparison (`docs/vs-microsandbox.md`).
 - **Preview URLs for agent sessions.** `fluxctl agent expose|previews|unexpose`, MCP `session_preview`, and
   `POST/GET/DELETE /v1/agents/sessions/{id}/preview[s]` plus a token-gated `/preview/{token}/...` route: an expiring,
   revocable URL to one guest TCP port. Run on a `vz` NAT session on an M4; WebSocket, streaming and Linux not run.
