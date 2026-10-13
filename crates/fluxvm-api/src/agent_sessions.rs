@@ -1510,7 +1510,22 @@ async fn preview_serve(
     if !alive {
         return gone();
     }
-    let mut resp = super::sandbox_proxy_inner(m, p.sandbox, p.port, path, req).await;
+    let is_ws = req
+        .headers()
+        .get(axum::http::header::UPGRADE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.eq_ignore_ascii_case("websocket"));
+    let mut resp = if is_ws {
+        // The same token that gates HTTP gates the WebSocket (Chrome DevTools, dev-server HMR).
+        use axum::extract::FromRequestParts as _;
+        let (mut parts, _body) = req.into_parts();
+        match axum::extract::ws::WebSocketUpgrade::from_request_parts(&mut parts, &()).await {
+            Ok(ws) => super::sandbox_ws_inner(m, p.sandbox, p.port, path, ws).await,
+            Err(e) => e.into_response(),
+        }
+    } else {
+        super::sandbox_proxy_inner(m, p.sandbox, p.port, path, req).await
+    };
     // A preview is somebody else's app: never let a browser leak the token via Referer or cache it.
     let h = resp.headers_mut();
     h.insert(

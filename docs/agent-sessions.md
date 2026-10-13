@@ -193,9 +193,36 @@ all three look the same (404). The token never enters the ledger. Responses carr
 
 What was run: on this M4 (`vz`, NAT session, `python3 -m http.server` in the guest) the URL returned the page and a
 sub-path, a made-up token and a revoked token returned 404; router tests cover expiry, revocation, tenant scoping and
-the ledger. **Not run:** Linux (the route reuses the netns proxy there), WebSocket, streaming or large bodies, and
-HTTPS (the URL is as private as the daemon's own address: put it behind TLS yourself). An **offline** session has no
+the ledger. A WebSocket upgrade on a preview URL is bridged with the same token check (run: a Chrome DevTools
+round trip, see below; a bad token is 404). **Not run:** Linux (the route reuses the netns proxy there), streaming or
+large bodies, and HTTPS (the URL is as private as the daemon's own address: put it behind TLS yourself). An **offline** session has no
 network address, so it has nothing to preview.
+
+### Browser (Chrome DevTools Protocol)
+
+There is no browser image yet; this is a recipe on the stock `debian-13`, run on this M4 (`vz`, `policy open`, 2 GiB):
+
+```bash
+fluxctl agent run --policy open --memory-mb 2048                 # open: apt needs the network
+fluxctl agent bg <s> -- sh -c 'sudo -n apt-get update -qq && sudo -n DEBIAN_FRONTEND=noninteractive \
+  apt-get install -y -qq --no-install-recommends chromium socat'   # ~minutes; poll with `agent logs`
+fluxctl agent bg <s> -- chromium --headless=new --no-sandbox --disable-gpu --remote-debugging-port=9222 about:blank
+fluxctl agent bg <s> -- socat TCP-LISTEN:9223,fork,reuseaddr TCP:127.0.0.1:9222
+fluxctl agent expose <s> 9223                                    # -> http://<daemon>/preview/<token>/
+```
+
+Why `socat`: Chrome 155 binds DevTools to `127.0.0.1` and ignored `--remote-debugging-address=0.0.0.0` in this run, so
+the sandbox proxy (which reaches the guest's NIC address) could not connect without a forwarder.
+
+A CDP client connects to `ws://<daemon>/preview/<token>` + the path of a target's `webSocketDebuggerUrl` from
+`<preview>/json/list`. **That URL's host and prefix are wrong** in the JSON (Chrome reports the guest address and
+omits `/preview/<token>`), so a client that follows `webSocketDebuggerUrl` itself (Playwright `connectOverCDP` by
+HTTP endpoint) will not work through the preview: rewrite the URL as above. What was run: `/json/version` and
+`/json/list` over HTTP, then over the WebSocket `Browser.getVersion`, `Page.navigate` to a `data:` URL,
+`Runtime.evaluate document.title` (returned the page title) and `Page.captureScreenshot` (a 2.3 KB PNG). The same works
+through the authenticated `/v1/sandboxes/{sandbox_id}/ws/{port}/{path}`. **Not run:** Playwright/Puppeteer clients,
+headful or GPU, a window/computer-use display (vz display and input exist separately), a prebuilt browser image
+(Chromium adds ~600 MB to the 2.8 GB stock root; the install above fits but leaves little free).
 
 ### Ledger
 
@@ -246,6 +273,6 @@ Each item says why it is not in the MVP.
 | HTTP method/path rules through the session policy | the egress proxy supports them on QEMU/KVM; not exposed here |
 | Streaming PTY / stdin for a session | background **jobs** (above) cover long-running commands with polled output; there is still no stdin, no TTY and no push stream; the `console` route is VM-level and admin-only |
 | Replay | the ledger is a log, not a recording |
-| Preview URLs: WebSocket upgrades, large or streamed responses | the preview route is plain HTTP through the existing sandbox proxy; WebSocket and streaming bodies were not run through it (`/v1/sandboxes/{id}/ws/{port}/*` is separate and auth-gated) |
-| Browser / computer-use profile | vz display and input exist; no CDP/Playwright profile |
+| Preview URLs: large or streamed responses | WebSocket upgrades are bridged (run with Chrome DevTools); large and streamed bodies were not run through the preview route |
+| Browser / computer-use profile | a CDP recipe works on the stock image (see Browser above); no prebuilt browser image, no Playwright client run, no computer-use display profile |
 | Secretless credentials | the credential broker (`docs/credential-broker.md`) is per sandbox; not bound to sessions |
