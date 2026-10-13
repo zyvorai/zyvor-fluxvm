@@ -1266,6 +1266,8 @@ pub fn tools(remote: Arc<Remote>) -> Vec<Tool> {
                     "policy": {"type": "string", "enum": ["offline", "developer-safe", "open"]},
                     "allow": {"type": "array", "items": {"type": "string"}, "description": "host names the session may reach; everything else is refused"},
                     "image": {"type": "string", "description": "guest image, e.g. agent-micro"},
+                    "allow_commands": {"type": "array", "items": {"type": "string"}, "description": "command patterns (* wildcard) session_exec may run; other commands are refused. A guardrail on the command string, not a security boundary"},
+                    "deny_commands": {"type": "array", "items": {"type": "string"}, "description": "command patterns (* wildcard) session_exec refuses"},
                     "ttl_seconds": {"type": "integer", "minimum": 30},
                 }),
                 &[],
@@ -1292,6 +1294,21 @@ pub fn tools(remote: Arc<Remote>) -> Vec<Tool> {
                     if policy != json!({}) {
                         body["policy"] = policy;
                     }
+                    let strs = |k: &str| -> Vec<String> {
+                        args[k]
+                            .as_array()
+                            .map(|a| {
+                                a.iter()
+                                    .filter_map(|v| v.as_str().map(str::to_string))
+                                    .collect()
+                            })
+                            .unwrap_or_default()
+                    };
+                    crate::agent_session::add_process_rules(
+                        &mut body,
+                        &strs("allow_commands"),
+                        &strs("deny_commands"),
+                    );
                     if let Some(t) = int_arg(&args, "ttl_seconds")? {
                         body["ttl_seconds"] = json!(t);
                     }
