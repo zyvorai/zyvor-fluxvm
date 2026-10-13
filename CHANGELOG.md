@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- **Terminal resize.** `fluxctl agent shell` forwards a local window resize (SIGWINCH) as a `{"resize":{...}}` text
+  frame; the daemon sets the guest tty's size, so editors and `top` reflow. Run live: 30x100 to 50x160 to 20x70
+  reported correctly in the guest and a `WINCH` trap fired.
+
 - **Interactive terminal for agent sessions.** `fluxctl agent shell <session> [-- cmd]` (WebSocket
   `GET /v1/agents/sessions/{id}/pty`) gives a real pty over `ssh -tt`, on offline sessions too (vsock proxy). Exit
   codes propagate; open/close are ledgered (counts, not content). Size is fixed at open, **no resize**; refused for
