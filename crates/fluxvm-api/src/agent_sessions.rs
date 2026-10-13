@@ -30,6 +30,9 @@
 //! * `POST   /v1/agents/sessions/{id}/jobs`          start a detached command
 //! * `GET    /v1/agents/sessions/{id}/jobs/{job}`    its state and output from `?offset=`
 //! * `DELETE /v1/agents/sessions/{id}/jobs/{job}`    stop it
+//! * `GET    /v1/agents/sessions/{id}/jobs`          list jobs (command, state, exit code)
+//! * `GET    /v1/agents/sessions/{id}/jobs/{job}/stream` Server-Sent Events: output from `?offset=` / `Last-Event-ID`, then `exit`
+//! * `POST   /v1/agents/sessions/{id}/jobs/{job}/stdin` write to a job started with `stdin: true`
 //! * `GET    /v1/agents/sessions/{id}/files?path=`   list a directory (or stat a file)
 //! * `GET    /v1/agents/sessions/{id}/files/content?path=` read a file
 //! * `PUT    /v1/agents/sessions/{id}/files/content` write a file
@@ -112,7 +115,15 @@ pub(crate) fn routes() -> Router<Arc<VmManager>> {
         .route("/v1/agents/sessions/{id}/git/log", get(git_log))
         .route("/v1/agents/sessions/{id}/git/commit", post(git_commit))
         .route("/v1/agents/sessions/{id}/git/branch", post(git_branch))
-        .route("/v1/agents/sessions/{id}/jobs", post(job_start))
+        .route(
+            "/v1/agents/sessions/{id}/jobs",
+            post(job_start).get(job_list),
+        )
+        .route(
+            "/v1/agents/sessions/{id}/jobs/{job}/stream",
+            get(job_stream),
+        )
+        .route("/v1/agents/sessions/{id}/jobs/{job}/stdin", post(job_stdin))
         .route(
             "/v1/agents/sessions/{id}/jobs/{job}",
             get(job_read).delete(job_kill),
@@ -1246,6 +1257,7 @@ async fn delete_session(
         record(&m, id, "session.delete", json!({}));
     }
     agent_session_auth::purge(&m.cfg.state_dir, id).await;
+    let _ = tokio::fs::remove_file(job_meta_path(&m, id)).await;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -2795,46 +2807,199 @@ async fn relay_pty(
 
 // ---------------------------------------------------------------------------------------
 // Jobs: a command that outlives the request. It runs detached in the guest (`setsid`), its
-// output goes to a file, and the caller reads that file from a byte offset. This is built on
-// the ordinary exec path, so each read costs one exec; it is polling, not a stream. There is
-// no stdin and no TTY.
+// output goes to a file (bounded: the log stops at `max_output_bytes` and the job gets SIGPIPE),
+// and the caller reads that file from a byte offset, either by polling `GET .../jobs/{job}` or
+// as a Server-Sent Events stream (`.../stream`, `Last-Event-ID` is the byte offset, so a dropped
+// connection resumes). With `stdin: true` the job reads from a FIFO that `POST .../stdin`
+// appends to. Everything is built on the ordinary exec path, so each read costs one guest exec;
+// there is no TTY and no end-of-file on stdin. Metadata (command, start, exit) is kept on the
+// host so a listing survives a daemon restart.
 
 const JOBS_DIR: &str = "/tmp/fluxvm-jobs";
 const JOB_READ_MAX: usize = 65_536;
+const JOB_DEFAULT_MAX_OUTPUT: u64 = 16 * 1024 * 1024;
+const JOB_MAX_OUTPUT: u64 = 256 * 1024 * 1024;
+/// One stdin write: it travels as a shell argument, so it is kept small.
+const JOB_STDIN_MAX: usize = 48 * 1024;
+const JOB_STREAM_POLL: std::time::Duration = std::time::Duration::from_millis(400);
+const JOB_STREAM_MAX_SECS: u64 = 3600;
+const MAX_JOB_STREAMS: usize = 16;
 
 #[derive(Debug, Deserialize)]
 struct JobBody {
     command: String,
+    /// Give the job a stdin that `POST .../stdin` writes to (default: /dev/null).
+    #[serde(default)]
+    stdin: bool,
+    /// Stop recording output after this many bytes (default 16 MiB, at most 256 MiB).
+    #[serde(default)]
+    max_output_bytes: Option<u64>,
+}
+
+fn job_stdin_path(job: Uuid) -> String {
+    format!("{JOBS_DIR}/{job}.in")
 }
 
 /// The guest-side shell line that starts a job. Pure, so it is unit-tested.
-fn job_start_script(job: Uuid, command: &str) -> String {
+fn job_start_script(job: Uuid, command: &str, stdin: bool, max_output: u64) -> String {
     let f = format!("{JOBS_DIR}/{job}");
     let out = shell_quote(&format!("{f}.out"));
     let exit = shell_quote(&format!("{f}.exit"));
     let pid = shell_quote(&format!("{f}.pid"));
-    // The inner shell records its pid (== process group, because of setsid), runs the command
-    // with output to a file, and records the exit code last, so "exit file exists" means the
-    // output file is complete.
+    let fifo = job_stdin_path(job);
+    let mkfifo = if stdin {
+        format!("mkfifo {} && ", shell_quote(&fifo))
+    } else {
+        String::new()
+    };
+    let input = if stdin {
+        shell_quote(&fifo)
+    } else {
+        "/dev/null".to_string()
+    };
+    // The inner shell records its pid (== process group, because of setsid), holds the stdin
+    // FIFO open read-write so writers never block and the job never sees EOF, pipes the command's
+    // output through `head -c` (the bound), and records the exit code last, so "exit file exists"
+    // means the output file is complete.
     format!(
-        "mkdir -p {dir} && (setsid sh -c 'echo $$ > \"$1\"; sh -c \"$2\" > \"$3\" 2>&1 < /dev/null; echo $? > \"$4\"' _ {pid} {cmd} {out} {exit} > /dev/null 2>&1 &) ; echo started",
+        "mkdir -p {dir} && {mkfifo}(setsid sh -c 'echo $$ > \"$1\"; exec 3<>\"$6\"; {{ sh -c \"$2\" 2>&1 <&3; echo $? > \"$4.rc\"; }} | head -c \"$5\" > \"$3\"; mv \"$4.rc\" \"$4\"' _ {pid} {cmd} {out} {exit} {max_output} {input} > /dev/null 2>&1 &) ; echo started",
         dir = shell_quote(JOBS_DIR),
         cmd = shell_quote(command),
     )
 }
 
-/// The guest-side line that reads a job: exit code first, then output from `offset`, so an
-/// exit seen here means the output read after it is complete.
+/// The guest-side line that reads a job: exit code first, then output from `offset`, then the
+/// log's size, so an exit seen here means the output read after it is complete.
 fn job_read_script(job: Uuid, offset: u64) -> String {
     let f = format!("{JOBS_DIR}/{job}");
     format!(
         "e=$(cat {exit} 2>/dev/null); if [ ! -e {out} ]; then echo MISSING; exit 0; fi; \
-         echo \"EXIT:$e\"; tail -c +{from} {out} | head -c {max} | base64 | tr -d '\\n'; echo",
+         echo \"EXIT:$e\"; tail -c +{from} {out} | head -c {max} | base64 | tr -d '\\n'; echo; \
+         echo \"SIZE:$(wc -c < {out})\"",
         exit = shell_quote(&format!("{f}.exit")),
         out = shell_quote(&format!("{f}.out")),
         from = offset + 1,
         max = JOB_READ_MAX,
     )
+}
+
+/// The guest-side line that appends to a job's stdin. Refuses (exit 3) when the job has no stdin
+/// FIFO or has already exited, because opening a FIFO nobody reads would block.
+fn job_stdin_script(job: Uuid, data: &[u8]) -> String {
+    use base64::Engine as _;
+    format!(
+        "f={fifo}; [ -p \"$f\" ] && [ ! -e {exit} ] || exit 3; printf %s {b64} | base64 -d > \"$f\"",
+        fifo = shell_quote(&job_stdin_path(job)),
+        exit = shell_quote(&format!("{JOBS_DIR}/{job}.exit")),
+        b64 = base64::engine::general_purpose::STANDARD.encode(data),
+    )
+}
+
+/// One parsed answer of [`job_read_script`].
+enum JobRead {
+    Missing,
+    Chunk {
+        exit: Option<i64>,
+        bytes: Vec<u8>,
+        size: u64,
+    },
+}
+
+fn parse_job_read(stdout: &str) -> JobRead {
+    let mut lines = stdout.lines();
+    let head = lines.next().unwrap_or("");
+    if head == "MISSING" {
+        return JobRead::Missing;
+    }
+    let exit = head
+        .strip_prefix("EXIT:")
+        .map(str::trim)
+        .filter(|e| !e.is_empty())
+        .and_then(|e| e.parse::<i64>().ok());
+    let bytes = base64_decode(lines.next().unwrap_or(""));
+    let size = lines
+        .next()
+        .and_then(|l| l.strip_prefix("SIZE:"))
+        .and_then(|n| n.trim().parse::<u64>().ok())
+        .unwrap_or(0);
+    JobRead::Chunk { exit, bytes, size }
+}
+
+// Host-side job metadata: `<state_dir>/agent-session-jobs/<session>.json`.
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct JobMeta {
+    job: Uuid,
+    command: String,
+    stdin: bool,
+    max_output_bytes: u64,
+    started_at: DateTime<Utc>,
+    #[serde(default)]
+    killed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    exit_code: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    finished_at: Option<DateTime<Utc>>,
+}
+
+impl JobMeta {
+    fn state(&self) -> &'static str {
+        match (self.exit_code, self.killed) {
+            (None, _) => "running",
+            (Some(_), true) => "killed",
+            (Some(_), false) => "exited",
+        }
+    }
+}
+
+static JOB_META_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+fn job_meta_path(m: &VmManager, id: Uuid) -> PathBuf {
+    m.cfg
+        .state_dir
+        .join("agent-session-jobs")
+        .join(format!("{id}.json"))
+}
+
+async fn job_meta_read(m: &VmManager, id: Uuid) -> Vec<JobMeta> {
+    match tokio::fs::read(job_meta_path(m, id)).await {
+        Ok(b) => serde_json::from_slice(&b).unwrap_or_default(),
+        Err(_) => Vec::new(),
+    }
+}
+
+/// Read-modify-write of one session's job metadata. Failures are logged, never fatal.
+async fn job_meta_update(m: &VmManager, id: Uuid, f: impl FnOnce(&mut Vec<JobMeta>)) {
+    let _g = JOB_META_LOCK.lock().await;
+    let mut all = job_meta_read(m, id).await;
+    f(&mut all);
+    let path = job_meta_path(m, id);
+    let res = async {
+        if let Some(d) = path.parent() {
+            tokio::fs::create_dir_all(d).await?;
+        }
+        let tmp = path.with_extension("json.tmp");
+        tokio::fs::write(&tmp, serde_json::to_vec_pretty(&all)?).await?;
+        tokio::fs::rename(&tmp, &path).await?;
+        anyhow::Ok(())
+    }
+    .await;
+    if let Err(e) = res {
+        tracing::warn!(session = %id, error = %e, "agent session: job metadata not saved");
+    }
+}
+
+/// Notes an observed exit in the metadata (first observation wins).
+async fn job_meta_exited(m: &VmManager, id: Uuid, job: Uuid, code: i64) {
+    job_meta_update(m, id, |all| {
+        if let Some(j) = all.iter_mut().find(|j| j.job == job)
+            && j.exit_code.is_none()
+        {
+            j.exit_code = Some(code);
+            j.finished_at = Some(Utc::now());
+        }
+    })
+    .await;
 }
 
 fn base64_decode(s: &str) -> Vec<u8> {
@@ -2890,12 +3055,19 @@ async fn job_start(
         );
         return Err(e);
     }
+    let max_output = body.max_output_bytes.unwrap_or(JOB_DEFAULT_MAX_OUTPUT);
+    if max_output == 0 || max_output > JOB_MAX_OUTPUT {
+        return Err(ApiError {
+            status: StatusCode::BAD_REQUEST,
+            message: format!("max_output_bytes must be 1-{JOB_MAX_OUTPUT}"),
+        });
+    }
     m.ensure_running_for_request(s.sandbox_id).await?;
     let job = Uuid::new_v4();
     let res = m
         .exec_with_policy(
             s.sandbox_id,
-            job_start_script(job, &body.command),
+            job_start_script(job, &body.command, body.stdin, max_output),
             Some(30),
             s.policy.exec.clone(),
         )
@@ -2914,11 +3086,24 @@ async fn job_start(
         &m,
         id,
         "job.start",
-        json!({"job": job, "command": body.command}),
+        json!({"job": job, "command": body.command, "stdin": body.stdin}),
     );
+    let meta = JobMeta {
+        job,
+        command: body.command.clone(),
+        stdin: body.stdin,
+        max_output_bytes: max_output,
+        started_at: Utc::now(),
+        killed: false,
+        exit_code: None,
+        finished_at: None,
+    };
+    job_meta_update(&m, id, |all| all.push(meta)).await;
     Ok((
         StatusCode::CREATED,
-        Json(json!({"job": job, "state": "running"})),
+        Json(json!({
+            "job": job, "state": "running", "stdin": body.stdin, "max_output_bytes": max_output,
+        })),
     ))
 }
 
@@ -2944,21 +3129,23 @@ async fn job_read(
         .exec_with_policy(s.sandbox_id, job_read_script(job, q.offset), Some(30), None)
         .await?;
     let out = json!(res);
-    let stdout = out["stdout"].as_str().unwrap_or("");
-    let mut lines = stdout.lines();
-    let head = lines.next().unwrap_or("");
-    if head == "MISSING" {
-        return Err(ApiError {
-            status: StatusCode::NOT_FOUND,
-            message: format!("job {job} not found in session {id}"),
-        });
+    let (exit, bytes, size) = match parse_job_read(out["stdout"].as_str().unwrap_or("")) {
+        JobRead::Missing => {
+            return Err(ApiError {
+                status: StatusCode::NOT_FOUND,
+                message: format!("job {job} not found in session {id}"),
+            });
+        }
+        JobRead::Chunk { exit, bytes, size } => (exit, bytes, size),
+    };
+    if let Some(code) = exit {
+        job_meta_exited(&m, id, job, code).await;
     }
-    let exit = head
-        .strip_prefix("EXIT:")
-        .map(str::trim)
-        .filter(|e| !e.is_empty())
-        .and_then(|e| e.parse::<i64>().ok());
-    let bytes = base64_decode(lines.next().unwrap_or(""));
+    let max = job_meta_read(&m, id)
+        .await
+        .iter()
+        .find(|j| j.job == job)
+        .map_or(JOB_DEFAULT_MAX_OUTPUT, |j| j.max_output_bytes);
     let next = q.offset + bytes.len() as u64;
     Ok(Json(json!({
         "job": job,
@@ -2969,7 +3156,274 @@ async fn job_read(
         "next_offset": next,
         // true when more output was waiting than one read returns; read again from next_offset
         "more": bytes.len() >= JOB_READ_MAX,
+        // the log reached max_output_bytes: later output was not recorded
+        "truncated": size >= max,
     })))
+}
+
+/// `GET .../jobs`: every job the session started, with its state refreshed from the guest in one
+/// exec (the exit files), so it is right after a daemon restart too.
+async fn job_list(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    scope: Option<Extension<SessionScope>>,
+    token_tenant: Option<Extension<TokenTenant>>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<Value>> {
+    authorize(role, &scope, id, Op::Jobs)?;
+    let s = load(&m, id, &caller_tenant(&token_tenant)).await?;
+    if s.state == "running"
+        && m.ensure_running_for_request(s.sandbox_id).await.is_ok()
+        && let Ok(res) = m
+            .exec_with_policy(
+                s.sandbox_id,
+                format!(
+                    "cd {} 2>/dev/null && for f in *.exit; do [ -e \"$f\" ] && echo \"$f $(cat \"$f\")\"; done; true",
+                    shell_quote(JOBS_DIR)
+                ),
+                Some(30),
+                None,
+            )
+            .await
+    {
+        let out = json!(res);
+        let exits: Vec<(Uuid, i64)> = out["stdout"]
+            .as_str()
+            .unwrap_or("")
+            .lines()
+            .filter_map(|l| {
+                let (f, code) = l.split_once(' ')?;
+                Some((
+                    Uuid::parse_str(f.strip_suffix(".exit")?).ok()?,
+                    code.trim().parse().ok()?,
+                ))
+            })
+            .collect();
+        for (job, code) in exits {
+            job_meta_exited(&m, id, job, code).await;
+        }
+    }
+    let items: Vec<Value> = job_meta_read(&m, id)
+        .await
+        .into_iter()
+        .map(|j| {
+            json!({
+                "job": j.job, "command": j.command, "state": j.state(), "exit_code": j.exit_code,
+                "stdin": j.stdin, "max_output_bytes": j.max_output_bytes,
+                "started_at": j.started_at, "finished_at": j.finished_at,
+            })
+        })
+        .collect();
+    Ok(Json(json!({"items": items})))
+}
+
+#[derive(Debug, Deserialize)]
+struct StdinBody {
+    /// UTF-8 text to write.
+    #[serde(default)]
+    text: Option<String>,
+    /// Or raw bytes, base64.
+    #[serde(default)]
+    data_base64: Option<String>,
+}
+
+/// `POST .../jobs/{job}/stdin`: append to a job started with `stdin: true`. There is no
+/// end-of-file: a program that waits for EOF should read from a file you put in the guest.
+async fn job_stdin(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    scope: Option<Extension<SessionScope>>,
+    token_tenant: Option<Extension<TokenTenant>>,
+    Path((id, job)): Path<(Uuid, Uuid)>,
+    Json(body): Json<StdinBody>,
+) -> ApiResult<Json<Value>> {
+    authorize(role, &scope, id, Op::Jobs)?;
+    let bad = |message: &str| ApiError {
+        status: StatusCode::BAD_REQUEST,
+        message: message.into(),
+    };
+    let data = match (body.text, body.data_base64) {
+        (Some(t), None) => t.into_bytes(),
+        (None, Some(b)) => base64_decode(&b),
+        _ => return Err(bad("give exactly one of text or data_base64")),
+    };
+    if data.is_empty() || data.len() > JOB_STDIN_MAX {
+        return Err(bad(&format!("stdin writes are 1-{JOB_STDIN_MAX} bytes")));
+    }
+    let s = load(&m, id, &caller_tenant(&token_tenant)).await?;
+    running(&s)?;
+    if !job_meta_read(&m, id)
+        .await
+        .iter()
+        .any(|j| j.job == job && j.stdin)
+    {
+        return Err(ApiError {
+            status: StatusCode::CONFLICT,
+            message: format!(
+                "job {job} was not started with stdin: true (or is not in this session)"
+            ),
+        });
+    }
+    // Same confinement as the job itself: it is a write into the guest on the session's behalf.
+    m.ensure_running_for_request(s.sandbox_id).await?;
+    let res = m
+        .exec_with_policy(s.sandbox_id, job_stdin_script(job, &data), Some(10), None)
+        .await?;
+    match json!(res)["exit_code"].as_i64() {
+        Some(0) => {}
+        Some(3) => {
+            return Err(ApiError {
+                status: StatusCode::CONFLICT,
+                message: format!("job {job} has already exited"),
+            });
+        }
+        code => {
+            return Err(ApiError {
+                status: StatusCode::BAD_GATEWAY,
+                message: format!("could not write to the job's stdin (exit {code:?})"),
+            });
+        }
+    }
+    // Sizes only: what a program is fed may be a secret.
+    record(
+        &m,
+        id,
+        "job.stdin",
+        json!({"job": job, "bytes": data.len()}),
+    );
+    Ok(Json(json!({"job": job, "bytes": data.len()})))
+}
+
+static JOB_STREAMS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+struct StreamSlot;
+
+impl Drop for StreamSlot {
+    fn drop(&mut self) {
+        JOB_STREAMS.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct StreamQuery {
+    #[serde(default)]
+    offset: Option<u64>,
+}
+
+/// `GET .../jobs/{job}/stream`: Server-Sent Events. `output` events carry `{offset, next_offset,
+/// output, output_base64}` and use `next_offset` as the event id, so a client that reconnects
+/// with `Last-Event-ID` (or `?offset=`) continues without gaps or repeats. The stream ends with an
+/// `exit` event, or an `error` event if the job or session went away. At most 16 streams per
+/// host, one hour each.
+async fn job_stream(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    scope: Option<Extension<SessionScope>>,
+    token_tenant: Option<Extension<TokenTenant>>,
+    Path((id, job)): Path<(Uuid, Uuid)>,
+    headers: axum::http::HeaderMap,
+    Query(q): Query<StreamQuery>,
+) -> Result<
+    axum::response::sse::Sse<
+        impl futures::Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>>,
+    >,
+    ApiError,
+> {
+    use axum::response::sse::{Event, KeepAlive, Sse};
+    authorize(role, &scope, id, Op::Jobs)?;
+    let s = load(&m, id, &caller_tenant(&token_tenant)).await?;
+    running(&s)?;
+    let start = q
+        .offset
+        .or_else(|| {
+            headers
+                .get("last-event-id")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.trim().parse().ok())
+        })
+        .unwrap_or(0);
+    if JOB_STREAMS.fetch_add(1, std::sync::atomic::Ordering::SeqCst) >= MAX_JOB_STREAMS {
+        JOB_STREAMS.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        return Err(ApiError {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            message: format!("at most {MAX_JOB_STREAMS} job streams at once on this host"),
+        });
+    }
+    let slot = StreamSlot;
+    let sandbox = s.sandbox_id;
+    let stream = async_stream::stream! {
+        let _slot = slot;
+        let began = std::time::Instant::now();
+        let mut offset = start;
+        let err = |msg: String| Event::default().event("error").data(json!({"error": msg}).to_string());
+        loop {
+            if began.elapsed().as_secs() > JOB_STREAM_MAX_SECS {
+                yield Ok(err(format!("stream time limit reached; reconnect with Last-Event-ID {offset}")));
+                break;
+            }
+            // The session may have been restored, expired or deleted since the last poll.
+            match load(&m, id, &s.tenant).await {
+                Ok(cur) if cur.state == "running" => {}
+                Ok(cur) => {
+                    yield Ok(err(format!("session is {}", cur.state)));
+                    break;
+                }
+                Err(e) => {
+                    yield Ok(err(e.message));
+                    break;
+                }
+            }
+            let res = match m.ensure_running_for_request(sandbox).await {
+                Ok(_) => m
+                    .exec_with_policy(sandbox, job_read_script(job, offset), Some(30), None)
+                    .await,
+                Err(e) => Err(e),
+            };
+            let res = match res {
+                Ok(r) => json!(r),
+                Err(e) => {
+                    yield Ok(err(format!("{e:#}")));
+                    break;
+                }
+            };
+            match parse_job_read(res["stdout"].as_str().unwrap_or("")) {
+                JobRead::Missing => {
+                    yield Ok(err(format!("job {job} not found in session {id}")));
+                    break;
+                }
+                JobRead::Chunk { exit, bytes, .. } => {
+                    let more = bytes.len() >= JOB_READ_MAX;
+                    if !bytes.is_empty() {
+                        let next = offset + bytes.len() as u64;
+                        use base64::Engine as _;
+                        yield Ok(Event::default()
+                            .event("output")
+                            .id(next.to_string())
+                            .data(json!({
+                                "offset": offset,
+                                "next_offset": next,
+                                "output": String::from_utf8_lossy(&bytes),
+                                "output_base64": base64::engine::general_purpose::STANDARD.encode(&bytes),
+                            }).to_string()));
+                        offset = next;
+                    }
+                    if more {
+                        continue;
+                    }
+                    if let Some(code) = exit {
+                        job_meta_exited(&m, id, job, code).await;
+                        yield Ok(Event::default()
+                            .event("exit")
+                            .id(offset.to_string())
+                            .data(json!({"exit_code": code, "next_offset": offset}).to_string()));
+                        break;
+                    }
+                }
+            }
+            tokio::time::sleep(JOB_STREAM_POLL).await;
+        }
+    };
+    Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
 }
 
 async fn job_kill(
@@ -2992,6 +3446,16 @@ async fn job_kill(
     );
     m.exec_with_policy(s.sandbox_id, cmd, Some(30), None)
         .await?;
+    job_meta_update(&m, id, |all| {
+        if let Some(j) = all.iter_mut().find(|j| j.job == job) {
+            j.killed = true;
+            if j.exit_code.is_none() {
+                j.exit_code = Some(143);
+                j.finished_at = Some(Utc::now());
+            }
+        }
+    })
+    .await;
     record(&m, id, "job.kill", json!({"job": job}));
     Ok(StatusCode::NO_CONTENT)
 }
@@ -4018,7 +4482,7 @@ mod tests {
     #[test]
     fn a_job_is_started_detached_and_read_exit_first() {
         let job = Uuid::nil();
-        let start = job_start_script(job, "echo 'hi there'; sleep 1");
+        let start = job_start_script(job, "echo 'hi there'; sleep 1", false, 1024);
         assert!(start.contains("setsid"), "{start}");
         assert!(start.contains("/tmp/fluxvm-jobs/00000000-0000-0000-0000-000000000000.out"));
         // The command arrives as one quoted argument, never spliced into the line.
@@ -4032,6 +4496,129 @@ mod tests {
             read.find(".exit").unwrap() < read.find("tail -c +11").unwrap(),
             "{read}"
         );
+    }
+
+    /// Runs the real guest scripts with a local `sh`. `setsid` is absent on macOS, so a shim that
+    /// just execs its arguments stands in for it; the scripts are otherwise unchanged.
+    #[cfg(unix)]
+    mod live_scripts {
+        use super::super::*;
+        use std::process::Command;
+        use std::time::{Duration, Instant};
+
+        struct Sh {
+            path: std::ffi::OsString,
+            _dir: tempfile::TempDir,
+        }
+
+        fn sh() -> Sh {
+            let dir = tempfile::tempdir().unwrap();
+            let shim = dir.path().join("setsid");
+            std::fs::write(&shim, "#!/bin/sh\nexec \"$@\"\n").unwrap();
+            std::os::unix::fs::PermissionsExt::set_mode(
+                &mut std::fs::metadata(&shim).unwrap().permissions(),
+                0o755,
+            );
+            let mut p = std::fs::metadata(&shim).unwrap().permissions();
+            std::os::unix::fs::PermissionsExt::set_mode(&mut p, 0o755);
+            std::fs::set_permissions(&shim, p).unwrap();
+            let mut path = std::ffi::OsString::from(dir.path());
+            path.push(":");
+            path.push(std::env::var_os("PATH").unwrap_or_default());
+            Sh { path, _dir: dir }
+        }
+
+        fn run(sh: &Sh, script: &str) -> (i32, String) {
+            let o = Command::new("sh")
+                .arg("-c")
+                .arg(script)
+                .env("PATH", &sh.path)
+                .output()
+                .unwrap();
+            (
+                o.status.code().unwrap_or(-1),
+                String::from_utf8_lossy(&o.stdout).to_string(),
+            )
+        }
+
+        /// Polls `job_read_script` until the job has exited (or the deadline).
+        fn wait_exit(sh: &Sh, job: Uuid) -> (Option<i64>, Vec<u8>, u64) {
+            let end = Instant::now() + Duration::from_secs(10);
+            loop {
+                let (_, out) = run(sh, &job_read_script(job, 0));
+                if let JobRead::Chunk { exit, bytes, size } = parse_job_read(&out)
+                    && (exit.is_some() || Instant::now() > end)
+                {
+                    return (exit, bytes, size);
+                }
+                assert!(
+                    Instant::now() < end + Duration::from_secs(1),
+                    "job never appeared"
+                );
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        }
+
+        #[test]
+        fn a_job_records_output_and_its_exit_code() {
+            let sh = sh();
+            let job = Uuid::new_v4();
+            let (code, out) = run(
+                &sh,
+                &job_start_script(job, "echo out; echo err >&2; exit 7", false, 1 << 20),
+            );
+            assert_eq!((code, out.trim()), (0, "started"));
+            let (exit, bytes, _) = wait_exit(&sh, job);
+            assert_eq!(exit, Some(7));
+            assert_eq!(String::from_utf8_lossy(&bytes), "out\nerr\n");
+        }
+
+        #[test]
+        fn stdin_reaches_the_job_and_a_dead_job_refuses_it() {
+            let sh = sh();
+            let job = Uuid::new_v4();
+            // `head -n 2` reads two lines from stdin, so the job lives until both arrive.
+            run(&sh, &job_start_script(job, "head -n 2", true, 1 << 20));
+            let end = Instant::now() + Duration::from_secs(5);
+            // The FIFO is created before the job is backgrounded, so the first write works.
+            let (c1, _) = run(&sh, &job_stdin_script(job, b"one\n"));
+            assert_eq!(c1, 0);
+            let (c2, _) = run(&sh, &job_stdin_script(job, b"two\n"));
+            assert_eq!(c2, 0);
+            let (exit, bytes, _) = wait_exit(&sh, job);
+            assert!(Instant::now() < end + Duration::from_secs(10));
+            assert_eq!(exit, Some(0));
+            assert_eq!(String::from_utf8_lossy(&bytes), "one\ntwo\n");
+            // Exited: a further write is refused, not blocked forever.
+            let (c3, _) = run(&sh, &job_stdin_script(job, b"three\n"));
+            assert_eq!(c3, 3);
+            // A job without stdin has no FIFO at all.
+            let plain = Uuid::new_v4();
+            run(&sh, &job_start_script(plain, "true", false, 1024));
+            assert_eq!(run(&sh, &job_stdin_script(plain, b"x")).0, 3);
+        }
+
+        #[test]
+        fn the_output_log_is_bounded_and_the_job_still_reports_an_exit() {
+            let sh = sh();
+            let job = Uuid::new_v4();
+            run(
+                &sh,
+                &job_start_script(
+                    job,
+                    "yes aaaaaaaaaaaaaaaaaaaa | head -c 200000",
+                    false,
+                    1000,
+                ),
+            );
+            let (exit, bytes, size) = wait_exit(&sh, job);
+            assert!(
+                exit.is_some(),
+                "an exit is recorded even when output was cut"
+            );
+            assert_eq!(size, 1000);
+            assert_eq!(bytes.len(), 1000);
+        }
     }
 
     #[test]

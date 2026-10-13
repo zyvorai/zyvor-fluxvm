@@ -306,15 +306,35 @@ fluxctl agent logs <session> $J -f      # follows until exit, exits with the job
 fluxctl agent kill <session> $J         # SIGTERM to its process group; exit code reads 143
 ```
 
-`POST .../jobs` starts it (`setsid`, output to `/tmp/fluxvm-jobs/<job>.out`, exit code written last);
-`GET .../jobs/{job}?offset=N` returns `state`, `exit_code`, `output`, `next_offset` and `more`; `DELETE .../jobs/{job}`
-stops it. MCP: `session_job_start`, `session_job_read`, `session_job_kill`.
+`POST .../jobs {command, stdin?, max_output_bytes?}` starts it (`setsid`, output to `/tmp/fluxvm-jobs/<job>.out`, exit
+code written last). Reading:
 
-Run live (M4, `vz`, NAT session): a 4-second job followed to its exit code 7; a `sleep 300` job killed (143); a
-200 000-byte output read back whole across several pages; an unknown job id returned 404. **This is polling over the
-ordinary exec path, not a stream**: each read costs one exec (0.1 s on a NAT session, about 0.4 s offline), `-f` polls
-twice a second, and there is no stdin or TTY. A job lives in the guest's `/tmp`, so it is gone after a disk-only
-restore or a reboot, and output is not rotated.
+- `GET .../jobs/{job}?offset=N` returns `state`, `exit_code`, `output`, `next_offset`, `more` and `truncated`.
+- `GET .../jobs/{job}/stream` is **Server-Sent Events**: `output` events carry `{offset, next_offset, output,
+  output_base64}` with `next_offset` as the event id, then one `exit` event (`{exit_code}`), or an `error` event if the
+  job or session went away. Reconnect with `Last-Event-ID` (or `?offset=`) and it continues with no gap or repeat.
+  At most 16 streams per host, one hour each; the session must stay `running`.
+- `GET .../jobs` lists every job with `command`, `state` (`running`, `exited`, `killed`), `exit_code` and times. The
+  metadata is kept on the host, so it survives a daemon restart; states are refreshed from the guest on each listing.
+
+Writing and limits:
+
+- `stdin: true` gives the job a FIFO that `POST .../jobs/{job}/stdin {text | data_base64}` appends to (1 byte to 48 KiB
+  per write; `409` once the job has exited). **There is no end-of-file**: a program that waits for EOF should read a
+  file you put in the guest instead. Only sizes are ledgered (`job.stdin`), never the data.
+- The log is bounded: output stops being recorded at `max_output_bytes` (default 16 MiB, at most 256 MiB) and the job
+  receives SIGPIPE on its next write; `truncated` says so and an exit code is still recorded.
+- `DELETE .../jobs/{job}` stops it (SIGTERM to its process group, exit 143, state `killed`).
+
+CLI: `fluxctl agent bg [--stdin] [--max-output-bytes N]`, `jobs`, `stdin <id> <job> <text>`, `logs [-f]`, `kill`
+(`logs -f` still polls; the stream is for SDKs and `curl -N`). MCP: `session_job_start`, `session_job_read`,
+`session_job_stdin`, `session_jobs`, `session_job_kill`.
+
+Run live earlier (M4, `vz`, NAT session): a 4-second job followed to its exit code 7; a `sleep 300` job killed (143); a
+200 000-byte output read back whole across several pages; an unknown job id returned 404. The streaming, stdin and
+bounded-log scripts were run with a local `sh` (unit tests), **not yet in a guest**, and the SSE route was not run
+against a live daemon. It is still the ordinary exec path underneath, so each poll costs one exec (0.1 s on a NAT
+session, about 0.4 s offline). A job lives in the guest's `/tmp`, so it is gone after a disk-only restore or a reboot.
 
 ### Preview URLs
 
@@ -435,7 +455,7 @@ Each item says why it is not in the MVP.
 | Workspace overlay mode, read-only mounts | `mode: "overlay"` is refused; clone is the only writable mode |
 | Process policy as a security boundary | `process` rules are still string globs; filesystem confinement is wired, command confinement beyond it is not |
 | HTTP method/path rules through the session policy | the egress proxy supports them on QEMU/KVM; not exposed here |
-| Streaming exec output | `exec` is still buffered and jobs are polled; the terminal (`shell`) streams |
+| Streaming exec output | `exec` is still buffered; jobs stream over SSE (polled from the guest every 400 ms) and the terminal (`shell`) streams |
 | Replay | the ledger is a log, not a recording |
 | Preview URLs: large or streamed responses | WebSocket upgrades are bridged (run with Chrome DevTools); large and streamed bodies were not run through the preview route |
 | Browser / computer-use profile | a CDP recipe works on the stock image (see Browser above); no prebuilt browser image, no Playwright client run, no computer-use display profile |

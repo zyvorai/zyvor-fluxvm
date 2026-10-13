@@ -1592,9 +1592,14 @@ pub fn tools(remote: Arc<Remote>) -> Vec<Tool> {
         ),
         tool(
             "session_job_start",
-            "Start a command that keeps running after the call returns (a dev server, a long build). Returns a job id; read output with session_job_read. No stdin and no TTY.",
+            "Start a command that keeps running after the call returns (a dev server, a long build). Returns a job id; read output with session_job_read. No TTY; set stdin true to feed it with session_job_stdin.",
             object(
-                json!({"session": {"type": "string"}, "command": {"type": "string", "description": "one shell line"}}),
+                json!({
+                    "session": {"type": "string"},
+                    "command": {"type": "string", "description": "one shell line"},
+                    "stdin": {"type": "boolean", "description": "give the job a stdin that session_job_stdin writes to (no end-of-file)"},
+                    "max_output_bytes": {"type": "integer", "minimum": 1, "description": "stop recording output after this many bytes (default 16 MiB)"},
+                }),
                 &["session", "command"],
             ),
             true,
@@ -1604,13 +1609,70 @@ pub fn tools(remote: Arc<Remote>) -> Vec<Tool> {
                     let id = session_id(&args)?;
                     let command = str_arg(&args, "command")
                         .ok_or_else(|| anyhow::anyhow!("command is required"))?;
+                    let mut body = json!({"command": command});
+                    if args["stdin"].as_bool().unwrap_or(false) {
+                        body["stdin"] = json!(true);
+                    }
+                    if let Some(n) = int_arg(&args, "max_output_bytes")? {
+                        body["max_output_bytes"] = json!(n);
+                    }
                     pretty(
                         &r.call(
                             Method::POST,
                             &format!("/v1/agents/sessions/{id}/jobs"),
-                            Some(json!({"command": command})),
+                            Some(body),
                         )
                         .await?,
+                    )
+                })
+                .await
+            },
+        ),
+        tool(
+            "session_job_stdin",
+            "Write text to the stdin of a background job started with stdin true. There is no end-of-file; a newline is not added.",
+            object(
+                json!({
+                    "session": {"type": "string"},
+                    "job": {"type": "string"},
+                    "text": {"type": "string", "description": "up to 48 KiB"},
+                }),
+                &["session", "job", "text"],
+            ),
+            true,
+            &remote,
+            |r, args| async move {
+                timed(CALL_TIMEOUT, async {
+                    let id = session_id(&args)?;
+                    let job = str_arg(&args, "job")
+                        .and_then(|j| Uuid::parse_str(j).ok())
+                        .ok_or_else(|| anyhow::anyhow!("job must be a job id"))?;
+                    let text = str_arg(&args, "text")
+                        .ok_or_else(|| anyhow::anyhow!("text is required"))?;
+                    pretty(
+                        &r.call(
+                            Method::POST,
+                            &format!("/v1/agents/sessions/{id}/jobs/{job}/stdin"),
+                            Some(json!({"text": text})),
+                        )
+                        .await?,
+                    )
+                })
+                .await
+            },
+        ),
+        tool(
+            "session_jobs",
+            "List a session's background jobs with command, state (running|exited|killed) and exit code.",
+            object(json!({"session": {"type": "string"}}), &["session"]),
+            false,
+            &remote,
+            |r, args| async move {
+                timed(CALL_TIMEOUT, async {
+                    let id = session_id(&args)?;
+                    pretty(
+                        &r.call(Method::GET, &format!("/v1/agents/sessions/{id}/jobs"), None)
+                            .await?,
                     )
                 })
                 .await

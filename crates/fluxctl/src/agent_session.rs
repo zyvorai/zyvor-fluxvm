@@ -159,12 +159,27 @@ pub enum AgentCommand {
         recursive: bool,
     },
     /// Start a command that keeps running after this call returns; prints the job id. Read it with
-    /// `agent logs`. No stdin, no TTY. REST: `POST .../jobs`.
+    /// `agent logs`. No TTY; stdin only with `--stdin`. REST: `POST .../jobs`.
     Bg {
         id: Uuid,
+        /// Give the job a stdin that `agent stdin` writes to (there is no end-of-file).
+        #[arg(long)]
+        stdin: bool,
+        /// Stop recording output after this many bytes (default 16 MiB, at most 256 MiB).
+        #[arg(long)]
+        max_output_bytes: Option<u64>,
         /// The command: one shell line, or an argv after `--`.
         #[arg(trailing_var_arg = true, required = true, num_args = 1..)]
         command: Vec<String>,
+    },
+    /// The session's background jobs: command, state and exit code. REST: `GET .../jobs`.
+    Jobs { id: Uuid },
+    /// Write to the stdin of a job started with `bg --stdin`. REST: `POST .../jobs/{job}/stdin`.
+    Stdin {
+        id: Uuid,
+        job: Uuid,
+        /// Text to write (a newline is not added).
+        text: String,
     },
     /// Output of a background job. With `-f` keep reading until it exits and exit with its code.
     /// REST: `GET .../jobs/{job}?offset=N`.
@@ -878,17 +893,42 @@ pub async fn run(r: &Remote, cmd: AgentCommand) -> Result<()> {
             println!("{}", json!({"ok": true, "removed": path}));
             Ok(())
         }
-        AgentCommand::Bg { id, command } => {
+        AgentCommand::Bg {
+            id,
+            stdin,
+            max_output_bytes,
+            command,
+        } => {
+            let mut body = json!({"command": guest_command(&command)});
+            if stdin {
+                body["stdin"] = json!(true);
+            }
+            if let Some(n) = max_output_bytes {
+                body["max_output_bytes"] = json!(n);
+            }
             let v = r
                 .call(
                     Method::POST,
                     &format!("/v1/agents/sessions/{id}/jobs"),
-                    Some(json!({"command": guest_command(&command)})),
+                    Some(body),
                 )
                 .await
                 .context("start job")?;
             show(&v)
         }
+        AgentCommand::Jobs { id } => show(
+            &r.call(Method::GET, &format!("/v1/agents/sessions/{id}/jobs"), None)
+                .await?,
+        ),
+        AgentCommand::Stdin { id, job, text } => show(
+            &r.call(
+                Method::POST,
+                &format!("/v1/agents/sessions/{id}/jobs/{job}/stdin"),
+                Some(json!({"text": text})),
+            )
+            .await
+            .context("write stdin")?,
+        ),
         AgentCommand::Logs { id, job, follow } => {
             use std::io::Write as _;
             let mut offset = 0u64;
