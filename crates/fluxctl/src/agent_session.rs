@@ -84,6 +84,25 @@ pub enum AgentCommand {
     },
     /// Workspace changes since the baseline, checkpoints and children. REST: `GET .../artifacts`.
     Artifacts { id: Uuid },
+    /// Start a command that keeps running after this call returns; prints the job id. Read it with
+    /// `agent logs`. No stdin, no TTY. REST: `POST .../jobs`.
+    Bg {
+        id: Uuid,
+        /// The command: one shell line, or an argv after `--`.
+        #[arg(trailing_var_arg = true, required = true, num_args = 1..)]
+        command: Vec<String>,
+    },
+    /// Output of a background job. With `-f` keep reading until it exits and exit with its code.
+    /// REST: `GET .../jobs/{job}?offset=N`.
+    Logs {
+        id: Uuid,
+        job: Uuid,
+        /// Follow until the job exits (polls about twice a second).
+        #[arg(short = 'f', long)]
+        follow: bool,
+    },
+    /// Stop a background job (SIGTERM to its process group). REST: `DELETE .../jobs/{job}`.
+    Kill { id: Uuid, job: Uuid },
     /// Mint an expiring preview URL for a guest port: whoever holds the URL reaches that port and
     /// nothing else. REST: `POST .../preview`.
     Expose {
@@ -244,6 +263,58 @@ pub async fn run(r: &Remote, cmd: AgentCommand) -> Result<()> {
             .await
             .context("artifacts")?,
         ),
+        AgentCommand::Bg { id, command } => {
+            let v = r
+                .call(
+                    Method::POST,
+                    &format!("/v1/agents/sessions/{id}/jobs"),
+                    Some(json!({"command": guest_command(&command)})),
+                )
+                .await
+                .context("start job")?;
+            show(&v)
+        }
+        AgentCommand::Logs { id, job, follow } => {
+            use std::io::Write as _;
+            let mut offset = 0u64;
+            loop {
+                let v = r
+                    .call(
+                        Method::GET,
+                        &format!("/v1/agents/sessions/{id}/jobs/{job}?offset={offset}"),
+                        None,
+                    )
+                    .await
+                    .context("read job")?;
+                let out = v["output"].as_str().unwrap_or("");
+                print!("{out}");
+                let _ = std::io::stdout().flush();
+                offset = v["next_offset"].as_u64().unwrap_or(offset);
+                let more = v["more"].as_bool() == Some(true);
+                if let Some(code) = v["exit_code"].as_i64()
+                    && !more
+                {
+                    eprintln!("[job exited {code}]");
+                    std::process::exit(if follow { code.clamp(0, 255) as i32 } else { 0 });
+                }
+                if !follow && !more {
+                    return Ok(());
+                }
+                if !more {
+                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                }
+            }
+        }
+        AgentCommand::Kill { id, job } => {
+            r.call(
+                Method::DELETE,
+                &format!("/v1/agents/sessions/{id}/jobs/{job}"),
+                None,
+            )
+            .await?;
+            println!("{}", json!({"ok": true, "killed": job}));
+            Ok(())
+        }
         AgentCommand::Expose { id, port, ttl } => {
             let mut v = r
                 .call(

@@ -3,6 +3,9 @@
 ## Unreleased
 
 ### Added
+- **Background jobs for agent sessions.** `fluxctl agent bg|logs [-f]|kill`, MCP `session_job_start|read|kill`, and
+  `POST /v1/agents/sessions/{id}/jobs`, `GET|DELETE .../jobs/{job}`: a detached command whose output is read from a byte
+  offset. Polling over exec, not a stream; no stdin or TTY. Run on a `vz` NAT session on an M4.
 - **Preview URLs for agent sessions.** `fluxctl agent expose|previews|unexpose`, MCP `session_preview`, and
   `POST/GET/DELETE /v1/agents/sessions/{id}/preview[s]` plus a token-gated `/preview/{token}/...` route: an expiring,
   revocable URL to one guest TCP port. Run on a `vz` NAT session on an M4; WebSocket, streaming and Linux not run.

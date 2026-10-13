@@ -1513,6 +1513,88 @@ pub fn tools(remote: Arc<Remote>) -> Vec<Tool> {
             },
         ),
         tool(
+            "session_job_start",
+            "Start a command that keeps running after the call returns (a dev server, a long build). Returns a job id; read output with session_job_read. No stdin and no TTY.",
+            object(
+                json!({"session": {"type": "string"}, "command": {"type": "string", "description": "one shell line"}}),
+                &["session", "command"],
+            ),
+            true,
+            &remote,
+            |r, args| async move {
+                timed(CALL_TIMEOUT, async {
+                    let id = session_id(&args)?;
+                    let command = str_arg(&args, "command")
+                        .ok_or_else(|| anyhow::anyhow!("command is required"))?;
+                    pretty(
+                        &r.call(
+                            Method::POST,
+                            &format!("/v1/agents/sessions/{id}/jobs"),
+                            Some(json!({"command": command})),
+                        )
+                        .await?,
+                    )
+                })
+                .await
+            },
+        ),
+        tool(
+            "session_job_read",
+            "Output of a background job from a byte offset. Returns state (running|exited), exit_code, output and next_offset: pass next_offset back to read only what is new. more=true means read again at once.",
+            object(
+                json!({
+                    "session": {"type": "string"},
+                    "job": {"type": "string"},
+                    "offset": {"type": "integer", "description": "byte offset, default 0"},
+                }),
+                &["session", "job"],
+            ),
+            false,
+            &remote,
+            |r, args| async move {
+                timed(CALL_TIMEOUT, async {
+                    let id = session_id(&args)?;
+                    let job =
+                        str_arg(&args, "job").ok_or_else(|| anyhow::anyhow!("job is required"))?;
+                    let offset = int_arg(&args, "offset")?.unwrap_or(0);
+                    pretty(
+                        &r.call(
+                            Method::GET,
+                            &format!("/v1/agents/sessions/{id}/jobs/{job}?offset={offset}"),
+                            None,
+                        )
+                        .await?,
+                    )
+                })
+                .await
+            },
+        ),
+        tool(
+            "session_job_kill",
+            "Stop a background job (SIGTERM to its process group). Its exit_code then reads 143.",
+            object(
+                json!({"session": {"type": "string"}, "job": {"type": "string"}}),
+                &["session", "job"],
+            ),
+            true,
+            &remote,
+            |r, args| async move {
+                timed(CALL_TIMEOUT, async {
+                    let id = session_id(&args)?;
+                    let job =
+                        str_arg(&args, "job").ok_or_else(|| anyhow::anyhow!("job is required"))?;
+                    r.call(
+                        Method::DELETE,
+                        &format!("/v1/agents/sessions/{id}/jobs/{job}"),
+                        None,
+                    )
+                    .await?;
+                    pretty(&json!({"ok": true, "killed": job}))
+                })
+                .await
+            },
+        ),
+        tool(
             "session_delete",
             "End an agent session and delete its sandbox.",
             object(json!({"session": {"type": "string"}}), &["session"]),

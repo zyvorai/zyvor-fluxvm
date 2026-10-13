@@ -22,8 +22,10 @@ and stop; do not try to install anything yourself.
 3. `session_checkpoint` before any step you might want to undo; `session_restore` to go back.
 4. `session_preview` (port) when you start a web server the user should see: it returns an expiring URL; share it
    only with who should see the app. Offline sessions have no address to preview.
-5. `session_artifacts` to see added/modified/deleted files under `/workspace` before reporting the result.
-6. `session_delete` when done. Sessions also expire by TTL.
+5. For anything that runs longer than one call (a server, a build): `session_job_start`, then `session_job_read`
+   with the `next_offset` it returned; `session_job_kill` to stop it. There is no stdin.
+6. `session_artifacts` to see added/modified/deleted files under `/workspace` before reporting the result.
+7. `session_delete` when done. Sessions also expire by TTL.
 
 ## Trying several approaches
 
