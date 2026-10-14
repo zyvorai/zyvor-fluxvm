@@ -38,7 +38,8 @@ impl VmManager {
         let vm = self.get(id).await?;
         grants::set_audit_sink(crate::audit_event);
         let value = resolve_secret(&req, |k| std::env::var(k).ok())?;
-        let source_ip = vm.guest_ip.as_deref().and_then(|s| s.parse().ok());
+        // The address the proxy sees: a vz guest relayed through its runner shows up as its alias.
+        let source_ip = Self::guest_addr(&vm);
         let sandbox_id = id.to_string();
         let info = grants::global()
             .add(&sandbox_id, &req, value, source_ip, chrono::Utc::now())
@@ -61,7 +62,8 @@ impl VmManager {
     /// bound to a stale one: a grant that cannot be bound safely is not kept.
     pub async fn rebind_grants(&self, id: Uuid) -> Result<bool> {
         let vm = self.get(id).await?;
-        let source_ip = vm.guest_ip.as_deref().and_then(|s| s.parse().ok());
+        // The address the proxy sees: a vz guest relayed through its runner shows up as its alias.
+        let source_ip = Self::guest_addr(&vm);
         let sandbox_id = id.to_string();
         match grants::global().rebind(&sandbox_id, source_ip) {
             Ok(has) => Ok(has),
