@@ -11,6 +11,8 @@
 //! * `GET    /v1/agents/sessions/{id}`               one session and its capabilities
 //! * `DELETE /v1/agents/sessions/{id}`               delete the session and its sandbox
 //! * `POST   /v1/agents/sessions/{id}/exec`          run a command
+//! * `GET    /v1/agents/sessions/{id}/screenshot`    the guest display as a PNG (`vz`; scope `screen`)
+//! * `POST   /v1/agents/sessions/{id}/input`         keyboard and mouse input to the display (`vz`; scope `screen`)
 //! * `GET    /v1/agents/sessions/{id}/probe`         which tools the guest image has (git, sha256sum, node, browsers ...)
 //! * `POST   /v1/agents/sessions/{id}/grants`        give the session a brokered credential for named hosts (also GET, DELETE)
 //! * `POST   /v1/agents/sessions/{id}/tokens`        mint an expiring token scoped to this session (also GET, DELETE .../{token})
@@ -84,6 +86,8 @@ pub(crate) fn routes() -> Router<Arc<VmManager>> {
         )
         .route("/v1/agents/sessions/{id}/exec", post(exec_session))
         .route("/v1/agents/sessions/{id}/probe", get(probe))
+        .route("/v1/agents/sessions/{id}/screenshot", get(screenshot))
+        .route("/v1/agents/sessions/{id}/input", post(screen_input))
         .route(
             "/v1/agents/sessions/{id}/grants",
             post(grant_create).get(grant_list).delete(grant_revoke_all),
@@ -2098,7 +2102,7 @@ async fn grant_revoke(
 
 #[derive(Debug, Deserialize)]
 struct MintTokenBody {
-    /// Operations to grant: read, exec, jobs, files.read, files.write, git, checkpoint, preview.
+    /// Operations to grant: read, exec, jobs, files.read, files.write, git, checkpoint, preview, screen.
     ops: Vec<String>,
     #[serde(default)]
     ttl_seconds: Option<u64>,
@@ -3689,6 +3693,100 @@ async fn probe(
     let mut report = probe_report(out["stdout"].as_str().unwrap_or(""));
     report["session"] = json!(id);
     Ok(Json(report))
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct ScreenshotQuery {
+    #[serde(default)]
+    max_width: Option<u32>,
+}
+
+/// `GET /v1/agents/sessions/{id}/screenshot[?max_width=N]` — the guest display as a PNG (vz sessions). The screen can
+/// show anything the guest does, so it is its own scope (`screen`), not part of `read`. Ledgered without the pixels.
+async fn screenshot(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    scope: Option<Extension<SessionScope>>,
+    token_tenant: Option<Extension<TokenTenant>>,
+    Path(id): Path<Uuid>,
+    Query(q): Query<ScreenshotQuery>,
+) -> ApiResult<axum::response::Response> {
+    use axum::response::IntoResponse;
+    authorize(role, &scope, id, Op::Screen)?;
+    let s = load(&m, id, &caller_tenant(&token_tenant)).await?;
+    running(&s)?;
+    m.ensure_running_for_request(s.sandbox_id).await?;
+    let shot = m.vm_screenshot(s.sandbox_id, q.max_width).await?;
+    record(
+        &m,
+        id,
+        "screen.shot",
+        json!({"width": shot.width, "height": shot.height, "blank": shot.blank, "bytes": shot.png.len()}),
+    );
+    let h = |k: &'static str, v: String| (axum::http::HeaderName::from_static(k), v);
+    Ok((
+        [
+            (axum::http::header::CONTENT_TYPE, "image/png".to_string()),
+            (axum::http::header::CACHE_CONTROL, "no-store".to_string()),
+            h("x-fluxvm-screen-width", shot.width.to_string()),
+            h("x-fluxvm-screen-height", shot.height.to_string()),
+            h("x-fluxvm-screen-blank", shot.blank.to_string()),
+        ],
+        shot.png,
+    )
+        .into_response())
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum ScreenInput {
+    Batch {
+        actions: Vec<fluxvm_scheduler::vz_screen::InputAction>,
+    },
+    One(fluxvm_scheduler::vz_screen::InputAction),
+}
+
+/// `POST /v1/agents/sessions/{id}/input` — one action or `{"actions": [...]}` to the guest display, in order.
+/// Ledgered as `screen.input` with the action count and the action kinds (typed text is not copied into the ledger).
+async fn screen_input(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    scope: Option<Extension<SessionScope>>,
+    token_tenant: Option<Extension<TokenTenant>>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<ScreenInput>,
+) -> ApiResult<Json<Value>> {
+    authorize(role, &scope, id, Op::Screen)?;
+    let s = load(&m, id, &caller_tenant(&token_tenant)).await?;
+    running(&s)?;
+    m.ensure_running_for_request(s.sandbox_id).await?;
+    let actions = match req {
+        ScreenInput::Batch { actions } => actions,
+        ScreenInput::One(a) => vec![a],
+    };
+    if actions.is_empty() || actions.len() > 256 {
+        return Err(ApiError {
+            status: StatusCode::BAD_REQUEST,
+            message: "send 1-256 actions".into(),
+        });
+    }
+    let kinds: Vec<String> = actions
+        .iter()
+        .map(|a| {
+            serde_json::to_value(a)
+                .ok()
+                .and_then(|v| v.get("action").and_then(|k| k.as_str().map(str::to_string)))
+                .unwrap_or_else(|| "?".into())
+        })
+        .collect();
+    let n = m.vm_input(s.sandbox_id, &actions).await?;
+    record(
+        &m,
+        id,
+        "screen.input",
+        json!({"actions": n, "kinds": kinds}),
+    );
+    Ok(Json(json!({"ok": true, "actions": n})))
 }
 
 // ---------------------------------------------------------------------------------------

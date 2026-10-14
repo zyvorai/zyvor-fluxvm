@@ -2203,11 +2203,11 @@ pub fn tools(remote: Arc<Remote>) -> Vec<Tool> {
         ),
         tool(
             "session_token",
-            "Mint an expiring bearer token that works on this one session and only for the listed operations, to hand to a less-trusted agent. The token is shown once. Grantable: read, exec, jobs, files.read, files.write, git, checkpoint, preview; restore, fork, delete, terminals and promote stay with the caller.",
+            "Mint an expiring bearer token that works on this one session and only for the listed operations, to hand to a less-trusted agent. The token is shown once. Grantable: read, exec, jobs, files.read, files.write, git, checkpoint, preview, screen; restore, fork, delete, terminals and promote stay with the caller.",
             object(
                 json!({
                     "session": {"type": "string"},
-                    "ops": {"type": "array", "items": {"type": "string", "enum": ["read", "exec", "jobs", "files.read", "files.write", "git", "checkpoint", "preview"]}, "minItems": 1},
+                    "ops": {"type": "array", "items": {"type": "string", "enum": ["read", "exec", "jobs", "files.read", "files.write", "git", "checkpoint", "preview", "screen"]}, "minItems": 1},
                     "ttl_seconds": {"type": "integer", "minimum": 1, "maximum": 86400},
                     "label": {"type": "string"},
                 }),
