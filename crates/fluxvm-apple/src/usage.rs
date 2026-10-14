@@ -246,8 +246,9 @@ fn open_file_paths(pid: libc::pid_t) -> Vec<PathBuf> {
                 FDINFO_WITH_PATH as libc::c_int,
             )
         };
-        if (r as usize) < FDINFO_WITH_PATH {
-            return Vec::new();
+        // A descriptor can close between the listing and this query; skip it rather than lose the whole list.
+        if r <= 0 || (r as usize) < FDINFO_WITH_PATH {
+            continue;
         }
         let raw = &buf[PATH_OFFSET..];
         let len = raw.iter().position(|b| *b == 0).unwrap_or(raw.len());

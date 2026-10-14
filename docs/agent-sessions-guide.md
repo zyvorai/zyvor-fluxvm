@@ -471,6 +471,12 @@ There is no token budget (the daemon does not see model usage) and no process-co
 
 The point of sessions: try things, keep what works, roll back what does not.
 
+> **Fork speed on a Mac.** A vz fork clones the disk and saved state with `clonefile(2)` (APFS copy-on-write), so a
+> fork of two children took about 2 s and used almost no disk (measured: 20 files cloned, 0 copied). On a volume that
+> cannot clone (not APFS, or the state directory on another volume) the files are fully copied: slower and real disk.
+> The fork response says which: `files_cloned` and `files_copied` (also in the `fork` ledger entry), and the daemon
+> logs a warning per copied file.
+
 ### 9.1 Checkpoint and restore
 
 ```bash
