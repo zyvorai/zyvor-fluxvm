@@ -11,24 +11,41 @@ on:
       tag:
         description: "Tag to package (builds and uploads a workflow artifact only if empty)"
         required: false
+      arch:
+        description: "Build only this architecture (x86_64 or aarch64); empty builds both"
+        required: false
 
 permissions:
   contents: write
 
 jobs:
+  plan:
+    runs-on: ubuntu-22.04
+    outputs:
+      matrix: ${{ steps.m.outputs.matrix }}
+    steps:
+      - id: m
+        env:
+          ARCH: ${{ github.event.inputs.arch }}
+        run: |
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json, os
+          arch = os.environ.get("ARCH", "")
+          rows = [
+              {"arch": "x86_64", "runner": "ubuntu-22.04", "experimental": False, "cross": False},
+              # Cross-compiled on x86_64: this organization has no hosted arm64 Linux runners (the `ubuntu-22.04-arm`
+              # job queued forever). A failure must not block the x86_64 package or the release.
+              {"arch": "aarch64", "runner": "ubuntu-22.04", "experimental": True, "cross": True},
+          ]
+          rows = [r for r in rows if not arch or r["arch"] == arch]
+          print("matrix=" + json.dumps({"include": rows}))
+          PY
+
   package:
+    needs: plan
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - arch: x86_64
-            runner: ubuntu-22.04
-            experimental: false
-          # GitHub-hosted arm64 Linux runners; not every repository has them, so a missing runner must not
-          # block the x86_64 package or the release.
-          - arch: aarch64
-            runner: ubuntu-22.04-arm
-            experimental: true
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
     runs-on: ${{ matrix.runner }}
     continue-on-error: ${{ matrix.experimental }}
     steps:
@@ -42,6 +59,26 @@ jobs:
           repository: zyvorai/guestkit
           path: guestkit
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.cross && 'aarch64-unknown-linux-gnu' || '' }}
+      - name: arm64 development packages (cross build)
+        if: matrix.cross
+        run: |
+          # The default sources serve amd64 only; arm64 packages come from ports.ubuntu.com.
+          sudo sed -i 's/^deb \(http\|https\):/deb [arch=amd64] \1:/' /etc/apt/sources.list
+          sudo find /etc/apt/sources.list.d -name '*.sources' -exec sed -i '/^Types:/a Architectures: amd64' {} +
+          sudo dpkg --add-architecture arm64
+          for suite in jammy jammy-updates jammy-security; do
+            echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports $suite main universe" | sudo tee -a /etc/apt/sources.list.d/arm64.list
+          done
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq gcc-aarch64-linux-gnu libsystemd-dev:arm64 libhivex-dev:arm64 libbpf-dev:arm64
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
+          echo "PKG_CONFIG_aarch64_unknown_linux_gnu=aarch64-linux-gnu-pkg-config" >> "$GITHUB_ENV"
+          echo "PKG_CONFIG_ALLOW_CROSS=1" >> "$GITHUB_ENV"
+          echo "PKG_CONFIG_PATH=/usr/lib/aarch64-linux-gnu/pkgconfig" >> "$GITHUB_ENV"
+          echo "PKG_CONFIG_LIBDIR=/usr/lib/aarch64-linux-gnu/pkgconfig:/usr/share/pkgconfig" >> "$GITHUB_ENV"
+          echo "BINDGEN_EXTRA_CLANG_ARGS_aarch64_unknown_linux_gnu=--sysroot=/ -I/usr/include/aarch64-linux-gnu" >> "$GITHUB_ENV"
       - name: System dependencies (the same as ci.yml)
         run: sudo apt-get update -qq && sudo apt-get install -y -qq libsystemd-dev libhivex-dev clang llvm libbpf-dev linux-libc-dev
       - uses: Swatinem/rust-cache@v2
@@ -53,13 +90,17 @@ jobs:
         working-directory: fluxvm
         run: |
           TAG="${{ github.event.inputs.tag || github.ref_name }}"
-          scripts/package-linux.sh --version "${TAG#v}"
+          scripts/package-linux.sh --version "${TAG#v}" ${{ matrix.cross && '--target aarch64-unknown-linux-gnu' || '' }}
           echo "file=$(ls target/package/*.tar.gz)" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-qemu-action@v3
+        if: matrix.cross
+        with:
+          platforms: arm64
       - name: Smoke test in a clean container
         working-directory: fluxvm
         run: |
           F="$(realpath "${{ steps.pkg.outputs.file }}")"
-          docker run --rm -v "$F:/pkg.tar.gz:ro" ubuntu:22.04 bash -euc '
+          docker run --rm ${{ matrix.cross && '--platform linux/arm64' || '' }} -v "$F:/pkg.tar.gz:ro" ubuntu:22.04 bash -euc '
             apt-get update -qq && apt-get install -y -qq libhivex0 libsystemd0 >/dev/null
             mkdir /p && tar -xzf /pkg.tar.gz -C /p
             for b in fluxctl fluxvm-hypervisor fluxvm-agent; do
