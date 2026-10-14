@@ -547,21 +547,45 @@ pub fn prepare_fork_child(parent: &Path, tag: &str, child: &Path) -> Result<Path
     Ok(disk)
 }
 
-/// Copy-on-write clone on APFS (`cp -c`), a plain copy elsewhere. Replaces `to` if it exists.
-pub fn clone_file(from: &Path, to: &Path) -> Result<()> {
+static CLONED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static COPIED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Files cloned copy-on-write, and files that had to be fully copied because the volume cannot clone
+/// (not APFS, or `from` and `to` on different volumes). A fork or checkpoint that copied is slow and
+/// uses real disk, so callers compare the counters around an operation and say so.
+pub fn clone_counters() -> (u64, u64) {
+    use std::sync::atomic::Ordering::Relaxed;
+    (CLONED.load(Relaxed), COPIED.load(Relaxed))
+}
+
+/// Copy-on-write clone (`clonefile(2)`; APFS), a plain copy where the volume cannot clone. Replaces `to`
+/// if it exists. `Ok(true)` when the file was cloned, `Ok(false)` when it was copied.
+pub fn clone_file_reported(from: &Path, to: &Path) -> Result<bool> {
+    use std::sync::atomic::Ordering::Relaxed;
     let _ = fs::remove_file(to);
-    let cloned = std::process::Command::new("cp")
-        .arg("-c")
-        .arg(from)
-        .arg(to)
-        .stderr(std::process::Stdio::null())
-        .status()
-        .is_ok_and(|s| s.success());
-    if !cloned {
-        fs::copy(from, to)
-            .with_context(|| format!("copying {} to {}", from.display(), to.display()))?;
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        let f = std::ffi::CString::new(from.as_os_str().as_bytes());
+        let t = std::ffi::CString::new(to.as_os_str().as_bytes());
+        if let (Ok(f), Ok(t)) = (f, t) {
+            // SAFETY: both are valid NUL-terminated paths that outlive the call.
+            if unsafe { libc::clonefile(f.as_ptr(), t.as_ptr(), 0) } == 0 {
+                CLONED.fetch_add(1, Relaxed);
+                return Ok(true);
+            }
+        }
     }
-    Ok(())
+    fs::copy(from, to)
+        .with_context(|| format!("copying {} to {}", from.display(), to.display()))?;
+    COPIED.fetch_add(1, Relaxed);
+    tracing::warn!(from = %from.display(), to = %to.display(), "could not clone copy-on-write; copied the file");
+    Ok(false)
+}
+
+/// Copy-on-write clone on APFS, a plain copy elsewhere (counted; see [`clone_counters`]).
+pub fn clone_file(from: &Path, to: &Path) -> Result<()> {
+    clone_file_reported(from, to).map(|_| ())
 }
 
 /// Files that make a macOS guest the machine it is, kept beside its disk by the installer. A clone of a prepared guest takes
@@ -853,6 +877,27 @@ impl OneShotVm {
 #[cfg(test)]
 mod one_shot_tests {
     use super::*;
+
+    #[test]
+    fn a_clone_is_copy_on_write_where_the_volume_allows_and_replaces_the_target() {
+        let d = tempfile::tempdir().unwrap();
+        let (a, b) = (d.path().join("a"), d.path().join("b"));
+        fs::write(&a, b"one").unwrap();
+        fs::write(&b, b"stale").unwrap();
+        let before = clone_counters();
+        let cloned = clone_file_reported(&a, &b).unwrap();
+        assert_eq!(fs::read(&b).unwrap(), b"one");
+        let after = clone_counters();
+        // Counters are process-wide and other tests clone too: only check that this call moved one of them.
+        if cloned {
+            assert!(after.0 > before.0);
+        } else {
+            assert!(after.1 > before.1);
+        }
+        // Writing the clone leaves the source alone.
+        fs::write(&b, b"two").unwrap();
+        assert_eq!(fs::read(&a).unwrap(), b"one");
+    }
 
     #[test]
     fn one_shot_vm_is_headless_offline_direct_boot() {

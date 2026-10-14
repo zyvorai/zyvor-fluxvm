@@ -2722,6 +2722,7 @@ async fn fork(
 ) -> ApiResult<(StatusCode, Json<Value>)> {
     require_admin(role)?;
     let _gate = begin_lifecycle(id, "fork")?.mark(&m, "fork");
+    let clones_before = fluxvm_scheduler::clone_counters();
     let mut s = load(&m, id, &caller_tenant(&token_tenant)).await?;
     check_if_match(&headers, &s)?;
     running(&s)?;
@@ -2840,17 +2841,24 @@ async fn fork(
         kids.push(cs);
     }
     save(&m, &mut s).await?;
+    let clones_after = fluxvm_scheduler::clone_counters();
+    let files_cloned = clones_after.0.saturating_sub(clones_before.0);
+    let files_copied = clones_after.1.saturating_sub(clones_before.1);
     record(
         &m,
         id,
         "fork",
-        json!({"count": count, "children": s.children, "total_ms": report.total_ms}),
+        json!({"count": count, "children": s.children, "total_ms": report.total_ms,
+               "files_cloned": files_cloned, "files_copied": files_copied}),
     );
     Ok((
         StatusCode::CREATED,
         Json(json!({
             "items": kids,
             "identity": identity,
+            // Copied files were not copy-on-write: the fork was slower and used real disk for them.
+            "files_cloned": files_cloned,
+            "files_copied": files_copied,
             "total_ms": report.total_ms,
             "parent_snapshot_ms": report.parent_snapshot_ms,
         })),

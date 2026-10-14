@@ -61,6 +61,9 @@ pub mod vm_restore;
 pub mod vz_devices;
 mod vz_disks;
 pub mod vz_guest;
+
+/// Files cloned copy-on-write vs fully copied by vz fork/checkpoint (see `fluxvm_apple::clone_counters`).
+pub use fluxvm_apple::clone_counters;
 pub mod vz_screen;
 pub use events::{EventFilter, VmEvent};
 pub use sandbox::{SandboxCreateRequest, TemplateInfo};
