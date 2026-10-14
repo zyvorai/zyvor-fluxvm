@@ -92,6 +92,10 @@ JI="$(api "$U/v1/agents/sessions/$S/jobs" | jget '[j for j in d["items"] if j["j
 [[ "$(echo "$JI" | jget 'd["engine"]')" == supervisor && "$(echo "$JI" | jget 'd["exit_code"]')" == 7 ]] \
   && ok "job ran under the supervisor with exit code 7" || bad "job: $JI"
 
+# 4c. Whether a memory checkpoint is possible is reported up front (and a refusal says why).
+SJ="$(api "$U/v1/agents/sessions/$S")"
+[[ "$(echo "$SJ" | jget '"memory_checkpoint" in d["capabilities"]')" == True ]] \
+  && ok "capabilities.memory_checkpoint is reported ($(echo "$SJ" | jget 'd["capabilities"]["memory_checkpoint"]'))" || bad "memory_checkpoint missing: $SJ"
 # 4b. The display: screenshot and input are their own token scope and are ledgered.
 code=$(curl -s -o "$T/shot.png" -w '%{http_code}' -H "authorization: Bearer $TOKEN" "$U/v1/agents/sessions/$S/screenshot?max_width=640")
 [[ "$code" == 200 && "$(head -c 4 "$T/shot.png" | tail -c 3)" == PNG ]] && ok "screenshot returns a PNG" || bad "screenshot: http $code"

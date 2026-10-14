@@ -969,6 +969,15 @@ final class Runner: NSObject, VZVirtualMachineDelegate, NSWindowDelegate {
                     response = ["ok": false, "error": "cannot encode host capabilities"]
                 }
                 sem.signal()
+            case "save-support":
+                // Whether this VM's device set can be saved (memory checkpoint), and if not, why.
+                if #available(macOS 14.0, *), let cfgv = self.lastConfiguration {
+                    do { try cfgv.validateSaveRestoreSupport(); response = ["ok": true, "supported": true] }
+                    catch { response = ["ok": true, "supported": false, "reason": error.localizedDescription] }
+                } else {
+                    response = ["ok": true, "supported": false, "reason": "saving a VM needs macOS 14 or later and a running guest"]
+                }
+                sem.signal()
             case "balloon":
                 response = self.balloonControl(reclaimMiB: (o["balloon_mib"] as? NSNumber)?.uint64Value)
                 sem.signal()

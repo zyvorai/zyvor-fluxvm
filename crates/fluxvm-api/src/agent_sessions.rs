@@ -214,6 +214,12 @@ struct Capabilities {
     /// The guest agent has the job supervisor (`jobs-v2`).
     #[serde(default)]
     supervisor: bool,
+    /// A memory checkpoint (`memory: true`) can be taken: the VM's device set can be saved. Probed at create on vz;
+    /// when false, `memory_checkpoint_reason` says why and a checkpoint needs `memory: false`.
+    #[serde(default)]
+    memory_checkpoint: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    memory_checkpoint_reason: Option<String>,
 }
 
 /// The policy as compiled, including the parts that are accepted but not enforced yet.
@@ -1420,6 +1426,8 @@ fn capabilities_for(backend: &str, offline: bool) -> Capabilities {
         http_policy: false,
         engine: String::new(),
         supervisor: false,
+        memory_checkpoint: matches!(backend, "flux-vm" | "qemu" | "firecracker"),
+        memory_checkpoint_reason: None,
     }
 }
 
@@ -1845,6 +1853,12 @@ async fn create_session(
                 "session.engine",
                 json!({"engine": session.capabilities.engine, "supervisor": supervisor}),
             );
+            if let Ok(v) = m.vz_save_support(rec.id).await {
+                session.capabilities.memory_checkpoint = v["supported"].as_bool().unwrap_or(false);
+                session.capabilities.memory_checkpoint_reason =
+                    v["reason"].as_str().map(str::to_string);
+                record(&m, id, "session.save_support", v);
+            }
         }
     }
     if require_agent && session.backend == "vz" && session.capabilities.engine != "agent" {
@@ -2648,6 +2662,18 @@ async fn checkpoint(
         });
     }
     let memory = body.memory.unwrap_or(true);
+    if memory
+        && !s.capabilities.memory_checkpoint
+        && let Some(why) = &s.capabilities.memory_checkpoint_reason
+    {
+        return Err(ApiError {
+            status: StatusCode::CONFLICT,
+            message: format!(
+                "this session's devices cannot be saved with memory: {why}. Take a disk-only checkpoint with \
+                 {{\"memory\": false}}"
+            ),
+        });
+    }
     m.create_vm_snapshot_with(s.sandbox_id, &tag, memory)
         .await?;
     let cp = Checkpoint {

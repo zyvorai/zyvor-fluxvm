@@ -329,6 +329,10 @@ commands and are not matched against them.
 
 `GET /v1/agents/sessions/{id}` reports `capabilities` for the session's backend so a client can decide without trying.
 
+On vz, `capabilities.memory_checkpoint` says whether the VM's device set can be saved with memory (probed at create
+with the runner's `save-support`); when it is `false`, `capabilities.memory_checkpoint_reason` is the framework's reason
+and a checkpoint without `{"memory": false}` is refused with `409` and that reason.
+
 ### Terminal (PTY)
 
 `fluxctl agent shell <session> [-- command…]` opens an interactive shell on a real terminal; REST is a WebSocket,
