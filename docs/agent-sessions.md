@@ -1,5 +1,8 @@
 # Agent sessions
 
+> **New here?** Start with the [practical guide](agent-sessions-guide.md): task-by-task walkthroughs with the commands to run,
+> what you should see, and troubleshooting. This page is the reference.
+
 An **agent session** is one handle for what an AI agent needs from FluxVM: a sandbox, a workspace, a network
 policy, checkpoints and a ledger of what was done. It is a thin layer over the existing sandbox, snapshot, fork,
 change-set and event primitives. It adds no new isolation and no new hypervisor; everything an agent could already
@@ -23,6 +26,7 @@ tenant's id answers `404`, not `403`).
 | `DELETE /v1/agents/sessions/{id}` | Delete the session and its sandbox. Idempotent (`204`). |
 | `POST /v1/agents/sessions/{id}/exec` | `{command, timeout_seconds?}` through the sandbox's guest path. Recorded in the ledger. |
 | `POST /v1/agents/sessions/{id}/tokens` | `{ops, ttl_seconds?, label?}`: mint a [session token](#session-tokens). `GET` lists live ones (no secrets); `DELETE .../tokens/{token}` revokes. Admin only. |
+| `POST /v1/agents/sessions/{id}/uploads` | open a resumable [upload](#large-files-resumable-upload-and-ranged-download) of a large file; chunks go to `PUT .../uploads/{upload}?offset=N`, then `POST .../complete`. `GET .../files/range` reads a slice. |
 | `GET /v1/agents/sessions/{id}/approvals` | the session's [approval](#approvals) requests. `POST .../approvals/{approval}/approve` and `.../deny` decide one (`{note?}`); admin only. |
 | `POST /v1/agents/sessions/{id}/promote` | `{dry_run?, plan_id?, skip_conflicts?, paths?}` on a fork child: apply its workspace changes to its parent. See [Promoting a fork](#promoting-a-fork). Admin only. |
 | `POST /v1/agents/sessions/{id}/checkpoint` | `{tag?, memory?}`; `memory:false` is disk-only. |
@@ -449,8 +453,44 @@ Writing under a directory that did not exist first created it with `sudo` and le
 writes; the daemon now hands the directories it creates to the guest user (found by this run, fixed, re-run).
 **Limits:** a single write is capped by the daemon's request-body limit, 1,500,000 bytes of file. The daemon drops the
 connection on a larger body (a reset, not a clean 413), so `fluxctl agent put` and the MCP tool refuse first with a
-message; a raw REST client still sees the reset. There is no chunked upload yet. Reads are whole files. List
-entries come from GNU `find`, so a guest without it (busybox) is not supported.
+message; a raw REST client still sees the reset. List entries come from GNU `find`, so a guest without it (busybox) is
+not supported. Larger files use the resumable transfer below.
+
+#### Large files: resumable upload and ranged download
+
+```bash
+fluxctl agent upload   <session> ./dataset.tar /workspace/dataset.tar --mode 644   # prints the upload id
+fluxctl agent upload   <session> ./dataset.tar /workspace/dataset.tar --resume <upload id>   # after an interruption
+fluxctl agent download <session> /workspace/out.tar ./out.tar [--resume]
+```
+
+| Route | |
+|---|---|
+| `POST .../uploads` `{path, size, sha256?, mode?, parents?}` | open an upload (size 1 byte to 2 GiB); at most 8 open per session |
+| `PUT .../uploads/{upload}?offset=N` raw bytes | the next chunk (at most 4 MiB). `N` must be `received`; otherwise `409` says where to continue |
+| `GET .../uploads/{upload}` / `GET .../uploads` | `received`, `size`, `parts`, state |
+| `POST .../uploads/{upload}/complete` | assemble, verify, rename into place. Calling it again after success returns the same record |
+| `DELETE .../uploads/{upload}` | drop the upload and its parts in the guest |
+| `GET .../files/range?path=&offset=&length=&checksum=` | up to 4 MiB of a file with `size`, `eof` and (with `checksum=true`) the file's `sha256` |
+
+- Chunks are written as part files under `/var/tmp/.fluxvm-uploads/<upload>/` in the guest. `complete` concatenates them
+  into a temporary file next to the destination, checks the **size** and, when you gave one, the **SHA-256** (needs
+  `sha256sum` or `shasum` in the guest), applies `mode`, then `mv`s it over the destination, so nothing half-written is
+  ever at `path`. A mismatch is `409` and writes nothing.
+- The record is on the host (`<state_dir>/agent-session-uploads/<session>.json`), so an upload survives a daemon restart;
+  `received` is the byte to continue from. `fluxctl agent upload` hashes the file first and sends the checksum, retries a
+  failed chunk three times, and re-asks the daemon where it is after an error, because the chunk may have landed.
+- `files.write` is required to upload; `files.read` to read ranges and list uploads. Both are ledgered as `file.upload`,
+  `upload.open` and `upload.abort` (path, size, whether a checksum was verified; never content). A session token's
+  confinement applies to the assembly step. Uploads and parts are removed with the session by the cleanup pass.
+- `download` writes `<local>.part`, asks for the guest's checksum on the first slice, verifies the finished file
+  against it, and only then renames. Reads are slices, so a file that changes while it is being read is detected by
+  size or checksum and reported, not silently mixed.
+
+**Not run on a live guest.** The assembly and range scripts are unit-tested by running real `sh` (parts, rename, size
+and checksum mismatches, a missing part, quoting) and the routes' input handling by router-level tests; chunk writes
+use the existing file-write path, and none of it went through a daemon with a real sandbox. Part files take the
+guest's disk (up to the file's size, twice during assembly).
 
 ### Background jobs
 
@@ -632,12 +672,22 @@ fluxctl agent rm <id>
 fluxctl agent run claude-code --confine --fs-write /data/out        # guest confinement (Linux guests)
 fluxctl agent token <id> --ops exec,files.read,git --ttl-seconds 1800
 fluxctl agent promote <child> --dry-run                              # review, then --plan-id <id> to apply
+fluxctl agent exec <id> --approval-wait 120 -- 'deploy prod'        # a process.ask command: waits for an operator
+fluxctl agent approve <id> <approval>                               # operator, admin credential
+fluxctl agent bg <id> --stdin --timeout 600 -- 'python3 -u repl.py' # supervised job
+fluxctl agent upload <id> ./big.tar /workspace/big.tar              # resumable, verified
+fluxctl agent grant <id> --secret-ref gh --host api.github.com --method GET --path '/repos/acme/*'
 ```
 
-- **MCP** (`fluxctl mcp serve --allow-write`): `session_create`, `session_exec`, `session_checkpoint`, `session_restore`,
-  `session_fork`, `session_promote`, `session_token`, `session_rollout`, `session_events`, `session_artifacts`,
-  `session_delete`, plus `sandbox_speculate`, `sandbox_changesets`
-  and `sandbox_changeset_decide`.
+Walkthroughs for each of these, with expected output and a troubleshooting table, are in
+[agent-sessions-guide.md](agent-sessions-guide.md).
+
+- **MCP** (`fluxctl mcp serve --allow-write`): `session_create`, `session_exec`, `session_approvals`, `session_approve`,
+  `session_job_start`/`_read`/`_stdin`/`_kill`, `session_jobs`, `session_files`, `session_file_read`, `session_file_write`,
+  `session_git`, `session_checkpoint`, `session_restore`, `session_fork`, `session_rollout`, `session_evaluate`,
+  `session_promote`, `session_grant`, `session_revoke_grants`, `session_token`, `session_preview`, `session_probe`,
+  `session_events`, `session_artifacts`, `session_delete`, plus `sandbox_speculate`, `sandbox_changesets` and
+  `sandbox_changeset_decide`. The full table is in [mcp.md](mcp.md#agent-session-tools).
 - **Go**: `client.CreateSession(ctx, fluxvm.CreateSessionRequest{…})`, then `Exec`, `Checkpoint`, `Restore`, `Fork`,
   `Events`, `Artifacts`, `Delete` (`go/sessions.go`).
 - **Python**: `FluxVM(url).create_session("codex", policy="developer-safe")`, a context manager that deletes on exit

@@ -328,6 +328,38 @@ pub enum AgentCommand {
     /// Which tools the guest image has (git, sha256sum for promote, node, a browser, playwright ...)
     /// and which session features that makes possible. REST: `GET /v1/agents/sessions/{id}/probe`.
     Probe { id: Uuid },
+    /// Copy a local file into the guest in verified, resumable chunks: parts are written in the guest,
+    /// then assembled, size- and SHA-256-checked, and renamed into place. Rerun with `--resume <upload>`
+    /// after an interruption. REST: `POST .../uploads`, `PUT .../uploads/{upload}`, `POST .../complete`.
+    Upload {
+        id: Uuid,
+        /// Local file.
+        local: std::path::PathBuf,
+        /// Absolute path in the guest.
+        remote: String,
+        /// Permission bits, octal (for example 755).
+        #[arg(long, value_parser = parse_octal)]
+        mode: Option<u32>,
+        /// Continue an upload that was interrupted (its id was printed when it opened).
+        #[arg(long)]
+        resume: Option<Uuid>,
+        /// Chunk size in MiB (1-4).
+        #[arg(long, default_value_t = 4, value_parser = clap::value_parser!(u64).range(1..=4))]
+        chunk_mib: u64,
+    },
+    /// Copy a guest file to a local path in ranged reads, verified against the guest's SHA-256. Writes
+    /// `<local>.part` and renames it when complete; `--resume` continues a `.part`. REST:
+    /// `GET .../files/range`.
+    Download {
+        id: Uuid,
+        /// Absolute path in the guest.
+        remote: String,
+        /// Local destination.
+        local: std::path::PathBuf,
+        /// Continue from the existing `<local>.part`.
+        #[arg(long)]
+        resume: bool,
+    },
     /// Mint an expiring token that works on this one session and only for the listed operations
     /// (read, exec, jobs, files.read, files.write, git, checkpoint, preview). Prints it once; use it as
     /// the bearer token for `fluxctl --token` or REST. REST: `POST /v1/agents/sessions/{id}/tokens`.
@@ -760,8 +792,230 @@ async fn decide_approval(
     )
 }
 
+fn parse_octal(s: &str) -> Result<u32, String> {
+    u32::from_str_radix(s.trim_start_matches("0o"), 8)
+        .ok()
+        .filter(|m| *m <= 0o7777)
+        .ok_or_else(|| format!("{s:?} is not an octal permission mask"))
+}
+
+/// The offset a `409` from a chunk upload says to continue at.
+fn resume_offset(message: &str) -> Option<u64> {
+    let rest = message.split("offset=").nth(1)?;
+    let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+    digits.parse().ok()
+}
+
+fn file_sha256(path: &std::path::Path) -> Result<String> {
+    use sha2::{Digest, Sha256};
+    use std::io::Read;
+    let mut f = std::fs::File::open(path).with_context(|| format!("opening {}", path.display()))?;
+    let mut h = Sha256::new();
+    let mut buf = vec![0u8; 1 << 20];
+    loop {
+        let n = f.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        h.update(&buf[..n]);
+    }
+    Ok(h.finalize().iter().map(|b| format!("{b:02x}")).collect())
+}
+
+async fn upload_file(
+    r: &Remote,
+    id: Uuid,
+    local: &std::path::Path,
+    remote: &str,
+    mode: Option<u32>,
+    resume: Option<Uuid>,
+    chunk: usize,
+) -> Result<Value> {
+    use std::io::{Read, Seek, SeekFrom};
+    let size = std::fs::metadata(local)
+        .with_context(|| format!("reading {}", local.display()))?
+        .len();
+    eprintln!("hashing {} ({size} bytes)", local.display());
+    let sha = file_sha256(local)?;
+    let base = format!("/v1/agents/sessions/{id}/uploads");
+    let (upload, mut offset) = match resume {
+        Some(u) => {
+            let v = r.call(Method::GET, &format!("{base}/{u}"), None).await?;
+            anyhow::ensure!(
+                v["size"].as_u64() == Some(size) && v["sha256"].as_str() == Some(&sha),
+                "upload {u} was opened for a different file (size or checksum differ)"
+            );
+            (u, v["received"].as_u64().unwrap_or(0))
+        }
+        None => {
+            let mut body = json!({"path": remote, "size": size, "sha256": sha});
+            if let Some(m) = mode {
+                body["mode"] = json!(m);
+            }
+            let v = r.call(Method::POST, &base, Some(body)).await?;
+            let u: Uuid = v["id"]
+                .as_str()
+                .and_then(|s| s.parse().ok())
+                .context("the daemon did not return an upload id")?;
+            eprintln!("upload {u} opened; resume with --resume {u}");
+            (u, 0)
+        }
+    };
+    let mut f = std::fs::File::open(local)?;
+    let mut buf = vec![0u8; chunk];
+    let mut failures = 0u32;
+    while offset < size {
+        f.seek(SeekFrom::Start(offset))?;
+        let want = chunk.min((size - offset) as usize);
+        f.read_exact(&mut buf[..want])?;
+        match r
+            .put_bytes(
+                &format!("{base}/{upload}?offset={offset}"),
+                buf[..want].to_vec(),
+            )
+            .await
+        {
+            Ok(v) => {
+                failures = 0;
+                offset = v["received"].as_u64().unwrap_or(offset + want as u64);
+                eprintln!("{offset}/{size} bytes ({}%)", offset * 100 / size);
+            }
+            Err(e) => {
+                // Another writer, or a chunk that landed before its answer was lost: continue
+                // where the daemon says it is.
+                if let Some(at) = resume_offset(&format!("{e:#}")) {
+                    offset = at;
+                    continue;
+                }
+                failures += 1;
+                if failures > 3 {
+                    return Err(e.context(format!(
+                        "upload {upload} stopped at {offset} bytes; rerun with --resume {upload}"
+                    )));
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(u64::from(failures))).await;
+                // Ask where it is; the chunk may have landed.
+                if let Ok(v) = r.call(Method::GET, &format!("{base}/{upload}"), None).await {
+                    offset = v["received"].as_u64().unwrap_or(offset);
+                }
+            }
+        }
+    }
+    r.call(Method::POST, &format!("{base}/{upload}/complete"), None)
+        .await
+}
+
+async fn download_file(
+    r: &Remote,
+    id: Uuid,
+    remote: &str,
+    local: &std::path::Path,
+    resume: bool,
+) -> Result<Value> {
+    use base64::Engine as _;
+    use std::io::Write;
+    let part = {
+        let mut n = local.as_os_str().to_owned();
+        n.push(".part");
+        std::path::PathBuf::from(n)
+    };
+    let mut offset = if resume {
+        std::fs::metadata(&part).map(|m| m.len()).unwrap_or(0)
+    } else {
+        0
+    };
+    let mut out = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .append(resume)
+        .truncate(!resume)
+        .open(&part)
+        .with_context(|| format!("opening {}", part.display()))?;
+    let mut expect_sha: Option<String> = None;
+    let mut size;
+    loop {
+        // The checksum is asked for once, on the first slice; the guest hashes the whole file.
+        let want_sum = expect_sha.is_none();
+        let q = format!(
+            "/v1/agents/sessions/{id}/files/range?path={}&offset={offset}&checksum={want_sum}",
+            urlencoding_path(remote)
+        );
+        let v = r.call(Method::GET, &q, None).await?;
+        size = v["size"].as_u64().unwrap_or(0);
+        if want_sum {
+            expect_sha = v["sha256"].as_str().map(str::to_string);
+        }
+        let data = base64::engine::general_purpose::STANDARD
+            .decode(v["content_base64"].as_str().unwrap_or(""))
+            .context("decoding a chunk")?;
+        out.write_all(&data)?;
+        offset += data.len() as u64;
+        eprintln!("{offset}/{size} bytes");
+        if v["eof"].as_bool() == Some(true) || data.is_empty() || offset >= size {
+            break;
+        }
+    }
+    out.flush()?;
+    drop(out);
+    anyhow::ensure!(
+        offset == size,
+        "the file changed while it was being read ({offset} of {size} bytes); rerun"
+    );
+    let got = file_sha256(&part)?;
+    if let Some(want) = &expect_sha {
+        anyhow::ensure!(
+            &got == want,
+            "checksum mismatch (guest {want}, local {got}); {} was kept, rerun without --resume",
+            part.display()
+        );
+    }
+    std::fs::rename(&part, local)?;
+    Ok(json!({
+        "path": remote, "local": local, "bytes": size, "sha256": got,
+        "verified_against_guest": expect_sha.is_some(),
+    }))
+}
+
+/// Percent-encodes a path for a query value.
+fn urlencoding_path(p: &str) -> String {
+    let mut out = String::new();
+    for b in p.bytes() {
+        if b.is_ascii_alphanumeric() || b"-_.~/".contains(&b) {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
 pub async fn run(r: &Remote, cmd: AgentCommand) -> Result<()> {
     match cmd {
+        AgentCommand::Upload {
+            id,
+            local,
+            remote,
+            mode,
+            resume,
+            chunk_mib,
+        } => show(
+            &upload_file(
+                r,
+                id,
+                &local,
+                &remote,
+                mode,
+                resume,
+                (chunk_mib as usize) * 1024 * 1024,
+            )
+            .await?,
+        ),
+        AgentCommand::Download {
+            id,
+            remote,
+            local,
+            resume,
+        } => show(&download_file(r, id, &remote, &local, resume).await?),
         AgentCommand::Run {
             agent,
             repo,
@@ -2063,6 +2317,29 @@ fn create_body(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn transfer_helpers() {
+        assert_eq!(
+            resume_offset(
+                "PUT /x: 409 Conflict: upload u has 8388608 bytes: send the next chunk with offset=8388608"
+            ),
+            Some(8388608)
+        );
+        assert_eq!(resume_offset("no offset here"), None);
+        assert_eq!(parse_octal("755"), Ok(0o755));
+        assert_eq!(parse_octal("0o640"), Ok(0o640));
+        assert!(parse_octal("999").is_err());
+        assert!(parse_octal("77777").is_err());
+        assert_eq!(urlencoding_path("/a b/c&d.txt"), "/a%20b/c%26d.txt");
+        let dir = std::env::temp_dir().join(format!("fluxctl-sha-{}", std::process::id()));
+        std::fs::write(&dir, b"abc").unwrap();
+        assert_eq!(
+            file_sha256(&dir).unwrap(),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        let _ = std::fs::remove_file(&dir);
+    }
 
     #[test]
     fn exec_keeps_a_script_in_one_piece() {

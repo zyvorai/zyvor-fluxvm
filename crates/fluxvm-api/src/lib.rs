@@ -42,6 +42,7 @@ pub mod self_control;
 pub use netobs_api::install_netobs;
 mod agent_session_approvals;
 mod agent_session_auth;
+mod agent_session_transfer;
 mod agent_sessions;
 mod macos_pool_api;
 mod speculate_api;
@@ -7303,6 +7304,75 @@ mod tests {
             let (st, b) = call(app, "POST", &exec, &scoped, Some(&body)).await;
             assert_eq!(st, StatusCode::FORBIDDEN, "{b}");
             assert!(b.contains("denied"), "{b}");
+        }
+
+        #[tokio::test]
+        async fn uploads_validate_input_and_unknown_ids_before_touching_the_guest() {
+            let m = procbox_manager(tenant_tokens(), false);
+            let id = seed_session(&m, Some("acme"), "vz", "running");
+            let app = router(m);
+            let up = format!("/v1/agents/sessions/{id}/uploads");
+            for (body, why) in [
+                (r#"{"path":"rel","size":5}"#, "relative path"),
+                (r#"{"path":"/a/../b","size":5}"#, ".."),
+                (r#"{"path":"/a/b/","size":5}"#, "directory"),
+                (r#"{"path":"/a/b","size":0}"#, "empty"),
+                (r#"{"path":"/a/b","size":3000000000}"#, "over the limit"),
+                (r#"{"path":"/a/b","size":5,"sha256":"xyz"}"#, "bad checksum"),
+                (r#"{"path":"/a/b","size":5,"mode":65535}"#, "bad mode"),
+            ] {
+                let (st, b) = call(app.clone(), "POST", &up, "acme", Some(body)).await;
+                assert_eq!(st, StatusCode::BAD_REQUEST, "{why}: {b}");
+            }
+            // Unknown upload: 404 for every verb, and another tenant cannot even see the session.
+            let ghost = uuid::Uuid::new_v4();
+            for (method, suffix) in [
+                ("GET", format!("/{ghost}")),
+                ("DELETE", format!("/{ghost}")),
+                ("POST", format!("/{ghost}/complete")),
+            ] {
+                let (st, b) =
+                    call(app.clone(), method, &format!("{up}{suffix}"), "acme", None).await;
+                assert_eq!(st, StatusCode::NOT_FOUND, "{method} {suffix}: {b}");
+            }
+            let (st, _) = call(app.clone(), "GET", &up, "other", None).await;
+            assert_eq!(st, StatusCode::NOT_FOUND);
+            let (st, b) = call(app.clone(), "GET", &up, "acme", None).await;
+            assert_eq!(st, StatusCode::OK, "{b}");
+            assert!(b.contains(r#""items":[]"#), "{b}");
+            // A token that may only read cannot upload or abort.
+            let (_, t) = call(
+                app.clone(),
+                "POST",
+                &format!("/v1/agents/sessions/{id}/tokens"),
+                "acme",
+                Some(r#"{"ops":["files.read"]}"#),
+            )
+            .await;
+            let scoped = serde_json::from_str::<serde_json::Value>(&t).unwrap()["token"]
+                .as_str()
+                .unwrap()
+                .to_string();
+            let (st, _) = call(
+                app.clone(),
+                "POST",
+                &up,
+                &scoped,
+                Some(r#"{"path":"/a/b","size":5}"#),
+            )
+            .await;
+            assert_eq!(st, StatusCode::FORBIDDEN);
+            let (st, _) = call(
+                app.clone(),
+                "DELETE",
+                &format!("{up}/{ghost}"),
+                &scoped,
+                None,
+            )
+            .await;
+            assert_eq!(st, StatusCode::FORBIDDEN);
+            let (st, _) = call(app, "GET", &up, &scoped, None).await;
+            assert_eq!(st, StatusCode::OK);
         }
 
         #[tokio::test]
