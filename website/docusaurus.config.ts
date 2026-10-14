@@ -74,6 +74,7 @@ const config: Config = {
       },
       hideOnScroll: false,
       items: [
+        {to: '/docs/install', label: 'Install', position: 'right'},
         {to: '/mac', label: 'Mac', position: 'right'},
         {to: '/agents', label: 'Agents', position: 'right'},
         {to: '/mac-cloud', label: 'Mac cloud', position: 'right'},
@@ -96,7 +97,9 @@ const config: Config = {
         {
           title: 'Docs',
           items: [
-            {label: 'Install on a Mac', to: '/docs/install-macos'},
+            {label: 'Install FluxVM', to: '/docs/install'},
+            {label: 'Install with Homebrew', to: '/docs/install-macos'},
+            {label: 'Agent sessions guide', to: '/docs/agent-sessions-guide'},
             {label: 'FluxVM on Mac', to: '/mac'},
             {label: 'Agent sandboxes', to: '/agents'},
             {label: 'Build a Mac cloud', to: '/mac-cloud'},

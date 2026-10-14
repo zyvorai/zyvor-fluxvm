@@ -71,6 +71,7 @@ Eleven use cases map onto what is implemented today — nothing below is aspirat
 | Direct (bridge-less) datapath, with measurements | [docs/direct-datapath.md](direct-datapath.md) |
 | Security groups & CNP network policy | [docs/network-groups.md](network-groups.md) · [docs/network-policy.md](network-policy.md) |
 | Kairon VM edge (anti-spoof, learn-IP, DNS/SNI allow lists, QoS, conntrack move) | [docs/vm-edge-contract.md](vm-edge-contract.md) |
+| Install FluxVM: one command (`curl ... \| bash`), what it does, options, upgrade and rollback, Linux, troubleshooting | [docs/install.md](install.md) |
 | Agent sessions: how to use them (policy, tokens, approvals, jobs, uploads, budgets, fork/promote), with a troubleshooting table | [docs/agent-sessions-guide.md](agent-sessions-guide.md) |
 | Agent sessions: API and behaviour reference | [docs/agent-sessions.md](agent-sessions.md) |
 | AI agents over MCP (`fluxctl mcp serve`: Hermes Agent, Claude Code, Cursor; tools, setup, workflows) | [docs/mcp.md](mcp.md) |
