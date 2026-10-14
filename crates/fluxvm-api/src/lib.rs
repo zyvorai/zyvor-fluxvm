@@ -7230,6 +7230,61 @@ mod tests {
         }
 
         #[tokio::test]
+        async fn promote_is_admin_only_tenant_scoped_and_needs_a_fork_child_with_a_baseline() {
+            let m = procbox_manager(tenant_tokens(), false);
+            let parent = seed_session(&m, Some("acme"), "vz", "running");
+            let child = seed_session(&m, Some("acme"), "vz", "running");
+            let lone = seed_session(&m, Some("acme"), "vz", "running");
+            // Make `child` a fork child of `parent`; neither has a workspace baseline.
+            let path = m
+                .cfg
+                .state_dir
+                .join("agent-sessions")
+                .join(format!("{child}.json"));
+            let mut rec: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            rec["parent"] = json!(parent);
+            std::fs::write(&path, rec.to_string()).unwrap();
+            let app = router(m);
+            let uri = |id: Uuid| format!("/v1/agents/sessions/{id}/promote");
+
+            // Another tenant: 404, not a hint that the id exists.
+            let (st, _) = call(app.clone(), "POST", &uri(child), "other", Some("{}")).await;
+            assert_eq!(st, StatusCode::NOT_FOUND);
+            // A session that is not a fork child has nothing to promote into.
+            let (st, b) = call(app.clone(), "POST", &uri(lone), "acme", Some("{}")).await;
+            assert_eq!(st, StatusCode::CONFLICT, "{b}");
+            assert!(b.contains("not a fork child"), "{b}");
+            // A child without a workspace baseline cannot be planned, dry run or not.
+            for body in [r#"{}"#, r#"{"dry_run":true}"#] {
+                let (st, b) = call(app.clone(), "POST", &uri(child), "acme", Some(body)).await;
+                assert_eq!(st, StatusCode::CONFLICT, "{b}");
+                assert!(b.contains("workspace with a baseline"), "{b}");
+            }
+            // A session token never promotes, whatever it was granted.
+            let (_, minted) = call(
+                app.clone(),
+                "POST",
+                &format!("/v1/agents/sessions/{child}/tokens"),
+                "acme",
+                Some(
+                    r#"{"ops":["read","exec","files.write","git","jobs","checkpoint","preview"]}"#,
+                ),
+            )
+            .await;
+            let v: serde_json::Value = serde_json::from_str(&minted).unwrap();
+            let (st, _) = call(
+                app,
+                "POST",
+                &uri(child),
+                v["token"].as_str().unwrap(),
+                Some("{}"),
+            )
+            .await;
+            assert_eq!(st, StatusCode::FORBIDDEN);
+        }
+
+        #[tokio::test]
         async fn the_terminal_page_needs_no_token_and_the_ticket_is_scoped_to_its_session() {
             use tower::ServiceExt as _;
             let m = procbox_manager(tenant_tokens(), false);
