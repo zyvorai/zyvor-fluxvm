@@ -741,7 +741,7 @@ pub fn tools(remote: Arc<Remote>) -> Vec<Tool> {
                 timed(CALL_TIMEOUT, async {
                     let id = resolve(&r, str_arg(&args, "vm").unwrap_or_default()).await?;
                     let width = int_arg(&args, "max_width")?.unwrap_or(DEFAULT_SCREEN_WIDTH);
-                    screenshot_content(&r, id, width).await
+                    screenshot_content(&r, &format!("/v1/vms/{id}"), width).await
                 })
                 .await
             },
@@ -784,7 +784,7 @@ pub fn tools(remote: Arc<Remote>) -> Vec<Tool> {
                             .get("screen_width")
                             .and_then(Value::as_u64)
                             .unwrap_or(DEFAULT_SCREEN_WIDTH);
-                        return screenshot_content(&r, id, width).await;
+                        return screenshot_content(&r, &format!("/v1/vms/{id}"), width).await;
                     }
                     Ok(vec![json!({"type": "text", "text": pretty(&v)?})])
                 })
@@ -818,7 +818,12 @@ pub fn tools(remote: Arc<Remote>) -> Vec<Tool> {
                         .await?;
                     if args.get("screenshot").and_then(Value::as_bool) == Some(true) {
                         tokio::time::sleep(Duration::from_secs(2)).await;
-                        return screenshot_content(&r, id, DEFAULT_SCREEN_WIDTH).await;
+                        return screenshot_content(
+                            &r,
+                            &format!("/v1/vms/{id}"),
+                            DEFAULT_SCREEN_WIDTH,
+                        )
+                        .await;
                     }
                     Ok(vec![
                         json!({"type": "text", "text": "signed in (typed the stored sign-in)"}),
@@ -1716,6 +1721,72 @@ pub fn tools(remote: Arc<Remote>) -> Vec<Tool> {
             },
         ),
         tool(
+            "session_screenshot",
+            "Screenshot of a vz session's guest display, as an image (token scope: screen). Coordinates for session_input are pixels of this image from the top left; pass its width as screen_width.",
+            object(
+                json!({
+                    "session": {"type": "string"},
+                    "max_width": {"type": "integer", "minimum": 64, "maximum": 8192, "description": "scale down to this width (default 1280)"}
+                }),
+                &["session"],
+            ),
+            false,
+            &remote,
+            |r, args| async move {
+                timed(CALL_TIMEOUT, async {
+                    let id = session_id(&args)?;
+                    let width = int_arg(&args, "max_width")?.unwrap_or(DEFAULT_SCREEN_WIDTH);
+                    screenshot_content(&r, &format!("/v1/agents/sessions/{id}"), width).await
+                })
+                .await
+            },
+        ),
+        tool(
+            "session_input",
+            "Keyboard and mouse input for a vz session's guest display (token scope: screen). Same actions as vm_input: type, key, move, click, double_click, right_click, middle_click, down, up, drag, scroll; actions runs a list in order. Typed text is not copied into the session ledger. screenshot returns the display afterwards.",
+            object(
+                json!({
+                    "session": {"type": "string"},
+                    "action": {"type": "string", "enum": INPUT_ACTIONS},
+                    "text": {"type": "string"},
+                    "key": {"type": "string"},
+                    "modifiers": {"type": "array", "items": {"type": "string", "enum": ["shift", "control", "option", "command"]}},
+                    "x": {"type": "number"},
+                    "y": {"type": "number"},
+                    "to_x": {"type": "number"},
+                    "to_y": {"type": "number"},
+                    "dx": {"type": "integer"},
+                    "dy": {"type": "integer"},
+                    "screen_width": {"type": "integer", "minimum": 1},
+                    "actions": {"type": "array", "maxItems": 100, "items": {"type": "object"}},
+                    "screenshot": {"type": "boolean", "description": "return a screenshot (default width 1280) after the input"}
+                }),
+                &["session"],
+            ),
+            true,
+            &remote,
+            |r, args| async move {
+                timed(Duration::from_secs(120), async {
+                    let id = session_id(&args)?;
+                    let body = input_body(&args)?;
+                    let base = format!("/v1/agents/sessions/{id}");
+                    let v = r
+                        .call(Method::POST, &format!("{base}/input"), Some(body))
+                        .await?;
+                    if args.get("screenshot").and_then(Value::as_bool) == Some(true) {
+                        tokio::time::sleep(Duration::from_millis(500)).await;
+                        let width = args
+                            .get("screen_width")
+                            .and_then(Value::as_u64)
+                            .unwrap_or(DEFAULT_SCREEN_WIDTH);
+                        return screenshot_content(&r, &base, width).await;
+                    }
+                    Ok(vec![json!({"type": "text", "text": pretty(&v)?})])
+                })
+                .await
+            },
+        ),
+        tool(
             "session_events",
             "What an agent session did: its ledger (exec, checkpoint, restore, fork, ...) and the sandbox's VM events. since is an RFC 3339 time.",
             object(
@@ -2437,10 +2508,10 @@ fn input_body(args: &Value) -> Result<Value> {
 }
 
 /// `vm_screenshot`'s reply: the PNG as an MCP image block and a caption with its size.
-async fn screenshot_content(r: &Remote, id: Uuid, max_width: u64) -> Result<Vec<Value>> {
+async fn screenshot_content(r: &Remote, base: &str, max_width: u64) -> Result<Vec<Value>> {
     use base64::Engine as _;
     let (status, png) = r
-        .get_raw(&format!("/v1/vms/{id}/screenshot?max_width={max_width}"))
+        .get_raw(&format!("{base}/screenshot?max_width={max_width}"))
         .await?;
     if !status.is_success() {
         let body = String::from_utf8_lossy(&png);
@@ -2647,6 +2718,7 @@ mod tests {
             "vm_snapshot_delete",
             "vm_delete",
             "vm_input",
+            "session_input",
             "vm_sign_in",
         ] {
             assert!(lookup(name).write, "{name} must require --allow-write");
