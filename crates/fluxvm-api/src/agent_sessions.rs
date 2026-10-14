@@ -178,6 +178,10 @@ struct Capabilities {
     /// for sessions without a `filesystem` policy.
     #[serde(default)]
     confinement: bool,
+    /// The egress proxy enforces the session's `network.allow` method/path rules for this
+    /// sandbox. False for sessions without such rules.
+    #[serde(default)]
+    http_policy: bool,
 }
 
 /// The policy as compiled, including the parts that are accepted but not enforced yet.
@@ -199,6 +203,19 @@ struct PolicyReport {
     /// `best-effort`: the session is created and `capabilities.confinement` says what happened.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     enforcement: Option<String>,
+    /// Method/host/path rules compiled from `network.allow` entries that name methods or paths
+    /// (`docs/http-acl.md` grammar), enforced by the host's egress proxy next to the host-wide
+    /// rules: a request must pass both.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    http_rules: Vec<String>,
+    /// `strict` (default): create fails if the sandbox cannot be filtered. `best-effort`: the
+    /// session is created and `capabilities.http_policy` says `false`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    network_enforcement: Option<String>,
+    /// The rules could not be re-bound to the sandbox's address after a restore or fork, so its
+    /// traffic is no longer attributed to them. Exec and jobs are refused until it is recreated.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    http_unbound: bool,
 }
 
 /// Paths every confined command may read: enough for a shell, a toolchain and `/proc`.
@@ -813,9 +830,75 @@ struct NetworkBody {
     /// `deny` (default when `allow` is given) or `allow`.
     #[serde(default)]
     default: Option<String>,
-    /// Host names (`example.com`, `*.example.com`). Method/path rules are not supported yet.
+    /// Host names (`example.com`, `*.example.com`), or `{host, methods?, paths?}` objects that
+    /// limit what may be sent to a host. Method/path rules need the host's egress proxy.
     #[serde(default)]
     allow: Vec<Value>,
+    /// `strict` (default) or `best-effort`; only matters when an entry names methods or paths.
+    #[serde(default)]
+    enforcement: Option<String>,
+}
+
+/// The proxy rules for a policy whose `network.allow` limits some hosts to methods or paths.
+/// Once any allow rule exists the proxy denies everything that matches none, so every allowed
+/// host also gets an unrestricted rule (the host and, as the host allow-list does, its
+/// subdomains); a host with limits gets only the limited rules.
+fn http_rules_for(
+    allow_hosts: &[String],
+    limited: &[(String, Vec<String>, Vec<String>)],
+) -> Result<Vec<String>, String> {
+    let mut rules = Vec::new();
+    let is_limited = |h: &str| limited.iter().any(|(lh, _, _)| lh == h);
+    // A host that appears both bare and limited stays limited: the narrower entry wins.
+    let mut hosts: Vec<&String> = allow_hosts.iter().filter(|h| !is_limited(h)).collect();
+    hosts.sort();
+    hosts.dedup();
+    for h in hosts {
+        let bare = h.trim_start_matches("*.");
+        rules.push(format!("allow * {bare}"));
+        rules.push(format!("allow * *.{bare}"));
+    }
+    for (host, methods, paths) in limited {
+        let bare = host.trim_start_matches("*.");
+        let methods: Vec<String> = if methods.is_empty() {
+            vec!["*".into()]
+        } else {
+            methods
+                .iter()
+                .map(|m| m.trim().to_ascii_uppercase())
+                .collect()
+        };
+        for m in &methods {
+            if m != "*"
+                && !(!m.is_empty() && m.len() <= 16 && m.bytes().all(|b| b.is_ascii_uppercase()))
+            {
+                return Err(format!(
+                    "network.allow methods: {m:?} is not an HTTP method"
+                ));
+            }
+        }
+        let paths: Vec<String> = if paths.is_empty() {
+            vec![String::new()]
+        } else {
+            paths.iter().map(|p| p.trim().to_string()).collect()
+        };
+        for p in &paths {
+            if !p.is_empty() && !p.starts_with('/') {
+                return Err(format!("network.allow paths: {p:?} must start with /"));
+            }
+        }
+        for m in &methods {
+            for p in &paths {
+                rules.push(format!("allow {m} {bare}{p}"));
+                rules.push(format!("allow {m} *.{bare}{p}"));
+            }
+        }
+    }
+    rules.sort();
+    rules.dedup();
+    // The same parser the proxy uses, so a rule the proxy would refuse is refused here.
+    fluxvm_network::http_acl::HttpAcl::parse(&rules)?;
+    Ok(rules)
 }
 
 fn compile_policy(p: Option<PolicyBody>) -> Result<PolicyReport, ApiError> {
@@ -852,23 +935,57 @@ fn compile_policy(p: Option<PolicyBody>) -> Result<PolicyReport, ApiError> {
                 "network.default=allow with an allow list is contradictory; use deny".into(),
             ));
         }
+        match n.enforcement.as_deref() {
+            None => {}
+            Some(m @ ("strict" | "best-effort")) => r.network_enforcement = Some(m.into()),
+            Some(_) => {
+                return Err(bad(
+                    "network.enforcement must be strict or best-effort".into()
+                ));
+            }
+        }
+        // Entries that limit methods or paths, as (host, methods, paths).
+        let mut limited: Vec<(String, Vec<String>, Vec<String>)> = Vec::new();
         for item in n.allow {
             match item {
                 Value::String(h) => r.allow_hosts.push(h),
                 Value::Object(o) => {
-                    if o.keys().any(|k| k != "host") {
-                        return Err(bad(
-                            "allow entries with methods or paths are not supported yet (host names only)"
-                                .into(),
-                        ));
+                    if let Some(k) = o
+                        .keys()
+                        .find(|k| !matches!(k.as_str(), "host" | "methods" | "paths"))
+                    {
+                        return Err(bad(format!(
+                            "unknown network.allow key `{k}` (use host, methods, paths)"
+                        )));
                     }
-                    match o.get("host").and_then(Value::as_str) {
-                        Some(h) => r.allow_hosts.push(h.to_string()),
-                        None => return Err(bad("allow entry needs a host".into())),
+                    let Some(host) = o.get("host").and_then(Value::as_str) else {
+                        return Err(bad("allow entry needs a host".into()));
+                    };
+                    let strs = |key: &str| -> Result<Vec<String>, ApiError> {
+                        match o.get(key) {
+                            None => Ok(Vec::new()),
+                            Some(Value::Array(a)) => a
+                                .iter()
+                                .map(|v| {
+                                    v.as_str().map(str::to_string).ok_or_else(|| {
+                                        bad(format!("network.allow {key} entries are strings"))
+                                    })
+                                })
+                                .collect(),
+                            Some(_) => Err(bad(format!("network.allow {key} must be a list"))),
+                        }
+                    };
+                    let (methods, paths) = (strs("methods")?, strs("paths")?);
+                    r.allow_hosts.push(host.to_string());
+                    if !methods.is_empty() || !paths.is_empty() {
+                        limited.push((host.to_string(), methods, paths));
                     }
                 }
-                _ => return Err(bad("allow entries are host names".into())),
+                _ => return Err(bad("allow entries are host names or objects".into())),
             }
+        }
+        if !limited.is_empty() {
+            r.http_rules = http_rules_for(&r.allow_hosts, &limited).map_err(bad)?;
         }
         if default == "deny" && r.allow_hosts.is_empty() && p.preset.as_deref() != Some("open") {
             r.offline = true;
@@ -1091,6 +1208,7 @@ fn capabilities_for(backend: &str, offline: bool) -> Capabilities {
         // `GET .../pty` reaches the guest over SSH, which only the vz path has.
         pty: backend == "vz",
         confinement: false,
+        http_policy: false,
     }
 }
 
@@ -1438,6 +1556,35 @@ async fn create_session(
         }
         session.capabilities.confinement = enforced;
     }
+    if !session.policy.http_rules.is_empty() {
+        // The sandbox must be up for its guest address to be known.
+        let started = m.ensure_running_for_request(rec.id).await;
+        let applied = match started {
+            Ok(_) => m
+                .set_http_policy(rec.id, &session.policy.http_rules)
+                .await
+                .map_err(|e| format!("{e:#}")),
+            Err(e) => Err(format!("the sandbox did not start: {e:#}")),
+        };
+        match applied {
+            Ok(()) => session.capabilities.http_policy = true,
+            Err(why) => {
+                record(&m, id, "policy.http_unenforced", json!({"reason": why}));
+                if session.policy.network_enforcement.as_deref() != Some("best-effort") {
+                    let _ = m.delete(rec.id).await;
+                    let _ = std::fs::remove_file(session_path(&m, id));
+                    m.clear_http_policy(rec.id);
+                    return Err(ApiError {
+                        status: StatusCode::BAD_REQUEST,
+                        message: format!(
+                            "{why}. Set network.enforcement to best-effort to create the session \
+                             with the host allow-list only"
+                        ),
+                    });
+                }
+            }
+        }
+    }
     save(&m, &mut session).await?;
     Ok((StatusCode::CREATED, Json(json!(session))))
 }
@@ -1509,6 +1656,7 @@ async fn delete_session(
     let _ = tokio::fs::remove_file(job_meta_path(&m, id)).await;
     let _ = tokio::fs::remove_file(usage_path(&m, id)).await;
     approvals::remove(&m.cfg.state_dir, id).await;
+    m.clear_http_policy(s.sandbox_id);
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1728,6 +1876,21 @@ async fn revoke_token(
     }
     record(&m, id, "token.revoke", json!({"token": token}));
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Refuses work in a session whose HTTP rules are not applied to its sandbox's traffic.
+fn egress_bound(s: &Session) -> ApiResult<()> {
+    if s.policy.http_unbound {
+        return Err(ApiError {
+            status: StatusCode::CONFLICT,
+            message: format!(
+                "session {}'s HTTP policy is not bound to its sandbox's address (the address is \
+                 in use by another sandbox's rules); delete the session and create it again",
+                s.id
+            ),
+        });
+    }
+    Ok(())
 }
 
 fn running(s: &Session) -> ApiResult<()> {
@@ -2000,6 +2163,7 @@ async fn exec_session(
     let mut work = Some(begin_work(id)?);
     let s = load(&m, id, &caller_tenant(&token_tenant)).await?;
     running(&s)?;
+    egress_bound(&s)?;
     if body.command.trim().is_empty() {
         return Err(ApiError {
             status: StatusCode::BAD_REQUEST,
@@ -2155,9 +2319,34 @@ async fn restore(
             false
         }
     };
-    Ok(Json(
-        json!({"restored": body.tag, "vm": vm, "grants_rebound": grants_rebound}),
-    ))
+    // The same for the session's HTTP rules: if the new address belongs to another sandbox's
+    // rules, this sandbox's traffic is no longer attributed to them, so the session stops
+    // taking exec and jobs rather than running with a policy that is not applied.
+    let mut http_bound = None;
+    if !s.policy.http_rules.is_empty() {
+        let unbound = match m.rebind_http_policy(s.sandbox_id).await {
+            Ok(_) => false,
+            Err(e) => {
+                record(
+                    &m,
+                    id,
+                    "http_policy.unbound",
+                    json!({"reason": format!("{e:#}")}),
+                );
+                true
+            }
+        };
+        if unbound != s.policy.http_unbound {
+            let mut cur = s.clone();
+            cur.policy.http_unbound = unbound;
+            save(&m, &mut cur).await?;
+        }
+        http_bound = Some(!unbound);
+    }
+    Ok(Json(json!({
+        "restored": body.tag, "vm": vm, "grants_rebound": grants_rebound,
+        "http_policy_bound": http_bound,
+    })))
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -2270,6 +2459,19 @@ async fn fork(
             budget: child_budget.clone(),
             revision: 0,
         };
+        if !cs.policy.http_rules.is_empty() {
+            // A child is a new sandbox with its own address; the rules are installed for it, or
+            // it is marked unbound and refuses exec and jobs.
+            if let Err(e) = m.set_http_policy(child.id, &cs.policy.http_rules).await {
+                record(
+                    &m,
+                    cid,
+                    "http_policy.unbound",
+                    json!({"reason": format!("{e:#}")}),
+                );
+                cs.policy.http_unbound = true;
+            }
+        }
         let seeded = match &seed {
             Some((path, mf)) => m
                 .sandbox_baseline_seed(child.id, vec![path.clone()], mf.clone())
@@ -3393,6 +3595,7 @@ async fn pty_ticket(
     require_admin(role)?;
     let s = load(&m, id, &caller_tenant(&token_tenant)).await?;
     running(&s)?;
+    egress_bound(&s)?;
     check_pty_allowed(&s)?;
     let ticket = mint_pty_ticket(id).ok_or(ApiError {
         status: StatusCode::TOO_MANY_REQUESTS,
@@ -3987,6 +4190,7 @@ async fn job_start(
     let mut work = Some(begin_work(id)?);
     let s = load(&m, id, &caller_tenant(&token_tenant)).await?;
     running(&s)?;
+    egress_bound(&s)?;
     if body.command.trim().is_empty() {
         return Err(ApiError {
             status: StatusCode::BAD_REQUEST,
@@ -5419,10 +5623,10 @@ mod tests {
     fn what_is_not_supported_is_refused_not_ignored() {
         assert!(
             compile_policy(Some(pol(
-                json!({"network": {"allow": [{"host": "a.b", "methods": ["GET"]}]}})
+                json!({"network": {"allow": [{"host": "a.b", "verbs": ["GET"]}]}})
             )))
             .is_err(),
-            "method/path rules must be refused until they are enforced"
+            "an unknown allow key must be refused, not ignored"
         );
         assert!(compile_policy(Some(pol(json!({"preset": "nope"})))).is_err());
         assert!(
@@ -5695,6 +5899,58 @@ mod tests {
             check_if_match(&h("x"), &s).unwrap_err().status,
             StatusCode::BAD_REQUEST
         );
+    }
+
+    #[test]
+    fn network_allow_entries_can_limit_methods_and_paths() {
+        let r = compile_policy(Some(pol(json!({
+            "network": {"allow": [
+                "pypi.org",
+                {"host": "github.com", "methods": ["get", "HEAD"], "paths": ["/org/*"]},
+                {"host": "api.example.com"},
+            ]}
+        }))))
+        .unwrap();
+        assert_eq!(
+            r.allow_hosts,
+            vec!["api.example.com", "github.com", "pypi.org"]
+        );
+        // Unlimited hosts get a blanket rule (the proxy denies what no allow rule matches), the
+        // limited one only its own.
+        for want in [
+            "allow * pypi.org",
+            "allow * *.pypi.org",
+            "allow * api.example.com",
+            "allow GET github.com/org/*",
+            "allow HEAD *.github.com/org/*",
+        ] {
+            assert!(
+                r.http_rules.contains(&want.to_string()),
+                "{want}: {:?}",
+                r.http_rules
+            );
+        }
+        assert!(!r.http_rules.iter().any(|x| x == "allow * github.com"));
+        // Plain host lists compile no HTTP rules at all.
+        let plain =
+            compile_policy(Some(pol(json!({"network": {"allow": ["a.example"]}})))).unwrap();
+        assert!(plain.http_rules.is_empty());
+        // Bad entries are refused with a reason.
+        for bad in [
+            json!({"network": {"allow": [{"host": "x.io", "methods": ["G ET"]}]}}),
+            json!({"network": {"allow": [{"host": "x.io", "paths": ["no-slash"]}]}}),
+            json!({"network": {"allow": [{"host": "x.io", "paths": ["/a/../b"]}]}}),
+            json!({"network": {"allow": [{"host": "x.io", "verbs": ["GET"]}]}}),
+            json!({"network": {"allow": [{"host": "x.io", "methods": "GET"}]}}),
+            json!({"network": {"allow": [{"methods": ["GET"]}]}}),
+            json!({"network": {"enforcement": "maybe"}}),
+        ] {
+            assert!(compile_policy(Some(pol(bad.clone()))).is_err(), "{bad}");
+        }
+        let be = compile_policy(Some(pol(json!({"network": {
+            "allow": [{"host": "x.io", "methods": ["GET"]}], "enforcement": "best-effort"}}))))
+        .unwrap();
+        assert_eq!(be.network_enforcement.as_deref(), Some("best-effort"));
     }
 
     #[test]

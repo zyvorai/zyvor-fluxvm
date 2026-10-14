@@ -622,6 +622,29 @@ async fn forward(
     }
 }
 
+/// The per-sandbox rules (see `peer_policy`) for one plain-HTTP request, on top of the host-wide
+/// ACL that `vet_request` already applied. Judges the same canonical host.
+fn peer_check_request(
+    peer: Option<IpAddr>,
+    method: &Method,
+    uri: &Uri,
+    headers: &HeaderMap,
+) -> Result<(), (StatusCode, String)> {
+    if peer.is_none() || method == Method::CONNECT {
+        return Ok(());
+    }
+    // Ambiguity between what is judged and what is contacted is the way around a host filter.
+    if headers.get_all(header::HOST).iter().count() > 1 {
+        return Err(deny("multiple Host headers"));
+    }
+    let header_host = headers.get(header::HOST).and_then(|v| v.to_str().ok());
+    let host = http_acl::effective_host(uri.host(), header_host).map_err(deny)?;
+    match crate::peer_policy::global().check(peer, method.as_str(), &host, uri.path()) {
+        Verdict::Allow => Ok(()),
+        Verdict::Deny(reason) => Err(deny(reason)),
+    }
+}
+
 /// Peer address recorded by `axum::serve` (or inserted by the transparent
 /// listener) on a request.
 fn peer_ip<B>(req: &Request<B>) -> Option<IpAddr> {
@@ -637,10 +660,18 @@ fn peer_ip<B>(req: &Request<B>) -> Option<IpAddr> {
 fn broker_authorization(
     peer: Option<IpAddr>,
     host: &str,
+    method: &Method,
+    path: &str,
     fallback: Option<String>,
 ) -> Option<String> {
     if let Some(ip) = peer
-        && let Some(inj) = fluxvm_core::grants::global().resolve(ip, host, chrono::Utc::now())
+        && let Some(inj) = fluxvm_core::grants::global().resolve_for(
+            ip,
+            host,
+            Some(method.as_str()),
+            Some(path),
+            chrono::Utc::now(),
+        )
     {
         fluxvm_core::grants::audit_use(&inj, host);
         return Some(inj.authorization.expose().to_string());
@@ -681,6 +712,10 @@ async fn handle_plain(
             return (status, reason).into_response();
         }
     };
+    if let Err((status, reason)) = peer_check_request(peer_ip(&req), &method, &uri, req.headers()) {
+        count_denied(status, &method, &uri, &reason);
+        return (status, reason).into_response();
+    }
     let decision = vetted.decision;
     let host = req
         .headers()
@@ -712,7 +747,13 @@ async fn handle_plain(
     };
 
     let headers = req.headers().clone();
-    let inject = broker_authorization(peer_ip(&req), &host, decision.inject_authorization);
+    let inject = broker_authorization(
+        peer_ip(&req),
+        &host,
+        &method,
+        uri.path(),
+        decision.inject_authorization,
+    );
     let body = has_body(&headers).then(|| req.into_body());
     let client = if transparent_port.is_some() {
         &state.transparent_client
@@ -770,6 +811,13 @@ async fn connect(state: Arc<ProxyState>, tls: Arc<TlsState>, req: &mut Request<B
         }
     };
     tunnel.peer = peer_ip(&*req);
+    if let Verdict::Deny(reason) =
+        crate::peer_policy::global().check_tunnel(tunnel.peer, &tunnel.host)
+    {
+        let (status, reason) = deny(reason);
+        count_denied(status, &Method::CONNECT, req.uri(), &reason);
+        return (status, reason).into_response();
+    }
     let on_upgrade = hyper::upgrade::on(&mut *req);
     tokio::spawn(async move {
         match on_upgrade.await {
@@ -878,10 +926,22 @@ async fn tunnel_request(
             return (status, reason).into_response();
         }
     };
+    if let Verdict::Deny(reason) = crate::peer_policy::global().check(
+        tunnel.peer,
+        parts.method.as_str(),
+        &tunnel.host,
+        parts.uri.path(),
+    ) {
+        let (status, reason) = deny(reason);
+        count_denied(status, &parts.method, &parts.uri, &reason);
+        return (status, reason).into_response();
+    }
     let body = has_body(&parts.headers).then(|| request_body(body));
     let inject = broker_authorization(
         tunnel.peer,
         &tunnel.host,
+        &parts.method,
+        parts.uri.path(),
         vetted.decision.inject_authorization,
     );
     forward(
@@ -931,6 +991,49 @@ mod tests {
             &uri.parse().unwrap(),
             &headers(hosts),
         )
+    }
+
+    #[test]
+    fn per_sandbox_rules_apply_on_top_of_the_host_rules() {
+        // A peer address no other test uses: the store is process-wide.
+        let peer: IpAddr = "10.99.99.1".parse().unwrap();
+        let other: IpAddr = "10.99.99.2".parse().unwrap();
+        crate::peer_policy::global()
+            .set(
+                "egress-proxy-test",
+                &["allow GET git.example/*".to_string()],
+                Some(peer),
+            )
+            .unwrap();
+        let get = |m: &str, u: &str, h: &[&str], p: IpAddr| {
+            peer_check_request(
+                Some(p),
+                &m.parse().unwrap(),
+                &u.parse().unwrap(),
+                &headers(h),
+            )
+        };
+        assert!(get("GET", "/r.git/info/refs", &["git.example"], peer).is_ok());
+        let (status, why) =
+            get("POST", "/r.git/git-receive-pack", &["git.example"], peer).unwrap_err();
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert!(why.contains("no allow rule"), "{why}");
+        assert!(get("GET", "/", &["elsewhere.example"], peer).is_err());
+        // Another sandbox, and a request with no known peer, are not subject to it.
+        assert!(get("POST", "/", &["elsewhere.example"], other).is_ok());
+        assert!(
+            peer_check_request(
+                None,
+                &Method::POST,
+                &"/".parse().unwrap(),
+                &headers(&["elsewhere.example"])
+            )
+            .is_ok()
+        );
+        // Ambiguous Host headers are refused, as for the host-wide rules.
+        assert!(get("GET", "/", &["git.example", "evil.example"], peer).is_err());
+        crate::peer_policy::global().remove("egress-proxy-test");
+        assert!(get("POST", "/", &["elsewhere.example"], peer).is_ok());
     }
 
     #[test]

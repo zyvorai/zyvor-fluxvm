@@ -1639,6 +1639,8 @@ pub fn tools(remote: Arc<Remote>) -> Vec<Tool> {
                     "secret_ref": {"type": "string", "description": "name of the daemon-held secret"},
                     "hosts": {"type": "array", "items": {"type": "string"}, "minItems": 1, "description": "destination hosts (exact or domain suffix)"},
                     "ttl_seconds": {"type": "integer", "minimum": 1},
+                    "methods": {"type": "array", "items": {"type": "string"}, "description": "send the secret only with these HTTP methods (default: any)"},
+                    "paths": {"type": "array", "items": {"type": "string"}, "description": "send the secret only to these paths; * matches any run (default: any)"},
                 }),
                 &["session", "secret_ref", "hosts"],
             ),
@@ -1653,6 +1655,11 @@ pub fn tools(remote: Arc<Remote>) -> Vec<Tool> {
                     });
                     if let Some(t) = int_arg(&args, "ttl_seconds")? {
                         body["ttl_seconds"] = json!(t);
+                    }
+                    for key in ["methods", "paths"] {
+                        if args[key].is_array() {
+                            body[key] = args[key].clone();
+                        }
                     }
                     pretty(
                         &r.call(

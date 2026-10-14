@@ -8142,7 +8142,8 @@ for (const a of t.ACTIONS) if (a.run.action === "theme") assert(t.THEMES[a.run.n
             let app = router(m.clone());
             for body in [
                 r#"{"policy":{"preset":"nope"}}"#,
-                r#"{"policy":{"network":{"allow":[{"host":"a.b","methods":["GET"]}]}}}"#,
+                r#"{"policy":{"network":{"allow":[{"host":"a.b","verbs":["GET"]}]}}}"#,
+                r#"{"policy":{"network":{"allow":[{"host":"a.b","methods":["G ET"]}]}}}"#,
                 r#"{"workspace":{"git":"git@github.com:a/b.git"}}"#,
                 r#"{"workspace":{"path":"/a/../b"}}"#,
                 r#"{"workspace":{"mode":"overlay"}}"#,

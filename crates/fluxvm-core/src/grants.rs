@@ -70,6 +70,13 @@ pub struct GrantRequest {
     pub ttl_seconds: Option<i64>,
     #[serde(default)]
     pub expires_at: Option<DateTime<Utc>>,
+    /// HTTP methods the secret may be sent with (`GET`, `POST`...). Empty: any method.
+    #[serde(default)]
+    pub methods: Vec<String>,
+    /// Request paths the secret may be sent to; `*` matches any run of characters. Empty: any
+    /// path. A path with `..`, `//`, `%` or a backslash never matches (it is not canonical).
+    #[serde(default)]
+    pub paths: Vec<String>,
 }
 
 /// The public, secret-free view of a grant.
@@ -79,6 +86,12 @@ pub struct GrantInfo {
     pub sandbox_id: String,
     pub secret_ref: String,
     pub hosts: Vec<String>,
+    /// Empty means any method.
+    #[serde(default)]
+    pub methods: Vec<String>,
+    /// Empty means any path.
+    #[serde(default)]
+    pub paths: Vec<String>,
     pub created_at: DateTime<Utc>,
     pub expires_at: DateTime<Utc>,
     /// Whether the sandbox's source address is known. A grant without one
@@ -152,6 +165,89 @@ pub fn secret_env_name(secret_ref: &str) -> String {
     out
 }
 
+fn normalize_method(m: &str) -> Result<String, GrantError> {
+    let m = m.trim().to_ascii_uppercase();
+    if m.is_empty() || m.len() > 16 || !m.bytes().all(|b| b.is_ascii_uppercase()) {
+        return Err(GrantError::Invalid(format!(
+            "invalid grant method {m:?}: use an HTTP method such as GET or POST"
+        )));
+    }
+    Ok(m)
+}
+
+fn normalize_path(p: &str) -> Result<String, GrantError> {
+    let p = p.trim();
+    let ok = p.starts_with('/')
+        && p.len() <= 256
+        && !p.contains("..")
+        && !p.contains("//")
+        && !p
+            .chars()
+            .any(|c| c.is_control() || c.is_whitespace() || matches!(c, '%' | '?' | '#' | '\\'));
+    if !ok {
+        return Err(GrantError::Invalid(format!(
+            "invalid grant path {p:?}: start with /, no .., //, %, ?, # or backslash (`*` is the wildcard)"
+        )));
+    }
+    Ok(p.to_string())
+}
+
+/// `*` matches any run of characters, including `/`.
+fn path_glob(pat: &str, text: &str) -> bool {
+    let (p, t): (Vec<char>, Vec<char>) = (pat.chars().collect(), text.chars().collect());
+    let (mut pi, mut ti, mut star, mut mark) = (0, 0, None, 0);
+    while ti < t.len() {
+        if pi < p.len() && p[pi] == '*' {
+            star = Some(pi);
+            mark = ti;
+            pi += 1;
+        } else if pi < p.len() && p[pi] == t[ti] {
+            pi += 1;
+            ti += 1;
+        } else if let Some(sp) = star {
+            pi = sp + 1;
+            mark += 1;
+            ti = mark;
+        } else {
+            return false;
+        }
+    }
+    while pi < p.len() && p[pi] == '*' {
+        pi += 1;
+    }
+    pi == p.len()
+}
+
+/// Whether `path` (a request path without the query) is canonical enough to be matched.
+fn canonical_path(path: &str) -> bool {
+    path.starts_with('/')
+        && !path.contains("//")
+        && !path.contains('%')
+        && !path.contains('\\')
+        && !path.split('/').any(|c| c == ".." || c == ".")
+}
+
+impl GrantInfo {
+    /// Whether this grant's method and path limits allow the request. A grant with limits never
+    /// matches a request whose method or path is unknown or not canonical.
+    fn allows(&self, method: Option<&str>, path: Option<&str>) -> bool {
+        if !self.methods.is_empty()
+            && !method.is_some_and(|m| self.methods.iter().any(|a| a.eq_ignore_ascii_case(m)))
+        {
+            return false;
+        }
+        if !self.paths.is_empty() {
+            let Some(p) = path.filter(|p| canonical_path(p)) else {
+                return false;
+            };
+            if !self.paths.iter().any(|g| path_glob(g, p)) {
+                return false;
+            }
+        }
+        true
+    }
+}
+
 fn normalize_host(h: &str) -> Result<String, GrantError> {
     let h = h.trim().trim_start_matches('.').to_ascii_lowercase();
     if h.is_empty()
@@ -200,6 +296,21 @@ impl GrantStore {
             .iter()
             .map(|h| normalize_host(h))
             .collect::<Result<Vec<_>, _>>()?;
+        let methods = req
+            .methods
+            .iter()
+            .map(|m| normalize_method(m))
+            .collect::<Result<Vec<_>, _>>()?;
+        let paths = req
+            .paths
+            .iter()
+            .map(|p| normalize_path(p))
+            .collect::<Result<Vec<_>, _>>()?;
+        if methods.len() > 16 || paths.len() > 32 {
+            return Err(GrantError::Invalid(
+                "at most 16 methods and 32 paths per grant".into(),
+            ));
+        }
         let expires_at = match (req.expires_at, req.ttl_seconds) {
             (Some(at), _) => at,
             (None, Some(ttl)) => {
@@ -232,6 +343,8 @@ impl GrantStore {
             sandbox_id: sandbox_id.to_string(),
             secret_ref: secret_ref.to_string(),
             hosts,
+            methods,
+            paths,
             created_at: now,
             expires_at,
             bound: source_ip.is_some(),
@@ -312,6 +425,20 @@ impl GrantStore {
     /// Find the credential for traffic from `peer` to `host`, if a live grant
     /// of the sandbox that owns `peer` covers that host.
     pub fn resolve(&self, peer: IpAddr, host: &str, now: DateTime<Utc>) -> Option<Injection> {
+        self.resolve_for(peer, host, None, None, now)
+    }
+
+    /// Like [`GrantStore::resolve`], and a grant with `methods` or `paths` limits matches only a
+    /// request that is within them. The credential is not sent otherwise (the request still goes
+    /// through, without it).
+    pub fn resolve_for(
+        &self,
+        peer: IpAddr,
+        host: &str,
+        method: Option<&str>,
+        path: Option<&str>,
+        now: DateTime<Utc>,
+    ) -> Option<Injection> {
         let inner = self.lock();
         let sandbox = inner.sources.get(&peer)?;
         inner
@@ -319,7 +446,9 @@ impl GrantStore {
             .get(sandbox)?
             .iter()
             .filter(|g| g.info.expires_at > now)
-            .find(|g| g.info.hosts.iter().any(|p| host_matches(p, host)))
+            .find(|g| {
+                g.info.hosts.iter().any(|p| host_matches(p, host)) && g.info.allows(method, path)
+            })
             .map(|g| Injection {
                 sandbox_id: g.info.sandbox_id.clone(),
                 grant_id: g.info.id.clone(),
@@ -373,11 +502,71 @@ mod tests {
             hosts: hosts.iter().map(|s| s.to_string()).collect(),
             ttl_seconds: Some(60),
             expires_at: None,
+            methods: Vec::new(),
+            paths: Vec::new(),
         }
     }
 
     fn ip(s: &str) -> IpAddr {
         s.parse().unwrap()
+    }
+
+    #[test]
+    fn a_grant_with_limits_is_injected_only_within_them() {
+        let s = GrantStore::new();
+        let now = Utc::now();
+        let mut req = req(&["git.example"]);
+        req.methods = vec!["get".into()];
+        req.paths = vec!["/org/repo.git/*".into()];
+        let info = s
+            .add(
+                "sb",
+                &req,
+                Secret::new("Bearer t"),
+                Some(ip("10.0.0.2")),
+                now,
+            )
+            .unwrap();
+        assert_eq!(info.methods, vec!["GET".to_string()]);
+        let hit = |m: Option<&str>, p: Option<&str>| {
+            s.resolve_for(ip("10.0.0.2"), "git.example", m, p, now)
+                .is_some()
+        };
+        assert!(hit(Some("GET"), Some("/org/repo.git/info/refs")));
+        assert!(!hit(Some("POST"), Some("/org/repo.git/git-receive-pack")));
+        assert!(!hit(Some("GET"), Some("/org/other.git/info/refs")));
+        // Not canonical, or unknown: no credential.
+        assert!(!hit(Some("GET"), Some("/org/repo.git/../other.git/x")));
+        assert!(!hit(Some("GET"), Some("/org/repo.git//x")));
+        assert!(!hit(Some("GET"), Some("/org/repo.git/%2e%2e/x")));
+        assert!(!hit(None, Some("/org/repo.git/x")));
+        assert!(!hit(Some("GET"), None));
+        // The unlimited lookup used by older callers does not satisfy a limited grant.
+        assert!(s.resolve(ip("10.0.0.2"), "git.example", now).is_none());
+    }
+
+    #[test]
+    fn grant_limits_are_validated() {
+        let s = GrantStore::new();
+        let now = Utc::now();
+        for (methods, paths) in [
+            (vec!["G ET"], vec![]),
+            (vec!["GET1"], vec![]),
+            (vec![], vec!["relative"]),
+            (vec![], vec!["/a/../b"]),
+            (vec![], vec!["/a//b"]),
+            (vec![], vec!["/a%2fb"]),
+            (vec![], vec!["/a?x=1"]),
+        ] {
+            let mut r = req(&["x.io"]);
+            r.methods = methods.iter().map(|m| m.to_string()).collect();
+            r.paths = paths.iter().map(|p| p.to_string()).collect();
+            assert!(
+                s.add("sb", &r, Secret::new("v"), None, now).is_err(),
+                "{methods:?} {paths:?}"
+            );
+        }
+        assert!(s.list("sb", now).is_empty());
     }
 
     #[test]
