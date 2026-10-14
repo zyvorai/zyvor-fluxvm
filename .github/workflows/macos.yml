@@ -18,7 +18,7 @@ permissions:
 
 jobs:
   build-and-test:
-    runs-on: macos-26
+    runs-on: [self-hosted, macOS, ARM64, fluxvm-mac]
     steps:
       # fluxvm-image depends on the sibling guestkit project through a relative path.
       - uses: actions/checkout@v7
