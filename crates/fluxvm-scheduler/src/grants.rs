@@ -124,6 +124,8 @@ mod tests {
             hosts: vec!["api.github.com".into()],
             ttl_seconds: None,
             expires_at: None,
+            methods: Vec::new(),
+            paths: Vec::new(),
         }
     }
 

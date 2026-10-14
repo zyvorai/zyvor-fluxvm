@@ -107,8 +107,48 @@ fluxctl agent ungrant <session> [<grant id>]
   a different sandbox's grants, this session's grants are **revoked** rather than left on a stale address
   (`grants_rebound` in the restore response, `grant.revoked` in the ledger). A grant with an unknown address matches
   nothing.
+- **Method and path limits**: `--method GET` (repeatable) and `--path '/org/repo.git/*'` (repeatable, `*` matches any
+  run) make the proxy inject the secret only for requests within them; a request outside still goes through, without
+  the credential. A request path that is not canonical (`..`, `//`, `%`, backslash) never matches a limited grant, and
+  an unknown method or path never does. Without limits a grant covers its hosts as before.
 - The existing broker's limits (a TTL cap, a grant count per sandbox) apply. Not run live: the broker and the re-bind
   are unit-tested, not driven through the egress proxy from a guest.
+
+### HTTP method and path rules
+
+`network.allow` entries can limit what may be sent to a host:
+
+```json
+{"network": {"allow": [
+  "pypi.org",
+  {"host": "github.com", "methods": ["GET", "HEAD"], "paths": ["/org/*"]}
+], "enforcement": "strict"}}
+```
+
+They compile to rules in the `docs/http-acl.md` grammar (`allow GET github.com/org/*`, and the same for subdomains), and
+every other allowed host gets an `allow * host` rule, because the proxy denies whatever no allow rule matches. The
+rules are installed for this sandbox in the host's egress proxy (`fluxvm_network::peer_policy`), keyed by its guest
+address, and apply **in addition to** the host-wide `egress_http_rules`: a request must pass both, so a session can
+only narrow what the host allows. `policy.http_rules` shows the compiled rules; `capabilities.http_policy` says
+whether they are enforced.
+
+- **Where it works**: backends whose traffic reaches the host's own egress proxy (`sandbox.egress_proxy_listen`
+  set; QEMU/KVM and the in-tree engine) with a known guest address. **Not on `vz`** (its allow-list proxy is the
+  runner's and matches host names only) and **not on procbox sandboxes**. Where it cannot be enforced, create returns
+  `400` with the reason, unless `network.enforcement` is `best-effort` (the session is created with the host
+  allow-list only and `capabilities.http_policy` is `false`, `policy.http_unenforced` in the ledger).
+- HTTPS is judged per request only when the proxy intercepts TLS (`egress_tls_intercept`); without it a `CONNECT` is
+  refused outright (`501`), so a limited host cannot be reached over TLS at all, which fails closed. A tunnel is refused
+  up front when no rule could ever allow its host. Two `Host` headers are refused.
+- **Restore and fork**: a restore re-binds the rules to the machine's current address; fork children get the rules
+  installed for their own address. If an address is already bound to another sandbox's rules, the session is marked
+  `http_unbound` and `exec`, jobs and terminals return `409` until it is recreated (`http_policy.unbound` in the
+  ledger, `http_policy_bound: false` in the restore response), rather than running with a policy that is not applied.
+  Deleting the session removes the rules.
+- **Not verified live**: attribution relies on the proxy seeing the guest's own address, which holds when the
+  sandbox's traffic is redirected to the proxy by the host network setup (transparent redirect or proxy settings). A
+  guest with a direct route out bypasses the proxy, and the rules do not apply to it. The compile step, the rule store,
+  and the proxy's per-request check are unit-tested; no guest traffic was driven through them.
 
 ### Budgets
 
@@ -127,9 +167,20 @@ fluxctl agent ungrant <session> [<grant id>]
   gives its children back.
 - `max_exec_seconds` is checked when a command starts; commands running in parallel can overshoot it. Jobs are not
   counted against `max_exec_seconds`.
+- `max_compute_seconds` is commands **plus** background jobs: finished jobs by their recorded start and end, running ones
+  up to now. It is checked when a command or job starts, a command gets at most what is left, and a child starts with
+  what is left. A running job is not stopped when the budget runs out (give the job its own `timeout_seconds`).
+- `max_output_bytes` caps what one `exec` returns per stream (the rest is dropped on a character boundary, with
+  `output_truncated` and `<stream>_dropped_bytes` in the answer and the ledger) and the bytes a job retains per stream.
+  It never slows or kills the command.
+- `max_workspace_bytes` is the workspace directory's size from `du -sk` in the guest, measured when a command or job
+  starts (one extra command each time; the last value is `usage.workspace_bytes`). Growth during a run is not stopped;
+  the *next* start is refused. It needs a workspace (`400` otherwise) and `du` in the guest.
 
-Not done: token, output-size and storage budgets. Tokens need usage reports from the model client or gateway, which the
-daemon never sees; output and storage need guest-side accounting.
+Not done: token budgets (they need usage reports from the model client or gateway, which the daemon never sees) and a
+process-count limit. `RLIMIT_NPROC` exists in the confinement policy, but the kernel does not apply it to root and
+sessions run as root, so a `max_processes` knob would look enforced and not be; it waits for `run_as` support in
+sessions.
 
 ### Evaluating candidates
 
@@ -160,10 +211,22 @@ delete (like `rollout`); it needs a running session with a workspace baseline to
   body replays the first 2xx response, a different body is `422`, a key still running is `409`, records last 24 h.
 - **Expiry.** A session past its `expires_at` is persisted as `expired` the next time anything reads it (every route
   refuses it with `409`; delete still works). The record and listing also report `gone` when the daemon no longer has
-  the sandbox; that is shown, not saved. There is no background sweep: reconciliation happens on access, so it also
-  covers a daemon restart.
+  the sandbox; that is shown, not saved.
+- **Sweeper.** A background task (first pass 30 s after start, then every 60 s) marks expired sessions `expired` without
+  anyone reading them and removes what an ended (`expired` or `deleted`) session left: tokens, grants, previews,
+  approvals, job metadata, usage and HTTP rules. The record and ledger stay. `session.cleanup` is ledgered once per
+  session; delete runs the same cleanup. Previews of a deleted session used to linger until their expiry; they no
+  longer do.
+- **Interrupted operations.** While a checkpoint, restore, fork or delete runs, a marker file exists
+  (`<state_dir>/agent-session-ops/<session>.json`). If the daemon dies mid-way the marker is left, and the next read of
+  the session shows `interrupted_op: {op, started_at}` and ledgers `lifecycle.interrupted` once, until another
+  operation completes. It reports; it does not repair: whether a half-done restore or fork left the sandbox usable is
+  for the operator to check.
 
-Not done: the gate and replay store are per daemon; reads (`files`, `git status`, `job read`) are not gated.
+Not done: the lifecycle gate is still in the daemon's memory (a restart clears it, and two daemons on one state
+directory do not see each other); reads (`files`, `git status`, `job read`) are not gated; jobs running in a guest are
+not re-adopted into a new daemon's view beyond the metadata it persisted. The sweeper and the marker are unit and
+router tested, not run through a real daemon restart.
 
 ### Session tokens
 
@@ -598,7 +661,7 @@ Each item says why it is not in the MVP.
 | Lazy memory restore (sub-second claim/fork) | a restore engine change, not an API change; not started |
 | Workspace overlay mode, read-only mounts | `mode: "overlay"` is refused; clone is the only writable mode |
 | Process policy as a security boundary | `process` rules are still string globs (`ask` approvals included); filesystem confinement is wired, executable/argv rules are not |
-| HTTP method/path rules through the session policy | the egress proxy supports them on QEMU/KVM; not exposed here |
+| HTTP method/path rules on `vz` | the runner's allow-list proxy matches host names only; per-session rules are enforced by the host egress proxy (see above) |
 | Streaming exec output | `exec` is still buffered; jobs stream over SSE (long-polled from the guest supervisor, or polled every 400 ms on older agents) and the terminal (`shell`) streams |
 | Replay | the ledger is a log, not a recording |
 | Preview URLs: large or streamed responses | WebSocket upgrades are bridged (run with Chrome DevTools); large and streamed bodies were not run through the preview route |

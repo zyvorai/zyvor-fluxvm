@@ -178,6 +178,10 @@ struct Capabilities {
     /// for sessions without a `filesystem` policy.
     #[serde(default)]
     confinement: bool,
+    /// The egress proxy enforces the session's `network.allow` method/path rules for this
+    /// sandbox. False for sessions without such rules.
+    #[serde(default)]
+    http_policy: bool,
 }
 
 /// The policy as compiled, including the parts that are accepted but not enforced yet.
@@ -199,6 +203,19 @@ struct PolicyReport {
     /// `best-effort`: the session is created and `capabilities.confinement` says what happened.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     enforcement: Option<String>,
+    /// Method/host/path rules compiled from `network.allow` entries that name methods or paths
+    /// (`docs/http-acl.md` grammar), enforced by the host's egress proxy next to the host-wide
+    /// rules: a request must pass both.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    http_rules: Vec<String>,
+    /// `strict` (default): create fails if the sandbox cannot be filtered. `best-effort`: the
+    /// session is created and `capabilities.http_policy` says `false`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    network_enforcement: Option<String>,
+    /// The rules could not be re-bound to the sandbox's address after a restore or fork, so its
+    /// traffic is no longer attributed to them. Exec and jobs are refused until it is recreated.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    http_unbound: bool,
 }
 
 /// Paths every confined command may read: enough for a shell, a toolchain and `/proc`.
@@ -428,6 +445,18 @@ struct Budget {
     /// Fork children created.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     max_children: Option<u64>,
+    /// Wall-clock seconds of `exec` plus background jobs (a running job counts up to now).
+    /// Checked when a command or job starts; a command is also given at most what is left.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    max_compute_seconds: Option<u64>,
+    /// Bytes of output one `exec` returns per stream (the rest is dropped, `output_truncated`
+    /// says so) and bytes a job retains per stream. The command is not slowed or killed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    max_output_bytes: Option<u64>,
+    /// Size of the session's workspace directory, measured with `du` in the guest when a command
+    /// or job starts. Growth during a run is not stopped; the next start is refused.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    max_workspace_bytes: Option<u64>,
 }
 
 /// What a session has used. Counted when a command, job or fork is accepted.
@@ -437,6 +466,9 @@ struct Usage {
     exec_ms: u64,
     jobs: u64,
     children: u64,
+    /// The workspace size at the last check, when a workspace budget is set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    workspace_bytes: Option<u64>,
 }
 
 fn validate_budget(b: Option<Budget>) -> Result<Option<Budget>, ApiError> {
@@ -447,11 +479,23 @@ fn validate_budget(b: Option<Budget>) -> Result<Option<Budget>, ApiError> {
         ("max_jobs", b.max_jobs),
         ("max_concurrent_jobs", b.max_concurrent_jobs),
         ("max_children", b.max_children),
+        ("max_compute_seconds", b.max_compute_seconds),
     ] {
         if v == Some(0) || v.is_some_and(|n| n > 10_000_000) {
             return Err(ApiError {
                 status: StatusCode::BAD_REQUEST,
                 message: format!("budget.{name} must be 1-10000000"),
+            });
+        }
+    }
+    for (name, v, max) in [
+        ("max_output_bytes", b.max_output_bytes, JOB_MAX_OUTPUT),
+        ("max_workspace_bytes", b.max_workspace_bytes, 1 << 40),
+    ] {
+        if v == Some(0) || v.is_some_and(|n| n > max) {
+            return Err(ApiError {
+                status: StatusCode::BAD_REQUEST,
+                message: format!("budget.{name} must be 1-{max}"),
             });
         }
     }
@@ -468,25 +512,37 @@ fn budget_exhausted(what: &str, used: u64, limit: u64) -> ApiError {
 impl Budget {
     /// Whether one more `exec` may start under `u`, and the seconds it may run (`None`: no time
     /// limit). Counts nothing.
-    fn check_exec(&self, u: &Usage) -> Result<Option<u64>, ApiError> {
+    fn check_exec(&self, u: &Usage, job_ms: u64) -> Result<Option<u64>, ApiError> {
         if let Some(max) = self.max_execs
             && u.execs >= max
         {
             return Err(budget_exhausted("exec", u.execs, max));
         }
-        match self.max_exec_seconds {
-            Some(max) => {
-                let used = u.exec_ms.div_ceil(1000);
-                if used >= max {
-                    return Err(budget_exhausted("exec time (seconds)", used, max));
-                }
-                Ok(Some(max - used))
+        let mut left = None;
+        if let Some(max) = self.max_exec_seconds {
+            let used = u.exec_ms.div_ceil(1000);
+            if used >= max {
+                return Err(budget_exhausted("exec time (seconds)", used, max));
             }
-            None => Ok(None),
+            left = Some(max - used);
         }
+        if let Some(max) = self.max_compute_seconds {
+            let used = (u.exec_ms + job_ms).div_ceil(1000);
+            if used >= max {
+                return Err(budget_exhausted("compute time (seconds)", used, max));
+            }
+            left = Some(left.map_or(max - used, |l| l.min(max - used)));
+        }
+        Ok(left)
     }
 
-    fn check_job(&self, u: &Usage, running: u64) -> Result<(), ApiError> {
+    fn check_job(&self, u: &Usage, running: u64, job_ms: u64) -> Result<(), ApiError> {
+        if let Some(max) = self.max_compute_seconds {
+            let used = (u.exec_ms + job_ms).div_ceil(1000);
+            if used >= max {
+                return Err(budget_exhausted("compute time (seconds)", used, max));
+            }
+        }
         if let Some(max) = self.max_concurrent_jobs
             && running >= max
         {
@@ -524,6 +580,10 @@ impl Budget {
             max_jobs: left(self.max_jobs, u.jobs),
             max_concurrent_jobs: self.max_concurrent_jobs,
             max_children: left(self.max_children, u.children),
+            // The child's own jobs start at zero, so it gets the parent's compute that is left.
+            max_compute_seconds: left(self.max_compute_seconds, u.exec_ms.div_ceil(1000)),
+            max_output_bytes: self.max_output_bytes,
+            max_workspace_bytes: self.max_workspace_bytes,
         }
     }
 }
@@ -573,16 +633,96 @@ async fn usage_update<T>(
 /// Accepts one `exec` against the budget and counts it. Returns the most seconds the command may
 /// run (the seconds left), or `None` when the budget has no time limit.
 async fn budget_start_exec(m: &VmManager, s: &Session) -> ApiResult<Option<u64>> {
+    let job_ms = match &s.budget {
+        Some(b) if b.max_compute_seconds.is_some() => job_compute_ms(m, s.id).await,
+        _ => 0,
+    };
     usage_update(m, s.id, |u| {
         // No limits: still counted, so usage is reported for every session.
         let left = match &s.budget {
-            Some(b) => b.check_exec(u)?,
+            Some(b) => b.check_exec(u, job_ms)?,
             None => None,
         };
         u.execs += 1;
         Ok(left)
     })
     .await
+}
+
+/// Wall-clock milliseconds the session's background jobs have run: finished ones from their
+/// metadata, running ones up to now.
+async fn job_compute_ms(m: &VmManager, id: Uuid) -> u64 {
+    let now = Utc::now();
+    job_meta_read(m, id)
+        .await
+        .iter()
+        .map(|j| {
+            let end = j.finished_at.unwrap_or(now);
+            (end - j.started_at).num_milliseconds().max(0) as u64
+        })
+        .sum()
+}
+
+/// Cuts `stdout` and `stderr` of an exec answer to `cap` bytes each (on a character boundary) and
+/// sets `output_truncated`. Returns whether anything was cut.
+fn cap_output(out: &mut Value, cap: usize) -> bool {
+    let mut cut = false;
+    for key in ["stdout", "stderr"] {
+        let Some(text) = out[key].as_str() else {
+            continue;
+        };
+        if text.len() > cap {
+            let mut end = cap;
+            while end > 0 && !text.is_char_boundary(end) {
+                end -= 1;
+            }
+            let dropped = text.len() - end;
+            let kept = text[..end].to_string();
+            out[key] = json!(kept);
+            out[format!("{key}_dropped_bytes")] = json!(dropped);
+            cut = true;
+        }
+    }
+    if cut {
+        out["output_truncated"] = json!(true);
+    }
+    cut
+}
+
+/// Refuses a command or job start when the workspace is over `max_workspace_bytes`. The size
+/// comes from `du` in the guest, so the sandbox must be running.
+async fn budget_check_workspace(m: &VmManager, s: &Session) -> ApiResult<()> {
+    let (Some(max), Some(ws)) = (
+        s.budget.as_ref().and_then(|b| b.max_workspace_bytes),
+        s.workspace.as_ref(),
+    ) else {
+        return Ok(());
+    };
+    let res = m
+        .exec_with_policy(
+            s.sandbox_id,
+            format!("du -sk {} 2>/dev/null | cut -f1", shell_quote(&ws.path)),
+            Some(30),
+            s.policy.exec.clone(),
+        )
+        .await?;
+    let kib = json!(res)["stdout"]
+        .as_str()
+        .and_then(|o| o.trim().parse::<u64>().ok())
+        .ok_or_else(|| ApiError {
+            status: StatusCode::BAD_GATEWAY,
+            message: "could not measure the workspace size (needs `du` in the guest)".into(),
+        })?;
+    let used = kib.saturating_mul(1024);
+    let _ = usage_update(m, s.id, |u| {
+        u.workspace_bytes = Some(used);
+        Ok(())
+    })
+    .await;
+    if used >= max {
+        return Err(budget_exhausted("workspace size (bytes)", used, max));
+    }
+    Ok(())
 }
 
 async fn budget_finish_exec(m: &VmManager, id: Uuid, elapsed_ms: u64) {
@@ -628,12 +768,62 @@ fn gate_conflict(message: String) -> ApiError {
 }
 
 /// Held while a checkpoint, restore, fork or delete runs.
-struct LifecycleGuard(Uuid);
+struct LifecycleGuard(Uuid, Option<PathBuf>);
 
 impl Drop for LifecycleGuard {
     fn drop(&mut self) {
         with_gate(self.0, |g| g.lifecycle = None);
+        // The operation ended, whether it succeeded or failed: it was not interrupted.
+        if let Some(p) = &self.1 {
+            let _ = std::fs::remove_file(p);
+        }
     }
+}
+
+fn op_marker_path(m: &VmManager, id: Uuid) -> PathBuf {
+    m.cfg
+        .state_dir
+        .join("agent-session-ops")
+        .join(format!("{id}.json"))
+}
+
+impl LifecycleGuard {
+    /// Writes a marker that exists only while the operation runs. A daemon that dies mid-way
+    /// leaves it behind, and the session record then reports the interrupted operation, so a
+    /// half-done restore or fork is visible rather than silent.
+    fn mark(mut self, m: &VmManager, kind: &str) -> Self {
+        let path = op_marker_path(m, self.0);
+        if let Some(d) = path.parent() {
+            let _ = std::fs::create_dir_all(d);
+        }
+        let body = json!({"op": kind, "started_at": Utc::now(), "reported": false});
+        if std::fs::write(&path, body.to_string()).is_ok() {
+            self.1 = Some(path);
+        }
+        self
+    }
+}
+
+/// The operation a previous daemon was running on this session when it stopped, if any. Reports it
+/// to the ledger once.
+fn interrupted_op(m: &VmManager, id: Uuid) -> Option<Value> {
+    // Something in this process holds the slot: the operation is live, not interrupted.
+    if with_gate(id, |g| g.lifecycle.is_some()) {
+        return None;
+    }
+    let path = op_marker_path(m, id);
+    let mut v: Value = serde_json::from_slice(&std::fs::read(&path).ok()?).ok()?;
+    if v["reported"] != json!(true) {
+        record(
+            m,
+            id,
+            "lifecycle.interrupted",
+            json!({"op": v["op"], "started_at": v["started_at"]}),
+        );
+        v["reported"] = json!(true);
+        let _ = std::fs::write(&path, v.to_string());
+    }
+    Some(json!({"op": v["op"], "started_at": v["started_at"]}))
 }
 
 /// Takes the session's lifecycle slot, or `409` naming what holds it. Restore and fork also
@@ -653,7 +843,7 @@ fn begin_lifecycle(id: Uuid, kind: &'static str) -> ApiResult<LifecycleGuard> {
             )));
         }
         g.lifecycle = Some(kind);
-        Ok(LifecycleGuard(id))
+        Ok(LifecycleGuard(id, None))
     })
 }
 
@@ -813,9 +1003,75 @@ struct NetworkBody {
     /// `deny` (default when `allow` is given) or `allow`.
     #[serde(default)]
     default: Option<String>,
-    /// Host names (`example.com`, `*.example.com`). Method/path rules are not supported yet.
+    /// Host names (`example.com`, `*.example.com`), or `{host, methods?, paths?}` objects that
+    /// limit what may be sent to a host. Method/path rules need the host's egress proxy.
     #[serde(default)]
     allow: Vec<Value>,
+    /// `strict` (default) or `best-effort`; only matters when an entry names methods or paths.
+    #[serde(default)]
+    enforcement: Option<String>,
+}
+
+/// The proxy rules for a policy whose `network.allow` limits some hosts to methods or paths.
+/// Once any allow rule exists the proxy denies everything that matches none, so every allowed
+/// host also gets an unrestricted rule (the host and, as the host allow-list does, its
+/// subdomains); a host with limits gets only the limited rules.
+fn http_rules_for(
+    allow_hosts: &[String],
+    limited: &[(String, Vec<String>, Vec<String>)],
+) -> Result<Vec<String>, String> {
+    let mut rules = Vec::new();
+    let is_limited = |h: &str| limited.iter().any(|(lh, _, _)| lh == h);
+    // A host that appears both bare and limited stays limited: the narrower entry wins.
+    let mut hosts: Vec<&String> = allow_hosts.iter().filter(|h| !is_limited(h)).collect();
+    hosts.sort();
+    hosts.dedup();
+    for h in hosts {
+        let bare = h.trim_start_matches("*.");
+        rules.push(format!("allow * {bare}"));
+        rules.push(format!("allow * *.{bare}"));
+    }
+    for (host, methods, paths) in limited {
+        let bare = host.trim_start_matches("*.");
+        let methods: Vec<String> = if methods.is_empty() {
+            vec!["*".into()]
+        } else {
+            methods
+                .iter()
+                .map(|m| m.trim().to_ascii_uppercase())
+                .collect()
+        };
+        for m in &methods {
+            if m != "*"
+                && !(!m.is_empty() && m.len() <= 16 && m.bytes().all(|b| b.is_ascii_uppercase()))
+            {
+                return Err(format!(
+                    "network.allow methods: {m:?} is not an HTTP method"
+                ));
+            }
+        }
+        let paths: Vec<String> = if paths.is_empty() {
+            vec![String::new()]
+        } else {
+            paths.iter().map(|p| p.trim().to_string()).collect()
+        };
+        for p in &paths {
+            if !p.is_empty() && !p.starts_with('/') {
+                return Err(format!("network.allow paths: {p:?} must start with /"));
+            }
+        }
+        for m in &methods {
+            for p in &paths {
+                rules.push(format!("allow {m} {bare}{p}"));
+                rules.push(format!("allow {m} *.{bare}{p}"));
+            }
+        }
+    }
+    rules.sort();
+    rules.dedup();
+    // The same parser the proxy uses, so a rule the proxy would refuse is refused here.
+    fluxvm_network::http_acl::HttpAcl::parse(&rules)?;
+    Ok(rules)
 }
 
 fn compile_policy(p: Option<PolicyBody>) -> Result<PolicyReport, ApiError> {
@@ -852,23 +1108,57 @@ fn compile_policy(p: Option<PolicyBody>) -> Result<PolicyReport, ApiError> {
                 "network.default=allow with an allow list is contradictory; use deny".into(),
             ));
         }
+        match n.enforcement.as_deref() {
+            None => {}
+            Some(m @ ("strict" | "best-effort")) => r.network_enforcement = Some(m.into()),
+            Some(_) => {
+                return Err(bad(
+                    "network.enforcement must be strict or best-effort".into()
+                ));
+            }
+        }
+        // Entries that limit methods or paths, as (host, methods, paths).
+        let mut limited: Vec<(String, Vec<String>, Vec<String>)> = Vec::new();
         for item in n.allow {
             match item {
                 Value::String(h) => r.allow_hosts.push(h),
                 Value::Object(o) => {
-                    if o.keys().any(|k| k != "host") {
-                        return Err(bad(
-                            "allow entries with methods or paths are not supported yet (host names only)"
-                                .into(),
-                        ));
+                    if let Some(k) = o
+                        .keys()
+                        .find(|k| !matches!(k.as_str(), "host" | "methods" | "paths"))
+                    {
+                        return Err(bad(format!(
+                            "unknown network.allow key `{k}` (use host, methods, paths)"
+                        )));
                     }
-                    match o.get("host").and_then(Value::as_str) {
-                        Some(h) => r.allow_hosts.push(h.to_string()),
-                        None => return Err(bad("allow entry needs a host".into())),
+                    let Some(host) = o.get("host").and_then(Value::as_str) else {
+                        return Err(bad("allow entry needs a host".into()));
+                    };
+                    let strs = |key: &str| -> Result<Vec<String>, ApiError> {
+                        match o.get(key) {
+                            None => Ok(Vec::new()),
+                            Some(Value::Array(a)) => a
+                                .iter()
+                                .map(|v| {
+                                    v.as_str().map(str::to_string).ok_or_else(|| {
+                                        bad(format!("network.allow {key} entries are strings"))
+                                    })
+                                })
+                                .collect(),
+                            Some(_) => Err(bad(format!("network.allow {key} must be a list"))),
+                        }
+                    };
+                    let (methods, paths) = (strs("methods")?, strs("paths")?);
+                    r.allow_hosts.push(host.to_string());
+                    if !methods.is_empty() || !paths.is_empty() {
+                        limited.push((host.to_string(), methods, paths));
                     }
                 }
-                _ => return Err(bad("allow entries are host names".into())),
+                _ => return Err(bad("allow entries are host names or objects".into())),
             }
+        }
+        if !limited.is_empty() {
+            r.http_rules = http_rules_for(&r.allow_hosts, &limited).map_err(bad)?;
         }
         if default == "deny" && r.allow_hosts.is_empty() && p.preset.as_deref() != Some("open") {
             r.offline = true;
@@ -1091,6 +1381,7 @@ fn capabilities_for(backend: &str, offline: bool) -> Capabilities {
         // `GET .../pty` reaches the guest over SSH, which only the vz path has.
         pty: backend == "vz",
         confinement: false,
+        http_policy: false,
     }
 }
 
@@ -1161,6 +1452,15 @@ async fn create_session(
     }
     let policy = compile_policy(body.policy)?;
     let budget = validate_budget(body.budget)?;
+    if budget
+        .as_ref()
+        .is_some_and(|b| b.max_workspace_bytes.is_some())
+        && body.workspace.is_none()
+    {
+        return Err(bad(
+            "budget.max_workspace_bytes needs a workspace to measure",
+        ));
+    }
 
     let tenant = caller_tenant(&token_tenant);
     let want_volumes = body
@@ -1438,6 +1738,35 @@ async fn create_session(
         }
         session.capabilities.confinement = enforced;
     }
+    if !session.policy.http_rules.is_empty() {
+        // The sandbox must be up for its guest address to be known.
+        let started = m.ensure_running_for_request(rec.id).await;
+        let applied = match started {
+            Ok(_) => m
+                .set_http_policy(rec.id, &session.policy.http_rules)
+                .await
+                .map_err(|e| format!("{e:#}")),
+            Err(e) => Err(format!("the sandbox did not start: {e:#}")),
+        };
+        match applied {
+            Ok(()) => session.capabilities.http_policy = true,
+            Err(why) => {
+                record(&m, id, "policy.http_unenforced", json!({"reason": why}));
+                if session.policy.network_enforcement.as_deref() != Some("best-effort") {
+                    let _ = m.delete(rec.id).await;
+                    let _ = std::fs::remove_file(session_path(&m, id));
+                    m.clear_http_policy(rec.id);
+                    return Err(ApiError {
+                        status: StatusCode::BAD_REQUEST,
+                        message: format!(
+                            "{why}. Set network.enforcement to best-effort to create the session \
+                             with the host allow-list only"
+                        ),
+                    });
+                }
+            }
+        }
+    }
     save(&m, &mut session).await?;
     Ok((StatusCode::CREATED, Json(json!(session))))
 }
@@ -1481,6 +1810,9 @@ async fn get_session(
     reconcile(&m, &mut s, true).await;
     let mut out = json!(s);
     out["usage"] = json!(usage_read(&m, id).await);
+    if let Some(op) = interrupted_op(&m, id) {
+        out["interrupted_op"] = op;
+    }
     Ok(Json(out))
 }
 
@@ -1492,7 +1824,7 @@ async fn delete_session(
     headers: axum::http::HeaderMap,
 ) -> ApiResult<StatusCode> {
     require_admin(role)?;
-    let _gate = begin_lifecycle(id, "delete")?;
+    let _gate = begin_lifecycle(id, "delete")?.mark(&m, "delete");
     let mut s = load(&m, id, &caller_tenant(&token_tenant)).await?;
     check_if_match(&headers, &s)?;
     if s.state != "deleted" {
@@ -1504,12 +1836,111 @@ async fn delete_session(
         save(&m, &mut s).await?;
         record(&m, id, "session.delete", json!({}));
     }
-    agent_session_auth::purge(&m.cfg.state_dir, id).await;
-    let _ = m.revoke_grant(s.sandbox_id, None).await;
-    let _ = tokio::fs::remove_file(job_meta_path(&m, id)).await;
-    let _ = tokio::fs::remove_file(usage_path(&m, id)).await;
-    approvals::remove(&m.cfg.state_dir, id).await;
+    session_cleanup(&m, &s).await;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Removes everything a finished session leaves besides its record and ledger: tokens, grants,
+/// HTTP rules, previews, approvals, job metadata and usage. Safe to run again.
+async fn session_cleanup(m: &VmManager, s: &Session) {
+    agent_session_auth::purge(&m.cfg.state_dir, s.id).await;
+    let _ = m.revoke_grant(s.sandbox_id, None).await;
+    // The in-memory broker store, by sandbox id: this also covers a sandbox the manager no longer
+    // knows (`revoke_grant` looks it up first).
+    fluxvm_core::grants::global().remove_sandbox(&s.sandbox_id.to_string());
+    let _ = tokio::fs::remove_file(job_meta_path(m, s.id)).await;
+    let _ = tokio::fs::remove_file(usage_path(m, s.id)).await;
+    approvals::remove(&m.cfg.state_dir, s.id).await;
+    m.clear_http_policy(s.sandbox_id);
+    if let Ok(mut rd) = tokio::fs::read_dir(previews_dir(m)).await {
+        while let Ok(Some(e)) = rd.next_entry().await {
+            let Ok(b) = tokio::fs::read(e.path()).await else {
+                continue;
+            };
+            if serde_json::from_slice::<Preview>(&b).is_ok_and(|p| p.session == s.id) {
+                let _ = tokio::fs::remove_file(e.path()).await;
+            }
+        }
+    }
+}
+
+/// How often the sweeper looks, and how long after start it first does.
+const SWEEP_EVERY: std::time::Duration = std::time::Duration::from_secs(60);
+const SWEEP_FIRST: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// One pass: an expired session is marked `expired` (it is otherwise only noticed when someone
+/// reads it) and every ended session's side files are removed. Returns how many sessions it
+/// cleaned.
+pub(crate) async fn sweep_sessions(m: &VmManager) -> usize {
+    let mut cleaned = 0;
+    let Ok(mut rd) = tokio::fs::read_dir(dir(m)).await else {
+        return 0;
+    };
+    while let Ok(Some(e)) = rd.next_entry().await {
+        let path = e.path();
+        if path.extension().and_then(|x| x.to_str()) != Some("json") {
+            continue;
+        }
+        let Ok(bytes) = tokio::fs::read(&path).await else {
+            continue;
+        };
+        let Ok(mut s) = serde_json::from_slice::<Session>(&bytes) else {
+            continue;
+        };
+        reconcile(m, &mut s, false).await;
+        if !matches!(s.state.as_str(), "expired" | "deleted") {
+            continue;
+        }
+        // Skip the work when nothing is left to remove.
+        let leftovers = job_meta_path(m, s.id).exists()
+            || usage_path(m, s.id).exists()
+            || m.cfg
+                .state_dir
+                .join("agent-session-tokens")
+                .join(format!("{}.json", s.id))
+                .exists()
+            || m.cfg
+                .state_dir
+                .join("agent-session-approvals")
+                .join(format!("{}.json", s.id))
+                .exists()
+            || m.http_policy_status(s.sandbox_id).0
+            || !fluxvm_core::grants::global()
+                .list(&s.sandbox_id.to_string(), Utc::now())
+                .is_empty();
+        if leftovers {
+            session_cleanup(m, &s).await;
+            record(m, s.id, "session.cleanup", json!({"state": s.state}));
+            cleaned += 1;
+        }
+    }
+    cleaned
+}
+
+/// Starts the sweeper once per process. Like the history sampler it does nothing without a Tokio
+/// runtime and holds only a weak reference to the manager.
+pub(crate) fn start_sweeper(manager: &Arc<VmManager>) {
+    static STARTED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    let Ok(handle) = tokio::runtime::Handle::try_current() else {
+        return;
+    };
+    if STARTED.set(()).is_err() {
+        return;
+    }
+    let weak = Arc::downgrade(manager);
+    handle.spawn(async move {
+        let mut tick =
+            tokio::time::interval_at(tokio::time::Instant::now() + SWEEP_FIRST, SWEEP_EVERY);
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            tick.tick().await;
+            let Some(m) = weak.upgrade() else { return };
+            let n = sweep_sessions(&m).await;
+            if n > 0 {
+                tracing::info!(sessions = n, "agent sessions: swept ended sessions");
+            }
+        }
+    });
 }
 
 // ---------------------------------------------------------------------------------------
@@ -1728,6 +2159,21 @@ async fn revoke_token(
     }
     record(&m, id, "token.revoke", json!({"token": token}));
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Refuses work in a session whose HTTP rules are not applied to its sandbox's traffic.
+fn egress_bound(s: &Session) -> ApiResult<()> {
+    if s.policy.http_unbound {
+        return Err(ApiError {
+            status: StatusCode::CONFLICT,
+            message: format!(
+                "session {}'s HTTP policy is not bound to its sandbox's address (the address is \
+                 in use by another sandbox's rules); delete the session and create it again",
+                s.id
+            ),
+        });
+    }
+    Ok(())
 }
 
 fn running(s: &Session) -> ApiResult<()> {
@@ -2000,6 +2446,7 @@ async fn exec_session(
     let mut work = Some(begin_work(id)?);
     let s = load(&m, id, &caller_tenant(&token_tenant)).await?;
     running(&s)?;
+    egress_bound(&s)?;
     if body.command.trim().is_empty() {
         return Err(ApiError {
             status: StatusCode::BAD_REQUEST,
@@ -2031,6 +2478,7 @@ async fn exec_session(
         AskGate::Required(a) => return Ok(approval_required(&a)),
     }
     m.ensure_running_for_request(s.sandbox_id).await?;
+    budget_check_workspace(&m, &s).await?;
     let left = budget_start_exec(&m, &s).await?;
     // A command never gets more time than the budget has left.
     let timeout = match (body.timeout_seconds, left) {
@@ -2049,7 +2497,11 @@ async fn exec_session(
         .await;
     budget_finish_exec(&m, id, started.elapsed().as_millis() as u64).await;
     let res = res?;
-    let out = json!(res);
+    let mut out = json!(res);
+    let truncated = match s.budget.as_ref().and_then(|b| b.max_output_bytes) {
+        Some(cap) => cap_output(&mut out, cap as usize),
+        None => false,
+    };
     record(
         &m,
         id,
@@ -2058,6 +2510,7 @@ async fn exec_session(
             "command": body.command,
             "exit_code": out["exit_code"],
             "duration_ms": started.elapsed().as_millis() as u64,
+            "output_truncated": truncated,
         }),
     );
     Ok((StatusCode::OK, Json(out)))
@@ -2082,7 +2535,7 @@ async fn checkpoint(
     body: Option<Json<CheckpointBody>>,
 ) -> ApiResult<Json<Value>> {
     authorize(role, &scope, id, Op::Checkpoint)?;
-    let _gate = begin_lifecycle(id, "checkpoint")?;
+    let _gate = begin_lifecycle(id, "checkpoint")?.mark(&m, "checkpoint");
     let mut s = load(&m, id, &caller_tenant(&token_tenant)).await?;
     check_if_match(&headers, &s)?;
     running(&s)?;
@@ -2131,7 +2584,7 @@ async fn restore(
     Json(body): Json<RestoreBody>,
 ) -> ApiResult<Json<Value>> {
     require_admin(role)?;
-    let _gate = begin_lifecycle(id, "restore")?;
+    let _gate = begin_lifecycle(id, "restore")?.mark(&m, "restore");
     let s = load(&m, id, &caller_tenant(&token_tenant)).await?;
     check_if_match(&headers, &s)?;
     running(&s)?;
@@ -2155,9 +2608,34 @@ async fn restore(
             false
         }
     };
-    Ok(Json(
-        json!({"restored": body.tag, "vm": vm, "grants_rebound": grants_rebound}),
-    ))
+    // The same for the session's HTTP rules: if the new address belongs to another sandbox's
+    // rules, this sandbox's traffic is no longer attributed to them, so the session stops
+    // taking exec and jobs rather than running with a policy that is not applied.
+    let mut http_bound = None;
+    if !s.policy.http_rules.is_empty() {
+        let unbound = match m.rebind_http_policy(s.sandbox_id).await {
+            Ok(_) => false,
+            Err(e) => {
+                record(
+                    &m,
+                    id,
+                    "http_policy.unbound",
+                    json!({"reason": format!("{e:#}")}),
+                );
+                true
+            }
+        };
+        if unbound != s.policy.http_unbound {
+            let mut cur = s.clone();
+            cur.policy.http_unbound = unbound;
+            save(&m, &mut cur).await?;
+        }
+        http_bound = Some(!unbound);
+    }
+    Ok(Json(json!({
+        "restored": body.tag, "vm": vm, "grants_rebound": grants_rebound,
+        "http_policy_bound": http_bound,
+    })))
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -2180,7 +2658,7 @@ async fn fork(
     body: Option<Json<ForkBody>>,
 ) -> ApiResult<(StatusCode, Json<Value>)> {
     require_admin(role)?;
-    let _gate = begin_lifecycle(id, "fork")?;
+    let _gate = begin_lifecycle(id, "fork")?.mark(&m, "fork");
     let mut s = load(&m, id, &caller_tenant(&token_tenant)).await?;
     check_if_match(&headers, &s)?;
     running(&s)?;
@@ -2270,6 +2748,19 @@ async fn fork(
             budget: child_budget.clone(),
             revision: 0,
         };
+        if !cs.policy.http_rules.is_empty() {
+            // A child is a new sandbox with its own address; the rules are installed for it, or
+            // it is marked unbound and refuses exec and jobs.
+            if let Err(e) = m.set_http_policy(child.id, &cs.policy.http_rules).await {
+                record(
+                    &m,
+                    cid,
+                    "http_policy.unbound",
+                    json!({"reason": format!("{e:#}")}),
+                );
+                cs.policy.http_unbound = true;
+            }
+        }
         let seeded = match &seed {
             Some((path, mf)) => m
                 .sandbox_baseline_seed(child.id, vec![path.clone()], mf.clone())
@@ -3393,6 +3884,7 @@ async fn pty_ticket(
     require_admin(role)?;
     let s = load(&m, id, &caller_tenant(&token_tenant)).await?;
     running(&s)?;
+    egress_bound(&s)?;
     check_pty_allowed(&s)?;
     let ticket = mint_pty_ticket(id).ok_or(ApiError {
         status: StatusCode::TOO_MANY_REQUESTS,
@@ -3987,6 +4479,7 @@ async fn job_start(
     let mut work = Some(begin_work(id)?);
     let s = load(&m, id, &caller_tenant(&token_tenant)).await?;
     running(&s)?;
+    egress_bound(&s)?;
     if body.command.trim().is_empty() {
         return Err(ApiError {
             status: StatusCode::BAD_REQUEST,
@@ -4032,9 +4525,13 @@ async fn job_start(
         }
         _ => 0,
     };
+    let job_ms = match &s.budget {
+        Some(b) if b.max_compute_seconds.is_some() => job_compute_ms(&m, id).await,
+        _ => 0,
+    };
     usage_update(&m, id, |u| {
         if let Some(b) = &s.budget {
-            b.check_job(u, running_jobs)?;
+            b.check_job(u, running_jobs, job_ms)?;
         }
         u.jobs += 1;
         Ok(())
@@ -4047,7 +4544,13 @@ async fn job_start(
             message: format!("max_output_bytes must be 1-{JOB_MAX_OUTPUT}"),
         });
     }
+    // The session's output budget caps what a job retains.
+    let max_output = match s.budget.as_ref().and_then(|b| b.max_output_bytes) {
+        Some(cap) => max_output.min(cap),
+        None => max_output,
+    };
     m.ensure_running_for_request(s.sandbox_id).await?;
+    budget_check_workspace(&m, &s).await?;
     let job = Uuid::new_v4();
     if m.guest_jobs_supported(s.sandbox_id).await {
         let started = sup_call(
@@ -5419,10 +5922,10 @@ mod tests {
     fn what_is_not_supported_is_refused_not_ignored() {
         assert!(
             compile_policy(Some(pol(
-                json!({"network": {"allow": [{"host": "a.b", "methods": ["GET"]}]}})
+                json!({"network": {"allow": [{"host": "a.b", "verbs": ["GET"]}]}})
             )))
             .is_err(),
-            "method/path rules must be refused until they are enforced"
+            "an unknown allow key must be refused, not ignored"
         );
         assert!(compile_policy(Some(pol(json!({"preset": "nope"})))).is_err());
         assert!(
@@ -5504,33 +6007,42 @@ mod tests {
             max_jobs: Some(2),
             max_concurrent_jobs: Some(1),
             max_children: Some(4),
+            ..Default::default()
         };
         let mut u = Usage::default();
         // Fresh: 10 s left for the first command.
-        assert_eq!(b.check_exec(&u).unwrap(), Some(10));
+        assert_eq!(b.check_exec(&u, 0).unwrap(), Some(10));
         u.execs = 2;
         u.exec_ms = 7_500;
         assert_eq!(
-            b.check_exec(&u).unwrap(),
+            b.check_exec(&u, 0).unwrap(),
             Some(2),
             "partial seconds round up as used"
         );
         u.execs = 3;
-        assert_eq!(b.check_exec(&u).unwrap_err().status, StatusCode::FORBIDDEN);
+        assert_eq!(
+            b.check_exec(&u, 0).unwrap_err().status,
+            StatusCode::FORBIDDEN
+        );
         u.execs = 1;
         u.exec_ms = 10_000;
-        assert!(b.check_exec(&u).unwrap_err().message.contains("exec time"));
+        assert!(
+            b.check_exec(&u, 0)
+                .unwrap_err()
+                .message
+                .contains("exec time")
+        );
         // Jobs: concurrency and total are separate limits.
         let mut u = Usage::default();
-        assert!(b.check_job(&u, 0).is_ok());
+        assert!(b.check_job(&u, 0, 0).is_ok());
         assert!(
-            b.check_job(&u, 1)
+            b.check_job(&u, 1, 0)
                 .unwrap_err()
                 .message
                 .contains("concurrent")
         );
         u.jobs = 2;
-        assert!(b.check_job(&u, 0).is_err());
+        assert!(b.check_job(&u, 0, 0).is_err());
         // Forks: the whole request must fit.
         let u = Usage {
             children: 3,
@@ -5539,7 +6051,7 @@ mod tests {
         assert!(b.check_fork(&u, 1).is_ok());
         assert!(b.check_fork(&u, 2).is_err());
         // No limits means no refusals.
-        assert_eq!(Budget::default().check_exec(&u).unwrap(), None);
+        assert_eq!(Budget::default().check_exec(&u, 0).unwrap(), None);
         // A child starts with the remainder, never with zero (zero would read as "refused" and
         // zero is not a valid limit), and the concurrency cap is inherited as is.
         let used = Usage {
@@ -5547,6 +6059,7 @@ mod tests {
             exec_ms: 9_001,
             jobs: 1,
             children: 2,
+            workspace_bytes: None,
         };
         let r = b.remaining(&used);
         assert_eq!(r.max_execs, Some(1));
@@ -5567,6 +6080,18 @@ mod tests {
             },
             Budget {
                 max_jobs: Some(20_000_000),
+                ..Default::default()
+            },
+            Budget {
+                max_output_bytes: Some(0),
+                ..Default::default()
+            },
+            Budget {
+                max_workspace_bytes: Some(u64::MAX),
+                ..Default::default()
+            },
+            Budget {
+                max_compute_seconds: Some(0),
                 ..Default::default()
             },
         ] {
@@ -5695,6 +6220,93 @@ mod tests {
             check_if_match(&h("x"), &s).unwrap_err().status,
             StatusCode::BAD_REQUEST
         );
+    }
+
+    #[test]
+    fn network_allow_entries_can_limit_methods_and_paths() {
+        let r = compile_policy(Some(pol(json!({
+            "network": {"allow": [
+                "pypi.org",
+                {"host": "github.com", "methods": ["get", "HEAD"], "paths": ["/org/*"]},
+                {"host": "api.example.com"},
+            ]}
+        }))))
+        .unwrap();
+        assert_eq!(
+            r.allow_hosts,
+            vec!["api.example.com", "github.com", "pypi.org"]
+        );
+        // Unlimited hosts get a blanket rule (the proxy denies what no allow rule matches), the
+        // limited one only its own.
+        for want in [
+            "allow * pypi.org",
+            "allow * *.pypi.org",
+            "allow * api.example.com",
+            "allow GET github.com/org/*",
+            "allow HEAD *.github.com/org/*",
+        ] {
+            assert!(
+                r.http_rules.contains(&want.to_string()),
+                "{want}: {:?}",
+                r.http_rules
+            );
+        }
+        assert!(!r.http_rules.iter().any(|x| x == "allow * github.com"));
+        // Plain host lists compile no HTTP rules at all.
+        let plain =
+            compile_policy(Some(pol(json!({"network": {"allow": ["a.example"]}})))).unwrap();
+        assert!(plain.http_rules.is_empty());
+        // Bad entries are refused with a reason.
+        for bad in [
+            json!({"network": {"allow": [{"host": "x.io", "methods": ["G ET"]}]}}),
+            json!({"network": {"allow": [{"host": "x.io", "paths": ["no-slash"]}]}}),
+            json!({"network": {"allow": [{"host": "x.io", "paths": ["/a/../b"]}]}}),
+            json!({"network": {"allow": [{"host": "x.io", "verbs": ["GET"]}]}}),
+            json!({"network": {"allow": [{"host": "x.io", "methods": "GET"}]}}),
+            json!({"network": {"allow": [{"methods": ["GET"]}]}}),
+            json!({"network": {"enforcement": "maybe"}}),
+        ] {
+            assert!(compile_policy(Some(pol(bad.clone()))).is_err(), "{bad}");
+        }
+        let be = compile_policy(Some(pol(json!({"network": {
+            "allow": [{"host": "x.io", "methods": ["GET"]}], "enforcement": "best-effort"}}))))
+        .unwrap();
+        assert_eq!(be.network_enforcement.as_deref(), Some("best-effort"));
+    }
+
+    #[test]
+    fn output_is_cut_per_stream_on_a_character_boundary() {
+        let mut out = json!({"exit_code": 0, "stdout": "héllo wörld", "stderr": "ok"});
+        // 2 bytes land inside "é": the cut backs up to the boundary before it.
+        assert!(cap_output(&mut out, 2));
+        assert_eq!(out["stdout"], "h");
+        assert_eq!(out["stdout_dropped_bytes"], 12);
+        assert_eq!(out["stderr"], "ok");
+        assert_eq!(out["output_truncated"], true);
+        let mut small = json!({"stdout": "ab", "stderr": ""});
+        assert!(!cap_output(&mut small, 2));
+        assert!(small.get("output_truncated").is_none());
+    }
+
+    #[test]
+    fn compute_budget_counts_exec_and_job_time() {
+        let b = Budget {
+            max_compute_seconds: Some(100),
+            max_exec_seconds: Some(500),
+            ..Default::default()
+        };
+        let u = Usage {
+            exec_ms: 30_000,
+            ..Default::default()
+        };
+        // 30 s of exec + 50 s of jobs: 20 s left, and that is the most one command may run.
+        assert_eq!(b.check_exec(&u, 50_000).unwrap(), Some(20));
+        assert!(b.check_exec(&u, 70_000).is_err());
+        assert!(b.check_job(&u, 0, 70_000).is_err());
+        assert!(b.check_job(&u, 0, 10_000).is_ok());
+        // A child starts with what is left of the parent's compute.
+        assert_eq!(b.remaining(&u).max_compute_seconds, Some(70));
+        assert_eq!(Budget::default().check_exec(&u, 1).unwrap(), None);
     }
 
     #[test]

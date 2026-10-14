@@ -409,6 +409,7 @@ fn require_admin(role: Role) -> ApiResult<()> {
 
 pub fn router(manager: Arc<VmManager>) -> Router {
     fluxvm_scheduler::history::start_sampler(&manager);
+    agent_sessions::start_sweeper(&manager);
     let oidc = build_oidc(&manager.cfg.auth);
     let mut router = Router::new()
         .route("/healthz", get(|| async { Json(json!({"ok": true})) }))
@@ -7305,6 +7306,78 @@ mod tests {
         }
 
         #[tokio::test]
+        async fn the_sweeper_expires_sessions_and_removes_what_they_left() {
+            let m = procbox_manager(tenant_tokens(), false);
+            let id = seed_session(&m, Some("acme"), "vz", "running");
+            let live = seed_session(&m, Some("acme"), "vz", "running");
+            let path = m
+                .cfg
+                .state_dir
+                .join("agent-sessions")
+                .join(format!("{id}.json"));
+            let mut rec: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            rec["expires_at"] = json!(chrono::Utc::now() - chrono::Duration::seconds(5));
+            std::fs::write(&path, rec.to_string()).unwrap();
+            // Side files the session left, for both.
+            let side = |kind: &str, sid: uuid::Uuid| {
+                let d = m.cfg.state_dir.join(kind);
+                std::fs::create_dir_all(&d).unwrap();
+                let p = d.join(format!("{sid}.json"));
+                std::fs::write(&p, "[]").unwrap();
+                p
+            };
+            let (a1, a2) = (
+                side("agent-session-approvals", id),
+                side("agent-session-jobs", id),
+            );
+            let b1 = side("agent-session-approvals", live);
+            let swept = agent_sessions::sweep_sessions(&m).await;
+            assert_eq!(swept, 1);
+            assert!(
+                !a1.exists() && !a2.exists(),
+                "the expired session's files go"
+            );
+            assert!(b1.exists(), "a live session keeps its files");
+            // It is now persisted as expired, with a ledger line, and a second pass has no work.
+            let on_disk = std::fs::read_to_string(&path).unwrap();
+            assert!(on_disk.contains(r#""state": "expired""#), "{on_disk}");
+            assert_eq!(agent_sessions::sweep_sessions(&m).await, 0);
+            let app = router(m);
+            let (_, ev) = call(
+                app,
+                "GET",
+                &format!("/v1/agents/sessions/{id}/events"),
+                "acme",
+                None,
+            )
+            .await;
+            assert!(ev.contains("session.cleanup"), "{ev}");
+        }
+
+        #[tokio::test]
+        async fn an_operation_a_dead_daemon_left_behind_is_reported_once() {
+            let m = procbox_manager(tenant_tokens(), false);
+            let id = seed_session(&m, Some("acme"), "vz", "running");
+            let d = m.cfg.state_dir.join("agent-session-ops");
+            std::fs::create_dir_all(&d).unwrap();
+            std::fs::write(
+                d.join(format!("{id}.json")),
+                r#"{"op":"restore","started_at":"2026-01-01T00:00:00Z","reported":false}"#,
+            )
+            .unwrap();
+            let app = router(m);
+            let uri = format!("/v1/agents/sessions/{id}");
+            for _ in 0..2 {
+                let (st, b) = call(app.clone(), "GET", &uri, "acme", None).await;
+                assert_eq!(st, StatusCode::OK, "{b}");
+                assert!(b.contains(r#""interrupted_op":{"op":"restore""#), "{b}");
+            }
+            let (_, ev) = call(app, "GET", &format!("{uri}/events"), "acme", None).await;
+            assert_eq!(ev.matches("lifecycle.interrupted").count(), 1, "{ev}");
+        }
+
+        #[tokio::test]
         async fn an_expired_session_is_persisted_as_expired_and_refuses_work() {
             let m = procbox_manager(tenant_tokens(), false);
             let id = seed_session(&m, Some("acme"), "vz", "running");
@@ -8142,7 +8215,8 @@ for (const a of t.ACTIONS) if (a.run.action === "theme") assert(t.THEMES[a.run.n
             let app = router(m.clone());
             for body in [
                 r#"{"policy":{"preset":"nope"}}"#,
-                r#"{"policy":{"network":{"allow":[{"host":"a.b","methods":["GET"]}]}}}"#,
+                r#"{"policy":{"network":{"allow":[{"host":"a.b","verbs":["GET"]}]}}}"#,
+                r#"{"policy":{"network":{"allow":[{"host":"a.b","methods":["G ET"]}]}}}"#,
                 r#"{"workspace":{"git":"git@github.com:a/b.git"}}"#,
                 r#"{"workspace":{"path":"/a/../b"}}"#,
                 r#"{"workspace":{"mode":"overlay"}}"#,

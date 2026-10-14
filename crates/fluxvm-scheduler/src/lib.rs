@@ -35,6 +35,7 @@ pub mod fork;
 pub mod fork_plan;
 pub mod grants;
 pub mod guest_exec;
+pub mod http_policy;
 pub mod hibernate;
 pub mod history;
 pub mod idempotency;

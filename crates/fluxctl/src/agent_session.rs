@@ -83,6 +83,15 @@ pub enum AgentCommand {
         /// Budget: most fork children created. Children start with what is left of the others.
         #[arg(long)]
         max_children: Option<u64>,
+        /// Budget: seconds of command plus background-job wall time.
+        #[arg(long)]
+        max_compute_seconds: Option<u64>,
+        /// Budget: bytes of output kept per stream (commands return at most this; jobs retain it).
+        #[arg(long)]
+        max_output_bytes: Option<u64>,
+        /// Budget: workspace size in bytes, measured when a command or job starts.
+        #[arg(long)]
+        max_workspace_bytes: Option<u64>,
         #[arg(long)]
         ttl_seconds: Option<u64>,
     },
@@ -349,6 +358,13 @@ pub enum AgentCommand {
         value: Option<String>,
         #[arg(long)]
         ttl_seconds: Option<i64>,
+        /// Send the secret only with this HTTP method (repeatable), for example `--method GET`.
+        #[arg(long = "method")]
+        methods: Vec<String>,
+        /// Send the secret only to this path (repeatable; `*` matches any run), for example
+        /// `--path '/org/repo.git/*'`.
+        #[arg(long = "path")]
+        paths: Vec<String>,
     },
     /// List the session's live grants (never the secrets). REST: `GET .../grants`.
     Grants { id: Uuid },
@@ -768,6 +784,9 @@ pub async fn run(r: &Remote, cmd: AgentCommand) -> Result<()> {
             max_jobs,
             max_concurrent_jobs,
             max_children,
+            max_compute_seconds,
+            max_output_bytes,
+            max_workspace_bytes,
             ttl_seconds,
         } => {
             let mut body = create_body(
@@ -797,6 +816,9 @@ pub async fn run(r: &Remote, cmd: AgentCommand) -> Result<()> {
                     ("max_jobs", max_jobs),
                     ("max_concurrent_jobs", max_concurrent_jobs),
                     ("max_children", max_children),
+                    ("max_compute_seconds", max_compute_seconds),
+                    ("max_output_bytes", max_output_bytes),
+                    ("max_workspace_bytes", max_workspace_bytes),
                 ],
             );
             if require_ready && body.get("workspace").is_some() {
@@ -934,8 +956,16 @@ pub async fn run(r: &Remote, cmd: AgentCommand) -> Result<()> {
             hosts,
             value,
             ttl_seconds,
+            methods,
+            paths,
         } => {
             let mut body = json!({"secret_ref": secret_ref, "hosts": hosts});
+            if !methods.is_empty() {
+                body["methods"] = json!(methods);
+            }
+            if !paths.is_empty() {
+                body["paths"] = json!(paths);
+            }
             if let Some(v) = value {
                 body["value"] = json!(v);
             }
