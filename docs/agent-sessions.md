@@ -84,6 +84,67 @@ file modes are kept, symlinks and ownership are not. Ledgered as `promote` on th
 
 Not run on a live guest: the plan is unit-tested and the route's refusals are router-tested, the transfer itself is not.
 
+### Credential grants
+
+The sandbox credential broker (`/v1/sandboxes/{id}/grants`) through the session, so an agent can call an authenticated
+API without ever holding the secret: the egress proxy injects the `Authorization` header for the named hosts, for traffic
+from this sandbox's address only.
+
+```bash
+fluxctl agent grant <session> --secret-ref gh-token --host api.github.com --ttl-seconds 1800
+fluxctl agent grants <session>          # id, secret_ref, hosts, expiry, bound; never the value
+fluxctl agent ungrant <session> [<grant id>]
+```
+
+- Admin only, and a session token cannot grant itself one. The secret is the request's own `value`, or the daemon's
+  `FLUXVM_SECRET_<REF>`; the value is never ledgered or returned.
+- **Bounded by the session**: a grant's expiry is capped at the session's, and deleting the session revokes them.
+- **Not inherited**: a fork child starts with no grants. Grant each child you want to have one (a rollout of untrusted
+  candidates therefore cannot use the parent's credentials by default).
+- **Re-bound after restore**: a restored machine may come back on another guest address. `restore` re-binds the
+  session's grants to the current one, so the old address stops matching at once; if the new address is already bound to
+  a different sandbox's grants, this session's grants are **revoked** rather than left on a stale address
+  (`grants_rebound` in the restore response, `grant.revoked` in the ledger). A grant with an unknown address matches
+  nothing.
+- The existing broker's limits (a TTL cap, a grant count per sandbox) apply. Not run live: the broker and the re-bind
+  are unit-tested, not driven through the egress proxy from a guest.
+
+### Budgets
+
+`budget` at create limits what a session may consume; every field is optional.
+
+```json
+{"budget": {"max_execs": 200, "max_exec_seconds": 1800, "max_jobs": 10, "max_concurrent_jobs": 2, "max_children": 8}}
+```
+
+- `max_execs` commands through `exec`; `max_exec_seconds` the summed wall time of commands, and a command is also given
+  at most the seconds left as its timeout; `max_jobs` started and `max_concurrent_jobs` running at once;
+  `max_children` fork children (a rollout or `evaluate` spends it).
+- Exceeding one is `403` with the limit and the amount used. Usage (`execs`, `exec_ms`, `jobs`, `children`) is returned
+  as `usage` on `GET .../{id}`; it is kept in its own file, so counting never changes `revision`.
+- A fork child starts with what is **left** of its parent's budget, so forking cannot multiply it. A fork that fails
+  gives its children back.
+- `max_exec_seconds` is checked when a command starts; commands running in parallel can overshoot it. Jobs are not
+  counted against `max_exec_seconds`.
+
+Not done: token, output-size and storage budgets. Tokens need usage reports from the model client or gateway, which the
+daemon never sees; output and storage need guest-side accounting.
+
+### Evaluating candidates
+
+`fluxctl agent evaluate <session> --candidate 'cmd A' --candidate 'cmd B' --test 'make test'` (MCP
+`session_evaluate`) is "try several fixes in isolated machines, test each, review the winner, apply it":
+
+1. forks one child per candidate (same forkability rules as `fork`, and `max_children` is spent);
+2. in each child runs the candidate and then, if it exited 0, the test command, all children in parallel;
+3. scores each: **100** passed (the test exited 0, or with no `--test` the candidate did), **10** ran cleanly but failed
+   its test, **0** failed or never ran; ties go to the shortest, then the lowest index;
+4. deletes the losers (unless `--keep-all`) and prints every result with output tails and the `winner`.
+
+A winner exists only if something passed, so a failing result is never offered. Then
+`fluxctl agent promote <winner> --dry-run` and apply, as above. It is client-side orchestration over fork, exec and
+delete (like `rollout`); it needs a running session with a workspace baseline to be promotable.
+
 ### Lifecycle guarantees
 
 - **Conflicting operations are refused, not interleaved.** Checkpoint, restore, fork and delete take the session's
@@ -391,6 +452,34 @@ HTTP endpoint) will not work through the preview: rewrite the URL as above. What
 through the authenticated `/v1/sandboxes/{sandbox_id}/ws/{port}/{path}`. **Not run:** Playwright/Puppeteer clients,
 headful or GPU, a window/computer-use display (vz display and input exist separately), a prebuilt browser image
 (Chromium adds ~600 MB to the 2.8 GB stock root; the install above fits but leaves little free).
+
+### Image readiness
+
+`GET .../probe` (`fluxctl agent probe`, MCP `session_probe`) runs one short command in the guest, under the session's
+confinement, and reports which tools exist (`git`, `sha256sum`, `python3`, `node`/`npm`, `cargo`, `go`, `gcc`/`make`,
+`chromium`/`google-chrome`, `socat`, `playwright`, a Playwright browser cache) and what that makes possible:
+
+| `ready_for` | needs |
+|---|---|
+| `git` | `git` (workspace clones, the git verbs) |
+| `promote` | `sha256sum` (fork promotion compares content by sha256) |
+| `build_node` / `build_python` / `build_rust` / `build_c` | `node`+`npm` / `python3` / `cargo` / `make` and `gcc` or `cc` |
+| `browser_cdp` | a Chromium or Chrome |
+| `browser_cdp_through_preview` | a browser **and** `socat` (Chrome binds DevTools to 127.0.0.1; see Browser) |
+| `playwright` | a `playwright` CLI or a Playwright browser cache |
+
+`workspace.require_ready` at create (`fluxctl agent run --require-ready`) turns a workspace that did not initialize
+(directory not created, clone failed) from a session with a `workspace.note` into a `502` that removes the sandbox.
+
+**DevTools URLs through a preview are rewritten.** A preview of Chrome's DevTools port answers `/json`, `/json/list`,
+`/json/version` and `/json/new` with `webSocketDebuggerUrl` and `devtoolsFrontendUrl` pointing at the daemon and under
+`/preview/<token>` (`wss` when the request came with `X-Forwarded-Proto: https`), so a client that follows them, such as
+Playwright `connectOverCDP`, reaches the page. The rewrite is unit-tested on Chrome's document shape; **not run** against
+a live Chrome through a preview, nor with a real Playwright client.
+
+**No versioned coding or browser image is shipped by this change.** Building one needs an image pipeline and a registry,
+not an API; what is added is the probe to verify any image against these needs, and the readiness gate. Until an image
+exists, the Browser recipe above is how you get one.
 
 ### Ledger
 

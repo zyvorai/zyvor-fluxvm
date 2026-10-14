@@ -11,6 +11,8 @@
 //! * `GET    /v1/agents/sessions/{id}`               one session and its capabilities
 //! * `DELETE /v1/agents/sessions/{id}`               delete the session and its sandbox
 //! * `POST   /v1/agents/sessions/{id}/exec`          run a command
+//! * `GET    /v1/agents/sessions/{id}/probe`         which tools the guest image has (git, sha256sum, node, browsers ...)
+//! * `POST   /v1/agents/sessions/{id}/grants`        give the session a brokered credential for named hosts (also GET, DELETE)
 //! * `POST   /v1/agents/sessions/{id}/tokens`        mint an expiring token scoped to this session (also GET, DELETE .../{token})
 //! * `POST   /v1/agents/sessions/{id}/checkpoint`    snapshot under a tag
 //! * `POST   /v1/agents/sessions/{id}/restore`       restore a checkpoint
@@ -77,6 +79,15 @@ pub(crate) fn routes() -> Router<Arc<VmManager>> {
             get(get_session).delete(delete_session),
         )
         .route("/v1/agents/sessions/{id}/exec", post(exec_session))
+        .route("/v1/agents/sessions/{id}/probe", get(probe))
+        .route(
+            "/v1/agents/sessions/{id}/grants",
+            post(grant_create).get(grant_list).delete(grant_revoke_all),
+        )
+        .route(
+            "/v1/agents/sessions/{id}/grants/{grant}",
+            axum::routing::delete(grant_revoke),
+        )
         .route(
             "/v1/agents/sessions/{id}/tokens",
             post(mint_token).get(list_tokens),
@@ -309,6 +320,10 @@ struct Session {
     checkpoints: Vec<Checkpoint>,
     #[serde(default)]
     volumes: Vec<VolumeMount>,
+    /// Limits set at create; `None` means unlimited. Usage lives in its own file (see `Usage`),
+    /// so counting an exec never changes `revision`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    budget: Option<Budget>,
     /// Bumped by every save. `If-Match: <revision>` on checkpoint, restore, fork and delete
     /// makes the call fail with 412 when the session changed since the caller read it.
     #[serde(default)]
@@ -362,6 +377,194 @@ async fn save(m: &VmManager, s: &mut Session) -> ApiResult<()> {
         .await
         .map_err(anyhow::Error::from)?;
     Ok(())
+}
+
+// ---------------------------------------------------------------------------------------
+// Budgets: limits a session was created with, and the usage counted against them.
+
+/// Limits on what a session may consume. Every field is optional; a limit that is absent does
+/// not apply. A fork child gets the parent's *remaining* budget, so forking cannot multiply it.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+struct Budget {
+    /// Commands run through `exec`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    max_execs: Option<u64>,
+    /// Wall-clock seconds spent in `exec`, summed. Checked when a command starts (a command is
+    /// also given at most the seconds left as its timeout), so parallel commands can overshoot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    max_exec_seconds: Option<u64>,
+    /// Background jobs started.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    max_jobs: Option<u64>,
+    /// Background jobs running at once.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    max_concurrent_jobs: Option<u64>,
+    /// Fork children created.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    max_children: Option<u64>,
+}
+
+/// What a session has used. Counted when a command, job or fork is accepted.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+struct Usage {
+    execs: u64,
+    exec_ms: u64,
+    jobs: u64,
+    children: u64,
+}
+
+fn validate_budget(b: Option<Budget>) -> Result<Option<Budget>, ApiError> {
+    let Some(b) = b else { return Ok(None) };
+    for (name, v) in [
+        ("max_execs", b.max_execs),
+        ("max_exec_seconds", b.max_exec_seconds),
+        ("max_jobs", b.max_jobs),
+        ("max_concurrent_jobs", b.max_concurrent_jobs),
+        ("max_children", b.max_children),
+    ] {
+        if v == Some(0) || v.is_some_and(|n| n > 10_000_000) {
+            return Err(ApiError {
+                status: StatusCode::BAD_REQUEST,
+                message: format!("budget.{name} must be 1-10000000"),
+            });
+        }
+    }
+    Ok((b != Budget::default()).then_some(b))
+}
+
+fn budget_exhausted(what: &str, used: u64, limit: u64) -> ApiError {
+    ApiError {
+        status: StatusCode::FORBIDDEN,
+        message: format!("this session's {what} budget is used up ({used} of {limit})"),
+    }
+}
+
+impl Budget {
+    /// Whether one more `exec` may start under `u`, and the seconds it may run (`None`: no time
+    /// limit). Counts nothing.
+    fn check_exec(&self, u: &Usage) -> Result<Option<u64>, ApiError> {
+        if let Some(max) = self.max_execs
+            && u.execs >= max
+        {
+            return Err(budget_exhausted("exec", u.execs, max));
+        }
+        match self.max_exec_seconds {
+            Some(max) => {
+                let used = u.exec_ms.div_ceil(1000);
+                if used >= max {
+                    return Err(budget_exhausted("exec time (seconds)", used, max));
+                }
+                Ok(Some(max - used))
+            }
+            None => Ok(None),
+        }
+    }
+
+    fn check_job(&self, u: &Usage, running: u64) -> Result<(), ApiError> {
+        if let Some(max) = self.max_concurrent_jobs
+            && running >= max
+        {
+            return Err(budget_exhausted("concurrent job", running, max));
+        }
+        if let Some(max) = self.max_jobs
+            && u.jobs >= max
+        {
+            return Err(budget_exhausted("job", u.jobs, max));
+        }
+        Ok(())
+    }
+
+    fn check_fork(&self, u: &Usage, count: u64) -> Result<(), ApiError> {
+        if let Some(max) = self.max_children
+            && u.children + count > max
+        {
+            return Err(ApiError {
+                status: StatusCode::FORBIDDEN,
+                message: format!(
+                    "this session's fork budget is {max} children and {} are already used",
+                    u.children
+                ),
+            });
+        }
+        Ok(())
+    }
+
+    /// What is left after `u`: the budget a fork child starts with.
+    fn remaining(&self, u: &Usage) -> Budget {
+        let left = |max: Option<u64>, used: u64| max.map(|m| m.saturating_sub(used).max(1));
+        Budget {
+            max_execs: left(self.max_execs, u.execs),
+            max_exec_seconds: left(self.max_exec_seconds, u.exec_ms.div_ceil(1000)),
+            max_jobs: left(self.max_jobs, u.jobs),
+            max_concurrent_jobs: self.max_concurrent_jobs,
+            max_children: left(self.max_children, u.children),
+        }
+    }
+}
+
+static USAGE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+fn usage_path(m: &VmManager, id: Uuid) -> PathBuf {
+    m.cfg
+        .state_dir
+        .join("agent-session-usage")
+        .join(format!("{id}.json"))
+}
+
+async fn usage_read(m: &VmManager, id: Uuid) -> Usage {
+    match tokio::fs::read(usage_path(m, id)).await {
+        Ok(b) => serde_json::from_slice(&b).unwrap_or_default(),
+        Err(_) => Usage::default(),
+    }
+}
+
+/// Applies `f` to the usage under a lock; if it returns `Err` nothing is written. A write
+/// failure is an error too: a limit that cannot be counted must not be silently skipped.
+async fn usage_update<T>(
+    m: &VmManager,
+    id: Uuid,
+    f: impl FnOnce(&mut Usage) -> Result<T, ApiError>,
+) -> ApiResult<T> {
+    let _g = USAGE_LOCK.lock().await;
+    let mut u = usage_read(m, id).await;
+    let out = f(&mut u)?;
+    let path = usage_path(m, id);
+    if let Some(d) = path.parent() {
+        tokio::fs::create_dir_all(d)
+            .await
+            .map_err(anyhow::Error::from)?;
+    }
+    let tmp = path.with_extension("json.tmp");
+    tokio::fs::write(&tmp, serde_json::to_vec(&u).map_err(anyhow::Error::from)?)
+        .await
+        .map_err(anyhow::Error::from)?;
+    tokio::fs::rename(&tmp, &path)
+        .await
+        .map_err(anyhow::Error::from)?;
+    Ok(out)
+}
+
+/// Accepts one `exec` against the budget and counts it. Returns the most seconds the command may
+/// run (the seconds left), or `None` when the budget has no time limit.
+async fn budget_start_exec(m: &VmManager, s: &Session) -> ApiResult<Option<u64>> {
+    usage_update(m, s.id, |u| {
+        // No limits: still counted, so usage is reported for every session.
+        let left = match &s.budget {
+            Some(b) => b.check_exec(u)?,
+            None => None,
+        };
+        u.execs += 1;
+        Ok(left)
+    })
+    .await
+}
+
+async fn budget_finish_exec(m: &VmManager, id: Uuid, elapsed_ms: u64) {
+    let _ = usage_update(m, id, |u| {
+        u.exec_ms += elapsed_ms;
+        Ok(())
+    })
+    .await;
 }
 
 // ---------------------------------------------------------------------------------------
@@ -749,6 +952,8 @@ struct CreateBody {
     policy: Option<PolicyBody>,
     #[serde(default)]
     ttl_seconds: Option<u64>,
+    #[serde(default)]
+    budget: Option<Budget>,
 }
 
 fn default_agent() -> String {
@@ -766,6 +971,11 @@ struct WorkspaceBody {
     /// Guest path; default `/workspace`.
     #[serde(default)]
     path: Option<String>,
+    /// Fail the create (and remove the sandbox) unless the workspace directory exists and, when
+    /// `git` is given, the clone succeeded. Default: the session is made and `workspace.note`
+    /// says what went wrong.
+    #[serde(default)]
+    require_ready: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -929,6 +1139,7 @@ async fn create_session(
         return Err(bad("workspace.git must be an https:// URL"));
     }
     let policy = compile_policy(body.policy)?;
+    let budget = validate_budget(body.budget)?;
 
     let tenant = caller_tenant(&token_tenant);
     let want_volumes = body
@@ -1030,6 +1241,7 @@ async fn create_session(
         workspace: None,
         checkpoints: Vec::new(),
         volumes: Vec::new(),
+        budget: budget.clone(),
         revision: 0,
     };
     record(
@@ -1141,6 +1353,19 @@ async fn create_session(
                 json!({"git": url, "path": ws_path, "ok": state.cloned, "note": state.note}),
             );
         }
+        if w.require_ready && (state.note.is_some() || (w.git.is_some() && !state.cloned)) {
+            let why = state
+                .note
+                .clone()
+                .unwrap_or_else(|| "the workspace was not initialized".into());
+            // Nothing was promised yet: remove the sandbox and the record.
+            let _ = m.delete(rec.id).await;
+            let _ = std::fs::remove_file(session_path(&m, id));
+            return Err(ApiError {
+                status: StatusCode::BAD_GATEWAY,
+                message: format!("the workspace is not ready: {why}"),
+            });
+        }
         // A baseline makes `artifacts` report what the agent changed. Best effort.
         if m.sandbox_baseline(rec.id, vec![ws_path.clone()])
             .await
@@ -1233,7 +1458,9 @@ async fn get_session(
     authorize(role, &scope, id, Op::Read)?;
     let mut s = load(&m, id, &caller_tenant(&token_tenant)).await?;
     reconcile(&m, &mut s, true).await;
-    Ok(Json(json!(s)))
+    let mut out = json!(s);
+    out["usage"] = json!(usage_read(&m, id).await);
+    Ok(Json(out))
 }
 
 async fn delete_session(
@@ -1257,8 +1484,100 @@ async fn delete_session(
         record(&m, id, "session.delete", json!({}));
     }
     agent_session_auth::purge(&m.cfg.state_dir, id).await;
+    let _ = m.revoke_grant(s.sandbox_id, None).await;
     let _ = tokio::fs::remove_file(job_meta_path(&m, id)).await;
+    let _ = tokio::fs::remove_file(usage_path(&m, id)).await;
     Ok(StatusCode::NO_CONTENT)
+}
+
+// ---------------------------------------------------------------------------------------
+// Credential grants: the sandbox credential broker, through the session. The agent never holds
+// the secret: the egress proxy injects it for the named hosts, from this sandbox's address only.
+// A grant ends with the session and never outlives its expiry; a fork child starts with none.
+
+/// `POST .../grants`: same body as `POST /v1/sandboxes/{id}/grants`. Admin only (a scoped
+/// session token cannot grant itself credentials).
+async fn grant_create(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    token_tenant: Option<Extension<TokenTenant>>,
+    Path(id): Path<Uuid>,
+    Json(mut req): Json<fluxvm_core::grants::GrantRequest>,
+) -> ApiResult<(StatusCode, Json<Value>)> {
+    require_admin(role)?;
+    let s = load(&m, id, &caller_tenant(&token_tenant)).await?;
+    running(&s)?;
+    // A grant never outlives the session.
+    if let Some(end) = s.expires_at {
+        let now = Utc::now();
+        let wanted = match (req.expires_at, req.ttl_seconds) {
+            (Some(at), _) => at,
+            (None, Some(ttl)) if ttl > 0 => now + chrono::Duration::seconds(ttl),
+            _ => end,
+        };
+        let at = wanted.min(end);
+        if at <= now {
+            return Err(ApiError {
+                status: StatusCode::CONFLICT,
+                message: format!("agent session {id} has expired"),
+            });
+        }
+        req.expires_at = Some(at);
+        req.ttl_seconds = None;
+    }
+    m.ensure_running_for_request(s.sandbox_id).await?;
+    let info = m.add_grant(s.sandbox_id, req).await?;
+    // Names and hosts, never the value.
+    record(
+        &m,
+        id,
+        "grant.create",
+        json!({"grant": info.id, "secret_ref": info.secret_ref, "hosts": info.hosts,
+               "expires_at": info.expires_at, "bound": info.bound}),
+    );
+    Ok((StatusCode::CREATED, Json(json!(info))))
+}
+
+async fn grant_list(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    token_tenant: Option<Extension<TokenTenant>>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<Value>> {
+    require_admin(role)?;
+    let s = load(&m, id, &caller_tenant(&token_tenant)).await?;
+    Ok(Json(json!({"grants": m.list_grants(s.sandbox_id).await?})))
+}
+
+async fn grant_revoke_all(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    token_tenant: Option<Extension<TokenTenant>>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<Value>> {
+    require_admin(role)?;
+    let s = load(&m, id, &caller_tenant(&token_tenant)).await?;
+    let revoked = m.revoke_grant(s.sandbox_id, None).await?;
+    record(&m, id, "grant.revoke", json!({"grant": "all"}));
+    Ok(Json(json!({"revoked": revoked})))
+}
+
+async fn grant_revoke(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    token_tenant: Option<Extension<TokenTenant>>,
+    Path((id, grant)): Path<(Uuid, String)>,
+) -> ApiResult<Json<Value>> {
+    require_admin(role)?;
+    let s = load(&m, id, &caller_tenant(&token_tenant)).await?;
+    if !m.revoke_grant(s.sandbox_id, Some(&grant)).await? {
+        return Err(ApiError {
+            status: StatusCode::NOT_FOUND,
+            message: "grant not found".into(),
+        });
+    }
+    record(&m, id, "grant.revoke", json!({"grant": grant}));
+    Ok(Json(json!({"revoked": true})))
 }
 
 #[derive(Debug, Deserialize)]
@@ -1434,15 +1753,24 @@ async fn exec_session(
         return Err(e);
     }
     m.ensure_running_for_request(s.sandbox_id).await?;
+    let left = budget_start_exec(&m, &s).await?;
+    // A command never gets more time than the budget has left.
+    let timeout = match (body.timeout_seconds, left) {
+        (Some(t), Some(l)) => Some(t.min(l)),
+        (None, Some(l)) => Some(l.min(fluxvm_guest_protocol::DEFAULT_EXEC_TIMEOUT_SECS)),
+        (t, None) => t,
+    };
     let started = std::time::Instant::now();
     let res = m
         .exec_with_policy(
             s.sandbox_id,
             body.command.clone(),
-            body.timeout_seconds,
+            timeout,
             s.policy.exec.clone(),
         )
-        .await?;
+        .await;
+    budget_finish_exec(&m, id, started.elapsed().as_millis() as u64).await;
+    let res = res?;
     let out = json!(res);
     record(
         &m,
@@ -1540,7 +1868,18 @@ async fn restore(
         .await
         .map_err(change_error)?;
     record(&m, id, "restore", json!({"tag": body.tag}));
-    Ok(Json(json!({"restored": body.tag, "vm": vm})))
+    // The restored machine may have another guest address: re-bind its credential grants to it
+    // (or drop them if that address is taken), so a grant never follows someone else's traffic.
+    let grants_rebound = match m.rebind_grants(s.sandbox_id).await {
+        Ok(has) => has,
+        Err(e) => {
+            record(&m, id, "grant.revoked", json!({"reason": format!("{e:#}")}));
+            false
+        }
+    };
+    Ok(Json(
+        json!({"restored": body.tag, "vm": vm, "grants_rebound": grants_rebound}),
+    ))
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -1599,6 +1938,17 @@ async fn fork(
     // The parent's files at the fork instant are every child's starting point, so they become
     // each child's baseline: a child's `artifacts` and a later `promote` then see exactly what it
     // did since the fork. The lifecycle gate means nothing is running on the parent meanwhile.
+    // Children are counted against the parent's budget and start with what it has left.
+    let usage_now = usage_read(&m, id).await;
+    let child_budget = s.budget.as_ref().map(|b| b.remaining(&usage_now));
+    usage_update(&m, id, |u| {
+        if let Some(b) = &s.budget {
+            b.check_fork(u, count as u64)?;
+        }
+        u.children += count as u64;
+        Ok(())
+    })
+    .await?;
     let seed = match &s.workspace {
         Some(w) if w.baseline => m
             .sandbox_manifest(s.sandbox_id, vec![w.path.clone()])
@@ -1607,7 +1957,18 @@ async fn fork(
             .map(|mf| (w.path.clone(), mf)),
         _ => None,
     };
-    let report = m.fork_vm_spec(s.sandbox_id, spec, actor_name).await?;
+    let report = match m.fork_vm_spec(s.sandbox_id, spec, actor_name).await {
+        Ok(r) => r,
+        Err(e) => {
+            // Nothing was created, so nothing is spent.
+            let _ = usage_update(&m, id, |u| {
+                u.children = u.children.saturating_sub(count as u64);
+                Ok(())
+            })
+            .await;
+            return Err(e.into());
+        }
+    };
 
     let mut kids = Vec::new();
     for child in &report.children {
@@ -1628,6 +1989,7 @@ async fn fork(
             workspace: s.workspace.clone(),
             volumes: Vec::new(),
             checkpoints: Vec::new(),
+            budget: child_budget.clone(),
             revision: 0,
         };
         let seeded = match &seed {
@@ -2247,6 +2609,57 @@ async fn preview_path(
     preview_serve(m, token, path, req).await
 }
 
+/// Chrome's DevTools discovery endpoints (`/json`, `/json/list`, `/json/version`, `/json/new`).
+fn is_cdp_discovery_path(path: &str) -> bool {
+    let p = path.trim_matches('/');
+    p == "json" || p.starts_with("json/") && !p.starts_with("json/protocol")
+}
+
+/// Rewrites `webSocketDebuggerUrl` / `devtoolsFrontendUrl` in a DevTools discovery document
+/// (an object, or an array of them) so they point at `host` under `/preview/<token>`.
+fn rewrite_cdp_urls(v: &mut Value, host: &str, token: &str, secure: bool) {
+    match v {
+        Value::Array(a) => a
+            .iter_mut()
+            .for_each(|x| rewrite_cdp_urls(x, host, token, secure)),
+        Value::Object(o) => {
+            let prefix = format!("/preview/{token}");
+            if let Some(Value::String(s)) = o.get_mut("webSocketDebuggerUrl") {
+                // ws://10.0.0.5:9223/devtools/page/ID -> ws(s)://<host>/preview/<token>/devtools/page/ID
+                if let Some(path) = s
+                    .strip_prefix("ws://")
+                    .or_else(|| s.strip_prefix("wss://"))
+                    .and_then(|r| r.find('/').map(|i| r[i..].to_string()))
+                {
+                    let scheme = if secure { "wss" } else { "ws" };
+                    *s = format!("{scheme}://{host}{prefix}{path}");
+                }
+            }
+            if let Some(Value::String(s)) = o.get_mut("devtoolsFrontendUrl") {
+                // /devtools/inspector.html?ws=10.0.0.5:9223/devtools/page/ID
+                //   -> /preview/<token>/devtools/inspector.html?ws=<host>/preview/<token>/devtools/page/ID
+                let (path, query) = match s.split_once("?ws=") {
+                    Some((p, q)) => (p.to_string(), Some(q.to_string())),
+                    None => (s.clone(), None),
+                };
+                if path.starts_with('/') {
+                    let mut out = format!("{prefix}{path}");
+                    if let Some(q) = query {
+                        let tail = q.find('/').map(|i| q[i..].to_string()).unwrap_or_default();
+                        out.push_str(&format!("?ws={host}{prefix}{tail}"));
+                    }
+                    *s = out;
+                }
+            }
+            // Nested documents (none today) are walked too.
+            o.values_mut()
+                .filter(|x| x.is_array() || x.is_object())
+                .for_each(|x| rewrite_cdp_urls(x, host, token, secure));
+        }
+        _ => {}
+    }
+}
+
 async fn preview_serve(
     m: Arc<VmManager>,
     token: String,
@@ -2271,6 +2684,18 @@ async fn preview_serve(
     if !alive {
         return gone();
     }
+    // How the client reached this daemon, for rewriting DevTools URLs back to the preview.
+    let public_host = req
+        .headers()
+        .get(axum::http::header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+    let secure = req
+        .headers()
+        .get("x-forwarded-proto")
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.eq_ignore_ascii_case("https"));
+    let cdp_discovery = is_cdp_discovery_path(&path);
     let is_ws = req
         .headers()
         .get(axum::http::header::UPGRADE)
@@ -2287,6 +2712,37 @@ async fn preview_serve(
     } else {
         super::sandbox_proxy_inner(m, p.sandbox, p.port, path, req).await
     };
+    // Chrome DevTools discovery documents name the guest's own address and no preview prefix, so
+    // a client that follows `webSocketDebuggerUrl` (Playwright `connectOverCDP`) would go
+    // straight past the preview. Point those URLs back at it.
+    if cdp_discovery
+        && !is_ws
+        && resp.status() == StatusCode::OK
+        && let Some(host) = public_host
+        && resp
+            .headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|c| c.contains("json"))
+    {
+        let (mut parts, body) = resp.into_parts();
+        match axum::body::to_bytes(body, 8 * 1024 * 1024).await {
+            Ok(bytes) => {
+                let out = serde_json::from_slice::<Value>(&bytes)
+                    .ok()
+                    .map(|mut v| {
+                        rewrite_cdp_urls(&mut v, &host, &token, secure);
+                        serde_json::to_vec(&v).unwrap_or_else(|_| bytes.to_vec())
+                    })
+                    .unwrap_or_else(|| bytes.to_vec());
+                parts.headers.remove(axum::http::header::CONTENT_LENGTH);
+                resp = axum::response::Response::from_parts(parts, axum::body::Body::from(out));
+            }
+            Err(_) => {
+                return (StatusCode::BAD_GATEWAY, "DevTools response too large").into_response();
+            }
+        }
+    }
     // A preview is somebody else's app: never let a browser leak the token via Referer or cache it.
     let h = resp.headers_mut();
     h.insert(
@@ -2298,6 +2754,101 @@ async fn preview_serve(
         axum::http::HeaderValue::from_static("no-store"),
     );
     resp
+}
+
+// ---------------------------------------------------------------------------------------
+// Probe: what the guest image can do, so a caller finds out before it builds on it.
+
+const PROBE_TOOLS: &[&str] = &[
+    "git",
+    "sha256sum",
+    "python3",
+    "pip3",
+    "node",
+    "npm",
+    "npx",
+    "cargo",
+    "go",
+    "gcc",
+    "cc",
+    "make",
+    "curl",
+    "chromium",
+    "chromium-browser",
+    "google-chrome",
+    "playwright",
+    "socat",
+];
+
+fn probe_script() -> String {
+    let names = PROBE_TOOLS.join(" ");
+    format!(
+        "for t in {names}; do p=$(command -v \"$t\" 2>/dev/null) && echo \"$t=$p\"; done; \
+         d=\"${{PLAYWRIGHT_BROWSERS_PATH:-$HOME/.cache/ms-playwright}}\"; \
+         [ -d \"$d\" ] && echo \"playwright-browsers=$d\"; \
+         echo \"arch=$(uname -m)\"; echo \"kernel=$(uname -r)\"; true"
+    )
+}
+
+/// Turns the probe's `name=value` lines into the report. Pure.
+fn probe_report(stdout: &str) -> Value {
+    let mut found = serde_json::Map::new();
+    let mut info = serde_json::Map::new();
+    for line in stdout.lines() {
+        let Some((k, v)) = line.split_once('=') else {
+            continue;
+        };
+        let (k, v) = (k.trim(), v.trim());
+        if k == "arch" || k == "kernel" {
+            info.insert(k.into(), json!(v));
+        } else if PROBE_TOOLS.contains(&k) || k == "playwright-browsers" {
+            found.insert(k.into(), json!(v));
+        }
+    }
+    let has = |t: &str| found.contains_key(t);
+    let browser = has("chromium") || has("chromium-browser") || has("google-chrome");
+    json!({
+        "tools": found,
+        "system": info,
+        // What the session features need from the image.
+        "ready_for": {
+            "git": has("git"),
+            "promote": has("sha256sum"),
+            "build_node": has("node") && has("npm"),
+            "build_python": has("python3"),
+            "build_rust": has("cargo"),
+            "build_c": has("make") && (has("gcc") || has("cc")),
+            "browser_cdp": browser,
+            "browser_cdp_through_preview": browser && has("socat"),
+            "playwright": has("playwright") || has("playwright-browsers"),
+        },
+    })
+}
+
+/// `GET .../probe`: one short command in the guest (under the session's confinement, if any).
+async fn probe(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    scope: Option<Extension<SessionScope>>,
+    token_tenant: Option<Extension<TokenTenant>>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<Value>> {
+    authorize(role, &scope, id, Op::Read)?;
+    let s = load(&m, id, &caller_tenant(&token_tenant)).await?;
+    running(&s)?;
+    m.ensure_running_for_request(s.sandbox_id).await?;
+    let res = m
+        .exec_with_policy(
+            s.sandbox_id,
+            probe_script(),
+            Some(30),
+            s.policy.exec.clone(),
+        )
+        .await?;
+    let out = json!(res);
+    let mut report = probe_report(out["stdout"].as_str().unwrap_or(""));
+    report["session"] = json!(id);
+    Ok(Json(report))
 }
 
 // ---------------------------------------------------------------------------------------
@@ -3055,6 +3606,25 @@ async fn job_start(
         );
         return Err(e);
     }
+    let running_jobs = match s.budget.as_ref().and_then(|b| b.max_concurrent_jobs) {
+        Some(_) if m.ensure_running_for_request(s.sandbox_id).await.is_ok() => {
+            refresh_job_states(&m, &s).await;
+            job_meta_read(&m, id)
+                .await
+                .iter()
+                .filter(|j| j.exit_code.is_none())
+                .count() as u64
+        }
+        _ => 0,
+    };
+    usage_update(&m, id, |u| {
+        if let Some(b) = &s.budget {
+            b.check_job(u, running_jobs)?;
+        }
+        u.jobs += 1;
+        Ok(())
+    })
+    .await?;
     let max_output = body.max_output_bytes.unwrap_or(JOB_DEFAULT_MAX_OUTPUT);
     if max_output == 0 || max_output > JOB_MAX_OUTPUT {
         return Err(ApiError {
@@ -3161,6 +3731,40 @@ async fn job_read(
     })))
 }
 
+/// Reads the guest's job exit files in one exec and records each observed exit.
+async fn refresh_job_states(m: &VmManager, s: &Session) {
+    let Ok(res) = m
+        .exec_with_policy(
+            s.sandbox_id,
+            format!(
+                "cd {} 2>/dev/null && for f in *.exit; do [ -e \"$f\" ] && echo \"$f $(cat \"$f\")\"; done; true",
+                shell_quote(JOBS_DIR)
+            ),
+            Some(30),
+            None,
+        )
+        .await
+    else {
+        return;
+    };
+    let out = json!(res);
+    let exits: Vec<(Uuid, i64)> = out["stdout"]
+        .as_str()
+        .unwrap_or("")
+        .lines()
+        .filter_map(|l| {
+            let (f, code) = l.split_once(' ')?;
+            Some((
+                Uuid::parse_str(f.strip_suffix(".exit")?).ok()?,
+                code.trim().parse().ok()?,
+            ))
+        })
+        .collect();
+    for (job, code) in exits {
+        job_meta_exited(m, s.id, job, code).await;
+    }
+}
+
 /// `GET .../jobs`: every job the session started, with its state refreshed from the guest in one
 /// exec (the exit files), so it is right after a daemon restart too.
 async fn job_list(
@@ -3172,36 +3776,8 @@ async fn job_list(
 ) -> ApiResult<Json<Value>> {
     authorize(role, &scope, id, Op::Jobs)?;
     let s = load(&m, id, &caller_tenant(&token_tenant)).await?;
-    if s.state == "running"
-        && m.ensure_running_for_request(s.sandbox_id).await.is_ok()
-        && let Ok(res) = m
-            .exec_with_policy(
-                s.sandbox_id,
-                format!(
-                    "cd {} 2>/dev/null && for f in *.exit; do [ -e \"$f\" ] && echo \"$f $(cat \"$f\")\"; done; true",
-                    shell_quote(JOBS_DIR)
-                ),
-                Some(30),
-                None,
-            )
-            .await
-    {
-        let out = json!(res);
-        let exits: Vec<(Uuid, i64)> = out["stdout"]
-            .as_str()
-            .unwrap_or("")
-            .lines()
-            .filter_map(|l| {
-                let (f, code) = l.split_once(' ')?;
-                Some((
-                    Uuid::parse_str(f.strip_suffix(".exit")?).ok()?,
-                    code.trim().parse().ok()?,
-                ))
-            })
-            .collect();
-        for (job, code) in exits {
-            job_meta_exited(&m, id, job, code).await;
-        }
+    if s.state == "running" && m.ensure_running_for_request(s.sandbox_id).await.is_ok() {
+        refresh_job_states(&m, &s).await;
     }
     let items: Vec<Value> = job_meta_read(&m, id)
         .await
@@ -4170,8 +4746,161 @@ mod tests {
             workspace: None,
             checkpoints: Vec::new(),
             volumes: Vec::new(),
+            budget: None,
             revision: 0,
         }
+    }
+
+    #[test]
+    fn a_budget_is_checked_before_it_is_spent_and_a_child_gets_what_is_left() {
+        let b = Budget {
+            max_execs: Some(3),
+            max_exec_seconds: Some(10),
+            max_jobs: Some(2),
+            max_concurrent_jobs: Some(1),
+            max_children: Some(4),
+        };
+        let mut u = Usage::default();
+        // Fresh: 10 s left for the first command.
+        assert_eq!(b.check_exec(&u).unwrap(), Some(10));
+        u.execs = 2;
+        u.exec_ms = 7_500;
+        assert_eq!(
+            b.check_exec(&u).unwrap(),
+            Some(2),
+            "partial seconds round up as used"
+        );
+        u.execs = 3;
+        assert_eq!(b.check_exec(&u).unwrap_err().status, StatusCode::FORBIDDEN);
+        u.execs = 1;
+        u.exec_ms = 10_000;
+        assert!(b.check_exec(&u).unwrap_err().message.contains("exec time"));
+        // Jobs: concurrency and total are separate limits.
+        let mut u = Usage::default();
+        assert!(b.check_job(&u, 0).is_ok());
+        assert!(
+            b.check_job(&u, 1)
+                .unwrap_err()
+                .message
+                .contains("concurrent")
+        );
+        u.jobs = 2;
+        assert!(b.check_job(&u, 0).is_err());
+        // Forks: the whole request must fit.
+        let u = Usage {
+            children: 3,
+            ..Default::default()
+        };
+        assert!(b.check_fork(&u, 1).is_ok());
+        assert!(b.check_fork(&u, 2).is_err());
+        // No limits means no refusals.
+        assert_eq!(Budget::default().check_exec(&u).unwrap(), None);
+        // A child starts with the remainder, never with zero (zero would read as "refused" and
+        // zero is not a valid limit), and the concurrency cap is inherited as is.
+        let used = Usage {
+            execs: 3,
+            exec_ms: 9_001,
+            jobs: 1,
+            children: 2,
+        };
+        let r = b.remaining(&used);
+        assert_eq!(r.max_execs, Some(1));
+        assert_eq!(r.max_exec_seconds, Some(1));
+        assert_eq!(r.max_jobs, Some(1));
+        assert_eq!(r.max_concurrent_jobs, Some(1));
+        assert_eq!(r.max_children, Some(2));
+    }
+
+    #[test]
+    fn budget_inputs_are_validated() {
+        assert!(validate_budget(None).unwrap().is_none());
+        assert!(validate_budget(Some(Budget::default())).unwrap().is_none());
+        for bad in [
+            Budget {
+                max_execs: Some(0),
+                ..Default::default()
+            },
+            Budget {
+                max_jobs: Some(20_000_000),
+                ..Default::default()
+            },
+        ] {
+            assert!(validate_budget(Some(bad)).is_err());
+        }
+        let ok = validate_budget(Some(Budget {
+            max_children: Some(8),
+            ..Default::default()
+        }))
+        .unwrap();
+        assert_eq!(ok.unwrap().max_children, Some(8));
+    }
+
+    #[test]
+    fn devtools_discovery_urls_point_back_at_the_preview() {
+        assert!(is_cdp_discovery_path("json"));
+        assert!(is_cdp_discovery_path("json/"));
+        assert!(is_cdp_discovery_path("/json/list"));
+        assert!(is_cdp_discovery_path("json/version"));
+        assert!(!is_cdp_discovery_path("json/protocol"));
+        assert!(!is_cdp_discovery_path("jsonx"));
+        assert!(!is_cdp_discovery_path("devtools/page/1"));
+        // What Chrome returns when reached through the sandbox proxy.
+        let mut doc = json!([{
+            "id": "ABC", "title": "t", "type": "page",
+            "webSocketDebuggerUrl": "ws://192.168.64.5:9223/devtools/page/ABC",
+            "devtoolsFrontendUrl": "/devtools/inspector.html?ws=192.168.64.5:9223/devtools/page/ABC",
+        }]);
+        rewrite_cdp_urls(&mut doc, "daemon.example:8080", "tok123", false);
+        assert_eq!(
+            doc[0]["webSocketDebuggerUrl"],
+            "ws://daemon.example:8080/preview/tok123/devtools/page/ABC"
+        );
+        assert_eq!(
+            doc[0]["devtoolsFrontendUrl"],
+            "/preview/tok123/devtools/inspector.html?ws=daemon.example:8080/preview/tok123/devtools/page/ABC"
+        );
+        assert_eq!(doc[0]["title"], "t");
+        // /json/version is an object, and behind TLS the scheme is wss.
+        let mut v = json!({
+            "Browser": "Chrome/155",
+            "webSocketDebuggerUrl": "ws://127.0.0.1:9222/devtools/browser/XYZ",
+        });
+        rewrite_cdp_urls(&mut v, "h", "t", true);
+        assert_eq!(
+            v["webSocketDebuggerUrl"],
+            "wss://h/preview/t/devtools/browser/XYZ"
+        );
+        assert_eq!(v["Browser"], "Chrome/155");
+        // Anything else is left alone.
+        let mut other = json!({"webSocketDebuggerUrl": 5, "x": ["ws://a/b"]});
+        rewrite_cdp_urls(&mut other, "h", "t", false);
+        assert_eq!(other, json!({"webSocketDebuggerUrl": 5, "x": ["ws://a/b"]}));
+    }
+
+    #[test]
+    fn a_probe_report_says_what_each_feature_needs() {
+        let r = probe_report(
+            "git=/usr/bin/git\nsha256sum=/usr/bin/sha256sum\nchromium=/usr/bin/chromium\n\
+             socat=/usr/bin/socat\nnode=/usr/bin/node\narch=aarch64\nkernel=6.1\njunk=1\n",
+        );
+        assert_eq!(r["tools"]["git"], "/usr/bin/git");
+        assert!(r["tools"].get("junk").is_none());
+        assert_eq!(r["system"]["arch"], "aarch64");
+        let ready = &r["ready_for"];
+        assert_eq!(ready["git"], true);
+        assert_eq!(ready["promote"], true);
+        assert_eq!(ready["browser_cdp"], true);
+        assert_eq!(ready["browser_cdp_through_preview"], true);
+        // node without npm is not a Node toolchain; no compiler means no C builds.
+        assert_eq!(ready["build_node"], false);
+        assert_eq!(ready["build_c"], false);
+        assert_eq!(ready["playwright"], false);
+        // The script asks for every tool the report knows and nothing else.
+        let script = probe_script();
+        for t in PROBE_TOOLS {
+            assert!(script.contains(t), "{t}");
+        }
+        assert_eq!(probe_report("")["ready_for"]["promote"], false);
     }
 
     #[test]

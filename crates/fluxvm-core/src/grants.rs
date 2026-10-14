@@ -264,6 +264,37 @@ impl GrantStore {
         inner.sources.retain(|_, s| s != sandbox_id);
     }
 
+    /// Re-binds a sandbox's grants to its current guest address (after a restore or a move may
+    /// have changed it). The old address stops resolving to this sandbox at once. Returns
+    /// `Ok(true)` if the sandbox has grants, and refuses (`Err`) if the new address is already
+    /// bound to a *different* sandbox: a grant must never follow another machine's traffic.
+    /// With `None` (address unknown) the grants stay but no address resolves to them: fail closed.
+    pub fn rebind(&self, sandbox_id: &str, source_ip: Option<IpAddr>) -> Result<bool, GrantError> {
+        let mut inner = self.lock();
+        if let Some(ip) = source_ip
+            && inner.sources.get(&ip).is_some_and(|s| s != sandbox_id)
+        {
+            return Err(GrantError::Invalid(format!(
+                "address {ip} is bound to another sandbox's grants"
+            )));
+        }
+        inner.sources.retain(|_, s| s != sandbox_id);
+        let bound = source_ip.is_some();
+        let has = match inner.grants.get_mut(sandbox_id) {
+            Some(list) => {
+                for g in list.iter_mut() {
+                    g.info.bound = bound;
+                }
+                !list.is_empty()
+            }
+            None => false,
+        };
+        if let (Some(ip), true) = (source_ip, has) {
+            inner.sources.insert(ip, sandbox_id.to_string());
+        }
+        Ok(has)
+    }
+
     /// Live (unexpired) grants of a sandbox, without secrets.
     pub fn list(&self, sandbox_id: &str, now: DateTime<Utc>) -> Vec<GrantInfo> {
         self.lock()
@@ -347,6 +378,48 @@ mod tests {
 
     fn ip(s: &str) -> IpAddr {
         s.parse().unwrap()
+    }
+
+    #[test]
+    fn rebind_moves_the_binding_and_never_steals_another_sandboxs_address() {
+        let s = GrantStore::new();
+        let now = Utc::now();
+        s.add(
+            "a",
+            &req(&["x.io"]),
+            Secret::new("t"),
+            Some(ip("10.0.0.2")),
+            now,
+        )
+        .unwrap();
+        s.add(
+            "b",
+            &req(&["x.io"]),
+            Secret::new("u"),
+            Some(ip("10.0.0.3")),
+            now,
+        )
+        .unwrap();
+        // `a` comes back on a new address: the old one stops resolving, the new one does.
+        assert_eq!(s.rebind("a", Some(ip("10.0.0.9"))), Ok(true));
+        assert!(s.resolve(ip("10.0.0.2"), "x.io", now).is_none());
+        assert_eq!(
+            s.resolve(ip("10.0.0.9"), "x.io", now).unwrap().sandbox_id,
+            "a"
+        );
+        // `b`'s address is untouched, and `a` cannot be moved onto it.
+        assert!(s.rebind("a", Some(ip("10.0.0.3"))).is_err());
+        assert_eq!(
+            s.resolve(ip("10.0.0.3"), "x.io", now).unwrap().sandbox_id,
+            "b"
+        );
+        // Address unknown: grants are kept but resolve for nobody (fail closed).
+        assert_eq!(s.rebind("a", None), Ok(true));
+        assert!(s.resolve(ip("10.0.0.9"), "x.io", now).is_none());
+        assert!(!s.list("a", now)[0].bound);
+        // A sandbox with no grants is a no-op.
+        assert_eq!(s.rebind("nobody", Some(ip("10.0.0.50"))), Ok(false));
+        assert!(s.resolve(ip("10.0.0.50"), "x.io", now).is_none());
     }
 
     #[test]
