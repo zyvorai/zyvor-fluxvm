@@ -230,6 +230,15 @@ Verified by hand on an Apple M4 running macOS 27.2 with macOS 27.0.1 (26A434) as
   turning FileVault off there only matters if the template file itself needs to stay secret.
 - **First boot of a clone** is slow on a USB drive (about 5 minutes to SSH at 37 MB/s) and restarts sshd once, so retry SSH for a minute.
 
+### As an agent session
+
+`POST /v1/agents/sessions` with `runtime.template` names a template directory under `sandbox.templates_dir`
+(`<name>/spec.json` plus `disk.raw`, `hardware.bin`, `identity.bin`, `auxiliary.bin`). `scripts/macos-session-template.sh` builds
+one from the IPSW (install, provision, authorize the daemon's key, disable sleep and the screen lock, stop), and
+`scripts/vz-macos-session-live-test.sh` exercises it end to end. What a macOS session can and cannot do is the table in
+[agent-sessions-guide.md](agent-sessions-guide.md#22-a-macos-guest-as-a-session). **Implemented and unit-tested; the live
+script has not been run to completion yet** (see the status line in the PR that added it).
+
 ### Installing through the API
 
 `apple.install: true` installs from an IPSW as part of `POST /v1/vms` (run against a real 27.0.1 IPSW: install, `provision_*` and SSH

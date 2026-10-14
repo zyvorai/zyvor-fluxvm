@@ -108,6 +108,23 @@ image and `engine: ssh`. Build and register `agent-micro` as described in [agent
 `runtime.image: agent-micro` explicitly. To refuse the weaker engine instead of getting it, set `runtime.engine: "agent"`:
 the create returns 409 and removes the sandbox when the guest would run on SSH. Per-session `http_rules` on vz need the setup in [7.1](#71-limit-a-host-to-methods-and-paths).
 
+### 2.2 A macOS guest as a session
+
+`runtime.template: "<name>"` starts a session on a clone of a macOS template (`<templates_dir>/<name>/spec.json`, built by
+[`scripts/macos-session-template.sh`](../scripts/macos-session-template.sh) from an IPSW). It is the `ssh` engine with these
+differences, all reported in `capabilities` (`guest_os: "macos"`):
+
+| | macOS guest | Linux guest |
+|---|---|---|
+| exec, files, jobs (shell scripts), PTY, screenshot/input | yes | yes |
+| memory checkpoint / restore | yes, needs the host's login session **unlocked** | yes |
+| `fork` | **no** (409): the saved state is bound to one machine identity | yes on offline vz |
+| `network.allow` / `offline`, `http_rules`, `filesystem` confinement, `runtime.volumes` | **refused** (400): no in-guest forwarder, no agent, and no NIC means no SSH | yes |
+| default workspace | `/Users/<provision_username>/workspace` (the system volume is read-only) | `/workspace` |
+| concurrent guests | 2 per host (Apple's limit); a third create is 409 | host memory |
+
+A macOS session is **unrestricted on the network**: use it for work you would trust on your own Mac's NAT, not for untrusted code.
+
 ## 3. Choosing a policy
 
 Pick the strictest policy that still lets the task finish. Policies are fixed at create; to change one, create a new

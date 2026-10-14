@@ -642,7 +642,7 @@ impl VmManager {
         Ok(hosts)
     }
 
-    async fn load_template_spec(&self, name: &str) -> Result<CreateVmRequest> {
+    pub async fn load_template_spec(&self, name: &str) -> Result<CreateVmRequest> {
         let dir = self
             .cfg
             .sandbox
