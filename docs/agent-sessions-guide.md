@@ -4,6 +4,10 @@
 to **use** sessions, by task, with the commands to run and what you should see. Read it top to bottom once, then use the
 table of contents as a cookbook.
 
+**Install first:** `curl -fsSL https://zyvorai.github.io/zyvor-fluxvm/install.sh | bash` ([install.md](install.md)),
+and check `fluxctl agent --help`: a release older than the session work answers `unrecognized subcommand`, and then you
+build from source (the install page says how).
+
 Every example uses `fluxctl agent ...` (REST: `/v1/agents/sessions/...`). Replace `$S` with a session id.
 
 ## Contents
