@@ -180,6 +180,9 @@ fluxctl agent token $S --ops exec,jobs,files.read,files.write,git --ttl-seconds 
 - The token works on this session only (any other id is `404`), expires at most 24 h out and never after the session,
   and is revoked when the session is deleted.
 - `fluxctl agent tokens $S` lists live tokens (never the secrets); `fluxctl agent untoken $S <token id>` revokes one.
+- **Tokens only limit anything when the daemon has `[auth]` configured.** With no auth (lab mode) every bearer,
+  session tokens included, is treated as an anonymous admin, so a token does not narrow what the agent can do.
+  Configure `[auth]` with at least one admin token before handing an agent a session token.
 
 Give the agent the token, not your admin credential:
 
