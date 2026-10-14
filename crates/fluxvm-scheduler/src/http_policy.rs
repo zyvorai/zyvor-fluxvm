@@ -49,7 +49,7 @@ pub(crate) fn unsupported_reason(
 impl VmManager {
     /// The address the proxy sees this sandbox's traffic from: the guest's own, or, for a vz guest relayed
     /// through the runner, its alias.
-    fn guest_addr(vm: &fluxvm_core::model::VmRecord) -> Option<IpAddr> {
+    pub(crate) fn guest_addr(vm: &fluxvm_core::model::VmRecord) -> Option<IpAddr> {
         if vm.backend == BackendKind::Vz {
             return fluxvm_core::peer_alias::ip_of(vm.id);
         }

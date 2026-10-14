@@ -15,8 +15,11 @@ secret: the egress proxy injects it into the request after vetting it.
 | Secrets never serialized or printed (including `/v1/egress/check`) | yes (unit test) | n/a |
 | Global `credential_vault` fallback | yes (unchanged behavior) | not yet |
 
-Nothing in this batch has been run end-to-end on real VMs. In particular, no real request has been
-observed carrying an injected header yet.
+**Verified on hardware (vz, agent-micro guest on an M4 host):** through the runner's relay and the daemon's TLS-intercepting
+proxy, an HTTPS `GET` to an echo host carried the injected `Authorization` header; a path outside the grant's `paths` did not;
+the value never appeared in the guest environment, the grant response or the session ledger; and a revoked grant injected
+nothing (`scripts/vz-https-live-test.sh`, 13 checks). The same test found that vz grants were bound to `guest_ip`, which a
+relayed vz guest does not have, so they never matched; they now bind to the guest's alias address. Not verified on QEMU/KVM.
 
 ## Creating a grant
 
