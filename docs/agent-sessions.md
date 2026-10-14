@@ -167,9 +167,20 @@ whether they are enforced.
   gives its children back.
 - `max_exec_seconds` is checked when a command starts; commands running in parallel can overshoot it. Jobs are not
   counted against `max_exec_seconds`.
+- `max_compute_seconds` is commands **plus** background jobs: finished jobs by their recorded start and end, running ones
+  up to now. It is checked when a command or job starts, a command gets at most what is left, and a child starts with
+  what is left. A running job is not stopped when the budget runs out (give the job its own `timeout_seconds`).
+- `max_output_bytes` caps what one `exec` returns per stream (the rest is dropped on a character boundary, with
+  `output_truncated` and `<stream>_dropped_bytes` in the answer and the ledger) and the bytes a job retains per stream.
+  It never slows or kills the command.
+- `max_workspace_bytes` is the workspace directory's size from `du -sk` in the guest, measured when a command or job
+  starts (one extra command each time; the last value is `usage.workspace_bytes`). Growth during a run is not stopped;
+  the *next* start is refused. It needs a workspace (`400` otherwise) and `du` in the guest.
 
-Not done: token, output-size and storage budgets. Tokens need usage reports from the model client or gateway, which the
-daemon never sees; output and storage need guest-side accounting.
+Not done: token budgets (they need usage reports from the model client or gateway, which the daemon never sees) and a
+process-count limit. `RLIMIT_NPROC` exists in the confinement policy, but the kernel does not apply it to root and
+sessions run as root, so a `max_processes` knob would look enforced and not be; it waits for `run_as` support in
+sessions.
 
 ### Evaluating candidates
 
@@ -200,10 +211,22 @@ delete (like `rollout`); it needs a running session with a workspace baseline to
   body replays the first 2xx response, a different body is `422`, a key still running is `409`, records last 24 h.
 - **Expiry.** A session past its `expires_at` is persisted as `expired` the next time anything reads it (every route
   refuses it with `409`; delete still works). The record and listing also report `gone` when the daemon no longer has
-  the sandbox; that is shown, not saved. There is no background sweep: reconciliation happens on access, so it also
-  covers a daemon restart.
+  the sandbox; that is shown, not saved.
+- **Sweeper.** A background task (first pass 30 s after start, then every 60 s) marks expired sessions `expired` without
+  anyone reading them and removes what an ended (`expired` or `deleted`) session left: tokens, grants, previews,
+  approvals, job metadata, usage and HTTP rules. The record and ledger stay. `session.cleanup` is ledgered once per
+  session; delete runs the same cleanup. Previews of a deleted session used to linger until their expiry; they no
+  longer do.
+- **Interrupted operations.** While a checkpoint, restore, fork or delete runs, a marker file exists
+  (`<state_dir>/agent-session-ops/<session>.json`). If the daemon dies mid-way the marker is left, and the next read of
+  the session shows `interrupted_op: {op, started_at}` and ledgers `lifecycle.interrupted` once, until another
+  operation completes. It reports; it does not repair: whether a half-done restore or fork left the sandbox usable is
+  for the operator to check.
 
-Not done: the gate and replay store are per daemon; reads (`files`, `git status`, `job read`) are not gated.
+Not done: the lifecycle gate is still in the daemon's memory (a restart clears it, and two daemons on one state
+directory do not see each other); reads (`files`, `git status`, `job read`) are not gated; jobs running in a guest are
+not re-adopted into a new daemon's view beyond the metadata it persisted. The sweeper and the marker are unit and
+router tested, not run through a real daemon restart.
 
 ### Session tokens
 

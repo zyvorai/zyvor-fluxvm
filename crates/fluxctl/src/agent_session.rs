@@ -83,6 +83,15 @@ pub enum AgentCommand {
         /// Budget: most fork children created. Children start with what is left of the others.
         #[arg(long)]
         max_children: Option<u64>,
+        /// Budget: seconds of command plus background-job wall time.
+        #[arg(long)]
+        max_compute_seconds: Option<u64>,
+        /// Budget: bytes of output kept per stream (commands return at most this; jobs retain it).
+        #[arg(long)]
+        max_output_bytes: Option<u64>,
+        /// Budget: workspace size in bytes, measured when a command or job starts.
+        #[arg(long)]
+        max_workspace_bytes: Option<u64>,
         #[arg(long)]
         ttl_seconds: Option<u64>,
     },
@@ -775,6 +784,9 @@ pub async fn run(r: &Remote, cmd: AgentCommand) -> Result<()> {
             max_jobs,
             max_concurrent_jobs,
             max_children,
+            max_compute_seconds,
+            max_output_bytes,
+            max_workspace_bytes,
             ttl_seconds,
         } => {
             let mut body = create_body(
@@ -804,6 +816,9 @@ pub async fn run(r: &Remote, cmd: AgentCommand) -> Result<()> {
                     ("max_jobs", max_jobs),
                     ("max_concurrent_jobs", max_concurrent_jobs),
                     ("max_children", max_children),
+                    ("max_compute_seconds", max_compute_seconds),
+                    ("max_output_bytes", max_output_bytes),
+                    ("max_workspace_bytes", max_workspace_bytes),
                 ],
             );
             if require_ready && body.get("workspace").is_some() {
