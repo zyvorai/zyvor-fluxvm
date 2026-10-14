@@ -14,6 +14,12 @@ pub use exec_policy::{
     ExecEnforcement, ExecIsolation, ExecPolicy, ExecRunAs, ExecSeccompMode, ExecTcpRule,
 };
 
+mod jobs;
+pub use jobs::{
+    DEFAULT_JOB_OUTPUT_BYTES, FEATURE_JOBS_V2, JobPhase, JobStatus, JobStream, MAX_JOB_READ_BYTES,
+    MAX_JOB_WAIT_MS, valid_job_id,
+};
+
 /// Default AF_VSOCK port the guest agent listens on.
 pub const DEFAULT_PORT: u32 = 17777;
 
@@ -84,6 +90,62 @@ pub enum AgentRequest {
         rows: u16,
     },
     Shutdown,
+    /// Which optional features this agent has (see [`FEATURE_JOBS_V2`]). An older agent answers
+    /// `Error`, which a caller reads as "none".
+    Capabilities,
+    /// Start a supervised job. Give `process` (argv, no shell) or `command` (`/bin/sh -c`). Output goes to
+    /// per-stream spools read with `JobRead`; the process leads its own process group.
+    JobStart {
+        job_id: String,
+        #[serde(default)]
+        command: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        process: Option<ExecProcess>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        policy: Option<ExecPolicy>,
+        #[serde(default)]
+        timeout_seconds: Option<u64>,
+        /// Keep a stdin pipe open for `JobWrite`. Without it stdin is closed.
+        #[serde(default)]
+        stdin: bool,
+        /// Retained bytes per stream; the process is kept draining past it.
+        #[serde(default)]
+        max_output_bytes: Option<u64>,
+    },
+    /// Read a spool from `offset`. Waits up to `wait_ms` for new bytes or the end of the stream.
+    JobRead {
+        job_id: String,
+        stream: JobStream,
+        #[serde(default)]
+        offset: u64,
+        #[serde(default)]
+        max_bytes: Option<u32>,
+        #[serde(default)]
+        wait_ms: Option<u64>,
+    },
+    /// Write to the job's stdin and/or close it (EOF).
+    JobWrite {
+        job_id: String,
+        #[serde(default)]
+        data_base64: String,
+        #[serde(default)]
+        close: bool,
+    },
+    /// Send `signal` to the process (or, with `tree`, its whole process group).
+    JobSignal {
+        job_id: String,
+        signal: i32,
+        #[serde(default)]
+        tree: bool,
+    },
+    JobInfo {
+        job_id: String,
+    },
+    JobList,
+    /// Forget a finished job and delete its spools.
+    JobReap {
+        job_id: String,
+    },
     /// Give a freshly forked/restored guest its own identity: the snapshot
     /// carries the parent's hostname, `/etc/machine-id` and RNG state, so
     /// every child must reset them. Each step is best-effort and reported in
@@ -232,6 +294,27 @@ pub enum AgentResponse {
     /// client reads back is raw PTY output (not JSON, not framed).
     ShellOpened,
     ShuttingDown,
+    Capabilities {
+        features: Vec<String>,
+    },
+    JobStarted {
+        status: JobStatus,
+    },
+    JobOutput {
+        data_base64: String,
+        /// Offset to pass next: `offset` plus the bytes returned.
+        next_offset: u64,
+        /// The stream has ended and `next_offset` is its end.
+        eof: bool,
+        status: JobStatus,
+    },
+    Job {
+        status: JobStatus,
+    },
+    Jobs {
+        jobs: Vec<JobStatus>,
+    },
+    JobAck,
     /// Result of [`AgentRequest::ResetIdentity`]: the steps that were
     /// applied, and a human-readable note for each that failed.
     IdentityReset {

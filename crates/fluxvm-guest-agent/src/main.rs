@@ -6,6 +6,8 @@
 //! on it, and writes one newline-delimited JSON response.
 
 mod exec_policy;
+#[cfg(unix)]
+mod jobs;
 
 #[cfg(unix)]
 use anyhow::Context;
@@ -300,6 +302,46 @@ fn handle_connection(
             let conn = reader.into_inner();
             return spawn_open_shell_session(listener_fd, conn, writer, cols, rows, pending);
         }
+        AgentRequest::Capabilities => AgentResponse::Capabilities {
+            features: vec![fluxvm_guest_protocol::FEATURE_JOBS_V2.to_string()],
+        },
+        AgentRequest::JobStart {
+            job_id,
+            command,
+            process,
+            policy,
+            timeout_seconds,
+            stdin,
+            max_output_bytes,
+        } => jobs::start(jobs::StartArgs {
+            job_id,
+            command,
+            process,
+            policy,
+            timeout_seconds,
+            stdin,
+            max_output_bytes,
+        }),
+        AgentRequest::JobRead {
+            job_id,
+            stream,
+            offset,
+            max_bytes,
+            wait_ms,
+        } => jobs::read(&job_id, stream, offset, max_bytes, wait_ms),
+        AgentRequest::JobWrite {
+            job_id,
+            data_base64,
+            close,
+        } => jobs::write(&job_id, &data_base64, close),
+        AgentRequest::JobSignal {
+            job_id,
+            signal,
+            tree,
+        } => jobs::signal(&job_id, signal, tree),
+        AgentRequest::JobInfo { job_id } => jobs::info(&job_id),
+        AgentRequest::JobList => jobs::list(),
+        AgentRequest::JobReap { job_id } => jobs::reap(&job_id),
         AgentRequest::Shutdown => {
             writer.write_all(encode_line(&AgentResponse::ShuttingDown)?.as_bytes())?;
             writer.flush()?;
@@ -693,10 +735,16 @@ fn exec_with_timeout(command: &str, timeout: Duration) -> AgentResponse {
 /// Runs `process.argv` with execve (no shell), with its environment, directory and identity.
 #[cfg(unix)]
 fn exec_process(process: &fluxvm_guest_protocol::ExecProcess, timeout: Duration) -> AgentResponse {
-    use std::os::unix::process::CommandExt;
     if let Err(message) = process.validate() {
         return AgentResponse::Error { message };
     }
+    run_with_timeout(process_command(process), timeout)
+}
+
+/// The command for a validated `process`: argv, environment, directory and identity.
+#[cfg(unix)]
+pub(crate) fn process_command(process: &fluxvm_guest_protocol::ExecProcess) -> Command {
+    use std::os::unix::process::CommandExt;
     let mut cmd = Command::new(&process.argv[0]);
     cmd.args(&process.argv[1..]);
     if process.clean_env {
@@ -714,15 +762,75 @@ fn exec_process(process: &fluxvm_guest_protocol::ExecProcess, timeout: Duration)
         // std drops root's supplementary groups (setgroups(0)) before setuid; pre_exec would run too late.
         cmd.gid(user.gid).uid(user.uid);
     }
-    run_with_timeout(cmd, timeout)
+    cmd
+}
+
+/// Most output a synchronous exec returns per stream. The rest is read and discarded so the
+/// command keeps running and finishes with its real exit code.
+#[cfg(unix)]
+const EXEC_OUTPUT_CAP: usize = 16 * 1024 * 1024;
+/// How long to wait for the pipes to close after the command has exited or been killed. A
+/// background child that inherited them can keep them open indefinitely.
+#[cfg(unix)]
+const EXEC_DRAIN_GRACE: Duration = Duration::from_secs(2);
+
+/// A pipe drained on its own thread into a capped buffer.
+#[cfg(unix)]
+struct Drain {
+    buf: Arc<std::sync::Mutex<(Vec<u8>, bool)>>,
+    done: std::sync::mpsc::Receiver<()>,
+}
+
+#[cfg(unix)]
+impl Drain {
+    fn spawn<R: std::io::Read + Send + 'static>(mut pipe: R) -> Drain {
+        let buf = Arc::new(std::sync::Mutex::new((Vec::new(), false)));
+        let (tx, done) = std::sync::mpsc::channel();
+        let b = buf.clone();
+        std::thread::spawn(move || {
+            let mut chunk = [0u8; 16 * 1024];
+            loop {
+                match pipe.read(&mut chunk) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        let mut g = b.lock().unwrap_or_else(|p| p.into_inner());
+                        let room = EXEC_OUTPUT_CAP.saturating_sub(g.0.len());
+                        if n > room {
+                            g.1 = true;
+                        }
+                        g.0.extend_from_slice(&chunk[..n.min(room)]);
+                    }
+                }
+            }
+            let _ = tx.send(());
+        });
+        Drain { buf, done }
+    }
+
+    /// What was read, waiting until `deadline` for the pipe to reach EOF.
+    fn collect(&self, deadline: Instant) -> String {
+        let wait = deadline.saturating_duration_since(Instant::now());
+        let _ = self.done.recv_timeout(wait);
+        let g = self.buf.lock().unwrap_or_else(|p| p.into_inner());
+        let mut text = String::from_utf8_lossy(&g.0).into_owned();
+        if g.1 {
+            text.push_str(&format!(
+                "\n[fluxvm: output truncated at {EXEC_OUTPUT_CAP} bytes]\n"
+            ));
+        }
+        text
+    }
 }
 
 #[cfg(unix)]
 fn run_with_timeout(mut cmd: Command, timeout: Duration) -> AgentResponse {
+    use std::os::unix::process::CommandExt;
+    // Its own process group, so a timeout reaches the command's descendants too.
     let mut child = match cmd
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
+        .process_group(0)
         .spawn()
     {
         Ok(c) => c,
@@ -733,34 +841,22 @@ fn run_with_timeout(mut cmd: Command, timeout: Duration) -> AgentResponse {
         }
     };
 
-    let stdout_pipe = child.stdout.take().expect("stdout was piped");
-    let stderr_pipe = child.stderr.take().expect("stderr was piped");
-    let stdout_reader = std::thread::spawn(move || {
-        use std::io::Read;
-        let mut buf = String::new();
-        let mut pipe = stdout_pipe;
-        let _ = pipe.read_to_string(&mut buf);
-        buf
-    });
-    let stderr_reader = std::thread::spawn(move || {
-        use std::io::Read;
-        let mut buf = String::new();
-        let mut pipe = stderr_pipe;
-        let _ = pipe.read_to_string(&mut buf);
-        buf
-    });
+    let stdout = Drain::spawn(child.stdout.take().expect("stdout was piped"));
+    let stderr = Drain::spawn(child.stderr.take().expect("stderr was piped"));
 
+    let pgid = child.id() as i32;
     let deadline = Instant::now() + timeout;
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break Some(status),
             Ok(None) => {
                 if Instant::now() >= deadline {
+                    unsafe { libc::kill(-pgid, libc::SIGKILL) };
                     let _ = child.kill();
                     let _ = child.wait();
                     break None;
                 }
-                std::thread::sleep(Duration::from_millis(50));
+                std::thread::sleep(Duration::from_millis(20));
             }
             Err(e) => {
                 return AgentResponse::Error {
@@ -770,8 +866,9 @@ fn run_with_timeout(mut cmd: Command, timeout: Duration) -> AgentResponse {
         }
     };
 
-    let stdout = stdout_reader.join().unwrap_or_default();
-    let stderr = stderr_reader.join().unwrap_or_default();
+    let drain_by = Instant::now() + EXEC_DRAIN_GRACE;
+    let stdout = stdout.collect(drain_by);
+    let stderr = stderr.collect(drain_by);
 
     match status {
         Some(status) => AgentResponse::Exec {
@@ -1254,6 +1351,30 @@ mod tests {
             assert_eq!(len, 12);
             assert_eq!(addr.svm_len, 12);
         }
+    }
+
+    #[test]
+    fn exec_timeout_returns_even_when_a_descendant_holds_the_pipes() {
+        let t = Instant::now();
+        let r = exec_with_timeout("sleep 60 & wait", Duration::from_secs(1));
+        assert!(matches!(r, AgentResponse::Error { .. }), "{r:?}");
+        assert!(t.elapsed() < Duration::from_secs(6), "{:?}", t.elapsed());
+    }
+
+    #[test]
+    fn exec_returns_when_a_background_child_keeps_the_pipes_open() {
+        let t = Instant::now();
+        let r = exec_with_timeout("sleep 20 & echo hi", Duration::from_secs(30));
+        match r {
+            AgentResponse::Exec {
+                exit_code, stdout, ..
+            } => {
+                assert_eq!(exit_code, 0);
+                assert_eq!(stdout, "hi\n");
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(t.elapsed() < Duration::from_secs(8), "{:?}", t.elapsed());
     }
 
     #[test]
