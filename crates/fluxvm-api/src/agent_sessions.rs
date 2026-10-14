@@ -222,6 +222,9 @@ struct Capabilities {
     memory_checkpoint: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     memory_checkpoint_reason: Option<String>,
+    /// `macos` for a macOS guest (no guest agent: SSH engine only, no fork, no confinement, open network); empty for Linux.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    guest_os: String,
 }
 
 /// The policy as compiled, including the parts that are accepted but not enforced yet.
@@ -1336,6 +1339,10 @@ struct RuntimeBody {
     volumes: Vec<VolumeBody>,
     #[serde(default)]
     image: Option<String>,
+    /// A named template under `sandbox.templates_dir` (its `spec.json`). A macOS guest comes from one: build it with
+    /// `scripts/macos-session-template.sh`. Not combinable with `image`.
+    #[serde(default)]
+    template: Option<String>,
     #[serde(default)]
     cpus: Option<u8>,
     #[serde(default)]
@@ -1430,7 +1437,56 @@ fn capabilities_for(backend: &str, offline: bool) -> Capabilities {
         supervisor: false,
         memory_checkpoint: matches!(backend, "flux-vm" | "qemu" | "firecracker"),
         memory_checkpoint_reason: None,
+        guest_os: String::new(),
     }
+}
+
+/// A macOS guest has no guest agent and no way to restore a saved state onto another machine identity, so a session
+/// on one is SSH-engine only, cannot fork, and runs on the Mac's NAT (an offline guest would lose SSH too).
+fn macos_capabilities() -> Capabilities {
+    Capabilities {
+        snapshot: true,
+        fork: false,
+        pty: true,
+        engine: "ssh".into(),
+        guest_os: "macos".into(),
+        ..capabilities_for("vz", false)
+    }
+}
+
+/// Apple lets one host run two macOS VMs at once (a kernel limit, not FluxVM's).
+const MAX_MACOS_GUESTS: usize = 2;
+
+/// Why a macOS guest cannot honor a session policy, or `None`.
+fn macos_policy_refusal(policy: &PolicyReport, has_volumes: bool) -> Option<String> {
+    let what = if policy.offline || !policy.allow_hosts.is_empty() {
+        "network.allow / offline (a macOS guest has no in-guest egress forwarder, and with no network card it has no SSH)"
+    } else if !policy.http_rules.is_empty() {
+        "HTTP method/path rules (they need the runner's relay, which a macOS guest does not use)"
+    } else if has_volumes {
+        "runtime.volumes (the mount script is Linux-only)"
+    } else {
+        return None;
+    };
+    Some(format!(
+        "a macOS guest session cannot enforce {what}: it runs on the Mac's NAT with the SSH engine and no guest agent. \
+         Remove it, or use a Linux guest"
+    ))
+}
+
+/// Where a macOS session's workspace goes when none is named: the system volume is read-only, so under the user's home.
+fn macos_default_workspace(user: Option<&str>) -> String {
+    match user {
+        Some(u) if valid_guest_user(u) => format!("/Users/{u}/workspace"),
+        _ => "/Users/Shared/workspace".into(),
+    }
+}
+
+fn valid_guest_user(u: &str) -> bool {
+    !u.is_empty()
+        && u.len() <= 32
+        && u.chars()
+            .all(|c| c.is_ascii_alphanumeric() || "._-".contains(c))
 }
 
 /// The image an agent session gets when the caller named none: `agent-micro` when this host's
@@ -1457,6 +1513,13 @@ fn fork_refusal(s: &Session) -> Option<String> {
     }
     if s.capabilities.fork {
         return None;
+    }
+    if s.capabilities.guest_os == "macos" {
+        return Some(
+            "a macOS guest cannot be forked: its saved state is bound to one machine identifier and auxiliary \
+             storage. Take a checkpoint and restore it on this session, or create a second session from the template"
+                .to_string(),
+        );
     }
     Some(if s.backend == "vz" {
         "fork on vz needs a session with no network card of its own: create it with policy offline \
@@ -1493,9 +1556,8 @@ async fn create_session(
         return Err(bad("agent must be 1-64 characters of [A-Za-z0-9._-]"));
     }
     let ws = body.workspace.as_ref();
-    let ws_path = ws
-        .and_then(|w| w.path.clone())
-        .unwrap_or_else(|| "/workspace".into());
+    let ws_explicit = ws.and_then(|w| w.path.clone());
+    let mut ws_path = ws_explicit.clone().unwrap_or_else(|| "/workspace".into());
     if !valid_guest_path(&ws_path) {
         return Err(bad("workspace.path must be an absolute guest path"));
     }
@@ -1522,6 +1584,78 @@ async fn create_session(
         return Err(bad(
             "budget.max_workspace_bytes needs a workspace to measure",
         ));
+    }
+
+    // A macOS guest comes from a template; it has no guest agent, so what the session may ask for is narrower.
+    let template = body.runtime.as_ref().and_then(|r| r.template.clone());
+    let mut macos_user: Option<Option<String>> = None;
+    if let Some(t) = &template {
+        if body.runtime.as_ref().is_some_and(|r| r.image.is_some()) {
+            return Err(bad(
+                "runtime.template and runtime.image cannot both be set: the template names the image",
+            ));
+        }
+        if t.is_empty() || t.len() > 64 || t.starts_with('.') || !valid_guest_user(t) {
+            return Err(bad(
+                "runtime.template must be 1-64 characters of [A-Za-z0-9._-]",
+            ));
+        }
+        let spec = m
+            .load_template_spec(t)
+            .await
+            .map_err(|e| bad(&format!("template {t:?}: {e:#}")))?;
+        if spec
+            .apple
+            .as_ref()
+            .is_some_and(|a| a.guest_os == fluxvm_core::model::AppleGuest::Macos)
+        {
+            // The SSH user: `cloud_init.user` (what `vz_guest` reaches first), else the provisioned account.
+            macos_user = Some(
+                spec.cloud_init
+                    .as_ref()
+                    .and_then(|c| c.user.clone())
+                    .or_else(|| {
+                        spec.apple
+                            .as_ref()
+                            .and_then(|a| a.provision_username.clone())
+                    }),
+            );
+        }
+    }
+    if let Some(user) = &macos_user {
+        if !cfg!(target_os = "macos") {
+            return Err(bad("macOS guests run only on a Mac host"));
+        }
+        if let Some(why) = macos_policy_refusal(
+            &policy,
+            body.runtime.as_ref().is_some_and(|r| !r.volumes.is_empty()),
+        ) {
+            return Err(bad(&why));
+        }
+        if ws_explicit.is_none() {
+            ws_path = macos_default_workspace(user.as_deref());
+        }
+        let running = m
+            .list()
+            .await
+            .iter()
+            .filter(|v| {
+                v.status == fluxvm_core::model::VmStatus::Running
+                    && v.request
+                        .apple
+                        .as_ref()
+                        .is_some_and(|a| a.guest_os == fluxvm_core::model::AppleGuest::Macos)
+            })
+            .count();
+        if running >= MAX_MACOS_GUESTS {
+            return Err(ApiError {
+                status: StatusCode::CONFLICT,
+                message: format!(
+                    "{running} macOS guests are already running; Apple allows {MAX_MACOS_GUESTS} at once on one host. \
+                     Stop one, or delete a session"
+                ),
+            });
+        }
     }
 
     let tenant = caller_tenant(&token_tenant);
@@ -1603,11 +1737,15 @@ async fn create_session(
     let id = Uuid::new_v4();
     let req = fluxvm_scheduler::SandboxCreateRequest {
         name: Some(format!("agent-{}", &id.to_string()[..8])),
-        image: body
-            .runtime
-            .as_ref()
-            .and_then(|r| r.image.clone())
-            .or_else(|| default_session_image(&m)),
+        image: if template.is_some() {
+            None
+        } else {
+            body.runtime
+                .as_ref()
+                .and_then(|r| r.image.clone())
+                .or_else(|| default_session_image(&m))
+        },
+        template: template.clone(),
         ttl_seconds: body.ttl_seconds,
         vcpus: body.runtime.as_ref().and_then(|r| r.cpus),
         memory_mib: body.runtime.as_ref().and_then(|r| r.memory_mb),
@@ -1626,7 +1764,11 @@ async fn create_session(
         id,
         agent: body.agent,
         sandbox_id: rec.id,
-        capabilities: capabilities_for(&backend, policy.offline || !policy.allow_hosts.is_empty()),
+        capabilities: if macos_user.is_some() {
+            macos_capabilities()
+        } else {
+            capabilities_for(&backend, policy.offline || !policy.allow_hosts.is_empty())
+        },
         backend,
         parent: None,
         children: Vec::new(),
@@ -1704,9 +1846,14 @@ async fn create_session(
         if m.ensure_running_for_request(rec.id).await.is_ok() {
             // The guest user is not root on stock images, so `/workspace` needs sudo to exist.
             let p = shell_quote(&ws_path);
-            let mk = format!(
-                "mkdir -p {p} 2>/dev/null || (sudo -n mkdir -p {p} && sudo -n chown \"$(id -u):$(id -g)\" {p})"
-            );
+            let mk = if macos_user.is_some() {
+                // The system volume is read-only and the guest user owns its home.
+                format!("mkdir -p {p}")
+            } else {
+                format!(
+                    "mkdir -p {p} 2>/dev/null || (sudo -n mkdir -p {p} && sudo -n chown \"$(id -u):$(id -g)\" {p})"
+                )
+            };
             let code = m
                 .exec_with_policy(rec.id, mk, Some(30), None)
                 .await
@@ -4407,7 +4554,7 @@ async fn relay_pty(
 }
 
 // ---------------------------------------------------------------------------------------
-// Jobs: a command that outlives the request. It runs detached in the guest (`setsid`), its
+// Jobs: a command that outlives the request. It runs detached in the guest (`setsid` where it exists; macOS has none), its
 // output goes to a file (bounded: the log stops at `max_output_bytes` and the job gets SIGPIPE),
 // and the caller reads that file from a byte offset, either by polling `GET .../jobs/{job}` or
 // as a Server-Sent Events stream (`.../stream`, `Last-Event-ID` is the byte offset, so a dropped
@@ -4565,7 +4712,7 @@ fn job_start_script(job: Uuid, command: &str, stdin: bool, max_output: u64) -> S
     // output through `head -c` (the bound), and records the exit code last, so "exit file exists"
     // means the output file is complete.
     format!(
-        "mkdir -p {dir} && {mkfifo}(setsid sh -c 'echo $$ > \"$1\"; exec 3<>\"$6\"; {{ sh -c \"$2\" 2>&1 <&3; echo $? > \"$4.rc\"; }} | head -c \"$5\" > \"$3\"; mv \"$4.rc\" \"$4\"' _ {pid} {cmd} {out} {exit} {max_output} {input} > /dev/null 2>&1 &) ; echo started",
+        "mkdir -p {dir} && {mkfifo}{{ S=; command -v setsid >/dev/null 2>&1 && S=setsid; (exec $S sh -c 'echo $$ > \"$1\"; exec 3<>\"$6\"; {{ sh -c \"$2\" 2>&1 <&3; echo $? > \"$4.rc\"; }} | head -c \"$5\" > \"$3\"; mv \"$4.rc\" \"$4\"' _ {pid} {cmd} {out} {exit} {max_output} {input} > /dev/null 2>&1 &); }} ; echo started",
         dir = shell_quote(JOBS_DIR),
         cmd = shell_quote(command),
     )
@@ -5544,7 +5691,8 @@ async fn job_kill(
     // Negative pid = the whole process group the job started in. That group includes the wrapper
     // that would have written the exit file, so a killed job gets the conventional 143 here.
     let cmd = format!(
-        "p=$(cat {pid} 2>/dev/null) && [ -n \"$p\" ] && kill -TERM -- \"-$p\" 2>/dev/null; \
+        "p=$(cat {pid} 2>/dev/null) && [ -n \"$p\" ] && {{ kill -TERM -- \"-$p\" 2>/dev/null \
+         || {{ pkill -TERM -P \"$p\" 2>/dev/null; kill -TERM \"$p\" 2>/dev/null; }}; }}; \
          sleep 0.3; [ -e {exit} ] || echo 143 > {exit}; true"
     );
     m.exec_with_policy(s.sandbox_id, cmd, Some(30), None)
@@ -7218,6 +7366,69 @@ mod tests {
         assert!(valid_tag("after-build.1"));
         assert!(!valid_tag("a/b"));
         assert_eq!(shell_quote("it's"), "'it'\\''s'");
+    }
+
+    #[test]
+    fn a_macos_session_is_ssh_only_cannot_fork_and_refuses_what_it_cannot_enforce() {
+        let c = macos_capabilities();
+        assert!(
+            c.snapshot && c.pty && !c.fork && !c.confinement && !c.http_policy && !c.supervisor
+        );
+        assert_eq!((c.engine.as_str(), c.guest_os.as_str()), ("ssh", "macos"));
+        assert!(capabilities_for("vz", false).guest_os.is_empty());
+
+        let mut s = fixture_session();
+        s.capabilities = c;
+        let why = fork_refusal(&s).expect("a macOS session cannot fork");
+        assert!(
+            why.contains("macOS") && why.contains("machine identifier"),
+            "{why}"
+        );
+
+        let open = PolicyReport::default();
+        assert!(macos_policy_refusal(&open, false).is_none());
+        let offline = PolicyReport {
+            offline: true,
+            ..Default::default()
+        };
+        assert!(
+            macos_policy_refusal(&offline, false)
+                .unwrap()
+                .contains("network.allow")
+        );
+        let allow = PolicyReport {
+            allow_hosts: vec!["example.com".into()],
+            ..Default::default()
+        };
+        assert!(macos_policy_refusal(&allow, false).is_some());
+        let rules = PolicyReport {
+            http_rules: vec!["allow GET example.com/*".into()],
+            ..Default::default()
+        };
+        assert!(
+            macos_policy_refusal(&rules, false)
+                .unwrap()
+                .contains("HTTP")
+        );
+        assert!(
+            macos_policy_refusal(&open, true)
+                .unwrap()
+                .contains("volumes")
+        );
+    }
+
+    #[test]
+    fn a_macos_workspace_lives_under_the_guest_users_home() {
+        assert_eq!(
+            macos_default_workspace(Some("flux")),
+            "/Users/flux/workspace"
+        );
+        assert_eq!(macos_default_workspace(None), "/Users/Shared/workspace");
+        assert_eq!(
+            macos_default_workspace(Some("../etc")),
+            "/Users/Shared/workspace"
+        );
+        assert!(valid_guest_user("mac-template.1") && !valid_guest_user("a/b"));
     }
 
     #[test]
