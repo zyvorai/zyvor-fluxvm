@@ -1,5 +1,8 @@
 # Agent sessions
 
+> **New here?** Start with the [practical guide](agent-sessions-guide.md): task-by-task walkthroughs with the commands to run,
+> what you should see, and troubleshooting. This page is the reference.
+
 An **agent session** is one handle for what an AI agent needs from FluxVM: a sandbox, a workspace, a network
 policy, checkpoints and a ledger of what was done. It is a thin layer over the existing sandbox, snapshot, fork,
 change-set and event primitives. It adds no new isolation and no new hypervisor; everything an agent could already
@@ -669,12 +672,22 @@ fluxctl agent rm <id>
 fluxctl agent run claude-code --confine --fs-write /data/out        # guest confinement (Linux guests)
 fluxctl agent token <id> --ops exec,files.read,git --ttl-seconds 1800
 fluxctl agent promote <child> --dry-run                              # review, then --plan-id <id> to apply
+fluxctl agent exec <id> --approval-wait 120 -- 'deploy prod'        # a process.ask command: waits for an operator
+fluxctl agent approve <id> <approval>                               # operator, admin credential
+fluxctl agent bg <id> --stdin --timeout 600 -- 'python3 -u repl.py' # supervised job
+fluxctl agent upload <id> ./big.tar /workspace/big.tar              # resumable, verified
+fluxctl agent grant <id> --secret-ref gh --host api.github.com --method GET --path '/repos/acme/*'
 ```
 
-- **MCP** (`fluxctl mcp serve --allow-write`): `session_create`, `session_exec`, `session_checkpoint`, `session_restore`,
-  `session_fork`, `session_promote`, `session_token`, `session_rollout`, `session_events`, `session_artifacts`,
-  `session_delete`, plus `sandbox_speculate`, `sandbox_changesets`
-  and `sandbox_changeset_decide`.
+Walkthroughs for each of these, with expected output and a troubleshooting table, are in
+[agent-sessions-guide.md](agent-sessions-guide.md).
+
+- **MCP** (`fluxctl mcp serve --allow-write`): `session_create`, `session_exec`, `session_approvals`, `session_approve`,
+  `session_job_start`/`_read`/`_stdin`/`_kill`, `session_jobs`, `session_files`, `session_file_read`, `session_file_write`,
+  `session_git`, `session_checkpoint`, `session_restore`, `session_fork`, `session_rollout`, `session_evaluate`,
+  `session_promote`, `session_grant`, `session_revoke_grants`, `session_token`, `session_preview`, `session_probe`,
+  `session_events`, `session_artifacts`, `session_delete`, plus `sandbox_speculate`, `sandbox_changesets` and
+  `sandbox_changeset_decide`. The full table is in [mcp.md](mcp.md#agent-session-tools).
 - **Go**: `client.CreateSession(ctx, fluxvm.CreateSessionRequest{…})`, then `Exec`, `Checkpoint`, `Restore`, `Fork`,
   `Events`, `Artifacts`, `Delete` (`go/sessions.go`).
 - **Python**: `FluxVM(url).create_session("codex", policy="developer-safe")`, a context manager that deletes on exit
