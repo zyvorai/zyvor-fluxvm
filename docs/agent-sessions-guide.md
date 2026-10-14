@@ -105,7 +105,8 @@ On a Mac the session's commands reach the guest one of two ways, and the session
 
 If `fluxctl catalog` has an `agent-micro` entry, sessions without `runtime.image` use it; otherwise they get the stock
 image and `engine: ssh`. Build and register `agent-micro` as described in [agent-micro.md](agent-micro.md), or pass
-`runtime.image: agent-micro` explicitly. Per-session `http_rules` on vz need the setup in [7.1](#71-limit-a-host-to-methods-and-paths).
+`runtime.image: agent-micro` explicitly. To refuse the weaker engine instead of getting it, set `runtime.engine: "agent"`:
+the create returns 409 and removes the sandbox when the guest would run on SSH. Per-session `http_rules` on vz need the setup in [7.1](#71-limit-a-host-to-methods-and-paths).
 
 ## 3. Choosing a policy
 
