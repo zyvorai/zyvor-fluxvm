@@ -12,7 +12,7 @@ do with `/v1/sandboxes` and `/v1/vms` it can now do through one id.
 
 ## API
 
-All routes need an `admin` token and are tenant-scoped (a tenant token only ever sees its own sessions; another
+All routes need an `admin` token (or a [session token](#session-tokens) for the operations it was minted with) and are tenant-scoped (a tenant token only ever sees its own sessions; another
 tenant's id answers `404`, not `403`).
 
 | Route | What it does |
@@ -22,6 +22,8 @@ tenant's id answers `404`, not `403`).
 | `GET /v1/agents/sessions/{id}` | One session: backend, capabilities, policy, workspace, checkpoints, children. |
 | `DELETE /v1/agents/sessions/{id}` | Delete the session and its sandbox. Idempotent (`204`). |
 | `POST /v1/agents/sessions/{id}/exec` | `{command, timeout_seconds?}` through the sandbox's guest path. Recorded in the ledger. |
+| `POST /v1/agents/sessions/{id}/tokens` | `{ops, ttl_seconds?, label?}`: mint a [session token](#session-tokens). `GET` lists live ones (no secrets); `DELETE .../tokens/{token}` revokes. Admin only. |
+| `POST /v1/agents/sessions/{id}/promote` | `{dry_run?, plan_id?, skip_conflicts?, paths?}` on a fork child: apply its workspace changes to its parent. See [Promoting a fork](#promoting-a-fork). Admin only. |
 | `POST /v1/agents/sessions/{id}/checkpoint` | `{tag?, memory?}`; `memory:false` is disk-only. |
 | `POST /v1/agents/sessions/{id}/restore` | `{tag}`; only tags this session took. |
 | `POST /v1/agents/sessions/{id}/fork` | `{count, identity?}` (1-32) into child sessions that start from the current state. `identity` is `best-effort` (default), `unique` or `preserve`. **`409` with the reason when the session cannot fork; nothing is created.** |
@@ -57,6 +59,75 @@ fork, then exec in every child in parallel, then delete the children (`--keep` k
   `409`; fork `409`. A memory restore on a session with a volume brought the volume back to the checkpoint's content
   in that run, so treat a restore as rolling the volume back too. Not run: Linux (QEMU volumes are separate virtiofs
   directories), concurrent readers, volume resize while attached.
+
+### Promoting a fork
+
+Forks and `rollout` leave children independent. `promote` copies the winner's **workspace file changes** back onto the
+parent, as a three-way merge.
+
+1. **Fork** records the parent's workspace manifest as every child's baseline, so a child's `artifacts` (and a
+   promotion) are exactly what it did since the fork. A child forked before this existed has no such baseline and
+   cannot be promoted.
+2. **Review**: `POST /v1/agents/sessions/{child}/promote {"dry_run": true}` returns `plan` and a `plan_id` digest:
+   `apply` (added / modified / deleted, as the child changed them), `already_applied` (the parent already has the
+   child's content), `conflicts` and the count of untouched files. A path is a conflict when the parent changed it too,
+   so nothing the parent did is ever overwritten.
+3. **Apply**: the same call without `dry_run`, optionally with `plan_id` (refused with `409` if the plan is different
+   now) and `paths` (files or directories inside the workspace). Any conflict refuses the whole promotion with
+   nothing changed, unless `skip_conflicts` applies just the clean paths.
+
+Before the first write the parent gets a disk checkpoint, `pre-promote-<child>-<time>`, returned as `checkpoint`; if a
+transfer fails midway the error says how many paths were applied and names that checkpoint, and restoring it undoes
+them. Promotion refuses while commands run on either session, needs `sha256sum` in both guests (size and mtime cannot
+compare two machines), and moves at most 2000 changes at once. Only regular files under the workspace are transferred;
+file modes are kept, symlinks and ownership are not. Ledgered as `promote` on the parent and `promote.out` on the child.
+
+Not run on a live guest: the plan is unit-tested and the route's refusals are router-tested, the transfer itself is not.
+
+### Lifecycle guarantees
+
+- **Conflicting operations are refused, not interleaved.** Checkpoint, restore, fork and delete take the session's
+  lifecycle slot; a second one, or any new `exec`, job start, file write/delete or git commit/branch while one runs,
+  gets `409` naming what is in flight. Restore and fork also refuse while commands are running on the session (they
+  would replace the machine under them); a checkpoint and a delete do not (delete is how a stuck session is ended).
+  The gate is in the daemon's memory: it protects one daemon process, and a restart clears it.
+- **Revisions.** The session record carries `revision`, bumped by every save. `If-Match: <revision>` (`*` always
+  matches) on checkpoint, restore, fork and delete returns `412` when the session changed since you read it.
+- **Idempotency.** `Idempotency-Key` is honoured on session create, `checkpoint`, `restore`, `fork`, `exec` and `jobs`
+  (not on `tokens`, whose response holds a secret), with the semantics of the VM routes: a retry with the same key and
+  body replays the first 2xx response, a different body is `422`, a key still running is `409`, records last 24 h.
+- **Expiry.** A session past its `expires_at` is persisted as `expired` the next time anything reads it (every route
+  refuses it with `409`; delete still works). The record and listing also report `gone` when the daemon no longer has
+  the sandbox; that is shown, not saved. There is no background sweep: reconciliation happens on access, so it also
+  covers a daemon restart.
+
+Not done: the gate and replay store are per daemon; reads (`files`, `git status`, `job read`) are not gated.
+
+### Session tokens
+
+An admin mints a bearer token that works on **one session** and only for the operations it names, so an agent can
+run commands and read its workspace without VM-management access.
+
+```json
+POST /v1/agents/sessions/{id}/tokens
+{"ops": ["exec", "files.read", "files.write", "git", "jobs"], "ttl_seconds": 3600, "label": "claude-code"}
+```
+
+The response carries `token` (`fxst_…`) **once**; the store keeps only its SHA-256. Grantable operations: `read`
+(session record, events, trajectory, artifacts, preview list), `exec`, `jobs`, `files.read`, `files.write`, `git`,
+`checkpoint`, `preview`. Not grantable, so admin-only: create, list, delete, restore, fork, terminals and `ssh`, and
+minting tokens (a session token cannot mint another).
+
+- A token reaches only `/v1/agents/sessions/{its id}…`; any other path (another session, `/v1/vms`, the session list)
+  is `403`. An operation it was not granted is `403`; an expired, revoked or unknown token is `401`.
+- Lifetime is `ttl_seconds` (default 3600, at most 86400), capped at the session's own expiry. Deleting the session
+  revokes every token. At most 32 live tokens per session. Tokens are ledgered as `token.mint` / `token.revoke`
+  (never the secret) and calls are audited as `session-token:<id>`.
+- A scoped caller sees the session as the session's tenant does. The process and filesystem policy applies to its
+  `exec`, jobs, files and git calls exactly as to an admin's.
+
+Not done: the CLI and MCP tools do not mint or use these yet (`fluxctl` still takes one bearer token), and tokens are
+not narrowed by path or by git repository.
 
 ### Policy
 
@@ -351,7 +422,7 @@ Each item says why it is not in the MVP.
 
 | Item | Why not yet |
 |---|---|
-| Promote a child's change set into its parent | children are independent sandboxes; copying the winner's files back needs a cross-sandbox transfer that is not built. `speculate` + `changesets/{cs}/apply` (MCP: `sandbox_speculate`, `sandbox_changeset_decide`) cover the single-sandbox case |
+| Promote a child's *non-file* state (memory, processes, volumes) | promotion copies workspace files only; a child's running processes and memory are not merged |
 | Lazy memory restore (sub-second claim/fork) | a restore engine change, not an API change; not started |
 | Workspace overlay mode, read-only mounts | `mode: "overlay"` is refused; clone is the only writable mode |
 | Process policy as a security boundary | `process` rules are still string globs; filesystem confinement is wired, command confinement beyond it is not |

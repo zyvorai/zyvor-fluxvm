@@ -11,9 +11,11 @@
 //! * `GET    /v1/agents/sessions/{id}`               one session and its capabilities
 //! * `DELETE /v1/agents/sessions/{id}`               delete the session and its sandbox
 //! * `POST   /v1/agents/sessions/{id}/exec`          run a command
+//! * `POST   /v1/agents/sessions/{id}/tokens`        mint an expiring token scoped to this session (also GET, DELETE .../{token})
 //! * `POST   /v1/agents/sessions/{id}/checkpoint`    snapshot under a tag
 //! * `POST   /v1/agents/sessions/{id}/restore`       restore a checkpoint
 //! * `POST   /v1/agents/sessions/{id}/fork`          fork into child sessions (in-tree KVM only)
+//! * `POST   /v1/agents/sessions/{id}/promote`       apply a fork child's workspace changes to its parent (dry run, review, apply)
 //! * `GET    /v1/agents/sessions/{id}/events`        ledger plus the sandbox's VM events
 //! * `GET    /v1/agents/sessions/{id}/artifacts`     workspace changes since the baseline
 //! * `POST   /v1/agents/sessions/{id}/pty-ticket`    a 30 s single-use ticket for a browser terminal
@@ -42,6 +44,7 @@
 //! session survives a daemon restart. What is *not* here: promote, replay, sandbox-scoped PTY,
 //! browser profiles (see `docs/agent-sessions.md`, "Roadmap").
 
+use super::agent_session_auth::{self, Op, SessionScope, authorize};
 use super::{ApiError, ApiResult, AuditActor, TokenTenant, change_error, require_admin};
 use axum::{
     Extension, Json, Router,
@@ -71,9 +74,18 @@ pub(crate) fn routes() -> Router<Arc<VmManager>> {
             get(get_session).delete(delete_session),
         )
         .route("/v1/agents/sessions/{id}/exec", post(exec_session))
+        .route(
+            "/v1/agents/sessions/{id}/tokens",
+            post(mint_token).get(list_tokens),
+        )
+        .route(
+            "/v1/agents/sessions/{id}/tokens/{token}",
+            axum::routing::delete(revoke_token),
+        )
         .route("/v1/agents/sessions/{id}/checkpoint", post(checkpoint))
         .route("/v1/agents/sessions/{id}/restore", post(restore))
         .route("/v1/agents/sessions/{id}/fork", post(fork))
+        .route("/v1/agents/sessions/{id}/promote", post(promote))
         .route("/v1/agents/sessions/{id}/events", get(events))
         .route("/v1/agents/sessions/{id}/artifacts", get(artifacts))
         .route("/v1/agents/sessions/{id}/trajectory", get(trajectory))
@@ -286,6 +298,10 @@ struct Session {
     checkpoints: Vec<Checkpoint>,
     #[serde(default)]
     volumes: Vec<VolumeMount>,
+    /// Bumped by every save. `If-Match: <revision>` on checkpoint, restore, fork and delete
+    /// makes the call fail with 412 when the session changed since the caller read it.
+    #[serde(default)]
+    revision: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -320,7 +336,8 @@ fn not_found(id: Uuid) -> ApiError {
     }
 }
 
-async fn save(m: &VmManager, s: &Session) -> ApiResult<()> {
+async fn save(m: &VmManager, s: &mut Session) -> ApiResult<()> {
+    s.revision += 1;
     let d = dir(m);
     tokio::fs::create_dir_all(&d)
         .await
@@ -336,15 +353,150 @@ async fn save(m: &VmManager, s: &Session) -> ApiResult<()> {
     Ok(())
 }
 
+// ---------------------------------------------------------------------------------------
+// Lifecycle gate: conflicting operations on one session are refused, not interleaved.
+
+#[derive(Default)]
+struct Gate {
+    /// The lifecycle operation in flight (checkpoint, restore, fork or delete).
+    lifecycle: Option<&'static str>,
+    /// Commands, jobs and mutating file/git calls currently running.
+    work: u32,
+}
+
+static GATES: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<Uuid, Gate>>> =
+    std::sync::OnceLock::new();
+
+fn with_gate<R>(id: Uuid, f: impl FnOnce(&mut Gate) -> R) -> R {
+    let mut map = GATES
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let g = map.entry(id).or_default();
+    let out = f(g);
+    if g.lifecycle.is_none() && g.work == 0 {
+        map.remove(&id);
+    }
+    out
+}
+
+fn gate_conflict(message: String) -> ApiError {
+    ApiError {
+        status: StatusCode::CONFLICT,
+        message,
+    }
+}
+
+/// Held while a checkpoint, restore, fork or delete runs.
+struct LifecycleGuard(Uuid);
+
+impl Drop for LifecycleGuard {
+    fn drop(&mut self) {
+        with_gate(self.0, |g| g.lifecycle = None);
+    }
+}
+
+/// Takes the session's lifecycle slot, or `409` naming what holds it. Restore and fork also
+/// refuse while commands run (they would replace the machine under them); a checkpoint does
+/// not, and delete does not either (it is how a stuck session is ended).
+fn begin_lifecycle(id: Uuid, kind: &'static str) -> ApiResult<LifecycleGuard> {
+    with_gate(id, |g| {
+        if let Some(k) = g.lifecycle {
+            return Err(gate_conflict(format!(
+                "a {k} is already in progress on this session; retry when it finishes"
+            )));
+        }
+        if matches!(kind, "restore" | "fork" | "promote") && g.work > 0 {
+            return Err(gate_conflict(format!(
+                "{} command(s) are still running on this session; a {kind} would replace the machine under them",
+                g.work
+            )));
+        }
+        g.lifecycle = Some(kind);
+        Ok(LifecycleGuard(id))
+    })
+}
+
+/// Held while a command, job start or mutating file/git call runs.
+struct WorkGuard(Uuid);
+
+impl Drop for WorkGuard {
+    fn drop(&mut self) {
+        with_gate(self.0, |g| g.work = g.work.saturating_sub(1));
+    }
+}
+
+fn begin_work(id: Uuid) -> ApiResult<WorkGuard> {
+    with_gate(id, |g| {
+        if let Some(k) = g.lifecycle {
+            return Err(gate_conflict(format!(
+                "a {k} is in progress on this session; retry shortly"
+            )));
+        }
+        g.work += 1;
+        Ok(WorkGuard(id))
+    })
+}
+
+/// `If-Match: <revision>` (quoted or not, or `*`): `412` when the session moved on.
+fn check_if_match(h: &axum::http::HeaderMap, s: &Session) -> ApiResult<()> {
+    let Some(v) = h.get(axum::http::header::IF_MATCH) else {
+        return Ok(());
+    };
+    let raw = v.to_str().unwrap_or("").trim().trim_matches('"');
+    if raw == "*" {
+        return Ok(());
+    }
+    let want: u64 = raw.parse().map_err(|_| ApiError {
+        status: StatusCode::BAD_REQUEST,
+        message: "If-Match must be the session's revision number".into(),
+    })?;
+    if want != s.revision {
+        return Err(ApiError {
+            status: StatusCode::PRECONDITION_FAILED,
+            message: format!(
+                "the session changed: it is at revision {}, the request expected {want}",
+                s.revision
+            ),
+        });
+    }
+    Ok(())
+}
+
+/// Brings a stored session in line with what the daemon knows. A session past its expiry is
+/// persisted as `expired`; every route sees that. With `probe`, a sandbox the manager no longer
+/// has is also reported as `gone`, in the response only: that lookup can fail for reasons that
+/// are not the sandbox being deleted, so it is never written back and never changes what the
+/// other routes do. Only the session record and the listing ask for it.
+async fn reconcile(m: &VmManager, s: &mut Session, probe: bool) {
+    if s.state != "running" {
+        return;
+    }
+    if s.expires_at.is_some_and(|e| e <= Utc::now()) {
+        s.state = "expired".into();
+        if save(m, s).await.is_ok() {
+            record(
+                m,
+                s.id,
+                "session.expire",
+                json!({"expired_at": s.expires_at}),
+            );
+        }
+    } else if probe && m.get(s.sandbox_id).await.is_err() {
+        s.state = "gone".into();
+    }
+}
+
 async fn load(m: &VmManager, id: Uuid, tenant: &Option<String>) -> ApiResult<Session> {
     let bytes = tokio::fs::read(session_path(m, id))
         .await
         .map_err(|_| not_found(id))?;
-    let s: Session = serde_json::from_slice(&bytes).map_err(anyhow::Error::from)?;
+    let mut s: Session = serde_json::from_slice(&bytes).map_err(anyhow::Error::from)?;
     // A tenant-scoped token only ever sees its own sessions (404, not 403, like sandboxes).
     if &s.tenant != tenant {
         return Err(not_found(id));
     }
+    reconcile(m, &mut s, false).await;
     Ok(s)
 }
 
@@ -867,6 +1019,7 @@ async fn create_session(
         workspace: None,
         checkpoints: Vec::new(),
         volumes: Vec::new(),
+        revision: 0,
     };
     record(
         &m,
@@ -1028,7 +1181,7 @@ async fn create_session(
         }
         session.capabilities.confinement = enforced;
     }
-    save(&m, &session).await?;
+    save(&m, &mut session).await?;
     Ok((StatusCode::CREATED, Json(json!(session))))
 }
 
@@ -1047,9 +1200,10 @@ async fn list_sessions(
                 continue;
             }
             if let Ok(b) = tokio::fs::read(e.path()).await
-                && let Ok(s) = serde_json::from_slice::<Session>(&b)
+                && let Ok(mut s) = serde_json::from_slice::<Session>(&b)
                 && s.tenant == tenant
             {
+                reconcile(&m, &mut s, true).await;
                 items.push(s);
             }
         }
@@ -1061,11 +1215,13 @@ async fn list_sessions(
 async fn get_session(
     State(m): State<Arc<VmManager>>,
     Extension(role): Extension<Role>,
+    scope: Option<Extension<SessionScope>>,
     token_tenant: Option<Extension<TokenTenant>>,
     Path(id): Path<Uuid>,
 ) -> ApiResult<Json<Value>> {
-    require_admin(role)?;
-    let s = load(&m, id, &caller_tenant(&token_tenant)).await?;
+    authorize(role, &scope, id, Op::Read)?;
+    let mut s = load(&m, id, &caller_tenant(&token_tenant)).await?;
+    reconcile(&m, &mut s, true).await;
     Ok(Json(json!(s)))
 }
 
@@ -1074,18 +1230,150 @@ async fn delete_session(
     Extension(role): Extension<Role>,
     token_tenant: Option<Extension<TokenTenant>>,
     Path(id): Path<Uuid>,
+    headers: axum::http::HeaderMap,
 ) -> ApiResult<StatusCode> {
     require_admin(role)?;
+    let _gate = begin_lifecycle(id, "delete")?;
     let mut s = load(&m, id, &caller_tenant(&token_tenant)).await?;
+    check_if_match(&headers, &s)?;
     if s.state != "deleted" {
         // The sandbox may already be gone (TTL); the session is still closed.
         if let Err(e) = m.delete(s.sandbox_id).await {
             tracing::warn!(session = %id, error = %format!("{e:#}"), "agent session: sandbox delete");
         }
         s.state = "deleted".into();
-        save(&m, &s).await?;
+        save(&m, &mut s).await?;
         record(&m, id, "session.delete", json!({}));
     }
+    agent_session_auth::purge(&m.cfg.state_dir, id).await;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Debug, Deserialize)]
+struct MintTokenBody {
+    /// Operations to grant: read, exec, jobs, files.read, files.write, git, checkpoint, preview.
+    ops: Vec<String>,
+    #[serde(default)]
+    ttl_seconds: Option<u64>,
+    #[serde(default)]
+    label: Option<String>,
+}
+
+/// `POST .../tokens`: mint an expiring credential that works on this session only. Admin only,
+/// and a scoped token can never mint another (the role it carries is read-only).
+async fn mint_token(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    token_tenant: Option<Extension<TokenTenant>>,
+    Path(id): Path<Uuid>,
+    Json(body): Json<MintTokenBody>,
+) -> ApiResult<(StatusCode, Json<Value>)> {
+    require_admin(role)?;
+    let bad = |message: String| ApiError {
+        status: StatusCode::BAD_REQUEST,
+        message,
+    };
+    let s = load(&m, id, &caller_tenant(&token_tenant)).await?;
+    running(&s)?;
+    if body.ops.is_empty() {
+        return Err(bad("ops must name at least one operation".into()));
+    }
+    let mut ops = Vec::new();
+    for o in &body.ops {
+        let op = Op::parse(o).ok_or_else(|| {
+            bad(format!(
+                "unknown operation {o:?}; grantable: {}",
+                Op::ALL.map(Op::as_str).join(", ")
+            ))
+        })?;
+        if !ops.contains(&op) {
+            ops.push(op);
+        }
+    }
+    let ttl = body
+        .ttl_seconds
+        .unwrap_or(agent_session_auth::DEFAULT_TTL_SECS);
+    if ttl == 0 || ttl > agent_session_auth::MAX_TTL_SECS {
+        return Err(bad(format!(
+            "ttl_seconds must be 1-{}",
+            agent_session_auth::MAX_TTL_SECS
+        )));
+    }
+    let label = match body.label {
+        Some(l) if l.trim().is_empty() || l.len() > 100 || l.chars().any(char::is_control) => {
+            return Err(bad("label is 1-100 printable characters".into()));
+        }
+        l => l,
+    };
+    // A token never outlives its session's sandbox.
+    let mut expires_at = Utc::now() + chrono::Duration::seconds(ttl as i64);
+    if let Some(e) = s.expires_at {
+        expires_at = expires_at.min(e);
+    }
+    if expires_at <= Utc::now() {
+        return Err(ApiError {
+            status: StatusCode::CONFLICT,
+            message: format!("agent session {id} has expired"),
+        });
+    }
+    let minted = agent_session_auth::mint(
+        &m.cfg.state_dir,
+        id,
+        s.tenant.clone(),
+        ops,
+        label,
+        expires_at,
+    )
+    .await?;
+    // The ledger gets what was granted and until when, never the credential.
+    record(
+        &m,
+        id,
+        "token.mint",
+        json!({"token": minted.record.id, "ops": minted.record.ops, "expires_at": minted.record.expires_at}),
+    );
+    Ok((
+        StatusCode::CREATED,
+        Json(json!({
+            "id": minted.record.id,
+            "token": minted.secret_token,
+            "session": id,
+            "ops": minted.record.ops,
+            "label": minted.record.label,
+            "expires_at": minted.record.expires_at,
+            "note": "shown once; use as `Authorization: Bearer <token>` on /v1/agents/sessions/{id}/...",
+        })),
+    ))
+}
+
+async fn list_tokens(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    token_tenant: Option<Extension<TokenTenant>>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<Value>> {
+    require_admin(role)?;
+    load(&m, id, &caller_tenant(&token_tenant)).await?;
+    Ok(Json(json!({
+        "items": agent_session_auth::list(&m.cfg.state_dir, id).await
+    })))
+}
+
+async fn revoke_token(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    token_tenant: Option<Extension<TokenTenant>>,
+    Path((id, token)): Path<(Uuid, Uuid)>,
+) -> ApiResult<StatusCode> {
+    require_admin(role)?;
+    load(&m, id, &caller_tenant(&token_tenant)).await?;
+    if !agent_session_auth::revoke(&m.cfg.state_dir, id, token).await? {
+        return Err(ApiError {
+            status: StatusCode::NOT_FOUND,
+            message: "token not found".into(),
+        });
+    }
+    record(&m, id, "token.revoke", json!({"token": token}));
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1109,11 +1397,13 @@ struct ExecBody {
 async fn exec_session(
     State(m): State<Arc<VmManager>>,
     Extension(role): Extension<Role>,
+    scope: Option<Extension<SessionScope>>,
     token_tenant: Option<Extension<TokenTenant>>,
     Path(id): Path<Uuid>,
     Json(body): Json<ExecBody>,
 ) -> ApiResult<Json<Value>> {
-    require_admin(role)?;
+    authorize(role, &scope, id, Op::Exec)?;
+    let _work = begin_work(id)?;
     let s = load(&m, id, &caller_tenant(&token_tenant)).await?;
     running(&s)?;
     if body.command.trim().is_empty() {
@@ -1167,12 +1457,16 @@ struct CheckpointBody {
 async fn checkpoint(
     State(m): State<Arc<VmManager>>,
     Extension(role): Extension<Role>,
+    scope: Option<Extension<SessionScope>>,
     token_tenant: Option<Extension<TokenTenant>>,
     Path(id): Path<Uuid>,
+    headers: axum::http::HeaderMap,
     body: Option<Json<CheckpointBody>>,
 ) -> ApiResult<Json<Value>> {
-    require_admin(role)?;
+    authorize(role, &scope, id, Op::Checkpoint)?;
+    let _gate = begin_lifecycle(id, "checkpoint")?;
     let mut s = load(&m, id, &caller_tenant(&token_tenant)).await?;
+    check_if_match(&headers, &s)?;
     running(&s)?;
     let body = body.map(|Json(b)| b).unwrap_or_default();
     let tag = body
@@ -1200,7 +1494,7 @@ async fn checkpoint(
     };
     s.checkpoints.retain(|c| c.tag != tag);
     s.checkpoints.push(cp.clone());
-    save(&m, &s).await?;
+    save(&m, &mut s).await?;
     record(&m, id, "checkpoint", json!({"tag": tag, "memory": memory}));
     Ok(Json(json!(cp)))
 }
@@ -1215,10 +1509,13 @@ async fn restore(
     Extension(role): Extension<Role>,
     token_tenant: Option<Extension<TokenTenant>>,
     Path(id): Path<Uuid>,
+    headers: axum::http::HeaderMap,
     Json(body): Json<RestoreBody>,
 ) -> ApiResult<Json<Value>> {
     require_admin(role)?;
+    let _gate = begin_lifecycle(id, "restore")?;
     let s = load(&m, id, &caller_tenant(&token_tenant)).await?;
+    check_if_match(&headers, &s)?;
     running(&s)?;
     if !s.checkpoints.iter().any(|c| c.tag == body.tag) {
         return Err(ApiError {
@@ -1250,10 +1547,13 @@ async fn fork(
     actor: Option<Extension<AuditActor>>,
     token_tenant: Option<Extension<TokenTenant>>,
     Path(id): Path<Uuid>,
+    headers: axum::http::HeaderMap,
     body: Option<Json<ForkBody>>,
 ) -> ApiResult<(StatusCode, Json<Value>)> {
     require_admin(role)?;
+    let _gate = begin_lifecycle(id, "fork")?;
     let mut s = load(&m, id, &caller_tenant(&token_tenant)).await?;
+    check_if_match(&headers, &s)?;
     running(&s)?;
     if let Some(why) = fork_refusal(&s) {
         // Never a silent fallback: a caller that forks to explore in parallel must know.
@@ -1284,12 +1584,23 @@ async fn fork(
     }))
     .map_err(anyhow::Error::from)?;
     let actor_name = actor.as_ref().map(|a| a.0.0.as_str());
+    // The parent's files at the fork instant are every child's starting point, so they become
+    // each child's baseline: a child's `artifacts` and a later `promote` then see exactly what it
+    // did since the fork. The lifecycle gate means nothing is running on the parent meanwhile.
+    let seed = match &s.workspace {
+        Some(w) if w.baseline => m
+            .sandbox_manifest(s.sandbox_id, vec![w.path.clone()])
+            .await
+            .ok()
+            .map(|mf| (w.path.clone(), mf)),
+        _ => None,
+    };
     let report = m.fork_vm_spec(s.sandbox_id, spec, actor_name).await?;
 
     let mut kids = Vec::new();
     for child in &report.children {
         let cid = Uuid::new_v4();
-        let cs = Session {
+        let mut cs = Session {
             id: cid,
             agent: s.agent.clone(),
             sandbox_id: child.id,
@@ -1305,13 +1616,24 @@ async fn fork(
             workspace: s.workspace.clone(),
             volumes: Vec::new(),
             checkpoints: Vec::new(),
+            revision: 0,
         };
-        save(&m, &cs).await?;
+        let seeded = match &seed {
+            Some((path, mf)) => m
+                .sandbox_baseline_seed(child.id, vec![path.clone()], mf.clone())
+                .await
+                .is_ok(),
+            None => false,
+        };
+        if let Some(w) = cs.workspace.as_mut() {
+            w.baseline = seeded;
+        }
+        save(&m, &mut cs).await?;
         record(&m, cid, "session.fork_child", json!({"parent": id}));
         s.children.push(cid);
         kids.push(cs);
     }
-    save(&m, &s).await?;
+    save(&m, &mut s).await?;
     record(
         &m,
         id,
@@ -1329,6 +1651,282 @@ async fn fork(
     ))
 }
 
+// ---------------------------------------------------------------------------------------
+// Promote: apply what a fork child did to its workspace onto its parent.
+
+const MAX_PROMOTE_CHANGES: usize = 2000;
+
+#[derive(Debug, Deserialize, Default)]
+struct PromoteBody {
+    /// Compute and return the plan; change nothing.
+    #[serde(default)]
+    dry_run: bool,
+    /// The `plan_id` of a plan you reviewed: the apply is refused if the plan is different now.
+    #[serde(default)]
+    plan_id: Option<String>,
+    /// Apply the paths that merge cleanly and leave conflicting ones alone (default: any
+    /// conflict refuses the whole promotion).
+    #[serde(default)]
+    skip_conflicts: bool,
+    /// Only these files or directories (absolute, inside the workspace).
+    #[serde(default)]
+    paths: Option<Vec<String>>,
+}
+
+/// A digest of a plan, so an apply can say "the plan I reviewed".
+fn plan_digest(plan: &fluxvm_scheduler::changes::PromotionPlan) -> String {
+    use sha2::{Digest, Sha256};
+    let mut text = String::new();
+    for c in &plan.apply {
+        text.push_str(&format!("apply\t{}\t{}\n", c.kind, c.path));
+    }
+    for p in &plan.already_applied {
+        text.push_str(&format!("already\t{p}\n"));
+    }
+    for c in &plan.conflicts {
+        text.push_str(&format!("conflict\t{}\t{}\n", c.reason, c.path));
+    }
+    Sha256::digest(text.as_bytes())
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+/// `POST .../{child}/promote`: three-way merge of the child's workspace changes onto its parent.
+/// Admin only. The parent gets a disk checkpoint first; a path the parent also changed is a
+/// conflict, never overwritten.
+async fn promote(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    token_tenant: Option<Extension<TokenTenant>>,
+    Path(id): Path<Uuid>,
+    body: Option<Json<PromoteBody>>,
+) -> ApiResult<Json<Value>> {
+    require_admin(role)?;
+    let body = body.map(|Json(b)| b).unwrap_or_default();
+    let conflict = |message: String| ApiError {
+        status: StatusCode::CONFLICT,
+        message,
+    };
+    let tenant = caller_tenant(&token_tenant);
+    let _child_gate = begin_lifecycle(id, "promote")?;
+    let child = load(&m, id, &tenant).await?;
+    running(&child)?;
+    let parent_id = child.parent.ok_or_else(|| {
+        conflict("this session is not a fork child: there is no parent to promote into".into())
+    })?;
+    let _parent_gate = begin_lifecycle(parent_id, "promote")?;
+    let mut parent = load(&m, parent_id, &tenant).await?;
+    running(&parent)?;
+    let ws = match (&child.workspace, &parent.workspace) {
+        (Some(c), Some(p)) if c.baseline && c.path == p.path => c.path.clone(),
+        _ => {
+            return Err(conflict(
+                "promotion needs a workspace with a baseline on both sides; the child's baseline is \
+                 recorded at fork time, so a child forked before this was available cannot be promoted"
+                    .into(),
+            ));
+        }
+    };
+    let filter: Option<Vec<String>> = match body.paths {
+        Some(ps) => {
+            let mut out = Vec::new();
+            for p in ps {
+                let t = p.trim_end_matches('/').to_string();
+                if !valid_file_path(&t) || !(t == ws || t.starts_with(&format!("{ws}/"))) {
+                    return Err(ApiError {
+                        status: StatusCode::BAD_REQUEST,
+                        message: format!("paths entries must be absolute and inside {ws}"),
+                    });
+                }
+                out.push(t);
+            }
+            Some(out)
+        }
+        None => None,
+    };
+    m.ensure_running_for_request(child.sandbox_id).await?;
+    m.ensure_running_for_request(parent.sandbox_id).await?;
+    let mut plan = m
+        .sandbox_promotion_plan(child.sandbox_id, parent.sandbox_id, vec![ws.clone()])
+        .await
+        .map_err(change_error)?;
+    // Paths come from the guest's own file listing: only ones inside the workspace and plainly
+    // nameable are ever transferred. The rest are reported, not moved.
+    let safe = |p: &str| valid_file_path(p) && p.starts_with(&format!("{ws}/"));
+    let (ok, unsafe_): (Vec<_>, Vec<_>) = plan.apply.drain(..).partition(|c| safe(&c.path));
+    plan.apply = ok;
+    for c in unsafe_ {
+        plan.conflicts
+            .push(fluxvm_scheduler::changes::PromotionConflict {
+                path: c.path,
+                reason: "path is not safe to transfer",
+            });
+    }
+    if let Some(f) = &filter {
+        let inside = |p: &str| f.iter().any(|r| p == r || p.starts_with(&format!("{r}/")));
+        plan.apply.retain(|c| inside(&c.path));
+        plan.conflicts.retain(|c| inside(&c.path));
+        plan.already_applied.retain(|p| inside(p));
+    }
+    if plan.apply.len() > MAX_PROMOTE_CHANGES {
+        return Err(ApiError {
+            status: StatusCode::PAYLOAD_TOO_LARGE,
+            message: format!(
+                "{} changes to apply; narrow it with `paths` (at most {MAX_PROMOTE_CHANGES} at once)",
+                plan.apply.len()
+            ),
+        });
+    }
+    let plan_id = plan_digest(&plan);
+    if body.dry_run {
+        return Ok(Json(json!({
+            "session": id, "into": parent_id, "dry_run": true, "applied": false,
+            "plan_id": plan_id, "plan": plan,
+        })));
+    }
+    if let Some(want) = &body.plan_id
+        && want != &plan_id
+    {
+        return Err(conflict(
+            "the plan is different from the one you reviewed (a side changed); dry-run again"
+                .into(),
+        ));
+    }
+    if !plan.conflicts.is_empty() && !body.skip_conflicts {
+        return Err(ApiError {
+            status: StatusCode::CONFLICT,
+            message: format!(
+                "{} conflicting path(s), nothing was changed: {}; resolve them or pass skip_conflicts",
+                plan.conflicts.len(),
+                plan.conflicts
+                    .iter()
+                    .take(5)
+                    .map(|c| format!("{} ({})", c.path, c.reason))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        });
+    }
+    if plan.apply.is_empty() {
+        return Ok(Json(json!({
+            "session": id, "into": parent_id, "applied": false, "plan_id": plan_id,
+            "plan": plan, "note": "nothing to apply",
+        })));
+    }
+    if !parent.capabilities.snapshot {
+        return Err(conflict(format!(
+            "backend {} cannot checkpoint the parent, and promotion never writes without one",
+            parent.backend
+        )));
+    }
+    // The way back: a disk checkpoint of the parent immediately before the first write.
+    let tag = format!(
+        "pre-promote-{}-{}",
+        &id.to_string()[..8],
+        Utc::now().format("%H%M%S")
+    );
+    m.create_vm_snapshot_with(parent.sandbox_id, &tag, false)
+        .await?;
+    parent.checkpoints.push(Checkpoint {
+        tag: tag.clone(),
+        memory: false,
+        created_at: Utc::now(),
+    });
+    save(&m, &mut parent).await?;
+
+    let mut applied: Vec<Value> = Vec::new();
+    let fail = |applied: &[Value], path: &str, why: String| ApiError {
+        status: StatusCode::BAD_GATEWAY,
+        message: format!(
+            "promotion stopped at {path}: {why}. {} path(s) were already applied; restore the parent's \
+             checkpoint {tag:?} to undo them",
+            applied.len()
+        ),
+    };
+    for c in &plan.apply {
+        let step: Result<(), String> = async {
+            if c.kind == "deleted" {
+                let out = m
+                    .exec_with_policy(
+                        parent.sandbox_id,
+                        format!("rm -f -- {}", shell_quote(&c.path)),
+                        Some(30),
+                        None,
+                    )
+                    .await
+                    .map_err(|e| format!("{e:#}"))?;
+                return match serde_json::to_value(&out)
+                    .ok()
+                    .and_then(|v| v["exit_code"].as_i64())
+                {
+                    Some(0) => Ok(()),
+                    code => Err(format!("rm exited {code:?}")),
+                };
+            }
+            let (content, mode) = match m
+                .get_file(child.sandbox_id, c.path.clone())
+                .await
+                .map_err(|e| format!("reading from the child: {e:#}"))?
+            {
+                fluxvm_guest_protocol::AgentResponse::FileContent {
+                    content_base64,
+                    mode,
+                } => (content_base64, mode),
+                other => return Err(format!("unexpected guest response: {other:?}")),
+            };
+            if let Some(dir) = std::path::Path::new(&c.path)
+                .parent()
+                .and_then(|d| d.to_str())
+            {
+                m.exec_with_policy(
+                    parent.sandbox_id,
+                    format!("mkdir -p -- {}", shell_quote(dir)),
+                    Some(30),
+                    None,
+                )
+                .await
+                .map_err(|e| format!("creating {dir}: {e:#}"))?;
+            }
+            m.put_file(parent.sandbox_id, c.path.clone(), content, Some(mode))
+                .await
+                .map_err(|e| format!("writing to the parent: {e:#}"))?;
+            Ok(())
+        }
+        .await;
+        match step {
+            Ok(()) => applied.push(json!({"path": c.path, "kind": c.kind})),
+            Err(why) => {
+                record(
+                    &m,
+                    parent_id,
+                    "promote.failed",
+                    json!({"child": id, "path": c.path, "reason": why, "applied": applied.len(), "checkpoint": tag}),
+                );
+                return Err(fail(&applied, &c.path, why));
+            }
+        }
+    }
+    record(
+        &m,
+        parent_id,
+        "promote",
+        json!({"child": id, "applied": applied.len(), "already_applied": plan.already_applied.len(),
+               "skipped_conflicts": plan.conflicts.len(), "checkpoint": tag, "plan_id": plan_id}),
+    );
+    record(
+        &m,
+        id,
+        "promote.out",
+        json!({"into": parent_id, "applied": applied.len(), "plan_id": plan_id}),
+    );
+    Ok(Json(json!({
+        "session": id, "into": parent_id, "applied": true, "plan_id": plan_id,
+        "checkpoint": tag, "changes": applied,
+        "already_applied": plan.already_applied, "skipped_conflicts": plan.conflicts,
+    })))
+}
+
 #[derive(Debug, Deserialize, Default)]
 struct EventsQuery {
     #[serde(default)]
@@ -1338,11 +1936,12 @@ struct EventsQuery {
 async fn events(
     State(m): State<Arc<VmManager>>,
     Extension(role): Extension<Role>,
+    scope: Option<Extension<SessionScope>>,
     token_tenant: Option<Extension<TokenTenant>>,
     Path(id): Path<Uuid>,
     Query(q): Query<EventsQuery>,
 ) -> ApiResult<Json<Value>> {
-    require_admin(role)?;
+    authorize(role, &scope, id, Op::Read)?;
     let s = load(&m, id, &caller_tenant(&token_tenant)).await?;
     let ledger = read_ledger(&m, id, q.since);
     let vm_events = match fluxvm_scheduler::events::global() {
@@ -1383,10 +1982,11 @@ fn number_steps(mut steps: Vec<(DateTime<Utc>, Value)>) -> Vec<Value> {
 async fn trajectory(
     State(m): State<Arc<VmManager>>,
     Extension(role): Extension<Role>,
+    scope: Option<Extension<SessionScope>>,
     token_tenant: Option<Extension<TokenTenant>>,
     Path(id): Path<Uuid>,
 ) -> ApiResult<Json<Value>> {
-    require_admin(role)?;
+    authorize(role, &scope, id, Op::Read)?;
     let s = load(&m, id, &caller_tenant(&token_tenant)).await?;
     let mut steps: Vec<(DateTime<Utc>, Value)> = Vec::new();
     for e in read_ledger(&m, id, None) {
@@ -1432,10 +2032,11 @@ async fn trajectory(
 async fn artifacts(
     State(m): State<Arc<VmManager>>,
     Extension(role): Extension<Role>,
+    scope: Option<Extension<SessionScope>>,
     token_tenant: Option<Extension<TokenTenant>>,
     Path(id): Path<Uuid>,
 ) -> ApiResult<Json<Value>> {
-    require_admin(role)?;
+    authorize(role, &scope, id, Op::Read)?;
     let s = load(&m, id, &caller_tenant(&token_tenant)).await?;
     let ledger = read_ledger(&m, id, None);
     let execs = ledger.iter().filter(|e| e["kind"] == "exec").count();
@@ -1511,11 +2112,12 @@ struct PreviewBody {
 async fn create_preview(
     State(m): State<Arc<VmManager>>,
     Extension(role): Extension<Role>,
+    scope: Option<Extension<SessionScope>>,
     token_tenant: Option<Extension<TokenTenant>>,
     Path(id): Path<Uuid>,
     Json(body): Json<PreviewBody>,
 ) -> ApiResult<(StatusCode, Json<Value>)> {
-    require_admin(role)?;
+    authorize(role, &scope, id, Op::Preview)?;
     let s = load(&m, id, &caller_tenant(&token_tenant)).await?;
     running(&s)?;
     let bad = |msg: &str| ApiError {
@@ -1568,10 +2170,11 @@ async fn create_preview(
 async fn list_previews(
     State(m): State<Arc<VmManager>>,
     Extension(role): Extension<Role>,
+    scope: Option<Extension<SessionScope>>,
     token_tenant: Option<Extension<TokenTenant>>,
     Path(id): Path<Uuid>,
 ) -> ApiResult<Json<Value>> {
-    require_admin(role)?;
+    authorize(role, &scope, id, Op::Read)?;
     load(&m, id, &caller_tenant(&token_tenant)).await?;
     let now = Utc::now();
     let mut items = Vec::new();
@@ -1597,10 +2200,11 @@ async fn list_previews(
 async fn revoke_preview(
     State(m): State<Arc<VmManager>>,
     Extension(role): Extension<Role>,
+    scope: Option<Extension<SessionScope>>,
     token_tenant: Option<Extension<TokenTenant>>,
     Path((id, token)): Path<(Uuid, String)>,
 ) -> ApiResult<StatusCode> {
-    require_admin(role)?;
+    authorize(role, &scope, id, Op::Preview)?;
     load(&m, id, &caller_tenant(&token_tenant)).await?;
     match read_preview(&m, &token) {
         Some(p) if p.session == id => {
@@ -2262,11 +2866,13 @@ fn base64_decode(s: &str) -> Vec<u8> {
 async fn job_start(
     State(m): State<Arc<VmManager>>,
     Extension(role): Extension<Role>,
+    scope: Option<Extension<SessionScope>>,
     token_tenant: Option<Extension<TokenTenant>>,
     Path(id): Path<Uuid>,
     Json(body): Json<JobBody>,
 ) -> ApiResult<(StatusCode, Json<Value>)> {
-    require_admin(role)?;
+    authorize(role, &scope, id, Op::Jobs)?;
+    let _work = begin_work(id)?;
     let s = load(&m, id, &caller_tenant(&token_tenant)).await?;
     running(&s)?;
     if body.command.trim().is_empty() {
@@ -2325,11 +2931,12 @@ struct JobQuery {
 async fn job_read(
     State(m): State<Arc<VmManager>>,
     Extension(role): Extension<Role>,
+    scope: Option<Extension<SessionScope>>,
     token_tenant: Option<Extension<TokenTenant>>,
     Path((id, job)): Path<(Uuid, Uuid)>,
     Query(q): Query<JobQuery>,
 ) -> ApiResult<Json<Value>> {
-    require_admin(role)?;
+    authorize(role, &scope, id, Op::Jobs)?;
     let s = load(&m, id, &caller_tenant(&token_tenant)).await?;
     running(&s)?;
     m.ensure_running_for_request(s.sandbox_id).await?;
@@ -2368,10 +2975,11 @@ async fn job_read(
 async fn job_kill(
     State(m): State<Arc<VmManager>>,
     Extension(role): Extension<Role>,
+    scope: Option<Extension<SessionScope>>,
     token_tenant: Option<Extension<TokenTenant>>,
     Path((id, job)): Path<(Uuid, Uuid)>,
 ) -> ApiResult<StatusCode> {
-    require_admin(role)?;
+    authorize(role, &scope, id, Op::Jobs)?;
     let s = load(&m, id, &caller_tenant(&token_tenant)).await?;
     running(&s)?;
     let pid = shell_quote(&format!("{JOBS_DIR}/{job}.pid"));
@@ -2473,11 +3081,12 @@ async fn guest_exec(m: &Arc<VmManager>, s: &Session, cmd: String) -> ApiResult<V
 async fn files_list(
     State(m): State<Arc<VmManager>>,
     Extension(role): Extension<Role>,
+    scope: Option<Extension<SessionScope>>,
     token_tenant: Option<Extension<TokenTenant>>,
     Path(id): Path<Uuid>,
     Query(q): Query<PathQuery>,
 ) -> ApiResult<Json<Value>> {
-    require_admin(role)?;
+    authorize(role, &scope, id, Op::FilesRead)?;
     let s = load(&m, id, &caller_tenant(&token_tenant)).await?;
     running(&s)?;
     path_arg(&q.path)?;
@@ -2511,11 +3120,12 @@ async fn files_list(
 async fn files_read(
     State(m): State<Arc<VmManager>>,
     Extension(role): Extension<Role>,
+    scope: Option<Extension<SessionScope>>,
     token_tenant: Option<Extension<TokenTenant>>,
     Path(id): Path<Uuid>,
     Query(q): Query<PathQuery>,
 ) -> ApiResult<Json<Value>> {
-    require_admin(role)?;
+    authorize(role, &scope, id, Op::FilesRead)?;
     let s = load(&m, id, &caller_tenant(&token_tenant)).await?;
     running(&s)?;
     path_arg(&q.path)?;
@@ -2548,11 +3158,13 @@ fn yes() -> bool {
 async fn files_write(
     State(m): State<Arc<VmManager>>,
     Extension(role): Extension<Role>,
+    scope: Option<Extension<SessionScope>>,
     token_tenant: Option<Extension<TokenTenant>>,
     Path(id): Path<Uuid>,
     Json(body): Json<WriteBody>,
 ) -> ApiResult<Json<Value>> {
-    require_admin(role)?;
+    authorize(role, &scope, id, Op::FilesWrite)?;
+    let _work = begin_work(id)?;
     let s = load(&m, id, &caller_tenant(&token_tenant)).await?;
     running(&s)?;
     path_arg(&body.path)?;
@@ -2607,11 +3219,13 @@ async fn files_write(
 async fn files_delete(
     State(m): State<Arc<VmManager>>,
     Extension(role): Extension<Role>,
+    scope: Option<Extension<SessionScope>>,
     token_tenant: Option<Extension<TokenTenant>>,
     Path(id): Path<Uuid>,
     Query(q): Query<PathQuery>,
 ) -> ApiResult<StatusCode> {
-    require_admin(role)?;
+    authorize(role, &scope, id, Op::FilesWrite)?;
+    let _work = begin_work(id)?;
     let s = load(&m, id, &caller_tenant(&token_tenant)).await?;
     running(&s)?;
     path_arg(&q.path)?;
@@ -2772,11 +3386,12 @@ fn truncate_output(s: String) -> (String, bool) {
 async fn git_status(
     State(m): State<Arc<VmManager>>,
     Extension(role): Extension<Role>,
+    scope: Option<Extension<SessionScope>>,
     token_tenant: Option<Extension<TokenTenant>>,
     Path(id): Path<Uuid>,
     Query(q): Query<GitQuery>,
 ) -> ApiResult<Json<Value>> {
-    require_admin(role)?;
+    authorize(role, &scope, id, Op::Git)?;
     let s = load(&m, id, &caller_tenant(&token_tenant)).await?;
     running(&s)?;
     let repo = repo_dir(&s, &q.repo)?;
@@ -2793,11 +3408,12 @@ async fn git_status(
 async fn git_diff(
     State(m): State<Arc<VmManager>>,
     Extension(role): Extension<Role>,
+    scope: Option<Extension<SessionScope>>,
     token_tenant: Option<Extension<TokenTenant>>,
     Path(id): Path<Uuid>,
     Query(q): Query<GitQuery>,
 ) -> ApiResult<Json<Value>> {
-    require_admin(role)?;
+    authorize(role, &scope, id, Op::Git)?;
     let s = load(&m, id, &caller_tenant(&token_tenant)).await?;
     running(&s)?;
     let repo = repo_dir(&s, &q.repo)?;
@@ -2832,11 +3448,12 @@ async fn git_diff(
 async fn git_log(
     State(m): State<Arc<VmManager>>,
     Extension(role): Extension<Role>,
+    scope: Option<Extension<SessionScope>>,
     token_tenant: Option<Extension<TokenTenant>>,
     Path(id): Path<Uuid>,
     Query(q): Query<GitQuery>,
 ) -> ApiResult<Json<Value>> {
-    require_admin(role)?;
+    authorize(role, &scope, id, Op::Git)?;
     let s = load(&m, id, &caller_tenant(&token_tenant)).await?;
     running(&s)?;
     let repo = repo_dir(&s, &q.repo)?;
@@ -2877,11 +3494,13 @@ struct CommitBody {
 async fn git_commit(
     State(m): State<Arc<VmManager>>,
     Extension(role): Extension<Role>,
+    scope: Option<Extension<SessionScope>>,
     token_tenant: Option<Extension<TokenTenant>>,
     Path(id): Path<Uuid>,
     Json(body): Json<CommitBody>,
 ) -> ApiResult<Json<Value>> {
-    require_admin(role)?;
+    authorize(role, &scope, id, Op::Git)?;
+    let _work = begin_work(id)?;
     let s = load(&m, id, &caller_tenant(&token_tenant)).await?;
     running(&s)?;
     let repo = repo_dir(&s, &body.repo)?;
@@ -2937,11 +3556,13 @@ struct BranchBody {
 async fn git_branch(
     State(m): State<Arc<VmManager>>,
     Extension(role): Extension<Role>,
+    scope: Option<Extension<SessionScope>>,
     token_tenant: Option<Extension<TokenTenant>>,
     Path(id): Path<Uuid>,
     Json(body): Json<BranchBody>,
 ) -> ApiResult<Json<Value>> {
-    require_admin(role)?;
+    authorize(role, &scope, id, Op::Git)?;
+    let _work = begin_work(id)?;
     let s = load(&m, id, &caller_tenant(&token_tenant)).await?;
     running(&s)?;
     if !valid_branch(&body.name) {
@@ -3066,6 +3687,76 @@ mod tests {
         assert!(fs(json!({"enforcement": "maybe"})).is_err());
         assert!(fs(json!("x")).is_err());
         assert!(compile_policy(None).unwrap().exec.is_none());
+    }
+
+    fn fixture_session() -> Session {
+        Session {
+            id: Uuid::new_v4(),
+            agent: "t".into(),
+            sandbox_id: Uuid::new_v4(),
+            backend: "vz".into(),
+            parent: None,
+            children: Vec::new(),
+            tenant: None,
+            state: "running".into(),
+            created_at: Utc::now(),
+            expires_at: None,
+            capabilities: capabilities_for("vz", false),
+            policy: PolicyReport::default(),
+            workspace: None,
+            checkpoints: Vec::new(),
+            volumes: Vec::new(),
+            revision: 0,
+        }
+    }
+
+    #[test]
+    fn conflicting_lifecycle_operations_are_refused_not_interleaved() {
+        let id = Uuid::new_v4();
+        let ck = begin_lifecycle(id, "checkpoint").unwrap();
+        // A second lifecycle op and any new work are refused while one runs.
+        assert!(begin_lifecycle(id, "restore").is_err());
+        assert!(begin_lifecycle(id, "delete").is_err());
+        assert!(begin_work(id).is_err());
+        drop(ck);
+        // Work in flight blocks restore and fork, but not a checkpoint or a delete.
+        let w = begin_work(id).unwrap();
+        assert!(begin_lifecycle(id, "restore").is_err());
+        assert!(begin_lifecycle(id, "fork").is_err());
+        drop(begin_lifecycle(id, "checkpoint").unwrap());
+        drop(begin_lifecycle(id, "delete").unwrap());
+        drop(w);
+        drop(begin_lifecycle(id, "restore").unwrap());
+        // Another session is unaffected, and an idle gate leaves no entry behind.
+        let other = Uuid::new_v4();
+        let _held = begin_lifecycle(id, "fork").unwrap();
+        assert!(begin_work(other).is_ok());
+        drop(_held);
+        assert!(!GATES.get().unwrap().lock().unwrap().contains_key(&id));
+    }
+
+    #[test]
+    fn if_match_compares_the_revision() {
+        use axum::http::{HeaderMap, HeaderValue, header::IF_MATCH};
+        let mut s = fixture_session();
+        s.revision = 4;
+        let h = |v: &str| {
+            let mut m = HeaderMap::new();
+            m.insert(IF_MATCH, HeaderValue::from_str(v).unwrap());
+            m
+        };
+        assert!(check_if_match(&HeaderMap::new(), &s).is_ok());
+        assert!(check_if_match(&h("4"), &s).is_ok());
+        assert!(check_if_match(&h("\"4\""), &s).is_ok());
+        assert!(check_if_match(&h("*"), &s).is_ok());
+        assert_eq!(
+            check_if_match(&h("3"), &s).unwrap_err().status,
+            StatusCode::PRECONDITION_FAILED
+        );
+        assert_eq!(
+            check_if_match(&h("x"), &s).unwrap_err().status,
+            StatusCode::BAD_REQUEST
+        );
     }
 
     #[test]

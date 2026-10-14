@@ -40,6 +40,7 @@ mod rate_limit;
 #[cfg(target_os = "macos")]
 pub mod self_control;
 pub use netobs_api::install_netobs;
+mod agent_session_auth;
 mod agent_sessions;
 mod macos_pool_api;
 mod speculate_api;
@@ -163,10 +164,27 @@ async fn auth_middleware(State(auth): State<AuthState>, mut req: Request, next: 
         .and_then(|h| h.strip_prefix("Bearer "))
         .map(str::to_string);
 
+    // Set only for an `fxst_` session token: confines the request to one session's routes.
+    let mut session_scope: Option<agent_session_auth::SessionScope> = None;
     let (role, token_name, token_tenant) = if !must && !m.cfg.auth.has_credentials() {
         (Some(Role::Admin), Some("anonymous-admin".to_string()), None)
     } else if let Some(ref t) = presented {
-        if let Some(entry) = m
+        if t.starts_with(agent_session_auth::TOKEN_PREFIX) {
+            // Read-only role as defence in depth: the path check below and the handlers'
+            // `authorize` are what actually confine it, and neither consults the admin role.
+            match agent_session_auth::resolve(&m.cfg.state_dir, t).await {
+                Some(sc) => {
+                    let who = (
+                        Some(Role::ReadOnly),
+                        Some(format!("session-token:{}", sc.token_id)),
+                        sc.tenant.clone(),
+                    );
+                    session_scope = Some(sc);
+                    who
+                }
+                None => (None, None, None),
+            }
+        } else if let Some(entry) = m
             .cfg
             .auth
             .tokens
@@ -221,6 +239,16 @@ async fn auth_middleware(State(auth): State<AuthState>, mut req: Request, next: 
     };
     match role {
         Some(role) => {
+            if let Some(sc) = session_scope {
+                if !agent_session_auth::path_allowed(&path, sc.session) {
+                    return (
+                        StatusCode::FORBIDDEN,
+                        Json(json!({"error": "a session token only reaches its own session's routes"})),
+                    )
+                        .into_response();
+                }
+                req.extensions_mut().insert(sc);
+            }
             req.extensions_mut().insert(role);
             if let Some(name) = token_name.clone() {
                 req.extensions_mut().insert(AuditActor(name));
@@ -808,7 +836,13 @@ pub fn router(manager: Arc<VmManager>) -> Router {
             idempotency::middleware,
         ))
         .merge(speculate_api::routes())
-        .merge(agent_sessions::routes())
+        // Its own `Idempotency-Key` layer: the one above only wraps routes added before it.
+        .merge(
+            agent_sessions::routes().layer(middleware::from_fn_with_state(
+                manager.clone(),
+                idempotency::middleware,
+            )),
+        )
         .merge(macos_pool_api::routes())
         .merge(vz_api::routes())
         .merge(volumes_api::routes())
@@ -6999,6 +7033,255 @@ mod tests {
             }
             let (_, list) = call(app, "GET", "/v1/agents/sessions", "other", None).await;
             assert!(!list.contains(&id.to_string()), "{list}");
+        }
+
+        #[tokio::test]
+        async fn a_session_token_reaches_only_its_session_and_only_what_it_grants() {
+            let m = procbox_manager(tenant_tokens(), false);
+            let id = seed_session(&m, Some("acme"), "vz", "running");
+            let other = seed_session(&m, Some("acme"), "vz", "running");
+            let app = router(m);
+            let uri = format!("/v1/agents/sessions/{id}");
+
+            // Minting is admin-only and tenant-checked; bad requests mint nothing.
+            let tok = format!("{uri}/tokens");
+            let (st, _) = call(
+                app.clone(),
+                "POST",
+                &tok,
+                "other",
+                Some(r#"{"ops":["read"]}"#),
+            )
+            .await;
+            assert_eq!(st, StatusCode::NOT_FOUND);
+            for bad in [
+                r#"{"ops":[]}"#,
+                r#"{"ops":["restore"]}"#,
+                r#"{"ops":["read"],"ttl_seconds":999999}"#,
+            ] {
+                let (st, b) = call(app.clone(), "POST", &tok, "acme", Some(bad)).await;
+                assert_eq!(st, StatusCode::BAD_REQUEST, "{bad}: {b}");
+            }
+            let (st, body) = call(
+                app.clone(),
+                "POST",
+                &tok,
+                "acme",
+                Some(r#"{"ops":["read","checkpoint"],"ttl_seconds":600}"#),
+            )
+            .await;
+            assert_eq!(st, StatusCode::CREATED, "{body}");
+            let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+            let scoped = v["token"].as_str().unwrap().to_string();
+            let token_id = v["id"].as_str().unwrap().to_string();
+            assert!(scoped.starts_with("fxst_"));
+
+            // Granted: its own session's read routes.
+            let (st, b) = call(app.clone(), "GET", &uri, &scoped, None).await;
+            assert_eq!(st, StatusCode::OK, "{b}");
+            let (st, _) = call(app.clone(), "GET", &format!("{uri}/events"), &scoped, None).await;
+            assert_eq!(st, StatusCode::OK);
+            // Not granted: other ops of the same session, and admin-only verbs.
+            for (method, suffix, body) in [
+                ("POST", "/exec", Some(r#"{"command":"id"}"#)),
+                (
+                    "PUT",
+                    "/files/content",
+                    Some(r#"{"path":"/workspace/a","content_base64":"eA=="}"#),
+                ),
+                ("DELETE", "", None),
+                ("POST", "/restore", Some(r#"{"tag":"x"}"#)),
+                ("POST", "/fork", Some(r#"{"count":1}"#)),
+                ("POST", "/tokens", Some(r#"{"ops":["read"]}"#)),
+                ("GET", "/tokens", None),
+                ("POST", "/pty-ticket", None),
+            ] {
+                let (st, b) = call(
+                    app.clone(),
+                    method,
+                    &format!("{uri}{suffix}"),
+                    &scoped,
+                    body,
+                )
+                .await;
+                assert_eq!(st, StatusCode::FORBIDDEN, "{method} {suffix}: {b}");
+            }
+            // Out of scope: another session, the session list, and every non-session route.
+            for path in [
+                format!("/v1/agents/sessions/{other}"),
+                format!("/v1/agents/sessions/{other}/events"),
+                "/v1/agents/sessions".to_string(),
+                "/v1/vms".to_string(),
+                "/v1/sandboxes".to_string(),
+            ] {
+                let (st, b) = call(app.clone(), "GET", &path, &scoped, None).await;
+                assert_eq!(st, StatusCode::FORBIDDEN, "{path}: {b}");
+            }
+            // The listing never shows a secret.
+            let (_, list) = call(app.clone(), "GET", &tok, "acme", None).await;
+            assert!(
+                list.contains(&token_id) && !list.contains(&scoped),
+                "{list}"
+            );
+            // A forged token for the other session, and a revoked one, are 401.
+            let forged = scoped.replacen(&id.simple().to_string(), &other.simple().to_string(), 1);
+            let (st, _) = call(
+                app.clone(),
+                "GET",
+                &format!("/v1/agents/sessions/{other}"),
+                &forged,
+                None,
+            )
+            .await;
+            assert_eq!(st, StatusCode::UNAUTHORIZED);
+            let (st, _) = call(
+                app.clone(),
+                "DELETE",
+                &format!("{tok}/{token_id}"),
+                "acme",
+                None,
+            )
+            .await;
+            assert_eq!(st, StatusCode::NO_CONTENT);
+            let (st, _) = call(app, "GET", &uri, &scoped, None).await;
+            assert_eq!(st, StatusCode::UNAUTHORIZED);
+        }
+
+        #[tokio::test]
+        async fn an_expired_session_is_persisted_as_expired_and_refuses_work() {
+            let m = procbox_manager(tenant_tokens(), false);
+            let id = seed_session(&m, Some("acme"), "vz", "running");
+            let path = m
+                .cfg
+                .state_dir
+                .join("agent-sessions")
+                .join(format!("{id}.json"));
+            let mut rec: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            rec["expires_at"] = json!(chrono::Utc::now() - chrono::Duration::seconds(5));
+            std::fs::write(&path, rec.to_string()).unwrap();
+            let app = router(m);
+            let uri = format!("/v1/agents/sessions/{id}");
+            let (st, b) = call(app.clone(), "GET", &uri, "acme", None).await;
+            assert_eq!(st, StatusCode::OK, "{b}");
+            assert!(b.contains(r#""state":"expired""#), "{b}");
+            // Persisted: the record on disk says so, and ledgered once.
+            let on_disk = std::fs::read_to_string(&path).unwrap();
+            assert!(on_disk.contains(r#""state": "expired""#), "{on_disk}");
+            let (st, b) = call(
+                app.clone(),
+                "POST",
+                &format!("{uri}/exec"),
+                "acme",
+                Some(r#"{"command":"id"}"#),
+            )
+            .await;
+            assert_eq!(st, StatusCode::CONFLICT, "{b}");
+            assert!(b.contains("expired"), "{b}");
+            // The listing agrees.
+            let (_, list) = call(app, "GET", "/v1/agents/sessions", "acme", None).await;
+            assert!(list.contains(r#""state":"expired""#), "{list}");
+        }
+
+        #[tokio::test]
+        async fn if_match_stops_a_stale_lifecycle_call_and_the_session_reports_its_revision() {
+            let m = procbox_manager(tenant_tokens(), false);
+            let id = seed_session(&m, Some("acme"), "vz", "running");
+            let app = router(m);
+            let uri = format!("/v1/agents/sessions/{id}");
+            for suffix in ["/checkpoint", "/restore", "/fork"] {
+                let resp = app
+                    .clone()
+                    .oneshot(
+                        Request::builder()
+                            .method("POST")
+                            .uri(format!("{uri}{suffix}"))
+                            .header(header::AUTHORIZATION, "Bearer acme")
+                            .header(header::CONTENT_TYPE, "application/json")
+                            .header(header::IF_MATCH, "41")
+                            .body(Body::from(r#"{"tag":"t","count":1}"#))
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(resp.status(), StatusCode::PRECONDITION_FAILED, "{suffix}");
+            }
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("DELETE")
+                        .uri(&uri)
+                        .header(header::AUTHORIZATION, "Bearer acme")
+                        .header(header::IF_MATCH, "41")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::PRECONDITION_FAILED);
+            // A refused call changed nothing.
+            let (st, b) = call(app, "GET", &uri, "acme", None).await;
+            assert_eq!(st, StatusCode::OK, "{b}");
+            assert!(
+                b.contains(r#""state":"running""#) || b.contains(r#""state":"gone""#),
+                "{b}"
+            );
+        }
+
+        #[tokio::test]
+        async fn promote_is_admin_only_tenant_scoped_and_needs_a_fork_child_with_a_baseline() {
+            let m = procbox_manager(tenant_tokens(), false);
+            let parent = seed_session(&m, Some("acme"), "vz", "running");
+            let child = seed_session(&m, Some("acme"), "vz", "running");
+            let lone = seed_session(&m, Some("acme"), "vz", "running");
+            // Make `child` a fork child of `parent`; neither has a workspace baseline.
+            let path = m
+                .cfg
+                .state_dir
+                .join("agent-sessions")
+                .join(format!("{child}.json"));
+            let mut rec: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            rec["parent"] = json!(parent);
+            std::fs::write(&path, rec.to_string()).unwrap();
+            let app = router(m);
+            let uri = |id: Uuid| format!("/v1/agents/sessions/{id}/promote");
+
+            // Another tenant: 404, not a hint that the id exists.
+            let (st, _) = call(app.clone(), "POST", &uri(child), "other", Some("{}")).await;
+            assert_eq!(st, StatusCode::NOT_FOUND);
+            // A session that is not a fork child has nothing to promote into.
+            let (st, b) = call(app.clone(), "POST", &uri(lone), "acme", Some("{}")).await;
+            assert_eq!(st, StatusCode::CONFLICT, "{b}");
+            assert!(b.contains("not a fork child"), "{b}");
+            // A child without a workspace baseline cannot be planned, dry run or not.
+            for body in [r#"{}"#, r#"{"dry_run":true}"#] {
+                let (st, b) = call(app.clone(), "POST", &uri(child), "acme", Some(body)).await;
+                assert_eq!(st, StatusCode::CONFLICT, "{b}");
+                assert!(b.contains("workspace with a baseline"), "{b}");
+            }
+            // A session token never promotes, whatever it was granted.
+            let (_, minted) = call(
+                app.clone(),
+                "POST",
+                &format!("/v1/agents/sessions/{child}/tokens"),
+                "acme",
+                Some(
+                    r#"{"ops":["read","exec","files.write","git","jobs","checkpoint","preview"]}"#,
+                ),
+            )
+            .await;
+            let v: serde_json::Value = serde_json::from_str(&minted).unwrap();
+            let (st, _) = call(
+                app,
+                "POST",
+                &uri(child),
+                v["token"].as_str().unwrap(),
+                Some("{}"),
+            )
+            .await;
+            assert_eq!(st, StatusCode::FORBIDDEN);
         }
 
         #[tokio::test]
