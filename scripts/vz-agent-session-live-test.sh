@@ -107,6 +107,13 @@ TK="$(api -X POST "$U/v1/agents/sessions/$S/tokens" -d '{"ops":["read","exec"]}'
 [[ "$(api "$U/v1/agents/sessions/$S/events" | jget 'sorted({e["kind"] for e in d.get("ledger",[]) if e["kind"].startswith("screen.")})')" == '["screen.input", "screen.shot"]' ]] \
   && ok "screen actions are in the ledger" || bad "screen ledger entries missing"
 
+# 4d. Waiting for the display returns within its timeout and says whether it changed.
+t0=$SECONDS
+WR="$(api -X POST "$U/v1/agents/sessions/$S/screen/wait" -d '{"timeout_seconds":3}')"
+dt=$((SECONDS - t0))
+[[ "$(echo "$WR" | jget '"changed" in d and d["waited_ms"] >= 0')" == True && $dt -le 15 ]] \
+  && ok "screen wait returned in ${dt}s (changed=$(echo "$WR" | jget 'd["changed"]'))" || bad "screen wait: $WR"
+
 # 5. Fork clones copy-on-write.
 FORK="$(api -X POST "$U/v1/agents/sessions/$S/fork" -d '{"count":2}')"
 [[ "$(echo "$FORK" | jget 'len(d.get("items",[]))')" == 2 ]] || bad "fork failed: $FORK"
