@@ -162,12 +162,15 @@ pub enum AgentCommand {
     /// `agent logs`. No TTY; stdin only with `--stdin`. REST: `POST .../jobs`.
     Bg {
         id: Uuid,
-        /// Give the job a stdin that `agent stdin` writes to (there is no end-of-file).
+        /// Give the job a stdin that `agent stdin` writes to (`agent stdin --close` sends EOF).
         #[arg(long)]
         stdin: bool,
         /// Stop recording output after this many bytes (default 16 MiB, at most 256 MiB).
         #[arg(long)]
         max_output_bytes: Option<u64>,
+        /// Kill the job's whole process tree after this many seconds (needs the guest job supervisor).
+        #[arg(long)]
+        timeout: Option<u64>,
         /// The command: one shell line, or an argv after `--`.
         #[arg(trailing_var_arg = true, required = true, num_args = 1..)]
         command: Vec<String>,
@@ -178,20 +181,29 @@ pub enum AgentCommand {
     Stdin {
         id: Uuid,
         job: Uuid,
-        /// Text to write (a newline is not added).
-        text: String,
+        /// Text to write (a newline is not added). May be omitted with `--close`.
+        text: Option<String>,
+        /// Close the job's stdin after writing (EOF). Needs the guest job supervisor.
+        #[arg(long)]
+        close: bool,
     },
     /// Output of a background job. With `-f` keep reading until it exits and exit with its code.
     /// REST: `GET .../jobs/{job}?offset=N`.
     Logs {
         id: Uuid,
         job: Uuid,
-        /// Follow until the job exits (polls about twice a second).
+        /// Follow until the job exits. Supervised jobs long-poll; shell-script jobs poll twice a second.
         #[arg(short = 'f', long)]
         follow: bool,
     },
-    /// Stop a background job (SIGTERM to its process group). REST: `DELETE .../jobs/{job}`.
-    Kill { id: Uuid, job: Uuid },
+    /// Stop a background job (SIGTERM to its whole process tree by default). REST: `DELETE .../jobs/{job}`.
+    Kill {
+        id: Uuid,
+        job: Uuid,
+        /// Signal name or number (supervised jobs only), e.g. KILL.
+        #[arg(long)]
+        signal: Option<String>,
+    },
     /// Mint an expiring preview URL for a guest port: whoever holds the URL reaches that port and
     /// nothing else. REST: `POST .../preview`.
     Expose {
@@ -897,11 +909,15 @@ pub async fn run(r: &Remote, cmd: AgentCommand) -> Result<()> {
             id,
             stdin,
             max_output_bytes,
+            timeout,
             command,
         } => {
             let mut body = json!({"command": guest_command(&command)});
             if stdin {
                 body["stdin"] = json!(true);
+            }
+            if let Some(t) = timeout {
+                body["timeout_seconds"] = json!(t);
             }
             if let Some(n) = max_output_bytes {
                 body["max_output_bytes"] = json!(n);
@@ -920,50 +936,80 @@ pub async fn run(r: &Remote, cmd: AgentCommand) -> Result<()> {
             &r.call(Method::GET, &format!("/v1/agents/sessions/{id}/jobs"), None)
                 .await?,
         ),
-        AgentCommand::Stdin { id, job, text } => show(
-            &r.call(
-                Method::POST,
-                &format!("/v1/agents/sessions/{id}/jobs/{job}/stdin"),
-                Some(json!({"text": text})),
+        AgentCommand::Stdin {
+            id,
+            job,
+            text,
+            close,
+        } => {
+            if text.is_none() && !close {
+                anyhow::bail!("give text to write, or --close");
+            }
+            let mut body = json!({});
+            if let Some(t) = text {
+                body["text"] = json!(t);
+            }
+            if close {
+                body["close"] = json!(true);
+            }
+            show(
+                &r.call(
+                    Method::POST,
+                    &format!("/v1/agents/sessions/{id}/jobs/{job}/stdin"),
+                    Some(body),
+                )
+                .await
+                .context("write stdin")?,
             )
-            .await
-            .context("write stdin")?,
-        ),
+        }
         AgentCommand::Logs { id, job, follow } => {
             use std::io::Write as _;
-            let mut offset = 0u64;
+            let (mut offset, mut err_offset) = (0u64, 0u64);
+            // Supervised jobs hold the request open while there is nothing to read.
+            let wait = if follow { 15_000 } else { 0 };
             loop {
                 let v = r
                     .call(
                         Method::GET,
-                        &format!("/v1/agents/sessions/{id}/jobs/{job}?offset={offset}"),
+                        &format!(
+                            "/v1/agents/sessions/{id}/jobs/{job}?offset={offset}&stderr_offset={err_offset}&wait_ms={wait}"
+                        ),
                         None,
                     )
                     .await
                     .context("read job")?;
-                let out = v["output"].as_str().unwrap_or("");
-                print!("{out}");
+                print!("{}", v["output"].as_str().unwrap_or(""));
                 let _ = std::io::stdout().flush();
+                if let Some(e) = v["stderr"].as_str().filter(|e| !e.is_empty()) {
+                    eprint!("{e}");
+                }
                 offset = v["next_offset"].as_u64().unwrap_or(offset);
+                err_offset = v["stderr_next_offset"].as_u64().unwrap_or(err_offset);
                 let more = v["more"].as_bool() == Some(true);
-                if let Some(code) = v["exit_code"].as_i64()
-                    && !more
-                {
-                    eprintln!("[job exited {code}]");
+                // Shell-script jobs have no `eof`; they are done once an exit code shows.
+                let drained = v["eof"].as_bool().unwrap_or(true);
+                let code = v["exit_code"]
+                    .as_i64()
+                    .or(v["signal"].as_i64().map(|s| 128 + s));
+                let finished = v["state"].as_str().is_some_and(|s| s != "running");
+                if finished && drained && !more {
+                    let code = code.unwrap_or(-1);
+                    eprintln!("[job {} {code}]", v["state"].as_str().unwrap_or("exited"));
                     std::process::exit(if follow { code.clamp(0, 255) as i32 } else { 0 });
                 }
                 if !follow && !more {
                     return Ok(());
                 }
-                if !more {
+                if !more && v["engine"].as_str() != Some("supervisor") {
                     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                 }
             }
         }
-        AgentCommand::Kill { id, job } => {
+        AgentCommand::Kill { id, job, signal } => {
+            let q = signal.map(|s| format!("?signal={s}")).unwrap_or_default();
             r.call(
                 Method::DELETE,
-                &format!("/v1/agents/sessions/{id}/jobs/{job}"),
+                &format!("/v1/agents/sessions/{id}/jobs/{job}{q}"),
                 None,
             )
             .await?;

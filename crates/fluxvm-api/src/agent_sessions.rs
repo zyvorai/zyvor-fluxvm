@@ -57,7 +57,9 @@ use axum::{
 };
 use chrono::{DateTime, Utc};
 use fluxvm_core::config::Role;
-use fluxvm_guest_protocol::{ExecPolicy, ExecTcpRule};
+use fluxvm_guest_protocol::{
+    AgentRequest, AgentResponse, ExecPolicy, ExecTcpRule, JobPhase, JobStatus, JobStream,
+};
 use fluxvm_scheduler::VmManager;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -2834,6 +2836,103 @@ struct JobBody {
     /// Stop recording output after this many bytes (default 16 MiB, at most 256 MiB).
     #[serde(default)]
     max_output_bytes: Option<u64>,
+    /// Kill the job's process tree after this many seconds. Needs the guest job supervisor.
+    #[serde(default)]
+    timeout_seconds: Option<u64>,
+}
+
+/// `JobMeta.engine` of a job run by the guest agent's supervisor (shell-script jobs leave it empty).
+const ENGINE_SUPERVISOR: &str = "supervisor";
+/// How long one supervisor call may take beyond its own long poll.
+const SUP_CALL_SECS: u64 = 30;
+
+fn phase_name(p: JobPhase) -> &'static str {
+    match p {
+        JobPhase::Running => "running",
+        JobPhase::Exited => "exited",
+        JobPhase::Signaled => "signaled",
+        JobPhase::TimedOut => "timed_out",
+        JobPhase::Canceled => "killed",
+    }
+}
+
+/// A supervisor call that turns the agent's `Error` answers into API errors.
+async fn sup_call(
+    m: &VmManager,
+    sandbox: Uuid,
+    req: AgentRequest,
+    wait_secs: u64,
+) -> ApiResult<AgentResponse> {
+    let res = m
+        .guest_agent_call(
+            sandbox,
+            req,
+            std::time::Duration::from_secs(SUP_CALL_SECS + wait_secs),
+        )
+        .await?;
+    match res {
+        AgentResponse::Error { message } => Err(ApiError {
+            status: if message.starts_with("no such job") {
+                StatusCode::NOT_FOUND
+            } else if message.contains("stdin is closed") || message.contains("already ended") {
+                StatusCode::CONFLICT
+            } else {
+                StatusCode::BAD_GATEWAY
+            },
+            message,
+        }),
+        other => Ok(other),
+    }
+}
+
+/// Offsets from a `Last-Event-ID`: `N` (stdout) or `N:M` (stdout, stderr).
+fn parse_event_offsets(v: &str) -> (u64, u64) {
+    let v = v.trim();
+    match v.split_once(':') {
+        Some((a, b)) => (a.parse().unwrap_or(0), b.parse().unwrap_or(0)),
+        None => (v.parse().unwrap_or(0), 0),
+    }
+}
+
+/// A signal given by name (`TERM`, `SIGKILL`) or number.
+fn signal_number(s: &str) -> Option<i32> {
+    let t = s.trim().to_ascii_uppercase();
+    let t = t.strip_prefix("SIG").unwrap_or(&t);
+    match t {
+        "HUP" => Some(1),
+        "INT" => Some(2),
+        "QUIT" => Some(3),
+        "KILL" => Some(9),
+        "USR1" => Some(10),
+        "USR2" => Some(12),
+        "TERM" => Some(15),
+        n => n.parse::<i32>().ok().filter(|n| (1..=64).contains(n)),
+    }
+}
+
+/// Records how a supervised job ended (first observation wins).
+async fn job_meta_status(m: &VmManager, id: Uuid, st: &JobStatus) {
+    if !st.phase.is_final() {
+        return;
+    }
+    let job = st.job_id.parse::<Uuid>().ok();
+    job_meta_update(m, id, |all| {
+        if let Some(j) = all.iter_mut().find(|j| Some(j.job) == job)
+            && j.exit_code.is_none()
+        {
+            j.exit_code = Some(
+                st.exit_code
+                    .map(i64::from)
+                    .or(st.signal.map(|s| 128 + i64::from(s)))
+                    .unwrap_or(-1),
+            );
+            j.phase = Some(phase_name(st.phase).to_string());
+            j.signal = st.signal;
+            j.dropped_bytes = st.stdout_dropped + st.stderr_dropped;
+            j.finished_at = Some(Utc::now());
+        }
+    })
+    .await;
 }
 
 fn job_stdin_path(job: Uuid) -> String {
@@ -2936,6 +3035,16 @@ struct JobMeta {
     started_at: DateTime<Utc>,
     #[serde(default)]
     killed: bool,
+    /// `supervisor` for jobs run by the guest agent; empty for shell-script jobs.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    engine: String,
+    /// How a supervised job ended: `exited`, `signaled`, `timed_out` or `killed`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    phase: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    signal: Option<i32>,
+    #[serde(default)]
+    dropped_bytes: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     exit_code: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2944,6 +3053,12 @@ struct JobMeta {
 
 impl JobMeta {
     fn state(&self) -> &'static str {
+        match self.phase.as_deref() {
+            Some("signaled") => return "signaled",
+            Some("timed_out") => return "timed_out",
+            Some("killed") => return "killed",
+            _ => {}
+        }
         match (self.exit_code, self.killed) {
             (None, _) => "running",
             (Some(_), true) => "killed",
@@ -3064,6 +3179,62 @@ async fn job_start(
     }
     m.ensure_running_for_request(s.sandbox_id).await?;
     let job = Uuid::new_v4();
+    if m.guest_jobs_supported(s.sandbox_id).await {
+        let started = sup_call(
+            &m,
+            s.sandbox_id,
+            AgentRequest::JobStart {
+                job_id: job.to_string(),
+                command: body.command.clone(),
+                process: None,
+                policy: s.policy.exec.clone(),
+                timeout_seconds: body.timeout_seconds,
+                stdin: body.stdin,
+                max_output_bytes: Some(max_output),
+            },
+            0,
+        )
+        .await?;
+        record(
+            &m,
+            id,
+            "job.start",
+            json!({"job": job, "command": body.command, "stdin": body.stdin, "engine": ENGINE_SUPERVISOR}),
+        );
+        let meta = JobMeta {
+            job,
+            command: body.command.clone(),
+            stdin: body.stdin,
+            max_output_bytes: max_output,
+            started_at: Utc::now(),
+            killed: false,
+            engine: ENGINE_SUPERVISOR.into(),
+            phase: None,
+            signal: None,
+            dropped_bytes: 0,
+            exit_code: None,
+            finished_at: None,
+        };
+        job_meta_update(&m, id, |all| all.push(meta)).await;
+        let enforcement = match started {
+            AgentResponse::JobStarted { status } => status.enforcement,
+            _ => None,
+        };
+        return Ok((
+            StatusCode::CREATED,
+            Json(json!({
+                "job": job, "state": "running", "engine": ENGINE_SUPERVISOR, "stdin": body.stdin,
+                "max_output_bytes": max_output, "timeout_seconds": body.timeout_seconds,
+                "enforcement": enforcement,
+            })),
+        ));
+    }
+    if body.timeout_seconds.is_some() {
+        return Err(ApiError {
+            status: StatusCode::BAD_REQUEST,
+            message: "timeout_seconds needs the guest job supervisor (jobs-v2), which this guest agent does not have; wrap the command in `timeout` instead".into(),
+        });
+    }
     let res = m
         .exec_with_policy(
             s.sandbox_id,
@@ -3095,6 +3266,10 @@ async fn job_start(
         max_output_bytes: max_output,
         started_at: Utc::now(),
         killed: false,
+        engine: String::new(),
+        phase: None,
+        signal: None,
+        dropped_bytes: 0,
         exit_code: None,
         finished_at: None,
     };
@@ -3111,6 +3286,12 @@ async fn job_start(
 struct JobQuery {
     #[serde(default)]
     offset: u64,
+    /// Supervised jobs only: where to continue the stderr stream.
+    #[serde(default)]
+    stderr_offset: u64,
+    /// Supervised jobs only: wait up to this long (at most 25 s) for new output.
+    #[serde(default)]
+    wait_ms: Option<u64>,
 }
 
 async fn job_read(
@@ -3125,6 +3306,13 @@ async fn job_read(
     let s = load(&m, id, &caller_tenant(&token_tenant)).await?;
     running(&s)?;
     m.ensure_running_for_request(s.sandbox_id).await?;
+    let supervised = job_meta_read(&m, id)
+        .await
+        .iter()
+        .any(|j| j.job == job && j.engine == ENGINE_SUPERVISOR);
+    if supervised {
+        return sup_job_read(&m, &s, job, &q).await.map(Json);
+    }
     let res = m
         .exec_with_policy(s.sandbox_id, job_read_script(job, q.offset), Some(30), None)
         .await?;
@@ -3159,6 +3347,79 @@ async fn job_read(
         // the log reached max_output_bytes: later output was not recorded
         "truncated": size >= max,
     })))
+}
+
+/// One supervised read: stdout from `offset` (long poll), stderr from `stderr_offset` (no wait).
+async fn sup_job_read(m: &VmManager, s: &Session, job: Uuid, q: &JobQuery) -> ApiResult<Value> {
+    let wait = q
+        .wait_ms
+        .unwrap_or(0)
+        .min(fluxvm_guest_protocol::MAX_JOB_WAIT_MS);
+    let read = |stream, offset, wait_ms| AgentRequest::JobRead {
+        job_id: job.to_string(),
+        stream,
+        offset,
+        max_bytes: Some(JOB_READ_MAX as u32),
+        wait_ms: Some(wait_ms),
+    };
+    let AgentResponse::JobOutput {
+        data_base64: out64,
+        next_offset,
+        eof: out_eof,
+        status,
+    } = sup_call(
+        m,
+        s.sandbox_id,
+        read(JobStream::Stdout, q.offset, wait),
+        wait / 1000 + 1,
+    )
+    .await?
+    else {
+        return Err(ApiError {
+            status: StatusCode::BAD_GATEWAY,
+            message: "unexpected answer from the guest agent".into(),
+        });
+    };
+    let AgentResponse::JobOutput {
+        data_base64: err64,
+        next_offset: err_next,
+        eof: err_eof,
+        ..
+    } = sup_call(
+        m,
+        s.sandbox_id,
+        read(JobStream::Stderr, q.stderr_offset, 0),
+        0,
+    )
+    .await?
+    else {
+        return Err(ApiError {
+            status: StatusCode::BAD_GATEWAY,
+            message: "unexpected answer from the guest agent".into(),
+        });
+    };
+    job_meta_status(m, s.id, &status).await;
+    let (out, err) = (base64_decode(&out64), base64_decode(&err64));
+    Ok(json!({
+        "job": job,
+        "engine": ENGINE_SUPERVISOR,
+        "state": phase_name(status.phase),
+        "exit_code": status.exit_code,
+        "signal": status.signal,
+        "output": String::from_utf8_lossy(&out),
+        "output_base64": out64,
+        "offset": q.offset,
+        "next_offset": next_offset,
+        "stderr": String::from_utf8_lossy(&err),
+        "stderr_base64": err64,
+        "stderr_offset": q.stderr_offset,
+        "stderr_next_offset": err_next,
+        "more": out.len() >= JOB_READ_MAX || err.len() >= JOB_READ_MAX,
+        // data past the retention cap was read and discarded; the job was not slowed or killed
+        "truncated": status.stdout_dropped > 0 || status.stderr_dropped > 0,
+        "dropped_bytes": {"stdout": status.stdout_dropped, "stderr": status.stderr_dropped},
+        "eof": status.phase.is_final() && out_eof && err_eof,
+    }))
 }
 
 /// `GET .../jobs`: every job the session started, with its state refreshed from the guest in one
@@ -3203,12 +3464,25 @@ async fn job_list(
             job_meta_exited(&m, id, job, code).await;
         }
     }
+    if s.state == "running"
+        && job_meta_read(&m, id)
+            .await
+            .iter()
+            .any(|j| j.engine == ENGINE_SUPERVISOR && j.exit_code.is_none())
+        && let Ok(AgentResponse::Jobs { jobs }) =
+            sup_call(&m, s.sandbox_id, AgentRequest::JobList, 0).await
+    {
+        for st in &jobs {
+            job_meta_status(&m, id, st).await;
+        }
+    }
     let items: Vec<Value> = job_meta_read(&m, id)
         .await
         .into_iter()
         .map(|j| {
             json!({
                 "job": j.job, "command": j.command, "state": j.state(), "exit_code": j.exit_code,
+                "signal": j.signal, "engine": j.engine, "dropped_bytes": j.dropped_bytes,
                 "stdin": j.stdin, "max_output_bytes": j.max_output_bytes,
                 "started_at": j.started_at, "finished_at": j.finished_at,
             })
@@ -3225,10 +3499,14 @@ struct StdinBody {
     /// Or raw bytes, base64.
     #[serde(default)]
     data_base64: Option<String>,
+    /// Close the job's stdin after this write (EOF). Needs the guest job supervisor.
+    #[serde(default)]
+    close: bool,
 }
 
 /// `POST .../jobs/{job}/stdin`: append to a job started with `stdin: true`. There is no
-/// end-of-file: a program that waits for EOF should read from a file you put in the guest.
+/// end-of-file for shell-script jobs: a program that waits for EOF should read from a file you put
+/// in the guest. Supervised jobs take `close: true`.
 async fn job_stdin(
     State(m): State<Arc<VmManager>>,
     Extension(role): Extension<Role>,
@@ -3245,13 +3523,51 @@ async fn job_stdin(
     let data = match (body.text, body.data_base64) {
         (Some(t), None) => t.into_bytes(),
         (None, Some(b)) => base64_decode(&b),
+        (None, None) if body.close => Vec::new(),
         _ => return Err(bad("give exactly one of text or data_base64")),
     };
-    if data.is_empty() || data.len() > JOB_STDIN_MAX {
+    let supervised_max = fluxvm_guest_protocol::MAX_JOB_READ_BYTES as usize;
+    if (data.is_empty() && !body.close) || data.len() > supervised_max.max(JOB_STDIN_MAX) {
         return Err(bad(&format!("stdin writes are 1-{JOB_STDIN_MAX} bytes")));
     }
     let s = load(&m, id, &caller_tenant(&token_tenant)).await?;
     running(&s)?;
+    let supervised = job_meta_read(&m, id)
+        .await
+        .iter()
+        .any(|j| j.job == job && j.engine == ENGINE_SUPERVISOR);
+    if supervised {
+        use base64::Engine as _;
+        m.ensure_running_for_request(s.sandbox_id).await?;
+        sup_call(
+            &m,
+            s.sandbox_id,
+            AgentRequest::JobWrite {
+                job_id: job.to_string(),
+                data_base64: base64::engine::general_purpose::STANDARD.encode(&data),
+                close: body.close,
+            },
+            0,
+        )
+        .await?;
+        record(
+            &m,
+            id,
+            "job.stdin",
+            json!({"job": job, "bytes": data.len(), "close": body.close}),
+        );
+        return Ok(Json(
+            json!({"job": job, "bytes": data.len(), "closed": body.close}),
+        ));
+    }
+    if body.close {
+        return Err(bad(
+            "closing stdin needs the guest job supervisor (jobs-v2); this job was started without it",
+        ));
+    }
+    if data.len() > JOB_STDIN_MAX {
+        return Err(bad(&format!("stdin writes are 1-{JOB_STDIN_MAX} bytes")));
+    }
     if !job_meta_read(&m, id)
         .await
         .iter()
@@ -3308,6 +3624,9 @@ impl Drop for StreamSlot {
 struct StreamQuery {
     #[serde(default)]
     offset: Option<u64>,
+    /// Supervised jobs: where to continue stderr.
+    #[serde(default)]
+    stderr_offset: Option<u64>,
 }
 
 /// `GET .../jobs/{job}/stream`: Server-Sent Events. `output` events carry `{offset, next_offset,
@@ -3333,15 +3652,16 @@ async fn job_stream(
     authorize(role, &scope, id, Op::Jobs)?;
     let s = load(&m, id, &caller_tenant(&token_tenant)).await?;
     running(&s)?;
-    let start = q
-        .offset
-        .or_else(|| {
-            headers
-                .get("last-event-id")
-                .and_then(|v| v.to_str().ok())
-                .and_then(|v| v.trim().parse().ok())
-        })
-        .unwrap_or(0);
+    let last = headers
+        .get("last-event-id")
+        .and_then(|v| v.to_str().ok())
+        .map(parse_event_offsets);
+    let start = q.offset.or(last.map(|l| l.0)).unwrap_or(0);
+    let err_start = q.stderr_offset.or(last.map(|l| l.1)).unwrap_or(0);
+    let supervised = job_meta_read(&m, id)
+        .await
+        .iter()
+        .any(|j| j.job == job && j.engine == ENGINE_SUPERVISOR);
     if JOB_STREAMS.fetch_add(1, std::sync::atomic::Ordering::SeqCst) >= MAX_JOB_STREAMS {
         JOB_STREAMS.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
         return Err(ApiError {
@@ -3355,6 +3675,7 @@ async fn job_stream(
         let _slot = slot;
         let began = std::time::Instant::now();
         let mut offset = start;
+        let mut err_offset = err_start;
         let err = |msg: String| Event::default().event("error").data(json!({"error": msg}).to_string());
         loop {
             if began.elapsed().as_secs() > JOB_STREAM_MAX_SECS {
@@ -3372,6 +3693,88 @@ async fn job_stream(
                     yield Ok(err(e.message));
                     break;
                 }
+            }
+            if supervised {
+                use base64::Engine as _;
+                if let Err(e) = m.ensure_running_for_request(sandbox).await {
+                    yield Ok(err(format!("{e:#}")));
+                    break;
+                }
+                let mk = |stream, off, wait_ms| AgentRequest::JobRead {
+                    job_id: job.to_string(),
+                    stream,
+                    offset: off,
+                    max_bytes: Some(JOB_READ_MAX as u32),
+                    wait_ms: Some(wait_ms),
+                };
+                // stdout long-polls, so the loop is paced by the guest, not by a timer.
+                let out = sup_call(&m, sandbox, mk(JobStream::Stdout, offset, 2000), 2).await;
+                let (out_bytes, out_eof, status) = match out {
+                    Ok(AgentResponse::JobOutput { data_base64, eof, status, .. }) => {
+                        (base64_decode(&data_base64), eof, status)
+                    }
+                    Ok(_) => {
+                        yield Ok(err("unexpected answer from the guest agent".into()));
+                        break;
+                    }
+                    Err(e) => {
+                        yield Ok(err(e.message));
+                        break;
+                    }
+                };
+                let (err_bytes, err_eof) = match sup_call(&m, sandbox, mk(JobStream::Stderr, err_offset, 0), 0).await {
+                    Ok(AgentResponse::JobOutput { data_base64, eof, .. }) => (base64_decode(&data_base64), eof),
+                    Ok(_) => (Vec::new(), false),
+                    Err(e) => {
+                        yield Ok(err(e.message));
+                        break;
+                    }
+                };
+                let b64 = base64::engine::general_purpose::STANDARD;
+                if !out_bytes.is_empty() {
+                    let from = offset;
+                    offset += out_bytes.len() as u64;
+                    // The id carries both offsets so a reconnect resumes both streams.
+                    yield Ok(Event::default()
+                        .event("output")
+                        .id(format!("{offset}:{err_offset}"))
+                        .data(json!({
+                            "offset": from,
+                            "next_offset": offset,
+                            "output": String::from_utf8_lossy(&out_bytes),
+                            "output_base64": b64.encode(&out_bytes),
+                        }).to_string()));
+                }
+                if !err_bytes.is_empty() {
+                    let from = err_offset;
+                    err_offset += err_bytes.len() as u64;
+                    yield Ok(Event::default()
+                        .event("stderr")
+                        .id(format!("{offset}:{err_offset}"))
+                        .data(json!({
+                            "offset": from,
+                            "next_offset": err_offset,
+                            "output": String::from_utf8_lossy(&err_bytes),
+                            "output_base64": b64.encode(&err_bytes),
+                        }).to_string()));
+                }
+                let more = out_bytes.len() >= JOB_READ_MAX || err_bytes.len() >= JOB_READ_MAX;
+                if status.phase.is_final() && out_eof && err_eof && !more {
+                    job_meta_status(&m, id, &status).await;
+                    yield Ok(Event::default()
+                        .event("exit")
+                        .id(format!("{offset}:{err_offset}"))
+                        .data(json!({
+                            "exit_code": status.exit_code,
+                            "state": phase_name(status.phase),
+                            "signal": status.signal,
+                            "next_offset": offset,
+                            "stderr_next_offset": err_offset,
+                            "dropped_bytes": {"stdout": status.stdout_dropped, "stderr": status.stderr_dropped},
+                        }).to_string()));
+                    break;
+                }
+                continue;
             }
             let res = match m.ensure_running_for_request(sandbox).await {
                 Ok(_) => m
@@ -3426,16 +3829,57 @@ async fn job_stream(
     Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
 }
 
+#[derive(Debug, Deserialize, Default)]
+struct KillQuery {
+    /// Supervised jobs: a signal name or number (default TERM). The whole process tree gets it.
+    #[serde(default)]
+    signal: Option<String>,
+}
+
 async fn job_kill(
     State(m): State<Arc<VmManager>>,
     Extension(role): Extension<Role>,
     scope: Option<Extension<SessionScope>>,
     token_tenant: Option<Extension<TokenTenant>>,
     Path((id, job)): Path<(Uuid, Uuid)>,
+    Query(q): Query<KillQuery>,
 ) -> ApiResult<StatusCode> {
     authorize(role, &scope, id, Op::Jobs)?;
     let s = load(&m, id, &caller_tenant(&token_tenant)).await?;
     running(&s)?;
+    let supervised = job_meta_read(&m, id)
+        .await
+        .iter()
+        .any(|j| j.job == job && j.engine == ENGINE_SUPERVISOR);
+    if supervised {
+        let sig = match q.signal.as_deref() {
+            None => 15,
+            Some(name) => signal_number(name).ok_or_else(|| ApiError {
+                status: StatusCode::BAD_REQUEST,
+                message: format!("unknown signal {name:?}; use a name like TERM or KILL, or 1-64"),
+            })?,
+        };
+        m.ensure_running_for_request(s.sandbox_id).await?;
+        sup_call(
+            &m,
+            s.sandbox_id,
+            AgentRequest::JobSignal {
+                job_id: job.to_string(),
+                signal: sig,
+                tree: true,
+            },
+            0,
+        )
+        .await?;
+        job_meta_update(&m, id, |all| {
+            if let Some(j) = all.iter_mut().find(|j| j.job == job) {
+                j.killed = true;
+            }
+        })
+        .await;
+        record(&m, id, "job.kill", json!({"job": job, "signal": sig}));
+        return Ok(StatusCode::NO_CONTENT);
+    }
     let pid = shell_quote(&format!("{JOBS_DIR}/{job}.pid"));
     let exit = shell_quote(&format!("{JOBS_DIR}/{job}.exit"));
     // Negative pid = the whole process group the job started in. That group includes the wrapper
@@ -4221,6 +4665,57 @@ mod tests {
             check_if_match(&h("x"), &s).unwrap_err().status,
             StatusCode::BAD_REQUEST
         );
+    }
+
+    #[test]
+    fn event_ids_carry_both_stream_offsets() {
+        assert_eq!(parse_event_offsets("120"), (120, 0));
+        assert_eq!(parse_event_offsets(" 120:45 "), (120, 45));
+        assert_eq!(parse_event_offsets("junk"), (0, 0));
+    }
+
+    #[test]
+    fn signals_are_named_or_numbered() {
+        assert_eq!(signal_number("TERM"), Some(15));
+        assert_eq!(signal_number("sigkill"), Some(9));
+        assert_eq!(signal_number("2"), Some(2));
+        assert_eq!(signal_number("0"), None);
+        assert_eq!(signal_number("65"), None);
+        assert_eq!(signal_number("BOGUS"), None);
+    }
+
+    #[test]
+    fn a_supervised_job_reports_how_it_ended() {
+        let mut j = JobMeta {
+            job: Uuid::nil(),
+            command: "x".into(),
+            stdin: false,
+            max_output_bytes: 1,
+            started_at: Utc::now(),
+            killed: false,
+            engine: ENGINE_SUPERVISOR.into(),
+            phase: None,
+            signal: None,
+            dropped_bytes: 0,
+            exit_code: None,
+            finished_at: None,
+        };
+        assert_eq!(j.state(), "running");
+        j.exit_code = Some(0);
+        j.phase = Some("exited".into());
+        assert_eq!(j.state(), "exited");
+        j.phase = Some("timed_out".into());
+        assert_eq!(j.state(), "timed_out");
+        j.phase = Some("signaled".into());
+        assert_eq!(j.state(), "signaled");
+        // Metadata written before the supervisor existed has no engine or phase.
+        let old: JobMeta = serde_json::from_value(json!({
+            "job": Uuid::nil(), "command": "x", "stdin": false, "max_output_bytes": 1,
+            "started_at": Utc::now(), "exit_code": 3
+        }))
+        .unwrap();
+        assert_eq!(old.state(), "exited");
+        assert!(old.engine.is_empty());
     }
 
     #[test]

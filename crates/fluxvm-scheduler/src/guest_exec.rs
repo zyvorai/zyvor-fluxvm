@@ -42,6 +42,49 @@ impl VmManager {
             .await
     }
 
+    /// Sends one request to the sandbox's guest agent and returns its answer. Used by the job
+    /// supervisor, which has no SSH or procbox equivalent: a sandbox without a reachable agent
+    /// is an error here, and callers fall back to shell scripts.
+    pub async fn guest_agent_call(
+        &self,
+        id: Uuid,
+        request: AgentRequest,
+        timeout: std::time::Duration,
+    ) -> Result<AgentResponse> {
+        let vm = self.get(id).await?;
+        if procbox_sandbox::load_spec(&vm)?.is_some() {
+            bail!("supervised jobs are not available on procbox sandboxes");
+        }
+        if vm.backend == fluxvm_core::model::BackendKind::Vz {
+            if crate::oci_sandbox::is_oci(&vm) {
+                return self.oci_agent(&vm, request, timeout).await;
+            }
+            return self
+                .vz_agent(&vm, request, timeout)
+                .await
+                .ok_or_else(|| anyhow::anyhow!("this guest does not run the vsock guest agent"));
+        }
+        fluxvm_vsock_client::call(&vm, request, timeout + std::time::Duration::from_secs(5)).await
+    }
+
+    /// Whether the guest agent has the job supervisor (`jobs-v2`). Any failure, including an
+    /// older agent answering `Error` to the unknown op, reads as "no".
+    pub async fn guest_jobs_supported(&self, id: Uuid) -> bool {
+        match self
+            .guest_agent_call(
+                id,
+                AgentRequest::Capabilities,
+                std::time::Duration::from_secs(5),
+            )
+            .await
+        {
+            Ok(AgentResponse::Capabilities { features }) => features
+                .iter()
+                .any(|f| f == fluxvm_guest_protocol::FEATURE_JOBS_V2),
+            _ => false,
+        }
+    }
+
     async fn exec_request(
         &self,
         id: Uuid,
