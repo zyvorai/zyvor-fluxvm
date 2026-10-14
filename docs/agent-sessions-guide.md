@@ -477,6 +477,12 @@ The point of sessions: try things, keep what works, roll back what does not.
 > cannot clone (not APFS, or the state directory on another volume) the files are fully copied: slower and real disk.
 > The fork response says which: `files_cloned` and `files_copied` (also in the `fork` ledger entry), and the daemon
 > logs a warning per copied file.
+>
+> **Warm starts without a pool.** Measured on an M-series Mac with `agent-micro`, offline policy: a cold session create
+> took about 84 s, a memory checkpoint 0.5 s, a restore 3.8 s, and a fork 1.4 s for one child and 2.8 s for four. To
+> skip the cold boot, create one prepared session (tools installed, repo cloned), checkpoint it, and fork it per task:
+> each child is a running guest in about 1.5 s. A separate pre-restored pool would add idle RAM for little gain over
+> that, so none is built. Fork needs a session with no NIC of its own (`offline` or a host allow-list).
 
 ### 9.1 Checkpoint and restore
 
