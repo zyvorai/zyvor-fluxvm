@@ -146,7 +146,7 @@ impl VmManager {
     }
 
     /// Asks the agent of a container sandbox, which has no SSH to fall back to.
-    async fn oci_agent(
+    pub(crate) async fn oci_agent(
         &self,
         vm: &VmRecord,
         request: AgentRequest,
@@ -160,7 +160,7 @@ impl VmManager {
     }
 
     /// Asks the guest agent; `None` means "use SSH".
-    async fn vz_agent(
+    pub(crate) async fn vz_agent(
         &self,
         vm: &VmRecord,
         request: AgentRequest,

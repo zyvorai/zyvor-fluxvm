@@ -84,6 +84,67 @@ file modes are kept, symlinks and ownership are not. Ledgered as `promote` on th
 
 Not run on a live guest: the plan is unit-tested and the route's refusals are router-tested, the transfer itself is not.
 
+### Credential grants
+
+The sandbox credential broker (`/v1/sandboxes/{id}/grants`) through the session, so an agent can call an authenticated
+API without ever holding the secret: the egress proxy injects the `Authorization` header for the named hosts, for traffic
+from this sandbox's address only.
+
+```bash
+fluxctl agent grant <session> --secret-ref gh-token --host api.github.com --ttl-seconds 1800
+fluxctl agent grants <session>          # id, secret_ref, hosts, expiry, bound; never the value
+fluxctl agent ungrant <session> [<grant id>]
+```
+
+- Admin only, and a session token cannot grant itself one. The secret is the request's own `value`, or the daemon's
+  `FLUXVM_SECRET_<REF>`; the value is never ledgered or returned.
+- **Bounded by the session**: a grant's expiry is capped at the session's, and deleting the session revokes them.
+- **Not inherited**: a fork child starts with no grants. Grant each child you want to have one (a rollout of untrusted
+  candidates therefore cannot use the parent's credentials by default).
+- **Re-bound after restore**: a restored machine may come back on another guest address. `restore` re-binds the
+  session's grants to the current one, so the old address stops matching at once; if the new address is already bound to
+  a different sandbox's grants, this session's grants are **revoked** rather than left on a stale address
+  (`grants_rebound` in the restore response, `grant.revoked` in the ledger). A grant with an unknown address matches
+  nothing.
+- The existing broker's limits (a TTL cap, a grant count per sandbox) apply. Not run live: the broker and the re-bind
+  are unit-tested, not driven through the egress proxy from a guest.
+
+### Budgets
+
+`budget` at create limits what a session may consume; every field is optional.
+
+```json
+{"budget": {"max_execs": 200, "max_exec_seconds": 1800, "max_jobs": 10, "max_concurrent_jobs": 2, "max_children": 8}}
+```
+
+- `max_execs` commands through `exec`; `max_exec_seconds` the summed wall time of commands, and a command is also given
+  at most the seconds left as its timeout; `max_jobs` started and `max_concurrent_jobs` running at once;
+  `max_children` fork children (a rollout or `evaluate` spends it).
+- Exceeding one is `403` with the limit and the amount used. Usage (`execs`, `exec_ms`, `jobs`, `children`) is returned
+  as `usage` on `GET .../{id}`; it is kept in its own file, so counting never changes `revision`.
+- A fork child starts with what is **left** of its parent's budget, so forking cannot multiply it. A fork that fails
+  gives its children back.
+- `max_exec_seconds` is checked when a command starts; commands running in parallel can overshoot it. Jobs are not
+  counted against `max_exec_seconds`.
+
+Not done: token, output-size and storage budgets. Tokens need usage reports from the model client or gateway, which the
+daemon never sees; output and storage need guest-side accounting.
+
+### Evaluating candidates
+
+`fluxctl agent evaluate <session> --candidate 'cmd A' --candidate 'cmd B' --test 'make test'` (MCP
+`session_evaluate`) is "try several fixes in isolated machines, test each, review the winner, apply it":
+
+1. forks one child per candidate (same forkability rules as `fork`, and `max_children` is spent);
+2. in each child runs the candidate and then, if it exited 0, the test command, all children in parallel;
+3. scores each: **100** passed (the test exited 0, or with no `--test` the candidate did), **10** ran cleanly but failed
+   its test, **0** failed or never ran; ties go to the shortest, then the lowest index;
+4. deletes the losers (unless `--keep-all`) and prints every result with output tails and the `winner`.
+
+A winner exists only if something passed, so a failing result is never offered. Then
+`fluxctl agent promote <winner> --dry-run` and apply, as above. It is client-side orchestration over fork, exec and
+delete (like `rollout`); it needs a running session with a workspace baseline to be promotable.
+
 ### Lifecycle guarantees
 
 - **Conflicting operations are refused, not interleaved.** Checkpoint, restore, fork and delete take the session's
@@ -301,40 +362,63 @@ entries come from GNU `find`, so a guest without it (busybox) is not supported.
 A command that outlives the request, with output you read incrementally:
 
 ```bash
-J=$(fluxctl agent bg <session> -- 'npm run dev' | jq -r .job)
+J=$(fluxctl agent bg <session> --timeout 600 -- 'npm run dev' | jq -r .job)
 fluxctl agent logs <session> $J -f      # follows until exit, exits with the job's exit code
-fluxctl agent kill <session> $J         # SIGTERM to its process group; exit code reads 143
+fluxctl agent stdin <session> $J --close # EOF on stdin (job started with --stdin)
+fluxctl agent kill <session> $J         # SIGTERM to the whole process tree; --signal KILL
 ```
 
-`POST .../jobs {command, stdin?, max_output_bytes?}` starts it (`setsid`, output to `/tmp/fluxvm-jobs/<job>.out`, exit
-code written last). Reading:
+`POST .../jobs {command, stdin?, max_output_bytes?, timeout_seconds?}` starts it. There are two engines; the response
+and the job record say which one ran (`engine`):
 
-- `GET .../jobs/{job}?offset=N` returns `state`, `exit_code`, `output`, `next_offset`, `more` and `truncated`.
-- `GET .../jobs/{job}/stream` is **Server-Sent Events**: `output` events carry `{offset, next_offset, output,
-  output_base64}` with `next_offset` as the event id, then one `exit` event (`{exit_code}`), or an `error` event if the
-  job or session went away. Reconnect with `Last-Event-ID` (or `?offset=`) and it continues with no gap or repeat.
-  At most 16 streams per host, one hour each; the session must stay `running`.
-- `GET .../jobs` lists every job with `command`, `state` (`running`, `exited`, `killed`), `exit_code` and times. The
-  metadata is kept on the host, so it survives a daemon restart; states are refreshed from the guest on each listing.
+- **`supervisor`** (guest agent with `jobs-v2`, checked with a `Capabilities` request at start): the agent runs the job in
+  its own process group, with separate stdout and stderr spools under `/var/lib/fluxvm-jobs/<job>/`, an optional stdin
+  pipe, a timeout and tree signals. The agent keeps draining its pipes after the retention cap, so the command is never
+  given SIGPIPE and its **real exit status** is kept; `dropped_bytes` says how much was discarded. Confined sessions
+  start the job through procbox (Landlock + seccomp) and return the guest's `enforcement` report.
+- **shell-script** (older agents, or a guest the supervisor cannot reach): the earlier implementation. Output is merged
+  stdout+stderr in `/tmp/fluxvm-jobs/<job>.out`, bounded with `head -c` (the job gets SIGPIPE at the cap), stdin has no
+  end-of-file, and `timeout_seconds` is refused with `400`.
+
+Reading:
+
+- `GET .../jobs/{job}?offset=N` returns `state`, `exit_code`, `output`, `next_offset`, `more` and `truncated`. Supervised
+  jobs also return `stderr`, `stderr_next_offset` (pass `stderr_offset`), `signal`, `dropped_bytes`, `eof` and
+  `output_base64`; `wait_ms` (at most 25 000) holds the request until output arrives. `state` is `running`, `exited`,
+  `killed` (stopped by a signal request), `signaled` or `timed_out`.
+- `GET .../jobs/{job}/stream` is **Server-Sent Events**. `output` events carry `{offset, next_offset, output,
+  output_base64}`, then one `exit` event, or an `error` event if the job or session went away. Shell-script jobs use
+  `next_offset` as the event id; supervised jobs also send `stderr` events and use the id `<stdout>:<stderr>`, which
+  `Last-Event-ID` (or `?offset=&stderr_offset=`) resumes with no gap or repeat. Supervised streams are paced by the
+  guest's long poll, not a timer. At most 16 streams per host, one hour each; the session must stay `running`.
+- `GET .../jobs` lists every job with `command`, `state`, `exit_code`, `signal`, `engine` and times. The metadata is
+  kept on the host, so it survives a daemon restart; states are refreshed from the guest on each listing.
 
 Writing and limits:
 
-- `stdin: true` gives the job a FIFO that `POST .../jobs/{job}/stdin {text | data_base64}` appends to (1 byte to 48 KiB
-  per write; `409` once the job has exited). **There is no end-of-file**: a program that waits for EOF should read a
-  file you put in the guest instead. Only sizes are ledgered (`job.stdin`), never the data.
-- The log is bounded: output stops being recorded at `max_output_bytes` (default 16 MiB, at most 256 MiB) and the job
-  receives SIGPIPE on its next write; `truncated` says so and an exit code is still recorded.
-- `DELETE .../jobs/{job}` stops it (SIGTERM to its process group, exit 143, state `killed`).
+- `stdin: true` gives the job a stdin that `POST .../jobs/{job}/stdin {text | data_base64, close?}` writes to (up to
+  48 KiB per write; `409` once the job has exited). `close: true` sends end-of-file (supervised jobs only; a shell-script
+  job returns `400`). Only sizes are ledgered (`job.stdin`), never the data.
+- `max_output_bytes` (default 16 MiB, at most 256 MiB) bounds retained output per stream.
+- `DELETE .../jobs/{job}[?signal=TERM]` signals the whole process tree (supervised jobs; shell-script jobs get SIGTERM to
+  the group and exit 143, state `killed`).
+- The same guest agent also hardens synchronous `exec`: a timeout now kills the command's process group, output is
+  capped at 16 MiB per stream (with a marker), and the call returns within about two seconds once the command has
+  exited even if a background child keeps the pipes open.
 
-CLI: `fluxctl agent bg [--stdin] [--max-output-bytes N]`, `jobs`, `stdin <id> <job> <text>`, `logs [-f]`, `kill`
-(`logs -f` still polls; the stream is for SDKs and `curl -N`). MCP: `session_job_start`, `session_job_read`,
-`session_job_stdin`, `session_jobs`, `session_job_kill`.
+CLI: `fluxctl agent bg [--stdin] [--max-output-bytes N] [--timeout S]`, `jobs`, `stdin <id> <job> [text] [--close]`,
+`logs [-f]` (stderr goes to the terminal's stderr; supervised jobs long-poll), `kill [--signal S]`. MCP:
+`session_job_start`, `session_job_read`, `session_job_stdin`, `session_jobs`, `session_job_kill`.
 
-Run live earlier (M4, `vz`, NAT session): a 4-second job followed to its exit code 7; a `sleep 300` job killed (143); a
-200 000-byte output read back whole across several pages; an unknown job id returned 404. The streaming, stdin and
-bounded-log scripts were run with a local `sh` (unit tests), **not yet in a guest**, and the SSE route was not run
-against a live daemon. It is still the ordinary exec path underneath, so each poll costs one exec (0.1 s on a NAT
-session, about 0.4 s offline). A job lives in the guest's `/tmp`, so it is gone after a disk-only restore or a reboot.
+Run live earlier (M4, `vz`, NAT session, shell-script engine): a 4-second job followed to its exit code 7; a `sleep 300`
+job killed (143); a 200 000-byte output read back whole across several pages; an unknown job id returned 404.
+**Not run on a live guest:** the supervisor itself. Its behaviour (separate streams, binary output, offsets, long poll,
+stdin EOF, drain past the cap with the real exit code, a descendant holding the pipes killed on timeout and cancel) is
+covered by unit tests that run real processes on macOS, and the new synchronous-exec behaviour by two more. The
+Linux-only confined spawn (`fluxvm-procbox::spawn`) was **not compiled or run here** (no Linux toolchain in the
+development shell). The new API branches (`supervisor` engine in read/stream/stdin/kill/list) are compile-checked and their
+helpers unit-tested, but were not run against a daemon. A job lives in the agent's memory: a reboot or agent restart
+forgets the table (spools stay on disk); jobs are not re-adopted yet.
 
 ### Preview URLs
 
@@ -391,6 +475,34 @@ HTTP endpoint) will not work through the preview: rewrite the URL as above. What
 through the authenticated `/v1/sandboxes/{sandbox_id}/ws/{port}/{path}`. **Not run:** Playwright/Puppeteer clients,
 headful or GPU, a window/computer-use display (vz display and input exist separately), a prebuilt browser image
 (Chromium adds ~600 MB to the 2.8 GB stock root; the install above fits but leaves little free).
+
+### Image readiness
+
+`GET .../probe` (`fluxctl agent probe`, MCP `session_probe`) runs one short command in the guest, under the session's
+confinement, and reports which tools exist (`git`, `sha256sum`, `python3`, `node`/`npm`, `cargo`, `go`, `gcc`/`make`,
+`chromium`/`google-chrome`, `socat`, `playwright`, a Playwright browser cache) and what that makes possible:
+
+| `ready_for` | needs |
+|---|---|
+| `git` | `git` (workspace clones, the git verbs) |
+| `promote` | `sha256sum` (fork promotion compares content by sha256) |
+| `build_node` / `build_python` / `build_rust` / `build_c` | `node`+`npm` / `python3` / `cargo` / `make` and `gcc` or `cc` |
+| `browser_cdp` | a Chromium or Chrome |
+| `browser_cdp_through_preview` | a browser **and** `socat` (Chrome binds DevTools to 127.0.0.1; see Browser) |
+| `playwright` | a `playwright` CLI or a Playwright browser cache |
+
+`workspace.require_ready` at create (`fluxctl agent run --require-ready`) turns a workspace that did not initialize
+(directory not created, clone failed) from a session with a `workspace.note` into a `502` that removes the sandbox.
+
+**DevTools URLs through a preview are rewritten.** A preview of Chrome's DevTools port answers `/json`, `/json/list`,
+`/json/version` and `/json/new` with `webSocketDebuggerUrl` and `devtoolsFrontendUrl` pointing at the daemon and under
+`/preview/<token>` (`wss` when the request came with `X-Forwarded-Proto: https`), so a client that follows them, such as
+Playwright `connectOverCDP`, reaches the page. The rewrite is unit-tested on Chrome's document shape; **not run** against
+a live Chrome through a preview, nor with a real Playwright client.
+
+**No versioned coding or browser image is shipped by this change.** Building one needs an image pipeline and a registry,
+not an API; what is added is the probe to verify any image against these needs, and the readiness gate. Until an image
+exists, the Browser recipe above is how you get one.
 
 ### Ledger
 
@@ -455,7 +567,7 @@ Each item says why it is not in the MVP.
 | Workspace overlay mode, read-only mounts | `mode: "overlay"` is refused; clone is the only writable mode |
 | Process policy as a security boundary | `process` rules are still string globs; filesystem confinement is wired, command confinement beyond it is not |
 | HTTP method/path rules through the session policy | the egress proxy supports them on QEMU/KVM; not exposed here |
-| Streaming exec output | `exec` is still buffered; jobs stream over SSE (polled from the guest every 400 ms) and the terminal (`shell`) streams |
+| Streaming exec output | `exec` is still buffered; jobs stream over SSE (long-polled from the guest supervisor, or polled every 400 ms on older agents) and the terminal (`shell`) streams |
 | Replay | the ledger is a log, not a recording |
 | Preview URLs: large or streamed responses | WebSocket upgrades are bridged (run with Chrome DevTools); large and streamed bodies were not run through the preview route |
 | Browser / computer-use profile | a CDP recipe works on the stock image (see Browser above); no prebuilt browser image, no Playwright client run, no computer-use display profile |

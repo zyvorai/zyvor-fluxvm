@@ -19,4 +19,7 @@ pub mod selftest;
 
 pub use policy::{parse_size, Enforcement, Isolation, Policy, RunAs, SeccompMode, TcpRule};
 pub use profile::Profile;
-pub use run::{build_env, run, run_with, RunOptions, RunResult, SyscallOverrides};
+pub use run::{
+    build_env, run, run_with, spawn, spawn_with, RunOptions, RunResult, Spawned, StdioMode,
+    SyscallOverrides,
+};

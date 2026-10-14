@@ -11,6 +11,8 @@
 //! * `GET    /v1/agents/sessions/{id}`               one session and its capabilities
 //! * `DELETE /v1/agents/sessions/{id}`               delete the session and its sandbox
 //! * `POST   /v1/agents/sessions/{id}/exec`          run a command
+//! * `GET    /v1/agents/sessions/{id}/probe`         which tools the guest image has (git, sha256sum, node, browsers ...)
+//! * `POST   /v1/agents/sessions/{id}/grants`        give the session a brokered credential for named hosts (also GET, DELETE)
 //! * `POST   /v1/agents/sessions/{id}/tokens`        mint an expiring token scoped to this session (also GET, DELETE .../{token})
 //! * `POST   /v1/agents/sessions/{id}/checkpoint`    snapshot under a tag
 //! * `POST   /v1/agents/sessions/{id}/restore`       restore a checkpoint
@@ -57,7 +59,9 @@ use axum::{
 };
 use chrono::{DateTime, Utc};
 use fluxvm_core::config::Role;
-use fluxvm_guest_protocol::{ExecPolicy, ExecTcpRule};
+use fluxvm_guest_protocol::{
+    AgentRequest, AgentResponse, ExecPolicy, ExecTcpRule, JobPhase, JobStatus, JobStream,
+};
 use fluxvm_scheduler::VmManager;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -77,6 +81,15 @@ pub(crate) fn routes() -> Router<Arc<VmManager>> {
             get(get_session).delete(delete_session),
         )
         .route("/v1/agents/sessions/{id}/exec", post(exec_session))
+        .route("/v1/agents/sessions/{id}/probe", get(probe))
+        .route(
+            "/v1/agents/sessions/{id}/grants",
+            post(grant_create).get(grant_list).delete(grant_revoke_all),
+        )
+        .route(
+            "/v1/agents/sessions/{id}/grants/{grant}",
+            axum::routing::delete(grant_revoke),
+        )
         .route(
             "/v1/agents/sessions/{id}/tokens",
             post(mint_token).get(list_tokens),
@@ -309,6 +322,10 @@ struct Session {
     checkpoints: Vec<Checkpoint>,
     #[serde(default)]
     volumes: Vec<VolumeMount>,
+    /// Limits set at create; `None` means unlimited. Usage lives in its own file (see `Usage`),
+    /// so counting an exec never changes `revision`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    budget: Option<Budget>,
     /// Bumped by every save. `If-Match: <revision>` on checkpoint, restore, fork and delete
     /// makes the call fail with 412 when the session changed since the caller read it.
     #[serde(default)]
@@ -362,6 +379,194 @@ async fn save(m: &VmManager, s: &mut Session) -> ApiResult<()> {
         .await
         .map_err(anyhow::Error::from)?;
     Ok(())
+}
+
+// ---------------------------------------------------------------------------------------
+// Budgets: limits a session was created with, and the usage counted against them.
+
+/// Limits on what a session may consume. Every field is optional; a limit that is absent does
+/// not apply. A fork child gets the parent's *remaining* budget, so forking cannot multiply it.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+struct Budget {
+    /// Commands run through `exec`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    max_execs: Option<u64>,
+    /// Wall-clock seconds spent in `exec`, summed. Checked when a command starts (a command is
+    /// also given at most the seconds left as its timeout), so parallel commands can overshoot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    max_exec_seconds: Option<u64>,
+    /// Background jobs started.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    max_jobs: Option<u64>,
+    /// Background jobs running at once.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    max_concurrent_jobs: Option<u64>,
+    /// Fork children created.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    max_children: Option<u64>,
+}
+
+/// What a session has used. Counted when a command, job or fork is accepted.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+struct Usage {
+    execs: u64,
+    exec_ms: u64,
+    jobs: u64,
+    children: u64,
+}
+
+fn validate_budget(b: Option<Budget>) -> Result<Option<Budget>, ApiError> {
+    let Some(b) = b else { return Ok(None) };
+    for (name, v) in [
+        ("max_execs", b.max_execs),
+        ("max_exec_seconds", b.max_exec_seconds),
+        ("max_jobs", b.max_jobs),
+        ("max_concurrent_jobs", b.max_concurrent_jobs),
+        ("max_children", b.max_children),
+    ] {
+        if v == Some(0) || v.is_some_and(|n| n > 10_000_000) {
+            return Err(ApiError {
+                status: StatusCode::BAD_REQUEST,
+                message: format!("budget.{name} must be 1-10000000"),
+            });
+        }
+    }
+    Ok((b != Budget::default()).then_some(b))
+}
+
+fn budget_exhausted(what: &str, used: u64, limit: u64) -> ApiError {
+    ApiError {
+        status: StatusCode::FORBIDDEN,
+        message: format!("this session's {what} budget is used up ({used} of {limit})"),
+    }
+}
+
+impl Budget {
+    /// Whether one more `exec` may start under `u`, and the seconds it may run (`None`: no time
+    /// limit). Counts nothing.
+    fn check_exec(&self, u: &Usage) -> Result<Option<u64>, ApiError> {
+        if let Some(max) = self.max_execs
+            && u.execs >= max
+        {
+            return Err(budget_exhausted("exec", u.execs, max));
+        }
+        match self.max_exec_seconds {
+            Some(max) => {
+                let used = u.exec_ms.div_ceil(1000);
+                if used >= max {
+                    return Err(budget_exhausted("exec time (seconds)", used, max));
+                }
+                Ok(Some(max - used))
+            }
+            None => Ok(None),
+        }
+    }
+
+    fn check_job(&self, u: &Usage, running: u64) -> Result<(), ApiError> {
+        if let Some(max) = self.max_concurrent_jobs
+            && running >= max
+        {
+            return Err(budget_exhausted("concurrent job", running, max));
+        }
+        if let Some(max) = self.max_jobs
+            && u.jobs >= max
+        {
+            return Err(budget_exhausted("job", u.jobs, max));
+        }
+        Ok(())
+    }
+
+    fn check_fork(&self, u: &Usage, count: u64) -> Result<(), ApiError> {
+        if let Some(max) = self.max_children
+            && u.children + count > max
+        {
+            return Err(ApiError {
+                status: StatusCode::FORBIDDEN,
+                message: format!(
+                    "this session's fork budget is {max} children and {} are already used",
+                    u.children
+                ),
+            });
+        }
+        Ok(())
+    }
+
+    /// What is left after `u`: the budget a fork child starts with.
+    fn remaining(&self, u: &Usage) -> Budget {
+        let left = |max: Option<u64>, used: u64| max.map(|m| m.saturating_sub(used).max(1));
+        Budget {
+            max_execs: left(self.max_execs, u.execs),
+            max_exec_seconds: left(self.max_exec_seconds, u.exec_ms.div_ceil(1000)),
+            max_jobs: left(self.max_jobs, u.jobs),
+            max_concurrent_jobs: self.max_concurrent_jobs,
+            max_children: left(self.max_children, u.children),
+        }
+    }
+}
+
+static USAGE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+fn usage_path(m: &VmManager, id: Uuid) -> PathBuf {
+    m.cfg
+        .state_dir
+        .join("agent-session-usage")
+        .join(format!("{id}.json"))
+}
+
+async fn usage_read(m: &VmManager, id: Uuid) -> Usage {
+    match tokio::fs::read(usage_path(m, id)).await {
+        Ok(b) => serde_json::from_slice(&b).unwrap_or_default(),
+        Err(_) => Usage::default(),
+    }
+}
+
+/// Applies `f` to the usage under a lock; if it returns `Err` nothing is written. A write
+/// failure is an error too: a limit that cannot be counted must not be silently skipped.
+async fn usage_update<T>(
+    m: &VmManager,
+    id: Uuid,
+    f: impl FnOnce(&mut Usage) -> Result<T, ApiError>,
+) -> ApiResult<T> {
+    let _g = USAGE_LOCK.lock().await;
+    let mut u = usage_read(m, id).await;
+    let out = f(&mut u)?;
+    let path = usage_path(m, id);
+    if let Some(d) = path.parent() {
+        tokio::fs::create_dir_all(d)
+            .await
+            .map_err(anyhow::Error::from)?;
+    }
+    let tmp = path.with_extension("json.tmp");
+    tokio::fs::write(&tmp, serde_json::to_vec(&u).map_err(anyhow::Error::from)?)
+        .await
+        .map_err(anyhow::Error::from)?;
+    tokio::fs::rename(&tmp, &path)
+        .await
+        .map_err(anyhow::Error::from)?;
+    Ok(out)
+}
+
+/// Accepts one `exec` against the budget and counts it. Returns the most seconds the command may
+/// run (the seconds left), or `None` when the budget has no time limit.
+async fn budget_start_exec(m: &VmManager, s: &Session) -> ApiResult<Option<u64>> {
+    usage_update(m, s.id, |u| {
+        // No limits: still counted, so usage is reported for every session.
+        let left = match &s.budget {
+            Some(b) => b.check_exec(u)?,
+            None => None,
+        };
+        u.execs += 1;
+        Ok(left)
+    })
+    .await
+}
+
+async fn budget_finish_exec(m: &VmManager, id: Uuid, elapsed_ms: u64) {
+    let _ = usage_update(m, id, |u| {
+        u.exec_ms += elapsed_ms;
+        Ok(())
+    })
+    .await;
 }
 
 // ---------------------------------------------------------------------------------------
@@ -749,6 +954,8 @@ struct CreateBody {
     policy: Option<PolicyBody>,
     #[serde(default)]
     ttl_seconds: Option<u64>,
+    #[serde(default)]
+    budget: Option<Budget>,
 }
 
 fn default_agent() -> String {
@@ -766,6 +973,11 @@ struct WorkspaceBody {
     /// Guest path; default `/workspace`.
     #[serde(default)]
     path: Option<String>,
+    /// Fail the create (and remove the sandbox) unless the workspace directory exists and, when
+    /// `git` is given, the clone succeeded. Default: the session is made and `workspace.note`
+    /// says what went wrong.
+    #[serde(default)]
+    require_ready: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -929,6 +1141,7 @@ async fn create_session(
         return Err(bad("workspace.git must be an https:// URL"));
     }
     let policy = compile_policy(body.policy)?;
+    let budget = validate_budget(body.budget)?;
 
     let tenant = caller_tenant(&token_tenant);
     let want_volumes = body
@@ -1030,6 +1243,7 @@ async fn create_session(
         workspace: None,
         checkpoints: Vec::new(),
         volumes: Vec::new(),
+        budget: budget.clone(),
         revision: 0,
     };
     record(
@@ -1141,6 +1355,19 @@ async fn create_session(
                 json!({"git": url, "path": ws_path, "ok": state.cloned, "note": state.note}),
             );
         }
+        if w.require_ready && (state.note.is_some() || (w.git.is_some() && !state.cloned)) {
+            let why = state
+                .note
+                .clone()
+                .unwrap_or_else(|| "the workspace was not initialized".into());
+            // Nothing was promised yet: remove the sandbox and the record.
+            let _ = m.delete(rec.id).await;
+            let _ = std::fs::remove_file(session_path(&m, id));
+            return Err(ApiError {
+                status: StatusCode::BAD_GATEWAY,
+                message: format!("the workspace is not ready: {why}"),
+            });
+        }
         // A baseline makes `artifacts` report what the agent changed. Best effort.
         if m.sandbox_baseline(rec.id, vec![ws_path.clone()])
             .await
@@ -1233,7 +1460,9 @@ async fn get_session(
     authorize(role, &scope, id, Op::Read)?;
     let mut s = load(&m, id, &caller_tenant(&token_tenant)).await?;
     reconcile(&m, &mut s, true).await;
-    Ok(Json(json!(s)))
+    let mut out = json!(s);
+    out["usage"] = json!(usage_read(&m, id).await);
+    Ok(Json(out))
 }
 
 async fn delete_session(
@@ -1257,8 +1486,100 @@ async fn delete_session(
         record(&m, id, "session.delete", json!({}));
     }
     agent_session_auth::purge(&m.cfg.state_dir, id).await;
+    let _ = m.revoke_grant(s.sandbox_id, None).await;
     let _ = tokio::fs::remove_file(job_meta_path(&m, id)).await;
+    let _ = tokio::fs::remove_file(usage_path(&m, id)).await;
     Ok(StatusCode::NO_CONTENT)
+}
+
+// ---------------------------------------------------------------------------------------
+// Credential grants: the sandbox credential broker, through the session. The agent never holds
+// the secret: the egress proxy injects it for the named hosts, from this sandbox's address only.
+// A grant ends with the session and never outlives its expiry; a fork child starts with none.
+
+/// `POST .../grants`: same body as `POST /v1/sandboxes/{id}/grants`. Admin only (a scoped
+/// session token cannot grant itself credentials).
+async fn grant_create(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    token_tenant: Option<Extension<TokenTenant>>,
+    Path(id): Path<Uuid>,
+    Json(mut req): Json<fluxvm_core::grants::GrantRequest>,
+) -> ApiResult<(StatusCode, Json<Value>)> {
+    require_admin(role)?;
+    let s = load(&m, id, &caller_tenant(&token_tenant)).await?;
+    running(&s)?;
+    // A grant never outlives the session.
+    if let Some(end) = s.expires_at {
+        let now = Utc::now();
+        let wanted = match (req.expires_at, req.ttl_seconds) {
+            (Some(at), _) => at,
+            (None, Some(ttl)) if ttl > 0 => now + chrono::Duration::seconds(ttl),
+            _ => end,
+        };
+        let at = wanted.min(end);
+        if at <= now {
+            return Err(ApiError {
+                status: StatusCode::CONFLICT,
+                message: format!("agent session {id} has expired"),
+            });
+        }
+        req.expires_at = Some(at);
+        req.ttl_seconds = None;
+    }
+    m.ensure_running_for_request(s.sandbox_id).await?;
+    let info = m.add_grant(s.sandbox_id, req).await?;
+    // Names and hosts, never the value.
+    record(
+        &m,
+        id,
+        "grant.create",
+        json!({"grant": info.id, "secret_ref": info.secret_ref, "hosts": info.hosts,
+               "expires_at": info.expires_at, "bound": info.bound}),
+    );
+    Ok((StatusCode::CREATED, Json(json!(info))))
+}
+
+async fn grant_list(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    token_tenant: Option<Extension<TokenTenant>>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<Value>> {
+    require_admin(role)?;
+    let s = load(&m, id, &caller_tenant(&token_tenant)).await?;
+    Ok(Json(json!({"grants": m.list_grants(s.sandbox_id).await?})))
+}
+
+async fn grant_revoke_all(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    token_tenant: Option<Extension<TokenTenant>>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<Value>> {
+    require_admin(role)?;
+    let s = load(&m, id, &caller_tenant(&token_tenant)).await?;
+    let revoked = m.revoke_grant(s.sandbox_id, None).await?;
+    record(&m, id, "grant.revoke", json!({"grant": "all"}));
+    Ok(Json(json!({"revoked": revoked})))
+}
+
+async fn grant_revoke(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    token_tenant: Option<Extension<TokenTenant>>,
+    Path((id, grant)): Path<(Uuid, String)>,
+) -> ApiResult<Json<Value>> {
+    require_admin(role)?;
+    let s = load(&m, id, &caller_tenant(&token_tenant)).await?;
+    if !m.revoke_grant(s.sandbox_id, Some(&grant)).await? {
+        return Err(ApiError {
+            status: StatusCode::NOT_FOUND,
+            message: "grant not found".into(),
+        });
+    }
+    record(&m, id, "grant.revoke", json!({"grant": grant}));
+    Ok(Json(json!({"revoked": true})))
 }
 
 #[derive(Debug, Deserialize)]
@@ -1434,15 +1755,24 @@ async fn exec_session(
         return Err(e);
     }
     m.ensure_running_for_request(s.sandbox_id).await?;
+    let left = budget_start_exec(&m, &s).await?;
+    // A command never gets more time than the budget has left.
+    let timeout = match (body.timeout_seconds, left) {
+        (Some(t), Some(l)) => Some(t.min(l)),
+        (None, Some(l)) => Some(l.min(fluxvm_guest_protocol::DEFAULT_EXEC_TIMEOUT_SECS)),
+        (t, None) => t,
+    };
     let started = std::time::Instant::now();
     let res = m
         .exec_with_policy(
             s.sandbox_id,
             body.command.clone(),
-            body.timeout_seconds,
+            timeout,
             s.policy.exec.clone(),
         )
-        .await?;
+        .await;
+    budget_finish_exec(&m, id, started.elapsed().as_millis() as u64).await;
+    let res = res?;
     let out = json!(res);
     record(
         &m,
@@ -1540,7 +1870,18 @@ async fn restore(
         .await
         .map_err(change_error)?;
     record(&m, id, "restore", json!({"tag": body.tag}));
-    Ok(Json(json!({"restored": body.tag, "vm": vm})))
+    // The restored machine may have another guest address: re-bind its credential grants to it
+    // (or drop them if that address is taken), so a grant never follows someone else's traffic.
+    let grants_rebound = match m.rebind_grants(s.sandbox_id).await {
+        Ok(has) => has,
+        Err(e) => {
+            record(&m, id, "grant.revoked", json!({"reason": format!("{e:#}")}));
+            false
+        }
+    };
+    Ok(Json(
+        json!({"restored": body.tag, "vm": vm, "grants_rebound": grants_rebound}),
+    ))
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -1599,6 +1940,17 @@ async fn fork(
     // The parent's files at the fork instant are every child's starting point, so they become
     // each child's baseline: a child's `artifacts` and a later `promote` then see exactly what it
     // did since the fork. The lifecycle gate means nothing is running on the parent meanwhile.
+    // Children are counted against the parent's budget and start with what it has left.
+    let usage_now = usage_read(&m, id).await;
+    let child_budget = s.budget.as_ref().map(|b| b.remaining(&usage_now));
+    usage_update(&m, id, |u| {
+        if let Some(b) = &s.budget {
+            b.check_fork(u, count as u64)?;
+        }
+        u.children += count as u64;
+        Ok(())
+    })
+    .await?;
     let seed = match &s.workspace {
         Some(w) if w.baseline => m
             .sandbox_manifest(s.sandbox_id, vec![w.path.clone()])
@@ -1607,7 +1959,18 @@ async fn fork(
             .map(|mf| (w.path.clone(), mf)),
         _ => None,
     };
-    let report = m.fork_vm_spec(s.sandbox_id, spec, actor_name).await?;
+    let report = match m.fork_vm_spec(s.sandbox_id, spec, actor_name).await {
+        Ok(r) => r,
+        Err(e) => {
+            // Nothing was created, so nothing is spent.
+            let _ = usage_update(&m, id, |u| {
+                u.children = u.children.saturating_sub(count as u64);
+                Ok(())
+            })
+            .await;
+            return Err(e.into());
+        }
+    };
 
     let mut kids = Vec::new();
     for child in &report.children {
@@ -1628,6 +1991,7 @@ async fn fork(
             workspace: s.workspace.clone(),
             volumes: Vec::new(),
             checkpoints: Vec::new(),
+            budget: child_budget.clone(),
             revision: 0,
         };
         let seeded = match &seed {
@@ -2247,6 +2611,57 @@ async fn preview_path(
     preview_serve(m, token, path, req).await
 }
 
+/// Chrome's DevTools discovery endpoints (`/json`, `/json/list`, `/json/version`, `/json/new`).
+fn is_cdp_discovery_path(path: &str) -> bool {
+    let p = path.trim_matches('/');
+    p == "json" || p.starts_with("json/") && !p.starts_with("json/protocol")
+}
+
+/// Rewrites `webSocketDebuggerUrl` / `devtoolsFrontendUrl` in a DevTools discovery document
+/// (an object, or an array of them) so they point at `host` under `/preview/<token>`.
+fn rewrite_cdp_urls(v: &mut Value, host: &str, token: &str, secure: bool) {
+    match v {
+        Value::Array(a) => a
+            .iter_mut()
+            .for_each(|x| rewrite_cdp_urls(x, host, token, secure)),
+        Value::Object(o) => {
+            let prefix = format!("/preview/{token}");
+            if let Some(Value::String(s)) = o.get_mut("webSocketDebuggerUrl") {
+                // ws://10.0.0.5:9223/devtools/page/ID -> ws(s)://<host>/preview/<token>/devtools/page/ID
+                if let Some(path) = s
+                    .strip_prefix("ws://")
+                    .or_else(|| s.strip_prefix("wss://"))
+                    .and_then(|r| r.find('/').map(|i| r[i..].to_string()))
+                {
+                    let scheme = if secure { "wss" } else { "ws" };
+                    *s = format!("{scheme}://{host}{prefix}{path}");
+                }
+            }
+            if let Some(Value::String(s)) = o.get_mut("devtoolsFrontendUrl") {
+                // /devtools/inspector.html?ws=10.0.0.5:9223/devtools/page/ID
+                //   -> /preview/<token>/devtools/inspector.html?ws=<host>/preview/<token>/devtools/page/ID
+                let (path, query) = match s.split_once("?ws=") {
+                    Some((p, q)) => (p.to_string(), Some(q.to_string())),
+                    None => (s.clone(), None),
+                };
+                if path.starts_with('/') {
+                    let mut out = format!("{prefix}{path}");
+                    if let Some(q) = query {
+                        let tail = q.find('/').map(|i| q[i..].to_string()).unwrap_or_default();
+                        out.push_str(&format!("?ws={host}{prefix}{tail}"));
+                    }
+                    *s = out;
+                }
+            }
+            // Nested documents (none today) are walked too.
+            o.values_mut()
+                .filter(|x| x.is_array() || x.is_object())
+                .for_each(|x| rewrite_cdp_urls(x, host, token, secure));
+        }
+        _ => {}
+    }
+}
+
 async fn preview_serve(
     m: Arc<VmManager>,
     token: String,
@@ -2271,6 +2686,18 @@ async fn preview_serve(
     if !alive {
         return gone();
     }
+    // How the client reached this daemon, for rewriting DevTools URLs back to the preview.
+    let public_host = req
+        .headers()
+        .get(axum::http::header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+    let secure = req
+        .headers()
+        .get("x-forwarded-proto")
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.eq_ignore_ascii_case("https"));
+    let cdp_discovery = is_cdp_discovery_path(&path);
     let is_ws = req
         .headers()
         .get(axum::http::header::UPGRADE)
@@ -2287,6 +2714,37 @@ async fn preview_serve(
     } else {
         super::sandbox_proxy_inner(m, p.sandbox, p.port, path, req).await
     };
+    // Chrome DevTools discovery documents name the guest's own address and no preview prefix, so
+    // a client that follows `webSocketDebuggerUrl` (Playwright `connectOverCDP`) would go
+    // straight past the preview. Point those URLs back at it.
+    if cdp_discovery
+        && !is_ws
+        && resp.status() == StatusCode::OK
+        && let Some(host) = public_host
+        && resp
+            .headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|c| c.contains("json"))
+    {
+        let (mut parts, body) = resp.into_parts();
+        match axum::body::to_bytes(body, 8 * 1024 * 1024).await {
+            Ok(bytes) => {
+                let out = serde_json::from_slice::<Value>(&bytes)
+                    .ok()
+                    .map(|mut v| {
+                        rewrite_cdp_urls(&mut v, &host, &token, secure);
+                        serde_json::to_vec(&v).unwrap_or_else(|_| bytes.to_vec())
+                    })
+                    .unwrap_or_else(|| bytes.to_vec());
+                parts.headers.remove(axum::http::header::CONTENT_LENGTH);
+                resp = axum::response::Response::from_parts(parts, axum::body::Body::from(out));
+            }
+            Err(_) => {
+                return (StatusCode::BAD_GATEWAY, "DevTools response too large").into_response();
+            }
+        }
+    }
     // A preview is somebody else's app: never let a browser leak the token via Referer or cache it.
     let h = resp.headers_mut();
     h.insert(
@@ -2298,6 +2756,101 @@ async fn preview_serve(
         axum::http::HeaderValue::from_static("no-store"),
     );
     resp
+}
+
+// ---------------------------------------------------------------------------------------
+// Probe: what the guest image can do, so a caller finds out before it builds on it.
+
+const PROBE_TOOLS: &[&str] = &[
+    "git",
+    "sha256sum",
+    "python3",
+    "pip3",
+    "node",
+    "npm",
+    "npx",
+    "cargo",
+    "go",
+    "gcc",
+    "cc",
+    "make",
+    "curl",
+    "chromium",
+    "chromium-browser",
+    "google-chrome",
+    "playwright",
+    "socat",
+];
+
+fn probe_script() -> String {
+    let names = PROBE_TOOLS.join(" ");
+    format!(
+        "for t in {names}; do p=$(command -v \"$t\" 2>/dev/null) && echo \"$t=$p\"; done; \
+         d=\"${{PLAYWRIGHT_BROWSERS_PATH:-$HOME/.cache/ms-playwright}}\"; \
+         [ -d \"$d\" ] && echo \"playwright-browsers=$d\"; \
+         echo \"arch=$(uname -m)\"; echo \"kernel=$(uname -r)\"; true"
+    )
+}
+
+/// Turns the probe's `name=value` lines into the report. Pure.
+fn probe_report(stdout: &str) -> Value {
+    let mut found = serde_json::Map::new();
+    let mut info = serde_json::Map::new();
+    for line in stdout.lines() {
+        let Some((k, v)) = line.split_once('=') else {
+            continue;
+        };
+        let (k, v) = (k.trim(), v.trim());
+        if k == "arch" || k == "kernel" {
+            info.insert(k.into(), json!(v));
+        } else if PROBE_TOOLS.contains(&k) || k == "playwright-browsers" {
+            found.insert(k.into(), json!(v));
+        }
+    }
+    let has = |t: &str| found.contains_key(t);
+    let browser = has("chromium") || has("chromium-browser") || has("google-chrome");
+    json!({
+        "tools": found,
+        "system": info,
+        // What the session features need from the image.
+        "ready_for": {
+            "git": has("git"),
+            "promote": has("sha256sum"),
+            "build_node": has("node") && has("npm"),
+            "build_python": has("python3"),
+            "build_rust": has("cargo"),
+            "build_c": has("make") && (has("gcc") || has("cc")),
+            "browser_cdp": browser,
+            "browser_cdp_through_preview": browser && has("socat"),
+            "playwright": has("playwright") || has("playwright-browsers"),
+        },
+    })
+}
+
+/// `GET .../probe`: one short command in the guest (under the session's confinement, if any).
+async fn probe(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    scope: Option<Extension<SessionScope>>,
+    token_tenant: Option<Extension<TokenTenant>>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<Value>> {
+    authorize(role, &scope, id, Op::Read)?;
+    let s = load(&m, id, &caller_tenant(&token_tenant)).await?;
+    running(&s)?;
+    m.ensure_running_for_request(s.sandbox_id).await?;
+    let res = m
+        .exec_with_policy(
+            s.sandbox_id,
+            probe_script(),
+            Some(30),
+            s.policy.exec.clone(),
+        )
+        .await?;
+    let out = json!(res);
+    let mut report = probe_report(out["stdout"].as_str().unwrap_or(""));
+    report["session"] = json!(id);
+    Ok(Json(report))
 }
 
 // ---------------------------------------------------------------------------------------
@@ -2834,6 +3387,103 @@ struct JobBody {
     /// Stop recording output after this many bytes (default 16 MiB, at most 256 MiB).
     #[serde(default)]
     max_output_bytes: Option<u64>,
+    /// Kill the job's process tree after this many seconds. Needs the guest job supervisor.
+    #[serde(default)]
+    timeout_seconds: Option<u64>,
+}
+
+/// `JobMeta.engine` of a job run by the guest agent's supervisor (shell-script jobs leave it empty).
+const ENGINE_SUPERVISOR: &str = "supervisor";
+/// How long one supervisor call may take beyond its own long poll.
+const SUP_CALL_SECS: u64 = 30;
+
+fn phase_name(p: JobPhase) -> &'static str {
+    match p {
+        JobPhase::Running => "running",
+        JobPhase::Exited => "exited",
+        JobPhase::Signaled => "signaled",
+        JobPhase::TimedOut => "timed_out",
+        JobPhase::Canceled => "killed",
+    }
+}
+
+/// A supervisor call that turns the agent's `Error` answers into API errors.
+async fn sup_call(
+    m: &VmManager,
+    sandbox: Uuid,
+    req: AgentRequest,
+    wait_secs: u64,
+) -> ApiResult<AgentResponse> {
+    let res = m
+        .guest_agent_call(
+            sandbox,
+            req,
+            std::time::Duration::from_secs(SUP_CALL_SECS + wait_secs),
+        )
+        .await?;
+    match res {
+        AgentResponse::Error { message } => Err(ApiError {
+            status: if message.starts_with("no such job") {
+                StatusCode::NOT_FOUND
+            } else if message.contains("stdin is closed") || message.contains("already ended") {
+                StatusCode::CONFLICT
+            } else {
+                StatusCode::BAD_GATEWAY
+            },
+            message,
+        }),
+        other => Ok(other),
+    }
+}
+
+/// Offsets from a `Last-Event-ID`: `N` (stdout) or `N:M` (stdout, stderr).
+fn parse_event_offsets(v: &str) -> (u64, u64) {
+    let v = v.trim();
+    match v.split_once(':') {
+        Some((a, b)) => (a.parse().unwrap_or(0), b.parse().unwrap_or(0)),
+        None => (v.parse().unwrap_or(0), 0),
+    }
+}
+
+/// A signal given by name (`TERM`, `SIGKILL`) or number.
+fn signal_number(s: &str) -> Option<i32> {
+    let t = s.trim().to_ascii_uppercase();
+    let t = t.strip_prefix("SIG").unwrap_or(&t);
+    match t {
+        "HUP" => Some(1),
+        "INT" => Some(2),
+        "QUIT" => Some(3),
+        "KILL" => Some(9),
+        "USR1" => Some(10),
+        "USR2" => Some(12),
+        "TERM" => Some(15),
+        n => n.parse::<i32>().ok().filter(|n| (1..=64).contains(n)),
+    }
+}
+
+/// Records how a supervised job ended (first observation wins).
+async fn job_meta_status(m: &VmManager, id: Uuid, st: &JobStatus) {
+    if !st.phase.is_final() {
+        return;
+    }
+    let job = st.job_id.parse::<Uuid>().ok();
+    job_meta_update(m, id, |all| {
+        if let Some(j) = all.iter_mut().find(|j| Some(j.job) == job)
+            && j.exit_code.is_none()
+        {
+            j.exit_code = Some(
+                st.exit_code
+                    .map(i64::from)
+                    .or(st.signal.map(|s| 128 + i64::from(s)))
+                    .unwrap_or(-1),
+            );
+            j.phase = Some(phase_name(st.phase).to_string());
+            j.signal = st.signal;
+            j.dropped_bytes = st.stdout_dropped + st.stderr_dropped;
+            j.finished_at = Some(Utc::now());
+        }
+    })
+    .await;
 }
 
 fn job_stdin_path(job: Uuid) -> String {
@@ -2936,6 +3586,16 @@ struct JobMeta {
     started_at: DateTime<Utc>,
     #[serde(default)]
     killed: bool,
+    /// `supervisor` for jobs run by the guest agent; empty for shell-script jobs.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    engine: String,
+    /// How a supervised job ended: `exited`, `signaled`, `timed_out` or `killed`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    phase: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    signal: Option<i32>,
+    #[serde(default)]
+    dropped_bytes: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     exit_code: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2944,6 +3604,12 @@ struct JobMeta {
 
 impl JobMeta {
     fn state(&self) -> &'static str {
+        match self.phase.as_deref() {
+            Some("signaled") => return "signaled",
+            Some("timed_out") => return "timed_out",
+            Some("killed") => return "killed",
+            _ => {}
+        }
         match (self.exit_code, self.killed) {
             (None, _) => "running",
             (Some(_), true) => "killed",
@@ -3055,6 +3721,25 @@ async fn job_start(
         );
         return Err(e);
     }
+    let running_jobs = match s.budget.as_ref().and_then(|b| b.max_concurrent_jobs) {
+        Some(_) if m.ensure_running_for_request(s.sandbox_id).await.is_ok() => {
+            refresh_job_states(&m, &s).await;
+            job_meta_read(&m, id)
+                .await
+                .iter()
+                .filter(|j| j.exit_code.is_none())
+                .count() as u64
+        }
+        _ => 0,
+    };
+    usage_update(&m, id, |u| {
+        if let Some(b) = &s.budget {
+            b.check_job(u, running_jobs)?;
+        }
+        u.jobs += 1;
+        Ok(())
+    })
+    .await?;
     let max_output = body.max_output_bytes.unwrap_or(JOB_DEFAULT_MAX_OUTPUT);
     if max_output == 0 || max_output > JOB_MAX_OUTPUT {
         return Err(ApiError {
@@ -3064,6 +3749,62 @@ async fn job_start(
     }
     m.ensure_running_for_request(s.sandbox_id).await?;
     let job = Uuid::new_v4();
+    if m.guest_jobs_supported(s.sandbox_id).await {
+        let started = sup_call(
+            &m,
+            s.sandbox_id,
+            AgentRequest::JobStart {
+                job_id: job.to_string(),
+                command: body.command.clone(),
+                process: None,
+                policy: s.policy.exec.clone(),
+                timeout_seconds: body.timeout_seconds,
+                stdin: body.stdin,
+                max_output_bytes: Some(max_output),
+            },
+            0,
+        )
+        .await?;
+        record(
+            &m,
+            id,
+            "job.start",
+            json!({"job": job, "command": body.command, "stdin": body.stdin, "engine": ENGINE_SUPERVISOR}),
+        );
+        let meta = JobMeta {
+            job,
+            command: body.command.clone(),
+            stdin: body.stdin,
+            max_output_bytes: max_output,
+            started_at: Utc::now(),
+            killed: false,
+            engine: ENGINE_SUPERVISOR.into(),
+            phase: None,
+            signal: None,
+            dropped_bytes: 0,
+            exit_code: None,
+            finished_at: None,
+        };
+        job_meta_update(&m, id, |all| all.push(meta)).await;
+        let enforcement = match started {
+            AgentResponse::JobStarted { status } => status.enforcement,
+            _ => None,
+        };
+        return Ok((
+            StatusCode::CREATED,
+            Json(json!({
+                "job": job, "state": "running", "engine": ENGINE_SUPERVISOR, "stdin": body.stdin,
+                "max_output_bytes": max_output, "timeout_seconds": body.timeout_seconds,
+                "enforcement": enforcement,
+            })),
+        ));
+    }
+    if body.timeout_seconds.is_some() {
+        return Err(ApiError {
+            status: StatusCode::BAD_REQUEST,
+            message: "timeout_seconds needs the guest job supervisor (jobs-v2), which this guest agent does not have; wrap the command in `timeout` instead".into(),
+        });
+    }
     let res = m
         .exec_with_policy(
             s.sandbox_id,
@@ -3095,6 +3836,10 @@ async fn job_start(
         max_output_bytes: max_output,
         started_at: Utc::now(),
         killed: false,
+        engine: String::new(),
+        phase: None,
+        signal: None,
+        dropped_bytes: 0,
         exit_code: None,
         finished_at: None,
     };
@@ -3111,6 +3856,12 @@ async fn job_start(
 struct JobQuery {
     #[serde(default)]
     offset: u64,
+    /// Supervised jobs only: where to continue the stderr stream.
+    #[serde(default)]
+    stderr_offset: u64,
+    /// Supervised jobs only: wait up to this long (at most 25 s) for new output.
+    #[serde(default)]
+    wait_ms: Option<u64>,
 }
 
 async fn job_read(
@@ -3125,6 +3876,13 @@ async fn job_read(
     let s = load(&m, id, &caller_tenant(&token_tenant)).await?;
     running(&s)?;
     m.ensure_running_for_request(s.sandbox_id).await?;
+    let supervised = job_meta_read(&m, id)
+        .await
+        .iter()
+        .any(|j| j.job == job && j.engine == ENGINE_SUPERVISOR);
+    if supervised {
+        return sup_job_read(&m, &s, job, &q).await.map(Json);
+    }
     let res = m
         .exec_with_policy(s.sandbox_id, job_read_script(job, q.offset), Some(30), None)
         .await?;
@@ -3161,6 +3919,125 @@ async fn job_read(
     })))
 }
 
+/// One supervised read: stdout from `offset` (long poll), stderr from `stderr_offset` (no wait).
+async fn sup_job_read(m: &VmManager, s: &Session, job: Uuid, q: &JobQuery) -> ApiResult<Value> {
+    let wait = q
+        .wait_ms
+        .unwrap_or(0)
+        .min(fluxvm_guest_protocol::MAX_JOB_WAIT_MS);
+    let read = |stream, offset, wait_ms| AgentRequest::JobRead {
+        job_id: job.to_string(),
+        stream,
+        offset,
+        max_bytes: Some(JOB_READ_MAX as u32),
+        wait_ms: Some(wait_ms),
+    };
+    let AgentResponse::JobOutput {
+        data_base64: out64,
+        next_offset,
+        eof: out_eof,
+        status,
+    } = sup_call(
+        m,
+        s.sandbox_id,
+        read(JobStream::Stdout, q.offset, wait),
+        wait / 1000 + 1,
+    )
+    .await?
+    else {
+        return Err(ApiError {
+            status: StatusCode::BAD_GATEWAY,
+            message: "unexpected answer from the guest agent".into(),
+        });
+    };
+    let AgentResponse::JobOutput {
+        data_base64: err64,
+        next_offset: err_next,
+        eof: err_eof,
+        ..
+    } = sup_call(
+        m,
+        s.sandbox_id,
+        read(JobStream::Stderr, q.stderr_offset, 0),
+        0,
+    )
+    .await?
+    else {
+        return Err(ApiError {
+            status: StatusCode::BAD_GATEWAY,
+            message: "unexpected answer from the guest agent".into(),
+        });
+    };
+    job_meta_status(m, s.id, &status).await;
+    let (out, err) = (base64_decode(&out64), base64_decode(&err64));
+    Ok(json!({
+        "job": job,
+        "engine": ENGINE_SUPERVISOR,
+        "state": phase_name(status.phase),
+        "exit_code": status.exit_code,
+        "signal": status.signal,
+        "output": String::from_utf8_lossy(&out),
+        "output_base64": out64,
+        "offset": q.offset,
+        "next_offset": next_offset,
+        "stderr": String::from_utf8_lossy(&err),
+        "stderr_base64": err64,
+        "stderr_offset": q.stderr_offset,
+        "stderr_next_offset": err_next,
+        "more": out.len() >= JOB_READ_MAX || err.len() >= JOB_READ_MAX,
+        // data past the retention cap was read and discarded; the job was not slowed or killed
+        "truncated": status.stdout_dropped > 0 || status.stderr_dropped > 0,
+        "dropped_bytes": {"stdout": status.stdout_dropped, "stderr": status.stderr_dropped},
+        "eof": status.phase.is_final() && out_eof && err_eof,
+    }))
+}
+
+/// Reads the guest's job exit files in one exec and records each observed exit.
+async fn refresh_job_states(m: &VmManager, s: &Session) {
+    // Supervised jobs: one JobList answers for all of them.
+    if job_meta_read(m, s.id)
+        .await
+        .iter()
+        .any(|j| j.engine == ENGINE_SUPERVISOR && j.exit_code.is_none())
+        && let Ok(AgentResponse::Jobs { jobs }) =
+            sup_call(m, s.sandbox_id, AgentRequest::JobList, 0).await
+    {
+        for st in &jobs {
+            job_meta_status(m, s.id, st).await;
+        }
+    }
+    let Ok(res) = m
+        .exec_with_policy(
+            s.sandbox_id,
+            format!(
+                "cd {} 2>/dev/null && for f in *.exit; do [ -e \"$f\" ] && echo \"$f $(cat \"$f\")\"; done; true",
+                shell_quote(JOBS_DIR)
+            ),
+            Some(30),
+            None,
+        )
+        .await
+    else {
+        return;
+    };
+    let out = json!(res);
+    let exits: Vec<(Uuid, i64)> = out["stdout"]
+        .as_str()
+        .unwrap_or("")
+        .lines()
+        .filter_map(|l| {
+            let (f, code) = l.split_once(' ')?;
+            Some((
+                Uuid::parse_str(f.strip_suffix(".exit")?).ok()?,
+                code.trim().parse().ok()?,
+            ))
+        })
+        .collect();
+    for (job, code) in exits {
+        job_meta_exited(m, s.id, job, code).await;
+    }
+}
+
 /// `GET .../jobs`: every job the session started, with its state refreshed from the guest in one
 /// exec (the exit files), so it is right after a daemon restart too.
 async fn job_list(
@@ -3172,36 +4049,8 @@ async fn job_list(
 ) -> ApiResult<Json<Value>> {
     authorize(role, &scope, id, Op::Jobs)?;
     let s = load(&m, id, &caller_tenant(&token_tenant)).await?;
-    if s.state == "running"
-        && m.ensure_running_for_request(s.sandbox_id).await.is_ok()
-        && let Ok(res) = m
-            .exec_with_policy(
-                s.sandbox_id,
-                format!(
-                    "cd {} 2>/dev/null && for f in *.exit; do [ -e \"$f\" ] && echo \"$f $(cat \"$f\")\"; done; true",
-                    shell_quote(JOBS_DIR)
-                ),
-                Some(30),
-                None,
-            )
-            .await
-    {
-        let out = json!(res);
-        let exits: Vec<(Uuid, i64)> = out["stdout"]
-            .as_str()
-            .unwrap_or("")
-            .lines()
-            .filter_map(|l| {
-                let (f, code) = l.split_once(' ')?;
-                Some((
-                    Uuid::parse_str(f.strip_suffix(".exit")?).ok()?,
-                    code.trim().parse().ok()?,
-                ))
-            })
-            .collect();
-        for (job, code) in exits {
-            job_meta_exited(&m, id, job, code).await;
-        }
+    if s.state == "running" && m.ensure_running_for_request(s.sandbox_id).await.is_ok() {
+        refresh_job_states(&m, &s).await;
     }
     let items: Vec<Value> = job_meta_read(&m, id)
         .await
@@ -3209,6 +4058,7 @@ async fn job_list(
         .map(|j| {
             json!({
                 "job": j.job, "command": j.command, "state": j.state(), "exit_code": j.exit_code,
+                "signal": j.signal, "engine": j.engine, "dropped_bytes": j.dropped_bytes,
                 "stdin": j.stdin, "max_output_bytes": j.max_output_bytes,
                 "started_at": j.started_at, "finished_at": j.finished_at,
             })
@@ -3225,10 +4075,14 @@ struct StdinBody {
     /// Or raw bytes, base64.
     #[serde(default)]
     data_base64: Option<String>,
+    /// Close the job's stdin after this write (EOF). Needs the guest job supervisor.
+    #[serde(default)]
+    close: bool,
 }
 
 /// `POST .../jobs/{job}/stdin`: append to a job started with `stdin: true`. There is no
-/// end-of-file: a program that waits for EOF should read from a file you put in the guest.
+/// end-of-file for shell-script jobs: a program that waits for EOF should read from a file you put
+/// in the guest. Supervised jobs take `close: true`.
 async fn job_stdin(
     State(m): State<Arc<VmManager>>,
     Extension(role): Extension<Role>,
@@ -3245,13 +4099,51 @@ async fn job_stdin(
     let data = match (body.text, body.data_base64) {
         (Some(t), None) => t.into_bytes(),
         (None, Some(b)) => base64_decode(&b),
+        (None, None) if body.close => Vec::new(),
         _ => return Err(bad("give exactly one of text or data_base64")),
     };
-    if data.is_empty() || data.len() > JOB_STDIN_MAX {
+    let supervised_max = fluxvm_guest_protocol::MAX_JOB_READ_BYTES as usize;
+    if (data.is_empty() && !body.close) || data.len() > supervised_max.max(JOB_STDIN_MAX) {
         return Err(bad(&format!("stdin writes are 1-{JOB_STDIN_MAX} bytes")));
     }
     let s = load(&m, id, &caller_tenant(&token_tenant)).await?;
     running(&s)?;
+    let supervised = job_meta_read(&m, id)
+        .await
+        .iter()
+        .any(|j| j.job == job && j.engine == ENGINE_SUPERVISOR);
+    if supervised {
+        use base64::Engine as _;
+        m.ensure_running_for_request(s.sandbox_id).await?;
+        sup_call(
+            &m,
+            s.sandbox_id,
+            AgentRequest::JobWrite {
+                job_id: job.to_string(),
+                data_base64: base64::engine::general_purpose::STANDARD.encode(&data),
+                close: body.close,
+            },
+            0,
+        )
+        .await?;
+        record(
+            &m,
+            id,
+            "job.stdin",
+            json!({"job": job, "bytes": data.len(), "close": body.close}),
+        );
+        return Ok(Json(
+            json!({"job": job, "bytes": data.len(), "closed": body.close}),
+        ));
+    }
+    if body.close {
+        return Err(bad(
+            "closing stdin needs the guest job supervisor (jobs-v2); this job was started without it",
+        ));
+    }
+    if data.len() > JOB_STDIN_MAX {
+        return Err(bad(&format!("stdin writes are 1-{JOB_STDIN_MAX} bytes")));
+    }
     if !job_meta_read(&m, id)
         .await
         .iter()
@@ -3308,6 +4200,9 @@ impl Drop for StreamSlot {
 struct StreamQuery {
     #[serde(default)]
     offset: Option<u64>,
+    /// Supervised jobs: where to continue stderr.
+    #[serde(default)]
+    stderr_offset: Option<u64>,
 }
 
 /// `GET .../jobs/{job}/stream`: Server-Sent Events. `output` events carry `{offset, next_offset,
@@ -3333,15 +4228,16 @@ async fn job_stream(
     authorize(role, &scope, id, Op::Jobs)?;
     let s = load(&m, id, &caller_tenant(&token_tenant)).await?;
     running(&s)?;
-    let start = q
-        .offset
-        .or_else(|| {
-            headers
-                .get("last-event-id")
-                .and_then(|v| v.to_str().ok())
-                .and_then(|v| v.trim().parse().ok())
-        })
-        .unwrap_or(0);
+    let last = headers
+        .get("last-event-id")
+        .and_then(|v| v.to_str().ok())
+        .map(parse_event_offsets);
+    let start = q.offset.or(last.map(|l| l.0)).unwrap_or(0);
+    let err_start = q.stderr_offset.or(last.map(|l| l.1)).unwrap_or(0);
+    let supervised = job_meta_read(&m, id)
+        .await
+        .iter()
+        .any(|j| j.job == job && j.engine == ENGINE_SUPERVISOR);
     if JOB_STREAMS.fetch_add(1, std::sync::atomic::Ordering::SeqCst) >= MAX_JOB_STREAMS {
         JOB_STREAMS.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
         return Err(ApiError {
@@ -3355,6 +4251,7 @@ async fn job_stream(
         let _slot = slot;
         let began = std::time::Instant::now();
         let mut offset = start;
+        let mut err_offset = err_start;
         let err = |msg: String| Event::default().event("error").data(json!({"error": msg}).to_string());
         loop {
             if began.elapsed().as_secs() > JOB_STREAM_MAX_SECS {
@@ -3372,6 +4269,88 @@ async fn job_stream(
                     yield Ok(err(e.message));
                     break;
                 }
+            }
+            if supervised {
+                use base64::Engine as _;
+                if let Err(e) = m.ensure_running_for_request(sandbox).await {
+                    yield Ok(err(format!("{e:#}")));
+                    break;
+                }
+                let mk = |stream, off, wait_ms| AgentRequest::JobRead {
+                    job_id: job.to_string(),
+                    stream,
+                    offset: off,
+                    max_bytes: Some(JOB_READ_MAX as u32),
+                    wait_ms: Some(wait_ms),
+                };
+                // stdout long-polls, so the loop is paced by the guest, not by a timer.
+                let out = sup_call(&m, sandbox, mk(JobStream::Stdout, offset, 2000), 2).await;
+                let (out_bytes, out_eof, status) = match out {
+                    Ok(AgentResponse::JobOutput { data_base64, eof, status, .. }) => {
+                        (base64_decode(&data_base64), eof, status)
+                    }
+                    Ok(_) => {
+                        yield Ok(err("unexpected answer from the guest agent".into()));
+                        break;
+                    }
+                    Err(e) => {
+                        yield Ok(err(e.message));
+                        break;
+                    }
+                };
+                let (err_bytes, err_eof) = match sup_call(&m, sandbox, mk(JobStream::Stderr, err_offset, 0), 0).await {
+                    Ok(AgentResponse::JobOutput { data_base64, eof, .. }) => (base64_decode(&data_base64), eof),
+                    Ok(_) => (Vec::new(), false),
+                    Err(e) => {
+                        yield Ok(err(e.message));
+                        break;
+                    }
+                };
+                let b64 = base64::engine::general_purpose::STANDARD;
+                if !out_bytes.is_empty() {
+                    let from = offset;
+                    offset += out_bytes.len() as u64;
+                    // The id carries both offsets so a reconnect resumes both streams.
+                    yield Ok(Event::default()
+                        .event("output")
+                        .id(format!("{offset}:{err_offset}"))
+                        .data(json!({
+                            "offset": from,
+                            "next_offset": offset,
+                            "output": String::from_utf8_lossy(&out_bytes),
+                            "output_base64": b64.encode(&out_bytes),
+                        }).to_string()));
+                }
+                if !err_bytes.is_empty() {
+                    let from = err_offset;
+                    err_offset += err_bytes.len() as u64;
+                    yield Ok(Event::default()
+                        .event("stderr")
+                        .id(format!("{offset}:{err_offset}"))
+                        .data(json!({
+                            "offset": from,
+                            "next_offset": err_offset,
+                            "output": String::from_utf8_lossy(&err_bytes),
+                            "output_base64": b64.encode(&err_bytes),
+                        }).to_string()));
+                }
+                let more = out_bytes.len() >= JOB_READ_MAX || err_bytes.len() >= JOB_READ_MAX;
+                if status.phase.is_final() && out_eof && err_eof && !more {
+                    job_meta_status(&m, id, &status).await;
+                    yield Ok(Event::default()
+                        .event("exit")
+                        .id(format!("{offset}:{err_offset}"))
+                        .data(json!({
+                            "exit_code": status.exit_code,
+                            "state": phase_name(status.phase),
+                            "signal": status.signal,
+                            "next_offset": offset,
+                            "stderr_next_offset": err_offset,
+                            "dropped_bytes": {"stdout": status.stdout_dropped, "stderr": status.stderr_dropped},
+                        }).to_string()));
+                    break;
+                }
+                continue;
             }
             let res = match m.ensure_running_for_request(sandbox).await {
                 Ok(_) => m
@@ -3426,16 +4405,57 @@ async fn job_stream(
     Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
 }
 
+#[derive(Debug, Deserialize, Default)]
+struct KillQuery {
+    /// Supervised jobs: a signal name or number (default TERM). The whole process tree gets it.
+    #[serde(default)]
+    signal: Option<String>,
+}
+
 async fn job_kill(
     State(m): State<Arc<VmManager>>,
     Extension(role): Extension<Role>,
     scope: Option<Extension<SessionScope>>,
     token_tenant: Option<Extension<TokenTenant>>,
     Path((id, job)): Path<(Uuid, Uuid)>,
+    Query(q): Query<KillQuery>,
 ) -> ApiResult<StatusCode> {
     authorize(role, &scope, id, Op::Jobs)?;
     let s = load(&m, id, &caller_tenant(&token_tenant)).await?;
     running(&s)?;
+    let supervised = job_meta_read(&m, id)
+        .await
+        .iter()
+        .any(|j| j.job == job && j.engine == ENGINE_SUPERVISOR);
+    if supervised {
+        let sig = match q.signal.as_deref() {
+            None => 15,
+            Some(name) => signal_number(name).ok_or_else(|| ApiError {
+                status: StatusCode::BAD_REQUEST,
+                message: format!("unknown signal {name:?}; use a name like TERM or KILL, or 1-64"),
+            })?,
+        };
+        m.ensure_running_for_request(s.sandbox_id).await?;
+        sup_call(
+            &m,
+            s.sandbox_id,
+            AgentRequest::JobSignal {
+                job_id: job.to_string(),
+                signal: sig,
+                tree: true,
+            },
+            0,
+        )
+        .await?;
+        job_meta_update(&m, id, |all| {
+            if let Some(j) = all.iter_mut().find(|j| j.job == job) {
+                j.killed = true;
+            }
+        })
+        .await;
+        record(&m, id, "job.kill", json!({"job": job, "signal": sig}));
+        return Ok(StatusCode::NO_CONTENT);
+    }
     let pid = shell_quote(&format!("{JOBS_DIR}/{job}.pid"));
     let exit = shell_quote(&format!("{JOBS_DIR}/{job}.exit"));
     // Negative pid = the whole process group the job started in. That group includes the wrapper
@@ -4170,8 +5190,161 @@ mod tests {
             workspace: None,
             checkpoints: Vec::new(),
             volumes: Vec::new(),
+            budget: None,
             revision: 0,
         }
+    }
+
+    #[test]
+    fn a_budget_is_checked_before_it_is_spent_and_a_child_gets_what_is_left() {
+        let b = Budget {
+            max_execs: Some(3),
+            max_exec_seconds: Some(10),
+            max_jobs: Some(2),
+            max_concurrent_jobs: Some(1),
+            max_children: Some(4),
+        };
+        let mut u = Usage::default();
+        // Fresh: 10 s left for the first command.
+        assert_eq!(b.check_exec(&u).unwrap(), Some(10));
+        u.execs = 2;
+        u.exec_ms = 7_500;
+        assert_eq!(
+            b.check_exec(&u).unwrap(),
+            Some(2),
+            "partial seconds round up as used"
+        );
+        u.execs = 3;
+        assert_eq!(b.check_exec(&u).unwrap_err().status, StatusCode::FORBIDDEN);
+        u.execs = 1;
+        u.exec_ms = 10_000;
+        assert!(b.check_exec(&u).unwrap_err().message.contains("exec time"));
+        // Jobs: concurrency and total are separate limits.
+        let mut u = Usage::default();
+        assert!(b.check_job(&u, 0).is_ok());
+        assert!(
+            b.check_job(&u, 1)
+                .unwrap_err()
+                .message
+                .contains("concurrent")
+        );
+        u.jobs = 2;
+        assert!(b.check_job(&u, 0).is_err());
+        // Forks: the whole request must fit.
+        let u = Usage {
+            children: 3,
+            ..Default::default()
+        };
+        assert!(b.check_fork(&u, 1).is_ok());
+        assert!(b.check_fork(&u, 2).is_err());
+        // No limits means no refusals.
+        assert_eq!(Budget::default().check_exec(&u).unwrap(), None);
+        // A child starts with the remainder, never with zero (zero would read as "refused" and
+        // zero is not a valid limit), and the concurrency cap is inherited as is.
+        let used = Usage {
+            execs: 3,
+            exec_ms: 9_001,
+            jobs: 1,
+            children: 2,
+        };
+        let r = b.remaining(&used);
+        assert_eq!(r.max_execs, Some(1));
+        assert_eq!(r.max_exec_seconds, Some(1));
+        assert_eq!(r.max_jobs, Some(1));
+        assert_eq!(r.max_concurrent_jobs, Some(1));
+        assert_eq!(r.max_children, Some(2));
+    }
+
+    #[test]
+    fn budget_inputs_are_validated() {
+        assert!(validate_budget(None).unwrap().is_none());
+        assert!(validate_budget(Some(Budget::default())).unwrap().is_none());
+        for bad in [
+            Budget {
+                max_execs: Some(0),
+                ..Default::default()
+            },
+            Budget {
+                max_jobs: Some(20_000_000),
+                ..Default::default()
+            },
+        ] {
+            assert!(validate_budget(Some(bad)).is_err());
+        }
+        let ok = validate_budget(Some(Budget {
+            max_children: Some(8),
+            ..Default::default()
+        }))
+        .unwrap();
+        assert_eq!(ok.unwrap().max_children, Some(8));
+    }
+
+    #[test]
+    fn devtools_discovery_urls_point_back_at_the_preview() {
+        assert!(is_cdp_discovery_path("json"));
+        assert!(is_cdp_discovery_path("json/"));
+        assert!(is_cdp_discovery_path("/json/list"));
+        assert!(is_cdp_discovery_path("json/version"));
+        assert!(!is_cdp_discovery_path("json/protocol"));
+        assert!(!is_cdp_discovery_path("jsonx"));
+        assert!(!is_cdp_discovery_path("devtools/page/1"));
+        // What Chrome returns when reached through the sandbox proxy.
+        let mut doc = json!([{
+            "id": "ABC", "title": "t", "type": "page",
+            "webSocketDebuggerUrl": "ws://192.168.64.5:9223/devtools/page/ABC",
+            "devtoolsFrontendUrl": "/devtools/inspector.html?ws=192.168.64.5:9223/devtools/page/ABC",
+        }]);
+        rewrite_cdp_urls(&mut doc, "daemon.example:8080", "tok123", false);
+        assert_eq!(
+            doc[0]["webSocketDebuggerUrl"],
+            "ws://daemon.example:8080/preview/tok123/devtools/page/ABC"
+        );
+        assert_eq!(
+            doc[0]["devtoolsFrontendUrl"],
+            "/preview/tok123/devtools/inspector.html?ws=daemon.example:8080/preview/tok123/devtools/page/ABC"
+        );
+        assert_eq!(doc[0]["title"], "t");
+        // /json/version is an object, and behind TLS the scheme is wss.
+        let mut v = json!({
+            "Browser": "Chrome/155",
+            "webSocketDebuggerUrl": "ws://127.0.0.1:9222/devtools/browser/XYZ",
+        });
+        rewrite_cdp_urls(&mut v, "h", "t", true);
+        assert_eq!(
+            v["webSocketDebuggerUrl"],
+            "wss://h/preview/t/devtools/browser/XYZ"
+        );
+        assert_eq!(v["Browser"], "Chrome/155");
+        // Anything else is left alone.
+        let mut other = json!({"webSocketDebuggerUrl": 5, "x": ["ws://a/b"]});
+        rewrite_cdp_urls(&mut other, "h", "t", false);
+        assert_eq!(other, json!({"webSocketDebuggerUrl": 5, "x": ["ws://a/b"]}));
+    }
+
+    #[test]
+    fn a_probe_report_says_what_each_feature_needs() {
+        let r = probe_report(
+            "git=/usr/bin/git\nsha256sum=/usr/bin/sha256sum\nchromium=/usr/bin/chromium\n\
+             socat=/usr/bin/socat\nnode=/usr/bin/node\narch=aarch64\nkernel=6.1\njunk=1\n",
+        );
+        assert_eq!(r["tools"]["git"], "/usr/bin/git");
+        assert!(r["tools"].get("junk").is_none());
+        assert_eq!(r["system"]["arch"], "aarch64");
+        let ready = &r["ready_for"];
+        assert_eq!(ready["git"], true);
+        assert_eq!(ready["promote"], true);
+        assert_eq!(ready["browser_cdp"], true);
+        assert_eq!(ready["browser_cdp_through_preview"], true);
+        // node without npm is not a Node toolchain; no compiler means no C builds.
+        assert_eq!(ready["build_node"], false);
+        assert_eq!(ready["build_c"], false);
+        assert_eq!(ready["playwright"], false);
+        // The script asks for every tool the report knows and nothing else.
+        let script = probe_script();
+        for t in PROBE_TOOLS {
+            assert!(script.contains(t), "{t}");
+        }
+        assert_eq!(probe_report("")["ready_for"]["promote"], false);
     }
 
     #[test]
@@ -4221,6 +5394,57 @@ mod tests {
             check_if_match(&h("x"), &s).unwrap_err().status,
             StatusCode::BAD_REQUEST
         );
+    }
+
+    #[test]
+    fn event_ids_carry_both_stream_offsets() {
+        assert_eq!(parse_event_offsets("120"), (120, 0));
+        assert_eq!(parse_event_offsets(" 120:45 "), (120, 45));
+        assert_eq!(parse_event_offsets("junk"), (0, 0));
+    }
+
+    #[test]
+    fn signals_are_named_or_numbered() {
+        assert_eq!(signal_number("TERM"), Some(15));
+        assert_eq!(signal_number("sigkill"), Some(9));
+        assert_eq!(signal_number("2"), Some(2));
+        assert_eq!(signal_number("0"), None);
+        assert_eq!(signal_number("65"), None);
+        assert_eq!(signal_number("BOGUS"), None);
+    }
+
+    #[test]
+    fn a_supervised_job_reports_how_it_ended() {
+        let mut j = JobMeta {
+            job: Uuid::nil(),
+            command: "x".into(),
+            stdin: false,
+            max_output_bytes: 1,
+            started_at: Utc::now(),
+            killed: false,
+            engine: ENGINE_SUPERVISOR.into(),
+            phase: None,
+            signal: None,
+            dropped_bytes: 0,
+            exit_code: None,
+            finished_at: None,
+        };
+        assert_eq!(j.state(), "running");
+        j.exit_code = Some(0);
+        j.phase = Some("exited".into());
+        assert_eq!(j.state(), "exited");
+        j.phase = Some("timed_out".into());
+        assert_eq!(j.state(), "timed_out");
+        j.phase = Some("signaled".into());
+        assert_eq!(j.state(), "signaled");
+        // Metadata written before the supervisor existed has no engine or phase.
+        let old: JobMeta = serde_json::from_value(json!({
+            "job": Uuid::nil(), "command": "x", "stdin": false, "max_output_bytes": 1,
+            "started_at": Utc::now(), "exit_code": 3
+        }))
+        .unwrap();
+        assert_eq!(old.state(), "exited");
+        assert!(old.engine.is_empty());
     }
 
     #[test]

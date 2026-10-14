@@ -23,6 +23,52 @@ pub struct RunOptions {
     pub capture: bool,
 }
 
+/// How [`spawn`] wires the child's standard streams.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StdioMode {
+    /// Inherit the parent's stdio.
+    Inherit,
+    /// stdin closed; stdout and stderr piped (what [`run`] uses with `capture`).
+    Capture,
+    /// stdin, stdout and stderr all piped, for a caller that streams.
+    Piped,
+}
+
+/// A confined child that is running; the caller owns its pipes and must reap it.
+#[derive(Debug)]
+pub struct Spawned {
+    pub child: std::process::Child,
+    pub enforcement: Enforcement,
+}
+
+/// Starts `argv` confined by `policy` and returns at once. The child leads its own process group
+/// (`child.id()` is the pgid), so `kill(-pgid)` reaches everything it started. Unlike [`run`] this does
+/// not enforce `policy.timeout_secs` or `max_output_bytes`: the caller supervises the child.
+pub fn spawn(policy: &Policy, argv: &[String], stdio: StdioMode) -> Result<Spawned> {
+    spawn_with(policy, &SyscallOverrides::default(), argv, stdio)
+}
+
+#[cfg(target_os = "linux")]
+pub fn spawn_with(
+    policy: &Policy,
+    overrides: &SyscallOverrides,
+    argv: &[String],
+    stdio: StdioMode,
+) -> Result<Spawned> {
+    let (child, enforcement) = imp::spawn(policy, overrides, argv, stdio)?;
+    Ok(Spawned { child, enforcement })
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn spawn_with(
+    _policy: &Policy,
+    _overrides: &SyscallOverrides,
+    _argv: &[String],
+    _stdio: StdioMode,
+) -> Result<Spawned> {
+    anyhow::bail!("fluxvm-procbox only runs on Linux (Landlock and seccomp)")
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct RunResult {
     pub exit_code: Option<i32>,
@@ -182,6 +228,69 @@ mod imp {
         argv: &[String],
         opts: &RunOptions,
     ) -> Result<RunResult> {
+        let stdio = if opts.capture {
+            StdioMode::Capture
+        } else {
+            StdioMode::Inherit
+        };
+        let start = Instant::now();
+        let (mut child, enforcement) = spawn(policy, overrides, argv, stdio)?;
+        let pgid = child.id() as i32;
+        let cap = policy.max_output_bytes;
+        let out_reader = child.stdout.take().map(|s| read_capped(s, cap));
+        let err_reader = child.stderr.take().map(|s| read_capped(s, cap));
+
+        let deadline = policy.timeout_secs.map(|s| start + Duration::from_secs(s));
+        let mut timed_out = false;
+        let status = loop {
+            if let Some(st) = child.try_wait().context("waiting for child")? {
+                break st;
+            }
+            if let Some(d) = deadline {
+                if !timed_out && Instant::now() >= d {
+                    timed_out = true;
+                    unsafe { libc::kill(-pgid, libc::SIGKILL) };
+                }
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        // Reap anything the child left behind in its process group so no
+        // sandboxed process outlives the run (and pipe readers can finish).
+        unsafe { libc::kill(-pgid, libc::SIGKILL) };
+
+        let (mut stdout, mut truncated) = (Vec::new(), false);
+        if let Some(h) = out_reader {
+            if let Ok((b, t)) = h.join() {
+                stdout = b;
+                truncated |= t;
+            }
+        }
+        let mut stderr = Vec::new();
+        if let Some(h) = err_reader {
+            if let Ok((b, t)) = h.join() {
+                stderr = b;
+                truncated |= t;
+            }
+        }
+
+        Ok(RunResult {
+            exit_code: status.code(),
+            signal: status.signal(),
+            timed_out,
+            stdout: String::from_utf8_lossy(&stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&stderr).into_owned(),
+            output_truncated: truncated,
+            wall_ms: start.elapsed().as_millis() as u64,
+            enforcement,
+        })
+    }
+
+    pub fn spawn(
+        policy: &Policy,
+        overrides: &SyscallOverrides,
+        argv: &[String],
+        stdio: StdioMode,
+    ) -> Result<(std::process::Child, Enforcement)> {
         if argv.is_empty() {
             bail!("no command given");
         }
@@ -265,10 +374,18 @@ mod imp {
         if let Some(cwd) = &policy.cwd {
             cmd.current_dir(cwd);
         }
-        if opts.capture {
-            cmd.stdin(Stdio::null())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped());
+        match stdio {
+            StdioMode::Inherit => {}
+            StdioMode::Capture => {
+                cmd.stdin(Stdio::null())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped());
+            }
+            StdioMode::Piped => {
+                cmd.stdin(Stdio::piped())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped());
+            }
         }
         cmd.process_group(0);
         if let (Some((uid, gid)), None) = (run_as, &iso) {
@@ -300,8 +417,7 @@ mod imp {
             });
         }
 
-        let start = Instant::now();
-        let mut child = cmd.spawn().with_context(|| {
+        let child = cmd.spawn().with_context(|| {
             format!(
                 "failed to start {:?} inside the sandbox (the command and its libraries must be \
                  under a --read/--write path)",
@@ -309,55 +425,7 @@ mod imp {
             )
         })?;
         drop(prepared);
-
-        let pgid = child.id() as i32;
-        let cap = policy.max_output_bytes;
-        let out_reader = child.stdout.take().map(|s| read_capped(s, cap));
-        let err_reader = child.stderr.take().map(|s| read_capped(s, cap));
-
-        let deadline = policy.timeout_secs.map(|s| start + Duration::from_secs(s));
-        let mut timed_out = false;
-        let status = loop {
-            if let Some(st) = child.try_wait().context("waiting for child")? {
-                break st;
-            }
-            if let Some(d) = deadline {
-                if !timed_out && Instant::now() >= d {
-                    timed_out = true;
-                    unsafe { libc::kill(-pgid, libc::SIGKILL) };
-                }
-            }
-            std::thread::sleep(Duration::from_millis(5));
-        };
-        // Reap anything the child left behind in its process group so no
-        // sandboxed process outlives the run (and pipe readers can finish).
-        unsafe { libc::kill(-pgid, libc::SIGKILL) };
-
-        let (mut stdout, mut truncated) = (Vec::new(), false);
-        if let Some(h) = out_reader {
-            if let Ok((b, t)) = h.join() {
-                stdout = b;
-                truncated |= t;
-            }
-        }
-        let mut stderr = Vec::new();
-        if let Some(h) = err_reader {
-            if let Ok((b, t)) = h.join() {
-                stderr = b;
-                truncated |= t;
-            }
-        }
-
-        Ok(RunResult {
-            exit_code: status.code(),
-            signal: status.signal(),
-            timed_out,
-            stdout: String::from_utf8_lossy(&stdout).into_owned(),
-            stderr: String::from_utf8_lossy(&stderr).into_owned(),
-            output_truncated: truncated,
-            wall_ms: start.elapsed().as_millis() as u64,
-            enforcement: plan.enforcement,
-        })
+        Ok((child, plan.enforcement))
     }
 }
 
