@@ -119,7 +119,7 @@ pub(crate) fn complete_script(u: &Upload) -> String {
     let dest = q(&u.path);
     let tmp = q(&format!("{}.fluxvm-upload-{}", u.path, u.id.simple()));
     let mut s = format!(
-        "set -e; d={dir}; t={tmp}; [ -d \"$d\" ] || exit 6; \
+        "set -e; d={dir}; t={tmp}; trap 'rm -f \"$t\"' EXIT; [ -d \"$d\" ] || exit 6; \
          n=$(ls \"$d\" | wc -l | tr -d ' '); [ \"$n\" = {parts} ] || exit 6; \
          cat \"$d\"/* > \"$t\"; \
          [ \"$(wc -c < \"$t\" | tr -d ' ')\" = {size} ] || {{ rm -f \"$t\"; exit 3; }}; ",
