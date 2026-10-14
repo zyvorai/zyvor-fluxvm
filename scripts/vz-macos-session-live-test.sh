@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: Apache-2.0
 # Live test of an agent session on a macOS guest (template clone, SSH engine). Builds a template from an IPSW
-# (scripts/macos-session-template.sh), or reuses one: set FLUXVM_MACOS_TEMPLATE_DIR to a directory that holds
+# (scripts/macos-session-template.sh) into `FLUXVM_MACOS_TEMPLATE_DIR` (default: the run's temp dir), or reuses one there: set FLUXVM_MACOS_TEMPLATE_DIR to a directory that holds
 # `<name>/spec.json` and pass FLUXVM_MACOS_TEMPLATE=<name>.
 #   scripts/vz-macos-session-live-test.sh /path/to/restore.ipsw
 # Needs Apple silicon macOS, an UNLOCKED login session (a memory restore fails with the screen locked), about 60 GB
-# free on an APFS volume, python3 and curl. The first run takes about 10 minutes (the install).
+# free on an APFS volume, python3 and curl. To reuse a template across runs set FLUXVM_MACOS_STATE_DIR too. The first run takes about 10 minutes (the install).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 [[ "$(uname -s)" == Darwin && "$(uname -m)" == arm64 ]] || { echo "Apple silicon macOS only" >&2; exit 2; }
@@ -36,7 +36,8 @@ jget() {
 cargo build -p fluxctl -j 4 2>&1 | tail -1
 RUNNER="$(find target/debug/build -path '*fluxvm-apple-*/out/fluxvm-vz-runner' -type f -exec ls -t {} + | head -1)"
 [[ -x "$RUNNER" ]] || { echo "vz runner not built" >&2; exit 2; }
-STATE="$T/state"; TPL_DIR="${FLUXVM_MACOS_TEMPLATE_DIR:-$STATE/templates}"
+# A template authorizes one daemon's SSH key, so reusing a template needs the same state dir (it holds that key).
+STATE="${FLUXVM_MACOS_STATE_DIR:-$T/state}"; TPL_DIR="${FLUXVM_MACOS_TEMPLATE_DIR:-$STATE/templates}"
 mkdir -p "$STATE"
 cat > "$T/fluxvm.toml" <<EOT
 listen = "127.0.0.1:$PORT"
@@ -56,14 +57,14 @@ for _ in $(seq 1 40); do curl -fs "$U/healthz" >/dev/null 2>&1 && break; sleep 1
 curl -fs "$U/healthz" >/dev/null && ok "daemon is up" || bad "daemon did not start"
 
 NAME="${FLUXVM_MACOS_TEMPLATE:-live-macos}"
-if [[ -z "${FLUXVM_MACOS_TEMPLATE_DIR:-}" ]]; then
+if [[ ! -f "$TPL_DIR/$NAME/spec.json" ]]; then
   FLUXVM_URL="$U" FLUXVM_TOKEN="$TOKEN" FLUXVM_TEMPLATES_DIR="$TPL_DIR" \
     scripts/macos-session-template.sh "$NAME" "$IPSW" flux "$STATE" > "$T/template.log" 2>&1 \
     || { tail -15 "$T/template.log"; bad "template build failed"; }
   ok "template built"
 fi
 [[ -f "$TPL_DIR/$NAME/spec.json" ]] || bad "no template $NAME in $TPL_DIR"
-USER_NAME="$(jget 'd["apple"].get("provision_username","")' < "$TPL_DIR/$NAME/spec.json")"
+USER_NAME="$(jget '(d.get("cloud_init") or {}).get("user") or d["apple"].get("provision_username","")' < "$TPL_DIR/$NAME/spec.json")"
 
 # 1. Refusals come before anything boots.
 R="$(api -w ' %{http_code}' -X POST "$U/v1/agents/sessions" \
@@ -71,7 +72,7 @@ R="$(api -w ' %{http_code}' -X POST "$U/v1/agents/sessions" \
 [[ "${R##* }" == 400 && "$R" == *"macOS guest"* ]] && ok "an offline policy is refused for a macOS guest" || bad "offline: $R"
 
 # 2. A session on a clone of the template.
-SESSION="$(api -X POST "$U/v1/agents/sessions" -d "{\"agent\":\"live\",\"runtime\":{\"template\":\"$NAME\"}}")"
+SESSION="$(api -X POST "$U/v1/agents/sessions" -d "{\"agent\":\"live\",\"runtime\":{\"template\":\"$NAME\"},\"workspace\":{\"mode\":\"clone\"}}")"
 S="$(echo "$SESSION" | jget 'd.get("id","")')"
 [[ -n "$S" ]] || bad "session create failed: $SESSION"
 ok "session created from the template"
@@ -99,7 +100,7 @@ for _ in $(seq 1 20); do
   [[ "$JS" == exited ]] && break; sleep 1
 done
 [[ "$(api "$U/v1/agents/sessions/$S/jobs" | jget '[j for j in d["items"] if j["job"]=="'"$J"'"][0].get("exit_code")')" == 7 ]] \
-  && ok "job exit code kept" || bad "job did not exit 7"
+  && ok "job exit code kept" || bad "job did not exit 7: $(api "$U/v1/agents/sessions/$S/jobs")"
 
 # 4. The display.
 CODE="$(api -o "$T/shot.png" -w '%{http_code}' "$U/v1/agents/sessions/$S/screenshot")"
@@ -124,6 +125,7 @@ done
 
 # 7. Delete frees the clone.
 api -X DELETE "$U/v1/agents/sessions/$S" >/dev/null
-[[ "$(api "$U/v1/agents/sessions/$S" | jget 'd.get("state","")')" == deleted ]] && ok "session deleted" || bad "session still there"
+GONE="$(api -w ' %{http_code}' "$U/v1/agents/sessions/$S")"
+[[ "${GONE##* }" == 404 || "$GONE" == *'"state":"deleted"'* ]] && ok "session deleted" || bad "session still there: $GONE"
 
 echo "all $pass checks passed"

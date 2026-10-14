@@ -1609,10 +1609,16 @@ async fn create_session(
             .as_ref()
             .is_some_and(|a| a.guest_os == fluxvm_core::model::AppleGuest::Macos)
         {
+            // The SSH user: `cloud_init.user` (what `vz_guest` reaches first), else the provisioned account.
             macos_user = Some(
-                spec.apple
+                spec.cloud_init
                     .as_ref()
-                    .and_then(|a| a.provision_username.clone()),
+                    .and_then(|c| c.user.clone())
+                    .or_else(|| {
+                        spec.apple
+                            .as_ref()
+                            .and_then(|a| a.provision_username.clone())
+                    }),
             );
         }
     }
@@ -4548,7 +4554,7 @@ async fn relay_pty(
 }
 
 // ---------------------------------------------------------------------------------------
-// Jobs: a command that outlives the request. It runs detached in the guest (`setsid`), its
+// Jobs: a command that outlives the request. It runs detached in the guest (`setsid` where it exists; macOS has none), its
 // output goes to a file (bounded: the log stops at `max_output_bytes` and the job gets SIGPIPE),
 // and the caller reads that file from a byte offset, either by polling `GET .../jobs/{job}` or
 // as a Server-Sent Events stream (`.../stream`, `Last-Event-ID` is the byte offset, so a dropped
@@ -4706,7 +4712,7 @@ fn job_start_script(job: Uuid, command: &str, stdin: bool, max_output: u64) -> S
     // output through `head -c` (the bound), and records the exit code last, so "exit file exists"
     // means the output file is complete.
     format!(
-        "mkdir -p {dir} && {mkfifo}(setsid sh -c 'echo $$ > \"$1\"; exec 3<>\"$6\"; {{ sh -c \"$2\" 2>&1 <&3; echo $? > \"$4.rc\"; }} | head -c \"$5\" > \"$3\"; mv \"$4.rc\" \"$4\"' _ {pid} {cmd} {out} {exit} {max_output} {input} > /dev/null 2>&1 &) ; echo started",
+        "mkdir -p {dir} && {mkfifo}{{ S=; command -v setsid >/dev/null 2>&1 && S=setsid; (exec $S sh -c 'echo $$ > \"$1\"; exec 3<>\"$6\"; {{ sh -c \"$2\" 2>&1 <&3; echo $? > \"$4.rc\"; }} | head -c \"$5\" > \"$3\"; mv \"$4.rc\" \"$4\"' _ {pid} {cmd} {out} {exit} {max_output} {input} > /dev/null 2>&1 &); }} ; echo started",
         dir = shell_quote(JOBS_DIR),
         cmd = shell_quote(command),
     )
@@ -5685,7 +5691,8 @@ async fn job_kill(
     // Negative pid = the whole process group the job started in. That group includes the wrapper
     // that would have written the exit file, so a killed job gets the conventional 143 here.
     let cmd = format!(
-        "p=$(cat {pid} 2>/dev/null) && [ -n \"$p\" ] && kill -TERM -- \"-$p\" 2>/dev/null; \
+        "p=$(cat {pid} 2>/dev/null) && [ -n \"$p\" ] && {{ kill -TERM -- \"-$p\" 2>/dev/null \
+         || {{ pkill -TERM -P \"$p\" 2>/dev/null; kill -TERM \"$p\" 2>/dev/null; }}; }}; \
          sleep 0.3; [ -e {exit} ] || echo 143 > {exit}; true"
     );
     m.exec_with_policy(s.sandbox_id, cmd, Some(30), None)

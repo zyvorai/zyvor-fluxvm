@@ -19,7 +19,6 @@ TEMPLATES="${FLUXVM_TEMPLATES_DIR:-$STATE/templates}"
 [[ -f "$IPSW" ]] || { echo "no such IPSW: $IPSW" >&2; exit 2; }
 [[ "$NAME" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] || { echo "template name must be 1-64 of [A-Za-z0-9._-]" >&2; exit 2; }
 [[ -e "$TEMPLATES/$NAME" ]] && { echo "template $NAME already exists at $TEMPLATES/$NAME" >&2; exit 2; }
-[[ -f "$STATE/sandbox_ed25519.pub" ]] || { echo "no $STATE/sandbox_ed25519.pub: run the daemon once, or pass its state_dir" >&2; exit 2; }
 api() { curl -sf -H "authorization: Bearer $TOKEN" -H 'content-type: application/json' "$@"; }
 jget() { python3 -I -c 'import sys,json; d=json.load(sys.stdin); print(eval(sys.argv[1], {"d": d}) or "")' "$1"; }
 
@@ -58,6 +57,11 @@ done
 export SSH_ASKPASS="$W/askpass" SSH_ASKPASS_REQUIRE=force
 gs() { ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR \
   -o PreferredAuthentications=password,keyboard-interactive -o PubkeyAuthentication=no "$GUEST_USER@$IP" "$@"; }
+# The daemon creates its key on first use; an exec (which fails: the key is not authorized yet) makes it.
+if [[ ! -f "$STATE/sandbox_ed25519.pub" ]]; then
+  api -X POST "$URL/v1/vms/$VM/agent" -d '{"command":"true","timeout_seconds":20}' >/dev/null 2>&1 || true
+fi
+[[ -f "$STATE/sandbox_ed25519.pub" ]] || { echo "no $STATE/sandbox_ed25519.pub: pass the daemon's state_dir" >&2; exit 1; }
 PUB="$(cat "$STATE/sandbox_ed25519.pub")"
 gs "mkdir -p ~/.ssh && chmod 700 ~/.ssh && echo '$PUB' >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys"
 echo "daemon key authorized for $GUEST_USER"
@@ -84,7 +88,7 @@ import json, sys
 d, user = sys.argv[1:3]
 spec = {"name": "template", "backend": "vz", "image": f"{d}/disk.raw", "vcpus": 4, "memory_mib": 8192,
         "network": {"mode": "user"},
-        "apple": {"guest_os": "macos", "provision_username": user}}
+        "apple": {"guest_os": "macos"}, "cloud_init": {"user": user}}
 open(f"{d}/spec.json", "w").write(json.dumps(spec, indent=2) + "\n")
 PY
 echo "template ready: $TEMPLATES/$NAME"

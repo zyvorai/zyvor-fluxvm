@@ -236,8 +236,11 @@ Verified by hand on an Apple M4 running macOS 27.2 with macOS 27.0.1 (26A434) as
 (`<name>/spec.json` plus `disk.raw`, `hardware.bin`, `identity.bin`, `auxiliary.bin`). `scripts/macos-session-template.sh` builds
 one from the IPSW (install, provision, authorize the daemon's key, disable sleep and the screen lock, stop), and
 `scripts/vz-macos-session-live-test.sh` exercises it end to end. What a macOS session can and cannot do is the table in
-[agent-sessions-guide.md](agent-sessions-guide.md#22-a-macos-guest-as-a-session). **Implemented and unit-tested; the live
-script has not been run to completion yet** (see the status line in the PR that added it).
+[agent-sessions-guide.md](agent-sessions-guide.md#22-a-macos-guest-as-a-session). **Verified on an M4 host with a macOS 27.0.1 guest:** the template build, an offline policy refused,
+session create (`guest_os: macos`, `engine: ssh`), exec, the workspace under the user's home, a shell job keeping its exit code,
+a screenshot, fork refused with the reason, a memory checkpoint and restore returning the earlier file state, and delete.
+**Not verified live:** the two-guest limit (the third create is 409; unit-level only). Shell jobs use `setsid` where it exists;
+macOS has none, so a killed job loses its direct children but not necessarily deeper descendants.
 
 ### Installing through the API
 
