@@ -23,6 +23,7 @@ pub mod migration_state;
 pub mod netns;
 pub mod netns_scope;
 pub mod packetflow;
+pub mod peer_policy;
 pub mod pod_identity;
 pub mod qemu_cgroup;
 pub mod service;

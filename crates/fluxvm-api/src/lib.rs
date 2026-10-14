@@ -42,6 +42,7 @@ pub mod self_control;
 pub use netobs_api::install_netobs;
 mod agent_session_approvals;
 mod agent_session_auth;
+mod agent_session_transfer;
 mod agent_sessions;
 mod macos_pool_api;
 mod speculate_api;
@@ -409,6 +410,7 @@ fn require_admin(role: Role) -> ApiResult<()> {
 
 pub fn router(manager: Arc<VmManager>) -> Router {
     fluxvm_scheduler::history::start_sampler(&manager);
+    agent_sessions::start_sweeper(&manager);
     let oidc = build_oidc(&manager.cfg.auth);
     let mut router = Router::new()
         .route("/healthz", get(|| async { Json(json!({"ok": true})) }))
@@ -7305,6 +7307,147 @@ mod tests {
         }
 
         #[tokio::test]
+        async fn uploads_validate_input_and_unknown_ids_before_touching_the_guest() {
+            let m = procbox_manager(tenant_tokens(), false);
+            let id = seed_session(&m, Some("acme"), "vz", "running");
+            let app = router(m);
+            let up = format!("/v1/agents/sessions/{id}/uploads");
+            for (body, why) in [
+                (r#"{"path":"rel","size":5}"#, "relative path"),
+                (r#"{"path":"/a/../b","size":5}"#, ".."),
+                (r#"{"path":"/a/b/","size":5}"#, "directory"),
+                (r#"{"path":"/a/b","size":0}"#, "empty"),
+                (r#"{"path":"/a/b","size":3000000000}"#, "over the limit"),
+                (r#"{"path":"/a/b","size":5,"sha256":"xyz"}"#, "bad checksum"),
+                (r#"{"path":"/a/b","size":5,"mode":65535}"#, "bad mode"),
+            ] {
+                let (st, b) = call(app.clone(), "POST", &up, "acme", Some(body)).await;
+                assert_eq!(st, StatusCode::BAD_REQUEST, "{why}: {b}");
+            }
+            // Unknown upload: 404 for every verb, and another tenant cannot even see the session.
+            let ghost = uuid::Uuid::new_v4();
+            for (method, suffix) in [
+                ("GET", format!("/{ghost}")),
+                ("DELETE", format!("/{ghost}")),
+                ("POST", format!("/{ghost}/complete")),
+            ] {
+                let (st, b) =
+                    call(app.clone(), method, &format!("{up}{suffix}"), "acme", None).await;
+                assert_eq!(st, StatusCode::NOT_FOUND, "{method} {suffix}: {b}");
+            }
+            let (st, _) = call(app.clone(), "GET", &up, "other", None).await;
+            assert_eq!(st, StatusCode::NOT_FOUND);
+            let (st, b) = call(app.clone(), "GET", &up, "acme", None).await;
+            assert_eq!(st, StatusCode::OK, "{b}");
+            assert!(b.contains(r#""items":[]"#), "{b}");
+            // A token that may only read cannot upload or abort.
+            let (_, t) = call(
+                app.clone(),
+                "POST",
+                &format!("/v1/agents/sessions/{id}/tokens"),
+                "acme",
+                Some(r#"{"ops":["files.read"]}"#),
+            )
+            .await;
+            let scoped = serde_json::from_str::<serde_json::Value>(&t).unwrap()["token"]
+                .as_str()
+                .unwrap()
+                .to_string();
+            let (st, _) = call(
+                app.clone(),
+                "POST",
+                &up,
+                &scoped,
+                Some(r#"{"path":"/a/b","size":5}"#),
+            )
+            .await;
+            assert_eq!(st, StatusCode::FORBIDDEN);
+            let (st, _) = call(
+                app.clone(),
+                "DELETE",
+                &format!("{up}/{ghost}"),
+                &scoped,
+                None,
+            )
+            .await;
+            assert_eq!(st, StatusCode::FORBIDDEN);
+            let (st, _) = call(app, "GET", &up, &scoped, None).await;
+            assert_eq!(st, StatusCode::OK);
+        }
+
+        #[tokio::test]
+        async fn the_sweeper_expires_sessions_and_removes_what_they_left() {
+            let m = procbox_manager(tenant_tokens(), false);
+            let id = seed_session(&m, Some("acme"), "vz", "running");
+            let live = seed_session(&m, Some("acme"), "vz", "running");
+            let path = m
+                .cfg
+                .state_dir
+                .join("agent-sessions")
+                .join(format!("{id}.json"));
+            let mut rec: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            rec["expires_at"] = json!(chrono::Utc::now() - chrono::Duration::seconds(5));
+            std::fs::write(&path, rec.to_string()).unwrap();
+            // Side files the session left, for both.
+            let side = |kind: &str, sid: uuid::Uuid| {
+                let d = m.cfg.state_dir.join(kind);
+                std::fs::create_dir_all(&d).unwrap();
+                let p = d.join(format!("{sid}.json"));
+                std::fs::write(&p, "[]").unwrap();
+                p
+            };
+            let (a1, a2) = (
+                side("agent-session-approvals", id),
+                side("agent-session-jobs", id),
+            );
+            let b1 = side("agent-session-approvals", live);
+            let swept = agent_sessions::sweep_sessions(&m).await;
+            assert_eq!(swept, 1);
+            assert!(
+                !a1.exists() && !a2.exists(),
+                "the expired session's files go"
+            );
+            assert!(b1.exists(), "a live session keeps its files");
+            // It is now persisted as expired, with a ledger line, and a second pass has no work.
+            let on_disk = std::fs::read_to_string(&path).unwrap();
+            assert!(on_disk.contains(r#""state": "expired""#), "{on_disk}");
+            assert_eq!(agent_sessions::sweep_sessions(&m).await, 0);
+            let app = router(m);
+            let (_, ev) = call(
+                app,
+                "GET",
+                &format!("/v1/agents/sessions/{id}/events"),
+                "acme",
+                None,
+            )
+            .await;
+            assert!(ev.contains("session.cleanup"), "{ev}");
+        }
+
+        #[tokio::test]
+        async fn an_operation_a_dead_daemon_left_behind_is_reported_once() {
+            let m = procbox_manager(tenant_tokens(), false);
+            let id = seed_session(&m, Some("acme"), "vz", "running");
+            let d = m.cfg.state_dir.join("agent-session-ops");
+            std::fs::create_dir_all(&d).unwrap();
+            std::fs::write(
+                d.join(format!("{id}.json")),
+                r#"{"op":"restore","started_at":"2026-01-01T00:00:00Z","reported":false}"#,
+            )
+            .unwrap();
+            let app = router(m);
+            let uri = format!("/v1/agents/sessions/{id}");
+            for _ in 0..2 {
+                let (st, b) = call(app.clone(), "GET", &uri, "acme", None).await;
+                assert_eq!(st, StatusCode::OK, "{b}");
+                assert!(b.contains(r#""interrupted_op":{"op":"restore""#), "{b}");
+            }
+            let (_, ev) = call(app, "GET", &format!("{uri}/events"), "acme", None).await;
+            assert_eq!(ev.matches("lifecycle.interrupted").count(), 1, "{ev}");
+        }
+
+        #[tokio::test]
         async fn an_expired_session_is_persisted_as_expired_and_refuses_work() {
             let m = procbox_manager(tenant_tokens(), false);
             let id = seed_session(&m, Some("acme"), "vz", "running");
@@ -8142,7 +8285,8 @@ for (const a of t.ACTIONS) if (a.run.action === "theme") assert(t.THEMES[a.run.n
             let app = router(m.clone());
             for body in [
                 r#"{"policy":{"preset":"nope"}}"#,
-                r#"{"policy":{"network":{"allow":[{"host":"a.b","methods":["GET"]}]}}}"#,
+                r#"{"policy":{"network":{"allow":[{"host":"a.b","verbs":["GET"]}]}}}"#,
+                r#"{"policy":{"network":{"allow":[{"host":"a.b","methods":["G ET"]}]}}}"#,
                 r#"{"workspace":{"git":"git@github.com:a/b.git"}}"#,
                 r#"{"workspace":{"path":"/a/../b"}}"#,
                 r#"{"workspace":{"mode":"overlay"}}"#,
