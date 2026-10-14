@@ -95,8 +95,32 @@ pub enum AgentCommand {
         id: Uuid,
         #[arg(long)]
         timeout_seconds: Option<u64>,
+        /// An approval an operator granted for exactly this command (see `agent approvals`).
+        #[arg(long)]
+        approval_id: Option<Uuid>,
+        /// If the command needs approval, wait up to this many seconds (at most 120) for the decision.
+        #[arg(long)]
+        approval_wait: Option<u64>,
         #[arg(trailing_var_arg = true, allow_hyphen_values = true, required = true)]
         command: Vec<String>,
+    },
+    /// The session's approval requests (commands that matched a `process.ask` rule) and their state.
+    /// REST: `GET .../approvals`.
+    Approvals { id: Uuid },
+    /// Approve a pending request: the agent may then run exactly that command once. Needs an admin
+    /// credential; a session token cannot. REST: `POST .../approvals/{approval}/approve`.
+    Approve {
+        id: Uuid,
+        approval: Uuid,
+        #[arg(long)]
+        note: Option<String>,
+    },
+    /// Deny a pending request. REST: `POST .../approvals/{approval}/deny`.
+    Deny {
+        id: Uuid,
+        approval: Uuid,
+        #[arg(long)]
+        note: Option<String>,
     },
     /// Snapshot the session under a tag. REST: `POST /v1/agents/sessions/{id}/checkpoint`.
     Checkpoint {
@@ -190,6 +214,12 @@ pub enum AgentCommand {
         /// Kill the job's whole process tree after this many seconds (needs the guest job supervisor).
         #[arg(long)]
         timeout: Option<u64>,
+        /// An approval an operator granted for exactly this command (see `agent approvals`).
+        #[arg(long)]
+        approval_id: Option<Uuid>,
+        /// If the command needs approval, wait up to this many seconds (at most 120) for the decision.
+        #[arg(long)]
+        approval_wait: Option<u64>,
         /// The command: one shell line, or an argv after `--`.
         #[arg(trailing_var_arg = true, required = true, num_args = 1..)]
         command: Vec<String>,
@@ -696,6 +726,24 @@ pub(crate) async fn evaluate(
     }))
 }
 
+async fn decide_approval(
+    r: &Remote,
+    id: Uuid,
+    approval: Uuid,
+    verb: &str,
+    note: Option<String>,
+) -> Result<()> {
+    let body = note.map(|n| json!({"note": n}));
+    show(
+        &r.call(
+            Method::POST,
+            &format!("/v1/agents/sessions/{id}/approvals/{approval}/{verb}"),
+            body,
+        )
+        .await?,
+    )
+}
+
 pub async fn run(r: &Remote, cmd: AgentCommand) -> Result<()> {
     match cmd {
         AgentCommand::Run {
@@ -765,14 +813,36 @@ pub async fn run(r: &Remote, cmd: AgentCommand) -> Result<()> {
             &r.call(Method::GET, &format!("/v1/agents/sessions/{id}"), None)
                 .await?,
         ),
+        AgentCommand::Approvals { id } => show(
+            &r.call(
+                Method::GET,
+                &format!("/v1/agents/sessions/{id}/approvals"),
+                None,
+            )
+            .await?,
+        ),
+        AgentCommand::Approve { id, approval, note } => {
+            decide_approval(r, id, approval, "approve", note).await
+        }
+        AgentCommand::Deny { id, approval, note } => {
+            decide_approval(r, id, approval, "deny", note).await
+        }
         AgentCommand::Exec {
             id,
             timeout_seconds,
+            approval_id,
+            approval_wait,
             command,
         } => {
             let mut body = json!({ "command": guest_command(&command) });
             if let Some(t) = timeout_seconds {
                 body["timeout_seconds"] = json!(t);
+            }
+            if let Some(a) = approval_id {
+                body["approval_id"] = json!(a);
+            }
+            if let Some(w) = approval_wait {
+                body["approval_wait_seconds"] = json!(w);
             }
             let v = r
                 .call(
@@ -1248,9 +1318,17 @@ pub async fn run(r: &Remote, cmd: AgentCommand) -> Result<()> {
             stdin,
             max_output_bytes,
             timeout,
+            approval_id,
+            approval_wait,
             command,
         } => {
             let mut body = json!({"command": guest_command(&command)});
+            if let Some(a) = approval_id {
+                body["approval_id"] = json!(a);
+            }
+            if let Some(w) = approval_wait {
+                body["approval_wait_seconds"] = json!(w);
+            }
             if stdin {
                 body["stdin"] = json!(true);
             }

@@ -40,6 +40,7 @@ mod rate_limit;
 #[cfg(target_os = "macos")]
 pub mod self_control;
 pub use netobs_api::install_netobs;
+mod agent_session_approvals;
 mod agent_session_auth;
 mod agent_sessions;
 mod macos_pool_api;
@@ -7145,6 +7146,162 @@ mod tests {
             assert_eq!(st, StatusCode::NO_CONTENT);
             let (st, _) = call(app, "GET", &uri, &scoped, None).await;
             assert_eq!(st, StatusCode::UNAUTHORIZED);
+        }
+
+        #[tokio::test]
+        async fn a_command_matching_an_ask_rule_waits_for_an_operators_approval() {
+            let m = procbox_manager(tenant_tokens(), false);
+            let id = seed_session(&m, Some("acme"), "vz", "running");
+            let path = m
+                .cfg
+                .state_dir
+                .join("agent-sessions")
+                .join(format!("{id}.json"));
+            let mut rec: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            rec["policy"]["process"] = json!({"allow": [], "deny": [], "ask": ["deploy *"]});
+            std::fs::write(&path, rec.to_string()).unwrap();
+            let app = router(m);
+            let uri = format!("/v1/agents/sessions/{id}");
+
+            let (st, body) = call(
+                app.clone(),
+                "POST",
+                &format!("{uri}/tokens"),
+                "acme",
+                Some(r#"{"ops":["read","exec"]}"#),
+            )
+            .await;
+            assert_eq!(st, StatusCode::CREATED, "{body}");
+            let scoped = serde_json::from_str::<serde_json::Value>(&body).unwrap()["token"]
+                .as_str()
+                .unwrap()
+                .to_string();
+
+            // The agent's own request is held: 428 with an approval id, nothing runs.
+            let exec = format!("{uri}/exec");
+            let (st, b) = call(
+                app.clone(),
+                "POST",
+                &exec,
+                &scoped,
+                Some(r#"{"command":"deploy prod"}"#),
+            )
+            .await;
+            assert_eq!(st, StatusCode::PRECONDITION_REQUIRED, "{b}");
+            let v: serde_json::Value = serde_json::from_str(&b).unwrap();
+            let aid = v["approval_id"].as_str().unwrap().to_string();
+            assert_eq!(v["state"], "pending");
+            // Asking again does not make a second request.
+            let (_, b2) = call(
+                app.clone(),
+                "POST",
+                &exec,
+                &scoped,
+                Some(r#"{"command":"deploy prod"}"#),
+            )
+            .await;
+            assert!(b2.contains(&aid), "{b2}");
+
+            // The agent can see the request but cannot decide it.
+            let (st, list) = call(
+                app.clone(),
+                "GET",
+                &format!("{uri}/approvals"),
+                &scoped,
+                None,
+            )
+            .await;
+            assert_eq!(st, StatusCode::OK, "{list}");
+            assert!(
+                list.contains(&aid) && list.contains("deploy prod"),
+                "{list}"
+            );
+            for verb in ["approve", "deny"] {
+                let (st, b) = call(
+                    app.clone(),
+                    "POST",
+                    &format!("{uri}/approvals/{aid}/{verb}"),
+                    &scoped,
+                    None,
+                )
+                .await;
+                assert_eq!(st, StatusCode::FORBIDDEN, "{verb}: {b}");
+            }
+            // Pending: presenting the id early is refused as not yet decided.
+            let with_id = format!(r#"{{"command":"deploy prod","approval_id":"{aid}"}}"#);
+            let (st, _) = call(app.clone(), "POST", &exec, &scoped, Some(&with_id)).await;
+            assert_eq!(st, StatusCode::PRECONDITION_REQUIRED);
+
+            // Another tenant cannot decide it; the operator can.
+            let (st, _) = call(
+                app.clone(),
+                "POST",
+                &format!("{uri}/approvals/{aid}/approve"),
+                "other",
+                None,
+            )
+            .await;
+            assert_eq!(st, StatusCode::NOT_FOUND);
+            let (st, b) = call(
+                app.clone(),
+                "POST",
+                &format!("{uri}/approvals/{aid}/approve"),
+                "acme",
+                Some(r#"{"note":"ship it"}"#),
+            )
+            .await;
+            assert_eq!(st, StatusCode::OK, "{b}");
+            assert!(b.contains(r#""state":"approved""#), "{b}");
+
+            // It does not stretch to another command.
+            let other = format!(r#"{{"command":"deploy staging","approval_id":"{aid}"}}"#);
+            let (st, b) = call(app.clone(), "POST", &exec, &scoped, Some(&other)).await;
+            assert_eq!(st, StatusCode::FORBIDDEN, "{b}");
+            // The exact request passes the gate (it then fails on the stand-in sandbox, which is
+            // not what this test is about), and the approval is spent.
+            let (st, b) = call(app.clone(), "POST", &exec, &scoped, Some(&with_id)).await;
+            assert_ne!(st, StatusCode::PRECONDITION_REQUIRED, "{b}");
+            assert!(!b.contains("approval"), "{b}");
+            let (st, b) = call(app.clone(), "POST", &exec, &scoped, Some(&with_id)).await;
+            assert_eq!(st, StatusCode::FORBIDDEN, "{b}");
+            assert!(b.contains("already used"), "{b}");
+            let (_, list) = call(
+                app.clone(),
+                "GET",
+                &format!("{uri}/approvals"),
+                "acme",
+                None,
+            )
+            .await;
+            assert!(list.contains(r#""state":"consumed""#), "{list}");
+
+            // A denial stays denied.
+            let (_, b) = call(
+                app.clone(),
+                "POST",
+                &exec,
+                &scoped,
+                Some(r#"{"command":"deploy qa"}"#),
+            )
+            .await;
+            let qa = serde_json::from_str::<serde_json::Value>(&b).unwrap()["approval_id"]
+                .as_str()
+                .unwrap()
+                .to_string();
+            let (st, _) = call(
+                app.clone(),
+                "POST",
+                &format!("{uri}/approvals/{qa}/deny"),
+                "acme",
+                None,
+            )
+            .await;
+            assert_eq!(st, StatusCode::OK);
+            let body = format!(r#"{{"command":"deploy qa","approval_id":"{qa}"}}"#);
+            let (st, b) = call(app, "POST", &exec, &scoped, Some(&body)).await;
+            assert_eq!(st, StatusCode::FORBIDDEN, "{b}");
+            assert!(b.contains("denied"), "{b}");
         }
 
         #[tokio::test]
