@@ -201,6 +201,15 @@ struct Capabilities {
     /// sandbox. False for sessions without such rules.
     #[serde(default)]
     http_policy: bool,
+    /// How exec reaches the guest: `agent` (the guest agent over vsock: hardened exec, job
+    /// supervisor, confinement) or `ssh` (vz guests without the agent: exec works, background
+    /// children can hold a command open until its timeout and jobs run as shell scripts). Empty
+    /// where it was not probed.
+    #[serde(default)]
+    engine: String,
+    /// The guest agent has the job supervisor (`jobs-v2`).
+    #[serde(default)]
+    supervisor: bool,
 }
 
 /// The policy as compiled, including the parts that are accepted but not enforced yet.
@@ -1401,7 +1410,23 @@ fn capabilities_for(backend: &str, offline: bool) -> Capabilities {
         pty: backend == "vz",
         confinement: false,
         http_policy: false,
+        engine: String::new(),
+        supervisor: false,
     }
+}
+
+/// The image an agent session gets when the caller named none: `agent-micro` when this host's
+/// catalog has it (the guest agent is baked in), otherwise the sandbox default.
+fn default_session_image(m: &VmManager) -> Option<String> {
+    if !cfg!(target_os = "macos") {
+        return None;
+    }
+    let name = fluxvm_scheduler::vz_guest::AGENT_MICRO_IMAGE;
+    fluxvm_image::catalog::list_with_verification(&m.cfg)
+        .ok()?
+        .iter()
+        .any(|e| e.entry.name == name)
+        .then(|| name.to_string())
 }
 
 /// Why a session cannot fork, for the 409 body. `None` when it can.
@@ -1550,7 +1575,11 @@ async fn create_session(
     let id = Uuid::new_v4();
     let req = fluxvm_scheduler::SandboxCreateRequest {
         name: Some(format!("agent-{}", &id.to_string()[..8])),
-        image: body.runtime.as_ref().and_then(|r| r.image.clone()),
+        image: body
+            .runtime
+            .as_ref()
+            .and_then(|r| r.image.clone())
+            .or_else(|| default_session_image(&m)),
         ttl_seconds: body.ttl_seconds,
         vcpus: body.runtime.as_ref().and_then(|r| r.cpus),
         memory_mib: body.runtime.as_ref().and_then(|r| r.memory_mb),
@@ -1784,6 +1813,20 @@ async fn create_session(
                     });
                 }
             }
+        }
+    }
+    if session.backend == "vz" {
+        // Say which engine the session will actually get, so nobody finds out from a hung command.
+        if m.ensure_running_for_request(rec.id).await.is_ok() {
+            let supervisor = m.guest_jobs_supported(rec.id).await;
+            session.capabilities.supervisor = supervisor;
+            session.capabilities.engine = if supervisor { "agent" } else { "ssh" }.into();
+            record(
+                &m,
+                id,
+                "session.engine",
+                json!({"engine": session.capabilities.engine, "supervisor": supervisor}),
+            );
         }
     }
     save(&m, &mut session).await?;

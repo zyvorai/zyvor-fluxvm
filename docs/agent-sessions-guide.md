@@ -93,6 +93,20 @@ fluxctl agent rm $S
 `fluxctl agent probe $S` tells you what the guest image can do (is `git` installed? `sha256sum`? a browser?), which
 decides whether `git`, `promote` and checksummed uploads will work. Run it once on a new image.
 
+### 2.1 Which engine your session got (Mac / vz)
+
+On a Mac the session's commands reach the guest one of two ways, and the session says which in
+`capabilities.engine` (also `capabilities.supervisor`, and a `session.engine` ledger entry):
+
+| `engine` | What it is | You get |
+|---|---|---|
+| `agent` | the guest agent over vsock (image `agent-micro`, or a spec with `agent.enabled`) | hardened exec (a background child cannot hold a command open past its timeout), supervised jobs, `filesystem` confinement |
+| `ssh` | the daemon's SSH key into a stock image such as `debian-13` | exec, files, PTY, checkpoints; **no** supervisor and **no** confinement, jobs run as shell scripts |
+
+If `fluxctl catalog` has an `agent-micro` entry, sessions without `runtime.image` use it; otherwise they get the stock
+image and `engine: ssh`. Build and register `agent-micro` as described in [agent-micro.md](agent-micro.md), or pass
+`runtime.image: agent-micro` explicitly. Per-session `http_rules` on vz are not enforced yet.
+
 ## 3. Choosing a policy
 
 Pick the strictest policy that still lets the task finish. Policies are fixed at create; to change one, create a new
