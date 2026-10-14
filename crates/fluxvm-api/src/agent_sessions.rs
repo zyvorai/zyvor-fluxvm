@@ -51,6 +51,7 @@
 
 use super::agent_session_approvals as approvals;
 use super::agent_session_auth::{self, Op, SessionScope, authorize};
+use super::agent_session_transfer::{self as transfer, Chunk, Upload, UploadState};
 use super::{ApiError, ApiResult, AuditActor, TokenTenant, change_error, require_admin};
 use axum::{
     Extension, Json, Router,
@@ -123,6 +124,24 @@ pub(crate) fn routes() -> Router<Arc<VmManager>> {
         .route(
             "/v1/agents/sessions/{id}/files/content",
             get(files_read).put(files_write),
+        )
+        .route("/v1/agents/sessions/{id}/files/range", get(files_range))
+        .route(
+            "/v1/agents/sessions/{id}/uploads",
+            post(upload_create).get(upload_list),
+        )
+        .route(
+            "/v1/agents/sessions/{id}/uploads/{upload}",
+            get(upload_get)
+                .delete(upload_abort)
+                .put(upload_chunk)
+                .layer(axum::extract::DefaultBodyLimit::max(
+                    transfer::MAX_CHUNK_BYTES + 4096,
+                )),
+        )
+        .route(
+            "/v1/agents/sessions/{id}/uploads/{upload}/complete",
+            post(upload_complete),
         )
         .route("/v1/agents/sessions/{id}/git/status", get(git_status))
         .route("/v1/agents/sessions/{id}/git/diff", get(git_diff))
@@ -1851,6 +1870,7 @@ async fn session_cleanup(m: &VmManager, s: &Session) {
     let _ = tokio::fs::remove_file(job_meta_path(m, s.id)).await;
     let _ = tokio::fs::remove_file(usage_path(m, s.id)).await;
     approvals::remove(&m.cfg.state_dir, s.id).await;
+    let _ = tokio::fs::remove_file(uploads_path(m, s.id)).await;
     m.clear_http_policy(s.sandbox_id);
     if let Ok(mut rd) = tokio::fs::read_dir(previews_dir(m)).await {
         while let Ok(Some(e)) = rd.next_entry().await {
@@ -5461,30 +5481,8 @@ async fn files_write(
             message: "path must name a file".into(),
         });
     }
-    if body.parents
-        && let Some(dir) = std::path::Path::new(&body.path)
-            .parent()
-            .and_then(|d| d.to_str())
-        && dir != "/"
-    {
-        let out = guest_exec(
-            &m,
-            &s,
-            // The guest user is not root on stock images: fall back to sudo, then hand the topmost
-            // directory that had to be created to that user, so this and later writes succeed.
-            format!(
-                "t={0}; u=; while [ ! -e \"$t\" ]; do u=\"$t\"; t=$(dirname \"$t\"); done; \
-                 mkdir -p {0} 2>/dev/null || (sudo -n mkdir -p {0} && sudo -n chown -R \"$(id -u):$(id -g)\" \"$u\")",
-                shell_quote(dir)
-            ),
-        )
-        .await?;
-        if out["exit_code"].as_i64() != Some(0) {
-            return Err(ApiError {
-                status: StatusCode::BAD_REQUEST,
-                message: format!("could not create {dir}"),
-            });
-        }
+    if body.parents {
+        ensure_parent_dir(&m, &s, &body.path).await?;
     }
     let bytes = base64_decode(&body.content_base64).len();
     m.put_file(
@@ -5501,6 +5499,513 @@ async fn files_write(
         json!({"path": body.path, "bytes": bytes}),
     );
     Ok(Json(json!({"path": body.path, "bytes": bytes})))
+}
+
+/// Creates the directory a file is going into. The guest user is not root on stock images: fall
+/// back to sudo, then hand the topmost directory that had to be created to that user, so this and
+/// later writes succeed.
+async fn ensure_parent_dir(m: &Arc<VmManager>, s: &Session, path: &str) -> ApiResult<()> {
+    let Some(dir) = std::path::Path::new(path)
+        .parent()
+        .and_then(|d| d.to_str())
+        .filter(|d| *d != "/")
+    else {
+        return Ok(());
+    };
+    let out = guest_exec(
+        m,
+        s,
+        format!(
+            "t={0}; u=; while [ ! -e \"$t\" ]; do u=\"$t\"; t=$(dirname \"$t\"); done; \
+             mkdir -p {0} 2>/dev/null || (sudo -n mkdir -p {0} && sudo -n chown -R \"$(id -u):$(id -g)\" \"$u\")",
+            shell_quote(dir)
+        ),
+    )
+    .await?;
+    if out["exit_code"].as_i64() != Some(0) {
+        return Err(ApiError {
+            status: StatusCode::BAD_REQUEST,
+            message: format!("could not create {dir}"),
+        });
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------------------
+// Resumable transfer: ranged reads and chunked uploads (see `agent_session_transfer`).
+
+#[derive(Debug, Deserialize)]
+struct RangeQuery {
+    path: String,
+    #[serde(default)]
+    offset: u64,
+    /// Bytes to return (default and most: 4 MiB).
+    #[serde(default)]
+    length: Option<u64>,
+    /// Also return the file's SHA-256 (the guest hashes the whole file).
+    #[serde(default)]
+    checksum: bool,
+}
+
+/// `GET .../files/range`: a slice of a file with its size, and its SHA-256 on request.
+async fn files_range(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    scope: Option<Extension<SessionScope>>,
+    token_tenant: Option<Extension<TokenTenant>>,
+    Path(id): Path<Uuid>,
+    Query(q): Query<RangeQuery>,
+) -> ApiResult<Json<Value>> {
+    authorize(role, &scope, id, Op::FilesRead)?;
+    let s = load(&m, id, &caller_tenant(&token_tenant)).await?;
+    running(&s)?;
+    path_arg(&q.path)?;
+    let len = q
+        .length
+        .unwrap_or(transfer::MAX_RANGE_BYTES)
+        .min(transfer::MAX_RANGE_BYTES);
+    if len == 0 {
+        return Err(ApiError {
+            status: StatusCode::BAD_REQUEST,
+            message: "length must be at least 1".into(),
+        });
+    }
+    m.ensure_running_for_request(s.sandbox_id).await?;
+    // A checksum reads the whole file, so allow it more time than a slice.
+    let timeout = if q.checksum { 600 } else { 60 };
+    let res = m
+        .exec_with_policy(
+            s.sandbox_id,
+            transfer::range_script(&q.path, q.offset, len, q.checksum),
+            Some(timeout),
+            s.policy.exec.clone(),
+        )
+        .await?;
+    let out = json!(res);
+    match out["exit_code"].as_i64() {
+        Some(0) => {}
+        Some(2) => {
+            return Err(ApiError {
+                status: StatusCode::NOT_FOUND,
+                message: format!("{}: no such file", q.path),
+            });
+        }
+        code => {
+            return Err(ApiError {
+                status: StatusCode::BAD_GATEWAY,
+                message: format!(
+                    "could not read {} (exit {code:?}): {}",
+                    q.path,
+                    out["stderr"].as_str().unwrap_or("")
+                ),
+            });
+        }
+    }
+    let r =
+        transfer::parse_range(out["stdout"].as_str().unwrap_or("")).ok_or_else(|| ApiError {
+            status: StatusCode::BAD_GATEWAY,
+            message: "the guest's answer was not understood (needs wc, tail, head and base64)"
+                .into(),
+        })?;
+    let returned = base64_decode(&r.data_base64).len() as u64;
+    Ok(Json(json!({
+        "path": q.path,
+        "size": r.size,
+        "offset": q.offset,
+        "length": returned,
+        "eof": q.offset + returned >= r.size,
+        "sha256": r.sha256,
+        "content_base64": r.data_base64,
+    })))
+}
+
+fn uploads_path(m: &VmManager, id: Uuid) -> PathBuf {
+    m.cfg
+        .state_dir
+        .join("agent-session-uploads")
+        .join(format!("{id}.json"))
+}
+
+static UPLOAD_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+async fn uploads_read(m: &VmManager, id: Uuid) -> Vec<Upload> {
+    match tokio::fs::read(uploads_path(m, id)).await {
+        Ok(b) => serde_json::from_slice(&b).unwrap_or_default(),
+        Err(_) => Vec::new(),
+    }
+}
+
+/// Read-modify-write of the session's uploads under one lock, so two chunks cannot both be
+/// accepted at the same offset.
+async fn uploads_update<R>(
+    m: &VmManager,
+    id: Uuid,
+    f: impl FnOnce(&mut Vec<Upload>) -> ApiResult<R>,
+) -> ApiResult<R> {
+    let _g = UPLOAD_LOCK.lock().await;
+    let mut all = uploads_read(m, id).await;
+    let r = f(&mut all)?;
+    let path = uploads_path(m, id);
+    if let Some(d) = path.parent() {
+        tokio::fs::create_dir_all(d)
+            .await
+            .map_err(anyhow::Error::from)?;
+    }
+    let tmp = path.with_extension("json.tmp");
+    tokio::fs::write(&tmp, serde_json::to_vec(&all).map_err(anyhow::Error::from)?)
+        .await
+        .map_err(anyhow::Error::from)?;
+    tokio::fs::rename(&tmp, &path)
+        .await
+        .map_err(anyhow::Error::from)?;
+    Ok(r)
+}
+
+fn upload_not_found(id: Uuid, upload: Uuid) -> ApiError {
+    ApiError {
+        status: StatusCode::NOT_FOUND,
+        message: format!("upload {upload} not found in session {id}"),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct UploadBody {
+    path: String,
+    /// The file's size in bytes, at most 2 GiB. `complete` refuses a different total.
+    size: u64,
+    /// Lowercase hex SHA-256; checked in the guest before the file appears.
+    #[serde(default)]
+    sha256: Option<String>,
+    #[serde(default)]
+    mode: Option<u32>,
+    /// Create missing parent directories first (default true).
+    #[serde(default = "yes")]
+    parents: bool,
+}
+
+/// `POST .../uploads`: opens an upload. Send the chunks with `PUT .../uploads/{id}?offset=N`.
+async fn upload_create(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    scope: Option<Extension<SessionScope>>,
+    token_tenant: Option<Extension<TokenTenant>>,
+    Path(id): Path<Uuid>,
+    Json(body): Json<UploadBody>,
+) -> ApiResult<(StatusCode, Json<Value>)> {
+    authorize(role, &scope, id, Op::FilesWrite)?;
+    let _work = begin_work(id)?;
+    let s = load(&m, id, &caller_tenant(&token_tenant)).await?;
+    running(&s)?;
+    egress_bound(&s)?;
+    let bad = |message: &str| ApiError {
+        status: StatusCode::BAD_REQUEST,
+        message: message.into(),
+    };
+    path_arg(&body.path)?;
+    if body.path.ends_with('/') {
+        return Err(bad("path must name a file"));
+    }
+    if body.size == 0 || body.size > transfer::MAX_UPLOAD_BYTES {
+        return Err(bad(&format!(
+            "size must be 1-{} bytes (use files/content for an empty file)",
+            transfer::MAX_UPLOAD_BYTES
+        )));
+    }
+    let sha256 = match body.sha256.as_deref() {
+        None => None,
+        Some(h) => {
+            Some(transfer::normalize_sha256(h).ok_or_else(|| bad("sha256 must be 64 hex digits"))?)
+        }
+    };
+    if body.mode.is_some_and(|m| m > 0o7777) {
+        return Err(bad("mode must be a permission mask up to 0o7777"));
+    }
+    if body.parents {
+        ensure_parent_dir(&m, &s, &body.path).await?;
+    }
+    let u = Upload {
+        id: Uuid::new_v4(),
+        path: body.path,
+        size: body.size,
+        sha256,
+        mode: body.mode,
+        received: 0,
+        parts: 0,
+        state: UploadState::Open,
+        created_at: Utc::now(),
+        completed_at: None,
+    };
+    let created = u.clone();
+    uploads_update(&m, id, move |all| {
+        let open = all.iter().filter(|x| x.state == UploadState::Open).count();
+        if open >= transfer::MAX_OPEN_UPLOADS {
+            return Err(ApiError {
+                status: StatusCode::TOO_MANY_REQUESTS,
+                message: format!(
+                    "at most {} uploads may be open at once; complete or abort one",
+                    transfer::MAX_OPEN_UPLOADS
+                ),
+            });
+        }
+        all.push(created);
+        Ok(())
+    })
+    .await?;
+    let opened = guest_exec(&m, &s, transfer::open_script(&u)).await;
+    if !matches!(&opened, Ok(o) if o["exit_code"].as_i64() == Some(0)) {
+        let _ = uploads_update(&m, id, |all| {
+            all.retain(|x| x.id != u.id);
+            Ok(())
+        })
+        .await;
+        return Err(ApiError {
+            status: StatusCode::BAD_GATEWAY,
+            message: "could not prepare the upload directory in the guest".into(),
+        });
+    }
+    record(
+        &m,
+        id,
+        "upload.open",
+        json!({"upload": u.id, "path": u.path, "size": u.size}),
+    );
+    Ok((StatusCode::CREATED, Json(json!(u))))
+}
+
+async fn upload_list(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    scope: Option<Extension<SessionScope>>,
+    token_tenant: Option<Extension<TokenTenant>>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<Value>> {
+    authorize(role, &scope, id, Op::FilesRead)?;
+    load(&m, id, &caller_tenant(&token_tenant)).await?;
+    Ok(Json(json!({"items": uploads_read(&m, id).await})))
+}
+
+/// `GET .../uploads/{id}`: where the upload stands; `received` is where to continue.
+async fn upload_get(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    scope: Option<Extension<SessionScope>>,
+    token_tenant: Option<Extension<TokenTenant>>,
+    Path((id, upload)): Path<(Uuid, Uuid)>,
+) -> ApiResult<Json<Value>> {
+    authorize(role, &scope, id, Op::FilesRead)?;
+    load(&m, id, &caller_tenant(&token_tenant)).await?;
+    uploads_read(&m, id)
+        .await
+        .into_iter()
+        .find(|u| u.id == upload)
+        .map(|u| Json(json!(u)))
+        .ok_or_else(|| upload_not_found(id, upload))
+}
+
+#[derive(Debug, Deserialize)]
+struct ChunkQuery {
+    offset: u64,
+}
+
+/// `PUT .../uploads/{id}?offset=N`: the next chunk, raw bytes (at most 4 MiB). `N` must be the
+/// upload's `received`; otherwise `409` says where to continue.
+async fn upload_chunk(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    scope: Option<Extension<SessionScope>>,
+    token_tenant: Option<Extension<TokenTenant>>,
+    Path((id, upload)): Path<(Uuid, Uuid)>,
+    Query(q): Query<ChunkQuery>,
+    body: axum::body::Bytes,
+) -> ApiResult<Json<Value>> {
+    use base64::Engine as _;
+    authorize(role, &scope, id, Op::FilesWrite)?;
+    let _work = begin_work(id)?;
+    let s = load(&m, id, &caller_tenant(&token_tenant)).await?;
+    running(&s)?;
+    egress_bound(&s)?;
+    m.ensure_running_for_request(s.sandbox_id).await?;
+    let current = uploads_read(&m, id)
+        .await
+        .into_iter()
+        .find(|u| u.id == upload)
+        .ok_or_else(|| upload_not_found(id, upload))?;
+    if current.state != UploadState::Open {
+        return Err(ApiError {
+            status: StatusCode::CONFLICT,
+            message: format!("upload {upload} is already complete"),
+        });
+    }
+    let index = match current.check_chunk(q.offset, body.len()) {
+        Chunk::Accept { index } => index,
+        Chunk::Resume { received } => {
+            return Err(ApiError {
+                status: StatusCode::CONFLICT,
+                message: format!(
+                    "upload {upload} has {received} bytes: send the next chunk with offset={received}"
+                ),
+            });
+        }
+        Chunk::TooBig(why) => {
+            return Err(ApiError {
+                status: StatusCode::BAD_REQUEST,
+                message: why,
+            });
+        }
+    };
+    // The part goes to the guest first. If the host record then fails to update, the chunk is
+    // simply sent again: the same part path is overwritten.
+    m.put_file(
+        s.sandbox_id,
+        current.part_path(index),
+        base64::engine::general_purpose::STANDARD.encode(&body),
+        Some(0o600),
+    )
+    .await?;
+    let len = body.len() as u64;
+    let after = uploads_update(&m, id, move |all| {
+        let u = all
+            .iter_mut()
+            .find(|u| u.id == upload)
+            .ok_or_else(|| upload_not_found(id, upload))?;
+        if u.received != q.offset {
+            return Err(ApiError {
+                status: StatusCode::CONFLICT,
+                message: format!(
+                    "upload {upload} moved to {} bytes; resume there",
+                    u.received
+                ),
+            });
+        }
+        u.received += len;
+        u.parts += 1;
+        Ok(u.clone())
+    })
+    .await?;
+    Ok(Json(json!({
+        "upload": upload, "received": after.received, "size": after.size,
+        "parts": after.parts, "remaining": after.size - after.received,
+    })))
+}
+
+/// `POST .../uploads/{id}/complete`: assembles the parts, verifies size and checksum in the
+/// guest, and renames the file into place.
+async fn upload_complete(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    scope: Option<Extension<SessionScope>>,
+    token_tenant: Option<Extension<TokenTenant>>,
+    Path((id, upload)): Path<(Uuid, Uuid)>,
+) -> ApiResult<Json<Value>> {
+    authorize(role, &scope, id, Op::FilesWrite)?;
+    let _work = begin_work(id)?;
+    let s = load(&m, id, &caller_tenant(&token_tenant)).await?;
+    running(&s)?;
+    egress_bound(&s)?;
+    let u = uploads_read(&m, id)
+        .await
+        .into_iter()
+        .find(|u| u.id == upload)
+        .ok_or_else(|| upload_not_found(id, upload))?;
+    if u.state == UploadState::Complete {
+        // Completing twice is a no-op: a retry after a lost answer succeeds.
+        return Ok(Json(json!(u)));
+    }
+    if u.received != u.size {
+        return Err(ApiError {
+            status: StatusCode::CONFLICT,
+            message: format!(
+                "upload {upload} has {} of {} bytes: continue with offset={}",
+                u.received, u.size, u.received
+            ),
+        });
+    }
+    m.ensure_running_for_request(s.sandbox_id).await?;
+    let res = m
+        .exec_with_policy(
+            s.sandbox_id,
+            transfer::complete_script(&u),
+            Some(900),
+            s.policy.exec.clone(),
+        )
+        .await?;
+    let out = json!(res);
+    match out["exit_code"].as_i64() {
+        Some(0) => {}
+        Some(code @ (3 | 4 | 5 | 6)) => {
+            let why = match code {
+                3 => "the assembled size does not match the declared size",
+                4 => "the checksum does not match",
+                5 => "the guest has no sha256sum or shasum to verify the checksum",
+                _ => "a part is missing in the guest",
+            };
+            return Err(ApiError {
+                status: StatusCode::CONFLICT,
+                message: format!(
+                    "upload {upload} was not completed: {why}; nothing was written to {}",
+                    u.path
+                ),
+            });
+        }
+        code => {
+            return Err(ApiError {
+                status: StatusCode::BAD_GATEWAY,
+                message: format!(
+                    "could not assemble the upload (exit {code:?}): {}",
+                    out["stderr"].as_str().unwrap_or("")
+                ),
+            });
+        }
+    }
+    let done = uploads_update(&m, id, move |all| {
+        let u = all
+            .iter_mut()
+            .find(|u| u.id == upload)
+            .ok_or_else(|| upload_not_found(id, upload))?;
+        u.state = UploadState::Complete;
+        u.completed_at = Some(Utc::now());
+        Ok(u.clone())
+    })
+    .await?;
+    record(
+        &m,
+        id,
+        "file.upload",
+        json!({"path": done.path, "bytes": done.size, "sha256_verified": done.sha256.is_some()}),
+    );
+    Ok(Json(json!(done)))
+}
+
+/// `DELETE .../uploads/{id}`: drops an upload and its parts in the guest.
+async fn upload_abort(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    scope: Option<Extension<SessionScope>>,
+    token_tenant: Option<Extension<TokenTenant>>,
+    Path((id, upload)): Path<(Uuid, Uuid)>,
+) -> ApiResult<StatusCode> {
+    authorize(role, &scope, id, Op::FilesWrite)?;
+    let s = load(&m, id, &caller_tenant(&token_tenant)).await?;
+    let u = uploads_read(&m, id)
+        .await
+        .into_iter()
+        .find(|u| u.id == upload)
+        .ok_or_else(|| upload_not_found(id, upload))?;
+    if s.state == "running" && m.ensure_running_for_request(s.sandbox_id).await.is_ok() {
+        let _ = guest_exec(&m, &s, transfer::abort_script(&u)).await;
+    }
+    uploads_update(&m, id, move |all| {
+        all.retain(|x| x.id != upload);
+        Ok(())
+    })
+    .await?;
+    record(
+        &m,
+        id,
+        "upload.abort",
+        json!({"upload": upload, "path": u.path}),
+    );
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn files_delete(
