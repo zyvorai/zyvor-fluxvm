@@ -105,7 +105,7 @@ On a Mac the session's commands reach the guest one of two ways, and the session
 
 If `fluxctl catalog` has an `agent-micro` entry, sessions without `runtime.image` use it; otherwise they get the stock
 image and `engine: ssh`. Build and register `agent-micro` as described in [agent-micro.md](agent-micro.md), or pass
-`runtime.image: agent-micro` explicitly. Per-session `http_rules` on vz are not enforced yet.
+`runtime.image: agent-micro` explicitly. Per-session `http_rules` on vz need the setup in [7.1](#71-limit-a-host-to-methods-and-paths).
 
 ## 3. Choosing a policy
 
@@ -400,7 +400,13 @@ orgs. `policy.http_rules` in the session record shows the compiled rules (gramma
   `egress_http_rules`. A request must pass both: a session can only narrow.
 - It works where the sandbox's traffic reaches that proxy with the sandbox's own address (QEMU/KVM with
   `sandbox.egress_proxy_listen` set, and a network setup that forces or redirects traffic there). It does **not** apply
-  on `vz` or procbox sandboxes, and a guest with a direct route out bypasses it.
+  on procbox sandboxes, and a guest with a direct route out bypasses it.
+- **On a Mac (`vz`)** it works for a session with a host allow-list (`policy.network.allow`, which gives the guest no
+  network card) when the daemon runs the proxy on loopback (`[sandbox] egress_proxy_listen = "127.0.0.1:18080"`). The
+  runner relays each allowed request to that proxy with a secret the guest never sees, so the session's rules apply to
+  plain `http://` requests. The guest reaches the relay at `127.0.0.1:3128` (`curl -x http://127.0.0.1:3128 ...`).
+  Without `egress_tls_intercept` an HTTPS `CONNECT` is refused, so a ruled host cannot be reached over TLS. A guest
+  on the Mac's NAT is refused with `400` (it has its own route out).
 - HTTPS is judged per request only when the proxy intercepts TLS (`egress_tls_intercept`); otherwise a `CONNECT` is
   refused (`501`), so a limited host cannot be reached over TLS at all (fail closed).
 - Create **fails with `400` and the reason** when the sandbox cannot be filtered. Set `"network": {"enforcement":

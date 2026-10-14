@@ -22,10 +22,14 @@ pub(crate) fn unsupported_reason(
     if procbox {
         return Some("procbox sandboxes share the host network namespace's own policy".into());
     }
-    if backend == BackendKind::Vz {
+    if backend == BackendKind::Vz && guest_ip.is_none() {
+        // A vz guest's address is its alias (see `fluxvm_core::peer_alias`), which exists only when its
+        // runner relays through the daemon's proxy: no network card, a host allow-list, and a loopback
+        // `sandbox.egress_proxy_listen`.
         return Some(
-            "vz sandboxes reach the network through the runner's own allow-list proxy, which \
-             matches host names only (no method or path rules)"
+            "a vz sandbox's method/path rules need the daemon's egress proxy: set \
+             sandbox.egress_proxy_listen to a 127.0.0.1 address and give the session a host allow-list \
+             (a guest with its own network card, or the runner's name-only proxy, cannot be filtered)"
                 .into(),
         );
     }
@@ -43,7 +47,12 @@ pub(crate) fn unsupported_reason(
 }
 
 impl VmManager {
+    /// The address the proxy sees this sandbox's traffic from: the guest's own, or, for a vz guest relayed
+    /// through the runner, its alias.
     fn guest_addr(vm: &fluxvm_core::model::VmRecord) -> Option<IpAddr> {
+        if vm.backend == BackendKind::Vz {
+            return fluxvm_core::peer_alias::ip_of(vm.id);
+        }
         vm.guest_ip.as_deref().and_then(|s| s.parse().ok())
     }
 
@@ -88,6 +97,7 @@ impl VmManager {
 
     pub fn clear_http_policy(&self, id: Uuid) {
         peer_policy::global().remove(&id.to_string());
+        fluxvm_core::peer_alias::remove(id);
     }
 }
 
@@ -102,8 +112,13 @@ mod tests {
             unsupported_reason(BackendKind::Qemu, false, "127.0.0.1:18080", ip),
             None
         );
+        // A vz guest with an alias (relayed through its runner) can be filtered.
+        assert_eq!(
+            unsupported_reason(BackendKind::Vz, false, "127.0.0.1:18080", ip),
+            None
+        );
         for (b, pb, listen, ip) in [
-            (BackendKind::Vz, false, "127.0.0.1:18080", ip),
+            (BackendKind::Vz, false, "127.0.0.1:18080", None),
             (BackendKind::Qemu, true, "127.0.0.1:18080", ip),
             (BackendKind::Qemu, false, "", ip),
             (BackendKind::Qemu, false, "127.0.0.1:18080", None),

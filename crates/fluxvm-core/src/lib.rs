@@ -8,6 +8,7 @@ pub mod fs_image;
 pub mod gpu;
 pub mod gpu_health;
 pub mod grants;
+pub mod peer_alias;
 pub mod keychain;
 pub mod mdev;
 pub mod metrics;
