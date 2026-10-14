@@ -1332,6 +1332,10 @@ struct RuntimeBody {
     cpus: Option<u8>,
     #[serde(default)]
     memory_mb: Option<u64>,
+    /// `"agent"` refuses a session whose guest would run on the SSH engine (no supervisor, no confine, no HTTP rules)
+    /// instead of silently creating one. vz only; other backends have no SSH engine.
+    #[serde(default)]
+    engine: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1575,6 +1579,16 @@ async fn create_session(
             ));
         }
     }
+    let require_agent = match body.runtime.as_ref().and_then(|r| r.engine.as_deref()) {
+        None => false,
+        Some("agent") => true,
+        Some(other) => {
+            return Err(ApiError {
+                status: StatusCode::BAD_REQUEST,
+                message: format!("runtime.engine must be \"agent\" (got {other:?})"),
+            });
+        }
+    };
     let actor_name = actor.as_ref().map(|a| a.0.0.as_str());
     let id = Uuid::new_v4();
     let req = fluxvm_scheduler::SandboxCreateRequest {
@@ -1832,6 +1846,17 @@ async fn create_session(
                 json!({"engine": session.capabilities.engine, "supervisor": supervisor}),
             );
         }
+    }
+    if require_agent && session.backend == "vz" && session.capabilities.engine != "agent" {
+        let _ = m.delete(rec.id).await;
+        let _ = std::fs::remove_file(session_path(&m, id));
+        m.clear_http_policy(rec.id);
+        return Err(ApiError {
+            status: StatusCode::CONFLICT,
+            message: "runtime.engine is \"agent\" but this guest would run on the SSH engine: the image has no \
+                      guest agent (use agent-micro, or an image built with it)"
+                .into(),
+        });
     }
     save(&m, &mut session).await?;
     Ok((StatusCode::CREATED, Json(json!(session))))
