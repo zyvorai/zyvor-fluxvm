@@ -113,11 +113,23 @@ impl VmManager {
     }
 
     pub(crate) fn vz_guest(&self, vm: &VmRecord) -> Result<GuestSsh> {
+        // A macOS guest has no cloud-init; the account it was provisioned with (`apple.provision_username`) is the
+        // one to reach. The default `sandbox` is a system account there and refuses logins.
         let user = vm
             .request
             .cloud_init
             .as_ref()
             .and_then(|c| c.user.clone())
+            .or_else(|| {
+                is_macos_guest(&vm.request)
+                    .then(|| {
+                        vm.request
+                            .apple
+                            .as_ref()
+                            .and_then(|a| a.provision_username.clone())
+                    })
+                    .flatten()
+            })
             .unwrap_or_else(|| DEFAULT_SANDBOX_USER.into());
         let (_, key) = self.sandbox_ssh_key()?;
         // A guest with no network card is reached through the runner's vsock proxy; the others by address.
