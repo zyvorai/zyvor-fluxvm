@@ -624,17 +624,18 @@ Be honest with yourself before putting this in front of untrusted agents.
 **Run on real hardware earlier** (Apple M4, `vz`, stock `debian-13`): create/exec/checkpoint/restore, fork of an offline
 session, files, the shell-script job engine, previews, the PTY terminal, trajectory export.
 
+**Driven through a real guest on a Mac** (Apple M4, `vz`, the `agent-micro` image; `scripts/vz-agent-session-live-test.sh`
+runs these 12 checks): the engine the session gets, hardened `exec` (a background child does not hold the command; a
+timeout leaves no process), the job supervisor with its exit code, fork cloning, Landlock confinement refusing a write
+outside the policy, and per-session HTTP method/path rules through the egress proxy (GET allowed, POST and unlisted hosts
+refused). Earlier, on the stock `debian-13` image (SSH engine): approvals end to end, token scopes, upload/download with
+checksum and resume, output caps, the exec budget, evaluate and promote, and the sweeper.
+
 **Unit and router tested only, not driven through a real guest or daemon:**
 
-- the guest job supervisor, hardened `exec`, and everything built on it (real processes on macOS in unit tests, but no
-  guest);
-- Landlock/seccomp confinement through sessions and the procbox `spawn` path (the Linux-only code was first compiled by
-  CI, not on a developer machine);
-- `process.ask` approvals (decision logic, concurrent consume, and a router test; no real guest);
-- per-session HTTP rules in the egress proxy, and method/path-limited grants (compile, store and per-request check;
-  **no guest traffic** was driven through the proxy);
-- budgets beyond the first set, the sweeper, the interrupted-operation marker, resumable uploads and ranged reads,
-  and the fleet node agent changes.
+- the Linux-only code paths on a KVM host (Landlock/seccomp through the procbox `spawn` path was first compiled by CI);
+- method/path-limited credential grants, and HTTPS rules (these need `egress_tls_intercept` and the CA in the guest);
+- budgets beyond the first set and the fleet node agent changes.
 
 **Not built:** a packaged browser image, token budgets, a process-count limit, executable/argv-level command
 confinement, and a daemon-restart-proof lifecycle gate.

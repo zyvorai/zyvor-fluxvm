@@ -79,7 +79,7 @@ pub const CAPABILITIES: &[Capability] = &[
     yes_min(
         "vmnet custom network",
         26,
-        "macOS 26+ shared/host-only network, DHCP reservation, TCP/UDP forwards; named networks are shared across VMs through the fluxvm-vmnetd broker; unverified on hardware",
+        "macOS 26+ shared/host-only network, DHCP reservation, TCP/UDP forwards; named networks are shared across VMs through the fluxvm-vmnetd broker; needs the restricted com.apple.vm.networking entitlement (an Apple provisioning profile), so it is refused without it and unverified end to end",
     ),
     yes(
         "usernet gateway",
@@ -163,7 +163,10 @@ pub const CAPABILITIES: &[Capability] = &[
         "TPM, confidential profiles",
         "not offered by Virtualization.framework",
     ),
-    no("hotplug (cpu, memory, disks, nics)", "not supported"),
+    no(
+        "hotplug (cpu, memory, disks, nics)",
+        "not supported by Virtualization.framework; the exception is USB mass-storage disks, which attach and detach live",
+    ),
     no(
         "top-level data_disks and cdroms",
         "use apple.extra_disks (image, block, NBD; virtio, NVMe, USB) or apple.media instead",
