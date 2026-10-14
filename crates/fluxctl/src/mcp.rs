@@ -1348,12 +1348,14 @@ pub fn tools(remote: Arc<Remote>) -> Vec<Tool> {
         ),
         tool(
             "session_exec",
-            "Run a shell command in an agent session; returns exit code, stdout and stderr. The action is recorded in the session's ledger.",
+            "Run a shell command in an agent session; returns exit code, stdout and stderr. The action is recorded in the session's ledger. A command matching the session's process.ask rules is not run: the call fails with 428 and an approval_id; an operator approves it (session_approve with an admin credential, or `fluxctl agent approve`), then call again with approval_id, or set approval_wait_seconds to wait for the decision.",
             object(
                 json!({
                     "session": {"type": "string", "description": "session id"},
                     "command": {"type": "string"},
                     "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 600, "description": "default 60"},
+                    "approval_id": {"type": "string", "description": "an approval granted for exactly this command and timeout"},
+                    "approval_wait_seconds": {"type": "integer", "minimum": 1, "maximum": 120, "description": "wait this long for an operator's decision"},
                 }),
                 &["session", "command"],
             ),
@@ -1361,17 +1363,85 @@ pub fn tools(remote: Arc<Remote>) -> Vec<Tool> {
             &remote,
             |r, args| async move {
                 let timeout = int_arg(&args, "timeout_seconds")?.unwrap_or(60).min(600);
-                timed(Duration::from_secs(timeout + 30), async {
+                let waiting = int_arg(&args, "approval_wait_seconds")?
+                    .unwrap_or(0)
+                    .min(120);
+                timed(Duration::from_secs(timeout + waiting + 30), async {
                     let id = session_id(&args)?;
-                    let body = json!({
+                    let mut body = json!({
                         "command": str_arg(&args, "command").unwrap_or_default(),
                         "timeout_seconds": timeout,
                     });
+                    if let Some(a) = str_arg(&args, "approval_id") {
+                        body["approval_id"] = json!(a);
+                    }
+                    if waiting > 0 {
+                        body["approval_wait_seconds"] = json!(waiting);
+                    }
                     pretty(
                         &r.call(
                             Method::POST,
                             &format!("/v1/agents/sessions/{id}/exec"),
                             Some(body),
+                        )
+                        .await?,
+                    )
+                })
+                .await
+            },
+        ),
+        tool(
+            "session_approvals",
+            "List a session's approval requests: commands that matched a process.ask rule, with id, summary, state (pending|approved|denied|consumed|expired) and expiry. Read-only.",
+            object(json!({"session": {"type": "string"}}), &["session"]),
+            false,
+            &remote,
+            |r, args| async move {
+                timed(CALL_TIMEOUT, async {
+                    let id = session_id(&args)?;
+                    pretty(
+                        &r.call(
+                            Method::GET,
+                            &format!("/v1/agents/sessions/{id}/approvals"),
+                            None,
+                        )
+                        .await?,
+                    )
+                })
+                .await
+            },
+        ),
+        tool(
+            "session_approve",
+            "Approve or deny a pending approval request. Needs an admin credential: a session token is refused, so an agent cannot approve its own command. Approving lets exactly that command run once, until it expires.",
+            object(
+                json!({
+                    "session": {"type": "string"},
+                    "approval": {"type": "string", "description": "approval id from the 428 answer or session_approvals"},
+                    "decision": {"type": "string", "enum": ["approve", "deny"]},
+                    "note": {"type": "string"},
+                }),
+                &["session", "approval", "decision"],
+            ),
+            true,
+            &remote,
+            |r, args| async move {
+                timed(CALL_TIMEOUT, async {
+                    let id = session_id(&args)?;
+                    let approval = str_arg(&args, "approval")
+                        .and_then(|a| Uuid::parse_str(a).ok())
+                        .ok_or_else(|| anyhow::anyhow!("approval must be an approval id"))?;
+                    let verb = match str_arg(&args, "decision") {
+                        Some("approve") => "approve",
+                        Some("deny") => "deny",
+                        _ => anyhow::bail!("decision must be approve or deny"),
+                    };
+                    let body = str_arg(&args, "note").map(|n| json!({"note": n}));
+                    pretty(
+                        &r.call(
+                            Method::POST,
+                            &format!("/v1/agents/sessions/{id}/approvals/{approval}/{verb}"),
+                            body,
                         )
                         .await?,
                     )
@@ -1728,6 +1798,8 @@ pub fn tools(remote: Arc<Remote>) -> Vec<Tool> {
                     "stdin": {"type": "boolean", "description": "give the job a stdin that session_job_stdin writes to; close it with session_job_stdin close=true"},
                     "max_output_bytes": {"type": "integer", "minimum": 1, "description": "keep this many bytes of output per stream (default 16 MiB); the job keeps running past it and later output is dropped"},
                     "timeout_seconds": {"type": "integer", "minimum": 1, "description": "kill the job's whole process tree after this long"},
+                    "approval_id": {"type": "string", "description": "an approval granted for exactly this job (command, stdin, caps)"},
+                    "approval_wait_seconds": {"type": "integer", "minimum": 1, "maximum": 120},
                 }),
                 &["session", "command"],
             ),
@@ -1747,6 +1819,12 @@ pub fn tools(remote: Arc<Remote>) -> Vec<Tool> {
                     }
                     if let Some(n) = int_arg(&args, "timeout_seconds")? {
                         body["timeout_seconds"] = json!(n);
+                    }
+                    if let Some(a) = str_arg(&args, "approval_id") {
+                        body["approval_id"] = json!(a);
+                    }
+                    if let Some(w) = int_arg(&args, "approval_wait_seconds")? {
+                        body["approval_wait_seconds"] = json!(w);
                     }
                     pretty(
                         &r.call(

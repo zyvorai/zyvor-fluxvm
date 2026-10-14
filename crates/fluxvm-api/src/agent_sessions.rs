@@ -49,6 +49,7 @@
 //! session survives a daemon restart. What is *not* here: promote, replay, sandbox-scoped PTY,
 //! browser profiles (see `docs/agent-sessions.md`, "Roadmap").
 
+use super::agent_session_approvals as approvals;
 use super::agent_session_auth::{self, Op, SessionScope, authorize};
 use super::{ApiError, ApiResult, AuditActor, TokenTenant, change_error, require_admin};
 use axum::{
@@ -128,6 +129,15 @@ pub(crate) fn routes() -> Router<Arc<VmManager>> {
         .route("/v1/agents/sessions/{id}/git/log", get(git_log))
         .route("/v1/agents/sessions/{id}/git/commit", post(git_commit))
         .route("/v1/agents/sessions/{id}/git/branch", post(git_branch))
+        .route("/v1/agents/sessions/{id}/approvals", get(approval_list))
+        .route(
+            "/v1/agents/sessions/{id}/approvals/{approval}/approve",
+            post(approval_approve),
+        )
+        .route(
+            "/v1/agents/sessions/{id}/approvals/{approval}/deny",
+            post(approval_deny),
+        )
         .route(
             "/v1/agents/sessions/{id}/jobs",
             post(job_start).get(job_list),
@@ -233,6 +243,10 @@ struct CommandRules {
     allow: Vec<String>,
     #[serde(default)]
     deny: Vec<String>,
+    /// Commands that run only after an operator approves them (see `agent_session_approvals`).
+    /// A piece matching an `ask` pattern also satisfies a non-empty `allow` list.
+    #[serde(default)]
+    ask: Vec<String>,
 }
 
 fn glob_match(pat: &str, text: &str) -> bool {
@@ -286,11 +300,21 @@ impl CommandRules {
             if let Some(d) = self.deny.iter().find(|d| glob_match(d, &piece)) {
                 return Err(format!("`{piece}` matches the deny rule `{d}`"));
             }
-            if !self.allow.is_empty() && !self.allow.iter().any(|a| glob_match(a, &piece)) {
+            if !self.allow.is_empty()
+                && !self.allow.iter().any(|a| glob_match(a, &piece))
+                && !self.ask.iter().any(|a| glob_match(a, &piece))
+            {
                 return Err(format!("`{piece}` matches no allow rule"));
             }
         }
         Ok(())
+    }
+
+    /// The `ask` pattern a command matches, if any: running it needs an approval.
+    fn ask_match(&self, cmd: &str) -> Option<String> {
+        command_pieces(cmd)
+            .iter()
+            .find_map(|piece| self.ask.iter().find(|a| glob_match(a, piece)).cloned())
     }
 }
 
@@ -912,12 +936,7 @@ fn compile_policy(p: Option<PolicyBody>) -> Result<PolicyReport, ApiError> {
             let list = match k.as_str() {
                 "allow" => &mut rules.allow,
                 "deny" => &mut rules.deny,
-                "ask" => {
-                    return Err(bad(
-                        "process.ask is not supported yet: there is no per-command approval flow"
-                            .into(),
-                    ));
-                }
+                "ask" => &mut rules.ask,
                 other => return Err(bad(format!("unknown process rule `{other}`"))),
             };
             for e in val
@@ -1489,6 +1508,7 @@ async fn delete_session(
     let _ = m.revoke_grant(s.sandbox_id, None).await;
     let _ = tokio::fs::remove_file(job_meta_path(&m, id)).await;
     let _ = tokio::fs::remove_file(usage_path(&m, id)).await;
+    approvals::remove(&m.cfg.state_dir, id).await;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1720,11 +1740,252 @@ fn running(s: &Session) -> ApiResult<()> {
     Ok(())
 }
 
+enum AskGate {
+    /// The command matches no `ask` rule.
+    Clear,
+    /// An approval was consumed for this request.
+    Approved,
+    /// Nobody has approved it yet.
+    Required(approvals::Approval),
+}
+
+/// The `428` answer for a request that needs an approval. It is not a 2xx, so the idempotency
+/// layer never stores it and the same `Idempotency-Key` can be retried after the decision.
+fn approval_required(a: &approvals::Approval) -> (StatusCode, Json<Value>) {
+    (
+        StatusCode::PRECONDITION_REQUIRED,
+        Json(json!({
+            "approval_required": true,
+            "approval_id": a.id,
+            "state": "pending",
+            "kind": a.kind,
+            "summary": a.summary,
+            "matched": a.matched,
+            "params": a.params,
+            "expires_at": a.expires_at,
+            // `error` is the key the CLI and SDKs print for a non-2xx answer.
+            "error": format!(
+                "this command needs an operator's approval (approval_id {}): approve it with POST .../approvals/{}/approve, then repeat the request with approval_id",
+                a.id, a.id
+            ),
+        })),
+    )
+}
+
+/// Applies the session's `process.ask` rules to one request. `work` is released while waiting
+/// for a decision, so a held request never blocks a checkpoint or restore.
+#[allow(clippy::too_many_arguments)]
+async fn approval_gate(
+    m: &Arc<VmManager>,
+    s: &Session,
+    kind: &str,
+    command: &str,
+    params: Value,
+    presented: Option<Uuid>,
+    wait_secs: Option<u64>,
+    work: &mut Option<WorkGuard>,
+) -> ApiResult<AskGate> {
+    let Some(matched) = s.policy.process.as_ref().and_then(|r| r.ask_match(command)) else {
+        return Ok(AskGate::Clear);
+    };
+    let policy_hash = approvals::hash_str(&serde_json::to_string(&s.policy).unwrap_or_default());
+    let subject = approvals::Subject {
+        session: s.id,
+        kind,
+        command,
+        params,
+        policy_hash: &policy_hash,
+        revision: s.revision,
+    };
+    let state_dir = m.cfg.state_dir.clone();
+    let now = Utc::now();
+    let mut decision = approvals::mutate(&state_dir, s.id, |all| {
+        approvals::sweep(all, now);
+        approvals::decide_request(all, &subject, &matched, presented, now)
+    })
+    .await?;
+    if let approvals::Decision::Pending(a) = &decision
+        && a.requested_at == now
+    {
+        record(
+            m,
+            s.id,
+            "approval.requested",
+            json!({"approval": a.id, "kind": kind, "command": a.summary, "matched": matched}),
+        );
+    }
+    let wait = wait_secs.unwrap_or(0).min(approvals::MAX_WAIT_SECS);
+    if wait > 0
+        && let approvals::Decision::Pending(a) = &decision
+    {
+        let id = a.id;
+        // A held request must not pin the session against checkpoint and restore.
+        *work = None;
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(wait);
+        let mut outcome: Option<approvals::State> = None;
+        while std::time::Instant::now() < until {
+            tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+            let all = approvals::list(&state_dir, s.id).await;
+            match all.iter().find(|a| a.id == id).map(|a| a.state) {
+                Some(approvals::State::Pending) => continue,
+                other => {
+                    outcome = other;
+                    break;
+                }
+            }
+        }
+        *work = Some(begin_work(s.id)?);
+        // The session may have been restored or its policy changed while waiting.
+        let cur = load(m, s.id, &s.tenant).await?;
+        running(&cur)?;
+        let now = Utc::now();
+        if outcome.is_some() {
+            decision = approvals::mutate(&state_dir, s.id, |all| {
+                approvals::decide_request(all, &subject, &matched, Some(id), now)
+            })
+            .await?;
+        }
+        if cur.revision != s.revision {
+            return Err(ApiError {
+                status: StatusCode::CONFLICT,
+                message: "the session changed while waiting for the approval; repeat the request"
+                    .into(),
+            });
+        }
+    }
+    match decision {
+        approvals::Decision::Run(id) => {
+            record(
+                m,
+                s.id,
+                "approval.consumed",
+                json!({"approval": id, "kind": kind, "command": clip_for_ledger(command)}),
+            );
+            let _ = id;
+            Ok(AskGate::Approved)
+        }
+        approvals::Decision::Pending(a) => Ok(AskGate::Required(a)),
+        approvals::Decision::Refuse(status, message) => {
+            record(
+                m,
+                s.id,
+                "approval.refused",
+                json!({"kind": kind, "command": clip_for_ledger(command), "reason": message}),
+            );
+            Err(ApiError { status, message })
+        }
+    }
+}
+
+fn clip_for_ledger(s: &str) -> String {
+    s.chars().take(512).collect()
+}
+
+/// `GET .../approvals`: the session's approval requests, newest first.
+async fn approval_list(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    scope: Option<Extension<SessionScope>>,
+    token_tenant: Option<Extension<TokenTenant>>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<Value>> {
+    authorize(role, &scope, id, Op::Read)?;
+    load(&m, id, &caller_tenant(&token_tenant)).await?;
+    let now = Utc::now();
+    let mut all = approvals::list(&m.cfg.state_dir, id).await;
+    all.sort_by(|a, b| b.requested_at.cmp(&a.requested_at));
+    let items: Vec<Value> = all
+        .iter()
+        .map(|a| {
+            let mut v = json!(a);
+            v["state"] = json!(a.effective_state(now));
+            v
+        })
+        .collect();
+    Ok(Json(json!({"items": items})))
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct DecideBody {
+    #[serde(default)]
+    note: Option<String>,
+}
+
+async fn decide_approval(
+    m: Arc<VmManager>,
+    role: Role,
+    actor: Option<Extension<AuditActor>>,
+    token_tenant: Option<Extension<TokenTenant>>,
+    id: Uuid,
+    approval: Uuid,
+    approve: bool,
+    note: Option<String>,
+) -> ApiResult<Json<Value>> {
+    // Admin only, and never through a session token: those carry the read-only role. An agent
+    // cannot approve its own request.
+    require_admin(role)?;
+    load(&m, id, &caller_tenant(&token_tenant)).await?;
+    let by = actor
+        .map(|Extension(a)| a.0)
+        .unwrap_or_else(|| "admin".into());
+    let now = Utc::now();
+    let by2 = by.clone();
+    let res = approvals::mutate(&m.cfg.state_dir, id, |all| {
+        approvals::decide_record(all, approval, approve, &by2, note, now)
+    })
+    .await?;
+    let a = res.map_err(|(status, message)| ApiError { status, message })?;
+    record(
+        &m,
+        id,
+        if approve {
+            "approval.approved"
+        } else {
+            "approval.denied"
+        },
+        json!({"approval": a.id, "by": by, "command": a.summary, "kind": a.kind}),
+    );
+    let mut v = json!(a);
+    v["state"] = json!(a.effective_state(now));
+    Ok(Json(v))
+}
+
+async fn approval_approve(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    actor: Option<Extension<AuditActor>>,
+    token_tenant: Option<Extension<TokenTenant>>,
+    Path((id, approval)): Path<(Uuid, Uuid)>,
+    body: Option<Json<DecideBody>>,
+) -> ApiResult<Json<Value>> {
+    let note = body.and_then(|Json(b)| b.note);
+    decide_approval(m, role, actor, token_tenant, id, approval, true, note).await
+}
+
+async fn approval_deny(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    actor: Option<Extension<AuditActor>>,
+    token_tenant: Option<Extension<TokenTenant>>,
+    Path((id, approval)): Path<(Uuid, Uuid)>,
+    body: Option<Json<DecideBody>>,
+) -> ApiResult<Json<Value>> {
+    let note = body.and_then(|Json(b)| b.note);
+    decide_approval(m, role, actor, token_tenant, id, approval, false, note).await
+}
+
 #[derive(Debug, Deserialize)]
 struct ExecBody {
     command: String,
     #[serde(default)]
     timeout_seconds: Option<u64>,
+    /// A command matching a `process.ask` rule needs an approval: repeat the request with the id
+    /// from the `428` answer once an operator approved it.
+    #[serde(default)]
+    approval_id: Option<Uuid>,
+    /// Hold the request open this long (at most 120) for the decision instead of answering `428`.
+    #[serde(default)]
+    approval_wait_seconds: Option<u64>,
 }
 
 async fn exec_session(
@@ -1734,9 +1995,9 @@ async fn exec_session(
     token_tenant: Option<Extension<TokenTenant>>,
     Path(id): Path<Uuid>,
     Json(body): Json<ExecBody>,
-) -> ApiResult<Json<Value>> {
+) -> ApiResult<(StatusCode, Json<Value>)> {
     authorize(role, &scope, id, Op::Exec)?;
-    let _work = begin_work(id)?;
+    let mut work = Some(begin_work(id)?);
     let s = load(&m, id, &caller_tenant(&token_tenant)).await?;
     running(&s)?;
     if body.command.trim().is_empty() {
@@ -1753,6 +2014,21 @@ async fn exec_session(
             json!({"command": body.command, "reason": e.message}),
         );
         return Err(e);
+    }
+    match approval_gate(
+        &m,
+        &s,
+        "exec",
+        &body.command,
+        json!({"timeout_seconds": body.timeout_seconds}),
+        body.approval_id,
+        body.approval_wait_seconds,
+        &mut work,
+    )
+    .await?
+    {
+        AskGate::Clear | AskGate::Approved => {}
+        AskGate::Required(a) => return Ok(approval_required(&a)),
     }
     m.ensure_running_for_request(s.sandbox_id).await?;
     let left = budget_start_exec(&m, &s).await?;
@@ -1784,7 +2060,7 @@ async fn exec_session(
             "duration_ms": started.elapsed().as_millis() as u64,
         }),
     );
-    Ok(Json(out))
+    Ok((StatusCode::OK, Json(out)))
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -3390,6 +3666,11 @@ struct JobBody {
     /// Kill the job's process tree after this many seconds. Needs the guest job supervisor.
     #[serde(default)]
     timeout_seconds: Option<u64>,
+    /// See `ExecBody::approval_id`.
+    #[serde(default)]
+    approval_id: Option<Uuid>,
+    #[serde(default)]
+    approval_wait_seconds: Option<u64>,
 }
 
 /// `JobMeta.engine` of a job run by the guest agent's supervisor (shell-script jobs leave it empty).
@@ -3703,7 +3984,7 @@ async fn job_start(
     Json(body): Json<JobBody>,
 ) -> ApiResult<(StatusCode, Json<Value>)> {
     authorize(role, &scope, id, Op::Jobs)?;
-    let _work = begin_work(id)?;
+    let mut work = Some(begin_work(id)?);
     let s = load(&m, id, &caller_tenant(&token_tenant)).await?;
     running(&s)?;
     if body.command.trim().is_empty() {
@@ -3720,6 +4001,25 @@ async fn job_start(
             json!({"command": body.command, "reason": e.message}),
         );
         return Err(e);
+    }
+    match approval_gate(
+        &m,
+        &s,
+        "job",
+        &body.command,
+        json!({
+            "stdin": body.stdin,
+            "max_output_bytes": body.max_output_bytes,
+            "timeout_seconds": body.timeout_seconds,
+        }),
+        body.approval_id,
+        body.approval_wait_seconds,
+        &mut work,
+    )
+    .await?
+    {
+        AskGate::Clear | AskGate::Approved => {}
+        AskGate::Required(a) => return Ok(approval_required(&a)),
     }
     let running_jobs = match s.budget.as_ref().and_then(|b| b.max_concurrent_jobs) {
         Some(_) if m.ensure_running_for_request(s.sandbox_id).await.is_ok() => {
@@ -5143,7 +5443,8 @@ mod tests {
         assert!(e.best_effort && e.allow_udp);
         let rules = r.process.unwrap();
         assert_eq!(rules.allow, vec!["git"]);
-        assert!(compile_policy(Some(pol(json!({"process": {"ask": ["x"]}})))).is_err());
+        let r = compile_policy(Some(pol(json!({"process": {"ask": ["deploy *"]}})))).unwrap();
+        assert_eq!(r.process.unwrap().ask, vec!["deploy *".to_string()]);
         assert!(compile_policy(Some(pol(json!({"process": {"nope": []}})))).is_err());
         assert!(compile_policy(Some(pol(json!({"process": {"deny": "rm"}})))).is_err());
     }
@@ -5478,10 +5779,34 @@ mod tests {
     }
 
     #[test]
+    fn ask_rules_match_any_piece_and_count_as_allowed() {
+        let r = CommandRules {
+            allow: vec!["ls".into()],
+            deny: vec!["rm -rf /*".into()],
+            ask: vec!["deploy *".into(), "git push*".into()],
+        };
+        assert_eq!(r.ask_match("ls"), None);
+        assert_eq!(
+            r.ask_match("ls && deploy prod").as_deref(),
+            Some("deploy *")
+        );
+        assert_eq!(
+            r.ask_match("'git' 'push' origin").as_deref(),
+            Some("git push*")
+        );
+        // An ask pattern satisfies a non-empty allow list; deny still wins.
+        assert!(r.check("deploy prod").is_ok());
+        assert!(r.check("rm -rf /x").is_err());
+        assert!(r.check("python3 x.py").is_err());
+        assert_eq!(CommandRules::default().ask_match("deploy prod"), None);
+    }
+
+    #[test]
     fn command_rules_check_every_piece_of_a_compound_command() {
         let r = CommandRules {
             allow: vec![],
             deny: vec!["rm *".into(), "sudo*".into(), "curl *|*".into()],
+            ask: vec![],
         };
         assert!(r.check("ls -la && cargo test").is_ok());
         assert!(r.check("echo hi; rm -rf /workspace").is_err());
@@ -5490,6 +5815,7 @@ mod tests {
         let a = CommandRules {
             allow: vec!["git *".into(), "ls".into(), "cargo *".into()],
             deny: vec!["git push*".into()],
+            ask: vec![],
         };
         assert!(a.check("git status && ls").is_ok());
         assert!(a.check("git push origin main").is_err());

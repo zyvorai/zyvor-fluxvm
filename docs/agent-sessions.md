@@ -23,6 +23,7 @@ tenant's id answers `404`, not `403`).
 | `DELETE /v1/agents/sessions/{id}` | Delete the session and its sandbox. Idempotent (`204`). |
 | `POST /v1/agents/sessions/{id}/exec` | `{command, timeout_seconds?}` through the sandbox's guest path. Recorded in the ledger. |
 | `POST /v1/agents/sessions/{id}/tokens` | `{ops, ttl_seconds?, label?}`: mint a [session token](#session-tokens). `GET` lists live ones (no secrets); `DELETE .../tokens/{token}` revokes. Admin only. |
+| `GET /v1/agents/sessions/{id}/approvals` | the session's [approval](#approvals) requests. `POST .../approvals/{approval}/approve` and `.../deny` decide one (`{note?}`); admin only. |
 | `POST /v1/agents/sessions/{id}/promote` | `{dry_run?, plan_id?, skip_conflicts?, paths?}` on a fork child: apply its workspace changes to its parent. See [Promoting a fork](#promoting-a-fork). Admin only. |
 | `POST /v1/agents/sessions/{id}/checkpoint` | `{tag?, memory?}`; `memory:false` is disk-only. |
 | `POST /v1/agents/sessions/{id}/restore` | `{tag}`; only tags this session took. |
@@ -194,6 +195,38 @@ work against that one session. Verbs the token does not grant, and `agent run`/`
 
 Not done: tokens are not narrowed by path or by git repository.
 
+### Approvals
+
+`process.ask: ["deploy *", "git push*"]` makes a matching command wait for an operator. It applies to `exec` and job
+start, with the same piece-by-piece matching as `allow`/`deny` (a piece that matches `ask` also satisfies a non-empty
+`allow` list; `deny` still wins).
+
+1. The agent's `exec` / job request is **not run**. The answer is `428` with `approval_id`, `summary`, `matched` and
+   `expires_at` (10 minutes). Asking again for the same command returns the same request.
+2. An operator decides: `POST .../approvals/{approval}/approve` (or `deny`, optional `{note}`), or
+   `fluxctl agent approve|deny <session> <approval>`, MCP `session_approve`. **Admin credential only**: a session token
+   carries a read-only role and is refused, so an agent cannot approve its own command.
+3. The agent repeats the request with `approval_id` (CLI `--approval-id`), or sets `approval_wait_seconds` (at most 120;
+   CLI `--approval-wait`) to hold the first request open for the decision. A held request releases the session's work
+   slot, so checkpoint and restore are not blocked behind it.
+
+The approval is bound to a SHA-256 digest of the session, the kind (`exec`/`job`), the exact command, its parameters
+(timeout, stdin, output cap), the session's policy and the session **revision**, which restore, fork and checkpoint
+change. A different command, a changed parameter or policy, or a restore in between makes it `403`. It is **single
+use**: consuming it is a compare-and-set under one lock (two concurrent retries: one runs). Denied, expired and
+already-used approvals are `403`. The ledger records `approval.requested`, `.approved`, `.denied`, `.consumed` and
+`.refused` with the approver. Records live in `<state_dir>/agent-session-approvals/<session>.json`, and are removed
+with the session.
+
+Limits, said plainly: matching is on the command string, so an `ask` rule is as good as a string glob is (see the
+process-policy caveat above) — a command written as `sh -c "$(...)"` matches the `sh` piece, not what it builds.
+The approval covers the command and session revision, **not the workspace's file contents** (an edit by a file write
+does not change the revision). File writes, git verbs and previews are not subject to `ask`. A `428` is not a 2xx, so
+an `Idempotency-Key` on the request is not stored and can be reused after the decision. **Not run live:** the flow is
+covered by unit tests of the decision logic (single use, mismatch, expiry, flood cap, concurrent consume) and a
+router-level test (agent held, token cannot decide, other tenant 404, approve, one run, replay refused, denial
+sticks); it was not run against a real guest.
+
 ### Policy
 
 A policy is compiled into fields the sandbox already enforces. The response reports exactly what was compiled.
@@ -205,7 +238,7 @@ A policy is compiled into fields the sandbox already enforces. The response repo
 | `preset: "open"` or no policy | nothing | n/a |
 | `network.default: "deny"` + `allow: [host…]` | `allow_hosts` (merged, de-duplicated); `offline` when nothing is allowed | as above |
 | `network.allow` entries with `methods` or `paths` | **refused (`400`)** | not supported yet; HTTP method/path rules exist for the QEMU/KVM egress proxy, not through this API |
-| `process: {allow: [glob…], deny: [glob…]}` | `policy.process` | the API, on `exec` and job start (`403`, ledgered as `exec.refused` / `job.refused`). A guardrail on the command string, **not a security boundary**: see below |
+| `process: {allow: [glob…], deny: [glob…], ask: [glob…]}` | `policy.process` | the API, on `exec` and job start (`403`, ledgered as `exec.refused` / `job.refused`). `ask` holds a matching command for an operator's [approval](#approvals) (`428`). A guardrail on the command string, **not a security boundary**: see below |
 | `process.ask` | **refused (`400`)** | there is no per-command approval flow yet |
 | `filesystem: {read, write, enforcement?}` | `policy.exec`: a guest Landlock + seccomp policy (system dirs read-only, `/tmp` and the workspace/volumes writable, plus your `read`/`write` paths; a trailing `/**` means the directory) | the guest agent, on `exec`, jobs, file and git verbs. Linux guests only (including Linux on Apple VZ). **Create probes enforcement and returns `400` if the guest cannot give it** (macOS guest, procbox sandbox); `enforcement: "best-effort"` creates the session anyway and `capabilities.confinement` says `false`. Network reach is still the sandbox's (no NIC / egress proxy). Not run live yet |
 
@@ -565,7 +598,7 @@ Each item says why it is not in the MVP.
 | Promote a child's *non-file* state (memory, processes, volumes) | promotion copies workspace files only; a child's running processes and memory are not merged |
 | Lazy memory restore (sub-second claim/fork) | a restore engine change, not an API change; not started |
 | Workspace overlay mode, read-only mounts | `mode: "overlay"` is refused; clone is the only writable mode |
-| Process policy as a security boundary | `process` rules are still string globs; filesystem confinement is wired, command confinement beyond it is not |
+| Process policy as a security boundary | `process` rules are still string globs (`ask` approvals included); filesystem confinement is wired, executable/argv rules are not |
 | HTTP method/path rules through the session policy | the egress proxy supports them on QEMU/KVM; not exposed here |
 | Streaming exec output | `exec` is still buffered; jobs stream over SSE (long-polled from the guest supervisor, or polled every 400 ms on older agents) and the terminal (`shell`) streams |
 | Replay | the ledger is a log, not a recording |
