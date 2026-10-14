@@ -7285,6 +7285,57 @@ mod tests {
         }
 
         #[tokio::test]
+        async fn job_list_stdin_and_stream_are_tenant_scoped_and_validated() {
+            let m = procbox_manager(tenant_tokens(), false);
+            let id = seed_session(&m, Some("acme"), "vz", "running");
+            let job = Uuid::new_v4();
+            let app = router(m);
+            let base = format!("/v1/agents/sessions/{id}/jobs");
+            // Another tenant gets 404 on all three, never a hint the session exists.
+            for (method, suffix, body) in [
+                ("GET", String::new(), None),
+                ("POST", format!("/{job}/stdin"), Some(r#"{"text":"x"}"#)),
+                ("GET", format!("/{job}/stream"), None),
+            ] {
+                let (st, _) = call(
+                    app.clone(),
+                    method,
+                    &format!("{base}{suffix}"),
+                    "other",
+                    body,
+                )
+                .await;
+                assert_eq!(st, StatusCode::NOT_FOUND, "{method} {suffix}");
+            }
+            // stdin takes exactly one of text and data_base64, and a bounded amount.
+            let stdin = format!("{base}/{job}/stdin");
+            for bad in [
+                r#"{}"#.to_string(),
+                r#"{"text":"a","data_base64":"YQ=="}"#.to_string(),
+                r#"{"text":""}"#.to_string(),
+                format!(r#"{{"text":"{}"}}"#, "a".repeat(50_000)),
+            ] {
+                let (st, b) = call(app.clone(), "POST", &stdin, "acme", Some(&bad)).await;
+                assert_eq!(st, StatusCode::BAD_REQUEST, "{b}");
+            }
+            // A job that was never started with stdin: 409, before any guest is touched.
+            let (st, b) = call(app.clone(), "POST", &stdin, "acme", Some(r#"{"text":"x"}"#)).await;
+            assert_eq!(st, StatusCode::CONFLICT, "{b}");
+            // The output bound is validated at start.
+            for n in ["0", "999999999999"] {
+                let (st, b) = call(
+                    app.clone(),
+                    "POST",
+                    &base,
+                    "acme",
+                    Some(&format!(r#"{{"command":"true","max_output_bytes":{n}}}"#)),
+                )
+                .await;
+                assert_eq!(st, StatusCode::BAD_REQUEST, "{n}: {b}");
+            }
+        }
+
+        #[tokio::test]
         async fn the_terminal_page_needs_no_token_and_the_ticket_is_scoped_to_its_session() {
             use tower::ServiceExt as _;
             let m = procbox_manager(tenant_tokens(), false);
