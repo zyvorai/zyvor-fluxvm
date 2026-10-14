@@ -13,6 +13,7 @@
 //! * `POST   /v1/agents/sessions/{id}/exec`          run a command
 //! * `GET    /v1/agents/sessions/{id}/screenshot`    the guest display as a PNG (`vz`; scope `screen`)
 //! * `POST   /v1/agents/sessions/{id}/input`         keyboard and mouse input to the display (`vz`; scope `screen`)
+//! * `POST   /v1/agents/sessions/{id}/screen/wait`   block until the display changes (`vz`; scope `screen`)
 //! * `GET    /v1/agents/sessions/{id}/probe`         which tools the guest image has (git, sha256sum, node, browsers ...)
 //! * `POST   /v1/agents/sessions/{id}/grants`        give the session a brokered credential for named hosts (also GET, DELETE)
 //! * `POST   /v1/agents/sessions/{id}/tokens`        mint an expiring token scoped to this session (also GET, DELETE .../{token})
@@ -88,6 +89,7 @@ pub(crate) fn routes() -> Router<Arc<VmManager>> {
         .route("/v1/agents/sessions/{id}/probe", get(probe))
         .route("/v1/agents/sessions/{id}/screenshot", get(screenshot))
         .route("/v1/agents/sessions/{id}/input", post(screen_input))
+        .route("/v1/agents/sessions/{id}/screen/wait", post(screen_wait))
         .route(
             "/v1/agents/sessions/{id}/grants",
             post(grant_create).get(grant_list).delete(grant_revoke_all),
@@ -3786,6 +3788,64 @@ async fn screenshot(
         shot.png,
     )
         .into_response())
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct ScreenWaitBody {
+    /// Give up after this long (default 10, at most 60).
+    #[serde(default)]
+    timeout_seconds: Option<u64>,
+    /// How often to look (default 500 ms, 100-5000).
+    #[serde(default)]
+    interval_ms: Option<u64>,
+    /// Compare at this width (default 320): small enough to ignore cursor-blink noise at the pixel level, no more.
+    #[serde(default)]
+    max_width: Option<u32>,
+}
+
+/// `POST /v1/agents/sessions/{id}/screen/wait` — returns when the display differs from how it looked at the call, or
+/// at the timeout: `{"changed", "waited_ms", "width", "height"}`. Take a screenshot afterwards to see it. Needs the
+/// `screen` scope; ledgered as `screen.wait`.
+async fn screen_wait(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    scope: Option<Extension<SessionScope>>,
+    token_tenant: Option<Extension<TokenTenant>>,
+    Path(id): Path<Uuid>,
+    body: Option<Json<ScreenWaitBody>>,
+) -> ApiResult<Json<Value>> {
+    use sha2::{Digest, Sha256};
+    authorize(role, &scope, id, Op::Screen)?;
+    let s = load(&m, id, &caller_tenant(&token_tenant)).await?;
+    running(&s)?;
+    m.ensure_running_for_request(s.sandbox_id).await?;
+    let b = body.map(|Json(b)| b).unwrap_or_default();
+    let timeout = std::time::Duration::from_secs(b.timeout_seconds.unwrap_or(10).clamp(1, 60));
+    let interval = std::time::Duration::from_millis(b.interval_ms.unwrap_or(500).clamp(100, 5000));
+    let width = b.max_width.or(Some(320));
+    let started = std::time::Instant::now();
+    let first = m.vm_screenshot(s.sandbox_id, width).await?;
+    let base = Sha256::digest(&first.png);
+    let (mut changed, mut dims) = (false, (first.width, first.height));
+    while started.elapsed() < timeout {
+        tokio::time::sleep(interval).await;
+        let now = m.vm_screenshot(s.sandbox_id, width).await?;
+        dims = (now.width, now.height);
+        if Sha256::digest(&now.png) != base {
+            changed = true;
+            break;
+        }
+    }
+    let waited_ms = started.elapsed().as_millis() as u64;
+    record(
+        &m,
+        id,
+        "screen.wait",
+        json!({"changed": changed, "waited_ms": waited_ms}),
+    );
+    Ok(Json(
+        json!({"changed": changed, "waited_ms": waited_ms, "width": dims.0, "height": dims.1}),
+    ))
 }
 
 #[derive(Deserialize)]

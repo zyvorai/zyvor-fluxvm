@@ -1787,6 +1787,40 @@ pub fn tools(remote: Arc<Remote>) -> Vec<Tool> {
             },
         ),
         tool(
+            "session_wait_screen",
+            "Block until a vz session's display changes (or the timeout): returns changed, waited_ms and the size. Call session_screenshot afterwards. Use it after session_input instead of sleeping and polling (token scope: screen).",
+            object(
+                json!({
+                    "session": {"type": "string"},
+                    "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 60, "description": "default 10"},
+                    "interval_ms": {"type": "integer", "minimum": 100, "maximum": 5000, "description": "how often to look, default 500"}
+                }),
+                &["session"],
+            ),
+            false,
+            &remote,
+            |r, args| async move {
+                timed(Duration::from_secs(90), async {
+                    let id = session_id(&args)?;
+                    let mut body = serde_json::Map::new();
+                    for k in ["timeout_seconds", "interval_ms"] {
+                        if let Some(v) = args.get(k) {
+                            body.insert(k.into(), v.clone());
+                        }
+                    }
+                    pretty(
+                        &r.call(
+                            Method::POST,
+                            &format!("/v1/agents/sessions/{id}/screen/wait"),
+                            Some(Value::Object(body)),
+                        )
+                        .await?,
+                    )
+                })
+                .await
+            },
+        ),
+        tool(
             "session_events",
             "What an agent session did: its ledger (exec, checkpoint, restore, fork, ...) and the sandbox's VM events. since is an RFC 3339 time.",
             object(
