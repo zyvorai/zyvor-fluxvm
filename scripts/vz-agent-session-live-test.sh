@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: Apache-2.0
 # Live test of agent sessions on the vz backend with the guest agent (`agent-micro`): the engine a session gets,
-# hardened exec, confinement, the job supervisor, fork cloning, and (with the egress proxy) per-session HTTP rules.
+# hardened exec, confinement, the job supervisor, the display (screenshot/input), fork cloning, and (with the egress proxy) per-session HTTP rules.
 #   scripts/vz-agent-session-live-test.sh /path/to/agent-micro-arm64.raw
 # Build the image on Linux first: scripts/build-guest-agent-static.sh + scripts/build-agent-micro.sh (docs/agent-micro.md).
 # Needs Apple silicon macOS, the Xcode command line tools, Rust, python3 and curl. Takes a few minutes (cold boots).
@@ -96,6 +96,16 @@ JI="$(api "$U/v1/agents/sessions/$S/jobs" | jget '[j for j in d["items"] if j["j
 SJ="$(api "$U/v1/agents/sessions/$S")"
 [[ "$(echo "$SJ" | jget '"memory_checkpoint" in d["capabilities"]')" == True ]] \
   && ok "capabilities.memory_checkpoint is reported ($(echo "$SJ" | jget 'd["capabilities"]["memory_checkpoint"]'))" || bad "memory_checkpoint missing: $SJ"
+# 4b. The display: screenshot and input are their own token scope and are ledgered.
+code=$(curl -s -o "$T/shot.png" -w '%{http_code}' -H "authorization: Bearer $TOKEN" "$U/v1/agents/sessions/$S/screenshot?max_width=640")
+[[ "$code" == 200 && "$(head -c 4 "$T/shot.png" | tail -c 3)" == PNG ]] && ok "screenshot returns a PNG" || bad "screenshot: http $code"
+[[ "$(api -X POST "$U/v1/agents/sessions/$S/input" -d '{"action":"key","key":"enter"}' | jget 'd.get("actions","?")')" == 1 ]] \
+  && ok "input accepted" || bad "input"
+TK="$(api -X POST "$U/v1/agents/sessions/$S/tokens" -d '{"ops":["read","exec"]}' | jget 'd["token"]')"
+[[ "$(curl -s -o /dev/null -w '%{http_code}' -H "authorization: Bearer $TK" "$U/v1/agents/sessions/$S/screenshot")" == 403 ]] \
+  && ok "a token without screen cannot take a screenshot" || bad "screen scope not enforced"
+[[ "$(api "$U/v1/agents/sessions/$S/events" | jget 'sorted({e["kind"] for e in d.get("ledger",[]) if e["kind"].startswith("screen.")})')" == '["screen.input", "screen.shot"]' ]] \
+  && ok "screen actions are in the ledger" || bad "screen ledger entries missing"
 
 # 5. Fork clones copy-on-write.
 FORK="$(api -X POST "$U/v1/agents/sessions/$S/fork" -d '{"count":2}')"

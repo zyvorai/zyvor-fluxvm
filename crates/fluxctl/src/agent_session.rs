@@ -361,7 +361,7 @@ pub enum AgentCommand {
         resume: bool,
     },
     /// Mint an expiring token that works on this one session and only for the listed operations
-    /// (read, exec, jobs, files.read, files.write, git, checkpoint, preview). Prints it once; use it as
+    /// (read, exec, jobs, files.read, files.write, git, checkpoint, preview, screen). Prints it once; use it as
     /// the bearer token for `fluxctl --token` or REST. REST: `POST /v1/agents/sessions/{id}/tokens`.
     Token {
         id: Uuid,

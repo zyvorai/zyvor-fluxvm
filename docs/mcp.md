@@ -96,6 +96,8 @@ credentials, or touch another session.
 | `session_token` *write* | Mint a scoped session token | `POST {id}/tokens` |
 | `session_preview` *write* | Expiring URL for a guest port | `POST {id}/preview` |
 | `session_probe` | What the guest image has, and what that enables | `GET {id}/probe` |
+| `session_screenshot` | The guest display of a vz session as an image (token scope `screen`); coordinates for `session_input` are its pixels | `GET /v1/agents/sessions/{id}/screenshot` |
+| `session_input` | Keyboard and mouse input for a vz session's display; same actions as `vm_input`; typed text is not ledgered | `POST /v1/agents/sessions/{id}/input` |
 | `session_events`, `session_artifacts` | Ledger and VM events; workspace changes | `GET {id}/events\|artifacts` |
 | `session_delete` *write* | Delete the session | `DELETE {id}` |
 

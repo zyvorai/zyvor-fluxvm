@@ -244,7 +244,9 @@ POST /v1/agents/sessions/{id}/tokens
 
 The response carries `token` (`fxst_…`) **once**; the store keeps only its SHA-256. Grantable operations: `read`
 (session record, events, trajectory, artifacts, preview list), `exec`, `jobs`, `files.read`, `files.write`, `git`,
-`checkpoint`, `preview`. Not grantable, so admin-only: create, list, delete, restore, fork, terminals and `ssh`, and
+`checkpoint`, `preview`, `screen` (the guest display: `GET .../screenshot[?max_width=N]` returns a PNG, `POST .../input`
+takes one action or `{"actions": [...]}`; vz sessions only, ledgered as `screen.shot` / `screen.input`, typed text is not
+copied into the ledger). Not grantable, so admin-only: create, list, delete, restore, fork, terminals and `ssh`, and
 minting tokens (a session token cannot mint another).
 
 - A token reaches only `/v1/agents/sessions/{its id}…`; any other path (another session, `/v1/vms`, the session list)

@@ -48,10 +48,13 @@ pub(crate) enum Op {
     Checkpoint,
     #[serde(rename = "preview")]
     Preview,
+    /// The guest display: screenshot and keyboard/mouse input (`vz` sessions).
+    #[serde(rename = "screen")]
+    Screen,
 }
 
 impl Op {
-    pub(crate) const ALL: [Op; 8] = [
+    pub(crate) const ALL: [Op; 9] = [
         Op::Read,
         Op::Exec,
         Op::Jobs,
@@ -60,6 +63,7 @@ impl Op {
         Op::Git,
         Op::Checkpoint,
         Op::Preview,
+        Op::Screen,
     ];
 
     pub(crate) fn as_str(self) -> &'static str {
@@ -72,6 +76,7 @@ impl Op {
             Op::Git => "git",
             Op::Checkpoint => "checkpoint",
             Op::Preview => "preview",
+            Op::Screen => "screen",
         }
     }
 
