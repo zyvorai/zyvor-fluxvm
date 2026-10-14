@@ -259,6 +259,19 @@ impl VmBackend for AppleBackend {
         let runner = find_runner()?;
         let mut conf = RunnerConfig::for_launch(req, ctx)?;
         conf.serial_log_max_bytes = Some(cfg.apple.serial_log_max_mib.max(1) << 20);
+        // A guest with a host allow-list reaches the network only through the runner's proxy. When the daemon runs its
+        // own egress proxy on loopback, relay through it so per-session method/path rules and grants can apply.
+        if !conf.egress_allow.is_empty()
+            && let Ok(addr) = cfg
+                .sandbox
+                .egress_proxy_listen
+                .parse::<std::net::SocketAddr>()
+            && addr.ip() == std::net::Ipv4Addr::LOCALHOST
+        {
+            let (_, token) = fluxvm_core::peer_alias::register(ctx.id);
+            conf.egress_via = Some(format!("127.0.0.1:{}", addr.port()));
+            conf.egress_token = Some(token);
+        }
         // Signed boot manifest in the `metadata` vsock service (a host claim, not hardware attestation; see `attest`).
         // A failure leaves the metadata without an `attestation` field rather than blocking the boot.
         if let Some(meta) = conf.vsock_metadata.take() {

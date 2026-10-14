@@ -686,7 +686,32 @@ fn count_denied(status: StatusCode, method: &Method, target: &dyn std::fmt::Disp
     }
 }
 
+/// A request relayed by a vz runner carries its token in `x-fluxvm-peer`. From a loopback peer that
+/// proves which sandbox it is: the request is attributed to the sandbox's alias address (so its rules
+/// and grants apply) and the header is removed before anything is forwarded. From anyone else the
+/// header is just dropped.
+fn adopt_runner_identity<B>(req: &mut Request<B>) {
+    let token = req
+        .headers_mut()
+        .remove(fluxvm_core::peer_alias::PEER_HEADER);
+    let (Some(token), Some(real)) = (token, peer_ip(req)) else {
+        return;
+    };
+    if !real.is_loopback() {
+        return;
+    }
+    if let Some(alias) = token
+        .to_str()
+        .ok()
+        .and_then(fluxvm_core::peer_alias::resolve)
+    {
+        req.extensions_mut()
+            .insert(ConnectInfo(SocketAddr::new(alias, 0)));
+    }
+}
+
 async fn proxy(State(state): State<Arc<ProxyState>>, mut req: Request<Body>) -> Response {
+    adopt_runner_identity(&mut req);
     if req.method() == Method::CONNECT
         && let Some(tls) = state.tls.clone()
     {
@@ -1188,5 +1213,51 @@ mod tests {
         let c = cfg(&["allow * good.example/*"], &[]);
         let e = vet(&c, "OPTIONS", "*", &["good.example"]).unwrap_err();
         assert_eq!(e.0, StatusCode::FORBIDDEN);
+    }
+}
+
+#[cfg(test)]
+mod runner_identity_tests {
+    use super::*;
+
+    fn req(peer: &str, token: Option<&str>) -> Request<Body> {
+        let mut b = Request::builder().uri("http://example.com/");
+        if let Some(t) = token {
+            b = b.header(fluxvm_core::peer_alias::PEER_HEADER, t);
+        }
+        let mut r = b.body(Body::empty()).unwrap();
+        r.extensions_mut()
+            .insert(ConnectInfo(SocketAddr::new(peer.parse().unwrap(), 4000)));
+        r
+    }
+
+    #[test]
+    fn a_loopback_peer_with_a_valid_token_is_attributed_to_the_alias_and_the_header_goes() {
+        let (alias, token) = fluxvm_core::peer_alias::register(uuid::Uuid::new_v4());
+        let mut r = req("127.0.0.1", Some(&token));
+        adopt_runner_identity(&mut r);
+        assert_eq!(peer_ip(&r), Some(alias));
+        assert!(
+            r.headers()
+                .get(fluxvm_core::peer_alias::PEER_HEADER)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn a_bad_token_or_a_remote_peer_keeps_its_own_address_and_loses_the_header() {
+        let (_, token) = fluxvm_core::peer_alias::register(uuid::Uuid::new_v4());
+        let mut bad = req("127.0.0.1", Some("nope"));
+        adopt_runner_identity(&mut bad);
+        assert_eq!(peer_ip(&bad), Some("127.0.0.1".parse().unwrap()));
+        let mut remote = req("10.1.2.3", Some(&token));
+        adopt_runner_identity(&mut remote);
+        assert_eq!(peer_ip(&remote), Some("10.1.2.3".parse().unwrap()));
+        assert!(
+            remote
+                .headers()
+                .get(fluxvm_core::peer_alias::PEER_HEADER)
+                .is_none()
+        );
     }
 }

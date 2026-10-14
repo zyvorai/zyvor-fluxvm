@@ -62,6 +62,11 @@ pub struct RunnerConfig {
     pub network_none: bool,
     /// Hosts the guest may reach through the vsock proxy on `EGRESS_PORT` (empty: no proxy).
     pub egress_allow: Vec<String>,
+    /// `127.0.0.1:port` of the daemon's egress proxy: allowed requests are relayed there so the session's
+    /// method/path rules and grants apply. Needs `egress_allow`.
+    pub egress_via: Option<String>,
+    /// The secret the daemon's proxy maps to this VM (`fluxvm_core::peer_alias`); never reaches the guest.
+    pub egress_token: Option<String>,
     /// Extra guest→host vsock services (see `AppleSpec::vsock_services`), with socket names resolved to host paths.
     pub vsock_services: Vec<VsockServiceConfig>,
     /// The JSON the `metadata` built-in serves (id, name, sizing).
@@ -316,6 +321,8 @@ impl RunnerConfig {
             rosetta_cache: apple.rosetta_cache.clone(),
             network_none: matches!(req.network, NetworkSpec::None),
             egress_allow: apple.egress_allow.clone(),
+            egress_via: None,
+            egress_token: None,
             vsock_services: apple
                 .vsock_services
                 .iter()
