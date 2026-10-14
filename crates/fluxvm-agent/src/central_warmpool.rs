@@ -1262,6 +1262,8 @@ mod tests {
             labels: HashMap::new(),
             security: Default::default(),
             density: None,
+            daemon: None,
+            allocated: None,
             apple: Some(AppleHostCaps {
                 free_cpu: 64,
                 free_memory_mib: 256 * 1024,
