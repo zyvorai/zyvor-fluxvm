@@ -92,6 +92,11 @@ JI="$(api "$U/v1/agents/sessions/$S/jobs" | jget '[j for j in d["items"] if j["j
 [[ "$(echo "$JI" | jget 'd["engine"]')" == supervisor && "$(echo "$JI" | jget 'd["exit_code"]')" == 7 ]] \
   && ok "job ran under the supervisor with exit code 7" || bad "job: $JI"
 
+# 4c. Whether a memory checkpoint is possible is reported up front (and a refusal says why).
+SJ="$(api "$U/v1/agents/sessions/$S")"
+[[ "$(echo "$SJ" | jget '"memory_checkpoint" in d["capabilities"]')" == True ]] \
+  && ok "capabilities.memory_checkpoint is reported ($(echo "$SJ" | jget 'd["capabilities"]["memory_checkpoint"]'))" || bad "memory_checkpoint missing: $SJ"
+
 # 5. Fork clones copy-on-write.
 FORK="$(api -X POST "$U/v1/agents/sessions/$S/fork" -d '{"count":2}')"
 [[ "$(echo "$FORK" | jget 'len(d.get("items",[]))')" == 2 ]] || bad "fork failed: $FORK"

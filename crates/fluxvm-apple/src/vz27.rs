@@ -30,6 +30,11 @@ pub async fn secure_boot_status(vm: &VmRecord) -> Result<Value> {
     call(vm, "secure-boot-status").await
 }
 
+/// `{"supported": bool, "reason"?: str}`: whether this VM's device set can take a memory checkpoint.
+pub async fn save_support(vm: &VmRecord) -> Result<Value> {
+    call(vm, "save-support").await
+}
+
 /// Asks the custom Virtio device to reset; the guest driver re-negotiates.
 pub async fn custom_virtio_reset(vm: &VmRecord) -> Result<()> {
     call(vm, "virtio-reset").await.map(|_| ())
