@@ -1266,12 +1266,14 @@ pub fn tools(remote: Arc<Remote>) -> Vec<Tool> {
                     "policy": {"type": "string", "enum": ["offline", "developer-safe", "open"]},
                     "allow": {"type": "array", "items": {"type": "string"}, "description": "host names the session may reach; everything else is refused"},
                     "image": {"type": "string", "description": "guest image, e.g. agent-micro"},
+                    "require_ready": {"type": "boolean", "description": "fail the create unless the workspace directory exists and the repo clone succeeded (default: the session is made and workspace.note says why not)"},
                     "volumes": {"type": "array", "items": {"type": "string"}, "description": "named host volumes as NAME:/guest/path (vz only; formatted ext4 on first use; the session cannot fork)"},
                     "allow_commands": {"type": "array", "items": {"type": "string"}, "description": "command patterns (* wildcard) session_exec may run; other commands are refused. A guardrail on the command string, not a security boundary"},
                     "deny_commands": {"type": "array", "items": {"type": "string"}, "description": "command patterns (* wildcard) session_exec refuses"},
                     "confine": {"type": "boolean", "description": "confine every command, job, file and git call in the guest with Landlock + seccomp: system directories read-only, /tmp and the workspace writable. Fails if the guest cannot enforce it (macOS guests cannot); a terminal and ssh are refused on such a session"},
                     "read_paths": {"type": "array", "items": {"type": "string"}, "description": "extra absolute paths a confined session may read (implies confine)"},
                     "write_paths": {"type": "array", "items": {"type": "string"}, "description": "extra absolute paths a confined session may write (implies confine)"},
+                    "budget": {"type": "object", "description": "limits on the session: max_execs, max_exec_seconds (summed wall time of commands), max_jobs, max_concurrent_jobs, max_children (fork children). Fork children start with what is left. Exceeding one refuses the call with 403", "properties": {"max_execs": {"type": "integer", "minimum": 1}, "max_exec_seconds": {"type": "integer", "minimum": 1}, "max_jobs": {"type": "integer", "minimum": 1}, "max_concurrent_jobs": {"type": "integer", "minimum": 1}, "max_children": {"type": "integer", "minimum": 1}}},
                     "confine_best_effort": {"type": "boolean", "description": "create the session even if the guest cannot enforce confinement; capabilities.confinement says whether it did (implies confine)"},
                     "ttl_seconds": {"type": "integer", "minimum": 30},
                 }),
@@ -1284,6 +1286,9 @@ pub fn tools(remote: Arc<Remote>) -> Vec<Tool> {
                     let mut body = json!({"agent": str_arg(&args, "agent").unwrap_or("custom")});
                     if let Some(g) = str_arg(&args, "repo") {
                         body["workspace"] = json!({"git": g});
+                        if args["require_ready"].as_bool().unwrap_or(false) {
+                            body["workspace"]["require_ready"] = json!(true);
+                        }
                     }
                     if let Some(i) = str_arg(&args, "image") {
                         body["runtime"] = json!({"image": i});
@@ -1315,6 +1320,9 @@ pub fn tools(remote: Arc<Remote>) -> Vec<Tool> {
                         &strs("allow_commands"),
                         &strs("deny_commands"),
                     );
+                    if args["budget"].is_object() {
+                        body["budget"] = args["budget"].clone();
+                    }
                     let best_effort = args["confine_best_effort"].as_bool().unwrap_or(false);
                     let (rp, wp) = (strs("read_paths"), strs("write_paths"));
                     crate::agent_session::add_filesystem(
@@ -1502,6 +1510,126 @@ pub fn tools(remote: Arc<Remote>) -> Vec<Tool> {
                             command,
                             timeout,
                             keep,
+                            None,
+                        )
+                        .await?,
+                    )
+                })
+                .await
+            },
+        ),
+        tool(
+            "session_evaluate",
+            "Try several candidate fixes in isolated forks and keep the best: forks one child per candidate command, runs the candidate and then the test command in it, scores each (passed only if the test exits 0), deletes the losing children and returns the winner. Then review it with session_promote dry_run and apply. Needs a forkable session (see session_fork); each child is a full sandbox, so keep candidates few.",
+            object(
+                json!({
+                    "session": {"type": "string"},
+                    "candidates": {"type": "array", "items": {"type": "string"}, "minItems": 1, "maxItems": 32, "description": "one shell command per candidate, each run in its own child"},
+                    "test": {"type": "string", "description": "shell command that decides a candidate passed (exit 0); without it, the candidate's own exit code decides"},
+                    "timeout_seconds": {"type": "integer", "minimum": 1},
+                    "keep_all": {"type": "boolean", "description": "keep losing children too (default false)"},
+                }),
+                &["session", "candidates"],
+            ),
+            true,
+            &remote,
+            |r, args| async move {
+                timed(Duration::from_secs(1800), async {
+                    let id = session_id(&args)?;
+                    let candidates: Vec<String> = args["candidates"]
+                        .as_array()
+                        .map(|a| {
+                            a.iter()
+                                .filter_map(|v| v.as_str().map(str::to_string))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    pretty(
+                        &crate::agent_session::evaluate(
+                            &r,
+                            id,
+                            &candidates,
+                            str_arg(&args, "test").filter(|t| !t.trim().is_empty()),
+                            int_arg(&args, "timeout_seconds")?,
+                            args["keep_all"].as_bool().unwrap_or(false),
+                            None,
+                        )
+                        .await?,
+                    )
+                })
+                .await
+            },
+        ),
+        tool(
+            "session_grant",
+            "Give a session a brokered credential: the egress proxy injects it as an Authorization header for the named hosts only, so the agent never sees the secret. secret_ref names a secret held by the daemon (FLUXVM_SECRET_<REF>). It ends with the session and is not inherited by fork children (grant each child explicitly).",
+            object(
+                json!({
+                    "session": {"type": "string"},
+                    "secret_ref": {"type": "string", "description": "name of the daemon-held secret"},
+                    "hosts": {"type": "array", "items": {"type": "string"}, "minItems": 1, "description": "destination hosts (exact or domain suffix)"},
+                    "ttl_seconds": {"type": "integer", "minimum": 1},
+                }),
+                &["session", "secret_ref", "hosts"],
+            ),
+            true,
+            &remote,
+            |r, args| async move {
+                timed(CALL_TIMEOUT, async {
+                    let id = session_id(&args)?;
+                    let mut body = json!({
+                        "secret_ref": str_arg(&args, "secret_ref").unwrap_or_default(),
+                        "hosts": args["hosts"],
+                    });
+                    if let Some(t) = int_arg(&args, "ttl_seconds")? {
+                        body["ttl_seconds"] = json!(t);
+                    }
+                    pretty(
+                        &r.call(
+                            Method::POST,
+                            &format!("/v1/agents/sessions/{id}/grants"),
+                            Some(body),
+                        )
+                        .await?,
+                    )
+                })
+                .await
+            },
+        ),
+        tool(
+            "session_revoke_grants",
+            "Revoke one credential grant of a session (grant id), or all of them.",
+            object(
+                json!({"session": {"type": "string"}, "grant": {"type": "string", "description": "grant id; omit to revoke all"}}),
+                &["session"],
+            ),
+            true,
+            &remote,
+            |r, args| async move {
+                timed(CALL_TIMEOUT, async {
+                    let id = session_id(&args)?;
+                    let path = match str_arg(&args, "grant") {
+                        Some(g) => format!("/v1/agents/sessions/{id}/grants/{g}"),
+                        None => format!("/v1/agents/sessions/{id}/grants"),
+                    };
+                    pretty(&r.call(Method::DELETE, &path, None).await?)
+                })
+                .await
+            },
+        ),
+        tool(
+            "session_probe",
+            "Which tools a session's guest image has (git, sha256sum, node, python, cargo, a browser, socat, playwright) and which features that enables: git, promote (needs sha256sum), build toolchains, browser_cdp. Run it before relying on the image.",
+            object(json!({"session": {"type": "string"}}), &["session"]),
+            false,
+            &remote,
+            |r, args| async move {
+                timed(CALL_TIMEOUT, async {
+                    let id = session_id(&args)?;
+                    pretty(
+                        &r.call(
+                            Method::GET,
+                            &format!("/v1/agents/sessions/{id}/probe"),
                             None,
                         )
                         .await?,

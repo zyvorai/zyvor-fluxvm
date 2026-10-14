@@ -56,6 +56,30 @@ impl VmManager {
         Ok(info)
     }
 
+    /// Re-binds the sandbox's grants to its current guest address, for after a restore. Returns
+    /// whether it has any. On a conflicting address the grants are revoked instead of left
+    /// bound to a stale one: a grant that cannot be bound safely is not kept.
+    pub async fn rebind_grants(&self, id: Uuid) -> Result<bool> {
+        let vm = self.get(id).await?;
+        let source_ip = vm.guest_ip.as_deref().and_then(|s| s.parse().ok());
+        let sandbox_id = id.to_string();
+        match grants::global().rebind(&sandbox_id, source_ip) {
+            Ok(has) => Ok(has),
+            Err(e) => {
+                grants::global().remove_sandbox(&sandbox_id);
+                crate::audit_event(
+                    "credential.revoke",
+                    &[
+                        ("sandbox_id", &sandbox_id),
+                        ("grant_id", "all"),
+                        ("reason", "address conflict after restore"),
+                    ],
+                );
+                Err(anyhow::Error::from(e))
+            }
+        }
+    }
+
     /// Live grants of a sandbox (never includes secrets).
     pub async fn list_grants(&self, id: Uuid) -> Result<Vec<GrantInfo>> {
         self.get(id).await?;

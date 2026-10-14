@@ -25,6 +25,10 @@ pub enum AgentCommand {
         /// Guest path of the workspace.
         #[arg(long)]
         workspace_path: Option<String>,
+        /// Fail the create (and remove the sandbox) unless the workspace directory exists and the
+        /// `--repo` clone succeeded; by default the session is made and `workspace.note` says why not.
+        #[arg(long)]
+        require_ready: bool,
         /// Guest image, for example `agent-micro`.
         #[arg(long)]
         image: Option<String>,
@@ -64,6 +68,21 @@ pub enum AgentCommand {
         /// `capabilities.confinement` then says whether it did).
         #[arg(long)]
         confine_best_effort: bool,
+        /// Budget: most commands (`exec`) the session may run.
+        #[arg(long)]
+        max_execs: Option<u64>,
+        /// Budget: most wall-clock seconds spent in commands, summed.
+        #[arg(long)]
+        max_exec_seconds: Option<u64>,
+        /// Budget: most background jobs started.
+        #[arg(long)]
+        max_jobs: Option<u64>,
+        /// Budget: most background jobs running at once.
+        #[arg(long)]
+        max_concurrent_jobs: Option<u64>,
+        /// Budget: most fork children created. Children start with what is left of the others.
+        #[arg(long)]
+        max_children: Option<u64>,
         #[arg(long)]
         ttl_seconds: Option<u64>,
     },
@@ -245,6 +264,31 @@ pub enum AgentCommand {
     },
     /// Delete the session and its sandbox. REST: `DELETE /v1/agents/sessions/{id}`.
     Rm { id: Uuid },
+    /// Try several candidate fixes in isolated forks, test each, rank them and keep the winner:
+    /// forks one child per `--candidate`, runs the candidate and then `--test` in it, scores every
+    /// result, deletes the losers and prints the winner. Review and apply it with
+    /// `agent promote <winner> --dry-run`. Same forkability rules as `fork`.
+    Evaluate {
+        id: Uuid,
+        /// A candidate command (repeatable, 1-32): what to try in one child.
+        #[arg(long = "candidate", required = true)]
+        candidates: Vec<String>,
+        /// Command that decides whether a candidate passes (exit 0). Without it a candidate passes
+        /// when it exits 0.
+        #[arg(long)]
+        test: Option<String>,
+        /// Per-command timeout in seconds.
+        #[arg(long)]
+        timeout_seconds: Option<u64>,
+        /// Keep the losing children too (their ids are in the output).
+        #[arg(long)]
+        keep_all: bool,
+        #[arg(long)]
+        identity: Option<String>,
+    },
+    /// Which tools the guest image has (git, sha256sum for promote, node, a browser, playwright ...)
+    /// and which session features that makes possible. REST: `GET /v1/agents/sessions/{id}/probe`.
+    Probe { id: Uuid },
     /// Mint an expiring token that works on this one session and only for the listed operations
     /// (read, exec, jobs, files.read, files.write, git, checkpoint, preview). Prints it once; use it as
     /// the bearer token for `fluxctl --token` or REST. REST: `POST /v1/agents/sessions/{id}/tokens`.
@@ -259,6 +303,27 @@ pub enum AgentCommand {
         #[arg(long)]
         label: Option<String>,
     },
+    /// Give the session a brokered credential: the egress proxy injects it as an `Authorization`
+    /// header for the named hosts, so the agent never holds the secret. It ends with the session
+    /// and is not inherited by fork children. REST: `POST /v1/agents/sessions/{id}/grants`.
+    Grant {
+        id: Uuid,
+        /// Name of the secret; without `--value` it is read from the daemon's `FLUXVM_SECRET_<REF>`.
+        #[arg(long)]
+        secret_ref: String,
+        /// Destination host (repeatable; exact or domain suffix) the secret may be sent to.
+        #[arg(long = "host", required = true)]
+        hosts: Vec<String>,
+        /// The full header value, for example `Bearer abc`. Prefer a daemon-side secret_ref.
+        #[arg(long, env = "FLUXVM_GRANT_VALUE", hide_env_values = true)]
+        value: Option<String>,
+        #[arg(long)]
+        ttl_seconds: Option<i64>,
+    },
+    /// List the session's live grants (never the secrets). REST: `GET .../grants`.
+    Grants { id: Uuid },
+    /// Revoke one grant, or every grant of the session with no id. REST: `DELETE .../grants[/{grant}]`.
+    Ungrant { id: Uuid, grant: Option<String> },
     /// List a session's live tokens (never the secrets). REST: `GET .../tokens`.
     Tokens { id: Uuid },
     /// Revoke one session token by its id. REST: `DELETE .../tokens/{token}`.
@@ -442,12 +507,202 @@ pub(crate) async fn rollout(
     }))
 }
 
+/// One candidate's outcome, as far as ranking is concerned.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Outcome {
+    pub candidate_exit: Option<i64>,
+    pub test_exit: Option<i64>,
+    pub had_test: bool,
+    pub duration_ms: u64,
+}
+
+impl Outcome {
+    /// Passed: the test exited 0 (or, with no test, the candidate did).
+    pub(crate) fn passed(&self) -> bool {
+        if self.had_test {
+            self.candidate_exit == Some(0) && self.test_exit == Some(0)
+        } else {
+            self.candidate_exit == Some(0)
+        }
+    }
+
+    /// 100 passed; 10 ran cleanly but failed its test; 0 failed or never ran.
+    pub(crate) fn score(&self) -> u32 {
+        if self.passed() {
+            100
+        } else if self.candidate_exit == Some(0) {
+            10
+        } else {
+            0
+        }
+    }
+}
+
+/// Index of the best outcome: highest score, then shortest, then lowest index. `None` when
+/// nothing passed, because a winner that fails its test must not be offered for promotion.
+pub(crate) fn pick_winner(outcomes: &[Outcome]) -> Option<usize> {
+    outcomes
+        .iter()
+        .enumerate()
+        .filter(|(_, o)| o.passed())
+        .min_by_key(|(i, o)| (std::cmp::Reverse(o.score()), o.duration_ms, *i))
+        .map(|(i, _)| i)
+}
+
+fn tail(v: &Value, n: usize) -> String {
+    let s = v.as_str().unwrap_or("");
+    let skip = s.chars().count().saturating_sub(n);
+    s.chars().skip(skip).collect()
+}
+
+/// Fork one child per candidate, run candidate then test in each, rank, keep the winner.
+/// A child that errors is a result with `error`, never an abort of the others.
+pub(crate) async fn evaluate(
+    r: &Remote,
+    id: Uuid,
+    candidates: &[String],
+    test: Option<&str>,
+    timeout_seconds: Option<u64>,
+    keep_all: bool,
+    identity: Option<&str>,
+) -> Result<Value> {
+    if candidates.is_empty() || candidates.len() > 32 {
+        anyhow::bail!("give 1-32 candidates");
+    }
+    if candidates.iter().any(|c| c.trim().is_empty()) {
+        anyhow::bail!("a candidate command is empty");
+    }
+    let mut fork_body = json!({"count": candidates.len()});
+    if let Some(i) = identity {
+        fork_body["identity"] = json!(i);
+    }
+    let forked = r
+        .call(
+            Method::POST,
+            &format!("/v1/agents/sessions/{id}/fork"),
+            Some(fork_body),
+        )
+        .await
+        .context("fork")?;
+    let kids: Vec<String> = forked["items"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|c| c["id"].as_str().map(str::to_string))
+        .collect();
+    if kids.len() != candidates.len() {
+        // Do not leave a half-made fork behind.
+        for cid in &kids {
+            let _ = r
+                .call(Method::DELETE, &format!("/v1/agents/sessions/{cid}"), None)
+                .await;
+        }
+        anyhow::bail!(
+            "asked for {} children, got {}; they were deleted",
+            candidates.len(),
+            kids.len()
+        );
+    }
+    let exec = |cid: &str, cmd: &str| {
+        let mut body = json!({"command": cmd});
+        if let Some(t) = timeout_seconds {
+            body["timeout_seconds"] = json!(t);
+        }
+        let path = format!("/v1/agents/sessions/{cid}/exec");
+        async move { r.call(Method::POST, &path, Some(body)).await }
+    };
+    let runs = kids.iter().zip(candidates).map(|(cid, cmd)| {
+        let exec = &exec;
+        async move {
+            let t0 = std::time::Instant::now();
+            let cand = match exec(cid, cmd).await {
+                Ok(v) => v,
+                Err(e) => {
+                    return (
+                        Outcome {
+                            candidate_exit: None,
+                            test_exit: None,
+                            had_test: test.is_some(),
+                            duration_ms: t0.elapsed().as_millis() as u64,
+                        },
+                        json!({"session": cid, "command": cmd, "error": format!("{e:#}")}),
+                    );
+                }
+            };
+            let cand_exit = cand["exit_code"].as_i64();
+            let mut test_exit = None;
+            let mut test_v = Value::Null;
+            // A candidate that did not exit cleanly is not worth testing.
+            if let (Some(t), Some(0)) = (test, cand_exit) {
+                match exec(cid, t).await {
+                    Ok(v) => {
+                        test_exit = v["exit_code"].as_i64();
+                        test_v = v;
+                    }
+                    Err(e) => test_v = json!({"error": format!("{e:#}")}),
+                }
+            }
+            let o = Outcome {
+                candidate_exit: cand_exit,
+                test_exit,
+                had_test: test.is_some(),
+                duration_ms: t0.elapsed().as_millis() as u64,
+            };
+            let detail = json!({
+                "session": cid,
+                "command": cmd,
+                "candidate_exit": cand_exit,
+                "test_exit": test_exit,
+                "passed": o.passed(),
+                "score": o.score(),
+                "duration_ms": o.duration_ms,
+                "stdout_tail": tail(&cand["stdout"], 2000),
+                "stderr_tail": tail(&cand["stderr"], 2000),
+                "test_stdout_tail": tail(&test_v["stdout"], 2000),
+                "test_stderr_tail": tail(&test_v["stderr"], 2000),
+            });
+            (o, detail)
+        }
+    });
+    let done = futures_util::future::join_all(runs).await;
+    let outcomes: Vec<Outcome> = done.iter().map(|(o, _)| o.clone()).collect();
+    let winner = pick_winner(&outcomes);
+    let mut results: Vec<Value> = Vec::new();
+    for (i, (_, mut d)) in done.into_iter().enumerate() {
+        d["index"] = json!(i);
+        results.push(d);
+    }
+    let mut deleted = 0;
+    for (i, cid) in kids.iter().enumerate() {
+        if keep_all || Some(i) == winner {
+            continue;
+        }
+        if r.call(Method::DELETE, &format!("/v1/agents/sessions/{cid}"), None)
+            .await
+            .is_ok()
+        {
+            deleted += 1;
+        }
+    }
+    let winner_session = winner.map(|i| kids[i].clone());
+    Ok(json!({
+        "parent": id,
+        "fork_ms": forked["total_ms"],
+        "results": results,
+        "winner": winner_session,
+        "winner_index": winner,
+        "children_deleted": deleted,
+        "next": winner_session.as_ref().map(|w| format!("fluxctl agent promote {w} --dry-run")),
+    }))
+}
+
 pub async fn run(r: &Remote, cmd: AgentCommand) -> Result<()> {
     match cmd {
         AgentCommand::Run {
             agent,
             repo,
             workspace_path,
+            require_ready,
             image,
             cpus,
             memory_mb,
@@ -460,6 +715,11 @@ pub async fn run(r: &Remote, cmd: AgentCommand) -> Result<()> {
             fs_read,
             fs_write,
             confine_best_effort,
+            max_execs,
+            max_exec_seconds,
+            max_jobs,
+            max_concurrent_jobs,
+            max_children,
             ttl_seconds,
         } => {
             let mut body = create_body(
@@ -481,6 +741,19 @@ pub async fn run(r: &Remote, cmd: AgentCommand) -> Result<()> {
                 &fs_write,
                 confine_best_effort,
             );
+            add_budget(
+                &mut body,
+                [
+                    ("max_execs", max_execs),
+                    ("max_exec_seconds", max_exec_seconds),
+                    ("max_jobs", max_jobs),
+                    ("max_concurrent_jobs", max_concurrent_jobs),
+                    ("max_children", max_children),
+                ],
+            );
+            if require_ready && body.get("workspace").is_some() {
+                body["workspace"]["require_ready"] = json!(true);
+            }
             add_volumes(&mut body, &volume)?;
             show(
                 &r.call(Method::POST, "/v1/agents/sessions", Some(body))
@@ -585,6 +858,52 @@ pub async fn run(r: &Remote, cmd: AgentCommand) -> Result<()> {
                 .await?,
             )
         }
+        AgentCommand::Grant {
+            id,
+            secret_ref,
+            hosts,
+            value,
+            ttl_seconds,
+        } => {
+            let mut body = json!({"secret_ref": secret_ref, "hosts": hosts});
+            if let Some(v) = value {
+                body["value"] = json!(v);
+            }
+            if let Some(t) = ttl_seconds {
+                body["ttl_seconds"] = json!(t);
+            }
+            show(
+                &r.call(
+                    Method::POST,
+                    &format!("/v1/agents/sessions/{id}/grants"),
+                    Some(body),
+                )
+                .await?,
+            )
+        }
+        AgentCommand::Probe { id } => show(
+            &r.call(
+                Method::GET,
+                &format!("/v1/agents/sessions/{id}/probe"),
+                None,
+            )
+            .await?,
+        ),
+        AgentCommand::Grants { id } => show(
+            &r.call(
+                Method::GET,
+                &format!("/v1/agents/sessions/{id}/grants"),
+                None,
+            )
+            .await?,
+        ),
+        AgentCommand::Ungrant { id, grant } => {
+            let path = match grant {
+                Some(g) => format!("/v1/agents/sessions/{id}/grants/{g}"),
+                None => format!("/v1/agents/sessions/{id}/grants"),
+            };
+            show(&r.call(Method::DELETE, &path, None).await?)
+        }
         AgentCommand::Tokens { id } => show(
             &r.call(
                 Method::GET,
@@ -652,6 +971,25 @@ pub async fn run(r: &Remote, cmd: AgentCommand) -> Result<()> {
                 &guest_command(&command),
                 timeout_seconds,
                 keep,
+                identity.as_deref(),
+            )
+            .await?,
+        ),
+        AgentCommand::Evaluate {
+            id,
+            candidates,
+            test,
+            timeout_seconds,
+            keep_all,
+            identity,
+        } => show(
+            &evaluate(
+                r,
+                id,
+                &candidates,
+                test.as_deref(),
+                timeout_seconds,
+                keep_all,
                 identity.as_deref(),
             )
             .await?,
@@ -1514,6 +1852,15 @@ pub(crate) fn promote_body(
     b
 }
 
+/// Attach `budget` to a create body when any limit was given.
+pub(crate) fn add_budget<const N: usize>(body: &mut Value, limits: [(&str, Option<u64>); N]) {
+    for (name, v) in limits {
+        if let Some(n) = v {
+            body["budget"][name] = json!(n);
+        }
+    }
+}
+
 /// Attach `policy.filesystem` (guest confinement) to a create body when `confine` is set.
 pub(crate) fn add_filesystem(
     body: &mut Value,
@@ -1799,6 +2146,55 @@ mod tests {
         assert_eq!(c["policy"]["filesystem"]["read"][0], "/data");
         assert_eq!(c["policy"]["filesystem"]["write"][0], "/out");
         assert_eq!(c["policy"]["filesystem"]["enforcement"], "best-effort");
+    }
+
+    #[test]
+    fn the_winner_passes_first_then_is_fastest_and_nothing_failing_is_offered() {
+        let o = |c: Option<i64>, t: Option<i64>, ms: u64| Outcome {
+            candidate_exit: c,
+            test_exit: t,
+            had_test: true,
+            duration_ms: ms,
+        };
+        // 1 and 3 pass; 3 is faster. 0 failed its test, 2 failed to run cleanly.
+        let all = [
+            o(Some(0), Some(1), 10),
+            o(Some(0), Some(0), 900),
+            o(Some(2), None, 5),
+            o(Some(0), Some(0), 400),
+        ];
+        assert_eq!(pick_winner(&all), Some(3));
+        assert_eq!(all[0].score(), 10);
+        assert_eq!(all[2].score(), 0);
+        assert_eq!(all[3].score(), 100);
+        // Ties on score and time go to the lowest index.
+        let tie = [o(Some(0), Some(0), 7), o(Some(0), Some(0), 7)];
+        assert_eq!(pick_winner(&tie), Some(0));
+        // Nothing passed: no winner, so nothing is offered for promotion.
+        assert_eq!(
+            pick_winner(&[o(Some(0), Some(1), 1), o(None, None, 1)]),
+            None
+        );
+        // No test command: exiting 0 is passing.
+        let no_test = Outcome {
+            candidate_exit: Some(0),
+            test_exit: None,
+            had_test: false,
+            duration_ms: 3,
+        };
+        assert!(no_test.passed());
+        assert_eq!(pick_winner(&[no_test]), Some(0));
+    }
+
+    #[test]
+    fn budget_flags_land_under_budget_and_only_when_given() {
+        let mut b = json!({"agent": "custom"});
+        add_budget(&mut b, [("max_execs", None), ("max_jobs", None)]);
+        assert!(b.get("budget").is_none());
+        add_budget(&mut b, [("max_execs", Some(50)), ("max_children", Some(4))]);
+        assert_eq!(b["budget"]["max_execs"], 50);
+        assert_eq!(b["budget"]["max_children"], 4);
+        assert!(b["budget"].get("max_jobs").is_none());
     }
 
     #[test]
