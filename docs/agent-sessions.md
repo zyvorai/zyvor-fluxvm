@@ -31,7 +31,7 @@ tenant's id answers `404`, not `403`).
 | `POST /v1/agents/sessions/{id}/promote` | `{dry_run?, plan_id?, skip_conflicts?, paths?}` on a fork child: apply its workspace changes to its parent. See [Promoting a fork](#promoting-a-fork). Admin only. |
 | `POST /v1/agents/sessions/{id}/checkpoint` | `{tag?, memory?}`; `memory:false` is disk-only. |
 | `POST /v1/agents/sessions/{id}/restore` | `{tag}`; only tags this session took. |
-| `GET /v1/agents/sessions/{id}/rewind` | The [rewind](#rewind-undo-the-last-action) config and its points (oldest first). `POST .../rewind/config` `{enabled?, max_points?, memory?}`, `POST .../rewind/undo` `{steps?}` or `{to: tag}` and `POST .../rewind/pin` `{tag, pinned?}` and `POST .../rewind/bisect` `{test, good?, bad?, timeout_seconds?}` change and use it; admin only. |
+| `GET /v1/agents/sessions/{id}/rewind` | The [rewind](#rewind-undo-the-last-action) config and its points (oldest first). `POST .../rewind/config` `{enabled?, max_points?, memory?, triggers?}`, `POST .../rewind/undo` `{steps?}` or `{to: tag}` and `POST .../rewind/pin` `{tag, pinned?}` and `POST .../rewind/bisect` `{test, good?, bad?, timeout_seconds?}` change and use it; admin only. |
 | `POST /v1/agents/sessions/{id}/fork` | `{count, identity?}` (1-32) into child sessions that start from the current state. `identity` is `best-effort` (default), `unique` or `preserve`. **`409` with the reason when the session cannot fork; nothing is created.** |
 | `GET /v1/agents/sessions/{id}/events` | `?since=` RFC 3339. `{ledger, vm_events}`. |
 | `GET /v1/agents/sessions/{id}/artifacts` | Workspace changes since the baseline, checkpoints, children, counters. |
@@ -705,8 +705,12 @@ curl $B/v1/agents/sessions/$ID/rewind                                   # the re
 - **Screenshots.** When the guest has a display, a point also keeps a 480 px thumbnail of it (`"screenshot": true` in the list),
   served by `GET .../rewind/{tag}/screenshot` (needs the `screen` scope). It is best effort with a 3 s limit: a guest with no
   display, a blank one or a slow one simply has none. It goes away with its point and with the session.
-- Only `exec` takes points so far; jobs, file writes and git calls do not. Branching from a past point is not available:
-  fork starts from the machine as it is now.
+- **Triggers.** `config {triggers: [...]}` chooses what takes a point: `exec` (the default), `job` (a background job start),
+  `file` (a file write, delete or a completed upload) and `git` (commit, branch). `fluxctl agent rewind <id> on --triggers
+  exec,file,git`. Every trigger costs a snapshot, so turn on only what an undo needs to cover; the point's `command` reads
+  `write /path`, `delete /path`, `upload /path`, `commit <message>` or `branch <name>` for the non-exec ones. Chunked upload
+  parts and reads never take one. An `undo` reverses them like any other point: it puts the whole machine back.
+- Branching from a past point is not available: fork starts from the machine as it is now.
 
 ## Clients
 

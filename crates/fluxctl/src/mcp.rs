@@ -1547,6 +1547,7 @@ pub fn tools(remote: Arc<Remote>) -> Vec<Tool> {
                     "tag": {"type": "string", "description": "pin and unpin: the point"},
                     "max_points": {"type": "integer", "minimum": 1, "maximum": 50},
                     "disk_only": {"type": "boolean", "description": "on: points without memory (much smaller)"},
+                    "triggers": {"type": "array", "items": {"type": "string", "enum": ["exec", "job", "file", "git"]}, "description": "on: what takes a point (default exec only; file = writes, deletes and uploads, git = commit and branch)"},
                     "test": {"type": "string", "description": "bisect: shell command, exit 0 = good"},
                     "good": {"type": "string", "description": "bisect: a point known to pass (default the oldest)"},
                     "bad": {"type": "string", "description": "bisect: a point known to fail (default the machine now)"},
@@ -1571,6 +1572,9 @@ pub fn tools(remote: Arc<Remote>) -> Vec<Tool> {
                             }
                             if args["disk_only"].as_bool() == Some(true) {
                                 b["memory"] = json!(false);
+                            }
+                            if let Some(t) = args.get("triggers").filter(|t| t.is_array()) {
+                                b["triggers"] = t.clone();
                             }
                             ("config", b)
                         }

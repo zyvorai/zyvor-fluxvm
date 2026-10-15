@@ -21,6 +21,9 @@ pub enum RewindAction {
         /// Disk-only points: far smaller, no memory state.
         #[arg(long)]
         disk_only: bool,
+        /// What takes a point, comma separated: exec (default), job, file, git.
+        #[arg(long, value_delimiter = ',')]
+        triggers: Option<Vec<String>>,
     },
     /// Stop taking points (existing ones stay).
     Off,
@@ -1213,6 +1216,7 @@ pub async fn run(r: &Remote, cmd: AgentCommand) -> Result<()> {
                 Some(RewindAction::On {
                     max_points,
                     disk_only,
+                    triggers,
                 }) => {
                     let mut body = json!({ "enabled": true });
                     if let Some(n) = max_points {
@@ -1220,6 +1224,9 @@ pub async fn run(r: &Remote, cmd: AgentCommand) -> Result<()> {
                     }
                     if disk_only {
                         body["memory"] = json!(false);
+                    }
+                    if let Some(t) = triggers {
+                        body["triggers"] = json!(t);
                     }
                     show(
                         &r.call(Method::POST, &format!("{base}/config"), Some(body))
