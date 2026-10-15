@@ -12,6 +12,34 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 
 #[derive(Subcommand)]
+pub enum RewindAction {
+    /// Take a checkpoint before every exec from now on.
+    On {
+        /// Points kept (1-50, default 10).
+        #[arg(long)]
+        max_points: Option<u32>,
+        /// Disk-only points: far smaller, no memory state.
+        #[arg(long)]
+        disk_only: bool,
+    },
+    /// Stop taking points (existing ones stay).
+    Off,
+    /// Put the machine back before the last STEPS actions, or to a point by tag.
+    Undo {
+        #[arg(long, default_value_t = 1, conflicts_with = "to")]
+        steps: u32,
+        #[arg(long)]
+        to: Option<String>,
+    },
+    /// Keep a point through eviction and undo (`--unpin` to release it).
+    Pin {
+        tag: String,
+        #[arg(long)]
+        unpin: bool,
+    },
+}
+
+#[derive(Subcommand)]
 pub enum AgentCommand {
     /// Start a session: a sandbox with a workspace and a network policy. Prints the session record.
     /// REST: `POST /v1/agents/sessions`.
@@ -142,6 +170,13 @@ pub enum AgentCommand {
     },
     /// Restore a checkpoint. REST: `POST /v1/agents/sessions/{id}/restore`.
     Restore { id: Uuid, tag: String },
+    /// Rewind: list, configure, pin and undo to the automatic checkpoints taken before each exec.
+    /// REST: `GET|POST /v1/agents/sessions/{id}/rewind[/config|/undo|/pin]`.
+    Rewind {
+        id: Uuid,
+        #[command(subcommand)]
+        action: Option<RewindAction>,
+    },
     /// Fork into COUNT child sessions (in-tree KVM, or a vz session with no NIC: policy offline or an
     /// allow-list; refused otherwise with the reason).
     /// REST: `POST /v1/agents/sessions/{id}/fork`.
@@ -1155,6 +1190,56 @@ pub async fn run(r: &Remote, cmd: AgentCommand) -> Result<()> {
                 )
                 .await?,
             )
+        }
+        AgentCommand::Rewind { id, action } => {
+            let base = format!("/v1/agents/sessions/{id}/rewind");
+            match action {
+                None => show(&r.call(Method::GET, &base, None).await?),
+                Some(RewindAction::On {
+                    max_points,
+                    disk_only,
+                }) => {
+                    let mut body = json!({ "enabled": true });
+                    if let Some(n) = max_points {
+                        body["max_points"] = json!(n);
+                    }
+                    if disk_only {
+                        body["memory"] = json!(false);
+                    }
+                    show(
+                        &r.call(Method::POST, &format!("{base}/config"), Some(body))
+                            .await?,
+                    )
+                }
+                Some(RewindAction::Off) => show(
+                    &r.call(
+                        Method::POST,
+                        &format!("{base}/config"),
+                        Some(json!({ "enabled": false })),
+                    )
+                    .await?,
+                ),
+                Some(RewindAction::Undo { steps, to }) => {
+                    let mut body = json!({});
+                    if let Some(t) = to {
+                        body["to"] = json!(t);
+                    } else {
+                        body["steps"] = json!(steps);
+                    }
+                    show(
+                        &r.call(Method::POST, &format!("{base}/undo"), Some(body))
+                            .await?,
+                    )
+                }
+                Some(RewindAction::Pin { tag, unpin }) => show(
+                    &r.call(
+                        Method::POST,
+                        &format!("{base}/pin"),
+                        Some(json!({ "tag": tag, "pinned": !unpin })),
+                    )
+                    .await?,
+                ),
+            }
         }
         AgentCommand::Restore { id, tag } => show(
             &r.call(

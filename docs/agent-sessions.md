@@ -31,7 +31,7 @@ tenant's id answers `404`, not `403`).
 | `POST /v1/agents/sessions/{id}/promote` | `{dry_run?, plan_id?, skip_conflicts?, paths?}` on a fork child: apply its workspace changes to its parent. See [Promoting a fork](#promoting-a-fork). Admin only. |
 | `POST /v1/agents/sessions/{id}/checkpoint` | `{tag?, memory?}`; `memory:false` is disk-only. |
 | `POST /v1/agents/sessions/{id}/restore` | `{tag}`; only tags this session took. |
-| `GET /v1/agents/sessions/{id}/rewind` | The [rewind](#rewind-undo-the-last-action) config and its points (oldest first). `POST .../rewind/config` `{enabled?, max_points?, memory?}` and `POST .../rewind/undo` `{steps?}` change and use it; admin only. |
+| `GET /v1/agents/sessions/{id}/rewind` | The [rewind](#rewind-undo-the-last-action) config and its points (oldest first). `POST .../rewind/config` `{enabled?, max_points?, memory?}`, `POST .../rewind/undo` `{steps?}` or `{to: tag}` and `POST .../rewind/pin` `{tag, pinned?}` change and use it; admin only. |
 | `POST /v1/agents/sessions/{id}/fork` | `{count, identity?}` (1-32) into child sessions that start from the current state. `identity` is `best-effort` (default), `unique` or `preserve`. **`409` with the reason when the session cannot fork; nothing is created.** |
 | `GET /v1/agents/sessions/{id}/events` | `?since=` RFC 3339. `{ledger, vm_events}`. |
 | `GET /v1/agents/sessions/{id}/artifacts` | Workspace changes since the baseline, checkpoints, children, counters. |
@@ -690,7 +690,13 @@ curl $B/v1/agents/sessions/$ID/rewind                                   # the re
   with memory, see Measured), so turn it on for sessions where undo matters.
 - Points are kept outside the session record: taking one does not change `revision`. Ledger kinds: `rewind.config`,
   `rewind.point`, `rewind.undo`.
-- Only `exec` takes points so far; jobs, file writes and git calls do not.
+- **Pin** (`POST .../rewind/pin {tag}`, `{tag, pinned:false}` to release): a pinned point is skipped by eviction and kept by an
+  undo that would otherwise drop it. At least one slot must stay free, so a pin that would fill the ring is `409`.
+- **`undo {to: tag}`** goes back to a named point instead of counting steps.
+- CLI: `fluxctl agent rewind <id> [on [--max-points N] [--disk-only] | off | undo [--steps N | --to TAG] | pin TAG [--unpin]]`;
+  with no subcommand it lists the points.
+- Only `exec` takes points so far; jobs, file writes and git calls do not. Branching from a past point is not available:
+  fork starts from the machine as it is now.
 
 ## Clients
 
