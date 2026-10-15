@@ -7,7 +7,7 @@ on:
 
 jobs:
   build-and-test:
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && '"ubuntu-latest"' || '["self-hosted","Linux","X64","zyvor-build"]') }}
     steps:
       # fluxvm-image depends on the sibling `guestkit` project via a
       # relative path (../../../guestkit from crates/fluxvm-image), so it
@@ -72,7 +72,7 @@ jobs:
   # guestkit's qemu-nbd + chroot — so this runs on stock GitHub-hosted
   # runners with no nested-virtualization dependency.
   image-customize:
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && '"ubuntu-latest"' || '["self-hosted","Linux","X64","zyvor-build"]') }}
     strategy:
       fail-fast: false
       matrix:
@@ -155,7 +155,7 @@ jobs:
         run: sudo -E ./scripts/test-apparmor-build-image.sh --image /tmp/base-image.qcow2
 
   container-image:
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && '"ubuntu-latest"' || '["self-hosted","Linux","X64","zyvor-build"]') }}
     permissions:
       contents: read
       packages: write
@@ -185,7 +185,7 @@ jobs:
           cache-to: type=gha,mode=max
 
   website:
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && '"ubuntu-latest"' || '["self-hosted","Linux","X64","zyvor-build"]') }}
     steps:
       - uses: actions/checkout@v7
 
