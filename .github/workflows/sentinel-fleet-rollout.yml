@@ -7,6 +7,11 @@ on:
     paths: ['tools/fluxvm_fleet_rollout.py','tools/tests/test_fluxvm_fleet_rollout.py','scripts/*fleet-rollout*','schemas/sentinel-fleet-rollout.schema.json','docs/sentinel-fleet-rollout.md']
   workflow_dispatch:
 permissions: { contents: read }
+# Collapse superseded runs of this workflow on the same ref so queued duplicates do not hold the org's runners.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   portable:
     runs-on: ubuntu-latest

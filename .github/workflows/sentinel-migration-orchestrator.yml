@@ -7,6 +7,11 @@ on:
     paths: ['tools/fluxvm_migration_orchestrator.py','tools/tests/test_fluxvm_migration_orchestrator.py','scripts/*migration-orchestrator*','docs/sentinel-migration-orchestrator.md','schemas/migration-plan.schema.json']
   workflow_dispatch:
 permissions: {contents: read}
+# Collapse superseded runs of this workflow on the same ref so queued duplicates do not hold the org's runners.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   static:
     runs-on: ubuntu-24.04

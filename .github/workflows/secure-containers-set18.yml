@@ -11,6 +11,11 @@ on:
       - 'controllers/fluxvm-networkpolicy-controller/**'
       - 'scripts/test-networkpolicy-endpointslice-set18.sh'
       - 'docs/secure-containers-set18.md'
+# Collapse superseded runs of this workflow on the same ref so queued duplicates do not hold the org's runners.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   controller:
     runs-on: ubuntu-latest
