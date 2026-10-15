@@ -702,6 +702,9 @@ curl $B/v1/agents/sessions/$ID/rewind                                   # the re
   exec policy. A `n`-point ring needs about `log2(n)+2` restores.
 - CLI: `fluxctl agent rewind <id> [on [--max-points N] [--disk-only] | off | undo [--steps N | --to TAG] | pin TAG [--unpin] | bisect TEST [--good TAG] [--bad TAG]]`;
   with no subcommand it lists the points.
+- **Screenshots.** When the guest has a display, a point also keeps a 480 px thumbnail of it (`"screenshot": true` in the list),
+  served by `GET .../rewind/{tag}/screenshot` (needs the `screen` scope). It is best effort with a 3 s limit: a guest with no
+  display, a blank one or a slow one simply has none. It goes away with its point and with the session.
 - Only `exec` takes points so far; jobs, file writes and git calls do not. Branching from a past point is not available:
   fork starts from the machine as it is now.
 
