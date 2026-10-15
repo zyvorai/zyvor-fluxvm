@@ -90,6 +90,8 @@ credentials, or touch another session.
 | `session_file_write` *write* | Write a file (up to ~1.5 MB; use `fluxctl agent upload` for larger) | `PUT {id}/files/content` |
 | `session_git` | git status, diff, log; commit and branch with `--allow-write` | `GET\|POST {id}/git/*` |
 | `session_checkpoint`, `session_restore`, `session_fork` *write* | Snapshot, roll back, fork | `POST {id}/checkpoint\|restore\|fork` |
+| `session_rewind_points` | List the automatic checkpoints taken before each exec | `GET {id}/rewind` |
+| `session_rewind` *write* | `on`/`off`, `undo` (steps or a point), `pin`/`unpin`, `bisect` (find the command that broke it) | `POST {id}/rewind/config\|undo\|pin\|bisect` |
 | `session_rollout`, `session_evaluate` *write* | Run a command in N forks; try candidates, test and rank them, keep the winner | fork + exec |
 | `session_promote` *write* | Apply a fork child's workspace changes to its parent (`dry_run`, `plan_id`) | `POST {id}/promote` |
 | `session_grant`, `session_revoke_grants` *write* | Brokered credential limited to hosts, `methods`, `paths`; revoke | `POST\|DELETE {id}/grants` |
