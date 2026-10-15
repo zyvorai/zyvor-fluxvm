@@ -72,11 +72,13 @@ B="$(api -X POST "$SU/rewind/bisect" -d '{"test":"! test -e /tmp/broken"}')"
 TAG="$(api "$SU/rewind" | jget '[p["tag"] for p in d["points"] if "touch /tmp/broken" in (p.get("command") or "")][0]')"
 [[ "$(api -X POST "$SU/rewind/pin" -d "{\"tag\":\"$TAG\"}" -o /dev/null -w '%{http_code}')" == 200 ]] \
   && ok "point $TAG pinned" || bad "pin failed"
+run 'echo v4 > /tmp/state' >/dev/null
 UNDO="$(api -X POST "$SU/rewind/undo" -d '{"steps":1}')"
-[[ "$(run 'cat /tmp/state')" == v2 ]] && ok "undo reversed the last action (state v2)" || bad "undo: state is $(run 'cat /tmp/state'): $UNDO"
+[[ "$(run 'cat /tmp/state')" == v3 ]] && ok "undo reversed the last action (v4 -> v3)" || bad "undo: state is $(run 'cat /tmp/state'): $UNDO"
 
 # 4. Undo to the pinned point: the breaking command is reversed too.
 api -X POST "$SU/rewind/undo" -d "{\"to\":\"$TAG\"}" >/dev/null
+[[ "$(run 'cat /tmp/state')" == v2 ]] && ok "undo to a tag restored its state (v2)" || bad "state after undo to a tag"
 [[ "$(run 'test -e /tmp/broken && echo yes || echo no')" == no ]] && ok "undo to a tag removed the breaking file" || bad "file still there"
 
 # 5. Branch from the earliest point; the parent is untouched.
