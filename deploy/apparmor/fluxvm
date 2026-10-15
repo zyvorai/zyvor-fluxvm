@@ -150,6 +150,12 @@ profile fluxctl /usr/local/bin/fluxctl flags=(attach_disconnected) {
   /etc/fluxvm.toml r,
   /etc/ceph/** r,
 
+  # Kairon's node image cache: base images are owned by the kairon user
+  # (mode 0600), so `owner` below never matches; FluxVM opens them as the
+  # backing file of a new Machine's disk. Read-only, with k for the
+  # shared lock QEMU takes on a backing file.
+  /var/lib/kairon-node/image-cache/** rk,
+
   # User-owned build specs, copy_in sources, and outputs outside state_dir.
   # k: a storage=shared disk can live anywhere (an NFS mount, a shared
   # block-device path), and QEMU takes its image lock on it.
@@ -340,6 +346,12 @@ profile fluxvm /usr/local/bin/fluxvm flags=(attach_disconnected) {
   /var/tmp/** rwk,
   /etc/fluxvm.toml r,
   /etc/ceph/** r,
+
+  # Kairon's node image cache: base images are owned by the kairon user
+  # (mode 0600), so `owner` below never matches; FluxVM opens them as the
+  # backing file of a new Machine's disk. Read-only, with k for the
+  # shared lock QEMU takes on a backing file.
+  /var/lib/kairon-node/image-cache/** rk,
 
   # k: QEMU's image lock on a storage=shared disk outside state_dir.
   owner /** rwk,

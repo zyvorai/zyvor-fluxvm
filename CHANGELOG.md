@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- **AppArmor: Kairon image cache and shared-disk locks.** The `fluxctl`/`fluxvm` profiles allow read+lock on
+  `/var/lib/kairon-node/image-cache/**` (files are `kairon`-owned 0600, so `owner` never matched; every image-booted
+  Machine failed `opening base image ... Permission denied`) and `k` on `owner /**` for QEMU's image lock on a
+  `storage=shared` disk. `scripts/test-apparmor-profile-rules.sh` checks both, in CI. Found on a two-node Kairon
+  cluster: the veyron daily-ops E2E went from 18 to 37 passed. Reload with `apparmor_parser -r`.
+
+- **QEMU live migration: machine type, relay, retries.** A receiver boots the source's concrete machine type
+  (label `fluxvm.dev/machine-type`, refused when the host's QEMU lacks it). The TCP relay closes both sides when
+  either ends and now fronts every QEMU source (the egress hook drops non-loopback dials). Capabilities/params are
+  restated on each attempt, a leftover TLS creds object is replaced, cancelling a completed non-post-copy migration
+  resumes the guest, and a receiver still receiving keeps its TTL. Unit-tested; not run end to end across two hosts.
+
 - **Browser terminal: search, copy mode, quick select, prompt marks, command palette.** `⌘F` search, `⌃⇧X` vi-like copy
   mode, `⌃⇧Space` quick select (URLs, paths, UUIDs, IPv4, hashes, numbers on screen), `⌘↑`/`⌘↓` between prompts,
   `⌘⇧P` palette. Prompt marks are OSC 133 from the bash rc file, emitted only for `TERM_PROGRAM=FluxVM`. Node tests
