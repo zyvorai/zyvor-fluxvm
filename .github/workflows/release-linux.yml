@@ -20,7 +20,7 @@ permissions:
 
 jobs:
   plan:
-    runs-on: ubuntu-22.04
+    runs-on: [self-hosted, Linux, X64, zyvor-build]
     outputs:
       matrix: ${{ steps.m.outputs.matrix }}
     steps:
@@ -32,10 +32,10 @@ jobs:
           import json, os
           arch = os.environ.get("ARCH", "")
           rows = [
-              {"arch": "x86_64", "runner": "ubuntu-22.04", "experimental": False, "cross": False},
+              {"arch": "x86_64", "runner": ["self-hosted", "Linux", "X64", "zyvor-build"], "experimental": False, "cross": False},
               # Cross-compiled on x86_64: this organization has no hosted arm64 Linux runners (the `ubuntu-22.04-arm`
               # job queued forever). A failure must not block the x86_64 package or the release.
-              {"arch": "aarch64", "runner": "ubuntu-22.04", "experimental": True, "cross": True},
+              {"arch": "aarch64", "runner": ["self-hosted", "Linux", "X64", "zyvor-build"], "experimental": True, "cross": True},
           ]
           rows = [r for r in rows if not arch or r["arch"] == arch]
           print("matrix=" + json.dumps({"include": rows}))

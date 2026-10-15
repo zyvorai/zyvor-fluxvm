@@ -14,7 +14,7 @@ permissions:
   contents: read
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, zyvor-build]
     steps:
     - uses: actions/checkout@v7
     - uses: actions/setup-node@v7
@@ -25,7 +25,7 @@ jobs:
       with: {path: website/build}
   deploy:
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, zyvor-build]
     environment: {name: github-pages, url: "${{ steps.deployment.outputs.page_url }}"}
     permissions: {pages: write, id-token: write}
     steps:
