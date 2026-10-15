@@ -21,6 +21,11 @@ on:
       - '.github/workflows/scx-vm-scheduler.yml'
   workflow_dispatch:
 
+# Collapse superseded runs of this workflow on the same ref so queued duplicates do not hold the org's runners.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   portable:
     runs-on: ubuntu-24.04

@@ -9,6 +9,11 @@ on:
       - "controllers/fluxvm-networkpolicy-controller/**"
       - "scripts/**"
       - "docs/**"
+# Collapse superseded runs of this workflow on the same ref so queued duplicates do not hold the org's runners.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   rust-bpf:
     runs-on: ubuntu-latest

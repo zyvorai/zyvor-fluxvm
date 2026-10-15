@@ -75,6 +75,11 @@ name: Network Fabric
       - '.github/workflows/network-fabric.yml'
   workflow_dispatch:
 
+# Collapse superseded runs of this workflow on the same ref so queued duplicates do not hold the org's runners.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build-test:
     runs-on: ubuntu-latest
