@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- **`vz` placement keeps macOS headroom.** A Mac's heartbeat advertised all of its unified memory minus allocated VMs,
+  so `fluxvm-agent central` could fill a 16 GB Mac to the last MiB and leave macOS to swap. It now advertises memory
+  after the larger of 3 GiB and a quarter, the rule Kairon's Mac node already uses (`apple_placement::allocatable_mib`).
+  Unit-tested only; not run on a second Mac.
+
 - **Docs and comments no longer call hardware-verified Apple features unverified.** `apple.usernet` (DHCP, DNS, TCP
   egress, TCP forwards, policy) and macOS-guest vsock were verified on an M4 (hardware log in `docs/macos.md`), but
   the capability table, model docs, runner header and one doc paragraph still said "unverified" or "never booted".

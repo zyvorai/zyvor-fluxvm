@@ -623,7 +623,9 @@ async fn fetch_apple_caps(
         .ok()?;
     Some(AppleHostCaps {
         free_cpu: vcpus_total.saturating_sub(local.allocated_vcpus),
-        free_memory_mib: memory_mib_total.saturating_sub(local.allocated_memory_mib),
+        // Keep macOS's own headroom out of what placement may hand to VMs (docs/macos-cluster.md).
+        free_memory_mib: fluxvm_scheduler::apple_placement::allocatable_mib(memory_mib_total)
+            .saturating_sub(local.allocated_memory_mib),
         nested_virtualization: caps.nested_virtualization,
         vmnet: caps.vmnet_custom_networks && caps.vmnet_serialization,
         custom_virtio: caps.custom_virtio_queue_backend && caps.guest_memory_mapping,

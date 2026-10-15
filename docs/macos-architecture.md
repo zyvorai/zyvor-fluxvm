@@ -503,7 +503,7 @@ Several Macs, each running `fluxctl serve`, can share bursts of sandboxes ([maco
   `kairon.zyvor.dev/chip` and `kairon.zyvor.dev/memory-gib`. Labels are fixed at agent start, so anything that changes (pressure, warm
   slots) is reported in `density`, not in labels. Kairon's Mac node reports allocatable memory as unified memory minus the larger of
   3 GiB and a quarter.
-- **Heartbeat.** `fluxvm-agent node` heartbeats every 10 s with total vCPUs and memory, VM count, labels, and the `density` report. On a Mac it also sends `apple` capabilities: it takes memory from `hw.memsize`, runs the signed runner's `host-capabilities` mode, and counts running macOS guests.
+- **Heartbeat.** `fluxvm-agent node` heartbeats every 10 s with total vCPUs and memory, VM count, labels, and the `density` report. On a Mac it also sends `apple` capabilities: it takes memory from `hw.memsize` (the `free_memory_mib` it advertises already leaves out macOS's headroom, the larger of 3 GiB and a quarter, like Kairon's Mac node), runs the signed runner's `host-capabilities` mode, and counts running macOS guests.
 - **Built-in central placement.** `POST /fleet/vms` without a `node` picks from healthy, uncordoned nodes whose labels match the
   `nodeSelector`; skips nodes at **critical** memory pressure; prefers **normal** (or none reported) over **warn**; then takes the most
   residual capacity, then fewer VMs. The daemon's own admission is the last check.
