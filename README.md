@@ -82,6 +82,8 @@ From the [CHANGELOG](CHANGELOG.md) (0.4.x, current release 0.4.6) and recent com
 | **Container sandboxes on a Mac** | `"oci": {"image": "alpine:3.22"}` on `POST /v1/sandboxes`, or `fluxctl sandbox run IMAGE -- CMD`, boots the container in its own lightweight `vz` VM: direct kernel boot, a read-only root, uid 65534, no SSH, agent-only exec. Published ports, named volumes, restart policies and health checks; container services in `fluxctl up` stacks (with write-only `secret_env` and `--fleet` placement), `fluxctl import-compose`, and a web dashboard at `/console` ([docs/oci-sandboxes.md](docs/oci-sandboxes.md)) |
 | **GPUs for sandboxes** | `gpus: N` on `POST /v1/sandboxes` passes free VFIO-bound GPUs to a QEMU-backed sandbox; supported in all three SDKs |
 | **Kairon VM edge, enforced** | Anti-spoof, learn-IP, DNS and SNI allow lists and an egress token bucket loaded into the VM's TC program |
+| **AppArmor covers Kairon's image cache** | The enforced `fluxctl`/`fluxvm` profiles read Kairon's node image cache and take QEMU's image lock on `storage=shared` disks; without it an image-booted Machine fails `opening base image ... Permission denied` ([profile notes](deploy/apparmor/README.md)) |
+| **Safer QEMU live migration** | A receiver boots the source's concrete machine type and refuses a host whose QEMU lacks it; the relay closes both sides when either ends; retries restate capabilities; cancelling a finished pre-copy migration resumes the guest ([operations](docs/operations.md), [contract](docs/runtime-boundary.md)). Unit-tested; not yet run across two hosts end to end |
 | **VM-edge packet capture** | A bounded `tcpdump` on the VM's dataplane interface with pcap download |
 | **Incident bundles** | `POST /v1/vms/{id}/diagnostics` / `fluxctl incident`: one redacted tar.gz with QMP state, cgroup and PSI, the console log, dataplane state and an optional pcap, plus an opt-in QEMU guest memory dump ([docs/diagnostics-bundle.md](docs/diagnostics-bundle.md)) |
 
@@ -239,6 +241,8 @@ Every one maps onto what is implemented today. [All eleven](docs/index.md#use-ca
 | Positioning, overview and the exhaustive feature list | [docs/POSITIONING.md](docs/POSITIONING.md) · [docs/PRODUCT_OVERVIEW.md](docs/PRODUCT_OVERVIEW.md) · [FEATURES.md](FEATURES.md) |
 | REST API, auth/RBAC and the VM JSON contract | [docs/api.md](docs/api.md) |
 | Day-2 operations | [docs/operations.md](docs/operations.md) |
+| Host hardening: the AppArmor profile and what it allows | [deploy/apparmor/README.md](deploy/apparmor/README.md) |
+| Live migration contract and receivers | [docs/runtime-boundary.md](docs/runtime-boundary.md) · [docs/operations.md](docs/operations.md) |
 | Native KVM, no QEMU | [docs/native-kvm-no-qemu.md](docs/native-kvm-no-qemu.md) |
 | Native macOS: the `vz` backend, sandboxes, container sandboxes, a Mac cloud | [docs/macos.md](docs/macos.md) · [docs/mac-cloud.md](docs/mac-cloud.md) · [docs/macos-sandboxes.md](docs/macos-sandboxes.md) · [docs/oci-sandboxes.md](docs/oci-sandboxes.md) |
 | AI-agent sessions: install, quickstart, MCP, comparison | [docs/agent-platform/](docs/agent-platform/README.md) · [docs/agent-sessions.md](docs/agent-sessions.md) · [vs microsandbox](docs/vs-microsandbox.md) |
