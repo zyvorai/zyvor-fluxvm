@@ -23,6 +23,7 @@ use tokio::sync::Mutex as AsyncMutex;
 use uuid::Uuid;
 
 pub mod apple_placement;
+pub mod apple_rebalance;
 pub mod backup;
 pub mod branch;
 pub mod cbt;
