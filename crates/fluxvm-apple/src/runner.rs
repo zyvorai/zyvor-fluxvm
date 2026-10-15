@@ -52,7 +52,7 @@ pub struct RunnerConfig {
     pub usb_controllers: u8,
     pub vmnet: Option<fluxvm_core::model::AppleVmnetSpec>,
     pub custom_virtio: bool,
-    /// macOS guests only: attach a virtio-socket device (experimental, unverified on hardware).
+    /// macOS guests only: attach a virtio-socket device (experimental; verified once on one M4 and macOS 27.0.1).
     pub macos_vsock: bool,
     /// virtiofs shares, tagged `fs0`, `fs1`, … in request order (the tags the guest-side mount uses).
     pub shares: Vec<ShareConfig>,

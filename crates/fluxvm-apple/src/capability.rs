@@ -83,7 +83,7 @@ pub const CAPABILITIES: &[Capability] = &[
     ),
     yes(
         "usernet gateway",
-        "Linux guests: userspace NAT (fluxvm-usernet) with egress/DNS policy, port forwards and flow observability in /v1/netobs; unverified on hardware",
+        "Linux guests: userspace NAT (fluxvm-usernet) with egress/DNS policy, port forwards and flow observability in /v1/netobs; verified on an M4 (DHCP, DNS, TCP egress, TCP forwards, policy); UDP forwards are unit-tested only",
     ),
     yes_min(
         "custom Virtio device",
