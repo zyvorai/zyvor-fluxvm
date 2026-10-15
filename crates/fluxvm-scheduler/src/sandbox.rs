@@ -151,6 +151,11 @@ fn valid_volume_component(s: &str) -> bool {
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '.' | '_' | '-'))
 }
 
+/// Backends that mount `shared_folders` as virtiofs, which is how a VM sandbox volume reaches the guest.
+fn backend_has_virtiofs(b: BackendKind) -> bool {
+    matches!(b, BackendKind::Qemu | BackendKind::Vz)
+}
+
 fn validate_volume(v: &SandboxVolume, container: bool) -> Result<()> {
     if !valid_volume_component(&v.name) {
         bail!(
@@ -551,9 +556,10 @@ impl VmManager {
         create: &mut CreateVmRequest,
         volumes: &[SandboxVolume],
     ) -> Result<()> {
-        if create.backend != BackendKind::Qemu {
+        if !backend_has_virtiofs(create.backend) {
             bail!(
-                "volumes need a QEMU-backed template: the in-tree FluxVm backend has no virtiofs support"
+                "volumes need a QEMU or vz (Apple) backed template: the {:?} backend has no virtiofs support",
+                create.backend
             );
         }
         let hosts = self
@@ -874,6 +880,14 @@ pub(crate) fn enforce_sandbox_tenant(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn volumes_are_for_virtiofs_backends() {
+        assert!(backend_has_virtiofs(BackendKind::Qemu));
+        assert!(backend_has_virtiofs(BackendKind::Vz));
+        assert!(!backend_has_virtiofs(BackendKind::FluxVm));
+        assert!(!backend_has_virtiofs(BackendKind::Firecracker));
+    }
 
     fn req() -> CreateVmRequest {
         CreateVmRequest {
