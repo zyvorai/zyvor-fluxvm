@@ -59,6 +59,7 @@ Eleven use cases map onto what is implemented today — nothing below is aspirat
 | Mac cloud: prices, statements, self-service sign-up and Stripe | [docs/mac-cloud-billing.md](mac-cloud-billing.md) |
 | Mac cloud: graphs, `fluxctl fleet top` and Prometheus | [docs/fleet-metrics.md](fleet-metrics.md) |
 | Mac cloud: warm pools (CI jobs start in seconds) | [docs/warm-pools.md](warm-pools.md) |
+| Mac cloud: how a Mac is chosen (memory headroom, image already there), rebalance dry run, macOS pool checkout across Macs | [docs/macos-cluster.md](macos-cluster.md#placing-a-vm-on-the-right-mac) |
 | Mac cloud: `fluxctl fleet` command reference | [docs/fluxctl-fleet.md](fluxctl-fleet.md) |
 | Mac cloud: Go, Python and TypeScript clients, OpenAPI, Terraform provider | [docs/fleet-sdk.md](fleet-sdk.md) |
 | Mac cloud on one laptop with simulated Macs | [docs/fleet-quickstart.md](fleet-quickstart.md) |

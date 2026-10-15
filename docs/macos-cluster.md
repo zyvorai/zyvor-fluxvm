@@ -56,20 +56,100 @@ The cluster design follows GK Servis's [Mac Studio LLM inference cluster](https:
 ## Placing a VM on the right Mac
 
 Macs in one cluster differ: macOS version (vmnet needs 26, custom Virtio devices 27), nested virtualization (M3 or later), which
-bridged interfaces exist, and free CPU and memory. `fluxvm_scheduler::apple_placement` is a pure scorer for this. A host is described
-by `AppleHostCaps`, a request is reduced from a `CreateVmRequest` by `ApplePlacementRequest::from_request`, and `pick` returns the
-best host:
+bridged interfaces exist, which images they already hold, and how much memory is really free. `fluxvm_scheduler::apple_placement`
+is a pure scorer for this; `fluxvm-agent central` runs it for every `POST /fleet/vms` with `backend: vz`, and a scheduler outside
+the registry, such as Kairon, can call it itself.
 
-- A host is excluded if it lacks the free vCPUs or memory, the needed feature (nested, vmnet, custom Virtio, the named bridge
-  interface), or, for a macOS guest, if it already runs two macOS guests (Apple's licence limit, `MAX_MACOS_GUESTS`).
-- Among hosts that fit, the tightest fit wins, so small agent VMs pack onto busy hosts and the big Macs stay free for big VMs.
+### What each Mac reports
 
-The fleet uses it. `fluxvm-agent node` sends the host's Apple capabilities (`fluxvm-vz-runner host-capabilities`) plus free CPU,
-memory and its macOS guest count in every heartbeat, and `fluxvm-agent central` runs `apple_placement` for requests with `backend: vz`.
-Nodes without Apple capabilities are excluded for those requests. This was checked only on loopback: one real M4 node and two fake
-nodes registered by hand (see [macos.md](macos.md#what-is-verified)); central's `vz` filtering has unit tests, but no second Mac has been used. A scheduler outside the registry, such as Kairon, can still call the scorer itself. Also note that
-sandboxes restored from warm slots keep the address they had when the slot was built, so on one Mac a slot whose address is in use is
-skipped and that sandbox cold-boots instead.
+`fluxvm-agent node` sends this in every heartbeat (every 10 s) as the node's `apple` object. Nodes without it, and nodes that
+are stale, cordoned, at critical memory pressure or whose daemon is unreachable, are never chosen for a `vz` request.
+
+| Field | Meaning |
+| --- | --- |
+| `free_cpu` | vCPUs not requested by an active VM (creating, running, paused) |
+| `free_memory_mib` | **allocatable** memory minus what active VMs request. Allocatable is unified memory minus the larger of 3 GiB and a quarter of it, so a 16 GiB Mac offers 12 GiB and macOS keeps the rest |
+| `nested_virtualization` | the Mac and macOS support it (M3 or later, macOS 15+) |
+| `vmnet`, `custom_virtio`, `secure_boot`, `rosetta` | the feature is usable here (vmnet needs the networking entitlement) |
+| `bridged_interfaces` | host interfaces a VM may bridge to |
+| `macos_guests` | macOS guests holding one of Apple's two slots |
+| `images` | built-in image names already downloaded and converted (`GET /v1/host/images`, no network access) |
+| `macos_pool_idle` | idle slots in the Mac's macOS pool; absent when the daemon would not say |
+
+### How a Mac is chosen
+
+1. **Hard filters.** A Mac is dropped if it lacks the free vCPUs or memory, the needed feature (nested, vmnet, custom Virtio,
+   Secure Boot, Rosetta, the named bridge interface), or, for a macOS guest, already runs two macOS guests (Apple's licence
+   limit, `MAX_MACOS_GUESTS`). A bonus below never admits a Mac these filters dropped.
+2. **Tightest fit.** Among the Macs that fit, the one left with the least free CPU and memory wins
+   (`-(cpu_left * 1024 + memory_left_mib / 64)`), so small agent VMs pack onto busy Macs and the big Macs stay free for big VMs.
+3. **Image already there.** When `image` is a bare name (`debian-13`) and a Mac already holds it, that Mac gets a bonus of
+   1 000 000, larger than any fit difference. A new VM then lands where the download (about 400 MB for `debian-13`) is already
+   done. A path in `image` is your own file and carries no bias.
+4. **Ties** (equal scores) go to the Mac under less memory pressure, then the one with the larger free fraction, then the one
+   with fewer VMs, then the first by name.
+
+Why headroom matters: Virtualization.framework does not enforce guest memory, so macOS memory pressure applies to everything on
+the Mac. Placing VMs up to the last MiB of unified memory leaves macOS to swap; the reserve is the same rule Kairon's Mac node
+uses, so the two schedulers agree.
+
+### Relieving an overloaded Mac (dry run)
+
+`vz` has no live migration, so placement is final once a VM runs. `GET /fleet/rebalance/plan` (operator token) answers "what
+could leave this Mac?" without changing anything:
+
+```bash
+curl -s "$CENTRAL/fleet/rebalance/plan?high_water=0.85&max_moves=5" -H "Authorization: Bearer $ADMIN_TOKEN"
+```
+
+```json
+{
+  "dry_run": true,
+  "plan": {
+    "high_water": 0.85,
+    "moves": [{"vm": "3f0c…", "from": "mini-1", "to": "studio-1", "vcpus": 2, "memory_mib": 4096}],
+    "unresolved": [],
+    "before": [{"node": "mini-1", "used_mib": 11500, "allocatable_mib": 12288, "utilisation": 0.94}],
+    "after":  [{"node": "mini-1", "used_mib": 7404, "allocatable_mib": 12288, "utilisation": 0.60}]
+  },
+  "nodes_considered": 2,
+  "vm_lists_unavailable": []
+}
+```
+
+- A Mac above `high_water` (default 0.85 of its allocatable memory) is a source. The planner picks the smallest movable VM that
+  clears the excess, else the largest one, and sends it to the **tightest** Mac that stays at or under the mark afterwards and has
+  the CPU. Cordoned or unhealthy Macs can be sources, never destinations.
+- **Movable** means the VM was created `reschedulable` (central kept its spec) or is ephemeral (a TTL or the
+  `fluxvm.dev/ephemeral` label), the same rule as `drain --mode reschedule`. macOS guests never move.
+- A Mac still above the mark when nothing more can move is listed in `unresolved`; a Mac whose VM list could not be read is
+  in `vm_lists_unavailable`.
+- Applying a move is a recreate on the target (disk state is not carried): drain with `mode=reschedule`, or delete and create.
+
+### Checking out a macOS pool slot across Macs
+
+Each Mac can hold up to two slot-bound macOS guests in its [macOS pool](macos.md) (`/v1/macos-pool`, restored from a `warm`
+snapshot on checkout, discarded on return). From central:
+
+```bash
+curl -s -X POST "$CENTRAL/fleet/macos-pool/checkout" -H "Authorization: Bearer $ADMIN_TOKEN"
+# {"node": "studio-1", "vm": {"id": "11111111-…", ...}}
+curl -s -X POST "$CENTRAL/fleet/macos-pool/studio-1/11111111-…/return" -H "Authorization: Bearer $ADMIN_TOKEN"
+```
+
+Central takes the healthy, uncordoned Mac with the most idle slots, and tries the next one if a report was stale (the Mac
+answers 409). With no idle slot anywhere the answer is 409. A slot belongs to its Mac, so keep the `node` from the reply for the
+return. Operator token only; slots are not leased to tenants.
+
+### What has been checked
+
+Unit tests cover the scorer, the headroom rule, the image bonus, the planner (7 cases) and the checkout fallback against stub
+nodes. On hardware, only one real M4 plus fake nodes registered by hand has been used: **no second Mac has run placement, the
+rebalance plan or the pool checkout**. The new-field paths (`images`, `macos_pool_idle`) were not run against a live
+daemon's heartbeat either.
+
+Also note that sandboxes restored from warm slots keep the address they had when the slot was built, so on one Mac a slot whose
+address is in use is skipped and that sandbox cold-boots instead.
 
 ## Quick start on one Mac
 
@@ -92,6 +172,10 @@ Create a VM with `"backend": "vz"` (or `"auto"`, which resolves to `vz` on a Mac
   lifecycle, forwards, shares, snapshots, `fluxctl run`, stacks and agent sandboxes; see [macos.md](macos.md)); a Kairon `vz` Machine
   scheduled to the Mac and run through FluxVM. Container sandboxes ([oci-sandboxes.md](oci-sandboxes.md)): `scripts/oci-live-test.sh` passes on the same Mac (exit codes, exec, offline
   and allow-listed network, a private network, `linux/amd64` under Rosetta, a warm-pool claim); `scripts/vz-devices-live-test.sh` passes (extra disks, USB hot-plug, console ports, display size). Published ports, volumes, health checks, stacks and `--fleet` placement are unit-tested only.
+- **Also verified (2026-10-15, same M4):** `scripts/vz-usernet-live-test.sh` (offline-injected SSH key, TCP and UDP forwards,
+  live netobs flows and DNS, the pause precondition) and `scripts/vz-sandbox-volume-live-test.sh` (named volumes on a VM
+  sandbox); the whole `vz` suite passed from `main` ([macos.md](macos.md)). **Unit-tested only, one Mac:** the image bonus, the
+  memory headroom, the rebalance plan and the fleet macOS pool checkout described above.
 - **Verified by hand only:** a macOS 27 guest installed from an IPSW, cloned and reached over SSH ([macos.md](macos.md#macos-guests)). **Implemented, not verified on hardware:** installing macOS guests through the API (`apple.install`), first-boot keys, and snapshots of macOS guests. **Verified on loopback only:** `vz` placement in `fluxvm-agent central` (one real node plus fake nodes). **Not verified:** multi-Mac clusters on real hardware, Thunderbolt RDMA, the shared vmnet broker, physical USB passthrough, any throughput figure on this page.
 - **Roadmap (not FluxVM's job, listed for the whole stack):** sharding one model across Macs (EXO or MLX distributed), a
   topology view of Thunderbolt links, per-node temperature and tok/s, and a benchmark command.
