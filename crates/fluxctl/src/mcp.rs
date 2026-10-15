@@ -1515,6 +1515,109 @@ pub fn tools(remote: Arc<Remote>) -> Vec<Tool> {
             },
         ),
         tool(
+            "session_rewind_points",
+            "List an agent session's rewind points: the automatic checkpoints taken before each exec (oldest first, each with the command that ran next, and whether it is pinned), and whether rewind is on.",
+            object(json!({"session": {"type": "string"}}), &["session"]),
+            false,
+            &remote,
+            |r, args| async move {
+                timed(Duration::from_secs(30), async {
+                    let id = session_id(&args)?;
+                    pretty(
+                        &r.call(
+                            Method::GET,
+                            &format!("/v1/agents/sessions/{id}/rewind"),
+                            None,
+                        )
+                        .await?,
+                    )
+                })
+                .await
+            },
+        ),
+        tool(
+            "session_rewind",
+            "Undo and debug an agent session with its rewind points. action: on (take a checkpoint before every exec; optional max_points 1-50, disk_only), off, undo (put the whole machine back before the last `steps` commands, default 1, or to point `to`; discards everything since, memory included), pin or unpin (tag; a pinned point is kept through eviction and undo), bisect (give `test`, a shell command that exits 0 on a good machine: it restores points, runs the test after each and returns the first command after which it fails, then puts the machine back as it was; optional good and bad point tags).",
+            object(
+                json!({
+                    "session": {"type": "string"},
+                    "action": {"type": "string", "enum": ["on", "off", "undo", "pin", "unpin", "bisect"]},
+                    "steps": {"type": "integer", "minimum": 1, "description": "undo: commands to go back (default 1)"},
+                    "to": {"type": "string", "description": "undo: a point tag instead of steps"},
+                    "tag": {"type": "string", "description": "pin and unpin: the point"},
+                    "max_points": {"type": "integer", "minimum": 1, "maximum": 50},
+                    "disk_only": {"type": "boolean", "description": "on: points without memory (much smaller)"},
+                    "test": {"type": "string", "description": "bisect: shell command, exit 0 = good"},
+                    "good": {"type": "string", "description": "bisect: a point known to pass (default the oldest)"},
+                    "bad": {"type": "string", "description": "bisect: a point known to fail (default the machine now)"},
+                    "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 600, "description": "bisect: per-run limit, default 60"},
+                }),
+                &["session", "action"],
+            ),
+            true,
+            &remote,
+            |r, args| async move {
+                timed(Duration::from_secs(900), async {
+                    let id = session_id(&args)?;
+                    let action = str_arg(&args, "action").unwrap_or_default();
+                    let (path, body) = match action {
+                        "on" => {
+                            let mut b = json!({"enabled": true});
+                            if let Some(n) = int_arg(&args, "max_points")? {
+                                if !(1..=50).contains(&n) {
+                                    bail!("max_points must be 1-50");
+                                }
+                                b["max_points"] = json!(n);
+                            }
+                            if args["disk_only"].as_bool() == Some(true) {
+                                b["memory"] = json!(false);
+                            }
+                            ("config", b)
+                        }
+                        "off" => ("config", json!({"enabled": false})),
+                        "undo" => {
+                            let b = match str_arg(&args, "to") {
+                                Some(t) => json!({"to": t}),
+                                None => json!({"steps": int_arg(&args, "steps")?.unwrap_or(1)}),
+                            };
+                            ("undo", b)
+                        }
+                        "pin" | "unpin" => {
+                            let Some(tag) = str_arg(&args, "tag") else {
+                                bail!("{action} needs tag");
+                            };
+                            ("pin", json!({"tag": tag, "pinned": action == "pin"}))
+                        }
+                        "bisect" => {
+                            let Some(test) = str_arg(&args, "test") else {
+                                bail!("bisect needs test, a shell command that exits 0 on a good machine");
+                            };
+                            let mut b = json!({"test": test});
+                            for k in ["good", "bad"] {
+                                if let Some(v) = str_arg(&args, k) {
+                                    b[k] = json!(v);
+                                }
+                            }
+                            if let Some(t) = int_arg(&args, "timeout_seconds")? {
+                                b["timeout_seconds"] = json!(t);
+                            }
+                            ("bisect", b)
+                        }
+                        other => bail!("action must be on, off, undo, pin, unpin or bisect, not {other:?}"),
+                    };
+                    pretty(
+                        &r.call(
+                            Method::POST,
+                            &format!("/v1/agents/sessions/{id}/rewind/{path}"),
+                            Some(body),
+                        )
+                        .await?,
+                    )
+                })
+                .await
+            },
+        ),
+        tool(
             "session_fork",
             "Fork an agent session into COUNT child sessions that start from its current state, to try approaches in parallel. Needs a forkable session: the in-tree KVM engine, or a vz session with no network card (policy offline or a host allow-list). Otherwise this fails with the reason and nothing is created.",
             object(
@@ -2849,6 +2952,16 @@ mod tests {
             .route(
                 "/v1/agents/sessions/{id}/artifacts",
                 get(|Path(_): Path<Uuid>| async move { Json(json!({"changes": {"added": ["/workspace/a"]}})) }),
+            )
+            .route(
+                "/v1/agents/sessions/{id}/rewind",
+                get(|Path(_): Path<Uuid>| async move { Json(json!({"enabled": true, "points": []})) }),
+            )
+            .route(
+                "/v1/agents/sessions/{id}/rewind/{action}",
+                post(|Path((_, action)): Path<(Uuid, String)>, Json(b): Json<Value>| async move {
+                    Json(json!({"action": action, "body": b}))
+                }),
             );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -2866,6 +2979,11 @@ mod tests {
             format!(r#"{{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{{"name":"sandbox_changeset_decide","arguments":{{"vm":"{vm}","changeset":"c1","action":"apply"}}}}}}"#),
             format!(r#"{{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{{"name":"sandbox_changeset_decide","arguments":{{"vm":"{vm}","changeset":"c1","action":"delete"}}}}}}"#),
             format!(r#"{{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{{"name":"session_artifacts","arguments":{{"session":"{sid}"}}}}}}"#),
+            format!(r#"{{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{{"name":"session_rewind","arguments":{{"session":"{sid}","action":"bisect","test":"curl -fs localhost/health","good":"rw-1"}}}}}}"#),
+            format!(r#"{{"jsonrpc":"2.0","id":10,"method":"tools/call","params":{{"name":"session_rewind","arguments":{{"session":"{sid}","action":"undo","steps":2}}}}}}"#),
+            format!(r#"{{"jsonrpc":"2.0","id":11,"method":"tools/call","params":{{"name":"session_rewind","arguments":{{"session":"{sid}","action":"bisect"}}}}}}"#),
+            format!(r#"{{"jsonrpc":"2.0","id":12,"method":"tools/call","params":{{"name":"session_rewind","arguments":{{"session":"{sid}","action":"pin","tag":"rw-1"}}}}}}"#),
+            format!(r#"{{"jsonrpc":"2.0","id":13,"method":"tools/call","params":{{"name":"session_rewind_points","arguments":{{"session":"{sid}"}}}}}}"#),
         ];
         let refs: Vec<&str> = calls.iter().map(String::as_str).collect();
         let got = run(s, &refs).await;
@@ -2893,6 +3011,20 @@ mod tests {
         let (t, err) = text(&got["7"]);
         assert!(err && t.contains("approve, reject or apply"), "{t}");
         assert!(text(&got["8"]).0.contains("/workspace/a"));
+        let (t, err) = text(&got["9"]);
+        assert!(
+            !err && t.contains("\"action\": \"bisect\"")
+                && t.contains("curl -fs localhost/health")
+                && t.contains("rw-1"),
+            "{t}"
+        );
+        let (t, err) = text(&got["10"]);
+        assert!(!err && t.contains("\"steps\": 2"), "{t}");
+        let (t, err) = text(&got["11"]);
+        assert!(err && t.contains("bisect needs test"), "{t}");
+        let (t, err) = text(&got["12"]);
+        assert!(!err && t.contains("\"pinned\": true"), "{t}");
+        assert!(text(&got["13"]).0.contains("\"enabled\": true"));
     }
 
     #[tokio::test]

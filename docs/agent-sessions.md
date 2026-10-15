@@ -730,7 +730,7 @@ Walkthroughs for each of these, with expected output and a troubleshooting table
 
 - **MCP** (`fluxctl mcp serve --allow-write`): `session_create`, `session_exec`, `session_approvals`, `session_approve`,
   `session_job_start`/`_read`/`_stdin`/`_kill`, `session_jobs`, `session_files`, `session_file_read`, `session_file_write`,
-  `session_git`, `session_checkpoint`, `session_restore`, `session_fork`, `session_rollout`, `session_evaluate`,
+  `session_git`, `session_checkpoint`, `session_restore`, `session_rewind_points`, `session_rewind`, `session_fork`, `session_rollout`, `session_evaluate`,
   `session_promote`, `session_grant`, `session_revoke_grants`, `session_token`, `session_preview`, `session_probe`,
   `session_events`, `session_artifacts`, `session_delete`, plus `sandbox_speculate`, `sandbox_changesets` and
   `sandbox_changeset_decide`. The full table is in [mcp.md](mcp.md#agent-session-tools).
