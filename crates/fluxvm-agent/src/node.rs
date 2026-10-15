@@ -167,6 +167,7 @@ async fn beat(http: &reqwest::Client, cfg: &NodeConfig, preferred: usize) -> Res
     };
     if let (Some(caps), true, None) = (apple.as_mut(), reachable, &cfg.sim) {
         caps.images = fetch_cached_images(http, &cfg.fluxvm_url).await;
+        caps.macos_pool_idle = fetch_macos_pool_idle(http, &cfg.fluxvm_url).await;
     }
     let allocated = reachable
         .then(|| json!({"vcpus": local.allocated_vcpus, "memory_mib": local.allocated_memory_mib}));
@@ -492,6 +493,34 @@ async fn fetch_node_security(http: &reqwest::Client, fluxvm_url: &str) -> NodeSe
 }
 
 /// Memory pressure, warm slots and sandbox counts for fleet placement; `None` when the daemon does not serve them.
+/// Idle slots in the local daemon's macOS pool (`state` label `idle`); `None` when it cannot be read (the route is
+/// admin-only, so a daemon that wants a token answers 401).
+async fn fetch_macos_pool_idle(http: &reqwest::Client, fluxvm_url: &str) -> Option<u32> {
+    let resp = http
+        .get(format!("{fluxvm_url}/v1/macos-pool"))
+        .send()
+        .await
+        .ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    let items: Vec<serde_json::Value> = resp.json().await.ok()?;
+    Some(count_idle_pool_slots(&items))
+}
+
+/// Pool slots (`GET /v1/macos-pool` items) whose `fluxvm.pool.state` label is `idle`.
+fn count_idle_pool_slots(items: &[serde_json::Value]) -> u32 {
+    items
+        .iter()
+        .filter(|vm| {
+            vm.get("labels")
+                .and_then(|l| l.get("fluxvm.pool.state"))
+                .and_then(|v| v.as_str())
+                == Some("idle")
+        })
+        .count() as u32
+}
+
 /// Built-in images the local daemon already holds; empty when it does not answer (which only removes the bias).
 async fn fetch_cached_images(http: &reqwest::Client, fluxvm_url: &str) -> Vec<String> {
     let Ok(resp) = http
@@ -637,6 +666,7 @@ fn sim_apple_caps(h: &SimHost, local: LocalVmStats) -> AppleHostCaps {
         secure_boot: true,
         rosetta: true,
         images: Vec::new(),
+        macos_pool_idle: None,
     }
 }
 
@@ -663,6 +693,7 @@ async fn fetch_apple_caps(
         secure_boot: caps.efi_secure_boot,
         rosetta: caps.rosetta == "installed",
         images: Vec::new(),
+        macos_pool_idle: None,
     })
 }
 
@@ -706,6 +737,24 @@ fn total_memory_mib() -> Option<u64> {
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 fn total_memory_mib() -> Option<u64> {
     None
+}
+
+#[cfg(test)]
+mod pool_idle_tests {
+    use super::count_idle_pool_slots;
+    use serde_json::json;
+
+    #[test]
+    fn only_idle_slots_count() {
+        let items = vec![
+            json!({"id": "a", "labels": {"fluxvm.pool": "macos", "fluxvm.pool.state": "idle"}}),
+            json!({"id": "b", "labels": {"fluxvm.pool": "macos", "fluxvm.pool.state": "leased"}}),
+            json!({"id": "c", "labels": {}}),
+            json!({"id": "d"}),
+        ];
+        assert_eq!(count_idle_pool_slots(&items), 1);
+        assert_eq!(count_idle_pool_slots(&[]), 0);
+    }
 }
 
 #[cfg(test)]

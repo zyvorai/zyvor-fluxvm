@@ -35,6 +35,10 @@ pub struct AppleHostCaps {
     /// report it, which only means no bias: the host can still fetch the image on first use.
     #[serde(default)]
     pub images: Vec<String>,
+    /// Enrolled macOS pool slots that are idle (stopped and free to check out, `/v1/macos-pool`). `None` when the agent
+    /// does not report it or the daemon would not say; `Some(0)` is a pool with every slot leased, or none enrolled.
+    #[serde(default)]
+    pub macos_pool_idle: Option<u32>,
 }
 
 /// Memory kept back for macOS itself: the larger of 3 GiB and a quarter of the Mac's unified memory. Kairon's Mac
@@ -203,6 +207,7 @@ mod tests {
             secure_boot: true,
             rosetta: false,
             images: vec![],
+            macos_pool_idle: None,
         }
     }
 
