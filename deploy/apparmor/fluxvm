@@ -150,8 +150,10 @@ profile fluxctl /usr/local/bin/fluxctl flags=(attach_disconnected) {
   /etc/fluxvm.toml r,
   /etc/ceph/** r,
 
-  # User-owned build specs, copy_in sources, and outputs outside state_dir
-  owner /** rw,
+  # User-owned build specs, copy_in sources, and outputs outside state_dir.
+  # k: a storage=shared disk can live anywhere (an NFS mount, a shared
+  # block-device path), and QEMU takes its image lock on it.
+  owner /** rwk,
 
   @{PROC}/@{pid}/cgroup r,
   @{PROC}/@{pid}/mountinfo r,
@@ -339,7 +341,8 @@ profile fluxvm /usr/local/bin/fluxvm flags=(attach_disconnected) {
   /etc/fluxvm.toml r,
   /etc/ceph/** r,
 
-  owner /** rw,
+  # k: QEMU's image lock on a storage=shared disk outside state_dir.
+  owner /** rwk,
 
   @{PROC}/@{pid}/cgroup r,
   @{PROC}/@{pid}/mountinfo r,

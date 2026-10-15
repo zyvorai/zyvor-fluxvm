@@ -209,19 +209,19 @@ pub(crate) fn start_settings(
     }
     let post_copy = request.effective_post_copy()?;
     let multifd = request.multifd_channels.unwrap_or(1) > 1;
-    let mut capabilities = Vec::new();
+    // Stated either way: QEMU keeps capabilities and parameters across
+    // attempts, so a retry would otherwise inherit an earlier attempt's
+    // stream shape and send channels the receiver never enabled.
+    let capabilities = vec![
+        json!({"capability": "multifd", "state": multifd}),
+        json!({"capability": "postcopy-ram", "state": post_copy != PostCopyMode::Disabled}),
+        json!({"capability": "auto-converge", "state": request.auto_converge.is_some()}),
+    ];
     let mut params = serde_json::Map::new();
-    if multifd {
-        capabilities.push(json!({"capability": "multifd", "state": true}));
-    }
-    if post_copy != PostCopyMode::Disabled {
-        capabilities.push(json!({"capability": "postcopy-ram", "state": true}));
-    }
     if let Some(ac) = &request.auto_converge {
         check_pct("auto_converge.initial_pct", ac.initial_pct)?;
         check_pct("auto_converge.increment_pct", ac.increment_pct)?;
         check_pct("auto_converge.max_pct", ac.max_pct)?;
-        capabilities.push(json!({"capability": "auto-converge", "state": true}));
         if let Some(p) = ac.initial_pct {
             params.insert("cpu-throttle-initial".into(), Value::from(p));
         }
@@ -245,6 +245,10 @@ pub(crate) fn start_settings(
     if let Some(channels) = request.multifd_channels.filter(|c| *c > 1) {
         params.insert("multifd-channels".into(), Value::from(channels));
     }
+    params.insert("multifd-compression".into(), Value::from("none"));
+    // set_migration_tls sets these after the parameters when TLS is asked for.
+    params.insert("tls-creds".into(), Value::from(""));
+    params.insert("tls-hostname".into(), Value::from(""));
     if let Some(c) = &request.compression {
         insert_compression(&mut params, c, multifd, true)?;
     }
@@ -438,6 +442,10 @@ pub(crate) async fn set_migration_tls(
     tls_hostname: Option<&str>,
     timeout: Duration,
 ) -> Result<()> {
+    // A failed earlier attempt leaves the creds object in the source QEMU,
+    // and object-add of the same id then fails; replacing it also picks up
+    // rotated certificates.
+    let _ = execute(socket, "object-del", Some(json!({"id": creds_id})), timeout).await;
     execute(
         socket,
         "object-add",
@@ -554,8 +562,25 @@ pub async fn migration_start(
     migration_status(socket, timeout).await
 }
 
+/// Cancels an outgoing migration. One that already completed left the guest
+/// stopped in `postmigrate`; cancelling means no destination took over, so
+/// the guest resumes here -- unless post-copy was enabled, where the
+/// destination may hold pages newer than this copy.
 pub async fn migration_cancel(socket: &Path, timeout: Duration) -> Result<MigrationStatus> {
     execute(socket, "migrate_cancel", None, timeout).await?;
+    let state = execute(socket, "query-status", None, timeout).await?;
+    if state.get("status").and_then(Value::as_str) == Some("postmigrate") {
+        let caps = execute(socket, "query-migrate-capabilities", None, timeout).await?;
+        let postcopy = caps.as_array().is_some_and(|caps| {
+            caps.iter().any(|c| {
+                c.get("capability").and_then(Value::as_str) == Some("postcopy-ram")
+                    && c.get("state").and_then(Value::as_bool) == Some(true)
+            })
+        });
+        if !postcopy {
+            execute(socket, "cont", None, timeout).await?;
+        }
+    }
     migration_status(socket, timeout).await
 }
 
@@ -1336,6 +1361,54 @@ mod tests {
         server.await.unwrap();
     }
 
+    async fn serve_one_reply(listener: &UnixListener, reply: &'static [u8]) -> String {
+        let (stream, _) = listener.accept().await.unwrap();
+        let (read_half, mut write_half) = stream.into_split();
+        let mut reader = BufReader::new(read_half);
+        write_half
+            .write_all(b"{\"QMP\":{\"version\":{}}}\n")
+            .await
+            .unwrap();
+        let mut caps = String::new();
+        reader.read_line(&mut caps).await.unwrap();
+        write_half.write_all(b"{\"return\":{}}\n").await.unwrap();
+        let mut req = String::new();
+        reader.read_line(&mut req).await.unwrap();
+        write_half.write_all(reply).await.unwrap();
+        let req: Value = serde_json::from_str(&req).unwrap();
+        req["execute"].as_str().unwrap().to_string()
+    }
+
+    #[tokio::test]
+    async fn set_migration_tls_replaces_a_leftover_creds_object() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("qmp.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        let server = tokio::spawn(async move {
+            let not_found =
+                b"{\"error\":{\"class\":\"GenericError\",\"desc\":\"object 'migtls' not found\"}}\n";
+            vec![
+                serve_one_reply(&listener, not_found).await,
+                serve_one_reply(&listener, b"{\"return\":{}}\n").await,
+                serve_one_reply(&listener, b"{\"return\":{}}\n").await,
+            ]
+        });
+        set_migration_tls(
+            &path,
+            "migtls",
+            dir.path(),
+            "client",
+            None,
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            server.await.unwrap(),
+            ["object-del", "object-add", "migrate-set-parameters"]
+        );
+    }
+
     #[tokio::test]
     async fn gives_up_once_the_overall_timeout_elapses() {
         let dir = tempfile::tempdir().unwrap();
@@ -1385,8 +1458,26 @@ mod migration_contract_tests {
 
     fn cap_names(caps: &[Value]) -> Vec<&str> {
         caps.iter()
+            .filter(|c| c["state"] == true)
             .map(|c| c["capability"].as_str().unwrap())
             .collect()
+    }
+
+    #[test]
+    fn start_settings_turn_off_an_earlier_attempts_stream() {
+        let (caps, params, _) = start_settings(&start_req(json!({}))).unwrap();
+        assert!(cap_names(&caps).is_empty());
+        let stated: Vec<_> = caps.iter().map(|c| c["capability"].clone()).collect();
+        assert_eq!(
+            stated,
+            [
+                json!("multifd"),
+                json!("postcopy-ram"),
+                json!("auto-converge")
+            ]
+        );
+        assert_eq!(params["multifd-compression"], "none");
+        assert_eq!(params["tls-creds"], "");
     }
 
     #[test]
@@ -1640,6 +1731,59 @@ mod hotplug_tests {
         assert_eq!(got.free_mib, Some(1024));
         assert_eq!(got.available_mib, Some(1536));
         assert_eq!(got.disk_caches_mib, None);
+    }
+
+    #[tokio::test]
+    async fn cancelling_a_completed_migration_resumes_the_guest() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("qmp.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        let server = tokio::spawn(serve_script(
+            listener,
+            vec![
+                ("migrate_cancel", json!({})),
+                (
+                    "query-status",
+                    json!({"status": "postmigrate", "running": false}),
+                ),
+                (
+                    "query-migrate-capabilities",
+                    json!([{"capability": "postcopy-ram", "state": false}]),
+                ),
+                ("cont", json!({})),
+                ("query-migrate", json!({"status": "completed"})),
+            ],
+        ));
+        migration_cancel(&path, Duration::from_secs(5))
+            .await
+            .unwrap();
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn cancelling_after_post_copy_leaves_the_guest_stopped() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("qmp.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        let server = tokio::spawn(serve_script(
+            listener,
+            vec![
+                ("migrate_cancel", json!({})),
+                (
+                    "query-status",
+                    json!({"status": "postmigrate", "running": false}),
+                ),
+                (
+                    "query-migrate-capabilities",
+                    json!([{"capability": "postcopy-ram", "state": true}]),
+                ),
+                ("query-migrate", json!({"status": "completed"})),
+            ],
+        ));
+        migration_cancel(&path, Duration::from_secs(5))
+            .await
+            .unwrap();
+        server.await.unwrap();
     }
 
     #[tokio::test]

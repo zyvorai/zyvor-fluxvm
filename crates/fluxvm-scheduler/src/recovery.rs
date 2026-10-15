@@ -1229,4 +1229,109 @@ mod tests {
         assert!(m.store.get(young).await.is_some());
         assert!(young_ws.exists());
     }
+
+    #[tokio::test]
+    async fn reconcile_records_a_running_qemu_machine_type() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        let td = tempfile::tempdir().unwrap();
+        let m = manager(td.path());
+        let id = Uuid::new_v4();
+        let ws = m.cfg.state_dir.join("instances").join(id.to_string());
+        fs::create_dir_all(&ws).unwrap();
+        let listener = tokio::net::UnixListener::bind(ws.join("qmp.sock")).unwrap();
+        let qmp = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (r, mut w) = stream.into_split();
+            let mut r = BufReader::new(r);
+            let mut line = String::new();
+            w.write_all(b"{\"QMP\":{\"version\":{}}}\n").await.unwrap();
+            r.read_line(&mut line).await.unwrap();
+            w.write_all(b"{\"return\":{}}\n").await.unwrap();
+            line.clear();
+            r.read_line(&mut line).await.unwrap();
+            w.write_all(b"{\"return\":\"pc-q35-noble-machine\"}\n")
+                .await
+                .unwrap();
+            line
+        });
+        let mut rec = creating_record(id, &ws, 0);
+        rec.status = VmStatus::Running;
+        rec.pid = Some(std::process::id());
+        m.store.insert_with_cid(rec, false, 3).await.unwrap();
+        m.reconcile().await.unwrap();
+        assert!(qmp.await.unwrap().contains("qom-get"));
+        let labels = m.store.get(id).await.unwrap().labels;
+        assert_eq!(
+            labels
+                .get(crate::live_migration::MACHINE_TYPE_LABEL)
+                .map(String::as_str),
+            Some("pc-q35-noble")
+        );
+    }
+
+    #[tokio::test]
+    async fn an_expired_receiver_still_receiving_gets_a_fresh_ttl() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        let td = tempfile::tempdir().unwrap();
+        let m = manager(td.path());
+        let id = Uuid::new_v4();
+        let ws = m.receiver_dir().join(id.to_string());
+        fs::create_dir_all(&ws).unwrap();
+        let listener = tokio::net::UnixListener::bind(ws.join("qmp.sock")).unwrap();
+        let qmp = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (r, mut w) = stream.into_split();
+            let mut r = BufReader::new(r);
+            let mut line = String::new();
+            w.write_all(b"{\"QMP\":{\"version\":{}}}\n").await.unwrap();
+            r.read_line(&mut line).await.unwrap();
+            w.write_all(b"{\"return\":{}}\n").await.unwrap();
+            line.clear();
+            r.read_line(&mut line).await.unwrap();
+            w.write_all(b"{\"return\":{\"status\":\"active\"}}\n")
+                .await
+                .unwrap();
+        });
+        let rec = fluxvm_core::model::MigrationReceiver {
+            id,
+            uri: "tcp:127.0.0.1:1".into(),
+            listen_uri: String::new(),
+            token: "t".into(),
+            expires_at_unix: 1,
+            pid: 0,
+            qmp_socket: ws.join("qmp.sock"),
+            workspace: ws.clone(),
+            disk: ws.join("disk.raw"),
+            cgroup_path: None,
+            vcpus: 0,
+            memory_mib: 0,
+            tls: None,
+            source_id: None,
+            capabilities: Default::default(),
+        };
+        m.write_receiver(&rec).unwrap();
+        m.reap_migration_receivers().await;
+        qmp.await.unwrap();
+        let kept = m.read_receiver(id).unwrap();
+        assert!(kept.expires_at_unix > chrono::Utc::now().timestamp() as u64);
+    }
+
+    #[tokio::test]
+    async fn adopt_receiver_placeholder_survives_reconcile() {
+        let td = tempfile::tempdir().unwrap();
+        let m = manager(td.path());
+        let id = Uuid::new_v4();
+        let ws = m.cfg.state_dir.join("instances").join(id.to_string());
+        fs::create_dir_all(&ws).unwrap();
+        // The placeholder inherits an old source `created_at`.
+        m.store
+            .insert_with_cid(creating_record(id, &ws, 3600), false, 3)
+            .await
+            .unwrap();
+        fs::create_dir_all(m.receiver_dir()).unwrap();
+        fs::write(m.receiver_dir().join(format!("{id}.json")), "{}").unwrap();
+        m.reconcile().await.unwrap();
+        assert!(m.store.get(id).await.is_some());
+        assert!(ws.exists());
+    }
 }

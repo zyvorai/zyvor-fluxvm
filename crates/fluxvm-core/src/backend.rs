@@ -88,6 +88,10 @@ pub struct LaunchContext {
     /// via `file=nbd:unix:<path>,format=raw` instead of opening `disk`
     /// directly as a local file.
     pub nbd_export: Option<PathBuf>,
+    /// QEMU only: a concrete machine type (e.g. `pc-q35-noble`) to boot
+    /// instead of the host's `q35` alias, so a migration receiver matches
+    /// the device model of a source on a different QEMU release.
+    pub machine_type: Option<String>,
 }
 
 #[derive(Debug, Clone)]
