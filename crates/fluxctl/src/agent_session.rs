@@ -49,6 +49,15 @@ pub enum RewindAction {
         #[arg(long)]
         timeout: Option<u64>,
     },
+    /// Start child sessions from a past point; this session is left untouched. Same forkability rules as `fork`.
+    Branch {
+        tag: String,
+        #[arg(long, default_value_t = 1)]
+        count: u32,
+        /// best-effort (default), unique, preserve.
+        #[arg(long)]
+        identity: Option<String>,
+    },
     /// Keep a point through eviction and undo (`--unpin` to release it).
     Pin {
         tag: String,
@@ -1271,6 +1280,20 @@ pub async fn run(r: &Remote, cmd: AgentCommand) -> Result<()> {
                     }
                     show(
                         &r.call(Method::POST, &format!("{base}/bisect"), Some(body))
+                            .await?,
+                    )
+                }
+                Some(RewindAction::Branch {
+                    tag,
+                    count,
+                    identity,
+                }) => {
+                    let mut body = json!({ "tag": tag, "count": count });
+                    if let Some(i) = identity {
+                        body["identity"] = json!(i);
+                    }
+                    show(
+                        &r.call(Method::POST, &format!("{base}/branch"), Some(body))
                             .await?,
                     )
                 }

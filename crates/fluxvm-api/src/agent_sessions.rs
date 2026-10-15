@@ -115,6 +115,10 @@ pub(crate) fn routes() -> Router<Arc<VmManager>> {
         )
         .route("/v1/agents/sessions/{id}/rewind/undo", post(rewind_undo))
         .route(
+            "/v1/agents/sessions/{id}/rewind/branch",
+            post(rewind_branch),
+        )
+        .route(
             "/v1/agents/sessions/{id}/rewind/{tag}/screenshot",
             get(rewind_screenshot),
         )
@@ -3430,6 +3434,191 @@ async fn rewind_bisect(
         "ms": started.elapsed().as_millis() as u64,
         "machine_restored": true,
     })))
+}
+
+#[derive(Debug, Deserialize)]
+struct RewindBranchBody {
+    /// The point to branch from, as `GET .../rewind` lists them.
+    tag: String,
+    /// Child sessions to start from it (1-32, default 1).
+    #[serde(default)]
+    count: Option<u32>,
+    /// `best-effort` (default), `unique` or `preserve`, as for fork.
+    #[serde(default)]
+    identity: Option<String>,
+}
+
+/// `POST /v1/agents/sessions/{id}/rewind/branch` — starts child sessions from a *past* point, leaving the session itself
+/// exactly as it is. Where `undo` goes back, `branch` explores: "what if I had not run that command?" runs in a child
+/// while the parent carries on. Same forkability rules (and children counted against the budget) as `fork`.
+async fn rewind_branch(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    actor: Option<Extension<AuditActor>>,
+    token_tenant: Option<Extension<TokenTenant>>,
+    Path(id): Path<Uuid>,
+    headers: axum::http::HeaderMap,
+    Json(body): Json<RewindBranchBody>,
+) -> ApiResult<(StatusCode, Json<Value>)> {
+    require_admin(role)?;
+    let _gate = begin_lifecycle(id, "fork")?.mark(&m, "fork");
+    let mut s = load(&m, id, &caller_tenant(&token_tenant)).await?;
+    check_if_match(&headers, &s)?;
+    running(&s)?;
+    if let Some(why) = fork_refusal(&s) {
+        return Err(gate_conflict(why));
+    }
+    let count = body.count.unwrap_or(1);
+    if count == 0 || count > 32 {
+        return Err(ApiError {
+            status: StatusCode::BAD_REQUEST,
+            message: "count must be 1-32".into(),
+        });
+    }
+    let identity = body.identity.unwrap_or_else(|| "best-effort".into());
+    if !["best-effort", "unique", "preserve"].contains(&identity.as_str()) {
+        return Err(ApiError {
+            status: StatusCode::BAD_REQUEST,
+            message: "identity must be best-effort, unique or preserve".into(),
+        });
+    }
+    let st = rewind_read(&m, id).await;
+    let point = st
+        .points
+        .iter()
+        .find(|p| p.tag == body.tag)
+        .cloned()
+        .ok_or_else(|| ApiError {
+            status: StatusCode::NOT_FOUND,
+            message: format!("session {id} has no rewind point {:?}", body.tag),
+        })?;
+    let spec: fluxvm_scheduler::fork::ForkSpec = serde_json::from_value(json!({
+        "count": count,
+        "name_prefix": format!("agent-{}-branch", &id.to_string()[..8]),
+        "identity": identity,
+    }))
+    .map_err(anyhow::Error::from)?;
+    let actor_name = actor.as_ref().map(|a| a.0.0.as_str());
+    let started = std::time::Instant::now();
+    let usage_now = usage_read(&m, id).await;
+    let child_budget = s.budget.as_ref().map(|b| b.remaining(&usage_now));
+    usage_update(&m, id, |u| {
+        if let Some(b) = &s.budget {
+            b.check_fork(u, count as u64)?;
+        }
+        u.children += count as u64;
+        Ok(())
+    })
+    .await?;
+    let refund = |m: Arc<VmManager>| async move {
+        let _ = usage_update(&m, id, |u| {
+            u.children = u.children.saturating_sub(count as u64);
+            Ok(())
+        })
+        .await;
+    };
+    // The point's snapshot becomes a short-lived branch, which the children are started from; the
+    // session's own machine is not touched at any point.
+    let branch_name = format!("rw-{}", &Uuid::new_v4().simple().to_string()[..12]);
+    let branch = match m
+        .create_branch_from_snapshot(
+            s.sandbox_id,
+            &point.tag,
+            branch_name,
+            Default::default(),
+            actor_name,
+        )
+        .await
+    {
+        Ok(b) => b,
+        Err(e) => {
+            refund(m.clone()).await;
+            return Err(e.into());
+        }
+    };
+    let started_children = m.start_branch(branch.id, spec, actor_name).await;
+    // Started VMs are independent clones: the branch has done its job either way.
+    if let Err(e) = m.delete_branch(branch.id, actor_name).await {
+        record(
+            &m,
+            id,
+            "rewind.branch_cleanup_failed",
+            json!({"branch": branch.id, "reason": format!("{e:#}")}),
+        );
+    }
+    let report = match started_children {
+        Ok(r) => r,
+        Err(e) => {
+            refund(m.clone()).await;
+            return Err(e.into());
+        }
+    };
+
+    let mut kids = Vec::new();
+    for child in &report.children {
+        let cid = Uuid::new_v4();
+        let mut cs = Session {
+            id: cid,
+            agent: s.agent.clone(),
+            sandbox_id: child.id,
+            backend: s.backend.clone(),
+            parent: Some(id),
+            children: Vec::new(),
+            tenant: s.tenant.clone(),
+            state: "running".into(),
+            created_at: Utc::now(),
+            expires_at: child.expires_at,
+            capabilities: s.capabilities.clone(),
+            policy: s.policy.clone(),
+            // The parent's files *now* are not this child's starting point, so there is no baseline
+            // to diff or promote against.
+            workspace: s.workspace.clone().map(|mut w| {
+                w.baseline = false;
+                w
+            }),
+            volumes: Vec::new(),
+            checkpoints: Vec::new(),
+            budget: child_budget.clone(),
+            revision: 0,
+        };
+        if !cs.policy.http_rules.is_empty() {
+            if let Err(e) = m.set_http_policy(child.id, &cs.policy.http_rules).await {
+                record(
+                    &m,
+                    cid,
+                    "http_policy.unbound",
+                    json!({"reason": format!("{e:#}")}),
+                );
+                cs.policy.http_unbound = true;
+            }
+        }
+        save(&m, &mut cs).await?;
+        record(
+            &m,
+            cid,
+            "session.branch_child",
+            json!({"parent": id, "from": point.tag, "undone": point.command}),
+        );
+        s.children.push(cid);
+        kids.push(cs);
+    }
+    save(&m, &mut s).await?;
+    record(
+        &m,
+        id,
+        "rewind.branch",
+        json!({"tag": point.tag, "count": count, "children": kids.iter().map(|k| k.id).collect::<Vec<_>>(),
+               "ms": started.elapsed().as_millis() as u64}),
+    );
+    Ok((
+        StatusCode::CREATED,
+        Json(json!({
+            "items": kids,
+            "from": point,
+            "identity": identity,
+            "total_ms": started.elapsed().as_millis() as u64,
+        })),
+    ))
 }
 
 #[derive(Debug, Deserialize)]

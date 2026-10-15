@@ -1537,14 +1537,15 @@ pub fn tools(remote: Arc<Remote>) -> Vec<Tool> {
         ),
         tool(
             "session_rewind",
-            "Undo and debug an agent session with its rewind points. action: on (take a checkpoint before every exec; optional max_points 1-50, disk_only), off, undo (put the whole machine back before the last `steps` commands, default 1, or to point `to`; discards everything since, memory included), pin or unpin (tag; a pinned point is kept through eviction and undo), bisect (give `test`, a shell command that exits 0 on a good machine: it restores points, runs the test after each and returns the first command after which it fails, then puts the machine back as it was; optional good and bad point tags).",
+            "Undo and debug an agent session with its rewind points. action: on (take a checkpoint before every exec; optional max_points 1-50, disk_only), off, undo (put the whole machine back before the last `steps` commands, default 1, or to point `to`; discards everything since, memory included), pin or unpin (tag; a pinned point is kept through eviction and undo), branch (tag, optional count: start that many child sessions from that past point while this session carries on untouched; the session must be forkable like session_fork), bisect (give `test`, a shell command that exits 0 on a good machine: it restores points, runs the test after each and returns the first command after which it fails, then puts the machine back as it was; optional good and bad point tags).",
             object(
                 json!({
                     "session": {"type": "string"},
-                    "action": {"type": "string", "enum": ["on", "off", "undo", "pin", "unpin", "bisect"]},
+                    "action": {"type": "string", "enum": ["on", "off", "undo", "pin", "unpin", "bisect", "branch"]},
                     "steps": {"type": "integer", "minimum": 1, "description": "undo: commands to go back (default 1)"},
                     "to": {"type": "string", "description": "undo: a point tag instead of steps"},
-                    "tag": {"type": "string", "description": "pin and unpin: the point"},
+                    "tag": {"type": "string", "description": "pin, unpin and branch: the point"},
+                    "count": {"type": "integer", "minimum": 1, "maximum": 32, "description": "branch: child sessions to start (default 1)"},
                     "max_points": {"type": "integer", "minimum": 1, "maximum": 50},
                     "disk_only": {"type": "boolean", "description": "on: points without memory (much smaller)"},
                     "triggers": {"type": "array", "items": {"type": "string", "enum": ["exec", "job", "file", "git"]}, "description": "on: what takes a point (default exec only; file = writes, deletes and uploads, git = commit and branch)"},
@@ -1592,6 +1593,16 @@ pub fn tools(remote: Arc<Remote>) -> Vec<Tool> {
                             };
                             ("pin", json!({"tag": tag, "pinned": action == "pin"}))
                         }
+                        "branch" => {
+                            let Some(tag) = str_arg(&args, "tag") else {
+                                bail!("branch needs tag, a point from session_rewind_points");
+                            };
+                            let count = int_arg(&args, "count")?.unwrap_or(1);
+                            if !(1..=32).contains(&count) {
+                                bail!("count must be 1-32");
+                            }
+                            ("branch", json!({"tag": tag, "count": count}))
+                        }
                         "bisect" => {
                             let Some(test) = str_arg(&args, "test") else {
                                 bail!("bisect needs test, a shell command that exits 0 on a good machine");
@@ -1607,7 +1618,7 @@ pub fn tools(remote: Arc<Remote>) -> Vec<Tool> {
                             }
                             ("bisect", b)
                         }
-                        other => bail!("action must be on, off, undo, pin, unpin or bisect, not {other:?}"),
+                        other => bail!("action must be on, off, undo, pin, unpin, branch or bisect, not {other:?}"),
                     };
                     pretty(
                         &r.call(
