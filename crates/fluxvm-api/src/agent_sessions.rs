@@ -2471,7 +2471,7 @@ enum AskGate {
     /// An approval was consumed for this request.
     Approved,
     /// Nobody has approved it yet.
-    Required(approvals::Approval),
+    Required(Box<approvals::Approval>),
 }
 
 /// The `428` answer for a request that needs an approval. It is not a 2xx, so the idempotency
@@ -2618,7 +2618,7 @@ async fn approval_list(
     load(&m, id, &caller_tenant(&token_tenant)).await?;
     let now = Utc::now();
     let mut all = approvals::list(&m.cfg.state_dir, id).await;
-    all.sort_by(|a, b| b.requested_at.cmp(&a.requested_at));
+    all.sort_by_key(|a| std::cmp::Reverse(a.requested_at));
     let items: Vec<Value> = all
         .iter()
         .map(|a| {
@@ -2636,6 +2636,8 @@ struct DecideBody {
     note: Option<String>,
 }
 
+// One argument per piece of request context the handler is given; a struct would only rename them.
+#[allow(clippy::too_many_arguments)]
 async fn decide_approval(
     m: Arc<VmManager>,
     role: Role,
@@ -3581,16 +3583,16 @@ async fn rewind_branch(
             budget: child_budget.clone(),
             revision: 0,
         };
-        if !cs.policy.http_rules.is_empty() {
-            if let Err(e) = m.set_http_policy(child.id, &cs.policy.http_rules).await {
-                record(
-                    &m,
-                    cid,
-                    "http_policy.unbound",
-                    json!({"reason": format!("{e:#}")}),
-                );
-                cs.policy.http_unbound = true;
-            }
+        if !cs.policy.http_rules.is_empty()
+            && let Err(e) = m.set_http_policy(child.id, &cs.policy.http_rules).await
+        {
+            record(
+                &m,
+                cid,
+                "http_policy.unbound",
+                json!({"reason": format!("{e:#}")}),
+            );
+            cs.policy.http_unbound = true;
         }
         save(&m, &mut cs).await?;
         record(
@@ -3744,7 +3746,7 @@ async fn rewind_undo(
 async fn restore_session_to(m: &Arc<VmManager>, s: &Session, tag: &str) -> ApiResult<Value> {
     let id = s.id;
     let vm = m
-        .restore_vm_snapshot(s.sandbox_id, &tag)
+        .restore_vm_snapshot(s.sandbox_id, tag)
         .await
         .map_err(change_error)?;
     record(m, id, "restore", json!({"tag": tag}));
@@ -7252,7 +7254,7 @@ async fn upload_complete(
     let out = json!(res);
     match out["exit_code"].as_i64() {
         Some(0) => {}
-        Some(code @ (3 | 4 | 5 | 6)) => {
+        Some(code @ (3..=6)) => {
             let why = match code {
                 3 => "the assembled size does not match the declared size",
                 4 => "the checksum does not match",

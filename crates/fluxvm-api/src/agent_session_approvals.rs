@@ -123,7 +123,7 @@ pub(crate) enum Decision {
     /// An approved record was consumed: run the action.
     Run(Uuid),
     /// Nobody has decided yet: answer `428` with this record.
-    Pending(Approval),
+    Pending(Box<Approval>),
     Refuse(StatusCode, String),
 }
 
@@ -167,7 +167,7 @@ pub(crate) fn decide_request(
             State::Pending if now > a.expires_at => {
                 refuse(StatusCode::FORBIDDEN, "the approval request expired")
             }
-            State::Pending => Decision::Pending(a.clone()),
+            State::Pending => Decision::Pending(Box::new(a.clone())),
             State::Denied => refuse(StatusCode::FORBIDDEN, "the approval was denied"),
             State::Consumed => refuse(StatusCode::FORBIDDEN, "the approval was already used"),
             State::Approved if now > a.expires_at => refuse(
@@ -195,7 +195,7 @@ pub(crate) fn decide_request(
         .iter()
         .find(|a| a.digest == digest && a.state == State::Pending && now <= a.expires_at)
     {
-        return Decision::Pending(a.clone());
+        return Decision::Pending(Box::new(a.clone()));
     }
     let pending = all
         .iter()
@@ -224,7 +224,7 @@ pub(crate) fn decide_request(
         consumed_at: None,
     };
     all.push(a.clone());
-    Decision::Pending(a)
+    Decision::Pending(Box::new(a))
 }
 
 /// Approves or denies a pending record.
@@ -329,7 +329,7 @@ mod tests {
 
     fn pending(d: Decision) -> Approval {
         match d {
-            Decision::Pending(a) => a,
+            Decision::Pending(a) => *a,
             other => panic!("expected pending, got {other:?}"),
         }
     }

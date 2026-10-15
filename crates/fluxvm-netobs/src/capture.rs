@@ -39,10 +39,11 @@ impl CaptureFilter {
 
     pub fn matches(&self, p: &Packet<'_>) -> bool {
         let Net::Ip(ip) = &p.net else { return false };
-        if let Some(h) = self.host {
-            if ip.src != h && ip.dst != h {
-                return false;
-            }
+        if let Some(h) = self.host
+            && ip.src != h
+            && ip.dst != h
+        {
+            return false;
         }
         if let Some(port) = self.port {
             let (s, d) = p.ports();
@@ -310,6 +311,9 @@ pub fn write_pcap<W: Write>(w: &mut W, snaplen: u32, frames: &[CapturedFrame]) -
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// (ts_sec, ts_usec, orig_len, bytes)
+    type PcapRecord = (u32, u32, u32, Vec<u8>);
     use crate::packet::{self, TCP_ACK, build};
     use std::net::Ipv4Addr;
 
@@ -318,7 +322,7 @@ mod tests {
     const C: Ipv4Addr = Ipv4Addr::new(10, 0, 0, 3);
 
     /// A minimal in-test pcap reader: independent of the writer's code path.
-    fn read_pcap(b: &[u8]) -> (u32, u32, Vec<(u32, u32, u32, Vec<u8>)>) {
+    fn read_pcap(b: &[u8]) -> (u32, u32, Vec<PcapRecord>) {
         assert_eq!(&b[0..4], &[0xd4, 0xc3, 0xb2, 0xa1], "little-endian magic");
         let u32at = |o: usize| u32::from_le_bytes(b[o..o + 4].try_into().unwrap());
         assert_eq!(u16::from_le_bytes([b[4], b[5]]), 2);

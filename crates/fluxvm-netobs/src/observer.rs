@@ -25,7 +25,7 @@ use crate::flow::{
     Orientation, Verdict, orient_tcp, parse_proto, proto_name,
 };
 use crate::h2::H2Message;
-use crate::health::{CloseReason, Dir, Health, HealthDelta, IcmpHealth, TcpHealth};
+use crate::health::{CloseReason, Dir, Health, HealthDelta, IcmpHealth};
 use crate::l7::{self, ClientHello, Http, Redaction, ServerHello};
 use crate::packet::{
     self, IPPROTO_ICMP, IPPROTO_ICMPV6, IPPROTO_TCP, L4, Mac, Net, Packet, TCP_ACK, TCP_SYN, Tcp,
@@ -140,23 +140,24 @@ pub struct FlowQuery {
 
 impl FlowQuery {
     fn matches(&self, v: &FlowView) -> bool {
-        if let Some(a) = &self.allowed_vms {
-            if !a.contains(&v.vm_id) {
-                return false;
-            }
+        if let Some(a) = &self.allowed_vms
+            && !a.contains(&v.vm_id)
+        {
+            return false;
         }
         if self.vm.as_ref().is_some_and(|vm| *vm != v.vm_id) {
             return false;
         }
-        if let Some(p) = &self.proto {
-            if proto_name(parse_proto(p).unwrap_or(255)) != v.proto {
-                return false;
-            }
+        if let Some(p) = &self.proto
+            && proto_name(parse_proto(p).unwrap_or(255)) != v.proto
+        {
+            return false;
         }
-        if let Some(port) = self.port {
-            if v.client.port != port && v.server.port != port {
-                return false;
-            }
+        if let Some(port) = self.port
+            && v.client.port != port
+            && v.server.port != port
+        {
+            return false;
         }
         if let Some(h) = self.host {
             let h = h.to_string();
@@ -381,13 +382,14 @@ impl Inner {
         let key = FlowKey::new(&meta.identity, ip.proto, src, dst);
 
         // A fresh SYN on a flow that already closed starts a new flow instead of extending the old one.
-        if let (Some(f), L4::Tcp(t)) = (self.flows.get(&key), &pkt.l4) {
-            if f.closed.is_some() && t.has(TCP_SYN) && !t.has(TCP_ACK) {
-                if let Some(old) = self.flows.remove(&key) {
-                    let reason = old.closed.unwrap_or(CloseReason::Fin);
-                    self.finish(now, old, reason);
-                }
-            }
+        if let (Some(f), L4::Tcp(t)) = (self.flows.get(&key), &pkt.l4)
+            && f.closed.is_some()
+            && t.has(TCP_SYN)
+            && !t.has(TCP_ACK)
+            && let Some(old) = self.flows.remove(&key)
+        {
+            let reason = old.closed.unwrap_or(CloseReason::Fin);
+            self.finish(now, old, reason);
         }
 
         let mut evicted = Vec::new();
@@ -424,7 +426,7 @@ impl Inner {
                 verdict: Verdict::Allowed,
                 dropped_packets: 0,
                 health: match proto {
-                    IPPROTO_TCP => Health::Tcp(Box::new(TcpHealth::new())),
+                    IPPROTO_TCP => Health::Tcp(Box::default()),
                     IPPROTO_ICMP | IPPROTO_ICMPV6 => Health::Icmp(IcmpHealth::default()),
                     _ => Health::None,
                 },
@@ -505,11 +507,11 @@ impl Inner {
         } else if let Some(r) = delta.handshake_rtt_us {
             samples.push(Sample::Rtt(r));
         }
-        if let Some(reason) = delta.closed {
-            if flow.closed.is_none() {
-                flow.closed = Some(reason);
-                flow.closed_at_us = now;
-            }
+        if let Some(reason) = delta.closed
+            && flow.closed.is_none()
+        {
+            flow.closed = Some(reason);
+            flow.closed_at_us = now;
         }
 
         // L7 metadata.
@@ -621,11 +623,12 @@ fn apply_client_hello(
     }
     let red = ctx.red;
     flow.l7.app = Some(if transport == 'q' { "quic" } else { "tls" });
-    if let Some(raw) = &h.sni {
-        if flow.l7.encrypted_dns.is_none() && l7::sni_is_doh(raw, ctx.doh_hosts) {
-            flow.l7.encrypted_dns = Some("doh");
-            ctx.counters.encrypted_dns_flows += 1;
-        }
+    if let Some(raw) = &h.sni
+        && flow.l7.encrypted_dns.is_none()
+        && l7::sni_is_doh(raw, ctx.doh_hosts)
+    {
+        flow.l7.encrypted_dns = Some("doh");
+        ctx.counters.encrypted_dns_flows += 1;
     }
     flow.l7.sni = h.sni.as_deref().and_then(|s| red.apply(red.tls_sni, s));
     if red.fingerprints {
@@ -1303,10 +1306,10 @@ impl Observer {
                 red,
             })
             .collect();
-        rows.sort_by(|a, b| b.red.bytes.cmp(&a.red.bytes));
+        rows.sort_by_key(|r| std::cmp::Reverse(r.red.bytes));
         let top_talkers: Vec<RedRow> = rows.iter().take(10).cloned().collect();
         rows.retain(|r| r.red.error_events() > 0);
-        rows.sort_by(|a, b| b.red.error_events().cmp(&a.red.error_events()));
+        rows.sort_by_key(|r| std::cmp::Reverse(r.red.error_events()));
         rows.truncate(10);
         let capture = g.capture.status(now_us);
         Summary {
@@ -1341,7 +1344,7 @@ impl Observer {
                     .filter(|v| q.matches(v)),
             );
         }
-        out.sort_by(|a, b| b.last_seen_us.cmp(&a.last_seen_us));
+        out.sort_by_key(|r| std::cmp::Reverse(r.last_seen_us));
         out.truncate(limit);
         out
     }
@@ -1426,7 +1429,7 @@ impl Observer {
                     red: r.clone(),
                 })
                 .collect();
-            rows.sort_by(|a, b| b.red.bytes.cmp(&a.red.bytes));
+            rows.sort_by_key(|r| std::cmp::Reverse(r.red.bytes));
             rows
         };
         g.rollup

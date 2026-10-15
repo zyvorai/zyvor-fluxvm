@@ -841,10 +841,10 @@ impl StateStore {
     }
 
     pub fn save(&self, state: &MeshState) -> Result<()> {
-        if let Some(parent) = self.path.parent() {
-            if !parent.as_os_str().is_empty() {
-                fs::create_dir_all(parent)?;
-            }
+        if let Some(parent) = self.path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            fs::create_dir_all(parent)?;
         }
         let mut body = String::new();
         body.push_str(&format!("VERSION\t{}\n", state.version));
@@ -1048,12 +1048,12 @@ fn hex_encode(value: &str) -> String {
 }
 
 fn hex_decode(value: &str) -> Result<String> {
-    if value.len() % 2 != 0 {
+    if !value.len().is_multiple_of(2) {
         return Err(MeshError::InvalidState("odd-length hex field".into()));
     }
     let bytes = value.as_bytes();
     let mut out = Vec::with_capacity(bytes.len() / 2);
-    for chunk in bytes.chunks_exact(2) {
+    for chunk in bytes.as_chunks::<2>().0 {
         let hi = hex_nibble(chunk[0])?;
         let lo = hex_nibble(chunk[1])?;
         out.push((hi << 4) | lo);

@@ -151,9 +151,10 @@ mod tests {
     use super::*;
 
     fn cfg(dir: &Path) -> Config {
-        let mut c = Config::default();
-        c.state_dir = dir.to_path_buf();
-        c
+        Config {
+            state_dir: dir.to_path_buf(),
+            ..Config::default()
+        }
     }
 
     #[test]

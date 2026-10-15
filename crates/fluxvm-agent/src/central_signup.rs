@@ -1802,9 +1802,12 @@ mod tests {
         setup_with(None).await
     }
 
+    /// (body, signature header) per mail received.
+    type MailLog = Vec<(Value, Option<String>)>;
+
     /// Where the tests' sign-up mail goes: every JSON body POSTed to it, in order.
-    async fn mail_sink() -> (String, Arc<std::sync::Mutex<Vec<(Value, Option<String>)>>>) {
-        let got: Arc<std::sync::Mutex<Vec<(Value, Option<String>)>>> = Arc::default();
+    async fn mail_sink() -> (String, Arc<std::sync::Mutex<MailLog>>) {
+        let got: Arc<std::sync::Mutex<MailLog>> = Arc::default();
         let g = got.clone();
         let app = Router::new().route(
             "/",

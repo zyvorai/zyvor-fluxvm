@@ -232,7 +232,8 @@ pub(super) async fn show(
     };
     let vcpus = v["vcpus"].as_f64().unwrap_or(0.0);
     let size = v["memory_mib"].as_f64().unwrap_or(0.0);
-    let rows: [(&str, &str, f64, fn(Option<f64>) -> String); 6] = [
+    type Row = (&'static str, &'static str, f64, fn(Option<f64>) -> String);
+    let rows: [Row; 6] = [
         ("CPU", "cpu_percent", 100.0, pct),
         ("Memory", "memory_used_mib", size, mib),
         ("Disk read", "disk_read_bps", 1e6, rate),

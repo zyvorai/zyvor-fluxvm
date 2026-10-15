@@ -66,6 +66,8 @@ pub enum RewindAction {
     },
 }
 
+// A clap subcommand enum: one variant per subcommand, built once at start-up.
+#[allow(clippy::large_enum_variant)]
 #[derive(Subcommand)]
 pub enum AgentCommand {
     /// Start a session: a sandbox with a workspace and a network policy. Prints the session record.
@@ -2562,7 +2564,7 @@ mod tests {
             "{m}"
         );
         // the limit leaves room for base64 (x4/3) and the JSON around it inside 2 MiB
-        assert!(MAX_FILE_WRITE_BYTES * 4 / 3 + 1024 < 2 * 1024 * 1024);
+        const { assert!(MAX_FILE_WRITE_BYTES * 4 / 3 + 1024 < 2 * 1024 * 1024) };
     }
 
     #[test]

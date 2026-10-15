@@ -257,17 +257,15 @@ fn handle_connection(
         return Ok(());
     }
 
-    if auth != Auth::NoToken {
-        if auth != Auth::Authorized {
-            writer.write_all(
-                encode_line(&AgentResponse::Error {
-                    message: "unauthorized: missing or incorrect token".into(),
-                })?
-                .as_bytes(),
-            )?;
-            writer.flush()?;
-            return Ok(());
-        }
+    if auth != Auth::NoToken && auth != Auth::Authorized {
+        writer.write_all(
+            encode_line(&AgentResponse::Error {
+                message: "unauthorized: missing or incorrect token".into(),
+            })?
+            .as_bytes(),
+        )?;
+        writer.flush()?;
+        return Ok(());
     }
 
     let response = match envelope.request {

@@ -184,20 +184,20 @@ pub(super) async fn notice(
     match seg {
         ["fleet", "vms", node, id, "snapshots"] => Some((
             "vm.snapshot",
-            format!("{}: snapshot{target} taken", name_of(*node, *id).await),
+            format!("{}: snapshot{target} taken", name_of(node, id).await),
             Some(format!("#/vms/{node}/{id}")),
         )),
         ["fleet", "vms", node, id, "snapshots", snap, "restore"] => Some((
             "vm.restored",
             format!(
                 "{} was restored to snapshot {snap}",
-                name_of(*node, *id).await
+                name_of(node, id).await
             ),
             Some(format!("#/vms/{node}/{id}")),
         )),
         ["fleet", "vms", node, id, "clone"] => Some((
             "vm.cloned",
-            format!("VM{target} cloned from {}", name_of(*node, *id).await),
+            format!("VM{target} cloned from {}", name_of(node, id).await),
             Some("#/vms".to_owned()),
         )),
         _ => None,

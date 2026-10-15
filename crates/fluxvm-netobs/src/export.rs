@@ -560,7 +560,8 @@ pub fn render_prometheus(s: &Summary) -> String {
             esc(reason)
         );
     }
-    let series: &[(&str, &str, fn(&Red) -> u64)] = &[
+    type Series = (&'static str, &'static str, fn(&Red) -> u64);
+    let series: &[Series] = &[
         ("packets_total", "Packets per VM.", |r| r.packets),
         ("bytes_total", "Frame bytes per VM.", |r| r.bytes),
         ("flows_total", "Flows opened per VM.", |r| r.flows),

@@ -795,6 +795,8 @@ impl VmManager {
         Ok((vm, report))
     }
 
+    // The fork pipeline threads one value per phase; grouping them would hide the order they apply in.
+    #[allow(clippy::too_many_arguments)]
     async fn fork_children(
         self: &Arc<Self>,
         src: &VmRecord,
@@ -831,6 +833,7 @@ impl VmManager {
         Ok(children)
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn fork_child(
         self: &Arc<Self>,
         src: &VmRecord,
@@ -1017,7 +1020,7 @@ impl VmManager {
         let entropy_b64 = base64::engine::general_purpose::STANDARD.encode(&entropy);
         let new_token = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
 
-        let mut last_problem = String::new();
+        let last_problem: String;
         if vm.request.agent.as_ref().is_some_and(|a| a.enabled) {
             let request = AgentRequest::ResetIdentity {
                 hostname: Some(hostname.to_string()),
@@ -1232,7 +1235,7 @@ impl VmManager {
             )),
         };
         if let Some(cmd) = probe {
-            let mut last = String::from("no attempt");
+            let mut last: String;
             loop {
                 match self.exec(vm.id, cmd.clone(), Some(5)).await {
                     Ok(AgentResponse::Exec { exit_code: 0, .. }) => break,

@@ -204,12 +204,14 @@ pub fn load_credentials(text: &str) -> Result<BTreeMap<String, String>> {
     Ok(out)
 }
 
+/// Registered peers: name -> (session id, the stream to write frames to).
+type Sessions = Arc<Mutex<BTreeMap<String, (u64, Arc<Mutex<TcpStream>>)>>>;
+
 /// Small blocking TCP relay. Run it on loopback behind a TLS stream proxy for
 /// the :443 mode. Registration is authenticated with per-node opaque tokens.
 pub fn serve_tcp(addr: SocketAddr, credentials: BTreeMap<String, String>) -> io::Result<()> {
     let listener = TcpListener::bind(addr)?;
-    let sessions: Arc<Mutex<BTreeMap<String, (u64, Arc<Mutex<TcpStream>>)>>> =
-        Arc::new(Mutex::new(BTreeMap::new()));
+    let sessions: Sessions = Arc::new(Mutex::new(BTreeMap::new()));
     let next_session = Arc::new(AtomicU64::new(1));
     let credentials = Arc::new(credentials);
     for accepted in listener.incoming() {
@@ -227,7 +229,7 @@ pub fn serve_tcp(addr: SocketAddr, credentials: BTreeMap<String, String>) -> io:
 fn handle_client(
     mut stream: TcpStream,
     credentials: Arc<BTreeMap<String, String>>,
-    sessions: Arc<Mutex<BTreeMap<String, (u64, Arc<Mutex<TcpStream>>)>>>,
+    sessions: Sessions,
     next_session: Arc<AtomicU64>,
 ) -> io::Result<()> {
     stream.set_nodelay(true)?;
@@ -302,10 +304,10 @@ fn handle_client(
         }
     }
 
-    if let Ok(mut guard) = sessions.lock() {
-        if guard.get(node).is_some_and(|(id, _)| *id == session_id) {
-            guard.remove(node);
-        }
+    if let Ok(mut guard) = sessions.lock()
+        && guard.get(node).is_some_and(|(id, _)| *id == session_id)
+    {
+        guard.remove(node);
     }
     Ok(())
 }
@@ -427,11 +429,7 @@ pub fn run_tcp_client(
         let writer = Arc::clone(&writer);
         thread::spawn(move || {
             let mut buf = vec![0u8; MAX_RELAY_PAYLOAD];
-            loop {
-                let (n, _) = match socket.recv_from(&mut buf) {
-                    Ok(v) => v,
-                    Err(_) => break,
-                };
+            while let Ok((n, _)) = socket.recv_from(&mut buf) {
                 let frame = RelayFrame {
                     peer: peer.clone(),
                     payload: buf[..n].to_vec(),

@@ -314,7 +314,7 @@ impl InvoiceRecord {
         if let Some(s) = inv
             .get("status")
             .and_then(Value::as_str)
-            .filter(|s| rank(*s) >= rank(&self.status))
+            .filter(|s| rank(s) >= rank(&self.status))
         {
             if s == "paid" && self.status != "paid" {
                 self.paid_at = Some(now);

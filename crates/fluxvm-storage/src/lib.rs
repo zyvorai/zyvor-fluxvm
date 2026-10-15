@@ -16,8 +16,7 @@ use anyhow::{Context, Result, bail};
 use fluxvm_core::config::Policy;
 use fluxvm_core::model::{PoolRecord, VmRecord};
 use fluxvm_core::policy::{
-    BatchReservation, QuotaLedger, UsageTotals, enforce_host_totals, ledger_for_host_admission,
-    ledger_is_warm,
+    BatchReservation, QuotaLedger, enforce_host_totals, ledger_for_host_admission, ledger_is_warm,
 };
 use std::{
     collections::HashMap,

@@ -83,11 +83,7 @@ impl RttStats {
     }
 
     pub fn mean_us(&self) -> u64 {
-        if self.samples == 0 {
-            0
-        } else {
-            self.sum_us / self.samples
-        }
+        self.sum_us.checked_div(self.samples).unwrap_or(0)
     }
 }
 

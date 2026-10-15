@@ -139,17 +139,17 @@ pub(crate) fn decide(req: &SeccompPolicyRpcRequest) -> SeccompPolicyRpcResponse 
         .map(Duration::from_millis)
         .unwrap_or(Duration::from_secs(2));
 
-    if let Ok(url) = std::env::var("FLUXVM_SECCOMP_POLICY_RPC_URL") {
-        if !url.is_empty() {
-            match http_decide(&url, req, timeout) {
-                Ok(resp) => return resp,
-                Err(e) => {
-                    warn!(
-                        "seccomp policy RPC HTTP failed for container={} nr={}: {e:#}; denying",
-                        req.container_id, req.syscall_nr
-                    );
-                    return deny_errno();
-                }
+    if let Ok(url) = std::env::var("FLUXVM_SECCOMP_POLICY_RPC_URL")
+        && !url.is_empty()
+    {
+        match http_decide(&url, req, timeout) {
+            Ok(resp) => return resp,
+            Err(e) => {
+                warn!(
+                    "seccomp policy RPC HTTP failed for container={} nr={}: {e:#}; denying",
+                    req.container_id, req.syscall_nr
+                );
+                return deny_errno();
             }
         }
     }
