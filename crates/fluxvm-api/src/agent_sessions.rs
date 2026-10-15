@@ -114,6 +114,10 @@ pub(crate) fn routes() -> Router<Arc<VmManager>> {
             post(rewind_config),
         )
         .route("/v1/agents/sessions/{id}/rewind/undo", post(rewind_undo))
+        .route(
+            "/v1/agents/sessions/{id}/rewind/pin",
+            post(rewind_pin_point),
+        )
         .route("/v1/agents/sessions/{id}/fork", post(fork))
         .route("/v1/agents/sessions/{id}/promote", post(promote))
         .route("/v1/agents/sessions/{id}/events", get(events))
@@ -2863,6 +2867,9 @@ struct RewindPoint {
     /// The command about to run when the point was taken: undoing to this point reverses it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     command: Option<String>,
+    /// A pinned point is never evicted from the ring and survives an undo.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pinned: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -2886,12 +2893,46 @@ impl Default for RewindState {
     }
 }
 
-/// Adds a point and returns the tags that fell off the end of the ring.
+/// Drops the oldest unpinned points until the ring fits `max_points`, and returns their tags.
+/// Pinned points stay (a ring made only of pins may exceed the limit; `rewind_pin` prevents that).
+fn rewind_evict(st: &mut RewindState) -> Vec<String> {
+    let keep = st.max_points.max(1) as usize;
+    let mut out = Vec::new();
+    while st.points.len() > keep {
+        match st.points.iter().position(|p| !p.pinned) {
+            Some(i) => out.push(st.points.remove(i).tag),
+            None => break,
+        }
+    }
+    out
+}
+
+/// Adds a point and returns the tags that fell off the ring.
 fn rewind_push(st: &mut RewindState, p: RewindPoint) -> Vec<String> {
     st.points.push(p);
-    let keep = st.max_points.max(1) as usize;
-    let drop = st.points.len().saturating_sub(keep);
-    st.points.drain(..drop).map(|p| p.tag).collect()
+    rewind_evict(st)
+}
+
+/// Pins or unpins `tag`. A pin that would leave no room for new points is refused.
+fn rewind_pin(st: &mut RewindState, tag: &str, pinned: bool) -> Result<(), String> {
+    let pins = st
+        .points
+        .iter()
+        .filter(|p| p.pinned && p.tag != tag)
+        .count();
+    if pinned && pins + 1 >= st.max_points as usize {
+        return Err(format!(
+            "{} point(s) are already pinned; the ring holds {} and needs room for new ones",
+            pins, st.max_points
+        ));
+    }
+    match st.points.iter_mut().find(|p| p.tag == tag) {
+        Some(p) => {
+            p.pinned = pinned;
+            Ok(())
+        }
+        None => Err(format!("no rewind point {tag:?}")),
+    }
 }
 
 /// Index of the point `steps` actions back (`1` is the point taken before the last exec).
@@ -2912,9 +2953,18 @@ fn rewind_target(st: &RewindState, steps: u32) -> Result<usize, String> {
 }
 
 /// After restoring to `idx`, drops that point and every newer one (they describe a timeline that
-/// no longer exists) and returns their tags.
+/// no longer exists) and returns their tags. Pinned points are kept: the user asked to keep them.
 fn rewind_truncate(st: &mut RewindState, idx: usize) -> Vec<String> {
-    st.points.drain(idx..).map(|p| p.tag).collect()
+    let mut dropped = Vec::new();
+    let mut i = idx;
+    while i < st.points.len() {
+        if st.points[i].pinned {
+            i += 1;
+        } else {
+            dropped.push(st.points.remove(i).tag);
+        }
+    }
+    dropped
 }
 
 fn rewind_path(m: &VmManager, id: Uuid) -> PathBuf {
@@ -2988,6 +3038,7 @@ async fn rewind_capture(m: &Arc<VmManager>, s: &Session, command: &str) {
         created_at: Utc::now(),
         trigger: "exec".into(),
         command: Some(command.chars().take(512).collect()),
+        pinned: false,
     };
     let evicted = {
         let _g = REWIND_LOCK.lock().await;
@@ -3077,10 +3128,8 @@ async fn rewind_config(
         if let Some(mem) = body.memory {
             st.memory = mem;
         }
-        // A smaller ring drops the oldest points now.
-        let keep = st.max_points as usize;
-        let drop = st.points.len().saturating_sub(keep);
-        let evicted: Vec<String> = st.points.drain(..drop).map(|p| p.tag).collect();
+        // A smaller ring drops the oldest unpinned points now.
+        let evicted = rewind_evict(&mut st);
         rewind_write(&m, id, &st).await?;
         (st, evicted)
     };
@@ -3096,11 +3145,62 @@ async fn rewind_config(
     Ok(Json(json!(st)))
 }
 
+#[derive(Debug, Deserialize)]
+struct RewindPinBody {
+    tag: String,
+    /// `false` unpins.
+    #[serde(default = "pin_default")]
+    pinned: bool,
+}
+
+fn pin_default() -> bool {
+    true
+}
+
+async fn rewind_pin_point(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    token_tenant: Option<Extension<TokenTenant>>,
+    Path(id): Path<Uuid>,
+    Json(body): Json<RewindPinBody>,
+) -> ApiResult<Json<Value>> {
+    require_admin(role)?;
+    load(&m, id, &caller_tenant(&token_tenant)).await?;
+    let (st, evicted) = {
+        let _g = REWIND_LOCK.lock().await;
+        let mut st = rewind_read(&m, id).await;
+        rewind_pin(&mut st, &body.tag, body.pinned).map_err(|message| ApiError {
+            status: StatusCode::CONFLICT,
+            message,
+        })?;
+        // Unpinning can let an over-full ring shrink back.
+        let evicted = rewind_evict(&mut st);
+        rewind_write(&m, id, &st).await?;
+        (st, evicted)
+    };
+    if !evicted.is_empty() {
+        let s = load(&m, id, &caller_tenant(&token_tenant)).await?;
+        for t in &evicted {
+            let _ = m.delete_vm_snapshot(s.sandbox_id, t).await;
+        }
+    }
+    record(
+        &m,
+        id,
+        "rewind.pin",
+        json!({"tag": body.tag, "pinned": body.pinned}),
+    );
+    Ok(Json(json!(st)))
+}
+
 #[derive(Debug, Deserialize, Default)]
 struct RewindUndoBody {
     /// How many actions to go back; `1` (default) reverses the last exec.
     #[serde(default)]
     steps: Option<u32>,
+    /// Go back to this point instead (by tag, as `GET .../rewind` lists them).
+    #[serde(default)]
+    to: Option<String>,
 }
 
 async fn rewind_undo(
@@ -3116,12 +3216,29 @@ async fn rewind_undo(
     let s = load(&m, id, &caller_tenant(&token_tenant)).await?;
     check_if_match(&headers, &s)?;
     running(&s)?;
-    let steps = body.and_then(|Json(b)| b.steps).unwrap_or(1);
+    let body = body.map(|Json(b)| b).unwrap_or_default();
     let st = rewind_read(&m, id).await;
-    let idx = rewind_target(&st, steps).map_err(|message| ApiError {
-        status: StatusCode::CONFLICT,
-        message,
-    })?;
+    let (idx, steps) = match &body.to {
+        Some(tag) => {
+            let i = st
+                .points
+                .iter()
+                .position(|p| &p.tag == tag)
+                .ok_or_else(|| ApiError {
+                    status: StatusCode::NOT_FOUND,
+                    message: format!("session {id} has no rewind point {tag:?}"),
+                })?;
+            (i, (st.points.len() - i) as u32)
+        }
+        None => {
+            let steps = body.steps.unwrap_or(1);
+            let idx = rewind_target(&st, steps).map_err(|message| ApiError {
+                status: StatusCode::CONFLICT,
+                message,
+            })?;
+            (idx, steps)
+        }
+    };
     let point = st.points[idx].clone();
     let mut out = restore_session_to(&m, &s, &point.tag).await?;
     let dropped = {
@@ -7134,7 +7251,47 @@ mod tests {
             created_at: Utc::now(),
             trigger: "exec".into(),
             command: None,
+            pinned: false,
         }
+    }
+
+    #[test]
+    fn rewind_pins_survive_eviction_and_undo() {
+        let mut st = RewindState {
+            max_points: 3,
+            ..Default::default()
+        };
+        for t in ["a", "b", "c"] {
+            rewind_push(&mut st, rw_point(t));
+        }
+        rewind_pin(&mut st, "a", true).unwrap();
+        // "a" is oldest but pinned: "b" goes instead.
+        assert_eq!(rewind_push(&mut st, rw_point("d")), vec!["b".to_string()]);
+        let tags: Vec<_> = st.points.iter().map(|p| p.tag.as_str()).collect();
+        assert_eq!(tags, ["a", "c", "d"]);
+        // Undo to "c" drops "c" and "d" but keeps the pinned "a" that sits before it.
+        rewind_pin(&mut st, "d", true).unwrap();
+        let idx = st.points.iter().position(|p| p.tag == "c").unwrap();
+        assert_eq!(rewind_truncate(&mut st, idx), vec!["c".to_string()]);
+        let tags: Vec<_> = st.points.iter().map(|p| p.tag.as_str()).collect();
+        assert_eq!(tags, ["a", "d"]);
+    }
+
+    #[test]
+    fn rewind_refuses_a_pin_that_fills_the_ring() {
+        let mut st = RewindState {
+            max_points: 2,
+            ..Default::default()
+        };
+        rewind_push(&mut st, rw_point("a"));
+        rewind_push(&mut st, rw_point("b"));
+        rewind_pin(&mut st, "a", true).unwrap();
+        // One pin leaves one slot; a second would leave none for new points.
+        rewind_pin(&mut st, "b", true).unwrap_err();
+        assert!(rewind_pin(&mut st, "zzz", true).is_err());
+        st.max_points = 3;
+        rewind_pin(&mut st, "b", true).unwrap();
+        rewind_pin(&mut st, "a", false).unwrap();
     }
 
     #[test]
