@@ -3,7 +3,7 @@
 
 //! macOS guests installed through the API (`apple.install`), and the first-boot share that lets fresh clones accept SSH keys.
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use fluxvm_core::model::{AppleFirstBoot, AppleGuest, CreateVmRequest};
 use std::{
     fs,
@@ -90,7 +90,13 @@ pub fn validate(req: &CreateVmRequest) -> Result<()> {
                 bail!("apple.firstboot.username must be a simple POSIX username");
             }
         }
-        if fb.auto_login && fb.username.as_deref().map(|s| s.trim().is_empty()).unwrap_or(true) {
+        if fb.auto_login
+            && fb
+                .username
+                .as_deref()
+                .map(|s| s.trim().is_empty())
+                .unwrap_or(true)
+        {
             bail!("apple.firstboot.auto_login requires a username");
         }
     }
@@ -124,9 +130,19 @@ pub fn write_firstboot(workspace: &Path, fb: &AppleFirstBoot) -> Result<PathBuf>
     } else {
         let _ = fs::remove_file(&flag);
     }
-    if let Some(user) = fb.username.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+    if let Some(user) = fb
+        .username
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
         fs::write(dir.join("username"), format!("{user}\n"))?;
-        if let Some(name) = fb.full_name.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        if let Some(name) = fb
+            .full_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
             fs::write(dir.join("full_name"), format!("{name}\n"))?;
         }
         let password = if let Some(pf) = &fb.password_file {
@@ -293,9 +309,18 @@ mod tests {
             "ssh-ed25519 AAAA a\nssh-ed25519 BBBB b\n"
         );
         assert!(dir.join("enable_remote_login").is_file());
-        assert_eq!(fs::read_to_string(dir.join("username")).unwrap().trim(), "fluxvm");
-        assert_eq!(fs::read_to_string(dir.join("full_name")).unwrap().trim(), "FluxVM Admin");
-        assert_eq!(fs::read_to_string(dir.join("password")).unwrap().trim(), "test-secret");
+        assert_eq!(
+            fs::read_to_string(dir.join("username")).unwrap().trim(),
+            "fluxvm"
+        );
+        assert_eq!(
+            fs::read_to_string(dir.join("full_name")).unwrap().trim(),
+            "FluxVM Admin"
+        );
+        assert_eq!(
+            fs::read_to_string(dir.join("password")).unwrap().trim(),
+            "test-secret"
+        );
         assert!(dir.join("auto_login").is_file());
         let script = fs::read_to_string(dir.join("firstboot.sh")).unwrap();
         assert!(script.contains("AuthorizedKeysFile"));
