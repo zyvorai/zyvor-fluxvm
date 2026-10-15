@@ -35,21 +35,21 @@ impl MultiHomeState {
             )
         });
         let best = candidates.first()?.clone();
-        if let Some(active) = self.active {
-            if let Some(current) = candidates.iter().find(|e| e.addr == active) {
-                let cur = self.health.get(&active);
-                let best_h = self.health.get(&best.addr);
-                let current_bad = cur.is_some_and(|v| v.failures >= 3);
-                let meaningfully_better = match (cur, best_h) {
-                    (Some(a), Some(b)) => {
-                        b.failures < a.failures || b.rtt_ms.saturating_add(20) < a.rtt_ms
-                    }
-                    (None, Some(_)) => false,
-                    _ => best.priority < current.priority,
-                };
-                if !current_bad && !meaningfully_better {
-                    return Some(current.clone());
+        if let Some(active) = self.active
+            && let Some(current) = candidates.iter().find(|e| e.addr == active)
+        {
+            let cur = self.health.get(&active);
+            let best_h = self.health.get(&best.addr);
+            let current_bad = cur.is_some_and(|v| v.failures >= 3);
+            let meaningfully_better = match (cur, best_h) {
+                (Some(a), Some(b)) => {
+                    b.failures < a.failures || b.rtt_ms.saturating_add(20) < a.rtt_ms
                 }
+                (None, Some(_)) => false,
+                _ => best.priority < current.priority,
+            };
+            if !current_bad && !meaningfully_better {
+                return Some(current.clone());
             }
         }
         self.active = Some(best.addr);

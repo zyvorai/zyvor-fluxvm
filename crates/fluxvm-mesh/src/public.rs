@@ -305,12 +305,12 @@ impl PublicCloudConfig {
                 }
             }
         }
-        if let Some(relay) = &self.public_relay {
-            if relay.server_name.trim().is_empty() || relay.site_id.trim().is_empty() {
-                return Err(MeshError::InvalidState(
-                    "public relay requires server_name and site_id".into(),
-                ));
-            }
+        if let Some(relay) = &self.public_relay
+            && (relay.server_name.trim().is_empty() || relay.site_id.trim().is_empty())
+        {
+            return Err(MeshError::InvalidState(
+                "public relay requires server_name and site_id".into(),
+            ));
         }
         if let Some(otlp) = &self.otlp {
             if !(otlp.endpoint.starts_with("http://") || otlp.endpoint.starts_with("https://")) {

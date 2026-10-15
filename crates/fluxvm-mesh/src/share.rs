@@ -5,7 +5,7 @@
 
 use crate::{MeshError, Result};
 use ring::{
-    constant_time, hmac,
+    hmac,
     rand::{SecureRandom, SystemRandom},
 };
 use std::fs;
@@ -91,12 +91,13 @@ impl ShareAuthority {
         }
         let signature = unhex(parts[4])?;
         let signed = parts[..4].join(".");
-        let want = hmac::sign(
+        // `hmac::verify` compares in constant time.
+        if hmac::verify(
             &hmac::Key::new(hmac::HMAC_SHA256, &self.key),
             signed.as_bytes(),
-        );
-        if signature.len() != want.as_ref().len()
-            || constant_time::verify_slices_are_equal(&signature, want.as_ref()).is_err()
+            &signature,
+        )
+        .is_err()
         {
             return Err(MeshError::InvalidState("invalid share signature".into()));
         }
@@ -150,7 +151,7 @@ fn hex(bytes: &[u8]) -> String {
 }
 
 fn unhex(value: &str) -> Result<Vec<u8>> {
-    if value.len() % 2 != 0 {
+    if !value.len().is_multiple_of(2) {
         return Err(MeshError::InvalidState("invalid hex".into()));
     }
     (0..value.len())

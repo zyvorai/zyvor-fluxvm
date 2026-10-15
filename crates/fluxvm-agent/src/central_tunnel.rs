@@ -209,10 +209,9 @@ fn node_tunnel_url(fluxvm_url: &str, vm_id: &str, port: u16) -> Option<String> {
     let base = fluxvm_url.trim_end_matches('/');
     let ws = if let Some(rest) = base.strip_prefix("https://") {
         format!("wss://{rest}")
-    } else if let Some(rest) = base.strip_prefix("http://") {
-        format!("ws://{rest}")
     } else {
-        return None;
+        let rest = base.strip_prefix("http://")?;
+        format!("ws://{rest}")
     };
     let id: String = vm_id
         .bytes()

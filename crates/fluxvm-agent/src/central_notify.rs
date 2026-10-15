@@ -208,7 +208,7 @@ fn wants(hook: &Webhook, n: &Notification) -> bool {
         None => true,
         Some(t) => n.tenant.as_deref() == Some(t.as_str()) && !operator_only(&n.kind),
     };
-    audience && (hook.events.is_empty() || hook.events.iter().any(|e| *e == n.kind))
+    audience && (hook.events.is_empty() || hook.events.contains(&n.kind))
 }
 
 /// Records a notification and sends it to every webhook that wants it.
@@ -539,14 +539,16 @@ pub(super) async fn from_change(fleet: &Fleet, e: &super::audit::AuditEvent) {
 /// Looks for time-based events; called by the reconciler. `ended` are the leases it just ended.
 pub(super) async fn scan(fleet: &Fleet, ended: &[crate::tenancy::Lease]) {
     let now = Utc::now();
-    let mut out: Vec<(
+    // (dedupe key, kind, tenant, title, detail, link)
+    type Event = (
         String,
         &'static str,
         Option<String>,
         String,
         Option<String>,
         Option<String>,
-    )> = Vec::new();
+    );
+    let mut out: Vec<Event> = Vec::new();
     for l in ended {
         out.push((
             format!("ended:{}", l.id),

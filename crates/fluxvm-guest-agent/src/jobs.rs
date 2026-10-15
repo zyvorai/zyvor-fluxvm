@@ -87,10 +87,10 @@ impl Spool {
 
     /// Copies `r` into the spool until EOF. Keeps reading past the cap so the writer never blocks.
     fn pump<R: Read>(&self, mut r: R) {
-        let mut file = match std::fs::OpenOptions::new().append(true).open(&self.path) {
-            Ok(f) => Some(f),
-            Err(_) => None,
-        };
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&self.path)
+            .ok();
         let mut buf = [0u8; 16 * 1024];
         loop {
             let n = match r.read(&mut buf) {
@@ -110,13 +110,13 @@ impl Spool {
             };
             let take = n.min(room);
             let mut wrote = 0;
-            if take > 0 {
-                if let Some(f) = file.as_mut() {
-                    if f.write_all(&buf[..take]).is_ok() {
-                        wrote = take;
-                    } else {
-                        file = None;
-                    }
+            if take > 0
+                && let Some(f) = file.as_mut()
+            {
+                if f.write_all(&buf[..take]).is_ok() {
+                    wrote = take;
+                } else {
+                    file = None;
                 }
             }
             let mut st = lock(&self.state);
@@ -227,6 +227,8 @@ fn table() -> &'static Mutex<HashMap<String, Arc<Job>>> {
     T.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+// The error is a ready-to-send protocol response; boxing it would only move the allocation to every caller.
+#[allow(clippy::result_large_err)]
 fn find(id: &str) -> Result<Arc<Job>, AgentResponse> {
     lock(table())
         .get(id)
@@ -338,6 +340,8 @@ pub fn start(a: StartArgs) -> AgentResponse {
 }
 
 /// Starts the process with piped stdio, in its own process group, confined when a policy is given.
+// The error is a ready-to-send protocol response; boxing it would only move the allocation to every caller.
+#[allow(clippy::result_large_err)]
 fn spawn_child(a: &StartArgs) -> Result<(Child, Option<ExecEnforcement>), AgentResponse> {
     if let Some(policy) = &a.policy {
         if !cfg!(target_os = "linux") {
@@ -397,12 +401,12 @@ fn supervise(job: Arc<Job>, mut child: Child, timeout: Option<u64>) {
             Err(_) => break None,
         }
         let now = Instant::now();
-        if let (Some(d), false) = (deadline, timed_out) {
-            if now >= d {
-                timed_out = true;
-                killpg(job.pid, libc::SIGTERM);
-                kill_at = Some(now + KILL_GRACE);
-            }
+        if let (Some(d), false) = (deadline, timed_out)
+            && now >= d
+        {
+            timed_out = true;
+            killpg(job.pid, libc::SIGTERM);
+            kill_at = Some(now + KILL_GRACE);
         }
         if kill_at.is_some_and(|k| now >= k) {
             killpg(job.pid, libc::SIGKILL);
@@ -611,10 +615,10 @@ mod tests {
     fn wait_final(job_id: &str) -> JobStatus {
         let end = Instant::now() + Duration::from_secs(20);
         loop {
-            if let AgentResponse::Job { status } = info(job_id) {
-                if status.phase.is_final() {
-                    return status;
-                }
+            if let AgentResponse::Job { status } = info(job_id)
+                && status.phase.is_final()
+            {
+                return status;
             }
             assert!(Instant::now() < end, "job did not finish");
             std::thread::sleep(Duration::from_millis(20));

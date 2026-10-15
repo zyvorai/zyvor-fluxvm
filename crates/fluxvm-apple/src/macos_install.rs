@@ -3,7 +3,7 @@
 
 //! macOS guests installed through the API (`apple.install`), and the first-boot share that lets fresh clones accept SSH keys.
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use fluxvm_core::model::{AppleFirstBoot, AppleGuest, CreateVmRequest};
 use std::{
     fs,

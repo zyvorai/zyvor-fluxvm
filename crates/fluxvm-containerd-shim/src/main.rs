@@ -71,7 +71,7 @@ use serde_json::{Value, json};
 use std::{
     collections::{HashMap, HashSet},
     hash::{Hash, Hasher},
-    net::{IpAddr, Ipv4Addr, Ipv6Addr},
+    net::IpAddr,
     os::unix::fs::{FileTypeExt, MetadataExt},
     path::{Path, PathBuf},
     sync::Arc,
@@ -581,6 +581,7 @@ fn runtime_state_path(cfg: &RuntimeConfig, namespace: &str, group: &str) -> Path
 
 /// Drop the sandbox journal once the last task is gone. A remaining task
 /// keeps the VM, tap, and pod id. Returns true when the journal was cleared.
+#[cfg(test)]
 fn journal_after_task_delete(state: &mut RuntimeStateJournal, task_id: &str) -> bool {
     state.tasks.remove(task_id);
     if !state.tasks.is_empty() {
@@ -1060,10 +1061,10 @@ impl Service {
                 vm.name
             );
         }
-        if let Some(cni) = journal.cni.as_ref() {
-            if !self.recovery_cni_ready(cni).await {
-                bail!("journal-owned CNI bridge/netns topology is incomplete");
-            }
+        if let Some(cni) = journal.cni.as_ref()
+            && !self.recovery_cni_ready(cni).await
+        {
+            bail!("journal-owned CNI bridge/netns topology is incomplete");
         }
         if vm.status == VmStatus::Paused {
             self.api(Method::POST, &format!("/v1/vms/{}/resume", vm.id), None)
@@ -1162,50 +1163,50 @@ impl Service {
             );
         }
 
-        if self.cfg.recovery_enabled {
-            if let Some(journal) = self.journal_sandbox.lock().await.clone() {
-                let has_processes =
-                    !self.tasks.read().await.is_empty() || !self.execs.read().await.is_empty();
+        if self.cfg.recovery_enabled
+            && let Some(journal) = self.journal_sandbox.lock().await.clone()
+        {
+            let has_processes =
+                !self.tasks.read().await.is_empty() || !self.execs.read().await.is_empty();
 
-                if journal.ready {
-                    match self.recover_sandbox_from_journal(&journal).await {
-                        Ok(recovered) => {
-                            let vm = recovered.vm.clone();
-                            *guard = Some(recovered);
-                            return Ok(vm);
-                        }
-                        Err(e) if has_processes => {
-                            bail!(
-                                "failed to recover live secure-container sandbox: {e:#};                                  refusing to cold-create a duplicate VM"
-                            );
-                        }
-                        Err(e) => {
-                            warn!(
-                                "discarding stale empty sandbox journal after recovery failure: {e:#}"
-                            );
-                        }
+            if journal.ready {
+                match self.recover_sandbox_from_journal(&journal).await {
+                    Ok(recovered) => {
+                        let vm = recovered.vm.clone();
+                        *guard = Some(recovered);
+                        return Ok(vm);
                     }
-                } else if has_processes {
-                    bail!(
-                        "recovery journal owns provisional VM {} while task metadata exists;                          refusing duplicate sandbox creation",
-                        journal.vm_id
-                    );
+                    Err(e) if has_processes => {
+                        bail!(
+                            "failed to recover live secure-container sandbox: {e:#};                                  refusing to cold-create a duplicate VM"
+                        );
+                    }
+                    Err(e) => {
+                        warn!(
+                            "discarding stale empty sandbox journal after recovery failure: {e:#}"
+                        );
+                    }
                 }
-
-                // Empty/provisional ownership can be reclaimed. The VM ID was
-                // persisted as soon as create returned, so even a crash during
-                // guest boot is cleaned up before a new sandbox is attempted.
-                if let Ok(Some(vm)) = self.recovery_vm(&journal.vm_id).await {
-                    let _ = self
-                        .api(Method::DELETE, &format!("/v1/vms/{}", vm.id), None)
-                        .await;
-                }
-                if let Some(cni) = journal.cni.as_ref() {
-                    cleanup_cni_bridge(cni).await;
-                }
-                *self.journal_sandbox.lock().await = None;
-                self.clear_runtime_state_file().await;
+            } else if has_processes {
+                bail!(
+                    "recovery journal owns provisional VM {} while task metadata exists;                          refusing duplicate sandbox creation",
+                    journal.vm_id
+                );
             }
+
+            // Empty/provisional ownership can be reclaimed. The VM ID was
+            // persisted as soon as create returned, so even a crash during
+            // guest boot is cleaned up before a new sandbox is attempted.
+            if let Ok(Some(vm)) = self.recovery_vm(&journal.vm_id).await {
+                let _ = self
+                    .api(Method::DELETE, &format!("/v1/vms/{}", vm.id), None)
+                    .await;
+            }
+            if let Some(cni) = journal.cni.as_ref() {
+                cleanup_cni_bridge(cni).await;
+            }
+            *self.journal_sandbox.lock().await = None;
+            self.clear_runtime_state_file().await;
         }
 
         let cold_started = tokio::time::Instant::now();
@@ -1531,27 +1532,23 @@ impl Service {
                     .await?;
             }
 
-            if self.cfg.warm_pool.is_some() {
-                if let Some(current) = cni.as_ref() {
-                    if let Err(e) = self.hotplug_cni_nics(&vm, current).await {
-                        // `auto`: the daemon could not honour a direct hotplug (legacy dataplane, an
-                        // eBPF attach failure, an older daemon that predates the request field).
-                        // It removes what it created, so the port is free for the bridge chain.
-                        let can_retry =
-                            self.cfg.cni_datapath == CniDatapath::Auto && current.direct;
-                        let Some((path, primary, multus)) =
-                            bridge_retry.as_ref().filter(|_| can_retry)
-                        else {
-                            return Err(e);
-                        };
-                        warn!("direct hotplug failed ({e:#}); falling back to the bridge chain");
-                        cleanup_cni_bridge(current).await;
-                        let bridge =
-                            prepare_bridge_chain(&self.group, path, primary, multus).await?;
-                        self.hotplug_cni_nics(&vm, &bridge).await?;
-                        cni = Some(bridge);
-                    }
-                }
+            if self.cfg.warm_pool.is_some()
+                && let Some(current) = cni.as_ref()
+                && let Err(e) = self.hotplug_cni_nics(&vm, current).await
+            {
+                // `auto`: the daemon could not honour a direct hotplug (legacy dataplane, an
+                // eBPF attach failure, an older daemon that predates the request field).
+                // It removes what it created, so the port is free for the bridge chain.
+                let can_retry = self.cfg.cni_datapath == CniDatapath::Auto && current.direct;
+                let Some((path, primary, multus)) = bridge_retry.as_ref().filter(|_| can_retry)
+                else {
+                    return Err(e);
+                };
+                warn!("direct hotplug failed ({e:#}); falling back to the bridge chain");
+                cleanup_cni_bridge(current).await;
+                let bridge = prepare_bridge_chain(&self.group, path, primary, multus).await?;
+                self.hotplug_cni_nics(&vm, &bridge).await?;
+                cni = Some(bridge);
             }
 
             // A claimed pool member was booted before this Pod existed, so it has none of the Pod's
@@ -2114,15 +2111,15 @@ impl Service {
 
     async fn persist_attachment_owner(&self, key: &str, owner: &str) -> AnyResult<()> {
         let mut changed = false;
-        if let Some(sandbox) = self.sandbox.lock().await.as_mut() {
-            if let Some(item) = sandbox.devices.iter_mut().find(|d| d.key() == key) {
-                changed |= item.add_owner(owner);
-            }
+        if let Some(sandbox) = self.sandbox.lock().await.as_mut()
+            && let Some(item) = sandbox.devices.iter_mut().find(|d| d.key() == key)
+        {
+            changed |= item.add_owner(owner);
         }
-        if let Some(journal) = self.journal_sandbox.lock().await.as_mut() {
-            if let Some(item) = journal.devices.iter_mut().find(|d| d.key() == key) {
-                changed |= item.add_owner(owner);
-            }
+        if let Some(journal) = self.journal_sandbox.lock().await.as_mut()
+            && let Some(item) = journal.devices.iter_mut().find(|d| d.key() == key)
+        {
+            changed |= item.add_owner(owner);
         }
         if changed {
             self.persist_runtime_state().await?;
@@ -2163,8 +2160,8 @@ impl Service {
         let source = self.canonical_block_source(source, pod_uid)?;
         let meta = std::fs::metadata(&source)?;
         let rdev = meta.rdev();
-        let host_major = libc::major(rdev) as u64;
-        let host_minor = libc::minor(rdev) as u64;
+        let host_major = libc::major(rdev as _) as u64;
+        let host_minor = libc::minor(rdev as _) as u64;
         let key = format!("block:{}", source.display());
 
         let existing = self.journal_sandbox.lock().await.as_ref().and_then(|j| {
@@ -2300,12 +2297,12 @@ impl Service {
                 iommu_group: old_group,
                 ..
             } = &existing
+                && old_group.is_some()
+                && *old_group != iommu_group
             {
-                if old_group.is_some() && *old_group != iommu_group {
-                    bail!(
-                        "VFIO IOMMU-group drift for {bdf}: journal {old_group:?}, host {iommu_group:?}"
-                    );
-                }
+                bail!(
+                    "VFIO IOMMU-group drift for {bdf}: journal {old_group:?}, host {iommu_group:?}"
+                );
             }
             if !self.qmp_device_present(vm, existing.device_id()).await {
                 bail!(
@@ -2439,10 +2436,8 @@ impl Service {
                 }
             }
         }
-        if changed {
-            if let Err(e) = self.persist_runtime_state().await {
-                warn!("persisting released device claims for {owner} failed: {e:#}");
-            }
+        if changed && let Err(e) = self.persist_runtime_state().await {
+            warn!("persisting released device claims for {owner} failed: {e:#}");
         }
         if let Err(e) = self.reap_unowned_devices_locked(vm).await {
             // Container deletion must remain successful once the guest process
@@ -2483,8 +2478,8 @@ impl Service {
                         );
                     }
                     let rdev = meta.rdev();
-                    let major = libc::major(rdev) as u64;
-                    let minor = libc::minor(rdev) as u64;
+                    let major = libc::major(rdev as _) as u64;
+                    let minor = libc::minor(rdev as _) as u64;
                     if host_major.is_some_and(|v| v != major)
                         || host_minor.is_some_and(|v| v != minor)
                     {
@@ -2749,16 +2744,14 @@ impl Service {
             .pointer("/linux/mountLabel")
             .and_then(|v| v.as_str())
             .is_none()
+            && let Some(label) = mount_label_ann
+            && let Some(linux) = spec.as_object_mut().and_then(|o| {
+                o.entry("linux")
+                    .or_insert_with(|| Value::Object(serde_json::Map::new()))
+                    .as_object_mut()
+            })
         {
-            if let Some(label) = mount_label_ann {
-                if let Some(linux) = spec.as_object_mut().and_then(|o| {
-                    o.entry("linux")
-                        .or_insert_with(|| Value::Object(serde_json::Map::new()))
-                        .as_object_mut()
-                }) {
-                    linux.insert("mountLabel".into(), Value::String(label));
-                }
-            }
+            linux.insert("mountLabel".into(), Value::String(label));
         }
         let device_claims = self
             .prepare_hotplug_devices(&vm, &mut spec, hints.pod_uid.as_deref(), &req.id)
@@ -2798,6 +2791,7 @@ impl Service {
         Ok((vm, serde_json::to_string(&spec)?, io, io_dir, device_claims))
     }
 
+    #[allow(clippy::too_many_arguments)] // the containerd task request fields, passed through as they arrive
     async fn prepare_io(
         &self,
         id: &str,
@@ -2859,6 +2853,7 @@ impl Service {
         Ok((guest, Some(io_dir)))
     }
 
+    #[allow(clippy::too_many_arguments)] // the containerd task request fields, passed through as they arrive
     async fn attach_stream_relays(
         &self,
         vm: &VmRecord,
@@ -2999,7 +2994,7 @@ impl Service {
     /// growing, then give the host relay a final beat before publishing exit.
     async fn flush_stdio_after_exit(&self, id: &str, exec_id: Option<&str>) {
         let key = process_key(id, exec_id);
-        let streaming = if let Some(exec_id) = exec_id {
+        let streaming = if exec_id.is_some() {
             self.execs
                 .read()
                 .await
@@ -3325,13 +3320,13 @@ impl Service {
                     }
                     Ok(other) => {
                         consecutive_errors += 1;
-                        if consecutive_errors == 1 || consecutive_errors % 20 == 0 {
+                        if consecutive_errors == 1 || consecutive_errors.is_multiple_of(20) {
                             warn!("unexpected cgroup-events response for {id}: {other:?}");
                         }
                     }
                     Err(e) => {
                         consecutive_errors += 1;
-                        if consecutive_errors == 1 || consecutive_errors % 20 == 0 {
+                        if consecutive_errors == 1 || consecutive_errors.is_multiple_of(20) {
                             warn!("OOM monitor query failed for {id}: {e:#}");
                         }
                     }
@@ -4238,7 +4233,7 @@ fn timestamp_from_nanos(
     ns: i64,
 ) -> containerd_shim_protos::protobuf::well_known_types::timestamp::Timestamp {
     let mut ts = containerd_shim_protos::protobuf::well_known_types::timestamp::Timestamp::new();
-    ts.seconds = ns.div_euclid(1_000_000_000) as i64;
+    ts.seconds = ns.div_euclid(1_000_000_000);
     ts.nanos = ns.rem_euclid(1_000_000_000) as i32;
     ts
 }
@@ -4643,6 +4638,7 @@ enum CniProvider {
     Generic,
 }
 
+#[cfg(test)]
 impl CniProvider {
     fn as_str(self) -> &'static str {
         match self {
@@ -5003,8 +4999,6 @@ async fn resolve_cni_interface(
     let links = inventory_cni_links(netns_path).await?;
     let preferred = if !configured.is_empty() && valid_iface_name(configured) {
         configured.to_string()
-    } else if provider == CniProvider::Cilium {
-        "eth0".into()
     } else {
         "eth0".into()
     };
@@ -5922,10 +5916,10 @@ fn find_block_rdev_under(root: &Path, major: u64, minor: u64, depth: usize) -> O
             {
                 return Some(path);
             }
-        } else if meta.is_dir() {
-            if let Some(found) = find_block_rdev_under(&path, major, minor, depth - 1) {
-                return Some(found);
-            }
+        } else if meta.is_dir()
+            && let Some(found) = find_block_rdev_under(&path, major, minor, depth - 1)
+        {
+            return Some(found);
         }
     }
     None
@@ -6203,11 +6197,11 @@ async fn stage_bind_mounts(
         // Kubernetes PVC/CSI/emptyDir/projected volume sources are already
         // mounted by kubelet before runtime SyncPod. Keep them write-through
         // by translating only paths under this Pod's bounded volume roots.
-        if let Some(uid) = pod_uid {
-            if let Some(guest) = kubelet_guest_source(&source_path, uid) {
-                mount["source"] = Value::String(guest.to_string_lossy().into_owned());
-                continue;
-            }
+        if let Some(uid) = pod_uid
+            && let Some(guest) = kubelet_guest_source(&source_path, uid)
+        {
+            mount["source"] = Value::String(guest.to_string_lossy().into_owned());
+            continue;
         }
 
         // S9 / P0 hostPath broker: only paths under an explicit allowlist root
@@ -6278,7 +6272,7 @@ async fn stage_bind_mounts(
             match fluxvm_core::policy::hostpath_guest(&source_path, allow_root) {
                 Some(guest) => {
                     // Remap guest root when using a numbered export (hi > 0).
-                    let guest = if guest_root != PathBuf::from("/run/fluxvm/hostpath-allow") {
+                    let guest = if guest_root != *"/run/fluxvm/hostpath-allow" {
                         let rel = guest.strip_prefix("/run/fluxvm/hostpath-allow").ok();
                         match rel {
                             Some(rest) => guest_root.join(rest),
@@ -6327,16 +6321,6 @@ async fn stage_bind_mounts(
     Ok(())
 }
 
-/// Explicit hostPath broker allowlist root (S9 P0). Empty / unset → no
-/// arbitrary hostPath passthrough (snapshot-only for non-kubelet binds).
-fn hostpath_share_json(host: &Path) -> Value {
-    json!({
-        "host_path": host,
-        "guest_path": "/run/fluxvm/hostpath-allow",
-        "read_only": false
-    })
-}
-
 /// Directories exported at sandbox create (`FLUXVM_HOSTPATH_ALLOW`, colon-separated).
 fn hostpath_export_roots() -> Vec<PathBuf> {
     std::env::var_os("FLUXVM_HOSTPATH_ALLOW")
@@ -6349,11 +6333,6 @@ fn hostpath_export_roots() -> Vec<PathBuf> {
                 .collect()
         })
         .unwrap_or_default()
-}
-
-/// First export root (compat for single-path callers).
-fn hostpath_export_root() -> Option<PathBuf> {
-    hostpath_export_roots().into_iter().next()
 }
 
 fn hostpath_allow_root(spec: &Value) -> Option<PathBuf> {
@@ -6438,6 +6417,7 @@ fn spawn_stdio_relay(source: PathBuf, destination: PathBuf, label: String, poll_
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::{Ipv4Addr, Ipv6Addr};
 
     #[test]
     fn dual_stack_route_and_address_rendering() {

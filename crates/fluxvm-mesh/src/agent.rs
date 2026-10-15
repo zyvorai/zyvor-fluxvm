@@ -216,21 +216,20 @@ fn run_stun_observation(cfg: &AgentConfig, mesh: &mut MeshState) -> Result<Optio
     // listen port and the NAT mapping is endpoint-independent.
     if cfg.stun_bind.port() == cfg.listen_port
         && report.nat_type == crate::NatType::EndpointIndependent
+        && let Some(mapped) = report.public_endpoint()
     {
-        if let Some(mapped) = report.public_endpoint() {
-            let local = mesh.local_node.clone();
-            mesh.node_mut(&local)?
-                .endpoints
-                .retain(|endpoint| endpoint.kind != EndpointKind::PublicUdp);
-            mesh.add_endpoint(
-                &local,
-                Endpoint {
-                    kind: EndpointKind::PublicUdp,
-                    addr: mapped,
-                    priority: 30,
-                },
-            )?;
-        }
+        let local = mesh.local_node.clone();
+        mesh.node_mut(&local)?
+            .endpoints
+            .retain(|endpoint| endpoint.kind != EndpointKind::PublicUdp);
+        mesh.add_endpoint(
+            &local,
+            Endpoint {
+                kind: EndpointKind::PublicUdp,
+                addr: mapped,
+                priority: 30,
+            },
+        )?;
     }
     Ok(Some(report))
 }

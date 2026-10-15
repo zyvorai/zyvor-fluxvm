@@ -89,11 +89,7 @@ impl Red {
     }
 
     pub fn rtt_mean_us(&self) -> u64 {
-        if self.rtt_samples == 0 {
-            0
-        } else {
-            self.rtt_sum_us / self.rtt_samples
-        }
+        self.rtt_sum_us.checked_div(self.rtt_samples).unwrap_or(0)
     }
 }
 

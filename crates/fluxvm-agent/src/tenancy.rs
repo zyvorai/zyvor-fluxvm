@@ -748,6 +748,7 @@ impl UsageReport {
         );
         let h = |s: i64| format!("{:.4}", s as f64 / 3600.0);
         for t in &self.tenants {
+            let memory_gib_hours = format!("{:.4}", t.memory_mib_seconds as f64 / 1024.0 / 3600.0);
             out.push_str(&format!(
                 "{},{},{},{},{},{},{},{},{},{},{}\n",
                 t.tenant,
@@ -755,7 +756,7 @@ impl UsageReport {
                 self.to.to_rfc3339(),
                 h(t.vm_seconds),
                 h(t.vcpu_seconds),
-                format!("{:.4}", t.memory_mib_seconds as f64 / 1024.0 / 3600.0),
+                memory_gib_hours,
                 h(t.macos_vm_seconds),
                 h(t.lease_seconds),
                 h(t.billable_lease_seconds),

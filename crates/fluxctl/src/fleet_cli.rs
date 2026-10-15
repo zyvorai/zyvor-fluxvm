@@ -174,7 +174,7 @@ impl Table {
             .headers
             .iter()
             .enumerate()
-            .map(|(i, h)| out.dim(pad(*h, i)))
+            .map(|(i, h)| out.dim(pad(h, i)))
             .collect();
         s.push_str(head.join("  ").trim_end());
         s.push('\n');
@@ -242,7 +242,7 @@ fn num(x: u64) -> String {
 }
 
 fn gib(mib: u64) -> String {
-    if mib % 1024 == 0 {
+    if mib.is_multiple_of(1024) {
         format!("{} GiB", mib / 1024)
     } else {
         format!("{:.1} GiB", mib as f64 / 1024.0)

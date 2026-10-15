@@ -149,7 +149,7 @@ pub fn build(state_dir: &Path, vms: &[VmRecord], branches: &[(Uuid, String)]) ->
             usage: usage_of(&state_dir.join("branches").join(id.to_string())),
         })
         .collect();
-    branch_rows.sort_by(|a, b| b.usage.allocated_bytes.cmp(&a.usage.allocated_bytes));
+    branch_rows.sort_by_key(|r| std::cmp::Reverse(r.usage.allocated_bytes));
     StorageReport {
         volume: volume(state_dir),
         vms: vm_rows,

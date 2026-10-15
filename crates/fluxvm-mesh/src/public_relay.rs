@@ -185,10 +185,10 @@ impl Registry {
     }
 
     async fn touch_session(&self, site: &str, session_id: &str) {
-        if let Some(entry) = self.control.lock().await.get_mut(site) {
-            if entry.session_id == session_id {
-                entry.last_seen = now_secs();
-            }
+        if let Some(entry) = self.control.lock().await.get_mut(site)
+            && entry.session_id == session_id
+        {
+            entry.last_seen = now_secs();
         }
     }
 
@@ -398,10 +398,8 @@ pub async fn run_client(cfg: RelayClientConfig) -> Result<()> {
                 Err(e) => eprintln!("fluxmesh-public-relay: QUIC reconnect after error: {e}"),
             }
         }
-        if !used_quic {
-            if let Err(e) = connect_control(&cfg, &secret, &connector).await {
-                eprintln!("fluxmesh-public-relay: TLS/TCP reconnect after error: {e}");
-            }
+        if !used_quic && let Err(e) = connect_control(&cfg, &secret, &connector).await {
+            eprintln!("fluxmesh-public-relay: TLS/TCP reconnect after error: {e}");
         }
         tokio::time::sleep(Duration::from_secs(2)).await;
     }

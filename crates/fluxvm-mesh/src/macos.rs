@@ -114,10 +114,10 @@ impl MacTunnelPlan {
     }
 
     pub fn write_atomic(&self, path: &Path) -> Result<()> {
-        if let Some(parent) = path.parent() {
-            if !parent.as_os_str().is_empty() {
-                fs::create_dir_all(parent)?;
-            }
+        if let Some(parent) = path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            fs::create_dir_all(parent)?;
         }
         let tmp = path.with_extension("tmp");
         fs::write(&tmp, format!("{}\n", self.to_json()))?;

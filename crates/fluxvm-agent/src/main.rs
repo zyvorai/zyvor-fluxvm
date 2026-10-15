@@ -15,6 +15,8 @@ struct Cli {
     command: Command,
 }
 
+// A clap subcommand enum: one variant per subcommand, built once at start-up.
+#[allow(clippy::large_enum_variant)]
 #[derive(Subcommand)]
 enum Command {
     /// Run the central fleet registry + create/list/delete proxy.
