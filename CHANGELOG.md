@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- **AppArmor: Kairon image cache and shared-disk locks.** The `fluxctl`/`fluxvm` profiles allow read+lock on
+  `/var/lib/kairon-node/image-cache/**` (files are `kairon`-owned 0600, so `owner` never matched; every image-booted
+  Machine failed `opening base image ... Permission denied`) and `k` on `owner /**` for QEMU's image lock on a
+  `storage=shared` disk. `scripts/test-apparmor-profile-rules.sh` checks both, in CI. Found on a two-node Kairon
+  cluster: the veyron daily-ops E2E went from 18 to 37 passed. Reload with `apparmor_parser -r`.
+
+- **QEMU live migration: machine type, relay, retries.** A receiver boots the source's concrete machine type
+  (label `fluxvm.dev/machine-type`, refused when the host's QEMU lacks it). The TCP relay closes both sides when
+  either ends and now fronts every QEMU source (the egress hook drops non-loopback dials). Capabilities/params are
+  restated on each attempt, a leftover TLS creds object is replaced, cancelling a completed non-post-copy migration
+  resumes the guest, and a receiver still receiving keeps its TTL. Unit-tested; not run end to end across two hosts.
+
 
 - **OTLP trace export.** `fluxctl agent export <session> --otlp http://collector:4318 [--otlp-header K=V]` sends a
   session's trajectory as one OTLP/HTTP JSON trace (root span plus a span per step). After-the-fact, built from the

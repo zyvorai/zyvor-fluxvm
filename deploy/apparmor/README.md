@@ -14,7 +14,15 @@ FluxVM ships an AppArmor profile at `deploy/apparmor/fluxvm`, installed by
 - Devices: `/dev/kvm`, `/dev/nbd*`, `/dev/loop*`, `/dev/mapper/**`
 - Workdirs: `/var/lib/fluxvm/**`, `/run/fluxvm/**`, `/run/guestkit*/**`,
   `/run/blkid/**`, `/tmp/**`
-- User-owned specs / `copy_in` sources / outputs anywhere (`owner /** rw`)
+- User-owned specs / `copy_in` sources / outputs anywhere (`owner /** rwk`;
+  `k` is the image lock QEMU takes on a `storage=shared` disk outside
+  `state_dir`)
+- Kairon's node image cache, `/var/lib/kairon-node/image-cache/**` read and
+  lock. Its base images are owned by the `kairon` user (mode 0600), so the
+  `owner` rule never matches. Without this rule an image-booted Machine
+  fails with `provisioning VM disk: opening base image ...: Permission
+  denied` and the kernel log shows `apparmor="DENIED" operation="open"
+  profile="fluxctl"`
 - `/proc/*/cgroup`, `/sys/devices/system/node/**` (qemu-img)
 - Capabilities for guestkit + chrooted package managers: `ipc_lock`,
   `dac_read_search`, `chown`, `fowner`, `sys_resource`, …

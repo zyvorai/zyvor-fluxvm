@@ -413,6 +413,13 @@ via `POST /v1/migration/receivers` (activate with the returned token), or the ma
 host ledger as untracked capacity until reaped. Default listen is `0.0.0.0` — bind to a management
 address or firewall the port in multi-tenant networks. Cloud Hypervisor has no matching receiver API.
 
+A receiver boots the **concrete machine type** the source booted (`pc-q35-noble`, not the `q35` alias, which
+moves with the QEMU release). A running QEMU's type is recorded in the VM label `fluxvm.dev/machine-type` by
+reconcile and cleared on a fresh start. Creating a receiver fails up front when the receiving host's QEMU
+(`qemu -machine help`) does not list that type: QEMU migrates only to the same or a newer release. A receiver
+that is still receiving when its TTL passes gets a fresh 300 s window instead of being reaped mid-transfer, and
+an adopt-mode receiver's placeholder VM stays `Creating` until adopted instead of being swept as stuck.
+
 **Firecracker-specific note:** pause/resume were verified correct and fast against Firecracker's own
 authoritative `GET /` state (not CPU-time heuristics — an idle guest and a paused one both show flat
 CPU time, which is a false "it's paused" signal either way). `exec` over vsock works before a VM is

@@ -58,6 +58,14 @@ applies them; deciding when to use them is the orchestrator's job.
   `capabilities {multifd_channels, compression, post_copy}`. They are applied
   before `migrate-incoming`, and QEMU refuses a stream whose capabilities
   differ between the two ends.
+- Every `migration/start` states multifd, post-copy and auto-converge (on or
+  off) plus multifd compression and TLS, because QEMU keeps them across
+  attempts and a retry would otherwise inherit the previous stream shape.
+  A TLS credentials object left by a failed attempt is replaced.
+- `migration/cancel` after the stream completed finds the guest stopped in
+  `postmigrate`; with no post-copy it resumes the guest on the source.
+  With post-copy enabled it stays stopped, because the destination may hold
+  newer pages.
 - `GET /v1/runtime/capabilities` reports `autoConverge`, `compression`,
   `postCopySwitch`, `liveTune` and `postCopyWithMultifd`. The last is true
   only when the QEMU binary reports version 10.0 or later.
