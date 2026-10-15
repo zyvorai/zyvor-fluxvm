@@ -300,6 +300,12 @@ fn ops() -> Vec<Op> {
         ),
         op(
             "get",
+            "/v1/host/images",
+            "Built-in images that already have a ready copy on this host (the fleet scheduler's image-presence signal)",
+            HOST,
+        ),
+        op(
+            "get",
             "/v1/host/history",
             "Last hour of host memory and per-VM runner usage at 5 s spacing (in memory; empty after a daemon restart)",
             HOST,

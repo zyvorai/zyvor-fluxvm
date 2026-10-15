@@ -233,6 +233,17 @@ pub fn current_id(cfg: &Config, name: &str) -> Option<String> {
         .then(|| sum[..12.min(sum.len())].to_owned())
 }
 
+/// Names of the built-in images that already have a ready raw copy on this host, in catalog order. No network access.
+/// A fleet scheduler uses it to prefer a host that will not have to download the image.
+pub fn cached_names(cfg: &Config) -> Vec<String> {
+    let dir = cfg.state_dir.join("images");
+    BUILTIN_IMAGES
+        .iter()
+        .filter(|i| newest_cached(&dir, i.name).is_some())
+        .map(|i| i.name.to_owned())
+        .collect()
+}
+
 /// Local path of the ready-to-clone raw image for `name`, downloading and converting it on first use.
 ///
 /// A cached image is used without any network access for a day after the vendor's list was last checked, and
@@ -454,6 +465,20 @@ mod tests {
             raw_path(dir.path(), "debian-13", &sum),
             dir.path().join("debian-13-aaaaaaaaaaaa.raw")
         );
+    }
+
+    #[test]
+    fn cached_names_lists_only_ready_images() {
+        let state = tempfile::tempdir().unwrap();
+        let dir = state.path().join("images");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("debian-13-aaaaaaaaaaaa.raw"), b"x").unwrap();
+        fs::write(dir.join("debian-12-bbbbbbbbbbbb.raw.part"), b"x").unwrap();
+        let cfg = Config {
+            state_dir: state.path().to_path_buf(),
+            ..Config::default()
+        };
+        assert_eq!(cached_names(&cfg), vec!["debian-13".to_string()]);
     }
 
     #[test]

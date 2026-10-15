@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- **`vz` placement prefers a Mac that already has the image.** Each Mac's heartbeat now lists its cached built-in images
+  (new `GET /v1/host/images`), and `fluxvm-agent central` adds a bonus for a host that holds the requested image name,
+  so a new `debian-13` VM lands where the ~400 MB download is already done instead of fetching it again. A host that
+  cannot fit the VM is never chosen for it. A path in `image` carries no bias. Unit-tested only; not run across two Macs.
+
 - **`apple.usernet` live checks, and the rows that said "unverified" now say what ran.** New
   `scripts/vz-usernet-live-test.sh` boots a Debian 13 guest on an M4 and checks: root login with an SSH key written
   into the root disk offline (cloud-init copy dropped), a TCP forward, a UDP forward answered by a guest listener,
