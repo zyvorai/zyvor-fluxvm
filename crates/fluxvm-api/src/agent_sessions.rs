@@ -115,6 +115,10 @@ pub(crate) fn routes() -> Router<Arc<VmManager>> {
         )
         .route("/v1/agents/sessions/{id}/rewind/undo", post(rewind_undo))
         .route(
+            "/v1/agents/sessions/{id}/rewind/{tag}/screenshot",
+            get(rewind_screenshot),
+        )
+        .route(
             "/v1/agents/sessions/{id}/rewind/pin",
             post(rewind_pin_point),
         )
@@ -2118,6 +2122,8 @@ async fn session_cleanup(m: &VmManager, s: &Session) {
     fluxvm_core::grants::global().remove_sandbox(&s.sandbox_id.to_string());
     let _ = tokio::fs::remove_file(job_meta_path(m, s.id)).await;
     let _ = tokio::fs::remove_file(usage_path(m, s.id)).await;
+    let _ = tokio::fs::remove_file(rewind_path(m, s.id)).await;
+    let _ = tokio::fs::remove_dir_all(rewind_path(m, s.id).with_extension("shots")).await;
     approvals::remove(&m.cfg.state_dir, s.id).await;
     let _ = tokio::fs::remove_file(uploads_path(m, s.id)).await;
     m.clear_http_policy(s.sandbox_id);
@@ -2860,6 +2866,8 @@ async fn checkpoint(
 
 const REWIND_DEFAULT_POINTS: u32 = 10;
 const REWIND_MAX_POINTS: u32 = 50;
+/// Timeline screenshots are thumbnails: enough to recognise the screen, cheap to keep.
+const REWIND_SHOT_WIDTH: u32 = 480;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 struct RewindPoint {
@@ -2874,6 +2882,9 @@ struct RewindPoint {
     /// A pinned point is never evicted from the ring and survives an undo.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pinned: bool,
+    /// The guest display was captured with the point: `GET .../rewind/{tag}/screenshot`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    screenshot: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -2978,6 +2989,22 @@ fn rewind_path(m: &VmManager, id: Uuid) -> PathBuf {
         .join(format!("{id}.json"))
 }
 
+fn rewind_shot_path(m: &VmManager, id: Uuid, tag: &str) -> PathBuf {
+    m.cfg
+        .state_dir
+        .join("agent-session-rewind")
+        .join(format!("{id}.shots"))
+        .join(format!("{tag}.png"))
+}
+
+/// Deletes the snapshots and screenshots of points that left the ring.
+async fn rewind_forget(m: &VmManager, s: &Session, tags: &[String]) {
+    for t in tags {
+        let _ = m.delete_vm_snapshot(s.sandbox_id, t).await;
+        let _ = tokio::fs::remove_file(rewind_shot_path(m, s.id, t)).await;
+    }
+}
+
 static REWIND_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 async fn rewind_read(m: &VmManager, id: Uuid) -> RewindState {
@@ -3005,6 +3032,26 @@ async fn rewind_write(m: &VmManager, id: Uuid, st: &RewindState) -> ApiResult<()
         .await
         .map_err(anyhow::Error::from)?;
     Ok(())
+}
+
+/// Saves a small screenshot for point `tag`; `true` when there is one.
+async fn rewind_take_shot(m: &VmManager, s: &Session, tag: &str) -> bool {
+    let shot = match tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        m.vm_screenshot(s.sandbox_id, Some(REWIND_SHOT_WIDTH)),
+    )
+    .await
+    {
+        Ok(Ok(shot)) if !shot.blank => shot,
+        _ => return false,
+    };
+    let path = rewind_shot_path(m, s.id, tag);
+    if let Some(d) = path.parent()
+        && tokio::fs::create_dir_all(d).await.is_err()
+    {
+        return false;
+    }
+    tokio::fs::write(&path, &shot.png).await.is_ok()
 }
 
 /// Takes a point before `command` runs, when rewind is on. Best effort: a point that cannot be
@@ -3035,6 +3082,9 @@ async fn rewind_capture(m: &Arc<VmManager>, s: &Session, command: &str) {
         drop(guard);
         return;
     }
+    // What the display showed at this point, for the timeline. Best effort and short: a guest with
+    // no display, or a slow one, just has no picture.
+    let screenshot = rewind_take_shot(m, s, &tag).await;
     drop(guard);
     let point = RewindPoint {
         tag: tag.clone(),
@@ -3043,6 +3093,7 @@ async fn rewind_capture(m: &Arc<VmManager>, s: &Session, command: &str) {
         trigger: "exec".into(),
         command: Some(command.chars().take(512).collect()),
         pinned: false,
+        screenshot,
     };
     let evicted = {
         let _g = REWIND_LOCK.lock().await;
@@ -3055,14 +3106,12 @@ async fn rewind_capture(m: &Arc<VmManager>, s: &Session, command: &str) {
                 "rewind.capture_failed",
                 json!({"reason": e.message, "tag": tag}),
             );
-            let _ = m.delete_vm_snapshot(s.sandbox_id, &tag).await;
+            rewind_forget(m, s, std::slice::from_ref(&tag)).await;
             return;
         }
         evicted
     };
-    for t in &evicted {
-        let _ = m.delete_vm_snapshot(s.sandbox_id, t).await;
-    }
+    rewind_forget(m, s, &evicted).await;
     record(
         m,
         s.id,
@@ -3084,6 +3133,41 @@ async fn rewind_list(
     let mut v = json!(rewind_read(&m, id).await);
     v["memory_available"] = json!(s.capabilities.memory_checkpoint);
     Ok(Json(v))
+}
+
+/// `GET /v1/agents/sessions/{id}/rewind/{tag}/screenshot` — the display as it was at that point.
+async fn rewind_screenshot(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    scope: Option<Extension<SessionScope>>,
+    token_tenant: Option<Extension<TokenTenant>>,
+    Path((id, tag)): Path<(Uuid, String)>,
+) -> ApiResult<axum::response::Response> {
+    use axum::response::IntoResponse;
+    authorize(role, &scope, id, Op::Screen)?;
+    load(&m, id, &caller_tenant(&token_tenant)).await?;
+    // The tag is only ever used as a file name once it is known to be one of the ring's points.
+    let st = rewind_read(&m, id).await;
+    if !st.points.iter().any(|p| p.tag == tag && p.screenshot) {
+        return Err(ApiError {
+            status: StatusCode::NOT_FOUND,
+            message: format!("session {id} has no screenshot for rewind point {tag:?}"),
+        });
+    }
+    let png = tokio::fs::read(rewind_shot_path(&m, id, &tag))
+        .await
+        .map_err(|_| ApiError {
+            status: StatusCode::NOT_FOUND,
+            message: format!("the screenshot of rewind point {tag:?} is gone"),
+        })?;
+    Ok((
+        [
+            (axum::http::header::CONTENT_TYPE, "image/png".to_string()),
+            (axum::http::header::CACHE_CONTROL, "no-store".to_string()),
+        ],
+        png,
+    )
+        .into_response())
 }
 
 #[derive(Debug, Deserialize)]
@@ -3137,9 +3221,7 @@ async fn rewind_config(
         rewind_write(&m, id, &st).await?;
         (st, evicted)
     };
-    for t in &evicted {
-        let _ = m.delete_vm_snapshot(s.sandbox_id, t).await;
-    }
+    rewind_forget(&m, &s, &evicted).await;
     record(
         &m,
         id,
@@ -3342,9 +3424,7 @@ async fn rewind_pin_point(
     };
     if !evicted.is_empty() {
         let s = load(&m, id, &caller_tenant(&token_tenant)).await?;
-        for t in &evicted {
-            let _ = m.delete_vm_snapshot(s.sandbox_id, t).await;
-        }
+        rewind_forget(&m, &s, &evicted).await;
     }
     record(
         &m,
@@ -3414,9 +3494,7 @@ async fn rewind_undo(
         rewind_write(&m, id, &cur).await?;
         dropped
     };
-    for t in &dropped {
-        let _ = m.delete_vm_snapshot(s.sandbox_id, t).await;
-    }
+    rewind_forget(&m, &s, &dropped).await;
     record(
         &m,
         id,
@@ -7414,6 +7492,7 @@ mod tests {
             trigger: "exec".into(),
             command: None,
             pinned: false,
+            screenshot: false,
         }
     }
 
