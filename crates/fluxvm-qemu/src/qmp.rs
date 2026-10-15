@@ -201,6 +201,15 @@ fn check_pct(name: &str, v: Option<u8>) -> Result<()> {
 /// The `migrate-set-capabilities` list and `migrate-set-parameters` map a
 /// start request needs, validated. Pure so the mapping is unit-tested
 /// without a QEMU.
+/// QEMU's own defaults for the migration parameters, used when a start request
+/// leaves one out (see `start_settings`).
+const QEMU_DEFAULT_MAX_BANDWIDTH: u64 = 134_217_728; // bytes/second (128 MiB/s)
+const QEMU_DEFAULT_DOWNTIME_LIMIT_MS: u64 = 300;
+const QEMU_DEFAULT_MULTIFD_CHANNELS: u8 = 2;
+const QEMU_DEFAULT_CPU_THROTTLE_INITIAL: u8 = 20;
+const QEMU_DEFAULT_CPU_THROTTLE_INCREMENT: u8 = 10;
+const QEMU_DEFAULT_MAX_CPU_THROTTLE: u8 = 99;
+
 pub(crate) fn start_settings(
     request: &MigrationStartRequest,
 ) -> Result<(Vec<Value>, serde_json::Map<String, Value>, PostCopyMode)> {
@@ -217,34 +226,64 @@ pub(crate) fn start_settings(
         json!({"capability": "postcopy-ram", "state": post_copy != PostCopyMode::Disabled}),
         json!({"capability": "auto-converge", "state": request.auto_converge.is_some()}),
     ];
+    // Every tunable is stated, falling back to QEMU's own default, for the
+    // same reason: a request that leaves one out must not run with the value
+    // an earlier (e.g. throttled, then cancelled) attempt left behind.
     let mut params = serde_json::Map::new();
     if let Some(ac) = &request.auto_converge {
         check_pct("auto_converge.initial_pct", ac.initial_pct)?;
         check_pct("auto_converge.increment_pct", ac.increment_pct)?;
         check_pct("auto_converge.max_pct", ac.max_pct)?;
-        if let Some(p) = ac.initial_pct {
-            params.insert("cpu-throttle-initial".into(), Value::from(p));
-        }
-        if let Some(p) = ac.increment_pct {
-            params.insert("cpu-throttle-increment".into(), Value::from(p));
-        }
-        if let Some(p) = ac.max_pct {
-            params.insert("max-cpu-throttle".into(), Value::from(p));
-        }
     }
-    if let Some(mbps) = request.bandwidth_mbps {
-        // QEMU max-bandwidth is bytes/second. Decimal Mbps is the operator-facing unit.
-        params.insert(
-            "max-bandwidth".into(),
-            Value::from(mbps.saturating_mul(1_000_000) / 8),
-        );
-    }
-    if let Some(ms) = request.max_downtime_ms {
-        params.insert("downtime-limit".into(), Value::from(ms));
-    }
-    if let Some(channels) = request.multifd_channels.filter(|c| *c > 1) {
-        params.insert("multifd-channels".into(), Value::from(channels));
-    }
+    let ac = request.auto_converge.as_ref();
+    params.insert(
+        "cpu-throttle-initial".into(),
+        Value::from(
+            ac.and_then(|a| a.initial_pct)
+                .unwrap_or(QEMU_DEFAULT_CPU_THROTTLE_INITIAL),
+        ),
+    );
+    params.insert(
+        "cpu-throttle-increment".into(),
+        Value::from(
+            ac.and_then(|a| a.increment_pct)
+                .unwrap_or(QEMU_DEFAULT_CPU_THROTTLE_INCREMENT),
+        ),
+    );
+    params.insert(
+        "max-cpu-throttle".into(),
+        Value::from(
+            ac.and_then(|a| a.max_pct)
+                .unwrap_or(QEMU_DEFAULT_MAX_CPU_THROTTLE),
+        ),
+    );
+    // QEMU max-bandwidth is bytes/second. Decimal Mbps is the operator-facing unit.
+    params.insert(
+        "max-bandwidth".into(),
+        Value::from(
+            request
+                .bandwidth_mbps
+                .map(|mbps| mbps.saturating_mul(1_000_000) / 8)
+                .unwrap_or(QEMU_DEFAULT_MAX_BANDWIDTH),
+        ),
+    );
+    params.insert(
+        "downtime-limit".into(),
+        Value::from(
+            request
+                .max_downtime_ms
+                .unwrap_or(QEMU_DEFAULT_DOWNTIME_LIMIT_MS),
+        ),
+    );
+    params.insert(
+        "multifd-channels".into(),
+        Value::from(
+            request
+                .multifd_channels
+                .filter(|c| *c > 1)
+                .unwrap_or(QEMU_DEFAULT_MULTIFD_CHANNELS),
+        ),
+    );
     params.insert("multifd-compression".into(), Value::from("none"));
     // set_migration_tls sets these after the parameters when TLS is asked for.
     params.insert("tls-creds".into(), Value::from(""));
@@ -1478,6 +1517,20 @@ mod migration_contract_tests {
         );
         assert_eq!(params["multifd-compression"], "none");
         assert_eq!(params["tls-creds"], "");
+    }
+
+    #[test]
+    fn start_settings_restate_defaults_so_a_retry_is_not_throttled() {
+        // A cancelled attempt that asked for 1 Mbps must not cap the next one.
+        let (_, throttled, _) = start_settings(&start_req(json!({"bandwidth_mbps": 1}))).unwrap();
+        assert_eq!(throttled["max-bandwidth"], 125_000);
+        let (_, params, _) = start_settings(&start_req(json!({}))).unwrap();
+        assert_eq!(params["max-bandwidth"], 134_217_728_u64);
+        assert_eq!(params["downtime-limit"], 300);
+        assert_eq!(params["multifd-channels"], 2);
+        assert_eq!(params["cpu-throttle-initial"], 20);
+        assert_eq!(params["cpu-throttle-increment"], 10);
+        assert_eq!(params["max-cpu-throttle"], 99);
     }
 
     #[test]

@@ -59,8 +59,12 @@ applies them; deciding when to use them is the orchestrator's job.
   before `migrate-incoming`, and QEMU refuses a stream whose capabilities
   differ between the two ends.
 - Every `migration/start` states multifd, post-copy and auto-converge (on or
-  off) plus multifd compression and TLS, because QEMU keeps them across
-  attempts and a retry would otherwise inherit the previous stream shape.
+  off), multifd compression and TLS, and every tunable (`max-bandwidth`,
+  `downtime-limit`, multifd channels, the auto-converge throttle), falling back
+  to QEMU's own default for any the request leaves out. QEMU keeps all of them
+  across attempts, so a retry would otherwise inherit the previous attempt's
+  stream shape or a throttle (a cancelled 1 Mbps attempt left the next one
+  unable to finish).
   A TLS credentials object left by a failed attempt is replaced.
 - `migration/cancel` after the stream completed finds the guest stopped in
   `postmigrate`; with no post-copy it resumes the guest on the source.

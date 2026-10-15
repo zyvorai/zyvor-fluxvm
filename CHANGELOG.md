@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- **Migration retries no longer inherit a cancelled attempt's limits.** `migration/start` stated capabilities but not
+  the tunables, and QEMU keeps them: after a cancelled 1 Mbps attempt, a retry with default settings stayed `active`
+  and never finished. Every start now sets `max-bandwidth`, `downtime-limit`, multifd channels and the auto-converge
+  throttle, using QEMU's own default when the request leaves one out. Found by the two-host script; the retry now
+  completes in about 4 s.
+
 - **Linux aarch64 release package is cross-compiled.** The release workflow built it on a hosted arm64 runner this
   organization does not have, so the job queued forever. It now cross-compiles on x86_64 (marked experimental: a
   failure does not block the x86_64 package or the release), and `scripts/package-linux.sh` packages a cross-built
@@ -21,9 +27,10 @@
   (label `fluxvm.dev/machine-type`, refused when the host's QEMU lacks it). The TCP relay closes both sides when
   either ends and now fronts every QEMU source (the egress hook drops non-loopback dials). Capabilities/params are
   restated on each attempt, a leftover TLS creds object is replaced, cancelling a completed non-post-copy migration
-  resumes the guest, and a receiver still receiving keeps its TTL. Unit-tested, and run live between two hosts (QEMU 10.2.1 on both, shared NFS disk, TCP relay): the guest
-  kept its uptime across the move and the machine type matched; `scripts/test-migration-two-host.sh` repeats it.
-  Not run: TLS, post-copy or multifd migrations, a cancel mid-transfer, or a source on an older QEMU.
+  resumes the guest, and a receiver still receiving keeps its TTL. Unit-tested, and run live between two hosts (shared NFS disk, TCP relay) with
+  `scripts/test-migration-two-host.sh`: pre-copy, multifd, post-copy, x509 TLS (no `tls_hostname` given), a cancel
+  mid-transfer followed by a retry, an unsupported machine type refused, and a source on QEMU 8.2.2 into 10.2.1.
+  In each the guest kept its uptime across the move. Not run: compression, auto-converge, a source older than 8.2.
 
 - **Browser terminal: search, copy mode, quick select, prompt marks, command palette.** `⌘F` search, `⌃⇧X` vi-like copy
   mode, `⌃⇧Space` quick select (URLs, paths, UUIDs, IPv4, hashes, numbers on screen), `⌘↑`/`⌘↓` between prompts,
