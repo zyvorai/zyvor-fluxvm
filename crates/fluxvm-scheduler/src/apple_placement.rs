@@ -33,6 +33,17 @@ pub struct AppleHostCaps {
     pub rosetta: bool,
 }
 
+/// Memory kept back for macOS itself: the larger of 3 GiB and a quarter of the Mac's unified memory. Kairon's Mac
+/// node reports allocatable memory the same way, so a fleet scheduler and `fluxvm-agent central` agree.
+pub fn headroom_mib(total_mib: u64) -> u64 {
+    (3 * 1024).max(total_mib / 4)
+}
+
+/// Memory VMs may use on a Mac with `total_mib` of unified memory.
+pub fn allocatable_mib(total_mib: u64) -> u64 {
+    total_mib.saturating_sub(headroom_mib(total_mib))
+}
+
 /// Apple's limit on concurrently running macOS guests per host.
 pub const MAX_MACOS_GUESTS: u32 = 2;
 
@@ -174,6 +185,15 @@ mod tests {
             memory_mib: 512,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn headroom_is_the_larger_of_three_gib_and_a_quarter() {
+        assert_eq!(headroom_mib(8 * 1024), 3 * 1024);
+        assert_eq!(headroom_mib(12 * 1024), 3 * 1024);
+        assert_eq!(headroom_mib(64 * 1024), 16 * 1024);
+        assert_eq!(allocatable_mib(16 * 1024), 12 * 1024);
+        assert_eq!(allocatable_mib(2 * 1024), 0, "never underflows");
     }
 
     #[test]
