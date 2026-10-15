@@ -21,7 +21,9 @@
   (label `fluxvm.dev/machine-type`, refused when the host's QEMU lacks it). The TCP relay closes both sides when
   either ends and now fronts every QEMU source (the egress hook drops non-loopback dials). Capabilities/params are
   restated on each attempt, a leftover TLS creds object is replaced, cancelling a completed non-post-copy migration
-  resumes the guest, and a receiver still receiving keeps its TTL. Unit-tested; not run end to end across two hosts.
+  resumes the guest, and a receiver still receiving keeps its TTL. Unit-tested, and run live between two hosts (QEMU 10.2.1 on both, shared NFS disk, TCP relay): the guest
+  kept its uptime across the move and the machine type matched; `scripts/test-migration-two-host.sh` repeats it.
+  Not run: TLS, post-copy or multifd migrations, a cancel mid-transfer, or a source on an older QEMU.
 
 - **Browser terminal: search, copy mode, quick select, prompt marks, command palette.** `⌘F` search, `⌃⇧X` vi-like copy
   mode, `⌃⇧Space` quick select (URLs, paths, UUIDs, IPv4, hashes, numbers on screen), `⌘↑`/`⌘↓` between prompts,
