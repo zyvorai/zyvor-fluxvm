@@ -8,8 +8,8 @@
   binary. Workflow and script only; no aarch64 release has been cut with it yet.
 
 - **User-manual PDFs removed.** `docs/user/pdf/` (four PDFs, their HTML sources and an index) and the README section
-  listing them are gone; the markdown manual is the source. `scripts/user-docs/build-user-pdfs.mjs` is still in the
-  tree, and `sync-to-website.mjs` skips a missing `pdf/` directory.
+  listing them are gone; the markdown manual is the source. The PDF builder (`build-user-pdfs.mjs`), the
+  `.docs-tools` markdown dependency and the PDF copying in `sync-to-website.mjs` are removed too.
 
 - **AppArmor: Kairon image cache and shared-disk locks.** The `fluxctl`/`fluxvm` profiles allow read+lock on
   `/var/lib/kairon-node/image-cache/**` (files are `kairon`-owned 0600, so `owner` never matched; every image-booted
