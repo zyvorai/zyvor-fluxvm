@@ -56,20 +56,20 @@ points() { api "$SU/rewind" | jget 'len(d["points"])'; }
 # 1. Opt in, then a history whose third action breaks the machine.
 [[ "$(api -X POST "$SU/rewind/config" -d '{"enabled":true,"max_points":10}' | jget 'd["enabled"]')" == True ]] \
   && ok "rewind enabled" || bad "could not enable rewind"
-run 'touch /tmp/healthy; echo v1 > /tmp/state' >/dev/null
+run 'echo v1 > /tmp/state' >/dev/null
 run 'echo v2 > /tmp/state' >/dev/null
-run 'rm /tmp/healthy' >/dev/null
+run 'touch /tmp/broken' >/dev/null
 run 'echo v3 > /tmp/state' >/dev/null
 [[ "$(points)" == 4 ]] && ok "a point before each of the 4 execs" || bad "points: $(api "$SU/rewind")"
 
 # 2. Bisect names the command that broke the test, and leaves the machine as it was.
-B="$(api -X POST "$SU/rewind/bisect" -d '{"test":"test -f /tmp/healthy"}')"
-[[ "$(echo "$B" | jget '"rm /tmp/healthy" in (d["culprit"]["command"] or "")')" == True ]] \
+B="$(api -X POST "$SU/rewind/bisect" -d '{"test":"! test -e /tmp/broken"}')"
+[[ "$(echo "$B" | jget '"touch /tmp/broken" in (d["culprit"]["command"] or "")')" == True ]] \
   && ok "bisect found the culprit: $(echo "$B" | jget 'd["culprit"]["command"]') ($(echo "$B" | jget 'd["ms"]') ms)" || bad "bisect: $B"
 [[ "$(run 'cat /tmp/state')" == v3 ]] && ok "the machine is back at its head after bisect" || bad "bisect left the machine elsewhere"
 
 # 3. Pin the point before the culprit, then undo one step: the last exec is reversed.
-TAG="$(api "$SU/rewind" | jget '[p["tag"] for p in d["points"] if "rm /tmp/healthy" in (p.get("command") or "")][0]')"
+TAG="$(api "$SU/rewind" | jget '[p["tag"] for p in d["points"] if "touch /tmp/broken" in (p.get("command") or "")][0]')"
 [[ "$(api -X POST "$SU/rewind/pin" -d "{\"tag\":\"$TAG\"}" -o /dev/null -w '%{http_code}')" == 200 ]] \
   && ok "point $TAG pinned" || bad "pin failed"
 api -X POST "$SU/rewind/undo" -d '{"steps":1}' >/dev/null
@@ -77,7 +77,7 @@ api -X POST "$SU/rewind/undo" -d '{"steps":1}' >/dev/null
 
 # 4. Undo to the pinned point: the breaking command is reversed too.
 api -X POST "$SU/rewind/undo" -d "{\"to\":\"$TAG\"}" >/dev/null
-[[ "$(run 'test -f /tmp/healthy && echo yes || echo no')" == yes ]] && ok "undo to a tag brought the file back" || bad "file still missing"
+[[ "$(run 'test -e /tmp/broken && echo yes || echo no')" == no ]] && ok "undo to a tag removed the breaking file" || bad "file still there"
 
 # 5. Branch from the earliest point; the parent is untouched.
 FIRST="$(api "$SU/rewind" | jget 'd["points"][0]["tag"]')"
@@ -85,7 +85,7 @@ BR="$(api -X POST "$SU/rewind/branch" -d "{\"tag\":\"$FIRST\"}")"
 C="$(echo "$BR" | jget 'd["items"][0]["id"]' 2>/dev/null || true)"
 [[ -n "$C" && "$C" != None ]] || bad "branch failed: $BR"
 CS="$U/v1/agents/sessions/$C"
-CO="$(api -X POST "$CS/exec" -d '{"command":"cat /tmp/state 2>/dev/null; test -f /tmp/healthy && echo healthy","timeout_seconds":60}' | jget 'd.get("stdout","").strip()')"
+CO="$(api -X POST "$CS/exec" -d '{"command":"cat /tmp/state 2>/dev/null; test -e /tmp/broken && echo broken","timeout_seconds":60}' | jget 'd.get("stdout","").strip()')"
 [[ "$CO" != *v2* && "$CO" != *v3* ]] && ok "the child starts from the old moment ($(echo $CO | tr '\n' ' '))" || bad "child state: $CO"
 [[ "$(run 'cat /tmp/state')" == v2 ]] && ok "the parent is untouched by the branch" || bad "parent changed"
 api -X DELETE "$CS" >/dev/null || true
