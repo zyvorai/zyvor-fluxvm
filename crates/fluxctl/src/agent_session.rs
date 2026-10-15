@@ -31,6 +31,21 @@ pub enum RewindAction {
         #[arg(long)]
         to: Option<String>,
     },
+    /// Find which command broke the machine: restores points, runs TEST in the guest after each (exit 0 =
+    /// good) and reports the first command after which it fails. Leaves the machine as it was.
+    Bisect {
+        /// Shell command run in the guest.
+        test: String,
+        /// A point known to pass (default: the oldest).
+        #[arg(long)]
+        good: Option<String>,
+        /// A point known to fail (default: the machine now).
+        #[arg(long)]
+        bad: Option<String>,
+        /// Per-run limit in seconds (default 60).
+        #[arg(long)]
+        timeout: Option<u64>,
+    },
     /// Keep a point through eviction and undo (`--unpin` to release it).
     Pin {
         tag: String,
@@ -1228,6 +1243,27 @@ pub async fn run(r: &Remote, cmd: AgentCommand) -> Result<()> {
                     }
                     show(
                         &r.call(Method::POST, &format!("{base}/undo"), Some(body))
+                            .await?,
+                    )
+                }
+                Some(RewindAction::Bisect {
+                    test,
+                    good,
+                    bad,
+                    timeout,
+                }) => {
+                    let mut body = json!({ "test": test });
+                    if let Some(g) = good {
+                        body["good"] = json!(g);
+                    }
+                    if let Some(b) = bad {
+                        body["bad"] = json!(b);
+                    }
+                    if let Some(t) = timeout {
+                        body["timeout_seconds"] = json!(t);
+                    }
+                    show(
+                        &r.call(Method::POST, &format!("{base}/bisect"), Some(body))
                             .await?,
                     )
                 }

@@ -118,6 +118,10 @@ pub(crate) fn routes() -> Router<Arc<VmManager>> {
             "/v1/agents/sessions/{id}/rewind/pin",
             post(rewind_pin_point),
         )
+        .route(
+            "/v1/agents/sessions/{id}/rewind/bisect",
+            post(rewind_bisect),
+        )
         .route("/v1/agents/sessions/{id}/fork", post(fork))
         .route("/v1/agents/sessions/{id}/promote", post(promote))
         .route("/v1/agents/sessions/{id}/events", get(events))
@@ -3143,6 +3147,164 @@ async fn rewind_config(
         json!({"enabled": st.enabled, "max_points": st.max_points, "memory": st.memory}),
     );
     Ok(Json(json!(st)))
+}
+
+/// The next state to test while narrowing `(lo, hi)`, where `lo` passed and `hi` failed; `None`
+/// when they are adjacent, so `hi` is the first bad state.
+fn bisect_next(lo: usize, hi: usize) -> Option<usize> {
+    (hi > lo + 1).then(|| lo + (hi - lo) / 2)
+}
+
+const BISECT_TEST_SECS: u64 = 60;
+
+#[derive(Debug, Deserialize)]
+struct BisectBody {
+    /// Shell command run in the guest after each restore; exit 0 means the state is good.
+    test: String,
+    /// A point known to pass (default: the oldest point).
+    #[serde(default)]
+    good: Option<String>,
+    /// A point known to fail (default: the machine as it is now).
+    #[serde(default)]
+    bad: Option<String>,
+    #[serde(default)]
+    timeout_seconds: Option<u64>,
+}
+
+/// Finds the first command whose effect made `test` fail. States are the rewind points (the
+/// machine just before each exec) plus, last, the machine as it is now; the command that ran
+/// between two adjacent states is the first point's `command`. Leaves the machine as it was.
+async fn rewind_bisect(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    token_tenant: Option<Extension<TokenTenant>>,
+    Path(id): Path<Uuid>,
+    headers: axum::http::HeaderMap,
+    Json(body): Json<BisectBody>,
+) -> ApiResult<Json<Value>> {
+    require_admin(role)?;
+    let _gate = begin_lifecycle(id, "restore")?.mark(&m, "restore");
+    let s = load(&m, id, &caller_tenant(&token_tenant)).await?;
+    check_if_match(&headers, &s)?;
+    running(&s)?;
+    egress_bound(&s)?;
+    if body.test.trim().is_empty() {
+        return Err(ApiError {
+            status: StatusCode::BAD_REQUEST,
+            message: "test is required".into(),
+        });
+    }
+    enforce_rules(&s, &body.test)?;
+    let st = rewind_read(&m, id).await;
+    let n = st.points.len();
+    if n == 0 {
+        return Err(gate_conflict(
+            "no rewind points: enable rewind, then run commands".into(),
+        ));
+    }
+    // State `n` is the machine as it is now.
+    let find = |tag: &Option<String>, default: usize| -> ApiResult<usize> {
+        match tag {
+            None => Ok(default),
+            Some(t) => st
+                .points
+                .iter()
+                .position(|p| &p.tag == t)
+                .ok_or_else(|| ApiError {
+                    status: StatusCode::NOT_FOUND,
+                    message: format!("session {id} has no rewind point {t:?}"),
+                }),
+        }
+    };
+    let mut lo = find(&body.good, 0)?;
+    let mut hi = find(&body.bad, n)?;
+    if lo >= hi {
+        return Err(ApiError {
+            status: StatusCode::BAD_REQUEST,
+            message: "good must be an older state than bad".into(),
+        });
+    }
+    // The machine now, so it can be put back whatever happens below.
+    let head_tag = format!("rw-bisect-{}", Utc::now().timestamp_millis());
+    let memory = st.memory && s.capabilities.memory_checkpoint;
+    m.create_vm_snapshot_with(s.sandbox_id, &head_tag, memory)
+        .await?;
+    let timeout = body
+        .timeout_seconds
+        .unwrap_or(BISECT_TEST_SECS)
+        .clamp(1, 600);
+    let mut steps: Vec<Value> = Vec::new();
+    let started = std::time::Instant::now();
+
+    let outcome: ApiResult<()> = async {
+        // Restores state `i` and returns (passed, exit code, tag).
+        let test_state = |i: usize| {
+            let m = m.clone();
+            let s = s.clone();
+            let tag = if i == n {
+                head_tag.clone()
+            } else {
+                st.points[i].tag.clone()
+            };
+            let cmd = body.test.clone();
+            async move {
+                restore_session_to(&m, &s, &tag).await?;
+                let res = m
+                    .exec_with_policy(s.sandbox_id, cmd, Some(timeout), s.policy.exec.clone())
+                    .await?;
+                let code = json!(res)["exit_code"].as_i64().unwrap_or(-1);
+                Ok::<(bool, i64, String), ApiError>((code == 0, code, tag))
+            }
+        };
+        // The two ends must disagree, or there is nothing to find.
+        let (lo_ok, lo_code, lo_tag) = test_state(lo).await?;
+        steps.push(json!({"state": lo, "tag": lo_tag, "passed": lo_ok, "exit_code": lo_code}));
+        if !lo_ok {
+            return Err(gate_conflict(format!(
+                "the test already fails on the good point (exit {lo_code}); pick an older `good`"
+            )));
+        }
+        let (hi_ok, hi_code, hi_tag) = test_state(hi).await?;
+        steps.push(json!({"state": hi, "tag": hi_tag, "passed": hi_ok, "exit_code": hi_code}));
+        if hi_ok {
+            return Err(gate_conflict(
+                "the test passes on the bad state too; nothing to bisect".into(),
+            ));
+        }
+        while let Some(mid) = bisect_next(lo, hi) {
+            let (ok, code, tag) = test_state(mid).await?;
+            steps.push(json!({"state": mid, "tag": tag, "passed": ok, "exit_code": code}));
+            if ok {
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+        }
+        Ok(())
+    }
+    .await;
+
+    // Put the machine back, success or not, and drop the temporary snapshot.
+    let restored = restore_session_to(&m, &s, &head_tag).await;
+    let _ = m.delete_vm_snapshot(s.sandbox_id, &head_tag).await;
+    outcome?;
+    restored?;
+
+    let culprit = &st.points[lo];
+    record(
+        &m,
+        id,
+        "rewind.bisect",
+        json!({"command": culprit.command, "last_good": culprit.tag, "steps": steps.len(),
+               "ms": started.elapsed().as_millis() as u64}),
+    );
+    Ok(Json(json!({
+        "culprit": {"command": culprit.command, "ran_after": culprit.tag, "at": culprit.created_at},
+        "first_bad_state": hi,
+        "tested": steps,
+        "ms": started.elapsed().as_millis() as u64,
+        "machine_restored": true,
+    })))
 }
 
 #[derive(Debug, Deserialize)]
@@ -7336,6 +7498,28 @@ mod tests {
         assert_eq!(tags, ["a", "b"]);
         // The next undo goes one action further back from the restored state.
         assert_eq!(rewind_target(&st, 1), Ok(1));
+    }
+
+    #[test]
+    fn bisect_narrows_to_the_first_bad_state() {
+        // States 0..=9, the first bad one is `first_bad`; the ends are never tested again.
+        for first_bad in 1..=9usize {
+            let (mut lo, mut hi) = (0usize, 9usize);
+            let mut tested = 0;
+            while let Some(mid) = bisect_next(lo, hi) {
+                tested += 1;
+                if mid < first_bad {
+                    lo = mid;
+                } else {
+                    hi = mid;
+                }
+            }
+            assert_eq!(hi, first_bad, "first_bad={first_bad}");
+            assert_eq!(lo + 1, hi);
+            assert!(tested <= 4, "9 states need at most ceil(log2(9)) tests");
+        }
+        assert_eq!(bisect_next(3, 4), None);
+        assert_eq!(bisect_next(0, 2), Some(1));
     }
 
     #[test]
