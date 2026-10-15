@@ -9,7 +9,8 @@
 //! (also by itself via `--watch-pid`, should the daemon be gone). A server that dies while the runner lives is restarted
 //! on the same port.
 //!
-//! UNVERIFIED: whether Virtualization.framework's NBD client works against `fluxvm-blockd` has not been run on hardware.
+//! Verified on an M4: Virtualization.framework's NBD client connects to `fluxvm-blockd` (plain, encrypted and lazy HTTP
+//! overlays); see the hardware log in docs/macos.md.
 
 use anyhow::{Context, Result, bail};
 use fluxvm_core::model::{AppleDisk, AppleDiskKind};
