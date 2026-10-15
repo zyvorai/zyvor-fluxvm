@@ -5893,6 +5893,18 @@ impl VmManager {
                 }
             } else if vm.status == VmStatus::Creating
                 && now - vm.created_at > STUCK_CREATING_GRACE
+                // An adopt-mode receiver's placeholder is inserted at the
+                // start of `launch_adopt_receiver`, carries the *source's*
+                // `created_at` (so the grace above is already long past), and
+                // only gets its receiver file after QEMU and the network are
+                // up -- seconds later. A tick landing in that window used to
+                // delete the receiver mid-launch and the migration then
+                // failed at commit with the destination runtime "failed".
+                // Receiver placeholders are labelled; the launch path removes
+                // the placeholder itself on every error, and the receiver
+                // file's TTL (`reap_migration_receivers`) owns cleanup once it
+                // exists.
+                && !vm.labels.contains_key(live_migration::MIGRATING_FROM_LABEL)
                 // An adopt-mode receiver's placeholder carries the source's
                 // `created_at` and stays Creating until adopted; its receiver
                 // file's TTL (`reap_migration_receivers`) owns its cleanup.
