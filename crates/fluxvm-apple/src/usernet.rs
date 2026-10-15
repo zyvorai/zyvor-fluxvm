@@ -13,7 +13,8 @@
 //! real frames to the process-wide `fluxvm_netobs` tap, tagged with the VM's identity, so flows, DNS and health show up in
 //! `/v1/netobs/*` like any other guest traffic. (Its stdout flow-event JSON lines are only logged.)
 //!
-//! UNVERIFIED on hardware: no VM has been booted through this path.
+//! Verified on an Apple M4 (DHCP, DNS, ICMP, IPv6 SLAAC, TCP egress and TCP host-to-guest forwards, deny verdicts, live
+//! policy, jumbo MTU). UDP forwards are unit-tested only; see the hardware log in docs/macos.md.
 
 use anyhow::{Context, Result, bail};
 use fluxvm_core::model::{AppleGuest, AppleSpec, AppleUsernet, CreateVmRequest, NetworkSpec};

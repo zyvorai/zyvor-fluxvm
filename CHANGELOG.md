@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- **Docs and comments no longer call hardware-verified Apple features unverified.** `apple.usernet` (DHCP, DNS, TCP
+  egress, TCP forwards, policy) and macOS-guest vsock were verified on an M4 (hardware log in `docs/macos.md`), but
+  the capability table, model docs, runner header and one doc paragraph still said "unverified" or "never booted".
+  They now say what ran; UDP forwards on usernet remain unit-tested only. No behaviour change.
+
 - **Migration retries no longer inherit a cancelled attempt's limits.** `migration/start` stated capabilities but not
   the tunables, and QEMU keeps them: after a cancelled 1 Mbps attempt, a retry with default settings stayed `active`
   and never finished. Every start now sets `max-bandwidth`, `downtime-limit`, multifd channels and the auto-converge

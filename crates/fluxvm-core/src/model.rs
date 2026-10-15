@@ -1127,7 +1127,7 @@ pub struct AppleSpec {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub vsock_services: Vec<AppleVsockService>,
     /// macOS guests: add a virtio-socket (vsock) device so a guest-side agent (a LaunchDaemon) can be reached without SSH.
-    /// EXPERIMENTAL and unverified on hardware: whether a macOS guest exposes a usable vsock device is a hypothesis. When
+    /// EXPERIMENTAL; verified once on one M4 and macOS 27.0.1, other macOS versions untested. When
     /// the guest does not answer on vsock, exec and file access fall back to SSH. Refused for Linux guests (they always have vsock).
     #[serde(default)]
     pub macos_vsock: bool,
@@ -1175,7 +1175,7 @@ pub struct AppleSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rosetta_cache: Option<String>,
     /// Linux guests: replace the NAT card with a userspace gateway (`fluxvm-usernet`) that applies this egress policy,
-    /// DNS allow/deny and port forwards, and feeds `/v1/netobs/*`. UNVERIFIED on hardware.
+    /// DNS allow/deny and port forwards, and feeds `/v1/netobs/*`. Verified on an M4 except UDP forwards (unit-tested only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usernet: Option<AppleUsernet>,
     /// Linux guests on the Mac's NAT (or bridged): the MTU the guest sets on its primary card, 576..=1500, applied through the

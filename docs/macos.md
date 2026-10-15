@@ -282,7 +282,7 @@ way as for Linux guests. Exercised once on an Apple M4 (macOS 27.2 host) with a 
 and `POST /v1/vms/{id}/restore` returned 200 after 15 s with the VM running and its address reported again. Not checked: that processes
 inside the guest kept running across the restore (no SSH login was set up in that template).
 
-Exec over vsock for macOS guests is **experimental and unverified** (next section). The `macos` image name looks up and downloads the
+Exec over vsock for macOS guests is **experimental and verified once** on one M4 and macOS 27.0.1 (next section). The `macos` image name looks up and downloads the
 IPSW; that download path has not been run end to end (only Apple's metadata lookup was checked on an Apple silicon Mac). Apple
 allows two macOS VMs at a time per Mac.
 
@@ -704,8 +704,8 @@ These compile against the macOS 27 SDK and are validated at admission. Except fo
   reason, such as a spoofed source, as `dropped`; the details are in the gateway log, `<workspace>/usernet.log`). IPv6 is opt-in:
   `"ipv6": true` serves a ULA /64 by SLAAC with the same egress policy, `allow_cidrs6` / `deny_cidrs6` take IPv6 CIDRs, and a forward
   can set `"guest_family": "v6"` (with an optional `"guest_addr"` inside the /64; otherwise the last address the guest used). Frames reach the observer only when the VM is launched by the `fluxctl serve` daemon. IP discovery and
-  the legacy 127.0.0.1 `network.forwards` relay read the NAT lease file and do not work: use `usernet.port_forwards`. Never booted;
-  the file-handle attachment path is the same one private networks use, which is verified.
+  the legacy 127.0.0.1 `network.forwards` relay read the NAT lease file and do not work: use `usernet.port_forwards`. Booted and verified on an
+  M4 (see the hardware log); the file-handle attachment path is the same one private networks use.
 - **Custom Virtio (macOS 27+, Linux guests):** `custom_virtio: true` adds a vendor Virtio device (id `0x3F`, PCI `1af4:107f`; an earlier id, `0xFF00`, was outside the range Linux binds) with a host-side provider. Queue 0 is a bounded (1 MiB) versioned JSON control channel (`ping`, `echo`, `capabilities`, `stats`, `map-probe`); queue 1 is the bulk queue (`bulk_zero`, `fill`, `copy`, `crc32`, up to 64 MiB). The guest driver is in `guest/virtio-flux` (`/dev/fluxvm`, `/dev/fluxvm-bulk`, `fluxvm_virtioctl`). **Verified** on the M4 with a Debian 13 guest: `ping`, `echo`, `stats` and `capabilities`. `fluxvm_virtioctl bulk-test`, `bulk-zero-test`, `bulk-copy-test` and `bulk-crc-test` (queue 1, 1 B to 1 MiB) pass after the driver stopped using a stack buffer for its request; the 64 MiB host cap was not tried. See [macos-vz27-full-stack.md](macos-vz27-full-stack.md).
   The device also handles DRIVER_OK, stop, pause, resume and reset, and saves its counters with a VM snapshot (the configuration sets
   `supportsSaveRestore`; without it Virtualization refuses to save a VM with the device). **Verified** on the M4: snapshot, stop and
@@ -773,7 +773,7 @@ These compile against the macOS 27 SDK and are validated at admission. Except fo
 | shared folders (virtiofs), VM snapshots (memory + disk, Linux and macOS guests), pause / resume, graceful shutdown, force stop, EFI Secure Boot (macOS 27+, Linux) | TPM, confidential profiles |
 | guest agent over vsock (proxied like Firecracker; needs the agent in the image) | hotplug of CPU, memory and NICs; cdroms; firmware overrides |
 | macOS guests (installed from an IPSW through the API or by hand, then cloned; see above) | live migration, in-place restore of a running VM, direct kernel boot of macOS guests |
-| `apple.usernet` userspace gateway for Linux guests (egress/DNS policy, UDP/TCP forwards, netobs frames; DHCP, DNS, ICMP, IPv6 SLAAC and deny verdicts verified on hardware, **TCP and forwards not yet re-verified after a fix**) | |
+| `apple.usernet` userspace gateway for Linux guests (egress/DNS policy, UDP/TCP forwards, netobs frames; DHCP, DNS, ICMP, IPv6 SLAAC and deny verdicts verified on hardware, TCP egress and TCP forwards re-verified after a fix (hardware log); **UDP forwards unit-tested only**) | |
 | network observability: `/v1/netobs/*`, `fluxctl netobs`, `/metrics` series, private-network switches bridged into the daemon (see [netobs.md](netobs.md); unit/integration tested with synthetic frames, **unverified with live guest traffic**) | packet payload retention without an explicit, filtered, expiring capture |
 | `POST /v1/vms/{id}/vz/display` and `fluxctl vz display resize` (macOS 14+; **partial on hardware**: the connector's preferred mode changes, the active mode needs a KMS client in the guest) | |
 | `GET /v1/vms/{id}/vz/attestation` and `fluxctl vz attestation verify`: signed boot manifest, host claim only (**not exercised on a booted VM**) | hardware attestation, TPM, measured boot |
