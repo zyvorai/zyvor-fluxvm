@@ -161,10 +161,13 @@ async fn beat(http: &reqwest::Client, cfg: &NodeConfig, preferred: usize) -> Res
     } else {
         (NodeSecurityCapabilities::standard_only(), None)
     };
-    let apple = match &cfg.sim {
+    let mut apple = match &cfg.sim {
         Some(h) => Some(sim_apple_caps(h, local)),
         None => fetch_apple_caps(vcpus_total, memory_mib_total, local).await,
     };
+    if let (Some(caps), true, None) = (apple.as_mut(), reachable, &cfg.sim) {
+        caps.images = fetch_cached_images(http, &cfg.fluxvm_url).await;
+    }
     let allocated = reachable
         .then(|| json!({"vcpus": local.allocated_vcpus, "memory_mib": local.allocated_memory_mib}));
 
@@ -489,6 +492,31 @@ async fn fetch_node_security(http: &reqwest::Client, fluxvm_url: &str) -> NodeSe
 }
 
 /// Memory pressure, warm slots and sandbox counts for fleet placement; `None` when the daemon does not serve them.
+/// Built-in images the local daemon already holds; empty when it does not answer (which only removes the bias).
+async fn fetch_cached_images(http: &reqwest::Client, fluxvm_url: &str) -> Vec<String> {
+    let Ok(resp) = http
+        .get(format!("{fluxvm_url}/v1/host/images"))
+        .send()
+        .await
+    else {
+        return Vec::new();
+    };
+    if !resp.status().is_success() {
+        return Vec::new();
+    }
+    let Ok(v) = resp.json::<serde_json::Value>().await else {
+        return Vec::new();
+    };
+    v.get("builtin_cached")
+        .and_then(|a| a.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|s| s.as_str().map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 async fn fetch_density(
     http: &reqwest::Client,
     fluxvm_url: &str,
@@ -608,6 +636,7 @@ fn sim_apple_caps(h: &SimHost, local: LocalVmStats) -> AppleHostCaps {
         macos_guests: local.macos_guests,
         secure_boot: true,
         rosetta: true,
+        images: Vec::new(),
     }
 }
 
@@ -633,6 +662,7 @@ async fn fetch_apple_caps(
         macos_guests: local.macos_guests,
         secure_boot: caps.efi_secure_boot,
         rosetta: caps.rosetta == "installed",
+        images: Vec::new(),
     })
 }
 

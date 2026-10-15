@@ -31,6 +31,10 @@ pub struct AppleHostCaps {
     /// Rosetta for Linux is installed.
     #[serde(default)]
     pub rosetta: bool,
+    /// Built-in images that already have a ready copy here (`GET /v1/host/images`). Empty from an agent that does not
+    /// report it, which only means no bias: the host can still fetch the image on first use.
+    #[serde(default)]
+    pub images: Vec<String>,
 }
 
 /// Memory kept back for macOS itself: the larger of 3 GiB and a quarter of the Mac's unified memory. Kairon's Mac
@@ -103,7 +107,14 @@ pub struct ApplePlacementRequest {
     pub needs_secure_boot: bool,
     pub needs_rosetta: bool,
     pub bridge_interface: Option<String>,
+    /// A built-in image name (`debian-13`); a host that already holds it is preferred over one that must download it.
+    pub image: Option<String>,
 }
+
+/// Added to the score of a host that already has the requested image. It outweighs any fit difference (the fit term is
+/// `cpu * 1024 + mem / 64`, a few tens of thousands on the largest Mac), so a download is avoided whenever a host that
+/// has the image can take the VM at all.
+pub const IMAGE_PRESENT_BONUS: i64 = 1_000_000;
 
 impl ApplePlacementRequest {
     pub fn from_request(req: &CreateVmRequest) -> Self {
@@ -118,6 +129,12 @@ impl ApplePlacementRequest {
             needs_secure_boot: req.secure_boot == Some(true),
             needs_rosetta: apple.rosetta,
             bridge_interface: apple.bridge_interface,
+            // Only a bare name can be a built-in image; a path is the operator's own file.
+            image: req
+                .image
+                .to_str()
+                .filter(|s| !s.is_empty() && !s.contains('/'))
+                .map(str::to_owned),
         }
     }
 }
@@ -145,7 +162,16 @@ pub fn score(c: &AppleHostCaps, r: &ApplePlacementRequest) -> Option<i64> {
     }
     let cpu_after = i64::from(c.free_cpu - r.vcpus);
     let mem_after = i64::try_from((c.free_memory_mib - r.memory_mib) / 64).unwrap_or(i64::MAX);
-    Some(-(cpu_after.saturating_mul(1024).saturating_add(mem_after)))
+    let fit = -(cpu_after.saturating_mul(1024).saturating_add(mem_after));
+    let cached = r
+        .image
+        .as_ref()
+        .is_some_and(|i| c.images.iter().any(|x| x == i));
+    Some(if cached {
+        fit + IMAGE_PRESENT_BONUS
+    } else {
+        fit
+    })
 }
 
 /// Index of the best host, or `None` if no host fits. Ties go to the earlier host.
@@ -176,6 +202,7 @@ mod tests {
             macos_guests: 0,
             secure_boot: true,
             rosetta: false,
+            images: vec![],
         }
     }
 
@@ -185,6 +212,56 @@ mod tests {
             memory_mib: 512,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn a_host_with_the_image_wins_over_a_tighter_fit() {
+        let r = ApplePlacementRequest {
+            image: Some("debian-13".into()),
+            ..small()
+        };
+        let tight = AppleHostCaps {
+            free_cpu: 2,
+            free_memory_mib: 1024,
+            ..studio()
+        };
+        let roomy = AppleHostCaps {
+            images: vec!["debian-13".into()],
+            ..studio()
+        };
+        assert_eq!(pick(&[tight.clone(), roomy.clone()], &r), Some(1));
+        // Without the image on any host the tightest fit still wins.
+        let none = ApplePlacementRequest {
+            image: Some("ubuntu-24.04".into()),
+            ..small()
+        };
+        assert_eq!(pick(&[tight, roomy], &none), Some(0));
+    }
+
+    #[test]
+    fn image_bias_never_admits_a_host_that_cannot_fit() {
+        let r = ApplePlacementRequest {
+            vcpus: 64,
+            image: Some("debian-13".into()),
+            ..small()
+        };
+        let has = AppleHostCaps {
+            images: vec!["debian-13".into()],
+            ..studio()
+        };
+        assert_eq!(score(&has, &r), None);
+    }
+
+    #[test]
+    fn a_path_is_not_an_image_name() {
+        let mut req = create("linux");
+        req.image = "/var/lib/disk.raw".into();
+        assert_eq!(ApplePlacementRequest::from_request(&req).image, None);
+        req.image = "debian-13".into();
+        assert_eq!(
+            ApplePlacementRequest::from_request(&req).image.as_deref(),
+            Some("debian-13")
+        );
     }
 
     #[test]

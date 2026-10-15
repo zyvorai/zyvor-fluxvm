@@ -756,6 +756,8 @@ Two read-only routes feed a dashboard without scraping `/metrics`:
   once: the daemon rewrites the gateway's config and signals it, and **new** connections and DNS queries follow the new
   policy while open connections are not cut. Reply: the policy plus `applied` and a `note`. Port forwards, MTU and
   addresses are not changed this way.
+- `GET /v1/host/images`: `{"builtin_cached": ["debian-13", ...]}`, the built-in images with a ready copy on this host (no network
+  access). `fluxvm-agent node` sends it in the heartbeat and `fluxvm-agent central` prefers a Mac that already has the image.
 - `GET /v1/host/storage`: where disk space goes. `volume` (`path`, `total_bytes`, `free_bytes` of the filesystem holding the
   state directory), `vms[]` (`vm_id`, `name`, `status`, `disk` and `other` as `{allocated_bytes, logical_bytes, files}`:
   the root disk, and everything else in the workspace), `branches[]` (`id`, `name`, `usage`), `images` (the image cache) and

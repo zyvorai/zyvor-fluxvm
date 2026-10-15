@@ -43,6 +43,7 @@ pub(crate) fn routes() -> Router<Arc<VmManager>> {
         .route("/v1/host/history", get(host_history))
         .route("/v1/stats", get(node_stats))
         .route("/v1/host/storage", get(host_storage))
+        .route("/v1/host/images", get(host_images))
         .route(
             "/v1/vms/{id}/usernet/policy",
             get(usernet_policy).put(usernet_policy_set),
@@ -80,6 +81,16 @@ async fn host_capabilities() -> ApiResult<Json<Value>> {
     Ok(Json(
         fluxvm_scheduler::vz_devices::apple_capabilities_json().await,
     ))
+}
+
+/// Built-in images with a ready copy on this host (no network access). `fluxvm-agent node` reports it in the heartbeat so
+/// `fluxvm-agent central` can prefer a Mac that will not have to download the image.
+async fn host_images(State(m): State<Arc<VmManager>>) -> Json<Value> {
+    let cfg = m.cfg.clone();
+    let cached = tokio::task::spawn_blocking(move || fluxvm_image::builtin::cached_names(&cfg))
+        .await
+        .unwrap_or_default();
+    Json(json!({ "builtin_cached": cached }))
 }
 
 /// Everything a dashboard needs in one cheap call: daemon, host, VM counts, per-VM usage rows and helper availability.

@@ -1389,6 +1389,12 @@ fn apple_placement_request(
             .and_then(|a| a.get("bridge_interface"))
             .and_then(Value::as_str)
             .map(str::to_owned),
+        // A bare name can be a built-in image; a path is the operator's own file and carries no bias.
+        image: body
+            .get("image")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty() && !s.contains('/'))
+            .map(str::to_owned),
     })
 }
 
@@ -3559,6 +3565,22 @@ mod tests {
             free_memory_mib,
             ..AppleHostCaps::default()
         }
+    }
+
+    #[test]
+    fn apple_request_carries_a_bare_image_name_but_not_a_path() {
+        let named = json!({"backend": "vz", "image": "debian-13"});
+        let r = apple_placement_request(&named, 1, 512).unwrap();
+        assert_eq!(r.image.as_deref(), Some("debian-13"));
+        let path = json!({"backend": "vz", "image": "/Users/x/disk.raw"});
+        assert_eq!(apple_placement_request(&path, 1, 512).unwrap().image, None);
+        // A node that already has the image is preferred by the apple score.
+        let has = AppleHostCaps {
+            images: vec!["debian-13".into()],
+            ..caps(8, 16 * 1024)
+        };
+        let lacks = caps(8, 16 * 1024);
+        assert!(apple_score(&has, &r).unwrap() > apple_score(&lacks, &r).unwrap());
     }
 
     #[test]
