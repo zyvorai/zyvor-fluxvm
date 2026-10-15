@@ -75,6 +75,32 @@ and [SECURITY.md](../../SECURITY.md).
 | `<state_dir>/backups/` | VM backups (`fluxctl backup`) |
 | `journalctl -u fluxvm -f` | Daemon journal |
 
+## AppArmor and Kairon
+
+On Ubuntu the AppArmor profile (`deploy/apparmor/fluxvm`) runs in enforce mode. After
+upgrading, reload it:
+
+```bash
+sudo install -m 0644 deploy/apparmor/fluxvm /etc/apparmor.d/fluxvm
+sudo apparmor_parser -r /etc/apparmor.d/fluxvm
+```
+
+If a Kairon Machine goes to `Error` with `opening base image
+/var/lib/kairon-node/image-cache/...: Permission denied`, the loaded profile is older
+than the rule that lets FluxVM read Kairon's image cache. Confirm with
+`journalctl -k | grep 'apparmor="DENIED"'`, then reload as above. If you edited
+`/etc/apparmor.d/fluxvm` by hand (for example an extra QEMU path), merge the new rule
+instead of overwriting the file. A `storage=shared` disk outside `/var/lib/fluxvm`
+also needs the profile's file-lock permission for QEMU's image lock.
+
+## Live migration across hosts
+
+A migration receiver boots the same concrete machine type as the source (for example
+`pc-q35-noble`), and creating one fails up front when the receiving host's QEMU does
+not list that type: migrate to the same or a newer QEMU release. A receiver that is
+still receiving past its time limit is kept until the transfer ends. Details:
+[operations](../operations.md).
+
 ## Production checklist
 
 ```bash
