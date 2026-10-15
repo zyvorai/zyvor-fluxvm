@@ -1,0 +1,84 @@
+name: Release (Linux package)
+
+# Builds the Linux package (fluxctl, fluxvm-hypervisor, fluxvm-agent) for a version tag and attaches it, with its
+# checksum, to that tag's GitHub release (created as a DRAFT if it does not exist yet, so nothing is published until
+# someone publishes it). scripts/install.sh downloads exactly these assets. The macOS package is release-macos.yml.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to package (builds and uploads a workflow artifact only if empty)"
+        required: false
+
+permissions:
+  contents: write
+
+jobs:
+  package:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-22.04
+            experimental: false
+          # GitHub-hosted arm64 Linux runners; not every repository has them, so a missing runner must not
+          # block the x86_64 package or the release.
+          - arch: aarch64
+            runner: ubuntu-22.04-arm
+            experimental: true
+    runs-on: ${{ matrix.runner }}
+    continue-on-error: ${{ matrix.experimental }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: fluxvm
+          ref: ${{ github.event.inputs.tag || github.ref }}
+      # fluxvm-image depends on the sibling guestkit project through a relative path.
+      - uses: actions/checkout@v7
+        with:
+          repository: zyvorai/guestkit
+          path: guestkit
+      - uses: dtolnay/rust-toolchain@stable
+      - name: System dependencies (the same as ci.yml)
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq libsystemd-dev libhivex-dev clang llvm libbpf-dev linux-libc-dev
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fluxvm
+          key: release-linux-${{ matrix.arch }}
+      - name: Package
+        id: pkg
+        working-directory: fluxvm
+        run: |
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          scripts/package-linux.sh --version "${TAG#v}"
+          echo "file=$(ls target/package/*.tar.gz)" >> "$GITHUB_OUTPUT"
+      - name: Smoke test in a clean container
+        working-directory: fluxvm
+        run: |
+          F="$(realpath "${{ steps.pkg.outputs.file }}")"
+          docker run --rm -v "$F:/pkg.tar.gz:ro" ubuntu:22.04 bash -euc '
+            apt-get update -qq && apt-get install -y -qq libhivex0 libsystemd0 >/dev/null
+            mkdir /p && tar -xzf /pkg.tar.gz -C /p
+            for b in fluxctl fluxvm-hypervisor fluxvm-agent; do
+              ldd /p/fluxvm-*/bin/$b | grep "not found" && { echo "$b has missing libraries"; exit 1; }
+            done
+            /p/fluxvm-*/bin/fluxctl --version
+          '
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fluxvm-linux-${{ matrix.arch }}
+          path: |
+            fluxvm/target/package/*.tar.gz
+            fluxvm/target/package/*.sha256
+      - name: Attach to the release (draft if new)
+        if: github.event_name == 'push' || github.event.inputs.tag != ''
+        working-directory: fluxvm
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --draft --title "$TAG" --notes "Linux package. Install with: curl -fsSL https://zyvorai.github.io/zyvor-fluxvm/install.sh | bash"
+          gh release upload "$TAG" target/package/*.tar.gz target/package/*.sha256 --clobber

@@ -50,7 +50,7 @@ FluxVM runs natively on Apple silicon. Its `vz` backend drives Apple's **Virtual
 | **A throwaway computer per agent task** | An offline sandbox (no network card) is ready in about 4.5 s and forks into four running copies in about 4 s; a local model stays reachable over one vsock port. [Demo](examples/agent-sandbox-demo/README.md) · [Agent sessions](docs/agent-platform/README.md) · [Agents page](https://zyvorai.github.io/zyvor-fluxvm/agents) |
 
 ```bash
-curl -fsSL https://zyvorai.github.io/zyvor-fluxvm/install.sh | bash   # drives Homebrew, starts the service, checks healthz
+curl -fsSL https://raw.githubusercontent.com/zyvorai/zyvor-fluxvm/main/scripts/install.sh | bash   # drives Homebrew, starts the service, checks healthz
 # or by hand:
 brew install zyvorai/tap/fluxvm                     # prebuilt, Apple silicon, macOS 14+
 fluxctl run                                         # a throwaway Debian 13 VM and a shell

@@ -398,8 +398,9 @@ const INSTALL_TABS: {id: string; label: string; note: ReactNode; code: string}[]
       </>
     ),
     code: [
-      'brew install zyvorai/tap/fluxvm',
-      'brew services start zyvorai/tap/fluxvm   # the daemon, API on 127.0.0.1:7788',
+      '# one command, no sudo (or: brew install zyvorai/tap/fluxvm)',
+      'curl -fsSL https://zyvorai.github.io/zyvor-fluxvm/install.sh | bash -s -- --service',
+      'curl -s http://127.0.0.1:7788/healthz     # the daemon, API on 127.0.0.1:7788',
       'fluxctl run -- uname -a                  # a throwaway Debian VM, one command',
       'fluxctl mcp install claude-code --allow-write   # wire up an agent',
     ].join('\n'),

@@ -100,6 +100,32 @@ impl VmManager {
         labels: BTreeMap<String, String>,
         actor: Option<&str>,
     ) -> Result<VmBranch> {
+        self.create_branch_from(vm_id, name, labels, actor, None)
+            .await
+    }
+
+    /// Like `create_branch`, but from the VM's existing snapshot `from_tag` (a moment in its past) instead of taking
+    /// a new one. The snapshot is left in place. The VM is not touched, so it keeps running undisturbed.
+    pub async fn create_branch_from_snapshot(
+        self: &Arc<Self>,
+        vm_id: Uuid,
+        from_tag: &str,
+        name: String,
+        labels: BTreeMap<String, String>,
+        actor: Option<&str>,
+    ) -> Result<VmBranch> {
+        self.create_branch_from(vm_id, name, labels, actor, Some(from_tag))
+            .await
+    }
+
+    async fn create_branch_from(
+        self: &Arc<Self>,
+        vm_id: Uuid,
+        name: String,
+        labels: BTreeMap<String, String>,
+        actor: Option<&str>,
+        from_tag: Option<&str>,
+    ) -> Result<VmBranch> {
         validate_vm_name(&name)?;
         if labels.len() > 16
             || labels
@@ -123,13 +149,24 @@ impl VmManager {
         }
 
         let id = Uuid::new_v4();
-        let tag = format!("branch-{}", &id.simple().to_string()[..12]);
+        let tag = match from_tag {
+            Some(t) => {
+                crate::validate_snapshot_tag(t)?;
+                if !fluxvm_apple::snapshot_dir(&src.workspace, t).is_dir() {
+                    bail!("VM {vm_id} has no snapshot {t:?}");
+                }
+                t.to_string()
+            }
+            None => format!("branch-{}", &id.simple().to_string()[..12]),
+        };
         let dir = self.branch_dir(id);
         let partial = self.branches_dir().join(format!(".{id}.partial"));
         std::fs::create_dir_all(self.branches_dir())?;
         set_private(&self.branches_dir());
 
-        self.create_vm_snapshot(vm_id, &tag).await?;
+        if from_tag.is_none() {
+            self.create_vm_snapshot(vm_id, &tag).await?;
+        }
         let exported: Result<u64> = async {
             let (ws, p, t) = (src.workspace.clone(), partial.clone(), tag.clone());
             tokio::task::spawn_blocking(move || {
@@ -142,8 +179,10 @@ impl VmManager {
             Ok(std::fs::metadata(state).map(|m| m.len()).unwrap_or(0))
         }
         .await;
-        // The VM's own snapshot has done its job, whatever happened.
-        if let Err(e) = self.delete_vm_snapshot(vm_id, &tag).await {
+        // The VM's own snapshot has done its job, whatever happened. One that already existed is not ours to remove.
+        if from_tag.is_none()
+            && let Err(e) = self.delete_vm_snapshot(vm_id, &tag).await
+        {
             tracing::warn!(vm = %vm_id, tag, error = %e, "removing the branch's temporary snapshot failed");
         }
         let state_bytes = match exported {

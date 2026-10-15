@@ -97,6 +97,12 @@ target/debug/fluxvm-agent sim-node --name studio-2 --token $TOKEN --vcpus 24 --m
 | `--interval-secs` | 10 | heartbeat interval |
 | `--overlay-config` | none | write the overlay.json this Mac would get here |
 
+A node agent's heartbeat has bounded timeouts (3 s connect, 10 s request) and backs off with jitter after failures
+(the interval doubled per failure, up to 8x). If it cannot reach its own FluxVM daemon it still heartbeats, with
+`daemon.reachable: false` and the error; `GET /fleet/nodes` shows `daemon_reachable: false` and placement skips the node,
+rather than the node silently going stale or reporting zero VMs. The node also sends `allocated` (the summed vCPUs and
+memory of its active VMs), which central uses in place of its per-VM estimate; an older agent keeps the estimate.
+
 `fluxctl fleet …` works against it as against a real fleet; see [mac-cloud-tenancy.md](mac-cloud-tenancy.md).
 To try failover, run two centrals with `--ha-redis` ([fleet-ha.md](fleet-ha.md)) and give each sim node both URLs.
 
@@ -105,6 +111,7 @@ To try failover, run two centrals with `--ha-redis` ([fleet-ha.md](fleet-ha.md))
 - Booting, real disks and images, the guest agent beyond echoing the command, and the network: overlay.json is
   written but no switch runs. The screen is a drawn picture that shows what you typed and where you clicked; a
   volume is a name and a size (nothing is written); a tunnel is a local echo on every port.
-- Resource use: free CPU and memory are the Mac's size minus 2 vCPUs and 2 GiB per VM, as a real node reports them.
+- Resource use: free CPU and memory are the Mac's size minus what the active VMs (creating, running, paused) request,
+  summed from their records, as a real node reports them. A VM record without a size counts as 2 vCPUs and 2 GiB.
 - VM state survives only as long as the process; restarting a sim node empties it, which the reconciler then sees as
   VMs that vanished.

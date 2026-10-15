@@ -1,6 +1,6 @@
 # macOS 27 VZ: remaining full-stack implementation
 
-This change finishes the post-#198 work in one PR. Everything below is implemented; what was and was not verified on hardware is listed under "Hardware status" at the end.
+This change finishes the post-#198 work in one PR. Everything below is implemented in code, which is not the same as verified: what was and was not run on hardware is listed under "Hardware status" at the end, and the platform gates (restricted entitlements, UI consent) are not code gaps.
 
 ## 1. virtio-flux guest path
 

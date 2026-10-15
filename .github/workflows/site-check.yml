@@ -3,7 +3,7 @@
 name: Docs site check
 on:
   pull_request:
-    paths: ['website/**', 'docs/**', 'scripts/install.sh', '.github/workflows/site-check.yml']
+    paths: ['website/**', 'docs/**', 'scripts/install.sh', 'scripts/test-install.sh', '.github/workflows/site-check.yml']
 permissions:
   contents: read
 concurrency:
@@ -18,6 +18,10 @@ jobs:
       with: {node-version: '22', cache: npm, cache-dependency-path: website/package-lock.json}
     - name: install.sh served by the site matches scripts/install.sh
       run: cmp scripts/install.sh website/static/install.sh
+    - name: install.sh lints and passes its tests (fake releases, no network)
+      run: |
+        shellcheck scripts/install.sh scripts/test-install.sh
+        scripts/test-install.sh
     - run: npm --prefix website ci
     - name: Typecheck
       run: npm --prefix website run typecheck

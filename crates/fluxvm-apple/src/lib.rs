@@ -41,10 +41,10 @@ pub use host_caps::{AppleHostCapabilities, host_capabilities, prime_host_capabil
 pub use ipsw::{IpswInfo, latest_ipsw};
 pub use runner::{
     EGRESS_PORT, ForwardConfig, MACOS_TEMPLATE_FILES, OneShotVm, RunnerConfig, SELF_CONTROL_PORT,
-    SNAPSHOT_FILES, STATE_FILE, ShareConfig, adopt_macos_template, clone_file, console_port_socket,
-    export_checkpoint, find_runner, ip_file, oci_meta_dir, prepare_fork_child, read_guest_ip,
-    release_mac, self_control_socket_path, set_self_control_socket, snapshot_dir,
-    write_oci_meta_as,
+    SNAPSHOT_FILES, STATE_FILE, ShareConfig, adopt_macos_template, clone_counters, clone_file,
+    clone_file_reported, console_port_socket, export_checkpoint, find_runner, ip_file,
+    oci_meta_dir, prepare_fork_child, read_guest_ip, release_mac, self_control_socket_path,
+    set_self_control_socket, snapshot_dir, write_oci_meta_as,
 };
 pub use usage::{
     RunnerUsage, VmUsage, attribute_services, is_vz_service_path, mach_ticks_to_seconds,
@@ -259,6 +259,19 @@ impl VmBackend for AppleBackend {
         let runner = find_runner()?;
         let mut conf = RunnerConfig::for_launch(req, ctx)?;
         conf.serial_log_max_bytes = Some(cfg.apple.serial_log_max_mib.max(1) << 20);
+        // A guest with a host allow-list reaches the network only through the runner's proxy. When the daemon runs its
+        // own egress proxy on loopback, relay through it so per-session method/path rules and grants can apply.
+        if !conf.egress_allow.is_empty()
+            && let Ok(addr) = cfg
+                .sandbox
+                .egress_proxy_listen
+                .parse::<std::net::SocketAddr>()
+            && addr.ip() == std::net::Ipv4Addr::LOCALHOST
+        {
+            let (_, token) = fluxvm_core::peer_alias::register(ctx.id);
+            conf.egress_via = Some(format!("127.0.0.1:{}", addr.port()));
+            conf.egress_token = Some(token);
+        }
         // Signed boot manifest in the `metadata` vsock service (a host claim, not hardware attestation; see `attest`).
         // A failure leaves the metadata without an `attestation` field rather than blocking the boot.
         if let Some(meta) = conf.vsock_metadata.take() {

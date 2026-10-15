@@ -141,7 +141,7 @@ fn parse_options(mut b: &[u8]) -> Result<Vec<(u16, Vec<u8>)>> {
     }
     Ok(out)
 }
-fn opt<'a>(opts: &'a [(u16, Vec<u8>)], code: u16) -> Option<&'a [u8]> {
+fn opt(opts: &[(u16, Vec<u8>)], code: u16) -> Option<&[u8]> {
     opts.iter()
         .find(|(c, _)| *c == code)
         .map(|(_, v)| v.as_slice())

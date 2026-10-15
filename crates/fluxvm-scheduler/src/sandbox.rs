@@ -478,8 +478,8 @@ impl VmManager {
         Ok(())
     }
 
-    /// vz guests have no vsock agent: exec and files go over SSH with the daemon's own key (see `vz_guest`), authorised through
-    /// cloud-init for the sandbox user.
+    /// vz guests use the guest agent over vsock when the spec enables one (`agent-micro`); otherwise exec and files go over
+    /// SSH with the daemon's own key (see `vz_guest`), authorised through cloud-init for the sandbox user.
     pub(crate) fn prepare_vz_sandbox(&self, create: &mut CreateVmRequest) -> Result<()> {
         create.agent = crate::vz_guest::vz_sandbox_agent(create);
         let (public_key, _) = self.sandbox_ssh_key()?;
@@ -642,7 +642,7 @@ impl VmManager {
         Ok(hosts)
     }
 
-    async fn load_template_spec(&self, name: &str) -> Result<CreateVmRequest> {
+    pub async fn load_template_spec(&self, name: &str) -> Result<CreateVmRequest> {
         let dir = self
             .cfg
             .sandbox

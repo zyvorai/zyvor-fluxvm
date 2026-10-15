@@ -68,6 +68,42 @@ the process's `exit_code` or `init_error`) are read-only and always offered.
 
 Migrate, and edge or policy changes are not exposed.
 
+### Agent session tools
+
+Agent sessions ([agent-sessions.md](agent-sessions.md), practical walkthroughs in
+[agent-sessions-guide.md](agent-sessions-guide.md)) have their own tools, named `session_*`. Reads are always offered;
+tools marked *write* need `--allow-write`. Give an agent-facing server a **session token** (`FLUXVM_TOKEN=fxst_...`,
+minted with `fluxctl agent token`), not the admin token: then an agent cannot approve its own commands, grant itself
+credentials, or touch another session.
+
+| Tool | Effect | API (`/v1/agents/sessions/...`) |
+|---|---|---|
+| `session_create` *write* | Create a session: `policy` (network allow-list or `preset`, `filesystem`, `process` allow/deny/ask), `workspace`, `budget`, `confine` | `POST ` |
+| `session_exec` *write* | Run a command; a command matching `process.ask` returns `428` with an `approval_id` (`approval_id`, `approval_wait_seconds` params) | `POST {id}/exec` |
+| `session_approvals` | List approval requests and their state | `GET {id}/approvals` |
+| `session_approve` *write* | Approve or deny a request. **Admin credential only** | `POST {id}/approvals/{a}/approve\|deny` |
+| `session_job_start` *write* | Start a background job (`stdin`, `timeout_seconds`, `max_output_bytes`, approval params) | `POST {id}/jobs` |
+| `session_job_read` | Job output from offsets (stdout, stderr, `wait_ms`), state, exit code | `GET {id}/jobs/{job}` |
+| `session_job_stdin` *write* | Write to a job's stdin; `close: true` sends EOF | `POST {id}/jobs/{job}/stdin` |
+| `session_jobs`, `session_job_kill` *(kill: write)* | List jobs; stop one (`signal`) | `GET {id}/jobs`, `DELETE {id}/jobs/{job}` |
+| `session_files`, `session_file_read` | List a directory; read a file | `GET {id}/files`, `GET {id}/files/content` |
+| `session_file_write` *write* | Write a file (up to ~1.5 MB; use `fluxctl agent upload` for larger) | `PUT {id}/files/content` |
+| `session_git` | git status, diff, log; commit and branch with `--allow-write` | `GET\|POST {id}/git/*` |
+| `session_checkpoint`, `session_restore`, `session_fork` *write* | Snapshot, roll back, fork | `POST {id}/checkpoint\|restore\|fork` |
+| `session_rewind_points` | List the automatic checkpoints taken before each exec | `GET {id}/rewind` |
+| `session_rewind` *write* | `on`/`off`, `undo` (steps or a point), `pin`/`unpin`, `bisect` (find the command that broke it) | `POST {id}/rewind/config\|undo\|pin\|bisect` |
+| `session_rollout`, `session_evaluate` *write* | Run a command in N forks; try candidates, test and rank them, keep the winner | fork + exec |
+| `session_promote` *write* | Apply a fork child's workspace changes to its parent (`dry_run`, `plan_id`) | `POST {id}/promote` |
+| `session_grant`, `session_revoke_grants` *write* | Brokered credential limited to hosts, `methods`, `paths`; revoke | `POST\|DELETE {id}/grants` |
+| `session_token` *write* | Mint a scoped session token | `POST {id}/tokens` |
+| `session_preview` *write* | Expiring URL for a guest port | `POST {id}/preview` |
+| `session_probe` | What the guest image has, and what that enables | `GET {id}/probe` |
+| `session_screenshot` | The guest display of a vz session as an image (token scope `screen`); coordinates for `session_input` are its pixels | `GET /v1/agents/sessions/{id}/screenshot` |
+| `session_input` | Keyboard and mouse input for a vz session's display; same actions as `vm_input`; typed text is not ledgered | `POST /v1/agents/sessions/{id}/input` |
+| `session_wait_screen` | Block until a vz session's display changes or the timeout (≤ 60 s); returns `changed`, `waited_ms`, size; token scope `screen` | `POST /v1/agents/sessions/{id}/screen/wait` |
+| `session_events`, `session_artifacts` | Ledger and VM events; workspace changes | `GET {id}/events\|artifacts` |
+| `session_delete` *write* | Delete the session | `DELETE {id}` |
+
 `vm` accepts a VM name, a UUID or a unique UUID prefix. Unknown or missing
 required arguments are rejected with an error the model can read.
 

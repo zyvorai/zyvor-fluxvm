@@ -105,7 +105,7 @@ fn parse_pairs<F: FnMut(&str, &str)>(
     a: &[String],
     mut f: F,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    if a.len() % 2 != 0 {
+    if !a.len().is_multiple_of(2) {
         return Err("options must be --flag value pairs".into());
     }
     let mut i = 0;

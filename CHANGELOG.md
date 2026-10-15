@@ -14,22 +14,55 @@
   restated on each attempt, a leftover TLS creds object is replaced, cancelling a completed non-post-copy migration
   resumes the guest, and a receiver still receiving keeps its TTL. Unit-tested; not run end to end across two hosts.
 
+- **Browser terminal: search, copy mode, quick select, prompt marks, command palette.** `⌘F` search, `⌃⇧X` vi-like copy
+  mode, `⌃⇧Space` quick select (URLs, paths, UUIDs, IPv4, hashes, numbers on screen), `⌘↑`/`⌘↓` between prompts,
+  `⌘⇧P` palette. Prompt marks are OSC 133 from the bash rc file, emitted only for `TERM_PROGRAM=FluxVM`. Node tests
+  cover the matcher, hint labels, motions, yank, prompt jumps and palette filter; each was also driven in headless
+  Chrome on a vz session. Quick select misses matches wrapped across rows; not run in Safari or Firefox.
 
+- **Browser terminal.** `/console/terminal?session=<id>` and `fluxctl agent shell --web`: xterm.js (vendored, MIT) with
+  WebGL, tabs and split panes, themes (default "Neon Storm" after the author's WezTerm config), inline images
+  (sixel, iTerm2), links, a clock, and WezTerm-style keys. Auth for the WebSocket is a 30 s single-use in-memory ticket
+  (`POST /v1/agents/sessions/{id}/pty-ticket`). Run in headless Chrome on vz.
+
+- **Plain ssh into a session and terminal-program forwarding.** `fluxctl agent ssh-config <session> [--name N]`
+  (`GET .../ssh`) prints an OpenSSH `Host` block (address, or a `vsock-proxy` ProxyCommand for an offline guest) so
+  `ssh`, `scp`, `rsync` and WezTerm's `wezterm ssh` work; local machine only, refused to tenant tokens.
+  `fluxctl agent shell` forwards `TERM_PROGRAM` and its version. Hyperlink, inline-image (iTerm2, sixel, kitty), mouse
+  and 24-bit colour sequences were checked to arrive intact; no real WezTerm was available to draw them.
+
+- **Terminal look.** `fluxctl agent shell` forwards the local `TERM` and truecolor `COLORTERM` to the guest and, for a
+  bash login shell, adds colour for `grep`/`diff`/`ip`, `ll`/`la`, coloured man pages and compiler messages (`--plain`
+  turns it off). Checked by variables and aliases in the guest, not by a Terminal.app screenshot.
+
+## 0.4.8 (2026-10-13)
+
+This release adds **AgentSession**, a single object an agent drives instead of assembling VM, sandbox, snapshot and
+fork itself, with background jobs, a file API, git verbs, an interactive terminal, preview URLs (including
+WebSockets), command rules, volumes, rollouts and trajectory/OTLP export, plus per-disk I/O throttling on QEMU.
+Session behaviour below was run on an Apple M4 (`vz`, stock `debian-13`); the in-tree KVM fork, tenant tokens against
+a real daemon, Linux, a real OpenTelemetry collector and a successful `git clone` were not run.
+
+### Added
+
+- **Terminal resize.** `fluxctl agent shell` forwards a local window resize (SIGWINCH) as a `{"resize":{...}}` text
+  frame; the daemon sets the guest tty's size, so editors and `top` reflow. Run live: 30x100 to 50x160 to 20x70
+  reported correctly in the guest and a `WINCH` trap fired.
+- **Interactive terminal for agent sessions.** `fluxctl agent shell <session> [-- cmd]` (WebSocket
+  `GET /v1/agents/sessions/{id}/pty`) gives a real pty over `ssh -tt`, on offline sessions too (vsock proxy). Exit
+  codes propagate; open/close are ledgered (counts, not content). Size follows the local window (resize is forwarded); refused for
+  sessions with command rules; `capabilities.pty` is now true on vz. Run live on vz with a local pseudo-terminal.
 - **OTLP trace export.** `fluxctl agent export <session> --otlp http://collector:4318 [--otlp-header K=V]` sends a
   session's trajectory as one OTLP/HTTP JSON trace (root span plus a span per step). After-the-fact, built from the
   ledger: no live stream, no reasoning content. Checked against a stub receiver, not a real collector.
-
 - **Preview URLs carry WebSockets.** A WebSocket upgrade on `/preview/{token}/...` is now bridged to the guest with
   the same token check (it used to answer `101` and then drop). Run live on vz with Chrome DevTools: navigate,
   evaluate, screenshot. Docs gain a Chromium/CDP recipe for the stock image (needs `socat` because Chrome binds
   DevTools to localhost). No browser image, no Playwright client run.
-
-
 - **Volumes for vz agent sessions.** `runtime.volumes` / `fluxctl agent run --volume NAME:/path` attaches a named
   host volume as a virtio disk, formats it ext4 only when `blkid` says it is empty, mounts it and persists an fstab
   line. One VM at a time (`409` otherwise), no fork for such a session, tenant tokens refused. New sandbox create
   field `extra_disks` (vz). Run live on vz: data written in one session was read in the next.
-
 - **Rollouts.** `fluxctl agent rollout <session> --count N -- <cmd>` (MCP `session_rollout`) forks N children, runs
   the command in each in parallel, returns every exit code and output, then deletes the children (`--keep` to keep
   them). It is composed client-side from fork, exec and delete, so it follows fork's rules (in-tree KVM, or a vz
@@ -42,22 +75,15 @@
 - **Trajectory export.** `GET /v1/agents/sessions/{id}/trajectory` merges the session ledger and the sandbox's VM
   events into one time-ordered, numbered list; `fluxctl agent export <session> [--out file]` writes it as JSON Lines
   (a header line, then one step per line). It records what the API and hypervisor layer did, not the agent's
-  reasoning, which FluxVM never sees. No OTLP trace export yet.
-
-## 0.4.8 (2026-10-13)
-
-This release adds **AgentSession**, a single object an agent drives instead of assembling VM, sandbox, snapshot and
-fork itself, plus preview URLs for guest ports and per-disk I/O throttling on QEMU. Session behaviour below was run on
-an Apple M4 (`vz`, stock `debian-13`); the in-tree KVM fork, tenant tokens against a real daemon, Linux previews and a
-successful `git clone` were not run.
-
-### Added
+  reasoning, which FluxVM never sees.  `--otlp` sends the same data as OpenTelemetry traces.
+- **File API for agent sessions.** `GET .../files?path=` (list or stat), `GET|PUT .../files/content`, `DELETE .../files?path=&recursive=`; `fluxctl agent put|files|cat|pull|rm-file`; MCP `session_files`, `session_file_read`, `session_file_write`. About 1.5 MiB per write; deleting `/` or a one-component path is refused. Run on a `vz` NAT session on an M4.
+- **Git verbs for agent sessions.** `GET .../git/status|diff|log`, `POST .../git/commit|branch`; `fluxctl agent git <session> status|diff|log|commit|branch`; MCP `session_git` (writes need `--allow-write`). Runs `git` in the guest, so the image needs it (stock `debian-13` has none: a session with network access can `apt-get install git`; an offline one cannot, and gets `409` with that message). A diff is capped at 256 KiB. No push, pull, fetch, merge, rebase or checkout of an existing branch.
 
 - **Background jobs for agent sessions.** `fluxctl agent bg|logs [-f]|kill`, MCP `session_job_start|read|kill`, and
   `POST /v1/agents/sessions/{id}/jobs`, `GET|DELETE .../jobs/{job}`: a detached command whose output is read from a byte
   offset. Polling over exec, not a stream; no stdin or TTY. Run on a `vz` NAT session on an M4.
 
-- **Agen API and CLI.** `POST/GET /v1/agents/sessions`, `GET|DELETE .../{id}`, `.../exec`, `.../checkpoint`,
+- **AgentSession API and CLI.** `POST/GET /v1/agents/sessions`, `GET|DELETE .../{id}`, `.../exec`, `.../checkpoint`,
   `.../restore`, `.../fork`, `GET .../events`, `GET .../artifacts`. `fluxctl agent run|ls|get|exec|checkpoint|restore|
   fork|timeline|artifacts|rm`. Sessions are tenant-scoped, survive a daemon restart, and keep an action ledger. Policy
   presets (`offline`, `developer-safe`, `open`) and host allow-lists are enforced; filesystem and process rules are

@@ -540,10 +540,10 @@ pub fn parse_client_hello_body(body: &[u8]) -> Option<ClientHello> {
     p += 1 + sid;
     let cs = be16(body, p)? as usize;
     p += 2;
-    if cs % 2 != 0 {
+    if !cs.is_multiple_of(2) {
         return None;
     }
-    for c in body.get(p..p + cs)?.chunks_exact(2) {
+    for c in body.get(p..p + cs)?.as_chunks::<2>().0 {
         hello.ciphers.push(u16::from_be_bytes([c[0], c[1]]));
     }
     p += cs;
@@ -584,7 +584,7 @@ pub fn parse_client_hello_body(body: &[u8]) -> Option<ClientHello> {
             }
             10 => {
                 let n = be16(data, 0)? as usize;
-                for c in data.get(2..2 + n)?.chunks_exact(2) {
+                for c in data.get(2..2 + n)?.as_chunks::<2>().0 {
                     hello.groups.push(u16::from_be_bytes([c[0], c[1]]));
                 }
             }
@@ -594,7 +594,7 @@ pub fn parse_client_hello_body(body: &[u8]) -> Option<ClientHello> {
             }
             13 => {
                 let n = be16(data, 0)? as usize;
-                for c in data.get(2..2 + n)?.chunks_exact(2) {
+                for c in data.get(2..2 + n)?.as_chunks::<2>().0 {
                     hello.sig_algs.push(u16::from_be_bytes([c[0], c[1]]));
                 }
             }
@@ -613,7 +613,7 @@ pub fn parse_client_hello_body(body: &[u8]) -> Option<ClientHello> {
             }
             43 => {
                 let n = *data.first()? as usize;
-                for c in data.get(1..1 + n)?.chunks_exact(2) {
+                for c in data.get(1..1 + n)?.as_chunks::<2>().0 {
                     hello
                         .supported_versions
                         .push(u16::from_be_bytes([c[0], c[1]]));

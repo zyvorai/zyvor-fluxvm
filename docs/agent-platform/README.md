@@ -18,26 +18,32 @@ Sandbox ── snapshot · restore · fork (KVM) · speculate → changeset → 
 vz · KVM · Firecracker · Cloud Hypervisor · QEMU
 ```
 
-> **Honest status.** The session layer is an MVP. On an Apple M4 it was run live for create, exec, memory checkpoint
-> and restore, fork into diverging children, workspace diff and delete. It is **not** sub-second today (create is
-> seconds), a session on the Mac's NAT **cannot fork** (offline or allow-listed sessions can), and the filesystem/process
-> parts of a policy are recorded but not enforced. The table at the end lists every
-> claim with how it was checked. Compared with microsandbox: [vs-microsandbox.md](../vs-microsandbox.md).
+> **Honest status.** On an Apple M4 the session layer was run live for create, exec, memory checkpoint and restore, fork
+> into diverging children, workspace diff and delete. It is **not** sub-second (create is seconds), and a session on the
+> Mac's NAT **cannot fork** (offline or allow-listed sessions can). Since then the layer gained filesystem confinement
+> (Landlock + seccomp, Linux guests), scoped session tokens, a guest job supervisor, per-action approvals, per-session HTTP
+> method/path rules, budgets, resumable file transfer and fork-evaluate-promote. Those are **implemented and unit/router
+> tested, not yet field-tested on a live guest**; the practical guide ends with the exact list.
+> Start with [agent-sessions-guide.md](../agent-sessions-guide.md). The table at the end lists every claim and how it was
+> checked. Compared with microsandbox: [vs-microsandbox.md](../vs-microsandbox.md).
 
 ## Install
 
-macOS, Apple Silicon, macOS 14 or newer:
+macOS (Apple silicon, macOS 14 or newer) and Linux (x86_64):
 
 ```bash
-curl -fsSL https://zyvorai.github.io/zyvor-fluxvm/install.sh | bash    # the same three steps below, via Homebrew only
-# or by hand:
-brew install zyvorai/tap/fluxvm
-brew services start zyvorai/tap/fluxvm      # the API on 127.0.0.1:7788
-curl -s http://127.0.0.1:7788/healthz       # {"ok":true}
+curl -fsSL https://zyvorai.github.io/zyvor-fluxvm/install.sh | bash                      # download, verify, install
+curl -fsSL https://zyvorai.github.io/zyvor-fluxvm/install.sh | bash -s -- --service --client claude-code
+fluxctl --version && curl -s http://127.0.0.1:7788/healthz       # {"ok":true} once the daemon runs
 ```
 
-That installs FluxVM 0.4.7, which has sandboxes, snapshots, speculative execution and MCP. **The session API and
-`fluxctl agent` are newer than 0.4.7**; until the next release, build them from source:
+The installer needs no sudo or Homebrew, verifies the package's SHA-256, and is reversible (`--uninstall`); the options and
+what it changes are in [install.md](../install.md). Homebrew (`brew install zyvorai/tap/fluxvm`) is the alternative on
+a Mac.
+
+**Which release has sessions.** The newest published release at the time of writing, 0.4.7, has sandboxes, snapshots,
+speculative execution and MCP, but **not** the session API or `fluxctl agent`. Check with `fluxctl agent --help`
+(`unrecognized subcommand` means an older release). Until the next release is published, build them from source:
 
 ```bash
 git clone https://github.com/zyvorai/zyvor-fluxvm && cd zyvor-fluxvm
@@ -46,7 +52,8 @@ cargo build -p fluxctl                                   # needs the sibling gue
 FLUXVM_VZ_RUNNER=/opt/homebrew/opt/fluxvm/bin/fluxvm-vz-runner target/debug/fluxctl serve
 ```
 
-Linux hosts: build from source (`cargo build --release -p fluxctl`); the Linux packages are not published.
+Linux hosts get a package from the same installer once a release carries one (the release workflow builds
+`linux-x86_64`); otherwise build from source (`cargo build --release -p fluxctl`).
 Full macOS notes: [install-macos.md](../install-macos.md).
 
 ## 60 seconds
@@ -74,10 +81,11 @@ fluxctl mcp install claude-code --allow-write      # also: codex, gemini, cursor
 fluxctl mcp status
 ```
 
-The agent then has `session_create`, `session_exec`, `session_checkpoint`, `session_restore`, `session_fork`,
-`session_events`, `session_artifacts`, `session_delete`, and the review loop tools `sandbox_speculate`,
-`sandbox_changesets`, `sandbox_changeset_decide`. Write tools exist only with `--allow-write`. More:
-[mcp.md](../mcp.md).
+The agent then has the `session_*` tools (create, exec, jobs, files, git, checkpoint, restore, fork, rollout, evaluate,
+promote, grants, tokens, approvals, probe, events, artifacts, delete) and the review loop tools `sandbox_speculate`,
+`sandbox_changesets`, `sandbox_changeset_decide`. Write tools exist only with `--allow-write`. For an agent you do not
+fully trust, give the MCP server a scoped session token, not the admin one. The full table is in
+[mcp.md](../mcp.md#agent-session-tools).
 
 ## From code
 
@@ -112,7 +120,9 @@ Two ways, depending on the backend:
   creates children that start from the parent's exact state and diverge; run a candidate in each, keep the winner,
   delete the rest. [examples/agent-sandbox-demo](https://github.com/zyvorai/zyvor-fluxvm/blob/main/examples/agent-sandbox-demo/README.md) does this at the sandbox
   level (4 copies in about 4 s on an M4 mini). A session on the Mac's NAT answers `409` with the reason and creates
-  nothing. Children are independent sessions: copying a winner's files back into the parent is not built yet.
+  nothing. `fluxctl agent evaluate` forks one child per candidate, tests and ranks them and keeps the winner; `fluxctl
+  agent promote <child> --dry-run` then shows a three-way merge of its workspace changes into the parent, which you apply
+  with the `plan_id`.
 
 ## Policy
 
@@ -122,9 +132,17 @@ fluxctl agent run codex --policy developer-safe                # GitHub, crates.
 fluxctl agent run codex --allow api.example.com --allow '*.example.com'
 ```
 
-Host allow-lists are enforced by the host (a proxy on ports 80/443; the guest has no other route). Method and path rules
-and filesystem/process rules are not enforced through sessions yet; asking for the former is refused, the latter is
-recorded under `policy.unenforced`. See [agent-sessions.md](../agent-sessions.md#policy).
+Host allow-lists are enforced by the host (a proxy on ports 80/443; the guest has no other route). Beyond that:
+
+- **Method and path rules** (`{host, methods, paths}` entries) are enforced per session by the host's egress proxy where
+  the sandbox's traffic reaches it (QEMU/KVM with the proxy enabled); a session that cannot be filtered is refused at
+  create unless you choose `best-effort`. Not on `vz`.
+- **Filesystem rules** are enforced inside Linux guests with Landlock + seccomp (`--confine`, `--fs-read`, `--fs-write`).
+- **Process rules** (`allow`, `deny`, `ask`) are a guardrail on the command string, **not** a security boundary; `ask`
+  holds a command for an operator's approval.
+
+How to choose and verify each: [agent-sessions-guide.md](../agent-sessions-guide.md#3-choosing-a-policy). Reference:
+[agent-sessions.md](../agent-sessions.md#policy).
 
 ## What was checked, and how
 

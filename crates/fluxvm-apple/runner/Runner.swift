@@ -74,6 +74,8 @@ struct Config: Decodable {
     let vsock_metadata: String?     // JSON served by the "metadata" built-in
     let telemetry_log: String?      // file the "telemetry" built-in appends to
     let egress_allow: [String]?     // hosts the guest may reach through the vsock proxy on port 3128 (nil/empty: no proxy)
+    let egress_via: String?         // "127.0.0.1:port": relay allowed requests to the daemon's egress proxy (method/path rules, grants)
+    let egress_token: String?       // secret the daemon's proxy maps to this sandbox; sent as x-fluxvm-peer, never shown to the guest
     let restore_state: String?      // resume from a state file written by `save` instead of cold-booting
     let kernel: String?             // direct boot (VZLinuxBootLoader): uncompressed arm64 Image; nil boots EFI from the disk
     let initrd: String?
@@ -967,6 +969,15 @@ final class Runner: NSObject, VZVirtualMachineDelegate, NSWindowDelegate {
                     response = ["ok": false, "error": "cannot encode host capabilities"]
                 }
                 sem.signal()
+            case "save-support":
+                // Whether this VM's device set can be saved (memory checkpoint), and if not, why.
+                if #available(macOS 14.0, *), let cfgv = self.lastConfiguration {
+                    do { try cfgv.validateSaveRestoreSupport(); response = ["ok": true, "supported": true] }
+                    catch { response = ["ok": true, "supported": false, "reason": error.localizedDescription] }
+                } else {
+                    response = ["ok": true, "supported": false, "reason": "saving a VM needs macOS 14 or later and a running guest"]
+                }
+                sem.signal()
             case "balloon":
                 response = self.balloonControl(reclaimMiB: (o["balloon_mib"] as? NSNumber)?.uint64Value)
                 sem.signal()
@@ -1393,6 +1404,24 @@ final class Runner: NSObject, VZVirtualMachineDelegate, NSWindowDelegate {
         guard port == 80 || port == 443, hostAllowed(host, rules) else {
             emit(["event": "egress-denied", "host": host, "port": Int(port)])
             reply("403 Forbidden", "\(host):\(port) is not on this sandbox's allow-list\n"); return
+        }
+        if let via = cfg.egress_via, let token = cfg.egress_token,
+           let viaPort = UInt16(via.split(separator: ":").last ?? ""), via.hasPrefix("127.0.0.1:") {
+            // The daemon's proxy judges method and path (and injects grants); the host allow-list above still applies first.
+            // One request per connection, and the guest cannot choose its own identity header.
+            guard let up = connectLoopback(viaPort) else {
+                emit(["event": "egress-unreachable", "host": host])
+                reply("502 Bad Gateway", "the host egress proxy is not reachable\n"); return
+            }
+            let kept = lines.filter { l in
+                let k = l.lowercased()
+                return !l.isEmpty && !k.hasPrefix("connection:") && !k.hasPrefix("proxy-connection:") && !k.hasPrefix("x-fluxvm-peer:")
+            }
+            let out = (["\(method) \(target) \(version)"] + kept + ["x-fluxvm-peer: \(token)", "Connection: close", "", ""]).joined(separator: "\r\n")
+            emit(["event": "egress-relayed", "host": host, "port": Int(port)])
+            _ = out.withCString { write(up, $0, strlen($0)) }
+            splice(c, up) { close(up); finish() }
+            return
         }
         guard let up = connectUpstream(host, port) else {
             emit(["event": "egress-unreachable", "host": host])

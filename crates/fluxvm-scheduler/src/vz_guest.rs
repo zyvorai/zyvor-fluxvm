@@ -113,11 +113,23 @@ impl VmManager {
     }
 
     pub(crate) fn vz_guest(&self, vm: &VmRecord) -> Result<GuestSsh> {
+        // A macOS guest has no cloud-init; the account it was provisioned with (`apple.provision_username`) is the
+        // one to reach. The default `sandbox` is a system account there and refuses logins.
         let user = vm
             .request
             .cloud_init
             .as_ref()
             .and_then(|c| c.user.clone())
+            .or_else(|| {
+                is_macos_guest(&vm.request)
+                    .then(|| {
+                        vm.request
+                            .apple
+                            .as_ref()
+                            .and_then(|a| a.provision_username.clone())
+                    })
+                    .flatten()
+            })
             .unwrap_or_else(|| DEFAULT_SANDBOX_USER.into());
         let (_, key) = self.sandbox_ssh_key()?;
         // A guest with no network card is reached through the runner's vsock proxy; the others by address.
@@ -146,7 +158,7 @@ impl VmManager {
     }
 
     /// Asks the agent of a container sandbox, which has no SSH to fall back to.
-    async fn oci_agent(
+    pub(crate) async fn oci_agent(
         &self,
         vm: &VmRecord,
         request: AgentRequest,
@@ -160,7 +172,7 @@ impl VmManager {
     }
 
     /// Asks the guest agent; `None` means "use SSH".
-    async fn vz_agent(
+    pub(crate) async fn vz_agent(
         &self,
         vm: &VmRecord,
         request: AgentRequest,
@@ -225,6 +237,25 @@ impl VmManager {
             stderr: out.stderr,
             enforcement: None,
         })
+    }
+
+    /// How to reach a vz Linux guest with plain `ssh`: the user, the address (or `vsock` with the runner's proxy
+    /// socket for a guest with no network card) and the shared sandbox key on this host.
+    pub fn ssh_target(&self, vm: &VmRecord) -> Result<GuestSsh> {
+        if vm.backend != fluxvm_core::model::BackendKind::Vz || crate::oci_sandbox::is_oci(vm) {
+            bail!("only a vz Linux sandbox is reached over SSH");
+        }
+        self.vz_guest(vm)
+    }
+
+    /// Starts an interactive shell (or `script`) in a vz Linux guest on a pseudo-terminal over SSH. The child's stdin
+    /// and stdout are the terminal. Container (OCI) sandboxes run no sshd and cannot.
+    pub fn pty_spawn(&self, vm: &VmRecord, script: &str) -> Result<tokio::process::Child> {
+        if vm.backend != fluxvm_core::model::BackendKind::Vz || crate::oci_sandbox::is_oci(vm) {
+            bail!("an interactive terminal needs a vz Linux sandbox reached over SSH");
+        }
+        let g = self.vz_guest(vm)?;
+        ssh::pty_spawn(&g, script)
     }
 
     pub(crate) async fn vz_get_file(&self, vm: &VmRecord, path: String) -> Result<AgentResponse> {

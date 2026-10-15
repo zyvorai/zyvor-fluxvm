@@ -17,7 +17,7 @@ permissions:
 
 jobs:
   package:
-    runs-on: macos-26
+    runs-on: [self-hosted, macOS, ARM64, fluxvm-mac]
     steps:
       - uses: actions/checkout@v7
         with:

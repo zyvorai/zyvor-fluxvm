@@ -39,6 +39,8 @@ hyper-util = { version = "0.1", features = ["tokio", "service"] }
 chrono = { version = "0.4", features = ["serde"] }
 http-body-util = "0.1"
 libc = "0.2"
+sha2 = "0.10"
+base64 = "0.22"
 
 [dev-dependencies]
 chrono = { version = "0.4", features = ["serde"] }

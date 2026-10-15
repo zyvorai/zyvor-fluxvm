@@ -145,7 +145,10 @@ extension Runner {
 
     func startMachine(_ machine: VZVirtualMachine) {
         if let why = controlPrecondition("start") { fail(why) }
-        let provision = cfg.provision_username != nil && cfg.provision_full_name != nil && cfg.provision_password_file != nil
+        // The password file is one-shot: it is deleted once the guest has been provisioned, so a later start of the same
+        // VM (stop/start, restart after a crash) must not try to provision again.
+        let provision = cfg.provision_username != nil && cfg.provision_full_name != nil
+            && (cfg.provision_password_file.map { FileManager.default.fileExists(atPath: $0) } ?? false)
         guard cfg.guest_os == "macos", provision || cfg.recovery == true else {
             machine.start { r in
                 switch r { case .success: self.state = "running"; emit(["event":"running"])

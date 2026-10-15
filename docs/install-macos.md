@@ -1,5 +1,9 @@
 # Install FluxVM on a Mac with Homebrew
 
+> **Prefer one command and no Homebrew formula?** `curl -fsSL https://zyvorai.github.io/zyvor-fluxvm/install.sh | bash`
+> downloads and verifies the same release package into `~/.local` (no sudo), with `--service` and `--client` options.
+> See [install.md](install.md). This page is the Homebrew route.
+
 The quickest way to a working FluxVM on Apple silicon: one `brew install`, the daemon as a background service, and
 an AI agent client wired to it over MCP. Everything on this page was run on an Apple M4 mini (macOS 27.2) against the
 published `v0.4.4` package, from the tap, unless a line says otherwise. Install, service, upgrade (from 0.4.1) and uninstall

@@ -424,7 +424,7 @@ pub(super) async fn put_budget(
     let tenant = keys_owner(&caller, &id)?;
     let monthly = match b.monthly {
         None => None,
-        Some(m) if m == 0.0 => None,
+        Some(0.0) => None,
         Some(m) if m.is_finite() && m > 0.0 && m <= 1e9 => Some(m),
         Some(_) => {
             return Err(AppError(
@@ -1735,6 +1735,8 @@ mod tests {
             labels: HashMap::new(),
             security: Default::default(),
             density: None,
+            daemon: None,
+            allocated: None,
             apple: Some(AppleHostCaps {
                 free_cpu: 10,
                 free_memory_mib: mem,
@@ -2646,7 +2648,8 @@ mod tests {
     #[tokio::test]
     async fn webhooks_get_signed_events() {
         // A receiver that keeps what it gets.
-        let got: Arc<Mutex<Vec<(String, String, Vec<u8>)>>> = Arc::default();
+        type Received = Vec<(String, String, Vec<u8>)>;
+        let got: Arc<Mutex<Received>> = Arc::default();
         let sink = got.clone();
         let receiver = Router::new().route(
             "/hook",

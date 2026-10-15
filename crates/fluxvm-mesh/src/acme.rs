@@ -302,8 +302,8 @@ impl AcmeClient {
         let owner = format!("_acme-challenge.{base}");
         let lease = dns01::present(dns_cfg, &owner, &txt).await?;
         dns01::wait_for_propagation(dns_cfg).await;
-        if let Some(resolver) = dns_cfg.validation_resolver {
-            if let Err(e) = crate::dnssec::verify_txt(
+        if let Some(resolver) = dns_cfg.validation_resolver
+            && let Err(e) = crate::dnssec::verify_txt(
                 resolver,
                 &owner,
                 &txt,
@@ -311,10 +311,9 @@ impl AcmeClient {
                 Duration::from_secs(5),
             )
             .await
-            {
-                let _ = dns01::cleanup(dns_cfg, &lease, &txt).await;
-                return Err(e);
-            }
+        {
+            let _ = dns01::cleanup(dns_cfg, &lease, &txt).await;
+            return Err(e);
         }
         let trigger = self
             .jws_post(&challenge.url, Some(&json!({})), false)
@@ -542,11 +541,11 @@ fn load_or_create_account_key(path: &Path) -> Result<Vec<u8>> {
 }
 
 fn replay_nonce(headers: &reqwest::header::HeaderMap) -> Result<Option<String>> {
-    Ok(headers
+    headers
         .get("replay-nonce")
         .map(|v| v.to_str().map(str::to_owned))
         .transpose()
-        .map_err(|_| MeshError::InvalidState("invalid Replay-Nonce header".into()))?)
+        .map_err(|_| MeshError::InvalidState("invalid Replay-Nonce header".into()))
 }
 
 fn validate_domains(domains: &[String]) -> Result<()> {

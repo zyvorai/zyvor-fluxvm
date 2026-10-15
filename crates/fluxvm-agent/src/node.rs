@@ -54,15 +54,24 @@ pub struct SimHost {
 pub async fn run(cfg: NodeConfig) {
     // No redirects: a standby answers 503 and the next configured central is tried instead, so the bearer token only
     // ever goes to URLs the operator listed.
+    // Bounded: a central or a local daemon that accepts the connection and never answers must not
+    // hold the heartbeat loop forever (the node would then simply go stale).
     let http = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(CONNECT_TIMEOUT)
+        .timeout(REQUEST_TIMEOUT)
         .build()
         .unwrap_or_else(|_| reqwest::Client::new());
-    let mut tick = tokio::time::interval(cfg.interval);
     let mut preferred = 0usize;
+    let mut failures = 0u32;
     loop {
-        tick.tick().await;
-        match beat(&http, &cfg, preferred).await {
+        let outcome = beat(&http, &cfg, preferred).await;
+        failures = if outcome.is_ok() {
+            0
+        } else {
+            failures.saturating_add(1)
+        };
+        match outcome {
             Ok(used) => {
                 preferred = used;
                 tracing::debug!(node = %cfg.name, "heartbeat sent");
@@ -79,9 +88,38 @@ pub async fn run(cfg: NodeConfig) {
                     }
                 }
             }
-            Err(e) => tracing::warn!(error = %e, "heartbeat failed, will retry next tick"),
+            Err(e) => {
+                tracing::warn!(error = %e, failures, "heartbeat failed, will retry with backoff")
+            }
         }
+        tokio::time::sleep(retry_delay(cfg.interval, failures, jitter_fraction())).await;
     }
+}
+
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// How long to wait before the next heartbeat. After a success: the interval. After `failures`
+/// consecutive failures: the interval doubled per failure up to 8x, then scaled into 50-100% by
+/// `jitter` (0.0..1.0), so a fleet whose central just came back does not send every node's beat in
+/// the same instant. Never longer than the interval times 8, so a node stays well inside the
+/// central's stale window.
+fn retry_delay(interval: Duration, failures: u32, jitter: f64) -> Duration {
+    if failures == 0 {
+        return interval;
+    }
+    let factor = 1u32 << failures.min(3);
+    let base = interval.saturating_mul(factor);
+    base.mul_f64(0.5 + 0.5 * jitter.clamp(0.0, 1.0))
+}
+
+/// A cheap 0.0..1.0 from the clock; jitter needs spread, not randomness.
+fn jitter_fraction() -> f64 {
+    let n = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos())
+        .unwrap_or(0);
+    (n % 1000) as f64 / 1000.0
 }
 
 /// The configured centrals: `--central` is one URL or a comma-separated list (HA).
@@ -95,9 +133,16 @@ pub fn central_urls(s: &str) -> Vec<String> {
 /// Sends one heartbeat, starting with central `preferred` (the one that answered last time) and trying the others
 /// in order when it is down or a standby. Returns the index of the central that took it.
 async fn beat(http: &reqwest::Client, cfg: &NodeConfig, preferred: usize) -> Result<usize> {
-    let local = local_vm_stats(http, &cfg.fluxvm_url)
-        .await
-        .context("reading local VM inventory")?;
+    // A daemon that cannot be reached is reported, not hidden: the node still heartbeats (so it
+    // is visibly alive and says why it cannot take work) instead of just going stale.
+    let (local, daemon) = match local_vm_stats(http, &cfg.fluxvm_url).await {
+        Ok(l) => (l, json!({"reachable": true})),
+        Err(e) => (
+            LocalVmStats::default(),
+            json!({"reachable": false, "error": format!("{e:#}")}),
+        ),
+    };
+    let reachable = daemon["reachable"] == json!(true);
     let vm_count = local.count;
     let (vcpus_total, memory_mib_total) = match &cfg.sim {
         Some(h) => (h.vcpus, h.memory_mib),
@@ -108,12 +153,20 @@ async fn beat(http: &reqwest::Client, cfg: &NodeConfig, preferred: usize) -> Res
             total_memory_mib().unwrap_or(0),
         ),
     };
-    let security = fetch_node_security(http, &cfg.fluxvm_url).await;
-    let density = fetch_density(http, &cfg.fluxvm_url).await;
+    let (security, density) = if reachable {
+        (
+            fetch_node_security(http, &cfg.fluxvm_url).await,
+            fetch_density(http, &cfg.fluxvm_url).await,
+        )
+    } else {
+        (NodeSecurityCapabilities::standard_only(), None)
+    };
     let apple = match &cfg.sim {
         Some(h) => Some(sim_apple_caps(h, local)),
         None => fetch_apple_caps(vcpus_total, memory_mib_total, local).await,
     };
+    let allocated = reachable
+        .then(|| json!({"vcpus": local.allocated_vcpus, "memory_mib": local.allocated_memory_mib}));
 
     let body = json!({
         "name": cfg.name,
@@ -125,6 +178,8 @@ async fn beat(http: &reqwest::Client, cfg: &NodeConfig, preferred: usize) -> Res
         "security": security,
         "density": density,
         "apple": apple,
+        "daemon": daemon,
+        "allocated": allocated,
     });
     let urls = central_urls(&cfg.central_url);
     anyhow::ensure!(!urls.is_empty(), "no central URL configured");
@@ -350,6 +405,65 @@ mod central_list_tests {
     use super::central_urls;
 
     #[test]
+    fn retry_waits_longer_after_failures_with_jitter_and_a_ceiling() {
+        let i = std::time::Duration::from_secs(10);
+        assert_eq!(super::retry_delay(i, 0, 0.9), i);
+        // One failure: 2x, scaled into 50-100%.
+        assert_eq!(
+            super::retry_delay(i, 1, 0.0),
+            std::time::Duration::from_secs(10)
+        );
+        assert_eq!(
+            super::retry_delay(i, 1, 1.0),
+            std::time::Duration::from_secs(20)
+        );
+        // The ceiling is 8x the interval however long the outage.
+        assert_eq!(
+            super::retry_delay(i, 50, 1.0),
+            std::time::Duration::from_secs(80)
+        );
+        assert!(super::retry_delay(i, 50, 0.0) >= std::time::Duration::from_secs(40));
+        // Out-of-range jitter is clamped, never negative or above the ceiling.
+        assert_eq!(
+            super::retry_delay(i, 2, 7.0),
+            std::time::Duration::from_secs(40)
+        );
+        assert_eq!(
+            super::retry_delay(i, 2, -3.0),
+            std::time::Duration::from_secs(20)
+        );
+    }
+
+    #[test]
+    fn allocation_is_summed_from_active_vm_records() {
+        let vm = |status: &str, cpus: Option<u64>, mem: Option<u64>| {
+            let mut req = serde_json::json!({});
+            if let Some(c) = cpus {
+                req["vcpus"] = c.into();
+            }
+            if let Some(m) = mem {
+                req["memory_mib"] = m.into();
+            }
+            serde_json::json!({"status": status, "request": req})
+        };
+        assert!(super::is_active(&vm("running", None, None)));
+        assert!(!super::is_active(&vm("stopped", Some(8), Some(8192))));
+        assert_eq!(
+            super::vm_size(&vm("running", Some(8), Some(16384))),
+            (8, 16384)
+        );
+        // No recorded size: the assumed one, never zero.
+        assert_eq!(
+            super::vm_size(&vm("running", None, None)),
+            (super::ASSUMED_VM_VCPUS, super::ASSUMED_VM_MEMORY_MIB)
+        );
+        assert_eq!(
+            super::vm_size(&vm("running", Some(0), Some(0))),
+            (super::ASSUMED_VM_VCPUS, super::ASSUMED_VM_MEMORY_MIB)
+        );
+    }
+
+    #[test]
     fn central_lists_are_split_and_trimmed() {
         assert_eq!(central_urls("http://a:7799"), ["http://a:7799"]);
         assert_eq!(
@@ -394,6 +508,38 @@ async fn fetch_density(
 struct LocalVmStats {
     count: usize,
     macos_guests: u32,
+    /// CPU and memory the active VMs (creating, running, paused) request, summed from their records.
+    allocated_vcpus: u32,
+    allocated_memory_mib: u64,
+}
+
+/// What an active VM without a recorded size is assumed to hold.
+const ASSUMED_VM_VCPUS: u32 = 2;
+const ASSUMED_VM_MEMORY_MIB: u64 = 2048;
+
+fn is_active(vm: &serde_json::Value) -> bool {
+    vm.get("status")
+        .or_else(|| vm.get("state"))
+        .and_then(|v| v.as_str())
+        .is_some_and(|s| matches!(s, "creating" | "running" | "paused"))
+}
+
+/// The CPU and memory one VM record requests, or the assumed size when it records none.
+fn vm_size(vm: &serde_json::Value) -> (u32, u64) {
+    let request = vm.get("request").unwrap_or(vm);
+    (
+        request
+            .get("vcpus")
+            .and_then(|v| v.as_u64())
+            .map(|n| n as u32)
+            .filter(|n| *n > 0)
+            .unwrap_or(ASSUMED_VM_VCPUS),
+        request
+            .get("memory_mib")
+            .and_then(|v| v.as_u64())
+            .filter(|n| *n > 0)
+            .unwrap_or(ASSUMED_VM_MEMORY_MIB),
+    )
 }
 
 async fn local_vm_stats(http: &reqwest::Client, fluxvm_url: &str) -> Result<LocalVmStats> {
@@ -402,6 +548,12 @@ async fn local_vm_stats(http: &reqwest::Client, fluxvm_url: &str) -> Result<Loca
         .send()
         .await
         .context("GET /v1/vms")?;
+    // An error body would parse as "no VMs", which is exactly the wrong thing to report.
+    anyhow::ensure!(
+        resp.status().is_success(),
+        "the local daemon answered GET /v1/vms with {}",
+        resp.status()
+    );
     let body: serde_json::Value = resp.json().await.context("parsing /v1/vms response")?;
     let items = body
         .get("items")
@@ -409,9 +561,17 @@ async fn local_vm_stats(http: &reqwest::Client, fluxvm_url: &str) -> Result<Loca
         .cloned()
         .unwrap_or_default();
     let macos_guests = count_active_macos_guests(&items);
+    let (mut vcpus, mut memory) = (0u32, 0u64);
+    for vm in items.iter().filter(|v| is_active(v)) {
+        let (c, m) = vm_size(vm);
+        vcpus = vcpus.saturating_add(c);
+        memory = memory.saturating_add(m);
+    }
     Ok(LocalVmStats {
         count: items.len(),
         macos_guests,
+        allocated_vcpus: vcpus,
+        allocated_memory_mib: memory,
     })
 }
 
@@ -439,12 +599,8 @@ fn count_active_macos_guests(items: &[serde_json::Value]) -> u32 {
 
 fn sim_apple_caps(h: &SimHost, local: LocalVmStats) -> AppleHostCaps {
     AppleHostCaps {
-        free_cpu: h
-            .vcpus
-            .saturating_sub((local.count as u32).saturating_mul(2)),
-        free_memory_mib: h
-            .memory_mib
-            .saturating_sub((local.count as u64).saturating_mul(2048)),
+        free_cpu: h.vcpus.saturating_sub(local.allocated_vcpus),
+        free_memory_mib: h.memory_mib.saturating_sub(local.allocated_memory_mib),
         nested_virtualization: h.nested_virtualization,
         vmnet: h.vmnet,
         custom_virtio: true,
@@ -466,8 +622,8 @@ async fn fetch_apple_caps(
         .ok()?
         .ok()?;
     Some(AppleHostCaps {
-        free_cpu: vcpus_total.saturating_sub((local.count as u32).saturating_mul(2)),
-        free_memory_mib: memory_mib_total.saturating_sub((local.count as u64).saturating_mul(2048)),
+        free_cpu: vcpus_total.saturating_sub(local.allocated_vcpus),
+        free_memory_mib: memory_mib_total.saturating_sub(local.allocated_memory_mib),
         nested_virtualization: caps.nested_virtualization,
         vmnet: caps.vmnet_custom_networks && caps.vmnet_serialization,
         custom_virtio: caps.custom_virtio_queue_backend && caps.guest_memory_mapping,

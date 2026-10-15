@@ -40,6 +40,9 @@ mod rate_limit;
 #[cfg(target_os = "macos")]
 pub mod self_control;
 pub use netobs_api::install_netobs;
+mod agent_session_approvals;
+mod agent_session_auth;
+mod agent_session_transfer;
 mod agent_sessions;
 mod macos_pool_api;
 mod speculate_api;
@@ -148,7 +151,10 @@ async fn auth_middleware(State(auth): State<AuthState>, mut req: Request, next: 
         || path == "/v1/openapi.json"
         || path.starts_with("/preview/")
         || ((method == Method::GET || method == Method::HEAD)
-            && CONSOLE_PATHS.contains(&path.as_str()))
+            && (CONSOLE_PATHS.contains(&path.as_str()) || path.starts_with("/console/terminal")))
+        // A browser WebSocket cannot send `Authorization`: the single-use ticket in the path is the
+        // credential (minted by an authenticated `POST .../pty-ticket`, see agent_sessions.rs).
+        || (method == Method::GET && path.starts_with("/console/pty/"))
     {
         return next.run(req).await;
     }
@@ -160,10 +166,27 @@ async fn auth_middleware(State(auth): State<AuthState>, mut req: Request, next: 
         .and_then(|h| h.strip_prefix("Bearer "))
         .map(str::to_string);
 
+    // Set only for an `fxst_` session token: confines the request to one session's routes.
+    let mut session_scope: Option<agent_session_auth::SessionScope> = None;
     let (role, token_name, token_tenant) = if !must && !m.cfg.auth.has_credentials() {
         (Some(Role::Admin), Some("anonymous-admin".to_string()), None)
     } else if let Some(ref t) = presented {
-        if let Some(entry) = m
+        if t.starts_with(agent_session_auth::TOKEN_PREFIX) {
+            // Read-only role as defence in depth: the path check below and the handlers'
+            // `authorize` are what actually confine it, and neither consults the admin role.
+            match agent_session_auth::resolve(&m.cfg.state_dir, t).await {
+                Some(sc) => {
+                    let who = (
+                        Some(Role::ReadOnly),
+                        Some(format!("session-token:{}", sc.token_id)),
+                        sc.tenant.clone(),
+                    );
+                    session_scope = Some(sc);
+                    who
+                }
+                None => (None, None, None),
+            }
+        } else if let Some(entry) = m
             .cfg
             .auth
             .tokens
@@ -218,6 +241,16 @@ async fn auth_middleware(State(auth): State<AuthState>, mut req: Request, next: 
     };
     match role {
         Some(role) => {
+            if let Some(sc) = session_scope {
+                if !agent_session_auth::path_allowed(&path, sc.session) {
+                    return (
+                        StatusCode::FORBIDDEN,
+                        Json(json!({"error": "a session token only reaches its own session's routes"})),
+                    )
+                        .into_response();
+                }
+                req.extensions_mut().insert(sc);
+            }
             req.extensions_mut().insert(role);
             if let Some(name) = token_name.clone() {
                 req.extensions_mut().insert(AuditActor(name));
@@ -377,6 +410,7 @@ fn require_admin(role: Role) -> ApiResult<()> {
 
 pub fn router(manager: Arc<VmManager>) -> Router {
     fluxvm_scheduler::history::start_sampler(&manager);
+    agent_sessions::start_sweeper(&manager);
     let oidc = build_oidc(&manager.cfg.auth);
     let mut router = Router::new()
         .route("/healthz", get(|| async { Json(json!({"ok": true})) }))
@@ -768,6 +802,9 @@ pub fn router(manager: Arc<VmManager>) -> Router {
         .route("/console", get(console_ui))
         .route("/console/", get(console_ui))
         .route("/console/app.js", get(console_js))
+        .route("/console/terminal", get(terminal_page))
+        .route("/console/terminal/", get(terminal_page))
+        .route("/console/terminal/{file}", get(terminal_asset))
         .route("/v1/images/build", post(build_image))
         .route("/v1/images/import", post(import_image))
         .route("/v1/images/catalog", post(add_catalog_entry))
@@ -802,7 +839,13 @@ pub fn router(manager: Arc<VmManager>) -> Router {
             idempotency::middleware,
         ))
         .merge(speculate_api::routes())
-        .merge(agent_sessions::routes())
+        // Its own `Idempotency-Key` layer: the one above only wraps routes added before it.
+        .merge(
+            agent_sessions::routes().layer(middleware::from_fn_with_state(
+                manager.clone(),
+                idempotency::middleware,
+            )),
+        )
         .merge(macos_pool_api::routes())
         .merge(vz_api::routes())
         .merge(volumes_api::routes())
@@ -2150,11 +2193,26 @@ async fn egress_nftables() -> impl IntoResponse {
 const CONSOLE_CSP: &str = "default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; connect-src 'self'; \
      img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
 
+/// The terminal page needs three things the read-only console does not: its own stylesheets
+/// (`style-src 'self'`), WebAssembly for the sixel decoder (`'wasm-unsafe-eval'`, which allows
+/// compiling wasm but not `eval` of strings), and `blob:` images for inline-image protocols.
+const TERMINAL_CSP: &str = "default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; \
+     style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data: blob:; \
+     font-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
+
 fn console_file(content_type: &'static str, body: &'static str) -> Response {
+    console_file_with(content_type, body, CONSOLE_CSP)
+}
+
+fn console_file_with(
+    content_type: &'static str,
+    body: &'static str,
+    csp: &'static str,
+) -> Response {
     (
         [
             (header::CONTENT_TYPE, content_type),
-            (header::CONTENT_SECURITY_POLICY, CONSOLE_CSP),
+            (header::CONTENT_SECURITY_POLICY, csp),
             (header::X_FRAME_OPTIONS, "DENY"),
             (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
             (header::REFERRER_POLICY, "no-referrer"),
@@ -2171,6 +2229,77 @@ async fn console_ui() -> Response {
 
 async fn console_js() -> Response {
     console_file("text/javascript; charset=utf-8", CONSOLE_JS)
+}
+
+/// The terminal page and its vendored xterm.js files (`terminal/vendor/NOTICE`, checked by `SHA256SUMS`).
+const TERMINAL_FILES: &[(&str, &str, &str)] = &[
+    (
+        "terminal.js",
+        "text/javascript; charset=utf-8",
+        include_str!("terminal/terminal.js"),
+    ),
+    (
+        "terminal.css",
+        "text/css; charset=utf-8",
+        include_str!("terminal/terminal.css"),
+    ),
+    (
+        "xterm.js",
+        "text/javascript; charset=utf-8",
+        include_str!("terminal/vendor/xterm.js"),
+    ),
+    (
+        "xterm.css",
+        "text/css; charset=utf-8",
+        include_str!("terminal/vendor/xterm.css"),
+    ),
+    (
+        "addon-fit.js",
+        "text/javascript; charset=utf-8",
+        include_str!("terminal/vendor/addon-fit.js"),
+    ),
+    (
+        "addon-search.js",
+        "text/javascript; charset=utf-8",
+        include_str!("terminal/vendor/addon-search.js"),
+    ),
+    (
+        "addon-web-links.js",
+        "text/javascript; charset=utf-8",
+        include_str!("terminal/vendor/addon-web-links.js"),
+    ),
+    (
+        "addon-image.js",
+        "text/javascript; charset=utf-8",
+        include_str!("terminal/vendor/addon-image.js"),
+    ),
+    (
+        "addon-unicode11.js",
+        "text/javascript; charset=utf-8",
+        include_str!("terminal/vendor/addon-unicode11.js"),
+    ),
+    (
+        "addon-clipboard.js",
+        "text/javascript; charset=utf-8",
+        include_str!("terminal/vendor/addon-clipboard.js"),
+    ),
+    (
+        "addon-webgl.js",
+        "text/javascript; charset=utf-8",
+        include_str!("terminal/vendor/addon-webgl.js"),
+    ),
+];
+const TERMINAL_HTML: &str = include_str!("terminal/terminal.html");
+
+async fn terminal_page() -> Response {
+    console_file_with("text/html; charset=utf-8", TERMINAL_HTML, TERMINAL_CSP)
+}
+
+async fn terminal_asset(Path(file): Path<String>) -> Response {
+    match TERMINAL_FILES.iter().find(|(name, _, _)| *name == file) {
+        Some((_, ct, body)) => console_file_with(ct, body, TERMINAL_CSP),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
 }
 
 const CONSOLE_HTML: &str = include_str!("console.html");
@@ -6910,6 +7039,980 @@ mod tests {
         }
 
         #[tokio::test]
+        async fn a_session_token_reaches_only_its_session_and_only_what_it_grants() {
+            let m = procbox_manager(tenant_tokens(), false);
+            let id = seed_session(&m, Some("acme"), "vz", "running");
+            let other = seed_session(&m, Some("acme"), "vz", "running");
+            let app = router(m);
+            let uri = format!("/v1/agents/sessions/{id}");
+
+            // Minting is admin-only and tenant-checked; bad requests mint nothing.
+            let tok = format!("{uri}/tokens");
+            let (st, _) = call(
+                app.clone(),
+                "POST",
+                &tok,
+                "other",
+                Some(r#"{"ops":["read"]}"#),
+            )
+            .await;
+            assert_eq!(st, StatusCode::NOT_FOUND);
+            for bad in [
+                r#"{"ops":[]}"#,
+                r#"{"ops":["restore"]}"#,
+                r#"{"ops":["read"],"ttl_seconds":999999}"#,
+            ] {
+                let (st, b) = call(app.clone(), "POST", &tok, "acme", Some(bad)).await;
+                assert_eq!(st, StatusCode::BAD_REQUEST, "{bad}: {b}");
+            }
+            let (st, body) = call(
+                app.clone(),
+                "POST",
+                &tok,
+                "acme",
+                Some(r#"{"ops":["read","checkpoint"],"ttl_seconds":600}"#),
+            )
+            .await;
+            assert_eq!(st, StatusCode::CREATED, "{body}");
+            let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+            let scoped = v["token"].as_str().unwrap().to_string();
+            let token_id = v["id"].as_str().unwrap().to_string();
+            assert!(scoped.starts_with("fxst_"));
+
+            // Granted: its own session's read routes.
+            let (st, b) = call(app.clone(), "GET", &uri, &scoped, None).await;
+            assert_eq!(st, StatusCode::OK, "{b}");
+            let (st, _) = call(app.clone(), "GET", &format!("{uri}/events"), &scoped, None).await;
+            assert_eq!(st, StatusCode::OK);
+            // Not granted: other ops of the same session, and admin-only verbs.
+            for (method, suffix, body) in [
+                ("POST", "/exec", Some(r#"{"command":"id"}"#)),
+                (
+                    "PUT",
+                    "/files/content",
+                    Some(r#"{"path":"/workspace/a","content_base64":"eA=="}"#),
+                ),
+                ("DELETE", "", None),
+                ("POST", "/restore", Some(r#"{"tag":"x"}"#)),
+                ("POST", "/fork", Some(r#"{"count":1}"#)),
+                ("POST", "/tokens", Some(r#"{"ops":["read"]}"#)),
+                ("GET", "/tokens", None),
+                ("POST", "/pty-ticket", None),
+            ] {
+                let (st, b) = call(
+                    app.clone(),
+                    method,
+                    &format!("{uri}{suffix}"),
+                    &scoped,
+                    body,
+                )
+                .await;
+                assert_eq!(st, StatusCode::FORBIDDEN, "{method} {suffix}: {b}");
+            }
+            // Out of scope: another session, the session list, and every non-session route.
+            for path in [
+                format!("/v1/agents/sessions/{other}"),
+                format!("/v1/agents/sessions/{other}/events"),
+                "/v1/agents/sessions".to_string(),
+                "/v1/vms".to_string(),
+                "/v1/sandboxes".to_string(),
+            ] {
+                let (st, b) = call(app.clone(), "GET", &path, &scoped, None).await;
+                assert_eq!(st, StatusCode::FORBIDDEN, "{path}: {b}");
+            }
+            // The listing never shows a secret.
+            let (_, list) = call(app.clone(), "GET", &tok, "acme", None).await;
+            assert!(
+                list.contains(&token_id) && !list.contains(&scoped),
+                "{list}"
+            );
+            // A forged token for the other session, and a revoked one, are 401.
+            let forged = scoped.replacen(&id.simple().to_string(), &other.simple().to_string(), 1);
+            let (st, _) = call(
+                app.clone(),
+                "GET",
+                &format!("/v1/agents/sessions/{other}"),
+                &forged,
+                None,
+            )
+            .await;
+            assert_eq!(st, StatusCode::UNAUTHORIZED);
+            let (st, _) = call(
+                app.clone(),
+                "DELETE",
+                &format!("{tok}/{token_id}"),
+                "acme",
+                None,
+            )
+            .await;
+            assert_eq!(st, StatusCode::NO_CONTENT);
+            let (st, _) = call(app, "GET", &uri, &scoped, None).await;
+            assert_eq!(st, StatusCode::UNAUTHORIZED);
+        }
+
+        #[tokio::test]
+        async fn a_command_matching_an_ask_rule_waits_for_an_operators_approval() {
+            let m = procbox_manager(tenant_tokens(), false);
+            let id = seed_session(&m, Some("acme"), "vz", "running");
+            let path = m
+                .cfg
+                .state_dir
+                .join("agent-sessions")
+                .join(format!("{id}.json"));
+            let mut rec: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            rec["policy"]["process"] = json!({"allow": [], "deny": [], "ask": ["deploy *"]});
+            std::fs::write(&path, rec.to_string()).unwrap();
+            let app = router(m);
+            let uri = format!("/v1/agents/sessions/{id}");
+
+            let (st, body) = call(
+                app.clone(),
+                "POST",
+                &format!("{uri}/tokens"),
+                "acme",
+                Some(r#"{"ops":["read","exec"]}"#),
+            )
+            .await;
+            assert_eq!(st, StatusCode::CREATED, "{body}");
+            let scoped = serde_json::from_str::<serde_json::Value>(&body).unwrap()["token"]
+                .as_str()
+                .unwrap()
+                .to_string();
+
+            // The agent's own request is held: 428 with an approval id, nothing runs.
+            let exec = format!("{uri}/exec");
+            let (st, b) = call(
+                app.clone(),
+                "POST",
+                &exec,
+                &scoped,
+                Some(r#"{"command":"deploy prod"}"#),
+            )
+            .await;
+            assert_eq!(st, StatusCode::PRECONDITION_REQUIRED, "{b}");
+            let v: serde_json::Value = serde_json::from_str(&b).unwrap();
+            let aid = v["approval_id"].as_str().unwrap().to_string();
+            assert_eq!(v["state"], "pending");
+            // Asking again does not make a second request.
+            let (_, b2) = call(
+                app.clone(),
+                "POST",
+                &exec,
+                &scoped,
+                Some(r#"{"command":"deploy prod"}"#),
+            )
+            .await;
+            assert!(b2.contains(&aid), "{b2}");
+
+            // The agent can see the request but cannot decide it.
+            let (st, list) = call(
+                app.clone(),
+                "GET",
+                &format!("{uri}/approvals"),
+                &scoped,
+                None,
+            )
+            .await;
+            assert_eq!(st, StatusCode::OK, "{list}");
+            assert!(
+                list.contains(&aid) && list.contains("deploy prod"),
+                "{list}"
+            );
+            for verb in ["approve", "deny"] {
+                let (st, b) = call(
+                    app.clone(),
+                    "POST",
+                    &format!("{uri}/approvals/{aid}/{verb}"),
+                    &scoped,
+                    None,
+                )
+                .await;
+                assert_eq!(st, StatusCode::FORBIDDEN, "{verb}: {b}");
+            }
+            // Pending: presenting the id early is refused as not yet decided.
+            let with_id = format!(r#"{{"command":"deploy prod","approval_id":"{aid}"}}"#);
+            let (st, _) = call(app.clone(), "POST", &exec, &scoped, Some(&with_id)).await;
+            assert_eq!(st, StatusCode::PRECONDITION_REQUIRED);
+
+            // Another tenant cannot decide it; the operator can.
+            let (st, _) = call(
+                app.clone(),
+                "POST",
+                &format!("{uri}/approvals/{aid}/approve"),
+                "other",
+                None,
+            )
+            .await;
+            assert_eq!(st, StatusCode::NOT_FOUND);
+            let (st, b) = call(
+                app.clone(),
+                "POST",
+                &format!("{uri}/approvals/{aid}/approve"),
+                "acme",
+                Some(r#"{"note":"ship it"}"#),
+            )
+            .await;
+            assert_eq!(st, StatusCode::OK, "{b}");
+            assert!(b.contains(r#""state":"approved""#), "{b}");
+
+            // It does not stretch to another command.
+            let other = format!(r#"{{"command":"deploy staging","approval_id":"{aid}"}}"#);
+            let (st, b) = call(app.clone(), "POST", &exec, &scoped, Some(&other)).await;
+            assert_eq!(st, StatusCode::FORBIDDEN, "{b}");
+            // The exact request passes the gate (it then fails on the stand-in sandbox, which is
+            // not what this test is about), and the approval is spent.
+            let (st, b) = call(app.clone(), "POST", &exec, &scoped, Some(&with_id)).await;
+            assert_ne!(st, StatusCode::PRECONDITION_REQUIRED, "{b}");
+            assert!(!b.contains("approval"), "{b}");
+            let (st, b) = call(app.clone(), "POST", &exec, &scoped, Some(&with_id)).await;
+            assert_eq!(st, StatusCode::FORBIDDEN, "{b}");
+            assert!(b.contains("already used"), "{b}");
+            let (_, list) = call(
+                app.clone(),
+                "GET",
+                &format!("{uri}/approvals"),
+                "acme",
+                None,
+            )
+            .await;
+            assert!(list.contains(r#""state":"consumed""#), "{list}");
+
+            // A denial stays denied.
+            let (_, b) = call(
+                app.clone(),
+                "POST",
+                &exec,
+                &scoped,
+                Some(r#"{"command":"deploy qa"}"#),
+            )
+            .await;
+            let qa = serde_json::from_str::<serde_json::Value>(&b).unwrap()["approval_id"]
+                .as_str()
+                .unwrap()
+                .to_string();
+            let (st, _) = call(
+                app.clone(),
+                "POST",
+                &format!("{uri}/approvals/{qa}/deny"),
+                "acme",
+                None,
+            )
+            .await;
+            assert_eq!(st, StatusCode::OK);
+            let body = format!(r#"{{"command":"deploy qa","approval_id":"{qa}"}}"#);
+            let (st, b) = call(app, "POST", &exec, &scoped, Some(&body)).await;
+            assert_eq!(st, StatusCode::FORBIDDEN, "{b}");
+            assert!(b.contains("denied"), "{b}");
+        }
+
+        #[tokio::test]
+        async fn uploads_validate_input_and_unknown_ids_before_touching_the_guest() {
+            let m = procbox_manager(tenant_tokens(), false);
+            let id = seed_session(&m, Some("acme"), "vz", "running");
+            let app = router(m);
+            let up = format!("/v1/agents/sessions/{id}/uploads");
+            for (body, why) in [
+                (r#"{"path":"rel","size":5}"#, "relative path"),
+                (r#"{"path":"/a/../b","size":5}"#, ".."),
+                (r#"{"path":"/a/b/","size":5}"#, "directory"),
+                (r#"{"path":"/a/b","size":0}"#, "empty"),
+                (r#"{"path":"/a/b","size":3000000000}"#, "over the limit"),
+                (r#"{"path":"/a/b","size":5,"sha256":"xyz"}"#, "bad checksum"),
+                (r#"{"path":"/a/b","size":5,"mode":65535}"#, "bad mode"),
+            ] {
+                let (st, b) = call(app.clone(), "POST", &up, "acme", Some(body)).await;
+                assert_eq!(st, StatusCode::BAD_REQUEST, "{why}: {b}");
+            }
+            // Unknown upload: 404 for every verb, and another tenant cannot even see the session.
+            let ghost = uuid::Uuid::new_v4();
+            for (method, suffix) in [
+                ("GET", format!("/{ghost}")),
+                ("DELETE", format!("/{ghost}")),
+                ("POST", format!("/{ghost}/complete")),
+            ] {
+                let (st, b) =
+                    call(app.clone(), method, &format!("{up}{suffix}"), "acme", None).await;
+                assert_eq!(st, StatusCode::NOT_FOUND, "{method} {suffix}: {b}");
+            }
+            let (st, _) = call(app.clone(), "GET", &up, "other", None).await;
+            assert_eq!(st, StatusCode::NOT_FOUND);
+            let (st, b) = call(app.clone(), "GET", &up, "acme", None).await;
+            assert_eq!(st, StatusCode::OK, "{b}");
+            assert!(b.contains(r#""items":[]"#), "{b}");
+            // A token that may only read cannot upload or abort.
+            let (_, t) = call(
+                app.clone(),
+                "POST",
+                &format!("/v1/agents/sessions/{id}/tokens"),
+                "acme",
+                Some(r#"{"ops":["files.read"]}"#),
+            )
+            .await;
+            let scoped = serde_json::from_str::<serde_json::Value>(&t).unwrap()["token"]
+                .as_str()
+                .unwrap()
+                .to_string();
+            let (st, _) = call(
+                app.clone(),
+                "POST",
+                &up,
+                &scoped,
+                Some(r#"{"path":"/a/b","size":5}"#),
+            )
+            .await;
+            assert_eq!(st, StatusCode::FORBIDDEN);
+            let (st, _) = call(
+                app.clone(),
+                "DELETE",
+                &format!("{up}/{ghost}"),
+                &scoped,
+                None,
+            )
+            .await;
+            assert_eq!(st, StatusCode::FORBIDDEN);
+            let (st, _) = call(app, "GET", &up, &scoped, None).await;
+            assert_eq!(st, StatusCode::OK);
+        }
+
+        #[tokio::test]
+        async fn the_sweeper_expires_sessions_and_removes_what_they_left() {
+            let m = procbox_manager(tenant_tokens(), false);
+            let id = seed_session(&m, Some("acme"), "vz", "running");
+            let live = seed_session(&m, Some("acme"), "vz", "running");
+            let path = m
+                .cfg
+                .state_dir
+                .join("agent-sessions")
+                .join(format!("{id}.json"));
+            let mut rec: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            rec["expires_at"] = json!(chrono::Utc::now() - chrono::Duration::seconds(5));
+            std::fs::write(&path, rec.to_string()).unwrap();
+            // Side files the session left, for both.
+            let side = |kind: &str, sid: uuid::Uuid| {
+                let d = m.cfg.state_dir.join(kind);
+                std::fs::create_dir_all(&d).unwrap();
+                let p = d.join(format!("{sid}.json"));
+                std::fs::write(&p, "[]").unwrap();
+                p
+            };
+            let (a1, a2) = (
+                side("agent-session-approvals", id),
+                side("agent-session-jobs", id),
+            );
+            let b1 = side("agent-session-approvals", live);
+            let swept = agent_sessions::sweep_sessions(&m).await;
+            assert_eq!(swept, 1);
+            assert!(
+                !a1.exists() && !a2.exists(),
+                "the expired session's files go"
+            );
+            assert!(b1.exists(), "a live session keeps its files");
+            // It is now persisted as expired, with a ledger line, and a second pass has no work.
+            let on_disk = std::fs::read_to_string(&path).unwrap();
+            assert!(on_disk.contains(r#""state": "expired""#), "{on_disk}");
+            assert_eq!(agent_sessions::sweep_sessions(&m).await, 0);
+            let app = router(m);
+            let (_, ev) = call(
+                app,
+                "GET",
+                &format!("/v1/agents/sessions/{id}/events"),
+                "acme",
+                None,
+            )
+            .await;
+            assert!(ev.contains("session.cleanup"), "{ev}");
+        }
+
+        #[tokio::test]
+        async fn an_operation_a_dead_daemon_left_behind_is_reported_once() {
+            let m = procbox_manager(tenant_tokens(), false);
+            let id = seed_session(&m, Some("acme"), "vz", "running");
+            let d = m.cfg.state_dir.join("agent-session-ops");
+            std::fs::create_dir_all(&d).unwrap();
+            std::fs::write(
+                d.join(format!("{id}.json")),
+                r#"{"op":"restore","started_at":"2026-01-01T00:00:00Z","reported":false}"#,
+            )
+            .unwrap();
+            let app = router(m);
+            let uri = format!("/v1/agents/sessions/{id}");
+            for _ in 0..2 {
+                let (st, b) = call(app.clone(), "GET", &uri, "acme", None).await;
+                assert_eq!(st, StatusCode::OK, "{b}");
+                assert!(b.contains(r#""interrupted_op":{"op":"restore""#), "{b}");
+            }
+            let (_, ev) = call(app, "GET", &format!("{uri}/events"), "acme", None).await;
+            assert_eq!(ev.matches("lifecycle.interrupted").count(), 1, "{ev}");
+        }
+
+        #[tokio::test]
+        async fn an_expired_session_is_persisted_as_expired_and_refuses_work() {
+            let m = procbox_manager(tenant_tokens(), false);
+            let id = seed_session(&m, Some("acme"), "vz", "running");
+            let path = m
+                .cfg
+                .state_dir
+                .join("agent-sessions")
+                .join(format!("{id}.json"));
+            let mut rec: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            rec["expires_at"] = json!(chrono::Utc::now() - chrono::Duration::seconds(5));
+            std::fs::write(&path, rec.to_string()).unwrap();
+            let app = router(m);
+            let uri = format!("/v1/agents/sessions/{id}");
+            let (st, b) = call(app.clone(), "GET", &uri, "acme", None).await;
+            assert_eq!(st, StatusCode::OK, "{b}");
+            assert!(b.contains(r#""state":"expired""#), "{b}");
+            // Persisted: the record on disk says so, and ledgered once.
+            let on_disk = std::fs::read_to_string(&path).unwrap();
+            assert!(on_disk.contains(r#""state": "expired""#), "{on_disk}");
+            let (st, b) = call(
+                app.clone(),
+                "POST",
+                &format!("{uri}/exec"),
+                "acme",
+                Some(r#"{"command":"id"}"#),
+            )
+            .await;
+            assert_eq!(st, StatusCode::CONFLICT, "{b}");
+            assert!(b.contains("expired"), "{b}");
+            // The listing agrees.
+            let (_, list) = call(app, "GET", "/v1/agents/sessions", "acme", None).await;
+            assert!(list.contains(r#""state":"expired""#), "{list}");
+        }
+
+        #[tokio::test]
+        async fn if_match_stops_a_stale_lifecycle_call_and_the_session_reports_its_revision() {
+            let m = procbox_manager(tenant_tokens(), false);
+            let id = seed_session(&m, Some("acme"), "vz", "running");
+            let app = router(m);
+            let uri = format!("/v1/agents/sessions/{id}");
+            for suffix in ["/checkpoint", "/restore", "/fork"] {
+                let resp = app
+                    .clone()
+                    .oneshot(
+                        Request::builder()
+                            .method("POST")
+                            .uri(format!("{uri}{suffix}"))
+                            .header(header::AUTHORIZATION, "Bearer acme")
+                            .header(header::CONTENT_TYPE, "application/json")
+                            .header(header::IF_MATCH, "41")
+                            .body(Body::from(r#"{"tag":"t","count":1}"#))
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(resp.status(), StatusCode::PRECONDITION_FAILED, "{suffix}");
+            }
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("DELETE")
+                        .uri(&uri)
+                        .header(header::AUTHORIZATION, "Bearer acme")
+                        .header(header::IF_MATCH, "41")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::PRECONDITION_FAILED);
+            // A refused call changed nothing.
+            let (st, b) = call(app, "GET", &uri, "acme", None).await;
+            assert_eq!(st, StatusCode::OK, "{b}");
+            assert!(
+                b.contains(r#""state":"running""#) || b.contains(r#""state":"gone""#),
+                "{b}"
+            );
+        }
+
+        #[tokio::test]
+        async fn promote_is_admin_only_tenant_scoped_and_needs_a_fork_child_with_a_baseline() {
+            let m = procbox_manager(tenant_tokens(), false);
+            let parent = seed_session(&m, Some("acme"), "vz", "running");
+            let child = seed_session(&m, Some("acme"), "vz", "running");
+            let lone = seed_session(&m, Some("acme"), "vz", "running");
+            // Make `child` a fork child of `parent`; neither has a workspace baseline.
+            let path = m
+                .cfg
+                .state_dir
+                .join("agent-sessions")
+                .join(format!("{child}.json"));
+            let mut rec: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            rec["parent"] = json!(parent);
+            std::fs::write(&path, rec.to_string()).unwrap();
+            let app = router(m);
+            let uri = |id: Uuid| format!("/v1/agents/sessions/{id}/promote");
+
+            // Another tenant: 404, not a hint that the id exists.
+            let (st, _) = call(app.clone(), "POST", &uri(child), "other", Some("{}")).await;
+            assert_eq!(st, StatusCode::NOT_FOUND);
+            // A session that is not a fork child has nothing to promote into.
+            let (st, b) = call(app.clone(), "POST", &uri(lone), "acme", Some("{}")).await;
+            assert_eq!(st, StatusCode::CONFLICT, "{b}");
+            assert!(b.contains("not a fork child"), "{b}");
+            // A child without a workspace baseline cannot be planned, dry run or not.
+            for body in [r#"{}"#, r#"{"dry_run":true}"#] {
+                let (st, b) = call(app.clone(), "POST", &uri(child), "acme", Some(body)).await;
+                assert_eq!(st, StatusCode::CONFLICT, "{b}");
+                assert!(b.contains("workspace with a baseline"), "{b}");
+            }
+            // A session token never promotes, whatever it was granted.
+            let (_, minted) = call(
+                app.clone(),
+                "POST",
+                &format!("/v1/agents/sessions/{child}/tokens"),
+                "acme",
+                Some(
+                    r#"{"ops":["read","exec","files.write","git","jobs","checkpoint","preview"]}"#,
+                ),
+            )
+            .await;
+            let v: serde_json::Value = serde_json::from_str(&minted).unwrap();
+            let (st, _) = call(
+                app,
+                "POST",
+                &uri(child),
+                v["token"].as_str().unwrap(),
+                Some("{}"),
+            )
+            .await;
+            assert_eq!(st, StatusCode::FORBIDDEN);
+        }
+
+        #[tokio::test]
+        async fn job_list_stdin_and_stream_are_tenant_scoped_and_validated() {
+            let m = procbox_manager(tenant_tokens(), false);
+            let id = seed_session(&m, Some("acme"), "vz", "running");
+            let job = Uuid::new_v4();
+            let app = router(m);
+            let base = format!("/v1/agents/sessions/{id}/jobs");
+            // Another tenant gets 404 on all three, never a hint the session exists.
+            for (method, suffix, body) in [
+                ("GET", String::new(), None),
+                ("POST", format!("/{job}/stdin"), Some(r#"{"text":"x"}"#)),
+                ("GET", format!("/{job}/stream"), None),
+            ] {
+                let (st, _) = call(
+                    app.clone(),
+                    method,
+                    &format!("{base}{suffix}"),
+                    "other",
+                    body,
+                )
+                .await;
+                assert_eq!(st, StatusCode::NOT_FOUND, "{method} {suffix}");
+            }
+            // stdin takes exactly one of text and data_base64, and a bounded amount.
+            let stdin = format!("{base}/{job}/stdin");
+            for bad in [
+                r#"{}"#.to_string(),
+                r#"{"text":"a","data_base64":"YQ=="}"#.to_string(),
+                r#"{"text":""}"#.to_string(),
+                format!(r#"{{"text":"{}"}}"#, "a".repeat(50_000)),
+            ] {
+                let (st, b) = call(app.clone(), "POST", &stdin, "acme", Some(&bad)).await;
+                assert_eq!(st, StatusCode::BAD_REQUEST, "{b}");
+            }
+            // A job that was never started with stdin: 409, before any guest is touched.
+            let (st, b) = call(app.clone(), "POST", &stdin, "acme", Some(r#"{"text":"x"}"#)).await;
+            assert_eq!(st, StatusCode::CONFLICT, "{b}");
+            // The output bound is validated at start.
+            for n in ["0", "999999999999"] {
+                let (st, b) = call(
+                    app.clone(),
+                    "POST",
+                    &base,
+                    "acme",
+                    Some(&format!(r#"{{"command":"true","max_output_bytes":{n}}}"#)),
+                )
+                .await;
+                assert_eq!(st, StatusCode::BAD_REQUEST, "{n}: {b}");
+            }
+        }
+
+        #[tokio::test]
+        async fn a_bad_budget_is_refused_before_any_sandbox_is_made() {
+            let m = procbox_manager(tenant_tokens(), false);
+            let app = router(m);
+            for body in [
+                r#"{"budget":{"max_execs":0}}"#,
+                r#"{"budget":{"max_jobs":99999999999}}"#,
+                r#"{"budget":{"max_execs":"many"}}"#,
+            ] {
+                let (st, b) = call(
+                    app.clone(),
+                    "POST",
+                    "/v1/agents/sessions",
+                    "acme",
+                    Some(body),
+                )
+                .await;
+                assert!(
+                    st == StatusCode::BAD_REQUEST || st == StatusCode::UNPROCESSABLE_ENTITY,
+                    "{body}: {st} {b}"
+                );
+            }
+        }
+
+        #[tokio::test]
+        async fn session_grants_are_admin_only_and_tenant_scoped() {
+            let m = procbox_manager(tenant_tokens(), false);
+            let id = seed_session(&m, Some("acme"), "vz", "running");
+            let app = router(m);
+            let base = format!("/v1/agents/sessions/{id}/grants");
+            let body = r#"{"secret_ref":"gh","value":"s3cret","hosts":["api.github.com"]}"#;
+            // Another tenant: 404 on every verb.
+            for (method, uri, b) in [
+                ("POST", base.clone(), Some(body)),
+                ("GET", base.clone(), None),
+                ("DELETE", base.clone(), None),
+                ("DELETE", format!("{base}/g1"), None),
+            ] {
+                let (st, _) = call(app.clone(), method, &uri, "other", b).await;
+                assert_eq!(st, StatusCode::NOT_FOUND, "{method} {uri}");
+            }
+            // A session token, whatever it was granted, cannot give itself a credential.
+            let (_, minted) = call(
+                app.clone(),
+                "POST",
+                &format!("/v1/agents/sessions/{id}/tokens"),
+                "acme",
+                Some(
+                    r#"{"ops":["read","exec","files.write","git","jobs","checkpoint","preview"]}"#,
+                ),
+            )
+            .await;
+            let v: serde_json::Value = serde_json::from_str(&minted).unwrap();
+            let tok = v["token"].as_str().unwrap();
+            for (method, uri, b) in [
+                ("POST", base.clone(), Some(body)),
+                ("GET", base.clone(), None),
+                ("DELETE", base.clone(), None),
+            ] {
+                let (st, _) = call(app.clone(), method, &uri, tok, b).await;
+                assert_eq!(st, StatusCode::FORBIDDEN, "{method} {uri}");
+            }
+            // The owner is let in (the seeded sandbox does not exist, so the broker answers 400),
+            // and no response echoes a secret.
+            let (st, b) = call(app.clone(), "GET", &base, "acme", None).await;
+            assert!(
+                st != StatusCode::FORBIDDEN && st != StatusCode::UNAUTHORIZED,
+                "{st} {b}"
+            );
+            assert!(!b.contains("s3cret"));
+        }
+
+        #[tokio::test]
+        async fn the_terminal_page_needs_no_token_and_the_ticket_is_scoped_to_its_session() {
+            use tower::ServiceExt as _;
+            let m = procbox_manager(tenant_tokens(), false);
+            let id = seed_session(&m, Some("acme"), "vz", "running");
+            let app = router(m.clone());
+            // The page and its vendored files load without a bearer token and carry the console CSP.
+            for (uri, ct) in [
+                ("/console/terminal", "text/html"),
+                ("/console/terminal/", "text/html"),
+                ("/console/terminal/terminal.js", "text/javascript"),
+                ("/console/terminal/xterm.js", "text/javascript"),
+                ("/console/terminal/xterm.css", "text/css"),
+            ] {
+                let resp = app
+                    .clone()
+                    .oneshot(
+                        Request::builder()
+                            .method("GET")
+                            .uri(uri)
+                            .body(Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(resp.status(), StatusCode::OK, "{uri}");
+                let h = resp.headers();
+                assert!(
+                    h[header::CONTENT_TYPE].to_str().unwrap().starts_with(ct),
+                    "{uri}"
+                );
+                let csp = h[header::CONTENT_SECURITY_POLICY].to_str().unwrap();
+                // wasm may compile (the sixel decoder); strings may not be eval'd; nothing loads from elsewhere
+                assert!(
+                    csp.contains("script-src 'self' 'wasm-unsafe-eval'"),
+                    "{csp}"
+                );
+                assert!(
+                    !csp.contains("'unsafe-eval'") && !csp.contains("http"),
+                    "{csp}"
+                );
+                assert!(
+                    csp.contains("default-src 'none'") && csp.contains("frame-ancestors 'none'"),
+                    "{csp}"
+                );
+            }
+            let st = status_for(app.clone(), "GET", "/console/terminal/nope.js", None).await;
+            assert_eq!(st, StatusCode::NOT_FOUND);
+            // Only GET gets past auth for the page.
+            let st = status_for(app.clone(), "POST", "/console/terminal", None).await;
+            assert_eq!(st, StatusCode::UNAUTHORIZED);
+
+            // Minting a ticket needs a token, and another tenant cannot mint one.
+            let st = status_for(
+                app.clone(),
+                "POST",
+                &format!("/v1/agents/sessions/{id}/pty-ticket"),
+                None,
+            )
+            .await;
+            assert_eq!(st, StatusCode::UNAUTHORIZED);
+            let (st, _) = call(
+                app.clone(),
+                "POST",
+                &format!("/v1/agents/sessions/{id}/pty-ticket"),
+                "other",
+                None,
+            )
+            .await;
+            assert_eq!(st, StatusCode::NOT_FOUND);
+            let (st, body) = call(
+                app.clone(),
+                "POST",
+                &format!("/v1/agents/sessions/{id}/pty-ticket"),
+                "acme",
+                None,
+            )
+            .await;
+            assert_eq!(st, StatusCode::OK, "{body}");
+            let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+            assert_eq!(v["ticket"].as_str().unwrap().len(), 64);
+            assert_eq!(v["expires_in"], 30);
+            // The ticket route needs no bearer: a plain GET gets past auth and fails at the missing
+            // WebSocket upgrade (400), never 401.
+            let st = status_for(app.clone(), "GET", "/console/pty/anything", None).await;
+            assert_ne!(st, StatusCode::UNAUTHORIZED);
+
+            // A session with command rules refuses a terminal at the ticket, not later.
+            let ruled = seed_session(&m, Some("acme"), "vz", "running");
+            let path = m
+                .cfg
+                .state_dir
+                .join("agent-sessions")
+                .join(format!("{ruled}.json"));
+            let mut rec: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            rec["policy"]["process"] = json!({"allow": ["ls"], "deny": []});
+            std::fs::write(&path, rec.to_string()).unwrap();
+            let (st, _) = call(
+                app,
+                "POST",
+                &format!("/v1/agents/sessions/{ruled}/pty-ticket"),
+                "acme",
+                None,
+            )
+            .await;
+            assert_eq!(st, StatusCode::FORBIDDEN);
+        }
+
+        /// The page's pure helpers and palettes, run under node when it is installed.
+        #[test]
+        fn the_terminal_page_helpers_and_themes_hold() {
+            let Ok(node) = std::process::Command::new("node").arg("--version").output() else {
+                eprintln!("node is not installed; skipping");
+                return;
+            };
+            assert!(node.status.success());
+            let file = concat!(env!("CARGO_MANIFEST_DIR"), "/src/terminal/terminal.js");
+            let script = format!(
+                r##"
+const assert = require("assert");
+const t = require({file:?});
+const keys = ["foreground","background","cursor","cursorAccent","selectionBackground","black","red","green","yellow",
+  "blue","magenta","cyan","white","brightBlack","brightRed","brightGreen","brightYellow","brightBlue","brightMagenta",
+  "brightCyan","brightWhite"];
+assert(Object.keys(t.THEMES).length >= 5);
+for (const [name, th] of Object.entries(t.THEMES)) {{
+  for (const k of keys) assert(/^#[0-9a-f]{{6}}$/i.test(th[k]), name + "." + k + " = " + th[k]);
+  assert.strictEqual(typeof th.dark, "boolean", name);
+  assert(t.contrast(th.foreground, th.background) >= 4.5, name + " text contrast " + t.contrast(th.foreground, th.background));
+  // dark themes have a dark background and light ones a light one
+  assert.strictEqual(t.contrast(th.background, "#000000") < t.contrast(th.background, "#ffffff"), th.dark, name);
+}}
+assert.strictEqual(t.pickTheme("Dracula", false), "Dracula");
+assert.strictEqual(t.pickTheme("nope", true), t.DEFAULT_DARK);
+assert.strictEqual(t.pickTheme(null, false), t.DEFAULT_LIGHT);
+assert.strictEqual(t.pickTheme("__proto__", true), t.DEFAULT_DARK);
+const u = t.ptyUrl({{ protocol: "http:", host: "127.0.0.1:7788" }}, "ab12", 100, 30);
+assert(u.startsWith("ws://127.0.0.1:7788/console/pty/ab12?"), u);
+assert(u.includes("cols=100") && u.includes("rows=30") && u.includes("term_program=FluxVM") && u.includes("colorterm=truecolor"), u);
+assert(t.ptyUrl({{ protocol: "https:", host: "h" }}, "x/y", 1, 1).startsWith("wss://h/console/pty/x%2Fy?"));
+assert.strictEqual(t.exitCode("exit=3"), 3);
+assert.strictEqual(t.exitCode("exit=-1"), -1);
+assert.strictEqual(t.exitCode(""), null);
+assert.strictEqual(t.exitCode("exit=3; rm"), null);
+assert.strictEqual(t.clampSize(2), 9);
+assert.strictEqual(t.clampSize(99), 32);
+assert.strictEqual(t.clampSize("14"), 14);
+assert.strictEqual(t.clampSize("x"), 16);
+assert.strictEqual(t.clampSize(99), 32);
+// the WezTerm-style theme: neon accent, a gradient window and dimmed inactive panes
+const neon = t.THEMES["Neon Storm"], c = t.chromeFor(neon);
+assert.strictEqual(t.DEFAULT_DARK, "Neon Storm");
+assert.strictEqual(c.accent, "#82aaff"); assert.strictEqual(c.tabActiveBg, "#82aaff");
+assert.deepStrictEqual(c.gradient, ["#16161e", "#2a2b3b", "#16161e"]);
+assert.strictEqual(c.opacity, 0.94); assert.strictEqual(c.paneDim.brightness, 0.7);
+assert(t.contrast(c.tabActiveFg, c.tabActiveBg) >= 4.5, "active tab text");
+assert(t.contrast(c.tabInactiveFg, c.tabInactiveBg) >= 4.5, "inactive tab text");
+const plain = t.chromeFor(t.THEMES["Dracula"]);
+assert.strictEqual(plain.gradient, null); assert.strictEqual(plain.opacity, 1);
+// layout tree
+let tree = {{ leaf: 1 }};
+tree = t.splitLeaf(tree, 1, "h", 2);        // 1 | 2
+tree = t.splitLeaf(tree, 2, "v", 3);        // 1 | (2 over 3)
+assert.deepStrictEqual(t.leaves(tree), [1, 2, 3]);
+assert.deepStrictEqual(t.leaves(t.splitLeaf(tree, 99, "h", 4)), [1, 2, 3], "unknown pane changes nothing");
+const rects = t.layoutRects(tree, {{ x: 0, y: 0, w: 100, h: 60 }});
+assert.deepStrictEqual(rects[1], {{ x: 0, y: 0, w: 50, h: 60 }});
+assert.deepStrictEqual(rects[2], {{ x: 50, y: 0, w: 50, h: 30 }});
+assert.deepStrictEqual(rects[3], {{ x: 50, y: 30, w: 50, h: 30 }});
+assert.strictEqual(t.neighbour(rects, 1, "right"), "2");
+assert.strictEqual(t.neighbour(rects, 3, "left"), "1");
+assert.strictEqual(t.neighbour(rects, 2, "down"), "3");
+assert.strictEqual(t.neighbour(rects, 3, "up"), "2");
+assert.strictEqual(t.neighbour(rects, 1, "left"), null);
+assert.strictEqual(t.neighbour(rects, 1, "up"), null);
+assert.deepStrictEqual(t.leaves(t.removeLeaf(tree, 2)), [1, 3]);
+assert.deepStrictEqual(t.removeLeaf(t.removeLeaf(tree, 2), 3), {{ leaf: 1 }});
+assert.strictEqual(t.removeLeaf({{ leaf: 1 }}, 1), null, "closing the last pane leaves nothing");
+assert.deepStrictEqual(t.removeLeaf({{ leaf: 1 }}, 7), {{ leaf: 1 }});
+// titles and clock
+assert.strictEqual(t.tabTitle("  sandbox@host:   ~  ", "x", 24), "sandbox@host: ~");
+assert.strictEqual(t.tabTitle("", "fallback", 24), "fallback");
+assert.strictEqual(t.tabTitle("a".repeat(40), "x", 10), "aaaaaaaaa…");
+assert.strictEqual(t.clock(new Date(2026, 0, 2, 3, 4, 5)), "03:04:05");
+// keys: the user's bindings (⌘T ⌘W ⌘⌃hjkl) plus WezTerm's split keys; nothing else is taken
+const key = (o) => Object.assign({{ key: "", metaKey: false, ctrlKey: false, shiftKey: false, altKey: false }}, o);
+assert.deepStrictEqual(t.shortcut(key({{ key: "t", metaKey: true }}), true), {{ action: "new-tab" }});
+assert.deepStrictEqual(t.shortcut(key({{ key: "w", metaKey: true }}), true), {{ action: "close" }});
+assert.deepStrictEqual(t.shortcut(key({{ key: "h", metaKey: true, ctrlKey: true }}), true), {{ action: "focus", dir: "left" }});
+assert.deepStrictEqual(t.shortcut(key({{ key: "j", metaKey: true, ctrlKey: true }}), true), {{ action: "focus", dir: "down" }});
+assert.deepStrictEqual(t.shortcut(key({{ key: "3", metaKey: true }}), true), {{ action: "tab", index: 2 }});
+assert.deepStrictEqual(t.shortcut(key({{ key: '"', ctrlKey: true, shiftKey: true, altKey: true }}), true), {{ action: "split", dir: "v" }});
+assert.deepStrictEqual(t.shortcut(key({{ key: "T", ctrlKey: true, shiftKey: true }}), false), {{ action: "new-tab" }});
+// plain typing, Ctrl-C/Ctrl-W/Ctrl-T for the shell and bare Cmd on a non-mac are left alone
+for (const e of [key({{ key: "t" }}), key({{ key: "c", ctrlKey: true }}), key({{ key: "w", ctrlKey: true }}),
+  key({{ key: "t", ctrlKey: true }}), key({{ key: "a", metaKey: true }})]) assert.strictEqual(t.shortcut(e, true), null, JSON.stringify(e));
+assert.strictEqual(t.shortcut(key({{ key: "t", metaKey: true }}), false), null);
+// search, palette, copy mode, quick select and prompt jumps
+assert.deepStrictEqual(t.shortcut(key({{ key: "f", metaKey: true }}), true), {{ action: "search" }});
+assert.deepStrictEqual(t.shortcut(key({{ key: "P", metaKey: true, shiftKey: true }}), true), {{ action: "palette" }});
+assert.deepStrictEqual(t.shortcut(key({{ key: "X", ctrlKey: true, shiftKey: true }}), true), {{ action: "copy-mode" }});
+assert.deepStrictEqual(t.shortcut(key({{ key: " ", ctrlKey: true, shiftKey: true }}), true), {{ action: "quick-select" }});
+assert.deepStrictEqual(t.shortcut(key({{ key: "ArrowUp", metaKey: true }}), true), {{ action: "prompt", dir: -1 }});
+assert.strictEqual(t.shortcut(key({{ key: "f", ctrlKey: true }}), true), null, "Ctrl-F stays the shell's");
+assert.strictEqual(t.shortcut(key({{ key: "ArrowUp" }}), true), null, "history stays the shell's");
+// quick select
+const q = t.quickMatches([
+  "see https://example.com/a/b?x=1, and /etc/hosts or ~/src/app.rs",
+  "commit 3f2a9c1d4e at 10.0.0.12:8080 id 123e4567-e89b-12d3-a456-426614174000 pid 48213",
+  "plain words only and 12",
+]);
+const kinds = q.map((m) => m.kind + ":" + m.text);
+assert.deepStrictEqual(kinds, [
+  "url:https://example.com/a/b?x=1", "path:/etc/hosts", "path:~/src/app.rs",
+  "hash:3f2a9c1d4e", "ipv4:10.0.0.12:8080", "uuid:123e4567-e89b-12d3-a456-426614174000", "number:48213",
+], JSON.stringify(kinds));
+assert.deepStrictEqual(q[0], {{ row: 0, col: 4, len: 27, text: "https://example.com/a/b?x=1", kind: "url" }});
+assert.strictEqual(t.quickMatches(["a/b"]).length, 0, "a bare relative word is not a path");
+assert.strictEqual(t.quickMatches(["deadbeef cafebabe"]).length, 0, "words made only of hex letters are not hashes");
+assert.deepStrictEqual(t.hintLabels(3), ["a", "s", "d"]);
+assert.strictEqual(t.hintLabels(26).length, 26);
+const many = t.hintLabels(40);
+assert.strictEqual(new Set(many).size, 40);
+assert(many.every((l) => l.length === 2), "two letters each once they no longer fit in one");
+for (const a of many) for (const b of many) if (a !== b) assert(!b.startsWith(a), "prefix-free");
+// copy mode
+const L = ["alpha beta  gamma", "", "x.y z"];
+const mv = (st, ...ks) => ks.reduce((s, k) => t.copyMove(s, k, L), st);
+let st = {{ row: 0, col: 0, mode: null, anchor: null }};
+assert.deepStrictEqual(mv(st, "w"), {{ ...st, col: 6 }});
+assert.deepStrictEqual(mv(st, "w", "w"), {{ ...st, col: 12 }});
+assert.deepStrictEqual(mv(st, "w", "w", "w"), {{ ...st, row: 1, col: 0 }}, "w crosses a line break");
+assert.deepStrictEqual(mv(st, "$"), {{ ...st, col: 16 }});
+assert.deepStrictEqual(mv(st, "$", "b"), {{ ...st, col: 12 }});
+assert.deepStrictEqual(mv(st, "$", "b", "b"), {{ ...st, col: 6 }});
+assert.deepStrictEqual(mv(st, "j", "j"), {{ ...st, row: 2, col: 0 }});
+assert.deepStrictEqual(mv(st, "k", "h"), st, "stays inside the buffer");
+assert.deepStrictEqual(mv(st, "G"), {{ ...st, row: 2, col: 0 }});
+assert.deepStrictEqual(mv(st, "G", "g"), st);
+assert.strictEqual(mv(st, "$", "j").col, 0, "an empty line clamps the column");
+// visual selection and yank
+let v = mv(st, "v", "w");
+assert.strictEqual(t.copyText(v, L), "alpha b");
+assert.strictEqual(t.copyText(mv(st, "V", "j", "j"), L), "alpha beta  gamma\n\nx.y z");
+assert.strictEqual(t.copyText(mv(st, "j", "j", "v", "k", "k"), L), "alpha beta  gamma\n\nx");
+assert.strictEqual(t.copyText(st, L), "", "nothing without a selection");
+assert.strictEqual(mv(st, "v", "v").mode, null, "v again leaves visual mode");
+// prompt marks
+assert.strictEqual(t.promptJump([4, 20, 9], 10, -1), 9);
+assert.strictEqual(t.promptJump([4, 20, 9], 10, 1), 20);
+assert.strictEqual(t.promptJump([4, 20, 9], 9, -1), 4);
+assert.strictEqual(t.promptJump([4], 0, -1), null);
+assert.strictEqual(t.promptJump([-1, 4], 0, 1), 4, "disposed markers (line -1) are ignored");
+// palette
+assert(t.ACTIONS.length > 10);
+assert.deepStrictEqual(t.filterActions(t.ACTIONS, "split").map((a) => a.run.dir), ["h", "v"]);
+assert.strictEqual(t.filterActions(t.ACTIONS, "THEME dracula").length, 1);
+assert.strictEqual(t.filterActions(t.ACTIONS, "").length, t.ACTIONS.length);
+assert.strictEqual(t.filterActions(t.ACTIONS, "zzzz").length, 0);
+for (const a of t.ACTIONS) if (a.run.action === "theme") assert(t.THEMES[a.run.name], a.title);
+"##
+            );
+            let dir = tempfile::tempdir().unwrap();
+            let js = dir.path().join("t.js");
+            std::fs::write(&js, script).unwrap();
+            let out = std::process::Command::new("node")
+                .arg(&js)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "{}{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+
+        #[test]
+        fn the_vendored_terminal_files_match_their_checksums() {
+            use sha2::{Digest, Sha256};
+            let sums = include_str!("terminal/vendor/SHA256SUMS");
+            let mut seen = 0;
+            for line in sums.lines().filter(|l| !l.trim().is_empty()) {
+                let (want, name) = line.split_once("  ").expect("sha256sum format");
+                let body = TERMINAL_FILES
+                    .iter()
+                    .find(|(n, _, _)| *n == name)
+                    .map(|(_, _, b)| *b);
+                let Some(body) = body else {
+                    assert_eq!(name, "LICENSE-xterm", "{name} is listed but not served");
+                    continue;
+                };
+                let got: String = Sha256::digest(body.as_bytes())
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect();
+                assert_eq!(got, want, "{name} differs from what was vendored");
+                seen += 1;
+            }
+            // xterm.js, xterm.css and the seven add-ons; terminal.js and terminal.css are ours.
+            assert_eq!(seen, 9, "every vendored file is checksummed");
+            assert!(!sums.contains("sourceMappingURL"));
+        }
+
+        #[tokio::test]
         async fn agent_session_preview_urls_are_tokens_that_expire_and_can_be_revoked() {
             let m = procbox_manager(tenant_tokens(), false);
             let id = seed_session(&m, Some("acme"), "vz", "running");
@@ -7182,7 +8285,8 @@ mod tests {
             let app = router(m.clone());
             for body in [
                 r#"{"policy":{"preset":"nope"}}"#,
-                r#"{"policy":{"network":{"allow":[{"host":"a.b","methods":["GET"]}]}}}"#,
+                r#"{"policy":{"network":{"allow":[{"host":"a.b","verbs":["GET"]}]}}}"#,
+                r#"{"policy":{"network":{"allow":[{"host":"a.b","methods":["G ET"]}]}}}"#,
                 r#"{"workspace":{"git":"git@github.com:a/b.git"}}"#,
                 r#"{"workspace":{"path":"/a/../b"}}"#,
                 r#"{"workspace":{"mode":"overlay"}}"#,

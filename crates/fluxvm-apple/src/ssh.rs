@@ -108,7 +108,27 @@ pub fn shell_quote(s: &str) -> String {
 }
 
 fn command(g: &GuestSsh) -> Command {
+    command_with(g, false)
+}
+
+/// Starts an interactive login: `ssh -tt` forces a remote pseudo-terminal even though our stdin is a pipe, so the
+/// guest sees a real tty (line editing, job control, full-screen programs). The terminal size is fixed at start by
+/// `stty`; a later resize is not forwarded. Output of the pty (stdout and stderr merged) comes back on stdout.
+pub fn pty_spawn(g: &GuestSsh, remote: &str) -> Result<tokio::process::Child> {
+    command_with(g, true)
+        .arg(remote)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .context("running ssh (is the OpenSSH client installed?)")
+}
+
+fn command_with(g: &GuestSsh, tty: bool) -> Command {
     let mut c = Command::new("ssh");
+    if tty {
+        c.arg("-tt");
+    }
     c.arg("-i")
         .arg(&g.key)
         .args([

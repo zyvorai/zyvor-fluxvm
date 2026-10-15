@@ -33,7 +33,7 @@ jobs:
       - run: FLUXVM_SKIP_VZ_RUNNER=1 cargo test -p fluxvm-apple
       - run: cargo test -p fluxvm-scheduler density
   apple:
-    runs-on: macos-latest
+    runs-on: [self-hosted, macOS, ARM64, fluxvm-mac]
     defaults:
       run:
         working-directory: fluxvm

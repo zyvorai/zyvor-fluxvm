@@ -51,8 +51,7 @@ const MEMORY: Row[] = [
 
 const MCP_STEPS = [
   '# once per Mac',
-  'brew install zyvorai/tap/fluxvm',
-  'brew services start zyvorai/tap/fluxvm',
+  'curl -fsSL https://zyvorai.github.io/zyvor-fluxvm/install.sh | bash -s -- --service',
   '',
   '# once per agent client',
   'fluxctl mcp install claude-code --allow-write',
@@ -62,9 +61,25 @@ const MCP_STEPS = [
   '#   vm_fork {"vm": id, "count": 4}   ...   vm_delete',
 ].join('\n');
 
-// Install variants. The script and the Homebrew line drive the same formula; the session API and `fluxctl agent` are
-// newer than the 0.4.7 package, so the third tab builds from source. See docs/agent-platform/README.md.
+// Install variants. The one-liner downloads and verifies the release package (scripts/install.sh, docs/install.md); the
+// Homebrew line installs the same package through the tap. The session API and `fluxctl agent` are newer than the 0.4.7
+// package, so until the next release is published they need the source tab. See docs/install.md.
 const INSTALL_TABS = [
+  {
+    id: 'script',
+    label: 'One line',
+    body: [
+      'curl -fsSL https://zyvorai.github.io/zyvor-fluxvm/install.sh | bash',
+      '',
+      '# with the daemon at login and an MCP client wired up:',
+      'curl -fsSL https://zyvorai.github.io/zyvor-fluxvm/install.sh | bash -s -- --service --client claude-code',
+      '',
+      '# it verifies the SHA-256, needs no sudo, writes under ~/.local;',
+      '# --dry-run prints the plan, --version X pins or rolls back, --uninstall reverses it.',
+      '',
+      'fluxctl --version',
+    ].join('\n'),
+  },
   {
     id: 'brew',
     label: 'Homebrew',
@@ -78,23 +93,24 @@ const INSTALL_TABS = [
     ].join('\n'),
   },
   {
-    id: 'script',
-    label: 'One line',
+    id: 'linux',
+    label: 'Linux',
     body: [
+      '# the same one-liner; it picks the linux-x86_64 package when the release has one',
       'curl -fsSL https://zyvorai.github.io/zyvor-fluxvm/install.sh | bash',
-      '# or, wiring an MCP client in the same step:',
-      'curl -fsSL https://zyvorai.github.io/zyvor-fluxvm/install.sh | bash -s -- --client claude-code',
+      'sudo apt-get install -y libhivex0 libsystemd0     # runtime libraries',
       '',
-      '# it only runs brew install, brew services start and fluxctl mcp install;',
-      '# --dry-run prints those and stops; --uninstall reverses them.',
+      '# the daemon needs root and /dev/kvm; the installer prints the exact steps with --service',
+      'curl -fsSL https://zyvorai.github.io/zyvor-fluxvm/install.sh | bash -s -- --service',
     ].join('\n'),
   },
   {
     id: 'source',
     label: 'From source (sessions)',
     body: [
+      'git clone https://github.com/zyvorai/guestkit',
       'git clone https://github.com/zyvorai/zyvor-fluxvm && cd zyvor-fluxvm',
-      'xcode-select --install && brew install hivex',
+      'xcode-select --install && brew install hivex      # Linux: libsystemd-dev libhivex-dev clang llvm libbpf-dev',
       'cargo build -p fluxctl',
       'FLUXVM_VZ_RUNNER=/opt/homebrew/opt/fluxvm/bin/fluxvm-vz-runner \\',
       '  target/debug/fluxctl serve',
@@ -137,7 +153,7 @@ const COMPARE: Cmp[] = [
 
 function Hero() {
   const [copied, setCopied] = useState(false);
-  const cmd = 'brew install zyvorai/tap/fluxvm';
+  const cmd = 'curl -fsSL https://zyvorai.github.io/zyvor-fluxvm/install.sh | bash';
   const copy = () => {
     navigator.clipboard?.writeText(cmd).then(() => {
       setCopied(true);
@@ -178,8 +194,8 @@ function Hero() {
           </pre>
         </div>
         <div className={styles.buttons} style={{marginTop: '1.5rem'}}>
-          <Link className="button button--primary button--lg" to="/docs/install-macos">
-            Install on a Mac
+          <Link className="button button--primary button--lg" to="/docs/install">
+            Install FluxVM
           </Link>
           <Link
             className="button button--outline button--lg button--secondary"
@@ -432,11 +448,13 @@ function Install() {
           <div className="text--center">
             <p className={styles.kicker}>Install</p>
             <Heading as="h2" className={styles.h2}>
-              Apple silicon, macOS 14 or newer
+              One command, no sudo
             </Heading>
             <p className={styles.lead}>
-              Homebrew installs the five signed binaries and runs the daemon as a background service. The session
-              commands on this page are newer than the 0.4.7 package, so they are the third tab until the next release.
+              The installer downloads the release package for your machine, verifies its SHA-256 and links the binaries
+              into <code>~/.local/bin</code>. Run it again to upgrade; <code>--version</code> rolls back. The session
+              commands on this page are newer than the 0.4.7 package, so until the next release is published they need
+              the source tab (<code>fluxctl agent --help</code> tells you which you have).
             </p>
           </div>
           <div className={styles.terminal} style={{maxWidth: 760, margin: '0 auto'}}>
@@ -461,8 +479,9 @@ function Install() {
             <pre className={styles.terminalBody}>{cur.body}</pre>
           </div>
           <p className={clsx(styles.footnote, 'text--center')}>
-            Linux hosts are built from source; no Linux package is published.{' '}
-            <Link to="/docs/install-macos">Full macOS install notes</Link>
+            macOS 14+ on Apple silicon, and Linux x86_64 once a release carries the package.{' '}
+            <Link to="/docs/install">Every option, upgrade and uninstall</Link> ·{' '}
+            <Link to="/docs/install-macos">Homebrew notes</Link>
           </p>
         </Reveal>
       </div>
@@ -499,9 +518,10 @@ function Sessions() {
               <Heading as="h3">Policy, compiled</Heading>
               <p>
                 <code>offline</code>, <code>developer-safe</code> or your own host list, turned into the allow-list the
-                host already enforces. Method and path rules are refused, not ignored.
+                host already enforces. Method and path limits per host are enforced by the egress proxy where the
+                sandbox's traffic reaches it, and refused at create where it cannot.
               </p>
-              <span className={clsx(styles.tag, styles.tagOk)}>Verified on M4</span>
+              <span className={clsx(styles.tag, styles.tagOk)}>Host list: verified on M4</span>
             </div>
             <div className={styles.card}>
               <Heading as="h3">Checkpoint and roll back</Heading>
@@ -525,6 +545,112 @@ function Sessions() {
             of 5 runs on one M4 mini, debug build, offline session.{' '}
             <Link to="/docs/benchmarks/agent-session">The tables</Link> ·{' '}
             <Link to="/docs/agent-platform/">Agent README</Link> · <Link to="/docs/agent-sessions">API</Link>
+          </p>
+        </Reveal>
+      </div>
+    </section>
+  );
+}
+
+type Control = {title: string; body: ReactNode; status: 'ok' | 'warn'; label: string};
+// What the session layer does beyond create/checkpoint/fork. Source: docs/agent-sessions-guide.md (section 14 lists what
+// was and was not run). "Tests" means unit and router tests; nothing here was run through a live guest yet.
+const CONTROLS: Control[] = [
+  {
+    title: 'Filesystem confinement',
+    body: (
+      <>
+        <code>--confine --fs-write /data</code>: every command, job, file and git call runs under Landlock and seccomp
+        in a Linux guest. Create fails, with the reason, where the guest cannot enforce it.
+      </>
+    ),
+    status: 'warn',
+    label: 'Tests',
+  },
+  {
+    title: 'Approvals',
+    body: (
+      <>
+        <code>process.ask</code> holds a matching command until an operator approves exactly that command, once.
+        A session token cannot approve its own request.
+      </>
+    ),
+    status: 'warn',
+    label: 'Tests',
+  },
+  {
+    title: 'Scoped tokens',
+    body: (
+      <>
+        Give an agent a token for one session and a list of operations, not the admin credential. It expires and
+        dies with the session.
+      </>
+    ),
+    status: 'warn',
+    label: 'Router tests',
+  },
+  {
+    title: 'Jobs that stream',
+    body: (
+      <>
+        Long-running commands with separate stdout and stderr, resumable offsets, stdin and EOF, a timeout and
+        tree-wide signals. The command&rsquo;s own exit status survives the output cap.
+      </>
+    ),
+    status: 'warn',
+    label: 'Tests',
+  },
+  {
+    title: 'Credentials the agent never sees',
+    body: (
+      <>
+        A grant injects an <code>Authorization</code> header for named hosts, optionally only for given methods and
+        paths, and ends with the session.
+      </>
+    ),
+    status: 'warn',
+    label: 'Tests',
+  },
+  {
+    title: 'Budgets and big files',
+    body: (
+      <>
+        Limits on commands, compute time, jobs, forks, output and workspace size; resumable, checksum-verified uploads
+        of files up to 2 GiB.
+      </>
+    ),
+    status: 'warn',
+    label: 'Tests',
+  },
+];
+
+function Controls() {
+  return (
+    <section className={clsx(styles.section, styles.alt)}>
+      <div className="container">
+        <Reveal>
+          <div className="text--center">
+            <p className={styles.kicker}>Controls</p>
+            <Heading as="h2" className={styles.h2}>
+              What you can hold an agent to
+            </Heading>
+            <p className={styles.lead}>
+              Implemented, reviewed and covered by unit and router tests. <strong>Not yet run through a live guest</strong>
+              : treat them as ready to trial, and use the checks in the guide on your own hosts before you rely on them.
+            </p>
+          </div>
+          <div className={styles.grid3}>
+            {CONTROLS.map((c) => (
+              <div key={c.title} className={styles.card}>
+                <Heading as="h3">{c.title}</Heading>
+                <p>{c.body}</p>
+                <span className={clsx(styles.tag, c.status === 'ok' ? styles.tagOk : styles.tagWarn)}>{c.label}</span>
+              </div>
+            ))}
+          </div>
+          <p className={clsx(styles.footnote, 'text--center')}>
+            <Link to="/docs/agent-sessions-guide">The practical guide</Link> (policy, tokens, approvals, jobs, transfer,
+            budgets, fork and promote, troubleshooting) · <Link to="/docs/agent-sessions">API reference</Link>
           </p>
         </Reveal>
       </div>
@@ -633,11 +759,12 @@ function Cta() {
             Give your agent a clean machine.
           </Heading>
           <p className={styles.ctaSub}>
-            <code>brew install zyvorai/tap/fluxvm</code>, then run the demo and watch four attempts become one.
+            <code>curl -fsSL https://zyvorai.github.io/zyvor-fluxvm/install.sh | bash</code>, then run the demo and watch
+            four attempts become one.
           </p>
           <div className={styles.buttons}>
-            <Link className="button button--primary button--lg" to="/docs/install-macos">
-              Install on a Mac
+            <Link className="button button--primary button--lg" to="/docs/install">
+              Install FluxVM
             </Link>
             <Link className="button button--outline button--lg button--secondary" to="/docs/macos-sandboxes">
               Sandbox guide
@@ -660,6 +787,7 @@ export default function AgentsPage(): ReactNode {
         <Install />
         <Loop />
         <Sessions />
+        <Controls />
         <Offline />
         <Compare />
         <Cost />

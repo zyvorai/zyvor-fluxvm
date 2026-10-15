@@ -36,6 +36,7 @@ pub const ORPHAN_NET_GRACE: Duration = Duration::from_secs(120);
 
 /// Only processes with one of these names (`/proc/<pid>/comm` prefixes) are
 /// ever killed on behalf of a rolled-back VM.
+#[cfg(target_os = "linux")]
 const VMM_COMM_PREFIXES: [&str; 7] = [
     "qemu",
     "cloud-hyper",

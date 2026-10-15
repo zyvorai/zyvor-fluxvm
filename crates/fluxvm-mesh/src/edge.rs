@@ -80,8 +80,10 @@ pub struct EdgeReport {
 pub async fn reconcile_once(cfg: &EdgeConfig, wan_state: &mut WanState) -> Result<EdgeReport> {
     let public = PublicConfigStore::new(&cfg.public_config_path).load()?;
     let mesh = StateStore::new(&cfg.state_path).load()?;
-    let mut report = EdgeReport::default();
-    report.ingress_routes = public.ingress.len();
+    let mut report = EdgeReport {
+        ingress_routes: public.ingress.len(),
+        ..EdgeReport::default()
+    };
 
     // Converge the active uplink before probing public reachability.
     if !public.wan.is_empty() {
@@ -199,23 +201,23 @@ pub async fn run(cfg: EdgeConfig) -> Result<()> {
         });
     }
 
-    if let Ok(public_cfg) = PublicConfigStore::new(&cfg.public_config_path).load() {
-        if let Some(relay) = public_cfg.public_relay {
-            let client = RelayClientConfig {
-                relay_addr: relay.relay_addr,
-                quic_relay_addr: relay.quic_relay_addr,
-                transport: relay.transport,
-                server_name: relay.server_name,
-                ca_file: relay.ca_file,
-                site_id: relay.site_id,
-                secret_file: relay.secret_file,
-                local_ingress: relay.local_ingress,
-                heartbeat_file: crate::mesh_dir().join("public-relay-heartbeat"),
-            };
-            tokio::spawn(async move {
-                let _ = public_relay::run_client(client).await;
-            });
-        }
+    if let Ok(public_cfg) = PublicConfigStore::new(&cfg.public_config_path).load()
+        && let Some(relay) = public_cfg.public_relay
+    {
+        let client = RelayClientConfig {
+            relay_addr: relay.relay_addr,
+            quic_relay_addr: relay.quic_relay_addr,
+            transport: relay.transport,
+            server_name: relay.server_name,
+            ca_file: relay.ca_file,
+            site_id: relay.site_id,
+            secret_file: relay.secret_file,
+            local_ingress: relay.local_ingress,
+            heartbeat_file: crate::mesh_dir().join("public-relay-heartbeat"),
+        };
+        tokio::spawn(async move {
+            let _ = public_relay::run_client(client).await;
+        });
     }
 
     let telemetry = TelemetryStore::new(&cfg.telemetry_path);
@@ -266,24 +268,24 @@ pub async fn run(cfg: EdgeConfig) -> Result<()> {
         stats.http3_requests = h3.requests;
         stats.http3_failures = h3.failures;
         let _ = telemetry.save(&stats);
-        if let Ok(public_cfg) = PublicConfigStore::new(&cfg.public_config_path).load() {
-            if let Some(otlp) = public_cfg.otlp {
-                let mut attributes = std::collections::BTreeMap::new();
-                attributes.insert("relay.connected".into(), stats.relay_connected.to_string());
-                attributes.insert("http3.requests".into(), stats.http3_requests.to_string());
-                if let Some(error) = trace_error {
-                    attributes.insert("error.message".into(), error);
-                }
-                let span = EdgeSpan {
-                    name: "fluxmesh.edge.reconcile".into(),
-                    start_unix_nano: span_start,
-                    end_unix_nano: now_ns(),
-                    ok: trace_ok,
-                    attributes,
-                };
-                if let Err(e) = trace::export(&otlp, span).await {
-                    eprintln!("fluxmesh-edge: OTLP export failed: {e}");
-                }
+        if let Ok(public_cfg) = PublicConfigStore::new(&cfg.public_config_path).load()
+            && let Some(otlp) = public_cfg.otlp
+        {
+            let mut attributes = std::collections::BTreeMap::new();
+            attributes.insert("relay.connected".into(), stats.relay_connected.to_string());
+            attributes.insert("http3.requests".into(), stats.http3_requests.to_string());
+            if let Some(error) = trace_error {
+                attributes.insert("error.message".into(), error);
+            }
+            let span = EdgeSpan {
+                name: "fluxmesh.edge.reconcile".into(),
+                start_unix_nano: span_start,
+                end_unix_nano: now_ns(),
+                ok: trace_ok,
+                attributes,
+            };
+            if let Err(e) = trace::export(&otlp, span).await {
+                eprintln!("fluxmesh-edge: OTLP export failed: {e}");
             }
         }
         tokio::time::sleep(cfg.interval).await;

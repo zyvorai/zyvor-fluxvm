@@ -1,0 +1,15 @@
+{
+  "name": "debian-asif",
+  "backend": "vz",
+  "image": "debian-13",
+  "vcpus": 2,
+  "memory_mib": 2048,
+  "network": { "mode": "user" },
+  "apple": {
+    "guest_os": "linux",
+    "asif_overlay": true,
+    "custom_virtio": true,
+    "rosetta": true,
+    "usb_controller": true
+  }
+}

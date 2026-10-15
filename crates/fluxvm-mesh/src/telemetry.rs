@@ -159,9 +159,11 @@ mod tests {
     }
     #[test]
     fn high_failure_ratio_fails() {
-        let mut v = EdgeTelemetry::default();
-        v.reconcile_total = 20;
-        v.reconcile_failures = 10;
+        let v = EdgeTelemetry {
+            reconcile_total: 20,
+            reconcile_failures: 10,
+            ..EdgeTelemetry::default()
+        };
         assert!(!evaluate_slo(&v, 60_000, 0.1).healthy);
     }
 }

@@ -12,6 +12,7 @@ pub mod keychain;
 pub mod mdev;
 pub mod metrics;
 pub mod model;
+pub mod peer_alias;
 pub mod policy;
 pub mod pressure_admission;
 pub mod process;

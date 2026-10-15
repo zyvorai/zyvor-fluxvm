@@ -107,9 +107,9 @@ impl Bucket {
 
     fn mean(&self) -> [f32; 6] {
         let mut out = [f32::NAN; 6];
-        for i in 0..6 {
+        for (i, o) in out.iter_mut().enumerate() {
             if self.n[i] > 0 {
-                out[i] = (self.sum[i] / f64::from(self.n[i])) as f32;
+                *o = (self.sum[i] / f64::from(self.n[i])) as f32;
             }
         }
         out
@@ -1229,7 +1229,7 @@ async fn render(fleet: &Fleet) -> String {
                             ("name", e.last.name.as_str()),
                             ("tenant", *t),
                         ],
-                        f(*e)?,
+                        f(e)?,
                     ))
                 })
                 .collect::<Vec<_>>()

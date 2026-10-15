@@ -25,7 +25,7 @@ On an Apple M4 running macOS 27.2 (Xcode 27, Rust 1.98):
 | `scripts/vz-devices-live-test.sh` | **PASS** on a Debian 13 guest: extra disks on virtio, NVMe and USB, a host block device, an NBD export, USB hot-attach and detach, a console port both ways, a 1600x900 Linux display |
 | `scripts/macos-guest-live-test.sh` | Clones a prepared macOS guest template through the API, checks the reported address and SSH, deletes it; needs your own template (`FLUXVM_MACOS_TEMPLATE`), so CI does not run it |
 
-**Verified by hand only:** the macOS IPSW install (see "macOS guests"); `apple.install` and `provision_*` have not run against a real IPSW through the API. **Not verified:** multi-Mac clusters (placement was only checked on loopback with one real Mac and fake nodes), the shared vmnet broker, physical USB passthrough, Linux-only crates (`fluxvm-procbox`,
+**Verified on hardware (macOS 27.0.1 guest on an M4 host):** `POST /v1/vms` with `image` set to the cached IPSW, `apple.install` and `provision_*` end to end (installed, provisioned and reachable over SSH as the provisioned user with no one at the console), exec through `/v1/vms/{id}/agent`, a memory snapshot (3-9 s), a stop/start of the provisioned VM, and a memory restore of a running VM (a file written after the snapshot was gone again after `POST /v1/vms/{id}/restore`). A memory restore needs an unlocked login session on the host: with the screen locked it fails with "An error occurred while restoring the virtual machine". **Not verified:** multi-Mac clusters (placement was only checked on loopback with one real Mac and fake nodes), the shared vmnet broker, physical USB passthrough, Linux-only crates (`fluxvm-procbox`,
 `fluxvm-container-*`, `fluxvm-microvm`, `fluxvm-kube`, the eBPF agent), and any Intel Mac. The hosted CI jobs for the `vz` pull requests
 have not all been green; see the pull requests for their state.
 
@@ -230,10 +230,22 @@ Verified by hand on an Apple M4 running macOS 27.2 with macOS 27.0.1 (26A434) as
   turning FileVault off there only matters if the template file itself needs to stay secret.
 - **First boot of a clone** is slow on a USB drive (about 5 minutes to SSH at 37 MB/s) and restarts sshd once, so retry SSH for a minute.
 
+### As an agent session
+
+`POST /v1/agents/sessions` with `runtime.template` names a template directory under `sandbox.templates_dir`
+(`<name>/spec.json` plus `disk.raw`, `hardware.bin`, `identity.bin`, `auxiliary.bin`). `scripts/macos-session-template.sh` builds
+one from the IPSW (install, provision, authorize the daemon's key, disable sleep and the screen lock, stop), and
+`scripts/vz-macos-session-live-test.sh` exercises it end to end. What a macOS session can and cannot do is the table in
+[agent-sessions-guide.md](agent-sessions-guide.md#22-a-macos-guest-as-a-session). **Verified on an M4 host with a macOS 27.0.1 guest:** the template build, an offline policy refused,
+session create (`guest_os: macos`, `engine: ssh`), exec, the workspace under the user's home, a shell job keeping its exit code,
+a screenshot, fork refused with the reason, a memory checkpoint and restore returning the earlier file state, and delete.
+**Not verified live:** the two-guest limit (the third create is 409; unit-level only). Shell jobs use `setsid` where it exists;
+macOS has none, so a killed job loses its direct children but not necessarily deeper descendants.
+
 ### Installing through the API
 
-`apple.install: true` installs from an IPSW as part of `POST /v1/vms` (tested against a fake runner; not yet run against a real IPSW
-through the API):
+`apple.install: true` installs from an IPSW as part of `POST /v1/vms` (run against a real 27.0.1 IPSW: install, `provision_*` and SSH
+exec worked unattended; the sandbox SSH user for a macOS guest is `apple.provision_username`, not `sandbox`, which is a system account there):
 
 ```bash
 curl -X POST localhost:7788/v1/vms -H 'Content-Type: application/json' -d @examples/macos-install.json

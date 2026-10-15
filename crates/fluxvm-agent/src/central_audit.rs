@@ -159,6 +159,7 @@ pub(super) fn event(
 
 /// Reads a JSON body to find its `name`, `id` or `node`, and returns the request rebuilt with the same body. A command
 /// (`.../exec`) body is the guest's input, so it is neither read nor searched.
+#[allow(clippy::result_large_err)] // the error is the HTTP response to send
 pub(super) async fn target_of(req: Request) -> Result<(Request, Option<String>), Response> {
     if req.uri().path().ends_with("/exec") || req.uri().path().ends_with("/input") {
         return Ok((req, None));

@@ -13,6 +13,20 @@
 3. Publish the draft release (a draft's assets cannot be downloaded), then put `fluxvm.rb` in the tap as `Formula/fluxvm.rb`.
    Users then run `brew install zyvorai/tap/fluxvm`.
 
+## What a release publishes
+
+One tag produces every package, and `scripts/install.sh` (the one-liner on the docs site) downloads exactly these assets:
+
+| Asset | Built by | Used by |
+|---|---|---|
+| `fluxvm-<ver>-macos-arm64.tar.gz` + `.sha256` | `.github/workflows/release-macos.yml` (`scripts/package-macos.sh`) | the Homebrew formula and `install.sh` on Apple silicon |
+| `fluxvm-<ver>-linux-x86_64.tar.gz` + `.sha256` | `.github/workflows/release-linux.yml` (`scripts/package-linux.sh`) | `install.sh` on Linux x86_64 |
+| `fluxvm-<ver>-linux-aarch64.tar.gz` + `.sha256` | the same workflow, arm64 runner (allowed to fail) | `install.sh` on Linux arm64 |
+
+The installer resolves "latest" with `releases/latest`, which **skips drafts**: publish the draft release, or users
+keep getting the previous version. Tag, wait for both workflows, check the assets, publish, then update the formula.
+`scripts/test-install.sh` exercises the installer against fake packages (no network) and runs in `site-check.yml`.
+
 ## Build the package locally
 
 `scripts/package-macos.sh` (add `--profile debug` for a quick, large, unoptimised build) writes

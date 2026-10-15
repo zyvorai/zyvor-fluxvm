@@ -673,7 +673,7 @@ mod tests {
         let mut s = state();
         let a = ready(&mut s, Some("acme"), "data", 1, "mac1");
         s.claim_volumes(&acme(), &["data".to_owned()]).unwrap();
-        s.settle_volumes(&[a.id.clone()], Some("vm-9"));
+        s.settle_volumes(std::slice::from_ref(&a.id), Some("vm-9"));
         // The ledger never heard of vm-9 (or it ended): reconciling mac1 frees the volume.
         s.reconcile_node("mac1", &Default::default(), t0() + Duration::hours(1));
         assert_eq!(s.find_volume(&acme(), "data").unwrap().attached_to, None);

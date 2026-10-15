@@ -622,6 +622,29 @@ async fn forward(
     }
 }
 
+/// The per-sandbox rules (see `peer_policy`) for one plain-HTTP request, on top of the host-wide
+/// ACL that `vet_request` already applied. Judges the same canonical host.
+fn peer_check_request(
+    peer: Option<IpAddr>,
+    method: &Method,
+    uri: &Uri,
+    headers: &HeaderMap,
+) -> Result<(), (StatusCode, String)> {
+    if peer.is_none() || method == Method::CONNECT {
+        return Ok(());
+    }
+    // Ambiguity between what is judged and what is contacted is the way around a host filter.
+    if headers.get_all(header::HOST).iter().count() > 1 {
+        return Err(deny("multiple Host headers"));
+    }
+    let header_host = headers.get(header::HOST).and_then(|v| v.to_str().ok());
+    let host = http_acl::effective_host(uri.host(), header_host).map_err(deny)?;
+    match crate::peer_policy::global().check(peer, method.as_str(), &host, uri.path()) {
+        Verdict::Allow => Ok(()),
+        Verdict::Deny(reason) => Err(deny(reason)),
+    }
+}
+
 /// Peer address recorded by `axum::serve` (or inserted by the transparent
 /// listener) on a request.
 fn peer_ip<B>(req: &Request<B>) -> Option<IpAddr> {
@@ -637,10 +660,18 @@ fn peer_ip<B>(req: &Request<B>) -> Option<IpAddr> {
 fn broker_authorization(
     peer: Option<IpAddr>,
     host: &str,
+    method: &Method,
+    path: &str,
     fallback: Option<String>,
 ) -> Option<String> {
     if let Some(ip) = peer
-        && let Some(inj) = fluxvm_core::grants::global().resolve(ip, host, chrono::Utc::now())
+        && let Some(inj) = fluxvm_core::grants::global().resolve_for(
+            ip,
+            host,
+            Some(method.as_str()),
+            Some(path),
+            chrono::Utc::now(),
+        )
     {
         fluxvm_core::grants::audit_use(&inj, host);
         return Some(inj.authorization.expose().to_string());
@@ -655,7 +686,32 @@ fn count_denied(status: StatusCode, method: &Method, target: &dyn std::fmt::Disp
     }
 }
 
+/// A request relayed by a vz runner carries its token in `x-fluxvm-peer`. From a loopback peer that
+/// proves which sandbox it is: the request is attributed to the sandbox's alias address (so its rules
+/// and grants apply) and the header is removed before anything is forwarded. From anyone else the
+/// header is just dropped.
+fn adopt_runner_identity<B>(req: &mut Request<B>) {
+    let token = req
+        .headers_mut()
+        .remove(fluxvm_core::peer_alias::PEER_HEADER);
+    let (Some(token), Some(real)) = (token, peer_ip(req)) else {
+        return;
+    };
+    if !real.is_loopback() {
+        return;
+    }
+    if let Some(alias) = token
+        .to_str()
+        .ok()
+        .and_then(fluxvm_core::peer_alias::resolve)
+    {
+        req.extensions_mut()
+            .insert(ConnectInfo(SocketAddr::new(alias, 0)));
+    }
+}
+
 async fn proxy(State(state): State<Arc<ProxyState>>, mut req: Request<Body>) -> Response {
+    adopt_runner_identity(&mut req);
     if req.method() == Method::CONNECT
         && let Some(tls) = state.tls.clone()
     {
@@ -681,6 +737,10 @@ async fn handle_plain(
             return (status, reason).into_response();
         }
     };
+    if let Err((status, reason)) = peer_check_request(peer_ip(&req), &method, &uri, req.headers()) {
+        count_denied(status, &method, &uri, &reason);
+        return (status, reason).into_response();
+    }
     let decision = vetted.decision;
     let host = req
         .headers()
@@ -712,7 +772,13 @@ async fn handle_plain(
     };
 
     let headers = req.headers().clone();
-    let inject = broker_authorization(peer_ip(&req), &host, decision.inject_authorization);
+    let inject = broker_authorization(
+        peer_ip(&req),
+        &host,
+        &method,
+        uri.path(),
+        decision.inject_authorization,
+    );
     let body = has_body(&headers).then(|| req.into_body());
     let client = if transparent_port.is_some() {
         &state.transparent_client
@@ -770,6 +836,13 @@ async fn connect(state: Arc<ProxyState>, tls: Arc<TlsState>, req: &mut Request<B
         }
     };
     tunnel.peer = peer_ip(&*req);
+    if let Verdict::Deny(reason) =
+        crate::peer_policy::global().check_tunnel(tunnel.peer, &tunnel.host)
+    {
+        let (status, reason) = deny(reason);
+        count_denied(status, &Method::CONNECT, req.uri(), &reason);
+        return (status, reason).into_response();
+    }
     let on_upgrade = hyper::upgrade::on(&mut *req);
     tokio::spawn(async move {
         match on_upgrade.await {
@@ -878,10 +951,22 @@ async fn tunnel_request(
             return (status, reason).into_response();
         }
     };
+    if let Verdict::Deny(reason) = crate::peer_policy::global().check(
+        tunnel.peer,
+        parts.method.as_str(),
+        &tunnel.host,
+        parts.uri.path(),
+    ) {
+        let (status, reason) = deny(reason);
+        count_denied(status, &parts.method, &parts.uri, &reason);
+        return (status, reason).into_response();
+    }
     let body = has_body(&parts.headers).then(|| request_body(body));
     let inject = broker_authorization(
         tunnel.peer,
         &tunnel.host,
+        &parts.method,
+        parts.uri.path(),
         vetted.decision.inject_authorization,
     );
     forward(
@@ -931,6 +1016,49 @@ mod tests {
             &uri.parse().unwrap(),
             &headers(hosts),
         )
+    }
+
+    #[test]
+    fn per_sandbox_rules_apply_on_top_of_the_host_rules() {
+        // A peer address no other test uses: the store is process-wide.
+        let peer: IpAddr = "10.99.99.1".parse().unwrap();
+        let other: IpAddr = "10.99.99.2".parse().unwrap();
+        crate::peer_policy::global()
+            .set(
+                "egress-proxy-test",
+                &["allow GET git.example/*".to_string()],
+                Some(peer),
+            )
+            .unwrap();
+        let get = |m: &str, u: &str, h: &[&str], p: IpAddr| {
+            peer_check_request(
+                Some(p),
+                &m.parse().unwrap(),
+                &u.parse().unwrap(),
+                &headers(h),
+            )
+        };
+        assert!(get("GET", "/r.git/info/refs", &["git.example"], peer).is_ok());
+        let (status, why) =
+            get("POST", "/r.git/git-receive-pack", &["git.example"], peer).unwrap_err();
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert!(why.contains("no allow rule"), "{why}");
+        assert!(get("GET", "/", &["elsewhere.example"], peer).is_err());
+        // Another sandbox, and a request with no known peer, are not subject to it.
+        assert!(get("POST", "/", &["elsewhere.example"], other).is_ok());
+        assert!(
+            peer_check_request(
+                None,
+                &Method::POST,
+                &"/".parse().unwrap(),
+                &headers(&["elsewhere.example"])
+            )
+            .is_ok()
+        );
+        // Ambiguous Host headers are refused, as for the host-wide rules.
+        assert!(get("GET", "/", &["git.example", "evil.example"], peer).is_err());
+        crate::peer_policy::global().remove("egress-proxy-test");
+        assert!(get("POST", "/", &["elsewhere.example"], peer).is_ok());
     }
 
     #[test]
@@ -1085,5 +1213,51 @@ mod tests {
         let c = cfg(&["allow * good.example/*"], &[]);
         let e = vet(&c, "OPTIONS", "*", &["good.example"]).unwrap_err();
         assert_eq!(e.0, StatusCode::FORBIDDEN);
+    }
+}
+
+#[cfg(test)]
+mod runner_identity_tests {
+    use super::*;
+
+    fn req(peer: &str, token: Option<&str>) -> Request<Body> {
+        let mut b = Request::builder().uri("http://example.com/");
+        if let Some(t) = token {
+            b = b.header(fluxvm_core::peer_alias::PEER_HEADER, t);
+        }
+        let mut r = b.body(Body::empty()).unwrap();
+        r.extensions_mut()
+            .insert(ConnectInfo(SocketAddr::new(peer.parse().unwrap(), 4000)));
+        r
+    }
+
+    #[test]
+    fn a_loopback_peer_with_a_valid_token_is_attributed_to_the_alias_and_the_header_goes() {
+        let (alias, token) = fluxvm_core::peer_alias::register(uuid::Uuid::new_v4());
+        let mut r = req("127.0.0.1", Some(&token));
+        adopt_runner_identity(&mut r);
+        assert_eq!(peer_ip(&r), Some(alias));
+        assert!(
+            r.headers()
+                .get(fluxvm_core::peer_alias::PEER_HEADER)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn a_bad_token_or_a_remote_peer_keeps_its_own_address_and_loses_the_header() {
+        let (_, token) = fluxvm_core::peer_alias::register(uuid::Uuid::new_v4());
+        let mut bad = req("127.0.0.1", Some("nope"));
+        adopt_runner_identity(&mut bad);
+        assert_eq!(peer_ip(&bad), Some("127.0.0.1".parse().unwrap()));
+        let mut remote = req("10.1.2.3", Some(&token));
+        adopt_runner_identity(&mut remote);
+        assert_eq!(peer_ip(&remote), Some("10.1.2.3".parse().unwrap()));
+        assert!(
+            remote
+                .headers()
+                .get(fluxvm_core::peer_alias::PEER_HEADER)
+                .is_none()
+        );
     }
 }

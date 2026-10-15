@@ -38,7 +38,8 @@ impl VmManager {
         let vm = self.get(id).await?;
         grants::set_audit_sink(crate::audit_event);
         let value = resolve_secret(&req, |k| std::env::var(k).ok())?;
-        let source_ip = vm.guest_ip.as_deref().and_then(|s| s.parse().ok());
+        // The address the proxy sees: a vz guest relayed through its runner shows up as its alias.
+        let source_ip = Self::guest_addr(&vm);
         let sandbox_id = id.to_string();
         let info = grants::global()
             .add(&sandbox_id, &req, value, source_ip, chrono::Utc::now())
@@ -54,6 +55,31 @@ impl VmManager {
             ],
         );
         Ok(info)
+    }
+
+    /// Re-binds the sandbox's grants to its current guest address, for after a restore. Returns
+    /// whether it has any. On a conflicting address the grants are revoked instead of left
+    /// bound to a stale one: a grant that cannot be bound safely is not kept.
+    pub async fn rebind_grants(&self, id: Uuid) -> Result<bool> {
+        let vm = self.get(id).await?;
+        // The address the proxy sees: a vz guest relayed through its runner shows up as its alias.
+        let source_ip = Self::guest_addr(&vm);
+        let sandbox_id = id.to_string();
+        match grants::global().rebind(&sandbox_id, source_ip) {
+            Ok(has) => Ok(has),
+            Err(e) => {
+                grants::global().remove_sandbox(&sandbox_id);
+                crate::audit_event(
+                    "credential.revoke",
+                    &[
+                        ("sandbox_id", &sandbox_id),
+                        ("grant_id", "all"),
+                        ("reason", "address conflict after restore"),
+                    ],
+                );
+                Err(anyhow::Error::from(e))
+            }
+        }
     }
 
     /// Live grants of a sandbox (never includes secrets).
@@ -100,6 +126,8 @@ mod tests {
             hosts: vec!["api.github.com".into()],
             ttl_seconds: None,
             expires_at: None,
+            methods: Vec::new(),
+            paths: Vec::new(),
         }
     }
 

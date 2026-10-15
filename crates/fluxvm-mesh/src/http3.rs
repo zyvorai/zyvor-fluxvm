@@ -330,10 +330,10 @@ fn quic_server_config(cert_path: &Path, key_path: &Path) -> Result<ServerConfig>
 }
 
 fn strip_host_port(host: &str) -> String {
-    if let Some(rest) = host.strip_prefix('[') {
-        if let Some((addr, _)) = rest.split_once(']') {
-            return addr.to_owned();
-        }
+    if let Some(rest) = host.strip_prefix('[')
+        && let Some((addr, _)) = rest.split_once(']')
+    {
+        return addr.to_owned();
     }
     host.split(':').next().unwrap_or(host).to_owned()
 }

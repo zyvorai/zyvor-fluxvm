@@ -1,0 +1,16 @@
+{
+  "name": "debian-nested",
+  "backend": "vz",
+  "image": "debian-13",
+  "vcpus": 4,
+  "memory_mib": 8192,
+  "network": { "mode": "user" },
+  "apple": {
+    "guest_os": "linux",
+    "nested_virtualization": true,
+    "usb_controller": true,
+    "usb_controllers": 2,
+    "clipboard": true,
+    "audio_output": true
+  }
+}

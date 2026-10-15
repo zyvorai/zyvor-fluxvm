@@ -6,6 +6,10 @@ Clone, build, install and run your first VM, plus the day-2 verbs and the networ
 
 ## Quick start
 
+**Prebuilt (Linux x86_64, macOS Apple silicon):** `curl -fsSL https://zyvorai.github.io/zyvor-fluxvm/install.sh | bash`
+downloads and verifies a release package into `~/.local` with no sudo ([install.md](install.md)); on Linux you still run
+the host preparation in step 1 below. Or build from source:
+
 ```bash
 git clone https://github.com/zyvorai/fluxvm.git
 cd fluxvm

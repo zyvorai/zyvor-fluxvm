@@ -72,6 +72,11 @@ impl Remote {
         &self.base
     }
 
+    /// The bearer token, for a request this type does not make itself (a WebSocket upgrade).
+    pub fn bearer(&self) -> Option<&str> {
+        self.token.as_deref()
+    }
+
     pub async fn call(&self, method: Method, path: &str, body: Option<Value>) -> Result<Value> {
         let url = format!("{}{path}", self.base);
         let mut req = self.http.request(method.clone(), &url);
@@ -96,6 +101,30 @@ impl Remote {
         }
         if text.trim().is_empty() {
             return Ok(Value::Null);
+        }
+        serde_json::from_str(&text).with_context(|| format!("decoding {path} response"))
+    }
+
+    /// `PUT path` with a raw body (a chunk of an upload), answering JSON like [`Self::call`].
+    pub async fn put_bytes(&self, path: &str, body: Vec<u8>) -> Result<Value> {
+        let url = format!("{}{path}", self.base);
+        let mut req = self
+            .http
+            .put(&url)
+            .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
+            .body(body);
+        if let Some(t) = &self.token {
+            req = req.bearer_auth(t);
+        }
+        let resp = req.send().await.with_context(|| format!("PUT {url}"))?;
+        let status = resp.status();
+        let text = resp.text().await.context("reading response body")?;
+        if !status.is_success() {
+            let msg = serde_json::from_str::<Value>(&text)
+                .ok()
+                .and_then(|v| v.get("error").and_then(Value::as_str).map(str::to_string))
+                .unwrap_or(text);
+            bail!("PUT {path}: {status}: {msg}");
         }
         serde_json::from_str(&text).with_context(|| format!("decoding {path} response"))
     }

@@ -13,6 +13,8 @@ This change closes the largest correctness gap in FluxVM's macOS 27 support: `ap
 
 ## What already exists on main
 
+This is a feature inventory, not a verification claim: [macos.md](macos.md) has the capability matrix and the hardware log (what was run, and what is still unverified or blocked, such as vmnet without Apple's provisioning profile).
+
 FluxVM already has VZ Linux/macOS boot, IPSW restore, unattended macOS 27 account provisioning, APFS clones, DiskImageKit ASIF overlays, save/restore snapshots, warm pools, vmnet per-VM networks, NAT/bridge/private networks, TCP forwarding, virtiofs, vsock, NBD/NVMe/USB storage, USB mass-storage hotplug, displays/audio/microphone, Rosetta, nested virtualization, OCI VM sandboxes, and Apple-host placement logic.
 
 ## Explicit platform gates

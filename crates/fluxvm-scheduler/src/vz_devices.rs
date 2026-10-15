@@ -52,6 +52,11 @@ impl VmManager {
         fluxvm_apple::vz27::secure_boot_status(&self.vz_running_vm(id).await?).await
     }
 
+    /// `{"supported", "reason"?}`: whether a memory checkpoint of this running vz VM can be taken.
+    pub async fn vz_save_support(&self, id: Uuid) -> Result<Value> {
+        fluxvm_apple::vz27::save_support(&self.vz_running_vm(id).await?).await
+    }
+
     /// Driver state and request counters of the custom Virtio device.
     pub async fn vz_custom_virtio_status(&self, id: Uuid) -> Result<Value> {
         fluxvm_apple::vz27::custom_virtio_status(&self.vz_running_vm(id).await?).await

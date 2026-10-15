@@ -77,6 +77,28 @@ pub fn validate(req: &CreateVmRequest) -> Result<()> {
                 bail!("apple.firstboot.ssh_public_keys entries must be OpenSSH public keys");
             }
         }
+        if let Some(u) = &fb.username {
+            let u = u.trim();
+            if u.is_empty()
+                || u.contains('/')
+                || u.contains(' ')
+                || u.contains('\n')
+                || u.contains('\r')
+                || u.contains(':')
+                || u.starts_with('.')
+            {
+                bail!("apple.firstboot.username must be a simple POSIX username");
+            }
+        }
+        if fb.auto_login
+            && fb
+                .username
+                .as_deref()
+                .map(|s| s.trim().is_empty())
+                .unwrap_or(true)
+        {
+            bail!("apple.firstboot.auto_login requires a username");
+        }
     }
     Ok(())
 }
@@ -107,6 +129,41 @@ pub fn write_firstboot(workspace: &Path, fb: &AppleFirstBoot) -> Result<PathBuf>
         fs::write(&flag, "1\n")?;
     } else {
         let _ = fs::remove_file(&flag);
+    }
+    if let Some(user) = fb
+        .username
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        fs::write(dir.join("username"), format!("{user}\n"))?;
+        if let Some(name) = fb
+            .full_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            fs::write(dir.join("full_name"), format!("{name}\n"))?;
+        }
+        let password = if let Some(pf) = &fb.password_file {
+            fs::read_to_string(pf)
+                .with_context(|| format!("reading password file {}", pf.display()))?
+                .trim()
+                .to_string()
+        } else {
+            fb.password.clone().unwrap_or_default()
+        };
+        if !password.is_empty() {
+            fs::write(dir.join("password"), format!("{password}\n"))?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                fs::set_permissions(dir.join("password"), fs::Permissions::from_mode(0o600))?;
+            }
+        }
+        if fb.auto_login {
+            fs::write(dir.join("auto_login"), "1\n")?;
+        }
     }
     let script = dir.join("firstboot.sh");
     fs::write(&script, FIRSTBOOT_SCRIPT)?;
@@ -240,6 +297,11 @@ mod tests {
         let fb = AppleFirstBoot {
             ssh_public_keys: vec!["ssh-ed25519 AAAA a".into(), "ssh-ed25519 BBBB b".into()],
             enable_remote_login: true,
+            username: Some("fluxvm".into()),
+            full_name: Some("FluxVM Admin".into()),
+            password: Some("test-secret".into()),
+            auto_login: true,
+            ..Default::default()
         };
         let dir = write_firstboot(d.path(), &fb).unwrap();
         assert_eq!(
@@ -247,11 +309,25 @@ mod tests {
             "ssh-ed25519 AAAA a\nssh-ed25519 BBBB b\n"
         );
         assert!(dir.join("enable_remote_login").is_file());
+        assert_eq!(
+            fs::read_to_string(dir.join("username")).unwrap().trim(),
+            "fluxvm"
+        );
+        assert_eq!(
+            fs::read_to_string(dir.join("full_name")).unwrap().trim(),
+            "FluxVM Admin"
+        );
+        assert_eq!(
+            fs::read_to_string(dir.join("password")).unwrap().trim(),
+            "test-secret"
+        );
+        assert!(dir.join("auto_login").is_file());
         let script = fs::read_to_string(dir.join("firstboot.sh")).unwrap();
         assert!(script.contains("AuthorizedKeysFile"));
+        assert!(script.contains("sysadminctl"));
         let off = AppleFirstBoot {
             enable_remote_login: false,
-            ..fb
+            ..fb.clone()
         };
         write_firstboot(d.path(), &off).unwrap();
         assert!(!dir.join("enable_remote_login").exists());

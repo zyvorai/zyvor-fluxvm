@@ -346,10 +346,10 @@ pub fn rotate_wireguard_key(path: &Path) -> Result<String> {
     }
     let public_key = public_key_from_private(&private_key)?;
 
-    if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() {
-            fs::create_dir_all(parent)?;
-        }
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        fs::create_dir_all(parent)?;
     }
     let tmp = path.with_extension("new");
     fs::write(&tmp, format!("{private_key}\n"))?;

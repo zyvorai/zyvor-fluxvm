@@ -106,6 +106,8 @@ pub async fn sync(
     Ok(report)
 }
 
+// One argument per Cloudflare API field; a struct would only move the same list elsewhere.
+#[allow(clippy::too_many_arguments)]
 async fn cloudflare_update(
     http: &reqwest::Client,
     base: &str,

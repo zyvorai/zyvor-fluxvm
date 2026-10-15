@@ -78,6 +78,22 @@ const HEALTHY_WINDOW_SECS: i64 = 30;
 const DEFAULT_VM_VCPUS: u32 = 2;
 const DEFAULT_VM_MEMORY_MIB: u64 = 2048;
 
+/// Whether the node agent could reach its own FluxVM daemon on its last heartbeat. A node whose daemon
+/// is down still heartbeats (so it is `healthy` in the freshness sense) but is not a placement target.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DaemonStatus {
+    pub reachable: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// What the node's running VMs actually request, summed from its daemon's records (not a per-VM guess).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Allocated {
+    pub vcpus: u32,
+    pub memory_mib: u64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NodeInfo {
     pub name: String,
@@ -116,9 +132,21 @@ pub struct NodeInfo {
     /// Apple VZ placement capabilities; None for Linux/non-VZ nodes and old agents.
     #[serde(default)]
     pub apple: Option<AppleHostCaps>,
+    /// `None` from a node agent that predates it (treated as reachable).
+    #[serde(default)]
+    pub daemon: Option<DaemonStatus>,
+    /// Summed CPU and memory the node's active VMs request; `None` from an older agent, which falls
+    /// back to the per-VM estimate.
+    #[serde(default)]
+    pub allocated: Option<Allocated>,
 }
 
 impl NodeInfo {
+    /// False when the node agent reported that it cannot reach its FluxVM daemon.
+    fn daemon_reachable(&self) -> bool {
+        self.daemon.as_ref().is_none_or(|d| d.reachable)
+    }
+
     fn healthy(&self) -> bool {
         (Utc::now() - self.last_seen).num_seconds() < HEALTHY_WINDOW_SECS
     }
@@ -132,11 +160,17 @@ impl NodeInfo {
     }
 
     fn estimated_used_vcpus(&self) -> u32 {
-        (self.vm_count as u32).saturating_mul(DEFAULT_VM_VCPUS)
+        match self.allocated {
+            Some(a) => a.vcpus,
+            None => (self.vm_count as u32).saturating_mul(DEFAULT_VM_VCPUS),
+        }
     }
 
     fn estimated_used_memory_mib(&self) -> u64 {
-        (self.vm_count as u64).saturating_mul(DEFAULT_VM_MEMORY_MIB)
+        match self.allocated {
+            Some(a) => a.memory_mib,
+            None => (self.vm_count as u64).saturating_mul(DEFAULT_VM_MEMORY_MIB),
+        }
     }
 
     fn free_vcpus(&self) -> u32 {
@@ -155,7 +189,11 @@ impl NodeInfo {
         request_vcpus: u32,
         request_mem: u64,
     ) -> Option<(i64, i64, i64, String)> {
-        if !self.healthy() || self.cordoned || self.pressure() == Some(PressureLevel::Critical) {
+        if !self.healthy()
+            || !self.daemon_reachable()
+            || self.cordoned
+            || self.pressure() == Some(PressureLevel::Critical)
+        {
             return None;
         }
         if self.free_vcpus() < request_vcpus || self.free_memory_mib() < request_mem {
@@ -209,6 +247,10 @@ pub struct RegisterRequest {
     pub density: Option<DensityReport>,
     #[serde(default)]
     pub apple: Option<AppleHostCaps>,
+    #[serde(default)]
+    pub daemon: Option<DaemonStatus>,
+    #[serde(default)]
+    pub allocated: Option<Allocated>,
 }
 
 #[derive(Debug)]
@@ -964,6 +1006,8 @@ fn apply_register(nodes: &mut HashMap<String, NodeInfo>, req: RegisterRequest) {
             security: req.security,
             density: req.density,
             apple: req.apple,
+            daemon: req.daemon,
+            allocated: req.allocated,
         },
     );
 }
@@ -993,6 +1037,9 @@ fn node_json(n: &NodeInfo) -> Value {
         "security": n.security,
         "density": n.density,
         "apple": n.apple,
+        "daemon_reachable": n.daemon_reachable(),
+        "daemon": n.daemon,
+        "allocated": n.allocated,
     })
 }
 
@@ -2234,6 +2281,8 @@ mod tests {
             labels: HashMap::new(),
             security: NodeSecurityCapabilities::default(),
             density: None,
+            daemon: None,
+            allocated: None,
             apple: None,
         }
     }
@@ -2246,6 +2295,44 @@ mod tests {
             }),
             ..node(name, vm_count, 0)
         }
+    }
+
+    #[test]
+    fn a_node_that_cannot_reach_its_daemon_takes_no_work_but_is_still_listed() {
+        let mut nodes = HashMap::new();
+        let mut a = node("a", 0, 0);
+        a.daemon = Some(DaemonStatus {
+            reachable: false,
+            error: Some("connection refused".into()),
+        });
+        nodes.insert("a".into(), a.clone());
+        nodes.insert("b".into(), node("b", 5, 0));
+        // `a` is emptier but its daemon is down: `b` is chosen.
+        assert_eq!(pick_best_capacity(&nodes, 1, 512).unwrap().name, "b");
+        assert!(a.healthy(), "it is still heartbeating, so not stale");
+        let j = node_json(&a);
+        assert_eq!(j["daemon_reachable"], false);
+        assert_eq!(j["daemon"]["error"], "connection refused");
+        // An agent that predates the field reads as reachable.
+        assert!(node("c", 0, 0).daemon_reachable());
+    }
+
+    #[test]
+    fn reported_allocation_replaces_the_per_vm_estimate() {
+        let mut n = node("a", 4, 0);
+        let estimated = (n.free_vcpus(), n.free_memory_mib());
+        n.allocated = Some(Allocated {
+            vcpus: 1,
+            memory_mib: 1024,
+        });
+        assert_eq!((n.free_vcpus(), n.free_memory_mib()), (7, 15360));
+        assert_ne!(estimated, (n.free_vcpus(), n.free_memory_mib()));
+        // Four large VMs: a node the estimate called nearly empty is in fact full.
+        n.allocated = Some(Allocated {
+            vcpus: 8,
+            memory_mib: 16384,
+        });
+        assert_eq!((n.free_vcpus(), n.free_memory_mib()), (0, 0));
     }
 
     #[test]
@@ -2314,6 +2401,8 @@ mod tests {
             labels: HashMap::new(),
             security: NodeSecurityCapabilities::default(),
             density: None,
+            daemon: None,
+            allocated: None,
             apple: None,
         }
     }
@@ -2445,6 +2534,8 @@ mod tests {
                 labels: HashMap::new(),
                 security: NodeSecurityCapabilities::default(),
                 density: None,
+                daemon: None,
+                allocated: None,
                 apple: None,
             },
         );
@@ -2466,6 +2557,8 @@ mod tests {
                 labels: HashMap::new(),
                 security: NodeSecurityCapabilities::default(),
                 density: None,
+                daemon: None,
+                allocated: None,
                 apple: None,
             },
         );
@@ -2723,6 +2816,8 @@ mod tests {
                 labels: HashMap::new(),
                 security: NodeSecurityCapabilities::default(),
                 density: None,
+                daemon: None,
+                allocated: None,
                 apple: None,
             },
         );

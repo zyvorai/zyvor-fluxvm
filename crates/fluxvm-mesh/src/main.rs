@@ -166,10 +166,12 @@ fn real_main() -> fluxvm_mesh::Result<()> {
     let key_path = take_path(&mut args, "--key", || {
         fluxvm_mesh::mesh_dir().join("wireguard.key")
     });
-    let mut cloud_paths = CloudPaths::default();
-    cloud_paths.state = state_path.clone();
-    cloud_paths.catalog = catalog_path.clone();
-    cloud_paths.key = key_path;
+    let cloud_paths = CloudPaths {
+        state: state_path.clone(),
+        catalog: catalog_path.clone(),
+        key: key_path,
+        ..CloudPaths::default()
+    };
 
     match command.as_str() {
         "init" => {

@@ -65,12 +65,11 @@ impl WanState {
             )
         });
         let best = *candidates.first()?;
-        if let Some(active) = self.active.as_deref() {
-            if let Some(current) = links.iter().find(|l| l.name == active) {
-                if self.health.get(active).is_none_or(|h| h.healthy) {
-                    return Some(current);
-                }
-            }
+        if let Some(active) = self.active.as_deref()
+            && let Some(current) = links.iter().find(|l| l.name == active)
+            && self.health.get(active).is_none_or(|h| h.healthy)
+        {
+            return Some(current);
         }
         self.active = Some(best.name.clone());
         Some(best)
