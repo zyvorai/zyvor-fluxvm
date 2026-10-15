@@ -7,14 +7,16 @@ on:
     branches: [main]
     paths: ['website/**', 'docs/**', '.github/workflows/pages.yml']
   workflow_dispatch: {}
+# A queued deploy is not thrown away by the next push: GitHub keeps the newest pending run and the one in progress.
 concurrency:
   group: pages
-  cancel-in-progress: true
+  cancel-in-progress: false
 permissions:
   contents: read
 jobs:
   build:
-    runs-on: [self-hosted, Linux, X64, zyvor-build]
+    # Hosted-runner jobs for this org have sat queued for hours, so this runs on the Mac mini runner (same labels as macos.yml).
+    runs-on: [self-hosted, macOS, ARM64, fluxvm-mac]
     steps:
     - uses: actions/checkout@v7
     - uses: actions/setup-node@v7
@@ -25,7 +27,8 @@ jobs:
       with: {path: website/build}
   deploy:
     needs: build
-    runs-on: [self-hosted, Linux, X64, zyvor-build]
+    # Hosted-runner jobs for this org have sat queued for hours, so this runs on the Mac mini runner (same labels as macos.yml).
+    runs-on: [self-hosted, macOS, ARM64, fluxvm-mac]
     environment: {name: github-pages, url: "${{ steps.deployment.outputs.page_url }}"}
     permissions: {pages: write, id-token: write}
     steps:
