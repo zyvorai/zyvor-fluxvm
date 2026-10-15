@@ -160,6 +160,10 @@ pub const CAPABILITIES: &[Capability] = &[
         "macOS 27+ Linux EFI guests: Apple or custom platform key, Microsoft or custom KEK/db/dbx",
     ),
     no(
+        "virtio-input devices, GDB debug stub, guest battery, macOS guest clipboard",
+        "no public API in the macOS 27 SDK (keyboards and pointers are USB or Mac devices, and the Spice clipboard port only serves guests that run a Spice agent, which is Linux); not something FluxVM can add",
+    ),
+    no(
         "TPM, confidential profiles",
         "not offered by Virtualization.framework",
     ),
