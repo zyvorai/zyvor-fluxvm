@@ -8,7 +8,10 @@ one Layer-2 network and one subnet, as if they were on the same host.
 - The switch protocol was compiled and tested standalone with a stand-in cipher. The tests cover the round trip,
   MAC learning, and refusal of replays, wrong keys, the wrong network, strangers, tampering and spoofing.
 - Placement, allocation and the sync have unit and in-process HTTP tests.
-- Nothing has run on two real Macs yet.
+- `crates/fluxvm-vz-switch/tests/overlay_loopback.rs` runs three real switches with the real AES-256-GCM overlay over
+  loopback UDP on one machine: a flood crosses between two of them, a learned MAC turns the reply into unicast, a
+  near-MTU frame survives sealing, and a switch with another key neither receives nor injects frames.
+- Nothing has run on two real Macs yet, so a real NIC, the path MTU and a rotation across hosts are unexercised.
 
 ## Using it
 

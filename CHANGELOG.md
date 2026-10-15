@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- **Cross-Mac private networks: a real-cipher loopback test.** `fluxvm-vz-switch` had overlay tests only with a
+  stand-in cipher. A new integration test runs three switches with the real AES-256-GCM overlay on one machine
+  (flood across Macs, unicast after learning, a 1400-byte frame, and a wrongly keyed switch that neither receives nor
+  injects). Still not run on two real Macs.
+
 - **Rebalance plan for `vz` Macs (dry run).** `GET /fleet/rebalance/plan[?high_water=0.85&max_moves=10]` (operator)
   lists which VMs could leave a Mac whose memory use is above the high-water mark (of what VMs may use, after macOS
   headroom) and which Mac each would fit on without going over the mark or out of CPU. Only VMs created `reschedulable`
