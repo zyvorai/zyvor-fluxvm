@@ -783,6 +783,7 @@ pub fn router_with_sso(
             post(cloud::drain_node).get(cloud::drain_status),
         )
         .route("/fleet/nodes/{name}/scrub", post(cloud::scrub_node))
+        .route("/fleet/rebalance/plan", get(cloud::rebalance_plan))
         .route("/fleet/vms", post(create_vm_route).get(list_vms_route))
         .route("/fleet/nodes/{name}/vms", get(node_vms))
         .route(

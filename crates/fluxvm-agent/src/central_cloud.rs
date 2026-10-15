@@ -13,6 +13,7 @@
 //! | `GET/POST /fleet/leases`, `GET /fleet/leases/{id}`, `POST …/{id}/release` (*tenant*) | Mac leases |
 //! | `POST /fleet/nodes/{name}/scrub` | clear a released node for reuse |
 //! | `POST/GET /fleet/nodes/{name}/drain` | cordon, then evict or reschedule |
+//! | `GET /fleet/rebalance/plan` | dry run: VMs that could leave an overloaded Mac |
 //! | `POST /fleet/vms/{node}/{id}/exec` (*tenant*) | guest exec through the node's agent |
 //! | `GET /fleet/usage` (*tenant*: own only) | metering, JSON or CSV |
 //! | `POST /fleet/reconcile`, `GET/PUT /fleet/policy` | ledger reconcile, licence policy |
@@ -1078,6 +1079,104 @@ fn is_ephemeral(vm: &Value) -> bool {
     ttl || label(vm.get("labels")) || label(req.and_then(|r| r.get("labels")))
 }
 
+#[derive(Debug, Deserialize)]
+pub(super) struct RebalanceQuery {
+    /// Fraction of a Mac's allocatable memory above which it is overloaded (default 0.85).
+    #[serde(default)]
+    high_water: Option<f64>,
+    /// Upper bound on proposed moves (default 10, at most 100).
+    #[serde(default)]
+    max_moves: Option<usize>,
+}
+
+/// One VM record as a rebalance candidate: `None` for a VM that holds no memory (not creating, running or paused).
+/// Movable only when it was created `reschedulable` (the ledger kept its spec) or is ephemeral, and never a macOS guest.
+fn rebalance_vm(
+    node: &str,
+    vm: &Value,
+    has_spec: bool,
+) -> Option<fluxvm_scheduler::apple_rebalance::RebalanceVm> {
+    let status = vm.get("status").and_then(Value::as_str)?;
+    if !matches!(status, "creating" | "running" | "paused") {
+        return None;
+    }
+    let req = vm.get("request").unwrap_or(vm);
+    let macos = req
+        .get("apple")
+        .and_then(|a| a.get("guest_os"))
+        .and_then(Value::as_str)
+        == Some("macos");
+    Some(fluxvm_scheduler::apple_rebalance::RebalanceVm {
+        id: vm_id(vm),
+        node: node.to_owned(),
+        vcpus: req.get("vcpus").and_then(Value::as_u64).unwrap_or(2) as u32,
+        memory_mib: req.get("memory_mib").and_then(Value::as_u64).unwrap_or(0),
+        movable: !macos && (has_spec || is_ephemeral(vm)),
+    })
+}
+
+/// `GET /fleet/rebalance/plan[?high_water=0.85&max_moves=10]` (admin): a dry run. Which reschedulable or ephemeral VMs
+/// could leave a Mac that is above its memory high-water mark, and where they would fit. Nothing is changed; applying a
+/// move is a reschedule drain or a delete and create by the operator.
+pub(super) async fn rebalance_plan(
+    State(fleet): State<Fleet>,
+    Extension(caller): Extension<Caller>,
+    Query(q): Query<RebalanceQuery>,
+) -> Result<Json<Value>, AppError> {
+    require_admin(&caller)?;
+    let high_water = q
+        .high_water
+        .filter(|h| h.is_finite())
+        .unwrap_or(fluxvm_scheduler::apple_rebalance::DEFAULT_HIGH_WATER);
+    let max_moves = q.max_moves.unwrap_or(10).min(100);
+    let mut nodes: Vec<NodeInfo> = fleet
+        .nodes
+        .lock()
+        .await
+        .values()
+        .filter(|n| n.apple.is_some())
+        .cloned()
+        .collect();
+    nodes.sort_by(|a, b| a.name.cmp(&b.name));
+    let mut rn = Vec::with_capacity(nodes.len());
+    let mut rv = Vec::new();
+    let mut skipped = Vec::new();
+    for n in &nodes {
+        let apple = n.apple.as_ref().expect("filtered on apple caps");
+        rn.push(fluxvm_scheduler::apple_rebalance::RebalanceNode {
+            name: n.name.clone(),
+            allocatable_mib: fluxvm_scheduler::apple_placement::allocatable_mib(n.memory_mib_total),
+            used_mib: n.estimated_used_memory_mib(),
+            free_cpu: apple.free_cpu,
+            accepts_vms: n.healthy() && n.daemon_reachable() && !n.cordoned,
+        });
+        match fetch_node_vms(&fleet, n).await {
+            Ok(vms) => {
+                for vm in &vms {
+                    let id = vm_id(vm);
+                    let has_spec = fleet
+                        .tenancy
+                        .lock()
+                        .await
+                        .vm(&n.name, &id)
+                        .is_some_and(|e| e.active() && e.spec.is_some());
+                    if let Some(v) = rebalance_vm(&n.name, vm, has_spec) {
+                        rv.push(v);
+                    }
+                }
+            }
+            Err(e) => skipped.push(json!({"node": n.name, "error": e.1})),
+        }
+    }
+    let plan = fluxvm_scheduler::apple_rebalance::plan_rebalance(&rn, &rv, high_water, max_moves);
+    Ok(Json(json!({
+        "dry_run": true,
+        "plan": plan,
+        "nodes_considered": nodes.len(),
+        "vm_lists_unavailable": skipped,
+    })))
+}
+
 /// `POST /fleet/nodes/{name}/drain?mode=cordon|evict-ephemeral|reschedule[&force=true]`.
 ///
 /// Cordons the node and marks it draining, then handles each VM on it by `mode`. `Virtualization.framework` has no
@@ -1722,6 +1821,28 @@ mod tests {
     use crate::tenancy::TenancyError;
     use axum::body::Body;
     use tower::ServiceExt;
+
+    #[test]
+    fn rebalance_candidates_follow_the_drain_rules() {
+        let running = json!({"id": "a", "status": "running",
+            "request": {"vcpus": 4, "memory_mib": 4096, "apple": {"guest_os": "linux"}}});
+        let v = rebalance_vm("n", &running, false).unwrap();
+        assert_eq!((v.vcpus, v.memory_mib, v.movable), (4, 4096, false));
+        // A kept spec (created reschedulable) makes it movable.
+        assert!(rebalance_vm("n", &running, true).unwrap().movable);
+        // A TTL makes it ephemeral, hence movable.
+        let ttl = json!({"id": "b", "status": "running",
+            "request": {"vcpus": 1, "memory_mib": 512, "ttl_seconds": 600}});
+        assert!(rebalance_vm("n", &ttl, false).unwrap().movable);
+        // A macOS guest never moves, spec or not.
+        let mac_vm = json!({"id": "c", "status": "running",
+            "request": {"vcpus": 4, "memory_mib": 8192, "apple": {"guest_os": "macos"}}});
+        assert!(!rebalance_vm("n", &mac_vm, true).unwrap().movable);
+        // A stopped VM holds no memory and is not a candidate at all.
+        let stopped =
+            json!({"id": "d", "status": "stopped", "request": {"vcpus": 1, "memory_mib": 512}});
+        assert!(rebalance_vm("n", &stopped, true).is_none());
+    }
 
     fn mac(name: &str, mem: u64, vms: usize) -> NodeInfo {
         NodeInfo {

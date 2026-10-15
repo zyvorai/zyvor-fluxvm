@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- **Rebalance plan for `vz` Macs (dry run).** `GET /fleet/rebalance/plan[?high_water=0.85&max_moves=10]` (operator)
+  lists which VMs could leave a Mac whose memory use is above the high-water mark (of what VMs may use, after macOS
+  headroom) and which Mac each would fit on without going over the mark or out of CPU. Only VMs created `reschedulable`
+  or ephemeral are candidates and macOS guests never are, the same rules as a reschedule drain; there is no live
+  migration, so applying a move is a recreate. Changes nothing. Unit-tested only; not run on a real fleet.
+
 - **`vz` placement prefers a Mac that already has the image.** Each Mac's heartbeat now lists its cached built-in images
   (new `GET /v1/host/images`), and `fluxvm-agent central` adds a bonus for a host that holds the requested image name,
   so a new `debian-13` VM lands where the ~400 MB download is already done instead of fetching it again. A host that

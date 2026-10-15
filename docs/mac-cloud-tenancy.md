@@ -637,6 +637,7 @@ capabilities, but not its address, labels or security report.
 | `GET/POST /fleet/leases`, `GET /fleet/leases/{id}`, `POST /fleet/leases/{id}/release[?force=true]` | tenant, operator |
 | `POST /fleet/nodes/{name}/scrub[?force=true]` | operator |
 | `POST /fleet/nodes/{name}/drain?mode=…[&force=true]`, `GET /fleet/nodes/{name}/drain` | operator |
+| `GET /fleet/rebalance/plan[?high_water=0.85&max_moves=10]` (dry run: which reschedulable or ephemeral VMs could leave an overloaded Mac, and where they fit) | operator |
 | `POST /fleet/vms/{node}/{id}/exec` (`{"command": "…", "timeout_seconds": N}`) | tenant (own VMs), operator |
 | `GET /fleet/usage?from=&to=&tenant=&format=json\|csv` | tenant (own), operator |
 | `POST /fleet/reconcile`, `GET/PUT /fleet/policy` | operator |
