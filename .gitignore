@@ -4,6 +4,5 @@
 *.raw
 *.img
 *.iso
-.docs-tools/
 __pycache__/
 *.pyc

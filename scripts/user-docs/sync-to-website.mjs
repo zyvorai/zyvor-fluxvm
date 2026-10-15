@@ -2,7 +2,7 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
 // SPDX-License-Identifier: Apache-2.0
 
-import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { dirname, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -18,10 +18,8 @@ const USER_DOCS = resolve(ROOT, 'docs/user')
 const SITE = resolve(process.argv[2] ?? resolve(ROOT, '../zyvor-web'))
 const PRODUCT = process.env.USER_DOCS_PRODUCT || 'Hermes'
 const SLUG = (process.env.USER_DOCS_SLUG || PRODUCT).toLowerCase().replace(/\s+/g, '-')
-const PDF_PREFIX = process.env.USER_DOCS_PDF_PREFIX || PRODUCT.replace(/\s+/g, '-')
 const MANUAL_DIR = process.env.USER_DOCS_MANUAL_DIR || `${SLUG}-manual`
 const TARGET = join(SITE, `docs/${MANUAL_DIR}`)
-const PDF_TARGET = join(SITE, `static/downloads/${SLUG}-docs`)
 
 if (!existsSync(join(SITE, 'docusaurus.config.ts'))) {
   console.error(`ERROR: ${SITE} is not zyvor-web`)
@@ -83,22 +81,9 @@ function transformLinks(md) {
   })
 }
 
-function rewriteIndexPdfSection(md) {
-  const pdfNames = [
-    `${PDF_PREFIX}-User-README`,
-    `${PDF_PREFIX}-Getting-Started`,
-    `${PDF_PREFIX}-Page-by-Page`,
-    `${PDF_PREFIX}-Admin-Basics`,
-  ]
-  let out = md.replace(
-    /```bash\nnode scripts\/user-docs\/build-user-pdfs\.mjs\n```\n\nOutput lands in \[`pdf\/`\]\(pdf\/\):/,
-    'Prefer paper or offline reading? Download the print-ready PDFs:',
-  )
-  for (const name of pdfNames) {
-    const nice = name.replace(`${PDF_PREFIX}-`, '').replace(/-/g, ' ')
-    out = out.replaceAll(`\`${name}.pdf\``, `[${nice} (PDF)](/downloads/${SLUG}-docs/${name}.pdf)`)
-  }
-  return out.replace(/\nAlso available:[^\n]*\n/, '\n')
+// The repo README links "using the CLI & API" for GitHub readers; the site has its own sidebar entry.
+function stripAlsoAvailable(md) {
+  return md.replace(/\nAlso available:[^\n]*\n/, '\n')
 }
 
 function frontMatter(fields) {
@@ -120,18 +105,17 @@ function walk(dir) {
 
 rmSync(TARGET, { recursive: true, force: true })
 mkdirSync(TARGET, { recursive: true })
-mkdirSync(PDF_TARGET, { recursive: true })
 
 let written = 0
 for (const file of walk(USER_DOCS)) {
   const rel = relative(USER_DOCS, file)
-  if (rel.startsWith('pdf/') || !rel.endsWith('.md')) continue
+  if (!rel.endsWith('.md')) continue
   const target = join(TARGET, renameTarget(rel))
   mkdirSync(dirname(target), { recursive: true })
   let body = transformLinks(readFileSync(file, 'utf8'))
   const targetName = renameTarget(rel)
   if (targetName === 'index.md') {
-    body = rewriteIndexPdfSection(body)
+    body = stripAlsoAvailable(body)
     body = frontMatter({ title: `${PRODUCT} Manual`, sidebar_position: 1, slug: `/${MANUAL_DIR}` }) + body
   } else if (targetName === 'pages/index.md') {
     body = frontMatter({ title: 'Page-by-page guides', sidebar_position: 1 }) + body
@@ -158,15 +142,4 @@ if (existsSync(pagesDir)) {
   }
 }
 
-let pdfs = 0
-const pdfDir = join(USER_DOCS, 'pdf')
-if (existsSync(pdfDir)) {
-  for (const f of readdirSync(pdfDir)) {
-    if (!f.endsWith('.pdf') && !f.endsWith('.html')) continue
-    cpSync(join(pdfDir, f), join(PDF_TARGET, f))
-    pdfs++
-  }
-}
-
 console.log(`Synced ${written} markdown files -> ${TARGET}`)
-console.log(`Copied ${pdfs} PDF/HTML files -> ${PDF_TARGET}`)
