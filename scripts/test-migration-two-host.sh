@@ -11,6 +11,9 @@
 #   baseline   plain pre-copy
 #   multifd    4 multifd channels
 #   postcopy   post-copy
+#   compression zstd multifd compression (4 channels), set on both ends
+#   autoconverge auto-converge with the guest dirtying memory under a bandwidth
+#              cap; reports the highest CPU throttle QEMU applied
 #   tls        x509 on both ends; no tls_hostname given, the relay defaults it
 #   cancel     a throttled migration is cancelled mid-transfer: the source must
 #              keep running, then a retry with default settings must complete
@@ -19,7 +22,7 @@
 #              temporarily points SRC's /etc/fluxvm.toml at it, restores after
 #
 #   SRC=sus@175.110.122.71 DST=sus@80.79.5.173 DST_ADDR=80.79.5.173 \
-#   [SCENARIOS="baseline multifd postcopy tls cancel machine"] \
+#   [SCENARIOS="baseline multifd postcopy compression autoconverge tls cancel machine"] \
 #   [SRC_OLD_QEMU=/usr/bin/qemu-system-x86_64] \
 #   ./scripts/test-migration-two-host.sh
 #
@@ -34,7 +37,7 @@ SRC_IMAGE=${SRC_IMAGE:-/var/lib/fluxvm/images/linux-agent.raw}
 SRC_KERNEL=${SRC_KERNEL:-/var/lib/fluxvm/kernels/bionic-vmlinuz-4.15}
 SRC_INITRD=${SRC_INITRD:-/var/lib/fluxvm/kernels/bionic-initrd-4.15}
 if [[ -z "${SCENARIOS:-}" ]]; then
-  SCENARIOS="baseline multifd postcopy tls cancel machine"
+  SCENARIOS="baseline multifd postcopy compression autoconverge tls cancel machine"
   [[ -n "${SRC_OLD_QEMU:-}" ]] && SCENARIOS="$SCENARIOS oldqemu"
 fi
 WORK="${SHARED_ROOT}/fluxvm-e2e-$$"
@@ -199,6 +202,60 @@ for scenario in $SCENARIOS; do
   baseline) run_simple baseline '' '' ;;
   multifd)  run_simple multifd '{"multifd_channels":4}' '{"capabilities":{"multifd_channels":4}}' ;;
   postcopy) run_simple postcopy '{"mode":"post-copy"}' '{"capabilities":{"post_copy":true}}' ;;
+  compression)
+    c='{"algorithm":"zstd","level":3}'
+    run_simple compression "{\"multifd_channels\":4,\"compression\":${c}}" \
+      "{\"capabilities\":{\"multifd_channels\":4,\"compression\":${c}}}" ;;
+  autoconverge)
+    create_source mig-e2e-autoconverge
+    up1=$(uptime_via "$SRC" "$SRC_VM") || fail "autoconverge: guest agent never answered on source"
+    mt=$(machine_type_of "$SRC" "$SRC_VM")
+    # Dirty guest memory continuously (~115 Mbps) under a 200 Mbps cap: above QEMU's
+    # 50% trigger so it throttles, below the cap so the throttled guest then converges.
+    rapi "$SRC" POST "/v1/vms/${SRC_VM}/agent" \
+      '{"command":"sh -c \"(while :; do dd if=/dev/urandom of=/dev/shm/dirty bs=1M count=200 2>/dev/null; done) >/dev/null 2>&1 &\"","timeout_seconds":10}'
+    arm_receiver ''
+    start_migration '{"bandwidth_mbps":200,"auto_converge":{"initial_pct":20,"increment_pct":20,"max_pct":99}}'
+    max_throttle=0
+    phase=
+    for _ in $(seq 1 300); do
+      rapi "$SRC" GET "/v1/vms/${SRC_VM}/migration/status"
+      phase=$(printf '%s' "$OUT" | jget '["phase"]')
+      t=$(printf '%s' "$OUT" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("cpu_throttle_pct") or 0)')
+      (( t > max_throttle )) && max_throttle=$t
+      [[ "$phase" == completed ]] && break
+      [[ "$phase" == failed || "$phase" == cancelled ]] && fail "autoconverge: migration ${phase}: $OUT"
+      sleep 1
+    done
+    if [[ "$phase" != completed ]]; then
+      echo "last migration status: $OUT" >&2
+      rapi "$SRC" GET "/v1/vms/${SRC_VM}"
+      ws=$(printf '%s' "$OUT" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("workspace",""))')
+      ssh "${SSH_OPTS[@]}" "$SRC" "sudo -n python3 - '${ws}/qmp.sock'" >&2 <<'PYQ' || true
+import json, socket, sys
+s = socket.socket(socket.AF_UNIX); s.connect(sys.argv[1]); f = s.makefile("rw")
+f.readline()
+def cmd(c):
+    f.write(json.dumps({"execute": c}) + "\n"); f.flush()
+    while True:
+        r = json.loads(f.readline())
+        if "return" in r or "error" in r: return r
+cmd("qmp_capabilities")
+for c in ("query-migrate-capabilities", "query-migrate-parameters", "query-migrate"):
+    r = cmd(c)
+    if c == "query-migrate-capabilities":
+        r = {x["capability"]: x["state"] for x in r.get("return", [])}
+    print(c, json.dumps(r)[:900])
+PYQ
+      fail "autoconverge: did not complete (${phase}, max throttle ${max_throttle}%)"
+    fi
+    if (( max_throttle > 0 )); then
+      ok "autoconverge: QEMU throttled the guest CPU up to ${max_throttle}% and the migration converged"
+    else
+      echo "note autoconverge: completed, but QEMU never applied a CPU throttle (the guest did not out-dirty the stream): the capability was set, not shown to engage"
+    fi
+    finish_and_adopt autoconverge "$up1" "$mt"
+    drop ;;
   tls)
     # One CA-signed cert valid for the destination's address, used at both ends.
     ssh "${SSH_OPTS[@]}" "$SRC" "sudo -n bash -s" <<CERTS || fail "tls: generating certificates"
