@@ -32,7 +32,7 @@ unchanged: read it first with `curl -fsSL https://zyvorai.github.io/zyvor-fluxvm
 |---|---|---|
 | macOS 14 (Sonoma) or newer, **Apple silicon** | `macos-arm64` | `curl`, `tar`; the `hivex` library (`brew install hivex`: the installer does it when Homebrew is present) |
 | Linux **x86_64** | `linux-x86_64` | `curl`, `tar`; `libhivex0` and `libsystemd0` (Debian/Ubuntu) or `hivex` and `systemd-libs` (Fedora/RHEL); KVM (`/dev/kvm`) to run VMs |
-| Linux aarch64 | `linux-aarch64` | as above; published when the release workflow's arm64 runner is available |
+| Linux aarch64 | `linux-aarch64` | as above; cross-compiled on x86_64 by the release workflow and marked experimental, so a failed aarch64 build does not block the x86_64 package or the release |
 | Intel Macs, Windows, other | none | build from source: `cargo build --release -p fluxctl` (see the [README](https://github.com/zyvorai/zyvor-fluxvm#readme)) |
 
 The installer checks the platform first and exits with status 2 and the reason if there is no package for it. A release
