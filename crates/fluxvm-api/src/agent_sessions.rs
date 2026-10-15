@@ -108,6 +108,12 @@ pub(crate) fn routes() -> Router<Arc<VmManager>> {
         )
         .route("/v1/agents/sessions/{id}/checkpoint", post(checkpoint))
         .route("/v1/agents/sessions/{id}/restore", post(restore))
+        .route("/v1/agents/sessions/{id}/rewind", get(rewind_list))
+        .route(
+            "/v1/agents/sessions/{id}/rewind/config",
+            post(rewind_config),
+        )
+        .route("/v1/agents/sessions/{id}/rewind/undo", post(rewind_undo))
         .route("/v1/agents/sessions/{id}/fork", post(fork))
         .route("/v1/agents/sessions/{id}/promote", post(promote))
         .route("/v1/agents/sessions/{id}/events", get(events))
@@ -2735,6 +2741,7 @@ async fn exec_session(
     m.ensure_running_for_request(s.sandbox_id).await?;
     budget_check_workspace(&m, &s).await?;
     let left = budget_start_exec(&m, &s).await?;
+    rewind_capture(&m, &s, &body.command).await;
     // A command never gets more time than the budget has left.
     let timeout = match (body.timeout_seconds, left) {
         (Some(t), Some(l)) => Some(t.min(l)),
@@ -2837,6 +2844,360 @@ async fn checkpoint(
     Ok(Json(json!(cp)))
 }
 
+// ---------------------------------------------------------------------------------------
+// Rewind: automatic checkpoints taken before each exec, so the last action can be undone.
+//
+// The points live in their own file (like `Usage`), not in `Session::checkpoints`: taking one on
+// every exec must not bump the session `revision` and 412 a caller that holds an `If-Match`.
+
+const REWIND_DEFAULT_POINTS: u32 = 10;
+const REWIND_MAX_POINTS: u32 = 50;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct RewindPoint {
+    tag: String,
+    memory: bool,
+    created_at: DateTime<Utc>,
+    /// What caused it (`exec`).
+    trigger: String,
+    /// The command about to run when the point was taken: undoing to this point reverses it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    command: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct RewindState {
+    enabled: bool,
+    max_points: u32,
+    /// Ask for memory in each point (needs `capabilities.memory_checkpoint`; else disk-only).
+    memory: bool,
+    /// Oldest first.
+    points: Vec<RewindPoint>,
+}
+
+impl Default for RewindState {
+    fn default() -> Self {
+        RewindState {
+            enabled: false,
+            max_points: REWIND_DEFAULT_POINTS,
+            memory: true,
+            points: Vec::new(),
+        }
+    }
+}
+
+/// Adds a point and returns the tags that fell off the end of the ring.
+fn rewind_push(st: &mut RewindState, p: RewindPoint) -> Vec<String> {
+    st.points.push(p);
+    let keep = st.max_points.max(1) as usize;
+    let drop = st.points.len().saturating_sub(keep);
+    st.points.drain(..drop).map(|p| p.tag).collect()
+}
+
+/// Index of the point `steps` actions back (`1` is the point taken before the last exec).
+fn rewind_target(st: &RewindState, steps: u32) -> Result<usize, String> {
+    if steps == 0 {
+        return Err("steps must be at least 1".into());
+    }
+    let n = st.points.len();
+    if n == 0 {
+        return Err("no rewind points: enable rewind, then run a command".into());
+    }
+    if steps as usize > n {
+        return Err(format!(
+            "only {n} rewind point(s) are kept; asked to go back {steps}"
+        ));
+    }
+    Ok(n - steps as usize)
+}
+
+/// After restoring to `idx`, drops that point and every newer one (they describe a timeline that
+/// no longer exists) and returns their tags.
+fn rewind_truncate(st: &mut RewindState, idx: usize) -> Vec<String> {
+    st.points.drain(idx..).map(|p| p.tag).collect()
+}
+
+fn rewind_path(m: &VmManager, id: Uuid) -> PathBuf {
+    m.cfg
+        .state_dir
+        .join("agent-session-rewind")
+        .join(format!("{id}.json"))
+}
+
+static REWIND_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+async fn rewind_read(m: &VmManager, id: Uuid) -> RewindState {
+    match tokio::fs::read(rewind_path(m, id)).await {
+        Ok(b) => serde_json::from_slice(&b).unwrap_or_default(),
+        Err(_) => RewindState::default(),
+    }
+}
+
+async fn rewind_write(m: &VmManager, id: Uuid, st: &RewindState) -> ApiResult<()> {
+    let path = rewind_path(m, id);
+    if let Some(d) = path.parent() {
+        tokio::fs::create_dir_all(d)
+            .await
+            .map_err(anyhow::Error::from)?;
+    }
+    let tmp = path.with_extension("json.tmp");
+    tokio::fs::write(
+        &tmp,
+        serde_json::to_vec_pretty(st).map_err(anyhow::Error::from)?,
+    )
+    .await
+    .map_err(anyhow::Error::from)?;
+    tokio::fs::rename(&tmp, &path)
+        .await
+        .map_err(anyhow::Error::from)?;
+    Ok(())
+}
+
+/// Takes a point before `command` runs, when rewind is on. Best effort: a point that cannot be
+/// taken (another lifecycle operation holds the slot, the snapshot fails) is written to the
+/// ledger and the command still runs, so rewind never makes exec less available.
+async fn rewind_capture(m: &Arc<VmManager>, s: &Session, command: &str) {
+    let st = rewind_read(m, s.id).await;
+    if !st.enabled || !s.capabilities.snapshot {
+        return;
+    }
+    let guard = match begin_lifecycle(s.id, "checkpoint") {
+        Ok(g) => g.mark(m, "checkpoint"),
+        Err(e) => {
+            record(m, s.id, "rewind.skipped", json!({"reason": e.message}));
+            return;
+        }
+    };
+    let memory = st.memory && s.capabilities.memory_checkpoint;
+    let tag = format!("rw-{}", Utc::now().timestamp_millis());
+    let started = std::time::Instant::now();
+    if let Err(e) = m.create_vm_snapshot_with(s.sandbox_id, &tag, memory).await {
+        record(
+            m,
+            s.id,
+            "rewind.capture_failed",
+            json!({"reason": format!("{e:#}")}),
+        );
+        drop(guard);
+        return;
+    }
+    drop(guard);
+    let point = RewindPoint {
+        tag: tag.clone(),
+        memory,
+        created_at: Utc::now(),
+        trigger: "exec".into(),
+        command: Some(command.chars().take(512).collect()),
+    };
+    let evicted = {
+        let _g = REWIND_LOCK.lock().await;
+        let mut cur = rewind_read(m, s.id).await;
+        let evicted = rewind_push(&mut cur, point);
+        if let Err(e) = rewind_write(m, s.id, &cur).await {
+            record(
+                m,
+                s.id,
+                "rewind.capture_failed",
+                json!({"reason": e.message, "tag": tag}),
+            );
+            let _ = m.delete_vm_snapshot(s.sandbox_id, &tag).await;
+            return;
+        }
+        evicted
+    };
+    for t in &evicted {
+        let _ = m.delete_vm_snapshot(s.sandbox_id, t).await;
+    }
+    record(
+        m,
+        s.id,
+        "rewind.point",
+        json!({"tag": tag, "memory": memory, "ms": started.elapsed().as_millis() as u64,
+               "evicted": evicted.len()}),
+    );
+}
+
+async fn rewind_list(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    scope: Option<Extension<SessionScope>>,
+    token_tenant: Option<Extension<TokenTenant>>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<Value>> {
+    authorize(role, &scope, id, Op::Read)?;
+    let s = load(&m, id, &caller_tenant(&token_tenant)).await?;
+    let mut v = json!(rewind_read(&m, id).await);
+    v["memory_available"] = json!(s.capabilities.memory_checkpoint);
+    Ok(Json(v))
+}
+
+#[derive(Debug, Deserialize)]
+struct RewindConfigBody {
+    #[serde(default)]
+    enabled: Option<bool>,
+    #[serde(default)]
+    max_points: Option<u32>,
+    #[serde(default)]
+    memory: Option<bool>,
+}
+
+async fn rewind_config(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    token_tenant: Option<Extension<TokenTenant>>,
+    Path(id): Path<Uuid>,
+    Json(body): Json<RewindConfigBody>,
+) -> ApiResult<Json<Value>> {
+    require_admin(role)?;
+    let s = load(&m, id, &caller_tenant(&token_tenant)).await?;
+    running(&s)?;
+    if let Some(n) = body.max_points
+        && !(1..=REWIND_MAX_POINTS).contains(&n)
+    {
+        return Err(ApiError {
+            status: StatusCode::BAD_REQUEST,
+            message: format!("max_points must be 1-{REWIND_MAX_POINTS}"),
+        });
+    }
+    if body.enabled == Some(true) && !s.capabilities.snapshot {
+        return Err(ApiError {
+            status: StatusCode::CONFLICT,
+            message: format!("backend {} cannot snapshot, so it cannot rewind", s.backend),
+        });
+    }
+    let (st, evicted) = {
+        let _g = REWIND_LOCK.lock().await;
+        let mut st = rewind_read(&m, id).await;
+        if let Some(e) = body.enabled {
+            st.enabled = e;
+        }
+        if let Some(n) = body.max_points {
+            st.max_points = n;
+        }
+        if let Some(mem) = body.memory {
+            st.memory = mem;
+        }
+        // A smaller ring drops the oldest points now.
+        let keep = st.max_points as usize;
+        let drop = st.points.len().saturating_sub(keep);
+        let evicted: Vec<String> = st.points.drain(..drop).map(|p| p.tag).collect();
+        rewind_write(&m, id, &st).await?;
+        (st, evicted)
+    };
+    for t in &evicted {
+        let _ = m.delete_vm_snapshot(s.sandbox_id, t).await;
+    }
+    record(
+        &m,
+        id,
+        "rewind.config",
+        json!({"enabled": st.enabled, "max_points": st.max_points, "memory": st.memory}),
+    );
+    Ok(Json(json!(st)))
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct RewindUndoBody {
+    /// How many actions to go back; `1` (default) reverses the last exec.
+    #[serde(default)]
+    steps: Option<u32>,
+}
+
+async fn rewind_undo(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    token_tenant: Option<Extension<TokenTenant>>,
+    Path(id): Path<Uuid>,
+    headers: axum::http::HeaderMap,
+    body: Option<Json<RewindUndoBody>>,
+) -> ApiResult<Json<Value>> {
+    require_admin(role)?;
+    let _gate = begin_lifecycle(id, "restore")?.mark(&m, "restore");
+    let s = load(&m, id, &caller_tenant(&token_tenant)).await?;
+    check_if_match(&headers, &s)?;
+    running(&s)?;
+    let steps = body.and_then(|Json(b)| b.steps).unwrap_or(1);
+    let st = rewind_read(&m, id).await;
+    let idx = rewind_target(&st, steps).map_err(|message| ApiError {
+        status: StatusCode::CONFLICT,
+        message,
+    })?;
+    let point = st.points[idx].clone();
+    let mut out = restore_session_to(&m, &s, &point.tag).await?;
+    let dropped = {
+        let _g = REWIND_LOCK.lock().await;
+        let mut cur = rewind_read(&m, id).await;
+        // Points are only ever added under the gate we hold, so the index still names `point`.
+        let dropped = match cur.points.iter().position(|p| p.tag == point.tag) {
+            Some(i) => rewind_truncate(&mut cur, i),
+            None => Vec::new(),
+        };
+        rewind_write(&m, id, &cur).await?;
+        dropped
+    };
+    for t in &dropped {
+        let _ = m.delete_vm_snapshot(s.sandbox_id, t).await;
+    }
+    record(
+        &m,
+        id,
+        "rewind.undo",
+        json!({"tag": point.tag, "steps": steps, "undid": point.command, "dropped": dropped.len()}),
+    );
+    out["rewound_to"] = json!(point);
+    out["steps"] = json!(steps);
+    Ok(Json(out))
+}
+
+/// Puts the session's machine back to the snapshot `tag` and re-binds what hangs off its address
+/// (credential grants, HTTP rules). The caller holds the lifecycle slot and has checked that the
+/// session is running.
+async fn restore_session_to(m: &Arc<VmManager>, s: &Session, tag: &str) -> ApiResult<Value> {
+    let id = s.id;
+    let vm = m
+        .restore_vm_snapshot(s.sandbox_id, &tag)
+        .await
+        .map_err(change_error)?;
+    record(m, id, "restore", json!({"tag": tag}));
+    // The restored machine may have another guest address: re-bind its credential grants to it
+    // (or drop them if that address is taken), so a grant never follows someone else's traffic.
+    let grants_rebound = match m.rebind_grants(s.sandbox_id).await {
+        Ok(has) => has,
+        Err(e) => {
+            record(m, id, "grant.revoked", json!({"reason": format!("{e:#}")}));
+            false
+        }
+    };
+    // The same for the session's HTTP rules: if the new address belongs to another sandbox's
+    // rules, this sandbox's traffic is no longer attributed to them, so the session stops
+    // taking exec and jobs rather than running with a policy that is not applied.
+    let mut http_bound = None;
+    if !s.policy.http_rules.is_empty() {
+        let unbound = match m.rebind_http_policy(s.sandbox_id).await {
+            Ok(_) => false,
+            Err(e) => {
+                record(
+                    m,
+                    id,
+                    "http_policy.unbound",
+                    json!({"reason": format!("{e:#}")}),
+                );
+                true
+            }
+        };
+        if unbound != s.policy.http_unbound {
+            let mut cur = s.clone();
+            cur.policy.http_unbound = unbound;
+            save(m, &mut cur).await?;
+        }
+        http_bound = Some(!unbound);
+    }
+    Ok(json!({
+        "restored": tag, "vm": vm, "grants_rebound": grants_rebound,
+        "http_policy_bound": http_bound,
+    }))
+}
+
 #[derive(Debug, Deserialize)]
 struct RestoreBody {
     tag: String,
@@ -2861,48 +3222,7 @@ async fn restore(
             message: format!("session {id} has no checkpoint {:?}", body.tag),
         });
     }
-    let vm = m
-        .restore_vm_snapshot(s.sandbox_id, &body.tag)
-        .await
-        .map_err(change_error)?;
-    record(&m, id, "restore", json!({"tag": body.tag}));
-    // The restored machine may have another guest address: re-bind its credential grants to it
-    // (or drop them if that address is taken), so a grant never follows someone else's traffic.
-    let grants_rebound = match m.rebind_grants(s.sandbox_id).await {
-        Ok(has) => has,
-        Err(e) => {
-            record(&m, id, "grant.revoked", json!({"reason": format!("{e:#}")}));
-            false
-        }
-    };
-    // The same for the session's HTTP rules: if the new address belongs to another sandbox's
-    // rules, this sandbox's traffic is no longer attributed to them, so the session stops
-    // taking exec and jobs rather than running with a policy that is not applied.
-    let mut http_bound = None;
-    if !s.policy.http_rules.is_empty() {
-        let unbound = match m.rebind_http_policy(s.sandbox_id).await {
-            Ok(_) => false,
-            Err(e) => {
-                record(
-                    &m,
-                    id,
-                    "http_policy.unbound",
-                    json!({"reason": format!("{e:#}")}),
-                );
-                true
-            }
-        };
-        if unbound != s.policy.http_unbound {
-            let mut cur = s.clone();
-            cur.policy.http_unbound = unbound;
-            save(&m, &mut cur).await?;
-        }
-        http_bound = Some(!unbound);
-    }
-    Ok(Json(json!({
-        "restored": body.tag, "vm": vm, "grants_rebound": grants_rebound,
-        "http_policy_bound": http_bound,
-    })))
+    restore_session_to(&m, &s, &body.tag).await.map(Json)
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -6805,6 +7125,68 @@ mod tests {
 
     fn pol(v: Value) -> PolicyBody {
         serde_json::from_value(v).unwrap()
+    }
+
+    fn rw_point(tag: &str) -> RewindPoint {
+        RewindPoint {
+            tag: tag.into(),
+            memory: false,
+            created_at: Utc::now(),
+            trigger: "exec".into(),
+            command: None,
+        }
+    }
+
+    #[test]
+    fn rewind_ring_evicts_the_oldest_points() {
+        let mut st = RewindState {
+            max_points: 3,
+            ..Default::default()
+        };
+        for t in ["a", "b", "c"] {
+            assert!(rewind_push(&mut st, rw_point(t)).is_empty());
+        }
+        assert_eq!(rewind_push(&mut st, rw_point("d")), vec!["a".to_string()]);
+        let tags: Vec<_> = st.points.iter().map(|p| p.tag.as_str()).collect();
+        assert_eq!(tags, ["b", "c", "d"]);
+    }
+
+    #[test]
+    fn rewind_undo_counts_back_from_the_newest_point() {
+        let mut st = RewindState::default();
+        assert!(rewind_target(&st, 1).is_err(), "nothing to undo yet");
+        for t in ["a", "b", "c"] {
+            rewind_push(&mut st, rw_point(t));
+        }
+        assert_eq!(rewind_target(&st, 1), Ok(2));
+        assert_eq!(rewind_target(&st, 3), Ok(0));
+        assert!(rewind_target(&st, 4).is_err());
+        assert!(rewind_target(&st, 0).is_err());
+    }
+
+    #[test]
+    fn rewind_undo_drops_the_target_and_everything_newer() {
+        let mut st = RewindState::default();
+        for t in ["a", "b", "c", "d"] {
+            rewind_push(&mut st, rw_point(t));
+        }
+        let idx = rewind_target(&st, 2).unwrap();
+        assert_eq!(
+            rewind_truncate(&mut st, idx),
+            vec!["c".to_string(), "d".to_string()]
+        );
+        let tags: Vec<_> = st.points.iter().map(|p| p.tag.as_str()).collect();
+        assert_eq!(tags, ["a", "b"]);
+        // The next undo goes one action further back from the restored state.
+        assert_eq!(rewind_target(&st, 1), Ok(1));
+    }
+
+    #[test]
+    fn rewind_state_defaults_are_off_and_survive_a_round_trip() {
+        let st = RewindState::default();
+        assert!(!st.enabled && st.memory && st.max_points == REWIND_DEFAULT_POINTS);
+        let back: RewindState = serde_json::from_value(json!(st)).unwrap();
+        assert_eq!(back, st);
     }
 
     #[test]

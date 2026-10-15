@@ -31,6 +31,7 @@ tenant's id answers `404`, not `403`).
 | `POST /v1/agents/sessions/{id}/promote` | `{dry_run?, plan_id?, skip_conflicts?, paths?}` on a fork child: apply its workspace changes to its parent. See [Promoting a fork](#promoting-a-fork). Admin only. |
 | `POST /v1/agents/sessions/{id}/checkpoint` | `{tag?, memory?}`; `memory:false` is disk-only. |
 | `POST /v1/agents/sessions/{id}/restore` | `{tag}`; only tags this session took. |
+| `GET /v1/agents/sessions/{id}/rewind` | The [rewind](#rewind-undo-the-last-action) config and its points (oldest first). `POST .../rewind/config` `{enabled?, max_points?, memory?}` and `POST .../rewind/undo` `{steps?}` change and use it; admin only. |
 | `POST /v1/agents/sessions/{id}/fork` | `{count, identity?}` (1-32) into child sessions that start from the current state. `identity` is `best-effort` (default), `unique` or `preserve`. **`409` with the reason when the session cannot fork; nothing is created.** |
 | `GET /v1/agents/sessions/{id}/events` | `?since=` RFC 3339. `{ledger, vm_events}`. |
 | `GET /v1/agents/sessions/{id}/artifacts` | Workspace changes since the baseline, checkpoints, children, counters. |
@@ -664,6 +665,32 @@ command. It is built client-side from what the ledger records, after the fact: *
 reasoning or tool-call content** (FluxVM does not see it). Run: a session with a good exec, a failing exec and a
 refused command, posted to a stub receiver that checked the path, content type and header and the 7 spans. **Not
 run:** a real OpenTelemetry Collector or backend, OTLP/gRPC or protobuf.
+
+## Rewind: undo the last action
+
+Rewind takes a checkpoint automatically before every `exec`, keeps the last few in a ring, and puts the machine back to one of
+them on request. It is **off by default**; turn it on per session:
+
+```bash
+curl -X POST $B/v1/agents/sessions/$ID/rewind/config -d '{"enabled": true, "max_points": 10}'
+curl -X POST $B/v1/agents/sessions/$ID/exec -d '{"command": "rm -rf /srv/app"}'
+curl -X POST $B/v1/agents/sessions/$ID/rewind/undo -d '{"steps": 1}'   # /srv/app is back, processes still running
+curl $B/v1/agents/sessions/$ID/rewind                                   # the remaining points
+```
+
+- **A point** is a checkpoint with memory when the session's devices can be saved with memory (`capabilities.memory_checkpoint`)
+  and `memory` is not `false`, otherwise disk-only. Each one records the command that was about to run.
+- **`undo {steps}`** goes back that many actions (`1` reverses the last exec). It restores like `POST .../restore` does (same
+  refusals while commands run, same re-binding of grants and HTTP rules), then **drops that point and every newer one**: they
+  describe a timeline that no longer exists. There is no redo yet.
+- **The ring** keeps `max_points` (default 10, at most 50); the oldest point and its snapshot are deleted when it is full, and
+  lowering `max_points` trims it at once.
+- **Best effort.** If a point cannot be taken (another checkpoint, restore or fork holds the session, or the snapshot fails), the
+  command still runs and the ledger gets `rewind.skipped` or `rewind.capture_failed`. A point costs a snapshot per exec (seconds
+  with memory, see Measured), so turn it on for sessions where undo matters.
+- Points are kept outside the session record: taking one does not change `revision`. Ledger kinds: `rewind.config`,
+  `rewind.point`, `rewind.undo`.
+- Only `exec` takes points so far; jobs, file writes and git calls do not.
 
 ## Clients
 
