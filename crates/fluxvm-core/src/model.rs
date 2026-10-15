@@ -944,6 +944,22 @@ pub struct AppleFirstBoot {
     pub ssh_public_keys: Vec<String>,
     #[serde(default = "default_true")]
     pub enable_remote_login: bool,
+    /// Optional local admin account to create on first boot (sysadminctl).
+    /// Useful when the native macOS 27 VZMacGuestProvisioningOptions path is unavailable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub username: Option<String>,
+    /// Display name for the created account.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub full_name: Option<String>,
+    /// Password for the created account. Prefer `password_file` in production so the secret does not live in the VM spec.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub password: Option<String>,
+    /// Path to a file containing the account password (one line). Takes precedence over `password` when both are set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub password_file: Option<PathBuf>,
+    /// Enable auto-login for the created account (writes `/etc/kcpassword` via the helper).
+    #[serde(default)]
+    pub auto_login: bool,
 }
 
 /// Mode of a macOS 26+ vmnet network.
