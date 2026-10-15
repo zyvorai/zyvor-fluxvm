@@ -72,8 +72,8 @@ B="$(api -X POST "$SU/rewind/bisect" -d '{"test":"! test -e /tmp/broken"}')"
 TAG="$(api "$SU/rewind" | jget '[p["tag"] for p in d["points"] if "touch /tmp/broken" in (p.get("command") or "")][0]')"
 [[ "$(api -X POST "$SU/rewind/pin" -d "{\"tag\":\"$TAG\"}" -o /dev/null -w '%{http_code}')" == 200 ]] \
   && ok "point $TAG pinned" || bad "pin failed"
-api -X POST "$SU/rewind/undo" -d '{"steps":1}' >/dev/null
-[[ "$(run 'cat /tmp/state')" == v2 ]] && ok "undo reversed the last action (state v2)" || bad "undo: state is $(run 'cat /tmp/state')"
+UNDO="$(api -X POST "$SU/rewind/undo" -d '{"steps":1}')"
+[[ "$(run 'cat /tmp/state')" == v2 ]] && ok "undo reversed the last action (state v2)" || bad "undo: state is $(run 'cat /tmp/state'): $UNDO"
 
 # 4. Undo to the pinned point: the breaking command is reversed too.
 api -X POST "$SU/rewind/undo" -d "{\"to\":\"$TAG\"}" >/dev/null
