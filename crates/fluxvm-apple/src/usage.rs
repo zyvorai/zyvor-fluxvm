@@ -52,7 +52,7 @@ pub fn process_started_at(pid: u32) -> Option<i64> {
                 size,
             )
         };
-        (n == size).then(|| info.pbi_start_tvsec as i64)
+        (n == size).then_some(info.pbi_start_tvsec as i64)
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -92,10 +92,10 @@ pub fn runner_usage(pid: u32) -> Result<RunnerUsage> {
                 std::io::Error::last_os_error()
             );
         }
-        let mut tb = libc::mach_timebase_info { numer: 0, denom: 0 };
+        let mut tb = mach2::mach_time::mach_timebase_info { numer: 0, denom: 0 };
         // SAFETY: `tb` is a valid out-parameter.
-        if unsafe { libc::mach_timebase_info(&mut tb) } != 0 {
-            tb = libc::mach_timebase_info { numer: 1, denom: 1 };
+        if unsafe { mach2::mach_time::mach_timebase_info(&mut tb) } != 0 {
+            tb = mach2::mach_time::mach_timebase_info { numer: 1, denom: 1 };
         }
         Ok(RunnerUsage {
             rss_bytes: info.ri_resident_size,
