@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- **Volumes on `vz` VM sandboxes.** `volumes` were refused unless the template was QEMU-backed, although `vz` already
+  mounts `shared_folders` as virtiofs. A Mac sandbox now takes named volumes (persistent host directories, cloud-init
+  fstab mounts, cold boot). Verified on an M4 by `scripts/vz-sandbox-volume-live-test.sh` (write from the guest,
+  survives delete, re-read by a second sandbox); `read_only` and several volumes are unit-tested only.
+
 - **`vz` placement keeps macOS headroom.** A Mac's heartbeat advertised all of its unified memory minus allocated VMs,
   so `fluxvm-agent central` could fill a 16 GB Mac to the last MiB and leave macOS to swap. It now advertises memory
   after the larger of 3 GiB and a quarter, the rule Kairon's Mac node already uses (`apple_placement::allocatable_mib`).
