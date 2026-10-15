@@ -31,7 +31,7 @@ tenant's id answers `404`, not `403`).
 | `POST /v1/agents/sessions/{id}/promote` | `{dry_run?, plan_id?, skip_conflicts?, paths?}` on a fork child: apply its workspace changes to its parent. See [Promoting a fork](#promoting-a-fork). Admin only. |
 | `POST /v1/agents/sessions/{id}/checkpoint` | `{tag?, memory?}`; `memory:false` is disk-only. |
 | `POST /v1/agents/sessions/{id}/restore` | `{tag}`; only tags this session took. |
-| `GET /v1/agents/sessions/{id}/rewind` | The [rewind](#rewind-undo-the-last-action) config and its points (oldest first). `POST .../rewind/config` `{enabled?, max_points?, memory?, triggers?}`, `POST .../rewind/undo` `{steps?}` or `{to: tag}` and `POST .../rewind/pin` `{tag, pinned?}` and `POST .../rewind/bisect` `{test, good?, bad?, timeout_seconds?}` change and use it; admin only. |
+| `GET /v1/agents/sessions/{id}/rewind` | The [rewind](#rewind-undo-the-last-action) config and its points (oldest first). `POST .../rewind/config` `{enabled?, max_points?, memory?, triggers?}`, `POST .../rewind/undo` `{steps?}` or `{to: tag}` and `POST .../rewind/pin` `{tag, pinned?}`, `POST .../rewind/branch` `{tag, count?, identity?}` and `POST .../rewind/bisect` `{test, good?, bad?, timeout_seconds?}` change and use it; admin only. |
 | `POST /v1/agents/sessions/{id}/fork` | `{count, identity?}` (1-32) into child sessions that start from the current state. `identity` is `best-effort` (default), `unique` or `preserve`. **`409` with the reason when the session cannot fork; nothing is created.** |
 | `GET /v1/agents/sessions/{id}/events` | `?since=` RFC 3339. `{ledger, vm_events}`. |
 | `GET /v1/agents/sessions/{id}/artifacts` | Workspace changes since the baseline, checkpoints, children, counters. |
@@ -710,7 +710,13 @@ curl $B/v1/agents/sessions/$ID/rewind                                   # the re
   exec,file,git`. Every trigger costs a snapshot, so turn on only what an undo needs to cover; the point's `command` reads
   `write /path`, `delete /path`, `upload /path`, `commit <message>` or `branch <name>` for the non-exec ones. Chunked upload
   parts and reads never take one. An `undo` reverses them like any other point: it puts the whole machine back.
-- Branching from a past point is not available: fork starts from the machine as it is now.
+- **Branch** (`POST .../rewind/branch {tag, count?, identity?}`): starts child sessions from a *past* point and leaves this
+  session exactly as it is, so "what if I had not run that command?" runs in a child while the parent carries on. It needs a
+  forkable session (same rules as `fork`, `409` with the reason otherwise), counts the children against the budget, and
+  returns them like `fork` does (`parent` is this session, ledger kind `session.branch_child`). The point's snapshot is
+  exported to a short-lived [branch](macos.md) that the children start from and is then removed; the point stays in the ring.
+  A branch child has **no workspace baseline** (the parent's files now are not its starting point), so `artifacts` and
+  `promote` on it do not apply. `fluxctl agent rewind <id> branch TAG [--count N]`.
 
 ## Clients
 
