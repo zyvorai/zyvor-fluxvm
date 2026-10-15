@@ -2755,7 +2755,7 @@ async fn exec_session(
     m.ensure_running_for_request(s.sandbox_id).await?;
     budget_check_workspace(&m, &s).await?;
     let left = budget_start_exec(&m, &s).await?;
-    rewind_capture(&m, &s, &body.command).await;
+    rewind_capture(&m, &s, "exec", &body.command).await;
     // A command never gets more time than the budget has left.
     let timeout = match (body.timeout_seconds, left) {
         (Some(t), Some(l)) => Some(t.min(l)),
@@ -2893,8 +2893,36 @@ struct RewindState {
     max_points: u32,
     /// Ask for memory in each point (needs `capabilities.memory_checkpoint`; else disk-only).
     memory: bool,
+    /// What takes a point: any of `exec`, `job`, `file`, `git`. Only `exec` by default.
+    #[serde(default = "rewind_default_triggers")]
+    triggers: Vec<String>,
     /// Oldest first.
     points: Vec<RewindPoint>,
+}
+
+const REWIND_TRIGGERS: [&str; 4] = ["exec", "job", "file", "git"];
+
+fn rewind_default_triggers() -> Vec<String> {
+    vec!["exec".into()]
+}
+
+/// The triggers in canonical order without repeats, or why the list is not acceptable.
+fn rewind_triggers(raw: &[String]) -> Result<Vec<String>, String> {
+    if let Some(bad) = raw.iter().find(|t| !REWIND_TRIGGERS.contains(&t.as_str())) {
+        return Err(format!(
+            "unknown trigger {bad:?}; use any of {}",
+            REWIND_TRIGGERS.join(", ")
+        ));
+    }
+    let out: Vec<String> = REWIND_TRIGGERS
+        .iter()
+        .filter(|t| raw.iter().any(|r| r == **t))
+        .map(|t| t.to_string())
+        .collect();
+    if out.is_empty() {
+        return Err("triggers must name at least one of exec, job, file, git".into());
+    }
+    Ok(out)
 }
 
 impl Default for RewindState {
@@ -2903,6 +2931,7 @@ impl Default for RewindState {
             enabled: false,
             max_points: REWIND_DEFAULT_POINTS,
             memory: true,
+            triggers: rewind_default_triggers(),
             points: Vec::new(),
         }
     }
@@ -3057,9 +3086,9 @@ async fn rewind_take_shot(m: &VmManager, s: &Session, tag: &str) -> bool {
 /// Takes a point before `command` runs, when rewind is on. Best effort: a point that cannot be
 /// taken (another lifecycle operation holds the slot, the snapshot fails) is written to the
 /// ledger and the command still runs, so rewind never makes exec less available.
-async fn rewind_capture(m: &Arc<VmManager>, s: &Session, command: &str) {
+async fn rewind_capture(m: &Arc<VmManager>, s: &Session, kind: &str, what: &str) {
     let st = rewind_read(m, s.id).await;
-    if !st.enabled || !s.capabilities.snapshot {
+    if !st.enabled || !s.capabilities.snapshot || !st.triggers.iter().any(|t| t == kind) {
         return;
     }
     let guard = match begin_lifecycle(s.id, "checkpoint") {
@@ -3090,8 +3119,8 @@ async fn rewind_capture(m: &Arc<VmManager>, s: &Session, command: &str) {
         tag: tag.clone(),
         memory,
         created_at: Utc::now(),
-        trigger: "exec".into(),
-        command: Some(command.chars().take(512).collect()),
+        trigger: kind.into(),
+        command: Some(what.chars().take(512).collect()),
         pinned: false,
         screenshot,
     };
@@ -3178,6 +3207,9 @@ struct RewindConfigBody {
     max_points: Option<u32>,
     #[serde(default)]
     memory: Option<bool>,
+    /// Any of `exec`, `job`, `file`, `git`.
+    #[serde(default)]
+    triggers: Option<Vec<String>>,
 }
 
 async fn rewind_config(
@@ -3198,6 +3230,13 @@ async fn rewind_config(
             message: format!("max_points must be 1-{REWIND_MAX_POINTS}"),
         });
     }
+    let triggers = match &body.triggers {
+        Some(t) => Some(rewind_triggers(t).map_err(|message| ApiError {
+            status: StatusCode::BAD_REQUEST,
+            message,
+        })?),
+        None => None,
+    };
     if body.enabled == Some(true) && !s.capabilities.snapshot {
         return Err(ApiError {
             status: StatusCode::CONFLICT,
@@ -3216,6 +3255,9 @@ async fn rewind_config(
         if let Some(mem) = body.memory {
             st.memory = mem;
         }
+        if let Some(t) = triggers {
+            st.triggers = t;
+        }
         // A smaller ring drops the oldest unpinned points now.
         let evicted = rewind_evict(&mut st);
         rewind_write(&m, id, &st).await?;
@@ -3226,7 +3268,8 @@ async fn rewind_config(
         &m,
         id,
         "rewind.config",
-        json!({"enabled": st.enabled, "max_points": st.max_points, "memory": st.memory}),
+        json!({"enabled": st.enabled, "max_points": st.max_points, "memory": st.memory,
+               "triggers": st.triggers}),
     );
     Ok(Json(json!(st)))
 }
@@ -5655,6 +5698,7 @@ async fn job_start(
     };
     m.ensure_running_for_request(s.sandbox_id).await?;
     budget_check_workspace(&m, &s).await?;
+    rewind_capture(&m, &s, "job", &body.command).await;
     let job = Uuid::new_v4();
     if m.guest_jobs_supported(s.sandbox_id).await {
         let started = sup_call(
@@ -6566,6 +6610,7 @@ async fn files_write(
             message: "path must name a file".into(),
         });
     }
+    rewind_capture(&m, &s, "file", &format!("write {}", body.path)).await;
     if body.parents {
         ensure_parent_dir(&m, &s, &body.path).await?;
     }
@@ -7005,6 +7050,7 @@ async fn upload_complete(
             ),
         });
     }
+    rewind_capture(&m, &s, "file", &format!("upload {}", u.path)).await;
     m.ensure_running_for_request(s.sandbox_id).await?;
     let res = m
         .exec_with_policy(
@@ -7113,6 +7159,7 @@ async fn files_delete(
             message: "refusing to remove a top-level path".into(),
         });
     }
+    rewind_capture(&m, &s, "file", &format!("delete {}", q.path)).await;
     let flag = if q.recursive { "-rf" } else { "-f" };
     let out = guest_exec(&m, &s, format!("rm {flag} -- {}", shell_quote(&q.path))).await?;
     if out["exit_code"].as_i64() != Some(0) {
@@ -7388,6 +7435,7 @@ async fn git_commit(
             message: "message is required (at most 4000 characters)".into(),
         });
     }
+    rewind_capture(&m, &s, "git", &format!("commit {}", message)).await;
     if body.all {
         let (code, _, err) = run_git(&m, &s, &repo, "add -A").await?;
         if code != 0 {
@@ -7449,6 +7497,7 @@ async fn git_branch(
         });
     }
     let repo = repo_dir(&s, &body.repo)?;
+    rewind_capture(&m, &s, "git", &format!("branch {}", body.name)).await;
     let (code, _, err) = run_git(
         &m,
         &s,
@@ -7599,6 +7648,25 @@ mod tests {
         }
         assert_eq!(bisect_next(3, 4), None);
         assert_eq!(bisect_next(0, 2), Some(1));
+    }
+
+    #[test]
+    fn rewind_triggers_are_validated_and_ordered() {
+        let v = |a: &[&str]| rewind_triggers(&a.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+        assert_eq!(v(&["git", "exec", "git"]).unwrap(), ["exec", "git"]);
+        assert_eq!(
+            v(&["file", "job", "git", "exec"]).unwrap(),
+            ["exec", "job", "file", "git"]
+        );
+        assert!(v(&[]).is_err());
+        assert!(v(&["exec", "mail"]).unwrap_err().contains("mail"));
+        assert_eq!(RewindState::default().triggers, ["exec"]);
+        // A state file written before triggers existed reads back as exec-only.
+        let old: RewindState = serde_json::from_value(
+            json!({"enabled": true, "max_points": 5, "memory": true, "points": []}),
+        )
+        .unwrap();
+        assert_eq!(old.triggers, ["exec"]);
     }
 
     #[test]
