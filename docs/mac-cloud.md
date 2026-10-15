@@ -81,7 +81,7 @@ curl http://fleet-registry:7799/fleet/vms          # every VM on every Mac, tagg
 
 For `backend: vz` the registry uses the Apple scorer (`fluxvm_scheduler::apple_placement`): a Mac is skipped if it lacks the free
 CPU or memory, a requested feature (nested virtualization, vmnet, custom Virtio, a named bridge), or already runs two macOS guests;
-among the Macs that fit, the tightest fit wins, so small VMs pack onto busy Macs and big Macs stay free for big VMs. Stacks use the
+among the Macs that fit, the tightest fit wins, so small VMs pack onto busy Macs and big Macs stay free for big VMs. A Mac that already holds the requested image is preferred, and each Mac advertises memory after macOS's own headroom (the larger of 3 GiB and a quarter). Details, the rebalance dry run and fleet-wide macOS pool checkout: [macos-cluster.md](macos-cluster.md#placing-a-vm-on-the-right-mac). Stacks use the
 same registry: `fluxctl up --fleet http://fleet-registry:7799` ([macos-stacks.md](macos-stacks.md)).
 
 ## What to run on it

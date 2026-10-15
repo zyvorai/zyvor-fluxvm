@@ -82,6 +82,27 @@ For many sandboxes on one Mac (sizes such as `"profile": "tiny"`, admission on m
   calls the command made really happened (the changeset's `side_effects` says whether the sandbox could reach out).
 - **Volumes** (`volumes: [{name, guest_path, read_only?}]`) are named host directories passed as virtiofs shares and mounted through `/etc/fstab` by cloud-init, so the image needs cloud-init. A sandbox with volumes always cold-boots. Container sandboxes also take `volumes`; see [oci-sandboxes.md](oci-sandboxes.md). Not yet on `vz` for VM sandboxes: GPUs. Verified on an M4 with `scripts/vz-sandbox-volume-live-test.sh`: the guest sees the mount, its write lands in the host volume directory, the file survives deleting the sandbox, and a second sandbox with the same volume reads it. `read_only` volumes and the two-volume case are not live-tested.
 
+## Volumes: files that outlive a sandbox
+
+A sandbox is deleted when its TTL runs out, so anything it wrote is gone. A **named volume** is a directory on the Mac that a
+sandbox mounts and that survives it:
+
+```bash
+curl -s -X POST localhost:7788/v1/sandboxes -H 'Content-Type: application/json' \
+  -d '{"ttl_seconds": 600, "volumes": [{"name": "cache", "guest_path": "/mnt/cache"}]}'
+```
+
+- **Where it lives.** `<volumes_dir>/<tenant>/<name>` on the Mac (`[sandbox] volumes_dir`, default `<state_dir>/volumes`). A
+  caller without a tenant uses `_shared`. The directory is created on first use and kept after the sandbox is deleted; the next
+  sandbox that names it sees the same files.
+- **How it reaches the guest.** As a virtiofs share, mounted at `guest_path` through `/etc/fstab` by cloud-init, so the image
+  needs cloud-init (the default `debian-13` has it). A sandbox with volumes always cold-boots: it never takes a warm slot.
+- **Rules.** Up to 4 volumes. `name` is 1 to 63 characters from `[a-z0-9._-]`. `guest_path` is absolute, at most 128
+  characters from `[A-Za-z0-9/_.-]`, and starts under `/home`, `/mnt`, `/data`, `/srv`, `/opt`, `/workspace` or `/root`.
+  `read_only: true` is enforced by the host.
+- **One owner at a time.** A volume already attached to another VM, or to a container sandbox, is refused.
+- **Not on `vz`:** GPUs. Container sandboxes take volumes too, with a looser `guest_path` rule ([oci-sandboxes.md](oci-sandboxes.md#volumes)).
+
 ## Verified
 
 On an Apple M4 (macOS 27.2): create with no body, exec with exit code and output, file write and read with awkward paths and a mode,
@@ -89,6 +110,9 @@ a missing file reported cleanly, an offline sandbox with only `lo` (DNS and rout
 With the pool: 2 warm slots built in about 15 s after the first create; two concurrent creates took 1.7 s and 3.6 s (7.6 s cold), got
 different addresses and did not see each other's files; a create after the pool was consumed and refilled took 1.9 s.
 `scripts/macos-live-test.sh` covers the REST path.
+Volumes: `scripts/vz-sandbox-volume-live-test.sh` created a sandbox with a named volume, checked the guest saw the mount and that
+its write landed in the host volume directory, deleted the sandbox, and read the file back from a second sandbox on the same
+volume (2026-10-15, M4, macOS 27.2).
 
 ## Fork an offline sandbox: try four fixes in parallel
 
