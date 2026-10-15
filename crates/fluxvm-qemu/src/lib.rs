@@ -133,10 +133,14 @@ pub fn build_args(
     // needed for any pflash/OVMF boot, not only when Secure Boot
     // enforcement itself is on, matching the standard modern QEMU+OVMF+q35
     // invocation (the same shape libvirt itself generates).
+    let machine_type = ctx.machine_type.as_deref().unwrap_or("q35");
+    if !is_machine_type_name(machine_type) {
+        anyhow::bail!("invalid QEMU machine type {machine_type:?}");
+    }
     let machine = if effective_firmware.is_some() {
-        "q35,accel=kvm,smm=on".to_string()
+        format!("{machine_type},accel=kvm,smm=on")
     } else {
-        "q35,accel=kvm".to_string()
+        format!("{machine_type},accel=kvm")
     };
     let mut a = vec![
         "-enable-kvm".into(),
@@ -733,6 +737,61 @@ pub fn parse_qemu_version(banner: &str) -> Option<(u32, u32)> {
     Some((major, minor))
 }
 
+/// A bare machine type name (`q35`, `pc-q35-noble`), nothing QEMU would read
+/// as a further `-machine` option.
+pub fn is_machine_type_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '.' | '_'))
+}
+
+/// The concrete machine type a running QEMU booted (`pc-q35-10.2` for a VM
+/// started with the `q35` alias on QEMU 10.2).
+pub async fn running_machine_type(vm: &VmRecord) -> Result<String> {
+    let socket = vm.workspace.join("qmp.sock");
+    if !socket.exists() {
+        anyhow::bail!("{} does not exist", socket.display());
+    }
+    let v = qmp::execute(
+        &socket,
+        "qom-get",
+        Some(serde_json::json!({"path": "/machine", "property": "type"})),
+        Duration::from_secs(2),
+    )
+    .await?;
+    let qom = v
+        .as_str()
+        .context("qom-get /machine type returned no string")?;
+    Ok(qom.strip_suffix("-machine").unwrap_or(qom).to_string())
+}
+
+/// Machine types `cfg.qemu_binary` can boot, from `-machine help`.
+pub async fn machine_types(cfg: &Config) -> Result<Vec<String>> {
+    let out = tokio::process::Command::new(&cfg.qemu_binary)
+        .args(["-machine", "help"])
+        .output()
+        .await
+        .with_context(|| format!("running {} -machine help", cfg.qemu_binary))?;
+    if !out.status.success() {
+        anyhow::bail!(
+            "{} -machine help exited with {}",
+            cfg.qemu_binary,
+            out.status
+        );
+    }
+    Ok(parse_machine_types(&String::from_utf8_lossy(&out.stdout)))
+}
+
+fn parse_machine_types(help: &str) -> Vec<String> {
+    help.lines()
+        .skip_while(|l| !l.starts_with("Supported machines"))
+        .skip(1)
+        .filter_map(|l| l.split_whitespace().next())
+        .map(String::from)
+        .collect()
+}
+
 /// Hot-add `add_vcpus` vCPUs. Returns the realized vCPU count after adding
 /// (bounded by `max_vcpus`'s headroom reserved at launch — see `build_args`).
 pub async fn hotplug_cpu(_cfg: &Config, vm: &VmRecord, add_vcpus: u8) -> Result<u8> {
@@ -1063,7 +1122,33 @@ mod tests {
             vsock_socket: None,
             disk_format: "qcow2".into(),
             nbd_export: None,
+            machine_type: None,
         }
+    }
+
+    #[test]
+    fn machine_type_pins_the_device_model() {
+        let args = build_args(&cfg(), &req(2048), &ctx(), &[]).unwrap();
+        assert!(args.iter().any(|a| a == "q35,accel=kvm"));
+        let mut pinned = ctx();
+        pinned.machine_type = Some("pc-q35-noble".into());
+        let args = build_args(&cfg(), &req(2048), &pinned, &[]).unwrap();
+        assert!(args.iter().any(|a| a == "pc-q35-noble,accel=kvm"));
+        pinned.machine_type = Some("pc-q35-noble,smm=off".into());
+        assert!(build_args(&cfg(), &req(2048), &pinned, &[]).is_err());
+    }
+
+    #[test]
+    fn machine_types_parse_from_help() {
+        let help = "Supported machines are:\n\
+            microvm              microvm (i386)\n\
+            q35                  Standard PC (Q35 + ICH9, 2009) (alias of pc-q35-10.2)\n\
+            pc-q35-noble         Ubuntu 24.04 PC (Q35 + ICH9, 2009)\n\
+            none                 empty machine\n";
+        assert_eq!(
+            parse_machine_types(help),
+            ["microvm", "q35", "pc-q35-noble", "none"]
+        );
     }
 
     #[test]

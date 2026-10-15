@@ -202,6 +202,26 @@ pub async fn activate(
     Ok(())
 }
 
+/// Whether the receiver's QEMU is in the middle of an incoming migration.
+/// Any QMP failure reads as not in progress.
+pub async fn incoming_in_progress(qmp_socket: &Path) -> bool {
+    if !qmp_socket.exists() {
+        return false;
+    }
+    let Ok(v) = qmp::execute(qmp_socket, "query-migrate", None, Duration::from_secs(2)).await
+    else {
+        return false;
+    };
+    incoming_status_in_progress(v.get("status").and_then(|s| s.as_str()))
+}
+
+fn incoming_status_in_progress(status: Option<&str>) -> bool {
+    !matches!(
+        status,
+        None | Some("none" | "completed" | "failed" | "cancelled")
+    )
+}
+
 /// QMP `query-status` run state (`inmigrate`, `running`, `paused`, ...).
 pub async fn run_state(qmp_socket: &Path) -> Result<String> {
     let v = qmp::execute(qmp_socket, "query-status", None, ACTIVATE_TIMEOUT).await?;
@@ -214,6 +234,16 @@ pub async fn run_state(qmp_socket: &Path) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn incoming_progress_states() {
+        for s in ["setup", "active", "device", "postcopy-active"] {
+            assert!(incoming_status_in_progress(Some(s)), "{s}");
+        }
+        for s in [None, Some("none"), Some("completed"), Some("failed")] {
+            assert!(!incoming_status_in_progress(s), "{s:?}");
+        }
+    }
 
     #[test]
     fn argv_defers_incoming_and_does_not_copy_the_disk() {

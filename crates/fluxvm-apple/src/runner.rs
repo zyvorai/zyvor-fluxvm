@@ -960,6 +960,7 @@ mod one_shot_tests {
             vsock_socket: None,
             disk_format: "raw".into(),
             nbd_export: None,
+            machine_type: None,
         };
         let conf = RunnerConfig::for_launch(&req, &ctx).unwrap();
         let share = conf.shares.iter().find(|s| s.tag == "fluxvm-meta").unwrap();
@@ -996,6 +997,7 @@ mod one_shot_tests {
                 vsock_socket: None,
                 disk_format: "raw".into(),
                 nbd_export: None,
+                machine_type: None,
             };
             RunnerConfig::for_launch(&req, &ctx).unwrap().usernet_mtu
         };

@@ -299,6 +299,10 @@ const GRACEFUL_SHUTDOWN_WAIT: std::time::Duration = std::time::Duration::from_se
 /// legitimately-slow create getting cut off, so this errs long.
 const STUCK_CREATING_GRACE: Duration = Duration::seconds(300);
 
+/// How long past its TTL a migration receiver last seen receiving is kept,
+/// renewed on every reap that still finds it receiving.
+const RECEIVER_ACTIVE_GRACE_SECS: u64 = 300;
+
 /// A control operation needs a live runner but the VM is not running (or paused). The API maps it to 409
 /// instead of letting the caller hit a raw "No such file" on the runner's control socket.
 #[derive(Debug)]
@@ -3025,6 +3029,7 @@ impl VmManager {
                 vsock_socket,
                 disk_format: fluxvm_image::storage::disk_format(req.backend, req.storage),
                 nbd_export: provisioned.nbd_export,
+                machine_type: None,
             };
             let launch = backend(req.backend)?.launch(&self.cfg, &req, &ctx).await?;
             record.pid = Some(launch.pid);
@@ -3473,13 +3478,21 @@ impl VmManager {
                 return Err(e);
             }
         }
-        // A netns VM's QEMU cannot reach host-namespace addresses; hand it a
-        // workspace socket that FluxVM relays to the TCP destination.
+        // A netns VM's QEMU cannot reach host-namespace addresses, and the
+        // QEMU egress hook (fluxvm_qemu_egress) drops non-loopback dials from
+        // any QEMU: hand it a workspace socket that FluxVM relays to the TCP
+        // destination.
         let mut request = request.clone();
         if vm.backend == BackendKind::Qemu
-            && vm.netns.is_some()
             && let Some(dest) = migration_relay::tcp_target(&request.destination)
         {
+            // Over a UNIX socket QEMU has no host to verify the peer
+            // certificate against.
+            if let Some(tls) = request.tls.as_mut()
+                && tls.tls_hostname.is_none()
+            {
+                tls.tls_hostname = Some(migration_relay::tcp_host(dest).to_string());
+            }
             let sock = vm.workspace.join(live_migration::OUTGOING_SOCKET);
             let ws = vm.workspace.clone();
             migration_relay::spawn_unix_to_tcp(
@@ -3825,9 +3838,21 @@ impl VmManager {
             else {
                 continue;
             };
-            if rec.expires_at_unix < now {
-                let _ = self.delete_migration_receiver(rec.id).await;
+            if rec.expires_at_unix >= now {
+                continue;
             }
+            // The TTL bounds an unclaimed receiver, not a transfer in flight:
+            // one still receiving gets a fresh window, which also covers the
+            // adopt that follows completion.
+            if fluxvm_qemu::receiver::incoming_in_progress(&rec.qmp_socket).await {
+                let mut rec = rec;
+                rec.expires_at_unix = now + RECEIVER_ACTIVE_GRACE_SECS;
+                if let Err(e) = self.write_receiver(&rec) {
+                    tracing::warn!(receiver = %rec.id, error = %e, "extending migration receiver TTL");
+                }
+                continue;
+            }
+            let _ = self.delete_migration_receiver(rec.id).await;
         }
     }
 
@@ -4080,6 +4105,10 @@ impl VmManager {
                 vsock_socket,
                 disk_format: fluxvm_image::storage::disk_format(vm.backend, vm.request.storage),
                 nbd_export,
+                // Saved state loads only into the machine it was taken on.
+                machine_type: resume_state
+                    .as_ref()
+                    .and_then(|_| vm.labels.get(live_migration::MACHINE_TYPE_LABEL).cloned()),
             };
             // Cloned, not mutated in place: `vm.request` is the VM's
             // original creation-time request and gets persisted below via
@@ -4115,6 +4144,9 @@ impl VmManager {
             vm.status = VmStatus::Running;
             vm.error = None;
             live_migration::clear_hotplug_labels(&mut vm.labels);
+            if resume_state.is_none() {
+                vm.labels.remove(live_migration::MACHINE_TYPE_LABEL);
+            }
             if let Some(ref ns) = vm.netns {
                 if let Err(e) = fluxvm_network::netns::repair_named_netns(ns, launch.pid).await {
                     tracing::warn!(
@@ -5790,6 +5822,29 @@ impl VmManager {
                         continue;
                     }
 
+                    if vm.backend == BackendKind::Qemu
+                        && !vm.labels.contains_key(live_migration::MACHINE_TYPE_LABEL)
+                    {
+                        match fluxvm_qemu::running_machine_type(&vm).await {
+                            Ok(t) => {
+                                if let Some(mut fresh) = self.store.get(vm.id).await
+                                    && fresh.pid == Some(pid)
+                                    && !fresh
+                                        .labels
+                                        .contains_key(live_migration::MACHINE_TYPE_LABEL)
+                                {
+                                    fresh
+                                        .labels
+                                        .insert(live_migration::MACHINE_TYPE_LABEL.into(), t);
+                                    self.store.update(fresh).await?;
+                                }
+                            }
+                            Err(e) => {
+                                tracing::debug!(vm = %vm.id, error = %e, "reading the QEMU machine type")
+                            }
+                        }
+                    }
+
                     // Daemon restart / package upgrades can leave a live VMM
                     // while TC pins/filters are missing or on an older schema.
                     if self.cfg.sandbox.dataplane.mode != fluxvm_core::config::DataplaneMode::Legacy
@@ -5832,7 +5887,15 @@ impl VmManager {
                         }
                     }
                 }
-            } else if vm.status == VmStatus::Creating && now - vm.created_at > STUCK_CREATING_GRACE
+            } else if vm.status == VmStatus::Creating
+                && now - vm.created_at > STUCK_CREATING_GRACE
+                // An adopt-mode receiver's placeholder carries the source's
+                // `created_at` and stays Creating until adopted; its receiver
+                // file's TTL (`reap_migration_receivers`) owns its cleanup.
+                && !self
+                    .receiver_dir()
+                    .join(format!("{}.json", vm.id))
+                    .exists()
             {
                 // `create()` sets this placeholder's status to Running or
                 // Failed as its very last step — a record still Creating

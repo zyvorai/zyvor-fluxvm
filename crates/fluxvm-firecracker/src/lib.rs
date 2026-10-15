@@ -583,6 +583,7 @@ mod tests {
             vsock_socket: None,
             disk_format: "raw".into(),
             nbd_export: None,
+            machine_type: None,
         }
     }
 

@@ -38,6 +38,10 @@ use uuid::Uuid;
 pub const MIGRATING_FROM_LABEL: &str = "fluxvm.dev/migrating-from";
 /// Label on an adopted VM: the source VM id it was migrated from.
 pub const MIGRATED_FROM_LABEL: &str = "fluxvm.dev/migrated-from";
+/// Concrete QEMU machine type a running VM booted (`pc-q35-noble`). A
+/// receiver on another QEMU release boots the same one. Cleared on start;
+/// reconcile records it again from the live QEMU.
+pub const MACHINE_TYPE_LABEL: &str = "fluxvm.dev/machine-type";
 /// Set on a VM after a CPU/memory hot-add or removing its last extra NIC,
 /// cleared on the next start.
 pub const HOTPLUGGED_LABEL: &str = "fluxvm.dev/hotplugged";
@@ -133,6 +137,15 @@ impl VmManager {
             &self.cfg.policy,
             &fluxvm_core::policy::ledger_for_host_admission(&ledger),
         )?;
+        let machine_type = source.labels.get(MACHINE_TYPE_LABEL).cloned();
+        if let Some(t) = &machine_type {
+            let supported = fluxvm_qemu::machine_types(&self.cfg).await?;
+            if !supported.contains(t) {
+                bail!(
+                    "this host's QEMU cannot boot the source's machine type {t:?}; QEMU only migrates to the same or a newer release"
+                );
+            }
+        }
 
         let id = Uuid::new_v4();
         let workspace = self.cfg.state_dir.join("instances").join(id.to_string());
@@ -280,6 +293,7 @@ impl VmManager {
                 vsock_socket: None,
                 disk_format: fluxvm_image::storage::disk_format(BackendKind::Qemu, sreq.storage),
                 nbd_export: None,
+                machine_type: machine_type.clone(),
             };
             let mut launch_req = sreq.clone();
             launch_req.loadvm_tag = None;
