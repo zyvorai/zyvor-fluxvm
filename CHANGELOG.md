@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- **Fleet-level macOS pool checkout.** The per-Mac macOS pool (`/v1/macos-pool`, two slot-bound guests) could only be
+  used by calling one Mac. Each Mac's heartbeat now carries its idle slot count (`apple.macos_pool_idle`, absent when
+  the daemon would not say), and `fluxvm-agent central` has `POST /fleet/macos-pool/checkout` (operator): it checks a
+  slot out on the healthy, uncordoned Mac with the most idle ones, tries the next when a report was stale (409), and
+  names the node in the reply; `POST /fleet/macos-pool/{node}/{id}/return` gives it back. Operator-only for now (no
+  tenant leasing). Unit-tested with stub nodes only; not run across real Macs.
+
 - **`vz` capability table: what the macOS 27 SDK cannot do.** Added a row for virtio-input devices, a GDB debug stub,
   a guest battery and clipboard sharing for macOS guests: the SDK headers have no public API for them, so FluxVM cannot
   offer them. The one unwired public class is the custom-Virtio shared-memory region, which needs a guest-side driver

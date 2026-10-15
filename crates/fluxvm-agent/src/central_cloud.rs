@@ -14,6 +14,7 @@
 //! | `POST /fleet/nodes/{name}/scrub` | clear a released node for reuse |
 //! | `POST/GET /fleet/nodes/{name}/drain` | cordon, then evict or reschedule |
 //! | `GET /fleet/rebalance/plan` | dry run: VMs that could leave an overloaded Mac |
+//! | `POST /fleet/macos-pool/checkout`, `…/{node}/{id}/return` | a macOS pool slot on the Mac with most idle ones |
 //! | `POST /fleet/vms/{node}/{id}/exec` (*tenant*) | guest exec through the node's agent |
 //! | `GET /fleet/usage` (*tenant*: own only) | metering, JSON or CSV |
 //! | `POST /fleet/reconcile`, `GET/PUT /fleet/policy` | ledger reconcile, licence policy |
@@ -1079,6 +1080,110 @@ fn is_ephemeral(vm: &Value) -> bool {
     ttl || label(vm.get("labels")) || label(req.and_then(|r| r.get("labels")))
 }
 
+/// Nodes that report an idle macOS pool slot and may take work, best first: the most idle slots, then the name.
+fn pool_checkout_order(nodes: &HashMap<String, NodeInfo>) -> Vec<NodeInfo> {
+    let mut v: Vec<NodeInfo> = nodes
+        .values()
+        .filter(|n| n.healthy() && n.daemon_reachable() && !n.cordoned)
+        .filter(|n| {
+            n.apple
+                .as_ref()
+                .and_then(|a| a.macos_pool_idle)
+                .is_some_and(|i| i > 0)
+        })
+        .cloned()
+        .collect();
+    let idle = |n: &NodeInfo| {
+        n.apple
+            .as_ref()
+            .and_then(|a| a.macos_pool_idle)
+            .unwrap_or(0)
+    };
+    v.sort_by(|a, b| idle(b).cmp(&idle(a)).then(a.name.cmp(&b.name)));
+    v
+}
+
+/// `POST /fleet/macos-pool/checkout` (admin): checks a macOS slot out on the Mac with the most idle ones. Apple allows two
+/// macOS guests per Mac and a slot is bound to its Mac, so the fleet can offer one slot per idle report. A Mac whose
+/// report was stale answers 409 and the next is tried. The reply names the node; return it with
+/// `POST /fleet/macos-pool/{node}/{id}/return`.
+pub(super) async fn macos_pool_checkout(
+    State(fleet): State<Fleet>,
+    Extension(caller): Extension<Caller>,
+) -> Result<Json<Value>, AppError> {
+    require_admin(&caller)?;
+    let order = pool_checkout_order(&*fleet.nodes.lock().await);
+    if order.is_empty() {
+        return Err(AppError(
+            StatusCode::CONFLICT,
+            "no Mac reports an idle macOS pool slot (enrol one with `fluxctl macos-pool enroll`, or return one)".into(),
+        ));
+    }
+    let mut last = String::new();
+    for n in &order {
+        let resp = match fleet
+            .http
+            .post(format!("{}/v1/macos-pool/checkout", n.fluxvm_url))
+            .send()
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                last = format!("node '{}' unreachable: {e}", n.name);
+                continue;
+            }
+        };
+        let status = resp.status();
+        let body: Value = resp.json().await.unwrap_or(Value::Null);
+        if status.is_success() {
+            tracing::info!(node = %n.name, "macOS pool slot checked out");
+            return Ok(Json(json!({"node": n.name, "vm": body})));
+        }
+        last = format!("node '{}' answered {status}: {body}", n.name);
+    }
+    Err(AppError(
+        StatusCode::CONFLICT,
+        format!("no macOS pool slot could be checked out; last: {last}"),
+    ))
+}
+
+/// `POST /fleet/macos-pool/{node}/{id}/return` (admin): stops the slot on its Mac; it is idle again for the next checkout.
+pub(super) async fn macos_pool_return(
+    State(fleet): State<Fleet>,
+    Extension(caller): Extension<Caller>,
+    Path((node, id)): Path<(String, String)>,
+) -> Result<Json<Value>, AppError> {
+    require_admin(&caller)?;
+    // The id goes into a URL path on the node: only a UUID's characters.
+    if id.len() != 36 || !id.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-') {
+        return Err(AppError(
+            StatusCode::BAD_REQUEST,
+            "id must be a VM UUID".into(),
+        ));
+    }
+    let target = node_by_name(&fleet, &node).await?;
+    let resp = fleet
+        .http
+        .post(format!("{}/v1/macos-pool/{id}/return", target.fluxvm_url))
+        .send()
+        .await
+        .map_err(|e| {
+            AppError(
+                StatusCode::BAD_GATEWAY,
+                format!("node '{node}' unreachable: {e}"),
+            )
+        })?;
+    let status = resp.status();
+    let body: Value = resp.json().await.unwrap_or(Value::Null);
+    if !status.is_success() {
+        return Err(AppError(
+            StatusCode::BAD_GATEWAY,
+            format!("node '{node}' rejected return ({status}): {body}"),
+        ));
+    }
+    Ok(Json(json!({"node": node, "vm": body})))
+}
+
 #[derive(Debug, Deserialize)]
 pub(super) struct RebalanceQuery {
     /// Fraction of a Mac's allocatable memory above which it is overloaded (default 0.85).
@@ -1821,6 +1926,89 @@ mod tests {
     use crate::tenancy::TenancyError;
     use axum::body::Body;
     use tower::ServiceExt;
+
+    async fn stub_node(status: u16, body: Value) -> String {
+        let app = Router::new().route(
+            "/v1/macos-pool/checkout",
+            post(move || {
+                let body = body.clone();
+                async move { (StatusCode::from_u16(status).unwrap(), Json(body)) }
+            }),
+        );
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", l.local_addr().unwrap());
+        tokio::spawn(async move {
+            let _ = axum::serve(l, app).await;
+        });
+        url
+    }
+
+    #[tokio::test]
+    async fn pool_checkout_skips_a_mac_whose_report_was_stale() {
+        let mut stale = mac("stale", 16 * 1024, 0);
+        stale.fluxvm_url = stub_node(409, json!({"error": "no free macOS pool slot"})).await;
+        stale
+            .apple
+            .get_or_insert_with(Default::default)
+            .macos_pool_idle = Some(2);
+        let mut good = mac("good", 16 * 1024, 0);
+        good.fluxvm_url =
+            stub_node(200, json!({"id": "11111111-1111-1111-1111-111111111111"})).await;
+        good.apple
+            .get_or_insert_with(Default::default)
+            .macos_pool_idle = Some(1);
+        let fleet = fleet_of(vec![stale, good], TenancyState::default());
+        let Json(v) = macos_pool_checkout(State(fleet.clone()), Extension(Caller::Admin))
+            .await
+            .unwrap();
+        assert_eq!(v["node"], "good");
+        assert_eq!(v["vm"]["id"], "11111111-1111-1111-1111-111111111111");
+
+        // Nobody reports an idle slot: a plain 409, not a guess.
+        let empty = fleet_of(vec![mac("m", 16 * 1024, 0)], TenancyState::default());
+        let err = macos_pool_checkout(State(empty), Extension(Caller::Admin))
+            .await
+            .unwrap_err();
+        assert_eq!(err.0, StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn pool_return_refuses_an_id_that_is_not_a_uuid() {
+        let fleet = fleet_of(vec![mac("m", 16 * 1024, 0)], TenancyState::default());
+        let err = macos_pool_return(
+            State(fleet),
+            Extension(Caller::Admin),
+            Path(("m".into(), "../../v1/vms".into())),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn pool_checkout_prefers_the_mac_with_most_idle_slots() {
+        let with = |name: &str, idle: Option<u32>, cordoned: bool| {
+            let mut n = mac(name, 16 * 1024, 0);
+            n.last_seen = Utc::now();
+            n.cordoned = cordoned;
+            n.apple.get_or_insert_with(Default::default).macos_pool_idle = idle;
+            (name.to_string(), n)
+        };
+        let nodes: HashMap<String, NodeInfo> = [
+            with("b", Some(1), false),
+            with("a", Some(2), false),
+            with("none", Some(0), false),
+            with("unknown", None, false),
+            with("cordoned", Some(2), true),
+        ]
+        .into_iter()
+        .collect();
+        let order: Vec<String> = pool_checkout_order(&nodes)
+            .into_iter()
+            .map(|n| n.name)
+            .collect();
+        assert_eq!(order, ["a", "b"]);
+    }
 
     #[test]
     fn rebalance_candidates_follow_the_drain_rules() {
