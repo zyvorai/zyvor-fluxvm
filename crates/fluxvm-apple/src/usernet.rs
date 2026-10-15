@@ -14,7 +14,8 @@
 //! `/v1/netobs/*` like any other guest traffic. (Its stdout flow-event JSON lines are only logged.)
 //!
 //! Verified on an Apple M4 (DHCP, DNS, ICMP, IPv6 SLAAC, TCP egress and TCP host-to-guest forwards, deny verdicts, live
-//! policy, jumbo MTU). UDP forwards are unit-tested only; see the hardware log in docs/macos.md.
+//! policy, jumbo MTU). a UDP forward, live netobs flows and DNS records and an offline-injected SSH key were checked by
+//! `scripts/vz-usernet-live-test.sh`; see the hardware log in docs/macos.md.
 
 use anyhow::{Context, Result, bail};
 use fluxvm_core::model::{AppleGuest, AppleSpec, AppleUsernet, CreateVmRequest, NetworkSpec};

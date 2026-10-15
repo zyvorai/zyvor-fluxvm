@@ -1175,7 +1175,7 @@ pub struct AppleSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rosetta_cache: Option<String>,
     /// Linux guests: replace the NAT card with a userspace gateway (`fluxvm-usernet`) that applies this egress policy,
-    /// DNS allow/deny and port forwards, and feeds `/v1/netobs/*`. Verified on an M4 except UDP forwards (unit-tested only).
+    /// DNS allow/deny and port forwards, and feeds `/v1/netobs/*`. Verified on an M4.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usernet: Option<AppleUsernet>,
     /// Linux guests on the Mac's NAT (or bridged): the MTU the guest sets on its primary card, 576..=1500, applied through the

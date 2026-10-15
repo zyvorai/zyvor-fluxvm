@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- **`apple.usernet` live checks, and the rows that said "unverified" now say what ran.** New
+  `scripts/vz-usernet-live-test.sh` boots a Debian 13 guest on an M4 and checks: root login with an SSH key written
+  into the root disk offline (cloud-init copy dropped), a TCP forward, a UDP forward answered by a guest listener,
+  guest traffic and a DNS lookup in `/v1/netobs/flows` and `/v1/netobs/dns`, and the runner's plain refusal of a pause
+  on a paused VM. All passed. Not covered: the vsock-to-TCP relay and the `fluxvm-blockd` NBD client.
+
 - **Volumes on `vz` VM sandboxes.** `volumes` were refused unless the template was QEMU-backed, although `vz` already
   mounts `shared_folders` as virtiofs. A Mac sandbox now takes named volumes (persistent host directories, cloud-init
   fstab mounts, cold boot). Verified on an M4 by `scripts/vz-sandbox-volume-live-test.sh` (write from the guest,

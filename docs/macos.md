@@ -111,7 +111,7 @@ to the VM log, and records the guest's NAT address.
   cloud-init copy stays the only one, for OCI sandboxes, macOS guests, ASIF overlays, a read-only root, non-default storage and
   non-raw disks. A failed injection also keeps the cloud-init copy. Keys are injected only when `cloud_init.user` is explicitly `root` (then the cloud-init copy is dropped once every key is on the
   disk). With the user unset or any other account the keys belong to that account, so nothing is written to root's file: the offline
-  writer can only touch root's `authorized_keys`, and writing them there would grant a root login that cloud-init alone does not. **Unverified on hardware:** unit-tested decision logic and an
+  writer can only touch root's `authorized_keys`, and writing them there would grant a root login that cloud-init alone does not. **Verified on a booted Debian 13 guest on an M4** (`scripts/vz-usernet-live-test.sh`: root login with the key and no cloud-init copy); the decision logic is also unit-tested, and an
   ext4 round trip in `fluxvm-diskinject`; booted once on Debian 13 with a clean ext4 (see the hardware log).
 - **Guest address:** macOS offers no usable DHCP-lease or ARP view to a spawned process, so FluxVM adds a small systemd
   service to the cloud-init (when a `cloud_init` is given) that prints `VELORA-IP <addr>` on the serial console; the runner
@@ -463,7 +463,7 @@ Verified on macOS 27.2 with a Debian 13 guest: a file changed after `self_snapsh
 
 - The runner checks `canStart`, `canPause`, `canResume`, `canRequestStop` and `canStop` before `pause`, `resume`, `shutdown` and
   `stop`, and answers with a plain reason (`cannot pause: the VM is paused; pause needs a running VM`) instead of a Virtualization
-  error from the middle of a transition. **Unverified on hardware** (compiled against the macOS 27 SDK only).
+  error from the middle of a transition. **Partly verified on hardware:** a second `pause` on a paused VM came back as `cannot pause: the VM is paused; pause needs a running VM`; the other checks are compiled against the macOS 27 SDK only.
 - `display-resize` on the runner control socket calls `VZGraphicsDisplay.reconfigure(configuration:)` (macOS 14+) on a running or
   paused VM. From Rust: `fluxvm_apple::display_resize(&vm, width, height, display, ppi)`; `ppi` only applies to macOS guests.
   REST: `POST /v1/vms/{id}/vz/display` with `{"width": 1920, "height": 1080, "display": 0, "ppi": 220}` (`display` and `ppi`
@@ -773,11 +773,11 @@ These compile against the macOS 27 SDK and are validated at admission. Except fo
 | shared folders (virtiofs), VM snapshots (memory + disk, Linux and macOS guests), pause / resume, graceful shutdown, force stop, EFI Secure Boot (macOS 27+, Linux) | TPM, confidential profiles |
 | guest agent over vsock (proxied like Firecracker; needs the agent in the image) | hotplug of CPU, memory and NICs; cdroms; firmware overrides |
 | macOS guests (installed from an IPSW through the API or by hand, then cloned; see above) | live migration, in-place restore of a running VM, direct kernel boot of macOS guests |
-| `apple.usernet` userspace gateway for Linux guests (egress/DNS policy, UDP/TCP forwards, netobs frames; DHCP, DNS, ICMP, IPv6 SLAAC and deny verdicts verified on hardware, TCP egress and TCP forwards re-verified after a fix (hardware log); **UDP forwards unit-tested only**) | |
-| network observability: `/v1/netobs/*`, `fluxctl netobs`, `/metrics` series, private-network switches bridged into the daemon (see [netobs.md](netobs.md); unit/integration tested with synthetic frames, **unverified with live guest traffic**) | packet payload retention without an explicit, filtered, expiring capture |
+| `apple.usernet` userspace gateway for Linux guests (egress/DNS policy, UDP/TCP forwards, netobs frames; DHCP, DNS, ICMP, IPv6 SLAAC and deny verdicts verified on hardware, TCP egress, TCP and UDP forwards and live netobs re-verified (hardware log)) | |
+| network observability: `/v1/netobs/*`, `fluxctl netobs`, `/metrics` series, private-network switches bridged into the daemon (see [netobs.md](netobs.md); unit/integration tested with synthetic frames, verified with live guest traffic from a usernet guest on an M4: flows and DNS records, `scripts/vz-usernet-live-test.sh`) | packet payload retention without an explicit, filtered, expiring capture |
 | `POST /v1/vms/{id}/vz/display` and `fluxctl vz display resize` (macOS 14+; **partial on hardware**: the connector's preferred mode changes, the active mode needs a KMS client in the guest) | |
 | `GET /v1/vms/{id}/vz/attestation` and `fluxctl vz attestation verify`: signed boot manifest, host claim only (**not exercised on a booted VM**) | hardware attestation, TPM, measured boot |
-| offline agent-token and SSH-key injection into a private raw root disk (token injection verified on a booted Debian 13 guest; SSH-key injection **unverified on a booted guest**) | injection into a running VM's disk, qcow2, shared storage, or another user's `authorized_keys` |
+| offline agent-token and SSH-key injection into a private raw root disk (token injection verified on a booted Debian 13 guest; SSH-key injection verified on a booted Debian 13 guest with `cloud_init.user: root`) | injection into a running VM's disk, qcow2, shared storage, or another user's `authorized_keys` |
 | overlay disk exclusivity across VM records (create, attach, start) | protecting an overlay file from processes outside FluxVM |
 | `apple.macos_vsock` for macOS guests: vsock device plus a LaunchDaemon agent (**experimental**: verified on one M4 with a macOS 27.0.1 guest for ping, exec and files; SSH remains the fallback) | exec policies in macOS guests (Landlock/seccomp are Linux-only) |
 | extra disks (image, block device, NBD, blockd overlay (verified once on hardware); virtio, NVMe, USB), USB disk hot-attach and detach, private networks, console ports, bridged and vmnet networking, balloon, Rosetta, display, audio | (vmnet forwards may be UDP; NAT forwards are TCP only) |
