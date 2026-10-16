@@ -427,6 +427,18 @@ pub fn warm_name(spec: &Value) -> String {
     )
 }
 
+/// A line for the user once `elapsed` crosses another `every`-second mark since the last one
+/// (`last` is the mark already announced), so a minute of booting is not silent. Pure, for tests.
+fn progress_note(what: &str, elapsed: Duration, last: &mut u64, every: u64) -> Option<String> {
+    let mark = elapsed.as_secs() / every;
+    if mark > *last {
+        *last = mark;
+        Some(format!("still {what} ({}s)…", mark * every))
+    } else {
+        None
+    }
+}
+
 /// Waits for the guest's address and for sshd to accept a login.
 pub(crate) async fn wait_ssh<A: VmApi>(
     api: &A,
@@ -434,13 +446,23 @@ pub(crate) async fn wait_ssh<A: VmApi>(
     user: &str,
     identity: &Option<PathBuf>,
 ) -> Result<String> {
-    let deadline = Instant::now() + Duration::from_secs(180);
+    let started = Instant::now();
+    let deadline = started + Duration::from_secs(180);
+    let mut last = 0;
     let ip = loop {
         if let Some(ip) = api.guest_ip(id).await? {
             break ip;
         }
         if Instant::now() > deadline {
             bail!("the VM did not report an address within 180s");
+        }
+        if let Some(n) = progress_note(
+            "waiting for the guest's address",
+            started.elapsed(),
+            &mut last,
+            15,
+        ) {
+            eprintln!("{n}");
         }
         tokio::time::sleep(Duration::from_millis(500)).await;
     };
@@ -458,6 +480,9 @@ pub(crate) async fn wait_ssh<A: VmApi>(
         }
         if Instant::now() > deadline {
             bail!("ssh did not come up within 180s");
+        }
+        if let Some(n) = progress_note("waiting for ssh", started.elapsed(), &mut last, 15) {
+            eprintln!("{n}");
         }
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
@@ -630,6 +655,23 @@ pub async fn run<A: VmApi>(api: &A, o: RunOptions) -> Result<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn progress_note_speaks_once_per_interval() {
+        let mut last = 0;
+        let s = |n| Duration::from_secs(n);
+        assert_eq!(progress_note("booting", s(3), &mut last, 15), None);
+        assert_eq!(
+            progress_note("booting", s(15), &mut last, 15).as_deref(),
+            Some("still booting (15s)…")
+        );
+        // Polling again inside the same interval stays quiet.
+        assert_eq!(progress_note("booting", s(29), &mut last, 15), None);
+        assert_eq!(
+            progress_note("booting", s(31), &mut last, 15).as_deref(),
+            Some("still booting (30s)…")
+        );
+    }
 
     #[test]
     fn ports_parse_as_host_guest() {

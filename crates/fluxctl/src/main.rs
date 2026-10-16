@@ -77,8 +77,9 @@ struct Cli {
         help_heading = "Global Flags"
     )]
     state_dir: Option<PathBuf>,
-    /// Output format for list-style commands (`list`, `list-images`,
-    /// `snapshot-list`, `events`, `sandbox list`).
+    /// Output format for list-style commands (`list`, `list-images`, `snapshot-list`,
+    /// `disk list`, `vm-template list`, `context list`, `events`, `sandbox list`) and for
+    /// `doctor`; `fleet` prints tables on a terminal unless this is given. Other commands print JSON.
     #[arg(
         id = "output_format",
         short = 'o',

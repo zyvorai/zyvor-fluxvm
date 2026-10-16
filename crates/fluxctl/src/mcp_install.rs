@@ -325,6 +325,23 @@ pub fn uninstall(client: Client, project: bool, name: &str) -> Result<Value> {
     Ok(json!({"client": client.id(), "path": path, "removed": new.is_some()}))
 }
 
+/// One `status` row. `stale` is set when the entry names a binary that no longer exists, which is
+/// what `brew upgrade` leaves behind in an entry written with a versioned Cellar path.
+fn status_row(client: &str, path: &Path, entry: Option<String>) -> Value {
+    let binary = entry
+        .as_deref()
+        .and_then(|c| c.split_whitespace().next())
+        .map(PathBuf::from);
+    let stale = binary.as_deref().is_some_and(|b| !b.exists());
+    let mut row =
+        json!({"client": client, "path": path, "installed": entry.is_some(), "command": entry});
+    if stale {
+        row["stale"] = json!(true);
+        row["fix"] = json!(format!("fluxctl mcp install {client}"));
+    }
+    row
+}
+
 pub fn status(project: bool, name: &str) -> Result<Value> {
     let home = home()?;
     let project = project_dir(project)?;
@@ -332,8 +349,10 @@ pub fn status(project: bool, name: &str) -> Result<Value> {
         .iter()
         .filter_map(|&c| {
             let path = c.path(&home, project.as_deref()).ok()?;
-            let entry = fs::read_to_string(&path).ok().and_then(|t| read_entry(c.format(), &t, name));
-            Some(json!({"client": c.id(), "path": path, "installed": entry.is_some(), "command": entry}))
+            let entry = fs::read_to_string(&path)
+                .ok()
+                .and_then(|t| read_entry(c.format(), &t, name));
+            Some(status_row(c.id(), &path, entry))
         })
         .collect::<Vec<_>>();
     Ok(Value::Array(rows))
@@ -342,6 +361,26 @@ pub fn status(project: bool, name: &str) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn status_row_flags_an_entry_whose_binary_is_gone() {
+        let p = Path::new("/home/u/.claude.json");
+        let dead = status_row(
+            "claude-code",
+            p,
+            Some("/opt/homebrew/Cellar/fluxvm/0.0.0-gone/bin/fluxctl mcp serve".into()),
+        );
+        assert_eq!(dead["stale"], true);
+        assert_eq!(dead["fix"], "fluxctl mcp install claude-code");
+        assert_eq!(dead["installed"], true);
+
+        let live = status_row("claude-code", p, Some("/bin/sh mcp serve".into()));
+        assert!(live.get("stale").is_none() && live.get("fix").is_none());
+
+        let none = status_row("cursor", p, None);
+        assert_eq!(none["installed"], false);
+        assert!(none.get("stale").is_none());
+    }
 
     fn entry() -> Entry {
         Entry {

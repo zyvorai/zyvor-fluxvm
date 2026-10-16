@@ -66,6 +66,10 @@ fn color_on() -> bool {
 ///
 /// Uses clap/`anstyle` style markers (not raw CSI) so `wrap_help` preserves
 /// colors the same way clap's own headers/literals do.
+/// What `fluxctl` exits with. The pass-through rows are why these are not one enum: the code
+/// belongs to the command that ran, not to fluxctl.
+pub const EXIT_CODES: &str = "  0    success\n  1    an error (message on stderr); `doctor` found a failing check\n  2    a usage error (unknown flag, missing argument)\n  N    the command's own status, for `run`, `sandbox run`, `ssh`,\n       `fleet exec` and `agent exec`";
+
 pub fn after_help() -> String {
     let on = color_on();
     let header = if on {
@@ -88,6 +92,10 @@ pub fn after_help() -> String {
             &[
                 ("serve", "Start the FluxVM control-plane daemon"),
                 ("status", "Host panel, or VM status with an id"),
+                (
+                    "doctor",
+                    "Is this host ready? Checks and the fix for each problem",
+                ),
                 ("completions", "Print a bash/zsh/fish completion script"),
                 ("mcp serve", "MCP stdio server for AI agents (Hermes, ...)"),
             ],
@@ -210,6 +218,8 @@ pub fn after_help() -> String {
         }
     }
 
+    let _ = write!(out, "\n\n{header}Exit codes{header:#}\n");
+    out.push_str(EXIT_CODES);
     out.push('\n');
     out.push_str("Use \"fluxctl [command] --help\" for more information about a command.");
     out
@@ -232,6 +242,8 @@ mod tests {
             "🛡️",
             "🔭 Observability:",
             "🌐 Cluster:",
+            "Exit codes",
+            "doctor",
         ] {
             assert!(help.contains(marker), "grouped help missing {marker}");
         }

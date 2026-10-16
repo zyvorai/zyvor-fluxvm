@@ -47,8 +47,26 @@ More: [install-macos.md](install-macos.md#troubleshooting).
 
 | You see | Cause and fix |
 |---|---|
-| `-o table` has no effect on a command | `-o`/`--output-format` applies to the list-style commands (`list`, `list-images`, `snapshot-list`, `events`, `sandbox list`) and to `fleet`, which prints tables on a terminal. Other commands print JSON. |
+| `-o table` has no effect on a command | `-o`/`--output-format` applies to the list-style commands (`list`, `list-images`, `snapshot-list`, `disk list`, `vm-template list`, `context list`, `events`, `sandbox list`) and to `doctor`; `fleet` prints tables on a terminal unless `-o` is given. Other commands print JSON. |
 | Remote host, no results | `fluxctl --server http://host:7788 list`, or save it with `fluxctl context add` and `fluxctl context use`. Pass `--server-token` (or `FLUXVM_TOKEN`) if the daemon requires auth. |
+
+## Exit codes
+
+| Code | Meaning |
+|---|---|
+| `0` | Success |
+| `1` | An error (the message is on stderr), or `fluxctl doctor` found a failing check |
+| `2` | A usage error: an unknown flag or a missing argument |
+| `N` | For `run`, `sandbox run`, `ssh`, `fleet exec` and `agent exec` (also when following an agent job or shell): the command's own exit status, so a script can branch on what ran inside the guest |
+
+`fluxctl --help` prints the same table.
+
+## Is this host ready?
+
+`fluxctl doctor` checks the daemon, the binaries, free disk, `/dev/kvm` (Linux) or the runner's virtualization
+entitlement and memory headroom (macOS), and MCP or LaunchAgent entries that still point at a removed Homebrew
+path. Each warning or failure prints the command that fixes it, and it exits `1` on a failure. It works with the
+daemon down; add `-o json` for a machine-readable report.
 
 ## Still stuck
 
