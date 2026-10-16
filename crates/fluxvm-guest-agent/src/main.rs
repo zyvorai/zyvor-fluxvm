@@ -47,15 +47,19 @@ struct Cli {
     /// Shared-secret token file (an OCI sandbox keeps it outside the image's read-only root).
     #[arg(long, default_value = fluxvm_guest_protocol::TOKEN_FILE_PATH)]
     token_file: String,
+    /// A file the host provides the token in (macOS guests: the read-only `firstboot` share). Read only while the agent
+    /// has no token of its own, then written to `--token-file`; a token already there always wins.
+    #[arg(long)]
+    token_seed: Option<String>,
 }
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
-    run_server(cli.port, &cli.token_file)
+    run_server(cli.port, &cli.token_file, cli.token_seed.as_deref())
 }
 
 #[cfg(unix)]
-fn run_server(port: u32, token_file: &str) -> Result<()> {
+fn run_server(port: u32, token_file: &str, token_seed: Option<&str>) -> Result<()> {
     use std::os::fd::FromRawFd;
 
     let expected_token: Arc<std::sync::Mutex<TokenState>> =
@@ -66,6 +70,7 @@ fn run_server(port: u32, token_file: &str) -> Result<()> {
                 .filter(|s| !s.is_empty()),
             previous: None,
             file: token_file.to_string(),
+            seed: token_seed.map(str::to_owned),
         }));
     if expected_token.lock().is_ok_and(|t| t.current.is_some()) {
         eprintln!("fluxvm-guest-agent: token found at {token_file}, requests must authenticate");
@@ -157,7 +162,7 @@ mod vsock {
 }
 
 #[cfg(not(unix))]
-fn run_server(_port: u32, _token_file: &str) -> Result<()> {
+fn run_server(_port: u32, _token_file: &str, _token_seed: Option<&str>) -> Result<()> {
     anyhow::bail!("fluxvm-guest-agent supports Linux and macOS guests only (AF_VSOCK)")
 }
 
@@ -168,6 +173,8 @@ struct TokenState {
     current: Option<String>,
     previous: Option<String>,
     file: String,
+    /// Where the host leaves a token for a guest that was cloned from a template without one.
+    seed: Option<String>,
 }
 
 /// How a request's token compares with the agent's.
@@ -180,7 +187,33 @@ enum Auth {
 }
 
 impl TokenState {
+    /// With no token, takes the host's from the seed file (a share that may mount after this process started, so this
+    /// is tried on every request until it works) and keeps it in the token file. Never replaces a token that exists.
+    fn adopt_seed(&mut self) {
+        if self.current.is_some() {
+            return;
+        }
+        let Some(seed) = self.seed.clone() else {
+            return;
+        };
+        let Ok(text) = std::fs::read_to_string(&seed) else {
+            return;
+        };
+        let t = text.trim();
+        if t.len() < 16 || t.chars().any(|c| c.is_whitespace() || c.is_control()) {
+            return;
+        }
+        if self.rotate(t).is_ok() {
+            self.previous = None;
+            eprintln!(
+                "fluxvm-guest-agent: took the token from {seed} and wrote it to {}",
+                self.file
+            );
+        }
+    }
+
     fn authorize(&mut self, got: Option<&str>) -> Auth {
+        self.adopt_seed();
         let Some(cur) = self.current.as_deref() else {
             return Auth::NoToken;
         };
@@ -1282,6 +1315,7 @@ mod tests {
             current: Some(token.to_string()),
             previous: None,
             file,
+            seed: None,
         }
     }
 
@@ -1330,8 +1364,55 @@ mod tests {
             current: None,
             previous: None,
             file: "/nonexistent".into(),
+            seed: None,
         };
         assert_eq!(t.authorize(Some("anything")), Auth::NoToken);
+    }
+
+    #[test]
+    fn a_seed_provides_the_token_only_when_there_is_none() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tempfile::tempdir().unwrap();
+        let seed = d.path().join("agent-token");
+        let file = d.path().join("token");
+        let mk = |current: Option<&str>| TokenState {
+            current: current.map(str::to_owned),
+            previous: None,
+            file: file.to_string_lossy().into_owned(),
+            seed: Some(seed.to_string_lossy().into_owned()),
+        };
+
+        // The share is not mounted yet: still no token, and nothing is written.
+        let mut t = mk(None);
+        assert_eq!(t.authorize(Some("host-token-0123456789")), Auth::NoToken);
+        assert!(!file.exists());
+
+        // Mounted later: the next request adopts it, 0600, without a restart.
+        std::fs::write(&seed, "host-token-0123456789\n").unwrap();
+        assert_eq!(t.authorize(Some("host-token-0123456789")), Auth::Authorized);
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap().trim(),
+            "host-token-0123456789"
+        );
+        assert_eq!(
+            std::fs::metadata(&file).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(t.authorize(Some("wrong")), Auth::Denied);
+
+        // A token the guest already has is never replaced by the seed.
+        let mut keeps = mk(Some("guest-token-abcdefghij"));
+        assert_eq!(keeps.authorize(Some("host-token-0123456789")), Auth::Denied);
+        assert_eq!(
+            keeps.authorize(Some("guest-token-abcdefghij")),
+            Auth::Authorized
+        );
+
+        // A short or malformed seed is ignored.
+        std::fs::write(&seed, "short\n").unwrap();
+        let mut bad = mk(None);
+        std::fs::remove_file(&file).unwrap();
+        assert_eq!(bad.authorize(Some("short")), Auth::NoToken);
     }
 
     #[test]

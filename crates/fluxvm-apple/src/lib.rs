@@ -255,6 +255,11 @@ impl VmBackend for AppleBackend {
         if let Some(fb) = req.apple.as_ref().and_then(|a| a.firstboot.as_ref()) {
             macos_install::write_firstboot(&ctx.workspace, fb)?;
         }
+        if macos_install::wants_agent_seed(req)
+            && let Some(token) = req.agent.as_ref().and_then(|a| a.token.as_deref())
+        {
+            macos_install::write_agent_token(&ctx.workspace, token)?;
+        }
         runner::write_oci_meta(req, &ctx.workspace)?;
         let runner = find_runner()?;
         let mut conf = RunnerConfig::for_launch(req, ctx)?;

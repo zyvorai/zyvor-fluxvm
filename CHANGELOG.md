@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- **macOS guests get their agent token from the host; nothing is provisioned by hand in a clone.** The guest agent
+  needed a token typed into every macOS guest (no cloud-init), or it refused everything. The daemon now writes the VM's
+  token to `agent-token` (0600) in the read-only `firstboot` share and attaches that share whenever a macOS guest has
+  `apple.macos_vsock` and `agent.enabled`; `fluxvm-guest-agent --token-seed <file>` (set in the shipped LaunchDaemon plist)
+  adopts it only while the agent has no token of its own, and a token already there always wins. Install the agent once,
+  without a token, in the template. Unit-tested, and run live on an M4 with `scripts/vz-macos-agent-seed-live-test.sh`:
+  macOS 26 installed from the cached IPSW, the agent installed with no token (it refused), a clone's guest token equalled the
+  VM's, the agent log named the share, and `uname -sm` ran through the API; a clone with the agent off got no share. The
+  share is readable by any process in the guest that can read it (like the other firstboot files). **Not run:** a macOS 27
+  guest, FileVault, a token rotation followed by a reboot.
 
 - **UDP published ports for container sandboxes.** `ports` accepts `HOST:CONTAINER/udp` next to TCP. The Mac's NAT
   relay is TCP-only, so a sandbox that publishes UDP gets the userspace gateway (`apple.usernet`) as its network card,

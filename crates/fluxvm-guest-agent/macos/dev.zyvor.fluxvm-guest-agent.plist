@@ -3,7 +3,8 @@
 <!--
   LaunchDaemon for the FluxVM guest agent inside a macOS guest.
   EXPERIMENTAL. Verified on an Apple M4 with a macOS 27.0.1 guest created with apple.macos_vsock = true. Install with
-  install.sh; the token is read from /etc/fluxvm-guest-agent.token.
+  install.sh; the token is read from /etc/fluxvm-guest-agent.token, or, when there is none, taken from the host's
+  read-only firstboot share (--token-seed) and kept there.
 -->
 <plist version="1.0">
 <dict>
@@ -16,6 +17,8 @@
     <string>17777</string>
     <string>--token-file</string>
     <string>/etc/fluxvm-guest-agent.token</string>
+    <string>--token-seed</string>
+    <string>/Volumes/My Shared Files/firstboot/agent-token</string>
   </array>
   <key>UserName</key>
   <string>root</string>

@@ -304,9 +304,23 @@ cycle the LaunchDaemon started by itself and answered `ping` with no reinstall. 
 - **Guest side.** `fluxvm-guest-agent` builds for macOS (`cargo build -p fluxvm-guest-agent`). The vsock listener, exec, file
   transfer, shell (PTY), shutdown and hostname reset are ported; per-exec policies (Landlock/seccomp) are refused outright because
   they need Linux, and machine-id and entropy reseeding are reported as failures. Install it as a LaunchDaemon with
-  `crates/fluxvm-guest-agent/macos/install.sh <binary> <token>` (plist: `dev.zyvor.fluxvm-guest-agent.plist`). A macOS guest has no
-  cloud-init, so the token is provisioned there by hand; with no token the agent refuses everything.
+  `crates/fluxvm-guest-agent/macos/install.sh <binary> [token]` (plist: `dev.zyvor.fluxvm-guest-agent.plist`). A macOS guest has no
+  cloud-init. Install the agent **once, without a token**, in the template: each clone then gets its own token from the host through
+  the read-only `firstboot` share (see "Host side"). With no token anywhere the agent refuses everything. Passing a token to
+  `install.sh` still works and always wins: the agent never replaces a token it already has with the share's.
+- **Token delivery.** For a macOS guest with `apple.macos_vsock: true` and `agent.enabled`, the daemon writes the VM's agent token
+  (generated when you gave none) to `agent-token`, mode 0600, in the guest's `firstboot` share (`/Volumes/My Shared Files/firstboot`,
+  read-only) and attaches that share even when `apple.firstboot` is unset. The agent's LaunchDaemon passes `--token-seed` pointing
+  there, tries it on a request while it has no token (the share may mount after the daemon starts), and keeps what it found in
+  `/etc/fluxvm-guest-agent.token`. **Run on an M4** (`scripts/vz-macos-agent-seed-live-test.sh`, a macOS 26 guest installed from
+  `macos-26A434.ipsw`): the template's agent had no token and refused, a clone's token file then equalled the VM's token, its log said
+  it took the token from the share, and `POST /v1/vms/{id}/agent` ran `uname -sm` (`Darwin arm64`); a clone with the agent off got
+  no share and no token. **Caveats:** a template that already holds a token keeps it (so the host's differs and requests are
+  refused until you reset it); any process in the guest that can read the share can read the token, as with the other firstboot
+  files, so this is for single-tenant sandbox guests; after a token rotation the share still holds the old token, which is only
+  read when the guest has none. Not run: a macOS 27 guest, FileVault, or a fresh clone whose share mounts after login.
 - **Host side.** Create the VM with `apple.macos_vsock: true` **and** `agent: {"enabled": true, "token": "<the token in the guest>"}`
+  (or leave `token` out and use the delivery above)
   (admission used to refuse `agent.enabled` for every macOS guest, so the host could never choose the agent; it now needs
   `macos_vsock`). `vz_guest` pings the agent over the runner's vsock proxy (3 s) before each request and uses SSH when it does not
   answer. Verified: a VM created from a template with the daemon installed answered `exec` through the daemon's `/v1/vms/{id}/agent`
