@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- **QMP sockets under the short `run_dir` (macOS `sockaddr_un` overflow).** Putting `qmp.sock` under
+  `~/Library/Application Support/FluxVM/instances/<uuid>/` (or `migration-receivers/…`) overflows the ~104-byte Unix
+  socket path limit on macOS; launches and CI then failed with `path must be shorter than SUN_LEN`. QEMU now binds
+  `run_dir/qmp/<id>.sock` (default `/tmp/fluxvm-run-<uid>/…`), records it as `control_socket`, and falls back to the
+  legacy workspace path for older VMs. Migration receiver workspaces move to `run_dir/mr/<id>/`. Recovery tests use a
+  short `/tmp` tempdir. Unit-tested: machine-type reconcile + expired receiver TTL (`fluxvm-scheduler` 300/300).
+
 - **Linux release package is built in an `ubuntu:22.04` container.** The self-hosted runners differ in OS release, and a
   package linked on a newer glibc (2.38/2.39) failed the workflow's own 22.04 smoke test. The glibc floor is now 2.35
   whatever runner builds it, and the runner host needs no sudo. Smoke test and release attach run as a separate job.

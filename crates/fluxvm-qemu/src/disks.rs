@@ -179,11 +179,12 @@ fn boot_throttles(
 /// QEMU keeps throttles out of the migration stream, so this also runs on a
 /// migration target.
 pub async fn apply_boot_throttles(
+    qmp_sock: &Path,
     workspace: &Path,
     root_io: Option<&DiskIo>,
     timeout: std::time::Duration,
 ) -> Result<()> {
-    let sock = workspace.join("qmp.sock");
+    let sock = qmp_sock;
     for (target, t) in boot_throttles(workspace, root_io) {
         let what = target.to_string();
         qmp::execute(
@@ -484,7 +485,7 @@ pub fn cdrom_args(cdroms: &[fluxvm_core::model::CdromSpec]) -> Vec<String> {
 /// lock can't block it), drop the medium, close the tray, then free the
 /// ISO's node. The empty `ide-cd` device stays.
 pub async fn eject_cdrom(vm: &VmRecord, name: &str) -> Result<()> {
-    let sock = vm.workspace.join("qmp.sock");
+    let sock = crate::qmp_socket(vm);
     let id = format!("cdrom-{name}");
     qmp::execute(
         &sock,
@@ -866,7 +867,7 @@ async fn apply_throttle(
     t: Option<&DiskThrottle>,
 ) -> Result<()> {
     qmp::execute(
-        &vm.workspace.join("qmp.sock"),
+        &crate::qmp_socket(vm),
         "block_set_io_throttle",
         Some(throttle_args(target, t)),
         QMP_TIMEOUT,
@@ -1101,7 +1102,7 @@ async fn has_shared_memory(sock: &Path) -> bool {
 }
 
 async fn hot_add(cfg: &Config, vm: &VmRecord, name: &str, path: &Path, sc: &Sidecar) -> Result<()> {
-    let sock = vm.workspace.join("qmp.sock");
+    let sock = crate::qmp_socket(vm);
     let io = &sc.io;
     let bus = sc.port.map(port_id);
     if io.bus() == DiskBus::VhostUserBlk {
@@ -1265,7 +1266,7 @@ pub async fn detach(vm: &VmRecord, name: &str) -> Result<()> {
     };
     let io = disk_io(&vm.workspace, name);
     if is_live(vm) {
-        let sock = vm.workspace.join("qmp.sock");
+        let sock = crate::qmp_socket(vm);
         qmp::execute(
             &sock,
             "device_del",
@@ -1367,7 +1368,7 @@ pub async fn resize(cfg: &Config, vm: &VmRecord, name: &str, size_gib: u64) -> R
         bail!("disk {name:?} is already {cur} bytes; resize only grows");
     }
     if is_live(vm) {
-        let qmp_sock = vm.workspace.join("qmp.sock");
+        let qmp_sock = crate::qmp_socket(vm);
         if name == ROOT_DISK {
             resize_live_root(&qmp_sock, new_bytes).await?;
         } else {

@@ -1373,7 +1373,7 @@ impl VmManager {
         };
         let plan = fluxvm_qemu::numa::plan(&vm.request);
         fluxvm_qemu::numa::status(
-            &vm.workspace.join("qmp.sock"),
+            &fluxvm_qemu::qmp_socket(&vm),
             pid,
             &plan,
             std::time::Duration::from_secs(10),
@@ -3063,7 +3063,7 @@ impl VmManager {
                 record.qga_socket = Some(workspace.join("qga.sock"));
             }
             self.attach_cgroup(id, launch.pid, &mut record, &req.vfio_devices);
-            self.pin_numa_vcpus(id, &req, &workspace.join("qmp.sock"))
+            self.pin_numa_vcpus(id, &req, &fluxvm_qemu::qmp_socket(&record))
                 .await;
             record.status = VmStatus::Running;
             if req.backend == BackendKind::FluxVm
@@ -3711,7 +3711,9 @@ impl VmManager {
         req: fluxvm_core::model::MigrationReceiverRequest,
     ) -> Result<fluxvm_core::model::MigrationReceiver> {
         let id = Uuid::new_v4();
-        let workspace = self.receiver_dir().join(id.to_string());
+        // Short path under run_dir: state_dir/migration-receivers/<uuid>/qmp.sock overflows
+        // sockaddr_un (~104 bytes) on macOS Application Support layouts.
+        let workspace = self.cfg.run_dir.join("mr").join(id.to_string());
         let launched = fluxvm_qemu::receiver::launch(
             &self.cfg,
             &workspace,
@@ -3807,7 +3809,9 @@ impl VmManager {
 
     pub async fn delete_migration_receiver(&self, id: Uuid) -> Result<()> {
         let path = self.receiver_dir().join(format!("{id}.json"));
+        let mut workspace = self.cfg.run_dir.join("mr").join(id.to_string());
         if let Ok(rec) = self.read_receiver(id) {
+            workspace = rec.workspace.clone();
             if let Err(e) = process::terminate_pid(rec.pid).await {
                 tracing::warn!(receiver = %id, error = %e, "stopping migration receiver");
             }
@@ -3834,9 +3838,13 @@ impl VmManager {
         if path.exists() {
             fs::remove_file(&path)?;
         }
-        let workspace = self.receiver_dir().join(id.to_string());
         if workspace.exists() {
             let _ = fs::remove_dir_all(&workspace);
+        }
+        // Legacy layout before run_dir/mr.
+        let legacy = self.receiver_dir().join(id.to_string());
+        if legacy.exists() && legacy != workspace {
+            let _ = fs::remove_dir_all(&legacy);
         }
         Ok(())
     }
@@ -4157,7 +4165,7 @@ impl VmManager {
             }
             let vfio_devices = vm.request.vfio_devices.clone();
             self.attach_cgroup(id, launch.pid, &mut vm, &vfio_devices);
-            self.pin_numa_vcpus(id, &vm.request, &vm.workspace.join("qmp.sock"))
+            self.pin_numa_vcpus(id, &vm.request, &fluxvm_qemu::qmp_socket(&vm))
                 .await;
             if let Some(state) = &resume_state {
                 self.finish_resume(&vm, launch.pid, state).await?;
@@ -7694,7 +7702,7 @@ mod direct_hotplug_tests {
 
         // ── success: the mock QEMU must see getfd(with the tap) -> netdev_add -> device_add ──
         let vm = warm_pool_member(&work.join("ws"));
-        let sock = vm.workspace.join("qmp.sock");
+        let sock = fluxvm_qemu::qmp_socket(&vm);
         let server = serve(StdListener::bind(&sock).unwrap(), false);
         let prepared = plug_direct_nic(&cfg, &vm, direct(), Some("02:00:00:00:00:07".into()))
             .await

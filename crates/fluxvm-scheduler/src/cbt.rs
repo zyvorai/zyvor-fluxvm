@@ -936,7 +936,7 @@ impl VmManager {
         let live = matches!(vm.status, VmStatus::Running | VmStatus::Paused);
         let host = if live {
             BlockHost {
-                socket: vm.workspace.join("qmp.sock"),
+                socket: fluxvm_qemu::qmp_socket(&vm),
                 daemon: None,
             }
         } else {

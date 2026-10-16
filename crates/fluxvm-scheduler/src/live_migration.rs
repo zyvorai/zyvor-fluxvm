@@ -308,9 +308,10 @@ impl VmManager {
             if sreq.qga.as_ref().is_some_and(|q| q.enabled) {
                 record.qga_socket = Some(workspace.join("qga.sock"));
             }
+            let qmp = fluxvm_qemu::qmp_socket(&record);
             process::wait_for_socket_ready(
                 launch.pid,
-                &workspace.join("qmp.sock"),
+                &qmp,
                 std::time::Duration::from_secs(15),
                 "QEMU migration receiver",
                 &log_path,
@@ -318,8 +319,7 @@ impl VmManager {
             .await?;
             let vfio = sreq.vfio_devices.clone();
             self.attach_cgroup(id, launch.pid, &mut record, &vfio);
-            self.pin_numa_vcpus(id, &sreq, &workspace.join("qmp.sock"))
-                .await;
+            self.pin_numa_vcpus(id, &sreq, &qmp).await;
             if let Some(ns) = &record.netns
                 && let Err(e) = fluxvm_network::netns::repair_named_netns(ns, launch.pid).await
             {
@@ -349,7 +349,7 @@ impl VmManager {
             token: Uuid::new_v4().to_string(),
             expires_at_unix: (Utc::now() + Duration::seconds(ttl as i64)).timestamp() as u64,
             pid: record.pid.unwrap_or_default(),
-            qmp_socket: workspace.join("qmp.sock"),
+            qmp_socket: fluxvm_qemu::qmp_socket(&record),
             workspace,
             disk: source.disk.clone(),
             cgroup_path: record.cgroup_path.clone(),
