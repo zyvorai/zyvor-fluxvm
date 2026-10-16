@@ -215,11 +215,18 @@ fn human(b: u64) -> String {
     format!("{:.1} GiB", b as f64 / GIB as f64)
 }
 
-/// Linux: `/dev/kvm` must exist and be usable by this user.
+/// Linux: `/dev/kvm` must exist and be usable. `daemon_up` is whether the daemon answered: it usually runs
+/// as another user (root), so a `/dev/kvm` this user cannot open is only a warning while it is healthy: the VMs
+/// do not run as this user.
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-pub fn check_kvm(exists: bool, usable: bool) -> Check {
+pub fn check_kvm(exists: bool, usable: bool, daemon_up: bool) -> Check {
     match (exists, usable) {
         (true, true) => Check::ok("kvm", "/dev/kvm is present and usable"),
+        (true, false) if daemon_up => Check::warn(
+            "kvm",
+            "/dev/kvm exists but this user cannot open it; the daemon is running, so it runs as another user",
+            "only needed to run VMs as this user: sudo usermod -aG kvm \"$USER\"   then log in again",
+        ),
         (true, false) => Check::fail(
             "kvm",
             "/dev/kvm exists but this user cannot open it",
@@ -321,6 +328,7 @@ pub fn check_memory(total_mib: Option<u64>) -> Check {
 }
 
 /// What the console login session looks like to `ioreg`.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Session {
     Unlocked,
@@ -333,6 +341,7 @@ pub enum Session {
 
 /// Parse the `IOConsoleUsers` line of `ioreg -n Root -d1`. `IOConsoleLocked` is not used: it can
 /// say `No` while the user's session reports `CGSSessionScreenIsLocked=Yes`.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub fn parse_console_session(ioreg: &str) -> Session {
     if ioreg.trim().is_empty() {
         return Session::Unknown;
@@ -551,7 +560,7 @@ pub async fn gather(listen: &str, state_dir: &Path) -> Vec<Check> {
             .write(true)
             .open("/dev/kvm")
             .is_ok();
-        out.push(check_kvm(exists, usable));
+        out.push(check_kvm(exists, usable, matches!(healthz, Ok(200))));
     }
 
     out.push(check_disk(state_dir, free_bytes(state_dir)));
@@ -607,9 +616,22 @@ mod tests {
 
     #[test]
     fn kvm_states() {
-        assert_eq!(level(&check_kvm(true, true)), Level::Ok);
-        assert!(check_kvm(true, false).fix.unwrap().contains("kvm"));
-        assert!(check_kvm(false, false).detail.contains("missing"));
+        assert_eq!(level(&check_kvm(true, true, false)), Level::Ok);
+        assert!(check_kvm(true, false, false).fix.unwrap().contains("kvm"));
+        assert!(check_kvm(false, false, false).detail.contains("missing"));
+    }
+
+    #[test]
+    fn an_unopenable_kvm_is_only_a_warning_while_the_daemon_is_healthy() {
+        // The daemon runs as root, this user is not in the kvm group: a healthy host, not a failure.
+        let c = check_kvm(true, false, true);
+        assert_eq!(level(&c), Level::Warn);
+        assert!(c.detail.contains("another user"));
+        assert_eq!(exit_code(&[c]), 0);
+        // With no daemon there is nothing proving VMs can run, so it stays a failure.
+        assert_eq!(level(&check_kvm(true, false, false)), Level::Fail);
+        // A missing /dev/kvm fails regardless of the daemon.
+        assert_eq!(level(&check_kvm(false, false, true)), Level::Fail);
     }
 
     #[test]
