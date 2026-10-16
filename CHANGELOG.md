@@ -10,6 +10,8 @@
   virtual patch. `learn-exec`, `sign-exec-policy`, `sign-rule-pack` and `pack verify` are new. Signing is shared with
   the image catalog (`fluxvm_core::signing`). Verified on a BPF-LSM kernel with
   `scripts/test-vmm-guard-exec-patch-host.sh`.
+- **Guard status over REST and `fluxctl guard`.** `GET /v1/vms/{id}/guard` (read-only) reports mode, exec
+  allow-list, applied rule packs and `expired_packs`; `fluxctl guard ...` wraps `fluxvm-guard` locally.
 - **Fix: guard device/file allow-lists never matched.** Device numbers were encoded in the userspace layout, but the
   kernel compares `(major << 20) | minor`, so the device, writable-file and new exec allow-list keys all missed.
 
