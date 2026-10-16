@@ -320,6 +320,62 @@ pub fn check_memory(total_mib: Option<u64>) -> Check {
     }
 }
 
+/// What the console login session looks like to `ioreg`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Session {
+    Unlocked,
+    Locked,
+    /// Nobody is logged in at the console.
+    NoSession,
+    /// `ioreg` gave nothing usable.
+    Unknown,
+}
+
+/// Parse the `IOConsoleUsers` line of `ioreg -n Root -d1`. `IOConsoleLocked` is not used: it can
+/// say `No` while the user's session reports `CGSSessionScreenIsLocked=Yes`.
+pub fn parse_console_session(ioreg: &str) -> Session {
+    if ioreg.trim().is_empty() {
+        return Session::Unknown;
+    }
+    let Some(line) = ioreg.lines().find(|l| l.contains("\"IOConsoleUsers\"")) else {
+        return Session::NoSession;
+    };
+    if !line.contains('{') {
+        return Session::NoSession;
+    }
+    if line.contains("\"CGSSessionScreenIsLocked\"=Yes") {
+        Session::Locked
+    } else {
+        Session::Unlocked
+    }
+}
+
+/// Snapshot restore and warm slots need a logged-in, unlocked session (`docs/macos-sandboxes.md`).
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub fn check_session(s: Session) -> Check {
+    const FIX: &str = "unlock the Mac, or give it a dedicated auto-login user with the screen lock off (docs/agent-density.md#unattended-hosts)";
+    match s {
+        Session::Unlocked => Check::ok(
+            "login session",
+            "a user is logged in and the screen is unlocked",
+        ),
+        Session::Locked => Check::warn(
+            "login session",
+            "the screen is locked: snapshot restore and warm-pool slots will fail until it is unlocked",
+            FIX,
+        ),
+        Session::NoSession => Check::warn(
+            "login session",
+            "nobody is logged in at the console: snapshot restore and warm-pool slots will fail",
+            FIX,
+        ),
+        Session::Unknown => Check::skip(
+            "login session",
+            "could not read the console session (ioreg)",
+        ),
+    }
+}
+
 // ---- host probing --------------------------------------------------------------------------
 
 fn which(name: &str) -> Option<PathBuf> {
@@ -384,6 +440,17 @@ fn runner_entitled(runner: &Path) -> Option<bool> {
         String::from_utf8_lossy(&out.stderr)
     );
     Some(text.contains("com.apple.security.virtualization"))
+}
+
+#[cfg(target_os = "macos")]
+fn console_session() -> Session {
+    match std::process::Command::new("ioreg")
+        .args(["-n", "Root", "-d1"])
+        .output()
+    {
+        Ok(o) if o.status.success() => parse_console_session(&String::from_utf8_lossy(&o.stdout)),
+        _ => Session::Unknown,
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -474,6 +541,7 @@ pub async fn gather(listen: &str, state_dir: &Path) -> Vec<Check> {
         let entitled = runner.as_deref().and_then(runner_entitled);
         out.push(check_runner_entitlement(runner.as_deref(), entitled));
         out.push(check_memory(total_memory_mib()));
+        out.push(check_session(console_session()));
     }
     #[cfg(target_os = "linux")]
     {
@@ -593,6 +661,36 @@ mod tests {
         // 4 GiB leaves 1 GiB.
         assert_eq!(level(&check_memory(Some(4 * 1024))), Level::Warn);
         assert_eq!(level(&check_memory(None)), Level::Skip);
+    }
+
+    #[test]
+    fn console_session_is_read_from_the_user_dict_not_ioconsolelocked() {
+        let locked = "      \"IOConsoleLocked\" = No\n      \"IOConsoleUsers\" = ({\"kCGSSessionOnConsoleKey\"=Yes,\"CGSSessionScreenIsLocked\"=Yes,\"kCGSSessionUserNameKey\"=\"mini\"})\n";
+        assert_eq!(parse_console_session(locked), Session::Locked);
+        let open = locked.replace("\"CGSSessionScreenIsLocked\"=Yes,", "");
+        assert_eq!(parse_console_session(&open), Session::Unlocked);
+        assert_eq!(
+            parse_console_session(
+                "      \"IOConsoleLocked\" = No\n      \"IOConsoleUsers\" = ()\n"
+            ),
+            Session::NoSession
+        );
+        assert_eq!(
+            parse_console_session("      \"IOConsoleLocked\" = No\n"),
+            Session::NoSession
+        );
+        assert_eq!(parse_console_session(""), Session::Unknown);
+    }
+
+    #[test]
+    fn locked_or_absent_session_warns_with_the_unattended_hosts_fix() {
+        for s in [Session::Locked, Session::NoSession] {
+            let c = check_session(s);
+            assert_eq!(level(&c), Level::Warn);
+            assert!(c.fix.unwrap().contains("agent-density.md#unattended-hosts"));
+        }
+        assert_eq!(level(&check_session(Session::Unlocked)), Level::Ok);
+        assert_eq!(level(&check_session(Session::Unknown)), Level::Skip);
     }
 
     #[test]

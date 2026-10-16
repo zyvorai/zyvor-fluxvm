@@ -40,7 +40,7 @@ More: [install-macos.md](install-macos.md#troubleshooting).
 | You see | Cause and fix |
 |---|---|
 | `the Apple runner fluxvm-vz-runner was not found (looked at: …/target/debug/…)` | A VM record from a development build points at a path that no longer exists. Delete the VM (`fluxctl delete <id>`) and create it again. |
-| Snapshot restore or a warm slot fails | The login session is locked or absent. Unlock it, or set up the dedicated auto-login user ([Unattended hosts](agent-density.md#unattended-hosts)). |
+| Snapshot restore or a warm slot fails | The login session is locked or absent. `fluxctl doctor` reports it (`login session`). Unlock it, or set up the dedicated auto-login user ([Unattended hosts](agent-density.md#unattended-hosts)). |
 | A VM needs vmnet, bridged networking or USB | Not available in the ad hoc signed package; see [macos-signing.md](macos-signing.md). |
 
 ## Reading `fluxctl` output
@@ -64,7 +64,7 @@ More: [install-macos.md](install-macos.md#troubleshooting).
 ## Is this host ready?
 
 `fluxctl doctor` checks the daemon, the binaries, free disk, `/dev/kvm` (Linux) or the runner's virtualization
-entitlement and memory headroom (macOS), and MCP or LaunchAgent entries that still point at a removed Homebrew
+entitlement, memory headroom and whether the login session is locked (macOS), and MCP or LaunchAgent entries that still point at a removed Homebrew
 path. Each warning or failure prints the command that fixes it, and it exits `1` on a failure. It works with the
 daemon down; add `-o json` for a machine-readable report.
 
