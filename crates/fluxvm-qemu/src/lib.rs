@@ -64,6 +64,20 @@ const SHARE_PORTS_START: u8 = 4;
 /// First serial port's UNIX socket, relative to the VM workspace.
 pub const SERIAL_SOCKET: &str = "serial.sock";
 
+/// QMP unix socket under the short `run_dir` (`sockaddr_un` is ~104 bytes; macOS
+/// `Application Support/.../instances/<uuid>/qmp.sock` overflows it).
+pub fn qmp_socket_path(cfg: &Config, id: uuid::Uuid) -> PathBuf {
+    cfg.run_dir.join("qmp").join(format!("{id}.sock"))
+}
+
+/// Live QMP path for a VM: `control_socket` when set (current launches), else the
+/// legacy `<workspace>/qmp.sock` for records started before the run_dir move.
+pub fn qmp_socket(vm: &VmRecord) -> PathBuf {
+    vm.control_socket
+        .clone()
+        .unwrap_or_else(|| vm.workspace.join("qmp.sock"))
+}
+
 pub struct QemuBackend;
 
 /// One `virtiofsd` instance's device-facing identity, resolved before QEMU
@@ -453,7 +467,11 @@ pub fn build_args(
         }
     }
 
-    let qmp = ctx.workspace.join("qmp.sock");
+    let qmp = qmp_socket_path(cfg, ctx.id);
+    if let Some(parent) = qmp.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating QMP socket dir {}", parent.display()))?;
+    }
     a.extend([
         "-qmp".into(),
         format!("unix:{},server=on,wait=off", qmp.display()),
@@ -492,7 +510,7 @@ pub async fn hotplug_virtiofs(
     index: usize,
 ) -> Result<u32> {
     let tag = format!("fs{index}");
-    let qmp_socket = vm.workspace.join("qmp.sock");
+    let qmp_socket = qmp_socket(vm);
     let mut last_err = None;
     for port in (SHARE_PORTS_START..HOTPLUG_PCIE_PORTS).rev() {
         // A `virtiofsd` serves exactly one vhost-user connection and exits when it drops, so a failed
@@ -628,8 +646,9 @@ impl VmBackend for QemuBackend {
             kill_pids(&sidecar_pids);
             anyhow::bail!("QEMU exited before PID was available");
         };
+        let qmp = qmp_socket_path(cfg, ctx.id);
         if let Err(e) =
-            disks::apply_boot_throttles(&ctx.workspace, req.root_disk_io.as_ref(), QMP_BOOT_TIMEOUT)
+            disks::apply_boot_throttles(&qmp, &ctx.workspace, req.root_disk_io.as_ref(), QMP_BOOT_TIMEOUT)
                 .await
         {
             kill_pids(&[pid]);
@@ -638,7 +657,7 @@ impl VmBackend for QemuBackend {
         }
         Ok(LaunchResult {
             pid,
-            control_socket: Some(ctx.workspace.join("qmp.sock")),
+            control_socket: Some(qmp),
             jail_path: None,
             vsock_socket: None,
             virtiofsd_pids,
@@ -647,18 +666,18 @@ impl VmBackend for QemuBackend {
     }
 
     async fn pause(&self, _cfg: &Config, vm: &VmRecord) -> Result<()> {
-        qmp::execute(&vm.workspace.join("qmp.sock"), "stop", None, QMP_TIMEOUT).await?;
+        qmp::execute(&qmp_socket(vm), "stop", None, QMP_TIMEOUT).await?;
         Ok(())
     }
 
     async fn resume(&self, _cfg: &Config, vm: &VmRecord) -> Result<()> {
-        qmp::execute(&vm.workspace.join("qmp.sock"), "cont", None, QMP_TIMEOUT).await?;
+        qmp::execute(&qmp_socket(vm), "cont", None, QMP_TIMEOUT).await?;
         Ok(())
     }
 
     async fn graceful_shutdown(&self, _cfg: &Config, vm: &VmRecord) -> Result<()> {
         qmp::execute(
-            &vm.workspace.join("qmp.sock"),
+            &qmp_socket(vm),
             "system_powerdown",
             None,
             QMP_TIMEOUT,
@@ -674,21 +693,21 @@ pub async fn migration_start(
     vm: &VmRecord,
     request: &fluxvm_core::model::MigrationStartRequest,
 ) -> Result<fluxvm_core::model::MigrationStatus> {
-    qmp::migration_start(&vm.workspace.join("qmp.sock"), request, QMP_SAVEVM_TIMEOUT).await
+    qmp::migration_start(&qmp_socket(vm), request, QMP_SAVEVM_TIMEOUT).await
 }
 
 pub async fn migration_status(
     _cfg: &Config,
     vm: &VmRecord,
 ) -> Result<fluxvm_core::model::MigrationStatus> {
-    qmp::migration_status(&vm.workspace.join("qmp.sock"), QMP_TIMEOUT).await
+    qmp::migration_status(&qmp_socket(vm), QMP_TIMEOUT).await
 }
 
 pub async fn migration_cancel(
     _cfg: &Config,
     vm: &VmRecord,
 ) -> Result<fluxvm_core::model::MigrationStatus> {
-    qmp::migration_cancel(&vm.workspace.join("qmp.sock"), QMP_TIMEOUT).await
+    qmp::migration_cancel(&qmp_socket(vm), QMP_TIMEOUT).await
 }
 
 pub async fn migration_tune(
@@ -696,14 +715,14 @@ pub async fn migration_tune(
     vm: &VmRecord,
     req: &fluxvm_core::model::MigrationTuneRequest,
 ) -> Result<fluxvm_core::model::MigrationStatus> {
-    qmp::migration_tune(&vm.workspace.join("qmp.sock"), req, QMP_TIMEOUT).await
+    qmp::migration_tune(&qmp_socket(vm), req, QMP_TIMEOUT).await
 }
 
 pub async fn migration_start_postcopy(
     _cfg: &Config,
     vm: &VmRecord,
 ) -> Result<fluxvm_core::model::MigrationStatus> {
-    qmp::migration_start_postcopy(&vm.workspace.join("qmp.sock"), QMP_TIMEOUT).await
+    qmp::migration_start_postcopy(&qmp_socket(vm), QMP_TIMEOUT).await
 }
 
 /// `(major, minor)` of `cfg.qemu_binary`, probed once per binary path.
@@ -749,7 +768,7 @@ pub fn is_machine_type_name(name: &str) -> bool {
 /// The concrete machine type a running QEMU booted (`pc-q35-10.2` for a VM
 /// started with the `q35` alias on QEMU 10.2).
 pub async fn running_machine_type(vm: &VmRecord) -> Result<String> {
-    let socket = vm.workspace.join("qmp.sock");
+    let socket = qmp_socket(vm);
     if !socket.exists() {
         anyhow::bail!("{} does not exist", socket.display());
     }
@@ -795,7 +814,7 @@ fn parse_machine_types(help: &str) -> Vec<String> {
 /// Hot-add `add_vcpus` vCPUs. Returns the realized vCPU count after adding
 /// (bounded by `max_vcpus`'s headroom reserved at launch — see `build_args`).
 pub async fn hotplug_cpu(_cfg: &Config, vm: &VmRecord, add_vcpus: u8) -> Result<u8> {
-    qmp::hotplug_cpu(&vm.workspace.join("qmp.sock"), add_vcpus, QMP_TIMEOUT).await
+    qmp::hotplug_cpu(&qmp_socket(vm), add_vcpus, QMP_TIMEOUT).await
 }
 
 /// Hot-add `add_memory_mib` MiB of RAM. Returns the VM's new *total* live
@@ -803,13 +822,13 @@ pub async fn hotplug_cpu(_cfg: &Config, vm: &VmRecord, add_vcpus: u8) -> Result<
 /// just what this one call added.
 pub async fn hotplug_memory(_cfg: &Config, vm: &VmRecord, add_memory_mib: u64) -> Result<u64> {
     let hotplugged =
-        qmp::hotplug_memory(&vm.workspace.join("qmp.sock"), add_memory_mib, QMP_TIMEOUT).await?;
+        qmp::hotplug_memory(&qmp_socket(vm), add_memory_mib, QMP_TIMEOUT).await?;
     Ok(vm.request.memory_mib.saturating_add(hotplugged))
 }
 
 /// Live guest memory of a QEMU VM: boot memory plus hot-added DIMMs.
 pub async fn live_memory_mib(vm: &VmRecord) -> Result<u64> {
-    let devices = qmp::query_memory_devices(&vm.workspace.join("qmp.sock"), QMP_TIMEOUT).await?;
+    let devices = qmp::query_memory_devices(&qmp_socket(vm), QMP_TIMEOUT).await?;
     Ok(vm
         .request
         .memory_mib
@@ -827,7 +846,7 @@ pub async fn balloon_control(
     if vm.request.balloon.is_none() {
         anyhow::bail!("this VM was created without a balloon device");
     }
-    let sock = vm.workspace.join("qmp.sock");
+    let sock = qmp_socket(vm);
     let memory_mib = live_memory_mib(vm).await?;
     let target = match balloon_mib {
         Some(mib) => {
@@ -882,7 +901,7 @@ pub async fn balloon_guest_stats(vm: &VmRecord) -> Result<Option<GuestMemoryStat
         return Ok(None);
     };
     qmp::balloon_guest_stats(
-        &vm.workspace.join("qmp.sock"),
+        &qmp_socket(vm),
         spec.stats_interval_secs,
         QMP_TIMEOUT,
     )
@@ -892,12 +911,12 @@ pub async fn balloon_guest_stats(vm: &VmRecord) -> Result<Option<GuestMemoryStat
 /// Hot-add a virtio-net NIC on an already-created TAP. `index` selects
 /// `hotplug-pcie-{index}` (0..HOTPLUG_PCIE_PORTS). The caller owns the TAP.
 pub async fn hotplug_nic(vm: &VmRecord, tap: &str, mac: Option<&str>, index: u8) -> Result<()> {
-    qmp::hotplug_nic(&vm.workspace.join("qmp.sock"), tap, mac, index, QMP_TIMEOUT).await
+    qmp::hotplug_nic(&qmp_socket(vm), tap, mac, index, QMP_TIMEOUT).await
 }
 
 /// Hot-remove the extra NIC on `hotplug-pcie-{index}`. The caller removes the TAP.
 pub async fn unplug_nic(vm: &VmRecord, index: u8) -> Result<()> {
-    qmp::unplug_nic(&vm.workspace.join("qmp.sock"), index, QMP_TIMEOUT).await
+    qmp::unplug_nic(&qmp_socket(vm), index, QMP_TIMEOUT).await
 }
 
 /// [`hotplug_nic`] for a TAP the daemon already opened, passed as a descriptor because it lives in
@@ -910,7 +929,7 @@ pub async fn hotplug_nic_fd(
     index: u8,
 ) -> Result<()> {
     qmp::hotplug_nic_fd(
-        &vm.workspace.join("qmp.sock"),
+        &qmp_socket(vm),
         tap_fd,
         mac,
         index,
@@ -930,7 +949,7 @@ pub async fn hotplug_nic_fd(
 /// explicitly, since a caller acting on `Ok(())` here has no other way to
 /// learn the VM didn't come back up.
 pub async fn snapshot_save(_cfg: &Config, vm: &VmRecord, name: &str) -> Result<()> {
-    let sock = vm.workspace.join("qmp.sock");
+    let sock = qmp_socket(vm);
     let was_running = vm.status == fluxvm_core::model::VmStatus::Running;
     if was_running {
         qmp::execute(&sock, "stop", None, QMP_TIMEOUT).await?;
@@ -1002,7 +1021,7 @@ fn parse_qemu_img_snapshots(json: &[u8]) -> Result<Vec<fluxvm_core::model::VmSna
 pub async fn snapshot_delete(cfg: &Config, vm: &VmRecord, tag: &str) -> Result<()> {
     use fluxvm_core::model::VmStatus;
     if matches!(vm.status, VmStatus::Running | VmStatus::Paused) {
-        return qmp::delvm(&vm.workspace.join("qmp.sock"), tag, QMP_SAVEVM_TIMEOUT).await;
+        return qmp::delvm(&qmp_socket(vm), tag, QMP_SAVEVM_TIMEOUT).await;
     }
     let out = tokio::process::Command::new(&cfg.qemu_img_binary)
         .args(["snapshot", "-d", tag])

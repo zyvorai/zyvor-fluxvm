@@ -190,7 +190,7 @@ impl VmManager {
         }
         fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
 
-        let qmp = vm.workspace.join("qmp.sock");
+        let qmp = fluxvm_qemu::qmp_socket(&vm);
         let state_bytes =
             match fluxvm_qemu::hibernate::save_state(&qmp, &dir.join(STATE_FILE), SAVE_DEADLINE)
                 .await
@@ -280,7 +280,7 @@ impl VmManager {
 
     /// Loads the saved state into a QEMU just launched with `-incoming defer`.
     pub(crate) async fn finish_resume(&self, vm: &VmRecord, pid: u32, state: &Path) -> Result<()> {
-        let qmp = vm.workspace.join("qmp.sock");
+        let qmp = fluxvm_qemu::qmp_socket(&vm);
         process::wait_for_socket_ready(
             pid,
             &qmp,

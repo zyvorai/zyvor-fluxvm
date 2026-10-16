@@ -907,6 +907,15 @@ mod tests {
         assert_eq!(got, want);
     }
 
+    /// Tempdir under `/tmp` with a short prefix. Default `tempfile` paths on macOS
+    /// (`$TMPDIR/.../instances/<uuid>/qmp.sock`) overflow `sockaddr_un` (~104 bytes).
+    fn short_tempdir() -> tempfile::TempDir {
+        tempfile::Builder::new()
+            .prefix("fv")
+            .tempdir_in("/tmp")
+            .expect("short /tmp dir for unix sockets")
+    }
+
     fn manager(dir: &Path) -> std::sync::Arc<VmManager> {
         let cfg = Config {
             state_dir: dir.join("state"),
@@ -1234,12 +1243,15 @@ mod tests {
     #[tokio::test]
     async fn reconcile_records_a_running_qemu_machine_type() {
         use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-        let td = tempfile::tempdir().unwrap();
+        let td = short_tempdir();
         let m = manager(td.path());
         let id = Uuid::new_v4();
         let ws = m.cfg.state_dir.join("instances").join(id.to_string());
         fs::create_dir_all(&ws).unwrap();
-        let listener = tokio::net::UnixListener::bind(ws.join("qmp.sock")).unwrap();
+        // Prefer the short run_dir QMP path (production); also record it on the VM.
+        let qmp_path = fluxvm_qemu::qmp_socket_path(&m.cfg, id);
+        fs::create_dir_all(qmp_path.parent().unwrap()).unwrap();
+        let listener = tokio::net::UnixListener::bind(&qmp_path).unwrap();
         let qmp = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
             let (r, mut w) = stream.into_split();
@@ -1258,6 +1270,7 @@ mod tests {
         let mut rec = creating_record(id, &ws, 0);
         rec.status = VmStatus::Running;
         rec.pid = Some(std::process::id());
+        rec.control_socket = Some(qmp_path);
         m.store.insert_with_cid(rec, false, 3).await.unwrap();
         m.reconcile().await.unwrap();
         assert!(qmp.await.unwrap().contains("qom-get"));
@@ -1273,10 +1286,10 @@ mod tests {
     #[tokio::test]
     async fn an_expired_receiver_still_receiving_gets_a_fresh_ttl() {
         use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-        let td = tempfile::tempdir().unwrap();
+        let td = short_tempdir();
         let m = manager(td.path());
         let id = Uuid::new_v4();
-        let ws = m.receiver_dir().join(id.to_string());
+        let ws = m.cfg.run_dir.join("mr").join(id.to_string());
         fs::create_dir_all(&ws).unwrap();
         let listener = tokio::net::UnixListener::bind(ws.join("qmp.sock")).unwrap();
         let qmp = tokio::spawn(async move {

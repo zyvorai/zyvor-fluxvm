@@ -412,7 +412,7 @@ impl VmManager {
             tail_lines(&vm.log_path, req.log_lines.unwrap_or(DEFAULT_LOG_LINES)),
         );
 
-        let qmp = vm.workspace.join("qmp.sock");
+        let qmp = fluxvm_qemu::qmp_socket(&vm);
         let live_qemu = vm.backend == BackendKind::Qemu
             && matches!(vm.status, VmStatus::Running | VmStatus::Paused)
             && qmp.exists();
@@ -551,7 +551,7 @@ impl VmManager {
             bail!("{why}");
         }
         let took = fluxvm_qemu::diagnostics::dump_memory(
-            &current.workspace.join("qmp.sock"),
+            &fluxvm_qemu::qmp_socket(&current),
             path,
             DUMP_DEADLINE,
         )
