@@ -4,6 +4,16 @@ Every feature area and every document, in one place.
 
 [Back to README](../README.md)
 
+## Start here
+
+| You have | Go to |
+|---|---|
+| A Mac with Apple silicon | [install-macos.md](install-macos.md) (Homebrew) or [install.md](install.md) (`curl \| bash`, no sudo), then [macos.md](macos.md) |
+| A Linux x86_64 host with KVM | [install.md](install.md), then [getting-started.md](getting-started.md) |
+| A Kubernetes cluster | [kubernetes-operator.md](kubernetes-operator.md) |
+| Something that is not working | [troubleshooting.md](troubleshooting.md) |
+| A job in mind (CI runners, agent sandboxes, per-branch environments) | [Use cases](#use-cases) below |
+
 ## Feature highlights
 
 | Area | What's there | Docs |
