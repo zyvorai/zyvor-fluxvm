@@ -2,7 +2,7 @@
 
 The virsh-to-fluxctl command mapping, and which backend to choose for what.
 
-[Back to README](../README.md)
+[Back to README](https://github.com/zyvorai/zyvor-fluxvm/blob/main/README.md)
 
 <a id="vs-libvirtvirsh"></a>
 

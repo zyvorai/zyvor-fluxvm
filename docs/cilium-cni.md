@@ -46,7 +46,7 @@ export FLUXVM_CONTAINER_CNI_INTERFACE=eth0
 sudo ./scripts/enable-network-fabric-ga.sh --cilium --restart
 ```
 
-4. Deploy RuntimeClass / DaemonSet mounts from [deploy/k8s/cilium/](../deploy/k8s/cilium/).
+4. Deploy RuntimeClass / DaemonSet mounts from [deploy/k8s/cilium/](https://github.com/zyvorai/zyvor-fluxvm/tree/main/deploy/k8s/cilium).
 
 5. Evidence:
 

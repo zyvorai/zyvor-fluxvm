@@ -111,4 +111,4 @@ sudo ./scripts/upgrade-snapshot.sh snapshot --tag before-$VERSION
 #   sudo ./scripts/upgrade-rollback.sh snapshot --tag before-$VERSION
 ```
 
-Examples: [examples/devops/README.md](../examples/devops/README.md).
+Examples: [examples/devops/README.md](https://github.com/zyvorai/zyvor-fluxvm/blob/main/examples/devops/README.md).

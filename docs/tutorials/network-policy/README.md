@@ -7,7 +7,7 @@ audit mode, and observe — aimed at operators of the VM-edge dataplane.
 
 FluxVM pins programs under `/sys/fs/bpf/fluxvm` (schema **v4**). It does not
 write foreign CNI private maps. For node CNI coexistence (`mode=cilium`), see
-[ebpf-cilium.md](../ebpf-cilium.md).
+[ebpf-cilium.md](../../ebpf-cilium.md).
 
 | Tutorial | Focus | Time |
 |----------|-------|------|
@@ -22,13 +22,13 @@ write foreign CNI private maps. For node CNI coexistence (`mode=cilium`), see
 | [09 — Observe](09-observe.md) | Snapshot identities/groups/CNPs/VMs | ~10 min |
 | [10 — Multi-group merge](10-multi-group-merge.md) | Union / min-rate semantics | ~15 min |
 
-Reference: [network-policy.md](../network-policy.md) ·
-[network-groups.md](../network-groups.md) ·
-[network-fabric.md](../network-fabric.md) ·
-[production-dataplane.md](../production-dataplane.md) ·
-[PRODUCTION.md](../PRODUCTION.md) ·
+Reference: [network-policy.md](../../network-policy.md) ·
+[network-groups.md](../../network-groups.md) ·
+[network-fabric.md](../../network-fabric.md) ·
+[production-dataplane.md](../../production-dataplane.md) ·
+[PRODUCTION.md](../../PRODUCTION.md) ·
 [production readiness tutorials](../production/README.md) ·
-[ebpf-cilium.md](../ebpf-cilium.md).
+[ebpf-cilium.md](../../ebpf-cilium.md).
 
 ## Shared prerequisites
 

@@ -10,7 +10,7 @@ images — not only the dataplane.
 - [x] Tokens carry optional `tenant`; VM specs set `tenant` — same tutorial
 - [x] Token/OIDC tenant is authoritative on create (inherited when omitted; mismatch → 403)
 - [x] Token tenant auto-scopes list / get / mutate (other tenants → 404)
-- [x] `GET /readyz` returns HTTP 503 when `"ok": false` — DaemonSet probes in [deploy/k8s/daemonset.yaml](../deploy/k8s/daemonset.yaml); [deploy/k8s/README.md](../deploy/k8s/README.md)
+- [x] `GET /readyz` returns HTTP 503 when `"ok": false` — DaemonSet probes in [deploy/k8s/daemonset.yaml](../deploy/k8s/daemonset.yaml); [deploy/k8s/README.md](https://github.com/zyvorai/zyvor-fluxvm/blob/main/deploy/k8s/README.md)
 - [x] `GET /v1/vms?tenant=<id>` filters the fleet
 - [x] `GET /readyz` returns `"ok": true` (state dir + dataplane if required)
 - [x] `GET /healthz` for liveness; `/readyz` for readiness probes — DaemonSet wiring above
@@ -63,8 +63,8 @@ images — not only the dataplane.
 ## 5. Kubernetes
 
 - [x] DaemonSet readiness → `/readyz`; liveness → `/healthz` — [deploy/k8s/daemonset.yaml](../deploy/k8s/daemonset.yaml)
-- [x] Privileged DaemonSet + hostNetwork as in `deploy/k8s/` — [deploy/k8s/README.md](../deploy/k8s/README.md)
-- [x] Host `nbd` module loaded if GuestKit customize runs on-node — documented in [deploy/k8s/README.md](../deploy/k8s/README.md) (`modprobe nbd`)
+- [x] Privileged DaemonSet + hostNetwork as in `deploy/k8s/` — [deploy/k8s/README.md](https://github.com/zyvorai/zyvor-fluxvm/blob/main/deploy/k8s/README.md)
+- [x] Host `nbd` module loaded if GuestKit customize runs on-node — documented in [deploy/k8s/README.md](https://github.com/zyvorai/zyvor-fluxvm/blob/main/deploy/k8s/README.md) (`modprobe nbd`)
 - [ ] Operator talks to an already-healthy fabricd/FluxVM API
 - [ ] Optional MicroVM stack after DaemonSet: `deploy/k8s/microvm/`
       (GuestImage Ready on host files; `--convert` opt-in only)
@@ -238,7 +238,7 @@ and to flag the few genuinely still-open follow-ups.
 9. **Kubernetes CRD/operator** — DaemonSet packaging, tap/macvtap CR fields, and optional `--enable-placement` are implemented; see the [Kubernetes CRD/operator](kubernetes-operator.md#kubernetes-crdoperator) section and `deploy/k8s/`.
 10. **Distributed node-agent** — TLS/auth, persisted registry, and residual-capacity placement are implemented; see [operations.md](operations.md#distributed-node-agent).
 11. **Scheduler placement** — `CreateVmRequest` accepts optional `numa` (guest nodes bound to host nodes, vCPU threads pinned), `numa_node`, `cpuset`, `hugepages`, and `vfio_devices` (PCI addresses or mdev UUIDs, QEMU backend only); `GET /v1/host/topology` reports the hardware graph. See [host-topology.md](host-topology.md) and [vgpu.md](vgpu.md).
-12. **Windows path** — Offline `windows{}` (incl. `unattend_path`/`sysprep`) and live QGA on QEMU are implemented; Cloud Hypervisor Windows boot + QGA over serial socket are also done (named virtio-serial remains QEMU-only) — see [ROADMAP-DENSITY.md](ROADMAP-DENSITY.md#2-cloud-hypervisor-windows--qga).
+12. **Windows path** — Offline `windows{}` (incl. `unattend_path`/`sysprep`) and live QGA on QEMU are implemented; Cloud Hypervisor Windows boot + QGA over serial socket are also done (named virtio-serial remains QEMU-only) — see [ROADMAP-DENSITY.md](ROADMAP-DENSITY.md).
 13. **AI-agent sandbox hardening** (see [agent-sandbox-gaps.md](agent-sandbox-gaps.md)) — `fluxvm_engine=kvm`, multi-port proxy, native TC/eBPF + Cilium coexistence, benchmarks. Optional: Cilium-native identities / Hubble; published density numbers.
 
 "auto" backend selection is already implemented — see [operations.md](operations.md#auto-backend-selection).

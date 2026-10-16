@@ -2,13 +2,13 @@
 
 `fluxvm-kube`: the `DisposableVm` resource and its node-local operator.
 
-[Back to README](../README.md)
+[Back to README](https://github.com/zyvorai/zyvor-fluxvm/blob/main/README.md)
 
 ## Kubernetes CRD/operator
 
 `fluxvm-kube` is a `DisposableVm` custom resource plus a node-local operator that reconciles them against a
 *local* `fluxctl serve` instance — each node's operator only acts on objects whose `spec.node` matches the
-node it was started with, the same shape as a real DaemonSet (see [`deploy/k8s/`](../deploy/k8s/) for the
+node it was started with, the same shape as a real DaemonSet (see [`deploy/k8s/`](https://github.com/zyvorai/zyvor-fluxvm/tree/main/deploy/k8s) for the
 Dockerfile and CRD/RBAC/DaemonSet manifests). Verified end to end against a real k3s cluster (9/9 checks:
 CRD acceptance, real VM reconciliation, out-of-band-delete self-healing, and finalizer-blocked cleanup with no
 leaked QEMU process — see [`scripts/test-kube-operator.sh`](../scripts/test-kube-operator.sh)):

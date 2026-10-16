@@ -112,7 +112,7 @@ FluxVM's sandboxed-execution use case (Firecracker jailer + cgroups + netns + vs
 
 ## License
 
-Apache License 2.0, applied to the entire repository — see [README.md — License](../README.md#license) and [NOTICE](../NOTICE). No dual licensing, no separately-licensed core component, no commercial tier for FluxVM itself (Fabric and Ragnarok, which use FluxVM as their engine, are separate products with their own licensing).
+Apache License 2.0, applied to the entire repository — see [README.md — License](https://github.com/zyvorai/zyvor-fluxvm/blob/main/README.md#license) and [NOTICE](https://github.com/zyvorai/zyvor-fluxvm/blob/main/NOTICE). No dual licensing, no separately-licensed core component, no commercial tier for FluxVM itself (Fabric and Ragnarok, which use FluxVM as their engine, are separate products with their own licensing).
 
 ---
 
@@ -121,6 +121,6 @@ Apache License 2.0, applied to the entire repository — see [README.md — Lice
 - Product: [zyvor.dev](https://zyvor.dev)
 - Repository: [github.com/zyvorai/fluxvm](https://github.com/zyvorai/fluxvm)
 - Product overview + metrics: [PRODUCT_OVERVIEW.md](PRODUCT_OVERVIEW.md)
-- Exhaustive feature checklist: [../FEATURES.md](../FEATURES.md)
+- Exhaustive feature checklist: [../FEATURES.md](https://github.com/zyvorai/zyvor-fluxvm/blob/main/FEATURES.md)
 - Use cases: [../docs/use-cases.md](../docs/use-cases.md)
 - Documentation map: [index.md#documentation-map](index.md#documentation-map)

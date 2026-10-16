@@ -2,7 +2,7 @@
 
 How FluxVM relates to zyvor-fabric, Ragnarok, h2kvm and GuestKit, and how to talk to Zyvor.
 
-[Back to README](../README.md)
+[Back to README](https://github.com/zyvorai/zyvor-fluxvm/blob/main/README.md)
 
 ## Ecosystem
 

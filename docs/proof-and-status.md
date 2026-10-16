@@ -2,7 +2,7 @@
 
 We only claim what has been run. What is verified today, and the boundaries to know before you commit.
 
-[Back to README](../README.md)
+[Back to README](https://github.com/zyvorai/zyvor-fluxvm/blob/main/README.md)
 
 <a id="maturity-whats-real-today"></a>
 

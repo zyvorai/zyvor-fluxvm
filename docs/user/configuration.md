@@ -77,4 +77,4 @@ Unset `storage` → qcow2 CoW (QEMU) or reflinked raw (CH/Firecracker).
 - [Common workflows](workflows.md)
 - [Admin basics](admin-basics.md)
 - [PRODUCTION.md](../PRODUCTION.md)
-- [SECURITY.md](../../SECURITY.md)
+- [SECURITY.md](https://github.com/zyvorai/zyvor-fluxvm/blob/main/SECURITY.md)

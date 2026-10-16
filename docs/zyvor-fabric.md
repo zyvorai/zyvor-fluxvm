@@ -1,6 +1,6 @@
 # Using FluxVM through zyvor-fabric
 
-[zyvor-fabric](../../zyvor-fabric) is the other primary consumer of FluxVM, and the older/more
+[zyvor-fabric](https://github.com/zyvorai/fabric) is the other primary consumer of FluxVM, and the older/more
 direct of the two integrations: unlike Ragnarok's Kubernetes CRD approach (see
 [ragnarok.md](ragnarok.md)), zyvor-fabric talks straight to a host's `fluxctl serve` REST API
 (`backend/crates/fluxvm-driver` + `fluxvm-client` hand-mirror FluxVM's own DTOs rather than

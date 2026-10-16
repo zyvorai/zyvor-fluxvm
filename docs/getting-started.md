@@ -2,7 +2,7 @@
 
 Clone, build, install and run your first VM, plus the day-2 verbs and the network modes.
 
-[Back to README](../README.md)
+[Back to README](https://github.com/zyvorai/zyvor-fluxvm/blob/main/README.md)
 
 ## Quick start
 

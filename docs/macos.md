@@ -39,7 +39,7 @@ fluxctl run                      # a throwaway Debian VM and a shell
 brew services start fluxvm       # the daemon in the background, API on 127.0.0.1:7788
 ```
 
-The package is built from each version tag (see [`packaging/homebrew`](../packaging/homebrew/README.md)) and contains `fluxctl`, the
+The package is built from each version tag (see [`packaging/homebrew`](https://github.com/zyvorai/zyvor-fluxvm/blob/main/packaging/homebrew/README.md)) and contains `fluxctl`, the
 signed `fluxvm-vz-runner`, `fluxvm-vz-switch`, `fluxvm-blockd` and `fluxvm-usernet` side by side, which is where the daemon looks for
 them. Or build from source:
 

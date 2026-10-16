@@ -7,10 +7,10 @@ what the API does (tenants, leases, quotas, billing) see [mac-cloud-tenancy.md](
 | | Where | Status |
 |---|---|---|
 | OpenAPI 3.1 | [`schemas/fleet-openapi.yaml`](../schemas/fleet-openapi.yaml) | Written from central's handlers; checked to cover every routed `/fleet` path except node-agent and HA ones |
-| Go | [`go/fleet`](../go/fleet) (`github.com/zyvorai/fluxvm/go/fleet`) | Typed; unit tests against an in-memory fake central (`go/fleet/fleettest`) |
+| Go | [`go/fleet`](https://github.com/zyvorai/zyvor-fluxvm/tree/main/go/fleet) (`github.com/zyvorai/fluxvm/go/fleet`) | Typed; unit tests against an in-memory fake central (`go/fleet/fleettest`) |
 | Python | `fluxvm.FleetClient` ([`python/fluxvm/fleet.py`](../python/fluxvm/fleet.py)) | Standard library only; `unittest` against a fake central |
 | TypeScript | `FleetClient` ([`typescript/src/fleet.ts`](../typescript/src/fleet.ts)) | No runtime dependencies; `node:test` against a mock server |
-| Terraform | [`terraform-provider-fluxvm`](../terraform-provider-fluxvm) | terraform-plugin-framework; tested over the plugin protocol against the Go fake |
+| Terraform | [`terraform-provider-fluxvm`](https://github.com/zyvorai/zyvor-fluxvm/tree/main/terraform-provider-fluxvm) | terraform-plugin-framework; tested over the plugin protocol against the Go fake |
 
 None of these has run against a real central with real Macs yet: the tests use fakes that copy central's shapes,
 statuses and tenant scoping.
@@ -102,9 +102,9 @@ console.log((await fleet.execVm(node, vm.id, "sw_vers")).stdout);
 
 ## Terraform
 
-The provider lives in [`terraform-provider-fluxvm`](../terraform-provider-fluxvm), with registry docs in its
-[`docs/`](../terraform-provider-fluxvm/docs/index.md) and a full example in
-[`examples/main.tf`](../terraform-provider-fluxvm/examples/main.tf).
+The provider lives in [`terraform-provider-fluxvm`](https://github.com/zyvorai/zyvor-fluxvm/tree/main/terraform-provider-fluxvm), with registry docs in its
+[`docs/`](https://github.com/zyvorai/zyvor-fluxvm/blob/main/terraform-provider-fluxvm/docs/index.md) and a full example in
+[`examples/main.tf`](https://github.com/zyvorai/zyvor-fluxvm/blob/main/terraform-provider-fluxvm/examples/main.tf).
 
 ```terraform
 provider "fluxvm" {}   # FLUXVM_ENDPOINT, FLUXVM_TOKEN

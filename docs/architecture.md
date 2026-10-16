@@ -2,7 +2,7 @@
 
 How the control plane, the four backends and the image path fit together, and how the workspace is laid out.
 
-[Back to README](../README.md)
+[Back to README](https://github.com/zyvorai/zyvor-fluxvm/blob/main/README.md)
 
 ## Architecture at a glance
 
@@ -57,7 +57,7 @@ Network Fabric dataplane diagrams (packet decision and control-plane sequence):
 
 ## Project layout
 
-A Cargo workspace of **27 crates** (plus the [`python/`](../python/README.md) and [`go/`](../go/README.md) SDKs), structured for FluxVM's multi-node architecture.
+A Cargo workspace of **27 crates** (plus the [`python/`](https://github.com/zyvorai/zyvor-fluxvm/blob/main/python/README.md) and [`go/`](https://github.com/zyvorai/zyvor-fluxvm/blob/main/go/README.md) SDKs), structured for FluxVM's multi-node architecture.
 
 <details>
 <summary><b>Show the crate map</b></summary>

@@ -125,7 +125,7 @@ hotplug, QEMU-only VMM) — see Current limitations in
 [Set 3](secure-containers-set3.md),
 [Set 4](secure-containers-set4.md),
 [Set 5](secure-containers-set5.md). Deploy fragment:
-[`deploy/containerd/`](../deploy/containerd/).
+[`deploy/containerd/`](https://github.com/zyvorai/zyvor-fluxvm/tree/main/deploy/containerd).
 
 ```bash
 sudo ./scripts/install-secure-containers.sh

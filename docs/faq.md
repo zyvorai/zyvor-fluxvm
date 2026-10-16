@@ -2,7 +2,7 @@
 
 Is this for you, and the questions people ask first.
 
-[Back to README](../README.md)
+[Back to README](https://github.com/zyvorai/zyvor-fluxvm/blob/main/README.md)
 
 ## Is this for you?
 
@@ -30,7 +30,7 @@ Is this for you, and the questions people ask first.
 
 **How is this different from KubeVirt?** A different model: FluxVM's `DisposableVm` and MicroVM paths run the VMM on the host under `fluxctl serve`, not inside a virt-launcher Pod. `kubectl-fluxvm` covers console, exec, pause, resume, and CR delete. `GuestImage` HTTP staging is not CDI. QEMU live migration has a target receiver; it is not KubeVirt migration parity. Full comparison: [docs/microvm.md](microvm.md#vs-disposablevm-and-kubevirt).
 
-**Do I need Fabric or Ragnarok?** No. Clone it, build it, run `fluxctl create`. Fabric and Ragnarok are separate products that use FluxVM as their VM engine — see [Ecosystem](ecosystem.md#ecosystem).
+**Do I need Fabric or Ragnarok?** No. Clone it, build it, run `fluxctl create`. Fabric and Ragnarok are separate products that use FluxVM as their VM engine — see [Ecosystem](ecosystem.md).
 
 **What storage backends are supported?** qcow2/raw, LVM thin, NBD and Ceph RBD — see [Bring-your-own storage backend](use-cases.md#bring-your-own-storage-backend).
 
@@ -38,4 +38,4 @@ Is this for you, and the questions people ask first.
 
 **How do I test security profiles without SNP/TDX hardware?** Run `./scripts/test-security-profiles.sh` (same suite as [CI](../.github/workflows/security-profiles.yml)). Measured evidence is always `software-test` — see [docs/guides/security-profiles-howto.md](guides/security-profiles-howto.md).
 
-**What license is this under?** Apache License 2.0 for the whole repository, no dual licensing — see [License](../README.md#license).
+**What license is this under?** Apache License 2.0 for the whole repository, no dual licensing — see [License](https://github.com/zyvorai/zyvor-fluxvm/blob/main/README.md#license).

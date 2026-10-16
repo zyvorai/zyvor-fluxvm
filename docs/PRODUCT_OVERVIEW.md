@@ -5,7 +5,7 @@ Kubernetes RuntimeClass `fluxvm`: a Pod with its own guest kernel, plus
 **Sentinel** host↔guest policy ([sentinel-wedge.md](sentinel-wedge.md)) — not
 Kata-equivalent packaging ([secure-containers-supported-profile.md](secure-containers-supported-profile.md)).
 
-This doc is the capability tour and the one authoritative metrics table for FluxVM. For the pitch and quick start, see the [README](../README.md); for who this is (and isn't) for, see [POSITIONING.md](POSITIONING.md); for the exhaustive feature checklist, see [FEATURES.md](../FEATURES.md).
+This doc is the capability tour and the one authoritative metrics table for FluxVM. For the pitch and quick start, see the [README](https://github.com/zyvorai/zyvor-fluxvm/blob/main/README.md); for who this is (and isn't) for, see [POSITIONING.md](POSITIONING.md); for the exhaustive feature checklist, see [FEATURES.md](https://github.com/zyvorai/zyvor-fluxvm/blob/main/FEATURES.md).
 
 ## The Problem
 
@@ -32,7 +32,7 @@ FluxVM is a Rust-native VM control plane. It provides:
 
 ## Capability Tour
 
-The exhaustive, line-by-line checklist lives in **[FEATURES.md](../FEATURES.md)**. This section is the skim version.
+The exhaustive, line-by-line checklist lives in **[FEATURES.md](https://github.com/zyvorai/zyvor-fluxvm/blob/main/FEATURES.md)**. This section is the skim version.
 
 **VM lifecycle** — create, list, get, pause, resume, delete across all 4 backends; `"backend":"auto"` resolution; vsock-based `exec`/console/file-transfer with no SSH required.
 
@@ -174,7 +174,7 @@ Unlike some of the figures in this table, we deliberately don't include a lines-
 
 ## License
 
-Apache License 2.0 — free for commercial use, modification, and distribution, for the entire repository. See [README.md — License](../README.md#license) and [NOTICE](../NOTICE).
+Apache License 2.0 — free for commercial use, modification, and distribution, for the entire repository. See [README.md — License](https://github.com/zyvorai/zyvor-fluxvm/blob/main/README.md#license) and [NOTICE](https://github.com/zyvorai/zyvor-fluxvm/blob/main/NOTICE).
 
 ---
 
