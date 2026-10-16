@@ -358,3 +358,22 @@ Not covered by `oci-live-test.sh`: volumes, `restart` and health checks, `secret
 dashboard (`fluxctl dashboard`, served at `/console`) is not covered either. Published TCP and UDP ports have their own live test,
 `scripts/oci-udp-ports-live-test.sh`. `scripts/vz-devices-live-test.sh` is about VM devices
 (disks, USB, console ports, display), not containers.
+
+## Docker CLI (`DOCKER_HOST`)
+
+On macOS, `fluxctl serve` also listens for a **Docker Engine API** subset on a unix socket (default
+`{run_dir}/docker.sock`, e.g. `/tmp/fluxvm-run-<uid>/docker.sock`). Containers created through that socket are ordinary OCI
+sandboxes (one microVM each). Set:
+
+```bash
+brew install docker   # CLI only
+export DOCKER_HOST=unix:///tmp/fluxvm-run-$(id -u)/docker.sock
+docker pull alpine:3.22
+docker run --rm alpine:3.22 echo hello
+docker ps -a
+docker exec <id> uname -a
+```
+
+Supported: `pull`, `images`, `run`, `ps`, `rm`, `logs`, `exec`, `stop`. Not supported: `build`, Compose as a daemon, bind mounts,
+Docker networks. Disable with `docker_sock = ""` in the config. Live check: `scripts/docker-compat-live-test.sh`.
+See also [vs-desktop-hypervisors.md](vs-desktop-hypervisors.md).

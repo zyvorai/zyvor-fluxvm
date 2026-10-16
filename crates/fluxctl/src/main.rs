@@ -21,6 +21,8 @@ use std::{
     sync::Arc,
 };
 use tokio::net::TcpListener;
+#[cfg(unix)]
+use fluxvm_api::docker_engine;
 use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
 
@@ -5811,6 +5813,8 @@ async fn main() -> Result<()> {
             api::self_control::spawn(m.clone(), &cfg.state_dir);
             // Held until the daemon exits: dropping it stops the observer's pump.
             let _netobs_pump = api::install_netobs(&cfg);
+            #[cfg(unix)]
+            docker_engine::spawn_if_configured(m.clone(), &cfg);
             let app = api::router(m);
             if cfg.tls.enabled() {
                 // rustls 0.23: select a process-wide CryptoProvider (ring) before

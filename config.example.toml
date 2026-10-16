@@ -4,6 +4,10 @@
 listen = "127.0.0.1:7788"
 state_dir = "/var/lib/fluxvm"
 run_dir = "/run/fluxvm"
+# Docker Engine API shim. Empty disables. On macOS the default is
+# "{run_dir}/docker.sock" — point Docker CLI at it with:
+#   export DOCKER_HOST=unix:///tmp/fluxvm-run-$(id -u)/docker.sock
+# docker_sock = "{run_dir}/docker.sock"
 qemu_binary = "qemu-system-x86_64"
 qemu_img_binary = "qemu-img"
 cloud_hypervisor_binary = "cloud-hypervisor"

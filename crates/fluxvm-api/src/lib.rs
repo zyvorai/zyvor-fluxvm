@@ -31,6 +31,7 @@ use std::time::Duration;
 use tower_http::trace::TraceLayer;
 use uuid::Uuid;
 
+pub mod docker_engine;
 mod grants;
 mod idempotency;
 mod mfa;
