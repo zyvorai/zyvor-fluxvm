@@ -128,6 +128,19 @@ Both were run for real: 0.4.1 installed from the tap, then `brew upgrade` to 0.4
 service kept serving until `brew services restart` started the new binary), and `brew uninstall` (formula, `opt` link
 and binaries gone, no LaunchAgent or daemon left behind).
 
+## Optional: tab completion
+
+`fluxctl completions bash|zsh|fish` prints the script for your shell. For zsh:
+
+```sh
+mkdir -p ~/.zfunc && fluxctl completions zsh > ~/.zfunc/_fluxctl
+# in ~/.zshrc, before compinit:  fpath+=~/.zfunc
+```
+
+For bash write it to `~/.local/share/bash-completion/completions/fluxctl`, for fish to `~/.config/fish/completions/fluxctl.fish`.
+Homebrew can do this for you if the formula calls `generate_completions_from_executable(bin/"fluxctl", "completions")`.
+Run it again after an upgrade that adds commands.
+
 ## Optional: the fleet console
 
 The web console (`/console`) is served by `fluxvm-agent central`, the multi-Mac control plane. The Homebrew package
