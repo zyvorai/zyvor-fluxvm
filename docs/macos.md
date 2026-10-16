@@ -161,10 +161,13 @@ snapshot taken while it was logged in. Slots are reused, not consumed.
 1. Set a guest up by hand (Setup Assistant, auto-login), leave it running and `fluxctl macos-pool enroll <id>`. This saves the
    `warm` snapshot, stops the VM and marks it idle. A third enrolment is refused.
 2. `fluxctl macos-pool checkout` restores a free slot: the snapshot's disk and auxiliary storage go back first, then memory.
-   409 when every slot is checked out. A failed restore is an error; there is no cold-boot fallback.
+   409 when every slot is checked out; 503 when the restore fails and the Mac's login session is why (locked screen, nobody
+   logged in): the message says so and the slot stays idle. Any other failed restore is an error; there is no cold-boot fallback.
 3. `fluxctl macos-pool return <id>` stops the slot. Whatever the guest wrote is discarded by the next checkout.
 
-Restore needs an unlocked login session on the Mac (see Snapshots above). Not verified on hardware; the enroll, checkout
+Restore needs an unlocked login session on the Mac (see Snapshots above). `fluxctl macos-pool status` (REST
+`GET /v1/macos-pool/status`) says whether a checkout can restore right now (`login_session`: `unlocked`, `locked`,
+`no_session` or `unknown`, with `hint` when it will fail) and how many slots are free. Not verified on hardware; the enroll, checkout
 and return flow has only been unit-tested for slot selection.
 
 ### Branches (`fluxctl branch`)

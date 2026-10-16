@@ -90,6 +90,11 @@ pub struct DensityReport {
     pub oci_warm_misses: u64,
     /// The last claim, from picking a slot to the container's agent answering, ms.
     pub oci_warm_last_claim_ms: Option<u64>,
+    /// macOS: the console login session. A locked or missing one makes every warm-slot and hibernate restore fail (the
+    /// create then cold-boots); `None` where it does not apply.
+    pub login_session: Option<crate::login_session::LoginSession>,
+    /// Why restores will fail and what to do, present only when `login_session` blocks them.
+    pub restore_blocked: Option<String>,
 }
 
 /// `POST /v1/sandboxes/warm`.
@@ -182,6 +187,27 @@ mod tests {
             Some(crate::pressure_admission::PressureLevel::Warn)
         );
         assert!(crate::pressure_admission::is_enabled(&cfg.policy));
+    }
+
+    #[test]
+    fn a_report_from_an_older_daemon_has_no_session_and_a_locked_one_serialises_its_reason() {
+        let old: DensityReport = serde_json::from_str(r#"{"warm_slots_configured": 2}"#).unwrap();
+        assert_eq!(old.login_session, None);
+        assert_eq!(old.restore_blocked, None);
+        let locked = DensityReport {
+            login_session: Some(crate::login_session::LoginSession::Locked),
+            restore_blocked: crate::login_session::LoginSession::Locked.restore_hint(),
+            ..DensityReport::default()
+        };
+        let v = serde_json::to_value(&locked).unwrap();
+        assert_eq!(v["login_session"], "locked");
+        assert!(
+            v["restore_blocked"]
+                .as_str()
+                .unwrap()
+                .contains("screen is locked")
+        );
+        assert_eq!(serde_json::from_value::<DensityReport>(v).unwrap(), locked);
     }
 
     #[test]

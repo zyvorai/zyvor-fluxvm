@@ -115,7 +115,7 @@ impl VmManager {
                 continue;
             }
             if let Err(e) = self.start_from_snapshot(slot.id, WARM_TAG).await {
-                tracing::warn!(slot = %slot.id, error = %format!("{e:#}"), "restoring a warm sandbox failed; cold-booting instead");
+                tracing::warn!(slot = %slot.id, error = %format!("{e:#}"), why = ?crate::restore_blocked_hint(), "restoring a warm sandbox failed; cold-booting instead");
                 return Ok(None);
             }
             let name = name

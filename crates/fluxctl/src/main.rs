@@ -2588,12 +2588,14 @@ enum DiskCommand {
 enum MacosPoolCommand {
     /// The enrolled slots.
     List,
+    /// Whether a checkout can restore right now (the Mac's login session must be unlocked) and how many slots are free.
+    Status,
     /// Save a running, set-up, logged-in macOS guest's state as the slot's pristine copy, then stop it.
     Enroll {
         #[arg(value_parser = output::parse_vm_ref)]
         id: Uuid,
     },
-    /// Restore a free slot (409 when none is free). Needs an unlocked login session on the Mac.
+    /// Restore a free slot (409 when none is free, 503 when the Mac's session is locked). Needs an unlocked login session.
     Checkout,
     /// Stop a checked-out slot; the next checkout restores the pristine state again.
     Return {
@@ -4106,6 +4108,9 @@ async fn run_remote(
         )?,
         Command::MacosPool { command } => match command {
             MacosPoolCommand::List => pretty(&r.call(Method::GET, "/v1/macos-pool", None).await?)?,
+            MacosPoolCommand::Status => {
+                pretty(&r.call(Method::GET, "/v1/macos-pool/status", None).await?)?
+            }
             MacosPoolCommand::Enroll { id } => pretty(
                 &r.call(Method::POST, &format!("/v1/macos-pool/{id}/enroll"), None)
                     .await?,
@@ -5508,6 +5513,7 @@ async fn main() -> Result<()> {
         Command::MacosPool { command } => {
             let out = match command {
                 MacosPoolCommand::List => serde_json::to_value(m.macos_pool_list().await)?,
+                MacosPoolCommand::Status => m.macos_pool_status().await,
                 MacosPoolCommand::Enroll { id } => {
                     serde_json::to_value(m.macos_pool_enroll(id).await?)?
                 }

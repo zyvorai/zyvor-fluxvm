@@ -9,6 +9,7 @@ pub mod gpu;
 pub mod gpu_health;
 pub mod grants;
 pub mod keychain;
+pub mod login_session;
 pub mod mdev;
 pub mod metrics;
 pub mod model;

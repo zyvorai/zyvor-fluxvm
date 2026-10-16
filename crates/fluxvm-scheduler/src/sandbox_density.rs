@@ -104,7 +104,7 @@ impl VmManager {
         let vm = match self.start_from_snapshot(id, HIBERNATE_TAG).await {
             Ok(vm) => vm,
             Err(e) => {
-                tracing::warn!(vm = %id, error = %format!("{e:#}"), "restoring a hibernated sandbox failed; cold-booting it");
+                tracing::warn!(vm = %id, error = %format!("{e:#}"), why = ?crate::restore_blocked_hint(), "restoring a hibernated sandbox failed; cold-booting it");
                 self.start(id).await.context("waking the sandbox")?
             }
         };
@@ -167,6 +167,11 @@ impl VmManager {
         r.host_mem_available_mib = host.mem_available_mib;
         r.host_mem_total_mib = host.mem_total_mib;
         r.host_pressure_level = host.level;
+        if cfg!(target_os = "macos") {
+            let session = fluxvm_core::login_session::LoginSession::current();
+            r.restore_blocked = session.restore_hint();
+            r.login_session = Some(session);
+        }
         r
     }
 }

@@ -625,6 +625,13 @@ fn snapshot_backend_error(backend: BackendKind) -> Option<String> {
 
 /// Admission check for `cfg.policy`, run once resolved (see `resolve_backend`)
 /// but before any disk/network work — a rejected request should be cheap.
+/// Why a snapshot restore would fail right now because of the Mac's login session (locked screen, nobody logged in), with the
+/// fix. Read only after a restore has already failed, to say what the bare error does not. `None` off macOS or when the
+/// session is fine or unreadable.
+pub(crate) fn restore_blocked_hint() -> Option<String> {
+    fluxvm_core::login_session::LoginSession::current().restore_hint()
+}
+
 pub fn audit_event(event: &str, pairs: &[(&str, &str)]) {
     let record = fluxvm_core::policy::format_audit_record(event, pairs);
     tracing::info!(target: "fluxvm_audit", record = %record, "audit");
