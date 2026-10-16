@@ -20,7 +20,7 @@ Host: arm64 macOS 27.2; `fluxctl` 0.4.10 (Homebrew); unlocked login session; dae
 | vz-agent-session | SKIP | no `agent-micro-arm64.raw` on host |
 | vz-https | SKIP | no `agent-micro-arm64.raw` on host |
 | macos-guest-live | SKIP | needs template `disk.raw` + SSH key (session covered via IPSW) |
-| Developer ID package | PASS | `FLUXVM_SIGN_IDENTITY` NX667LTDQ2; hardened runtime |
+| Developer ID package | PASS | Developer ID Application identity; hardened runtime (team id omitted) |
 | Notarization | BLOCKED | no App Store Connect API key / `notarytool` profile; no `MACOS_NOTARY_*` secrets |
 | Provisioning profiles | MISSING | runner / vmnetd / usbd profiles not on host |
 | Mac App Store | NON-GOAL | Developer ID + Homebrew / GitHub only |

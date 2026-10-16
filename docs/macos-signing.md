@@ -62,13 +62,16 @@ needs `crates/fluxvm-apple/macos/usbd/build-install.sh` on a Mac with the SDK (a
 ## Building a signed package locally
 
 ```bash
-export FLUXVM_SIGN_IDENTITY="Developer ID Application: Zyvor AI Labs (ABCDE12345)"
+export FLUXVM_SIGN_IDENTITY="Developer ID Application: Your Org Name (TEAMID)"
 export FLUXVM_PROFILE_RUNNER=~/profiles/FluxVM_Runner.provisionprofile
 export FLUXVM_PROFILE_VMNETD=~/profiles/FluxVM_Networking.provisionprofile
 export FLUXVM_PROFILE_USBD=~/profiles/FluxVM_USB.provisionprofile
 export FLUXVM_NOTARIZE=1 FLUXVM_NOTARY_PROFILE=fluxvm-notary
 scripts/package-macos.sh --version 0.5.0
 ```
+
+Do **not** commit real Team IDs, certificate subjects, `.p12` / `.p8` material, or provisioning profiles.
+
 
 Before signing, the script checks each profile:
 - it was issued for the right bundle id;
@@ -116,7 +119,7 @@ signed with the virtualization entitlement only, so it starts, but VMs cannot us
 
 | Piece | State |
 |---|---|
-| Developer ID Application cert | **Present** on the build Mac: `ZYVORAI LABS PRIVATE LIMITED (NX667LTDQ2)` |
+| Developer ID Application cert | **Present** on the build Mac (do not publish the identity string or Team ID; check locally with `security find-identity -v -p codesigning`) |
 | Local Developer ID package | **Built** with `FLUXVM_SIGN_IDENTITY=… scripts/package-macos.sh --version 0.4.10` (hardened runtime). `spctl` reports `Unnotarized Developer ID` until notary runs |
 | Notary App Store Connect API key | **Missing** — no `notarytool` keychain profile, no `MACOS_NOTARY_*` GitHub Actions secrets |
 | Restricted entitlement profiles | **Missing** — `dev.zyvor.fluxvm.runner` / `.vmnetd` / `.usbd` Developer ID `.provisionprofile` files not installed; vmnet/bridge/physical USB stay admission-refused |

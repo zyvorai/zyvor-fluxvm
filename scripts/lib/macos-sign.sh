@@ -2,7 +2,7 @@
 # Shared signing helpers for FluxVM's macOS binaries. Source it; every function is prefixed `fs_`.
 #
 #   FLUXVM_SIGN_IDENTITY   codesign identity: "-" (ad hoc, the default) or e.g.
-#                          "Developer ID Application: Zyvor AI Labs (TEAMID1234)"
+#                          "Developer ID Application: Your Org Name (TEAMID)"
 #
 # Ad hoc signing works for everything except Apple's restricted entitlements (com.apple.vm.networking,
 # com.apple.developer.accessory-access.usb): those are only honoured for a Developer ID signed app bundle that embeds a
