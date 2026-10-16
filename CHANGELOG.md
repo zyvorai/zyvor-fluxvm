@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- **`[sandbox.dataplane] require_edge = true` refuses a VM that cannot be enforced.** A VM with no host-visible interface
+  (user NAT, `network.mode = none`) has no edge to attach the dataplane to, so it has always run with no network policy,
+  rate limit or flow records, even with `required = true` (the default), which only warns since the last release. With
+  `require_edge = true` such a create is refused before launch with a message naming the fix. It is a separate key, off by
+  default, because `required` is on by default and turning it into a refusal would reject every `mode = none` VM on upgrade;
+  the nftables mode and `vz` VMs are not affected. Unit-tested (the two switches, and `apply_sandbox_policy` refusing and not
+  refusing). Run live on a Linux host (`required = true`, `network.mode = none` qemu VM): `require_edge = true` gave HTTP 400
+  with the message, `false` gave 201 and a running VM. Not run: a real tap/bridge VM with it on, macOS.
+
 - **A locked Mac now says why warm-pool restores fail.** On a locked screen (or with nobody logged in) every snapshot
   restore fails; sandboxes then silently cold-booted and `macos-pool checkout` returned a bare restore error. The session is
   now read in one shared place (`fluxvm-core::login_session`, also used by `doctor`): `GET /v1/sandboxes/density` gains

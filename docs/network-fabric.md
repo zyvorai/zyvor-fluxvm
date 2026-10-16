@@ -34,7 +34,8 @@ is not a different `mode`; see [production-dataplane.md](production-dataplane.md
 [tutorials/network-policy/](tutorials/network-policy/README.md).
 
 `required = true` fail-closes when a host-visible VM edge exists but attach
-fails; `network.mode=none` / user NAT still soft-skip (no edge). Service load
+fails; `network.mode=none` / user NAT still soft-skip (no edge; with `required = true` that is logged at `warn`,
+and `require_edge = true` refuses such a VM at create instead). Service load
 balancing, BGP, WireGuard (host-to-host overlay lives in [FluxMesh](fluxmesh.md)), and first-class Cilium endpoint identity belong in
 separate projects rather than expanding this blast radius. Virtual networks
 (VNI-isolated eBPF routing with a Geneve overlay, SNAT and floating IPs) are
@@ -436,7 +437,7 @@ sample_rate = 100
 ```
 
 GA semantics: fail-closed on the VM edge when an edge exists; soft-skip when
-there is no host-visible iface.
+there is no host-visible iface, unless `require_edge = true` (default `false`), which refuses the create.
 
 ## Validation
 
