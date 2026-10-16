@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.4.10 (2026-10-16)
+
 - **QMP sockets under the short `run_dir` (macOS `sockaddr_un` overflow).** Putting `qmp.sock` under
   `~/Library/Application Support/FluxVM/instances/<uuid>/` (or `migration-receivers/…`) overflows the ~104-byte Unix
   socket path limit on macOS; launches and CI then failed with `path must be shorter than SUN_LEN`. QEMU now binds
