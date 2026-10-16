@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+
+- **`fluxctl vm rename|clone|fork`: the VM verbs under one noun.** `rename-vm`, `clone-vm` and `fork-vm` read differently from
+  `fleet`, `macos-pool` and `vm-template`. `vm <verb>` is the same command (it is rewritten to the existing handler, so there is
+  one implementation and one set of flags). Nothing is removed or changed: the hyphenated names keep working, and on a terminal
+  they print a one-line "now `fluxctl vm clone`" note on stderr (nothing on a pipe, so scripts and captured output are
+  untouched). The grouped `--help` and the docs use the new spelling. Not done, deliberately: removing the old names, which
+  would be the breaking change. Unit-tested (all three verbs, the flags of `fork`, the hint, an unknown verb).
+
 - **`[sandbox.dataplane] require_edge = true` refuses a VM that cannot be enforced.** A VM with no host-visible interface
   (user NAT, `network.mode = none`) has no edge to attach the dataplane to, so it has always run with no network policy,
   rate limit or flow records, even with `required = true` (the default), which only warns since the last release. With
@@ -10,6 +18,7 @@
   the nftables mode and `vz` VMs are not affected. Unit-tested (the two switches, and `apply_sandbox_policy` refusing and not
   refusing). Run live on a Linux host (`required = true`, `network.mode = none` qemu VM): `require_edge = true` gave HTTP 400
   with the message, `false` gave 201 and a running VM. Not run: a real tap/bridge VM with it on, macOS.
+
 
 - **A locked Mac now says why warm-pool restores fail.** On a locked screen (or with nobody logged in) every snapshot
   restore fails; sandboxes then silently cold-booted and `macos-pool checkout` returned a bare restore error. The session is

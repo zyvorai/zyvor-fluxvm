@@ -85,7 +85,7 @@ Two cautions:
 A fork resumes the parent's memory, so every child starts with the parent's
 hostname, `/etc/machine-id`, SSH host keys, cloud-init instance, DHCP identity,
 kernel RNG state and **agent token**. The request's `identity` says how hard to
-try (`POST /v1/vms/{id}/fork`, `fluxctl fork-vm --identity`, MCP `vm_fork`):
+try (`POST /v1/vms/{id}/fork`, `fluxctl vm fork --identity`, MCP `vm_fork`):
 
 | `identity` | Behaviour |
 |---|---|
@@ -155,7 +155,7 @@ is gone.
 ```sh
 fluxctl branch create <vm> checkpoint-a --label purpose=demo   # the guest keeps running; held ~0.4 s
 fluxctl branch list [<vm>]
-fluxctl branch start <branch> -n 4 --prefix worker             # same flags as fork-vm: --identity --network --ready --hook
+fluxctl branch start <branch> -n 4 --prefix worker             # same flags as vm fork: --identity --network --ready --hook
 fluxctl branch delete <branch>
 ```
 
@@ -203,7 +203,7 @@ child must do before it is reported: `running` (default: identity reset and noth
 `exec` (a trivial command runs, through SSH for a vz guest without an agent), `{"tcp": 5432}` (accepts connections on
 `127.0.0.1` inside the guest) or `{"http": {"port": 8080, "path": "/health"}}` (a 2xx). Probes retry for
 `ready_timeout_seconds` (default 60, hooks included); a child that is not ready fails the whole fork and is deleted.
-`fluxctl fork-vm --hook "systemctl restart app" --ready http:8080/health --ready-timeout 30`. The per-child report has
+`fluxctl vm fork --hook "systemctl restart app" --ready http:8080/health --ready-timeout 30`. The per-child report has
 `hooks_ms` and `ready_ms`.
 
 This is the place to reset application identity the guest cannot know about (a node id, a session cache): the fork

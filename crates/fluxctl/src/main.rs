@@ -349,36 +349,7 @@ enum Command {
     },
     /// Fork a running VM (flux-vm, or a vz Linux guest on apple.usernet or no network) into N
     /// running copies from one saved state. REST: `POST /v1/vms/{id}/fork` `{"count": N}`.
-    ForkVm {
-        #[arg(value_parser = output::parse_vm_ref)]
-        id: Uuid,
-        #[arg(short = 'n', long, default_value_t = 1)]
-        count: u32,
-        /// Child names are `<prefix>-<n>` (default `<vm>-fork`).
-        #[arg(long)]
-        prefix: Option<String>,
-        /// `unique` (default): fail the fork unless every child's identity reset is confirmed;
-        /// `best-effort`: log a failed reset and keep the child; `preserve`: reset nothing.
-        #[arg(long, value_parser = ["unique", "best-effort", "preserve"])]
-        identity: Option<String>,
-        /// `auto` (default), `isolated`, `none` or `preserve`; see docs/fork-and-restore.md.
-        #[arg(long, value_parser = ["auto", "isolated", "none", "preserve"])]
-        network: Option<String>,
-        /// Children restored at the same time (vz; default min(count, 8)).
-        #[arg(long)]
-        parallel: Option<u8>,
-        /// Ready when: `running` (default), `agent`, `exec`, `tcp:<port>` or `http:<port>[/path]`, probed inside
-        /// each child.
-        #[arg(long)]
-        ready: Option<String>,
-        /// Seconds a child may take to become ready, hooks included (default 60).
-        #[arg(long)]
-        ready_timeout: Option<u32>,
-        /// A command to run in each child after its identity reset, split on spaces (no shell); repeatable.
-        /// Use the REST body for arguments that contain spaces.
-        #[arg(long = "hook")]
-        hooks: Vec<String>,
-    },
+    ForkVm(ForkArgs),
     /// Block until a VM reaches a state: `running`, `stopped`, `paused`,
     /// `failed`, or `agent` (guest agent answers a ping).
     Wait {
@@ -593,6 +564,11 @@ enum Command {
     Context {
         #[command(subcommand)]
         command: ContextCommand,
+    },
+    /// VM verbs under one noun: `vm rename`, `vm clone`, `vm fork` (the hyphenated `rename-vm`, `clone-vm`, `fork-vm` keep working).
+    Vm {
+        #[command(subcommand)]
+        command: VmCommand,
     },
     /// Warm pool of up to two slot-bound macOS guests: enrol, checkout, return. REST: `/v1/macos-pool`.
     MacosPool {
@@ -2589,6 +2565,80 @@ enum DiskCommand {
     },
 }
 
+#[derive(clap::Args)]
+struct ForkArgs {
+    #[arg(value_parser = output::parse_vm_ref)]
+    id: Uuid,
+    #[arg(short = 'n', long, default_value_t = 1)]
+    count: u32,
+    /// Child names are `<prefix>-<n>` (default `<vm>-fork`).
+    #[arg(long)]
+    prefix: Option<String>,
+    /// `unique` (default): fail the fork unless every child's identity reset is confirmed;
+    /// `best-effort`: log a failed reset and keep the child; `preserve`: reset nothing.
+    #[arg(long, value_parser = ["unique", "best-effort", "preserve"])]
+    identity: Option<String>,
+    /// `auto` (default), `isolated`, `none` or `preserve`; see docs/fork-and-restore.md.
+    #[arg(long, value_parser = ["auto", "isolated", "none", "preserve"])]
+    network: Option<String>,
+    /// Children restored at the same time (vz; default min(count, 8)).
+    #[arg(long)]
+    parallel: Option<u8>,
+    /// Ready when: `running` (default), `agent`, `exec`, `tcp:<port>` or `http:<port>[/path]`, probed inside
+    /// each child.
+    #[arg(long)]
+    ready: Option<String>,
+    /// Seconds a child may take to become ready, hooks included (default 60).
+    #[arg(long)]
+    ready_timeout: Option<u32>,
+    /// A command to run in each child after its identity reset, split on spaces (no shell); repeatable.
+    /// Use the REST body for arguments that contain spaces.
+    #[arg(long = "hook")]
+    hooks: Vec<String>,
+}
+
+/// `fluxctl vm <verb>`: the VM verbs under one noun, like `fleet` and `macos-pool`. Each maps onto the existing hyphenated
+/// command (`vm clone` is `clone-vm`), which keeps working.
+#[derive(Subcommand)]
+enum VmCommand {
+    /// Rename a VM. Same as `rename-vm`.
+    Rename {
+        #[arg(value_parser = output::parse_vm_ref)]
+        id: Uuid,
+        new_name: String,
+    },
+    /// Copy a stopped VM into a new VM (disk flattened, fresh MAC, labels kept). Same as `clone-vm`.
+    Clone {
+        #[arg(value_parser = output::parse_vm_ref)]
+        id: Uuid,
+        new_name: String,
+    },
+    /// Fork a running VM into N running copies from one saved state. Same as `fork-vm`.
+    Fork(ForkArgs),
+}
+
+/// The old hyphenated spelling of a `vm` verb, if `cmd` is one: `(old, new)`. Used for the one-line hint.
+fn renamed_verb(cmd: &Command) -> Option<(&'static str, &'static str)> {
+    match cmd {
+        Command::RenameVm { .. } => Some(("rename-vm", "vm rename")),
+        Command::CloneVm { .. } => Some(("clone-vm", "vm clone")),
+        Command::ForkVm(_) => Some(("fork-vm", "vm fork")),
+        _ => None,
+    }
+}
+
+/// Rewrites `vm <verb>` into the command it names, so there is one implementation of each verb.
+fn lift_vm_group(cmd: Command) -> Command {
+    match cmd {
+        Command::Vm { command } => match command {
+            VmCommand::Rename { id, new_name } => Command::RenameVm { id, new_name },
+            VmCommand::Clone { id, new_name } => Command::CloneVm { id, new_name },
+            VmCommand::Fork(a) => Command::ForkVm(a),
+        },
+        other => other,
+    }
+}
+
 #[derive(Subcommand)]
 enum MacosPoolCommand {
     /// The enrolled slots.
@@ -4007,7 +4057,7 @@ async fn run_remote(
             )
             .await?,
         )?,
-        Command::ForkVm {
+        Command::ForkVm(ForkArgs {
             id,
             count,
             prefix,
@@ -4017,7 +4067,7 @@ async fn run_remote(
             ready,
             ready_timeout,
             hooks,
-        } => {
+        }) => {
             let mut body = json!({"count": count});
             if let Some(p) = prefix {
                 body["namePrefix"] = json!(p);
@@ -4959,6 +5009,19 @@ async fn main() -> Result<()> {
             explicit,
         )
     };
+    // `vm <verb>` becomes the command it names; a user still typing the old hyphenated name gets a one-line pointer at the
+    // new one on a terminal (nothing is printed to a pipe or a script's captured output).
+    let cli = {
+        if let Some((old, new)) = renamed_verb(&cli.command)
+            && std::io::stderr().is_terminal()
+        {
+            eprintln!("note: `fluxctl {old}` is now `fluxctl {new}`; the old name keeps working");
+        }
+        Cli {
+            command: lift_vm_group(cli.command),
+            ..cli
+        }
+    };
     if let Command::Completions { shell } = &cli.command {
         use std::io::Write;
         let mut buf = Vec::new();
@@ -5242,7 +5305,10 @@ async fn main() -> Result<()> {
         | Command::Netobs { .. }
         | Command::Agent { .. }
         | Command::Doctor { .. }
-        | Command::Quota { token: Some(_), .. } => unreachable!("handled above"),
+        | Command::Vm { .. }
+        | Command::Quota { token: Some(_), .. } => {
+            unreachable!("handled above (`vm` is lifted to its verb)")
+        }
         Command::Quota { token: None, name } => {
             println!(
                 "{}",
@@ -5281,7 +5347,7 @@ async fn main() -> Result<()> {
                 serde_json::to_string_pretty(&m.clone_vm(id, new_name, None).await?)?
             );
         }
-        Command::ForkVm {
+        Command::ForkVm(ForkArgs {
             id,
             count,
             prefix,
@@ -5291,7 +5357,7 @@ async fn main() -> Result<()> {
             ready,
             ready_timeout,
             hooks,
-        } => {
+        }) => {
             // The same JSON the REST body carries, so the vocabulary is one thing.
             let mut body = serde_json::json!({"count": count});
             if let Some(r) = ready {
@@ -8979,6 +9045,45 @@ mod tier2_cli_tests {
             cli(&["restore-backup", &id, "db-1"]).unwrap().command,
             Command::RestoreBackup { name, .. } if name == "db-1"
         ));
+    }
+
+    #[test]
+    fn the_vm_group_is_the_same_command_as_the_hyphenated_verb() {
+        let id = Uuid::new_v4().to_string();
+        let lifted = |args: &[&str]| lift_vm_group(Cli::try_parse_from(args).unwrap().command);
+        assert!(matches!(
+            lifted(&["fluxctl", "vm", "clone", &id, "web-2"]),
+            Command::CloneVm { new_name, .. } if new_name == "web-2"
+        ));
+        assert!(matches!(
+            lifted(&["fluxctl", "vm", "rename", &id, "db"]),
+            Command::RenameVm { new_name, .. } if new_name == "db"
+        ));
+        match lifted(&[
+            "fluxctl", "vm", "fork", &id, "-n", "3", "--prefix", "w", "--hook", "true",
+        ]) {
+            Command::ForkVm(a) => assert_eq!(
+                (a.count, a.prefix.as_deref(), a.hooks.len()),
+                (3, Some("w"), 1)
+            ),
+            _ => panic!("expected ForkVm"),
+        }
+        // The old spellings still parse and are recognised for the hint; `vm <verb>` as typed is not one.
+        for (old, new) in [
+            ("rename-vm", "vm rename"),
+            ("clone-vm", "vm clone"),
+            ("fork-vm", "vm fork"),
+        ] {
+            let mut args = vec!["fluxctl", old, &id];
+            if old != "fork-vm" {
+                args.push("x");
+            }
+            let c = Cli::try_parse_from(args).unwrap().command;
+            assert_eq!(renamed_verb(&c), Some((old, new)));
+        }
+        let typed = Cli::try_parse_from(["fluxctl", "vm", "clone", &id, "x"]).unwrap();
+        assert!(renamed_verb(&typed.command).is_none());
+        assert!(Cli::try_parse_from(["fluxctl", "vm", "reboot", &id]).is_err());
     }
 
     #[test]

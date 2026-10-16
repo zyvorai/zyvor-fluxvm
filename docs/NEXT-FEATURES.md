@@ -108,7 +108,7 @@ Ranked by operator value vs effort. Tier 1 is being built on
 | # | Item | Surface |
 |---|---|---|
 | N1 | Restart as one op | scheduler `restart`, `POST /v1/vms/{id}/restart`, `fluxctl restart` |
-| N2 | VM metadata PATCH (rename, labels) | `PATCH /v1/vms/{id}`, `fluxctl label`, `fluxctl rename-vm` |
+| N2 | VM metadata PATCH (rename, labels) | `PATCH /v1/vms/{id}`, `fluxctl label`, `fluxctl vm rename` |
 | N3 | Snapshot list / delete | `GET/DELETE /v1/vms/{id}/snapshots[/{tag}]`, `fluxctl snapshot-list`, `snapshot-delete` |
 | N4 | Events API + watch | `GET /v1/events`, `GET /v1/events/stream` (SSE), `fluxctl events --follow` |
 | N5 | Tenant quota usage | `GET /v1/quotas/me`, `fluxctl quota` |
