@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- **`fluxctl doctor` no longer fails a healthy Linux host because of who runs it.** Run on a Linux host for the first time,
+  as a user outside the `kvm` group, it exited 1 with `kvm FAIL` while the root daemon was healthy and its VMs were running.
+  An unopenable `/dev/kvm` is now a warning while the daemon answers (it runs as another user), and stays a failure when
+  nothing answers or `/dev/kvm` is missing. Also silenced two Linux-only dead-code warnings. Run on the Linux host as an
+  unprivileged user (warn, exit 0), as root (ok, exit 0) and with no daemon (FAIL, exit 1).
+
 - **macOS guests get their agent token from the host; nothing is provisioned by hand in a clone.** The guest agent
   needed a token typed into every macOS guest (no cloud-init), or it refused everything. The daemon now writes the VM's
   token to `agent-token` (0600) in the read-only `firstboot` share and attaches that share whenever a macOS guest has
@@ -35,8 +41,9 @@
   or `network.mode = none` has no host-visible interface, so the eBPF/Cilium dataplane has nothing to attach to and
   skips it (failing closed would be wrong: there is no edge). That skip was logged at `debug`, so an operator who set
   `[sandbox.dataplane] required = true` saw nothing while the VM ran without policy, rate limits or flow records. It
-  is now a `warn` that says so; without `required` it stays at `debug`. Unit-tested (the decision is a pure function);
-  not observed in a live daemon log.
+  is now a `warn` that says so; without `required` it stays at `debug`. Unit-tested (the decision is a pure function),
+  and observed in a live daemon log on a Linux host: with `required = true` a `network.mode = none` VM logged the warning,
+  and with `required = false` it logged nothing.
 
 
 
@@ -55,8 +62,8 @@
   client and LaunchAgent entries that still point at a removed Homebrew `Cellar` path. Each warning or failure
   prints the command that fixes it; exit code 1 on a failure. Text by default, JSON with `-o json`. Unit-tested
   (the checks take injected observations) and run on an M4 with the daemon down (exit 1, fix printed) and up
-  (exit 0). **Not run:** the Linux-only `/dev/kvm` check on a Linux host (it compiles only there), and the
-  stale-path warning against a real upgraded Homebrew install (unit-tested only).
+  (exit 0). Run on a Linux host (80.79.5.173) as an unprivileged user, as root and with no daemon: see the next entry for what it
+  found. **Not run:** the stale-path warning against a real upgraded Homebrew install (unit-tested only).
 
 - **Fleet-level macOS pool checkout.** The per-Mac macOS pool (`/v1/macos-pool`, two slot-bound guests) could only be
   used by calling one Mac. Each Mac's heartbeat now carries its idle slot count (`apple.macos_pool_idle`, absent when
