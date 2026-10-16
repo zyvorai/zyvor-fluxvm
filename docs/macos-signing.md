@@ -112,9 +112,22 @@ fluxctl vz host        # vm_networking_entitlement should now be true
 Run without `FLUXVM_PACKAGE_DIR`, the scripts still build and sign ad hoc from source for development. The broker is then
 signed with the virtualization entitlement only, so it starts, but VMs cannot use its networks.
 
-## Status
+## Status (2026-10-16)
 
-The scripts and the workflow are written but **not yet run on a Mac**: no certificate, profile or Apple approval exists
-yet. The first signed release is the real test. Check `fluxctl vz host`, a VM on `apple.vmnet`, two VMs on one named
-network through the broker, and USB passthrough. Those are the production gates in
-[macos-vz27-remaining-complete.md](macos-vz27-remaining-complete.md).
+| Piece | State |
+|---|---|
+| Developer ID Application cert | **Present** on the build Mac (identity name omitted from this public doc; check with `security find-identity -v -p codesigning`) |
+| Local Developer ID package | **Built** with `FLUXVM_SIGN_IDENTITY=… scripts/package-macos.sh --version 0.4.10` (hardened runtime). `spctl` reports `Unnotarized Developer ID` until notary runs |
+| Notary App Store Connect API key | **Missing** — no `notarytool` keychain profile, no `MACOS_NOTARY_*` GitHub Actions secrets |
+| Restricted entitlement profiles | **Missing** — `dev.zyvor.fluxvm.runner` / `.vmnetd` / `.usbd` Developer ID `.provisionprofile` files not installed; vmnet/bridge/physical USB stay admission-refused |
+| GitHub Actions secrets | Wire when material exists: `MACOS_DEVELOPER_ID_P12`, `MACOS_DEVELOPER_ID_P12_PASSWORD`, optional `MACOS_PROFILE_*`, `MACOS_NOTARY_KEY_P8`, `MACOS_NOTARY_KEY_ID`, `MACOS_NOTARY_ISSUER` (see table above) |
+
+Once the notary API key is in secrets (or `xcrun notarytool store-credentials` locally), rebuild with `FLUXVM_NOTARIZE=1`, confirm `stapler validate` / `spctl -a -t exec` on the bundles, attach the tarball to the GitHub release, and refresh the Homebrew formula sha256.
+
+Production gates after profiles land: `fluxctl vz host`, a VM on `apple.vmnet`, two VMs on one named network through the broker, and USB passthrough — [macos-vz27-remaining-complete.md](macos-vz27-remaining-complete.md).
+
+## Mac App Store — non-goal
+
+FluxVM is **not** submitted to the Mac App Store. Distribution is **Developer ID + notarization** via GitHub releases and Homebrew (`zyvorai/tap/fluxvm`).
+
+MAS is a poor fit for this product: App Sandbox is required and incompatible with the hypervisor control plane; packaging is a multi-binary CLI/daemon with LaunchAgent helpers, not a sandboxed single `.app`; restricted entitlements (`com.apple.vm.networking`, Accessory Access USB) follow the Developer ID profile path documented above; App Store Connect appears here only as the **notarytool** credential source.

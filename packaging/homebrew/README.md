@@ -27,6 +27,11 @@ The installer resolves "latest" with `releases/latest`, which **skips drafts**: 
 keep getting the previous version. Tag, wait for both workflows, check the assets, publish, then update the formula.
 `scripts/test-install.sh` exercises the installer against fake packages (no network) and runs in `site-check.yml`.
 
+**Notarization.** `scripts/package-macos.sh` can Developer ID–sign and notarize when credentials exist
+([docs/macos-signing.md](../../docs/macos-signing.md)). As of 0.4.10 the published Homebrew tarball may still be
+ad hoc or Developer ID without a staple; check readiness with `scripts/check-macos-release-secrets.sh`. Distribution
+is GitHub + Homebrew — **not** the Mac App Store.
+
 ## Build the package locally
 
 `scripts/package-macos.sh` (add `--profile debug` for a quick, large, unoptimised build) writes

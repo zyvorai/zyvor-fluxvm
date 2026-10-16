@@ -65,8 +65,9 @@ host_infer_port = 8080   # loopback port of the host model server
 - OCI sandboxes: set `apple.host_gpu` on the underlying VM spec; env injection for
   `oci-init` processes may need the image to read `/etc/environment`.
 
-## Demo
+## Demo and live test
 
 [`examples/agent-sandbox-demo/local-model.sh`](../examples/agent-sandbox-demo/local-model.sh)
-still works with a manual `vsock_services` entry. Prefer `host_gpu: true` for
-new scripts.
+(`STAND_IN=1` or a real model on `:8080`) and
+[`scripts/vz-host-gpu-live-test.sh`](../scripts/vz-host-gpu-live-test.sh) exercise the path against a
+running daemon. Prefer `host_gpu: true` for new scripts.
