@@ -3,6 +3,10 @@ name: Release (Linux package)
 # Builds the Linux package (fluxctl, fluxvm-hypervisor, fluxvm-agent) for a version tag and attaches it, with its
 # checksum, to that tag's GitHub release (created as a DRAFT if it does not exist yet, so nothing is published until
 # someone publishes it). scripts/install.sh downloads exactly these assets. The macOS package is release-macos.yml.
+#
+# The build runs in an ubuntu:22.04 container: the self-hosted runners differ in OS release, and a binary linked on a newer
+# glibc (2.38/2.39) does not start on 22.04. The container also needs no sudo on the runner host. Smoke test and attach run
+# on the host afterwards (they need docker and the release token), from the uploaded artifact.
 on:
   push:
     tags: ["v*"]
@@ -48,7 +52,12 @@ jobs:
       matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
     runs-on: ${{ matrix.runner }}
     continue-on-error: ${{ matrix.experimental }}
+    container: ubuntu:22.04
+    env:
+      DEBIAN_FRONTEND: noninteractive
     steps:
+      - name: Base tools (the container is a bare ubuntu:22.04)
+        run: apt-get update -qq && apt-get install -y -qq git curl ca-certificates build-essential pkg-config python3
       - uses: actions/checkout@v7
         with:
           path: fluxvm
@@ -65,14 +74,14 @@ jobs:
         if: matrix.cross
         run: |
           # The default sources serve amd64 only; arm64 packages come from ports.ubuntu.com.
-          sudo sed -i 's/^deb \(http\|https\):/deb [arch=amd64] \1:/' /etc/apt/sources.list
-          sudo find /etc/apt/sources.list.d -name '*.sources' -exec sed -i '/^Types:/a Architectures: amd64' {} +
-          sudo dpkg --add-architecture arm64
+          sed -i 's/^deb \(http\|https\):/deb [arch=amd64] \1:/' /etc/apt/sources.list
+          find /etc/apt/sources.list.d -name '*.sources' -exec sed -i '/^Types:/a Architectures: amd64' {} +
+          dpkg --add-architecture arm64
           for suite in jammy jammy-updates jammy-security; do
-            echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports $suite main universe" | sudo tee -a /etc/apt/sources.list.d/arm64.list
+            echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports $suite main universe" >> /etc/apt/sources.list.d/arm64.list
           done
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq gcc-aarch64-linux-gnu libsystemd-dev:arm64 libhivex-dev:arm64 libbpf-dev:arm64
+          apt-get update -qq
+          apt-get install -y -qq gcc-aarch64-linux-gnu libsystemd-dev:arm64 libhivex-dev:arm64 libbpf-dev:arm64
           echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
           echo "PKG_CONFIG_aarch64_unknown_linux_gnu=aarch64-linux-gnu-pkg-config" >> "$GITHUB_ENV"
           echo "PKG_CONFIG_ALLOW_CROSS=1" >> "$GITHUB_ENV"
@@ -80,26 +89,44 @@ jobs:
           echo "PKG_CONFIG_LIBDIR=/usr/lib/aarch64-linux-gnu/pkgconfig:/usr/share/pkgconfig" >> "$GITHUB_ENV"
           echo "BINDGEN_EXTRA_CLANG_ARGS_aarch64_unknown_linux_gnu=--sysroot=/ -I/usr/include/aarch64-linux-gnu" >> "$GITHUB_ENV"
       - name: System dependencies (the same as ci.yml)
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq libsystemd-dev libhivex-dev clang llvm libbpf-dev linux-libc-dev
+        run: apt-get install -y -qq libsystemd-dev libhivex-dev clang llvm libbpf-dev linux-libc-dev
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: fluxvm
-          key: release-linux-${{ matrix.arch }}
+          key: release-linux-${{ matrix.arch }}-jammy
       - name: Package
-        id: pkg
         working-directory: fluxvm
         run: |
           TAG="${{ github.event.inputs.tag || github.ref_name }}"
           scripts/package-linux.sh --version "${TAG#v}" ${{ matrix.cross && '--target aarch64-unknown-linux-gnu' || '' }}
-          echo "file=$(ls target/package/*.tar.gz)" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fluxvm-linux-${{ matrix.arch }}
+          path: |
+            fluxvm/target/package/*.tar.gz
+            fluxvm/target/package/*.sha256
+
+  verify:
+    needs: [plan, package]
+    # Runs even when the experimental aarch64 build failed, so the x86_64 package still reaches the release.
+    if: ${{ !cancelled() && needs.package.result != 'cancelled' }}
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    runs-on: ${{ matrix.runner }}
+    continue-on-error: ${{ matrix.experimental }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: fluxvm-linux-${{ matrix.arch }}
+          path: pkg
       - uses: docker/setup-qemu-action@v3
         if: matrix.cross
         with:
           platforms: arm64
       - name: Smoke test in a clean container
-        working-directory: fluxvm
         run: |
-          F="$(realpath "${{ steps.pkg.outputs.file }}")"
+          F="$(realpath pkg/*.tar.gz)"
           docker run --rm ${{ matrix.cross && '--platform linux/arm64' || '' }} -v "$F:/pkg.tar.gz:ro" ubuntu:22.04 bash -euc '
             apt-get update -qq && apt-get install -y -qq libhivex0 libsystemd0 >/dev/null
             mkdir /p && tar -xzf /pkg.tar.gz -C /p
@@ -108,18 +135,12 @@ jobs:
             done
             /p/fluxvm-*/bin/fluxctl --version
           '
-      - uses: actions/upload-artifact@v4
-        with:
-          name: fluxvm-linux-${{ matrix.arch }}
-          path: |
-            fluxvm/target/package/*.tar.gz
-            fluxvm/target/package/*.sha256
       - name: Attach to the release (draft if new)
         if: github.event_name == 'push' || github.event.inputs.tag != ''
-        working-directory: fluxvm
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
         run: |
           TAG="${{ github.event.inputs.tag || github.ref_name }}"
           gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --draft --title "$TAG" --notes "Linux package. Install with: curl -fsSL https://zyvorai.github.io/zyvor-fluxvm/install.sh | bash"
-          gh release upload "$TAG" target/package/*.tar.gz target/package/*.sha256 --clobber
+          gh release upload "$TAG" pkg/*.tar.gz pkg/*.sha256 --clobber
