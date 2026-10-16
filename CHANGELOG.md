@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+
 - **UDP published ports for container sandboxes.** `ports` accepts `HOST:CONTAINER/udp` next to TCP. The Mac's NAT
   relay is TCP-only, so a sandbox that publishes UDP gets the userspace gateway (`apple.usernet`) as its network card,
   which already forwards both; a UDP port is refused together with `expose`, `gateway_hosts` or private `networks`
@@ -11,6 +12,23 @@
   to the published `127.0.0.1` ports are echoed by `nc` in an alpine container, a clash is refused, and delete frees
   the port. This is also the first live run of published TCP ports for container sandboxes. Not run: a UDP port next
   to volumes, restarts or health checks, and UDP through `--fleet` placement.
+
+
+- **`fluxctl doctor` reports a locked or absent login session on a Mac.** Snapshot restore and warm-pool slots need a
+  logged-in, unlocked session; on a locked or headless Mac they failed with no hint why. `doctor` now reads the
+  console session from `ioreg` (`CGSSessionScreenIsLocked` inside `IOConsoleUsers`; `IOConsoleLocked` is not used,
+  it said `No` while the session was locked) and warns with the unattended-hosts fix. Unit-tested on captured
+  `ioreg` text, and run on an M4 whose screen was locked at the time (warned). **Not run:** a Mac with nobody
+  logged in at the console, and the pool status endpoint does not report it yet.
+
+- **A VM the dataplane cannot attach to is no longer skipped silently under `required = true`.** A VM on user NAT
+  or `network.mode = none` has no host-visible interface, so the eBPF/Cilium dataplane has nothing to attach to and
+  skips it (failing closed would be wrong: there is no edge). That skip was logged at `debug`, so an operator who set
+  `[sandbox.dataplane] required = true` saw nothing while the VM ran without policy, rate limits or flow records. It
+  is now a `warn` that says so; without `required` it stays at `debug`. Unit-tested (the decision is a pure function);
+  not observed in a live daemon log.
+
+
 
 - **CLI rough edges.** `fluxctl --help` now lists `doctor` and prints the exit-code contract: `0` success, `1` an error
   or a failing `doctor` check, `2` a usage error, and for `run`, `sandbox run`, `ssh`, `fleet exec` and
