@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- **`scripts/preflight.sh` now runs `fluxctl doctor`, so the two cannot drift apart.** New `fluxctl doctor --host-only`
+  checks the machine's prerequisites and skips the daemon check, for a host FluxVM is not installed on yet (an unopenable
+  `/dev/kvm` is then a warning, since a packaged daemon runs as root). The script uses it when a `fluxctl` that has the flag
+  is on PATH or built in `./target`, and otherwise runs its old checks, so it still works on a fresh machine. `--native-kvm`
+  keeps its extra binaries. Run on macOS (wrapper path, fallback path, bad argument); the Linux run is listed in the PR.
+
 - **`fluxctl doctor` no longer fails a healthy Linux host because of who runs it.** Run on a Linux host for the first time,
   as a user outside the `kvm` group, it exited 1 with `kvm FAIL` while the root daemon was healthy and its VMs were running.
   An unopenable `/dev/kvm` is now a warning while the daemon answers (it runs as another user), and stays a failure when

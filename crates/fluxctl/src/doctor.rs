@@ -217,12 +217,18 @@ fn human(b: u64) -> String {
 
 /// Linux: `/dev/kvm` must exist and be usable. `daemon_up` is whether the daemon answered: it usually runs
 /// as another user (root), so a `/dev/kvm` this user cannot open is only a warning while it is healthy: the VMs
-/// do not run as this user.
+/// do not run as this user. `None` = the daemon was not checked (`--host-only`): judge `/dev/kvm` alone, as a warning,
+/// because a packaged daemon runs as root.
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-pub fn check_kvm(exists: bool, usable: bool, daemon_up: bool) -> Check {
+pub fn check_kvm(exists: bool, usable: bool, daemon_up: Option<bool>) -> Check {
     match (exists, usable) {
         (true, true) => Check::ok("kvm", "/dev/kvm is present and usable"),
-        (true, false) if daemon_up => Check::warn(
+        (true, false) if daemon_up.is_none() => Check::warn(
+            "kvm",
+            "/dev/kvm exists but this user cannot open it; the daemon normally runs as root and does not need this",
+            "only needed to run VMs as this user: sudo usermod -aG kvm \"$USER\"   then log in again",
+        ),
+        (true, false) if daemon_up == Some(true) => Check::warn(
             "kvm",
             "/dev/kvm exists but this user cannot open it; the daemon is running, so it runs as another user",
             "only needed to run VMs as this user: sudo usermod -aG kvm \"$USER\"   then log in again",
@@ -516,13 +522,20 @@ fn client_refs() -> Vec<PathRef> {
     refs
 }
 
-/// Probe this host and return the report.
-pub async fn gather(listen: &str, state_dir: &Path) -> Vec<Check> {
+/// Probe this host and return the report. `host_only` skips the daemon check, for a machine FluxVM is not installed on
+/// yet: there is no daemon to find, and `/dev/kvm` is judged on its own (the daemon will run as root).
+pub async fn gather(listen: &str, state_dir: &Path, host_only: bool) -> Vec<Check> {
     let mut out = Vec::new();
 
-    let healthz = probe(listen, "/healthz").await;
-    let readyz = probe(listen, "/readyz").await;
-    out.push(check_daemon(listen, &healthz, &readyz));
+    let healthz = if host_only {
+        Ok(200)
+    } else {
+        probe(listen, "/healthz").await
+    };
+    if !host_only {
+        let readyz = probe(listen, "/readyz").await;
+        out.push(check_daemon(listen, &healthz, &readyz));
+    }
 
     #[cfg(target_os = "macos")]
     let (required, optional): (&[&'static str], &[&'static str]) = (
@@ -560,7 +573,11 @@ pub async fn gather(listen: &str, state_dir: &Path) -> Vec<Check> {
             .write(true)
             .open("/dev/kvm")
             .is_ok();
-        out.push(check_kvm(exists, usable, matches!(healthz, Ok(200))));
+        out.push(check_kvm(
+            exists,
+            usable,
+            (!host_only).then_some(matches!(healthz, Ok(200))),
+        ));
     }
 
     out.push(check_disk(state_dir, free_bytes(state_dir)));
@@ -615,23 +632,41 @@ mod tests {
     }
 
     #[test]
+    fn an_unchecked_daemon_makes_an_unopenable_kvm_a_warning_not_a_failure() {
+        let c = check_kvm(true, false, None);
+        assert_eq!(level(&c), Level::Warn);
+        assert_eq!(exit_code(&[c]), 0);
+        // A missing /dev/kvm is still a failure whatever the daemon state.
+        assert_eq!(level(&check_kvm(false, false, None)), Level::Fail);
+    }
+
+    #[test]
     fn kvm_states() {
-        assert_eq!(level(&check_kvm(true, true, false)), Level::Ok);
-        assert!(check_kvm(true, false, false).fix.unwrap().contains("kvm"));
-        assert!(check_kvm(false, false, false).detail.contains("missing"));
+        assert_eq!(level(&check_kvm(true, true, Some(false))), Level::Ok);
+        assert!(
+            check_kvm(true, false, Some(false))
+                .fix
+                .unwrap()
+                .contains("kvm")
+        );
+        assert!(
+            check_kvm(false, false, Some(false))
+                .detail
+                .contains("missing")
+        );
     }
 
     #[test]
     fn an_unopenable_kvm_is_only_a_warning_while_the_daemon_is_healthy() {
         // The daemon runs as root, this user is not in the kvm group: a healthy host, not a failure.
-        let c = check_kvm(true, false, true);
+        let c = check_kvm(true, false, Some(true));
         assert_eq!(level(&c), Level::Warn);
         assert!(c.detail.contains("another user"));
         assert_eq!(exit_code(&[c]), 0);
         // With no daemon there is nothing proving VMs can run, so it stays a failure.
-        assert_eq!(level(&check_kvm(true, false, false)), Level::Fail);
+        assert_eq!(level(&check_kvm(true, false, Some(false))), Level::Fail);
         // A missing /dev/kvm fails regardless of the daemon.
-        assert_eq!(level(&check_kvm(false, false, true)), Level::Fail);
+        assert_eq!(level(&check_kvm(false, false, Some(true))), Level::Fail);
     }
 
     #[test]
