@@ -266,6 +266,9 @@ sudo ./scripts/test-crash-recovery.sh [--image PATH] [--fork-spec FILE] [--port 
 The daemon runs from a throwaway config in a `mktemp -d` directory, with its own
 `state_dir`, `run_dir`, port (default 17788) and `reaper_interval_secs = 2`. It
 does not read or write `/var/lib/fluxvm` VM state (it only reads the image).
+Use a **short** `run_dir` (under `/tmp`) so QMP sockets stay within the macOS
+`sockaddr_un` limit; production does the same (`run_dir/qmp/<id>.sock` from 0.4.10 —
+see [operations.md](operations.md#state-layout)).
 VMM cleanup is `pkill -9 -f "<temp state>/instances"`, scoped to that path.
 
 ### Baseline namespaces and taps

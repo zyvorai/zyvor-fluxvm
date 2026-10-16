@@ -1,5 +1,9 @@
 # GPUs for sandboxes
 
+> **On a Mac** there is no VFIO GPU passthrough into a Linux VZ guest. Use `host_gpu: true` /
+> `fluxctl agent run --host-gpu` so the guest calls the host Metal/MLX (or llama.cpp) OpenAI endpoint over vsock —
+> [host-inference.md](host-inference.md). This page is the **Linux / QEMU VFIO** path.
+
 A sandbox can ask for GPUs with `gpus` on `POST /v1/sandboxes`. FluxVM picks free ones itself and passes them through
 to the guest with VFIO. The caller never names a device, so two callers cannot be given the same GPU.
 

@@ -43,12 +43,13 @@ On an Apple M4 mini (16 GB, macOS 27.2), `debian-13` guest, daemon on loopback, 
 ## A local model, with no network card
 
 `local-model.sh` shows the other half of the privacy story: a sandbox with **no network device** (only `lo`) that still
-reaches an OpenAI-compatible server on the Mac, through one vsock port relayed to `127.0.0.1:PORT`
-(`apple.vsock_services`, `tcp`). Inside the guest it starts a ten-line relay, asks `/v1/models` and a chat completion,
-and then shows the internet is still unreachable.
+reaches an OpenAI-compatible server on the Mac. Prefer **`host_gpu: true`** (0.4.10+): the daemon installs the vsock
+forwarder, sets guest `OPENAI_BASE_URL`, and talks to `[apple].host_infer_port` (default 8080). See
+[docs/host-inference.md](../../docs/host-inference.md). Manual `apple.vsock_services` still works for older daemons.
 
 ```bash
 llama-server -m model.gguf --port 8080 &        # or mlx_lm.server --port 8080
+# or: fluxctl infer serve --stand-in
 examples/agent-sandbox-demo/local-model.sh
 STAND_IN=1 examples/agent-sandbox-demo/local-model.sh   # no model: a stub server, proves the path not inference
 ```

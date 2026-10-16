@@ -17,8 +17,9 @@ install page to open.
 | `fluxctl: command not found` | `~/.local/bin` is not on `PATH`. Add `export PATH="$HOME/.local/bin:$PATH"` to your shell profile, or open a new shell. |
 | `dyld: Library not loaded: .../libhivex.dylib` | `brew install hivex` (the installer does it unless `--no-deps`). |
 | `error while loading shared libraries: libhivex.so.0` | `sudo apt-get install libhivex0` (Debian/Ubuntu) or `sudo dnf install hivex` (Fedora). |
-| `unrecognized subcommand 'agent'` | You installed a release older than the session work. Install a newer one, or build from source. |
+| `unrecognized subcommand 'agent'` | You installed a release older than 0.4.8. Install 0.4.10 (or newer), or build from source. |
 | `skipped fluxctl: ... exists and is not a link` | A real file of yours is in the way. Move it, or use another `--prefix`. |
+| `path must be shorter than SUN_LEN` / QMP connect fails on a Mac | Unix socket path too long under `~/Library/Application Support/…`. Fixed in **0.4.10**: QMP binds under short `run_dir/qmp/<id>.sock`. Upgrade, or set a short `[paths] run_dir`. See [operations.md](operations.md#state-layout). |
 
 More: [install.md](install.md#troubleshooting).
 
@@ -42,6 +43,7 @@ More: [install-macos.md](install-macos.md#troubleshooting).
 | `the Apple runner fluxvm-vz-runner was not found (looked at: …/target/debug/…)` | A VM record from a development build points at a path that no longer exists. Delete the VM (`fluxctl delete <id>`) and create it again. |
 | Snapshot restore or a warm slot fails | The login session is locked or absent. `fluxctl doctor` reports it (`login session`). Unlock it, or set up the dedicated auto-login user ([Unattended hosts](agent-density.md#unattended-hosts)). |
 | A VM needs vmnet, bridged networking or USB | Not available in the ad hoc signed package; see [macos-signing.md](macos-signing.md). |
+| Offline sandbox cannot reach a local model | Prefer `host_gpu: true` / `fluxctl agent run --host-gpu` (0.4.10+) so the guest gets `OPENAI_BASE_URL` over vsock. Serve something on `[apple].host_infer_port` (default 8080); probe with `fluxctl infer status`. See [host-inference.md](host-inference.md). |
 
 ## Reading `fluxctl` output
 

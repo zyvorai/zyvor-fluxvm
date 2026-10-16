@@ -224,7 +224,7 @@ function Platform() {
           <Heading as="h3">For AI agents</Heading>
           <p>
             An MCP server for seven agent clients, offline or allow-listed sandboxes, file change-sets and VM
-            fork for disposable machines, with a local model reachable over one vsock port.
+            fork for disposable machines, with host Metal/MLX inference over vsock (`host_gpu`).
           </p>
           <Chevron to="/agents">Agent sandboxes</Chevron>
         </div>
