@@ -17,7 +17,7 @@ install page to open.
 | `fluxctl: command not found` | `~/.local/bin` is not on `PATH`. Add `export PATH="$HOME/.local/bin:$PATH"` to your shell profile, or open a new shell. |
 | `dyld: Library not loaded: .../libhivex.dylib` | `brew install hivex` (the installer does it unless `--no-deps`). |
 | `error while loading shared libraries: libhivex.so.0` | `sudo apt-get install libhivex0` (Debian/Ubuntu) or `sudo dnf install hivex` (Fedora). |
-| `unrecognized subcommand 'agent'` | You installed a release older than 0.4.8. Install 0.4.10 (or newer), or build from source. |
+| `unrecognized subcommand 'agent'` | You installed a release older than 0.4.8. Install 0.4.11 (or newer), or build from source. |
 | `skipped fluxctl: ... exists and is not a link` | A real file of yours is in the way. Move it, or use another `--prefix`. |
 | `path must be shorter than SUN_LEN` / QMP connect fails on a Mac | Unix socket path too long under `~/Library/Application Support/…`. Fixed in **0.4.10**: QMP binds under short `run_dir/qmp/<id>.sock`. Upgrade, or set a short `[paths] run_dir`. See [operations.md](operations.md#state-layout). |
 

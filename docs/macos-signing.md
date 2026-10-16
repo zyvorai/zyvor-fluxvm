@@ -120,8 +120,8 @@ signed with the virtualization entitlement only, so it starts, but VMs cannot us
 | Piece | State |
 |---|---|
 | Developer ID Application cert | **Present** on the build Mac (do not publish the identity string or Team ID; check locally with `security find-identity -v -p codesigning`) |
-| Local Developer ID package | **Built** with `FLUXVM_SIGN_IDENTITY=… scripts/package-macos.sh --version 0.4.10` (hardened runtime). `spctl` reports `Unnotarized Developer ID` until notary runs |
-| Notary App Store Connect API key | **Missing** — no `notarytool` keychain profile, no `MACOS_NOTARY_*` GitHub Actions secrets |
+| Local Developer ID package | **Built and notarized** for 0.4.11 (`scripts/package-macos.sh` with `FLUXVM_NOTARIZE=1`). Apps staple; `fluxctl` uses `disable-library-validation` for Homebrew `libhivex` |
+| Notary credentials | **Available** on the release Mac (`notarytool` keychain profile). Wire `MACOS_NOTARY_*` + P12 into GitHub Actions when CI should notarize |
 | Restricted entitlement profiles | **Missing** — `dev.zyvor.fluxvm.runner` / `.vmnetd` / `.usbd` Developer ID `.provisionprofile` files not installed; vmnet/bridge/physical USB stay admission-refused |
 | GitHub Actions secrets | Wire when material exists: `MACOS_DEVELOPER_ID_P12`, `MACOS_DEVELOPER_ID_P12_PASSWORD`, optional `MACOS_PROFILE_*`, `MACOS_NOTARY_KEY_P8`, `MACOS_NOTARY_KEY_ID`, `MACOS_NOTARY_ISSUER` (see table above) |
 
