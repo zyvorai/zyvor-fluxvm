@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- **`fluxctl doctor` reports a locked or absent login session on a Mac.** Snapshot restore and warm-pool slots need a
+  logged-in, unlocked session; on a locked or headless Mac they failed with no hint why. `doctor` now reads the
+  console session from `ioreg` (`CGSSessionScreenIsLocked` inside `IOConsoleUsers`; `IOConsoleLocked` is not used,
+  it said `No` while the session was locked) and warns with the unattended-hosts fix. Unit-tested on captured
+  `ioreg` text, and run on an M4 whose screen was locked at the time (warned). **Not run:** a Mac with nobody
+  logged in at the console, and the pool status endpoint does not report it yet.
+
 - **CLI rough edges.** `fluxctl --help` now lists `doctor` and prints the exit-code contract: `0` success, `1` an error
   or a failing `doctor` check, `2` a usage error, and for `run`, `sandbox run`, `ssh`, `fleet exec` and
   `agent exec` the command's own status (these pass the guest's code through, so they are deliberately not one
