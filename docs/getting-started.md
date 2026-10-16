@@ -46,7 +46,7 @@ fluxctl freeze <id> && fluxctl frozen <id> && fluxctl thaw <id>  # cgroup-level,
 fluxctl restart <id> && fluxctl wait <id> --for running
 fluxctl label <id> env=dev fluxvm.io/snapshot-every=6h fluxvm.io/snapshot-keep=4  # `key-` removes
 fluxctl list -l env=dev && fluxctl stop -l env=dev
-fluxctl clone-vm <stopped-id> web-2         # copies data disks + labels
+fluxctl vm clone <stopped-id> web-2         # copies data disks + labels
 fluxctl disk attach <id> data --size-gib 10 && fluxctl disk resize <id> root --size-gib 40
 fluxctl serial <id>                         # QEMU serial console, Ctrl-] quits
 fluxctl backup <id> --all-disks --compress  # live when running

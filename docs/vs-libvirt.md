@@ -18,12 +18,12 @@ drop-in for KubeVirt/OpenShift.
 | `virsh suspend` / `virsh resume` | `fluxctl pause` / `fluxctl resume` | Yes |
 | `virsh destroy` | `fluxctl delete` | Yes |
 | `virsh reboot` | `fluxctl restart` | Yes |
-| `virsh domrename` / metadata | `fluxctl rename-vm` / `fluxctl label` | Yes (labels drive `-l` selectors) |
+| `virsh domrename` / metadata | `fluxctl vm rename` / `fluxctl label` | Yes (labels drive `-l` selectors) |
 | `virsh console` | `fluxctl serial` (websocket over REST too) | Yes |
 | `virsh attach-disk` / `blockresize` / `detach-disk` | `fluxctl disk attach\|resize\|detach` | Yes (QEMU) |
 | `virsh snapshot-create` / `-list` / `-delete` | `fluxctl snapshot` / `snapshot-list` / `snapshot-delete` | Yes (QEMU internal snapshots) |
 | `virsh backup-begin` | `fluxctl backup [--all-disks]` | Yes (standalone qcow2) |
-| `virt-clone` | `fluxctl clone-vm` | Yes |
+| `virt-clone` | `fluxctl vm clone` | Yes |
 | `virsh event` | `fluxctl events -f` (SSE: `/v1/events/stream`) | Yes |
 | `virsh -c qemu+ssh://host` | `fluxctl --server` / `fluxctl context` | Yes (REST, bearer token) |
 | XML domain definitions | JSON VM spec (`fluxctl create --spec vm.json`) | Different format, same purpose |

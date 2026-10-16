@@ -490,7 +490,7 @@ prefix (4+ hex chars). Ambiguous names/prefixes are rejected with the matching i
 | Task | CLI | REST |
 |---|---|---|
 | Restart (graceful stop, then start) | `fluxctl restart <vm>` | `POST /v1/vms/{id}/restart` |
-| Rename | `fluxctl rename-vm <vm> <new-name>` | `PATCH /v1/vms/{id}` `{"name": "..."}` |
+| Rename | `fluxctl vm rename <vm> <new-name>` | `PATCH /v1/vms/{id}` `{"name": "..."}` |
 | Set / remove labels | `fluxctl label <vm> env=prod team-` | `PATCH /v1/vms/{id}` `{"labels": {"env": "prod", "team": null}}` |
 | List snapshots | `fluxctl snapshot-list <vm>` | `GET /v1/vms/{id}/snapshots` |
 | Delete a snapshot | `fluxctl snapshot-delete <vm> --tag <t>` | `DELETE /v1/vms/{id}/snapshots/{tag}` |
@@ -500,7 +500,7 @@ prefix (4+ hex chars). Ambiguous names/prefixes are rejected with the matching i
 | Shell completions | `fluxctl completions bash\|zsh\|fish` | — |
 | Filter by labels | `fluxctl list -l env=prod,!tmp` | `GET /v1/vms?label=env%3Dprod` |
 | Bulk lifecycle | `fluxctl start\|stop\|restart -l <sel>`, `fluxctl delete -l <sel> --yes` | per-VM calls |
-| Clone a stopped VM | `fluxctl clone-vm <vm> <new-name>` | `POST /v1/vms/{id}/clone` `{"name": "..."}` |
+| Clone a stopped VM | `fluxctl vm clone <vm> <new-name>` | `POST /v1/vms/{id}/clone` `{"name": "..."}` |
 | Disks | `fluxctl disk list\|attach\|resize\|detach\|throttle <vm> ...` | `GET/POST /v1/vms/{id}/disks`, `PATCH/DELETE /v1/vms/{id}/disks/{name}`, `PUT /v1/vms/{id}/disks/{name}/throttle` |
 | Serial console | `fluxctl serial <vm>` (Ctrl-] detaches) | websocket `GET /v1/vms/{id}/serial` |
 | Backup root disk | `fluxctl backup <vm> [--compress] [--dest PATH]` | `POST /v1/vms/{id}/backup` `{"compress": true}` |
@@ -616,7 +616,7 @@ untouched.
 `state_dir/vm-templates.json` (separate from sandbox templates at
 `/v1/templates`). Save from a spec file (its `name` may be omitted) or from an
 existing VM (`--from-vm`, which copies the VM's *spec*, not its disk — use
-`clone-vm` for that). `vm-template create` goes through the normal create path,
+`vm clone` for that). `vm-template create` goes through the normal create path,
 so policy, tenant and token quotas apply. A template that references a clone
 base image keeps that image alive after the clone VM is deleted.
 
