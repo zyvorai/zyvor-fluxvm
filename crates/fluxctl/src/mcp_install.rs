@@ -253,6 +253,70 @@ fn read_entry(format: Format, text: &str, name: &str) -> Option<String> {
     )
 }
 
+/// The entry's `command` alone (not joined with its args), for repairs that must keep everything else.
+fn read_command(format: Format, text: &str, name: &str) -> Option<String> {
+    if format == Format::CodexToml {
+        let doc: toml_edit::DocumentMut = text.parse().ok()?;
+        return Some(
+            doc.get("mcp_servers")?
+                .get(name)?
+                .get("command")?
+                .as_str()?
+                .to_owned(),
+        );
+    }
+    let v: Value = serde_json::from_str(text).ok()?;
+    Some(
+        v.get(servers_key(format))?
+            .get(name)?
+            .get("command")?
+            .as_str()?
+            .to_owned(),
+    )
+}
+
+/// The file with only the entry's `command` replaced: args, env and every other setting stay as the user left them.
+fn replace_command(format: Format, text: &str, name: &str, command: &str) -> Option<String> {
+    if format == Format::CodexToml {
+        let mut doc: toml_edit::DocumentMut = text.parse().ok()?;
+        doc.get_mut("mcp_servers")?.get_mut(name)?["command"] = toml_edit::value(command);
+        return Some(doc.to_string());
+    }
+    let mut v: Value = serde_json::from_str(text).ok()?;
+    *v.get_mut(servers_key(format))?
+        .get_mut(name)?
+        .get_mut("command")? = json!(command);
+    Some(serde_json::to_string_pretty(&v).ok()? + "\n")
+}
+
+/// `fluxctl doctor --fix`: point every client entry whose `fluxctl` no longer exists (a versioned Homebrew path left by
+/// `brew upgrade`) at `exe`. Only the `command` changes, so `--allow-write`, `--context`, env and tokens survive, which a
+/// plain reinstall would drop. An entry that does not name a `fluxctl` is not ours to rewrite and is left alone.
+pub fn repair_stale(project: bool, name: &str, exe: &Path) -> Result<Vec<Value>> {
+    let home = home()?;
+    let project = project_dir(project)?;
+    let mut done = Vec::new();
+    for &c in &Client::ALL {
+        let Ok(path) = c.path(&home, project.as_deref()) else {
+            continue;
+        };
+        let Ok(text) = fs::read_to_string(&path) else {
+            continue;
+        };
+        let Some(old) = read_command(c.format(), &text, name) else {
+            continue;
+        };
+        if Path::new(&old).exists() || Path::new(&old).file_name() != Some("fluxctl".as_ref()) {
+            continue;
+        }
+        if let Some(new) = replace_command(c.format(), &text, name, &exe.display().to_string()) {
+            write_atomic(&path, &new)?;
+            done.push(json!({"client": c.id(), "path": path, "was": old, "now": exe}));
+        }
+    }
+    Ok(done)
+}
+
 fn home() -> Result<PathBuf> {
     Ok(PathBuf::from(
         std::env::var_os("HOME").context("HOME is not set")?,
@@ -380,6 +444,83 @@ mod tests {
         let none = status_row("cursor", p, None);
         assert_eq!(none["installed"], false);
         assert!(none.get("stale").is_none());
+    }
+
+    #[test]
+    fn replace_command_changes_only_the_command() {
+        let json_before = r#"{"theme":"dark","mcpServers":{"fluxvm":{"command":"/old/fluxctl","args":["--context","prod","mcp","serve","--allow-write"],"env":{"FLUXVM_URL":"http://h:1"}},"other":{"command":"o"}}}"#;
+        let after = replace_command(
+            Format::McpServersJson,
+            json_before,
+            "fluxvm",
+            "/new/fluxctl",
+        )
+        .unwrap();
+        let v: Value = serde_json::from_str(&after).unwrap();
+        assert_eq!(v["mcpServers"]["fluxvm"]["command"], "/new/fluxctl");
+        assert_eq!(v["mcpServers"]["fluxvm"]["args"][4], "--allow-write");
+        assert_eq!(v["mcpServers"]["fluxvm"]["env"]["FLUXVM_URL"], "http://h:1");
+        assert_eq!(v["mcpServers"]["other"]["command"], "o");
+        assert_eq!(v["theme"], "dark");
+
+        let toml_before = "# mine\nmodel = \"x\"\n[mcp_servers.fluxvm]\ncommand = \"/old/fluxctl\"\nargs = [\"mcp\", \"serve\"]\n";
+        let after =
+            replace_command(Format::CodexToml, toml_before, "fluxvm", "/new/fluxctl").unwrap();
+        assert!(after.contains("# mine") && after.contains("model = \"x\""));
+        assert!(
+            after.contains("command = \"/new/fluxctl\"")
+                && after.contains("args = [\"mcp\", \"serve\"]")
+        );
+        assert_eq!(
+            read_command(Format::CodexToml, &after, "fluxvm").unwrap(),
+            "/new/fluxctl"
+        );
+
+        // No such entry: nothing to replace.
+        assert!(replace_command(Format::McpServersJson, "{}", "fluxvm", "/n").is_none());
+    }
+
+    #[test]
+    fn repair_stale_rewrites_a_dead_fluxctl_entry_and_leaves_the_rest() {
+        let dir = std::env::temp_dir().join(format!("fluxvm-repair-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let live = dir.join("fluxctl");
+        std::fs::write(&live, "").unwrap();
+        let cfg = dir.join(".claude.json");
+        let body = |cmd: &str| {
+            format!(
+                r#"{{"mcpServers":{{"fluxvm":{{"command":"{cmd}","args":["mcp","serve","--allow-write"]}}}}}}"#
+            )
+        };
+        std::fs::write(&cfg, body("/gone/Cellar/fluxvm/0.0.1/bin/fluxctl")).unwrap();
+        // Not a fluxctl: left alone even though it does not exist.
+        let cursor = dir.join(".cursor");
+        std::fs::create_dir_all(&cursor).unwrap();
+        std::fs::write(cursor.join("mcp.json"), body("/gone/other-tool")).unwrap();
+        let prev = std::env::var_os("HOME");
+        // SAFETY: only this test touches HOME, and it restores it.
+        unsafe { std::env::set_var("HOME", &dir) };
+        let done = repair_stale(false, "fluxvm", &live).unwrap();
+        let again = repair_stale(false, "fluxvm", &live).unwrap();
+        match prev {
+            Some(p) => unsafe { std::env::set_var("HOME", p) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+        assert_eq!(done.len(), 1);
+        assert_eq!(done[0]["client"], "claude-code");
+        assert!(again.is_empty(), "a second run changes nothing");
+        let after: Value = serde_json::from_str(&std::fs::read_to_string(&cfg).unwrap()).unwrap();
+        assert_eq!(
+            after["mcpServers"]["fluxvm"]["command"],
+            live.display().to_string()
+        );
+        assert_eq!(after["mcpServers"]["fluxvm"]["args"][2], "--allow-write");
+        assert!(
+            std::fs::read_to_string(cursor.join("mcp.json"))
+                .unwrap()
+                .contains("/gone/other-tool")
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn entry() -> Entry {

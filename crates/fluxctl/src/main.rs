@@ -231,6 +231,11 @@ enum Command {
         /// (what `scripts/preflight.sh` runs).
         #[arg(long)]
         host_only: bool,
+        /// Repair what is safe to repair on its own: point MCP client entries whose `fluxctl` path was removed (a
+        /// versioned Homebrew path left by `brew upgrade`) at the current one, keeping their other settings. Nothing else
+        /// is changed; without this flag doctor never writes.
+        #[arg(long)]
+        fix: bool,
     },
     /// Daemon liveness probe. Hits `GET /healthz` on `listen` (no auth).
     Healthz,
@@ -5142,15 +5147,28 @@ async fn main() -> Result<()> {
     }
 
     // `doctor` only reads: it must work when the daemon is down and without a VmManager.
-    if let Command::Doctor { host_only } = cli.command {
+    if let Command::Doctor { host_only, fix } = cli.command {
+        let mut fixed = Vec::new();
+        if fix {
+            let exe = stable_exe::stable_exe().context("locating fluxctl")?;
+            fixed = mcp_install::repair_stale(false, "fluxvm", &exe)?;
+        }
+        // After a repair the report is taken again, so it shows the state the user is left with.
         let checks = doctor::gather(&cfg.listen, &cfg.state_dir, host_only).await;
         // Readable text unless JSON was asked for (`-o json` or FLUXCTL_OUTPUT); `-o` defaults to json.
         if output_explicit && cli.output == output::OutputFormat::Json {
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&doctor::to_json(&checks))?
-            );
+            let mut report = doctor::to_json(&checks);
+            report["fixed"] = serde_json::Value::Array(fixed);
+            println!("{}", serde_json::to_string_pretty(&report)?);
         } else {
+            for f in &fixed {
+                println!(
+                    "fixed MCP {}: {} -> {}",
+                    f["client"].as_str().unwrap_or("client"),
+                    f["was"].as_str().unwrap_or("?"),
+                    f["now"].as_str().unwrap_or("?")
+                );
+            }
             print!("{}", doctor::render(&checks));
         }
         std::process::exit(doctor::exit_code(&checks));
