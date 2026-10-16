@@ -5,11 +5,11 @@
 
 ## Cutting a release
 
-1. Tag and push: `git tag v0.4.10 && git push origin v0.4.10`. The `Release (macOS package)` workflow builds the package on a hosted
-   macOS runner, smoke-tests it, and attaches `fluxvm-0.4.10-macos-arm64.tar.gz` and its `.sha256` to the release for that tag
+1. Tag and push: `git tag v0.4.11 && git push origin v0.4.11`. The `Release (macOS package)` workflow builds the package on a hosted
+   macOS runner, smoke-tests it, and attaches `fluxvm-0.4.11-macos-arm64.tar.gz` and its `.sha256` to the release for that tag
    (a **draft** release is created if there is none; publish it when you are happy).
 2. Fill in the formula from the package (or from the `.sha256` file's hash):
-   `scripts/update-homebrew-formula.sh 0.4.10 path/to/fluxvm-0.4.10-macos-arm64.tar.gz`
+   `scripts/update-homebrew-formula.sh 0.4.11 path/to/fluxvm-0.4.11-macos-arm64.tar.gz`
 3. Publish the draft release (a draft's assets cannot be downloaded), then put `fluxvm.rb` in the tap as `Formula/fluxvm.rb`.
    Users then run `brew install zyvorai/tap/fluxvm`.
 
@@ -28,8 +28,7 @@ keep getting the previous version. Tag, wait for both workflows, check the asset
 `scripts/test-install.sh` exercises the installer against fake packages (no network) and runs in `site-check.yml`.
 
 **Notarization.** `scripts/package-macos.sh` can Developer ID–sign and notarize when credentials exist
-([docs/macos-signing.md](../../docs/macos-signing.md)). As of 0.4.10 the published Homebrew tarball may still be
-ad hoc or Developer ID without a staple; check readiness with `scripts/check-macos-release-secrets.sh`. Distribution
+([docs/macos-signing.md](../../docs/macos-signing.md)). As of 0.4.11 the published Homebrew tarball is Developer ID signed and notarized; check readiness with `scripts/check-macos-release-secrets.sh`. Distribution
 is GitHub + Homebrew — **not** the Mac App Store.
 
 ## Build the package locally

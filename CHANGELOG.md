@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 0.4.11 (2026-10-16)
+
+- **macOS package is Developer ID signed and notarized.** The published Homebrew / GitHub tarball is notarized and
+  stapled. `fluxctl` is signed with `com.apple.security.cs.disable-library-validation` so Hardened Runtime can load
+  Homebrew's `libhivex` (different Team ID). First clean cut after the 0.4.10 asset churn.
+
+- **Speculate reports egress from the VM's network policy.** Sandbox speculate results include whether the sandbox
+  could reach the network, derived from the applied policy (not a guess).
+
 ## 0.4.10 (2026-10-16)
 
 - **QMP sockets under the short `run_dir` (macOS `sockaddr_un` overflow).** Putting `qmp.sock` under

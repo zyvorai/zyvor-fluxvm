@@ -63,7 +63,7 @@ your shell startup files: if `~/.local/bin` is not on your `PATH` it prints the 
 Pass them after `bash -s --`:
 
 ```bash
-curl -fsSL https://zyvorai.github.io/zyvor-fluxvm/install.sh | bash -s -- --version 0.4.10 --client claude-code
+curl -fsSL https://zyvorai.github.io/zyvor-fluxvm/install.sh | bash -s -- --version 0.4.11 --client claude-code
 ```
 
 | Option | Meaning |
@@ -94,11 +94,11 @@ curl -fsSL https://zyvorai.github.io/zyvor-fluxvm/install.sh | bash -s -- --dry-
 curl -fsSL https://zyvorai.github.io/zyvor-fluxvm/install.sh | bash -s -- --service --client claude-code
 
 # pin a version, into a project-local prefix
-curl -fsSL https://zyvorai.github.io/zyvor-fluxvm/install.sh | bash -s -- --version 0.4.10 --prefix "$PWD/.fluxvm"
+curl -fsSL https://zyvorai.github.io/zyvor-fluxvm/install.sh | bash -s -- --version 0.4.11 --prefix "$PWD/.fluxvm"
 PATH="$PWD/.fluxvm/bin:$PATH" fluxctl --version
 
-# offline, from a directory you populated with download/v0.4.10/<asset> and <asset>.sha256
-FLUXVM_RELEASE_BASE=file:///srv/fluxvm-mirror bash install.sh --version 0.4.10
+# offline, from a directory you populated with download/v0.4.11/<asset> and <asset>.sha256
+FLUXVM_RELEASE_BASE=file:///srv/fluxvm-mirror bash install.sh --version 0.4.11
 ```
 
 ## Install without piping to a shell
@@ -106,7 +106,7 @@ FLUXVM_RELEASE_BASE=file:///srv/fluxvm-mirror bash install.sh --version 0.4.10
 Everything the script does, by hand (macOS shown; use `linux-x86_64` on Linux):
 
 ```bash
-V=0.4.10
+V=0.4.11
 A=fluxvm-$V-macos-arm64.tar.gz
 B=https://github.com/zyvorai/zyvor-fluxvm/releases/download/v$V
 curl -fLO $B/$A && curl -fLO $B/$A.sha256
@@ -123,13 +123,14 @@ same.) A tarball downloaded in a browser is quarantined by macOS: clear it with
 
 ## Which version has what
 
-The one-liner installs the newest **published** release. As of this page that is **0.4.10**:
+The one-liner installs the newest **published** release. As of this page that is **0.4.11**:
 
 | Release | Has |
 |---|---|
 | `0.4.7` and earlier | sandboxes, snapshots, fork, speculative execution, MCP, the fleet. **No `fluxctl agent`.** |
 | `0.4.8` and `0.4.9` | agent sessions: enforced filesystem policy, scoped tokens, supervised jobs, approvals, per-session HTTP rules, budgets, resumable transfer, fork/evaluate/promote. See the [session guide](agent-sessions-guide.md). |
-| **`0.4.10`** (current) | everything above, plus `apple.host_gpu` / `fluxctl infer` for host Metal/MLX into offline VZ sandboxes ([host-inference.md](host-inference.md)), QMP sockets under a short `run_dir` (macOS `sockaddr_un` fix), and the Linux package built in `ubuntu:22.04` (glibc 2.35+). |
+| `0.4.10` | host_gpu / `fluxctl infer`, QMP under short `run_dir`, Linux package in `ubuntu:22.04`. macOS asset was re-uploaded for notarization and hivex Hardened Runtime.
+| **`0.4.11`** (current) | clean cut of the above: Developer ID **notarized** macOS package with Homebrew `libhivex` load fixed; speculate egress from network policy. |
 
 Check what you have:
 
@@ -138,7 +139,7 @@ fluxctl --version
 fluxctl agent --help        # "unrecognized subcommand 'agent'" means a release without sessions
 ```
 
-If you are on something older than 0.4.8 and need sessions immediately, build from source (below) or pin `--version 0.4.10`.
+If you are on something older than 0.4.8 and need sessions immediately, build from source (below) or pin `--version 0.4.11`.
 
 ## Upgrade, pin, roll back, uninstall
 
@@ -150,8 +151,8 @@ curl -fsSL https://zyvorai.github.io/zyvor-fluxvm/install.sh | bash
 curl -fsSL https://zyvorai.github.io/zyvor-fluxvm/install.sh | bash -s -- --version 0.4.9
 
 # list what is installed, and free space
-ls ~/.local/share/fluxvm            # 0.4.9  0.4.10  current
-rm -rf ~/.local/share/fluxvm/0.4.9  # only a version `current` does not point at
+ls ~/.local/share/fluxvm            # 0.4.10  0.4.11  current
+rm -rf ~/.local/share/fluxvm/0.4.10  # only a version `current` does not point at
 
 # uninstall
 curl -fsSL https://zyvorai.github.io/zyvor-fluxvm/install.sh | bash -s -- --uninstall

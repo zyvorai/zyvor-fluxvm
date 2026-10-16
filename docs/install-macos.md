@@ -5,7 +5,7 @@
 > See [install.md](install.md). This page is the Homebrew route.
 
 The quickest way to a working FluxVM on Apple silicon: one `brew install`, the daemon as a background service, and
-an AI agent client wired to it over MCP. The current tap formula is **0.4.10** (`fluxctl agent`, `host_gpu` /
+an AI agent client wired to it over MCP. The current tap formula is **0.4.11** (`fluxctl agent`, `host_gpu` /
 [host-inference.md](host-inference.md)). Install, service, upgrade and uninstall were originally verified on an
 Apple M4 mini (macOS 27.2) against earlier 0.4.x packages from the tap; notes below that name `0.4.4` / `0.4.5` are
 historical (for example `/readyz` and Homebrew `opt` paths). A local model path was verified with the
@@ -22,7 +22,7 @@ agent-sandbox demo (`examples/agent-sandbox-demo/local-model.sh`).
 
 ```bash
 brew install zyvorai/tap/fluxvm
-fluxctl --version                  # fluxctl 0.4.10
+fluxctl --version                  # fluxctl 0.4.11
 brew test zyvorai/tap/fluxvm       # --version, the five binaries, and the runner's virtualization entitlement
 ```
 
@@ -95,7 +95,7 @@ Other clients: `cursor`, `claude-desktop`, `codex`, `vscode`, `windsurf`, `gemin
 [mcp.md](mcp.md#installing-into-a-client). Restart the client afterwards.
 
 Tested end to end from a fresh `HOME`: the entry is written, then `fluxctl mcp serve` answers the MCP handshake
-(`serverInfo.name` `fluxvm`, 66 tools with `--allow-write` in 0.4.10) and a real sandbox round trip works:
+(`serverInfo.name` `fluxvm`, 66 tools with `--allow-write` in 0.4.11) and a real sandbox round trip works:
 
 | Tool call | Result on the M4 |
 |---|---|
