@@ -117,6 +117,8 @@ reaper_interval_secs = 5
 # bpf_object = "/usr/lib/fluxvm/bpf/fluxvm_tc.bpf.o"
 # pin_root = "/sys/fs/bpf/fluxvm"
 # required = true
+# require_edge = false                  # true: refuse a VM with no host-visible interface (user NAT, network.mode = none)
+#                                       # instead of running it unenforced (required=true only warns about it)
 # default_allow = false
 # allow_cidrs = ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"]
 # allow_ports = ["tcp/443", "tcp/80", "udp/53"]

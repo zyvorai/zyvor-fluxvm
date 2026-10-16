@@ -49,7 +49,8 @@ The FluxVM hypervisor track (`backend: "flux-vm"`) is the AI-agent sandbox path.
   schema **v4** maps (`fluxvm_gid`, `fluxvm_ct`, `fluxvm_deny4/6`);
   ARP/DHCP/NDP bootstrap always allowed; fallback to nftables unless
   `required = true` **and** a host-visible edge exists (user NAT / `mode=none`
-  soft-skip, logged at `warn` when `required = true` because policy is then not enforced for that VM;
+  soft-skip, logged at `warn` when `required = true` because policy is then not enforced for that VM; set
+  `require_edge = true` to refuse such a VM at create instead;
   IPv6/rate never silently downgrade). Optional node XDP
   (`bpf/fluxvm_xdp.bpf.c`, meta under `/run/fluxvm/xdp/`) — disabled by default
   and refused in `cilium` mode.
