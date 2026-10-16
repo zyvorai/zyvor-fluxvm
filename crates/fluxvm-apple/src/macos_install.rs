@@ -15,6 +15,8 @@ use std::{
 pub const INSTALLED_MARKER: &str = "macos-installed";
 /// The workspace directory shared into a macOS guest as `/Volumes/My Shared Files/firstboot`.
 pub const FIRSTBOOT_DIR: &str = "firstboot";
+/// The file in the firstboot share that carries this VM's agent token (`fluxvm-guest-agent --token-seed`).
+pub const AGENT_TOKEN_FILE: &str = "agent-token";
 /// Default and minimum size of a fresh macOS disk. The installed system takes about 24 GB.
 pub const DEFAULT_INSTALL_DISK_GIB: u64 = 64;
 pub const MIN_INSTALL_DISK_GIB: u64 = 40;
@@ -175,6 +177,34 @@ pub fn write_firstboot(workspace: &Path, fb: &AppleFirstBoot) -> Result<PathBuf>
     Ok(dir)
 }
 
+/// Whether a macOS guest should be handed its agent token through the firstboot share: the host agent is
+/// on (`agent.enabled` with a token, `apple.macos_vsock`) so there is a token for the guest to have.
+pub fn wants_agent_seed(req: &fluxvm_core::model::CreateVmRequest) -> bool {
+    req.apple
+        .as_ref()
+        .is_some_and(|a| a.guest_os == fluxvm_core::model::AppleGuest::Macos && a.macos_vsock)
+        && req
+            .agent
+            .as_ref()
+            .is_some_and(|a| a.enabled && a.token.as_deref().is_some_and(|t| !t.is_empty()))
+}
+
+/// Writes the agent token to `<workspace>/firstboot/agent-token` (0600), creating the share directory when
+/// `apple.firstboot` did not. The guest agent reads it only while it has no token of its own.
+pub fn write_agent_token(workspace: &Path, token: &str) -> Result<PathBuf> {
+    let dir = workspace.join(FIRSTBOOT_DIR);
+    fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+    let path = dir.join(AGENT_TOKEN_FILE);
+    fs::write(&path, format!("{token}\n"))
+        .with_context(|| format!("writing {}", path.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(path)
+}
+
 /// Runs `fluxvm-vz-runner install` to completion. Progress events go to the runner log.
 pub async fn run_install(runner: &Path, conf_path: &Path, workspace: &Path) -> Result<()> {
     let log = crate::runner::open_runner_log(workspace)?;
@@ -262,6 +292,27 @@ mod tests {
         let mut small = req(r#"{"guest_os":"macos","install":true}"#);
         small.disk_size_gib = Some(20);
         assert!(validate(&small).is_err());
+    }
+
+    #[test]
+    fn the_agent_token_goes_to_a_0600_file_in_the_firstboot_share() {
+        use std::os::unix::fs::PermissionsExt;
+        let mut r = req(r#"{"guest_os":"macos","macos_vsock":true}"#);
+        assert!(!wants_agent_seed(&r), "no agent yet");
+        r.agent =
+            Some(serde_json::from_str(r#"{"enabled":true,"token":"0123456789abcdef"}"#).unwrap());
+        assert!(wants_agent_seed(&r));
+        let d = tempfile::tempdir().unwrap();
+        let p = write_agent_token(d.path(), "0123456789abcdef").unwrap();
+        assert_eq!(p, d.path().join("firstboot/agent-token"));
+        assert_eq!(fs::read_to_string(&p).unwrap(), "0123456789abcdef\n");
+        assert_eq!(
+            fs::metadata(&p).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        // An empty token is not delivered.
+        r.agent = Some(serde_json::from_str(r#"{"enabled":true,"token":""}"#).unwrap());
+        assert!(!wants_agent_seed(&r));
     }
 
     #[test]

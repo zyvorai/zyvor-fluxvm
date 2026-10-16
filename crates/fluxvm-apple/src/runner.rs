@@ -256,12 +256,13 @@ impl RunnerConfig {
                     read_only: true,
                 }))
                 .chain(
-                    (apple.guest_os == AppleGuest::Macos && apple.firstboot.is_some()).then(|| {
-                        ShareConfig {
-                            tag: crate::macos_install::FIRSTBOOT_DIR.into(),
-                            host_path: ctx.workspace.join(crate::macos_install::FIRSTBOOT_DIR),
-                            read_only: true,
-                        }
+                    (apple.guest_os == AppleGuest::Macos
+                        && (apple.firstboot.is_some()
+                            || crate::macos_install::wants_agent_seed(req)))
+                    .then(|| ShareConfig {
+                        tag: crate::macos_install::FIRSTBOOT_DIR.into(),
+                        host_path: ctx.workspace.join(crate::macos_install::FIRSTBOOT_DIR),
+                        read_only: true,
                     }),
                 )
                 .collect(),
@@ -1017,6 +1018,73 @@ mod one_shot_tests {
         let conf = RunnerConfig::for_launch(&req, &ctx).unwrap();
         let share = conf.shares.iter().find(|s| s.tag == "fluxvm-meta").unwrap();
         assert!(share.read_only && share.host_path == meta);
+    }
+
+    #[test]
+    fn a_macos_guest_with_the_host_agent_gets_the_firstboot_share_for_its_token() {
+        let share_tags = |apple: serde_json::Value, agent: serde_json::Value| -> Vec<String> {
+            let dir = tempfile::tempdir().unwrap();
+            let req: CreateVmRequest = serde_json::from_value(serde_json::json!({
+                "name": "m", "backend": "vz", "image": "/r.raw", "apple": apple, "agent": agent,
+            }))
+            .unwrap();
+            let ctx = fluxvm_core::backend::LaunchContext {
+                id: uuid::Uuid::new_v4(),
+                workspace: dir.path().into(),
+                disk: dir.path().join("root.raw"),
+                seed_disk: None,
+                log_path: dir.path().join("console.log"),
+                network: fluxvm_core::backend::PreparedNetwork {
+                    spec: NetworkSpec::None,
+                    tap_name: None,
+                    tap_fd: None,
+                    netns: None,
+                    dhcp_leasefile: None,
+                    guest_ip: None,
+                    guest_cidr: None,
+                    gateway: None,
+                    extra_tap_fds: vec![],
+                },
+                guest_cid: None,
+                vsock_socket: None,
+                disk_format: "raw".into(),
+                nbd_export: None,
+                machine_type: None,
+            };
+            RunnerConfig::for_launch(&req, &ctx)
+                .unwrap()
+                .shares
+                .into_iter()
+                .map(|s| s.tag)
+                .collect()
+        };
+        let on = serde_json::json!({"enabled": true, "token": "0123456789abcdef-token"});
+        let mac = |extra: serde_json::Value| {
+            let mut a = serde_json::json!({"guest_os": "macos", "macos_vsock": true});
+            a.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            a
+        };
+        assert!(
+            share_tags(mac(serde_json::json!({})), on.clone()).contains(&"firstboot".to_string())
+        );
+        // No host agent, or no vsock, or a Linux guest: no share for it.
+        assert!(
+            !share_tags(
+                mac(serde_json::json!({})),
+                serde_json::json!({"enabled": false})
+            )
+            .contains(&"firstboot".to_string())
+        );
+        assert!(
+            !share_tags(serde_json::json!({"guest_os": "macos"}), on.clone())
+                .contains(&"firstboot".to_string())
+        );
+        assert!(
+            !share_tags(serde_json::json!({"guest_os": "linux"}), on)
+                .contains(&"firstboot".to_string())
+        );
     }
 
     #[test]
