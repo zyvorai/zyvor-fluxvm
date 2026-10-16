@@ -84,6 +84,7 @@ const config: Config = {
           position: 'right',
           label: 'Docs',
         },
+        {to: '/support', label: 'Support', position: 'right'},
         {
           href: 'https://github.com/zyvorai/zyvor-fluxvm',
           label: 'GitHub',
@@ -117,6 +118,7 @@ const config: Config = {
           title: 'Project',
           items: [
             {label: 'GitHub', href: 'https://github.com/zyvorai/zyvor-fluxvm'},
+            {label: 'Support', to: '/support'},
             {
               label: 'Changelog',
               href: 'https://github.com/zyvorai/zyvor-fluxvm/blob/main/CHANGELOG.md',
