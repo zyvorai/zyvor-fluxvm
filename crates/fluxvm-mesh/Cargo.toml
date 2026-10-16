@@ -3,7 +3,7 @@
 
 [package]
 name = "fluxvm-mesh"
-version = "0.4.8"
+version = "0.4.9"
 edition = "2024"
 license = "Apache-2.0"
 description = "FluxMesh personal-cloud overlay control plane for FluxVM"

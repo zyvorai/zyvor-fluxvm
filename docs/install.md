@@ -63,7 +63,7 @@ your shell startup files: if `~/.local/bin` is not on your `PATH` it prints the 
 Pass them after `bash -s --`:
 
 ```bash
-curl -fsSL https://zyvorai.github.io/zyvor-fluxvm/install.sh | bash -s -- --version 0.4.8 --client claude-code
+curl -fsSL https://zyvorai.github.io/zyvor-fluxvm/install.sh | bash -s -- --version 0.4.9 --client claude-code
 ```
 
 | Option | Meaning |
@@ -94,11 +94,11 @@ curl -fsSL https://zyvorai.github.io/zyvor-fluxvm/install.sh | bash -s -- --dry-
 curl -fsSL https://zyvorai.github.io/zyvor-fluxvm/install.sh | bash -s -- --service --client claude-code
 
 # pin a version, into a project-local prefix
-curl -fsSL https://zyvorai.github.io/zyvor-fluxvm/install.sh | bash -s -- --version 0.4.8 --prefix "$PWD/.fluxvm"
+curl -fsSL https://zyvorai.github.io/zyvor-fluxvm/install.sh | bash -s -- --version 0.4.9 --prefix "$PWD/.fluxvm"
 PATH="$PWD/.fluxvm/bin:$PATH" fluxctl --version
 
-# offline, from a directory you populated with download/v0.4.8/<asset> and <asset>.sha256
-FLUXVM_RELEASE_BASE=file:///srv/fluxvm-mirror bash install.sh --version 0.4.8
+# offline, from a directory you populated with download/v0.4.9/<asset> and <asset>.sha256
+FLUXVM_RELEASE_BASE=file:///srv/fluxvm-mirror bash install.sh --version 0.4.9
 ```
 
 ## Install without piping to a shell
@@ -106,7 +106,7 @@ FLUXVM_RELEASE_BASE=file:///srv/fluxvm-mirror bash install.sh --version 0.4.8
 Everything the script does, by hand (macOS shown; use `linux-x86_64` on Linux):
 
 ```bash
-V=0.4.8
+V=0.4.9
 A=fluxvm-$V-macos-arm64.tar.gz
 B=https://github.com/zyvorai/zyvor-fluxvm/releases/download/v$V
 curl -fLO $B/$A && curl -fLO $B/$A.sha256
