@@ -148,7 +148,7 @@ If you are on something older than 0.4.8 and need sessions immediately, build fr
 curl -fsSL https://zyvorai.github.io/zyvor-fluxvm/install.sh | bash
 
 # pin or roll back: the version you want is already on disk, so this is a relink
-curl -fsSL https://zyvorai.github.io/zyvor-fluxvm/install.sh | bash -s -- --version 0.4.9
+curl -fsSL https://zyvorai.github.io/zyvor-fluxvm/install.sh | bash -s -- --version 0.4.10
 
 # list what is installed, and free space
 ls ~/.local/share/fluxvm            # 0.4.10  0.4.11  current
