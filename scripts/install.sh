@@ -5,7 +5,7 @@
 # Install FluxVM from a GitHub release, in one command, with no sudo and no package manager:
 #
 #   curl -fsSL https://zyvorai.github.io/zyvor-fluxvm/install.sh | bash
-#   curl -fsSL https://zyvorai.github.io/zyvor-fluxvm/install.sh | bash -s -- --version 0.4.8 --client claude-code
+#   curl -fsSL https://zyvorai.github.io/zyvor-fluxvm/install.sh | bash -s -- --version 0.4.9 --client claude-code
 #
 # What it does: finds the release (the latest published one unless --version), downloads the package for this
 # machine and its .sha256, REFUSES TO CONTINUE if the checksum differs, unpacks it under PREFIX/share/fluxvm/<version>,

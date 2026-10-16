@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+## 0.4.9 (2026-10-16)
 
 - **`fluxctl vm rename|clone|fork`: the VM verbs under one noun.** `rename-vm`, `clone-vm` and `fork-vm` read differently from
   `fleet`, `macos-pool` and `vm-template`. `vm <verb>` is the same command (it is rewritten to the existing handler, so there is
