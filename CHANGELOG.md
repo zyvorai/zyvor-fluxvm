@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- **CLI rough edges.** `fluxctl --help` now lists `doctor` and prints the exit-code contract: `0` success, `1` an error
+  or a failing `doctor` check, `2` a usage error, and for `run`, `sandbox run`, `ssh`, `fleet exec` and
+  `agent exec` the command's own status (these pass the guest's code through, so they are deliberately not one
+  enum). The `-o` help text and docs now name every command that honours it (`disk list`, `vm-template list` and
+  `context list` were missing). `fluxctl mcp status` marks an entry `"stale": true` with a `fix` when its binary
+  no longer exists, which is what `brew upgrade` leaves behind. `fluxctl run` and the SSH wait print a "still
+  waiting" line every 15 s instead of staying silent for up to three minutes. Unit-tested; the progress lines
+  were not run against a slow first boot.
+
 - **`fluxctl doctor`: is this host ready?** A read-only report that works with the daemon down. It checks the daemon
   (`/healthz`, `/readyz`), the binaries on `PATH`, free disk under the state dir and, per platform, `/dev/kvm`
   (Linux) or the runner's `com.apple.security.virtualization` entitlement and memory headroom (macOS), plus MCP

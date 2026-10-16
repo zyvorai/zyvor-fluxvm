@@ -24,7 +24,7 @@ orchestration UI lives in [Zyvor Fabric](https://github.com/zyvorai/fabric)
 | VM templates | `fluxctl vm-template save\|list\|show\|delete\|create …` |
 | Events / quota | `fluxctl events -f`, `fluxctl quota` |
 | Remote host | `fluxctl --server http://host:7788 list`, or `fluxctl context add\|use …` |
-| Output format | `-o json\|table\|wide` on `list`, `list-images`, `snapshot-list`, `events`, `sandbox list` (and `fleet` tables on a terminal); other commands print JSON |
+| Output format | `-o json\|table\|wide` on `list`, `list-images`, `snapshot-list`, `disk list`, `vm-template list`, `context list`, `events`, `sandbox list` and `doctor` (`fleet` prints tables on a terminal); other commands print JSON |
 | Build image | `fluxctl build-image --spec examples/build-image.json` |
 | Pool | `fluxctl pool create\|claim\|list …` |
 | Serve API | `fluxctl serve` |
