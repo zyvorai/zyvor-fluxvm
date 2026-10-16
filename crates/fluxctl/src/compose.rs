@@ -294,14 +294,19 @@ fn port(v: &Yaml) -> Result<String> {
             (host.into(), target.into(), proto.into())
         }
     };
-    if proto != "tcp" {
-        bail!("{host}:{target}/{proto}: only tcp can be published");
+    let proto = proto.to_ascii_lowercase();
+    if proto != "tcp" && proto != "udp" {
+        bail!("{host}:{target}/{proto}: only tcp and udp can be published");
     }
     if host.contains('-') || target.contains('-') {
         bail!("{host}:{target}: port ranges are not supported");
     }
-    let spec = format!("{host}:{target}");
-    fluxvm_scheduler::oci_sandbox::parse_port(&spec)?;
+    let spec = if proto == "udp" {
+        format!("{host}:{target}/udp")
+    } else {
+        format!("{host}:{target}")
+    };
+    fluxvm_scheduler::oci_sandbox::parse_port_spec(&spec)?;
     Ok(spec)
 }
 

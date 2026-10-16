@@ -62,7 +62,7 @@ Apple's `container` tool also runs one Linux VM per container. FluxVM's differen
 | `user` | the image's `User`, else `65534:65534` | `uid[:gid]` or `name[:group]`, resolved against the image's `/etc/passwd` and `/etc/group`. |
 | `read_only_root` | `true` | `false` mounts the sandbox's own copy of the image read-write; it is kept until the sandbox is deleted. |
 | `exit_policy` | `keep` | `keep` leaves the VM up for exec after the process exits; `poweroff` stops it. `fluxctl sandbox run` uses `poweroff`. |
-| `ports` | `[]` | Published TCP ports, `HOST:CONTAINER` (or `PORT`, optionally `/tcp`): the Mac's `127.0.0.1:HOST` reaches the container. See [Published ports](#published-ports). |
+| `ports` | `[]` | Published ports, `HOST:CONTAINER` (or `PORT`), TCP by default or `/udp`: the Mac's `127.0.0.1:HOST` reaches the container. See [Published ports](#published-ports). |
 | `expose` | `[]` | Container ports other sandboxes and VMs on this Mac reach at the NAT gateway, same number on both sides. Used by stacks. |
 | `gateway_hosts` | `[]` | Host names written into the container's `/etc/hosts`, pointing at the NAT gateway. Used by stacks so `db` resolves. |
 | `restart` | `no` | `no`, `on-failure` or `always`. See [Restarts and health checks](#restarts-and-health-checks). |
@@ -81,8 +81,17 @@ stderr, so `fluxctl sandbox run … > out` captures only the container's output.
 `ports` uses the same runner forwards as `fluxctl run -p` for VMs: the runner listens on `127.0.0.1:HOST` on the Mac and connects
 to the container's port. The runner learns the container's address from init, which prints `VELORA-IP <address>` on the console
 after its DHCP lease. Host ports must be 1024 or higher (the daemon does not run as root), each host port may be published once,
-and a host port another VM on this Mac already publishes is refused. Only TCP. Ports, `expose` and `gateway_hosts` need the
-network card, so they cannot be combined with `offline` or `allow_hosts`.
+and a host port another VM on this Mac already publishes is refused (the same number may be held once per protocol, so `5353:53/tcp`
+and `5353:53/udp` can both be published). Ports, `expose` and `gateway_hosts` need the network card, so they cannot be combined with
+`offline` or `allow_hosts`.
+
+**UDP.** The Mac's NAT relays TCP only, so a sandbox with a `/udp` port gets the userspace gateway (`apple.usernet`, the one
+[macos.md](macos.md) describes for VMs) as its network card, with every published port forwarded by it. The container sees the
+same DHCP lease and DNS; what changes is that the egress policy is the gateway's default (the public internet, no private ranges).
+A UDP port cannot be combined with `expose`, `gateway_hosts` or private `networks` (none of those has been run with the gateway, so
+they are refused with the reason). Run on an M4 by `scripts/oci-udp-ports-live-test.sh`: a datagram sent to `127.0.0.1:HOST` is
+echoed by `nc` in an alpine container, a TCP line likewise, the same UDP host port is refused while it is published, and deleting
+the sandbox releases it.
 
 ### x86-64 images (Rosetta)
 
@@ -304,7 +313,7 @@ at them.
 
 - `linux/arm64` and `linux/amd64` (under Rosetta) only; no 32-bit or other architectures.
 - No image building (`docker build`); pull images built elsewhere.
-- No GPUs. Only TCP ports can be published, on the Mac's `127.0.0.1`; a server is also reachable through
+- No GPUs. Only TCP and UDP ports can be published, on the Mac's `127.0.0.1`; a server is also reachable through
   `/v1/sandboxes/{id}/http/{port}/…`, as for other sandboxes.
 - Volumes are named directories managed by FluxVM; there are no bind mounts of arbitrary Mac paths into a container.
 - The first use of an image pulls it and builds its rootfs (seconds to minutes, depending on its size). Later sandboxes from the
@@ -343,7 +352,8 @@ the tag on Docker Hub.
   sandbox;
 - the cold-start time.
 
-Not covered by `oci-live-test.sh`, so unit-tested only: published ports, volumes, `restart` and health checks, `secret_env`,
+Not covered by `oci-live-test.sh`: volumes, `restart` and health checks, `secret_env`,
 `GET /v1/sandboxes/{id}/logs` field details such as `restarts` and `health`, stacks of containers and `--fleet` placement. The
-dashboard (`fluxctl dashboard`, served at `/console`) is not covered either. `scripts/vz-devices-live-test.sh` is about VM devices
+dashboard (`fluxctl dashboard`, served at `/console`) is not covered either. Published TCP and UDP ports have their own live test,
+`scripts/oci-udp-ports-live-test.sh`. `scripts/vz-devices-live-test.sh` is about VM devices
 (disks, USB, console ports, display), not containers.

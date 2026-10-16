@@ -106,13 +106,22 @@ pub struct OciSandboxSpec {
 const MAX_SECRET_ENV: usize = 64;
 const MAX_SECRET_ENV_BYTES: usize = 64 * 1024;
 
-/// `HOST:CONTAINER`, `HOST:CONTAINER/tcp`, or `PORT`.
-pub fn parse_port(spec: &str) -> Result<(u16, u16)> {
+/// One published port: the Mac's `127.0.0.1:host` reaches the container's `guest`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PortSpec {
+    pub host: u16,
+    pub guest: u16,
+    pub udp: bool,
+}
+
+/// `HOST:CONTAINER`, `HOST:CONTAINER/tcp`, `HOST:CONTAINER/udp`, or `PORT` (TCP; with `/udp` too).
+pub fn parse_port_spec(spec: &str) -> Result<PortSpec> {
     let s = spec.trim();
-    let s = match s.split_once('/') {
-        Some((p, proto)) if proto.eq_ignore_ascii_case("tcp") => p,
-        Some((_, proto)) => bail!("port {spec:?}: only tcp can be published, not {proto}"),
-        None => s,
+    let (s, udp) = match s.split_once('/') {
+        Some((p, proto)) if proto.eq_ignore_ascii_case("tcp") => (p, false),
+        Some((p, proto)) if proto.eq_ignore_ascii_case("udp") => (p, true),
+        Some((_, proto)) => bail!("port {spec:?}: only tcp and udp can be published, not {proto}"),
+        None => (s, false),
     };
     let num = |p: &str| -> Result<u16> {
         match p.trim().parse::<u16>() {
@@ -130,7 +139,16 @@ pub fn parse_port(spec: &str) -> Result<(u16, u16)> {
     if host < 1024 {
         bail!("port {spec:?}: host ports below 1024 cannot be published on the Mac");
     }
-    Ok((host, guest))
+    Ok(PortSpec { host, guest, udp })
+}
+
+/// A TCP-only port: the same as [`parse_port_spec`], refusing `/udp`.
+pub fn parse_port(spec: &str) -> Result<(u16, u16)> {
+    let p = parse_port_spec(spec)?;
+    if p.udp {
+        bail!("port {spec:?}: this is a TCP-only context, udp cannot be published here");
+    }
+    Ok((p.host, p.guest))
 }
 
 impl OciSandboxSpec {
@@ -174,10 +192,30 @@ pub(crate) fn validate(req: &SandboxCreateRequest) -> Result<()> {
         bail!("oci cannot be combined with {what}: the image is the whole sandbox");
     }
     let mut seen = std::collections::HashSet::new();
+    let mut any_udp = false;
     for p in &oci.ports {
-        let (host, _) = parse_port(p)?;
-        if !seen.insert(host) {
-            bail!("host port {host} is published more than once");
+        let port = parse_port_spec(p)?;
+        any_udp |= port.udp;
+        if !seen.insert((port.host, port.udp)) {
+            bail!(
+                "host port {}/{} is published more than once",
+                port.host,
+                if port.udp { "udp" } else { "tcp" }
+            );
+        }
+    }
+    if any_udp {
+        // UDP goes through the userspace gateway (`apple.usernet`); the Mac's NAT relay is TCP-only.
+        // `expose`/`gateway_hosts` use that NAT's gateway address and private networks add cards
+        // beside it; none of them has been run with the gateway, so they are refused rather than guessed.
+        for (set, what) in [
+            (!oci.expose.is_empty(), "expose"),
+            (!oci.gateway_hosts.is_empty(), "gateway_hosts"),
+            (!oci.networks.is_empty(), "networks"),
+        ] {
+            if set {
+                bail!("a udp port cannot be combined with {what}");
+            }
         }
     }
     let mut exposed = std::collections::HashSet::new();
@@ -243,28 +281,60 @@ pub(crate) fn validate(req: &SandboxCreateRequest) -> Result<()> {
     Ok(())
 }
 
+/// What a VM on this Mac already listens on: `(host port, on the gateway for guests, udp)`.
+type Taken = (u16, bool, bool);
+
 /// The forwards for `ports` (loopback) and `expose` (gateway), refused when another VM on this Mac already listens
-/// there.
-fn forwards(oci: &OciSandboxSpec, taken: &[(u16, bool)]) -> Result<Vec<PortForward>> {
+/// there. The same number may be taken once per protocol.
+fn forwards(oci: &OciSandboxSpec, taken: &[Taken]) -> Result<Vec<PortForward>> {
     let published = oci
         .ports
         .iter()
-        .map(|p| parse_port(p).map(|(h, g)| (h, g, false)));
-    let exposed = oci.expose.iter().map(|&p| Ok((p, p, true)));
+        .map(|p| parse_port_spec(p).map(|p| (p.host, p.guest, false, p.udp)));
+    let exposed = oci.expose.iter().map(|&p| Ok((p, p, true, false)));
     let mut out = Vec::new();
     for f in published.chain(exposed) {
-        let (host_port, guest_port, guests) = f?;
-        if taken.contains(&(host_port, guests)) {
-            bail!("host port {host_port} is already published by another VM");
+        let (host_port, guest_port, guests, udp) = f?;
+        if taken.contains(&(host_port, guests, udp)) {
+            bail!(
+                "host port {host_port}/{} is already published by another VM",
+                if udp { "udp" } else { "tcp" }
+            );
         }
         out.push(PortForward {
             host_port,
             guest_port,
-            protocol: "tcp".into(),
+            protocol: if udp { "udp" } else { "tcp" }.into(),
             guests,
         });
     }
     Ok(out)
+}
+
+/// The listeners another VM holds, from its plain NAT forwards or its `apple.usernet` forwards.
+fn taken_by(vm: &VmRecord) -> Vec<Taken> {
+    let mut out: Vec<Taken> = match &vm.request.network {
+        NetworkSpec::User { forwards } => forwards
+            .iter()
+            .map(|f| {
+                (
+                    f.host_port,
+                    f.guests,
+                    f.protocol.eq_ignore_ascii_case("udp"),
+                )
+            })
+            .collect(),
+        _ => Vec::new(),
+    };
+    if let Some(u) = vm.request.apple.as_ref().and_then(|a| a.usernet.as_ref()) {
+        out.extend(
+            u.port_forwards
+                .iter()
+                .filter(|f| f.host_port != 0)
+                .map(|f| (f.host_port, false, f.protocol.eq_ignore_ascii_case("udp"))),
+        );
+    }
+    out
 }
 
 /// The volume shares and their mounts: share `fluxvm-vol<N>` is mounted at the volume's `guest_path`.
@@ -384,11 +454,39 @@ pub(crate) fn build_create(
     if let Some(apple) = create.apple.as_mut() {
         apple.secret_env = spec.secret_env.clone();
     }
+    let udp = forwards
+        .iter()
+        .any(|f| f.protocol.eq_ignore_ascii_case("udp"));
     create.network = if offline {
         if !forwards.is_empty() {
             bail!("an offline sandbox has no network card to publish ports on");
         }
         NetworkSpec::None
+    } else if udp {
+        // The Mac's NAT relays TCP only. The userspace gateway forwards both, so a sandbox that
+        // publishes UDP gets it as its network card, with the forwards on the gateway.
+        if forwards.iter().any(|f| f.guests) {
+            bail!("a udp port cannot be combined with expose");
+        }
+        if let Some(apple) = create.apple.as_mut() {
+            apple.usernet = Some(fluxvm_core::model::AppleUsernet {
+                port_forwards: forwards
+                    .iter()
+                    .map(|f| fluxvm_core::model::AppleUsernetForward {
+                        protocol: f.protocol.to_ascii_lowercase(),
+                        host_addr: None,
+                        host_port: f.host_port,
+                        guest_port: f.guest_port,
+                        guest_family: None,
+                        guest_addr: None,
+                    })
+                    .collect(),
+                ..Default::default()
+            });
+        }
+        NetworkSpec::User {
+            forwards: Vec::new(),
+        }
     } else {
         NetworkSpec::User { forwards }
     };
@@ -478,18 +576,12 @@ impl VmManager {
             .clone()
             .unwrap_or_else(|| format!("sandbox-{}", Uuid::new_v4()));
         let offline = req.offline || !req.allow_hosts.is_empty();
-        let taken: Vec<(u16, bool)> = self
+        let taken: Vec<Taken> = self
             .list()
             .await
             .into_iter()
             .filter(|vm| vm.status != VmStatus::Failed)
-            .flat_map(|vm| match vm.request.network {
-                NetworkSpec::User { forwards } => forwards
-                    .into_iter()
-                    .map(|f| (f.host_port, f.guests))
-                    .collect(),
-                _ => Vec::new(),
-            })
+            .flat_map(|vm| taken_by(&vm))
             .collect();
         let forwards = forwards(&oci, &taken)?;
         let tenant = token_tenant.map(str::to_owned);
@@ -607,6 +699,23 @@ impl VmManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_boot() -> OciBoot {
+        OciBoot {
+            kernel: "/b/oci-kernel".into(),
+            initrd: "/b/oci-initrd".into(),
+            cmdline: "console=hvc0".into(),
+        }
+    }
+
+    fn test_process() -> init::ProcessSpec {
+        init::ProcessSpec {
+            argv: vec!["/bin/sh".into()],
+            env: vec![],
+            cwd: "/".into(),
+            user: "65534:65534".into(),
+        }
+    }
 
     fn spec(json: serde_json::Value) -> OciSandboxSpec {
         serde_json::from_value(json).unwrap()
@@ -859,9 +968,27 @@ mod tests {
         assert_eq!(parse_port("8080:80").unwrap(), (8080, 80));
         assert_eq!(parse_port(" 8080:80/tcp ").unwrap(), (8080, 80));
         assert_eq!(parse_port("5000").unwrap(), (5000, 5000));
-        for bad in ["80:80", "8080:80/udp", "x:80", "8080:0", "", "70000:1"] {
+        for bad in [
+            "80:80",
+            "8080:80/udp",
+            "x:80",
+            "8080:0",
+            "",
+            "70000:1",
+            "8080:80/sctp",
+        ] {
             assert!(parse_port(bad).is_err(), "{bad}");
         }
+        // The full parser knows udp; the TCP-only wrapper above refuses it.
+        assert_eq!(
+            parse_port_spec("5353:53/UDP").unwrap(),
+            PortSpec {
+                host: 5353,
+                guest: 53,
+                udp: true
+            }
+        );
+        assert!(!parse_port_spec("5353:53").unwrap().udp);
     }
 
     #[test]
@@ -890,9 +1017,86 @@ mod tests {
         assert_eq!(f.len(), 2);
         assert!(!f[0].guests && f[0].host_port == 8080 && f[0].guest_port == 80);
         assert!(f[1].guests && f[1].host_port == 5432 && f[1].guest_port == 5432);
-        assert!(forwards(&both, &[(8080, false)]).is_err());
-        assert!(forwards(&both, &[(5432, true)]).is_err());
-        assert!(forwards(&both, &[(8080, true), (5432, false)]).is_ok());
+        assert!(forwards(&both, &[(8080, false, false)]).is_err());
+        assert!(forwards(&both, &[(5432, true, false)]).is_err());
+        assert!(forwards(&both, &[(8080, true, false), (5432, false, false)]).is_ok());
+        // The same host port may be held once per protocol.
+        assert!(forwards(&both, &[(8080, false, true)]).is_ok());
+    }
+
+    #[test]
+    fn udp_ports_validate_and_are_unique_per_protocol() {
+        let ok = sandbox(
+            serde_json::json!({"oci": {"image": "coredns", "ports": ["5353:53/udp", "5353:53/tcp"]}}),
+        );
+        assert!(
+            validate(&ok).is_ok(),
+            "the same number may be published once per protocol"
+        );
+        for bad in [
+            serde_json::json!({"oci": {"image": "x", "ports": ["5353:53/udp", "5353:54/udp"]}}),
+            serde_json::json!({"oci": {"image": "x", "ports": ["5353:53/udp"], "expose": [5432]}}),
+            serde_json::json!({"oci": {"image": "x", "ports": ["5353:53/udp"], "gateway_hosts": ["db"]}}),
+            serde_json::json!({"oci": {"image": "x", "ports": ["5353:53/udp"]}, "offline": true}),
+            serde_json::json!({"oci": {"image": "x", "ports": ["5353:53/sctp"]}}),
+        ] {
+            assert!(validate(&sandbox(bad.clone())).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn a_udp_port_gives_the_sandbox_the_userspace_gateway() {
+        let (rootfs, boot, process) = (PathBuf::from("/r"), test_boot(), test_process());
+        let s = spec(serde_json::json!({"image": "coredns", "ports": ["8080:80", "5353:53/udp"]}));
+        let f = forwards(&s, &[]).unwrap();
+        let c = build_create(
+            "n",
+            &rootfs,
+            &boot,
+            process,
+            &s,
+            (1, 512),
+            false,
+            &[],
+            f,
+            (vec![], vec![]),
+        )
+        .unwrap();
+        let u = c
+            .apple
+            .as_ref()
+            .unwrap()
+            .usernet
+            .as_ref()
+            .expect("udp => apple.usernet");
+        let protos: Vec<_> = u
+            .port_forwards
+            .iter()
+            .map(|f| (f.host_port, f.protocol.as_str()))
+            .collect();
+        assert_eq!(protos, [(8080, "tcp"), (5353, "udp")]);
+        // The gateway owns the forwards: none are left on the plain NAT (the two are mutually exclusive).
+        assert!(matches!(&c.network, NetworkSpec::User { forwards } if forwards.is_empty()));
+        fluxvm_apple::validate_request(&c).unwrap();
+
+        // TCP only keeps the plain NAT relay and no gateway.
+        let t = spec(serde_json::json!({"image": "nginx", "ports": ["8080:80"]}));
+        let f = forwards(&t, &[]).unwrap();
+        let c = build_create(
+            "n",
+            &rootfs,
+            &boot,
+            test_process(),
+            &t,
+            (1, 512),
+            false,
+            &[],
+            f,
+            (vec![], vec![]),
+        )
+        .unwrap();
+        assert!(c.apple.as_ref().unwrap().usernet.is_none());
+        assert!(matches!(&c.network, NetworkSpec::User { forwards } if forwards.len() == 1));
     }
 
     #[test]
