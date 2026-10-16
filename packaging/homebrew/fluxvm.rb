@@ -5,7 +5,7 @@ class Fluxvm < Formula
   homepage "https://github.com/zyvorai/zyvor-fluxvm"
   version "0.4.10"
   url "https://github.com/zyvorai/zyvor-fluxvm/releases/download/v#{version}/fluxvm-#{version}-macos-arm64.tar.gz"
-  sha256 "1b99d76fbc4c070fc77ee237c98317c5d5ed723c9134ad674d0c56a1e3385ee1"
+  sha256 "2d5c97f0782c7d34b982352d956f1daf3ebb30e0edbfe421791949908eba36f5"
   license "Apache-2.0"
 
   depends_on arch: :arm64
