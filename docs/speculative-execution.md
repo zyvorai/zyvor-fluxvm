@@ -130,10 +130,12 @@ removes deleted paths.
 - `replayable`: file changes inside the sandbox. This is all `apply` ever reproduces.
 - `non_replayable`: anything that may have happened for real. Never replayed.
 - `egress`:
-  - `blocked`: VM sandbox with `network = none`, or a procbox sandbox with no `net_ports`.
-  - `allow_listed`: a VM with a non-empty global `[sandbox] egress_allow_domains` (the domains are
+  - `blocked`: VM sandbox with `network = none`, a VM whose network policy (`POST /v1/vms/{id}/network/policy`, after
+    security-group merging) is deny-all, or a procbox sandbox with no `net_ports`.
+  - `allow_listed`: a VM whose network policy is an allow-list (the allowed CIDRs and ports, or FQDNs, are listed), a VM with a non-empty global `[sandbox] egress_allow_domains` (the domains are
     listed), or a procbox sandbox with `net_ports` (listed as `tcp/<port> (port allow-list only, any host)`).
-  - `unrestricted`: a VM with networking and no allow-list. External effects are unknown.
+  - `unrestricted`: a VM with networking and no allow-list, or whose network policy allows by default, is audit-only, or
+    uses entities. External effects are unknown.
 
 **Limitation: egress is declared, not enforced.** The report is derived from the sandbox's network
 spec and the daemon's allow-list configuration. The speculative run does not get a network of its own:

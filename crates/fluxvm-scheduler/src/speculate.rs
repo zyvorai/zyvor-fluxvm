@@ -241,7 +241,43 @@ fn procbox_effects(spec: &ProcboxSpec) -> (EgressMode, Vec<String>) {
     }
 }
 
-fn vm_effects(vm: &VmRecord, allow_domains: &[String]) -> (EgressMode, Vec<String>) {
+/// What a VM's declared network policy (after security-group merging) lets out, or `None` when it cannot be
+/// said to restrict anything. Fail-safe: anything open, log-and-allow or entity-based is `None`, which the
+/// caller reports as unrestricted.
+fn policy_effects(
+    p: &fluxvm_network::dataplane::VmNetworkPolicy,
+) -> Option<(EgressMode, Vec<String>)> {
+    if p.default_allow || p.audit_mode || !p.entities.is_empty() {
+        return None;
+    }
+    let mut dests: Vec<String> = Vec::new();
+    for cidr in &p.allow_cidrs {
+        if p.allow_ports.is_empty() {
+            dests.push(cidr.clone());
+        } else {
+            dests.extend(p.allow_ports.iter().map(|port| format!("{cidr} {port}")));
+        }
+    }
+    dests.extend(p.allow_fqdns.iter().cloned());
+    if dests.is_empty() {
+        // Nothing allow-listed. With no CIDR list, a port-only list is still an allow-list of any host.
+        if p.allow_ports.is_empty() {
+            return Some((EgressMode::Blocked, Vec::new()));
+        }
+        dests.extend(
+            p.allow_ports
+                .iter()
+                .map(|port| format!("{port} (any host)")),
+        );
+    }
+    Some((EgressMode::AllowListed, dests))
+}
+
+fn vm_effects(
+    vm: &VmRecord,
+    allow_domains: &[String],
+    policy: Option<&fluxvm_network::dataplane::VmNetworkPolicy>,
+) -> (EgressMode, Vec<String>) {
     let proxied = vm
         .request
         .apple
@@ -253,6 +289,10 @@ fn vm_effects(vm: &VmRecord, allow_domains: &[String]) -> (EgressMode, Vec<Strin
         (EgressMode::AllowListed, proxied)
     } else if matches!(vm.request.network, NetworkSpec::None) {
         (EgressMode::Blocked, Vec::new())
+    } else if let Some(effects) = policy.and_then(policy_effects) {
+        // The network policy set on the running VM (`POST /v1/vms/{id}/network/policy`) is what the
+        // dataplane enforces, so it decides what a speculative run could reach.
+        effects
     } else if !allow_domains.is_empty() {
         (EgressMode::AllowListed, allow_domains.to_vec())
     } else {
@@ -743,7 +783,8 @@ impl VmManager {
             {
                 bail!("speculation needs the guest agent, and this sandbox was created without it");
             }
-            let effects = vm_effects(&vm, &self.cfg.sandbox.egress_allow_domains);
+            let policy = self.merged_network_policy(id).await;
+            let effects = vm_effects(&vm, &self.cfg.sandbox.egress_allow_domains, policy.as_ref());
             let forked =
                 if vm.status == VmStatus::Running && crate::fork::check_forkable(&vm, 1).is_ok() {
                     self.speculate_via_fork(&vm, &command, timeout, &paths)
@@ -1216,6 +1257,56 @@ mod tests {
         assert!(base_conflicts(&base, &base.clone()).is_empty());
         let drifted = manifest(&[("/a", H2), ("/c", H1)]);
         assert_eq!(base_conflicts(&base, &drifted), vec!["/a", "/b", "/c"]);
+    }
+
+    fn policy(
+        f: impl FnOnce(&mut fluxvm_network::dataplane::VmNetworkPolicy),
+    ) -> fluxvm_network::dataplane::VmNetworkPolicy {
+        let mut p = fluxvm_network::dataplane::VmNetworkPolicy::default();
+        p.default_allow = false;
+        f(&mut p);
+        p
+    }
+
+    #[test]
+    fn a_deny_all_policy_is_blocked() {
+        assert_eq!(
+            policy_effects(&policy(|_| {})),
+            Some((EgressMode::Blocked, Vec::new()))
+        );
+    }
+
+    #[test]
+    fn an_allow_list_policy_reports_its_destinations() {
+        let p = policy(|p| {
+            p.allow_cidrs = vec!["10.0.0.1/32".into()];
+            p.allow_ports = vec!["tcp/9097".into()];
+        });
+        assert_eq!(
+            policy_effects(&p),
+            Some((
+                EgressMode::AllowListed,
+                vec!["10.0.0.1/32 tcp/9097".to_string()]
+            ))
+        );
+        let ports_only = policy(|p| p.allow_ports = vec!["tcp/443".into()]);
+        assert_eq!(
+            policy_effects(&ports_only).unwrap().0,
+            EgressMode::AllowListed
+        );
+    }
+
+    #[test]
+    fn an_open_or_audit_only_policy_says_nothing_so_it_stays_unrestricted() {
+        assert_eq!(
+            policy_effects(&fluxvm_network::dataplane::VmNetworkPolicy::default()),
+            None
+        );
+        assert_eq!(policy_effects(&policy(|p| p.audit_mode = true)), None);
+        assert_eq!(
+            policy_effects(&policy(|p| p.entities = vec!["world".into()])),
+            None
+        );
     }
 
     #[test]

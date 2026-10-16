@@ -2301,6 +2301,24 @@ impl VmManager {
         .context("network effective reader panicked")?
     }
 
+    /// The VM's network policy as the dataplane enforces it (declared policy plus security-group merging), or
+    /// `None` if it cannot be read. Callers that report what a VM could reach treat `None` as "unknown".
+    pub(crate) async fn merged_network_policy(
+        &self,
+        id: Uuid,
+    ) -> Option<fluxvm_network::dataplane::VmNetworkPolicy> {
+        let cfg = self.cfg.clone();
+        tokio::task::spawn_blocking(move || {
+            let declared = fluxvm_network::dataplane::effective_policy(&cfg, id).ok()?;
+            fluxvm_network::groups::merge_group_policy(&cfg, declared)
+                .ok()
+                .map(|(merged, _)| merged)
+        })
+        .await
+        .ok()
+        .flatten()
+    }
+
     pub async fn network_policy(
         &self,
         id: Uuid,
