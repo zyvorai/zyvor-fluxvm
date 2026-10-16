@@ -118,7 +118,9 @@ if [[ -n "${FLUXVM_PROFILE_RUNNER:-}" ]]; then
 fi
 
 # Re-sign the plain binaries with the chosen identity (the runner keeps its virtualization entitlement).
-for b in fluxctl fluxvm-vz-switch fluxvm-blockd fluxvm-usernet; do fs_sign_binary "$STAGE/bin/$b"; done
+# fluxctl links Homebrew libhivex: under Hardened Runtime that needs disable-library-validation.
+fs_sign_binary "$STAGE/bin/fluxctl" "packaging/macos/fluxctl.entitlements.plist"
+for b in fluxvm-vz-switch fluxvm-blockd fluxvm-usernet; do fs_sign_binary "$STAGE/bin/$b"; done
 fs_sign_binary "$STAGE/bin/fluxvm-vz-runner" "$APPLE/runner/Entitlements.plist"
 fs_has_entitlement "$STAGE/bin/fluxvm-vz-runner" com.apple.security.virtualization \
   || { echo "the re-signed runner lost com.apple.security.virtualization" >&2; exit 1; }
