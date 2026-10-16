@@ -16,7 +16,8 @@ warn() { echo "warn $*"; }
 
 ID="$(security find-identity -v -p codesigning 2>/dev/null | sed -n 's/.*"\(Developer ID Application: .*\)"/\1/p' | head -n1 || true)"
 if [[ -n "$ID" ]]; then
-  ok "codesigning identity: $ID"
+  # Do not print the identity string (contains org name / Team ID).
+  ok "Developer ID Application identity present in the login keychain"
 else
   miss "Developer ID Application identity in the login keychain"
 fi
