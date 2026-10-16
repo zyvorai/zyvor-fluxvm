@@ -16,6 +16,12 @@
   is on PATH or built in `./target`, and otherwise runs its old checks, so it still works on a fresh machine. `--native-kvm`
   keeps its extra binaries. Run on macOS (wrapper path, fallback path, bad argument); the Linux run is listed in the PR.
 
+- **`fluxctl doctor --fix` repairs MCP entries that `brew upgrade` left pointing at a removed path.** It rewrites only the
+  entry's `command` to the current `fluxctl`, so `--allow-write`, `--context`, env and tokens survive (a plain `mcp install`
+  rewrites the whole entry and drops them); an entry that does not name a `fluxctl` is left alone, a second run changes
+  nothing, and the report is taken again afterwards. Without the flag `doctor` still never writes. The LaunchAgent is not
+  touched (it starts a service): its fix command is still printed. Unit-tested (JSON and Codex TOML, comments kept) and run
+  on macOS against a stale entry under a scratch `$HOME`. Not run: against a real upgraded Homebrew install.
 
 - **`fluxctl doctor` no longer fails a healthy Linux host because of who runs it.** Run on a Linux host for the first time,
   as a user outside the `kvm` group, it exited 1 with `kvm FAIL` while the root daemon was healthy and its VMs were running.

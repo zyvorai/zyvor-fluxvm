@@ -30,7 +30,7 @@ More: [install.md](install.md#troubleshooting).
 | `brew services` shows `Running: false` and the log says `Address already in use` | A `fluxctl service install` agent (from a version before the guard, or installed with `--force`) already holds port 7788: `fluxctl service uninstall`, then `brew services restart zyvorai/tap/fluxvm`. |
 | `fluxctl service install` says FluxVM is managed by Homebrew, or that something already listens | The guard working: use `brew services start zyvorai/tap/fluxvm`, or stop the other daemon. `--force` installs anyway. |
 | `curl 127.0.0.1:7788/readyz` gives `503` | Expected on 0.4.4 only; upgrade, or use `/healthz` for liveness. |
-| The MCP client lost the `fluxvm` tools after `brew upgrade` | The entry points at the removed versioned path: re-run `fluxctl mcp install <client>`. |
+| The MCP client lost the `fluxvm` tools after `brew upgrade` | The entry points at the removed versioned path: run `fluxctl doctor --fix` (it changes only the `command`, so `--allow-write` and env stay), or re-run `fluxctl mcp install <client>`. |
 | The client does not list the `fluxvm` tools | Restart the client; `fluxctl mcp status` shows whether the entry is written. |
 
 More: [install-macos.md](install-macos.md#troubleshooting).

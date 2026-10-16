@@ -306,7 +306,7 @@ pub fn check_stale_paths(refs: &[PathRef]) -> Check {
     Check::warn(
         "client entries",
         format!("point at a binary that no longer exists: {list}"),
-        "re-run `fluxctl mcp install <client>` and, for the service, `fluxctl service install`",
+        "`fluxctl doctor --fix` repoints MCP entries (keeping their settings); or re-run `fluxctl mcp install <client>`; for the LaunchAgent, `fluxctl service install`",
     )
 }
 
@@ -705,7 +705,8 @@ mod tests {
             !c.detail.contains("LaunchAgent ->"),
             "only dead entries are listed"
         );
-        assert!(c.fix.unwrap().contains("mcp install"));
+        let fix = c.fix.unwrap();
+        assert!(fix.contains("mcp install") && fix.contains("doctor --fix"));
         assert_eq!(level(&check_stale_paths(&[])), Level::Skip);
     }
 
