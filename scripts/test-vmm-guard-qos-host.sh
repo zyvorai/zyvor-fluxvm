@@ -21,7 +21,19 @@ cleanup(){ set +e; "$ROOT/dist/bin/fluxvm-guard-loader" --unload "$PIN" >/dev/nu
 trap cleanup EXIT
 mkdir "$CG"
 
-"$ROOT/scripts/build-runtime-intelligence.sh" "$ROOT/dist"
+# Build only what this test needs (guard object, loader, fluxvm-guard) so it does not depend on
+# the unrelated Runtime Intelligence tools (libxdp, sched_ext, ...). Set FLUXVM_TEST_FULL_BUILD=1
+# to use the full build instead.
+if [[ "${FLUXVM_TEST_FULL_BUILD:-0}" == 1 ]]; then
+  "$ROOT/scripts/build-runtime-intelligence.sh" "$ROOT/dist"
+else
+  mkdir -p "$ROOT/dist/bin" "$ROOT/dist/bpf"
+  "$ROOT/scripts/build-vmm-guard.sh" "$ROOT/dist/bpf" >/dev/null
+  ${CC:-cc} -O2 -g -Wall -Wextra -Werror "$ROOT/tools/fluxvm-guard-loader.c" \
+    -o "$ROOT/dist/bin/fluxvm-guard-loader" $(pkg-config --cflags --libs libbpf)
+  (cd "$ROOT" && cargo build --release -p fluxvm-intelligence --bin fluxvm-guard) >/dev/null
+  cp "$ROOT/target/release/fluxvm-guard" "$ROOT/dist/bin/fluxvm-guard"
+fi
 "$ROOT/dist/bin/fluxvm-guard-loader" --load "$ROOT/dist/bpf/fluxvm_guard.bpf.o" "$PIN"
 
 cat > "$TMP/probe.c" <<'C'

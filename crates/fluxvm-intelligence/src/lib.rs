@@ -2,11 +2,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
 pub mod afxdp;
+pub mod exec_policy;
 pub mod guard;
 pub mod memprof;
 pub mod netintel;
 pub mod qos;
 pub mod quiclb;
+pub mod rule_pack;
 pub mod scx;
 pub mod shield;
 pub mod tcpintel;

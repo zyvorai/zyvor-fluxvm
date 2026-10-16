@@ -316,12 +316,7 @@ fn inject_host_gpu_env(
     command: String,
     process: Option<ExecProcess>,
 ) -> (String, Option<ExecProcess>) {
-    if !vm
-        .request
-        .apple
-        .as_ref()
-        .is_some_and(|a| a.host_gpu)
-    {
+    if !vm.request.apple.as_ref().is_some_and(|a| a.host_gpu) {
         return (command, process);
     }
     let port = fluxvm_apple::HOST_INFER_PORT;

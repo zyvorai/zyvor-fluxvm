@@ -11,6 +11,8 @@ migration orchestration.
 
 - `bprm_check_security`: optionally blocks `execve()` from a guarded VM cgroup.
 - `file_mprotect`: optionally blocks W+X mappings.
+- `bprm_check_security` also supports a positive exec allow-list; see
+  [host-hardening.md](host-hardening.md#positive-exec-allow-list-vmm-guard).
 - `file_open`: optionally restricts character/block devices and writable
   regular files to exact allow-list identities.
 

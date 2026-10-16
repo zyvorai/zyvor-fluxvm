@@ -12,6 +12,7 @@ description = "REST API for Zyvor FluxVM"
 fluxvm-core = { path = "../fluxvm-core" }
 fluxvm-scheduler = { path = "../fluxvm-scheduler" }
 fluxvm-image = { path = "../fluxvm-image" }
+fluxvm-intelligence = { path = "../fluxvm-intelligence" }
 fluxvm-network = { path = "../fluxvm-network" }
 fluxvm-netobs = { path = "../fluxvm-netobs" }
 fluxvm-vsock-client = { path = "../fluxvm-vsock-client" }
@@ -40,6 +41,8 @@ chrono = { version = "0.4", features = ["serde"] }
 http-body-util = "0.1"
 libc = "0.2"
 sha2 = "0.10"
+sha1 = "0.10"
+hmac = "0.12"
 base64 = "0.22"
 
 [dev-dependencies]

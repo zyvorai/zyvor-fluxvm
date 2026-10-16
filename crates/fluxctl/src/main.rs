@@ -30,9 +30,10 @@ mod compose;
 mod contexts;
 mod create;
 mod doctor;
-mod infer;
 mod fleet_cli;
 mod fleet_client;
+mod guard_cmd;
+mod infer;
 mod launch_agent;
 mod mcp;
 mod mcp_install;
@@ -105,6 +106,16 @@ struct Cli {
         help_heading = "Global Flags"
     )]
     server_token: Option<String>,
+    /// Current TOTP code for tokens that need step-up MFA (`[[auth.mfa]]`),
+    /// sent as `X-Fluxvm-Totp` with remote requests.
+    #[arg(
+        long,
+        env = "FLUXVM_TOTP",
+        global = true,
+        hide_env_values = true,
+        help_heading = "Global Flags"
+    )]
+    totp: Option<String>,
     /// Named remote from `fluxctl context add` (`local` forces local mode).
     /// Defaults to the current context, if one is set.
     #[arg(
@@ -289,6 +300,14 @@ enum Command {
     Hibernate {
         #[arg(value_parser = output::parse_vm_ref)]
         id: Uuid,
+    },
+    /// VMM Guard: exec allow-list, signed virtual-patch rule packs, policy status. Runs
+    /// `fluxvm-guard` on this host (root + BPF-LSM); with `--server` only `guard status <vm>`.
+    /// See docs/host-hardening.md.
+    #[command(trailing_var_arg = true)]
+    Guard {
+        #[arg(allow_hyphen_values = true, required = true)]
+        args: Vec<String>,
     },
     /// Collect an incident bundle: QMP state, cgroup and PSI, console log,
     /// network and eBPF state, optionally a packet capture and a guest memory
@@ -3967,6 +3986,12 @@ async fn run_remote(
         Command::Pause { id } => pretty(&r.vm_op(id, "pause").await?)?,
         Command::Resume { id } => pretty(&r.vm_op(id, "resume").await?)?,
         Command::Hibernate { id } => pretty(&r.vm_op(id, "hibernate").await?)?,
+        Command::Guard { args } => match guard_cmd::parse_remote(&args)? {
+            guard_cmd::Remote::Status(id) => pretty(
+                &r.call(Method::GET, &format!("/v1/vms/{id}/guard"), None)
+                    .await?,
+            )?,
+        },
         Command::Incident {
             id,
             pcap_seconds,
@@ -5885,6 +5910,7 @@ async fn main() -> Result<()> {
         Command::Hibernate { id } => {
             println!("{}", serde_json::to_string_pretty(&m.hibernate(id).await?)?)
         }
+        Command::Guard { args } => guard_cmd::run_local(&args)?,
         Command::Incident {
             id,
             pcap_seconds,

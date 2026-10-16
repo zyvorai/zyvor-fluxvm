@@ -29,6 +29,23 @@ pub fn from_argv_env() -> Option<Remote> {
     endpoint(server, token, context.as_deref()).ok().flatten()
 }
 
+/// The step-up TOTP code from `--totp` / `FLUXVM_TOTP`, read straight from
+/// argv for the same reason as [`from_argv_env`] (a `Remote` is built before
+/// clap runs). Sent as `X-Fluxvm-Totp` on every request; the server only
+/// looks at it for tokens with an `[[auth.mfa]]` rule.
+fn totp_code() -> Option<String> {
+    let args: Vec<String> = std::env::args().collect();
+    let from_argv = args.iter().enumerate().find_map(|(i, a)| {
+        a.strip_prefix("--totp=")
+            .map(str::to_string)
+            .or_else(|| (a == "--totp").then(|| args.get(i + 1).cloned()).flatten())
+    });
+    from_argv
+        .or_else(|| std::env::var("FLUXVM_TOTP").ok())
+        .map(|c| c.trim().to_string())
+        .filter(|c| !c.is_empty())
+}
+
 /// Reserved `--context` value forcing local mode over a current context.
 pub const LOCAL_CONTEXT: &str = "local";
 
@@ -61,10 +78,19 @@ impl Remote {
         } else {
             format!("http://{}", server.trim_end_matches('/'))
         };
+        let mut headers = reqwest::header::HeaderMap::new();
+        if let Some(code) = totp_code()
+            && let Ok(v) = reqwest::header::HeaderValue::from_str(&code)
+        {
+            headers.insert("x-fluxvm-totp", v);
+        }
         Self {
             base,
             token: token.filter(|t| !t.is_empty()),
-            http: reqwest::Client::new(),
+            http: reqwest::Client::builder()
+                .default_headers(headers)
+                .build()
+                .unwrap_or_default(),
         }
     }
 

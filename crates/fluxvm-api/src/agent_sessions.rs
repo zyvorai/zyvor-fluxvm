@@ -5602,16 +5602,31 @@ async fn job_meta_status(m: &VmManager, id: Uuid, st: &JobStatus) {
 }
 
 fn job_stdin_path(job: Uuid) -> String {
-    format!("{JOBS_DIR}/{job}.in")
+    job_stdin_path_in(JOBS_DIR, job)
+}
+
+fn job_stdin_path_in(dir: &str, job: Uuid) -> String {
+    format!("{dir}/{job}.in")
 }
 
 /// The guest-side shell line that starts a job. Pure, so it is unit-tested.
 fn job_start_script(job: Uuid, command: &str, stdin: bool, max_output: u64) -> String {
-    let f = format!("{JOBS_DIR}/{job}");
+    job_start_script_in(JOBS_DIR, job, command, stdin, max_output)
+}
+
+/// [`job_start_script`] with the jobs directory chosen by the caller (tests use a private one).
+fn job_start_script_in(
+    dir: &str,
+    job: Uuid,
+    command: &str,
+    stdin: bool,
+    max_output: u64,
+) -> String {
+    let f = format!("{dir}/{job}");
     let out = shell_quote(&format!("{f}.out"));
     let exit = shell_quote(&format!("{f}.exit"));
     let pid = shell_quote(&format!("{f}.pid"));
-    let fifo = job_stdin_path(job);
+    let fifo = job_stdin_path_in(dir, job);
     let mkfifo = if stdin {
         format!("mkfifo {} && ", shell_quote(&fifo))
     } else {
@@ -5628,7 +5643,7 @@ fn job_start_script(job: Uuid, command: &str, stdin: bool, max_output: u64) -> S
     // means the output file is complete.
     format!(
         "mkdir -p {dir} && {mkfifo}{{ S=; command -v setsid >/dev/null 2>&1 && S=setsid; (exec $S sh -c 'echo $$ > \"$1\"; exec 3<>\"$6\"; {{ sh -c \"$2\" 2>&1 <&3; echo $? > \"$4.rc\"; }} | head -c \"$5\" > \"$3\"; mv \"$4.rc\" \"$4\"' _ {pid} {cmd} {out} {exit} {max_output} {input} > /dev/null 2>&1 &); }} ; echo started",
-        dir = shell_quote(JOBS_DIR),
+        dir = shell_quote(dir),
         cmd = shell_quote(command),
     )
 }
@@ -5636,7 +5651,11 @@ fn job_start_script(job: Uuid, command: &str, stdin: bool, max_output: u64) -> S
 /// The guest-side line that reads a job: exit code first, then output from `offset`, then the
 /// log's size, so an exit seen here means the output read after it is complete.
 fn job_read_script(job: Uuid, offset: u64) -> String {
-    let f = format!("{JOBS_DIR}/{job}");
+    job_read_script_in(JOBS_DIR, job, offset)
+}
+
+fn job_read_script_in(dir: &str, job: Uuid, offset: u64) -> String {
+    let f = format!("{dir}/{job}");
     format!(
         "e=$(cat {exit} 2>/dev/null); if [ ! -e {out} ]; then echo MISSING; exit 0; fi; \
          echo \"EXIT:$e\"; tail -c +{from} {out} | head -c {max} | base64 | tr -d '\\n'; echo; \
@@ -5651,11 +5670,15 @@ fn job_read_script(job: Uuid, offset: u64) -> String {
 /// The guest-side line that appends to a job's stdin. Refuses (exit 3) when the job has no stdin
 /// FIFO or has already exited, because opening a FIFO nobody reads would block.
 fn job_stdin_script(job: Uuid, data: &[u8]) -> String {
+    job_stdin_script_in(JOBS_DIR, job, data)
+}
+
+fn job_stdin_script_in(dir: &str, job: Uuid, data: &[u8]) -> String {
     use base64::Engine as _;
     format!(
         "f={fifo}; [ -p \"$f\" ] && [ ! -e {exit} ] || exit 3; printf %s {b64} | base64 -d > \"$f\"",
-        fifo = shell_quote(&job_stdin_path(job)),
-        exit = shell_quote(&format!("{JOBS_DIR}/{job}.exit")),
+        fifo = shell_quote(&job_stdin_path_in(dir, job)),
+        exit = shell_quote(&format!("{dir}/{job}.exit")),
         b64 = base64::engine::general_purpose::STANDARD.encode(data),
     )
 }
@@ -8711,6 +8734,9 @@ mod tests {
 
         struct Sh {
             path: std::ffi::OsString,
+            /// Private jobs directory: the production path (`/tmp/fluxvm-jobs`) is shared and
+            /// fixed, so another user's leftover there made these tests fail.
+            jobs: String,
             _dir: tempfile::TempDir,
         }
 
@@ -8728,7 +8754,12 @@ mod tests {
             let mut path = std::ffi::OsString::from(dir.path());
             path.push(":");
             path.push(std::env::var_os("PATH").unwrap_or_default());
-            Sh { path, _dir: dir }
+            let jobs = dir.path().join("jobs").to_string_lossy().into_owned();
+            Sh {
+                path,
+                jobs,
+                _dir: dir,
+            }
         }
 
         fn run(sh: &Sh, script: &str) -> (i32, String) {
@@ -8748,7 +8779,7 @@ mod tests {
         fn wait_exit(sh: &Sh, job: Uuid) -> (Option<i64>, Vec<u8>, u64) {
             let end = Instant::now() + Duration::from_secs(10);
             loop {
-                let (_, out) = run(sh, &job_read_script(job, 0));
+                let (_, out) = run(sh, &job_read_script_in(&sh.jobs, job, 0));
                 if let JobRead::Chunk { exit, bytes, size } = parse_job_read(&out)
                     && (exit.is_some() || Instant::now() > end)
                 {
@@ -8768,7 +8799,13 @@ mod tests {
             let job = Uuid::new_v4();
             let (code, out) = run(
                 &sh,
-                &job_start_script(job, "echo out; echo err >&2; exit 7", false, 1 << 20),
+                &job_start_script_in(
+                    &sh.jobs,
+                    job,
+                    "echo out; echo err >&2; exit 7",
+                    false,
+                    1 << 20,
+                ),
             );
             assert_eq!((code, out.trim()), (0, "started"));
             let (exit, bytes, _) = wait_exit(&sh, job);
@@ -8781,24 +8818,30 @@ mod tests {
             let sh = sh();
             let job = Uuid::new_v4();
             // `head -n 2` reads two lines from stdin, so the job lives until both arrive.
-            run(&sh, &job_start_script(job, "head -n 2", true, 1 << 20));
+            run(
+                &sh,
+                &job_start_script_in(&sh.jobs, job, "head -n 2", true, 1 << 20),
+            );
             let end = Instant::now() + Duration::from_secs(5);
             // The FIFO is created before the job is backgrounded, so the first write works.
-            let (c1, _) = run(&sh, &job_stdin_script(job, b"one\n"));
+            let (c1, _) = run(&sh, &job_stdin_script_in(&sh.jobs, job, b"one\n"));
             assert_eq!(c1, 0);
-            let (c2, _) = run(&sh, &job_stdin_script(job, b"two\n"));
+            let (c2, _) = run(&sh, &job_stdin_script_in(&sh.jobs, job, b"two\n"));
             assert_eq!(c2, 0);
             let (exit, bytes, _) = wait_exit(&sh, job);
             assert!(Instant::now() < end + Duration::from_secs(10));
             assert_eq!(exit, Some(0));
             assert_eq!(String::from_utf8_lossy(&bytes), "one\ntwo\n");
             // Exited: a further write is refused, not blocked forever.
-            let (c3, _) = run(&sh, &job_stdin_script(job, b"three\n"));
+            let (c3, _) = run(&sh, &job_stdin_script_in(&sh.jobs, job, b"three\n"));
             assert_eq!(c3, 3);
             // A job without stdin has no FIFO at all.
             let plain = Uuid::new_v4();
-            run(&sh, &job_start_script(plain, "true", false, 1024));
-            assert_eq!(run(&sh, &job_stdin_script(plain, b"x")).0, 3);
+            run(
+                &sh,
+                &job_start_script_in(&sh.jobs, plain, "true", false, 1024),
+            );
+            assert_eq!(run(&sh, &job_stdin_script_in(&sh.jobs, plain, b"x")).0, 3);
         }
 
         #[test]
@@ -8807,7 +8850,8 @@ mod tests {
             let job = Uuid::new_v4();
             run(
                 &sh,
-                &job_start_script(
+                &job_start_script_in(
+                    &sh.jobs,
                     job,
                     "yes aaaaaaaaaaaaaaaaaaaa | head -c 200000",
                     false,

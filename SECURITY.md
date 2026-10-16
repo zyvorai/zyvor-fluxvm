@@ -23,7 +23,9 @@ multi-tenant public cloud. Before exposing it off-loopback:
    when VMs have a host-visible edge.
 6. Use Firecracker jailer + cgroup v2 limits for untrusted guests.
 7. Sign catalog images (Ed25519 / optional cosign).
-8. Walk [docs/PRODUCTION.md](docs/PRODUCTION.md) and run
+8. Require step-up TOTP for admin tokens that can run guest commands
+   (`[[auth.mfa]]`, see [docs/host-hardening.md](docs/host-hardening.md)).
+9. Walk [docs/PRODUCTION.md](docs/PRODUCTION.md) and run
    `./scripts/release-checklist.sh` before calling a host production-ready.
 
 ## Report a vulnerability

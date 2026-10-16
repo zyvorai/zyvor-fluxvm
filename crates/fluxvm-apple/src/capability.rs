@@ -485,12 +485,14 @@ pub fn wire_host_gpu(apple: &mut fluxvm_core::model::AppleSpec, host_port: u16) 
             }
         }
     } else {
-        apple.vsock_services.push(fluxvm_core::model::AppleVsockService {
-            port,
-            socket: None,
-            builtin: None,
-            tcp: Some(target),
-        });
+        apple
+            .vsock_services
+            .push(fluxvm_core::model::AppleVsockService {
+                port,
+                socket: None,
+                builtin: None,
+                tcp: Some(target),
+            });
     }
     Ok(())
 }
@@ -1460,9 +1462,7 @@ mod tests {
     #[test]
     fn host_gpu_is_for_linux_guests_and_wires_vsock_plus_relay() {
         assert!(validate_request(&req(r#""apple":{"host_gpu":true}"#)).is_ok());
-        assert!(
-            validate_request(&req(r#""apple":{"host_gpu":true,"guest_os":"macos"}"#)).is_err()
-        );
+        assert!(validate_request(&req(r#""apple":{"host_gpu":true,"guest_os":"macos"}"#)).is_err());
         let mut apple = fluxvm_core::model::AppleSpec {
             host_gpu: true,
             ..Default::default()
@@ -1482,12 +1482,11 @@ mod tests {
                 .iter()
                 .any(|f| f.path == "/usr/local/sbin/fluxvm-infer")
         );
-        assert!(
-            ci.write_files
-                .iter()
-                .any(|f| f.path == "/etc/profile.d/fluxvm-infer.sh"
-                    && f.content.contains("OPENAI_BASE_URL=http://127.0.0.1:8080/v1"))
-        );
+        assert!(ci.write_files.iter().any(|f| {
+            f.path == "/etc/profile.d/fluxvm-infer.sh"
+                && f.content
+                    .contains("OPENAI_BASE_URL=http://127.0.0.1:8080/v1")
+        }));
     }
 
     #[test]

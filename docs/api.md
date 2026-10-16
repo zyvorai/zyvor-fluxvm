@@ -958,3 +958,6 @@ seccomp, and the exec response carries `enforcement`:
 If the policy cannot be enforced, the command is not run and the response is an error. Procbox
 sandboxes reject a per-exec `policy` (400). Without `policy`, the response is unchanged and has no
 `enforcement` key.
+
+- `GET /v1/vms/{id}/guard` (read-only): the VMM Guard state for a VM — mode, exec allow-list, applied rule packs and
+  `expired_packs`. See `docs/host-hardening.md`.

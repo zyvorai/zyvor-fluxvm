@@ -647,9 +647,13 @@ impl VmBackend for QemuBackend {
             anyhow::bail!("QEMU exited before PID was available");
         };
         let qmp = qmp_socket_path(cfg, ctx.id);
-        if let Err(e) =
-            disks::apply_boot_throttles(&qmp, &ctx.workspace, req.root_disk_io.as_ref(), QMP_BOOT_TIMEOUT)
-                .await
+        if let Err(e) = disks::apply_boot_throttles(
+            &qmp,
+            &ctx.workspace,
+            req.root_disk_io.as_ref(),
+            QMP_BOOT_TIMEOUT,
+        )
+        .await
         {
             kill_pids(&[pid]);
             kill_pids(&sidecar_pids);
@@ -676,13 +680,7 @@ impl VmBackend for QemuBackend {
     }
 
     async fn graceful_shutdown(&self, _cfg: &Config, vm: &VmRecord) -> Result<()> {
-        qmp::execute(
-            &qmp_socket(vm),
-            "system_powerdown",
-            None,
-            QMP_TIMEOUT,
-        )
-        .await?;
+        qmp::execute(&qmp_socket(vm), "system_powerdown", None, QMP_TIMEOUT).await?;
         Ok(())
     }
 }
@@ -821,8 +819,7 @@ pub async fn hotplug_cpu(_cfg: &Config, vm: &VmRecord, add_vcpus: u8) -> Result<
 /// memory (boot-time `memory_mib` plus every hot-added DIMM so far), not
 /// just what this one call added.
 pub async fn hotplug_memory(_cfg: &Config, vm: &VmRecord, add_memory_mib: u64) -> Result<u64> {
-    let hotplugged =
-        qmp::hotplug_memory(&qmp_socket(vm), add_memory_mib, QMP_TIMEOUT).await?;
+    let hotplugged = qmp::hotplug_memory(&qmp_socket(vm), add_memory_mib, QMP_TIMEOUT).await?;
     Ok(vm.request.memory_mib.saturating_add(hotplugged))
 }
 
@@ -900,12 +897,7 @@ pub async fn balloon_guest_stats(vm: &VmRecord) -> Result<Option<GuestMemoryStat
     let Some(spec) = &vm.request.balloon else {
         return Ok(None);
     };
-    qmp::balloon_guest_stats(
-        &qmp_socket(vm),
-        spec.stats_interval_secs,
-        QMP_TIMEOUT,
-    )
-    .await
+    qmp::balloon_guest_stats(&qmp_socket(vm), spec.stats_interval_secs, QMP_TIMEOUT).await
 }
 
 /// Hot-add a virtio-net NIC on an already-created TAP. `index` selects
@@ -928,14 +920,7 @@ pub async fn hotplug_nic_fd(
     mac: Option<&str>,
     index: u8,
 ) -> Result<()> {
-    qmp::hotplug_nic_fd(
-        &qmp_socket(vm),
-        tap_fd,
-        mac,
-        index,
-        QMP_TIMEOUT,
-    )
-    .await
+    qmp::hotplug_nic_fd(&qmp_socket(vm), tap_fd, mac, index, QMP_TIMEOUT).await
 }
 
 /// Pause, save an internal snapshot tagged `name`, then resume if the VM was

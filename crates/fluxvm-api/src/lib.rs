@@ -33,6 +33,7 @@ use uuid::Uuid;
 
 mod grants;
 mod idempotency;
+mod mfa;
 mod netobs_api;
 mod oidc;
 mod openapi;
@@ -251,6 +252,42 @@ async fn auth_middleware(State(auth): State<AuthState>, mut req: Request, next: 
                 }
                 req.extensions_mut().insert(sc);
             }
+            let mfa_outcome = mfa::enforce(
+                &m.cfg.auth,
+                token_name.as_deref(),
+                method.as_str(),
+                &path,
+                req.headers().get(mfa::HEADER).and_then(|v| v.to_str().ok()),
+            );
+            if !matches!(mfa_outcome, mfa::Outcome::NotRequired | mfa::Outcome::Ok) {
+                fluxvm_core::metrics::inc_auth_deny();
+                let status = if mfa_outcome == mfa::Outcome::LockedOut {
+                    StatusCode::TOO_MANY_REQUESTS
+                } else {
+                    StatusCode::UNAUTHORIZED
+                };
+                audit_log(
+                    token_name.as_deref().unwrap_or("anonymous"),
+                    role,
+                    &method,
+                    &path,
+                    status.as_u16(),
+                    mfa_outcome,
+                );
+                let mut resp = (
+                    status,
+                    Json(json!({
+                        "error": "step-up authentication required: send a valid TOTP code in X-Fluxvm-Totp",
+                        "mfa": mfa_outcome.label(),
+                    })),
+                )
+                    .into_response();
+                resp.headers_mut().insert(
+                    header::WWW_AUTHENTICATE,
+                    header::HeaderValue::from_static("TOTP realm=\"fluxvm\""),
+                );
+                return resp;
+            }
             req.extensions_mut().insert(role);
             if let Some(name) = token_name.clone() {
                 req.extensions_mut().insert(AuditActor(name));
@@ -265,12 +302,20 @@ async fn auth_middleware(State(auth): State<AuthState>, mut req: Request, next: 
                 &method,
                 &path,
                 response.status().as_u16(),
+                mfa_outcome,
             );
             response
         }
         None => {
             fluxvm_core::metrics::inc_auth_deny();
-            audit_log("none", Role::ReadOnly, &method, &path, 401);
+            audit_log(
+                "none",
+                Role::ReadOnly,
+                &method,
+                &path,
+                401,
+                mfa::Outcome::NotRequired,
+            );
             (
                 StatusCode::UNAUTHORIZED,
                 Json(json!({"error": "missing or invalid bearer token"})),
@@ -385,7 +430,7 @@ async fn rate_limit_middleware(
     }
 }
 
-fn audit_log(actor: &str, role: Role, method: &Method, path: &str, status: u16) {
+fn audit_log(actor: &str, role: Role, method: &Method, path: &str, status: u16, mfa: mfa::Outcome) {
     let role = match role {
         Role::Admin => "admin",
         Role::ReadOnly => "read-only",
@@ -397,6 +442,7 @@ fn audit_log(actor: &str, role: Role, method: &Method, path: &str, status: u16) 
         method = %method,
         path = %path,
         status = status,
+        mfa = mfa.label(),
         "audit"
     );
 }
@@ -735,6 +781,7 @@ pub fn router(manager: Arc<VmManager>) -> Router {
         .route("/v1/network/hubble/flows/text", get(hubble_flows_text))
         .route("/v1/network/hubble/ui", get(hubble_ui))
         .route("/v1/vms/{id}/pressure", get(vm_pressure))
+        .route("/v1/vms/{id}/guard", get(vm_guard))
         .route("/v1/vms/{id}/logs", get(vm_logs))
         .route("/v1/vms/{id}/agent", post(agent_exec))
         .route("/v1/vms/{id}/screenshot", get(vm_screenshot))
@@ -2512,17 +2559,14 @@ async fn host_infer_status(State(m): State<Arc<VmManager>>) -> Json<serde_json::
         Ok(resp) => {
             let models_ok = resp.status().is_success();
             let model = if models_ok {
-                resp.json::<serde_json::Value>()
-                    .await
-                    .ok()
-                    .and_then(|v| {
-                        v.get("data")
-                            .and_then(|d| d.as_array())
-                            .and_then(|a| a.first())
-                            .and_then(|m| m.get("id"))
-                            .and_then(|id| id.as_str())
-                            .map(str::to_string)
-                    })
+                resp.json::<serde_json::Value>().await.ok().and_then(|v| {
+                    v.get("data")
+                        .and_then(|d| d.as_array())
+                        .and_then(|a| a.first())
+                        .and_then(|m| m.get("id"))
+                        .and_then(|id| id.as_str())
+                        .map(str::to_string)
+                })
             } else {
                 None
             };
@@ -3965,6 +4009,30 @@ async fn vm_pressure(
     Path(id): Path<Uuid>,
 ) -> ApiResult<Json<serde_json::Value>> {
     Ok(Json(json!(m.pressure(id).await?)))
+}
+
+/// `GET /v1/vms/{id}/guard`: the VMM Guard policy applied to this VM (mode, exec allow-list, applied
+/// virtual-patch rule packs and which of them have expired). Read-only; applying packs stays a
+/// host-local `fluxvm-guard apply` because it needs root and the pinned BPF maps.
+async fn vm_guard(
+    State(m): State<Arc<VmManager>>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<serde_json::Value>> {
+    m.get(id).await?;
+    let pin = std::env::var("FLUXVM_GUARD_PIN_ROOT")
+        .unwrap_or_else(|_| fluxvm_intelligence::guard::DEFAULT_GUARD_PIN_ROOT.into());
+    let state = std::env::var("FLUXVM_GUARD_STATE_ROOT")
+        .unwrap_or_else(|_| fluxvm_intelligence::guard::DEFAULT_GUARD_STATE_ROOT.into());
+    let status = tokio::task::spawn_blocking(move || {
+        fluxvm_intelligence::guard::status(
+            id,
+            std::path::Path::new(&pin),
+            std::path::Path::new(&state),
+        )
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("guard status task failed: {e}"))??;
+    Ok(Json(json!(status)))
 }
 
 async fn vm_network_stats(
@@ -6279,6 +6347,94 @@ mod tests {
             assert!(
                 !CONSOLE_JS.contains("innerHTML"),
                 "API data is rendered as text"
+            );
+        }
+
+        #[tokio::test]
+        async fn guard_status_route_is_authenticated_and_read_only() {
+            let auth = AuthConfig {
+                tokens: vec![ApiToken {
+                    token: "ro-secret".into(),
+                    role: Role::ReadOnly,
+                    name: Some("dash".into()),
+                    tenant: None,
+                }],
+                ..Default::default()
+            };
+            let m = manager(auth);
+            let guard = format!("/v1/vms/{}/guard", Uuid::nil());
+            let plain = format!("/v1/vms/{}", Uuid::nil());
+            assert_eq!(
+                status_for(router(m.clone()), "GET", &guard, None).await,
+                StatusCode::UNAUTHORIZED
+            );
+            // A read-only token reaches it (no 401/403) and an unknown VM is answered exactly like
+            // `GET /v1/vms/{id}` answers it.
+            let got = status_for(router(m.clone()), "GET", &guard, Some("ro-secret")).await;
+            let want = status_for(router(m), "GET", &plain, Some("ro-secret")).await;
+            assert_eq!(got, want);
+            assert_ne!(got, StatusCode::UNAUTHORIZED);
+            assert_ne!(got, StatusCode::FORBIDDEN);
+            assert_ne!(got, StatusCode::OK);
+        }
+
+        #[tokio::test]
+        async fn exec_requires_a_totp_code_for_an_mfa_token_but_reads_do_not() {
+            use fluxvm_core::config::{MfaRule, MfaScope};
+            let dir = tempfile::tempdir().unwrap();
+            let secret_file = dir.path().join("totp");
+            std::fs::write(&secret_file, "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ").unwrap();
+            let auth = AuthConfig {
+                tokens: vec![ApiToken {
+                    token: "ops-secret".into(),
+                    role: Role::Admin,
+                    name: Some("ops-mfa".into()),
+                    tenant: None,
+                }],
+                mfa: vec![MfaRule {
+                    token: "ops-mfa".into(),
+                    totp_secret_file: secret_file.to_string_lossy().into(),
+                    require: MfaScope::Exec,
+                }],
+                ..Default::default()
+            };
+            let m = manager(auth);
+            let uri = format!("/v1/vms/{}/agent", Uuid::nil());
+            let send = |code: Option<String>| {
+                let mut b = Request::post(uri.clone())
+                    .header(header::AUTHORIZATION, "Bearer ops-secret")
+                    .header(header::CONTENT_TYPE, "application/json");
+                if let Some(c) = code {
+                    b = b.header("x-fluxvm-totp", c);
+                }
+                router(m.clone()).oneshot(b.body(Body::from("{}")).unwrap())
+            };
+            let missing = send(None).await.unwrap();
+            assert_eq!(missing.status(), StatusCode::UNAUTHORIZED);
+            assert!(missing.headers().contains_key(header::WWW_AUTHENTICATE));
+            assert_eq!(
+                send(Some("000000".into())).await.unwrap().status(),
+                StatusCode::UNAUTHORIZED
+            );
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+            let code = format!(
+                "{:06}",
+                super::super::mfa::hotp(b"12345678901234567890", now / 30)
+            );
+            let ok = send(Some(code.clone())).await.unwrap().status();
+            assert_ne!(ok, StatusCode::UNAUTHORIZED, "valid code passes MFA");
+            // the same code cannot be replayed
+            assert_eq!(
+                send(Some(code)).await.unwrap().status(),
+                StatusCode::UNAUTHORIZED
+            );
+            // non-exec reads are untouched
+            assert_eq!(
+                status_for(router(m), "GET", "/v1/vms", Some("ops-secret")).await,
+                StatusCode::OK
             );
         }
 

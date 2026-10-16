@@ -14,10 +14,8 @@
 
 use crate::{fetch_if_needed, verify_sha256};
 use anyhow::{Context, Result, bail};
-use base64::{Engine, engine::general_purpose::STANDARD as B64};
-use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
+use ed25519_dalek::VerifyingKey;
 use fluxvm_core::config::Config;
-use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
@@ -360,26 +358,13 @@ pub async fn export_entry(cfg: &Config, name: &str, dest: &Path) -> Result<()> {
     Ok(())
 }
 
-fn parse_public_key(b64: &str) -> Result<VerifyingKey> {
-    let bytes = B64
-        .decode(b64)
-        .context("trusted_signers entry is not valid base64")?;
-    let arr: [u8; 32] = bytes
-        .try_into()
-        .map_err(|v: Vec<u8>| anyhow::anyhow!("public key must be 32 bytes, got {}", v.len()))?;
-    VerifyingKey::from_bytes(&arr).context("invalid Ed25519 public key")
-}
-
 /// Parses every `[[catalog.trusted_signers]]` entry's own `public_key`
 /// once, paired with its `name` -- shared by both `resolve` and
 /// `list_with_verification` rather than each re-parsing independently.
 fn parse_trusted_signers(
     signers: &[fluxvm_core::config::TrustedSigner],
 ) -> Result<Vec<(String, VerifyingKey)>> {
-    signers
-        .iter()
-        .map(|s| Ok((s.name.clone(), parse_public_key(&s.public_key)?)))
-        .collect::<Result<_>>()
+    fluxvm_core::signing::parse_trusted_signers(signers)
         .context("parsing config.catalog.trusted_signers")
 }
 
@@ -399,24 +384,13 @@ fn verify_signature<'a>(
             entry.name
         )
     })?;
-    let sig_bytes = B64
-        .decode(sig_b64)
-        .context("signature is not valid base64")?;
-    let sig_arr: [u8; 64] = sig_bytes
-        .try_into()
-        .map_err(|v: Vec<u8>| anyhow::anyhow!("signature must be 64 bytes, got {}", v.len()))?;
-    let sig = Signature::from_bytes(&sig_arr);
     let payload = canonical_payload(entry);
-    trusted
-        .iter()
-        .find(|(_, key)| key.verify(payload.as_bytes(), &sig).is_ok())
-        .map(|(name, _)| name.as_str())
-        .with_context(|| {
-            format!(
-                "catalog entry '{}' signature does not match any configured trusted_signers",
-                entry.name
-            )
-        })
+    fluxvm_core::signing::verify_bytes(payload.as_bytes(), sig_b64, trusted).with_context(|| {
+        format!(
+            "catalog entry '{}' signature does not match any configured trusted_signers",
+            entry.name
+        )
+    })
 }
 
 /// Result of [`resolve_with_provenance`]. `from_catalog` is false when the
@@ -616,10 +590,7 @@ pub fn list_with_verification(cfg: &Config) -> Result<Vec<CatalogListEntry>> {
 /// (CLI) decides where it's stored; this project has no opinion beyond "not
 /// silently, not in the catalog file itself."
 pub fn generate_keypair() -> (String, String) {
-    let signing_key = SigningKey::generate(&mut OsRng);
-    let private_b64 = B64.encode(signing_key.to_bytes());
-    let public_b64 = B64.encode(signing_key.verifying_key().to_bytes());
-    (private_b64, public_b64)
+    fluxvm_core::signing::generate_keypair()
 }
 
 /// `fluxvm catalog sign`: builds a `CatalogEntry` from the given fields
@@ -639,14 +610,6 @@ pub fn sign_entry(
     build_run_id: Option<String>,
     build_commit: Option<String>,
 ) -> Result<CatalogEntry> {
-    let key_bytes = B64
-        .decode(private_key_b64)
-        .context("private key is not valid base64")?;
-    let key_arr: [u8; 32] = key_bytes
-        .try_into()
-        .map_err(|v: Vec<u8>| anyhow::anyhow!("private key must be 32 bytes, got {}", v.len()))?;
-    let signing_key = SigningKey::from_bytes(&key_arr);
-
     let mut entry = CatalogEntry {
         name,
         source,
@@ -670,8 +633,10 @@ pub fn sign_entry(
         build_run_id,
         build_commit,
     };
-    let signature = signing_key.sign(canonical_payload(&entry).as_bytes());
-    entry.signature = Some(B64.encode(signature.to_bytes()));
+    entry.signature = Some(fluxvm_core::signing::sign_bytes(
+        private_key_b64,
+        canonical_payload(&entry).as_bytes(),
+    )?);
     Ok(entry)
 }
 
@@ -679,6 +644,7 @@ pub fn sign_entry(
 mod tests {
     use super::*;
     use fluxvm_core::config::{CatalogConfig, Config};
+    use fluxvm_core::signing::parse_public_key;
     use sha2::Digest;
 
     fn cfg_with_catalog(path: &Path, trusted_signer_keys: Vec<String>) -> Config {

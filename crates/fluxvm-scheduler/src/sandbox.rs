@@ -383,10 +383,7 @@ impl VmManager {
             if create.backend != BackendKind::Vz {
                 bail!("host_gpu is only supported on the vz backend (macOS)");
             }
-            create
-                .apple
-                .get_or_insert_with(Default::default)
-                .host_gpu = true;
+            create.apple.get_or_insert_with(Default::default).host_gpu = true;
         }
         if create.backend == BackendKind::Vz {
             self.prepare_vz_sandbox(&mut create)?;

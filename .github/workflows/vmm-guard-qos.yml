@@ -6,6 +6,7 @@ on:
       - 'bpf/fluxvm_guard.bpf.c'
       - 'crates/fluxvm-intelligence/**'
       - 'tools/fluxvm-guard-*.c'
+      - 'crates/fluxvm-core/src/signing.rs'
       - 'scripts/*vmm-guard*'
       - 'scripts/build-runtime-intelligence.sh'
       - 'scripts/install-runtime-intelligence.sh'
@@ -15,6 +16,7 @@ on:
       - 'bpf/fluxvm_guard.bpf.c'
       - 'crates/fluxvm-intelligence/**'
       - 'tools/fluxvm-guard-*.c'
+      - 'crates/fluxvm-core/src/signing.rs'
       - 'scripts/*vmm-guard*'
       - 'scripts/build-runtime-intelligence.sh'
       - 'scripts/install-runtime-intelligence.sh'
@@ -56,3 +58,9 @@ jobs:
         if: ${{ vars.FLUXVM_EBPF_PRIVILEGED_CI == '1' }}
         working-directory: fluxvm
         run: sudo --preserve-env=PATH ./scripts/test-vmm-guard-qos-host.sh
+      - name: Privileged exec allow-list and rule pack test
+        if: ${{ vars.FLUXVM_EBPF_PRIVILEGED_CI == '1' }}
+        working-directory: fluxvm
+        run: |
+          cargo build -p fluxctl -p fluxvm-intelligence --bin fluxctl --bin fluxvm-guard
+          sudo --preserve-env=PATH env FLUXCTL="$PWD/target/debug/fluxctl" FLUXVM_GUARD_BIN="$PWD/target/debug/fluxvm-guard" ./scripts/test-vmm-guard-exec-patch-host.sh
