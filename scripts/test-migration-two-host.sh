@@ -19,7 +19,11 @@
 #              keep running, then a retry with default settings must complete
 #   machine    a receiver for a machine type DST cannot boot is refused up front
 #   oldqemu    SRC_OLD_QEMU=/usr/bin/qemu-system-x86_64 (older than DST's):
-#              temporarily points SRC's /etc/fluxvm.toml at it, restores after
+#              temporarily points SRC's /etc/fluxvm.toml at it, restores after.
+#              A QEMU unpacked outside the distro (dpkg -x) needs its SeaBIOS
+#              and iPXE ROMs under <prefix>/usr/share/qemu, and those ROMs must
+#              be the same size as DST's (virtio-net-pci.rom 0x40000 != 0x80000
+#              fails the load); AppArmor needs an exec rule for the binary.
 #
 #   SRC=sus@175.110.122.71 DST=sus@80.79.5.173 DST_ADDR=80.79.5.173 \
 #   [SCENARIOS="baseline multifd postcopy compression autoconverge tls cancel machine"] \
@@ -51,7 +55,7 @@ ok() { echo "ok   $*"; }
 rapi() { # host method path [body] -> OUT (body), CODE (HTTP status)
   local raw
   raw=$(printf '%s' "${4:-}" | ssh "${SSH_OPTS[@]}" "$1" \
-    "curl -s -w '\n%{http_code}' -X $2 http://127.0.0.1:7788$3 -H 'Content-Type: application/json' ${4:+-d @-}")
+    "curl -s -w '\n%{http_code}' -X $2 http://127.0.0.1:7788$3 -H 'Content-Type: application/json' ${4:+-d @-}") || true # curl exits non-zero (7) while a daemon restarts; CODE=000 then
   CODE=${raw##*$'\n'}
   OUT=${raw%$'\n'*}
 }
@@ -180,7 +184,11 @@ finish_and_adopt() { # name up-before machine-type
 run_simple() { # name start-extra receiver-extra
   local name=$1 up1 mt
   create_source "mig-e2e-${name}"
-  up1=$(uptime_via "$SRC" "$SRC_VM") || fail "$name: guest agent never answered on source"
+  up1=$(uptime_via "$SRC" "$SRC_VM") || {
+    rapi "$SRC" GET "/v1/vms/${SRC_VM}"; echo "source VM: ${OUT}" >&2
+    rapi "$SRC" GET "/v1/vms/${SRC_VM}/logs"; echo "source console (tail):" >&2; printf '%s\n' "$OUT" | tail -25 >&2
+    fail "$name: guest agent never answered on source"
+  }
   mt=$(machine_type_of "$SRC" "$SRC_VM"); [[ -n "$mt" ]] || fail "$name: no machine-type label on the source"
   arm_receiver "$3"
   start_migration "$2"

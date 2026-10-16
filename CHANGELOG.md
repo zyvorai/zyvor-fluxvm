@@ -78,10 +78,11 @@
   restated on each attempt, a leftover TLS creds object is replaced, cancelling a completed non-post-copy migration
   resumes the guest, and a receiver still receiving keeps its TTL. Unit-tested, and run live between two hosts (shared NFS disk, TCP relay) with
   `scripts/test-migration-two-host.sh`: pre-copy, multifd, post-copy, x509 TLS (no `tls_hostname` given), a cancel
-  mid-transfer followed by a retry, an unsupported machine type refused, and a source on QEMU 8.2.2 into 10.2.1.
+  mid-transfer followed by a retry, an unsupported machine type refused, a source on QEMU 8.2.2 into 10.2.1, and a source on QEMU 7.2.22 (Debian 12, machine `pc-q35-7.2`) into 10.2.1.
   In each the guest kept its uptime across the move. Also run: zstd multifd compression, and auto-converge with a
   guest dirtying memory (QEMU throttled the guest CPU up to 99% and the migration converged). Not run: a source
-  older than QEMU 8.2 (the oldest installed on the test hosts is 8.2.2).
+  older than QEMU 7.2. The script's `rapi` no longer aborts when the daemon restarts mid-poll, and a source guest that
+  never answers now prints the VM record and console tail.
 
 - **Browser terminal: search, copy mode, quick select, prompt marks, command palette.** `⌘F` search, `⌃⇧X` vi-like copy
   mode, `⌃⇧Space` quick select (URLs, paths, UUIDs, IPv4, hashes, numbers on screen), `⌘↑`/`⌘↓` between prompts,
