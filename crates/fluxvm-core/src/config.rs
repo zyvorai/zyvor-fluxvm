@@ -895,9 +895,41 @@ pub struct AuthConfig {
     /// limit starts throttling them.
     #[serde(default)]
     pub rate_limit_burst: Option<u32>,
+    /// Step-up TOTP requirements, keyed by `[[auth.tokens]]` `name`. Kept
+    /// apart from `ApiToken` so the TOTP secret lives in its own file and
+    /// token entries keep their shape. Empty (the default) = no MFA.
+    #[serde(default)]
+    pub mfa: Vec<MfaRule>,
+}
+
+/// Step-up second factor for one named static API token.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MfaRule {
+    /// `[[auth.tokens]]` `name` this rule applies to.
+    pub token: String,
+    /// File holding the base32 TOTP secret (RFC 6238, SHA-1, 6 digits, 30 s).
+    /// Never inline the secret in the main config.
+    pub totp_secret_file: String,
+    /// Which requests need a code in `X-Fluxvm-Totp`.
+    #[serde(default)]
+    pub require: MfaScope,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum MfaScope {
+    /// Only guest command execution (`/agent`, `/qga/exec`).
+    #[default]
+    Exec,
+    /// Exec plus every mutating request (anything but GET/HEAD).
+    Write,
 }
 
 impl AuthConfig {
+    pub fn mfa_rule(&self, token_name: &str) -> Option<&MfaRule> {
+        self.mfa.iter().find(|r| r.token == token_name)
+    }
+
     /// OIDC JWT path is enabled when both issuer and audience are set.
     pub fn oidc_enabled(&self) -> bool {
         self.oidc_issuer.as_ref().is_some_and(|s| !s.is_empty())

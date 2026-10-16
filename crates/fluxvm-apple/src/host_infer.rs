@@ -56,9 +56,8 @@ pub async fn probe(port: u16) -> HostInferStatus {
             };
         }
     };
-    let req = format!(
-        "GET /v1/models HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n"
-    );
+    let req =
+        format!("GET /v1/models HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n");
     if let Err(e) = stream.write_all(req.as_bytes()).await {
         return HostInferStatus {
             port,

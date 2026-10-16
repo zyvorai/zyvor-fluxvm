@@ -12,7 +12,10 @@ use std::{
 };
 use uuid::Uuid;
 
-use crate::vm_key;
+use crate::{
+    rule_pack::{PackInfo, PatchSet},
+    vm_key,
+};
 
 pub const DEFAULT_GUARD_PIN_ROOT: &str = "/sys/fs/bpf/fluxvm/guard";
 pub const DEFAULT_GUARD_STATE_ROOT: &str = "/run/fluxvm/guard";
@@ -22,6 +25,8 @@ const FLAG_DENY_EXEC: u32 = 1 << 1;
 const FLAG_DENY_WX: u32 = 1 << 2;
 const FLAG_RESTRICT_DEVICES: u32 = 1 << 3;
 const FLAG_RESTRICT_WRITES: u32 = 1 << 4;
+const FLAG_RESTRICT_EXEC: u32 = 1 << 5;
+const FLAG_PATCHES: u32 = 1 << 6;
 const DEVICE_CHAR: u32 = 1;
 const DEVICE_BLOCK: u32 = 2;
 
@@ -72,12 +77,37 @@ pub struct GuardPolicyState {
     pub restrict_writes: bool,
     pub allowed_devices: Vec<DeviceIdentity>,
     pub allowed_files: Vec<FileIdentity>,
+    /// Positive exec allow-list (`FLAG_RESTRICT_EXEC`). Absent in state files
+    /// written before it existed.
+    #[serde(default)]
+    pub restrict_exec: bool,
+    #[serde(default)]
+    pub allowed_execs: Vec<FileIdentity>,
+    /// Signed virtual-patch rule packs applied with this policy generation.
+    #[serde(default)]
+    pub patches: Vec<PackInfo>,
+    #[serde(default)]
+    pub patch_files: Vec<PatchFileState>,
+    #[serde(default)]
+    pub patch_devices: Vec<DeviceIdentity>,
+}
+
+/// A file deny rule resolved to kernel identity; `bits` are `rule_pack::BIT_*`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PatchFileState {
+    #[serde(flatten)]
+    pub file: FileIdentity,
+    pub bits: u8,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct GuardStatus {
     pub configured: bool,
     pub kernel_policy_present: bool,
+    /// Ids of applied rule packs whose `valid_until` has passed. They stay
+    /// loaded until the policy is re-applied; re-apply without them.
+    #[serde(default)]
+    pub expired_packs: Vec<String>,
     pub state: Option<GuardPolicyState>,
 }
 
@@ -133,18 +163,31 @@ fn file_identity(path: &Path) -> Result<FileIdentity> {
     })
 }
 
-fn kernel_dev_t(raw: u64) -> Result<u32> {
-    // glibc dev_t is 64-bit; kernel struct inode/super_block store the compact
-    // 32-bit new_encode_dev() representation. Match the kernel encoding so
-    // userspace allow-list keys compare byte-for-byte with BPF CO-RE reads.
-    let major = ((raw & 0x0000_0000_000f_ff00) >> 8) | ((raw & 0xffff_f000_0000_0000) >> 32);
-    let minor = (raw & 0xff) | ((raw & 0x0000_0fff_fff0_0000) >> 12);
-    if major >= (1 << 12) || minor >= (1 << 20) {
-        bail!(
-            "device number major={major} minor={minor} cannot be represented by kernel new_encode_dev"
-        );
+/// Like [`file_identity`], but also requires an executable regular file so a
+/// typo in an allow-list cannot silently list a data file.
+fn exec_identity(path: &Path) -> Result<FileIdentity> {
+    use std::os::unix::fs::PermissionsExt;
+    let meta =
+        fs::metadata(path).with_context(|| format!("stat exec allow-list {}", path.display()))?;
+    if !meta.file_type().is_file() || meta.permissions().mode() & 0o111 == 0 {
+        bail!("{} is not an executable regular file", path.display());
     }
-    Ok(((minor & 0xff) | (major << 8) | ((minor & !0xff) << 12)) as u32)
+    file_identity(path)
+}
+
+fn kernel_dev_t(raw: u64) -> Result<u32> {
+    // Userspace dev_t (glibc, 64-bit) -> the kernel's internal dev_t. Inside
+    // the kernel, `inode->i_rdev` and `super_block->s_dev` are
+    // MKDEV(major, minor) = (major << 20) | minor. That is NOT the compact
+    // `new_encode_dev()` layout, which is only the userspace-facing ABI; using
+    // it here makes every allow-list key miss the BPF CO-RE read (verified on
+    // a live kernel: root fs 8:2 is 0x800002 in-kernel, 0x802 encoded).
+    let major = ((raw >> 8) & 0xfff) | ((raw >> 32) & 0xffff_f000);
+    let minor = (raw & 0xff) | ((raw >> 12) & 0xffff_ff00);
+    if major >= (1 << 12) || minor >= (1 << 20) {
+        bail!("device number major={major} minor={minor} does not fit the kernel's 12:20 dev_t");
+    }
+    Ok(((major << 20) | minor) as u32)
 }
 
 fn default_vmm_devices() -> Vec<PathBuf> {
@@ -182,6 +225,8 @@ pub fn apply_policy(
     restrict_writes: bool,
     allow_devices: &[PathBuf],
     allow_files: &[PathBuf],
+    allow_execs: Option<&[PathBuf]>,
+    patches: Option<&PatchSet>,
     pin_root: &Path,
     state_root: &Path,
 ) -> Result<GuardPolicyState> {
@@ -190,6 +235,13 @@ pub fn apply_policy(
     let key = vm_key(vm_id);
     let generation = generation();
     require_guard_maps(pin_root)?;
+    if allow_execs.is_some() {
+        require_exec_map(pin_root)?;
+    }
+    let patches = patches.filter(|p| !p.is_empty());
+    if patches.is_some() {
+        require_patch_maps(pin_root)?;
+    }
     let previous = if state_path(state_root, vm_id).exists() {
         Some(read_state(state_root, vm_id)?)
     } else {
@@ -210,6 +262,34 @@ pub fn apply_policy(
     for path in allow_files {
         files.push(file_identity(path)?);
     }
+    let restrict_exec = allow_execs.is_some();
+    let mut execs = Vec::new();
+    for path in allow_execs.unwrap_or_default() {
+        execs.push(exec_identity(path)?);
+    }
+    execs.sort_by_key(|f| (f.filesystem_dev, f.inode));
+    execs.dedup_by_key(|f| (f.filesystem_dev, f.inode));
+    let mut patch_files: Vec<PatchFileState> = Vec::new();
+    let mut patch_devices: Vec<DeviceIdentity> = Vec::new();
+    if let Some(set) = patches {
+        for (path, bits) in &set.files {
+            let id = file_identity(path)?;
+            // Two rule paths can name the same inode (symlink, hard link).
+            match patch_files
+                .iter_mut()
+                .find(|p| p.file.filesystem_dev == id.filesystem_dev && p.file.inode == id.inode)
+            {
+                Some(existing) => existing.bits |= bits,
+                None => patch_files.push(PatchFileState {
+                    file: id,
+                    bits: *bits,
+                }),
+            }
+        }
+        for path in &set.devices {
+            patch_devices.push(device_identity(path)?);
+        }
+    }
 
     // Populate the new generation first, then publish the policy atomically by
     // replacing one cgroup-keyed map value. Old generations become unreachable
@@ -219,6 +299,23 @@ pub fn apply_policy(
     }
     for f in &files {
         update_file(pin_root, key, generation, f)?;
+    }
+    for f in &execs {
+        update_exec(pin_root, key, generation, f)?;
+    }
+    for f in &patch_files {
+        update_key_value(
+            &pin_root.join("maps/guard_patch_files"),
+            &file_key(key, generation, &f.file),
+            &[f.bits],
+        )?;
+    }
+    for d in &patch_devices {
+        update_key_value(
+            &pin_root.join("maps/guard_patch_devices"),
+            &device_key(key, generation, d),
+            &[1],
+        )?;
     }
 
     let mut flags = 0u32;
@@ -236,6 +333,12 @@ pub fn apply_policy(
     }
     if restrict_writes {
         flags |= FLAG_RESTRICT_WRITES;
+    }
+    if restrict_exec {
+        flags |= FLAG_RESTRICT_EXEC;
+    }
+    if !patch_files.is_empty() || !patch_devices.is_empty() {
+        flags |= FLAG_PATCHES;
     }
     update_policy(pin_root, cgroup_id, key, flags, generation)?;
 
@@ -261,6 +364,13 @@ pub fn apply_policy(
                 &file_key(old.vm_key, old.generation, f),
             );
         }
+        for f in &old.allowed_execs {
+            let _ = delete_key(
+                &pin_root.join("maps/guard_exec"),
+                &file_key(old.vm_key, old.generation, f),
+            );
+        }
+        delete_patches(pin_root, old);
     }
 
     let state = GuardPolicyState {
@@ -278,6 +388,11 @@ pub fn apply_policy(
         restrict_writes,
         allowed_devices: devices,
         allowed_files: files,
+        restrict_exec,
+        allowed_execs: execs,
+        patches: patches.map(|p| p.packs.clone()).unwrap_or_default(),
+        patch_files,
+        patch_devices,
     };
     write_state(state_root, &state)?;
     Ok(state)
@@ -308,6 +423,13 @@ pub fn remove_policy(vm_id: Uuid, pin_root: &Path, state_root: &Path) -> Result<
                 &file_key(state.vm_key, state.generation, f),
             );
         }
+        for f in &state.allowed_execs {
+            let _ = delete_key(
+                &pin_root.join("maps/guard_exec"),
+                &file_key(state.vm_key, state.generation, f),
+            );
+        }
+        delete_patches(pin_root, state);
     }
     let path = state_path(state_root, vm_id);
     if path.exists() {
@@ -331,7 +453,16 @@ pub fn status(vm_id: Uuid, pin_root: &Path, state_root: &Path) -> Result<GuardSt
             )
         })
         .unwrap_or(false);
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+    let expired_packs = state
+        .as_ref()
+        .map(|s| expired_pack_ids(&s.patches, now))
+        .unwrap_or_default();
     Ok(GuardStatus {
+        expired_packs,
         configured: state.is_some(),
         kernel_policy_present: present,
         state,
@@ -378,6 +509,57 @@ fn require_guard_maps(root: &Path) -> Result<()> {
     Ok(())
 }
 
+/// The exec allow-list map is newer than the other guard maps, so it is only
+/// required when an exec policy is applied; older loaded objects keep working.
+fn require_exec_map(root: &Path) -> Result<()> {
+    let p = root.join("maps/guard_exec");
+    if !p.exists() {
+        bail!(
+            "VMM Guard map missing: {}; reload a fluxvm_guard.bpf.o built with exec allow-list support",
+            p.display()
+        );
+    }
+    Ok(())
+}
+
+/// The patch maps are newer than the other guard maps; required only when a
+/// rule pack is applied.
+fn require_patch_maps(root: &Path) -> Result<()> {
+    for name in ["guard_patch_files", "guard_patch_devices"] {
+        let p = root.join("maps").join(name);
+        if !p.exists() {
+            bail!(
+                "VMM Guard map missing: {}; reload a fluxvm_guard.bpf.o built with rule-pack support",
+                p.display()
+            );
+        }
+    }
+    Ok(())
+}
+
+fn delete_patches(pin_root: &Path, state: &GuardPolicyState) {
+    for f in &state.patch_files {
+        let _ = delete_key(
+            &pin_root.join("maps/guard_patch_files"),
+            &file_key(state.vm_key, state.generation, &f.file),
+        );
+    }
+    for d in &state.patch_devices {
+        let _ = delete_key(
+            &pin_root.join("maps/guard_patch_devices"),
+            &device_key(state.vm_key, state.generation, d),
+        );
+    }
+}
+
+fn expired_pack_ids(packs: &[PackInfo], now: i64) -> Vec<String> {
+    packs
+        .iter()
+        .filter(|p| p.valid_until <= now)
+        .map(|p| p.id.clone())
+        .collect()
+}
+
 fn update_policy(root: &Path, cgroup: u64, vm: u64, flags: u32, generation: u32) -> Result<()> {
     let mut value = Vec::with_capacity(16);
     value.extend(vm.to_le_bytes());
@@ -417,6 +599,13 @@ fn update_device(root: &Path, vm: u64, generation: u32, d: &DeviceIdentity) -> R
     update_key_value(
         &root.join("maps/guard_devices"),
         &device_key(vm, generation, d),
+        &[1],
+    )
+}
+fn update_exec(root: &Path, vm: u64, generation: u32, f: &FileIdentity) -> Result<()> {
+    update_key_value(
+        &root.join("maps/guard_exec"),
+        &file_key(vm, generation, f),
         &[1],
     )
 }
@@ -527,8 +716,81 @@ mod tests {
         assert_eq!(file_key(7, 1, &f).len(), 24);
     }
     #[test]
+    fn exec_allow_uses_the_file_key_layout() {
+        let f = FileIdentity {
+            path: "/bin/true".into(),
+            filesystem_dev: 3,
+            inode: 9,
+        };
+        assert_eq!(file_key(7, 1, &f).len(), 24);
+        assert_eq!(FLAG_RESTRICT_EXEC, 1 << 5);
+    }
+    #[test]
+    fn exec_identity_rejects_non_executables_and_missing_paths() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().join("data");
+        fs::write(&data, "x").unwrap();
+        fs::set_permissions(&data, fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(exec_identity(&data).is_err());
+        assert!(exec_identity(&dir.path().join("missing")).is_err());
+        let bin = dir.path().join("bin");
+        fs::write(&bin, "x").unwrap();
+        fs::set_permissions(&bin, fs::Permissions::from_mode(0o755)).unwrap();
+        let id = exec_identity(&bin).unwrap();
+        assert_eq!(id.inode, fs::metadata(&bin).unwrap().ino());
+    }
+    #[test]
+    fn old_state_files_without_exec_fields_still_load() {
+        let json = r#"{"schema_version":1,"vm_id":"00000000-0000-0000-0000-000000000001","vm_key":1,"pid":2,"cgroup_path":"/x","cgroup_id":3,"mode":"audit","generation":4,"deny_exec":true,"deny_wx":true,"restrict_devices":true,"restrict_writes":false,"allowed_devices":[],"allowed_files":[]}"#;
+        let s: GuardPolicyState = serde_json::from_str(json).unwrap();
+        assert!(!s.restrict_exec && s.allowed_execs.is_empty());
+    }
+    #[test]
+    fn old_state_files_load_without_patch_fields_and_expired_packs_are_reported() {
+        let json = r#"{"schema_version":1,"vm_id":"00000000-0000-0000-0000-000000000001","vm_key":1,"pid":2,"cgroup_path":"/x","cgroup_id":3,"mode":"audit","generation":4,"deny_exec":true,"deny_wx":true,"restrict_devices":true,"restrict_writes":false,"allowed_devices":[],"allowed_files":[]}"#;
+        let s: GuardPolicyState = serde_json::from_str(json).unwrap();
+        assert!(s.patches.is_empty() && s.patch_files.is_empty() && s.patch_devices.is_empty());
+        let packs = vec![
+            PackInfo {
+                id: "old".into(),
+                cve: vec![],
+                valid_until: 100,
+                signer: "ci".into(),
+            },
+            PackInfo {
+                id: "new".into(),
+                cve: vec![],
+                valid_until: 200,
+                signer: "ci".into(),
+            },
+        ];
+        assert_eq!(expired_pack_ids(&packs, 150), vec!["old".to_string()]);
+        assert_eq!(expired_pack_ids(&packs, 200).len(), 2);
+    }
+    #[test]
+    fn patch_file_state_round_trips_with_flattened_identity() {
+        let p = PatchFileState {
+            file: FileIdentity {
+                path: "/usr/lib/v".into(),
+                filesystem_dev: 3,
+                inode: 9,
+            },
+            bits: 3,
+        };
+        let json = serde_json::to_string(&p).unwrap();
+        assert!(json.contains("\"inode\":9") && json.contains("\"bits\":3"));
+        assert_eq!(serde_json::from_str::<PatchFileState>(&json).unwrap(), p);
+        assert_eq!(FLAG_PATCHES, 1 << 6);
+    }
+    #[test]
     fn kernel_dev_encoding_matches_common_values() {
-        // makedev(10, 232) on Linux/glibc is 0x0000000000000ae8.
-        assert_eq!(kernel_dev_t(0x0ae8).unwrap(), 0x0ae8);
+        // makedev(10, 232) on Linux/glibc is 0x0ae8; the kernel's MKDEV is (10 << 20) | 232.
+        assert_eq!(kernel_dev_t(0x0ae8).unwrap(), 0x00a0_00e8);
+        // The root disk seen on the test host: makedev(8, 2) = 0x802 -> 8:2 in-kernel.
+        assert_eq!(kernel_dev_t(0x0802).unwrap(), 0x0080_0002);
+        // A minor above 255 spreads across glibc's split fields: makedev(259, 300).
+        let raw = (300u64 & 0xff) | ((259u64 & 0xfff) << 8) | ((300u64 & !0xff) << 12);
+        assert_eq!(kernel_dev_t(raw).unwrap(), (259 << 20) | 300);
     }
 }

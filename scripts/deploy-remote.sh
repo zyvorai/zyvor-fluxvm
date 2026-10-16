@@ -278,6 +278,7 @@ sync_files() {
     local excludes=(
         --exclude '.git'
         --exclude 'target'
+        --exclude '/dist'
         --exclude '*.qcow2' --exclude '*.raw' --exclude '*.img'
         --exclude '*.iso' --exclude '*.vmdk'
     )
@@ -385,16 +386,19 @@ source "$HOME/.cargo/env" 2>/dev/null || true
 cd "${REMOTE_STAGING}"
 set -o pipefail
 cargo build --release -p fluxctl -p fluxvm-guest-agent -p fluxvm-hypervisor -p fluxvm-microvm -p fluxvm-kube 2>&1 | tee /tmp/fluxvm-cargo-build.log | tail -30
+# VMM Guard CLI (`fluxctl guard ...` runs it): exec allow-list, signed rule packs, policy status.
+cargo build --release -p fluxvm-intelligence --bin fluxvm-guard 2>&1 | tee -a /tmp/fluxvm-cargo-build.log | tail -5
 set +o pipefail
 $SUDO install -m755 target/release/fluxctl /usr/local/bin/fluxctl
 $SUDO ln -sfn fluxctl /usr/local/bin/fluxvm
 $SUDO install -m755 target/release/fluxvm-hypervisor /usr/local/bin/fluxvm-hypervisor
 $SUDO install -m755 target/release/fluxvm-microvm /usr/local/bin/fluxvm-microvm
 $SUDO install -m755 target/release/fluxvm-kube /usr/local/bin/fluxvm-kube
+$SUDO install -m755 target/release/fluxvm-guard /usr/local/bin/fluxvm-guard
 [ -f /etc/fluxvm.toml ] || $SUDO install -m644 config.example.toml /etc/fluxvm.toml
 $SUDO install -m644 systemd/fluxvm.service /etc/systemd/system/fluxvm.service
 $SUDO systemctl daemon-reload 2>/dev/null || true
-echo "Installed: $(fluxctl --version 2>/dev/null || echo ok) + fluxvm-hypervisor + fluxvm-microvm + fluxvm-kube"
+echo "Installed: $(fluxctl --version 2>/dev/null || echo ok) + fluxvm-hypervisor + fluxvm-microvm + fluxvm-kube + fluxvm-guard"
 REMOTE
 }
 

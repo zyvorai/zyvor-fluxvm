@@ -226,6 +226,17 @@ reaper_interval_secs = 5
 # role = "read-only"
 # name = "dashboard"
 
+# Step-up MFA (TOTP, RFC 6238: SHA-1, 6 digits, 30 s) for a named static token.
+# The caller sends the current code as `X-Fluxvm-Totp` (`fluxctl --totp CODE`
+# or FLUXVM_TOTP). Each code works once; 5 wrong codes lock the token for 60 s.
+# require = "exec"  -> guest exec and shells only (/agent, /qga/exec, agent-session exec/pty)
+# require = "write" -> exec plus every mutating request
+# The secret is base32 in its own file (chmod 600), never inline here.
+# [[auth.mfa]]
+# token = "ci"                              # matches [[auth.tokens]] name
+# totp_secret_file = "/etc/fluxvm/mfa/ci.totp"
+# require = "exec"
+
 # Named, checksummed, optionally-signed base images -- see
 # docs/operations.md#image-catalog--signing. trusted_signers empty (the
 # default) means catalog entries don't need to be signed at all.

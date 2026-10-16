@@ -13,6 +13,17 @@ grep -q 'SEC("lsm/bprm_check_security")' "$ROOT/bpf/fluxvm_guard.bpf.c"
 grep -q 'SEC("lsm/file_mprotect")' "$ROOT/bpf/fluxvm_guard.bpf.c"
 grep -q 'SEC("lsm/file_open")' "$ROOT/bpf/fluxvm_guard.bpf.c"
 grep -q 'bpf_get_current_cgroup_id' "$ROOT/bpf/fluxvm_guard.bpf.c"
+grep -q 'FLUXVM_GUARD_RESTRICT_EXEC' "$ROOT/bpf/fluxvm_guard.bpf.c"
+grep -q '} guard_exec SEC(".maps")' "$ROOT/bpf/fluxvm_guard.bpf.c"
+grep -q 'FLAG_RESTRICT_EXEC' "$ROOT/crates/fluxvm-intelligence/src/guard.rs"
+grep -q 'pub fn load_verified' "$ROOT/crates/fluxvm-intelligence/src/exec_policy.rs"
+grep -q 'pub mod exec_policy;' "$ROOT/crates/fluxvm-intelligence/src/lib.rs"
+grep -q 'FLUXVM_GUARD_PATCHES' "$ROOT/bpf/fluxvm_guard.bpf.c"
+grep -q '} guard_patch_files SEC(".maps")' "$ROOT/bpf/fluxvm_guard.bpf.c"
+grep -q '} guard_patch_devices SEC(".maps")' "$ROOT/bpf/fluxvm_guard.bpf.c"
+grep -q 'FLAG_PATCHES' "$ROOT/crates/fluxvm-intelligence/src/guard.rs"
+grep -q 'pub fn merge' "$ROOT/crates/fluxvm-intelligence/src/rule_pack.rs"
+grep -q 'pub mod rule_pack;' "$ROOT/crates/fluxvm-intelligence/src/lib.rs"
 grep -q 'generation = policy->generation' "$ROOT/bpf/fluxvm_guard.bpf.c"
 grep -q 'bpf_program__attach_lsm' "$ROOT/tools/fluxvm-guard-loader.c"
 grep -q 'ring_buffer__new' "$ROOT/tools/fluxvm-guard-events.c"
@@ -30,6 +41,8 @@ yaml.safe_load((root/'.github/workflows/vmm-guard-qos.yml').read_text())
 for path in [
     root/'crates/fluxvm-intelligence/src/lib.rs',
     root/'crates/fluxvm-intelligence/src/guard.rs',
+    root/'crates/fluxvm-intelligence/src/exec_policy.rs',
+    root/'crates/fluxvm-intelligence/src/rule_pack.rs',
     root/'crates/fluxvm-intelligence/src/qos.rs',
     root/'crates/fluxvm-intelligence/src/bin/fluxvm-guard.rs',
     root/'crates/fluxvm-intelligence/src/bin/fluxvm-qos.rs',

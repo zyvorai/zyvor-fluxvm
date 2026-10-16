@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- **Step-up TOTP for exec and writes.** `[[auth.mfa]]` pairs a static API token with a TOTP secret file; guest exec,
+  shells and (optionally) every write then need a current code in `X-Fluxvm-Totp` (`fluxctl --totp`). Codes are
+  single-use, repeated failures lock the token out, and the audit log records `mfa=`. See docs/host-hardening.md.
+- **VMM Guard exec allow-list and signed rule packs.** `fluxvm-guard apply --exec-policy` restricts a guarded
+  cgroup to approved executables; `--rule-pack` loads signed, time-limited deny rules (exec, open, device) as a
+  virtual patch. `learn-exec`, `sign-exec-policy`, `sign-rule-pack` and `pack verify` are new. Signing is shared with
+  the image catalog (`fluxvm_core::signing`). Verified on a BPF-LSM kernel with
+  `scripts/test-vmm-guard-exec-patch-host.sh`.
+- **Guard status over REST and `fluxctl guard`.** `GET /v1/vms/{id}/guard` (read-only) reports mode, exec
+  allow-list, applied rule packs and `expired_packs`; `fluxctl guard ...` wraps `fluxvm-guard` locally.
+- **Fix: guard device/file allow-lists never matched.** Device numbers were encoded in the userspace layout, but the
+  kernel compares `(major << 20) | minor`, so the device, writable-file and new exec allow-list keys all missed.
+
 ## 0.4.11 (2026-10-16)
 
 - **macOS package is Developer ID signed and notarized.** The published Homebrew / GitHub tarball is notarized and

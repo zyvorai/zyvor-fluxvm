@@ -31,11 +31,21 @@
 #define FLUXVM_GUARD_DENY_WX           (1u << 2)
 #define FLUXVM_GUARD_RESTRICT_DEVICES  (1u << 3)
 #define FLUXVM_GUARD_RESTRICT_WRITES   (1u << 4)
+#define FLUXVM_GUARD_RESTRICT_EXEC     (1u << 5)
+#define FLUXVM_GUARD_PATCHES           (1u << 6)
 
 #define FLUXVM_GUARD_ACTION_EXEC         1u
 #define FLUXVM_GUARD_ACTION_WX           2u
 #define FLUXVM_GUARD_ACTION_DEVICE_OPEN  3u
 #define FLUXVM_GUARD_ACTION_WRITE_OPEN   4u
+#define FLUXVM_GUARD_ACTION_EXEC_UNLISTED 5u
+#define FLUXVM_GUARD_ACTION_PATCH_EXEC    6u
+#define FLUXVM_GUARD_ACTION_PATCH_OPEN    7u
+#define FLUXVM_GUARD_ACTION_PATCH_DEVICE  8u
+
+/* guard_patch_files value bits (signed virtual-patch rule packs). */
+#define FLUXVM_GUARD_PATCH_DENY_EXEC     (1u << 0)
+#define FLUXVM_GUARD_PATCH_DENY_OPEN     (1u << 1)
 
 #define FLUXVM_GUARD_DECISION_ALLOW      0u
 #define FLUXVM_GUARD_DECISION_AUDIT      1u
@@ -61,8 +71,11 @@ struct file {
     unsigned int f_mode;
 } __attribute__((preserve_access_index));
 
+struct linux_binprm {
+    struct file *file;
+} __attribute__((preserve_access_index));
+
 struct vm_area_struct;
-struct linux_binprm;
 
 struct guard_policy {
     __u64 vm_key;
@@ -133,6 +146,38 @@ struct {
     __type(key, struct guard_file_key);
     __type(value, __u8);
 } guard_files SEC(".maps");
+
+/*
+ * Positive exec allow-list: executables a guarded cgroup may run when
+ * FLUXVM_GUARD_RESTRICT_EXEC is set, keyed like guard_files (fs dev + inode).
+ * Script interpreters are separate bprm checks, so they must be listed too.
+ */
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, 65536);
+    __type(key, struct guard_file_key);
+    __type(value, __u8);
+} guard_exec SEC(".maps");
+
+/*
+ * Virtual-patch deny rules from signed rule packs (FLUXVM_GUARD_PATCHES).
+ * Deny always wins over the allow-lists above. Files are keyed like
+ * guard_files; the value is a FLUXVM_GUARD_PATCH_DENY_* bitmask.
+ */
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, 16384);
+    __type(key, struct guard_file_key);
+    __type(value, __u8);
+} guard_patch_files SEC(".maps");
+
+/* Denied devices, keyed like guard_devices. */
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, 4096);
+    __type(key, struct guard_device_key);
+    __type(value, __u8);
+} guard_patch_devices SEC(".maps");
 
 struct {
     __uint(type, BPF_MAP_TYPE_PERCPU_HASH);
@@ -207,13 +252,49 @@ static __always_inline int violation(
 SEC("lsm/bprm_check_security")
 int BPF_PROG(fluxvm_guard_exec, struct linux_binprm *bprm, int ret)
 {
-    (void)bprm;
     if (ret)
         return ret;
     struct guard_policy *policy = current_policy();
-    if (!policy || !(policy->flags & FLUXVM_GUARD_DENY_EXEC))
+    if (!policy)
         return 0;
-    return violation(policy, FLUXVM_GUARD_ACTION_EXEC, 0, 0);
+    /* Deny-all wins over the allow-list when both are set. */
+    if (policy->flags & FLUXVM_GUARD_DENY_EXEC)
+        return violation(policy, FLUXVM_GUARD_ACTION_EXEC, 0, 0);
+    if (!(policy->flags & (FLUXVM_GUARD_RESTRICT_EXEC | FLUXVM_GUARD_PATCHES)))
+        return 0;
+
+    struct file *file = BPF_CORE_READ(bprm, file);
+    struct inode *inode = file ? BPF_CORE_READ(file, f_inode) : 0;
+    if (!inode) {
+        if (policy->flags & FLUXVM_GUARD_RESTRICT_EXEC)
+            return violation(policy, FLUXVM_GUARD_ACTION_EXEC_UNLISTED, 0, 0);
+        return 0;
+    }
+    struct super_block *sb = BPF_CORE_READ(inode, i_sb);
+    __u32 sb_dev = sb ? BPF_CORE_READ(sb, s_dev) : 0;
+    struct guard_file_key key = {
+        .vm_key = policy->vm_key,
+        .generation = policy->generation,
+        .sb_dev = sb_dev,
+        .ino = BPF_CORE_READ(inode, i_ino),
+    };
+    if (policy->flags & FLUXVM_GUARD_PATCHES) {
+        __u8 *deny = bpf_map_lookup_elem(&guard_patch_files, &key);
+        if (deny && (*deny & FLUXVM_GUARD_PATCH_DENY_EXEC)) {
+            __u64 object_id = ((__u64)sb_dev << 32) ^ key.ino;
+            int rc = violation(policy, FLUXVM_GUARD_ACTION_PATCH_EXEC, object_id, 0);
+            if (rc)
+                return rc;
+        }
+    }
+    if (!(policy->flags & FLUXVM_GUARD_RESTRICT_EXEC))
+        return 0;
+    __u8 *allowed = bpf_map_lookup_elem(&guard_exec, &key);
+    if (!allowed || !*allowed) {
+        __u64 object_id = ((__u64)sb_dev << 32) ^ key.ino;
+        return violation(policy, FLUXVM_GUARD_ACTION_EXEC_UNLISTED, object_id, 0);
+    }
+    return 0;
 }
 
 SEC("lsm/file_mprotect")
@@ -251,6 +332,40 @@ int BPF_PROG(fluxvm_guard_file_open, struct file *file, int ret)
     unsigned short mode = BPF_CORE_READ(inode, i_mode);
     unsigned int f_mode = BPF_CORE_READ(file, f_mode);
     __u32 type = mode & S_IFMT;
+
+    if (policy->flags & FLUXVM_GUARD_PATCHES) {
+        if (type == S_IFCHR || type == S_IFBLK) {
+            struct guard_device_key dkey = {
+                .vm_key = policy->vm_key,
+                .generation = policy->generation,
+                .rdev = BPF_CORE_READ(inode, i_rdev),
+                .kind = type == S_IFCHR ? FLUXVM_GUARD_KIND_CHAR : FLUXVM_GUARD_KIND_BLOCK,
+            };
+            __u8 *deny = bpf_map_lookup_elem(&guard_patch_devices, &dkey);
+            if (deny && *deny) {
+                __u64 object_id = ((__u64)dkey.kind << 32) | dkey.rdev;
+                int rc = violation(policy, FLUXVM_GUARD_ACTION_PATCH_DEVICE, object_id, f_mode);
+                if (rc)
+                    return rc;
+            }
+        } else if (type == S_IFREG) {
+            struct super_block *psb = BPF_CORE_READ(inode, i_sb);
+            __u32 psb_dev = psb ? BPF_CORE_READ(psb, s_dev) : 0;
+            struct guard_file_key pkey = {
+                .vm_key = policy->vm_key,
+                .generation = policy->generation,
+                .sb_dev = psb_dev,
+                .ino = BPF_CORE_READ(inode, i_ino),
+            };
+            __u8 *deny = bpf_map_lookup_elem(&guard_patch_files, &pkey);
+            if (deny && (*deny & FLUXVM_GUARD_PATCH_DENY_OPEN)) {
+                __u64 object_id = ((__u64)psb_dev << 32) ^ pkey.ino;
+                int rc = violation(policy, FLUXVM_GUARD_ACTION_PATCH_OPEN, object_id, f_mode);
+                if (rc)
+                    return rc;
+            }
+        }
+    }
 
     if ((policy->flags & FLUXVM_GUARD_RESTRICT_DEVICES) &&
         (type == S_IFCHR || type == S_IFBLK)) {
