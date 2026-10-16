@@ -35,7 +35,7 @@ const CAPABILITIES: Capability[] = [
   },
   {
     title: 'Agent sandboxes',
-    body: 'Disposable machines for coding agents: TTL, exec and files, offline sandboxes you can fork into four running copies in about 4 s, a local model reachable with no network card, and a warm pool.',
+    body: 'Disposable machines for coding agents: TTL, exec and files, offline sandboxes you can fork into four running copies in about 4 s, host Metal/MLX via host_gpu with no network card, and a warm pool.',
     status: 'ok',
     tag: 'Verified on M4',
     to: '/agents',

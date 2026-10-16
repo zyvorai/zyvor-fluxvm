@@ -123,12 +123,13 @@ same.) A tarball downloaded in a browser is quarantined by macOS: clear it with
 
 ## Which version has what
 
-The one-liner installs the newest **published** release. As of this page:
+The one-liner installs the newest **published** release. As of this page that is **0.4.10**:
 
 | Release | Has |
 |---|---|
 | `0.4.7` and earlier | sandboxes, snapshots, fork, speculative execution, MCP, the fleet. **No `fluxctl agent`.** |
-| the next release (`0.4.8` and later) | adds agent sessions: enforced filesystem policy, scoped tokens, supervised jobs, approvals, per-session HTTP rules, budgets, resumable transfer, fork/evaluate/promote. See the [session guide](agent-sessions-guide.md). |
+| `0.4.8` and `0.4.9` | agent sessions: enforced filesystem policy, scoped tokens, supervised jobs, approvals, per-session HTTP rules, budgets, resumable transfer, fork/evaluate/promote. See the [session guide](agent-sessions-guide.md). |
+| **`0.4.10`** (current) | everything above, plus `apple.host_gpu` / `fluxctl infer` for host Metal/MLX into offline VZ sandboxes ([host-inference.md](host-inference.md)), QMP sockets under a short `run_dir` (macOS `sockaddr_un` fix), and the Linux package built in `ubuntu:22.04` (glibc 2.35+). |
 
 Check what you have:
 
@@ -137,7 +138,7 @@ fluxctl --version
 fluxctl agent --help        # "unrecognized subcommand 'agent'" means a release without sessions
 ```
 
-To run sessions before that release is published, build from source (below).
+If you are on something older than 0.4.8 and need sessions immediately, build from source (below) or pin `--version 0.4.10`.
 
 ## Upgrade, pin, roll back, uninstall
 
@@ -146,11 +147,11 @@ To run sessions before that release is published, build from source (below).
 curl -fsSL https://zyvorai.github.io/zyvor-fluxvm/install.sh | bash
 
 # pin or roll back: the version you want is already on disk, so this is a relink
-curl -fsSL https://zyvorai.github.io/zyvor-fluxvm/install.sh | bash -s -- --version 0.4.7
+curl -fsSL https://zyvorai.github.io/zyvor-fluxvm/install.sh | bash -s -- --version 0.4.9
 
 # list what is installed, and free space
-ls ~/.local/share/fluxvm            # 0.4.7  0.4.8  current
-rm -rf ~/.local/share/fluxvm/0.4.7  # only a version `current` does not point at
+ls ~/.local/share/fluxvm            # 0.4.9  0.4.10  current
+rm -rf ~/.local/share/fluxvm/0.4.9  # only a version `current` does not point at
 
 # uninstall
 curl -fsSL https://zyvorai.github.io/zyvor-fluxvm/install.sh | bash -s -- --uninstall

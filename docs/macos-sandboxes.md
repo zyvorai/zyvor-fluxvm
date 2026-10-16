@@ -62,6 +62,9 @@ For many sandboxes on one Mac (sizes such as `"profile": "tiny"`, admission on m
   nothing for the guest to route through; it has only `lo`. Commands and files still work: the daemon reaches the guest's sshd over
   **vsock** (stock Debian 13 images have `sshd-vsock.socket` on port 22) through the runner, using a built-in relay
   (`fluxctl vsock-proxy`, ssh's ProxyCommand). They cold-boot (about 6 s, no warm pool). For sandboxes that need *some* network, see below.
+- **Host inference without a NIC.** `{"host_gpu": true}` (or `fluxctl agent run --host-gpu`) relays guest
+  `http://127.0.0.1:8080/v1` over vsock to the host Metal/MLX (or llama.cpp) server and sets `OPENAI_BASE_URL`.
+  See [host-inference.md](host-inference.md).
 - **Allow-listed egress.** `{"allow_hosts": ["example.com", "*.pypi.org"]}` (MCP: `sandbox_create` with `allow_hosts`) implies `offline`:
   the guest has no card, and its only way out is an HTTP(S) proxy the runner serves over vsock (guest to host, port 3128). A small
   forwarder in the guest (`fluxvm-egress.service`, written by cloud-init) exposes it on `127.0.0.1:3128`, and `/etc/environment` plus an

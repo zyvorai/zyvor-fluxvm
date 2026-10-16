@@ -12,13 +12,13 @@ const REPO = 'https://github.com/zyvorai/zyvor-fluxvm';
 
 // Every figure on this page was measured on one Apple M4 mini (16 GB, macOS 27.2) with a debian-13 guest.
 // Sources: examples/agent-sandbox-demo/README.md (timings, two runs), docs/agent-density.md (memory, 21 sandboxes),
-// docs/install-macos.md (install and MCP round trip, from the published v0.4.4 tap).
+// docs/install-macos.md (install and MCP; current package 0.4.10).
 type Stat = {value: string; label: string; note: string};
 const PROOF: Stat[] = [
   {value: '4.5 s', label: 'A fresh offline sandbox', note: 'cold boot, no network card; a default sandbox claiming a warm slot takes about 1 s'},
   {value: '~4 s', label: 'Fork into 4 running copies', note: 'they share the parent’s memory snapshot'},
   {value: '0.3 s', label: 'Four fixes tried and tested', note: 'in parallel, one in each copy'},
-  {value: '31', label: 'MCP tools in 0.4.7', note: 'create, run, fork, snapshot, delete; read-only unless you allow writes (session and changeset tools are newer)'},
+  {value: '66', label: 'MCP tools in 0.4.10', note: 'VMs, sandboxes, sessions, speculate/changesets; read-only unless you allow writes'},
 ];
 
 const LOOP = [
@@ -61,9 +61,8 @@ const MCP_STEPS = [
   '#   vm_fork {"vm": id, "count": 4}   ...   vm_delete',
 ].join('\n');
 
-// Install variants. The one-liner downloads and verifies the release package (scripts/install.sh, docs/install.md); the
-// Homebrew line installs the same package through the tap. The session API and `fluxctl agent` are newer than the 0.4.7
-// package, so until the next release is published they need the source tab. See docs/install.md.
+// Install variants. The one-liner and Homebrew install the published 0.4.10 package (sessions + host_gpu).
+// See docs/install.md.
 const INSTALL_TABS = [
   {
     id: 'script',
@@ -77,7 +76,8 @@ const INSTALL_TABS = [
       '# it verifies the SHA-256, needs no sudo, writes under ~/.local;',
       '# --dry-run prints the plan, --version X pins or rolls back, --uninstall reverses it.',
       '',
-      'fluxctl --version',
+      'fluxctl --version   # 0.4.10',
+      'fluxctl agent --help',
     ].join('\n'),
   },
   {
@@ -90,6 +90,9 @@ const INSTALL_TABS = [
       '',
       '# let an agent drive it',
       'fluxctl mcp install claude-code --allow-write',
+      '',
+      '# offline session + host Metal/MLX:',
+      '# fluxctl agent run --policy offline --host-gpu',
     ].join('\n'),
   },
   {
@@ -97,8 +100,8 @@ const INSTALL_TABS = [
     label: 'Linux',
     body: [
       '# the same one-liner; it picks the linux-x86_64 package when the release has one',
-      'curl -fsSL https://zyvorai.github.io/zyvor-fluxvm/install.sh | bash',
-      'sudo apt-get install -y libhivex0 libsystemd0     # runtime libraries',
+      'curl -fsSL https://zyvorai.github.io/zyvor-fluxvm/install.sh | bash -s -- --version 0.4.10',
+      'sudo apt-get install -y libhivex0 libsystemd0     # runtime libraries (glibc 2.35+)',
       '',
       '# the daemon needs root and /dev/kvm; the installer prints the exact steps with --service',
       'curl -fsSL https://zyvorai.github.io/zyvor-fluxvm/install.sh | bash -s -- --service',
@@ -106,7 +109,7 @@ const INSTALL_TABS = [
   },
   {
     id: 'source',
-    label: 'From source (sessions)',
+    label: 'From source',
     body: [
       'git clone https://github.com/zyvorai/guestkit',
       'git clone https://github.com/zyvorai/zyvor-fluxvm && cd zyvor-fluxvm',
@@ -331,17 +334,18 @@ function Offline() {
               <span className={clsx(styles.tag, styles.tagOk)}>Verified on M4</span>
             </div>
             <div className={styles.card}>
-              <Heading as="h3">A local model, one port</Heading>
+              <Heading as="h3">Host inference (<code>host_gpu</code>)</Heading>
               <p>
-                A guest with no network card reached a real <code>llama-server</code> model on the Mac over one vsock
-                port, and still could not reach the internet.
+                <code>fluxctl agent run --host-gpu</code> (or <code>host_gpu: true</code>) relays guest{' '}
+                <code>OPENAI_BASE_URL</code> to the Mac&rsquo;s Metal/MLX or llama.cpp server over vsock. No network
+                card. <Link to="/docs/host-inference">host-inference</Link>
               </p>
               <span className={clsx(styles.tag, styles.tagOk)}>Verified on M4, small model</span>
             </div>
           </div>
           <p className={clsx(styles.footnote, 'text--center')}>
             The model run used a deliberately tiny 135M-parameter model, so its answers are weak: it proves the path,
-            not answer quality. MLX and larger models were not run.
+            not answer quality. A stand-in server (<code>fluxctl infer serve --stand-in</code>) is enough for path tests.
           </p>
         </Reveal>
       </div>
@@ -416,7 +420,7 @@ function PlugIn() {
             <p className={styles.lead}>
               Claude Code, Cursor, Claude Desktop, Codex, VS Code, Windsurf and Gemini CLI each get a{' '}
               <code>fluxvm</code> MCP server in their own config. Tested end to end from a fresh home directory on the
-              published package: handshake, 31 tools, a sandbox created, a command run, a fork, a delete.
+              published package: handshake, 66 tools in 0.4.10, a sandbox created, a command run, a fork, a delete.
             </p>
           </div>
           <div className={styles.terminal} style={{maxWidth: 760, margin: '0 auto'}}>
@@ -452,9 +456,9 @@ function Install() {
             </Heading>
             <p className={styles.lead}>
               The installer downloads the release package for your machine, verifies its SHA-256 and links the binaries
-              into <code>~/.local/bin</code>. Run it again to upgrade; <code>--version</code> rolls back. The session
-              commands on this page are newer than the 0.4.7 package, so until the next release is published they need
-              the source tab (<code>fluxctl agent --help</code> tells you which you have).
+              into <code>~/.local/bin</code>. Run it again to upgrade; <code>--version</code> rolls back. Current is{' '}
+              <strong>0.4.10</strong>: <code>fluxctl agent</code>, sessions and <code>--host-gpu</code> are in the
+              package (<code>fluxctl agent --help</code> confirms it).
             </p>
           </div>
           <div className={styles.terminal} style={{maxWidth: 760, margin: '0 auto'}}>
@@ -479,7 +483,8 @@ function Install() {
             <pre className={styles.terminalBody}>{cur.body}</pre>
           </div>
           <p className={clsx(styles.footnote, 'text--center')}>
-            macOS 14+ on Apple silicon, and Linux x86_64 once a release carries the package.{' '}
+            macOS 14+ on Apple silicon; Linux x86_64 from the same installer when the release has that asset
+            (0.4.10 builds it in ubuntu:22.04).{' '}
             <Link to="/docs/install">Every option, upgrade and uninstall</Link> ·{' '}
             <Link to="/docs/install-macos">Homebrew notes</Link>
           </p>

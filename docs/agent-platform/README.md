@@ -42,20 +42,13 @@ The installer needs no sudo or Homebrew, verifies the package's SHA-256, and is 
 what it changes are in [install.md](../install.md). Homebrew (`brew install zyvorai/tap/fluxvm`) is the alternative on
 a Mac.
 
-**Which release has sessions.** The newest published release at the time of writing, 0.4.7, has sandboxes, snapshots,
-speculative execution and MCP, but **not** the session API or `fluxctl agent`. Check with `fluxctl agent --help`
-(`unrecognized subcommand` means an older release). Until the next release is published, build them from source:
+**Sessions ship in 0.4.8+; current is 0.4.10.** `fluxctl agent --help` should list verbs. On a Mac, add `--host-gpu`
+(or `runtime.host_gpu`) so an offline guest can call the host Metal/MLX OpenAI endpoint ([host-inference.md](../host-inference.md)).
+If `agent` is missing, upgrade (`curl … \| bash` or `brew upgrade zyvorai/tap/fluxvm`) or build from source
+([install.md](../install.md)).
 
-```bash
-git clone https://github.com/zyvorai/zyvor-fluxvm && cd zyvor-fluxvm
-xcode-select --install && brew install hivex
-cargo build -p fluxctl                                   # needs the sibling guestkit checkout, see README
-FLUXVM_VZ_RUNNER=/opt/homebrew/opt/fluxvm/bin/fluxvm-vz-runner target/debug/fluxctl serve
-```
-
-Linux hosts get a package from the same installer once a release carries one (the release workflow builds
-`linux-x86_64`); otherwise build from source (`cargo build --release -p fluxctl`).
-Full macOS notes: [install-macos.md](../install-macos.md).
+Linux hosts use the same installer when the release has a `linux-x86_64` asset (0.4.10 builds that package in
+`ubuntu:22.04`); otherwise `cargo build --release -p fluxctl`. Full macOS notes: [install-macos.md](../install-macos.md).
 
 ## 60 seconds
 

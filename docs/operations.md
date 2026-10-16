@@ -1441,8 +1441,17 @@ of a surprise landing somewhere else.
 
 ## State layout
 
+Durable VM state lives under `state_dir` (Linux default `/var/lib/fluxvm`; on a Mac,
+`~/Library/Application Support/FluxVM`). **QMP and other Unix control sockets** are not kept
+under the long instance path: on macOS a `sockaddr_un` path must stay under ~104 bytes
+(`SUN_LEN`), and `…/instances/<uuid>/qmp.sock` overflows that. From **0.4.10** QEMU binds
+`run_dir/qmp/<id>.sock` (default `run_dir` is `/tmp/fluxvm-run-<uid>`), records it as
+`control_socket` on the VM record, and still accepts a legacy workspace `qmp.sock` for older
+VMs. Migration receiver workspaces use `run_dir/mr/<id>/`. Override with `[paths] run_dir` in
+the config.
+
 ```text
-/var/lib/fluxvm/
+/var/lib/fluxvm/                 (state_dir)
   vms.json
   vms.lock
   events.jsonl                (VM lifecycle/audit events; rotates to events.jsonl.1 at 16 MiB)
@@ -1472,11 +1481,16 @@ of a surprise landing somewhere else.
       meta-data
       console.log
       serial.sock             (QEMU serial chardev; fluxctl serial / websocket)
-      qmp.sock | ch-api.sock | firecracker.sock | fluxvm.sock
+      ch-api.sock | firecracker.sock | fluxvm.sock
+      qmp.sock                (legacy only; prefer run_dir/qmp/<id>.sock)
       vsock.sock              (CH / Firecracker / FluxVm, when agent.enabled)
       firecracker.json
       snapshot/               (FluxVm memory+disk snapshots)
       nbd.sock | nbd.pid      (storage=nbd only — see "Storage backends" above)
+
+/tmp/fluxvm-run-<uid>/           (run_dir; short path for Unix sockets)
+  qmp/<id>.sock                  (QEMU monitor; also VmRecord.control_socket)
+  mr/<id>/                       (migration receiver workspace)
 ```
 
 `storage=lvm-thin` and `storage=ceph-rbd` disks live outside this tree entirely — a thin

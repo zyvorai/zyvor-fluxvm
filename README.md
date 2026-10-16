@@ -65,10 +65,13 @@ Measured on one Apple M4 with macOS 27.2. Multi-Mac fleets are not yet verified 
 
 ## What's new
 
-From the [CHANGELOG](CHANGELOG.md) (0.4.x, current release 0.4.6) and recent commits:
+From the [CHANGELOG](CHANGELOG.md) (0.4.x, current release **0.4.10**) and recent commits:
 
 | Feature | What it does |
 |---|---|
+| **Host Metal/MLX inference for offline sandboxes** | `apple.host_gpu` / `fluxctl agent run --host-gpu`: guest `OPENAI_BASE_URL` reaches the host OpenAI-compatible server over vsock (no GPU passthrough). `fluxctl infer status` / `infer serve --stand-in` ([host-inference](docs/host-inference.md)) |
+| **QMP under a short `run_dir`** | Avoids macOS `sockaddr_un` / `SUN_LEN` failures when the state path is long; sockets live at `run_dir/qmp/<id>.sock`, migration receivers at `run_dir/mr/<id>/` ([operations](docs/operations.md#state-layout-on-disk)) |
+| **Agent sessions (`fluxctl agent`)** | Enforced filesystem policy, scoped tokens, supervised jobs, approvals, budgets, fork/evaluate/promote — in the published package from 0.4.8 ([session guide](docs/agent-sessions-guide.md)) |
 | **Agent sandboxes you can fork** | `sandbox_create {"offline": true}`, then `vm_fork`: four running copies in about 4 s, four fixes tested in 0.3 s, the passing one kept ([demo](examples/agent-sandbox-demo/README.md); measured on an M4 mini, copies keep the parent's identity) |
 | **Fleet platform** | Tenants and 24-hour Mac leases, snapshots and clones, volumes, SSH and port tunnels, SSO and roles, metrics and Prometheus, warm pools, prices and signed webhooks, Go/Python/TypeScript clients and a Terraform provider ([guide](docs/mac-cloud-tenancy.md), [run it](docs/mac-cloud-operations.md); tested against simulated Macs, not a real multi-Mac fleet) |
 | **Fleet console, redesigned** | One top bar with grouped menus (Overview, Cloud, Compute, Billing, Access), light and dark, served by central at `/console`; operators and tenants sign in with their key ([install guide](docs/install-macos.md#optional-the-fleet-console)) |
@@ -277,7 +280,7 @@ Every one maps onto what is implemented today. [All eleven](docs/index.md#use-ca
 | Status | Areas |
 |---|---|
 | **GA** | Network Fabric (TC/eBPF, the default dataplane; nftables via explicit `mode = "legacy"`) · Secure Containers (containerd runtime-v2, not a Kata-equivalence claim) |
-| **Released (0.4.x)** | MCP server, sandbox GPUs, enforced Kairon VM edge, VM-edge capture, VM fork, VM import, quiesced backups, fleet console |
+| **Released (0.4.x)** | MCP server, agent sessions (`fluxctl agent`), `host_gpu` Metal/MLX inference, sandbox GPUs (Linux VFIO), enforced Kairon VM edge, VM-edge capture, VM fork, VM import, quiesced backups, fleet console |
 | **Built, not yet run on real hosts** | FluxMesh (overlay, DNS, relay, enrollment, public edge): unit tests only; see [Proof & status](docs/proof-and-status.md) |
 | **Not by design** | KubeVirt compatibility |
 
