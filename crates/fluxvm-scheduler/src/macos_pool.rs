@@ -48,6 +48,27 @@ impl std::fmt::Display for NoFreeSlot {
 
 impl std::error::Error for NoFreeSlot {}
 
+/// A checkout's restore failed and the Mac's login session is why (locked screen, nobody logged in). The API maps it to 503:
+/// it clears when someone unlocks the Mac, and the slot stays idle.
+#[derive(Debug)]
+pub struct SessionBlocksRestore {
+    pub slot: Uuid,
+    pub hint: String,
+    pub cause: String,
+}
+
+impl std::fmt::Display for SessionBlocksRestore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "restoring pool slot {}: {} ({})",
+            self.slot, self.hint, self.cause
+        )
+    }
+}
+
+impl std::error::Error for SessionBlocksRestore {}
+
 /// Serialises enrolling and checking out, so two callers never take the same slot.
 static POOL_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
@@ -85,6 +106,20 @@ impl VmManager {
     /// The enrolled slots, idle and leased.
     pub async fn macos_pool_list(&self) -> Vec<VmRecord> {
         self.list().await.into_iter().filter(is_slot).collect()
+    }
+
+    /// The pool at a glance: whether a checkout can restore right now, and how many slots are free. `login_session` is
+    /// `unknown` when the session cannot be read.
+    pub async fn macos_pool_status(&self) -> serde_json::Value {
+        let slots = self.macos_pool_list().await;
+        let idle = slots.iter().filter(|v| state(v) == Some(IDLE)).count();
+        let session = fluxvm_core::login_session::LoginSession::current();
+        serde_json::json!({
+            "login_session": session,
+            "restore_possible": !session.blocks_restore(),
+            "hint": session.restore_hint(),
+            "slots": {"enrolled": slots.len(), "idle": idle, "leased": slots.len() - idle, "max": MAX_MACOS_GUESTS},
+        })
     }
 
     /// Turns a prepared, running macOS guest into a pool slot: saves its `warm` snapshot, stops it and marks it idle.
@@ -146,9 +181,18 @@ impl VmManager {
         {
             bail!("pool slot {id} has no {WARM_TAG:?} snapshot; enrol it again");
         }
-        self.start_from_snapshot(id, WARM_TAG)
-            .await
-            .with_context(|| format!("restoring pool slot {id}"))?;
+        if let Err(e) = self.start_from_snapshot(id, WARM_TAG).await {
+            // The bare restore error does not say why; the Mac's session usually is.
+            return Err(match crate::restore_blocked_hint() {
+                Some(hint) => SessionBlocksRestore {
+                    slot: id,
+                    hint,
+                    cause: format!("{e:#}"),
+                }
+                .into(),
+                None => e.context(format!("restoring pool slot {id}")),
+            });
+        }
         let vm = self
             .patch(
                 id,

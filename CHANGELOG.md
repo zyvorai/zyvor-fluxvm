@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- **A locked Mac now says why warm-pool restores fail.** On a locked screen (or with nobody logged in) every snapshot
+  restore fails; sandboxes then silently cold-booted and `macos-pool checkout` returned a bare restore error. The session is
+  now read in one shared place (`fluxvm-core::login_session`, also used by `doctor`): `GET /v1/sandboxes/density` gains
+  `login_session` and `restore_blocked`; new `GET /v1/macos-pool/status` / `fluxctl macos-pool status` report whether a
+  checkout can restore and the slot counts; a checkout that fails because of the session returns 503 with the fix and leaves
+  the slot idle; the warm-restore and hibernate-wake warnings carry the reason. Additive only (older readers ignore the new
+  fields). Run on this Mac while its screen was locked: `status` and the density report both showed `locked` with the hint.
+  Unit-tested: the parser, the 503 mapping, an older report without the fields. Not run: a checkout of a real enrolled slot on
+  a locked Mac (the 503 path), or an unlocked-to-locked transition.
+
 
 - **The installer ends with `fluxctl doctor` and a one-line tab-completion command for your shell.** `fluxctl completions`
   already printed bash, zsh and fish scripts, but nothing told anyone. `scripts/install.sh` (and its copy served from the

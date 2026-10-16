@@ -23,7 +23,9 @@ with a `warm` snapshot, labelled `fluxvm.pool=sandbox`. A default-shaped create 
 overrides, not tenant-scoped) restores one of them, which takes about 2 s, and that VM simply becomes the sandbox (it keeps its
 `warm` snapshot; deleting the sandbox deletes it). The first create cold-boots and starts filling the pool in the background; every
 create that claims a slot starts a refill. If no slot is free, or a restore fails (for example on a locked screen), the create
-cold-boots as before.
+cold-boots as before. When the cause is the login session, the daemon log line says so, and `GET /v1/sandboxes/density` reports
+`login_session` (`locked`, `no_session`, `unlocked`) and `restore_blocked` (the reason and the fix) while restores would fail, so
+a pool that never hits can be told apart from one that is blocked by a locked screen.
 
 Why a pool and not one snapshot restored many times: a saved VM state is tied to the MAC address and machine identifier it was saved
 with (restoring with another MAC or identifier fails with "invalid argument"), and two VMs restored from one snapshot share a MAC and
