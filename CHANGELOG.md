@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- **UDP published ports for container sandboxes.** `ports` accepts `HOST:CONTAINER/udp` next to TCP. The Mac's NAT
+  relay is TCP-only, so a sandbox that publishes UDP gets the userspace gateway (`apple.usernet`) as its network card,
+  which already forwards both; a UDP port is refused together with `expose`, `gateway_hosts` or private `networks`
+  (not run with the gateway). Host-port conflicts are per protocol, and a sandbox's ports on the gateway now count when
+  another sandbox asks for the same host port. Compose `ports: ["53:53/udp"]` imports as a UDP port instead of being
+  refused. Unit-tested, and run live on an M4 with `scripts/oci-udp-ports-live-test.sh`: a UDP datagram and a TCP line
+  to the published `127.0.0.1` ports are echoed by `nc` in an alpine container, a clash is refused, and delete frees
+  the port. This is also the first live run of published TCP ports for container sandboxes. Not run: a UDP port next
+  to volumes, restarts or health checks, and UDP through `--fleet` placement.
+
 - **CLI rough edges.** `fluxctl --help` now lists `doctor` and prints the exit-code contract: `0` success, `1` an error
   or a failing `doctor` check, `2` a usage error, and for `run`, `sandbox run`, `ssh`, `fleet exec` and
   `agent exec` the command's own status (these pass the guest's code through, so they are deliberately not one
