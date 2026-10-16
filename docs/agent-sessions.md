@@ -45,7 +45,7 @@ fork, then exec in every child in parallel, then delete the children (`--keep` k
 {
   "agent": "claude-code",
   "workspace": {"git": "https://github.com/octocat/Hello-World", "path": "/workspace", "mode": "clone"},
-  "runtime": {"image": "agent-micro", "cpus": 2, "memory_mb": 2048},
+  "runtime": {"image": "agent-micro", "cpus": 2, "memory_mb": 2048, "host_gpu": false},
   "policy": {"preset": "developer-safe", "network": {"default": "deny", "allow": ["example.com"]}},
   "ttl_seconds": 3600
 }
@@ -56,6 +56,8 @@ fork, then exec in every child in parallel, then delete the children (`--keep` k
   `workspace.note` (for example *git is not installed in the guest image*; the stock `debian-13` has none).
 - A baseline of the workspace is recorded at the end of create, which is what `artifacts` diffs against.
 - `runtime.image` follows the sandbox rules (`agent-micro` gives the vsock agent; another image cold-boots).
+- `runtime.host_gpu` (`fluxctl agent run --host-gpu`): vz only; guest `OPENAI_BASE_URL` reaches the host Metal/MLX
+  (or llama.cpp) server over vsock. See [host-inference.md](host-inference.md).
 - `runtime.volumes: [{"name", "path"}]` (`fluxctl agent run --volume NAME:/mnt/data`) attaches a named host volume
   (`POST /v1/volumes`) as a virtio disk, formats it ext4 **only when `blkid` reports no file system**, mounts it at
   `path` (under `/mnt`, `/data`, `/srv`, `/opt`, `/workspace`, `/home` or `/root`), makes the mount point the guest

@@ -213,6 +213,7 @@ impl VmManager {
     ) -> Result<AgentResponse> {
         let secs = timeout_seconds.unwrap_or(fluxvm_guest_protocol::DEFAULT_EXEC_TIMEOUT_SECS);
         let needs_agent = policy.is_some() || process.is_some();
+        let (command, process) = inject_host_gpu_env(vm, command, process);
         let request = AgentRequest::Exec {
             command: command.clone(),
             timeout_seconds: Some(secs),
@@ -306,6 +307,37 @@ impl VmManager {
         }
         ssh::write_file(&self.vz_guest(vm)?, &path, &data, mode.unwrap_or(0o644)).await?;
         Ok(AgentResponse::FileWritten)
+    }
+}
+
+/// When `apple.host_gpu` is set, ensure guest execs see the host inference URL without requiring a login shell.
+fn inject_host_gpu_env(
+    vm: &VmRecord,
+    command: String,
+    process: Option<ExecProcess>,
+) -> (String, Option<ExecProcess>) {
+    if !vm
+        .request
+        .apple
+        .as_ref()
+        .is_some_and(|a| a.host_gpu)
+    {
+        return (command, process);
+    }
+    let port = fluxvm_apple::HOST_INFER_PORT;
+    let base = format!("http://127.0.0.1:{port}/v1");
+    let openai = format!("OPENAI_BASE_URL={base}");
+    let flux = format!("FLUXVM_INFER_URL={base}");
+    if let Some(mut p) = process {
+        if !p.env.iter().any(|e| e.starts_with("OPENAI_BASE_URL=")) {
+            p.env.push(openai);
+        }
+        if !p.env.iter().any(|e| e.starts_with("FLUXVM_INFER_URL=")) {
+            p.env.push(flux);
+        }
+        (command, Some(p))
+    } else {
+        (format!("export {openai} {flux}; {command}"), None)
     }
 }
 

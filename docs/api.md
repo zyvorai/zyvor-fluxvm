@@ -131,7 +131,7 @@ GET    /v1/pools/{name}
 DELETE /v1/pools/{name}
 POST   /v1/pools/{name}/claim            # ?ready=exec adds first_command_ms + phases
 POST   /v1/pools/{name}/resize
-POST   /v1/sandboxes                     # optional volumes: [{name, guest_path, read_only}] (QEMU template or oci); vz: "oci": {"image", "ports"?, "restart"?, "healthcheck"?, ...} (oci-sandboxes.md)
+POST   /v1/sandboxes                     # optional volumes; vz: "offline", "host_gpu" (host-inference.md), "oci": {...} (oci-sandboxes.md)
 GET    /v1/sandboxes
 POST   /v1/sandboxes/{id}/snapshot
 POST   /v1/sandboxes/{id}/fs/read
@@ -836,6 +836,8 @@ policy before it connects here.
   `204`) refuses an instance a VM lists or holds. `vfio_devices` takes instance UUIDs. See [vgpu.md](vgpu.md).
 - `GET /v1/host/gpus/health`: per GPU `healthy`, `degraded` or `unhealthy` with reasons, AER counters, PCIe link and
   `nvidia-smi` counters when installed.
+- `GET /v1/host/infer`: whether the host OpenAI-compatible model server answers on `[apple].host_infer_port` for
+  `apple.host_gpu` sandboxes (see [host-inference.md](host-inference.md)). `fluxctl infer status` / `infer serve --stand-in`.
 
 ### Balloon and memory
 

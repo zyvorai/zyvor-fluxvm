@@ -460,6 +460,8 @@ pub fn write_oci_meta_as(req: &CreateVmRequest, workspace: &Path, config_name: &
 
 /// The vsock port the runner's egress proxy listens on (guest to host); the guest forwards 127.0.0.1:3128 to it.
 pub const EGRESS_PORT: u32 = 3128;
+/// Guest TCP and vsock port for `apple.host_gpu`: clients use `http://127.0.0.1:8080/v1`.
+pub const HOST_INFER_PORT: u32 = 8080;
 
 /// The vsock port (and guest-local TCP port) of a `self_control` VM's MCP server.
 pub const SELF_CONTROL_PORT: u32 = 7790;

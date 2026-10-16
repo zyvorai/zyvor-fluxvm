@@ -1122,6 +1122,11 @@ pub struct AppleSpec {
     /// `http://127.0.0.1:7790/mcp` in the guest (relayed to the host over vsock; scoped to this VM only).
     #[serde(default)]
     pub self_control: bool,
+    /// Linux guests: wire host Metal/MLX (or llama.cpp) inference into the guest over vsock. The guest sees
+    /// `http://127.0.0.1:8080/v1` (`OPENAI_BASE_URL`); the host end is `[apple].host_infer_port` (default 8080).
+    /// No guest network card is required. See `docs/host-inference.md`.
+    #[serde(default)]
+    pub host_gpu: bool,
     /// Extra guest→host vsock services: each guest-facing `port` is relayed either to a host Unix socket the daemon owner
     /// runs (`socket`, a name resolved under the runner socket directory, never an arbitrary path) or answered by the runner itself (`builtin`: `metadata` or `telemetry`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1458,6 +1463,7 @@ impl Default for AppleSpec {
             custom_virtio: false,
             egress_allow: Vec::new(),
             self_control: false,
+            host_gpu: false,
             vsock_services: Vec::new(),
             macos_vsock: false,
             root_read_only: false,

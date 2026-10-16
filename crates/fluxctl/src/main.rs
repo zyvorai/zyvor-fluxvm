@@ -30,6 +30,7 @@ mod compose;
 mod contexts;
 mod create;
 mod doctor;
+mod infer;
 mod fleet_cli;
 mod fleet_client;
 mod launch_agent;
@@ -1056,6 +1057,11 @@ enum Command {
     Mcp {
         #[command(subcommand)]
         command: McpCommand,
+    },
+    /// Host Metal/MLX (or llama.cpp) inference for `apple.host_gpu` sandboxes.
+    Infer {
+        #[command(subcommand)]
+        command: infer::InferCommand,
     },
     /// Hubble-lite flows and CiliumEndpoint views.
     Hubble {
@@ -5280,6 +5286,11 @@ async fn main() -> Result<()> {
         return agent_session::run(&r, command).await;
     }
 
+    if let Command::Infer { command } = cli.command {
+        let r = remote::Remote::new(&cfg.listen, cli.server_token.clone());
+        return infer::run(&r, command).await;
+    }
+
     let m = manager(cfg.clone()).await?;
 
     match cli.command {
@@ -5304,6 +5315,7 @@ async fn main() -> Result<()> {
         | Command::Context { .. }
         | Command::Netobs { .. }
         | Command::Agent { .. }
+        | Command::Infer { .. }
         | Command::Doctor { .. }
         | Command::Vm { .. }
         | Command::Quota { token: Some(_), .. } => {

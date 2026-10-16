@@ -1373,6 +1373,9 @@ struct RuntimeBody {
     /// instead of silently creating one. vz only; other backends have no SSH engine.
     #[serde(default)]
     engine: Option<String>,
+    /// vz only: wire the host Metal/MLX (or llama.cpp) OpenAI endpoint into the session over vsock.
+    #[serde(default)]
+    host_gpu: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1773,6 +1776,7 @@ async fn create_session(
         memory_mib: body.runtime.as_ref().and_then(|r| r.memory_mb),
         offline: policy.offline,
         allow_hosts: policy.allow_hosts.clone(),
+        host_gpu: body.runtime.as_ref().is_some_and(|r| r.host_gpu),
         extra_disks,
         ..serde_json::from_value(json!({})).map_err(anyhow::Error::from)?
     };

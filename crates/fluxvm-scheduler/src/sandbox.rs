@@ -80,6 +80,10 @@ pub struct SandboxCreateRequest {
     /// no network card, and the only way out is an HTTP(S) proxy on the host that refuses everything not listed. Enforced by the host.
     #[serde(default)]
     pub allow_hosts: Vec<String>,
+    /// vz only: give the sandbox the host's Metal/MLX (or llama.cpp) OpenAI-compatible endpoint over vsock
+    /// (`apple.host_gpu`). Works with `offline`. See `docs/host-inference.md`.
+    #[serde(default)]
+    pub host_gpu: bool,
     /// vz only: run a container image as the sandbox, one lightweight VM per container (see
     /// [`crate::oci_sandbox`] and `docs/oci-sandboxes.md`). Not combinable with `template`, `spec`, `image`, `procbox`,
     /// `volumes`, `gpus` or `confidential`; `profile`, `vcpus`, `memory_mib`, `offline`, `allow_hosts` and `ttl_seconds` apply.
@@ -298,6 +302,7 @@ impl VmManager {
             && memory_mib.is_none()
             && gpus == 0
             && !req.offline
+            && !req.host_gpu
             && req.allow_hosts.is_empty()
             && token_tenant.is_none();
         let extra_disks = req.extra_disks.clone();
@@ -306,6 +311,7 @@ impl VmManager {
         }
         let (claim_name, claim_ttl) = (req.name.clone(), req.ttl_seconds);
         let allow_hosts = req.allow_hosts.clone();
+        let host_gpu = req.host_gpu;
         let offline = req.offline || !allow_hosts.is_empty();
         let from_template = req.template.is_some();
         let mut create = if let Some(template) = &req.template {
@@ -372,6 +378,15 @@ impl VmManager {
                 .egress_allow = allow_hosts.clone();
             let ci = create.cloud_init.take().unwrap_or_default();
             create.cloud_init = Some(fluxvm_apple::with_egress_forwarder(ci));
+        }
+        if host_gpu {
+            if create.backend != BackendKind::Vz {
+                bail!("host_gpu is only supported on the vz backend (macOS)");
+            }
+            create
+                .apple
+                .get_or_insert_with(Default::default)
+                .host_gpu = true;
         }
         if create.backend == BackendKind::Vz {
             self.prepare_vz_sandbox(&mut create)?;

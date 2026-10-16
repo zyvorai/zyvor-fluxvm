@@ -430,6 +430,7 @@ pub fn router(manager: Arc<VmManager>) -> Router {
         .route("/v1/host/gpus/bind", post(bind_host_gpu))
         .route("/v1/host/gpus/release", post(release_host_gpu))
         .route("/v1/host/gpus/health", get(host_gpu_health))
+        .route("/v1/host/infer", get(host_infer_status))
         .route("/v1/host/mdev", get(list_host_mdev).post(create_host_mdev))
         .route("/v1/host/mdev/{uuid}", delete(remove_host_mdev))
         .route("/v1/host/pci/bind", post(bind_host_pci))
@@ -2485,6 +2486,66 @@ async fn list_host_gpus(State(m): State<Arc<VmManager>>) -> ApiResult<Json<serde
     let allocated = allocated_vfio_bdfs(&m.list().await);
     let gpus = fluxvm_core::gpu::list_host_gpus(&m.cfg.state_dir, &allocated)?;
     Ok(Json(json!({ "items": gpus })))
+}
+
+/// Whether the host OpenAI-compatible model server (MLX / llama.cpp) answers on `[apple].host_infer_port`.
+async fn host_infer_status(State(m): State<Arc<VmManager>>) -> Json<serde_json::Value> {
+    let port = m.cfg.apple.host_infer_port;
+    let guest_base_url = format!("http://127.0.0.1:{}/v1", 8080u16);
+    let url = format!("http://127.0.0.1:{port}/v1/models");
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(2))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            return Json(json!({
+                "port": port,
+                "guest_base_url": guest_base_url,
+                "reachable": false,
+                "models_ok": false,
+                "error": e.to_string(),
+            }));
+        }
+    };
+    match client.get(&url).send().await {
+        Ok(resp) => {
+            let models_ok = resp.status().is_success();
+            let model = if models_ok {
+                resp.json::<serde_json::Value>()
+                    .await
+                    .ok()
+                    .and_then(|v| {
+                        v.get("data")
+                            .and_then(|d| d.as_array())
+                            .and_then(|a| a.first())
+                            .and_then(|m| m.get("id"))
+                            .and_then(|id| id.as_str())
+                            .map(str::to_string)
+                    })
+            } else {
+                None
+            };
+            let mut out = json!({
+                "port": port,
+                "guest_base_url": guest_base_url,
+                "reachable": true,
+                "models_ok": models_ok,
+                "model": model,
+            });
+            if !models_ok {
+                out["error"] = json!("GET /v1/models was not 2xx");
+            }
+            Json(out)
+        }
+        Err(e) => Json(json!({
+            "port": port,
+            "guest_base_url": guest_base_url,
+            "reachable": false,
+            "models_ok": false,
+            "error": e.to_string(),
+        })),
+    }
 }
 
 async fn host_gpu_health() -> Json<serde_json::Value> {

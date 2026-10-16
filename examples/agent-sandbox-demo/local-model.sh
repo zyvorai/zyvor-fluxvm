@@ -53,36 +53,27 @@ fi
 curl -sf "http://127.0.0.1:$PORT/v1/models" >/dev/null \
   || { echo "nothing answers on 127.0.0.1:$PORT/v1/models: start llama-server or mlx_lm.server there, or STAND_IN=1" >&2; exit 1; }
 
-echo "1. sandbox with no network card; vsock port 5100 relayed to 127.0.0.1:$PORT on this Mac"
-id="$(call -X POST "$URL/v1/sandboxes" -d "{\"name\":\"local-model-$$\",\"offline\":true,\"ttl_seconds\":900,
-  \"spec\":{\"name\":\"local-model-$$\",\"backend\":\"vz\",\"image\":\"debian-13\",\"vcpus\":2,\"memory_mib\":2048,
-  \"apple\":{\"vsock_services\":[{\"port\":5100,\"tcp\":\"127.0.0.1:$PORT\"}]}}}" | jq -r .id)"
+# Prefer host_gpu (daemon wires vsock + guest forwarder). MODEL_PORT must match [apple].host_infer_port (default 8080).
+if [[ "$PORT" != "8080" ]]; then
+  echo "MODEL_PORT=$PORT: set [apple].host_infer_port=$PORT in the daemon config, or use PORT=8080" >&2
+fi
+echo "1. offline sandbox with host_gpu (vsock → 127.0.0.1:$PORT on this Mac)"
+id="$(call -X POST "$URL/v1/sandboxes" -d "{\"name\":\"local-model-$$\",\"offline\":true,\"host_gpu\":true,\"ttl_seconds\":900}" | jq -r .id)"
 
-echo "2. inside it: a relay from 127.0.0.1:8080 to the vsock port, then the model API"
-guest_cmd='ip -br a | tr -s " "; cat > relay.py <<PY
-import socket, threading
-def pump(a, b):
+echo "2. inside it: model API via OPENAI_BASE_URL (no internet)"
+guest_cmd='ip -br a | tr -s " "; python3 - <<PY
+import json, os, time, urllib.request
+base = os.environ.get("OPENAI_BASE_URL", "http://127.0.0.1:8080/v1")
+for _ in range(30):
     try:
-        while True:
-            d = a.recv(65536)
-            if not d: break
-            b.sendall(d)
-    finally:
-        a.close(); b.close()
-srv = socket.socket(); srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-srv.bind(("127.0.0.1", 8080)); srv.listen(16)
-while True:
-    c, _ = srv.accept()
-    v = socket.socket(socket.AF_VSOCK); v.connect((2, 5100))
-    threading.Thread(target=pump, args=(c, v), daemon=True).start()
-    threading.Thread(target=pump, args=(v, c), daemon=True).start()
-PY
-nohup python3 relay.py >relay.log 2>&1 &
-sleep 1
-python3 - <<PY
-import json, urllib.request
-print("models:", json.load(urllib.request.urlopen("http://127.0.0.1:8080/v1/models"))["data"][0]["id"])
-req = urllib.request.Request("http://127.0.0.1:8080/v1/chat/completions", data=json.dumps({"model": "x",
+        urllib.request.urlopen(base + "/models", timeout=2)
+        break
+    except Exception:
+        time.sleep(1)
+else:
+    raise SystemExit("inference forwarder not ready")
+print("models:", json.load(urllib.request.urlopen(base + "/models"))["data"][0]["id"])
+req = urllib.request.Request(base + "/chat/completions", data=json.dumps({"model": "x",
   "messages": [{"role": "user", "content": "hello from a guest with no network card"}]}).encode(),
   headers={"content-type": "application/json"})
 print("chat:", json.load(urllib.request.urlopen(req))["choices"][0]["message"]["content"])
