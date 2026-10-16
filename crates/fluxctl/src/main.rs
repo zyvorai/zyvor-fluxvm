@@ -226,7 +226,12 @@ enum Command {
     #[command(next_help_heading = "Basic Commands")]
     /// Check that this host is ready: daemon, binaries, KVM or the vz runner entitlement, disk,
     /// and client entries left pointing at a removed Homebrew path. Read-only; exits 1 on a failure.
-    Doctor,
+    Doctor {
+        /// Check only this machine's prerequisites and skip the daemon check, for a host before FluxVM is installed
+        /// (what `scripts/preflight.sh` runs).
+        #[arg(long)]
+        host_only: bool,
+    },
     /// Daemon liveness probe. Hits `GET /healthz` on `listen` (no auth).
     Healthz,
     /// Daemon readiness probe. Hits `GET /readyz` on `listen` (no auth).
@@ -5137,11 +5142,14 @@ async fn main() -> Result<()> {
     }
 
     // `doctor` only reads: it must work when the daemon is down and without a VmManager.
-    if matches!(cli.command, Command::Doctor) {
-        let checks = doctor::gather(&cfg.listen, &cfg.state_dir).await;
+    if let Command::Doctor { host_only } = cli.command {
+        let checks = doctor::gather(&cfg.listen, &cfg.state_dir, host_only).await;
         // Readable text unless JSON was asked for (`-o json` or FLUXCTL_OUTPUT); `-o` defaults to json.
         if output_explicit && cli.output == output::OutputFormat::Json {
-            println!("{}", serde_json::to_string_pretty(&doctor::to_json(&checks))?);
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&doctor::to_json(&checks))?
+            );
         } else {
             print!("{}", doctor::render(&checks));
         }
@@ -5210,7 +5218,7 @@ async fn main() -> Result<()> {
         | Command::Context { .. }
         | Command::Netobs { .. }
         | Command::Agent { .. }
-        | Command::Doctor
+        | Command::Doctor { .. }
         | Command::Quota { token: Some(_), .. } => unreachable!("handled above"),
         Command::Quota { token: None, name } => {
             println!(
