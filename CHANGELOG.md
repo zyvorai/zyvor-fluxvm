@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- **Linux release package is built in an `ubuntu:22.04` container.** The self-hosted runners differ in OS release, and a
+  package linked on a newer glibc (2.38/2.39) failed the workflow's own 22.04 smoke test. The glibc floor is now 2.35
+  whatever runner builds it, and the runner host needs no sudo. Smoke test and release attach run as a separate job.
 - **`apple.host_gpu`: host Metal/MLX inference for offline VZ sandboxes.** Linux guests cannot use GPU passthrough; with
   `host_gpu: true` (sandbox create, session `runtime.host_gpu`, or `fluxctl agent run --host-gpu`) the daemon relays guest
   `http://127.0.0.1:8080/v1` over vsock to `[apple].host_infer_port` (default 8080), installs the cloud-init forwarder, and
