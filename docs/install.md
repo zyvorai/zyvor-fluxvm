@@ -31,7 +31,7 @@ unchanged: read it first with `curl -fsSL https://zyvorai.github.io/zyvor-fluxvm
 | Host | Package | Needs |
 |---|---|---|
 | macOS 14 (Sonoma) or newer, **Apple silicon** | `macos-arm64` | `curl`, `tar`; the `hivex` library (`brew install hivex`: the installer does it when Homebrew is present) |
-| Linux **x86_64** | `linux-x86_64` | `curl`, `tar`; `libhivex0` and `libsystemd0` (Debian/Ubuntu) or `hivex` and `systemd-libs` (Fedora/RHEL); KVM (`/dev/kvm`) to run VMs |
+| Linux **x86_64** | `linux-x86_64` | `curl`, `tar`; `libhivex0` and `libsystemd0` (Debian/Ubuntu) or `hivex` and `systemd-libs` (Fedora/RHEL); KVM (`/dev/kvm`) to run VMs. Built on Ubuntu 22.04, so glibc 2.35 or newer (Ubuntu 22.04+, Debian 12+, Fedora/RHEL 9+) |
 | Linux aarch64 | `linux-aarch64` | as above; cross-compiled on x86_64 by the release workflow and marked experimental, so a failed aarch64 build does not block the x86_64 package or the release |
 | Intel Macs, Windows, other | none | build from source: `cargo build --release -p fluxctl` (see the [README](https://github.com/zyvorai/zyvor-fluxvm#readme)) |
 
@@ -233,6 +233,7 @@ On a Mac, point the source-built daemon at the signed runner from the package:
 | `fluxctl: command not found` | `~/.local/bin` is not on `PATH`. Add `export PATH="$HOME/.local/bin:$PATH"` to your shell profile, or open a new shell. |
 | `dyld: Library not loaded: .../libhivex.dylib` | `brew install hivex` (the installer does it unless `--no-deps`). |
 | `error while loading shared libraries: libhivex.so.0` | `sudo apt-get install libhivex0` (Debian/Ubuntu) or `sudo dnf install hivex` (Fedora). |
+| `version 'GLIBC_2.3x' not found` | The package needs glibc 2.35 or newer; the host is older. Upgrade the OS, or build from source. |
 | `unrecognized subcommand 'agent'` | You installed a release older than the session work. Install a newer one, or build from source. |
 | `skipped fluxctl: ... exists and is not a link` | A real file of yours is in the way. Move it, or use another `--prefix`. |
 | The macOS daemon does not answer on `7788` | `fluxctl service status`; `tail ~/Library/Logs/fluxvm.log` (under Homebrew: `/opt/homebrew/var/log/fluxvm.log`); make sure only one of `brew services` and `fluxctl service install` is in use. |
