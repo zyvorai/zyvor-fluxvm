@@ -29,6 +29,7 @@ mod cloud;
 mod compose;
 mod contexts;
 mod create;
+mod doctor;
 mod fleet_cli;
 mod fleet_client;
 mod launch_agent;
@@ -221,6 +222,10 @@ enum Command {
         #[arg(value_parser = output::parse_vm_ref)]
         id: Option<Uuid>,
     },
+    #[command(next_help_heading = "Basic Commands")]
+    /// Check that this host is ready: daemon, binaries, KVM or the vz runner entitlement, disk,
+    /// and client entries left pointing at a removed Homebrew path. Read-only; exits 1 on a failure.
+    Doctor,
     /// Daemon liveness probe. Hits `GET /healthz` on `listen` (no auth).
     Healthz,
     /// Daemon readiness probe. Hits `GET /readyz` on `listen` (no auth).
@@ -5130,6 +5135,18 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
+    // `doctor` only reads: it must work when the daemon is down and without a VmManager.
+    if matches!(cli.command, Command::Doctor) {
+        let checks = doctor::gather(&cfg.listen, &cfg.state_dir).await;
+        // Readable text unless JSON was asked for (`-o json` or FLUXCTL_OUTPUT); `-o` defaults to json.
+        if output_explicit && cli.output == output::OutputFormat::Json {
+            println!("{}", serde_json::to_string_pretty(&doctor::to_json(&checks))?);
+        } else {
+            print!("{}", doctor::render(&checks));
+        }
+        std::process::exit(doctor::exit_code(&checks));
+    }
+
     // `status` without an id is the host panel (no write access required).
     // With an id it is machinectl-style VM status and needs the manager.
     if let Command::Status { verbose, id: None } = &cli.command {
@@ -5192,6 +5209,7 @@ async fn main() -> Result<()> {
         | Command::Context { .. }
         | Command::Netobs { .. }
         | Command::Agent { .. }
+        | Command::Doctor
         | Command::Quota { token: Some(_), .. } => unreachable!("handled above"),
         Command::Quota { token: None, name } => {
             println!(
