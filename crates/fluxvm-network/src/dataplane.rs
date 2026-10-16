@@ -344,6 +344,15 @@ pub fn policy_fingerprint(policy: &VmNetworkPolicy) -> Result<u64> {
     Ok(hash)
 }
 
+/// The warning for a VM that has no host-visible interface (user NAT, `network.mode = none`):
+/// `Some` only when the operator set `required = true`, since only then is the skip a surprise.
+fn no_edge_warning(required: bool) -> Option<&'static str> {
+    required.then_some(
+        "dataplane.required is set but this VM has no host-visible interface (user NAT or \
+         network.mode=none): network policy, rate limits and flow records are NOT enforced for it",
+    )
+}
+
 pub fn apply_sandbox_policy(
     cfg: &Config,
     id: Uuid,
@@ -409,10 +418,15 @@ pub fn apply_sandbox_policy(
             // VM edge exists but attach fails. network.mode=none / user NAT
             // have no edge — always soft-skip (even when required).
             let Some(iface) = iface else {
-                tracing::debug!(
-                    %id,
-                    "skipping dataplane attach: no host-visible VM interface"
-                );
+                // Fail-closed would be wrong here (there is nothing to attach to), but with
+                // `required = true` the operator believes policy is enforced: say so loudly.
+                match no_edge_warning(dp.required) {
+                    Some(msg) => warn!(%id, "{msg}"),
+                    None => tracing::debug!(
+                        %id,
+                        "skipping dataplane attach: no host-visible VM interface"
+                    ),
+                }
                 return Ok(());
             };
 
@@ -985,6 +999,13 @@ pub fn run_nft(args: &[&str]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_vm_with_no_edge_warns_only_when_the_dataplane_is_required() {
+        assert!(no_edge_warning(false).is_none());
+        let msg = no_edge_warning(true).expect("required => warn");
+        assert!(msg.contains("NOT enforced") && msg.contains("user NAT"));
+    }
 
     #[test]
     fn primary_dataplane_skips_networks_without_a_host_edge() {

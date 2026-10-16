@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- **A VM the dataplane cannot attach to is no longer skipped silently under `required = true`.** A VM on user NAT
+  or `network.mode = none` has no host-visible interface, so the eBPF/Cilium dataplane has nothing to attach to and
+  skips it (failing closed would be wrong: there is no edge). That skip was logged at `debug`, so an operator who set
+  `[sandbox.dataplane] required = true` saw nothing while the VM ran without policy, rate limits or flow records. It
+  is now a `warn` that says so; without `required` it stays at `debug`. Unit-tested (the decision is a pure function);
+  not observed in a live daemon log.
+
 - **CLI rough edges.** `fluxctl --help` now lists `doctor` and prints the exit-code contract: `0` success, `1` an error
   or a failing `doctor` check, `2` a usage error, and for `run`, `sandbox run`, `ssh`, `fleet exec` and
   `agent exec` the command's own status (these pass the guest's code through, so they are deliberately not one
