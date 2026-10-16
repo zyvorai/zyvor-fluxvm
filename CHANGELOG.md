@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- **`fluxctl doctor`: is this host ready?** A read-only report that works with the daemon down. It checks the daemon
+  (`/healthz`, `/readyz`), the binaries on `PATH`, free disk under the state dir and, per platform, `/dev/kvm`
+  (Linux) or the runner's `com.apple.security.virtualization` entitlement and memory headroom (macOS), plus MCP
+  client and LaunchAgent entries that still point at a removed Homebrew `Cellar` path. Each warning or failure
+  prints the command that fixes it; exit code 1 on a failure. Text by default, JSON with `-o json`. Unit-tested
+  (the checks take injected observations) and run on an M4 with the daemon down (exit 1, fix printed) and up
+  (exit 0). **Not run:** the Linux-only `/dev/kvm` check on a Linux host (it compiles only there), and the
+  stale-path warning against a real upgraded Homebrew install (unit-tested only).
+
 - **Fleet-level macOS pool checkout.** The per-Mac macOS pool (`/v1/macos-pool`, two slot-bound guests) could only be
   used by calling one Mac. Each Mac's heartbeat now carries its idle slot count (`apple.macos_pool_idle`, absent when
   the daemon would not say), and `fluxvm-agent central` has `POST /fleet/macos-pool/checkout` (operator): it checks a
