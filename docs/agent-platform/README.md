@@ -3,7 +3,8 @@
 Give an agent a disposable, hardware-isolated machine it can break, with a handle to checkpoint it, roll it back,
 see what it changed and read what it did. FluxVM runs the machine (Apple Virtualization.framework on a Mac; KVM,
 Firecracker, Cloud Hypervisor and QEMU on Linux) and an **agent session** wraps it with a workspace, a network policy
-and a ledger.
+and a ledger. On a Mac, `--host-gpu` / `runtime.host_gpu` exposes the host Metal/MLX OpenAI endpoint inside an offline
+guest ([host-inference.md](../host-inference.md)).
 
 ```text
 Agent (Claude Code, Codex, Gemini CLI, OpenCode, your own)

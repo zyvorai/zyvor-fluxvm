@@ -151,6 +151,10 @@ pub enum AgentCommand {
         max_workspace_bytes: Option<u64>,
         #[arg(long)]
         ttl_seconds: Option<u64>,
+        /// Wire the Mac's Metal/MLX (or llama.cpp) OpenAI endpoint into the guest over vsock.
+        /// See `docs/host-inference.md`.
+        #[arg(long)]
+        host_gpu: bool,
     },
     /// List sessions. REST: `GET /v1/agents/sessions`.
     Ls,
@@ -1106,6 +1110,7 @@ pub async fn run(r: &Remote, cmd: AgentCommand) -> Result<()> {
             max_output_bytes,
             max_workspace_bytes,
             ttl_seconds,
+            host_gpu,
         } => {
             let mut body = create_body(
                 agent,
@@ -1117,6 +1122,7 @@ pub async fn run(r: &Remote, cmd: AgentCommand) -> Result<()> {
                 policy,
                 allow,
                 ttl_seconds,
+                host_gpu,
             );
             add_process_rules(&mut body, &cmd_allow, &cmd_deny);
             add_filesystem(
@@ -2426,6 +2432,7 @@ fn create_body(
     policy: Option<String>,
     allow: Vec<String>,
     ttl_seconds: Option<u64>,
+    host_gpu: bool,
 ) -> Value {
     let mut body = json!({ "agent": agent });
     if repo.is_some() || workspace_path.is_some() {
@@ -2438,7 +2445,7 @@ fn create_body(
         }
         body["workspace"] = ws;
     }
-    if image.is_some() || cpus.is_some() || memory_mb.is_some() {
+    if image.is_some() || cpus.is_some() || memory_mb.is_some() || host_gpu {
         let mut rt = json!({});
         if let Some(i) = image {
             rt["image"] = json!(i);
@@ -2448,6 +2455,9 @@ fn create_body(
         }
         if let Some(m) = memory_mb {
             rt["memory_mb"] = json!(m);
+        }
+        if host_gpu {
+            rt["host_gpu"] = json!(true);
         }
         body["runtime"] = rt;
     }
@@ -2757,6 +2767,7 @@ mod tests {
             Some("developer-safe".into()),
             vec!["example.com".into()],
             Some(600),
+            true,
         );
         assert_eq!(b["agent"], "claude-code");
         assert_eq!(
@@ -2765,6 +2776,7 @@ mod tests {
         );
         assert_eq!(b["runtime"]["image"], "agent-micro");
         assert_eq!(b["runtime"]["cpus"], 2);
+        assert_eq!(b["runtime"]["host_gpu"], true);
         assert!(b["runtime"].get("memory_mb").is_none());
         assert_eq!(b["policy"]["preset"], "developer-safe");
         assert_eq!(b["policy"]["network"]["default"], "deny");
@@ -2780,6 +2792,7 @@ mod tests {
             None,
             vec![],
             None,
+            false,
         );
         assert_eq!(min, json!({"agent": "custom"}));
     }

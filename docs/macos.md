@@ -423,7 +423,12 @@ reaches the host at CID 2). Each entry is `{"port": N, "builtin": "metadata" | "
 
 #### Local model server (host inference over vsock)
 
-To give a guest an OpenAI-compatible endpoint backed by the Mac's GPU, run MLX (`mlx_lm.server --port 8080`) or llama.cpp
+**Preferred:** set `"apple": {"host_gpu": true}` (or sandbox/session `host_gpu` /
+`fluxctl agent run --host-gpu`). The daemon relays guest `http://127.0.0.1:8080/v1`
+to `[apple].host_infer_port` on the Mac and installs the in-guest forwarder. See
+[host-inference.md](host-inference.md).
+
+**Manual (older):** run MLX (`mlx_lm.server --port 8080`) or llama.cpp
 (`llama-server --port 8080`) on the host, bound to `127.0.0.1`, and create the VM with
 `fluxctl create --vsock-service 5100=tcp:127.0.0.1:8080` (no network card needed). Inside the guest, forward a local port to
 the vsock service (CID 2, port 5100) and point the client at it:

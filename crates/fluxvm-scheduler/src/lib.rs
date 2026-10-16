@@ -1391,24 +1391,28 @@ impl VmManager {
     /// attached to the guest but never actually reachable inside it.
     fn effective_cloud_init(req: &CreateVmRequest) -> Option<CloudInitSpec> {
         if req.backend == BackendKind::Vz {
-            // Shares need the in-guest mount, and self-control its relay, so they imply a cloud-init even when the caller gave none.
+            // Shares need the in-guest mount, and self-control / host_gpu their relays, so they imply a
+            // cloud-init even when the caller gave none.
             let self_control = req.apple.as_ref().is_some_and(|a| a.self_control);
+            let host_gpu = req.apple.as_ref().is_some_and(|a| a.host_gpu);
             let ci = match (
                 &req.cloud_init,
-                req.shared_folders.is_empty() && !self_control,
+                req.shared_folders.is_empty() && !self_control && !host_gpu,
             ) {
                 (None, true) => return None,
                 (ci, _) => ci.clone().unwrap_or_default(),
             };
-            let ci = fluxvm_apple::with_shared_folder_mounts(
+            let mut ci = fluxvm_apple::with_shared_folder_mounts(
                 fluxvm_apple::with_guest_reporting(ci),
                 &req.shared_folders,
             );
-            return Some(if self_control {
-                fluxvm_apple::with_self_control_forwarder(ci)
-            } else {
-                ci
-            });
+            if self_control {
+                ci = fluxvm_apple::with_self_control_forwarder(ci);
+            }
+            if host_gpu {
+                ci = fluxvm_apple::with_host_gpu_forwarder(ci);
+            }
+            return Some(ci);
         }
         let vnet = req.network.vnet().is_some();
         if req.shared_folders.is_empty() && !vnet {
@@ -2466,6 +2470,11 @@ impl VmManager {
         // assumes a concrete backend and must never see Auto.
         req.backend = resolve_backend(&req, &self.cfg);
         if req.backend == BackendKind::Vz {
+            if let Some(apple) = req.apple.as_mut()
+                && apple.host_gpu
+            {
+                fluxvm_apple::wire_host_gpu(apple, self.cfg.apple.host_infer_port)?;
+            }
             self.resolve_macos_ipsw(&mut req).await?;
             // Installs the live host's macOS version once, so a refusal names the real OS requirement.
             fluxvm_apple::prime_host_capabilities().await;

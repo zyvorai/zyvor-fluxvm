@@ -13,6 +13,7 @@ mod capability;
 mod control;
 pub mod display;
 mod host_caps;
+pub mod host_infer;
 pub mod ipsw;
 pub mod macos_install;
 mod runner;
@@ -30,21 +31,22 @@ pub use attest::{Attestation, verify_attestation, verify_attestation_hex};
 pub use capability::{
     CAPABILITIES, Capability, CapabilityStatus, RUNNER_MIN_MACOS, capability_report,
     current_host_capabilities, macos_major, set_host_capabilities, validate_disk, validate_request,
-    validate_request_with_host, with_egress_forwarder, with_guest_reporting,
-    with_self_control_forwarder, with_shared_folder_mounts,
+    validate_request_with_host, wire_host_gpu, with_egress_forwarder, with_guest_reporting,
+    with_host_gpu_forwarder, with_self_control_forwarder, with_shared_folder_mounts,
 };
 pub use control::{ControlReply, call as control_call, call_with as control_call_with};
 pub use display::{
     DISPLAY_RESIZE_NOTE, display_resize, display_resize_reply, display_resize_request,
 };
 pub use host_caps::{AppleHostCapabilities, host_capabilities, prime_host_capabilities};
+pub use host_infer::{HostInferStatus, probe as probe_host_infer};
 pub use ipsw::{IpswInfo, latest_ipsw};
 pub use runner::{
-    EGRESS_PORT, ForwardConfig, MACOS_TEMPLATE_FILES, OneShotVm, RunnerConfig, SELF_CONTROL_PORT,
-    SNAPSHOT_FILES, STATE_FILE, ShareConfig, adopt_macos_template, clone_counters, clone_file,
-    clone_file_reported, console_port_socket, export_checkpoint, find_runner, ip_file,
-    oci_meta_dir, prepare_fork_child, read_guest_ip, release_mac, self_control_socket_path,
-    set_self_control_socket, snapshot_dir, write_oci_meta_as,
+    EGRESS_PORT, ForwardConfig, HOST_INFER_PORT, MACOS_TEMPLATE_FILES, OneShotVm, RunnerConfig,
+    SELF_CONTROL_PORT, SNAPSHOT_FILES, STATE_FILE, ShareConfig, adopt_macos_template,
+    clone_counters, clone_file, clone_file_reported, console_port_socket, export_checkpoint,
+    find_runner, ip_file, oci_meta_dir, prepare_fork_child, read_guest_ip, release_mac,
+    self_control_socket_path, set_self_control_socket, snapshot_dir, write_oci_meta_as,
 };
 pub use usage::{
     RunnerUsage, VmUsage, attribute_services, is_vz_service_path, mach_ticks_to_seconds,

@@ -275,6 +275,7 @@ oci_cmdline = "console=hvc0 loglevel=4 panic=-1"
 oci_builder_memory_mib = 1024
 oci_warm_slots = 0                   # pre-booted VMs per size; see "Warm pool"
 oci_warm_sizes = ["1x512"]
+host_infer_port = 8080               # host MLX/llama.cpp for apple.host_gpu; see host-inference.md
 serial_log_max_mib = 16              # console.log rotates to console.log.1 past this
 
 [[apple.oci_registry_credentials]]

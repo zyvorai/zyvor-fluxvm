@@ -178,6 +178,14 @@ pub struct AppleConfig {
     pub oci_warm_sizes: Vec<String>,
     /// A Linux guest's `console.log` moves to `console.log.1` (replacing it) past this size.
     pub serial_log_max_mib: u64,
+    /// Loopback TCP port of the host OpenAI-compatible model server (MLX `mlx_lm.server`, llama.cpp
+    /// `llama-server`, or `fluxctl infer serve --stand-in`). Used when a VM has `apple.host_gpu: true`.
+    #[serde(default = "default_host_infer_port")]
+    pub host_infer_port: u16,
+}
+
+fn default_host_infer_port() -> u16 {
+    8080
 }
 
 impl Default for AppleConfig {
@@ -191,6 +199,7 @@ impl Default for AppleConfig {
             oci_warm_slots: 0,
             oci_warm_sizes: vec!["1x512".into()],
             serial_log_max_mib: 16,
+            host_infer_port: default_host_infer_port(),
         }
     }
 }

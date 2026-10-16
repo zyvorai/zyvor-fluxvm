@@ -65,6 +65,11 @@ If you remember one thing: **`process` rules stop accidents, not adversaries.** 
 fluxctl agent run claude-code \
   --repo https://github.com/acme/app.git \
   --policy developer-safe --ttl-seconds 3600
+
+# offline + host Metal/MLX (or llama.cpp / stand-in) inside the guest:
+# fluxctl infer serve --stand-in   # or mlx_lm.server --port 8080
+# fluxctl agent run --policy offline --host-gpu
+# see docs/host-inference.md
 ```
 
 The command prints the session record. Note `id`, `capabilities` (what this backend can do: `snapshot`, `fork`,

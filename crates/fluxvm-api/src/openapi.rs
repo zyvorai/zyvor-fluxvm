@@ -354,6 +354,12 @@ fn ops() -> Vec<Op> {
         ),
         op(
             "get",
+            "/v1/host/infer",
+            "Host OpenAI-compatible model server for apple.host_gpu (reachable, /v1/models)",
+            HOST,
+        ),
+        op(
+            "get",
             "/v1/host/mdev",
             "Mediated device (vGPU) parents with their types, free instances, framebuffer and MIG geometry, and the instances that exist",
             HOST,

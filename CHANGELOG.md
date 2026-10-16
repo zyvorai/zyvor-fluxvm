@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- **`apple.host_gpu`: host Metal/MLX inference for offline VZ sandboxes.** Linux guests cannot use GPU passthrough; with
+  `host_gpu: true` (sandbox create, session `runtime.host_gpu`, or `fluxctl agent run --host-gpu`) the daemon relays guest
+  `http://127.0.0.1:8080/v1` over vsock to `[apple].host_infer_port` (default 8080), installs the cloud-init forwarder, and
+  injects `OPENAI_BASE_URL` on exec. `GET /v1/host/infer` / `fluxctl infer status` probe the host server; `fluxctl infer serve
+  --stand-in` is a stub for path tests. Docs: [host-inference.md](docs/host-inference.md). Unit-tested (wire + cloud-init);
+  live path: `examples/agent-sandbox-demo/local-model.sh`.
+
 ## 0.4.9 (2026-10-16)
 
 - **`fluxctl vm rename|clone|fork`: the VM verbs under one noun.** `rename-vm`, `clone-vm` and `fork-vm` read differently from

@@ -444,6 +444,57 @@ pub fn loopback_tcp_port(target: &str) -> Result<u16> {
     }
 }
 
+/// `apple.host_gpu` reserves vsock port [`crate::runner::HOST_INFER_PORT`]; a conflicting entry is refused.
+fn validate_host_gpu_vsock(services: &[fluxvm_core::model::AppleVsockService]) -> Result<()> {
+    let port = crate::runner::HOST_INFER_PORT;
+    if let Some(s) = services.iter().find(|s| s.port == port) {
+        match &s.tcp {
+            Some(_) => Ok(()),
+            None => bail!(
+                "apple.host_gpu needs vsock port {port} for the host inference relay; remove the conflicting vsock_services entry or drop host_gpu"
+            ),
+        }
+    } else {
+        Ok(())
+    }
+}
+
+/// Ensure `apple.vsock_services` relays guest vsock [`crate::runner::HOST_INFER_PORT`] to
+/// `127.0.0.1:{host_port}` on this Mac. Idempotent when the entry already matches.
+pub fn wire_host_gpu(apple: &mut fluxvm_core::model::AppleSpec, host_port: u16) -> Result<()> {
+    if !(1024..=65535).contains(&host_port) {
+        bail!("apple host_infer_port must be 1024..=65535 (got {host_port})");
+    }
+    apple.host_gpu = true;
+    let port = crate::runner::HOST_INFER_PORT;
+    let target = format!("127.0.0.1:{host_port}");
+    if let Some(s) = apple.vsock_services.iter_mut().find(|s| s.port == port) {
+        match (&s.socket, &s.builtin, &s.tcp) {
+            (None, None, Some(t)) if t == &target || t == &format!("localhost:{host_port}") => {
+                s.tcp = Some(target);
+            }
+            (None, None, Some(t)) => {
+                bail!(
+                    "apple.host_gpu needs vsock port {port} → {target}, but vsock_services already has {t:?}"
+                );
+            }
+            _ => {
+                bail!(
+                    "apple.host_gpu needs vsock port {port} for the host inference relay; remove the conflicting vsock_services entry"
+                );
+            }
+        }
+    } else {
+        apple.vsock_services.push(fluxvm_core::model::AppleVsockService {
+            port,
+            socket: None,
+            builtin: None,
+            tcp: Some(target),
+        });
+    }
+    Ok(())
+}
+
 fn validate_vsock_services(services: &[fluxvm_core::model::AppleVsockService]) -> Result<()> {
     if services.len() > 16 {
         bail!("apple.vsock_services allows at most 16 entries");
@@ -699,8 +750,19 @@ fn validate_static(req: &CreateVmRequest) -> Result<()> {
             "apple.self_control needs a Linux guest (the in-guest relay is installed by cloud-init)"
         );
     }
+    if let Some(apple) = &req.apple
+        && apple.host_gpu
+        && matches!(apple.guest_os, fluxvm_core::model::AppleGuest::Macos)
+    {
+        bail!(
+            "apple.host_gpu needs a Linux guest (the in-guest inference relay is installed by cloud-init)"
+        );
+    }
     if let Some(apple) = &req.apple {
         validate_vsock_services(&apple.vsock_services)?;
+        if apple.host_gpu {
+            validate_host_gpu_vsock(&apple.vsock_services)?;
+        }
         if apple.usb_controllers > 4 {
             bail!("apple.usb_controllers must be 0-4");
         }
@@ -1216,6 +1278,28 @@ pub fn with_self_control_forwarder(mut ci: CloudInitSpec) -> CloudInitSpec {
     ci
 }
 
+/// For `apple.host_gpu`: guest `http://127.0.0.1:8080` reaches the host OpenAI-compatible model server over vsock.
+pub fn with_host_gpu_forwarder(mut ci: CloudInitSpec) -> CloudInitSpec {
+    let port = crate::runner::HOST_INFER_PORT;
+    push_vsock_forwarder(
+        &mut ci,
+        "fluxvm-infer",
+        "Forward to the FluxVM host's inference server (Metal/MLX)",
+        port,
+    );
+    let base = format!("http://127.0.0.1:{port}/v1");
+    ci.write_files.push(CloudInitFile {
+        path: "/etc/profile.d/fluxvm-infer.sh".into(),
+        content: format!("export OPENAI_BASE_URL={base}\nexport FLUXVM_INFER_URL={base}\n"),
+        permissions: Some("0644".into()),
+    });
+    // Append so an egress-proxy `/etc/environment` written earlier is preserved.
+    ci.runcmd.push(format!(
+        "grep -q '^OPENAI_BASE_URL=' /etc/environment 2>/dev/null || printf 'OPENAI_BASE_URL={base}\\nFLUXVM_INFER_URL={base}\\n' >> /etc/environment"
+    ));
+    ci
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1370,6 +1454,39 @@ mod tests {
             ci.runcmd
                 .iter()
                 .any(|c| c.contains("enable --now fluxvm-self.service"))
+        );
+    }
+
+    #[test]
+    fn host_gpu_is_for_linux_guests_and_wires_vsock_plus_relay() {
+        assert!(validate_request(&req(r#""apple":{"host_gpu":true}"#)).is_ok());
+        assert!(
+            validate_request(&req(r#""apple":{"host_gpu":true,"guest_os":"macos"}"#)).is_err()
+        );
+        let mut apple = fluxvm_core::model::AppleSpec {
+            host_gpu: true,
+            ..Default::default()
+        };
+        wire_host_gpu(&mut apple, 8080).unwrap();
+        assert_eq!(apple.vsock_services.len(), 1);
+        assert_eq!(apple.vsock_services[0].port, 8080);
+        assert_eq!(
+            apple.vsock_services[0].tcp.as_deref(),
+            Some("127.0.0.1:8080")
+        );
+        wire_host_gpu(&mut apple, 8080).unwrap();
+        assert_eq!(apple.vsock_services.len(), 1);
+        let ci = with_host_gpu_forwarder(CloudInitSpec::default());
+        assert!(
+            ci.write_files
+                .iter()
+                .any(|f| f.path == "/usr/local/sbin/fluxvm-infer")
+        );
+        assert!(
+            ci.write_files
+                .iter()
+                .any(|f| f.path == "/etc/profile.d/fluxvm-infer.sh"
+                    && f.content.contains("OPENAI_BASE_URL=http://127.0.0.1:8080/v1"))
         );
     }
 
