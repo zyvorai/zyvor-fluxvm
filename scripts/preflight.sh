@@ -1,51 +1,49 @@
 #!/usr/bin/env bash
 # Copyright 2026 Zyvor AI Labs · https://zyvor.dev
 # SPDX-License-Identifier: Apache-2.0
+#
+# Is this host ready for FluxVM? With `fluxctl` on PATH (or built in ./target) this runs `fluxctl doctor --host-only`, so the
+# script and the command cannot drift apart. Without it (a fresh machine, before install) the checks below run instead.
+#   scripts/preflight.sh [--native-kvm]
 set -euo pipefail
 
-missing=0
 profile="${1:-all}"
 case "$profile" in
-  all)
-    required=(qemu-system-x86_64 qemu-img cloud-localds ip)
-    optional=(cloud-hypervisor firecracker fluxctl fluxvm-hypervisor bpftool tc)
-    ;;
-  --native-kvm)
-    required=(fluxctl fluxvm-hypervisor cp ip)
-    optional=(debugfs bpftool tc)
-    ;;
+  all|--native-kvm) ;;
   *) echo "usage: $0 [--native-kvm]" >&2; exit 2 ;;
 esac
-for cmd in "${required[@]}"; do
-  if command -v "$cmd" >/dev/null 2>&1; then
-    printf '%-24s %s\n' "$cmd" "OK ($(command -v "$cmd"))"
-  else
-    printf '%-24s %s\n' "$cmd" "MISSING"
-    missing=1
-  fi
+
+missing=0
+here="$(cd "$(dirname "$0")/.." && pwd)"
+fluxctl="$(command -v fluxctl 2>/dev/null || true)"
+for cand in "$here/target/release/fluxctl" "$here/target/debug/fluxctl"; do
+  [[ -z "$fluxctl" && -x "$cand" ]] && fluxctl="$cand"
 done
 
-for cmd in "${optional[@]}"; do
-  if command -v "$cmd" >/dev/null 2>&1; then
-    printf '%-24s %s\n' "$cmd" "OK ($(command -v "$cmd"))"
+check() { # name required|optional
+  if command -v "$1" >/dev/null 2>&1; then
+    printf '%-24s %s\n' "$1" "OK ($(command -v "$1"))"
+  elif [[ "$2" == required ]]; then
+    printf '%-24s %s\n' "$1" "MISSING"; missing=1
   else
-    printf '%-24s %s\n' "$cmd" "optional/not installed"
+    printf '%-24s %s\n' "$1" "optional/not installed"
   fi
-done
+}
 
-# tap+netns networking starts one dnsmasq (DHCP for the guest) per VM namespace.
-# Not fatal: VMs on other network modes do not need it.
-if command -v dnsmasq >/dev/null 2>&1; then
-  printf '%-24s %s\n' "dnsmasq" "OK ($(command -v dnsmasq))"
+# A `fluxctl` too old to know `doctor --host-only` falls through to the plain checks.
+if [[ -n "$fluxctl" ]] && "$fluxctl" doctor --help 2>/dev/null | grep -q -- --host-only; then
+  "$fluxctl" doctor --host-only || missing=1
 else
-  printf '%-24s %s\n' "dnsmasq" "not installed (needed for tap+netns guest DHCP: apt install dnsmasq-base)"
+  [[ -n "$fluxctl" ]] && echo "note: $fluxctl has no 'doctor --host-only'; running the basic checks" >&2
+  for c in qemu-system-x86_64 qemu-img cloud-localds ip; do check "$c" required; done
+  for c in cloud-hypervisor firecracker fluxctl fluxvm-hypervisor bpftool tc dnsmasq; do check "$c" optional; done
+  if [[ -e /dev/kvm ]]; then echo "/dev/kvm                 OK"; else echo "/dev/kvm                 MISSING"; missing=1; fi
 fi
 
-if [[ -e /dev/kvm ]]; then
-  echo "/dev/kvm                 OK"
-else
-  echo "/dev/kvm                 MISSING"
-  missing=1
+# The native-KVM profile needs its own binaries on top of the host checks.
+if [[ "$profile" == --native-kvm ]]; then
+  for c in fluxctl fluxvm-hypervisor cp ip; do check "$c" required; done
+  for c in debugfs bpftool tc; do check "$c" optional; done
 fi
 
 exit "$missing"
