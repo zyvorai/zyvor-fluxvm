@@ -491,6 +491,10 @@ pub struct DataplaneConfig {
     /// If true, a dataplane load/attach failure fails VM creation/start.
     /// If false, FluxVM logs the failure and falls back to nftables.
     pub required: bool,
+    /// If true, a VM that has no host-visible interface (user NAT, `network.mode = none`) is refused at create instead of
+    /// running with no network policy, rate limit or flow records. Off by default: `required` is on by default and such VMs
+    /// have always been let through, so turning this on is an explicit choice. Applies to the native dataplane modes only.
+    pub require_edge: bool,
     /// Default action when no CIDR entry matches. `true` preserves the
     /// pre-eBPF allow-all behavior until an operator opts into deny-by-default.
     pub default_allow: bool,
@@ -518,6 +522,7 @@ impl Default for DataplaneConfig {
             bpf_object: "/usr/lib/fluxvm/bpf/fluxvm_tc.bpf.o".into(),
             pin_root: "/sys/fs/bpf/fluxvm".into(),
             required: true,
+            require_edge: false,
             default_allow: true,
             allow_cidrs: Vec::new(),
             allow_ports: Vec::new(),

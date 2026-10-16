@@ -7,7 +7,7 @@
 //! `cilium` keeps Cilium as the node/Kubernetes dataplane while FluxVM owns
 //! only the VM-edge TC program and its private `/sys/fs/bpf/fluxvm` pins.
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use fluxvm_core::config::{Config, DataplaneMode};
 use serde::{Deserialize, Serialize};
 use std::{fs, io::Write, net::IpAddr, path::PathBuf, process::Command};
@@ -344,13 +344,33 @@ pub fn policy_fingerprint(policy: &VmNetworkPolicy) -> Result<u64> {
     Ok(hash)
 }
 
-/// The warning for a VM that has no host-visible interface (user NAT, `network.mode = none`):
-/// `Some` only when the operator set `required = true`, since only then is the skip a surprise.
-fn no_edge_warning(required: bool) -> Option<&'static str> {
-    required.then_some(
-        "dataplane.required is set but this VM has no host-visible interface (user NAT or \
-         network.mode=none): network policy, rate limits and flow records are NOT enforced for it",
-    )
+/// What to do with a VM that has no host-visible interface (user NAT, `network.mode = none`), so there is nothing to attach to.
+#[derive(Debug, PartialEq, Eq)]
+enum NoEdge {
+    /// `require_edge = true`: refuse, since the operator asked for no VM without enforcement.
+    Refuse(&'static str),
+    /// `required = true` only: let it run, but say loudly that nothing is enforced for it.
+    Warn(&'static str),
+    /// Nothing was promised: skip quietly.
+    Skip,
+}
+
+fn no_edge_outcome(required: bool, require_edge: bool) -> NoEdge {
+    if require_edge {
+        NoEdge::Refuse(
+            "dataplane.require_edge is set but this VM has no host-visible interface (user NAT or \
+             network.mode=none), so network policy, rate limits and flow records could not be enforced for it: \
+             give it a tap/bridge network, or unset [sandbox.dataplane] require_edge",
+        )
+    } else if required {
+        NoEdge::Warn(
+            "dataplane.required is set but this VM has no host-visible interface (user NAT or \
+             network.mode=none): network policy, rate limits and flow records are NOT enforced for it \
+             (set [sandbox.dataplane] require_edge = true to refuse such VMs)",
+        )
+    } else {
+        NoEdge::Skip
+    }
 }
 
 pub fn apply_sandbox_policy(
@@ -418,11 +438,12 @@ pub fn apply_sandbox_policy(
             // VM edge exists but attach fails. network.mode=none / user NAT
             // have no edge — always soft-skip (even when required).
             let Some(iface) = iface else {
-                // Fail-closed would be wrong here (there is nothing to attach to), but with
-                // `required = true` the operator believes policy is enforced: say so loudly.
-                match no_edge_warning(dp.required) {
-                    Some(msg) => warn!(%id, "{msg}"),
-                    None => tracing::debug!(
+                // `required` alone keeps its GA meaning (fail closed when an edge exists but attach fails) and
+                // only warns here; `require_edge` is the opt-in that refuses.
+                match no_edge_outcome(dp.required, dp.require_edge) {
+                    NoEdge::Refuse(msg) => bail!("{msg}"),
+                    NoEdge::Warn(msg) => warn!(%id, "{msg}"),
+                    NoEdge::Skip => tracing::debug!(
                         %id,
                         "skipping dataplane attach: no host-visible VM interface"
                     ),
@@ -1001,10 +1022,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_vm_with_no_edge_warns_only_when_the_dataplane_is_required() {
-        assert!(no_edge_warning(false).is_none());
-        let msg = no_edge_warning(true).expect("required => warn");
-        assert!(msg.contains("NOT enforced") && msg.contains("user NAT"));
+    fn a_vm_with_no_edge_is_skipped_warned_about_or_refused_by_the_two_switches() {
+        assert_eq!(no_edge_outcome(false, false), NoEdge::Skip);
+        match no_edge_outcome(true, false) {
+            NoEdge::Warn(m) => assert!(m.contains("NOT enforced") && m.contains("require_edge")),
+            other => panic!("required alone only warns: {other:?}"),
+        }
+        // require_edge refuses whether or not `required` is on.
+        for required in [true, false] {
+            match no_edge_outcome(required, true) {
+                NoEdge::Refuse(m) => assert!(m.contains("user NAT") && m.contains("unset")),
+                other => panic!("require_edge refuses: {other:?}"),
+            }
+        }
     }
 
     #[test]
@@ -1015,6 +1045,13 @@ mod tests {
             ..Config::default()
         };
         cfg.sandbox.dataplane.bpf_object = tmp.path().join("missing.bpf.o");
+        apply_sandbox_policy(&cfg, Uuid::new_v4(), None, None, &[], None).unwrap();
+        // The same VM is refused once the operator asks for no VM without enforcement.
+        cfg.sandbox.dataplane.require_edge = true;
+        let err = apply_sandbox_policy(&cfg, Uuid::new_v4(), None, None, &[], None).unwrap_err();
+        assert!(format!("{err:#}").contains("require_edge"), "{err:#}");
+        // An interface-less VM on the nftables mode is untouched by it.
+        cfg.sandbox.dataplane.mode = DataplaneMode::Legacy;
         apply_sandbox_policy(&cfg, Uuid::new_v4(), None, None, &[], None).unwrap();
     }
 
