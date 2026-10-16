@@ -301,12 +301,22 @@ case ":$PATH:" in
     printf '\nAdd it to your PATH:\n  export PATH="%s:$PATH"      # put this line in ~/.zshrc or ~/.bashrc\n' "$BIN" ;;
 esac
 
-cat <<'EONEXT'
+# Tab completion is one line per shell; offer the one for the shell this was run from.
+case "${SHELL##*/}" in
+  zsh)  COMPLETE='mkdir -p ~/.zfunc && fluxctl completions zsh > ~/.zfunc/_fluxctl   # and put fpath+=~/.zfunc before compinit in ~/.zshrc' ;;
+  bash) COMPLETE='mkdir -p ~/.local/share/bash-completion/completions && fluxctl completions bash > ~/.local/share/bash-completion/completions/fluxctl' ;;
+  fish) COMPLETE='mkdir -p ~/.config/fish/completions && fluxctl completions fish > ~/.config/fish/completions/fluxctl.fish' ;;
+  *)    COMPLETE='fluxctl completions bash|zsh|fish   # prints the script for your shell' ;;
+esac
+
+cat <<EONEXT
 
 Next:
+  fluxctl doctor                                      # is this host ready? (every failure prints its fix)
   fluxctl run                                         # a throwaway VM and a shell
   fluxctl mcp install claude-code --allow-write       # let an agent drive it
   fluxctl agent run --policy developer-safe           # an agent session (releases that include it)
+Tab completion:  $COMPLETE
 Upgrade: run the same command again. Pin or roll back: --version X. Remove: --uninstall.
 Docs: https://zyvorai.github.io/zyvor-fluxvm/docs/install
 EONEXT

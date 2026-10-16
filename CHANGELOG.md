@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- **The installer ends with `fluxctl doctor` and a one-line tab-completion command for your shell.** `fluxctl completions`
+  already printed bash, zsh and fish scripts, but nothing told anyone. `scripts/install.sh` (and its copy served from the
+  site) now lists `fluxctl doctor` first under "Next" and prints the exact completion line for `$SHELL` (creating the
+  directory it writes into); `docs/install-macos.md` has the same in a short section. The Homebrew formula lives in the tap
+  and is not changed here (a `generate_completions_from_executable` line would install them). Run: the message block for
+  zsh, bash, fish and an unknown shell, `bash -n`; not run: a full install.
+
 - **`fluxctl doctor` no longer fails a healthy Linux host because of who runs it.** Run on a Linux host for the first time,
   as a user outside the `kvm` group, it exited 1 with `kvm FAIL` while the root daemon was healthy and its VMs were running.
   An unopenable `/dev/kvm` is now a warning while the daemon answers (it runs as another user), and stays a failure when
