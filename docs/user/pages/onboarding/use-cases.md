@@ -15,7 +15,7 @@ FluxVM is a Rust-native VM control plane: create and manage isolated
 virtual machines backed by QEMU/KVM, Cloud Hypervisor, or Firecracker.
 Optional `ttl_seconds` supports disposable / short-lived patterns. Every use
 case below maps directly onto what's implemented today — see the
-[technical docs](/docs/fluxvm) or the project's
+[technical docs](../../../index.md) or the project's
 [README](https://github.com/zyvorai/fluxvm#what-is-implemented) for the
 full feature list.
 

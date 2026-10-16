@@ -9,7 +9,7 @@ generation **6** (Service Fabric **v6**).
 **Prerequisites:** [Getting started](../../user/getting-started.md), eBPF
 dataplane enabled, bridged/tap VM or north-south uplink configured.
 
-Operator reference: [service-fabric.md](../service-fabric.md) ·
+Operator reference: [service-fabric.md](../../service-fabric.md) ·
 Fabric fan-out: [ebpf-service-fabric.md](https://github.com/zyvorai/fabric/blob/main/docs/ebpf-service-fabric.md).
 
 ## What you will learn
@@ -83,6 +83,6 @@ curl -sf -X DELETE "${AUTH[@]}" "$API/v1/network/services/$NAME"
 
 ## Next
 
-- [service-fabric-phase6.md](../service-fabric-phase6.md) — shipped vs remaining
-- [Network policy tutorials](../tutorials/network-policy/README.md) — orthogonal per-VM edge
+- [service-fabric-phase6.md](../../service-fabric-phase6.md) — shipped vs remaining
+- [Network policy tutorials](../network-policy/README.md) — orthogonal per-VM edge
 - Fabric: Edge Dataplane → **Services** + `zyvorctl dataplane service …`

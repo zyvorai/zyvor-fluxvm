@@ -17,7 +17,7 @@ kubectl -n fluxvm-system get pods -o wide
 ```
 
 If the DaemonSet is missing, deploy `deploy/k8s/` first
-([deploy/k8s/README.md](../../../deploy/k8s/README.md)).
+([deploy/k8s/README.md](https://github.com/zyvorai/zyvor-fluxvm/blob/main/deploy/k8s/README.md)).
 
 ## 2. Apply MicroVM CRDs
 

@@ -15,8 +15,8 @@ privileged surface stays the existing `fluxvm-kube` DaemonSet that already runs
 | **Binary** | `fluxvm-microvm` |
 | **API group** | `microvm.fluxvm.zyvor.io` / `v1alpha1` |
 | **Controllers** | Namespace `fluxvm-system` |
-| **Manifests** | [`deploy/k8s/microvm/`](../deploy/k8s/microvm/) |
-| **Examples** | [`examples/microvm/`](../examples/microvm/) |
+| **Manifests** | [`deploy/k8s/microvm/`](https://github.com/zyvorai/zyvor-fluxvm/tree/main/deploy/k8s/microvm) |
+| **Examples** | [`examples/microvm/`](https://github.com/zyvorai/zyvor-fluxvm/tree/main/examples/microvm) |
 | **Tutorials** | [`docs/tutorials/microvm/`](tutorials/microvm/README.md) |
 
 ## Vs DisposableVm and KubeVirt
@@ -92,7 +92,7 @@ kubectl label node <node> ragnarok.io/fluxvm-capable=true
 kubectl apply -f deploy/k8s/daemonset.yaml
 ```
 
-See [deploy/k8s/README.md](../deploy/k8s/README.md) and
+See [deploy/k8s/README.md](https://github.com/zyvorai/zyvor-fluxvm/blob/main/deploy/k8s/README.md) and
 [user/kubernetes-deployment.md](user/kubernetes-deployment.md).
 
 **2. Then MicroVM controllers:**
@@ -304,6 +304,6 @@ python3 scripts/test-microvm-policy.py
 | [05 — GuestImage](tutorials/microvm/05-guestimage.md) | Host-file Ready + catalog name |
 
 Also: [kubernetes-deployment.md](user/kubernetes-deployment.md) ·
-[deploy/k8s/microvm/README.md](../deploy/k8s/microvm/README.md) ·
+[deploy/k8s/microvm/README.md](https://github.com/zyvorai/zyvor-fluxvm/blob/main/deploy/k8s/microvm/README.md) ·
 [benchmarks/README.md](benchmarks/README.md) ·
 [PRODUCTION.md](PRODUCTION.md).

@@ -2,7 +2,17 @@
 
 Every feature area and every document, in one place.
 
-[Back to README](../README.md)
+[Back to README](https://github.com/zyvorai/zyvor-fluxvm/blob/main/README.md)
+
+## Start here
+
+| You have | Go to |
+|---|---|
+| A Mac with Apple silicon | [install-macos.md](install-macos.md) (Homebrew) or [install.md](install.md) (`curl \| bash`, no sudo), then [macos.md](macos.md) |
+| A Linux x86_64 host with KVM | [install.md](install.md), then [getting-started.md](getting-started.md) |
+| A Kubernetes cluster | [kubernetes-operator.md](kubernetes-operator.md) |
+| Something that is not working | [troubleshooting.md](troubleshooting.md) |
+| A job in mind (CI runners, agent sandboxes, per-branch environments) | [Use cases](#use-cases) below |
 
 ## Feature highlights
 
@@ -14,8 +24,8 @@ Every feature area and every document, in one place.
 | **Service Fabric** | Node-local Maglev VIP load balancing: dual-stack NAT/DSR/SNAT, health-aware routing, per-service EDT, flow export | [docs/service-fabric.md](service-fabric.md) |
 | **Images** | virt-builder-style `build-image` (guestkit-based, never libguestfs), per-distro package install, Ed25519-signed catalog with REST CRUD, Windows golden-image customization | [docs/build-image-tutorials.md](build-image-tutorials.md) · [docs/operations.md](operations.md#image-catalog--signing) · [docs/windows-golden.md](windows-golden.md) |
 | **Operations** | Day-2 VM verbs: restart, rename, labels + bulk selectors, clone, QEMU data disks (hot-add, live resize), serial console, live backups, scheduled snapshots with retention, VM templates, lifecycle events (SSE), remote `fluxctl` contexts, OpenAPI; cgroup v2 limits, freeze/thaw and PSI; warm VM pools; Firecracker jailer; LVM thin / NBD / Ceph RBD; admission limits; bearer-token auth/RBAC; incident bundles with an opt-in memory dump ([diagnostics-bundle.md](diagnostics-bundle.md)) | [docs/operations.md](operations.md) · [docs/api.md](api.md#auth--rbac) |
-| **Native KVM (no QEMU)** | In-tree KVM engine for Linux guests: SMP, pause/snapshot for every vCPU, restore preflight (no silent cold boot), atomic snapshot writes, raw-ext4 direct-kernel boot, static musl guest agent, and a golden Cloud-init template with a baked systemd-networkd config | [docs/native-kvm-no-qemu.md](native-kvm-no-qemu.md) · [crate README](../crates/fluxvm-hypervisor/README.md) |
-| **Agent sandboxes** | Egress **HTTP ACL** (method/host/path rules, deny wins, path normalisation; HTTPS via opt-in interception) · guest file **change-set** (`baseline` / `changes`) · rootless **procbox** tier with profiles, a ptrace `learn` mode and a real-discard `dry-run` · stdlib-only **Python** and **Go** SDKs and a dependency-free **TypeScript** SDK | [docs/http-acl.md](http-acl.md) · [docs/sandbox-changes.md](sandbox-changes.md) · [docs/procbox.md](procbox.md) · [`python/`](../python/README.md) · [`go/`](../go/README.md) · [`typescript/`](../typescript/README.md) |
+| **Native KVM (no QEMU)** | In-tree KVM engine for Linux guests: SMP, pause/snapshot for every vCPU, restore preflight (no silent cold boot), atomic snapshot writes, raw-ext4 direct-kernel boot, static musl guest agent, and a golden Cloud-init template with a baked systemd-networkd config | [docs/native-kvm-no-qemu.md](native-kvm-no-qemu.md) · [crate README](https://github.com/zyvorai/zyvor-fluxvm/blob/main/crates/fluxvm-hypervisor/README.md) |
+| **Agent sandboxes** | Egress **HTTP ACL** (method/host/path rules, deny wins, path normalisation; HTTPS via opt-in interception) · guest file **change-set** (`baseline` / `changes`) · rootless **procbox** tier with profiles, a ptrace `learn` mode and a real-discard `dry-run` · stdlib-only **Python** and **Go** SDKs and a dependency-free **TypeScript** SDK | [docs/http-acl.md](http-acl.md) · [docs/sandbox-changes.md](sandbox-changes.md) · [docs/procbox.md](procbox.md) · [`python/`](https://github.com/zyvorai/zyvor-fluxvm/blob/main/python/README.md) · [`go/`](https://github.com/zyvorai/zyvor-fluxvm/blob/main/go/README.md) · [`typescript/`](https://github.com/zyvorai/zyvor-fluxvm/blob/main/typescript/README.md) |
 | **Native macOS (`vz`)** | Daemon, API and `fluxctl` on Apple silicon; Linux and macOS guests on Virtualization.framework; agent sandboxes with a warm pool, offline and allow-listed egress; **container sandboxes**: an OCI image in its own lightweight VM (`fluxctl sandbox run IMAGE -- CMD`); a **Mac cloud** of Mac minis and Mac Studios behind one fleet registry | [docs/macos.md](macos.md) · [docs/mac-cloud.md](mac-cloud.md) · [docs/macos-sandboxes.md](macos-sandboxes.md) · [docs/oci-sandboxes.md](oci-sandboxes.md) · [docs/agent-density.md](agent-density.md) |
 | **Kubernetes & fleet** | `DisposableVm` CRD + node-local operator; `fluxvm-microvm` scheduler-native path (no KubeVirt); `fluxvm-agent` fleet registry with load-aware placement | [Kubernetes CRD/operator](kubernetes-operator.md#kubernetes-crdoperator) · [docs/microvm.md](microvm.md) · [docs/operations.md](operations.md#distributed-node-agent) |
 | **Secure Containers** *(GA)* | containerd runtime-v2 shim mapping a Pod onto one microVM: CNI L2, Sentinel policy, cgroup-v2 stats, VSOCK stdio/TTY, guest AppArmor/SELinux/seccomp | [docs/secure-containers.md](secure-containers.md) · [supported profile](secure-containers-supported-profile.md) · [15-min lab](secure-containers-15min-lab.md) · [Sentinel wedge](sentinel-wedge.md) |
@@ -64,7 +74,7 @@ Eleven use cases map onto what is implemented today — nothing below is aspirat
 | Mac cloud: Go, Python and TypeScript clients, OpenAPI, Terraform provider | [docs/fleet-sdk.md](fleet-sdk.md) |
 | Mac cloud on one laptop with simulated Macs | [docs/fleet-quickstart.md](fleet-quickstart.md) |
 | Product overview + metrics | [docs/PRODUCT_OVERVIEW.md](PRODUCT_OVERVIEW.md) |
-| Exhaustive feature checklist | [FEATURES.md](../FEATURES.md) |
+| Exhaustive feature checklist | [FEATURES.md](https://github.com/zyvorai/zyvor-fluxvm/blob/main/FEATURES.md) |
 | Concrete use cases (CI runners, golden images, sandboxes, fleets) | [docs/use-cases.md](use-cases.md) |
 | Network Fabric (eBPF/Cilium dataplane, diagrams, why it's faster) | [docs/network-fabric.md](network-fabric.md) |
 | eBPF / Cilium coexistence detail | [docs/ebpf-cilium.md](ebpf-cilium.md) |
@@ -94,11 +104,11 @@ Eleven use cases map onto what is implemented today — nothing below is aspirat
 | Host topology and NUMA binding | [docs/host-topology.md](host-topology.md) |
 | vGPU (mediated devices) and GPU health | [docs/vgpu.md](vgpu.md) |
 | Virtual networks (eBPF routing, Geneve, SNAT, floating IPs) | [docs/virtual-network.md](virtual-network.md) |
-| Native KVM, no QEMU (golden template, snapshots, SMP) | [docs/native-kvm-no-qemu.md](native-kvm-no-qemu.md) · [crates/fluxvm-hypervisor/README.md](../crates/fluxvm-hypervisor/README.md) |
+| Native KVM, no QEMU (golden template, snapshots, SMP) | [docs/native-kvm-no-qemu.md](native-kvm-no-qemu.md) · [crates/fluxvm-hypervisor/README.md](https://github.com/zyvorai/zyvor-fluxvm/blob/main/crates/fluxvm-hypervisor/README.md) |
 | Egress HTTP method/path ACL and HTTPS interception | [docs/http-acl.md](http-acl.md) |
 | Sandbox file change-set (baseline / changes) | [docs/sandbox-changes.md](sandbox-changes.md) |
 | procbox: rootless Landlock + seccomp sandbox, and as a `/v1/sandboxes` kind | [docs/procbox.md](procbox.md) · [docs/procbox-backend.md](procbox-backend.md) |
-| Python, Go and TypeScript SDKs | [python/README.md](../python/README.md) · [go/README.md](../go/README.md) · [typescript/README.md](../typescript/README.md) |
+| Python, Go and TypeScript SDKs | [python/README.md](https://github.com/zyvorai/zyvor-fluxvm/blob/main/python/README.md) · [go/README.md](https://github.com/zyvorai/zyvor-fluxvm/blob/main/go/README.md) · [typescript/README.md](https://github.com/zyvorai/zyvor-fluxvm/blob/main/typescript/README.md) |
 | CI for these features (portable lane, hosted KVM smokes, lab gate) | [agent-sandbox.yml](../.github/workflows/agent-sandbox.yml) · [native-kvm.yml](../.github/workflows/native-kvm.yml) · [all-features.yml](../.github/workflows/all-features.yml) |
 | Ranked backlog / next features | [docs/NEXT-FEATURES.md](NEXT-FEATURES.md) |
 

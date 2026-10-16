@@ -60,7 +60,7 @@ curl -sf -H "Authorization: Bearer replace-me" http://127.0.0.1:7788/v1/vms
 ```
 
 List/filter: `GET /v1/vms?tenant=team-a`. See [PRODUCTION.md](../PRODUCTION.md)
-and [SECURITY.md](../../SECURITY.md).
+and [SECURITY.md](https://github.com/zyvorai/zyvor-fluxvm/blob/main/SECURITY.md).
 
 ## State and logs
 

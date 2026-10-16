@@ -44,4 +44,4 @@ scripts/density-smoke.sh 8 tiny            # how many tiny sandboxes this Mac ca
 cargo test -p fluxvm-core -p fluxvm-scheduler -p fluxvm-apple -p fluxvm-api -p fluxvm-agent
 ```
 
-Unattended Macs: [deploy/launchd-notes.md](../deploy/launchd-notes.md).
+Unattended Macs: [deploy/launchd-notes.md](https://github.com/zyvorai/zyvor-fluxvm/blob/main/deploy/launchd-notes.md).

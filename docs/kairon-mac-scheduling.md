@@ -13,7 +13,7 @@ scheduler) decides which Mac gets each VM; this page lists what FluxVM gives it 
 
 ## What each Mac reports
 
-`fluxvm-agent node` heartbeats to the central registry every 10 s (see [deploy/kairon-node-mac.md](../deploy/kairon-node-mac.md)):
+`fluxvm-agent node` heartbeats to the central registry every 10 s (see [deploy/kairon-node-mac.md](https://github.com/zyvorai/zyvor-fluxvm/blob/main/deploy/kairon-node-mac.md)):
 
 | Field                     | Source                                 | Use                                    |
 |---------------------------|----------------------------------------|----------------------------------------|

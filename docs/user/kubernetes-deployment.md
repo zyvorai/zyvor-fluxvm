@@ -16,7 +16,7 @@ events/OCI hardening, Pod-UID volumes + guest seccomp/paths, VSOCK stdio/TTY), s
 [Set 3](../secure-containers-set3.md),
 [Set 4](../secure-containers-set4.md),
 [Set 5](../secure-containers-set5.md), and
-[`deploy/containerd/`](../../deploy/containerd/).
+[`deploy/containerd/`](https://github.com/zyvorai/zyvor-fluxvm/tree/main/deploy/containerd).
 That path is GA (with documented scope boundaries) and is not what this DaemonSet deploys.
 
 ## What gets deployed
@@ -90,7 +90,7 @@ Shadow Pods request `10m`/`32Mi` only.
   present on the scheduled node and a clear story with the DaemonSet's
   `hostNetwork: true` vs cluster CNI — validate per site before production.
 - **No scheduler on DisposableVm**: whatever creates `DisposableVm` objects —
-  e.g. [Ragnarok](/docs/ragnarok-manual) — picks `spec.node`. For
+  e.g. Ragnarok — picks `spec.node`. For
   scheduler-driven placement, use MicroVM instead (above).
 - **No CDI image pull**: stage disks on each capable node (or use GuestImage
   Ready when the host file exists).
@@ -98,11 +98,11 @@ Shadow Pods request `10m`/`32Mi` only.
 ## Ragnarok product path
 
 1. Deploy FluxVM CRD + DaemonSet (this page).
-2. Install [Ragnarok](/docs/ragnarok) (KubeVirt required for the main fleet; FluxVM is opt-in).
+2. Install Ragnarok (KubeVirt required for the main fleet; FluxVM is opt-in).
 3. Optional: wire Ragnarok OIDC/SSO (`--with-oidc`) — identity stays on Ragnarok; FluxVM does not terminate browser SSO.
-4. Open Ragnarok → [FluxVM VMs](/docs/ragnarok-manual/pages/compute/fluxvm-vms). Missing operator → explicit banner, not a silent empty page.
+4. Open Ragnarok → FluxVM VMs. Missing operator → explicit banner, not a silent empty page.
 
-User manuals: [FluxVM](/docs/fluxvm-manual) · [Ragnarok](/docs/ragnarok-manual).
+User manuals: [FluxVM](README.md) · Ragnarok.
 
 ## Next steps
 

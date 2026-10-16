@@ -170,6 +170,8 @@ For real Macs, run `fluxvm-agent central` on one host (with `--tls-cert/--tls-ke
 
 ## Troubleshooting
 
+Problems outside the Mac daemon (installer, Linux, `fluxctl` output) are collected in [troubleshooting.md](troubleshooting.md).
+
 | Symptom | Cause and fix |
 |---|---|
 | `curl 127.0.0.1:7788/readyz` gives `503` | Expected on 0.4.4 only (see above); upgrade, or use `/healthz`. |

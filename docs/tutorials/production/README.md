@@ -13,7 +13,7 @@ Also read:
 
 - [PRODUCTION.md](../../PRODUCTION.md) — whole-stack checklist
 - [production-dataplane.md](../../production-dataplane.md) — Network Fabric ops
-- [SECURITY.md](../../../SECURITY.md) · [CONTRIBUTING.md](../../../CONTRIBUTING.md)
+- [SECURITY.md](https://github.com/zyvorai/zyvor-fluxvm/blob/main/SECURITY.md) · [CONTRIBUTING.md](https://github.com/zyvorai/zyvor-fluxvm/blob/main/CONTRIBUTING.md)
 - Network policy series: [../network-policy/](../network-policy/README.md)
 - MicroVM (k8s scheduled guests): [../microvm/](../microvm/README.md) · [microvm.md](../../microvm.md)
 
