@@ -129,7 +129,30 @@ impl ApiError {
 }
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        (self.status, Json(json!({"error": self.message}))).into_response()
+        let code = error_code(self.status);
+        (
+            self.status,
+            Json(json!({"error": self.message, "code": code})),
+        )
+            .into_response()
+    }
+}
+
+/// Stable, machine-readable name for an error status, sent as `code` next to `error`. Clients
+/// should branch on this, not on the message text. Listed in `docs/api.md#errors`.
+fn error_code(status: StatusCode) -> &'static str {
+    match status.as_u16() {
+        400 => "BAD_REQUEST",
+        401 => "UNAUTHORIZED",
+        403 => "FORBIDDEN",
+        404 => "NOT_FOUND",
+        409 => "CONFLICT",
+        413 => "PAYLOAD_TOO_LARGE",
+        422 => "UNPROCESSABLE",
+        429 => "RATE_LIMITED",
+        503 => "UNAVAILABLE",
+        s if s >= 500 => "INTERNAL",
+        _ => "ERROR",
     }
 }
 
@@ -246,7 +269,7 @@ async fn auth_middleware(State(auth): State<AuthState>, mut req: Request, next: 
                 if !agent_session_auth::path_allowed(&path, sc.session) {
                     return (
                         StatusCode::FORBIDDEN,
-                        Json(json!({"error": "a session token only reaches its own session's routes"})),
+                        Json(json!({"error": "a session token only reaches its own session's routes", "code": "FORBIDDEN"})),
                     )
                         .into_response();
                 }
@@ -318,7 +341,7 @@ async fn auth_middleware(State(auth): State<AuthState>, mut req: Request, next: 
             );
             (
                 StatusCode::UNAUTHORIZED,
-                Json(json!({"error": "missing or invalid bearer token"})),
+                Json(json!({"error": "missing or invalid bearer token", "code": "UNAUTHORIZED"})),
             )
                 .into_response()
         }
@@ -373,7 +396,7 @@ async fn tenant_guard_middleware(
             _ => {
                 return (
                     StatusCode::NOT_FOUND,
-                    Json(json!({"error": "VM not found"})),
+                    Json(json!({"error": "VM not found", "code": "NOT_FOUND"})),
                 )
                     .into_response();
             }
@@ -423,7 +446,9 @@ async fn rate_limit_middleware(
             (
                 StatusCode::TOO_MANY_REQUESTS,
                 [(header::RETRY_AFTER, (retry_after.as_secs() + 1).to_string())],
-                Json(json!({"error": "too many requests; try again later"})),
+                Json(
+                    json!({"error": "too many requests; try again later", "code": "RATE_LIMITED"}),
+                ),
             )
                 .into_response()
         }
@@ -5924,6 +5949,16 @@ async fn network_service_envoy_contract(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn error_codes_are_stable() {
+        use super::{StatusCode, error_code};
+        assert_eq!(error_code(StatusCode::NOT_FOUND), "NOT_FOUND");
+        assert_eq!(error_code(StatusCode::CONFLICT), "CONFLICT");
+        assert_eq!(error_code(StatusCode::SERVICE_UNAVAILABLE), "UNAVAILABLE");
+        assert_eq!(error_code(StatusCode::BAD_GATEWAY), "INTERNAL");
+        assert_eq!(error_code(StatusCode::IM_A_TEAPOT), "ERROR");
+    }
+
     use super::*;
     use fluxvm_core::model::{AgentSpec, CreateVmRequest, NetworkSpec};
     use std::path::PathBuf;
