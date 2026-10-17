@@ -1,3 +1,8 @@
+//go:build live
+
+// Copyright 2026 Zyvor AI Labs · https://zyvor.dev
+// SPDX-License-Identifier: Apache-2.0
+
 package fluxvm
 
 import (
@@ -7,11 +12,12 @@ import (
 	"time"
 )
 
-// TestLiveWatchEvents needs FLUXVM_LIVE_URL (a daemon with a session template named "fc").
+// TestLiveWatchEvents needs FLUXVM_LIVE_EVENTS_URL: a daemon with a session template named "fc".
+// Run with: FLUXVM_LIVE_EVENTS_URL=http://127.0.0.1:7788 go test -tags live -run LiveWatchEvents .
 func TestLiveWatchEvents(t *testing.T) {
-	base := os.Getenv("FLUXVM_LIVE_URL")
+	base := os.Getenv("FLUXVM_LIVE_EVENTS_URL")
 	if base == "" {
-		t.Skip("FLUXVM_LIVE_URL not set")
+		t.Skip("FLUXVM_LIVE_EVENTS_URL not set")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
 	defer cancel()

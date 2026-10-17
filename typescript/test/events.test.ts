@@ -34,12 +34,14 @@ describe("watchSessionEvents", () => {
     fake.emit("s1", "ledger", { op: "create" });
     const ctl = new AbortController();
     const watch = fx.watchSessionEvents("s1", { signal: ctl.signal });
-    const got = take(watch, 3);
-    await new Promise((r) => setTimeout(r, 50));
+    // The replayed entry arrives only once the stream is open, so what follows is live, not a
+    // replay (a fixed sleep here raced a slow runner's connect).
+    const first = await watch.next();
     fake.emit("s1", "vm", { event: "vm.start" });
     fake.emit("s1", "ledger", { op: "exec" });
-    const events = await got;
+    const rest = await take(watch, 2);
     ctl.abort();
+    const events = [first.value as SessionStreamEvent, ...rest];
     assert.deepEqual(
       events.map((e) => [e.type, e.data.op ?? e.data.event]),
       [["ledger", "create"], ["vm", "vm.start"], ["ledger", "exec"]],
