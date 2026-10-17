@@ -1,6 +1,6 @@
 name: Release (Linux package)
 
-# Builds the Linux package (tarball and .deb, see docs/linux-package.md) for a version tag and attaches it, with its
+# Builds the Linux package (tarball, .deb and .rpm, see docs/linux-package.md) for a version tag and attaches it, with its
 # checksum, to that tag's GitHub release (created as a DRAFT if it does not exist yet, so nothing is published until
 # someone publishes it). scripts/install.sh downloads exactly these assets. The macOS package is release-macos.yml.
 #
@@ -125,20 +125,31 @@ jobs:
           d="$(mktemp -d)"
           tar -xzf target/package/*.tar.gz -C "$d"
           OBJDUMP=${{ matrix.cross && 'aarch64-linux-gnu-objdump' || 'objdump' }} scripts/check-glibc-floor.sh "$d" 2.35
-      - name: .deb (nfpm, from the tree the tarball was built from)
+      - name: .deb and .rpm (nfpm, from the tree the tarball was built from)
         working-directory: fluxvm
         run: |
           NFPM_VERSION=2.48.0
           curl -fsSL -o /tmp/nfpm.tgz "https://github.com/goreleaser/nfpm/releases/download/v${NFPM_VERSION}/nfpm_${NFPM_VERSION}_Linux_x86_64.tar.gz"
           echo "6d7f9a28b2f397934403950fcbba83f598b08d02edbe79a0815b3b4897341750  /tmp/nfpm.tgz" | sha256sum -c -
           tar -xzf /tmp/nfpm.tgz -C /usr/local/bin nfpm
-          scripts/package-linux-pkgs.sh --stage "$(ls -d target/package/fluxvm-*-linux-*/ | head -n1)"
+          STAGE="$(ls -d target/package/fluxvm-*-linux-*/ | head -n1)"
+          scripts/package-linux-pkgs.sh --stage "$STAGE"
+          scripts/package-linux-pkgs.sh --stage "$STAGE" --format rpm
+      # Informational: would the binaries also run on EL9 (glibc 2.34)? The rpm declares glibc >= 2.35 until this passes.
+      - name: glibc 2.34 probe (EL9)
+        continue-on-error: true
+        working-directory: fluxvm
+        run: |
+          d="$(mktemp -d)"
+          tar -xzf target/package/*.tar.gz -C "$d"
+          OBJDUMP=${{ matrix.cross && 'aarch64-linux-gnu-objdump' || 'objdump' }} scripts/check-glibc-floor.sh "$d" 2.34
       - uses: actions/upload-artifact@v4
         with:
           name: fluxvm-linux-${{ matrix.arch }}
           path: |
             fluxvm/target/package/*.tar.gz
             fluxvm/target/package/*.deb
+            fluxvm/target/package/*.rpm
             fluxvm/target/package/*.sha256
 
   verify:
@@ -179,6 +190,19 @@ jobs:
             test -f /etc/fluxvm.toml && test -d /usr/lib/fluxvm/bpf && test -x /usr/share/fluxvm/guest/fluxvm-guest-agent
             dpkg -V fluxvm
           '
+      - name: Install the .rpm in clean Fedora and EL10 containers
+        run: |
+          R="$(realpath pkg/*.rpm)"
+          for image in fedora:43 quay.io/rockylinux/rockylinux:10; do
+            docker run --rm ${{ matrix.cross && '--platform linux/arm64' || '' }} -v "$R:/fluxvm.rpm:ro" "$image" bash -euc '
+              dnf install -y -q /fluxvm.rpm >/dev/null
+              fluxctl --version
+              test -f /etc/fluxvm.toml && test -d /usr/lib/fluxvm/bpf && test -x /usr/share/fluxvm/guest/fluxvm-guest-agent
+              rpm -V fluxvm
+              dnf remove -y -q fluxvm >/dev/null
+              test -d /var/lib/fluxvm && test -f /etc/fluxvm.toml
+            '
+          done
       - name: Attach to the release (draft if new)
         if: github.event_name == 'push' || github.event.inputs.tag != ''
         env:
@@ -187,7 +211,7 @@ jobs:
         run: |
           TAG="${{ github.event.inputs.tag || github.ref_name }}"
           gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --draft --title "$TAG" --notes "Linux package. Install with: curl -fsSL https://zyvorai.github.io/zyvor-fluxvm/install.sh | bash"
-          gh release upload "$TAG" pkg/*.tar.gz pkg/*.deb pkg/*.sha256 --clobber
+          gh release upload "$TAG" pkg/*.tar.gz pkg/*.deb pkg/*.rpm pkg/*.sha256 --clobber
 
   # Signs the release and publishes it for the pull installer (scripts/fluxvm-bootstrap.sh) only after the packages
   # installed cleanly in the verify job. Runs when FLUXVM_RELEASE_KEY (an Ed25519 private key, PEM) is configured;
@@ -213,6 +237,7 @@ jobs:
           subject-path: |
             pkg/*.tar.gz
             pkg/*.deb
+            pkg/*.rpm
       - name: Sign and build the mirror tree
         id: sign
         run: |
