@@ -653,7 +653,7 @@ impl VmManager {
         if let Some(e) = failure {
             let ids: Vec<Uuid> = created.lock().map(|g| g.clone()).unwrap_or_default();
             for child in ids {
-                let _ = self.delete(child).await;
+                self.discard_child(child).await;
             }
             return Err(e);
         }
@@ -691,7 +691,7 @@ impl VmManager {
         let disk = match disk {
             Ok(d) => d,
             Err(e) => {
-                let _ = self.delete(id).await;
+                self.discard_child(id).await;
                 let _ = std::fs::remove_dir_all(&workspace);
                 return Err(e.context("preparing the child's files"));
             }
@@ -760,7 +760,7 @@ impl VmManager {
         let vm = match started {
             Ok(vm) => vm,
             Err(e) => {
-                let _ = self.delete(id).await;
+                self.discard_child(id).await;
                 return Err(e);
             }
         };
@@ -768,7 +768,7 @@ impl VmManager {
         let outcome = match self.reset_child_identity(&vm, name, identity).await {
             Ok(o) => o,
             Err(e) => {
-                let _ = self.delete(id).await;
+                self.discard_child(id).await;
                 return Err(e.context("identity reset"));
             }
         };
@@ -776,7 +776,7 @@ impl VmManager {
         let (hooks_ms, ready_ms) = match self.fork_post_restore(&vm, post).await {
             Ok(t) => t,
             Err(e) => {
-                let _ = self.delete(id).await;
+                self.discard_child(id).await;
                 return Err(e);
             }
         };
@@ -824,7 +824,7 @@ impl VmManager {
                 Ok(child) => children.push(child),
                 Err(e) => {
                     for (child, _) in &children {
-                        let _ = self.delete(child.id).await;
+                        self.discard_child(child.id).await;
                     }
                     return Err(e.context(format!("forking child {name}")));
                 }
@@ -933,7 +933,7 @@ impl VmManager {
         }
         .await;
         if let Err(e) = prepared {
-            let _ = self.delete(id).await;
+            self.discard_child(id).await;
             return Err(e);
         }
 
@@ -946,7 +946,7 @@ impl VmManager {
         let vm = match started {
             Ok(vm) => vm,
             Err(e) => {
-                let _ = self.delete(id).await;
+                self.discard_child(id).await;
                 return Err(e);
             }
         };
@@ -954,7 +954,7 @@ impl VmManager {
         let outcome = match self.reset_child_identity(&vm, name, identity).await {
             Ok(o) => o,
             Err(e) => {
-                let _ = self.delete(id).await;
+                self.discard_child(id).await;
                 return Err(e.context("identity reset"));
             }
         };
@@ -962,7 +962,7 @@ impl VmManager {
         let (hooks_ms, ready_ms) = match self.fork_post_restore(&vm, post).await {
             Ok(t) => t,
             Err(e) => {
-                let _ = self.delete(id).await;
+                self.discard_child(id).await;
                 return Err(e);
             }
         };
@@ -985,12 +985,30 @@ impl VmManager {
 /// agent starts answering again.
 const IDENTITY_RESET_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
+/// Consecutive "agent closed the connection" answers after which the identity reset stops retrying: the
+/// agent accepted the connection twice and dropped it twice, so it is reachable but cannot handle
+/// `ResetIdentity`. Two, not more: an agent that closes slowly (one old agent held each connection for
+/// several seconds) would otherwise use up the whole deadline before the count was reached.
+const IDENTITY_RESET_CLOSED_LIMIT: u32 = 2;
+
+fn gives_up_after_closes(streak: u32) -> bool {
+    streak >= IDENTITY_RESET_CLOSED_LIMIT
+}
+
 /// How long the SSH fallback waits for sshd before giving up on it.
 const SSH_FALLBACK_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
 
 impl VmManager {
     /// Give a resumed child its own identity, as `mode` says, and report how.
     ///
+    /// Throw away a fork child that is not going to be handed out. It is deleted straight away, so it is
+    /// killed at once instead of waiting out the graceful-shutdown grace period (about 12 s for a guest that
+    /// does not power off, which used to be most of a failed fork's time).
+    async fn discard_child(&self, id: Uuid) {
+        let _ = self.stop_with(id, false).await;
+        let _ = self.delete(id).await;
+    }
+
     /// A fork resumes the parent's memory, so without this every child shares its hostname, machine-id, SSH host keys,
     /// cloud-init instance, DHCP identity, RNG state and agent token. [`ForkIdentityMode::Unique`] fails unless the
     /// guest confirmed every step in `REQUIRED_STEPS` (an older agent ignores the new fields and omits their names,
@@ -1034,6 +1052,7 @@ impl VmManager {
                 new_agent_token: Some(new_token.clone()),
             };
             let deadline = tokio::time::Instant::now() + IDENTITY_RESET_TIMEOUT;
+            let mut closed_streak = 0u32;
             let answer = loop {
                 let attempt = fluxvm_vsock_client::call(
                     vm,
@@ -1050,7 +1069,21 @@ impl VmManager {
                     }
                     Ok(other) => break Err(anyhow::anyhow!("unexpected response: {other:?}")),
                     Err(e) if tokio::time::Instant::now() >= deadline => break Err(e),
-                    Err(_) => tokio::time::sleep(std::time::Duration::from_millis(250)).await,
+                    Err(e) => {
+                        // An agent that takes the connection and drops it will not parse the request on
+                        // the next try either: stop retrying instead of waiting out the deadline.
+                        if e.downcast_ref::<fluxvm_vsock_client::AgentClosedConnection>()
+                            .is_some()
+                        {
+                            closed_streak += 1;
+                            if gives_up_after_closes(closed_streak) {
+                                break Err(e);
+                            }
+                        } else {
+                            closed_streak = 0;
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(250)).await
+                    }
                 }
             };
             match answer {
@@ -1418,6 +1451,32 @@ pub(crate) fn check_forkable(src: &VmRecord, count: u32) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn identity_reset_stops_retrying_after_a_few_closed_connections() {
+        assert!(!gives_up_after_closes(0));
+        assert!(!gives_up_after_closes(IDENTITY_RESET_CLOSED_LIMIT - 1));
+        assert!(gives_up_after_closes(IDENTITY_RESET_CLOSED_LIMIT));
+        // Two refusals are decisive; waiting for many would run into the 15 s deadline for a slow closer.
+        assert_eq!(IDENTITY_RESET_CLOSED_LIMIT, 2);
+    }
+
+    #[test]
+    fn a_closed_agent_connection_is_recognisable_and_explains_itself() {
+        let e: anyhow::Error = fluxvm_vsock_client::AgentClosedConnection.into();
+        let with_context = e.context("identity reset");
+        assert!(
+            with_context
+                .downcast_ref::<fluxvm_vsock_client::AgentClosedConnection>()
+                .is_some()
+        );
+        let text = format!("{with_context:#}");
+        assert!(
+            text.contains("closed the connection without responding"),
+            "{text}"
+        );
+        assert!(text.contains("older than this host"), "{text}");
+    }
 
     #[test]
     fn the_fork_event_report_is_compact_json_with_every_phase() {
