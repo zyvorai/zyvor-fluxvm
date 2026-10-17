@@ -307,7 +307,7 @@ sync_binary_only() {
     _ssh "mkdir -p '${REMOTE_DIR}/bin'"
     _rsync "$bin" "${TARGET_USER}@${TARGET_HOST}:${REMOTE_DIR}/bin/fluxctl"
     _rsync "${PROJECT_DIR}/config.example.toml" "${TARGET_USER}@${TARGET_HOST}:${REMOTE_DIR}/config.example.toml"
-    _rsync "${PROJECT_DIR}/systemd/fluxvm.service" "${TARGET_USER}@${TARGET_HOST}:${REMOTE_DIR}/fluxvm.service"
+    _rsync "${PROJECT_DIR}/packaging/systemd/fluxvm.service" "${TARGET_USER}@${TARGET_HOST}:${REMOTE_DIR}/fluxvm.service"
     ok "Release binary synced"
 }
 
@@ -396,7 +396,7 @@ $SUDO install -m755 target/release/fluxvm-microvm /usr/local/bin/fluxvm-microvm
 $SUDO install -m755 target/release/fluxvm-kube /usr/local/bin/fluxvm-kube
 $SUDO install -m755 target/release/fluxvm-guard /usr/local/bin/fluxvm-guard
 [ -f /etc/fluxvm.toml ] || $SUDO install -m644 config.example.toml /etc/fluxvm.toml
-$SUDO install -m644 systemd/fluxvm.service /etc/systemd/system/fluxvm.service
+$SUDO install -m644 packaging/systemd/fluxvm.service /etc/systemd/system/fluxvm.service
 $SUDO systemctl daemon-reload 2>/dev/null || true
 echo "Installed: $(fluxctl --version 2>/dev/null || echo ok) + fluxvm-hypervisor + fluxvm-microvm + fluxvm-kube + fluxvm-guard"
 REMOTE
@@ -421,7 +421,7 @@ REMOTE
 # indefinitely (found live: a VM's QEMU command line was still missing a
 # flag added hours after that VM's daemon was last restarted). Safe to do
 # unconditionally on every deploy: the unit's `KillMode=process` (see
-# systemd/fluxvm.service) means `restart` only replaces the tracked
+# packaging/systemd/fluxvm.service) means `restart` only replaces the tracked
 # fluxvm PID -- QEMU children are left alone and `reconcile()` reattaches
 # to them by their stored PID on the next `serve` startup, so already
 # -running VMs are not disrupted.
@@ -435,7 +435,7 @@ SUDO=""
 # allow-list here, regardless of caller privilege -- found live: hotplug-nic
 # failed with "bridge helper failed" against a real, existing bridge purely
 # because this file didn't exist. `fluxvm` already runs as root with
-# CAP_NET_ADMIN (see systemd/fluxvm.service), so this check adds no real
+# CAP_NET_ADMIN (see packaging/systemd/fluxvm.service), so this check adds no real
 # isolation on top of that -- `allow all` matches the trust boundary that
 # already exists rather than requiring a hand-maintained list that would
 # drift from the bridges zyvor-fabric's networking crate creates dynamically.
@@ -446,7 +446,7 @@ if [ ! -f /etc/qemu/bridge.conf ]; then
 fi
 # Ensure state/run dirs exist before first start (ProtectSystem + ReadWritePaths).
 $SUDO install -d -m755 /var/lib/fluxvm /run/fluxvm /run/netns
-$SUDO install -m644 "${REMOTE_STAGING}/systemd/fluxvm.service" /etc/systemd/system/fluxvm.service
+$SUDO install -m644 "${REMOTE_STAGING}/packaging/systemd/fluxvm.service" /etc/systemd/system/fluxvm.service
 $SUDO systemctl daemon-reload
 $SUDO systemctl enable fluxvm 2>/dev/null || true
 $SUDO systemctl restart fluxvm
