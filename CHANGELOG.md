@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- **macOS: the vz runner no longer gets silently terminated.** The windowless runner is now exempt from AppKit
+  automatic/sudden termination and holds an activity assertion while the guest runs, and a SIGTERM/SIGINT it receives
+  is logged (`{"event":"signal"}` in `vz-runner.log`) instead of looking like a clean exit. Previously a guest could
+  vanish with no `vm.stop` event and nothing in the log.
 - **Step-up TOTP for exec and writes.** `[[auth.mfa]]` pairs a static API token with a TOTP secret file; guest exec,
   shells and (optionally) every write then need a current code in `X-Fluxvm-Totp` (`fluxctl --totp`). Codes are
   single-use, repeated failures lock the token out, and the audit log records `mfa=`. See docs/host-hardening.md.
