@@ -4,10 +4,11 @@
 # One instance per fluxvm-capable node, matching the "node-local
 # daemonset" model crates/fluxvm-kube/src/crd.rs and controller.rs are
 # written for. Requires:
-#   - the node labeled `ragnarok.io/fluxvm-capable: "true"` (KVM-capable,
-#     QEMU/CH/Firecracker tooling reachable, `nbd` kernel module loaded —
-#     the last one is a host prerequisite this DaemonSet cannot satisfy
-#     itself; see README.md)
+#   - the node labeled `ragnarok.io/fluxvm-capable: "true"` (KVM-capable; the
+#     `host-prep` init container loads `nbd` and writes /etc/qemu/bridge.conf,
+#     but cannot create KVM or a kernel - see docs/container-image.md)
+#   - the __VERSION__/__DIGEST__ placeholders replaced: use the release's
+#     fluxvm-k8s-<ver>.yaml, or scripts/render-k8s.sh
 #   - crd.yaml and rbac.yaml applied first
 #   - VM images pre-staged under the state_dir hostPath below (no
 #     k8s-native image pull path exists yet — see README.md)
@@ -39,9 +40,38 @@ spec:
       # relaxation to revisit later.
       hostNetwork: true
       dnsPolicy: ClusterFirstWithHostNet
+      # Host preparation, run before the VMM starts (every pod start, idempotent).
+      # Privileged on purpose and ONLY this container: it chroots into the host
+      # root to run the host's own modprobe, and writes the host's
+      # /etc/qemu/bridge.conf. What it cannot fix (KVM absent, kernel too old
+      # or without nbd, no kernel-module tree) it reports and fails on, so the
+      # pod stays Init:Error instead of starting a VMM that cannot work.
+      # See docs/container-image.md.
+      initContainers:
+        - name: host-prep
+          image: ghcr.io/zyvorai/fluxvm:__VERSION__@sha256:__DIGEST__
+          command:
+            - /bin/sh
+            - -ceu
+            - |
+              [ -c /dev/kvm ] || { echo "host-prep: /dev/kvm is absent on this node" >&2; exit 1; }
+              chroot /host /sbin/modprobe nbd max_part=16 \
+                || { echo "host-prep: modprobe nbd failed (kernel without nbd, or no module tree)" >&2; exit 1; }
+              mp=$(cat /sys/module/nbd/parameters/max_part 2>/dev/null || echo 0)
+              [ "$mp" -ge 16 ] || echo "host-prep: nbd already loaded with max_part=$mp; unload it or reboot to get 16" >&2
+              mkdir -p /host/etc/qemu
+              echo "allow all" > /host/etc/qemu/bridge.conf
+              chmod 0644 /host/etc/qemu/bridge.conf
+          securityContext:
+            privileged: true
+          volumeMounts:
+            - name: host-root
+              mountPath: /host
+            - name: kvm
+              mountPath: /dev/kvm
       containers:
         - name: fluxctl
-          image: ghcr.io/zyvorai/fluxvm:0.1.0
+          image: ghcr.io/zyvorai/fluxvm:__VERSION__@sha256:__DIGEST__
           command: ["fluxvm", "--config", "/etc/fluxvm.toml", "serve"]
           securityContext:
             capabilities:
@@ -64,6 +94,11 @@ spec:
             - name: config
               mountPath: /etc/fluxvm.toml
               subPath: fluxvm.toml
+            # The image's qemu-bridge-helper reads /etc/qemu/bridge.conf from
+            # the container filesystem; this is the file host-prep wrote.
+            - name: etc-qemu
+              mountPath: /etc/qemu
+              readOnly: true
           readinessProbe:
             httpGet:
               path: /readyz
@@ -77,7 +112,7 @@ spec:
             initialDelaySeconds: 10
             periodSeconds: 20
         - name: fluxvm-kube
-          image: ghcr.io/zyvorai/fluxvm:0.1.0
+          image: ghcr.io/zyvorai/fluxvm:__VERSION__@sha256:__DIGEST__
           command: ["fluxvm-kube"]
           env:
             # Must be the real Kubernetes node name — this is what a
@@ -97,6 +132,14 @@ spec:
             capabilities:
               drop: ["ALL"]
       volumes:
+        - name: host-root
+          hostPath:
+            path: /
+            type: Directory
+        - name: etc-qemu
+          hostPath:
+            path: /etc/qemu
+            type: DirectoryOrCreate
         - name: kvm
           hostPath:
             path: /dev/kvm

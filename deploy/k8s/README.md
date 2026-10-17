@@ -30,10 +30,15 @@ Before labeling a node `ragnarok.io/fluxvm-capable=true`:
 
 1. **KVM**: `/dev/kvm` present and accessible (virtualization enabled in
    firmware, `kvm`/`kvm_intel`/`kvm_amd` kernel modules loaded).
-2. **`nbd` kernel module**: `modprobe nbd` — needed by `guestkit` for image
-   customization. This cannot be loaded from inside a container; it's a
-   host-level prerequisite, the same way ../../scripts/bootstrap-host.sh
-   documents it for the systemd deployment.
+2. **`nbd` kernel module**: needed by `guestkit` for image customization. The
+   DaemonSet's privileged `host-prep` init container runs the host's
+   `modprobe nbd max_part=16` and writes `/etc/qemu/bridge.conf`, but the node
+   kernel must ship `nbd` (and its module tree); see
+   [docs/container-image.md](../../docs/container-image.md#what-a-daemonset-still-cannot-do).
+
+   Images are pinned as `ghcr.io/zyvorai/fluxvm:__VERSION__@sha256:__DIGEST__`
+   in these files. Apply the release's `fluxvm-k8s-<ver>.yaml`, or render with
+   `scripts/render-k8s.sh`.
 3. **VM images pre-staged** under `/var/lib/fluxvm/images` (the
    `state_dir` in configmap.yaml) — there is no k8s-native image pull path
    yet (unlike, e.g., KubeVirt's `containerDisk`). Stage images with the

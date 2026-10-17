@@ -1,73 +1,247 @@
-# Publish ghcr.io/zyvorai/fluxvm (includes fluxvm, fluxvm-kube, fluxvm-microvm).
-# Manual or on version tags. Requires packages:write (GITHUB_TOKEN).
+# Publish ghcr.io/zyvorai/fluxvm (fluxctl, fluxvm-kube, fluxvm-microvm, ...).
+#
+# The image is assembled from the Linux release tarball (release-linux.yml), not rebuilt: the binaries are the ones
+# linked on ubuntu:22.04 and tested there. Each architecture is built on a runner of that architecture and pushed
+# by digest; the `merge` job joins them into one manifest list, signs it keyless, attests it, and refuses to finish
+# unless the signature verifies. See docs/container-image.md.
+#
+# Runs on a version tag or by hand. On a tag it waits for the release-linux.yml assets of the same tag.
 name: publish-image
 
 on:
   workflow_dispatch:
     inputs:
-      tag:
-        description: "Image tag (e.g. 0.1.0 or latest)"
+      version:
+        description: "Version to publish, e.g. 0.4.8 or 0.5.0-rc.1 (its v<version> release must hold the Linux tarballs)"
         required: true
-        default: "0.1.0"
   push:
     tags:
       - "v*"
 
 permissions:
   contents: read
-  packages: write
+
+concurrency:
+  group: publish-image-${{ github.ref }}-${{ inputs.version }}
+  cancel-in-progress: false
+
+env:
+  IMAGE: ghcr.io/zyvorai/fluxvm
 
 jobs:
-  publish:
+  plan:
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      tags: ${{ steps.v.outputs.tags }}
     steps:
-      - name: Checkout fluxvm
-        uses: actions/checkout@v7
+      - id: v
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
+            VER="${INPUT_VERSION#v}"
+          else
+            VER="${GITHUB_REF_NAME#v}"
+          fi
+          if ! [[ "$VER" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.]+)?$ ]]; then
+            echo "not a version: '$VER' (a moving tag such as 'latest' is never published)" >&2
+            exit 1
+          fi
+          TAGS="${IMAGE}:${VER}"
+          # <major>.<minor> only for a final release, so a pre-release never moves it.
+          if [[ "$VER" =~ ^([0-9]+)\.([0-9]+)\.[0-9]+$ ]]; then
+            TAGS="${TAGS}"$'\n'"${IMAGE}:${BASH_REMATCH[1]}.${BASH_REMATCH[2]}"
+          fi
+          echo "version=${VER}" >> "$GITHUB_OUTPUT"
+          {
+            echo "tags<<EOF"
+            echo "$TAGS"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: plan
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            arch: x86_64
+            runner: ubuntu-latest
+            experimental: false
+          # The arm64 package itself is still experimental in release-linux.yml; a missing arm64 runner or tarball
+          # must not block the amd64 image. The merge job publishes whatever was built.
+          - platform: linux/arm64
+            arch: aarch64
+            runner: ubuntu-24.04-arm
+            experimental: true
+    runs-on: ${{ matrix.runner }}
+    continue-on-error: ${{ matrix.experimental }}
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    steps:
+      - name: Fetch and verify the release tarball
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          VER: ${{ needs.plan.outputs.version }}
+          ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          name="fluxvm-${VER}-linux-${ARCH}"
+          mkdir -p dl stage
+          # On a tag push release-linux.yml is running in parallel; wait for its upload (up to 60 minutes).
+          for i in $(seq 1 60); do
+            if gh release download "v${VER}" -D dl -p "${name}.tar.gz" -p "${name}.tar.gz.sha256" --clobber 2>/dev/null \
+               && [ -s "dl/${name}.tar.gz" ] && [ -s "dl/${name}.tar.gz.sha256" ]; then break; fi
+            echo "waiting for v${VER} ${name} ($i/60)"; sleep 60
+          done
+          (cd dl && sha256sum -c "${name}.tar.gz.sha256")
+          tar -xzf "dl/${name}.tar.gz" -C stage
+          test -x "stage/${name}/bin/fluxctl"
+          echo "TARBALL_SHA256=$(sha256sum "dl/${name}.tar.gz" | cut -d' ' -f1)" >> "$GITHUB_ENV"
+
+      - uses: actions/checkout@v7
         with:
           path: fluxvm
 
-      # Pinned to the tag in packaging/guestkit.ref, not the default branch (see release-linux.yml).
-      - name: Read the pinned guestkit tag
-        id: gk
-        run: echo "ref=$(tr -d '[:space:]' < fluxvm/packaging/guestkit.ref)" >> "$GITHUB_OUTPUT"
-
-      - name: Checkout guestkit
-        uses: actions/checkout@v7
-        with:
-          repository: zyvorai/guestkit
-          path: guestkit
-          ref: ${{ steps.gk.outputs.ref }}
-
-      - name: Check the guestkit pin against Cargo.lock and the checkout
-        run: fluxvm/scripts/check-guestkit-pin.sh fluxvm guestkit
-
-      - name: Log in to GHCR
-        uses: docker/login-action@v4
+      - uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
+      - uses: docker/setup-buildx-action@v4
 
-      - name: Resolve tags
-        id: meta
-        run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            TAG="${{ inputs.tag }}"
-          else
-            TAG="${GITHUB_REF_NAME#v}"
-          fi
-          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
-          echo "tags=ghcr.io/zyvorai/fluxvm:${TAG},ghcr.io/zyvorai/fluxvm:latest" >> "$GITHUB_OUTPUT"
-
-      - name: Build and push
+      - name: Build and push by digest
+        id: build
         uses: docker/build-push-action@v7
         with:
           context: fluxvm
-          build-contexts: guestkit=guestkit
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          file: fluxvm/Dockerfile
+          platforms: ${{ matrix.platform }}
+          build-contexts: stage=stage/fluxvm-${{ needs.plan.outputs.version }}-linux-${{ matrix.arch }}
+          build-args: VERSION=${{ needs.plan.outputs.version }}
+          provenance: mode=max
+          sbom: true
+          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
+
+      - name: Record the digest
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          ARCH: ${{ matrix.arch }}
+        run: |
+          mkdir -p digests
+          printf '%s\n' "${DIGEST}" > "digests/${ARCH}.digest"
+          printf '%s\n' "${TARBALL_SHA256}" > "digests/${ARCH}.tarball-sha256"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ matrix.arch }}
+          path: digests/*
+          if-no-files-found: error
+
+  merge:
+    needs: [plan, build]
+    if: ${{ !cancelled() && needs.plan.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write   # attach the rendered Kubernetes manifest to the release
+      packages: write
+      id-token: write   # keyless signing
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: digests-*
+          path: digests
+          merge-multiple: true
+
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/setup-buildx-action@v4
+      - uses: sigstore/cosign-installer@v3
+
+      - name: Create the manifest list
+        id: manifest
+        env:
+          TAGS: ${{ needs.plan.outputs.tags }}
+        run: |
+          set -euo pipefail
+          ls digests
+          test -s digests/x86_64.digest || { echo "no amd64 image was built" >&2; exit 1; }
+          args=()
+          for t in $TAGS; do args+=(-t "$t"); done
+          refs=()
+          for f in digests/*.digest; do refs+=("${IMAGE}@$(cat "$f")"); done
+          docker buildx imagetools create "${args[@]}" "${refs[@]}"
+          first_tag=$(echo "$TAGS" | head -n1)
+          digest=$(docker buildx imagetools inspect "$first_tag" --format '{{json .Manifest}}' | jq -r .digest)
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "bad digest: $digest" >&2; exit 1; }
+          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
+          echo "### ${IMAGE}@${digest}" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Sign (keyless)
+        env:
+          DIGEST: ${{ steps.manifest.outputs.digest }}
+        run: cosign sign --yes "${IMAGE}@${DIGEST}"
+
+      - name: Attest what the image was assembled from
+        env:
+          DIGEST: ${{ steps.manifest.outputs.digest }}
+          VER: ${{ needs.plan.outputs.version }}
+        run: |
+          set -euo pipefail
+          jq -n --arg ver "$VER" --arg commit "$GITHUB_SHA" \
+            --arg run "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+            --arg amd64 "$(cat digests/x86_64.tarball-sha256)" \
+            --arg arm64 "$(cat digests/aarch64.tarball-sha256 2>/dev/null || true)" \
+            '{version:$ver, dockerfile_commit:$commit, workflow_run:$run,
+              release_tarball_sha256:{x86_64:$amd64, aarch64:$arm64}}' > predicate.json
+          cosign attest --yes --type custom --predicate predicate.json "${IMAGE}@${DIGEST}"
+
+      - name: Verify gate (signature, attestation, provenance and SBOM present)
+        env:
+          DIGEST: ${{ steps.manifest.outputs.digest }}
+          TAGS: ${{ needs.plan.outputs.tags }}
+        run: |
+          set -euo pipefail
+          ident="^https://github.com/${GITHUB_REPOSITORY}/\.github/workflows/publish-image\.yml@"
+          issuer="https://token.actions.githubusercontent.com"
+          cosign verify "${IMAGE}@${DIGEST}" --certificate-identity-regexp "$ident" --certificate-oidc-issuer "$issuer" >/dev/null
+          cosign verify-attestation "${IMAGE}@${DIGEST}" --type custom \
+            --certificate-identity-regexp "$ident" --certificate-oidc-issuer "$issuer" >/dev/null
+          # BuildKit attaches provenance and an SBOM to every platform manifest.
+          for t in $TAGS; do
+            docker buildx imagetools inspect "$t" --format '{{json .Provenance}}' | jq -e 'length > 0' >/dev/null
+            docker buildx imagetools inspect "$t" --format '{{json .SBOM}}' | jq -e 'length > 0' >/dev/null
+            # The tag must resolve to the digest that was signed.
+            [ "$(docker buildx imagetools inspect "$t" --format '{{json .Manifest}}' | jq -r .digest)" = "$DIGEST" ]
+          done
+          echo "verified ${IMAGE}@${DIGEST}"
+
+      - name: Render the Kubernetes manifest and attach it to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          DIGEST: ${{ steps.manifest.outputs.digest }}
+          VER: ${{ needs.plan.outputs.version }}
+        run: |
+          set -euo pipefail
+          scripts/render-k8s.sh --version "$VER" --digest "$DIGEST" --out "fluxvm-k8s-${VER}.yaml"
+          sha256sum "fluxvm-k8s-${VER}.yaml" > "fluxvm-k8s-${VER}.yaml.sha256"
+          gh release view "v${VER}" >/dev/null 2>&1 \
+            || gh release create "v${VER}" --draft --title "v${VER}" --notes "Container image ${IMAGE}:${VER}@${DIGEST}"
+          gh release upload "v${VER}" "fluxvm-k8s-${VER}.yaml" "fluxvm-k8s-${VER}.yaml.sha256" --clobber
