@@ -12,13 +12,14 @@ OUT_DIR="${1:-$ROOT/dist/bpf}"
 CLANG="${CLANG:-clang}"
 mkdir -p "$OUT_DIR"
 
-case "$(uname -m)" in
-  x86_64) BPF_ARCH=x86 ;;
+# FLUXVM_BPF_ARCH=x86|arm64|... builds for another architecture than the host (a cross-built package).
+case "${FLUXVM_BPF_ARCH:-$(uname -m)}" in
+  x86|x86_64) BPF_ARCH=x86 ;;
   aarch64|arm64) BPF_ARCH=arm64 ;;
   s390x) BPF_ARCH=s390 ;;
   ppc64le) BPF_ARCH=powerpc ;;
   riscv64) BPF_ARCH=riscv ;;
-  *) echo "unsupported BPF build architecture: $(uname -m)" >&2; exit 2 ;;
+  *) echo "unsupported BPF build architecture: ${FLUXVM_BPF_ARCH:-$(uname -m)}" >&2; exit 2 ;;
 esac
 
 CFLAGS=(
