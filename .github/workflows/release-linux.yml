@@ -1,6 +1,6 @@
 name: Release (Linux package)
 
-# Builds the Linux package (fluxctl, fluxvm-hypervisor, fluxvm-agent) for a version tag and attaches it, with its
+# Builds the Linux package (tarball and .deb, see docs/linux-package.md) for a version tag and attaches it, with its
 # checksum, to that tag's GitHub release (created as a DRAFT if it does not exist yet, so nothing is published until
 # someone publishes it). scripts/install.sh downloads exactly these assets. The macOS package is release-macos.yml.
 #
@@ -117,11 +117,20 @@ jobs:
           d="$(mktemp -d)"
           tar -xzf target/package/*.tar.gz -C "$d"
           OBJDUMP=${{ matrix.cross && 'aarch64-linux-gnu-objdump' || 'objdump' }} scripts/check-glibc-floor.sh "$d" 2.35
+      - name: .deb (nfpm, from the tree the tarball was built from)
+        working-directory: fluxvm
+        run: |
+          NFPM_VERSION=2.48.0
+          curl -fsSL -o /tmp/nfpm.tgz "https://github.com/goreleaser/nfpm/releases/download/v${NFPM_VERSION}/nfpm_${NFPM_VERSION}_Linux_x86_64.tar.gz"
+          echo "6d7f9a28b2f397934403950fcbba83f598b08d02edbe79a0815b3b4897341750  /tmp/nfpm.tgz" | sha256sum -c -
+          tar -xzf /tmp/nfpm.tgz -C /usr/local/bin nfpm
+          scripts/package-linux-pkgs.sh --stage "$(ls -d target/package/fluxvm-*-linux-*/ | head -n1)"
       - uses: actions/upload-artifact@v4
         with:
           name: fluxvm-linux-${{ matrix.arch }}
           path: |
             fluxvm/target/package/*.tar.gz
+            fluxvm/target/package/*.deb
             fluxvm/target/package/*.sha256
 
   verify:
@@ -153,6 +162,15 @@ jobs:
             done
             /p/fluxvm-*/bin/fluxctl --version
           '
+      - name: Install the .deb in a clean container
+        run: |
+          D="$(realpath pkg/*.deb)"
+          docker run --rm ${{ matrix.cross && '--platform linux/arm64' || '' }} -v "$D:/fluxvm.deb:ro" ubuntu:22.04 bash -euc '
+            apt-get update -qq && apt-get install -y -qq /fluxvm.deb >/dev/null
+            fluxctl --version
+            test -f /etc/fluxvm.toml && test -d /usr/lib/fluxvm/bpf && test -x /usr/share/fluxvm/guest/fluxvm-guest-agent
+            dpkg -V fluxvm
+          '
       - name: Attach to the release (draft if new)
         if: github.event_name == 'push' || github.event.inputs.tag != ''
         env:
@@ -161,4 +179,4 @@ jobs:
         run: |
           TAG="${{ github.event.inputs.tag || github.ref_name }}"
           gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --draft --title "$TAG" --notes "Linux package. Install with: curl -fsSL https://zyvorai.github.io/zyvor-fluxvm/install.sh | bash"
-          gh release upload "$TAG" pkg/*.tar.gz pkg/*.sha256 --clobber
+          gh release upload "$TAG" pkg/*.tar.gz pkg/*.deb pkg/*.sha256 --clobber

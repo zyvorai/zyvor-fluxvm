@@ -31,6 +31,25 @@ decision on a separate package and on the runtime libraries it declares.
 The layout keeps `bin/`, `share/config.example.toml` and `share/systemd/fluxvm.service` where `scripts/install.sh`
 expects them; everything else is added next to them.
 
+## The .deb
+
+The release also builds `fluxvm_<version>_<amd64|arm64>.deb` from the same staged tree (`scripts/package-linux-pkgs.sh`,
+`packaging/nfpm.yaml`). Layout: `/usr/bin`, `/usr/lib/fluxvm/bpf`, `/usr/share/fluxvm` (guest agent, config template),
+`/usr/lib/systemd/system/fluxvm.service` (ExecStart `/usr/bin/fluxctl`), `modules-load.d`/`modprobe.d` for `nbd max_part=16`,
+shell completions in the distribution directories.
+
+The maintainer scripts (`packaging/deb/`) follow these rules:
+
+- `/etc/fluxvm.toml` is seeded from the template only when absent and is not a conffile, so an upgrade never touches it.
+- The service is enabled on install but not started (the seeded config is a template). On upgrade the running daemon is
+  restarted only when `/etc/fluxvm/upgrade.conf` says `RESTART_ON_UPGRADE=yes`; the default is `no`. The unit uses
+  `KillMode=process`, so a restart leaves running VMs alone.
+- `/etc/qemu/bridge.conf` (`allow all`) is created if missing; the swtpm AppArmor override is added only when AppArmor is enforcing.
+- `/var/lib/fluxvm` is never deleted, not on remove and not on purge.
+
+`scripts/test-deb.sh` installs, upgrades (with an edited config), removes and purges it in an ubuntu:22.04 container; CI runs it.
+`.rpm` follows in a later milestone. Not done yet in the .deb: bundled Firecracker / Cloud Hypervisor (needs `packaging/vendor.lock`).
+
 ## Building and checking
 
 ```bash
