@@ -4,8 +4,12 @@ A serverless backend (functions with a time limit, plus a database that pushes c
 sandboxes and show their activity live. FluxVM has no plugin for any particular platform; this page shows the pattern
 with the [TypeScript client](../typescript/README.md).
 
-> **Not run on a serverless platform.** The FluxVM calls are covered by the client's tests (against the in-memory
-> `FakeFluxVM`); the glue below is a sketch to adapt, not a tested package. `db` stands for your own data layer.
+> **Not run on a serverless platform.** The two code blocks below were type-checked (strict) and run once against the
+> client's in-memory `FakeFluxVM`, with a stub `db` and `schedule`: `run` creates, runs and deletes the sandbox and records
+> the execution; `slice` writes the replayed and live events with the right `ownerId`, stops without rescheduling when the
+> session ends, and schedules the next slice when the time slice runs out (the cursor it passes on was not checked). Everything platform-specific
+> (how `db` stores rows, how `schedule` re-runs a function, secrets, time limits) is yours to adapt and is untested. That
+> check is not committed as a test.
 
 ## Pieces
 
