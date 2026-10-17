@@ -218,6 +218,126 @@ pub(super) fn spawn_flusher(fleet: Fleet) {
     });
 }
 
+/// How many nodes central talks to at once when it polls or fans out (`FLUXVM_POLL_CONCURRENCY`, default 64).
+pub(super) fn poll_concurrency() -> usize {
+    (env_f64("FLUXVM_POLL_CONCURRENCY", 64.0) as usize).clamp(1, 1024)
+}
+
+/// Runs `f` on every item with at most [`poll_concurrency`] in flight and returns the results in completion order
+/// (put what identifies the item in the result). A task that panics is dropped from the results.
+pub(super) async fn bounded<T, R, F, Fut>(items: Vec<T>, f: F) -> Vec<R>
+where
+    T: Send + 'static,
+    R: Send + 'static,
+    F: Fn(T) -> Fut,
+    Fut: std::future::Future<Output = R> + Send + 'static,
+{
+    let sem = std::sync::Arc::new(Semaphore::new(poll_concurrency()));
+    let mut set = tokio::task::JoinSet::new();
+    for item in items {
+        let Ok(permit) = sem.clone().acquire_owned().await else {
+            break;
+        };
+        let fut = f(item);
+        set.spawn(async move {
+            let r = fut.await;
+            drop(permit);
+            r
+        });
+    }
+    let mut out = Vec::with_capacity(set.len());
+    while let Some(joined) = set.join_next().await {
+        if let Ok(r) = joined {
+            out.push(r);
+        }
+    }
+    out
+}
+
+/// Filters and paging for `GET /fleet/nodes`.
+#[derive(Default)]
+pub(super) struct NodeQuery {
+    pub(super) limit: Option<usize>,
+    pub(super) cursor: Option<String>,
+    healthy: Option<bool>,
+    cordoned: Option<bool>,
+    outdated: Option<bool>,
+    version: Option<String>,
+    labels: Vec<(String, String)>,
+    pub(super) summary: bool,
+}
+
+impl NodeQuery {
+    pub(super) fn parse(raw: &str) -> Result<Self, String> {
+        let mut q = NodeQuery::default();
+        if raw.is_empty() {
+            return Ok(q);
+        }
+        let url = reqwest::Url::parse(&format!("http://x/?{raw}"))
+            .map_err(|e| format!("bad query: {e}"))?;
+        let flag = |k: &str, v: &str| -> Result<bool, String> {
+            match v {
+                "true" | "1" => Ok(true),
+                "false" | "0" => Ok(false),
+                _ => Err(format!("{k} must be true or false")),
+            }
+        };
+        for (k, v) in url.query_pairs() {
+            match &*k {
+                "limit" => {
+                    let n: usize = v.parse().map_err(|_| "limit must be a number".to_owned())?;
+                    if !(1..=5000).contains(&n) {
+                        return Err("limit must be between 1 and 5000".into());
+                    }
+                    q.limit = Some(n);
+                }
+                "cursor" => q.cursor = Some(v.into_owned()),
+                "healthy" => q.healthy = Some(flag("healthy", &v)?),
+                "cordoned" => q.cordoned = Some(flag("cordoned", &v)?),
+                "outdated" => q.outdated = Some(flag("outdated", &v)?),
+                "summary" => q.summary = flag("summary", &v)?,
+                "version" => q.version = Some(v.into_owned()),
+                "label" => {
+                    let (lk, lv) = v.split_once('=').ok_or("label must be key=value")?;
+                    q.labels.push((lk.to_owned(), lv.to_owned()));
+                }
+                other => return Err(format!("unknown query parameter '{other}'")),
+            }
+        }
+        Ok(q)
+    }
+
+    pub(super) fn matches(&self, n: &super::NodeInfo) -> bool {
+        self.healthy.is_none_or(|h| n.healthy() == h)
+            && self.cordoned.is_none_or(|c| n.cordoned == c)
+            && self.outdated.is_none_or(|o| n.outdated == o)
+            && self.version.as_ref().is_none_or(|v| &n.agent_version == v)
+            && self.labels.iter().all(|(k, v)| n.labels.get(k) == Some(v))
+    }
+}
+
+/// Counts for `GET /fleet/nodes?summary=true`: a fleet-sized answer in a few hundred bytes.
+pub(super) fn summarize<'a>(nodes: impl Iterator<Item = &'a super::NodeInfo>) -> serde_json::Value {
+    let (mut total, mut healthy, mut cordoned, mut outdated, mut unreachable) = (0, 0, 0, 0, 0);
+    let mut versions: std::collections::BTreeMap<String, usize> = Default::default();
+    for n in nodes {
+        total += 1;
+        healthy += n.healthy() as usize;
+        cordoned += n.cordoned as usize;
+        outdated += n.outdated as usize;
+        unreachable += (!n.daemon_reachable()) as usize;
+        *versions
+            .entry(if n.agent_version.is_empty() {
+                "unknown".into()
+            } else {
+                n.agent_version.clone()
+            })
+            .or_default() += 1;
+    }
+    json!({"summary": {"total": total, "healthy": healthy, "unhealthy": total - healthy, "cordoned": cordoned,
+                       "outdated": outdated, "daemon_unreachable": unreachable, "by_agent_version": versions}})
+}
+
 /// Advice to lengthen the heartbeat interval once the fleet is big: none up to 2,000 nodes (a node keeps its own
 /// setting), then 11 s and up, never more than 15 s (the stale window is 30 s). Nodes that predate the field ignore
 /// it, and a node never shortens its own interval because of it.
@@ -262,6 +382,32 @@ mod tests {
         assert_eq!(next_interval_secs(1_000_000), Some(15));
     }
 
+    #[tokio::test]
+    async fn bounded_runs_everything_with_a_cap_on_concurrency() {
+        use std::sync::atomic::AtomicUsize;
+        let (now, peak) = (
+            std::sync::Arc::new(AtomicUsize::new(0)),
+            std::sync::Arc::new(AtomicUsize::new(0)),
+        );
+        let out = bounded((0..300).collect::<Vec<u32>>(), |i| {
+            let (now, peak) = (now.clone(), peak.clone());
+            async move {
+                let n = now.fetch_add(1, Ordering::SeqCst) + 1;
+                peak.fetch_max(n, Ordering::SeqCst);
+                tokio::time::sleep(Duration::from_millis(5)).await;
+                now.fetch_sub(1, Ordering::SeqCst);
+                i
+            }
+        })
+        .await;
+        assert_eq!(out.len(), 300);
+        assert!(peak.load(Ordering::SeqCst) <= poll_concurrency());
+        assert!(
+            peak.load(Ordering::SeqCst) > 1,
+            "it should actually run in parallel"
+        );
+    }
+
     #[test]
     fn bucket_refuses_past_the_burst_and_says_when_to_retry() {
         let a = Admission::new(10.0, 3.0, 100);
@@ -281,5 +427,97 @@ mod tests {
         drop(p1);
         assert!(a.admit().is_ok());
         drop(p2);
+    }
+
+    async fn get(app: &axum::Router, uri: &str) -> (u16, serde_json::Value) {
+        use tower::ServiceExt;
+        let req = axum::http::Request::builder()
+            .uri(uri)
+            .header("authorization", "Bearer adm")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        let status = resp.status().as_u16();
+        let bytes = axum::body::to_bytes(resp.into_body(), 1 << 22)
+            .await
+            .unwrap();
+        (
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(json!(null)),
+        )
+    }
+
+    #[tokio::test]
+    async fn the_node_list_pages_filters_and_summarizes() {
+        use tower::ServiceExt;
+        let dir = tempfile::tempdir().unwrap();
+        let app = super::super::router(super::super::CentralConfig {
+            state_dir: dir.path().to_path_buf(),
+            token: Some("adm".into()),
+            reconcile_interval: None,
+            ha: None,
+        });
+        for i in 0..25 {
+            let body = json!({"name": format!("n{i:02}"), "fluxvm_url": "http://x", "vcpus_total": 2, "memory_mib_total": 2048,
+                "vm_count": 0, "labels": {"zone": if i % 2 == 0 { "a" } else { "b" }},
+                "agent_version": if i < 10 { "0.4.9" } else { "0.4.12" }});
+            let req = axum::http::Request::builder()
+                .method("POST")
+                .uri("/fleet/register")
+                .header("authorization", "Bearer adm")
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(body.to_string()))
+                .unwrap();
+            assert_eq!(app.clone().oneshot(req).await.unwrap().status(), 200);
+        }
+        // No query: everything, as before.
+        let (s, v) = get(&app, "/fleet/nodes").await;
+        assert_eq!(
+            (
+                s,
+                v["items"].as_array().unwrap().len(),
+                v["truncated"].clone()
+            ),
+            (200, 25, json!(false))
+        );
+        // Paging walks the whole list once, in name order.
+        let (mut seen, mut cursor) = (Vec::new(), String::new());
+        loop {
+            let uri = if cursor.is_empty() {
+                "/fleet/nodes?limit=10".to_owned()
+            } else {
+                format!("/fleet/nodes?limit=10&cursor={cursor}")
+            };
+            let (_, v) = get(&app, &uri).await;
+            seen.extend(
+                v["items"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|n| n["name"].as_str().unwrap().to_owned()),
+            );
+            assert_eq!(v["total"], 25);
+            match v["next_cursor"].as_str() {
+                Some(c) => cursor = c.to_owned(),
+                None => break,
+            }
+        }
+        assert_eq!(seen.len(), 25);
+        assert!(seen.windows(2).all(|w| w[0] < w[1]));
+        // Filters.
+        let (_, v) = get(&app, "/fleet/nodes?label=zone%3Da").await;
+        assert_eq!(v["total"], 13);
+        let (_, v) = get(&app, "/fleet/nodes?version=0.4.9&healthy=true").await;
+        assert_eq!(v["total"], 10);
+        let (_, v) = get(&app, "/fleet/nodes?cordoned=true").await;
+        assert_eq!(v["total"], 0);
+        // Summary.
+        let (_, v) = get(&app, "/fleet/nodes?summary=true").await;
+        assert_eq!(v["summary"]["total"], 25);
+        assert_eq!(v["summary"]["by_agent_version"]["0.4.12"], 15);
+        // Bad input is a 400, not an empty list.
+        assert_eq!(get(&app, "/fleet/nodes?limit=0").await.0, 400);
+        assert_eq!(get(&app, "/fleet/nodes?bogus=1").await.0, 400);
+        assert_eq!(get(&app, "/fleet/nodes?label=nokv").await.0, 400);
     }
 }

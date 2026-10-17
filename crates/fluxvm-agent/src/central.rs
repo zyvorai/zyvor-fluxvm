@@ -1233,10 +1233,38 @@ fn node_json(n: &NodeInfo) -> Value {
     })
 }
 
-async fn list_nodes(State(fleet): State<Fleet>) -> Json<Value> {
+/// `GET /fleet/nodes`. With no query it returns every node, as it always did. Query parameters: `limit` (1-5000) and
+/// `cursor` (the `next_cursor` of the previous page; nodes are ordered by name), `healthy=true|false`,
+/// `cordoned=true|false`, `outdated=true|false`, `version=<agent version>`, `label=k=v` (repeatable, all must match),
+/// and `summary=true` for counts only. `total` is the number of matches before paging; `truncated` is true when
+/// `limit` cut the list and `next_cursor` says where to continue.
+async fn list_nodes(
+    State(fleet): State<Fleet>,
+    axum::extract::RawQuery(query): axum::extract::RawQuery,
+) -> Result<Json<Value>, AppError> {
+    let q = registry::NodeQuery::parse(query.as_deref().unwrap_or(""))
+        .map_err(|e| AppError(StatusCode::BAD_REQUEST, e))?;
     let nodes = fleet.nodes.lock().await;
-    let items: Vec<Value> = nodes.values().map(node_json).collect();
-    Json(json!({"items": items}))
+    if q.summary {
+        return Ok(Json(registry::summarize(nodes.values())));
+    }
+    let mut matching: Vec<&NodeInfo> = nodes.values().filter(|n| q.matches(n)).collect();
+    matching.sort_by(|a, b| a.name.cmp(&b.name));
+    let total = matching.len();
+    if let Some(c) = &q.cursor {
+        matching.retain(|n| n.name.as_str() > c.as_str());
+    }
+    let truncated = q.limit.is_some_and(|l| matching.len() > l);
+    if let Some(l) = q.limit {
+        matching.truncate(l);
+    }
+    let next_cursor = truncated
+        .then(|| matching.last().map(|n| n.name.clone()))
+        .flatten();
+    let items: Vec<Value> = matching.into_iter().map(node_json).collect();
+    Ok(Json(
+        json!({"items": items, "total": total, "truncated": truncated, "next_cursor": next_cursor}),
+    ))
 }
 
 /// `GET /fleet/nodes/{name}` — exactly one node's own record (the same
@@ -2227,50 +2255,50 @@ async fn list_vms_all(fleet: &Fleet) -> Json<Value> {
         (targets, unreachable)
     };
     let mut items = Vec::new();
-    for node in targets {
-        match fleet
-            .http
-            .get(format!("{}/v1/vms", node.fluxvm_url))
-            .send()
-            .await
-        {
-            Ok(resp) => {
-                let status = resp.status();
-                match resp.json::<Value>().await {
-                    Ok(body) => {
-                        if !status.is_success() {
+    // All nodes at once (bounded); a node that cannot answer is named in `unreachable_nodes`, never dropped silently.
+    let answers = registry::bounded(targets, |node| {
+        let http = fleet.http.clone();
+        async move {
+            let r = http.get(format!("{}/v1/vms", node.fluxvm_url)).send().await;
+            let outcome = match r {
+                Ok(resp) => {
+                    let status = resp.status();
+                    match resp.json::<Value>().await {
+                        Ok(body) if status.is_success() => Ok(body
+                            .get("items")
+                            .and_then(|v| v.as_array())
+                            .cloned()
+                            .unwrap_or_default()),
+                        Ok(body) => {
                             tracing::warn!(node = %node.name, %status, body = %body, "node rejected fleet-wide list");
-                            unreachable.push(json!({
-                                "node": node.name,
-                                "reason": format!("node rejected list ({status}): {body}"),
-                            }));
-                            continue;
+                            Err(format!("node rejected list ({status}): {body}"))
                         }
-                        if let Some(node_items) = body.get("items").and_then(|v| v.as_array()) {
-                            for mut vm in node_items.clone() {
-                                if let Some(obj) = vm.as_object_mut() {
-                                    obj.insert("node".into(), json!(node.name));
-                                }
-                                items.push(vm);
-                            }
+                        Err(e) => {
+                            tracing::warn!(node = %node.name, error = %e, "failed to parse node's VM list");
+                            Err(format!("failed to parse node's VM list: {e}"))
                         }
-                    }
-                    Err(e) => {
-                        tracing::warn!(node = %node.name, error = %e, "failed to parse node's VM list");
-                        unreachable.push(json!({
-                            "node": node.name,
-                            "reason": format!("failed to parse node's VM list: {e}"),
-                        }));
                     }
                 }
+                Err(e) => {
+                    tracing::warn!(node = %node.name, error = %e, "failed to reach node for fleet-wide list");
+                    Err(format!("unreachable: {e}"))
+                }
+            };
+            (node.name, outcome)
+        }
+    })
+    .await;
+    for (node, outcome) in answers {
+        match outcome {
+            Ok(node_items) => {
+                for mut vm in node_items {
+                    if let Some(obj) = vm.as_object_mut() {
+                        obj.insert("node".into(), json!(node));
+                    }
+                    items.push(vm);
+                }
             }
-            Err(e) => {
-                tracing::warn!(node = %node.name, error = %e, "failed to reach node for fleet-wide list");
-                unreachable.push(json!({
-                    "node": node.name,
-                    "reason": format!("unreachable: {e}"),
-                }));
-            }
+            Err(reason) => unreachable.push(json!({"node": node, "reason": reason})),
         }
     }
     Json(json!({"items": items, "unreachable_nodes": unreachable}))

@@ -4,7 +4,7 @@
 //! Fleet metrics: a collector that samples every healthy node's `GET /v1/stats`, a bounded in-memory history per VM
 //! and per node, the graphs' API and a Prometheus endpoint.
 //!
-//! * The collector polls every [`DEFAULT_INTERVAL`] (`--metrics-interval-secs`), at most [`MAX_CONCURRENT_POLLS`]
+//! * The collector polls every [`DEFAULT_INTERVAL`] (`--metrics-interval-secs`), at most `FLUXVM_POLL_CONCURRENCY` (default 64)
 //!   nodes at a time, each with a [`POLL_TIMEOUT`] and a [`MAX_BODY`] cap. Only the HA leader collects.
 //! * Nodes report cumulative counters; rates are taken between two consecutive samples of the same node, so the
 //!   first sample after a node (or VM) appears has no CPU or I/O rate yet. A counter that goes backwards (a VM
@@ -36,7 +36,24 @@ const KEEP_POINTS: usize = 24 * 60;
 const KEEP_SECS: i64 = KEEP_POINTS as i64 * STEP_SECS;
 pub(super) const MAX_VM_SERIES: usize = 1000;
 pub(super) const MAX_NODE_SERIES: usize = 500;
-const MAX_CONCURRENT_POLLS: usize = 16;
+
+/// The series caps, raised or lowered with `FLUXVM_METRICS_MAX_NODE_SERIES` / `FLUXVM_METRICS_MAX_VM_SERIES`. Each
+/// series costs about 50 KiB of history, so 10,000 node series is about 500 MiB: raise it only with the memory to match.
+/// Series past the cap are counted in `fluxvm_central_metrics_series_dropped_total`.
+fn cap(var: &str, default: usize) -> usize {
+    std::env::var(var)
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(default)
+}
+fn max_node_series() -> usize {
+    static V: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *V.get_or_init(|| cap("FLUXVM_METRICS_MAX_NODE_SERIES", MAX_NODE_SERIES))
+}
+fn max_vm_series() -> usize {
+    static V: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *V.get_or_init(|| cap("FLUXVM_METRICS_MAX_VM_SERIES", MAX_VM_SERIES))
+}
 const POLL_TIMEOUT: Duration = Duration::from_secs(5);
 /// Largest `/v1/stats` body accepted from a node.
 const MAX_BODY: usize = 4 << 20;
@@ -263,7 +280,7 @@ impl MetricsStore {
         let ts = at.floor() as i64;
         let mut g = lock(&self.inner);
         let g = &mut *g;
-        if g.nodes.contains_key(node) || g.nodes.len() < MAX_NODE_SERIES {
+        if g.nodes.contains_key(node) || g.nodes.len() < max_node_series() {
             let e = g
                 .nodes
                 .entry(node.to_owned())
@@ -306,7 +323,7 @@ impl MetricsStore {
                 continue;
             }
             let key = (node.to_owned(), v.id.clone());
-            if !g.vms.contains_key(&key) && g.vms.len() >= MAX_VM_SERIES {
+            if !g.vms.contains_key(&key) && g.vms.len() >= max_vm_series() {
                 self.series_dropped.fetch_add(1, Ordering::Relaxed);
                 continue;
             }
@@ -435,25 +452,13 @@ pub(super) async fn collect_once(fleet: &Fleet) -> (usize, usize) {
         )
     };
     fleet.metrics.retain_nodes(&registered);
-    let sem = Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_POLLS));
-    let mut set = tokio::task::JoinSet::new();
-    for (name, url) in targets {
-        let Ok(permit) = sem.clone().acquire_owned().await else {
-            break;
-        };
+    let results = super::registry::bounded(targets, |(name, url)| {
         let http = fleet.http.clone();
-        set.spawn(async move {
-            let r = fetch_stats(&http, &url).await;
-            drop(permit);
-            (name, r)
-        });
-    }
+        async move { (name, fetch_stats(&http, &url).await) }
+    })
+    .await;
     let (mut polled, mut failed) = (0, 0);
-    while let Some(joined) = set.join_next().await {
-        let Ok((name, r)) = joined else {
-            failed += 1;
-            continue;
-        };
+    for (name, r) in results {
         polled += 1;
         match r {
             Ok(s) => {
