@@ -93,7 +93,7 @@ Rules:
   Loading an exec policy against an older loaded object fails with a clear
   error; existing policies without an exec list keep working.
 
-Status: verified on a BPF-LSM kernel (Ubuntu 26.04, 7.0.0-34) with
+Status: verified on a BPF-LSM kernel (Ubuntu 26.04, kernels 7.0.0-34 and 7.0.0-38) with
 `scripts/test-vmm-guard-exec-patch-host.sh`: in audit mode an unlisted exec is
 logged and allowed; in enforce mode it returns EPERM, listed binaries still run,
 and the default deny-all exec still blocks everything.
@@ -156,7 +156,7 @@ Behavior:
   arguments to `fluxvm-guard`. Applying packs stays a host-local, root
   operation (`fluxvm-guard apply --rule-pack`), because it writes BPF maps.
 
-Status: verified on the same BPF-LSM kernel by
+Status: verified on the same BPF-LSM kernels (7.0.0-34 and 7.0.0-38) by
 `scripts/test-vmm-guard-exec-patch-host.sh`. With a pack applied in enforce
 mode, a patched exec, a patched file open and a patched device open each return
 EPERM and are counted; unpatched controls are unaffected; audit mode logs and

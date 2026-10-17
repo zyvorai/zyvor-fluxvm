@@ -259,6 +259,7 @@ Every one maps onto what is implemented today. [All eleven](docs/index.md#use-ca
 ## Contributing & community
 
 - **Contributing:** build and test commands, PR expectations and repo layout, in [CONTRIBUTING.md](CONTRIBUTING.md).
+- **Host hardening:** TOTP step-up for exec, a signed exec allow-list and signed rule packs, in [docs/host-hardening.md](docs/host-hardening.md).
 - **Security:** the current hardening bar and how to report a vulnerability, in [SECURITY.md](SECURITY.md).
 - **Changelog:** [CHANGELOG.md](CHANGELOG.md).
 
