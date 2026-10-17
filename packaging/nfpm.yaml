@@ -1,0 +1,45 @@
+# One description of the Linux packages, read by nfpm (https://nfpm.goreleaser.com). scripts/package-linux-pkgs.sh
+# stages the tree from scripts/package-linux.sh into a package root and runs nfpm with these variables:
+#   FLUXVM_VERSION  FLUXVM_ARCH (amd64|arm64)  FLUXVM_ROOT (the package root, laid out as the target filesystem)
+# The tarball layout is bin/ lib/ share/; the root maps it to /usr/bin, /usr/lib/fluxvm and /usr/share/fluxvm.
+name: fluxvm
+arch: ${FLUXVM_ARCH}
+platform: linux
+version: ${FLUXVM_VERSION}
+version_schema: semver
+section: admin
+priority: optional
+maintainer: Zyvor AI Labs <ssahani@zyvor.dev>
+vendor: Zyvor AI Labs
+homepage: https://zyvor.dev
+license: Apache-2.0
+description: |
+  Zyvor FluxVM: microVM and VM control plane.
+  The daemon (fluxctl serve), the CLI, the hypervisor, the fleet agent, the Kubernetes operator, the eBPF
+  objects and the static guest agent.
+
+contents:
+  - src: ${FLUXVM_ROOT}/usr/
+    dst: /usr/
+    type: tree
+
+scripts:
+  postinstall: packaging/deb/postinst.sh
+  preremove: packaging/deb/prerm.sh
+  postremove: packaging/deb/postrm.sh
+
+overrides:
+  deb:
+    depends:
+      - libc6 (>= 2.35)
+      - libsystemd0
+      - libhivex0
+      - iproute2
+      - qemu-system-x86 | qemu-system-arm
+      - qemu-utils
+    recommends:
+      - cloud-image-utils
+      - nftables
+      - bpftool
+      - dnsmasq-base
+      - swtpm

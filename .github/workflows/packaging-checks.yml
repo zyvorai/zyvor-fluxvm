@@ -8,6 +8,8 @@ on:
       - 'packaging/**'
       - 'scripts/package-linux.sh'
       - 'scripts/test-package-manifest.sh'
+      - 'scripts/package-linux-pkgs.sh'
+      - 'scripts/test-deb.sh'
       - 'scripts/build-ebpf.sh'
       - '.github/workflows/packaging-checks.yml'
   pull_request:
@@ -15,6 +17,8 @@ on:
       - 'packaging/**'
       - 'scripts/package-linux.sh'
       - 'scripts/test-package-manifest.sh'
+      - 'scripts/package-linux-pkgs.sh'
+      - 'scripts/test-deb.sh'
       - 'scripts/build-ebpf.sh'
       - '.github/workflows/packaging-checks.yml'
 
@@ -34,3 +38,17 @@ jobs:
         run: |
           scripts/package-linux.sh --check-manifest
           scripts/test-package-manifest.sh
+
+  deb:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Maintainer scripts and packaging scripts pass shellcheck
+        run: shellcheck packaging/deb/*.sh scripts/package-linux-pkgs.sh scripts/test-deb.sh
+      - name: Install nfpm
+        run: |
+          curl -fsSL -o /tmp/nfpm.tgz https://github.com/goreleaser/nfpm/releases/download/v2.48.0/nfpm_2.48.0_Linux_x86_64.tar.gz
+          echo "6d7f9a28b2f397934403950fcbba83f598b08d02edbe79a0815b3b4897341750  /tmp/nfpm.tgz" | sha256sum -c -
+          sudo tar -xzf /tmp/nfpm.tgz -C /usr/local/bin nfpm
+      - name: Install, upgrade, remove and purge in a clean container
+        run: scripts/test-deb.sh
