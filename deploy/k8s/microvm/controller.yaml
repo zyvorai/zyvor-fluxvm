@@ -14,7 +14,7 @@ spec:
       serviceAccountName: fluxvm-microvm-controller
       containers:
         - name: controller
-          image: ghcr.io/zyvorai/fluxvm:0.1.0
+          image: ghcr.io/zyvorai/fluxvm:__VERSION__@sha256:__DIGEST__
           command: ["fluxvm-microvm", "controller"]
           env: [{name: RUST_LOG, value: info}]
           securityContext:
