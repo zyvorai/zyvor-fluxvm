@@ -268,7 +268,23 @@ fn handle_connection(
     if reader.read_line(&mut line).context("reading request")? == 0 {
         return Ok(()); // peer closed without sending anything
     }
-    let envelope: Envelope = decode_line(&line).context("parsing request")?;
+    let envelope: Envelope = match decode_line(&line) {
+        Ok(envelope) => envelope,
+        Err(_) => {
+            // Answer instead of dropping the connection, so a newer host can tell "this agent
+            // does not know that request" from a transient fault. This runs before authentication,
+            // so the answer is generic: no echo of the request, no version, no list of operations.
+            writer.write_all(
+                encode_line(&AgentResponse::Error {
+                    message: "unrecognised request: this agent cannot parse it and may be older than the host"
+                        .into(),
+                })?
+                .as_bytes(),
+            )?;
+            writer.flush()?;
+            return Ok(());
+        }
+    };
 
     let auth = token_state
         .lock()
@@ -1547,6 +1563,37 @@ mod tests {
                 std::fs::File::from_raw_fd(fds[1]),
             )
         }
+    }
+
+    #[test]
+    fn an_unparsable_request_gets_an_error_answer_not_a_silent_close() {
+        let (agent_end, client_end) = socketpair();
+        let dir = tempfile::tempdir().unwrap();
+        let tokens = std::sync::Mutex::new(state(dir.path(), "tok-0123456789abcdef"));
+        let mut client_reader = BufReader::new(client_end.try_clone().unwrap());
+        let mut client_writer = client_end;
+        std::thread::scope(|scope| {
+            let agent = scope.spawn(|| handle_connection(agent_end, &tokens, -1));
+            client_writer
+                .write_all(b"{\"op\":\"a-request-from-a-newer-host\"}\n")
+                .unwrap();
+            client_writer.flush().unwrap();
+            let mut answer = String::new();
+            client_reader.read_line(&mut answer).unwrap();
+            assert!(!answer.is_empty(), "the agent closed without answering");
+            let parsed: AgentResponse = decode_line(&answer).unwrap();
+            match parsed {
+                AgentResponse::Error { message } => {
+                    assert!(message.contains("unrecognised request"), "{message}");
+                    assert!(
+                        !message.contains("a-request-from-a-newer-host"),
+                        "must not echo the request: {message}"
+                    );
+                }
+                other => panic!("expected an error, got {other:?}"),
+            }
+            agent.join().unwrap().unwrap();
+        });
     }
 
     #[test]
