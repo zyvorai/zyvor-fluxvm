@@ -10,7 +10,7 @@ how each child gets its own identity. Written from `crates/fluxvm-scheduler/src/
 | Piece | State |
 |---|---|
 | Fork flow, `MAP_PRIVATE` restore with eager fallback, `ResetIdentity`, `?ready=exec`, bench scripts | Implemented and type-checked. Unit tests cover `check_forkable`, hostname validation and request/response shapes. |
-| Any of it running against real KVM guests | **Not verified on hardware.** No fork, restore or identity reset from this batch has been run end to end. `bench-fork.sh` and `bench-first-command.sh` have produced no numbers yet, so this page makes no latency or memory claims. |
+| Any of it running against real KVM guests | **Partly verified on one Linux host.** With `fluxvm_engine = "kvm"`, `POST /v1/vms/{id}/fork` created a child from a running flux-vm guest (3 of 3 with `identity: "best-effort"`). With the default `identity: "unique"` it failed on that guest: the child's agent closed the connection during the identity reset, so the cause is not understood. With the default Firecracker engine it answers 400. The timings (26–59 s per child) were dominated by copying the disk on ext4, so this page still makes no latency or memory claims. `bench-first-command.sh` does not pass `identity`, so its fork section fails on that guest. |
 
 ## Fork flow
 
