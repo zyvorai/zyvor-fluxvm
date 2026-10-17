@@ -4695,7 +4695,7 @@ async fn run_remote(
                     command,
                 } => {
                     let mut body = json!({
-                        "command": command.join(" "),
+                        "command": agent_session::guest_command(&command),
                         "timeout_seconds": timeout_seconds,
                         "ttl_seconds": ttl_seconds,
                     });
@@ -6201,7 +6201,7 @@ async fn main() -> Result<()> {
             command,
         } => {
             if !command.is_empty() {
-                let response = m.exec(id, command.join(" "), None).await?;
+                let response = m.exec(id, agent_session::guest_command(&command), None).await?;
                 println!("{}", serde_json::to_string_pretty(&response)?);
             } else {
                 run_console_session(&m, id, cols, rows).await?;
@@ -6336,7 +6336,7 @@ async fn main() -> Result<()> {
                 None => None,
             };
             let response = m
-                .exec_with_policy(id, command.join(" "), timeout_seconds, policy)
+                .exec_with_policy(id, agent_session::guest_command(&command), timeout_seconds, policy)
                 .await?;
             println!("{}", serde_json::to_string_pretty(&response)?);
         }

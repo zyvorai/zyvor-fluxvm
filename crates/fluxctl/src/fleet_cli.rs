@@ -604,7 +604,7 @@ async fn dispatch(
             id,
             timeout,
             command,
-        } => exec(central, token, &out, &node, &id, timeout, command.join(" ")).await,
+        } => exec(central, token, &out, &node, &id, timeout, crate::agent_session::guest_command(&command)).await,
         FleetCommand::Top { sort, limit } => metrics::top(central, token, &out, &sort, limit).await,
         FleetCommand::Metrics { vm, range } => {
             metrics::show(central, token, &out, &vm, &range).await
@@ -615,7 +615,7 @@ async fn dispatch(
             command,
         } => {
             let (node, id, _) = resolve_vm(central, token, &vm).await?;
-            exec(central, token, &out, &node, &id, timeout, command.join(" ")).await
+            exec(central, token, &out, &node, &id, timeout, crate::agent_session::guest_command(&command)).await
         }
         FleetCommand::Screen {
             vm,

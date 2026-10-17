@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- **`exec`, `shell`, `sandbox run` and `fleet exec` keep argument boundaries.** Several words after `--` were joined with
+  spaces, so `fluxctl exec ID -- sh -c 'a b'` ran `sh -c a b` and `{{.Names}}`-style arguments were lost. They now use
+  the same rule as `agent exec`: one argument is a shell line as typed, several are quoted word by word.
 - **Step-up TOTP for exec and writes.** `[[auth.mfa]]` pairs a static API token with a TOTP secret file; guest exec,
   shells and (optionally) every write then need a current code in `X-Fluxvm-Totp` (`fluxctl --totp`). Codes are
   single-use, repeated failures lock the token out, and the audit log records `mfa=`. See docs/host-hardening.md.
