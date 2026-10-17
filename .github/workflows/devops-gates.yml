@@ -25,3 +25,7 @@ jobs:
         run: bash scripts/test-devops-gate.sh
       - name: Upgrade snapshot dry-run
         run: bash scripts/test-upgrade-snapshot.sh
+      - name: guestkit pin matches Cargo.lock
+        run: bash scripts/check-guestkit-pin.sh .
+      - name: guestkit pin checker tests
+        run: bash scripts/test-check-guestkit-pin.sh

@@ -62,11 +62,19 @@ jobs:
         with:
           path: fluxvm
           ref: ${{ github.event.inputs.tag || github.ref }}
-      # fluxvm-image depends on the sibling guestkit project through a relative path.
+      # fluxvm-image depends on the sibling guestkit project through a relative path. It is checked out at the
+      # tag pinned in packaging/guestkit.ref (not its default branch), so a guestkit release cannot change or
+      # break a fluxvm release build; rebuilding an old fluxvm tag uses the guestkit it was released with.
+      - name: Read the pinned guestkit tag
+        id: gk
+        run: echo "ref=$(tr -d '[:space:]' < fluxvm/packaging/guestkit.ref)" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@v7
         with:
           repository: zyvorai/guestkit
           path: guestkit
+          ref: ${{ steps.gk.outputs.ref }}
+      - name: Check the guestkit pin against Cargo.lock and the checkout
+        run: fluxvm/scripts/check-guestkit-pin.sh fluxvm guestkit
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.cross && 'aarch64-unknown-linux-gnu' || '' }}
