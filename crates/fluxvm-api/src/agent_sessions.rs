@@ -36,6 +36,7 @@
 //! * `GET    /v1/agents/sessions/{id}/jobs/{job}`    its state and output from `?offset=`
 //! * `DELETE /v1/agents/sessions/{id}/jobs/{job}`    stop it
 //! * `GET    /v1/agents/sessions/{id}/jobs`          list jobs (command, state, exit code)
+//! * `GET    /v1/agents/sessions/{id}/events/stream` Server-Sent Events: ledger and VM events as they happen, resumable with `Last-Event-ID`
 //! * `GET    /v1/agents/sessions/{id}/jobs/{job}/stream` Server-Sent Events: output from `?offset=` / `Last-Event-ID`, then `exit`
 //! * `POST   /v1/agents/sessions/{id}/jobs/{job}/stdin` write to a job started with `stdin: true`
 //! * `GET    /v1/agents/sessions/{id}/files?path=`   list a directory (or stat a file)
@@ -189,6 +190,7 @@ pub(crate) fn routes() -> Router<Arc<VmManager>> {
             "/v1/agents/sessions/{id}/jobs",
             post(job_start).get(job_list),
         )
+        .route("/v1/agents/sessions/{id}/events/stream", get(events_stream))
         .route(
             "/v1/agents/sessions/{id}/jobs/{job}/stream",
             get(job_stream),
@@ -6365,6 +6367,147 @@ impl Drop for StreamSlot {
     }
 }
 
+const EVENT_STREAM_POLL: std::time::Duration = std::time::Duration::from_millis(500);
+const EVENT_STREAM_MAX_SECS: u64 = 3600;
+const MAX_EVENT_STREAMS: usize = 64;
+static EVENT_STREAMS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+struct EventSlot;
+
+impl Drop for EventSlot {
+    fn drop(&mut self) {
+        EVENT_STREAMS.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct EventsStreamQuery {
+    /// Replay only what happened after this time, then follow. Default: replay everything.
+    #[serde(default)]
+    since: Option<DateTime<Utc>>,
+}
+
+/// Event id of the stream: `<ledger entries delivered>|<RFC 3339 time of the last VM event>`.
+fn event_cursor(ledger_seen: usize, vm_ts: Option<DateTime<Utc>>) -> String {
+    let ts = vm_ts
+        .map(|t| t.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true))
+        .unwrap_or_default();
+    format!("{ledger_seen}|{ts}")
+}
+
+fn parse_event_cursor(v: &str) -> Option<(usize, Option<DateTime<Utc>>)> {
+    let (n, ts) = v.trim().split_once('|')?;
+    let n = n.parse().ok()?;
+    if ts.is_empty() {
+        return Some((n, None));
+    }
+    Some((n, Some(ts.parse().ok()?)))
+}
+
+/// `GET .../events/stream`: Server-Sent Events for the session's own record. `ledger` events carry
+/// one ledger entry (what the API did), `vm` events one hypervisor event (what the VMM saw). The
+/// existing history is replayed first (or only what is newer than `?since=`), then new entries
+/// follow about every 500 ms. Each event's id is a cursor: reconnecting with `Last-Event-ID`
+/// continues with no ledger entry repeated or missed; a VM event that shares its exact timestamp
+/// with the last one seen may repeat (at-least-once). An `error` event ends the stream when the
+/// session is gone or the hour is up. At most 64 streams per host. Needs `read`, like `events`.
+async fn events_stream(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    scope: Option<Extension<SessionScope>>,
+    token_tenant: Option<Extension<TokenTenant>>,
+    Path(id): Path<Uuid>,
+    headers: axum::http::HeaderMap,
+    Query(q): Query<EventsStreamQuery>,
+) -> Result<
+    axum::response::sse::Sse<
+        impl futures::Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>>,
+    >,
+    ApiError,
+> {
+    use axum::response::sse::{Event, KeepAlive, Sse};
+    authorize(role, &scope, id, Op::Read)?;
+    let s = load(&m, id, &caller_tenant(&token_tenant)).await?;
+    let resume = headers
+        .get("last-event-id")
+        .and_then(|v| v.to_str().ok())
+        .and_then(parse_event_cursor);
+    let (mut seen, mut vm_ts) = match (resume, q.since) {
+        (Some(c), _) => c,
+        (None, Some(t)) => {
+            let older = read_ledger(&m, id, None)
+                .iter()
+                .filter(|v| {
+                    v["ts"]
+                        .as_str()
+                        .and_then(|s| s.parse::<DateTime<Utc>>().ok())
+                        .is_some_and(|ts| ts <= t)
+                })
+                .count();
+            (older, Some(t))
+        }
+        (None, None) => (0, None),
+    };
+    if EVENT_STREAMS.fetch_add(1, std::sync::atomic::Ordering::SeqCst) >= MAX_EVENT_STREAMS {
+        EVENT_STREAMS.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        return Err(ApiError {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            message: format!("at most {MAX_EVENT_STREAMS} event streams at once on this host"),
+        });
+    }
+    let slot = EventSlot;
+    let sandbox = s.sandbox_id;
+    let tenant = s.tenant.clone();
+    let stream = async_stream::stream! {
+        let _slot = slot;
+        let began = std::time::Instant::now();
+        let mut vm_seen: Vec<String> = Vec::new();
+        let err = |msg: String| Event::default().event("error").data(json!({"error": msg}).to_string());
+        loop {
+            if began.elapsed().as_secs() > EVENT_STREAM_MAX_SECS {
+                yield Ok(err("stream time limit reached; reconnect with Last-Event-ID".into()));
+                break;
+            }
+            if let Err(e) = load(&m, id, &tenant).await {
+                yield Ok(err(e.message));
+                break;
+            }
+            let fresh: Vec<Value> = read_ledger(&m, id, None).into_iter().skip(seen).collect();
+            for entry in fresh {
+                seen += 1;
+                yield Ok(Event::default().event("ledger").id(event_cursor(seen, vm_ts)).data(entry.to_string()));
+            }
+            if let Some(log) = fluxvm_scheduler::events::global() {
+                let filter = fluxvm_scheduler::EventFilter {
+                    vm: Some(sandbox),
+                    // The filter is strictly-after; step back so events sharing the last timestamp
+                    // are seen again and dropped by `vm_seen` instead of being missed.
+                    since: vm_ts.map(|t| t - chrono::Duration::nanoseconds(1)),
+                    event: None,
+                    limit: Some(500),
+                };
+                let mut events = log.list(&filter).unwrap_or_default();
+                events.sort_by_key(|e| e.ts);
+                for e in events {
+                    let body = json!(e).to_string();
+                    if vm_ts == Some(e.ts) {
+                        if vm_seen.contains(&body) {
+                            continue;
+                        }
+                    } else {
+                        vm_ts = Some(e.ts);
+                        vm_seen.clear();
+                    }
+                    vm_seen.push(body.clone());
+                    yield Ok(Event::default().event("vm").id(event_cursor(seen, vm_ts)).data(body));
+                }
+            }
+            tokio::time::sleep(EVENT_STREAM_POLL).await;
+        }
+    };
+    Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
+}
+
 #[derive(Debug, Deserialize, Default)]
 struct StreamQuery {
     #[serde(default)]
@@ -7745,6 +7888,19 @@ async fn git_branch(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn event_cursor_round_trips() {
+        let ts: DateTime<Utc> = "2026-10-17T01:02:03.123456789Z".parse().unwrap();
+        assert_eq!(
+            parse_event_cursor(&event_cursor(7, Some(ts))),
+            Some((7, Some(ts)))
+        );
+        assert_eq!(parse_event_cursor(&event_cursor(0, None)), Some((0, None)));
+        assert_eq!(parse_event_cursor("garbage"), None);
+        assert_eq!(parse_event_cursor("x|"), None);
+        assert_eq!(parse_event_cursor("3|not-a-time"), None);
+    }
+
     use super::*;
 
     fn pol(v: Value) -> PolicyBody {

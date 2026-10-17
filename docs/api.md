@@ -928,6 +928,27 @@ adds `first_command_ms` (the slowest child) and `first_command` (one
 `{first_command_ms, phases}` object per child). A `vm.first_command` event is recorded for each VM.
 `scripts/bench-first-command.sh` uses it.
 
+### Errors
+
+Every error is JSON: `{"error": "<message>", "code": "<CODE>"}`. Branch on `code` (it does not change); the
+message is for people and may be reworded. The code follows the HTTP status:
+
+| Status | `code` | Typical cause |
+|--------|--------|---------------|
+| 400 | `BAD_REQUEST` | Malformed body, query or `Idempotency-Key` |
+| 401 | `UNAUTHORIZED` | Missing or invalid bearer token |
+| 403 | `FORBIDDEN` | Role or session token does not allow the route |
+| 404 | `NOT_FOUND` | No such VM or session, **or one that belongs to another tenant** (never 403, so ids do not leak) |
+| 409 | `CONFLICT` | State conflict: VM not running, a duplicate in flight, a changeset whose files moved |
+| 413 | `PAYLOAD_TOO_LARGE` | Request body over the limit |
+| 422 | `UNPROCESSABLE` | Same `Idempotency-Key` reused with a different request |
+| 429 | `RATE_LIMITED` | Honour `Retry-After` |
+| 503 | `UNAVAILABLE` | Capacity (for example no free GPU); retry later |
+| other 5xx | `INTERNAL` | Server fault |
+
+Some older routes that build their own error bodies (tunnels, fleet central) still send only `error`; treat a missing
+`code` as unknown and fall back to the status.
+
 ### Idempotency-Key
 
 `POST /v1/vms`, `DELETE /v1/vms/{uuid}`, `POST /v1/vms/{uuid}/snapshot` and
