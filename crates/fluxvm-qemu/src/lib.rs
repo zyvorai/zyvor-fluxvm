@@ -1101,7 +1101,12 @@ mod tests {
     }
 
     fn cfg() -> Config {
-        Config::default()
+        // `build_args` creates `<run_dir>/qmp`; the default `/run/fluxvm` is root-only, so a test run
+        // as an ordinary user (CI, a laptop) would fail on it.
+        Config {
+            run_dir: std::env::temp_dir().join("fluxvm-qemu-tests"),
+            ..Config::default()
+        }
     }
 
     fn ctx() -> LaunchContext {
