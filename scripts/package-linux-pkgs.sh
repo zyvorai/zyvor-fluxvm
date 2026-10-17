@@ -2,10 +2,10 @@
 # Copyright 2026 Zyvor AI Labs · https://zyvor.dev
 # SPDX-License-Identifier: Apache-2.0
 #
-# Builds the .deb (and, once M2 lands, the .rpm) from the tree scripts/package-linux.sh stages, so the tarball and
+# Builds the .deb or the .rpm from the tree scripts/package-linux.sh stages, so the tarball and
 # the packages hold the same files.
 #
-#   scripts/package-linux-pkgs.sh --stage target/package/fluxvm-0.4.12-linux-x86_64 [--format deb] [--out DIR]
+#   scripts/package-linux-pkgs.sh --stage target/package/fluxvm-0.4.12-linux-x86_64 [--format deb|rpm] [--out DIR]
 #
 # Needs nfpm (https://nfpm.goreleaser.com) and a staged tree (package-linux.sh --stage-only). Runs on any OS,
 # because it only moves files. Layout: bin/ -> /usr/bin, lib/ -> /usr/lib/fluxvm, share/ -> /usr/share/fluxvm,
@@ -19,11 +19,11 @@ while [[ $# -gt 0 ]]; do
     --stage) STAGE="$2"; shift 2 ;;
     --format) FORMAT="$2"; shift 2 ;;
     --out) OUT="$2"; shift 2 ;;
-    *) echo "usage: $0 --stage DIR [--format deb] [--out DIR]" >&2; exit 2 ;;
+    *) echo "usage: $0 --stage DIR [--format deb|rpm] [--out DIR]" >&2; exit 2 ;;
   esac
 done
 [[ -d "$STAGE" ]] || { echo "package-linux-pkgs: --stage must be a staged tree" >&2; exit 2; }
-[[ "$FORMAT" == deb ]] || { echo "package-linux-pkgs: format '$FORMAT' is not supported yet (deb only)" >&2; exit 2; }
+case "$FORMAT" in deb|rpm) ;; *) echo "package-linux-pkgs: format '$FORMAT' is not supported (deb or rpm)" >&2; exit 2 ;; esac
 command -v nfpm >/dev/null || { echo "package-linux-pkgs: nfpm is not installed" >&2; exit 2; }
 
 NAME="$(basename "$STAGE")"             # fluxvm-<version>-linux-<arch>
@@ -76,8 +76,12 @@ mkdir -p "$OUT"
 # nfpm expands the variables in the header fields but not in content paths, so the root is substituted here.
 CONF="$OUT/nfpm-$ARCH.yaml"
 sed "s|\${FLUXVM_ROOT}|$(cd "$ROOT" && pwd)|g" packaging/nfpm.yaml > "$CONF"
+# deb: fluxvm_<ver>_<amd64|arm64>.deb. rpm: fluxvm-<ver>-1.<x86_64|aarch64>.rpm, the name rpm tooling expects.
+case "$FORMAT" in
+  deb) PKG="fluxvm_${VERSION}_${ARCH}.deb" ;;
+  rpm) case "$ARCH" in amd64) RARCH=x86_64 ;; *) RARCH=aarch64 ;; esac; PKG="fluxvm-${VERSION}-1.${RARCH}.rpm" ;;
+esac
 FLUXVM_VERSION="$VERSION" FLUXVM_ARCH="$ARCH" \
-  nfpm package --config "$CONF" --packager "$FORMAT" --target "$OUT/fluxvm_${VERSION}_${ARCH}.$FORMAT"
-PKG="fluxvm_${VERSION}_${ARCH}.$FORMAT"
+  nfpm package --config "$CONF" --packager "$FORMAT" --target "$OUT/$PKG"
 if command -v sha256sum >/dev/null; then ( cd "$OUT" && sha256sum "$PKG" > "$PKG.sha256" ); else ( cd "$OUT" && shasum -a 256 "$PKG" > "$PKG.sha256" ); fi
 echo "$OUT/$PKG"

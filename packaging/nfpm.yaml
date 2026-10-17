@@ -43,3 +43,22 @@ overrides:
       - bpftool
       - dnsmasq-base
       - swtpm
+  rpm:
+    # EL9, EL10 and Fedora (checked against the Rocky 9/10 BaseOS+AppStream and Fedora 43 package lists).
+    # hivex-libs is in AppStream on EL9/EL10 and in Fedora; only hivex-devel is in CRB, and EPEL is not needed.
+    # glibc: the binaries are built on ubuntu:22.04 (glibc 2.35), and EL9 ships 2.34, so EL9 refuses the install
+    # until a build on EL9 (or a glibc gate that passes at 2.34) exists. EL10 and Fedora are newer.
+    depends:
+      - glibc >= 2.35
+      - systemd-libs
+      - hivex-libs
+      - iproute
+      - qemu-img
+      - qemu-kvm
+    recommends:
+      - nftables
+      - bpftool
+      - dnsmasq
+      - swtpm
+      - xorriso
+      - cloud-utils

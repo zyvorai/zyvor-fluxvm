@@ -14,6 +14,10 @@ on:
       - 'scripts/test-bootstrap.sh'
       - 'scripts/make-release-manifest.sh'
       - 'scripts/make-sbom.py'
+      - 'scripts/test-rpm.sh'
+      - 'scripts/test-vendor-lock.sh'
+      - 'scripts/install-firecracker.sh'
+      - 'scripts/install-cloud-hypervisor.sh'
       - 'scripts/build-ebpf.sh'
       - '.github/workflows/packaging-checks.yml'
   pull_request:
@@ -27,6 +31,10 @@ on:
       - 'scripts/test-bootstrap.sh'
       - 'scripts/make-release-manifest.sh'
       - 'scripts/make-sbom.py'
+      - 'scripts/test-rpm.sh'
+      - 'scripts/test-vendor-lock.sh'
+      - 'scripts/install-firecracker.sh'
+      - 'scripts/install-cloud-hypervisor.sh'
       - 'scripts/build-ebpf.sh'
       - '.github/workflows/packaging-checks.yml'
 
@@ -52,7 +60,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Maintainer scripts and packaging scripts pass shellcheck
-        run: shellcheck packaging/deb/*.sh scripts/package-linux-pkgs.sh scripts/test-deb.sh
+        run: shellcheck packaging/deb/*.sh scripts/package-linux-pkgs.sh scripts/test-deb.sh scripts/test-rpm.sh
       - name: Install nfpm
         run: |
           curl -fsSL -o /tmp/nfpm.tgz https://github.com/goreleaser/nfpm/releases/download/v2.48.0/nfpm_2.48.0_Linux_x86_64.tar.gz
@@ -71,3 +79,24 @@ jobs:
         run: scripts/test-bootstrap.sh
       - name: The SBOM generator runs on the lock file
         run: python3 scripts/make-sbom.py --version 0.0.0 | jq -e '.components | length > 100'
+  rpm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install nfpm and rpm
+        run: |
+          curl -fsSL -o /tmp/nfpm.tgz https://github.com/goreleaser/nfpm/releases/download/v2.48.0/nfpm_2.48.0_Linux_x86_64.tar.gz
+          echo "6d7f9a28b2f397934403950fcbba83f598b08d02edbe79a0815b3b4897341750  /tmp/nfpm.tgz" | sha256sum -c -
+          sudo tar -xzf /tmp/nfpm.tgz -C /usr/local/bin nfpm
+          sudo apt-get update -qq && sudo apt-get install -y -qq rpm
+      - name: Inspect the rpm, then install, upgrade and erase it in Fedora and Rocky 10 containers
+        run: scripts/test-rpm.sh
+
+  vendor-lock:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install scripts and the lock file pass shellcheck
+        run: shellcheck scripts/install-firecracker.sh scripts/install-cloud-hypervisor.sh scripts/test-vendor-lock.sh
+      - name: packaging/vendor.lock is well formed and the install scripts accept the pin flags (offline)
+        run: scripts/test-vendor-lock.sh
