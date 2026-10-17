@@ -24,6 +24,23 @@ const DEFAULT_TIMEOUT: Duration = Duration::from_secs(15);
 /// by `timeout` (the whole round trip: connect + handshake + exchange).
 /// `vm.request.agent.token` (if set — see `AgentSpec::token`) rides along in
 /// every request automatically; callers never need to supply it themselves.
+/// The guest agent accepted the connection and closed it without answering. An agent does this
+/// for a request it cannot parse, so the usual cause is an agent older than the host (for
+/// example one that predates `ResetIdentity`), not a transient fault.
+#[derive(Debug)]
+pub struct AgentClosedConnection;
+
+impl std::fmt::Display for AgentClosedConnection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(
+            "guest agent closed the connection without responding; it may be older than this host \
+             and unable to parse the request (rebuild the image with the current fluxvm-guest-agent)",
+        )
+    }
+}
+
+impl std::error::Error for AgentClosedConnection {}
+
 pub async fn call(
     vm: &VmRecord,
     request: AgentRequest,
@@ -90,7 +107,7 @@ async fn uds_proxy_call(
         .await
         .context("reading agent response")?;
     if response_line.is_empty() {
-        bail!("guest agent closed the connection without responding");
+        return Err(AgentClosedConnection.into());
     }
     decode_line(&response_line).context("parsing agent response")
 }
@@ -329,7 +346,7 @@ async fn open_shell_proxy(
         .await
         .context("reading ShellOpened response")?;
     if line.is_empty() {
-        bail!("guest agent closed the connection without responding");
+        return Err(AgentClosedConnection.into());
     }
     match decode_line::<AgentResponse>(&String::from_utf8_lossy(&line))
         .context("parsing ShellOpened response")?

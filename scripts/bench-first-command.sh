@@ -13,6 +13,8 @@
 # Sections are skipped when their input is missing: warm claims need POOL
 # (an existing pool with >= N ready members), forks need FORK_SRC (a running
 # flux-vm VM; it is never deleted). Only VMs this script created are deleted.
+# Forks need the in-tree KVM engine (fluxvm_engine = "kvm") and, for the default identity=unique, a guest agent that
+# knows ResetIdentity: rebuild old images with scripts/build-guest-agent-static.sh, or run with IDENTITY=best-effort.
 set -euo pipefail
 
 if [[ "$(uname -s)" != "Linux" ]]; then
@@ -28,6 +30,8 @@ KERNEL="${KERNEL:-${FLUXVM_BENCH_KERNEL:-/var/lib/fluxvm/kernels/vmlinux}}"
 MEM_MIB="${MEM_MIB:-256}"
 POOL="${POOL:-}"
 FORK_SRC="${FORK_SRC:-}"
+# Fork identity mode (unique | best-effort | preserve); empty uses the server default (unique).
+IDENTITY="${IDENTITY:-}"
 PREFIX="firstcmd-$$"
 AUTH_HDR=()
 if [[ -n "${FLUXVM_TOKEN:-}" ]]; then
@@ -107,8 +111,19 @@ else
 fi
 
 if [[ -n "$FORK_SRC" ]]; then
+  fork_err_shown=0
   for ((i = 1; i <= N; i++)); do
-    body=$(post "/v1/vms/${FORK_SRC}/fork?ready=exec" "{\"count\":1,\"namePrefix\":\"${PREFIX}-fork-${i}\"}")
+    identity_json=""
+    [[ -n "$IDENTITY" ]] && identity_json=",\"identity\":\"${IDENTITY}\""
+    # No `curl -f` here: on failure the server's error says why, and that is worth showing once.
+    body=$(curl -s -X POST "${API}/v1/vms/${FORK_SRC}/fork?ready=exec" "${AUTH_HDR[@]}" -H 'Content-Type: application/json' \
+      -d "{\"count\":1,\"namePrefix\":\"${PREFIX}-fork-${i}\"${identity_json}}" || true)
+    if (( fork_err_shown == 0 )) && printf '%s' "$body" | grep -q '"error"'; then
+      fork_err_shown=1
+      echo "bench-first-command: fork failed: $(printf '%s' "$body" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("error",""))' 2>/dev/null)" >&2
+      echo "bench-first-command: the default identity=unique needs a guest agent that knows ResetIdentity (2026-10-08 or later);" >&2
+      echo "bench-first-command: rebuild the image with scripts/build-guest-agent-static.sh, or set IDENTITY=best-effort to skip the reset." >&2
+    fi
     record "$WORKDIR/fork.txt" "$body"
   done
 else
