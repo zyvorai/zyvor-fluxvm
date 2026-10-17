@@ -1,0 +1,35 @@
+# Copyright 2026 Zyvor
+# SPDX-License-Identifier: Apache-2.0
+
+# The per-node fleet heartbeat client (`fluxvm-agent node`). Disabled by default: it needs /etc/fluxvm/agent.env
+# (copy share/agent.env.example) with CENTRAL_URL, NODE_NAME and ADVERTISE_URL, and the join/fleet token in
+# /etc/fluxvm/agent.token (mode 0600). The token is passed with LoadCredential=, so it is not in argv or the
+# environment. An empty ADVERTISE_URL makes the agent exit at start rather than register a loopback address.
+
+[Unit]
+Description=Zyvor FluxVM fleet node agent
+After=network-online.target fluxvm.service
+Wants=network-online.target
+ConditionPathExists=/etc/fluxvm/agent.env
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/fluxvm/agent.env
+LoadCredential=token:/etc/fluxvm/agent.token
+Environment=FLUXVM_AGENT_TOKEN_FILE=%d/token
+ExecStart=/usr/local/bin/fluxvm-agent node --advertise-url ${ADVERTISE_URL}
+Restart=always
+RestartSec=5
+StateDirectory=fluxvm-agent
+StateDirectoryMode=0700
+DynamicUser=no
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+[Install]
+WantedBy=multi-user.target
