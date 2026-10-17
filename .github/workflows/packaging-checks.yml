@@ -10,6 +10,10 @@ on:
       - 'scripts/test-package-manifest.sh'
       - 'scripts/package-linux-pkgs.sh'
       - 'scripts/test-deb.sh'
+      - 'scripts/fluxvm-bootstrap.sh'
+      - 'scripts/test-bootstrap.sh'
+      - 'scripts/make-release-manifest.sh'
+      - 'scripts/make-sbom.py'
       - 'scripts/build-ebpf.sh'
       - '.github/workflows/packaging-checks.yml'
   pull_request:
@@ -19,6 +23,10 @@ on:
       - 'scripts/test-package-manifest.sh'
       - 'scripts/package-linux-pkgs.sh'
       - 'scripts/test-deb.sh'
+      - 'scripts/fluxvm-bootstrap.sh'
+      - 'scripts/test-bootstrap.sh'
+      - 'scripts/make-release-manifest.sh'
+      - 'scripts/make-sbom.py'
       - 'scripts/build-ebpf.sh'
       - '.github/workflows/packaging-checks.yml'
 
@@ -52,3 +60,14 @@ jobs:
           sudo tar -xzf /tmp/nfpm.tgz -C /usr/local/bin nfpm
       - name: Install, upgrade, remove and purge in a clean container
         run: scripts/test-deb.sh
+
+  bootstrap:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: shellcheck
+        run: shellcheck scripts/fluxvm-bootstrap.sh scripts/test-bootstrap.sh scripts/make-release-manifest.sh
+      - name: Pull installer tests (signatures, waves, rollback, resume, 429)
+        run: scripts/test-bootstrap.sh
+      - name: The SBOM generator runs on the lock file
+        run: python3 scripts/make-sbom.py --version 0.0.0 | jq -e '.components | length > 100'

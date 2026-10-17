@@ -1,0 +1,25 @@
+#cloud-config
+# Brings a fresh Ubuntu/Debian node onto FluxVM by pulling the signed release: no compiler, no SSH from an operator.
+# Fill in the three values marked CHANGE, or let your provisioning tool template them. See docs/fleet-install.md.
+#
+# Put the join/fleet token in agent.token through your secret store (cloud provider user-data secrets, Vault agent,
+# systemd credentials), never in an image. Do not bake this file's result into a golden image without clearing
+# /etc/machine-id: the rollout wave is chosen from it, so clones of one image would all land in the same wave.
+package_update: true
+packages: [curl, jq, openssl, util-linux, ca-certificates]
+write_files:
+  - path: /etc/fluxvm/bootstrap.conf
+    permissions: "0644"
+    content: |
+      MIRROR_URL=https://mirror.example.com/fluxvm        # CHANGE
+      CHANNEL=stable
+      INSTALL_MODE=deb
+  - path: /etc/fluxvm/release.pub
+    permissions: "0644"
+    content: |
+      -----BEGIN PUBLIC KEY-----
+      CHANGE: the release public key (openssl pkey -in release.key -pubout)
+      -----END PUBLIC KEY-----
+runcmd:
+  - [sh, -c, "curl -fsSL https://mirror.example.com/fluxvm/fluxvm-bootstrap -o /usr/local/bin/fluxvm-bootstrap && chmod 0755 /usr/local/bin/fluxvm-bootstrap"]   # CHANGE host; publish scripts/fluxvm-bootstrap.sh there
+  - [sh, -c, "systemctl enable --now fluxvm-bootstrap.timer 2>/dev/null || true; /usr/local/bin/fluxvm-bootstrap install"]

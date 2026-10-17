@@ -1,0 +1,19 @@
+# Copyright 2026 Zyvor
+# SPDX-License-Identifier: Apache-2.0
+
+# One pull-install pass (scripts/fluxvm-bootstrap.sh), run by fluxvm-bootstrap.timer. Configuration is
+# /etc/fluxvm/bootstrap.conf; set FLUXVM_AUTO_UPGRADE=0 there to check and report only.
+
+[Unit]
+Description=Zyvor FluxVM pull installer (fetch, verify, install, roll back)
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=/etc/fluxvm/bootstrap.conf
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/fluxvm-bootstrap install
+# Exit 3 means "installed a version that did not come up, rolled back": a result, not a unit failure.
+SuccessExitStatus=3
+TimeoutStartSec=2h
+Nice=10

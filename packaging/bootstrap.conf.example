@@ -1,0 +1,10 @@
+# /etc/fluxvm/bootstrap.conf: read by fluxvm-bootstrap (shell syntax).
+MIRROR_URL=https://mirror.example.com/fluxvm
+CHANNEL=stable
+# Rollout rules in the channel file can require or exclude labels; list this node's here (space separated).
+LABELS=""
+# deb | tarball (default: deb where dpkg exists)
+#INSTALL_MODE=deb
+# 0 = fetch and verify and report, never install.
+#FLUXVM_AUTO_UPGRADE=1
+# The release public key: /etc/fluxvm/release.pub, or /usr/share/fluxvm/release.pub from the package.

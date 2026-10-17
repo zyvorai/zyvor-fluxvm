@@ -58,7 +58,7 @@ if [[ -d "$ROOT/usr/share/fluxvm/completions" ]]; then
   rm -rf "$c"
 fi
 # Every unit in the package, with the tarball's /usr/local/bin paths turned into /usr/bin.
-for u in "$STAGE"/share/systemd/*.service; do
+for u in "$STAGE"/share/systemd/*.service "$STAGE"/share/systemd/*.timer; do
   sed 's|/usr/local/bin/|/usr/bin/|g' "$u" > "$ROOT/usr/lib/systemd/system/$(basename "$u")"
 done
 grep -q '^ExecStart=/usr/bin/fluxctl ' "$ROOT/usr/lib/systemd/system/fluxvm.service" \

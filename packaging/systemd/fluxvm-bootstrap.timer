@@ -1,0 +1,17 @@
+# Copyright 2026 Zyvor
+# SPDX-License-Identifier: Apache-2.0
+
+# Disabled by default: `systemctl enable --now fluxvm-bootstrap.timer`. The delays spread a fleet over time; the
+# script adds its own stable per-node jitter before it contacts the mirror.
+
+[Unit]
+Description=Zyvor FluxVM pull installer schedule
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=6h
+RandomizedDelaySec=30min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
