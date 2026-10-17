@@ -5,7 +5,9 @@
 # After remove and purge. State (/var/lib/fluxvm: VMs, images, keys) is never deleted, not even on purge:
 # a package manager should not be able to destroy a node's VMs. /etc/fluxvm.toml and /etc/fluxvm stay too.
 set -e
-[ -d /run/systemd/system ] && systemctl daemon-reload >/dev/null 2>&1 || true
+if [ -d /run/systemd/system ]; then
+    systemctl daemon-reload >/dev/null 2>&1 || true
+fi
 case "$1" in
     purge)
         # Only what the package added to a file it does not own.

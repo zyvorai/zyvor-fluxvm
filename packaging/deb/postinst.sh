@@ -35,7 +35,9 @@ if [ -d /etc/apparmor.d/local ] && command -v apparmor_parser >/dev/null 2>&1 \
     local_file=/etc/apparmor.d/local/usr.bin.swtpm
     if ! grep -qs 'fluxvm/instances' "$local_file"; then
         cat "$SHARE/apparmor/usr.bin.swtpm.fluxvm" >> "$local_file"
-        [ -f /etc/apparmor.d/usr.bin.swtpm ] && apparmor_parser -r /etc/apparmor.d/usr.bin.swtpm 2>/dev/null || true
+        if [ -f /etc/apparmor.d/usr.bin.swtpm ]; then
+            apparmor_parser -r /etc/apparmor.d/usr.bin.swtpm 2>/dev/null || true
+        fi
     fi
 fi
 
