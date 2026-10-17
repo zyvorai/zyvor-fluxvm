@@ -101,6 +101,7 @@ Eleven use cases map onto what is implemented today — nothing below is aspirat
 | AI-agent sandbox capability gaps | [docs/agent-sandbox-gaps.md](agent-sandbox-gaps.md) |
 | The Linux package: what is in it, how it is built and checked | [docs/linux-package.md](linux-package.md) |
 | Per-node enrollment: join tokens, node credentials, `--node-auth` | [docs/fleet-enroll.md](fleet-enroll.md) |
+| Installing FluxVM on many nodes: signed releases, waves, the pull installer | [docs/fleet-install.md](fleet-install.md) |
 | Use FluxVM from a serverless backend, with live events | [docs/serverless-agent.md](serverless-agent.md) |
 | Fleet scale: what `fluxvm-agent central` takes today, and how to measure it | [docs/fleet-scale.md](fleet-scale.md) |
 | Native macOS backend (`vz`), Mac sandboxes and agent density | [docs/macos.md](macos.md) · [docs/macos-sandboxes.md](macos-sandboxes.md) · [docs/agent-density.md](agent-density.md) |

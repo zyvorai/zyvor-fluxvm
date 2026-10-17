@@ -18,9 +18,17 @@ on:
       arch:
         description: "Build only this architecture (x86_64 or aarch64); empty builds both"
         required: false
+      channel:
+        description: "Channel the signed manifest is published to (default canary; use stable only after a canary soak)"
+        required: false
+      percent:
+        description: "Rollout wave for that channel, 0-100 (default 100 on canary, 5 elsewhere)"
+        required: false
 
 permissions:
   contents: write
+  id-token: write
+  attestations: write
 
 jobs:
   plan:
@@ -180,3 +188,58 @@ jobs:
           TAG="${{ github.event.inputs.tag || github.ref_name }}"
           gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --draft --title "$TAG" --notes "Linux package. Install with: curl -fsSL https://zyvorai.github.io/zyvor-fluxvm/install.sh | bash"
           gh release upload "$TAG" pkg/*.tar.gz pkg/*.deb pkg/*.sha256 --clobber
+
+  # Signs the release and publishes it for the pull installer (scripts/fluxvm-bootstrap.sh) only after the packages
+  # installed cleanly in the verify job. Runs when FLUXVM_RELEASE_KEY (an Ed25519 private key, PEM) is configured;
+  # the mirror sync additionally needs the MIRROR_S3_URI variable. Artifacts go up first and the channel file last.
+  publish:
+    needs: [plan, package, verify]
+    if: ${{ !cancelled() && needs.verify.result == 'success' && (github.event_name == 'push' || github.event.inputs.tag != '') }}
+    runs-on: ubuntu-latest
+    env:
+      RELEASE_KEY: ${{ secrets.FLUXVM_RELEASE_KEY }}
+      MIRROR_S3_URI: ${{ vars.MIRROR_S3_URI }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: fluxvm-linux-*
+          merge-multiple: true
+          path: pkg
+      - uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            pkg/*.tar.gz
+            pkg/*.deb
+      - name: Sign and build the mirror tree
+        id: sign
+        run: |
+          if [ -z "$RELEASE_KEY" ]; then echo "FLUXVM_RELEASE_KEY is not set; the release is not signed for the pull installer."; exit 0; fi
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"; VERSION="${TAG#v}"
+          CHANNEL="${{ github.event.inputs.channel }}"; CHANNEL="${CHANNEL:-canary}"
+          PERCENT="${{ github.event.inputs.percent }}"; PERCENT="${PERCENT:-$([ "$CHANNEL" = canary ] && echo 100 || echo 5)}"
+          umask 077; printf '%s\n' "$RELEASE_KEY" > "$RUNNER_TEMP/release.key"
+          python3 scripts/make-sbom.py --version "$VERSION" > "$RUNNER_TEMP/sbom.cdx.json"
+          scripts/make-release-manifest.sh --version "$VERSION" --artifacts pkg --key "$RUNNER_TEMP/release.key" \
+            --out mirror --channel "$CHANNEL" --percent "$PERCENT" --sbom "$RUNNER_TEMP/sbom.cdx.json"
+          openssl pkey -in "$RUNNER_TEMP/release.key" -pubout -out "$RUNNER_TEMP/release.pub"
+          scripts/make-release-manifest.sh --verify "mirror/channels/$CHANNEL.json" --pubkey "$RUNNER_TEMP/release.pub"
+          rm -f "$RUNNER_TEMP/release.key"
+          echo "signed=1" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        if: steps.sign.outputs.signed == '1'
+        with:
+          name: mirror-tree
+          path: mirror
+      - name: Sync to the mirror (artifacts first, channel file last)
+        if: steps.sign.outputs.signed == '1' && env.MIRROR_S3_URI != ''
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.MIRROR_AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.MIRROR_AWS_SECRET_ACCESS_KEY }}
+          AWS_ENDPOINT_URL: ${{ vars.MIRROR_ENDPOINT }}
+        run: |
+          aws s3 sync mirror/releases "$MIRROR_S3_URI/releases" --only-show-errors
+          for f in mirror/channels/*.json.sig; do aws s3 cp "$f" "$MIRROR_S3_URI/channels/$(basename "$f")" --only-show-errors; done
+          for f in mirror/channels/*.json; do aws s3 cp "$f" "$MIRROR_S3_URI/channels/$(basename "$f")" --only-show-errors; done
