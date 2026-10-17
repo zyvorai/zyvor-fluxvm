@@ -290,6 +290,22 @@ curl -sN "$URL/v1/agents/sessions/$S/jobs/$J/stream" -H "authorization: Bearer $
 # reconnect with:  -H 'Last-Event-ID: 1024:0'
 ```
 
+### Following a session live
+
+`GET /v1/agents/sessions/$S/events` returns the ledger and VM events so far. To watch them as they happen, use the
+Server-Sent Events twin, which replays the history and then follows (about every 500 ms):
+
+```bash
+curl -sN "$URL/v1/agents/sessions/$S/events/stream" -H "authorization: Bearer $TOKEN"
+# only what is newer than a time:  ...events/stream?since=2026-10-17T09:00:00Z
+# resume after a drop:             -H 'Last-Event-ID: 12|2026-10-17T09:00:03.5Z'
+```
+
+`ledger` events are what the API did, `vm` events what the hypervisor saw, and an `error` event ends the stream (the
+session is gone, or the hour limit is up: reconnect with the last id). The id is a cursor: no ledger entry is repeated
+or missed, but a VM event with the same timestamp as the last one seen may repeat. At most 64 streams per host. In
+TypeScript, `fx.watchSessionEvents(id)` does the reconnecting for you ([client](../typescript/README.md)).
+
 A job lives in the guest agent's memory with its output spooled on the guest's disk. A reboot or agent restart forgets
 the table (spools stay); a disk-only restore rolls the spool back.
 
