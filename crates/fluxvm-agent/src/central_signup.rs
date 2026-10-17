@@ -1862,6 +1862,7 @@ mod tests {
                 }))
                 .with_mail(mail),
             ),
+            registry: Arc::default(),
         };
         let app = routes()
             .route("/fleet/tenants/me", get(super::super::cloud::tenant_me))

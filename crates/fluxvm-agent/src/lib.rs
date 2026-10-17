@@ -15,6 +15,7 @@ pub mod central;
 pub mod gha;
 pub mod ha;
 pub mod node;
+pub mod node_enroll;
 pub mod shared_state;
 pub mod sim;
 pub mod sim_fleet;

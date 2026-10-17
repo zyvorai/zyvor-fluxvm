@@ -2034,6 +2034,11 @@ mod tests {
 
     fn mac(name: &str, mem: u64, vms: usize) -> NodeInfo {
         NodeInfo {
+            agent_version: String::new(),
+            daemon_version: String::new(),
+            proto: 0,
+            capabilities: Vec::new(),
+            outdated: false,
             name: name.into(),
             fluxvm_url: "http://127.0.0.1:1".into(),
             vcpus_total: 10,
@@ -2073,6 +2078,7 @@ mod tests {
             tunnels: Arc::default(),
             sso: Arc::default(),
             signup: Arc::default(),
+            registry: Arc::default(),
         }
     }
 

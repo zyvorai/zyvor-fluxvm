@@ -726,6 +726,7 @@ mod tests {
             tunnels: Arc::default(),
             sso: Arc::default(),
             signup: Arc::default(),
+            registry: Arc::default(),
         }
     }
 

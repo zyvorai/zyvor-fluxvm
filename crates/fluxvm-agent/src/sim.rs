@@ -1057,6 +1057,7 @@ pub async fn run(cfg: SimConfig) -> Result<()> {
         labels: cfg.labels,
         overlay_config: cfg.overlay_config,
         sim: Some(cfg.host),
+        state_dir: None,
     })
     .await;
     Ok(())
