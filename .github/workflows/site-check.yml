@@ -18,6 +18,13 @@ jobs:
       with: {node-version: '22', cache: npm, cache-dependency-path: website/package-lock.json}
     - name: install.sh served by the site matches scripts/install.sh
       run: cmp scripts/install.sh website/static/install.sh
+    - name: shellcheck (the self-hosted runner does not ship it; ubuntu-latest does)
+      run: |
+        if ! command -v shellcheck >/dev/null; then
+          sudo -n apt-get update -qq
+          sudo -n apt-get install -y -qq shellcheck
+        fi
+        shellcheck --version
     - name: install.sh lints and passes its tests (fake releases, no network)
       run: |
         shellcheck scripts/install.sh scripts/test-install.sh
