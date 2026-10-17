@@ -41,3 +41,7 @@ identity can also be passed as headers (for a trusted frontend):
 Headers are honored only when `tls.client_ca` is configured (mTLS on).
 Do not put FluxVM behind a proxy that blindly injects these headers without
 verifying the client certificate.
+
+## Step-up TOTP
+
+Static bearer tokens can require a second factor for exec and writes with `[[auth.mfa]]`; see [host-hardening.md](host-hardening.md#step-up-mfa-totp-for-exec-and-writes). OIDC and mTLS identities are not covered by it: enforce MFA at the identity provider (for example by requiring an `amr` claim), because FluxVM does not read it yet.

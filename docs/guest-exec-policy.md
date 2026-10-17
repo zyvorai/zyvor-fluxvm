@@ -167,3 +167,7 @@ changes what happens when there is none:
   run the command **unconfined** and the response would have no `enforcement` key. When you send a
   policy, treat a response without `enforcement` as "not confined", and rebuild the guest image with
   this agent version before depending on confinement.
+
+## Related: host exec allow-list
+
+This policy governs commands run inside a guest. Which binaries the VMM process may run on the host is a separate control, the VMM Guard exec allow-list; see [host-hardening.md](host-hardening.md#positive-exec-allow-list-vmm-guard).
