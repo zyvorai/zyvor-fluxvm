@@ -1,0 +1,36 @@
+name: Packaging checks
+
+# Fast checks on what goes into the Linux package. The package itself is built and verified by release-linux.yml.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'packaging/**'
+      - 'scripts/package-linux.sh'
+      - 'scripts/test-package-manifest.sh'
+      - 'scripts/build-ebpf.sh'
+      - '.github/workflows/packaging-checks.yml'
+  pull_request:
+    paths:
+      - 'packaging/**'
+      - 'scripts/package-linux.sh'
+      - 'scripts/test-package-manifest.sh'
+      - 'scripts/build-ebpf.sh'
+      - '.github/workflows/packaging-checks.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  manifest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: packaging/files.txt is valid and its tests pass
+        run: |
+          scripts/package-linux.sh --check-manifest
+          scripts/test-package-manifest.sh
