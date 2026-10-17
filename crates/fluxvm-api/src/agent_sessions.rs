@@ -6410,7 +6410,7 @@ fn parse_event_cursor(v: &str) -> Option<(usize, Option<DateTime<Utc>>)> {
 /// follow about every 500 ms. Each event's id is a cursor: reconnecting with `Last-Event-ID`
 /// continues with no ledger entry repeated or missed; a VM event that shares its exact timestamp
 /// with the last one seen may repeat (at-least-once). An `error` event ends the stream when the
-/// session is gone or the hour is up. At most 64 streams per host. Needs `read`, like `events`.
+/// session is deleted, expired or gone (after its last entries) or the hour is up. At most 64 streams per host. Needs `read`, like `events`.
 async fn events_stream(
     State(m): State<Arc<VmManager>>,
     Extension(role): Extension<Role>,
@@ -6468,10 +6468,13 @@ async fn events_stream(
                 yield Ok(err("stream time limit reached; reconnect with Last-Event-ID".into()));
                 break;
             }
-            if let Err(e) = load(&m, id, &tenant).await {
-                yield Ok(err(e.message));
-                break;
-            }
+            let state = match load(&m, id, &tenant).await {
+                Ok(cur) => cur.state,
+                Err(e) => {
+                    yield Ok(err(e.message));
+                    break;
+                }
+            };
             let fresh: Vec<Value> = read_ledger(&m, id, None).into_iter().skip(seen).collect();
             for entry in fresh {
                 seen += 1;
@@ -6501,6 +6504,12 @@ async fn events_stream(
                     vm_seen.push(body.clone());
                     yield Ok(Event::default().event("vm").id(event_cursor(seen, vm_ts)).data(body));
                 }
+            }
+            // A deleted, expired or gone session keeps its record but will not change: say so
+            // after its last entries (the delete itself) went out, instead of idling to the limit.
+            if state != "running" {
+                yield Ok(err(format!("session is {state}")));
+                break;
             }
             tokio::time::sleep(EVENT_STREAM_POLL).await;
         }
