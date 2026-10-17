@@ -81,7 +81,7 @@ if systemctl cat "$UNIT" >/dev/null 2>&1; then
   if grep -q 'LimitMEMLOCK=infinity' <<<"$unit_text"; then
     ok "$UNIT LimitMEMLOCK=infinity"
   else
-    fail "$UNIT missing LimitMEMLOCK=infinity (see systemd/fluxvm.service)"
+    fail "$UNIT missing LimitMEMLOCK=infinity (see packaging/systemd/fluxvm.service)"
   fi
   if grep -E 'ReadWritePaths=.*(/sys/fs/bpf|/run/fluxvm)' <<<"$unit_text" >/dev/null; then
     ok "$UNIT ReadWritePaths covers bpffs /run/fluxvm"
