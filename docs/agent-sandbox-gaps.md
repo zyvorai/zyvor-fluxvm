@@ -81,7 +81,7 @@ Compared against the feature list of a hosted microVM sandbox integration. Capab
 | Stable error codes | Done: `code` next to `error` ([api.md#errors](api.md#errors)); a few routes with their own error bodies still send none |
 | Test helper | Done for TypeScript: `@zyvorai/fluxvm/testing` (`FakeFluxVM`) |
 | Framework recipe | [serverless-agent.md](serverless-agent.md), untested on a serverless platform |
-| Published boot and fork latency on Linux | Open, no figure claimed. One run of `scripts/bench-first-command.sh` (N=5, flux-vm, 256 MiB, 12-core Xeon E-2336, ext4, no copy-on-write clones) gave a cold create-to-first-command p50 of about 26 s, which is the copy of a 2.1 GB image and not boot time, and all 5 forks failed (cause not investigated). Measure again on a reflink filesystem (btrfs or XFS) before quoting anything |
+| Published boot and fork latency on Linux | Open, no figure claimed. Runs on a 12-core Xeon E-2336 host with ext4 (no copy-on-write clones), flux-vm, 256 MiB, 2.1 GB rootfs: cold create to first command p50 about 26–32 s and `fork` 26–59 s per child, both dominated by copying the disk, so they say nothing about boot or snapshot speed. What the runs did show: `fork` needs `fluxvm_engine = "kvm"` (the default Firecracker engine answers 400 and says so), and on this guest it then needed `identity: "best-effort"` because the child's guest agent closed the connection during the identity reset. Measure again on btrfs or XFS before quoting anything |
 
 ## Remaining (optional hardening)
 
