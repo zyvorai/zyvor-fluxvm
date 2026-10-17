@@ -1932,7 +1932,7 @@ async fn read_guest_file(r: &Remote, id: Uuid, path: &str) -> Result<Value> {
 
 /// One argument is a shell line, as typed (`agent exec ID -- 'cd /w && make'`); several are an
 /// argv, so each word is single-quoted and `-- sh -c 'a; b'` keeps its script in one piece.
-fn guest_command(args: &[String]) -> String {
+pub(crate) fn guest_command(args: &[String]) -> String {
     if let [one] = args {
         return one.clone();
     }
