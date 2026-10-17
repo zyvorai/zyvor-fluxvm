@@ -176,3 +176,15 @@ Device numbers: the guard compares kernel-internal `dev_t` values
 (`(major << 20) | minor`). An earlier version used the compact userspace
 encoding, so every device and file allow-list key (exec, writable-file and
 device) silently failed to match; this is fixed and covered by the host test.
+
+## Privileged CI
+
+The `privileged` job in `.github/workflows/vmm-guard-qos.yml` runs the exec
+allow-list and rule-pack test on a self-hosted Linux runner with BPF-LSM. It
+does not run for pull requests, needs the `FLUXVM_EBPF_PRIVILEGED_CI=1`
+repository variable, and waits for approval of the `privileged-ebpf`
+environment. The runner user may `sudo` only
+`scripts/ci-privileged-guard-test.sh` (installed as
+`/usr/local/sbin/fluxvm-ci-guard-test`). That script copies the checkout to a
+root-owned directory and runs the test from there. It still runs the code of the
+commit under test as root, so keep the environment approval on.
