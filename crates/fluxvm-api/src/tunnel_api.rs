@@ -178,6 +178,8 @@ fn on_vmnet_bridge(ip: IpAddr) -> bool {
 }
 
 /// Whether `a` and `b` are in the same subnet under `mask` (a host mask of 0 would match everything: refused).
+/// Only the macOS interface lookup calls it; elsewhere it exists for the unit tests.
+#[cfg(any(target_os = "macos", test))]
 fn same_subnet(a: Ipv4Addr, b: Ipv4Addr, mask: u32) -> bool {
     mask != 0 && (u32::from(a) & mask) == (u32::from(b) & mask)
 }
