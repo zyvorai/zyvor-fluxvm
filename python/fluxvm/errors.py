@@ -29,6 +29,9 @@ class ApiError(FluxVMError):
         self.status = status
         self.body = body
         self.message = message if message is not None else str(body)
+        # The server's stable error code (NOT_FOUND, CONFLICT, ...); None on routes that send none.
+        code = body.get("code") if isinstance(body, dict) else None
+        self.code = code if isinstance(code, str) else None
         super().__init__("HTTP {}: {}".format(status, self.message))
 
 

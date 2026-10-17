@@ -4,10 +4,14 @@
 package fluxvm
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 )
 
@@ -226,6 +230,150 @@ func (s *Session) Events(ctx context.Context, since string) (*SessionEvents, err
 	}
 	return &out, nil
 }
+
+// SessionStreamEvent is one Server-Sent Event from WatchEvents. Type is "ledger" (what the API
+// did), "vm" (what the hypervisor saw) or "error" (the stream is over). ID is the resume cursor.
+type SessionStreamEvent struct {
+	Type string
+	ID   string
+	Data json.RawMessage
+}
+
+// WatchOptions tunes WatchEvents. The zero value replays everything and follows.
+type WatchOptions struct {
+	// Since replays only what is newer than this RFC 3339 time.
+	Since string
+	// LastEventID resumes from a cursor taken from an earlier event's ID.
+	LastEventID string
+	// MaxReconnects is how many failed connection attempts in a row to tolerate; default 5.
+	MaxReconnects int
+	// ReconnectDelay is the wait between reconnects; default one second.
+	ReconnectDelay time.Duration
+}
+
+// WatchEvents follows GET .../events/stream: it replays the history, then calls fn for each new
+// ledger and VM event. It reconnects with Last-Event-ID when the connection drops, so no ledger
+// entry is repeated or missed (a VM event with the same timestamp as the last one may repeat).
+// A final "error" event (the session is gone) is passed to fn and WatchEvents returns nil.
+// It returns ctx's error when ctx ends, fn's error if fn fails, and the last error after
+// MaxReconnects failed attempts in a row.
+func (s *Session) WatchEvents(ctx context.Context, opts WatchOptions, fn func(SessionStreamEvent) error) error {
+	maxFail := opts.MaxReconnects
+	if maxFail <= 0 {
+		maxFail = 5
+	}
+	delay := opts.ReconnectDelay
+	if delay <= 0 {
+		delay = time.Second
+	}
+	last := opts.LastEventID
+	failures := 0
+	for {
+		hdr := http.Header{"Accept": {"text/event-stream"}}
+		p := s.path("/events/stream")
+		if last != "" {
+			hdr.Set("Last-Event-ID", last)
+		} else if opts.Since != "" {
+			p += "?since=" + url.QueryEscape(opts.Since)
+		}
+		resp, err := s.client.openStream(ctx, p, hdr)
+		if err != nil {
+			var api *APIError
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			// A 4xx other than 429 will not get better by retrying.
+			if errors.As(err, &api) && api.Status < 500 && api.Status != http.StatusTooManyRequests {
+				return err
+			}
+			if failures++; failures > maxFail {
+				return err
+			}
+		} else {
+			failures = 0
+			done, err := readSessionStream(resp.Body, &last, fn)
+			resp.Body.Close()
+			if err != nil {
+				return err
+			}
+			if done {
+				return nil
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(delay):
+		}
+	}
+}
+
+// readSessionStream parses one connection. done is true after a final error event.
+func readSessionStream(body io.Reader, last *string, fn func(SessionStreamEvent) error) (done bool, err error) {
+	sc := bufio.NewScanner(body)
+	sc.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)
+	event, id, data, has := "message", "", "", false
+	flush := func() (bool, error) {
+		defer func() { event, id, data, has = "message", "", "", false }()
+		if !has {
+			return false, nil
+		}
+		if id != "" {
+			*last = id
+		}
+		switch event {
+		case "ledger", "vm":
+			return false, fn(SessionStreamEvent{Type: event, ID: id, Data: json.RawMessage(data)})
+		case "error":
+			var p struct {
+				Error string `json:"error"`
+			}
+			_ = json.Unmarshal([]byte(data), &p)
+			// The hour limit asks for a reconnect; anything else means the session is gone.
+			if strings.HasPrefix(p.Error, "stream time limit") {
+				return false, errReconnect
+			}
+			return true, fn(SessionStreamEvent{Type: "error", ID: id, Data: json.RawMessage(data)})
+		}
+		return false, nil
+	}
+	for sc.Scan() {
+		line := sc.Text()
+		if line == "" {
+			stop, ferr := flush()
+			if errors.Is(ferr, errReconnect) {
+				return false, nil
+			}
+			if ferr != nil || stop {
+				return stop, ferr
+			}
+			continue
+		}
+		if strings.HasPrefix(line, ":") {
+			continue
+		}
+		name, value, _ := strings.Cut(line, ":")
+		value = strings.TrimPrefix(value, " ")
+		switch name {
+		case "event":
+			event = value
+		case "id":
+			id = value
+		case "data":
+			if data != "" {
+				data += "\n"
+			}
+			data += value
+		default:
+			continue
+		}
+		has = true
+	}
+	// A scanner error is a dropped connection: the caller reconnects from last.
+	return false, nil
+}
+
+var errReconnect = errors.New("fluxvm: stream time limit")
 
 // Artifacts calls GET .../artifacts: the workspace changes since the baseline (Changes is
 // null when there is no baseline; Note says why), checkpoints, children and counters.
