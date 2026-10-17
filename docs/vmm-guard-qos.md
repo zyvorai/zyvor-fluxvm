@@ -72,6 +72,9 @@ The kernel needs `CONFIG_BPF_LSM=y`, BTF/CO-RE support, and `bpf` in the active
 LSM list (`/sys/kernel/security/lsm`). The loader fails explicitly when the BPF
 LSM is not enabled instead of pretending enforcement is active.
 
+Ubuntu kernels ship `CONFIG_BPF_LSM=y` but do not activate it by default; add `bpf` to
+the `lsm=` kernel parameter and reboot. See [host-hardening.md](host-hardening.md#running-the-host-test).
+
 ## Adaptive QoS
 
 `fluxvm-qos` consumes the Set-4 Flight Recorder snapshot plus cgroup-v2 PSI.
