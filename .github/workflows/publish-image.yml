@@ -26,11 +26,20 @@ jobs:
         with:
           path: fluxvm
 
+      # Pinned to the tag in packaging/guestkit.ref, not the default branch (see release-linux.yml).
+      - name: Read the pinned guestkit tag
+        id: gk
+        run: echo "ref=$(tr -d '[:space:]' < fluxvm/packaging/guestkit.ref)" >> "$GITHUB_OUTPUT"
+
       - name: Checkout guestkit
         uses: actions/checkout@v7
         with:
           repository: zyvorai/guestkit
           path: guestkit
+          ref: ${{ steps.gk.outputs.ref }}
+
+      - name: Check the guestkit pin against Cargo.lock and the checkout
+        run: fluxvm/scripts/check-guestkit-pin.sh fluxvm guestkit
 
       - name: Log in to GHCR
         uses: docker/login-action@v4
