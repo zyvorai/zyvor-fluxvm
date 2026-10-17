@@ -280,7 +280,7 @@ impl VmManager {
 
     /// Loads the saved state into a QEMU just launched with `-incoming defer`.
     pub(crate) async fn finish_resume(&self, vm: &VmRecord, pid: u32, state: &Path) -> Result<()> {
-        let qmp = fluxvm_qemu::qmp_socket(&vm);
+        let qmp = fluxvm_qemu::qmp_socket(vm);
         process::wait_for_socket_ready(
             pid,
             &qmp,
