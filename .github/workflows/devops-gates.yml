@@ -21,6 +21,8 @@ jobs:
       - name: Contract + example tests
         working-directory: examples/devops
         run: python3 -m unittest test_contract.py test_examples.py -v
+      - name: glibc floor gate tests
+        run: bash scripts/test-check-glibc-floor.sh
       - name: Offline devops-gate
         run: bash scripts/test-devops-gate.sh
       - name: Shipped systemd units verify
