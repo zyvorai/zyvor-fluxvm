@@ -21,9 +21,46 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 use std::time::{Duration, Instant};
 
+/// How the simulated nodes authenticate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SimMode {
+    /// Every node beats with the fleet token (what nodes did before enrollment).
+    Legacy,
+    /// Every node enrolls with the join token first and beats with its own credential.
+    Enrolled,
+    /// Odd-numbered nodes enroll, even-numbered ones use the fleet token.
+    Mixed,
+}
+
+impl std::str::FromStr for SimMode {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, String> {
+        match s {
+            "legacy" => Ok(SimMode::Legacy),
+            "enrolled" => Ok(SimMode::Enrolled),
+            "mixed" => Ok(SimMode::Mixed),
+            _ => Err(format!("'{s}' is not legacy, enrolled or mixed")),
+        }
+    }
+}
+
+impl SimMode {
+    fn enrolls(self, index: usize) -> bool {
+        match self {
+            SimMode::Legacy => false,
+            SimMode::Enrolled => true,
+            SimMode::Mixed => index % 2 == 1,
+        }
+    }
+}
+
 pub struct SimFleetConfig {
     pub central_url: String,
     pub token: Option<String>,
+    pub mode: SimMode,
+    /// A join token (`fvjt_...`) for the nodes that enroll; they need `max_uses` of at least their number.
+    pub join_token: Option<String>,
     pub nodes: usize,
     /// Node `i` is named `{prefix}-{i:05}`.
     pub prefix: String,
@@ -39,6 +76,9 @@ pub struct SimFleetConfig {
 
 #[derive(Debug, Serialize, PartialEq)]
 pub struct SimFleetReport {
+    pub mode: SimMode,
+    /// Simulated nodes that obtained a credential.
+    pub enrolled: u64,
     pub nodes: usize,
     pub interval_secs: f64,
     pub duration_secs: f64,
@@ -129,6 +169,7 @@ struct Tally {
     other4xx: u64,
     r5xx: u64,
     transport: u64,
+    enrolled: u64,
     latencies_ms: Vec<u64>,
 }
 
@@ -140,6 +181,7 @@ impl Tally {
         self.other4xx += o.other4xx;
         self.r5xx += o.r5xx;
         self.transport += o.transport;
+        self.enrolled += o.enrolled;
         self.latencies_ms.extend(o.latencies_ms);
     }
 }
@@ -149,6 +191,7 @@ struct NodeJob {
     http: reqwest::Client,
     url: String,
     token: Option<String>,
+    enroll_with: Option<String>,
     name: String,
     index: usize,
     interval: Duration,
@@ -160,7 +203,8 @@ async fn node_task(job: NodeJob) -> Tally {
     let NodeJob {
         http,
         url,
-        token,
+        mut token,
+        enroll_with,
         name,
         index: i,
         interval,
@@ -170,6 +214,50 @@ async fn node_task(job: NodeJob) -> Tally {
     let mut t = Tally::default();
     if start_jitter {
         tokio::time::sleep(interval.mul_f64(phase_fraction(&name))).await;
+    }
+    if let Some(join) = enroll_with {
+        // A stable id per name, so a rerun finds the same enrollment instead of a conflict.
+        let node_id = format!("{:x}", Sha256::digest(name.as_bytes()))[..32].to_owned();
+        // Like a real node: a 429 is waited out (Retry-After) and tried again.
+        let mut tries = 0;
+        loop {
+            tries += 1;
+            match http
+                .post(format!("{url}/fleet/enroll"))
+                .bearer_auth(&join)
+                .json(&json!({"name": name, "node_id": node_id}))
+                .send()
+                .await
+            {
+                Ok(resp) if resp.status().is_success() => {
+                    t.enrolled = 1;
+                    token = resp
+                        .json::<Value>()
+                        .await
+                        .ok()
+                        .and_then(|v| v["credential"].as_str().map(str::to_owned));
+                    break;
+                }
+                Ok(resp) if resp.status().as_u16() == 429 && tries < 30 => {
+                    t.r429 += 1;
+                    let wait = resp
+                        .headers()
+                        .get(reqwest::header::RETRY_AFTER)
+                        .and_then(|v| v.to_str().ok())
+                        .and_then(|v| v.parse::<u64>().ok())
+                        .unwrap_or(1);
+                    tokio::time::sleep(Duration::from_secs(wait.clamp(1, 10))).await;
+                }
+                Ok(_) => {
+                    t.other4xx += 1;
+                    return t;
+                }
+                Err(_) => {
+                    t.transport += 1;
+                    return t;
+                }
+            }
+        }
     }
     let body = heartbeat_body(&name, i);
     let mut tick = tokio::time::interval(interval);
@@ -317,6 +405,11 @@ pub async fn run(cfg: SimFleetConfig) -> Result<SimFleetReport> {
             http: http.clone(),
             url: url.clone(),
             token: cfg.token.clone(),
+            enroll_with: cfg
+                .mode
+                .enrolls(i)
+                .then(|| cfg.join_token.clone())
+                .flatten(),
             name: node_name(&cfg.prefix, i),
             index: i,
             interval: cfg.interval,
@@ -334,6 +427,8 @@ pub async fn run(cfg: SimFleetConfig) -> Result<SimFleetReport> {
     total.latencies_ms.sort_unstable();
     let l = &total.latencies_ms;
     Ok(SimFleetReport {
+        mode: cfg.mode,
+        enrolled: total.enrolled,
         nodes: cfg.nodes,
         interval_secs: cfg.interval.as_secs_f64(),
         duration_secs: elapsed,
@@ -422,6 +517,8 @@ mod tests {
         SimFleetConfig {
             central_url: url,
             token: None,
+            mode: SimMode::Legacy,
+            join_token: None,
             nodes,
             prefix: "t".into(),
             interval: Duration::from_millis(100),

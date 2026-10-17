@@ -50,6 +50,11 @@ enum Command {
         /// Run highly available: several centrals share this Redis, one leads (docs/fleet-ha.md).
         #[arg(long, env = "FLUXVM_AGENT_HA_REDIS")]
         ha_redis: Option<String>,
+        /// Who may register nodes: `legacy` (the fleet token only; enrollment is off), `both` (the default while
+        /// nodes migrate) or `enrolled` (only nodes with their own credential from `POST /fleet/enroll`; the fleet token
+        /// can no longer register a node). See docs/fleet-enroll.md.
+        #[arg(long, env = "FLUXVM_NODE_AUTH", default_value = "both")]
+        node_auth: fluxvm_agent::central::NodeAuth,
         /// Name of the HA group (several fleets can share one Redis).
         #[arg(long, env = "FLUXVM_AGENT_HA_CLUSTER", default_value = "default")]
         ha_cluster: String,
@@ -136,6 +141,12 @@ enum Command {
         central: String,
         #[arg(long, env = "FLUXVM_AGENT_TOKEN")]
         token: Option<String>,
+        /// `legacy` (fleet token), `enrolled` (each node enrolls with --join-token first) or `mixed` (half and half).
+        #[arg(long, default_value = "legacy")]
+        mode: fluxvm_agent::sim_fleet::SimMode,
+        /// Join token for the nodes that enroll (create one with `POST /fleet/enroll/tokens`, max_uses >= nodes).
+        #[arg(long, env = "FLUXVM_AGENT_JOIN_TOKEN")]
+        join_token: Option<String>,
         #[arg(long, default_value = "100")]
         nodes: usize,
         /// Node `i` is named `<prefix>-<i, five digits>`.
@@ -180,6 +191,11 @@ enum Command {
         /// argv or in the environment. Surrounding whitespace is trimmed.
         #[arg(long, env = "FLUXVM_AGENT_TOKEN_FILE", conflicts_with = "token")]
         token_file: Option<PathBuf>,
+        /// Where this node keeps its id and, once enrolled, its credential (mode 0600). Default: `$STATE_DIRECTORY`,
+        /// else /var/lib/fluxvm-agent. A token starting `fvjt_` is a join token: the node exchanges it for its own
+        /// credential once and uses that afterwards.
+        #[arg(long, env = "FLUXVM_AGENT_STATE_DIR")]
+        state_dir: Option<PathBuf>,
         /// Label this node reports on every heartbeat, as `key=value`.
         /// Repeatable. Lets `fluxctl fleet create --node-selector
         /// key=value` (or a plain `POST /fleet/vms` `"nodeSelector"`
@@ -232,6 +248,7 @@ async fn main() -> Result<()> {
             tls_key,
             reconcile_secs,
             ha_redis,
+            node_auth,
             ha_cluster,
             advertise_url,
             ha_ttl_secs,
@@ -244,6 +261,7 @@ async fn main() -> Result<()> {
             signup_mail_webhook,
             signup_mail_secret_file,
         } => {
+            fluxvm_agent::central::set_node_auth(node_auth);
             // `--public-url` is declared once (in the SSO flags) and used by Stripe Checkout too.
             let public_url = sso
                 .public_url
@@ -458,6 +476,8 @@ async fn main() -> Result<()> {
         Command::SimFleet {
             central,
             token,
+            mode,
+            join_token,
             nodes,
             prefix,
             interval_secs,
@@ -468,6 +488,8 @@ async fn main() -> Result<()> {
             let report = fluxvm_agent::sim_fleet::run(fluxvm_agent::sim_fleet::SimFleetConfig {
                 central_url: central,
                 token,
+                mode,
+                join_token,
                 nodes,
                 prefix,
                 interval: Duration::from_secs(interval_secs.max(1)),
@@ -490,11 +512,17 @@ async fn main() -> Result<()> {
             interval_secs,
             token,
             token_file,
+            state_dir,
             labels,
             no_overlay_sync,
         } => {
-            if advertise_url.as_deref().is_some_and(|u| u.trim().is_empty()) {
-                anyhow::bail!("--advertise-url (ADVERTISE_URL) is empty: set the address central should reach this node on");
+            if advertise_url
+                .as_deref()
+                .is_some_and(|u| u.trim().is_empty())
+            {
+                anyhow::bail!(
+                    "--advertise-url (ADVERTISE_URL) is empty: set the address central should reach this node on"
+                );
             }
             let token = match token_file {
                 Some(file) => {
@@ -517,6 +545,7 @@ async fn main() -> Result<()> {
                 labels: labels.into_iter().collect(),
                 overlay_config: (!no_overlay_sync).then(fluxvm_apple::vznet::overlay_config_path),
                 sim: None,
+                state_dir,
             })
             .await;
         }

@@ -35,6 +35,8 @@ pub struct NodeConfig {
     pub overlay_config: Option<std::path::PathBuf>,
     /// Report this simulated host instead of the real one (`fluxvm-agent sim-node`).
     pub sim: Option<SimHost>,
+    /// Where the node id and credential are kept (see [`crate::node_enroll`]); `None` uses the default.
+    pub state_dir: Option<std::path::PathBuf>,
 }
 
 /// What a simulated Mac reports: its size and its Virtualization.framework capabilities.
@@ -51,7 +53,7 @@ pub struct SimHost {
 /// `HEALTHY_WINDOW_SECS` is the correct outcome of a *sustained* outage —
 /// a node agent that gave up after one failed request would make a
 /// transient network blip permanently evict an otherwise-fine node).
-pub async fn run(cfg: NodeConfig) {
+pub async fn run(mut cfg: NodeConfig) {
     // No redirects: a standby answers 503 and the next configured central is tried instead, so the bearer token only
     // ever goes to URLs the operator listed.
     // Bounded: a central or a local daemon that accepts the connection and never answers must not
@@ -62,16 +64,80 @@ pub async fn run(cfg: NodeConfig) {
         .timeout(REQUEST_TIMEOUT)
         .build()
         .unwrap_or_else(|_| reqwest::Client::new());
+    // A join token is exchanged once for this node's own credential, which is used from then on and renewed daily.
+    let state_dir = cfg
+        .state_dir
+        .clone()
+        .unwrap_or_else(crate::node_enroll::default_state_dir);
+    let mut enrolled = false;
+    match cfg.token.clone() {
+        Some(t) if t.starts_with(crate::node_enroll::JOIN_PREFIX) => {
+            // Wait out this node's phase first: a restarted fleet should not enroll in one second either.
+            if cfg.sim.is_none() {
+                tokio::time::sleep(start_phase(&cfg.name, cfg.interval)).await;
+            }
+            match crate::node_enroll::ensure_credential(
+                &http,
+                &central_urls(&cfg.central_url),
+                &t,
+                &cfg.name,
+                &state_dir,
+            )
+            .await
+            {
+                Ok(c) => {
+                    cfg.token = Some(c);
+                    enrolled = true;
+                }
+                Err(e) => {
+                    tracing::error!(error = %format!("{e:#}"), "cannot enroll this node; not sending heartbeats");
+                    return;
+                }
+            }
+        }
+        Some(t) if t.starts_with(crate::node_enroll::CRED_PREFIX) => enrolled = true,
+        // A node enrolled earlier keeps using its credential even when started without the join token again.
+        None => match crate::node_enroll::load_credential(&state_dir) {
+            Ok(Some(c)) => {
+                cfg.token = Some(c);
+                enrolled = true;
+            }
+            Ok(None) => {}
+            Err(e) => {
+                tracing::error!(error = %format!("{e:#}"), "cannot read the node credential");
+                return;
+            }
+        },
+        Some(_) => {}
+    }
+    let mut last_renew = std::time::Instant::now();
     let mut preferred = 0usize;
     let mut failures = 0u32;
     // The interval central last asked for (`next_interval_secs`), used only when it is longer than the configured one.
     let mut interval = cfg.interval;
     // Spread a restarted fleet: each node waits a fixed share of the interval, derived from its name, before the first
     // beat, so ten thousand nodes started together do not beat in the same second.
-    if cfg.sim.is_none() {
+    if cfg.sim.is_none() && !enrolled {
         tokio::time::sleep(start_phase(&cfg.name, cfg.interval)).await;
     }
     loop {
+        if enrolled && last_renew.elapsed() >= RENEW_EVERY {
+            if let (Some(cur), Some(url)) = (
+                cfg.token.clone(),
+                central_urls(&cfg.central_url).get(preferred).cloned(),
+            ) {
+                match crate::node_enroll::renew(&http, &url, &cur, &state_dir).await {
+                    Ok(new) => {
+                        cfg.token = Some(new);
+                        tracing::info!("node credential renewed");
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %format!("{e:#}"), "credential renewal failed; will retry")
+                    }
+                }
+            }
+            last_renew = std::time::Instant::now();
+        }
         let outcome = beat(&http, &cfg, preferred).await;
         let backoff = outcome
             .as_ref()
@@ -84,7 +150,10 @@ pub async fn run(cfg: NodeConfig) {
             failures.saturating_add(1)
         };
         match outcome {
-            Ok(Sent { used, next_interval }) => {
+            Ok(Sent {
+                used,
+                next_interval,
+            }) => {
                 preferred = used;
                 interval = next_interval.map_or(cfg.interval, |n| n.max(cfg.interval));
                 tracing::debug!(node = %cfg.name, "heartbeat sent");
@@ -149,6 +218,8 @@ struct Sent {
     next_interval: Option<Duration>,
 }
 
+/// How often an enrolled node asks for a fresh credential generation.
+const RENEW_EVERY: Duration = Duration::from_secs(24 * 3600);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -260,7 +331,10 @@ async fn beat(http: &reqwest::Client, cfg: &NodeConfig, preferred: usize) -> Res
                     .ok()
                     .and_then(|v| v["next_interval_secs"].as_u64())
                     .map(|n| Duration::from_secs(n.clamp(5, 20)));
-                return Ok(Sent { used: i, next_interval });
+                return Ok(Sent {
+                    used: i,
+                    next_interval,
+                });
             }
             Ok(resp) if resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS => {
                 return Err(Busy(retry_after(&resp)).into());
@@ -485,7 +559,11 @@ mod central_list_tests {
             .map(|n| start_phase(&format!("node-{n}"), i).as_millis())
             .inspect(|ms| assert!(*ms < 10_000))
             .collect();
-        assert!(spread.len() > 150, "phases should spread out, got {}", spread.len());
+        assert!(
+            spread.len() > 150,
+            "phases should spread out, got {}",
+            spread.len()
+        );
     }
 
     #[test]

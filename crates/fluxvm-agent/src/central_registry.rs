@@ -77,7 +77,8 @@ impl Admission {
         if self.rate > 0.0 {
             let mut b = self.bucket.lock().unwrap_or_else(|e| e.into_inner());
             let now = Instant::now();
-            b.tokens = (b.tokens + now.duration_since(b.last).as_secs_f64() * self.rate).min(self.burst);
+            b.tokens =
+                (b.tokens + now.duration_since(b.last).as_secs_f64() * self.rate).min(self.burst);
             b.last = now;
             if b.tokens < 1.0 {
                 self.rejected.fetch_add(1, Ordering::Relaxed);
@@ -120,6 +121,8 @@ pub(super) async fn admission(State(fleet): State<Fleet>, req: Request, next: Ne
 
 /// Runtime state for the registry: the dirty flag, the flush numbers and admission control.
 pub(super) struct RegistryRt {
+    /// Join tokens and node credentials (`fleet-enroll.json`).
+    pub(super) enroll: super::enroll::Enroll,
     dirty: AtomicBool,
     pub(super) admission: Admission,
     flushes: AtomicU64,
@@ -129,7 +132,14 @@ pub(super) struct RegistryRt {
 
 impl Default for RegistryRt {
     fn default() -> Self {
+        RegistryRt::with_enroll(Default::default())
+    }
+}
+
+impl RegistryRt {
+    pub(super) fn with_enroll(enroll: super::enroll::Enroll) -> Self {
         RegistryRt {
+            enroll,
             dirty: AtomicBool::new(false),
             admission: Admission::from_env(),
             flushes: AtomicU64::new(0),
@@ -186,7 +196,8 @@ pub(super) async fn flush(fleet: &Fleet, force: bool) {
     .await
     .unwrap_or(0);
     rt.flushes.fetch_add(1, Ordering::Relaxed);
-    rt.last_flush_ms.store(started.elapsed().as_millis() as u64, Ordering::Relaxed);
+    rt.last_flush_ms
+        .store(started.elapsed().as_millis() as u64, Ordering::Relaxed);
     rt.last_flush_bytes.store(bytes, Ordering::Relaxed);
 }
 

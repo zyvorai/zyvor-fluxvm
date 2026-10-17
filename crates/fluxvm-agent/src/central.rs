@@ -13,6 +13,8 @@
 mod audit;
 #[path = "central_cloud.rs"]
 mod cloud;
+#[path = "central_enroll.rs"]
+mod enroll;
 #[path = "central_ha.rs"]
 mod ha_rt;
 #[path = "central_metrics.rs"]
@@ -34,6 +36,7 @@ mod tunnel;
 #[path = "central_volumes.rs"]
 mod vols;
 
+pub use enroll::{NodeAuth, set_node_auth};
 pub use ha_rt::HaHandle;
 pub use metrics::{
     DEFAULT_INTERVAL as DEFAULT_METRICS_INTERVAL, MetricsSettings, configure as configure_metrics,
@@ -384,7 +387,8 @@ async fn auth_middleware(State(fleet): State<Fleet>, mut req: Request, next: Nex
         return next.run(req).await;
     }
     // ---- signup ---- (sign-up and the Stripe webhook, which is signed)
-    if signup::PUBLIC_PATHS.contains(&path) {
+    // `POST /fleet/enroll` carries a join token and checks it itself.
+    if signup::PUBLIC_PATHS.contains(&path) || path == "/fleet/enroll" {
         return next.run(req).await;
     }
     let presented = req
@@ -416,6 +420,41 @@ async fn auth_middleware(State(fleet): State<Fleet>, mut req: Request, next: Nex
                 user = Some(u);
             }
         }
+    }
+    // ---- node credentials ---- an enrolled node may register as itself, renew, and read its own overlays; nothing else.
+    if let Some(t) = presented.as_deref()
+        && t.starts_with(enroll::CRED_PREFIX)
+    {
+        if enroll::node_auth() == enroll::NodeAuth::Legacy {
+            return unauthorized();
+        }
+        let now = Utc::now().timestamp();
+        let name = fleet
+            .registry
+            .enroll
+            .state
+            .lock()
+            .await
+            .authenticate(t, now);
+        let Some(name) = name else {
+            return unauthorized();
+        };
+        let allowed = (req.method() == axum::http::Method::POST
+            && matches!(req.uri().path(), "/fleet/register" | "/fleet/enroll/renew"))
+            || (req.method() == axum::http::Method::GET
+                && req.uri().path() == format!("/fleet/nodes/{name}/overlays"));
+        if !allowed {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(json!({"error": "a node credential may only register, renew and read its own overlays"})),
+            )
+                .into_response();
+        }
+        req.extensions_mut().insert(enroll::NodeIdentity(name));
+        req.extensions_mut().insert(Caller::Admin);
+        req.extensions_mut().insert(KeyUsed(None));
+        req.extensions_mut().insert(sso::Who(None));
+        return next.run(req).await;
     }
     let caller = match (fleet.token.as_deref(), presented.as_deref()) {
         _ if session_caller.is_some() => session_caller.clone().unwrap_or(Caller::Admin),
@@ -532,6 +571,13 @@ async fn auth_middleware(State(fleet): State<Fleet>, mut req: Request, next: Nex
         && let Some(refusal) = signup::payment_gate(&fleet, t, req.method(), req.uri().path()).await
     {
         return refusal;
+    }
+    if req.uri().path() == "/fleet/register" && enroll::node_auth() == enroll::NodeAuth::Enrolled {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({"error": "this central only accepts heartbeats from enrolled nodes (--node-auth enrolled)"})),
+        )
+            .into_response();
     }
     req.extensions_mut().insert(caller.clone());
     req.extensions_mut().insert(KeyUsed(key_used.clone()));
@@ -773,7 +819,9 @@ pub fn router_with_sso(
         signup: Arc::new(
             signup::Runtime::new(signup::boot_config()).with_mail(signup::boot_mail()),
         ),
-        registry: Arc::default(),
+        registry: Arc::new(registry::RegistryRt::with_enroll(enroll::Enroll::open(
+            &cfg.state_dir,
+        ))),
     };
     let mut fleet = fleet;
     let mut handle = None;
@@ -812,10 +860,30 @@ pub fn router_with_sso(
         .route(
             "/fleet/register",
             post(register)
-                .route_layer(middleware::from_fn_with_state(fleet.clone(), registry::admission))
-                .layer(axum::extract::DefaultBodyLimit::max(registry::REGISTER_BODY_LIMIT)),
+                .route_layer(middleware::from_fn_with_state(
+                    fleet.clone(),
+                    registry::admission,
+                ))
+                .layer(axum::extract::DefaultBodyLimit::max(
+                    registry::REGISTER_BODY_LIMIT,
+                )),
         )
         .route("/fleet/registry", get(registry_status))
+        .route(
+            "/fleet/enroll",
+            post(enroll::enroll).layer(axum::extract::DefaultBodyLimit::max(4096)),
+        )
+        .route("/fleet/enroll/renew", post(enroll::renew))
+        .route(
+            "/fleet/enroll/tokens",
+            get(enroll::list_tokens).post(enroll::create_token),
+        )
+        .route(
+            "/fleet/enroll/tokens/{id}",
+            axum::routing::delete(enroll::revoke_token),
+        )
+        .route("/fleet/enroll/nodes", get(enroll::list_enrolled))
+        .route("/fleet/nodes/{name}/{action}", post(enroll::node_action))
         .route("/fleet/nodes", get(list_nodes))
         .route("/fleet/nodes/{name}", get(get_node).delete(deregister_node))
         .route("/fleet/nodes/{name}/cordon", post(cordon_node))
@@ -1063,8 +1131,9 @@ fn apply_register_with(
 ) -> bool {
     let old = nodes.get(&req.name);
     let cordoned = old.map(|n| n.cordoned).unwrap_or(false);
-    let outdated = min_version
-        .is_some_and(|m| req.agent_version.is_empty() || registry::version_lt(&req.agent_version, m));
+    let outdated = min_version.is_some_and(|m| {
+        req.agent_version.is_empty() || registry::version_lt(&req.agent_version, m)
+    });
     let durable = old.is_none_or(|n| {
         n.fluxvm_url != req.fluxvm_url
             || n.vcpus_total != req.vcpus_total
@@ -1101,7 +1170,23 @@ fn apply_register_with(
     durable
 }
 
-async fn register(State(fleet): State<Fleet>, Json(req): Json<RegisterRequest>) -> Json<Value> {
+async fn register(
+    State(fleet): State<Fleet>,
+    identity: Option<Extension<enroll::NodeIdentity>>,
+    Json(req): Json<RegisterRequest>,
+) -> Result<Json<Value>, AppError> {
+    // An enrolled node may only report itself; the fleet token is not bound to a name.
+    if let Some(Extension(id)) = &identity
+        && id.0 != req.name
+    {
+        return Err(AppError(
+            StatusCode::FORBIDDEN,
+            format!(
+                "this credential belongs to node '{}', not '{}'",
+                id.0, req.name
+            ),
+        ));
+    }
     let mut nodes = fleet.nodes.lock().await;
     let durable = apply_register(&mut nodes, req);
     let count = nodes.len();
@@ -1109,10 +1194,10 @@ async fn register(State(fleet): State<Fleet>, Json(req): Json<RegisterRequest>) 
     if durable {
         fleet.registry.mark_dirty();
     }
-    match registry::next_interval_secs(count) {
+    Ok(match registry::next_interval_secs(count) {
         Some(n) => Json(json!({"ok": true, "next_interval_secs": n})),
         None => Json(json!({"ok": true})),
-    }
+    })
 }
 
 /// `GET /fleet/registry` (operator): registry write-behind and heartbeat admission numbers.
@@ -1290,6 +1375,9 @@ async fn deregister_node(
             if let (Some(path), Some(lock)) = (&fleet.persist_path, &fleet.lock_path) {
                 persist_nodes(path, lock, &nodes);
             }
+            drop(nodes);
+            // A decommissioned node's credential stops working with it.
+            fleet.registry.enroll.forget(&name).await;
             Ok(StatusCode::NO_CONTENT)
         }
         DeregisterOutcome::NotFound => Err(AppError(
@@ -2691,16 +2779,31 @@ mod tests {
     #[test]
     fn only_durable_changes_mark_the_registry_dirty() {
         let mut nodes = HashMap::new();
-        assert!(apply_register_with(&mut nodes, beat_req("n", 0, "0.4.12"), None), "a new node is durable");
-        assert!(!apply_register_with(&mut nodes, beat_req("n", 0, "0.4.12"), None), "an identical beat is not");
-        assert!(!apply_register_with(&mut nodes, beat_req("n", 5, "0.4.12"), None), "VM count is live data, not durable");
+        assert!(
+            apply_register_with(&mut nodes, beat_req("n", 0, "0.4.12"), None),
+            "a new node is durable"
+        );
+        assert!(
+            !apply_register_with(&mut nodes, beat_req("n", 0, "0.4.12"), None),
+            "an identical beat is not"
+        );
+        assert!(
+            !apply_register_with(&mut nodes, beat_req("n", 5, "0.4.12"), None),
+            "VM count is live data, not durable"
+        );
         let mut moved = beat_req("n", 5, "0.4.12");
         moved.fluxvm_url = "http://elsewhere".into();
-        assert!(apply_register_with(&mut nodes, moved, None), "a new address is durable");
+        assert!(
+            apply_register_with(&mut nodes, moved, None),
+            "a new address is durable"
+        );
         let mut labelled = beat_req("n", 5, "0.4.12");
         labelled.fluxvm_url = "http://elsewhere".into();
         labelled.labels.insert("zone".into(), "a".into());
-        assert!(apply_register_with(&mut nodes, labelled, None), "labels are durable");
+        assert!(
+            apply_register_with(&mut nodes, labelled, None),
+            "labels are durable"
+        );
     }
 
     #[test]
@@ -2713,7 +2816,10 @@ mod tests {
         assert!(nodes["old"].outdated && nodes["none"].outdated);
         assert!(!nodes["new"].outdated && !nodes["free"].outdated);
         assert_eq!(nodes.len(), 4);
-        assert!(nodes["old"].capacity_score(1, 1).is_none(), "outdated nodes take no placements");
+        assert!(
+            nodes["old"].capacity_score(1, 1).is_none(),
+            "outdated nodes take no placements"
+        );
         assert!(nodes["new"].capacity_score(1, 1).is_some());
     }
 
