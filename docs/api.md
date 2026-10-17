@@ -327,6 +327,11 @@ characters of `[A-Za-z0-9._-]` (400 otherwise, checked before a member is taken 
 ```bash
 curl -sS http://127.0.0.1:7788/v1/vms -H 'Authorization: Bearer <token>'
 curl -sS 'http://127.0.0.1:7788/v1/vms?tenant=acme' -H 'Authorization: Bearer <token>'
+```
+
+A token listed in `[[auth.mfa]]` also needs a current TOTP code on guest exec, shells and (optionally) writes. Send it in `X-Fluxvm-Totp`; a missing or wrong code returns 401, repeated failures 429. See [host-hardening.md](host-hardening.md#step-up-mfa-totp-for-exec-and-writes).
+
+```bash
 curl -sS http://127.0.0.1:7788/readyz   # no token; "ok" requires state_dir (+ dataplane if required)
 ```
 
