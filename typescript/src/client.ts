@@ -4,12 +4,15 @@
 import {
   ApiError,
   AuthError,
+  Conflict,
   ConnectionFailed,
   ForbiddenError,
   NotFound,
   RateLimited,
   RequestTimeout,
+  ServiceUnavailable,
 } from "./errors.js";
+import { SessionEventsSnapshot, SessionStreamEvent, WatchOptions, watchSessionEvents } from "./events.js";
 import {
   BaselineSummary,
   ChangeSet,
@@ -49,7 +52,7 @@ interface Sent {
   body: Uint8Array;
 }
 
-function errorFromResponse(status: number, raw: Uint8Array, headers: Record<string, string>): ApiError {
+export function errorFromResponse(status: number, raw: Uint8Array, headers: Record<string, string>): ApiError {
   const text = new TextDecoder().decode(raw);
   let body: unknown = text;
   let message = text;
@@ -74,6 +77,8 @@ function errorFromResponse(status: number, raw: Uint8Array, headers: Record<stri
     const n = value === undefined ? NaN : Number(value);
     return new RateLimited(status, body, message, Number.isFinite(n) ? n : undefined);
   }
+  if (status === 409) return new Conflict(status, body, message);
+  if (status === 503) return new ServiceUnavailable(status, body, message);
   return new ApiError(status, body, message);
 }
 
@@ -148,6 +153,36 @@ export class FluxVM {
     } finally {
       clearTimeout(timer);
     }
+  }
+
+  /**
+   * Open a long-lived response (Server-Sent Events) without buffering it. Resolves for every
+   * HTTP status; the caller checks `ok`. Aborting `signal` ends the stream.
+   */
+  async openStream(path: string, headers: Record<string, string>, signal?: AbortSignal): Promise<Response> {
+    const merged: Record<string, string> = { ...this.headers, ...headers };
+    if (this.token) merged["Authorization"] = `Bearer ${this.token}`;
+    try {
+      return await this.fetchFn(this.baseUrl + path, { method: "GET", headers: merged, redirect: "manual", signal });
+    } catch (err) {
+      if (signal?.aborted) throw err;
+      throw new ConnectionFailed(`GET ${this.baseUrl}${path}: ${(err as Error).message}`);
+    }
+  }
+
+  /** `GET /v1/agents/sessions/{id}/events`: the ledger and VM events so far, optionally after `since`. */
+  sessionEvents(id: string, since?: Date | string): Promise<SessionEventsSnapshot> {
+    const q = since === undefined ? "" : `?since=${enc(since instanceof Date ? since.toISOString() : since)}`;
+    return this.json("GET", `/v1/agents/sessions/${enc(id)}/events${q}`);
+  }
+
+  /**
+   * Follow `GET /v1/agents/sessions/{id}/events/stream`: replays the history, then yields new
+   * ledger and VM events as they happen. Reconnects with `Last-Event-ID` when the connection drops, so no ledger entry is repeated or missed. Ends when the session is gone (a final `error` event
+   * is yielded first), when `signal` aborts, or after `maxReconnects` failed attempts in a row.
+   */
+  watchSessionEvents(id: string, opts: WatchOptions = {}): AsyncGenerator<SessionStreamEvent> {
+    return watchSessionEvents(this, id, opts);
   }
 
   async json<T = any>(

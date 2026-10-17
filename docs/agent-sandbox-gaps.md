@@ -69,6 +69,20 @@ optional for native). See [network-fabric.md](network-fabric.md),
 [ebpf-cilium.md](ebpf-cilium.md), and the
 [packet-decision diagrams](network-fabric.md#packet-decision-and-control-plane-diagrams).
 
+## Developer-experience gaps (audit of a hosted-sandbox Convex component)
+
+Compared against the feature list of a hosted microVM Convex component. Capability is not the gap; integration is.
+
+| Area | State |
+|---|---|
+| Idempotent lifecycle calls | Done: `Idempotency-Key` on VM create/fork/snapshot/delete and on session create/checkpoint/restore/fork/exec/jobs |
+| Tenant isolation without leaking ids | Done for agent sessions (another tenant's id is `404`) |
+| Live events | Done: `GET /v1/agents/sessions/{id}/events/stream` (SSE, resumable); the TypeScript client's `watchSessionEvents` follows it. Not run end to end against a live daemon |
+| Stable error codes | Done: `code` next to `error` ([api.md#errors](api.md#errors)); a few routes with their own error bodies still send none |
+| Test helper | Done for TypeScript: `@zyvorai/fluxvm/testing` (`FakeFluxVM`) |
+| Framework recipe | [convex-agent.md](convex-agent.md), untested against a Convex deployment |
+| Published boot and fork latency on Linux | Open: needs a Linux KVM host (`scripts/bench-sandbox.sh`); no number is claimed here |
+
 ## Remaining (optional hardening)
 
 - **Production-grade virtio device live-state** inside in-tree KVM snapshots (**FLUXKVM1 v3** packs queue rings; Firecracker remains production snap format for FC guests)

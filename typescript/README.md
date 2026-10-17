@@ -58,6 +58,19 @@ Same behaviour as the Python client:
 `createKey`, `createWebhook`, `billing`, `createVolume`, `createPool` and more, with typed answers. Errors add
 `Conflict` (409) and `ServiceUnavailable` (503). See [docs/fleet-sdk.md](../docs/fleet-sdk.md).
 
+## Agent-session events and tests
+
+- `fx.sessionEvents(id, since?)` → `{ ledger, vm_events }` (`GET /v1/agents/sessions/{id}/events`).
+- `fx.watchSessionEvents(id, { since, lastEventId, signal })` is an async iterator over
+  `GET …/events/stream`: it replays history, then yields `ledger` and `vm` events as they happen, reconnects with
+  `Last-Event-ID`, and ends with a final `error` event when the session is gone.
+- `ApiError.code` carries the server's stable error code (`NOT_FOUND`, `CONFLICT`, ...). 409 maps to `Conflict` and 503
+  to `ServiceUnavailable`.
+- `import { FakeFluxVM } from "@zyvorai/fluxvm/testing"` starts an in-memory stand-in (sandbox create/run/delete, session
+  events, token → tenant isolation) for your own unit tests. It is not the real server.
+
+Using this from Convex: [docs/convex-agent.md](../docs/convex-agent.md).
+
 ## Tests
 
 `npm test` builds and runs the unit tests against a local mock server (`test/client.test.ts`). It has not been run

@@ -4,6 +4,8 @@
 export { FluxVM, Sandbox, shellQuote, MAX_FILE_TRANSFER_BYTES, DEFAULT_EXEC_TIMEOUT_SECS } from "./client.js";
 export type { FluxVMOptions } from "./client.js";
 export * from "./errors.js";
+export { parseSse } from "./events.js";
+export type { SessionEventsSnapshot, SessionStreamEvent, WatchOptions } from "./events.js";
 export { FleetClient } from "./fleet.js";
 export type {
   ApiKey,
