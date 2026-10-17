@@ -99,6 +99,15 @@ jobs:
         run: |
           TAG="${{ github.event.inputs.tag || github.ref_name }}"
           scripts/package-linux.sh --version "${TAG#v}" ${{ matrix.cross && '--target aarch64-unknown-linux-gnu' || '' }}
+      # The ubuntu:22.04 build container (glibc 2.35) is the compatibility floor for every supported node. This
+      # fails the release if a binary needs a newer glibc symbol or a library outside the allowlist, instead of
+      # shipping a package that dies with "version GLIBC_2.xx not found" on an older node.
+      - name: glibc floor gate
+        working-directory: fluxvm
+        run: |
+          d="$(mktemp -d)"
+          tar -xzf target/package/*.tar.gz -C "$d"
+          OBJDUMP=${{ matrix.cross && 'aarch64-linux-gnu-objdump' || 'objdump' }} scripts/check-glibc-floor.sh "$d" 2.35
       - uses: actions/upload-artifact@v4
         with:
           name: fluxvm-linux-${{ matrix.arch }}
