@@ -4,9 +4,9 @@
 #
 # Root-side wrapper for the privileged CI job (.github/workflows/vmm-guard-qos.yml).
 # Install it root-owned and not writable by the runner user, and allow only this
-# path in sudoers:
+# path in sudoers (sudo rejects wildcards in arguments; the script checks its own argument):
 #   install -o root -g root -m 0755 scripts/ci-privileged-guard-test.sh /usr/local/sbin/fluxvm-ci-guard-test
-#   echo 'ghrunner ALL=(root) NOPASSWD: /usr/local/sbin/fluxvm-ci-guard-test /home/ghrunner/*' \
+#   echo 'ghrunner ALL=(root) NOPASSWD: /usr/local/sbin/fluxvm-ci-guard-test' \
 #     > /etc/sudoers.d/ghrunner-fluxvm-guard-test   # check with visudo -c
 #
 # It copies the checkout (and the binaries the job built) into a root-owned
