@@ -1,7 +1,7 @@
-"""Live check of Session.watch_events against a real daemon. Skips unless FLUXVM_LIVE_URL is set.
+"""Live check of Session.watch_events against a real daemon. Skips unless FLUXVM_LIVE_EVENTS_URL is set.
 
 The daemon needs a session template named "fc" (a flux-vm spec.json under sandbox.templates_dir).
-    FLUXVM_LIVE_URL=http://127.0.0.1:7788 python3 tests/live_events.py
+    FLUXVM_LIVE_EVENTS_URL=http://127.0.0.1:7788 python3 tests/live_events.py
 """
 import os
 import sys
@@ -15,9 +15,9 @@ from fluxvm.sessions import Session  # noqa: E402
 
 
 def main() -> int:
-    url = os.environ.get("FLUXVM_LIVE_URL")
+    url = os.environ.get("FLUXVM_LIVE_EVENTS_URL")
     if not url:
-        print("FLUXVM_LIVE_URL not set; skipping")
+        print("FLUXVM_LIVE_EVENTS_URL not set; skipping")
         return 0
     fx = FluxVM(url, token=os.environ.get("FLUXVM_TOKEN"), timeout=120)
     info = fx._json("POST", "/v1/agents/sessions",
