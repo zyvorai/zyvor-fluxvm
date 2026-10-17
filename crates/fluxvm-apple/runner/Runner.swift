@@ -881,6 +881,9 @@ final class Runner: NSObject, VZVirtualMachineDelegate, NSWindowDelegate {
             Darwin.signal(s, SIG_IGN)
             let src = DispatchSource.makeSignalSource(signal: s, queue: .main)
             src.setEventHandler { [weak self] in
+                // Record who stopped us: a signal the daemon did not send (launchd, automatic termination) would
+                // otherwise look like a clean exit with nothing in the log.
+                emit(["event": "signal", "signal": s == SIGTERM ? "SIGTERM" : "SIGINT"])
                 guard let self, let vm = self.vm else { exit(0) }
                 // A forced stop: the host asked the runner to go away.
                 vm.stop { _ in self.state = "stopped"; self.cleanupAndExit(0) }
@@ -1556,5 +1559,10 @@ if args[1] == "check" {
 }
 let app = NSApplication.shared
 app.setActivationPolicy(.prohibited)
+// This process has no windows, which AppKit treats as idle: it logs "AutomaticTermination: No windows open yet" and
+// macOS may then SIGTERM it while the guest is running. Opt out for as long as the VM lives.
+ProcessInfo.processInfo.disableAutomaticTermination("fluxvm guest is running")
+ProcessInfo.processInfo.disableSuddenTermination()
+let keepAlive = ProcessInfo.processInfo.beginActivity(options: .userInitiatedAllowingIdleSystemSleep, reason: "fluxvm guest is running")
 DispatchQueue.main.async { args[1] == "install" ? runner.install() : runner.boot() }
-withExtendedLifetime(runner) { app.run() }
+withExtendedLifetime((runner, keepAlive)) { app.run() }
