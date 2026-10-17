@@ -44,6 +44,9 @@ type APIError struct {
 	Body []byte
 	// RetryAfter is the server's Retry-After for a 429; zero when absent.
 	RetryAfter time.Duration
+	// Code is the server's stable error code (NOT_FOUND, CONFLICT, RATE_LIMITED, ...); empty on
+	// routes that send none. Branch on it, not on Message.
+	Code string
 }
 
 func (e *APIError) Error() string {
@@ -72,9 +75,13 @@ func newAPIError(status int, header http.Header, body []byte) *APIError {
 	e := &APIError{Status: status, Message: string(body), Body: body}
 	var parsed struct {
 		Error *string `json:"error"`
+		Code  string  `json:"code"`
 	}
-	if json.Unmarshal(body, &parsed) == nil && parsed.Error != nil {
-		e.Message = *parsed.Error
+	if json.Unmarshal(body, &parsed) == nil {
+		if parsed.Error != nil {
+			e.Message = *parsed.Error
+		}
+		e.Code = parsed.Code
 	}
 	if status == http.StatusTooManyRequests {
 		if v := header.Get("Retry-After"); v != "" {

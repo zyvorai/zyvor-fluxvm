@@ -77,7 +77,7 @@ Compared against the feature list of a hosted microVM sandbox integration. Capab
 |---|---|
 | Idempotent lifecycle calls | Done: `Idempotency-Key` on VM create/fork/snapshot/delete and on session create/checkpoint/restore/fork/exec/jobs |
 | Tenant isolation without leaking ids | Done for agent sessions (another tenant's id is `404`) |
-| Live events | Done: `GET /v1/agents/sessions/{id}/events/stream` (SSE, resumable); the TypeScript client's `watchSessionEvents` follows it. Not run end to end against a live daemon |
+| Live events | Done: `GET /v1/agents/sessions/{id}/events/stream` (SSE, resumable); the TypeScript, Python and Go clients follow it and reconnect. Not run end to end against a live daemon |
 | Stable error codes | Done: `code` next to `error` ([api.md#errors](api.md#errors)); a few routes with their own error bodies still send none |
 | Test helper | Done for TypeScript: `@zyvorai/fluxvm/testing` (`FakeFluxVM`) |
 | Framework recipe | [serverless-agent.md](serverless-agent.md), untested on a serverless platform |

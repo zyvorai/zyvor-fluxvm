@@ -47,11 +47,25 @@ Request and response shapes come from `crates/fluxvm-api/src/lib.rs` and
 `crates/fluxvm-scheduler/src/sandbox.rs`. Unset `CreateSandboxRequest` fields
 are omitted so the server's defaults apply.
 
+## Following a session live
+
+`session.Events(ctx, since)` returns the ledger and VM events so far. `session.WatchEvents(ctx, fluxvm.WatchOptions{}, fn)`
+follows `GET …/events/stream`: it replays the history, then calls `fn` with each `ledger` or `vm` event, reconnecting
+with `Last-Event-ID` when the connection drops (no ledger entry repeated or missed). A final `error` event is passed to
+`fn` and the call returns nil; it returns `ctx`'s error when `ctx` ends.
+
+```go
+err := session.WatchEvents(ctx, fluxvm.WatchOptions{}, func(e fluxvm.SessionStreamEvent) error {
+	fmt.Println(e.Type, string(e.Data))
+	return nil
+})
+```
+
 ## Errors
 
 A non-success answer is an `*APIError` (`Status`, `Message`, raw `Body`,
 `RetryAfter` for 429). Newer servers also send a stable `code` (`NOT_FOUND`, `CONFLICT`, ...; see
-[docs/api.md](../docs/api.md#errors)) inside `Body`. It also matches sentinels with `errors.Is`:
+[docs/api.md](../docs/api.md#errors)) in `APIError.Code`. It also matches sentinels with `errors.Is`:
 
 | Sentinel | Matches |
 |---|---|

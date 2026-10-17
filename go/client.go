@@ -122,6 +122,43 @@ func (c *Client) do(ctx context.Context, method, path string, body []byte, hdr h
 	return resp.StatusCode, resp.Header, data, nil
 }
 
+// openStream starts a long-lived GET (Server-Sent Events) and returns the response for the
+// caller to read and close. There is no client-side timeout: ctx ends it. A non-2xx answer is
+// read and returned as an *APIError.
+func (c *Client) openStream(ctx context.Context, path string, hdr http.Header) (*http.Response, error) {
+	if c.baseURL == "" {
+		return nil, errors.New("fluxvm: base URL is required")
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+path, nil)
+	if err != nil {
+		return nil, fmt.Errorf("fluxvm: building request: %w", err)
+	}
+	for k, vs := range c.headers {
+		for _, v := range vs {
+			req.Header.Add(k, v)
+		}
+	}
+	for k, vs := range hdr {
+		req.Header.Del(k)
+		for _, v := range vs {
+			req.Header.Add(k, v)
+		}
+	}
+	if c.token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.token)
+	}
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, classify(ctx, http.MethodGet, path, err)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		defer resp.Body.Close()
+		data, _ := io.ReadAll(resp.Body)
+		return nil, newAPIError(resp.StatusCode, resp.Header, data)
+	}
+	return resp, nil
+}
+
 // classify maps a transport error onto the package's sentinels. A caller's
 // own cancellation is returned as context.Canceled, untouched.
 func classify(ctx context.Context, method, path string, err error) error {

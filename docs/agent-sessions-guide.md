@@ -304,7 +304,7 @@ curl -sN "$URL/v1/agents/sessions/$S/events/stream" -H "authorization: Bearer $T
 `ledger` events are what the API did, `vm` events what the hypervisor saw, and an `error` event ends the stream (the
 session is gone, or the hour limit is up: reconnect with the last id). The id is a cursor: no ledger entry is repeated
 or missed, but a VM event with the same timestamp as the last one seen may repeat. At most 64 streams per host. In
-TypeScript, `fx.watchSessionEvents(id)` does the reconnecting for you ([client](../typescript/README.md)).
+The TypeScript (`fx.watchSessionEvents`), Python (`session.watch_events`) and Go (`session.WatchEvents`) clients reconnect for you.
 
 A job lives in the guest agent's memory with its output spooled on the guest's disk. A reboot or agent restart forgets
 the table (spools stay); a disk-only restore rolls the spool back.

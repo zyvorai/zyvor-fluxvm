@@ -78,8 +78,20 @@ and validation, to **400** with `{"error": "…"}`). Subclasses: `AuthError` (40
 `ForbiddenError` (403, also an `AuthError`), `NotFound` (404), `RateLimited`
 (429, with `retry_after`). Newer servers also send a stable `code` next to `error`
 (`NOT_FOUND`, `CONFLICT`, `RATE_LIMITED`, ...; see [docs/api.md](../docs/api.md#errors)); it is in
-`err.body["code"]`. Branch on it, not on the message. Transport failures raise `RequestTimeout` or
+`err.code` (also in `err.body`). Branch on it, not on the message. Transport failures raise `RequestTimeout` or
 `ConnectionFailed`.
+
+## Following a session live
+
+`session.events(since=None)` returns the ledger and VM events so far. `session.watch_events()` follows
+`GET …/events/stream`: it replays the history, then yields `{"type": "ledger" | "vm" | "error", "data": {...},
+"id": "..."}` as events happen, and reconnects with `Last-Event-ID` when the connection drops (no ledger entry repeated or
+missed). It ends after a final `error` event (the session is gone). Break out of the loop to stop.
+
+```python
+for ev in session.watch_events():
+    print(ev["type"], ev["data"])
+```
 
 ## Not covered yet
 

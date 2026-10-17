@@ -7,10 +7,37 @@ engine; check ``session.capabilities["fork"]`` instead of calling :meth:`Session
 catching :class:`~fluxvm.errors.Conflict`.
 """
 
+import http.client
+import json
+import time
 import urllib.parse
-from typing import Any, Dict, List, Mapping, Optional, Sequence
+from typing import Any, Dict, Iterable, Iterator, List, Mapping, Optional, Sequence, Tuple
 
+from .errors import ConnectionFailed, RequestTimeout
 from .models import ExecResult
+
+
+def parse_sse(lines: Iterable[bytes]) -> Iterator[Tuple[str, Optional[str], str]]:
+    """Split Server-Sent Events lines into ``(event, id, data)`` tuples."""
+    event, ident, data, has = "message", None, [], False
+    for raw in lines:
+        line = raw.decode("utf-8", errors="replace").rstrip("\r\n")
+        if line == "":
+            if has:
+                yield event, ident, "\n".join(data)
+            event, ident, data, has = "message", None, [], False
+        elif not line.startswith(":"):
+            name, _, value = line.partition(":")
+            value = value[1:] if value.startswith(" ") else value
+            if name == "event":
+                event = value
+            elif name == "id":
+                ident = value
+            elif name == "data":
+                data.append(value)
+            else:
+                continue
+            has = True
 
 
 class Session:
@@ -102,6 +129,62 @@ class Session:
         if since:
             path += "?since=" + urllib.parse.quote(since, safe="")
         return self._client._json("GET", path)
+
+    def watch_events(
+        self,
+        since: Optional[str] = None,
+        last_event_id: Optional[str] = None,
+        max_reconnects: int = 5,
+        reconnect_delay: float = 1.0,
+    ) -> Iterator[Dict[str, Any]]:
+        """Follow ``GET .../events/stream``: replays the history, then yields new events as
+        ``{"type": "ledger" | "vm" | "error", "data": {...}, "id": "..."}``.
+
+        Reconnects with ``Last-Event-ID`` when the connection drops, so no ledger entry is
+        repeated or missed (a VM event with the same timestamp as the last one may repeat).
+        A final ``error`` event (the session is gone) is yielded and then the iterator ends.
+        Gives up with the last error after ``max_reconnects`` failed attempts in a row. Break
+        out of the loop to stop.
+        """
+        failures = 0
+        while True:
+            headers = {"Accept": "text/event-stream"}
+            path = self._path("/events/stream")
+            if last_event_id is not None:
+                headers["Last-Event-ID"] = last_event_id
+            elif since:
+                path += "?since=" + urllib.parse.quote(since, safe="")
+            try:
+                resp = self._client._open_stream(path, headers)
+            except (ConnectionFailed, RequestTimeout):
+                failures += 1
+                if failures > max_reconnects:
+                    raise
+                time.sleep(reconnect_delay)
+                continue
+            failures = 0
+            try:
+                try:
+                    for event, ident, data in parse_sse(resp):
+                        if ident is not None:
+                            last_event_id = ident
+                        try:
+                            payload = json.loads(data)
+                        except ValueError:
+                            payload = {}
+                        if event == "error":
+                            # The hour limit asks for a reconnect; anything else is final.
+                            if str(payload.get("error", "")).startswith("stream time limit"):
+                                break
+                            yield {"type": "error", "data": payload, "id": ident}
+                            return
+                        if event in ("ledger", "vm"):
+                            yield {"type": event, "data": payload, "id": ident}
+                except (OSError, http.client.HTTPException):
+                    pass  # dropped or idle connection: reconnect from the last id
+            finally:
+                resp.close()
+            time.sleep(reconnect_delay)
 
     def artifacts(self) -> Dict[str, Any]:
         """Workspace changes since the baseline (``changes`` is None, with a ``note``, when

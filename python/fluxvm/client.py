@@ -22,6 +22,7 @@ from .errors import (
     NotFound,
     RateLimited,
     RequestTimeout,
+    ServiceUnavailable,
 )
 from .models import BaselineSummary, ChangeSet, ExecResult, FileContent, HttpResponse, SandboxInfo, Volume
 
@@ -76,6 +77,8 @@ def _error_from_response(status: int, raw: bytes, headers: Mapping[str, str]) ->
         return NotFound(status, body, message)
     if status == 409:
         return Conflict(status, body, message)
+    if status == 503:
+        return ServiceUnavailable(status, body, message)
     if status == 429:
         retry_after = None
         value = headers.get("Retry-After")
@@ -151,6 +154,29 @@ class FluxVM:
             if _is_timeout(err):
                 raise RequestTimeout("{} {} timed out".format(method, path)) from err
             raise ConnectionFailed("{} {}: {}".format(method, url, err)) from err
+
+    def _open_stream(self, path: str, headers: Mapping[str, str],
+                     timeout: Optional[float] = None) -> Any:
+        """Open a long-lived GET (Server-Sent Events) and return the response to read lines
+        from. A non-2xx answer raises the matching :class:`ApiError`."""
+        req = urllib.request.Request(self.base_url + path, method="GET")
+        merged = dict(self.headers)
+        merged.update(headers)
+        if self.token:
+            merged["Authorization"] = "Bearer " + self.token
+        for key, value in merged.items():
+            req.add_header(key, value)
+        try:
+            return self._opener.open(req, timeout=self.timeout if timeout is None else timeout)
+        except urllib.error.HTTPError as err:
+            try:
+                raise _error_from_response(err.code, err.read(), dict(err.headers.items())) from None
+            finally:
+                err.close()
+        except (urllib.error.URLError, OSError) as err:
+            if _is_timeout(err):
+                raise RequestTimeout("GET {} timed out".format(path)) from err
+            raise ConnectionFailed("GET {}{}: {}".format(self.base_url, path, err)) from err
 
     def _json(
         self,
