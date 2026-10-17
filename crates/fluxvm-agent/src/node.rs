@@ -64,16 +64,29 @@ pub async fn run(cfg: NodeConfig) {
         .unwrap_or_else(|_| reqwest::Client::new());
     let mut preferred = 0usize;
     let mut failures = 0u32;
+    // The interval central last asked for (`next_interval_secs`), used only when it is longer than the configured one.
+    let mut interval = cfg.interval;
+    // Spread a restarted fleet: each node waits a fixed share of the interval, derived from its name, before the first
+    // beat, so ten thousand nodes started together do not beat in the same second.
+    if cfg.sim.is_none() {
+        tokio::time::sleep(start_phase(&cfg.name, cfg.interval)).await;
+    }
     loop {
         let outcome = beat(&http, &cfg, preferred).await;
+        let backoff = outcome
+            .as_ref()
+            .err()
+            .and_then(|e| e.downcast_ref::<Busy>())
+            .map(|b| b.0);
         failures = if outcome.is_ok() {
             0
         } else {
             failures.saturating_add(1)
         };
         match outcome {
-            Ok(used) => {
+            Ok(Sent { used, next_interval }) => {
                 preferred = used;
+                interval = next_interval.map_or(cfg.interval, |n| n.max(cfg.interval));
                 tracing::debug!(node = %cfg.name, "heartbeat sent");
                 if let Some(path) = &cfg.overlay_config {
                     let central = central_urls(&cfg.central_url)[used].clone();
@@ -92,8 +105,48 @@ pub async fn run(cfg: NodeConfig) {
                 tracing::warn!(error = %e, failures, "heartbeat failed, will retry with backoff")
             }
         }
-        tokio::time::sleep(retry_delay(cfg.interval, failures, jitter_fraction())).await;
+        // A central that said "busy" named how long to wait; honour it (plus jitter) rather than the usual backoff.
+        let wait = match backoff {
+            Some(b) => b + Duration::from_millis((jitter_fraction() * 1000.0) as u64),
+            None => retry_delay(interval, failures, jitter_fraction()),
+        };
+        tokio::time::sleep(wait).await;
     }
+}
+
+/// A node's fixed offset into the heartbeat interval: a hash of its name, so it is the same on every start.
+pub fn start_phase(name: &str, interval: Duration) -> Duration {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    name.hash(&mut h);
+    let ms = interval.as_millis().max(1) as u64;
+    Duration::from_millis(h.finish() % ms)
+}
+
+/// Central answered 429: wait at least this long, and do not try another central (they share the load).
+#[derive(Debug)]
+struct Busy(Duration);
+impl std::fmt::Display for Busy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "central is busy, asked to wait {}s", self.0.as_secs())
+    }
+}
+impl std::error::Error for Busy {}
+
+/// `Retry-After` in seconds (the HTTP-date form is not used by central), capped at two minutes.
+fn retry_after(resp: &reqwest::Response) -> Duration {
+    let secs = resp
+        .headers()
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(5);
+    Duration::from_secs(secs.clamp(1, 120))
+}
+
+struct Sent {
+    used: usize,
+    next_interval: Option<Duration>,
 }
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
@@ -132,7 +185,7 @@ pub fn central_urls(s: &str) -> Vec<String> {
 
 /// Sends one heartbeat, starting with central `preferred` (the one that answered last time) and trying the others
 /// in order when it is down or a standby. Returns the index of the central that took it.
-async fn beat(http: &reqwest::Client, cfg: &NodeConfig, preferred: usize) -> Result<usize> {
+async fn beat(http: &reqwest::Client, cfg: &NodeConfig, preferred: usize) -> Result<Sent> {
     // A daemon that cannot be reached is reported, not hidden: the node still heartbeats (so it
     // is visibly alive and says why it cannot take work) instead of just going stale.
     let (local, daemon) = match local_vm_stats(http, &cfg.fluxvm_url).await {
@@ -184,6 +237,11 @@ async fn beat(http: &reqwest::Client, cfg: &NodeConfig, preferred: usize) -> Res
         "apple": apple,
         "daemon": daemon,
         "allocated": allocated,
+        "agent_version": env!("CARGO_PKG_VERSION"),
+        // The daemon has no version endpoint yet; it is installed by the same package as this agent.
+        "daemon_version": "",
+        "proto": 1,
+        "capabilities": ["next_interval", "retry_after"],
     });
     let urls = central_urls(&cfg.central_url);
     anyhow::ensure!(!urls.is_empty(), "no central URL configured");
@@ -195,7 +253,18 @@ async fn beat(http: &reqwest::Client, cfg: &NodeConfig, preferred: usize) -> Res
             req = req.bearer_auth(t);
         }
         match req.json(&body).send().await {
-            Ok(resp) if resp.status().is_success() => return Ok(i),
+            Ok(resp) if resp.status().is_success() => {
+                let next_interval = resp
+                    .json::<serde_json::Value>()
+                    .await
+                    .ok()
+                    .and_then(|v| v["next_interval_secs"].as_u64())
+                    .map(|n| Duration::from_secs(n.clamp(5, 20)));
+                return Ok(Sent { used: i, next_interval });
+            }
+            Ok(resp) if resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS => {
+                return Err(Busy(retry_after(&resp)).into());
+            }
             Ok(resp) => errors.push(format!("{}: {}", urls[i], resp.status())),
             Err(e) => errors.push(format!("{}: {e}", urls[i])),
         }
@@ -406,7 +475,18 @@ mod overlay_sync_tests {
 
 #[cfg(test)]
 mod central_list_tests {
-    use super::central_urls;
+    use super::{central_urls, start_phase};
+
+    #[test]
+    fn start_phase_is_stable_and_inside_the_interval() {
+        let i = std::time::Duration::from_secs(10);
+        assert_eq!(start_phase("node-a", i), start_phase("node-a", i));
+        let spread: std::collections::HashSet<u128> = (0..200)
+            .map(|n| start_phase(&format!("node-{n}"), i).as_millis())
+            .inspect(|ms| assert!(*ms < 10_000))
+            .collect();
+        assert!(spread.len() > 150, "phases should spread out, got {}", spread.len());
+    }
 
     #[test]
     fn retry_waits_longer_after_failures_with_jitter_and_a_ceiling() {

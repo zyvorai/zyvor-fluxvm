@@ -53,8 +53,29 @@ What this shows:
 - No Redis, no HA, no tenants, no VMs. Central's other background work was at its defaults.
 - The ~6 MB figure at 10,000 nodes is extrapolated from the measured ~600 bytes per node.
 
+## After: write-behind registry and heartbeat admission
+
+Same method and machine as the baseline (release build, loopback, empty state directory, one run each). Central no longer
+rewrites `fleet-nodes.json` on every heartbeat: a heartbeat updates memory and marks the registry dirty only when something
+durable changed (a new node, address, size, labels, capabilities, a cordon), and one background task writes the file at most
+every 5 s (`FLUXVM_REGISTRY_FLUSH_SECS`), at least every 60 s, with `fsync` of the file and its directory. Heartbeats pass a
+concurrency limit and a token bucket (`FLUXVM_REGISTER_INFLIGHT` 512, `FLUXVM_REGISTER_RATE` 5000/s, `FLUXVM_REGISTER_BURST`
+10000) and a refused one gets `429` with a jittered `Retry-After`; a node honours it and does not try another central.
+`GET /fleet/registry` shows flush and refusal counters.
+
+| Nodes | Beats/s achieved | Latency p50 / p99 / max | Failed beats | Registered, healthy | Central CPU / memory | `fleet-nodes.json` |
+|---:|---:|---|---|---|---|---:|
+| 3,000 | 240 | 0 / 0 / 9 ms | 0 | 3,000 / 3,000 | 2.8 s / n.a. | 1.8 MB |
+| 5,000 | 400 | 0 / 0 / 11 ms | 0 | 5,000 / 5,000 | 5 s / 82 MiB | 3.6 MB |
+| 10,000 | 857 | 0 / 0 / 36 ms | 0 | 10,000 / 10,000 | 13.7 s / 155 MiB | 7.2 MB |
+
+Before, 5,000 nodes timed out half their beats; now 10,000 nodes run clean on the same laptop. The same caveats as above apply
+(loopback, no TLS from distinct clients, simulated nodes, one run). What it costs: a restart can lose up to one flush interval
+of *durable* changes (a node re-registers on its next beat, so the effect is a short gap, not lost data), and `last_seen` in the
+file can be up to a minute old. A journal was not needed for these numbers and is not built; the incremental HA feed that
+depends on it is therefore not built either.
+
 ## What changes next
 
-The plan (registry facade, sharded in-memory registry with a write-behind journal, admission control with `Retry-After`,
-per-node enrollment, bounded polling) is tracked in the 10,000-node install work. Each step is measured with
-`scripts/bench-fleet-central.sh` against the numbers above.
+Per-node enrollment, bounded polling and the paginated node list follow in the 10,000-node install work. Each step is
+measured with `scripts/bench-fleet-central.sh` against these numbers.

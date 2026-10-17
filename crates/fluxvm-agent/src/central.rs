@@ -21,6 +21,8 @@ mod metrics;
 mod notify;
 #[path = "central_warmpool.rs"]
 mod pools;
+#[path = "central_registry.rs"]
+mod registry;
 #[path = "central_signup.rs"]
 mod signup;
 #[path = "central_snapshots.rs"]
@@ -139,6 +141,18 @@ pub struct NodeInfo {
     /// back to the per-VM estimate.
     #[serde(default)]
     pub allocated: Option<Allocated>,
+    /// Version and capabilities the node agent reported; empty from an agent that predates them.
+    #[serde(default)]
+    pub agent_version: String,
+    #[serde(default)]
+    pub daemon_version: String,
+    #[serde(default)]
+    pub proto: u32,
+    #[serde(default)]
+    pub capabilities: Vec<String>,
+    /// Older than `FLUXVM_MIN_NODE_VERSION`: kept in the registry and listed, but not a placement target.
+    #[serde(default)]
+    pub outdated: bool,
 }
 
 impl NodeInfo {
@@ -191,6 +205,7 @@ impl NodeInfo {
     ) -> Option<(i64, i64, i64, String)> {
         if !self.healthy()
             || !self.daemon_reachable()
+            || self.outdated
             || self.cordoned
             || self.pressure() == Some(PressureLevel::Critical)
         {
@@ -251,6 +266,16 @@ pub struct RegisterRequest {
     pub daemon: Option<DaemonStatus>,
     #[serde(default)]
     pub allocated: Option<Allocated>,
+    /// `fluxvm-agent` version, the node protocol revision, the daemon's version and optional feature names.
+    /// All `#[serde(default)]`: an older agent omits them.
+    #[serde(default)]
+    pub agent_version: String,
+    #[serde(default)]
+    pub daemon_version: String,
+    #[serde(default)]
+    pub proto: u32,
+    #[serde(default)]
+    pub capabilities: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -292,6 +317,8 @@ struct Fleet {
     sso: Arc<sso::Sso>,
     /// Self-service sign-up and Stripe (rate limits, the Stripe config).
     signup: Arc<signup::Runtime>,
+    /// Write-behind for `fleet-nodes.json` and heartbeat admission control.
+    registry: Arc<registry::RegistryRt>,
 }
 
 impl Fleet {
@@ -671,8 +698,15 @@ fn persist_json<T: Serialize + ?Sized>(path: &FsPath, lock_path: &FsPath, value:
                     return;
                 }
             }
+            // Durable before it replaces the old file, and the rename itself made durable: a power cut leaves the
+            // old registry or the new one, never an empty file.
+            if let Ok(f) = fs::File::open(&tmp) {
+                let _ = f.sync_all();
+            }
             if let Err(e) = fs::rename(&tmp, path) {
                 tracing::warn!(error = %e, "renaming fleet registry");
+            } else if let Some(dir) = path.parent().and_then(|d| fs::File::open(d).ok()) {
+                let _ = dir.sync_all();
             }
         }
         Err(e) => tracing::warn!(error = %e, "serializing fleet registry"),
@@ -739,6 +773,7 @@ pub fn router_with_sso(
         signup: Arc::new(
             signup::Runtime::new(signup::boot_config()).with_mail(signup::boot_mail()),
         ),
+        registry: Arc::default(),
     };
     let mut fleet = fleet;
     let mut handle = None;
@@ -765,6 +800,7 @@ pub fn router_with_sso(
     }
     if tokio::runtime::Handle::try_current().is_ok() {
         signup::spawn_billing_job(fleet.clone());
+        registry::spawn_flusher(fleet.clone());
     }
     let app = Router::new()
         .route("/console", get(console_html))
@@ -773,7 +809,13 @@ pub fn router_with_sso(
         .route("/fleet/ha", get(ha_rt::ha_status))
         .route("/fleet/ha/leader", get(ha_rt::ha_leader_check))
         .route("/healthz", get(|| async { Json(json!({"ok": true})) }))
-        .route("/fleet/register", post(register))
+        .route(
+            "/fleet/register",
+            post(register)
+                .route_layer(middleware::from_fn_with_state(fleet.clone(), registry::admission))
+                .layer(axum::extract::DefaultBodyLimit::max(registry::REGISTER_BODY_LIMIT)),
+        )
+        .route("/fleet/registry", get(registry_status))
         .route("/fleet/nodes", get(list_nodes))
         .route("/fleet/nodes/{name}", get(get_node).delete(deregister_node))
         .route("/fleet/nodes/{name}/cordon", post(cordon_node))
@@ -999,8 +1041,40 @@ async fn console_js() -> Response {
 /// naive overwrite-on-every-beat would silently un-cordon a node the very
 /// next time its own agent reported in, seconds after an operator cordoned
 /// it for maintenance.
-fn apply_register(nodes: &mut HashMap<String, NodeInfo>, req: RegisterRequest) {
-    let cordoned = nodes.get(&req.name).map(|n| n.cordoned).unwrap_or(false);
+fn apply_register(nodes: &mut HashMap<String, NodeInfo>, req: RegisterRequest) -> bool {
+    apply_register_with(nodes, req, min_node_version().as_deref())
+}
+
+/// The oldest node agent allowed to take placements (`FLUXVM_MIN_NODE_VERSION`); older and unversioned agents are
+/// marked `outdated`, never removed.
+fn min_node_version() -> Option<String> {
+    std::env::var("FLUXVM_MIN_NODE_VERSION")
+        .ok()
+        .map(|v| v.trim().to_owned())
+        .filter(|v| !v.is_empty())
+}
+
+/// Returns whether anything a restart must not lose changed: the node is new, or its address, size, labels or
+/// capabilities differ. Live numbers (VM count, allocation, density, daemon status, `last_seen`) are not durable.
+fn apply_register_with(
+    nodes: &mut HashMap<String, NodeInfo>,
+    req: RegisterRequest,
+    min_version: Option<&str>,
+) -> bool {
+    let old = nodes.get(&req.name);
+    let cordoned = old.map(|n| n.cordoned).unwrap_or(false);
+    let outdated = min_version
+        .is_some_and(|m| req.agent_version.is_empty() || registry::version_lt(&req.agent_version, m));
+    let durable = old.is_none_or(|n| {
+        n.fluxvm_url != req.fluxvm_url
+            || n.vcpus_total != req.vcpus_total
+            || n.memory_mib_total != req.memory_mib_total
+            || n.labels != req.labels
+            || n.security != req.security
+            || n.apple != req.apple
+            || n.agent_version != req.agent_version
+            || n.outdated != outdated
+    });
     nodes.insert(
         req.name.clone(),
         NodeInfo {
@@ -1017,17 +1091,34 @@ fn apply_register(nodes: &mut HashMap<String, NodeInfo>, req: RegisterRequest) {
             apple: req.apple,
             daemon: req.daemon,
             allocated: req.allocated,
+            agent_version: req.agent_version,
+            daemon_version: req.daemon_version,
+            proto: req.proto,
+            capabilities: req.capabilities,
+            outdated,
         },
     );
+    durable
 }
 
 async fn register(State(fleet): State<Fleet>, Json(req): Json<RegisterRequest>) -> Json<Value> {
     let mut nodes = fleet.nodes.lock().await;
-    apply_register(&mut nodes, req);
-    if let (Some(path), Some(lock)) = (&fleet.persist_path, &fleet.lock_path) {
-        persist_nodes(path, lock, &nodes);
+    let durable = apply_register(&mut nodes, req);
+    let count = nodes.len();
+    drop(nodes);
+    if durable {
+        fleet.registry.mark_dirty();
     }
-    Json(json!({"ok": true}))
+    match registry::next_interval_secs(count) {
+        Some(n) => Json(json!({"ok": true, "next_interval_secs": n})),
+        None => Json(json!({"ok": true})),
+    }
+}
+
+/// `GET /fleet/registry` (operator): registry write-behind and heartbeat admission numbers.
+async fn registry_status(State(fleet): State<Fleet>) -> Json<Value> {
+    let n = fleet.nodes.lock().await.len();
+    Json(fleet.registry.status(n))
 }
 
 fn node_json(n: &NodeInfo) -> Value {
@@ -1049,6 +1140,11 @@ fn node_json(n: &NodeInfo) -> Value {
         "daemon_reachable": n.daemon_reachable(),
         "daemon": n.daemon,
         "allocated": n.allocated,
+        "agent_version": n.agent_version,
+        "daemon_version": n.daemon_version,
+        "proto": n.proto,
+        "capabilities": n.capabilities,
+        "outdated": n.outdated,
     })
 }
 
@@ -2286,6 +2382,11 @@ mod tests {
 
     fn node(name: &str, vm_count: usize, age_secs: i64) -> NodeInfo {
         NodeInfo {
+            agent_version: String::new(),
+            daemon_version: String::new(),
+            proto: 0,
+            capabilities: Vec::new(),
+            outdated: false,
             name: name.into(),
             fluxvm_url: format!("http://{name}"),
             vcpus_total: 8,
@@ -2406,6 +2507,11 @@ mod tests {
 
     fn node_cap(name: &str, vm_count: usize, vcpus: u32, mem: u64) -> NodeInfo {
         NodeInfo {
+            agent_version: String::new(),
+            daemon_version: String::new(),
+            proto: 0,
+            capabilities: Vec::new(),
+            outdated: false,
             name: name.into(),
             fluxvm_url: format!("http://{name}"),
             vcpus_total: vcpus,
@@ -2541,6 +2647,10 @@ mod tests {
         apply_register(
             &mut nodes,
             RegisterRequest {
+                agent_version: String::new(),
+                daemon_version: String::new(),
+                proto: 0,
+                capabilities: Vec::new(),
                 name: "a".into(),
                 fluxvm_url: "http://a".into(),
                 vcpus_total: 8,
@@ -2558,12 +2668,65 @@ mod tests {
         assert_eq!(nodes["a"].vm_count, 1); // other fields still update
     }
 
+    fn beat_req(name: &str, vm_count: usize, version: &str) -> RegisterRequest {
+        RegisterRequest {
+            agent_version: version.into(),
+            daemon_version: String::new(),
+            proto: 1,
+            capabilities: Vec::new(),
+            name: name.into(),
+            fluxvm_url: format!("http://{name}"),
+            vcpus_total: 8,
+            memory_mib_total: 16384,
+            vm_count,
+            labels: HashMap::new(),
+            security: NodeSecurityCapabilities::default(),
+            density: None,
+            daemon: None,
+            allocated: None,
+            apple: None,
+        }
+    }
+
+    #[test]
+    fn only_durable_changes_mark_the_registry_dirty() {
+        let mut nodes = HashMap::new();
+        assert!(apply_register_with(&mut nodes, beat_req("n", 0, "0.4.12"), None), "a new node is durable");
+        assert!(!apply_register_with(&mut nodes, beat_req("n", 0, "0.4.12"), None), "an identical beat is not");
+        assert!(!apply_register_with(&mut nodes, beat_req("n", 5, "0.4.12"), None), "VM count is live data, not durable");
+        let mut moved = beat_req("n", 5, "0.4.12");
+        moved.fluxvm_url = "http://elsewhere".into();
+        assert!(apply_register_with(&mut nodes, moved, None), "a new address is durable");
+        let mut labelled = beat_req("n", 5, "0.4.12");
+        labelled.fluxvm_url = "http://elsewhere".into();
+        labelled.labels.insert("zone".into(), "a".into());
+        assert!(apply_register_with(&mut nodes, labelled, None), "labels are durable");
+    }
+
+    #[test]
+    fn nodes_older_than_the_minimum_version_are_outdated_not_removed() {
+        let mut nodes = HashMap::new();
+        apply_register_with(&mut nodes, beat_req("old", 0, "0.4.9"), Some("0.4.12"));
+        apply_register_with(&mut nodes, beat_req("new", 0, "0.4.12"), Some("0.4.12"));
+        apply_register_with(&mut nodes, beat_req("none", 0, ""), Some("0.4.12"));
+        apply_register_with(&mut nodes, beat_req("free", 0, "0.4.9"), None);
+        assert!(nodes["old"].outdated && nodes["none"].outdated);
+        assert!(!nodes["new"].outdated && !nodes["free"].outdated);
+        assert_eq!(nodes.len(), 4);
+        assert!(nodes["old"].capacity_score(1, 1).is_none(), "outdated nodes take no placements");
+        assert!(nodes["new"].capacity_score(1, 1).is_some());
+    }
+
     #[test]
     fn first_ever_heartbeat_registers_uncordoned() {
         let mut nodes = HashMap::new();
         apply_register(
             &mut nodes,
             RegisterRequest {
+                agent_version: String::new(),
+                daemon_version: String::new(),
+                proto: 0,
+                capabilities: Vec::new(),
                 name: "new".into(),
                 fluxvm_url: "http://new".into(),
                 vcpus_total: 4,
@@ -2823,6 +2986,10 @@ mod tests {
         apply_register(
             &mut nodes,
             RegisterRequest {
+                agent_version: String::new(),
+                daemon_version: String::new(),
+                proto: 0,
+                capabilities: Vec::new(),
                 name: "a".into(),
                 fluxvm_url: "http://a".into(),
                 vcpus_total: 8,
@@ -2928,6 +3095,7 @@ mod tests {
             tunnels: Arc::default(),
             sso: Arc::default(),
             signup: Arc::default(),
+            registry: Arc::default(),
         }
     }
 

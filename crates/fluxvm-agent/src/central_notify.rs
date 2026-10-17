@@ -889,6 +889,7 @@ mod tests {
             tunnels: Arc::default(),
             sso: Arc::default(),
             signup: Arc::default(),
+            registry: Arc::default(),
         };
         let now = Utc::now();
         fleet.tenancy.lock().await.leases.push(Lease {

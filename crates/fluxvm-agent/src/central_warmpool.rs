@@ -1252,6 +1252,11 @@ mod tests {
             let _ = axum::serve(listener, app).await;
         });
         NodeInfo {
+            agent_version: String::new(),
+            daemon_version: String::new(),
+            proto: 0,
+            capabilities: Vec::new(),
+            outdated: false,
             name: name.into(),
             fluxvm_url: format!("http://{addr}"),
             vcpus_total: 64,
@@ -1290,6 +1295,7 @@ mod tests {
             tunnels: Arc::default(),
             sso: Arc::default(),
             signup: Arc::default(),
+            registry: Arc::default(),
         }
     }
 
