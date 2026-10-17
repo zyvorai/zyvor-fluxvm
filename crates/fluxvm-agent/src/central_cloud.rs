@@ -178,8 +178,17 @@ pub(super) async fn reconcile_once(fleet: &Fleet) -> Value {
         .collect();
     let mut closed = 0usize;
     let mut errors = Vec::new();
-    for n in targets {
-        match fetch_node_vms(fleet, &n).await {
+    // Ask the nodes at the same time (bounded), then update the ledger one node at a time.
+    let fetched = super::registry::bounded(targets, |n| {
+        let fleet = fleet.clone();
+        async move {
+            let r = fetch_node_vms(&fleet, &n).await;
+            (n, r)
+        }
+    })
+    .await;
+    for (n, result) in fetched {
+        match result {
             Ok(items) => {
                 let ids: HashSet<String> = items.iter().map(vm_id).collect();
                 let mut t = fleet.tenancy.lock().await;

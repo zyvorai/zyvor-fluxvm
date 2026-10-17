@@ -75,7 +75,23 @@ of *durable* changes (a node re-registers on its next beat, so the effect is a s
 file can be up to a minute old. A journal was not needed for these numbers and is not built; the incremental HA feed that
 depends on it is therefore not built either.
 
+## Listing, polling and metrics at fleet size
+
+- `GET /fleet/nodes` still returns every node when called without a query. It now also takes `limit` (1-5000) and `cursor`
+  (nodes are ordered by name), `healthy`, `cordoned`, `outdated`, `version`, repeatable `label=k=v`, and `summary=true` for
+  counts only (total, healthy, cordoned, outdated, by agent version). Responses carry `total`, `truncated` and `next_cursor`.
+  A bad parameter is a `400`, not an empty list. **This adds fields to an existing response; the default call is
+  compatible.** Listing and summary latency at 10,000 nodes was not measured.
+- Metrics polling, the reconcile pass and `GET /fleet/vms` now talk to nodes with bounded concurrency
+  (`FLUXVM_POLL_CONCURRENCY`, default 64; metrics polling was 16, the other two were one node at a time). Pass time at 10,000
+  real nodes was not measured; with unreachable nodes it is roughly `nodes / concurrency x timeout`.
+- Metrics history keeps 500 node and 1,000 VM series, about 50 KiB each, and counts what it cannot keep in
+  `fluxvm_central_metrics_series_dropped_total`. Raise `FLUXVM_METRICS_MAX_NODE_SERIES` / `FLUXVM_METRICS_MAX_VM_SERIES` only
+  with the memory to match (10,000 node series is about 500 MiB). Downsampling and top-N selection are not built.
+- Still open: central's own calls to a node's daemon (`/v1/stats`, `/v1/vms`) send no credential, so they fail against a node
+  daemon that has a token set. Which credential central should present is a decision for the operator and is not made here.
+
 ## What changes next
 
-Per-node enrollment, bounded polling and the paginated node list follow in the 10,000-node install work. Each step is
-measured with `scripts/bench-fleet-central.sh` against these numbers.
+Each step is measured with `scripts/bench-fleet-central.sh` against these numbers. Not built: the append-only journal, shards
+and the incremental HA feed (the write-behind snapshot was enough), and flipping `--node-auth` to `enrolled` by default.
