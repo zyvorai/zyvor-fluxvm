@@ -176,6 +176,10 @@ enum Command {
         /// Bearer token matching `fluxvm-agent central --token`.
         #[arg(long, env = "FLUXVM_AGENT_TOKEN")]
         token: Option<String>,
+        /// Read the bearer token from this file instead (a systemd `LoadCredential=` path), so it never appears in
+        /// argv or in the environment. Surrounding whitespace is trimmed.
+        #[arg(long, env = "FLUXVM_AGENT_TOKEN_FILE", conflicts_with = "token")]
+        token_file: Option<PathBuf>,
         /// Label this node reports on every heartbeat, as `key=value`.
         /// Repeatable. Lets `fluxctl fleet create --node-selector
         /// key=value` (or a plain `POST /fleet/vms` `"nodeSelector"`
@@ -485,9 +489,23 @@ async fn main() -> Result<()> {
             advertise_url,
             interval_secs,
             token,
+            token_file,
             labels,
             no_overlay_sync,
         } => {
+            if advertise_url.as_deref().is_some_and(|u| u.trim().is_empty()) {
+                anyhow::bail!("--advertise-url (ADVERTISE_URL) is empty: set the address central should reach this node on");
+            }
+            let token = match token_file {
+                Some(file) => {
+                    let t = std::fs::read_to_string(&file)
+                        .with_context(|| format!("reading the token file {}", file.display()))?;
+                    let t = t.trim().to_string();
+                    anyhow::ensure!(!t.is_empty(), "the token file {} is empty", file.display());
+                    Some(t)
+                }
+                None => token,
+            };
             let advertise_url = advertise_url.unwrap_or_else(|| fluxvm_url.clone());
             fluxvm_agent::node::run(fluxvm_agent::node::NodeConfig {
                 name,

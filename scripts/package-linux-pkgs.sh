@@ -57,7 +57,10 @@ if [[ -d "$ROOT/usr/share/fluxvm/completions" ]]; then
   place fluxctl.fish usr/share/fish/vendor_completions.d fluxctl.fish
   rm -rf "$c"
 fi
-sed 's|/usr/local/bin/fluxctl|/usr/bin/fluxctl|' "$STAGE/share/systemd/fluxvm.service" > "$ROOT/usr/lib/systemd/system/fluxvm.service"
+# Every unit in the package, with the tarball's /usr/local/bin paths turned into /usr/bin.
+for u in "$STAGE"/share/systemd/*.service; do
+  sed 's|/usr/local/bin/|/usr/bin/|g' "$u" > "$ROOT/usr/lib/systemd/system/$(basename "$u")"
+done
 grep -q '^ExecStart=/usr/bin/fluxctl ' "$ROOT/usr/lib/systemd/system/fluxvm.service" \
   || { echo "package-linux-pkgs: the unit's ExecStart is not /usr/local/bin/fluxctl; update this script" >&2; exit 1; }
 
