@@ -188,7 +188,7 @@ pub async fn apply_boot_throttles(
     for (target, t) in boot_throttles(workspace, root_io) {
         let what = target.to_string();
         qmp::execute(
-            &sock,
+            sock,
             "block_set_io_throttle",
             Some(throttle_args(target, Some(&t))),
             timeout,

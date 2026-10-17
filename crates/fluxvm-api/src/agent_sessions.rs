@@ -5603,10 +5603,6 @@ async fn job_meta_status(m: &VmManager, id: Uuid, st: &JobStatus) {
     .await;
 }
 
-fn job_stdin_path(job: Uuid) -> String {
-    job_stdin_path_in(JOBS_DIR, job)
-}
-
 fn job_stdin_path_in(dir: &str, job: Uuid) -> String {
     format!("{dir}/{job}.in")
 }
