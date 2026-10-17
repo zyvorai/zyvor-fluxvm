@@ -25,6 +25,11 @@ export class ApiError extends FluxVMError {
   readonly status: number;
   readonly body: unknown;
   readonly detail: string;
+  /**
+   * The server's stable error code (`NOT_FOUND`, `CONFLICT`, `RATE_LIMITED`, ...) when the body
+   * carries one. Branch on this, not on the message. Older routes send none.
+   */
+  readonly code?: string;
 
   constructor(status: number, body: unknown, detail?: string) {
     const text = detail ?? (typeof body === "string" ? body : JSON.stringify(body));
@@ -32,6 +37,9 @@ export class ApiError extends FluxVMError {
     this.status = status;
     this.body = body;
     this.detail = text;
+    if (body && typeof body === "object" && typeof (body as { code?: unknown }).code === "string") {
+      this.code = (body as { code: string }).code;
+    }
   }
 }
 
