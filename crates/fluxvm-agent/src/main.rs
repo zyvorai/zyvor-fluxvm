@@ -127,6 +127,32 @@ enum Command {
         #[arg(long)]
         overlay_config: Option<PathBuf>,
     },
+    /// Run N simulated nodes against one central and report how it coped: heartbeat latency, failures, and whether
+    /// every node ended up registered exactly once. Nothing boots. Exit status 1 when the run fails. See
+    /// docs/fleet-scale.md.
+    SimFleet {
+        /// Central URL.
+        #[arg(long, env = "CENTRAL_URL", default_value = "http://127.0.0.1:7799")]
+        central: String,
+        #[arg(long, env = "FLUXVM_AGENT_TOKEN")]
+        token: Option<String>,
+        #[arg(long, default_value = "100")]
+        nodes: usize,
+        /// Node `i` is named `<prefix>-<i, five digits>`.
+        #[arg(long, default_value = "sf")]
+        prefix: String,
+        #[arg(long, default_value = "10")]
+        interval_secs: u64,
+        /// How long to keep heartbeating.
+        #[arg(long, default_value = "30")]
+        duration_secs: u64,
+        /// Start every node's first beat at the same instant (a mass reboot) instead of spreading them over the
+        /// interval.
+        #[arg(long)]
+        herd: bool,
+        #[arg(long, default_value = "10")]
+        request_timeout_secs: u64,
+    },
     /// Run this node's heartbeat client, reporting to a central registry.
     Node {
         /// This node's name, as it'll appear in `POST /fleet/vms {"node": "..."}`.
@@ -424,6 +450,33 @@ async fn main() -> Result<()> {
                 overlay_config,
             })
             .await?;
+        }
+        Command::SimFleet {
+            central,
+            token,
+            nodes,
+            prefix,
+            interval_secs,
+            duration_secs,
+            herd,
+            request_timeout_secs,
+        } => {
+            let report = fluxvm_agent::sim_fleet::run(fluxvm_agent::sim_fleet::SimFleetConfig {
+                central_url: central,
+                token,
+                nodes,
+                prefix,
+                interval: Duration::from_secs(interval_secs.max(1)),
+                duration: Duration::from_secs(duration_secs.max(1)),
+                start_jitter: !herd,
+                request_timeout: Duration::from_secs(request_timeout_secs.max(1)),
+            })
+            .await?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            if !report.passed() {
+                eprintln!("sim-fleet: FAILED (see the report above)");
+                std::process::exit(1);
+            }
         }
         Command::Node {
             name,
