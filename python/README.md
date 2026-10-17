@@ -76,7 +76,9 @@ Behaviour worth knowing:
 response (the server maps most handler failures, including guest-agent errors
 and validation, to **400** with `{"error": "…"}`). Subclasses: `AuthError` (401),
 `ForbiddenError` (403, also an `AuthError`), `NotFound` (404), `RateLimited`
-(429, with `retry_after`). Transport failures raise `RequestTimeout` or
+(429, with `retry_after`). Newer servers also send a stable `code` next to `error`
+(`NOT_FOUND`, `CONFLICT`, `RATE_LIMITED`, ...; see [docs/api.md](../docs/api.md#errors)); it is in
+`err.body["code"]`. Branch on it, not on the message. Transport failures raise `RequestTimeout` or
 `ConnectionFailed`.
 
 ## Not covered yet

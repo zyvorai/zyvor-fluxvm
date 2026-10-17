@@ -85,7 +85,7 @@ Eleven use cases map onto what is implemented today — nothing below is aspirat
 | Kairon VM edge (anti-spoof, learn-IP, DNS/SNI allow lists, QoS, conntrack move) | [docs/vm-edge-contract.md](vm-edge-contract.md) |
 | Install FluxVM: one command (`curl ... \| bash`), what it does, options, upgrade and rollback, Linux, troubleshooting | [docs/install.md](install.md) |
 | Agent sessions: how to use them (policy, tokens, approvals, jobs, uploads, budgets, fork/promote), with a troubleshooting table | [docs/agent-sessions-guide.md](agent-sessions-guide.md) |
-| Agent sessions: API and behaviour reference | [docs/agent-sessions.md](agent-sessions.md) |
+| Agent sessions: API and behaviour reference, including the live events stream | [docs/agent-sessions.md](agent-sessions.md) |
 | Host Metal/MLX inference for offline VZ sandboxes (`host_gpu`, `fluxctl infer`) | [docs/host-inference.md](host-inference.md) |
 | AI agents over MCP (`fluxctl mcp serve`: Hermes Agent, Claude Code, Cursor; tools, setup, workflows) | [docs/mcp.md](mcp.md) |
 | REST API reference, auth/RBAC, VM JSON contract | [docs/api.md](api.md) |

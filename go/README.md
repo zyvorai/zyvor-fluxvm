@@ -50,7 +50,8 @@ are omitted so the server's defaults apply.
 ## Errors
 
 A non-success answer is an `*APIError` (`Status`, `Message`, raw `Body`,
-`RetryAfter` for 429). It also matches sentinels with `errors.Is`:
+`RetryAfter` for 429). Newer servers also send a stable `code` (`NOT_FOUND`, `CONFLICT`, ...; see
+[docs/api.md](../docs/api.md#errors)) inside `Body`. It also matches sentinels with `errors.Is`:
 
 | Sentinel | Matches |
 |---|---|
