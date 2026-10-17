@@ -77,11 +77,11 @@ Compared against the feature list of a hosted microVM sandbox integration. Capab
 |---|---|
 | Idempotent lifecycle calls | Done: `Idempotency-Key` on VM create/fork/snapshot/delete and on session create/checkpoint/restore/fork/exec/jobs |
 | Tenant isolation without leaking ids | Done for agent sessions (another tenant's id is `404`) |
-| Live events | Done: `GET /v1/agents/sessions/{id}/events/stream` (SSE, resumable); the TypeScript, Python and Go clients follow it and reconnect. Not run end to end against a live daemon |
+| Live events | Done: `GET /v1/agents/sessions/{id}/events/stream` (SSE, resumable); the TypeScript, Python and Go clients follow it and reconnect. Run end to end on a Linux host with the TypeScript, Python and Go clients (flux-vm session: create, exec, delete) |
 | Stable error codes | Done: `code` next to `error` ([api.md#errors](api.md#errors)); a few routes with their own error bodies still send none |
 | Test helper | Done for TypeScript: `@zyvorai/fluxvm/testing` (`FakeFluxVM`) |
 | Framework recipe | [serverless-agent.md](serverless-agent.md), untested on a serverless platform |
-| Published boot and fork latency on Linux | Open: needs a Linux KVM host (`scripts/bench-sandbox.sh`); no number is claimed here |
+| Published boot and fork latency on Linux | Open, no figure claimed. One run of `scripts/bench-first-command.sh` (N=5, flux-vm, 256 MiB, 12-core Xeon E-2336, ext4, no copy-on-write clones) gave a cold create-to-first-command p50 of about 26 s, which is the copy of a 2.1 GB image and not boot time, and all 5 forks failed (cause not investigated). Measure again on a reflink filesystem (btrfs or XFS) before quoting anything |
 
 ## Remaining (optional hardening)
 
