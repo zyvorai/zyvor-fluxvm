@@ -17,6 +17,7 @@ pub mod ha;
 pub mod node;
 pub mod shared_state;
 pub mod sim;
+pub mod sim_fleet;
 pub mod stripe;
 pub mod tenancy;
 pub mod volumes;

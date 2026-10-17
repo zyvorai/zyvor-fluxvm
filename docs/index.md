@@ -100,6 +100,7 @@ Eleven use cases map onto what is implemented today — nothing below is aspirat
 | Using FluxVM through Ragnarok | [docs/ragnarok.md](ragnarok.md) |
 | AI-agent sandbox capability gaps | [docs/agent-sandbox-gaps.md](agent-sandbox-gaps.md) |
 | Use FluxVM from a serverless backend, with live events | [docs/serverless-agent.md](serverless-agent.md) |
+| Fleet scale: what `fluxvm-agent central` takes today, and how to measure it | [docs/fleet-scale.md](fleet-scale.md) |
 | Native macOS backend (`vz`), Mac sandboxes and agent density | [docs/macos.md](macos.md) · [docs/macos-sandboxes.md](macos-sandboxes.md) · [docs/agent-density.md](agent-density.md) |
 | Guest-network observability (flows, DNS, capture) and FluxDisk overlays (`fluxvm-blockd`) | [docs/netobs.md](netobs.md) · [docs/flux-disk.md](flux-disk.md) |
 | Container (OCI) sandboxes on a Mac, one VM per container | [docs/oci-sandboxes.md](oci-sandboxes.md) |
