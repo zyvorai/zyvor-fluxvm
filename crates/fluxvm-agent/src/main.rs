@@ -493,8 +493,13 @@ async fn main() -> Result<()> {
             labels,
             no_overlay_sync,
         } => {
-            if advertise_url.as_deref().is_some_and(|u| u.trim().is_empty()) {
-                anyhow::bail!("--advertise-url (ADVERTISE_URL) is empty: set the address central should reach this node on");
+            if advertise_url
+                .as_deref()
+                .is_some_and(|u| u.trim().is_empty())
+            {
+                anyhow::bail!(
+                    "--advertise-url (ADVERTISE_URL) is empty: set the address central should reach this node on"
+                );
             }
             let token = match token_file {
                 Some(file) => {
