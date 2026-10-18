@@ -6,7 +6,8 @@
 #   scripts/test-release-e2e.sh                         on this machine (Linux needed for most suites)
 #   scripts/test-release-e2e.sh --host sus@212.8.248.187 [--suite NAME ...] [--keep]
 # Suites: static packages bootstrap-tarball bootstrap-deb bootstrap-rpm systemd-deb image-k8s ha enroll-invariants enroll-security
-#         central-node agent-central-api agent-central-ha agents scale   (default: all of these; the two agent-central ones also run on macOS)
+#         central-node agent-central-api agent-central-ha agent-tunnel agents scale   (default: all of these; the two agent-central ones also run on macOS)
+#         console-ui  (opt-in: headless Chrome via puppeteer)
 #         mutation  (opt-in, slow: breaks each enrollment guard, expects a failure)
 #         guest-exec-policy agent-central-vms  (opt-in: root + KVM, builds a guest-agent image; the host's fluxctl and a base image)
 # scripts/e2e/deploy-remote.sh and scripts/e2e/fleet-two-host.sh run from the control machine, not through this runner.
@@ -24,7 +25,7 @@ while [[ $# -gt 0 ]]; do
     *) echo "unknown argument $1" >&2; exit 2 ;;
   esac
 done
-ALL=(static packages bootstrap-tarball bootstrap-deb bootstrap-rpm systemd-deb image-k8s enroll-invariants enroll-security central-node agent-central-api agent-central-ha agents scale)
+ALL=(static packages bootstrap-tarball bootstrap-deb bootstrap-rpm systemd-deb image-k8s enroll-invariants enroll-security central-node agent-central-api agent-central-ha agent-tunnel agents scale)
 [[ ${#SUITES[@]} -gt 0 ]] || SUITES=("${ALL[@]}")
 
 if [[ -n "$HOST" ]]; then
@@ -42,7 +43,10 @@ fi
 mkdir -p target
 LOG="target/e2e-$(date +%Y%m%d-%H%M%S).log"
 export BIN="${CARGO_TARGET_DIR:-$PWD/target}/release/fluxvm-agent"
-need_agent() { [[ -x "$BIN" ]] || CARGO_INCREMENTAL=0 cargo build --release -p fluxvm-agent >>"$LOG" 2>&1; }
+export FLUXCTL="${CARGO_TARGET_DIR:-$PWD/target}/release/fluxctl"
+# Always ask cargo: a no-op when fresh, and it stops a suite from running against a binary built before the last change.
+need_fluxctl() { CARGO_INCREMENTAL=0 cargo build --release -p fluxctl >>"$LOG" 2>&1; }
+need_agent() { CARGO_INCREMENTAL=0 cargo build --release -p fluxvm-agent >>"$LOG" 2>&1; }
 
 run() { # SUITE command...
   local name="$1"; shift
@@ -94,6 +98,8 @@ for s in "${SUITES[@]}"; do
     mutation) run mutation scripts/e2e/mutation-security.sh ;;
     agent-central-api) need_agent; run agent-central-api scripts/e2e/agent-central-api.sh ;;
     agent-central-ha) need_agent; run agent-central-ha scripts/e2e/agent-central-ha.sh ;;
+    console-ui) need_agent; run console-ui scripts/e2e/console-ui.sh ;;
+    agent-tunnel) need_agent; need_fluxctl; run agent-tunnel env "BIN=$BIN" "FLUXCTL=$FLUXCTL" scripts/e2e/agent-tunnel.sh ;;
     guest-exec-policy) run guest-exec-policy sudo env "PATH=$PATH" scripts/e2e/guest-exec-policy.sh ;;
     agent-central-vms) need_agent; run agent-central-vms sudo env "PATH=$PATH" "BIN=$BIN" scripts/e2e/agent-central-vms.sh ;;
     ha) run ha ha ;;

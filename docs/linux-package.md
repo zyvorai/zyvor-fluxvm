@@ -71,8 +71,9 @@ Dependencies (names checked against the Rocky 9 and 10 BaseOS/AppStream/CRB, EPE
 
 Support boundary:
 
-- **EL10 and Fedora**: the dependencies resolve and glibc is newer than the build container's 2.35. Install-tested in CI only
-  (see Testing).
+- **EL10 and Fedora**: the dependencies resolve and glibc is newer than the build container's 2.35. Install-tested under systemd on
+  Rocky Linux 10 and Fedora 42 with `scripts/e2e/systemd-rpm.sh` (and in CI, see Testing). On Rocky Linux 9 the same script checks
+  that `dnf` refuses the rpm with the glibc message and leaves nothing behind.
 - **EL9 is not installable yet.** EL9 ships glibc 2.34 and the binaries are built on ubuntu:22.04 (glibc 2.35), so the rpm
   declares `glibc >= 2.35` and `dnf` refuses it with a clear message instead of the binaries dying with
   `GLIBC_2.35 not found`. The release job runs `check-glibc-floor.sh ... 2.34` as an informational probe

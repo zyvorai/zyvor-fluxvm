@@ -161,6 +161,24 @@ jobs:
           sudo apt-get update -qq && sudo apt-get install -y -qq podman
           scripts/e2e/systemd-deb.sh
 
+  systemd-rpm:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        image: [docker.io/library/rockylinux:9, quay.io/rockylinux/rockylinux:10, quay.io/fedora/fedora:42]
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install nfpm
+        run: |
+          curl -fsSL -o /tmp/nfpm.tgz https://github.com/goreleaser/nfpm/releases/download/v2.48.0/nfpm_2.48.0_Linux_x86_64.tar.gz
+          echo "6d7f9a28b2f397934403950fcbba83f598b08d02edbe79a0815b3b4897341750  /tmp/nfpm.tgz" | sha256sum -c -
+          sudo tar -xzf /tmp/nfpm.tgz -C /usr/local/bin nfpm
+      - name: The .rpm under a real systemd in ${{ matrix.image }} (EL9 must refuse it cleanly)
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq podman
+          scripts/e2e/systemd-rpm.sh ${{ matrix.image }}
+
   enroll-e2e:
     runs-on: ubuntu-latest
     steps:
@@ -176,6 +194,6 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: System deps
         run: sudo apt-get update -qq && sudo apt-get install -y -qq libsystemd-dev libhivex-dev pkg-config jq redis-server
-      - name: Enrollment security (58 checks), real central and nodes, the central API (82 checks), HA with a real Redis (21 checks)
+      - name: Enrollment security (58 checks), real central and nodes, the central API (82 checks), HA with a real Redis (21 checks), tunnels through central
         working-directory: fluxvm
-        run: scripts/test-release-e2e.sh --suite enroll-invariants --suite enroll-security --suite central-node --suite agent-central-api --suite agent-central-ha
+        run: scripts/test-release-e2e.sh --suite enroll-invariants --suite enroll-security --suite central-node --suite agent-central-api --suite agent-central-ha --suite agent-tunnel
