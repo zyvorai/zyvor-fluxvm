@@ -39,6 +39,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           repository: zyvorai/guestkit
+          ref: v1.2.6   # packaging/guestkit.ref; checked by scripts/check-guestkit-pin.sh
           path: guestkit
       - uses: dtolnay/rust-toolchain@stable
       - name: Dependencies
@@ -73,6 +74,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           repository: zyvorai/guestkit
+          ref: v1.2.6   # packaging/guestkit.ref; checked by scripts/check-guestkit-pin.sh
           path: guestkit
       - name: Build guard and fluxctl
         working-directory: fluxvm
