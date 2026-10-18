@@ -236,6 +236,9 @@ fn parse_label(s: &str) -> Result<(String, String), String> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // reqwest, tokio-tungstenite and axum-server pull in both `ring` and `aws-lc-rs`, so rustls cannot pick a provider on its
+    // own and `central --tls-cert` panicked at startup. Install one before anything opens a TLS connection or listener.
+    let _ = rustls::crypto::ring::default_provider().install_default();
     tracing_subscriber::fmt::init();
     let cli = Cli::parse();
     match cli.command {

@@ -76,6 +76,15 @@ check "rotate the tenant token returns a new one" test -n "$(adm -XPOST "$URL/fl
 RID="$(adm "$URL/fleet/tenants/acme/keys" | jq -r '.items[]|select(.name=="viewer")|.id')"
 check "revoke a key" test "$(code adm -XDELETE "$URL/fleet/tenants/acme/keys/$RID")" -lt 300
 check "a revoked key stops working at once" test "$(code "$RO" "$URL/fleet/tenants/me")" = 401
+# --- the payment gate and the activity log ----------------------------------------------------------------------
+check "an operator marks the tenant as owing a payment method" test "$(code adm -XPUT -d '{"payment_method_required":true}' "$URL/fleet/tenants/acme/billing")" = 200
+check "payment gate: creating a VM is refused with 402" test "$(code "$KEY" -XPOST -d '{"backend":"qemu","name":"x"}' "$URL/fleet/vms")" = 402
+check "payment gate: taking a lease is refused with 402" test "$(code "$KEY" -XPOST -d '{}' "$URL/fleet/leases")" = 402
+check "payment gate: reads still work" test "$(code "$KEY" "$URL/fleet/vms")" = 200
+check "payment gate: the operator is not gated" test "$(code adm -XPOST -d '{}' "$URL/fleet/leases")" != 402
+check "the gate lifts when the flag is cleared" bash -c "$(declare -f code); H=(-H 'content-type: application/json'); curl -s -o /dev/null -H 'authorization: Bearer adm' -H 'content-type: application/json' -XPUT -d '{\"payment_method_required\":false}' $URL/fleet/tenants/acme/billing; [[ \$(code '$KEY' -XPOST -d '{\"backend\":\"qemu\",\"name\":\"x\"}' $URL/fleet/vms) != 402 ]]"
+check "a tenant sets its monthly budget" test "$(code "$KEY" -XPUT -d '{"monthly":5}' "$URL/fleet/tenants/me/budget")" = 200
+check "the activity log records that successful change with the tenant as actor" waitfor 'curl -s -H "authorization: Bearer adm" "'$URL'/fleet/events?limit=500" | jq -e "[.items[]|select(.actor==\"acme\" and .status==200 and (.path|test(\"budget\")))]|length > 0" >/dev/null' 10
 check "disable a tenant (PATCH)" test "$(code adm -XPATCH -d '{"disabled":true}' "$URL/fleet/tenants/acme")" = 200
 check "a disabled tenant's keys are refused" test "$(code "$K2" "$URL/fleet/tenants/me")" != 200
 check "re-enable" test "$(code adm -XPATCH -d '{"disabled":false}' "$URL/fleet/tenants/acme")" = 200
@@ -155,6 +164,23 @@ kill -TERM "$PID2"; wait "$PID2" 2>/dev/null
 c2
 check "a node registered just before SIGTERM is still there after the restart (graceful stop saves the registry)" test "$(curl -s -H 'authorization: Bearer adm' "$U2/fleet/nodes" | jq -r '[.items[].name]|join(",")')" = late
 kill "$C2" 2>/dev/null; wait "$C2" 2>/dev/null
+
+# --- TLS: central serving https with its own certificate ---------------------------------------------------------
+# Regression: `central --tls-cert/--tls-key` panicked at startup ("Could not automatically determine the process-level
+# CryptoProvider") because the agent never installed a rustls provider.
+OSSL="$(command -v /opt/homebrew/bin/openssl || command -v openssl)"
+P3=$((PORT + 2)); U3="https://localhost:$P3"
+if "$OSSL" req -x509 -newkey rsa:2048 -nodes -keyout "$D/tls.key" -out "$D/tls.crt" -days 1 -subj "/CN=localhost" -addext "subjectAltName=DNS:localhost,IP:127.0.0.1" >/dev/null 2>&1; then
+  "$BIN" central --listen "127.0.0.1:$P3" --state-dir "$D/tls" --token adm --tls-cert "$D/tls.crt" --tls-key "$D/tls.key" >>"$D/tls.log" 2>&1 & C3=$!
+  check "central starts with --tls-cert/--tls-key (no rustls provider panic)" waitfor "curl -sf --cacert $D/tls.crt $U3/healthz >/dev/null" 40
+  check "https works with a client that trusts the certificate" test "$(curl -s --cacert "$D/tls.crt" "$U3/healthz")" = '{"ok":true}'
+  check "https refuses a client that does not trust it" test "$(curl -s -o /dev/null -w '%{http_code}' "$U3/healthz")" = 000
+  check "plain http to the TLS port is not served" test "$(curl -s -m 3 -o /dev/null -w '%{http_code}' "http://127.0.0.1:$P3/healthz")" != 200
+  check "the API works over https with the token" test "$(curl -s -o /dev/null -w '%{http_code}' --cacert "$D/tls.crt" -H 'authorization: Bearer adm' "$U3/fleet/nodes")" = 200
+  check "and still needs it over https" test "$(curl -s -o /dev/null -w '%{http_code}' --cacert "$D/tls.crt" "$U3/fleet/nodes")" = 401
+  check "no panic in the TLS central's log" bash -c "! grep -q -i panicked '$D/tls.log'"
+  kill "$C3" 2>/dev/null; wait "$C3" 2>/dev/null
+else echo "SKIP TLS: this openssl cannot make a certificate with a SAN"; fi
 
 # --- a tenant gone: delete -------------------------------------------------------------------------------------
 check "delete a tenant" test "$(code adm -XDELETE "$URL/fleet/tenants/acme")" -lt 300

@@ -66,6 +66,13 @@ Run 2026-10-18 on Ubuntu 26.04 (212.8.248.187; 80.79.5.173 for the two-host run)
 | `agent-central-vms`: a real QEMU VM placed through central, listing, exec over vsock, logs, stop/start, tenant isolation, delete | 25 ok, 3 known gaps | n/a |
 | `guest-exec-policy`: exec policy inside a real guest (Landlock/seccomp): allowed reads and writes work, others are refused by the kernel, TCP deny, namespaces, memory limit, output cap, timeout, malformed and unenforceable policies fail closed | 19 checks, ok | n/a |
 | `fleet-two-host` (`scripts/e2e/fleet-two-host.sh`): central on one real host, node agents on two, a real VM on each, capacity from /proc, heartbeats over the network, vm_count, cordon, node restart, `kill -9` of central | 17 checks, ok; temporary firewall rules removed, INPUT checksum unchanged | n/a |
+| `agent-tunnel` (`scripts/e2e/agent-tunnel.sh`): central, a simulated Mac and the `fluxctl fleet` client as real processes: `tunnel-stdio` and `port-forward` carry bytes to the VM and back, listing and closing, a port outside the policy, a read-only key, another tenant and no token are refused | ok | ok |
+| `console-ui` (`scripts/e2e/console-ui.sh`): the fleet console in headless Chrome as operator and as tenant: sign-in (wrong token refused), every page of the nav, notification bell, account menu, phone width, no script or console errors, sign-out forgets the token | opt-in, needs puppeteer | all ok |
+| `mutation-central` (`scripts/e2e/mutation-central.sh`): breaks seven guards one at a time (tenant route allow-list, read-only keys, VM ownership, the audit write, the payment gate, the tunnel port policy, read-only tunnels) | n/a | 7 of 7 killed |
+| Secure containers through a private containerd (`scripts/e2e/secure-containers-private.sh`: own socket and state, the isolated daemon, the shim built from this tree): `ctr run` of busybox through `io.containerd.fluxvm.v2`, VSOCK stdio and TTY, hostPath | 3 ok | n/a |
+| `systemd-rpm` (`scripts/e2e/systemd-rpm.sh`): the .rpm under systemd in Rocky Linux 10 and Fedora 42 (install, enabled but not started, kill -9 restart, timer, upgrade keeps edits, downgrade, erase), and Rocky Linux 9 | 24 ok on each; EL9 refuses cleanly (3 ok) | n/a |
+| `vz-agent-session-live-test` (18) and `vz-https-live-test` (13) with an `agent-micro` image built on Linux (arm64 guest agent cross-built on the Mac) | n/a | all ok |
+| `macos-vz27-live-test` with a Linux VZ config using `custom_virtio` | n/a | VZ configuration accepted on macOS 27.2 |
 | MCP end to end (`scripts/test-mcp-sdk.py`) and the Python (55), Go and TypeScript (26) SDK unit tests | ok | ok |
 | SDKs against a real daemon (`scripts/e2e/sdk-live.sh`; Python on the host, Go through a tunnel) | ok | n/a (procbox is Linux-only) |
 | procbox (114 tests) | as `sus`: 11 isolate tests skip (AppArmor blocks unprivileged user namespaces); as root: all run, 0 skipped | n/a |
@@ -77,6 +84,12 @@ Run 2026-10-18 on Ubuntu 26.04 (212.8.248.187; 80.79.5.173 for the two-host run)
 - **A graceful stop lost nodes.** `fluxvm-agent central` has no final save: on SIGTERM (systemd stop, a rollout) every node
   registered since the last background save was gone after the restart. It now saves the registry before exiting
   (`RegistryFlush`, with a unit test and a process-level check).
+- **`fluxvm-agent central --tls-cert/--tls-key` panicked at startup** ("Could not automatically determine the process-level
+  CryptoProvider"): reqwest, tokio-tungstenite and axum-server enable both `ring` and `aws-lc-rs`, so rustls cannot choose, and
+  the agent never installed one. It now installs `ring` first. `agent-central-api` has a TLS section that fails on the old
+  binary on Linux and macOS.
+- `scripts/test-release-e2e.sh` reused any `fluxvm-agent` already built, so a suite could pass or fail against a binary from
+  before the last change; it now always asks cargo (a no-op when fresh).
 - `scripts/test-mcp-sdk.py` expected 12 fewer read-only MCP tools than `fluxctl mcp serve` exposes, so `mcp.yml` would fail on
   `main`; the read-only set is now exact and the write set is checked as a superset.
 - `scripts/macos-live-test.sh` forced the generated `fluxvm_ed25519` key when any of `id_ed25519.pub`, `id_ecdsa.pub`,
@@ -96,6 +109,12 @@ Run 2026-10-18 on Ubuntu 26.04 (212.8.248.187; 80.79.5.173 for the two-host run)
   nobody leases"). QEMU snapshots and clones through central are refused ("disk-only snapshots are implemented for the vz backend").
 - A guest on Landlock ABI 4 (Ubuntu 24.04) cannot enforce the default exec policy (`scope_ipc` needs ABI 6); the guest refuses to
   run the command rather than run it unconfined. `docs/guest-exec-policy.md` now says so and is marked verified.
+- **Node agents trust only the public web roots.** `fluxvm-agent node` and `sim-fleet` have no way to trust a private CA or a
+  self-signed certificate, so `central --tls-cert` works for nodes only with a certificate from a public CA (or behind a TLS
+  proxy that has one); a TLS fleet cannot be tested with a throw-away certificate.
+- A request the payment gate refuses (402) is not written to the activity log, unlike the 403s and 404s around it.
+- The .rpm is not installable on EL9 by design (it requires glibc >= 2.35; EL9 has 2.34): `dnf` refuses it with that message and
+  leaves nothing behind. Rocky Linux 10 and Fedora 42 install, run, upgrade and erase it.
 - A released Mac must be scrubbed before it is leased again; an early lease release is refused until 24 hours, an operator can force it.
 - The Mac's data volume was at 99-100% during this work. It briefly reached 100% (one VM image unpack failed with "No space
   left on device") and the Mac's SSH port-forward to the `aurora` VM was no longer running afterwards; the VM itself, the daemon
@@ -103,14 +122,15 @@ Run 2026-10-18 on Ubuntu 26.04 (212.8.248.187; 80.79.5.173 for the two-host run)
 
 ### Not run
 
-- Mac: `vz-agent-session` and `vz-https` (need `agent-micro-arm64.raw`, built on Linux), `vz-host-gpu` (uses the shared 7788
-  daemon), the macOS-guest/IPSW tests (attended, 30-60 GB), `bench-sandbox-mac`, and `macos-vz27-live-test` (needs a hand-written
-  VZ config and runner path).
-- Linux: the containerd end-to-end secure-container gate (no containerd service; the host's containerd is k3s's), central's
-  WebSocket tunnel, the fleet console's JavaScript, `gha-runners` against GitHub.
+- Mac: `vz-host-gpu` (uses the shared 7788 daemon), the macOS-guest/IPSW tests (attended, 30-60 GB; the volume had 7 GB
+  free), and `bench-sandbox-mac`.
+- Linux: four secure-container scripts (`security`, `volume`, `namespaces`, `oom`) need a Kubernetes cluster with the
+  `fluxvm` RuntimeClass; the only cluster on the host is k3s, which is not ours. Their pods were rejected by admission and
+  nothing was left behind. `block`, `device-lifecycle`, `dualstack` and `userns-load` were not tried. `gha-runners` is covered
+  by 13 in-process tests with a fake GitHub and fleet, not by a process-level run.
 - No launchd plist exists for `fluxvm-agent central|node`; the guest LaunchDaemon is marked experimental.
 
 ## Not covered here
 
-EL9 (glibc 2.34 is below the package's floor; needs a build on EL9), an `apply` of the manifests against a real
-cluster, and a real fleet of 10,000 distinct clients with TLS.
+An `apply` of the manifests against a real cluster, a TLS fleet of 10,000 distinct clients (nodes cannot trust a throw-away
+certificate, see above), and the macOS-guest tests.

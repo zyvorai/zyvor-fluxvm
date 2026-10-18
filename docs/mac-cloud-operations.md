@@ -47,7 +47,7 @@ Every flag has an environment variable, shown in the second column.
 | `--state-dir DIR` | `FLUXVM_AGENT_STATE_DIR` | `/var/lib/fluxvm-agent` | Where state is kept (below). |
 | `--token TOKEN` | `FLUXVM_AGENT_TOKEN` | generated | The operator's bearer token for `/fleet/*`. When omitted, central generates one on first start and keeps it in `<state-dir>/operator-token` (`0600`). `--ha-redis` still needs an explicit `--token`. |
 | `--no-auth` | `FLUXVM_AGENT_NO_AUTH` | off | Serve `/fleet/*` with no operator check. Lab only; refused together with `--oidc-issuer`. |
-| `--tls-cert PEM`, `--tls-key PEM` | `FLUXVM_AGENT_TLS_CERT`, `FLUXVM_AGENT_TLS_KEY` | none | Serve HTTPS directly. Both are needed together. |
+| `--tls-cert PEM`, `--tls-key PEM` | `FLUXVM_AGENT_TLS_CERT`, `FLUXVM_AGENT_TLS_KEY` | none | Serve HTTPS directly. Both are needed together. Node agents trust only publicly trusted certificates (no private-CA option), so use a certificate from a public CA, or terminate TLS in a proxy that has one. |
 | `--reconcile-secs N` | `FLUXVM_AGENT_RECONCILE_SECS` | `60` | How often central reconciles its ledger against every Mac and checks lease ends, billing, notifications and warm pools. `0` turns the background pass off (`POST /fleet/reconcile` still runs one). |
 
 ### Metrics
