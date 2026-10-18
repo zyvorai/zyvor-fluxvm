@@ -74,7 +74,7 @@ if [[ $PROMOTE -eq 1 ]]; then
 else
 rm -rf "$REL"; mkdir -p "$REL"
 
-# Artifacts: fluxvm-<ver>-linux-<arch>.tar.gz and fluxvm_<ver>_<amd64|arm64>.deb, each with its sha256.
+# Artifacts: fluxvm-<ver>-linux-<arch>.tar.gz and fluxvm_<ver>_<amd64|arm64>.deb and fluxvm-<ver>-1.<x86_64|aarch64>.rpm, each with its sha256.
 arts='{}'
 add() { # ARCH KIND FILE
   cp "$3" "$REL/"
@@ -87,6 +87,8 @@ try x86_64 tarball "$ARTIFACTS/fluxvm-$VERSION-linux-x86_64.tar.gz"
 try aarch64 tarball "$ARTIFACTS/fluxvm-$VERSION-linux-aarch64.tar.gz"
 try x86_64 deb "$ARTIFACTS/fluxvm_${VERSION}_amd64.deb"
 try aarch64 deb "$ARTIFACTS/fluxvm_${VERSION}_arm64.deb"
+try x86_64 rpm "$ARTIFACTS/fluxvm-${VERSION}-1.x86_64.rpm"
+try aarch64 rpm "$ARTIFACTS/fluxvm-${VERSION}-1.aarch64.rpm"
 [[ $n -gt 0 ]] || die "no fluxvm $VERSION packages in $ARTIFACTS"
 if [[ -n "$SBOM" ]]; then [[ -f "$SBOM" ]] || die "--sbom file missing"; cp "$SBOM" "$REL/sbom.cdx.json"; fi
 
