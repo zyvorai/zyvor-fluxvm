@@ -19,6 +19,11 @@ on:
       - 'scripts/install-firecracker.sh'
       - 'scripts/install-cloud-hypervisor.sh'
       - 'scripts/build-ebpf.sh'
+      - 'scripts/e2e/**'
+      - 'scripts/test-release-e2e.sh'
+      - 'scripts/deploy-remote.sh'
+      - 'Dockerfile'
+      - 'deploy/k8s/**'
       - '.github/workflows/packaging-checks.yml'
   pull_request:
     paths:
@@ -36,6 +41,11 @@ on:
       - 'scripts/install-firecracker.sh'
       - 'scripts/install-cloud-hypervisor.sh'
       - 'scripts/build-ebpf.sh'
+      - 'scripts/e2e/**'
+      - 'scripts/test-release-e2e.sh'
+      - 'scripts/deploy-remote.sh'
+      - 'Dockerfile'
+      - 'deploy/k8s/**'
       - '.github/workflows/packaging-checks.yml'
 
 permissions:
@@ -100,3 +110,70 @@ jobs:
         run: shellcheck scripts/install-firecracker.sh scripts/install-cloud-hypervisor.sh scripts/test-vendor-lock.sh
       - name: packaging/vendor.lock is well formed and the install scripts accept the pin flags (offline)
         run: scripts/test-vendor-lock.sh
+
+  # The suites of scripts/test-release-e2e.sh that need no KVM and no root on the host. docs/release-test-report.md has the rest.
+  e2e-scripts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: The e2e scripts and the deploy script pass shellcheck (warnings and above)
+        run: shellcheck -S warning scripts/e2e/*.sh scripts/test-release-e2e.sh scripts/deploy-remote.sh
+      - name: deploy-remote.sh refuses an unknown option
+        run: |
+          if scripts/deploy-remote.sh 127.0.0.1 nobody --nonsense --dry-run 2>/dev/null; then echo "accepted an unknown option"; exit 1; fi
+
+  bootstrap-pkg:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        mode: [deb, rpm]
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install nfpm
+        run: |
+          curl -fsSL -o /tmp/nfpm.tgz https://github.com/goreleaser/nfpm/releases/download/v2.48.0/nfpm_2.48.0_Linux_x86_64.tar.gz
+          echo "6d7f9a28b2f397934403950fcbba83f598b08d02edbe79a0815b3b4897341750  /tmp/nfpm.tgz" | sha256sum -c -
+          sudo tar -xzf /tmp/nfpm.tgz -C /usr/local/bin nfpm
+      - name: The pull installer in ${{ matrix.mode }} mode, in a distro container (install, upgrade, auto rollback, rollback, pin, verify)
+        run: scripts/e2e/bootstrap-pkg.sh ${{ matrix.mode }}
+
+  image-k8s:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Build the Dockerfile from a staged tree, run it, render and kustomize deploy/k8s
+        run: scripts/e2e/image-k8s.sh
+
+  systemd-deb:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install nfpm
+        run: |
+          curl -fsSL -o /tmp/nfpm.tgz https://github.com/goreleaser/nfpm/releases/download/v2.48.0/nfpm_2.48.0_Linux_x86_64.tar.gz
+          echo "6d7f9a28b2f397934403950fcbba83f598b08d02edbe79a0815b3b4897341750  /tmp/nfpm.tgz" | sha256sum -c -
+          sudo tar -xzf /tmp/nfpm.tgz -C /usr/local/bin nfpm
+      - name: The .deb under a real systemd in a rootless podman container
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq podman
+          scripts/e2e/systemd-deb.sh
+
+  enroll-e2e:
+    runs-on: ubuntu-latest
+    steps:
+      # fluxvm-image needs the sibling guestkit checkout at the pinned tag (packaging/guestkit.ref).
+      - uses: actions/checkout@v7
+        with:
+          path: fluxvm
+      - uses: actions/checkout@v7
+        with:
+          repository: zyvorai/guestkit
+          ref: v1.2.6   # packaging/guestkit.ref; checked by scripts/check-guestkit-pin.sh
+          path: guestkit
+      - uses: dtolnay/rust-toolchain@stable
+      - name: System deps
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq libsystemd-dev libhivex-dev pkg-config jq
+      - name: Enrollment security (58 checks), real central and nodes, enrollment invariants
+        working-directory: fluxvm
+        run: scripts/test-release-e2e.sh --suite enroll-invariants --suite enroll-security --suite central-node
