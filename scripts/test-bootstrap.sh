@@ -154,5 +154,11 @@ JITTER_MAX=300; okj=1
 for i in $(seq 1 200); do NODE_ID="j-$i"; v="$(jitter_seconds)"; [[ $v -ge 0 && $v -le 300 ]] || okj=0; done
 check "jitter stays within 0..JITTER_MAX" test "$okj" = 1
 
+# rpm artifacts are listed in the signed manifest next to the deb and the tarball, and the installer picks the kind by mode.
+mkdir -p "$T/art-rpm" && for f in fluxvm-9.9.9-linux-x86_64.tar.gz fluxvm_9.9.9_amd64.deb fluxvm-9.9.9-1.x86_64.rpm fluxvm-9.9.9-1.aarch64.rpm; do echo "$f" > "$T/art-rpm/$f"; done
+"$MK" --version 9.9.9 --artifacts "$T/art-rpm" --key "$T/k.pem" --out "$T/mirror-rpm" >/dev/null
+check "the manifest lists the rpm for both architectures" test "$(jq -r '[.artifacts.x86_64.rpm.file, .artifacts.aarch64.rpm.file] | join(",")' "$T/mirror-rpm/releases/9.9.9/manifest.json")" = "fluxvm-9.9.9-1.x86_64.rpm,fluxvm-9.9.9-1.aarch64.rpm"
+check "the rpm is covered by SHA256SUMS" grep -q "fluxvm-9.9.9-1.x86_64.rpm" "$T/mirror-rpm/releases/9.9.9/SHA256SUMS"
+
 echo; echo "$pass passed, $fail failed"
 [[ $fail -eq 0 ]]
