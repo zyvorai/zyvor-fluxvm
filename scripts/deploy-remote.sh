@@ -114,11 +114,12 @@ if [[ -n "${TARGET_HOST}" && "${TARGET_HOST}" == *"@"* ]]; then
 fi
 
 _use_color() { [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; }
+# shellcheck disable=SC2034  # C_DIM is kept for the palette even when no message uses it
 if _use_color; then
     C_OK=$'\033[32m'; C_FAIL=$'\033[31m'; C_INFO=$'\033[36m'; C_WARN=$'\033[33m'
     C_DIM=$'\033[2m'; C_BOLD=$'\033[1m'; C_MAG=$'\033[35m'; C_CYAN=$'\033[96m'; C_RST=$'\033[0m'
 else
-    C_OK= C_FAIL= C_INFO= C_WARN= C_DIM= C_BOLD= C_MAG= C_CYAN= C_RST=
+    C_OK=''; C_FAIL=''; C_INFO=''; C_WARN=''; C_DIM=''; C_BOLD=''; C_MAG=''; C_CYAN=''; C_RST=''
 fi
 
 _log_file() { mkdir -p "$(dirname "$DEPLOY_LOG")" 2>/dev/null || true; echo "[$(date -Iseconds)] $*" >>"$DEPLOY_LOG" 2>/dev/null || true; }
