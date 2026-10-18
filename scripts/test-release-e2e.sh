@@ -6,8 +6,10 @@
 #   scripts/test-release-e2e.sh                         on this machine (Linux needed for most suites)
 #   scripts/test-release-e2e.sh --host sus@212.8.248.187 [--suite NAME ...] [--keep]
 # Suites: static packages bootstrap-tarball bootstrap-deb bootstrap-rpm systemd-deb image-k8s ha enroll-invariants enroll-security
-#         central-node agents scale   (default: all of these)   mutation  (opt-in, slow: breaks each enrollment guard, expects a failure)
-# scripts/e2e/deploy-remote.sh runs from the control machine, not through this runner (it deploys to the host).
+#         central-node agent-central-api agent-central-ha agents scale   (default: all of these; the two agent-central ones also run on macOS)
+#         mutation  (opt-in, slow: breaks each enrollment guard, expects a failure)
+#         guest-exec-policy agent-central-vms  (opt-in: root + KVM, builds a guest-agent image; the host's fluxctl and a base image)
+# scripts/e2e/deploy-remote.sh and scripts/e2e/fleet-two-host.sh run from the control machine, not through this runner.
 # On a host it rsyncs the tree to ~/e2e-work/tree, builds fluxvm-agent once (release) and removes only what it created.
 # Needs nfpm and docker for the package suites, curl, jq, openssl >= 3, python3. Exit status = failed suites.
 set -uo pipefail
@@ -22,7 +24,7 @@ while [[ $# -gt 0 ]]; do
     *) echo "unknown argument $1" >&2; exit 2 ;;
   esac
 done
-ALL=(static packages bootstrap-tarball bootstrap-deb bootstrap-rpm systemd-deb image-k8s enroll-invariants enroll-security central-node agents scale)
+ALL=(static packages bootstrap-tarball bootstrap-deb bootstrap-rpm systemd-deb image-k8s enroll-invariants enroll-security central-node agent-central-api agent-central-ha agents scale)
 [[ ${#SUITES[@]} -gt 0 ]] || SUITES=("${ALL[@]}")
 
 if [[ -n "$HOST" ]]; then
@@ -90,6 +92,10 @@ for s in "${SUITES[@]}"; do
     image-k8s) run image-k8s scripts/e2e/image-k8s.sh ;;
     agents) run agents agents ;;
     mutation) run mutation scripts/e2e/mutation-security.sh ;;
+    agent-central-api) need_agent; run agent-central-api scripts/e2e/agent-central-api.sh ;;
+    agent-central-ha) need_agent; run agent-central-ha scripts/e2e/agent-central-ha.sh ;;
+    guest-exec-policy) run guest-exec-policy sudo env "PATH=$PATH" scripts/e2e/guest-exec-policy.sh ;;
+    agent-central-vms) need_agent; run agent-central-vms sudo env "PATH=$PATH" "BIN=$BIN" scripts/e2e/agent-central-vms.sh ;;
     ha) run ha ha ;;
     scale) run scale scale ;;
     *) echo "unknown suite $s" >&2; fails=$((fails + 1)); continue ;;

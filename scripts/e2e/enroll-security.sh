@@ -94,7 +94,7 @@ C4="$(enroll "$(mk '{}' | jq -r .token)" p1 "$(ID 31)" | jq -r .credential)"
 sleep 2; stop; start both
 check "a credential still works after kill -9 and restart" test "$(beat "$C4" p1)" = 200
 check "a revoked node stays revoked after restart" test "$(beat "$C3" n1)" -ge 400
-check "the enroll secret file is mode 0600" test "$(stat -c %a "$D/state/fleet-enroll.json")" = 600
+check "the enroll secret file is mode 0600" test "$(stat -c %a "$D/state/fleet-enroll.json" 2>/dev/null || stat -f %Lp "$D/state/fleet-enroll.json")" = 600
 
 # --- the three modes
 stop; start legacy

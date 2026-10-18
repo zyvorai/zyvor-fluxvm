@@ -385,7 +385,7 @@ async fn main() -> Result<()> {
                 }
                 None => None,
             };
-            let (app, ha_handle) = fluxvm_agent::central::router_with_sso(
+            let (app, ha_handle, registry_flush) = fluxvm_agent::central::router_with_flush(
                 fluxvm_agent::central::CentralConfig {
                     state_dir,
                     token,
@@ -395,19 +395,22 @@ async fn main() -> Result<()> {
                 },
                 sso,
             );
-            // On Ctrl-C or SIGTERM (launchd, systemd), hand the leader lock over before exiting.
-            if let Some(h) = ha_handle {
-                tokio::spawn(async move {
-                    shutdown_signal().await;
+            // On Ctrl-C or SIGTERM (launchd, systemd, a rollout): hand the leader lock over, then save the registry (it is
+            // written in the background, so nodes registered in the last few seconds are not on disk yet), then exit.
+            tokio::spawn(async move {
+                shutdown_signal().await;
+                if let Some(h) = ha_handle {
                     match h.release().await {
                         Ok(()) => tracing::info!("released the fleet leader lock"),
                         Err(e) => {
                             tracing::warn!(error = %e, "could not release the fleet leader lock")
                         }
                     }
-                    std::process::exit(0);
-                });
-            }
+                }
+                registry_flush.flush().await;
+                tracing::info!("saved the fleet registry");
+                std::process::exit(0);
+            });
             let addr: SocketAddr = listen
                 .parse()
                 .with_context(|| format!("parsing listen address {listen}"))?;

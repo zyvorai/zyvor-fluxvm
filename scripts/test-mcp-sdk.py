@@ -34,7 +34,9 @@ STOPS = []
 
 READ_TOOLS = {"list_vms", "get_vm", "host_status", "vm_network", "vm_logs", "backup_list", "sandbox_read_file",
               "sandbox_logs", "vm_snapshot_list", "vm_screenshot", "vm_vz_status",
-              "host_apple_capabilities"}
+              "host_apple_capabilities", "sandbox_changesets", "session_approvals", "session_artifacts", "session_events",
+              "session_file_read", "session_files", "session_job_read", "session_jobs", "session_probe",
+              "session_rewind_points", "session_screenshot", "session_wait_screen"}
 WRITE_TOOLS = {
     "vm_power", "vm_capture", "vm_fork", "image_import", "vm_backup", "backup_restore",
     "pool_claim", "sandbox_create", "sandbox_exec", "sandbox_write_file",
@@ -149,7 +151,11 @@ async def run(binary, base, allow_write):
                 err, text = await call(session, "vm_power", {"vm": "web", "op": "stop"})
                 check(err and "--allow-write" in text and not STOPS, "write tool refused without --allow-write")
             else:
-                check(set(tools) == READ_TOOLS | WRITE_TOOLS, f"write tool set {sorted(tools)}")
+                # The read-only set above is exact (it is the safety contract). The write set grows with every session verb, so here
+                # the core write tools must exist, every read tool must still be there, and the rest (the session_* family and
+                # sandbox_* decisions) is only printed.
+                check(READ_TOOLS | WRITE_TOOLS <= set(tools), f"write tool set misses {sorted((READ_TOOLS | WRITE_TOOLS) - set(tools))}")
+                print("extra write tools:", len(set(tools) - READ_TOOLS - WRITE_TOOLS))
                 err, text = await call(session, "vm_power", {"vm": "web", "op": "stop"})
                 check(not err and "stopped" in text and STOPS == [VM_ID], "vm_power stops the VM")
 

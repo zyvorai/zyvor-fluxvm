@@ -20,6 +20,7 @@ on:
       - 'scripts/install-cloud-hypervisor.sh'
       - 'scripts/build-ebpf.sh'
       - 'scripts/e2e/**'
+      - 'crates/fluxvm-agent/**'
       - 'scripts/test-release-e2e.sh'
       - 'scripts/deploy-remote.sh'
       - 'Dockerfile'
@@ -42,6 +43,7 @@ on:
       - 'scripts/install-cloud-hypervisor.sh'
       - 'scripts/build-ebpf.sh'
       - 'scripts/e2e/**'
+      - 'crates/fluxvm-agent/**'
       - 'scripts/test-release-e2e.sh'
       - 'scripts/deploy-remote.sh'
       - 'Dockerfile'
@@ -173,7 +175,7 @@ jobs:
           path: guestkit
       - uses: dtolnay/rust-toolchain@stable
       - name: System deps
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq libsystemd-dev libhivex-dev pkg-config jq
-      - name: Enrollment security (58 checks), real central and nodes, enrollment invariants
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq libsystemd-dev libhivex-dev pkg-config jq redis-server
+      - name: Enrollment security (58 checks), real central and nodes, the central API (82 checks), HA with a real Redis (21 checks)
         working-directory: fluxvm
-        run: scripts/test-release-e2e.sh --suite enroll-invariants --suite enroll-security --suite central-node
+        run: scripts/test-release-e2e.sh --suite enroll-invariants --suite enroll-security --suite central-node --suite agent-central-api --suite agent-central-ha

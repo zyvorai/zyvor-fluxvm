@@ -783,6 +783,26 @@ pub fn router_with_sso(
     cfg: CentralConfig,
     sso_cfg: Option<SsoConfig>,
 ) -> (Router, Option<HaHandle>) {
+    let (app, handle, _) = router_with_flush(cfg, sso_cfg);
+    (app, handle)
+}
+
+/// Writes the node registry now. The registry is write-behind (a background task saves it every few seconds), so a
+/// process that is asked to stop must call this first or it loses every node registered since the last save.
+#[derive(Clone)]
+pub struct RegistryFlush(Fleet);
+
+impl RegistryFlush {
+    pub async fn flush(&self) {
+        registry::flush(&self.0, true).await;
+    }
+}
+
+/// [`router_with_sso`], plus the handle `fluxvm-agent central` uses to save the registry on SIGTERM / Ctrl-C.
+pub fn router_with_flush(
+    cfg: CentralConfig,
+    sso_cfg: Option<SsoConfig>,
+) -> (Router, Option<HaHandle>, RegistryFlush) {
     let persist_path = cfg.state_dir.join("fleet-nodes.json");
     let lock_path = cfg.state_dir.join("fleet-nodes.lock");
     let tenancy_path = cfg.state_dir.join("fleet-tenancy.json");
@@ -1067,8 +1087,8 @@ pub fn router_with_sso(
             fleet.clone(),
             metrics::count_requests,
         ))
-        .with_state(fleet);
-    (app, handle)
+        .with_state(fleet.clone());
+    (app, handle, RegistryFlush(fleet))
 }
 
 // ---- the fleet console: two static files, no auth to fetch them (the page asks for a token and calls the API) ----
@@ -2527,6 +2547,36 @@ mod tests {
             }),
             ..node(name, vm_count, 0)
         }
+    }
+
+    /// The registry is saved in the background every few seconds. A central that is stopped (SIGTERM from systemd or
+    /// a rollout) in between must save it on the way out, or the nodes registered in that window are gone on restart.
+    #[tokio::test]
+    async fn the_registry_is_saved_on_demand_for_a_graceful_stop() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_app, _ha, flush) = router_with_flush(
+            CentralConfig {
+                state_dir: dir.path().to_path_buf(),
+                token: Some("t".into()),
+                reconcile_interval: None,
+                ha: None,
+            },
+            None,
+        );
+        flush
+            .0
+            .nodes
+            .lock()
+            .await
+            .insert("late".into(), node("late", 0, 0));
+        flush.0.registry.mark_dirty();
+        // Nothing has been written yet: the background flusher has not run (its first pass is seconds away).
+        assert!(!load_persisted(&dir.path().join("fleet-nodes.json")).contains_key("late"));
+        flush.flush().await;
+        assert!(
+            load_persisted(&dir.path().join("fleet-nodes.json")).contains_key("late"),
+            "a flush on shutdown writes the node that registered after the last background save"
+        );
     }
 
     #[test]

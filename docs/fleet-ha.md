@@ -4,9 +4,11 @@ One `fluxvm-agent central` is a single point of failure: if it is down, no VM ca
 `--ha-redis`, you run two or three centrals against one Redis. One of them leads and serves `/fleet/*`, and the
 others stand by.
 
-**Status:** implemented and tested in process (two centrals on a shared in-memory store: the standby refuses requests,
-then takes over with the leader's tenants and nodes after the leader dies). Not yet run against a real Redis or on
-several hosts.
+**Status:** tested in process (two centrals on a shared in-memory store) and with real processes against a real Redis
+(`scripts/e2e/agent-central-ha.sh`, on Linux and macOS, 21 checks): exactly one leader, the standby answers `503` naming it,
+`kill -9` of the leader is followed by a takeover within the TTL with the nodes, tenants and keys intact, the old leader comes
+back as a standby, and a leader frozen past its TTL (`SIGSTOP`) is replaced and cannot overwrite the new leader's state when it
+wakes (fencing). Not yet run on several hosts or with a Redis outage.
 
 ```bash
 # On each of central-a, central-b (and optionally central-c):
