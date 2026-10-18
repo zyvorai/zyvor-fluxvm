@@ -16,7 +16,7 @@ installs the runtime packages on top. Two consequences:
 - **The image runs the released bytes.** What was tested and signed in the tarball is what is in the image.
 
 Runtime packages mirror `packaging/nfpm.yaml`: `libhivex0`, `libsystemd0`, `qemu-system-x86` (amd64) or `qemu-system-arm`
-(arm64), `qemu-utils`, `cloud-image-utils`, `iproute2`, `dnsmasq-base`, `nftables`, `bpftool`, `util-linux`. There is no
+(arm64), `qemu-utils`, `cloud-image-utils`, `iproute2`, `dnsmasq-base`, `nftables`, `bpftool` (linked from `linux-tools-generic`; Ubuntu 24.04 has no `bpftool` package), `util-linux`. There is no
 `python3`, `curl`, or build toolchain, and nothing is downloaded at build time except Ubuntu packages.
 
 The base image is pinned by index digest (`ubuntu:24.04@sha256:68ee2200...`; both amd64 and arm64 are in that index). To

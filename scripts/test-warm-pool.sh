@@ -39,7 +39,7 @@ PROJECT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 CONFIG="/etc/fluxvm.toml"
 [ -f "$CONFIG" ] || CONFIG=""
 IMAGE=""
-BASE_URL="http://127.0.0.1:7788"
+BASE_URL="${BASE_URL:-http://127.0.0.1:7788}"   # override together with a --config whose listen differs, to run beside a live daemon
 
 while [ $# -gt 0 ]; do
     case "$1" in

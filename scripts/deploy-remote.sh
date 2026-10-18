@@ -86,6 +86,13 @@ while [ $# -gt 0 ]; do
         --verify-only)    VERIFY_ONLY=true; shift ;;
         --preflight-only) PREFLIGHT_ONLY=true; shift ;;
         -v|--verbose)     VERBOSE=true; shift ;;
+        --) shift; POSITIONAL+=("$@"); break ;;
+        -*)
+            # A typo such as --verfiy-only used to become a positional argument (the "password") and the script went on
+            # to do a full deploy. Refuse it; a password that starts with "-" goes after "--".
+            echo "unknown option: $1 (see --help)" >&2
+            exit 2
+            ;;
         *)
             POSITIONAL+=("$1")
             shift
