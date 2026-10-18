@@ -50,7 +50,8 @@ ENV DEBIAN_FRONTEND=noninteractive
 #   qemu-system-x86|arm       QEMU backend, chosen by target architecture
 #   qemu-utils / cloud-image-utils   qcow2 tooling, cloud-localds seed images
 #   iproute2 / dnsmasq-base / nftables   TAP/bridge setup, per-netns DHCP, rules
-#   bpftool                   BPF inspection by the dataplane
+#   linux-tools-generic       bpftool: ubuntu 24.04 has no `bpftool` package, the binary ships in the kernel tools
+#                             package, so it is linked into PATH below (vnet.rs loads its programs with it)
 #   util-linux                chroot/nsenter for the host-prep init container
 RUN case "${TARGETARCH}" in \
       amd64) QEMU=qemu-system-x86 ;; \
@@ -60,8 +61,9 @@ RUN case "${TARGETARCH}" in \
     && apt-get update \
     && apt-get install -y --no-install-recommends \
          "${QEMU}" qemu-utils cloud-image-utils \
-         iproute2 dnsmasq-base nftables bpftool \
+         iproute2 dnsmasq-base nftables linux-tools-generic \
          libhivex0 libsystemd0 ca-certificates util-linux \
+    && ln -s "$(ls /usr/lib/linux-tools/*/bpftool | head -n1)" /usr/local/bin/bpftool \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=stage bin/ /usr/local/bin/

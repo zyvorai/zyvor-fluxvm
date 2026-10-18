@@ -5,7 +5,9 @@
 # Runs every release/fleet suite in one go, locally or on a Linux host over ssh, and prints one line per suite.
 #   scripts/test-release-e2e.sh                         on this machine (Linux needed for most suites)
 #   scripts/test-release-e2e.sh --host sus@212.8.248.187 [--suite NAME ...] [--keep]
-# Suites: static packages bootstrap-tarball bootstrap-deb bootstrap-rpm ha enroll-invariants enroll-security central-node scale
+# Suites: static packages bootstrap-tarball bootstrap-deb bootstrap-rpm systemd-deb image-k8s ha enroll-invariants enroll-security
+#         central-node agents scale   (default: all of these)   mutation  (opt-in, slow: breaks each enrollment guard, expects a failure)
+# scripts/e2e/deploy-remote.sh runs from the control machine, not through this runner (it deploys to the host).
 # On a host it rsyncs the tree to ~/e2e-work/tree, builds fluxvm-agent once (release) and removes only what it created.
 # Needs nfpm and docker for the package suites, curl, jq, openssl >= 3, python3. Exit status = failed suites.
 set -uo pipefail
@@ -20,7 +22,7 @@ while [[ $# -gt 0 ]]; do
     *) echo "unknown argument $1" >&2; exit 2 ;;
   esac
 done
-ALL=(static packages bootstrap-tarball bootstrap-deb bootstrap-rpm enroll-invariants enroll-security central-node scale)
+ALL=(static packages bootstrap-tarball bootstrap-deb bootstrap-rpm systemd-deb image-k8s enroll-invariants enroll-security central-node agents scale)
 [[ ${#SUITES[@]} -gt 0 ]] || SUITES=("${ALL[@]}")
 
 if [[ -n "$HOST" ]]; then
@@ -52,7 +54,7 @@ static() {
   if rustfmt --version >/dev/null 2>&1; then rustfmt --edition 2024 --check crates/fluxvm-agent/src/*.rs crates/fluxctl/src/*.rs || rc=1
   else echo "static: rustfmt is not installed here; skipped"; fi
   if command -v shellcheck >/dev/null; then shellcheck scripts/fluxvm-bootstrap.sh scripts/make-release-manifest.sh scripts/package-linux-pkgs.sh \
-      scripts/test-bootstrap.sh scripts/e2e/*.sh scripts/test-release-e2e.sh packaging/deb/*.sh || rc=1
+      scripts/test-bootstrap.sh scripts/e2e/*.sh scripts/test-release-e2e.sh scripts/deploy-remote.sh packaging/deb/*.sh || rc=1
   else echo "static: shellcheck is not installed here; skipped"; fi
   for t in test-package-manifest test-vendor-lock test-check-glibc-floor test-check-guestkit-pin verify-systemd-units; do "scripts/$t.sh" || rc=1; done
   need_agent && CARGO_INCREMENTAL=0 cargo test -p fluxvm-agent --lib || rc=1
@@ -68,6 +70,9 @@ ha() {
   docker rm -f "$c" >/dev/null 2>&1
   return $rc
 }
+# Every agent crate: the fleet agent (central/node/sim), the guest agent and its protocol, the container agent, the vsock client.
+agents() { CARGO_INCREMENTAL=0 cargo test --no-fail-fast -p fluxvm-agent -p fluxvm-guest-agent -p fluxvm-guest-protocol -p fluxvm-container-agent \
+  -p fluxvm-container-protocol -p fluxvm-vsock-client -p fluxvm-container-client -p fluxctl; }
 scale() { need_agent && scripts/bench-fleet-central.sh -b "$BIN" 1000:10:20 5000:10:30 10000:10:40; }
 
 fails=0
@@ -81,6 +86,10 @@ for s in "${SUITES[@]}"; do
     enroll-invariants) need_agent; run enroll-invariants scripts/test-enroll-invariants.sh ;;
     enroll-security) need_agent; run enroll-security scripts/e2e/enroll-security.sh ;;
     central-node) need_agent; run central-node scripts/e2e/central-node.sh ;;
+    systemd-deb) run systemd-deb scripts/e2e/systemd-deb.sh ;;
+    image-k8s) run image-k8s scripts/e2e/image-k8s.sh ;;
+    agents) run agents agents ;;
+    mutation) run mutation scripts/e2e/mutation-security.sh ;;
     ha) run ha ha ;;
     scale) run scale scale ;;
     *) echo "unknown suite $s" >&2; fails=$((fails + 1)); continue ;;
