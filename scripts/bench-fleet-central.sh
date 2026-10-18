@@ -16,7 +16,7 @@
 # do and do not show.
 set -uo pipefail
 
-BIN="target/release/fluxvm-agent"
+BIN="${BIN:-target/release/fluxvm-agent}"
 if [[ "${1:-}" == "-b" ]]; then
   BIN="${2:?-b needs a path}"
   shift 2
