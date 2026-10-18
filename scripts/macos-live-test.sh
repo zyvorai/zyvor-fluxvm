@@ -81,15 +81,21 @@ RUNOUT="$("${FX[@]}" run -- 'ls /var/tmp/leak 2>/dev/null || echo clean' 2>/dev/
 [[ "$(curl -fs "$B" | python3 -c 'import sys,json;d=json.load(sys.stdin);d=d.get("items",d) if isinstance(d,dict) else d;print(sum(1 for v in d if not v["name"].startswith("warm-")),sum(1 for v in d if v["name"].startswith("warm-") and v["status"]!="stopped"))')" == "0 0" ]] && ok "fluxctl run left nothing running (only the stopped warm template)" || bad "a run VM was left behind"
 # A stack: two services, one depending on the other. The app reaches the db by name, which only works through the Mac's relay.
 mkdir -p "$T/proj" && cp examples/fluxvm.toml "$T/proj/fluxvm.toml" && echo hello > "$T/proj/marker.txt"
+# macOS itself listens on 5000 (AirPlay Receiver), which is where the example publishes the db; FLUXVM_LIVE_DB_PORT picks another.
+[[ -n "${FLUXVM_LIVE_DB_PORT:-}" ]] && perl -pi -e "s/\"5000:5000\"/\"${FLUXVM_LIVE_DB_PORT}:5000\"/" "$T/proj/fluxvm.toml"
 ( cd "$T/proj" && "${FX[@]}" up >"$T/up1.log" 2>&1 </dev/null ) || { tail -5 "$T/up1.log"; bad "fluxctl up failed"; }
 STACKPS="$( cd "$T/proj" && "${FX[@]}" ps 2>/dev/null )"
 [[ "$(grep -c running <<<"$STACKPS")" == 2 ]] && ok "stack: up created db and app" || bad "stack ps: $STACKPS"
 APPIP="$(awk '$1=="app"{print $4}' <<<"$STACKPS")"
 # Stack VMs use your own user name and SSH key (like `fluxctl run`), not this script's throwaway key.
 # With no key of your own, fluxctl generates ~/.ssh/fluxvm_ed25519 and the VMs trust that one.
-MYKEY=(); ls ~/.ssh/id_ed25519.pub ~/.ssh/id_ecdsa.pub ~/.ssh/id_rsa.pub >/dev/null 2>&1 || { [[ -f ~/.ssh/fluxvm_ed25519 ]] && MYKEY=(-i ~/.ssh/fluxvm_ed25519); }
+# fluxctl injects the first of id_ed25519/id_ecdsa/id_rsa it finds (run.rs: ssh_key), else a generated ~/.ssh/fluxvm_ed25519. The script
+# runs with pipefail, so a `ls a b c | grep` test fails when ANY of the three is missing; look at each file instead.
+MYKEY=(); HAVE_KEY=0; for k in id_ed25519 id_ecdsa id_rsa; do [[ -f ~/.ssh/$k.pub ]] && HAVE_KEY=1; done
+[[ $HAVE_KEY == 1 ]] || { [[ -f ~/.ssh/fluxvm_ed25519 ]] && MYKEY=(-i ~/.ssh/fluxvm_ed25519); }
 mine() { ssh ${MYKEY[@]+"${MYKEY[@]}"} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o BatchMode=yes -o ConnectTimeout=8 "$USER@$1" "$2"; }
-[[ "$(mine "$APPIP" 'cat /tmp/db-reply' 2>/dev/null)" == db-ok ]] && ok "stack: app reached db by name through the Mac's relay (after_up)" || bad "app could not reach db"
+[[ "$(mine "$APPIP" 'cat /tmp/db-reply' 2>/dev/null)" == db-ok ]] && ok "stack: app reached db by name through the Mac's relay (after_up)" \
+  || bad "app could not reach db: $(mine "$APPIP" 'cat /tmp/db-reply; getent hosts db' 2>&1 | tail -3 | tr '\n' ' ')"
 [[ "$(mine "$APPIP" 'cat /srv/app/marker.txt' 2>/dev/null)" == hello ]] && ok "stack: the project directory is shared into app" || bad "stack volume"
 START=$SECONDS; ( cd "$T/proj" && "${FX[@]}" up >"$T/up2.log" 2>&1 </dev/null ) && ! grep -qE "creating|recreating" "$T/up2.log" && ok "stack: a second up changes nothing ($((SECONDS-START))s)" || bad "second up was not a no-op: $(cat "$T/up2.log")"
 ( cd "$T/proj" && "${FX[@]}" down >/dev/null 2>&1 </dev/null )

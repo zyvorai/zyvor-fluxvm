@@ -52,7 +52,65 @@ recorded, not gated.
 - The `.deb` was not installed on the test host itself: that host already runs a hand-deployed `fluxvm.service` from
   `/usr/local/bin`, which a package would overwrite. The package was installed under real systemd in a container instead.
 
+## Agents, on Linux and on the Mac
+
+Run 2026-10-18 on Ubuntu 26.04 (212.8.248.187; 80.79.5.173 for the two-host run) and on an Apple-silicon Mac mini (macOS 27.2,
+16 GiB). Every run used its own ports and state directory; nothing of the hosts' own services was stopped or reconfigured.
+
+| Suite | Linux | Mac |
+|---|---|---|
+| `cargo test`: fluxvm-agent (277), guest-agent (34), guest/container protocols (16, 12), container agent (34), shim (35), vsock/container clients, fluxctl (228) | 0 failed | fluxvm-agent, apple (131 + 21 contract tests), vz-switch (15), usernet (76), guest-agent (33), guest-protocol (16), vsock-client (2): 0 failed |
+| `agent-central-api` (`scripts/e2e/agent-central-api.sh`): tenants and keys (scopes, read-only, revoke, rotate, disable, quota), what a tenant cannot reach, webhooks (https/private-address rules), budget/usage/billing, cordon, overlays, Mac leases (24 h minimum, forced release, scrub before reuse), console assets, `/metrics`, secrets in logs, restart durability, SIGTERM save | 82 checks, ok | 82 checks, ok |
+| `agent-central-ha`: real Redis, two centrals, `kill -9` takeover, old leader returns as a standby, `SIGSTOP` fencing | 21 checks, ok | 21 checks, ok |
+| `enroll-security` (58), `central-node`, `enroll-invariants`, `scale` | ok (see above) | ok; sim-fleet 1,000 nodes (32 MiB, p99 0 ms) and 5,000 nodes (89 MiB, p99 0 ms), 0 failed beats |
+| `agent-central-vms`: a real QEMU VM placed through central, listing, exec over vsock, logs, stop/start, tenant isolation, delete | 25 ok, 3 known gaps | n/a |
+| `guest-exec-policy`: exec policy inside a real guest (Landlock/seccomp): allowed reads and writes work, others are refused by the kernel, TCP deny, namespaces, memory limit, output cap, timeout, malformed and unenforceable policies fail closed | 19 checks, ok | n/a |
+| `fleet-two-host` (`scripts/e2e/fleet-two-host.sh`): central on one real host, node agents on two, a real VM on each, capacity from /proc, heartbeats over the network, vm_count, cordon, node restart, `kill -9` of central | 17 checks, ok; temporary firewall rules removed, INPUT checksum unchanged | n/a |
+| MCP end to end (`scripts/test-mcp-sdk.py`) and the Python (55), Go and TypeScript (26) SDK unit tests | ok | ok |
+| SDKs against a real daemon (`scripts/e2e/sdk-live.sh`; Python on the host, Go through a tunnel) | ok | n/a (procbox is Linux-only) |
+| procbox (114 tests) | as `sus`: 11 isolate tests skip (AppArmor blocks unprivileged user namespaces); as root: all run, 0 skipped | n/a |
+| Guest agent over vsock: `test-lifecycle` 7/7, `test-guest-agent-auth` 5/5, `test-boot-smoke` 7/7, `test-warm-pool` 13/13 | ok | n/a |
+| vz live tests, each on its own daemon and temp state: `macos-live-test` 54, `vz-devices` 26, `vz-usb-buses` 9, `vz-usernet` 11, `vz-vsock-services` 7, `vz-sandbox-volume` 6, `vz-rewind` 11, `vz-asif-overlay` 3, `macos-vz27-complete` (fluxvm-apple build, tests, clippy `-D warnings`, EFI Secure Boot on and off) | n/a | all ok |
+
+### Bugs found and fixed
+
+- **A graceful stop lost nodes.** `fluxvm-agent central` has no final save: on SIGTERM (systemd stop, a rollout) every node
+  registered since the last background save was gone after the restart. It now saves the registry before exiting
+  (`RegistryFlush`, with a unit test and a process-level check).
+- `scripts/test-mcp-sdk.py` expected 12 fewer read-only MCP tools than `fluxctl mcp serve` exposes, so `mcp.yml` would fail on
+  `main`; the read-only set is now exact and the write set is checked as a superset.
+- `scripts/macos-live-test.sh` forced the generated `fluxvm_ed25519` key when any of `id_ed25519.pub`, `id_ecdsa.pub`,
+  `id_rsa.pub` was missing (a `ls a b c` test under `pipefail`), so the stack check failed on a Mac that has just one key. The
+  example stack also publishes port 5000, which macOS's AirPlay receiver owns; `FLUXVM_LIVE_DB_PORT` picks another.
+- `scripts/test-fleet-agent.sh` can no longer start: `fluxctl serve` now refuses to listen on `0.0.0.0` without auth.
+  `scripts/e2e/fleet-two-host.sh` replaces its working parts.
+- `test-warm-pool.sh` and others hardcoded ports; `scripts/e2e/central-node.sh` and `enroll-security.sh` used GNU `stat -c`.
+
+### Findings (not bugs in this change)
+
+- **Central cannot control VMs on another host.** It calls a node's daemon with no credential, and the daemon refuses to listen
+  on a non-loopback address without auth. Across hosts, registration, capacity, heartbeats and cordon work; create/exec/delete
+  through central only work when the daemon is on the same host (loopback). Which credential central should present is still an
+  open decision.
+- Leases, volumes and warm pools are Mac features: on a Linux node a lease is refused ("not a Mac") and a pool backs off ("no host
+  nobody leases"). QEMU snapshots and clones through central are refused ("disk-only snapshots are implemented for the vz backend").
+- A guest on Landlock ABI 4 (Ubuntu 24.04) cannot enforce the default exec policy (`scope_ipc` needs ABI 6); the guest refuses to
+  run the command rather than run it unconfined. `docs/guest-exec-policy.md` now says so and is marked verified.
+- A released Mac must be scrubbed before it is leased again; an early lease release is refused until 24 hours, an operator can force it.
+- The Mac's data volume was at 99-100% during this work. It briefly reached 100% (one VM image unpack failed with "No space
+  left on device") and the Mac's SSH port-forward to the `aurora` VM was no longer running afterwards; the VM itself, the daemon
+  on 7788 and the hand-installed binaries were unchanged.
+
+### Not run
+
+- Mac: `vz-agent-session` and `vz-https` (need `agent-micro-arm64.raw`, built on Linux), `vz-host-gpu` (uses the shared 7788
+  daemon), the macOS-guest/IPSW tests (attended, 30-60 GB), `bench-sandbox-mac`, and `macos-vz27-live-test` (needs a hand-written
+  VZ config and runner path).
+- Linux: the containerd end-to-end secure-container gate (no containerd service; the host's containerd is k3s's), central's
+  WebSocket tunnel, the fleet console's JavaScript, `gha-runners` against GitHub.
+- No launchd plist exists for `fluxvm-agent central|node`; the guest LaunchDaemon is marked experimental.
+
 ## Not covered here
 
 EL9 (glibc 2.34 is below the package's floor; needs a build on EL9), an `apply` of the manifests against a real
-cluster, `test-fleet-agent.sh` (needs two hosts), and a real fleet of 10,000 distinct clients with TLS.
+cluster, and a real fleet of 10,000 distinct clients with TLS.

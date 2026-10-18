@@ -8,16 +8,19 @@ enforced.
 
 | Item | Implemented and type-checked | Verified on hardware |
 |---|---|---|
-| `policy` on `POST /v1/vms/{uuid}/agent` and `POST /v1/sandboxes/{id}/process` | yes (unit tests pass) | not yet |
-| `ExecPolicy` wire type, procbox-compatible JSON | yes (parse and conversion tests) | not yet |
-| Landlock and seccomp enforcement in the guest agent | yes | not yet |
-| Fail-closed on unenforceable policy | yes | not yet |
-| `ExecEnforcement` in the exec response | yes | not yet |
-| `fluxctl exec --policy FILE` | yes | not yet |
-| Agent refuses requests without a token | yes | not yet |
+| `policy` on `POST /v1/vms/{uuid}/agent` and `POST /v1/sandboxes/{id}/process` | yes (unit tests pass) | yes, on the VM route (Linux/QEMU guest) |
+| `ExecPolicy` wire type, procbox-compatible JSON | yes (parse and conversion tests) | yes (unknown fields ignored, a malformed policy is rejected and not run) |
+| Landlock and seccomp enforcement in the guest agent | yes | yes (reads and writes outside the policy, TCP connect, namespaces, memory limit, output cap, timeout) |
+| Fail-closed on unenforceable policy | yes | yes (see below) |
+| `ExecEnforcement` in the exec response | yes | yes |
+| `fluxctl exec --policy FILE` | yes | yes |
+| Agent refuses requests without a token | yes | yes (`scripts/test-guest-agent-auth.sh`) |
 
-Nothing in this batch has been run end-to-end on real VMs. The enforcement code is procbox's, which is
-covered by its own tests (see [procbox.md](procbox.md)); the new part is the plumbing through the agent.
+Verified by `scripts/e2e/guest-exec-policy.sh` on an Ubuntu 24.04 guest (kernel 6.8, Landlock ABI 4) under QEMU/KVM; the
+sandbox `process` route and other guest kernels are not covered. **A guest on Landlock ABI 4 cannot enforce the default policy**:
+`scope_ipc` (abstract-unix-socket and signal scoping) needs ABI 6, so the guest refuses with `policy could not be enforced,
+command not run` rather than running the command unconfined. Set `"scope_ipc": false` for such guests, or use a newer guest
+kernel. The response lists what was not enforced (`not_enforced`, for example device ioctl control needs ABI 5).
 
 ## Policy JSON
 

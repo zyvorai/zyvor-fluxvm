@@ -34,7 +34,7 @@ node a --token-file "$D/join" --label zone=east
 node b --token-file "$D/join" --label zone=east
 node c --token-file "$D/join" --label zone=west
 check "three real nodes enroll and register" waitfor '[[ "$(names)" == "[\"a\",\"b\",\"c\"]" ]]'
-check "each node holds a 0600 credential and a node-id" bash -c "[[ \$(stat -c %a $D/n-a/node-credential) == 600 && \$(stat -c %a $D/n-a/node-id) == 600 ]]"
+check "each node holds a 0600 credential and a node-id" bash -c "[[ \$(stat -c %a $D/n-a/node-credential 2>/dev/null || stat -f %Lp $D/n-a/node-credential) == 600 && \$(stat -c %a $D/n-a/node-id 2>/dev/null || stat -f %Lp $D/n-a/node-id) == 600 ]]"
 check "the join token is not on any node's command line" bash -c "! ps -eo args | grep -F '${J##*.}' | grep -v grep"
 check "the join token is not in a node log" bash -c "! grep -q '${J##*.}' $D/node-a.log"
 check "enrollments list three nodes" test "$(adm "$URL/fleet/enroll/nodes" | jq '.items|length')" = 3
