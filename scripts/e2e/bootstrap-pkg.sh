@@ -15,7 +15,7 @@ T="$(mktemp -d "${HOME}/.cache/fluxvm-bspkg.XXXXXX" 2>/dev/null || mktemp -d)"; 
 trap '[[ -n "$CT" ]] && docker rm -f "$CT" >/dev/null 2>&1; [[ -n "$SRV" ]] && kill "$SRV" 2>/dev/null; rm -rf "$T"' EXIT
 ok() { echo "ok   $1"; }; bad() { echo "FAIL $1"; fails=$((fails + 1)); }
 check() { local n="$1"; shift; if "$@"; then ok "$n"; else bad "$n"; fi; }
-case "$(uname -m)" in x86_64) U=x86_64; DA=amd64 ;; *) U=aarch64; DA=arm64 ;; esac
+case "$(uname -m)" in x86_64) U=x86_64 ;; *) U=aarch64 ;; esac
 
 mkpkg() { # VERSION [broken]
   local v="$1" s="$T/stage/fluxvm-$1-linux-$U"
