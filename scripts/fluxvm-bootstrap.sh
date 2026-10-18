@@ -35,7 +35,6 @@ NODE_ID="${NODE_ID:-$(cat "$ROOT/etc/machine-id" 2>/dev/null || true)}"
 LABELS="${LABELS:-}"
 STATE="${BOOTSTRAP_STATE:-$ROOT/var/lib/fluxvm-bootstrap}"
 OPT="$ROOT/opt/fluxvm"
-BIN_DIR="$ROOT/usr/local/bin"
 JITTER_MAX="${JITTER_MAX:-300}"
 TRIES="${FETCH_TRIES:-6}"
 BACKOFF_BASE="${BACKOFF_BASE:-2}"
@@ -50,6 +49,9 @@ if [[ -z "${INSTALL_MODE:-}" ]]; then
   elif command -v rpm >/dev/null 2>&1 && { command -v dnf >/dev/null 2>&1 || command -v yum >/dev/null 2>&1; }; then INSTALL_MODE=rpm
   else INSTALL_MODE=tarball; fi
 fi
+
+# A tarball install links the binaries into /usr/local/bin; the packages put them in /usr/bin.
+if [[ "$INSTALL_MODE" == tarball ]]; then BIN_DIR="$ROOT/usr/local/bin"; else BIN_DIR="$ROOT/usr/bin"; fi
 
 log() { echo "fluxvm-bootstrap: $*" >&2; }
 die() { log "$*"; set_status error "$*"; exit 1; }
@@ -151,7 +153,13 @@ in_wave() { # CHANNEL_JSON -> 0 when this node may install
 arch() { case "$(uname -m)" in x86_64) echo x86_64 ;; aarch64|arm64) echo aarch64 ;; *) echo unsupported ;; esac; }
 failed_has() { grep -qxF "$1" "$STATE/failed" 2>/dev/null; }
 
-service_restart() { [[ -n "$ROOT" ]] && return 0; systemctl daemon-reload >/dev/null 2>&1; systemctl is-enabled --quiet fluxvm.service 2>/dev/null && systemctl restart fluxvm.service; }
+# A node whose service is not enabled (a fresh install, a container) has nothing to restart; that is not a failure.
+service_restart() {
+  [[ -n "$ROOT" ]] && return 0
+  command -v systemctl >/dev/null 2>&1 || return 0
+  systemctl daemon-reload >/dev/null 2>&1
+  if systemctl is-enabled --quiet fluxvm.service 2>/dev/null; then systemctl restart fluxvm.service; fi
+}
 healthy() { # VERSION: the new binary reports it, and the service (when enabled) came up
   local want="$1" i
   for ((i = 0; i < HEALTH_WAIT; i++)); do
@@ -194,6 +202,18 @@ install_rpm() { # FILE [--downgrade]
 }
 install_artifact() { # KIND FILE VERSION
   case "$1" in deb) install_deb "$2" ;; rpm) install_rpm "$2" ;; *) install_tarball "$2" "$3" ;; esac
+}
+
+# Keep the newest two packages (the one we run and the one to roll back to) and the manifests of the versions still cached.
+prune_cache() {
+  # shellcheck disable=SC2012
+  ls -t "$STATE/cache/"*.deb "$STATE/cache/"*.rpm "$STATE/cache/"*.tar.gz 2>/dev/null | tail -n +3 | xargs -r rm -f
+  local m v
+  for m in "$STATE/cache/"manifest-*.json "$STATE/cache/"manifest-*.json.sig; do
+    [[ -e "$m" ]] || continue
+    v="${m##*/manifest-}"; v="${v%.sig}"; v="${v%.json}"
+    compgen -G "$STATE/cache/*[_-]${v}[_-]*" >/dev/null || rm -f "$m"
+  done
 }
 
 preflight() { # SIZE
@@ -313,6 +333,8 @@ cmd_install() { # [--dry-run] [--force]
       local pf; pf="$(find "$STATE/cache" -name "fluxvm-${cur}-*.rpm" -print -quit)"
       [[ -n "$pf" ]] && echo "rpm $cur $pf" > "$STATE/previous.new"
     else echo "tarball $cur -" > "$STATE/previous.new"; fi
+    # Remember the pointer we are replacing: when this release fails and we land back on $cur, it is still the right one.
+    rm -f "$STATE/previous.prev"; [[ -f "$STATE/previous" ]] && cp "$STATE/previous" "$STATE/previous.prev"
     [[ -f "$STATE/previous.new" ]] && mv "$STATE/previous.new" "$STATE/previous"
   fi
 
@@ -320,14 +342,17 @@ cmd_install() { # [--dry-run] [--force]
   if install_artifact "$kind" "$pkg" "$version" && service_restart && healthy "$version"; then
     echo "$kind $version $pkg" > "$STATE/last-installed"
     log "now on $version"; set_status updated "installed $version"
-    # Only keep the newest two packages in the cache.
-    # shellcheck disable=SC2012
-    ls -t "$STATE/cache/"*.deb "$STATE/cache/"*.rpm "$STATE/cache/"*.tar.gz 2>/dev/null | tail -n +3 | xargs -r rm -f
+    prune_cache
     return 0
   fi
   log "$version did not come up healthy"
   echo "$version" >> "$STATE/failed"
-  if [[ -n "$cur" ]] && do_rollback; then set_status rolled-back "$version failed; back on $cur"; return 3; fi
+  [[ -n "$cur" ]] && rm -f "$pkg"   # a release that failed is not a rollback target; keep the two before it
+  prune_cache
+  if [[ -n "$cur" ]] && do_rollback; then
+    [[ -f "$STATE/previous.prev" ]] && mv "$STATE/previous.prev" "$STATE/previous"
+    set_status rolled-back "$version failed; back on $cur"; return 3
+  fi
   set_status failed "$version failed and there was nothing to roll back to"; return 1
 }
 

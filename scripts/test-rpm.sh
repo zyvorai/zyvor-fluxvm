@@ -49,6 +49,8 @@ if command -v rpm >/dev/null; then
   done
   # The node's real config and the state directory are created by the scriptlet, never owned by the package.
   grep -qE '^/etc/|^/var/' <<<"$files" && bad "package owns something under /etc or /var"
+  # Directories the package owns must be 0755: Fedora's systemd-udev owns /usr/lib/modprobe.d with 0755 and rpm refuses a clash.
+  rpm -qplv "$R1" | awk '$1 ~ /^d/ && $1 != "drwxr-xr-x" { print; bad_d=1 } END { exit bad_d }' || bad "a directory in the rpm is not 0755"
   q --dump | awk '{ if ($6 != "root" || $7 != "root") exit 1 }' || bad "a file is not owned by root"
   sc="$(q --scripts)"
   grep -q 'remove|0)' <<<"$sc" || bad "preuninstall does not handle rpm's 0"

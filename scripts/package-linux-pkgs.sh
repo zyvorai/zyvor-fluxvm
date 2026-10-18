@@ -11,6 +11,7 @@
 # because it only moves files. Layout: bin/ -> /usr/bin, lib/ -> /usr/lib/fluxvm, share/ -> /usr/share/fluxvm,
 # and the unit -> /usr/lib/systemd/system with ExecStart pointing at /usr/bin (the tarball installs to /usr/local).
 set -euo pipefail
+umask 022   # the package records directory modes; a 0002 umask made 0775 directories that clash with systemd-udev's 0755
 cd "$(dirname "$0")/.."
 
 STAGE=""; FORMAT=deb; OUT=target/package
@@ -72,6 +73,7 @@ cp packaging/deb/modprobe-fluxvm.conf "$ROOT/usr/lib/modprobe.d/fluxvm.conf"
 cp packaging/deb/upgrade.conf "$ROOT/usr/share/fluxvm/upgrade.conf.example"
 
 mkdir -p "$OUT"
+find "$ROOT" -type d -exec chmod 755 {} +   # also for a stage built under another umask
 # The tree entries in packaging/nfpm.yaml are absolute-from-root, so give nfpm absolute paths.
 # nfpm expands the variables in the header fields but not in content paths, so the root is substituted here.
 CONF="$OUT/nfpm-$ARCH.yaml"
