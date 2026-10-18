@@ -32,6 +32,7 @@ jobs:
         uses: actions/checkout@v7
         with:
           repository: zyvorai/guestkit
+          ref: v1.2.6   # packaging/guestkit.ref; checked by scripts/check-guestkit-pin.sh
           path: guestkit
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -57,6 +58,7 @@ jobs:
         uses: actions/checkout@v7
         with:
           repository: zyvorai/guestkit
+          ref: v1.2.6   # packaging/guestkit.ref; checked by scripts/check-guestkit-pin.sh
           path: guestkit
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -135,6 +137,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           repository: zyvorai/guestkit
+          ref: v1.2.6   # packaging/guestkit.ref; checked by scripts/check-guestkit-pin.sh
           path: guestkit
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -169,6 +172,7 @@ jobs:
         uses: actions/checkout@v7
         with:
           repository: zyvorai/guestkit
+          ref: v1.2.6   # packaging/guestkit.ref; checked by scripts/check-guestkit-pin.sh
           path: guestkit
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -269,6 +273,7 @@ jobs:
         uses: actions/checkout@v7
         with:
           repository: zyvorai/guestkit
+          ref: v1.2.6   # packaging/guestkit.ref; checked by scripts/check-guestkit-pin.sh
           path: guestkit
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -294,6 +299,7 @@ jobs:
         uses: actions/checkout@v7
         with:
           repository: zyvorai/guestkit
+          ref: v1.2.6   # packaging/guestkit.ref; checked by scripts/check-guestkit-pin.sh
           path: guestkit
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -319,6 +325,7 @@ jobs:
         uses: actions/checkout@v7
         with:
           repository: zyvorai/guestkit
+          ref: v1.2.6   # packaging/guestkit.ref; checked by scripts/check-guestkit-pin.sh
           path: guestkit
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable

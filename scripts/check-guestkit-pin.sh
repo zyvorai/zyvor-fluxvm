@@ -46,4 +46,17 @@ if [[ -n "$GUESTKIT_DIR" ]]; then
     exit 1
   }
 fi
+# Every workflow that checks guestkit out must check out the pin: guestkit's default branch moves (1.2.9 while the lock said
+# 1.2.6) and `cargo --locked` then fails.
+bad=0
+for wf in "${FLUXVM_DIR}"/.github/workflows/*.yml; do
+  [[ -f "$wf" ]] || continue
+  repos="$(grep -c 'repository: zyvorai/guestkit' "$wf" || true)"
+  pins="$(grep -c -E "^[[:space:]]*ref: (${ref}|\\$\\{\\{ steps\\.gk\\.outputs\\.ref \\}\\})" "$wf" || true)"
+  if [[ "$repos" != "$pins" ]]; then
+    echo "check-guestkit-pin: $(basename "$wf") checks guestkit out ${repos} time(s) but pins ${ref} ${pins} time(s)" >&2
+    bad=1
+  fi
+done
+[[ $bad == 0 ]] || exit 1
 echo "check-guestkit-pin: guestkit ${ref} (matches Cargo.lock${GUESTKIT_DIR:+ and the checkout})"
