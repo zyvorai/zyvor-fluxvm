@@ -57,7 +57,7 @@ run() { # SUITE command...
     printf 'FAIL  %-20s %4ss  (see %s)\n' "$name" $((SECONDS - t0)) "$LOG"
     # CI keeps no files: show which checks failed and how the suite ended
     local part; part="$(tail -c +$((from + 1)) "$LOG")"
-    { grep -E '^(FAIL|not ok)' <<<"$part" | head -20; echo "... last lines:"; tail -n 12 <<<"$part"; } | sed 's/^/    | /'
+    { grep -E '^(FAIL|not ok)' <<<"$part" | head -20; echo "... last lines:"; tail -n 45 <<<"$part"; } | sed 's/^/    | /'
     return 1
   fi
 }

@@ -15,7 +15,11 @@ BIN="${BIN:-target/release/fluxvm-agent}"; FX="${FLUXCTL:-target/release/fluxctl
 [[ -x "$BIN" && -x "$FX" ]] || { echo "build $BIN and $FX first (or set BIN, FLUXCTL)" >&2; exit 2; }
 D="$(mktemp -d)"; PORT=$((20000 + RANDOM % 20000)); URL="http://127.0.0.1:$PORT"; LP=$((PORT + 1)); fails=0; PIDS=()
 trap 'for p in ${PIDS[@]+"${PIDS[@]}"}; do kill "$p" 2>/dev/null; done; rm -rf "$D"' EXIT
-ok() { echo "ok   $1"; }; bad() { echo "FAIL $1"; fails=$((fails + 1)); }
+ok() { echo "ok   $1"; }; bad() { echo "FAIL $1"; fails=$((fails + 1)); dump; }
+# CI keeps no files: show what the client and central said, once, the first time a check fails
+dump() { [[ -n "${DUMPED:-}" ]] && return; DUMPED=1; local f; for f in stdio.err ref.err pf.log sim.log; do [[ -s "$D/$f" ]] && { echo "--- $f"; tail -n 15 "$D/$f"; }; done; echo "--- central.log"; tail -n 15 "$D/central.log"; echo "--- env"; env | grep -i proxy; echo "--- fluxctl"; ls -l "$FX"; "$FX" --version 2>&1 | head -2; ldd "$FX" 2>&1 | grep -i "not found"
+  echo "--- probe: tunnel-stdio, no token"; (printf x; sleep 1) | timeout 20 "$FX" fleet --central "$URL" --token "" tunnel-stdio "${VM:-sim-mac/none}" 22 2>&1 | head -c 600; echo "rc=${PIPESTATUS[1]}"
+  echo "--- probe: tunnel-stdio, operator"; (printf x; sleep 1) | timeout 20 "$FX" fleet --central "$URL" --token adm tunnel-stdio "${VM:-sim-mac/none}" 80 2>&1 | head -c 600; echo "rc=${PIPESTATUS[1]}"; }
 check() { local n="$1"; shift; if "$@"; then ok "$n"; else bad "$n"; fi; }
 adm() { curl -s -H 'authorization: Bearer adm' -H 'content-type: application/json' "$@"; }
 as() { local k="$1"; shift; curl -s -H "authorization: Bearer $k" -H 'content-type: application/json' "$@"; }
