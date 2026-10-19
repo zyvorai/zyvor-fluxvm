@@ -67,43 +67,60 @@ for _ in $(seq 1 20); do [[ -S "$SVC" ]] && break; sleep 0.5; done
 
 # Guest-side AF_VSOCK via perl: stock Debian 13 arm64 python3 dies with SIGILL on M4
 # (docs/macos.md), which showed up as AF_VSOCK BrokenPipe in the 0.4.10 E2E.
-# sockaddr_vm: family=AF_VSOCK(40), reserved, port, cid, flags, zero[3].
-vs() {
-  local port="$1" send="$2"
-  # send=0: connect and read only; send=1: write stdin then shutdown write and read.
-  sshc perl -e '
-    use strict; use warnings;
-    use Socket qw(SOCK_STREAM);
-    my ($port, $send) = @ARGV;
-    my $AF_VSOCK = 40;
-    my $cid = 2; # VMADDR_CID_HOST
-    socket(my $s, $AF_VSOCK, SOCK_STREAM, 0) or die "socket: $!";
-    my $addr = pack("S S L L C a3", $AF_VSOCK, 0, $port, $cid, 0, "");
-    {
-      # alarm so a hung connect fails the check instead of blocking the suite
-      local $SIG{ALRM} = sub { die "vsock timeout\n" };
-      alarm 8;
-      connect($s, $addr) or die "connect: $!";
-      alarm 0;
-    }
-    if ($send) {
-      local $/; my $buf = <STDIN>;
-      print $s $buf if defined $buf;
-      shutdown($s, 1); # SHUT_WR
-    }
-    local $/; my $out = <$s>;
-    print $out if defined $out;
-  ' "$port" "$send"
+# Ship the helper as base64 so ssh's login shell cannot mangle a heredoc / -e payload.
+B64="$(python3 - <<'PY'
+import base64
+src = b"""#!/usr/bin/perl
+use strict; use warnings;
+use Socket qw(SOCK_STREAM);
+# mode: 0 = read only; 1 = write stdin and close (no read); 2 = write stdin then read reply
+my ($port, $mode) = @ARGV;
+my $AF_VSOCK = 40;
+my $cid = 2;
+socket(my $s, $AF_VSOCK, SOCK_STREAM, 0) or die "socket: $!";
+# syswrite: print+shutdown leaves Perl's stdio buffer unflushed and the host sees EOF with no bytes.
+my $addr = pack("S S L L C a3", $AF_VSOCK, 0, $port+0, $cid, 0, "");
+{ local $SIG{ALRM} = sub { die "vsock timeout\\n" }; alarm 8; connect($s, $addr) or die "connect: $!"; alarm 0; }
+if ($mode+0 == 1) {
+  # Telemetry: write and close so the host sees EOF; never block on a reply.
+  local $/; my $buf = <STDIN>;
+  syswrite($s, $buf) if defined $buf && length $buf;
+  close $s;
+  exit 0;
 }
+if ($mode+0 == 2) {
+  local $/; my $buf = <STDIN>;
+  syswrite($s, $buf) if defined $buf && length $buf;
+  # Half-close write so the host echo service can reply after recv.
+  shutdown($s, 1);
+}
+{ local $SIG{ALRM} = sub { die "vsock timeout\\n" }; alarm 8; local $/; my $out = <$s>; alarm 0; print $out if defined $out; }
+"""
+print(base64.b64encode(src).decode())
+PY
+)"
+sshc "echo $B64 | base64 -d > /tmp/fluxvm-vsock.pl && chmod 755 /tmp/fluxvm-vsock.pl" \
+  || bad "could not install vsock helper in the guest"
+# mode 0 = read only; 1 = write-only (telemetry); 2 = write then read (relay).
+vs() { sshc "/tmp/fluxvm-vsock.pl $1 $2"; }
 META="$(vs 5001 0 </dev/null)"
 python3 -c 'import json,sys; d=json.loads(sys.argv[1]); assert d["name"]=="vsock" and d["vcpus"]==2 and d["memory_mib"]==2048' "$META" \
   && ok "metadata built-in: $META" || bad "metadata gave '$META'"
-echo "boot ok" | vs 5002 1 >/dev/null || true
-sleep 1
-LOG="$(find "$T/state" -name telemetry.log -print -quit)"
-[[ -n "$LOG" ]] && grep -q "boot ok" "$LOG" && ok "telemetry built-in wrote $LOG" || bad "no telemetry line (log '${LOG:-none}')"
-ECHO="$(echo hello | vs 5003 1)"
-[[ "$ECHO" == echo:hello* ]] && ok "allow-listed port relayed to the host socket" || bad "relay gave '$ECHO'"
+echo "boot ok" | vs 5002 1 >/dev/null || bad "telemetry vsock write failed"
+LOG=""; for _ in $(seq 1 20); do
+  LOG="$(find "$T/state" -name telemetry.log -print -quit)"
+  [[ -n "$LOG" ]] && grep -q "boot ok" "$LOG" && break
+  sleep 0.5
+done
+[[ -n "$LOG" ]] && grep -q "boot ok" "$LOG" && ok "telemetry built-in wrote $LOG" \
+  || bad "no telemetry line (log '${LOG:-none}' content='$( [[ -n "$LOG" ]] && cat "$LOG" | tr '\n' ';' )')"
+# Capture helper errors: a non-zero exit under set -e used to skip the FAIL line.
+set +e
+ECHO="$(echo hello | vs 5003 2 2>"$T/relay.err")"
+RC=$?
+set -e
+[[ $RC -eq 0 && "$ECHO" == echo:hello* ]] && ok "allow-listed port relayed to the host socket" \
+  || bad "relay gave '$ECHO' (rc=$RC err='$(tr '\n' ';' <"$T/relay.err" 2>/dev/null)')"
 if vs 5999 0 </dev/null >/dev/null 2>&1; then bad "port 5999 is not allow-listed but accepted a connection"; else ok "unlisted port stays closed"; fi
 curl -fs -X DELETE "$V" >/dev/null || true
 echo "vsock services: PASS"
