@@ -50,10 +50,16 @@ need_agent() { CARGO_INCREMENTAL=0 cargo build --release -p fluxvm-agent >>"$LOG
 
 run() { # SUITE command...
   local name="$1"; shift
-  local t0=$SECONDS
-  echo "=== $name" >>"$LOG"
+  local t0=$SECONDS from
+  echo "=== $name" >>"$LOG"; from=$(wc -c <"$LOG")
   if "$@" >>"$LOG" 2>&1; then printf 'ok    %-20s %4ss\n' "$name" $((SECONDS - t0)); return 0
-  else printf 'FAIL  %-20s %4ss  (see %s)\n' "$name" $((SECONDS - t0)) "$LOG"; return 1; fi
+  else
+    printf 'FAIL  %-20s %4ss  (see %s)\n' "$name" $((SECONDS - t0)) "$LOG"
+    # CI keeps no files: show which checks failed and how the suite ended
+    local part; part="$(tail -c +$((from + 1)) "$LOG")"
+    { grep -E '^(FAIL|not ok)' <<<"$part" | head -20; echo "... last lines:"; tail -n 12 <<<"$part"; } | sed 's/^/    | /'
+    return 1
+  fi
 }
 static() {
   local rc=0
