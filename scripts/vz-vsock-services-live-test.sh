@@ -65,7 +65,36 @@ while True:
 for _ in $(seq 1 20); do [[ -S "$SVC" ]] && break; sleep 0.5; done
 [[ -S "$SVC" ]] || bad "host service socket $SVC did not appear"
 
-vs() { sshc "python3 -c 'import socket,sys; s=socket.socket(socket.AF_VSOCK); s.settimeout(8); s.connect((2,$1)); s.sendall(sys.stdin.buffer.read() if $2 else b\"\"); s.shutdown(socket.SHUT_WR) if $2 else None; sys.stdout.buffer.write(s.recv(4096))'" ; }
+# Guest-side AF_VSOCK via perl: stock Debian 13 arm64 python3 dies with SIGILL on M4
+# (docs/macos.md), which showed up as AF_VSOCK BrokenPipe in the 0.4.10 E2E.
+# sockaddr_vm: family=AF_VSOCK(40), reserved, port, cid, flags, zero[3].
+vs() {
+  local port="$1" send="$2"
+  # send=0: connect and read only; send=1: write stdin then shutdown write and read.
+  sshc perl -e '
+    use strict; use warnings;
+    use Socket qw(SOCK_STREAM);
+    my ($port, $send) = @ARGV;
+    my $AF_VSOCK = 40;
+    my $cid = 2; # VMADDR_CID_HOST
+    socket(my $s, $AF_VSOCK, SOCK_STREAM, 0) or die "socket: $!";
+    my $addr = pack("S S L L C a3", $AF_VSOCK, 0, $port, $cid, 0, "");
+    {
+      # alarm so a hung connect fails the check instead of blocking the suite
+      local $SIG{ALRM} = sub { die "vsock timeout\n" };
+      alarm 8;
+      connect($s, $addr) or die "connect: $!";
+      alarm 0;
+    }
+    if ($send) {
+      local $/; my $buf = <STDIN>;
+      print $s $buf if defined $buf;
+      shutdown($s, 1); # SHUT_WR
+    }
+    local $/; my $out = <$s>;
+    print $out if defined $out;
+  ' "$port" "$send"
+}
 META="$(vs 5001 0 </dev/null)"
 python3 -c 'import json,sys; d=json.loads(sys.argv[1]); assert d["name"]=="vsock" and d["vcpus"]==2 and d["memory_mib"]==2048' "$META" \
   && ok "metadata built-in: $META" || bad "metadata gave '$META'"
