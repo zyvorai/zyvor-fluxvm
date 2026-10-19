@@ -933,9 +933,6 @@ pub enum AppleGuest {
     Linux,
     /// macOS installed from an Apple IPSW restore image (needs an explicit `install` before first boot).
     Macos,
-    /// ARM64 Windows 11 booted with EFI. The installer ISO goes in `media` and the virtio-win driver ISO in
-    /// `extra_disks` (USB); there is no TPM, so the installer needs its TPM/Secure Boot check bypassed.
-    Windows,
 }
 
 /// First-boot material for a macOS guest. The guest runs `firstboot.sh` from the share (once, as an admin, or from a
@@ -1038,7 +1035,7 @@ pub struct AppleVmnetSpec {
 pub struct AppleSpec {
     #[serde(default)]
     pub guest_os: AppleGuest,
-    /// macOS guests: the IPSW restore image. Linux and Windows guests: an optional installer ISO attached read-only.
+    /// macOS guests: the IPSW restore image. Linux guests: an optional installer ISO attached read-only.
     #[serde(default)]
     pub media: Option<PathBuf>,
     /// macOS guests: install from the IPSW (`media`, or `image` when `media` is unset) onto a fresh sparse disk of

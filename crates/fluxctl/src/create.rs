@@ -13,7 +13,6 @@ use std::path::PathBuf;
 pub enum GuestOs {
     Linux,
     Macos,
-    Windows,
 }
 
 #[derive(Args, Debug, Default)]
@@ -36,13 +35,6 @@ pub struct CreateArgs {
     /// Guest OS on the `vz` backend (`apple.guest_os`).
     #[arg(long, value_enum)]
     pub guest: Option<GuestOs>,
-    /// Installer ISO attached read-only (`apple.media`); for `--guest windows`, the Windows 11 ARM64 ISO.
-    #[arg(long)]
-    pub media: Option<PathBuf>,
-    /// Windows guests: the virtio-win ISO, attached read-only on USB so the installer can load the disk and network
-    /// drivers (`apple.extra_disks`).
-    #[arg(long)]
-    pub virtio_win: Option<PathBuf>,
     /// Open the guest's console window.
     #[arg(long)]
     pub window: bool,
@@ -134,11 +126,6 @@ pub fn create_body(a: &CreateArgs) -> Result<Value> {
     }
     if let Some(i) = &a.image {
         obj.insert("image".into(), json!(i));
-    } else if matches!(a.guest, Some(GuestOs::Windows))
-        && let Some(m) = &a.media
-    {
-        // A Windows install boots from a blank disk, so there is no base image; the ISO stands in for it.
-        obj.insert("image".into(), json!(m));
     }
     if a.spec.is_none() && (!obj.contains_key("name") || !obj.contains_key("image")) {
         bail!("without --spec both --name and --image are required");
@@ -160,17 +147,7 @@ pub fn create_body(a: &CreateArgs) -> Result<Value> {
             json!(match g {
                 GuestOs::Linux => "linux",
                 GuestOs::Macos => "macos",
-                GuestOs::Windows => "windows",
             }),
-        );
-    }
-    if let Some(m) = &a.media {
-        apple.insert("media".into(), json!(m));
-    }
-    if let Some(v) = &a.virtio_win {
-        apple.insert(
-            "extra_disks".into(),
-            json!([{ "name": "virtio-win", "path": v, "read_only": true, "controller": "usb" }]),
         );
     }
     if let Some(d) = &a.display {
@@ -282,23 +259,6 @@ mod tests {
         assert_eq!(b["apple"]["install"], true);
         assert_eq!(b["apple"]["audio_output"], false);
         assert!(b["apple"].get("rosetta").is_none());
-    }
-
-    #[test]
-    fn windows_install_needs_no_image_and_attaches_the_driver_iso() {
-        let mut a = CreateArgs {
-            name: Some("win".into()),
-            ..Default::default()
-        };
-        a.guest = Some(GuestOs::Windows);
-        a.media = Some("/iso/Win11_ARM64.iso".into());
-        a.virtio_win = Some("/iso/virtio-win.iso".into());
-        let b = create_body(&a).unwrap();
-        assert_eq!(b["image"], "/iso/Win11_ARM64.iso");
-        assert_eq!(b["apple"]["guest_os"], "windows");
-        assert_eq!(b["apple"]["media"], "/iso/Win11_ARM64.iso");
-        assert_eq!(b["apple"]["extra_disks"][0]["controller"], "usb");
-        assert_eq!(b["apple"]["extra_disks"][0]["read_only"], true);
     }
 
     #[test]

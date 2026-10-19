@@ -2861,20 +2861,6 @@ impl VmManager {
                     nbd_export: None,
                     nbd_pid: None,
                 }
-            } else if req.backend == BackendKind::Vz
-                && fluxvm_apple::windows::is_windows_install(&req)
-            {
-                // `image` is only the installer ISO here: Windows installs onto a blank disk instead of a clone.
-                if req.storage != StorageBackend::Default {
-                    bail!("a Windows install needs the default storage backend");
-                }
-                fluxvm_apple::windows::create_install_disk(&disk, req.disk_size_gib)?;
-                fluxvm_image::storage::ProvisionedDisk {
-                    disk: disk.clone(),
-                    lvm_lv: None,
-                    nbd_export: None,
-                    nbd_pid: None,
-                }
             } else {
                 fluxvm_image::storage::provision(
                     &self.cfg,

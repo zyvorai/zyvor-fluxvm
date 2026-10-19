@@ -26,7 +26,6 @@ pub mod usernet_policy;
 pub use usernet::usernet_forward_addrs;
 pub mod vz27;
 pub mod vznet;
-pub mod windows;
 
 pub use attest::{Attestation, verify_attestation, verify_attestation_hex};
 pub use capability::{
