@@ -16,8 +16,10 @@ fetched 6 MiB (in 1 MiB ranges, from a Range-capable server) before the guest re
 full read caused no new requests. Offline `rebase` and `resize` against a VZ guest's overlay were verified on an M4
 (`scripts/vz-blockd-rebase-resize-live-test.sh`). Live rebase/resize/branch while the overlay is open take an exclusive
 `flock` and refuse with "in use" (shared flock held by `serve` / `open`). Not exercised on hardware: structured replies
-against VZ (not confirmed either way), and an encrypted overlay's `branch`. An overlay that has children is frozen and is
-served read-only.
+against VZ (not confirmed either way). An encrypted overlay's `branch` was verified on an M4
+(`scripts/vz-blockd-encrypted-branch-live-test.sh`): a branch while served was refused, a wrong key was refused, the encrypted
+child read the parent's marker and took its own writes, neither file held a marker in clear, the base was unchanged and the
+frozen parent had none of the child's data. An overlay that has children is frozen and is served read-only.
 
 ## Overlays
 
