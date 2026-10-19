@@ -15,8 +15,9 @@ overlay files held the marker in clear and the encrypted overlay file held none;
 fetched 6 MiB (in 1 MiB ranges, from a Range-capable server) before the guest read the disk, the rest on demand, and a second
 full read caused no new requests. Offline `rebase` and `resize` against a VZ guest's overlay were verified on an M4
 (`scripts/vz-blockd-rebase-resize-live-test.sh`). Live rebase/resize/branch while the overlay is open take an exclusive
-`flock` and refuse with "in use" (shared flock held by `serve` / `open`). Not exercised on hardware: structured replies
-against VZ (not confirmed either way). An encrypted overlay's `branch` was verified on an M4
+`flock` and refuse with "in use" (shared flock held by `serve` / `open`). Virtualization.framework's NBD client does
+**not** negotiate structured replies (server log on an M4: `structured replies: false`, `scripts/vz-blockd-structured-reply-live-test.sh`),
+so VZ always gets simple replies; the structured path is covered only by the in-tree client. An encrypted overlay's `branch` was verified on an M4
 (`scripts/vz-blockd-encrypted-branch-live-test.sh`): a branch while served was refused, a wrong key was refused, the encrypted
 child read the parent's marker and took its own writes, neither file held a marker in clear, the base was unchanged and the
 frozen parent had none of the child's data. An overlay that has children is frozen and is served read-only.
