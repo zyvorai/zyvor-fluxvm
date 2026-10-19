@@ -175,6 +175,7 @@ impl Server {
             Some(e) => e,
             None => return Ok(()),
         };
+        eprintln!("fluxvm-blockd: client negotiated (structured replies: {structured})");
         transmit(s, export, structured).await
     }
 
