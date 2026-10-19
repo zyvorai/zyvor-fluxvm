@@ -5316,6 +5316,23 @@ async fn main() -> Result<()> {
         return infer::run(&r, command).await;
     }
 
+    if let Command::Fleet {
+        central,
+        token,
+        command,
+    } = cli.command
+    {
+        // Talks to central over HTTP only: building the local manager would create run/state directories it never uses,
+        // and fails for any user who cannot write them (a CI runner, a developer laptop).
+        return fleet_cli::run(
+            &central,
+            token.as_deref(),
+            command,
+            fleet_cli::Out::new(format, output_explicit),
+        )
+        .await;
+    }
+
     let m = manager(cfg.clone()).await?;
 
     match cli.command {
@@ -7167,19 +7184,7 @@ async fn main() -> Result<()> {
                  or recreate from an updated JSON spec"
             );
         }
-        Command::Fleet {
-            central,
-            token,
-            command,
-        } => {
-            fleet_cli::run(
-                &central,
-                token.as_deref(),
-                command,
-                fleet_cli::Out::new(format, output_explicit),
-            )
-            .await?;
-        }
+        Command::Fleet { .. } => unreachable!("handled before the local manager is built"),
     }
     Ok(())
 }
