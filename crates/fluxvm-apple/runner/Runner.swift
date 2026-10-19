@@ -1001,7 +1001,11 @@ final class Runner: NSObject, VZVirtualMachineDelegate, NSWindowDelegate {
                 sem.signal()
             case "usb-attach":
                 guard let path = o["path"] as? String else { response = ["ok": false, "error": "usb-attach needs path"]; sem.signal(); break }
-                self.attachUSBMassStorage(path: path, readOnly: (o["read_only"] as? Bool) ?? false, bus: (o["bus"] as? Int) ?? 0) { response = $0; sem.signal() }
+                // JSONSerialization boxes numbers as NSNumber; `as? Int` fails and used to force every
+                // hot-attach onto bus 0 (vz-usb-buses live test: guest empty / wrong bus).
+                let readOnly = (o["read_only"] as? Bool) ?? ((o["read_only"] as? NSNumber)?.boolValue ?? false)
+                let bus = (o["bus"] as? Int) ?? (o["bus"] as? NSNumber)?.intValue ?? 0
+                self.attachUSBMassStorage(path: path, readOnly: readOnly, bus: bus) { response = $0; sem.signal() }
             case "usb-detach":
                 guard let id = o["uuid"] as? String else { response = ["ok": false, "error": "usb-detach needs uuid"]; sem.signal(); break }
                 self.detachUSB(uuid: id) { response = $0; sem.signal() }

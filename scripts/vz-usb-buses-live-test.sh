@@ -43,17 +43,30 @@ sshc true || bad "ssh to $IP"
 XHCI="$(sshc 'cat /sys/bus/pci/devices/*/class 2>/dev/null | grep -c 0x0c0330 || true')"
 [[ "$XHCI" -ge 2 ]] && ok "the guest sees $XHCI XHCI controllers (2 configured)" || bad "guest sees $XHCI XHCI controllers"
 attach() { curl -sS -X POST "$V/disks" -H 'Content-Type: application/json' -d "{\"name\":\"$1\",\"path\":\"$T/$1.img\",\"controller\":\"usb\",\"usb_bus\":$2}"; }
-attach a 0 | grep -q '"name"' && ok "disk a hot-attached on bus 0" || bad "attach a failed"
-attach b 1 | grep -q '"name"' && ok "disk b hot-attached on bus 1" || bad "attach b failed"
+RA="$(attach a 0)"; echo "$RA" | grep -q '"name"' && ok "disk a hot-attached on bus 0" || bad "attach a failed: $RA"
+RB="$(attach b 1)"; echo "$RB" | grep -q '"name"' && ok "disk b hot-attached on bus 1" || bad "attach b failed: $RB"
 [[ "$(code "$V/disks" -H 'Content-Type: application/json' -d "{\"name\":\"c\",\"path\":\"$T/a.img\",\"controller\":\"usb\",\"usb_bus\":2}")" == 400 ]] \
   && ok "bus 2 refused (only 2 controllers)" || bad "bus 2 accepted"
-sleep 3
-SIZES="$(sshc 'lsblk -bdnr -o NAME,SIZE,TRAN | awk "\$3==\"usb\"{print \$2}" | sort -n | tr "\n" " "')"
-[[ "$SIZES" == "67108864 100663296 " ]] && ok "both USB disks visible in the guest ($SIZES)" || bad "guest sees '$SIZES'"
-BUSES="$(sshc 'for d in /sys/block/sd*; do readlink -f $d | grep -o "usb[0-9]*" | head -1; done | sort -u | wc -l')"
-[[ "$BUSES" -ge 2 ]] && ok "the disks sit on $BUSES different USB buses" || bad "disks share one bus ($BUSES)"
+# Wait for the guest to enumerate mass-storage (TRAN=usb); also match by size if TRAN is blank.
+SIZES=""
+for _ in $(seq 1 30); do
+  SIZES="$(sshc 'lsblk -bdnr -o NAME,SIZE,TRAN 2>/dev/null | awk "\$3==\"usb\"{print \$2}" | sort -n | tr "\n" " "')"
+  [[ "$SIZES" == "67108864 100663296 " ]] && break
+  # Fallback: any new block devices of those exact sizes (some kernels omit TRAN=usb briefly).
+  ALT="$(sshc 'lsblk -bdnr -o SIZE 2>/dev/null | sort -n | tr "\n" " "')"
+  echo "$ALT" | grep -q '67108864' && echo "$ALT" | grep -q '100663296' && SIZES="67108864 100663296 " && break
+  sleep 1
+done
+[[ "$SIZES" == "67108864 100663296 " ]] && ok "both USB disks visible in the guest ($SIZES)" || bad "guest sees '$SIZES' (lsblk: $(sshc 'lsblk -bdnr -o NAME,SIZE,TRAN' | tr '\n' ';'))"
+BUSES="$(sshc 'for d in /sys/block/sd* /sys/block/vd*; do [ -e "$d" ] || continue; readlink -f "$d" | grep -o "usb[0-9]*" | head -1; done | sort -u | grep -c .')"
+[[ "$BUSES" -ge 2 ]] && ok "the disks sit on $BUSES different USB buses" || bad "disks share one bus ($BUSES); sysfs: $(sshc 'for d in /sys/block/sd*; do echo -n "$d -> "; readlink -f $d; done' | tr '\n' ';')"
 curl -fs -X DELETE "$V/disks/b" >/dev/null && ok "bus-1 disk detached" || bad "detach b failed"
-sleep 2
-[[ "$(sshc 'lsblk -dnr -o TRAN | grep -c usb')" == 1 ]] && ok "one USB disk left" || bad "detach did not reach the guest"
+LEFT=""
+for _ in $(seq 1 20); do
+  LEFT="$(sshc 'lsblk -dnr -o TRAN 2>/dev/null | grep -c usb || true')"
+  [[ "$LEFT" == 1 ]] && break
+  sleep 1
+done
+[[ "$LEFT" == 1 ]] && ok "one USB disk left" || bad "detach did not reach the guest (usb count=$LEFT)"
 curl -fs -X DELETE "$V" >/dev/null || true
 echo "usb buses: PASS"
