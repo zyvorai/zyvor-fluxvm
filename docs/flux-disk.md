@@ -13,8 +13,10 @@ HTTP base (`sha256=`). All three read back the base byte-for-byte (the guest's `
 900 KB marker written with `O_DIRECT` and `fsync` read back identical after `drop_caches` on all three; the plain and lazy
 overlay files held the marker in clear and the encrypted overlay file held none; the base file was unchanged. The lazy export
 fetched 6 MiB (in 1 MiB ranges, from a Range-capable server) before the guest read the disk, the rest on demand, and a second
-full read caused no new requests. Not exercised on hardware: structured replies against VZ (not confirmed either way), rebase
-and resize under a running guest, and an encrypted overlay's `branch`. An overlay that has children is frozen and is served
+full read caused no new requests. Offline `rebase` and `resize` against a VZ guest's overlay were verified on an M4
+(`scripts/vz-blockd-rebase-resize-live-test.sh`). Live rebase/resize while the overlay is being served currently return
+success without a file lock (marker survived once); do them offline. Not exercised on hardware: structured replies against
+VZ (not confirmed either way), and an encrypted overlay's `branch`. An overlay that has children is frozen and is served
 read-only.
 
 ## Overlays
@@ -51,8 +53,9 @@ fluxvm-blockd resize --overlay vm1.ovl --size 40G              # offline grow; K
   new parent has the same content). The parent path is stored relative to the overlay when possible; `--sha256` sets the expected
   hash of a lazy (URL) parent.
 - **resize.** Offline grow only. In place when the reserved bitmap space suffices, otherwise the file is rewritten (allocated
-  blocks copied, zero blocks skipped) to a temporary file and renamed over the original, upgrading the header to version 2. Never
-  run it on an overlay that is being served or open elsewhere: nothing stops you.
+  blocks copied, zero blocks skipped) to a temporary file and renamed over the original, upgrading the header to version 2. Do
+  not run it on an overlay that is being served or open elsewhere: nothing stops you today (a live call returned 0 on hardware
+  once with the guest marker intact; still treat the result as undefined).
 
 ## Encryption and keys
 
