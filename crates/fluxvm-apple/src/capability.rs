@@ -730,44 +730,6 @@ pub fn validate_request(req: &CreateVmRequest) -> Result<()> {
     validate_request_with_host(req, host.as_ref())
 }
 
-/// A Windows guest boots EFI from a virtio-blk disk with an installer ISO on USB and has none of the Linux guest's
-/// cloud-init or agent plumbing, so everything that relies on those is refused up front.
-fn validate_windows(req: &CreateVmRequest, apple: &fluxvm_core::model::AppleSpec) -> Result<()> {
-    for (on, what) in [
-        (apple.self_control, "apple.self_control"),
-        (apple.host_gpu, "apple.host_gpu"),
-        (apple.rosetta, "apple.rosetta"),
-        (apple.clipboard, "apple.clipboard"),
-        (apple.custom_virtio, "apple.custom_virtio"),
-        (
-            apple.install,
-            "apple.install (that is the macOS IPSW install)",
-        ),
-        (!apple.networks.is_empty(), "apple.networks"),
-        (apple.nat_mtu.is_some(), "apple.nat_mtu"),
-        (apple.usernet.is_some(), "apple.usernet"),
-        (apple.init_config.is_some(), "apple.init_config"),
-        (apple.firstboot.is_some(), "apple.firstboot"),
-        (!apple.egress_allow.is_empty(), "apple.egress_allow"),
-        (!apple.vsock_services.is_empty(), "apple.vsock_services"),
-        (
-            req.agent.as_ref().is_some_and(|a| a.enabled),
-            "agent.enabled",
-        ),
-        (
-            req.kernel.is_some() || req.initrd.is_some() || req.kernel_args.is_some(),
-            "direct kernel boot",
-        ),
-    ] {
-        if on {
-            bail!(
-                "{what} is not supported for Windows guests (v1 boots the installer; there is no in-guest agent or cloud-init)"
-            );
-        }
-    }
-    crate::windows::validate(req)
-}
-
 fn validate_static(req: &CreateVmRequest) -> Result<()> {
     macro_rules! reject {
         ($cond:expr, $msg:expr) => {
@@ -775,11 +737,6 @@ fn validate_static(req: &CreateVmRequest) -> Result<()> {
                 bail!("the vz backend does not support {}", $msg);
             }
         };
-    }
-    if let Some(apple) = &req.apple
-        && matches!(apple.guest_os, fluxvm_core::model::AppleGuest::Windows)
-    {
-        validate_windows(req, apple)?;
     }
     if let Some(apple) = &req.apple
         && apple.macos_vsock
@@ -1476,26 +1433,6 @@ mod tests {
             r#""apple":{"vsock_services":[{"port":5000,"builtin":"shell"}]}"#,
             r#""apple":{"vsock_services":[{"port":5000,"socket":"a","builtin":"metadata"}]}"#,
             r#""apple":{"vsock_services":[{"port":5000,"socket":"a"},{"port":5000,"socket":"b"}]}"#,
-        ] {
-            assert!(validate_request(&req(bad)).is_err(), "{bad}");
-        }
-    }
-
-    #[test]
-    fn windows_guest_boots_but_refuses_linux_plumbing() {
-        assert!(validate_request(&req(r#""apple":{"guest_os":"windows"}"#)).is_ok());
-        assert!(
-            validate_request(&req(
-                r#""apple":{"guest_os":"windows","media":"/tmp/win.iso","extra_disks":[{"path":"/tmp/virtio-win.iso","read_only":true,"controller":"usb"}]}"#
-            ))
-            .is_ok()
-        );
-        for bad in [
-            r#""apple":{"guest_os":"windows","self_control":true}"#,
-            r#""apple":{"guest_os":"windows","rosetta":true}"#,
-            r#""apple":{"guest_os":"windows","install":true}"#,
-            r#""apple":{"guest_os":"windows","macos_vsock":true}"#,
-            r#""apple":{"guest_os":"windows","vsock_services":[{"port":5000,"socket":"a"}]}"#,
         ] {
             assert!(validate_request(&req(bad)).is_err(), "{bad}");
         }

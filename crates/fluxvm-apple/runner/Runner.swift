@@ -35,7 +35,7 @@ struct Config: Decodable {
     let workspace: String
     let cpus: Int
     let memory_mib: UInt64
-    let guest_os: String            // "linux" | "macos" | "windows"
+    let guest_os: String            // "linux" | "macos"
     let disk: String
     let seed: String?
     let media: String?
@@ -632,8 +632,8 @@ final class Runner: NSObject, VZVirtualMachineDelegate, NSWindowDelegate {
         var storage: [VZStorageDeviceConfiguration] = [
             VZVirtioBlockDeviceConfiguration(attachment: try self.rootStorageAttachment())
         ]
-        if cfg.guest_os == "linux" || cfg.guest_os == "windows" {
-            if cfg.guest_os == "linux", let seed = cfg.seed, FileManager.default.fileExists(atPath: seed) {
+        if cfg.guest_os == "linux" {
+            if let seed = cfg.seed, FileManager.default.fileExists(atPath: seed) {
                 storage.append(VZVirtioBlockDeviceConfiguration(attachment: try self.imageAttachment(URL(fileURLWithPath: seed), readOnly: true)))
             }
             if let media = cfg.media, !media.isEmpty {

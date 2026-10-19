@@ -183,7 +183,6 @@ impl RunnerConfig {
             guest_os: match apple.guest_os {
                 AppleGuest::Linux => "linux",
                 AppleGuest::Macos => "macos",
-                AppleGuest::Windows => "windows",
             },
             disk: ctx.disk.clone(),
             seed: ctx.seed_disk.clone(),
