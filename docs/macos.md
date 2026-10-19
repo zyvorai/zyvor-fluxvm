@@ -858,6 +858,8 @@ Two things seen in the same runs that matter when you write guest-side tooling o
   cards now get a static MAC-matched entry in the seed's `network-config` (`CloudInitSpec.static_nics`), which sorts before
   the DHCP match: `wait-online` takes 1.4 s and the address is reported about 7 s after create (was ≥ 120 s).
 
+Windows 11 ARM guests (experimental, boot and install only) are covered in [windows-vz.md](windows-vz.md).
+
 ## Honest limits
 
 - This is a preview-quality backend. Linux ARM64 guests are what the live tests boot; macOS guests were booted by hand and cloned
