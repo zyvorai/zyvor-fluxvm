@@ -77,7 +77,7 @@ Run 2026-10-18 on Ubuntu 26.04 (212.8.248.187; 80.79.5.173 for the two-host run)
 | SDKs against a real daemon (`scripts/e2e/sdk-live.sh`; Python on the host, Go through a tunnel) | ok | n/a (procbox is Linux-only) |
 | procbox (114 tests) | as `sus`: 11 isolate tests skip (AppArmor blocks unprivileged user namespaces); as root: all run, 0 skipped | n/a |
 | Guest agent over vsock: `test-lifecycle` 7/7, `test-guest-agent-auth` 5/5, `test-boot-smoke` 7/7, `test-warm-pool` 13/13 | ok | n/a |
-| vz live tests, each on its own daemon and temp state: `macos-live-test` 54, `vz-devices` 26, `vz-usb-buses` 9, `vz-usernet` 11, `vz-vsock-services` 7, `vz-sandbox-volume` 6, `vz-rewind` 11, `vz-asif-overlay` 3, `macos-vz27-complete` (fluxvm-apple build, tests, clippy `-D warnings`, EFI Secure Boot on and off) | n/a | all ok |
+| vz live tests, each on its own daemon and temp state: `macos-live-test` 54, `vz-devices` 26, `vz-usb-buses` 9, `vz-usernet` 11, `vz-vsock-services` 7, `vz-sandbox-volume` 13, `vz-rewind` 11, `vz-asif-overlay` 3, `macos-vz27-complete` (fluxvm-apple build, tests, clippy `-D warnings`, EFI Secure Boot on and off) | n/a | all ok |
 
 ### Bugs found and fixed
 

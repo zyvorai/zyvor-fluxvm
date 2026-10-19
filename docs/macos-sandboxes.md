@@ -85,7 +85,7 @@ For many sandboxes on one Mac (sizes such as `"profile": "tiny"`, admission on m
   large to scan). Limits: it needs an **unlocked login session** (it uses snapshot restore), the VM restarts its processes' memory
   state back to the snapshot (anything the command did in memory is discarded too), and only file changes are captured: network
   calls the command made really happened (the changeset's `side_effects` says whether the sandbox could reach out).
-- **Volumes** (`volumes: [{name, guest_path, read_only?}]`) are named host directories passed as virtiofs shares and mounted through `/etc/fstab` by cloud-init, so the image needs cloud-init. A sandbox with volumes always cold-boots. Container sandboxes also take `volumes`; see [oci-sandboxes.md](oci-sandboxes.md). Not yet on `vz` for VM sandboxes: GPUs. Verified on an M4 with `scripts/vz-sandbox-volume-live-test.sh`: the guest sees the mount, its write lands in the host volume directory, the file survives deleting the sandbox, and a second sandbox with the same volume reads it. `read_only` volumes and the two-volume case are not live-tested.
+- **Volumes** (`volumes: [{name, guest_path, read_only?}]`) are named host directories passed as virtiofs shares and mounted through `/etc/fstab` by cloud-init, so the image needs cloud-init. A sandbox with volumes always cold-boots. Container sandboxes also take `volumes`; see [oci-sandboxes.md](oci-sandboxes.md). Not yet on `vz` for VM sandboxes: GPUs. Verified on an M4 with `scripts/vz-sandbox-volume-live-test.sh`: RW persistence across delete, two volumes at once, and a `read_only` volume the guest can read but not write.
 
 ## Volumes: files that outlive a sandbox
 
