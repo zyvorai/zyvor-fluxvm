@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: Apache-2.0
 # Live test of `fluxvm-blockd` rebase and resize against a `vz` guest's overlay extra disk:
-# offline grow + rebase keep guest data; live rebase/resize while blockd is serving are probed and must not
-# silently corrupt the overlay (clean refusal or documented outcome).
+# offline grow + rebase keep guest data; live rebase/resize while blockd is serving must be refused
+# (shared flock held by the server) without disturbing the guest's data.
 #   scripts/vz-blockd-rebase-resize-live-test.sh [image]
 # Needs Apple silicon macOS 14+, Xcode CLT, Rust and python3. Defaults to `debian-13`.
 set -euo pipefail
@@ -85,30 +85,21 @@ GOT="$(sshc "sudo dd if=/dev/$DEV bs=1 skip=$((32*1024*1024)) count=9 status=non
 AFTER_HEAD="$(dd if="$T/base.raw" bs=1m count=1 status=none | shasum -a 256 | awk '{print $1}')"
 [[ "$AFTER_HEAD" == "$BASE_HEAD" ]] && ok "base.raw head unchanged after guest write" || bad "base head changed"
 
-# --- live probes while blockd is serving ---
+# --- live probes while blockd is serving: must refuse (shared flock) ---
 set +e
 LIVE_REBASE_OUT="$($BLOCKD rebase --overlay "$OVL" --parent "$T/base.raw" 2>&1)"
 LIVE_REBASE_RC=$?
 LIVE_RESIZE_OUT="$($BLOCKD resize --overlay "$OVL" --size ${NEW_MIB}M 2>&1)"
 LIVE_RESIZE_RC=$?
 set -e
-# Rebase onto the same parent is a no-op rewrite of the header; it may succeed even while served.
-# Resize while served is documented as unsafe; either refuse, or we must still read the marker after.
-if [[ $LIVE_REBASE_RC -eq 0 ]]; then
-  ok "live rebase returned 0 (header rewrite while served): $(echo "$LIVE_REBASE_OUT" | tr '\n' ' ')"
-else
-  ok "live rebase refused (rc=$LIVE_REBASE_RC): $(echo "$LIVE_REBASE_OUT" | tr '\n' ' ' | head -c 160)"
-fi
-if [[ $LIVE_RESIZE_RC -eq 0 ]]; then
-  # Dangerous path: confirm marker still readable and note the outcome.
-  GOT="$(sshc "sudo dd if=/dev/$DEV bs=1 skip=$((32*1024*1024)) count=9 status=none" 2>/dev/null || true)"
-  [[ "$GOT" == MARKER-OK ]] && ok "live resize returned 0; marker still intact (document: resize while served is unsafe but survived here)" \
-    || bad "live resize returned 0 and corrupted marker ('$GOT')"
-else
-  ok "live resize refused (rc=$LIVE_RESIZE_RC): $(echo "$LIVE_RESIZE_OUT" | tr '\n' ' ' | head -c 160)"
-fi
+[[ $LIVE_REBASE_RC -ne 0 ]] && echo "$LIVE_REBASE_OUT" | grep -qi 'in use' \
+  && ok "live rebase refused while served: $(echo "$LIVE_REBASE_OUT" | tr '\n' ' ' | head -c 160)" \
+  || bad "live rebase should refuse (rc=$LIVE_REBASE_RC out='$LIVE_REBASE_OUT')"
+[[ $LIVE_RESIZE_RC -ne 0 ]] && echo "$LIVE_RESIZE_OUT" | grep -qi 'in use' \
+  && ok "live resize refused while served: $(echo "$LIVE_RESIZE_OUT" | tr '\n' ' ' | head -c 160)" \
+  || bad "live resize should refuse (rc=$LIVE_RESIZE_RC out='$LIVE_RESIZE_OUT')"
 GOT="$(sshc "sudo dd if=/dev/$DEV bs=1 skip=$((32*1024*1024)) count=9 status=none")"
-[[ "$GOT" == MARKER-OK ]] && ok "marker intact after live probes" || bad "marker lost after live probes: '$GOT'"
+[[ "$GOT" == MARKER-OK ]] && ok "marker intact after refused live probes" || bad "marker lost after live probes: '$GOT'"
 
 # --- offline resize ---
 curl -fs -X DELETE "$V" >/dev/null || bad "delete failed"

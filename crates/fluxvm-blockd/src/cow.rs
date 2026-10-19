@@ -51,6 +51,7 @@ use crate::seams::{BlockCipher, LazySource};
 use std::fs::{File, OpenOptions as FsOpen};
 use std::io;
 use std::os::unix::fs::FileExt;
+use std::os::unix::io::AsRawFd;
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
@@ -68,6 +69,47 @@ const XF_SHA: u32 = 4;
 
 fn bad(msg: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, msg.into())
+}
+
+/// Shared flock held for the life of an open overlay fd (serve / read). Blocks exclusive
+/// resize/rebase/branch from another process.
+fn flock_shared(file: &File) -> io::Result<()> {
+    // SAFETY: `file` is open; flock applies to the inode for this process's lifetime of the fd.
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_SH) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// Non-blocking exclusive flock for offline mutate ops. Fails with [`io::ErrorKind::WouldBlock`]
+/// when the overlay is served or otherwise open.
+fn try_flock_exclusive(file: &File) -> io::Result<()> {
+    // SAFETY: as above; LOCK_NB makes failure immediate when a shared holder exists.
+    let r = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+    if r == 0 {
+        return Ok(());
+    }
+    let err = io::Error::last_os_error();
+    if err.kind() == io::ErrorKind::WouldBlock
+        || err.raw_os_error() == Some(libc::EWOULDBLOCK)
+        || err.raw_os_error() == Some(libc::EAGAIN)
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::WouldBlock,
+            "overlay is in use (served or open elsewhere); stop the server before resize/rebase/branch",
+        ));
+    }
+    Err(err)
+}
+
+/// How `open_inner` locks the top-of-chain file.
+#[derive(Clone, Copy, PartialEq)]
+enum Lock {
+    Shared,
+    Exclusive,
+    /// Caller holds an exclusive lock on the overlay being mutated: skip locking the whole
+    /// chain (a second fd would block on our own lock). Rebase verify / cycle check.
+    Held,
 }
 
 /// Options for creating an overlay.
@@ -344,7 +386,8 @@ impl CowBackend {
         o: &CreateOptions,
         open: &OpenOptions,
     ) -> io::Result<Arc<Self>> {
-        let p = Self::open_inner(parent, 0, true, open)?;
+        // Exclusive: refuse to freeze/branch a parent that is currently served.
+        let p = Self::open_inner(parent, 0, true, open, Lock::Exclusive)?;
         if p.cipher.is_some() && o.cipher.is_none() {
             return Err(bad("parent is encrypted: child must be encrypted too"));
         }
@@ -406,13 +449,14 @@ impl CowBackend {
     }
 
     /// Open an existing overlay and its whole parent chain. If the overlay
-    /// has been branched from it opens read-only.
+    /// has been branched from it opens read-only. Holds a shared flock for the
+    /// life of the returned handle so offline resize/rebase/branch refuse while served.
     pub fn open(path: &Path) -> io::Result<Arc<Self>> {
-        Self::open_inner(path, 0, false, &OpenOptions::default())
+        Self::open_inner(path, 0, false, &OpenOptions::default(), Lock::Shared)
     }
 
     pub fn open_with(path: &Path, o: &OpenOptions) -> io::Result<Arc<Self>> {
-        Self::open_inner(path, 0, false, o)
+        Self::open_inner(path, 0, false, o, Lock::Shared)
     }
 
     fn create_with(path: &Path, par: Parent, o: &CreateOptions) -> io::Result<Arc<Self>> {
@@ -470,6 +514,7 @@ impl CowBackend {
         file.write_all_at(&hb, 0)?;
         file.set_len(data_off + data_len(h.encrypted, nblocks, size))?; // sparse
         file.sync_all()?;
+        flock_shared(&file)?;
         Ok(Arc::new(Self {
             path: cpath,
             file,
@@ -489,12 +534,20 @@ impl CowBackend {
         depth: usize,
         force_frozen: bool,
         o: &OpenOptions,
+        lock: Lock,
     ) -> io::Result<Arc<Self>> {
         if depth > MAX_DEPTH {
             return Err(bad("overlay chain too deep (cycle?)"));
         }
         let cpath = canon_file(path)?;
         let file = FsOpen::new().read(true).write(true).open(&cpath)?;
+        // Top of the chain: exclusive for branch/freeze, shared for serve. Deeper
+        // parents always take shared so a served child blocks mutating them too.
+        match (depth, lock) {
+            (0, Lock::Exclusive) => try_flock_exclusive(&file)?,
+            (_, Lock::Held) => {}
+            _ => flock_shared(&file)?,
+        }
         let mut hb = vec![0u8; HEADER_LEN as usize];
         file.read_exact_at(&mut hb, 0)?;
         let h = Header::decode(&hb)?;
@@ -531,7 +584,17 @@ impl CowBackend {
                 if h.kind == KIND_RAW {
                     Arc::new(RawFile::open(&pp, true)?)
                 } else {
-                    let p = Self::open_inner(&pp, depth + 1, true, o)?;
+                    let p = Self::open_inner(
+                        &pp,
+                        depth + 1,
+                        true,
+                        o,
+                        if lock == Lock::Held {
+                            Lock::Held
+                        } else {
+                            Lock::Shared
+                        },
+                    )?;
                     parent_cow = Some(p.clone());
                     p
                 }
@@ -571,6 +634,7 @@ impl CowBackend {
     pub fn rebase(path: &Path, parent: &str, open: &OpenOptions) -> io::Result<()> {
         let cpath = canon_file(path)?;
         let file = FsOpen::new().read(true).write(true).open(&cpath)?;
+        try_flock_exclusive(&file)?;
         let mut old = vec![0u8; HEADER_LEN as usize];
         file.read_exact_at(&mut old, 0)?;
         let mut h = Header::decode(&old)?;
@@ -589,7 +653,7 @@ impl CowBackend {
                 return Err(bad("an overlay cannot be its own parent"));
             }
             if is_overlay_file(&pp) {
-                let p = Self::open_inner(&pp, 0, true, open)?;
+                let p = Self::open_inner(&pp, 0, true, open, Lock::Held)?;
                 if p.chain_contains(&cpath) {
                     return Err(bad("rebase would create a cycle"));
                 }
@@ -635,7 +699,7 @@ impl CowBackend {
         let verify = if h.encrypted && open.key.is_none() {
             Ok(())
         } else {
-            Self::open_inner(&cpath, 0, false, open).map(|_| ())
+            Self::open_inner(&cpath, 0, false, open, Lock::Held).map(|_| ())
         };
         if let Err(e) = verify {
             file.write_all_at(&old, 0)?;
@@ -698,6 +762,7 @@ impl CowBackend {
     pub fn resize_file(path: &Path, new_size: u64) -> io::Result<bool> {
         let cpath = canon_file(path)?;
         let file = FsOpen::new().read(true).write(true).open(&cpath)?;
+        try_flock_exclusive(&file)?;
         let mut hb = vec![0u8; HEADER_LEN as usize];
         file.read_exact_at(&mut hb, 0)?;
         let h = Header::decode(&hb)?;
@@ -1114,7 +1179,8 @@ mod tests {
         // Branched-from overlay reopens read-only.
         let a2 = CowBackend::open(&d.path().join("a.ovl")).unwrap();
         assert!(a2.is_frozen());
-        // Grandchild via path.
+        drop((b2, a2));
+        // Grandchild via path (parent must not be open: exclusive flock).
         let g = CowBackend::create_on_overlay(&d.path().join("g.ovl"), &d.path().join("b.ovl"))
             .unwrap();
         assert_eq!(rd(&*g, 0, 7), *b"child-b");
@@ -1401,6 +1467,7 @@ mod feature_tests {
         let b = CowBackend::open_with(&d.path().join("b.ovl"), &open_key(1)).unwrap();
         assert_eq!(rd(&*b, 0, 11), *b"parent-data");
         assert_eq!(rd(&*b, 100, 10), *b"child-data");
+        drop(b);
         // A plain child over an encrypted parent is refused.
         let e = CowBackend::create_on_overlay_opts(
             &d.path().join("plain.ovl"),
@@ -1420,6 +1487,49 @@ mod feature_tests {
         )
         .unwrap();
         assert_eq!(rd(&*g, 100, 10), *b"child-data");
+    }
+
+    #[test]
+    fn resize_and_rebase_refuse_while_overlay_is_open() {
+        // Hold the shared flock in another process: same-process SH→EX upgrade can
+        // block forever on Darwin even with LOCK_NB.
+        let d = tempfile::tempdir().unwrap();
+        let base = d.path().join("base.img");
+        std::fs::write(&base, vec![0xABu8; 2 * BLOCK_SIZE as usize]).unwrap();
+        let ov = d.path().join("busy.ovl");
+        {
+            let held = CowBackend::create(&ov, &base, None).unwrap();
+            held.write_at(0, b"xx").unwrap();
+            held.flush().unwrap();
+        }
+        let mut holder = std::process::Command::new("python3")
+            .args([
+                "-c",
+                "import fcntl,sys,time; f=open(sys.argv[1],'r+b'); fcntl.flock(f, fcntl.LOCK_SH); time.sleep(30)",
+                ov.to_str().unwrap(),
+            ])
+            .spawn()
+            .expect("python3 flock holder");
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        let e = CowBackend::resize_file(&ov, 4 * BLOCK_SIZE).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::WouldBlock, "{e}");
+        assert!(e.to_string().contains("in use"), "{e}");
+        let e =
+            CowBackend::rebase(&ov, base.to_str().unwrap(), &OpenOptions::default()).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::WouldBlock, "{e}");
+        let branch = d.path().join("child.ovl");
+        match CowBackend::create_on_overlay(&branch, &ov) {
+            Err(e) => {
+                assert_eq!(e.kind(), io::ErrorKind::WouldBlock, "{e}");
+                assert!(e.to_string().contains("in use"), "{e}");
+            }
+            Ok(_) => panic!("branch while open should refuse"),
+        }
+        let _ = holder.kill();
+        let _ = holder.wait();
+        assert!(!CowBackend::resize_file(&ov, 4 * BLOCK_SIZE).unwrap());
+        CowBackend::rebase(&ov, base.to_str().unwrap(), &OpenOptions::default()).unwrap();
+        CowBackend::create_on_overlay(&branch, &ov).unwrap();
     }
 
     #[test]
