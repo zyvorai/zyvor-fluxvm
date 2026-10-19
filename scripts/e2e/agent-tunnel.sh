@@ -55,6 +55,9 @@ check "no token: refused (401)" refused 401 "" "$VM" 22
 RO="$(as "$TK" -XPOST -d '{"name":"viewer","read_only":true}' "$URL/fleet/tenants/me/keys" | jq -r .token)"
 check "a read-only key may not open a tunnel (403, says why)" bash -c "$(declare -f refused); FX='$FX'; URL='$URL'; D='$D'; refused 403 '$RO' '$VM' 22 && grep -q 'is read-only' '$D/ref.err'"
 
+# the fleet client only talks to central: it must not need to create the local daemon's state or run directories (a CI user cannot)
+check "the fleet client works without a writable local state dir" bash -c "FLUXVM_STATE_DIR=/proc/no/such/dir '$FX' fleet --central '$URL' --token '$TK' tunnels >/dev/null 2>'$D/nodir.err' || { cat '$D/nodir.err'; exit 1; }"
+
 # --- port-forward: a local port that carries one TCP connection per client ---------------------------------------
 "$FX" fleet --central "$URL" --token "$TK" port-forward "$VM" "$LP:22" >"$D/pf.log" 2>&1 & PF=$!; PIDS+=("$PF")
 check "port-forward listens on the local port" waitfor "(exec 3<>/dev/tcp/127.0.0.1/$LP) 2>/dev/null" 20
