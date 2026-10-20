@@ -31,6 +31,9 @@ pub trait VmBackend: Send {
 pub trait VcpuBackend: Send {
     fn set_rip(&mut self, rip: u64) -> Result<()>;
     fn run(&mut self) -> Result<VcpuExit>;
+    /// Hand the data produced for the last `IoIn`/`MmioRead` exit back to the
+    /// guest; the backend must deliver it on the next `run`.
+    fn complete_read(&mut self, data: &[u8]) -> Result<()>;
 }
 
 pub struct StubHv;
@@ -64,6 +67,10 @@ struct StubVcpu {
 impl VcpuBackend for StubVcpu {
     fn set_rip(&mut self, rip: u64) -> Result<()> {
         self.rip = rip;
+        Ok(())
+    }
+
+    fn complete_read(&mut self, _data: &[u8]) -> Result<()> {
         Ok(())
     }
 

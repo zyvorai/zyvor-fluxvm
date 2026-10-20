@@ -214,7 +214,7 @@ That's the default dataplane.
 Needs a Linux host with KVM, a Rust toolchain, and a sibling `guestkit` checkout.
 
 ```bash
-git clone https://github.com/zyvorai/zyvor-fluxvm.git && cd fluxvm   # needs a sibling guestkit checkout
+git clone https://github.com/zyvorai/zyvor-fluxvm.git && cd zyvor-fluxvm   # needs a sibling guestkit checkout
 sudo ./scripts/bootstrap-host.sh vmbr0 && ./scripts/preflight.sh
 cargo build --release
 sudo install -m 0755 target/release/fluxctl /usr/local/bin/fluxctl
