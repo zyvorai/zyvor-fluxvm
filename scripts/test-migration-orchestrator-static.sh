@@ -14,6 +14,6 @@ print('json parse: PASS')
 JSONCHECK
 for f in "$ROOT"/scripts/*.sh; do bash -n "$f"; done
 python3 -B "$ROOT/tools/fluxvm_migration_orchestrator.py" --state-root /tmp/fluxvm-set13e-test validate "$ROOT/examples/migration-plan.json" >/dev/null
-! grep -R --include='*.py' -n 'shell=True' "$ROOT/tools"
+if grep -R --include='*.py' -n 'shell=True' "$ROOT/tools"; then echo 'shell=True found' >&2; exit 1; fi
 if find "$ROOT" \( -name '__pycache__' -o -name '*.pyc' \) -print | grep -q .; then echo 'bytecode artifact found' >&2; exit 1; fi
 echo 'migration orchestrator static gates: PASS'

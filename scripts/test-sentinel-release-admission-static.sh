@@ -13,6 +13,6 @@ from pathlib import Path
 for p in sys.argv[1:]: json.loads(Path(p).read_text(encoding='utf-8'))
 PY
 bash -n "$ROOT/scripts/install-sentinel-release-admission.sh" "$ROOT/scripts/test-sentinel-release-admission-host.sh"
-! find "$ROOT" -type d -name __pycache__ -print -quit | grep -q .
-! find "$ROOT" -type f \( -name '*.pyc' -o -name '*.pyo' \) -print -quit | grep -q .
+if find "$ROOT" -type d -name __pycache__ -print -quit | grep -q .; then echo '__pycache__ found' >&2; exit 1; fi
+if find "$ROOT" -type f \( -name '*.pyc' -o -name '*.pyo' \) -print -quit | grep -q .; then echo 'bytecode found' >&2; exit 1; fi
 echo "Set 17E static gates: PASS"

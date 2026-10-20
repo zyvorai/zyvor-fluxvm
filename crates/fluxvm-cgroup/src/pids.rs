@@ -37,3 +37,57 @@ impl PidsController {
         read_u64(&self.path.join("pids.current"))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    fn fake_cgroup() -> (tempfile::TempDir, PidsController) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        fs::write(dir.path().join("pids.max"), "").unwrap();
+        fs::write(dir.path().join("pids.current"), "").unwrap();
+        let ctl = PidsController::new(dir.path().to_path_buf());
+        (dir, ctl)
+    }
+
+    #[test]
+    fn get_max_maps_max_keyword_to_unlimited() {
+        let (dir, ctl) = fake_cgroup();
+        fs::write(dir.path().join("pids.max"), "max\n").unwrap();
+        assert_eq!(ctl.get_max().unwrap(), u64::MAX);
+    }
+
+    #[test]
+    fn set_max_unlimited_writes_max_keyword() {
+        let (dir, ctl) = fake_cgroup();
+        ctl.set_max(u64::MAX).unwrap();
+        assert_eq!(fs::read_to_string(dir.path().join("pids.max")).unwrap().trim(), "max");
+    }
+
+    #[test]
+    fn set_max_writes_decimal_and_zero_is_a_limit() {
+        let (dir, ctl) = fake_cgroup();
+        ctl.set_max(512).unwrap();
+        assert_eq!(fs::read_to_string(dir.path().join("pids.max")).unwrap().trim(), "512");
+        ctl.set_max(0).unwrap();
+        assert_eq!(fs::read_to_string(dir.path().join("pids.max")).unwrap().trim(), "0");
+    }
+
+    #[test]
+    fn get_current_reads_counter_and_rejects_max() {
+        let (dir, ctl) = fake_cgroup();
+        fs::write(dir.path().join("pids.current"), "17\n").unwrap();
+        assert_eq!(ctl.get_current().unwrap(), 17);
+        fs::write(dir.path().join("pids.current"), "max\n").unwrap();
+        assert!(ctl.get_current().is_err());
+    }
+
+    #[test]
+    fn missing_files_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctl = PidsController::new(dir.path().join("nope"));
+        assert!(ctl.get_current().is_err());
+        assert!(ctl.get_max().is_err());
+    }
+}
