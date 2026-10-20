@@ -33,6 +33,12 @@ class FluxvmDevopsLayoutTests(unittest.TestCase):
         text = path.read_text(encoding="utf-8")
         self.assertIn("../namespace.yaml", text)
 
+    def test_gitops_namespace_matches_manifests(self):
+        # Every base manifest, RBAC subject and the MicroVM token Secret
+        # docs use fluxvm-system; the overlay must not move them elsewhere.
+        text = (REPO / "deploy/k8s/gitops/kustomization.yaml").read_text(encoding="utf-8")
+        self.assertIn("\nnamespace: fluxvm-system\n", text)
+
 
 if __name__ == "__main__":
     unittest.main()
