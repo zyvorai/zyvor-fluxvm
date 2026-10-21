@@ -1,0 +1,68 @@
+# Copyright 2026 Zyvor AI Labs · https://zyvor.dev
+# SPDX-License-Identifier: Apache-2.0
+#
+# Prometheus alert rules for the `vz` backend (Apple Virtualization.framework on a Mac).
+# Every metric below is exported by the daemon's /metrics today (crates/fluxvm-api/src/lib.rs).
+# Check with: promtool check rules deploy/prometheus/fluxvm-vz-alerts.yaml
+# Add under `rule_files:` in prometheus.yml. Thresholds are starting points; tune them to your fleet.
+groups:
+  - name: fluxvm-vz
+    rules:
+      - alert: FluxvmVzAgentFallingBackToSsh
+        # The vsock guest agent did not answer, so requests used SSH. A few at boot are normal; a sustained share is not.
+        expr: |
+          sum by (instance) (rate(fluxvm_vz_agent_ssh_fallbacks_total[10m]))
+            / clamp_min(sum by (instance) (rate(fluxvm_vz_agent_calls_total[10m]) + rate(fluxvm_vz_agent_ssh_fallbacks_total[10m])), 1e-9)
+            > 0.2
+        for: 15m
+        labels: {severity: warning}
+        annotations:
+          summary: "{{ $labels.instance }}: more than 20% of vz sandbox requests fall back to SSH"
+          description: "The guest agent is not answering on the vsock proxy. Check the guest image's agent and `fluxctl logs`. Fallback still works but is slower and needs SSH set up."
+
+      - alert: FluxvmSandboxWarmPoolMissing
+        # Default-shaped creates are cold-booting instead of using a warm slot (about 10 s boot vs about 2 s restore).
+        expr: |
+          sum by (instance) (rate(fluxvm_sandbox_warm_misses_total[15m]))
+            / clamp_min(sum by (instance) (rate(fluxvm_sandbox_warm_hits_total[15m]) + rate(fluxvm_sandbox_warm_misses_total[15m])), 1e-9)
+            > 0.5
+          and sum by (instance) (rate(fluxvm_sandbox_warm_misses_total[15m]) + rate(fluxvm_sandbox_warm_hits_total[15m])) > 0.002
+        for: 30m
+        labels: {severity: info}
+        annotations:
+          summary: "{{ $labels.instance }}: over half of default sandbox creates miss the warm pool"
+          description: "Fill the pool with `fluxctl` warm-pool fill, or raise its size, if create latency matters."
+
+      - alert: FluxvmHostMemoryPressureWarn
+        expr: max by (instance) (fluxvm_host_memory_pressure_level) >= 1
+        for: 10m
+        labels: {severity: warning}
+        annotations:
+          summary: "{{ $labels.instance }}: macOS memory pressure is elevated"
+          description: "Level 1 (warn). Guests may be swapped; reduce running VMs or guest memory."
+
+      - alert: FluxvmHostMemoryPressureCritical
+        expr: max by (instance) (fluxvm_host_memory_pressure_level) >= 2
+        for: 2m
+        labels: {severity: critical}
+        annotations:
+          summary: "{{ $labels.instance }}: macOS memory pressure is critical"
+          description: "Level 2. The host is reclaiming aggressively; stop or pause VMs now."
+
+      - alert: FluxvmHostMemoryLow
+        expr: min by (instance) (fluxvm_host_mem_available_mib) < 1024
+        for: 10m
+        labels: {severity: warning}
+        annotations:
+          summary: "{{ $labels.instance }}: under 1 GiB of host memory available"
+
+      - alert: FluxvmVmCreateSlow
+        # Mean create time over the window, from the cumulative duration and count counters.
+        expr: |
+          rate(fluxvm_vm_create_duration_ms_total[30m]) / clamp_min(rate(fluxvm_vm_create_total[30m]), 1e-9) > 60000
+          and rate(fluxvm_vm_create_total[30m]) > 0
+        for: 30m
+        labels: {severity: warning}
+        annotations:
+          summary: "{{ $labels.instance }}: VM creates average over 60 s"
+          description: "A macOS guest install or a large image pull inflates this legitimately; otherwise look at disk and network."

@@ -22,6 +22,7 @@ On an Apple M4 running macOS 27.2 (Xcode 27, Rust 1.98):
 | Custom Virtio guest bus | Debian 13 guest (kernel 6.12), `apple.custom_virtio: true`, device id `0x3F`: the driver binds, `/dev/fluxvm` appears, `fluxvm_virtioctl ping`, `echo`, `stats` and `capabilities` work, and all four bulk operations (fill, zero, copy, crc32; up to 1 MiB) pass. See "Mac Studio options" for what is not exercised |
 | `scripts/macos-live-test.sh` | **PASS**, end to end on a real Debian 13 guest: create through the API, address, SSH, TCP forwards (host and guest-to-guest), shared folders, pause/resume, stop/start, snapshot and restore, named images, `fluxctl run` (cold and warm), a two-service stack, sandboxes (exec, files, TTL, warm pool and its refresh after an image update, concurrent creates, offline, allow-listed egress, speculate and changesets), nothing left running |
 | `scripts/oci-live-test.sh` | **PASS** with the `oci-boot` CI artifacts: container exit codes, uid, read-only root, exec, distroless argv exec, offline, allow-list, a private network between two sandboxes, `linux/amd64` under Rosetta, a warm-pool claim, TTL |
+| `scripts/vz-usernet-tcp-live-test.sh` | On a Debian 13 guest with `apple.usernet`: SSH and an HTTP server through host-to-guest port forwards, HTTPS egress through the userspace gateway, and `deny_ports` refusing port 25 while 443 connects, with the denial in `usernet.log`; leaves nothing running |
 | `scripts/vz-devices-live-test.sh` | **PASS** on a Debian 13 guest: extra disks on virtio, NVMe and USB, a host block device, an NBD export, USB hot-attach and detach, a console port both ways, a 1600x900 Linux display |
 | `scripts/macos-guest-live-test.sh` | Clones a prepared macOS guest template through the API, checks the reported address and SSH, deletes it; needs your own template (`FLUXVM_MACOS_TEMPLATE`), so CI does not run it |
 
@@ -49,6 +50,8 @@ brew install hivex              # linked by guestkit's registry support
 cargo build -p fluxctl          # also builds and ad-hoc signs target/*/build/fluxvm-apple-*/out/fluxvm-vz-runner
 ./scripts/macos-live-test.sh    # boots a real Debian VM through the API (downloads the built-in debian-13, about 300 MB)
 ```
+
+Before the first VM, `fluxctl vz doctor` checks this Mac (Apple silicon, macOS 14 or newer, a signed runner, Rosetta, free disk, the daemon), prints a fix for each problem and exits 1 when something fails; `--json` for scripts. It runs locally and needs no daemon.
 
 Or skip the API: `fluxctl run` gives you a throwaway VM and a shell, and everything you did in it is gone when you leave.
 
