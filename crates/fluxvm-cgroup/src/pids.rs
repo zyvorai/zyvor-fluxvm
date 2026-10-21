@@ -62,16 +62,31 @@ mod tests {
     fn set_max_unlimited_writes_max_keyword() {
         let (dir, ctl) = fake_cgroup();
         ctl.set_max(u64::MAX).unwrap();
-        assert_eq!(fs::read_to_string(dir.path().join("pids.max")).unwrap().trim(), "max");
+        assert_eq!(
+            fs::read_to_string(dir.path().join("pids.max"))
+                .unwrap()
+                .trim(),
+            "max"
+        );
     }
 
     #[test]
     fn set_max_writes_decimal_and_zero_is_a_limit() {
         let (dir, ctl) = fake_cgroup();
         ctl.set_max(512).unwrap();
-        assert_eq!(fs::read_to_string(dir.path().join("pids.max")).unwrap().trim(), "512");
+        assert_eq!(
+            fs::read_to_string(dir.path().join("pids.max"))
+                .unwrap()
+                .trim(),
+            "512"
+        );
         ctl.set_max(0).unwrap();
-        assert_eq!(fs::read_to_string(dir.path().join("pids.max")).unwrap().trim(), "0");
+        assert_eq!(
+            fs::read_to_string(dir.path().join("pids.max"))
+                .unwrap()
+                .trim(),
+            "0"
+        );
     }
 
     #[test]
