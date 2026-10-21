@@ -169,7 +169,9 @@ jobs:
         run: cargo test -p fluxvm-procbox
 
   python-sdk:
-    runs-on: ubuntu-latest
+    # The SDK declares python >= 3.8 and this matrix checks that floor; ubuntu-latest (26.04) has no 3.8 build in
+    # actions/python-versions, 24.04 does (3.8.18).
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
