@@ -232,7 +232,7 @@ jobs:
           pattern: fluxvm-linux-*
           merge-multiple: true
           path: pkg
-      - uses: actions/attest-build-provenance@v2
+      - uses: actions/attest-build-provenance@v4
         with:
           subject-path: |
             pkg/*.tar.gz
