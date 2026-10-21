@@ -26,6 +26,8 @@ concurrency:
 jobs:
   update:
     runs-on: ubuntu-latest
+    env:
+      CARGO_TERM_COLOR: never   # the cargo output goes into the pull request body, where escape codes are noise
     steps:
       - name: Checkout fluxvm
         uses: actions/checkout@v7
@@ -68,27 +70,44 @@ jobs:
           cargo install cargo-audit --locked --quiet
           # Advisories are reported in the pull request, they do not stop it: a vulnerable crate that is already in
           # the lock should not keep the other updates out.
-          cargo audit --deny warnings > "$RUNNER_TEMP/audit.txt" 2>&1 && echo "No advisories." > "$RUNNER_TEMP/audit-status.txt" \
-            || echo "cargo audit reported findings." > "$RUNNER_TEMP/audit-status.txt"
+          cargo audit --json > "$RUNNER_TEMP/audit.json" || true
+          cargo audit --color never > "$RUNNER_TEMP/audit.txt" 2>&1 || true
 
       - name: Write the pull request body
         run: |
+          # An audit that could not run (advisory database unreachable) leaves audit.json empty: say so, still open the PR.
+          vulns=$(jq '.vulnerabilities.count' "$RUNNER_TEMP/audit.json" 2>/dev/null || echo unknown)
+          warns=$(jq '[.warnings[]?[]?] | length' "$RUNNER_TEMP/audit.json" 2>/dev/null || echo unknown)
+          vulns=${vulns:-unknown}; warns=${warns:-unknown}
           {
             echo "Weekly \`cargo update\` of \`Cargo.lock\` (semver-compatible bumps only), with guestkit at the \`packaging/guestkit.ref\` pin ($(tr -d '[:space:]' < fluxvm/packaging/guestkit.ref))."
             echo
             echo "The workspace was checked with \`cargo check --workspace --all-targets --locked\` before this pull request was opened."
             echo "Dependabot cannot do this for the workspace (see \`.github/workflows/cargo-update.yml\`)."
             echo
+            echo "## cargo audit of the updated lock"
+            echo
+            echo "**${vulns} vulnerabilities, ${warns} warnings (unmaintained or yanked crates).**"
+            if [ "$vulns" != "0" ] && [ "$vulns" != "unknown" ]; then
+              echo
+              jq -r '.vulnerabilities.list[] | "- \(.package.name) \(.package.version): \(.advisory.id), \(.advisory.title)"' "$RUNNER_TEMP/audit.json"
+            fi
+            echo
+            echo "<details><summary>Full cargo audit output</summary>"
+            echo
+            echo '```'
+            head -n 300 "$RUNNER_TEMP/audit.txt"
+            echo '```'
+            echo "</details>"
+            echo
             echo "## cargo update"
+            echo
+            echo "<details><summary>Packages changed</summary>"
+            echo
             echo '```'
             grep -vE '^\s*(Compiling|Downloaded|Downloading|Checking|Finished)' "$RUNNER_TEMP/update.txt" || true
             echo '```'
-            echo
-            echo "## cargo audit"
-            cat "$RUNNER_TEMP/audit-status.txt"
-            echo '```'
-            tail -n 60 "$RUNNER_TEMP/audit.txt"
-            echo '```'
+            echo "</details>"
           } > "$RUNNER_TEMP/body.md"
 
       - name: Open the pull request
