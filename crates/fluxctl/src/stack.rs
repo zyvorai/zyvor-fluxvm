@@ -958,11 +958,20 @@ mod tests {
     #[test]
     fn ssh_forward_port_is_stable_and_in_range() {
         let p = ssh_forward_port("myapp-db");
-        assert_eq!(p, ssh_forward_port("myapp-db"), "a rerun must compute the same spec");
+        assert_eq!(
+            p,
+            ssh_forward_port("myapp-db"),
+            "a rerun must compute the same spec"
+        );
         assert!((22000..23000).contains(&p));
-        let spread: std::collections::BTreeSet<u16> =
-            ["a-web", "a-db", "a-cache", "b-web", "b-db"].iter().map(|n| ssh_forward_port(n)).collect();
-        assert!(spread.len() >= 4, "different VMs should mostly get different ports: {spread:?}");
+        let spread: std::collections::BTreeSet<u16> = ["a-web", "a-db", "a-cache", "b-web", "b-db"]
+            .iter()
+            .map(|n| ssh_forward_port(n))
+            .collect();
+        assert!(
+            spread.len() >= 4,
+            "different VMs should mostly get different ports: {spread:?}"
+        );
     }
 
     const FILE: &str = r#"
