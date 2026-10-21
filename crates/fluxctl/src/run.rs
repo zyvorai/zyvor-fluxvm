@@ -292,16 +292,27 @@ impl VmApi for crate::remote::Remote {
 
 /// `8080:80` -> a TCP forward from 127.0.0.1:8080 to guest port 80.
 pub fn parse_port(s: &str) -> Result<Value> {
-    let (h, g) = s
-        .split_once(':')
-        .with_context(|| format!("port {s:?} must be HOST:GUEST"))?;
+    // `[ADDR:]HOST:GUEST`. ADDR (an IP literal) chooses which host address QEMU listens on; without it the
+    // forward keeps the backend's default.
+    let parts: Vec<&str> = s.split(':').collect();
+    let (addr, h, g) = match parts.as_slice() {
+        [h, g] => (None, *h, *g),
+        [a, h, g] => (Some(*a), *h, *g),
+        _ => bail!("port {s:?} must be [ADDR:]HOST:GUEST"),
+    };
     let (h, g): (u16, u16) = (
         h.parse()
             .with_context(|| format!("bad host port in {s:?}"))?,
         g.parse()
             .with_context(|| format!("bad guest port in {s:?}"))?,
     );
-    Ok(json!({"host_port": h, "guest_port": g}))
+    let mut v = json!({"host_port": h, "guest_port": g});
+    if let Some(a) = addr {
+        a.parse::<std::net::IpAddr>()
+            .with_context(|| format!("bad address in {s:?} (want an IP such as 127.0.0.1)"))?;
+        v["host_addr"] = json!(a);
+    }
+    Ok(v)
 }
 
 /// `~/src:/mnt/src` or `./dir:/mnt/dir:ro` -> a shared folder. The host side may be relative or start with `~`.
@@ -719,6 +730,19 @@ mod tests {
         );
         assert_eq!(loopback_ssh_endpoint(&json!({"network": {"mode": "tap"}})), None);
         assert_eq!(loopback_ssh_endpoint(&json!({})), None);
+    }
+
+    #[test]
+    fn ports_may_name_the_host_address() {
+        assert_eq!(parse_port("8080:80").unwrap(), json!({"host_port": 8080, "guest_port": 80}));
+        assert_eq!(
+            parse_port("127.0.0.1:443:8443").unwrap(),
+            json!({"host_port": 443, "guest_port": 8443, "host_addr": "127.0.0.1"})
+        );
+        assert!(parse_port("localhost:443:8443").is_err(), "only IP literals");
+        assert!(parse_port("127.0.0.1,restrict=off:1:2").is_err());
+        assert!(parse_port("1:2:3:4").is_err());
+        assert!(parse_port("80").is_err());
     }
 
     #[test]

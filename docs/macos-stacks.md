@@ -183,7 +183,8 @@ State lives in the daemon's VM labels, so it also works with `--server` and does
   computes the same definition). The VM's address then reads `127.0.0.1:<port>`, and `fluxctl ssh`, `up` and `run` connect
   with `-p <port>`. The forward listens on loopback only (`host_addr` in the port-forward object; unset keeps the older
   all-interfaces behaviour). If something else already listens on that port, creating the VM fails.
-- **`ports` listen on all interfaces** here (not 127.0.0.1 as on a Mac) and the guest sees every inbound connection as coming
+- **`ports = ["127.0.0.1:443:8443"]`** names the host address (`[ADDR:]HOST:GUEST`, an IP literal); use it to keep a service off the network and reach it through an SSH tunnel.
+- **`ports` without an address listen on all interfaces** here (not 127.0.0.1 as on a Mac) and the guest sees every inbound connection as coming
   from QEMU's gateway `10.0.2.2`. Anything in the guest that decides by client address (an allow-list) cannot tell callers
   apart; put such a check on the host, or use a tap network.
 - `virtiofsd` lives in `/usr/libexec`, which is not on `PATH` (also under `sudo`): add it before running `up` with shared folders.
