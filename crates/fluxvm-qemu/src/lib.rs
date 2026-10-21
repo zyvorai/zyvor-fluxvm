@@ -1137,7 +1137,11 @@ mod tests {
         }
     }
 
-    fn forward(host_port: u16, guest_port: u16, host_addr: Option<&str>) -> fluxvm_core::model::PortForward {
+    fn forward(
+        host_port: u16,
+        guest_port: u16,
+        host_addr: Option<&str>,
+    ) -> fluxvm_core::model::PortForward {
         fluxvm_core::model::PortForward {
             host_port,
             guest_port,
@@ -1151,13 +1155,20 @@ mod tests {
         let mut c = ctx();
         c.network.spec = NetworkSpec::User { forwards };
         let args = build_args(&cfg(), &req(2048), &c, &[])?;
-        let at = args.iter().position(|a| a == "-netdev").expect("a -netdev option");
+        let at = args
+            .iter()
+            .position(|a| a == "-netdev")
+            .expect("a -netdev option");
         Ok(args[at + 1].clone())
     }
 
     #[test]
     fn user_forwards_listen_everywhere_unless_told_otherwise() {
-        let n = netdev_arg(vec![forward(8443, 443, None), forward(22044, 22, Some("127.0.0.1"))]).unwrap();
+        let n = netdev_arg(vec![
+            forward(8443, 443, None),
+            forward(22044, 22, Some("127.0.0.1")),
+        ])
+        .unwrap();
         assert!(n.contains(",hostfwd=tcp:0.0.0.0:8443-:443"), "{n}");
         assert!(n.contains(",hostfwd=tcp:127.0.0.1:22044-:22"), "{n}");
     }

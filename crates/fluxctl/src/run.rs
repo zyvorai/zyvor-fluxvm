@@ -721,25 +721,44 @@ mod tests {
             {"host_port": 2222, "guest_port": 22},                            // public ssh forward: not the control path
             {"host_port": 22044, "guest_port": 22, "host_addr": "127.0.0.1"},
         ]}});
-        assert_eq!(loopback_ssh_endpoint(&req).as_deref(), Some("127.0.0.1:22044"));
-        // No loopback forward to port 22, a non-loopback address, or a different network mode: no endpoint.
-        assert_eq!(loopback_ssh_endpoint(&json!({"network": {"mode": "user", "forwards": [{"host_port": 1, "guest_port": 80}]}})), None);
         assert_eq!(
-            loopback_ssh_endpoint(&json!({"network": {"forwards": [{"host_port": 2222, "guest_port": 22, "host_addr": "0.0.0.0"}]}})),
+            loopback_ssh_endpoint(&req).as_deref(),
+            Some("127.0.0.1:22044")
+        );
+        // No loopback forward to port 22, a non-loopback address, or a different network mode: no endpoint.
+        assert_eq!(
+            loopback_ssh_endpoint(
+                &json!({"network": {"mode": "user", "forwards": [{"host_port": 1, "guest_port": 80}]}})
+            ),
             None
         );
-        assert_eq!(loopback_ssh_endpoint(&json!({"network": {"mode": "tap"}})), None);
+        assert_eq!(
+            loopback_ssh_endpoint(
+                &json!({"network": {"forwards": [{"host_port": 2222, "guest_port": 22, "host_addr": "0.0.0.0"}]}})
+            ),
+            None
+        );
+        assert_eq!(
+            loopback_ssh_endpoint(&json!({"network": {"mode": "tap"}})),
+            None
+        );
         assert_eq!(loopback_ssh_endpoint(&json!({})), None);
     }
 
     #[test]
     fn ports_may_name_the_host_address() {
-        assert_eq!(parse_port("8080:80").unwrap(), json!({"host_port": 8080, "guest_port": 80}));
+        assert_eq!(
+            parse_port("8080:80").unwrap(),
+            json!({"host_port": 8080, "guest_port": 80})
+        );
         assert_eq!(
             parse_port("127.0.0.1:443:8443").unwrap(),
             json!({"host_port": 443, "guest_port": 8443, "host_addr": "127.0.0.1"})
         );
-        assert!(parse_port("localhost:443:8443").is_err(), "only IP literals");
+        assert!(
+            parse_port("localhost:443:8443").is_err(),
+            "only IP literals"
+        );
         assert!(parse_port("127.0.0.1,restrict=off:1:2").is_err());
         assert!(parse_port("1:2:3:4").is_err());
         assert!(parse_port("80").is_err());
@@ -747,20 +766,36 @@ mod tests {
 
     #[test]
     fn endpoints_split_into_host_and_port() {
-        assert_eq!(split_endpoint("127.0.0.1:22044"), ("127.0.0.1", Some(22044)));
+        assert_eq!(
+            split_endpoint("127.0.0.1:22044"),
+            ("127.0.0.1", Some(22044))
+        );
         assert_eq!(split_endpoint("192.168.64.5"), ("192.168.64.5", None));
-        assert_eq!(split_endpoint("fd00::5"), ("fd00::5", None), "an IPv6 literal has no port part");
+        assert_eq!(
+            split_endpoint("fd00::5"),
+            ("fd00::5", None),
+            "an IPv6 literal has no port part"
+        );
         assert_eq!(split_endpoint("host:notaport"), ("host:notaport", None));
     }
 
     #[test]
     fn ssh_command_carries_the_forwarded_port() {
         let c = ssh_base("127.0.0.1:22044", "root", &None);
-        let args: Vec<String> = c.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
-        let at = args.iter().position(|a| a == "-p").expect("-p for a forwarded guest");
+        let args: Vec<String> = c
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        let at = args
+            .iter()
+            .position(|a| a == "-p")
+            .expect("-p for a forwarded guest");
         assert_eq!(args[at + 1], "22044");
         assert_eq!(args.last().unwrap(), "root@127.0.0.1");
-        let plain: Vec<String> = ssh_base("10.0.0.7", "root", &None).get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+        let plain: Vec<String> = ssh_base("10.0.0.7", "root", &None)
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
         assert!(!plain.contains(&"-p".to_string()));
         assert_eq!(plain.last().unwrap(), "root@10.0.0.7");
     }
