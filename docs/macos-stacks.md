@@ -171,3 +171,20 @@ State lives in the daemon's VM labels, so it also works with `--server` and does
 - On the NAT (the default), a container service only resolves the names of the services it `depends_on`, and the names are fixed
   when it is created. With `network = "private"` every service resolves every other.
 - Verified on an Apple M4 with the `vz` backend only.
+
+## Linux hosts
+
+`fluxctl up` also works on a Linux/KVM host, with QEMU's user-mode networking instead of the Mac's NAT:
+
+- **Base image.** `image = "debian-13"` is a catalog name; a host with no `[catalog]` configured needs a path instead
+  (for example the official Debian `genericcloud` qcow2, checked against Debian's `SHA512SUMS`).
+- **How `fluxctl` reaches the guest.** A user-mode guest has no address on the host, so `up` gives every VM service a
+  forward from `127.0.0.1:<port>` to the guest's port 22 (the port is a hash of the VM name in 22000-22999, so a rerun
+  computes the same definition). The VM's address then reads `127.0.0.1:<port>`, and `fluxctl ssh`, `up` and `run` connect
+  with `-p <port>`. The forward listens on loopback only (`host_addr` in the port-forward object; unset keeps the older
+  all-interfaces behaviour). If something else already listens on that port, creating the VM fails.
+- **`ports` listen on all interfaces** here (not 127.0.0.1 as on a Mac) and the guest sees every inbound connection as coming
+  from QEMU's gateway `10.0.2.2`. Anything in the guest that decides by client address (an allow-list) cannot tell callers
+  apart; put such a check on the host, or use a tap network.
+- `virtiofsd` lives in `/usr/libexec`, which is not on `PATH` (also under `sudo`): add it before running `up` with shared folders.
+- Creating VMs writes to the root-owned state directory, so run `fluxctl up` as root (`sudo env PATH=$PATH fluxctl up`).

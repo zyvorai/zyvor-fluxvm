@@ -55,6 +55,36 @@ pub trait VmApi {
 /// Console lines `sandbox_logs` returns; stacks only read the markers.
 const SANDBOX_LOG_LINES: usize = 50;
 
+/// How to reach a guest over SSH when it has no address of its own: a QEMU user-mode VM (Linux hosts) is only
+/// reachable through the loopback SSH forward `fluxctl up` gives it, so its "address" is `127.0.0.1:<port>`.
+/// `None` when the VM has no such forward (then its `guest_ip`, if any, is the address).
+pub(crate) fn loopback_ssh_endpoint(request: &Value) -> Option<String> {
+    request["network"]["forwards"]
+        .as_array()?
+        .iter()
+        .find(|f| {
+            f["guest_port"] == 22
+                && f["host_addr"]
+                    .as_str()
+                    .is_some_and(|a| a.parse::<std::net::IpAddr>().is_ok_and(|a| a.is_loopback()))
+                && f["protocol"].as_str().unwrap_or("tcp") == "tcp"
+        })
+        .and_then(|f| f["host_port"].as_u64())
+        .map(|p| format!("127.0.0.1:{p}"))
+}
+
+/// Splits an address that may carry a port (`127.0.0.1:2222`, see [`loopback_ssh_endpoint`]) into host and port.
+/// Bare IPv4 addresses and IPv6 literals (several colons) have no port part.
+pub(crate) fn split_endpoint(addr: &str) -> (&str, Option<u16>) {
+    match addr.rsplit_once(':') {
+        Some((host, port)) if !host.contains(':') => match port.parse() {
+            Ok(p) => (host, Some(p)),
+            Err(_) => (addr, None),
+        },
+        _ => (addr, None),
+    }
+}
+
 pub struct Local<'a>(pub &'a std::sync::Arc<fluxvm_scheduler::VmManager>);
 
 impl VmApi for Local<'_> {
@@ -62,7 +92,12 @@ impl VmApi for Local<'_> {
         Ok(self.0.create(serde_json::from_value(spec)?).await?.id)
     }
     async fn guest_ip(&self, id: Uuid) -> Result<Option<String>> {
-        Ok(self.0.get(id).await?.guest_ip.clone())
+        let vm = self.0.get(id).await?;
+        if vm.guest_ip.is_some() {
+            return Ok(vm.guest_ip.clone());
+        }
+        // QEMU user networking: no guest address, but the stack gave it a loopback SSH forward.
+        Ok(loopback_ssh_endpoint(&serde_json::to_value(&vm.request)?))
     }
     async fn delete(&self, id: Uuid) -> Result<()> {
         self.0.delete(id).await
@@ -153,7 +188,10 @@ impl VmApi for crate::remote::Remote {
         let v = self
             .call(reqwest::Method::GET, &format!("/v1/vms/{id}"), None)
             .await?;
-        Ok(v["guest_ip"].as_str().map(str::to_owned))
+        Ok(v["guest_ip"]
+            .as_str()
+            .map(str::to_owned)
+            .or_else(|| loopback_ssh_endpoint(&v["request"])))
     }
     async fn delete(&self, id: Uuid) -> Result<()> {
         self.vm_op(id, "delete").await.map(drop)
@@ -328,6 +366,11 @@ pub async fn ssh_to(
     local_nat_vm: bool,
     args: &[String],
 ) -> Result<()> {
+    // `127.0.0.1:<port>` is a QEMU user-mode guest behind its loopback forward; its host key changes whenever the VM is
+    // recreated, so treat it like the local NAT guests on a Mac.
+    let (host, forwarded) = split_endpoint(ip);
+    let local_nat_vm = local_nat_vm || forwarded.is_some();
+    let port = forwarded.unwrap_or(port);
     let mut c = tokio::process::Command::new("ssh");
     c.arg("-tt").arg("-p").arg(port.to_string());
     if local_nat_vm {
@@ -344,7 +387,7 @@ pub async fn ssh_to(
         }
     }
     let status = c
-        .arg(format!("{user}@{ip}"))
+        .arg(format!("{user}@{host}"))
         .args(args)
         .status()
         .await
@@ -378,7 +421,11 @@ pub(crate) fn ssh_base(ip: &str, user: &str, key: &Option<PathBuf>) -> std::proc
     if let Some(k) = key {
         c.arg("-i").arg(k);
     }
-    c.arg(format!("{user}@{ip}"));
+    let (host, port) = split_endpoint(ip);
+    if let Some(p) = port {
+        c.arg("-p").arg(p.to_string());
+    }
+    c.arg(format!("{user}@{host}"));
     c
 }
 
@@ -655,6 +702,44 @@ pub async fn run<A: VmApi>(api: &A, o: RunOptions) -> Result<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_user_mode_guest_is_reached_through_its_loopback_ssh_forward() {
+        let req = json!({"network": {"mode": "user", "forwards": [
+            {"host_port": 443, "guest_port": 8443},
+            {"host_port": 2222, "guest_port": 22},                            // public ssh forward: not the control path
+            {"host_port": 22044, "guest_port": 22, "host_addr": "127.0.0.1"},
+        ]}});
+        assert_eq!(loopback_ssh_endpoint(&req).as_deref(), Some("127.0.0.1:22044"));
+        // No loopback forward to port 22, a non-loopback address, or a different network mode: no endpoint.
+        assert_eq!(loopback_ssh_endpoint(&json!({"network": {"mode": "user", "forwards": [{"host_port": 1, "guest_port": 80}]}})), None);
+        assert_eq!(
+            loopback_ssh_endpoint(&json!({"network": {"forwards": [{"host_port": 2222, "guest_port": 22, "host_addr": "0.0.0.0"}]}})),
+            None
+        );
+        assert_eq!(loopback_ssh_endpoint(&json!({"network": {"mode": "tap"}})), None);
+        assert_eq!(loopback_ssh_endpoint(&json!({})), None);
+    }
+
+    #[test]
+    fn endpoints_split_into_host_and_port() {
+        assert_eq!(split_endpoint("127.0.0.1:22044"), ("127.0.0.1", Some(22044)));
+        assert_eq!(split_endpoint("192.168.64.5"), ("192.168.64.5", None));
+        assert_eq!(split_endpoint("fd00::5"), ("fd00::5", None), "an IPv6 literal has no port part");
+        assert_eq!(split_endpoint("host:notaport"), ("host:notaport", None));
+    }
+
+    #[test]
+    fn ssh_command_carries_the_forwarded_port() {
+        let c = ssh_base("127.0.0.1:22044", "root", &None);
+        let args: Vec<String> = c.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+        let at = args.iter().position(|a| a == "-p").expect("-p for a forwarded guest");
+        assert_eq!(args[at + 1], "22044");
+        assert_eq!(args.last().unwrap(), "root@127.0.0.1");
+        let plain: Vec<String> = ssh_base("10.0.0.7", "root", &None).get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+        assert!(!plain.contains(&"-p".to_string()));
+        assert_eq!(plain.last().unwrap(), "root@10.0.0.7");
+    }
 
     #[test]
     fn progress_note_speaks_once_per_interval() {

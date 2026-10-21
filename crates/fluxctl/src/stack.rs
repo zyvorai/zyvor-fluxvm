@@ -66,7 +66,8 @@ pub struct Service {
     /// Commands cloud-init runs on first boot (before the other services' names are known).
     #[serde(default)]
     pub run: Vec<String>,
-    /// `HOST:GUEST` TCP forwards from 127.0.0.1.
+    /// `HOST:GUEST` TCP forwards. On a Mac they listen on 127.0.0.1; on Linux (QEMU user networking) they listen on all
+    /// interfaces, and the guest sees every connection as coming from QEMU's gateway (10.0.2.2), not the real client.
     #[serde(default)]
     pub ports: Vec<String>,
     /// TCP ports other services may connect to (`db:5432`). VMs on the Mac's NAT cannot reach each other directly, so
@@ -405,6 +406,15 @@ pub fn vm_name(stack: &str, service: &str) -> String {
     format!("{stack}-{service}")
 }
 
+/// The host port of the loopback SSH forward for a VM: stable (a hash of its name, in 22000..=22999) so a rerun
+/// computes the same spec and does not recreate the VM. A clash with something else listening fails the create loudly.
+pub fn ssh_forward_port(vm_name: &str) -> u16 {
+    let h = vm_name
+        .bytes()
+        .fold(0u32, |h, b| h.wrapping_mul(31).wrapping_add(u32::from(b)));
+    22000 + (h % 1000) as u16
+}
+
 /// The `CreateVmRequest` JSON for one service.
 pub fn service_spec(
     f: &StackFile,
@@ -425,6 +435,15 @@ pub fn service_spec(
             .iter()
             .map(|p| json!({"host_port": p, "guest_port": p, "guests": true})),
     );
+    // Only the Mac's own hypervisor hands guests an address; everywhere else (QEMU user networking) the control
+    // path is an SSH forward that listens on the host's loopback only.
+    if !cfg!(target_os = "macos") && f.private.is_none() {
+        forwards.push(json!({
+            "host_port": ssh_forward_port(&vm_name(&f.name, name)),
+            "guest_port": 22,
+            "host_addr": "127.0.0.1",
+        }));
+    }
     let volumes = svc
         .volumes
         .iter()
@@ -935,6 +954,16 @@ pub async fn ps<A: VmApi>(api: &A, stack: &str) -> Result<Vec<[String; 4]>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ssh_forward_port_is_stable_and_in_range() {
+        let p = ssh_forward_port("myapp-db");
+        assert_eq!(p, ssh_forward_port("myapp-db"), "a rerun must compute the same spec");
+        assert!((22000..23000).contains(&p));
+        let spread: std::collections::BTreeSet<u16> =
+            ["a-web", "a-db", "a-cache", "b-web", "b-db"].iter().map(|n| ssh_forward_port(n)).collect();
+        assert!(spread.len() >= 4, "different VMs should mostly get different ports: {spread:?}");
+    }
 
     const FILE: &str = r#"
 name = "myapp"
