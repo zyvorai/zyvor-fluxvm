@@ -71,8 +71,14 @@ mod tests {
         let delivered = Arc::new(Mutex::new(Vec::new()));
         let vcpu = Scripted {
             exits: VecDeque::from([
-                VcpuExit::IoIn { port: 0x3f8, size: 1 },
-                VcpuExit::MmioRead { addr: 0xd000_0000, size: 4 },
+                VcpuExit::IoIn {
+                    port: 0x3f8,
+                    size: 1,
+                },
+                VcpuExit::MmioRead {
+                    addr: 0xd000_0000,
+                    size: 4,
+                },
             ]),
             delivered: delivered.clone(),
         };
