@@ -164,7 +164,8 @@ jobs:
         run: sudo -E ./scripts/test-apparmor-build-image.sh --image /tmp/base-image.qcow2
 
   container-image:
-    runs-on: ${{ fromJSON(github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && '"ubuntu-latest"' || '["self-hosted","Linux","X64","zyvor-build"]') }}
+    # `docker`: zyvor-kernel-a also carries zyvor-build but has no Docker daemon, so buildx failed there.
+    runs-on: ${{ fromJSON(github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && '"ubuntu-latest"' || '["self-hosted","Linux","X64","zyvor-build","docker"]') }}
     permissions:
       contents: read
     steps:
