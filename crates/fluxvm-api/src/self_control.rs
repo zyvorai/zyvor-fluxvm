@@ -49,12 +49,55 @@ pub fn spawn(m: Arc<VmManager>, state_dir: &Path) {
         Ok(listener) => {
             fluxvm_scheduler::vz_screen::set_self_control_socket(path.clone());
             tracing::info!(socket = %path.display(), "serving guest self-control");
+            remove_stale_sockets(&path);
+            tokio::spawn(remove_socket_on_signal(path));
             tokio::spawn(accept_loop(m, listener));
         }
         Err(e) => {
             tracing::warn!(error = %e, socket = %path.display(), "cannot serve guest self-control")
         }
     }
+}
+
+/// Removes `self-*.sock` files in `live`'s directory that no daemon answers on (left by a killed or crashed daemon).
+fn remove_stale_sockets(live: &Path) {
+    let Some(dir) = live.parent() else { return };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for e in entries.flatten() {
+        let p = e.path();
+        let name = e.file_name();
+        let name = name.to_string_lossy();
+        if p == live || !(name.starts_with("self-") && name.ends_with(".sock")) {
+            continue;
+        }
+        if let Err(err) = std::os::unix::net::UnixStream::connect(&p)
+            && err.kind() == std::io::ErrorKind::ConnectionRefused
+        {
+            let _ = std::fs::remove_file(&p);
+        }
+    }
+}
+
+/// The daemon has no graceful-shutdown path, so on SIGTERM/SIGINT/SIGHUP remove the socket and exit the way the
+/// default action would (128 + signal).
+async fn remove_socket_on_signal(path: PathBuf) {
+    use tokio::signal::unix::{SignalKind, signal};
+    let (Ok(mut term), Ok(mut int), Ok(mut hup)) = (
+        signal(SignalKind::terminate()),
+        signal(SignalKind::interrupt()),
+        signal(SignalKind::hangup()),
+    ) else {
+        return;
+    };
+    let code = tokio::select! {
+        _ = term.recv() => 143,
+        _ = int.recv() => 130,
+        _ = hup.recv() => 129,
+    };
+    let _ = std::fs::remove_file(&path);
+    std::process::exit(code);
 }
 
 fn bind(path: &PathBuf) -> std::io::Result<tokio::net::UnixListener> {
@@ -349,5 +392,26 @@ mod tests {
             assert_eq!(t["inputSchema"]["type"], "object");
         }
         assert_eq!(tools[3]["annotations"]["destructiveHint"], true);
+    }
+
+    #[test]
+    fn stale_sockets_are_swept_but_live_and_unrelated_ones_are_kept() {
+        let dir = std::env::temp_dir().join(format!("fluxvm-selfsock-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let live = dir.join("self-00000001.sock");
+        let other_live = dir.join("self-00000002.sock");
+        let stale = dir.join("self-00000003.sock");
+        let unrelated = dir.join("keep.sock");
+        let _live_l = std::os::unix::net::UnixListener::bind(&live).unwrap();
+        let _other_l = std::os::unix::net::UnixListener::bind(&other_live).unwrap();
+        // Binding then dropping the listener leaves the file with nobody answering, like a killed daemon.
+        drop(std::os::unix::net::UnixListener::bind(&stale).unwrap());
+        drop(std::os::unix::net::UnixListener::bind(&unrelated).unwrap());
+        remove_stale_sockets(&live);
+        assert!(live.exists() && other_live.exists());
+        assert!(!stale.exists());
+        assert!(unrelated.exists());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

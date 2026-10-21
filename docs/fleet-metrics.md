@@ -150,3 +150,7 @@ sum by (tenant) (fluxvm_vm_memory_used_bytes)
 # Central error rate
 sum(rate(fluxvm_central_http_requests_total{status=~"5.."}[5m]))
 ```
+
+## Dashboard and alerts for the `vz` backend
+
+For a Mac running `vz` guests, `deploy/grafana/fluxvm-vz.json` (import it in Grafana) charts the guest agent against its SSH fallback, the warm pool hit rate, host memory pressure and available memory, sandboxes with an inflated balloon, and the mean VM create time. `deploy/prometheus/fluxvm-vz-alerts.yaml` has the matching alert rules (agent falling back to SSH, no warm pool, host memory pressure warn and critical, memory low, slow VM creates); add it under `rule_files:` and check it with `promtool check rules`. Thresholds are starting points. Both use only series the daemon's `/metrics` exports.

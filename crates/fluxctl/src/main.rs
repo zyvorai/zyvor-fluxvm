@@ -47,6 +47,7 @@ mod stack;
 mod stack_fleet;
 mod status;
 mod styles;
+mod vz_doctor;
 
 #[derive(Parser)]
 #[command(
@@ -2936,6 +2937,13 @@ enum OciCommand {
 enum VzCommand {
     /// What this Mac's Virtualization.framework offers (OS, vmnet, custom Virtio, Secure Boot, Rosetta).
     Host,
+    /// Preflight for the `vz` backend on this Mac: Apple silicon, macOS 14+, a signed runner, Rosetta, free disk, the
+    /// daemon. Prints a fix for every problem and exits 1 when something fails. Runs locally and needs no daemon.
+    Doctor {
+        /// Machine-readable output.
+        #[arg(long)]
+        json: bool,
+    },
     /// Apple's newest macOS restore image (what `--image macos --install` uses) and whether it is cached;
     /// `--download` fetches it now (about 25 GB).
     Ipsw {
@@ -4532,6 +4540,9 @@ async fn run_remote(
             }
         }
         Command::Vz { command } => match command {
+            VzCommand::Doctor { .. } => {
+                unreachable!("`vz doctor` runs locally before remote dispatch")
+            }
             VzCommand::Host => pretty(&r.call(Method::GET, "/v1/host/apple", None).await?)?,
             VzCommand::Ipsw { download } => pretty(
                 &r.call(
@@ -5207,6 +5218,33 @@ async fn main() -> Result<()> {
             cli.command,
         )
         .await;
+    }
+    if let Command::Vz {
+        command: VzCommand::Doctor { json },
+    } = &cli.command
+    {
+        let cfg = load_cfg(&cli).ok();
+        let healthz = match &cfg {
+            Some(c) => Some(daemon_get(c, "/healthz", None).await.is_ok()),
+            None => None,
+        };
+        let state_dir = cfg
+            .as_ref()
+            .map(|c| c.state_dir.clone())
+            .unwrap_or_else(std::env::temp_dir);
+        let checks = vz_doctor::evaluate(&vz_doctor::gather(&state_dir, healthz));
+        if *json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&vz_doctor::render_json(&checks))?
+            );
+        } else {
+            print!("{}", vz_doctor::render_text(&checks));
+        }
+        if vz_doctor::worst(&checks) == vz_doctor::Status::Fail {
+            std::process::exit(1);
+        }
+        return Ok(());
     }
     if let Command::VmImage { command } = cli.command {
         return run_vm_image(command).await;
@@ -6022,6 +6060,9 @@ async fn main() -> Result<()> {
         }
         Command::Vz { command } => {
             let out = match command {
+                VzCommand::Doctor { .. } => {
+                    unreachable!("`vz doctor` runs locally before the manager is built")
+                }
                 VzCommand::Host => fluxvm_scheduler::vz_devices::apple_host_capabilities().await?,
                 VzCommand::Ipsw { download } => m.macos_ipsw(download).await?,
                 VzCommand::SecureBoot { id } => m.vz_secure_boot_status(id).await?,
