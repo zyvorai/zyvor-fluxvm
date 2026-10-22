@@ -25,6 +25,7 @@ tenant's id answers `404`, not `403`).
 | `GET /v1/agents/sessions/{id}` | One session: backend, capabilities, policy, workspace, checkpoints, children. |
 | `DELETE /v1/agents/sessions/{id}` | Delete the session and its sandbox. Idempotent (`204`). |
 | `POST /v1/agents/sessions/{id}/exec` | `{command, timeout_seconds?}` through the sandbox's guest path. Recorded in the ledger. |
+| `POST /v1/agents/sessions/{id}/exec/stream` | `exec` with the output streamed as Server-Sent Events while the command runs: a `start` event (`{job}`), `output` and `stderr` events, then one `exit` event (`{exit_code, state}`). Same body as `exec`. It runs the command as a job, so the process policy, approvals, budget and confinement apply as for a job, and a dropped client can resume with `GET .../jobs/{job}/stream` and `Last-Event-ID`. A command held for approval answers `428` as JSON. `fluxctl agent exec --stream`. |
 | `POST /v1/agents/sessions/{id}/tokens` | `{ops, ttl_seconds?, label?}`: mint a [session token](#session-tokens). `GET` lists live ones (no secrets); `DELETE .../tokens/{token}` revokes. Admin only. |
 | `POST /v1/agents/sessions/{id}/uploads` | open a resumable [upload](#large-files-resumable-upload-and-ranged-download) of a large file; chunks go to `PUT .../uploads/{upload}?offset=N`, then `POST .../complete`. `GET .../files/range` reads a slice. |
 | `GET /v1/agents/sessions/{id}/approvals` | the session's [approval](#approvals) requests. `POST .../approvals/{approval}/approve` and `.../deny` decide one (`{note?}`); admin only. |
@@ -794,7 +795,7 @@ Each item says why it is not in the MVP.
 | Workspace overlay mode, read-only mounts | `mode: "overlay"` is refused; clone is the only writable mode |
 | Process policy: argv rules as a security boundary | `process.enforce: "exec"` (`fluxctl agent create --cmd-allow ... --cmd-enforce`) makes the `allow`/`ask` programs a kernel-enforced executable allow-list (Landlock), which holds for `sh -c`, scripts and children. `deny` and argument patterns (`git push*`) are still string globs, because the kernel sees paths, not arguments. Unit-tested; not yet run on a real Linux guest |
 | HTTP method/path rules on `vz` | the runner's allow-list proxy matches host names only; per-session rules are enforced by the host egress proxy (see above) |
-| Streaming exec output | `exec` is still buffered; jobs stream over SSE (long-polled from the guest supervisor, or polled every 400 ms on older agents) and the terminal (`shell`) streams |
+| Streaming exec output | **Done:** `POST .../exec/stream` (`fluxctl agent exec --stream`). Plain `exec` stays buffered; the stream is a job under the hood, long-polled from the guest supervisor or polled every 400 ms on older agents |
 | Replay | the ledger is a log, not a recording |
 | Preview URLs: large or streamed responses | WebSocket upgrades are bridged (run with Chrome DevTools); large and streamed bodies were not run through the preview route |
 | Browser / computer-use profile | a CDP recipe works on the stock image (see Browser above); no prebuilt browser image, no Playwright client run, no computer-use display profile |

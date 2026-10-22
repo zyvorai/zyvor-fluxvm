@@ -177,6 +177,10 @@ pub enum AgentCommand {
         /// If the command needs approval, wait up to this many seconds (at most 120) for the decision.
         #[arg(long)]
         approval_wait: Option<u64>,
+        /// Print output as the command produces it (REST: `POST .../exec/stream`) instead of when it
+        /// ends. The command runs as a job, so the guest needs the job supervisor to stream live.
+        #[arg(long)]
+        stream: bool,
         #[arg(trailing_var_arg = true, allow_hyphen_values = true, required = true)]
         command: Vec<String>,
     },
@@ -1185,6 +1189,7 @@ pub async fn run(r: &Remote, cmd: AgentCommand) -> Result<()> {
             timeout_seconds,
             approval_id,
             approval_wait,
+            stream,
             command,
         } => {
             let mut body = json!({ "command": guest_command(&command) });
@@ -1196,6 +1201,9 @@ pub async fn run(r: &Remote, cmd: AgentCommand) -> Result<()> {
             }
             if let Some(w) = approval_wait {
                 body["approval_wait_seconds"] = json!(w);
+            }
+            if stream {
+                return stream_exec(&r, id, body).await;
             }
             let v = r
                 .call(
@@ -2340,6 +2348,65 @@ async fn send_otlp(endpoint: &str, headers: &[String], doc: &Value) -> Result<()
     Ok(())
 }
 
+/// What one `exec/stream` event does to the terminal. Pure so it is unit-tested.
+#[derive(Debug, PartialEq)]
+pub(crate) enum StreamAction {
+    Stdout(String),
+    Stderr(String),
+    Exit(i32),
+    Fail(String),
+    Ignore,
+}
+
+pub(crate) fn stream_action(event: &str, data: &str) -> StreamAction {
+    let v: Value = serde_json::from_str(data).unwrap_or(Value::Null);
+    let text = |v: &Value| v["output"].as_str().unwrap_or("").to_string();
+    match event {
+        "output" => StreamAction::Stdout(text(&v)),
+        "stderr" => StreamAction::Stderr(text(&v)),
+        "exit" => StreamAction::Exit(match v["exit_code"].as_i64() {
+            Some(c) => c.clamp(0, 255) as i32,
+            // Killed by a signal or timed out: no code, but not a success.
+            None => 1,
+        }),
+        "error" => StreamAction::Fail(v["error"].as_str().unwrap_or(data).to_string()),
+        _ => StreamAction::Ignore,
+    }
+}
+
+/// `exec --stream`: relay output as it arrives and exit with the command's code.
+async fn stream_exec(r: &crate::remote::Remote, id: Uuid, body: Value) -> Result<()> {
+    use std::io::Write as _;
+    let mut code = None;
+    r.follow_sse_with(
+        Method::POST,
+        &format!("/v1/agents/sessions/{id}/exec/stream"),
+        Some(body),
+        |event, data| {
+            match stream_action(event, data) {
+                StreamAction::Stdout(s) => {
+                    print!("{s}");
+                    let _ = std::io::stdout().flush();
+                }
+                StreamAction::Stderr(s) => {
+                    eprint!("{s}");
+                    let _ = std::io::stderr().flush();
+                }
+                StreamAction::Exit(c) => code = Some(c),
+                StreamAction::Fail(e) => anyhow::bail!("exec stream: {e}"),
+                StreamAction::Ignore => {}
+            }
+            Ok(())
+        },
+    )
+    .await?;
+    match code {
+        Some(0) => Ok(()),
+        Some(c) => std::process::exit(c.max(1)),
+        None => anyhow::bail!("exec stream ended without an exit event"),
+    }
+}
+
 /// Add `runtime.volumes` from `NAME:/guest/path` specs.
 pub(crate) fn add_volumes(body: &mut Value, specs: &[String]) -> Result<()> {
     if specs.is_empty() {
@@ -2684,6 +2751,35 @@ mod tests {
         let mut c = json!({"agent": "custom"});
         add_volumes(&mut c, &["v:/data".into()]).unwrap();
         assert_eq!(c["runtime"]["volumes"][0]["path"], "/data");
+    }
+
+    #[test]
+    fn exec_stream_events_map_to_terminal_actions() {
+        assert_eq!(
+            stream_action("output", r#"{"offset":0,"next_offset":3,"output":"hi\n"}"#),
+            StreamAction::Stdout("hi\n".into())
+        );
+        assert_eq!(
+            stream_action("stderr", r#"{"output":"oops"}"#),
+            StreamAction::Stderr("oops".into())
+        );
+        assert_eq!(
+            stream_action("exit", r#"{"exit_code":3}"#),
+            StreamAction::Exit(3)
+        );
+        // A signal or a timeout has no exit code and still fails.
+        assert_eq!(
+            stream_action("exit", r#"{"exit_code":null,"state":"timed_out"}"#),
+            StreamAction::Exit(1)
+        );
+        assert_eq!(
+            stream_action("error", r#"{"error":"session is stopped"}"#),
+            StreamAction::Fail("session is stopped".into())
+        );
+        assert_eq!(
+            stream_action("start", r#"{"job":"x"}"#),
+            StreamAction::Ignore
+        );
     }
 
     #[test]

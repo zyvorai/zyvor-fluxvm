@@ -87,6 +87,7 @@ pub(crate) fn routes() -> Router<Arc<VmManager>> {
             get(get_session).delete(delete_session),
         )
         .route("/v1/agents/sessions/{id}/exec", post(exec_session))
+        .route("/v1/agents/sessions/{id}/exec/stream", post(exec_stream))
         .route("/v1/agents/sessions/{id}/probe", get(probe))
         .route("/v1/agents/sessions/{id}/screenshot", get(screenshot))
         .route("/v1/agents/sessions/{id}/input", post(screen_input))
@@ -2931,6 +2932,67 @@ async fn exec_session(
         }),
     );
     Ok((StatusCode::OK, Json(out)))
+}
+
+/// `POST .../exec/stream`: `exec` whose output arrives as Server-Sent Events while the command
+/// runs. It starts the command as a job (so the session's process policy, approvals, budget,
+/// confinement and rewind all apply exactly as for `POST .../jobs`) and follows the job's stream:
+/// a `start` event with the job id, then `output` / `stderr` events (same shape and resumable ids
+/// as `GET .../jobs/{job}/stream`), then one `exit` event. The job stays in the session's job
+/// list, so a dropped client can resume with `GET .../jobs/{job}/stream` and `Last-Event-ID`.
+/// A command held for approval answers `428` as plain JSON, like `exec`.
+async fn exec_stream(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    scope: Option<Extension<SessionScope>>,
+    token_tenant: Option<Extension<TokenTenant>>,
+    Path(id): Path<Uuid>,
+    Json(body): Json<ExecBody>,
+) -> Result<axum::response::Response, ApiError> {
+    use axum::response::IntoResponse;
+    use axum::response::sse::{Event, KeepAlive, Sse};
+    use futures::StreamExt as _;
+    authorize(role, &scope, id, Op::Exec)?;
+    let job_body = JobBody {
+        command: body.command,
+        stdin: false,
+        max_output_bytes: None,
+        timeout_seconds: body.timeout_seconds,
+        approval_id: body.approval_id,
+        approval_wait_seconds: body.approval_wait_seconds,
+    };
+    // The caller was authorized for `exec` above, and following the output of the job it just
+    // started is part of that. The job routes check `jobs`, which an `exec`-only session token
+    // lacks, so they are entered as the host's admin; the tenant check still applies.
+    let (status, Json(started)) = job_start(
+        State(m.clone()),
+        Extension(Role::Admin),
+        None,
+        token_tenant.clone(),
+        Path(id),
+        Json(job_body),
+    )
+    .await?;
+    let Some(job) = started["job"].as_str().and_then(|j| j.parse::<Uuid>().ok()) else {
+        // Not started: an approval is pending (`428`) or similar. Same answer as `exec`.
+        return Ok((status, Json(started)).into_response());
+    };
+    let sess = load(&m, id, &caller_tenant(&token_tenant)).await?;
+    let mut inner = Box::pin(job_event_stream(m, sess, id, job, 0, 0).await?);
+    let first = Event::default().event("start").data(
+        json!({"job": job, "engine": started["engine"], "enforcement": started["enforcement"]})
+            .to_string(),
+    );
+    // A `start` event first, then everything the job's stream sends.
+    let events = async_stream::stream! {
+        yield Ok::<Event, std::convert::Infallible>(first);
+        while let Some(ev) = inner.next().await {
+            yield ev;
+        }
+    };
+    Ok(Sse::new(events)
+        .keep_alive(KeepAlive::default())
+        .into_response())
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -6675,7 +6737,7 @@ async fn job_stream(
     >,
     ApiError,
 > {
-    use axum::response::sse::{Event, KeepAlive, Sse};
+    use axum::response::sse::{KeepAlive, Sse};
     authorize(role, &scope, id, Op::Jobs)?;
     let s = load(&m, id, &caller_tenant(&token_tenant)).await?;
     running(&s)?;
@@ -6685,6 +6747,24 @@ async fn job_stream(
         .map(parse_event_offsets);
     let start = q.offset.or(last.map(|l| l.0)).unwrap_or(0);
     let err_start = q.stderr_offset.or(last.map(|l| l.1)).unwrap_or(0);
+    let stream = job_event_stream(m, s, id, job, start, err_start).await?;
+    Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
+}
+
+/// The events of one job's output, from the given offsets: the body of `GET .../jobs/{job}/stream`
+/// and of `POST .../exec/stream`. Counts against the host's stream limit until it is dropped.
+async fn job_event_stream(
+    m: Arc<VmManager>,
+    s: Session,
+    id: Uuid,
+    job: Uuid,
+    start: u64,
+    err_start: u64,
+) -> Result<
+    impl futures::Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>>,
+    ApiError,
+> {
+    use axum::response::sse::Event;
     let supervised = job_meta_read(&m, id)
         .await
         .iter()
@@ -6853,7 +6933,7 @@ async fn job_stream(
             tokio::time::sleep(JOB_STREAM_POLL).await;
         }
     };
-    Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
+    Ok(stream)
 }
 
 #[derive(Debug, Deserialize, Default)]
