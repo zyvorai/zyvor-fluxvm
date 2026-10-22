@@ -82,7 +82,16 @@ pub fn apply_layer<'a, R: Read + 'a>(
     }
     // The diff_id covers the whole stream, including the end-of-archive padding tar stops short of.
     io::copy(&mut hashing, &mut io::sink())?;
-    Ok(format!("sha256:{:x}", hashing.hasher.finalize()))
+    Ok(format!("sha256:{}", hex(&hashing.hasher.finalize())))
+}
+
+/// Lowercase hex of a digest (the sha2 0.11 output type no longer implements `LowerHex`).
+fn hex(digest: &[u8]) -> String {
+    use std::fmt::Write;
+    digest.iter().fold(String::new(), |mut s, b| {
+        let _ = write!(s, "{b:02x}");
+        s
+    })
 }
 
 /// Archive path to a relative path; absolute and `./` prefixes are dropped, `..` is refused.
@@ -426,7 +435,7 @@ mod tests {
     }
 
     fn sha(b: &[u8]) -> String {
-        format!("sha256:{:x}", Sha256::digest(b))
+        format!("sha256:{}", super::hex(&Sha256::digest(b)))
     }
 
     fn apply(root: &Path, tar: &[u8], c: Compression) -> Result<String> {

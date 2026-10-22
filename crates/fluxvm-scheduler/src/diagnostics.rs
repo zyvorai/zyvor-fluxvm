@@ -708,7 +708,7 @@ fn sha256_file(path: &Path) -> Result<String> {
         }
         h.update(&buf[..n]);
     }
-    Ok(format!("{:x}", h.finalize()))
+    Ok(hex::encode(h.finalize()))
 }
 
 /// The last `lines` lines of `path`, read from at most its last
@@ -810,7 +810,7 @@ fn fingerprint(v: &Value) -> Value {
         Value::String(s) => s.clone(),
         other => other.to_string(),
     };
-    let digest = format!("{:x}", Sha256::digest(raw.as_bytes()));
+    let digest = hex::encode(Sha256::digest(raw.as_bytes()));
     Value::String(format!("redacted:sha256:{}", &digest[..16]))
 }
 

@@ -8,7 +8,7 @@
 //! failures lock the token out briefly.
 
 use fluxvm_core::config::{AuthConfig, MfaRule, MfaScope};
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use sha1::Sha1;
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
@@ -108,7 +108,8 @@ pub fn base32_decode(input: &str) -> Option<Vec<u8>> {
 
 /// HOTP value (RFC 4226) for `counter`, 6 digits.
 pub fn hotp(secret: &[u8], counter: u64) -> u32 {
-    let mut mac = <Hmac<Sha1> as Mac>::new_from_slice(secret).expect("HMAC takes any key length");
+    let mut mac =
+        <Hmac<Sha1> as KeyInit>::new_from_slice(secret).expect("HMAC takes any key length");
     mac.update(&counter.to_be_bytes());
     let h = mac.finalize().into_bytes();
     let off = (h[19] & 0x0f) as usize;

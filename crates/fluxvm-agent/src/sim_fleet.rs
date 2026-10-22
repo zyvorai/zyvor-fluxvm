@@ -217,7 +217,7 @@ async fn node_task(job: NodeJob) -> Tally {
     }
     if let Some(join) = enroll_with {
         // A stable id per name, so a rerun finds the same enrollment instead of a conflict.
-        let node_id = format!("{:x}", Sha256::digest(name.as_bytes()))[..32].to_owned();
+        let node_id = hex::encode(Sha256::digest(name.as_bytes()))[..32].to_owned();
         // Like a real node: a 429 is waited out (Retry-After) and tried again.
         let mut tries = 0;
         loop {

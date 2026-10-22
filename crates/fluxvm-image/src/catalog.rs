@@ -196,7 +196,7 @@ pub async fn add_entry(
         .await
         .with_context(|| format!("fetching '{source}'"))?;
     let bytes = fs::read(&local).with_context(|| format!("reading {}", local.display()))?;
-    let sha256 = format!("{:x}", Sha256::digest(&bytes));
+    let sha256 = hex::encode(Sha256::digest(&bytes));
     let entry = CatalogEntry {
         name,
         source,
@@ -696,7 +696,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let image_path = dir.path().join("base.qcow2");
         fs::write(&image_path, b"fake-image-bytes").unwrap();
-        let sha256 = format!("{:x}", sha2::Sha256::digest(b"fake-image-bytes"));
+        let sha256 = hex::encode(sha2::Sha256::digest(b"fake-image-bytes"));
 
         let catalog_path = write_catalog(
             dir.path(),
@@ -727,7 +727,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let image_path = dir.path().join("base.qcow2");
         fs::write(&image_path, b"original-bytes").unwrap();
-        let sha256_of_original = format!("{:x}", sha2::Sha256::digest(b"original-bytes"));
+        let sha256_of_original = hex::encode(sha2::Sha256::digest(b"original-bytes"));
 
         let catalog_path = write_catalog(
             dir.path(),

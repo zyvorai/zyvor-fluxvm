@@ -14,7 +14,7 @@ use aes_gcm::aead::{Aead, KeyInit, Payload};
 use aes_gcm::{Aes256Gcm, Nonce};
 use anyhow::{Context, Result, bail};
 use base64::Engine;
-use rand::RngCore;
+use rand::Rng;
 use sha2::{Digest, Sha256};
 use std::fs::File;
 use std::io::{BufReader, BufWriter, Read, Write};
@@ -66,7 +66,7 @@ fn fill(r: &mut impl Read, buf: &mut [u8]) -> Result<usize> {
 pub fn encrypt_file(src: &Path, dst: &Path, key: &[u8; 32]) -> Result<()> {
     let cipher = Aes256Gcm::new(key.into());
     let mut prefix = [0u8; 8];
-    rand::thread_rng().fill_bytes(&mut prefix);
+    rand::rng().fill_bytes(&mut prefix);
     let mut r =
         BufReader::new(File::open(src).with_context(|| format!("opening {}", src.display()))?);
     let mut w =
@@ -87,7 +87,7 @@ pub fn encrypt_file(src: &Path, dst: &Path, key: &[u8; 32]) -> Result<()> {
         let last = next_len == 0;
         let ct = cipher
             .encrypt(
-                Nonce::from_slice(&nonce(&prefix, index)),
+                &Nonce::from(nonce(&prefix, index)),
                 Payload {
                     msg: &cur[..cur_len],
                     aad: &aad(&prefix, index, last),
@@ -148,7 +148,7 @@ pub fn decrypt_file(src: &Path, dst: &Path, key: &[u8; 32]) -> Result<()> {
         let last = next.is_none();
         let pt = cipher
             .decrypt(
-                Nonce::from_slice(&nonce(&prefix, index)),
+                &Nonce::from(nonce(&prefix, index)),
                 Payload { msg: &cur, aad: &aad(&prefix, index, last) },
             )
             .map_err(|_| {

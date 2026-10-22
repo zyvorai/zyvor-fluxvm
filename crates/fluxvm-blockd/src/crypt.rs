@@ -17,8 +17,7 @@
 
 use crate::seams::BlockCipher;
 use aes::Aes256;
-use aes::cipher::generic_array::GenericArray;
-use aes::cipher::{BlockDecrypt, BlockEncrypt, KeyInit};
+use aes::cipher::{BlockCipherDecrypt, BlockCipherEncrypt, KeyInit};
 use sha2::{Digest, Sha256};
 use std::io;
 use std::path::Path;
@@ -80,8 +79,10 @@ impl XtsCipher {
             return Err(invalid("XTS key halves must differ"));
         }
         Ok(Self {
-            k1: Aes256::new(GenericArray::from_slice(&material[..32])),
-            k2: Aes256::new(GenericArray::from_slice(&material[32..])),
+            k1: Aes256::new_from_slice(&material[..32])
+                .map_err(|_| invalid("XTS key half is 32 bytes"))?,
+            k2: Aes256::new_from_slice(&material[32..])
+                .map_err(|_| invalid("XTS key half is 32 bytes"))?,
             material,
         })
     }
@@ -130,12 +131,12 @@ impl XtsCipher {
         }
         let mut t = [0u8; 16];
         t[..8].copy_from_slice(&block_index.to_le_bytes());
-        self.k2.encrypt_block(GenericArray::from_mut_slice(&mut t));
+        self.k2.encrypt_block((&mut t).into());
         for chunk in data.as_chunks_mut::<16>().0 {
             for (c, k) in chunk.iter_mut().zip(t.iter()) {
                 *c ^= k;
             }
-            let b = GenericArray::from_mut_slice(&mut chunk[..]);
+            let b = (&mut *chunk).into();
             if enc {
                 self.k1.encrypt_block(b);
             } else {

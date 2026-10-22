@@ -243,7 +243,7 @@ fn signature(len: u64, mtime_secs: i64, wanted_sha256: &str) -> String {
 
 #[cfg(test)]
 fn hash_file_bytes(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
+    hex::encode(Sha256::digest(bytes))
 }
 
 fn hash_file(path: &Path) -> std::io::Result<String> {
@@ -257,7 +257,7 @@ fn hash_file(path: &Path) -> std::io::Result<String> {
         }
         hasher.update(&buf[..n]);
     }
-    Ok(format!("{:x}", hasher.finalize()))
+    Ok(hex::encode(hasher.finalize()))
 }
 
 /// Decide `(ready, path, message, verifiedSignature)` for a staged file that
@@ -369,7 +369,7 @@ mod tests {
     #[test]
     fn matching_sha256_is_ready_and_caches_signature() {
         let f = staged(b"golden-image-bytes");
-        let want = format!("{:x}", Sha256::digest(b"golden-image-bytes"));
+        let want = hex::encode(Sha256::digest(b"golden-image-bytes"));
         let (ready, path, message, sig) =
             verify_staged_file(f.path().to_str().unwrap(), Some(&want), None);
         assert!(ready);
@@ -384,7 +384,7 @@ mod tests {
     #[test]
     fn sha256_comparison_is_case_insensitive() {
         let f = staged(b"golden-image-bytes");
-        let want = format!("{:X}", Sha256::digest(b"golden-image-bytes"));
+        let want = hex::encode_upper(Sha256::digest(b"golden-image-bytes"));
         let (ready, ..) = verify_staged_file(f.path().to_str().unwrap(), Some(&want), None);
         assert!(ready);
     }
@@ -392,7 +392,7 @@ mod tests {
     #[test]
     fn mismatched_sha256_is_not_ready_and_has_no_path() {
         let f = staged(b"tampered-bytes");
-        let wrong = format!("{:x}", Sha256::digest(b"not-what-is-on-disk"));
+        let wrong = hex::encode(Sha256::digest(b"not-what-is-on-disk"));
         let (ready, path, message, sig) =
             verify_staged_file(f.path().to_str().unwrap(), Some(&wrong), None);
         assert!(!ready);
@@ -414,7 +414,7 @@ mod tests {
     #[test]
     fn a_fresh_cache_hit_skips_hashing_without_re_reading_the_file() {
         let f = staged(b"golden-image-bytes");
-        let want = format!("{:x}", Sha256::digest(b"golden-image-bytes"));
+        let want = hex::encode(Sha256::digest(b"golden-image-bytes"));
         let (_, _, _, sig) = verify_staged_file(f.path().to_str().unwrap(), Some(&want), None);
         let cached = sig.unwrap();
         // Even if the on-disk content no longer matches, a signature computed
@@ -434,13 +434,13 @@ mod tests {
     #[test]
     fn changing_the_wanted_digest_invalidates_the_cache() {
         let f = staged(b"golden-image-bytes");
-        let want = format!("{:x}", Sha256::digest(b"golden-image-bytes"));
+        let want = hex::encode(Sha256::digest(b"golden-image-bytes"));
         let (_, _, _, sig) = verify_staged_file(f.path().to_str().unwrap(), Some(&want), None);
         let stale_cache = sig.unwrap();
         // Same file, but the operator now asks for a different digest: the
         // stale cache entry (keyed on the old `wanted`) must not short-circuit
         // verification of the new one.
-        let other_wanted = format!("{:x}", Sha256::digest(b"a-different-golden-image"));
+        let other_wanted = hex::encode(Sha256::digest(b"a-different-golden-image"));
         let (ready, _, message, _) = verify_staged_file(
             f.path().to_str().unwrap(),
             Some(&other_wanted),

@@ -644,7 +644,7 @@ impl std::fmt::Display for TenancyError {
 impl std::error::Error for TenancyError {}
 
 pub fn hash_token(token: &str) -> String {
-    format!("{:x}", Sha256::digest(token.as_bytes()))
+    hex::encode(Sha256::digest(token.as_bytes()))
 }
 
 /// A new random bearer token: 64 hex characters (two v4 UUIDs, 244 random bits) with a recognisable prefix.

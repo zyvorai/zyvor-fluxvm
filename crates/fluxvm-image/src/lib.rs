@@ -111,7 +111,7 @@ pub(crate) async fn fetch_if_needed(cfg: &Config, source: &str) -> Result<PathBu
 
 pub(crate) fn verify_sha256(path: &Path, wanted: &str) -> Result<()> {
     let bytes = fs::read(path)?;
-    let got = format!("{:x}", Sha256::digest(&bytes));
+    let got = hex::encode(Sha256::digest(&bytes));
     if !got.eq_ignore_ascii_case(wanted) {
         bail!("sha256 mismatch: expected {wanted}, got {got}");
     }

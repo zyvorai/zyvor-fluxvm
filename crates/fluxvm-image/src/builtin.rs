@@ -395,8 +395,8 @@ async fn fetch_verified(
     }
     out.flush().await?;
     let got = match img.sum {
-        Sum::Sha256 => format!("{:x}", h256.finalize()),
-        Sum::Sha512 => format!("{:x}", h512.finalize()),
+        Sum::Sha256 => hex::encode(h256.finalize()),
+        Sum::Sha512 => hex::encode(h512.finalize()),
     };
     if got != want {
         let _ = fs::remove_file(&part);
