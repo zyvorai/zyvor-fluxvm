@@ -340,6 +340,18 @@ pub enum AgentCommand {
         #[arg(long)]
         signal: Option<String>,
     },
+    /// Start a headless Chromium in the session and print a preview URL for its DevTools endpoint (the
+    /// guest image needs `chromium` and `socat`). Calling it again reuses a running browser.
+    /// REST: `POST .../browser`.
+    Browser {
+        id: Uuid,
+        /// Chromium's DevTools port in the guest; the preview is on this port + 1.
+        #[arg(long)]
+        port: Option<u16>,
+        /// Lifetime of the preview URL in seconds (default 3600).
+        #[arg(long)]
+        ttl: Option<u64>,
+    },
     /// Mint an expiring preview URL for a guest port: whoever holds the URL reaches that port and
     /// nothing else. REST: `POST .../preview`.
     Expose {
@@ -1889,6 +1901,31 @@ pub async fn run(r: &Remote, cmd: AgentCommand) -> Result<()> {
             .await?;
             println!("{}", json!({"ok": true, "killed": job}));
             Ok(())
+        }
+        AgentCommand::Browser { id, port, ttl } => {
+            let mut body = json!({});
+            if let Some(p) = port {
+                body["port"] = json!(p);
+            }
+            if let Some(t) = ttl {
+                body["ttl_seconds"] = json!(t);
+            }
+            let mut v = r
+                .call(
+                    Method::POST,
+                    &format!("/v1/agents/sessions/{id}/browser"),
+                    Some(body),
+                )
+                .await
+                .context("browser")?;
+            // Paths become full URLs, as for `expose`.
+            let base = r.base().trim_end_matches('/').to_string();
+            for key in [("preview", "url"), ("cdp", "http")] {
+                if let Some(path) = v[key.0][key.1].as_str() {
+                    v[key.0][key.1] = json!(format!("{base}{path}"));
+                }
+            }
+            show(&v)
         }
         AgentCommand::Expose { id, port, ttl } => {
             let mut v = r

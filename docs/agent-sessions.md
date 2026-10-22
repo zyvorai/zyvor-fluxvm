@@ -605,6 +605,7 @@ fluxctl agent unexpose <session> <token>
 
 | Route | |
 |---|---|
+| `POST /v1/agents/sessions/{id}/browser` | `{port?, ttl_seconds?}`. Starts headless Chromium and returns a DevTools preview (see Browser). |
 | `POST /v1/agents/sessions/{id}/preview` `{port, ttl_seconds}` | mint (1-86400 s, default 3600); admin, tenant-scoped |
 | `GET  /v1/agents/sessions/{id}/previews` | live ones |
 | `DELETE /v1/agents/sessions/{id}/preview/{token}` | revoke |
@@ -624,7 +625,17 @@ network address, so it has nothing to preview.
 
 ### Browser (Chrome DevTools Protocol)
 
-There is no browser image yet; this is a recipe on the stock `debian-13`, run on this M4 (`vz`, `policy open`, 2 GiB):
+`POST /v1/agents/sessions/{id}/browser` (`fluxctl agent browser <id>`) is the recipe below as one call. It looks for
+Chromium or Chrome and `socat` in the guest and, when either is missing, answers `409` naming what is missing and starts
+nothing. Otherwise it starts headless Chromium (`--headless=new --no-sandbox --disable-gpu`, DevTools on the guest's
+loopback `port`, default 9222) and a `socat` forwarder on `port + 1` as two session jobs (listed, logged and killable like
+any job), waits for the port, and returns a preview of the forwarder with `cdp.http` (`<preview>json/version`). `--no-sandbox`
+is deliberate: the guest VM is the boundary, and Chrome's own sandbox needs user namespaces that the default confined policy
+refuses. A second call reuses a browser that is already listening. Every step goes through the session's own exec, jobs and
+preview gates (the token needs all three). No image ships Chromium: the call is unit and router tested, **not run against
+a real guest** in this session.
+
+The manual recipe, on the stock `debian-13`, run on this M4 (`vz`, `policy open`, 2 GiB):
 
 ```bash
 fluxctl agent run --policy open --memory-mb 2048                 # open: apt needs the network
@@ -805,5 +816,5 @@ Each item says why it is not in the MVP.
 | Streaming exec output | **Done:** `POST .../exec/stream` (`fluxctl agent exec --stream`). Plain `exec` stays buffered; the stream is a job under the hood, long-polled from the guest supervisor or polled every 400 ms on older agents |
 | Replay | the ledger is a log, not a recording |
 | Preview URLs: large or streamed responses | WebSocket upgrades are bridged (run with Chrome DevTools); large and streamed bodies were not run through the preview route |
-| Browser / computer-use profile | a CDP recipe works on the stock image (see Browser above); no prebuilt browser image, no Playwright client run, no computer-use display profile |
+| Browser / computer-use profile | `POST .../browser` starts Chromium and returns a DevTools preview (see Browser); a prebuilt browser image, a Playwright client run, headful/GPU and a computer-use display profile are not done |
 | Secretless credentials at create time | session grants exist (`POST .../grants`, see Credential grants: they end with the session, are capped at its expiry and follow a restore). Declaring them in the create body is not offered on purpose: a grant names a `FLUXVM_SECRET_*` variable, so a tenant able to create one could aim any daemon secret at a host it controls; granting stays an admin call |
