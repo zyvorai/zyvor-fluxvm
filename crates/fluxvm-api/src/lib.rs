@@ -7724,6 +7724,23 @@ mod tests {
             assert!(body.contains("process policy"), "{body}");
         }
 
+        /// `POST .../browser` is gated like the calls it is made of, and refuses a bad port before anything starts.
+        #[tokio::test]
+        async fn browser_start_is_authenticated_tenant_scoped_and_validates_the_port() {
+            let m = procbox_manager(tenant_tokens(), false);
+            let id = seed_session(&m, Some("acme"), "vz", "running");
+            let app = router(m);
+            let uri = format!("/v1/agents/sessions/{id}/browser");
+            assert_eq!(
+                status_for(app.clone(), "POST", &uri, None).await,
+                StatusCode::UNAUTHORIZED
+            );
+            let (st, _) = call(app.clone(), "POST", &uri, "other", Some("{}")).await;
+            assert_eq!(st, StatusCode::NOT_FOUND);
+            let (st, body) = call(app, "POST", &uri, "acme", Some(r#"{"port":80}"#)).await;
+            assert_eq!(st, StatusCode::BAD_REQUEST, "{body}");
+        }
+
         /// `POST .../replay` lists what a ledger can redo, refuses to run without a target, is tenant-scoped, and
         /// sends every command through the target's own exec gates.
         #[tokio::test]
