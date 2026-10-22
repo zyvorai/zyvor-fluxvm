@@ -13,6 +13,7 @@ enforced.
 | Landlock and seccomp enforcement in the guest agent | yes | yes (reads and writes outside the policy, TCP connect, namespaces, memory limit, output cap, timeout) |
 | Fail-closed on unenforceable policy | yes | yes (see below) |
 | `ExecEnforcement` in the exec response | yes | yes |
+| `exec` allow-list (Landlock execute right; `exec_restricted` in the response) | yes | yes, 2026-10-22 (a listed program runs; a script written into a writable dir, an unlisted program and an empty list do not start; Ubuntu guest under QEMU/KVM, VM route) |
 | `fluxctl exec --policy FILE` | yes | yes |
 | Agent refuses requests without a token | yes | yes (`scripts/test-guest-agent-auth.sh`) |
 

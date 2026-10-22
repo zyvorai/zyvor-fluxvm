@@ -806,8 +806,11 @@ Each item says why it is not in the MVP.
 |---|---|
 | Promote a child's *non-file* state (memory, processes, volumes) | promotion copies workspace files only; a child's running processes and memory are not merged |
 | Lazy memory restore (sub-second claim/fork) | **Done on the in-tree KVM engine, not on `vz`.** KVM restores RAM with a `MAP_PRIVATE` mapping of `snap.mem` (pages fault in on first touch, children share unwritten pages; see [fork-and-restore.md](fork-and-restore.md#ram-restore-map_private-with-an-eager-fallback)), so it is not what limits a fork there: one measured child took 4.3–9.2 s, of which RAM restore was about 1.2 s and the guest identity reset about 3.5 s. Not done on `vz` (Apple's Virtualization framework restores the saved state itself, which is the 4.1 s restore above) |
+
 | Workspace overlay across guest reboots | `mode: "overlay"` and `"readonly"` are implemented (see Create); the overlay mount is not persisted in the guest's fstab |
 | Process policy: argv rules as a security boundary | `process.enforce: "exec"` (`fluxctl agent create --cmd-allow ... --cmd-enforce`) makes the `allow`/`ask` programs a kernel-enforced executable allow-list (Landlock), which holds for `sh -c`, scripts and children. `deny` and argument patterns (`git push*`) are still string globs, because the kernel sees paths, not arguments. Unit-tested; not yet run on a real Linux guest |
+
+
 | HTTP method/path rules on `vz` | the runner's allow-list proxy matches host names only; per-session rules are enforced by the host egress proxy (see above) |
 | Streaming exec output | **Done:** `POST .../exec/stream` (`fluxctl agent exec --stream`). Plain `exec` stays buffered; the stream is a job under the hood, long-polled from the guest supervisor or polled every 400 ms on older agents |
 | Replay | the ledger is a log, not a recording |
