@@ -9032,6 +9032,10 @@ for (const a of t.ACTIONS) if (a.run.action === "theme") assert(t.THEMES[a.run.n
                 r#"{"workspace":{"git":"git@github.com:a/b.git"}}"#,
                 r#"{"workspace":{"path":"/a/../b"}}"#,
                 r#"{"workspace":{"mode":"overlay"}}"#,
+                r#"{"workspace":{"mode":"overlay","lower":"relative/dir"}}"#,
+                r#"{"workspace":{"mode":"overlay","lower":"/workspace"}}"#,
+                r#"{"workspace":{"mode":"overlay","lower":"/opt/app","git":"https://github.com/a/b"}}"#,
+                r#"{"workspace":{"mode":"clone","lower":"/opt/app"}}"#,
                 r#"{"agent":"bad agent"}"#,
             ] {
                 let (st, msg) = call(

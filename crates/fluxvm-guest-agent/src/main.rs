@@ -1171,88 +1171,135 @@ fn run_tool(cmd: &str, args: &[&str]) -> Result<bool, String> {
     }
 }
 
+#[cfg(target_os = "linux")]
+fn extras_ssh_host_keys(applied: &mut Vec<String>, failures: &mut Vec<String>) {
+    let dir = std::path::Path::new("/etc/ssh");
+    let mut ok = true;
+    if dir.is_dir() {
+        if let Ok(rd) = std::fs::read_dir(dir) {
+            for e in rd.flatten() {
+                let n = e.file_name().to_string_lossy().into_owned();
+                if n.starts_with("ssh_host_")
+                    && (n.ends_with("_key") || n.ends_with("_key.pub"))
+                    && let Err(err) = std::fs::remove_file(e.path())
+                {
+                    failures.push(format!("removing {n}: {err}"));
+                    ok = false;
+                }
+            }
+        }
+        match run_tool("ssh-keygen", &["-A"]) {
+            Ok(_) => {}
+            Err(e) => {
+                failures.push(e);
+                ok = false;
+            }
+        }
+        // Best effort: a running sshd still holds the old keys in memory.
+        let _ = run_tool(
+            "systemctl",
+            &["try-reload-or-restart", "ssh.service", "sshd.service"],
+        );
+    }
+    if ok {
+        applied.push("ssh-host-keys".to_string());
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn extras_cloud_init(applied: &mut Vec<String>, failures: &mut Vec<String>) {
+    match run_tool("cloud-init", &["clean", "--logs"]) {
+        Ok(_) => applied.push("cloud-init".to_string()),
+        Err(e) => failures.push(e),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn extras_dhcp(applied: &mut Vec<String>, failures: &mut Vec<String>) {
+    let networkd_active =
+        run_tool("systemctl", &["is-active", "--quiet", "systemd-networkd"]).unwrap_or(false);
+    if !networkd_active {
+        applied.push("dhcp".to_string());
+    } else {
+        let ifaces: Vec<String> = std::fs::read_dir("/sys/class/net")
+            .map(|rd| {
+                rd.flatten()
+                    .map(|e| e.file_name().to_string_lossy().into_owned())
+                    .filter(|n| n != "lo")
+                    .collect()
+            })
+            .unwrap_or_default();
+        let _ = run_tool("networkctl", &["reload"]);
+        let mut args = vec!["reconfigure"];
+        args.extend(ifaces.iter().map(String::as_str));
+        match run_tool("networkctl", &args) {
+            Ok(_) => applied.push("dhcp".to_string()),
+            Err(e) => failures.push(e),
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn extras_network_state(applied: &mut Vec<String>, failures: &mut Vec<String>) {
+    let mut ok = true;
+    for (cmd, args) in [
+        ("ip", &["neigh", "flush", "all"][..]),
+        ("ip", &["route", "flush", "cache"][..]),
+    ] {
+        if let Err(e) = run_tool(cmd, args) {
+            failures.push(e);
+            ok = false;
+        }
+    }
+    let _ = run_tool("conntrack", &["-F"]);
+    if ok {
+        applied.push("network-state".to_string());
+    }
+}
+
 /// The identity a clone shares with its parent beyond hostname, machine-id and entropy. A step whose tool or
 /// subject is absent (no sshd, no cloud-init, no networkd) is reported applied: there is nothing to reset, and a strict
 /// caller must not fail a guest for lacking software.
 #[cfg(target_os = "linux")]
 fn reset_identity_extras(x: ExtraResets, applied: &mut Vec<String>, failures: &mut Vec<String>) {
-    if x.ssh_host_keys {
-        let dir = std::path::Path::new("/etc/ssh");
-        let mut ok = true;
-        if dir.is_dir() {
-            if let Ok(rd) = std::fs::read_dir(dir) {
-                for e in rd.flatten() {
-                    let n = e.file_name().to_string_lossy().into_owned();
-                    if n.starts_with("ssh_host_")
-                        && (n.ends_with("_key") || n.ends_with("_key.pub"))
-                        && let Err(err) = std::fs::remove_file(e.path())
-                    {
-                        failures.push(format!("removing {n}: {err}"));
-                        ok = false;
-                    }
-                }
-            }
-            match run_tool("ssh-keygen", &["-A"]) {
-                Ok(_) => {}
-                Err(e) => {
-                    failures.push(e);
-                    ok = false;
-                }
-            }
-            // Best effort: a running sshd still holds the old keys in memory.
-            let _ = run_tool(
-                "systemctl",
-                &["try-reload-or-restart", "ssh.service", "sshd.service"],
-            );
-        }
-        if ok {
-            applied.push("ssh-host-keys".to_string());
-        }
-    }
-    if x.cloud_init {
-        match run_tool("cloud-init", &["clean", "--logs"]) {
-            Ok(_) => applied.push("cloud-init".to_string()),
-            Err(e) => failures.push(e),
-        }
-    }
-    if x.dhcp {
-        let networkd_active =
-            run_tool("systemctl", &["is-active", "--quiet", "systemd-networkd"]).unwrap_or(false);
-        if !networkd_active {
-            applied.push("dhcp".to_string());
-        } else {
-            let ifaces: Vec<String> = std::fs::read_dir("/sys/class/net")
-                .map(|rd| {
-                    rd.flatten()
-                        .map(|e| e.file_name().to_string_lossy().into_owned())
-                        .filter(|n| n != "lo")
-                        .collect()
+    // The steps do not depend on one another (host keys and sshd, cloud-init's state, networkd and the neighbour
+    // cache), and the slowest, RSA host key generation, dominates a reset, so they run side by side: the reset takes as
+    // long as its slowest step. Results are merged in a fixed order, so the response is the same as before.
+    type Step = fn(&mut Vec<String>, &mut Vec<String>);
+    let steps: [(bool, Step); 4] = [
+        (x.ssh_host_keys, extras_ssh_host_keys),
+        (x.cloud_init, extras_cloud_init),
+        (x.dhcp, extras_dhcp),
+        (x.network_state, extras_network_state),
+    ];
+    let results: Vec<(Vec<String>, Vec<String>)> = std::thread::scope(|sc| {
+        let handles: Vec<_> = steps
+            .iter()
+            .filter(|(asked, _)| *asked)
+            .map(|(_, step)| {
+                let step = *step;
+                sc.spawn(move || {
+                    let (mut a, mut f) = (Vec::new(), Vec::new());
+                    step(&mut a, &mut f);
+                    (a, f)
                 })
-                .unwrap_or_default();
-            let _ = run_tool("networkctl", &["reload"]);
-            let mut args = vec!["reconfigure"];
-            args.extend(ifaces.iter().map(String::as_str));
-            match run_tool("networkctl", &args) {
-                Ok(_) => applied.push("dhcp".to_string()),
-                Err(e) => failures.push(e),
-            }
-        }
-    }
-    if x.network_state {
-        let mut ok = true;
-        for (cmd, args) in [
-            ("ip", &["neigh", "flush", "all"][..]),
-            ("ip", &["route", "flush", "cache"][..]),
-        ] {
-            if let Err(e) = run_tool(cmd, args) {
-                failures.push(e);
-                ok = false;
-            }
-        }
-        let _ = run_tool("conntrack", &["-F"]);
-        if ok {
-            applied.push("network-state".to_string());
-        }
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|h| {
+                h.join().unwrap_or_else(|_| {
+                    (
+                        Vec::new(),
+                        vec!["an identity reset step panicked".to_string()],
+                    )
+                })
+            })
+            .collect()
+    });
+    for (a, f) in results {
+        applied.extend(a);
+        failures.extend(f);
     }
 }
 
