@@ -1544,14 +1544,16 @@ fn mount_script(serial: &str, path: &str) -> String {
     )
 }
 
-/// Mounts `lower` copy-on-write at `path`; the upper and work layers live under `/var/lib/fluxvm-overlay`
-/// (root-owned, not in the agent's write set), so the agent cannot edit the lower layer around the mount.
+/// Mounts `lower` copy-on-write at `path`; the upper and work layers live under `/var/lib/fluxvm-overlay/<key>`, made
+/// mode 0700 and root-owned before the mount, so the agent user cannot reach them: writing into a live upper layer
+/// directly would bypass the merged view and can corrupt it. (The chown below changes the merged root, which is the
+/// upper layer's own root, so the directory above it is what keeps the agent out.)
 fn overlay_script(lower: &str, path: &str) -> String {
     let (l, p) = (shell_quote(lower), shell_quote(path));
     format!(
         "set -e; [ -d {l} ] || {{ echo lower directory missing >&2; exit 3; }}; \
          key=$(printf %s {p} | tr -c 'A-Za-z0-9' _); u=/var/lib/fluxvm-overlay/$key; \
-         sudo -n mkdir -p $u/upper $u/work {p}; \
+         sudo -n mkdir -p $u/upper $u/work {p}; sudo -n chmod 700 $u; \
          mountpoint -q {p} || sudo -n mount -t overlay overlay -o lowerdir={l},upperdir=$u/upper,workdir=$u/work {p}; \
          sudo -n chown \"$(id -u):$(id -g)\" {p}"
     )
@@ -9379,6 +9381,7 @@ mod tests {
         assert!(s.contains("/var/lib/fluxvm-overlay/"), "{s}");
         assert!(s.contains("mountpoint -q '/workspace'"), "{s}");
         assert!(s.contains("exit 3"), "{s}");
+        assert!(s.contains("chmod 700 $u"), "{s}");
     }
 
     #[test]
