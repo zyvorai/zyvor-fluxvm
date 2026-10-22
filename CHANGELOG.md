@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- **Egress policy for user-mode (slirp) guests.** `fluxvm_qemu_egress` allowed only loopback, so a guest on QEMU
+  user-mode networking could reach nothing (no guest agent download, no package mirror, no control plane) and no policy
+  could change that: `network/policy` needs a host-visible interface. The program now reads a per-VM policy from pinned
+  maps: `loopback` (the unchanged default), `allowlist` (`cidr` + optional `tcp|udp/port` rules), `audit` (allow
+  everything, record what an allow-list would have dropped) and `open`. Refused or would-be-refused destinations are
+  counted per `(address, port, protocol)`, so `POST /v1/vms/{id}/network/egress/suggest` can propose the rules that
+  fix a denial. New: `GET/PUT/DELETE /v1/vms/{id}/network/egress`, `…/egress/observed`, `…/egress/suggest[?apply=true]`,
+  `GET/PUT /v1/network/egress/defaults[?apply_running=true]`, `CreateVmRequest.egress`, `[sandbox.dataplane]
+  qemu_egress_mode` / `qemu_egress_rules`, and `fluxctl network egress*`. A VM started before this build keeps the old
+  program (no maps) and must be restarted to take a policy. IPv4 only; Cilium rewrites service addresses to the backend
+  before the hook runs, so rules must name the backend. See docs/qemu-egress.md.
+
 
 - **`exec`, `shell`, `sandbox run` and `fleet exec` keep argument boundaries.** Several words after `--` were joined with
   spaces, so `fluxctl exec ID -- sh -c 'a b'` ran `sh -c a b` and `{{.Names}}`-style arguments were lost. They now use
