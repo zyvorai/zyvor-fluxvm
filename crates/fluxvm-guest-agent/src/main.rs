@@ -1262,22 +1262,33 @@ fn extras_network_state(applied: &mut Vec<String>, failures: &mut Vec<String>) {
 /// caller must not fail a guest for lacking software.
 #[cfg(target_os = "linux")]
 fn reset_identity_extras(x: ExtraResets, applied: &mut Vec<String>, failures: &mut Vec<String>) {
-    // The steps do not depend on one another (host keys and sshd, cloud-init's state, networkd and the neighbour
-    // cache), and the slowest, RSA host key generation, dominates a reset, so they run side by side: the reset takes as
-    // long as its slowest step. Results are merged in a fixed order, so the response is the same as before.
-    type Step = fn(&mut Vec<String>, &mut Vec<String>);
-    let steps: [(bool, Step); 4] = [
-        (x.ssh_host_keys, extras_ssh_host_keys),
-        (x.cloud_init, extras_cloud_init),
-        (x.dhcp, extras_dhcp),
-        (x.network_state, extras_network_state),
+    // Host keys and sshd, cloud-init's state and the network steps do not depend on one another, and the slowest,
+    // RSA host key generation, dominates a reset, so those three run side by side. The network steps stay in order:
+    // `ip neigh flush` exits non-zero ("dump interrupted") when `networkctl reconfigure` changes the neighbour table
+    // under it, and a strict fork treats that as a failed reset (seen on a real guest). Results are merged in a fixed
+    // order, so the response is the same as before.
+    type Step = Box<dyn FnOnce(&mut Vec<String>, &mut Vec<String>) + Send>;
+    let (dhcp, network_state) = (x.dhcp, x.network_state);
+    let steps: [(bool, Step); 3] = [
+        (x.ssh_host_keys, Box::new(extras_ssh_host_keys)),
+        (x.cloud_init, Box::new(extras_cloud_init)),
+        (
+            dhcp || network_state,
+            Box::new(move |a, f| {
+                if dhcp {
+                    extras_dhcp(a, f);
+                }
+                if network_state {
+                    extras_network_state(a, f);
+                }
+            }),
+        ),
     ];
     let results: Vec<(Vec<String>, Vec<String>)> = std::thread::scope(|sc| {
         let handles: Vec<_> = steps
-            .iter()
+            .into_iter()
             .filter(|(asked, _)| *asked)
             .map(|(_, step)| {
-                let step = *step;
                 sc.spawn(move || {
                     let (mut a, mut f) = (Vec::new(), Vec::new());
                     step(&mut a, &mut f);
