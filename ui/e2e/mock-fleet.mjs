@@ -26,6 +26,17 @@ http.createServer((req, res) => {
     if (!/Bearer demo/.test(req.headers.authorization || '')) return j(res, { error: 'missing or invalid bearer token' }, 401);
     const op = !/tenant/.test(req.headers.authorization);
     if (p === '/fleet/tenants/me') return op ? j(res, { error: 'not a tenant' }, 400) : j(res, { id: 'acme' });
+    if (p === '/fleet/ha') return j(res, { enabled: true, me: 'https://central-a.example.com', leader: 'https://central-a.example.com', is_leader: true });
+    if (p === '/fleet/policy') return j(res, { min_lease_hours: 24, overlay_key_rotation_days: 30, tunnels: { enabled: true, max_per_tenant: 8 } });
+    if (p === '/fleet/rebalance/plan') return j(res, { moves: [{ vm: 'build-01', from: 'mac-studio-1', to: 'mac-mini-2', memory_mib: 8192 }], skipped: [] });
+    if (p === '/fleet/metrics/summary') return j(res, { scope: 'fleet', nodes_reporting: 3, cpu_percent: 41.5, memory_percent: 78.2, vms: 9, vms_running: 7 });
+    if (p === '/fleet/billing/invoices') return j(res, { items: [{ month: '2026-09', total_usd: 388.2, status: 'paid' }, { month: '2026-10', total_usd: 412.5, status: 'open' }] });
+    if (p === '/fleet/capacity') return j(res, { nodes_total: 3, nodes_healthy: 3, nodes_cordoned: 1, nodes_schedulable: 2, vm_count: 9, vcpus_total: 48, vcpus_used: 39, vcpus_free: 9, memory_mib_total: 196608, memory_mib_used: 90112, memory_mib_free: 106496 });
+    if (p === '/fleet/volumes') return j(res, { items: [{ id: 'vol-aaaaaaaaaaaa', name: 'build-cache', tenant: op ? 'acme' : null, node: 'mac-studio-1', size_gib: 100, attached_to: 'vm-1', format: 'raw' }, { id: 'vol-bbbbbbbbbbbb', name: 'scratch', tenant: op ? 'acme' : null, node: 'mac-mini-2', size_gib: 20, attached_to: null }, { id: 'vol-cccccccccccc', name: 'new-one', node: 'mac-mini-2', size_gib: 10, creating: true }] });
+    if (p === '/fleet/pools') return j(res, { items: [{ name: 'xcode', image: 'macos-14', size: 3, ready: 2, pending: 1 }] });
+    if (p === '/fleet/tunnels') return j(res, { items: [{ id: 'tun_1', tenant: 'acme', node: 'mac-studio-1', vm_id: 'vm-1', vm_name: 'build-01', port: 22, opened_at: ago(600000), idle_seconds: 42, bytes_sent: 18400, bytes_received: 5242880 }], enabled: true, max_per_tenant: 8, idle_timeout_minutes: 30, max_lifetime_minutes: 480, ports: [22, 5900] });
+    if (p === '/fleet/enroll/tokens') return j(res, { items: [{ id: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', created: Math.floor(Date.now() / 1000) - 3600, expires: Math.floor(Date.now() / 1000) + 82800, max_uses: 1, uses: 0, name_pattern: 'mac-*', revoked: false, note: 'rack 4' }, { id: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', created: Math.floor(Date.now() / 1000) - 864000, expires: null, max_uses: 5, uses: 5, name_pattern: null, revoked: false, note: '' }] });
+    if (p === '/fleet/enroll/nodes') return j(res, { items: [{ name: 'mac-studio-1', node_id: 'n1', token_id: 'aaaa', generation: 4, revoked: false, enrolled_at: Math.floor(Date.now() / 1000) - 604800 }, { name: 'mac-mini-3', node_id: 'n3', token_id: 'bbbb', generation: 1, revoked: true, enrolled_at: Math.floor(Date.now() / 1000) - 86400 }] });
     if (p === '/fleet/nodes') return j(res, { items: nodes });
     if (/^\/fleet\/nodes\/[^/]+\/drain$/.test(p)) return j(res, { draining: false, scrub_pending: p.includes('mini-2') });
     if (p === '/fleet/vms') return j(res, { items: vms, unreachable_nodes: [{ node: 'mac-mini-3' }] });
