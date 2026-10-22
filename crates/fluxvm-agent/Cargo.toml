@@ -23,7 +23,7 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive", "env"] }
 # Verifies console SSO ID tokens (same features as fluxvm-api, so nothing new is built).
-jsonwebtoken = { version = "10", default-features = false, features = ["use_pem", "rust_crypto"] }
+jsonwebtoken = { version = "11", default-features = false, features = ["use_pem", "rust_crypto"] }
 libc = "0.2"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 serde = { version = "1", features = ["derive"] }
