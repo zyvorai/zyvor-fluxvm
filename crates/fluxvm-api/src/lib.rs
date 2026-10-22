@@ -5587,9 +5587,8 @@ enum WsKind {
     Serial,
 }
 
-type WsTickets = std::sync::Mutex<
-    std::collections::HashMap<String, (Uuid, WsKind, std::time::Instant)>,
->;
+type WsTickets =
+    std::sync::Mutex<std::collections::HashMap<String, (Uuid, WsKind, std::time::Instant)>>;
 
 fn ws_tickets() -> &'static WsTickets {
     static T: std::sync::OnceLock<WsTickets> = std::sync::OnceLock::new();
@@ -5607,7 +5606,11 @@ fn mint_ws_ticket(vm: Uuid, kind: WsKind) -> Option<String> {
     let ticket = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
     t.insert(
         ticket.clone(),
-        (vm, kind, now + std::time::Duration::from_secs(WS_TICKET_SECS)),
+        (
+            vm,
+            kind,
+            now + std::time::Duration::from_secs(WS_TICKET_SECS),
+        ),
     );
     Some(ticket)
 }
@@ -6658,16 +6661,33 @@ mod tests {
             for path in ["/console/", "/console/machines/abc"] {
                 let r = get(path).await;
                 assert_eq!(r.status(), StatusCode::OK, "{path}");
-                assert!(r.headers()[header::CONTENT_TYPE].to_str().unwrap().starts_with("text/html"));
-                let csp = r.headers()[header::CONTENT_SECURITY_POLICY].to_str().unwrap();
-                assert!(csp.contains("script-src 'self'") && !csp.contains("script-src 'self' 'unsafe"));
+                assert!(
+                    r.headers()[header::CONTENT_TYPE]
+                        .to_str()
+                        .unwrap()
+                        .starts_with("text/html")
+                );
+                let csp = r.headers()[header::CONTENT_SECURITY_POLICY]
+                    .to_str()
+                    .unwrap();
+                assert!(
+                    csp.contains("script-src 'self'") && !csp.contains("script-src 'self' 'unsafe")
+                );
             }
             // Assets are JavaScript/CSS with an ETag; a stale asset URL is a 404, not HTML-as-JS.
             let js = get("/console/assets/app.js").await;
             assert_eq!(js.status(), StatusCode::OK);
-            assert!(js.headers()[header::CONTENT_TYPE].to_str().unwrap().starts_with("text/javascript"));
+            assert!(
+                js.headers()[header::CONTENT_TYPE]
+                    .to_str()
+                    .unwrap()
+                    .starts_with("text/javascript")
+            );
             let etag = js.headers()[header::ETAG].clone();
-            assert_eq!(get("/console/assets/gone-123.js").await.status(), StatusCode::NOT_FOUND);
+            assert_eq!(
+                get("/console/assets/gone-123.js").await.status(),
+                StatusCode::NOT_FOUND
+            );
             let cached = router(m.clone())
                 .oneshot(
                     Request::get("/console/assets/app.js")
@@ -6679,9 +6699,17 @@ mod tests {
                 .unwrap();
             assert_eq!(cached.status(), StatusCode::NOT_MODIFIED);
             // Static files are read-only, and the data behind them still needs a token.
-            let post = Request::post("/console/assets/app.js").body(Body::empty()).unwrap();
-            assert_ne!(router(m.clone()).oneshot(post).await.unwrap().status(), StatusCode::OK);
-            assert_eq!(status_for(router(m), "GET", "/v1/vms", None).await, StatusCode::UNAUTHORIZED);
+            let post = Request::post("/console/assets/app.js")
+                .body(Body::empty())
+                .unwrap();
+            assert_ne!(
+                router(m.clone()).oneshot(post).await.unwrap().status(),
+                StatusCode::OK
+            );
+            assert_eq!(
+                status_for(router(m), "GET", "/v1/vms", None).await,
+                StatusCode::UNAUTHORIZED
+            );
         }
 
         #[test]
@@ -6720,7 +6748,11 @@ mod tests {
             // rejects it with 400 before the ticket is looked at; an unknown ticket is a 404 once a real client upgrades
             // (`take_ws_ticket` returning `None`, covered above).
             let resp = router(m)
-                .oneshot(Request::get("/console/ws/nope").body(Body::empty()).unwrap())
+                .oneshot(
+                    Request::get("/console/ws/nope")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
                 .await
                 .unwrap();
             assert_ne!(resp.status(), StatusCode::UNAUTHORIZED);
