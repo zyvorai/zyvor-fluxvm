@@ -345,15 +345,17 @@ pub fn build_args(
         NetworkSpec::None => {}
         NetworkSpec::User { forwards } => {
             let mut netdev = "user,id=net0".to_string();
-            // Bind to all interfaces, not just loopback: these forwards
-            // exist specifically so a caller outside the host (e.g. SSH
-            // from a laptop) can reach the guest -- 127.0.0.1 would make
-            // every exposed port reachable only from processes already on
-            // the host itself, defeating the feature entirely.
+            // Bind to all interfaces unless the forward names an address: these forwards
+            // exist so a caller outside the host (e.g. SSH from a laptop) can reach the
+            // guest -- 127.0.0.1 would make every exposed port reachable only from
+            // processes already on the host. Forwards that are only the control path
+            // (`fluxctl up`'s SSH) name 127.0.0.1 explicitly.
             for f in forwards {
+                // `host_addr` is parsed as an IP, so it cannot smuggle extra QEMU options.
+                let addr = f.listen_addr().map_err(|e| anyhow::anyhow!(e))?;
                 netdev.push_str(&format!(
-                    ",hostfwd={}:0.0.0.0:{}-:{}",
-                    f.protocol, f.host_port, f.guest_port
+                    ",hostfwd={}:{}:{}-:{}",
+                    f.protocol, addr, f.host_port, f.guest_port
                 ));
             }
             a.extend([
@@ -1133,6 +1135,48 @@ mod tests {
             nbd_export: None,
             machine_type: None,
         }
+    }
+
+    fn forward(
+        host_port: u16,
+        guest_port: u16,
+        host_addr: Option<&str>,
+    ) -> fluxvm_core::model::PortForward {
+        fluxvm_core::model::PortForward {
+            host_port,
+            guest_port,
+            protocol: "tcp".into(),
+            guests: false,
+            host_addr: host_addr.map(str::to_owned),
+        }
+    }
+
+    fn netdev_arg(forwards: Vec<fluxvm_core::model::PortForward>) -> Result<String> {
+        let mut c = ctx();
+        c.network.spec = NetworkSpec::User { forwards };
+        let args = build_args(&cfg(), &req(2048), &c, &[])?;
+        let at = args
+            .iter()
+            .position(|a| a == "-netdev")
+            .expect("a -netdev option");
+        Ok(args[at + 1].clone())
+    }
+
+    #[test]
+    fn user_forwards_listen_everywhere_unless_told_otherwise() {
+        let n = netdev_arg(vec![
+            forward(8443, 443, None),
+            forward(22044, 22, Some("127.0.0.1")),
+        ])
+        .unwrap();
+        assert!(n.contains(",hostfwd=tcp:0.0.0.0:8443-:443"), "{n}");
+        assert!(n.contains(",hostfwd=tcp:127.0.0.1:22044-:22"), "{n}");
+    }
+
+    #[test]
+    fn a_forward_address_must_be_an_ip_so_it_cannot_add_qemu_options() {
+        let e = netdev_arg(vec![forward(1, 2, Some("127.0.0.1,restrict=off"))]).unwrap_err();
+        assert!(e.to_string().contains("not an IP address"), "{e}");
     }
 
     #[test]

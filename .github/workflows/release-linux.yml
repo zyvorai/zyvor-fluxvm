@@ -151,6 +151,12 @@ jobs:
             fluxvm/target/package/*.deb
             fluxvm/target/package/*.rpm
             fluxvm/target/package/*.sha256
+      # The container runs as root, and its workspace is the runner's own _work directory on the host. Without this, the
+      # root-owned fluxvm/target and fluxvm/.git left behind make the next host-side checkout on this runner (CI, site-check)
+      # fail with EACCES while it deletes them.
+      - name: Give the workspace back to the runner user
+        if: always()
+        run: chown -R "$(stat -c '%u:%g' "$GITHUB_WORKSPACE")" "$GITHUB_WORKSPACE"
 
   verify:
     needs: [plan, package]
