@@ -4324,7 +4324,7 @@ async fn promote(
     if body.dry_run {
         return Ok(Json(json!({
             "session": id, "into": parent_id, "dry_run": true, "applied": false,
-            "plan_id": plan_id, "plan": plan,
+            "plan_id": plan_id, "plan": plan, "not_carried": not_carried(&child),
         })));
     }
     if let Some(want) = &body.plan_id
@@ -4466,7 +4466,23 @@ async fn promote(
         "session": id, "into": parent_id, "applied": true, "plan_id": plan_id,
         "checkpoint": tag, "changes": applied,
         "already_applied": plan.already_applied, "skipped_conflicts": plan.conflicts,
+        "not_carried": not_carried(&child),
     })))
+}
+
+/// What a promotion does not bring into the parent, so a caller does not assume it did. Workspace files are the only
+/// thing carried: a child's memory and running processes cannot be merged into another running guest, and a volume
+/// is a block device one guest has mounted, so its contents are neither compared nor copied.
+fn not_carried(child: &Session) -> Value {
+    json!({
+        "memory_and_processes": "not carried: the parent keeps its own running state",
+        "volumes": child
+            .volumes
+            .iter()
+            .map(|v| json!({"name": v.name, "path": v.path}))
+            .collect::<Vec<_>>(),
+        "outside_workspace": "files outside the workspace are not compared",
+    })
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -8890,6 +8906,23 @@ mod tests {
         assert!(s.contains("[ $rc -eq 2 ]"), "{s}");
         assert!(s.contains("exit 4"));
         assert!(s.contains("nofail"));
+    }
+
+    #[test]
+    fn promote_says_what_it_does_not_carry() {
+        let mut s = fixture_session();
+        s.volumes.push(VolumeMount {
+            name: "data".into(),
+            path: "/mnt/data".into(),
+        });
+        let v = not_carried(&s);
+        assert_eq!(v["volumes"][0]["name"], "data");
+        assert!(
+            v["memory_and_processes"]
+                .as_str()
+                .unwrap()
+                .contains("not carried")
+        );
     }
 
     #[test]
