@@ -36,3 +36,15 @@ export function GenericTable({ rows, empty }: { rows: Record<string, unknown>[];
     </div>
   );
 }
+
+/** Flatten an object one level (`a.b`) into label/value pairs; arrays and deeper objects become short JSON. */
+export function flatten(data: unknown, prefix = '', depth = 0): [string, ReactNode][] {
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return [];
+  const out: [string, ReactNode][] = [];
+  for (const [k, v] of Object.entries(data as Record<string, unknown>)) {
+    const key = (prefix ? prefix + '.' : '') + k;
+    if (v && typeof v === 'object' && !Array.isArray(v) && depth < 1) out.push(...flatten(v, key, depth + 1));
+    else out.push([key.replace(/_/g, ' '), fmt(v)]);
+  }
+  return out;
+}

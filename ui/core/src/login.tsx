@@ -3,7 +3,7 @@ import { ApiError, api, setToken } from './api';
 import { Button } from './components';
 
 /** Netra-style single-card sign-in: a bearer token, verified against the API before it is kept. */
-export function LoginCard({ logo, product, blurb, onSignedIn, anonymousOk }: { logo: ReactNode; product: string; blurb: string; onSignedIn: () => void; anonymousOk?: boolean }) {
+export function LoginCard({ logo, product, blurb, onSignedIn, anonymousOk, probe = '/v1/vms', sso }: { logo: ReactNode; product: string; blurb: string; onSignedIn: () => void; anonymousOk?: boolean; probe?: string; sso?: { label: string; href: string } }) {
   const [token, setTok] = useState('');
   const [err, setErr] = useState('');
   const [busy, setBusy] = useState(false);
@@ -13,7 +13,7 @@ export function LoginCard({ logo, product, blurb, onSignedIn, anonymousOk }: { l
     setErr('');
     setToken(token.trim());
     try {
-      await api.get('/v1/vms');
+      await api.get(probe);
       onSignedIn();
     } catch (x) {
       setToken('');
@@ -40,6 +40,11 @@ export function LoginCard({ logo, product, blurb, onSignedIn, anonymousOk }: { l
         <Button variant="primary" size="lg" busy={busy} type="submit" disabled={!token.trim() && !anonymousOk}>
           Continue
         </Button>
+        {sso ? (
+          <a className="fx-btn fx-btn-secondary fx-btn-lg" href={sso.href}>
+            {sso.label}
+          </a>
+        ) : null}
         <small>The token stays in this tab’s session storage and is sent only to this daemon.</small>
       </form>
     </main>

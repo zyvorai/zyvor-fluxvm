@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- **FluxVM Studio: a web UI for the node daemon and for fleet central.** `fluxctl serve` serves a React app at
+  `/console/` and `fluxvm-agent central` one at its own `/console/`, both embedded in the binary (no Node at runtime) and
+  working behind any reverse-proxy prefix. Node: overview with live events, machines (create wizard; console, guest,
+  network and egress policy, storage, protect, migration), sandboxes, agent sessions, images and pools, backups, host and GPU
+  passthrough, access and an API explorer. Central: hosts (cordon, drain, scrub, lease), VMs, networks, tenants and keys,
+  billing, activity and webhooks. Dark by default with a light theme, ⌘K palette, reduced-motion support. New:
+  `POST /v1/vms/{id}/ws-ticket` and `GET /console/ws/{ticket}` (single-use browser WebSocket tickets, since browsers cannot
+  send `Authorization` on one). The old consoles stay at `/console/legacy` for one release. `/console` now redirects to
+  `/console/`. See docs/ui.md.
+
 - **Egress policy for user-mode (slirp) guests.** `fluxvm_qemu_egress` allowed only loopback, so a guest on QEMU
   user-mode networking could reach nothing (no guest agent download, no package mirror, no control plane) and no policy
   could change that: `network/policy` needs a host-visible interface. The program now reads a per-VM policy from pinned

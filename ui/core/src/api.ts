@@ -43,6 +43,12 @@ export const onUnauthorized = (fn: Listener): (() => void) => {
   return () => authListeners.delete(fn);
 };
 
+/** Headers added to every request (the fleet console sends `X-FluxVM-Console` so cookie sessions may change things). */
+let defaultHeaders: Record<string, string> = {};
+export const setDefaultHeaders = (h: Record<string, string>): void => {
+  defaultHeaders = h;
+};
+
 export interface ReqOpts {
   body?: unknown;
   text?: boolean;
@@ -51,7 +57,7 @@ export interface ReqOpts {
 }
 
 export async function request<T = unknown>(method: string, path: string, opts: ReqOpts = {}): Promise<T> {
-  const headers: Record<string, string> = { Accept: 'application/json', ...opts.headers };
+  const headers: Record<string, string> = { Accept: 'application/json', ...defaultHeaders, ...opts.headers };
   const token = getToken();
   if (token) headers.Authorization = `Bearer ${token}`;
   let body: BodyInit | undefined;
