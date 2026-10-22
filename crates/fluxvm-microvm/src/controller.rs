@@ -124,8 +124,8 @@ async fn apply(obj: &MicroVM, api: &Api<MicroVM>, ctx: &Context) -> Result<Actio
     }
     if prev_phase != "Scheduled" && status.phase == "Scheduled" {
         if let Some(created) = obj.meta().creation_timestamp.as_ref() {
-            let age = chrono::Utc::now().signed_duration_since(created.0);
-            if let Ok(d) = age.to_std() {
+            // k8s-openapi timestamps are jiff::Timestamp; SystemTime keeps chrono out of the conversion.
+            if let Ok(d) = std::time::SystemTime::now().duration_since(created.0.into()) {
                 crate::metrics::observe_create_to_scheduled(d);
             }
         }
