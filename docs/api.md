@@ -154,6 +154,13 @@ ANY    /sandbox/{id}/{*path}
 GET    /v1/vms/{uuid}/network/policy
 POST   /v1/vms/{uuid}/network/policy
 GET    /v1/vms/{uuid}/network/effective
+GET    /v1/vms/{uuid}/network/egress            # QEMU-process egress policy (user-mode guests): mode + rules, source, what the kernel enforces
+PUT    /v1/vms/{uuid}/network/egress            # {"mode":"loopback|allowlist|audit|open","rules":[{"cidr","proto","port","note"}]} (admin)
+DELETE /v1/vms/{uuid}/network/egress            # back to the node default (admin)
+GET    /v1/vms/{uuid}/network/egress/observed   # destinations refused (or, in audit mode, that would be)
+POST   /v1/vms/{uuid}/network/egress/suggest    # rules that would allow what was observed; ?apply=true adds them (admin)
+GET    /v1/network/egress/defaults              # node default policy
+PUT    /v1/network/egress/defaults              # ?apply_running=true re-programs running VMs without their own policy (admin)
 GET    /v1/vms/{uuid}/network/status
 GET    /v1/vms/{uuid}/network/stats
 GET    /v1/vms/{uuid}/network/flows

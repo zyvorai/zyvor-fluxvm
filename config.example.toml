@@ -113,6 +113,9 @@ reaper_interval_secs = 5
 #
 # --- GA / production (fail-closed when a host VM edge exists) ---
 # [sandbox.dataplane]
+# # Outbound policy for the QEMU process of user-mode (slirp) guests (docs/qemu-egress.md).
+# qemu_egress_mode = "allowlist"                          # loopback (default) | allowlist | audit | open
+# qemu_egress_rules = ["10.0.0.0/8:tcp/5151", "0.0.0.0/0:udp/53"]
 # mode = "ebpf"                         # legacy | ebpf | cilium
 # bpf_object = "/usr/lib/fluxvm/bpf/fluxvm_tc.bpf.o"
 # pin_root = "/sys/fs/bpf/fluxvm"

@@ -698,6 +698,24 @@ pub fn router(manager: Arc<VmManager>) -> Router {
             get(get_vm_network_policy).post(set_vm_network_policy),
         )
         .route(
+            "/v1/vms/{id}/network/egress",
+            get(get_vm_qemu_egress)
+                .put(set_vm_qemu_egress)
+                .delete(clear_vm_qemu_egress),
+        )
+        .route(
+            "/v1/vms/{id}/network/egress/observed",
+            get(get_vm_qemu_egress_observed),
+        )
+        .route(
+            "/v1/vms/{id}/network/egress/suggest",
+            post(suggest_vm_qemu_egress),
+        )
+        .route(
+            "/v1/network/egress/defaults",
+            get(get_qemu_egress_defaults).put(set_qemu_egress_defaults),
+        )
+        .route(
             "/v1/vms/{id}/network/pod-policy",
             get(get_vm_pod_network_policy)
                 .post(set_vm_pod_network_policy)
@@ -4296,6 +4314,104 @@ async fn get_vm_network_policy(
     Ok(Json(json!(m.network_policy(id).await?)))
 }
 
+/// Egress policy of the VM's QEMU process: the only policy that governs a user-mode (slirp)
+/// guest, which has no host-visible interface for `network/policy` to attach to.
+async fn get_vm_qemu_egress(
+    State(m): State<Arc<VmManager>>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<serde_json::Value>> {
+    Ok(Json(m.qemu_egress(id).await?))
+}
+
+async fn set_vm_qemu_egress(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+    Json(policy): Json<fluxvm_network::qemu_egress::QemuEgressPolicy>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    Ok(Json(m.set_qemu_egress(id, policy).await?))
+}
+
+/// Remove the VM's own policy so it follows the node default again.
+async fn clear_vm_qemu_egress(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    Ok(Json(m.clear_qemu_egress(id).await?))
+}
+
+async fn get_vm_qemu_egress_observed(
+    State(m): State<Arc<VmManager>>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let flows = m.qemu_egress_observed(id).await?;
+    Ok(Json(json!({"vm_id": id, "flows": flows})))
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct EgressSuggestQuery {
+    /// Add the suggested rules to the VM's policy (and switch an audit/loopback policy to
+    /// an allow-list) instead of only returning them.
+    #[serde(default)]
+    apply: bool,
+}
+
+/// Turn what the guest tried to reach into rules that would allow it. Read-only unless `?apply=true`.
+async fn suggest_vm_qemu_egress(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+    Query(q): Query<EgressSuggestQuery>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let flows = m.qemu_egress_observed(id).await?;
+    let rules = fluxvm_network::qemu_egress::suggest(&flows);
+    if !q.apply {
+        return Ok(Json(json!({"vm_id": id, "rules": rules, "applied": false})));
+    }
+    require_admin(role)?;
+    let current = m.qemu_egress(id).await?;
+    let mut policy: fluxvm_network::qemu_egress::QemuEgressPolicy =
+        serde_json::from_value(current["policy"].clone()).unwrap_or_default();
+    for r in &rules {
+        if !policy.rules.contains(r) {
+            policy.rules.push(r.clone());
+        }
+    }
+    policy.mode = fluxvm_network::qemu_egress::EgressMode::Allowlist;
+    let applied = m.set_qemu_egress(id, policy).await?;
+    Ok(Json(
+        json!({"vm_id": id, "rules": rules, "applied": true, "egress": applied}),
+    ))
+}
+
+async fn get_qemu_egress_defaults(
+    State(m): State<Arc<VmManager>>,
+) -> ApiResult<Json<serde_json::Value>> {
+    Ok(Json(json!({"policy": m.qemu_egress_defaults().await?})))
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct EgressDefaultsQuery {
+    /// Also re-program running VMs that have no policy of their own.
+    #[serde(default)]
+    apply_running: bool,
+}
+
+async fn set_qemu_egress_defaults(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Query(q): Query<EgressDefaultsQuery>,
+    Json(policy): Json<fluxvm_network::qemu_egress::QemuEgressPolicy>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    Ok(Json(
+        m.set_qemu_egress_defaults(policy, q.apply_running).await?,
+    ))
+}
+
 async fn vm_network_service_stats(
     State(m): State<Arc<VmManager>>,
     Path(id): Path<Uuid>,
@@ -5984,6 +6100,7 @@ mod tests {
             log_path: root.join("console.log"),
             error: None,
             request: CreateVmRequest {
+                egress: None,
                 apple: None,
                 name: "fixture".into(),
                 tenant: None,
