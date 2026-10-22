@@ -1,13 +1,13 @@
 import { useState, type ReactNode } from 'react';
 import { Plus, Trash2 } from 'lucide-react';
-import { Button, Card, EmptyState, Field, Pill, Segmented, Sheet, Skeleton, api, usePoll } from '@fluxvm/ui-core';
+import { Button, Card, EmptyState, Field, KV, Pill, Segmented, Sheet, Skeleton, api, usePoll } from '@fluxvm/ui-core';
 import type { Notify } from '../App';
 import { useAct } from '../lib/act';
-import { GenericTable, rowsOf } from '../lib/generic';
+import { GenericTable, flatten, rowsOf } from '../lib/generic';
 import { fluxctlFor } from '../lib/images';
 import {
   type BackendHealth, type GroupDraft, type SecurityGroup, type ServiceSpec, type VnetDraft, type VnetStatus,
-  describePolicy, groupBody, groupProblem, protoName, serviceHealth, vnetBody, vnetProblem,
+  CNP_TEMPLATE, SERVICE_REQUIRED, SERVICE_TEMPLATE, cnpName, describePolicy, groupBody, groupProblem, parseObject, protoName, serviceHealth, vnetBody, vnetProblem,
 } from '../lib/network';
 import { CopyCmd } from './Images';
 
@@ -160,13 +160,16 @@ export function ServicesTab({ notify }: { notify: Notify }) {
   const host = usePoll(() => api.get<{ xdp_acceleration?: boolean; map_tier?: string; north_south_interfaces?: string[] }>('/v1/network/services/status').catch(() => null), 15000);
   const { busy, run } = useAct(notify);
   const [del, setDel] = useState<string | null>(null);
+  const [apply, setApply] = useState<string | null>(null);
   const rows = list.data ?? [];
   const report = health.data ?? [];
+  const parsed = apply == null ? null : parseObject(apply, SERVICE_REQUIRED);
   const h = host.data;
   return (
     <>
       <Card title="Load-balanced services" action={
         <span className="fx-row-actions">
+          <Button size="sm" onClick={() => setApply(SERVICE_TEMPLATE)}><Plus size={14} /> Apply service</Button>
           <Button size="sm" busy={busy === 'health'} onClick={() => run('health', () => api.post('/v1/network/services/health/reconcile'), 'Health probes run', health.refresh)}>Probe now</Button>
           <Button size="sm" busy={busy === 'gc'} onClick={() => run('gc', () => api.post('/v1/network/services/conntrack/gc'), 'Connection table cleaned')}>Clean connections</Button>
         </span>
@@ -192,6 +195,14 @@ export function ServicesTab({ notify }: { notify: Notify }) {
           </Table>
         )}
       </Card>
+      <Sheet open={apply != null} title="Apply a service" onClose={() => setApply(null)}>
+        <p className="fx-muted">Paste a service as JSON. It is created, or replaced if the name exists. Address family, ports and backends are checked by the daemon.</p>
+        <textarea className="fx-input fx-mono" rows={14} aria-label="Service JSON" spellCheck={false} value={apply ?? ''} onChange={(e) => setApply(e.target.value)} />
+        {parsed && !parsed.ok ? <p className="fx-error" role="alert">{parsed.error}</p> : null}
+        <div className="fx-actions"><Button variant="primary" busy={busy === 'apply'} disabled={!parsed?.ok} onClick={async () => {
+          if (parsed?.ok && (await run('apply', () => api.post('/v1/network/services', parsed.value), `${String(parsed.value.name)} applied`, list.refresh))) setApply(null);
+        }}>Apply</Button><Button onClick={() => setApply(null)}>Cancel</Button></div>
+      </Sheet>
       {report.some((b) => !b.healthy) ? (
         <div className="fx-section"><Card title="Failing backends"><GenericTable rows={report.filter((b) => !b.healthy) as unknown as Record<string, unknown>[]} empty="" /></Card></div>
       ) : null}
@@ -236,5 +247,80 @@ export function FlowsTab() {
         </Table>
       )}
     </Card>
+  );
+}
+
+// ---- Cilium policies ----
+
+export function PoliciesTab({ notify }: { notify: Notify }) {
+  const list = usePoll(async () => rowsOf(await api.get<unknown>('/v1/network/cnp')), 8000);
+  const { busy, run } = useAct(notify);
+  const [apply, setApply] = useState<string | null>(null);
+  const [del, setDel] = useState<string | null>(null);
+  const rows = list.data ?? [];
+  const parsed = apply == null ? null : parseObject(apply, ['metadata', 'spec']);
+  const name = parsed?.ok ? cnpName(parsed.value) : '';
+  return (
+    <>
+      <Card title="Cilium network policies" action={<Button size="sm" onClick={() => setApply(CNP_TEMPLATE)}><Plus size={14} /> Apply policy</Button>}>
+        {list.loading && !rows.length ? <Skeleton h={100} /> : rows.length === 0 ? (
+          <EmptyState title="No Cilium policies" body="Policies in CiliumNetworkPolicy form are compiled to the same datapath as security groups." />
+        ) : (
+          <Table head={['Policy', 'Namespace', 'Selects', '']}>
+            {rows.map((p, i) => {
+              const n = cnpName(p);
+              const meta = (p.metadata ?? {}) as { namespace?: string };
+              return (
+                <tr key={n || i}>
+                  <td className="vm-name">{n || '—'}</td>
+                  <td className="fx-muted">{meta.namespace || 'default'}</td>
+                  <td className="fx-mono fx-muted">{JSON.stringify((p.spec as { endpointSelector?: unknown } | undefined)?.endpointSelector ?? {}).slice(0, 60)}</td>
+                  <td><span className="fx-row-actions"><Button size="sm" variant="ghost" aria-label={`Delete ${n}`} onClick={() => setDel(n)}><Trash2 size={14} /></Button></span></td>
+                </tr>
+              );
+            })}
+          </Table>
+        )}
+      </Card>
+      <Sheet open={apply != null} title="Apply a policy" onClose={() => setApply(null)}>
+        <p className="fx-muted">Paste a CiliumNetworkPolicy as JSON. A policy with the same name is replaced.</p>
+        <textarea className="fx-input fx-mono" rows={14} aria-label="Policy JSON" spellCheck={false} value={apply ?? ''} onChange={(e) => setApply(e.target.value)} />
+        {parsed && !parsed.ok ? <p className="fx-error" role="alert">{parsed.error}</p> : parsed?.ok && !name ? <p className="fx-error" role="alert">metadata.name is required.</p> : null}
+        <div className="fx-actions"><Button variant="primary" busy={busy === 'apply'} disabled={!parsed?.ok || !name} onClick={async () => {
+          if (parsed?.ok && (await run('apply', () => api.post('/v1/network/cnp', parsed.value), `${name} applied`, list.refresh))) setApply(null);
+        }}>Apply</Button><Button onClick={() => setApply(null)}>Cancel</Button></div>
+      </Sheet>
+      <Confirm what={del} busy={busy === 'del'} onClose={() => setDel(null)} onConfirm={async () => {
+        if (del && (await run('del', () => api.del(`/v1/network/cnp/${encodeURIComponent(del)}`), `${del} deleted`, list.refresh))) setDel(null);
+      }} />
+    </>
+  );
+}
+
+// ---- Inspect: identities, endpoints, address pool, health ----
+
+function Facts({ path, empty }: { path: string; empty: string }) {
+  const d = usePoll(() => api.get<unknown>(path).catch(() => null), 10000);
+  const rows = flatten(d.data);
+  if (d.loading && !d.data) return <Skeleton h={80} />;
+  return rows.length ? <KV rows={rows} /> : <p className="fx-muted">{empty}</p>;
+}
+
+function Rows({ path, empty }: { path: string; empty: string }) {
+  const d = usePoll(async () => rowsOf(await api.get<unknown>(path).catch(() => null)), 10000);
+  if (d.loading && !d.data) return <Skeleton h={80} />;
+  return <GenericTable rows={d.data ?? []} empty={empty} />;
+}
+
+export function InspectTab() {
+  return (
+    <div className="fx-grid cols-2">
+      <Card title="Datapath health"><Facts path="/v1/network/health" empty="The datapath reports no health data." /></Card>
+      <Card title="Address pool"><Facts path="/v1/network/ipam" empty="No address pool reported." /></Card>
+      <Card title="Identities"><Rows path="/v1/network/identities" empty="No identities allocated." /></Card>
+      <Card title="Endpoints"><Rows path="/v1/network/endpoints" empty="No endpoints." /></Card>
+      <Card title="IP cache"><Rows path="/v1/network/ipcache" empty="The IP cache is empty." /></Card>
+      <Card title="DNS"><Rows path="/v1/netobs/dns" empty="No DNS queries seen." /></Card>
+    </div>
   );
 }

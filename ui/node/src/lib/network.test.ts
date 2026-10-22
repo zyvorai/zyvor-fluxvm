@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { describePolicy, groupBody, groupProblem, inCidr, isIpv4, isIpv4Cidr, protoName, serviceHealth, vnetBody, vnetProblem } from './network';
+import { CNP_TEMPLATE, SERVICE_REQUIRED, SERVICE_TEMPLATE, cnpName, describePolicy, parseObject, groupBody, groupProblem, inCidr, isIpv4, isIpv4Cidr, protoName, serviceHealth, vnetBody, vnetProblem } from './network';
 
 const vnet = { vni: '100', cidr: '10.20.0.0/24', gateway: '10.20.0.1', uplink: '', snat: '' };
 const group = { name: 'web', labels: 'role=web', cidrs: '10.0.0.0/16', ports: 'tcp/443', defaultAllow: false, priority: '', description: '' };
@@ -80,4 +80,20 @@ it('names protocols', () => {
   expect(protoName(17)).toBe('udp');
   expect(protoName(99)).toBe('99');
   expect(protoName(undefined)).toBe('—');
+});
+
+
+describe('pasted JSON', () => {
+  it('rejects non-JSON, non-objects and missing fields', () => {
+    expect(parseObject('{', []).ok).toBe(false);
+    expect(parseObject('[1]', [])).toEqual({ ok: false, error: 'Expected a JSON object.' });
+    expect(parseObject('{"name":"a"}', ['name', 'vip'])).toEqual({ ok: false, error: 'Missing: vip.' });
+    expect(parseObject('{"name":"a"}', ['name']).ok).toBe(true);
+  });
+  it('ships templates that pass their own check', () => {
+    expect(parseObject(SERVICE_TEMPLATE, SERVICE_REQUIRED).ok).toBe(true);
+    const cnp = parseObject(CNP_TEMPLATE, ['metadata', 'spec']);
+    expect(cnp.ok && cnpName(cnp.value)).toBe('allow-dns');
+  });
+  it('has no name for a policy without metadata', () => expect(cnpName({})).toBe(''));
 });

@@ -5,6 +5,7 @@ import { GenericTable, flatten, rowsOf } from '../lib/generic';
 export function BillingPage({ role }: Ctx) {
   const bill = usePoll(() => api.get<unknown>('/fleet/billing').catch(() => null), 30000);
   const usage = usePoll(async () => rowsOf(await api.get<unknown>('/fleet/usage').catch(() => ({ items: [] })), 'items', 'usage', 'tenants'), 30000);
+  const invoices = usePoll(async () => rowsOf(await api.get<unknown>('/fleet/billing/invoices').catch(() => ({ items: [] })), 'items', 'invoices'), 60000);
   const rows = flatten(bill.data);
   return (
     <>
@@ -13,6 +14,9 @@ export function BillingPage({ role }: Ctx) {
         <Card title="Billing">{bill.loading && !bill.data ? <Skeleton h={100} /> : rows.length ? <KV rows={rows} /> : <p className="fx-muted">Billing is not set up on this central.</p>}</Card>
         <Card title="Usage">{usage.loading && !usage.data ? <Skeleton h={100} /> : <GenericTable rows={usage.data ?? []} empty="No usage recorded yet." />}</Card>
       </div>
+      {(invoices.data ?? []).length ? (
+        <div className="fx-section"><Card title="Invoices"><GenericTable rows={invoices.data ?? []} empty="" /></Card></div>
+      ) : null}
     </>
   );
 }

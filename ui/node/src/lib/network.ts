@@ -138,3 +138,39 @@ export function serviceHealth(name: string, report: BackendHealth[]): Health {
 
 /** Protocol number as the datapath reports it. */
 export const protoName = (n: unknown): string => (n === 6 ? 'tcp' : n === 17 ? 'udp' : n === 1 ? 'icmp' : n === 58 ? 'icmpv6' : String(n ?? '—'));
+
+export type JsonResult<T> = { ok: true; value: T } | { ok: false; error: string };
+
+/** Parse a pasted JSON object and make sure the fields the daemon needs are there, before a request is wasted. */
+export function parseObject(text: string, required: string[]): JsonResult<Record<string, unknown>> {
+  let v: unknown;
+  try {
+    v = JSON.parse(text);
+  } catch (e) {
+    return { ok: false, error: `Not valid JSON: ${(e as Error).message}` };
+  }
+  if (!v || typeof v !== 'object' || Array.isArray(v)) return { ok: false, error: 'Expected a JSON object.' };
+  const missing = required.filter((k) => (v as Record<string, unknown>)[k] == null);
+  return missing.length ? { ok: false, error: `Missing: ${missing.join(', ')}.` } : { ok: true, value: v as Record<string, unknown> };
+}
+
+/** A service needs these to be accepted; the daemon checks the rest (VIP family, backend ports and so on). */
+export const SERVICE_REQUIRED = ['name', 'vip', 'port', 'protocol'];
+
+export const SERVICE_TEMPLATE = JSON.stringify(
+  { name: 'api', vip: '10.96.0.10', port: 443, protocol: 'tcp', mode: 'nat', exposure: 'east-west', backends: [{ address: '10.20.0.5', port: 8443 }] },
+  null,
+  2,
+);
+
+export const CNP_TEMPLATE = JSON.stringify(
+  { metadata: { name: 'allow-dns' }, spec: { endpointSelector: { matchLabels: {} }, egress: [{ toPorts: [{ ports: [{ port: '53', protocol: 'UDP' }] }] }] } },
+  null,
+  2,
+);
+
+/** Name of a Cilium policy from its metadata, for the confirm text. */
+export const cnpName = (p: Record<string, unknown>): string => {
+  const m = p.metadata;
+  return m && typeof m === 'object' && typeof (m as { name?: unknown }).name === 'string' ? (m as { name: string }).name : '';
+};

@@ -4,15 +4,17 @@ import { Button, Card, EmptyState, Hero, Sheet, Skeleton, Stat, Tabs, ago, api, 
 import type { Notify } from '../App';
 import { EgressEditor } from './EgressEditor';
 import { rowsOf } from '../lib/generic';
-import { FlowsTab, GroupsTab, ServicesTab, VnetsTab } from './NetworkTabs';
+import { FlowsTab, GroupsTab, InspectTab, PoliciesTab, ServicesTab, VnetsTab } from './NetworkTabs';
 
-type NetTab = 'outbound' | 'vnets' | 'groups' | 'services' | 'flows';
+type NetTab = 'outbound' | 'vnets' | 'groups' | 'policies' | 'services' | 'flows' | 'inspect';
 const NET_TABS: { value: NetTab; label: string }[] = [
   { value: 'outbound', label: 'Outbound' },
   { value: 'vnets', label: 'Virtual networks' },
   { value: 'groups', label: 'Security groups' },
+  { value: 'policies', label: 'Cilium policies' },
   { value: 'services', label: 'Services' },
   { value: 'flows', label: 'Flows' },
+  { value: 'inspect', label: 'Inspect' },
 ];
 
 export function NetworkPage({ notify }: { notify: Notify }) {
@@ -38,7 +40,7 @@ export function NetworkPage({ notify }: { notify: Notify }) {
             <p className="fx-muted" style={{ marginTop: -6 }}>Machines without their own policy inherit this. Changes can re-program running VMs immediately.</p>
             <EgressEditor notify={notify} />
           </>
-        ) : tab === 'vnets' ? <VnetsTab notify={notify} /> : tab === 'groups' ? <GroupsTab notify={notify} /> : tab === 'services' ? <ServicesTab notify={notify} /> : <FlowsTab />}
+        ) : tab === 'vnets' ? <VnetsTab notify={notify} /> : tab === 'groups' ? <GroupsTab notify={notify} /> : tab === 'policies' ? <PoliciesTab notify={notify} /> : tab === 'services' ? <ServicesTab notify={notify} /> : tab === 'inspect' ? <InspectTab /> : <FlowsTab />}
       </div>
     </>
   );

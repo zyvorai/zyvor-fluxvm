@@ -5,7 +5,7 @@ import type { Notify } from '../App';
 import { useAct } from '../lib/act';
 import { GenericTable, flatten, rowsOf } from '../lib/generic';
 
-type Tab = 'overview' | 'gpus' | 'apple';
+type Tab = 'overview' | 'gpus' | 'apple' | 'pool';
 type Row = Record<string, unknown>;
 const str = (v: unknown): string => (typeof v === 'string' ? v : '');
 
@@ -80,9 +80,44 @@ function MdevBlock({ data }: { data: unknown }) {
   return rows.length ? <KV rows={rows} /> : <p className="fx-muted">No mediated-device types on this host.</p>;
 }
 
+interface PoolVm { id: string; name?: string; status?: unknown }
+
+/** The Mac VM pool: pre-created macOS machines a launch can check out, then hand back. */
+function MacPoolTab({ notify }: { notify: Notify }) {
+  const status = usePoll(() => api.get<unknown>('/v1/macos-pool/status').catch(() => null), 8000);
+  const list = usePoll(async () => (await api.get<PoolVm[]>('/v1/macos-pool').catch(() => [])) ?? [], 8000);
+  const { busy, run } = useAct(notify);
+  const rows = Array.isArray(list.data) ? list.data : [];
+  const after = async () => { await list.refresh(); await status.refresh(); };
+  return (
+    <>
+      <div className="fx-grid cols-2">
+        <Card title="Pool" action={<Button size="sm" variant="primary" busy={busy === 'checkout'} onClick={() => run('checkout', () => api.post('/v1/macos-pool/checkout'), 'Checked out a pool machine', after)}>Check out</Button>}>
+          {status.loading && !status.data ? <Skeleton h={80} /> : flatten(status.data).length ? <KV rows={flatten(status.data)} /> : <p className="fx-muted">The pool reports nothing.</p>}
+        </Card>
+        <Card title="Machines">
+          {list.loading && !rows.length ? <Skeleton h={80} /> : rows.length === 0 ? <EmptyState title="The pool is empty" body="Enroll a macOS machine into the pool, or check one out when it has some." /> : (
+            <div className="fx-table-wrap"><table className="fx-table"><tbody>
+              {rows.map((v) => (
+                <tr key={v.id}>
+                  <td className="vm-name">{v.name ?? v.id.slice(0, 8)}</td>
+                  <td><span className="fx-row-actions">
+                    <Button size="sm" variant="ghost" busy={busy === 'enroll' + v.id} onClick={() => run('enroll' + v.id, () => api.post(`/v1/macos-pool/${v.id}/enroll`), 'Enrolled', after)}>Enroll</Button>
+                    <Button size="sm" variant="ghost" busy={busy === 'return' + v.id} onClick={() => run('return' + v.id, () => api.post(`/v1/macos-pool/${v.id}/return`), 'Returned to the pool', after)}>Return</Button>
+                  </span></td>
+                </tr>
+              ))}
+            </tbody></table></div>
+          )}
+        </Card>
+      </div>
+    </>
+  );
+}
+
 export function HostPage({ notify, os }: { notify: Notify; os: 'linux' | 'macos' | 'unknown' }) {
   const [tab, setTab] = useState<Tab>('overview');
-  const tabs: { value: Tab; label: string }[] = [{ value: 'overview', label: 'Overview' }, ...(os !== 'macos' ? [{ value: 'gpus' as Tab, label: 'GPUs' }] : []), ...(os !== 'linux' ? [{ value: 'apple' as Tab, label: 'Apple host' }] : [])];
+  const tabs: { value: Tab; label: string }[] = [{ value: 'overview', label: 'Overview' }, ...(os !== 'macos' ? [{ value: 'gpus' as Tab, label: 'GPUs' }] : []), ...(os !== 'linux' ? [{ value: 'apple' as Tab, label: 'Apple host' }, { value: 'pool' as Tab, label: 'Mac pool' }] : [])];
   const t = tabs.some((x) => x.value === tab) ? tab : 'overview';
   return (
     <>
@@ -97,7 +132,7 @@ export function HostPage({ notify, os }: { notify: Notify; os: 'linux' | 'macos'
             <Card title="Confidential computing"><Facts path="/v1/host/confidential" empty="Not reported." /></Card>
             <Card title="Hibernation"><Facts path="/v1/host/hibernation" empty="Hibernation facts are not reported on this host." /></Card>
           </div>
-        ) : t === 'gpus' ? <GpusTab notify={notify} /> : (
+        ) : t === 'gpus' ? <GpusTab notify={notify} /> : t === 'pool' ? <MacPoolTab notify={notify} /> : (
           <div className="fx-grid cols-2">
             <Card title={<><Cpu size={16} /> Virtual networks</>}><VzNets /></Card>
             <Card title="Local model server"><Facts path="/v1/host/infer" empty="No host model server answering." /></Card>
