@@ -7724,6 +7724,79 @@ mod tests {
             assert!(body.contains("process policy"), "{body}");
         }
 
+        /// `POST .../replay` lists what a ledger can redo, refuses to run without a target, is tenant-scoped, and
+        /// sends every command through the target's own exec gates.
+        #[tokio::test]
+        async fn replay_lists_skips_and_runs_through_the_targets_gates() {
+            let m = procbox_manager(tenant_tokens(), false);
+            let src = seed_session(&m, Some("acme"), "vz", "running");
+            let dir = m.cfg.state_dir.join("agent-sessions");
+            let line = |kind: &str, detail: serde_json::Value| {
+                json!({"ts": "2026-10-22T10:00:00Z", "kind": kind, "detail": detail}).to_string()
+            };
+            std::fs::write(
+                dir.join(format!("{src}.ledger.jsonl")),
+                [
+                    line("exec", json!({"command": "echo hi", "exit_code": 0})),
+                    line("file.write", json!({"path": "/workspace/a", "bytes": 3})),
+                    line("job.start", json!({"job": "j", "command": "sleep 9"})),
+                    line("exec", json!({"command": "rm -rf /", "exit_code": 0})),
+                ]
+                .join("\n")
+                    + "\n",
+            )
+            .unwrap();
+            let app = router(m.clone());
+            let uri = format!("/v1/agents/sessions/{src}/replay");
+            let (st, body) = call(
+                app.clone(),
+                "POST",
+                &uri,
+                "acme",
+                Some(r#"{"dry_run":true}"#),
+            )
+            .await;
+            assert_eq!(st, StatusCode::OK, "{body}");
+            let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+            assert_eq!(v["steps"].as_array().unwrap().len(), 2, "{body}");
+            assert_eq!(v["steps"][0]["command"], "echo hi");
+            assert_eq!(v["skipped"].as_array().unwrap().len(), 2, "{body}");
+            // Without a target nothing runs.
+            let (st, _) = call(app.clone(), "POST", &uri, "acme", Some("{}")).await;
+            assert_eq!(st, StatusCode::BAD_REQUEST);
+            // Another tenant cannot see the source.
+            let (st, _) = call(
+                app.clone(),
+                "POST",
+                &uri,
+                "other",
+                Some(r#"{"dry_run":true}"#),
+            )
+            .await;
+            assert_eq!(st, StatusCode::NOT_FOUND);
+            // An unknown target is 404.
+            let missing = format!(r#"{{"target":"{}"}}"#, Uuid::new_v4());
+            let (st, _) = call(app.clone(), "POST", &uri, "acme", Some(&missing)).await;
+            assert_eq!(st, StatusCode::NOT_FOUND);
+            // The target's process policy refuses the second command, and the replay reports it and stops.
+            let tgt = seed_session(&m, Some("acme"), "vz", "running");
+            let path = dir.join(format!("{tgt}.json"));
+            let mut rec: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            rec["policy"]["process"] = json!({"allow": [], "deny": ["rm *"]});
+            std::fs::write(&path, rec.to_string()).unwrap();
+            let one = format!(r#"{{"target":"{tgt}","since":"2026-10-22T09:59:59Z"}}"#);
+            let rm_only = line("exec", json!({"command": "rm -rf /", "exit_code": 0})) + "\n";
+            std::fs::write(dir.join(format!("{src}.ledger.jsonl")), rm_only).unwrap();
+            let (st, body) = call(app, "POST", &uri, "acme", Some(&one)).await;
+            assert_eq!(st, StatusCode::OK, "{body}");
+            let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+            assert_eq!(v["steps"][0]["status"], "refused", "{body}");
+            assert_eq!(v["steps"][0]["http_status"], 403, "{body}");
+            assert_eq!(v["ran"], 0);
+            assert!(v["stopped"].is_string(), "{body}");
+        }
+
         /// Writes a session record the way `agent_sessions::save` does, so the routes can be exercised
         /// without booting a sandbox.
         fn seed_session(m: &VmManager, tenant: Option<&str>, backend: &str, state: &str) -> Uuid {
@@ -9032,6 +9105,10 @@ for (const a of t.ACTIONS) if (a.run.action === "theme") assert(t.THEMES[a.run.n
                 r#"{"workspace":{"git":"git@github.com:a/b.git"}}"#,
                 r#"{"workspace":{"path":"/a/../b"}}"#,
                 r#"{"workspace":{"mode":"overlay"}}"#,
+                r#"{"workspace":{"mode":"overlay","lower":"relative/dir"}}"#,
+                r#"{"workspace":{"mode":"overlay","lower":"/workspace"}}"#,
+                r#"{"workspace":{"mode":"overlay","lower":"/opt/app","git":"https://github.com/a/b"}}"#,
+                r#"{"workspace":{"mode":"clone","lower":"/opt/app"}}"#,
                 r#"{"agent":"bad agent"}"#,
             ] {
                 let (st, msg) = call(

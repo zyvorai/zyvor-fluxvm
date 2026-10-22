@@ -390,7 +390,7 @@ mod tests {
             reconcile_interval: None,
             ha: None,
         });
-        for path in ["/console", "/console/app.js"] {
+        for path in ["/console/", "/console/legacy", "/console/app.js", "/console/assets/app.js", "/console/hosts"] {
             let req = axum::http::Request::builder()
                 .uri(path)
                 .body(Body::empty())
@@ -400,6 +400,27 @@ mod tests {
             let csp = resp.headers()["content-security-policy"].to_str().unwrap();
             assert!(csp.contains("default-src 'none'") && csp.contains("script-src 'self'"));
         }
+        // `/console` redirects to the trailing-slash form (asset URLs are relative) and keeps the query.
+        let req = axum::http::Request::builder()
+            .uri("/console?payment_method=added")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), 308);
+        assert_eq!(resp.headers()["location"], "/console/?payment_method=added");
+        // A stale asset URL is a real 404, never the HTML shell served as JavaScript.
+        let req = axum::http::Request::builder()
+            .uri("/console/assets/gone.js")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(app.clone().oneshot(req).await.unwrap().status(), 404);
+        // Only reads are exempt: a POST under /console is not served without a token.
+        let req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/console/x")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(app.clone().oneshot(req).await.unwrap().status(), 401);
         // The API itself still needs the token.
         let (s, _) = call(&app, "GET", "/fleet/nodes", "wrong", json!({})).await;
         assert_eq!(s, 401);

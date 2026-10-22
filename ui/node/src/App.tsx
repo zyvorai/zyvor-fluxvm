@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
-import { Archive, Bot, Boxes, LayoutDashboard, LogOut, Moon, Network, Server } from 'lucide-react';
+import { Archive, Bot, Boxes, Cpu, Disc3, LayoutDashboard, LogOut, Moon, Network, ScrollText, Server } from 'lucide-react';
 import {
   CommandPalette, GlobalNav, LoginCard, Toasts, api, navigate, onUnauthorized, setToken, toggleTheme,
-  useRoute, type Command, type NavGroup, type ToastItem, type Vm,
+  useCapabilities, useRoute, type Command, type NavGroup, type ToastItem, type Vm,
 } from '@fluxvm/ui-core';
 import { NAV } from './nav';
 import { Overview } from './pages/Overview';
@@ -11,10 +11,13 @@ import { BackupsPage, NetworkPage } from './pages/NodePages';
 import { AgentDetail, AgentsPage } from './pages/Agents';
 import { SandboxDetail, SandboxesPage } from './pages/Sandboxes';
 import { MachineDetail } from './pages/MachineDetail';
+import { ImagesPage } from './pages/Images';
+import { HostPage } from './pages/Host';
+import { AccessPage } from './pages/Access';
 
 export type Notify = (text: string, tone?: 'ok' | 'bad') => void;
 
-const icons: Record<string, ReactNode> = { '/': <LayoutDashboard size={16} />, '/machines': <Server size={16} />, '/network': <Network size={16} />, '/backups': <Archive size={16} />, '/sandboxes': <Boxes size={16} />, '/agents': <Bot size={16} /> };
+const icons: Record<string, ReactNode> = { '/': <LayoutDashboard size={16} />, '/machines': <Server size={16} />, '/network': <Network size={16} />, '/backups': <Archive size={16} />, '/sandboxes': <Boxes size={16} />, '/agents': <Bot size={16} />, '/images': <Disc3 size={16} />, '/host': <Cpu size={16} />, '/access': <ScrollText size={16} /> };
 
 export function App() {
   const route = useRoute();
@@ -22,6 +25,7 @@ export function App() {
   const [palette, setPalette] = useState(false);
   const [toasts, setToasts] = useState<ToastItem[]>([]);
   const [vms, setVms] = useState<Vm[]>([]);
+  const caps = useCapabilities(auth === 'in');
 
   const notify = useCallback<Notify>((text, tone = 'ok') => {
     const id = Date.now() + Math.random();
@@ -71,7 +75,7 @@ export function App() {
 
   const detailId = route.segs[0] === 'machines' && route.segs[1] ? route.segs[1] : '';
   const subId = route.segs[1] ?? '';
-  const page = detailId ? <MachineDetail id={detailId} notify={notify} /> : route.segs[0] === 'sandboxes' && subId ? <SandboxDetail id={subId} notify={notify} /> : route.segs[0] === 'agents' && subId ? <AgentDetail id={subId} notify={notify} /> : route.path === '/sandboxes' ? <SandboxesPage notify={notify} /> : route.path === '/agents' ? <AgentsPage notify={notify} /> : route.path === '/' ? <Overview vms={vms} setVms={setVms} /> : route.path === '/network' ? <NetworkPage notify={notify} /> : route.path === '/backups' ? <BackupsPage notify={notify} /> : route.path.startsWith('/machines') ? <Machines vms={vms} setVms={setVms} notify={notify} q={route.query.get('q') ?? ''} /> : <Overview vms={vms} setVms={setVms} />;
+  const page = detailId ? <MachineDetail id={detailId} notify={notify} /> : route.segs[0] === 'sandboxes' && subId ? <SandboxDetail id={subId} notify={notify} /> : route.segs[0] === 'agents' && subId ? <AgentDetail id={subId} notify={notify} /> : route.path === '/sandboxes' ? <SandboxesPage notify={notify} /> : route.path === '/agents' ? <AgentsPage notify={notify} /> : route.path === '/' ? <Overview vms={vms} setVms={setVms} /> : route.path === '/network' ? <NetworkPage notify={notify} /> : route.path === '/backups' ? <BackupsPage notify={notify} /> : route.path === '/images' ? <ImagesPage notify={notify} macos={caps.os === 'macos'} /> : route.path === '/host' ? <HostPage notify={notify} os={caps.os} /> : route.path === '/access' ? <AccessPage notify={notify} /> : route.path.startsWith('/machines') ? <Machines vms={vms} setVms={setVms} notify={notify} q={route.query.get('q') ?? ''} /> : <Overview vms={vms} setVms={setVms} />;
   return (
     <>
       <GlobalNav

@@ -34,6 +34,7 @@ tenant's id answers `404`, not `403`).
 | `POST /v1/agents/sessions/{id}/restore` | `{tag}`; only tags this session took. |
 | `GET /v1/agents/sessions/{id}/rewind` | The [rewind](#rewind-undo-the-last-action) config and its points (oldest first). `POST .../rewind/config` `{enabled?, max_points?, memory?, triggers?}`, `POST .../rewind/undo` `{steps?}` or `{to: tag}` and `POST .../rewind/pin` `{tag, pinned?}`, `POST .../rewind/branch` `{tag, count?, identity?}` and `POST .../rewind/bisect` `{test, good?, bad?, timeout_seconds?}` change and use it; admin only. |
 | `POST /v1/agents/sessions/{id}/fork` | `{count, identity?}` (1-32) into child sessions that start from the current state. `identity` is `best-effort` (default), `unique` or `preserve`. **`409` with the reason when the session cannot fork; nothing is created.** |
+| `POST /v1/agents/sessions/{id}/replay` | `{target, dry_run?, since?, until?, stop_on_failure?, timeout_seconds?}`. Re-runs the `exec` commands in this session's ledger, in order, in `target` (see Replay). |
 | `GET /v1/agents/sessions/{id}/events` | `?since=` RFC 3339. `{ledger, vm_events}`. |
 | `GET /v1/agents/sessions/{id}/events/stream` | **Server-Sent Events**, same data as `events` but live. `ledger` events carry a ledger entry, `vm` events a hypervisor event; history is replayed first (or only what is newer than `?since=`), then new entries follow about every 500 ms. The event id is a cursor, so `Last-Event-ID` resumes with no ledger entry repeated or missed (a VM event with the exact timestamp of the last one seen may repeat). An `error` event ends the stream once the session is deleted, expired or gone (its last entries, such as `session.delete`, come first) or after an hour. At most 64 streams per host. Needs `read`. |
 | `GET /v1/agents/sessions/{id}/artifacts` | Workspace changes since the baseline, checkpoints, children, counters. |
@@ -63,6 +64,13 @@ fork, then exec in every child in parallel, then delete the children (`--keep` k
   `filesystem.enforcement: "best-effort"` to create the session without it). The files routes (`files/content`
   PUT, `files` DELETE, `uploads`) refuse writes under the workspace with `403`. The clone at create time runs before the
   policy applies. `/tmp` and attached volumes stay writable. Unit-tested; not yet run on a real Linux guest.
+- `workspace.mode: "overlay"` with `workspace.lower` (a directory already in the image) mounts overlayfs at
+  `workspace.path`: the agent reads the lower layer and writes freely, and the lower directory is never modified (the
+  upper and work layers sit under `/var/lib/fluxvm-overlay`, outside the agent's write set). The baseline is taken after
+  the mount, so `artifacts` and `promote` carry only the agent's changes. `lower` must exist and differ from `path`;
+  `git` is refused with it. Create fails (and removes the sandbox) if the guest cannot mount it. The mount is not in
+  `/etc/fstab`, so it does not survive a guest reboot; a fork child inherits it through the snapshot. CLI:
+  `--overlay-lower DIR`. Unit-tested; not yet run on a real Linux guest.
 - `runtime.image` follows the sandbox rules (`agent-micro` gives the vsock agent; another image cold-boots).
 - `runtime.host_gpu` (`fluxctl agent run --host-gpu`): vz only; guest `OPENAI_BASE_URL` reaches the host Metal/MLX
   (or llama.cpp) server over vsock. See [host-inference.md](host-inference.md).
@@ -148,8 +156,11 @@ only narrow what the host allows. `policy.http_rules` shows the compiled rules; 
 whether they are enforced.
 
 - **Where it works**: backends whose traffic reaches the host's own egress proxy (`sandbox.egress_proxy_listen`
-  set; QEMU/KVM and the in-tree engine) with a known guest address. **Not on `vz`** (its allow-list proxy is the
-  runner's and matches host names only) and **not on procbox sandboxes**. Where it cannot be enforced, create returns
+  set; QEMU/KVM and the in-tree engine) with a known guest address. **On `vz`** when the guest has no network card,
+  the session has a host allow-list and `sandbox.egress_proxy_listen` is a `127.0.0.1` address: the runner's vsock proxy
+  then relays allowed requests to the daemon's proxy with a per-VM secret, which maps to an alias address the rules are
+  keyed by (a vz guest with its own network card, or without a loopback proxy, cannot be filtered). **Not on procbox
+  sandboxes**. Where it cannot be enforced, create returns
   `400` with the reason, unless `network.enforcement` is `best-effort` (the session is created with the host
   allow-list only and `capabilities.http_policy` is `false`, `policy.http_unenforced` in the ledger).
 - HTTPS is judged per request only when the proxy intercepts TLS (`egress_tls_intercept`); without it a `CONNECT` is
@@ -622,6 +633,18 @@ round trip, see below; a bad token is 404). **Not run:** Linux (the route reuses
 large bodies, and HTTPS (the URL is as private as the daemon's own address: put it behind TLS yourself). An **offline** session has no
 network address, so it has nothing to preview.
 
+### Replay
+
+`POST /v1/agents/sessions/{id}/replay` (`fluxctl agent replay <id> --target <session>`) runs the `exec` commands recorded
+in a session's ledger, in order, in another session. Each goes through the target's own `exec`, so its process policy,
+approvals, budget, confinement and ledger apply: a replay cannot do more than the target may. A replay needs `read` on the
+source and `exec` on the target, and is tenant-scoped on both. Without a target it needs `dry_run`, which lists the steps and
+what was skipped and runs nothing. It stops at the first non-zero exit (`keep_going` / `stop_on_failure: false` continues),
+and always at a refusal or an approval request (the answer carries the approval, then the replay can be repeated with
+`since`). Each step reports its exit code beside the recorded one (`same_exit_code`). Up to 500 commands per request.
+File writes, uploads and deletes, jobs, git steps and promotions are listed under `skipped` with the reason: the ledger
+records what was done, not the content, so they cannot be redone. The target's ledger gets one `replay` entry.
+
 ### Browser (Chrome DevTools Protocol)
 
 There is no browser image yet; this is a recipe on the stock `debian-13`, run on this M4 (`vz`, `policy open`, 2 GiB):
@@ -799,11 +822,12 @@ Each item says why it is not in the MVP.
 |---|---|
 | Promote a child's *non-file* state (memory, processes, volumes) | not possible to merge: a parent's running memory and processes cannot absorb a child's, and a volume is a block device one guest has mounted. `promote` now says so: its answer has `not_carried` (memory and processes, the child's volumes by name and path, files outside the workspace) so a caller does not assume they moved |
 | Lazy memory restore (sub-second claim/fork) | **Done on the in-tree KVM engine, not on `vz`.** KVM restores RAM with a `MAP_PRIVATE` mapping of `snap.mem` (pages fault in on first touch, children share unwritten pages; see [fork-and-restore.md](fork-and-restore.md#ram-restore-map_private-with-an-eager-fallback)), so it is not what limits a fork there: one measured child took 4.3–9.2 s, of which RAM restore was about 1.2 s and the guest identity reset about 3.5 s. Not done on `vz` (Apple's Virtualization framework restores the saved state itself, which is the 4.1 s restore above) |
-| Workspace overlay mode | `mode: "overlay"` is refused; clone is the only writable mode. `mode: "readonly"` is enforced (see Create) |
-| Process policy: argv rules as a security boundary | `process.enforce: "exec"` (`fluxctl agent create --cmd-allow ... --cmd-enforce`) makes the `allow`/`ask` programs a kernel-enforced executable allow-list (Landlock), which holds for `sh -c`, scripts and children. `deny` and argument patterns (`git push*`) are still string globs, because the kernel sees paths, not arguments. The guest's exec allow-list is verified in a real Linux guest (`scripts/e2e/guest-exec-policy.sh`); the session-create step that compiles `process.enforce` into it is unit-tested, not yet run against a booted session |
+
+| Workspace overlay across guest reboots | `mode: "overlay"` and `"readonly"` are implemented (see Create); the overlay mount is not persisted in the guest's fstab |
+| Process policy: argv rules as a security boundary | `process.enforce: "exec"` (`fluxctl agent create --cmd-allow ... --cmd-enforce`) makes the `allow`/`ask` programs a kernel-enforced executable allow-list (Landlock), which holds for `sh -c`, scripts and children. `deny` and argument patterns (`git push*`) are still string globs, because the kernel sees paths, not arguments. Unit-tested; not yet run on a real Linux guest |
 | HTTP method/path rules on `vz` | the runner's allow-list proxy matches host names only; per-session rules are enforced by the host egress proxy (see above) |
 | Streaming exec output | **Done:** `POST .../exec/stream` (`fluxctl agent exec --stream`). Plain `exec` stays buffered; the stream is a job under the hood, long-polled from the guest supervisor or polled every 400 ms on older agents |
-| Replay | the ledger is a log, not a recording |
+| Replay of file writes, jobs and git steps | `replay` re-runs `exec` commands only; the ledger records a file write's path and size, not its content, so those steps are listed as skipped. Recording content would need a store the ledger does not have |
 | Preview URLs: large or streamed responses | WebSocket upgrades are bridged (run with Chrome DevTools); large and streamed bodies were not run through the preview route |
 | Browser / computer-use profile | a CDP recipe works on the stock image (see Browser above); no prebuilt browser image, no Playwright client run, no computer-use display profile |
 | Secretless credentials at create time | session grants exist (`POST .../grants`, see Credential grants: they end with the session, are capped at its expiry and follow a restore). Declaring them in the create body is not offered on purpose: a grant names a `FLUXVM_SECRET_*` variable, so a tenant able to create one could aim any daemon secret at a host it controls; granting stays an admin call |
