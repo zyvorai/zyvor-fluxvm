@@ -21,11 +21,11 @@ jobs:
       run:
         working-directory: fluxvm
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           path: fluxvm
       # fluxvm-image depends on the sibling guestkit project through a relative path.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           repository: zyvorai/guestkit
           ref: v1.2.6   # packaging/guestkit.ref; checked by scripts/check-guestkit-pin.sh
@@ -44,10 +44,10 @@ jobs:
       run:
         working-directory: fluxvm
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           path: fluxvm
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           repository: zyvorai/guestkit
           ref: v1.2.6   # packaging/guestkit.ref; checked by scripts/check-guestkit-pin.sh
