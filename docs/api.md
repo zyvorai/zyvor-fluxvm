@@ -190,7 +190,9 @@ GET    /v1/network/vnets/{vni}
 PUT    /v1/network/vnets/{vni}           # admin; replaces the config for the VNI
 DELETE /v1/network/vnets/{vni}           # admin; refused while a VM here is attached
 POST   /v1/network/refresh-dns
-GET    /console                          # web dashboard (static, no auth; it asks for a token)
+GET    /console/                         # FluxVM Studio web UI (static, no auth; it asks for a token); /console redirects here; see ui.md
+POST   /v1/vms/{id}/ws-ticket            # {"kind":"console"|"serial"} -> single-use 30 s ticket for a browser WebSocket
+GET    /console/ws/{ticket}              # redeem a ticket (WebSocket upgrade; no Authorization needed)
 ```
 
 Sandbox routes are the agent-sandbox surface on the FluxVm backend — see
