@@ -56,6 +56,7 @@ unchanged. Unknown fields are ignored (for example `max_abi`); missing fields ta
 | Field | Type | Default | Meaning |
 |---|---|---|---|
 | `read`, `write` | paths | `[]` | Filesystem paths the command may read or write |
+| `exec` | paths or absent | absent | Executable allow-list, enforced by Landlock's execute right. Absent: `read` and `write` paths are also executable. Present: they are not, and only files under these paths run, so a program the command wrote into a writable directory cannot start. Commands run through `/bin/sh -c`, so list the shell, the programs and the dynamic loader directory (for example `/lib64`). Needs a Linux guest with Landlock; otherwise the command is refused (or, with `best_effort`, reported in `not_enforced`). `exec_restricted` in the response says it applied. Verified by unit tests only so far; the real-enforcement tests in `crates/fluxvm-procbox/tests/confine.rs` run on Linux CI. |
 | `tcp_connect`, `tcp_bind` | `"any"`, `"deny"` or `{"ports": [n, ...]}` | `"deny"` | Landlock TCP rules |
 | `scope_ipc` | bool | `true` | Scope abstract unix sockets and signals |
 | `seccomp` | `"errno"`, `"kill"` or `null` | `"errno"` | Denylist action; `null` turns the filter off |

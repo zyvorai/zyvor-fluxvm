@@ -404,3 +404,71 @@ fn ipc_scoping_blocks_signals_and_abstract_sockets_outside_the_sandbox() {
     let unscoped = base();
     assert_eq!(out(&sandbox(&unscoped, "signal-parent", None)), "ok");
 }
+
+/// `base()` with the execute right moved from `read`/`write` to an allow-list: the helper binary's
+/// directory plus the dynamic loader and libraries it needs.
+fn exec_listed() -> Policy {
+    let mut p = base();
+    let mut allow = vec![Path::new(&bin()).parent().unwrap().to_path_buf()];
+    for d in ["/lib", "/lib64", "/usr/lib", "/usr/lib64"] {
+        if Path::new(d).exists() {
+            allow.push(d.into());
+        }
+    }
+    p.exec = Some(allow);
+    p
+}
+
+#[test]
+fn exec_allow_list_runs_listed_programs() {
+    need_abi!(3);
+    let work = tempfile::tempdir().unwrap();
+    let mut p = exec_listed();
+    p.write.push(work.path().to_path_buf());
+    let f = work.path().join("f");
+    let r = sandbox(&p, "write", Some(f.to_str().unwrap()));
+    assert_eq!(out(&r), "ok", "{r:?}");
+    assert!(r.enforcement.exec_restricted);
+}
+
+#[test]
+fn exec_allow_list_blocks_a_program_written_into_a_writable_dir() {
+    need_abi!(3);
+    use std::os::unix::fs::PermissionsExt;
+    let work = tempfile::tempdir().unwrap();
+    let copy = work.path().join("copy");
+    std::fs::copy(bin(), &copy).unwrap();
+    std::fs::set_permissions(&copy, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    // Without an allow-list the writable directory is executable, so the copy runs.
+    let mut open = base();
+    open.write.push(work.path().to_path_buf());
+    let r = run(
+        &open,
+        &[
+            copy.to_str().unwrap().into(),
+            "selftest".into(),
+            "write".into(),
+            work.path().join("a").to_str().unwrap().into(),
+        ],
+        &RunOptions { capture: true },
+    )
+    .expect("copy runs when execute is not restricted");
+    assert_eq!(out(&r), "ok", "{r:?}");
+
+    // With one, the same copy is refused even though the directory is writable and readable.
+    let mut p = exec_listed();
+    p.write.push(work.path().to_path_buf());
+    let res = run(
+        &p,
+        &[
+            copy.to_str().unwrap().into(),
+            "selftest".into(),
+            "write".into(),
+            work.path().join("b").to_str().unwrap().into(),
+        ],
+        &RunOptions { capture: true },
+    );
+    assert!(res.is_err(), "the copy must not start: {res:?}");
+    assert!(!work.path().join("b").exists());
+}

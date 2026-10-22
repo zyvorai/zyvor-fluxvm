@@ -66,6 +66,9 @@ pub struct Profile {
     /// Read-write paths (implies read).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub fs_write: Vec<PathBuf>,
+    /// Executable allow-list (see `Policy::exec`). Absent keeps `fs_read`/`fs_write` executable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fs_exec: Option<Vec<PathBuf>>,
     /// TCP connect rule.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub net_connect: Option<NetRule>,
@@ -151,7 +154,10 @@ impl Profile {
 
     /// Check everything that can be checked without running anything.
     pub fn validate(&self) -> Result<()> {
-        for (key, paths) in [("fs_read", &self.fs_read), ("fs_write", &self.fs_write)] {
+        for (key, paths) in [("fs_read", &self.fs_read), ("fs_write", &self.fs_write)]
+            .into_iter()
+            .chain(self.fs_exec.iter().map(|p| ("fs_exec", p)))
+        {
             for (i, p) in paths.iter().enumerate() {
                 if !p.is_absolute() {
                     bail!(
@@ -223,6 +229,12 @@ impl Profile {
         self.validate()?;
         policy.read.extend(self.fs_read.iter().cloned());
         policy.write.extend(self.fs_write.iter().cloned());
+        if let Some(x) = &self.fs_exec {
+            policy
+                .exec
+                .get_or_insert_with(Vec::new)
+                .extend(x.iter().cloned());
+        }
         if let Some(r) = &self.net_connect {
             policy.tcp_connect = r.to_rule("net_connect")?;
         }

@@ -91,6 +91,21 @@ pub fn write_rights(handled: u64) -> u64 {
     (READ_RIGHTS | WRITE_ONLY_RIGHTS) & handled
 }
 
+/// Rights granted for a read path when the policy has an `exec` allow-list: reading only.
+pub fn read_rights_no_exec(handled: u64) -> u64 {
+    read_rights(handled) & !ACCESS_FS_EXECUTE
+}
+
+/// Rights granted for a write path when the policy has an `exec` allow-list.
+pub fn write_rights_no_exec(handled: u64) -> u64 {
+    write_rights(handled) & !ACCESS_FS_EXECUTE
+}
+
+/// Rights granted for an `exec` path: run and read.
+pub fn exec_rights(handled: u64) -> u64 {
+    read_rights(handled)
+}
+
 pub fn file_rights(rights: u64) -> u64 {
     rights & FILE_RIGHTS
 }
@@ -124,6 +139,7 @@ pub fn plan(policy: &Policy, kernel_abi: u32) -> Result<Plan> {
     } else {
         handled_fs = fs_rights_for_abi(eff);
         enf.filesystem = true;
+        enf.exec_restricted = policy.exec.is_some();
         if eff < STRICT_MIN_FS_ABI {
             fatal.push(format!(
                 "filesystem truncate/refer control (needs Landlock ABI >= {STRICT_MIN_FS_ABI}, have {eff})"
@@ -295,11 +311,22 @@ mod sys {
         let mut notes = Vec::new();
 
         if plan.handled_fs != 0 {
+            let (r, w) = if policy.exec.is_some() {
+                (
+                    read_rights_no_exec(plan.handled_fs),
+                    write_rights_no_exec(plan.handled_fs),
+                )
+            } else {
+                (read_rights(plan.handled_fs), write_rights(plan.handled_fs))
+            };
             for p in &policy.read {
-                add_path(&fd, p, read_rights(plan.handled_fs), policy, &mut notes)?;
+                add_path(&fd, p, r, policy, &mut notes)?;
             }
             for p in &policy.write {
-                add_path(&fd, p, write_rights(plan.handled_fs), policy, &mut notes)?;
+                add_path(&fd, p, w, policy, &mut notes)?;
+            }
+            for p in policy.exec.iter().flatten() {
+                add_path(&fd, p, exec_rights(plan.handled_fs), policy, &mut notes)?;
             }
         }
         if plan.handled_net & ACCESS_NET_CONNECT_TCP != 0 {
@@ -516,6 +543,32 @@ mod tests {
         assert!(plan(&p, 7).is_err());
         p.best_effort = true;
         assert_eq!(plan(&p, 7).unwrap().effective_abi, 3);
+    }
+
+    #[test]
+    fn exec_allow_list_takes_execute_from_read_and_write() {
+        let h = fs_rights_for_abi(7);
+        assert_ne!(read_rights(h) & ACCESS_FS_EXECUTE, 0);
+        assert_ne!(write_rights(h) & ACCESS_FS_EXECUTE, 0);
+        assert_eq!(read_rights_no_exec(h) & ACCESS_FS_EXECUTE, 0);
+        assert_eq!(write_rights_no_exec(h) & ACCESS_FS_EXECUTE, 0);
+        // Reading and writing are untouched.
+        assert_ne!(read_rights_no_exec(h) & ACCESS_FS_READ_FILE, 0);
+        assert_ne!(write_rights_no_exec(h) & ACCESS_FS_WRITE_FILE, 0);
+        assert_ne!(exec_rights(h) & ACCESS_FS_EXECUTE, 0);
+        assert_ne!(exec_rights(h) & ACCESS_FS_READ_FILE, 0);
+        assert_eq!(exec_rights(h) & ACCESS_FS_WRITE_FILE, 0);
+    }
+
+    #[test]
+    fn plan_reports_whether_exec_is_restricted() {
+        let mut p = strict();
+        p.scope_ipc = false;
+        assert!(!plan(&p, 7).unwrap().enforcement.exec_restricted);
+        p.exec = Some(vec!["/usr/bin".into()]);
+        assert!(plan(&p, 7).unwrap().enforcement.exec_restricted);
+        // No Landlock at all: strict mode refuses rather than running unrestricted.
+        assert!(plan(&p, 0).is_err());
     }
 
     #[test]

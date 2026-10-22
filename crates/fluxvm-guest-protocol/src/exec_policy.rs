@@ -52,6 +52,10 @@ pub struct ExecRunAs {
 pub struct ExecPolicy {
     pub read: Vec<String>,
     pub write: Vec<String>,
+    /// Executable allow-list. `None`: `read` and `write` paths may also be executed. `Some`: they
+    /// may not, and only files under these paths run. Commands run through `/bin/sh -c`, so the
+    /// list needs the shell and the dynamic loader as well as the programs themselves.
+    pub exec: Option<Vec<String>>,
     pub tcp_connect: ExecTcpRule,
     pub tcp_bind: ExecTcpRule,
     pub scope_ipc: bool,
@@ -77,6 +81,7 @@ impl Default for ExecPolicy {
         Self {
             read: Vec::new(),
             write: Vec::new(),
+            exec: None,
             tcp_connect: ExecTcpRule::Deny,
             tcp_bind: ExecTcpRule::Deny,
             scope_ipc: true,
@@ -104,6 +109,9 @@ impl Default for ExecPolicy {
 pub struct ExecEnforcement {
     pub landlock_abi: u32,
     pub filesystem: bool,
+    /// Executing files was limited to the policy's `exec` paths.
+    #[serde(default)]
+    pub exec_restricted: bool,
     pub tcp_connect: bool,
     pub tcp_bind: bool,
     pub scope_abstract_unix: bool,
@@ -127,6 +135,26 @@ mod tests {
         assert_eq!(p, ExecPolicy::default());
         assert_eq!(p.tcp_connect, ExecTcpRule::Deny);
         assert!(p.scope_ipc);
+    }
+
+    #[test]
+    fn exec_allow_list_defaults_to_unrestricted_and_round_trips() {
+        let p: ExecPolicy = serde_json::from_str("{}").unwrap();
+        assert_eq!(p.exec, None);
+        let p: ExecPolicy = serde_json::from_str(r#"{"exec":["/usr/bin","/lib64"]}"#).unwrap();
+        assert_eq!(
+            p.exec,
+            Some(vec!["/usr/bin".to_string(), "/lib64".to_string()])
+        );
+        // An empty list is a policy too: nothing may run.
+        let p: ExecPolicy = serde_json::from_str(r#"{"exec":[]}"#).unwrap();
+        assert_eq!(p.exec, Some(vec![]));
+        // An old agent's reply has no `exec_restricted`.
+        let e: ExecEnforcement = serde_json::from_str(
+            r#"{"landlock_abi":7,"filesystem":true,"tcp_connect":false,"tcp_bind":false,"scope_abstract_unix":false,"scope_signal":false,"seccomp":true,"uid_dropped":false,"namespaces":false,"network_isolated":false,"seccomp_sockets":false,"not_enforced":[]}"#,
+        )
+        .unwrap();
+        assert!(!e.exec_restricted);
     }
 
     #[test]

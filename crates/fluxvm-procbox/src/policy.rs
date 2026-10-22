@@ -93,10 +93,16 @@ impl std::str::FromStr for Isolation {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Policy {
-    /// Read-only (and executable) paths.
+    /// Read-only paths. Executable too, unless `exec` is set.
     pub read: Vec<PathBuf>,
-    /// Read-write paths (implies read).
+    /// Read-write paths (implies read). Executable too, unless `exec` is set.
     pub write: Vec<PathBuf>,
+    /// Executable allow-list. `None` keeps the historical behaviour: every `read` and `write`
+    /// path may also be executed. `Some(paths)` takes the execute right away from `read` and
+    /// `write` and grants it only under these paths (readable too), so a binary the agent wrote
+    /// or downloaded into a writable directory cannot run. Include the dynamic loader
+    /// (for example `/lib64`) because the kernel executes it on behalf of dynamic programs.
+    pub exec: Option<Vec<PathBuf>>,
     pub tcp_connect: TcpRule,
     pub tcp_bind: TcpRule,
     /// Landlock IPC scoping: abstract unix sockets and signals outside the
@@ -142,6 +148,7 @@ impl Default for Policy {
         Self {
             read: Vec::new(),
             write: Vec::new(),
+            exec: None,
             // Deny by default: a bare `Policy::default()` must not silently
             // hand out unrestricted TCP, and (via `net_restricted` in
             // run.rs) it must not skip the UDP/raw/packet/netlink/AF_UNIX
@@ -177,6 +184,9 @@ pub struct Enforcement {
     /// Landlock ABI in effect (0 = unavailable).
     pub landlock_abi: u32,
     pub filesystem: bool,
+    /// Executing files is limited to the policy's `exec` paths.
+    #[serde(default)]
+    pub exec_restricted: bool,
     pub tcp_connect: bool,
     pub tcp_bind: bool,
     pub scope_abstract_unix: bool,
