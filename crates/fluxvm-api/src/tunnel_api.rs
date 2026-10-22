@@ -46,8 +46,17 @@ enum Target {
     Netns(u32, SocketAddr),
 }
 
+/// An error answer with the stable `code` every other route sends.
+fn err(status: StatusCode, msg: impl Into<String>) -> Response {
+    (
+        status,
+        Json(json!({"error": msg.into(), "code": crate::error_code(status)})),
+    )
+        .into_response()
+}
+
 fn conflict(msg: impl Into<String>) -> Response {
-    (StatusCode::CONFLICT, Json(json!({"error": msg.into()}))).into_response()
+    err(StatusCode::CONFLICT, msg)
 }
 
 /// An address a tunnel may connect to as the guest's: not loopback, not link-local (cloud metadata services live
@@ -267,20 +276,12 @@ pub(crate) async fn vm_tunnel(
         return e.into_response();
     }
     if q.port == 0 {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({"error": "port must be 1-65535"})),
-        )
-            .into_response();
+        return err(StatusCode::BAD_REQUEST, "port must be 1-65535");
     }
     let vm = match m.get(id).await {
         Ok(vm) => vm,
         Err(_) => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(json!({"error": format!("no VM '{id}'")})),
-            )
-                .into_response();
+            return err(StatusCode::NOT_FOUND, format!("no VM '{id}'"));
         }
     };
     if vm.status != VmStatus::Running {
@@ -320,18 +321,16 @@ pub(crate) async fn vm_tunnel(
             ));
         }
         Ok(Err(e)) => {
-            return (
+            return err(
                 StatusCode::BAD_GATEWAY,
-                Json(json!({"error": format!("connecting to the VM at {addr}: {e}")})),
-            )
-                .into_response();
+                format!("connecting to the VM at {addr}: {e}"),
+            );
         }
         Err(_) => {
-            return (
+            return err(
                 StatusCode::GATEWAY_TIMEOUT,
-                Json(json!({"error": format!("connecting to the VM at {addr} timed out")})),
-            )
-                .into_response();
+                format!("connecting to the VM at {addr} timed out"),
+            );
         }
     };
     let _ = tcp.set_nodelay(true);
@@ -389,6 +388,23 @@ async fn relay(socket: WebSocket, tcp: tokio::net::TcpStream) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn tunnel_errors_carry_the_stable_code() {
+        for (status, code) in [
+            (StatusCode::CONFLICT, "CONFLICT"),
+            (StatusCode::BAD_REQUEST, "BAD_REQUEST"),
+            (StatusCode::NOT_FOUND, "NOT_FOUND"),
+            (StatusCode::BAD_GATEWAY, "INTERNAL"),
+        ] {
+            let resp = err(status, "why");
+            assert_eq!(resp.status(), status);
+            let body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
+            let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(v["code"], code);
+            assert_eq!(v["error"], "why");
+        }
+    }
 
     #[test]
     fn netns_guests_may_be_link_local_but_never_the_metadata_address() {

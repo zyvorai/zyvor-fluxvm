@@ -90,7 +90,11 @@ impl Drop for InFlight {
 }
 
 fn error(status: StatusCode, message: &str) -> Response {
-    (status, Json(json!({ "error": message }))).into_response()
+    (
+        status,
+        Json(json!({ "error": message, "code": crate::error_code(status) })),
+    )
+        .into_response()
 }
 
 fn now_secs() -> i64 {
@@ -215,6 +219,15 @@ pub(crate) async fn middleware(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn idempotency_errors_carry_the_stable_code() {
+        let resp = error(StatusCode::UNPROCESSABLE_ENTITY, "reused");
+        let body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["code"], "UNPROCESSABLE");
+        assert_eq!(v["error"], "reused");
+    }
 
     #[test]
     fn only_the_listed_mutating_routes_qualify() {

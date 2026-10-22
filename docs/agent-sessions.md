@@ -25,6 +25,7 @@ tenant's id answers `404`, not `403`).
 | `GET /v1/agents/sessions/{id}` | One session: backend, capabilities, policy, workspace, checkpoints, children. |
 | `DELETE /v1/agents/sessions/{id}` | Delete the session and its sandbox. Idempotent (`204`). |
 | `POST /v1/agents/sessions/{id}/exec` | `{command, timeout_seconds?}` through the sandbox's guest path. Recorded in the ledger. |
+| `POST /v1/agents/sessions/{id}/exec/stream` | `exec` with the output streamed as Server-Sent Events while the command runs: a `start` event (`{job}`), `output` and `stderr` events, then one `exit` event (`{exit_code, state}`). Same body as `exec`. It runs the command as a job, so the process policy, approvals, budget and confinement apply as for a job, and a dropped client can resume with `GET .../jobs/{job}/stream` and `Last-Event-ID`. A command held for approval answers `428` as JSON. `fluxctl agent exec --stream`. |
 | `POST /v1/agents/sessions/{id}/tokens` | `{ops, ttl_seconds?, label?}`: mint a [session token](#session-tokens). `GET` lists live ones (no secrets); `DELETE .../tokens/{token}` revokes. Admin only. |
 | `POST /v1/agents/sessions/{id}/uploads` | open a resumable [upload](#large-files-resumable-upload-and-ranged-download) of a large file; chunks go to `PUT .../uploads/{upload}?offset=N`, then `POST .../complete`. `GET .../files/range` reads a slice. |
 | `GET /v1/agents/sessions/{id}/approvals` | the session's [approval](#approvals) requests. `POST .../approvals/{approval}/approve` and `.../deny` decide one (`{note?}`); admin only. |
@@ -786,8 +787,9 @@ Walkthroughs for each of these, with expected output and a troubleshooting table
 `scripts/bench-agent-session.sh`, results in [benchmarks/agent-session.md](benchmarks/agent-session.md): on an M4 Mac
 mini (debug build, 5 runs): on a NAT session create 6.8 s median (26.9 s on a cold first run), first exec 0.12 s, memory
 checkpoint 0.7 s, restore 4.1 s; on an offline session create 4.6 s, exec 0.39 s, fork into 2 children 2.5 s. **These are
-not sub-second.** Targets (sandbox claim < 300 ms, warm restore < 150 ms, fork child < 100 ms) are goals that need lazy
-memory restore and are **not met** on `vz` today.
+not sub-second.** Targets (sandbox claim < 300 ms, warm restore < 150 ms, fork child < 100 ms) are **not met** on `vz` today,
+where restore is Apple's. On the KVM engine RAM is already restored lazily and the time goes to the identity reset and device
+re-attach instead (see the roadmap).
 
 ## Roadmap
 
@@ -796,12 +798,12 @@ Each item says why it is not in the MVP.
 | Item | Why not yet |
 |---|---|
 | Promote a child's *non-file* state (memory, processes, volumes) | promotion copies workspace files only; a child's running processes and memory are not merged |
-| Lazy memory restore (sub-second claim/fork) | a restore engine change, not an API change; not started |
+| Lazy memory restore (sub-second claim/fork) | **Done on the in-tree KVM engine, not on `vz`.** KVM restores RAM with a `MAP_PRIVATE` mapping of `snap.mem` (pages fault in on first touch, children share unwritten pages; see [fork-and-restore.md](fork-and-restore.md#ram-restore-map_private-with-an-eager-fallback)), so it is not what limits a fork there: one measured child took 4.3–9.2 s, of which RAM restore was about 1.2 s and the guest identity reset about 3.5 s. Not done on `vz` (Apple's Virtualization framework restores the saved state itself, which is the 4.1 s restore above) |
 | Workspace overlay mode | `mode: "overlay"` is refused; clone is the only writable mode. `mode: "readonly"` is enforced (see Create) |
 | Process policy: argv rules as a security boundary | `process.enforce: "exec"` (`fluxctl agent create --cmd-allow ... --cmd-enforce`) makes the `allow`/`ask` programs a kernel-enforced executable allow-list (Landlock), which holds for `sh -c`, scripts and children. `deny` and argument patterns (`git push*`) are still string globs, because the kernel sees paths, not arguments. Unit-tested; not yet run on a real Linux guest |
 | HTTP method/path rules on `vz` | the runner's allow-list proxy matches host names only; per-session rules are enforced by the host egress proxy (see above) |
-| Streaming exec output | `exec` is still buffered; jobs stream over SSE (long-polled from the guest supervisor, or polled every 400 ms on older agents) and the terminal (`shell`) streams |
+| Streaming exec output | **Done:** `POST .../exec/stream` (`fluxctl agent exec --stream`). Plain `exec` stays buffered; the stream is a job under the hood, long-polled from the guest supervisor or polled every 400 ms on older agents |
 | Replay | the ledger is a log, not a recording |
 | Preview URLs: large or streamed responses | WebSocket upgrades are bridged (run with Chrome DevTools); large and streamed bodies were not run through the preview route |
 | Browser / computer-use profile | a CDP recipe works on the stock image (see Browser above); no prebuilt browser image, no Playwright client run, no computer-use display profile |
-| Secretless credentials | the credential broker (`docs/credential-broker.md`) is per sandbox; not bound to sessions |
+| Secretless credentials at create time | session grants exist (`POST .../grants`, see Credential grants: they end with the session, are capped at its expiry and follow a restore). Declaring them in the create body is not offered on purpose: a grant names a `FLUXVM_SECRET_*` variable, so a tenant able to create one could aim any daemon secret at a host it controls; granting stays an admin call |

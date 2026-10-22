@@ -264,6 +264,7 @@ pub(super) fn not_leader(ha: &HaRuntime) -> Response {
         StatusCode::SERVICE_UNAVAILABLE,
         Json(json!({
             "error": "this central is a standby; send fleet requests to the leader",
+            "code": "UNAVAILABLE",
             "leader": leader,
         })),
     )

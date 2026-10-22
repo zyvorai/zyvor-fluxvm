@@ -147,9 +147,12 @@ fn error_code(status: StatusCode) -> &'static str {
         403 => "FORBIDDEN",
         404 => "NOT_FOUND",
         409 => "CONFLICT",
+        412 => "PRECONDITION_FAILED",
         413 => "PAYLOAD_TOO_LARGE",
         422 => "UNPROCESSABLE",
+        428 => "PRECONDITION_REQUIRED",
         429 => "RATE_LIMITED",
+        501 => "NOT_IMPLEMENTED",
         503 => "UNAVAILABLE",
         s if s >= 500 => "INTERNAL",
         _ => "ERROR",
@@ -301,6 +304,7 @@ async fn auth_middleware(State(auth): State<AuthState>, mut req: Request, next: 
                     status,
                     Json(json!({
                         "error": "step-up authentication required: send a valid TOTP code in X-Fluxvm-Totp",
+                        "code": "STEP_UP_REQUIRED",
                         "mfa": mfa_outcome.label(),
                     })),
                 )
@@ -6072,6 +6076,15 @@ mod tests {
         assert_eq!(error_code(StatusCode::CONFLICT), "CONFLICT");
         assert_eq!(error_code(StatusCode::SERVICE_UNAVAILABLE), "UNAVAILABLE");
         assert_eq!(error_code(StatusCode::BAD_GATEWAY), "INTERNAL");
+        assert_eq!(
+            error_code(StatusCode::PRECONDITION_FAILED),
+            "PRECONDITION_FAILED"
+        );
+        assert_eq!(
+            error_code(StatusCode::PRECONDITION_REQUIRED),
+            "PRECONDITION_REQUIRED"
+        );
+        assert_eq!(error_code(StatusCode::NOT_IMPLEMENTED), "NOT_IMPLEMENTED");
         assert_eq!(error_code(StatusCode::IM_A_TEAPOT), "ERROR");
     }
 
@@ -7417,6 +7430,48 @@ mod tests {
             )
             .await;
             assert_ne!(st, StatusCode::FORBIDDEN);
+        }
+
+        /// `POST .../exec/stream` goes through the same gates as `exec` before anything starts.
+        #[tokio::test]
+        async fn exec_stream_applies_auth_tenant_and_process_rules_before_starting() {
+            let m = procbox_manager(tenant_tokens(), false);
+            let id = seed_session(&m, Some("acme"), "vz", "running");
+            let app = router(m.clone());
+            let uri = format!("/v1/agents/sessions/{id}/exec/stream");
+            let st = status_for(app.clone(), "POST", &uri, None).await;
+            assert_eq!(st, StatusCode::UNAUTHORIZED);
+            let (st, _) = call(
+                app.clone(),
+                "POST",
+                &uri,
+                "other",
+                Some(r#"{"command":"ls"}"#),
+            )
+            .await;
+            assert_eq!(st, StatusCode::NOT_FOUND);
+            let (st, _) = call(
+                app.clone(),
+                "POST",
+                &uri,
+                "acme",
+                Some(r#"{"command":"  "}"#),
+            )
+            .await;
+            assert_eq!(st, StatusCode::BAD_REQUEST);
+            let path = m
+                .cfg
+                .state_dir
+                .join("agent-sessions")
+                .join(format!("{id}.json"));
+            let mut rec: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            rec["policy"]["process"] = json!({"allow": [], "deny": ["rm *"]});
+            std::fs::write(&path, rec.to_string()).unwrap();
+            let (st, body) =
+                call(app, "POST", &uri, "acme", Some(r#"{"command":"rm -rf /"}"#)).await;
+            assert_eq!(st, StatusCode::FORBIDDEN, "{body}");
+            assert!(body.contains("process policy"), "{body}");
         }
 
         /// Writes a session record the way `agent_sessions::save` does, so the routes can be exercised

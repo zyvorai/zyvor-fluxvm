@@ -196,4 +196,4 @@ http_proxy_default_port = 8080
 | Feature | Status |
 |---------|--------|
 | **`/v1/agents/sessions`**: sandbox + workspace + compiled network policy + checkpoints + ledger, `fluxctl agent`, MCP `session_*`, Go and Python SDKs — [agent-sessions.md](agent-sessions.md) | Yes (run live on `vz`: create, exec, memory checkpoint/restore, artifacts, delete; fork run live on an offline `vz` session, 409 for a NAT one; lifecycle timings in [benchmarks/agent-session.md](benchmarks/agent-session.md)) |
-| Promote a fork's changes into its parent, filesystem/process policy enforcement, streaming PTY, replay, preview URLs, browser profile, sub-second restore | No — see the roadmap in [agent-sessions.md](agent-sessions.md#roadmap) |
+| Promote a fork's changes into its parent, streaming PTY, replay, preview URLs, browser profile, sub-second restore | Mostly no — see the roadmap in [agent-sessions.md](agent-sessions.md#roadmap). Filesystem confinement and a kernel-enforced program allow-list (`process.enforce`) exist now; argument-level process rules are still string globs |
