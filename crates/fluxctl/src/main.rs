@@ -2792,6 +2792,58 @@ enum NetworkCommand {
         #[arg(long)]
         spec: PathBuf,
     },
+    /// Outbound policy of the VM's QEMU process, the policy that governs a user-mode (slirp) guest.
+    /// REST: `GET /v1/vms/{id}/network/egress`.
+    Egress {
+        #[arg(value_parser = output::parse_vm_ref)]
+        id: Uuid,
+    },
+    /// Set the QEMU-process egress policy: `--mode allowlist --allow 10.0.0.0/8:tcp/5151 --allow 0.0.0.0/0:udp/53`,
+    /// or `--spec policy.json`. Applies at once to a running VM. REST: `PUT /v1/vms/{id}/network/egress`.
+    EgressSet {
+        #[arg(value_parser = output::parse_vm_ref)]
+        id: Uuid,
+        /// loopback | allowlist | audit | open
+        #[arg(long, default_value = "allowlist")]
+        mode: String,
+        /// `cidr`, `cidr:tcp/443` or `cidr:udp/53`; repeatable.
+        #[arg(long = "allow")]
+        allow: Vec<String>,
+        /// JSON policy file (overrides --mode/--allow).
+        #[arg(long)]
+        spec: Option<PathBuf>,
+    },
+    /// Back to the node default egress policy. REST: `DELETE /v1/vms/{id}/network/egress`.
+    EgressClear {
+        #[arg(value_parser = output::parse_vm_ref)]
+        id: Uuid,
+    },
+    /// What the guest tried to reach and was refused (or, in audit mode, would be).
+    /// REST: `GET /v1/vms/{id}/network/egress/observed`.
+    EgressObserved {
+        #[arg(value_parser = output::parse_vm_ref)]
+        id: Uuid,
+    },
+    /// Rules that would allow what was observed; `--apply` adds them and switches to an allow-list.
+    /// REST: `POST /v1/vms/{id}/network/egress/suggest`.
+    EgressSuggest {
+        #[arg(value_parser = output::parse_vm_ref)]
+        id: Uuid,
+        #[arg(long)]
+        apply: bool,
+    },
+    /// Node-wide default egress policy. REST: `GET /v1/network/egress/defaults`.
+    EgressDefaults,
+    /// Replace the node default; `--apply-running` re-programs running VMs that have no policy of their own.
+    /// REST: `PUT /v1/network/egress/defaults`.
+    EgressSetDefaults {
+        #[arg(long, default_value = "loopback")]
+        mode: String,
+        #[arg(long = "allow")]
+        allow: Vec<String>,
+        #[arg(long)]
+        apply_running: bool,
+    },
     /// Declared + group-merged effective policy. REST:
     /// `GET /v1/vms/{id}/network/effective`.
     Effective {
@@ -6942,6 +6994,75 @@ async fn main() -> Result<()> {
                 println!(
                     "{}",
                     serde_json::to_string_pretty(&m.set_network_policy(id, policy).await?)?
+                );
+            }
+            NetworkCommand::Egress { id } => {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&m.qemu_egress(id).await?)?
+                );
+            }
+            NetworkCommand::EgressSet {
+                id,
+                mode,
+                allow,
+                spec,
+            } => {
+                let policy = match spec {
+                    Some(path) => serde_json::from_slice(&std::fs::read(path)?)?,
+                    None => fluxvm_network::qemu_egress::config_default(&mode, &allow)?,
+                };
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&m.set_qemu_egress(id, policy).await?)?
+                );
+            }
+            NetworkCommand::EgressClear { id } => {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&m.clear_qemu_egress(id).await?)?
+                );
+            }
+            NetworkCommand::EgressObserved { id } => {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&m.qemu_egress_observed(id).await?)?
+                );
+            }
+            NetworkCommand::EgressSuggest { id, apply } => {
+                let flows = m.qemu_egress_observed(id).await?;
+                let rules = fluxvm_network::qemu_egress::suggest(&flows);
+                if apply {
+                    let current = m.qemu_egress(id).await?;
+                    let mut policy: fluxvm_network::qemu_egress::QemuEgressPolicy =
+                        serde_json::from_value(current["policy"].clone()).unwrap_or_default();
+                    for r in &rules {
+                        if !policy.rules.contains(r) {
+                            policy.rules.push(r.clone());
+                        }
+                    }
+                    policy.mode = fluxvm_network::qemu_egress::EgressMode::Allowlist;
+                    m.set_qemu_egress(id, policy).await?;
+                }
+                println!("{}", serde_json::to_string_pretty(&rules)?);
+            }
+            NetworkCommand::EgressDefaults => {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&m.qemu_egress_defaults().await?)?
+                );
+            }
+            NetworkCommand::EgressSetDefaults {
+                mode,
+                allow,
+                apply_running,
+            } => {
+                let policy = fluxvm_network::qemu_egress::config_default(&mode, &allow)?;
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(
+                        &m.set_qemu_egress_defaults(policy, apply_running).await?
+                    )?
                 );
             }
             NetworkCommand::Effective { id } => {

@@ -57,7 +57,7 @@ impl DevRule {
     }
 }
 
-fn qemu_pin_dir(root: &Path, id: Uuid) -> PathBuf {
+pub(crate) fn qemu_pin_dir(root: &Path, id: Uuid) -> PathBuf {
     vm_pin_dir(root, id).join("qemu")
 }
 
@@ -188,6 +188,7 @@ pub fn attach(
     cgroup_path: &Path,
     vfio_devices: &[String],
     disks: &[PathBuf],
+    egress: &crate::qemu_egress::QemuEgressPolicy,
 ) -> Result<()> {
     require_bpftool()?;
     let obj_dir = cfg
@@ -256,6 +257,8 @@ pub fn attach(
             egress_pin.display().to_string(),
             "type".into(),
             "cgroup_skb/egress".into(),
+            "pinmaps".into(),
+            map_dir.display().to_string(),
         ],
     ) {
         let _ = fs::remove_dir_all(&pin_dir);
@@ -302,7 +305,39 @@ pub fn attach(
         return Err(e).context("attaching fluxvm_qemu_egress to cgroup");
     }
 
+    // The program starts in loopback-only mode (an unset map reads as mode 0), so a
+    // failure here leaves the VM at the safe default rather than open.
+    if let Err(e) = crate::qemu_egress::apply(&pin_dir, egress) {
+        tracing::warn!(vm = %id, error = %e, "QEMU egress policy apply failed; VM stays loopback-only");
+    }
+
     Ok(())
+}
+
+/// Re-program a running VM's egress policy. Errors if the VM's egress program has no policy
+/// maps (started by a build that predates them).
+pub fn set_egress(
+    cfg: &DataplaneConfig,
+    id: Uuid,
+    policy: &crate::qemu_egress::QemuEgressPolicy,
+) -> Result<()> {
+    crate::qemu_egress::apply(&qemu_pin_dir(&cfg.pin_root, id), policy)
+}
+
+/// Flows the VM's egress program dropped (or would drop, in audit mode).
+pub fn observed_egress(
+    cfg: &DataplaneConfig,
+    id: Uuid,
+) -> Result<Vec<crate::qemu_egress::ObservedFlow>> {
+    crate::qemu_egress::observed(&qemu_pin_dir(&cfg.pin_root, id))
+}
+
+/// The mode and rules the kernel is enforcing right now.
+pub fn programmed_egress(
+    cfg: &DataplaneConfig,
+    id: Uuid,
+) -> Result<crate::qemu_egress::QemuEgressPolicy> {
+    crate::qemu_egress::programmed(&qemu_pin_dir(&cfg.pin_root, id))
 }
 
 /// Rewrite a running VM's device allowlist for its current `disks`: before a

@@ -1858,6 +1858,10 @@ pub struct CreateVmRequest {
     /// Hypervisor, and FluxVm+kvm (no FC-style template ABI).
     #[serde(default)]
     pub cpu_template: Option<String>,
+    /// Outbound policy for the QEMU process (user-mode networking, where the guest has no host-visible interface for the
+    /// tc dataplane). Stored with the VM and applied when its cgroup programs attach; unset inherits the node default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub egress: Option<crate::egress::QemuEgressPolicy>,
 }
 fn default_vcpus() -> u8 {
     2

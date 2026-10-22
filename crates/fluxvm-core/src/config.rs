@@ -518,6 +518,12 @@ pub struct DataplaneConfig {
     pub max_egress_pps: Option<u32>,
     /// Allowed-flow ringbuf sampling: 0=off, N≈1/N packets.
     pub sample_rate: u32,
+    /// Default outbound policy for the QEMU process of user-mode (slirp) guests, which have no host-visible interface
+    /// for the tc dataplane to govern: `loopback` (default, nothing leaves), `allowlist`, `audit` or `open`. A policy
+    /// set on the node (`PUT /v1/network/egress/defaults`) or on a VM overrides this.
+    pub qemu_egress_mode: String,
+    /// Rules for `qemu_egress_mode = "allowlist"`/`"audit"`: `cidr`, `cidr:tcp/443`, `cidr:udp/53`.
+    pub qemu_egress_rules: Vec<String>,
     /// Optional standalone node-ingress XDP guard (disabled with Cilium).
     pub xdp: XdpConfig,
     /// VM service load-balancing and optional north-south host/XDP hooks.
@@ -538,6 +544,8 @@ impl Default for DataplaneConfig {
             max_egress_mbps: None,
             max_egress_pps: None,
             sample_rate: 0,
+            qemu_egress_mode: "loopback".into(),
+            qemu_egress_rules: Vec::new(),
             xdp: XdpConfig::default(),
             service: ServiceFabricConfig::default(),
         }

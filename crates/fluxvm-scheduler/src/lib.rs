@@ -1321,6 +1321,7 @@ impl VmManager {
                         &cgroup_path,
                         vfio_devices,
                         &qemu_disk_paths(record),
+                        &self.qemu_egress_for_start(id, record),
                     ) {
                         tracing::warn!(vm = %id, error = %e, "Set 7S QEMU cgroup hardening attach failed");
                     }
@@ -2410,6 +2411,188 @@ impl VmManager {
         })
         .await
         .context("Pod network policy apply panicked")?
+    }
+
+    /// The QEMU egress policy a starting VM gets: one carried by its create request is stored
+    /// as the VM's own policy first, then the usual precedence applies (VM, node default,
+    /// `fluxvm.toml`, loopback-only). Never fails: a bad stored policy falls back to the safe
+    /// loopback-only default and is logged.
+    fn qemu_egress_for_start(
+        &self,
+        id: Uuid,
+        record: &VmRecord,
+    ) -> fluxvm_network::qemu_egress::QemuEgressPolicy {
+        use fluxvm_network::qemu_egress as eg;
+        if let Some(p) = &record.request.egress {
+            if let Err(e) = eg::save_vm_policy(&self.cfg.state_dir, id, p) {
+                tracing::warn!(vm = %id, error = %e, "ignoring invalid egress policy in create request");
+            }
+        }
+        match self.qemu_egress_effective_sync(id) {
+            Ok((p, _)) => p,
+            Err(e) => {
+                tracing::warn!(vm = %id, error = %e, "unreadable QEMU egress policy; using loopback-only");
+                eg::QemuEgressPolicy::default()
+            }
+        }
+    }
+
+    fn qemu_egress_effective_sync(
+        &self,
+        id: Uuid,
+    ) -> Result<(
+        fluxvm_network::qemu_egress::QemuEgressPolicy,
+        fluxvm_network::qemu_egress::PolicySource,
+    )> {
+        use fluxvm_network::qemu_egress as eg;
+        let dp = &self.cfg.sandbox.dataplane;
+        let from_config = eg::config_default(&dp.qemu_egress_mode, &dp.qemu_egress_rules)
+            .unwrap_or_else(|e| {
+                tracing::warn!(error = %e, "invalid [sandbox.dataplane] qemu_egress_*; using loopback-only");
+                eg::QemuEgressPolicy::default()
+            });
+        eg::effective(&self.cfg.state_dir, id, &from_config)
+    }
+
+    /// The egress policy of a VM's QEMU process: what is wanted (`policy`, and where it came
+    /// from) and what the kernel is enforcing (`programmed`, absent when the VM has no policy
+    /// maps because it started before this feature).
+    pub async fn qemu_egress(&self, id: Uuid) -> Result<serde_json::Value> {
+        let vm = self.get(id).await?;
+        let (policy, source) = self.qemu_egress_effective_sync(id)?;
+        let cfg = self.cfg.sandbox.dataplane.clone();
+        let running = matches!(vm.status, VmStatus::Running | VmStatus::Paused);
+        let programmed = if running {
+            tokio::task::spawn_blocking(move || {
+                fluxvm_network::qemu_cgroup::programmed_egress(&cfg, id).ok()
+            })
+            .await
+            .context("egress reader panicked")?
+        } else {
+            None
+        };
+        Ok(serde_json::json!({
+            "vm_id": id,
+            "policy": policy,
+            "source": source,
+            "running": running,
+            "programmed": programmed,
+        }))
+    }
+
+    /// Store a VM's egress policy and, when it is running, program it into the kernel at once.
+    /// A stopped VM picks it up at the next start. The previous policy is restored if the
+    /// kernel rejects the new one.
+    pub async fn set_qemu_egress(
+        &self,
+        id: Uuid,
+        policy: fluxvm_network::qemu_egress::QemuEgressPolicy,
+    ) -> Result<serde_json::Value> {
+        use fluxvm_network::qemu_egress as eg;
+        let vm = self.get(id).await?;
+        eg::validate(&policy)?;
+        let previous = eg::load_vm_policy(&self.cfg.state_dir, id)?;
+        eg::save_vm_policy(&self.cfg.state_dir, id, &policy)?;
+        if matches!(vm.status, VmStatus::Running | VmStatus::Paused) {
+            let cfg = self.cfg.sandbox.dataplane.clone();
+            let p = policy.clone();
+            let applied = tokio::task::spawn_blocking(move || {
+                fluxvm_network::qemu_cgroup::set_egress(&cfg, id, &p)
+            })
+            .await
+            .context("egress apply panicked")?;
+            if let Err(e) = applied {
+                match &previous {
+                    Some(old) => {
+                        let _ = eg::save_vm_policy(&self.cfg.state_dir, id, old);
+                    }
+                    None => {
+                        let _ = eg::delete_vm_policy(&self.cfg.state_dir, id);
+                    }
+                }
+                return Err(e).context("applying QEMU egress policy");
+            }
+        }
+        self.qemu_egress(id).await
+    }
+
+    /// Drop a VM's own policy so it inherits the node default again.
+    pub async fn clear_qemu_egress(&self, id: Uuid) -> Result<serde_json::Value> {
+        use fluxvm_network::qemu_egress as eg;
+        let vm = self.get(id).await?;
+        eg::delete_vm_policy(&self.cfg.state_dir, id)?;
+        if matches!(vm.status, VmStatus::Running | VmStatus::Paused) {
+            let (inherited, _) = self.qemu_egress_effective_sync(id)?;
+            let cfg = self.cfg.sandbox.dataplane.clone();
+            tokio::task::spawn_blocking(move || {
+                fluxvm_network::qemu_cgroup::set_egress(&cfg, id, &inherited)
+            })
+            .await
+            .context("egress apply panicked")??;
+        }
+        self.qemu_egress(id).await
+    }
+
+    /// Flows the VM's QEMU process was refused (or, in audit mode, would have been), busiest first.
+    pub async fn qemu_egress_observed(
+        &self,
+        id: Uuid,
+    ) -> Result<Vec<fluxvm_network::qemu_egress::ObservedFlow>> {
+        self.get(id).await?;
+        let cfg = self.cfg.sandbox.dataplane.clone();
+        tokio::task::spawn_blocking(move || fluxvm_network::qemu_cgroup::observed_egress(&cfg, id))
+            .await
+            .context("egress reader panicked")?
+    }
+
+    /// The node-wide default egress policy and how many VMs follow it.
+    pub async fn qemu_egress_defaults(
+        &self,
+    ) -> Result<fluxvm_network::qemu_egress::QemuEgressPolicy> {
+        use fluxvm_network::qemu_egress as eg;
+        let dp = &self.cfg.sandbox.dataplane;
+        if let Some(p) = eg::load_defaults(&self.cfg.state_dir)? {
+            return Ok(p);
+        }
+        eg::config_default(&dp.qemu_egress_mode, &dp.qemu_egress_rules)
+    }
+
+    /// Replace the node default. With `apply_running`, every running VM that has no policy of its
+    /// own is re-programmed now; otherwise the change reaches VMs as they start.
+    pub async fn set_qemu_egress_defaults(
+        &self,
+        policy: fluxvm_network::qemu_egress::QemuEgressPolicy,
+        apply_running: bool,
+    ) -> Result<serde_json::Value> {
+        use fluxvm_network::qemu_egress as eg;
+        eg::save_defaults(&self.cfg.state_dir, &policy)?;
+        let mut applied = Vec::new();
+        let mut failed = Vec::new();
+        if apply_running {
+            for vm in self.list().await {
+                if !matches!(vm.status, VmStatus::Running | VmStatus::Paused) {
+                    continue;
+                }
+                if eg::load_vm_policy(&self.cfg.state_dir, vm.id)?.is_some() {
+                    continue; // has its own policy
+                }
+                let cfg = self.cfg.sandbox.dataplane.clone();
+                let p = policy.clone();
+                let id = vm.id;
+                let r = tokio::task::spawn_blocking(move || {
+                    fluxvm_network::qemu_cgroup::set_egress(&cfg, id, &p)
+                })
+                .await
+                .context("egress apply panicked")?;
+                match r {
+                    Ok(()) => applied.push(vm.id),
+                    Err(e) => {
+                        failed.push(serde_json::json!({"vm_id": vm.id, "error": e.to_string()}))
+                    }
+                }
+            }
+        }
+        Ok(serde_json::json!({"policy": policy, "applied": applied, "failed": failed}))
     }
 
     pub async fn network_status(
@@ -5384,6 +5567,7 @@ impl VmManager {
         let vm = self.store.remove(id).await?.context("VM vanished")?;
         let _ = fluxvm_network::dataplane::remove_sandbox_policy(&self.cfg, id);
         let _ = fluxvm_network::dataplane::delete_policy(&self.cfg, id);
+        let _ = fluxvm_network::qemu_egress::delete_vm_policy(&self.cfg.state_dir, id);
         let _ = fluxvm_network::edge_contract::delete(&self.cfg, id);
         self.release_pod_identity(&vm).await;
         self.activity.lock().await.remove(&id);
@@ -6508,6 +6692,7 @@ mod tests {
         firmware: Option<&str>,
     ) -> CreateVmRequest {
         CreateVmRequest {
+            egress: None,
             apple: None,
             name: "fixture".into(),
             tenant: None,

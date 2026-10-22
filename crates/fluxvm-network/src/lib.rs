@@ -26,6 +26,7 @@ pub mod packetflow;
 pub mod peer_policy;
 pub mod pod_identity;
 pub mod qemu_cgroup;
+pub mod qemu_egress;
 pub mod service;
 pub mod service_ha;
 pub mod service_policy;

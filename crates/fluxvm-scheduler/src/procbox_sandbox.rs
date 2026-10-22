@@ -1300,6 +1300,7 @@ fn make_record(
 /// ever launched from it.
 fn minimal_request(name: Option<String>, spec: &ProcboxSpec) -> CreateVmRequest {
     CreateVmRequest {
+        egress: None,
         apple: None,
         name: name.unwrap_or_default(),
         tenant: None,

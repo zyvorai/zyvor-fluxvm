@@ -4,6 +4,7 @@
 pub mod agent_density;
 pub mod backend;
 pub mod config;
+pub mod egress;
 pub mod fs_image;
 pub mod gpu;
 pub mod gpu_health;
