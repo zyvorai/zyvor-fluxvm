@@ -443,17 +443,27 @@ fn exec_allow_list_blocks_a_program_written_into_a_writable_dir() {
     // Without an allow-list the writable directory is executable, so the copy runs.
     let mut open = base();
     open.write.push(work.path().to_path_buf());
-    let r = run(
-        &open,
-        &[
-            copy.to_str().unwrap().into(),
-            "selftest".into(),
-            "write".into(),
-            work.path().join("a").to_str().unwrap().into(),
-        ],
-        &RunOptions { capture: true },
-    )
-    .expect("copy runs when execute is not restricted");
+    // A parallel test thread that forks while the copy was still open for writing leaves it "Text file busy"
+    // (ETXTBSY) for a moment, so a start that fails that way is retried.
+    let mut attempt = 0;
+    let r = loop {
+        attempt += 1;
+        match run(
+            &open,
+            &[
+                copy.to_str().unwrap().into(),
+                "selftest".into(),
+                "write".into(),
+                work.path().join("a").to_str().unwrap().into(),
+            ],
+            &RunOptions { capture: true },
+        ) {
+            Err(e) if attempt < 50 && format!("{e:#}").contains("Text file busy") => {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            other => break other.expect("copy runs when execute is not restricted"),
+        }
+    };
     assert_eq!(out(&r), "ok", "{r:?}");
 
     // With one, the same copy is refused even though the directory is writable and readable.
@@ -469,6 +479,10 @@ fn exec_allow_list_blocks_a_program_written_into_a_writable_dir() {
         ],
         &RunOptions { capture: true },
     );
-    assert!(res.is_err(), "the copy must not start: {res:?}");
+    let err = res.expect_err("the copy must not start");
+    assert!(
+        !format!("{err:#}").contains("Text file busy"),
+        "refused for the wrong reason: {err:#}"
+    );
     assert!(!work.path().join("b").exists());
 }
