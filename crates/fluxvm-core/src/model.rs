@@ -482,7 +482,34 @@ pub struct PortForward {
     /// relays through the Mac. Ignored by other backends.
     #[serde(default)]
     pub guests: bool,
+    /// QEMU user networking: the host address the forward listens on. Unset keeps the long-standing `0.0.0.0`
+    /// (reachable from outside the host). Stack-managed SSH forwards set `127.0.0.1` so the control path into a
+    /// guest is never exposed. Must be an IP literal. Ignored by other backends.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_addr: Option<String>,
 }
+
+impl PortForward {
+    /// The address QEMU should listen on: `host_addr`, or all interfaces when unset.
+    pub fn listen_addr(&self) -> Result<std::net::IpAddr, String> {
+        match &self.host_addr {
+            None => Ok(std::net::Ipv4Addr::UNSPECIFIED.into()),
+            Some(a) => a
+                .parse()
+                .map_err(|_| format!("port forward host_addr {a:?} is not an IP address")),
+        }
+    }
+
+    /// True for a forward to the guest's SSH port that only listens on the host's loopback: the path
+    /// `fluxctl` uses to reach a QEMU user-mode guest, which has no address of its own on the host.
+    pub fn is_loopback_ssh(&self) -> bool {
+        self.guest_port == 22
+            && self.protocol == "tcp"
+            && self.listen_addr().map(|a| a.is_loopback()).unwrap_or(false)
+            && self.host_addr.is_some()
+    }
+}
+
 fn default_tcp() -> String {
     "tcp".into()
 }

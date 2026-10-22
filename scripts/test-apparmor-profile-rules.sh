@@ -28,7 +28,8 @@ for prof in fluxctl fluxvm; do
 done
 
 if command -v apparmor_parser >/dev/null 2>&1; then
-    apparmor_parser -Q "$PROFILE" && echo "ok:   apparmor_parser accepts the profile" \
+    # -K: this check runs unprivileged, so it must not try to write the policy cache in /var/cache/apparmor
+    apparmor_parser -QK "$PROFILE" && echo "ok:   apparmor_parser accepts the profile" \
         || { echo "FAIL: apparmor_parser rejected the profile"; fail=1; }
 fi
 exit $fail

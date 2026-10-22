@@ -101,7 +101,7 @@ The repo is very large and documentation-heavy. Much of the newer work (Sets 5â€
 
 **SDKs never run against a live daemon by default.** Python, Go and TS SDKs and the MCP tools are tested only against mocks. Live tests exist but are not in CI.
 
-**Dependabot covers only `cargo` and `github-actions`.** It misses the Go modules (`go/`, `controllers/`, `tools/`, `terraform-provider-fluxvm/`) and npm (`website/`, `typescript/`).
+**Dependabot covers only `github-actions`.** Cargo is not in `.github/dependabot.yml` (Dependabot cannot resolve the workspace without the sibling `guestkit` checkout); `.github/workflows/cargo-update.yml` runs `cargo update` weekly and opens a PR instead. Dependabot also misses the Go modules (`go/`, `controllers/`, `tools/`, `terraform-provider-fluxvm/`) and npm (`website/`, `typescript/`).
 
 **`secure-containers-set18.yml` hygiene.**
 - It has no `permissions:` block.

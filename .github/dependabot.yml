@@ -1,15 +1,8 @@
 version: 2
 updates:
-  - package-ecosystem: "cargo"
-    directory: "/"
-    schedule:
-      interval: "weekly"
-    open-pull-requests-limit: 5
-    groups:
-      cargo-dependencies:
-        patterns:
-          - "*"
-
+  # No cargo ecosystem: Dependabot cannot load this workspace (fluxvm-image depends on the sibling repo guestkit by
+  # relative path, which its checkout does not have), so every cargo run failed. .github/workflows/cargo-update.yml
+  # updates Cargo.lock instead.
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
