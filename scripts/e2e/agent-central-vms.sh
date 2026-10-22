@@ -93,6 +93,14 @@ else gap "snapshot through central on a qemu VM: HTTP $CODE $(jq -r '.error // .
 # --- power ------------------------------------------------------------------------------------------------------
 CODE="$(admc -XPOST "$C/fleet/vms/n1/$ID/stop")"; check "stop through central" test "$CODE" = 200 -o "$CODE" = 202
 check "the VM reports stopped" waitfor '[[ "$(adm '$C'/fleet/vms | jq -r --arg id '"$ID"' "[.items[]|select(.id==\$id)|.status]|first")" == stopped ]]' 40
+# Clone needs no snapshot when the source is stopped (the snapshot route is a known gap on qemu, so this is where clone gets exercised).
+CODE="$(admc -XPOST -d '{"name":"e2e-clone"}' "$C/fleet/vms/n1/$ID/clone")"
+if [[ "$CODE" == 200 || "$CODE" == 201 ]]; then
+  CID="$(jq -r '.id // .vm.id // empty' "$T/body")"; ok "clone of a stopped VM"
+  check "the clone is a different VM on the same node" test -n "$CID" -a "$CID" != "$ID" -a "$(adm "$C/fleet/vms" | jq -r --arg id "$CID" '[.items[]|select(.id==$id)|.node]|first')" = n1
+  check "delete the clone" test "$(admc -XDELETE "$C/fleet/vms/n1/$CID")" -lt 300
+  check "the source is still listed after the clone is gone" test "$(adm "$C/fleet/vms" | jq -r --arg id "$ID" '[.items[]|select(.id==$id)]|length')" = 1
+else gap "clone of a stopped VM through central: HTTP $CODE $(jq -r '.error // .' "$T/body" | head -c 160)"; fi
 CODE="$(admc -XPOST "$C/fleet/vms/n1/$ID/start")"; check "start through central" test "$CODE" = 200 -o "$CODE" = 202
 
 # --- lease -------------------------------------------------------------------------------------------------------
@@ -110,6 +118,7 @@ CODE="$(admc -XPOST -d "{\"name\":\"p1\",\"image\":\"e2e-linux\",\"vcpus\":1,\"m
 if [[ "$CODE" == 200 || "$CODE" == 201 ]]; then
   ok "warm pool created"
   # Pools place their VMs on hosts the owner leases, and leases are Mac-only: on a Linux node the pool backs off.
+  # Fill, hand-out, refill and tenant pools on leased Macs run against simulated Macs in central_warmpool.rs's tests.
   if waitfor '[[ "$(adm '$C'/fleet/pools/p1/status | jq -r "(.ready // .warm // 0)")" -ge 1 ]]' 25; then ok "the pool fills to min_ready without being asked"
   elif adm "$C/fleet/pools/p1/status" | jq -r .last_error | grep -q -i leases; then gap "warm pool on a Linux node: $(adm "$C/fleet/pools/p1/status" | jq -r .last_error | head -c 150)"
   else bad "the pool fills to min_ready without being asked: $(adm "$C/fleet/pools/p1/status" | jq -c . | cut -c1-200)"; fi
