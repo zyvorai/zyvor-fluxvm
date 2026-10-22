@@ -1,0 +1,13 @@
+{
+  "name": "fluxvm-ui",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "workspaces": ["core", "node"],
+  "scripts": {
+    "dev": "npm run dev -w @fluxvm/ui-node",
+    "build": "npm run build -w @fluxvm/ui-node",
+    "typecheck": "npm run typecheck -w @fluxvm/ui-node",
+    "test": "npm run test -w @fluxvm/ui-core && npm run test -w @fluxvm/ui-node"
+  }
+}

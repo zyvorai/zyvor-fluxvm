@@ -44,6 +44,7 @@ sha2 = "0.11"
 sha1 = "0.11"
 hmac = "0.13"
 base64 = "0.23"
+include_dir = "0.7"
 
 [dev-dependencies]
 chrono = { version = "0.4", features = ["serde"] }

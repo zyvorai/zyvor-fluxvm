@@ -47,6 +47,7 @@ mod agent_session_transfer;
 mod agent_sessions;
 mod macos_pool_api;
 mod speculate_api;
+mod studio;
 mod tunnel_api;
 mod volumes_api;
 mod vz_api;
@@ -175,7 +176,7 @@ async fn auth_middleware(State(auth): State<AuthState>, mut req: Request, next: 
         || path == "/v1/openapi.json"
         || path.starts_with("/preview/")
         || ((method == Method::GET || method == Method::HEAD)
-            && (CONSOLE_PATHS.contains(&path.as_str()) || path.starts_with("/console/terminal")))
+            && (path == "/console" || path.starts_with("/console/")))
         // A browser WebSocket cannot send `Authorization`: the single-use ticket in the path is the
         // credential (minted by an authenticated `POST .../pty-ticket`, see agent_sessions.rs).
         || (method == Method::GET && path.starts_with("/console/pty/"))
@@ -890,12 +891,15 @@ pub fn router(manager: Arc<VmManager>) -> Router {
         .route("/v1/templates", get(list_templates).post(build_template))
         .route("/v1/egress/check", post(egress_check))
         .route("/v1/egress/nftables", get(egress_nftables))
-        .route("/console", get(console_ui))
-        .route("/console/", get(console_ui))
+        // FluxVM Studio (the embedded SPA) owns /console; the old dashboard stays at /console/legacy for one release.
+        .route("/console", get(studio::studio_root))
+        .route("/console/", get(studio::studio_index))
+        .route("/console/legacy", get(console_ui))
         .route("/console/app.js", get(console_js))
         .route("/console/terminal", get(terminal_page))
         .route("/console/terminal/", get(terminal_page))
         .route("/console/terminal/{file}", get(terminal_asset))
+        .route("/console/{*path}", get(studio::studio_file))
         .route("/v1/images/build", post(build_image))
         .route("/v1/images/import", post(import_image))
         .route("/v1/images/catalog", post(add_catalog_entry))
@@ -2395,7 +2399,8 @@ async fn terminal_asset(Path(file): Path<String>) -> Response {
 
 const CONSOLE_HTML: &str = include_str!("console.html");
 const CONSOLE_JS: &str = include_str!("console.js");
-const CONSOLE_PATHS: [&str; 3] = ["/console", "/console/", "/console/app.js"];
+#[cfg(test)]
+const CONSOLE_PATHS: [&str; 3] = ["/console/", "/console/legacy", "/console/app.js"];
 
 // ZYVOR_RUNTIME_BOUNDARY_V1: stable node-runtime feature discovery for Fabric.
 async fn security_capabilities(
@@ -6500,6 +6505,61 @@ mod tests {
                 !CONSOLE_JS.contains("innerHTML"),
                 "API data is rendered as text"
             );
+        }
+
+        #[tokio::test]
+        async fn studio_serves_the_spa_without_a_token_and_never_html_for_a_missing_asset() {
+            let auth = AuthConfig {
+                tokens: vec![ApiToken {
+                    token: "secret".into(),
+                    role: Role::Admin,
+                    name: None,
+                    tenant: None,
+                }],
+                ..Default::default()
+            };
+            let m = manager(auth);
+            let get = |path: &'static str| {
+                let m = m.clone();
+                async move {
+                    router(m)
+                        .oneshot(Request::get(path).body(Body::empty()).unwrap())
+                        .await
+                        .unwrap()
+                }
+            };
+            // `/console` must redirect: the app's asset URLs are relative to `/console/`.
+            let r = get("/console").await;
+            assert_eq!(r.status(), StatusCode::PERMANENT_REDIRECT);
+            assert_eq!(r.headers()[header::LOCATION], "/console/");
+            // The entry point and a client-side route both get index.html.
+            for path in ["/console/", "/console/machines/abc"] {
+                let r = get(path).await;
+                assert_eq!(r.status(), StatusCode::OK, "{path}");
+                assert!(r.headers()[header::CONTENT_TYPE].to_str().unwrap().starts_with("text/html"));
+                let csp = r.headers()[header::CONTENT_SECURITY_POLICY].to_str().unwrap();
+                assert!(csp.contains("script-src 'self'") && !csp.contains("script-src 'self' 'unsafe"));
+            }
+            // Assets are JavaScript/CSS with an ETag; a stale asset URL is a 404, not HTML-as-JS.
+            let js = get("/console/assets/app.js").await;
+            assert_eq!(js.status(), StatusCode::OK);
+            assert!(js.headers()[header::CONTENT_TYPE].to_str().unwrap().starts_with("text/javascript"));
+            let etag = js.headers()[header::ETAG].clone();
+            assert_eq!(get("/console/assets/gone-123.js").await.status(), StatusCode::NOT_FOUND);
+            let cached = router(m.clone())
+                .oneshot(
+                    Request::get("/console/assets/app.js")
+                        .header(header::IF_NONE_MATCH, etag)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(cached.status(), StatusCode::NOT_MODIFIED);
+            // Static files are read-only, and the data behind them still needs a token.
+            let post = Request::post("/console/assets/app.js").body(Body::empty()).unwrap();
+            assert_ne!(router(m.clone()).oneshot(post).await.unwrap().status(), StatusCode::OK);
+            assert_eq!(status_for(router(m), "GET", "/v1/vms", None).await, StatusCode::UNAUTHORIZED);
         }
 
         #[tokio::test]
