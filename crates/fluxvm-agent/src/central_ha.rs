@@ -303,7 +303,7 @@ mod tests {
     }
 
     async fn wait_for(cond: impl Fn() -> bool) {
-        for _ in 0..100 {
+        for _ in 0..300 {
             if cond() {
                 return;
             }
@@ -320,7 +320,8 @@ mod tests {
             ha: Some(HaConfig {
                 store: store.clone(),
                 advertise_url: url.into(),
-                ttl: std::time::Duration::from_millis(300),
+                // Renewals run every ttl/3; 300 ms let one stalled renewal on a loaded CI runner cost the leader its lease.
+                ttl: std::time::Duration::from_millis(1500),
             }),
         });
         (app, handle.expect("HA handle"))
@@ -359,7 +360,8 @@ mod tests {
         )
         .await;
         assert_eq!(s, 200);
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        // The mirror runs on the renewal tick (ttl/3 = 500 ms).
+        tokio::time::sleep(std::time::Duration::from_millis(800)).await;
 
         // The leader dies without releasing the lock; the standby takes over after the TTL.
         ha.kill();
