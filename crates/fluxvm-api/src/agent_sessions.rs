@@ -2624,6 +2624,7 @@ fn approval_required(a: &approvals::Approval) -> (StatusCode, Json<Value>) {
             "params": a.params,
             "expires_at": a.expires_at,
             // `error` is the key the CLI and SDKs print for a non-2xx answer.
+            "code": "APPROVAL_REQUIRED",
             "error": format!(
                 "this command needs an operator's approval (approval_id {}): approve it with POST .../approvals/{}/approve, then repeat the request with approval_id",
                 a.id, a.id

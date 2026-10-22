@@ -947,14 +947,19 @@ message is for people and may be reworded. The code follows the HTTP status:
 | 403 | `FORBIDDEN` | Role or session token does not allow the route |
 | 404 | `NOT_FOUND` | No such VM or session, **or one that belongs to another tenant** (never 403, so ids do not leak) |
 | 409 | `CONFLICT` | State conflict: VM not running, a duplicate in flight, a changeset whose files moved |
+| 412 | `PRECONDITION_FAILED` | `If-Match` no longer matches |
 | 413 | `PAYLOAD_TOO_LARGE` | Request body over the limit |
 | 422 | `UNPROCESSABLE` | Same `Idempotency-Key` reused with a different request |
+| 428 | `PRECONDITION_REQUIRED` | The request needs a condition first (an operator approval, an `If-Match`) |
 | 429 | `RATE_LIMITED` | Honour `Retry-After` |
+| 501 | `NOT_IMPLEMENTED` | The backend does not support the route |
 | 503 | `UNAVAILABLE` | Capacity (for example no free GPU); retry later |
 | other 5xx | `INTERNAL` | Server fault |
 
-Some older routes that build their own error bodies (tunnels, fleet central) still send only `error`; treat a missing
-`code` as unknown and fall back to the status.
+Two special codes ride on the generic statuses: `APPROVAL_REQUIRED` (a `428` that also carries `approval_id`) and
+`STEP_UP_REQUIRED` (a `401` asking for a TOTP code). Tunnel, idempotency and fleet-central errors send a `code` too.
+The fleet central's sign-up and SSO browser flows still send only `error`; treat a missing `code` as unknown and fall
+back to the status.
 
 ### Idempotency-Key
 
