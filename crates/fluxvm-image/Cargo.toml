@@ -14,7 +14,7 @@ fluxvm-core = { path = "../fluxvm-core" }
 fluxvm-guest-protocol = { path = "../fluxvm-guest-protocol" }
 guestkit = { path = "../../../guestkit", features = ["registry-write", "agent"] }
 anyhow = "1"
-base64 = "0.22"
+base64 = "0.23"
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 flate2 = "1"
 roxmltree = "0.21"

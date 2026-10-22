@@ -11,7 +11,7 @@ description = "Shared domain types, config, and VmBackend trait for Zyvor FluxVM
 [dependencies]
 anyhow = "1"
 async-trait = "0.1"
-base64 = "0.22"
+base64 = "0.23"
 chrono = { version = "0.4", features = ["serde"] }
 fluxvm-cgroup = { path = "../fluxvm-cgroup" }
 ed25519-dalek = { version = "2", features = ["rand_core"] }

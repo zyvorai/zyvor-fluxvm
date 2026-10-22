@@ -12,7 +12,7 @@ description = "Backup chain storage for Zyvor FluxVM: manifests, S3 and director
 aes-gcm = "0.10"
 anyhow = "1"
 async-trait = "0.1"
-base64 = "0.22"
+base64 = "0.23"
 chrono = { version = "0.4", features = ["serde"] }
 hex = "0.4"
 hmac = "0.12"

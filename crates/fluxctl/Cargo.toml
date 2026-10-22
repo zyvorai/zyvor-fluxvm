@@ -20,7 +20,7 @@ fluxvm-guest-protocol = { path = "../fluxvm-guest-protocol" }
 anyhow = "1"
 axum = "0.8"
 axum-server = { version = "0.7", features = ["tls-rustls"] }
-base64 = "0.22"
+base64 = "0.23"
 clap = { version = "4", features = ["derive", "env", "color", "wrap_help"] }
 clap_complete = "4"
 anstyle = "1"

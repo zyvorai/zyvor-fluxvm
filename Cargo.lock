@@ -2209,7 +2209,7 @@ dependencies = [
  "anyhow",
  "axum",
  "axum-server",
- "base64 0.22.1",
+ "base64 0.23.1",
  "chrono",
  "clap",
  "clap_complete",
@@ -2279,7 +2279,7 @@ dependencies = [
  "anyhow",
  "async-stream",
  "axum",
- "base64 0.22.1",
+ "base64 0.23.1",
  "bytes",
  "chrono",
  "fluxvm-core",
@@ -2342,7 +2342,7 @@ dependencies = [
  "aes-gcm",
  "anyhow",
  "async-trait",
- "base64 0.22.1",
+ "base64 0.23.1",
  "chrono",
  "hex",
  "hmac",
@@ -2432,7 +2432,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
- "base64 0.22.1",
+ "base64 0.23.1",
  "containerd-shim",
  "containerd-shim-protos",
  "fluxvm-container-client",
@@ -2454,7 +2454,7 @@ version = "0.4.11"
 dependencies = [
  "anyhow",
  "async-trait",
- "base64 0.22.1",
+ "base64 0.23.1",
  "chrono",
  "ed25519-dalek",
  "fluxvm-cgroup",
@@ -2496,7 +2496,7 @@ name = "fluxvm-guest-agent"
 version = "0.4.11"
 dependencies = [
  "anyhow",
- "base64 0.22.1",
+ "base64 0.23.1",
  "clap",
  "fluxvm-guest-protocol",
  "fluxvm-procbox",
@@ -2542,7 +2542,7 @@ version = "0.4.11"
 dependencies = [
  "anyhow",
  "axum",
- "base64 0.22.1",
+ "base64 0.23.1",
  "ed25519-dalek",
  "flate2",
  "fluxvm-core",
@@ -2743,7 +2743,7 @@ name = "fluxvm-scheduler"
 version = "0.4.11"
 dependencies = [
  "anyhow",
- "base64 0.22.1",
+ "base64 0.23.1",
  "chrono",
  "flate2",
  "fluxvm-apple",
