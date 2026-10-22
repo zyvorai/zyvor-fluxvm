@@ -394,7 +394,10 @@ async fn auth_middleware(State(fleet): State<Fleet>, mut req: Request, next: Nex
         || path == "/fleet/ha"
         || path == "/fleet/ha/leader"
         || ((path == "/console" || path.starts_with("/console/"))
-            && matches!(*req.method(), axum::http::Method::GET | axum::http::Method::HEAD))
+            && matches!(
+                *req.method(),
+                axum::http::Method::GET | axum::http::Method::HEAD
+            ))
     {
         return next.run(req).await;
     }

@@ -390,7 +390,13 @@ mod tests {
             reconcile_interval: None,
             ha: None,
         });
-        for path in ["/console/", "/console/legacy", "/console/app.js", "/console/assets/app.js", "/console/hosts"] {
+        for path in [
+            "/console/",
+            "/console/legacy",
+            "/console/app.js",
+            "/console/assets/app.js",
+            "/console/hosts",
+        ] {
             let req = axum::http::Request::builder()
                 .uri(path)
                 .body(Body::empty())
