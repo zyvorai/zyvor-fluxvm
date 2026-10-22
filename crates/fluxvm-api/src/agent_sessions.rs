@@ -227,6 +227,10 @@ struct Capabilities {
     /// for sessions without a `filesystem` policy.
     #[serde(default)]
     confinement: bool,
+    /// The guest enforced the session's executable allow-list (`policy.process.enforce = "exec"`)
+    /// when probed at create: only the listed programs can start, whatever shell builds the command.
+    #[serde(default)]
+    exec_allowlist: bool,
     /// The egress proxy enforces the session's `network.allow` method/path rules for this
     /// sandbox. False for sessions without such rules.
     #[serde(default)]
@@ -260,6 +264,11 @@ struct PolicyReport {
     /// Command rules enforced on exec and job start; `None` when the session has none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     process: Option<CommandRules>,
+    /// `process.enforce = "exec"`: the allow and ask programs are also compiled into the guest's
+    /// executable allow-list (Landlock), which holds even where the command string does not show
+    /// what runs.
+    #[serde(default)]
+    enforce_exec: bool,
     /// Parts of the policy that are accepted but not enforced.
     unenforced: Vec<String>,
     /// The guest confinement (Landlock + seccomp) applied to exec, jobs, files and git. Present
@@ -293,6 +302,73 @@ const CONFINED_READ: &[&str] = &[
 /// Paths every confined command may write: scratch space (job logs live under `/tmp`) and the
 /// harmless device files shells open.
 const CONFINED_WRITE: &[&str] = &["/tmp", "/var/tmp", "/dev/null", "/dev/tty", "/dev/shm"];
+
+/// Directories a bare program name in `process.allow` is looked up in. The guest skips the
+/// candidates that do not exist (and reports them), so listing them all costs nothing.
+const EXEC_DIRS: &[&str] = &[
+    "/usr/local/bin",
+    "/usr/bin",
+    "/bin",
+    "/usr/local/sbin",
+    "/usr/sbin",
+    "/sbin",
+];
+/// Programs every enforced session needs whatever its rules say: the shell commands run through,
+/// `true` (the create-time probe) and the dynamic loader the kernel executes for dynamic programs.
+const EXEC_BASE: &[&str] = &[
+    "/bin/sh",
+    "/usr/bin/sh",
+    "/bin/true",
+    "/usr/bin/true",
+    "/lib64/ld-linux-x86-64.so.2",
+    "/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2",
+    "/lib/ld-linux-aarch64.so.1",
+    "/lib/aarch64-linux-gnu/ld-linux-aarch64.so.1",
+    "/lib/ld-musl-x86_64.so.1",
+    "/lib/ld-musl-aarch64.so.1",
+];
+
+/// The program a `process` pattern names: its first word. With `enforce = "exec"` it has to be
+/// literal, because the kernel enforces paths and cannot match a glob.
+fn pattern_program(pat: &str) -> Result<String, String> {
+    let word = pat
+        .split_whitespace()
+        .next()
+        .map(|w| w.trim_matches(|c| c == '\'' || c == '"'))
+        .unwrap_or_default();
+    if word.is_empty() || word.contains(['*', '?', '[', ']', '{', '}', '$', '`']) {
+        return Err(format!(
+            "process pattern `{pat}`: enforce = \"exec\" needs a literal program name or absolute path \
+             as its first word"
+        ));
+    }
+    if word.contains('/') {
+        return confine_path(word)
+            .filter(|p| !word.ends_with('/') && p == word)
+            .ok_or_else(|| {
+                format!(
+                    "process pattern `{pat}`: the program path must be absolute and without `..`"
+                )
+            });
+    }
+    Ok(word.to_string())
+}
+
+/// Compile the programs the `allow` and `ask` patterns name into guest executable paths.
+fn exec_allow_paths(rules: &CommandRules) -> Result<Vec<String>, String> {
+    let mut out: Vec<String> = EXEC_BASE.iter().map(|s| s.to_string()).collect();
+    for pat in rules.allow.iter().chain(&rules.ask) {
+        let prog = pattern_program(pat)?;
+        if prog.starts_with('/') {
+            out.push(prog);
+        } else {
+            out.extend(EXEC_DIRS.iter().map(|d| format!("{d}/{prog}")));
+        }
+    }
+    out.sort();
+    out.dedup();
+    Ok(out)
+}
 
 /// One `filesystem.read` / `filesystem.write` entry: an absolute path with no `..`. A trailing
 /// `/**` or `/*` is accepted and means the directory (Landlock rules are subtree rules).
@@ -770,7 +846,7 @@ async fn budget_check_workspace(m: &VmManager, s: &Session) -> ApiResult<()> {
             s.sandbox_id,
             format!("du -sk {} 2>/dev/null | cut -f1", shell_quote(&ws.path)),
             Some(30),
-            s.policy.exec.clone(),
+            helper_policy(s),
         )
         .await?;
     let kib = json!(res)["stdout"]
@@ -1141,6 +1217,24 @@ fn http_rules_for(
     Ok(rules)
 }
 
+/// The guest policy of a session that confines the filesystem: the common read and write paths,
+/// network reach left to the sandbox.
+fn confined_default() -> ExecPolicy {
+    ExecPolicy {
+        read: CONFINED_READ.iter().map(|s| s.to_string()).collect(),
+        write: CONFINED_WRITE.iter().map(|s| s.to_string()).collect(),
+        // Network reach is the sandbox's job (no NIC, or the host egress proxy); Landlock
+        // port rules would only break the proxy path, so the guest policy leaves it open.
+        tcp_connect: ExecTcpRule::Any,
+        tcp_bind: ExecTcpRule::Any,
+        allow_unix: true,
+        allow_udp: true,
+        // Missing optional paths (/lib32, /dev/shm) are skipped and reported, not fatal.
+        best_effort: true,
+        ..Default::default()
+    }
+}
+
 fn compile_policy(p: Option<PolicyBody>) -> Result<PolicyReport, ApiError> {
     let bad = |m: String| ApiError {
         status: StatusCode::BAD_REQUEST,
@@ -1235,19 +1329,7 @@ fn compile_policy(p: Option<PolicyBody>) -> Result<PolicyReport, ApiError> {
         let obj = v
             .as_object()
             .ok_or_else(|| bad("filesystem must be an object with read and/or write".into()))?;
-        let mut exec = ExecPolicy {
-            read: CONFINED_READ.iter().map(|s| s.to_string()).collect(),
-            write: CONFINED_WRITE.iter().map(|s| s.to_string()).collect(),
-            // Network reach is the sandbox's job (no NIC, or the host egress proxy); Landlock
-            // port rules would only break the proxy path, so the guest policy leaves it open.
-            tcp_connect: ExecTcpRule::Any,
-            tcp_bind: ExecTcpRule::Any,
-            allow_unix: true,
-            allow_udp: true,
-            // Missing optional paths (/lib32, /dev/shm) are skipped and reported, not fatal.
-            best_effort: true,
-            ..Default::default()
-        };
+        let mut exec = confined_default();
         for (k, val) in obj {
             let list = match k.as_str() {
                 "read" => &mut exec.read,
@@ -1289,11 +1371,22 @@ fn compile_policy(p: Option<PolicyBody>) -> Result<PolicyReport, ApiError> {
             .as_object()
             .ok_or_else(|| bad("process must be an object with allow and/or deny".into()))?;
         let mut rules = CommandRules::default();
+        let mut enforce_exec = false;
         for (k, val) in obj {
             let list = match k.as_str() {
                 "allow" => &mut rules.allow,
                 "deny" => &mut rules.deny,
                 "ask" => &mut rules.ask,
+                "enforce" => {
+                    match val.as_str() {
+                        Some("exec") => enforce_exec = true,
+                        Some("none") => {}
+                        _ => {
+                            return Err(bad("process.enforce must be \"exec\" or \"none\"".into()));
+                        }
+                    }
+                    continue;
+                }
                 other => return Err(bad(format!("unknown process rule `{other}`"))),
             };
             for e in val
@@ -1307,6 +1400,21 @@ fn compile_policy(p: Option<PolicyBody>) -> Result<PolicyReport, ApiError> {
                     .ok_or_else(|| bad(format!("process.{k} entries are non-empty strings")))?;
                 list.push(pat.to_string());
             }
+        }
+        if enforce_exec {
+            if rules.allow.is_empty() && rules.ask.is_empty() {
+                return Err(bad(
+                    "process.enforce = \"exec\" needs a non-empty allow (or ask) list: with none, \
+                     nothing would be permitted to run"
+                        .into(),
+                ));
+            }
+            let paths = exec_allow_paths(&rules).map_err(bad)?;
+            // Confinement is needed for the execute right to apply, so a policy without a
+            // `filesystem` section gets the default one.
+            let exec = r.exec.get_or_insert_with(confined_default);
+            exec.exec = Some(paths);
+            r.enforce_exec = true;
         }
         r.process = Some(rules);
     }
@@ -1459,6 +1567,7 @@ fn capabilities_for(backend: &str, offline: bool) -> Capabilities {
         // `GET .../pty` reaches the guest over SSH, which only the vz path has.
         pty: backend == "vz",
         confinement: false,
+        exec_allowlist: false,
         http_policy: false,
         engine: String::new(),
         supervisor: false,
@@ -1973,7 +2082,27 @@ async fn create_session(
             .as_ref()
             .and_then(|e| e["filesystem"].as_bool())
             .unwrap_or(false);
+        let exec_enforced = enforcement
+            .as_ref()
+            .and_then(|e| e["exec_restricted"].as_bool())
+            .unwrap_or(false);
         record(&m, id, "policy.probe", json!({"enforcement": enforcement}));
+        if session.policy.enforce_exec && !exec_enforced {
+            // No best-effort for this one: process.enforce = "exec" exists to be a boundary, and a
+            // session that only looks restricted is worse than a refused create.
+            let _ = m.delete(rec.id).await;
+            let _ = std::fs::remove_file(session_path(&m, id));
+            return Err(ApiError {
+                status: StatusCode::BAD_REQUEST,
+                message: format!(
+                    "the guest cannot enforce the executable allow-list on backend {} (needs a Linux \
+                     guest with Landlock and an up-to-date fluxvm guest agent); \
+                     remove process.enforce to use the command-string rules only",
+                    session.backend
+                ),
+            });
+        }
+        session.capabilities.exec_allowlist = exec_enforced;
         if !enforced && session.policy.enforcement.as_deref() != Some("best-effort") {
             let _ = m.delete(rec.id).await;
             let _ = std::fs::remove_file(session_path(&m, id));
@@ -4799,12 +4928,7 @@ async fn probe(
     running(&s)?;
     m.ensure_running_for_request(s.sandbox_id).await?;
     let res = m
-        .exec_with_policy(
-            s.sandbox_id,
-            probe_script(),
-            Some(30),
-            s.policy.exec.clone(),
-        )
+        .exec_with_policy(s.sandbox_id, probe_script(), Some(30), helper_policy(&s))
         .await?;
     let out = json!(res);
     let mut report = probe_report(out["stdout"].as_str().unwrap_or(""));
@@ -5966,6 +6090,16 @@ async fn job_start(
             })),
         ));
     }
+    if s.policy.enforce_exec {
+        // The shell wrapper around a job runs `setsid`, `cat` and friends, which the allow-list
+        // would refuse; and the supervisor is the path that confines the job itself.
+        return Err(ApiError {
+            status: StatusCode::CONFLICT,
+            message: "this session enforces an executable allow-list, which needs the guest job supervisor \
+                      (jobs-v2); this guest agent does not have it"
+                .into(),
+        });
+    }
     if body.timeout_seconds.is_some() {
         return Err(ApiError {
             status: StatusCode::BAD_REQUEST,
@@ -6872,10 +7006,32 @@ fn list_script(path: &str) -> String {
     )
 }
 
+/// The guest policy for the host's own helper scripts (`du`, `find`, `base64`, `rm`, upload
+/// assembly): the session's filesystem confinement, without the executable allow-list. Those
+/// scripts are written by this server from validated, quoted arguments, not by the agent, and
+/// need tools the agent's `process.allow` should not have to name. Commands the agent controls
+/// (exec, jobs, bisect tests, git) keep the full policy.
+fn helper_policy(s: &Session) -> Option<ExecPolicy> {
+    let mut p = s.policy.exec.clone();
+    if let Some(e) = p.as_mut() {
+        e.exec = None;
+    }
+    p
+}
+
 async fn guest_exec(m: &Arc<VmManager>, s: &Session, cmd: String) -> ApiResult<Value> {
+    guest_exec_as(m, s, cmd, helper_policy(s)).await
+}
+
+async fn guest_exec_as(
+    m: &Arc<VmManager>,
+    s: &Session,
+    cmd: String,
+    policy: Option<ExecPolicy>,
+) -> ApiResult<Value> {
     m.ensure_running_for_request(s.sandbox_id).await?;
     let res = m
-        .exec_with_policy(s.sandbox_id, cmd, Some(30), s.policy.exec.clone())
+        .exec_with_policy(s.sandbox_id, cmd, Some(30), policy)
         .await?;
     Ok(json!(res))
 }
@@ -7074,7 +7230,7 @@ async fn files_range(
             s.sandbox_id,
             transfer::range_script(&q.path, q.offset, len, q.checksum),
             Some(timeout),
-            s.policy.exec.clone(),
+            helper_policy(&s),
         )
         .await?;
     let out = json!(res);
@@ -7423,7 +7579,7 @@ async fn upload_complete(
             s.sandbox_id,
             transfer::complete_script(&u),
             Some(900),
-            s.policy.exec.clone(),
+            helper_policy(&s),
         )
         .await?;
     let out = json!(res);
@@ -7602,7 +7758,9 @@ async fn run_git(
          git -c core.quotepath=false -c safe.directory='*' {args}",
         shell_quote(repo)
     );
-    let out = guest_exec(m, s, cmd).await?;
+    // git can run hooks and filters the agent wrote, so it keeps the executable allow-list: a
+    // session that enforces one needs `git` in `process.allow` to use these routes.
+    let out = guest_exec_as(m, s, cmd, s.policy.exec.clone()).await?;
     let code = out["exit_code"].as_i64().unwrap_or(-1);
     match code {
         127 => Err(ApiError {
@@ -7912,6 +8070,70 @@ mod tests {
         serde_json::from_value(v).unwrap()
     }
 
+    #[test]
+    fn process_enforce_exec_compiles_programs_to_guest_paths() {
+        let r = compile_policy(Some(pol(json!({
+            "process": {"allow": ["git *", "/opt/tool/run --x"], "ask": ["deploy *"], "enforce": "exec"}
+        }))))
+        .unwrap();
+        assert!(r.enforce_exec);
+        let e = r.exec.expect("enforcement implies a guest policy");
+        let x = e.exec.expect("exec allow-list");
+        assert!(x.contains(&"/usr/bin/git".to_string()));
+        assert!(x.contains(&"/usr/local/bin/deploy".to_string()));
+        assert!(x.contains(&"/opt/tool/run".to_string()));
+        // Always present: the shell, the probe command and the dynamic loader.
+        assert!(x.contains(&"/bin/sh".to_string()));
+        assert!(x.contains(&"/usr/bin/true".to_string()));
+        assert!(x.contains(&"/lib64/ld-linux-x86-64.so.2".to_string()));
+        // Programs the policy did not name are not there.
+        assert!(
+            !x.iter()
+                .any(|p| p.ends_with("/curl") || p.ends_with("/python3"))
+        );
+        // No filesystem section: the default confinement still applies.
+        assert!(!e.read.is_empty());
+    }
+
+    #[test]
+    fn process_enforce_exec_keeps_a_filesystem_section() {
+        let r = compile_policy(Some(pol(json!({
+            "filesystem": {"read": ["/srv/data"]},
+            "process": {"allow": ["ls"], "enforce": "exec"}
+        }))))
+        .unwrap();
+        let e = r.exec.unwrap();
+        assert!(e.read.contains(&"/srv/data".to_string()));
+        assert!(e.exec.is_some());
+    }
+
+    #[test]
+    fn process_enforce_exec_refuses_what_it_cannot_enforce() {
+        let bad = |v: Value| compile_policy(Some(pol(v))).unwrap_err().message;
+        // A glob in the program position cannot be a path.
+        assert!(
+            bad(json!({"process": {"allow": ["g*t status"], "enforce": "exec"}}))
+                .contains("literal")
+        );
+        // Nothing allowed would run nothing at all.
+        assert!(
+            bad(json!({"process": {"deny": ["rm *"], "enforce": "exec"}})).contains("non-empty")
+        );
+        // A relative or traversing path.
+        assert!(
+            bad(json!({"process": {"allow": ["./x"], "enforce": "exec"}})).contains("absolute")
+        );
+        assert!(
+            bad(json!({"process": {"allow": ["/a/../b"], "enforce": "exec"}})).contains("absolute")
+        );
+        // `none` is the same as leaving it out.
+        let r = compile_policy(Some(pol(
+            json!({"process": {"allow": ["ls"], "enforce": "none"}}),
+        )))
+        .unwrap();
+        assert!(!r.enforce_exec && r.exec.is_none());
+    }
+
     fn rw_point(tag: &str) -> RewindPoint {
         RewindPoint {
             tag: tag.into(),
@@ -8111,6 +8333,7 @@ mod tests {
         let r = compile_policy(Some(pol(json!({"process": {"ask": ["deploy *"]}})))).unwrap();
         assert_eq!(r.process.unwrap().ask, vec!["deploy *".to_string()]);
         assert!(compile_policy(Some(pol(json!({"process": {"nope": []}})))).is_err());
+        assert!(compile_policy(Some(pol(json!({"process": {"enforce": "yes"}})))).is_err());
         assert!(compile_policy(Some(pol(json!({"process": {"deny": "rm"}})))).is_err());
     }
 

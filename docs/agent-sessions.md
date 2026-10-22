@@ -270,6 +270,26 @@ Not done: tokens are not narrowed by path or by git repository.
 
 ### Approvals
 
+### Enforcing the program list (`process.enforce`)
+
+`process.allow` and `process.deny` match the command *string*, so `sh -c`, `$(...)` or a script the agent wrote walks around
+them. `"process": {"allow": ["git *", "python3 *"], "enforce": "exec"}` additionally makes the programs the patterns name
+(the first word of each `allow` and `ask` pattern) the only files the guest kernel lets start (Landlock execute right).
+`fluxctl agent create --cmd-allow 'git *' --cmd-allow 'python3 *' --cmd-enforce`.
+
+- A pattern's first word must be a literal program name or absolute path. A bare name is looked up in the usual bin
+  directories; `g*t` or a relative path is refused at create. An `allow`/`ask` list is required.
+- The shell, `true` and the dynamic loader are always allowed. A script the agent writes into `/tmp` or the workspace
+  cannot be executed directly, and neither can a copied binary; it can still be run through an allowed interpreter
+  (`python3 script.py`), which is why the interpreter you allow is the boundary.
+- `exec`, background jobs and `rewind/bisect` tests run under the list. The server's own file helpers (listing, ranged reads,
+  upload assembly, workspace size) keep the filesystem confinement but not the list. The `git` routes keep the list, so the
+  session must allow `git` to use them.
+- Jobs need the guest job supervisor (`jobs-v2`); without it the start is refused (`409`).
+- Create fails when the create-time probe shows the guest did not enforce it (`capabilities.exec_allowlist` is true when it
+  did). There is no best-effort mode for this key.
+- `deny` and argument patterns such as `git push*` stay string rules: the kernel sees paths, not arguments.
+
 `process.ask: ["deploy *", "git push*"]` makes a matching command wait for an operator. It applies to `exec` and job
 start, with the same piece-by-piece matching as `allow`/`deny` (a piece that matches `ask` also satisfies a non-empty
 `allow` list; `deny` still wins).
@@ -772,7 +792,7 @@ Each item says why it is not in the MVP.
 | Promote a child's *non-file* state (memory, processes, volumes) | promotion copies workspace files only; a child's running processes and memory are not merged |
 | Lazy memory restore (sub-second claim/fork) | a restore engine change, not an API change; not started |
 | Workspace overlay mode, read-only mounts | `mode: "overlay"` is refused; clone is the only writable mode |
-| Process policy as a security boundary | `process` rules are still string globs (`ask` approvals included); filesystem confinement is wired, executable/argv rules are not |
+| Process policy: argv rules as a security boundary | `process.enforce: "exec"` (`fluxctl agent create --cmd-allow ... --cmd-enforce`) makes the `allow`/`ask` programs a kernel-enforced executable allow-list (Landlock), which holds for `sh -c`, scripts and children. `deny` and argument patterns (`git push*`) are still string globs, because the kernel sees paths, not arguments. Unit-tested; not yet run on a real Linux guest |
 | HTTP method/path rules on `vz` | the runner's allow-list proxy matches host names only; per-session rules are enforced by the host egress proxy (see above) |
 | Streaming exec output | `exec` is still buffered; jobs stream over SSE (long-polled from the guest supervisor, or polled every 400 ms on older agents) and the terminal (`shell`) streams |
 | Replay | the ledger is a log, not a recording |

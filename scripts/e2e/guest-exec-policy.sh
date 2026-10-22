@@ -106,6 +106,21 @@ check "creating a namespace is refused under seccomp" bash -c "[[ \$(jq -r '.exi
 R="$(P '{"unknown_future_field":1,"scope_ipc":false,"read":["/bin","/usr","/lib","/lib64","/etc"]}' true)"
 check "unknown policy fields are ignored" test "$(code <<<"$R")" = 0
 
+# Executable allow-list (`exec`): read/write paths lose the execute right; only the listed files run.
+EXECL='"/bin/sh","/usr/bin/sh","/bin/chmod","/usr/bin/chmod","/bin/true","/usr/bin/true","/lib64/ld-linux-x86-64.so.2","/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2","/lib/ld-linux-aarch64.so.1","/lib/aarch64-linux-gnu/ld-linux-aarch64.so.1"'
+EXECPOL="{$BASEPOL,\"write\":[\"/tmp\"],\"best_effort\":true,\"exec\":[$EXECL]}"
+R="$(P "$EXECPOL" sh -c 'echo listed')"
+check "exec list: a listed program (the shell) runs" test "$(out <<<"$R" | tr -d '\n')" = listed
+echo "     | exec list enforcement: $(jq -c '.enforcement | {exec_restricted, filesystem}' <<<"$R" 2>/dev/null)"
+check "exec list: the response says it was enforced" test "$(jq -r '.enforcement.exec_restricted' <<<"$R")" = true
+R="$(P "$EXECPOL" sh -c "printf '#!/bin/sh\necho pwned\n' > /tmp/e2e-x; chmod +x /tmp/e2e-x; /tmp/e2e-x; echo rc=\$?")"
+echo "     | script from /tmp: $(jq -c '[.exit_code,.stdout,.stderr]' <<<"$R" | cut -c1-160)"
+check "exec list: a script written into a writable dir cannot be executed" bash -c "! jq -r .stdout <<<'$R' | grep -q pwned && jq -r .stdout <<<'$R' | grep -q 'rc=[1-9]'"
+R="$(P "$EXECPOL" cat /etc/hostname)"
+check "exec list: a program that is not listed does not start" bash -c "[[ \$(jq -r '.exit_code // 1' <<<'$R') != 0 ]]"
+R="$(P "{$BASEPOL,\"exec\":[]}" true)"
+check "exec list: an empty list runs nothing" bash -c "[[ \$(jq -r '.exit_code // 1' <<<'$R') != 0 || \$(jq -r .result <<<'$R') == error ]]"
+
 printf '%s' 'not json' > "$T/bad.json"
 check "a malformed policy is rejected, not run unconfined" bash -c "! '$FX' --config '$CONFIG' exec --policy '$T/bad.json' '$ID' -- touch /tmp/should-not-exist >/dev/null 2>&1; [[ \$('$FX' --config '$CONFIG' exec '$ID' -- sh -c 'test -e /tmp/should-not-exist && echo yes || echo no' | jq -r .stdout) == no ]]"
 

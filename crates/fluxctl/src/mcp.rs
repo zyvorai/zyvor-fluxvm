@@ -1275,6 +1275,7 @@ pub fn tools(remote: Arc<Remote>) -> Vec<Tool> {
                     "volumes": {"type": "array", "items": {"type": "string"}, "description": "named host volumes as NAME:/guest/path (vz only; formatted ext4 on first use; the session cannot fork)"},
                     "allow_commands": {"type": "array", "items": {"type": "string"}, "description": "command patterns (* wildcard) session_exec may run; other commands are refused. A guardrail on the command string, not a security boundary"},
                     "deny_commands": {"type": "array", "items": {"type": "string"}, "description": "command patterns (* wildcard) session_exec refuses"},
+                    "enforce_exec": {"type": "boolean", "description": "also enforce allow_commands in the guest kernel (Landlock): only the programs the patterns name can start, however a command is built. Each pattern's first word must be a literal program; Linux guests only"},
                     "confine": {"type": "boolean", "description": "confine every command, job, file and git call in the guest with Landlock + seccomp: system directories read-only, /tmp and the workspace writable. Fails if the guest cannot enforce it (macOS guests cannot); a terminal and ssh are refused on such a session"},
                     "read_paths": {"type": "array", "items": {"type": "string"}, "description": "extra absolute paths a confined session may read (implies confine)"},
                     "write_paths": {"type": "array", "items": {"type": "string"}, "description": "extra absolute paths a confined session may write (implies confine)"},
@@ -1324,6 +1325,7 @@ pub fn tools(remote: Arc<Remote>) -> Vec<Tool> {
                         &mut body,
                         &strs("allow_commands"),
                         &strs("deny_commands"),
+                        args["enforce_exec"].as_bool().unwrap_or(false),
                     );
                     if args["budget"].is_object() {
                         body["budget"] = args["budget"].clone();
