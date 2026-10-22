@@ -497,6 +497,7 @@ mod tests {
                 guest_port: 80,
                 protocol: "tcp".into(),
                 guests: false,
+                host_addr: None,
             }],
         };
         assert!(!eligible(&c), "published ports");

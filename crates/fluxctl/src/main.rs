@@ -4783,6 +4783,8 @@ async fn run_remote(
             let vm = r.call(Method::GET, &format!("/v1/vms/{id}"), None).await?;
             let ip = vm["guest_ip"]
                 .as_str()
+                .map(str::to_owned)
+                .or_else(|| run::loopback_ssh_endpoint(&vm["request"]))
                 .context("VM has no guest_ip yet — wait for it to boot")?;
             let user = user
                 .or_else(|| {
@@ -4791,7 +4793,7 @@ async fn run_remote(
                         .map(str::to_owned)
                 })
                 .unwrap_or_else(|| "root".into());
-            run::ssh_to(ip, &user, port, vm["backend"] == "vz", &ssh_args).await?;
+            run::ssh_to(&ip, &user, port, vm["backend"] == "vz", &ssh_args).await?;
         }
         Command::Up { file, services, .. } => {
             let (f, dir) = load_stack_file(&file)?;
@@ -6330,13 +6332,21 @@ async fn main() -> Result<()> {
             ssh_args,
         } => {
             let vm = m.get(id).await?;
-            let ip = vm.guest_ip.as_deref().context(
-                "VM has no guest_ip yet — wait for DHCP/lease, or use `console`/`login` over vsock",
-            )?;
+            let ip = vm
+                .guest_ip
+                .clone()
+                .or_else(|| {
+                    serde_json::to_value(&vm.request)
+                        .ok()
+                        .and_then(|r| run::loopback_ssh_endpoint(&r))
+                })
+                .context(
+                    "VM has no guest_ip yet — wait for DHCP/lease, or use `console`/`login` over vsock",
+                )?;
             let user = user
                 .or_else(|| vm.request.cloud_init.as_ref().and_then(|c| c.user.clone()))
                 .unwrap_or_else(|| "root".into());
-            run::ssh_to(ip, &user, port, vm.backend == BackendKind::Vz, &ssh_args).await?;
+            run::ssh_to(&ip, &user, port, vm.backend == BackendKind::Vz, &ssh_args).await?;
         }
         Command::Show { id } => {
             println!("{}", serde_json::to_string_pretty(&m.get(id).await?)?);
