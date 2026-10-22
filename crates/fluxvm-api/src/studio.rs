@@ -45,7 +45,10 @@ fn respond(path: &str, req_headers: &HeaderMap) -> Response {
         return StatusCode::NOT_FOUND.into_response();
     };
     let body = file.contents();
-    let hex: String = Sha256::digest(body).iter().map(|b| format!("{b:02x}")).collect();
+    let hex: String = Sha256::digest(body)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
     let etag = format!("\"{hex}\"");
     let fresh = req_headers
         .get(header::IF_NONE_MATCH)
@@ -102,11 +105,18 @@ mod tests {
 
     #[test]
     fn the_embedded_build_has_an_entry_point_and_no_inline_script() {
-        let html = std::str::from_utf8(DIST.get_file("index.html").expect("index.html").contents()).unwrap();
-        assert!(html.contains("./assets/app.js"), "entry script must be relative");
+        let html = std::str::from_utf8(DIST.get_file("index.html").expect("index.html").contents())
+            .unwrap();
+        assert!(
+            html.contains("./assets/app.js"),
+            "entry script must be relative"
+        );
         for (i, _) in html.match_indices("<script") {
             let tag = &html[i..html[i..].find('>').map_or(html.len(), |e| i + e)];
-            assert!(tag.contains("src="), "inline script is blocked by the CSP: {tag}");
+            assert!(
+                tag.contains("src="),
+                "inline script is blocked by the CSP: {tag}"
+            );
         }
         assert!(DIST.get_file("assets/app.js").is_some());
         assert!(DIST.get_file("theme-init.js").is_some());
