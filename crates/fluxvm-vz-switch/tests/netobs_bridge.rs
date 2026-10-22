@@ -109,8 +109,8 @@ fn library_export_survives_the_observer_starting_late_and_restarting() {
     let switch = std::thread::spawn(move || {
         fluxvm_vz_switch::serve(&n2, Duration::from_millis(2500)).unwrap()
     });
-    let (a, _a_ctl) = join(&net, "vm-a", MAC_A);
-    let (b, _b_ctl) = join(&net, "vm-b", MAC_B);
+    let (a, a_ctl) = join(&net, "vm-a", MAC_A);
+    let (b, b_ctl) = join(&net, "vm-b", MAC_B);
     std::thread::sleep(Duration::from_millis(100));
 
     // Frames still forward with the observer absent.
@@ -170,7 +170,9 @@ fn library_export_survives_the_observer_starting_late_and_restarting() {
         "identities are re-announced on reconnect"
     );
     running2.shutdown().unwrap();
-    drop((a, b));
+    // A port lives as long as its control stream is open. Closing only the frame sockets is not enough on Linux (a closed
+    // datagram socketpair raises no POLLHUP, unlike macOS), so the switch would never go idle and `join` would hang.
+    drop((a, b, a_ctl, b_ctl));
     switch.join().unwrap();
 }
 
