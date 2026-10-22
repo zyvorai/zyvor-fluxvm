@@ -3,7 +3,13 @@ import type { NavGroup } from '@fluxvm/ui-core';
 // Phases add groups here as their pages land; nothing is listed that does not work.
 export const NAV: NavGroup[] = [
   { label: 'Overview', items: [{ to: '/', label: 'Overview' }] },
-  { label: 'Machines', items: [{ to: '/machines', label: 'Machines' }] },
+  {
+    label: 'Machines',
+    items: [
+      { to: '/machines', label: 'Machines' },
+      { to: '/branches', label: 'Branches', desc: 'Saved machines to start again' },
+    ],
+  },
   {
     label: 'Agents',
     items: [
@@ -16,6 +22,7 @@ export const NAV: NavGroup[] = [
     items: [
       { to: '/network', label: 'Network', desc: 'Outbound policy and live traffic' },
       { to: '/images', label: 'Images', desc: 'Catalog, templates and warm pools' },
+      { to: '/volumes', label: 'Volumes', desc: 'Disks that outlive a machine' },
       { to: '/backups', label: 'Backups', desc: 'Standalone disk copies' },
       { to: '/host', label: 'Host', desc: 'Memory, GPUs and topology' },
       { to: '/access', label: 'Access & audit', desc: 'Quota, events and the API' },

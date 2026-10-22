@@ -5,7 +5,7 @@ const { chromium } = require(process.env.PW_CORE || 'playwright-core');
 
 const [, , app, base, ...rest] = process.argv;
 const PAGES = {
-  node: ['/', '/machines', '/machines/vm-0', '/sandboxes', '/agents', '/network', '/network?tab=vnets', '/network?tab=groups', '/network?tab=services', '/network?tab=flows', '/images', '/backups', '/host', '/access'],
+  node: ['/', '/machines', '/machines/vm-0', '/sandboxes', '/agents', '/network', '/network?tab=vnets', '/network?tab=groups', '/network?tab=services', '/network?tab=flows', '/images', '/volumes', '/branches', '/backups', '/host', '/access'],
   fleet: ['/', '/hosts', '/vms', '/networks', '/tenants', '/billing', '/activity'],
 }[app];
 if (!PAGES || !base) {
