@@ -87,6 +87,7 @@ pub(crate) fn routes() -> Router<Arc<VmManager>> {
             get(get_session).delete(delete_session),
         )
         .route("/v1/agents/sessions/{id}/exec", post(exec_session))
+        .route("/v1/agents/sessions/{id}/replay", post(replay_session))
         .route("/v1/agents/sessions/{id}/exec/stream", post(exec_stream))
         .route("/v1/agents/sessions/{id}/probe", get(probe))
         .route("/v1/agents/sessions/{id}/screenshot", get(screenshot))
@@ -2948,6 +2949,195 @@ async fn exec_session(
         }),
     );
     Ok((StatusCode::OK, Json(out)))
+}
+
+/// Ledger kinds that changed the session but whose content the ledger does not keep, so a replay can name
+/// them and cannot redo them.
+const REPLAY_UNREPLAYABLE: [(&str, &str); 7] = [
+    (
+        "file.write",
+        "the ledger records the path and size, not the content",
+    ),
+    (
+        "file.upload",
+        "the ledger records the path and size, not the content",
+    ),
+    ("file.delete", "file changes are not replayed"),
+    (
+        "job.start",
+        "jobs are not replayed (they may run for long or in the background)",
+    ),
+    ("git.commit", "git steps are not replayed"),
+    ("git.branch", "git steps are not replayed"),
+    ("promote", "a promotion is not replayed"),
+];
+
+/// A replay never runs more than this many commands in one request.
+const REPLAY_MAX_STEPS: usize = 500;
+
+#[derive(Debug, Deserialize)]
+struct ReplayBody {
+    /// The session to run the recorded commands in. Required unless `dry_run`.
+    #[serde(default)]
+    target: Option<Uuid>,
+    /// Only ledger entries after `since` and at or before `until` (RFC 3339), like `GET .../events?since=`.
+    #[serde(default)]
+    since: Option<DateTime<Utc>>,
+    #[serde(default)]
+    until: Option<DateTime<Utc>>,
+    /// List what would run and what cannot be replayed, and run nothing.
+    #[serde(default)]
+    dry_run: bool,
+    /// Stop at the first command that exits non-zero (default `true`). A refusal, an approval request
+    /// or a budget stop always ends the replay.
+    #[serde(default)]
+    stop_on_failure: Option<bool>,
+    #[serde(default)]
+    timeout_seconds: Option<u64>,
+}
+
+fn bad_request(message: impl Into<String>) -> ApiError {
+    ApiError {
+        status: StatusCode::BAD_REQUEST,
+        message: message.into(),
+    }
+}
+
+/// `POST .../replay`: runs the `exec` commands recorded in this session's ledger, in order, in the `target`
+/// session. Every command goes through the target's own `exec` (process policy, approvals, budget,
+/// confinement, ledger), so a replay can never do more than the target session may. The ledger is a log of
+/// what the API did, not a recording: file writes, jobs and git steps are listed as `skipped` with the
+/// reason, and the answer says whether each command's exit code matched the recorded one.
+async fn replay_session(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    scope: Option<Extension<SessionScope>>,
+    token_tenant: Option<Extension<TokenTenant>>,
+    Path(id): Path<Uuid>,
+    Json(body): Json<ReplayBody>,
+) -> ApiResult<Json<Value>> {
+    authorize(role, &scope, id, Op::Read)?;
+    load(&m, id, &caller_tenant(&token_tenant)).await?;
+    let target = match (body.target, body.dry_run) {
+        (Some(t), _) => Some(t),
+        (None, true) => None,
+        (None, false) => {
+            return Err(bad_request(
+                "target is required (the session to run the commands in)",
+            ));
+        }
+    };
+    if let Some(t) = target {
+        authorize(role, &scope, t, Op::Exec)?;
+        load(&m, t, &caller_tenant(&token_tenant)).await?;
+    }
+    let mut steps: Vec<(Value, String, Option<i64>)> = Vec::new();
+    let mut skipped: Vec<Value> = Vec::new();
+    for e in read_ledger(&m, id, body.since) {
+        let ts = e["ts"]
+            .as_str()
+            .and_then(|t| DateTime::parse_from_rfc3339(t).ok());
+        if body
+            .until
+            .is_some_and(|u| ts.is_some_and(|t| t.with_timezone(&Utc) > u))
+        {
+            continue;
+        }
+        let kind = e["kind"].as_str().unwrap_or("");
+        if kind == "exec" {
+            if let Some(c) = e["detail"]["command"].as_str() {
+                steps.push((
+                    e["ts"].clone(),
+                    c.to_string(),
+                    e["detail"]["exit_code"].as_i64(),
+                ));
+            }
+        } else if let Some((_, why)) = REPLAY_UNREPLAYABLE.iter().find(|(k, _)| *k == kind) {
+            skipped.push(json!({"ts": e["ts"], "kind": kind, "reason": why}));
+        }
+    }
+    if steps.len() > REPLAY_MAX_STEPS {
+        return Err(bad_request(format!(
+            "the ledger has {} commands in that range; replay at most {REPLAY_MAX_STEPS} at a time (use since/until)",
+            steps.len()
+        )));
+    }
+    let listed: Vec<Value> = steps
+        .iter()
+        .enumerate()
+        .map(|(i, (ts, c, code))| json!({"step": i + 1, "ts": ts, "command": c, "recorded_exit_code": code}))
+        .collect();
+    let Some(target) = target else {
+        return Ok(Json(
+            json!({"dry_run": true, "steps": listed, "skipped": skipped}),
+        ));
+    };
+    let stop_on_failure = body.stop_on_failure.unwrap_or(true);
+    let mut results: Vec<Value> = Vec::new();
+    let (mut ran, mut failed, mut diverged) = (0usize, 0usize, 0usize);
+    let mut stopped: Option<&str> = None;
+    for (i, (_, command, recorded)) in steps.iter().enumerate() {
+        let r = exec_session(
+            State(m.clone()),
+            Extension(role),
+            scope.clone(),
+            token_tenant.clone(),
+            Path(target),
+            Json(ExecBody {
+                command: command.clone(),
+                timeout_seconds: body.timeout_seconds,
+                approval_id: None,
+                approval_wait_seconds: None,
+            }),
+        )
+        .await;
+        match r {
+            Ok((StatusCode::OK, Json(v))) => {
+                ran += 1;
+                let code = v["exit_code"].as_i64();
+                let same = code == *recorded;
+                if code != Some(0) {
+                    failed += 1;
+                }
+                if !same {
+                    diverged += 1;
+                }
+                results.push(json!({"step": i + 1, "command": command, "status": if code == Some(0) { "ok" } else { "failed" },
+                    "exit_code": code, "recorded_exit_code": recorded, "same_exit_code": same}));
+                if code != Some(0) && stop_on_failure {
+                    stopped = Some("a command failed");
+                    break;
+                }
+            }
+            Ok((status, Json(v))) => {
+                results.push(
+                    json!({"step": i + 1, "command": command, "status": "approval_required",
+                    "http_status": status.as_u16(), "approval": v}),
+                );
+                stopped = Some("a command needs an approval");
+                break;
+            }
+            Err(e) => {
+                results.push(
+                    json!({"step": i + 1, "command": command, "status": "refused",
+                    "http_status": e.status.as_u16(), "reason": e.message}),
+                );
+                stopped = Some("the target session refused a command");
+                break;
+            }
+        }
+    }
+    record(
+        &m,
+        target,
+        "replay",
+        json!({"source": id, "steps": steps.len(), "ran": ran, "failed": failed, "stopped": stopped}),
+    );
+    Ok(Json(json!({
+        "source": id, "target": target, "steps": results, "skipped": skipped,
+        "ran": ran, "failed": failed, "different_exit_code": diverged,
+        "not_run": steps.len() - results.len(), "stopped": stopped,
+    })))
 }
 
 /// `POST .../exec/stream`: `exec` whose output arrives as Server-Sent Events while the command
