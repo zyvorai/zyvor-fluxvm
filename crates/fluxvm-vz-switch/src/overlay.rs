@@ -59,9 +59,7 @@ pub struct AesGcm(aes_gcm::Aes256Gcm);
 impl AesGcm {
     pub fn new(key: &[u8; 32]) -> Self {
         use aes_gcm::aead::KeyInit;
-        Self(aes_gcm::Aes256Gcm::new(
-            aes_gcm::Key::<aes_gcm::Aes256Gcm>::from_slice(key),
-        ))
+        Self(aes_gcm::Aes256Gcm::new(key.into()))
     }
 }
 
@@ -69,20 +67,14 @@ impl FrameCipher for AesGcm {
     fn seal(&self, nonce: &[u8; 12], aad: &[u8], frame: &[u8]) -> Option<Vec<u8>> {
         use aes_gcm::aead::{Aead, Payload};
         self.0
-            .encrypt(
-                aes_gcm::Nonce::from_slice(nonce),
-                Payload { msg: frame, aad },
-            )
+            .encrypt(nonce.into(), Payload { msg: frame, aad })
             .ok()
     }
 
     fn open(&self, nonce: &[u8; 12], aad: &[u8], sealed: &[u8]) -> Option<Vec<u8>> {
         use aes_gcm::aead::{Aead, Payload};
         self.0
-            .decrypt(
-                aes_gcm::Nonce::from_slice(nonce),
-                Payload { msg: sealed, aad },
-            )
+            .decrypt(nonce.into(), Payload { msg: sealed, aad })
             .ok()
     }
 }

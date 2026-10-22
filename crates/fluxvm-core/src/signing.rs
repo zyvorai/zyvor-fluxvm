@@ -11,7 +11,8 @@
 use anyhow::{Context, Result};
 use base64::{Engine, engine::general_purpose::STANDARD as B64};
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
-use rand::rngs::OsRng;
+use rand::rand_core::UnwrapErr;
+use rand::rngs::SysRng;
 
 use crate::config::TrustedSigner;
 
@@ -38,7 +39,7 @@ pub fn parse_trusted_signers(signers: &[TrustedSigner]) -> Result<Vec<ParsedSign
 
 /// A fresh keypair, both halves base64-encoded: `(private, public)`.
 pub fn generate_keypair() -> (String, String) {
-    let signing_key = SigningKey::generate(&mut OsRng);
+    let signing_key = SigningKey::generate(&mut UnwrapErr(SysRng));
     (
         B64.encode(signing_key.to_bytes()),
         B64.encode(signing_key.verifying_key().to_bytes()),

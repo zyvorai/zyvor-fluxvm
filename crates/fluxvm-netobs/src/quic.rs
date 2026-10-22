@@ -17,8 +17,8 @@
 use crate::l7::{ClientHello, parse_client_hello_body};
 use crate::reasm::{Push, Stream};
 use aes::Aes128;
-use aes::cipher::generic_array::GenericArray;
-use aes::cipher::{BlockEncrypt, KeyInit};
+use aes::cipher::Array;
+use aes::cipher::{BlockCipherEncrypt, KeyInit};
 use aes_gcm::Aes128Gcm;
 use aes_gcm::aead::{Aead, Payload};
 use hkdf::Hkdf;
@@ -172,8 +172,8 @@ pub fn client_initial_keys(version: u32, dcid: &[u8]) -> Option<InitialKeys> {
 
 /// The header-protection mask: AES-ECB of a 16-byte sample (RFC 9001 section 5.4.3).
 pub fn hp_mask(hp: &[u8; 16], sample: &[u8; 16]) -> [u8; 16] {
-    let cipher = Aes128::new(GenericArray::from_slice(hp));
-    let mut block = GenericArray::clone_from_slice(sample);
+    let cipher = Aes128::new(hp.into());
+    let mut block = Array::from(*sample);
     cipher.encrypt_block(&mut block);
     block.into()
 }
@@ -221,7 +221,7 @@ pub fn decrypt_client_initial(
     let aead = Aes128Gcm::new_from_slice(&keys.key).ok()?;
     let plain = aead
         .decrypt(
-            GenericArray::from_slice(&nonce),
+            (&nonce).into(),
             Payload {
                 msg: ct,
                 aad: &header,
@@ -457,7 +457,7 @@ pub mod fixtures {
         let aead = Aes128Gcm::new_from_slice(&keys.key).unwrap();
         let ct = aead
             .encrypt(
-                GenericArray::from_slice(&nonce),
+                (&nonce).into(),
                 Payload {
                     msg: &plain,
                     aad: &hdr,

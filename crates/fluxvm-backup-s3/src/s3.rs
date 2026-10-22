@@ -12,7 +12,7 @@ use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
 use base64::Engine;
 use chrono::{DateTime, Utc};
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use md5::Md5;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};

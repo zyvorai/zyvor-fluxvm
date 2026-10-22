@@ -72,12 +72,9 @@ fn check_local(path: &Path) -> Result<PathBuf> {
             .next()
             .unwrap_or_default()
             .to_ascii_lowercase();
-        let got = format!(
-            "{:x}",
-            Sha256::digest(
-                std::fs::read(path).with_context(|| format!("reading {}", path.display()))?
-            )
-        );
+        let got = hex::encode(Sha256::digest(
+            std::fs::read(path).with_context(|| format!("reading {}", path.display()))?,
+        ));
         if want != got {
             bail!(
                 "{} does not match its .sha256 (want {want}, got {got})",
@@ -115,7 +112,7 @@ mod tests {
         std::fs::create_dir_all(&boot).unwrap();
         std::fs::write(boot.join("oci-kernel"), b"kernel").unwrap();
         std::fs::write(boot.join("oci-initrd"), b"initrd").unwrap();
-        let sum = format!("{:x}", Sha256::digest(b"kernel"));
+        let sum = hex::encode(Sha256::digest(b"kernel"));
         std::fs::write(
             boot.join("oci-kernel.sha256"),
             format!("{sum}  oci-kernel\n"),

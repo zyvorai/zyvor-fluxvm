@@ -23,7 +23,7 @@ netobs = ["dep:fluxvm-netobs"]
 
 [dependencies]
 fluxvm-netobs = { path = "../fluxvm-netobs", optional = true }
-aes-gcm = "0.10"
+aes-gcm = "0.11"
 anyhow = "1"
 libc = "0.2"
 serde = { version = "1", features = ["derive"] }

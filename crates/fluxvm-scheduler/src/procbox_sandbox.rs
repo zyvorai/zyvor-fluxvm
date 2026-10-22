@@ -790,7 +790,7 @@ mod fsroot {
                     }
                     hasher.update(&buf[..n]);
                 }
-                files.insert(e.rel.clone(), format!("{:x}", hasher.finalize()));
+                files.insert(e.rel.clone(), hex::encode(hasher.finalize()));
                 Ok(())
             })?;
             Ok(Manifest {

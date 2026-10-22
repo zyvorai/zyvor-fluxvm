@@ -143,7 +143,7 @@ pub(crate) fn validate_digest(d: &str) -> Result<&str> {
 }
 
 pub(crate) fn sha256_digest(bytes: &[u8]) -> String {
-    format!("sha256:{:x}", Sha256::digest(bytes))
+    format!("sha256:{}", hex::encode(Sha256::digest(bytes)))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -635,7 +635,7 @@ impl Puller {
         }
         f.flush().await?;
         drop(f);
-        let got = format!("sha256:{:x}", hasher.finalize());
+        let got = format!("sha256:{}", hex::encode(hasher.finalize()));
         if got != d.digest {
             let _ = tokio::fs::remove_file(&tmp).await;
             bail!("layer digest mismatch: expected {}, got {got}", d.digest);
