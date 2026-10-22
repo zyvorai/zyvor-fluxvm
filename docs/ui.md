@@ -62,3 +62,12 @@ The previous consoles remain at `/console/legacy` for one release.
 playwright-core at 390 px and 1280 px in both themes, and fails on console errors, failed requests, horizontal
 overflow, controls with no accessible name and pages without exactly one `<h1>`. It is a regression net, not a substitute
 for trying the UI against a real daemon.
+
+### Fleet form flows
+
+`ui/e2e/flows.sh` (or `npm run e2e:flows` in `ui/`) is the real-daemon counterpart for the fleet app's forms. It starts a
+`fluxvm-agent central` and one simulated Mac (`BIN`, default `target/debug/fluxvm-agent`; rebuild it after changing the UI,
+because the build is embedded), then drives the join-token sheet (validation, create, revoke), the lease sheet (the 24-hour
+minimum, a tenant is required, the lease appears with its countdown) and the billing page in Chrome. Every flow is confirmed
+through the API afterwards, so a toast alone cannot pass it. To use a central that is already running, set `FLOWS_URL` and
+`FLOWS_TOKEN`. The run force-releases its lease and scrubs the Mac, so it can be repeated against the same central.
