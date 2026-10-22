@@ -12,7 +12,9 @@ concurrency:
 
 jobs:
   build-and-test:
-    runs-on: ${{ fromJSON(github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && '"ubuntu-latest"' || '["self-hosted","Linux","X64","zyvor-build"]') }}
+    # `docker` keeps this off zyvor-kernel-a: every build-and-test run that landed there stalled for hours in
+    # `cargo build`/`cargo test` (linker processes never finished) and was cancelled, while the docker builders are healthy.
+    runs-on: ${{ fromJSON(github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && '"ubuntu-latest"' || '["self-hosted","Linux","X64","zyvor-build","docker"]') }}
     # A hung test once held a self-hosted runner for 2+ hours (the default limit is 6); a normal run takes well under 45 minutes.
     timeout-minutes: 90
     steps:
