@@ -1452,7 +1452,9 @@ struct WorkspaceBody {
     /// `https://…` git URL cloned into the workspace (needs the policy to allow the host).
     #[serde(default)]
     git: Option<String>,
-    /// `clone` (default) or `readonly`. `overlay` is on the roadmap.
+    /// `clone` (default) or `readonly`: the agent can read the workspace but not change it, enforced
+    /// by the guest's Landlock policy (a read-only workspace turns on the default confinement) and
+    /// by the files routes. `overlay` is on the roadmap.
     #[serde(default)]
     mode: Option<String>,
     /// Guest path; default `/workspace`.
@@ -1711,7 +1713,12 @@ async fn create_session(
     {
         return Err(bad("workspace.git must be an https:// URL"));
     }
-    let policy = compile_policy(body.policy)?;
+    let mut policy = compile_policy(body.policy)?;
+    if ws_mode == "readonly" && policy.exec.is_none() {
+        // Read-only has to be enforced by the guest kernel (Landlock): a chmod would not stop an
+        // agent whose user can sudo. So a read-only workspace implies the default confinement.
+        policy.exec = Some(confined_default());
+    }
     let budget = validate_budget(body.budget)?;
     if budget
         .as_ref()
@@ -2062,8 +2069,16 @@ async fn create_session(
         // above ran unconfined: it executed fixed scripts before the policy applied.
         if let Some(e) = session.policy.exec.as_mut() {
             if let Some(w) = &session.workspace {
-                e.write.push(w.path.clone());
+                // A read-only workspace is readable and nothing more; the agent's scratch space is
+                // `/tmp` and the volumes.
+                if w.mode == "readonly" {
+                    e.read.push(w.path.clone());
+                } else {
+                    e.write.push(w.path.clone());
+                }
             }
+            e.read.sort();
+            e.read.dedup();
             e.write
                 .extend(session.volumes.iter().map(|v| v.path.clone()));
             e.write.sort();
@@ -7031,6 +7046,24 @@ struct PathQuery {
     recursive: bool,
 }
 
+/// Refuses a write through the files routes into a read-only workspace. The guest enforces the
+/// same thing for the agent's own commands; this covers the host-side file writes, which the
+/// guest policy does not see.
+fn workspace_readonly_guard(s: &Session, path: &str) -> ApiResult<()> {
+    let Some(w) = s.workspace.as_ref().filter(|w| w.mode == "readonly") else {
+        return Ok(());
+    };
+    let root = w.path.trim_end_matches('/');
+    let p = path.trim_end_matches('/');
+    if p == root || p.starts_with(&format!("{root}/")) {
+        return Err(ApiError {
+            status: StatusCode::FORBIDDEN,
+            message: format!("{} is in the session's read-only workspace", w.path),
+        });
+    }
+    Ok(())
+}
+
 fn path_arg(p: &str) -> ApiResult<()> {
     if valid_file_path(p) {
         return Ok(());
@@ -7207,6 +7240,7 @@ async fn files_write(
     let s = load(&m, id, &caller_tenant(&token_tenant)).await?;
     running(&s)?;
     path_arg(&body.path)?;
+    workspace_readonly_guard(&s, &body.path)?;
     if body.path.ends_with('/') {
         return Err(ApiError {
             status: StatusCode::BAD_REQUEST,
@@ -7435,6 +7469,7 @@ async fn upload_create(
         message: message.into(),
     };
     path_arg(&body.path)?;
+    workspace_readonly_guard(&s, &body.path)?;
     if body.path.ends_with('/') {
         return Err(bad("path must name a file"));
     }
@@ -7755,6 +7790,7 @@ async fn files_delete(
     let s = load(&m, id, &caller_tenant(&token_tenant)).await?;
     running(&s)?;
     path_arg(&q.path)?;
+    workspace_readonly_guard(&s, &q.path)?;
     // `/` and one-component paths (`/etc`, `/usr`) are never a sensible thing to remove.
     if q.path.trim_end_matches('/').matches('/').count() < 2 {
         return Err(ApiError {

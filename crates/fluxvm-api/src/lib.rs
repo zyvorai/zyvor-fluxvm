@@ -7582,6 +7582,74 @@ mod tests {
             assert!(body.contains("vz backend"), "{body}");
         }
 
+        /// A read-only workspace refuses host-side file writes into it, before anything reaches the guest.
+        #[tokio::test]
+        async fn a_readonly_workspace_refuses_file_writes_into_it() {
+            let m = procbox_manager(tenant_tokens(), false);
+            let id = seed_session(&m, Some("acme"), "vz", "running");
+            let path = m
+                .cfg
+                .state_dir
+                .join("agent-sessions")
+                .join(format!("{id}.json"));
+            let mut rec: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            rec["workspace"] = json!({"path": "/workspace", "git": null, "mode": "readonly",
+                "cloned": false, "baseline": false, "note": null});
+            std::fs::write(&path, rec.to_string()).unwrap();
+            let app = router(m);
+            let base = format!("/v1/agents/sessions/{id}");
+            let w = r#"{"path":"/workspace/src/a.txt","content_base64":"aGk="}"#;
+            let (st, body) = call(
+                app.clone(),
+                "PUT",
+                &format!("{base}/files/content"),
+                "acme",
+                Some(w),
+            )
+            .await;
+            assert_eq!(st, StatusCode::FORBIDDEN, "{body}");
+            assert!(body.contains("read-only workspace"), "{body}");
+            let (st, _) = call(
+                app.clone(),
+                "PUT",
+                &format!("{base}/files/content"),
+                "acme",
+                Some(r#"{"path":"/workspace","content_base64":"aGk="}"#),
+            )
+            .await;
+            assert_eq!(st, StatusCode::FORBIDDEN);
+            let (st, _) = call(
+                app.clone(),
+                "DELETE",
+                &format!("{base}/files?path=/workspace/src/a.txt"),
+                "acme",
+                None,
+            )
+            .await;
+            assert_eq!(st, StatusCode::FORBIDDEN);
+            let (st, _) = call(
+                app.clone(),
+                "POST",
+                &format!("{base}/uploads"),
+                "acme",
+                Some(r#"{"path":"/workspace/big.bin","size":10}"#),
+            )
+            .await;
+            assert_eq!(st, StatusCode::FORBIDDEN);
+            // A sibling that only shares the prefix is not the workspace, so it gets past the guard
+            // (and fails later, on the guest the test does not have).
+            let (st, _) = call(
+                app,
+                "PUT",
+                &format!("{base}/files/content"),
+                "acme",
+                Some(r#"{"path":"/workspace2/a.txt","content_base64":"aGk="}"#),
+            )
+            .await;
+            assert_ne!(st, StatusCode::FORBIDDEN);
+        }
+
         /// `POST .../exec/stream` goes through the same gates as `exec` before anything starts.
         #[tokio::test]
         async fn exec_stream_applies_auth_tenant_and_process_rules_before_starting() {
@@ -7609,7 +7677,6 @@ mod tests {
             )
             .await;
             assert_eq!(st, StatusCode::BAD_REQUEST);
-
             let path = m
                 .cfg
                 .state_dir
