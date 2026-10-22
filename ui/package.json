@@ -3,11 +3,17 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
-  "workspaces": ["core", "node"],
+  "workspaces": [
+    "core",
+    "node",
+    "fleet"
+  ],
   "scripts": {
     "dev": "npm run dev -w @fluxvm/ui-node",
-    "build": "npm run build -w @fluxvm/ui-node",
-    "typecheck": "npm run typecheck -w @fluxvm/ui-node",
-    "test": "npm run test -w @fluxvm/ui-core && npm run test -w @fluxvm/ui-node"
+    "dev:fleet": "npm run dev -w @fluxvm/ui-fleet",
+    "build": "npm run build -w @fluxvm/ui-node && npm run build -w @fluxvm/ui-fleet",
+    "typecheck": "npm run typecheck -w @fluxvm/ui-node && npm run typecheck -w @fluxvm/ui-fleet",
+    "test": "npm run test -w @fluxvm/ui-core && npm run test -w @fluxvm/ui-node && npm run test -w @fluxvm/ui-fleet",
+    "e2e": "bash e2e/run.sh node && bash e2e/run.sh fleet"
   }
 }

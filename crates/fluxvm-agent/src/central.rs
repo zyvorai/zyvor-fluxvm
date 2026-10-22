@@ -31,6 +31,8 @@ mod signup;
 mod snapshots;
 #[path = "central_sso.rs"]
 mod sso;
+#[path = "central_studio.rs"]
+mod studio;
 #[path = "central_tunnel.rs"]
 mod tunnel;
 #[path = "central_volumes.rs"]
@@ -373,7 +375,8 @@ async fn auth_middleware(State(fleet): State<Fleet>, mut req: Request, next: Nex
     if path == "/healthz"
         || path == "/fleet/ha"
         || path == "/fleet/ha/leader"
-        || CONSOLE_PATHS.contains(&path)
+        || ((path == "/console" || path.starts_with("/console/"))
+            && matches!(*req.method(), axum::http::Method::GET | axum::http::Method::HEAD))
     {
         return next.run(req).await;
     }
@@ -871,9 +874,12 @@ pub fn router_with_flush(
         registry::spawn_flusher(fleet.clone());
     }
     let app = Router::new()
-        .route("/console", get(console_html))
-        .route("/console/", get(console_html))
+        .route("/console", get(studio::studio_root))
+        .route("/console/", get(studio::studio_index))
+        // The previous console, kept for one release while Studio reaches parity.
+        .route("/console/legacy", get(console_html))
         .route("/console/app.js", get(console_js))
+        .route("/console/{*path}", get(studio::studio_file))
         .route("/fleet/ha", get(ha_rt::ha_status))
         .route("/fleet/ha/leader", get(ha_rt::ha_leader_check))
         .route("/healthz", get(|| async { Json(json!({"ok": true})) }))
@@ -1093,7 +1099,6 @@ pub fn router_with_flush(
 
 // ---- the fleet console: two static files, no auth to fetch them (the page asks for a token and calls the API) ----
 
-const CONSOLE_PATHS: [&str; 3] = ["/console", "/console/", "/console/app.js"];
 const CONSOLE_HTML: &str = include_str!("fleet_console.html");
 const CONSOLE_JS: &str = include_str!("fleet_console.js");
 const CONSOLE_CSP: &str = "default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; connect-src 'self'; \
