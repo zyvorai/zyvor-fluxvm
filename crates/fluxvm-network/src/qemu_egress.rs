@@ -314,7 +314,25 @@ fn dump(map: &Path) -> Result<Value> {
             String::from_utf8_lossy(&out.stderr).trim()
         );
     }
-    serde_json::from_slice(&out.stdout).context("parsing bpftool JSON")
+    let root: Value = serde_json::from_slice(&out.stdout).context("parsing bpftool JSON")?;
+    Ok(normalize_dump(root))
+}
+
+/// With `-j`, bpftool prints raw hex under `key`/`value` and the BTF-decoded fields under
+/// `formatted`. Callers read named fields, so lift `formatted` over each entry.
+fn normalize_dump(root: Value) -> Value {
+    match root {
+        Value::Array(entries) => Value::Array(
+            entries
+                .into_iter()
+                .map(|mut e| match e.get_mut("formatted").map(Value::take) {
+                    Some(f) if f.is_object() => f,
+                    _ => e,
+                })
+                .collect(),
+        ),
+        other => other,
+    }
 }
 
 /// A destination the program dropped, or in audit mode would have dropped.
@@ -709,6 +727,18 @@ mod tests {
         });
         assert_eq!(any, vec![0u8; 16]);
         assert_eq!(encode_cfg(EgressMode::Audit), [2, 0, 0, 0, 0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn bpftool_formatted_entries_are_lifted() {
+        let raw: Value = serde_json::from_str(
+            r#"[{"key":["0x00"],"value":["0x02"],"formatted":{"key":0,"value":{"mode":2}}},
+                {"key":{"daddr":1},"value":{"packets":3}}]"#,
+        )
+        .unwrap();
+        let n = normalize_dump(raw);
+        assert_eq!(n[0]["value"]["mode"], 2);
+        assert_eq!(n[1]["value"]["packets"], 3);
     }
 
     #[test]
