@@ -172,7 +172,7 @@ jobs:
         with:
           name: fluxvm-linux-${{ matrix.arch }}
           path: pkg
-      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-qemu-action@v4
         if: matrix.cross
         with:
           platforms: arm64
