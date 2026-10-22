@@ -30,3 +30,16 @@ export function statusTone(status: string): 'ok' | 'warn' | 'bad' | 'info' | 'id
       return 'idle';
   }
 }
+
+/** "in 5m" style countdown to a future timestamp; "expired" once past, "never" for no expiry. */
+export function left(ts: number | string | Date | null | undefined, now = Date.now()): string {
+  if (ts == null || ts === '') return 'never';
+  const t = ts instanceof Date ? ts.getTime() : typeof ts === 'number' ? ts : Date.parse(ts);
+  if (!Number.isFinite(t)) return '—';
+  const s = Math.round((t - now) / 1000);
+  if (s <= 0) return 'expired';
+  if (s < 60) return `${s}s left`;
+  if (s < 3600) return `${Math.floor(s / 60)}m left`;
+  if (s < 86400) return `${Math.floor(s / 3600)}h left`;
+  return `${Math.floor(s / 86400)}d left`;
+}

@@ -5,6 +5,13 @@ export const NAV: NavGroup[] = [
   { label: 'Overview', items: [{ to: '/', label: 'Overview' }] },
   { label: 'Machines', items: [{ to: '/machines', label: 'Machines' }] },
   {
+    label: 'Agents',
+    items: [
+      { to: '/sandboxes', label: 'Sandboxes', desc: 'Disposable, isolated machines' },
+      { to: '/agents', label: 'Agent sessions', desc: 'Confined workspaces for agents' },
+    ],
+  },
+  {
     label: 'Platform',
     items: [
       { to: '/network', label: 'Network', desc: 'Outbound policy and live traffic' },

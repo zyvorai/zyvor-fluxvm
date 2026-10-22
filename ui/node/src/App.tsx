@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
-import { Archive, LayoutDashboard, LogOut, Moon, Network, Server } from 'lucide-react';
+import { Archive, Bot, Boxes, LayoutDashboard, LogOut, Moon, Network, Server } from 'lucide-react';
 import {
   CommandPalette, GlobalNav, LoginCard, Toasts, api, navigate, onUnauthorized, setToken, toggleTheme,
   useRoute, type Command, type NavGroup, type ToastItem, type Vm,
@@ -8,11 +8,13 @@ import { NAV } from './nav';
 import { Overview } from './pages/Overview';
 import { Machines } from './pages/Machines';
 import { BackupsPage, NetworkPage } from './pages/NodePages';
+import { AgentDetail, AgentsPage } from './pages/Agents';
+import { SandboxDetail, SandboxesPage } from './pages/Sandboxes';
 import { MachineDetail } from './pages/MachineDetail';
 
 export type Notify = (text: string, tone?: 'ok' | 'bad') => void;
 
-const icons: Record<string, ReactNode> = { '/': <LayoutDashboard size={16} />, '/machines': <Server size={16} />, '/network': <Network size={16} />, '/backups': <Archive size={16} /> };
+const icons: Record<string, ReactNode> = { '/': <LayoutDashboard size={16} />, '/machines': <Server size={16} />, '/network': <Network size={16} />, '/backups': <Archive size={16} />, '/sandboxes': <Boxes size={16} />, '/agents': <Bot size={16} /> };
 
 export function App() {
   const route = useRoute();
@@ -68,7 +70,8 @@ export function App() {
     );
 
   const detailId = route.segs[0] === 'machines' && route.segs[1] ? route.segs[1] : '';
-  const page = detailId ? <MachineDetail id={detailId} notify={notify} /> : route.path === '/' ? <Overview vms={vms} setVms={setVms} /> : route.path === '/network' ? <NetworkPage notify={notify} /> : route.path === '/backups' ? <BackupsPage notify={notify} /> : route.path.startsWith('/machines') ? <Machines vms={vms} setVms={setVms} notify={notify} q={route.query.get('q') ?? ''} /> : <Overview vms={vms} setVms={setVms} />;
+  const subId = route.segs[1] ?? '';
+  const page = detailId ? <MachineDetail id={detailId} notify={notify} /> : route.segs[0] === 'sandboxes' && subId ? <SandboxDetail id={subId} notify={notify} /> : route.segs[0] === 'agents' && subId ? <AgentDetail id={subId} notify={notify} /> : route.path === '/sandboxes' ? <SandboxesPage notify={notify} /> : route.path === '/agents' ? <AgentsPage notify={notify} /> : route.path === '/' ? <Overview vms={vms} setVms={setVms} /> : route.path === '/network' ? <NetworkPage notify={notify} /> : route.path === '/backups' ? <BackupsPage notify={notify} /> : route.path.startsWith('/machines') ? <Machines vms={vms} setVms={setVms} notify={notify} q={route.query.get('q') ?? ''} /> : <Overview vms={vms} setVms={setVms} />;
   return (
     <>
       <GlobalNav

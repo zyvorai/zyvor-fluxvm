@@ -3,7 +3,7 @@ import { parseSse } from './sse';
 import { parseHash } from './router';
 import { filterCommands } from './palette';
 import { detectOs } from './capabilities';
-import { ago, fmtMiB, statusTone } from './format';
+import { ago, fmtMiB, left, statusTone } from './format';
 
 describe('parseSse', () => {
   it('parses a JSON event', () => {
@@ -66,6 +66,13 @@ describe('format', () => {
     expect(ago(now - 2000, now)).toBe('just now');
     expect(ago(now - 90_000, now)).toBe('1m ago');
     expect(ago('nope', now)).toBe('—');
+  });
+  it('counts down to a deadline', () => {
+    const now = 1_000_000;
+    expect(left(now + 90_000, now)).toBe('1m left');
+    expect(left(now - 1, now)).toBe('expired');
+    expect(left(null, now)).toBe('never');
+    expect(left('nope', now)).toBe('—');
   });
   it('maps status to tone', () => {
     expect(statusTone('running')).toBe('ok');

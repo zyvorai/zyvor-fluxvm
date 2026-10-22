@@ -228,6 +228,7 @@ textarea.fx-input { min-height: 84px; resize: vertical; font-family: var(--font-
 .fx-preset[aria-pressed='true'] { border-color: var(--apple-blue); background: color-mix(in srgb, var(--apple-blue) 12%, transparent); }
 .fx-preset b { display: block; font-size: 15px; }
 .fx-preset small { color: var(--text-tertiary); }
+.fx-code-err { color: #ff9f9a; }
 .fx-code { background: var(--terminal-bg); color: var(--terminal-text); border-radius: var(--radius-md); padding: 14px 16px; font-family: var(--font-mono); font-size: 12.5px; line-height: 1.55; overflow: auto; max-height: 420px; white-space: pre-wrap; word-break: break-all; margin: 0; }
 .fx-back { display: inline-flex; align-items: center; gap: 4px; font-size: 14px; margin: 18px 0 0; }
 .fx-detail-head { display: flex; flex-wrap: wrap; align-items: center; gap: 14px; justify-content: space-between; margin: 8px 0 4px; }
@@ -245,6 +246,11 @@ textarea.fx-input { min-height: 84px; resize: vertical; font-family: var(--font-
 @media (max-width: 760px) { .fx-rule-form { grid-template-columns: 1fr 1fr; } }
 .fx-check { display: flex; align-items: center; gap: 10px; margin-top: 16px; font-size: 14px; color: var(--text-secondary); }
 .fx-check input { width: 18px; height: 18px; accent-color: var(--apple-blue); }
+/* terminal */
+.fx-term { display: grid; gap: 10px; }
+.fx-term-bar { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.fx-term-body { background: var(--terminal-bg); border-radius: var(--radius-lg); border: 1px solid var(--hairline-1); padding: 10px 12px; min-height: 420px; height: min(62vh, 640px); overflow: hidden; }
+.fx-term-body .xterm { height: 100%; }
 @keyframes fxGrow { from { transform: scaleX(0); } to { transform: none; } }
 @keyframes fxSpin { to { transform: rotate(360deg); } }
 @keyframes fxShimmer { to { background-position: -200% 0; } }

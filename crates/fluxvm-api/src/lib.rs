@@ -842,6 +842,8 @@ pub fn router(manager: Arc<VmManager>) -> Router {
         .route("/v1/vms/{id}/agent/get-file", post(agent_get_file))
         .route("/v1/vms/{id}/console", get(agent_console))
         .route("/v1/vms/{id}/serial", get(serial_console))
+        .route("/v1/vms/{id}/ws-ticket", post(vm_ws_ticket))
+        .route("/console/ws/{ticket}", get(vm_ws_by_ticket))
         .route("/v1/vms/{id}/tunnel", get(tunnel_api::vm_tunnel))
         .route("/v1/vms/{id}/ports/{name}", get(console_port))
         .route("/v1/vms/{id}/qga/ping", post(qga_ping))
@@ -5430,6 +5432,15 @@ async fn agent_console(
     ws: axum::extract::ws::WebSocketUpgrade,
 ) -> ApiResult<Response> {
     require_admin(role)?;
+    open_agent_console(m, id, q, ws).await
+}
+
+async fn open_agent_console(
+    m: Arc<VmManager>,
+    id: Uuid,
+    q: ConsoleQuery,
+    ws: axum::extract::ws::WebSocketUpgrade,
+) -> ApiResult<Response> {
     // Open the console *before* upgrading, so a failure (agent disabled,
     // guest unreachable, VM not found) comes back as a normal HTTP error
     // instead of a WS connection that opens and then immediately closes
@@ -5530,6 +5541,14 @@ async fn serial_console(
     ws: axum::extract::ws::WebSocketUpgrade,
 ) -> ApiResult<Response> {
     require_admin(role)?;
+    open_serial_ws(m, id, ws).await
+}
+
+async fn open_serial_ws(
+    m: Arc<VmManager>,
+    id: Uuid,
+    ws: axum::extract::ws::WebSocketUpgrade,
+) -> ApiResult<Response> {
     let record = m.get(id).await?;
     if record.backend != BackendKind::Qemu {
         // Only QEMU has an interactive serial socket; every other backend's
@@ -5547,6 +5566,96 @@ async fn serial_console(
     }
     let stream = m.open_serial(id).await?;
     Ok(ws.on_upgrade(move |socket| relay_serial(socket, stream)))
+}
+
+/// Single-use WebSocket tickets for the browser UI, which cannot put `Authorization` on a WebSocket. A ticket is
+/// 256 random bits, lives 30 seconds, is consumed by its first use and exists only in memory. It is minted by an
+/// authenticated admin request (`POST /v1/vms/{id}/ws-ticket`) and redeemed at `GET /console/ws/{ticket}`.
+const WS_TICKET_SECS: u64 = 30;
+const MAX_WS_TICKETS: usize = 256;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum WsKind {
+    /// The guest agent's interactive shell (`/v1/vms/{id}/console`).
+    Console,
+    /// The QEMU serial port, or a read-only console-log tail on other backends (`/v1/vms/{id}/serial`).
+    Serial,
+}
+
+type WsTickets = std::sync::Mutex<
+    std::collections::HashMap<String, (Uuid, WsKind, std::time::Instant)>,
+>;
+
+fn ws_tickets() -> &'static WsTickets {
+    static T: std::sync::OnceLock<WsTickets> = std::sync::OnceLock::new();
+    T.get_or_init(Default::default)
+}
+
+/// `None` when too many are outstanding (a flood, not a person).
+fn mint_ws_ticket(vm: Uuid, kind: WsKind) -> Option<String> {
+    let now = std::time::Instant::now();
+    let mut t = ws_tickets().lock().unwrap_or_else(|e| e.into_inner());
+    t.retain(|_, (_, _, exp)| *exp > now);
+    if t.len() >= MAX_WS_TICKETS {
+        return None;
+    }
+    let ticket = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
+    t.insert(
+        ticket.clone(),
+        (vm, kind, now + std::time::Duration::from_secs(WS_TICKET_SECS)),
+    );
+    Some(ticket)
+}
+
+fn take_ws_ticket(ticket: &str) -> Option<(Uuid, WsKind)> {
+    let mut t = ws_tickets().lock().unwrap_or_else(|e| e.into_inner());
+    let (vm, kind, exp) = t.remove(ticket)?;
+    (exp > std::time::Instant::now()).then_some((vm, kind))
+}
+
+#[derive(Debug, Deserialize)]
+struct WsTicketRequest {
+    kind: WsKind,
+}
+
+/// `POST /v1/vms/{id}/ws-ticket` `{"kind": "console"|"serial"}` (admin): a 30 s single-use ticket for
+/// `GET /console/ws/{ticket}`.
+async fn vm_ws_ticket(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<WsTicketRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    m.get(id).await?; // 404 for an unknown VM now, not when the socket opens
+    let ticket = mint_ws_ticket(id, req.kind).ok_or(ApiError {
+        status: StatusCode::TOO_MANY_REQUESTS,
+        message: "too many WebSocket tickets outstanding".into(),
+    })?;
+    Ok(Json(json!({
+        "ticket": ticket,
+        "expires_in": WS_TICKET_SECS,
+        "path": format!("/console/ws/{ticket}"),
+    })))
+}
+
+/// `GET /console/ws/{ticket}`: the ticket stands in for the bearer token (no `Authorization` on a browser
+/// WebSocket) and was minted by an authenticated, tenant-checked request. Unknown, expired or used: 404.
+async fn vm_ws_by_ticket(
+    State(m): State<Arc<VmManager>>,
+    Path(ticket): Path<String>,
+    Query(q): Query<ConsoleQuery>,
+    ws: axum::extract::ws::WebSocketUpgrade,
+) -> ApiResult<Response> {
+    let (id, kind) = take_ws_ticket(&ticket).ok_or(ApiError {
+        status: StatusCode::NOT_FOUND,
+        message: "WebSocket ticket not found".into(),
+    })?;
+    match kind {
+        WsKind::Console => open_agent_console(m, id, q, ws).await,
+        WsKind::Serial => open_serial_ws(m, id, ws).await,
+    }
 }
 
 /// Raw bytes to and from a `vz` VM's named console port (`apple.console_ports`). Binary and text frames are both written
@@ -6560,6 +6669,46 @@ mod tests {
             let post = Request::post("/console/assets/app.js").body(Body::empty()).unwrap();
             assert_ne!(router(m.clone()).oneshot(post).await.unwrap().status(), StatusCode::OK);
             assert_eq!(status_for(router(m), "GET", "/v1/vms", None).await, StatusCode::UNAUTHORIZED);
+        }
+
+        #[test]
+        fn ws_tickets_are_single_use_and_bound_to_a_vm_and_kind() {
+            let vm = Uuid::new_v4();
+            let t = mint_ws_ticket(vm, WsKind::Serial).unwrap();
+            assert_eq!(t.len(), 64);
+            assert_eq!(take_ws_ticket("not-a-ticket"), None);
+            assert_eq!(take_ws_ticket(&t), Some((vm, WsKind::Serial)));
+            assert_eq!(take_ws_ticket(&t), None, "a ticket works once");
+        }
+
+        #[tokio::test]
+        async fn ws_ticket_routes_need_a_token_to_mint_but_not_to_redeem() {
+            let auth = AuthConfig {
+                tokens: vec![ApiToken {
+                    token: "secret".into(),
+                    role: Role::Admin,
+                    name: None,
+                    tenant: None,
+                }],
+                ..Default::default()
+            };
+            let m = manager(auth);
+            let id = Uuid::new_v4();
+            let mint = Request::post(format!("/v1/vms/{id}/ws-ticket"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"kind":"console"}"#))
+                .unwrap();
+            assert_eq!(
+                router(m.clone()).oneshot(mint).await.unwrap().status(),
+                StatusCode::UNAUTHORIZED
+            );
+            // Redeeming is exempt from the bearer check (the ticket is the credential); an unknown ticket is a 404,
+            // never a 401 and never the SPA's index.html.
+            let resp = router(m)
+                .oneshot(Request::get("/console/ws/nope").body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::NOT_FOUND);
         }
 
         #[tokio::test]

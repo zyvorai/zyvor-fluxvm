@@ -3,9 +3,11 @@ import { ChevronLeft, Copy, Pause, Play, RotateCw, Square, Trash2 } from 'lucide
 import { Button, Card, Field, KV, Meter, Pill, Sheet, Skeleton, Sparkline, Tabs, ago, api, fmtMiB, navigate, statusTone, streamEvents, usePoll, type Vm } from '@fluxvm/ui-core';
 import type { Notify } from '../App';
 import { actionsFor } from './Machines';
+import { ConsoleTab } from './ConsoleTab';
+import { GuestTab } from './GuestTab';
 import { MigrationTab, NetworkTab, ProtectTab, StorageTab } from './tabs';
 
-type Tab = 'overview' | 'network' | 'storage' | 'protect' | 'migration' | 'logs' | 'events';
+type Tab = 'overview' | 'console' | 'guest' | 'network' | 'storage' | 'protect' | 'migration' | 'logs' | 'events';
 interface Metrics {
   cpu_usage_percent?: number;
   memory_usage_bytes?: number;
@@ -85,8 +87,10 @@ export function MachineDetail({ id, notify }: { id: string; notify: Notify }) {
         </div>
       </div>
       {v.error ? <div className="fx-error" role="alert">{v.error}</div> : null}
-      <Tabs value={tab} onChange={setTab} tabs={[{ value: 'overview', label: 'Overview' }, { value: 'network', label: 'Network' }, { value: 'storage', label: 'Storage' }, { value: 'protect', label: 'Protect' }, { value: 'migration', label: 'Migration' }, { value: 'logs', label: 'Logs' }, { value: 'events', label: 'Events' }]} />
+      <Tabs value={tab} onChange={setTab} tabs={[{ value: 'overview', label: 'Overview' }, { value: 'console', label: 'Console' }, { value: 'guest', label: 'Guest' }, { value: 'network', label: 'Network' }, { value: 'storage', label: 'Storage' }, { value: 'protect', label: 'Protect' }, { value: 'migration', label: 'Migration' }, { value: 'logs', label: 'Logs' }, { value: 'events', label: 'Events' }]} />
       {tab === 'overview' && <Overview vm={v} />}
+      {tab === 'console' && <ConsoleTab id={id} running={v.status === 'running'} />}
+      {tab === 'guest' && <GuestTab id={id} running={v.status === 'running'} notify={notify} />}
       {tab === 'network' && <NetworkTab id={id} notify={notify} />}
       {tab === 'storage' && <StorageTab id={id} notify={notify} />}
       {tab === 'protect' && <ProtectTab id={id} name={v.name} running={v.status === 'running'} notify={notify} />}
