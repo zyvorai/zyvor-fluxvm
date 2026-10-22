@@ -956,7 +956,7 @@ pub(super) async fn prometheus(
         return (
             StatusCode::UNAUTHORIZED,
             [(header::WWW_AUTHENTICATE, "Bearer")],
-            Json(json!({"error": "GET /metrics needs the fleet token or the --metrics-token"})),
+            Json(json!({"error": "GET /metrics needs the fleet token or the --metrics-token", "code": "UNAUTHORIZED"})),
         )
             .into_response();
     }

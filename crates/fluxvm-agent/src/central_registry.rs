@@ -113,7 +113,7 @@ pub(super) async fn admission(State(fleet): State<Fleet>, req: Request, next: Ne
         Err(secs) => (
             StatusCode::TOO_MANY_REQUESTS,
             [(header::RETRY_AFTER, secs.to_string())],
-            axum::Json(json!({"error": "central is busy; retry later", "retry_after_secs": secs})),
+            axum::Json(json!({"error": "central is busy; retry later", "code": "RATE_LIMITED", "retry_after_secs": secs})),
         )
             .into_response(),
     }

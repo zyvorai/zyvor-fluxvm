@@ -147,9 +147,12 @@ fn error_code(status: StatusCode) -> &'static str {
         403 => "FORBIDDEN",
         404 => "NOT_FOUND",
         409 => "CONFLICT",
+        412 => "PRECONDITION_FAILED",
         413 => "PAYLOAD_TOO_LARGE",
         422 => "UNPROCESSABLE",
+        428 => "PRECONDITION_REQUIRED",
         429 => "RATE_LIMITED",
+        501 => "NOT_IMPLEMENTED",
         503 => "UNAVAILABLE",
         s if s >= 500 => "INTERNAL",
         _ => "ERROR",
@@ -301,6 +304,7 @@ async fn auth_middleware(State(auth): State<AuthState>, mut req: Request, next: 
                     status,
                     Json(json!({
                         "error": "step-up authentication required: send a valid TOTP code in X-Fluxvm-Totp",
+                        "code": "STEP_UP_REQUIRED",
                         "mfa": mfa_outcome.label(),
                     })),
                 )
@@ -6072,6 +6076,15 @@ mod tests {
         assert_eq!(error_code(StatusCode::CONFLICT), "CONFLICT");
         assert_eq!(error_code(StatusCode::SERVICE_UNAVAILABLE), "UNAVAILABLE");
         assert_eq!(error_code(StatusCode::BAD_GATEWAY), "INTERNAL");
+        assert_eq!(
+            error_code(StatusCode::PRECONDITION_FAILED),
+            "PRECONDITION_FAILED"
+        );
+        assert_eq!(
+            error_code(StatusCode::PRECONDITION_REQUIRED),
+            "PRECONDITION_REQUIRED"
+        );
+        assert_eq!(error_code(StatusCode::NOT_IMPLEMENTED), "NOT_IMPLEMENTED");
         assert_eq!(error_code(StatusCode::IM_A_TEAPOT), "ERROR");
     }
 

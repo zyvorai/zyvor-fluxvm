@@ -281,11 +281,29 @@ pub struct RegisterRequest {
     pub capabilities: Vec<String>,
 }
 
+/// The stable `code` that goes with an error status, the same set as the node API.
+fn error_code(status: StatusCode) -> &'static str {
+    match status.as_u16() {
+        400 => "BAD_REQUEST",
+        401 => "UNAUTHORIZED",
+        403 => "FORBIDDEN",
+        404 => "NOT_FOUND",
+        409 => "CONFLICT",
+        413 => "PAYLOAD_TOO_LARGE",
+        422 => "UNPROCESSABLE",
+        429 => "RATE_LIMITED",
+        503 => "UNAVAILABLE",
+        s if s >= 500 => "INTERNAL",
+        _ => "ERROR",
+    }
+}
+
 #[derive(Debug)]
 struct AppError(StatusCode, String);
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
-        (self.0, Json(json!({"error": self.1}))).into_response()
+        let code = error_code(self.0);
+        (self.0, Json(json!({"error": self.1, "code": code}))).into_response()
     }
 }
 impl<E: std::fmt::Display> From<E> for AppError {
@@ -400,7 +418,7 @@ async fn auth_middleware(State(fleet): State<Fleet>, mut req: Request, next: Nex
     let unauthorized = || {
         (
             StatusCode::UNAUTHORIZED,
-            Json(json!({"error": "missing or invalid bearer token"})),
+            Json(json!({"error": "missing or invalid bearer token", "code": "UNAUTHORIZED"})),
         )
             .into_response()
     };
@@ -446,7 +464,7 @@ async fn auth_middleware(State(fleet): State<Fleet>, mut req: Request, next: Nex
         if !allowed {
             return (
                 StatusCode::FORBIDDEN,
-                Json(json!({"error": "a node credential may only register, renew and read its own overlays"})),
+            Json(json!({"error": "a node credential may only register, renew and read its own overlays", "code": "FORBIDDEN"})),
             )
                 .into_response();
         }
@@ -476,7 +494,7 @@ async fn auth_middleware(State(fleet): State<Fleet>, mut req: Request, next: Nex
                     }
                     return (
                         StatusCode::FORBIDDEN,
-                        Json(json!({"error": format!("tenant '{id}' is disabled")})),
+            Json(json!({"error": format!("tenant '{id}' is disabled"), "code": "FORBIDDEN"})),
                     )
                         .into_response();
                 }
@@ -497,7 +515,7 @@ async fn auth_middleware(State(fleet): State<Fleet>, mut req: Request, next: Nex
             if fleet.tenancy.lock().await.enabled() {
                 return (
                     StatusCode::UNAUTHORIZED,
-                    Json(json!({"error": "tenants exist but central runs without --token; restart it with --token"})),
+            Json(json!({"error": "tenants exist but central runs without --token; restart it with --token", "code": "UNAUTHORIZED"})),
                 )
                     .into_response();
             }
@@ -522,7 +540,7 @@ async fn auth_middleware(State(fleet): State<Fleet>, mut req: Request, next: Nex
         }
         return (
             StatusCode::FORBIDDEN,
-            Json(json!({"error": format!("tenant '{t}' may not call {} {}", req.method(), req.uri().path())})),
+            Json(json!({"error": format!("tenant '{t}' may not call {} {}", req.method(), req.uri().path()), "code": "FORBIDDEN"})),
         )
             .into_response();
     }
@@ -546,7 +564,11 @@ async fn auth_middleware(State(fleet): State<Fleet>, mut req: Request, next: Nex
                 StatusCode::FORBIDDEN,
                 key_used.clone(),
             ));
-            return (StatusCode::FORBIDDEN, Json(json!({"error": msg}))).into_response();
+            return (
+                StatusCode::FORBIDDEN,
+                Json(json!({"error": msg, "code": "FORBIDDEN"})),
+            )
+                .into_response();
         }
     }
     // ---- sso ---- a member's role decides what they may change.
@@ -564,7 +586,11 @@ async fn auth_middleware(State(fleet): State<Fleet>, mut req: Request, next: Nex
         );
         ev.user = Some(u.email.clone());
         fleet.audit.record(ev);
-        return (StatusCode::FORBIDDEN, Json(json!({"error": msg}))).into_response();
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({"error": msg, "code": "FORBIDDEN"})),
+        )
+            .into_response();
     }
     // ---- signup ----
     if let Caller::Tenant(t) = &caller
@@ -575,7 +601,7 @@ async fn auth_middleware(State(fleet): State<Fleet>, mut req: Request, next: Nex
     if req.uri().path() == "/fleet/register" && enroll::node_auth() == enroll::NodeAuth::Enrolled {
         return (
             StatusCode::FORBIDDEN,
-            Json(json!({"error": "this central only accepts heartbeats from enrolled nodes (--node-auth enrolled)"})),
+            Json(json!({"error": "this central only accepts heartbeats from enrolled nodes (--node-auth enrolled)", "code": "FORBIDDEN"})),
         )
             .into_response();
     }
@@ -2515,6 +2541,25 @@ async fn fleet_capacity(State(fleet): State<Fleet>) -> Json<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn central_errors_carry_the_stable_code() {
+        for (status, code) in [
+            (StatusCode::BAD_REQUEST, "BAD_REQUEST"),
+            (StatusCode::UNAUTHORIZED, "UNAUTHORIZED"),
+            (StatusCode::FORBIDDEN, "FORBIDDEN"),
+            (StatusCode::NOT_FOUND, "NOT_FOUND"),
+            (StatusCode::SERVICE_UNAVAILABLE, "UNAVAILABLE"),
+            (StatusCode::BAD_GATEWAY, "INTERNAL"),
+        ] {
+            let resp = AppError(status, "why".into()).into_response();
+            assert_eq!(resp.status(), status);
+            let body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
+            let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(v["code"], code, "{status}");
+            assert_eq!(v["error"], "why");
+        }
+    }
 
     fn node(name: &str, vm_count: usize, age_secs: i64) -> NodeInfo {
         NodeInfo {
