@@ -19,27 +19,27 @@ fluxvm-intelligence = { path = "../fluxvm-intelligence" }
 fluxvm-guest-protocol = { path = "../fluxvm-guest-protocol" }
 anyhow = "1"
 axum = "0.8"
-axum-server = { version = "0.7", features = ["tls-rustls"] }
-base64 = "0.22"
+axum-server = { version = "0.8", features = ["tls-rustls"] }
+base64 = "0.23"
 clap = { version = "4", features = ["derive", "env", "color", "wrap_help"] }
 clap_complete = "4"
 anstyle = "1"
 chrono = { version = "0.4", features = ["serde"] }
 serde = { version = "1", features = ["derive"] }
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "json"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 rustls-pemfile = "2"
 serde_json = "1"
 serde_yaml = "0.9"
 sha2 = "0.10"
-toml = "0.8"
-toml_edit = "0.22"
+toml = "1.1"
+toml_edit = "0.25"
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 libc = "0.2"
 uuid = { version = "1", features = ["v4", "serde"] }
-tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }
+tokio-tungstenite = { version = "0.30", features = ["rustls-tls-webpki-roots"] }
 fluxvm-apple = { path = "../fluxvm-apple" }
 futures-util = { version = "0.3", default-features = false, features = ["sink", "alloc"] }
 

@@ -15,12 +15,12 @@ path = "src/main.rs"
 [dependencies]
 anyhow = "1"
 async-trait = "0.1"
-base64 = "0.22"
+base64 = "0.23"
 containerd-shim = { version = "0.11", features = ["async"] }
 containerd-shim-protos = { version = "0.11", features = ["async"] }
 libc = "0.2"
 log = "0.4"
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "blocking"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "blocking"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }

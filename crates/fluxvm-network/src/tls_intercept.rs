@@ -10,7 +10,7 @@
 
 use anyhow::{Context, Result, anyhow, bail};
 use rcgen::{
-    BasicConstraints, CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, KeyPair,
+    BasicConstraints, CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair,
     KeyUsagePurpose, SanType,
 };
 use rustls::ServerConfig;
@@ -37,8 +37,7 @@ pub struct InterceptCa {
     /// Issuer object used for signing. When the CA was loaded from disk it is
     /// re-issued from the same subject and key, so leaves chain to the
     /// persisted certificate (validation uses name + key, not the serial).
-    issuer: rcgen::Certificate,
-    key: KeyPair,
+    issuer: Issuer<'static, KeyPair>,
     cert_pem: String,
 }
 
@@ -61,8 +60,7 @@ impl InterceptCa {
         let cert = params.self_signed(&key).context("self-signing CA")?;
         let cert_pem = cert.pem();
         Ok(Self {
-            issuer: cert,
-            key,
+            issuer: Issuer::new(params, key),
             cert_pem,
         })
     }
@@ -70,17 +68,21 @@ impl InterceptCa {
     /// Load a CA from PEM text (certificate and PKCS#8 private key).
     pub fn from_pems(cert_pem: &str, key_pem: &str) -> Result<Self> {
         let key = KeyPair::from_pem(key_pem).context("parsing CA private key")?;
-        let params =
-            CertificateParams::from_ca_cert_pem(cert_pem).context("parsing CA certificate")?;
-        if !matches!(params.is_ca, IsCa::Ca(_)) {
+        // rcgen's Issuer trusts the certificate to be a CA, so check basicConstraints here.
+        let (_, pem) = x509_parser::pem::parse_x509_pem(cert_pem.as_bytes())
+            .map_err(|e| anyhow::anyhow!("parsing CA certificate: {e}"))?;
+        let x509 = pem.parse_x509().context("parsing CA certificate")?;
+        let is_ca = x509
+            .basic_constraints()
+            .ok()
+            .flatten()
+            .is_some_and(|bc| bc.value.ca);
+        if !is_ca {
             bail!("egress CA certificate is not a CA (basicConstraints CA:TRUE missing)");
         }
-        let issuer = params
-            .self_signed(&key)
-            .context("re-issuing CA for signing")?;
+        let issuer = Issuer::from_ca_cert_pem(cert_pem, key).context("loading CA for signing")?;
         Ok(Self {
             issuer,
-            key,
             cert_pem: cert_pem.to_string(),
         })
     }
@@ -123,7 +125,11 @@ impl InterceptCa {
                     .with_context(|| format!("creating {}", dir.display()))?;
             }
         }
-        write_new(key_path, self.key.serialize_pem().as_bytes(), 0o600)?;
+        write_new(
+            key_path,
+            self.issuer.key().serialize_pem().as_bytes(),
+            0o600,
+        )?;
         write_new(cert_path, self.cert_pem.as_bytes(), 0o644)?;
         Ok(())
     }
@@ -156,7 +162,7 @@ impl InterceptCa {
         params.not_after = now + time::Duration::days(LEAF_VALIDITY_DAYS);
         let leaf_key = KeyPair::generate().context("generating leaf key")?;
         let cert = params
-            .signed_by(&leaf_key, &self.issuer, &self.key)
+            .signed_by(&leaf_key, &self.issuer)
             .context("signing leaf certificate")?;
         let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(leaf_key.serialize_der()));
         Ok((cert.der().clone(), key))
@@ -419,7 +425,7 @@ mod tests {
         assert!(!cert.is_empty());
         assert!(matches!(key, PrivateKeyDer::Pkcs8(_)));
         // Reloading from PEM must keep working with the same key.
-        let key_pem = ca.key.serialize_pem();
+        let key_pem = ca.issuer.key().serialize_pem();
         let again = InterceptCa::from_pems(ca.cert_pem(), &key_pem).unwrap();
         assert_eq!(again.cert_pem(), ca.cert_pem());
         again.mint("other.example.com").unwrap();

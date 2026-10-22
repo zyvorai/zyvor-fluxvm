@@ -65,8 +65,8 @@ hyper = { version = "1", features = ["server", "http1", "http2"] }
 http-body-util = "0.1"
 bytes = "1"
 ring = "0.17"
-rcgen = { version = "0.13", default-features = false, features = ["ring", "pem"] }
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "json"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }

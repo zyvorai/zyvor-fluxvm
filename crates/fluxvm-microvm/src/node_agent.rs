@@ -188,8 +188,7 @@ async fn apply(obj: &MicroVM, api: &Api<MicroVM>, ctx: &Context) -> Result<Actio
     }
     if status.phase == "Running" && prev_phase != "Running" {
         if let Some(created) = obj.meta().creation_timestamp.as_ref() {
-            let age = chrono::Utc::now().signed_duration_since(created.0);
-            if let Ok(d) = age.to_std() {
+            if let Ok(d) = std::time::SystemTime::now().duration_since(created.0.into()) {
                 crate::metrics::observe_create_to_running(d);
             }
         }
@@ -207,7 +206,7 @@ async fn apply(obj: &MicroVM, api: &Api<MicroVM>, ctx: &Context) -> Result<Actio
             }
         } else if let Some(created) = obj.meta().creation_timestamp.as_ref() {
             // Fallback when annotation missing (agent saw create before controller).
-            if let Ok(d) = chrono::Utc::now().signed_duration_since(created.0).to_std() {
+            if let Ok(d) = std::time::SystemTime::now().duration_since(created.0.into()) {
                 crate::metrics::observe_schedule_to_running(d);
             }
         }

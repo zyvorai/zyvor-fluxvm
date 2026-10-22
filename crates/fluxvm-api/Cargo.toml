@@ -22,14 +22,14 @@ async-stream = "0.3"
 axum = { version = "0.8", features = ["ws"] }
 bytes = "1"
 futures = "0.3"
-tokio-tungstenite = { version = "0.26", default-features = false, features = ["connect"] }
+tokio-tungstenite = { version = "0.30", default-features = false, features = ["connect"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["fs", "io-util", "time", "net", "sync", "rt"] }
-tower-http = { version = "0.6", features = ["trace"] }
+tower-http = { version = "0.7", features = ["trace"] }
 tracing = "0.1"
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
-jsonwebtoken = { version = "10", default-features = false, features = ["use_pem", "rust_crypto"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "json"] }
+jsonwebtoken = { version = "11", default-features = false, features = ["use_pem", "rust_crypto"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 # Used only by sandbox_proxy_inner: reqwest has no way to hand it a socket
 # that was connected from inside the sandbox's network namespace (see the
@@ -43,7 +43,7 @@ libc = "0.2"
 sha2 = "0.10"
 sha1 = "0.10"
 hmac = "0.12"
-base64 = "0.22"
+base64 = "0.23"
 
 [dev-dependencies]
 chrono = { version = "0.4", features = ["serde"] }
