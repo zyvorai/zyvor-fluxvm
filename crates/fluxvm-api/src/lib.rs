@@ -6702,13 +6702,22 @@ mod tests {
                 router(m.clone()).oneshot(mint).await.unwrap().status(),
                 StatusCode::UNAUTHORIZED
             );
-            // Redeeming is exempt from the bearer check (the ticket is the credential); an unknown ticket is a 404,
-            // never a 401 and never the SPA's index.html.
+            // Redeeming is exempt from the bearer check (the ticket is the credential), so it must reach the WebSocket
+            // handler: never a 401, and never the SPA's index.html. A plain request has no upgrade handshake, so axum
+            // rejects it with 400 before the ticket is looked at; an unknown ticket is a 404 once a real client upgrades
+            // (`take_ws_ticket` returning `None`, covered above).
             let resp = router(m)
                 .oneshot(Request::get("/console/ws/nope").body(Body::empty()).unwrap())
                 .await
                 .unwrap();
-            assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+            assert_ne!(resp.status(), StatusCode::UNAUTHORIZED);
+            assert!(
+                !resp
+                    .headers()
+                    .get(header::CONTENT_TYPE)
+                    .is_some_and(|v| v.to_str().unwrap_or("").starts_with("text/html")),
+                "the SPA fallback must not shadow /console/ws/{{ticket}}"
+            );
         }
 
         #[tokio::test]
