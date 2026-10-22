@@ -143,7 +143,7 @@ jobs:
           d="$(mktemp -d)"
           tar -xzf target/package/*.tar.gz -C "$d"
           OBJDUMP=${{ matrix.cross && 'aarch64-linux-gnu-objdump' || 'objdump' }} scripts/check-glibc-floor.sh "$d" 2.34
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: fluxvm-linux-${{ matrix.arch }}
           path: |
@@ -259,7 +259,7 @@ jobs:
           scripts/make-release-manifest.sh --verify "mirror/channels/$CHANNEL.json" --pubkey "$RUNNER_TEMP/release.pub"
           rm -f "$RUNNER_TEMP/release.key"
           echo "signed=1" >> "$GITHUB_OUTPUT"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: steps.sign.outputs.signed == '1'
         with:
           name: mirror-tree

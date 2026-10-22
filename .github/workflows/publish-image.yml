@@ -141,7 +141,7 @@ jobs:
           printf '%s\n' "${DIGEST}" > "digests/${ARCH}.digest"
           printf '%s\n' "${TARBALL_SHA256}" > "digests/${ARCH}.tarball-sha256"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: digests-${{ matrix.arch }}
           path: digests/*
