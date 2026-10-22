@@ -1,25 +1,44 @@
 import { useState } from 'react';
 import { Trash2 } from 'lucide-react';
-import { Button, Card, EmptyState, Hero, Sheet, Skeleton, Stat, ago, api, fmtMiB, usePoll } from '@fluxvm/ui-core';
+import { Button, Card, EmptyState, Hero, Sheet, Skeleton, Stat, Tabs, ago, api, fmtMiB, navigate, useRoute, usePoll } from '@fluxvm/ui-core';
 import type { Notify } from '../App';
 import { EgressEditor } from './EgressEditor';
 import { rowsOf } from '../lib/generic';
+import { FlowsTab, GroupsTab, ServicesTab, VnetsTab } from './NetworkTabs';
+
+type NetTab = 'outbound' | 'vnets' | 'groups' | 'services' | 'flows';
+const NET_TABS: { value: NetTab; label: string }[] = [
+  { value: 'outbound', label: 'Outbound' },
+  { value: 'vnets', label: 'Virtual networks' },
+  { value: 'groups', label: 'Security groups' },
+  { value: 'services', label: 'Services' },
+  { value: 'flows', label: 'Flows' },
+];
 
 export function NetworkPage({ notify }: { notify: Notify }) {
+  const route = useRoute();
+  const asked = route.query.get('tab');
+  const tab: NetTab = NET_TABS.find((t) => t.value === asked)?.value ?? 'outbound';
+  const setTab = (t: NetTab) => navigate(t === 'outbound' ? '/network' : `/network?tab=${t}`);
   const summary = usePoll(() => api.get<Record<string, unknown>>('/v1/netobs/summary').catch(() => null), 8000);
   const s = summary.data;
   const num = (k: string): number | null => (s && typeof s[k] === 'number' ? (s[k] as number) : null);
   const stats = ['flows', 'dns_queries', 'drops', 'bytes'].map((k) => [k, num(k)] as const).filter(([, v]) => v != null);
   return (
     <>
-      <Hero eyebrow="Network" title="Decide what" accent="can reach out." lede="The default outbound policy for user-mode guests, and a live view of what the datapath sees." />
+      <Hero eyebrow="Network" title="Decide what" accent="can reach out." lede="Outbound policy, virtual networks, security groups and load-balanced services, with a live view of what the datapath sees." />
       <div className="fx-grid cols-4">
         {summary.loading && !s ? [0, 1, 2, 3].map((i) => <Skeleton key={i} h={104} />) : stats.map(([k, v]) => <Stat key={k} label={k.replace(/_/g, ' ')} value={v as number} tone="info" />)}
       </div>
+      <Tabs value={tab} tabs={NET_TABS} onChange={setTab} />
       <div className="fx-section">
-        <h2>Node default</h2>
-        <p className="fx-muted" style={{ marginTop: -6 }}>Machines without their own policy inherit this. Changes can re-program running VMs immediately.</p>
-        <EgressEditor notify={notify} />
+        {tab === 'outbound' ? (
+          <>
+            <h2>Node default</h2>
+            <p className="fx-muted" style={{ marginTop: -6 }}>Machines without their own policy inherit this. Changes can re-program running VMs immediately.</p>
+            <EgressEditor notify={notify} />
+          </>
+        ) : tab === 'vnets' ? <VnetsTab notify={notify} /> : tab === 'groups' ? <GroupsTab notify={notify} /> : tab === 'services' ? <ServicesTab notify={notify} /> : <FlowsTab />}
       </div>
     </>
   );
