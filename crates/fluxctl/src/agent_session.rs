@@ -82,6 +82,10 @@ pub enum AgentCommand {
         /// Guest path of the workspace.
         #[arg(long)]
         workspace_path: Option<String>,
+        /// Mount this guest directory copy-on-write as the workspace (`workspace.mode: overlay`): the
+        /// agent writes freely and the directory itself stays untouched.
+        #[arg(long, value_name = "DIR", conflicts_with = "repo")]
+        overlay_lower: Option<String>,
         /// Fail the create (and remove the sandbox) unless the workspace directory exists and the
         /// `--repo` clone succeeded; by default the session is made and `workspace.note` says why not.
         #[arg(long)]
@@ -1098,6 +1102,7 @@ pub async fn run(r: &Remote, cmd: AgentCommand) -> Result<()> {
             agent,
             repo,
             workspace_path,
+            overlay_lower,
             require_ready,
             image,
             cpus,
@@ -1156,6 +1161,10 @@ pub async fn run(r: &Remote, cmd: AgentCommand) -> Result<()> {
                     ("max_workspace_bytes", max_workspace_bytes),
                 ],
             );
+            if let Some(lower) = overlay_lower {
+                body["workspace"]["mode"] = json!("overlay");
+                body["workspace"]["lower"] = json!(lower);
+            }
             if require_ready && body.get("workspace").is_some() {
                 body["workspace"]["require_ready"] = json!(true);
             }
