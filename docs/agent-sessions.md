@@ -800,4 +800,4 @@ Each item says why it is not in the MVP.
 | Replay | the ledger is a log, not a recording |
 | Preview URLs: large or streamed responses | WebSocket upgrades are bridged (run with Chrome DevTools); large and streamed bodies were not run through the preview route |
 | Browser / computer-use profile | a CDP recipe works on the stock image (see Browser above); no prebuilt browser image, no Playwright client run, no computer-use display profile |
-| Secretless credentials | the credential broker (`docs/credential-broker.md`) is per sandbox; not bound to sessions |
+| Secretless credentials at create time | session grants exist (`POST .../grants`, see Credential grants: they end with the session, are capped at its expiry and follow a restore). Declaring them in the create body is not offered on purpose: a grant names a `FLUXVM_SECRET_*` variable, so a tenant able to create one could aim any daemon secret at a host it controls; granting stays an admin call |
