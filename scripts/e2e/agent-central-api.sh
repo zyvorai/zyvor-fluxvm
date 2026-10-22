@@ -129,9 +129,12 @@ check "the overlay is listed" test "$(adm "$URL/fleet/overlays" | jq -r '[.. | .
 check "events (audit) stream route answers" test "$(curl -s -o /dev/null -m 3 -w '%{http_code}' -H 'authorization: Bearer adm' "$URL/fleet/events")" = 200
 
 # --- console assets ---------------------------------------------------------------------------------------------
-check "/console serves html" bash -c "curl -s $URL/console | grep -qi '<html'"
-check "/console/app.js serves javascript" bash -c "curl -sI $URL/console/app.js | tr -d '\r' | grep -qi 'content-type: .*javascript'"
-check "the console page is not cacheable across logins or carries a CSP" bash -c "curl -sI $URL/console | tr -d '\r' | grep -qi -E 'content-security-policy|cache-control'"
+check "/console redirects permanently to /console/" bash -c "curl -sI $URL/console | tr -d '\r' | grep -qi -E '^HTTP/[0-9.]+ (301|308)' && curl -sI $URL/console | tr -d '\r' | grep -qi '^location: .*/console/\$'"
+check "/console/ serves the Studio html" bash -c "curl -s $URL/console/ | grep -qi '<html'"
+check "the built app asset serves javascript" bash -c "curl -sI $URL/console/assets/app.js | tr -d '\r' | grep -qi 'content-type: .*javascript'"
+check "the console page carries a CSP and is revalidated, not cached across logins" bash -c "h=\$(curl -sI $URL/console/ | tr -d '\r'); grep -qi 'content-security-policy' <<<\"\$h\" && grep -qi 'cache-control: no-cache' <<<\"\$h\""
+check "the legacy console is still served at /console/legacy" bash -c "curl -s $URL/console/legacy | grep -qi '<html'"
+check "/console/app.js (the legacy script) serves javascript" bash -c "curl -sI $URL/console/app.js | tr -d '\r' | grep -qi 'content-type: .*javascript'"
 
 # --- metrics ----------------------------------------------------------------------------------------------------
 check "/metrics needs a token" test "$(curl -s -o /dev/null -w '%{http_code}' "$URL/metrics")" != 200
