@@ -42,6 +42,10 @@ pub fn to_procbox(p: &ExecPolicy, request_timeout: Duration) -> Policy {
     Policy {
         read: p.read.iter().map(PathBuf::from).collect(),
         write: p.write.iter().map(PathBuf::from).collect(),
+        exec: p
+            .exec
+            .as_ref()
+            .map(|x| x.iter().map(PathBuf::from).collect()),
         tcp_connect: tcp_rule(&p.tcp_connect),
         tcp_bind: tcp_rule(&p.tcp_bind),
         scope_ipc: p.scope_ipc,
@@ -78,6 +82,7 @@ pub fn enforcement_to_wire(e: &Enforcement) -> ExecEnforcement {
     ExecEnforcement {
         landlock_abi: e.landlock_abi,
         filesystem: e.filesystem,
+        exec_restricted: e.exec_restricted,
         tcp_connect: e.tcp_connect,
         tcp_bind: e.tcp_bind,
         scope_abstract_unix: e.scope_abstract_unix,
