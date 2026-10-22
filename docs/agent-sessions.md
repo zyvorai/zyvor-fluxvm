@@ -56,6 +56,12 @@ fork, then exec in every child in parallel, then delete the children (`--keep` k
   is not root), then cloned into when `git` is given. A failed clone does not fail the session: the record says why in
   `workspace.note` (for example *git is not installed in the guest image*; the stock `debian-13` has none).
 - A baseline of the workspace is recorded at the end of create, which is what `artifacts` diffs against.
+- `workspace.mode: "readonly"` makes the workspace readable and not writable. It is enforced by the guest kernel
+  (Landlock) for everything the agent runs (`exec`, jobs, git), so it turns on the default confinement even without a
+  `filesystem` section, and create fails if the guest cannot enforce it (Linux guest with Landlock; set
+  `filesystem.enforcement: "best-effort"` to create the session without it). The files routes (`files/content`
+  PUT, `files` DELETE, `uploads`) refuse writes under the workspace with `403`. The clone at create time runs before the
+  policy applies. `/tmp` and attached volumes stay writable. Unit-tested; not yet run on a real Linux guest.
 - `runtime.image` follows the sandbox rules (`agent-micro` gives the vsock agent; another image cold-boots).
 - `runtime.host_gpu` (`fluxctl agent run --host-gpu`): vz only; guest `OPENAI_BASE_URL` reaches the host Metal/MLX
   (or llama.cpp) server over vsock. See [host-inference.md](host-inference.md).
@@ -791,7 +797,7 @@ Each item says why it is not in the MVP.
 |---|---|
 | Promote a child's *non-file* state (memory, processes, volumes) | promotion copies workspace files only; a child's running processes and memory are not merged |
 | Lazy memory restore (sub-second claim/fork) | a restore engine change, not an API change; not started |
-| Workspace overlay mode, read-only mounts | `mode: "overlay"` is refused; clone is the only writable mode |
+| Workspace overlay mode | `mode: "overlay"` is refused; clone is the only writable mode. `mode: "readonly"` is enforced (see Create) |
 | Process policy: argv rules as a security boundary | `process.enforce: "exec"` (`fluxctl agent create --cmd-allow ... --cmd-enforce`) makes the `allow`/`ask` programs a kernel-enforced executable allow-list (Landlock), which holds for `sh -c`, scripts and children. `deny` and argument patterns (`git push*`) are still string globs, because the kernel sees paths, not arguments. Unit-tested; not yet run on a real Linux guest |
 | HTTP method/path rules on `vz` | the runner's allow-list proxy matches host names only; per-session rules are enforced by the host egress proxy (see above) |
 | Streaming exec output | `exec` is still buffered; jobs stream over SSE (long-polled from the guest supervisor, or polled every 400 ms on older agents) and the terminal (`shell`) streams |
