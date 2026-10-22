@@ -155,8 +155,11 @@ only narrow what the host allows. `policy.http_rules` shows the compiled rules; 
 whether they are enforced.
 
 - **Where it works**: backends whose traffic reaches the host's own egress proxy (`sandbox.egress_proxy_listen`
-  set; QEMU/KVM and the in-tree engine) with a known guest address. **Not on `vz`** (its allow-list proxy is the
-  runner's and matches host names only) and **not on procbox sandboxes**. Where it cannot be enforced, create returns
+  set; QEMU/KVM and the in-tree engine) with a known guest address. **On `vz`** when the guest has no network card,
+  the session has a host allow-list and `sandbox.egress_proxy_listen` is a `127.0.0.1` address: the runner's vsock proxy
+  then relays allowed requests to the daemon's proxy with a per-VM secret, which maps to an alias address the rules are
+  keyed by (a vz guest with its own network card, or without a loopback proxy, cannot be filtered). **Not on procbox
+  sandboxes**. Where it cannot be enforced, create returns
   `400` with the reason, unless `network.enforcement` is `best-effort` (the session is created with the host
   allow-list only and `capabilities.http_policy` is `false`, `policy.http_unenforced` in the ledger).
 - HTTPS is judged per request only when the proxy intercepts TLS (`egress_tls_intercept`); without it a `CONNECT` is
@@ -809,8 +812,6 @@ Each item says why it is not in the MVP.
 
 | Workspace overlay across guest reboots | `mode: "overlay"` and `"readonly"` are implemented (see Create); the overlay mount is not persisted in the guest's fstab |
 | Process policy: argv rules as a security boundary | `process.enforce: "exec"` (`fluxctl agent create --cmd-allow ... --cmd-enforce`) makes the `allow`/`ask` programs a kernel-enforced executable allow-list (Landlock), which holds for `sh -c`, scripts and children. `deny` and argument patterns (`git push*`) are still string globs, because the kernel sees paths, not arguments. Unit-tested; not yet run on a real Linux guest |
-
-
 | HTTP method/path rules on `vz` | the runner's allow-list proxy matches host names only; per-session rules are enforced by the host egress proxy (see above) |
 | Streaming exec output | **Done:** `POST .../exec/stream` (`fluxctl agent exec --stream`). Plain `exec` stays buffered; the stream is a job under the hood, long-polled from the guest supervisor or polled every 400 ms on older agents |
 | Replay | the ledger is a log, not a recording |
