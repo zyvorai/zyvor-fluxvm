@@ -3191,7 +3191,7 @@ dependencies = [
 
 [[package]]
 name = "guestkit"
-version = "1.2.5"
+version = "1.2.6"
 dependencies = [
  "aes 0.8.4",
  "anyhow",

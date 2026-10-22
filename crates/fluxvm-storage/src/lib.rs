@@ -750,6 +750,7 @@ mod tests {
                 net_pps_limit: None,
                 blk_mbit_limit: None,
                 blk_ops_limit: None,
+                egress: None,
                 cpu_template: None,
                 security_profile: Default::default(),
                 measurement_policy: None,
