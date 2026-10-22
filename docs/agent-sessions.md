@@ -66,11 +66,11 @@ fork, then exec in every child in parallel, then delete the children (`--keep` k
   policy applies. `/tmp` and attached volumes stay writable. Unit-tested; not yet run on a real Linux guest.
 - `workspace.mode: "overlay"` with `workspace.lower` (a directory already in the image) mounts overlayfs at
   `workspace.path`: the agent reads the lower layer and writes freely, and the lower directory is never modified (the
-  upper and work layers sit under `/var/lib/fluxvm-overlay`, outside the agent's write set). The baseline is taken after
+  upper and work layers sit under `/var/lib/fluxvm-overlay/<key>`, mode 0700 and root-owned, so the agent user cannot reach them). The baseline is taken after
   the mount, so `artifacts` and `promote` carry only the agent's changes. `lower` must exist and differ from `path`;
   `git` is refused with it. Create fails (and removes the sandbox) if the guest cannot mount it. The mount is not in
   `/etc/fstab`, so it does not survive a guest reboot; a fork child inherits it through the snapshot. CLI:
-  `--overlay-lower DIR`. Unit-tested; not yet run on a real Linux guest.
+  `--overlay-lower DIR`. The mount script was run by hand on a Linux host (lower untouched, changes and deletions in the upper layer, layers unreachable to the agent user); it is not yet run inside a booted session.
 - `runtime.image` follows the sandbox rules (`agent-micro` gives the vsock agent; another image cold-boots).
 - `runtime.host_gpu` (`fluxctl agent run --host-gpu`): vz only; guest `OPENAI_BASE_URL` reaches the host Metal/MLX
   (or llama.cpp) server over vsock. See [host-inference.md](host-inference.md).
