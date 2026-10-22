@@ -143,6 +143,7 @@ pub(crate) fn routes() -> Router<Arc<VmManager>> {
         .route("/console/pty/{ticket}", get(pty_by_ticket))
         .route("/v1/agents/sessions/{id}/ssh", get(ssh_target))
         .route("/v1/agents/sessions/{id}/preview", post(create_preview))
+        .route("/v1/agents/sessions/{id}/browser", post(start_browser))
         .route("/v1/agents/sessions/{id}/previews", get(list_previews))
         .route(
             "/v1/agents/sessions/{id}/preview/{token}",
@@ -4975,6 +4976,188 @@ async fn create_preview(
     ))
 }
 
+const BROWSER_DEFAULT_PORT: u16 = 9222;
+
+#[derive(Debug, Deserialize, Default)]
+struct BrowserBody {
+    /// Chromium's DevTools port in the guest (default 9222); the preview is on `port + 1`, through `socat`.
+    #[serde(default)]
+    port: Option<u16>,
+    #[serde(default)]
+    ttl_seconds: Option<u64>,
+}
+
+/// The guest command that prints the first Chromium or Chrome binary on `PATH`, then `socat` when that exists too.
+const BROWSER_PROBE: &str = "for b in chromium chromium-browser google-chrome google-chrome-stable; do p=$(command -v $b) && echo \"$p\" && break; done; command -v socat >/dev/null 2>&1 && echo socat; true";
+
+/// Succeeds when something listens on the guest's 127.0.0.1 `port` within `tries` quarter-seconds.
+fn port_wait_script(port: u16, tries: u32) -> String {
+    format!(
+        "bash -c 'for i in $(seq 1 {tries}); do (exec 3<>/dev/tcp/127.0.0.1/{port}) 2>/dev/null && exit 0; sleep 0.25; done; exit 1'"
+    )
+}
+
+/// The Chromium command line a browser session runs: headless, without Chrome's own sandbox (the guest VM is the
+/// boundary; Chrome's sandbox needs user namespaces the confined default policy refuses), DevTools on loopback.
+fn chromium_command(bin: &str, port: u16) -> String {
+    format!(
+        "{} --headless=new --no-sandbox --disable-gpu --remote-debugging-port={port} about:blank",
+        shell_quote(bin)
+    )
+}
+
+/// `POST .../browser`: starts a headless Chromium in the session and returns a preview URL for its DevTools endpoint,
+/// the recipe in the docs as one call. It needs Chromium and `socat` in the guest image (the answer says which is
+/// missing and nothing is started). Chromium and the forwarder are session jobs, so they are listed, logged and
+/// killed like any other, and every step goes through the session's exec, jobs and preview gates. Calling it again
+/// reuses a browser that is already listening.
+async fn start_browser(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    scope: Option<Extension<SessionScope>>,
+    token_tenant: Option<Extension<TokenTenant>>,
+    Path(id): Path<Uuid>,
+    body: Option<Json<BrowserBody>>,
+) -> ApiResult<(StatusCode, Json<Value>)> {
+    let body = body.map(|Json(b)| b).unwrap_or_default();
+    for op in [Op::Exec, Op::Jobs, Op::Preview] {
+        authorize(role, &scope, id, op)?;
+    }
+    let port = body.port.unwrap_or(BROWSER_DEFAULT_PORT);
+    if port < 1024 || port == u16::MAX {
+        return Err(ApiError {
+            status: StatusCode::BAD_REQUEST,
+            message: "port must be 1024-65534".into(),
+        });
+    }
+    let fwd = port + 1;
+    let exec = |command: String, timeout: u64| {
+        exec_session(
+            State(m.clone()),
+            Extension(role),
+            scope.clone(),
+            token_tenant.clone(),
+            Path(id),
+            Json(ExecBody {
+                command,
+                timeout_seconds: Some(timeout),
+                approval_id: None,
+                approval_wait_seconds: None,
+            }),
+        )
+    };
+    let job = |command: String| {
+        job_start(
+            State(m.clone()),
+            Extension(role),
+            scope.clone(),
+            token_tenant.clone(),
+            Path(id),
+            Json(JobBody {
+                command,
+                stdin: false,
+                max_output_bytes: None,
+                timeout_seconds: None,
+                approval_id: None,
+                approval_wait_seconds: None,
+            }),
+        )
+    };
+    let (_, Json(probe)) = exec(BROWSER_PROBE.to_string(), 30).await?;
+    let found: Vec<&str> = probe["stdout"].as_str().unwrap_or("").lines().collect();
+    let has_socat = found.contains(&"socat");
+    let bin = found.iter().find(|l| l.starts_with('/')).copied();
+    let (Some(bin), true) = (bin, has_socat) else {
+        return Err(ApiError {
+            status: StatusCode::CONFLICT,
+            message: format!(
+                "the guest image lacks {}; install them (for Debian: apt-get install chromium socat) or use an image that has them. Nothing was started",
+                match (bin.is_some(), has_socat) {
+                    (false, false) => "Chromium and socat",
+                    (false, true) => "Chromium",
+                    _ => "socat",
+                }
+            ),
+        });
+    };
+    let listening = |tries: u32, port: u16| {
+        let (m, scope, tt) = (m.clone(), scope.clone(), token_tenant.clone());
+        async move {
+            let r = exec_session(
+                State(m),
+                Extension(role),
+                scope,
+                tt,
+                Path(id),
+                Json(ExecBody {
+                    command: port_wait_script(port, tries),
+                    timeout_seconds: Some(30),
+                    approval_id: None,
+                    approval_wait_seconds: None,
+                }),
+            )
+            .await;
+            matches!(r, Ok((_, Json(ref v))) if v["exit_code"].as_i64() == Some(0))
+        }
+    };
+    let mut jobs = serde_json::Map::new();
+    let reused = listening(1, port).await;
+    if !reused {
+        let (_, Json(v)) = job(chromium_command(bin, port)).await?;
+        jobs.insert("chromium".into(), v["job"].clone());
+        if !listening(80, port).await {
+            return Err(ApiError {
+                status: StatusCode::GATEWAY_TIMEOUT,
+                message: format!(
+                    "Chromium did not open DevTools on port {port} within 20 s; see the job's logs (jobs: {})",
+                    Value::Object(jobs)
+                ),
+            });
+        }
+    }
+    if !listening(1, fwd).await {
+        let (_, Json(v)) = job(format!(
+            "socat TCP-LISTEN:{fwd},fork,reuseaddr TCP:127.0.0.1:{port}"
+        ))
+        .await?;
+        jobs.insert("socat".into(), v["job"].clone());
+        if !listening(40, fwd).await {
+            return Err(ApiError {
+                status: StatusCode::GATEWAY_TIMEOUT,
+                message: format!("the DevTools forwarder did not start on port {fwd}"),
+            });
+        }
+    }
+    let (_, Json(preview)) = create_preview(
+        State(m.clone()),
+        Extension(role),
+        scope.clone(),
+        token_tenant.clone(),
+        Path(id),
+        Json(PreviewBody {
+            port: fwd,
+            ttl_seconds: body.ttl_seconds,
+        }),
+    )
+    .await?;
+    record(
+        &m,
+        id,
+        "browser.start",
+        json!({"binary": bin, "port": port, "reused": reused, "jobs": jobs}),
+    );
+    Ok((
+        StatusCode::CREATED,
+        Json(json!({
+            "binary": bin, "port": port, "reused": reused, "jobs": jobs, "preview": preview,
+            "cdp": {
+                "http": format!("{}json/version", preview["url"].as_str().unwrap_or("")),
+                "note": "a client follows webSocketDebuggerUrl from /json, which the preview rewrites to the daemon",
+            },
+        })),
+    ))
+}
+
 async fn list_previews(
     State(m): State<Arc<VmManager>>,
     Extension(role): Extension<Role>,
@@ -9173,6 +9356,20 @@ mod tests {
                 .unwrap()
                 .contains("not carried")
         );
+    }
+
+    #[test]
+    fn browser_commands_are_quoted_and_target_the_given_ports() {
+        let c = chromium_command("/usr/bin/chromium", 9222);
+        assert!(c.starts_with("'/usr/bin/chromium' --headless=new"), "{c}");
+        assert!(c.contains("--remote-debugging-port=9222"), "{c}");
+        let w = port_wait_script(9223, 40);
+        assert!(
+            w.contains("/dev/tcp/127.0.0.1/9223") && w.contains("seq 1 40"),
+            "{w}"
+        );
+        // The probe only prints paths and the word socat, and always exits 0.
+        assert!(BROWSER_PROBE.ends_with("true"));
     }
 
     #[test]
