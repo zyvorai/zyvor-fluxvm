@@ -27,7 +27,7 @@ tracing = "0.1"
 uuid = { version = "1", features = ["v4", "serde"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-mach2 = "0.4"
+mach2 = "0.7"
 
 [dev-dependencies]
 fluxvm-guest-protocol = { path = "../fluxvm-guest-protocol" }
