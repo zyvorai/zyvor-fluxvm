@@ -86,3 +86,46 @@ export function tokenState(t: JoinToken, nowSec: number): TokenState {
 }
 
 export const usesText = (t: JoinToken): string => `${t.uses}${t.max_uses != null ? ` / ${t.max_uses}` : ''}`;
+
+export type Json<T> = { ok: true; value: T } | { ok: false; error: string };
+
+/** Parse the policy editor's text: a JSON object, nothing else, so a typo cannot replace the policy with junk. */
+export function parsePolicy(text: string): Json<Record<string, unknown>> {
+  let v: unknown;
+  try {
+    v = JSON.parse(text);
+  } catch (e) {
+    return { ok: false, error: `Not valid JSON: ${(e as Error).message}` };
+  }
+  return v && typeof v === 'object' && !Array.isArray(v) ? { ok: true, value: v as Record<string, unknown> } : { ok: false, error: 'The policy is a JSON object.' };
+}
+
+/** Keys whose value differs between two policies, for "you are about to change …". */
+export function changedKeys(before: Record<string, unknown>, after: Record<string, unknown>): string[] {
+  const keys = new Set([...Object.keys(before), ...Object.keys(after)]);
+  return [...keys].filter((k) => JSON.stringify(before[k]) !== JSON.stringify(after[k])).sort();
+}
+
+export interface Ha { enabled: boolean; me?: string; leader?: string | null; is_leader: boolean }
+
+/** One line for the HA card. */
+export function haSummary(h: Ha): string {
+  if (!h.enabled) return 'Single central: no standby.';
+  return h.is_leader ? 'This central is the leader.' : `This central is a standby; the leader is ${h.leader ?? 'unknown'}.`;
+}
+
+export interface RebalanceQuery { highWater: string; maxMoves: string }
+
+export function rebalanceProblem(q: RebalanceQuery): string {
+  if (q.highWater.trim() && (!Number.isFinite(Number(q.highWater)) || Number(q.highWater) <= 0 || Number(q.highWater) > 1)) return 'High water is a fraction between 0 and 1, such as 0.85.';
+  if (q.maxMoves.trim() && (!/^\d+$/.test(q.maxMoves.trim()) || Number(q.maxMoves) < 1 || Number(q.maxMoves) > 100)) return 'Max moves is a whole number from 1 to 100.';
+  return '';
+}
+
+export const rebalancePath = (q: RebalanceQuery): string => {
+  const p = new URLSearchParams();
+  if (q.highWater.trim()) p.set('high_water', q.highWater.trim());
+  if (q.maxMoves.trim()) p.set('max_moves', q.maxMoves.trim());
+  const s = p.toString();
+  return '/fleet/rebalance/plan' + (s ? '?' + s : '');
+};

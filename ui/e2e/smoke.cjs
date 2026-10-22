@@ -6,7 +6,7 @@ const { chromium } = require(process.env.PW_CORE || 'playwright-core');
 const [, , app, base, ...rest] = process.argv;
 const PAGES = {
   node: ['/', '/machines', '/machines/vm-0', '/sandboxes', '/agents', '/network', '/network?tab=vnets', '/network?tab=groups', '/network?tab=services', '/network?tab=flows', '/images', '/backups', '/host', '/access'],
-  fleet: ['/', '/hosts', '/vms', '/networks', '/volumes', '/pools', '/tunnels', '/enrollment', '/tenants', '/billing', '/activity'],
+  fleet: ['/', '/hosts', '/vms', '/networks', '/volumes', '/pools', '/tunnels', '/enrollment', '/operations', '/tenants', '/billing', '/activity'],
 }[app];
 if (!PAGES || !base) {
   console.error('usage: smoke.cjs node|fleet http://127.0.0.1:PORT [--widths 390,1280]');

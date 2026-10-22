@@ -11,6 +11,7 @@ export function Overview({ role }: Ctx) {
   const tenants = usePoll(async () => (role === 'operator' ? rowsOf(await api.get<unknown>('/fleet/tenants').catch(() => ({ items: [] })), 'items') : []), 30000, [role]);
   const events = usePoll(async () => rowsOf(await api.get<unknown>('/fleet/events?limit=8').catch(() => ({ items: [] })), 'items'), 8000);
   const cap = usePoll(() => (role === 'operator' ? api.get<Capacity>('/fleet/capacity').catch(() => null) : Promise.resolve(null)), 10000, [role]);
+  const load = usePoll(() => api.get<{ cpu_percent?: number | null; memory_percent?: number | null; nodes_reporting?: number }>('/fleet/metrics/summary').catch(() => null), 15000);
   const v = vms.data ?? [];
   const running = v.filter((x) => vmState(x) === 'running').length;
   const failed = v.filter((x) => vmState(x) === 'failed');
@@ -40,6 +41,16 @@ export function Overview({ role }: Ctx) {
           </>
         )}
       </div>
+      {load.data && (load.data.cpu_percent != null || load.data.memory_percent != null) ? (
+        <div className="fx-section">
+          <Card title="Load right now" action={<span className="fx-muted">{load.data.nodes_reporting ?? 0} hosts reporting</span>}>
+            <div className="fx-grid cols-2">
+              {load.data.cpu_percent != null ? <Meter label={`CPU · ${Math.round(load.data.cpu_percent)}%`} value={Math.round(load.data.cpu_percent)} tone={loadTone(load.data.cpu_percent)} /> : null}
+              {load.data.memory_percent != null ? <Meter label={`Memory · ${Math.round(load.data.memory_percent)}%`} value={Math.round(load.data.memory_percent)} tone={loadTone(load.data.memory_percent)} /> : null}
+            </div>
+          </Card>
+        </div>
+      ) : null}
       {role === 'operator' && cap.data ? (
         <div className="fx-section">
           <Card title="Capacity" action={<span className="fx-muted">{cap.data.nodes_schedulable} of {cap.data.nodes_total} hosts can take new VMs</span>}>

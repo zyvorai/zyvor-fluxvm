@@ -26,6 +26,11 @@ http.createServer((req, res) => {
     if (!/Bearer demo/.test(req.headers.authorization || '')) return j(res, { error: 'missing or invalid bearer token' }, 401);
     const op = !/tenant/.test(req.headers.authorization);
     if (p === '/fleet/tenants/me') return op ? j(res, { error: 'not a tenant' }, 400) : j(res, { id: 'acme' });
+    if (p === '/fleet/ha') return j(res, { enabled: true, me: 'https://central-a.example.com', leader: 'https://central-a.example.com', is_leader: true });
+    if (p === '/fleet/policy') return j(res, { min_lease_hours: 24, overlay_key_rotation_days: 30, tunnels: { enabled: true, max_per_tenant: 8 } });
+    if (p === '/fleet/rebalance/plan') return j(res, { moves: [{ vm: 'build-01', from: 'mac-studio-1', to: 'mac-mini-2', memory_mib: 8192 }], skipped: [] });
+    if (p === '/fleet/metrics/summary') return j(res, { scope: 'fleet', nodes_reporting: 3, cpu_percent: 41.5, memory_percent: 78.2, vms: 9, vms_running: 7 });
+    if (p === '/fleet/billing/invoices') return j(res, { items: [{ month: '2026-09', total_usd: 388.2, status: 'paid' }, { month: '2026-10', total_usd: 412.5, status: 'open' }] });
     if (p === '/fleet/capacity') return j(res, { nodes_total: 3, nodes_healthy: 3, nodes_cordoned: 1, nodes_schedulable: 2, vm_count: 9, vcpus_total: 48, vcpus_used: 39, vcpus_free: 9, memory_mib_total: 196608, memory_mib_used: 90112, memory_mib_free: 106496 });
     if (p === '/fleet/volumes') return j(res, { items: [{ id: 'vol-aaaaaaaaaaaa', name: 'build-cache', tenant: op ? 'acme' : null, node: 'mac-studio-1', size_gib: 100, attached_to: 'vm-1', format: 'raw' }, { id: 'vol-bbbbbbbbbbbb', name: 'scratch', tenant: op ? 'acme' : null, node: 'mac-mini-2', size_gib: 20, attached_to: null }, { id: 'vol-cccccccccccc', name: 'new-one', node: 'mac-mini-2', size_gib: 10, creating: true }] });
     if (p === '/fleet/pools') return j(res, { items: [{ name: 'xcode', image: 'macos-14', size: 3, ready: 2, pending: 1 }] });

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { fmtBytes, idleText, loadTone, pct, resizeProblem, tokenBody, tokenProblem, tokenState, usesText, volumeProblem } from './ops';
+import { changedKeys, haSummary, parsePolicy, rebalancePath, rebalanceProblem, fmtBytes, idleText, loadTone, pct, resizeProblem, tokenBody, tokenProblem, tokenState, usesText, volumeProblem } from './ops';
 
 describe('capacity', () => {
   it('clamps percentages and survives an empty fleet', () => {
@@ -65,5 +65,42 @@ describe('join tokens', () => {
   it('shows uses against the limit', () => {
     expect(usesText({ ...t, uses: 3 })).toBe('3');
     expect(usesText({ ...t, uses: 3, max_uses: 5 })).toBe('3 / 5');
+  });
+});
+
+
+describe('policy editor', () => {
+  it('accepts only a JSON object', () => {
+    expect(parsePolicy('{"a":1}')).toEqual({ ok: true, value: { a: 1 } });
+    expect(parsePolicy('[]').ok).toBe(false);
+    expect(parsePolicy('null').ok).toBe(false);
+    expect(parsePolicy('{').ok).toBe(false);
+  });
+  it('lists what changed, sorted', () => {
+    expect(changedKeys({ a: 1, b: { x: 1 }, c: 3 }, { a: 1, b: { x: 2 }, d: 4 })).toEqual(['b', 'c', 'd']);
+    expect(changedKeys({ a: 1 }, { a: 1 })).toEqual([]);
+  });
+});
+
+describe('high availability', () => {
+  it('says who leads', () => {
+    expect(haSummary({ enabled: false, is_leader: true })).toMatch(/Single/);
+    expect(haSummary({ enabled: true, is_leader: true })).toMatch(/is the leader/);
+    expect(haSummary({ enabled: true, is_leader: false, leader: 'https://b' })).toMatch(/https:\/\/b/);
+    expect(haSummary({ enabled: true, is_leader: false })).toMatch(/unknown/);
+  });
+});
+
+describe('rebalance query', () => {
+  it('bounds both knobs', () => {
+    expect(rebalanceProblem({ highWater: '0.85', maxMoves: '10' })).toBe('');
+    expect(rebalanceProblem({ highWater: '', maxMoves: '' })).toBe('');
+    expect(rebalanceProblem({ highWater: '1.5', maxMoves: '' })).toMatch(/High water/);
+    expect(rebalanceProblem({ highWater: 'x', maxMoves: '' })).toMatch(/High water/);
+    expect(rebalanceProblem({ highWater: '', maxMoves: '101' })).toMatch(/Max moves/);
+  });
+  it('builds the path with only what is set', () => {
+    expect(rebalancePath({ highWater: '', maxMoves: '' })).toBe('/fleet/rebalance/plan');
+    expect(rebalancePath({ highWater: '0.9', maxMoves: '5' })).toBe('/fleet/rebalance/plan?high_water=0.9&max_moves=5');
   });
 });
