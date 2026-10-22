@@ -1,0 +1,123 @@
+name: Cargo update
+
+# Dependabot cannot update this workspace's Cargo.lock: fluxvm-image depends on the sibling repo guestkit by relative
+# path (../../../guestkit), and Dependabot only checks out this repository, so every cargo run fails with
+# "failed to read .../guestkit/Cargo.toml". This workflow does the same job with guestkit checked out as a sibling,
+# the way ci.yml does: it runs `cargo update` (semver-compatible bumps, Cargo.lock only), refuses to continue if the
+# guestkit pin and the lock disagree, checks the workspace still builds, audits the result, and opens a pull request.
+#
+# A pull request opened with the default GITHUB_TOKEN does not start other workflows, so CI will not run on it. Add a
+# repository secret CARGO_UPDATE_TOKEN (a fine-grained token with contents and pull-requests write on this repo) and
+# the pull request is opened with that instead, which does start CI.
+
+on:
+  schedule:
+    - cron: "0 6 * * 1"   # Mondays 06:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: cargo-update
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    env:
+      CARGO_TERM_COLOR: never   # the cargo output goes into the pull request body, where escape codes are noise
+    steps:
+      - name: Checkout fluxvm
+        uses: actions/checkout@v7
+        with:
+          path: fluxvm
+
+      - name: Checkout guestkit (sibling path dependency)
+        uses: actions/checkout@v7
+        with:
+          repository: zyvorai/guestkit
+          ref: v1.2.6   # packaging/guestkit.ref; checked by scripts/check-guestkit-pin.sh
+          path: guestkit
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      # Same packages as ci.yml: libsystemd and hivex for guestkit, clang/llvm/libbpf for fluxvm-container-agent.
+      - name: Install system dependencies
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq libsystemd-dev libhivex-dev clang llvm libbpf-dev linux-libc-dev
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fluxvm
+
+      - name: cargo update
+        working-directory: fluxvm
+        run: cargo update 2>&1 | tee "$RUNNER_TEMP/update.txt"
+
+      - name: Keep the guestkit pin and Cargo.lock in step
+        run: fluxvm/scripts/check-guestkit-pin.sh fluxvm guestkit
+
+      - name: cargo check --workspace
+        working-directory: fluxvm
+        run: cargo check --workspace --all-targets --locked
+
+      - name: cargo audit
+        working-directory: fluxvm
+        run: |
+          cargo install cargo-audit --locked --quiet
+          # Advisories are reported in the pull request, they do not stop it: a vulnerable crate that is already in
+          # the lock should not keep the other updates out.
+          cargo audit --json > "$RUNNER_TEMP/audit.json" || true
+          cargo audit --color never > "$RUNNER_TEMP/audit.txt" 2>&1 || true
+
+      - name: Write the pull request body
+        run: |
+          # An audit that could not run (advisory database unreachable) leaves audit.json empty: say so, still open the PR.
+          vulns=$(jq '.vulnerabilities.count' "$RUNNER_TEMP/audit.json" 2>/dev/null || echo unknown)
+          warns=$(jq '[.warnings[]?[]?] | length' "$RUNNER_TEMP/audit.json" 2>/dev/null || echo unknown)
+          vulns=${vulns:-unknown}; warns=${warns:-unknown}
+          {
+            echo "Weekly \`cargo update\` of \`Cargo.lock\` (semver-compatible bumps only), with guestkit at the \`packaging/guestkit.ref\` pin ($(tr -d '[:space:]' < fluxvm/packaging/guestkit.ref))."
+            echo
+            echo "The workspace was checked with \`cargo check --workspace --all-targets --locked\` before this pull request was opened."
+            echo "Dependabot cannot do this for the workspace (see \`.github/workflows/cargo-update.yml\`)."
+            echo
+            echo "## cargo audit of the updated lock"
+            echo
+            echo "**${vulns} vulnerabilities, ${warns} warnings (unmaintained or yanked crates).**"
+            if [ "$vulns" != "0" ] && [ "$vulns" != "unknown" ]; then
+              echo
+              jq -r '.vulnerabilities.list[] | "- \(.package.name) \(.package.version): \(.advisory.id), \(.advisory.title)"' "$RUNNER_TEMP/audit.json"
+            fi
+            echo
+            echo "<details><summary>Full cargo audit output</summary>"
+            echo
+            echo '```'
+            head -n 300 "$RUNNER_TEMP/audit.txt"
+            echo '```'
+            echo "</details>"
+            echo
+            echo "## cargo update"
+            echo
+            echo "<details><summary>Packages changed</summary>"
+            echo
+            echo '```'
+            grep -vE '^\s*(Compiling|Downloaded|Downloading|Checking|Finished)' "$RUNNER_TEMP/update.txt" || true
+            echo '```'
+            echo "</details>"
+          } > "$RUNNER_TEMP/body.md"
+
+      - name: Open the pull request
+        uses: peter-evans/create-pull-request@v7
+        with:
+          path: fluxvm
+          token: ${{ secrets.CARGO_UPDATE_TOKEN || github.token }}
+          add-paths: Cargo.lock
+          branch: chore/cargo-update
+          delete-branch: true
+          commit-message: "cargo: weekly dependency update"
+          title: "cargo: weekly dependency update"
+          body-path: ${{ runner.temp }}/body.md
