@@ -110,6 +110,12 @@ pub enum AgentCommand {
         /// Command pattern the session may not run (repeatable, `*` wildcard).
         #[arg(long = "cmd-deny")]
         cmd_deny: Vec<String>,
+        /// Also enforce `--cmd-allow` programs in the guest kernel (Landlock): only the programs
+        /// named by the allow patterns can start, however a command is built (`sh -c`, scripts).
+        /// Each pattern's first word must be a literal program. Create fails if the guest cannot
+        /// enforce it; Linux guests only.
+        #[arg(long = "cmd-enforce")]
+        cmd_enforce: bool,
         /// Confine every command, job, file and git call in the guest (Landlock + seccomp):
         /// system directories read-only, `/tmp` and the workspace writable. Create fails when the
         /// guest cannot enforce it, unless `--confine-best-effort`. Linux guests only.
@@ -1097,6 +1103,7 @@ pub async fn run(r: &Remote, cmd: AgentCommand) -> Result<()> {
             volume,
             cmd_allow,
             cmd_deny,
+            cmd_enforce,
             confine,
             fs_read,
             fs_write,
@@ -1124,7 +1131,7 @@ pub async fn run(r: &Remote, cmd: AgentCommand) -> Result<()> {
                 ttl_seconds,
                 host_gpu,
             );
-            add_process_rules(&mut body, &cmd_allow, &cmd_deny);
+            add_process_rules(&mut body, &cmd_allow, &cmd_deny, cmd_enforce);
             add_filesystem(
                 &mut body,
                 confine || confine_best_effort || !fs_read.is_empty() || !fs_write.is_empty(),
@@ -2407,11 +2414,19 @@ pub(crate) fn add_filesystem(
 }
 
 /// Attach `policy.process` command rules to a create body when any were given.
-pub(crate) fn add_process_rules(body: &mut Value, allow: &[String], deny: &[String]) {
+pub(crate) fn add_process_rules(
+    body: &mut Value,
+    allow: &[String],
+    deny: &[String],
+    enforce_exec: bool,
+) {
     if allow.is_empty() && deny.is_empty() {
         return;
     }
     let mut rules = json!({});
+    if enforce_exec {
+        rules["enforce"] = json!("exec");
+    }
     if !allow.is_empty() {
         rules["allow"] = json!(allow);
     }
@@ -2672,11 +2687,21 @@ mod tests {
     }
 
     #[test]
+    fn enforce_flag_lands_as_process_enforce_exec() {
+        let mut b = json!({});
+        add_process_rules(&mut b, &["git *".into()], &[], true);
+        assert_eq!(b["policy"]["process"]["enforce"], "exec");
+        let mut b = json!({});
+        add_process_rules(&mut b, &["git *".into()], &[], false);
+        assert!(b["policy"]["process"].get("enforce").is_none());
+    }
+
+    #[test]
     fn command_rules_land_under_policy_process() {
         let mut b = json!({"agent": "custom"});
-        add_process_rules(&mut b, &[], &[]);
+        add_process_rules(&mut b, &[], &[], false);
         assert!(b.get("policy").is_none());
-        add_process_rules(&mut b, &["git *".into()], &["git push*".into()]);
+        add_process_rules(&mut b, &["git *".into()], &["git push*".into()], false);
         assert_eq!(b["policy"]["process"]["allow"][0], "git *");
         assert_eq!(b["policy"]["process"]["deny"][0], "git push*");
     }

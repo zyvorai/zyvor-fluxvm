@@ -846,7 +846,7 @@ async fn budget_check_workspace(m: &VmManager, s: &Session) -> ApiResult<()> {
             s.sandbox_id,
             format!("du -sk {} 2>/dev/null | cut -f1", shell_quote(&ws.path)),
             Some(30),
-            s.policy.exec.clone(),
+            helper_policy(s),
         )
         .await?;
     let kib = json!(res)["stdout"]
@@ -4928,12 +4928,7 @@ async fn probe(
     running(&s)?;
     m.ensure_running_for_request(s.sandbox_id).await?;
     let res = m
-        .exec_with_policy(
-            s.sandbox_id,
-            probe_script(),
-            Some(30),
-            s.policy.exec.clone(),
-        )
+        .exec_with_policy(s.sandbox_id, probe_script(), Some(30), helper_policy(&s))
         .await?;
     let out = json!(res);
     let mut report = probe_report(out["stdout"].as_str().unwrap_or(""));
@@ -6095,6 +6090,16 @@ async fn job_start(
             })),
         ));
     }
+    if s.policy.enforce_exec {
+        // The shell wrapper around a job runs `setsid`, `cat` and friends, which the allow-list
+        // would refuse; and the supervisor is the path that confines the job itself.
+        return Err(ApiError {
+            status: StatusCode::CONFLICT,
+            message: "this session enforces an executable allow-list, which needs the guest job supervisor \
+                      (jobs-v2); this guest agent does not have it"
+                .into(),
+        });
+    }
     if body.timeout_seconds.is_some() {
         return Err(ApiError {
             status: StatusCode::BAD_REQUEST,
@@ -7001,10 +7006,32 @@ fn list_script(path: &str) -> String {
     )
 }
 
+/// The guest policy for the host's own helper scripts (`du`, `find`, `base64`, `rm`, upload
+/// assembly): the session's filesystem confinement, without the executable allow-list. Those
+/// scripts are written by this server from validated, quoted arguments, not by the agent, and
+/// need tools the agent's `process.allow` should not have to name. Commands the agent controls
+/// (exec, jobs, bisect tests, git) keep the full policy.
+fn helper_policy(s: &Session) -> Option<ExecPolicy> {
+    let mut p = s.policy.exec.clone();
+    if let Some(e) = p.as_mut() {
+        e.exec = None;
+    }
+    p
+}
+
 async fn guest_exec(m: &Arc<VmManager>, s: &Session, cmd: String) -> ApiResult<Value> {
+    guest_exec_as(m, s, cmd, helper_policy(s)).await
+}
+
+async fn guest_exec_as(
+    m: &Arc<VmManager>,
+    s: &Session,
+    cmd: String,
+    policy: Option<ExecPolicy>,
+) -> ApiResult<Value> {
     m.ensure_running_for_request(s.sandbox_id).await?;
     let res = m
-        .exec_with_policy(s.sandbox_id, cmd, Some(30), s.policy.exec.clone())
+        .exec_with_policy(s.sandbox_id, cmd, Some(30), policy)
         .await?;
     Ok(json!(res))
 }
@@ -7203,7 +7230,7 @@ async fn files_range(
             s.sandbox_id,
             transfer::range_script(&q.path, q.offset, len, q.checksum),
             Some(timeout),
-            s.policy.exec.clone(),
+            helper_policy(&s),
         )
         .await?;
     let out = json!(res);
@@ -7552,7 +7579,7 @@ async fn upload_complete(
             s.sandbox_id,
             transfer::complete_script(&u),
             Some(900),
-            s.policy.exec.clone(),
+            helper_policy(&s),
         )
         .await?;
     let out = json!(res);
@@ -7731,7 +7758,9 @@ async fn run_git(
          git -c core.quotepath=false -c safe.directory='*' {args}",
         shell_quote(repo)
     );
-    let out = guest_exec(m, s, cmd).await?;
+    // git can run hooks and filters the agent wrote, so it keeps the executable allow-list: a
+    // session that enforces one needs `git` in `process.allow` to use these routes.
+    let out = guest_exec_as(m, s, cmd, s.policy.exec.clone()).await?;
     let code = out["exit_code"].as_i64().unwrap_or(-1);
     match code {
         127 => Err(ApiError {
