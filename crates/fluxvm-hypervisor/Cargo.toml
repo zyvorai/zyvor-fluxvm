@@ -33,7 +33,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-seccompiler = "0.4"
+seccompiler = "0.5"
 linux-loader = { version = "0.14", default-features = false, features = ["bzimage", "elf"] }
 vm-memory = { version = "0.18", default-features = false, features = ["backend-mmap"] }
 
