@@ -15,7 +15,10 @@ export const NAV: NavGroup[] = [
     label: 'Platform',
     items: [
       { to: '/network', label: 'Network', desc: 'Outbound policy and live traffic' },
+      { to: '/images', label: 'Images', desc: 'Catalog, templates and warm pools' },
       { to: '/backups', label: 'Backups', desc: 'Standalone disk copies' },
+      { to: '/host', label: 'Host', desc: 'Memory, GPUs and topology' },
+      { to: '/access', label: 'Access & audit', desc: 'Quota, events and the API' },
     ],
   },
 ];

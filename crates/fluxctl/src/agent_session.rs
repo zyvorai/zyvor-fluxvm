@@ -82,6 +82,10 @@ pub enum AgentCommand {
         /// Guest path of the workspace.
         #[arg(long)]
         workspace_path: Option<String>,
+        /// Mount this guest directory copy-on-write as the workspace (`workspace.mode: overlay`): the
+        /// agent writes freely and the directory itself stays untouched.
+        #[arg(long, value_name = "DIR", conflicts_with = "repo")]
+        overlay_lower: Option<String>,
         /// Fail the create (and remove the sandbox) unless the workspace directory exists and the
         /// `--repo` clone succeeded; by default the session is made and `workspace.note` says why not.
         #[arg(long)]
@@ -514,6 +518,31 @@ pub enum AgentCommand {
         /// Only this file or directory inside the workspace (repeatable).
         #[arg(long = "path")]
         paths: Vec<String>,
+    },
+    /// Re-run the `exec` commands recorded in a session's ledger, in order, in another session
+    /// (`--target`). Each goes through the target's own policy, approvals and budget. File writes,
+    /// jobs and git steps are listed as skipped: the ledger keeps what was done, not the content.
+    /// `--dry-run` lists what would run. REST: `POST /v1/agents/sessions/{id}/replay`.
+    Replay {
+        /// The session whose ledger is replayed.
+        id: Uuid,
+        /// The session to run the commands in (not needed with `--dry-run`).
+        #[arg(long)]
+        target: Option<Uuid>,
+        #[arg(long)]
+        dry_run: bool,
+        /// Only commands after this RFC 3339 time.
+        #[arg(long)]
+        since: Option<String>,
+        /// Only commands up to this RFC 3339 time.
+        #[arg(long)]
+        until: Option<String>,
+        /// Keep going after a command exits non-zero.
+        #[arg(long)]
+        keep_going: bool,
+        /// Per-command timeout in seconds.
+        #[arg(long)]
+        timeout_seconds: Option<u64>,
     },
     /// Fork COUNT children, run the same command in each in parallel, print every result, then
     /// delete the children (unless `--keep`). Composed from fork, exec and delete; each child is
@@ -1110,6 +1139,7 @@ pub async fn run(r: &Remote, cmd: AgentCommand) -> Result<()> {
             agent,
             repo,
             workspace_path,
+            overlay_lower,
             require_ready,
             image,
             cpus,
@@ -1168,6 +1198,10 @@ pub async fn run(r: &Remote, cmd: AgentCommand) -> Result<()> {
                     ("max_workspace_bytes", max_workspace_bytes),
                 ],
             );
+            if let Some(lower) = overlay_lower {
+                body["workspace"]["mode"] = json!("overlay");
+                body["workspace"]["lower"] = json!(lower);
+            }
             if require_ready && body.get("workspace").is_some() {
                 body["workspace"]["require_ready"] = json!(true);
             }
@@ -1215,7 +1249,7 @@ pub async fn run(r: &Remote, cmd: AgentCommand) -> Result<()> {
                 body["approval_wait_seconds"] = json!(w);
             }
             if stream {
-                return stream_exec(&r, id, body).await;
+                return stream_exec(r, id, body).await;
             }
             let v = r
                 .call(
@@ -1471,6 +1505,29 @@ pub async fn run(r: &Remote, cmd: AgentCommand) -> Result<()> {
                 Method::POST,
                 &format!("/v1/agents/sessions/{id}/promote"),
                 Some(promote_body(dry_run, plan_id, skip_conflicts, &paths)),
+            )
+            .await?,
+        ),
+        AgentCommand::Replay {
+            id,
+            target,
+            dry_run,
+            since,
+            until,
+            keep_going,
+            timeout_seconds,
+        } => show(
+            &r.call(
+                Method::POST,
+                &format!("/v1/agents/sessions/{id}/replay"),
+                Some(replay_body(
+                    target,
+                    dry_run,
+                    since,
+                    until,
+                    keep_going,
+                    timeout_seconds,
+                )),
             )
             .await?,
         ),
@@ -2462,6 +2519,36 @@ pub(crate) fn add_volumes(body: &mut Value, specs: &[String]) -> Result<()> {
 }
 
 /// The `promote` request body; only what was asked for, so the daemon's defaults apply otherwise.
+fn replay_body(
+    target: Option<Uuid>,
+    dry_run: bool,
+    since: Option<String>,
+    until: Option<String>,
+    keep_going: bool,
+    timeout_seconds: Option<u64>,
+) -> Value {
+    let mut b = json!({});
+    if let Some(t) = target {
+        b["target"] = json!(t);
+    }
+    if dry_run {
+        b["dry_run"] = json!(true);
+    }
+    if let Some(s) = since {
+        b["since"] = json!(s);
+    }
+    if let Some(u) = until {
+        b["until"] = json!(u);
+    }
+    if keep_going {
+        b["stop_on_failure"] = json!(false);
+    }
+    if let Some(t) = timeout_seconds {
+        b["timeout_seconds"] = json!(t);
+    }
+    b
+}
+
 pub(crate) fn promote_body(
     dry_run: bool,
     plan_id: Option<String>,
@@ -2901,6 +2988,27 @@ mod tests {
         assert_eq!(b["budget"]["max_execs"], 50);
         assert_eq!(b["budget"]["max_children"], 4);
         assert!(b["budget"].get("max_jobs").is_none());
+    }
+
+    #[test]
+    fn replay_body_carries_only_what_was_asked_for() {
+        assert_eq!(
+            replay_body(None, true, None, None, false, None),
+            json!({"dry_run": true})
+        );
+        let t = Uuid::nil();
+        let b = replay_body(
+            Some(t),
+            false,
+            Some("2026-10-22T10:00:00Z".into()),
+            None,
+            true,
+            Some(30),
+        );
+        assert_eq!(b["target"], json!(t));
+        assert_eq!(b["stop_on_failure"], false);
+        assert_eq!(b["timeout_seconds"], 30);
+        assert!(b.get("dry_run").is_none() && b.get("until").is_none());
     }
 
     #[test]
