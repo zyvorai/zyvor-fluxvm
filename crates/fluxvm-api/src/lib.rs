@@ -7364,6 +7364,49 @@ mod tests {
             assert!(body.contains("vz backend"), "{body}");
         }
 
+        /// `POST .../exec/stream` goes through the same gates as `exec` before anything starts.
+        #[tokio::test]
+        async fn exec_stream_applies_auth_tenant_and_process_rules_before_starting() {
+            let m = procbox_manager(tenant_tokens(), false);
+            let id = seed_session(&m, Some("acme"), "vz", "running");
+            let app = router(m.clone());
+            let uri = format!("/v1/agents/sessions/{id}/exec/stream");
+            let st = status_for(app.clone(), "POST", &uri, None).await;
+            assert_eq!(st, StatusCode::UNAUTHORIZED);
+            let (st, _) = call(
+                app.clone(),
+                "POST",
+                &uri,
+                "other",
+                Some(r#"{"command":"ls"}"#),
+            )
+            .await;
+            assert_eq!(st, StatusCode::NOT_FOUND);
+            let (st, _) = call(
+                app.clone(),
+                "POST",
+                &uri,
+                "acme",
+                Some(r#"{"command":"  "}"#),
+            )
+            .await;
+            assert_eq!(st, StatusCode::BAD_REQUEST);
+
+            let path = m
+                .cfg
+                .state_dir
+                .join("agent-sessions")
+                .join(format!("{id}.json"));
+            let mut rec: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            rec["policy"]["process"] = json!({"allow": [], "deny": ["rm *"]});
+            std::fs::write(&path, rec.to_string()).unwrap();
+            let (st, body) =
+                call(app, "POST", &uri, "acme", Some(r#"{"command":"rm -rf /"}"#)).await;
+            assert_eq!(st, StatusCode::FORBIDDEN, "{body}");
+            assert!(body.contains("process policy"), "{body}");
+        }
+
         /// Writes a session record the way `agent_sessions::save` does, so the routes can be exercised
         /// without booting a sandbox.
         fn seed_session(m: &VmManager, tenant: Option<&str>, backend: &str, state: &str) -> Uuid {

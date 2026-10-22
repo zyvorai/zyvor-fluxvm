@@ -259,18 +259,36 @@ impl Remote {
     pub async fn follow_sse(
         &self,
         path: &str,
+        on_event: impl FnMut(&str, &str) -> Result<()>,
+    ) -> Result<()> {
+        self.follow_sse_with(Method::GET, path, None, on_event)
+            .await
+    }
+
+    /// [`Self::follow_sse`] for a route that starts the work with a request body (`POST .../exec/stream`).
+    pub async fn follow_sse_with(
+        &self,
+        method: Method,
+        path: &str,
+        body: Option<Value>,
         mut on_event: impl FnMut(&str, &str) -> Result<()>,
     ) -> Result<()> {
         let url = format!("{}{path}", self.base);
-        let mut req = self.http.get(&url);
+        let mut req = self.http.request(method.clone(), &url);
         if let Some(t) = &self.token {
             req = req.bearer_auth(t);
         }
-        let mut resp = req.send().await.with_context(|| format!("GET {url}"))?;
+        if let Some(b) = body {
+            req = req.json(&b);
+        }
+        let mut resp = req
+            .send()
+            .await
+            .with_context(|| format!("{method} {url}"))?;
         if !resp.status().is_success() {
             let status = resp.status();
             bail!(
-                "GET {url}: {status}: {}",
+                "{method} {url}: {status}: {}",
                 resp.text().await.unwrap_or_default()
             );
         }
