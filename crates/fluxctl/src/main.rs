@@ -213,8 +213,9 @@ enum Command {
     #[command(next_help_heading = "Basic Commands")]
     /// Start the FluxVM control-plane daemon (REST API).
     Serve,
-    /// Open the daemon's web dashboard (`/console`): VMs and containers by stack, power actions, logs. The page asks
-    /// for the API token itself; it is never put in the URL.
+    /// Open FluxVM Studio, the daemon's web UI (`/console/`): machines, sandboxes, agents, network policy, images, host.
+    /// The page asks for the API token itself; it is never put in the URL. Opens a browser on macOS, and on Linux when
+    /// a desktop session is present (`DISPLAY` or `WAYLAND_DISPLAY`).
     Dashboard {
         /// Only print the URL.
         #[arg(long)]
@@ -3300,6 +3301,17 @@ enum PoolCommand {
     },
 }
 
+/// The program that opens a URL, if this host has a way to show one: `open` on a Mac, `xdg-open` on a Linux desktop.
+fn browser_opener(macos: bool, x11: bool, wayland: bool) -> Option<&'static str> {
+    if macos {
+        Some("/usr/bin/open")
+    } else if x11 || wayland {
+        Some("xdg-open")
+    } else {
+        None
+    }
+}
+
 async fn manager(cfg: Config) -> Result<Arc<VmManager>> {
     VmManager::new(cfg)
 }
@@ -5251,13 +5263,19 @@ async fn main() -> Result<()> {
                 remote::Remote::new(&listen, None).base().to_owned()
             }
         };
-        let url = format!("{base}/console");
+        let url = format!("{base}/console/");
         println!("{url}");
-        if !no_open && cfg!(target_os = "macos") {
-            std::process::Command::new("/usr/bin/open")
-                .arg(&url)
-                .status()
-                .context("opening the browser")?;
+        if !no_open
+            && let Some(opener) = browser_opener(
+                cfg!(target_os = "macos"),
+                std::env::var_os("DISPLAY").is_some_and(|v| !v.is_empty()),
+                std::env::var_os("WAYLAND_DISPLAY").is_some_and(|v| !v.is_empty()),
+            )
+        {
+            // A missing opener (no xdg-open) is not an error: the URL is already printed.
+            if let Err(e) = std::process::Command::new(opener).arg(&url).status() {
+                eprintln!("could not open a browser ({opener}): {e}");
+            }
         }
         return Ok(());
     }
@@ -7426,6 +7444,20 @@ async fn print_hubble_observe(
     };
     print!("{}", render_flows(&views, mode, detailed));
     Ok(())
+}
+
+#[cfg(test)]
+mod dashboard_tests {
+    use super::browser_opener;
+
+    #[test]
+    fn a_browser_opens_on_a_mac_or_a_linux_desktop_only() {
+        assert_eq!(browser_opener(true, false, false), Some("/usr/bin/open"));
+        assert_eq!(browser_opener(false, true, false), Some("xdg-open"));
+        assert_eq!(browser_opener(false, false, true), Some("xdg-open"));
+        // A headless server or an ssh session: just print the URL.
+        assert_eq!(browser_opener(false, false, false), None);
+    }
 }
 
 #[cfg(test)]

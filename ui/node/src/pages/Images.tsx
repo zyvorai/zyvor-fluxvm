@@ -10,7 +10,7 @@ type Tab = 'catalog' | 'oci' | 'templates' | 'pools';
 type Row = Record<string, unknown>;
 const str = (v: unknown): string => (typeof v === 'string' ? v : '');
 
-function CopyCmd({ cmd, notify }: { cmd: string; notify: Notify }) {
+export function CopyCmd({ cmd, notify }: { cmd: string; notify: Notify }) {
   return (
     <Button size="sm" variant="ghost" aria-label="Copy as fluxctl" title={cmd} onClick={() => navigator.clipboard.writeText(cmd).then(() => notify('Copied: ' + cmd), () => notify('Copy blocked by the browser', 'bad'))}>
       <Copy size={14} />

@@ -77,6 +77,7 @@ const config: Config = {
         {to: '/docs/install', label: 'Install', position: 'right'},
         {to: '/mac', label: 'Mac', position: 'right'},
         {to: '/agents', label: 'Agents', position: 'right'},
+        {to: '/studio', label: 'Studio', position: 'right'},
         {to: '/mac-cloud', label: 'Mac cloud', position: 'right'},
         {
           type: 'docSidebar',
