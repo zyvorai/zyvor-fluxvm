@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
-import { Activity, CreditCard, Cpu, KeyRound, LayoutDashboard, LogOut, Moon, Network, Server, Users } from 'lucide-react';
+import { Activity, Cable, CreditCard, Cpu, Flame, HardDrive, KeyRound, LayoutDashboard, LogOut, Moon, Network, Server, ShieldCheck, Users } from 'lucide-react';
 import {
   ApiError, CommandPalette, GlobalNav, LoginCard, Toasts, api, navigate, onUnauthorized, setDefaultHeaders, setToken, toggleTheme,
   useRoute, type Command, type NavGroup, type ToastItem,
@@ -14,6 +14,10 @@ import { TenantsPage } from './pages/Tenants';
 import { KeysPage } from './pages/Keys';
 import { BillingPage } from './pages/Billing';
 import { ActivityPage } from './pages/Activity';
+import { VolumesPage } from './pages/Volumes';
+import { TunnelsPage } from './pages/Tunnels';
+import { PoolsPage } from './pages/Pools';
+import { EnrollmentPage } from './pages/Enrollment';
 
 export type Notify = (text: string, tone?: 'ok' | 'bad') => void;
 export interface Ctx { role: Role; notify: Notify }
@@ -21,7 +25,7 @@ export interface Ctx { role: Role; notify: Notify }
 // Central refuses changes made with a cookie session unless this header is present.
 setDefaultHeaders({ 'X-FluxVM-Console': '1' });
 
-const icons: Record<string, ReactNode> = { '/': <LayoutDashboard size={16} />, '/hosts': <Cpu size={16} />, '/vms': <Server size={16} />, '/networks': <Network size={16} />, '/tenants': <Users size={16} />, '/keys': <KeyRound size={16} />, '/billing': <CreditCard size={16} />, '/activity': <Activity size={16} /> };
+const icons: Record<string, ReactNode> = { '/': <LayoutDashboard size={16} />, '/hosts': <Cpu size={16} />, '/vms': <Server size={16} />, '/networks': <Network size={16} />, '/volumes': <HardDrive size={16} />, '/pools': <Flame size={16} />, '/tunnels': <Cable size={16} />, '/enrollment': <ShieldCheck size={16} />, '/tenants': <Users size={16} />, '/keys': <KeyRound size={16} />, '/billing': <CreditCard size={16} />, '/activity': <Activity size={16} /> };
 
 /** `/fleet/tenants/me` answers 200 for a tenant and 400 ("not a tenant") for the operator. */
 async function detectRole(): Promise<Role> {
@@ -96,6 +100,10 @@ export function App() {
     route.path === '/hosts' ? <HostsPage {...ctx} /> :
     route.path === '/vms' ? <VmsPage {...ctx} /> :
     route.path === '/networks' ? <NetworksPage {...ctx} /> :
+    route.path === '/volumes' ? <VolumesPage {...ctx} /> :
+    route.path === '/pools' ? <PoolsPage {...ctx} /> :
+    route.path === '/tunnels' ? <TunnelsPage {...ctx} /> :
+    route.path === '/enrollment' && role === 'operator' ? <EnrollmentPage {...ctx} /> :
     route.path === '/tenants' && role === 'operator' ? <TenantsPage {...ctx} /> :
     route.path === '/keys' && role === 'tenant' ? <KeysPage {...ctx} /> :
     route.path === '/billing' ? <BillingPage {...ctx} /> :

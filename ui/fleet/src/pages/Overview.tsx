@@ -1,7 +1,8 @@
-import { Button, Card, Hero, Pill, Skeleton, Stat, ago, api, navigate, statusTone, usePoll } from '@fluxvm/ui-core';
+import { Button, Card, Hero, Meter, Pill, Skeleton, Stat, ago, api, navigate, statusTone, usePoll } from '@fluxvm/ui-core';
 import type { Ctx } from '../App';
 import { GenericTable, rowsOf } from '../lib/generic';
 import { type FleetNode, type FleetVm, type Lease, vmState } from '../lib/fleet';
+import { type Capacity, loadTone, pct } from '../lib/ops';
 
 export function Overview({ role }: Ctx) {
   const vms = usePoll(async () => rowsOf(await api.get<unknown>('/fleet/vms'), 'items') as unknown as FleetVm[], 6000);
@@ -9,6 +10,7 @@ export function Overview({ role }: Ctx) {
   const nodes = usePoll(async () => (role === 'operator' ? (rowsOf(await api.get<unknown>('/fleet/nodes'), 'items') as unknown as FleetNode[]) : []), 8000, [role]);
   const tenants = usePoll(async () => (role === 'operator' ? rowsOf(await api.get<unknown>('/fleet/tenants').catch(() => ({ items: [] })), 'items') : []), 30000, [role]);
   const events = usePoll(async () => rowsOf(await api.get<unknown>('/fleet/events?limit=8').catch(() => ({ items: [] })), 'items'), 8000);
+  const cap = usePoll(() => (role === 'operator' ? api.get<Capacity>('/fleet/capacity').catch(() => null) : Promise.resolve(null)), 10000, [role]);
   const v = vms.data ?? [];
   const running = v.filter((x) => vmState(x) === 'running').length;
   const failed = v.filter((x) => vmState(x) === 'failed');
@@ -38,6 +40,16 @@ export function Overview({ role }: Ctx) {
           </>
         )}
       </div>
+      {role === 'operator' && cap.data ? (
+        <div className="fx-section">
+          <Card title="Capacity" action={<span className="fx-muted">{cap.data.nodes_schedulable} of {cap.data.nodes_total} hosts can take new VMs</span>}>
+            <div className="fx-grid cols-2">
+              <Meter label={`vCPUs · ${cap.data.vcpus_used} of ${cap.data.vcpus_total} in use`} value={pct(cap.data.vcpus_used, cap.data.vcpus_total)} tone={loadTone(pct(cap.data.vcpus_used, cap.data.vcpus_total))} />
+              <Meter label={`Memory · ${Math.round(cap.data.memory_mib_used / 1024)} of ${Math.round(cap.data.memory_mib_total / 1024)} GiB in use`} value={pct(cap.data.memory_mib_used, cap.data.memory_mib_total)} tone={loadTone(pct(cap.data.memory_mib_used, cap.data.memory_mib_total))} />
+            </div>
+          </Card>
+        </div>
+      ) : null}
       {role === 'operator' && down.length ? (
         <div className="fx-section">
           <Card title="Needs attention">
