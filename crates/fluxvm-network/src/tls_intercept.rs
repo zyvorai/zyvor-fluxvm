@@ -125,7 +125,11 @@ impl InterceptCa {
                     .with_context(|| format!("creating {}", dir.display()))?;
             }
         }
-        write_new(key_path, self.issuer.key().serialize_pem().as_bytes(), 0o600)?;
+        write_new(
+            key_path,
+            self.issuer.key().serialize_pem().as_bytes(),
+            0o600,
+        )?;
         write_new(cert_path, self.cert_pem.as_bytes(), 0o644)?;
         Ok(())
     }
