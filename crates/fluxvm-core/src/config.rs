@@ -15,6 +15,11 @@ pub struct Config {
     pub listen: String,
     pub state_dir: PathBuf,
     pub run_dir: PathBuf,
+    /// Unix socket for a Docker Engine API shim. Empty disables.
+    /// Use `{run_dir}` for the configured run directory. Default on macOS:
+    /// `{run_dir}/docker.sock`; empty on other platforms.
+    #[serde(default = "default_docker_sock")]
+    pub docker_sock: String,
     pub qemu_binary: String,
     pub qemu_img_binary: String,
     /// Opens a stopped VM's disks for an incremental (CBT) backup, so its
@@ -99,6 +104,16 @@ pub struct Config {
 }
 
 impl Config {
+    /// Resolved Docker Engine API socket path, or `None` when the shim is off.
+    pub fn docker_sock_path(&self) -> Option<PathBuf> {
+        let raw = self.docker_sock.trim();
+        if raw.is_empty() {
+            return None;
+        }
+        let expanded = raw.replace("{run_dir}", &self.run_dir.to_string_lossy());
+        Some(PathBuf::from(expanded))
+    }
+
     /// The effective hibernation state directory.
     pub fn hibernation_dir(&self) -> PathBuf {
         self.hibernation_dir
@@ -246,12 +261,21 @@ fn default_run_dir() -> PathBuf {
     }
 }
 
+fn default_docker_sock() -> String {
+    if cfg!(target_os = "macos") {
+        "{run_dir}/docker.sock".into()
+    } else {
+        String::new()
+    }
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
             listen: "127.0.0.1:7788".into(),
             state_dir: default_state_dir(),
             run_dir: default_run_dir(),
+            docker_sock: default_docker_sock(),
             qemu_binary: "qemu-system-x86_64".into(),
             qemu_img_binary: "qemu-img".into(),
             qemu_storage_daemon_binary: "qemu-storage-daemon".into(),
@@ -1155,6 +1179,29 @@ impl Config {
     /// listen (Firecracker's "jailer only in production" rule).
     pub fn jailer_required(&self) -> bool {
         self.jailer.enforce || (self.auth.require && !is_loopback_listen(&self.listen))
+    }
+}
+
+#[cfg(test)]
+mod docker_sock_tests {
+    use super::*;
+
+    #[test]
+    fn resolves_run_dir_placeholder() {
+        let mut cfg = Config::default();
+        cfg.run_dir = PathBuf::from("/tmp/fluxvm-run-test");
+        cfg.docker_sock = "{run_dir}/docker.sock".into();
+        assert_eq!(
+            cfg.docker_sock_path().as_deref(),
+            Some(Path::new("/tmp/fluxvm-run-test/docker.sock"))
+        );
+    }
+
+    #[test]
+    fn empty_disables_shim() {
+        let mut cfg = Config::default();
+        cfg.docker_sock.clear();
+        assert!(cfg.docker_sock_path().is_none());
     }
 }
 
