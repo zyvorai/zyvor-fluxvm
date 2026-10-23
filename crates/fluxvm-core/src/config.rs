@@ -1188,9 +1188,11 @@ mod docker_sock_tests {
 
     #[test]
     fn resolves_run_dir_placeholder() {
-        let mut cfg = Config::default();
-        cfg.run_dir = PathBuf::from("/tmp/fluxvm-run-test");
-        cfg.docker_sock = "{run_dir}/docker.sock".into();
+        let cfg = Config {
+            run_dir: PathBuf::from("/tmp/fluxvm-run-test"),
+            docker_sock: "{run_dir}/docker.sock".into(),
+            ..Config::default()
+        };
         assert_eq!(
             cfg.docker_sock_path().as_deref(),
             Some(Path::new("/tmp/fluxvm-run-test/docker.sock"))
