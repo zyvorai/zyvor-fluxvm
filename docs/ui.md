@@ -63,7 +63,7 @@ Many buttons have a "Copy as fluxctl" twin so the CLI form is one click away.
     npm run dev:fleet                                          # fleet UI on :5175, proxies /fleet and /auth
     npm run typecheck && npm test && npm run build
 
-The previous consoles remain at `/console/legacy` for one release.
+The previous consoles (`/console/legacy` on the node and on central) were removed in 0.4.14; Studio replaces them.
 
 ### Page smoke test
 

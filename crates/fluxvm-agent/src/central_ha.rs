@@ -392,8 +392,6 @@ mod tests {
         });
         for path in [
             "/console/",
-            "/console/legacy",
-            "/console/app.js",
             "/console/assets/app.js",
             "/console/hosts",
         ] {

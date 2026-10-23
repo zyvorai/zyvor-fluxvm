@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **Removed the previous consoles.** `/console/legacy` and `/console/app.js` are gone from the node daemon and from fleet central (and the
+  embedded `console.html`/`fleet_console.html` and scripts). Studio, at `/console/`, has everything they had.
 - **Studio: stacks and ports on the node Machines page.** A strip per `fluxvm.stack` with Start all / Stop all, and a Ports column
   (`8080→80`). These were the two things the legacy node console had that Studio lacked.
 - **Studio: team members.** A tenant's Members page (add by work email, change a role, remove or leave) and a Members button per tenant for the
