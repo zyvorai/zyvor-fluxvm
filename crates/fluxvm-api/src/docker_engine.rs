@@ -948,8 +948,8 @@ fn image_summary(entry: &OciImageEntry) -> Value {
     let repo_tags: Vec<String> = entry
         .references
         .iter()
-        .cloned()
         .filter(|r| !r.contains('@'))
+        .cloned()
         .collect();
     let repo_digests: Vec<String> = entry
         .references
@@ -1082,22 +1082,19 @@ async fn stream_console(
         use tokio::io::{AsyncReadExt, AsyncSeekExt};
         let mut offset = 0u64;
         loop {
-            match tokio::fs::File::open(&path).await {
-                Ok(mut f) => {
-                    if f.seek(std::io::SeekFrom::Start(offset)).await.is_ok() {
-                        let mut buf = Vec::new();
-                        if f.read_to_end(&mut buf).await.is_ok() && !buf.is_empty() {
-                            offset += buf.len() as u64;
-                            yield Ok::<_, std::io::Error>(bytes::Bytes::from(mux_stdout(&buf)));
-                        }
-                    }
+            if let Ok(mut f) = tokio::fs::File::open(&path).await
+                && f.seek(std::io::SeekFrom::Start(offset)).await.is_ok()
+            {
+                let mut buf = Vec::new();
+                if f.read_to_end(&mut buf).await.is_ok() && !buf.is_empty() {
+                    offset += buf.len() as u64;
+                    yield Ok::<_, std::io::Error>(bytes::Bytes::from(mux_stdout(&buf)));
                 }
-                Err(_) => {}
             }
-            if let Ok(logs) = manager.sandbox_logs(id, 1).await {
-                if logs.exit_code.is_some() {
-                    break;
-                }
+            if let Ok(logs) = manager.sandbox_logs(id, 1).await
+                && logs.exit_code.is_some()
+            {
+                break;
             }
             if !follow {
                 break;
