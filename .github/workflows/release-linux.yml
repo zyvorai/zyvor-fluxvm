@@ -84,7 +84,11 @@ jobs:
           path: guestkit
           ref: ${{ steps.gk.outputs.ref }}
       - name: Check the guestkit pin against Cargo.lock and the checkout
-        run: fluxvm/scripts/check-guestkit-pin.sh fluxvm guestkit
+        run: |
+          # The checkout can leave HEAD at the pinned commit without the tag. fluxvm/ is the release tag's tree, whose
+          # copy of the check predates the remote-tag fallback, so create the tag here.
+          git -C guestkit fetch --depth=1 --no-tags origin "refs/tags/${{ steps.gk.outputs.ref }}:refs/tags/${{ steps.gk.outputs.ref }}"
+          fluxvm/scripts/check-guestkit-pin.sh fluxvm guestkit
       - uses: dtolnay/rust-toolchain@stable
         with:
           # The musl target builds the static guest agent that ships in share/guest/ (packaging/files.txt).
