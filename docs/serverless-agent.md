@@ -2,7 +2,7 @@
 
 A serverless backend (functions with a time limit, plus a database that pushes changes to its clients) can drive FluxVM
 sandboxes and show their activity live. FluxVM has no plugin for any particular platform; this page shows the pattern
-with the [TypeScript client](../typescript/README.md).
+with the [TypeScript client](https://github.com/zyvorai/zyvor-fluxvm/blob/main/typescript/README.md).
 
 > **Not run on a serverless platform.** The two code blocks below were type-checked (strict) and run once against the
 > client's in-memory `FakeFluxVM`, with a stub `db` and `schedule`: `run` creates, runs and deletes the sandbox and records
