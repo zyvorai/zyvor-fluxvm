@@ -20,7 +20,9 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 LIMIT=1000000
-BUDGET="${FLUXVM_VERIFIER_BUDGET:-500000}"   # 50% of the limit: room for kernel drift
+# 65% of the limit. fluxvm_tc uses 548,638 (55%) since the VM-edge program (243240df) and the pod-policy perf work (36759554):
+# 650,000 leaves about 18% for kernel and compiler drift while still failing long before the 1,000,000 rejection.
+BUDGET="${FLUXVM_VERIFIER_BUDGET:-650000}"
 say()  { echo "test-verifier-budget: $*"; }
 skip() { say "SKIP: $*"; exit 0; }
 FAILS=0

@@ -143,9 +143,9 @@ legacy clsact/tc (use `FLUXVM_TCX=required` to make that a hard error). The VM-e
 is verifier-complexity sensitive: on Linux 7.0 it was once rejected outright (over the
 1,000,000-instruction limit) until the pod-policy rule scan's per-rule match became a global
 BPF function (needs Linux ≥ 5.5). `scripts/test-verifier-budget.sh` loads every shipped TC
-object and fails above 50% of the limit, so a kernel or compiler change shows up as a budget
-regression long before an outright rejection. Current use on Linux 7.0.0-31: `fluxvm_tc` ≈ 17%,
-`fluxvm_pod_ingress` ≈ 5%.
+object and fails above 65% of the limit (650,000 instructions), so a kernel or compiler change shows up as a budget
+regression long before an outright rejection. Current use on Linux 7.0.0-38: `fluxvm_tc` ≈ 55%
+(548,638 instructions, with the VM-edge enforcement), `fluxvm_pod_ingress` ≈ 8%.
 
 ## VM-edge attachment
 
