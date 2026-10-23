@@ -85,6 +85,9 @@ jobs:
           ref: ${{ steps.gk.outputs.ref }}
       - name: Check the guestkit pin against Cargo.lock and the checkout
         run: |
+          # The container runs as root over a workspace the runner user owns, so git refuses the checkouts as "dubious
+          # ownership" (and the pin check, which hides git's stderr, then reports "no tag").
+          git config --global --add safe.directory '*'
           # The checkout can leave HEAD at the pinned commit without the tag. fluxvm/ is the release tag's tree, whose
           # copy of the check predates the remote-tag fallback, so create the tag here.
           git -C guestkit fetch --depth=1 --no-tags origin "refs/tags/${{ steps.gk.outputs.ref }}:refs/tags/${{ steps.gk.outputs.ref }}"
