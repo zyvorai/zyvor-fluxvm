@@ -72,6 +72,13 @@ playwright-core at 390 px and 1280 px in both themes, and fails on console error
 overflow, controls with no accessible name and pages without exactly one `<h1>`. It covers 18 node routes and 13 fleet routes. `ui/e2e/run.sh vmtools` (`npm run e2e:vmtools`) opens a VM's sheet and the Images page in Chrome against the same mock and checks the calls the page makes: the pixel a click lands on, merged keystrokes, snapshot, clone and command requests, and the catalog's PUT and DELETE. It is a regression net, not a substitute
 for trying the UI against a real daemon.
 
+### VM tools on a real guest
+
+`scripts/vz-studio-live-test.sh` (Apple silicon only) starts a node daemon with the vz runner, a central and a node agent, boots the
+`agent-micro` guest and drives a VM's sheet in Chrome: the screen, a snapshot (take, clone, restore, delete) and a command, each
+confirmed on the node's API. Control (clicks and keys) is only offered for macOS guests, so it is covered by the mock-API test
+(`ui/e2e/run.sh vmtools`) and the node's `scripts/vz-input-live-test.sh`, not by this one.
+
 ### Fleet form flows
 
 `ui/e2e/flows.sh` (or `npm run e2e:flows` in `ui/`) is the real-daemon counterpart for the fleet app's forms. It starts a
