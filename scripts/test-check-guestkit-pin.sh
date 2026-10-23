@@ -48,5 +48,15 @@ git -C "$T/gk" tag v1.2.6
 expect "a checkout at the pinned tag is accepted" pass "$CHECK" "$T/match" "$T/gk"
 git -C "$T/gk" -c user.name=t -c user.email=t@t commit -q --allow-empty -m next
 expect "a checkout past the tag is rejected" fail "$CHECK" "$T/match" "$T/gk"
+# a detached checkout whose tag the remote has, but the clone lacks (what actions/checkout can leave)
+git -C "$T/gk" tag -d v1.2.6 >/dev/null
+git -C "$T/gk" -c user.name=t -c user.email=t@t reset -q --hard HEAD~1
+git -C "$T/gk" tag v1.2.6
+git clone -q "$T/gk" "$T/gkclone"
+git -C "$T/gkclone" tag -d v1.2.6 >/dev/null
+expect "a checkout without the tag, whose remote has it at HEAD, is accepted" pass "$CHECK" "$T/match" "$T/gkclone"
+git -C "$T/gk" -c user.name=t -c user.email=t@t commit -q --allow-empty -m later
+git -C "$T/gk" tag -f v1.2.6 >/dev/null
+expect "a checkout without the tag, whose remote tag is elsewhere, is rejected" fail "$CHECK" "$T/match" "$T/gkclone"
 
 if [[ $fail -eq 0 ]]; then echo "all passed"; else echo "FAILED"; exit 1; fi

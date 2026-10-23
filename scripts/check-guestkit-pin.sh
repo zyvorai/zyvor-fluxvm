@@ -41,6 +41,12 @@ fi
 
 if [[ -n "$GUESTKIT_DIR" ]]; then
   at="$(git -C "$GUESTKIT_DIR" describe --tags --exact-match HEAD 2>/dev/null || true)"
+  if [[ -z "$at" ]]; then
+    # actions/checkout at a tag can leave a detached HEAD without the tag itself; ask the remote what the tag points at.
+    head="$(git -C "$GUESTKIT_DIR" rev-parse HEAD 2>/dev/null || true)"
+    tagged="$(git -C "$GUESTKIT_DIR" ls-remote origin "refs/tags/${ref}^{}" "refs/tags/${ref}" 2>/dev/null | awk '{print $1}' | grep -Fx "$head" || true)"
+    [[ -n "$head" && -n "$tagged" ]] && at="$ref"
+  fi
   [[ "$at" == "$ref" ]] || {
     echo "check-guestkit-pin: ${GUESTKIT_DIR} is at '${at:-no tag}', expected ${ref}" >&2
     exit 1
