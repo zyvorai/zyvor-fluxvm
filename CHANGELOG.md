@@ -8,11 +8,12 @@
   network and egress policy, storage, protect, migration), sandboxes, agent sessions, networks (virtual networks, groups,
   policies, services, flows, inspect), images, volumes, branches, backups, host (with the Mac pool on a Mac) and GPU passthrough, access and
   an API explorer. Central: hosts (cordon, drain, scrub, lease), VMs, networks, volumes, warm pools, tunnels, enrollment,
-  operations, tenants and keys, billing with invoices, activity and webhooks. Dark by default with a light theme, ⌘K palette, reduced-motion support. New:
+  operations, the image catalog, tenants and keys, billing with invoices, activity and webhooks. A central VM's sheet has its live
+  screen with Control (clicks, scrolling and keys, macOS guests), snapshots and clones, and a command runner. Dark by default with a light theme, ⌘K palette, reduced-motion support. New:
   `POST /v1/vms/{id}/ws-ticket` and `GET /console/ws/{ticket}` (single-use browser WebSocket tickets, since browsers cannot
   send `Authorization` on one). The old consoles stay at `/console/legacy` for one release. `/console` now redirects to
   `/console/`. Tests: `ui/e2e/run.sh` (page smoke test on a mock API) and `ui/e2e/flows.sh` (the fleet forms against a real
-  central and a simulated Mac); `scripts/e2e/agent-central-api.sh` now checks the Studio routes, and
+  central and a simulated Mac) and `ui/e2e/run.sh vmtools` (a VM's screen, snapshots, commands and the catalog); `scripts/e2e/agent-central-api.sh` now checks the Studio routes, and
   `scripts/e2e/agent-central-vms.sh` clones a stopped VM through central. See docs/ui.md.
 
 - **Egress policy for user-mode (slirp) guests.** `fluxvm_qemu_egress` allowed only loopback, so a guest on QEMU

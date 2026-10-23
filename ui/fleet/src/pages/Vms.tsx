@@ -1,13 +1,17 @@
 import { useState } from 'react';
 import { Plus } from 'lucide-react';
-import { Button, Card, EmptyState, Field, Hero, Pill, Segmented, Sheet, Skeleton, ago, api, fmtMiB, usePoll } from '@fluxvm/ui-core';
+import { Button, Card, EmptyState, Field, Hero, Pill, Segmented, Sheet, Skeleton, Tabs, ago, api, fmtMiB, usePoll } from '@fluxvm/ui-core';
 import type { Ctx } from '../App';
 import { useAct } from '../lib/act';
 import { rowsOf } from '../lib/generic';
+import { VmRun } from './VmRun';
+import { VmScreen } from './VmScreen';
+import { VmSnapshots } from './VmSnapshots';
 import { type FleetNode, type FleetVm, type LaunchDraft, launchProblem, launchRequest, powerActions, vmKey, vmState, vmTone } from '../lib/fleet';
 
 type Row = Record<string, unknown>;
 type Filter = 'all' | 'running' | 'other';
+type Tab = 'overview' | 'screen' | 'snapshots' | 'run';
 const cap = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
 const enc = encodeURIComponent;
 
@@ -24,6 +28,7 @@ export function VmsPage({ role, notify }: Ctx) {
   const [filter, setFilter] = useState<Filter>('all');
   const [sel, setSel] = useState<FleetVm | null>(null);
   const [logs, setLogs] = useState('');
+  const [tab, setTab] = useState<Tab>('overview');
   const [launch, setLaunch] = useState(false);
   const [touched, setTouched] = useState(false);
   const [d, setD] = useState<LaunchDraft>({ name: '', image: '', guest: 'macos', vcpus: '4', memoryGib: '8', node: '', ttl: '', networks: [] });
@@ -44,6 +49,7 @@ export function VmsPage({ role, notify }: Ctx) {
   };
   const open = async (v: FleetVm) => {
     setSel(v);
+    setTab('overview');
     setLogs('');
     try { setLogs(await api.get<string>(`/fleet/vms/${enc(v.node)}/${enc(v.id)}/logs`, { text: true })); } catch (e) { setLogs((e as Error).message); }
   };
@@ -81,12 +87,30 @@ export function VmsPage({ role, notify }: Ctx) {
         {sel ? (
           <>
             <p className="fx-muted">on {sel.node} · <span className="fx-mono">{sel.id.slice(0, 8)}</span></p>
-            <div className="fx-actions">
-              {powerActions(vmState(sel)).map((a) => <Button key={a} busy={busy === a + vmKey(sel)} onClick={() => power(sel, a)}>{cap(a)}</Button>)}
-              <Button variant="danger" onClick={() => (setDel(sel), setSel(null))}>Delete</Button>
-            </div>
-            <h3>Console log</h3>
-            {logs ? <pre className="fx-code">{logs.slice(-6000)}</pre> : <Skeleton h={80} />}
+            {(() => {
+              const state = vmState(sel);
+              const live = state === 'running';
+              const tabs: { value: Tab; label: string }[] = [{ value: 'overview', label: 'Overview' }, ...(live || state === 'paused' ? [{ value: 'screen' as const, label: 'Screen' }] : []), { value: 'snapshots', label: 'Snapshots' }, ...(live ? [{ value: 'run' as const, label: 'Run' }] : [])];
+              const here = tabs.some((t) => t.value === tab) ? tab : 'overview';
+              const macos = sel.request?.apple?.guest_os === 'macos';
+              return (
+                <>
+                  <Tabs<Tab> value={here} onChange={setTab} tabs={tabs} />
+                  {here === 'overview' ? (
+                    <>
+                      <div className="fx-actions">
+                        {powerActions(state).map((a) => <Button key={a} busy={busy === a + vmKey(sel)} onClick={() => power(sel, a)}>{cap(a)}</Button>)}
+                        <Button variant="danger" onClick={() => (setDel(sel), setSel(null))}>Delete</Button>
+                      </div>
+                      <h3>Console log</h3>
+                      {logs ? <pre className="fx-code">{logs.slice(-6000)}</pre> : <Skeleton h={80} />}
+                    </>
+                  ) : here === 'screen' ? <VmScreen key={vmKey(sel)} vm={sel} canControl={macos && live} notify={notify} />
+                    : here === 'snapshots' ? <VmSnapshots key={vmKey(sel)} vm={sel} stopped={state === 'stopped'} macos={macos} taken={all.map((x) => x.name)} notify={notify} onCloned={() => void list.refresh()} />
+                    : <VmRun key={vmKey(sel)} vm={sel} />}
+                </>
+              );
+            })()}
           </>
         ) : null}
       </Sheet>
