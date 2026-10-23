@@ -12,13 +12,14 @@ const REPO = 'https://github.com/zyvorai/zyvor-fluxvm';
 
 // Every figure on this page was measured on one Apple M4 mini (16 GB, macOS 27.2) with a debian-13 guest.
 // Sources: examples/agent-sandbox-demo/README.md (timings, two runs), docs/agent-density.md (memory, 21 sandboxes),
-// docs/install-macos.md (install and MCP; current package 0.4.11).
+// docs/install-macos.md (install and MCP). The timings and the 0.4.11 handshake were measured on those packages; the tool count was
+// re-counted on a 0.4.13 build (66 with --allow-write); the macOS package is now 0.4.14.
 type Stat = {value: string; label: string; note: string};
 const PROOF: Stat[] = [
   {value: '4.5 s', label: 'A fresh offline sandbox', note: 'cold boot, no network card; a default sandbox claiming a warm slot takes about 1 s'},
   {value: '~4 s', label: 'Fork into 4 running copies', note: 'they share the parent’s memory snapshot'},
   {value: '0.3 s', label: 'Four fixes tried and tested', note: 'in parallel, one in each copy'},
-  {value: '66', label: 'MCP tools in 0.4.11', note: 'VMs, sandboxes, sessions, speculate/changesets; read-only unless you allow writes'},
+  {value: '66', label: 'MCP tools', note: 'counted on 0.4.11 and 0.4.13 builds; VMs, sandboxes, sessions, speculate/changesets; read-only unless you allow writes'},
 ];
 
 const LOOP = [
@@ -61,7 +62,7 @@ const MCP_STEPS = [
   '#   vm_fork {"vm": id, "count": 4}   ...   vm_delete',
 ].join('\n');
 
-// Install variants. The one-liner and Homebrew install the published 0.4.11 package (sessions + host_gpu).
+// Install variants. The one-liner and Homebrew install the published package (0.4.14 on macOS; sessions + host_gpu).
 // See docs/install.md.
 const INSTALL_TABS = [
   {
@@ -76,7 +77,7 @@ const INSTALL_TABS = [
       '# it verifies the SHA-256, needs no sudo, writes under ~/.local;',
       '# --dry-run prints the plan, --version X pins or rolls back, --uninstall reverses it.',
       '',
-      'fluxctl --version   # 0.4.11',
+      'fluxctl --version   # 0.4.14',
       'fluxctl agent --help',
     ].join('\n'),
   },
@@ -457,7 +458,7 @@ function Install() {
             <p className={styles.lead}>
               The installer downloads the release package for your machine, verifies its SHA-256 and links the binaries
               into <code>~/.local/bin</code>. Run it again to upgrade; <code>--version</code> rolls back. Current is{' '}
-              <strong>0.4.11</strong>: <code>fluxctl agent</code>, sessions and <code>--host-gpu</code> are in the
+              <strong>0.4.14</strong> on macOS: <code>fluxctl agent</code>, sessions and <code>--host-gpu</code> are in the
               package (<code>fluxctl agent --help</code> confirms it).
             </p>
           </div>
@@ -484,7 +485,7 @@ function Install() {
           </div>
           <p className={clsx(styles.footnote, 'text--center')}>
             macOS 14+ on Apple silicon; Linux x86_64 from the same installer when the release has that asset
-            (0.4.11 builds it in ubuntu:22.04).{' '}
+            (check the release page; the package is built in ubuntu:22.04).{' '}
             <Link to="/docs/install">Every option, upgrade and uninstall</Link> ·{' '}
             <Link to="/docs/install-macos">Homebrew notes</Link>
           </p>

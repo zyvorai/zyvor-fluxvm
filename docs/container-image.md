@@ -2,11 +2,11 @@
 
 `ghcr.io/zyvorai/fluxvm` is one multi-arch (amd64, arm64) image that carries every FluxVM binary. Which one runs is chosen
 by the container's `command:` (`fluxvm serve`, `fluxvm-kube`, `fluxvm-microvm controller|node-agent`). The Kubernetes
-manifests that use it are in [deploy/k8s](../deploy/k8s/README.md).
+manifests that use it are in [deploy/k8s](https://github.com/zyvorai/zyvor-fluxvm/blob/main/deploy/k8s/README.md).
 
 ## How it is built
 
-The image is **assembled, not compiled**. [`Dockerfile`](../Dockerfile) copies the staged tree that the Linux release
+The image is **assembled, not compiled**. [`Dockerfile`](https://github.com/zyvorai/zyvor-fluxvm/blob/main/Dockerfile) copies the staged tree that the Linux release
 already built (`bin/`, `lib/bpf/`, `share/` of `fluxvm-<ver>-linux-<arch>.tar.gz`, see [linux-package.md](linux-package.md)) and
 installs the runtime packages on top. Two consequences:
 
