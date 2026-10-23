@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **Studio: stacks and ports on the node Machines page.** A strip per `fluxvm.stack` with Start all / Stop all, and a Ports column
+  (`8080→80`). These were the two things the legacy node console had that Studio lacked.
 - **Studio: team members.** A tenant's Members page (add by work email, change a role, remove or leave) and a Members button per tenant for the
   operator. This was the last page of the previous fleet console without a Studio equivalent.
 
