@@ -8,25 +8,24 @@
 //! Not supported: `build`, Compose, bind mounts, Docker networks.
 
 use axum::{
-    Router,
+    Json, Router,
     body::Body,
     extract::{Path, Query, Request, State},
     http::{HeaderMap, HeaderValue, StatusCode, Uri, header},
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{delete, get, post},
-    Json,
 };
 use fluxvm_core::model::{VmRecord, VmStatus};
 use fluxvm_guest_protocol::{AgentResponse, ExecProcess};
 use fluxvm_oci_init::{config::ExitPolicy, supervise::RestartPolicy};
 use fluxvm_scheduler::{
-    oci_images::OciImageEntry,
-    oci_sandbox::{OciSandboxSpec, OCI_IMAGE_LABEL},
     SandboxCreateRequest, VmManager,
+    oci_images::OciImageEntry,
+    oci_sandbox::{OCI_IMAGE_LABEL, OciSandboxSpec},
 };
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::{
     collections::BTreeMap,
     path::{Path as FsPath, PathBuf},
@@ -178,22 +177,10 @@ fn strip_version_prefix(path: &str) -> Option<String> {
 
 fn docker_headers() -> HeaderMap {
     let mut h = HeaderMap::new();
-    h.insert(
-        "Api-Version",
-        HeaderValue::from_static(API_VERSION),
-    );
-    h.insert(
-        "Docker-Experimental",
-        HeaderValue::from_static("false"),
-    );
-    h.insert(
-        "Ostype",
-        HeaderValue::from_static("linux"),
-    );
-    h.insert(
-        "Server",
-        HeaderValue::from_static("FluxVM"),
-    );
+    h.insert("Api-Version", HeaderValue::from_static(API_VERSION));
+    h.insert("Docker-Experimental", HeaderValue::from_static("false"));
+    h.insert("Ostype", HeaderValue::from_static("linux"));
+    h.insert("Server", HeaderValue::from_static("FluxVM"));
     h
 }
 
@@ -374,15 +361,16 @@ fn map_create_request(
     let expose = exposed_ports_to_u16(&body.exposed_ports)?;
     let entrypoint = parse_string_or_vec(body.entrypoint);
     let memory_mib = if body.host_config.memory > 0 {
-        Some((body.host_config.memory as u64).div_ceil(1024 * 1024).max(512))
+        Some(
+            (body.host_config.memory as u64)
+                .div_ceil(1024 * 1024)
+                .max(512),
+        )
     } else {
         None
     };
     let vcpus = if body.host_config.nano_cpus > 0 {
-        Some(
-            ((body.host_config.nano_cpus as u64).div_ceil(1_000_000_000) as u8)
-                .max(1),
-        )
+        Some(((body.host_config.nano_cpus as u64).div_ceil(1_000_000_000) as u8).max(1))
     } else {
         None
     };
@@ -425,9 +413,8 @@ fn map_create_request(
         hosts: Vec::new(),
     };
     let _ = body.labels; // OCI create path sets its own labels; user labels via PATCH later
-    let mut req: SandboxCreateRequest = serde_json::from_value(json!({})).map_err(|e| {
-        DockerError::bad(format!("internal sandbox request defaults: {e}"))
-    })?;
+    let mut req: SandboxCreateRequest = serde_json::from_value(json!({}))
+        .map_err(|e| DockerError::bad(format!("internal sandbox request defaults: {e}")))?;
     req.name = name;
     req.oci = Some(oci);
     req.vcpus = vcpus;
@@ -592,7 +579,12 @@ async fn containers_exec_create(
     Path(id): Path<String>,
     Json(body): Json<ExecCreateBody>,
 ) -> DockerResult<impl IntoResponse> {
-    let _ = (body.attach_stdin, body.attach_stdout, body.attach_stderr, body.tty);
+    let _ = (
+        body.attach_stdin,
+        body.attach_stdout,
+        body.attach_stderr,
+        body.tty,
+    );
     if body.cmd.is_empty() {
         return Err(DockerError::bad("Cmd is required"));
     }
@@ -740,7 +732,9 @@ async fn images_create(
     State(st): State<DockerState>,
     Query(q): Query<ImageCreateQuery>,
 ) -> DockerResult<Response> {
-    let image = q.from_image.ok_or_else(|| DockerError::bad("fromImage is required"))?;
+    let image = q
+        .from_image
+        .ok_or_else(|| DockerError::bad("fromImage is required"))?;
     let reference = match q.tag.as_deref() {
         Some(t) if !t.is_empty() && !image.contains(':') && !image.contains('@') => {
             format!("{image}:{t}")
@@ -748,10 +742,7 @@ async fn images_create(
         _ => image,
     };
     let platform = q.platform.filter(|p| !p.is_empty());
-    let entry = st
-        .manager
-        .oci_pull(&reference, platform.as_deref())
-        .await?;
+    let entry = st.manager.oci_pull(&reference, platform.as_deref()).await?;
     let lines = [
         json!({"status": format!("Pulling from {reference}")}),
         json!({"status": format!("Digest: {}", entry.manifest_digest)}),
@@ -1169,7 +1160,9 @@ async fn run_exec(
             stderr,
             ..
         } => Ok((stdout, stderr, exit_code)),
-        other => Err(DockerError::bad(format!("unexpected agent response: {other:?}"))),
+        other => Err(DockerError::bad(format!(
+            "unexpected agent response: {other:?}"
+        ))),
     }
 }
 
