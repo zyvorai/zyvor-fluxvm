@@ -1,7 +1,7 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
 // SPDX-License-Identifier: Apache-2.0
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 use anyhow::Context;
 use anyhow::Result;
 
@@ -21,12 +21,17 @@ pub fn apply_minimal() -> Result<()> {
             }
             libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0);
         }
+        #[cfg(target_arch = "x86_64")]
         apply_seccomp_filter().context("installing seccomp-bpf filter")?;
+        // The allowlist names x86_64 syscalls (open, stat, poll, fork, arch_prctl, ...) and TargetArch::x86_64. This
+        // hypervisor only runs VMs on x86_64 (see kvm.rs); elsewhere it just has to compile, so no filter is installed.
+        #[cfg(not(target_arch = "x86_64"))]
+        tracing::warn!("seccomp allowlist is only defined for x86_64; no filter installed on this architecture");
     }
     Ok(())
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 fn apply_seccomp_filter() -> Result<()> {
     use seccompiler::{apply_filter, BpfProgram, SeccompAction, SeccompFilter, TargetArch};
     use std::collections::BTreeMap;
