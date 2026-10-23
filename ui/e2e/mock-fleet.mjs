@@ -31,6 +31,13 @@ const png = (() => {
 // Mutating calls the page made, for e2e/vmtools.cjs to assert on (GET /__calls).
 const calls = [];
 const images = [{ name: 'macos-14', display_name: 'macOS Sonoma', image: '/images/macos14.img', guest_os: 'macos', vcpus: 4, memory_mib: 8192, disk_size_gib: 80 }, { name: 'ubuntu', display_name: 'Ubuntu 24.04', image: '/images/ubuntu.img', guest_os: 'linux', vcpus: 2, memory_mib: 4096 }];
+const members = {
+  me: [
+    { email: 'ops-lead@acme.example', role: 'owner', added_at: ago(9e8), added_by: 'operator', last_sign_in: ago(3.6e6) },
+    { email: 'dev@acme.example', role: 'member', added_at: ago(5e8), added_by: 'ops-lead@acme.example', last_sign_in: null },
+  ],
+  acme: [{ email: 'ops-lead@acme.example', role: 'owner', added_at: ago(9e8), added_by: 'operator', last_sign_in: ago(3.6e6) }],
+};
 const snaps = [{ name: 'clean-install', created_at: ago(3.6e6), size_bytes: 21474836480, memory: false }];
 const body = (req) => new Promise((ok) => { let d = ''; req.on('data', (c) => (d += c)); req.on('end', () => ok(d ? JSON.parse(d) : {})); });
 const j = (res, o, c = 200) => { res.writeHead(c, { 'content-type': 'application/json' }); res.end(JSON.stringify(o)); };
@@ -62,6 +69,19 @@ http.createServer(async (req, res) => {
     if (p === '/fleet/vms') return j(res, { items: vms, unreachable_nodes: [{ node: 'mac-mini-3' }] });
     if (p === '/fleet/leases') return j(res, { items: [{ id: 'l1', node: 'mac-studio-1', tenant: 'acme', state: 'active', started_at: ago(4e7), min_end: new Date(Date.now() + 4.6e7).toISOString() }] });
     if (p === '/fleet/tenants') return j(res, { items: [{ id: 'acme', display_name: 'Acme Inc.', quota: { max_leased_hosts: 2, max_vms: 20 } }, { id: 'globex', display_name: 'Globex', quota: {} }] });
+    const mem = p.match(/^\/fleet\/tenants\/([^/]+)\/members(?:\/(.+))?$/);
+    if (mem) {
+      const list = (members[mem[1]] ||= []);
+      const email = mem[2] && decodeURIComponent(mem[2]);
+      if (req.method === 'GET') return j(res, { items: list, sso: true });
+      const b = await body(req);
+      calls.push({ method: req.method, path: `members/${mem[1]}${email ? '/' + email : ''}`, body: b });
+      if (req.method === 'POST') { const m = { email: b.email, role: b.role || 'member', added_at: ago(0), added_by: 'you', last_sign_in: null }; list.push(m); return j(res, { member: m }, 201); }
+      const at = list.findIndex((x) => x.email === email);
+      if (at < 0) return j(res, { error: 'no such member' }, 404);
+      if (req.method === 'PATCH') { list[at].role = b.role; return j(res, { member: list[at] }); }
+      if (req.method === 'DELETE') { list.splice(at, 1); return j(res, { ok: true }); }
+    }
     const imgRoute = p.match(/^\/fleet\/images\/([^/]+)$/);
     if (imgRoute && req.method === 'PUT') { const b = await body(req); calls.push({ method: 'PUT', path: `images/${imgRoute[1]}`, body: b }); const at = images.findIndex((x) => x.name === imgRoute[1]); const row = { name: imgRoute[1], ...b }; if (at >= 0) images[at] = row; else images.push(row); return j(res, row); }
     if (imgRoute && req.method === 'DELETE') { calls.push({ method: 'DELETE', path: `images/${imgRoute[1]}`, body: {} }); images.splice(0, images.length, ...images.filter((x) => x.name !== imgRoute[1])); return j(res, { ok: true }); }

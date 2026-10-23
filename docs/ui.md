@@ -21,7 +21,7 @@ Access & audit (quota, events, an API explorer).
 
 **Fleet central:** Overview, Hosts (cordon, drain, scrub, lease), Virtual machines (launch, power, logs, delete),
 Networks, Volumes, Warm pools, Tunnels, Images (the catalog), Enrollment (join tokens, node credentials), Operations, Tenants (quota, token
-rotation) or API keys, Billing & usage (usage, budgets, invoices when there are any), Activity (audit log, alerts,
+rotation, and each tenant's members) or API keys and Members (a tenant's team), Billing & usage (usage, budgets, invoices when there are any), Activity (audit log, alerts,
 webhooks).
 
 A VM's sheet on central has an Overview (power, console log), a **Screen** (the display, refreshed every 2 seconds; for a

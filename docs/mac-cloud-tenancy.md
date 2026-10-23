@@ -35,7 +35,7 @@ keeps it in the tab's session storage and sends it only to this central.
 > **Studio and the previous console.** The page list below was written for the previous console, which stays at
 > `/console/legacy` for one release. Studio covers the same VM tools (screen and Control, snapshots and clones, commands),
 > the image catalog, hosts (cordon, drain, scrub, lease), networks, volumes, warm pools, tunnels, enrollment, operations,
-> tenants and keys, billing and activity. Page names differ: for example Snapshots, Screen and Run are tabs in a VM's sheet.
+> tenants and keys, members, billing and activity. Page names differ: for example Snapshots, Screen and Run are tabs in a VM's sheet.
 
 With a **tenant token** you get:
 - **Overview**: a getting-started checklist (lease a Mac, launch a VM, connect VMs), quota meters, your Macs and recent VMs.

@@ -5,6 +5,7 @@ import type { Ctx } from '../App';
 import { useAct } from '../lib/act';
 import { rowsOf } from '../lib/generic';
 import { tenantIdProblem } from '../lib/fleet';
+import { MemberList } from './Members';
 import { SecretSheet } from './Secret';
 
 const enc = encodeURIComponent;
@@ -20,6 +21,7 @@ export function TenantsPage({ notify }: Ctx) {
   const [quota, setQuota] = useState<Record<string, string>>({ max_leased_hosts: '2' });
   const [edit, setEdit] = useState<Row | null>(null);
   const [del, setDel] = useState<string | null>(null);
+  const [people, setPeople] = useState<string | null>(null);
   const [secret, setSecret] = useState<{ title: string; token: string } | null>(null);
   const rows = list.data ?? [];
   const body = (q: Record<string, string>) => Object.fromEntries(Object.entries(q).filter(([, v]) => v.trim() !== '').map(([k, v]) => [k, Number(v)]));
@@ -44,6 +46,7 @@ export function TenantsPage({ notify }: Ctx) {
                   <td className="fx-muted">{String(t.display_name ?? '—')}</td>
                   <td className="fx-muted">{QUOTA.map(([k, l]) => (q[k] != null ? `${l}: ${String(q[k])}` : null)).filter(Boolean).join(' · ') || 'no limits'}</td>
                   <td><span className="fx-row-actions">
+                    <Button size="sm" variant="ghost" aria-label={`Members of ${tid}`} onClick={() => setPeople(tid)}>Members</Button>
                     <Button size="sm" variant="ghost" onClick={() => setEdit({ id: tid, q: Object.fromEntries(QUOTA.map(([k]) => [k, q[k] != null ? String(q[k]) : ''])) })}>Quota</Button>
                     <Button size="sm" variant="ghost" aria-label={`Rotate token for ${tid}`} title="Rotate token" busy={busy === 'rot' + tid} onClick={() => run('rot' + tid, async () => { const r = await api.post<{ token: string }>(`/fleet/tenants/${enc(tid)}/rotate-token`); setSecret({ title: `New token for ${tid}`, token: r.token }); })}><RefreshCw size={14} /></Button>
                     <Button size="sm" variant="ghost" aria-label={`Delete ${tid}`} onClick={() => setDel(tid)}><Trash2 size={14} /></Button>
@@ -68,6 +71,9 @@ export function TenantsPage({ notify }: Ctx) {
       <Sheet open={!!edit} title={`Quota for ${String(edit?.id ?? '')}`} onClose={() => setEdit(null)}>
         {edit ? quotaFields(edit.q as Record<string, string>, (q) => setEdit({ ...edit, q })) : null}
         <div className="fx-actions"><Button variant="primary" busy={busy === 'quota'} disabled={!!edit && quotaBad(edit.q as Record<string, string>)} onClick={async () => { if (edit && (await run('quota', () => api.patch(`/fleet/tenants/${enc(String(edit.id))}`, { quota: body(edit.q as Record<string, string>) }), 'Quota saved', list.refresh))) setEdit(null); }}>Save</Button><Button onClick={() => setEdit(null)}>Cancel</Button></div>
+      </Sheet>
+      <Sheet open={!!people} title={`Members of ${people ?? ''}`} onClose={() => setPeople(null)}>
+        {people ? <MemberList key={people} owner={people} notify={notify} compact /> : null}
       </Sheet>
       <Sheet open={!!del} title={`Delete ${del ?? ''}`} onClose={() => setDel(null)}>
         <p>Delete tenant <b>{del}</b>? Its token and keys stop working.</p>
