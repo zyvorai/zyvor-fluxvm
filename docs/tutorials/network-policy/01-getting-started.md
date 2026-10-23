@@ -4,7 +4,7 @@
 take a first observe glance at identities and network status.
 
 **You will use:** `fluxctl identity list`, `fluxctl observe`, REST
-`/v1/network/status`.
+`/v1/network/observe` and `/v1/vms/{id}/network/status`.
 
 ## 1. Enable the dataplane
 

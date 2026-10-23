@@ -47,8 +47,8 @@ a Mac.
 If `agent` is missing, upgrade (`curl … \| bash` or `brew upgrade zyvorai/tap/fluxvm`) or build from source
 ([install.md](../install.md)).
 
-Linux hosts use the same installer when the release has a `linux-x86_64` asset (0.4.11 builds that package in
-`ubuntu:22.04`); otherwise `cargo build --release -p fluxctl`. Full macOS notes: [install-macos.md](../install-macos.md).
+Linux hosts use the same installer when the release has a `linux-x86_64` asset (check the release page: the package is
+built in `ubuntu:22.04`, and not every release has had one attached); otherwise `cargo build --release -p fluxctl`. Full macOS notes: [install-macos.md](../install-macos.md).
 
 ## 60 seconds
 
