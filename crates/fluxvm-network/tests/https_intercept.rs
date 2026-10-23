@@ -607,6 +607,9 @@ async fn large_and_chunked_request_bodies_are_streamed_through() {
     req.extend_from_slice(&big);
     let mut tls = tunnel(&f, "localhost").await.unwrap();
     tls.write_all(&req).await.unwrap();
+    // write_all can return with the last TLS records still in rustls' buffer (the socket was full); without a flush
+    // the proxy waits for the missing tail of the body until the read below times out.
+    tls.flush().await.unwrap();
     let mut out = Vec::new();
     let _ = tokio::time::timeout(STEP, tls.read_to_end(&mut out)).await;
     let text = String::from_utf8_lossy(&out);
