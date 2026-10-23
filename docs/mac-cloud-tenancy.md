@@ -33,10 +33,9 @@ This is an engineering control, not legal advice. The rules are defaults in `GET
 keeps it in the tab's session storage and sends it only to this central.
 
 > **Studio and the previous console.** The page list below was written for the previous console, which stays at
-> `/console/legacy` for one release. Studio covers hosts (cordon, drain, scrub, lease), VMs (launch, power, logs, delete),
-> networks, volumes, warm pools, tunnels, enrollment, operations, tenants and keys, billing and activity. It does **not**
-> yet have a VM's live screen and Control view, snapshots and clones, running a command in a VM, or the image catalog
-> editor; use `/console/legacy` or the API for those.
+> `/console/legacy` for one release. Studio covers the same VM tools (screen and Control, snapshots and clones, commands),
+> the image catalog, hosts (cordon, drain, scrub, lease), networks, volumes, warm pools, tunnels, enrollment, operations,
+> tenants and keys, billing and activity. Page names differ: for example Snapshots, Screen and Run are tabs in a VM's sheet.
 
 With a **tenant token** you get:
 - **Overview**: a getting-started checklist (lease a Mac, launch a VM, connect VMs), quota meters, your Macs and recent VMs.

@@ -24,10 +24,10 @@ jobs:
       run: npm --prefix ui test
     - name: Build
       run: npm --prefix ui run build
-    - name: Smoke test every page (both apps, both themes, phone and desktop)
+    - name: Smoke test every page (both apps, both themes, phone and desktop), then a VM's screen, snapshots, commands and the image catalog
       run: |
         if command -v google-chrome >/dev/null 2>&1 || command -v google-chrome-stable >/dev/null 2>&1; then
-          bash ui/e2e/run.sh node && bash ui/e2e/run.sh fleet
+          bash ui/e2e/run.sh node && bash ui/e2e/run.sh fleet && bash ui/e2e/run.sh vmtools
         else
           echo "::notice::no Chrome on this runner; skipping the page smoke test"
         fi

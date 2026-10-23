@@ -20,13 +20,15 @@ Volumes, Branches, Backups, Host (memory, pressure, topology, GPU passthrough on
 Access & audit (quota, events, an API explorer).
 
 **Fleet central:** Overview, Hosts (cordon, drain, scrub, lease), Virtual machines (launch, power, logs, delete),
-Networks, Volumes, Warm pools, Tunnels, Enrollment (join tokens, node credentials), Operations, Tenants (quota, token
+Networks, Volumes, Warm pools, Tunnels, Images (the catalog), Enrollment (join tokens, node credentials), Operations, Tenants (quota, token
 rotation) or API keys, Billing & usage (usage, budgets, invoices when there are any), Activity (audit log, alerts,
 webhooks).
 
-**Not in Studio yet** (use `/console/legacy` or the API): a VM's live screen and Control view, snapshots and clones, running
-a command in a VM, and the image catalog editor on central. Leases and warm-pool fill need a Mac node; on a Linux node
-they are refused by design.
+A VM's sheet on central has an Overview (power, console log), a **Screen** (the display, refreshed every 2 seconds; for a
+macOS guest, **Control** sends your clicks, scrolling and keys to it, and pasted text and Return, Esc, Tab and ⌘ Space
+buttons cover Setup Assistant), **Snapshots** (take with or without memory, restore, delete, and clone a VM from a snapshot
+or from a stopped VM's disk) and **Run** (a command through the guest agent, 60-second limit). Operators edit the image
+catalog on the **Images** page. Leases and warm-pool fill need a Mac node; on a Linux node they are refused by design.
 
 Press **⌘K** (Ctrl+K) from anywhere for every page and every machine. Dark is the default; the sun/moon button switches and
 the choice is remembered. Motion honours `prefers-reduced-motion`.
@@ -67,7 +69,7 @@ The previous consoles remain at `/console/legacy` for one release.
 
 `ui/e2e/run.sh node|fleet` (or `npm run e2e` in `ui/`) starts a mock API, drives every page in Chrome through
 playwright-core at 390 px and 1280 px in both themes, and fails on console errors, failed requests, horizontal
-overflow, controls with no accessible name and pages without exactly one `<h1>`. It covers 18 node routes and 12 fleet routes. It is a regression net, not a substitute
+overflow, controls with no accessible name and pages without exactly one `<h1>`. It covers 18 node routes and 13 fleet routes. `ui/e2e/run.sh vmtools` (`npm run e2e:vmtools`) opens a VM's sheet and the Images page in Chrome against the same mock and checks the calls the page makes: the pixel a click lands on, merged keystrokes, snapshot, clone and command requests, and the catalog's PUT and DELETE. It is a regression net, not a substitute
 for trying the UI against a real daemon.
 
 ### Fleet form flows

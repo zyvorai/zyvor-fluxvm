@@ -15,6 +15,7 @@
     "typecheck": "npm run typecheck -w @fluxvm/ui-node && npm run typecheck -w @fluxvm/ui-fleet",
     "test": "npm run test -w @fluxvm/ui-core && npm run test -w @fluxvm/ui-node && npm run test -w @fluxvm/ui-fleet",
     "e2e": "bash e2e/run.sh node && bash e2e/run.sh fleet",
-    "e2e:flows": "bash e2e/flows.sh"
+    "e2e:flows": "bash e2e/flows.sh",
+    "e2e:vmtools": "bash e2e/run.sh vmtools"
   }
 }
