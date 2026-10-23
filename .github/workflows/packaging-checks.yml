@@ -21,6 +21,7 @@ on:
       - 'scripts/build-ebpf.sh'
       - 'scripts/e2e/**'
       - 'crates/fluxvm-agent/**'
+      - 'ui/**'
       - 'scripts/test-release-e2e.sh'
       - 'scripts/deploy-remote.sh'
       - 'Dockerfile'
@@ -44,6 +45,7 @@ on:
       - 'scripts/build-ebpf.sh'
       - 'scripts/e2e/**'
       - 'crates/fluxvm-agent/**'
+      - 'ui/**'
       - 'scripts/test-release-e2e.sh'
       - 'scripts/deploy-remote.sh'
       - 'Dockerfile'
@@ -197,3 +199,12 @@ jobs:
       - name: Enrollment security (58 checks), real central and nodes, the central API (82 checks), HA with a real Redis (21 checks), tunnels through central
         working-directory: fluxvm
         run: scripts/test-release-e2e.sh --suite enroll-invariants --suite enroll-security --suite central-node --suite agent-central-api --suite agent-central-ha --suite agent-tunnel
+      # The suites above left a release fluxvm-agent in target/. The Studio fleet forms run against it with the embedded bundle.
+      - name: Studio fleet forms (join token, lease, billing) against a real central and a simulated Mac
+        working-directory: fluxvm
+        run: |
+          if command -v google-chrome >/dev/null 2>&1 || command -v google-chrome-stable >/dev/null 2>&1; then
+            BIN="$PWD/target/release/fluxvm-agent" bash ui/e2e/flows.sh
+          else
+            echo "::notice::no Chrome on this runner; skipping the Studio form flows"
+          fi

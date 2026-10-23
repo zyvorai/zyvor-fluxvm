@@ -24,6 +24,10 @@ Networks, Volumes, Warm pools, Tunnels, Enrollment (join tokens, node credential
 rotation) or API keys, Billing & usage (usage, budgets, invoices when there are any), Activity (audit log, alerts,
 webhooks).
 
+**Not in Studio yet** (use `/console/legacy` or the API): a VM's live screen and Control view, snapshots and clones, running
+a command in a VM, and the image catalog editor on central. Leases and warm-pool fill need a Mac node; on a Linux node
+they are refused by design.
+
 Press **⌘K** (Ctrl+K) from anywhere for every page and every machine. Dark is the default; the sun/moon button switches and
 the choice is remembered. Motion honours `prefers-reduced-motion`.
 
