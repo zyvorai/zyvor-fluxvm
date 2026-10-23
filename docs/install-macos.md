@@ -145,7 +145,7 @@ Run it again after an upgrade that adds commands.
 
 ## Optional: the fleet console
 
-The web console (`/console`) is served by `fluxvm-agent central`, the multi-Mac control plane. The Homebrew package
+The web console ([FluxVM Studio](ui.md), at `/console/`) is served by `fluxvm-agent central`, the multi-Mac control plane. The Homebrew package
 installs `fluxd`, `fluxctl` and friends but **not** `fluxvm-agent`, so build it from a checkout:
 
 ```bash
@@ -160,7 +160,7 @@ target/release/fluxvm-agent central --listen 127.0.0.1:7799 --state-dir ./centra
 # first start prints:  token: fvo_...   (also saved in ./central-state/operator-token, mode 0600)
 TOKEN=$(cat ./central-state/operator-token)
 target/release/fluxvm-agent sim-node --name studio-1 --central http://127.0.0.1:7799 --token "$TOKEN" &
-open http://127.0.0.1:7799/console              # paste the token into the sign-in field
+open http://127.0.0.1:7799/console/             # paste the token into the sign-in field
 ```
 
 With no `--token`, central makes a random operator token on its first start and keeps it, so there is always one
