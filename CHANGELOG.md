@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 0.4.14 (2026-10-23)
+
+- **Linux release build.** The Linux package job now builds the eBPF objects with clang 18 (the Ubuntu 22.04 container's clang 14 could not
+  build `fluxvm_qemu_egress` or the service XDP objects), trusts the workspace for git, and runs on runners with Docker. The verifier
+  complexity budget for `fluxvm_tc` is 650,000 instructions (65% of the limit; the VM-edge program uses 548,638).
 - **Removed the previous consoles.** `/console/legacy` and `/console/app.js` are gone from the node daemon and from fleet central (and the
   embedded `console.html`/`fleet_console.html` and scripts). Studio, at `/console/`, has everything they had.
 - **Studio: stacks and ports on the node Machines page.** A strip per `fluxvm.stack` with Start all / Stop all, and a Ports column
