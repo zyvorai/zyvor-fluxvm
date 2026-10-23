@@ -9,9 +9,10 @@ import styles from './mac.module.css';
 
 type Area = {title: string; body: string; to: string; tag: string};
 
-// Status tags say what each area has actually been run against. Nothing here has been used on a live daemon yet.
+// Status tags say what each area has actually been run against. The node pages have only run against a mock API. The fleet VM tools
+// (screen, snapshots, clones, commands) and forms have also run against a real central: see docs/ui.md, "VM tools on a real guest".
 const NODE: Area[] = [
-  {title: 'Machines', body: 'A create wizard, then per-machine console, guest exec and files, network and egress policy, storage, snapshots and backups, and migration.', to: '/docs/ui', tag: 'Built; run against a mock API'},
+  {title: 'Machines', body: 'A create wizard, then per-machine console, guest exec and files, network and egress policy, storage, snapshots and backups, and migration. VMs that share a stack get Start all and Stop all, and published ports show in the list.', to: '/docs/ui', tag: 'Built; run against a mock API'},
   {title: 'Sandboxes and agents', body: 'Disposable sandboxes with their warm pool, and agent sessions with approvals, checkpoints and a terminal.', to: '/docs/agent-sessions', tag: 'Built; run against a mock API'},
   {title: 'Network policy', body: 'Decide what a user-mode guest may reach: presets, observe then suggest then apply, and the node default.', to: '/docs/egress-policy', tag: 'Built; run against a mock API'},
   {title: 'Images and pools', body: 'The checksum-pinned catalog, machine templates, warm pools and OCI images, each with a copy-as-fluxctl button.', to: '/docs/ui', tag: 'Built; run against a mock API'},
@@ -22,7 +23,9 @@ const NODE: Area[] = [
 const FLEET: Area[] = [
   {title: 'Hosts', body: 'Cordon, drain, scrub and lease hosts, with the 24-hour minimum lease shown as it elapses.', to: '/docs/fleet-quickstart', tag: 'Built; run against a mock API'},
   {title: 'Virtual machines', body: 'Launch from the image catalog, power, logs and delete, across every host a tenant can see.', to: '/docs/fleet-quickstart', tag: 'Built; run against a mock API'},
-  {title: 'Tenants and keys', body: 'Quotas, token rotation, and named API keys that are shown once.', to: '/docs/mac-cloud-tenancy', tag: 'Built; run against a mock API'},
+  {title: 'A machine\'s screen, snapshots and commands', body: 'Open a VM for its live screen (and, for macOS guests, Control: clicks, scrolling and keys), snapshots, clones and a command runner.', to: '/docs/ui', tag: 'Screen, snapshots, clones and commands run against a real Linux guest through a real central; Control only against a mock'},
+  {title: 'Tenants, keys and members', body: 'Quotas, token rotation, named API keys that are shown once, and a tenant\'s members: add by work email, change a role, remove.', to: '/docs/mac-cloud-tenancy', tag: 'Built; run against a mock API'},
+  {title: 'Image catalog', body: 'Operators add, edit and remove catalog images; tenants launch from them.', to: '/docs/ui', tag: 'Built; run against a mock API'},
   {title: 'Billing and activity', body: 'Usage and billing, the audit log, alerts and signed webhooks. Sign in with a token or with SSO.', to: '/docs/mac-cloud-billing', tag: 'Built; run against a mock API'},
 ];
 
