@@ -116,6 +116,17 @@ jobs:
           echo "BINDGEN_EXTRA_CLANG_ARGS_aarch64_unknown_linux_gnu=--sysroot=/ -I/usr/include/aarch64-linux-gnu" >> "$GITHUB_ENV"
       - name: System dependencies (the same as ci.yml)
         run: apt-get install -y -qq libsystemd-dev libhivex-dev clang llvm libbpf-dev linux-libc-dev
+      # The eBPF objects are bytecode, so the build container's old clang is the only thing tying them to Ubuntu 22.04.
+      # Its clang 14 cannot fully unroll fluxvm_qemu_egress's port loop and has no -bpf-stack-size, so the service
+      # objects overflow the default 512-byte stack view. scripts/build-ebpf.sh honors $CLANG.
+      - name: clang 18 for the eBPF objects (apt.llvm.org)
+        run: |
+          apt-get install -y -qq gnupg
+          curl -fsSL https://apt.llvm.org/llvm-snapshot.gpg.key | gpg --dearmor -o /usr/share/keyrings/llvm.gpg
+          echo "deb [arch=amd64 signed-by=/usr/share/keyrings/llvm.gpg] http://apt.llvm.org/jammy/ llvm-toolchain-jammy-18 main" > /etc/apt/sources.list.d/llvm.list
+          apt-get update -qq
+          apt-get install -y -qq clang-18 llvm-18
+          echo "CLANG=clang-18" >> "$GITHUB_ENV"
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: fluxvm
