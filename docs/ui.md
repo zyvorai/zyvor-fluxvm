@@ -14,12 +14,15 @@ tab's session storage and is never put in a URL.
 ## What it covers
 
 **Node:** Overview (live events), Machines (create wizard, detail with Console, Guest, Network and egress policy,
-Storage, Protect, Migration), Sandboxes, Agent sessions, Network (node default egress policy, traffic), Images (catalog,
-templates, pools, OCI), Backups, Host (memory, pressure, topology, GPU passthrough on Linux, Apple host on a Mac), and
+Storage, Protect, Migration), Sandboxes, Agent sessions, Network (virtual networks, groups, network policies, services
+with apply, flows, inspect, node default egress policy, traffic), Images (catalog, templates, pools, OCI),
+Volumes, Branches, Backups, Host (memory, pressure, topology, GPU passthrough on Linux, Apple host and the Mac pool on a Mac), and
 Access & audit (quota, events, an API explorer).
 
 **Fleet central:** Overview, Hosts (cordon, drain, scrub, lease), Virtual machines (launch, power, logs, delete),
-Networks, Tenants (quota, token rotation) or API keys, Billing & usage, Activity (audit log, alerts, webhooks).
+Networks, Volumes, Warm pools, Tunnels, Enrollment (join tokens, node credentials), Operations, Tenants (quota, token
+rotation) or API keys, Billing & usage (usage, budgets, invoices when there are any), Activity (audit log, alerts,
+webhooks).
 
 Press **⌘K** (Ctrl+K) from anywhere for every page and every machine. Dark is the default; the sun/moon button switches and
 the choice is remembered. Motion honours `prefers-reduced-motion`.
@@ -60,7 +63,7 @@ The previous consoles remain at `/console/legacy` for one release.
 
 `ui/e2e/run.sh node|fleet` (or `npm run e2e` in `ui/`) starts a mock API, drives every page in Chrome through
 playwright-core at 390 px and 1280 px in both themes, and fails on console errors, failed requests, horizontal
-overflow, controls with no accessible name and pages without exactly one `<h1>`. It is a regression net, not a substitute
+overflow, controls with no accessible name and pages without exactly one `<h1>`. It covers 18 node routes and 12 fleet routes. It is a regression net, not a substitute
 for trying the UI against a real daemon.
 
 ### Fleet form flows
