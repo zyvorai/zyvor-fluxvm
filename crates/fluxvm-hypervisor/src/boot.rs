@@ -57,7 +57,7 @@ pub fn prepare(mem: &mut GuestMemory, cfg: &VmConfig) -> Result<BootInfo> {
 }
 
 fn prepare_linux(mem: &mut GuestMemory, cfg: &VmConfig) -> Result<BootInfo> {
-    #[cfg(target_os = "linux")]
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     {
         match prepare_linux_with_loader(mem, cfg) {
             Ok(info) => return Ok(info),
@@ -116,7 +116,7 @@ fn prepare_linux_raw(mem: &mut GuestMemory, cfg: &VmConfig) -> Result<BootInfo> 
     })
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 fn prepare_linux_with_loader(mem: &mut GuestMemory, cfg: &VmConfig) -> Result<BootInfo> {
     use crate::ffi;
     use linux_loader::configurator::linux::LinuxBootConfigurator;
@@ -278,7 +278,7 @@ fn prepare_linux_with_loader(mem: &mut GuestMemory, cfg: &VmConfig) -> Result<Bo
 /// cloud-hypervisor): low RAM, an explicit system reserved window for the
 /// MP table / EBDA range, a PCI MMCONFIG reserved window, then himem.
 /// PVH struct GPAs also match FC: start_info @ 0x6000, memmap @ 0x7000.
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 fn configure_pvh_boot(
     mem: &mut GuestMemory,
     gm: &vm_memory::GuestMemoryMmap<()>,
@@ -391,7 +391,7 @@ fn configure_pvh_boot(
     })
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 fn fill_e820(params: &mut linux_loader::loader::bootparam::boot_params, mem_size: u64) {
     // Same Firecracker / cloud-hypervisor layout as configure_pvh_boot.
     const E820_RAM: u32 = 1;
