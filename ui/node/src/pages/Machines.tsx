@@ -13,6 +13,18 @@ export const actionsFor = (status: string): Op[] => {
   if (status === 'stopped' || status === 'failed') return ['start'];
   return [];
 };
+/** Published ports as the legacy console showed them: `8080→80`, `guests:` when the forward is for other guests. */
+export const portsOf = (vm: Vm): string => {
+  const fwd = ((vm.request?.network as { forwards?: { host_port: number; guest_port: number; guests?: boolean }[] } | undefined)?.forwards) ?? [];
+  return fwd.map((f) => `${f.guests ? 'guests:' : ''}${f.host_port}→${f.guest_port}`).join(' ');
+};
+
+/** VMs sharing the `fluxvm.stack` label, by stack name. */
+export const stacksOf = (vms: Vm[]): { name: string; vms: Vm[] }[] => {
+  const m = new Map<string, Vm[]>();
+  for (const v of vms) { const n = v.labels?.['fluxvm.stack']; if (n) m.set(n, [...(m.get(n) ?? []), v]); }
+  return [...m.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([name, list]) => ({ name, vms: list }));
+};
 const ICON: Record<Op, ReactNode> = { start: <Play size={14} />, stop: <Square size={14} />, restart: <RotateCw size={14} />, pause: <Pause size={14} />, resume: <Play size={14} /> };
 
 export function Machines({ vms, setVms, notify, q: initialQ }: { vms: Vm[]; setVms: (v: Vm[]) => void; notify: Notify; q: string }) {
@@ -50,6 +62,17 @@ export function Machines({ vms, setVms, notify, q: initialQ }: { vms: Vm[]; setV
     }
   };
 
+  const stackAll = async (name: string, op: 'start' | 'stop', members: Vm[]) => {
+    const want = members.filter((v) => (op === 'start' ? v.status === 'stopped' || v.status === 'failed' : v.status === 'running'));
+    setBusy(`stack:${name}${op}`);
+    let failed = 0;
+    for (const v of want) { try { await api.post(`/v1/vms/${v.id}/${op}`); } catch (e) { failed++; notify(`${v.name}: ${(e as Error).message}`, 'bad'); } }
+    notify(`Stack ${name}: ${op} requested for ${want.length - failed} of ${want.length}`, failed ? 'bad' : undefined);
+    setBusy('');
+    await list.refresh();
+  };
+  const stacks = useMemo(() => stacksOf(vms), [vms]);
+
   return (
     <>
       <Hero eyebrow="Machines" title="Every machine," accent="one glance.">
@@ -59,13 +82,24 @@ export function Machines({ vms, setVms, notify, q: initialQ }: { vms: Vm[]; setV
         <input className="fx-input" placeholder="Search name, id, IP…" value={q} onChange={(e) => setQ(e.target.value)} aria-label="Search machines" />
         <Segmented label="Filter by state" value={filter} onChange={setFilter} options={[{ value: 'all', label: 'All' }, { value: 'running', label: 'Running' }, { value: 'stopped', label: 'Stopped' }, { value: 'failed', label: 'Failed' }]} />
       </div>
+      {stacks.length ? (
+        <div className="fx-toolbar" aria-label="Stacks">
+          {stacks.map((st) => (
+            <span key={st.name} className="fx-row-actions">
+              <b>Stack <code>{st.name}</code></b> <span className="fx-muted">{st.vms.length} VM{st.vms.length === 1 ? '' : 's'}</span>
+              <Button size="sm" busy={busy === `stack:${st.name}start`} onClick={() => void stackAll(st.name, 'start', st.vms)} aria-label={`Start all in stack ${st.name}`}>Start all</Button>
+              <Button size="sm" busy={busy === `stack:${st.name}stop`} onClick={() => void stackAll(st.name, 'stop', st.vms)} aria-label={`Stop all in stack ${st.name}`}>Stop all</Button>
+            </span>
+          ))}
+        </div>
+      ) : null}
       <Card>
         {list.loading && vms.length === 0 ? <Skeleton h={160} /> : shown.length === 0 ? (
           <EmptyState title={vms.length ? 'No machines match' : 'No machines yet'} body={vms.length ? 'Try a different search or filter.' : 'Pick an image, a size and a network — your first machine is a minute away.'} action={vms.length ? undefined : <Button variant="primary" onClick={() => setCreating(true)}>Create your first machine</Button>} />
         ) : (
           <div className="fx-table-wrap">
             <table className="fx-table">
-              <thead><tr><th>Name</th><th>State</th><th>Backend</th><th>IP</th><th>Size</th><th /></tr></thead>
+              <thead><tr><th>Name</th><th>State</th><th>Backend</th><th>IP</th><th>Ports</th><th>Size</th><th /></tr></thead>
               <tbody>
                 {shown.map((vm) => (
                   <tr key={vm.id}>
@@ -73,6 +107,7 @@ export function Machines({ vms, setVms, notify, q: initialQ }: { vms: Vm[]; setV
                     <td><Pill tone={statusTone(vm.status)}>{vm.status}</Pill></td>
                     <td className="fx-muted">{vm.request?.apple?.init_config ? 'container' : vm.backend}</td>
                     <td className="fx-mono">{vm.guest_ip || '—'}</td>
+                    <td className="fx-mono">{portsOf(vm) || '—'}</td>
                     <td className="fx-muted">{vm.request ? `${vm.request.vcpus} vCPU · ${fmtMiB(vm.request.memory_mib)}` : '—'}</td>
                     <td>
                       <span className="fx-row-actions">
