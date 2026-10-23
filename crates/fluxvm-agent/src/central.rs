@@ -905,9 +905,6 @@ pub fn router_with_flush(
     let app = Router::new()
         .route("/console", get(studio::studio_root))
         .route("/console/", get(studio::studio_index))
-        // The previous console, kept for one release while Studio reaches parity.
-        .route("/console/legacy", get(console_html))
-        .route("/console/app.js", get(console_js))
         .route("/console/{*path}", get(studio::studio_file))
         .route("/fleet/ha", get(ha_rt::ha_status))
         .route("/fleet/ha/leader", get(ha_rt::ha_leader_check))
@@ -1124,36 +1121,6 @@ pub fn router_with_flush(
         ))
         .with_state(fleet.clone());
     (app, handle, RegistryFlush(fleet))
-}
-
-// ---- the fleet console: two static files, no auth to fetch them (the page asks for a token and calls the API) ----
-
-const CONSOLE_HTML: &str = include_str!("fleet_console.html");
-const CONSOLE_JS: &str = include_str!("fleet_console.js");
-const CONSOLE_CSP: &str = "default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; connect-src 'self'; \
-     img-src 'self' data: blob:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
-
-fn console_file(content_type: &'static str, body: &'static str) -> Response {
-    (
-        [
-            (header::CONTENT_TYPE, content_type),
-            (header::CONTENT_SECURITY_POLICY, CONSOLE_CSP),
-            (header::X_FRAME_OPTIONS, "DENY"),
-            (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
-            (header::REFERRER_POLICY, "no-referrer"),
-            (header::CACHE_CONTROL, "no-store"),
-        ],
-        body,
-    )
-        .into_response()
-}
-
-async fn console_html() -> Response {
-    console_file("text/html; charset=utf-8", CONSOLE_HTML)
-}
-
-async fn console_js() -> Response {
-    console_file("text/javascript; charset=utf-8", CONSOLE_JS)
 }
 
 /// Insert/update a node from a heartbeat. A brand-new node starts

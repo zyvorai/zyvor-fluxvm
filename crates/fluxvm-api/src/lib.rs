@@ -898,11 +898,9 @@ pub fn router(manager: Arc<VmManager>) -> Router {
         .route("/v1/templates", get(list_templates).post(build_template))
         .route("/v1/egress/check", post(egress_check))
         .route("/v1/egress/nftables", get(egress_nftables))
-        // FluxVM Studio (the embedded SPA) owns /console; the old dashboard stays at /console/legacy for one release.
+        // FluxVM Studio (the embedded SPA) owns /console.
         .route("/console", get(studio::studio_root))
         .route("/console/", get(studio::studio_index))
-        .route("/console/legacy", get(console_ui))
-        .route("/console/app.js", get(console_js))
         .route("/console/terminal", get(terminal_page))
         .route("/console/terminal/", get(terminal_page))
         .route("/console/terminal/{file}", get(terminal_asset))
@@ -2290,21 +2288,12 @@ async fn egress_nftables() -> impl IntoResponse {
     )
 }
 
-/// The dashboard: static files only. They hold no data and no token, so they are served without auth; the page asks
-/// for a token and calls the API like any client.
-const CONSOLE_CSP: &str = "default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; connect-src 'self'; \
-     img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
-
 /// The terminal page needs three things the read-only console does not: its own stylesheets
 /// (`style-src 'self'`), WebAssembly for the sixel decoder (`'wasm-unsafe-eval'`, which allows
 /// compiling wasm but not `eval` of strings), and `blob:` images for inline-image protocols.
 const TERMINAL_CSP: &str = "default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; \
      style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data: blob:; \
      font-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
-
-fn console_file(content_type: &'static str, body: &'static str) -> Response {
-    console_file_with(content_type, body, CONSOLE_CSP)
-}
 
 fn console_file_with(
     content_type: &'static str,
@@ -2323,14 +2312,6 @@ fn console_file_with(
         body,
     )
         .into_response()
-}
-
-async fn console_ui() -> Response {
-    console_file("text/html; charset=utf-8", CONSOLE_HTML)
-}
-
-async fn console_js() -> Response {
-    console_file("text/javascript; charset=utf-8", CONSOLE_JS)
 }
 
 /// The terminal page and its vendored xterm.js files (`terminal/vendor/NOTICE`, checked by `SHA256SUMS`).
@@ -2404,10 +2385,8 @@ async fn terminal_asset(Path(file): Path<String>) -> Response {
     }
 }
 
-const CONSOLE_HTML: &str = include_str!("console.html");
-const CONSOLE_JS: &str = include_str!("console.js");
 #[cfg(test)]
-const CONSOLE_PATHS: [&str; 3] = ["/console/", "/console/legacy", "/console/app.js"];
+const CONSOLE_PATHS: [&str; 1] = ["/console/"];
 
 // ZYVOR_RUNTIME_BOUNDARY_V1: stable node-runtime feature discovery for Fabric.
 async fn security_capabilities(
@@ -6622,14 +6601,6 @@ mod tests {
             assert_eq!(
                 status_for(router(m), "GET", "/v1/vms", None).await,
                 StatusCode::UNAUTHORIZED
-            );
-            assert!(
-                !CONSOLE_HTML.contains("<script>"),
-                "inline script is blocked by the CSP"
-            );
-            assert!(
-                !CONSOLE_JS.contains("innerHTML"),
-                "API data is rendered as text"
             );
         }
 

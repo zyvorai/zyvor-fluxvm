@@ -32,8 +32,8 @@ This is an engineering control, not legal advice. The rules are defaults in `GET
 `http://<central>/console/` is the cloud's web console, [FluxVM Studio](ui.md). The page needs no token: it asks for one,
 keeps it in the tab's session storage and sends it only to this central.
 
-> **Studio and the previous console.** The page list below was written for the previous console, which stays at
-> `/console/legacy` for one release. Studio covers the same VM tools (screen and Control, snapshots and clones, commands),
+> **Studio and the previous console.** The page list below was written for the previous console, which was removed in 0.4.14.
+> Studio covers the same VM tools (screen and Control, snapshots and clones, commands),
 > the image catalog, hosts (cordon, drain, scrub, lease), networks, volumes, warm pools, tunnels, enrollment, operations,
 > tenants and keys, members, billing and activity. Page names differ: for example Snapshots, Screen and Run are tabs in a VM's sheet.
 
