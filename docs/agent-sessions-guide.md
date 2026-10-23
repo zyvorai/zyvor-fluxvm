@@ -5,7 +5,7 @@ to **use** sessions, by task, with the commands to run and what you should see. 
 table of contents as a cookbook.
 
 **Install first:** `curl -fsSL https://zyvorai.github.io/zyvor-fluxvm/install.sh | bash` ([install.md](install.md))
-(0.4.8+ includes sessions; current is 0.4.11). Check `fluxctl agent --help`: `unrecognized subcommand` means an older
+(0.4.8+ includes sessions; current is 0.4.13). Check `fluxctl agent --help`: `unrecognized subcommand` means an older
 package — upgrade, or build from source (the install page says how). On a Mac, `--host-gpu` reaches the host Metal/MLX
 server from an offline guest ([host-inference.md](host-inference.md)).
 
