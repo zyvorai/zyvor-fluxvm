@@ -5,6 +5,8 @@ use anyhow::{Context, Result};
 use base64::{Engine, engine::general_purpose::STANDARD as B64};
 use clap::{ColorChoice, CommandFactory, FromArgMatches, Parser, Subcommand};
 use fluxvm_api as api;
+#[cfg(unix)]
+use fluxvm_api::docker_engine;
 use fluxvm_core::{
     config::Config,
     model::{
@@ -21,8 +23,6 @@ use std::{
     sync::Arc,
 };
 use tokio::net::TcpListener;
-#[cfg(unix)]
-use fluxvm_api::docker_engine;
 use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
 
