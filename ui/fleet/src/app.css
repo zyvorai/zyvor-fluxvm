@@ -20,3 +20,8 @@
 .fx-term pre { margin: 4px 0; white-space: pre-wrap; word-break: break-all; }
 .fx-term-entry { margin-bottom: 12px; }
 .fx-term-cmd { font-weight: 600; }
+
+/* Member roles in the add sheet */
+.fx-roles { border: 0; padding: 0; margin: 14px 0; display: grid; gap: 8px; }
+.fx-roles legend { font-weight: 600; margin-bottom: 6px; padding: 0; }
+.fx-roles .fx-check { align-items: flex-start; }

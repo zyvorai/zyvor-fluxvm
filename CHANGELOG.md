@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- **Studio: team members.** A tenant's Members page (add by work email, change a role, remove or leave) and a Members button per tenant for the
+  operator. This was the last page of the previous fleet console without a Studio equivalent.
+
 ## 0.4.13 (2026-10-23)
 
 - **FluxVM Studio: a web UI for the node daemon and for fleet central.** `fluxctl serve` serves a React app at

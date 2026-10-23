@@ -18,7 +18,7 @@ export const navFor = (role: Role): NavGroup[] => [
   {
     label: 'Account',
     items: [
-      ...(role === 'operator' ? [{ to: '/tenants', label: 'Tenants', desc: 'Quotas, tokens and keys' }] : [{ to: '/keys', label: 'API keys', desc: 'Named keys for your tools' }]),
+      ...(role === 'operator' ? [{ to: '/tenants', label: 'Tenants', desc: 'Quotas, tokens and keys' }] : [{ to: '/keys', label: 'API keys', desc: 'Named keys for your tools' }, { to: '/members', label: 'Members', desc: 'People who sign in, and their roles' }]),
       { to: '/billing', label: 'Billing & usage', desc: 'What it costs, and why' },
     ],
   },
