@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.4.13 (2026-10-23)
+
 - **FluxVM Studio: a web UI for the node daemon and for fleet central.** `fluxctl serve` serves a React app at
   `/console/` and `fluxvm-agent central` one at its own `/console/`, both embedded in the binary (no Node at runtime) and
   working behind any reverse-proxy prefix. Node: overview with live events, machines (create wizard; console, guest,

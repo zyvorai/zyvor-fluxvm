@@ -7,7 +7,7 @@ README and the website may quote; anything else is a target, not a result.
 |---|---|
 | Date | 2026-10-13 |
 | Host | Apple M4 Mac mini, 16 GB, macOS 27.2 |
-| FluxVM | Historical: 0.4.7 + the AgentSession branch, **debug build** of `fluxctl serve` (sessions ship in 0.4.8+; current release 0.4.11 is faster as a release build) |
+| FluxVM | Historical: 0.4.7 + the AgentSession branch, **debug build** of `fluxctl serve` (sessions ship in 0.4.8+; current release 0.4.13 is faster as a release build) |
 | Guest | the default sandbox: `debian-13`, 2 vCPU, 2 GiB, `vz`, SSH exec (no vsock agent) |
 | Runs | 5, `policy=open`, snapshots are memory+disk, state dir already holding the image and a warm slot |
 
