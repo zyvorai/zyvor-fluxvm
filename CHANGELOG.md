@@ -38,6 +38,15 @@
   is logged (`{"event":"signal"}` in `vz-runner.log`) instead of looking like a clean exit. Previously a guest could
   vanish with no `vm.stop` event and nothing in the log.
 
+## 0.4.12 (2026-10-17)
+
+- **Docker Engine API shim.** On macOS, `fluxctl serve` listens on `{run_dir}/docker.sock` by default. Point Docker CLI
+  at it with `DOCKER_HOST=unix://…/docker.sock` (`brew install docker`). Containers map to OCI sandboxes; images to the
+  FluxVM OCI cache. Supported: `pull`, `images`, `run`, `ps`, `rm`, `logs`, `exec`, `stop`. Not supported: `build`,
+  Compose daemon, bind mounts, Docker networks. See
+  [docs/oci-sandboxes.md](docs/oci-sandboxes.md#docker-cli-docker_host) and
+  [docs/vs-desktop-hypervisors.md](docs/vs-desktop-hypervisors.md). Live: `scripts/docker-compat-live-test.sh`.
+
 - **Step-up TOTP for exec and writes.** `[[auth.mfa]]` pairs a static API token with a TOTP secret file; guest exec,
   shells and (optionally) every write then need a current code in `X-Fluxvm-Totp` (`fluxctl --totp`). Codes are
   single-use, repeated failures lock the token out, and the audit log records `mfa=`. See docs/host-hardening.md.
