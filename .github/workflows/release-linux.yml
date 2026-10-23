@@ -30,6 +30,8 @@ permissions:
   id-token: write
   attestations: write
 
+# The package and verify jobs run Docker (a build container, then the smoke-test containers). zyvor-kernel-a also carries
+# zyvor-build but has no Docker daemon, so without the `docker` label they landed there and failed in "Set up job".
 jobs:
   plan:
     runs-on: [self-hosted, Linux, X64, zyvor-build]
@@ -44,10 +46,10 @@ jobs:
           import json, os
           arch = os.environ.get("ARCH", "")
           rows = [
-              {"arch": "x86_64", "runner": ["self-hosted", "Linux", "X64", "zyvor-build"], "experimental": False, "cross": False},
+              {"arch": "x86_64", "runner": ["self-hosted", "Linux", "X64", "zyvor-build", "docker"], "experimental": False, "cross": False},
               # Cross-compiled on x86_64: this organization has no hosted arm64 Linux runners (the `ubuntu-22.04-arm`
               # job queued forever). A failure must not block the x86_64 package or the release.
-              {"arch": "aarch64", "runner": ["self-hosted", "Linux", "X64", "zyvor-build"], "experimental": True, "cross": True},
+              {"arch": "aarch64", "runner": ["self-hosted", "Linux", "X64", "zyvor-build", "docker"], "experimental": True, "cross": True},
           ]
           rows = [r for r in rows if not arch or r["arch"] == arch]
           print("matrix=" + json.dumps({"include": rows}))
