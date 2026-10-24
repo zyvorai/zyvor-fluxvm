@@ -10,6 +10,12 @@
   `max_per_tenant`, idle timeout, maximum lifetime, revoke checks, the **Tunnels** page and the activity log. The ticket, not a cookie
   or a token in a URL, is the credential for the socket. `VncScreen` (and `wsUrl`) moved into `@fluxvm/ui-core` so Studio and the fleet
   console share one component; the node's Display tab behaves as before.
+- **Studio: a Docker page.** The engine `fluxctl docker up` runs, in Studio: its version, the containers (state, Docker's own status text,
+  published ports, age; filter and a running or not-running switch), the images (tags, size, containers using them) and a container's log in
+  the same colourful window as a pod's (filter, tail length, follow, wrap, copy, download). Read-only and admin only. With no engine VM, a
+  stopped one or a socket that does not answer, the page says what to run. Daemon: `GET /v1/docker` and
+  `GET /v1/docker/containers/{id}/logs?tail=N`, talking to `/tmp/fluxvm-run-<uid>/docker-engine.sock` (checked against a real Docker 26.1 engine:
+  list, images and framed logs). The log window is the pod's, generalised (`LogsPane`).
 - **Studio: CPU and memory, Workloads and Events for Kubernetes clusters.** The Kubernetes page shows each node's CPU and memory use
   as a bar and each pod's CPU and memory (from the cluster's metrics-server; clusters without one just have no numbers), a *Workloads* tab
   (Deployments, StatefulSets, DaemonSets with ready of wanted and images; Services with type, cluster IP, ports and NodePorts) and an

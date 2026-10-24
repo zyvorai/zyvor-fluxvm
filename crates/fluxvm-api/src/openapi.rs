@@ -409,6 +409,8 @@ fn ops() -> Vec<Op> {
         .returns("CapabilityReport"),
         op("get", "/v1/host/apple", "Apple host capabilities (runner probe)", HOST),
         op("get", "/v1/vznets", "Private vz networks and their members", HOST),
+        op("get", "/v1/docker", "The Docker engine `fluxctl docker` runs: reachability, containers and images (read-only; admin)", VMS),
+        op("get", "/v1/docker/containers/{id}/logs", "Tail of a container's log as text with timestamps (?tail=; admin)", VMS),
         op("get", "/v1/kube", "Kubernetes clusters made by `fluxctl kube`, with their VMs", VMS),
         op("get", "/v1/kube/{name}", "A cluster's nodes and pods, read from its API server (read-only)", VMS),
         op("get", "/v1/kube/{name}/workloads", "Deployments, StatefulSets, DaemonSets and Services of a cluster (read-only)", VMS),

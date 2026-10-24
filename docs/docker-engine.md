@@ -69,6 +69,16 @@ deletes anything. The agent logs to `~/Library/Logs/fluxvm-docker-engine.log`.
 
 Nothing listens on a TCP port, and the guest's Docker socket is only reachable by your user through the SSH key.
 
+## In Studio
+
+The **Docker** page (Platform, in the node Studio) shows the engine the daemon can reach at `/tmp/fluxvm-run-<uid>/docker-engine.sock`, the socket
+`fluxctl docker up` publishes for the user the daemon runs as: its version, the containers (state, status as Docker words it, published ports,
+age, with a filter and a running or not-running switch) and the images (tags, size, containers using them), and a container's log in the same
+colourful, filterable window as a pod's. It is read-only and admin only: the containers belong to the whole host. When there is no engine VM
+or its socket does not answer, the page says so and names the command to run instead of failing. The routes are `GET /v1/docker` and
+`GET /v1/docker/containers/{id}/logs?tail=N` (in the daemon's OpenAPI document). A daemon that was given a different `--socket` for `fluxctl docker` does not see
+that engine.
+
 ## Limits
 
 - One engine VM per name; it uses its vCPUs and memory while it runs.
