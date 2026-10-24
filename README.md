@@ -65,10 +65,11 @@ Measured on one Apple M4 with macOS 27.2. Multi-Mac fleets are not yet verified 
 
 ## What's new
 
-From the [CHANGELOG](CHANGELOG.md) (0.4.x, current release **0.4.14**) and recent commits:
+From the [CHANGELOG](CHANGELOG.md) (0.4.x, current release **0.4.15**) and recent commits:
 
 | Feature | What it does |
 |---|---|
+| **Docker and Kubernetes on a Mac** | `fluxctl docker up` runs a real `dockerd` in one managed VM with its socket on the Mac (`build`, Compose, bind mounts, networks); `fluxctl kube up` runs k3s in FluxVM VMs (workers, `kube load`, offline installs, Cilium by default) and writes a kubeconfig. Studio's **Platform → Kubernetes** page shows each cluster's nodes and pods, coloured pod logs, a shell in a pod and a traffic graph ([docker](docs/docker-engine.md), [kubernetes](docs/kubernetes-on-mac.md)) |
 | **Host Metal/MLX inference for offline sandboxes** | `apple.host_gpu` / `fluxctl agent run --host-gpu`: guest `OPENAI_BASE_URL` reaches the host OpenAI-compatible server over vsock (no GPU passthrough). `fluxctl infer status` / `infer serve --stand-in` ([host-inference](docs/host-inference.md)) |
 | **QMP under a short `run_dir`** | Avoids macOS `sockaddr_un` / `SUN_LEN` failures when the state path is long; sockets live at `run_dir/qmp/<id>.sock`, migration receivers at `run_dir/mr/<id>/` ([operations](docs/operations.md#state-layout)) |
 | **Agent sessions (`fluxctl agent`)** | Enforced filesystem policy, scoped tokens, supervised jobs, approvals, budgets, fork/evaluate/promote — in the published package from 0.4.8 ([session guide](docs/agent-sessions-guide.md)) |
