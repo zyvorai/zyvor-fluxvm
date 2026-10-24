@@ -81,3 +81,5 @@ Nothing listens on a TCP port, and the guest's Docker socket is only reachable b
 - macOS with Apple silicon only (it uses a `vz` VM).
 
 Live check: `scripts/docker-engine-live-test.sh`.
+
+Need Kubernetes instead? `fluxctl kube up` does the same for a single-node k3s cluster: [kubernetes-on-mac.md](kubernetes-on-mac.md).
