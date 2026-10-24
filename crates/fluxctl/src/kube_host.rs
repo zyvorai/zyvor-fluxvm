@@ -30,13 +30,46 @@ pub const AGENT_LABEL: &str = "dev.zyvor.fluxvm.kube";
 const GUEST_API_PORT: u16 = 6443;
 /// The first boot downloads and starts k3s, so allow for a slow network.
 const FIRST_BOOT_BUDGET: Duration = Duration::from_secs(900);
+/// Tries at an image import before its ssh connection failures are reported.
+const IMPORT_ATTEMPTS: u32 = 4;
 /// Agent nodes a cluster may have. `down` looks for this many.
 pub const MAX_WORKERS: u8 = 8;
+/// The Cilium chart installed by default (`helm.cilium.io`).
+pub const CILIUM_VERSION: &str = "1.20.3";
 /// The files `fluxctl kube fetch` leaves in an offline folder (Apple silicon guests are arm64).
 pub const OFFLINE_BINARY: &str = "k3s-arm64";
 pub const OFFLINE_IMAGES: &str = "k3s-airgap-images-arm64.tar.zst";
 pub const OFFLINE_INSTALLER: &str = "install.sh";
 const OFFLINE_SUMS: &str = "sha256sum-arm64.txt";
+
+/// The pod network. Cilium is the default; k3s's bundled flannel is kept for `--offline`, which cannot fetch Cilium.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Cni {
+    Cilium,
+    Flannel,
+}
+
+impl Cni {
+    pub fn parse(s: &str) -> Result<Cni> {
+        match s {
+            "cilium" => Ok(Cni::Cilium),
+            "flannel" => Ok(Cni::Flannel),
+            other => bail!("--cni {other:?} must be cilium or flannel"),
+        }
+    }
+
+    /// What `--cni` means when it is not given: Cilium, except offline.
+    pub fn default_for(offline: bool) -> Cni {
+        if offline { Cni::Flannel } else { Cni::Cilium }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Cni::Cilium => "cilium",
+            Cni::Flannel => "flannel",
+        }
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct KubeOptions {
@@ -63,6 +96,10 @@ pub struct KubeOptions {
     pub workers: u8,
     /// A folder made by `fluxctl kube fetch`: k3s and its system images are installed from it, not the internet.
     pub offline: Option<PathBuf>,
+    /// The pod network (see [`Cni`]).
+    pub cni: Cni,
+    /// The Cilium chart version, such as `1.20.3`.
+    pub cilium_version: String,
 }
 
 impl Default for KubeOptions {
@@ -83,6 +120,8 @@ impl Default for KubeOptions {
             kubeconfig: None,
             workers: 0,
             offline: None,
+            cni: Cni::Cilium,
+            cilium_version: CILIUM_VERSION.into(),
         }
     }
 }
@@ -96,6 +135,23 @@ pub fn name_ok(name: &str) -> bool {
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == b'-')
         && b[0] != b'-'
         && b[b.len() - 1] != b'-'
+}
+
+/// `1.20.3`: three dot-separated numbers, nothing else reaches the manifest.
+pub fn cilium_version_ok(v: &str) -> bool {
+    let p: Vec<&str> = v.split('.').collect();
+    p.len() == 3
+        && p.iter()
+            .all(|n| !n.is_empty() && n.len() <= 3 && n.bytes().all(|c| c.is_ascii_digit()))
+}
+
+/// The HelmChart that k3s's built-in helm controller turns into a Cilium install. `bootstrap` lets it run before the
+/// node is Ready, which it cannot be without a pod network.
+pub fn cilium_manifest(o: &KubeOptions) -> String {
+    format!(
+        "apiVersion: helm.cattle.io/v1\nkind: HelmChart\nmetadata:\n  name: cilium\n  namespace: kube-system\nspec:\n  bootstrap: true\n  repo: https://helm.cilium.io\n  chart: cilium\n  version: {}\n  targetNamespace: kube-system\n  valuesContent: |-\n    operator:\n      replicas: 1\n    ipam:\n      mode: kubernetes\n    kubeProxyReplacement: false\n",
+        o.cilium_version
+    )
 }
 
 /// `v1.31.4+k3s1` (or without the `+k3sN`). Nothing else reaches the installer's environment.
@@ -138,6 +194,17 @@ fn validate(o: &KubeOptions) -> Result<()> {
     }
     if o.api_port == 0 {
         bail!("--api-port must be 1 to 65535");
+    }
+    if !cilium_version_ok(&o.cilium_version) {
+        bail!(
+            "--cilium-version {:?} must look like 1.20.3",
+            o.cilium_version
+        );
+    }
+    if o.cni == Cni::Cilium && o.offline.is_some() {
+        bail!(
+            "--cni cilium cannot be used with --offline: its chart and images come from helm.cilium.io and quay.io. Use --cni flannel"
+        );
     }
     if o.workers > MAX_WORKERS {
         bail!("--workers must be 0 to {MAX_WORKERS}");
@@ -192,6 +259,11 @@ pub fn k3s_exec(o: &KubeOptions) -> String {
         a.push("--disable".into());
         a.push("traefik".into());
     }
+    if o.cni == Cni::Cilium {
+        // Cilium brings its own pod network and network policy.
+        a.push("--flannel-backend=none".into());
+        a.push("--disable-network-policy".into());
+    }
     a.extend(o.k3s_args.iter().cloned());
     a.join(" ")
 }
@@ -235,7 +307,13 @@ fn worker_name(o: &KubeOptions, i: u8) -> String {
 /// validated to plain characters.
 fn install_commands(o: &KubeOptions, role: &Role, node: &str) -> Vec<String> {
     let private = o.workers > 0;
-    let node_ip = if private { " --node-ip $PRIV" } else { "" };
+    // Flannel binds its tunnel to the interface of the default route, which is the NAT card, and VMs cannot reach each
+    // other over NAT; point it at the private card. (Cilium follows the node's InternalIP, which is `--node-ip`.)
+    let node_ip = match (private, o.cni) {
+        (false, _) => "",
+        (true, Cni::Cilium) => " --node-ip $PRIV",
+        (true, Cni::Flannel) => " --node-ip $PRIV --flannel-iface $IFACE",
+    };
     let exec = match role {
         Role::Server => format!("{}{node_ip}", k3s_exec(o)),
         Role::Agent { .. } => format!("agent --node-name {node}{node_ip}"),
@@ -260,7 +338,7 @@ fn install_commands(o: &KubeOptions, role: &Role, node: &str) -> Vec<String> {
     }
     // Wait for the card on the cluster's private network, whose address becomes the node's.
     let wait_ip = if private {
-        "PRIV=\"\"; for i in $(seq 1 90); do PRIV=$(ip -4 -o addr show | grep -o \"10\\.89\\.[0-9]*\\.[0-9]*\" | head -1); [ -n \"$PRIV\" ] && break; sleep 2; done; "
+        "PRIV=\"\"; for i in $(seq 1 90); do PRIV=$(ip -4 -o addr show | grep -o \"10\\.89\\.[0-9]*\\.[0-9]*\" | head -1); [ -n \"$PRIV\" ] && break; sleep 2; done; IFACE=$(ip -o -4 addr show | grep -F \"$PRIV/\" | cut -d\" \" -f2); "
     } else {
         ""
     };
@@ -309,6 +387,14 @@ pub fn node_spec(
     } else {
         json!({})
     };
+    let write_files = match (role, o.cni) {
+        (Role::Server, Cni::Cilium) => vec![json!({
+            "path": "/var/lib/rancher/k3s/server/manifests/cilium.yaml",
+            "content": cilium_manifest(o),
+            "permissions": "0600",
+        })],
+        _ => vec![],
+    };
     json!({
         "name": node,
         "backend": "auto",
@@ -324,6 +410,7 @@ pub fn node_spec(
             "user": user,
             "ssh_authorized_keys": [key],
             "packages": packages,
+            "write_files": write_files,
             "runcmd": install_commands(o, role, node),
         },
     })
@@ -804,6 +891,10 @@ pub fn render_agent(
     if let Some(d) = &o.offline {
         flag("--offline", d.display().to_string());
     }
+    flag("--cni", o.cni.name().to_owned());
+    if o.cni == Cni::Cilium && o.cilium_version != CILIUM_VERSION {
+        flag("--cilium-version", o.cilium_version.clone());
+    }
     if o.traefik {
         args.push("--traefik".into());
     }
@@ -903,16 +994,30 @@ pub async fn load<A: VmApi>(
     };
     let mut report = vec![];
     for (name, ip) in targets {
-        let mut c = run::ssh_base(&ip, &user, &identity);
-        c.args([
-            "-o",
-            "BatchMode=yes",
-            "-o",
-            "ConnectTimeout=10",
-            "sudo k3s ctr images import -",
-        ]);
-        c.stdin(std::fs::File::open(&path).with_context(|| format!("opening {}", path.display()))?);
-        let out = c.output().context("running ssh")?;
+        // ssh exits 255 when the connection itself fails (sshd busy, a reset while the VM is under load). That says
+        // nothing about the import, so try again a few times; any other failure is the import's and is reported.
+        let mut attempt = 1;
+        let out = loop {
+            let mut c = run::ssh_base(&ip, &user, &identity);
+            c.args([
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "ConnectTimeout=10",
+                "sudo k3s ctr images import -",
+            ]);
+            c.stdin(
+                std::fs::File::open(&path)
+                    .with_context(|| format!("opening {}", path.display()))?,
+            );
+            let out = c.output().context("running ssh")?;
+            if out.status.code() == Some(255) && attempt < IMPORT_ATTEMPTS {
+                attempt += 1;
+                tokio::time::sleep(Duration::from_secs(3)).await;
+                continue;
+            }
+            break out;
+        };
         if !out.status.success() {
             bail!(
                 "importing into {name} failed: {}",
@@ -1561,5 +1666,142 @@ mod tests {
         ] {
             assert!(p.contains(want), "{want}");
         }
+    }
+
+    #[test]
+    fn cilium_is_the_default_pod_network() {
+        let o = KubeOptions::default();
+        assert_eq!(o.cni, Cni::Cilium);
+        assert_eq!(o.cilium_version, CILIUM_VERSION);
+        // k3s starts without flannel or its network-policy controller.
+        let exec = k3s_exec(&o);
+        assert!(
+            exec.contains("--flannel-backend=none") && exec.contains("--disable-network-policy"),
+            "{exec}"
+        );
+        // The server gets the chart as a root-only manifest; other nodes get none.
+        let server = kube_spec(&o, "u", "k", vec![]);
+        let f = &server["cloud_init"]["write_files"][0];
+        assert_eq!(
+            f["path"],
+            "/var/lib/rancher/k3s/server/manifests/cilium.yaml"
+        );
+        assert_eq!(f["permissions"], "0600");
+        let m = f["content"].as_str().unwrap();
+        assert!(
+            m.contains("kind: HelmChart") && m.contains("bootstrap: true"),
+            "{m}"
+        );
+        assert!(
+            m.contains(&format!("version: {CILIUM_VERSION}\n"))
+                && m.contains("repo: https://helm.cilium.io"),
+            "{m}"
+        );
+        let worker = node_spec(&o, &agent(), "w", "u", "k", vec![]);
+        assert_eq!(
+            worker["cloud_init"]["write_files"]
+                .as_array()
+                .unwrap()
+                .len(),
+            0
+        );
+        assert!(
+            !install_commands(&o, &agent(), "w")
+                .join(" ")
+                .contains("flannel")
+        );
+    }
+
+    #[test]
+    fn flannel_keeps_k3s_defaults_and_offline_cannot_use_cilium() {
+        let o = KubeOptions {
+            cni: Cni::Flannel,
+            ..Default::default()
+        };
+        assert!(!k3s_exec(&o).contains("flannel"));
+        let spec = kube_spec(&o, "u", "k", vec![]);
+        assert_eq!(
+            spec["cloud_init"]["write_files"].as_array().unwrap().len(),
+            0
+        );
+        assert!(validate(&o).is_ok());
+        let offline = KubeOptions {
+            offline: Some("/Users/me/k3s".into()),
+            ..Default::default()
+        };
+        let err = validate(&offline).unwrap_err().to_string();
+        assert!(err.contains("--cni flannel"), "{err}");
+        let flannel_offline = KubeOptions {
+            cni: Cni::Flannel,
+            ..offline
+        };
+        assert!(validate(&flannel_offline).is_ok());
+        assert_eq!(Cni::default_for(true), Cni::Flannel);
+        assert_eq!(Cni::default_for(false), Cni::Cilium);
+        assert_eq!(Cni::parse("cilium").unwrap(), Cni::Cilium);
+        assert!(Cni::parse("calico").is_err());
+    }
+
+    #[test]
+    fn cilium_versions_are_plain() {
+        for ok in ["1.20.3", "1.9.10", "10.0.0"] {
+            assert!(cilium_version_ok(ok), "{ok}");
+        }
+        for bad in [
+            "",
+            "1.20",
+            "1.20.3.4",
+            "v1.20.3",
+            "1.x.3",
+            "1.20.3'; id",
+            "1..3",
+        ] {
+            assert!(!cilium_version_ok(bad), "{bad:?}");
+        }
+        let o = KubeOptions {
+            cilium_version: "1.20".into(),
+            ..Default::default()
+        };
+        assert!(validate(&o).is_err());
+    }
+
+    #[test]
+    fn flannel_is_pinned_to_the_private_card_on_every_node() {
+        let o = KubeOptions {
+            cni: Cni::Flannel,
+            workers: 1,
+            ..Default::default()
+        };
+        for run in [
+            install_commands(&o, &Role::Server, "s"),
+            install_commands(&o, &agent(), "w"),
+        ] {
+            let c = &run[0];
+            assert!(
+                c.contains("IFACE=$(ip -o -4 addr show | grep -F \"$PRIV/\" | cut -d\" \" -f2)"),
+                "{c}"
+            );
+            assert!(c.contains("--node-ip $PRIV --flannel-iface $IFACE"), "{c}");
+            assert_eq!(c.matches('\'').count(), 2, "{c}");
+        }
+        // Cilium needs no interface; a single node needs neither.
+        let cilium = install_commands(
+            &KubeOptions {
+                workers: 1,
+                ..Default::default()
+            },
+            &Role::Server,
+            "s",
+        );
+        assert!(cilium[0].contains("--node-ip $PRIV") && !cilium[0].contains("--flannel-iface"));
+        let single = install_commands(
+            &KubeOptions {
+                cni: Cni::Flannel,
+                ..Default::default()
+            },
+            &Role::Server,
+            "s",
+        );
+        assert!(!single[0].contains("IFACE"));
     }
 }

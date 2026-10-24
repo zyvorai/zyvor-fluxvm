@@ -17,18 +17,30 @@ API="${FLUXVM_LIVE_API_PORT:-16443}"
 NODEPORT="${FLUXVM_LIVE_NODEPORT:-30080}"
 export KUBECONFIG="$T/kubeconfig.yaml"
 K=("$FLUXCTL" kube)
+# FLUXVM_LIVE_MEMORY_MIB sizes each of the two VMs (default 2560); smaller than the 4096 default so the test fits beside other VMs.
+# FLUXVM_LIVE_CNI=cilium (default) tests the default cluster; flannel tests the --offline install, which cannot use Cilium.
+CNI="${FLUXVM_LIVE_CNI:-cilium}"
 OFFLINE="$T/offline"
-ARGS=(--name "$NAME" --api-port "$API" --kubeconfig "$KUBECONFIG" --publish "$NODEPORT" --workers 1 --offline "$OFFLINE")
+ARGS=(--name "$NAME" --api-port "$API" --kubeconfig "$KUBECONFIG" --publish "$NODEPORT" --workers 1 --cni "$CNI" --memory-mib "${FLUXVM_LIVE_MEMORY_MIB:-2560}")
+[[ "$CNI" == flannel ]] && ARGS+=(--offline "$OFFLINE")
 cleanup() { "${K[@]}" down "${ARGS[@]}" --purge >/dev/null 2>&1 || true; rm -rf "$T"; }
 trap cleanup EXIT
 ok() { echo "ok   $*"; }; bad() { echo "FAIL $*"; exit 1; }
 
-FETCHED="$("${K[@]}" fetch "$OFFLINE")" || bad "fetch"
-[[ "$(grep -c '"verified": true' <<<"$FETCHED")" == 2 ]] || bad "fetch verification"; ok "fetch downloads k3s and checks the binary and images against the release's SHA-256 list"
+if [[ "$CNI" == flannel ]]; then
+  FETCHED="$("${K[@]}" fetch "$OFFLINE")" || bad "fetch"
+  [[ "$(grep -c '"verified": true' <<<"$FETCHED")" == 2 ]] || bad "fetch verification"; ok "fetch downloads k3s and checks the binary and images against the release's SHA-256 list"
+fi
 "${K[@]}" up "${ARGS[@]}" >/dev/null || bad "up"
 NODES="$(kubectl get nodes --no-headers | grep -c ' Ready')" ; [[ "$NODES" == 2 ]] || bad "expected 2 Ready nodes, got $NODES"; ok "--workers 1 gives a server and an agent node, both Ready"
 SERVER_IP="$("${K[@]}" status "${ARGS[@]}" | sed -n 's/.*"guest_ip": "\([0-9.]*\)".*/\1/p' | head -1)"
-ssh -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR "$USER@$SERVER_IP" 'grep -q "Skipping k3s download" /var/log/cloud-init-output.log' || bad "offline install log"; ok "--offline: the installer skipped the download"
+SSH=(ssh -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR "$USER@$SERVER_IP")
+if [[ "$CNI" == flannel ]]; then
+  "${SSH[@]}" 'sudo journalctl -u fluxvm-k3s-install --no-pager | grep -q "Skipping k3s download"' || bad "offline install log"; ok "--offline: the installer skipped the download"
+else
+  kubectl -n kube-system rollout status ds/cilium --timeout=240s >/dev/null || bad "cilium daemonset"; ok "Cilium is the pod network (its DaemonSet is rolled out on both nodes)"
+  [[ "$(kubectl get ds -n kube-system -o name | grep -c flannel || true)" == 0 ]] || bad "flannel present"
+fi
 [[ "$(stat -f %Lp "$KUBECONFIG")" == 600 ]] || bad "kubeconfig mode"; ok "kubeconfig written with mode 600"
 grep -q "server: https://127.0.0.1:$API" "$KUBECONFIG" || bad "kubeconfig server"; ok "kubeconfig points at the forwarded port"
 [[ "$(kubectl config current-context)" == "$NAME" ]] || bad "context name"; ok "context is named after the VM"

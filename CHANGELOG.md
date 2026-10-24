@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- **`fluxctl kube`: Cilium is the default pod network, and cross-node pod traffic works.** The earlier multi-node release joined
+  workers but flannel bound its VXLAN tunnel to the NAT card, which VMs cannot reach each other over, so pods on different nodes
+  could not talk. `up` now installs Cilium (chart pinned, `--cilium-version`) through k3s's helm controller with flannel and k3s's
+  network policy off; `--cni flannel` keeps flannel, now pinned to the private card with `--flannel-iface`. `--offline` defaults to
+  flannel and refuses Cilium, whose chart and images are fetched from the internet.
 - **`fluxctl kube`: worker nodes, `load` and offline installs.** `up --workers N` adds N agent VMs (`NAME-w1`…) that join the
   server with its node token and waits for `1 + N` Ready nodes; `down` stops and `down --purge` deletes them all. `kube load IMAGE…`
   (or `--archive FILE`) copies images from the Docker CLI into every node's containerd, so images built with `fluxctl docker` run

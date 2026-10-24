@@ -30,12 +30,25 @@ fluxctl kube down --purge                        # delete the VM, the cluster's 
 | `--share HOST[:GUEST][:ro]` | Share a Mac folder into the VM at the same path, for `hostPath` volumes. Fixed at creation. |
 | `--k3s-version v1.31.4+k3s1` | Pin the k3s release (default: the installer's stable channel). Fixed at creation. |
 | `--k3s-arg=--disable=metrics-server` | Extra `k3s server` argument. Repeatable. Fixed at creation. |
+| `--cni cilium\|flannel` | The pod network (default `cilium`; `flannel` with `--offline`). See [The pod network](#the-pod-network). Fixed at creation. |
+| `--cilium-version 1.20.3` | The Cilium chart to install. |
 | `--traefik` | Keep k3s's bundled Traefik ingress (off by default). |
 | `--workers N` | Add N agent nodes (0 to 8), each its own VM named `NAME-w1`… and joined to the server. See [More than one node](#more-than-one-node). |
 | `--offline DIR` | Install k3s from a folder made by `fluxctl kube fetch` instead of the internet. See [Without internet](#without-internet-on-first-boot). |
 | `--kubeconfig` | Where to write the kubeconfig (default `~/.kube/fluxvm-NAME.yaml`). |
 
 Options marked "fixed at creation" are baked into the VM's first boot. To change one, `down --purge` and `up` again.
+
+## The pod network
+
+Cilium is the default. k3s starts with `--flannel-backend=none --disable-network-policy`, and the server gets a `HelmChart` manifest
+(a root-only file written by cloud-init) that k3s's built-in helm controller turns into a Cilium install from `helm.cilium.io`, with
+the chart version pinned. The node becomes Ready once Cilium is up, which adds a minute or two to the first boot. Cilium also enforces
+`NetworkPolicy`. kube-proxy stays on, so Services work as in stock k3s.
+
+`--cni flannel` keeps k3s's bundled flannel. It is the default with `--offline`, because Cilium's chart and images come from the
+internet (`--offline --cni cilium` is refused). With workers, flannel is told to use the private network card (`--flannel-iface`);
+its default is the card with the default route, which is the NAT card, and VMs cannot reach each other over NAT.
 
 ## More than one node
 
@@ -54,7 +67,8 @@ The default FluxVM network keeps each VM apart from the others (two VMs on it ca
 workers puts every node on a second, private network named after the cluster (`apple.networks`, a `10.89.N.0/24` subnet with its own
 switch, see [macos.md](macos.md)). The nodes advertise that address (`--node-ip`) and workers join the server through it, so node
 and pod traffic stay on the private network while the first card still gives each VM internet access and the Mac its SSH route.
-A pod on one node reaches a service on another; `scripts/kube-live-test.sh` checks that.
+A pod on one node reaches a service on another; `scripts/kube-live-test.sh` checks that for Cilium and, with `FLUXVM_LIVE_CNI=flannel`,
+for flannel.
 
 * **Decide on workers when you create the cluster.** Only VMs created with `--workers` get the private card. A cluster created
   without it cannot gain workers later: `up --workers N` stops with a message, and you `down --purge` and start again.
