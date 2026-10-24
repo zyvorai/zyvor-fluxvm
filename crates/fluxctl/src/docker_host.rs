@@ -37,6 +37,8 @@ pub struct EngineOptions {
     pub shares: Vec<String>,
     pub socket: Option<PathBuf>,
     pub user: Option<String>,
+    /// `HOST` or `HOST:GUEST` TCP ports forwarded from this Mac's loopback to the guest's loopback.
+    pub publish: Vec<String>,
 }
 
 impl Default for EngineOptions {
@@ -50,6 +52,7 @@ impl Default for EngineOptions {
             shares: vec![],
             socket: None,
             user: None,
+            publish: vec![],
         }
     }
 }
@@ -141,6 +144,7 @@ fn ping_ok(response: &str) -> bool {
 }
 
 pub struct Engine {
+    pub publish: Vec<(u16, u16)>,
     #[allow(dead_code)] // kept for callers that want to address the VM after `up`
     pub id: Uuid,
     pub ip: String,
@@ -221,12 +225,51 @@ pub async fn ensure_vm<A: VmApi>(api: &A, o: &EngineOptions) -> Result<Engine> {
         }
         tokio::time::sleep(Duration::from_secs(3)).await;
     }
-    Ok(Engine { id, ip, user, identity, socket })
+    Ok(Engine { publish: parse_publish_all(&o.publish)?, id, ip, user, identity, socket })
 }
 
-/// Starts the SSH forward of the guest's Docker socket unless it already answers. Returns the forwarder's pid.
+/// `8080` or `18443:8443` -> (host port, guest port). Both are loopback ports; the Mac side is never exposed beyond 127.0.0.1.
+pub fn parse_publish(s: &str) -> Result<(u16, u16)> {
+    let port = |t: &str| -> Result<u16> {
+        match t.parse::<u16>() {
+            Ok(p) if p != 0 => Ok(p),
+            _ => bail!("publish {s:?}: {t:?} is not a port from 1 to 65535"),
+        }
+    };
+    match s.split_once(':') {
+        None => port(s).map(|p| (p, p)),
+        Some((h, g)) => Ok((port(h)?, port(g)?)),
+    }
+}
+
+fn parse_publish_all(all: &[String]) -> Result<Vec<(u16, u16)>> {
+    let mut out: Vec<(u16, u16)> = all.iter().map(|s| parse_publish(s)).collect::<Result<_>>()?;
+    out.sort_unstable();
+    out.dedup();
+    let mut seen = std::collections::BTreeSet::new();
+    for (h, _) in &out {
+        if !seen.insert(*h) {
+            bail!("publish: host port {h} is used twice");
+        }
+    }
+    Ok(out)
+}
+
+/// What the forwarder was started with, so a change of options restarts it instead of being ignored.
+fn forward_spec(e: &Engine) -> String {
+    let mut s = format!("{}@{}|{}", e.user, e.ip, e.socket.display());
+    for (h, g) in &e.publish {
+        s.push_str(&format!("|{h}:{g}"));
+    }
+    s
+}
+
+/// Starts the SSH forward of the guest's Docker socket (and any published ports) unless one with the same settings already
+/// answers. Returns the forwarder's pid when it started a new one.
 pub fn ensure_forward(e: &Engine) -> Result<Option<u32>> {
-    if ping(&e.socket) {
+    let spec = forward_spec(e);
+    let recorded = std::fs::read_to_string(pid_file(&e.socket)).ok().and_then(|t| t.lines().nth(1).map(str::to_owned));
+    if ping(&e.socket) && recorded.as_deref() == Some(spec.as_str()) {
         return Ok(None);
     }
     if let Some(dir) = e.socket.parent() {
@@ -250,12 +293,15 @@ pub fn ensure_forward(e: &Engine) -> Result<Option<u32>> {
         "-N",
     ]);
     c.arg("-L").arg(format!("{}:/var/run/docker.sock", e.socket.display()));
+    for (h, g) in &e.publish {
+        c.arg("-L").arg(format!("127.0.0.1:{h}:127.0.0.1:{g}"));
+    }
     c.arg(dest);
     c.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
     c.process_group(0); // survive Ctrl-C and the terminal closing
     let child = c.spawn().context("starting the SSH forward")?;
     let pid = child.id();
-    std::fs::write(pid_file(&e.socket), pid.to_string())?;
+    std::fs::write(pid_file(&e.socket), format!("{pid}\n{spec}\n"))?;
     let deadline = Instant::now() + Duration::from_secs(30);
     while Instant::now() < deadline {
         if ping(&e.socket) {
@@ -268,7 +314,8 @@ pub fn ensure_forward(e: &Engine) -> Result<Option<u32>> {
 
 fn stop_forwarder(socket: &Path) {
     if let Ok(text) = std::fs::read_to_string(pid_file(socket))
-        && let Ok(pid) = text.trim().parse::<i32>()
+        && let Some(first) = text.lines().next()
+        && let Ok(pid) = first.trim().parse::<i32>()
         && pid > 1
     {
         // SAFETY: kill with a pid read from our own pid file; a stale pid at worst signals nothing or an unrelated
@@ -388,6 +435,10 @@ pub fn render_agent(fluxctl: &Path, o: &EngineOptions, log: &Path, env: &[(Strin
     if let Some(u) = &o.user {
         args.push("--user".into());
         args.push(u.clone());
+    }
+    for p in &o.publish {
+        args.push("--publish".into());
+        args.push(p.clone());
     }
     let items: String = args
         .iter()
@@ -554,6 +605,34 @@ mod tests {
         assert!(p.contains("<string>4096</string>"));
         assert!(p.contains("/Users/a&amp;b"));
         assert!(p.contains("<key>KeepAlive</key><true/>"));
+    }
+
+    #[test]
+    fn publish_ports_parse_and_reject_clashes() {
+        assert_eq!(parse_publish("8080").unwrap(), (8080, 8080));
+        assert_eq!(parse_publish("18443:8443").unwrap(), (18443, 8443));
+        for bad in ["", "0", "70000", "a", "1:", ":2", "1:2:3", "-5"] {
+            assert!(parse_publish(bad).is_err(), "{bad:?}");
+        }
+        let ok = parse_publish_all(&["8080".into(), "8080".into(), "9000:90".into()]).unwrap();
+        assert_eq!(ok, vec![(8080, 8080), (9000, 90)]);
+        assert!(parse_publish_all(&["8080:1".into(), "8080:2".into()]).is_err());
+    }
+
+    #[test]
+    fn forward_spec_changes_when_ports_change() {
+        let mk = |publish: Vec<(u16, u16)>| Engine {
+            publish,
+            id: Uuid::nil(),
+            ip: "192.168.64.5".into(),
+            user: "mini".into(),
+            identity: None,
+            socket: PathBuf::from("/tmp/d.sock"),
+        };
+        let a = forward_spec(&mk(vec![]));
+        let b = forward_spec(&mk(vec![(18443, 8443)]));
+        assert_ne!(a, b);
+        assert_eq!(b, "mini@192.168.64.5|/tmp/d.sock|18443:8443");
     }
 
     #[test]

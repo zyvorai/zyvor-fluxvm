@@ -17,7 +17,8 @@ cleanup() { "$FLUXCTL" docker down --name "$NAME" --socket "$SOCK" --purge >/dev
 trap cleanup EXIT
 ok() { echo "ok   $*"; }; bad() { echo "FAIL $*"; exit 1; }
 
-"$FLUXCTL" docker up --name "$NAME" --socket "$SOCK" --share "$T" >/dev/null || bad "up"
+PORT="${FLUXVM_LIVE_PORT:-18089}"
+"$FLUXCTL" docker up --name "$NAME" --socket "$SOCK" --share "$T" --publish "$PORT" >/dev/null || bad "up"
 export DOCKER_HOST="unix://$SOCK"
 docker version --format '{{.Server.Version}}' >/dev/null || bad "docker version"; ok "the Docker CLI reaches the engine"
 [[ "$("$FLUXCTL" docker status --name "$NAME" --socket "$SOCK" | grep -c '"socket_answers": true')" == 1 ]] || bad "status"; ok "status reports the socket"
@@ -29,6 +30,10 @@ docker build -q -t fluxvm-engine-test "$T" >/dev/null || bad "build"
 
 echo from-the-mac > "$T/note.txt"
 [[ "$(docker run --rm -v "$T:/data:ro" alpine:3.22 cat /data/note.txt)" == from-the-mac ]] || bad "bind mount"; ok "bind mount of a shared Mac folder"
+
+docker run -d --rm --name pub -p "127.0.0.1:$PORT:80" nginx:1.29-alpine >/dev/null
+for _ in $(seq 1 20); do [[ "$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT/")" =~ ^[0-9]+$ && "$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT/")" != 000 ]] && break; sleep 1; done
+[[ "$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT/")" != 000 ]] || bad "published port"; docker rm -f pub >/dev/null; ok "a published container port is reachable from the Mac (--publish)"
 
 docker network create fluxvm-engine-net >/dev/null
 docker run -d --rm --name web --network fluxvm-engine-net alpine:3.22 sleep 60 >/dev/null

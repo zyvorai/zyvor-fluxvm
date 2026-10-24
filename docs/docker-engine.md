@@ -39,6 +39,16 @@ command run on the Mac such as `docker run -v "$PWD/conf:/etc/conf" …` or a Co
 that exists, with the same content, inside the VM where `dockerd` runs. A path outside a shared folder is empty in the guest.
 Shares are fixed when the VM is created; to add one, `down --purge` and `up` again (or use another `--name`).
 
+### Reach a container's port from the Mac
+
+A container published as `-p 127.0.0.1:8080:80` listens on the VM's loopback. Add `--publish 8080` (or `HOST:GUEST`) to `up` and
+the Mac's `127.0.0.1:8080` reaches it over the engine's SSH connection:
+
+```bash
+fluxctl docker up --publish 8080
+docker run -d -p 127.0.0.1:8080:80 nginx && curl -s http://127.0.0.1:8080/ | head -1
+```
+
 ### Keep it running (LaunchAgent)
 
 ```bash
@@ -54,8 +64,8 @@ deletes anything. The agent logs to `~/Library/Logs/fluxvm-docker-engine.log`.
 1. `up` finds the VM named `docker-engine` (`--name`) or creates it: Debian 13, `docker.io`, `docker-compose` and
    `docker-buildx` from apt (cloud-init), your SSH key, 2 vCPUs, 3 GiB, 40 GiB disk (all flags).
 2. It waits for the guest's address, for SSH, and for `docker info` to succeed.
-3. It starts a detached `ssh -N -L {socket}:/var/run/docker.sock` to the guest (with keepalives) and records its pid next to the
-   socket. The socket is `{run_dir}/docker-engine.sock`, beside the built-in `docker.sock`; `--socket` overrides it.
+3. It starts a detached `ssh -N -L {socket}:/var/run/docker.sock` to the guest (with keepalives, plus a `-L` per `--publish`) and
+   records its pid and settings next to the socket. The socket is `{run_dir}/docker-engine.sock`, beside the built-in `docker.sock`; `--socket` overrides it.
 
 Nothing listens on a TCP port, and the guest's Docker socket is only reachable by your user through the SSH key.
 
@@ -65,8 +75,9 @@ Nothing listens on a TCP port, and the guest's Docker socket is only reachable b
 - The containers inside share the VM's kernel and resources. For strong per-container isolation use the built-in
   [container sandboxes](oci-sandboxes.md).
 - Only the folders you `--share` exist in the guest. Docker volumes live on the VM's disk and go away with `down --purge`.
-- Published container ports are on the guest's network, not the Mac's loopback. Reach them with `fluxctl ssh docker-engine -- curl …`
-  or a forward; Compose stacks that test themselves from inside the guest need nothing extra.
+- Published container ports are on the guest's loopback, not the Mac's. Forward the ones you need with `--publish HOST[:GUEST]`
+  (repeatable; Mac side is always 127.0.0.1), for example `fluxctl docker up --publish 18443 --publish 18081`. Changing
+  `--publish` restarts the forward without touching the VM.
 - macOS with Apple silicon only (it uses a `vz` VM).
 
 Live check: `scripts/docker-engine-live-test.sh`.

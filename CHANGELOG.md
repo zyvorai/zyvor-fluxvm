@@ -7,6 +7,7 @@
   starts) a Debian VM running `dockerd` and publishes its socket at `{run_dir}/docker-engine.sock`; `env`, `status`, `down [--purge]`
   and `supervise` complete it, and `docker agent install` runs the supervisor as a LaunchAgent. Shared folders appear in the guest at
   the same path, so `docker build`, `docker compose up --build --wait`, bind mounts, networks and health checks work unchanged.
+  `--publish HOST[:GUEST]` forwards chosen Mac loopback ports to the guest, so a published container port is reachable from the Mac.
   See [docs/docker-engine.md](docs/docker-engine.md) and `scripts/docker-engine-live-test.sh`.
 
 ## 0.4.14 (2026-10-23)

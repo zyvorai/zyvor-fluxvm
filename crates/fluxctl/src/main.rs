@@ -171,6 +171,10 @@ struct DockerEngineArgs {
     /// Login user in the VM (default: your local user name).
     #[arg(long, short = 'l')]
     user: Option<String>,
+    /// Forward 127.0.0.1:HOST on this Mac to the guest's loopback port GUEST (default: the same number), over the engine's SSH
+    /// connection. Needed to reach a container published as `-p 127.0.0.1:PORT:…` from the Mac. Repeatable.
+    #[arg(long, short = 'p', value_name = "HOST[:GUEST]")]
+    publish: Vec<String>,
 }
 
 impl DockerEngineArgs {
@@ -184,6 +188,7 @@ impl DockerEngineArgs {
             shares: self.share.clone(),
             socket: self.socket.clone(),
             user: self.user.clone(),
+            publish: self.publish.clone(),
         }
     }
 }
