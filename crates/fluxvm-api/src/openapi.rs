@@ -411,6 +411,8 @@ fn ops() -> Vec<Op> {
         op("get", "/v1/vznets", "Private vz networks and their members", HOST),
         op("get", "/v1/kube", "Kubernetes clusters made by `fluxctl kube`, with their VMs", VMS),
         op("get", "/v1/kube/{name}", "A cluster's nodes and pods, read from its API server (read-only)", VMS),
+        op("get", "/v1/kube/{name}/pods/{ns}/{pod}/log", "Tail of a pod container's log as text (?container=&tail=&previous=)", VMS),
+        op("post", "/v1/kube/{name}/pods/{ns}/{pod}/exec-ticket", "Single-use 30 s ticket for a shell in a pod (admin); redeem at GET /console/kube/ws/{ticket}", VMS),
         op("get", "/v1/macos-pool", "Enrolled macOS warm-pool slots", VMS).returns("VmList"),
         op("post", "/v1/macos-pool/checkout", "Restore a free macOS pool slot (409 when none is free)", VMS).returns("VmRecord"),
         op("post", "/v1/macos-pool/{id}/enroll", "Make a running, set-up macOS guest a pool slot", VMS).returns("VmRecord"),

@@ -31,9 +31,9 @@ use std::{
 
 /// `fluxctl kube` puts the cluster name here on every node (older clusters used `1` on the server).
 const LABEL: &str = "fluxvm.kube";
-const API_PORT: u16 = 6443;
+pub(crate) const API_PORT: u16 = 6443;
 /// A name every k3s certificate has, so the connection verifies without the address being in the certificate.
-const API_NAME: &str = "kubernetes.default.svc";
+pub(crate) const API_NAME: &str = "kubernetes.default.svc";
 const PODS_LIMIT: usize = 500;
 
 /// A cluster name as `fluxctl kube` accepts it: also what keeps it out of file paths.
@@ -65,7 +65,7 @@ pub(crate) fn group(vms: &[VmRecord]) -> BTreeMap<String, Vec<&VmRecord>> {
     out
 }
 
-fn status_name(s: &VmStatus) -> &'static str {
+pub(crate) fn status_name(s: &VmStatus) -> &'static str {
     match s {
         VmStatus::Creating => "creating",
         VmStatus::Running => "running",
@@ -153,9 +153,17 @@ pub(crate) fn simplify_pod(p: &Value) -> Value {
     } else {
         str_of(p, &["status", "phase"]).unwrap_or("Unknown")
     };
+    let names = |key: &str| -> Vec<&str> {
+        p["spec"][key]
+            .as_array()
+            .map(|a| a.iter().filter_map(|c| c["name"].as_str()).collect())
+            .unwrap_or_default()
+    };
     json!({
         "namespace": str_of(p, &["metadata", "namespace"]),
         "name": str_of(p, &["metadata", "name"]),
+        "containers": names("containers"),
+        "init_containers": names("initContainers"),
         "status": status,
         "phase": str_of(p, &["status", "phase"]),
         "ready": format!("{ready}/{total}"),
@@ -214,7 +222,7 @@ fn visible(vms: &[VmRecord], tenant: Option<&str>) -> Vec<VmRecord> {
         .collect()
 }
 
-fn err(status: StatusCode, message: impl Into<String>) -> ApiError {
+pub(crate) fn err(status: StatusCode, message: impl Into<String>) -> ApiError {
     ApiError {
         status,
         message: message.into(),
@@ -257,7 +265,7 @@ fn kubeconfig_path(name: &str) -> Result<std::path::PathBuf, ApiError> {
 }
 
 /// An error and its causes, `a: b: c`: reqwest's own message stops at "error sending request".
-fn chain(e: &dyn std::error::Error) -> String {
+pub(crate) fn chain(e: &dyn std::error::Error) -> String {
     let mut out = e.to_string();
     let mut cur = e.source();
     while let Some(c) = cur {
@@ -293,11 +301,15 @@ async fn fetch(client: &reqwest::Client, port: u16, path: &str) -> Result<Value,
     })
 }
 
-/// Connects to the API server at `addr` with the kubeconfig's client certificate and returns its nodes and pods.
-async fn read(creds: &Credentials, addr: SocketAddr) -> Result<(Value, Value), ApiError> {
-    let client = reqwest::Client::builder()
+/// An HTTPS client for the API server at `addr`: the cluster's own CA is the only trust root, the kubeconfig's client
+/// certificate authenticates, and `API_NAME` (a name every k3s certificate carries) is what the connection is checked
+/// against.
+pub(crate) fn http_client(
+    creds: &Credentials,
+    addr: SocketAddr,
+) -> Result<reqwest::Client, ApiError> {
+    reqwest::Client::builder()
         .no_proxy()
-        // Trust the cluster's own CA and nothing else.
         .tls_certs_only([reqwest::Certificate::from_pem(&creds.ca).map_err(|e| {
             err(
                 StatusCode::UNPROCESSABLE_ENTITY,
@@ -319,7 +331,12 @@ async fn read(creds: &Credentials, addr: SocketAddr) -> Result<(Value, Value), A
                 StatusCode::INTERNAL_SERVER_ERROR,
                 format!("building the HTTPS client: {e}"),
             )
-        })?;
+        })
+}
+
+/// Connects to the API server at `addr` and returns its nodes and pods.
+async fn read(creds: &Credentials, addr: SocketAddr) -> Result<(Value, Value), ApiError> {
+    let client = http_client(creds, addr)?;
     let pods_path = format!("/api/v1/pods?limit={PODS_LIMIT}");
     let port = addr.port();
     let (nodes, pods) = tokio::join!(
@@ -329,19 +346,26 @@ async fn read(creds: &Credentials, addr: SocketAddr) -> Result<(Value, Value), A
     Ok((nodes?, pods?))
 }
 
-/// `GET /v1/kube/{cluster}`: its nodes and pods.
-pub(crate) async fn get_cluster(
-    State(m): State<Arc<VmManager>>,
-    token_tenant: Option<Extension<TokenTenant>>,
-    Path(name): Path<String>,
-) -> ApiResult<Json<Value>> {
-    if !name_ok(&name) {
+/// Everything needed to talk to one cluster's API server.
+pub(crate) struct Target {
+    pub creds: Credentials,
+    /// Where to try, in order: the kubeconfig's loopback forward, then the server VM's own address.
+    pub addrs: Vec<SocketAddr>,
+    pub vms: Vec<Value>,
+}
+
+/// Finds the cluster among the VMs `tenant` may see, checks its server is running and reads its kubeconfig.
+pub(crate) async fn resolve(
+    m: &Arc<VmManager>,
+    tenant: Option<&str>,
+    name: &str,
+) -> Result<Target, ApiError> {
+    if !name_ok(name) {
         return Err(err(StatusCode::BAD_REQUEST, "not a cluster name"));
     }
-    let tenant = token_tenant.map(|Extension(TokenTenant(t))| t);
-    let all = visible(&m.list().await, tenant.as_deref());
+    let all = visible(&m.list().await, tenant);
     let groups = group(&all);
-    let nodes = groups.get(&name).ok_or_else(|| {
+    let nodes = groups.get(name).ok_or_else(|| {
         err(
             StatusCode::NOT_FOUND,
             format!("no Kubernetes cluster named {name}"),
@@ -363,7 +387,7 @@ pub(crate) async fn get_cluster(
         .guest_ip
         .and_then(|s| s.parse().ok())
         .ok_or_else(|| err(StatusCode::CONFLICT, "the server VM has no address yet"))?;
-    let path = kubeconfig_path(&name)?;
+    let path = kubeconfig_path(name)?;
     let text = std::fs::read_to_string(&path).map_err(|_| {
         err(
             StatusCode::NOT_FOUND,
@@ -379,14 +403,30 @@ pub(crate) async fn get_cluster(
             "the kubeconfig has no client certificate",
         )
     })?;
-    let mut tried = vec![];
-    let mut found = None;
-    for addr in creds
+    let addrs = creds
         .server
         .into_iter()
         .chain([SocketAddr::new(ip, API_PORT)])
-    {
-        match read(&creds, addr).await {
+        .collect();
+    let vms = nodes
+        .iter()
+        .map(|vm| json!({"name": vm.name, "status": status_name(&vm.status)}))
+        .collect();
+    Ok(Target { creds, addrs, vms })
+}
+
+/// `GET /v1/kube/{cluster}`: its nodes and pods.
+pub(crate) async fn get_cluster(
+    State(m): State<Arc<VmManager>>,
+    token_tenant: Option<Extension<TokenTenant>>,
+    Path(name): Path<String>,
+) -> ApiResult<Json<Value>> {
+    let tenant = token_tenant.map(|Extension(TokenTenant(t))| t);
+    let target = resolve(&m, tenant.as_deref(), &name).await?;
+    let mut tried = vec![];
+    let mut found = None;
+    for &addr in &target.addrs {
+        match read(&target.creds, addr).await {
             Ok(both) => {
                 found = Some((addr, both));
                 break;
@@ -401,7 +441,7 @@ pub(crate) async fn get_cluster(
     Ok(Json(json!({
         "cluster": name,
         "api": format!("https://{addr}"),
-        "vms": nodes.iter().map(|vm| json!({"name": vm.name, "status": status_name(&vm.status)})).collect::<Vec<_>>(),
+        "vms": target.vms,
         "nodes": items(&node_list).iter().map(simplify_node).collect::<Vec<_>>(),
         "pods": items(&pod_list).iter().map(simplify_pod).collect::<Vec<_>>(),
         "truncated": pod_list["metadata"].get("continue").is_some_and(|c| c.as_str().is_some_and(|s| !s.is_empty())),
@@ -473,6 +513,7 @@ mod tests {
         assert_eq!(running["status"], "Running");
         assert_eq!(running["ready"], "1/2");
         assert_eq!(running["restarts"], 3);
+        assert_eq!(running["containers"], json!([]));
         assert_eq!(
             (running["node"].as_str(), running["pod_ip"].as_str()),
             (Some("n1"), Some("10.42.0.5"))

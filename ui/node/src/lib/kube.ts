@@ -5,6 +5,8 @@ export type Tone = 'ok' | 'warn' | 'bad' | 'info' | 'idle';
 export type KubePod = {
   namespace: string;
   name: string;
+  containers?: string[];
+  init_containers?: string[];
   status: string;
   phase: string | null;
   ready: string;
