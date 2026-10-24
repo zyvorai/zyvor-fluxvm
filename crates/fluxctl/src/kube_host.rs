@@ -541,8 +541,14 @@ async fn wait_nodes(c: &Cluster, want: usize, started: Instant) -> Result<()> {
         }
         if started.elapsed() > FIRST_BOOT_BUDGET {
             bail!(
-                "Kubernetes did not report {want} Ready node(s) within {}s",
-                FIRST_BOOT_BUDGET.as_secs()
+                "{}",
+                run::with_guest_report(
+                    format!(
+                        "Kubernetes did not report {want} Ready node(s) within {}s",
+                        FIRST_BOOT_BUDGET.as_secs()
+                    ),
+                    run::cloud_init_report(&c.ip, &c.user, &c.identity)
+                )
             );
         }
         let secs = started.elapsed().as_secs();

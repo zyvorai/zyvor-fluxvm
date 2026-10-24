@@ -157,6 +157,13 @@ read-only.
 
 The Studio's **Machines** page also groups a cluster's VMs together (`kube NAME`), so they can be started or stopped as one.
 
+## If the first boot stalls
+
+The first boot installs packages with apt, so it needs this Mac to be online. If the VM never reports an address, or Kubernetes does not report its nodes Ready in
+15 minutes, the command stops and says so; for a guest that is up it includes what cloud-init says in the guest (`cloud-init status` and the end of
+`/var/log/cloud-init-output.log`). `fluxctl serial NAME` shows the guest's console. Fix the network and run the same command again: it picks the VM
+up where it was.
+
 ## Keep it running
 
 ```bash

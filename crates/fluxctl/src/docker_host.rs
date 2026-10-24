@@ -229,8 +229,14 @@ pub async fn ensure_vm<A: VmApi>(api: &A, o: &EngineOptions) -> Result<Engine> {
         }
         if started.elapsed() > FIRST_BOOT_BUDGET {
             bail!(
-                "Docker did not come up in the VM within {}s",
-                FIRST_BOOT_BUDGET.as_secs()
+                "{}",
+                run::with_guest_report(
+                    format!(
+                        "Docker did not come up in the VM within {}s",
+                        FIRST_BOOT_BUDGET.as_secs()
+                    ),
+                    run::cloud_init_report(&ip, &user, &identity)
+                )
             );
         }
         let secs = started.elapsed().as_secs();

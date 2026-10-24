@@ -497,6 +497,53 @@ fn progress_note(what: &str, elapsed: Duration, last: &mut u64, every: u64) -> O
     }
 }
 
+/// What to tell someone whose VM never reported an address. The guest reports it from its own first boot, so a first boot that
+/// is stuck (nearly always cloud-init's apt reaching a mirror: no internet, or a very slow link) looks exactly like this.
+pub(crate) fn no_address_help(vm: &str) -> String {
+    format!(
+        "the VM did not report an address within 180s. Its first boot may be stuck, usually on cloud-init installing packages \
+         with no internet or a slow link; `fluxctl serial {vm}` shows the guest's console (Ctrl-] detaches). \
+         Check that this Mac is online, then run the command again: it picks the VM up where it was."
+    )
+}
+
+/// What cloud-init says on a guest that does answer ssh: its status and the end of its output log, or `None` when it
+/// cannot be asked. For the error of a first boot that came up but never finished (Docker or Kubernetes not ready in time).
+pub(crate) fn cloud_init_report(
+    ip: &str,
+    user: &str,
+    identity: &Option<PathBuf>,
+) -> Option<String> {
+    let out = ssh_base(ip, user, identity)
+        .args([
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "ConnectTimeout=5",
+            "cloud-init status 2>&1 | head -n 3; sudo -n tail -n 12 /var/log/cloud-init-output.log 2>&1",
+        ])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    let text = text.trim();
+    (!text.is_empty()).then(|| text.to_owned())
+}
+
+/// `msg`, then what the guest says cloud-init is doing, indented, when there is anything to say.
+pub(crate) fn with_guest_report(msg: String, report: Option<String>) -> String {
+    match report {
+        Some(r) => format!(
+            "{msg}\ncloud-init in the guest says:\n{}",
+            r.lines()
+                .map(|l| format!("  {l}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        ),
+        None => msg,
+    }
+}
+
 /// Waits for the guest's address and for sshd to accept a login.
 pub(crate) async fn wait_ssh<A: VmApi>(
     api: &A,
@@ -512,7 +559,7 @@ pub(crate) async fn wait_ssh<A: VmApi>(
             break ip;
         }
         if Instant::now() > deadline {
-            bail!("the VM did not report an address within 180s");
+            bail!("{}", no_address_help(&id.to_string()));
         }
         if let Some(n) = progress_note(
             "waiting for the guest's address",
@@ -798,6 +845,21 @@ mod tests {
             .collect();
         assert!(!plain.contains(&"-p".to_string()));
         assert_eq!(plain.last().unwrap(), "root@10.0.0.7");
+    }
+
+    #[test]
+    fn a_stalled_first_boot_is_explained() {
+        let h = no_address_help("docker-engine");
+        assert!(
+            h.contains("180s")
+                && h.contains("fluxctl serial docker-engine")
+                && h.contains("cloud-init")
+        );
+        assert_eq!(with_guest_report("base".into(), None), "base");
+        assert_eq!(
+            with_guest_report("base".into(), Some("status: running\nCurting".into())),
+            "base\ncloud-init in the guest says:\n  status: running\n  Curting"
+        );
     }
 
     #[test]
