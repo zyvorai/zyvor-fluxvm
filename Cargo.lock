@@ -2343,7 +2343,7 @@ dependencies = [
 
 [[package]]
 name = "fluxctl"
-version = "0.4.14"
+version = "0.4.15"
 dependencies = [
  "anstyle",
  "anyhow",
@@ -2384,7 +2384,7 @@ dependencies = [
 
 [[package]]
 name = "fluxvm-agent"
-version = "0.4.14"
+version = "0.4.15"
 dependencies = [
  "anyhow",
  "axum",
@@ -2416,7 +2416,7 @@ dependencies = [
 
 [[package]]
 name = "fluxvm-api"
-version = "0.4.14"
+version = "0.4.15"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -2460,7 +2460,7 @@ dependencies = [
 
 [[package]]
 name = "fluxvm-apple"
-version = "0.4.14"
+version = "0.4.15"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2484,7 +2484,7 @@ dependencies = [
 
 [[package]]
 name = "fluxvm-backup-s3"
-version = "0.4.14"
+version = "0.4.15"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -2519,7 +2519,7 @@ dependencies = [
 
 [[package]]
 name = "fluxvm-cgroup"
-version = "0.4.14"
+version = "0.4.15"
 dependencies = [
  "anyhow",
  "serde",
@@ -2530,7 +2530,7 @@ dependencies = [
 
 [[package]]
 name = "fluxvm-cloud-hypervisor"
-version = "0.4.14"
+version = "0.4.15"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2597,7 +2597,7 @@ dependencies = [
 
 [[package]]
 name = "fluxvm-core"
-version = "0.4.14"
+version = "0.4.15"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2627,7 +2627,7 @@ dependencies = [
 
 [[package]]
 name = "fluxvm-firecracker"
-version = "0.4.14"
+version = "0.4.15"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2640,7 +2640,7 @@ dependencies = [
 
 [[package]]
 name = "fluxvm-guest-agent"
-version = "0.4.14"
+version = "0.4.15"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
@@ -2653,7 +2653,7 @@ dependencies = [
 
 [[package]]
 name = "fluxvm-guest-protocol"
-version = "0.4.14"
+version = "0.4.15"
 dependencies = [
  "serde",
  "serde_json",
@@ -2661,7 +2661,7 @@ dependencies = [
 
 [[package]]
 name = "fluxvm-hypervisor"
-version = "0.4.14"
+version = "0.4.15"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2685,7 +2685,7 @@ dependencies = [
 
 [[package]]
 name = "fluxvm-image"
-version = "0.4.14"
+version = "0.4.15"
 dependencies = [
  "anyhow",
  "axum",
@@ -2733,7 +2733,7 @@ dependencies = [
 
 [[package]]
 name = "fluxvm-kube"
-version = "0.4.14"
+version = "0.4.15"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2754,7 +2754,7 @@ dependencies = [
 
 [[package]]
 name = "fluxvm-mesh"
-version = "0.4.14"
+version = "0.4.15"
 dependencies = [
  "bytes",
  "h3",
@@ -2777,7 +2777,7 @@ dependencies = [
 
 [[package]]
 name = "fluxvm-microvm"
-version = "0.4.14"
+version = "0.4.15"
 dependencies = [
  "anyhow",
  "axum",
@@ -2818,7 +2818,7 @@ dependencies = [
 
 [[package]]
 name = "fluxvm-network"
-version = "0.4.14"
+version = "0.4.15"
 dependencies = [
  "anyhow",
  "axum",
@@ -2845,7 +2845,7 @@ dependencies = [
 
 [[package]]
 name = "fluxvm-oci-init"
-version = "0.4.14"
+version = "0.4.15"
 dependencies = [
  "anyhow",
  "flate2",
@@ -2860,7 +2860,7 @@ dependencies = [
 
 [[package]]
 name = "fluxvm-procbox"
-version = "0.4.14"
+version = "0.4.15"
 dependencies = [
  "anyhow",
  "clap",
@@ -2874,7 +2874,7 @@ dependencies = [
 
 [[package]]
 name = "fluxvm-qemu"
-version = "0.4.14"
+version = "0.4.15"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2890,7 +2890,7 @@ dependencies = [
 
 [[package]]
 name = "fluxvm-scheduler"
-version = "0.4.14"
+version = "0.4.15"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
@@ -2926,7 +2926,7 @@ dependencies = [
 
 [[package]]
 name = "fluxvm-storage"
-version = "0.4.14"
+version = "0.4.15"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2952,7 +2952,7 @@ dependencies = [
 
 [[package]]
 name = "fluxvm-vsock-client"
-version = "0.4.14"
+version = "0.4.15"
 dependencies = [
  "anyhow",
  "fluxvm-core",
@@ -2964,7 +2964,7 @@ dependencies = [
 
 [[package]]
 name = "fluxvm-vz-switch"
-version = "0.4.14"
+version = "0.4.15"
 dependencies = [
  "aes-gcm",
  "anyhow",
