@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- **Studio: a traffic graph for Kubernetes clusters.** `GET /v1/kube/{name}/flows` runs `hubble observe` in each Cilium agent over the
+  cluster's `exec` API and folds the flows into workload-to-workload edges (protocol, port, flow and new-connection counts, drops).
+  The Kubernetes page gets a **Traffic** tab: a left-to-right service map with line weight by flow count, red for drops, a details
+  panel per workload, and filters for namespace, name or port and for system pods. Needs Cilium (the `fluxctl kube` default);
+  flannel clusters are told so. `kube_pod` can now run a single command in a pod and collect its output, not only open a shell.
 - **`fluxctl kube`: Cilium is the default pod network, and cross-node pod traffic works.** The earlier multi-node release joined
   workers but flannel bound its VXLAN tunnel to the NAT card, which VMs cannot reach each other over, so pods on different nodes
   could not talk. `up` now installs Cilium (chart pinned, `--cilium-version`) through k3s's helm controller with flannel and k3s's

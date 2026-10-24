@@ -335,7 +335,10 @@ pub(crate) fn http_client(
 }
 
 /// Connects to the API server at `addr` and returns its nodes and pods.
-async fn read(creds: &Credentials, addr: SocketAddr) -> Result<(Value, Value), ApiError> {
+pub(crate) async fn read(
+    creds: &Credentials,
+    addr: SocketAddr,
+) -> Result<(Value, Value), ApiError> {
     let client = http_client(creds, addr)?;
     let pods_path = format!("/api/v1/pods?limit={PODS_LIMIT}");
     let port = addr.port();
