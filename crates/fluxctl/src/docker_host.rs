@@ -60,14 +60,15 @@ impl Default for EngineOptions {
 /// Where the Docker CLI connects: `{run_dir}/docker-engine.sock` (next to the built-in `docker.sock`).
 pub fn default_socket() -> PathBuf {
     // SAFETY: getuid has no preconditions and cannot fail.
-    PathBuf::from(format!("/tmp/fluxvm-run-{}", unsafe { libc::getuid() })).join("docker-engine.sock")
+    PathBuf::from(format!("/tmp/fluxvm-run-{}", unsafe { libc::getuid() }))
+        .join("docker-engine.sock")
 }
 
 fn socket_of(o: &EngineOptions) -> PathBuf {
     o.socket.clone().unwrap_or_else(default_socket)
 }
 
-fn pid_file(socket: &Path) -> PathBuf {
+pub(crate) fn pid_file(socket: &Path) -> PathBuf {
     let mut p = socket.as_os_str().to_owned();
     p.push(".pid");
     PathBuf::from(p)
@@ -131,7 +132,9 @@ pub fn ping(socket: &Path) -> bool {
     };
     let _ = s.set_read_timeout(Some(Duration::from_secs(3)));
     let _ = s.set_write_timeout(Some(Duration::from_secs(3)));
-    if s.write_all(b"GET /_ping HTTP/1.1\r\nHost: docker\r\nConnection: close\r\n\r\n").is_err() {
+    if s.write_all(b"GET /_ping HTTP/1.1\r\nHost: docker\r\nConnection: close\r\n\r\n")
+        .is_err()
+    {
         return false;
     }
     let mut out = String::new();
@@ -153,16 +156,22 @@ pub struct Engine {
     pub socket: PathBuf,
 }
 
-fn user_name(o: &EngineOptions) -> Result<String> {
+pub(crate) fn user_name(o: &EngineOptions) -> Result<String> {
     o.user
         .clone()
         .or_else(|| std::env::var("USER").ok())
-        .filter(|u| !u.is_empty() && u.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-'))
+        .filter(|u| {
+            !u.is_empty()
+                && u.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+        })
         .context("could not tell which user to create in the VM; pass --user")
 }
 
-fn home() -> Result<PathBuf> {
-    std::env::var_os("HOME").map(PathBuf::from).context("HOME is not set")
+pub(crate) fn home() -> Result<PathBuf> {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .context("HOME is not set")
 }
 
 /// Finds or creates the engine VM, starts it if stopped, and waits until its Docker answers over SSH.
@@ -192,7 +201,10 @@ pub async fn ensure_vm<A: VmApi>(api: &A, o: &EngineOptions) -> Result<Engine> {
                 o.name
             );
             let id = api.create(engine_spec(o, &user, &key, shares)).await?;
-            let labels = std::collections::BTreeMap::from([("fluxvm.docker-engine".to_owned(), "1".to_owned())]);
+            let labels = std::collections::BTreeMap::from([(
+                "fluxvm.docker-engine".to_owned(),
+                "1".to_owned(),
+            )]);
             let _ = api.set_labels(id, labels).await; // a convenience for `list`, not needed to work
             id
         }
@@ -200,7 +212,7 @@ pub async fn ensure_vm<A: VmApi>(api: &A, o: &EngineOptions) -> Result<Engine> {
     let ip = run::wait_ssh(api, id, &user, &identity).await?;
     let mut last = 0u64;
     loop {
-        let ready = Command::from(run::ssh_base(&ip, &user, &identity))
+        let ready = run::ssh_base(&ip, &user, &identity)
             .args([
                 "-o",
                 "BatchMode=yes",
@@ -216,7 +228,10 @@ pub async fn ensure_vm<A: VmApi>(api: &A, o: &EngineOptions) -> Result<Engine> {
             break;
         }
         if started.elapsed() > FIRST_BOOT_BUDGET {
-            bail!("Docker did not come up in the VM within {}s", FIRST_BOOT_BUDGET.as_secs());
+            bail!(
+                "Docker did not come up in the VM within {}s",
+                FIRST_BOOT_BUDGET.as_secs()
+            );
         }
         let secs = started.elapsed().as_secs();
         if secs / 30 > last {
@@ -225,7 +240,14 @@ pub async fn ensure_vm<A: VmApi>(api: &A, o: &EngineOptions) -> Result<Engine> {
         }
         tokio::time::sleep(Duration::from_secs(3)).await;
     }
-    Ok(Engine { publish: parse_publish_all(&o.publish)?, id, ip, user, identity, socket })
+    Ok(Engine {
+        publish: parse_publish_all(&o.publish)?,
+        id,
+        ip,
+        user,
+        identity,
+        socket,
+    })
 }
 
 /// `8080` or `18443:8443` -> (host port, guest port). Both are loopback ports; the Mac side is never exposed beyond 127.0.0.1.
@@ -242,8 +264,11 @@ pub fn parse_publish(s: &str) -> Result<(u16, u16)> {
     }
 }
 
-fn parse_publish_all(all: &[String]) -> Result<Vec<(u16, u16)>> {
-    let mut out: Vec<(u16, u16)> = all.iter().map(|s| parse_publish(s)).collect::<Result<_>>()?;
+pub(crate) fn parse_publish_all(all: &[String]) -> Result<Vec<(u16, u16)>> {
+    let mut out: Vec<(u16, u16)> = all
+        .iter()
+        .map(|s| parse_publish(s))
+        .collect::<Result<_>>()?;
     out.sort_unstable();
     out.dedup();
     let mut seen = std::collections::BTreeSet::new();
@@ -264,11 +289,51 @@ fn forward_spec(e: &Engine) -> String {
     s
 }
 
+/// A detached `ssh -N` with these `-L` forwards. Options must precede the destination `ssh_base` already appended, so
+/// the argument order is rebuilt. Shared with `fluxctl kube`.
+pub(crate) fn forward_command(
+    ip: &str,
+    user: &str,
+    identity: &Option<PathBuf>,
+    forwards: &[String],
+) -> Result<Command> {
+    let base = run::ssh_base(ip, user, identity);
+    let program = base.get_program().to_owned();
+    let mut args: Vec<std::ffi::OsString> = base.get_args().map(|a| a.to_owned()).collect();
+    let dest = args.pop().context("ssh destination missing")?;
+    let mut c = Command::new(program);
+    c.args(args);
+    c.args([
+        "-o",
+        "ExitOnForwardFailure=yes",
+        "-o",
+        "ServerAliveInterval=15",
+        "-o",
+        "ServerAliveCountMax=3",
+        "-o",
+        "StreamLocalBindUnlink=yes",
+        "-o",
+        "BatchMode=yes",
+        "-N",
+    ]);
+    for f in forwards {
+        c.arg("-L").arg(f);
+    }
+    c.arg(dest);
+    c.stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    c.process_group(0); // survive Ctrl-C and the terminal closing
+    Ok(c)
+}
+
 /// Starts the SSH forward of the guest's Docker socket (and any published ports) unless one with the same settings already
 /// answers. Returns the forwarder's pid when it started a new one.
 pub fn ensure_forward(e: &Engine) -> Result<Option<u32>> {
     let spec = forward_spec(e);
-    let recorded = std::fs::read_to_string(pid_file(&e.socket)).ok().and_then(|t| t.lines().nth(1).map(str::to_owned));
+    let recorded = std::fs::read_to_string(pid_file(&e.socket))
+        .ok()
+        .and_then(|t| t.lines().nth(1).map(str::to_owned));
     if ping(&e.socket) && recorded.as_deref() == Some(spec.as_str()) {
         return Ok(None);
     }
@@ -277,28 +342,13 @@ pub fn ensure_forward(e: &Engine) -> Result<Option<u32>> {
     }
     stop_forwarder(&e.socket);
     let _ = std::fs::remove_file(&e.socket);
-    let mut c = run::ssh_base(&e.ip, &e.user, &e.identity);
-    // Options must precede the destination `ssh_base` already appended, so rebuild the argument order.
-    let program = c.get_program().to_owned();
-    let mut args: Vec<std::ffi::OsString> = c.get_args().map(|a| a.to_owned()).collect();
-    let dest = args.pop().context("ssh destination missing")?;
-    c = Command::new(program);
-    c.args(args);
-    c.args([
-        "-o", "ExitOnForwardFailure=yes",
-        "-o", "ServerAliveInterval=15",
-        "-o", "ServerAliveCountMax=3",
-        "-o", "StreamLocalBindUnlink=yes",
-        "-o", "BatchMode=yes",
-        "-N",
-    ]);
-    c.arg("-L").arg(format!("{}:/var/run/docker.sock", e.socket.display()));
-    for (h, g) in &e.publish {
-        c.arg("-L").arg(format!("127.0.0.1:{h}:127.0.0.1:{g}"));
-    }
-    c.arg(dest);
-    c.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
-    c.process_group(0); // survive Ctrl-C and the terminal closing
+    let mut forwards = vec![format!("{}:/var/run/docker.sock", e.socket.display())];
+    forwards.extend(
+        e.publish
+            .iter()
+            .map(|(h, g)| format!("127.0.0.1:{h}:127.0.0.1:{g}")),
+    );
+    let mut c = forward_command(&e.ip, &e.user, &e.identity, &forwards)?;
     let child = c.spawn().context("starting the SSH forward")?;
     let pid = child.id();
     std::fs::write(pid_file(&e.socket), format!("{pid}\n{spec}\n"))?;
@@ -309,31 +359,38 @@ pub fn ensure_forward(e: &Engine) -> Result<Option<u32>> {
         }
         std::thread::sleep(Duration::from_millis(300));
     }
-    bail!("the SSH forward started but {} does not answer", e.socket.display())
+    bail!(
+        "the SSH forward started but {} does not answer",
+        e.socket.display()
+    )
 }
 
 fn stop_forwarder(socket: &Path) {
-    if let Ok(text) = std::fs::read_to_string(pid_file(socket))
+    stop_recorded_ssh(&pid_file(socket), "docker.sock");
+}
+
+/// Stops the `ssh` whose pid is on the first line of `pidfile`, but only if its command line contains `needle`, so a
+/// stale pid can never signal an unrelated process. Removes the pid file. Shared with `fluxctl kube`.
+pub(crate) fn stop_recorded_ssh(pidfile: &Path, needle: &str) {
+    if let Ok(text) = std::fs::read_to_string(pidfile)
         && let Some(first) = text.lines().next()
         && let Ok(pid) = first.trim().parse::<i32>()
         && pid > 1
+        && is_our_ssh(pid, needle)
     {
-        // SAFETY: kill with a pid read from our own pid file; a stale pid at worst signals nothing or an unrelated
-        // process we started earlier, which `ps` below guards against by checking the command line.
-        if is_our_ssh(pid) {
-            unsafe { libc::kill(pid, libc::SIGTERM) };
-        }
+        // SAFETY: kill with a pid read from our own pid file and confirmed by its command line.
+        unsafe { libc::kill(pid, libc::SIGTERM) };
     }
-    let _ = std::fs::remove_file(pid_file(socket));
+    let _ = std::fs::remove_file(pidfile);
 }
 
-fn is_our_ssh(pid: i32) -> bool {
+fn is_our_ssh(pid: i32, needle: &str) -> bool {
     Command::new("ps")
         .args(["-o", "command=", "-p", &pid.to_string()])
         .output()
         .map(|o| {
             let c = String::from_utf8_lossy(&o.stdout);
-            c.contains("ssh") && c.contains("docker.sock")
+            c.contains("ssh") && c.contains(needle)
         })
         .unwrap_or(false)
 }
@@ -394,7 +451,8 @@ pub async fn down<A: VmApi>(api: &A, o: &EngineOptions, purge: bool) -> Result<(
 pub async fn supervise<A: VmApi>(api: &A, o: &EngineOptions, every: Duration) -> Result<()> {
     loop {
         let socket = socket_of(o);
-        let healthy = ping(&socket) && matches!(api.find(&o.name).await, Ok(Some((_, s))) if s == "running");
+        let healthy =
+            ping(&socket) && matches!(api.find(&o.name).await, Ok(Some((_, s))) if s == "running");
         if !healthy {
             match up(api, o).await {
                 Ok(_) => eprintln!("docker engine is up"),
@@ -406,12 +464,69 @@ pub async fn supervise<A: VmApi>(api: &A, o: &EngineOptions, every: Duration) ->
 }
 
 fn xml_escape(s: &str) -> String {
-    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
+/// A LaunchAgent that runs `args` at login and restarts it if it exits. Shared with `fluxctl kube`.
+pub(crate) fn render_plist(
+    label: &str,
+    args: &[String],
+    log: &Path,
+    env: &[(String, String)],
+) -> String {
+    let items: String = args
+        .iter()
+        .map(|a| format!("    <string>{}</string>\n", xml_escape(a)))
+        .collect();
+    let env_block = if env.is_empty() {
+        String::new()
+    } else {
+        let rows: String = env
+            .iter()
+            .map(|(k, v)| {
+                format!(
+                    "    <key>{}</key><string>{}</string>\n",
+                    xml_escape(k),
+                    xml_escape(v)
+                )
+            })
+            .collect();
+        format!("  <key>EnvironmentVariables</key>\n  <dict>\n{rows}  </dict>\n")
+    };
+    format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\">\n<dict>\n  <key>Label</key><string>{label}</string>\n  <key>ProgramArguments</key>\n  <array>\n{items}  </array>\n{env_block}  <key>RunAtLoad</key><true/>\n  <key>KeepAlive</key><true/>\n  <key>ThrottleInterval</key><integer>30</integer>\n  <key>StandardOutPath</key><string>{log}</string>\n  <key>StandardErrorPath</key><string>{log}</string>\n</dict>\n</plist>\n",
+        log = xml_escape(&log.display().to_string()),
+    )
+}
+
+/// Where the daemon is and which VZ runner it uses, carried into a plist. Never a token: nothing secret goes in a plist.
+pub(crate) fn carried_env() -> Vec<(String, String)> {
+    ["FLUXVM_URL", "FLUXVM_VZ_RUNNER"]
+        .iter()
+        .filter_map(|k| {
+            std::env::var(k)
+                .ok()
+                .filter(|v| !v.is_empty())
+                .map(|v| (k.to_string(), v))
+        })
+        .collect()
 }
 
 /// The LaunchAgent that runs `fluxctl docker supervise` at login and restarts it if it exits.
-pub fn render_agent(fluxctl: &Path, o: &EngineOptions, log: &Path, env: &[(String, String)]) -> String {
-    let mut args = vec![fluxctl.display().to_string(), "docker".into(), "supervise".into()];
+pub fn render_agent(
+    fluxctl: &Path,
+    o: &EngineOptions,
+    log: &Path,
+    env: &[(String, String)],
+) -> String {
+    let mut args = vec![
+        fluxctl.display().to_string(),
+        "docker".into(),
+        "supervise".into(),
+    ];
     args.push("--name".into());
     args.push(o.name.clone());
     args.push("--cpus".into());
@@ -440,29 +555,13 @@ pub fn render_agent(fluxctl: &Path, o: &EngineOptions, log: &Path, env: &[(Strin
         args.push("--publish".into());
         args.push(p.clone());
     }
-    let items: String = args
-        .iter()
-        .map(|a| format!("    <string>{}</string>\n", xml_escape(a)))
-        .collect();
-    let env_block = if env.is_empty() {
-        String::new()
-    } else {
-        let rows: String = env
-            .iter()
-            .map(|(k, v)| format!("    <key>{}</key><string>{}</string>\n", xml_escape(k), xml_escape(v)))
-            .collect();
-        format!("  <key>EnvironmentVariables</key>\n  <dict>\n{rows}  </dict>\n")
-    };
-    format!(
-        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\">\n<dict>\n  <key>Label</key><string>{AGENT_LABEL}</string>\n  <key>ProgramArguments</key>\n  <array>\n{items}  </array>\n{env_block}  <key>RunAtLoad</key><true/>\n  <key>KeepAlive</key><true/>\n  <key>ThrottleInterval</key><integer>30</integer>\n  <key>StandardOutPath</key><string>{log}</string>\n  <key>StandardErrorPath</key><string>{log}</string>\n</dict>\n</plist>\n",
-        log = xml_escape(&log.display().to_string()),
-        env_block = env_block,
-    )
+    render_plist(AGENT_LABEL, &args, log, env)
 }
 
 fn agent_paths(home: &Path) -> (PathBuf, PathBuf) {
     (
-        home.join("Library/LaunchAgents").join(format!("{AGENT_LABEL}.plist")),
+        home.join("Library/LaunchAgents")
+            .join(format!("{AGENT_LABEL}.plist")),
         home.join("Library/Logs/fluxvm-docker-engine.log"),
     )
 }
@@ -472,43 +571,53 @@ fn gui_domain() -> String {
     format!("gui/{}", unsafe { libc::getuid() })
 }
 
+/// Load (replacing any loaded copy of) the LaunchAgent in `plist`.
+pub(crate) fn launchctl_load(label: &str, plist: &Path) -> Result<()> {
+    let domain = gui_domain();
+    let _ = Command::new("launchctl")
+        .args(["bootout", &format!("{domain}/{label}")])
+        .output();
+    let out = Command::new("launchctl")
+        .args(["bootstrap", &domain])
+        .arg(plist)
+        .output()
+        .context("running launchctl")?;
+    if !out.status.success() {
+        bail!(
+            "launchctl bootstrap failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    Ok(())
+}
+
+/// Unload the agent and delete its plist; false when there was none.
+pub(crate) fn launchctl_unload(label: &str, plist: &Path) -> Result<bool> {
+    let _ = Command::new("launchctl")
+        .args(["bootout", &format!("{}/{label}", gui_domain())])
+        .output();
+    match std::fs::remove_file(plist) {
+        Ok(()) => Ok(true),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(e.into()),
+    }
+}
+
 /// `fluxctl docker agent install`: write the LaunchAgent and load it.
 pub fn agent_install(o: &EngineOptions) -> Result<PathBuf> {
     let home = home()?;
     let (plist, log) = agent_paths(&home);
     let exe = std::env::current_exe().context("finding fluxctl's own path")?;
     std::fs::create_dir_all(plist.parent().unwrap())?;
-    // Carry over where the daemon is and which VZ runner it uses. Never a token: nothing secret goes in a plist.
-    let env: Vec<(String, String)> = ["FLUXVM_URL", "FLUXVM_VZ_RUNNER"]
-        .iter()
-        .filter_map(|k| std::env::var(k).ok().filter(|v| !v.is_empty()).map(|v| (k.to_string(), v)))
-        .collect();
-    std::fs::write(&plist, render_agent(&exe, o, &log, &env))?;
-    let domain = gui_domain();
-    let _ = Command::new("launchctl").args(["bootout", &format!("{domain}/{AGENT_LABEL}")]).output();
-    let out = Command::new("launchctl")
-        .args(["bootstrap", &domain])
-        .arg(&plist)
-        .output()
-        .context("running launchctl")?;
-    if !out.status.success() {
-        bail!("launchctl bootstrap failed: {}", String::from_utf8_lossy(&out.stderr).trim());
-    }
+    std::fs::write(&plist, render_agent(&exe, o, &log, &carried_env()))?;
+    launchctl_load(AGENT_LABEL, &plist)?;
     Ok(plist)
 }
 
 /// `fluxctl docker agent uninstall`.
 pub fn agent_uninstall() -> Result<bool> {
-    let home = home()?;
-    let (plist, _) = agent_paths(&home);
-    let _ = Command::new("launchctl")
-        .args(["bootout", &format!("{}/{AGENT_LABEL}", gui_domain())])
-        .output();
-    match std::fs::remove_file(&plist) {
-        Ok(()) => Ok(true),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(e) => Err(e.into()),
-    }
+    let (plist, _) = agent_paths(&home()?);
+    launchctl_unload(AGENT_LABEL, &plist)
 }
 
 #[cfg(test)]
@@ -522,7 +631,9 @@ mod tests {
             &o,
             "mini",
             "ssh-ed25519 AAAA test",
-            vec![json!({"host_path": "/Users/mini/ci", "guest_path": "/Users/mini/ci", "read_only": false})],
+            vec![
+                json!({"host_path": "/Users/mini/ci", "guest_path": "/Users/mini/ci", "read_only": false}),
+            ],
         );
         assert_eq!(spec["name"], "docker-engine");
         assert_eq!(spec["vcpus"], 2);
@@ -534,7 +645,13 @@ mod tests {
             assert!(pk.iter().any(|p| p == want), "{want}");
         }
         // cloud-init runcmd entries are strings, not argv arrays.
-        assert!(spec["cloud_init"]["runcmd"].as_array().unwrap().iter().all(Value::is_string));
+        assert!(
+            spec["cloud_init"]["runcmd"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(Value::is_string)
+        );
         assert_eq!(spec["cloud_init"]["user"], "mini");
         assert_eq!(spec["shared_folders"][0]["guest_path"], "/Users/mini/ci");
     }
@@ -547,9 +664,24 @@ mod tests {
         assert_eq!(v["host_path"], real.to_str().unwrap());
         assert_eq!(v["guest_path"], real.to_str().unwrap());
         assert_eq!(v["read_only"], false);
-        let ro = parse_share(&format!("{}:/work:ro", real.display()), Path::new("/"), None).unwrap();
-        assert_eq!((ro["guest_path"].as_str(), ro["read_only"].as_bool()), (Some("/work"), Some(true)));
-        assert!(parse_share(&format!("{}:relative", real.display()), Path::new("/"), None).is_err());
+        let ro = parse_share(
+            &format!("{}:/work:ro", real.display()),
+            Path::new("/"),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            (ro["guest_path"].as_str(), ro["read_only"].as_bool()),
+            (Some("/work"), Some(true))
+        );
+        assert!(
+            parse_share(
+                &format!("{}:relative", real.display()),
+                Path::new("/"),
+                None
+            )
+            .is_err()
+        );
         assert!(parse_share("/definitely/not/here", Path::new("/"), None).is_err());
     }
 
@@ -572,7 +704,8 @@ mod tests {
             let mut buf = [0u8; 256];
             let n = s.read(&mut buf).unwrap();
             assert!(String::from_utf8_lossy(&buf[..n]).starts_with("GET /_ping"));
-            s.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK").unwrap();
+            s.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK")
+                .unwrap();
         });
         assert!(ping(&sock));
         t.join().unwrap();
@@ -581,11 +714,17 @@ mod tests {
 
     #[test]
     fn env_line_and_default_socket() {
-        assert_eq!(env_line(Path::new("/tmp/x.sock")), "export DOCKER_HOST=unix:///tmp/x.sock");
+        assert_eq!(
+            env_line(Path::new("/tmp/x.sock")),
+            "export DOCKER_HOST=unix:///tmp/x.sock"
+        );
         let s = default_socket();
         assert!(s.to_string_lossy().starts_with("/tmp/fluxvm-run-"));
         assert_eq!(s.file_name().unwrap(), "docker-engine.sock");
-        assert_eq!(pid_file(Path::new("/tmp/x.sock")), PathBuf::from("/tmp/x.sock.pid"));
+        assert_eq!(
+            pid_file(Path::new("/tmp/x.sock")),
+            PathBuf::from("/tmp/x.sock.pid")
+        );
     }
 
     #[test]
@@ -597,9 +736,17 @@ mod tests {
             ..Default::default()
         };
         let env = vec![("FLUXVM_URL".to_owned(), "http://127.0.0.1:7788".to_owned())];
-        let p = render_agent(Path::new("/opt/homebrew/bin/fluxctl"), &o, Path::new("/tmp/log"), &env);
+        let p = render_agent(
+            Path::new("/opt/homebrew/bin/fluxctl"),
+            &o,
+            Path::new("/tmp/log"),
+            &env,
+        );
         assert!(p.contains("<key>FLUXVM_URL</key><string>http://127.0.0.1:7788</string>"));
-        assert!(!render_agent(Path::new("/x"), &o, Path::new("/l"), &[]).contains("EnvironmentVariables"));
+        assert!(
+            !render_agent(Path::new("/x"), &o, Path::new("/l"), &[])
+                .contains("EnvironmentVariables")
+        );
         assert!(p.contains(AGENT_LABEL));
         assert!(p.contains("<string>supervise</string>"));
         assert!(p.contains("<string>4096</string>"));
@@ -637,10 +784,16 @@ mod tests {
 
     #[test]
     fn user_names_are_validated() {
-        let ok = EngineOptions { user: Some("mini".into()), ..Default::default() };
+        let ok = EngineOptions {
+            user: Some("mini".into()),
+            ..Default::default()
+        };
         assert_eq!(user_name(&ok).unwrap(), "mini");
         for bad in ["", "a b", "x;rm", "a/b"] {
-            let o = EngineOptions { user: Some(bad.into()), ..Default::default() };
+            let o = EngineOptions {
+                user: Some(bad.into()),
+                ..Default::default()
+            };
             assert!(user_name(&o).is_err(), "{bad:?}");
         }
     }

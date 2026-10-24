@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- **`fluxctl kube`: a single-node Kubernetes (k3s) cluster in a FluxVM VM, on a Mac.** Like `colima start --kubernetes`, built the
+  way `fluxctl docker` is. `fluxctl kube up [--publish PORT] [--share HOST[:GUEST][:ro]] [--k3s-version V]` creates (or starts) a
+  Debian VM running k3s, forwards the API server to `127.0.0.1:6443` over a supervised SSH connection, and writes a kubeconfig
+  (cluster, user and context named after the VM, mode 600) to `~/.kube/fluxvm-NAME.yaml`, leaving `~/.kube/config` alone. `env`,
+  `status`, `down [--purge]` and `supervise` complete it, and `kube agent install` runs the supervisor as a LaunchAgent. The
+  LaunchAgent, SSH-forward and pid-file code is now shared with `fluxctl docker`. See [docs/kubernetes-on-mac.md](docs/kubernetes-on-mac.md).
 - **`fluxctl docker`: a real Docker engine in a FluxVM VM.** The built-in Docker socket maps containers to microVMs and cannot
   `build`, run Compose, bind-mount Mac paths or create networks. `fluxctl docker up [--share HOST[:GUEST][:ro]]` creates (or
   starts) a Debian VM running `dockerd` and publishes its socket at `{run_dir}/docker-engine.sock`; `env`, `status`, `down [--purge]`

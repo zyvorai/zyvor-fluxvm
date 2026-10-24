@@ -31,18 +31,19 @@ mod cloud;
 mod compose;
 mod contexts;
 mod create;
+mod docker_host;
 mod doctor;
 mod fleet_cli;
 mod fleet_client;
 mod guard_cmd;
 mod infer;
+mod kube_host;
 mod launch_agent;
 mod mcp;
 mod mcp_install;
 mod netobs;
 mod output;
 mod remote;
-mod docker_host;
 mod run;
 mod sandbox_run;
 mod stable_exe;
@@ -228,6 +229,110 @@ enum DockerCommand {
 enum DockerAgentCommand {
     /// Write ~/Library/LaunchAgents/dev.zyvor.fluxvm.docker-engine.plist with these options and load it.
     Install(DockerEngineArgs),
+    /// Unload and delete it.
+    Uninstall,
+}
+
+/// Options shared by the `fluxctl kube` commands that create or supervise the cluster VM.
+#[derive(clap::Args, Clone)]
+struct KubeArgs {
+    /// Name of the VM, the node and the kubeconfig context (lowercase letters, digits, dashes).
+    #[arg(long, default_value = kube_host::DEFAULT_NAME)]
+    name: String,
+    #[arg(long, default_value_t = 2)]
+    cpus: u8,
+    #[arg(long, default_value_t = 4096)]
+    memory_mib: u64,
+    /// Disk size for the VM, the images and everything the cluster stores.
+    #[arg(long, default_value_t = 30)]
+    disk_gib: u64,
+    /// Image name or path (default on macOS: debian-13).
+    #[arg(long)]
+    image: Option<String>,
+    /// Share a host directory into the VM: HOST or HOST:GUEST[:ro]. The guest path defaults to the host path, so
+    /// `hostPath` volumes resolve on both sides. Repeatable; only applies when the VM is created.
+    #[arg(long, value_name = "HOST[:GUEST][:ro]")]
+    share: Vec<String>,
+    /// Login user in the VM (default: your local user name).
+    #[arg(long, short = 'l')]
+    user: Option<String>,
+    /// Forward 127.0.0.1:HOST on this Mac to the guest's loopback port GUEST (default: the same number), for NodePort
+    /// services and the like. Repeatable.
+    #[arg(long, short = 'p', value_name = "HOST[:GUEST]")]
+    publish: Vec<String>,
+    /// Where this Mac reaches the Kubernetes API server (127.0.0.1:PORT).
+    #[arg(long, default_value_t = 6443)]
+    api_port: u16,
+    /// A k3s release such as v1.31.4+k3s1 (default: the installer's stable channel). Only applies when the VM is created.
+    #[arg(long)]
+    k3s_version: Option<String>,
+    /// An extra `k3s server` argument, for example `--k3s-arg=--disable=metrics-server`. Repeatable; only applies when
+    /// the VM is created.
+    #[arg(long, value_name = "ARG")]
+    k3s_arg: Vec<String>,
+    /// Keep k3s's bundled Traefik ingress controller (off by default).
+    #[arg(long)]
+    traefik: bool,
+    /// Where to write the kubeconfig (default: ~/.kube/fluxvm-NAME.yaml).
+    #[arg(long)]
+    kubeconfig: Option<std::path::PathBuf>,
+}
+
+impl KubeArgs {
+    fn options(&self) -> kube_host::KubeOptions {
+        kube_host::KubeOptions {
+            name: self.name.clone(),
+            cpus: self.cpus,
+            memory_mib: self.memory_mib,
+            disk_gib: self.disk_gib,
+            image: self.image.clone(),
+            shares: self.share.clone(),
+            user: self.user.clone(),
+            publish: self.publish.clone(),
+            api_port: self.api_port,
+            k3s_version: self.k3s_version.clone(),
+            k3s_args: self.k3s_arg.clone(),
+            traefik: self.traefik,
+            kubeconfig: self.kubeconfig.clone(),
+        }
+    }
+}
+
+#[derive(Subcommand)]
+enum KubeCommand {
+    /// Create or start a single-node k3s cluster in a VM, publish its API server on this Mac and write a kubeconfig.
+    /// Idempotent. The first run downloads k3s and takes a few minutes.
+    Up(KubeArgs),
+    /// The VM, its address, whether the API answers and where the kubeconfig is, as JSON.
+    Status(KubeArgs),
+    /// Print `export KUBECONFIG=…` for this cluster (`eval "$(fluxctl kube env)"`).
+    Env(KubeArgs),
+    /// Stop the forward and the VM. `--purge` also deletes the VM, the cluster's state and the kubeconfig.
+    Down {
+        #[command(flatten)]
+        cluster: KubeArgs,
+        #[arg(long)]
+        purge: bool,
+    },
+    /// Keep the VM running and the API port answering until stopped (what the LaunchAgent runs).
+    Supervise {
+        #[command(flatten)]
+        cluster: KubeArgs,
+        /// Seconds between health checks.
+        #[arg(long, default_value_t = 30)]
+        every: u64,
+    },
+    /// Run `supervise` as a LaunchAgent of the logged-in user: starts at login, restarts if it exits.
+    Agent {
+        #[command(subcommand)]
+        command: KubeAgentCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum KubeAgentCommand {
+    /// Write ~/Library/LaunchAgents/dev.zyvor.fluxvm.kube.plist with these options and load it.
+    Install(KubeArgs),
     /// Unload and delete it.
     Uninstall,
 }
@@ -793,6 +898,12 @@ enum Command {
     Docker {
         #[command(subcommand)]
         command: DockerCommand,
+    },
+    /// A single-node Kubernetes (k3s) cluster in a FluxVM VM, with its API server and kubeconfig on this Mac. See
+    /// `fluxctl kube up --help`.
+    Kube {
+        #[command(subcommand)]
+        command: KubeCommand,
     },
     /// Boot a throwaway VM, SSH into it, and delete it when the session ends (`--keep` to retain it).
     /// `fluxctl run` on a Mac uses the built-in `debian-13`; elsewhere pass an image.
@@ -4983,6 +5094,7 @@ async fn run_remote(
             }
         }
         Command::Docker { command } => docker_command(r, command).await?,
+        Command::Kube { command } => kube_command(r, command).await?,
         Command::Run {
             image,
             name,
@@ -6466,6 +6578,7 @@ async fn main() -> Result<()> {
             }
         }
         Command::Docker { command } => docker_command(&run::Local(&m), command).await?,
+        Command::Kube { command } => kube_command(&run::Local(&m), command).await?,
         Command::Run {
             image,
             name,
@@ -7565,12 +7678,21 @@ async fn docker_command<A: run::VmApi>(api: &A, command: DockerCommand) -> Resul
             let o = a.options();
             println!(
                 "{}",
-                docker_host::env_line(&o.socket.clone().unwrap_or_else(docker_host::default_socket))
+                docker_host::env_line(
+                    &o.socket.clone().unwrap_or_else(docker_host::default_socket)
+                )
             );
         }
-        DockerCommand::Down { engine, purge } => docker_host::down(api, &engine.options(), purge).await?,
+        DockerCommand::Down { engine, purge } => {
+            docker_host::down(api, &engine.options(), purge).await?
+        }
         DockerCommand::Supervise { engine, every } => {
-            docker_host::supervise(api, &engine.options(), std::time::Duration::from_secs(every.max(5))).await?;
+            docker_host::supervise(
+                api,
+                &engine.options(),
+                std::time::Duration::from_secs(every.max(5)),
+            )
+            .await?;
         }
         DockerCommand::Agent { command } => match command {
             DockerAgentCommand::Install(a) => {
@@ -7581,7 +7703,63 @@ async fn docker_command<A: run::VmApi>(api: &A, command: DockerCommand) -> Resul
                 );
             }
             DockerAgentCommand::Uninstall => {
-                println!("{}", serde_json::json!({"ok": true, "removed": docker_host::agent_uninstall()?}));
+                println!(
+                    "{}",
+                    serde_json::json!({"ok": true, "removed": docker_host::agent_uninstall()?})
+                );
+            }
+        },
+    }
+    Ok(())
+}
+
+/// `fluxctl kube …` for any daemon connection (local state dir or `--server`).
+async fn kube_command<A: run::VmApi>(api: &A, command: KubeCommand) -> Result<()> {
+    match command {
+        KubeCommand::Up(a) => {
+            let kubeconfig = kube_host::up(api, &a.options()).await?;
+            println!("{}", kube_host::env_line(&kubeconfig));
+        }
+        KubeCommand::Status(a) => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&kube_host::status(api, &a.options()).await?)?
+            );
+        }
+        KubeCommand::Env(a) => {
+            let o = a.options();
+            let kubeconfig = match &o.kubeconfig {
+                Some(p) => p.clone(),
+                None => std::path::PathBuf::from(std::env::var("HOME").context("HOME is not set")?)
+                    .join(".kube")
+                    .join(format!("fluxvm-{}.yaml", o.name)),
+            };
+            println!("{}", kube_host::env_line(&kubeconfig));
+        }
+        KubeCommand::Down { cluster, purge } => {
+            kube_host::down(api, &cluster.options(), purge).await?
+        }
+        KubeCommand::Supervise { cluster, every } => {
+            kube_host::supervise(
+                api,
+                &cluster.options(),
+                std::time::Duration::from_secs(every.max(5)),
+            )
+            .await?;
+        }
+        KubeCommand::Agent { command } => match command {
+            KubeAgentCommand::Install(a) => {
+                let plist = kube_host::agent_install(&a.options())?;
+                println!(
+                    "{}",
+                    serde_json::json!({"ok": true, "plist": plist, "label": kube_host::AGENT_LABEL})
+                );
+            }
+            KubeAgentCommand::Uninstall => {
+                println!(
+                    "{}",
+                    serde_json::json!({"ok": true, "removed": kube_host::agent_uninstall()?})
+                );
             }
         },
     }
