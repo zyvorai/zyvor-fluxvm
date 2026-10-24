@@ -323,26 +323,58 @@ pub(crate) fn from_upstream(frame: &[u8]) -> Frame {
     }
 }
 
-/// The `exec` URL: the shell, a TTY, and the container if one was named.
-pub(crate) fn exec_url(port: u16, ns: &str, pod: &str, container: Option<&str>) -> String {
+/// What an `exec` runs.
+pub(crate) enum Run<'a> {
+    /// An interactive shell on a TTY.
+    Shell,
+    /// One command: no stdin, no TTY, stdout and stderr kept apart.
+    Command(&'a [&'a str]),
+}
+
+/// The `exec` URL for `run`, in the container if one was named.
+pub(crate) fn exec_url_for(
+    port: u16,
+    ns: &str,
+    pod: &str,
+    container: Option<&str>,
+    run: &Run,
+) -> String {
     let mut u = reqwest::Url::parse(&format!(
         "wss://{API_NAME}:{port}/api/v1/namespaces/{ns}/pods/{pod}/exec"
     ))
     .expect("a valid URL: the names are validated");
     {
         let mut q = u.query_pairs_mut();
-        for c in ["/bin/sh", "-c", SHELL] {
-            q.append_pair("command", c);
+        match run {
+            Run::Shell => {
+                for c in ["/bin/sh", "-c", SHELL] {
+                    q.append_pair("command", c);
+                }
+                q.append_pair("stdin", "true")
+                    .append_pair("stdout", "true")
+                    .append_pair("stderr", "false")
+                    .append_pair("tty", "true");
+            }
+            Run::Command(argv) => {
+                for c in *argv {
+                    q.append_pair("command", c);
+                }
+                q.append_pair("stdin", "false")
+                    .append_pair("stdout", "true")
+                    .append_pair("stderr", "true")
+                    .append_pair("tty", "false");
+            }
         }
-        q.append_pair("stdin", "true")
-            .append_pair("stdout", "true")
-            .append_pair("stderr", "false")
-            .append_pair("tty", "true");
         if let Some(c) = container {
             q.append_pair("container", c);
         }
     }
     u.into()
+}
+
+/// The `exec` URL: the shell, a TTY, and the container if one was named.
+pub(crate) fn exec_url(port: u16, ns: &str, pod: &str, container: Option<&str>) -> String {
+    exec_url_for(port, ns, pod, container, &Run::Shell)
 }
 
 fn tls_config(creds: &kube::Credentials) -> Result<rustls::ClientConfig, String> {
@@ -374,6 +406,25 @@ async fn connect(
     addr: SocketAddr,
     t: &ExecTicket,
 ) -> Result<Upstream2, String> {
+    connect_run(
+        creds,
+        addr,
+        &t.ns,
+        &t.pod,
+        t.container.as_deref(),
+        &Run::Shell,
+    )
+    .await
+}
+
+async fn connect_run(
+    creds: &kube::Credentials,
+    addr: SocketAddr,
+    ns: &str,
+    pod: &str,
+    container: Option<&str>,
+    run: &Run<'_>,
+) -> Result<Upstream2, String> {
     let cfg = tls_config(creds)?;
     let tcp = tokio::time::timeout(Duration::from_secs(4), tokio::net::TcpStream::connect(addr))
         .await
@@ -384,7 +435,7 @@ async fn connect(
         .connect(name, tcp)
         .await
         .map_err(|e| format!("TLS: {e}"))?;
-    let mut req = exec_url(addr.port(), &t.ns, &t.pod, t.container.as_deref())
+    let mut req = exec_url_for(addr.port(), ns, pod, container, run)
         .into_client_request()
         .map_err(|e| e.to_string())?;
     req.headers_mut().insert(
@@ -397,6 +448,83 @@ async fn connect(
         .await
         .map_err(|e| format!("exec: {e}"))?;
     Ok(ws)
+}
+
+/// What a finished command left: its standard output (cut at the cap) and whether it was cut.
+pub(crate) struct Output {
+    pub stdout: Vec<u8>,
+    pub truncated: bool,
+}
+
+/// Runs `argv` in a pod and collects its standard output. A non-zero exit, or output on stderr with no output on stdout, is
+/// an error carrying the cluster's message and what the command printed to stderr.
+pub(crate) async fn exec_output(
+    creds: &kube::Credentials,
+    addrs: &[SocketAddr],
+    ns: &str,
+    pod: &str,
+    container: &str,
+    argv: &[&str],
+    cap: usize,
+    limit: Duration,
+) -> Result<Output, String> {
+    let mut tried = vec![];
+    let mut ws = None;
+    for &addr in addrs {
+        match connect_run(creds, addr, ns, pod, Some(container), &Run::Command(argv)).await {
+            Ok(w) => {
+                ws = Some(w);
+                break;
+            }
+            Err(e) => tried.push(format!("{addr}: {e}")),
+        }
+    }
+    let mut ws = ws.ok_or_else(|| tried.join("; "))?;
+    let collect = async {
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        let mut truncated = false;
+        let mut failure = None;
+        while let Some(Ok(msg)) = ws.next().await {
+            let Upstream::Binary(b) = msg else {
+                if matches!(msg, Upstream::Close(_)) {
+                    break;
+                }
+                continue;
+            };
+            let Some((&channel, rest)) = b.split_first() else {
+                continue;
+            };
+            match channel {
+                1 if out.len() < cap => {
+                    let room = cap - out.len();
+                    out.extend_from_slice(&rest[..rest.len().min(room)]);
+                    truncated |= rest.len() > room;
+                }
+                1 => truncated = true,
+                2 if err.len() < 4096 => err.extend_from_slice(rest),
+                3 => {
+                    if let Frame::Done(Some(m)) = from_upstream(&b) {
+                        failure = Some(m);
+                    }
+                    break;
+                }
+                _ => {}
+            }
+        }
+        (out, err, truncated, failure)
+    };
+    let (out, err, truncated, failure) = tokio::time::timeout(limit, collect)
+        .await
+        .map_err(|_| format!("timed out after {}s", limit.as_secs()))?;
+    if let Some(m) = failure {
+        let e = String::from_utf8_lossy(&err);
+        let e = e.trim();
+        return Err(if e.is_empty() { m } else { format!("{m}: {e}") });
+    }
+    Ok(Output {
+        stdout: out,
+        truncated,
+    })
 }
 
 fn notice(text: &str) -> Axum {
@@ -655,6 +783,61 @@ mod tests {
                 .query()
                 .unwrap()
                 .contains("container")
+        );
+    }
+
+    #[test]
+    fn a_command_exec_has_no_tty_and_no_stdin() {
+        let argv = ["hubble", "observe", "--last", "100", "-o", "json"];
+        let u = reqwest::Url::parse(&exec_url_for(
+            6443,
+            "kube-system",
+            "cilium-abc",
+            Some("cilium-agent"),
+            &Run::Command(&argv),
+        ))
+        .unwrap();
+        assert_eq!(
+            u.path(),
+            "/api/v1/namespaces/kube-system/pods/cilium-abc/exec"
+        );
+        let q: Vec<(String, String)> = u
+            .query_pairs()
+            .map(|(a, b)| (a.into_owned(), b.into_owned()))
+            .collect();
+        let cmd: Vec<&str> = q
+            .iter()
+            .filter(|(k, _)| k == "command")
+            .map(|(_, v)| v.as_str())
+            .collect();
+        assert_eq!(
+            cmd, argv,
+            "each argument is its own command= parameter, in order"
+        );
+        for want in [
+            ("tty", "false"),
+            ("stdin", "false"),
+            ("stdout", "true"),
+            ("stderr", "true"),
+            ("container", "cilium-agent"),
+        ] {
+            assert!(
+                q.iter().any(|(k, v)| (k.as_str(), v.as_str()) == want),
+                "{want:?}"
+            );
+        }
+        // Arguments are encoded, not interpreted.
+        let odd = reqwest::Url::parse(&exec_url_for(
+            6443,
+            "d",
+            "p",
+            None,
+            &Run::Command(&["sh", "-c", "a b&c=d"]),
+        ))
+        .unwrap();
+        assert!(
+            odd.query_pairs()
+                .any(|(k, v)| k == "command" && v == "a b&c=d")
         );
     }
 
