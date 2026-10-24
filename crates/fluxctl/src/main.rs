@@ -284,11 +284,22 @@ struct KubeArgs {
     /// digits and - _ . / only). Only applies when a VM is created.
     #[arg(long, value_name = "DIR")]
     offline: Option<std::path::PathBuf>,
+    /// The pod network: `cilium` (default) or `flannel`, k3s's bundled one. Cilium is installed from helm.cilium.io on first
+    /// boot, so with `--offline` the default is `flannel`. Only applies when a VM is created.
+    #[arg(long, value_name = "cilium|flannel")]
+    cni: Option<String>,
+    /// The Cilium chart version to install.
+    #[arg(long, default_value = kube_host::CILIUM_VERSION)]
+    cilium_version: String,
 }
 
 impl KubeArgs {
-    fn options(&self) -> kube_host::KubeOptions {
-        kube_host::KubeOptions {
+    fn options(&self) -> Result<kube_host::KubeOptions> {
+        let cni = match &self.cni {
+            Some(c) => kube_host::Cni::parse(c)?,
+            None => kube_host::Cni::default_for(self.offline.is_some()),
+        };
+        Ok(kube_host::KubeOptions {
             name: self.name.clone(),
             cpus: self.cpus,
             memory_mib: self.memory_mib,
@@ -304,7 +315,9 @@ impl KubeArgs {
             kubeconfig: self.kubeconfig.clone(),
             workers: self.workers,
             offline: self.offline.clone(),
-        }
+            cni,
+            cilium_version: self.cilium_version.clone(),
+        })
     }
 }
 
@@ -7746,17 +7759,17 @@ async fn docker_command<A: run::VmApi>(api: &A, command: DockerCommand) -> Resul
 async fn kube_command<A: run::VmApi>(api: &A, command: KubeCommand) -> Result<()> {
     match command {
         KubeCommand::Up(a) => {
-            let kubeconfig = kube_host::up(api, &a.options()).await?;
+            let kubeconfig = kube_host::up(api, &a.options()?).await?;
             println!("{}", kube_host::env_line(&kubeconfig));
         }
         KubeCommand::Status(a) => {
             println!(
                 "{}",
-                serde_json::to_string_pretty(&kube_host::status(api, &a.options()).await?)?
+                serde_json::to_string_pretty(&kube_host::status(api, &a.options()?).await?)?
             );
         }
         KubeCommand::Env(a) => {
-            let o = a.options();
+            let o = a.options()?;
             let kubeconfig = match &o.kubeconfig {
                 Some(p) => p.clone(),
                 None => std::path::PathBuf::from(std::env::var("HOME").context("HOME is not set")?)
@@ -7771,7 +7784,7 @@ async fn kube_command<A: run::VmApi>(api: &A, command: KubeCommand) -> Result<()
             archive,
         } => {
             for line in
-                kube_host::load(api, &cluster.options(), &images, archive.as_deref()).await?
+                kube_host::load(api, &cluster.options()?, &images, archive.as_deref()).await?
             {
                 println!("{line}");
             }
@@ -7781,19 +7794,19 @@ async fn kube_command<A: run::VmApi>(api: &A, command: KubeCommand) -> Result<()
             println!("{}", serde_json::to_string_pretty(&report)?);
         }
         KubeCommand::Down { cluster, purge } => {
-            kube_host::down(api, &cluster.options(), purge).await?
+            kube_host::down(api, &cluster.options()?, purge).await?
         }
         KubeCommand::Supervise { cluster, every } => {
             kube_host::supervise(
                 api,
-                &cluster.options(),
+                &cluster.options()?,
                 std::time::Duration::from_secs(every.max(5)),
             )
             .await?;
         }
         KubeCommand::Agent { command } => match command {
             KubeAgentCommand::Install(a) => {
-                let plist = kube_host::agent_install(&a.options())?;
+                let plist = kube_host::agent_install(&a.options()?)?;
                 println!(
                     "{}",
                     serde_json::json!({"ok": true, "plist": plist, "label": kube_host::AGENT_LABEL})
