@@ -213,6 +213,7 @@ pub fn token_ok(t: &str) -> bool {
 /// An absolute folder path of plain characters, because it is placed inside single quotes in a shell line.
 pub fn offline_path_ok(p: &Path) -> bool {
     p.is_absolute()
+        && !p.components().any(|c| c == std::path::Component::ParentDir)
         && p.to_str().is_some_and(|s| {
             s.bytes()
                 .all(|c| c.is_ascii_alphanumeric() || b"-_./".contains(&c))
@@ -223,39 +224,67 @@ fn worker_name(o: &KubeOptions, i: u8) -> String {
     format!("{}-w{i}", o.name)
 }
 
-/// The shell lines cloud-init runs as root. Online they pipe the installer from get.k3s.io; offline they use the files
-/// from the shared folder and tell the installer not to download anything.
+/// The shell lines cloud-init runs as root.
+///
+/// A single node installed online pipes the installer from get.k3s.io, as k3s documents. Anything else (an offline
+/// folder, or a cluster with workers) runs as a transient unit that cloud-init does not wait for, because
+/// * FluxVM mounts shared folders with commands appended after these, so the offline folder is not there yet, and
+/// * the private network card that joins the VMs (`apple.networks`) is configured at about the same time.
+///
+/// Inside the single quotes of that unit only double quotes are used: the paths, node name, URL and token are all
+/// validated to plain characters.
 fn install_commands(o: &KubeOptions, role: &Role, node: &str) -> Vec<String> {
-    let (exec, join) = match role {
-        Role::Server => (k3s_exec(o), String::new()),
-        Role::Agent { url, token } => (
-            format!("agent --node-name {node}"),
-            format!("K3S_URL='{url}' K3S_TOKEN='{token}' "),
-        ),
+    let private = o.workers > 0;
+    let node_ip = if private { " --node-ip $PRIV" } else { "" };
+    let exec = match role {
+        Role::Server => format!("{}{node_ip}", k3s_exec(o)),
+        Role::Agent { .. } => format!("agent --node-name {node}{node_ip}"),
     };
-    match &o.offline {
-        None => {
-            let version = o
-                .k3s_version
-                .as_ref()
-                .map(|v| format!("INSTALL_K3S_VERSION='{v}' "))
-                .unwrap_or_default();
-            vec![format!(
-                "curl -sfL https://get.k3s.io | {version}{join}INSTALL_K3S_EXEC='{exec}' sh -"
-            )]
-        }
+    // The environment that makes the installer join an existing server, quoted with `q`.
+    let join = |q: &str| match role {
+        Role::Server => String::new(),
+        Role::Agent { url, token } => format!("K3S_URL={q}{url}{q} K3S_TOKEN={q}{token}{q} "),
+    };
+    let version = |q: &str| {
+        o.k3s_version
+            .as_ref()
+            .map(|v| format!("INSTALL_K3S_VERSION={q}{v}{q} "))
+            .unwrap_or_default()
+    };
+    if !private && o.offline.is_none() {
+        return vec![format!(
+            "curl -sfL https://get.k3s.io | {}{}INSTALL_K3S_EXEC='{exec}' sh -",
+            version("'"),
+            join("'")
+        )];
+    }
+    // Wait for the card on the cluster's private network, whose address becomes the node's.
+    let wait_ip = if private {
+        "PRIV=\"\"; for i in $(seq 1 90); do PRIV=$(ip -4 -o addr show | grep -o \"10\\.89\\.[0-9]*\\.[0-9]*\" | head -1); [ -n \"$PRIV\" ] && break; sleep 2; done; "
+    } else {
+        ""
+    };
+    let script = match &o.offline {
+        None => format!(
+            "{wait_ip}curl -sfL https://get.k3s.io | {}{}INSTALL_K3S_EXEC=\"{exec}\" sh -",
+            version("\""),
+            join("\"")
+        ),
         Some(dir) => {
             let d = dir.display();
-            vec![
-                "mkdir -p /var/lib/rancher/k3s/agent/images".to_owned(),
-                format!("cp '{d}/{OFFLINE_IMAGES}' /var/lib/rancher/k3s/agent/images/"),
-                format!("install -m 0755 '{d}/{OFFLINE_BINARY}' /usr/local/bin/k3s"),
-                format!(
-                    "{join}INSTALL_K3S_SKIP_DOWNLOAD=true INSTALL_K3S_EXEC='{exec}' sh '{d}/{OFFLINE_INSTALLER}'"
-                ),
-            ]
+            format!(
+                "{wait_ip}for i in $(seq 1 150); do [ -f \"{d}/{OFFLINE_BINARY}\" ] && [ -f \"{d}/{OFFLINE_IMAGES}\" ] && [ -f \"{d}/{OFFLINE_INSTALLER}\" ] && break; sleep 2; done; \
+                 mkdir -p /var/lib/rancher/k3s/agent/images && \
+                 cp \"{d}/{OFFLINE_IMAGES}\" /var/lib/rancher/k3s/agent/images/ && \
+                 install -m 0755 \"{d}/{OFFLINE_BINARY}\" /usr/local/bin/k3s && \
+                 {}INSTALL_K3S_SKIP_DOWNLOAD=true INSTALL_K3S_EXEC=\"{exec}\" sh \"{d}/{OFFLINE_INSTALLER}\"",
+                join("\"")
+            )
         }
-    }
+    };
+    vec![format!(
+        "systemd-run --no-block --unit=fluxvm-k3s-install /bin/bash -c '{script}'"
+    )]
 }
 
 /// The VM request for one node: Debian 13, k3s installed on first boot, the user's SSH key, folders shared at matching
@@ -273,6 +302,13 @@ pub fn node_spec(
     } else {
         vec!["curl", "ca-certificates", "iptables", "git", "jq"]
     };
+    // The default NAT network keeps each VM apart from the others. Nodes of one cluster share a private network
+    // (`10.89.N.0/24`, one switch per name) as a second card, which carries the node-to-node and pod traffic.
+    let apple = if o.workers > 0 {
+        json!({"networks": [{"name": o.name}]})
+    } else {
+        json!({})
+    };
     json!({
         "name": node,
         "backend": "auto",
@@ -281,6 +317,7 @@ pub fn node_spec(
         "memory_mib": o.memory_mib,
         "disk_size_gib": o.disk_gib,
         "network": {"mode": "user", "forwards": []},
+        "apple": apple,
         "shared_folders": shares,
         "cloud_init": {
             "hostname": node,
@@ -462,24 +499,54 @@ pub async fn ensure_vm<A: VmApi>(api: &A, o: &KubeOptions) -> Result<Cluster> {
         kubeconfig: home_kube(o)?,
     };
     wait_nodes(&cluster, 1, started).await?;
+    let mut missing = false;
+    for i in 1..=o.workers {
+        missing |= api.find(&worker_name(o, i)).await?.is_none();
+    }
     if o.workers > 0 {
-        let out = ssh(&cluster, "sudo cat /var/lib/rancher/k3s/server/node-token")
-            .output()
-            .context("running ssh")?;
-        let token = String::from_utf8_lossy(&out.stdout).trim().to_owned();
-        if !out.status.success() || !token_ok(&token) {
-            bail!("could not read the cluster's node token from the server");
+        // Workers get their own first-boot budget; the server's boot time does not count against them.
+        let started = Instant::now();
+        let mut role = None;
+        if missing {
+            let out = ssh(&cluster, "sudo cat /var/lib/rancher/k3s/server/node-token")
+                .output()
+                .context("running ssh")?;
+            let token = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+            if !out.status.success() || !token_ok(&token) {
+                bail!("could not read the cluster's node token from the server");
+            }
+            let private = private_ip(&cluster)?;
+            role = Some(Role::Agent {
+                url: format!("https://{private}:{GUEST_API_PORT}"),
+                token,
+            });
         }
-        let role = Role::Agent {
-            url: format!("https://{}:{GUEST_API_PORT}", cluster.ip),
-            token,
-        };
+        // Workers that already exist are only started if stopped; the role matters for the ones that must be created.
+        let role = role.unwrap_or(Role::Server);
         for i in 1..=o.workers {
             ensure_one(api, o, &worker_name(o, i), &role, &cluster.user, &key).await?;
         }
         wait_nodes(&cluster, 1 + usize::from(o.workers), started).await?;
     }
     Ok(cluster)
+}
+
+/// The server's address on the cluster's private network, which is how workers reach it. It is missing when the server
+/// was created without `--workers`, since only then does it get that card.
+fn private_ip(c: &Cluster) -> Result<String> {
+    let out = ssh(
+        c,
+        "ip -4 -o addr show | grep -o '10\\.89\\.[0-9]*\\.[0-9]*' | head -1",
+    )
+    .output()
+    .context("running ssh")?;
+    let ip = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+    match ip.parse::<std::net::Ipv4Addr>() {
+        Ok(a) if a.octets()[..2] == [10, 89] => Ok(ip),
+        _ => bail!(
+            "the server has no private-network address: it was created without --workers. Run `fluxctl kube down --purge` and `up --workers N` again"
+        ),
+    }
 }
 
 /// The worker VMs that exist, by name, id and status.
@@ -778,6 +845,11 @@ pub async fn load<A: VmApi>(
     if let Some(bad) = images.iter().find(|i| !image_ok(i)) {
         bail!("image {bad:?} is not a plain image reference");
     }
+    if let Some(a) = archive
+        && !a.is_file()
+    {
+        bail!("--archive {}: not a file", a.display());
+    }
     let home = dh::home()?;
     let user = dh::user_name(&dh::EngineOptions {
         user: o.user.clone(),
@@ -965,7 +1037,8 @@ pub fn fetch_offline(dir: &Path, version: Option<&str>) -> Result<Value> {
         (OFFLINE_INSTALLER, "https://get.k3s.io".to_owned(), false),
     ] {
         eprintln!("downloading {name}…");
-        let tmp = dir.join(format!(".{name}.part"));
+        let part = TempArchive(dir.join(format!(".{name}.part"))); // removed again on any failure
+        let tmp = part.0.clone();
         curl(&url, Some(&tmp))?;
         let hash = sha256_file(&tmp)?;
         if verify {
@@ -973,7 +1046,6 @@ pub fn fetch_offline(dir: &Path, version: Option<&str>) -> Result<Value> {
                 .get(name)
                 .with_context(|| format!("{OFFLINE_SUMS} has no entry for {name}"))?;
             if *want != hash {
-                let _ = std::fs::remove_file(&tmp);
                 bail!("{name}: SHA-256 {hash} does not match the release's {want}");
             }
         }
@@ -1245,13 +1317,13 @@ mod tests {
 
     fn agent() -> Role {
         Role::Agent {
-            url: "https://192.168.64.5:6443".into(),
+            url: "https://10.89.1.2:6443".into(),
             token: "K10abc::server:xyz".into(),
         }
     }
 
     #[test]
-    fn workers_join_the_server_with_its_token() {
+    fn workers_join_over_a_private_network_with_the_servers_token() {
         let o = KubeOptions {
             name: "dev".into(),
             workers: 2,
@@ -1259,64 +1331,105 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(worker_name(&o, 2), "dev-w2");
-        let spec = node_spec(&o, &agent(), "dev-w1", "u", "k", vec![]);
-        assert_eq!(spec["name"], "dev-w1");
-        assert_eq!(spec["cloud_init"]["hostname"], "dev-w1");
-        let run = spec["cloud_init"]["runcmd"][0].as_str().unwrap();
-        assert!(run.contains("INSTALL_K3S_VERSION='v1.31.4+k3s1'"), "{run}");
+        let worker = node_spec(&o, &agent(), "dev-w1", "u", "k", vec![]);
+        assert_eq!(worker["name"], "dev-w1");
+        assert_eq!(worker["cloud_init"]["hostname"], "dev-w1");
+        // Both nodes get a second card on a private network named after the cluster.
+        assert_eq!(worker["apple"]["networks"][0]["name"], "dev");
+        let server = kube_spec(&o, "u", "k", vec![]);
+        assert_eq!(server["apple"]["networks"][0]["name"], "dev");
+        let w = worker["cloud_init"]["runcmd"][0].as_str().unwrap();
         assert!(
-            run.contains("K3S_URL='https://192.168.64.5:6443' K3S_TOKEN='K10abc::server:xyz'"),
-            "{run}"
+            w.starts_with("systemd-run --no-block --unit=fluxvm-k3s-install /bin/bash -c '"),
+            "{w}"
         );
         assert!(
-            run.contains("INSTALL_K3S_EXEC='agent --node-name dev-w1'"),
-            "{run}"
+            w.contains("PRIV=$(ip -4 -o addr show | grep -o \"10\\.89\\."),
+            "waits for the private address: {w}"
+        );
+        assert!(w.contains("INSTALL_K3S_VERSION=\"v1.31.4+k3s1\""), "{w}");
+        assert!(
+            w.contains("K3S_URL=\"https://10.89.1.2:6443\" K3S_TOKEN=\"K10abc::server:xyz\""),
+            "{w}"
         );
         assert!(
-            !run.contains("--disable traefik"),
+            w.contains("INSTALL_K3S_EXEC=\"agent --node-name dev-w1 --node-ip $PRIV\""),
+            "{w}"
+        );
+        assert!(
+            !w.contains("--disable traefik"),
             "agents take no server flags"
         );
-        // The server line carries no token.
-        let server = kube_spec(&o, "u", "k", vec![]);
+        assert_eq!(w.matches('\'').count(), 2, "{w}");
+        // The server advertises its private address too, and carries no token.
+        let sv = server["cloud_init"]["runcmd"][0].as_str().unwrap();
         assert!(
-            !server["cloud_init"]["runcmd"][0]
-                .as_str()
-                .unwrap()
-                .contains("K3S_TOKEN")
+            sv.contains("--node-ip $PRIV") && sv.contains("--disable traefik"),
+            "{sv}"
         );
+        assert!(!sv.contains("K3S_TOKEN"), "{sv}");
+        assert_eq!(sv.matches('\'').count(), 2, "{sv}");
     }
 
     #[test]
-    fn offline_nodes_install_from_the_folder_and_download_nothing() {
+    fn a_single_node_keeps_the_plain_installer_line_and_no_private_network() {
+        let o = KubeOptions::default();
+        let spec = kube_spec(&o, "u", "k", vec![]);
+        assert_eq!(spec["apple"], json!({}));
+        let c = spec["cloud_init"]["runcmd"][0].as_str().unwrap();
+        assert!(
+            c.starts_with("curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC='server "),
+            "{c}"
+        );
+        assert!(!c.contains("PRIV"), "{c}");
+    }
+
+    #[test]
+    fn offline_nodes_wait_for_the_folder_then_install_from_it() {
         let o = KubeOptions {
             offline: Some("/Users/me/k3s".into()),
             ..Default::default()
         };
         let spec = kube_spec(&o, "u", "k", vec![]);
         assert_eq!(spec["cloud_init"]["packages"].as_array().unwrap().len(), 0);
-        let cmds: Vec<&str> = spec["cloud_init"]["runcmd"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|c| c.as_str().unwrap())
-            .collect();
-        let all = cmds.join("\n");
-        assert!(
-            !all.contains("get.k3s.io") && !all.contains("curl"),
-            "{all}"
+        let cmds = spec["cloud_init"]["runcmd"].as_array().unwrap();
+        assert_eq!(
+            cmds.len(),
+            1,
+            "one transient unit, so cloud-init is not blocked"
         );
-        assert!(all.contains(
-            "cp '/Users/me/k3s/k3s-airgap-images-arm64.tar.zst' /var/lib/rancher/k3s/agent/images/"
-        ));
-        assert!(all.contains("install -m 0755 '/Users/me/k3s/k3s-arm64' /usr/local/bin/k3s"));
-        assert!(all.contains("INSTALL_K3S_SKIP_DOWNLOAD=true INSTALL_K3S_EXEC='server "));
-        assert!(all.contains("sh '/Users/me/k3s/install.sh'"));
-        let worker = node_spec(&o, &agent(), "w", "u", "k", vec![]);
-        let w = worker["cloud_init"]["runcmd"][3].as_str().unwrap();
+        let c = cmds[0].as_str().unwrap();
         assert!(
-            w.contains("K3S_TOKEN='K10abc::server:xyz' INSTALL_K3S_SKIP_DOWNLOAD=true"),
+            c.starts_with("systemd-run --no-block --unit=fluxvm-k3s-install /bin/bash -c '"),
+            "{c}"
+        );
+        assert!(!c.contains("get.k3s.io") && !c.contains("curl"), "{c}");
+        // It waits for the files (FluxVM mounts the share after the user's commands), then installs.
+        assert!(
+            c.contains("for i in $(seq 1 150); do [ -f \"/Users/me/k3s/k3s-arm64\" ]"),
+            "{c}"
+        );
+        assert!(c.contains(
+            "cp \"/Users/me/k3s/k3s-airgap-images-arm64.tar.zst\" /var/lib/rancher/k3s/agent/images/"
+        ));
+        assert!(c.contains("install -m 0755 \"/Users/me/k3s/k3s-arm64\" /usr/local/bin/k3s"));
+        assert!(c.contains("INSTALL_K3S_SKIP_DOWNLOAD=true INSTALL_K3S_EXEC=\"server "));
+        assert!(c.contains("sh \"/Users/me/k3s/install.sh\"") && c.ends_with('\''));
+        assert!(
+            !c.contains("PRIV"),
+            "a single node needs no private address: {c}"
+        );
+        // Single quotes appear only around the whole script, so the shell nesting holds.
+        assert_eq!(c.matches('\'').count(), 2, "{c}");
+        let worker = node_spec(&o, &agent(), "w", "u", "k", vec![]);
+        let w = worker["cloud_init"]["runcmd"][0].as_str().unwrap();
+        assert!(
+            w.contains(
+                "K3S_URL=\"https://10.89.1.2:6443\" K3S_TOKEN=\"K10abc::server:xyz\" INSTALL_K3S_SKIP_DOWNLOAD=true"
+            ),
             "{w}"
         );
+        assert_eq!(w.matches('\'').count(), 2, "{w}");
     }
 
     #[test]
@@ -1340,6 +1453,7 @@ mod tests {
         }
         for bad in [
             "relative/dir",
+            "/a/../b",
             "/Users/me/my k3s",
             "/x'y",
             "/x;y",

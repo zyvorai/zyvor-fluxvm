@@ -45,16 +45,22 @@ kubectl get nodes
 ```
 
 `up` creates the server first, reads its node token over SSH, then creates each worker with that token and the server's address in
-its cloud-init and waits until `1 + N` nodes are Ready. Run it again with a larger `--workers` to add nodes; existing nodes are
+its cloud-init and waits until `1 + N` nodes are Ready. Run it again with a larger `--workers` to add nodes (for a cluster that was created with `--workers`); existing nodes are
 left alone. Every worker has the same size as the server (`--cpus`, `--memory-mib`, `--disk-gib`) and the same `--share` folders.
 `down` stops the server and all workers, and `down --purge` deletes them. To remove one worker, delete its node with
 `kubectl delete node` and delete its VM through FluxVM.
 
-The workers reach the server by its address on the Mac's VM network (`192.168.64.x`). The token is written into each worker's
-first-boot (cloud-init) configuration, so anyone with a login on a worker VM may be able to read it; the VMs are yours alone,
-but do not reuse the token elsewhere. The pod network (flannel) spans the VMs, so a pod on one
-node reaches a service on another; `scripts/kube-live-test.sh` checks that. If the server's address ever changes, workers need
-re-creating.
+The default FluxVM network keeps each VM apart from the others (two VMs on it cannot even ping each other), so a cluster with
+workers puts every node on a second, private network named after the cluster (`apple.networks`, a `10.89.N.0/24` subnet with its own
+switch, see [macos.md](macos.md)). The nodes advertise that address (`--node-ip`) and workers join the server through it, so node
+and pod traffic stay on the private network while the first card still gives each VM internet access and the Mac its SSH route.
+A pod on one node reaches a service on another; `scripts/kube-live-test.sh` checks that.
+
+* **Decide on workers when you create the cluster.** Only VMs created with `--workers` get the private card. A cluster created
+  without it cannot gain workers later: `up --workers N` stops with a message, and you `down --purge` and start again.
+* The node token is written into each worker's first-boot (cloud-init) configuration, so anyone with a login on a worker VM may be
+  able to read it; the VMs are yours alone, but do not reuse the token elsewhere.
+* If the server's private address ever changes, workers need re-creating.
 
 ## The kubeconfig
 
