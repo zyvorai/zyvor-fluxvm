@@ -122,3 +122,7 @@
 .vnc-screen:fullscreen { height: 100vh; border-radius: 0; border: 0; }
 .vnc-paste { display: flex; gap: 8px; }
 .vnc-paste .fx-input { flex: 1; }
+
+/* Kubernetes usage cells */
+.kd-use { display: inline-flex; gap: 8px; align-items: center; min-width: 190px; }
+.kd-use .fx-meter { flex: 0 0 64px; }

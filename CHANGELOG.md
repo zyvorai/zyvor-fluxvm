@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- **Studio: CPU and memory, Workloads and Events for Kubernetes clusters.** The Kubernetes page shows each node's CPU and memory use
+  as a bar and each pod's CPU and memory (from the cluster's metrics-server; clusters without one just have no numbers), a *Workloads* tab
+  (Deployments, StatefulSets, DaemonSets with ready of wanted and images; Services with type, cluster IP, ports and NodePorts) and an
+  *Events* tab (newest first, warnings-only switch, namespace and text filters). Daemon: `GET /v1/kube/{name}` gains `metrics` and
+  per-row usage, and `GET /v1/kube/{name}/workloads` and `GET /v1/kube/{name}/events` are new, read-only like the rest.
 - **Studio: a VNC console for QEMU machines.** The Display tab of a running QEMU machine opens its graphical console in the browser
   ([noVNC](https://github.com/novnc/noVNC) 1.7.0, MPL-2.0, attributed in `NOTICE`, loaded on first use): keys and clicks, Ctrl+Alt+Del,
   full screen, view-only, fit to window and text sent to the machine's clipboard. The daemon side is `POST /v1/vms/{id}/ws-ticket` with

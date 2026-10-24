@@ -411,6 +411,8 @@ fn ops() -> Vec<Op> {
         op("get", "/v1/vznets", "Private vz networks and their members", HOST),
         op("get", "/v1/kube", "Kubernetes clusters made by `fluxctl kube`, with their VMs", VMS),
         op("get", "/v1/kube/{name}", "A cluster's nodes and pods, read from its API server (read-only)", VMS),
+        op("get", "/v1/kube/{name}/workloads", "Deployments, StatefulSets, DaemonSets and Services of a cluster (read-only)", VMS),
+        op("get", "/v1/kube/{name}/events", "Recent events of a cluster, newest first (?namespace=)", VMS),
         op("get", "/v1/kube/{name}/flows", "Who talks to whom: Cilium Hubble flows folded into nodes and edges (?lines=)", VMS),
         op("get", "/v1/kube/{name}/pods/{ns}/{pod}/log", "Tail of a pod container's log as text (?container=&tail=&previous=)", VMS),
         op("post", "/v1/kube/{name}/pods/{ns}/{pod}/exec-ticket", "Single-use 30 s ticket for a shell in a pod (admin); redeem at GET /console/kube/ws/{ticket}", VMS),
