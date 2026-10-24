@@ -5580,6 +5580,8 @@ enum WsKind {
     Console,
     /// The QEMU serial port, or a read-only console-log tail on other backends (`/v1/vms/{id}/serial`).
     Serial,
+    /// The QEMU graphical console: the VM's VNC socket, raw RFB bytes in binary frames (what a browser VNC client speaks).
+    Vnc,
 }
 
 type WsTickets =
@@ -5630,7 +5632,16 @@ async fn vm_ws_ticket(
     Json(req): Json<WsTicketRequest>,
 ) -> ApiResult<Json<serde_json::Value>> {
     require_admin(role)?;
-    m.get(id).await?; // 404 for an unknown VM now, not when the socket opens
+    let record = m.get(id).await?; // 404 for an unknown VM now, not when the socket opens
+    if req.kind == WsKind::Vnc {
+        // Say why there is no screen now, rather than minting a ticket that cannot be redeemed.
+        vnc_socket(
+            &record.backend,
+            record.status == VmStatus::Running,
+            &record.workspace,
+            id,
+        )?;
+    }
     let ticket = mint_ws_ticket(id, req.kind).ok_or(ApiError {
         status: StatusCode::TOO_MANY_REQUESTS,
         message: "too many WebSocket tickets outstanding".into(),
@@ -5657,7 +5668,60 @@ async fn vm_ws_by_ticket(
     match kind {
         WsKind::Console => open_agent_console(m, id, q, ws).await,
         WsKind::Serial => open_serial_ws(m, id, ws).await,
+        WsKind::Vnc => open_vnc_ws(m, id, ws).await,
     }
+}
+
+/// Where a running QEMU VM's VNC server listens: `vnc.sock` in its workspace, the path `fluxvm-qemu` starts it on. Anything
+/// else has no VNC socket, and the error says what to use instead.
+fn vnc_socket(
+    backend: &BackendKind,
+    running: bool,
+    workspace: &std::path::Path,
+    id: Uuid,
+) -> Result<PathBuf, ApiError> {
+    let conflict = |message: String| ApiError {
+        status: StatusCode::CONFLICT,
+        message,
+    };
+    if *backend != BackendKind::Qemu {
+        return Err(conflict(format!(
+            "VM {id} has no VNC server: only QEMU machines do. A vz guest's screen is `GET /v1/vms/{id}/screenshot`; other backends have the console"
+        )));
+    }
+    if !running {
+        return Err(conflict(format!(
+            "VM {id} is not running: start it to see its screen"
+        )));
+    }
+    let socket = workspace.join("vnc.sock");
+    if !socket.exists() {
+        return Err(conflict(format!(
+            "VM {id} has no VNC socket at {}",
+            socket.display()
+        )));
+    }
+    Ok(socket)
+}
+
+/// The bridge to a QEMU VM's VNC socket. A VNC client (noVNC) speaks RFB in binary WebSocket frames, which is what the raw
+/// relay carries; the VM's display is as sensitive as its console, so only the admin-minted ticket gets here.
+async fn open_vnc_ws(
+    m: Arc<VmManager>,
+    id: Uuid,
+    ws: axum::extract::ws::WebSocketUpgrade,
+) -> ApiResult<Response> {
+    let record = m.get(id).await?;
+    let socket = vnc_socket(
+        &record.backend,
+        record.status == VmStatus::Running,
+        &record.workspace,
+        id,
+    )?;
+    let stream = tokio::net::UnixStream::connect(&socket)
+        .await
+        .map_err(|e| anyhow::anyhow!("connecting to {}: {e}", socket.display()))?;
+    Ok(ws.on_upgrade(move |socket| relay_serial(socket, stream)))
 }
 
 /// Raw bytes to and from a `vz` VM's named console port (`apple.console_ports`). Binary and text frames are both written
@@ -6707,6 +6771,203 @@ mod tests {
             assert_eq!(take_ws_ticket("not-a-ticket"), None);
             assert_eq!(take_ws_ticket(&t), Some((vm, WsKind::Serial)));
             assert_eq!(take_ws_ticket(&t), None, "a ticket works once");
+        }
+
+        #[test]
+        fn a_vnc_ticket_is_bound_to_its_vm_and_kind() {
+            let vm = Uuid::new_v4();
+            let t = mint_ws_ticket(vm, WsKind::Vnc).unwrap();
+            assert_eq!(take_ws_ticket(&t), Some((vm, WsKind::Vnc)));
+            assert_eq!(take_ws_ticket(&t), None, "a ticket works once");
+            let parsed: WsTicketRequest = serde_json::from_str(r#"{"kind":"vnc"}"#).unwrap();
+            assert_eq!(parsed.kind, WsKind::Vnc);
+        }
+
+        #[test]
+        fn the_vnc_socket_lookup_says_what_is_missing() {
+            let dir = tempfile::tempdir().unwrap();
+            let id = Uuid::nil();
+            let msg = |r: Result<PathBuf, ApiError>| {
+                let e = r.unwrap_err();
+                assert_eq!(e.status, StatusCode::CONFLICT);
+                e.message
+            };
+            assert!(
+                msg(vnc_socket(&BackendKind::Qemu, true, dir.path(), id)).contains("no VNC socket")
+            );
+            assert!(
+                msg(vnc_socket(&BackendKind::Qemu, false, dir.path(), id)).contains("not running")
+            );
+            let other = msg(vnc_socket(&BackendKind::Firecracker, true, dir.path(), id));
+            assert!(
+                other.contains("only QEMU") && other.contains("screenshot"),
+                "{other}"
+            );
+            std::fs::write(dir.path().join("vnc.sock"), b"").unwrap();
+            assert_eq!(
+                vnc_socket(&BackendKind::Qemu, true, dir.path(), id).unwrap(),
+                dir.path().join("vnc.sock")
+            );
+        }
+
+        /// Against a real QEMU VNC server: `qemu-system-x86_64 -display none -vnc unix:/tmp/x/vnc.sock ...` then
+        /// `FLUXVM_VNC_LIVE_SOCKET=/tmp/x/vnc.sock cargo test -p fluxvm-api --lib vnc_live -- --ignored --nocapture`.
+        /// The relay carries a full RFB 3.8 handshake to ServerInit, and then a FramebufferUpdate of real pixels.
+        #[tokio::test]
+        #[ignore = "needs a running QEMU with a VNC unix socket"]
+        async fn vnc_live_a_real_qemu_screen_comes_through_the_relay() {
+            use axum::{Router, extract::ws::WebSocketUpgrade, routing::get};
+            use futures::{SinkExt, StreamExt};
+            use tokio_tungstenite::tungstenite::Message as Wire;
+
+            let path = std::env::var("FLUXVM_VNC_LIVE_SOCKET").expect("FLUXVM_VNC_LIVE_SOCKET");
+            let app = Router::new().route(
+                "/vnc",
+                get(move |ws: WebSocketUpgrade| {
+                    let path = path.clone();
+                    async move {
+                        let stream = tokio::net::UnixStream::connect(&path).await.unwrap();
+                        ws.on_upgrade(move |socket| relay_serial(socket, stream))
+                    }
+                }),
+            );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/vnc"))
+                .await
+                .unwrap();
+            let mut got: Vec<u8> = Vec::new();
+            async fn need(
+                ws: &mut tokio_tungstenite::WebSocketStream<
+                    tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+                >,
+                got: &mut Vec<u8>,
+                n: usize,
+            ) {
+                while got.len() < n {
+                    let next =
+                        tokio::time::timeout(std::time::Duration::from_secs(20), ws.next()).await;
+                    match next
+                        .expect("timed out waiting for QEMU")
+                        .expect("closed")
+                        .unwrap()
+                    {
+                        Wire::Binary(b) => got.extend_from_slice(&b),
+                        other => panic!("expected binary, got {other:?}"),
+                    }
+                }
+            }
+            need(&mut ws, &mut got, 12).await;
+            let greeting = String::from_utf8_lossy(&got[..12]).into_owned();
+            println!("server greeting: {greeting:?}");
+            assert!(greeting.starts_with("RFB 003.00"));
+            ws.send(Wire::Binary(b"RFB 003.008\n".to_vec().into()))
+                .await
+                .unwrap();
+            got.drain(..12);
+            need(&mut ws, &mut got, 2).await;
+            let types = got[1..1 + usize::from(got[0])].to_vec();
+            println!("security types offered: {types:?}");
+            assert!(
+                types.contains(&1),
+                "QEMU's unix-socket VNC offers no authentication"
+            );
+            ws.send(Wire::Binary(vec![1].into())).await.unwrap(); // choose None
+            got.clear();
+            need(&mut ws, &mut got, 4).await;
+            assert_eq!(&got[..4], &[0, 0, 0, 0], "SecurityResult OK");
+            got.clear();
+            ws.send(Wire::Binary(vec![1].into())).await.unwrap(); // ClientInit: share the desktop
+            need(&mut ws, &mut got, 24).await; // width, height, pixel format, name length
+            let (w, h) = (
+                u16::from_be_bytes([got[0], got[1]]),
+                u16::from_be_bytes([got[2], got[3]]),
+            );
+            let name_len = u32::from_be_bytes([got[20], got[21], got[22], got[23]]) as usize;
+            need(&mut ws, &mut got, 24 + name_len).await;
+            println!(
+                "ServerInit: {w} x {h}, name {:?}",
+                String::from_utf8_lossy(&got[24..24 + name_len])
+            );
+            assert!(w >= 320 && h >= 200, "a real framebuffer size: {w}x{h}");
+            got.clear();
+            // SetEncodings: Raw only, then ask for the whole screen.
+            let mut req = vec![2, 0, 0, 1, 0, 0, 0, 0];
+            req.extend_from_slice(&[3, 0, 0, 0, 0, 0]);
+            req.extend_from_slice(&w.to_be_bytes());
+            req.extend_from_slice(&h.to_be_bytes());
+            ws.send(Wire::Binary(req.into())).await.unwrap();
+            need(&mut ws, &mut got, 16).await; // message type 0, padding, rect count, first rect header
+            assert_eq!(got[0], 0, "a FramebufferUpdate");
+            let (rw, rh) = (
+                u16::from_be_bytes([got[8], got[9]]),
+                u16::from_be_bytes([got[10], got[11]]),
+            );
+            println!(
+                "first rectangle: {rw} x {rh}, encoding {}",
+                i32::from_be_bytes([got[12], got[13], got[14], got[15]])
+            );
+            assert!(rw > 0 && rh > 0);
+        }
+
+        /// A stand-in RFB server on one end of a socket pair, the relay and a real WebSocket client on the other: the greeting
+        /// reaches the client, the client's reply reaches the server, and a payload bigger than the relay's read buffer
+        /// arrives whole.
+        #[tokio::test]
+        async fn the_vnc_relay_carries_rfb_bytes_both_ways() {
+            use axum::{Router, extract::ws::WebSocketUpgrade, routing::get};
+            use futures::{SinkExt, StreamExt};
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            use tokio_tungstenite::tungstenite::Message as Wire;
+
+            const BIG: usize = 70_000;
+            let app = Router::new().route(
+                "/vnc",
+                get(|ws: WebSocketUpgrade| async move {
+                    let (ours, mut server) = tokio::net::UnixStream::pair().unwrap();
+                    tokio::spawn(async move {
+                        server.write_all(b"RFB 003.008\n").await.unwrap();
+                        let mut version = [0u8; 12];
+                        server.read_exact(&mut version).await.unwrap();
+                        assert_eq!(&version, b"RFB 003.008\n");
+                        server.write_all(&[1, 1]).await.unwrap(); // one security type: None
+                        let mut big = vec![0u8; BIG];
+                        server.read_exact(&mut big).await.unwrap();
+                        let sum: u64 = big.iter().map(|b| u64::from(*b)).sum();
+                        server.write_all(&sum.to_be_bytes()).await.unwrap();
+                    });
+                    ws.on_upgrade(move |socket| relay_serial(socket, ours))
+                }),
+            );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/vnc"))
+                .await
+                .unwrap();
+            let mut received = Vec::new();
+            let mut read_n = async |ws: &mut _, n: usize, received: &mut Vec<u8>| {
+                let ws: &mut tokio_tungstenite::WebSocketStream<_> = ws;
+                while received.len() < n {
+                    match ws.next().await.expect("the relay closed early").unwrap() {
+                        Wire::Binary(b) => received.extend_from_slice(&b),
+                        other => panic!("expected binary frames, got {other:?}"),
+                    }
+                }
+            };
+            read_n(&mut ws, 12, &mut received).await;
+            assert_eq!(&received[..12], b"RFB 003.008\n");
+            ws.send(Wire::Binary(b"RFB 003.008\n".to_vec().into()))
+                .await
+                .unwrap();
+            read_n(&mut ws, 14, &mut received).await;
+            assert_eq!(&received[12..14], &[1, 1]);
+            let payload: Vec<u8> = (0..BIG).map(|i| (i % 251) as u8).collect();
+            ws.send(Wire::Binary(payload.clone().into())).await.unwrap();
+            read_n(&mut ws, 22, &mut received).await;
+            let want: u64 = payload.iter().map(|b| u64::from(*b)).sum();
+            assert_eq!(&received[14..22], &want.to_be_bytes());
         }
 
         #[tokio::test]

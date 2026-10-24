@@ -14,7 +14,7 @@ tab's session storage and is never put in a URL.
 ## What it covers
 
 **Node:** Overview (live events), Machines (create wizard, detail with Console, Connect (SSH commands and published ports), Display (a `vz` guest's screen
-with clicks and keys), Guest, Network and egress policy, Storage, Protect, Migration), Kubernetes (nodes, pods, logs, a shell, traffic), Sandboxes, Agent sessions, Network (virtual networks, groups, network policies, services
+with clicks and keys, or a QEMU machine's VNC console), Guest, Network and egress policy, Storage, Protect, Migration), Kubernetes (nodes, pods, logs, a shell, traffic), Sandboxes, Agent sessions, Network (virtual networks, groups, network policies, services
 with apply, flows, inspect, node default egress policy, traffic), Images (catalog, templates, pools, OCI),
 Volumes, Branches, Backups, Host (memory, pressure, topology, GPU passthrough on Linux, Apple host and the Mac pool on a Mac), and
 Access & audit (quota, events, an API explorer).
@@ -55,6 +55,14 @@ Many buttons have a "Copy as fluxctl" twin so the CLI form is one click away.
   30-second ticket bound to a VM and a kind (console or serial); `GET /console/ws/{ticket}` redeems it. Agent-session
   terminals use the existing `pty-ticket`.
 - Central refuses changes made with an SSO cookie unless the request carries `X-FluxVM-Console`; Studio sends it.
+
+
+- **VNC console (QEMU machines).** QEMU already listens on `vnc.sock` in each machine's workspace. `POST /v1/vms/{id}/ws-ticket`
+  with `{"kind":"vnc"}` (admin) mints a ticket, refused up front with the reason when the machine is not QEMU, not running or has
+  no socket; redeeming it at `GET /console/ws/{ticket}` bridges a WebSocket to that socket, raw RFB bytes in binary frames. The
+  Display tab runs [noVNC](https://github.com/novnc/noVNC) 1.7.0 (loaded on first use, a separate `assets/rfb.js` chunk) over it.
+  The socket takes no password, so the ticket, which only an admin can mint, is the whole access control. noVNC is licensed
+  MPL-2.0; see `NOTICE`.
 
 ### Development
 

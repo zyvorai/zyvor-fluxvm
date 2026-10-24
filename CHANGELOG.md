@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- **Studio: a VNC console for QEMU machines.** The Display tab of a running QEMU machine opens its graphical console in the browser
+  ([noVNC](https://github.com/novnc/noVNC) 1.7.0, MPL-2.0, attributed in `NOTICE`, loaded on first use): keys and clicks, Ctrl+Alt+Del,
+  full screen, view-only, fit to window and text sent to the machine's clipboard. The daemon side is `POST /v1/vms/{id}/ws-ticket` with
+  `{"kind":"vnc"}` (admin, single use, refused with the reason when the machine is not a running QEMU machine with a VNC socket) and the
+  existing `GET /console/ws/{ticket}`, which bridges the WebSocket to the VM's `vnc.sock` (raw RFB in binary frames). No port is opened.
 - **Studio: Connect and Display tabs on a machine.** *Connect* lists the ways in as commands to copy: `fluxctl ssh ID` (with `-l` for the
   cloud-init user), plain `ssh user@address`, `ssh -p PORT` for each published port 22, and `fluxctl fleet ssh NAME` for access through
   your fleet's central, with what each needs and the machine's published ports (web ports get an Open link); it opens nothing, and

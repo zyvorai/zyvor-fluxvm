@@ -78,8 +78,16 @@ export function connectRoutes(vm: ConnectVm, host: string): Route[] {
   return out;
 }
 
-/** Whether this machine has a screen to show: a macOS-style `vz` guest that is running. */
-export const hasDisplay = (vm: Pick<ConnectVm, 'backend' | 'status'>): boolean => vm.backend === 'vz' && vm.status === 'running';
+/**
+ * How this machine's screen is reached: a `vz` guest through screenshots and input events, a QEMU machine through its VNC
+ * server (a browser VNC client over the daemon's ticketed bridge). Null when there is nothing to show now.
+ */
+export type DisplayKind = 'screenshot' | 'vnc';
+export const displayKind = (vm: Pick<ConnectVm, 'backend' | 'status'>): DisplayKind | null =>
+  vm.status !== 'running' ? null : vm.backend === 'vz' ? 'screenshot' : vm.backend === 'qemu' ? 'vnc' : null;
+
+/** Whether a Display tab is worth showing at all for this backend (it explains itself when the machine is stopped). */
+export const hasDisplayTab = (vm: Pick<ConnectVm, 'backend'>): boolean => vm.backend === 'vz' || vm.backend === 'qemu';
 
 /** `http://host:port` for a published port that is plausibly a web server, so the table can offer a link. */
 export const WEB_PORTS = [80, 443, 3000, 5000, 8000, 8080, 8443, 8888, 9000];
