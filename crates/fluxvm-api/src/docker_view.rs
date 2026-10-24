@@ -1,14 +1,15 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
 // SPDX-License-Identifier: Apache-2.0
 
-//! A read-only view of the Docker engine `fluxctl docker up` runs, for the Studio UI.
+//! A view of the Docker engine `fluxctl docker up` runs, for the Studio UI, with start, stop and restart for its containers.
 //!
 //! * `GET /v1/docker` says whether the engine VM (labelled `fluxvm.docker-engine`) and its socket are there, and, when the socket
 //!   answers, lists its containers and images in a small, flat shape.
 //! * `GET /v1/docker/containers/{id}/logs` returns the tail of a container's log as text.
+//! * `POST /v1/docker/containers/{id}/{start|stop|restart}` does that to one container. Nothing else is written to the engine.
 //!
 //! The engine is the one `fluxctl docker` keeps at `/tmp/fluxvm-run-<uid>/docker-engine.sock` for the user the daemon runs as.
-//! The containers belong to the whole host, not to a tenant, so these routes are admin only. Nothing is written to the engine.
+//! The containers belong to the whole host, not to a tenant, so these routes are admin only; the request log records each action.
 
 use crate::{ApiError, ApiResult, Role, require_admin};
 use axum::{
@@ -20,7 +21,7 @@ use axum::{
 use bytes::Bytes;
 use fluxvm_scheduler::VmManager;
 use http_body_util::{BodyExt, Empty, Limited};
-use hyper::Request;
+use hyper::{Method, Request};
 use hyper_util::rt::TokioIo;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -36,6 +37,8 @@ const LABEL: &str = "fluxvm.docker-engine";
 /// Largest answer read from the engine.
 const MAX_BODY: usize = 8 * 1024 * 1024;
 const TIMEOUT: Duration = Duration::from_secs(10);
+/// A stop or restart waits up to the container's grace period (Docker's default is 10 s) before it kills it.
+const ACTION_TIMEOUT: Duration = Duration::from_secs(40);
 const DEFAULT_TAIL: u32 = 500;
 const MAX_TAIL: u32 = 5000;
 
@@ -55,6 +58,16 @@ pub(crate) fn default_socket() -> PathBuf {
 
 /// One GET over the engine's unix socket: the status and the body (at most [`MAX_BODY`] bytes).
 async fn engine_get(socket: &FsPath, path: &str) -> Result<(StatusCode, Bytes), String> {
+    engine_call(socket, Method::GET, path, TIMEOUT).await
+}
+
+/// One request over the engine's unix socket, without a body.
+async fn engine_call(
+    socket: &FsPath,
+    method: Method,
+    path: &str,
+    timeout: Duration,
+) -> Result<(StatusCode, Bytes), String> {
     let work = async {
         let stream = UnixStream::connect(socket)
             .await
@@ -64,6 +77,7 @@ async fn engine_get(socket: &FsPath, path: &str) -> Result<(StatusCode, Bytes), 
             .map_err(|e| format!("talking to the engine: {e}"))?;
         tokio::spawn(conn);
         let req = Request::builder()
+            .method(method)
             .uri(path)
             .header("host", "docker")
             .body(Empty::<Bytes>::new())
@@ -80,7 +94,7 @@ async fn engine_get(socket: &FsPath, path: &str) -> Result<(StatusCode, Bytes), 
             .to_bytes();
         Ok((status, body))
     };
-    tokio::time::timeout(TIMEOUT, work)
+    tokio::time::timeout(timeout, work)
         .await
         .map_err(|_| "the engine did not answer in time".to_owned())?
 }
@@ -320,10 +334,65 @@ pub(crate) async fn container_logs(
         .into_response())
 }
 
+/// What Docker answers to `POST /containers/{id}/{action}`: 204 done, 304 already in that state, 404 no such container.
+async fn act_on(socket: &FsPath, id: &str, action: &str) -> Result<Value, ApiError> {
+    let (s, b) = engine_call(
+        socket,
+        Method::POST,
+        &format!("/containers/{id}/{action}"),
+        ACTION_TIMEOUT,
+    )
+    .await
+    .map_err(|e| err(StatusCode::BAD_GATEWAY, e))?;
+    match s {
+        StatusCode::NOT_FOUND => Err(err(StatusCode::NOT_FOUND, format!("no container '{id}'"))),
+        StatusCode::NOT_MODIFIED => {
+            Ok(json!({"container": id, "action": action, "changed": false}))
+        }
+        s if s.is_success() => Ok(json!({"container": id, "action": action, "changed": true})),
+        s => {
+            json_of(s, &b, action)?;
+            Err(err(
+                StatusCode::BAD_GATEWAY,
+                format!("the engine answered {s} to {action}"),
+            ))
+        }
+    }
+}
+
+/// Who may do what to which container, before anything is sent to the engine.
+fn check_action(role: Role, id: &str, action: &str) -> Result<(), ApiError> {
+    require_admin(role)?;
+    if !id_ok(id) {
+        return Err(err(StatusCode::BAD_REQUEST, "not a container id or name"));
+    }
+    if !matches!(action, "start" | "stop" | "restart") {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "the action is start, stop or restart",
+        ));
+    }
+    Ok(())
+}
+
+/// `POST /v1/docker/containers/{id}/{action}` (admin) with `action` one of `start`, `stop`, `restart`. `changed: false` means
+/// the container was already started or stopped.
+pub(crate) async fn container_action(
+    State(_m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path((id, action)): Path<(String, String)>,
+) -> ApiResult<Json<Value>> {
+    check_action(role, &id, &action)?;
+    Ok(Json(act_on(&default_socket(), &id, &action).await?))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::{Router, routing::get};
+    use axum::{
+        Router,
+        routing::{get, post},
+    };
 
     fn frame(stream: u8, text: &str) -> Vec<u8> {
         let mut v = vec![stream, 0, 0, 0];
@@ -397,6 +466,9 @@ mod tests {
             .route("/containers/{id}/json", get(|Path(id): Path<String>| async move {
                 if id == "web" { Json(json!({"Config": {"Tty": false}})).into_response() } else { (StatusCode::NOT_FOUND, Json(json!({"message": "No such container"}))).into_response() }
             }))
+            .route("/containers/{id}/start", post(|Path(id): Path<String>| async move {
+                match id.as_str() { "web" => StatusCode::NO_CONTENT, "up" => StatusCode::NOT_MODIFIED, "bad" => StatusCode::INTERNAL_SERVER_ERROR, _ => StatusCode::NOT_FOUND }.into_response()
+            }))
             .route("/containers/{id}/logs", get(|| async {
                 let mut v = frame(1, "2026-10-24T10:00:00Z hello\n");
                 v.extend(frame(2, "2026-10-24T10:00:01Z oops\n"));
@@ -429,6 +501,39 @@ mod tests {
             logs_of(&sock, "nope", 10).await.unwrap_err().status,
             StatusCode::NOT_FOUND
         );
+    }
+
+    #[tokio::test]
+    async fn a_container_is_started_and_the_answers_are_told_apart() {
+        let dir = tempdir();
+        let sock = fake_engine(&dir).await;
+        assert_eq!(
+            act_on(&sock, "web", "start").await.unwrap()["changed"],
+            true
+        );
+        assert_eq!(
+            act_on(&sock, "up", "start").await.unwrap()["changed"],
+            false
+        );
+        assert_eq!(
+            act_on(&sock, "nope", "start").await.unwrap_err().status,
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            act_on(&sock, "bad", "start").await.unwrap_err().status,
+            StatusCode::BAD_GATEWAY
+        );
+    }
+
+    #[test]
+    fn only_start_stop_and_restart_by_an_admin_pass_the_check() {
+        let status = |role, id, action| check_action(role, id, action).unwrap_err().status;
+        assert_eq!(status(Role::ReadOnly, "web", "stop"), StatusCode::FORBIDDEN);
+        assert_eq!(status(Role::Admin, "web", "kill"), StatusCode::BAD_REQUEST);
+        assert_eq!(status(Role::Admin, "a b", "stop"), StatusCode::BAD_REQUEST);
+        for action in ["start", "stop", "restart"] {
+            assert!(check_action(Role::Admin, "web", action).is_ok());
+        }
     }
 
     #[tokio::test]

@@ -88,3 +88,11 @@ export const filterContainers = (list: DockerContainer[], q: string, group: 'all
     return words.every((w) => hay.includes(w));
   });
 };
+
+export type DockerAction = 'start' | 'stop' | 'restart';
+
+/** What to tell the user once the engine has answered; `changed` is false when the container was already so. */
+export const actionDone = (name: string, action: DockerAction, changed: boolean): string => {
+  if (!changed) return action === 'start' ? `${name} was already running` : `${name} was already stopped`;
+  return action === 'start' ? `${name} started` : action === 'stop' ? `${name} stopped` : `${name} restarted`;
+};

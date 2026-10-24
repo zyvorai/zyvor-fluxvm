@@ -1,25 +1,39 @@
 import { useMemo, useState } from 'react';
-import { ScrollText } from 'lucide-react';
+import { Play, RotateCw, ScrollText, Square } from 'lucide-react';
+import type { Notify } from '../App';
 import { ContainerWindow } from './ContainerWindow';
 import { Button, Card, EmptyState, Hero, Pill, Skeleton, Tabs, api, usePoll } from '@fluxvm/ui-core';
-import { type DockerContainer, type DockerView, ageSince, containerTone, filterContainers, fmtSize, portsText, summarize } from '../lib/docker';
+import { type DockerAction, type DockerContainer, type DockerView, actionDone, ageSince, containerTone, filterContainers, fmtSize, portsText, summarize } from '../lib/docker';
 
-/** The Docker engine `fluxctl docker` runs in its own VM: containers and images, and a container's log. Read-only. */
-export function DockerPage() {
+/** The Docker engine `fluxctl docker` runs in its own VM: containers and images, a container's log, and start, stop and restart. */
+export function DockerPage({ notify }: { notify: Notify }) {
   const view = usePoll(async () => await api.get<DockerView>('/v1/docker'), 5000);
   const d = view.data;
   const [tab, setTab] = useState<'containers' | 'images'>('containers');
   const [group, setGroup] = useState<'all' | 'running' | 'stopped'>('all');
   const [q, setQ] = useState('');
   const [open, setOpen] = useState<DockerContainer | null>(null);
+  const [busy, setBusy] = useState('');
   const now = Date.now();
+  const act = async (c: DockerContainer, action: DockerAction) => {
+    setBusy(c.id + action);
+    try {
+      const r = await api.post<{ changed: boolean }>(`/v1/docker/containers/${encodeURIComponent(c.id)}/${action}`);
+      notify(actionDone(c.name, action, r.changed));
+      await view.refresh();
+    } catch (e) {
+      notify(`${c.name}: ${(e as Error).message}`, 'bad');
+    } finally {
+      setBusy('');
+    }
+  };
   const shown = useMemo(() => filterContainers(d?.containers ?? [], q, group), [d, q, group]);
   const sum = useMemo(() => summarize(d?.containers ?? []), [d]);
   const forbidden = view.error?.message && /admin/i.test(view.error.message);
 
   return (
     <>
-      <Hero eyebrow="Docker" title="The engine on this host," accent="containers included." lede="The Docker engine fluxctl docker runs in its own VM. Read-only: this page shows what is running; use the docker CLI to change it." />
+      <Hero eyebrow="Docker" title="The engine on this host," accent="containers included." lede="The Docker engine fluxctl docker runs in its own VM. Start, stop and restart a container, read its log; use the docker CLI for the rest." />
       {view.loading && !d ? (
         <Skeleton h={160} />
       ) : forbidden ? (
@@ -62,7 +76,17 @@ export function DockerPage() {
                       <td className="fx-muted">{c.status}</td>
                       <td className="fx-mono">{portsText(c.ports) || '—'}</td>
                       <td className="fx-muted">{ageSince(c.created, now)}</td>
-                      <td><span className="fx-row-actions"><Button size="sm" variant="ghost" aria-label={`Logs of ${c.name}`} onClick={() => setOpen(c)}><ScrollText size={14} />Logs</Button></span></td>
+                      <td><span className="fx-row-actions">
+                        {c.state === 'running' || c.state === 'restarting' ? (
+                          <>
+                            <Button size="sm" variant="ghost" aria-label={`Restart ${c.name}`} busy={busy === c.id + 'restart'} disabled={!!busy} onClick={() => void act(c, 'restart')}><RotateCw size={14} />Restart</Button>
+                            <Button size="sm" variant="ghost" aria-label={`Stop ${c.name}`} busy={busy === c.id + 'stop'} disabled={!!busy} onClick={() => void act(c, 'stop')}><Square size={14} />Stop</Button>
+                          </>
+                        ) : (
+                          <Button size="sm" variant="ghost" aria-label={`Start ${c.name}`} busy={busy === c.id + 'start'} disabled={!!busy} onClick={() => void act(c, 'start')}><Play size={14} />Start</Button>
+                        )}
+                        <Button size="sm" variant="ghost" aria-label={`Logs of ${c.name}`} onClick={() => setOpen(c)}><ScrollText size={14} />Logs</Button>
+                      </span></td>
                     </tr>
                   ))}
                 </tbody></table></div>

@@ -81,9 +81,9 @@ up where it was.
 The **Docker** page (Platform, in the node Studio) shows the engine the daemon can reach at `/tmp/fluxvm-run-<uid>/docker-engine.sock`, the socket
 `fluxctl docker up` publishes for the user the daemon runs as: its version, the containers (state, status as Docker words it, published ports,
 age, with a filter and a running or not-running switch) and the images (tags, size, containers using them), and a container's log in the same
-colourful, filterable window as a pod's. It is read-only and admin only: the containers belong to the whole host. When there is no engine VM
+colourful, filterable window as a pod's. Each container has **Start**, **Stop** and **Restart** buttons (a stop waits for the container's grace period, 10 s by default, then kills it; a toast says what happened, including "already stopped"). Nothing else is written to the engine: no create, remove or pull, which stay with the docker CLI. It is admin only: the containers belong to the whole host. When there is no engine VM
 or its socket does not answer, the page says so and names the command to run instead of failing. The routes are `GET /v1/docker` and
-`GET /v1/docker/containers/{id}/logs?tail=N` (in the daemon's OpenAPI document). A daemon that was given a different `--socket` for `fluxctl docker` does not see
+`GET /v1/docker/containers/{id}/logs?tail=N` and `POST /v1/docker/containers/{id}/{start|stop|restart}` (in the daemon's OpenAPI document; the request log records each action). A daemon that was given a different `--socket` for `fluxctl docker` does not see
 that engine.
 
 ## Limits

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { type DockerContainer, containerTone, filterContainers, fmtSize, portsText, summarize } from './docker';
+import { type DockerContainer, actionDone, containerTone, filterContainers, fmtSize, portsText, summarize } from './docker';
 
 const c = (name: string, state: string, status: string, image = 'nginx'): DockerContainer => ({ id: name + '0000', name, image, command: '', state, status, created: 0, ports: [] });
 
@@ -40,5 +40,15 @@ describe('filter', () => {
   it('limits to a group', () => {
     expect(filterContainers(list, '', 'running').map((x) => x.name)).toEqual(['web']);
     expect(filterContainers(list, '', 'stopped').map((x) => x.name)).toEqual(['db']);
+  });
+});
+
+describe('actionDone', () => {
+  it('says what happened, and when nothing had to', () => {
+    expect(actionDone('web', 'start', true)).toBe('web started');
+    expect(actionDone('web', 'stop', true)).toBe('web stopped');
+    expect(actionDone('web', 'restart', true)).toBe('web restarted');
+    expect(actionDone('web', 'start', false)).toBe('web was already running');
+    expect(actionDone('web', 'stop', false)).toBe('web was already stopped');
   });
 });
