@@ -366,7 +366,8 @@ fn install_commands(o: &KubeOptions, role: &Role, node: &str) -> Vec<String> {
 }
 
 /// The VM request for one node: Debian 13, k3s installed on first boot, the user's SSH key, folders shared at matching
-/// paths. Offline nodes install no packages, so the first boot needs no network at all.
+/// paths. The default image needs no packages (see below) and offline nodes install none, so offline first boot needs no
+/// network at all.
 pub fn node_spec(
     o: &KubeOptions,
     role: &Role,
@@ -375,10 +376,15 @@ pub fn node_spec(
     key: &str,
     shares: Vec<Value>,
 ) -> Value {
-    let packages: Vec<&str> = if o.offline.is_some() {
+    // The default image (Debian 13) already has curl, wget, iptables and ca-certificates, which is all the k3s installer
+    // needs, so nothing is installed: cloud-init's `apt update` also downloads the source indexes that image's apt sources
+    // list (10 MB and more), took over three minutes on a slow link, and when cloud-init's apt wrapper timed out the whole
+    // first-boot sequence after it never ran, including the step that tells the host the guest's address. Offline nodes
+    // install nothing either. Only another image, which may lack curl, gets it installed.
+    let packages: Vec<&str> = if o.offline.is_some() || o.image.is_none() {
         vec![]
     } else {
-        vec!["curl", "ca-certificates", "iptables", "git", "jq"]
+        vec!["curl", "ca-certificates"]
     };
     // The default NAT network keeps each VM apart from the others. Nodes of one cluster share a private network
     // (`10.89.N.0/24`, one switch per name) as a second card, which carries the node-to-node and pod traffic.
@@ -1803,5 +1809,39 @@ mod tests {
             "s",
         );
         assert!(!single[0].contains("IFACE"));
+    }
+
+    #[test]
+    fn the_default_image_installs_no_packages_so_apt_cannot_stall_first_boot() {
+        let o = KubeOptions::default();
+        for spec in [
+            kube_spec(&o, "u", "k", vec![]),
+            node_spec(&o, &agent(), "w", "u", "k", vec![]),
+        ] {
+            assert_eq!(
+                spec["cloud_init"]["packages"],
+                json!([]),
+                "apt is not needed on debian-13"
+            );
+        }
+        // Another image may not have curl, so it gets curl and the certificates, and nothing else.
+        let custom = KubeOptions {
+            image: Some("ubuntu-24.04".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            kube_spec(&custom, "u", "k", vec![])["cloud_init"]["packages"],
+            json!(["curl", "ca-certificates"])
+        );
+        let offline = KubeOptions {
+            image: Some("ubuntu-24.04".into()),
+            offline: Some("/a".into()),
+            cni: Cni::Flannel,
+            ..Default::default()
+        };
+        assert_eq!(
+            kube_spec(&offline, "u", "k", vec![])["cloud_init"]["packages"],
+            json!([])
+        );
     }
 }
