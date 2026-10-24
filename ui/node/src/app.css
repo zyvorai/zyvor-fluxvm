@@ -5,3 +5,68 @@
 .vm-name { font-weight: 600; letter-spacing: -0.01em; }
 .vm-err { color: var(--danger); font-size: 12px; margin-top: 2px; }
 .vm-stack { display: inline-block; margin-left: 8px; font-size: 11px; color: var(--text-tertiary); border: 1px solid var(--hairline-1); border-radius: 6px; padding: 1px 6px; }
+
+/* Kubernetes pod window: logs and a shell, dressed like Terminal.app (always dark, whatever the theme). */
+.kx-wrap { position: fixed; inset: 0; z-index: 60; display: grid; place-items: center; padding: 3vh 3vw; background: rgba(0, 0, 0, 0.45); backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px); }
+.kx-window { --kx-bg: #1c1c1e; --kx-fg: #e9ebeb; --kx-dim: #8e8e93; --kx-line: #2c2c2e; width: min(1200px, 100%); height: min(86vh, 900px); display: grid; grid-template-rows: auto auto 1fr auto; border-radius: 12px; overflow: hidden; background: var(--kx-bg); color: var(--kx-fg); box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.12), 0 28px 80px rgba(0, 0, 0, 0.6); font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace; font-size: 12.5px; }
+.kx-window:has(.kx-sub-bar) { grid-template-rows: auto auto auto 1fr auto; }
+.kx-titlebar { display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 12px; padding: 9px 12px; background: linear-gradient(#3a3a3c, #2c2c2e); border-bottom: 1px solid #000; font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', system-ui, sans-serif; font-size: 13px; }
+.kx-dots { display: inline-flex; gap: 8px; }
+.kx-dot { width: 12px; height: 12px; border-radius: 50%; border: 0; padding: 0; display: inline-grid; place-items: center; color: transparent; }
+.kx-dot-close { background: #ff5f57; cursor: pointer; }
+.kx-dot-close:hover, .kx-dot-close:focus-visible { color: rgba(0, 0, 0, 0.6); }
+.kx-dot-min { background: #febc2e; }
+.kx-dot-max { background: #28c840; }
+.kx-title { text-align: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: #e5e5ea; }
+.kx-title b { font-weight: 600; }
+.kx-sub { color: var(--kx-dim); }
+.kx-tabs { display: inline-flex; background: #1c1c1e; border-radius: 7px; padding: 2px; }
+.kx-tabs button { all: unset; cursor: pointer; padding: 3px 12px; border-radius: 5px; color: var(--kx-dim); font: inherit; }
+.kx-tabs button.is-on { background: #636366; color: #fff; }
+.kx-sub-bar { padding: 6px 12px; background: #242426; border-bottom: 1px solid var(--kx-line); color: var(--kx-dim); }
+.kx-sub-bar select, .kx-bar select, .kx-bar input { background: #1c1c1e; color: var(--kx-fg); border: 1px solid #48484a; border-radius: 6px; padding: 3px 8px; font: inherit; }
+.kx-bar { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; padding: 7px 12px; background: #242426; border-bottom: 1px solid var(--kx-line); }
+.kx-bar input { flex: 1 1 200px; min-width: 120px; }
+.kx-bar button { all: unset; cursor: pointer; display: inline-flex; align-items: center; gap: 5px; padding: 3px 9px; border-radius: 6px; border: 1px solid #48484a; color: #d1d1d6; font: inherit; }
+.kx-bar button:hover { background: #3a3a3c; }
+.kx-bar button.is-on { background: #0a84ff33; border-color: #0a84ff; color: #fff; }
+.kx-bar button:focus-visible, .kx-tabs button:focus-visible, .kx-dot:focus-visible { outline: 2px solid #0a84ff; outline-offset: 1px; }
+.kx-log { overflow: auto; padding: 8px 0; line-height: 1.5; background: #141416; min-height: 0; }
+.kx-line { display: flex; gap: 10px; padding: 0 14px 0 0; border-left: 3px solid transparent; }
+.kx-line:hover { background: #ffffff0d; }
+.kx-line.lv-error, .kx-line.lv-fatal { background: #ff453a14; border-left-color: #ff453a; }
+.kx-line.lv-warn { background: #ffd60a10; border-left-color: #ffd60a; }
+.kx-n { flex: none; width: 4.5ch; text-align: right; color: #48484a; user-select: none; padding-left: 8px; }
+.kx-ts { flex: none; color: var(--kx-dim); }
+.kx-lv { flex: none; font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.04em; padding: 0 6px; border-radius: 4px; align-self: flex-start; margin-top: 2px; line-height: 1.55; }
+.kx-lv.lv-fatal { background: #ff453a; color: #fff; font-weight: 700; }
+.kx-lv.lv-error { background: #ff453a33; color: #ff6961; }
+.kx-lv.lv-warn { background: #ffd60a2e; color: #ffd60a; }
+.kx-lv.lv-info { background: #30d1582e; color: #32d74b; }
+.kx-lv.lv-debug { background: #64d2ff26; color: #64d2ff; }
+.kx-lv.lv-trace { background: #ffffff14; color: var(--kx-dim); }
+.kx-msg { flex: 1 1 auto; min-width: 0; white-space: pre; }
+.kx-log.is-wrap .kx-msg { white-space: pre-wrap; overflow-wrap: anywhere; }
+.kx-note { margin: 0; padding: 14px; color: var(--kx-dim); } .kx-err { color: #ff6961; }
+/* Terminal.app's ANSI palette */
+.kx-fg-black { color: #6e6e73; } .kx-fg-red { color: #c23621; } .kx-fg-green { color: #25bc24; } .kx-fg-yellow { color: #adad27; }
+.kx-fg-blue { color: #6d5cff; } .kx-fg-magenta { color: #d338d3; } .kx-fg-cyan { color: #33bbc8; } .kx-fg-white { color: #cbcccd; }
+.kx-fg-bright-black { color: #818383; } .kx-fg-bright-red { color: #fc391f; } .kx-fg-bright-green { color: #31e722; } .kx-fg-bright-yellow { color: #eaec23; }
+.kx-fg-bright-blue { color: #7c6bff; } .kx-fg-bright-magenta { color: #f935f8; } .kx-fg-bright-cyan { color: #14f0f0; } .kx-fg-bright-white { color: #e9ebeb; }
+.kx-bg-black { background: #000; } .kx-bg-red { background: #c23621; } .kx-bg-green { background: #25bc24; } .kx-bg-yellow { background: #adad27; }
+.kx-bg-blue { background: #492ee1; } .kx-bg-magenta { background: #d338d3; } .kx-bg-cyan { background: #33bbc8; } .kx-bg-white { background: #cbcccd; color: #000; }
+.kx-b { font-weight: 700; } .kx-dim { opacity: 0.6; } .kx-u { text-decoration: underline; }
+/* highlights for plain log text */
+.kx-key { color: #64d2ff; } .kx-str { color: #32d74b; } .kx-num { color: #ffd60a; } .kx-ip { color: #bf5af2; }
+.kx-url { color: #0a84ff; text-decoration: underline; } .kx-method { color: #ff79c6; font-weight: 700; } .kx-lit { color: #bf5af2; }
+.kx-code-ok { color: #32d74b; font-weight: 700; } .kx-code-info { color: #64d2ff; font-weight: 700; } .kx-code-warn { color: #ffd60a; font-weight: 700; } .kx-code-error { color: #ff453a; font-weight: 700; }
+.kx-foot { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; padding: 6px 12px; background: #242426; border-top: 1px solid #000; color: var(--kx-dim); font-size: 11.5px; }
+.kx-grow { flex: 1; }
+.kx-shell { min-height: 0; padding: 10px 12px; background: #141416; overflow: auto; --terminal-bg: #141416; --terminal-text: #e9ebeb; }
+.kx-shell .fx-term-body { height: min(66vh, 640px); border-color: #2c2c2e; }
+.kx-shell .fx-muted { color: var(--kx-dim); }
+@media (max-width: 700px) { .kx-wrap { padding: 0; } .kx-window { height: 100vh; border-radius: 0; } .kx-titlebar { grid-template-columns: auto 1fr; } .kx-tabs { grid-column: 1 / -1; justify-self: start; } }
+@media (prefers-reduced-motion: no-preference) { .kx-window { animation: kxIn 0.22s cubic-bezier(0.2, 0.9, 0.3, 1.1) both; } @keyframes kxIn { from { opacity: 0; transform: scale(0.97) translateY(6px); } } }
+.fx-link { all: unset; cursor: pointer; color: var(--apple-link, #2997ff); }
+.fx-link:hover { text-decoration: underline; }
+.fx-link:focus-visible { outline: 2px solid var(--apple-link, #2997ff); outline-offset: 2px; border-radius: 3px; }

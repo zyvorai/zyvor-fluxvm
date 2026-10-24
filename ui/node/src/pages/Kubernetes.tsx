@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Card, EmptyState, Hero, Pill, Skeleton, Tabs, api, usePoll } from '@fluxvm/ui-core';
-import { type KubeClusterItem, type KubeDetail, ageOf, filterPods, kubeProblem, namespacesOf, podTone, summarize } from '../lib/kube';
+import { ScrollText, SquareTerminal } from 'lucide-react';
+import { PodWindow, type PodTab } from './PodWindow';
+import { Button, Card, EmptyState, Hero, Pill, Skeleton, Tabs, api, usePoll } from '@fluxvm/ui-core';
+import { type KubeClusterItem, type KubeDetail, type KubePod, ageOf, filterPods, kubeProblem, namespacesOf, podTone, summarize } from '../lib/kube';
 
 const enc = encodeURIComponent;
 
@@ -13,6 +15,7 @@ export function KubernetesPage() {
   const [ns, setNs] = useState('');
   const [q, setQ] = useState('');
   const [now, setNow] = useState(Date.now());
+  const [open, setOpen] = useState<{ pod: KubePod; tab: PodTab } | null>(null);
   useEffect(() => {
     const t = setInterval(() => setNow(Date.now()), 5000);
     return () => clearInterval(t);
@@ -60,7 +63,7 @@ export function KubernetesPage() {
                 </tbody></table></div>
               </Card>
               <Card title="Pods">
-                <div className="fx-row-actions" style={{ marginBottom: 10, flexWrap: 'wrap' }}>
+                <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginBottom: 12 }}>
                   <Pill tone="ok">{sum.healthy} running</Pill>
                   {sum.waiting ? <Pill tone="warn">{sum.waiting} starting</Pill> : null}
                   {sum.failing ? <Pill tone="bad">{sum.failing} failing</Pill> : null}
@@ -74,17 +77,21 @@ export function KubernetesPage() {
                 {pods.length === 0 ? (
                   <p className="fx-muted">{d.pods.length ? 'No pod matches this filter.' : 'This cluster has no pods yet.'}</p>
                 ) : (
-                  <div className="fx-table-wrap"><table className="fx-table"><thead><tr><th>Namespace</th><th>Pod</th><th>Ready</th><th>Status</th><th>Restarts</th><th>Node</th><th>Pod IP</th><th>Age</th></tr></thead><tbody>
+                  <div className="fx-table-wrap"><table className="fx-table"><thead><tr><th>Namespace</th><th>Pod</th><th>Ready</th><th>Status</th><th>Restarts</th><th>Node</th><th>Pod IP</th><th>Age</th><th /></tr></thead><tbody>
                     {pods.map((p) => (
                       <tr key={`${p.namespace}/${p.name}`}>
                         <td className="fx-muted">{p.namespace}</td>
-                        <td className="vm-name">{p.name}</td>
+                        <td className="vm-name"><button className="fx-link" onClick={() => setOpen({ pod: p, tab: 'logs' })} title="Open the logs">{p.name}</button></td>
                         <td className="fx-mono">{p.ready}</td>
                         <td><Pill tone={podTone(p)}>{p.status}</Pill></td>
                         <td className="fx-muted">{p.restarts}</td>
                         <td className="fx-muted">{p.node ?? '—'}</td>
                         <td className="fx-mono">{p.pod_ip ?? '—'}</td>
                         <td className="fx-muted">{ageOf(p.created, now)}</td>
+                        <td><span className="fx-row-actions">
+                          <Button size="sm" variant="ghost" onClick={() => setOpen({ pod: p, tab: 'logs' })}><ScrollText size={14} />Logs</Button>
+                          <Button size="sm" variant="ghost" onClick={() => setOpen({ pod: p, tab: 'shell' })} disabled={p.phase !== 'Running'}><SquareTerminal size={14} />Shell</Button>
+                        </span></td>
                       </tr>
                     ))}
                   </tbody></table></div>
@@ -95,6 +102,7 @@ export function KubernetesPage() {
           )}
         </>
       )}
+      {open ? <PodWindow cluster={current} pod={open.pod} tab={open.tab} onClose={() => setOpen(null)} /> : null}
     </>
   );
 }

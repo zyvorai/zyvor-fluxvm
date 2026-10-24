@@ -47,6 +47,7 @@ mod agent_session_auth;
 mod agent_session_transfer;
 mod agent_sessions;
 mod kube;
+mod kube_pod;
 mod macos_pool_api;
 mod speculate_api;
 mod studio;
@@ -929,6 +930,15 @@ pub fn router(manager: Arc<VmManager>) -> Router {
         .route("/v1/vznets", get(list_vznets))
         .route("/v1/kube", get(kube::list_clusters))
         .route("/v1/kube/{name}", get(kube::get_cluster))
+        .route(
+            "/v1/kube/{name}/pods/{ns}/{pod}/log",
+            get(kube_pod::pod_log),
+        )
+        .route(
+            "/v1/kube/{name}/pods/{ns}/{pod}/exec-ticket",
+            post(kube_pod::exec_ticket),
+        )
+        .route("/console/kube/ws/{ticket}", get(kube_pod::exec_ws))
         .route("/v1/oci/images/{what}", delete(remove_oci_image))
         .route("/v1/oci/prune", post(prune_oci_images))
         .route("/v1/pools", post(create_pool).get(list_pools))
