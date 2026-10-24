@@ -63,7 +63,7 @@ export function KubernetesPage() {
                 </tbody></table></div>
               </Card>
               <Card title="Pods">
-                <div className="fx-row-actions" style={{ marginBottom: 10, flexWrap: 'wrap' }}>
+                <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginBottom: 12 }}>
                   <Pill tone="ok">{sum.healthy} running</Pill>
                   {sum.waiting ? <Pill tone="warn">{sum.waiting} starting</Pill> : null}
                   {sum.failing ? <Pill tone="bad">{sum.failing} failing</Pill> : null}
