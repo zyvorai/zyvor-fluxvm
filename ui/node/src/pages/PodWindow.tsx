@@ -48,13 +48,14 @@ export function PodWindow({ cluster, pod, tab: initial, onClose }: { cluster: st
             </label>
           </div>
         ) : null}
-        {tab === 'logs' ? <LogsPane base={base} container={container} pod={pod} /> : <ShellPane base={base} container={container} />}
+        {tab === 'logs' ? <LogsPane base={base} container={container} name={pod.name} up={`pod up ${ageOf(pod.created, Date.now())}`} /> : <ShellPane base={base} container={container} />}
       </section>
     </div>
   );
 }
 
-function LogsPane({ base, container, pod }: { base: string; container: string; pod: KubePod }) {
+/** A log with a filter, a tail length, follow, wrap, clear, copy and download. `base` + `/` + `logPath` is the route that returns the text. */
+export function LogsPane({ base, container, name, up, logPath = 'log', canPrevious = true }: { base: string; container: string; name: string; up: string; logPath?: string; canPrevious?: boolean }) {
   const [tail, setTail] = useState(500);
   const [follow, setFollow] = useState(true);
   const [previous, setPrevious] = useState(false);
@@ -66,7 +67,7 @@ function LogsPane({ base, container, pod }: { base: string; container: string; p
   const pinned = useRef(true);
 
   const q = `?tail=${tail}${container ? `&container=${enc(container)}` : ''}${previous ? '&previous=true' : ''}`;
-  const poll = usePoll(async () => await api.get<string>(`${base}/log${q}`, { text: true }), follow ? 2000 : 3_600_000, [q]);
+  const poll = usePoll(async () => await api.get<string>(`${base}/${logPath}${q}`, { text: true }), follow ? 2000 : 3_600_000, [q]);
   const all: LogLine[] = useMemo(() => linesOf(poll.data ?? '').map((l, i) => renderLine(i + 1, l)), [poll.data]);
   const shown = useMemo(() => all.filter((l) => l.n > cleared && matches(l.raw, filter)), [all, cleared, filter]);
   const counts = useMemo(() => levelCounts(shown), [shown]);
@@ -92,7 +93,7 @@ function LogsPane({ base, container, pod }: { base: string; container: string; p
   const download = () => {
     const a = document.createElement('a');
     a.href = URL.createObjectURL(new Blob([text()], { type: 'text/plain' }));
-    a.download = `${pod.name}${container ? '-' + container : ''}.log`;
+    a.download = `${name}${container ? '-' + container : ''}.log`;
     a.click();
     setTimeout(() => URL.revokeObjectURL(a.href), 2000);
   };
@@ -103,7 +104,7 @@ function LogsPane({ base, container, pod }: { base: string; container: string; p
       <div className="kx-bar">
         <input aria-label="Filter log lines" placeholder="Filter  (words, -exclude)" value={filter} onChange={(e) => setFilter(e.target.value)} />
         <select aria-label="Lines" value={tail} onChange={(e) => setTail(Number(e.target.value))}>{TAILS.map((t) => <option key={t} value={t}>last {t}</option>)}</select>
-        <button className={previous ? 'is-on' : ''} onClick={() => setPrevious(!previous)} title="The previous container instance (after a restart)">previous</button>
+        {canPrevious ? <button className={previous ? 'is-on' : ''} onClick={() => setPrevious(!previous)} title="The previous container instance (after a restart)">previous</button> : null}
         <button className={wrap ? 'is-on' : ''} onClick={() => setWrap(!wrap)} aria-pressed={wrap} title="Wrap long lines"><WrapText size={13} /></button>
         <button className={follow ? 'is-on' : ''} onClick={() => setFollow(!follow)} aria-pressed={follow} title="Refresh every 2 seconds">{follow ? <Pause size={13} /> : <Play size={13} />} {follow ? 'following' : 'paused'}</button>
         <button onClick={() => setCleared(all.length ? all[all.length - 1].n : 0)} title="Clear the screen (the log stays in the pod)" aria-label="Clear"><Trash2 size={13} /></button>
@@ -127,7 +128,7 @@ function LogsPane({ base, container, pod }: { base: string; container: string; p
         <span>{shown.length} line{shown.length === 1 ? '' : 's'}{all.length !== shown.length ? ` of ${all.length}` : ''}</span>
         {LEVEL_ORDER.filter((lv) => counts[lv]).map((lv) => <span key={lv} className={`kx-lv lv-${lv}`}>{counts[lv]} {lv}</span>)}
         <span className="kx-grow" />
-        <span>pod up {ageOf(pod.created, Date.now())}</span>
+        <span>{up}</span>
       </footer>
     </>
   );

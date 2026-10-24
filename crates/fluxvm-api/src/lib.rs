@@ -46,6 +46,7 @@ mod agent_session_approvals;
 mod agent_session_auth;
 mod agent_session_transfer;
 mod agent_sessions;
+mod docker_view;
 mod kube;
 mod kube_flows;
 mod kube_metrics;
@@ -931,6 +932,11 @@ pub fn router(manager: Arc<VmManager>) -> Router {
         .route("/v1/images/catalog", get(list_catalog))
         .route("/v1/oci/images", get(list_oci_images).post(pull_oci_image))
         .route("/v1/vznets", get(list_vznets))
+        .route("/v1/docker", get(docker_view::get_docker))
+        .route(
+            "/v1/docker/containers/{id}/logs",
+            get(docker_view::container_logs),
+        )
         .route("/v1/kube", get(kube::list_clusters))
         .route("/v1/kube/{name}", get(kube::get_cluster))
         .route("/v1/kube/{name}/flows", get(kube_flows::get_flows))

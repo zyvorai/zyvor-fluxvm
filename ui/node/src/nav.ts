@@ -22,6 +22,7 @@ export const NAV: NavGroup[] = [
     items: [
       { to: '/network', label: 'Network', desc: 'Outbound policy and live traffic' },
       { to: '/kubernetes', label: 'Kubernetes', desc: 'Clusters, nodes and pods' },
+      { to: '/docker', label: 'Docker', desc: 'Containers and images of the engine' },
       { to: '/images', label: 'Images', desc: 'Catalog, templates and warm pools' },
       { to: '/volumes', label: 'Volumes', desc: 'Disks that outlive a machine' },
       { to: '/backups', label: 'Backups', desc: 'Standalone disk copies' },
