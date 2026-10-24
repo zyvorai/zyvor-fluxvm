@@ -277,3 +277,10 @@ textarea.fx-input { min-height: 84px; resize: vertical; font-family: var(--font-
   *, *::before, *::after { animation: none !important; transition-duration: 0.01ms !important; }
   .fx-reveal { opacity: 1; transform: none; }
 }
+
+/* A VM's display (shared by the node Studio and the fleet console) */
+.fx-screen { background: var(--terminal-bg); border-radius: var(--radius-md); overflow: hidden; display: grid; place-items: center; min-height: 160px; }
+.fx-screen img { display: block; width: 100%; max-height: 60vh; object-fit: contain; }
+.fx-screen.is-control { outline: 2px solid var(--accent, currentColor); }
+.fx-screen.is-control img { cursor: crosshair; outline: none; }
+.fx-screen-empty { padding: 32px 16px; text-align: center; }

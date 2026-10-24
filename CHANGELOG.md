@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- **Studio: Connect and Display tabs on a machine.** *Connect* lists the ways in as commands to copy: `fluxctl ssh ID` (with `-l` for the
+  cloud-init user), plain `ssh user@address`, `ssh -p PORT` for each published port 22, and `fluxctl fleet ssh NAME` for access through
+  your fleet's central, with what each needs and the machine's published ports (web ports get an Open link); it opens nothing, and
+  quotes every value it puts in a command. *Display* (for `vz` guests) shows the guest's screen and, when you take control, sends
+  clicks, scrolling and keys, through the node's existing `screenshot` and `input` routes; it is the display component the fleet console
+  already had, now shared (`VmDisplay` in `@fluxvm/ui-core`).
+
 ## 0.4.15 (2026-10-24)
 
 **Docker and Kubernetes on a Mac, and a Kubernetes page in Studio.** `fluxctl docker` and `fluxctl kube` each run in managed Debian VMs

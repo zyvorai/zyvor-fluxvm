@@ -7,11 +7,6 @@
 .vm-stack { display: inline-block; margin-left: 8px; font-size: 11px; color: var(--text-tertiary); border: 1px solid var(--hairline-1); border-radius: 6px; padding: 1px 6px; }
 
 /* A VM's screen, snapshots and commands */
-.fx-screen { background: var(--terminal-bg); border-radius: var(--radius-md); overflow: hidden; display: grid; place-items: center; min-height: 160px; }
-.fx-screen img { display: block; width: 100%; max-height: 60vh; object-fit: contain; }
-.fx-screen.is-control { outline: 2px solid var(--accent, currentColor); }
-.fx-screen.is-control img { cursor: crosshair; outline: none; }
-.fx-screen-empty { padding: 32px 16px; text-align: center; }
 .fx-link { color: var(--accent, inherit); font-size: 13px; align-self: center; }
 .fx-snaps { display: grid; gap: 10px; }
 .fx-snap { border: 1px solid var(--hairline-1); border-radius: var(--radius-md); padding: 12px 14px; display: grid; gap: 8px; }

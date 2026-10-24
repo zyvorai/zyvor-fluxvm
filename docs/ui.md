@@ -13,8 +13,8 @@ tab's session storage and is never put in a URL.
 
 ## What it covers
 
-**Node:** Overview (live events), Machines (create wizard, detail with Console, Guest, Network and egress policy,
-Storage, Protect, Migration), Sandboxes, Agent sessions, Network (virtual networks, groups, network policies, services
+**Node:** Overview (live events), Machines (create wizard, detail with Console, Connect (SSH commands and published ports), Display (a `vz` guest's screen
+with clicks and keys), Guest, Network and egress policy, Storage, Protect, Migration), Kubernetes (nodes, pods, logs, a shell, traffic), Sandboxes, Agent sessions, Network (virtual networks, groups, network policies, services
 with apply, flows, inspect, node default egress policy, traffic), Images (catalog, templates, pools, OCI),
 Volumes, Branches, Backups, Host (memory, pressure, topology, GPU passthrough on Linux, Apple host and the Mac pool on a Mac), and
 Access & audit (quota, events, an API explorer).

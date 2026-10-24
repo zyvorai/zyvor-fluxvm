@@ -104,3 +104,12 @@
 .kg-panel dt { color: var(--text-tertiary); } .kg-panel dd { margin: 0; }
 .kg-h { margin: 14px 0 6px; font-size: 13px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-tertiary); }
 @media (prefers-reduced-motion: reduce) { .kg-node, .kg-edge path:first-child { transition: none; } }
+
+/* Connect tab */
+.cn-routes { display: grid; gap: 14px; }
+.cn-route { padding-bottom: 12px; border-bottom: 1px solid var(--hairline-1); }
+.cn-route:last-child { border-bottom: 0; padding-bottom: 0; }
+.cn-head { display: flex; gap: 10px; align-items: center; margin-bottom: 6px; }
+.cn-cmd { display: flex; gap: 8px; align-items: center; background: var(--fill-tertiary); border: 1px solid var(--hairline-1); border-radius: var(--radius-md); padding: 6px 6px 6px 12px; }
+.cn-cmd code { flex: 1; min-width: 0; overflow-x: auto; white-space: nowrap; font-size: 13px; }
+.cn-route p { margin: 6px 0 0; }
