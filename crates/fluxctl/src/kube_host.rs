@@ -30,6 +30,8 @@ pub const AGENT_LABEL: &str = "dev.zyvor.fluxvm.kube";
 const GUEST_API_PORT: u16 = 6443;
 /// The first boot downloads and starts k3s, so allow for a slow network.
 const FIRST_BOOT_BUDGET: Duration = Duration::from_secs(900);
+/// Tries at an image import before its ssh connection failures are reported.
+const IMPORT_ATTEMPTS: u32 = 4;
 /// Agent nodes a cluster may have. `down` looks for this many.
 pub const MAX_WORKERS: u8 = 8;
 /// The Cilium chart installed by default (`helm.cilium.io`).
@@ -992,16 +994,30 @@ pub async fn load<A: VmApi>(
     };
     let mut report = vec![];
     for (name, ip) in targets {
-        let mut c = run::ssh_base(&ip, &user, &identity);
-        c.args([
-            "-o",
-            "BatchMode=yes",
-            "-o",
-            "ConnectTimeout=10",
-            "sudo k3s ctr images import -",
-        ]);
-        c.stdin(std::fs::File::open(&path).with_context(|| format!("opening {}", path.display()))?);
-        let out = c.output().context("running ssh")?;
+        // ssh exits 255 when the connection itself fails (sshd busy, a reset while the VM is under load). That says
+        // nothing about the import, so try again a few times; any other failure is the import's and is reported.
+        let mut attempt = 1;
+        let out = loop {
+            let mut c = run::ssh_base(&ip, &user, &identity);
+            c.args([
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "ConnectTimeout=10",
+                "sudo k3s ctr images import -",
+            ]);
+            c.stdin(
+                std::fs::File::open(&path)
+                    .with_context(|| format!("opening {}", path.display()))?,
+            );
+            let out = c.output().context("running ssh")?;
+            if out.status.code() == Some(255) && attempt < IMPORT_ATTEMPTS {
+                attempt += 1;
+                tokio::time::sleep(Duration::from_secs(3)).await;
+                continue;
+            }
+            break out;
+        };
         if !out.status.success() {
             bail!(
                 "importing into {name} failed: {}",
