@@ -17,10 +17,11 @@ API="${FLUXVM_LIVE_API_PORT:-16443}"
 NODEPORT="${FLUXVM_LIVE_NODEPORT:-30080}"
 export KUBECONFIG="$T/kubeconfig.yaml"
 K=("$FLUXCTL" kube)
+# FLUXVM_LIVE_MEMORY_MIB sizes each of the two VMs (default 2560); smaller than the 4096 default so the test fits beside other VMs.
 # FLUXVM_LIVE_CNI=cilium (default) tests the default cluster; flannel tests the --offline install, which cannot use Cilium.
 CNI="${FLUXVM_LIVE_CNI:-cilium}"
 OFFLINE="$T/offline"
-ARGS=(--name "$NAME" --api-port "$API" --kubeconfig "$KUBECONFIG" --publish "$NODEPORT" --workers 1 --cni "$CNI")
+ARGS=(--name "$NAME" --api-port "$API" --kubeconfig "$KUBECONFIG" --publish "$NODEPORT" --workers 1 --cni "$CNI" --memory-mib "${FLUXVM_LIVE_MEMORY_MIB:-2560}")
 [[ "$CNI" == flannel ]] && ARGS+=(--offline "$OFFLINE")
 cleanup() { "${K[@]}" down "${ARGS[@]}" --purge >/dev/null 2>&1 || true; rm -rf "$T"; }
 trap cleanup EXIT
