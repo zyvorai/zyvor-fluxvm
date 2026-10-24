@@ -376,4 +376,7 @@ docker exec <id> uname -a
 
 Supported: `pull`, `images`, `run`, `ps`, `rm`, `logs`, `exec`, `stop`. Not supported: `build`, Compose as a daemon, bind mounts,
 Docker networks. Disable with `docker_sock = ""` in the config. Live check: `scripts/docker-compat-live-test.sh`.
+
+Need `docker build`, Compose, bind mounts or networks? Run a real engine in a FluxVM VM with `fluxctl docker up`: see
+[docker-engine.md](docker-engine.md).
 See also [vs-desktop-hypervisors.md](vs-desktop-hypervisors.md).

@@ -42,6 +42,7 @@ mod mcp_install;
 mod netobs;
 mod output;
 mod remote;
+mod docker_host;
 mod run;
 mod sandbox_run;
 mod stable_exe;
@@ -141,6 +142,89 @@ struct StackFleet {
     /// Bearer token of the fleet registry.
     #[arg(long, env = "FLUXVM_AGENT_TOKEN", hide_env_values = true)]
     fleet_token: Option<String>,
+}
+
+/// Options shared by the `fluxctl docker` commands that create or supervise the engine VM.
+#[derive(clap::Args, Clone)]
+struct DockerEngineArgs {
+    /// Name of the engine VM.
+    #[arg(long, default_value = docker_host::DEFAULT_NAME)]
+    name: String,
+    #[arg(long, default_value_t = 2)]
+    cpus: u8,
+    #[arg(long, default_value_t = 3072)]
+    memory_mib: u64,
+    /// Disk size for the VM and everything Docker stores in it.
+    #[arg(long, default_value_t = 40)]
+    disk_gib: u64,
+    /// Image name or path (default on macOS: debian-13).
+    #[arg(long)]
+    image: Option<String>,
+    /// Share a host directory into the VM: HOST or HOST:GUEST[:ro]. The guest path defaults to the host path, so bind
+    /// mounts (`-v $PWD/conf:/etc/conf`, Compose `volumes:`) resolve on both sides. Repeatable; only applies when the
+    /// VM is created.
+    #[arg(long, value_name = "HOST[:GUEST][:ro]")]
+    share: Vec<String>,
+    /// Where the Mac's Docker CLI connects (default: {run_dir}/docker-engine.sock).
+    #[arg(long)]
+    socket: Option<std::path::PathBuf>,
+    /// Login user in the VM (default: your local user name).
+    #[arg(long, short = 'l')]
+    user: Option<String>,
+}
+
+impl DockerEngineArgs {
+    fn options(&self) -> docker_host::EngineOptions {
+        docker_host::EngineOptions {
+            name: self.name.clone(),
+            cpus: self.cpus,
+            memory_mib: self.memory_mib,
+            disk_gib: self.disk_gib,
+            image: self.image.clone(),
+            shares: self.share.clone(),
+            socket: self.socket.clone(),
+            user: self.user.clone(),
+        }
+    }
+}
+
+#[derive(Subcommand)]
+enum DockerCommand {
+    /// Create or start a Docker engine VM and publish its socket on this Mac. Idempotent. Unlike the built-in Docker
+    /// subset (`docker_sock`), this runs a real `dockerd`: `docker build`, Compose, bind mounts and networks all work.
+    Up(DockerEngineArgs),
+    /// The VM, its address and whether the socket answers, as JSON.
+    Status(DockerEngineArgs),
+    /// Print `export DOCKER_HOST=unix://…` for this engine (`eval "$(fluxctl docker env)"`).
+    Env(DockerEngineArgs),
+    /// Stop the forward and the VM. `--purge` also deletes the VM and everything Docker stored in it.
+    Down {
+        #[command(flatten)]
+        engine: DockerEngineArgs,
+        #[arg(long)]
+        purge: bool,
+    },
+    /// Keep the VM running and the socket answering until stopped (what the LaunchAgent runs).
+    Supervise {
+        #[command(flatten)]
+        engine: DockerEngineArgs,
+        /// Seconds between health checks.
+        #[arg(long, default_value_t = 30)]
+        every: u64,
+    },
+    /// Run `supervise` as a LaunchAgent of the logged-in user: starts at login, restarts if it exits.
+    Agent {
+        #[command(subcommand)]
+        command: DockerAgentCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum DockerAgentCommand {
+    /// Write ~/Library/LaunchAgents/dev.zyvor.fluxvm.docker-engine.plist with these options and load it.
+    Install(DockerEngineArgs),
+    /// Unload and delete it.
+    Uninstall,
 }
 
 #[derive(Subcommand)]
@@ -698,6 +782,12 @@ enum Command {
         socket: PathBuf,
         #[arg(default_value_t = 22)]
         port: u32,
+    },
+    /// A real Docker engine in a FluxVM VM, with its socket on this Mac: `docker build`, Compose, bind mounts and
+    /// networks work. See `fluxctl docker up --help`.
+    Docker {
+        #[command(subcommand)]
+        command: DockerCommand,
     },
     /// Boot a throwaway VM, SSH into it, and delete it when the session ends (`--keep` to retain it).
     /// `fluxctl run` on a Mac uses the built-in `debian-13`; elsewhere pass an image.
@@ -4887,6 +4977,7 @@ async fn run_remote(
                 println!("{svc:<16} {vm:<28} {status:<10} {ip}");
             }
         }
+        Command::Docker { command } => docker_command(r, command).await?,
         Command::Run {
             image,
             name,
@@ -4918,7 +5009,7 @@ async fn run_remote(
             std::process::exit(code);
         }
         _ => anyhow::bail!(
-            "this command is not available with --server; supported: run, ssh, create, vm-template, list, get, \
+            "this command is not available with --server; supported: run, docker, ssh, create, vm-template, list, get, \
              status <vm>, start, stop, restart, delete, pause, resume, label, rename-vm, clone-vm, fork-vm, branch, import-image, snapshot, \
              snapshot-list, snapshot-delete, backup, disk, events [-f], serial, quota, healthz, \
              readyz, wait (not --for agent)"
@@ -6369,6 +6460,7 @@ async fn main() -> Result<()> {
                 println!("{svc:<16} {vm:<28} {status:<10} {ip}");
             }
         }
+        Command::Docker { command } => docker_command(&run::Local(&m), command).await?,
         Command::Run {
             image,
             name,
@@ -7447,6 +7539,47 @@ async fn print_hubble_observe(
         FlowOutput::parse(output)
     };
     print!("{}", render_flows(&views, mode, detailed));
+    Ok(())
+}
+
+/// `fluxctl docker …` for any daemon connection (local state dir or `--server`).
+async fn docker_command<A: run::VmApi>(api: &A, command: DockerCommand) -> Result<()> {
+    match command {
+        DockerCommand::Up(a) => {
+            let o = a.options();
+            let socket = docker_host::up(api, &o).await?;
+            println!("{}", docker_host::env_line(&socket));
+        }
+        DockerCommand::Status(a) => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&docker_host::status(api, &a.options()).await?)?
+            );
+        }
+        DockerCommand::Env(a) => {
+            let o = a.options();
+            println!(
+                "{}",
+                docker_host::env_line(&o.socket.clone().unwrap_or_else(docker_host::default_socket))
+            );
+        }
+        DockerCommand::Down { engine, purge } => docker_host::down(api, &engine.options(), purge).await?,
+        DockerCommand::Supervise { engine, every } => {
+            docker_host::supervise(api, &engine.options(), std::time::Duration::from_secs(every.max(5))).await?;
+        }
+        DockerCommand::Agent { command } => match command {
+            DockerAgentCommand::Install(a) => {
+                let plist = docker_host::agent_install(&a.options())?;
+                println!(
+                    "{}",
+                    serde_json::json!({"ok": true, "plist": plist, "label": docker_host::AGENT_LABEL})
+                );
+            }
+            DockerAgentCommand::Uninstall => {
+                println!("{}", serde_json::json!({"ok": true, "removed": docker_host::agent_uninstall()?}));
+            }
+        },
+    }
     Ok(())
 }
 

@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- **`fluxctl docker`: a real Docker engine in a FluxVM VM.** The built-in Docker socket maps containers to microVMs and cannot
+  `build`, run Compose, bind-mount Mac paths or create networks. `fluxctl docker up [--share HOST[:GUEST][:ro]]` creates (or
+  starts) a Debian VM running `dockerd` and publishes its socket at `{run_dir}/docker-engine.sock`; `env`, `status`, `down [--purge]`
+  and `supervise` complete it, and `docker agent install` runs the supervisor as a LaunchAgent. Shared folders appear in the guest at
+  the same path, so `docker build`, `docker compose up --build --wait`, bind mounts, networks and health checks work unchanged.
+  See [docs/docker-engine.md](docs/docker-engine.md) and `scripts/docker-engine-live-test.sh`.
+
 ## 0.4.14 (2026-10-23)
 
 - **Linux release build.** The Linux package job now builds the eBPF objects with clang 18 (the Ubuntu 22.04 container's clang 14 could not
