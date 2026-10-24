@@ -139,7 +139,12 @@ the loopback port that file names (the forward `fluxctl kube` keeps up) and, fai
 read-only.
 
 * **Nodes and pods:** readiness, roles, versions and addresses; every pod with its status as `kubectl` prints it, restarts, node and
-  IP, filterable by namespace and text.
+  IP, filterable by namespace and text. CPU and memory come from the cluster's metrics-server (k3s ships one): a usage bar per node,
+  `kubectl top`-style columns per pod. If it is not answering yet, the page says so and shows no numbers.
+* **Workloads:** Deployments, StatefulSets and DaemonSets with ready of wanted, up-to-date count and images, and Services with their
+  type, cluster IP, ports (NodePorts included) and selector.
+* **Events:** what the cluster has recorded, newest first, with a warnings-only switch and filters: the quickest way to see why a pod
+  will not start.
 * **Logs and Shell:** each pod has a window styled like Terminal.app. Logs are coloured (levels, keys, numbers, addresses, HTTP
   verbs and status codes; a line that carries its own ANSI colours keeps them), with a `-word` filter, tail size, the previous
   instance, follow, wrap, copy and download. **Shell** opens `/bin/sh` or `bash` in the container over the cluster's own `exec`; it

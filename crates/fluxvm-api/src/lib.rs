@@ -48,7 +48,9 @@ mod agent_session_transfer;
 mod agent_sessions;
 mod kube;
 mod kube_flows;
+mod kube_metrics;
 mod kube_pod;
+mod kube_workloads;
 mod macos_pool_api;
 mod speculate_api;
 mod studio;
@@ -932,6 +934,11 @@ pub fn router(manager: Arc<VmManager>) -> Router {
         .route("/v1/kube", get(kube::list_clusters))
         .route("/v1/kube/{name}", get(kube::get_cluster))
         .route("/v1/kube/{name}/flows", get(kube_flows::get_flows))
+        .route(
+            "/v1/kube/{name}/workloads",
+            get(kube_workloads::get_workloads),
+        )
+        .route("/v1/kube/{name}/events", get(kube_workloads::get_events))
         .route(
             "/v1/kube/{name}/pods/{ns}/{pod}/log",
             get(kube_pod::pod_log),

@@ -14,6 +14,9 @@ export type KubePod = {
   node: string | null;
   pod_ip: string | null;
   created: string | null;
+  /** From metrics-server; absent when it does not answer. */
+  cpu_m?: number;
+  mem_mib?: number;
 };
 
 export type KubeNode = {
@@ -26,6 +29,10 @@ export type KubeNode = {
   cpu: string | null;
   memory_mib: number | null;
   created: string | null;
+  cpu_m?: number;
+  mem_used_mib?: number;
+  cpu_percent?: number | null;
+  mem_percent?: number | null;
 };
 
 export type KubeClusterItem = { name: string; nodes: { name: string; status: string; role: 'server' | 'worker' }[] };
@@ -37,6 +44,8 @@ export type KubeDetail = {
   nodes: KubeNode[];
   pods: KubePod[];
   truncated: boolean;
+  /** True when metrics-server gave CPU and memory numbers. */
+  metrics?: boolean;
 };
 
 const BAD = /^(CrashLoopBackOff|Error|ErrImagePull|ImagePullBackOff|InvalidImageName|OOMKilled|Evicted|Failed|CreateContainerError|CreateContainerConfigError|RunContainerError|DeadlineExceeded|Unknown)$/;
@@ -98,3 +107,54 @@ export const kubeProblem = (message: string): { title: string; body: string } =>
   if (/no address/i.test(message)) return { title: 'The server machine has no address yet', body: 'It is still starting. This page refreshes on its own.' };
   return { title: 'Could not read the cluster', body: message };
 };
+
+/** CPU as `kubectl top` shows it: millicores, or cores from 1000m. */
+export const fmtCpu = (m: number | undefined): string => (m == null ? '—' : m < 1000 ? `${m}m` : `${(m / 1000).toFixed(m < 10000 ? 2 : 1)}`);
+
+export const fmtMem = (mib: number | undefined): string => (mib == null ? '—' : mib >= 1024 ? `${(mib / 1024).toFixed(1)} GiB` : `${mib} MiB`);
+
+/** How full something is: red from 90 %, amber from 75 %. */
+export const usageTone = (percent: number | null | undefined): Tone => (percent == null ? 'idle' : percent >= 90 ? 'bad' : percent >= 75 ? 'warn' : 'ok');
+
+// ---- workloads -------------------------------------------------------------------------------------------------------------------
+
+export type Replicated = { namespace: string; name: string; desired: number; ready: number; updated: number; available: number; images: string[]; created: string | null };
+
+export type ServicePort = { name: string | null; protocol: string; port: number; target_port: number | string | null; node_port: number | null };
+
+export type KubeService = { namespace: string; name: string; type: string; cluster_ip: string | null; external: string[]; ports: ServicePort[]; selector: string[]; created: string | null };
+
+export type Workloads = { cluster: string; deployments: Replicated[]; statefulsets: Replicated[]; daemonsets: Replicated[]; services: KubeService[] };
+
+/** Ready of wanted: green when all are up, red when none are, amber between; grey for something scaled to zero. */
+export const readyTone = (w: Pick<Replicated, 'ready' | 'desired'>): Tone => (w.desired === 0 ? 'idle' : w.ready >= w.desired ? 'ok' : w.ready === 0 ? 'bad' : 'warn');
+
+/** `80→8080/TCP`, with `:30080` for a NodePort. */
+export const portText = (p: ServicePort): string => `${p.port}${p.target_port != null && String(p.target_port) !== String(p.port) ? `→${p.target_port}` : ''}/${p.protocol}${p.node_port != null ? `:${p.node_port}` : ''}`;
+
+/** `nginx:1.29-alpine` from `docker.io/library/nginx:1.29-alpine`, and `app@sha256:…` kept short. */
+export const shortImage = (image: string): string => {
+  const [repo, digest] = image.split('@');
+  const name = repo.split('/').slice(-1)[0];
+  return digest ? `${name}@${digest.slice(0, 15)}` : name;
+};
+
+export const inNamespace = <T extends { namespace: string }>(items: T[], ns: string): T[] => (ns ? items.filter((i) => i.namespace === ns) : items);
+
+export const namespacesOfAll = (w: Workloads): string[] => [...new Set([...w.deployments, ...w.statefulsets, ...w.daemonsets, ...w.services].map((i) => i.namespace))].sort();
+
+// ---- events ----------------------------------------------------------------------------------------------------------------------
+
+export type KubeEvent = { namespace: string | null; type: string; reason: string | null; message: string | null; object: string; kind: string; name: string; count: number; first: string | null; last: string | null; component: string | null };
+
+export type EventFilter = { warningsOnly: boolean; namespace: string; text: string };
+
+export const eventTone = (type: string): Tone => (type === 'Warning' ? 'warn' : 'idle');
+
+/** Keeps the order the daemon sent (newest first). The text matches reason, object, message and component. */
+export const filterEvents = (events: KubeEvent[], f: EventFilter): KubeEvent[] => {
+  const q = f.text.trim().toLowerCase();
+  return events.filter((e) => (!f.warningsOnly || e.type === 'Warning') && (!f.namespace || e.namespace === f.namespace) && (!q || `${e.reason ?? ''} ${e.object} ${e.message ?? ''} ${e.component ?? ''}`.toLowerCase().includes(q)));
+};
+
+export const namespacesOfEvents = (events: KubeEvent[]): string[] => [...new Set(events.map((e) => e.namespace).filter((n): n is string => !!n))].sort();

@@ -276,7 +276,11 @@ pub(crate) fn chain(e: &dyn std::error::Error) -> String {
     out
 }
 
-async fn fetch(client: &reqwest::Client, port: u16, path: &str) -> Result<Value, ApiError> {
+pub(crate) async fn fetch(
+    client: &reqwest::Client,
+    port: u16,
+    path: &str,
+) -> Result<Value, ApiError> {
     let url = format!("https://{API_NAME}:{port}{path}");
     let resp = client.get(&url).send().await.map_err(|e| {
         err(
@@ -347,6 +351,39 @@ pub(crate) async fn read(
         fetch(&client, port, &pods_path),
     );
     Ok((nodes?, pods?))
+}
+
+/// GETs `path` from the cluster, trying each address in turn.
+pub(crate) async fn get_json(target: &Target, path: &str) -> Result<Value, ApiError> {
+    let mut tried = vec![];
+    for &addr in &target.addrs {
+        let client = match http_client(&target.creds, addr) {
+            Ok(c) => c,
+            Err(e) => {
+                tried.push(format!("{addr}: {}", e.message));
+                continue;
+            }
+        };
+        match fetch(&client, addr.port(), path).await {
+            Ok(v) => return Ok(v),
+            Err(e) => tried.push(format!("{addr}: {}", e.message)),
+        }
+    }
+    Err(err(StatusCode::BAD_GATEWAY, tried.join("; ")))
+}
+
+/// The cluster's node and pod metrics, or `None` for each when metrics-server does not answer.
+async fn read_metrics(creds: &Credentials, addr: SocketAddr) -> (Option<Value>, Option<Value>) {
+    let Ok(client) = http_client(creds, addr) else {
+        return (None, None);
+    };
+    let port = addr.port();
+    let pods_path = format!("/apis/metrics.k8s.io/v1beta1/pods?limit={PODS_LIMIT}");
+    let (nodes, pods) = tokio::join!(
+        fetch(&client, port, "/apis/metrics.k8s.io/v1beta1/nodes"),
+        fetch(&client, port, &pods_path),
+    );
+    (nodes.ok(), pods.ok())
 }
 
 /// Everything needed to talk to one cluster's API server.
@@ -441,12 +478,22 @@ pub(crate) async fn get_cluster(
         return Err(err(StatusCode::BAD_GATEWAY, tried.join("; ")));
     };
     let items = |v: &Value| v["items"].as_array().cloned().unwrap_or_default();
+    let mut nodes: Vec<Value> = items(&node_list).iter().map(simplify_node).collect();
+    let mut pods: Vec<Value> = items(&pod_list).iter().map(simplify_pod).collect();
+    let (node_metrics, pod_metrics) = read_metrics(&target.creds, addr).await;
+    let metrics = crate::kube_metrics::apply(
+        &mut nodes,
+        &mut pods,
+        node_metrics.as_ref(),
+        pod_metrics.as_ref(),
+    );
     Ok(Json(json!({
         "cluster": name,
         "api": format!("https://{addr}"),
         "vms": target.vms,
-        "nodes": items(&node_list).iter().map(simplify_node).collect::<Vec<_>>(),
-        "pods": items(&pod_list).iter().map(simplify_pod).collect::<Vec<_>>(),
+        "metrics": metrics,
+        "nodes": nodes,
+        "pods": pods,
         "truncated": pod_list["metadata"].get("continue").is_some_and(|c| c.as_str().is_some_and(|s| !s.is_empty())),
     })))
 }
