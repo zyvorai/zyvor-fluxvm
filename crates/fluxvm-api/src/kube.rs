@@ -208,6 +208,7 @@ pub(crate) fn simplify_node(n: &Value) -> Value {
         "roles": roles,
         "version": str_of(n, &["status", "nodeInfo", "kubeletVersion"]),
         "internal_ip": ip,
+        "unschedulable": n["spec"]["unschedulable"].as_bool().unwrap_or(false),
         "os": str_of(n, &["status", "nodeInfo", "osImage"]),
         "cpu": str_of(n, &["status", "capacity", "cpu"]),
         "memory_mib": str_of(n, &["status", "capacity", "memory"]).and_then(memory_mib),

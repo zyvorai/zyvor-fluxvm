@@ -135,8 +135,8 @@ project does not publish one; read `install.sh` in the folder before using it so
 
 `fluxctl dashboard` opens the Studio; **Platform → Kubernetes** shows each cluster the daemon's VMs belong to (the machines labelled
 `fluxvm.kube`). It reads the cluster with the client certificate in `~/.kube/fluxvm-NAME.yaml` of the user the daemon runs as, through
-the loopback port that file names (the forward `fluxctl kube` keeps up) and, failing that, the server VM's own address. It is
-read-only.
+the loopback port that file names (the forward `fluxctl kube` keeps up) and, failing that, the server VM's own address. Reading needs no
+special role; the few changes below need the daemon's admin role.
 
 * **Nodes and pods:** readiness, roles, versions and addresses; every pod with its status as `kubectl` prints it, restarts, node and
   IP, filterable by namespace and text. CPU and memory come from the cluster's metrics-server (k3s ships one): a usage bar per node,
@@ -154,6 +154,14 @@ read-only.
   for what it calls and what calls it, filter by namespace, name or port, and show or hide system pods. The daemon asks each Cilium
   agent for its recent flows with `hubble observe`, counts each packet event once (on the sender's node, replies skipped) and folds
   them into workload-to-workload edges. The window is however long each node's flow buffer (a few thousand flows) covers.
+
+* **Changes:** a few things you do all the time, with a spinner on the button and a toast when the cluster answers. **+** and **−** on a
+  Deployment or StatefulSet set its replicas (0 to 100); **Restart** rolls a Deployment, StatefulSet or DaemonSet the way
+  `kubectl rollout restart` does; **Delete** removes a pod (after a confirmation; its controller makes a new one); **Cordon** and
+  **Uncordon** mark a node unschedulable or schedulable again, and a cordoned node shows a *Cordoned* badge. The routes are
+  `POST /v1/kube/{cluster}/pods/{ns}/{pod}/delete`, `.../workloads/{ns}/{kind}/{name}/scale` (body `{"replicas": N}`) and `/restart`
+  (`kind` is `deployments`, `statefulsets` or `daemonsets`), and `.../nodes/{node}/{cordon|uncordon}`; names are checked before they
+  reach a URL. Applying or editing YAML, and draining a node, stay with `kubectl`.
 
 The Studio's **Machines** page also groups a cluster's VMs together (`kube NAME`), so they can be started or stopped as one.
 

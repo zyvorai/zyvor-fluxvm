@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { type KubeEvent, type KubePod, type Workloads, ageOf, eventTone, filterEvents, filterPods, fmtCpu, fmtMem, inNamespace, kubeProblem, namespacesOf, namespacesOfAll, namespacesOfEvents, podTone, portText, readyTone, shortImage, summarize, usageTone } from './kube';
+import { type KubeEvent, type KubePod, type Workloads, ageOf, eventTone, filterEvents, filterPods, fmtCpu, fmtMem, inNamespace, kubeProblem, namespacesOf, namespacesOfAll, namespacesOfEvents, podTone, portText, readyTone, shortImage, summarize, usageTone, actionPath, actionToast, canScale, clampReplicas } from './kube';
 
 const pod = (name: string, status: string, over: Partial<KubePod> = {}): KubePod => ({
   namespace: 'default', name, status, phase: null, ready: '1/1', restarts: 0, node: 'n1', pod_ip: '10.42.0.5', created: null, ...over,
@@ -111,5 +111,22 @@ describe('events', () => {
   it('colours warnings and lists namespaces', () => {
     expect([eventTone('Warning'), eventTone('Normal')]).toEqual(['warn', 'idle']);
     expect(namespacesOfEvents([...events, ev('Normal', 'X', 'Node/n', null)])).toEqual(['data', 'default']);
+  });
+});
+
+describe('cluster actions', () => {
+  it('builds escaped paths', () => {
+    expect(actionPath('c', { pod: { ns: 'default', name: 'web-1' } })).toBe('/v1/kube/c/pods/default/web-1/delete');
+    expect(actionPath('c', { workload: { ns: 'kube-system', kind: 'daemonsets', name: 'cilium' }, action: 'restart' })).toBe('/v1/kube/c/workloads/kube-system/daemonsets/cilium/restart');
+    expect(actionPath('c', { node: 'n/1', action: 'cordon' })).toBe('/v1/kube/c/nodes/n%2F1/cordon');
+  });
+  it('keeps replicas in range and only scales what scales', () => {
+    expect([clampReplicas(-3), clampReplicas(2.6), clampReplicas(500), clampReplicas(NaN)]).toEqual([0, 3, 100, 0]);
+    expect([canScale('deployments'), canScale('statefulsets'), canScale('daemonsets')]).toEqual([true, true, false]);
+  });
+  it('says what happened', () => {
+    expect(actionToast('web', 'scaled', 3)).toBe('web scaled to 3');
+    expect(actionToast('web-1', 'deleted')).toBe('web-1 deleted');
+    expect(actionToast('n1', 'uncordoned')).toBe('n1 uncordoned');
   });
 });
