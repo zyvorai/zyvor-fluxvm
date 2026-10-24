@@ -240,12 +240,24 @@ fn kubeconfig_path(name: &str) -> Result<std::path::PathBuf, ApiError> {
         .join(format!("fluxvm-{name}.yaml")))
 }
 
+/// An error and its causes, `a: b: c`: reqwest's own message stops at "error sending request".
+fn chain(e: &dyn std::error::Error) -> String {
+    let mut out = e.to_string();
+    let mut cur = e.source();
+    while let Some(c) = cur {
+        out.push_str(": ");
+        out.push_str(&c.to_string());
+        cur = c.source();
+    }
+    out
+}
+
 async fn fetch(client: &reqwest::Client, port: u16, path: &str) -> Result<Value, ApiError> {
     let url = format!("https://{API_NAME}:{port}{path}");
     let resp = client.get(&url).send().await.map_err(|e| {
         err(
             StatusCode::BAD_GATEWAY,
-            format!("could not reach the cluster's API server: {e}"),
+            format!("could not reach the cluster's API server: {}", chain(&e)),
         )
     })?;
     if !resp.status().is_success() {
