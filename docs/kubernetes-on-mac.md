@@ -31,9 +31,36 @@ fluxctl kube down --purge                        # delete the VM, the cluster's 
 | `--k3s-version v1.31.4+k3s1` | Pin the k3s release (default: the installer's stable channel). Fixed at creation. |
 | `--k3s-arg=--disable=metrics-server` | Extra `k3s server` argument. Repeatable. Fixed at creation. |
 | `--traefik` | Keep k3s's bundled Traefik ingress (off by default). |
+| `--workers N` | Add N agent nodes (0 to 8), each its own VM named `NAME-w1`… and joined to the server. See [More than one node](#more-than-one-node). |
+| `--offline DIR` | Install k3s from a folder made by `fluxctl kube fetch` instead of the internet. See [Without internet](#without-internet-on-first-boot). |
 | `--kubeconfig` | Where to write the kubeconfig (default `~/.kube/fluxvm-NAME.yaml`). |
 
 Options marked "fixed at creation" are baked into the VM's first boot. To change one, `down --purge` and `up` again.
+
+## More than one node
+
+```bash
+fluxctl kube up --workers 2        # a server plus two agent VMs: fluxvm-kube, fluxvm-kube-w1, fluxvm-kube-w2
+kubectl get nodes
+```
+
+`up` creates the server first, reads its node token over SSH, then creates each worker with that token and the server's address in
+its cloud-init and waits until `1 + N` nodes are Ready. Run it again with a larger `--workers` to add nodes (for a cluster that was created with `--workers`); existing nodes are
+left alone. Every worker has the same size as the server (`--cpus`, `--memory-mib`, `--disk-gib`) and the same `--share` folders.
+`down` stops the server and all workers, and `down --purge` deletes them. To remove one worker, delete its node with
+`kubectl delete node` and delete its VM through FluxVM.
+
+The default FluxVM network keeps each VM apart from the others (two VMs on it cannot even ping each other), so a cluster with
+workers puts every node on a second, private network named after the cluster (`apple.networks`, a `10.89.N.0/24` subnet with its own
+switch, see [macos.md](macos.md)). The nodes advertise that address (`--node-ip`) and workers join the server through it, so node
+and pod traffic stay on the private network while the first card still gives each VM internet access and the Mac its SSH route.
+A pod on one node reaches a service on another; `scripts/kube-live-test.sh` checks that.
+
+* **Decide on workers when you create the cluster.** Only VMs created with `--workers` get the private card. A cluster created
+  without it cannot gain workers later: `up --workers N` stops with a message, and you `down --purge` and start again.
+* The node token is written into each worker's first-boot (cloud-init) configuration, so anyone with a login on a worker VM may be
+  able to read it; the VMs are yours alone, but do not reuse the token elsewhere.
+* If the server's private address ever changes, workers need re-creating.
 
 ## The kubeconfig
 
@@ -57,12 +84,38 @@ The API server certificate carries `127.0.0.1` as a SAN, so `kubectl` verifies i
 
 ## Images
 
-The cluster has its own containerd. Images built with `fluxctl docker` are **not** visible to it. Push them to a registry the cluster
-can reach, or import one directly:
+The cluster has its own containerd, separate from the `fluxctl docker` engine. `fluxctl kube load` copies images from the Docker
+CLI into every node (server and workers):
 
 ```bash
-docker save app:dev | ssh "$USER@$(fluxctl kube status | jq -r .guest_ip)" sudo k3s ctr images import -
+eval "$(fluxctl docker env)"             # the Docker CLI talks to the engine VM
+docker build -t app:dev .
+fluxctl kube load app:dev                # docker save, then k3s ctr images import on each node
+kubectl run app --image=app:dev --image-pull-policy=Never --restart=Never
 ```
+
+Give loaded images a tag other than `:latest` (Kubernetes pulls `:latest` again by default) or set `imagePullPolicy: IfNotPresent` or
+`Never`. `fluxctl kube load --archive app.tar` imports an existing `docker save` archive instead. Image names may contain letters,
+digits and `. _ / : @ -` only.
+
+## Without internet on first boot
+
+By default the first boot downloads the installer and k3s from `get.k3s.io` and GitHub, and the k3s system images from the
+registry. To avoid that, download them once, then build clusters from the folder:
+
+```bash
+fluxctl kube fetch ~/k3s-offline                      # k3s-arm64, k3s-airgap-images-arm64.tar.zst, install.sh
+fluxctl kube up --offline ~/k3s-offline --workers 1
+```
+
+`fetch` takes the stable release, or `--k3s-version v1.31.4+k3s1`, and checks the binary and the image archive against the release's
+`sha256sum-arm64.txt` before moving them into place. The folder is shared read-only into each VM at the same path; cloud-init copies
+the binary and images into place and runs the installer with `INSTALL_K3S_SKIP_DOWNLOAD=true`. Offline nodes also install no apt
+packages, so nothing is fetched on first boot. The folder path must be absolute and use only letters, digits and `- _ . /`.
+
+Two things still need a network or a local source: the `debian-13` base image (FluxVM fetches it the first time it is used) and the images
+your own workloads use (pull them, or `fluxctl kube load` them). The installer script is fetched without a checksum because the
+project does not publish one; read `install.sh` in the folder before using it somewhere that matters.
 
 ## Keep it running
 
@@ -76,6 +129,6 @@ The supervisor starts the VM if it is stopped and restores the forward if it die
 
 ## What this is not
 
-* One node. There is no multi-node mode.
+* No high availability: there is one server (control plane); extra nodes are agents only.
 * The containers share the VM's kernel, unlike the per-container microVMs of the built-in sandboxes.
-* `k3s` is downloaded from `get.k3s.io` on first boot, so that boot needs internet access.
+* Unless you use `--offline`, the first boot needs internet access.
