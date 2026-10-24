@@ -70,3 +70,37 @@
 .fx-link { all: unset; cursor: pointer; color: var(--apple-link, #2997ff); }
 .fx-link:hover { text-decoration: underline; }
 .fx-link:focus-visible { outline: 2px solid var(--apple-link, #2997ff); outline-offset: 2px; border-radius: 3px; }
+
+/* Kubernetes traffic graph */
+.kg-layout { display: grid; grid-template-columns: minmax(0, 1fr) minmax(280px, 380px); gap: 16px; align-items: start; }
+@media (max-width: 1100px) { .kg-layout { grid-template-columns: minmax(0, 1fr); } }
+.kg-bar { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center; margin-bottom: 12px; }
+.kg-bar label { display: inline-flex; gap: 6px; align-items: center; font-size: 13px; color: var(--text-secondary); }
+.kg-bar .fx-input { max-width: 220px; }
+.kg-grow { flex: 1; }
+.kg-scroll { overflow: auto; border: 1px solid var(--hairline-1); border-radius: var(--radius-lg); background: var(--fill-quaternary, transparent); max-height: 70vh; }
+.kg-svg { display: block; }
+.kg-node { cursor: pointer; outline: none; transition: opacity 0.15s; }
+.kg-node rect { fill: var(--surface-1, #fff); stroke: var(--hairline-2, #c7c7cc); stroke-width: 1.2; }
+.kg-node.workload rect { stroke: var(--apple-blue, #0071e3); }
+.kg-node.system rect { stroke-dasharray: 4 3; }
+.kg-node.world rect { fill: color-mix(in srgb, #8e8e93 14%, var(--surface-1, #fff)); stroke: #8e8e93; }
+.kg-node.host rect { stroke: #bf5af2; }
+.kg-node:hover rect, .kg-node:focus-visible rect, .kg-node.is-picked rect { stroke-width: 2.4; filter: drop-shadow(0 2px 6px rgba(0, 0, 0, 0.18)); }
+.kg-node:focus-visible rect { stroke: var(--apple-link, #2997ff); }
+.kg-label { font: 600 13px -apple-system, BlinkMacSystemFont, system-ui, sans-serif; fill: var(--text-primary, #1d1d1f); }
+.kg-sub { font: 11px -apple-system, BlinkMacSystemFont, system-ui, sans-serif; fill: var(--text-tertiary, #86868b); }
+.kg-edge path:first-child { stroke: color-mix(in srgb, var(--apple-blue, #0071e3) 70%, transparent); transition: opacity 0.15s; }
+.kg-edge.bad path:first-child { stroke: var(--apple-red, #ff3b30); }
+.kg-edge .kg-hit { stroke: transparent; }
+.kg-edge:hover path:first-child { stroke-opacity: 1; }
+.kg-arrowhead { fill: color-mix(in srgb, var(--apple-blue, #0071e3) 80%, transparent); } .kg-arrowhead.bad { fill: var(--apple-red, #ff3b30); }
+.kg-count { font: 600 10.5px ui-monospace, 'SF Mono', Menlo, monospace; fill: var(--text-secondary, #6e6e73); paint-order: stroke; stroke: var(--surface-1, #fff); stroke-width: 3px; }
+.kg-edge.dim, .kg-node.dim { opacity: 0.18; }
+.kg-legend { display: flex; flex-wrap: wrap; gap: 14px; align-items: center; margin-top: 10px; font-size: 12px; color: var(--text-secondary); }
+.kg-sw { display: inline-block; width: 18px; height: 4px; border-radius: 2px; vertical-align: middle; margin-right: 4px; background: var(--apple-blue, #0071e3); }
+.kg-sw.bad { background: var(--apple-red, #ff3b30); }
+.kg-panel dl { display: grid; grid-template-columns: auto 1fr; gap: 6px 14px; margin: 10px 0; }
+.kg-panel dt { color: var(--text-tertiary); } .kg-panel dd { margin: 0; }
+.kg-h { margin: 14px 0 6px; font-size: 13px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-tertiary); }
+@media (prefers-reduced-motion: reduce) { .kg-node, .kg-edge path:first-child { transition: none; } }

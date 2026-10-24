@@ -131,6 +131,27 @@ Two things still need a network or a local source: the `debian-13` base image (F
 your own workloads use (pull them, or `fluxctl kube load` them). The installer script is fetched without a checksum because the
 project does not publish one; read `install.sh` in the folder before using it somewhere that matters.
 
+## See it in the Studio
+
+`fluxctl dashboard` opens the Studio; **Platform → Kubernetes** shows each cluster the daemon's VMs belong to (the machines labelled
+`fluxvm.kube`). It reads the cluster with the client certificate in `~/.kube/fluxvm-NAME.yaml` of the user the daemon runs as, through
+the loopback port that file names (the forward `fluxctl kube` keeps up) and, failing that, the server VM's own address. It is
+read-only.
+
+* **Nodes and pods:** readiness, roles, versions and addresses; every pod with its status as `kubectl` prints it, restarts, node and
+  IP, filterable by namespace and text.
+* **Logs and Shell:** each pod has a window styled like Terminal.app. Logs are coloured (levels, keys, numbers, addresses, HTTP
+  verbs and status codes; a line that carries its own ANSI colours keeps them), with a `-word` filter, tail size, the previous
+  instance, follow, wrap, copy and download. **Shell** opens `/bin/sh` or `bash` in the container over the cluster's own `exec`; it
+  needs the daemon's admin role, and an image without a shell (distroless) has nothing to open.
+* **Traffic:** who talks to whom, as a service map from Cilium's Hubble flows (so it needs the default `--cni cilium`; a flannel
+  cluster says so). Workloads are boxes, calls are arrows weighted by flow count, red where packets were dropped; click a workload
+  for what it calls and what calls it, filter by namespace, name or port, and show or hide system pods. The daemon asks each Cilium
+  agent for its recent flows with `hubble observe`, counts each packet event once (on the sender's node, replies skipped) and folds
+  them into workload-to-workload edges. The window is however long each node's flow buffer (a few thousand flows) covers.
+
+The Studio's **Machines** page also groups a cluster's VMs together (`kube NAME`), so they can be started or stopped as one.
+
 ## Keep it running
 
 ```bash
