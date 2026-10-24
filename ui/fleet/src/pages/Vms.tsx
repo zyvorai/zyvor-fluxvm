@@ -105,7 +105,7 @@ export function VmsPage({ role, notify }: Ctx) {
                       <h3>Console log</h3>
                       {logs ? <pre className="fx-code">{logs.slice(-6000)}</pre> : <Skeleton h={80} />}
                     </>
-                  ) : here === 'screen' ? <VmScreen key={vmKey(sel)} vm={sel} canControl={macos && live} notify={notify} />
+                  ) : here === 'screen' ? <VmScreen key={vmKey(sel)} vm={sel} macos={macos} canControl={macos && live} notify={notify} />
                     : here === 'snapshots' ? <VmSnapshots key={vmKey(sel)} vm={sel} stopped={state === 'stopped'} macos={macos} taken={all.map((x) => x.name)} notify={notify} onCloned={() => void list.refresh()} />
                     : <VmRun key={vmKey(sel)} vm={sel} />}
                 </>

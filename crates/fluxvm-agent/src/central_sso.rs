@@ -1765,6 +1765,11 @@ mod tests {
                 "/fleet/vms/mac-1/abc/tunnel",
                 [false, true, true, true],
             ),
+            (
+                &post,
+                "/fleet/vms/mac-1/abc/ws-ticket",
+                [false, true, true, true],
+            ),
             (&delete, "/fleet/tunnels/t1", [false, false, true, true]),
             (&get, "/fleet/tunnels", [true, true, true, true]),
             (

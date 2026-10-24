@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { changedKeys, haSummary, parsePolicy, rebalancePath, rebalanceProblem, fmtBytes, idleText, loadTone, pct, resizeProblem, tokenBody, tokenProblem, tokenState, usesText, volumeProblem } from './ops';
+import { changedKeys, haSummary, parsePolicy, rebalancePath, rebalanceProblem, fmtBytes, idleText, loadTone, pct, resizeProblem, tokenBody, tokenProblem, tokenState, tunnelTarget, usesText, volumeProblem } from './ops';
 
 describe('capacity', () => {
   it('clamps percentages and survives an empty fleet', () => {
@@ -102,5 +102,13 @@ describe('rebalance query', () => {
   it('builds the path with only what is set', () => {
     expect(rebalancePath({ highWater: '', maxMoves: '' })).toBe('/fleet/rebalance/plan');
     expect(rebalancePath({ highWater: '0.9', maxMoves: '5' })).toBe('/fleet/rebalance/plan?high_water=0.9&max_moves=5');
+  });
+});
+
+describe('tunnel target', () => {
+  it('names the screen of a VNC tunnel and the port of a TCP one', () => {
+    expect(tunnelTarget({ kind: 'vnc', port: 0 })).toBe('screen');
+    expect(tunnelTarget({ kind: 'tcp', port: 22 })).toBe('port 22');
+    expect(tunnelTarget({ port: 8080 })).toBe('port 8080'); // a central from before kinds existed
   });
 });

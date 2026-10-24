@@ -340,6 +340,27 @@ What does **not** end one: signing out of the console, or the tenant's primary t
 re-checked for the tenant, the key, the member's role and the VM, not re-authorised per byte, and it is not tied to a
 session token. To cut such access off at once, close the tunnels from the **Tunnels** page (or
 `DELETE /fleet/tunnels/{id}`); otherwise the lifetime ends them within eight hours by default.
+
+### A VM's screen in the browser
+
+The **Screen** tab of a VM that is not a macOS guest opens its graphical console (VNC, for QEMU VMs) in the browser, through
+central, so a VM's screen is as reachable as its SSH port and no node or VNC port is exposed. A browser WebSocket cannot send
+a bearer token, and relying on the session cookie alone would let another site open it, so the page first asks for a ticket
+with an ordinary authenticated request:
+
+```
+POST /fleet/vms/{node}/{id}/ws-ticket   {"kind": "vnc"}   ->   {"ticket": "…", "expires_in": 30, "path": "/fleet/ws/…"}
+GET  /fleet/ws/{ticket}                                       (WebSocket, raw RFB in binary messages)
+```
+
+The ticket works once, for 30 seconds, and is the only credential the second request needs. Asking for it follows the rules of a
+tunnel: the tenant must own the VM (`404`), a read-only key is refused, a viewer who signed in with SSO is refused (a screen can
+be typed into), and the policy's `tunnels.enabled` must be on. Redeeming it takes a slot from the tenant's `max_per_tenant`,
+writes the same `OPEN` and `CLOSE` entries to the activity log (as `<VM> screen`), appears on the **Tunnels** page, and ends for the same
+reasons (idle timeout, maximum lifetime, revoked access, `DELETE /fleet/tunnels/{id}`). Central then asks the node for a ticket
+of its own with the fleet token (`POST /v1/vms/{id}/ws-ticket`) and relays the node's VNC socket; a VM that has no graphical
+console (not QEMU, not running) answers `409` with the node's reason. The `ports` rule does not apply: nothing connects to a guest port.
+
 ## Sign-in with SSO and team members
 
 People can sign in to the console with the company's identity provider (OpenID Connect: Okta, Microsoft Entra ID,

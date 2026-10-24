@@ -47,6 +47,8 @@ pub(super) struct Tunnel {
     node: String,
     vm_id: String,
     vm_name: String,
+    /// `"tcp"` (a port of the guest) or `"vnc"` (the VM's graphical console, from a screen ticket).
+    kind: &'static str,
     port: u16,
     opened_at: DateTime<Utc>,
     /// Bytes from the client to the VM.
@@ -88,6 +90,7 @@ impl Tunnel {
             "node": self.node,
             "vm_id": self.vm_id,
             "vm_name": self.vm_name,
+            "kind": self.kind,
             "port": self.port,
             "opened_at": self.opened_at,
             "last_active_at": last,
@@ -102,6 +105,26 @@ impl Tunnel {
 #[derive(Default)]
 pub(super) struct Tunnels {
     open: std::sync::Mutex<HashMap<String, Arc<Tunnel>>>,
+    /// Screen tickets minted by `POST /fleet/vms/{node}/{id}/ws-ticket` and not yet redeemed.
+    tickets: std::sync::Mutex<HashMap<String, Ticket>>,
+}
+
+/// How long a screen ticket can be redeemed.
+const TICKET_SECS: u64 = 30;
+/// Most screen tickets outstanding at once (a flood, not a person).
+const MAX_TICKETS: usize = 256;
+
+/// What a screen ticket stands for: who asked, and for which VM. A browser WebSocket cannot carry a bearer token and
+/// a cookie-only upgrade is open to cross-site hijacking, so the page asks for a ticket with an ordinary
+/// authenticated request and opens the socket with it.
+struct Ticket {
+    caller: Caller,
+    key: Option<String>,
+    user: Option<String>,
+    node: String,
+    vm_id: String,
+    vm_name: String,
+    expires: std::time::Instant,
 }
 
 /// Why a tunnel could not get a slot.
@@ -133,6 +156,33 @@ impl Tunnels {
             tunnels: self.clone(),
             tunnel: t,
         })
+    }
+
+    /// A new single-use ticket for `t`; `None` when too many are outstanding.
+    fn mint(&self, t: Ticket) -> Option<String> {
+        let now = std::time::Instant::now();
+        let mut tickets = self.tickets.lock().unwrap_or_else(|p| p.into_inner());
+        tickets.retain(|_, x| x.expires > now);
+        if tickets.len() >= MAX_TICKETS {
+            return None;
+        }
+        let id = format!(
+            "{}{}",
+            uuid::Uuid::new_v4().simple(),
+            uuid::Uuid::new_v4().simple()
+        );
+        tickets.insert(id.clone(), t);
+        Some(id)
+    }
+
+    /// The ticket, removed: it works once, and only until it expires.
+    fn redeem(&self, ticket: &str) -> Option<Ticket> {
+        let t = self
+            .tickets
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(ticket)?;
+        (t.expires > std::time::Instant::now()).then_some(t)
     }
 
     fn get(&self, id: &str) -> Option<Arc<Tunnel>> {
@@ -204,17 +254,20 @@ fn ports_text(p: &TunnelPolicy) -> String {
     }
 }
 
-/// The node's tunnel endpoint for a VM: its API URL with `ws`/`wss`, the id as one escaped path segment.
-fn node_tunnel_url(fluxvm_url: &str, vm_id: &str, port: u16) -> Option<String> {
-    let base = fluxvm_url.trim_end_matches('/');
-    let ws = if let Some(rest) = base.strip_prefix("https://") {
-        format!("wss://{rest}")
+/// `http(s)://host` as `ws(s)://host`; `None` for any other scheme.
+fn ws_url(base: &str) -> Option<String> {
+    let base = base.trim_end_matches('/');
+    if let Some(rest) = base.strip_prefix("https://") {
+        Some(format!("wss://{rest}"))
     } else {
-        let rest = base.strip_prefix("http://")?;
-        format!("ws://{rest}")
-    };
-    let id: String = vm_id
-        .bytes()
+        base.strip_prefix("http://")
+            .map(|rest| format!("ws://{rest}"))
+    }
+}
+
+/// One path segment, percent-escaped.
+fn escape_segment(s: &str) -> String {
+    s.bytes()
         .map(|b| {
             if b.is_ascii_alphanumeric() || b == b'-' {
                 (b as char).to_string()
@@ -222,8 +275,16 @@ fn node_tunnel_url(fluxvm_url: &str, vm_id: &str, port: u16) -> Option<String> {
                 format!("%{b:02X}")
             }
         })
-        .collect();
-    Some(format!("{ws}/v1/vms/{id}/tunnel?port={port}"))
+        .collect()
+}
+
+/// The node's tunnel endpoint for a VM: its API URL with `ws`/`wss`, the id as one escaped path segment.
+fn node_tunnel_url(fluxvm_url: &str, vm_id: &str, port: u16) -> Option<String> {
+    Some(format!(
+        "{}/v1/vms/{}/tunnel?port={port}",
+        ws_url(fluxvm_url)?,
+        escape_segment(vm_id)
+    ))
 }
 
 /// Records a tunnel event in the activity log (`OPEN` or `CLOSE` on the tunnel's path).
@@ -248,6 +309,60 @@ fn record(
 
 fn refuse(status: StatusCode, msg: impl Into<String>) -> AppError {
     AppError(status, msg.into())
+}
+
+/// Whether `caller` may open a tunnel (or a screen ticket) to VM `id` on `node`: it owns a live VM, and a key that is
+/// only allowed to read is refused, since a tunnel can change anything in the VM. Returns the cloud's tunnel policy and
+/// the VM's name. A refused read-only key is written to the activity log as `what`.
+async fn authorize(
+    fleet: &Fleet,
+    caller: &Caller,
+    key: &Option<String>,
+    node: &str,
+    id: &str,
+    what: &str,
+) -> Result<(TunnelPolicy, String), AppError> {
+    let t = fleet.tenancy.lock().await;
+    let entry = t.vm(node, id);
+    let owned = t.owns(caller, node, id)
+        && (caller.tenant().is_none() || entry.is_some_and(|v| v.active()));
+    if !owned {
+        return Err(refuse(
+            StatusCode::NOT_FOUND,
+            format!("no VM '{id}' on node '{node}'"),
+        ));
+    }
+    // GET passes the read-only check in the middleware, but a tunnel can change anything in the VM.
+    if let (Caller::Tenant(tenant), Some(name)) = (caller, key) {
+        let read_only = t
+            .tenants
+            .get(tenant)
+            .and_then(|x| x.keys.iter().find(|k| &k.name == name))
+            .is_none_or(|k| k.read_only);
+        if read_only {
+            drop(t);
+            record(
+                fleet,
+                caller,
+                key.clone(),
+                "OPEN",
+                (node, id),
+                what.to_owned(),
+                StatusCode::FORBIDDEN,
+            );
+            return Err(refuse(
+                StatusCode::FORBIDDEN,
+                format!(
+                    "API key '{name}' is read-only; a tunnel needs a key that may make changes"
+                ),
+            ));
+        }
+    }
+    let name = entry
+        .map(|v| v.name.clone())
+        .filter(|n| !n.is_empty())
+        .unwrap_or_else(|| id.to_owned());
+    Ok((t.policy.tunnels.clone(), name))
 }
 
 /// `GET /fleet/vms/{node}/{id}/tunnel?port=N` (WebSocket; *tenant*: own VMs, keys that may make changes): one TCP
@@ -276,49 +391,8 @@ pub(super) async fn open_tunnel(
             })?,
     };
     let key = key.0;
-    let (policy, vm_name) = {
-        let t = fleet.tenancy.lock().await;
-        let entry = t.vm(&node, &id);
-        let owned = t.owns(&caller, &node, &id)
-            && (caller.tenant().is_none() || entry.is_some_and(|v| v.active()));
-        if !owned {
-            return Err(refuse(
-                StatusCode::NOT_FOUND,
-                format!("no VM '{id}' on node '{node}'"),
-            ));
-        }
-        // GET passes the read-only check in the middleware, but a tunnel can change anything in the VM.
-        if let (Caller::Tenant(tenant), Some(name)) = (&caller, &key) {
-            let read_only = t
-                .tenants
-                .get(tenant)
-                .and_then(|x| x.keys.iter().find(|k| &k.name == name))
-                .is_none_or(|k| k.read_only);
-            if read_only {
-                drop(t);
-                record(
-                    &fleet,
-                    &caller,
-                    key.clone(),
-                    "OPEN",
-                    (node.as_str(), id.as_str()),
-                    format!("port {port}"),
-                    StatusCode::FORBIDDEN,
-                );
-                return Err(refuse(
-                    StatusCode::FORBIDDEN,
-                    format!(
-                        "API key '{name}' is read-only; a tunnel needs a key that may make changes"
-                    ),
-                ));
-            }
-        }
-        let name = entry
-            .map(|v| v.name.clone())
-            .filter(|n| !n.is_empty())
-            .unwrap_or_else(|| id.clone());
-        (t.policy.tunnels.clone(), name)
-    };
+    let (policy, vm_name) =
+        authorize(&fleet, &caller, &key, &node, &id, &format!("port {port}")).await?;
     let target = format!("{vm_name} port {port}");
     if !policy.enabled || !policy.allows_port(port) {
         record(
@@ -380,6 +454,7 @@ pub(super) async fn open_tunnel(
                 node: node.clone(),
                 vm_id: id.clone(),
                 vm_name: vm_name.clone(),
+                kind: "tcp",
                 port,
                 opened_at: now,
                 sent: AtomicU64::new(0),
@@ -646,6 +721,273 @@ async fn still_allowed(fleet: &Fleet, t: &Tunnel) -> bool {
         .is_some_and(|v| v.active() && v.tenant.as_deref() == Some(tenant))
 }
 
+#[derive(Deserialize)]
+pub(super) struct TicketRequest {
+    kind: String,
+}
+
+/// `POST /fleet/vms/{node}/{id}/ws-ticket` `{"kind":"vnc"}` (*tenant*: own VMs, keys that may make changes): a 30 s
+/// single-use ticket for `GET /fleet/ws/{ticket}`, a WebSocket carrying the VM's graphical console (raw RFB bytes, what
+/// noVNC speaks) through central and the node. The same rules as a tunnel apply: the tenant's tunnel policy, its limit
+/// of open tunnels, the activity log and the revoke watchdog.
+pub(super) async fn screen_ticket(
+    State(fleet): State<Fleet>,
+    Extension(caller): Extension<Caller>,
+    Extension(key): Extension<KeyUsed>,
+    Extension(who): Extension<sso::Who>,
+    Path((node, id)): Path<(String, String)>,
+    Json(req): Json<TicketRequest>,
+) -> Result<Json<Value>, AppError> {
+    if req.kind != "vnc" {
+        return Err(refuse(StatusCode::BAD_REQUEST, "kind must be \"vnc\""));
+    }
+    let key = key.0;
+    let (policy, vm_name) = authorize(&fleet, &caller, &key, &node, &id, "screen").await?;
+    if !policy.enabled {
+        record(
+            &fleet,
+            &caller,
+            key,
+            "OPEN",
+            (node.as_str(), id.as_str()),
+            format!("{vm_name} screen"),
+            StatusCode::FORBIDDEN,
+        );
+        return Err(refuse(
+            StatusCode::FORBIDDEN,
+            "tunnels are turned off in this cloud's policy",
+        ));
+    }
+    let ticket = fleet
+        .tunnels
+        .mint(Ticket {
+            caller,
+            key,
+            user: who.0.as_ref().map(|u| u.email.clone()),
+            node,
+            vm_id: id,
+            vm_name,
+            expires: std::time::Instant::now() + Duration::from_secs(TICKET_SECS),
+        })
+        .ok_or_else(|| {
+            refuse(
+                StatusCode::TOO_MANY_REQUESTS,
+                "too many screen tickets outstanding; try again in a moment",
+            )
+        })?;
+    Ok(Json(json!({
+        "ticket": ticket,
+        "expires_in": TICKET_SECS,
+        "path": format!("/fleet/ws/{ticket}"),
+    })))
+}
+
+/// `GET /fleet/ws/{ticket}` (WebSocket; public, the ticket is the credential): redeems a screen ticket. Central asks
+/// the VM's node for a ticket of its own (with the fleet token) and relays the node's VNC socket to the client.
+pub(super) async fn open_screen(
+    State(fleet): State<Fleet>,
+    Path(ticket): Path<String>,
+    ws: Result<WebSocketUpgrade, WebSocketUpgradeRejection>,
+) -> Result<Response, AppError> {
+    let ws = ws.map_err(|_| {
+        refuse(
+            StatusCode::UPGRADE_REQUIRED,
+            "this is a WebSocket endpoint; the console opens it with a screen ticket",
+        )
+    })?;
+    let t = fleet
+        .tunnels
+        .redeem(&ticket)
+        .ok_or_else(|| refuse(StatusCode::NOT_FOUND, "screen ticket not found or expired"))?;
+    let Ticket {
+        caller,
+        key,
+        user,
+        node,
+        vm_id: id,
+        vm_name,
+        ..
+    } = t;
+    let target = format!("{vm_name} screen");
+    // The policy and the tenant may have changed in the seconds since the ticket was minted.
+    let policy = fleet.tenancy.lock().await.policy.tunnels.clone();
+    if !policy.enabled {
+        return Err(refuse(
+            StatusCode::FORBIDDEN,
+            "tunnels are turned off in this cloud's policy",
+        ));
+    }
+    let target_node = fleet
+        .nodes
+        .lock()
+        .await
+        .get(&node)
+        .cloned()
+        .ok_or_else(|| {
+            refuse(
+                StatusCode::NOT_FOUND,
+                format!("no registered node named '{node}'"),
+            )
+        })?;
+    let now = Utc::now();
+    let slot = fleet
+        .tunnels
+        .reserve(
+            Tunnel {
+                id: new_tunnel_id(),
+                tenant: caller.tenant().map(str::to_owned),
+                key: key.clone(),
+                user,
+                node: node.clone(),
+                vm_id: id.clone(),
+                vm_name,
+                kind: "vnc",
+                port: 0,
+                opened_at: now,
+                sent: AtomicU64::new(0),
+                received: AtomicU64::new(0),
+                last_active: AtomicI64::new(now.timestamp_millis()),
+                close: tokio::sync::Notify::new(),
+                closed_by: std::sync::Mutex::new(None),
+            },
+            policy.max_per_tenant,
+        )
+        .map_err(|e| {
+            record(
+                &fleet,
+                &caller,
+                key.clone(),
+                "OPEN",
+                (node.as_str(), id.as_str()),
+                target.clone(),
+                StatusCode::TOO_MANY_REQUESTS,
+            );
+            match e {
+                SlotError::TenantLimit(n) => refuse(
+                    StatusCode::TOO_MANY_REQUESTS,
+                    format!(
+                        "{n} tunnels are already open, the most allowed; close one and try again"
+                    ),
+                ),
+                SlotError::CentralFull => refuse(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "central has as many tunnels open as it can hold; try again later",
+                ),
+            }
+        })?;
+    if !still_allowed(&fleet, &slot.tunnel).await {
+        return Err(refuse(
+            StatusCode::FORBIDDEN,
+            "access to this VM was revoked",
+        ));
+    }
+    let node_ws = connect_node_screen(&fleet, &target_node.fluxvm_url, &node, &id).await?;
+    record(
+        &fleet,
+        &caller,
+        key,
+        "OPEN",
+        (node.as_str(), id.as_str()),
+        target,
+        StatusCode::SWITCHING_PROTOCOLS,
+    );
+    let idle = policy.idle_timeout();
+    let lifetime = policy.max_lifetime();
+    Ok(ws
+        .max_message_size(MAX_MESSAGE)
+        .max_frame_size(MAX_MESSAGE)
+        .on_upgrade(move |client| async move {
+            relay(fleet, caller, slot, client, node_ws, idle, lifetime).await;
+        }))
+}
+
+/// Opens the VM's VNC socket on its node: asks for a node ticket, then connects to it.
+async fn connect_node_screen(
+    fleet: &Fleet,
+    fluxvm_url: &str,
+    node: &str,
+    id: &str,
+) -> Result<NodeSocket, AppError> {
+    let base = fluxvm_url.trim_end_matches('/');
+    let esc = escape_segment(id);
+    let mut post = fleet
+        .http
+        .post(format!("{base}/v1/vms/{esc}/ws-ticket"))
+        .json(&json!({"kind": "vnc"}));
+    if let Some(t) = &fleet.token {
+        post = post.bearer_auth(t);
+    }
+    let resp = tokio::time::timeout(NODE_CONNECT_TIMEOUT, post.send())
+        .await
+        .map_err(|_| {
+            refuse(
+                StatusCode::GATEWAY_TIMEOUT,
+                format!("node '{node}' did not answer within 15 seconds"),
+            )
+        })?
+        .map_err(|e| {
+            refuse(
+                StatusCode::BAD_GATEWAY,
+                format!("could not reach node '{node}': {e}"),
+            )
+        })?;
+    let status = resp.status();
+    let body: Value = resp.json().await.unwrap_or(Value::Null);
+    if !status.is_success() {
+        let msg = body
+            .get("error")
+            .and_then(Value::as_str)
+            .unwrap_or("no reason given")
+            .to_owned();
+        return Err(match status.as_u16() {
+            404 => refuse(
+                StatusCode::NOT_FOUND,
+                format!("node '{node}' has no VM '{id}': {msg}"),
+            ),
+            // The node says why there is no graphical console (not a QEMU VM, not running).
+            409 => refuse(
+                StatusCode::CONFLICT,
+                format!("no screen for this VM: {msg}"),
+            ),
+            401 | 403 => refuse(
+                StatusCode::BAD_GATEWAY,
+                format!(
+                    "node '{node}' refused central's request ({status}); give the node's API the fleet token as an \
+                     admin token"
+                ),
+            ),
+            _ => refuse(
+                StatusCode::BAD_GATEWAY,
+                format!("node '{node}' could not open the screen ({status}): {msg}"),
+            ),
+        });
+    }
+    let node_ticket = body
+        .get("ticket")
+        .and_then(Value::as_str)
+        .filter(|t| t.bytes().all(|b| b.is_ascii_alphanumeric()))
+        .ok_or_else(|| {
+            refuse(
+                StatusCode::BAD_GATEWAY,
+                format!("node '{node}' sent no screen ticket"),
+            )
+        })?;
+    let ws_base = ws_url(base).ok_or_else(|| {
+        refuse(
+            StatusCode::BAD_GATEWAY,
+            format!("node '{node}' has no http(s) API address"),
+        )
+    })?;
+    connect_node(
+        fleet,
+        &format!("{ws_base}/console/ws/{node_ticket}"),
+        node,
+        id,
+        0,
+    )
+    .await
+}
+
 /// `GET /fleet/tunnels` (*tenant*: its own): the open tunnels, newest first, with bytes each way and idle time.
 pub(super) async fn list_tunnels(
     State(fleet): State<Fleet>,
@@ -700,6 +1042,7 @@ mod tests {
             node: "mac".into(),
             vm_id: "vm".into(),
             vm_name: "vm".into(),
+            kind: "tcp",
             port: 22,
             opened_at: Utc::now(),
             sent: AtomicU64::new(0),
@@ -884,6 +1227,14 @@ mod tests {
             "/fleet/tunnels/tun_1"
         ));
         assert!(!tenant_route_allowed(&Method::DELETE, "/fleet/tunnels"));
+        assert!(tenant_route_allowed(
+            &Method::POST,
+            "/fleet/vms/mac/vm/ws-ticket"
+        ));
+        assert!(!tenant_route_allowed(
+            &Method::GET,
+            "/fleet/vms/mac/vm/ws-ticket"
+        ));
     }
 
     #[test]
@@ -934,5 +1285,252 @@ mod tests {
         assert_eq!(v["port"], 22);
         assert!(t.visible_to(&Caller::Tenant("acme".into())));
         assert!(!t.visible_to(&Caller::Tenant("globex".into())));
+    }
+
+    fn ticket(expires_in: Duration) -> Ticket {
+        Ticket {
+            caller: Caller::Admin,
+            key: None,
+            user: None,
+            node: "mac".into(),
+            vm_id: "vm".into(),
+            vm_name: "vm".into(),
+            expires: std::time::Instant::now() + expires_in,
+        }
+    }
+
+    #[test]
+    fn a_screen_ticket_works_once() {
+        let t = Tunnels::default();
+        let id = t.mint(ticket(Duration::from_secs(30))).unwrap();
+        assert!(t.redeem(&id).is_some());
+        assert!(t.redeem(&id).is_none(), "second use");
+        assert!(t.redeem("not-a-ticket").is_none());
+    }
+
+    #[test]
+    fn an_expired_screen_ticket_is_refused_and_swept() {
+        let t = Tunnels::default();
+        let old = t.mint(ticket(Duration::ZERO)).unwrap();
+        assert!(t.redeem(&old).is_none());
+        for _ in 0..MAX_TICKETS {
+            assert!(
+                t.mint(ticket(Duration::ZERO)).is_some(),
+                "expired ones do not count"
+            );
+        }
+    }
+
+    #[test]
+    fn too_many_outstanding_screen_tickets_are_refused() {
+        let t = Tunnels::default();
+        for _ in 0..MAX_TICKETS {
+            assert!(t.mint(ticket(Duration::from_secs(30))).is_some());
+        }
+        assert!(t.mint(ticket(Duration::from_secs(30))).is_none());
+    }
+
+    #[test]
+    fn websocket_urls_follow_the_scheme_and_escape_the_id() {
+        assert_eq!(ws_url("http://mac:7788/").as_deref(), Some("ws://mac:7788"));
+        assert_eq!(ws_url("https://mac").as_deref(), Some("wss://mac"));
+        assert_eq!(ws_url("ftp://mac"), None);
+        assert_eq!(
+            node_tunnel_url("http://mac:7788", "a/b", 22).as_deref(),
+            Some("ws://mac:7788/v1/vms/a%2Fb/tunnel?port=22")
+        );
+    }
+
+    /// A fake node: hands out a ticket (and remembers the bearer token it was asked with), then echoes what the ticket's
+    /// socket receives.
+    async fn fake_node(bearer: Arc<std::sync::Mutex<Option<String>>>) -> String {
+        use axum::routing::{get, post};
+        let app = axum::Router::new()
+            .route(
+                "/v1/vms/{id}/ws-ticket",
+                post(
+                    move |headers: axum::http::HeaderMap, Json(body): Json<Value>| {
+                        let bearer = bearer.clone();
+                        async move {
+                            *bearer.lock().unwrap() = headers
+                                .get("authorization")
+                                .and_then(|v| v.to_str().ok())
+                                .map(str::to_owned);
+                            assert_eq!(body["kind"], "vnc");
+                            Json(json!({"ticket": "nodeticket1", "expires_in": 30}))
+                        }
+                    },
+                ),
+            )
+            .route(
+                "/console/ws/{ticket}",
+                get(|Path(t): Path<String>, ws: WebSocketUpgrade| async move {
+                    assert_eq!(t, "nodeticket1");
+                    ws.on_upgrade(|mut s| async move {
+                        while let Some(Ok(m)) = s.recv().await {
+                            if matches!(m, Message::Binary(_)) && s.send(m).await.is_err() {
+                                break;
+                            }
+                        }
+                    })
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        format!("http://{addr}")
+    }
+
+    /// A screen ticket from central opens the node's VNC socket and carries bytes both ways; the ticket is spent, the
+    /// open and close are in the activity log, and the node was asked with the fleet token.
+    #[tokio::test]
+    async fn a_screen_ticket_relays_the_nodes_vnc_socket() {
+        let bearer = Arc::default();
+        let node_url = fake_node(Arc::clone(&bearer)).await;
+        let mut fleet = fleet();
+        fleet.token = Some("fleet-secret".into());
+        let info = NodeInfo {
+            agent_version: String::new(),
+            daemon_version: String::new(),
+            proto: 0,
+            capabilities: Vec::new(),
+            outdated: false,
+            name: "mac".into(),
+            fluxvm_url: node_url,
+            vcpus_total: 8,
+            memory_mib_total: 16384,
+            vm_count: 0,
+            last_seen: Utc::now(),
+            cordoned: false,
+            labels: HashMap::new(),
+            security: Default::default(),
+            density: None,
+            daemon: None,
+            allocated: None,
+            apple: None,
+        };
+        fleet.nodes.lock().await.insert("mac".into(), info);
+
+        let app = axum::Router::new()
+            .route(
+                "/fleet/vms/{node}/{id}/ws-ticket",
+                axum::routing::post(screen_ticket),
+            )
+            .route("/fleet/ws/{ticket}", axum::routing::get(open_screen))
+            .layer(Extension(Caller::Admin))
+            .layer(Extension(KeyUsed(None)))
+            .layer(Extension(sso::Who(None)))
+            .with_state(fleet.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let http = reqwest::Client::new();
+        let bad = http
+            .post(format!("http://{addr}/fleet/vms/mac/vm/ws-ticket"))
+            .json(&json!({"kind": "console"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(bad.status(), 400, "only the graphical console is offered");
+        let got: Value = http
+            .post(format!("http://{addr}/fleet/vms/mac/vm/ws-ticket"))
+            .json(&json!({"kind": "vnc"}))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let path = got["path"].as_str().unwrap().to_owned();
+        assert!(path.starts_with("/fleet/ws/"));
+
+        let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}{path}"))
+            .await
+            .unwrap();
+        ws.send(NodeMessage::Binary(b"RFB 003.008\n".to_vec().into()))
+            .await
+            .unwrap();
+        match ws.next().await.unwrap().unwrap() {
+            NodeMessage::Binary(b) => assert_eq!(&b[..], b"RFB 003.008\n"),
+            other => panic!("expected an echo, got {other:?}"),
+        }
+        assert_eq!(
+            bearer.lock().unwrap().as_deref(),
+            Some("Bearer fleet-secret")
+        );
+        let open: Vec<Value> = fleet
+            .tunnels
+            .visible(&Caller::Admin)
+            .iter()
+            .map(|t| t.public_json())
+            .collect();
+        assert_eq!(open.len(), 1);
+        assert_eq!(open[0]["kind"], "vnc");
+
+        // The ticket is spent.
+        assert!(
+            tokio_tungstenite::connect_async(format!("ws://{addr}{path}"))
+                .await
+                .is_err()
+        );
+        drop(ws);
+    }
+
+    /// Through central's real router: asking for a ticket needs the bearer token, but redeeming one does not (the
+    /// ticket is the credential), and nothing else under `/fleet` opens up.
+    #[tokio::test]
+    async fn only_redeeming_a_screen_ticket_skips_the_bearer_token() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+        let dir = std::env::temp_dir().join(format!("fluxvm-ticket-{}", uuid::Uuid::new_v4()));
+        let app = super::super::router(super::super::CentralConfig {
+            state_dir: dir.clone(),
+            token: Some("t".into()),
+            reconcile_interval: None,
+            ha: None,
+        });
+        let send = |method: &str, uri: &str, token: bool, body: &str| {
+            let mut req = axum::http::Request::builder().method(method).uri(uri);
+            if token {
+                req = req.header("authorization", "Bearer t");
+            }
+            let req = req
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_owned()))
+                .unwrap();
+            app.clone().oneshot(req)
+        };
+        let ask = r#"{"kind":"vnc"}"#;
+        assert_eq!(
+            send("POST", "/fleet/vms/mac/vm/ws-ticket", false, ask)
+                .await
+                .unwrap()
+                .status(),
+            401
+        );
+        let minted = send("POST", "/fleet/vms/mac/vm/ws-ticket", true, ask)
+            .await
+            .unwrap();
+        assert_eq!(minted.status(), 200);
+        let bytes = axum::body::to_bytes(minted.into_body(), 4096)
+            .await
+            .unwrap();
+        let path = serde_json::from_slice::<Value>(&bytes).unwrap()["path"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        // No bearer token, and not a WebSocket upgrade: it gets to the handler (426), not the 401.
+        assert_eq!(send("GET", &path, false, "").await.unwrap().status(), 426);
+        // The same open door does not extend to the rest of /fleet, nor to other methods on the ticket path.
+        assert_eq!(
+            send("GET", "/fleet/tunnels", false, "")
+                .await
+                .unwrap()
+                .status(),
+            401
+        );
+        assert_eq!(send("POST", &path, false, "").await.unwrap().status(), 401);
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

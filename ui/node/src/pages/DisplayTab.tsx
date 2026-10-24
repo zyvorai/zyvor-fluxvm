@@ -1,7 +1,6 @@
-import { Card, EmptyState, VmDisplay, type Vm } from '@fluxvm/ui-core';
+import { Card, EmptyState, VmDisplay, VncScreen, type Vm } from '@fluxvm/ui-core';
 import type { Notify } from '../App';
 import { displayKind } from '../lib/connect';
-import { VncDisplay } from './VncDisplay';
 
 /** A machine's screen: a `vz` guest through screenshots and input events, a QEMU machine through VNC. Admin only, like the API behind it. */
 export function DisplayTab({ vm, notify }: { vm: Vm; notify: Notify }) {
@@ -11,7 +10,7 @@ export function DisplayTab({ vm, notify }: { vm: Vm; notify: Notify }) {
   return (
     <Card title="Screen">
       {kind === 'vnc' ? (
-        <VncDisplay key={vm.id} id={vm.id} name={vm.name} notify={notify} />
+        <VncScreen key={vm.id} ticketPath={`/v1/vms/${encodeURIComponent(vm.id)}/ws-ticket`} name={vm.name} notify={notify} footer="Clicks and keys go to the machine while it has focus. The console is a window onto the same screen as any other VNC client, so it is admin only." />
       ) : (
         <VmDisplay base={`/v1/vms/${encodeURIComponent(vm.id)}`} screenPath="screenshot" name={vm.name} canControl notify={notify} />
       )}

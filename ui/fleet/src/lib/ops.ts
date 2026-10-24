@@ -16,7 +16,9 @@ export interface Capacity {
 
 export interface Volume { id: string; name: string; tenant?: string | null; node: string; size_gib: number; attached_to?: string | null; creating?: boolean; format?: string; created_at?: string }
 
-export interface Tunnel { id: string; tenant?: string | null; user?: string | null; node: string; vm_name: string; port: number; opened_at?: string; idle_seconds?: number; bytes_sent?: number; bytes_received?: number }
+export interface Tunnel { id: string; tenant?: string | null; user?: string | null; node: string; vm_name: string; kind?: string; port: number; opened_at?: string; idle_seconds?: number; bytes_sent?: number; bytes_received?: number }
+/** What a tunnel reaches: the VM's graphical console (`kind` "vnc", port 0) or a TCP port of the guest. */
+export const tunnelTarget = (t: Pick<Tunnel, 'kind' | 'port'>): string => (t.kind === 'vnc' ? 'screen' : `port ${t.port}`);
 
 export interface JoinToken { id: string; created: number; expires?: number | null; max_uses?: number | null; uses: number; name_pattern?: string | null; revoked: boolean; note?: string }
 
