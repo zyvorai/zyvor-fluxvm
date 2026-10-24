@@ -276,6 +276,14 @@ struct KubeArgs {
     /// Where to write the kubeconfig (default: ~/.kube/fluxvm-NAME.yaml).
     #[arg(long)]
     kubeconfig: Option<std::path::PathBuf>,
+    /// Extra agent nodes, each its own VM (NAME-w1, NAME-w2, …) joined to the server. 0 to 8. Running `up` again with a
+    /// larger number adds nodes; `down` stops them all.
+    #[arg(long, default_value_t = 0)]
+    workers: u8,
+    /// Install k3s from a folder made by `fluxctl kube fetch` instead of the internet (an absolute path of letters,
+    /// digits and - _ . / only). Only applies when a VM is created.
+    #[arg(long, value_name = "DIR")]
+    offline: Option<std::path::PathBuf>,
 }
 
 impl KubeArgs {
@@ -294,6 +302,8 @@ impl KubeArgs {
             k3s_args: self.k3s_arg.clone(),
             traefik: self.traefik,
             kubeconfig: self.kubeconfig.clone(),
+            workers: self.workers,
+            offline: self.offline.clone(),
         }
     }
 }
@@ -321,6 +331,25 @@ enum KubeCommand {
         /// Seconds between health checks.
         #[arg(long, default_value_t = 30)]
         every: u64,
+    },
+    /// Copy images into every node's containerd, from the Docker CLI (`docker save`, so build them with `fluxctl docker`
+    /// first) or from a `docker save` archive. Use a tag other than `:latest`, which Kubernetes pulls again by default.
+    Load {
+        #[command(flatten)]
+        cluster: KubeArgs,
+        /// Images to copy, for example `app:dev`.
+        images: Vec<String>,
+        /// Import this archive instead of running `docker save`.
+        #[arg(long, value_name = "FILE")]
+        archive: Option<std::path::PathBuf>,
+    },
+    /// Download k3s, its air-gap images and the installer into DIR (checked against the release's SHA-256 list), for
+    /// `fluxctl kube up --offline DIR`.
+    Fetch {
+        dir: std::path::PathBuf,
+        /// A k3s release such as v1.31.4+k3s1 (default: the stable channel).
+        #[arg(long)]
+        k3s_version: Option<String>,
     },
     /// Run `supervise` as a LaunchAgent of the logged-in user: starts at login, restarts if it exits.
     Agent {
@@ -7735,6 +7764,21 @@ async fn kube_command<A: run::VmApi>(api: &A, command: KubeCommand) -> Result<()
                     .join(format!("fluxvm-{}.yaml", o.name)),
             };
             println!("{}", kube_host::env_line(&kubeconfig));
+        }
+        KubeCommand::Load {
+            cluster,
+            images,
+            archive,
+        } => {
+            for line in
+                kube_host::load(api, &cluster.options(), &images, archive.as_deref()).await?
+            {
+                println!("{line}");
+            }
+        }
+        KubeCommand::Fetch { dir, k3s_version } => {
+            let report = kube_host::fetch_offline(&dir, k3s_version.as_deref())?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
         }
         KubeCommand::Down { cluster, purge } => {
             kube_host::down(api, &cluster.options(), purge).await?

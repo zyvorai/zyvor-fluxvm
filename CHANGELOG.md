@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- **`fluxctl kube`: worker nodes, `load` and offline installs.** `up --workers N` adds N agent VMs (`NAME-w1`…) that join the
+  server with its node token and waits for `1 + N` Ready nodes; `down` stops and `down --purge` deletes them all. `kube load IMAGE…`
+  (or `--archive FILE`) copies images from the Docker CLI into every node's containerd, so images built with `fluxctl docker` run
+  with `imagePullPolicy: Never`. `kube fetch DIR` downloads k3s, its air-gap images and the installer (binary and images verified
+  against the release's SHA-256 list) and `up --offline DIR` installs from it with no download and no apt packages.
 - **`fluxctl kube`: a single-node Kubernetes (k3s) cluster in a FluxVM VM, on a Mac.** Like `colima start --kubernetes`, built the
   way `fluxctl docker` is. `fluxctl kube up [--publish PORT] [--share HOST[:GUEST][:ro]] [--k3s-version V]` creates (or starts) a
   Debian VM running k3s, forwards the API server to `127.0.0.1:6443` over a supervised SSH connection, and writes a kubeconfig
