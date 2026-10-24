@@ -69,6 +69,13 @@ deletes anything. The agent logs to `~/Library/Logs/fluxvm-docker-engine.log`.
 
 Nothing listens on a TCP port, and the guest's Docker socket is only reachable by your user through the SSH key.
 
+## If the first boot stalls
+
+The first boot installs packages with apt, so it needs this Mac to be online. If the VM never reports an address, or Docker is not ready in
+15 minutes, the command stops and says so; for a guest that is up it includes what cloud-init says in the guest (`cloud-init status` and the end of
+`/var/log/cloud-init-output.log`). `fluxctl serial NAME` shows the guest's console. Fix the network and run the same command again: it picks the VM
+up where it was.
+
 ## In Studio
 
 The **Docker** page (Platform, in the node Studio) shows the engine the daemon can reach at `/tmp/fluxvm-run-<uid>/docker-engine.sock`, the socket

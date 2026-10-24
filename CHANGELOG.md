@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- **`fluxctl docker` and `fluxctl kube`: a stalled first boot says why.** A VM that never reports an address now says its first boot may be
+  stuck on cloud-init installing packages (no internet, or a slow link), points at `fluxctl serial NAME`, and says the command can be run again to
+  pick the VM up. When the guest answers ssh but Docker or Kubernetes is not ready in time, the error now carries what cloud-init says
+  in the guest (`cloud-init status` and the end of its output log, read with `sudo`), so the cause is in the message instead of in a console.
 - **Fleet: a VM's screen in the browser, through central.** The Screen tab of a VM that is not a macOS guest now opens its graphical
   console (noVNC, QEMU VMs) from the fleet console, so a VM's screen is reachable the way its SSH port already is, with no node or VNC
   port exposed. `POST /fleet/vms/{node}/{id}/ws-ticket` (the usual authentication; owned VMs, keys that may make changes, members
