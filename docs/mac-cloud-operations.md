@@ -122,7 +122,7 @@ All under `--state-dir`:
 | `POST /stripe/webhook` | Stripe's callbacks. | HMAC signature over the raw body, 300 s tolerance; `503` if no secret is set. |
 | `GET /auth/config`, `GET /auth/login`, `GET /auth/callback`, `POST /auth/logout`, `GET /auth/session` | Console SSO. | State, nonce and PKCE; CSRF header and same-origin check on changes. |
 | `GET /metrics` | Prometheus. | The operator token or `--metrics-token`; a tenant token gets `401`. |
-| `GET /console`, `/console/app.js` | The console's static page and script (served with a strict CSP and `frame-ancestors 'none'`). | Everything they call needs a session or token. |
+| `GET /console`, `/console/assets/*` | Studio's static page and its scripts and styles (served with a strict CSP and `frame-ancestors 'none'`). | Everything they call needs a session or token. |
 
 Behind a reverse proxy, central trusts `X-Forwarded-For` **only from a peer on loopback** (it uses the last entry), so
 run the proxy on the same machine and bind central to `127.0.0.1`. Otherwise every sign-up looks like it comes from

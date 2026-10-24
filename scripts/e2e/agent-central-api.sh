@@ -133,8 +133,8 @@ check "/console redirects permanently to /console/" bash -c "curl -sI $URL/conso
 check "/console/ serves the Studio html" bash -c "curl -s $URL/console/ | grep -qi '<html'"
 check "the built app asset serves javascript" bash -c "curl -sI $URL/console/assets/app.js | tr -d '\r' | grep -qi 'content-type: .*javascript'"
 check "the console page carries a CSP and is revalidated, not cached across logins" bash -c "h=\$(curl -sI $URL/console/ | tr -d '\r'); grep -qi 'content-security-policy' <<<\"\$h\" && grep -qi 'cache-control: no-cache' <<<\"\$h\""
-check "the legacy console is still served at /console/legacy" bash -c "curl -s $URL/console/legacy | grep -qi '<html'"
-check "/console/app.js (the legacy script) serves javascript" bash -c "curl -sI $URL/console/app.js | tr -d '\r' | grep -qi 'content-type: .*javascript'"
+check "an extension-less /console path serves Studio's page (a client-side route)" bash -c "curl -s $URL/console/machines | grep -qi '<html'"
+check "the removed legacy script /console/app.js is a real 404, not HTML served as javascript" test "$(curl -s -o /dev/null -w '%{http_code}' "$URL/console/app.js")" = 404
 
 # --- metrics ----------------------------------------------------------------------------------------------------
 check "/metrics needs a token" test "$(curl -s -o /dev/null -w '%{http_code}' "$URL/metrics")" != 200
