@@ -323,7 +323,8 @@ impl KubeArgs {
 
 #[derive(Subcommand)]
 enum KubeCommand {
-    /// Create or start a single-node k3s cluster in a VM, publish its API server on this Mac and write a kubeconfig.
+    /// Create or start a k3s cluster in a VM (a server, plus workers with --workers), publish its API server on this Mac and write a
+    /// kubeconfig.
     /// Idempotent. The first run downloads k3s and takes a few minutes.
     Up(KubeArgs),
     /// The VM, its address, whether the API answers and where the kubeconfig is, as JSON.
@@ -941,7 +942,8 @@ enum Command {
         #[command(subcommand)]
         command: DockerCommand,
     },
-    /// A single-node Kubernetes (k3s) cluster in a FluxVM VM, with its API server and kubeconfig on this Mac. See
+    /// A Kubernetes (k3s) cluster in FluxVM VMs (a server and optional workers, Cilium by default), with its API server and kubeconfig
+    /// on this Mac. See
     /// `fluxctl kube up --help`.
     Kube {
         #[command(subcommand)]

@@ -2,27 +2,13 @@
 
 ## Unreleased
 
-- **Studio: a traffic graph for Kubernetes clusters.** `GET /v1/kube/{name}/flows` runs `hubble observe` in each Cilium agent over the
-  cluster's `exec` API and folds the flows into workload-to-workload edges (protocol, port, flow and new-connection counts, drops).
-  The Kubernetes page gets a **Traffic** tab: a left-to-right service map with line weight by flow count, red for drops, a details
-  panel per workload, and filters for namespace, name or port and for system pods. Needs Cilium (the `fluxctl kube` default);
-  flannel clusters are told so. `kube_pod` can now run a single command in a pod and collect its output, not only open a shell.
-- **`fluxctl kube`: Cilium is the default pod network, and cross-node pod traffic works.** The earlier multi-node release joined
-  workers but flannel bound its VXLAN tunnel to the NAT card, which VMs cannot reach each other over, so pods on different nodes
-  could not talk. `up` now installs Cilium (chart pinned, `--cilium-version`) through k3s's helm controller with flannel and k3s's
-  network policy off; `--cni flannel` keeps flannel, now pinned to the private card with `--flannel-iface`. `--offline` defaults to
-  flannel and refuses Cilium, whose chart and images are fetched from the internet.
-- **`fluxctl kube`: worker nodes, `load` and offline installs.** `up --workers N` adds N agent VMs (`NAME-w1`…) that join the
-  server with its node token and waits for `1 + N` Ready nodes; `down` stops and `down --purge` deletes them all. `kube load IMAGE…`
-  (or `--archive FILE`) copies images from the Docker CLI into every node's containerd, so images built with `fluxctl docker` run
-  with `imagePullPolicy: Never`. `kube fetch DIR` downloads k3s, its air-gap images and the installer (binary and images verified
-  against the release's SHA-256 list) and `up --offline DIR` installs from it with no download and no apt packages.
-- **`fluxctl kube`: a single-node Kubernetes (k3s) cluster in a FluxVM VM, on a Mac.** Like `colima start --kubernetes`, built the
-  way `fluxctl docker` is. `fluxctl kube up [--publish PORT] [--share HOST[:GUEST][:ro]] [--k3s-version V]` creates (or starts) a
-  Debian VM running k3s, forwards the API server to `127.0.0.1:6443` over a supervised SSH connection, and writes a kubeconfig
-  (cluster, user and context named after the VM, mode 600) to `~/.kube/fluxvm-NAME.yaml`, leaving `~/.kube/config` alone. `env`,
-  `status`, `down [--purge]` and `supervise` complete it, and `kube agent install` runs the supervisor as a LaunchAgent. The
-  LaunchAgent, SSH-forward and pid-file code is now shared with `fluxctl docker`. See [docs/kubernetes-on-mac.md](docs/kubernetes-on-mac.md).
+## 0.4.15 (2026-10-24)
+
+**Docker and Kubernetes on a Mac, and a Kubernetes page in Studio.** `fluxctl docker` and `fluxctl kube` each run in managed Debian VMs
+on Apple silicon, and Studio can show, read and open what runs in the cluster. Existing VM, sandbox and Linux-backend behaviour is
+unchanged; the daemon gains new API routes and three direct TLS dependencies (`rustls`, `tokio-rustls`, `rustls-pemfile`, already in the
+lock through `reqwest`).
+
 - **`fluxctl docker`: a real Docker engine in a FluxVM VM.** The built-in Docker socket maps containers to microVMs and cannot
   `build`, run Compose, bind-mount Mac paths or create networks. `fluxctl docker up [--share HOST[:GUEST][:ro]]` creates (or
   starts) a Debian VM running `dockerd` and publishes its socket at `{run_dir}/docker-engine.sock`; `env`, `status`, `down [--purge]`
@@ -30,6 +16,30 @@
   the same path, so `docker build`, `docker compose up --build --wait`, bind mounts, networks and health checks work unchanged.
   `--publish HOST[:GUEST]` forwards chosen Mac loopback ports to the guest, so a published container port is reachable from the Mac.
   See [docs/docker-engine.md](docs/docker-engine.md) and `scripts/docker-engine-live-test.sh`.
+- **`fluxctl kube`: Kubernetes (k3s) in FluxVM VMs, on a Mac.** Like `colima start --kubernetes`, built the way `fluxctl docker` is.
+  `fluxctl kube up` creates (or starts) a Debian VM running k3s, forwards the API server to `127.0.0.1:6443` over a supervised SSH
+  connection, and writes a kubeconfig (cluster, user and context named after the VM, mode 600) to `~/.kube/fluxvm-NAME.yaml`,
+  leaving `~/.kube/config` alone. `env`, `status`, `down [--purge]` and `supervise` complete it, and `kube agent install` runs the
+  supervisor as a LaunchAgent. Also: `--share` and `--publish` as for `docker`; `--workers N` adds agent VMs (`NAME-w1`…) on a
+  private network shared with the server, so nodes and pods reach each other (VMs on the default NAT network cannot); `kube load
+  IMAGE…` copies images built with `fluxctl docker` into every node; `kube fetch DIR` plus `up --offline DIR` install from a
+  SHA-256-verified download with no internet on first boot. **Cilium is the default pod network** (`--cni cilium|flannel`, chart
+  pinned, `--cilium-version`), installed through k3s's helm controller; `--offline` defaults to flannel, which is pinned to the
+  private card when there are workers. The LaunchAgent, SSH-forward and pid-file code is shared with `fluxctl docker`. See
+  [docs/kubernetes-on-mac.md](docs/kubernetes-on-mac.md) and `scripts/kube-live-test.sh`.
+- **Studio: Kubernetes page, pod logs and shell.** *Platform → Kubernetes* lists each `fluxctl kube` cluster (the VMs labelled
+  `fluxvm.kube`) with its nodes and pods, read-only, using the client certificate in `~/.kube/fluxvm-NAME.yaml` of the daemon's user
+  and reaching the API through the loopback forward that file names, then the server VM's own address. `GET /v1/kube` and
+  `GET /v1/kube/{name}` serve it. Each pod has **Logs** and **Shell**: `GET /v1/kube/{name}/pods/{ns}/{pod}/log` returns the tail as
+  text, and `POST …/exec-ticket` (admin) plus `GET /console/kube/ws/{ticket}` bridge the cluster's `exec` over mutual TLS to the
+  browser terminal (single-use 30 s ticket, names validated). Logs open in a Terminal.app-style window coloured by level, key, number,
+  address, URL and HTTP verb and status, with a `-word` filter, tail size, previous instance, follow, wrap, copy and download. The
+  Machines page groups a cluster's VMs as `kube NAME`.
+- **Studio: a traffic graph for Kubernetes clusters.** `GET /v1/kube/{name}/flows` runs `hubble observe` in each Cilium agent over the
+  cluster's `exec` API and folds the flows into workload-to-workload edges (protocol, port, flow and new-connection counts, drops).
+  The Kubernetes page gets a **Traffic** tab: a left-to-right service map with line weight by flow count, red for drops, a details
+  panel per workload, and filters for namespace, name or port and for system pods. Needs Cilium (the `fluxctl kube` default);
+  flannel clusters are told so.
 
 ## 0.4.14 (2026-10-23)
 

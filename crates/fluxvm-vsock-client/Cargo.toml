@@ -3,7 +3,7 @@
 
 [package]
 name = "fluxvm-vsock-client"
-version = "0.4.14"
+version = "0.4.15"
 edition = "2024"
 license = "Apache-2.0"
 description = "Host-side dialing for the Zyvor FluxVM guest agent over AF_VSOCK"

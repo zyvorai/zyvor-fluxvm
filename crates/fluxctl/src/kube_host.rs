@@ -1,7 +1,7 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
 // SPDX-License-Identifier: Apache-2.0
 
-//! `fluxctl kube`: a single-node Kubernetes (k3s) cluster inside a FluxVM VM, reachable from the Mac.
+//! `fluxctl kube`: a Kubernetes (k3s) cluster inside FluxVM VMs (a server and optional workers), reachable from the Mac.
 //!
 //! The same shape as `fluxctl docker`: one managed Debian VM, folders shared at matching paths (for `hostPath`
 //! volumes), and a supervised SSH forward that publishes the guest's API server on `127.0.0.1:<api-port>`. The
