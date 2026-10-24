@@ -68,3 +68,15 @@ describe('stacksOf', () => {
     expect(s.map((x) => [x.name, x.vms.length])).toEqual([['db', 1], ['web', 2]]);
   });
 });
+
+describe('stacksOf', () => {
+  const vm = (name: string, labels?: Record<string, string>) => ({ id: name, name, labels }) as never;
+  it('groups by stack label and by Kubernetes cluster', () => {
+    const groups = stacksOf([vm('a', { 'fluxvm.stack': 's1' }), vm('b', { 'fluxvm.stack': 's1' }), vm('k', { 'fluxvm.kube': 'k' }), vm('k-w1', { 'fluxvm.kube': 'k' }), vm('old', { 'fluxvm.kube': '1' }), vm('plain')]);
+    expect(groups.map((g) => [g.name, g.vms.map((v) => v.name)])).toEqual([
+      ['kube k', ['k', 'k-w1']],
+      ['kube old', ['old']],
+      ['s1', ['a', 'b']],
+    ]);
+  });
+});

@@ -19,10 +19,14 @@ export const portsOf = (vm: Vm): string => {
   return fwd.map((f) => `${f.guests ? 'guests:' : ''}${f.host_port}→${f.guest_port}`).join(' ');
 };
 
-/** VMs sharing the `fluxvm.stack` label, by stack name. */
+/** VMs sharing the `fluxvm.stack` label, by stack name; the nodes of a `fluxctl kube` cluster (`fluxvm.kube`) group as `kube <cluster>`. */
 export const stacksOf = (vms: Vm[]): { name: string; vms: Vm[] }[] => {
   const m = new Map<string, Vm[]>();
-  for (const v of vms) { const n = v.labels?.['fluxvm.stack']; if (n) m.set(n, [...(m.get(n) ?? []), v]); }
+  for (const v of vms) {
+    const kube = v.labels?.['fluxvm.kube'];
+    const n = v.labels?.['fluxvm.stack'] ?? (kube ? `kube ${kube === '1' ? v.name : kube}` : undefined);
+    if (n) m.set(n, [...(m.get(n) ?? []), v]);
+  }
   return [...m.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([name, list]) => ({ name, vms: list }));
 };
 const ICON: Record<Op, ReactNode> = { start: <Play size={14} />, stop: <Square size={14} />, restart: <RotateCw size={14} />, pause: <Pause size={14} />, resume: <Play size={14} /> };
