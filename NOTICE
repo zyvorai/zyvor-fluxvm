@@ -5,3 +5,11 @@ This product is licensed under the Apache License, Version 2.0.
 See the LICENSE file for the full license text.
 
 https://zyvor.dev
+
+Third-party code in the web console (ui/node)
+
+The Studio's embedded build includes noVNC 1.7.0 (https://github.com/novnc/noVNC), Copyright (C) the noVNC authors, which is
+licensed under the Mozilla Public License, Version 2.0 (https://www.mozilla.org/MPL/2.0/). The build is compiled from the
+unmodified noVNC source files; that source, and the licence text, are at the address above and in the @novnc/novnc package
+on npm.
+

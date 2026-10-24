@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { type ConnectVm, connectRoutes, forwardsOf, hasDisplay, loginOf, shq, webUrl } from './connect';
+import { type ConnectVm, connectRoutes, displayKind, forwardsOf, hasDisplayTab, loginOf, shq, webUrl } from './connect';
 
 const vm = (over: Partial<ConnectVm> = {}): ConnectVm => ({ id: '5be2b2f0-aaaa', name: 'web-1', status: 'running', backend: 'qemu', guest_ip: '192.168.64.10', request: { cloud_init: { user: 'ubuntu' } }, ...over });
 const by = (r: ReturnType<typeof connectRoutes>, key: string) => r.find((x) => x.key === key)!;
@@ -62,9 +62,13 @@ describe('helpers', () => {
   it('picks the login and decides about the display', () => {
     expect(loginOf(vm())).toBe('ubuntu');
     expect(loginOf(vm({ request: { cloud_init: { user: '  ' } } }))).toBe('root');
-    expect(hasDisplay({ backend: 'vz', status: 'running' })).toBe(true);
-    expect(hasDisplay({ backend: 'vz', status: 'stopped' })).toBe(false);
-    expect(hasDisplay({ backend: 'qemu', status: 'running' })).toBe(false);
+    expect(displayKind({ backend: 'vz', status: 'running' })).toBe('screenshot');
+    expect(displayKind({ backend: 'qemu', status: 'running' })).toBe('vnc');
+    expect(displayKind({ backend: 'vz', status: 'stopped' })).toBeNull();
+    expect(displayKind({ backend: 'qemu', status: 'paused' })).toBeNull();
+    expect(displayKind({ backend: 'firecracker', status: 'running' })).toBeNull();
+    expect(hasDisplayTab({ backend: 'qemu' }) && hasDisplayTab({ backend: 'vz' })).toBe(true);
+    expect(hasDisplayTab({ backend: 'firecracker' })).toBe(false);
   });
   it('links web-looking published ports only', () => {
     expect(webUrl({ host_port: 8080, guest_port: 80 }, 'mac.local')).toBe('http://mac.local:8080/');

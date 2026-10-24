@@ -113,3 +113,12 @@
 .cn-cmd { display: flex; gap: 8px; align-items: center; background: var(--fill-tertiary); border: 1px solid var(--hairline-1); border-radius: var(--radius-md); padding: 6px 6px 6px 12px; }
 .cn-cmd code { flex: 1; min-width: 0; overflow-x: auto; white-space: nowrap; font-size: 13px; }
 .cn-route p { margin: 6px 0 0; }
+
+/* VNC display (noVNC) */
+.vnc { display: grid; gap: 10px; }
+.vnc-bar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.vnc-opt { display: inline-flex; gap: 6px; align-items: center; font-size: 13px; color: var(--text-secondary); }
+.vnc-screen { background: #0b0b0d; border-radius: var(--radius-md); border: 1px solid var(--hairline-1); height: min(70vh, 760px); overflow: hidden; position: relative; }
+.vnc-screen:fullscreen { height: 100vh; border-radius: 0; border: 0; }
+.vnc-paste { display: flex; gap: 8px; }
+.vnc-paste .fx-input { flex: 1; }

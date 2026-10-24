@@ -191,7 +191,7 @@ PUT    /v1/network/vnets/{vni}           # admin; replaces the config for the VN
 DELETE /v1/network/vnets/{vni}           # admin; refused while a VM here is attached
 POST   /v1/network/refresh-dns
 GET    /console/                         # FluxVM Studio web UI (static, no auth; it asks for a token); /console redirects here; see ui.md
-POST   /v1/vms/{id}/ws-ticket            # {"kind":"console"|"serial"} -> single-use 30 s ticket for a browser WebSocket
+POST   /v1/vms/{id}/ws-ticket            # {"kind":"console"|"serial"|"vnc"} -> single-use 30 s ticket for a browser WebSocket (vnc: QEMU machines only)
 GET    /console/ws/{ticket}              # redeem a ticket (WebSocket upgrade; no Authorization needed)
 ```
 
