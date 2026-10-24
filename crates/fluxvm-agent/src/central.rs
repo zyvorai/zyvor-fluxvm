@@ -412,7 +412,11 @@ async fn auth_middleware(State(fleet): State<Fleet>, mut req: Request, next: Nex
     }
     // ---- signup ---- (sign-up and the Stripe webhook, which is signed)
     // `POST /fleet/enroll` carries a join token and checks it itself.
-    if signup::PUBLIC_PATHS.contains(&path) || path == "/fleet/enroll" {
+    // A screen ticket (minted by an authenticated request, single use, 30 s) stands in for the bearer token on a WebSocket.
+    if signup::PUBLIC_PATHS.contains(&path)
+        || path == "/fleet/enroll"
+        || (path.starts_with("/fleet/ws/") && *req.method() == axum::http::Method::GET)
+    {
         return next.run(req).await;
     }
     let presented = req
@@ -685,6 +689,7 @@ fn tenant_route_allowed(method: &axum::http::Method, path: &str) -> bool {
         ["fleet", "volumes", _, "resize"] => post,
         // ---- tunnel ----
         ["fleet", "vms", _, _, "tunnel"] | ["fleet", "tunnels"] => get,
+        ["fleet", "vms", _, _, "ws-ticket"] => post,
         ["fleet", "tunnels", _] => delete,
         // ---- warmpool ----
         ["fleet", "pools"] => get || post,
@@ -1076,6 +1081,11 @@ pub fn router_with_flush(
         .route("/fleet/volumes/{name}/resize", post(vols::resize_volume))
         // ---- tunnel ----
         .route("/fleet/vms/{node}/{id}/tunnel", get(tunnel::open_tunnel))
+        .route(
+            "/fleet/vms/{node}/{id}/ws-ticket",
+            post(tunnel::screen_ticket),
+        )
+        .route("/fleet/ws/{ticket}", get(tunnel::open_screen))
         .route("/fleet/tunnels", get(tunnel::list_tunnels))
         .route(
             "/fleet/tunnels/{id}",

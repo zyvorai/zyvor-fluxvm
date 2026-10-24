@@ -24,9 +24,10 @@ Networks, Volumes, Warm pools, Tunnels, Images (the catalog), Enrollment (join t
 rotation, and each tenant's members) or API keys and Members (a tenant's team), Billing & usage (usage, budgets, invoices when there are any), Activity (audit log, alerts,
 webhooks).
 
-A VM's sheet on central has an Overview (power, console log), a **Screen** (the display, refreshed every 2 seconds; for a
-macOS guest, **Control** sends your clicks, scrolling and keys to it, and pasted text and Return, Esc, Tab and ⌘ Space
-buttons cover Setup Assistant), **Snapshots** (take with or without memory, restore, delete, and clone a VM from a snapshot
+A VM's sheet on central has an Overview (power, console log), a **Screen** (for a macOS guest the display, refreshed every 2 seconds,
+where **Control** sends your clicks, scrolling and keys to it, and pasted text and Return, Esc, Tab and ⌘ Space buttons cover Setup
+Assistant; for any other VM its graphical console over VNC, live and interactive, relayed through central and the node, see
+[the VM's screen in the browser](mac-cloud-tenancy.md#a-vms-screen-in-the-browser)), **Snapshots** (take with or without memory, restore, delete, and clone a VM from a snapshot
 or from a stopped VM's disk) and **Run** (a command through the guest agent, 60-second limit). Operators edit the image
 catalog on the **Images** page. Leases and warm-pool fill need a Mac node; on a Linux node they are refused by design.
 

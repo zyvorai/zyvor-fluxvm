@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- **Fleet: a VM's screen in the browser, through central.** The Screen tab of a VM that is not a macOS guest now opens its graphical
+  console (noVNC, QEMU VMs) from the fleet console, so a VM's screen is reachable the way its SSH port already is, with no node or VNC
+  port exposed. `POST /fleet/vms/{node}/{id}/ws-ticket` (the usual authentication; owned VMs, keys that may make changes, members
+  and up) returns a 30-second single-use ticket and `GET /fleet/ws/{ticket}` is the WebSocket it opens; central asks the node for a ticket of
+  its own with the fleet token and relays the node's VNC socket. It is a tunnel for every limit that matters: `tunnels.enabled`,
+  `max_per_tenant`, idle timeout, maximum lifetime, revoke checks, the **Tunnels** page and the activity log. The ticket, not a cookie
+  or a token in a URL, is the credential for the socket. `VncScreen` (and `wsUrl`) moved into `@fluxvm/ui-core` so Studio and the fleet
+  console share one component; the node's Display tab behaves as before.
 - **Studio: CPU and memory, Workloads and Events for Kubernetes clusters.** The Kubernetes page shows each node's CPU and memory use
   as a bar and each pod's CPU and memory (from the cluster's metrics-server; clusters without one just have no numbers), a *Workloads* tab
   (Deployments, StatefulSets, DaemonSets with ready of wanted and images; Services with type, cluster IP, ports and NodePorts) and an

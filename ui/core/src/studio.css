@@ -284,3 +284,12 @@ textarea.fx-input { min-height: 84px; resize: vertical; font-family: var(--font-
 .fx-screen.is-control { outline: 2px solid var(--accent, currentColor); }
 .fx-screen.is-control img { cursor: crosshair; outline: none; }
 .fx-screen-empty { padding: 32px 16px; text-align: center; }
+
+/* VncScreen */
+.vnc { display: grid; gap: 10px; }
+.vnc-bar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.vnc-opt { display: inline-flex; gap: 6px; align-items: center; font-size: 13px; color: var(--text-secondary); }
+.vnc-screen { background: #0b0b0d; border-radius: var(--radius-md); border: 1px solid var(--hairline-1); height: min(70vh, 760px); overflow: hidden; position: relative; }
+.vnc-screen:fullscreen { height: 100vh; border-radius: 0; border: 0; }
+.vnc-paste { display: flex; gap: 8px; }
+.vnc-paste .fx-input { flex: 1; }

@@ -1,17 +1,24 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Keyboard, Maximize, Plug, Unplug } from 'lucide-react';
-import { Button, Pill, api } from '@fluxvm/ui-core';
 import type RFB from '@novnc/novnc';
-import type { Notify } from '../App';
-import { wsUrl } from '../lib/ws';
+import { api } from './api';
+import { Button, Pill } from './components';
+import { wsUrl } from './ws';
 
 type State = 'connecting' | 'open' | 'closed';
 
 /**
- * A QEMU machine's graphical console over VNC. The daemon mints a single-use ticket (admin only) and bridges a WebSocket to the VM's
- * VNC socket; noVNC (loaded on first use, so it stays out of the main bundle) speaks RFB over it.
+ * A QEMU machine's graphical console over VNC. `ticketPath` is the API route that mints a single-use WebSocket ticket for the
+ * machine (`/v1/vms/ID/ws-ticket` on a node, `/fleet/vms/NODE/ID/ws-ticket` on central, which relays through the node); the
+ * server bridges the socket to the VM's VNC socket and noVNC (loaded on first use, so it stays out of the main bundle) speaks
+ * RFB over it.
  */
-export function VncDisplay({ id, name, notify }: { id: string; name: string; notify: Notify }) {
+export function VncScreen({ ticketPath, name, notify, footer }: {
+  ticketPath: string;
+  name: string;
+  notify: (text: string, tone?: 'ok' | 'bad') => void;
+  footer?: string;
+}) {
   const host = useRef<HTMLDivElement>(null);
   const rfb = useRef<RFB | null>(null);
   const alive = useRef(true);
@@ -32,7 +39,7 @@ export function VncDisplay({ id, name, notify }: { id: string; name: string; not
     setErr('');
     setState('connecting');
     try {
-      const [{ default: RFBClass }, ticket] = await Promise.all([import('@novnc/novnc'), api.post<{ path: string }>(`/v1/vms/${encodeURIComponent(id)}/ws-ticket`, { kind: 'vnc' })]);
+      const [{ default: RFBClass }, ticket] = await Promise.all([import('@novnc/novnc'), api.post<{ path: string }>(ticketPath, { kind: 'vnc' })]);
       if (!alive.current || !host.current) return;
       host.current.replaceChildren();
       const r = new RFBClass(host.current, wsUrl(ticket.path), { shared: true });
@@ -57,7 +64,7 @@ export function VncDisplay({ id, name, notify }: { id: string; name: string; not
       setErr((e as Error).message);
       setState('closed');
     }
-  }, [id, stop]);
+  }, [ticketPath, stop]);
 
   useEffect(() => {
     alive.current = true;
@@ -87,7 +94,7 @@ export function VncDisplay({ id, name, notify }: { id: string; name: string; not
         <input className="fx-input" aria-label="Text to put on the machine's clipboard" placeholder="Text for the machine's clipboard…" value={paste} onChange={(e) => setPaste(e.target.value)} disabled={state !== 'open' || viewOnly} />
         <Button size="sm" type="submit" disabled={!paste || state !== 'open' || viewOnly}>Send</Button>
       </form>
-      <p className="fx-muted">Clicks and keys go to the machine while it has focus. The console is a window onto the same screen as any other VNC client, so it is admin only.</p>
+      <p className="fx-muted">{footer ?? 'Clicks and keys go to the machine while it has focus. The console is a window onto the same screen as any other VNC client.'}</p>
     </div>
   );
 }

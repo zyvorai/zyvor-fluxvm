@@ -14,3 +14,5 @@ export * from './palette';
 export * from './login';
 export * from './screen';
 export * from './VmDisplay';
+export * from './VncScreen';
+export * from './ws';
