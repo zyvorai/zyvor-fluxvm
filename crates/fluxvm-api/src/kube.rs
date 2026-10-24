@@ -7,8 +7,10 @@
 //!   call is made.
 //! * `GET /v1/kube/{cluster}` asks the cluster's API server for its nodes and pods and returns them in a small, flat
 //!   shape. It reads the credentials from the kubeconfig `fluxctl kube up` wrote (`~/.kube/fluxvm-<cluster>.yaml` of the
-//!   user the daemon runs as) and reaches the API at the server VM's own address, so the SSH forward does not have to be
-//!   running. Nothing is written to the cluster.
+//!   user the daemon runs as). It reaches the API through the loopback port the kubeconfig names (the SSH forward
+//!   `fluxctl kube up` keeps running) and, failing that, at the server VM's own address: with a private network k3s listens
+//!   only on that network and loopback, so the VM address works for a single node but not always for a cluster with
+//!   workers. Nothing is written to the cluster.
 
 use crate::{ApiError, ApiResult, TokenTenant};
 use axum::{
@@ -79,6 +81,9 @@ pub(crate) struct Credentials {
     pub ca: Vec<u8>,
     /// Client certificate followed by its private key, PEM.
     pub identity: Vec<u8>,
+    /// The loopback address the kubeconfig's `server:` names, where `fluxctl kube` forwards the API. Any other host is
+    /// ignored: this file is read from disk, but nothing but the local forward should ever be dialled from it.
+    pub server: Option<SocketAddr>,
 }
 
 /// The three `*-data` fields of the kubeconfig `fluxctl kube` writes (one base64 line each).
@@ -96,7 +101,18 @@ pub(crate) fn parse_kubeconfig(text: &str) -> Option<Credentials> {
     let mut identity = field("client-certificate-data")?;
     identity.push(b'\n');
     identity.extend(field("client-key-data")?);
-    Some(Credentials { ca, identity })
+    let server = text
+        .lines()
+        .map(str::trim)
+        .find_map(|l| l.strip_prefix("server:"))
+        .and_then(|u| u.trim().strip_prefix("https://"))
+        .and_then(|hp| hp.parse::<SocketAddr>().ok())
+        .filter(|a| a.ip().is_loopback());
+    Some(Credentials {
+        ca,
+        identity,
+        server,
+    })
 }
 
 fn str_of<'a>(v: &'a Value, path: &[&str]) -> Option<&'a str> {
@@ -295,7 +311,7 @@ async fn read(creds: &Credentials, addr: SocketAddr) -> Result<(Value, Value), A
             )
         })?)
         .resolve(API_NAME, addr)
-        .connect_timeout(Duration::from_secs(4))
+        .connect_timeout(Duration::from_secs(3))
         .timeout(Duration::from_secs(10))
         .build()
         .map_err(|e| {
@@ -363,11 +379,28 @@ pub(crate) async fn get_cluster(
             "the kubeconfig has no client certificate",
         )
     })?;
-    let (node_list, pod_list) = read(&creds, SocketAddr::new(ip, API_PORT)).await?;
+    let mut tried = vec![];
+    let mut found = None;
+    for addr in creds
+        .server
+        .into_iter()
+        .chain([SocketAddr::new(ip, API_PORT)])
+    {
+        match read(&creds, addr).await {
+            Ok(both) => {
+                found = Some((addr, both));
+                break;
+            }
+            Err(e) => tried.push(format!("{addr}: {}", e.message)),
+        }
+    }
+    let Some((addr, (node_list, pod_list))) = found else {
+        return Err(err(StatusCode::BAD_GATEWAY, tried.join("; ")));
+    };
     let items = |v: &Value| v["items"].as_array().cloned().unwrap_or_default();
     Ok(Json(json!({
         "cluster": name,
-        "api": format!("https://{ip}:{API_PORT}"),
+        "api": format!("https://{addr}"),
         "vms": nodes.iter().map(|vm| json!({"name": vm.name, "status": status_name(&vm.status)})).collect::<Vec<_>>(),
         "nodes": items(&node_list).iter().map(simplify_node).collect::<Vec<_>>(),
         "pods": items(&pod_list).iter().map(simplify_pod).collect::<Vec<_>>(),
@@ -410,6 +443,12 @@ mod tests {
         );
         let c = parse_kubeconfig(&text).unwrap();
         assert_eq!(c.ca, b"CA-PEM");
+        assert_eq!(c.server, Some("127.0.0.1:6443".parse().unwrap()));
+        // Only a loopback server is ever dialled from the file.
+        let remote = text.replace("https://127.0.0.1:6443", "https://10.0.0.9:6443");
+        assert_eq!(parse_kubeconfig(&remote).unwrap().server, None);
+        let named = text.replace("https://127.0.0.1:6443", "https://example.com:6443");
+        assert_eq!(parse_kubeconfig(&named).unwrap().server, None);
         assert_eq!(c.identity, b"CERT-PEM\nKEY-PEM");
         assert!(parse_kubeconfig("apiVersion: v1\n").is_none());
         assert!(parse_kubeconfig(&text.replace("client-key-data", "other")).is_none());
