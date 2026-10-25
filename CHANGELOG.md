@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- **Studio: start, stop and restart a Docker container.** The Docker page now has a button per container for what you do most, with a spinner
+  while the engine works and a toast when it answers ("web restarted", or "web was already stopped" when there was nothing to do).
+  `POST /v1/docker/containers/{id}/{start|stop|restart}` (admin) is the route; any other action or a malformed id is refused before it
+  reaches the engine. Create, remove and pull stay with the docker CLI.
 - **Studio: scale, restart, cordon and delete from the Kubernetes page.** Deployments and StatefulSets get **+** and **−** (0 to 100
   replicas), every workload gets **Restart** (a rollout restart), pods get **Delete** (with a confirmation) and nodes get **Cordon** or
   **Uncordon**, each with a spinner and a toast. Four new admin-only routes under `/v1/kube/{cluster}/`; the page's old "read-only" wording is gone.

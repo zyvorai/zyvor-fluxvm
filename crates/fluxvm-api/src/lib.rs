@@ -938,6 +938,10 @@ pub fn router(manager: Arc<VmManager>) -> Router {
             "/v1/docker/containers/{id}/logs",
             get(docker_view::container_logs),
         )
+        .route(
+            "/v1/docker/containers/{id}/{action}",
+            post(docker_view::container_action),
+        )
         .route("/v1/kube", get(kube::list_clusters))
         .route("/v1/kube/{name}", get(kube::get_cluster))
         .route("/v1/kube/{name}/flows", get(kube_flows::get_flows))
