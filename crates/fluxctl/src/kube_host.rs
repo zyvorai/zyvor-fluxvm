@@ -224,6 +224,10 @@ pub(crate) fn validate(o: &KubeOptions) -> Result<()> {
     Ok(())
 }
 
+pub(crate) fn kubeconfig_path(o: &KubeOptions) -> Result<PathBuf> {
+    home_kube(o)
+}
+
 fn home_kube(o: &KubeOptions) -> Result<PathBuf> {
     Ok(match &o.kubeconfig {
         Some(p) => p.clone(),

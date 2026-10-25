@@ -199,6 +199,14 @@ of one VM cannot put back consistently. A saved state restores only on the same 
 
 The Studio's Kubernetes page has a **Checkpoints** tab with the same list, Save, Restore and Delete. After a restore from the Studio, `kube supervise` (or `kube up`) reopens the kubectl port.
 
+## Try something, then undo it
+
+`fluxctl kube try -- kubectl apply -f app.yaml` saves a checkpoint (named `try-<time>`), runs the command against this cluster, and keeps the
+checkpoint. If it went wrong, `fluxctl kube undo` puts the cluster back as it was before, running pods included, and forgets that checkpoint,
+so running `undo` again goes one step further back. The command's exit code is passed on. `--keep N` (default 5) deletes older `try-`
+checkpoints. Put cluster flags such as `--name` before the `--`; everything after it is the command. Single-node clusters only.
+On a real cluster, deleting a deployment through `try` and then `undo` brought back the deployment and its original pod (save 1.5 s, undo 12.5 s).
+
 ## Sleep and wake
 
 `fluxctl kube sleep` saves the running cluster (a checkpoint named `sleep`) and stops its VM, so it costs no CPU and little memory.
