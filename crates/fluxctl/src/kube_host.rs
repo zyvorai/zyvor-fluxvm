@@ -642,9 +642,15 @@ pub(crate) async fn resync_clock<A: VmApi>(api: &A, o: &KubeOptions) {
     let _ = ssh(&cluster, "sudo systemctl restart systemd-timesyncd").output();
 }
 
-/// Runs a shell command in the cluster's server VM and returns its trimmed output, or the error text. Unlike `ensure_vm` it does
-/// not wait for Ready nodes, so it works while the control plane is down.
-pub(crate) async fn guest_sh<A: VmApi>(api: &A, o: &KubeOptions, script: &str) -> Result<String> {
+/// Runs a shell command in the cluster's server VM, feeding it `stdin` if given, and returns its trimmed output, or the
+/// error text. Unlike `ensure_vm` it does not wait for Ready nodes, so it works while the control plane is down.
+pub(crate) async fn guest_run<A: VmApi>(
+    api: &A,
+    o: &KubeOptions,
+    script: &str,
+    stdin: Option<&str>,
+) -> Result<String> {
+    use std::{io::Write, process::Stdio};
     let Some((id, _)) = api.find(&o.name).await? else {
         bail!("no cluster named {}", o.name);
     };
@@ -659,11 +665,114 @@ pub(crate) async fn guest_sh<A: VmApi>(api: &A, o: &KubeOptions, script: &str) -
     let (_, identity) = run::ssh_key(&home)?;
     let mut cmd = run::ssh_base(&ip, &user, &identity);
     cmd.args(["-o", "BatchMode=yes", "-o", "ConnectTimeout=5", script]);
-    let out = cmd.output().context("running a command in the server VM")?;
+    cmd.stdin(if stdin.is_some() {
+        Stdio::piped()
+    } else {
+        Stdio::null()
+    })
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped());
+    let mut child = cmd.spawn().context("running a command in the server VM")?;
+    if let (Some(text), Some(mut pipe)) = (stdin, child.stdin.take()) {
+        pipe.write_all(text.as_bytes())?;
+    }
+    let out = child.wait_with_output()?;
     if !out.status.success() {
         bail!("{}", String::from_utf8_lossy(&out.stderr).trim());
     }
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_owned())
+}
+
+pub(crate) async fn guest_sh<A: VmApi>(api: &A, o: &KubeOptions, script: &str) -> Result<String> {
+    guest_run(api, o, script, None).await
+}
+
+/// Runs a command in the server VM with a terminal, for shells; returns its exit code.
+pub(crate) async fn guest_interactive<A: VmApi>(
+    api: &A,
+    o: &KubeOptions,
+    script: &str,
+) -> Result<i32> {
+    let Some((id, _)) = api.find(&o.name).await? else {
+        bail!("no cluster named {}", o.name);
+    };
+    let Some(ip) = api.guest_ip(id).await? else {
+        bail!("{} has no address yet", o.name);
+    };
+    let home = dh::home()?;
+    let user = dh::user_name(&dh::EngineOptions {
+        user: o.user.clone(),
+        ..Default::default()
+    })?;
+    let (_, identity) = run::ssh_key(&home)?;
+    let mut cmd = run::ssh_base(&ip, &user, &identity);
+    cmd.args([
+        "-t",
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "ConnectTimeout=5",
+        script,
+    ]);
+    let status = cmd.status().context("opening a shell in the server VM")?;
+    Ok(status.code().unwrap_or(1))
+}
+
+/// Whether the names listener is up on this Mac (port 80 answers).
+pub(crate) fn names_are_served() -> bool {
+    api_answers(80)
+}
+
+/// The published services, for `kube open`.
+pub(crate) async fn published_services<A: VmApi>(
+    api: &A,
+    o: &KubeOptions,
+) -> Result<Vec<NodePortService>> {
+    let cluster = ensure_vm(api, o).await?;
+    read_services(&cluster)
+}
+
+/// `kubectl apply -f -` inside the server VM.
+pub(crate) async fn guest_apply<A: VmApi>(
+    api: &A,
+    o: &KubeOptions,
+    manifest: &str,
+) -> Result<String> {
+    guest_run(api, o, "sudo k3s kubectl apply -f -", Some(manifest)).await
+}
+
+/// Opens the forwards for the services that exist now, without waiting for a supervisor's next check.
+pub(crate) async fn publish_now<A: VmApi>(api: &A, o: &KubeOptions) -> Result<()> {
+    publish_services(api, o, &mut vec![], None)
+        .await
+        .map(|_| ())
+}
+
+/// The Mac ports the recorded forwarder was started with (the `host:guest` entries of its spec).
+pub(crate) fn forwarded_hosts(o: &KubeOptions) -> Vec<u16> {
+    spec_hosts(
+        std::fs::read_to_string(forwarder_pid(o))
+            .unwrap_or_default()
+            .lines()
+            .nth(1)
+            .unwrap_or(""),
+    )
+}
+
+/// `user@ip|6443|30080:30080|5432:30432` -> [30080, 5432]
+pub(crate) fn spec_hosts(spec: &str) -> Vec<u16> {
+    spec.split('|')
+        .filter_map(|f| f.split_once(':')?.0.parse().ok())
+        .collect()
+}
+
+/// Whether the Mac port `host` is forwarded to the guest's `guest` right now.
+pub(crate) fn is_forwarded(o: &KubeOptions, host: u16, guest: u16) -> bool {
+    std::fs::read_to_string(forwarder_pid(o))
+        .unwrap_or_default()
+        .lines()
+        .nth(1)
+        .is_some_and(|spec| spec.split('|').any(|f| f == format!("{host}:{guest}")))
 }
 
 /// Finds or creates one node's VM and starts it if stopped.
@@ -1209,7 +1318,29 @@ fn forwarder_bytes(o: &KubeOptions) -> Option<u64> {
 pub struct NodePortService {
     pub namespace: String,
     pub name: String,
+    /// The node port inside the VM.
     pub port: u16,
+    /// The port to open on the Mac instead, from the Service's `fluxvm.dev/local-ports` annotation (`30432=5432`), so a
+    /// database answers on its own number.
+    pub local: Option<u16>,
+}
+
+impl NodePortService {
+    /// The loopback port on the Mac.
+    pub fn host_port(&self) -> u16 {
+        self.local.unwrap_or(self.port)
+    }
+}
+
+/// `30432=5432,30900=9000` -> [(30432, 5432), (30900, 9000)]; bad pairs are ignored.
+pub(crate) fn parse_local_ports(annotation: &str) -> Vec<(u16, u16)> {
+    annotation
+        .split(',')
+        .filter_map(|pair| {
+            let (node, local) = pair.trim().split_once('=')?;
+            Some((node.trim().parse().ok()?, local.trim().parse().ok()?))
+        })
+        .collect()
 }
 
 /// The NodePort and LoadBalancer services in `kubectl get svc -A -o json`, one entry per node port, sorted.
@@ -1222,12 +1353,18 @@ pub(crate) fn node_port_services(list: &Value) -> Vec<NodePortService> {
         ) {
             continue;
         }
+        let local = parse_local_ports(
+            item["metadata"]["annotations"]["fluxvm.dev/local-ports"]
+                .as_str()
+                .unwrap_or(""),
+        );
         for p in item["spec"]["ports"].as_array().into_iter().flatten() {
             if let Some(port) = p["nodePort"].as_u64().and_then(|n| u16::try_from(n).ok()) {
                 out.push(NodePortService {
                     namespace: item["metadata"]["namespace"].as_str().unwrap_or("").into(),
                     name: item["metadata"]["name"].as_str().unwrap_or("").into(),
                     port,
+                    local: local.iter().find(|(n, _)| *n == port).map(|(_, l)| *l),
                 });
             }
         }
@@ -1246,16 +1383,16 @@ pub(crate) fn ports_to_open(
 ) -> Vec<(u16, u16)> {
     let mut out: Vec<(u16, u16)> = vec![];
     for s in found {
-        let p = s.port;
-        if p < 1024
-            || p == api_port
-            || fixed.iter().any(|(h, _)| *h == p)
-            || out.iter().any(|(h, _)| *h == p)
-            || taken(p)
+        let host = s.host_port();
+        if host < 1024
+            || host == api_port
+            || fixed.iter().any(|(h, _)| *h == host)
+            || out.iter().any(|(h, _)| *h == host)
+            || taken(host)
         {
             continue;
         }
-        out.push((p, p));
+        out.push((host, s.port));
     }
     out
 }
@@ -1272,7 +1409,7 @@ pub(crate) fn friendly_url(namespace: &str, name: &str, port: u16) -> String {
 }
 
 /// Whether something on the Mac already listens on this loopback port.
-fn port_in_use(port: u16) -> bool {
+pub(crate) fn port_in_use(port: u16) -> bool {
     std::net::TcpListener::bind(("127.0.0.1", port)).is_err()
 }
 
@@ -1298,13 +1435,16 @@ async fn publish_services<A: VmApi>(
     let mut cluster = ensure_vm(api, o).await?;
     let found = read_services(&cluster)?;
     let ours = open.clone();
+    // Ports the recorded forwarder already holds are ours too, even when another process (`kube add`) opened them;
+    // taking them for someone else's would drop and reopen them in turn, and every flip restarts the SSH forward.
+    let held = forwarded_hosts(o);
     let desired = ports_to_open(&found, &cluster.publish, o.api_port, |p| {
-        !ours.iter().any(|(h, _)| *h == p) && port_in_use(p)
+        !ours.iter().any(|(h, _)| *h == p) && !held.contains(&p) && port_in_use(p)
     });
     if let Some(names) = names {
         let published: Vec<NodePortService> = found
             .iter()
-            .filter(|s| desired.iter().any(|(h, _)| *h == s.port))
+            .filter(|s| desired.contains(&(s.host_port(), s.port)))
             .cloned()
             .collect();
         *names.lock().unwrap() = crate::kube_names::route_table(&published);
@@ -1492,11 +1632,11 @@ async fn healthy_enough<A: VmApi>(api: &A, o: &KubeOptions) -> bool {
 pub async fn services<A: VmApi>(api: &A, o: &KubeOptions) -> Result<Value> {
     let cluster = ensure_vm(api, o).await?;
     let recorded = std::fs::read_to_string(forwarder_pid(o)).unwrap_or_default();
-    let forwarded = |port: u16| {
+    let forwarded = |host: u16, guest: u16| {
         recorded
             .lines()
             .nth(1)
-            .is_some_and(|spec| spec.split('|').any(|f| f == format!("{port}:{port}")))
+            .is_some_and(|spec| spec.split('|').any(|f| f == format!("{host}:{guest}")))
     };
     let items: Vec<Value> = read_services(&cluster)?
         .iter()
@@ -1504,10 +1644,11 @@ pub async fn services<A: VmApi>(api: &A, o: &KubeOptions) -> Result<Value> {
             serde_json::json!({
                 "namespace": s.namespace,
                 "name": s.name,
-                "port": s.port,
-                "published": forwarded(s.port),
-                "url": service_url(s.port),
-                "friendly_url": friendly_url(&s.namespace, &s.name, s.port),
+                "port": s.host_port(),
+                "node_port": s.port,
+                "published": forwarded(s.host_port(), s.port),
+                "url": service_url(s.host_port()),
+                "friendly_url": friendly_url(&s.namespace, &s.name, s.host_port()),
             })
         })
         .collect();
@@ -2014,7 +2155,16 @@ mod tests {
         let port = l.local_addr().unwrap().port();
         assert!(api_answers(port));
         drop(l);
-        assert!(!api_answers(port));
+        // another test may briefly bind the same ephemeral port, so give it a moment to let go
+        let gone = (0..40).any(|_| {
+            if api_answers(port) {
+                std::thread::sleep(Duration::from_millis(50));
+                false
+            } else {
+                true
+            }
+        });
+        assert!(gone);
     }
 
     #[test]
@@ -2541,6 +2691,7 @@ mod tests {
             namespace: "n".into(),
             name: "s".into(),
             port,
+            local: None,
         };
         let found = [
             svc(80),
@@ -2553,6 +2704,47 @@ mod tests {
         let fixed = [(30082, 80)];
         let got = ports_to_open(&found, &fixed, 6443, |p| p == 30081);
         assert_eq!(got, vec![(30080, 30080)]);
+    }
+
+    #[test]
+    fn the_forwarders_ports_are_read_from_its_spec() {
+        assert_eq!(
+            spec_hosts("me@192.168.64.7|6443|30080:30080|5432:30432"),
+            vec![30080, 5432]
+        );
+        assert!(spec_hosts("me@192.168.64.7|6443").is_empty());
+        assert!(spec_hosts("").is_empty());
+    }
+
+    #[test]
+    fn a_service_can_ask_for_its_own_port_on_the_mac() {
+        assert_eq!(
+            parse_local_ports("30432=5432, 30900=9000,bad,x=1"),
+            vec![(30432, 5432), (30900, 9000)]
+        );
+        let list = serde_json::json!({"items": [
+            {"metadata": {"namespace": "default", "name": "postgres",
+                "annotations": {"fluxvm.dev/local-ports": "30432=5432"}},
+             "spec": {"type": "NodePort", "ports": [{"nodePort": 30432}]}},
+            {"metadata": {"namespace": "default", "name": "web"},
+             "spec": {"type": "NodePort", "ports": [{"nodePort": 30080}]}},
+        ]});
+        let found = node_port_services(&list);
+        let pg = found.iter().find(|s| s.name == "postgres").unwrap();
+        assert_eq!((pg.port, pg.host_port()), (30432, 5432));
+        assert_eq!(
+            found.iter().find(|s| s.name == "web").unwrap().host_port(),
+            30080
+        );
+        // the Mac port is the one opened, forwarding to the node port; a busy Mac port is skipped
+        assert_eq!(
+            ports_to_open(&found, &[], 6443, |_| false),
+            vec![(30080, 30080), (5432, 30432)]
+        );
+        assert_eq!(
+            ports_to_open(&found, &[], 6443, |p| p == 5432),
+            vec![(30080, 30080)]
+        );
     }
 
     const OURS: &str = "apiVersion: v1\nclusters:\n- cluster:\n    server: https://127.0.0.1:6443\n  name: dev\ncontexts:\n- context:\n    cluster: dev\n    user: dev\n  name: dev\ncurrent-context: dev\nkind: Config\nusers:\n- name: dev\n  user:\n    token: t\n";

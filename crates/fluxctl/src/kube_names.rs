@@ -14,16 +14,19 @@ use crate::kube_host::NodePortService;
 pub type Names = Arc<Mutex<BTreeMap<String, u16>>>;
 
 /// `web.shop.localhost` for every service; a service in `default` is also `web.localhost`. A service with several node
-/// ports answers on its lowest one.
+/// ports answers on its lowest node port (so an app puts the port a browser wants first).
 pub(crate) fn route_table(published: &[NodePortService]) -> BTreeMap<String, u16> {
     let mut t = BTreeMap::new();
     let mut sorted: Vec<&NodePortService> = published.iter().collect();
     sorted.sort_by_key(|s| s.port);
     for s in sorted.into_iter().rev() {
         // inserted highest port first, so the lowest port wins
-        t.insert(format!("{}.{}.localhost", s.name, s.namespace), s.port);
+        t.insert(
+            format!("{}.{}.localhost", s.name, s.namespace),
+            s.host_port(),
+        );
         if s.namespace == "default" {
-            t.insert(format!("{}.localhost", s.name), s.port);
+            t.insert(format!("{}.localhost", s.name), s.host_port());
         }
     }
     t
@@ -164,6 +167,7 @@ mod tests {
             namespace: ns.into(),
             name: name.into(),
             port,
+            local: None,
         }
     }
 

@@ -120,6 +120,40 @@ The API server certificate carries `127.0.0.1` as a SAN, so `kubectl` verifies i
   uses port 80 the names are skipped and the node-port URLs still work; `supervise --no-names` turns them off. HTTP only for now.
 * `kubectl port-forward` also works, since it goes through the API server.
 
+## Services next to your app: `kube add`
+
+```bash
+fluxctl kube add postgres        # postgresql://postgres:dev@127.0.0.1:5432/postgres
+fluxctl kube connect postgres    # psql inside the pod: nothing to install on the Mac
+fluxctl kube open mailpit        # opens http://mailpit.localhost
+fluxctl kube apps                # what can be added, what is running
+fluxctl kube remove postgres     # data kept; --delete-data erases it
+```
+
+`kube add` runs a ready-made Deployment, Service and (for apps that keep data) a volume in the cluster, waits until the app answers on
+this Mac, and prints what to paste into your app. Each app gets its usual port on `127.0.0.1`; if something on the Mac already uses it
+(a Homebrew Postgres on 5432, say) the app moves to the next free port and the printed address says so. Data lives on a volume, so
+`remove` and `add` again brings it back; a second `add` is harmless.
+
+| App | On the Mac | Login |
+|---|---|---|
+| `postgres` (17) | `127.0.0.1:5432` | `postgres` / `dev` |
+| `redis` (7, persistent) | `127.0.0.1:6379` | none |
+| `mysql` (8.4) | `127.0.0.1:3306`, database `app` | `root` / `dev` |
+| `mongodb` (8) | `127.0.0.1:27017` | none |
+| `rabbitmq` (4, management) | AMQP `5672`, UI `http://rabbitmq.localhost` (`15672`) | `guest` / `guest` |
+| `nats` (2, JetStream) | `4222`, monitoring `http://nats.localhost` (`8222`) | none |
+| `mailpit` | SMTP `1025`, inbox `http://mailpit.localhost` (`8025`) | none |
+| `grafana` (11) | `http://grafana.localhost` (`3000`) | `admin` / `admin` |
+
+These are development defaults with throwaway passwords, bound to loopback on the Mac; they are not for anything shared. An app's
+port can be opened only if the supervisor (`fluxctl kube supervise`, which the LaunchAgent runs) or `add` itself opens it; keep them
+open across restarts with `fluxctl kube agent install`. `connect` works for postgres, redis, mysql and mongodb (a shell in the pod
+through the cluster); `open NAME` opens any published service, by its `.localhost` name while `supervise` runs.
+
+Your own Services can ask for a port of their own on the Mac the same way, with an annotation: `fluxvm.dev/local-ports: "30432=5432"`
+opens `127.0.0.1:5432` for node port 30432.
+
 ## Images
 
 The cluster has its own containerd, separate from the `fluxctl docker` engine. `fluxctl kube load` copies images from the Docker
