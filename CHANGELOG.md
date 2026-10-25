@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- **`fluxctl kube sleep` and `wake`.** Sleep saves the cluster and stops its VM; wake brings it back as it was. Under `kube supervise` the first
+  `kubectl` call wakes a sleeping cluster by itself. Proved on a real k3s: sleep 6 s, first kubectl 3 s, pod still Running. Single-node only.
+  No idle timer yet.
 - **`fluxctl kube supervise` publishes NodePort and LoadBalancer services to 127.0.0.1 by itself.** Create a service, `curl 127.0.0.1:<nodePort>`
   works; delete it and the forward goes. Loopback only; ports below 1024, the API port and ports already in use on the Mac are skipped.
   `fluxctl kube services` lists them (JSON). `--no-auto-publish` turns it off. Proved on a real k3s: nginx NodePort answered 200 from the Mac

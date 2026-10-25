@@ -197,6 +197,14 @@ Limits: a label is 1 to 40 lowercase letters, digits or dashes; a label is used 
 be checkpointed; and a cluster made with `--workers` is refused, because its nodes are separate VMs on a private network that a snapshot
 of one VM cannot put back consistently. A saved state restores only on the same Mac model and a compatible macOS.
 
+## Sleep and wake
+
+`fluxctl kube sleep` saves the running cluster (a checkpoint named `sleep`) and stops its VM, so it costs no CPU and little memory.
+`fluxctl kube wake` restores it exactly as it was and deletes that checkpoint. While `fluxctl kube supervise` runs, the sleeping
+cluster keeps `127.0.0.1:<api-port>` open: the first `kubectl` call wakes it and is held until the API answers, so you just use
+`kubectl`. On a real cluster sleeping took 6 s and the first `kubectl get pods` against the sleeping cluster answered in 3 s. Same
+limits as checkpoints: single-node clusters only. Do not run `kube up` on a sleeping cluster; wake it.
+
 ## Keep it running
 
 ```bash

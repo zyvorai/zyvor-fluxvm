@@ -951,6 +951,11 @@ pub async fn supervise<A: VmApi>(
     validate(o)?;
     let mut open: Vec<(u16, u16)> = vec![];
     loop {
+        if crate::kube_checkpoint::is_asleep(api, o).await {
+            open.clear();
+            wake_on_demand(api, o, every).await;
+            continue;
+        }
         let mut healthy = api_answers(o.api_port)
             && matches!(api.find(&o.name).await, Ok(Some((_, s))) if s == "running");
         for i in 1..=o.workers {
@@ -968,6 +973,30 @@ pub async fn supervise<A: VmApi>(
             eprintln!("publishing services, will retry: {e:#}");
         }
         tokio::time::sleep(every).await;
+    }
+}
+
+/// A parked cluster: holds 127.0.0.1:<api-port> open, and the first client to connect wakes it. That client waits
+/// for the API and is then proxied to it. Returns after one wake, or after `every` with nobody connecting.
+async fn wake_on_demand<A: VmApi>(api: &A, o: &KubeOptions, every: Duration) {
+    use tokio::net::{TcpListener, TcpStream};
+    let Ok(listener) = TcpListener::bind(("127.0.0.1", o.api_port)).await else {
+        tokio::time::sleep(every).await; // something else holds the port; try again later
+        return;
+    };
+    let Ok(Ok((mut client, _))) = tokio::time::timeout(every, listener.accept()).await else {
+        return;
+    };
+    drop(listener); // the wake re-opens the real forward on this port
+    eprintln!("a client connected to the sleeping cluster: waking it");
+    match crate::kube_checkpoint::wake(api, o).await {
+        Ok(m) => eprintln!("{m}"),
+        Err(e) => return eprintln!("waking failed, will retry: {e:#}"),
+    }
+    if let Ok(mut api_side) = TcpStream::connect(("127.0.0.1", o.api_port)).await {
+        tokio::spawn(async move {
+            let _ = tokio::io::copy_bidirectional(&mut client, &mut api_side).await;
+        });
     }
 }
 

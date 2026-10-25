@@ -162,6 +162,50 @@ pub async fn remove<A: VmApi>(api: &A, o: &kube_host::KubeOptions, label: &str) 
     Ok(format!("checkpoint {label:?} of {} removed", o.name))
 }
 
+/// The checkpoint `sleep` makes and `wake` consumes.
+const SLEEP_LABEL: &str = "sleep";
+
+/// `fluxctl kube sleep`: save the running cluster, then stop its VM so it costs no CPU or memory.
+pub async fn sleep<A: VmApi>(api: &A, o: &kube_host::KubeOptions) -> Result<String> {
+    let (id, _) = server(api, o).await?;
+    let started = Instant::now();
+    checkpoint(api, o, SLEEP_LABEL).await?;
+    kube_host::stop_forward(o);
+    api.stop(id).await?;
+    Ok(format!(
+        "{} is asleep ({:.1}s). `fluxctl kube wake` or the first kubectl call under `kube supervise` brings it back",
+        o.name,
+        started.elapsed().as_secs_f32()
+    ))
+}
+
+/// Whether the cluster is parked: its VM is not running and the sleep checkpoint exists.
+pub async fn is_asleep<A: VmApi>(api: &A, o: &kube_host::KubeOptions) -> bool {
+    match api.find(&o.name).await {
+        Ok(Some((id, status))) if status != "running" => api
+            .has_snapshot(id, &tag_of(SLEEP_LABEL))
+            .await
+            .unwrap_or(false),
+        _ => false,
+    }
+}
+
+/// `fluxctl kube wake`: restore the sleep checkpoint and delete it, so the next sleep can save a new one.
+pub async fn wake<A: VmApi>(api: &A, o: &kube_host::KubeOptions) -> Result<String> {
+    let (id, _) = server(api, o).await?;
+    if !api.has_snapshot(id, &tag_of(SLEEP_LABEL)).await? {
+        bail!("{} is not asleep", o.name);
+    }
+    let started = Instant::now();
+    restore(api, o, SLEEP_LABEL).await?;
+    api.delete_snapshot(id, &tag_of(SLEEP_LABEL)).await?;
+    Ok(format!(
+        "{} is awake ({:.1}s)",
+        o.name,
+        started.elapsed().as_secs_f32()
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -218,7 +262,8 @@ mod tests {
             Ok(())
         }
         async fn stop(&self, _: Uuid) -> Result<()> {
-            unimplemented!()
+            self.calls.lock().unwrap().push("stop".into());
+            Ok(())
         }
         async fn restore(&self, _: Uuid, _: &str) -> Result<()> {
             unimplemented!()
@@ -391,5 +436,42 @@ mod tests {
                 .await
                 .unwrap()
         );
+    }
+
+    #[tokio::test]
+    async fn sleep_saves_before_it_stops_and_only_once() {
+        let api = fake("running");
+        sleep(&api, &opts()).await.unwrap();
+        assert_eq!(
+            api.calls.lock().unwrap().as_slice(),
+            ["snapshot kube-sleep", "stop"]
+        );
+        let e = sleep(&api, &opts()).await.unwrap_err().to_string();
+        assert!(e.contains("already has a checkpoint"), "{e}");
+        assert_eq!(api.calls.lock().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn only_a_stopped_cluster_with_a_sleep_checkpoint_is_asleep() {
+        let stopped = fake("stopped");
+        assert!(!is_asleep(&stopped, &opts()).await);
+        stopped
+            .snaps
+            .lock()
+            .unwrap()
+            .push((Uuid::from_u128(1), tag_of(SLEEP_LABEL)));
+        assert!(is_asleep(&stopped, &opts()).await);
+        let running = fake("running");
+        running
+            .snaps
+            .lock()
+            .unwrap()
+            .push((Uuid::from_u128(1), tag_of(SLEEP_LABEL)));
+        assert!(!is_asleep(&running, &opts()).await);
+        let e = wake(&fake("stopped"), &opts())
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("is not asleep"), "{e}");
     }
 }
