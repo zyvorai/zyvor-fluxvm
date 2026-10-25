@@ -44,11 +44,32 @@ export function KubeCheckpoints({ cluster, workers, notify }: { cluster: string;
     await api.del(`/v1/vms/${id}/snapshots/${encodeURIComponent('kube-sleep')}`);
     await vm.refresh();
   }, `${cluster} is awake`);
+  const lastTry = list.find((c) => c.kind === 'try');
+  const undoTry = () => run('undo', async () => {
+    if (!lastTry) return;
+    await api.post(`/v1/vms/${id}/restore`, { tag: lastTry.tag });
+    await api.del(`/v1/vms/${id}/snapshots/${encodeURIComponent(lastTry.tag)}`);
+  }, 'Cluster put back to before the last try');
   const dup = list.some((c) => c.label === label);
   return (
     <Card title="Checkpoints" action={<span className="fx-row-actions">
       {asleep ? <Button size="sm" busy={busy === 'wake'} onClick={wakeNow}><Sun size={14} />Wake</Button> : <Button size="sm" busy={busy === 'sleep'} disabled={!running || list.some((c) => c.kind === 'sleep')} onClick={sleepNow}><Moon size={14} />Sleep</Button>}
       <Button size="sm" variant="primary" disabled={!running} onClick={() => { setLabel(checkpointLabelNow(new Date())); setSheet(true); }}><Camera size={14} />Save checkpoint</Button></span>}>
+      {lastTry ? (
+        <div className="kx-undo">
+          <span>A <code>fluxctl kube try</code> saved the cluster {lastTry.created_at ? ago(lastTry.created_at) : 'earlier'}. Undo puts it back as it was, running pods included.</span>
+          <Button size="sm" busy={busy === 'undo'} onClick={undoTry}><RotateCcw size={14} />Undo it</Button>
+        </div>
+      ) : null}
+      {list.length > 1 ? (
+        <ol className="kx-timeline" aria-label="Checkpoints, oldest to newest">
+          {[...list].reverse().map((c) => (
+            <li key={c.tag}>
+              <button type="button" className={`kx-tl-dot kx-tl-${c.kind}`} title={`Go back to ${c.label}`} onClick={() => setConfirm({ kind: 'restore', c })}><span className="kx-tl-label">{c.label}</span><span className="kx-tl-when">{c.created_at ? ago(c.created_at) : ''}</span></button>
+            </li>
+          ))}
+        </ol>
+      ) : null}
       {list.length === 0 ? <p className="fx-muted">No checkpoints. A checkpoint saves the cluster with its memory in about a second, so Restore brings back every object and running pod exactly as they were. {running ? '' : 'Start the cluster to save one.'}</p> : (
         <div className="fx-table-wrap"><table className="fx-table"><thead><tr><th>Checkpoint</th><th>Saved</th><th /></tr></thead><tbody>
           {list.map((c) => (

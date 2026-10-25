@@ -119,3 +119,17 @@
 /* Kubernetes usage cells */
 .kd-use { display: inline-flex; gap: 8px; align-items: center; min-width: 190px; }
 .kd-use .fx-meter { flex: 0 0 64px; }
+
+/* checkpoint timeline: oldest on the left, click a point to go back to it */
+.kx-undo { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; padding: 10px 14px; margin-bottom: 14px; border: 1px solid var(--accent-amber); border-radius: 10px; }
+.kx-timeline { list-style: none; margin: 0 0 16px; padding: 18px 4px 4px; display: flex; gap: 0; overflow-x: auto; position: relative; }
+.kx-timeline li { flex: 0 0 auto; min-width: 110px; position: relative; padding-top: 14px; }
+.kx-timeline li::before { content: ""; position: absolute; top: 5px; left: 0; right: 0; height: 2px; background: var(--hairline-1); }
+.kx-tl-dot { all: unset; cursor: pointer; display: flex; flex-direction: column; gap: 2px; padding: 0 10px 0 0; position: relative; }
+.kx-tl-dot::before { content: ""; position: absolute; top: -14px; left: 0; width: 12px; height: 12px; border-radius: 50%; background: var(--text-tertiary); border: 2px solid var(--bg, transparent); }
+.kx-tl-dot:hover::before, .kx-tl-dot:focus-visible::before { outline: 2px solid var(--text-primary); }
+.kx-tl-auto::before { background: var(--accent-green); }
+.kx-tl-try::before { background: var(--accent-amber); }
+.kx-tl-sleep::before { background: var(--accent-blue, var(--text-secondary)); }
+.kx-tl-label { color: var(--text-primary); font-size: 13px; overflow: hidden; text-overflow: ellipsis; max-width: 150px; }
+.kx-tl-when { color: var(--text-secondary); font-size: 12px; }
