@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Camera, RotateCcw, Trash2 } from 'lucide-react';
+import { Camera, Moon, RotateCcw, Sun, Trash2 } from 'lucide-react';
 import { Button, Card, Field, Pill, Sheet, api, ago, usePoll } from '@fluxvm/ui-core';
 import type { Notify } from '../App';
 import { type KubeCheckpoint, type KubeSnapshot, checkpointLabelNow, checkpointLabelOk, checkpointsOf } from '../lib/kube';
@@ -33,9 +33,22 @@ export function KubeCheckpoints({ cluster, workers, notify }: { cluster: string;
   };
   if (workers) return <Card title="Checkpoints"><p className="fx-muted">This cluster has worker nodes. A checkpoint is a snapshot of one machine, which cannot put nodes on a private network back consistently. Checkpoints work on a cluster made without workers.</p></Card>;
   const running = vm.data?.status === 'running';
+  const asleep = !running && list.some((c) => c.kind === 'sleep');
+  const sleepNow = () => run('sleep', async () => {
+    await api.post(`/v1/vms/${id}/snapshot`, { tag: 'kube-sleep' });
+    await api.post(`/v1/vms/${id}/stop`, {});
+    await vm.refresh();
+  }, `${cluster} is asleep`);
+  const wakeNow = () => run('wake', async () => {
+    await api.post(`/v1/vms/${id}/restore`, { tag: 'kube-sleep' });
+    await api.del(`/v1/vms/${id}/snapshots/${encodeURIComponent('kube-sleep')}`);
+    await vm.refresh();
+  }, `${cluster} is awake`);
   const dup = list.some((c) => c.label === label);
   return (
-    <Card title="Checkpoints" action={<Button size="sm" variant="primary" disabled={!running} onClick={() => { setLabel(checkpointLabelNow(new Date())); setSheet(true); }}><Camera size={14} />Save checkpoint</Button>}>
+    <Card title="Checkpoints" action={<span className="fx-row-actions">
+      {asleep ? <Button size="sm" busy={busy === 'wake'} onClick={wakeNow}><Sun size={14} />Wake</Button> : <Button size="sm" busy={busy === 'sleep'} disabled={!running || list.some((c) => c.kind === 'sleep')} onClick={sleepNow}><Moon size={14} />Sleep</Button>}
+      <Button size="sm" variant="primary" disabled={!running} onClick={() => { setLabel(checkpointLabelNow(new Date())); setSheet(true); }}><Camera size={14} />Save checkpoint</Button></span>}>
       {list.length === 0 ? <p className="fx-muted">No checkpoints. A checkpoint saves the cluster with its memory in about a second, so Restore brings back every object and running pod exactly as they were. {running ? '' : 'Start the cluster to save one.'}</p> : (
         <div className="fx-table-wrap"><table className="fx-table"><thead><tr><th>Checkpoint</th><th>Saved</th><th /></tr></thead><tbody>
           {list.map((c) => (

@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- **Studio: Sleep and Wake buttons on the Checkpoints tab.** Sleep saves the `kube-sleep` checkpoint and stops the machine, the same parking `fluxctl kube sleep` does; Wake restores it. Type-checked and unit tests pass; not click-tested in a browser.
 - **`fluxctl kube up` on a sleeping cluster wakes it** from the sleep checkpoint instead of cold-booting the VM. Proved on a real k3s: `up` on a sleeping cluster took 3 s and the node was Ready.
 - **`fluxctl kube services` also prints a `friendly_url`**, `http://<service>.<namespace>.localhost:<port>`. `*.localhost` resolves to loopback, so
   services are told apart by name. Unit-tested only; not run against a live cluster.
