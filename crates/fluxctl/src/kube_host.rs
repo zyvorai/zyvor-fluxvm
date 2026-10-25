@@ -838,9 +838,118 @@ pub async fn down<A: VmApi>(api: &A, o: &KubeOptions, purge: bool) -> Result<()>
     Ok(())
 }
 
+/// A Service the cluster exposes on a node port.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NodePortService {
+    pub namespace: String,
+    pub name: String,
+    pub port: u16,
+}
+
+/// The NodePort and LoadBalancer services in `kubectl get svc -A -o json`, one entry per node port, sorted.
+pub(crate) fn node_port_services(list: &Value) -> Vec<NodePortService> {
+    let mut out = vec![];
+    for item in list["items"].as_array().into_iter().flatten() {
+        if !matches!(
+            item["spec"]["type"].as_str(),
+            Some("NodePort" | "LoadBalancer")
+        ) {
+            continue;
+        }
+        for p in item["spec"]["ports"].as_array().into_iter().flatten() {
+            if let Some(port) = p["nodePort"].as_u64().and_then(|n| u16::try_from(n).ok()) {
+                out.push(NodePortService {
+                    namespace: item["metadata"]["namespace"].as_str().unwrap_or("").into(),
+                    name: item["metadata"]["name"].as_str().unwrap_or("").into(),
+                    port,
+                });
+            }
+        }
+    }
+    out.sort_by(|a, b| (a.port, &a.namespace, &a.name).cmp(&(b.port, &b.namespace, &b.name)));
+    out
+}
+
+/// The node ports to forward on top of the fixed `--publish` ones: never below 1024, never the API port or a
+/// port already forwarded for another reason, each once. `taken` says whether the Mac already uses a port.
+pub(crate) fn ports_to_open(
+    found: &[NodePortService],
+    fixed: &[(u16, u16)],
+    api_port: u16,
+    taken: impl Fn(u16) -> bool,
+) -> Vec<(u16, u16)> {
+    let mut out: Vec<(u16, u16)> = vec![];
+    for s in found {
+        let p = s.port;
+        if p < 1024
+            || p == api_port
+            || fixed.iter().any(|(h, _)| *h == p)
+            || out.iter().any(|(h, _)| *h == p)
+            || taken(p)
+        {
+            continue;
+        }
+        out.push((p, p));
+    }
+    out
+}
+
+/// `http://127.0.0.1:<port>` for a published node port.
+pub(crate) fn service_url(port: u16) -> String {
+    format!("http://127.0.0.1:{port}")
+}
+
+/// Whether something on the Mac already listens on this loopback port.
+fn port_in_use(port: u16) -> bool {
+    std::net::TcpListener::bind(("127.0.0.1", port)).is_err()
+}
+
+/// Reads the cluster's services through the server VM.
+fn read_services(c: &Cluster) -> Result<Vec<NodePortService>> {
+    let out = ssh(c, "sudo k3s kubectl get svc -A -o json")
+        .output()
+        .context("listing services")?;
+    if !out.status.success() {
+        bail!("listing services failed");
+    }
+    Ok(node_port_services(&serde_json::from_slice(&out.stdout)?))
+}
+
+/// Opens a loopback forward for every NodePort and LoadBalancer service and closes it when the service goes away.
+/// `open` holds the node ports this process forwards now; returns true when the forward was changed.
+async fn publish_services<A: VmApi>(
+    api: &A,
+    o: &KubeOptions,
+    open: &mut Vec<(u16, u16)>,
+) -> Result<bool> {
+    let mut cluster = ensure_vm(api, o).await?;
+    let found = read_services(&cluster)?;
+    let ours = open.clone();
+    let desired = ports_to_open(&found, &cluster.publish, o.api_port, |p| {
+        !ours.iter().any(|(h, _)| *h == p) && port_in_use(p)
+    });
+    if desired == *open {
+        return Ok(false);
+    }
+    for (h, _) in desired.iter().filter(|d| !open.contains(d)) {
+        eprintln!("publishing {}", service_url(*h));
+    }
+    cluster.publish.extend(desired.iter().copied());
+    ensure_forward(o, &cluster)?;
+    *open = desired;
+    Ok(true)
+}
+
 /// `fluxctl kube supervise`: keeps the VM running and the API port answering, for launchd. Never returns.
-pub async fn supervise<A: VmApi>(api: &A, o: &KubeOptions, every: Duration) -> Result<()> {
+/// Unless `auto_publish` is off, it also forwards each NodePort and LoadBalancer service to 127.0.0.1.
+pub async fn supervise<A: VmApi>(
+    api: &A,
+    o: &KubeOptions,
+    every: Duration,
+    auto_publish: bool,
+) -> Result<()> {
     validate(o)?;
+    let mut open: Vec<(u16, u16)> = vec![];
     loop {
         let mut healthy = api_answers(o.api_port)
             && matches!(api.find(&o.name).await, Ok(Some((_, s))) if s == "running");
@@ -849,13 +958,44 @@ pub async fn supervise<A: VmApi>(api: &A, o: &KubeOptions, every: Duration) -> R
                 && matches!(api.find(&worker_name(o, i)).await, Ok(Some((_, s))) if s == "running");
         }
         if !healthy {
+            open.clear();
             match up(api, o).await {
                 Ok(_) => eprintln!("kubernetes is up"),
                 Err(e) => eprintln!("kubernetes is not ready, will retry: {e:#}"),
             }
         }
+        if auto_publish {
+            if let Err(e) = publish_services(api, o, &mut open).await {
+                eprintln!("publishing services, will retry: {e:#}");
+            }
+        }
         tokio::time::sleep(every).await;
     }
+}
+
+/// `fluxctl kube services`: the cluster's node-port services and whether each is reachable on 127.0.0.1.
+pub async fn services<A: VmApi>(api: &A, o: &KubeOptions) -> Result<Value> {
+    let cluster = ensure_vm(api, o).await?;
+    let recorded = std::fs::read_to_string(forwarder_pid(o)).unwrap_or_default();
+    let forwarded = |port: u16| {
+        recorded
+            .lines()
+            .nth(1)
+            .is_some_and(|spec| spec.split('|').any(|f| f == format!("{port}:{port}")))
+    };
+    let items: Vec<Value> = read_services(&cluster)?
+        .iter()
+        .map(|s| {
+            serde_json::json!({
+                "namespace": s.namespace,
+                "name": s.name,
+                "port": s.port,
+                "published": forwarded(s.port),
+                "url": service_url(s.port),
+            })
+        })
+        .collect();
+    Ok(serde_json::json!({ "services": items }))
 }
 
 /// The LaunchAgent that runs `fluxctl kube supervise` at login and restarts it if it exits.
@@ -1857,5 +1997,44 @@ mod tests {
             kube_spec(&offline, "u", "k", vec![])["cloud_init"]["packages"],
             json!([])
         );
+    }
+
+    #[test]
+    fn node_ports_come_from_nodeport_and_loadbalancer_services_only() {
+        let list = serde_json::json!({"items": [
+            {"metadata": {"namespace": "web", "name": "a"}, "spec": {"type": "NodePort",
+                "ports": [{"nodePort": 30080}, {"nodePort": 30443}]}},
+            {"metadata": {"namespace": "web", "name": "lb"}, "spec": {"type": "LoadBalancer",
+                "ports": [{"nodePort": 31000}]}},
+            {"metadata": {"namespace": "web", "name": "c"}, "spec": {"type": "ClusterIP",
+                "ports": [{"port": 80}]}},
+        ]});
+        let ports: Vec<u16> = node_port_services(&list).iter().map(|s| s.port).collect();
+        assert_eq!(ports, vec![30080, 30443, 31000]);
+    }
+
+    #[test]
+    fn ports_to_open_skips_low_reserved_duplicate_and_taken_ports() {
+        let svc = |port| NodePortService {
+            namespace: "n".into(),
+            name: "s".into(),
+            port,
+        };
+        let found = [
+            svc(80),
+            svc(6443),
+            svc(30080),
+            svc(30080),
+            svc(30081),
+            svc(30082),
+        ];
+        let fixed = [(30082, 80)];
+        let got = ports_to_open(&found, &fixed, 6443, |p| p == 30081);
+        assert_eq!(got, vec![(30080, 30080)]);
+    }
+
+    #[test]
+    fn service_url_is_loopback_only() {
+        assert_eq!(service_url(30080), "http://127.0.0.1:30080");
     }
 }

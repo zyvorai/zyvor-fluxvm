@@ -370,6 +370,14 @@ enum KubeCommand {
         /// Seconds between health checks.
         #[arg(long, default_value_t = 30)]
         every: u64,
+        /// Do not forward NodePort and LoadBalancer services to 127.0.0.1.
+        #[arg(long)]
+        no_auto_publish: bool,
+    },
+    /// List the cluster's node-port services and whether each is reachable on 127.0.0.1 (JSON).
+    Services {
+        #[command(flatten)]
+        cluster: KubeArgs,
     },
     /// Copy images into every node's containerd, from the Docker CLI (`docker save`, so build them with `fluxctl docker`
     /// first) or from a `docker save` archive. Use a tag other than `:latest`, which Kubernetes pulls again by default.
@@ -7849,13 +7857,22 @@ async fn kube_command<A: run::VmApi>(api: &A, command: KubeCommand) -> Result<()
         KubeCommand::Down { cluster, purge } => {
             kube_host::down(api, &cluster.options()?, purge).await?
         }
-        KubeCommand::Supervise { cluster, every } => {
+        KubeCommand::Supervise {
+            cluster,
+            every,
+            no_auto_publish,
+        } => {
             kube_host::supervise(
                 api,
                 &cluster.options()?,
                 std::time::Duration::from_secs(every.max(5)),
+                !no_auto_publish,
             )
             .await?;
+        }
+        KubeCommand::Services { cluster } => {
+            let v = kube_host::services(api, &cluster.options()?).await?;
+            println!("{}", serde_json::to_string_pretty(&v)?);
         }
         KubeCommand::Agent { command } => match command {
             KubeAgentCommand::Install(a) => {
