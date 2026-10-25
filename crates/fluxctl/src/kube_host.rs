@@ -964,10 +964,8 @@ pub async fn supervise<A: VmApi>(
                 Err(e) => eprintln!("kubernetes is not ready, will retry: {e:#}"),
             }
         }
-        if auto_publish {
-            if let Err(e) = publish_services(api, o, &mut open).await {
-                eprintln!("publishing services, will retry: {e:#}");
-            }
+        if auto_publish && let Err(e) = publish_services(api, o, &mut open).await {
+            eprintln!("publishing services, will retry: {e:#}");
         }
         tokio::time::sleep(every).await;
     }
