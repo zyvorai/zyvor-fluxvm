@@ -185,3 +185,28 @@ export const actionPath = (
   if ('workload' in what) return `${base}/workloads/${e(what.workload.ns)}/${what.workload.kind}/${e(what.workload.name)}/${what.action}`;
   return `${base}/nodes/${e(what.node)}/${what.action}`;
 };
+
+/** Checkpoint snapshots are tagged `kube-<label>`; the label is lowercase letters, digits and dashes (the same rule as fluxctl). */
+export const checkpointLabelOk = (label: string): boolean => /^[a-z0-9]([a-z0-9-]{0,38}[a-z0-9])?$/.test(label);
+
+export type KubeSnapshot = { tag: string; created_at?: string | null; size_bytes?: number; has_memory?: boolean };
+export type KubeCheckpoint = { label: string; tag: string; created_at: string | null; memory: boolean; kind: 'sleep' | 'auto' | 'try' | 'manual' };
+
+/** The checkpoints among a VM's snapshots, newest first. The `sleep` one is how a sleeping cluster is parked, `try-` and `auto-` are made by fluxctl. */
+export function checkpointsOf(snaps: KubeSnapshot[]): KubeCheckpoint[] {
+  return snaps
+    .filter((s) => s.tag.startsWith('kube-') && checkpointLabelOk(s.tag.slice(5)))
+    .map((s) => {
+      const label = s.tag.slice(5);
+      const kind = label === 'sleep' ? 'sleep' : label.startsWith('auto-') ? 'auto' : label.startsWith('try-') ? 'try' : 'manual';
+      return { label, tag: s.tag, created_at: s.created_at ?? null, memory: !!s.has_memory, kind } as KubeCheckpoint;
+    })
+    .sort((a, b) => (b.created_at ?? '').localeCompare(a.created_at ?? ''));
+}
+
+/** A label for a checkpoint made now, such as `studio-20261025-1030`. */
+export const checkpointLabelNow = (now: Date): string => `studio-${now.toISOString().slice(0, 16).replace(/[-:T]/g, '').replace(/^(\d{8})(\d{4})$/, '$1-$2')}`;
+
+/** Where a NodePort or LoadBalancer service answers on this Mac once `fluxctl kube supervise` has published it (loopback only). */
+export const serviceUrls = (s: Pick<KubeService, 'type' | 'ports'>): string[] =>
+  s.type === 'NodePort' || s.type === 'LoadBalancer' ? s.ports.filter((p) => p.node_port != null && p.node_port >= 1024).map((p) => `http://127.0.0.1:${p.node_port}`) : [];

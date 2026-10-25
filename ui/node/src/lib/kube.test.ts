@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { type KubeEvent, type KubePod, type Workloads, ageOf, eventTone, filterEvents, filterPods, fmtCpu, fmtMem, inNamespace, kubeProblem, namespacesOf, namespacesOfAll, namespacesOfEvents, podTone, portText, readyTone, shortImage, summarize, usageTone, actionPath, actionToast, canScale, clampReplicas } from './kube';
+import { type KubeEvent, type KubePod, type Workloads, ageOf, eventTone, filterEvents, filterPods, fmtCpu, fmtMem, inNamespace, kubeProblem, namespacesOf, namespacesOfAll, namespacesOfEvents, podTone, portText, readyTone, shortImage, summarize, usageTone, actionPath, actionToast, canScale, clampReplicas, checkpointLabelNow, checkpointLabelOk, checkpointsOf, serviceUrls } from './kube';
 
 const pod = (name: string, status: string, over: Partial<KubePod> = {}): KubePod => ({
   namespace: 'default', name, status, phase: null, ready: '1/1', restarts: 0, node: 'n1', pod_ip: '10.42.0.5', created: null, ...over,
@@ -128,5 +128,34 @@ describe('cluster actions', () => {
     expect(actionToast('web', 'scaled', 3)).toBe('web scaled to 3');
     expect(actionToast('web-1', 'deleted')).toBe('web-1 deleted');
     expect(actionToast('n1', 'uncordoned')).toBe('n1 uncordoned');
+  });
+});
+
+describe('checkpoints', () => {
+  it('accepts only fluxctl-style labels', () => {
+    for (const ok of ['a', 'before-upgrade', 'v1-2']) expect(checkpointLabelOk(ok)).toBe(true);
+    for (const bad of ['', '-a', 'a-', 'A', 'a b', 'a/b', 'x'.repeat(41)]) expect(checkpointLabelOk(bad)).toBe(false);
+  });
+  it('keeps only kube- snapshots, newest first, with their kind', () => {
+    const got = checkpointsOf([
+      { tag: 'manual', created_at: '2026-10-25T09:00:00Z' },
+      { tag: 'kube-old', created_at: '2026-10-25T08:00:00Z', has_memory: true },
+      { tag: 'kube-sleep', created_at: '2026-10-25T10:00:00Z' },
+      { tag: 'kube-try-20261025', created_at: '2026-10-25T09:30:00Z' },
+      { tag: 'kube-Bad', created_at: '2026-10-25T11:00:00Z' },
+    ]);
+    expect(got.map((c) => `${c.label}:${c.kind}`)).toEqual(['sleep:sleep', 'try-20261025:try', 'old:manual']);
+    expect(got[2].memory).toBe(true);
+  });
+  it('makes a valid label for now', () => {
+    expect(checkpointLabelOk(checkpointLabelNow(new Date('2026-10-25T10:30:00Z')))).toBe(true);
+  });
+});
+
+describe('serviceUrls', () => {
+  const port = (node_port: number | null) => ({ name: null, protocol: 'TCP', port: 80, target_port: 80, node_port });
+  it('lists loopback urls for node ports of 1024 and up only', () => {
+    expect(serviceUrls({ type: 'NodePort', ports: [port(30080), port(null), port(80)] })).toEqual(['http://127.0.0.1:30080']);
+    expect(serviceUrls({ type: 'ClusterIP', ports: [port(30080)] })).toEqual([]);
   });
 });
