@@ -37,6 +37,7 @@ mod fleet_cli;
 mod fleet_client;
 mod guard_cmd;
 mod infer;
+mod kube_chaos;
 mod kube_checkpoint;
 mod kube_host;
 mod launch_agent;
@@ -402,6 +403,24 @@ enum KubeCommand {
         /// The command and its arguments, after `--`: passes on exit code 0.
         #[arg(last = true, required = true)]
         command: Vec<String>,
+    },
+    /// Break the cluster on purpose, see whether your app copes, and put it back: `fluxctl kube chaos kill-pod --check "curl -fs localhost:30080"`.
+    /// It saves a checkpoint first and restores it at the end (unless `--no-restore`).
+    Chaos {
+        #[command(flatten)]
+        cluster: KubeArgs,
+        /// What to break: delete a random pod, stop k3s (the control plane and kubelet), or fill the disk.
+        #[arg(value_enum)]
+        scenario: kube_chaos::Scenario,
+        /// Seconds to leave it broken before checking.
+        #[arg(long, default_value_t = 20)]
+        hold: u64,
+        /// A command run after the hold; exit 0 means the app coped. KUBECONFIG is set.
+        #[arg(long)]
+        check: Option<String>,
+        /// Leave the cluster as the failure left it, after undoing the fault where it can be undone, instead of restoring the checkpoint.
+        #[arg(long)]
+        no_restore: bool,
     },
     /// Put the cluster back to before the last `kube try`, and forget that checkpoint (run it again to go one step further back).
     Undo {
@@ -7938,6 +7957,27 @@ async fn kube_command<A: run::VmApi>(api: &A, command: KubeCommand) -> Result<()
             let (summary, ok) =
                 kube_checkpoint::matrix(api, &cluster.options()?, runs, &command).await?;
             println!("{summary}");
+            if !ok {
+                std::process::exit(1);
+            }
+        }
+        KubeCommand::Chaos {
+            cluster,
+            scenario,
+            hold,
+            check,
+            no_restore,
+        } => {
+            let (report, ok) = kube_chaos::run(
+                api,
+                &cluster.options()?,
+                scenario,
+                hold,
+                check.as_deref(),
+                no_restore,
+            )
+            .await?;
+            println!("{report}");
             if !ok {
                 std::process::exit(1);
             }
