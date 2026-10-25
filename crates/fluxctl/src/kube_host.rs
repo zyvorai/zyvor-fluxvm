@@ -175,7 +175,7 @@ pub fn k3s_arg_ok(a: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || b"-_=./:,@+".contains(&c))
 }
 
-fn validate(o: &KubeOptions) -> Result<()> {
+pub(crate) fn validate(o: &KubeOptions) -> Result<()> {
     if !name_ok(&o.name) {
         bail!(
             "--name {:?} must be 1 to 40 lowercase letters, digits or dashes, not starting or ending with a dash",
@@ -649,7 +649,10 @@ fn private_ip(c: &Cluster) -> Result<String> {
 }
 
 /// The worker VMs that exist, by name, id and status.
-async fn worker_vms<A: VmApi>(api: &A, o: &KubeOptions) -> Result<Vec<(String, Uuid, String)>> {
+pub(crate) async fn worker_vms<A: VmApi>(
+    api: &A,
+    o: &KubeOptions,
+) -> Result<Vec<(String, Uuid, String)>> {
     let mut found = vec![];
     for i in 1..=MAX_WORKERS {
         let name = worker_name(o, i);
@@ -802,6 +805,11 @@ pub async fn status<A: VmApi>(api: &A, o: &KubeOptions) -> Result<Value> {
         "kubeconfig_exists": kubeconfig.exists(),
         "env": env_line(&kubeconfig),
     }))
+}
+
+/// Stops the supervised SSH forward of the API port, if one is recorded and still running.
+pub(crate) fn stop_forward(o: &KubeOptions) {
+    dh::stop_recorded_ssh(&forwarder_pid(o), &api_needle());
 }
 
 /// `fluxctl kube down`: stop the forward and the VMs; `purge` also deletes them, the cluster's state and the kubeconfig.
