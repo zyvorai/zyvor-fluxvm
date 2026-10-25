@@ -374,6 +374,16 @@ enum KubeCommand {
         #[arg(long)]
         no_auto_publish: bool,
     },
+    /// Save the running cluster and stop its VM, so it costs no CPU or memory. Single-node clusters only.
+    Sleep {
+        #[command(flatten)]
+        cluster: KubeArgs,
+    },
+    /// Bring a sleeping cluster back as it was. `kube supervise` does this by itself on the first kubectl call.
+    Wake {
+        #[command(flatten)]
+        cluster: KubeArgs,
+    },
     /// List the cluster's node-port services and whether each is reachable on 127.0.0.1 (JSON).
     Services {
         #[command(flatten)]
@@ -7869,6 +7879,15 @@ async fn kube_command<A: run::VmApi>(api: &A, command: KubeCommand) -> Result<()
                 !no_auto_publish,
             )
             .await?;
+        }
+        KubeCommand::Sleep { cluster } => {
+            println!(
+                "{}",
+                kube_checkpoint::sleep(api, &cluster.options()?).await?
+            );
+        }
+        KubeCommand::Wake { cluster } => {
+            println!("{}", kube_checkpoint::wake(api, &cluster.options()?).await?);
         }
         KubeCommand::Services { cluster } => {
             let v = kube_host::services(api, &cluster.options()?).await?;
