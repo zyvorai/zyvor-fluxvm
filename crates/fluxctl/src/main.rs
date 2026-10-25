@@ -390,6 +390,13 @@ enum KubeCommand {
         /// Do not forward NodePort and LoadBalancer services to 127.0.0.1.
         #[arg(long)]
         no_auto_publish: bool,
+        /// Save a checkpoint this often while the cluster runs: seconds, or with a suffix s, m, h, d (`1h`). Off by default.
+        /// Single-node clusters only; they are named `auto-<time>`.
+        #[arg(long, value_parser = parse_age_secs)]
+        auto_checkpoint: Option<u64>,
+        /// How many automatic checkpoints to keep; older ones are deleted.
+        #[arg(long, default_value_t = 6)]
+        keep_auto: usize,
     },
     /// Save the running cluster and stop its VM, so it costs no CPU or memory. Single-node clusters only.
     Sleep {
@@ -7901,12 +7908,18 @@ async fn kube_command<A: run::VmApi>(api: &A, command: KubeCommand) -> Result<()
             cluster,
             every,
             no_auto_publish,
+            auto_checkpoint,
+            keep_auto,
         } => {
+            if keep_auto == 0 {
+                anyhow::bail!("--keep-auto must be at least 1");
+            }
             kube_host::supervise(
                 api,
                 &cluster.options()?,
                 std::time::Duration::from_secs(every.max(5)),
                 !no_auto_publish,
+                auto_checkpoint.map(|s| (std::time::Duration::from_secs(s.max(60)), keep_auto)),
             )
             .await?;
         }

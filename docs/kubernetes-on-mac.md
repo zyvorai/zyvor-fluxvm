@@ -207,6 +207,13 @@ so running `undo` again goes one step further back. The command's exit code is p
 checkpoints. Put cluster flags such as `--name` before the `--`; everything after it is the command. Single-node clusters only.
 On a real cluster, deleting a deployment through `try` and then `undo` brought back the deployment and its original pod (save 1.5 s, undo 12.5 s).
 
+## Automatic checkpoints
+
+`fluxctl kube supervise --auto-checkpoint 1h --keep-auto 6` saves a checkpoint named `auto-<time>` every hour while the cluster runs and
+deletes the oldest beyond the newest 6. A stopped or sleeping cluster is skipped. Each one takes about a second and costs little disk until the
+cluster changes, so a bad hour is one `fluxctl kube restore auto-<time>` away (`kube checkpoints` lists them). The shortest interval is
+one minute. Off by default; single-node clusters only.
+
 ## Sleep and wake
 
 `fluxctl kube sleep` saves the running cluster (a checkpoint named `sleep`) and stops its VM, so it costs no CPU and little memory.

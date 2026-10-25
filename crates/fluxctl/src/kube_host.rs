@@ -951,9 +951,11 @@ pub async fn supervise<A: VmApi>(
     o: &KubeOptions,
     every: Duration,
     auto_publish: bool,
+    auto_checkpoint: Option<(Duration, usize)>,
 ) -> Result<()> {
     validate(o)?;
     let mut open: Vec<(u16, u16)> = vec![];
+    let mut last_auto = Instant::now();
     loop {
         if crate::kube_checkpoint::is_asleep(api, o).await {
             open.clear();
@@ -975,6 +977,17 @@ pub async fn supervise<A: VmApi>(
         }
         if auto_publish && let Err(e) = publish_services(api, o, &mut open).await {
             eprintln!("publishing services, will retry: {e:#}");
+        }
+        if let Some((gap, keep)) = auto_checkpoint
+            && healthy_enough(api, o).await
+            && last_auto.elapsed() >= gap
+        {
+            last_auto = Instant::now();
+            match crate::kube_checkpoint::auto_checkpoint(api, o, keep).await {
+                Ok(Some(m)) => eprintln!("{m}"),
+                Ok(None) => {}
+                Err(e) => eprintln!("automatic checkpoint failed, will retry later: {e:#}"),
+            }
         }
         tokio::time::sleep(every).await;
     }
@@ -1002,6 +1015,11 @@ async fn wake_on_demand<A: VmApi>(api: &A, o: &KubeOptions, every: Duration) {
             let _ = tokio::io::copy_bidirectional(&mut client, &mut api_side).await;
         });
     }
+}
+
+/// The API answers and the server VM is running: a good moment to take a checkpoint.
+async fn healthy_enough<A: VmApi>(api: &A, o: &KubeOptions) -> bool {
+    api_answers(o.api_port) && matches!(api.find(&o.name).await, Ok(Some((_, s))) if s == "running")
 }
 
 /// `fluxctl kube services`: the cluster's node-port services and whether each is reachable on 127.0.0.1.

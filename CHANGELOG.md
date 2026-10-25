@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- **`fluxctl kube supervise --auto-checkpoint 1h --keep-auto 6`: a rolling time machine.** While the cluster runs, supervise saves an `auto-<time>`
+  checkpoint on that interval and deletes the oldest beyond the newest N; stopped or sleeping clusters are skipped. Proved on a real k3s with a
+  1 minute interval and `--keep-auto 2`: a checkpoint (1.1 to 1.8 s each) appeared every minute and the list stayed at two. Off by default.
 - **`fluxctl kube try -- COMMAND` and `kube undo`.** `try` saves a checkpoint, runs your command (a `kubectl apply`, a helm upgrade) against the
   cluster and keeps the checkpoint; `undo` puts the cluster back as it was, running pods included, and forgets that checkpoint, so a second
   `undo` goes one step further back. On a real k3s: deleted a deployment through `try`, `undo` brought it back (save 1.5 s, undo 12.5 s).
