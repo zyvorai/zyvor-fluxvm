@@ -207,6 +207,13 @@ so running `undo` again goes one step further back. The command's exit code is p
 checkpoints. Put cluster flags such as `--name` before the `--`; everything after it is the command. Single-node clusters only.
 On a real cluster, deleting a deployment through `try` and then `undo` brought back the deployment and its original pod (save 1.5 s, undo 12.5 s).
 
+## Break it on purpose
+
+`fluxctl kube chaos SCENARIO --check 'COMMAND'` saves a checkpoint, causes a fault, waits `--hold` seconds (20 by default), runs your check
+(exit 0 means the app coped, `KUBECONFIG` is set) and then restores the checkpoint. Scenarios: `kill-pod` (a random pod outside
+`kube-system`), `stop-k3s` (the API server, scheduler and kubelet go away) and `fill-disk` (the disk 90% full). The exit code is 1 when the
+check fails. `--no-restore` undoes the fault where it can and leaves the cluster as it is.
+
 ## A clean start every time
 
 `fluxctl kube golden` marks the cluster as it is now as the known-good state. `fluxctl kube reset` puts it back in about 8 seconds, and the

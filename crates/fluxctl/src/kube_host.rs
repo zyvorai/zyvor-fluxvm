@@ -495,6 +495,30 @@ pub(crate) async fn resync_clock<A: VmApi>(api: &A, o: &KubeOptions) {
     let _ = ssh(&cluster, "sudo systemctl restart systemd-timesyncd").output();
 }
 
+/// Runs a shell command in the cluster's server VM and returns its trimmed output, or the error text. Unlike `ensure_vm` it does
+/// not wait for Ready nodes, so it works while the control plane is down.
+pub(crate) async fn guest_sh<A: VmApi>(api: &A, o: &KubeOptions, script: &str) -> Result<String> {
+    let Some((id, _)) = api.find(&o.name).await? else {
+        bail!("no cluster named {}", o.name);
+    };
+    let Some(ip) = api.guest_ip(id).await? else {
+        bail!("{} has no address yet", o.name);
+    };
+    let home = dh::home()?;
+    let user = dh::user_name(&dh::EngineOptions {
+        user: o.user.clone(),
+        ..Default::default()
+    })?;
+    let (_, identity) = run::ssh_key(&home)?;
+    let mut cmd = run::ssh_base(&ip, &user, &identity);
+    cmd.args(["-o", "BatchMode=yes", "-o", "ConnectTimeout=5", script]);
+    let out = cmd.output().context("running a command in the server VM")?;
+    if !out.status.success() {
+        bail!("{}", String::from_utf8_lossy(&out.stderr).trim());
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_owned())
+}
+
 /// Finds or creates one node's VM and starts it if stopped.
 async fn ensure_one<A: VmApi>(
     api: &A,

@@ -52,7 +52,10 @@ pub fn label_of(tag: &str) -> Option<&str> {
 const WORKERS_REFUSAL: &str = "this cluster has worker nodes. A checkpoint is a snapshot of one VM, and workers are separate VMs on a private network that it cannot put back consistently. Checkpoints work on a cluster made without --workers";
 
 /// The server VM of a single-node cluster, running or not.
-async fn server<A: VmApi>(api: &A, o: &kube_host::KubeOptions) -> Result<(Uuid, String)> {
+pub(crate) async fn server<A: VmApi>(
+    api: &A,
+    o: &kube_host::KubeOptions,
+) -> Result<(Uuid, String)> {
     kube_host::validate(o)?;
     if !kube_host::worker_vms(api, o).await?.is_empty() {
         bail!(WORKERS_REFUSAL);
@@ -281,7 +284,7 @@ async fn labels_of<A: VmApi>(api: &A, id: Uuid) -> Result<Vec<String>> {
 }
 
 /// Runs a command with `KUBECONFIG` pointing at this cluster and waits for it.
-async fn run_command(
+pub(crate) async fn run_command(
     o: &kube_host::KubeOptions,
     program: &str,
     args: &[String],
