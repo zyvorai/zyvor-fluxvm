@@ -48,6 +48,7 @@ mod agent_session_transfer;
 mod agent_sessions;
 mod docker_view;
 mod kube;
+mod kube_actions;
 mod kube_flows;
 mod kube_metrics;
 mod kube_pod;
@@ -952,6 +953,22 @@ pub fn router(manager: Arc<VmManager>) -> Router {
         .route(
             "/v1/kube/{name}/pods/{ns}/{pod}/exec-ticket",
             post(kube_pod::exec_ticket),
+        )
+        .route(
+            "/v1/kube/{name}/pods/{ns}/{pod}/delete",
+            post(kube_actions::delete_pod),
+        )
+        .route(
+            "/v1/kube/{name}/workloads/{ns}/{kind}/{wname}/scale",
+            post(kube_actions::scale),
+        )
+        .route(
+            "/v1/kube/{name}/workloads/{ns}/{kind}/{wname}/restart",
+            post(kube_actions::restart),
+        )
+        .route(
+            "/v1/kube/{name}/nodes/{node}/{what}",
+            post(kube_actions::cordon),
         )
         .route("/console/kube/ws/{ticket}", get(kube_pod::exec_ws))
         .route("/v1/oci/images/{what}", delete(remove_oci_image))

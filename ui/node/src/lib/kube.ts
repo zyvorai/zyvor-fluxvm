@@ -25,6 +25,8 @@ export type KubeNode = {
   roles: string[];
   version: string | null;
   internal_ip: string | null;
+  /** Cordoned: no new pods are placed on it. */
+  unschedulable?: boolean;
   os: string | null;
   cpu: string | null;
   memory_mib: number | null;
@@ -158,3 +160,28 @@ export const filterEvents = (events: KubeEvent[], f: EventFilter): KubeEvent[] =
 };
 
 export const namespacesOfEvents = (events: KubeEvent[]): string[] => [...new Set(events.map((e) => e.namespace).filter((n): n is string => !!n))].sort();
+
+/** The workload kinds the actions accept, as the API spells them in a path. */
+export type WorkloadKind = 'deployments' | 'statefulsets' | 'daemonsets';
+
+/** Scaling goes from 0 to 100 replicas, and a DaemonSet has none to set. */
+export const MAX_REPLICAS = 100;
+export const canScale = (kind: WorkloadKind): boolean => kind !== 'daemonsets';
+export const clampReplicas = (n: number): number => (Number.isFinite(n) ? Math.min(MAX_REPLICAS, Math.max(0, Math.round(n))) : 0);
+
+export type KubeVerb = 'deleted' | 'scaled' | 'restarted' | 'cordoned' | 'uncordoned';
+
+/** The toast for an action the daemon accepted: `web scaled to 3`, `web-7d restarted`. */
+export const actionToast = (subject: string, verb: KubeVerb, replicas?: number): string => (verb === 'scaled' && replicas != null ? `${subject} scaled to ${replicas}` : `${subject} ${verb}`);
+
+/** The daemon path of an action on a workload, a pod or a node; every part is escaped. */
+export const actionPath = (
+  cluster: string,
+  what: { pod: { ns: string; name: string } } | { workload: { ns: string; kind: WorkloadKind; name: string }; action: 'scale' | 'restart' } | { node: string; action: 'cordon' | 'uncordon' },
+): string => {
+  const e = encodeURIComponent;
+  const base = `/v1/kube/${e(cluster)}`;
+  if ('pod' in what) return `${base}/pods/${e(what.pod.ns)}/${e(what.pod.name)}/delete`;
+  if ('workload' in what) return `${base}/workloads/${e(what.workload.ns)}/${what.workload.kind}/${e(what.workload.name)}/${what.action}`;
+  return `${base}/nodes/${e(what.node)}/${what.action}`;
+};

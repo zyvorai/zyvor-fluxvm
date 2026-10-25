@@ -1,15 +1,17 @@
 import { useEffect, useMemo, useState } from 'react';
-import { ScrollText, SquareTerminal } from 'lucide-react';
+import { Ban, CircleCheck, ScrollText, SquareTerminal, Trash2 } from 'lucide-react';
+import type { Notify } from '../App';
+import { kubeAct } from '../lib/kubeAct';
 import { KubeEvents } from './KubeEvents';
 import { KubeGraph } from './KubeGraph';
 import { KubeWorkloads } from './KubeWorkloads';
 import { PodWindow, type PodTab } from './PodWindow';
-import { Button, Card, EmptyState, Hero, Meter, Pill, Skeleton, Tabs, api, usePoll } from '@fluxvm/ui-core';
-import { type KubeClusterItem, type KubeDetail, type KubePod, ageOf, filterPods, fmtCpu, fmtMem, kubeProblem, namespacesOf, podTone, summarize } from '../lib/kube';
+import { Button, Card, EmptyState, Hero, Meter, Pill, Sheet, Skeleton, Tabs, api, usePoll } from '@fluxvm/ui-core';
+import { type KubeClusterItem, type KubeDetail, type KubePod, actionPath, ageOf, filterPods, fmtCpu, fmtMem, kubeProblem, namespacesOf, podTone, summarize } from '../lib/kube';
 
 const enc = encodeURIComponent;
 
-export function KubernetesPage() {
+export function KubernetesPage({ notify }: { notify: Notify }) {
   const clusters = usePoll(async () => (await api.get<{ items: KubeClusterItem[] }>('/v1/kube')).items ?? [], 8000);
   const items = clusters.data ?? [];
   const [picked, setPicked] = useState('');
@@ -20,6 +22,14 @@ export function KubernetesPage() {
   const [q, setQ] = useState('');
   const [now, setNow] = useState(Date.now());
   const [open, setOpen] = useState<{ pod: KubePod; tab: PodTab } | null>(null);
+  const [confirm, setConfirm] = useState<KubePod | null>(null);
+  const [busy, setBusy] = useState('');
+  const act = async (key: string, path: string, subject: string, verb: 'deleted' | 'cordoned' | 'uncordoned') => {
+    setBusy(key);
+    if (await kubeAct(path, subject, verb, notify)) await detail.refresh();
+    setBusy('');
+    setConfirm(null);
+  };
   useEffect(() => {
     const t = setInterval(() => setNow(Date.now()), 5000);
     return () => clearInterval(t);
@@ -32,7 +42,7 @@ export function KubernetesPage() {
 
   return (
     <>
-      <Hero eyebrow="Kubernetes" title="Clusters on this host," accent="pods included." lede="k3s clusters made with fluxctl kube. Read-only: this page shows what is running; use kubectl to change it." />
+      <Hero eyebrow="Kubernetes" title="Clusters on this host," accent="pods included." lede="k3s clusters made with fluxctl kube. Scale, restart, cordon and delete from here; use kubectl for the rest." />
       {clusters.loading && !items.length ? (
         <Skeleton h={120} />
       ) : items.length === 0 ? (
@@ -50,7 +60,7 @@ export function KubernetesPage() {
           ) : view === 'traffic' ? (
             <KubeGraph cluster={current} />
           ) : view === 'workloads' ? (
-            <KubeWorkloads cluster={current} />
+            <KubeWorkloads cluster={current} notify={notify} />
           ) : view === 'events' ? (
             <KubeEvents cluster={current} />
           ) : !d ? (
@@ -59,17 +69,22 @@ export function KubernetesPage() {
             <>
               <Card title="Nodes">
                 {d.metrics === false ? <p className="fx-muted">No CPU or memory numbers: the cluster's metrics-server is not answering (it may still be starting).</p> : null}
-                <div className="fx-table-wrap"><table className="fx-table"><thead><tr><th>Node</th><th>Status</th><th>Roles</th><th>Version</th><th>Address</th><th>CPU</th><th>Memory</th><th>Age</th></tr></thead><tbody>
+                <div className="fx-table-wrap"><table className="fx-table"><thead><tr><th>Node</th><th>Status</th><th>Roles</th><th>Version</th><th>Address</th><th>CPU</th><th>Memory</th><th>Age</th><th /></tr></thead><tbody>
                   {d.nodes.map((n) => (
                     <tr key={n.name}>
                       <td className="vm-name">{n.name}</td>
-                      <td><Pill tone={n.ready ? 'ok' : 'bad'}>{n.ready ? 'Ready' : 'NotReady'}</Pill></td>
+                      <td><Pill tone={n.ready ? 'ok' : 'bad'}>{n.ready ? 'Ready' : 'NotReady'}</Pill>{n.unschedulable ? <> <Pill tone="warn">Cordoned</Pill></> : null}</td>
                       <td className="fx-muted">{n.roles.join(', ')}</td>
                       <td className="fx-muted fx-mono">{n.version ?? '—'}</td>
                       <td className="fx-mono">{n.internal_ip ?? '—'}</td>
                       <td>{n.cpu_percent != null ? <span className="kd-use"><Meter value={n.cpu_percent} label={`CPU of ${n.name}`} /><span className="fx-mono">{n.cpu_percent.toFixed(0)}%</span><span className="fx-muted"> of {n.cpu} cores</span></span> : <span className="fx-muted">{n.cpu ? `${n.cpu} cores` : '—'}</span>}</td>
                       <td>{n.mem_percent != null ? <span className="kd-use"><Meter value={n.mem_percent} label={`Memory of ${n.name}`} /><span className="fx-mono">{n.mem_percent.toFixed(0)}%</span><span className="fx-muted"> of {fmtMem(n.memory_mib ?? undefined)}</span></span> : <span className="fx-muted">{n.memory_mib != null ? fmtMem(n.memory_mib) : '—'}</span>}</td>
                       <td className="fx-muted">{ageOf(n.created, now)}</td>
+                      <td><span className="fx-row-actions">
+                        <Button size="sm" variant="ghost" aria-label={`${n.unschedulable ? 'Uncordon' : 'Cordon'} ${n.name}`} disabled={!!busy} busy={busy === `node/${n.name}`} onClick={() => void act(`node/${n.name}`, actionPath(current, { node: n.name, action: n.unschedulable ? 'uncordon' : 'cordon' }), n.name, n.unschedulable ? 'uncordoned' : 'cordoned')}>
+                          {n.unschedulable ? <CircleCheck size={14} /> : <Ban size={14} />}{n.unschedulable ? 'Uncordon' : 'Cordon'}
+                        </Button>
+                      </span></td>
                     </tr>
                   ))}
                 </tbody></table></div>
@@ -105,6 +120,7 @@ export function KubernetesPage() {
                         <td><span className="fx-row-actions">
                           <Button size="sm" variant="ghost" onClick={() => setOpen({ pod: p, tab: 'logs' })}><ScrollText size={14} />Logs</Button>
                           <Button size="sm" variant="ghost" onClick={() => setOpen({ pod: p, tab: 'shell' })} disabled={p.phase !== 'Running'}><SquareTerminal size={14} />Shell</Button>
+                          <Button size="sm" variant="ghost" aria-label={`Delete ${p.name}`} disabled={!!busy} onClick={() => setConfirm(p)}><Trash2 size={14} />Delete</Button>
                         </span></td>
                       </tr>
                     ))}
@@ -116,6 +132,13 @@ export function KubernetesPage() {
           )}
         </>
       )}
+      <Sheet open={!!confirm} title="Delete pod" onClose={() => setConfirm(null)}>
+        <p>Delete <b>{confirm?.name}</b>? Its controller, if it has one, starts a new pod; a pod made by hand is gone for good.</p>
+        <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 16 }}>
+          <Button variant="ghost" onClick={() => setConfirm(null)}>Cancel</Button>
+          <Button variant="danger" busy={!!confirm && busy === `pod/${confirm.namespace}/${confirm.name}`} onClick={() => confirm && void act(`pod/${confirm.namespace}/${confirm.name}`, actionPath(current, { pod: { ns: confirm.namespace, name: confirm.name } }), confirm.name, 'deleted')}>Delete</Button>
+        </div>
+      </Sheet>
       {open ? <PodWindow cluster={current} pod={open.pod} tab={open.tab} onClose={() => setOpen(null)} /> : null}
     </>
   );

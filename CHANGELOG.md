@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- **Studio: scale, restart, cordon and delete from the Kubernetes page.** Deployments and StatefulSets get **+** and **−** (0 to 100
+  replicas), every workload gets **Restart** (a rollout restart), pods get **Delete** (with a confirmation) and nodes get **Cordon** or
+  **Uncordon**, each with a spinner and a toast. Four new admin-only routes under `/v1/kube/{cluster}/`; the page's old "read-only" wording is gone.
 - **`fluxctl docker` and `fluxctl kube`: a stalled first boot says why.** A VM that never reports an address now says its first boot may be
   stuck on cloud-init installing packages (no internet, or a slow link), points at `fluxctl serial NAME`, and says the command can be run again to
   pick the VM up. When the guest answers ssh but Docker or Kubernetes is not ready in time, the error now carries what cloud-init says
