@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- **`fluxctl kube supervise` publishes NodePort and LoadBalancer services to 127.0.0.1 by itself.** Create a service, `curl 127.0.0.1:<nodePort>`
+  works; delete it and the forward goes. Loopback only; ports below 1024, the API port and ports already in use on the Mac are skipped.
+  `fluxctl kube services` lists them (JSON). `--no-auto-publish` turns it off. Proved on a real k3s: nginx NodePort answered 200 from the Mac
+  with no flags and refused after the service was deleted.
 - **`fluxctl kube checkpoint`, `restore`, `checkpoints`, `checkpoint-rm`: save a running cluster and put it back.** A checkpoint is a snapshot of
   the server VM with its memory, so `restore` brings back every object and running pod exactly as they were, then waits for the node and
   re-opens the API forward. On a real one-node cluster saving took 1.0 s and restoring 12.8 s. Single-node clusters only: a cluster with
