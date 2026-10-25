@@ -381,6 +381,28 @@ enum KubeCommand {
         #[arg(last = true, required = true)]
         command: Vec<String>,
     },
+    /// Mark the cluster as it is now as the known-good state (replaces the previous one). `fluxctl kube reset` returns to it.
+    Golden {
+        #[command(flatten)]
+        cluster: KubeArgs,
+    },
+    /// Put the cluster back to the golden state in seconds; the golden state is kept for the next reset.
+    Reset {
+        #[command(flatten)]
+        cluster: KubeArgs,
+    },
+    /// Run a command several times, resetting to the golden state before each run, and report which runs failed: `fluxctl kube matrix --runs 10 -- ./e2e.sh`.
+    /// Exits non-zero if any run failed.
+    Matrix {
+        #[command(flatten)]
+        cluster: KubeArgs,
+        /// How many runs.
+        #[arg(long, default_value_t = 5)]
+        runs: usize,
+        /// The command and its arguments, after `--`: passes on exit code 0.
+        #[arg(last = true, required = true)]
+        command: Vec<String>,
+    },
     /// Put the cluster back to before the last `kube try`, and forget that checkpoint (run it again to go one step further back).
     Undo {
         #[command(flatten)]
@@ -7895,6 +7917,30 @@ async fn kube_command<A: run::VmApi>(api: &A, command: KubeCommand) -> Result<()
                 "{}",
                 kube_checkpoint::bisect(api, &cluster.options()?, &command, stay).await?
             );
+        }
+        KubeCommand::Golden { cluster } => {
+            println!(
+                "{}",
+                kube_checkpoint::golden(api, &cluster.options()?).await?
+            );
+        }
+        KubeCommand::Reset { cluster } => {
+            println!(
+                "{}",
+                kube_checkpoint::reset(api, &cluster.options()?).await?
+            );
+        }
+        KubeCommand::Matrix {
+            cluster,
+            runs,
+            command,
+        } => {
+            let (summary, ok) =
+                kube_checkpoint::matrix(api, &cluster.options()?, runs, &command).await?;
+            println!("{summary}");
+            if !ok {
+                std::process::exit(1);
+            }
         }
         KubeCommand::Undo { cluster } => {
             println!("{}", kube_checkpoint::undo(api, &cluster.options()?).await?);

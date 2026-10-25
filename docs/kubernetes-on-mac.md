@@ -207,6 +207,13 @@ so running `undo` again goes one step further back. The command's exit code is p
 checkpoints. Put cluster flags such as `--name` before the `--`; everything after it is the command. Single-node clusters only.
 On a real cluster, deleting a deployment through `try` and then `undo` brought back the deployment and its original pod (save 1.5 s, undo 12.5 s).
 
+## A clean start every time
+
+`fluxctl kube golden` marks the cluster as it is now as the known-good state. `fluxctl kube reset` puts it back in about 8 seconds, and the
+golden state stays for the next reset. `fluxctl kube matrix --runs 10 -- ./e2e.sh` resets before each run, runs the command and prints, for
+example, `7 of 10 runs passed; failed: 2, 5, 9` (exit code 1 if any failed). A test that fails some of the time is flaky; one that fails every
+time is broken. After the last run the cluster is left as that run left it.
+
 ## Find when it broke
 
 `fluxctl kube bisect -- COMMAND` is `git bisect` for the cluster. With automatic checkpoints collected (see below), it restores them
