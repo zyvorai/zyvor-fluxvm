@@ -206,6 +206,100 @@ pub async fn wake<A: VmApi>(api: &A, o: &kube_host::KubeOptions) -> Result<Strin
     ))
 }
 
+/// Checkpoints made by `kube try` are named `try-<UTC time>`, so they sort by age and `kube undo` knows which are its own.
+const TRY_PREFIX: &str = "try-";
+
+/// `try-20261025-103000123` (to the millisecond, so two runs in one second get two checkpoints)
+pub(crate) fn try_label(now: chrono::DateTime<chrono::Utc>) -> String {
+    format!("{TRY_PREFIX}{}", now.format("%Y%m%d-%H%M%S%3f"))
+}
+
+/// The `try-` labels among these, oldest first.
+fn try_labels(labels: &[String]) -> Vec<String> {
+    let mut v: Vec<String> = labels
+        .iter()
+        .filter(|l| l.starts_with(TRY_PREFIX))
+        .cloned()
+        .collect();
+    v.sort();
+    v
+}
+
+/// The `try-` labels beyond the newest `keep`, oldest first: the ones to delete.
+pub(crate) fn stale_tries(labels: &[String], keep: usize) -> Vec<String> {
+    let v = try_labels(labels);
+    v[..v.len().saturating_sub(keep)].to_vec()
+}
+
+async fn labels_of<A: VmApi>(api: &A, id: Uuid) -> Result<Vec<String>> {
+    Ok(checkpoints(api, id)
+        .await?
+        .iter()
+        .filter_map(|c| c["label"].as_str().map(str::to_owned))
+        .collect())
+}
+
+/// `fluxctl kube try -- COMMAND`: saves a checkpoint, runs the command against this cluster (`KUBECONFIG` set), and keeps
+/// the checkpoint so `kube undo` can put the cluster back. Returns the command's exit code.
+pub async fn try_run<A: VmApi>(
+    api: &A,
+    o: &kube_host::KubeOptions,
+    command: &[String],
+    keep: usize,
+) -> Result<i32> {
+    let Some((program, args)) = command.split_first() else {
+        bail!(
+            "give a command after --, for example: fluxctl kube try -- kubectl apply -f app.yaml"
+        );
+    };
+    if keep == 0 {
+        bail!("--keep must be at least 1");
+    }
+    let label = try_label(chrono::Utc::now());
+    eprintln!("{}", checkpoint(api, o, &label).await?);
+    let kubeconfig = kube_host::kubeconfig_path(o)?;
+    let (program, args) = (program.clone(), args.to_vec());
+    let status = tokio::task::spawn_blocking(move || {
+        std::process::Command::new(program)
+            .args(args)
+            .env("KUBECONFIG", kubeconfig)
+            .status()
+    })
+    .await??;
+    let (id, _) = server(api, o).await?;
+    for old in stale_tries(&labels_of(api, id).await?, keep) {
+        api.delete_snapshot(id, &tag_of(&old)).await?;
+    }
+    eprintln!(
+        "{}. Put the cluster back with `fluxctl kube undo{}`",
+        if status.success() {
+            "done".to_owned()
+        } else {
+            format!("the command exited with {status}")
+        },
+        if o.name == kube_host::KubeOptions::default().name {
+            String::new()
+        } else {
+            format!(" --name {}", o.name)
+        }
+    );
+    Ok(status.code().unwrap_or(1))
+}
+
+/// `fluxctl kube undo`: restores the newest `try-` checkpoint and deletes it, so another `undo` goes one step further back.
+pub async fn undo<A: VmApi>(api: &A, o: &kube_host::KubeOptions) -> Result<String> {
+    let (id, _) = server(api, o).await?;
+    let Some(label) = try_labels(&labels_of(api, id).await?).pop() else {
+        bail!(
+            "{} has nothing to undo: no checkpoint from `fluxctl kube try` (they are named try-<time>)",
+            o.name
+        );
+    };
+    let done = restore(api, o, &label).await?;
+    api.delete_snapshot(id, &tag_of(&label)).await?;
+    Ok(done)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -473,5 +567,44 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(e.contains("is not asleep"), "{e}");
+    }
+
+    #[test]
+    fn try_labels_are_valid_sorted_and_pruned_oldest_first() {
+        use chrono::TimeZone;
+        let l = try_label(
+            chrono::Utc
+                .with_ymd_and_hms(2026, 10, 25, 10, 30, 5)
+                .unwrap(),
+        );
+        assert_eq!(l, "try-20261025-103005000");
+        assert!(label_ok(&l));
+        let all: Vec<String> = ["try-2", "before", "try-1", "try-3", "sleep"]
+            .map(String::from)
+            .to_vec();
+        assert_eq!(stale_tries(&all, 2), ["try-1"]);
+        assert!(stale_tries(&all, 3).is_empty());
+        assert!(stale_tries(&all, 9).is_empty());
+        assert_eq!(try_labels(&all), ["try-1", "try-2", "try-3"]);
+    }
+
+    #[tokio::test]
+    async fn try_keeps_the_checkpoint_whatever_the_command_does_and_reports_its_exit() {
+        let api = fake("running");
+        let ok = try_run(&api, &opts(), &["true".into()], 5).await.unwrap();
+        assert_eq!(ok, 0);
+        let bad = try_run(&api, &opts(), &["false".into()], 5).await.unwrap();
+        assert_eq!(bad, 1);
+        let listed = list(&api, &opts()).await.unwrap();
+        assert_eq!(listed["checkpoints"].as_array().unwrap().len(), 2);
+        assert!(try_run(&api, &opts(), &[], 5).await.is_err());
+        assert!(try_run(&api, &opts(), &["true".into()], 0).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn undo_with_nothing_to_undo_says_so() {
+        let api = fake("running");
+        let e = undo(&api, &opts()).await.unwrap_err().to_string();
+        assert!(e.contains("nothing to undo"), "{e}");
     }
 }

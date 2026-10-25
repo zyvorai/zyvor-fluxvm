@@ -357,6 +357,23 @@ enum KubeCommand {
         #[command(flatten)]
         cluster: KubeArgs,
     },
+    /// Save a checkpoint, run a command against this cluster, and keep the checkpoint: `fluxctl kube try -- kubectl apply -f app.yaml`.
+    /// `fluxctl kube undo` then puts the cluster back as it was, running pods included. The command's exit code is passed on.
+    Try {
+        #[command(flatten)]
+        cluster: KubeArgs,
+        /// How many `try-` checkpoints to keep; older ones are deleted.
+        #[arg(long, default_value_t = 5)]
+        keep: usize,
+        /// The command and its arguments, after `--`.
+        #[arg(last = true, required = true)]
+        command: Vec<String>,
+    },
+    /// Put the cluster back to before the last `kube try`, and forget that checkpoint (run it again to go one step further back).
+    Undo {
+        #[command(flatten)]
+        cluster: KubeArgs,
+    },
     /// Delete a checkpoint.
     CheckpointRm {
         #[command(flatten)]
@@ -7842,6 +7859,19 @@ async fn kube_command<A: run::VmApi>(api: &A, command: KubeCommand) -> Result<()
                     &kube_checkpoint::list(api, &cluster.options()?).await?
                 )?
             );
+        }
+        KubeCommand::Try {
+            cluster,
+            keep,
+            command,
+        } => {
+            let code = kube_checkpoint::try_run(api, &cluster.options()?, &command, keep).await?;
+            if code != 0 {
+                std::process::exit(code);
+            }
+        }
+        KubeCommand::Undo { cluster } => {
+            println!("{}", kube_checkpoint::undo(api, &cluster.options()?).await?);
         }
         KubeCommand::CheckpointRm { cluster, label } => {
             println!(

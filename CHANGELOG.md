@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- **`fluxctl kube try -- COMMAND` and `kube undo`.** `try` saves a checkpoint, runs your command (a `kubectl apply`, a helm upgrade) against the
+  cluster and keeps the checkpoint; `undo` puts the cluster back as it was, running pods included, and forgets that checkpoint, so a second
+  `undo` goes one step further back. On a real k3s: deleted a deployment through `try`, `undo` brought it back (save 1.5 s, undo 12.5 s).
+  `--keep N` prunes older ones. Single-node clusters only.
 - **Studio: a Checkpoints tab on the Kubernetes page.** Save a checkpoint, restore one (with a confirm), or delete one, for a single-node cluster;
   the same `kube-<label>` snapshots that `fluxctl kube checkpoint` makes, so each tool sees the other's. Automatic, "asleep" and "before a try"
   checkpoints are labelled. A cluster with workers explains why it has none. NodePort and LoadBalancer services get an "open" link to
