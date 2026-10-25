@@ -123,6 +123,7 @@ pub async fn restore<A: VmApi>(api: &A, o: &kube_host::KubeOptions, label: &str)
     kube_host::stop_forward(o); // the VM restarts, so the old tunnel is dead
     api.restore(id, &tag).await?;
     kube_host::up(api, o).await?; // waits for ssh and a Ready node, and forwards the API port again
+    kube_host::resync_clock(api, o).await;
     Ok(format!(
         "{} restored to checkpoint {label:?} in {:.1}s",
         o.name,
@@ -279,6 +280,23 @@ async fn labels_of<A: VmApi>(api: &A, id: Uuid) -> Result<Vec<String>> {
         .collect())
 }
 
+/// Runs a command with `KUBECONFIG` pointing at this cluster and waits for it.
+async fn run_command(
+    o: &kube_host::KubeOptions,
+    program: &str,
+    args: &[String],
+) -> Result<std::process::ExitStatus> {
+    let kubeconfig = kube_host::kubeconfig_path(o)?;
+    let (program, args) = (program.to_owned(), args.to_vec());
+    Ok(tokio::task::spawn_blocking(move || {
+        std::process::Command::new(program)
+            .args(args)
+            .env("KUBECONFIG", kubeconfig)
+            .status()
+    })
+    .await??)
+}
+
 /// `fluxctl kube try -- COMMAND`: saves a checkpoint, runs the command against this cluster (`KUBECONFIG` set), and keeps
 /// the checkpoint so `kube undo` can put the cluster back. Returns the command's exit code.
 pub async fn try_run<A: VmApi>(
@@ -297,15 +315,7 @@ pub async fn try_run<A: VmApi>(
     }
     let label = try_label(chrono::Utc::now());
     eprintln!("{}", checkpoint(api, o, &label).await?);
-    let kubeconfig = kube_host::kubeconfig_path(o)?;
-    let (program, args) = (program.clone(), args.to_vec());
-    let status = tokio::task::spawn_blocking(move || {
-        std::process::Command::new(program)
-            .args(args)
-            .env("KUBECONFIG", kubeconfig)
-            .status()
-    })
-    .await??;
+    let status = run_command(o, program, args).await?;
     let (id, _) = server(api, o).await?;
     for old in stale_tries(&labels_of(api, id).await?, keep) {
         api.delete_snapshot(id, &tag_of(&old)).await?;
@@ -324,6 +334,117 @@ pub async fn try_run<A: VmApi>(
         }
     );
     Ok(status.code().unwrap_or(1))
+}
+
+/// Binary search over checkpoints ordered oldest to newest, where the oldest is known good and the newest known bad.
+#[derive(Debug, PartialEq)]
+pub(crate) struct Bisect {
+    good: usize,
+    bad: usize,
+}
+
+impl Bisect {
+    pub(crate) fn new(len: usize) -> Self {
+        Self {
+            good: 0,
+            bad: len.saturating_sub(1),
+        }
+    }
+
+    /// The next checkpoint to test, or `None` once the first bad one is pinned down.
+    pub(crate) fn next(&self) -> Option<usize> {
+        (self.bad - self.good > 1).then(|| self.good + (self.bad - self.good) / 2)
+    }
+
+    pub(crate) fn record(&mut self, index: usize, passed: bool) {
+        if passed {
+            self.good = index;
+        } else {
+            self.bad = index;
+        }
+    }
+
+    /// (last good, first bad)
+    pub(crate) fn found(&self) -> (usize, usize) {
+        (self.good, self.bad)
+    }
+}
+
+const BISECT_START: &str = "bisect-start";
+
+/// `fluxctl kube bisect -- COMMAND`: finds which automatic checkpoint is the first one where COMMAND fails (exit code not 0).
+/// It restores checkpoints and runs the command, so it first saves where the cluster is now and puts that back at the end.
+pub async fn bisect<A: VmApi>(
+    api: &A,
+    o: &kube_host::KubeOptions,
+    command: &[String],
+    stay: bool,
+) -> Result<String> {
+    let Some((program, args)) = command.split_first() else {
+        bail!(
+            "give a test command after --, for example: fluxctl kube bisect -- kubectl wait --for=condition=available deploy/web --timeout=20s"
+        );
+    };
+    let (id, _) = server(api, o).await?;
+    let autos = stale_with(&labels_of(api, id).await?, AUTO_PREFIX, 0); // all of them, oldest first
+    if autos.len() < 2 {
+        bail!(
+            "bisect needs at least two automatic checkpoints, {} has {}. Run `fluxctl kube supervise --auto-checkpoint 1h` to collect them",
+            o.name,
+            autos.len()
+        );
+    }
+    if api.has_snapshot(id, &tag_of(BISECT_START)).await? {
+        api.delete_snapshot(id, &tag_of(BISECT_START)).await?;
+    }
+    eprintln!("{}", checkpoint(api, o, BISECT_START).await?);
+    let outcome = bisect_run(api, o, &autos, program, args).await;
+    if !stay {
+        eprintln!("{}", restore(api, o, BISECT_START).await?);
+        api.delete_snapshot(id, &tag_of(BISECT_START)).await?;
+    } else {
+        eprintln!(
+            "left at the last tested checkpoint; `fluxctl kube restore {BISECT_START}` goes back"
+        );
+    }
+    outcome
+}
+
+async fn bisect_run<A: VmApi>(
+    api: &A,
+    o: &kube_host::KubeOptions,
+    autos: &[String],
+    program: &str,
+    args: &[String],
+) -> Result<String> {
+    let mut test = async |i: usize| -> Result<bool> {
+        eprintln!("testing {}", autos[i]);
+        restore(api, o, &autos[i]).await?;
+        Ok(run_command(o, program, args).await?.success())
+    };
+    let last = autos.len() - 1;
+    if test(last).await? {
+        return Ok(format!(
+            "the command passes on the newest checkpoint {}: nothing to find",
+            autos[last]
+        ));
+    }
+    if !test(0).await? {
+        return Ok(format!(
+            "the command already fails on the oldest checkpoint {}: it broke before the first one",
+            autos[0]
+        ));
+    }
+    let mut b = Bisect::new(autos.len());
+    while let Some(i) = b.next() {
+        let passed = test(i).await?;
+        b.record(i, passed);
+    }
+    let (good, bad) = b.found();
+    Ok(format!(
+        "first failing checkpoint: {}\nlast good one:          {}",
+        autos[bad], autos[good]
+    ))
 }
 
 /// `fluxctl kube undo`: restores the newest `try-` checkpoint and deletes it, so another `undo` goes one step further back.
@@ -639,6 +760,36 @@ mod tests {
         assert_eq!(listed["checkpoints"].as_array().unwrap().len(), 2);
         assert!(try_run(&api, &opts(), &[], 5).await.is_err());
         assert!(try_run(&api, &opts(), &["true".into()], 0).await.is_err());
+    }
+
+    #[test]
+    fn bisect_pins_down_the_first_bad_checkpoint_in_log_steps() {
+        for first_bad in 1..16usize {
+            let mut b = Bisect::new(16);
+            let mut probes = 0;
+            while let Some(i) = b.next() {
+                b.record(i, i < first_bad);
+                probes += 1;
+            }
+            assert_eq!(
+                b.found(),
+                (first_bad - 1, first_bad),
+                "bad from {first_bad}"
+            );
+            assert!(probes <= 4, "{probes} probes for {first_bad}");
+        }
+        assert_eq!(Bisect::new(2).next(), None);
+    }
+
+    #[tokio::test]
+    async fn bisect_needs_two_automatic_checkpoints_and_a_command() {
+        let api = fake("running");
+        assert!(bisect(&api, &opts(), &[], false).await.is_err());
+        let e = bisect(&api, &opts(), &["true".into()], false)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("at least two automatic"), "{e}");
     }
 
     #[tokio::test]

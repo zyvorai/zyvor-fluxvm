@@ -486,6 +486,15 @@ fn ssh(c: &Cluster, remote: &str) -> Command {
     cmd
 }
 
+/// A restored VM wakes with the clock it was saved with, minutes behind. The guest's time service fixes that within a minute
+/// on its own; restarting it makes it step the clock now. Best effort: a failure only means waiting for the normal sync.
+pub(crate) async fn resync_clock<A: VmApi>(api: &A, o: &KubeOptions) {
+    let Ok(cluster) = ensure_vm(api, o).await else {
+        return;
+    };
+    let _ = ssh(&cluster, "sudo systemctl restart systemd-timesyncd").output();
+}
+
 /// Finds or creates one node's VM and starts it if stopped.
 async fn ensure_one<A: VmApi>(
     api: &A,

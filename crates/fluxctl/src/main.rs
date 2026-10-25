@@ -369,6 +369,18 @@ enum KubeCommand {
         #[arg(last = true, required = true)]
         command: Vec<String>,
     },
+    /// Find which automatic checkpoint is the first one where a command fails, like `git bisect`: `fluxctl kube bisect -- kubectl wait --for=condition=available deploy/web --timeout=20s`.
+    /// It restores checkpoints (about 4 for 16), so it saves the cluster as it is now and puts that back at the end.
+    Bisect {
+        #[command(flatten)]
+        cluster: KubeArgs,
+        /// Leave the cluster at the last tested checkpoint instead of putting it back.
+        #[arg(long)]
+        stay: bool,
+        /// The test command and its arguments, after `--`: passes on exit code 0.
+        #[arg(last = true, required = true)]
+        command: Vec<String>,
+    },
     /// Put the cluster back to before the last `kube try`, and forget that checkpoint (run it again to go one step further back).
     Undo {
         #[command(flatten)]
@@ -7873,6 +7885,16 @@ async fn kube_command<A: run::VmApi>(api: &A, command: KubeCommand) -> Result<()
             if code != 0 {
                 std::process::exit(code);
             }
+        }
+        KubeCommand::Bisect {
+            cluster,
+            stay,
+            command,
+        } => {
+            println!(
+                "{}",
+                kube_checkpoint::bisect(api, &cluster.options()?, &command, stay).await?
+            );
         }
         KubeCommand::Undo { cluster } => {
             println!("{}", kube_checkpoint::undo(api, &cluster.options()?).await?);
