@@ -97,7 +97,7 @@ The API server certificate carries `127.0.0.1` as a SAN, so `kubectl` verifies i
 * **Automatically**, while `fluxctl kube supervise` runs (the LaunchAgent does this): every NodePort and LoadBalancer service gets a
   forward on `127.0.0.1:<its node port>` within one check interval, and loses it when the service is deleted. Create a NodePort service
   and `curl http://127.0.0.1:<nodePort>` works with no flags. Only loopback; ports below 1024, the API port and ports something on the
-  Mac already uses are skipped. `fluxctl kube services` lists them as JSON with `published` and `url`. Turn it off with
+  Mac already uses are skipped. `fluxctl kube services` lists them as JSON with `published`, `url` and `friendly_url` (`http://<service>.<namespace>.localhost:<port>`, which browsers and macOS resolve to loopback). Turn it off with
   `supervise --no-auto-publish`. Changing the set restarts the SSH forward, so `kubectl` may pause for a moment.
 * `kubectl port-forward` also works, since it goes through the API server.
 

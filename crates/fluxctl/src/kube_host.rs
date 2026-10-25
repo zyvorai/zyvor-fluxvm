@@ -1011,6 +1011,12 @@ pub(crate) fn service_url(port: u16) -> String {
     format!("http://127.0.0.1:{port}")
 }
 
+/// `http://<service>.<namespace>.localhost:<port>`: `*.localhost` resolves to loopback in browsers and on macOS,
+/// so two services on different ports can be told apart by name.
+pub(crate) fn friendly_url(namespace: &str, name: &str, port: u16) -> String {
+    format!("http://{name}.{namespace}.localhost:{port}")
+}
+
 /// Whether something on the Mac already listens on this loopback port.
 fn port_in_use(port: u16) -> bool {
     std::net::TcpListener::bind(("127.0.0.1", port)).is_err()
@@ -1172,6 +1178,7 @@ pub async fn services<A: VmApi>(api: &A, o: &KubeOptions) -> Result<Value> {
                 "port": s.port,
                 "published": forwarded(s.port),
                 "url": service_url(s.port),
+                "friendly_url": friendly_url(&s.namespace, &s.name, s.port),
             })
         })
         .collect();
@@ -2217,6 +2224,11 @@ mod tests {
         let fixed = [(30082, 80)];
         let got = ports_to_open(&found, &fixed, 6443, |p| p == 30081);
         assert_eq!(got, vec![(30080, 30080)]);
+    }
+
+    #[test]
+    fn friendly_url_names_the_service() {
+        assert_eq!(friendly_url("shop", "web", 30080), "http://web.shop.localhost:30080");
     }
 
     #[test]
