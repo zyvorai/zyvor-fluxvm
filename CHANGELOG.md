@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- **`fluxctl kube golden`, `kube reset` and `kube matrix --runs N -- COMMAND`.** `golden` marks the cluster as it is as the known-good state; `reset` returns to it in about 8 s (the golden state is kept); `matrix` resets before every run, runs your command and reports which runs failed, exiting non-zero if any did, so a flaky test shows up as "7 of 10 runs passed; failed: 2, 5, 9". Proved on a real k3s: a namespace created after `golden` was gone after each reset, and 3 matrix runs of a test that only passes from a clean start all passed.
 - **`fluxctl kube bisect -- COMMAND`: `git bisect` for cluster state.** It binary-searches the `auto-*` checkpoints, restoring each and running your test (exit 0 passes), and names the first failing one and the last good one. About 4 restores for 16 checkpoints. It saves the cluster first and puts it back at the end (`--stay` to keep the last tested state). Unit-tested (search steps, input checks); the error path was run on a real cluster, a full bisect over real checkpoints was not.
 - **A restore no longer leaves the guest clock behind.** A restored guest woke about 342 s slow and fixed itself in 20 to 80 s; `kube restore`, `kube wake` and `kube undo` now step it at once. Measured on a real k3s: skew 0 s right after the restore.
 - **Studio: Sleep and Wake buttons on the Checkpoints tab.** Sleep saves the `kube-sleep` checkpoint and stops the machine, the same parking `fluxctl kube sleep` does; Wake restores it. Type-checked and unit tests pass; not click-tested in a browser.

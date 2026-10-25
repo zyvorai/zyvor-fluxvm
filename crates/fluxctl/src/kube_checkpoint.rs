@@ -447,6 +447,72 @@ async fn bisect_run<A: VmApi>(
     ))
 }
 
+const GOLDEN: &str = "golden";
+
+/// `fluxctl kube golden`: marks the cluster as it is now as the known-good state, replacing the previous one.
+pub async fn golden<A: VmApi>(api: &A, o: &kube_host::KubeOptions) -> Result<String> {
+    let (id, _) = server(api, o).await?;
+    if api.has_snapshot(id, &tag_of(GOLDEN)).await? {
+        api.delete_snapshot(id, &tag_of(GOLDEN)).await?;
+    }
+    checkpoint(api, o, GOLDEN).await
+}
+
+/// `fluxctl kube reset`: puts the cluster back to the golden state, keeping it for the next reset.
+pub async fn reset<A: VmApi>(api: &A, o: &kube_host::KubeOptions) -> Result<String> {
+    let (id, _) = server(api, o).await?;
+    if !api.has_snapshot(id, &tag_of(GOLDEN)).await? {
+        bail!(
+            "{} has no golden state. Set it with `fluxctl kube golden` while the cluster is how you want it",
+            o.name
+        );
+    }
+    restore(api, o, GOLDEN).await
+}
+
+/// "7 of 10 runs passed; failed: 2, 5, 9" or "all 10 runs passed".
+pub(crate) fn matrix_summary(passed: &[bool]) -> String {
+    let failed: Vec<String> = passed
+        .iter()
+        .enumerate()
+        .filter(|(_, ok)| !**ok)
+        .map(|(i, _)| (i + 1).to_string())
+        .collect();
+    if failed.is_empty() {
+        format!("all {} runs passed", passed.len())
+    } else {
+        format!(
+            "{} of {} runs passed; failed: {}",
+            passed.len() - failed.len(),
+            passed.len(),
+            failed.join(", ")
+        )
+    }
+}
+
+/// `fluxctl kube matrix --runs N -- COMMAND`: resets to the golden state before every run so the runs start identical, and
+/// reports which failed. A command that fails only sometimes is flaky; one that fails every time is broken. Returns true if all passed.
+pub async fn matrix<A: VmApi>(
+    api: &A,
+    o: &kube_host::KubeOptions,
+    runs: usize,
+    command: &[String],
+) -> Result<(String, bool)> {
+    let Some((program, args)) = command.split_first() else {
+        bail!("give a command after --, for example: fluxctl kube matrix --runs 10 -- ./e2e.sh");
+    };
+    if runs == 0 {
+        bail!("--runs must be at least 1");
+    }
+    let mut passed = Vec::new();
+    for i in 1..=runs {
+        eprintln!("run {i} of {runs}: {}", reset(api, o).await?);
+        passed.push(run_command(o, program, args).await?.success());
+    }
+    let ok = passed.iter().all(|p| *p);
+    Ok((matrix_summary(&passed), ok))
+}
+
 /// `fluxctl kube undo`: restores the newest `try-` checkpoint and deletes it, so another `undo` goes one step further back.
 pub async fn undo<A: VmApi>(api: &A, o: &kube_host::KubeOptions) -> Result<String> {
     let (id, _) = server(api, o).await?;
@@ -790,6 +856,34 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(e.contains("at least two automatic"), "{e}");
+    }
+
+    #[test]
+    fn the_matrix_summary_names_the_failed_runs() {
+        assert_eq!(matrix_summary(&[true, true]), "all 2 runs passed");
+        assert_eq!(
+            matrix_summary(&[true, false, true, false]),
+            "2 of 4 runs passed; failed: 2, 4"
+        );
+    }
+
+    #[tokio::test]
+    async fn reset_needs_a_golden_state_and_golden_replaces_the_old_one() {
+        let api = fake("running");
+        let e = reset(&api, &opts()).await.unwrap_err().to_string();
+        assert!(e.contains("no golden state"), "{e}");
+        golden(&api, &opts()).await.unwrap();
+        golden(&api, &opts()).await.unwrap();
+        let n = api
+            .snaps
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|s| s.1 == "kube-golden")
+            .count();
+        assert_eq!(n, 1);
+        assert!(matrix(&api, &opts(), 0, &["true".into()]).await.is_err());
+        assert!(matrix(&api, &opts(), 2, &[]).await.is_err());
     }
 
     #[tokio::test]
