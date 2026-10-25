@@ -763,6 +763,11 @@ fn api_needle() -> String {
 
 /// `fluxctl kube up`: idempotent. Returns the kubeconfig path.
 pub async fn up<A: VmApi>(api: &A, o: &KubeOptions) -> Result<PathBuf> {
+    // A sleeping cluster resumes from its sleep checkpoint (seconds) instead of cold-booting.
+    if crate::kube_checkpoint::is_asleep(api, o).await {
+        // `wake` ends in `up`, so the future is boxed; by then the VM runs and this branch is not taken again.
+        eprintln!("{}", Box::pin(crate::kube_checkpoint::wake(api, o)).await?);
+    }
     let cluster = ensure_vm(api, o).await?;
     if write_kubeconfig(&cluster, &o.name)? {
         eprintln!("wrote {}", cluster.kubeconfig.display());
