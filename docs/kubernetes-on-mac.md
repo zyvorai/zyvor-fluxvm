@@ -207,6 +207,13 @@ so running `undo` again goes one step further back. The command's exit code is p
 checkpoints. Put cluster flags such as `--name` before the `--`; everything after it is the command. Single-node clusters only.
 On a real cluster, deleting a deployment through `try` and then `undo` brought back the deployment and its original pod (save 1.5 s, undo 12.5 s).
 
+## Find when it broke
+
+`fluxctl kube bisect -- COMMAND` is `git bisect` for the cluster. With automatic checkpoints collected (see below), it restores them
+oldest to newest by binary search, runs COMMAND each time (exit code 0 means good) and prints the first failing checkpoint and the last good
+one. Sixteen checkpoints take about four restores. It saves the cluster as it is now and puts that back afterwards; `--stay` leaves it at
+the last tested checkpoint. It needs at least two `auto-` checkpoints.
+
 ## Automatic checkpoints
 
 `fluxctl kube supervise --auto-checkpoint 1h --keep-auto 6` saves a checkpoint named `auto-<time>` every hour while the cluster runs and

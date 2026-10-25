@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **`fluxctl kube bisect -- COMMAND`: `git bisect` for cluster state.** It binary-searches the `auto-*` checkpoints, restoring each and running your test (exit 0 passes), and names the first failing one and the last good one. About 4 restores for 16 checkpoints. It saves the cluster first and puts it back at the end (`--stay` to keep the last tested state). Unit-tested (search steps, input checks); the error path was run on a real cluster, a full bisect over real checkpoints was not.
+- **A restore no longer leaves the guest clock behind.** A restored guest woke about 342 s slow and fixed itself in 20 to 80 s; `kube restore`, `kube wake` and `kube undo` now step it at once. Measured on a real k3s: skew 0 s right after the restore.
 - **Studio: Sleep and Wake buttons on the Checkpoints tab.** Sleep saves the `kube-sleep` checkpoint and stops the machine, the same parking `fluxctl kube sleep` does; Wake restores it. Type-checked and unit tests pass; not click-tested in a browser.
 - **`fluxctl kube up` on a sleeping cluster wakes it** from the sleep checkpoint instead of cold-booting the VM. Proved on a real k3s: `up` on a sleeping cluster took 3 s and the node was Ready.
 - **`fluxctl kube services` also prints a `friendly_url`**, `http://<service>.<namespace>.localhost:<port>`. `*.localhost` resolves to loopback, so
