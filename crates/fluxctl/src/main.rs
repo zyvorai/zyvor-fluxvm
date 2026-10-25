@@ -37,6 +37,7 @@ mod fleet_cli;
 mod fleet_client;
 mod guard_cmd;
 mod infer;
+mod kube_apps;
 mod kube_chaos;
 mod kube_checkpoint;
 mod kube_host;
@@ -337,6 +338,40 @@ enum KubeCommand {
     Up(KubeArgs),
     /// The VM, its address, whether the API answers and where the kubeconfig is, as JSON.
     Status(KubeArgs),
+    /// Run a service you usually need next to your app, with its usual port on 127.0.0.1 and a connection string: `fluxctl kube add postgres`.
+    /// Postgres, Redis, MySQL, MinIO (S3) and Mailpit (mail catcher). Data is kept on a volume.
+    Add {
+        #[command(flatten)]
+        cluster: KubeArgs,
+        #[arg(value_enum)]
+        app: kube_apps::App,
+    },
+    /// Stop a service made by `kube add`; its data is kept unless `--delete-data`.
+    Remove {
+        #[command(flatten)]
+        cluster: KubeArgs,
+        #[arg(value_enum)]
+        app: kube_apps::App,
+        /// Also erase the volume.
+        #[arg(long)]
+        delete_data: bool,
+    },
+    /// A database shell inside the pod, with nothing to install on the Mac: `fluxctl kube connect postgres` (psql), redis, mysql, mongodb.
+    Connect {
+        #[command(flatten)]
+        cluster: KubeArgs,
+        #[arg(value_enum)]
+        app: kube_apps::App,
+    },
+    /// Open a published service in your browser: `fluxctl kube open mailpit` (uses `http://mailpit.localhost` while supervise runs).
+    Open {
+        #[command(flatten)]
+        cluster: KubeArgs,
+        /// The service name, or namespace/name.
+        service: String,
+    },
+    /// The services `kube add` can run, and which of them are running.
+    Apps(KubeArgs),
     /// Make this cluster the current `kubectl` context in ~/.kube/config (`fluxctl kube up` adds it without switching).
     Use(KubeArgs),
     /// Print `export KUBECONFIG=…` for this cluster (`eval "$(fluxctl kube env)"`).
@@ -7989,6 +8024,37 @@ async fn kube_command<A: run::VmApi>(api: &A, command: KubeCommand) -> Result<()
             if !ok {
                 std::process::exit(1);
             }
+        }
+        KubeCommand::Add { cluster, app } => {
+            print!("{}", kube_apps::add(api, &cluster.options()?, app).await?);
+        }
+        KubeCommand::Remove {
+            cluster,
+            app,
+            delete_data,
+        } => {
+            println!(
+                "{}",
+                kube_apps::remove(api, &cluster.options()?, app, delete_data).await?
+            );
+        }
+        KubeCommand::Connect { cluster, app } => {
+            let code = kube_apps::connect(api, &cluster.options()?, app).await?;
+            if code != 0 {
+                std::process::exit(code);
+            }
+        }
+        KubeCommand::Open { cluster, service } => {
+            let o = cluster.options()?;
+            let services = kube_host::published_services(api, &o).await?;
+            let url = kube_apps::pick_url(&services, &service, kube_host::names_are_served())?;
+            println!("{url}");
+            if std::env::var_os("FLUXVM_NO_OPEN").is_none() {
+                let _ = std::process::Command::new("open").arg(&url).status();
+            }
+        }
+        KubeCommand::Apps(cluster) => {
+            print!("{}", kube_apps::list(api, &cluster.options()?).await?);
         }
         KubeCommand::Use(cluster) => {
             let o = cluster.options()?;
