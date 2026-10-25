@@ -169,8 +169,8 @@ special role; the few changes below need the daemon's admin role.
 * **Checkpoints:** the cluster's checkpoints as a **timeline** (oldest left, coloured by kind: automatic, before a try, manual, asleep),
   where a click offers to go back to that point, and as a table with **Save**, **Restore** and **Delete**. An **Undo** banner offers to put
   the cluster back after a `fluxctl kube try`. **Sleep** saves the sleep checkpoint and stops the machine, and **Wake** restores it. Saving
-  needs the cluster to be running; clusters with workers show why they cannot be checkpointed. After a restore from the Studio, `kube
-  supervise` (or `kube up`) reopens the kubectl port.
+  needs the cluster to be running; clusters with workers show why they cannot be checkpointed. After a restore from the Studio the kubectl port is closed until `kube
+  supervise` (or `kube up`) reopens it; with supervise running that took about half a minute on a real cluster.
 * **Changes:** a few things you do all the time, with a spinner on the button and a toast when the cluster answers. **+** and **−** on a
   Deployment or StatefulSet set its replicas (0 to 100); **Restart** rolls a Deployment, StatefulSet or DaemonSet the way
   `kubectl rollout restart` does; **Delete** removes a pod (after a confirmation; its controller makes a new one); **Cordon** and
@@ -223,7 +223,7 @@ a tool outside the VM holds (your kubeconfig, a `--publish` forward) is changed.
 
 **The clock.** A restored guest wakes with the clock it was saved with: measured on a real cluster, 342 seconds behind after a 4 minute
 gap, correcting itself in 20 to 80 seconds through the guest's time service. `kube restore`, `kube wake` and `kube undo` now restart that
-service at once (skew 0 s right after the restore). A restore made from the Studio does not, so the guest catches up on its own within a minute.
+service at once (skew 0 s right after the restore). A restore made from the Studio cannot (the daemon has no shell in the guest), so with `kube supervise` running the supervisor steps the clock when it reopens the port, and without it the guest catches up on its own within a minute.
 
 Limits: a label is 1 to 40 lowercase letters, digits or dashes; a label is used once (remove it to reuse it); the cluster must be running
 to be checkpointed; and a cluster made with `--workers` is refused, because its nodes are separate VMs on a private network that a snapshot
