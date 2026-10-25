@@ -1181,7 +1181,11 @@ pub async fn supervise<A: VmApi>(
         if !healthy {
             open.clear();
             match up(api, o).await {
-                Ok(_) => eprintln!("kubernetes is up"),
+                Ok(_) => {
+                    eprintln!("kubernetes is up");
+                    // A restore (the Studio's, or a sleep checkpoint) leaves the guest clock behind; step it now.
+                    resync_clock(api, o).await;
+                }
                 Err(e) => eprintln!("kubernetes is not ready, will retry: {e:#}"),
             }
         }
