@@ -222,6 +222,8 @@ cluster keeps `127.0.0.1:<api-port>` open: the first `kubectl` call wakes it and
 `kubectl`. On a real cluster sleeping took 6 s and the first `kubectl get pods` against the sleeping cluster answered in 3 s. Same
 limits as checkpoints: single-node clusters only. Do not run `kube up` on a sleeping cluster; wake it.
 
+`fluxctl kube supervise --idle-sleep 30m` parks the cluster by itself after that long with no traffic through the API port or the published services (it watches the bytes the SSH forwarder carries, with `nettop`, so an open Studio page counts as traffic). The wake port opens straight after, so the next `kubectl` wakes it. Off by default; 1 minute at least. On a real cluster `--idle-sleep 60` parked it after about 80 seconds. `kube agent install` takes the same `--idle-sleep`, `--auto-checkpoint`, `--keep-auto` and `--no-auto-publish` flags and passes them to the LaunchAgent.
+
 ## Keep it running
 
 ```bash
