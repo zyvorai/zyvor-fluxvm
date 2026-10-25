@@ -2233,7 +2233,10 @@ mod tests {
 
     #[test]
     fn friendly_url_names_the_service() {
-        assert_eq!(friendly_url("shop", "web", 30080), "http://web.shop.localhost:30080");
+        assert_eq!(
+            friendly_url("shop", "web", 30080),
+            "http://web.shop.localhost:30080"
+        );
     }
 
     #[test]
