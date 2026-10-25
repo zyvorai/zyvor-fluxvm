@@ -174,8 +174,11 @@ pub async fn sleep<A: VmApi>(api: &A, o: &kube_host::KubeOptions) -> Result<Stri
     let (id, _) = server(api, o).await?;
     let started = Instant::now();
     checkpoint(api, o, SLEEP_LABEL).await?;
+    kube_host::mark_sleeping(o, true); // tells a running supervise to leave the cluster alone until the VM is stopped
     kube_host::stop_forward(o);
-    api.stop(id).await?;
+    let stopped = api.stop(id).await;
+    kube_host::mark_sleeping(o, false);
+    stopped?;
     Ok(format!(
         "{} is asleep ({:.1}s). `fluxctl kube wake` or the first kubectl call under `kube supervise` brings it back",
         o.name,

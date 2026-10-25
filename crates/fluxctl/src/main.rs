@@ -40,6 +40,7 @@ mod infer;
 mod kube_chaos;
 mod kube_checkpoint;
 mod kube_host;
+mod kube_names;
 mod launch_agent;
 mod mcp;
 mod mcp_install;
@@ -293,6 +294,10 @@ struct KubeArgs {
     /// The Cilium chart version to install.
     #[arg(long, default_value = kube_host::CILIUM_VERSION)]
     cilium_version: String,
+    /// Do not add the cluster to ~/.kube/config. By default `up` adds a context named after the cluster (and makes it
+    /// current only if you have none), so plain `kubectl` works; `down --purge` takes it out again.
+    #[arg(long)]
+    no_merge_kubeconfig: bool,
 }
 
 impl KubeArgs {
@@ -319,6 +324,7 @@ impl KubeArgs {
             offline: self.offline.clone(),
             cni,
             cilium_version: self.cilium_version.clone(),
+            no_merge: self.no_merge_kubeconfig,
         })
     }
 }
@@ -331,6 +337,8 @@ enum KubeCommand {
     Up(KubeArgs),
     /// The VM, its address, whether the API answers and where the kubeconfig is, as JSON.
     Status(KubeArgs),
+    /// Make this cluster the current `kubectl` context in ~/.kube/config (`fluxctl kube up` adds it without switching).
+    Use(KubeArgs),
     /// Print `export KUBECONFIG=…` for this cluster (`eval "$(fluxctl kube env)"`).
     Env(KubeArgs),
     /// Stop the forward and the VM. `--purge` also deletes the VM, the cluster's state and the kubeconfig.
@@ -7982,6 +7990,11 @@ async fn kube_command<A: run::VmApi>(api: &A, command: KubeCommand) -> Result<()
                 std::process::exit(1);
             }
         }
+        KubeCommand::Use(cluster) => {
+            let o = cluster.options()?;
+            kube_host::merge_default_kubeconfig(&o, true)?;
+            println!("kubectl now uses the context {:?}", o.name);
+        }
         KubeCommand::Undo { cluster } => {
             println!("{}", kube_checkpoint::undo(api, &cluster.options()?).await?);
         }
@@ -8025,6 +8038,7 @@ async fn kube_command<A: run::VmApi>(api: &A, command: KubeCommand) -> Result<()
                     .map(|s| (std::time::Duration::from_secs(s.max(60)), flags.keep_auto)),
                 flags.idle_sleep.map(std::time::Duration::from_secs),
                 (flags.sleep_on_battery, flags.sleep_on_lid_close),
+                !flags.no_names,
             )
             .await?;
         }

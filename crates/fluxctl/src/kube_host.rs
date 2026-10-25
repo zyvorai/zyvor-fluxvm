@@ -100,6 +100,8 @@ pub struct KubeOptions {
     pub cni: Cni,
     /// The Cilium chart version, such as `1.20.3`.
     pub cilium_version: String,
+    /// Do not add the cluster to `~/.kube/config` (see [`merge_default_kubeconfig`]).
+    pub no_merge: bool,
 }
 
 impl Default for KubeOptions {
@@ -122,6 +124,7 @@ impl Default for KubeOptions {
             offline: None,
             cni: Cni::Cilium,
             cilium_version: CILIUM_VERSION.into(),
+            no_merge: false,
         }
     }
 }
@@ -246,6 +249,31 @@ fn run_dir() -> PathBuf {
 
 fn forwarder_pid(o: &KubeOptions) -> PathBuf {
     pid_file(&run_dir().join(format!("kube-{}.sock", o.name)))
+}
+
+/// Present while `kube sleep` runs. The API port closes a few seconds before the VM is stopped, and a supervisor that sees a
+/// closed port and a running VM would start `up` and sit in it waiting for a VM that is going away.
+fn sleeping_marker(o: &KubeOptions) -> PathBuf {
+    run_dir().join(format!("kube-{}.sleeping", o.name))
+}
+
+pub(crate) fn mark_sleeping(o: &KubeOptions, on: bool) {
+    let p = sleeping_marker(o);
+    if on {
+        let _ = std::fs::create_dir_all(run_dir());
+        let _ = std::fs::write(&p, b"");
+    } else {
+        let _ = std::fs::remove_file(&p);
+    }
+}
+
+/// A `kube sleep` started less than five minutes ago and has not finished.
+fn sleep_in_progress(o: &KubeOptions) -> bool {
+    std::fs::metadata(sleeping_marker(o))
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.elapsed().ok())
+        .is_some_and(|age| age < Duration::from_secs(300))
 }
 
 /// The `k3s server` arguments the VM is installed with.
@@ -458,6 +486,125 @@ pub fn rewrite_kubeconfig(raw: &str, name: &str, port: u16) -> String {
         out.push('\n');
     }
     out
+}
+
+/// Adds this cluster's cluster, user and context entries (named after the VM) to the kubeconfig `existing` and returns the
+/// merged text. An entry of the same name is replaced; everything else is kept. `current-context` is only set when there is
+/// none, so a `kubectl` pointed at another cluster is never switched behind its owner's back (`kube use` switches).
+pub fn merge_kubeconfig(
+    existing: Option<&str>,
+    ours: &str,
+    name: &str,
+    use_it: bool,
+) -> Result<String> {
+    use serde_yaml::{Mapping, Value};
+    let ours: Value = serde_yaml::from_str(ours).context("reading the cluster's kubeconfig")?;
+    let mut merged: Value = match existing.map(str::trim).filter(|t| !t.is_empty()) {
+        Some(t) => serde_yaml::from_str(t).context("reading ~/.kube/config")?,
+        None => Value::Mapping(Mapping::new()),
+    };
+    let Value::Mapping(top) = &mut merged else {
+        bail!("~/.kube/config is not a kubeconfig (not a YAML mapping)");
+    };
+    top.entry("apiVersion".into()).or_insert("v1".into());
+    top.entry("kind".into()).or_insert("Config".into());
+    for key in ["clusters", "users", "contexts"] {
+        let list = top
+            .entry(key.into())
+            .or_insert_with(|| Value::Sequence(vec![]));
+        let Value::Sequence(items) = list else {
+            bail!("~/.kube/config has a {key:?} that is not a list");
+        };
+        items.retain(|i| i.get("name").and_then(Value::as_str) != Some(name));
+        if let Some(Value::Sequence(mine)) = ours.get(key) {
+            items.extend(mine.iter().cloned());
+        }
+    }
+    let has_current = top
+        .get("current-context")
+        .and_then(Value::as_str)
+        .is_some_and(|c| !c.is_empty());
+    if use_it || !has_current {
+        top.insert("current-context".into(), name.into());
+    }
+    Ok(serde_yaml::to_string(&merged)?)
+}
+
+/// Removes this cluster's entries from a kubeconfig; `current-context` is cleared if it named this cluster.
+pub fn unmerge_kubeconfig(existing: &str, name: &str) -> Result<String> {
+    use serde_yaml::Value;
+    let mut v: Value = serde_yaml::from_str(existing).context("reading ~/.kube/config")?;
+    let Value::Mapping(top) = &mut v else {
+        bail!("~/.kube/config is not a kubeconfig");
+    };
+    for key in ["clusters", "users", "contexts"] {
+        if let Some(Value::Sequence(items)) = top.get_mut(key) {
+            items.retain(|i| i.get("name").and_then(Value::as_str) != Some(name));
+        }
+    }
+    if top.get("current-context").and_then(Value::as_str) == Some(name) {
+        top.insert("current-context".into(), "".into());
+    }
+    Ok(serde_yaml::to_string(&v)?)
+}
+
+/// A kubeconfig with no clusters, users or contexts left.
+fn kubeconfig_is_empty(text: &str) -> bool {
+    let Ok(v) = serde_yaml::from_str::<serde_yaml::Value>(text) else {
+        return false;
+    };
+    ["clusters", "users", "contexts"].iter().all(|k| {
+        v.get(*k)
+            .and_then(serde_yaml::Value::as_sequence)
+            .is_none_or(|l| l.is_empty())
+    })
+}
+
+fn default_kubeconfig() -> Result<PathBuf> {
+    Ok(dh::home()?.join(".kube").join("config"))
+}
+
+/// Makes plain `kubectl`, `helm`, `k9s` and IDE plugins see this cluster with no `KUBECONFIG` to export. The user's
+/// `~/.kube/config` is backed up once as `config.pre-fluxvm`. Returns true when the file changed.
+pub fn merge_default_kubeconfig(o: &KubeOptions, use_it: bool) -> Result<bool> {
+    let ours =
+        std::fs::read_to_string(home_kube(o)?).context("reading the cluster's kubeconfig")?;
+    let path = default_kubeconfig()?;
+    let existing = std::fs::read_to_string(&path).ok();
+    let merged = merge_kubeconfig(existing.as_deref(), &ours, &o.name, use_it)?;
+    if existing.as_deref() == Some(merged.as_str()) {
+        return Ok(false);
+    }
+    if let Some(old) = &existing {
+        let backup = path.with_file_name("config.pre-fluxvm");
+        if !backup.exists() {
+            write_private(&backup, old)?;
+        }
+    }
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    write_private(&path, &merged)?;
+    Ok(true)
+}
+
+/// Takes this cluster out of `~/.kube/config` again (best effort; `down --purge` calls it).
+pub fn unmerge_default_kubeconfig(o: &KubeOptions) {
+    let Ok(path) = default_kubeconfig() else {
+        return;
+    };
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return;
+    };
+    if let Ok(out) = unmerge_kubeconfig(&text, &o.name)
+        && out != text
+    {
+        if kubeconfig_is_empty(&out) {
+            let _ = std::fs::remove_file(&path); // we created it, and nothing else is left in it
+        } else {
+            let _ = write_private(&path, &out);
+        }
+    }
 }
 
 /// True when something accepts TCP connections on the Mac's API port. (The VM's own readiness is checked over SSH.)
@@ -805,6 +952,18 @@ pub async fn up<A: VmApi>(api: &A, o: &KubeOptions) -> Result<PathBuf> {
     if write_kubeconfig(&cluster, &o.name)? {
         eprintln!("wrote {}", cluster.kubeconfig.display());
     }
+    if !o.no_merge && o.kubeconfig.is_none() {
+        match merge_default_kubeconfig(o, false) {
+            Ok(true) => eprintln!(
+                "added context {:?} to ~/.kube/config: plain `kubectl` works (`fluxctl kube use` makes it the current one)",
+                o.name
+            ),
+            Ok(false) => {}
+            Err(e) => eprintln!(
+                "could not add it to ~/.kube/config (the cluster still works with KUBECONFIG): {e:#}"
+            ),
+        }
+    }
     match ensure_forward(o, &cluster)? {
         Some(pid) => eprintln!(
             "forwarding the API server to 127.0.0.1:{} (pid {pid})",
@@ -876,6 +1035,7 @@ pub async fn down<A: VmApi>(api: &A, o: &KubeOptions, purge: bool) -> Result<()>
     }
     if purge {
         let _ = std::fs::remove_file(home_kube(o)?);
+        unmerge_default_kubeconfig(o);
     }
     Ok(())
 }
@@ -897,6 +1057,9 @@ pub struct SuperviseFlags {
     /// default. Single-node clusters only. A Studio page that is open counts as traffic.
     #[arg(long, value_parser = crate::parse_age_secs)]
     pub idle_sleep: Option<u64>,
+    /// Do not serve `http://<service>.<namespace>.localhost` on 127.0.0.1:80 for the published services.
+    #[arg(long)]
+    pub no_names: bool,
     /// Also put the cluster to sleep while the Mac runs on battery, once there has been no traffic for 2 minutes.
     #[arg(long)]
     pub sleep_on_battery: bool,
@@ -928,6 +1091,9 @@ impl SuperviseFlags {
         }
         if let Some(s) = self.idle_sleep {
             a.extend(["--idle-sleep".to_owned(), s.to_string()]);
+        }
+        if self.no_names {
+            a.push("--no-names".to_owned());
         }
         if self.sleep_on_battery {
             a.push("--sleep-on-battery".to_owned());
@@ -1127,6 +1293,7 @@ async fn publish_services<A: VmApi>(
     api: &A,
     o: &KubeOptions,
     open: &mut Vec<(u16, u16)>,
+    names: Option<&crate::kube_names::Names>,
 ) -> Result<bool> {
     let mut cluster = ensure_vm(api, o).await?;
     let found = read_services(&cluster)?;
@@ -1134,6 +1301,14 @@ async fn publish_services<A: VmApi>(
     let desired = ports_to_open(&found, &cluster.publish, o.api_port, |p| {
         !ours.iter().any(|(h, _)| *h == p) && port_in_use(p)
     });
+    if let Some(names) = names {
+        let published: Vec<NodePortService> = found
+            .iter()
+            .filter(|s| desired.iter().any(|(h, _)| *h == s.port))
+            .cloned()
+            .collect();
+        *names.lock().unwrap() = crate::kube_names::route_table(&published);
+    }
     if desired == *open {
         return Ok(false);
     }
@@ -1148,6 +1323,7 @@ async fn publish_services<A: VmApi>(
 
 /// `fluxctl kube supervise`: keeps the VM running and the API port answering, for launchd. Never returns.
 /// Unless `auto_publish` is off, it also forwards each NodePort and LoadBalancer service to 127.0.0.1.
+#[allow(clippy::too_many_arguments)]
 pub async fn supervise<A: VmApi>(
     api: &A,
     o: &KubeOptions,
@@ -1156,20 +1332,38 @@ pub async fn supervise<A: VmApi>(
     auto_checkpoint: Option<(Duration, usize)>,
     idle_sleep: Option<Duration>,
     sleep_on_power: (bool, bool),
+    local_names: bool,
 ) -> Result<()> {
     validate(o)?;
+    let names = (auto_publish && local_names).then(crate::kube_names::Names::default);
+    if let Some(n) = &names {
+        tokio::spawn(crate::kube_names::serve(n.clone()));
+    }
     let mut idle = IdleWatch::default();
     let mut open: Vec<(u16, u16)> = vec![];
     let mut parked: Vec<u16> = vec![]; // the service ports that were published when the cluster went to sleep
     let mut last_auto = Instant::now();
     loop {
+        if sleep_in_progress(o) {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            continue;
+        }
         if crate::kube_checkpoint::is_asleep(api, o).await {
             if !open.is_empty() {
                 parked = open.iter().map(|(h, _)| *h).collect();
             }
             open.clear();
             idle.reset();
-            wake_on_demand(api, o, every, &parked, auto_publish, &mut open).await;
+            wake_on_demand(
+                api,
+                o,
+                every,
+                &parked,
+                auto_publish,
+                &mut open,
+                names.as_ref(),
+            )
+            .await;
             continue;
         }
         let mut healthy = api_answers(o.api_port)
@@ -1189,8 +1383,13 @@ pub async fn supervise<A: VmApi>(
                 Err(e) => eprintln!("kubernetes is not ready, will retry: {e:#}"),
             }
         }
-        if auto_publish && let Err(e) = publish_services(api, o, &mut open).await {
-            eprintln!("publishing services, will retry: {e:#}");
+        if auto_publish {
+            match publish_services(api, o, &mut open, names.as_ref()).await {
+                // remembered apart from `open`, which is cleared whenever the cluster looks down (a hand-run `kube sleep`
+                // does that for a moment before supervise sees it is asleep)
+                Ok(_) => parked = open.iter().map(|(h, _)| *h).collect(),
+                Err(e) => eprintln!("publishing services, will retry: {e:#}"),
+            }
         }
         let watching = idle_sleep.is_some() || sleep_on_power.0 || sleep_on_power.1;
         if watching
@@ -1244,6 +1443,7 @@ async fn wake_on_demand<A: VmApi>(
     parked: &[u16],
     auto_publish: bool,
     open: &mut Vec<(u16, u16)>,
+    names: Option<&crate::kube_names::Names>,
 ) {
     use tokio::net::{TcpListener, TcpStream};
     let mut waiting = tokio::task::JoinSet::new();
@@ -1268,7 +1468,7 @@ async fn wake_on_demand<A: VmApi>(
     }
     if port != o.api_port
         && auto_publish
-        && let Err(e) = publish_services(api, o, open).await
+        && let Err(e) = publish_services(api, o, open, names).await
     {
         return eprintln!("publishing services after the wake, will retry: {e:#}");
     }
@@ -2355,6 +2555,55 @@ mod tests {
         assert_eq!(got, vec![(30080, 30080)]);
     }
 
+    const OURS: &str = "apiVersion: v1\nclusters:\n- cluster:\n    server: https://127.0.0.1:6443\n  name: dev\ncontexts:\n- context:\n    cluster: dev\n    user: dev\n  name: dev\ncurrent-context: dev\nkind: Config\nusers:\n- name: dev\n  user:\n    token: t\n";
+    const MINE: &str = "apiVersion: v1\nclusters:\n- cluster:\n    server: https://prod\n  name: prod\ncontexts:\n- context:\n    cluster: prod\n    user: me\n  name: prod\ncurrent-context: prod\nkind: Config\nusers:\n- name: me\n  user:\n    token: secret\n";
+
+    #[test]
+    fn merging_adds_the_cluster_and_never_steals_the_current_context() {
+        let out = merge_kubeconfig(Some(MINE), OURS, "dev", false).unwrap();
+        let v: serde_yaml::Value = serde_yaml::from_str(&out).unwrap();
+        assert_eq!(
+            v["current-context"].as_str(),
+            Some("prod"),
+            "someone's prod context stays current"
+        );
+        assert_eq!(v["clusters"].as_sequence().unwrap().len(), 2);
+        assert_eq!(v["users"].as_sequence().unwrap().len(), 2);
+        assert_eq!(v["contexts"].as_sequence().unwrap().len(), 2);
+        assert!(out.contains("token: secret"), "their entries are kept");
+        // merging again changes nothing
+        assert_eq!(
+            merge_kubeconfig(Some(&out), OURS, "dev", false).unwrap(),
+            out
+        );
+        // `use` switches
+        let used = merge_kubeconfig(Some(&out), OURS, "dev", true).unwrap();
+        assert!(used.contains("current-context: dev"));
+    }
+
+    #[test]
+    fn merging_into_nothing_makes_it_current_and_unmerging_removes_it() {
+        let out = merge_kubeconfig(None, OURS, "dev", false).unwrap();
+        assert!(out.contains("current-context: dev"));
+        let back = unmerge_kubeconfig(&out, "dev").unwrap();
+        let v: serde_yaml::Value = serde_yaml::from_str(&back).unwrap();
+        assert!(v["clusters"].as_sequence().unwrap().is_empty());
+        assert_eq!(v["current-context"].as_str(), Some(""));
+        let kept = unmerge_kubeconfig(
+            &merge_kubeconfig(Some(MINE), OURS, "dev", false).unwrap(),
+            "dev",
+        )
+        .unwrap();
+        assert!(
+            kept.contains("name: prod")
+                && !kept.contains("name: dev")
+                && kept.contains("current-context: prod")
+        );
+        assert!(merge_kubeconfig(Some("- not a mapping"), OURS, "dev", false).is_err());
+        assert!(kubeconfig_is_empty(&back));
+        assert!(!kubeconfig_is_empty(&kept));
+    }
+
     #[test]
     fn friendly_url_names_the_service() {
         assert_eq!(
@@ -2410,6 +2659,7 @@ mod tests {
             auto_checkpoint: Some(3600),
             keep_auto: 4,
             idle_sleep: Some(1800),
+            no_names: true,
             sleep_on_battery: true,
             sleep_on_lid_close: true,
         };
@@ -2423,6 +2673,7 @@ mod tests {
                 "4",
                 "--idle-sleep",
                 "1800",
+                "--no-names",
                 "--sleep-on-battery",
                 "--sleep-on-lid-close"
             ]

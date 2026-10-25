@@ -86,7 +86,14 @@ for flannel.
 
 `up` reads `/etc/rancher/k3s/k3s.yaml` from the guest over SSH, points `server:` at `https://127.0.0.1:<api-port>`, renames the
 cluster, user and context from `default` to the VM name (so merging with other files does not collide), and writes it with mode 600
-to `~/.kube/fluxvm-NAME.yaml`. Your own `~/.kube/config` is never touched. To use both:
+to `~/.kube/fluxvm-NAME.yaml`.
+
+**Plain `kubectl` just works.** `up` also adds the cluster, user and context to your `~/.kube/config`, so `kubectl`, `helm`, `k9s`, Lens and
+IDE plugins see it with no `KUBECONFIG` to export. It never switches you behind your back: the new context becomes the current one only
+if you had none, so a `kubectl` pointed at another cluster stays pointed there. `fluxctl kube use` makes this cluster current. Your
+file is backed up once as `~/.kube/config.pre-fluxvm`, other entries are kept untouched, and `down --purge` takes this cluster out again
+(and deletes the file if it was created for it and nothing else is left). `up --no-merge-kubeconfig` leaves `~/.kube/config` alone, as does
+`--kubeconfig PATH`; then to use both files:
 
 ```bash
 export KUBECONFIG=~/.kube/config:$HOME/.kube/fluxvm-fluxvm-kube.yaml
@@ -105,6 +112,12 @@ The API server certificate carries `127.0.0.1` as a SAN, so `kubectl` verifies i
   and `curl http://127.0.0.1:<nodePort>` works with no flags. Only loopback; ports below 1024, the API port and ports something on the
   Mac already uses are skipped. `fluxctl kube services` lists them as JSON with `published`, `url` and `friendly_url` (`http://<service>.<namespace>.localhost:<port>`, which browsers and macOS resolve to loopback, so two services are told apart by name). Turn it off with
   `supervise --no-auto-publish`. Changing the set restarts the SSH forward, so `kubectl` may pause for a moment.
+* **By name, on port 80.** While `supervise` runs, every published service is also reachable as
+  `http://<service>.<namespace>.localhost` (and `http://<service>.localhost` for the `default` namespace): no port number, no
+  `/etc/hosts`, because `*.localhost` resolves to this Mac. An unknown name answers with a page that lists the known ones. A request by
+  name to a **sleeping** cluster wakes it (3 seconds measured) and is answered. macOS lets an ordinary user take port 80 only on the
+  wildcard address, so the listener falls back to it and drops every connection that does not come from this Mac. If something already
+  uses port 80 the names are skipped and the node-port URLs still work; `supervise --no-names` turns them off. HTTP only for now.
 * `kubectl port-forward` also works, since it goes through the API server.
 
 ## Images
