@@ -225,10 +225,50 @@ fn try_labels(labels: &[String]) -> Vec<String> {
     v
 }
 
-/// The `try-` labels beyond the newest `keep`, oldest first: the ones to delete.
-pub(crate) fn stale_tries(labels: &[String], keep: usize) -> Vec<String> {
-    let v = try_labels(labels);
+/// The labels starting with `prefix` beyond the newest `keep`, oldest first: the ones to delete.
+fn stale_with(labels: &[String], prefix: &str, keep: usize) -> Vec<String> {
+    let mut v: Vec<String> = labels
+        .iter()
+        .filter(|l| l.starts_with(prefix))
+        .cloned()
+        .collect();
+    v.sort();
     v[..v.len().saturating_sub(keep)].to_vec()
+}
+
+/// The `try-` labels beyond the newest `keep`.
+pub(crate) fn stale_tries(labels: &[String], keep: usize) -> Vec<String> {
+    stale_with(labels, TRY_PREFIX, keep)
+}
+
+/// Checkpoints that `kube supervise --auto-checkpoint` makes are named `auto-<UTC time>`.
+const AUTO_PREFIX: &str = "auto-";
+
+pub(crate) fn auto_label(now: chrono::DateTime<chrono::Utc>) -> String {
+    format!("{AUTO_PREFIX}{}", now.format("%Y%m%d-%H%M%S"))
+}
+
+pub(crate) fn stale_autos(labels: &[String], keep: usize) -> Vec<String> {
+    stale_with(labels, AUTO_PREFIX, keep)
+}
+
+/// One round of the time machine: saves an `auto-` checkpoint when the cluster is running, then deletes the oldest ones
+/// beyond `keep`. A stopped, sleeping or missing cluster is skipped, not an error.
+pub async fn auto_checkpoint<A: VmApi>(
+    api: &A,
+    o: &kube_host::KubeOptions,
+    keep: usize,
+) -> Result<Option<String>> {
+    let (id, status) = server(api, o).await?;
+    if status != "running" {
+        return Ok(None);
+    }
+    let label = auto_label(chrono::Utc::now());
+    let done = checkpoint(api, o, &label).await?;
+    for old in stale_autos(&labels_of(api, id).await?, keep) {
+        api.delete_snapshot(id, &tag_of(&old)).await?;
+    }
+    Ok(Some(done))
 }
 
 async fn labels_of<A: VmApi>(api: &A, id: Uuid) -> Result<Vec<String>> {
@@ -606,5 +646,39 @@ mod tests {
         let api = fake("running");
         let e = undo(&api, &opts()).await.unwrap_err().to_string();
         assert!(e.contains("nothing to undo"), "{e}");
+    }
+
+    #[tokio::test]
+    async fn auto_checkpoints_are_taken_when_running_and_pruned_to_the_newest() {
+        let stopped = fake("stopped");
+        assert_eq!(auto_checkpoint(&stopped, &opts(), 2).await.unwrap(), None);
+        assert!(stopped.calls.lock().unwrap().is_empty());
+        let api = fake("running");
+        for old in [
+            "auto-20260101-000000",
+            "auto-20260102-000000",
+            "auto-20260103-000000",
+            "keepme",
+        ] {
+            api.snaps
+                .lock()
+                .unwrap()
+                .push((Uuid::from_u128(1), tag_of(old)));
+        }
+        assert!(auto_checkpoint(&api, &opts(), 2).await.unwrap().is_some());
+        let left: Vec<String> = api
+            .snaps
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|s| s.1.clone())
+            .collect();
+        assert!(left.contains(&"kube-keepme".to_owned()));
+        assert!(!left.contains(&"kube-auto-20260101-000000".to_owned()));
+        assert!(!left.contains(&"kube-auto-20260102-000000".to_owned()));
+        assert_eq!(
+            left.iter().filter(|t| t.starts_with("kube-auto-")).count(),
+            2
+        );
     }
 }
