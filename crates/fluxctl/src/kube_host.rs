@@ -897,6 +897,12 @@ pub struct SuperviseFlags {
     /// default. Single-node clusters only. A Studio page that is open counts as traffic.
     #[arg(long, value_parser = crate::parse_age_secs)]
     pub idle_sleep: Option<u64>,
+    /// Also put the cluster to sleep while the Mac runs on battery, once there has been no traffic for 2 minutes.
+    #[arg(long)]
+    pub sleep_on_battery: bool,
+    /// Also put the cluster to sleep while the Mac's lid is closed, once there has been no traffic for 2 minutes.
+    #[arg(long)]
+    pub sleep_on_lid_close: bool,
 }
 
 impl SuperviseFlags {
@@ -923,8 +929,52 @@ impl SuperviseFlags {
         if let Some(s) = self.idle_sleep {
             a.extend(["--idle-sleep".to_owned(), s.to_string()]);
         }
+        if self.sleep_on_battery {
+            a.push("--sleep-on-battery".to_owned());
+        }
+        if self.sleep_on_lid_close {
+            a.push("--sleep-on-lid-close".to_owned());
+        }
         a
     }
+}
+
+/// `pmset -g batt` says the Mac is drawing from the battery.
+pub(crate) fn on_battery(pmset: &str) -> bool {
+    pmset.contains("'Battery Power'")
+}
+
+/// `ioreg -r -k AppleClamshellState -d 4` says the lid is closed (a laptop only; a desktop has no such key).
+pub(crate) fn lid_closed(ioreg: &str) -> bool {
+    ioreg
+        .lines()
+        .any(|l| l.contains("\"AppleClamshellState\"") && l.trim_end().ends_with("Yes"))
+}
+
+/// How long the forwarder must have been quiet before a power condition parks the cluster, so a `kubectl` that just woke it
+/// is not undone at once.
+const POWER_QUIET: Duration = Duration::from_secs(120);
+
+fn power_says_sleep(battery: bool, lid: bool) -> Option<&'static str> {
+    let out = |cmd: &str, args: &[&str]| {
+        std::process::Command::new(cmd)
+            .args(args)
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+            .unwrap_or_default()
+    };
+    if battery && on_battery(&out("pmset", &["-g", "batt"])) {
+        return Some("the Mac is on battery");
+    }
+    if lid
+        && lid_closed(&out(
+            "ioreg",
+            &["-r", "-k", "AppleClamshellState", "-d", "4"],
+        ))
+    {
+        return Some("the Mac's lid is closed");
+    }
+    None
 }
 
 /// Total bytes in and out of a process from `nettop -P -L 1 -x -p PID` (CSV).
@@ -1105,6 +1155,7 @@ pub async fn supervise<A: VmApi>(
     auto_publish: bool,
     auto_checkpoint: Option<(Duration, usize)>,
     idle_sleep: Option<Duration>,
+    sleep_on_power: (bool, bool),
 ) -> Result<()> {
     validate(o)?;
     let mut idle = IdleWatch::default();
@@ -1133,25 +1184,32 @@ pub async fn supervise<A: VmApi>(
         if auto_publish && let Err(e) = publish_services(api, o, &mut open).await {
             eprintln!("publishing services, will retry: {e:#}");
         }
-        if let Some(after) = idle_sleep
+        let watching = idle_sleep.is_some() || sleep_on_power.0 || sleep_on_power.1;
+        if watching
             && healthy_enough(api, o).await
             && let Some(total) = forwarder_bytes(o)
-            && idle.tick(total, Instant::now()) >= after
         {
-            eprintln!(
-                "no traffic for {}s: putting the cluster to sleep",
-                after.as_secs()
-            );
-            idle.reset();
-            match crate::kube_checkpoint::sleep(api, o).await {
-                // asleep: go straight back to the top, which opens the wake port at once
-                Ok(m) => eprintln!("{m}"),
-                Err(e) => {
-                    eprintln!("could not sleep, will retry: {e:#}");
-                    tokio::time::sleep(every).await;
+            let quiet = idle.tick(total, Instant::now());
+            let why = if idle_sleep.is_some_and(|after| quiet >= after) {
+                Some(format!("no traffic for {}s", quiet.as_secs()))
+            } else if quiet >= POWER_QUIET {
+                power_says_sleep(sleep_on_power.0, sleep_on_power.1).map(str::to_owned)
+            } else {
+                None
+            };
+            if let Some(why) = why {
+                eprintln!("{why}: putting the cluster to sleep");
+                idle.reset();
+                match crate::kube_checkpoint::sleep(api, o).await {
+                    // asleep: go straight back to the top, which opens the wake port at once
+                    Ok(m) => eprintln!("{m}"),
+                    Err(e) => {
+                        eprintln!("could not sleep, will retry: {e:#}");
+                        tokio::time::sleep(every).await;
+                    }
                 }
+                continue;
             }
-            continue;
         }
         if let Some((gap, keep)) = auto_checkpoint
             && healthy_enough(api, o).await
@@ -2299,12 +2357,28 @@ mod tests {
     }
 
     #[test]
+    fn power_state_is_read_from_pmset_and_ioreg() {
+        assert!(on_battery(
+            "Now drawing from 'Battery Power'\n -InternalBattery-0 (id=1)\t80%; discharging"
+        ));
+        assert!(!on_battery(
+            "Now drawing from 'AC Power'\n -InternalBattery-0\t80%; charging"
+        ));
+        assert!(!on_battery(""));
+        assert!(lid_closed("    | |   \"AppleClamshellState\" = Yes\n"));
+        assert!(!lid_closed("    | |   \"AppleClamshellState\" = No\n"));
+        assert!(!lid_closed(""));
+    }
+
+    #[test]
     fn supervise_flags_become_agent_arguments_and_are_checked() {
         let f = SuperviseFlags {
             no_auto_publish: true,
             auto_checkpoint: Some(3600),
             keep_auto: 4,
             idle_sleep: Some(1800),
+            sleep_on_battery: true,
+            sleep_on_lid_close: true,
         };
         assert_eq!(
             f.args(),
@@ -2315,7 +2389,9 @@ mod tests {
                 "--keep-auto",
                 "4",
                 "--idle-sleep",
-                "1800"
+                "1800",
+                "--sleep-on-battery",
+                "--sleep-on-lid-close"
             ]
         );
         assert!(SuperviseFlags::default().args().is_empty());

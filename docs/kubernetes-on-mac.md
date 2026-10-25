@@ -207,6 +207,12 @@ so running `undo` again goes one step further back. The command's exit code is p
 checkpoints. Put cluster flags such as `--name` before the `--`; everything after it is the command. Single-node clusters only.
 On a real cluster, deleting a deployment through `try` and then `undo` brought back the deployment and its original pod (save 1.5 s, undo 12.5 s).
 
+## Sleep when the Mac does not need it
+
+On a laptop, `fluxctl kube supervise --sleep-on-battery` parks the cluster while the Mac runs on battery, and `--sleep-on-lid-close` does the
+same while the lid is closed. Each waits for 2 minutes without traffic through the API port or published services first, so a `kubectl` that
+has just woken the cluster is not undone at once. The next `kubectl` wakes it. `fluxctl kube agent install` accepts both flags.
+
 ## Break it on purpose
 
 `fluxctl kube chaos SCENARIO --check 'COMMAND'` saves a checkpoint, causes a fault, waits `--hold` seconds (20 by default), runs your check

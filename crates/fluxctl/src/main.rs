@@ -8024,6 +8024,7 @@ async fn kube_command<A: run::VmApi>(api: &A, command: KubeCommand) -> Result<()
                     .auto_checkpoint
                     .map(|s| (std::time::Duration::from_secs(s.max(60)), flags.keep_auto)),
                 flags.idle_sleep.map(std::time::Duration::from_secs),
+                (flags.sleep_on_battery, flags.sleep_on_lid_close),
             )
             .await?;
         }
