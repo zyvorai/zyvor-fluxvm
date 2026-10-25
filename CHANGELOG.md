@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- **`fluxctl kube up` on a sleeping cluster wakes it** from the sleep checkpoint instead of cold-booting the VM. Proved on a real k3s: `up` on a sleeping cluster took 3 s and the node was Ready.
 - **`fluxctl kube services` also prints a `friendly_url`**, `http://<service>.<namespace>.localhost:<port>`. `*.localhost` resolves to loopback, so
   services are told apart by name. Unit-tested only; not run against a live cluster.
 - **`fluxctl kube supervise --idle-sleep 30m`, and the LaunchAgent takes the supervise flags.** The cluster parks itself after that long with no
