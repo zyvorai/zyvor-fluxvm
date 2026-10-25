@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- **`fluxctl kube supervise --idle-sleep 30m`, and the LaunchAgent takes the supervise flags.** The cluster parks itself after that long with no
+  traffic through the API port or published services (measured from the SSH forwarder's byte counts; an open Studio page counts), and the next
+  `kubectl` wakes it. `kube agent install` now accepts `--idle-sleep`, `--auto-checkpoint`, `--keep-auto` and `--no-auto-publish`. Proved on a
+  real k3s: `--idle-sleep 60` slept after about 80 s and a `kubectl` woke it in 2 s. Off by default; single-node clusters only.
 - **`fluxctl kube supervise --auto-checkpoint 1h --keep-auto 6`: a rolling time machine.** While the cluster runs, supervise saves an `auto-<time>`
   checkpoint on that interval and deletes the oldest beyond the newest N; stopped or sleeping clusters are skipped. Proved on a real k3s with a
   1 minute interval and `--keep-auto 2`: a checkpoint (1.1 to 1.8 s each) appeared every minute and the list stayed at two. Off by default.

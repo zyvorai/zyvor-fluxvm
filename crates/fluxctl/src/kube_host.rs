@@ -842,6 +842,114 @@ pub async fn down<A: VmApi>(api: &A, o: &KubeOptions, purge: bool) -> Result<()>
     Ok(())
 }
 
+/// What `kube supervise` does besides keeping the cluster up. Shared by `supervise` and `agent install`.
+#[derive(clap::Args, Debug, Clone, Default)]
+pub struct SuperviseFlags {
+    /// Do not forward NodePort and LoadBalancer services to 127.0.0.1.
+    #[arg(long)]
+    pub no_auto_publish: bool,
+    /// Save a checkpoint this often while the cluster runs: seconds, or with a suffix s, m, h, d (`1h`). Off by default.
+    /// Single-node clusters only; they are named `auto-<time>`.
+    #[arg(long, value_parser = crate::parse_age_secs)]
+    pub auto_checkpoint: Option<u64>,
+    /// How many automatic checkpoints to keep; older ones are deleted.
+    #[arg(long, default_value_t = 6)]
+    pub keep_auto: usize,
+    /// Put the cluster to sleep after this long with no traffic through its API port or published services (`30m`). Off by
+    /// default. Single-node clusters only. A Studio page that is open counts as traffic.
+    #[arg(long, value_parser = crate::parse_age_secs)]
+    pub idle_sleep: Option<u64>,
+}
+
+impl SuperviseFlags {
+    pub fn check(&self) -> Result<()> {
+        if self.keep_auto == 0 {
+            bail!("--keep-auto must be at least 1");
+        }
+        if self.idle_sleep.is_some_and(|s| s < 60) {
+            bail!("--idle-sleep must be at least 1 minute");
+        }
+        Ok(())
+    }
+
+    /// The flags as `supervise` takes them, for the LaunchAgent.
+    pub fn args(&self) -> Vec<String> {
+        let mut a = vec![];
+        if self.no_auto_publish {
+            a.push("--no-auto-publish".to_owned());
+        }
+        if let Some(s) = self.auto_checkpoint {
+            a.extend(["--auto-checkpoint".to_owned(), s.to_string()]);
+            a.extend(["--keep-auto".to_owned(), self.keep_auto.to_string()]);
+        }
+        if let Some(s) = self.idle_sleep {
+            a.extend(["--idle-sleep".to_owned(), s.to_string()]);
+        }
+        a
+    }
+}
+
+/// Total bytes in and out of a process from `nettop -P -L 1 -x -p PID` (CSV).
+pub(crate) fn parse_nettop(csv: &str) -> Option<u64> {
+    let mut lines = csv.lines();
+    let header: Vec<&str> = lines.next()?.split(',').collect();
+    let (i, o) = (
+        header.iter().position(|c| *c == "bytes_in")?,
+        header.iter().position(|c| *c == "bytes_out")?,
+    );
+    let row: Vec<&str> = lines.next()?.split(',').collect();
+    Some(row.get(i)?.trim().parse::<u64>().ok()? + row.get(o)?.trim().parse::<u64>().ok()?)
+}
+
+/// Bytes a tick may move through the forwarder (keep-alives, our own health probe) and still count as idle.
+const IDLE_BYTES: u64 = 16 * 1024;
+
+/// Tracks whether the forwarder has been quiet: feed it each tick's byte total.
+#[derive(Debug, Default)]
+pub(crate) struct IdleWatch {
+    last: Option<u64>,
+    quiet_since: Option<Instant>,
+}
+
+impl IdleWatch {
+    /// How long traffic has been below the threshold, or zero when it just moved or this is the first reading.
+    pub(crate) fn tick(&mut self, total: u64, now: Instant) -> Duration {
+        let moved = self
+            .last
+            .is_none_or(|l| total < l || total - l > IDLE_BYTES);
+        self.last = Some(total);
+        if moved {
+            self.quiet_since = Some(now);
+        }
+        self.quiet_since.map_or(Duration::ZERO, |t| now - t)
+    }
+
+    pub(crate) fn reset(&mut self) {
+        *self = Self::default();
+    }
+}
+
+/// The pid of the SSH forwarder, from its pid file.
+fn forwarder_pid_of(o: &KubeOptions) -> Option<u32> {
+    std::fs::read_to_string(forwarder_pid(o))
+        .ok()?
+        .lines()
+        .next()?
+        .trim()
+        .parse()
+        .ok()
+}
+
+/// Bytes the forwarder has carried so far, from `nettop` (macOS; no sudo).
+fn forwarder_bytes(o: &KubeOptions) -> Option<u64> {
+    let pid = forwarder_pid_of(o)?;
+    let out = Command::new("nettop")
+        .args(["-P", "-L", "1", "-x", "-p", &pid.to_string()])
+        .output()
+        .ok()?;
+    parse_nettop(&String::from_utf8_lossy(&out.stdout))
+}
+
 /// A Service the cluster exposes on a node port.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NodePortService {
@@ -952,13 +1060,16 @@ pub async fn supervise<A: VmApi>(
     every: Duration,
     auto_publish: bool,
     auto_checkpoint: Option<(Duration, usize)>,
+    idle_sleep: Option<Duration>,
 ) -> Result<()> {
     validate(o)?;
+    let mut idle = IdleWatch::default();
     let mut open: Vec<(u16, u16)> = vec![];
     let mut last_auto = Instant::now();
     loop {
         if crate::kube_checkpoint::is_asleep(api, o).await {
             open.clear();
+            idle.reset();
             wake_on_demand(api, o, every).await;
             continue;
         }
@@ -977,6 +1088,26 @@ pub async fn supervise<A: VmApi>(
         }
         if auto_publish && let Err(e) = publish_services(api, o, &mut open).await {
             eprintln!("publishing services, will retry: {e:#}");
+        }
+        if let Some(after) = idle_sleep
+            && healthy_enough(api, o).await
+            && let Some(total) = forwarder_bytes(o)
+            && idle.tick(total, Instant::now()) >= after
+        {
+            eprintln!(
+                "no traffic for {}s: putting the cluster to sleep",
+                after.as_secs()
+            );
+            idle.reset();
+            match crate::kube_checkpoint::sleep(api, o).await {
+                // asleep: go straight back to the top, which opens the wake port at once
+                Ok(m) => eprintln!("{m}"),
+                Err(e) => {
+                    eprintln!("could not sleep, will retry: {e:#}");
+                    tokio::time::sleep(every).await;
+                }
+            }
+            continue;
         }
         if let Some((gap, keep)) = auto_checkpoint
             && healthy_enough(api, o).await
@@ -1053,6 +1184,7 @@ pub fn render_agent(
     o: &KubeOptions,
     log: &Path,
     env: &[(String, String)],
+    extras: &[String],
 ) -> String {
     let mut args = vec![
         fluxctl.display().to_string(),
@@ -1107,6 +1239,7 @@ pub fn render_agent(
     if o.traefik {
         args.push("--traefik".into());
     }
+    args.extend(extras.iter().cloned());
     dh::render_plist(AGENT_LABEL, &args, log, env)
 }
 
@@ -1381,12 +1514,15 @@ fn agent_paths(home: &Path) -> (PathBuf, PathBuf) {
 }
 
 /// `fluxctl kube agent install`: write the LaunchAgent and load it.
-pub fn agent_install(o: &KubeOptions) -> Result<PathBuf> {
+pub fn agent_install(o: &KubeOptions, extras: &[String]) -> Result<PathBuf> {
     validate(o)?;
     let (plist, log) = agent_paths(&dh::home()?);
     let exe = std::env::current_exe().context("finding fluxctl's own path")?;
     std::fs::create_dir_all(plist.parent().unwrap())?;
-    std::fs::write(&plist, render_agent(&exe, o, &log, &dh::carried_env()))?;
+    std::fs::write(
+        &plist,
+        render_agent(&exe, o, &log, &dh::carried_env(), extras),
+    )?;
     dh::launchctl_load(AGENT_LABEL, &plist)?;
     Ok(plist)
 }
@@ -1612,6 +1748,7 @@ mod tests {
             &o,
             Path::new("/tmp/log"),
             &env,
+            &[],
         );
         for want in [
             AGENT_LABEL,
@@ -1866,7 +2003,7 @@ mod tests {
             offline: Some("/Users/me/k3s".into()),
             ..Default::default()
         };
-        let p = render_agent(Path::new("/x/fluxctl"), &o, Path::new("/l"), &[]);
+        let p = render_agent(Path::new("/x/fluxctl"), &o, Path::new("/l"), &[], &[]);
         for want in [
             "<string>--workers</string>",
             "<string>2</string>",
@@ -2085,5 +2222,67 @@ mod tests {
     #[test]
     fn service_url_is_loopback_only() {
         assert_eq!(service_url(30080), "http://127.0.0.1:30080");
+    }
+
+    #[test]
+    fn nettop_csv_gives_total_bytes() {
+        let csv = "time,,interface,state,bytes_in,bytes_out,rx_dupe,\n11:20:59.876,ssh.20565,,,139406,199354,648,\n";
+        assert_eq!(parse_nettop(csv), Some(139406 + 199354));
+        assert_eq!(parse_nettop("time,,state\n"), None);
+        assert_eq!(parse_nettop(""), None);
+    }
+
+    #[test]
+    fn idle_watch_counts_quiet_time_and_restarts_when_traffic_moves() {
+        let t0 = Instant::now();
+        let s = |n| Duration::from_secs(n);
+        let mut w = IdleWatch::default();
+        assert_eq!(w.tick(1000, t0), Duration::ZERO); // first reading
+        assert_eq!(w.tick(1500, t0 + s(30)), s(30)); // keep-alives only
+        assert_eq!(w.tick(1600, t0 + s(60)), s(60));
+        assert_eq!(w.tick(900_000, t0 + s(90)), Duration::ZERO); // a kubectl burst
+        assert_eq!(w.tick(900_100, t0 + s(120)), s(30));
+        assert_eq!(w.tick(10, t0 + s(150)), Duration::ZERO); // forwarder restarted
+    }
+
+    #[test]
+    fn supervise_flags_become_agent_arguments_and_are_checked() {
+        let f = SuperviseFlags {
+            no_auto_publish: true,
+            auto_checkpoint: Some(3600),
+            keep_auto: 4,
+            idle_sleep: Some(1800),
+        };
+        assert_eq!(
+            f.args(),
+            [
+                "--no-auto-publish",
+                "--auto-checkpoint",
+                "3600",
+                "--keep-auto",
+                "4",
+                "--idle-sleep",
+                "1800"
+            ]
+        );
+        assert!(SuperviseFlags::default().args().is_empty());
+        assert!(f.check().is_ok());
+        assert!(
+            SuperviseFlags {
+                idle_sleep: Some(30),
+                keep_auto: 6,
+                ..Default::default()
+            }
+            .check()
+            .is_err()
+        );
+        assert!(
+            SuperviseFlags {
+                keep_auto: 0,
+                ..Default::default()
+            }
+            .check()
+            .is_err()
+        );
     }
 }
