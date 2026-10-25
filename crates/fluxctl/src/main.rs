@@ -37,6 +37,7 @@ mod fleet_cli;
 mod fleet_client;
 mod guard_cmd;
 mod infer;
+mod kube_checkpoint;
 mod kube_host;
 mod launch_agent;
 mod mcp;
@@ -337,6 +338,30 @@ enum KubeCommand {
         cluster: KubeArgs,
         #[arg(long)]
         purge: bool,
+    },
+    /// Save the running cluster as it is, memory included, under a label. A single-node cluster only.
+    Checkpoint {
+        #[command(flatten)]
+        cluster: KubeArgs,
+        /// Lowercase letters, digits and dashes, for example `before-upgrade`.
+        label: String,
+    },
+    /// Put the cluster back as a checkpoint saved it: every object and running pod, in seconds. Waits until the API answers.
+    Restore {
+        #[command(flatten)]
+        cluster: KubeArgs,
+        label: String,
+    },
+    /// List the cluster's checkpoints as JSON, newest first.
+    Checkpoints {
+        #[command(flatten)]
+        cluster: KubeArgs,
+    },
+    /// Delete a checkpoint.
+    CheckpointRm {
+        #[command(flatten)]
+        cluster: KubeArgs,
+        label: String,
     },
     /// Keep the VM running and the API port answering until stopped (what the LaunchAgent runs).
     Supervise {
@@ -7779,6 +7804,32 @@ async fn kube_command<A: run::VmApi>(api: &A, command: KubeCommand) -> Result<()
                     .join(format!("fluxvm-{}.yaml", o.name)),
             };
             println!("{}", kube_host::env_line(&kubeconfig));
+        }
+        KubeCommand::Checkpoint { cluster, label } => {
+            println!(
+                "{}",
+                kube_checkpoint::checkpoint(api, &cluster.options()?, &label).await?
+            );
+        }
+        KubeCommand::Restore { cluster, label } => {
+            println!(
+                "{}",
+                kube_checkpoint::restore(api, &cluster.options()?, &label).await?
+            );
+        }
+        KubeCommand::Checkpoints { cluster } => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(
+                    &kube_checkpoint::list(api, &cluster.options()?).await?
+                )?
+            );
+        }
+        KubeCommand::CheckpointRm { cluster, label } => {
+            println!(
+                "{}",
+                kube_checkpoint::remove(api, &cluster.options()?, &label).await?
+            );
         }
         KubeCommand::Load {
             cluster,

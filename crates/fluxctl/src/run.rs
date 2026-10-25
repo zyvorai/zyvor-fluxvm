@@ -35,6 +35,9 @@ pub trait VmApi {
     async fn find(&self, name: &str) -> Result<Option<(Uuid, String)>>;
     async fn snapshot(&self, id: Uuid, tag: &str) -> Result<()>;
     async fn has_snapshot(&self, id: Uuid, tag: &str) -> Result<bool>;
+    /// The VM's snapshots as the daemon lists them: `tag`, `created_at`, `size_bytes`, `has_memory`.
+    async fn list_snapshots(&self, id: Uuid) -> Result<Vec<Value>>;
+    async fn delete_snapshot(&self, id: Uuid, tag: &str) -> Result<()>;
     async fn stop(&self, id: Uuid) -> Result<()>;
     async fn restore(&self, id: Uuid, tag: &str) -> Result<()>;
     async fn start(&self, id: Uuid) -> Result<()>;
@@ -121,6 +124,17 @@ impl VmApi for Local<'_> {
             .await?
             .iter()
             .any(|s| s.tag == tag))
+    }
+    async fn list_snapshots(&self, id: Uuid) -> Result<Vec<Value>> {
+        self.0
+            .list_vm_snapshots(id)
+            .await?
+            .iter()
+            .map(|s| Ok(serde_json::to_value(s)?))
+            .collect()
+    }
+    async fn delete_snapshot(&self, id: Uuid, tag: &str) -> Result<()> {
+        self.0.delete_vm_snapshot(id, tag).await
     }
     async fn stop(&self, id: Uuid) -> Result<()> {
         self.0.stop(id).await.map(drop)
@@ -224,6 +238,25 @@ impl VmApi for crate::remote::Remote {
         Ok(v["items"]
             .as_array()
             .is_some_and(|a| a.iter().any(|s| s["tag"] == tag)))
+    }
+    async fn list_snapshots(&self, id: Uuid) -> Result<Vec<Value>> {
+        let v = self
+            .call(
+                reqwest::Method::GET,
+                &format!("/v1/vms/{id}/snapshots"),
+                None,
+            )
+            .await?;
+        Ok(v["items"].as_array().cloned().unwrap_or_default())
+    }
+    async fn delete_snapshot(&self, id: Uuid, tag: &str) -> Result<()> {
+        self.call(
+            reqwest::Method::DELETE,
+            &format!("/v1/vms/{id}/snapshots/{tag}"),
+            None,
+        )
+        .await
+        .map(drop)
     }
     async fn stop(&self, id: Uuid) -> Result<()> {
         self.vm_op(id, "stop").await.map(drop)

@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- **`fluxctl kube checkpoint`, `restore`, `checkpoints`, `checkpoint-rm`: save a running cluster and put it back.** A checkpoint is a snapshot of
+  the server VM with its memory, so `restore` brings back every object and running pod exactly as they were, then waits for the node and
+  re-opens the API forward. On a real one-node cluster saving took 1.0 s and restoring 12.8 s. Single-node clusters only: a cluster with
+  workers is refused with the reason. The daemon's snapshot calls are reused; `VmApi` gains `list_snapshots` and `delete_snapshot`.
 - **Studio: start, stop and restart a Docker container.** The Docker page now has a button per container for what you do most, with a spinner
   while the engine works and a toast when it answers ("web restarted", or "web was already stopped" when there was nothing to do).
   `POST /v1/docker/containers/{id}/{start|stop|restart}` (admin) is the route; any other action or a malformed id is refused before it

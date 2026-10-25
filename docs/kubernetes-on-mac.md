@@ -172,6 +172,26 @@ The first boot installs packages with apt, so it needs this Mac to be online. If
 `/var/log/cloud-init-output.log`). `fluxctl serial NAME` shows the guest's console. Fix the network and run the same command again: it picks the VM
 up where it was.
 
+## Checkpoints
+
+```bash
+fluxctl kube checkpoint before-upgrade     # save the running cluster, memory and disk
+kubectl apply -f risky.yaml                # break things
+fluxctl kube restore before-upgrade        # back as it was: every object, every running pod
+fluxctl kube checkpoints                   # label, time, size, whether memory is saved (JSON, newest first)
+fluxctl kube checkpoint-rm before-upgrade
+```
+
+A checkpoint is a snapshot of the server VM with its memory: Apple's Virtualization framework writes the guest's machine state and the disk
+is cloned (APFS), so saving takes about a second and costs next to nothing until the disk changes. `restore` stops the VM, puts the disk
+and the machine state back, starts it, waits for the node to be Ready and re-opens the API port forward; on a 2 vCPU, 3 GiB cluster that
+took 13 seconds. What was in the cluster at the checkpoint is what you get, including pods that were still terminating. Nothing a tool
+outside the VM holds (your kubeconfig, a `--publish` forward) is changed. `size` is the disk's apparent size, not what it uses.
+
+Limits: a label is 1 to 40 lowercase letters, digits or dashes; a label is used once (remove it to reuse it); the cluster must be running to
+be checkpointed; and a cluster made with `--workers` is refused, because its nodes are separate VMs on a private network that a snapshot
+of one VM cannot put back consistently. A saved state restores only on the same Mac model and a compatible macOS.
+
 ## Keep it running
 
 ```bash
