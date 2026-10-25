@@ -197,6 +197,8 @@ Limits: a label is 1 to 40 lowercase letters, digits or dashes; a label is used 
 be checkpointed; and a cluster made with `--workers` is refused, because its nodes are separate VMs on a private network that a snapshot
 of one VM cannot put back consistently. A saved state restores only on the same Mac model and a compatible macOS.
 
+The Studio's Kubernetes page has a **Checkpoints** tab with the same list, Save, Restore and Delete. After a restore from the Studio, `kube supervise` (or `kube up`) reopens the kubectl port.
+
 ## Sleep and wake
 
 `fluxctl kube sleep` saves the running cluster (a checkpoint named `sleep`) and stops its VM, so it costs no CPU and little memory.

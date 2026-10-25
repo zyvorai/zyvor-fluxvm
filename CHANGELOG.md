@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- **Studio: a Checkpoints tab on the Kubernetes page.** Save a checkpoint, restore one (with a confirm), or delete one, for a single-node cluster;
+  the same `kube-<label>` snapshots that `fluxctl kube checkpoint` makes, so each tool sees the other's. Automatic, "asleep" and "before a try"
+  checkpoints are labelled. A cluster with workers explains why it has none. NodePort and LoadBalancer services get an "open" link to
+  `127.0.0.1:<node port>` (needs `fluxctl kube supervise`). No new daemon routes: it uses the machine snapshot routes.
 - **`fluxctl kube sleep` and `wake`.** Sleep saves the cluster and stops its VM; wake brings it back as it was. Under `kube supervise` the first
   `kubectl` call wakes a sleeping cluster by itself. Proved on a real k3s: sleep 6 s, first kubectl 3 s, pod still Running. Single-node only.
   No idle timer yet.

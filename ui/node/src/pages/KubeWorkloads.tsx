@@ -3,7 +3,7 @@ import { Minus, Plus, RotateCw } from 'lucide-react';
 import type { Notify } from '../App';
 import { Button, Card, EmptyState, Pill, Skeleton, api, usePoll } from '@fluxvm/ui-core';
 import { kubeAct } from '../lib/kubeAct';
-import { type KubeService, type Replicated, type WorkloadKind, type Workloads, actionPath, ageOf, canScale, clampReplicas, inNamespace, kubeProblem, namespacesOfAll, portText, readyTone, shortImage } from '../lib/kube';
+import { type KubeService, type Replicated, type WorkloadKind, type Workloads, actionPath, ageOf, canScale, clampReplicas, inNamespace, kubeProblem, namespacesOfAll, portText, readyTone, serviceUrls, shortImage } from '../lib/kube';
 
 const enc = encodeURIComponent;
 
@@ -88,7 +88,7 @@ function ServicesTable({ rows, now }: { rows: KubeService[]; now: number }) {
             <td className="vm-name">{s.name}</td>
             <td><Pill tone={s.type === 'ClusterIP' ? 'idle' : 'info'}>{s.type}</Pill></td>
             <td className="fx-mono">{s.cluster_ip ?? '—'}</td>
-            <td className="fx-mono">{s.ports.map(portText).join(', ') || '—'}{s.external.length ? <span className="fx-muted"> · external {s.external.join(', ')}</span> : null}</td>
+            <td className="fx-mono">{s.ports.map(portText).join(', ') || '—'}{s.external.length ? <span className="fx-muted"> · external {s.external.join(', ')}</span> : null}{serviceUrls(s).map((u) => <span key={u}> · <a className="fx-link" href={u} target="_blank" rel="noreferrer" title="Open on this Mac; needs fluxctl kube supervise">open</a></span>)}</td>
             <td className="fx-mono fx-muted">{s.selector.join(', ') || '—'}</td>
             <td className="fx-muted">{ageOf(s.created, now)}</td>
           </tr>

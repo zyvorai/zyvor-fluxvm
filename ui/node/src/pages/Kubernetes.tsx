@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { Ban, CircleCheck, ScrollText, SquareTerminal, Trash2 } from 'lucide-react';
 import type { Notify } from '../App';
 import { kubeAct } from '../lib/kubeAct';
+import { KubeCheckpoints } from './KubeCheckpoints';
 import { KubeEvents } from './KubeEvents';
 import { KubeGraph } from './KubeGraph';
 import { KubeWorkloads } from './KubeWorkloads';
@@ -17,7 +18,7 @@ export function KubernetesPage({ notify }: { notify: Notify }) {
   const [picked, setPicked] = useState('');
   const current = items.find((c) => c.name === picked)?.name ?? items[0]?.name ?? '';
   const detail = usePoll(async () => (current ? await api.get<KubeDetail>(`/v1/kube/${enc(current)}`) : null), 5000, [current]);
-  const [view, setView] = useState<'overview' | 'workloads' | 'events' | 'traffic'>('overview');
+  const [view, setView] = useState<'overview' | 'workloads' | 'events' | 'traffic' | 'checkpoints'>('overview');
   const [ns, setNs] = useState('');
   const [q, setQ] = useState('');
   const [now, setNow] = useState(Date.now());
@@ -54,7 +55,7 @@ export function KubernetesPage({ notify }: { notify: Notify }) {
             onChange={(v) => (setPicked(v), setNs(''), setQ(''))}
             tabs={items.map((c) => ({ value: c.name, label: `${c.name} · ${c.nodes.filter((n) => n.status === 'running').length}/${c.nodes.length} machines up` }))}
           />
-          <Tabs value={view} onChange={setView} tabs={[{ value: 'overview', label: 'Nodes and pods' }, { value: 'workloads', label: 'Workloads' }, { value: 'events', label: 'Events' }, { value: 'traffic', label: 'Traffic' }]} />
+          <Tabs value={view} onChange={setView} tabs={[{ value: 'overview', label: 'Nodes and pods' }, { value: 'workloads', label: 'Workloads' }, { value: 'events', label: 'Events' }, { value: 'traffic', label: 'Traffic' }, { value: 'checkpoints', label: 'Checkpoints' }]} />
           {problem ? (
             <Card><EmptyState title={problem.title} body={problem.body} /></Card>
           ) : view === 'traffic' ? (
@@ -63,6 +64,8 @@ export function KubernetesPage({ notify }: { notify: Notify }) {
             <KubeWorkloads cluster={current} notify={notify} />
           ) : view === 'events' ? (
             <KubeEvents cluster={current} />
+          ) : view === 'checkpoints' ? (
+            <KubeCheckpoints cluster={current} workers={!!items.find((c) => c.name === current)?.nodes.some((n) => n.role === 'worker')} notify={notify} />
           ) : !d ? (
             <Skeleton h={160} />
           ) : (
