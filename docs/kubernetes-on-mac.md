@@ -4,6 +4,12 @@
 the pod network, its API server and a kubeconfig on your Mac.** It is the FluxVM counterpart of `colima start --kubernetes`, built the same way as [`fluxctl docker`](docker-engine.md):
 a Debian 13 VM, folders shared at matching paths, and a supervised SSH forward.
 
+Because the cluster is a VM, it can do things a Linux kind or minikube cluster cannot: **save the whole running machine in about a
+second** and put it back, so you can [undo a bad `kubectl apply`, bisect to the hour something broke, reset to a known-good state between
+test runs, break the cluster on purpose, and let it sleep and wake on demand](#time-travel-for-your-cluster).
+
+![Checkpoints on a timeline: automatic, manual, try and sleep points](assets/kube/timeline.svg)
+
 It is not the same thing as `fluxvm-kube` (see [architecture.md](architecture.md)), which is an operator that runs *inside* a
 cluster you already have.
 
@@ -97,7 +103,7 @@ The API server certificate carries `127.0.0.1` as a SAN, so `kubectl` verifies i
 * **Automatically**, while `fluxctl kube supervise` runs (the LaunchAgent does this): every NodePort and LoadBalancer service gets a
   forward on `127.0.0.1:<its node port>` within one check interval, and loses it when the service is deleted. Create a NodePort service
   and `curl http://127.0.0.1:<nodePort>` works with no flags. Only loopback; ports below 1024, the API port and ports something on the
-  Mac already uses are skipped. `fluxctl kube services` lists them as JSON with `published`, `url` and `friendly_url` (`http://<service>.<namespace>.localhost:<port>`, which browsers and macOS resolve to loopback). Turn it off with
+  Mac already uses are skipped. `fluxctl kube services` lists them as JSON with `published`, `url` and `friendly_url` (`http://<service>.<namespace>.localhost:<port>`, which browsers and macOS resolve to loopback, so two services are told apart by name). Turn it off with
   `supervise --no-auto-publish`. Changing the set restarts the SSH forward, so `kubectl` may pause for a moment.
 * `kubectl port-forward` also works, since it goes through the API server.
 
@@ -160,6 +166,11 @@ special role; the few changes below need the daemon's admin role.
   agent for its recent flows with `hubble observe`, counts each packet event once (on the sender's node, replies skipped) and folds
   them into workload-to-workload edges. The window is however long each node's flow buffer (a few thousand flows) covers.
 
+* **Checkpoints:** the cluster's checkpoints as a **timeline** (oldest left, coloured by kind: automatic, before a try, manual, asleep),
+  where a click offers to go back to that point, and as a table with **Save**, **Restore** and **Delete**. An **Undo** banner offers to put
+  the cluster back after a `fluxctl kube try`. **Sleep** saves the sleep checkpoint and stops the machine, and **Wake** restores it. Saving
+  needs the cluster to be running; clusters with workers show why they cannot be checkpointed. After a restore from the Studio, `kube
+  supervise` (or `kube up`) reopens the kubectl port.
 * **Changes:** a few things you do all the time, with a spinner on the button and a toast when the cluster answers. **+** and **−** on a
   Deployment or StatefulSet set its replicas (0 to 100); **Restart** rolls a Deployment, StatefulSet or DaemonSet the way
   `kubectl rollout restart` does; **Delete** removes a pod (after a confirmation; its controller makes a new one); **Cordon** and
@@ -177,7 +188,26 @@ The first boot installs packages with apt, so it needs this Mac to be online. If
 `/var/log/cloud-init-output.log`). `fluxctl serial NAME` shows the guest's console. Fix the network and run the same command again: it picks the VM
 up where it was.
 
-## Checkpoints
+## Time travel for your cluster
+
+Everything below rests on one thing a Linux kind, minikube or k3d cluster cannot do: **a checkpoint is the whole running machine**. Apple's
+Virtualization framework writes the guest's memory and device state, and the disk is cloned with APFS, so saving takes about a second and
+costs next to nothing until the disk changes. Putting a checkpoint back brings back every object and every running pod, not only what
+`kubectl get -o yaml` could describe. The features are built from that, and they all work on single-node clusters.
+
+![Checkpoints on a timeline: automatic, manual, try and sleep points, with restore, undo and bisect between them](assets/kube/timeline.svg)
+
+| You want to | Command | Cost on a 2 vCPU, 3 GiB cluster |
+|---|---|---|
+| Save and return to a state | `kube checkpoint LABEL` / `kube restore LABEL` | save 1.1 s, restore 8 to 13 s |
+| Undo a risky `kubectl apply` | `kube try -- CMD` then `kube undo` | save 1.5 s, undo 12.5 s |
+| Keep a rolling history | `kube supervise --auto-checkpoint 1h` | about 1 s each, little disk |
+| Find when it broke | `kube bisect -- TEST` | 5 restores for 7 checkpoints, 54 s |
+| Start every test clean | `kube golden`, `kube reset`, `kube matrix` | reset about 8 s |
+| Check your app survives failure | `kube chaos SCENARIO --check CMD` | fault, hold, restore |
+| Stop paying for an idle cluster | `kube sleep`, `--idle-sleep`, `--sleep-on-battery` | sleep 6 s, wake 2 s |
+
+### Checkpoints
 
 ```bash
 fluxctl kube checkpoint before-upgrade     # save the running cluster, memory and disk
@@ -187,69 +217,108 @@ fluxctl kube checkpoints                   # label, time, size, whether memory i
 fluxctl kube checkpoint-rm before-upgrade
 ```
 
-A checkpoint is a snapshot of the server VM with its memory: Apple's Virtualization framework writes the guest's machine state and the disk
-is cloned (APFS), so saving takes about a second and costs next to nothing until the disk changes. `restore` stops the VM, puts the disk
-and the machine state back, starts it, waits for the node to be Ready and re-opens the API port forward; on a 2 vCPU, 3 GiB cluster that
-took 13 seconds. What was in the cluster at the checkpoint is what you get, including pods that were still terminating. Nothing a tool
-outside the VM holds (your kubeconfig, a `--publish` forward) is changed. `size` is the disk's apparent size, not what it uses.
+`restore` stops the VM, puts the disk and the machine state back, starts it, waits for the node to be Ready, re-opens the API port forward
+and steps the guest's clock. What was in the cluster at the checkpoint is what you get, including pods that were still terminating. Nothing
+a tool outside the VM holds (your kubeconfig, a `--publish` forward) is changed. `size` is the disk's apparent size, not what it uses.
 
-Limits: a label is 1 to 40 lowercase letters, digits or dashes; a label is used once (remove it to reuse it); the cluster must be running to
-be checkpointed; and a cluster made with `--workers` is refused, because its nodes are separate VMs on a private network that a snapshot
+**The clock.** A restored guest wakes with the clock it was saved with: measured on a real cluster, 342 seconds behind after a 4 minute
+gap, correcting itself in 20 to 80 seconds through the guest's time service. `kube restore`, `kube wake` and `kube undo` now restart that
+service at once (skew 0 s right after the restore). A restore made from the Studio does not, so the guest catches up on its own within a minute.
+
+Limits: a label is 1 to 40 lowercase letters, digits or dashes; a label is used once (remove it to reuse it); the cluster must be running
+to be checkpointed; and a cluster made with `--workers` is refused, because its nodes are separate VMs on a private network that a snapshot
 of one VM cannot put back consistently. A saved state restores only on the same Mac model and a compatible macOS.
 
-The Studio's Kubernetes page has a **Checkpoints** tab with the same list, Save, Restore and Delete. After a restore from the Studio, `kube supervise` (or `kube up`) reopens the kubectl port.
-
-## Try something, then undo it
+### Try something, then undo it
 
 `fluxctl kube try -- kubectl apply -f app.yaml` saves a checkpoint (named `try-<time>`), runs the command against this cluster, and keeps the
-checkpoint. If it went wrong, `fluxctl kube undo` puts the cluster back as it was before, running pods included, and forgets that checkpoint,
-so running `undo` again goes one step further back. The command's exit code is passed on. `--keep N` (default 5) deletes older `try-`
-checkpoints. Put cluster flags such as `--name` before the `--`; everything after it is the command. Single-node clusters only.
-On a real cluster, deleting a deployment through `try` and then `undo` brought back the deployment and its original pod (save 1.5 s, undo 12.5 s).
+checkpoint. If it went wrong, `fluxctl kube undo` puts the cluster back as it was, running pods included, and forgets that checkpoint, so
+running `undo` again goes one step further back. The command's exit code is passed on. `--keep N` (default 5) deletes older `try-`
+checkpoints. Put cluster flags such as `--name` before the `--`; everything after it is the command. It works for a Helm upgrade, a CRD
+install or a `kubectl delete ns`. On a real cluster, deleting a deployment through `try` and then `undo` brought back the deployment and its
+original pod. The Studio shows an **Undo** banner while a `try` checkpoint exists.
 
-## Sleep when the Mac does not need it
-
-On a laptop, `fluxctl kube supervise --sleep-on-battery` parks the cluster while the Mac runs on battery, and `--sleep-on-lid-close` does the
-same while the lid is closed. Each waits for 2 minutes without traffic through the API port or published services first, so a `kubectl` that
-has just woken the cluster is not undone at once. The next `kubectl` wakes it. `fluxctl kube agent install` accepts both flags.
-
-## Break it on purpose
-
-`fluxctl kube chaos SCENARIO --check 'COMMAND'` saves a checkpoint, causes a fault, waits `--hold` seconds (20 by default), runs your check
-(exit 0 means the app coped, `KUBECONFIG` is set) and then restores the checkpoint. Scenarios: `kill-pod` (a random pod outside
-`kube-system`), `stop-k3s` (the API server, scheduler and kubelet go away) and `fill-disk` (the disk 90% full). The exit code is 1 when the
-check fails. `--no-restore` undoes the fault where it can and leaves the cluster as it is.
-
-## A clean start every time
-
-`fluxctl kube golden` marks the cluster as it is now as the known-good state. `fluxctl kube reset` puts it back in about 8 seconds, and the
-golden state stays for the next reset. `fluxctl kube matrix --runs 10 -- ./e2e.sh` resets before each run, runs the command and prints, for
-example, `7 of 10 runs passed; failed: 2, 5, 9` (exit code 1 if any failed). A test that fails some of the time is flaky; one that fails every
-time is broken. After the last run the cluster is left as that run left it.
-
-## Find when it broke
-
-`fluxctl kube bisect -- COMMAND` is `git bisect` for the cluster. With automatic checkpoints collected (see below), it restores them
-oldest to newest by binary search, runs COMMAND each time (exit code 0 means good) and prints the first failing checkpoint and the last good
-one. Sixteen checkpoints take about four restores. It saves the cluster as it is now and puts that back afterwards; `--stay` leaves it at
-the last tested checkpoint. It needs at least two `auto-` checkpoints.
-
-## Automatic checkpoints
+### A rolling history
 
 `fluxctl kube supervise --auto-checkpoint 1h --keep-auto 6` saves a checkpoint named `auto-<time>` every hour while the cluster runs and
-deletes the oldest beyond the newest 6. A stopped or sleeping cluster is skipped. Each one takes about a second and costs little disk until the
-cluster changes, so a bad hour is one `fluxctl kube restore auto-<time>` away (`kube checkpoints` lists them). The shortest interval is
-one minute. Off by default; single-node clusters only.
+deletes the oldest beyond the newest 6. A stopped or sleeping cluster is skipped. The shortest interval is one minute. A bad hour is one
+`fluxctl kube restore auto-<time>` away, and `kube checkpoints` lists them. Off by default.
 
-## Sleep and wake
+### Find when it broke
+
+![kube bisect restoring the middle checkpoint each time until it names the first failing one](assets/kube/bisect.svg)
+
+`fluxctl kube bisect -- COMMAND` is `git bisect` for the cluster. It takes your automatic checkpoints, oldest to newest, restores them by
+binary search and runs COMMAND after each restore (exit code 0 means good). It tests the newest first (if that passes there is nothing to
+find), then the oldest (if that fails it broke before the first checkpoint), then narrows down, and prints the first failing checkpoint and
+the last good one. It saves the cluster as it is now (`bisect-start`) and puts that back at the end; `--stay` leaves it at the last tested
+checkpoint instead. It needs at least two `auto-` checkpoints.
+
+```bash
+fluxctl kube supervise --auto-checkpoint 1h &      # collect checkpoints while you work
+# ... later, something is wrong:
+fluxctl kube bisect -- sh -c '! kubectl get cm bad'
+# first failing checkpoint: auto-20261025-132520
+# last good one:            auto-20261025-132419
+```
+
+Proved on a real cluster: 7 automatic checkpoints a minute apart, a ConfigMap created between the third and the fourth, and a test that
+fails while it exists. Bisect restored 5 checkpoints in 54 seconds, named the checkpoint taken just after the change, and put the cluster
+back in its broken present.
+
+### A clean start every time
+
+![golden, reset and matrix: each run starts from the same saved state](assets/kube/golden-matrix.svg)
+
+`fluxctl kube golden` marks the cluster as it is now as the known-good state, replacing the previous one. `fluxctl kube reset` puts it back
+in about 8 seconds and keeps it for the next reset. `fluxctl kube matrix --runs 10 -- ./e2e.sh` resets before every run, runs the command
+and prints, for example, `7 of 10 runs passed; failed: 2, 5, 9` (exit code 1 if any failed). A test that fails some of the time is flaky;
+one that fails every time is broken. After the last run the cluster is left as that run left it (`--runs` defaults to 5).
+
+### Break it on purpose
+
+![kube chaos: checkpoint, break, hold, check, restore](assets/kube/chaos.svg)
+
+`fluxctl kube chaos SCENARIO --check 'COMMAND'` saves a checkpoint (`chaos-start`), causes a fault, waits `--hold` seconds (20 by default),
+runs your check (exit 0 means the app coped; `KUBECONFIG` is set) and then restores the checkpoint.
+
+| Scenario | What it does |
+|---|---|
+| `kill-pod` | Deletes a random pod outside `kube-system`. |
+| `stop-k3s` | Stops k3s: the API server, scheduler and kubelet go away while the VM stays up. |
+| `fill-disk` | Fills the server VM's disk to 90%. |
+
+The exit code is 1 when the check fails. `--no-restore` undoes the fault where it can and leaves the cluster as it is. A pod-level chaos tool
+cannot take back a dead control plane or a full disk; a restore can. Proved on a real cluster: `kill-pod` passed its check on a deployment,
+`stop-k3s` failed a `kubectl get nodes` check as it should and the API came back after the restore.
+
+### Sleep and wake
+
+![A running cluster is saved and stopped, then restored by kubectl, a browser request or kube up](assets/kube/sleep-wake.svg)
 
 `fluxctl kube sleep` saves the running cluster (a checkpoint named `sleep`) and stops its VM, so it costs no CPU and little memory.
-`fluxctl kube wake` restores it exactly as it was and deletes that checkpoint. While `fluxctl kube supervise` runs, the sleeping
-cluster keeps `127.0.0.1:<api-port>` open: the first `kubectl` call wakes it and is held until the API answers, so you just use
-`kubectl`. On a real cluster sleeping took 6 s and the first `kubectl get pods` against the sleeping cluster answered in 3 s. Same
-limits as checkpoints: single-node clusters only. Do not run `kube up` on a sleeping cluster; wake it.
+`fluxctl kube wake` restores it exactly as it was and deletes that checkpoint. On a real cluster sleeping took 6 to 7 seconds and waking 2.
 
-`fluxctl kube supervise --idle-sleep 30m` parks the cluster by itself after that long with no traffic through the API port or the published services (it watches the bytes the SSH forwarder carries, with `nettop`, so an open Studio page counts as traffic). The wake port opens straight after, so the next `kubectl` wakes it. Off by default; 1 minute at least. On a real cluster `--idle-sleep 60` parked it after about 80 seconds. `kube agent install` takes the same `--idle-sleep`, `--auto-checkpoint`, `--keep-auto` and `--no-auto-publish` flags and passes them to the LaunchAgent.
+**What puts it to sleep, besides `kube sleep`:** while `fluxctl kube supervise` runs (the LaunchAgent does this),
+
+* `--idle-sleep 30m` parks the cluster after that long with no traffic through the API port or the published services. It watches the bytes
+  the SSH forwarder carries, with `nettop`, so an open Studio page counts as traffic. Off by default; one minute at least. `--idle-sleep 60`
+  parked a real cluster after about 80 seconds.
+* `--sleep-on-battery` and `--sleep-on-lid-close` (a laptop) park it while the Mac runs on battery or the lid is closed, once there has
+  been no traffic for 2 minutes, so a `kubectl` that has just woken the cluster is not undone at once.
+
+**What wakes it:** the first thing that connects. While parked, supervise keeps `127.0.0.1:<api-port>` open, and also the ports of the
+services that were published when it went to sleep. The first connection wakes the cluster, is held until it answers and is then proxied
+through, so you just use the cluster:
+
+* `kubectl get pods` against a sleeping cluster answers after the wake (3 seconds measured).
+* A browser or `curl` on a published service, such as `http://web.default.localhost:30080`, wakes it and gets the pod's answer (3 seconds
+  measured). Only services published when it went to sleep are held; a restarted supervise forgets them until the next wake.
+* `fluxctl kube up` on a sleeping cluster wakes it from the checkpoint instead of cold-booting (3 seconds measured).
+* The Studio's **Wake** button.
+
+Single-node clusters only. `kube agent install` takes `--idle-sleep`, `--auto-checkpoint`, `--keep-auto`, `--sleep-on-battery`,
+`--sleep-on-lid-close` and `--no-auto-publish` and passes them to the LaunchAgent.
 
 ## Keep it running
 
@@ -258,7 +327,8 @@ fluxctl kube agent install --publish 30080       # LaunchAgent dev.zyvor.fluxvm.
 fluxctl kube agent uninstall
 ```
 
-The supervisor starts the VM if it is stopped and restores the forward if it dies. The plist carries `FLUXVM_URL` and
+The supervisor starts the VM if it is stopped and restores the forward if it dies. With the options above it also publishes services, takes
+automatic checkpoints, and sleeps and wakes the cluster. The plist carries `FLUXVM_URL` and
 `FLUXVM_VZ_RUNNER` when set, never a token.
 
 ## What this is not

@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 284" width="900" height="284" role="img" aria-label="Sleep and wake states of a cluster" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif">
+<title>Sleep and wake states of a cluster</title>
+<rect x="0.5" y="0.5" width="899" height="283" rx="14" fill="#f5f6f8" stroke="#d5d9e2"/>
+<defs><marker id="a" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#7b8296"/></marker></defs>
+<text x="450" y="32" font-size="18" fill="#1f2430" text-anchor="middle" font-weight="700">Sleep and wake</text>
+<rect x="40" y="110" width="150" height="64" rx="10" fill="#fff" stroke="#2f9e6b" stroke-width="2"/>
+<text x="115.0" y="140.0" font-size="15" fill="#1f2430" text-anchor="middle" font-weight="600">Running</text>
+<text x="115.0" y="158.0" font-size="12" fill="#5d6577" text-anchor="middle" font-weight="400">k3s, pods, memory</text>
+<rect x="375" y="110" width="150" height="64" rx="10" fill="#fff" stroke="#3b6fd4" stroke-width="2"/>
+<text x="450.0" y="140.0" font-size="15" fill="#1f2430" text-anchor="middle" font-weight="600">Asleep</text>
+<text x="450.0" y="158.0" font-size="12" fill="#5d6577" text-anchor="middle" font-weight="400">VM stopped, ports held</text>
+<rect x="710" y="110" width="150" height="64" rx="10" fill="#fff" stroke="#2f9e6b" stroke-width="2"/>
+<text x="785.0" y="140.0" font-size="15" fill="#1f2430" text-anchor="middle" font-weight="600">Running</text>
+<text x="785.0" y="158.0" font-size="12" fill="#5d6577" text-anchor="middle" font-weight="400">exactly as it was</text>
+<line x1="190" y1="142" x2="375" y2="142" stroke="#7b8296" stroke-width="2" marker-end="url(#a)"/>
+<text x="282" y="132" font-size="12" fill="#5d6577" text-anchor="middle" font-weight="400">checkpoint + stop (6 s)</text>
+<line x1="525" y1="142" x2="710" y2="142" stroke="#7b8296" stroke-width="2" marker-end="url(#a)"/>
+<text x="618" y="132" font-size="12" fill="#5d6577" text-anchor="middle" font-weight="400">restore (2 to 13 s)</text>
+<text x="115" y="66" font-size="13" fill="#1f2430" text-anchor="middle" font-weight="700">what puts it to sleep</text>
+<text x="115" y="86" font-size="1" fill="#1f2430" text-anchor="middle" font-weight="400"></text>
+<text x="115" y="86" font-size="1" fill="#1f2430" text-anchor="middle" font-weight="400"></text>
+<text x="115" y="86" font-size="1" fill="#1f2430" text-anchor="middle" font-weight="400"></text>
+<text x="115" y="86" font-size="1" fill="#1f2430" text-anchor="middle" font-weight="400"></text>
+<g font-size="12" fill="#5d6577" text-anchor="start"><text x="30" y="206">kube sleep</text><text x="30" y="224">--idle-sleep 30m</text><text x="30" y="242">--sleep-on-battery</text><text x="30" y="260">--sleep-on-lid-close</text></g>
+<text x="785" y="206" font-size="13" fill="#1f2430" text-anchor="middle" font-weight="700">first thing that wakes it:</text>
+<g font-size="12" fill="#5d6577" text-anchor="middle"><text x="785" y="224">kubectl (the API port)</text><text x="785" y="242">a browser on a service port</text><text x="785" y="260">kube up  ·  Studio Wake</text></g>
+<line x1="115" y1="196" x2="115" y2="176" stroke="#b9bfcc" stroke-width="2" marker-end="url(#a)"/>
+<line x1="785" y1="196" x2="785" y2="176" stroke="#b9bfcc" stroke-width="2" marker-end="url(#a)"/>
+</svg>
