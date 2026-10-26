@@ -3,8 +3,9 @@
 //! The parsers and verdicts are pure; `run` only gathers the facts.
 
 use crate::{
-    VmApi, kube_checkpoint,
+    kube_checkpoint,
     kube_host::{self, KubeOptions},
+    run::VmApi,
 };
 use anyhow::Result;
 use std::process::Command;
