@@ -379,8 +379,8 @@ enum KubeCommand {
         #[command(flatten)]
         cluster: KubeArgs,
         /// The image the deployment runs, for example `app:dev`. Use a tag other than `latest` so it is not pulled.
-        #[arg(long)]
-        image: String,
+        #[arg(long = "app-image")]
+        app_image: String,
         /// The deployment to restart.
         #[arg(long)]
         deployment: String,
@@ -8081,7 +8081,7 @@ async fn kube_command<A: run::VmApi>(api: &A, command: KubeCommand) -> Result<()
         }
         KubeCommand::Dev {
             cluster,
-            image,
+            app_image,
             deployment,
             namespace,
             dir,
@@ -8092,7 +8092,7 @@ async fn kube_command<A: run::VmApi>(api: &A, command: KubeCommand) -> Result<()
                 api,
                 &cluster.options()?,
                 &kube_dev::Dev {
-                    image: &image,
+                    image: &app_image,
                     deployment: &deployment,
                     namespace: &namespace,
                     dir: &dir,
