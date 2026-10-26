@@ -371,6 +371,20 @@ through, so you just use the cluster:
 Single-node clusters only. `kube agent install` takes `--idle-sleep`, `--auto-checkpoint`, `--keep-auto`, `--sleep-on-battery`,
 `--sleep-on-lid-close` and `--no-auto-publish` and passes them to the LaunchAgent.
 
+### Ingress hosts just work
+
+Start the cluster with Traefik (`fluxctl kube up --traefik`) and write an Ingress for a `*.localhost` host:
+
+```yaml
+spec:
+  rules:
+  - host: shop.localhost
+```
+
+While `kube supervise` runs, `http://shop.localhost` (and `https://shop.localhost` after `kube trust`) reaches it, with no port number and no `/etc/hosts` edit. Any `*.localhost` name that is not a published service's name goes to Traefik with its Host header intact, and your Ingress rules decide. A Service's own name still wins, so `http://web.localhost` reaches the Service `web`; a name no rule matches gets Traefik's 404, not the list of known names.
+
+Proved on a real k3s with Traefik: `http://shop.localhost` and `http://api.shop.localhost` returned the two pods behind their Ingress rules, `https://shop.localhost` did too with the CA passed to curl, a host with no rule got Traefik's 404, and a request for a host outside `.localhost` was not forwarded. Not run: a browser, and an Ingress with TLS terminated by the cluster itself.
+
 ### HTTPS: `kube trust`
 
 ```sh

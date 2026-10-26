@@ -859,6 +859,7 @@ mod tests {
                 name: name.into(),
                 port,
                 local,
+                service_port: 0,
             };
         let all = [
             svc("default", "mailpit", 31025, Some(1025)),
