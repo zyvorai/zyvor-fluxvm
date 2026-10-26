@@ -1169,6 +1169,9 @@ pub struct SuperviseFlags {
     /// Do not serve `http://<service>.<namespace>.localhost` on 127.0.0.1:80 for the published services.
     #[arg(long)]
     pub no_names: bool,
+    /// Do not show a macOS notification when a pod starts crash-looping, runs out of memory or cannot pull its image.
+    #[arg(long)]
+    pub no_notify: bool,
     /// Also put the cluster to sleep while the Mac runs on battery, once there has been no traffic for 2 minutes.
     #[arg(long)]
     pub sleep_on_battery: bool,
@@ -1204,6 +1207,9 @@ impl SuperviseFlags {
         if self.no_names {
             a.push("--no-names".to_owned());
         }
+        if self.no_notify {
+            a.push("--no-notify".to_owned());
+        }
         if self.sleep_on_battery {
             a.push("--sleep-on-battery".to_owned());
         }
@@ -1228,6 +1234,8 @@ pub(crate) fn lid_closed(ioreg: &str) -> bool {
 
 /// How long the forwarder must have been quiet before a power condition parks the cluster, so a `kubectl` that just woke it
 /// is not undone at once.
+/// How often `supervise` looks at the pods for the notifications.
+const POD_CHECK: Duration = Duration::from_secs(30);
 const POWER_QUIET: Duration = Duration::from_secs(120);
 
 fn power_says_sleep(battery: bool, lid: bool) -> Option<&'static str> {
@@ -1473,6 +1481,7 @@ pub async fn supervise<A: VmApi>(
     idle_sleep: Option<Duration>,
     sleep_on_power: (bool, bool),
     local_names: bool,
+    notify: bool,
 ) -> Result<()> {
     validate(o)?;
     let names = (auto_publish && local_names).then(crate::kube_names::Names::default);
@@ -1487,6 +1496,8 @@ pub async fn supervise<A: VmApi>(
     let mut open: Vec<(u16, u16)> = vec![];
     let mut parked: Vec<u16> = vec![]; // the service ports that were published when the cluster went to sleep
     let mut last_auto = Instant::now();
+    let mut pods = crate::kube_notify::Watch::default();
+    let mut last_pods: Option<Instant> = None;
     loop {
         if sleep_in_progress(o) {
             tokio::time::sleep(Duration::from_secs(1)).await;
@@ -1533,6 +1544,16 @@ pub async fn supervise<A: VmApi>(
                 // does that for a moment before supervise sees it is asleep)
                 Ok(_) => parked = open.iter().map(|(h, _)| *h).collect(),
                 Err(e) => eprintln!("publishing services, will retry: {e:#}"),
+            }
+        }
+        if notify && last_pods.is_none_or(|t| t.elapsed() >= POD_CHECK) {
+            last_pods = Some(Instant::now());
+            // Unreachable while the VM boots or sleeps; that is not worth a message.
+            if let Ok(out) = guest_sh(api, o, "sudo k3s kubectl get pods -A --no-headers").await {
+                for alert in pods.update(&o.name, &crate::kube_doctor::parse_pods(&out)) {
+                    eprintln!("{}: {}", alert.title, alert.body);
+                    crate::kube_notify::send(&alert);
+                }
             }
         }
         let watching = idle_sleep.is_some() || sleep_on_power.0 || sleep_on_power.1;
@@ -2856,6 +2877,7 @@ mod tests {
             keep_auto: 4,
             idle_sleep: Some(1800),
             no_names: true,
+            no_notify: true,
             sleep_on_battery: true,
             sleep_on_lid_close: true,
         };
@@ -2870,6 +2892,7 @@ mod tests {
                 "--idle-sleep",
                 "1800",
                 "--no-names",
+                "--no-notify",
                 "--sleep-on-battery",
                 "--sleep-on-lid-close"
             ]
