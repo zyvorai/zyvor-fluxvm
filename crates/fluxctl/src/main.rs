@@ -47,6 +47,7 @@ mod kube_forward;
 mod kube_host;
 mod kube_names;
 mod kube_notify;
+mod kube_ps;
 mod kube_sync;
 mod kube_tls;
 mod launch_agent;
@@ -472,6 +473,9 @@ enum KubeCommand {
         #[arg(long)]
         install: bool,
     },
+    /// One screen about the cluster, like `docker ps`: its state, failing pods, the apps and forwards on this Mac, the names
+    /// that work and the checkpoints.
+    Ps(KubeArgs),
     /// Check what goes wrong for a cluster on a Mac (VPN, DNS, disk, clock, failing pods) and print the fix for each.
     Doctor(KubeArgs),
     /// Make this cluster the current `kubectl` context in ~/.kube/config (`fluxctl kube up` adds it without switching).
@@ -8237,6 +8241,10 @@ async fn kube_command<A: run::VmApi>(api: &A, command: KubeCommand) -> Result<()
         }
         KubeCommand::Trust { install } => {
             println!("{}", kube_tls::trust(install)?);
+        }
+        KubeCommand::Ps(cluster) => {
+            let snapshot = kube_ps::gather(api, &cluster.options()?).await?;
+            print!("{}", kube_ps::render(&snapshot));
         }
         KubeCommand::Doctor(cluster) => {
             let checks = kube_doctor::run(api, &cluster.options()?).await?;
