@@ -367,6 +367,16 @@ through, so you just use the cluster:
 Single-node clusters only. `kube agent install` takes `--idle-sleep`, `--auto-checkpoint`, `--keep-auto`, `--sleep-on-battery`,
 `--sleep-on-lid-close` and `--no-auto-publish` and passes them to the LaunchAgent.
 
+### HTTPS: `kube trust`
+
+```sh
+fluxctl kube trust
+```
+
+This creates a certificate authority of your own in `~/.fluxvm/ca` (its key is mode 0600 and never leaves that folder) and prints the one command that makes this Mac trust it. **Nothing is trusted until you run that command** (or `fluxctl kube trust --install`, which runs it and asks for your password); it changes the Mac's trust settings, so it is yours to run. Restart `kube supervise`, and every service also answers at `https://<service>.<namespace>.localhost` on port 443, with a certificate made for that exact name on first use. Only names ending in `.localhost` ever get one. Apps behind it see `x-forwarded-proto: https`. Safari, Chrome and curl use the system keychain; Firefox keeps its own store. To undo: `sudo security remove-trusted-cert -d ~/.fluxvm/ca/ca.pem` and delete the folder.
+
+Proved on a real k3s, with the CA passed to curl rather than installed in the keychain: `https://web.default.localhost/` and `https://web.localhost/` returned the pod's page; without the CA curl refused the certificate (exit 60); an unknown name got the list of known names; a request for a name outside `.localhost` was refused at the handshake; the certificate chained to the CA with the exact name as its only SAN, server-auth only, valid one year. Not run: installing the trust into the real keychain, and a browser.
+
 ## Save a file, the cluster runs it: `kube dev`
 
 ```sh

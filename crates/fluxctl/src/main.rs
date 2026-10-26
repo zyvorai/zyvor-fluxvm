@@ -44,6 +44,7 @@ mod kube_dev;
 mod kube_doctor;
 mod kube_host;
 mod kube_names;
+mod kube_tls;
 mod launch_agent;
 mod mcp;
 mod mcp_install;
@@ -395,6 +396,13 @@ enum KubeCommand {
         /// Build, load and restart once, then stop.
         #[arg(long)]
         once: bool,
+    },
+    /// Make `https://<service>.localhost` work: create a local certificate authority and print the one command that makes
+    /// this Mac trust it. Nothing is trusted until you run that command (or pass `--install`).
+    Trust {
+        /// Run the trust command now (asks for your password).
+        #[arg(long)]
+        install: bool,
     },
     /// Check what goes wrong for a cluster on a Mac (VPN, DNS, disk, clock, failing pods) and print the fix for each.
     Doctor(KubeArgs),
@@ -8101,6 +8109,9 @@ async fn kube_command<A: run::VmApi>(api: &A, command: KubeCommand) -> Result<()
                 },
             )
             .await?;
+        }
+        KubeCommand::Trust { install } => {
+            println!("{}", kube_tls::trust(install)?);
         }
         KubeCommand::Doctor(cluster) => {
             let checks = kube_doctor::run(api, &cluster.options()?).await?;
