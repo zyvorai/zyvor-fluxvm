@@ -40,6 +40,7 @@ mod infer;
 mod kube_apps;
 mod kube_chaos;
 mod kube_checkpoint;
+mod kube_doctor;
 mod kube_host;
 mod kube_names;
 mod launch_agent;
@@ -372,6 +373,8 @@ enum KubeCommand {
     },
     /// The services `kube add` can run, and which of them are running.
     Apps(KubeArgs),
+    /// Check what goes wrong for a cluster on a Mac (VPN, DNS, disk, clock, failing pods) and print the fix for each.
+    Doctor(KubeArgs),
     /// Make this cluster the current `kubectl` context in ~/.kube/config (`fluxctl kube up` adds it without switching).
     Use(KubeArgs),
     /// Print `export KUBECONFIG=…` for this cluster (`eval "$(fluxctl kube env)"`).
@@ -8051,6 +8054,13 @@ async fn kube_command<A: run::VmApi>(api: &A, command: KubeCommand) -> Result<()
             println!("{url}");
             if std::env::var_os("FLUXVM_NO_OPEN").is_none() {
                 let _ = std::process::Command::new("open").arg(&url).status();
+            }
+        }
+        KubeCommand::Doctor(cluster) => {
+            let checks = kube_doctor::run(api, &cluster.options()?).await?;
+            print!("{}", kube_doctor::render(&checks));
+            if kube_doctor::failed(&checks) {
+                std::process::exit(1);
             }
         }
         KubeCommand::Apps(cluster) => {
