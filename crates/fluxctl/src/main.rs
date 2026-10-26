@@ -47,6 +47,7 @@ mod kube_forward;
 mod kube_host;
 mod kube_names;
 mod kube_notify;
+mod kube_project;
 mod kube_ps;
 mod kube_sync;
 mod kube_tls;
@@ -472,6 +473,15 @@ enum KubeCommand {
         /// Run the trust command now (asks for your password).
         #[arg(long)]
         install: bool,
+    },
+    /// Build everything a project needs from `fluxvm-kube.yaml`: the cluster, images, apps, manifests and forwards. Run it
+    /// again and nothing changes. The file's settings win over the flags.
+    Start {
+        #[command(flatten)]
+        cluster: KubeArgs,
+        /// The project file.
+        #[arg(long, default_value = "fluxvm-kube.yaml")]
+        file: std::path::PathBuf,
     },
     /// One screen about the cluster, like `docker ps`: its state, failing pods, the apps and forwards on this Mac, the names
     /// that work and the checkpoints.
@@ -8241,6 +8251,9 @@ async fn kube_command<A: run::VmApi>(api: &A, command: KubeCommand) -> Result<()
         }
         KubeCommand::Trust { install } => {
             println!("{}", kube_tls::trust(install)?);
+        }
+        KubeCommand::Start { cluster, file } => {
+            kube_project::start(api, cluster.options()?, &file).await?;
         }
         KubeCommand::Ps(cluster) => {
             let snapshot = kube_ps::gather(api, &cluster.options()?).await?;

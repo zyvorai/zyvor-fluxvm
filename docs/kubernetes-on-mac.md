@@ -19,6 +19,7 @@ and `*.localhost` names, and the loop from a saved file to a running pod takes a
 
 | I want to… | Run | More |
 |---|---|---|
+| set up a whole project with one command | `kube start` (reads `fluxvm-kube.yaml`) | [`kube start`](#a-project-in-one-command-kube-start) |
 | start a cluster, stop it, throw it away | `kube up`, `kube down [--purge]`, `kube status`, `kube env`, `kube use` | [Use it](#use-it), [The kubeconfig](#the-kubeconfig) |
 | run Postgres, Redis, Kafka and friends | `kube add APP`, `kube apps`, `kube remove APP`, `kube connect APP`, `kube open NAME` | [`kube add`](#services-next-to-your-app-kube-add) |
 | reach a Service I already have | `kube forward SERVICE` (`--list`, `--remove`), `kube services` | [`kube forward`](#a-port-forward-that-stays-kube-forward) |
@@ -465,6 +466,28 @@ fluxctl kube sync web --dir . --to /app
 For apps that do not need compiling (Node, Python, Ruby, a static site) this is the fast loop: it copies the directory into the running pod now and again every time a file changes, in a fraction of a second, with no image build and no restart. It is what a bind mount gives you on Linux. `web` means `deploy/web`; `pod/NAME`, `statefulset/NAME` and `daemonset/NAME` work too, `--namespace` and `--container` pick the rest. `--then "kill -HUP 1"` runs a command in the pod after each copy, for a server that has to be told to reload; most dev servers (nodemon, uvicorn `--reload`, Vite) notice the change on their own. `--once` copies once and stops. `.git`, `target`, `node_modules`, `.venv` and `__pycache__` are not sent, and neither are Mac metadata files. The directory is sent whole each time, so keep it to source (more than 64 MiB is refused). A file you delete locally stays in the pod until the pod restarts. For a compiled language use `kube dev`, which rebuilds the image.
 
 Proved on a real k3s: a busybox web server served its original page, `kube sync` replaced it with the local folder (a subfolder arrived, `node_modules` did not, no `._` files), an edit was visible in the pod about a second later, each copy took 0.2 to 0.4 s, the pod did not restart, `--then` ran, and a destination with a space and a `job/` target were refused. Not run: a real Node or Python dev server reloading, and a pod with several replicas (the copy goes to one pod).
+
+## A project in one command: `kube start`
+
+Put what the project needs in `fluxvm-kube.yaml` next to the code and commit it:
+
+```yaml
+name: shop                 # the cluster; optional (cpus, memory_mib, disk_gib, traefik too)
+images: [app:dev]          # copied in from your Docker, as `kube load`
+apps: [postgres, redis]    # as `kube add`
+manifests: [k8s/]          # YAML files or folders, applied in order, paths relative to this file
+forwards:                  # as `kube forward`
+  - service: web
+    local: 8080
+```
+
+```sh
+fluxctl kube start          # builds all of it from nothing, then prints `kube ps`
+```
+
+A teammate clones the repository and runs one command. It adds nothing new underneath: it runs `up`, `load`, `add`, `apply` and `forward` in that order, and every one of them is safe to repeat, so running `start` again changes nothing. The file is checked before anything slow happens (an unknown app, a bad image name, a manifest path that leaves the folder or does not exist all stop it at once). Settings in the file win over flags. `--file` names a different project file; `kube down --purge` removes it all.
+
+Proved on a real k3s: from no cluster, one `start` built the cluster, Redis (answered `PONG`), a web Deployment and Service from a `k8s/` folder, and a forward that served the page, in 4 minutes 26 seconds (most of it first boot); a second `start` took 7 seconds and left every object as it was; a file naming an unknown app failed at once without creating a cluster. Not run: `images:` (it uses `kube load`, proved separately), Traefik and several apps together, and workers.
 
 ## One screen: `kube ps`
 
