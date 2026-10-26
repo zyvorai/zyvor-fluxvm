@@ -29,8 +29,20 @@ pub(crate) fn route_table(published: &[NodePortService]) -> BTreeMap<String, u16
             t.insert(format!("{}.localhost", s.name), s.host_port());
         }
     }
+    // Any other `*.localhost` name is an Ingress host if the cluster runs Traefik (`kube up --traefik`): hand it over with
+    // its Host header intact and let the Ingress rules decide.
+    if let Some(web) = published
+        .iter()
+        .filter(|s| s.namespace == "kube-system" && s.name == "traefik" && s.service_port == 80)
+        .min_by_key(|s| s.port)
+    {
+        t.insert(INGRESS.to_owned(), web.host_port());
+    }
     t
 }
+
+/// The route-table key for the ingress controller; not a host name, so it never matches a request or shows in listings.
+pub(crate) const INGRESS: &str = "*ingress";
 
 /// The host of an HTTP request head, lower-cased and without a port.
 pub(crate) fn parse_host(head: &[u8]) -> Option<String> {
@@ -78,6 +90,16 @@ fn not_found(host: Option<&str>, known: &[String]) -> String {
     )
 }
 
+/// The port for a request's host: its service, or for any other `*.localhost` name the ingress controller, if there is one.
+pub(crate) fn pick_port(table: &BTreeMap<String, u16>, host: Option<&str>) -> Option<u16> {
+    let host = host?;
+    table.get(host).copied().or_else(|| {
+        (host.ends_with(".localhost") && host != "localhost")
+            .then(|| table.get(INGRESS).copied())
+            .flatten()
+    })
+}
+
 /// Adds `x-forwarded-proto: https` after the request line, so an app behind the TLS listener builds https links.
 pub fn with_forwarded_proto(head: &[u8]) -> Vec<u8> {
     match head.windows(2).position(|w| w == b"\r\n") {
@@ -118,8 +140,11 @@ where
     let (port, known) = {
         let t = names.lock().unwrap();
         (
-            host.as_ref().and_then(|h| t.get(h)).copied(),
-            t.keys().cloned().collect::<Vec<_>>(),
+            pick_port(&t, host.as_deref()),
+            t.keys()
+                .filter(|k| *k != INGRESS)
+                .cloned()
+                .collect::<Vec<_>>(),
         )
     };
     let Some(port) = port else {
@@ -221,6 +246,7 @@ mod tests {
             name: name.into(),
             port,
             local: None,
+            service_port: 0,
         }
     }
 
@@ -247,6 +273,28 @@ mod tests {
         );
         assert_eq!(parse_host(b"GET / HTTP/1.1\r\nAccept: */*\r\n\r\n"), None);
         assert_eq!(parse_host(b"\xff\xfe"), None);
+    }
+
+    #[test]
+    fn unknown_localhost_names_go_to_traefik_when_it_is_there() {
+        let mut web = svc("kube-system", "traefik", 31080);
+        web.service_port = 80;
+        let mut tls = svc("kube-system", "traefik", 30443);
+        tls.service_port = 443;
+        let t = route_table(&[svc("default", "api", 30090), tls, web]);
+        assert_eq!(t[INGRESS], 31080, "the service's port 80, not its 443");
+        assert_eq!(pick_port(&t, Some("api.localhost")), Some(30090));
+        assert_eq!(
+            pick_port(&t, Some("shop.localhost")),
+            Some(31080),
+            "an Ingress host"
+        );
+        assert_eq!(pick_port(&t, Some("example.com")), None);
+        assert_eq!(pick_port(&t, Some("localhost")), None);
+        assert_eq!(pick_port(&t, None), None);
+        // without Traefik an unknown name is still an unknown name
+        let none = route_table(&[svc("default", "api", 30090)]);
+        assert_eq!(pick_port(&none, Some("shop.localhost")), None);
     }
 
     #[test]

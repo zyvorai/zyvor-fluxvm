@@ -1331,6 +1331,8 @@ pub struct NodePortService {
     /// The port to open on the Mac instead, from the Service's `fluxvm.dev/local-ports` annotation (`30432=5432`), so a
     /// database answers on its own number.
     pub local: Option<u16>,
+    /// The Service's own port that this node port leads to (80 for a web server); 0 when not known.
+    pub service_port: u16,
 }
 
 impl NodePortService {
@@ -1373,6 +1375,10 @@ pub(crate) fn node_port_services(list: &Value) -> Vec<NodePortService> {
                     name: item["metadata"]["name"].as_str().unwrap_or("").into(),
                     port,
                     local: local.iter().find(|(n, _)| *n == port).map(|(_, l)| *l),
+                    service_port: p["port"]
+                        .as_u64()
+                        .and_then(|n| u16::try_from(n).ok())
+                        .unwrap_or(0),
                 });
             }
         }
@@ -2717,6 +2723,7 @@ mod tests {
             name: "s".into(),
             port,
             local: None,
+            service_port: 0,
         };
         let found = [
             svc(80),
