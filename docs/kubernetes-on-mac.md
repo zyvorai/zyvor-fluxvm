@@ -10,6 +10,31 @@ test runs, break the cluster on purpose, and let it sleep and wake on demand](#t
 
 ![Checkpoints on a timeline: automatic, manual, try and sleep points](assets/kube/timeline.svg)
 
+The other half of the idea is that **you should forget the cluster is a VM.** `kubectl` already works, services have their usual ports
+and `*.localhost` names, and the loop from a saved file to a running pod takes a second:
+
+![The Mac, 127.0.0.1 and the cluster VM: ports, names and commands](assets/kube/mac-like-linux.svg)
+
+## Every command in one place
+
+| I want to… | Run | More |
+|---|---|---|
+| start a cluster, stop it, throw it away | `kube up`, `kube down [--purge]`, `kube status`, `kube env`, `kube use` | [Use it](#use-it), [The kubeconfig](#the-kubeconfig) |
+| run Postgres, Redis, Kafka and friends | `kube add APP`, `kube apps`, `kube remove APP`, `kube connect APP`, `kube open NAME` | [`kube add`](#services-next-to-your-app-kube-add) |
+| reach a Service I already have | `kube forward SERVICE` (`--list`, `--remove`), `kube services` | [`kube forward`](#a-port-forward-that-stays-kube-forward) |
+| keep a database across rebuilds | `kube db-backup APP`, `kube db-restore APP FILE` | [`db-backup`](#keep-your-data-when-you-rebuild-db-backup) |
+| open `https://app.localhost` | `kube trust` (and `kube up --traefik` for Ingress hosts) | [Ingress](#ingress-hosts-just-work), [HTTPS](#https-kube-trust) |
+| run the code I am writing | `kube dev` (rebuild an image), `kube sync` (copy files, no build), `kube load` (copy an image in) | [`kube dev`](#save-a-file-the-cluster-runs-it-kube-dev), [`kube sync`](#reload-without-rebuilding-kube-sync), [Images](#images) |
+| undo a mistake or find when it broke | `kube checkpoint`, `kube restore`, `kube checkpoints`, `kube checkpoint-rm`, `kube try`, `kube undo`, `kube bisect` | [Time travel](#time-travel-for-your-cluster) |
+| start clean every time | `kube golden`, `kube reset`, `kube matrix` | [A clean start](#a-clean-start-every-time) |
+| see whether my app copes with failure | `kube chaos` | [Break it on purpose](#break-it-on-purpose) |
+| cost nothing while I am away | `kube sleep`, `kube wake`, `kube supervise --idle-sleep`, `--sleep-on-battery` | [Sleep and wake](#sleep-and-wake) |
+| know what is wrong | `kube doctor`, and a notification from `kube supervise` | [`kube doctor`](#when-something-is-wrong-kube-doctor), [Notifications](#a-notification-when-a-pod-breaks) |
+| keep it all running | `kube supervise`, `kube agent install` | [Keep it running](#keep-it-running) |
+| work without internet | `kube fetch DIR`, `kube up --offline DIR` | [Without internet](#without-internet-on-first-boot) |
+
+Most sections say what was proved on a real cluster and what was not; read those lines before relying on a feature.
+
 It is not the same thing as `fluxvm-kube` (see [architecture.md](architecture.md)), which is an operator that runs *inside* a
 cluster you already have.
 
