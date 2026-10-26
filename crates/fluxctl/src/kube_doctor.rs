@@ -209,7 +209,7 @@ pub fn parse_pods(out: &str) -> Vec<PodRow> {
         .collect()
 }
 
-const BAD: [&str; 6] = [
+pub(crate) const BAD: [&str; 6] = [
     "CrashLoopBackOff",
     "ImagePullBackOff",
     "ErrImagePull",

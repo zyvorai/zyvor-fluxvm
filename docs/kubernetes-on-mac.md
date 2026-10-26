@@ -397,6 +397,12 @@ It checks what tends to go wrong for a cluster on a Mac and prints the fix next 
 
 Proved on a real k3s: a healthy cluster passes every check; with one pod killed for memory and one pointing at an image that does not exist, it named both and exited 1. Not run: a VPN, a full disk and a skewed clock on a real machine (those verdicts are unit-tested only).
 
+### A notification when a pod breaks
+
+While `kube supervise` runs (or the LaunchAgent from `kube agent install`), it looks at the pods every 30 seconds and shows a macOS notification when one starts failing: crash-looping, out of memory, or an image that cannot be pulled. Each problem is announced once, after it has looked bad twice in a row so pods that are still starting stay quiet, and again only if the pod has been fine for a while and then breaks again. The notification points at `fluxctl kube doctor`. `--no-notify` turns it off.
+
+Proved on a real k3s: no notification with a healthy cluster; a crash-looping pod and an out-of-memory pod each produced exactly one over three minutes while they kept restarting, and a healthy pod produced none. The messages were written to a log file through a test switch (`FLUXVM_NOTIFY_LOG`), and a real `osascript` call returned success over SSH. Not run: seeing the banner on a screen.
+
 ## Keep it running
 
 ```bash

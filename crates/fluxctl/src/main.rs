@@ -44,6 +44,7 @@ mod kube_dev;
 mod kube_doctor;
 mod kube_host;
 mod kube_names;
+mod kube_notify;
 mod kube_tls;
 mod launch_agent;
 mod mcp;
@@ -8172,6 +8173,7 @@ async fn kube_command<A: run::VmApi>(api: &A, command: KubeCommand) -> Result<()
                 flags.idle_sleep.map(std::time::Duration::from_secs),
                 (flags.sleep_on_battery, flags.sleep_on_lid_close),
                 !flags.no_names,
+                !flags.no_notify,
             )
             .await?;
         }
