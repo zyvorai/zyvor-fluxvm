@@ -29,6 +29,7 @@ and `*.localhost` names, and the loop from a saved file to a running pod takes a
 | start clean every time | `kube golden`, `kube reset`, `kube matrix` | [A clean start](#a-clean-start-every-time) |
 | see whether my app copes with failure | `kube chaos` | [Break it on purpose](#break-it-on-purpose) |
 | cost nothing while I am away | `kube sleep`, `kube wake`, `kube supervise --idle-sleep`, `--sleep-on-battery` | [Sleep and wake](#sleep-and-wake) |
+| see everything at a glance | `kube ps` | [`kube ps`](#one-screen-kube-ps) |
 | know what is wrong | `kube doctor`, and a notification from `kube supervise` | [`kube doctor`](#when-something-is-wrong-kube-doctor), [Notifications](#a-notification-when-a-pod-breaks) |
 | keep it all running | `kube supervise`, `kube agent install` | [Keep it running](#keep-it-running) |
 | work without internet | `kube fetch DIR`, `kube up --offline DIR` | [Without internet](#without-internet-on-first-boot) |
@@ -464,6 +465,22 @@ fluxctl kube sync web --dir . --to /app
 For apps that do not need compiling (Node, Python, Ruby, a static site) this is the fast loop: it copies the directory into the running pod now and again every time a file changes, in a fraction of a second, with no image build and no restart. It is what a bind mount gives you on Linux. `web` means `deploy/web`; `pod/NAME`, `statefulset/NAME` and `daemonset/NAME` work too, `--namespace` and `--container` pick the rest. `--then "kill -HUP 1"` runs a command in the pod after each copy, for a server that has to be told to reload; most dev servers (nodemon, uvicorn `--reload`, Vite) notice the change on their own. `--once` copies once and stops. `.git`, `target`, `node_modules`, `.venv` and `__pycache__` are not sent, and neither are Mac metadata files. The directory is sent whole each time, so keep it to source (more than 64 MiB is refused). A file you delete locally stays in the pod until the pod restarts. For a compiled language use `kube dev`, which rebuilds the image.
 
 Proved on a real k3s: a busybox web server served its original page, `kube sync` replaced it with the local folder (a subfolder arrived, `node_modules` did not, no `._` files), an edit was visible in the pod about a second later, each copy took 0.2 to 0.4 s, the pod did not restart, `--then` ran, and a destination with a space and a `job/` target were refused. Not run: a real Node or Python dev server reloading, and a pod with several replicas (the copy goes to one pod).
+
+## One screen: `kube ps`
+
+```text
+$ fluxctl kube ps
+cluster      dr  running  192.168.64.170
+kubectl      context dr, API https://127.0.0.1:6551 answers
+pods         9 fine, 1 failing
+               default/crashy Error (restarts 4)
+apps         redis :6379
+forwards     web (default) 80 -> 127.0.0.1:8080
+names        http://redis.localhost  http://web-local.localhost  http://webnp.localhost
+checkpoints  1, newest first (2m ago)
+```
+
+It is `docker ps` for the whole cluster: the state, the pods that are failing (a bad status, or three or more restarts; `kube doctor` says what to do about them), the apps and forwards open on this Mac, the names that answer, and the checkpoints. A cluster that is asleep, stopped or not created gets one line saying so and what to run. Proved on a real k3s through all four states.
 
 ## When something is wrong: `kube doctor`
 
