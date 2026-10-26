@@ -405,6 +405,16 @@ It builds the image in the current directory (`docker build`, or your own comman
 
 Proved on a real k3s: a pod served `v1`, I edited the file and it served `v2` with no other command, a deliberately broken Dockerfile was reported while the watcher stayed up, and fixing it gave `v3`. A cycle took about two seconds once the base image was cached.
 
+## Reload without rebuilding: `kube sync`
+
+```sh
+fluxctl kube sync web --dir . --to /app
+```
+
+For apps that do not need compiling (Node, Python, Ruby, a static site) this is the fast loop: it copies the directory into the running pod now and again every time a file changes, in a fraction of a second, with no image build and no restart. It is what a bind mount gives you on Linux. `web` means `deploy/web`; `pod/NAME`, `statefulset/NAME` and `daemonset/NAME` work too, `--namespace` and `--container` pick the rest. `--then "kill -HUP 1"` runs a command in the pod after each copy, for a server that has to be told to reload; most dev servers (nodemon, uvicorn `--reload`, Vite) notice the change on their own. `--once` copies once and stops. `.git`, `target`, `node_modules`, `.venv` and `__pycache__` are not sent, and neither are Mac metadata files. The directory is sent whole each time, so keep it to source (more than 64 MiB is refused). For a compiled language use `kube dev`, which rebuilds the image.
+
+Proved on a real k3s: a busybox web server served its original page, `kube sync` replaced it with the local folder (a subfolder arrived, `node_modules` did not, no `._` files), an edit was visible in the pod about a second later, each copy took 0.2 to 0.4 s, the pod did not restart, `--then` ran, and a destination with a space and a `job/` target were refused. Not run: a real Node or Python dev server reloading, and a pod with several replicas (the copy goes to one pod).
+
 ## When something is wrong: `kube doctor`
 
 ```sh

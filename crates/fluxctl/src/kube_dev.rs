@@ -12,8 +12,8 @@ use std::{
     time::{Duration, Instant, SystemTime},
 };
 
-const SKIP: [&str; 5] = [".git", "target", "node_modules", ".venv", "__pycache__"];
-const POLL: Duration = Duration::from_millis(700);
+pub(crate) const SKIP: [&str; 5] = [".git", "target", "node_modules", ".venv", "__pycache__"];
+pub(crate) const POLL: Duration = Duration::from_millis(700);
 
 /// What changes when a source file is added, removed or saved: the file count and the newest modification time.
 pub fn fingerprint(dir: &Path) -> (usize, u128) {
@@ -53,7 +53,7 @@ pub fn default_build(image: &str, dir: &Path) -> String {
     )
 }
 
-fn shell_quote(s: &str) -> String {
+pub(crate) fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 

@@ -45,6 +45,7 @@ mod kube_doctor;
 mod kube_host;
 mod kube_names;
 mod kube_notify;
+mod kube_sync;
 mod kube_tls;
 mod launch_agent;
 mod mcp;
@@ -395,6 +396,31 @@ enum KubeCommand {
         #[arg(long)]
         build: Option<String>,
         /// Build, load and restart once, then stop.
+        #[arg(long)]
+        once: bool,
+    },
+    /// Copy a directory into a running pod every time a file changes, so an app reloads in about a second with no image
+    /// build: `fluxctl kube sync web --dir . --to /app`. For interpreted apps and static sites; compiled ones want `kube dev`.
+    Sync {
+        #[command(flatten)]
+        cluster: KubeArgs,
+        /// `deploy/NAME` (or just `NAME`), `pod/NAME`, `statefulset/NAME` or `daemonset/NAME`.
+        target: String,
+        #[arg(long, default_value = "default")]
+        namespace: String,
+        /// The container, when the pod has several.
+        #[arg(long)]
+        container: Option<String>,
+        /// The directory to watch and copy.
+        #[arg(long, default_value = ".")]
+        dir: std::path::PathBuf,
+        /// Where to put it in the pod (an absolute path; created if missing).
+        #[arg(long)]
+        to: String,
+        /// A command to run in the pod after each copy, for example `kill -HUP 1`.
+        #[arg(long)]
+        then: Option<String>,
+        /// Copy once, then stop.
         #[arg(long)]
         once: bool,
     },
@@ -8106,6 +8132,31 @@ async fn kube_command<A: run::VmApi>(api: &A, command: KubeCommand) -> Result<()
                     namespace: &namespace,
                     dir: &dir,
                     build: build.as_deref(),
+                    once,
+                },
+            )
+            .await?;
+        }
+        KubeCommand::Sync {
+            cluster,
+            target,
+            namespace,
+            container,
+            dir,
+            to,
+            then,
+            once,
+        } => {
+            kube_sync::run(
+                api,
+                &cluster.options()?,
+                &kube_sync::Sync {
+                    target: &target,
+                    namespace: &namespace,
+                    container: container.as_deref(),
+                    dir: &dir,
+                    to: &to,
+                    then: then.as_deref(),
                     once,
                 },
             )

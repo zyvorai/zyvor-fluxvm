@@ -650,6 +650,16 @@ pub(crate) async fn guest_run<A: VmApi>(
     script: &str,
     stdin: Option<&str>,
 ) -> Result<String> {
+    guest_run_bytes(api, o, script, stdin.map(str::as_bytes)).await
+}
+
+/// `guest_run` with binary input, for streaming a tar archive.
+pub(crate) async fn guest_run_bytes<A: VmApi>(
+    api: &A,
+    o: &KubeOptions,
+    script: &str,
+    stdin: Option<&[u8]>,
+) -> Result<String> {
     use std::{io::Write, process::Stdio};
     let Some((id, _)) = api.find(&o.name).await? else {
         bail!("no cluster named {}", o.name);
@@ -674,7 +684,7 @@ pub(crate) async fn guest_run<A: VmApi>(
     .stderr(Stdio::piped());
     let mut child = cmd.spawn().context("running a command in the server VM")?;
     if let (Some(text), Some(mut pipe)) = (stdin, child.stdin.take()) {
-        pipe.write_all(text.as_bytes())?;
+        pipe.write_all(text)?;
     }
     let out = child.wait_with_output()?;
     if !out.status.success() {
