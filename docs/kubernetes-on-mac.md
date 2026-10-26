@@ -155,6 +155,18 @@ port can be opened only if the supervisor (`fluxctl kube supervise`, which the L
 open across restarts with `fluxctl kube agent install`. `connect` works for postgres, redis, mysql, mongodb and clickhouse (a shell in the pod
 through the cluster); `open NAME` opens any published service, by its `.localhost` name while `supervise` runs.
 
+### A port-forward that stays: `kube forward`
+
+```sh
+fluxctl kube forward web            # web:80 is on 127.0.0.1:8080, and http://web-local.localhost
+fluxctl kube forward --list
+fluxctl kube forward web --remove
+```
+
+For a Service you already have, this does what `kubectl port-forward` does, without the terminal you have to leave open and without dying when the pod restarts. It adds a small companion Service next to yours (`web-local`, same selector, a node port of its own) and `kube supervise` keeps the Mac port open for it. The Mac port is the Service's own port, or 8000 more when that is below 1024 (a Mac does not let you listen there), or the next free one; `--local` picks it, `--service-port` picks among several ports. Running it again changes nothing. Services without a selector (headless, external) are refused.
+
+Proved on a real k3s: a ClusterIP Service answered on `127.0.0.1:8080` and at `web-local.localhost`; after its pod was deleted the same port answered from the new pod; running it twice kept the same node port; a Service with no selector, a missing Service and `--local 80` were refused with clear messages; `--remove` closed the port in about ten seconds. Not run: a UDP Service (the companion is TCP only), and a Service in another namespace.
+
 ### Keep your data when you rebuild: `db-backup`
 
 ```sh

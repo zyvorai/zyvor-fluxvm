@@ -713,7 +713,7 @@ pub(crate) fn serving(port: u16) -> bool {
     }
 }
 
-async fn wait_serving(port: u16, within: std::time::Duration) -> bool {
+pub(crate) async fn wait_serving(port: u16, within: std::time::Duration) -> bool {
     let end = std::time::Instant::now() + within;
     loop {
         if tokio::task::spawn_blocking(move || serving(port))
