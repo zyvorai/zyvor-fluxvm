@@ -40,6 +40,7 @@ mod infer;
 mod kube_apps;
 mod kube_chaos;
 mod kube_checkpoint;
+mod kube_dev;
 mod kube_doctor;
 mod kube_host;
 mod kube_names;
@@ -373,6 +374,28 @@ enum KubeCommand {
     },
     /// The services `kube add` can run, and which of them are running.
     Apps(KubeArgs),
+    /// Rebuild an image whenever a file in a directory changes, copy it into the cluster and restart the deployment.
+    Dev {
+        #[command(flatten)]
+        cluster: KubeArgs,
+        /// The image the deployment runs, for example `app:dev`. Use a tag other than `latest` so it is not pulled.
+        #[arg(long)]
+        image: String,
+        /// The deployment to restart.
+        #[arg(long)]
+        deployment: String,
+        #[arg(long, default_value = "default")]
+        namespace: String,
+        /// The directory to watch and build from.
+        #[arg(long, default_value = ".")]
+        dir: std::path::PathBuf,
+        /// The build command, run with `sh -c` in the directory; default is `docker build -t IMAGE DIR`.
+        #[arg(long)]
+        build: Option<String>,
+        /// Build, load and restart once, then stop.
+        #[arg(long)]
+        once: bool,
+    },
     /// Check what goes wrong for a cluster on a Mac (VPN, DNS, disk, clock, failing pods) and print the fix for each.
     Doctor(KubeArgs),
     /// Make this cluster the current `kubectl` context in ~/.kube/config (`fluxctl kube up` adds it without switching).
@@ -8055,6 +8078,29 @@ async fn kube_command<A: run::VmApi>(api: &A, command: KubeCommand) -> Result<()
             if std::env::var_os("FLUXVM_NO_OPEN").is_none() {
                 let _ = std::process::Command::new("open").arg(&url).status();
             }
+        }
+        KubeCommand::Dev {
+            cluster,
+            image,
+            deployment,
+            namespace,
+            dir,
+            build,
+            once,
+        } => {
+            kube_dev::run(
+                api,
+                &cluster.options()?,
+                &kube_dev::Dev {
+                    image: &image,
+                    deployment: &deployment,
+                    namespace: &namespace,
+                    dir: &dir,
+                    build: build.as_deref(),
+                    once,
+                },
+            )
+            .await?;
         }
         KubeCommand::Doctor(cluster) => {
             let checks = kube_doctor::run(api, &cluster.options()?).await?;
