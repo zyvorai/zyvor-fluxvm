@@ -25,9 +25,17 @@ pub enum App {
     Nats,
     /// Grafana on http://localhost:3000 (admin / admin).
     Grafana,
+    /// Redpanda, a Kafka-compatible broker: Kafka API on localhost:9092, admin API on http://localhost:9644.
+    Redpanda,
+    /// Qdrant vector database: REST on http://localhost:6333 (dashboard at /dashboard), gRPC on localhost:6334.
+    Qdrant,
+    /// Meilisearch on http://localhost:7700 (development mode: no key, built-in search page).
+    Meilisearch,
+    /// ClickHouse: HTTP on http://localhost:8123, native protocol on localhost:9000 (user default, password dev).
+    Clickhouse,
 }
 
-pub const ALL: [App; 8] = [
+pub const ALL: [App; 12] = [
     App::Postgres,
     App::Redis,
     App::Mysql,
@@ -36,6 +44,10 @@ pub const ALL: [App; 8] = [
     App::Rabbitmq,
     App::Nats,
     App::Grafana,
+    App::Redpanda,
+    App::Qdrant,
+    App::Meilisearch,
+    App::Clickhouse,
 ];
 
 struct Port {
@@ -65,6 +77,10 @@ impl App {
             App::Rabbitmq => "rabbitmq",
             App::Nats => "nats",
             App::Grafana => "grafana",
+            App::Redpanda => "redpanda",
+            App::Qdrant => "qdrant",
+            App::Meilisearch => "meilisearch",
+            App::Clickhouse => "clickhouse",
         }
     }
 
@@ -75,6 +91,7 @@ impl App {
             App::Redis => Some("redis-cli"),
             App::Mysql => Some("mysql -uroot -pdev app"),
             App::Mongodb => Some("mongosh"),
+            App::Clickhouse => Some("clickhouse-client --password dev"),
             _ => None,
         }
     }
@@ -214,6 +231,100 @@ impl App {
                 }],
                 volume: Some(("/var/lib/grafana", "1Gi")),
             },
+            // The Kafka API advertises 127.0.0.1:9092, which is what a client on the Mac dials, so it must stay on 9092.
+            App::Redpanda => Spec {
+                image: "docker.io/redpandadata/redpanda:v24.3.1",
+                env: &[],
+                args: &[
+                    "redpanda",
+                    "start",
+                    "--overprovisioned",
+                    "--smp",
+                    "1",
+                    "--memory",
+                    "768M",
+                    "--reserve-memory",
+                    "0M",
+                    "--node-id",
+                    "0",
+                    "--check=false",
+                    "--kafka-addr",
+                    "0.0.0.0:9092",
+                    "--advertise-kafka-addr",
+                    "127.0.0.1:9092",
+                ],
+                ports: &[
+                    Port {
+                        name: "admin",
+                        container: 9644,
+                        node: 30090,
+                        local: 9644,
+                    },
+                    Port {
+                        name: "kafka",
+                        container: 9092,
+                        node: 30092,
+                        local: 9092,
+                    },
+                ],
+                volume: Some(("/var/lib/redpanda/data", "2Gi")),
+            },
+            App::Qdrant => Spec {
+                image: "docker.io/qdrant/qdrant:v1.12.4",
+                env: &[],
+                args: &[],
+                ports: &[
+                    Port {
+                        name: "rest",
+                        container: 6333,
+                        node: 30633,
+                        local: 6333,
+                    },
+                    Port {
+                        name: "grpc",
+                        container: 6334,
+                        node: 30634,
+                        local: 6334,
+                    },
+                ],
+                volume: Some(("/qdrant/storage", "2Gi")),
+            },
+            App::Meilisearch => Spec {
+                image: "docker.io/getmeili/meilisearch:v1.12",
+                env: &[("MEILI_ENV", "development")],
+                args: &[],
+                ports: &[Port {
+                    name: "http",
+                    container: 7700,
+                    node: 30770,
+                    local: 7700,
+                }],
+                volume: Some(("/meili_data", "1Gi")),
+            },
+            App::Clickhouse => Spec {
+                image: "docker.io/clickhouse/clickhouse-server:24.12-alpine",
+                env: &[
+                    ("CLICKHOUSE_USER", "default"),
+                    ("CLICKHOUSE_PASSWORD", "dev"),
+                    ("CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT", "1"),
+                ],
+                args: &[],
+                ports: &[
+                    Port {
+                        name: "http",
+                        container: 8123,
+                        node: 30123,
+                        local: 8123,
+                    },
+                    Port {
+                        name: "native",
+                        container: 9000,
+                        node: 30900,
+                        local: 9000,
+                    },
+                ],
+                volume: Some(("/var/lib/clickhouse", "2Gi")),
+            },
         }
     }
 
@@ -290,6 +401,35 @@ impl App {
                     "http://127.0.0.1:3000 or http://grafana.localhost".into(),
                 ),
                 ("login", "admin / admin".into()),
+            ],
+            App::Redpanda => vec![
+                ("kafka", "127.0.0.1:9092 (bootstrap server)".into()),
+                (
+                    "admin",
+                    "http://127.0.0.1:9644 or http://redpanda.localhost".into(),
+                ),
+            ],
+            App::Qdrant => vec![
+                (
+                    "rest",
+                    "http://127.0.0.1:6333 or http://qdrant.localhost".into(),
+                ),
+                ("dashboard", "http://127.0.0.1:6333/dashboard".into()),
+                ("grpc", "127.0.0.1:6334".into()),
+            ],
+            App::Meilisearch => vec![
+                (
+                    "ui",
+                    "http://127.0.0.1:7700 or http://meilisearch.localhost".into(),
+                ),
+                ("key", "none (development mode)".into()),
+            ],
+            App::Clickhouse => vec![
+                ("http", "http://default:dev@127.0.0.1:8123".into()),
+                (
+                    "cli",
+                    "clickhouse-client --host 127.0.0.1 --port 9000 --password dev".into(),
+                ),
             ],
         }
     }
@@ -639,7 +779,7 @@ pub async fn list<A: VmApi>(api: &A, o: &KubeOptions) -> Result<String> {
         let on = running.split_whitespace().any(|r| r == a.name());
         let ports: Vec<String> = a.local_ports().iter().map(|(h, _)| h.to_string()).collect();
         out.push_str(&format!(
-            "{:<9} {:<8} localhost:{}\n",
+            "{:<12} {:<8} localhost:{}\n",
             a.name(),
             if on { "running" } else { "-" },
             ports.join(", ")
