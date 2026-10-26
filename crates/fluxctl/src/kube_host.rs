@@ -660,6 +660,17 @@ pub(crate) async fn guest_run_bytes<A: VmApi>(
     script: &str,
     stdin: Option<&[u8]>,
 ) -> Result<String> {
+    let out = guest_output_bytes(api, o, script, stdin).await?;
+    Ok(String::from_utf8_lossy(&out).trim().to_owned())
+}
+
+/// Runs a command in the server VM with optional binary input and returns its standard output untouched, for dumps.
+pub(crate) async fn guest_output_bytes<A: VmApi>(
+    api: &A,
+    o: &KubeOptions,
+    script: &str,
+    stdin: Option<&[u8]>,
+) -> Result<Vec<u8>> {
     use std::{io::Write, process::Stdio};
     let Some((id, _)) = api.find(&o.name).await? else {
         bail!("no cluster named {}", o.name);
@@ -683,14 +694,23 @@ pub(crate) async fn guest_run_bytes<A: VmApi>(
     .stdout(Stdio::piped())
     .stderr(Stdio::piped());
     let mut child = cmd.spawn().context("running a command in the server VM")?;
-    if let (Some(text), Some(mut pipe)) = (stdin, child.stdin.take()) {
-        pipe.write_all(text)?;
-    }
-    let out = child.wait_with_output()?;
+    // Feed the input from a thread, so a command that prints while it reads cannot fill the output pipe and stall us.
+    let out = std::thread::scope(|scope| {
+        let writer = child
+            .stdin
+            .take()
+            .zip(stdin)
+            .map(|(mut pipe, data)| scope.spawn(move || pipe.write_all(data)));
+        let out = child.wait_with_output();
+        if let Some(w) = writer {
+            let _ = w.join(); // a write error shows up as the command's own failure
+        }
+        out
+    })?;
     if !out.status.success() {
         bail!("{}", String::from_utf8_lossy(&out.stderr).trim());
     }
-    Ok(String::from_utf8_lossy(&out.stdout).trim().to_owned())
+    Ok(out.stdout)
 }
 
 pub(crate) async fn guest_sh<A: VmApi>(api: &A, o: &KubeOptions, script: &str) -> Result<String> {
