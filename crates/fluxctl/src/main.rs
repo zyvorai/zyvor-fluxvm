@@ -43,6 +43,7 @@ mod kube_chaos;
 mod kube_checkpoint;
 mod kube_dev;
 mod kube_doctor;
+mod kube_forward;
 mod kube_host;
 mod kube_names;
 mod kube_notify;
@@ -361,6 +362,29 @@ enum KubeCommand {
         /// Also erase the volume.
         #[arg(long)]
         delete_data: bool,
+    },
+    /// A port-forward that stays: give a Service a port on 127.0.0.1 and a `.localhost` name, kept open by `kube
+    /// supervise` across pod restarts. `fluxctl kube forward web` (80 -> 8080), `--list`, `--remove`.
+    Forward {
+        #[command(flatten)]
+        cluster: KubeArgs,
+        /// The Service to forward to.
+        #[arg(required_unless_present = "list")]
+        service: Option<String>,
+        #[arg(long, default_value = "default")]
+        namespace: String,
+        /// Which of the Service's ports, when it has several.
+        #[arg(long)]
+        service_port: Option<u16>,
+        /// The port on this Mac (default: the Service's port, or 8000 more when that is below 1024).
+        #[arg(long)]
+        local: Option<u16>,
+        /// Stop forwarding the Service.
+        #[arg(long, conflicts_with = "list")]
+        remove: bool,
+        /// Show what is forwarded.
+        #[arg(long)]
+        list: bool,
     },
     /// Save a database's contents to a file on the Mac, so a cluster can be rebuilt without losing the data:
     /// `fluxctl kube db-backup postgres` (also mysql, mongodb). The file is private and never overwritten.
@@ -8115,6 +8139,26 @@ async fn kube_command<A: run::VmApi>(api: &A, command: KubeCommand) -> Result<()
                 "{}",
                 kube_apps::remove(api, &cluster.options()?, app, delete_data).await?
             );
+        }
+        KubeCommand::Forward {
+            cluster,
+            service,
+            namespace,
+            service_port,
+            local,
+            remove,
+            list,
+        } => {
+            let o = cluster.options()?;
+            let text = match (list, service) {
+                (true, _) => kube_forward::list(api, &o).await?,
+                (false, Some(s)) if remove => kube_forward::remove(api, &o, &s, &namespace).await?,
+                (false, Some(s)) => {
+                    kube_forward::forward(api, &o, &s, &namespace, service_port, local).await?
+                }
+                (false, None) => unreachable!("clap requires a service unless --list"),
+            };
+            println!("{text}");
         }
         KubeCommand::DbBackup { cluster, app, file } => {
             println!(
