@@ -144,7 +144,9 @@ The API server certificate carries `127.0.0.1` as a SAN, so `kubectl` verifies i
   `/etc/hosts`, because `*.localhost` resolves to this Mac. An unknown name answers with a page that lists the known ones. A request by
   name to a **sleeping** cluster wakes it (3 seconds measured) and is answered. macOS lets an ordinary user take port 80 only on the
   wildcard address, so the listener falls back to it and drops every connection that does not come from this Mac. If something already
-  uses port 80 the names are skipped and the node-port URLs still work; `supervise --no-names` turns them off. HTTP only for now.
+  uses port 80 the names are skipped and the node-port URLs still work; `supervise --no-names` turns them off. HTTPS needs a CA you
+  choose to trust ([`kube trust`](#https-kube-trust)). WebSocket upgrades pass through, so a dev server's hot reload works by name; any
+  other request is told to close its connection after the response, because the name is read from the first request on a connection.
 * `kubectl port-forward` also works, since it goes through the API server.
 
 ## Services next to your app: `kube add`
