@@ -6981,7 +6981,7 @@ mod tests {
                 .await
                 .unwrap();
             let mut received = Vec::new();
-            let mut read_n = async |ws: &mut _, n: usize, received: &mut Vec<u8>| {
+            let read_n = async |ws: &mut _, n: usize, received: &mut Vec<u8>| {
                 let ws: &mut tokio_tungstenite::WebSocketStream<_> = ws;
                 while received.len() < n {
                     match ws.next().await.expect("the relay closed early").unwrap() {

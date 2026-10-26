@@ -74,9 +74,7 @@ pub(crate) fn endpoint(e: &Value) -> Option<Endpoint> {
     let has = |l: &str| labels.contains(&l);
     let (id, label, kind) = if has("reserved:world") {
         ("world", "Internet", "world")
-    } else if has("reserved:kube-apiserver") {
-        ("host", "Node and API server", "host")
-    } else if has("reserved:host") {
+    } else if has("reserved:kube-apiserver") || has("reserved:host") {
         ("host", "Node and API server", "host")
     } else if has("reserved:remote-node") {
         ("remote-node", "Other nodes", "host")
@@ -250,10 +248,11 @@ pub(crate) fn lines_arg(q: &FlowsQuery) -> String {
         .to_string()
 }
 
+/// The Cilium agents as (namespace, pod), and the node of every pod keyed by (namespace, pod).
+type AgentsAndNodes = (Vec<(String, String)>, HashMap<(String, String), String>);
+
 /// The running Cilium agent pods and the node each runs on, plus every pod's node.
-pub(crate) fn agents_and_nodes(
-    pods: &Value,
-) -> (Vec<(String, String)>, HashMap<(String, String), String>) {
+pub(crate) fn agents_and_nodes(pods: &Value) -> AgentsAndNodes {
     let mut agents = vec![];
     let mut nodes = HashMap::new();
     for p in pods["items"].as_array().into_iter().flatten() {
