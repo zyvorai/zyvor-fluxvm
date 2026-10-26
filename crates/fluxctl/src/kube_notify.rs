@@ -2,7 +2,7 @@
 //! pulled), so a problem shows up on the desktop instead of in a terminal nobody is looking at. The decisions are pure;
 //! only `send` talks to the system.
 
-use crate::kube_doctor::{BAD, PodRow};
+use crate::kube_doctor::{PodRow, is_bad};
 use std::collections::HashMap;
 
 /// A failing pod must look bad on this many checks in a row before it is announced; pods that are merely still starting
@@ -39,7 +39,7 @@ impl Watch {
             let key = format!("{}/{}", p.namespace, p.name);
             present.insert(key.clone());
             let st = self.pods.entry(key.clone()).or_default();
-            if BAD.contains(&p.status.as_str()) {
+            if is_bad(&p.status) {
                 st.bad += 1;
                 st.quiet = 0;
                 if !st.announced && st.bad >= BAD_CHECKS {
@@ -91,9 +91,14 @@ pub fn send(a: &Alert) {
         }
         return;
     }
-    let _ = std::process::Command::new("osascript")
-        .args(["-e", &applescript(a)])
-        .status();
+    // Not waited for here: with no desktop session, or a permission prompt nobody answers, osascript can hang, and this is
+    // called from the supervise loop.
+    let script = applescript(a);
+    std::thread::spawn(move || {
+        let _ = std::process::Command::new("osascript")
+            .args(["-e", &script])
+            .status();
+    });
 }
 
 #[cfg(test)]

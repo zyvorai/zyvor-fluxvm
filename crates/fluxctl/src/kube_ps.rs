@@ -2,7 +2,7 @@
 //! the pods that are failing, the apps and forwards on this Mac, the names that work, and the checkpoints. The gathering is
 //! thin; `render` and the small summaries are pure.
 
-use crate::kube_doctor::{BAD, PodRow, parse_pods};
+use crate::kube_doctor::{PodRow, is_bad, parse_pods};
 use crate::kube_host::{self, KubeOptions};
 use crate::run::VmApi;
 use anyhow::Result;
@@ -49,7 +49,7 @@ pub fn ago(secs: i64) -> String {
 pub fn pod_summary(rows: &[PodRow]) -> (usize, Vec<String>) {
     let bad: Vec<String> = rows
         .iter()
-        .filter(|p| BAD.contains(&p.status.as_str()) || p.restarts >= 3)
+        .filter(|p| is_bad(&p.status) || p.restarts >= 3)
         .map(|p| {
             format!(
                 "{}/{} {} (restarts {})",

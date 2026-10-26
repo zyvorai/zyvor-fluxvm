@@ -68,10 +68,10 @@ pub fn validate(image: &str, deployment: &str, namespace: &str) -> Result<()> {
     if !kube_host::image_ok(image) {
         bail!("image {image:?} is not a plain image reference");
     }
-    if !kube_host::name_ok(deployment) {
+    if !kube_host::resource_name_ok(deployment) {
         bail!("deployment {deployment:?} is not a Kubernetes name");
     }
-    if !kube_host::name_ok(namespace) {
+    if !kube_host::resource_name_ok(namespace) {
         bail!("namespace {namespace:?} is not a Kubernetes name");
     }
     Ok(())

@@ -5,8 +5,8 @@
 use crate::docker_host as dh;
 use anyhow::{Context, Result};
 use rcgen::{
-    BasicConstraints, CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair,
-    KeyUsagePurpose,
+    BasicConstraints, CertificateParams, DnType, ExtendedKeyUsagePurpose, GeneralSubtree, IsCa,
+    Issuer, KeyPair, KeyUsagePurpose, NameConstraints,
 };
 use rustls::{
     crypto::ring as provider,
@@ -21,6 +21,8 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+/// Certificates kept for reuse; more than this and the cache starts over.
+const MAX_CACHED: usize = 256;
 const CA_NAME: &str = "FluxVM local CA";
 
 pub fn ca_dir() -> Result<PathBuf> {
@@ -40,7 +42,13 @@ fn ca_params() -> Result<CertificateParams> {
     p.distinguished_name.push(DnType::CommonName, CA_NAME);
     p.distinguished_name
         .push(DnType::OrganizationName, "FluxVM");
-    p.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+    // It signs leaves directly (no intermediates), and only for `localhost` names: whoever copies the key can mint a
+    // certificate for `shop.localhost`, but a client that honours name constraints rejects one for any other site.
+    p.is_ca = IsCa::Ca(BasicConstraints::Constrained(0));
+    p.name_constraints = Some(NameConstraints {
+        permitted_subtrees: vec![GeneralSubtree::DnsName("localhost".into())],
+        excluded_subtrees: vec![],
+    });
     p.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
     Ok(p)
 }
@@ -56,6 +64,10 @@ pub fn existing_ca() -> Option<Ca> {
 
 /// Loads the CA, or makes it on first use.
 pub fn ensure_ca() -> Result<Ca> {
+    ensure_ca_once(true)
+}
+
+fn ensure_ca_once(retry: bool) -> Result<Ca> {
     if let Some(ca) = existing_ca() {
         return Ok(ca);
     }
@@ -71,7 +83,19 @@ pub fn ensure_ca() -> Result<Ca> {
         cert_pem: cert.pem(),
         key_pem: key.serialize_pem(),
     };
-    write_file(&dir.join("ca-key.pem"), &ca.key_pem, 0o600)?;
+    // Files are created, never overwritten: if another process is making the CA at the same moment, use theirs.
+    if let Err(e) = write_file(&dir.join("ca-key.pem"), &ca.key_pem, 0o600) {
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        if let Some(theirs) = existing_ca() {
+            return Ok(theirs);
+        }
+        // a key left by a run that stopped before it wrote the certificate
+        if retry && dir.join("ca-key.pem").exists() && !dir.join("ca.pem").exists() {
+            let _ = std::fs::remove_file(dir.join("ca-key.pem"));
+            return ensure_ca_once(false);
+        }
+        return Err(e);
+    }
     write_file(&dir.join("ca.pem"), &ca.cert_pem, 0o644)?;
     Ok(ca)
 }
@@ -80,11 +104,10 @@ fn write_file(path: &std::path::Path, text: &str, mode: u32) -> Result<()> {
     use std::{io::Write, os::unix::fs::OpenOptionsExt};
     let mut f = std::fs::OpenOptions::new()
         .write(true)
-        .create(true)
-        .truncate(true)
+        .create_new(true)
         .mode(mode)
         .open(path)
-        .with_context(|| format!("writing {}", path.display()))?;
+        .with_context(|| format!("creating {}", path.display()))?;
     f.write_all(text.as_bytes())?;
     Ok(())
 }
@@ -108,7 +131,7 @@ pub fn fingerprint(cert_pem: &str) -> Option<String> {
 pub fn trust_command(ca_path: &std::path::Path) -> String {
     format!(
         "sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain {}",
-        ca_path.display()
+        crate::kube_dev::shell_quote(&ca_path.display().to_string())
     )
 }
 
@@ -182,7 +205,11 @@ impl ResolvesServerCert for Resolver {
             return Some(k.clone());
         }
         let key = Arc::new(leaf(&self.ca, &host).ok()?);
-        self.cache.lock().ok()?.insert(host, key.clone());
+        let mut cache = self.cache.lock().ok()?;
+        if cache.len() >= MAX_CACHED {
+            cache.clear(); // names are only ever asked for by local clients; start over rather than grow without bound
+        }
+        cache.insert(host, key.clone());
         Some(key)
     }
 }
@@ -258,7 +285,23 @@ mod tests {
         let c = trust_command(std::path::Path::new("/Users/me/.fluxvm/ca/ca.pem"));
         assert!(c.starts_with("sudo security add-trusted-cert -d -r trustRoot"));
         assert!(c.contains("/Library/Keychains/System.keychain"));
-        assert!(c.ends_with("/Users/me/.fluxvm/ca/ca.pem"));
+        assert!(c.ends_with("'/Users/me/.fluxvm/ca/ca.pem'"));
+        let odd = trust_command(std::path::Path::new("/Users/a b/it's/ca.pem"));
+        assert!(odd.ends_with("'/Users/a b/it'\\''s/ca.pem'"), "{odd}");
+    }
+
+    #[test]
+    fn the_ca_is_limited_to_localhost_and_cannot_make_intermediates() {
+        let p = ca_params().unwrap();
+        assert!(matches!(
+            p.is_ca,
+            IsCa::Ca(BasicConstraints::Constrained(0))
+        ));
+        let nc = p.name_constraints.expect("name constraints");
+        assert_eq!(nc.permitted_subtrees.len(), 1);
+        assert!(
+            matches!(&nc.permitted_subtrees[0], GeneralSubtree::DnsName(n) if n == "localhost")
+        );
     }
 
     #[test]

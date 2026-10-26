@@ -17,6 +17,29 @@ pub struct Tools {
     pub ext: &'static str,
 }
 
+/// Whether `data` looks like a complete dump made by this app's tool: the header it starts with and, for SQL, the line it
+/// ends with. A truncated file, or one from another tool, is refused before anything in the database is touched.
+pub fn looks_like_a_backup(app: App, data: &[u8]) -> bool {
+    fn has(hay: &[u8], needle: &str) -> bool {
+        let n = needle.as_bytes();
+        hay.windows(n.len()).any(|w| w == n)
+    }
+    let head = &data[..data.len().min(512)];
+    let tail = &data[data.len().saturating_sub(512)..];
+    match app {
+        App::Postgres => {
+            has(head, "PostgreSQL database cluster dump")
+                && has(tail, "PostgreSQL database cluster dump complete")
+        }
+        App::Mysql => has(head, "MySQL dump") && has(tail, "Dump completed"),
+        App::Mongodb => data.starts_with(&MONGO_ARCHIVE_MAGIC),
+        _ => false,
+    }
+}
+
+/// The first four bytes of a `mongodump --archive` stream, read from a real dump (`6d e2 99 81`).
+const MONGO_ARCHIVE_MAGIC: [u8; 4] = [0x6d, 0xe2, 0x99, 0x81];
+
 pub fn tools(app: App) -> Option<Tools> {
     match app {
         App::Postgres => Some(Tools {
@@ -118,6 +141,13 @@ pub async fn restore<A: VmApi>(api: &A, o: &KubeOptions, app: App, file: &Path) 
     if data.is_empty() {
         bail!("{} is empty", file.display());
     }
+    if !looks_like_a_backup(app, &data) {
+        bail!(
+            "{} does not look like a complete {} backup made by `db-backup` (truncated, or made by another tool); nothing was restored",
+            file.display(),
+            app.name()
+        );
+    }
     kube_host::guest_output_bytes(api, o, &exec_script(app, t.restore), Some(&data))
         .await
         .with_context(|| {
@@ -165,6 +195,28 @@ mod tests {
             let t = tools(a).unwrap();
             assert!(!t.dump.contains('\'') && !t.restore.contains('\''));
         }
+    }
+
+    #[test]
+    fn only_complete_dumps_of_the_right_kind_are_restored() {
+        let pg = b"--\n-- PostgreSQL database cluster dump\n--\nSET x;\n--\n-- PostgreSQL database cluster dump complete\n--\n";
+        assert!(looks_like_a_backup(App::Postgres, pg));
+        assert!(!looks_like_a_backup(App::Postgres, &pg[..60]), "truncated");
+        assert!(
+            !looks_like_a_backup(App::Mysql, pg),
+            "another database's dump"
+        );
+        let my =
+            b"-- MySQL dump 10.13  Distrib 8.4\nCREATE TABLE t;\n-- Dump completed on 2026-10-26\n";
+        assert!(looks_like_a_backup(App::Mysql, my));
+        assert!(!looks_like_a_backup(App::Mysql, &my[..40]));
+        assert!(looks_like_a_backup(
+            App::Mongodb,
+            &[0x6d, 0xe2, 0x99, 0x81, 1, 2, 3]
+        ));
+        assert!(!looks_like_a_backup(App::Mongodb, b"hello"));
+        assert!(!looks_like_a_backup(App::Redis, pg));
+        assert!(!looks_like_a_backup(App::Postgres, b""));
     }
 
     #[test]

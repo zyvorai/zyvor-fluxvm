@@ -38,7 +38,7 @@ pub fn resolve_target(t: &str) -> Result<String> {
             "cannot sync into a {other:?}: use deploy/NAME, pod/NAME, statefulset/NAME or daemonset/NAME"
         ),
     };
-    if !kube_host::name_ok(name) {
+    if !kube_host::resource_name_ok(name) {
         bail!("{name:?} is not a Kubernetes name");
     }
     Ok(format!("{kind}/{name}"))
@@ -55,11 +55,11 @@ fn path_ok(p: &str) -> bool {
 
 pub fn validate(s: &Sync<'_>) -> Result<String> {
     let target = resolve_target(s.target)?;
-    if !kube_host::name_ok(s.namespace) {
+    if !kube_host::resource_name_ok(s.namespace) {
         bail!("namespace {:?} is not a Kubernetes name", s.namespace);
     }
     if let Some(c) = s.container
-        && !kube_host::name_ok(c)
+        && !kube_host::resource_name_ok(c)
     {
         bail!("container {c:?} is not a Kubernetes name");
     }
