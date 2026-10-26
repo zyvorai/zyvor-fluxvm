@@ -341,7 +341,7 @@ enum KubeCommand {
     /// The VM, its address, whether the API answers and where the kubeconfig is, as JSON.
     Status(KubeArgs),
     /// Run a service you usually need next to your app, with its usual port on 127.0.0.1 and a connection string: `fluxctl kube add postgres`.
-    /// Postgres, Redis, MySQL, MinIO (S3) and Mailpit (mail catcher). Data is kept on a volume.
+    /// Postgres, Redis, MySQL, MongoDB, RabbitMQ, NATS, Mailpit (mail catcher) and Grafana. Data is kept on a volume.
     Add {
         #[command(flatten)]
         cluster: KubeArgs,

@@ -367,6 +367,26 @@ through, so you just use the cluster:
 Single-node clusters only. `kube agent install` takes `--idle-sleep`, `--auto-checkpoint`, `--keep-auto`, `--sleep-on-battery`,
 `--sleep-on-lid-close` and `--no-auto-publish` and passes them to the LaunchAgent.
 
+## Save a file, the cluster runs it: `kube dev`
+
+```sh
+fluxctl kube dev --app-image app:dev --deployment web
+```
+
+It builds the image in the current directory (`docker build`, or your own command with `--build`), copies it into the cluster, restarts the deployment and waits for the rollout, then watches the directory. Every save does it again. A build that fails is printed and the watcher keeps going; fix the file and save. `--once` does one cycle and stops. `.git`, `target` and `node_modules` are not watched. Use a tag other than `latest`, or Kubernetes pulls it again.
+
+Proved on a real k3s: a pod served `v1`, I edited the file and it served `v2` with no other command, a deliberately broken Dockerfile was reported while the watcher stayed up, and fixing it gave `v3`. A cycle took about two seconds once the base image was cached.
+
+## When something is wrong: `kube doctor`
+
+```sh
+fluxctl kube doctor
+```
+
+It checks what tends to go wrong for a cluster on a Mac and prints the fix next to each problem: free disk on the Mac, a VPN that takes all traffic, the VM's disk, whether the VM can resolve names and reach the image registry, the VM's clock against the Mac's, and pods that are crash-looping, out of memory, cannot pull their image, or keep restarting. A sleeping cluster is reported as asleep. It exits non-zero when something failed, so it can gate a script.
+
+Proved on a real k3s: a healthy cluster passes every check; with one pod killed for memory and one pointing at an image that does not exist, it named both and exited 1. Not run: a VPN, a full disk and a skewed clock on a real machine (those verdicts are unit-tested only).
+
 ## Keep it running
 
 ```bash
