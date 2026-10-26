@@ -7427,7 +7427,9 @@ mod tests {
 
         #[tokio::test]
         async fn caller_is_throttled_past_burst_with_retry_after_set() {
-            let app = router(manager(token_auth(1.0, 2)));
+            // A refill this slow means no token comes back during the test, however long a busy machine takes between requests
+            // (with 1 request per second a pause of a second between two calls refilled the bucket and the 429 never came).
+            let app = router(manager(token_auth(0.001, 2)));
             for _ in 0..2 {
                 assert_eq!(
                     status_for(app.clone(), "GET", "/v1/vms", Some("alice")).await,
@@ -7447,7 +7449,8 @@ mod tests {
 
         #[tokio::test]
         async fn distinct_tokens_have_independent_buckets() {
-            let app = router(manager(token_auth(1.0, 1)));
+            // A near-zero refill, so no token comes back however long a busy machine pauses between the requests.
+            let app = router(manager(token_auth(0.001, 1)));
             assert_eq!(
                 status_for(app.clone(), "GET", "/v1/vms", Some("alice")).await,
                 StatusCode::OK
