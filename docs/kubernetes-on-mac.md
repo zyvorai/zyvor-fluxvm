@@ -145,10 +145,14 @@ this Mac, and prints what to paste into your app. Each app gets its usual port o
 | `nats` (2, JetStream) | `4222`, monitoring `http://nats.localhost` (`8222`) | none |
 | `mailpit` | SMTP `1025`, inbox `http://mailpit.localhost` (`8025`) | none |
 | `grafana` (11) | `http://grafana.localhost` (`3000`) | `admin` / `admin` |
+| `redpanda` (Kafka API) | bootstrap `127.0.0.1:9092`, admin `http://redpanda.localhost` (`9644`) | none |
+| `qdrant` (vector database) | REST `http://qdrant.localhost` (`6333`, dashboard at `/dashboard`), gRPC `6334` | none |
+| `meilisearch` (1.12) | `http://meilisearch.localhost` (`7700`) | none (development mode) |
+| `clickhouse` (24.12) | HTTP `8123`, native `9000` | `default` / `dev` |
 
 These are development defaults with throwaway passwords, bound to loopback on the Mac; they are not for anything shared. An app's
 port can be opened only if the supervisor (`fluxctl kube supervise`, which the LaunchAgent runs) or `add` itself opens it; keep them
-open across restarts with `fluxctl kube agent install`. `connect` works for postgres, redis, mysql and mongodb (a shell in the pod
+open across restarts with `fluxctl kube agent install`. `connect` works for postgres, redis, mysql, mongodb and clickhouse (a shell in the pod
 through the cluster); `open NAME` opens any published service, by its `.localhost` name while `supervise` runs.
 
 Your own Services can ask for a port of their own on the Mac the same way, with an annotation: `fluxvm.dev/local-ports: "30432=5432"`
