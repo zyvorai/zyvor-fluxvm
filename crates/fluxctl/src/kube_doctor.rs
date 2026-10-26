@@ -94,17 +94,17 @@ pub fn guest_disk(pcent: Option<u32>) -> Check {
         None => Check::warn(
             "VM disk",
             "could not read usage",
-            "fluxctl kube shell, then df -h /",
+            "fluxctl ssh CLUSTER, then df -h /",
         ),
         Some(p) if p >= 95 => Check::fail(
             "VM disk",
             format!("{p}% full: pods will be evicted"),
-            "fluxctl kube shell, then: sudo k3s crictl rmi --prune",
+            "fluxctl ssh CLUSTER, then: sudo k3s crictl rmi --prune",
         ),
         Some(p) if p >= 85 => Check::warn(
             "VM disk",
             format!("{p}% full"),
-            "sudo k3s crictl rmi --prune (in fluxctl kube shell) removes unused images",
+            "sudo k3s crictl rmi --prune (in `fluxctl ssh CLUSTER`) removes unused images",
         ),
         Some(p) => Check::ok("VM disk", format!("{p}% used")),
     }
@@ -130,7 +130,7 @@ pub fn vpn(route: Option<String>) -> Check {
             format!(
                 "all Mac traffic goes through {i}; the VM's DNS and image pulls may fail while it is on"
             ),
-            "if image pulls fail: fluxctl kube shell, then check `getent hosts registry-1.docker.io`; or fluxctl kube load IMAGE",
+            "if image pulls fail: fluxctl ssh CLUSTER, then check `getent hosts registry-1.docker.io`; or fluxctl kube load IMAGE",
         ),
         None => Check::ok("VPN", "no full-tunnel VPN"),
     }
@@ -141,7 +141,7 @@ pub fn dns(resolved: bool, reached_registry: Option<String>) -> Check {
         return Check::fail(
             "VM DNS",
             "the VM cannot resolve names (a VPN or a changed network does this)",
-            "fluxctl kube shell, then: sudo systemctl restart systemd-resolved; or wake the cluster after changing networks: fluxctl kube sleep && fluxctl kube wake",
+            "fluxctl ssh CLUSTER, then: sudo systemctl restart systemd-resolved; or wake the cluster after changing networks: fluxctl kube sleep && fluxctl kube wake",
         );
     }
     match reached_registry.as_deref() {
@@ -165,7 +165,7 @@ pub fn clock(skew: Option<i64>) -> Check {
         None => Check::warn(
             "VM clock",
             "could not read it",
-            "fluxctl kube shell, then: date",
+            "fluxctl ssh CLUSTER, then: date",
         ),
         Some(s) if s.abs() > 60 => Check::fail(
             "VM clock",
@@ -218,16 +218,14 @@ const BAD: [&str; 6] = [
     "Error",
 ];
 
+/// Restarts after which a pod that looks fine right now is still worth a warning: a crash loop is "Running" for a moment
+/// between attempts, so a single snapshot can miss it.
+const RESTARTS_WARN: u32 = 3;
+
 pub fn pods(rows: &[PodRow]) -> Vec<Check> {
-    let bad: Vec<&PodRow> = rows
+    let mut checks: Vec<Check> = rows
         .iter()
         .filter(|p| BAD.contains(&p.status.as_str()))
-        .collect();
-    if bad.is_empty() {
-        let n = rows.len();
-        return vec![Check::ok("Pods", format!("{n} pod(s), none failing"))];
-    }
-    bad.iter()
         .map(|p| {
             let fix = match p.status.as_str() {
                 "ImagePullBackOff" | "ErrImagePull" => format!(
@@ -242,11 +240,35 @@ pub fn pods(rows: &[PodRow]) -> Vec<Check> {
             };
             Check::fail(
                 "Pod",
-                format!("{}/{} is {} (restarts {})", p.namespace, p.name, p.status, p.restarts),
+                format!(
+                    "{}/{} is {} (restarts {})",
+                    p.namespace, p.name, p.status, p.restarts
+                ),
                 fix,
             )
         })
-        .collect()
+        .collect();
+    checks.extend(
+        rows.iter()
+            .filter(|p| !BAD.contains(&p.status.as_str()) && p.restarts >= RESTARTS_WARN)
+            .map(|p| {
+                Check::warn(
+                    "Pod",
+                    format!(
+                        "{}/{} is {} but has restarted {} times",
+                        p.namespace, p.name, p.status, p.restarts
+                    ),
+                    format!("kubectl -n {} logs {} --previous", p.namespace, p.name),
+                )
+            }),
+    );
+    if checks.is_empty() {
+        checks.push(Check::ok(
+            "Pods",
+            format!("{} pod(s), none failing", rows.len()),
+        ));
+    }
+    checks
 }
 
 /// A short report; the exit code the CLI uses is nonzero when any check failed.
@@ -280,6 +302,14 @@ fn mac_sh(program: &str, args: &[&str]) -> String {
 
 /// Runs every check and returns the report. A sleeping or stopped cluster is reported as such and the in-VM checks skipped.
 pub async fn run<A: VmApi>(api: &A, o: &KubeOptions) -> Result<Vec<Check>> {
+    let mut checks = run_checks(api, o).await?;
+    for c in &mut checks {
+        c.fix = c.fix.replace("CLUSTER", &o.name);
+    }
+    Ok(checks)
+}
+
+async fn run_checks<A: VmApi>(api: &A, o: &KubeOptions) -> Result<Vec<Check>> {
     let mut checks = vec![];
     let home = std::env::var("HOME").unwrap_or_else(|_| "/".into());
     checks.push(mac_disk(parse_df_free(&mac_sh("df", &["-k", &home]))));
@@ -362,7 +392,7 @@ pub async fn run<A: VmApi>(api: &A, o: &KubeOptions) -> Result<Vec<Check>> {
         Err(e) => checks.push(Check::fail(
             "Kubernetes",
             format!("the API does not answer in the VM: {e}"),
-            "fluxctl kube shell, then: sudo journalctl -u k3s -n 50",
+            "fluxctl ssh CLUSTER, then: sudo journalctl -u k3s -n 50",
         )),
     }
     Ok(checks)
@@ -434,6 +464,9 @@ mod tests {
         assert!(checks[0].fix.contains("logs api-2 --previous"));
         assert!(checks[1].fix.contains("--memory-mib"));
         assert!(checks[2].fix.contains("kube load"));
+        let between = pods(&parse_pods("default flap 1/1 Running 5 (20s ago) 4m\n"));
+        assert_eq!(between.len(), 1);
+        assert_eq!(between[0].level, Level::Warn);
         let healthy = pods(&parse_pods("default web-1 1/1 Running 0 5m\n"));
         assert_eq!(healthy.len(), 1);
         assert_eq!(healthy[0].level, Level::Ok);
