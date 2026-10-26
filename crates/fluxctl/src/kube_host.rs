@@ -1478,6 +1478,10 @@ pub async fn supervise<A: VmApi>(
     let names = (auto_publish && local_names).then(crate::kube_names::Names::default);
     if let Some(n) = &names {
         tokio::spawn(crate::kube_names::serve(n.clone()));
+        // HTTPS only once `fluxctl kube trust` has made a CA; without one the names stay on plain http.
+        if let Some(acceptor) = crate::kube_tls::acceptor() {
+            tokio::spawn(crate::kube_names::serve_tls(n.clone(), acceptor));
+        }
     }
     let mut idle = IdleWatch::default();
     let mut open: Vec<(u16, u16)> = vec![];

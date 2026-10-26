@@ -78,84 +78,137 @@ fn not_found(host: Option<&str>, known: &[String]) -> String {
     )
 }
 
-/// Listens on 127.0.0.1:80 and forwards each HTTP request to the service its Host names. Returns at once if the port is
-/// taken (something else on the Mac uses 80); the names then simply do not work and the node-port URLs still do.
-pub async fn serve(names: Names) {
+/// Adds `x-forwarded-proto: https` after the request line, so an app behind the TLS listener builds https links.
+pub fn with_forwarded_proto(head: &[u8]) -> Vec<u8> {
+    match head.windows(2).position(|w| w == b"\r\n") {
+        Some(i) => {
+            let mut out = head[..i].to_vec();
+            out.extend_from_slice(b"\r\nx-forwarded-proto: https");
+            out.extend_from_slice(&head[i..]);
+            out
+        }
+        None => head.to_vec(),
+    }
+}
+
+/// Reads one request head from `client`, finds the service its Host names and proxies the connection to it.
+async fn handle<S>(mut client: S, names: Names, https: bool)
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
-        net::{TcpListener, TcpStream},
+        net::TcpStream,
     };
+    let mut head = Vec::new();
+    let mut buf = [0u8; 4096];
+    let read = tokio::time::timeout(Duration::from_secs(5), async {
+        while head.len() < 16 * 1024 && !head.windows(4).any(|w| w == b"\r\n\r\n") {
+            match client.read(&mut buf).await {
+                Ok(0) | Err(_) => return,
+                Ok(n) => head.extend_from_slice(&buf[..n]),
+            }
+        }
+    })
+    .await;
+    if read.is_err() || head.is_empty() {
+        return;
+    }
+    let host = parse_host(&head);
+    let (port, known) = {
+        let t = names.lock().unwrap();
+        (
+            host.as_ref().and_then(|h| t.get(h)).copied(),
+            t.keys().cloned().collect::<Vec<_>>(),
+        )
+    };
+    let Some(port) = port else {
+        let _ = client
+            .write_all(not_found(host.as_deref(), &known).as_bytes())
+            .await;
+        return;
+    };
+    // The service's port is open (published) or held by the wake-on-demand listener, which wakes the cluster. A
+    // cluster that is just going to sleep or coming back has neither for a moment, so wait a little before giving up.
+    let mut upstream = None;
+    for _ in 0..40 {
+        if let Ok(u) = TcpStream::connect(("127.0.0.1", port)).await {
+            upstream = Some(u);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    let Some(mut upstream) = upstream else {
+        let _ = client
+            .write_all(
+                b"HTTP/1.1 502 Bad Gateway\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+            )
+            .await;
+        return;
+    };
+    let head = if https {
+        with_forwarded_proto(&head)
+    } else {
+        head
+    };
+    if upstream.write_all(&head).await.is_err() {
+        return;
+    }
+    let _ = tokio::io::copy_bidirectional(&mut client, &mut upstream).await;
+}
+
+/// Listens on 127.0.0.1:`port` and forwards each request to the service its Host names; with `tls`, the connection is
+/// TLS first. Returns at once if the port is taken (something else on the Mac uses it); the names then simply do not work
+/// and the node-port URLs still do.
+async fn listen(names: Names, port: u16, tls: Option<tokio_rustls::TlsAcceptor>) {
+    use tokio::net::TcpListener;
+    let scheme = if tls.is_some() { "https" } else { "http" };
     // macOS lets an ordinary user bind a privileged port only on the wildcard address, not on 127.0.0.1. Prefer loopback
     // where it works; otherwise listen widely and drop every connection that does not come from this Mac.
-    let (listener, wide) = match TcpListener::bind(("127.0.0.1", 80)).await {
+    let (listener, wide) = match TcpListener::bind(("127.0.0.1", port)).await {
         Ok(l) => (l, false),
-        Err(_) => match TcpListener::bind(("0.0.0.0", 80)).await {
+        Err(_) => match TcpListener::bind(("0.0.0.0", port)).await {
             Ok(l) => (l, true),
             Err(e) => {
                 return eprintln!(
-                    "names: cannot listen on port 80 ({e}); services stay on their node ports"
+                    "names: cannot listen on port {port} ({e}); services stay on their node ports"
                 );
             }
         },
     };
-    eprintln!("names: http://<service>.<namespace>.localhost on port 80 (this Mac only)");
+    eprintln!("names: {scheme}://<service>.<namespace>.localhost on port {port} (this Mac only)");
     loop {
-        let Ok((mut client, peer)) = listener.accept().await else {
+        let Ok((client, peer)) = listener.accept().await else {
             continue;
         };
         if wide && !peer.ip().is_loopback() {
             continue; // another machine on the network: not for us
         }
         let names = names.clone();
+        let tls = tls.clone();
         tokio::spawn(async move {
-            let mut head = Vec::new();
-            let mut buf = [0u8; 4096];
-            let read = tokio::time::timeout(Duration::from_secs(5), async {
-                while head.len() < 16 * 1024 && !head.windows(4).any(|w| w == b"\r\n\r\n") {
-                    match client.read(&mut buf).await {
-                        Ok(0) | Err(_) => return,
-                        Ok(n) => head.extend_from_slice(&buf[..n]),
+            match tls {
+                None => handle(client, names, false).await,
+                Some(acceptor) => {
+                    let handshake =
+                        tokio::time::timeout(Duration::from_secs(5), acceptor.accept(client)).await;
+                    if let Ok(Ok(stream)) = handshake {
+                        handle(stream, names, true).await;
                     }
                 }
-            })
-            .await;
-            if read.is_err() || head.is_empty() {
-                return;
             }
-            let host = parse_host(&head);
-            let (port, known) = {
-                let t = names.lock().unwrap();
-                (
-                    host.as_ref().and_then(|h| t.get(h)).copied(),
-                    t.keys().cloned().collect::<Vec<_>>(),
-                )
-            };
-            let Some(port) = port else {
-                let _ = client
-                    .write_all(not_found(host.as_deref(), &known).as_bytes())
-                    .await;
-                return;
-            };
-            // The service's port is open (published) or held by the wake-on-demand listener, which wakes the cluster. A
-            // cluster that is just going to sleep or coming back has neither for a moment, so wait a little before giving up.
-            let mut upstream = None;
-            for _ in 0..40 {
-                if let Ok(u) = TcpStream::connect(("127.0.0.1", port)).await {
-                    upstream = Some(u);
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(500)).await;
-            }
-            let Some(mut upstream) = upstream else {
-                let _ = client.write_all(b"HTTP/1.1 502 Bad Gateway\r\ncontent-length: 0\r\nconnection: close\r\n\r\n").await;
-                return;
-            };
-            if upstream.write_all(&head).await.is_err() {
-                return;
-            }
-            let _ = tokio::io::copy_bidirectional(&mut client, &mut upstream).await;
         });
     }
+}
+
+/// The plain-HTTP names listener on port 80.
+pub async fn serve(names: Names) {
+    listen(names, 80, None).await
+}
+
+/// The HTTPS names listener on port 443, with a certificate per name from the local CA.
+pub async fn serve_tls(names: Names, acceptor: tokio_rustls::TlsAcceptor) {
+    listen(names, 443, Some(acceptor)).await
 }
 
 #[cfg(test)]
@@ -194,6 +247,16 @@ mod tests {
         );
         assert_eq!(parse_host(b"GET / HTTP/1.1\r\nAccept: */*\r\n\r\n"), None);
         assert_eq!(parse_host(b"\xff\xfe"), None);
+    }
+
+    #[test]
+    fn https_requests_tell_the_app_they_were_https() {
+        let out = with_forwarded_proto(b"GET / HTTP/1.1\r\nHost: a.localhost\r\n\r\n");
+        assert_eq!(
+            out,
+            b"GET / HTTP/1.1\r\nx-forwarded-proto: https\r\nHost: a.localhost\r\n\r\n"
+        );
+        assert_eq!(with_forwarded_proto(b"junk"), b"junk");
     }
 
     #[test]
