@@ -38,6 +38,7 @@ mod fleet_client;
 mod guard_cmd;
 mod infer;
 mod kube_apps;
+mod kube_backup;
 mod kube_chaos;
 mod kube_checkpoint;
 mod kube_dev;
@@ -360,6 +361,22 @@ enum KubeCommand {
         /// Also erase the volume.
         #[arg(long)]
         delete_data: bool,
+    },
+    /// Save a database's contents to a file on the Mac, so a cluster can be rebuilt without losing the data:
+    /// `fluxctl kube db-backup postgres` (also mysql, mongodb). The file is private and never overwritten.
+    DbBackup {
+        #[command(flatten)]
+        cluster: KubeArgs,
+        app: kube_apps::App,
+        /// Where to write it (default `APP-<time>.sql` in the current directory).
+        file: Option<std::path::PathBuf>,
+    },
+    /// Load a file made by `db-backup` into the app, replacing what it holds.
+    DbRestore {
+        #[command(flatten)]
+        cluster: KubeArgs,
+        app: kube_apps::App,
+        file: std::path::PathBuf,
     },
     /// A database shell inside the pod, with nothing to install on the Mac: `fluxctl kube connect postgres` (psql), redis, mysql, mongodb.
     Connect {
@@ -8097,6 +8114,18 @@ async fn kube_command<A: run::VmApi>(api: &A, command: KubeCommand) -> Result<()
             println!(
                 "{}",
                 kube_apps::remove(api, &cluster.options()?, app, delete_data).await?
+            );
+        }
+        KubeCommand::DbBackup { cluster, app, file } => {
+            println!(
+                "{}",
+                kube_backup::backup(api, &cluster.options()?, app, file.as_deref()).await?
+            );
+        }
+        KubeCommand::DbRestore { cluster, app, file } => {
+            println!(
+                "{}",
+                kube_backup::restore(api, &cluster.options()?, app, &file).await?
             );
         }
         KubeCommand::Connect { cluster, app } => {

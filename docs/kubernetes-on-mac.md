@@ -155,6 +155,19 @@ port can be opened only if the supervisor (`fluxctl kube supervise`, which the L
 open across restarts with `fluxctl kube agent install`. `connect` works for postgres, redis, mysql, mongodb and clickhouse (a shell in the pod
 through the cluster); `open NAME` opens any published service, by its `.localhost` name while `supervise` runs.
 
+### Keep your data when you rebuild: `db-backup`
+
+```sh
+fluxctl kube db-backup postgres             # postgres-20261026-101500.sql in the current directory
+fluxctl kube down --purge                   # throw the cluster away…
+fluxctl kube up && fluxctl kube add postgres
+fluxctl kube db-restore postgres postgres-20261026-101500.sql
+```
+
+`db-backup` runs the database's own dump tool inside the pod (`pg_dumpall`, `mysqldump`, `mongodump`) and writes one file on the Mac, readable by you only; it never overwrites an existing file. `db-restore` loads such a file back, replacing what the app holds, and can be repeated safely. It works for `postgres`, `mysql` and `mongodb`; nothing needs installing on the Mac. For a whole cluster, with every app and its memory, a checkpoint is the right tool; this one is for carrying a database to a fresh cluster or another Mac.
+
+Proved on a real k3s for all three: rows were written, backed up, the app and its data volume were deleted and added again (empty), and a restore brought the rows back (Postgres with its index; restoring a second time left two rows, not four). Not run: large databases (the whole dump is held in memory), Redis (not offered), and restoring onto a different major version of the database.
+
 Your own Services can ask for a port of their own on the Mac the same way, with an annotation: `fluxvm.dev/local-ports: "30432=5432"`
 opens `127.0.0.1:5432` for node port 30432.
 
@@ -411,7 +424,7 @@ Proved on a real k3s: a pod served `v1`, I edited the file and it served `v2` wi
 fluxctl kube sync web --dir . --to /app
 ```
 
-For apps that do not need compiling (Node, Python, Ruby, a static site) this is the fast loop: it copies the directory into the running pod now and again every time a file changes, in a fraction of a second, with no image build and no restart. It is what a bind mount gives you on Linux. `web` means `deploy/web`; `pod/NAME`, `statefulset/NAME` and `daemonset/NAME` work too, `--namespace` and `--container` pick the rest. `--then "kill -HUP 1"` runs a command in the pod after each copy, for a server that has to be told to reload; most dev servers (nodemon, uvicorn `--reload`, Vite) notice the change on their own. `--once` copies once and stops. `.git`, `target`, `node_modules`, `.venv` and `__pycache__` are not sent, and neither are Mac metadata files. The directory is sent whole each time, so keep it to source (more than 64 MiB is refused). For a compiled language use `kube dev`, which rebuilds the image.
+For apps that do not need compiling (Node, Python, Ruby, a static site) this is the fast loop: it copies the directory into the running pod now and again every time a file changes, in a fraction of a second, with no image build and no restart. It is what a bind mount gives you on Linux. `web` means `deploy/web`; `pod/NAME`, `statefulset/NAME` and `daemonset/NAME` work too, `--namespace` and `--container` pick the rest. `--then "kill -HUP 1"` runs a command in the pod after each copy, for a server that has to be told to reload; most dev servers (nodemon, uvicorn `--reload`, Vite) notice the change on their own. `--once` copies once and stops. `.git`, `target`, `node_modules`, `.venv` and `__pycache__` are not sent, and neither are Mac metadata files. The directory is sent whole each time, so keep it to source (more than 64 MiB is refused). A file you delete locally stays in the pod until the pod restarts. For a compiled language use `kube dev`, which rebuilds the image.
 
 Proved on a real k3s: a busybox web server served its original page, `kube sync` replaced it with the local folder (a subfolder arrived, `node_modules` did not, no `._` files), an edit was visible in the pod about a second later, each copy took 0.2 to 0.4 s, the pod did not restart, `--then` ran, and a destination with a space and a `job/` target were refused. Not run: a real Node or Python dev server reloading, and a pod with several replicas (the copy goes to one pod).
 
