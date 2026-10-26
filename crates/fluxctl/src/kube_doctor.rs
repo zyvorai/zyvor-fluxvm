@@ -209,7 +209,7 @@ pub fn parse_pods(out: &str) -> Vec<PodRow> {
         .collect()
 }
 
-pub(crate) const BAD: [&str; 6] = [
+const BAD: [&str; 6] = [
     "CrashLoopBackOff",
     "ImagePullBackOff",
     "ErrImagePull",
@@ -220,14 +220,31 @@ pub(crate) const BAD: [&str; 6] = [
 
 /// Restarts after which a pod that looks fine right now is still worth a warning: a crash loop is "Running" for a moment
 /// between attempts, so a single snapshot can miss it.
+/// Statuses that are failures too, and that the exact `BAD` list would miss.
+const ALSO_BAD: [&str; 7] = [
+    "Evicted",
+    "ContainerStatusUnknown",
+    "Failed",
+    "RunContainerError",
+    "CreateContainerError",
+    "InvalidImageName",
+    "ImageInspectError",
+];
+
+/// Whether a pod status means it is failing. `Init:CrashLoopBackOff` and the like count, with their `Init:` prefix removed.
+pub(crate) fn is_bad(status: &str) -> bool {
+    let s = status.strip_prefix("Init:").unwrap_or(status);
+    BAD.contains(&s) || ALSO_BAD.contains(&s)
+}
+
 const RESTARTS_WARN: u32 = 3;
 
 pub fn pods(rows: &[PodRow]) -> Vec<Check> {
     let mut checks: Vec<Check> = rows
         .iter()
-        .filter(|p| BAD.contains(&p.status.as_str()))
+        .filter(|p| is_bad(&p.status))
         .map(|p| {
-            let fix = match p.status.as_str() {
+            let fix = match p.status.strip_prefix("Init:").unwrap_or(&p.status) {
                 "ImagePullBackOff" | "ErrImagePull" => format!(
                     "image cannot be pulled; build it on the Mac and `fluxctl kube load IMAGE`, or check the VM's internet above ({}/{})",
                     p.namespace, p.name
@@ -250,7 +267,7 @@ pub fn pods(rows: &[PodRow]) -> Vec<Check> {
         .collect();
     checks.extend(
         rows.iter()
-            .filter(|p| !BAD.contains(&p.status.as_str()) && p.restarts >= RESTARTS_WARN)
+            .filter(|p| !is_bad(&p.status) && p.restarts >= RESTARTS_WARN)
             .map(|p| {
                 Check::warn(
                     "Pod",
@@ -470,6 +487,38 @@ mod tests {
         let healthy = pods(&parse_pods("default web-1 1/1 Running 0 5m\n"));
         assert_eq!(healthy.len(), 1);
         assert_eq!(healthy[0].level, Level::Ok);
+    }
+
+    #[test]
+    fn init_container_and_evicted_pods_are_failures_too() {
+        for bad in [
+            "Init:CrashLoopBackOff",
+            "Init:Error",
+            "Init:ImagePullBackOff",
+            "Evicted",
+            "ContainerStatusUnknown",
+            "Failed",
+            "Error",
+        ] {
+            assert!(is_bad(bad), "{bad}");
+        }
+        for fine in [
+            "Running",
+            "Pending",
+            "Init:0/1",
+            "Completed",
+            "ContainerCreating",
+            "Terminating",
+        ] {
+            assert!(!is_bad(fine), "{fine}");
+        }
+        let rows = parse_pods("default a 0/1 Init:ImagePullBackOff 0 1m\n");
+        let checks = pods(&rows);
+        assert_eq!(checks[0].level, Level::Fail);
+        assert!(
+            checks[0].fix.contains("kube load"),
+            "the Init: prefix still picks the pull advice"
+        );
     }
 
     #[test]

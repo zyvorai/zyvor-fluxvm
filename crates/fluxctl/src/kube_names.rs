@@ -46,12 +46,19 @@ pub(crate) const INGRESS: &str = "*ingress";
 
 /// The host of an HTTP request head, lower-cased and without a port.
 pub(crate) fn parse_host(head: &[u8]) -> Option<String> {
-    let text = std::str::from_utf8(head).ok()?;
+    // Only the header block: what follows may be the start of a binary request body.
+    let end = head
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .map_or(head.len(), |i| i + 2);
+    let text = String::from_utf8_lossy(&head[..end]);
     for line in text.split("\r\n").skip(1) {
         if line.is_empty() {
             break;
         }
-        let (name, value) = line.split_once(':')?;
+        let Some((name, value)) = line.split_once(':') else {
+            continue;
+        };
         if name.eq_ignore_ascii_case("host") {
             let v = value.trim();
             let host = match v.strip_prefix('[') {
@@ -100,17 +107,50 @@ pub(crate) fn pick_port(table: &BTreeMap<String, u16>, host: Option<&str>) -> Op
     })
 }
 
-/// Adds `x-forwarded-proto: https` after the request line, so an app behind the TLS listener builds https links.
-pub fn with_forwarded_proto(head: &[u8]) -> Vec<u8> {
-    match head.windows(2).position(|w| w == b"\r\n") {
-        Some(i) => {
-            let mut out = head[..i].to_vec();
-            out.extend_from_slice(b"\r\nx-forwarded-proto: https");
-            out.extend_from_slice(&head[i..]);
-            out
+/// The request head as it is sent on to the service. A client's own `x-forwarded-proto` is dropped and, for https, ours is
+/// added. The proxy routes by the first request's Host only, so unless the client is upgrading the connection (a WebSocket)
+/// the head also asks for `connection: close`, which makes the next request open a new connection and be routed afresh.
+pub fn normalize_head(head: &[u8], https: bool) -> Vec<u8> {
+    let Some(split) = head.windows(4).position(|w| w == b"\r\n\r\n") else {
+        return head.to_vec(); // not a complete head: send it untouched
+    };
+    let (block, rest) = head.split_at(split);
+    let mut lines = block
+        .split(|b| *b == b'\n')
+        .map(|l| l.strip_suffix(b"\r").unwrap_or(l));
+    let Some(request_line) = lines.next() else {
+        return head.to_vec();
+    };
+    let name_of = |l: &[u8]| l.iter().position(|b| *b == b':').map(|i| l[..i].to_vec());
+    let mut kept: Vec<&[u8]> = vec![];
+    let mut upgrading = false;
+    for l in lines {
+        match name_of(l) {
+            Some(n) if n.eq_ignore_ascii_case(b"x-forwarded-proto") => {}
+            Some(n) if n.eq_ignore_ascii_case(b"upgrade") => {
+                upgrading = true;
+                kept.push(l);
+            }
+            _ => kept.push(l),
         }
-        None => head.to_vec(),
     }
+    let mut out = request_line.to_vec();
+    for l in kept {
+        // a Connection header is replaced below, unless the client is upgrading and needs its own
+        if !upgrading && name_of(l).is_some_and(|n| n.eq_ignore_ascii_case(b"connection")) {
+            continue;
+        }
+        out.extend_from_slice(b"\r\n");
+        out.extend_from_slice(l);
+    }
+    if https {
+        out.extend_from_slice(b"\r\nx-forwarded-proto: https");
+    }
+    if !upgrading {
+        out.extend_from_slice(b"\r\nconnection: close");
+    }
+    out.extend_from_slice(rest);
+    out
 }
 
 /// Reads one request head from `client`, finds the service its Host names and proxies the connection to it.
@@ -171,11 +211,7 @@ where
             .await;
         return;
     };
-    let head = if https {
-        with_forwarded_proto(&head)
-    } else {
-        head
-    };
+    let head = normalize_head(&head, https);
     if upstream.write_all(&head).await.is_err() {
         return;
     }
@@ -202,16 +238,24 @@ async fn listen(names: Names, port: u16, tls: Option<tokio_rustls::TlsAcceptor>)
         },
     };
     eprintln!("names: {scheme}://<service>.<namespace>.localhost on port {port} (this Mac only)");
+    // At most this many connections at once: each can wait up to 20 s for its service, and a loop of local clients must not
+    // be able to pile up tasks without end.
+    let permits = Arc::new(tokio::sync::Semaphore::new(512));
     loop {
         let Ok((client, peer)) = listener.accept().await else {
+            tokio::time::sleep(Duration::from_millis(50)).await; // out of descriptors, say: do not spin
             continue;
         };
         if wide && !peer.ip().is_loopback() {
             continue; // another machine on the network: not for us
         }
+        let Ok(permit) = permits.clone().try_acquire_owned() else {
+            continue;
+        };
         let names = names.clone();
         let tls = tls.clone();
         tokio::spawn(async move {
+            let _permit = permit;
             match tls {
                 None => handle(client, names, false).await,
                 Some(acceptor) => {
@@ -298,13 +342,48 @@ mod tests {
     }
 
     #[test]
-    fn https_requests_tell_the_app_they_were_https() {
-        let out = with_forwarded_proto(b"GET / HTTP/1.1\r\nHost: a.localhost\r\n\r\n");
-        assert_eq!(
-            out,
-            b"GET / HTTP/1.1\r\nx-forwarded-proto: https\r\nHost: a.localhost\r\n\r\n"
+    fn the_head_is_normalized_for_the_service() {
+        let plain = normalize_head(
+            b"GET / HTTP/1.1\r\nHost: a.localhost\r\nConnection: keep-alive\r\n\r\n",
+            false,
         );
-        assert_eq!(with_forwarded_proto(b"junk"), b"junk");
+        assert_eq!(
+            plain,
+            b"GET / HTTP/1.1\r\nHost: a.localhost\r\nconnection: close\r\n\r\n"
+        );
+        let tls = normalize_head(
+            b"GET / HTTP/1.1\r\nHost: a.localhost\r\nX-Forwarded-Proto: http\r\n\r\nBODY",
+            true,
+        );
+        assert_eq!(
+            tls,
+            b"GET / HTTP/1.1\r\nHost: a.localhost\r\nx-forwarded-proto: https\r\nconnection: close\r\n\r\nBODY",
+            "a client's own value is dropped, and the body is untouched"
+        );
+        // a WebSocket keeps its Connection: Upgrade and is not told to close
+        let ws = normalize_head(b"GET /ws HTTP/1.1\r\nHost: a.localhost\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n", false);
+        assert_eq!(
+            ws,
+            b"GET /ws HTTP/1.1\r\nHost: a.localhost\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n"
+        );
+        assert_eq!(
+            normalize_head(b"GET / HTTP/1.1\r\nHost: a", false),
+            b"GET / HTTP/1.1\r\nHost: a",
+            "an incomplete head is untouched"
+        );
+    }
+
+    #[test]
+    fn a_binary_body_or_an_odd_header_line_does_not_hide_the_host() {
+        let mut req =
+            b"POST /up HTTP/1.1\r\nHost: Web.localhost\r\nContent-Length: 4\r\n\r\n".to_vec();
+        req.extend_from_slice(&[0xff, 0xfe, 0x00, 0x80]);
+        assert_eq!(parse_host(&req).as_deref(), Some("web.localhost"));
+        assert_eq!(
+            parse_host(b"GET / HTTP/1.1\r\nbroken header line\r\nHost: a.localhost\r\n\r\n")
+                .as_deref(),
+            Some("a.localhost")
+        );
     }
 
     #[test]

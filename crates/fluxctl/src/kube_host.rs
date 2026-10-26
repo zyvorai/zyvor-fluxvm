@@ -129,6 +129,17 @@ impl Default for KubeOptions {
     }
 }
 
+/// A Kubernetes resource name (a Deployment, Namespace, container, ...): a lowercase DNS label of up to 63 characters.
+pub fn resource_name_ok(name: &str) -> bool {
+    let b = name.as_bytes();
+    !b.is_empty()
+        && b.len() <= 63
+        && b.iter()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == b'-')
+        && b[0] != b'-'
+        && b[b.len() - 1] != b'-'
+}
+
 /// A Kubernetes node name: lowercase DNS label, which is also what the VM's hostname becomes.
 pub fn name_ok(name: &str) -> bool {
     let b = name.as_bytes();

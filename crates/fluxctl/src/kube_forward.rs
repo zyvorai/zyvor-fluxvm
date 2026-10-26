@@ -142,8 +142,32 @@ pub fn used_node_ports(list: &Value) -> Vec<u16> {
         .collect()
 }
 
+/// The Mac ports that Services have asked for with `fluxvm.dev/local-ports`, except those of the Service `skip` (namespace,
+/// name), which is the companion being refreshed.
+pub fn claimed_local_ports(list: &Value, skip: (&str, &str)) -> Vec<u16> {
+    list["items"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|i| {
+            (
+                i["metadata"]["namespace"].as_str().unwrap_or(""),
+                i["metadata"]["name"].as_str().unwrap_or(""),
+            ) != skip
+        })
+        .flat_map(|i| {
+            kube_host::parse_local_ports(
+                i["metadata"]["annotations"]["fluxvm.dev/local-ports"]
+                    .as_str()
+                    .unwrap_or(""),
+            )
+        })
+        .map(|(_, local)| local)
+        .collect()
+}
+
 fn check(namespace: &str, service: &str) -> Result<()> {
-    if !kube_host::name_ok(namespace) {
+    if !kube_host::resource_name_ok(namespace) {
         bail!("namespace {namespace:?} is not a Kubernetes name");
     }
     if !name_ok(service) {
@@ -174,24 +198,32 @@ pub async fn forward<A: VmApi>(
         &kube_host::guest_sh(api, o, "sudo k3s kubectl get svc -A -o json").await?,
     )?;
     let own = companion(service);
-    let reuse = all["items"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .find(|i| {
-            i["metadata"]["name"].as_str() == Some(own.as_str())
-                && i["metadata"]["namespace"].as_str() == Some(namespace)
-        })
+    let existing = all["items"].as_array().into_iter().flatten().find(|i| {
+        i["metadata"]["name"].as_str() == Some(own.as_str())
+            && i["metadata"]["namespace"].as_str() == Some(namespace)
+    });
+    if let Some(e) = existing
+        && e["metadata"]["labels"]["fluxvm.dev/forward-of"].as_str() != Some(service)
+    {
+        bail!(
+            "a Service named {own} already exists in {namespace} and was not made by `kube forward`; rename it or forward another way"
+        );
+    }
+    let reuse = existing
         .and_then(|i| i["spec"]["ports"][0]["nodePort"].as_u64())
         .and_then(|n| u16::try_from(n).ok());
-    let held = kube_host::forwarded_hosts(o);
+    // This companion's own Mac port is fine to keep; every other port that is open, or promised to another Service, is not.
+    let own_local = existing
+        .and_then(|i| i["metadata"]["annotations"]["fluxvm.dev/local-ports"].as_str())
+        .and_then(|a| kube_host::parse_local_ports(a).first().map(|(_, l)| *l));
+    let claimed = claimed_local_ports(&all, (namespace, &own));
     let p = plan(
         &svc,
         service_port,
         local,
         &used_node_ports(&all),
         reuse,
-        |port| kube_host::port_in_use(port) && !held.contains(&port),
+        |port| Some(port) != own_local && (kube_host::port_in_use(port) || claimed.contains(&port)),
     )?;
     kube_host::guest_apply(api, o, &p.manifest).await?;
     kube_host::publish_now(api, o).await?;
@@ -351,6 +383,27 @@ mod tests {
             {"spec": {"ports": [{"nodePort": 30100}, {"port": 1}]}},
             {"spec": {"ports": [{"nodePort": 30101}]}}]});
         assert_eq!(used_node_ports(&list), vec![30100, 30101]);
+    }
+
+    #[test]
+    fn ports_promised_to_other_services_are_claimed_but_not_our_own() {
+        let list = json!({"items": [
+            {"metadata": {"namespace": "default", "name": "web-local",
+                "annotations": {"fluxvm.dev/local-ports": "30100=8080"}}},
+            {"metadata": {"namespace": "default", "name": "postgres",
+                "annotations": {"fluxvm.dev/local-ports": "30432=5432"}}},
+            {"metadata": {"namespace": "default", "name": "plain"}}]});
+        assert_eq!(claimed_local_ports(&list, ("x", "y")), vec![8080, 5432]);
+        assert_eq!(
+            claimed_local_ports(&list, ("default", "web-local")),
+            vec![5432]
+        );
+        // a second forward of another Service on port 80 therefore does not land on 8080 again
+        let api = json!({"metadata": {"name": "api", "namespace": "default"},
+            "spec": {"selector": {"app": "api"}, "ports": [{"port": 80}]}});
+        let claimed = claimed_local_ports(&list, ("default", "api-local"));
+        let p = plan(&api, None, None, &[], None, |l| claimed.contains(&l)).unwrap();
+        assert_eq!(p.local, 8081);
     }
 
     #[test]

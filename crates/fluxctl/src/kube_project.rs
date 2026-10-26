@@ -90,7 +90,7 @@ pub fn parse(text: &str) -> Result<Project> {
         }
     }
     for f in &p.forwards {
-        if !crate::kube_forward::name_ok(&f.service) || !kube_host::name_ok(&f.namespace) {
+        if !crate::kube_forward::name_ok(&f.service) || !kube_host::resource_name_ok(&f.namespace) {
             bail!(
                 "forward {:?} in {:?} is not a Kubernetes name",
                 f.service,
