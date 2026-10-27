@@ -39,6 +39,7 @@ and `*.localhost` names, and the loop from a saved file to a running pod takes a
 | start, checkpoint and undo from Raycast | `integrations/raycast` | [Raycast](#raycast-alfred-and-shortcuts) |
 | know what is wrong | `kube doctor`, and a notification from `kube supervise` | [`kube doctor`](#when-something-is-wrong-kube-doctor), [Notifications](#a-notification-when-a-pod-breaks) |
 | keep it all running | `kube supervise`, `kube agent install` | [Keep it running](#keep-it-running) |
+| let pods call a program on my Mac | `kube host NAME PORT` | [`kube host`](#call-your-mac-from-a-pod-kube-host) |
 | run an image that is only built for Intel | `kube up --rosetta` | [Intel-only images](#intel-only-images---rosetta) |
 | work without internet | `kube fetch DIR`, `kube up --offline DIR` | [Without internet](#without-internet-on-first-boot) |
 
@@ -582,6 +583,29 @@ chmod +x ~/Library/Application\ Support/xbar/plugins/fluxvm-kube.30s.sh
 
 The `30s` in the file name is the refresh interval. FluxVM ships no menu-bar app of its own; this needs SwiftBar or xbar, which are
 separate programs.
+
+## Call your Mac from a pod: `kube host`
+
+`kube forward` brings a Service out to the Mac; `kube host` goes the other way. A program on the Mac becomes a Service in the cluster:
+
+```bash
+ollama serve &                          # listens on 127.0.0.1:11434
+fluxctl kube host ollama 11434          # runs until Ctrl-C
+kubectl run t --rm -it --image=curlimages/curl -- curl http://ollama:11434
+```
+
+Pods use `ollama:11434` (or `ollama.default.svc`) and reach whatever listens on the Mac's 127.0.0.1:11434: a model server, Postgres.app, a dev
+server you are debugging. The VM reaches the Mac at its network gateway address, and only a program listening there can be reached, so the
+command opens a relay on that one address that forwards to the Mac's loopback. The relay lets in only the VM's own /24 network, never the
+Wi-Fi, and the Service it makes (a Service without a selector and an EndpointSlice pointing at the Mac, both labelled `fluxvm.dev/host-of`) goes
+away with Ctrl-C. It never touches a Service it did not create. `-n NAMESPACE` picks the namespace; `--remove` clears one left behind by a crash.
+
+This is a plain TCP relay, so it works for anything that speaks TCP. It does not give pods the Mac's GPU: a model server running on the Mac
+uses it, and the pods just call that server.
+
+Status: the address parsing, the subnet rule, the manifests and the relay are unit-tested. Not run: a real cluster. The Service, the
+EndpointSlice and a pod reaching the Mac have not been tried, and whether the cluster's pod network sends a pod's traffic to the Mac
+from the node's address (which the subnet rule relies on) is not yet confirmed.
 
 ## Open it on your phone: `kube share`
 

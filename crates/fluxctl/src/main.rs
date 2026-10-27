@@ -46,6 +46,7 @@ mod kube_dev;
 mod kube_doctor;
 mod kube_forward;
 mod kube_host;
+mod kube_hostsvc;
 mod kube_logs;
 mod kube_menubar;
 mod kube_names;
@@ -498,6 +499,22 @@ enum KubeCommand {
         /// How long to stay open (1 to 480).
         #[arg(long, default_value_t = 60)]
         minutes: u64,
+    },
+    /// Make a program on this Mac a Service in the cluster: pods call `NAME:PORT` and reach this Mac's 127.0.0.1:PORT (a model
+    /// server on the Mac's GPU, Postgres.app, a dev server you are debugging). Runs until Ctrl-C; only the VM's network can use it.
+    Host {
+        #[command(flatten)]
+        cluster: KubeArgs,
+        /// The Service name pods will use.
+        name: String,
+        /// The port on this Mac (and the Service's port).
+        port: Option<u16>,
+        /// The namespace for the Service.
+        #[arg(long, short = 'n', default_value = "default")]
+        namespace: String,
+        /// Remove a Service left behind by an earlier run instead of starting one.
+        #[arg(long)]
+        remove: bool,
     },
     /// One line for your shell prompt, such as `⎈ dev 12/12` or `⎈ dev 💤`. It reads what `kube supervise` last saw, so it is
     /// instant and never wakes the cluster; it prints nothing when that is missing or older than a few minutes.
@@ -8448,6 +8465,25 @@ async fn kube_command<A: run::VmApi>(api: &A, command: KubeCommand) -> Result<()
             minutes,
         } => {
             kube_share::run(api, &cluster.options()?, &service, port, minutes).await?;
+        }
+        KubeCommand::Host {
+            cluster,
+            name,
+            port,
+            namespace,
+            remove,
+        } => {
+            let o = cluster.options()?;
+            if remove {
+                println!(
+                    "{}",
+                    kube_hostsvc::remove(api, &o, &name, &namespace).await?
+                );
+            } else {
+                let port =
+                    port.context("give the port on this Mac: fluxctl kube host NAME PORT")?;
+                kube_hostsvc::run(api, &o, &name, port, &namespace).await?;
+            }
         }
         KubeCommand::Trust { install } => {
             println!("{}", kube_tls::trust(install)?);
