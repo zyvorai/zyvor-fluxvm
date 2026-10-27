@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 0.4.16 (2026-10-27)
+
+**Kubernetes on a Mac that feels like Linux, and time travel for the cluster.** `fluxctl kube` gains plain `kubectl` and `.localhost` names with
+HTTPS, 17 one-line development services (`kube add`), a rolling time machine (`checkpoint`, `try`/`undo`, `bisect`, `golden`, `chaos`),
+sleep and wake, `dev`/`sync`/`cp` for working on code in the cluster, `logs`, `ps`, `doctor`, `pin`, `start` projects (also from an address)
+and a menu-bar view. Studio gains a Docker page, Kubernetes workloads, events, checkpoints and a VNC console. Existing VM, sandbox and
+Linux-backend behaviour is unchanged. Everything under `fluxctl kube` was proved on a real k3s on a Mac mini; each entry says what was not run.
+
 - **`fluxctl kube menubar`: the cluster in the Mac menu bar.** Prints the state in SwiftBar and xbar's plugin format (pod count or `⚠` in red, `zzz` asleep; failing pods, apps with their Mac ports, `.localhost` names, checkpoints, clickable Sleep/Wake/Doctor/Status); `--plugin` prints the one-line plugin script. Nothing can break out of a line (`|` and newlines in names are replaced). It needs SwiftBar or xbar; FluxVM ships no menu-bar app.
 - **`fluxctl kube pin`: the images the cluster runs, as `name:tag@sha256:...`.** Read from the pods' `imageID`s; system pods left out unless `--all`; unpulled images skipped. Paste into a manifest and the same bytes run everywhere.
 - **`kube start --file https://...`: a project from an address.** Fetches the project file and its listed manifests (https only, redirects to http refused, 1 MiB each, at most 30, each a `.yaml` file inside the project's directory) and, without `--yes`, prints what it would do and stops.
