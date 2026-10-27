@@ -102,6 +102,8 @@ pub struct KubeOptions {
     pub cilium_version: String,
     /// Do not add the cluster to `~/.kube/config` (see [`merge_default_kubeconfig`]).
     pub no_merge: bool,
+    /// Run `linux/amd64` images through the Mac's Rosetta (see [`rosetta_files`]).
+    pub rosetta: bool,
 }
 
 impl Default for KubeOptions {
@@ -125,6 +127,7 @@ impl Default for KubeOptions {
             cni: Cni::Cilium,
             cilium_version: CILIUM_VERSION.into(),
             no_merge: false,
+            rosetta: false,
         }
     }
 }
@@ -448,12 +451,12 @@ pub fn node_spec(
     };
     // The default NAT network keeps each VM apart from the others. Nodes of one cluster share a private network
     // (`10.89.N.0/24`, one switch per name) as a second card, which carries the node-to-node and pod traffic.
-    let apple = if o.workers > 0 {
+    let mut apple = if o.workers > 0 {
         json!({"networks": [{"name": o.name}]})
     } else {
         json!({})
     };
-    let write_files = match (role, o.cni) {
+    let mut write_files = match (role, o.cni) {
         (Role::Server, Cni::Cilium) => vec![json!({
             "path": "/var/lib/rancher/k3s/server/manifests/cilium.yaml",
             "content": cilium_manifest(o),
@@ -461,6 +464,12 @@ pub fn node_spec(
         })],
         _ => vec![],
     };
+    let mut runcmd = install_commands(o, role, node);
+    if o.rosetta {
+        apple["rosetta"] = json!(true);
+        write_files.extend(rosetta_files());
+        runcmd.splice(0..0, rosetta_commands());
+    }
     json!({
         "name": node,
         "backend": "auto",
@@ -477,9 +486,59 @@ pub fn node_spec(
             "ssh_authorized_keys": [key],
             "packages": packages,
             "write_files": write_files,
-            "runcmd": install_commands(o, role, node),
+            "runcmd": runcmd,
         },
     })
+}
+
+/// Where the guest mounts the Mac's Rosetta share (virtiofs tag `rosetta`, from `apple.rosetta`).
+const ROSETTA_MOUNT: &str = "/mnt/rosetta";
+
+/// The `binfmt_misc` registration Apple documents for Rosetta: x86-64 ELF executables, with `F` (the interpreter is
+/// opened at registration, so containers need not hold it) and `C` (credentials from the binary, so setuid works).
+fn rosetta_binfmt() -> String {
+    format!(
+        r":rosetta:M::\x7fELF\x02\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x02\x00\x3e\x00:\xff\xff\xff\xff\xff\xfe\xfe\x00\xff\xff\xff\xff\xff\xff\xff\xff\xfe\xff\xff\xff:{ROSETTA_MOUNT}/rosetta:CF"
+    )
+}
+
+/// The guest files that make `linux/amd64` images run: a script that mounts the share and registers it, and a systemd unit
+/// that runs it at every boot, before k3s starts any container.
+pub fn rosetta_files() -> Vec<Value> {
+    let script = format!(
+        "#!/bin/sh\n\
+         # Mounts the Mac's Rosetta share and registers it for x86-64 binaries.\n\
+         set -e\n\
+         mkdir -p {ROSETTA_MOUNT}\n\
+         mountpoint -q {ROSETTA_MOUNT} || mount -t virtiofs rosetta {ROSETTA_MOUNT}\n\
+         [ -e /proc/sys/fs/binfmt_misc/register ] || mount -t binfmt_misc binfmt_misc /proc/sys/fs/binfmt_misc\n\
+         [ -e /proc/sys/fs/binfmt_misc/rosetta ] || printf '%s' '{}' > /proc/sys/fs/binfmt_misc/register\n",
+        rosetta_binfmt()
+    );
+    let unit = "[Unit]\n\
+                Description=Rosetta for linux/amd64 container images\n\
+                After=local-fs.target\n\
+                Before=k3s.service k3s-agent.service\n\
+                \n\
+                [Service]\n\
+                Type=oneshot\n\
+                RemainAfterExit=yes\n\
+                ExecStart=/usr/local/sbin/fluxvm-rosetta\n\
+                \n\
+                [Install]\n\
+                WantedBy=multi-user.target\n";
+    vec![
+        json!({"path": "/usr/local/sbin/fluxvm-rosetta", "content": script, "permissions": "0755"}),
+        json!({"path": "/etc/systemd/system/fluxvm-rosetta.service", "content": unit, "permissions": "0644"}),
+    ]
+}
+
+/// First-boot commands that start the Rosetta unit before k3s is installed.
+pub fn rosetta_commands() -> Vec<String> {
+    vec![
+        "systemctl daemon-reload".into(),
+        "systemctl enable --now fluxvm-rosetta.service".into(),
+    ]
 }
 
 /// The control-plane VM.
@@ -1838,6 +1897,9 @@ pub fn render_agent(
     if o.traefik {
         args.push("--traefik".into());
     }
+    if o.rosetta {
+        args.push("--rosetta".into());
+    }
     args.extend(extras.iter().cloned());
     dh::render_plist(AGENT_LABEL, &args, log, env)
 }
@@ -3014,5 +3076,113 @@ mod tests {
             .check()
             .is_err()
         );
+    }
+
+    #[test]
+    fn rosetta_is_off_unless_asked_for() {
+        let spec = kube_spec(&KubeOptions::default(), "u", "k", vec![]);
+        assert!(spec["apple"].get("rosetta").is_none());
+        let files = spec["cloud_init"]["write_files"].to_string();
+        assert!(!files.contains("fluxvm-rosetta"), "{files}");
+        let run = spec["cloud_init"]["runcmd"].to_string();
+        assert!(!run.contains("rosetta"), "{run}");
+    }
+
+    #[test]
+    fn rosetta_adds_the_share_and_a_unit_that_runs_before_k3s() {
+        let o = KubeOptions {
+            rosetta: true,
+            workers: 1,
+            ..Default::default()
+        };
+        for spec in [
+            kube_spec(&o, "u", "k", vec![]),
+            node_spec(&o, &agent(), "w", "u", "k", vec![]),
+        ] {
+            assert_eq!(spec["apple"]["rosetta"], true);
+            // The private network the workers need is kept beside it.
+            assert_eq!(spec["apple"]["networks"][0]["name"], "fluxvm-kube");
+            let files = spec["cloud_init"]["write_files"].as_array().unwrap();
+            let script = files
+                .iter()
+                .find(|f| f["path"] == "/usr/local/sbin/fluxvm-rosetta")
+                .expect("script");
+            assert_eq!(script["permissions"], "0755");
+            let text = script["content"].as_str().unwrap();
+            assert!(text.starts_with("#!/bin/sh\n"), "{text}");
+            assert!(
+                text.contains("mount -t virtiofs rosetta /mnt/rosetta"),
+                "{text}"
+            );
+            assert!(
+                text.contains("> /proc/sys/fs/binfmt_misc/register"),
+                "{text}"
+            );
+            // A boot that already registered it must not fail on the second write.
+            assert!(
+                text.contains("[ -e /proc/sys/fs/binfmt_misc/rosetta ] ||"),
+                "{text}"
+            );
+            let unit = files
+                .iter()
+                .find(|f| f["path"] == "/etc/systemd/system/fluxvm-rosetta.service")
+                .expect("unit");
+            let unit = unit["content"].as_str().unwrap();
+            assert!(
+                unit.contains("Before=k3s.service k3s-agent.service"),
+                "{unit}"
+            );
+            assert!(unit.contains("WantedBy=multi-user.target"), "{unit}");
+            // The unit starts first, then the installer runs as before.
+            let run: Vec<&str> = spec["cloud_init"]["runcmd"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|c| c.as_str().unwrap())
+                .collect();
+            assert_eq!(run[0], "systemctl daemon-reload");
+            assert_eq!(run[1], "systemctl enable --now fluxvm-rosetta.service");
+            assert!(
+                run[2].contains("get.k3s.io") || run[2].contains("k3s"),
+                "{run:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_binfmt_line_matches_the_one_the_sandbox_runtime_registers() {
+        // Same x86-64 ELF magic and mask as fluxvm-oci-init; only the interpreter path differs (here the guest mount).
+        let ours = rosetta_binfmt();
+        let theirs = include_str!("../../fluxvm-oci-init/src/config.rs");
+        // ":name:type:offset:magic:mask:interpreter:flags": the magic and the mask are fields 4 and 5.
+        let fields = |l: &str| l.split(':').skip(4).take(2).collect::<Vec<_>>().join(":");
+        let want = fields(&ours);
+        assert!(
+            want.contains(r"\x7fELF") && want.ends_with(r"\xff\xff\xff"),
+            "{want}"
+        );
+        assert!(
+            theirs.contains(&want),
+            "oci-init registers different magic or mask"
+        );
+        assert!(ours.ends_with("/mnt/rosetta/rosetta:CF"), "{ours}");
+    }
+
+    #[test]
+    fn the_login_agent_keeps_the_rosetta_flag() {
+        let plist = |rosetta| {
+            render_agent(
+                Path::new("/opt/homebrew/bin/fluxctl"),
+                &KubeOptions {
+                    rosetta,
+                    ..Default::default()
+                },
+                Path::new("/tmp/log"),
+                &[],
+                &[],
+            )
+        };
+        assert!(plist(true).contains("<string>--rosetta</string>"));
+        assert!(!plist(false).contains("--rosetta"));
     }
 }
