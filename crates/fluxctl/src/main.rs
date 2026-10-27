@@ -45,6 +45,7 @@ mod kube_dev;
 mod kube_doctor;
 mod kube_forward;
 mod kube_host;
+mod kube_logs;
 mod kube_names;
 mod kube_notify;
 mod kube_project;
@@ -482,6 +483,32 @@ enum KubeCommand {
         /// The project file.
         #[arg(long, default_value = "fluxvm-kube.yaml")]
         file: std::path::PathBuf,
+    },
+    /// The logs of every pod behind a workload in one stream, each line tagged with its pod (`-f` follows).
+    Logs {
+        #[command(flatten)]
+        cluster: KubeArgs,
+        /// `NAME` or `deploy/NAME`, `statefulset/NAME`, `daemonset/NAME`, `pod/NAME`.
+        target: String,
+        #[arg(long, default_value = "default")]
+        namespace: String,
+        /// One container; by default all of them.
+        #[arg(long)]
+        container: Option<String>,
+        /// Only lines newer than this, for example `10m`.
+        #[arg(long)]
+        since: Option<String>,
+        /// Lines per pod to start from.
+        #[arg(long, default_value_t = 50)]
+        tail: u32,
+        /// Keep streaming.
+        #[arg(short, long)]
+        follow: bool,
+        /// The previous container, after a restart.
+        #[arg(long)]
+        previous: bool,
+        #[arg(long)]
+        timestamps: bool,
     },
     /// One screen about the cluster, like `docker ps`: its state, failing pods, the apps and forwards on this Mac, the names
     /// that work and the checkpoints.
@@ -8245,6 +8272,33 @@ async fn kube_command<A: run::VmApi>(api: &A, command: KubeCommand) -> Result<()
                     to: &to,
                     then: then.as_deref(),
                     once,
+                },
+            )
+            .await?;
+        }
+        KubeCommand::Logs {
+            cluster,
+            target,
+            namespace,
+            container,
+            since,
+            tail,
+            follow,
+            previous,
+            timestamps,
+        } => {
+            kube_logs::run(
+                api,
+                &cluster.options()?,
+                &kube_logs::Logs {
+                    target: &target,
+                    namespace: &namespace,
+                    container: container.as_deref(),
+                    since: since.as_deref(),
+                    tail: Some(tail),
+                    follow,
+                    previous,
+                    timestamps,
                 },
             )
             .await?;

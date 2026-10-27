@@ -728,6 +728,32 @@ pub(crate) async fn guest_sh<A: VmApi>(api: &A, o: &KubeOptions, script: &str) -
     guest_run(api, o, script, None).await
 }
 
+/// Starts a command in the server VM and hands back the child with its standard output piped, for streams such as logs.
+/// Standard error stays on this terminal.
+pub(crate) async fn guest_spawn<A: VmApi>(
+    api: &A,
+    o: &KubeOptions,
+    script: &str,
+) -> Result<std::process::Child> {
+    use std::process::Stdio;
+    let Some((id, _)) = api.find(&o.name).await? else {
+        bail!("no cluster named {}", o.name);
+    };
+    let Some(ip) = api.guest_ip(id).await? else {
+        bail!("{} has no address yet", o.name);
+    };
+    let home = dh::home()?;
+    let user = dh::user_name(&dh::EngineOptions {
+        user: o.user.clone(),
+        ..Default::default()
+    })?;
+    let (_, identity) = run::ssh_key(&home)?;
+    let mut cmd = run::ssh_base(&ip, &user, &identity);
+    cmd.args(["-o", "BatchMode=yes", "-o", "ConnectTimeout=5", script]);
+    cmd.stdin(Stdio::null()).stdout(Stdio::piped());
+    cmd.spawn().context("starting a command in the server VM")
+}
+
 /// Runs a command in the server VM with a terminal, for shells; returns its exit code.
 pub(crate) async fn guest_interactive<A: VmApi>(
     api: &A,

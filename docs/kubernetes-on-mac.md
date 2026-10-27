@@ -30,6 +30,7 @@ and `*.localhost` names, and the loop from a saved file to a running pod takes a
 | start clean every time | `kube golden`, `kube reset`, `kube matrix` | [A clean start](#a-clean-start-every-time) |
 | see whether my app copes with failure | `kube chaos` | [Break it on purpose](#break-it-on-purpose) |
 | cost nothing while I am away | `kube sleep`, `kube wake`, `kube supervise --idle-sleep`, `--sleep-on-battery` | [Sleep and wake](#sleep-and-wake) |
+| read the logs of every replica at once | `kube logs` | [`kube logs`](#every-replica-in-one-stream-kube-logs) |
 | see everything at a glance | `kube ps` | [`kube ps`](#one-screen-kube-ps) |
 | know what is wrong | `kube doctor`, and a notification from `kube supervise` | [`kube doctor`](#when-something-is-wrong-kube-doctor), [Notifications](#a-notification-when-a-pod-breaks) |
 | keep it all running | `kube supervise`, `kube agent install` | [Keep it running](#keep-it-running) |
@@ -490,6 +491,24 @@ fluxctl kube start          # builds all of it from nothing, then prints `kube p
 A teammate clones the repository and runs one command. It adds nothing new underneath: it runs `up`, `load`, `add`, `apply` and `forward` in that order, and every one of them is safe to repeat, so running `start` again changes nothing. The file is checked before anything slow happens (an unknown app, a bad image name, a manifest path that leaves the folder or does not exist all stop it at once). Settings in the file win over flags. `--file` names a different project file; `kube down --purge` removes it all.
 
 Proved on a real k3s: from no cluster, one `start` built the cluster, Redis (answered `PONG`), a web Deployment and Service from a `k8s/` folder, and a forward that served the page, in 4 minutes 26 seconds (most of it first boot); a second `start` took 7 seconds and left every object as it was; a file naming an unknown app failed at once without creating a cluster. Not run: `images:` (it uses `kube load`, proved separately), Traefik and several apps together, and workers.
+
+## Every replica in one stream: `kube logs`
+
+`kubectl logs deploy/web` shows one pod. `kube logs` reads them all, every container, and tags each line with its pod (a
+different color per pod on a terminal):
+
+```text
+$ fluxctl kube logs chat --tail 1
+[pod/chat-558c5574f-j78hv/say] hello from chat-558c5574f-j78hv
+[pod/chat-558c5574f-j78hv/side] sidecar
+[pod/chat-558c5574f-xjtpk/say] hello from chat-558c5574f-xjtpk
+[pod/chat-558c5574f-xjtpk/side] sidecar
+```
+
+`NAME` is a Deployment; `statefulset/NAME`, `daemonset/NAME` and `pod/NAME` work too. `-f` keeps streaming, `--since 10m`
+limits the age, `--tail N` sets the lines per pod (default 50), `--container C` picks one container, `--previous` reads the
+container before a restart, `--timestamps` adds times. The pods come from the workload's own label selector, up to 50 at
+once. `NO_COLOR=1` turns the colors off, and a pipe (`| grep`, `| head`) gets plain text.
 
 ## One screen: `kube ps`
 
