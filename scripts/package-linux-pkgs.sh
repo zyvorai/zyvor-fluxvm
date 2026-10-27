@@ -45,7 +45,13 @@ cp -a "$STAGE/bin" "$ROOT/usr/bin"
 [[ -d "$STAGE/lib" ]] && cp -a "$STAGE/lib" "$ROOT/usr/lib/fluxvm"
 mkdir -p "$ROOT/usr/lib/fluxvm"
 # Everything under share/ except the unit, which goes to the systemd directory.
-( cd "$STAGE/share" && find . -mindepth 1 -maxdepth 1 ! -name systemd -exec cp -a {} "$ROOT/usr/share/fluxvm/" \; )
+# The copy runs inside share/, so the destination must be absolute: --out is usually relative, and a relative path
+# would copy nowhere (find ignores the failed cp), which once shipped packages without config.example.toml, the
+# guest agent and the completions.
+ROOT_SHARE="$(cd "$ROOT/usr/share/fluxvm" && pwd)"
+( cd "$STAGE/share" && find . -mindepth 1 -maxdepth 1 ! -name systemd -exec cp -a {} "$ROOT_SHARE/" \; )
+[[ -e "$ROOT/usr/share/fluxvm/config.example.toml" ]] \
+  || { echo "package-linux-pkgs: config.example.toml did not reach the package root" >&2; exit 1; }
 mkdir -p "$ROOT/usr/share/fluxvm/apparmor"
 cp packaging/apparmor/usr.bin.swtpm.fluxvm "$ROOT/usr/share/fluxvm/apparmor/"
 [[ -f "$STAGE/LICENSE" ]] && cp "$STAGE/LICENSE" "$ROOT/usr/share/fluxvm/LICENSE"
