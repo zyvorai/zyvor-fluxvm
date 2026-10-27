@@ -217,7 +217,9 @@ jobs:
           docker run --rm ${{ matrix.cross && '--platform linux/arm64' || '' }} -v "$D:/fluxvm.deb:ro" ubuntu:22.04 bash -euc '
             apt-get update -qq && apt-get install -y -qq /fluxvm.deb >/dev/null
             fluxctl --version
-            test -f /etc/fluxvm.toml && test -d /usr/lib/fluxvm/bpf && test -x /usr/share/fluxvm/guest/fluxvm-guest-agent
+            test -f /etc/fluxvm.toml
+            test -d /usr/lib/fluxvm/bpf
+            test -x /usr/share/fluxvm/guest/fluxvm-guest-agent
             dpkg -V fluxvm
           '
       - name: Install the .rpm in clean Fedora and EL10 containers
@@ -227,10 +229,13 @@ jobs:
             docker run --rm ${{ matrix.cross && '--platform linux/arm64' || '' }} -v "$R:/fluxvm.rpm:ro" "$image" bash -euc '
               dnf install -y -q /fluxvm.rpm >/dev/null
               fluxctl --version
-              test -f /etc/fluxvm.toml && test -d /usr/lib/fluxvm/bpf && test -x /usr/share/fluxvm/guest/fluxvm-guest-agent
+              test -f /etc/fluxvm.toml
+              test -d /usr/lib/fluxvm/bpf
+              test -x /usr/share/fluxvm/guest/fluxvm-guest-agent
               rpm -V fluxvm
               dnf remove -y -q fluxvm >/dev/null
-              test -d /var/lib/fluxvm && test -f /etc/fluxvm.toml
+              test -d /var/lib/fluxvm
+              test -f /etc/fluxvm.toml
             '
           done
       - name: Attach to the release (draft if new)
