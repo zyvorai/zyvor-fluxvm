@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- `fluxctl kube share SERVICE`: opens a service to a phone or computer on the same Wi-Fi, with a QR code, a time limit and a private-network-only filter.
+- `fluxctl kube prompt`: a one-line cluster status for the shell prompt (starship, zsh, bash, fish), read from a file `kube supervise` keeps current; `supervise` now checks the pods even with `--no-notify`.
+- `integrations/raycast`: script commands for start, checkpoint, undo, sleep, wake, status, doctor and share (also usable from Alfred and Shortcuts).
+- `fluxctl kube doctor --fix`: makes the safe repairs inside the VM (unused images, the VM's resolver, its clock) and checks again. `kube doctor` also checks that the kubeconfig exists and points at the forwarded API port.
+
 ## 0.4.16 (2026-10-27)
 
 **Kubernetes on a Mac that feels like Linux, and time travel for the cluster.** `fluxctl kube` gains plain `kubectl` and `.localhost` names with

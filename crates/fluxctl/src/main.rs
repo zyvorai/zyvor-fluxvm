@@ -52,7 +52,9 @@ mod kube_names;
 mod kube_notify;
 mod kube_pin;
 mod kube_project;
+mod kube_prompt;
 mod kube_ps;
+mod kube_share;
 mod kube_sync;
 mod kube_tls;
 mod launch_agent;
@@ -478,6 +480,32 @@ enum KubeCommand {
         #[arg(long)]
         install: bool,
     },
+    /// Open a service to your phone or another computer on this Wi-Fi: prints an address and a QR code, and closes on Ctrl-C
+    /// or after `--minutes`. Only private-network addresses are let in.
+    Share {
+        #[command(flatten)]
+        cluster: KubeArgs,
+        /// The service, as shown by `kube services`: `web`, or `shop/web` when a name is in several namespaces.
+        service: String,
+        /// The port to open on the network (default: any free one).
+        #[arg(long)]
+        port: Option<u16>,
+        /// How long to stay open (1 to 480).
+        #[arg(long, default_value_t = 60)]
+        minutes: u64,
+    },
+    /// One line for your shell prompt, such as `⎈ dev 12/12` or `⎈ dev 💤`. It reads what `kube supervise` last saw, so it is
+    /// instant and never wakes the cluster; it prints nothing when that is missing or older than a few minutes.
+    Prompt {
+        #[arg(long, default_value = kube_host::DEFAULT_NAME)]
+        name: String,
+        /// No symbols: `k8s dev 10/12 !2`.
+        #[arg(long)]
+        plain: bool,
+        /// Print the setup lines for a shell (starship, zsh, bash or fish) instead of the status.
+        #[arg(long, value_name = "SHELL")]
+        snippet: Option<String>,
+    },
     /// Build everything a project needs from `fluxvm-kube.yaml`: the cluster, images, apps, manifests and forwards. Run it
     /// again and nothing changes. The file's settings win over the flags.
     Start {
@@ -552,7 +580,13 @@ enum KubeCommand {
     /// that work and the checkpoints.
     Ps(KubeArgs),
     /// Check what goes wrong for a cluster on a Mac (VPN, DNS, disk, clock, failing pods) and print the fix for each.
-    Doctor(KubeArgs),
+    Doctor {
+        #[command(flatten)]
+        cluster: KubeArgs,
+        /// Make the safe repairs inside the VM (remove unused images, restart its resolver, step its clock), then check again.
+        #[arg(long)]
+        fix: bool,
+    },
     /// Make this cluster the current `kubectl` context in ~/.kube/config (`fluxctl kube up` adds it without switching).
     Use(KubeArgs),
     /// Print `export KUBECONFIG=…` for this cluster (`eval "$(fluxctl kube env)"`).
@@ -5950,6 +5984,24 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
+    // `kube prompt` runs on every shell prompt: no daemon, no VmManager, nothing slow.
+    if let Command::Kube {
+        command:
+            KubeCommand::Prompt {
+                name,
+                plain,
+                snippet,
+            },
+    } = &cli.command
+    {
+        if let Some(shell) = snippet {
+            print!("{}", kube_prompt::snippet(shell, "fluxctl", name)?);
+        } else if let Some(line) = kube_prompt::run(name, *plain) {
+            println!("{line}");
+        }
+        return Ok(());
+    }
+
     // `doctor` only reads: it must work when the daemon is down and without a VmManager.
     if let Command::Doctor { host_only, fix } = cli.command {
         let mut fixed = Vec::new();
@@ -8383,6 +8435,15 @@ async fn kube_command<A: run::VmApi>(api: &A, command: KubeCommand) -> Result<()
             )
             .await?;
         }
+        KubeCommand::Prompt { .. } => unreachable!("handled before the daemon is opened"),
+        KubeCommand::Share {
+            cluster,
+            service,
+            port,
+            minutes,
+        } => {
+            kube_share::run(api, &cluster.options()?, &service, port, minutes).await?;
+        }
         KubeCommand::Trust { install } => {
             println!("{}", kube_tls::trust(install)?);
         }
@@ -8393,9 +8454,21 @@ async fn kube_command<A: run::VmApi>(api: &A, command: KubeCommand) -> Result<()
             let snapshot = kube_ps::gather(api, &cluster.options()?).await?;
             print!("{}", kube_ps::render(&snapshot));
         }
-        KubeCommand::Doctor(cluster) => {
-            let checks = kube_doctor::run(api, &cluster.options()?).await?;
+        KubeCommand::Doctor { cluster, fix } => {
+            let o = cluster.options()?;
+            let mut checks = kube_doctor::run(api, &o).await?;
             print!("{}", kube_doctor::render(&checks));
+            let plan = kube_doctor::plan(&checks);
+            if fix && !plan.is_empty() {
+                for line in kube_doctor::apply(api, &o, &plan).await {
+                    println!("{line}");
+                }
+                println!("\nchecking again:");
+                checks = kube_doctor::run(api, &o).await?;
+                print!("{}", kube_doctor::render(&checks));
+            } else if fix {
+                println!("nothing `--fix` can repair");
+            }
             if kube_doctor::failed(&checks) {
                 std::process::exit(1);
             }

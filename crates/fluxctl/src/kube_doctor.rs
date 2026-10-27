@@ -17,6 +17,38 @@ pub enum Level {
     Fail,
 }
 
+/// A repair `kube doctor --fix` can make by itself: small, reversible, and run inside the VM.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Remedy {
+    /// Delete container images no pod uses.
+    PruneImages,
+    /// Restart the VM's resolver after a network change.
+    RestartResolver,
+    /// Step the VM's clock to the Mac's.
+    StepClock,
+}
+
+impl Remedy {
+    pub fn label(self) -> &'static str {
+        match self {
+            Remedy::PruneImages => "removed images no pod uses",
+            Remedy::RestartResolver => "restarted the VM's resolver",
+            Remedy::StepClock => "stepped the VM's clock",
+        }
+    }
+
+    /// The script run in the VM. Each one is safe to run twice.
+    pub fn script(self, mac_now: i64) -> String {
+        match self {
+            Remedy::PruneImages => "sudo k3s crictl rmi --prune".into(),
+            Remedy::RestartResolver => "sudo systemctl restart systemd-resolved".into(),
+            Remedy::StepClock => format!(
+                "sudo chronyc makestep >/dev/null 2>&1 || sudo date -u -s @{mac_now} >/dev/null"
+            ),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Check {
     pub name: &'static str,
@@ -24,15 +56,23 @@ pub struct Check {
     pub detail: String,
     /// What to run or do about it; empty when fine.
     pub fix: String,
+    /// What `--fix` does about it, when it can.
+    pub remedy: Option<Remedy>,
 }
 
 impl Check {
+    fn fixable(mut self, r: Remedy) -> Self {
+        self.remedy = Some(r);
+        self
+    }
+
     fn ok(name: &'static str, detail: impl Into<String>) -> Self {
         Self {
             name,
             level: Level::Ok,
             detail: detail.into(),
             fix: String::new(),
+            remedy: None,
         }
     }
     fn warn(name: &'static str, detail: impl Into<String>, fix: impl Into<String>) -> Self {
@@ -41,6 +81,7 @@ impl Check {
             level: Level::Warn,
             detail: detail.into(),
             fix: fix.into(),
+            remedy: None,
         }
     }
     fn fail(name: &'static str, detail: impl Into<String>, fix: impl Into<String>) -> Self {
@@ -49,6 +90,7 @@ impl Check {
             level: Level::Fail,
             detail: detail.into(),
             fix: fix.into(),
+            remedy: None,
         }
     }
 }
@@ -100,12 +142,14 @@ pub fn guest_disk(pcent: Option<u32>) -> Check {
             "VM disk",
             format!("{p}% full: pods will be evicted"),
             "fluxctl ssh CLUSTER, then: sudo k3s crictl rmi --prune",
-        ),
+        )
+        .fixable(Remedy::PruneImages),
         Some(p) if p >= 85 => Check::warn(
             "VM disk",
             format!("{p}% full"),
             "sudo k3s crictl rmi --prune (in `fluxctl ssh CLUSTER`) removes unused images",
-        ),
+        )
+        .fixable(Remedy::PruneImages),
         Some(p) => Check::ok("VM disk", format!("{p}% used")),
     }
 }
@@ -142,7 +186,8 @@ pub fn dns(resolved: bool, reached_registry: Option<String>) -> Check {
             "VM DNS",
             "the VM cannot resolve names (a VPN or a changed network does this)",
             "fluxctl ssh CLUSTER, then: sudo systemctl restart systemd-resolved; or wake the cluster after changing networks: fluxctl kube sleep && fluxctl kube wake",
-        );
+        )
+        .fixable(Remedy::RestartResolver);
     }
     match reached_registry.as_deref() {
         Some("200") | Some("401") => Check::ok("VM internet", "reaches the image registry"),
@@ -171,13 +216,39 @@ pub fn clock(skew: Option<i64>) -> Check {
             "VM clock",
             format!("{s} s off the Mac: certificates and tokens will fail"),
             "fluxctl kube sleep && fluxctl kube wake (the clock is re-synced on every wake and restore)",
-        ),
+        )
+        .fixable(Remedy::StepClock),
         Some(s) if s.abs() > 5 => Check::warn(
             "VM clock",
             format!("{s} s off the Mac"),
             "it self-corrects within a minute",
         ),
         Some(s) => Check::ok("VM clock", format!("{s} s off the Mac")),
+    }
+}
+
+/// Whether the cluster's kubeconfig exists and points at the forwarded API port. `text` is the file's content, if it could be read.
+pub fn kubeconfig(text: Option<&str>, port: u16) -> Check {
+    let Some(text) = text else {
+        return Check::fail(
+            "Kubeconfig",
+            "the file is missing, so kubectl cannot reach this cluster",
+            "fluxctl kube up (writes it again; the cluster is not recreated)",
+        );
+    };
+    let want = format!("https://127.0.0.1:{port}");
+    match text.lines().find_map(|l| l.trim().strip_prefix("server:")) {
+        Some(s) if s.trim() == want => Check::ok("Kubeconfig", format!("points at {want}")),
+        Some(s) => Check::fail(
+            "Kubeconfig",
+            format!("points at {} but the API is forwarded to {want}", s.trim()),
+            "fluxctl kube up (writes it again; the cluster is not recreated)",
+        ),
+        None => Check::fail(
+            "Kubeconfig",
+            "the file has no server address",
+            "fluxctl kube up (writes it again; the cluster is not recreated)",
+        ),
     }
 }
 
@@ -299,10 +370,44 @@ pub fn render(checks: &[Check]) -> String {
         };
         s.push_str(&format!("{mark}  {:<12} {}\n", c.name, c.detail));
         if !c.fix.is_empty() {
-            s.push_str(&format!("      fix: {}\n", c.fix));
+            let auto = if c.remedy.is_some() {
+                "  (`--fix` does this)"
+            } else {
+                ""
+            };
+            s.push_str(&format!("      fix: {}{auto}\n", c.fix));
         }
     }
     s
+}
+
+/// The repairs `--fix` would make: one per kind, for the checks that are not ok.
+pub fn plan(checks: &[Check]) -> Vec<Remedy> {
+    let mut out: Vec<Remedy> = vec![];
+    for c in checks.iter().filter(|c| c.level != Level::Ok) {
+        if let Some(r) = c.remedy {
+            if !out.contains(&r) {
+                out.push(r);
+            }
+        }
+    }
+    out
+}
+
+/// Makes the repairs in the VM and says what each one did; a repair that fails is reported and the others still run.
+pub async fn apply<A: VmApi>(api: &A, o: &KubeOptions, remedies: &[Remedy]) -> Vec<String> {
+    let mac_now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let mut lines = vec![];
+    for r in remedies {
+        match kube_host::guest_sh(api, o, &r.script(mac_now)).await {
+            Ok(_) => lines.push(format!("fixed: {}", r.label())),
+            Err(e) => lines.push(format!("could not fix ({}): {e}", r.label())),
+        }
+    }
+    lines
 }
 
 pub fn failed(checks: &[Check]) -> bool {
@@ -374,6 +479,14 @@ async fn run_checks<A: VmApi>(api: &A, o: &KubeOptions) -> Result<Vec<Check>> {
             "fluxctl kube up (or fluxctl kube supervise keeps it open)",
         ));
     }
+
+    checks.push(kubeconfig(
+        kube_host::kubeconfig_path(o)
+            .ok()
+            .and_then(|p| std::fs::read_to_string(p).ok())
+            .as_deref(),
+        o.api_port,
+    ));
 
     let guest = |script: &'static str| async move { kube_host::guest_sh(api, o, script).await };
     checks.push(guest_disk(
@@ -519,6 +632,61 @@ mod tests {
             checks[0].fix.contains("kube load"),
             "the Init: prefix still picks the pull advice"
         );
+    }
+
+    #[test]
+    fn only_problems_with_a_safe_repair_are_planned_once_each() {
+        let checks = vec![
+            guest_disk(Some(96)),
+            guest_disk(Some(90)),
+            dns(false, None),
+            clock(Some(342)),
+            clock(Some(1)),
+            mac_disk(Some(GIB)),
+            vpn(Some("utun4".into())),
+        ];
+        assert_eq!(
+            plan(&checks),
+            vec![
+                Remedy::PruneImages,
+                Remedy::RestartResolver,
+                Remedy::StepClock
+            ]
+        );
+        assert!(plan(&[guest_disk(Some(10)), clock(Some(0))]).is_empty());
+        let pod = pods(&parse_pods("default a 0/1 CrashLoopBackOff 7 9m\n"));
+        assert!(plan(&pod).is_empty(), "a crash loop is the app's to fix");
+    }
+
+    #[test]
+    fn the_kubeconfig_must_exist_and_point_at_the_forward() {
+        let ok = "clusters:\n- cluster:\n    server: https://127.0.0.1:6443\n  name: x\n";
+        assert_eq!(kubeconfig(Some(ok), 6443).level, Level::Ok);
+        let moved = kubeconfig(Some(ok), 6444);
+        assert_eq!(moved.level, Level::Fail);
+        assert!(moved.detail.contains("6444") && moved.detail.contains("6443"));
+        assert_eq!(kubeconfig(None, 6443).level, Level::Fail);
+        assert_eq!(kubeconfig(Some("clusters: []\n"), 6443).level, Level::Fail);
+    }
+
+    #[test]
+    fn repair_scripts_touch_only_what_they_name() {
+        assert_eq!(Remedy::PruneImages.script(0), "sudo k3s crictl rmi --prune");
+        assert!(
+            Remedy::RestartResolver
+                .script(0)
+                .contains("systemd-resolved")
+        );
+        let clock = Remedy::StepClock.script(1_700_000_000);
+        assert!(clock.contains("chronyc makestep") && clock.contains("@1700000000"));
+    }
+
+    #[test]
+    fn the_report_marks_what_fix_would_do() {
+        let text = render(&[guest_disk(Some(96)), mac_disk(Some(GIB))]);
+        let lines: Vec<&str> = text.lines().filter(|l| l.contains("fix:")).collect();
+        assert!(lines[0].contains("`--fix` does this"));
+        assert!(!lines[1].contains("`--fix`"));
     }
 
     #[test]

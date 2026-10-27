@@ -258,6 +258,23 @@ fn run_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("/tmp"))
 }
 
+/// The one-line status `kube prompt` reads; `supervise` rewrites it on every check.
+pub(crate) fn prompt_file(name: &str) -> PathBuf {
+    run_dir().join(format!("kube-{name}.prompt"))
+}
+
+/// Records the cluster's state for `kube prompt`; a failure to write it is not worth stopping the supervisor for.
+fn write_prompt(
+    o: &KubeOptions,
+    state: crate::kube_prompt::State,
+    rows: &[crate::kube_doctor::PodRow],
+) {
+    let _ = write_private(
+        &prompt_file(&o.name),
+        &crate::kube_prompt::encode(state, rows, crate::kube_prompt::now()),
+    );
+}
+
 fn forwarder_pid(o: &KubeOptions) -> PathBuf {
     pid_file(&run_dir().join(format!("kube-{}.sock", o.name)))
 }
@@ -1582,6 +1599,7 @@ pub async fn supervise<A: VmApi>(
             }
             open.clear();
             idle.reset();
+            write_prompt(o, crate::kube_prompt::State::Asleep, &[]);
             wake_on_demand(
                 api,
                 o,
@@ -1619,14 +1637,20 @@ pub async fn supervise<A: VmApi>(
                 Err(e) => eprintln!("publishing services, will retry: {e:#}"),
             }
         }
-        if notify && last_pods.is_none_or(|t| t.elapsed() >= POD_CHECK) {
+        if last_pods.is_none_or(|t| t.elapsed() >= POD_CHECK) {
             last_pods = Some(Instant::now());
             // Unreachable while the VM boots or sleeps; that is not worth a message.
             if let Ok(out) = guest_sh(api, o, "sudo k3s kubectl get pods -A --no-headers").await {
-                for alert in pods.update(&o.name, &crate::kube_doctor::parse_pods(&out)) {
-                    eprintln!("{}: {}", alert.title, alert.body);
-                    crate::kube_notify::send(&alert);
+                let rows = crate::kube_doctor::parse_pods(&out);
+                write_prompt(o, crate::kube_prompt::State::Running, &rows);
+                if notify {
+                    for alert in pods.update(&o.name, &rows) {
+                        eprintln!("{}: {}", alert.title, alert.body);
+                        crate::kube_notify::send(&alert);
+                    }
                 }
+            } else if !healthy {
+                write_prompt(o, crate::kube_prompt::State::Down, &[]);
             }
         }
         let watching = idle_sleep.is_some() || sleep_on_power.0 || sleep_on_power.1;

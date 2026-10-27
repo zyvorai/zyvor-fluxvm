@@ -34,6 +34,9 @@ and `*.localhost` names, and the loop from a saved file to a running pod takes a
 | read the logs of every replica at once | `kube logs` | [`kube logs`](#every-replica-in-one-stream-kube-logs) |
 | run the same images everywhere | `kube pin` | [`kube pin`](#the-same-bytes-everywhere-kube-pin) |
 | see everything at a glance | `kube ps`, `kube menubar` | [`kube ps`](#one-screen-kube-ps), [Menu bar](#in-the-menu-bar-kube-menubar) |
+| open a service on my phone | `kube share` | [`kube share`](#open-it-on-your-phone-kube-share) |
+| see the cluster in my shell prompt | `kube prompt` | [Prompt](#in-your-shell-prompt-kube-prompt) |
+| start, checkpoint and undo from Raycast | `integrations/raycast` | [Raycast](#raycast-alfred-and-shortcuts) |
 | know what is wrong | `kube doctor`, and a notification from `kube supervise` | [`kube doctor`](#when-something-is-wrong-kube-doctor), [Notifications](#a-notification-when-a-pod-breaks) |
 | keep it all running | `kube supervise`, `kube agent install` | [Keep it running](#keep-it-running) |
 | work without internet | `kube fetch DIR`, `kube up --offline DIR` | [Without internet](#without-internet-on-first-boot) |
@@ -564,6 +567,44 @@ chmod +x ~/Library/Application\ Support/xbar/plugins/fluxvm-kube.30s.sh
 The `30s` in the file name is the refresh interval. FluxVM ships no menu-bar app of its own; this needs SwiftBar or xbar, which are
 separate programs.
 
+## Open it on your phone: `kube share`
+
+```sh
+fluxctl kube share web          # or shop/web when the name is in several namespaces
+```
+
+A published service answers only on 127.0.0.1. `kube share` opens one extra port on the Mac's network address that relays to it,
+prints `http://<your-mac>.local:PORT` (and the Wi-Fi IP address) with a QR code, and closes on Ctrl-C or after `--minutes` (60 by
+default, at most 480). Scan the code with the phone's camera to try the app on a real device.
+
+It is meant for your own network, and says so: only this Mac and private or link-local addresses (192.168.x.x, 10.x.x.x,
+172.16-31.x.x, 169.254.x.x, fe80::, fd00::) are let in, so a router that forwards a public address still gets refused; at most 64
+connections at once; nothing stays open after it stops. Anyone on the same Wi-Fi who knows the address can reach the service while it
+runs. The service must already be open on the Mac (`kube forward`, `kube add`, or a published NodePort).
+
+Unit-tested: picking the service, the allowed addresses, the Bonjour name, the QR code, and a relay between two local sockets.
+
+## In your shell prompt: `kube prompt`
+
+```sh
+fluxctl kube prompt                 # ⎈ dev 12/12     ⎈ dev 10/12 ✗2     ⎈ dev 💤
+fluxctl kube prompt --plain         # k8s dev 10/12 !2
+fluxctl kube prompt --snippet zsh   # the lines to add (starship, zsh, bash or fish)
+```
+
+It prints one line from a small file that `kube supervise` rewrites on every check (about every 30 seconds), so it answers at once, does
+not need the daemon, and never wakes a sleeping cluster. With no supervisor running, or a file older than 150 seconds, it prints
+nothing, so your prompt never shows a state that is no longer true. Pods count as ready unless they are failing or have restarted
+three or more times (the same rule as `kube ps`). Because the file is kept up to date, `supervise` now looks at the pods on every check
+even with `--no-notify`; `--no-notify` still only turns the messages off.
+
+## Raycast, Alfred and Shortcuts
+
+`integrations/raycast/` has eight small script commands: start, checkpoint (with an optional label), undo the last try, sleep, wake,
+status, doctor, and share with my phone. In Raycast add the folder under Settings, Extensions, Script Commands. They are plain
+`bash`, so Alfred's "Run Script" and Apple Shortcuts' "Run Shell Script" can use the same files. `scripts/test-raycast-scripts.sh`
+checks that they parse and have the headers Raycast reads. Not run: Raycast itself, Alfred or Shortcuts.
+
 ## Every replica in one stream: `kube logs`
 
 `kubectl logs deploy/web` shows one pod. `kube logs` reads them all, every container, and tags each line with its pod (a
@@ -604,7 +645,9 @@ It is `docker ps` for the whole cluster: the state, the pods that are failing (a
 fluxctl kube doctor
 ```
 
-It checks what tends to go wrong for a cluster on a Mac and prints the fix next to each problem: free disk on the Mac, a VPN that takes all traffic, the VM's disk, whether the VM can resolve names and reach the image registry, the VM's clock against the Mac's, and pods that are crash-looping, out of memory, cannot pull their image, or keep restarting. A sleeping cluster is reported as asleep. It exits non-zero when something failed, so it can gate a script.
+It checks what tends to go wrong for a cluster on a Mac and prints the fix next to each problem: free disk on the Mac, a VPN that takes all traffic, a kubeconfig that is missing or points at the wrong port, the VM's disk, whether the VM can resolve names and reach the image registry, the VM's clock against the Mac's, and pods that are crash-looping, out of memory, cannot pull their image, or keep restarting. A sleeping cluster is reported as asleep. It exits non-zero when something failed, so it can gate a script.
+
+`fluxctl kube doctor --fix` makes the repairs that are safe and small, inside the VM, and then checks again: it removes container images no pod uses (when the VM's disk is nearly full), restarts the VM's resolver (when it cannot resolve names) and steps the VM's clock to the Mac's (when it is more than a minute off). Each problem is fixed once, a repair that fails is reported without stopping the others, and the lines marked "`--fix` does this" in the report are exactly these. Everything else (a crash-looping pod, a full Mac disk, a VPN) is yours to decide, so it only prints the advice.
 
 Proved on a real k3s: a healthy cluster passes every check; with one pod killed for memory and one pointing at an image that does not exist, it named both and exited 1. Not run: a VPN, a full disk and a skewed clock on a real machine (those verdicts are unit-tested only).
 
