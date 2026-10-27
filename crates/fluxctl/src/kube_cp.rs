@@ -18,7 +18,10 @@ use std::{
 pub enum Side {
     Local(PathBuf),
     /// `deploy/web`-style target and an absolute path inside its pod.
-    Pod { target: String, path: String },
+    Pod {
+        target: String,
+        path: String,
+    },
 }
 
 /// `web:/app/log`, `pod/web-1:/tmp` are pod paths; anything else, including `./a:b` and `/x:y`, is a Mac path.
@@ -40,17 +43,35 @@ pub fn parse_side(s: &str) -> Result<Side> {
 
 pub enum Plan {
     /// Mac file or directory into a pod directory.
-    Up { src: PathBuf, target: String, to: String },
+    Up {
+        src: PathBuf,
+        target: String,
+        to: String,
+    },
     /// Pod file or directory into a Mac directory.
-    Down { target: String, from: String, dir: PathBuf },
+    Down {
+        target: String,
+        from: String,
+        dir: PathBuf,
+    },
 }
 
 pub fn plan(src: &str, dst: &str) -> Result<Plan> {
     match (parse_side(src)?, parse_side(dst)?) {
-        (Side::Local(src), Side::Pod { target, path }) => Ok(Plan::Up { src, target, to: path }),
-        (Side::Pod { target, path }, Side::Local(dir)) => Ok(Plan::Down { target, from: path, dir }),
+        (Side::Local(src), Side::Pod { target, path }) => Ok(Plan::Up {
+            src,
+            target,
+            to: path,
+        }),
+        (Side::Pod { target, path }, Side::Local(dir)) => Ok(Plan::Down {
+            target,
+            from: path,
+            dir,
+        }),
         (Side::Local(_), Side::Local(_)) => bail!("one side must be a pod path like web:/app"),
-        (Side::Pod { .. }, Side::Pod { .. }) => bail!("copying between two pods is not supported; copy to the Mac first"),
+        (Side::Pod { .. }, Side::Pod { .. }) => {
+            bail!("copying between two pods is not supported; copy to the Mac first")
+        }
     }
 }
 
@@ -119,7 +140,10 @@ fn unpack_local(tar: &[u8], dir: &Path) -> Result<()> {
         out
     })?;
     if !out.status.success() {
-        bail!("tar failed: {}", String::from_utf8_lossy(&out.stderr).trim());
+        bail!(
+            "tar failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
     }
     Ok(())
 }
@@ -144,7 +168,10 @@ pub async fn run<A: VmApi>(
                 .output()
                 .context("running tar")?;
             if !out.status.success() {
-                bail!("tar failed: {}", String::from_utf8_lossy(&out.stderr).trim());
+                bail!(
+                    "tar failed: {}",
+                    String::from_utf8_lossy(&out.stderr).trim()
+                );
             }
             if out.stdout.len() > MAX_BYTES {
                 bail!("{} is larger than {} MiB", src.display(), MAX_BYTES >> 20);
@@ -156,9 +183,16 @@ pub async fn run<A: VmApi>(
         Plan::Down { target, from, dir } => {
             kube_host::guest_sh(api, o, &exists_script(&target, namespace, container, &from))
                 .await
-                .with_context(|| format!("{target}:{from} does not exist (or the pod is not running)"))?;
-            let tar =
-                kube_host::guest_output_bytes(api, o, &pack_script(&target, namespace, container, &from), None).await?;
+                .with_context(|| {
+                    format!("{target}:{from} does not exist (or the pod is not running)")
+                })?;
+            let tar = kube_host::guest_output_bytes(
+                api,
+                o,
+                &pack_script(&target, namespace, container, &from),
+                None,
+            )
+            .await?;
             if tar.len() > MAX_BYTES {
                 bail!("{target}:{from} is larger than {} MiB", MAX_BYTES >> 20);
             }
@@ -176,20 +210,37 @@ mod tests {
     fn pod_paths_and_mac_paths_are_told_apart() {
         assert_eq!(
             parse_side("web:/app/log").unwrap(),
-            Side::Pod { target: "deploy/web".into(), path: "/app/log".into() }
+            Side::Pod {
+                target: "deploy/web".into(),
+                path: "/app/log".into()
+            }
         );
         assert_eq!(
             parse_side("pod/web-1:/tmp/").unwrap(),
-            Side::Pod { target: "pod/web-1".into(), path: "/tmp".into() }
+            Side::Pod {
+                target: "pod/web-1".into(),
+                path: "/tmp".into()
+            }
         );
         for local in ["./a:b", "/x:y", "~/f", "plain.txt", "../up"] {
-            assert!(matches!(parse_side(local).unwrap(), Side::Local(_)), "{local}");
+            assert!(
+                matches!(parse_side(local).unwrap(), Side::Local(_)),
+                "{local}"
+            );
         }
     }
 
     #[test]
     fn bad_pod_paths_are_refused() {
-        for bad in ["web:rel", "web:/", "web:/a b", "web:/a;rm", "web:/a/../b", "job/x:/a", "Web;id:/a"] {
+        for bad in [
+            "web:rel",
+            "web:/",
+            "web:/a b",
+            "web:/a;rm",
+            "web:/a/../b",
+            "job/x:/a",
+            "Web;id:/a",
+        ] {
             assert!(parse_side(bad).is_err(), "{bad}");
         }
     }
@@ -197,7 +248,10 @@ mod tests {
     #[test]
     fn exactly_one_side_is_a_pod() {
         assert!(matches!(plan("./f", "web:/app").unwrap(), Plan::Up { .. }));
-        assert!(matches!(plan("web:/app/f", "./out").unwrap(), Plan::Down { .. }));
+        assert!(matches!(
+            plan("web:/app/f", "./out").unwrap(),
+            Plan::Down { .. }
+        ));
         assert!(plan("./a", "./b").is_err());
         assert!(plan("web:/a", "db:/b").is_err());
     }
@@ -230,10 +284,16 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
         std::fs::create_dir_all(base.join("src/d")).unwrap();
         std::fs::write(base.join("src/d/a.txt"), "hello").unwrap();
-        let out = Command::new("tar").args(local_pack_args(&base.join("src/d")).unwrap()).output().unwrap();
+        let out = Command::new("tar")
+            .args(local_pack_args(&base.join("src/d")).unwrap())
+            .output()
+            .unwrap();
         assert!(out.status.success());
         unpack_local(&out.stdout, &base.join("out")).unwrap();
-        assert_eq!(std::fs::read_to_string(base.join("out/d/a.txt")).unwrap(), "hello");
+        assert_eq!(
+            std::fs::read_to_string(base.join("out/d/a.txt")).unwrap(),
+            "hello"
+        );
         let _ = std::fs::remove_dir_all(&base);
     }
 }

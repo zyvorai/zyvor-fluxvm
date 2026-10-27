@@ -35,8 +35,8 @@ pub enum App {
     Clickhouse,
     /// Keycloak identity server in dev mode on http://localhost:8180 (admin / admin). Needs about 1 GiB of VM memory.
     Keycloak,
-    /// MinIO, S3-compatible storage: S3 API on http://localhost:9010, console on http://localhost:9001 (minioadmin / minioadmin).
-    Minio,
+    /// SeaweedFS, S3-compatible storage: S3 API on http://localhost:8333 (no credentials), master page on http://localhost:9333.
+    Seaweedfs,
     /// HashiCorp Vault in dev mode on http://localhost:8200 (root token dev). Secrets live in memory only.
     Vault,
     /// Jaeger tracing: UI on http://localhost:16686, OTLP on localhost:4317 (gRPC) and localhost:4318 (HTTP).
@@ -59,7 +59,7 @@ pub const ALL: [App; 17] = [
     App::Meilisearch,
     App::Clickhouse,
     App::Keycloak,
-    App::Minio,
+    App::Seaweedfs,
     App::Vault,
     App::Jaeger,
     App::Temporal,
@@ -97,7 +97,7 @@ impl App {
             App::Meilisearch => "meilisearch",
             App::Clickhouse => "clickhouse",
             App::Keycloak => "keycloak",
-            App::Minio => "minio",
+            App::Seaweedfs => "seaweedfs",
             App::Vault => "vault",
             App::Jaeger => "jaeger",
             App::Temporal => "temporal",
@@ -361,26 +361,24 @@ impl App {
                 }],
                 volume: Some(("/opt/keycloak/data", "1Gi")),
             },
-            // The console has the lower node port, so `http://minio.localhost` opens it.
-            App::Minio => Spec {
-                image: "quay.io/minio/minio:RELEASE.2024-12-18T13-15-44Z",
-                env: &[
-                    ("MINIO_ROOT_USER", "minioadmin"),
-                    ("MINIO_ROOT_PASSWORD", "minioadmin"),
-                ],
-                args: &["server", "/data", "--console-address", ":9001"],
+            // The master page has the lower node port, so `http://seaweedfs.localhost` opens it. One process serves the
+            // master, a volume server and the S3 gateway; without an identities file S3 accepts any credentials.
+            App::Seaweedfs => Spec {
+                image: "docker.io/chrislusf/seaweedfs:4.00",
+                env: &[],
+                args: &["server", "-s3", "-dir=/data", "-ip.bind=0.0.0.0"],
                 ports: &[
                     Port {
-                        name: "console",
-                        container: 9001,
-                        node: 30901,
-                        local: 9001,
+                        name: "master",
+                        container: 9333,
+                        node: 30933,
+                        local: 9333,
                     },
                     Port {
                         name: "s3",
-                        container: 9000,
-                        node: 30910,
-                        local: 9010,
+                        container: 8333,
+                        node: 31833,
+                        local: 8333,
                     },
                 ],
                 volume: Some(("/data", "2Gi")),
@@ -569,12 +567,15 @@ impl App {
                 ),
                 ("login", "admin / admin".into()),
             ],
-            App::Minio => vec![
+            App::Seaweedfs => vec![
                 (
-                    "console",
-                    "http://127.0.0.1:9001 or http://minio.localhost (minioadmin / minioadmin)".into(),
+                    "master",
+                    "http://127.0.0.1:9333 or http://seaweedfs.localhost".into(),
                 ),
-                ("s3", "http://127.0.0.1:9010 (path-style addressing)".into()),
+                (
+                    "s3",
+                    "http://127.0.0.1:8333 (path-style addressing; any access key works)".into(),
+                ),
             ],
             App::Vault => vec![
                 (

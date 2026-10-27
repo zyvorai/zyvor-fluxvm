@@ -50,8 +50,8 @@ mod kube_logs;
 mod kube_menubar;
 mod kube_names;
 mod kube_notify;
-mod kube_project;
 mod kube_pin;
+mod kube_project;
 mod kube_ps;
 mod kube_sync;
 mod kube_tls;
@@ -8345,7 +8345,15 @@ async fn kube_command<A: run::VmApi>(api: &A, command: KubeCommand) -> Result<()
         } => {
             println!(
                 "{}",
-                kube_cp::run(api, &cluster.options()?, &src, &dst, &namespace, container.as_deref()).await?
+                kube_cp::run(
+                    api,
+                    &cluster.options()?,
+                    &src,
+                    &dst,
+                    &namespace,
+                    container.as_deref()
+                )
+                .await?
             );
         }
         KubeCommand::Logs {

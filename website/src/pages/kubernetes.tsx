@@ -86,7 +86,7 @@ const FEATURES: Feature[] = [
 
 const APPS = [
   'Postgres', 'Redis', 'MySQL', 'MongoDB', 'ClickHouse', 'Redpanda', 'NATS', 'RabbitMQ', 'Mailpit',
-  'Grafana', 'Qdrant', 'Meilisearch', 'Keycloak', 'MinIO', 'Vault', 'Jaeger', 'Temporal',
+  'Grafana', 'Qdrant', 'Meilisearch', 'Keycloak', 'SeaweedFS', 'Vault', 'Jaeger', 'Temporal',
 ];
 
 function Hero() {

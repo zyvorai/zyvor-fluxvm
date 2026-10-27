@@ -168,9 +168,14 @@ pub fn join_url(project_url: &str, manifest: &Path) -> Result<String> {
     let m = manifest.to_string_lossy();
     let yaml = m.ends_with(".yaml") || m.ends_with(".yml");
     if !yaml {
-        bail!("{m:?}: a project fetched from an address lists each manifest as a .yaml or .yml file, not a folder");
+        bail!(
+            "{m:?}: a project fetched from an address lists each manifest as a .yaml or .yml file, not a folder"
+        );
     }
-    if m.contains(['\\', '?', '#', '%']) || m.starts_with('/') || m.split('/').any(|c| c == ".." || c.is_empty()) {
+    if m.contains(['\\', '?', '#', '%'])
+        || m.starts_with('/')
+        || m.split('/').any(|c| c == ".." || c.is_empty())
+    {
         bail!("manifest {m:?} must be a plain relative path inside the project");
     }
     let base = project_url.split(['?', '#']).next().unwrap_or(project_url);
@@ -190,11 +195,18 @@ async fn fetch_text(url: &str) -> Result<String> {
             }
         }))
         .build()?;
-    let resp = client.get(url).send().await.with_context(|| format!("fetching {url}"))?;
+    let resp = client
+        .get(url)
+        .send()
+        .await
+        .with_context(|| format!("fetching {url}"))?;
     if !resp.status().is_success() {
         bail!("{url}: {}", resp.status());
     }
-    let bytes = resp.bytes().await.with_context(|| format!("reading {url}"))?;
+    let bytes = resp
+        .bytes()
+        .await
+        .with_context(|| format!("reading {url}"))?;
     if bytes.len() > MAX_REMOTE_BYTES {
         bail!("{url} is larger than {} KiB", MAX_REMOTE_BYTES >> 10);
     }
@@ -206,10 +218,17 @@ pub fn summary(p: &Project, manifests: &[String]) -> String {
     let mut lines = vec![format!(
         "cluster {}{}",
         p.name.as_deref().unwrap_or("(from --name)"),
-        if p.traefik == Some(true) { " with Traefik" } else { "" }
+        if p.traefik == Some(true) {
+            " with Traefik"
+        } else {
+            ""
+        }
     )];
     if !p.images.is_empty() {
-        lines.push(format!("copy images from this Mac's Docker: {}", p.images.join(", ")));
+        lines.push(format!(
+            "copy images from this Mac's Docker: {}",
+            p.images.join(", ")
+        ));
     }
     if !p.apps.is_empty() {
         lines.push(format!("add apps: {}", p.apps.join(", ")));
@@ -218,7 +237,10 @@ pub fn summary(p: &Project, manifests: &[String]) -> String {
         lines.push(format!("apply {m}"));
     }
     for f in &p.forwards {
-        lines.push(format!("open a port on this Mac for {}/{}", f.namespace, f.service));
+        lines.push(format!(
+            "open a port on this Mac for {}/{}",
+            f.namespace, f.service
+        ));
     }
     lines.join("\n  ")
 }
@@ -226,6 +248,9 @@ pub fn summary(p: &Project, manifests: &[String]) -> String {
 /// Everything `start` will apply, read before the first slow step: (label, YAML).
 async fn load_project(file: &str, yes: bool) -> Result<(Project, Vec<(String, String)>)> {
     if is_url(file) {
+        if !file.starts_with("https://") {
+            bail!("a project is fetched over https only, not {file:?}");
+        }
         let project = parse(&fetch_text(file).await?)?;
         if project.manifests.len() > MAX_REMOTE_MANIFESTS {
             bail!("a remote project may list at most {MAX_REMOTE_MANIFESTS} manifests");
@@ -258,7 +283,8 @@ async fn load_project(file: &str, yes: bool) -> Result<(Project, Vec<(String, St
         .unwrap_or(Path::new("."));
     let mut docs = vec![];
     for m in manifest_files(dir, &project.manifests)? {
-        let yaml = std::fs::read_to_string(&m).with_context(|| format!("reading {}", m.display()))?;
+        let yaml =
+            std::fs::read_to_string(&m).with_context(|| format!("reading {}", m.display()))?;
         docs.push((m.display().to_string(), yaml));
     }
     Ok((project, docs))
@@ -398,6 +424,14 @@ forwards:
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[tokio::test]
+    async fn plain_http_is_refused_before_anything_is_fetched() {
+        let e = load_project("http://127.0.0.1:9/p.yaml", true)
+            .await
+            .unwrap_err();
+        assert!(e.to_string().contains("https only"), "{e}");
+    }
+
     #[test]
     fn a_project_address_is_told_from_a_path() {
         assert!(is_url("https://example.com/p.yaml"));
@@ -412,9 +446,26 @@ forwards:
             join_url(base, Path::new("k8s/web.yaml")).unwrap(),
             "https://raw.example.com/acme/shop/main/k8s/web.yaml"
         );
-        assert!(join_url("http://x/p.yaml", Path::new("a.yaml")).is_err(), "plain http");
-        for bad in ["k8s/", "k8s", "../a.yaml", "/a.yaml", "a//b.yaml", "a.yaml?x=1", "a%2e.yaml", "a#b.yaml", "a\\b.yaml", "a.txt"] {
-            assert!(join_url("https://x.dev/p.yaml", Path::new(bad)).is_err(), "{bad}");
+        assert!(
+            join_url("http://x/p.yaml", Path::new("a.yaml")).is_err(),
+            "plain http"
+        );
+        for bad in [
+            "k8s/",
+            "k8s",
+            "../a.yaml",
+            "/a.yaml",
+            "a//b.yaml",
+            "a.yaml?x=1",
+            "a%2e.yaml",
+            "a#b.yaml",
+            "a\\b.yaml",
+            "a.txt",
+        ] {
+            assert!(
+                join_url("https://x.dev/p.yaml", Path::new(bad)).is_err(),
+                "{bad}"
+            );
         }
     }
 
@@ -422,7 +473,13 @@ forwards:
     fn the_confirmation_names_every_effect() {
         let p = parse("name: shop\ntraefik: true\nimages: [app:dev]\napps: [postgres]\nforwards: [{service: web}]\n").unwrap();
         let s = summary(&p, &["https://x.dev/k8s/web.yaml".into()]);
-        for want in ["shop with Traefik", "app:dev", "add apps: postgres", "apply https://x.dev/k8s/web.yaml", "default/web"] {
+        for want in [
+            "shop with Traefik",
+            "app:dev",
+            "add apps: postgres",
+            "apply https://x.dev/k8s/web.yaml",
+            "default/web",
+        ] {
             assert!(s.contains(want), "{want} in {s}");
         }
     }

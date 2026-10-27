@@ -182,7 +182,7 @@ this Mac, and prints what to paste into your app. Each app gets its usual port o
 | `meilisearch` (1.12) | `http://meilisearch.localhost` (`7700`) | none (development mode) |
 | `clickhouse` (24.12) | HTTP `8123`, native `9000` | `default` / `dev` |
 | `keycloak` (26.0, dev mode) | `http://keycloak.localhost` (`8180`) | `admin` / `admin`; give the VM about 1 GiB more memory |
-| `minio` (S3 storage) | console `http://minio.localhost` (`9001`), S3 API `http://127.0.0.1:9010` | `minioadmin` / `minioadmin` |
+| `seaweedfs` (4.00, S3 storage) | master page `http://seaweedfs.localhost` (`9333`), S3 API `http://127.0.0.1:8333` | none; any S3 access key works |
 | `vault` (1.18, dev mode) | `http://vault.localhost` (`8200`) | root token `dev`; secrets are in memory and vanish with the pod |
 | `jaeger` (1.64, tracing) | UI `http://jaeger.localhost` (`16686`), OTLP gRPC `4317`, OTLP HTTP `4318` | none; traces are in memory |
 | `temporal` (dev server) | UI `http://temporal.localhost` (`8233`), gRPC `7233` | none; state in a file on the volume |

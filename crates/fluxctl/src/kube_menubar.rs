@@ -7,7 +7,13 @@ use crate::kube_ps::{Snapshot, State, ago, compact_names, pod_summary};
 /// A value that is safe inside a plugin line: no newline or `|` can end the line or start an attribute.
 fn clean(s: &str) -> String {
     s.chars()
-        .map(|c| if matches!(c, '|' | '\n' | '\r') { ' ' } else { c })
+        .map(|c| {
+            if matches!(c, '|' | '\n' | '\r') {
+                ' '
+            } else {
+                c
+            }
+        })
         .collect()
 }
 
@@ -143,7 +149,10 @@ mod tests {
 
     #[test]
     fn a_healthy_cluster_shows_its_pod_count_and_actions() {
-        let t = render(&snap(State::Running, vec![pod("a", "Running", 0)]), "/opt/bin/fluxctl");
+        let t = render(
+            &snap(State::Running, vec![pod("a", "Running", 0)]),
+            "/opt/bin/fluxctl",
+        );
         assert!(t.starts_with("⎈ 1\n---\n"), "{t}");
         for want in [
             "dr · running · 192.168.64.2",
@@ -158,19 +167,38 @@ mod tests {
 
     #[test]
     fn a_failing_pod_turns_the_title_red() {
-        let t = render(&snap(State::Running, vec![pod("a", "Running", 0), pod("b", "CrashLoopBackOff", 5)]), "f");
+        let t = render(
+            &snap(
+                State::Running,
+                vec![pod("a", "Running", 0), pod("b", "CrashLoopBackOff", 5)],
+            ),
+            "f",
+        );
         assert!(t.starts_with("⎈ 1 ⚠ | color=red\n"), "{t}");
-        assert!(t.contains("⚠ default/b CrashLoopBackOff (restarts 5) | color=red"), "{t}");
+        assert!(
+            t.contains("⚠ default/b CrashLoopBackOff (restarts 5) | color=red"),
+            "{t}"
+        );
     }
 
     #[test]
     fn other_states_offer_the_one_thing_to_do() {
         let asleep = render(&snap(State::Asleep, vec![]), "f");
-        assert!(asleep.starts_with("⎈ zzz\n") && asleep.contains("Wake | bash=f param1=kube param2=wake"), "{asleep}");
+        assert!(
+            asleep.starts_with("⎈ zzz\n")
+                && asleep.contains("Wake | bash=f param1=kube param2=wake"),
+            "{asleep}"
+        );
         let off = render(&snap(State::Stopped("stopped".into()), vec![]), "f");
-        assert!(off.starts_with("⎈ off\n") && off.contains("Start | bash=f"), "{off}");
+        assert!(
+            off.starts_with("⎈ off\n") && off.contains("Start | bash=f"),
+            "{off}"
+        );
         let none = render(&snap(State::Missing, vec![]), "f");
-        assert!(none.starts_with("⎈ –\n") && none.contains("Create the cluster"), "{none}");
+        assert!(
+            none.starts_with("⎈ –\n") && none.contains("Create the cluster"),
+            "{none}"
+        );
     }
 
     #[test]
@@ -182,13 +210,20 @@ mod tests {
         assert!(!t.contains("x | bash"), "{t}");
         assert!(t.contains("bash=/Applications/My\\ Tools/fluxctl"), "{t}");
         for line in t.lines() {
-            assert!(line.matches(" | ").count() <= 1 || line.contains("terminal="), "{line}");
+            assert!(
+                line.matches(" | ").count() <= 1 || line.contains("terminal="),
+                "{line}"
+            );
         }
     }
 
     #[test]
     fn the_plugin_runs_this_command_with_quoting() {
         let p = plugin_script("/Users/me/it's/fluxctl", "dr");
-        assert!(p.starts_with("#!/bin/bash\n") && p.contains("exec '/Users/me/it'\\''s/fluxctl' kube menubar --name 'dr'\n"), "{p}");
+        assert!(
+            p.starts_with("#!/bin/bash\n")
+                && p.contains("exec '/Users/me/it'\\''s/fluxctl' kube menubar --name 'dr'\n"),
+            "{p}"
+        );
     }
 }
