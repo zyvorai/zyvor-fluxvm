@@ -152,11 +152,21 @@ pub fn qr(text: &str) -> Result<String> {
         .build())
 }
 
-/// Relays every allowed connection on `listener` to 127.0.0.1:`to` until `stop` finishes. Returns how many
-/// connections were relayed and how many were refused.
+/// Relays every connection from a private-network peer on `listener` to 127.0.0.1:`to` until `stop` finishes. Returns
+/// how many connections were relayed and how many were refused.
 pub async fn relay(
     listener: TcpListener,
     to: u16,
+    stop: impl std::future::Future<Output = ()>,
+) -> (u64, u64) {
+    relay_with(listener, to, lan_allowed, stop).await
+}
+
+/// [`relay`] with its own rule for which peers are let in.
+pub async fn relay_with(
+    listener: TcpListener,
+    to: u16,
+    allow: impl Fn(IpAddr) -> bool,
     stop: impl std::future::Future<Output = ()>,
 ) -> (u64, u64) {
     let slots = Arc::new(Semaphore::new(MAX_CONNECTIONS));
@@ -168,7 +178,7 @@ pub async fn relay(
             accepted = listener.accept() => {
                 let Ok((mut inbound, peer)) = accepted else { continue };
                 let permit = slots.clone().try_acquire_owned();
-                if !lan_allowed(peer.ip()) || permit.is_err() {
+                if !allow(peer.ip()) || permit.is_err() {
                     refused += 1;
                     continue;
                 }
