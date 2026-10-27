@@ -76,6 +76,7 @@ const config: Config = {
       items: [
         {to: '/docs/install', label: 'Install', position: 'right'},
         {to: '/mac', label: 'Mac', position: 'right'},
+        {to: '/kubernetes', label: 'Kubernetes', position: 'right'},
         {to: '/agents', label: 'Agents', position: 'right'},
         {to: '/studio', label: 'Studio', position: 'right'},
         {to: '/mac-cloud', label: 'Mac cloud', position: 'right'},
@@ -103,6 +104,7 @@ const config: Config = {
             {label: 'Install with Homebrew', to: '/docs/install-macos'},
             {label: 'Agent sessions guide', to: '/docs/agent-sessions-guide'},
             {label: 'FluxVM on Mac', to: '/mac'},
+            {label: 'Kubernetes on a Mac', to: '/kubernetes'},
             {label: 'Agent sandboxes', to: '/agents'},
             {label: 'Build a Mac cloud', to: '/mac-cloud'},
             {label: 'Mac cloud guide', to: '/docs/mac-cloud'},

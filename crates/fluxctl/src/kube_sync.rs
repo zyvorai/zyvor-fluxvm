@@ -11,7 +11,7 @@ use anyhow::{Context, Result, bail};
 use std::{path::Path, process::Command, time::Instant};
 
 /// Largest tree sent at once; a bigger one is almost certainly the wrong directory.
-const MAX_BYTES: usize = 64 << 20;
+pub(crate) const MAX_BYTES: usize = 64 << 20;
 
 pub struct Sync<'a> {
     pub target: &'a str,
@@ -45,7 +45,7 @@ pub fn resolve_target(t: &str) -> Result<String> {
 }
 
 /// Paths and names that go inside a remote command are limited to plain characters, so nothing needs escaping.
-fn path_ok(p: &str) -> bool {
+pub(crate) fn path_ok(p: &str) -> bool {
     p.starts_with('/')
         && p.len() <= 200
         && !p.contains("..")

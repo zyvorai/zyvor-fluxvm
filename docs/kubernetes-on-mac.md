@@ -30,8 +30,10 @@ and `*.localhost` names, and the loop from a saved file to a running pod takes a
 | start clean every time | `kube golden`, `kube reset`, `kube matrix` | [A clean start](#a-clean-start-every-time) |
 | see whether my app copes with failure | `kube chaos` | [Break it on purpose](#break-it-on-purpose) |
 | cost nothing while I am away | `kube sleep`, `kube wake`, `kube supervise --idle-sleep`, `--sleep-on-battery` | [Sleep and wake](#sleep-and-wake) |
+| copy files to or from a pod | `kube cp` | [`kube cp`](#copy-files-kube-cp) |
 | read the logs of every replica at once | `kube logs` | [`kube logs`](#every-replica-in-one-stream-kube-logs) |
-| see everything at a glance | `kube ps` | [`kube ps`](#one-screen-kube-ps) |
+| run the same images everywhere | `kube pin` | [`kube pin`](#the-same-bytes-everywhere-kube-pin) |
+| see everything at a glance | `kube ps`, `kube menubar` | [`kube ps`](#one-screen-kube-ps), [Menu bar](#in-the-menu-bar-kube-menubar) |
 | know what is wrong | `kube doctor`, and a notification from `kube supervise` | [`kube doctor`](#when-something-is-wrong-kube-doctor), [Notifications](#a-notification-when-a-pod-breaks) |
 | keep it all running | `kube supervise`, `kube agent install` | [Keep it running](#keep-it-running) |
 | work without internet | `kube fetch DIR`, `kube up --offline DIR` | [Without internet](#without-internet-on-first-boot) |
@@ -179,6 +181,11 @@ this Mac, and prints what to paste into your app. Each app gets its usual port o
 | `qdrant` (vector database) | REST `http://qdrant.localhost` (`6333`, dashboard at `/dashboard`), gRPC `6334` | none |
 | `meilisearch` (1.12) | `http://meilisearch.localhost` (`7700`) | none (development mode) |
 | `clickhouse` (24.12) | HTTP `8123`, native `9000` | `default` / `dev` |
+| `keycloak` (26.0, dev mode) | `http://keycloak.localhost` (`8180`) | `admin` / `admin`; give the VM about 1 GiB more memory |
+| `seaweedfs` (4.00, S3 storage) | master page `http://seaweedfs.localhost` (`9333`), S3 API `http://127.0.0.1:8333` | none; any S3 access key works |
+| `vault` (1.18, dev mode) | `http://vault.localhost` (`8200`) | root token `dev`; secrets are in memory and vanish with the pod |
+| `jaeger` (1.64, tracing) | UI `http://jaeger.localhost` (`16686`), OTLP gRPC `4317`, OTLP HTTP `4318` | none; traces are in memory |
+| `temporal` (dev server) | UI `http://temporal.localhost` (`8233`), gRPC `7233` | none; state in a file on the volume |
 
 These are development defaults with throwaway passwords, bound to loopback on the Mac; they are not for anything shared. An app's
 port can be opened only if the supervisor (`fluxctl kube supervise`, which the LaunchAgent runs) or `add` itself opens it; keep them
@@ -492,6 +499,71 @@ A teammate clones the repository and runs one command. It adds nothing new under
 
 Proved on a real k3s: from no cluster, one `start` built the cluster, Redis (answered `PONG`), a web Deployment and Service from a `k8s/` folder, and a forward that served the page, in 4 minutes 26 seconds (most of it first boot); a second `start` took 7 seconds and left every object as it was; a file naming an unknown app failed at once without creating a cluster. Not run: `images:` (it uses `kube load`, proved separately), Traefik and several apps together, and workers.
 
+### A project from an address
+
+`--file` also takes an `https://` address, so a project can live in a repository and be started without cloning it:
+
+```sh
+fluxctl kube start --file https://raw.githubusercontent.com/acme/shop/main/fluxvm-kube.yaml
+```
+
+A project runs images, manifests and ports on your machine, so without `--yes` it fetches the file, prints what it would do and
+stops:
+
+```text
+https://raw.githubusercontent.com/acme/shop/main/fluxvm-kube.yaml would do this on your Mac and in the cluster:
+  cluster shop
+  add apps: postgres
+  apply https://raw.githubusercontent.com/acme/shop/main/k8s/web.yaml
+  open a port on this Mac for default/web
+Only run projects you trust. Add --yes to go ahead.
+```
+
+Manifests are fetched from beside the project file, so each is listed as a `.yaml` file (a folder cannot be listed over HTTP), at most 30
+of up to 1 MiB each, and nothing may climb out of the project's directory. Only `https` is fetched, and a redirect to plain `http` is
+refused.
+
+## The same bytes everywhere: `kube pin`
+
+A tag such as `postgres:17-alpine` can point at a different image next month. `kube pin` prints what the cluster is running right
+now as tag plus digest:
+
+```text
+$ fluxctl kube pin
+docker.io/library/postgres:17-alpine@sha256:3f1c...e9
+docker.io/library/redis:7-alpine@sha256:81aa...07
+```
+
+Paste the lines into a manifest's `image:` field and the same bytes run on every machine. System pods are left out; `--all` includes
+them. A pod that has not pulled its image yet has no digest and is skipped.
+
+## Copy files: `kube cp`
+
+```sh
+fluxctl kube cp ./site web:/usr/share/nginx/html      # Mac -> pod: the folder `site` lands inside that directory
+fluxctl kube cp web:/var/log/nginx ./logs             # pod -> Mac: into the folder ./logs (created if missing)
+fluxctl kube cp pod/web-1:/etc/hosts . --namespace shop --container app
+```
+
+The pod side is `NAME:/absolute/path` (`NAME` is a Deployment; `pod/`, `statefulset/` and `daemonset/` work too). The destination is
+always a directory, like `docker cp` into an existing folder. A path with a colon that is meant for the Mac starts with `./` or `/`.
+Files travel as a tar stream through the VM, 64 MiB at most, so it needs nothing in the pod beyond `tar`. A missing source path is
+reported before anything is copied. Copying between two pods is refused; copy to the Mac first.
+
+## In the menu bar: `kube menubar`
+
+`kube menubar` prints the cluster's state in the format that [SwiftBar](https://swiftbar.app) and [xbar](https://xbarapp.com) read:
+the title is the pod count (`⎈ 9`), red with a warning when a pod is failing, `zzz` when the cluster sleeps. The menu lists failing
+pods, the apps and their Mac ports, the `.localhost` names to open, the checkpoints, and clickable Sleep, Wake, Doctor and Status.
+
+```sh
+fluxctl kube menubar --plugin > ~/Library/Application\ Support/xbar/plugins/fluxvm-kube.30s.sh   # or SwiftBar's folder
+chmod +x ~/Library/Application\ Support/xbar/plugins/fluxvm-kube.30s.sh
+```
+
+The `30s` in the file name is the refresh interval. FluxVM ships no menu-bar app of its own; this needs SwiftBar or xbar, which are
+separate programs.
+
 ## Every replica in one stream: `kube logs`
 
 `kubectl logs deploy/web` shows one pod. `kube logs` reads them all, every container, and tags each line with its pod (a
@@ -555,6 +627,7 @@ automatic checkpoints, and sleeps and wakes the cluster. The plist carries `FLUX
 
 ## What this is not
 
+* No `kube fork` (a second running cluster from a checkpoint): FluxVM refuses to fork a VM on the Mac's NAT, because a saved machine state cannot be restored onto a different network attachment (the copy's network card comes up disconnected), and cluster VMs use that NAT. For a clean copy per pull request use `kube golden` and `kube reset`. 
 * No high availability: there is one server (control plane); extra nodes are agents only.
 * The containers share the VM's kernel, unlike the per-container microVMs of the built-in sandboxes.
 * Unless you use `--offline`, the first boot needs internet access.

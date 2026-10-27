@@ -41,13 +41,16 @@ mod kube_apps;
 mod kube_backup;
 mod kube_chaos;
 mod kube_checkpoint;
+mod kube_cp;
 mod kube_dev;
 mod kube_doctor;
 mod kube_forward;
 mod kube_host;
 mod kube_logs;
+mod kube_menubar;
 mod kube_names;
 mod kube_notify;
+mod kube_pin;
 mod kube_project;
 mod kube_ps;
 mod kube_sync;
@@ -480,9 +483,44 @@ enum KubeCommand {
     Start {
         #[command(flatten)]
         cluster: KubeArgs,
-        /// The project file.
+        /// The project file, or an https:// address of one (which needs --yes: it runs what the file says).
         #[arg(long, default_value = "fluxvm-kube.yaml")]
-        file: std::path::PathBuf,
+        file: String,
+        /// Go ahead with a project fetched from an address, after reading what it will do.
+        #[arg(long)]
+        yes: bool,
+    },
+    /// The cluster's state as a menu-bar item for SwiftBar or xbar (`--plugin` prints the plugin file to save as
+    /// `fluxvm-kube.30s.sh` in their plugin folder).
+    Menubar {
+        #[command(flatten)]
+        cluster: KubeArgs,
+        /// Print the plugin script instead of the menu.
+        #[arg(long)]
+        plugin: bool,
+    },
+    /// Print the images the cluster is running as `name:tag@sha256:...`, so the same bytes run everywhere. Paste them
+    /// into a manifest or a `kube start` project. System pods are left out unless `--all`.
+    Pin {
+        #[command(flatten)]
+        cluster: KubeArgs,
+        #[arg(long)]
+        all: bool,
+    },
+    /// Copy a file or directory between this Mac and a pod: `kube cp ./site web:/usr/share/nginx/html`, or
+    /// `kube cp web:/var/log ./logs`. The pod side is `NAME:/absolute/path` (also `pod/NAME`, `statefulset/NAME`).
+    Cp {
+        #[command(flatten)]
+        cluster: KubeArgs,
+        /// A Mac path or `NAME:/path` in a pod.
+        src: String,
+        /// A directory: on the Mac, or `NAME:/dir` in a pod (created if missing).
+        dst: String,
+        #[arg(long, default_value = "default")]
+        namespace: String,
+        /// The container, when the pod has several.
+        #[arg(long)]
+        container: Option<String>,
     },
     /// The logs of every pod behind a workload in one stream, each line tagged with its pod (`-f` follows).
     Logs {
@@ -8276,6 +8314,48 @@ async fn kube_command<A: run::VmApi>(api: &A, command: KubeCommand) -> Result<()
             )
             .await?;
         }
+        KubeCommand::Menubar { cluster, plugin } => {
+            let o = cluster.options()?;
+            let bin = std::env::current_exe()?.display().to_string();
+            if plugin {
+                print!("{}", kube_menubar::plugin_script(&bin, &o.name));
+            } else {
+                // A daemon that is down is a state to show, not an error to print into the menu bar.
+                match kube_ps::gather(api, &o).await {
+                    Ok(s) => print!("{}", kube_menubar::render(&s, &bin)),
+                    Err(e) => println!("⎈ ?\n---\n{}", e.to_string().replace(['|', '\n'], " ")),
+                }
+            }
+        }
+        KubeCommand::Pin { cluster, all } => {
+            let pins = kube_pin::run(api, &cluster.options()?, all).await?;
+            if pins.is_empty() {
+                eprintln!("no pulled images yet");
+            }
+            for p in pins {
+                println!("{p}");
+            }
+        }
+        KubeCommand::Cp {
+            cluster,
+            src,
+            dst,
+            namespace,
+            container,
+        } => {
+            println!(
+                "{}",
+                kube_cp::run(
+                    api,
+                    &cluster.options()?,
+                    &src,
+                    &dst,
+                    &namespace,
+                    container.as_deref()
+                )
+                .await?
+            );
+        }
         KubeCommand::Logs {
             cluster,
             target,
@@ -8306,8 +8386,8 @@ async fn kube_command<A: run::VmApi>(api: &A, command: KubeCommand) -> Result<()
         KubeCommand::Trust { install } => {
             println!("{}", kube_tls::trust(install)?);
         }
-        KubeCommand::Start { cluster, file } => {
-            kube_project::start(api, cluster.options()?, &file).await?;
+        KubeCommand::Start { cluster, file, yes } => {
+            kube_project::start(api, cluster.options()?, &file, yes).await?;
         }
         KubeCommand::Ps(cluster) => {
             let snapshot = kube_ps::gather(api, &cluster.options()?).await?;
