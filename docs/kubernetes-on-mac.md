@@ -39,6 +39,7 @@ and `*.localhost` names, and the loop from a saved file to a running pod takes a
 | start, checkpoint and undo from Raycast | `integrations/raycast` | [Raycast](#raycast-alfred-and-shortcuts) |
 | know what is wrong | `kube doctor`, and a notification from `kube supervise` | [`kube doctor`](#when-something-is-wrong-kube-doctor), [Notifications](#a-notification-when-a-pod-breaks) |
 | keep it all running | `kube supervise`, `kube agent install` | [Keep it running](#keep-it-running) |
+| have the cluster follow my git branch | `kube git install` | [`kube git`](#the-cluster-follows-your-branch-kube-git) |
 | let pods call a program on my Mac | `kube host NAME PORT` | [`kube host`](#call-your-mac-from-a-pod-kube-host) |
 | run an image that is only built for Intel | `kube up --rosetta` | [Intel-only images](#intel-only-images---rosetta) |
 | work without internet | `kube fetch DIR`, `kube up --offline DIR` | [Without internet](#without-internet-on-first-boot) |
@@ -583,6 +584,34 @@ chmod +x ~/Library/Application\ Support/xbar/plugins/fluxvm-kube.30s.sh
 
 The `30s` in the file name is the refresh interval. FluxVM ships no menu-bar app of its own; this needs SwiftBar or xbar, which are
 separate programs.
+
+## The cluster follows your branch: `kube git`
+
+```bash
+cd ~/code/shop
+fluxctl kube git install        # puts a post-checkout hook in this repository
+git checkout -b add-orders      # the new branch starts from the cluster as it is now
+# ... migrate the database, deploy, try things ...
+git checkout main               # saves the cluster for add-orders, puts back the one for main
+git checkout add-orders         # and back again
+```
+
+A checkpoint is a whole-machine snapshot, so each branch keeps its own databases, migrations and deployed state. On a branch checkout the hook
+saves the cluster as the checkpoint `git-BRANCH` for the branch you leave and restores the one for the branch you enter, which takes about as
+long as `kube restore` (8 to 13 s on a 2 vCPU cluster). A branch with no checkpoint yet starts as a copy of where you were, as a new git branch
+starts from the commit you were on. A branch name with a slash or capitals gets a short hash in its checkpoint label, so `feature/x` and
+`feature-x` stay apart; `kube checkpoints` lists them.
+
+It only touches a cluster that is running and awake, never a detached HEAD or a file checkout, and a problem with the cluster is printed but
+never makes `git checkout` fail. The cluster remembers which branch its state belongs to per repository, so a checkout while the cluster was
+stopped does not mislabel anything. `kube git status` shows the hook, that record and the saved branches; `kube git uninstall` removes the hook
+(a `post-checkout` hook you wrote yourself is never replaced without `--force`).
+
+Limits: single-node clusters only (the same as checkpoints), and each saved branch takes disk, so remove old ones with `kube checkpoint-rm git-BRANCH`.
+Two working copies of one repository share the cluster but are tracked separately, so do not switch both at once.
+
+Status: the branch-name labels, the save/restore plan, the state file and the hook script are unit-tested. Not run: the hook in a real repository
+against a real cluster, so the 10 s switch and a restore that fails halfway are untested.
 
 ## Call your Mac from a pod: `kube host`
 
