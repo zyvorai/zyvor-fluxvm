@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- `fluxctl kube up --rosetta`: gives the cluster VM the Mac's Rosetta and registers it for x86-64 programs at every boot, so amd64 binaries in containers run instead of failing with `exec format error`. Unit-tested only; not yet run on a real cluster with an amd64-only image.
 - `fluxctl kube share SERVICE`: opens a service to a phone or computer on the same Wi-Fi, with a QR code, a time limit and a private-network-only filter.
 - `fluxctl kube prompt`: a one-line cluster status for the shell prompt (starship, zsh, bash, fish), read from a file `kube supervise` keeps current; `supervise` now checks the pods even with `--no-notify`.
 - `integrations/raycast`: script commands for start, checkpoint, undo, sleep, wake, status, doctor and share (also usable from Alfred and Shortcuts).

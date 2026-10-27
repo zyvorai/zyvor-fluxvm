@@ -39,6 +39,7 @@ and `*.localhost` names, and the loop from a saved file to a running pod takes a
 | start, checkpoint and undo from Raycast | `integrations/raycast` | [Raycast](#raycast-alfred-and-shortcuts) |
 | know what is wrong | `kube doctor`, and a notification from `kube supervise` | [`kube doctor`](#when-something-is-wrong-kube-doctor), [Notifications](#a-notification-when-a-pod-breaks) |
 | keep it all running | `kube supervise`, `kube agent install` | [Keep it running](#keep-it-running) |
+| run an image that is only built for Intel | `kube up --rosetta` | [Intel-only images](#intel-only-images---rosetta) |
 | work without internet | `kube fetch DIR`, `kube up --offline DIR` | [Without internet](#without-internet-on-first-boot) |
 
 Most sections say what was proved on a real cluster and what was not; read those lines before relying on a feature.
@@ -74,6 +75,7 @@ fluxctl kube down --purge                        # delete the VM, the cluster's 
 | `--traefik` | Keep k3s's bundled Traefik ingress (off by default). |
 | `--workers N` | Add N agent nodes (0 to 8), each its own VM named `NAME-w1`… and joined to the server. See [More than one node](#more-than-one-node). |
 | `--offline DIR` | Install k3s from a folder made by `fluxctl kube fetch` instead of the internet. See [Without internet](#without-internet-on-first-boot). |
+| `--rosetta` | Run `linux/amd64` binaries through the Mac's Rosetta. See [Intel-only images](#intel-only-images---rosetta). Fixed at creation. |
 | `--kubeconfig` | Where to write the kubeconfig (default `~/.kube/fluxvm-NAME.yaml`). |
 
 Options marked "fixed at creation" are baked into the VM's first boot. To change one, `down --purge` and `up` again.
@@ -238,6 +240,20 @@ kubectl run app --image=app:dev --image-pull-policy=Never --restart=Never
 Give loaded images a tag other than `:latest` (Kubernetes pulls `:latest` again by default) or set `imagePullPolicy: IfNotPresent` or
 `Never`. `fluxctl kube load --archive app.tar` imports an existing `docker save` archive instead. Image names may contain letters,
 digits and `. _ / : @ -` only.
+
+### Intel-only images: `--rosetta`
+
+The cluster's VM is arm64, so a program built only for Intel fails with `exec format error`. `fluxctl kube up --rosetta` gives the VM the
+Mac's Rosetta and registers it for x86-64 programs at every boot, before k3s starts, so an amd64 binary inside a container runs.
+It needs Rosetta installed on the Mac (`fluxvm-vz-runner install-rosetta`; `fluxctl vz doctor` checks) and, like the VM's size, is
+fixed when the VM is created. `kube agent install` keeps the flag.
+
+What this does and does not cover: it lets amd64 *programs* run. Kubernetes still pulls the image that matches the node, and an image
+published only for amd64 has no arm64 entry, so the pull itself may be refused before Rosetta is involved. Whether and how that works
+on this k3s is not yet proved (see the status line below); until it is, load such an image with `kube load` or build a multi-arch one.
+
+Status: the VM request, the boot-time unit and the flag are unit-tested. Not run: a real cluster with an amd64-only image, so no
+speed figure is given.
 
 ## Without internet on first boot
 

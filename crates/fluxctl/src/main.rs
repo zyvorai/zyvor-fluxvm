@@ -314,6 +314,10 @@ struct KubeArgs {
     /// current only if you have none), so plain `kubectl` works; `down --purge` takes it out again.
     #[arg(long)]
     no_merge_kubeconfig: bool,
+    /// Run `linux/amd64` images through the Mac's Rosetta, so an image published only for Intel starts instead of failing
+    /// with `exec format error`. Needs Rosetta installed on this Mac. Only applies when a VM is created.
+    #[arg(long)]
+    rosetta: bool,
 }
 
 impl KubeArgs {
@@ -341,6 +345,7 @@ impl KubeArgs {
             cni,
             cilium_version: self.cilium_version.clone(),
             no_merge: self.no_merge_kubeconfig,
+            rosetta: self.rosetta,
         })
     }
 }
