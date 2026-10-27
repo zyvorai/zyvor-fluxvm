@@ -150,16 +150,123 @@ pub fn manifest_files(base: &Path, entries: &[PathBuf]) -> Result<Vec<PathBuf>> 
     Ok(out)
 }
 
-pub async fn start<A: VmApi>(api: &A, base: KubeOptions, file: &Path) -> Result<()> {
-    let text = std::fs::read_to_string(file)
-        .with_context(|| format!("reading {} (create it, or pass --file)", file.display()))?;
+/// A project file given as an address, not a path.
+pub fn is_url(s: &str) -> bool {
+    s.starts_with("https://") || s.starts_with("http://")
+}
+
+/// Most a fetched project file or manifest may weigh, and how many manifests a remote project may list.
+const MAX_REMOTE_BYTES: usize = 1 << 20;
+const MAX_REMOTE_MANIFESTS: usize = 30;
+
+/// `manifest` (a relative path from a project file) resolved against the project's own address. Only `https`, only
+/// plain `.yaml`/`.yml` files: a remote project cannot list a folder, and nothing it names may leave its directory.
+pub fn join_url(project_url: &str, manifest: &Path) -> Result<String> {
+    if !project_url.starts_with("https://") {
+        bail!("a project is fetched over https only, not {project_url:?}");
+    }
+    let m = manifest.to_string_lossy();
+    let yaml = m.ends_with(".yaml") || m.ends_with(".yml");
+    if !yaml {
+        bail!("{m:?}: a project fetched from an address lists each manifest as a .yaml or .yml file, not a folder");
+    }
+    if m.contains(['\\', '?', '#', '%']) || m.starts_with('/') || m.split('/').any(|c| c == ".." || c.is_empty()) {
+        bail!("manifest {m:?} must be a plain relative path inside the project");
+    }
+    let base = project_url.split(['?', '#']).next().unwrap_or(project_url);
+    let dir = base.rsplit_once('/').map_or(base, |(d, _)| d);
+    Ok(format!("{dir}/{m}"))
+}
+
+async fn fetch_text(url: &str) -> Result<String> {
+    // Redirects are followed only to https, so a fetch cannot be bounced onto plain http.
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(20))
+        .redirect(reqwest::redirect::Policy::custom(|a| {
+            if a.url().scheme() == "https" && a.previous().len() < 4 {
+                a.follow()
+            } else {
+                a.stop()
+            }
+        }))
+        .build()?;
+    let resp = client.get(url).send().await.with_context(|| format!("fetching {url}"))?;
+    if !resp.status().is_success() {
+        bail!("{url}: {}", resp.status());
+    }
+    let bytes = resp.bytes().await.with_context(|| format!("reading {url}"))?;
+    if bytes.len() > MAX_REMOTE_BYTES {
+        bail!("{url} is larger than {} KiB", MAX_REMOTE_BYTES >> 10);
+    }
+    String::from_utf8(bytes.to_vec()).with_context(|| format!("{url} is not text"))
+}
+
+/// What a project will do, in words, for the confirmation a remote project needs.
+pub fn summary(p: &Project, manifests: &[String]) -> String {
+    let mut lines = vec![format!(
+        "cluster {}{}",
+        p.name.as_deref().unwrap_or("(from --name)"),
+        if p.traefik == Some(true) { " with Traefik" } else { "" }
+    )];
+    if !p.images.is_empty() {
+        lines.push(format!("copy images from this Mac's Docker: {}", p.images.join(", ")));
+    }
+    if !p.apps.is_empty() {
+        lines.push(format!("add apps: {}", p.apps.join(", ")));
+    }
+    for m in manifests {
+        lines.push(format!("apply {m}"));
+    }
+    for f in &p.forwards {
+        lines.push(format!("open a port on this Mac for {}/{}", f.namespace, f.service));
+    }
+    lines.join("\n  ")
+}
+
+/// Everything `start` will apply, read before the first slow step: (label, YAML).
+async fn load_project(file: &str, yes: bool) -> Result<(Project, Vec<(String, String)>)> {
+    if is_url(file) {
+        let project = parse(&fetch_text(file).await?)?;
+        if project.manifests.len() > MAX_REMOTE_MANIFESTS {
+            bail!("a remote project may list at most {MAX_REMOTE_MANIFESTS} manifests");
+        }
+        let urls = project
+            .manifests
+            .iter()
+            .map(|m| join_url(file, m))
+            .collect::<Result<Vec<_>>>()?;
+        if !yes {
+            bail!(
+                "{file} would do this on your Mac and in the cluster:\n  {}\nOnly run projects you trust. Add --yes to go ahead.",
+                summary(&project, &urls)
+            );
+        }
+        let mut docs = vec![];
+        for u in urls {
+            let yaml = fetch_text(&u).await?;
+            docs.push((u, yaml));
+        }
+        return Ok((project, docs));
+    }
+    let path = Path::new(file);
+    let text = std::fs::read_to_string(path)
+        .with_context(|| format!("reading {file} (create it, or pass --file)"))?;
     let project = parse(&text)?;
-    let dir = file
+    let dir = path
         .parent()
         .filter(|d| !d.as_os_str().is_empty())
         .unwrap_or(Path::new("."));
-    // Check everything that can be checked before the first slow step.
-    let manifests = manifest_files(dir, &project.manifests)?;
+    let mut docs = vec![];
+    for m in manifest_files(dir, &project.manifests)? {
+        let yaml = std::fs::read_to_string(&m).with_context(|| format!("reading {}", m.display()))?;
+        docs.push((m.display().to_string(), yaml));
+    }
+    Ok((project, docs))
+}
+
+pub async fn start<A: VmApi>(api: &A, base: KubeOptions, file: &str, yes: bool) -> Result<()> {
+    // Check and read everything that can be before the first slow step.
+    let (project, manifests) = load_project(file, yes).await?;
     let o = apply_to(&project, base);
 
     let kubeconfig = kube_host::up(api, &o).await?;
@@ -173,13 +280,11 @@ pub async fn start<A: VmApi>(api: &A, base: KubeOptions, file: &Path) -> Result<
         let app = App::from_str(name, true).expect("checked in parse");
         eprintln!("{}", crate::kube_apps::add(api, &o, app).await?);
     }
-    for m in &manifests {
-        let yaml =
-            std::fs::read_to_string(m).with_context(|| format!("reading {}", m.display()))?;
-        kube_host::guest_apply(api, &o, &yaml)
+    for (label, yaml) in &manifests {
+        kube_host::guest_apply(api, &o, yaml)
             .await
-            .with_context(|| format!("applying {}", m.display()))?;
-        eprintln!("applied {}", m.display());
+            .with_context(|| format!("applying {label}"))?;
+        eprintln!("applied {label}");
     }
     for f in &project.forwards {
         eprintln!(
@@ -291,5 +396,34 @@ forwards:
                 .contains("does not exist")
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_project_address_is_told_from_a_path() {
+        assert!(is_url("https://example.com/p.yaml"));
+        assert!(is_url("http://example.com/p.yaml"));
+        assert!(!is_url("fluxvm-kube.yaml") && !is_url("./https://x"));
+    }
+
+    #[test]
+    fn remote_manifests_resolve_beside_the_project_and_stay_inside_it() {
+        let base = "https://raw.example.com/acme/shop/main/fluxvm-kube.yaml?token=1";
+        assert_eq!(
+            join_url(base, Path::new("k8s/web.yaml")).unwrap(),
+            "https://raw.example.com/acme/shop/main/k8s/web.yaml"
+        );
+        assert!(join_url("http://x/p.yaml", Path::new("a.yaml")).is_err(), "plain http");
+        for bad in ["k8s/", "k8s", "../a.yaml", "/a.yaml", "a//b.yaml", "a.yaml?x=1", "a%2e.yaml", "a#b.yaml", "a\\b.yaml", "a.txt"] {
+            assert!(join_url("https://x.dev/p.yaml", Path::new(bad)).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn the_confirmation_names_every_effect() {
+        let p = parse("name: shop\ntraefik: true\nimages: [app:dev]\napps: [postgres]\nforwards: [{service: web}]\n").unwrap();
+        let s = summary(&p, &["https://x.dev/k8s/web.yaml".into()]);
+        for want in ["shop with Traefik", "app:dev", "add apps: postgres", "apply https://x.dev/k8s/web.yaml", "default/web"] {
+            assert!(s.contains(want), "{want} in {s}");
+        }
     }
 }

@@ -33,9 +33,19 @@ pub enum App {
     Meilisearch,
     /// ClickHouse: HTTP on http://localhost:8123, native protocol on localhost:9000 (user default, password dev).
     Clickhouse,
+    /// Keycloak identity server in dev mode on http://localhost:8180 (admin / admin). Needs about 1 GiB of VM memory.
+    Keycloak,
+    /// MinIO, S3-compatible storage: S3 API on http://localhost:9010, console on http://localhost:9001 (minioadmin / minioadmin).
+    Minio,
+    /// HashiCorp Vault in dev mode on http://localhost:8200 (root token dev). Secrets live in memory only.
+    Vault,
+    /// Jaeger tracing: UI on http://localhost:16686, OTLP on localhost:4317 (gRPC) and localhost:4318 (HTTP).
+    Jaeger,
+    /// Temporal dev server: gRPC on localhost:7233, web UI on http://localhost:8233.
+    Temporal,
 }
 
-pub const ALL: [App; 12] = [
+pub const ALL: [App; 17] = [
     App::Postgres,
     App::Redis,
     App::Mysql,
@@ -48,6 +58,11 @@ pub const ALL: [App; 12] = [
     App::Qdrant,
     App::Meilisearch,
     App::Clickhouse,
+    App::Keycloak,
+    App::Minio,
+    App::Vault,
+    App::Jaeger,
+    App::Temporal,
 ];
 
 struct Port {
@@ -81,6 +96,11 @@ impl App {
             App::Qdrant => "qdrant",
             App::Meilisearch => "meilisearch",
             App::Clickhouse => "clickhouse",
+            App::Keycloak => "keycloak",
+            App::Minio => "minio",
+            App::Vault => "vault",
+            App::Jaeger => "jaeger",
+            App::Temporal => "temporal",
         }
     }
 
@@ -325,6 +345,117 @@ impl App {
                 ],
                 volume: Some(("/var/lib/clickhouse", "2Gi")),
             },
+            // Starts the dev server (H2 file database); the first start takes a minute.
+            App::Keycloak => Spec {
+                image: "quay.io/keycloak/keycloak:26.0",
+                env: &[
+                    ("KC_BOOTSTRAP_ADMIN_USERNAME", "admin"),
+                    ("KC_BOOTSTRAP_ADMIN_PASSWORD", "admin"),
+                ],
+                args: &["start-dev"],
+                ports: &[Port {
+                    name: "http",
+                    container: 8080,
+                    node: 30818,
+                    local: 8180,
+                }],
+                volume: Some(("/opt/keycloak/data", "1Gi")),
+            },
+            // The console has the lower node port, so `http://minio.localhost` opens it.
+            App::Minio => Spec {
+                image: "quay.io/minio/minio:RELEASE.2024-12-18T13-15-44Z",
+                env: &[
+                    ("MINIO_ROOT_USER", "minioadmin"),
+                    ("MINIO_ROOT_PASSWORD", "minioadmin"),
+                ],
+                args: &["server", "/data", "--console-address", ":9001"],
+                ports: &[
+                    Port {
+                        name: "console",
+                        container: 9001,
+                        node: 30901,
+                        local: 9001,
+                    },
+                    Port {
+                        name: "s3",
+                        container: 9000,
+                        node: 30910,
+                        local: 9010,
+                    },
+                ],
+                volume: Some(("/data", "2Gi")),
+            },
+            // Dev mode keeps everything in memory and starts unsealed with a fixed root token.
+            App::Vault => Spec {
+                image: "docker.io/hashicorp/vault:1.18",
+                env: &[
+                    ("VAULT_DEV_ROOT_TOKEN_ID", "dev"),
+                    ("VAULT_DEV_LISTEN_ADDRESS", "0.0.0.0:8200"),
+                ],
+                args: &["server", "-dev"],
+                ports: &[Port {
+                    name: "http",
+                    container: 8200,
+                    node: 30820,
+                    local: 8200,
+                }],
+                volume: None,
+            },
+            // The UI has the lowest node port, so `http://jaeger.localhost` opens it. Traces are kept in memory.
+            App::Jaeger => Spec {
+                image: "docker.io/jaegertracing/all-in-one:1.64.0",
+                env: &[("COLLECTOR_OTLP_ENABLED", "true")],
+                args: &[],
+                ports: &[
+                    Port {
+                        name: "ui",
+                        container: 16686,
+                        node: 30686,
+                        local: 16686,
+                    },
+                    Port {
+                        name: "otlp-grpc",
+                        container: 4317,
+                        node: 31431,
+                        local: 4317,
+                    },
+                    Port {
+                        name: "otlp-http",
+                        container: 4318,
+                        node: 31418,
+                        local: 4318,
+                    },
+                ],
+                volume: None,
+            },
+            // The web UI has the lower node port, so `http://temporal.localhost` opens it.
+            App::Temporal => Spec {
+                image: "docker.io/temporalio/temporal:latest",
+                env: &[],
+                args: &[
+                    "server",
+                    "start-dev",
+                    "--ip",
+                    "0.0.0.0",
+                    "--db-filename",
+                    "/data/temporal.db",
+                ],
+                ports: &[
+                    Port {
+                        name: "ui",
+                        container: 8233,
+                        node: 30233,
+                        local: 8233,
+                    },
+                    Port {
+                        name: "grpc",
+                        container: 7233,
+                        node: 30723,
+                        local: 7233,
+                    },
+                ],
+                volume: Some(("/data", "1Gi")),
+            },
         }
     }
 
@@ -430,6 +561,47 @@ impl App {
                     "cli",
                     "clickhouse-client --host 127.0.0.1 --port 9000 --password dev".into(),
                 ),
+            ],
+            App::Keycloak => vec![
+                (
+                    "ui",
+                    "http://127.0.0.1:8180 or http://keycloak.localhost".into(),
+                ),
+                ("login", "admin / admin".into()),
+            ],
+            App::Minio => vec![
+                (
+                    "console",
+                    "http://127.0.0.1:9001 or http://minio.localhost (minioadmin / minioadmin)".into(),
+                ),
+                ("s3", "http://127.0.0.1:9010 (path-style addressing)".into()),
+            ],
+            App::Vault => vec![
+                (
+                    "ui",
+                    "http://127.0.0.1:8200 or http://vault.localhost".into(),
+                ),
+                (
+                    "cli",
+                    "VAULT_ADDR=http://127.0.0.1:8200 VAULT_TOKEN=dev vault status".into(),
+                ),
+            ],
+            App::Jaeger => vec![
+                (
+                    "ui",
+                    "http://127.0.0.1:16686 or http://jaeger.localhost".into(),
+                ),
+                (
+                    "otlp",
+                    "grpc 127.0.0.1:4317, http http://127.0.0.1:4318".into(),
+                ),
+            ],
+            App::Temporal => vec![
+                (
+                    "ui",
+                    "http://127.0.0.1:8233 or http://temporal.localhost".into(),
+                ),
+                ("grpc", "127.0.0.1:7233".into()),
             ],
         }
     }
