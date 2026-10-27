@@ -3,7 +3,7 @@
 
 [package]
 name = "fluxvm-scheduler"
-version = "0.4.15"
+version = "0.4.16"
 edition = "2024"
 license = "Apache-2.0"
 description = "VM lifecycle orchestration (VmManager) for Zyvor FluxVM"
