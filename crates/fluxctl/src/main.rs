@@ -51,10 +51,10 @@ mod kube_menubar;
 mod kube_names;
 mod kube_notify;
 mod kube_pin;
-mod kube_prompt;
 mod kube_project;
-mod kube_share;
+mod kube_prompt;
 mod kube_ps;
+mod kube_share;
 mod kube_sync;
 mod kube_tls;
 mod launch_agent;
@@ -5986,11 +5986,12 @@ async fn main() -> Result<()> {
 
     // `kube prompt` runs on every shell prompt: no daemon, no VmManager, nothing slow.
     if let Command::Kube {
-        command: KubeCommand::Prompt {
-            name,
-            plain,
-            snippet,
-        },
+        command:
+            KubeCommand::Prompt {
+                name,
+                plain,
+                snippet,
+            },
     } = &cli.command
     {
         if let Some(shell) = snippet {

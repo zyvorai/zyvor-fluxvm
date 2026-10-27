@@ -76,7 +76,10 @@ pub fn pick(items: &[Value], query: &str) -> Result<Target> {
         }
         many => bail!(
             "{query} is in several namespaces ({}); say which, for example {}",
-            many.iter().map(|s| describe(s)).collect::<Vec<_>>().join(", "),
+            many.iter()
+                .map(|s| describe(s))
+                .collect::<Vec<_>>()
+                .join(", "),
             describe(many[0])
         ),
     }
@@ -141,7 +144,8 @@ fn addresses() -> Vec<String> {
 
 /// The QR code for `text` drawn with half-block characters (two modules per text row), with the quiet zone around it.
 pub fn qr(text: &str) -> Result<String> {
-    let code = qrcode::QrCode::new(text.as_bytes()).context("the address is too long for a QR code")?;
+    let code =
+        qrcode::QrCode::new(text.as_bytes()).context("the address is too long for a QR code")?;
     Ok(code
         .render::<qrcode::render::unicode::Dense1x2>()
         .quiet_zone(true)
@@ -320,7 +324,9 @@ mod tests {
         let task = tokio::spawn(relay(shared, service_port, async {
             let _ = stop_rx.await;
         }));
-        let mut c = TcpStream::connect(("127.0.0.1", shared_port)).await.unwrap();
+        let mut c = TcpStream::connect(("127.0.0.1", shared_port))
+            .await
+            .unwrap();
         c.write_all(b"ping").await.unwrap();
         let mut reply = [0u8; 4];
         c.read_exact(&mut reply).await.unwrap();

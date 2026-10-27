@@ -124,7 +124,11 @@ mod tests {
 
     #[test]
     fn the_supervisor_writes_what_the_prompt_reads() {
-        let rows = vec![row("Running", 0), row("Running", 0), row("CrashLoopBackOff", 7)];
+        let rows = vec![
+            row("Running", 0),
+            row("Running", 0),
+            row("CrashLoopBackOff", 7),
+        ];
         let text = encode(State::Running, &rows, 1000);
         assert_eq!(text, "running 2 3 1 1000\n");
         assert_eq!(
@@ -157,7 +161,10 @@ mod tests {
         assert_eq!(line(&s(State::Asleep, 0, 0, 0), false), "⎈ dev 💤");
         assert_eq!(line(&s(State::Down, 0, 0, 0), false), "⎈ dev down");
         assert_eq!(line(&s(State::Asleep, 0, 0, 0), true), "k8s dev asleep");
-        assert_eq!(line(&s(State::Running, 10, 12, 2), true), "k8s dev 10/12 !2");
+        assert_eq!(
+            line(&s(State::Running, 10, 12, 2), true),
+            "k8s dev 10/12 !2"
+        );
     }
 
     #[test]

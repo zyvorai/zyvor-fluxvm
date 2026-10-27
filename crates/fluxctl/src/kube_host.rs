@@ -264,7 +264,11 @@ pub(crate) fn prompt_file(name: &str) -> PathBuf {
 }
 
 /// Records the cluster's state for `kube prompt`; a failure to write it is not worth stopping the supervisor for.
-fn write_prompt(o: &KubeOptions, state: crate::kube_prompt::State, rows: &[crate::kube_doctor::PodRow]) {
+fn write_prompt(
+    o: &KubeOptions,
+    state: crate::kube_prompt::State,
+    rows: &[crate::kube_doctor::PodRow],
+) {
     let _ = write_private(
         &prompt_file(&o.name),
         &crate::kube_prompt::encode(state, rows, crate::kube_prompt::now()),

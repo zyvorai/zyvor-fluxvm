@@ -647,7 +647,11 @@ mod tests {
         ];
         assert_eq!(
             plan(&checks),
-            vec![Remedy::PruneImages, Remedy::RestartResolver, Remedy::StepClock]
+            vec![
+                Remedy::PruneImages,
+                Remedy::RestartResolver,
+                Remedy::StepClock
+            ]
         );
         assert!(plan(&[guest_disk(Some(10)), clock(Some(0))]).is_empty());
         let pod = pods(&parse_pods("default a 0/1 CrashLoopBackOff 7 9m\n"));
@@ -668,7 +672,11 @@ mod tests {
     #[test]
     fn repair_scripts_touch_only_what_they_name() {
         assert_eq!(Remedy::PruneImages.script(0), "sudo k3s crictl rmi --prune");
-        assert!(Remedy::RestartResolver.script(0).contains("systemd-resolved"));
+        assert!(
+            Remedy::RestartResolver
+                .script(0)
+                .contains("systemd-resolved")
+        );
         let clock = Remedy::StepClock.script(1_700_000_000);
         assert!(clock.contains("chronyc makestep") && clock.contains("@1700000000"));
     }
