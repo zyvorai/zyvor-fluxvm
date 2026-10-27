@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- `fluxctl mcp serve` offers the cluster as MCP tools: `kube_status`, `kube_doctor`, `kube_checkpoints`, `kube_diff`, `kube_timeline`, and (with `--allow-write`) `kube_apply` (checkpoint, apply, report the diff), `kube_checkpoint`, `kube_restore` and `kube_undo`, so an AI agent's change to the cluster can be undone. Unit-tested only.
+- `fluxctl kube trust --simulator`: trusts the local CA in the booted iOS/iPadOS simulators (`xcrun simctl keychain booted add-root-cert`), so HTTPS to `*.localhost` works there. Unit-tested only.
+- `fluxctl kube doctor` checks whether Time Machine backs up, or Spotlight indexes, the VM folder, and `--fix` excludes it.
+- `fluxctl kube supervise --active 09:00-19:00 --weekdays --eco`: sleeps the cluster outside working hours (and wakes it when they begin), and while the Mac is in Low Power Mode or throttling for heat. Unit-tested only.
 - `fluxctl kube diff [A] [B]` and `kube timeline`: every checkpoint now records an inventory of the cluster's workloads, services, config and namespaces (images, replicas, a spec hash; secret values are only hashed), so what changed between two checkpoints, or since one, is shown without starting anything. Unit-tested only; not yet run on a real cluster.
 - `fluxctl kube git install`: the cluster follows your git branch. A `post-checkout` hook saves the cluster as a checkpoint for the branch you leave and restores the one for the branch you enter (a new branch starts from the current cluster). Unit-tested only; not yet run against a real repository and cluster.
 - `fluxctl kube host NAME PORT`: makes a program on the Mac a Service in the cluster, so pods can call it by name (a model server, Postgres.app, a dev server). A relay on the VM's gateway address, limited to the VM's network, forwards to the Mac's loopback until Ctrl-C. Unit-tested only; not yet run on a real cluster.

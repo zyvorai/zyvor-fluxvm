@@ -135,6 +135,29 @@ pub fn trust_command(ca_path: &std::path::Path) -> String {
     )
 }
 
+/// The arguments that add the CA to every booted iOS, iPadOS, watchOS or tvOS simulator's trust store (`xcrun simctl`).
+pub fn simulator_args(ca_path: &std::path::Path) -> Vec<String> {
+    ["simctl", "keychain", "booted", "add-root-cert"]
+        .iter()
+        .map(|s| (*s).to_owned())
+        .chain([ca_path.display().to_string()])
+        .collect()
+}
+
+/// A plain-language reason for a failed `simctl`, from its error output.
+pub fn simulator_failure(stderr: &str) -> String {
+    let e = stderr.trim();
+    if e.contains("No devices are booted") || e.contains("Unable to find a device") {
+        "no simulator is booted: start one in Xcode (or `xcrun simctl boot DEVICE`), then run this again".to_owned()
+    } else if e.contains("unable to find utility") || e.contains("xcrun: error") {
+        "Xcode's command line tools are not installed or selected (`xcode-select --install`)".to_owned()
+    } else if e.is_empty() {
+        "xcrun simctl failed".to_owned()
+    } else {
+        format!("xcrun simctl failed: {e}")
+    }
+}
+
 /// Only these names get a certificate; the resolver never signs for an arbitrary host a client asks for.
 pub fn name_allowed(host: &str) -> bool {
     let h = host.to_ascii_lowercase();
@@ -228,11 +251,25 @@ pub fn acceptor() -> Option<tokio_rustls::TlsAcceptor> {
 }
 
 /// `fluxctl kube trust`: make the CA and say how to trust it.
-pub fn trust(install: bool) -> Result<String> {
+pub fn trust(install: bool, simulator: bool) -> Result<String> {
     let ca = ensure_ca()?;
     let path = ca_dir()?.join("ca.pem");
     let cmd = trust_command(&path);
     let fp = fingerprint(&ca.cert_pem).unwrap_or_default();
+    if simulator {
+        // Only the simulators' own trust stores change, never this Mac's, so no password is asked for.
+        let out = std::process::Command::new("xcrun")
+            .args(simulator_args(&path))
+            .output()
+            .context("running xcrun (are Xcode's command line tools installed?)")?;
+        if !out.status.success() {
+            anyhow::bail!(simulator_failure(&String::from_utf8_lossy(&out.stderr)));
+        }
+        return Ok(format!(
+            "trusted {} ({fp}) in the booted simulators. Their Safari and apps now accept https://<service>.localhost; the simulator shares this Mac's localhost, so no address changes are needed.",
+            path.display()
+        ));
+    }
     if install {
         let status = std::process::Command::new("sh")
             .args(["-c", &cmd])
@@ -256,6 +293,23 @@ pub fn trust(install: bool) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_simulator_command_adds_the_ca_to_the_booted_devices() {
+        let a = simulator_args(std::path::Path::new("/Users/me/.fluxvm/ca.pem"));
+        assert_eq!(
+            a,
+            ["simctl", "keychain", "booted", "add-root-cert", "/Users/me/.fluxvm/ca.pem"]
+        );
+    }
+
+    #[test]
+    fn a_failed_simctl_is_explained() {
+        assert!(simulator_failure("Unable to find a device matching the provided UDID").contains("no simulator is booted"));
+        assert!(simulator_failure("xcrun: error: unable to find utility \"simctl\"").contains("xcode-select"));
+        assert_eq!(simulator_failure(""), "xcrun simctl failed");
+        assert_eq!(simulator_failure("boom\n"), "xcrun simctl failed: boom");
+    }
 
     #[test]
     fn only_localhost_names_get_a_certificate() {

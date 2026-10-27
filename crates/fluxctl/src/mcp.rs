@@ -21,7 +21,7 @@ pub const LATEST_PROTOCOL_VERSION: &str = "2025-06-18";
 const SUPPORTED_VERSIONS: &[&str] = &["2024-11-05", "2025-03-26", LATEST_PROTOCOL_VERSION];
 /// Cap on one tool result, so a call cannot flood the model's context.
 pub const MAX_OUTPUT: usize = 64 * 1024;
-const CALL_TIMEOUT: Duration = Duration::from_secs(30);
+pub(crate) const CALL_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_LOG_LINES: u64 = 500;
 
 type ToolFuture = Pin<Box<dyn Future<Output = Result<Reply>> + Send>>;
@@ -261,7 +261,7 @@ fn check_args(schema: &Value, args: &Value) -> Result<()> {
     Ok(())
 }
 
-fn object(props: Value, required: &[&str]) -> Value {
+pub(crate) fn object(props: Value, required: &[&str]) -> Value {
     let mut s = json!({"type": "object", "properties": props, "additionalProperties": false});
     if !required.is_empty() {
         s["required"] = json!(required);
@@ -269,11 +269,11 @@ fn object(props: Value, required: &[&str]) -> Value {
     s
 }
 
-fn pretty(v: &Value) -> Result<String> {
+pub(crate) fn pretty(v: &Value) -> Result<String> {
     Ok(serde_json::to_string_pretty(v)?)
 }
 
-fn str_arg<'a>(args: &'a Value, key: &str) -> Option<&'a str> {
+pub(crate) fn str_arg<'a>(args: &'a Value, key: &str) -> Option<&'a str> {
     args.get(key)
         .and_then(Value::as_str)
         .filter(|s| !s.is_empty())
@@ -353,7 +353,7 @@ const NETWORK_KINDS: &[&str] = &[
 ];
 const POWER_OPS: &[&str] = &["start", "stop", "pause", "resume", "restart"];
 
-fn tool<F, Fut, T>(
+pub(crate) fn tool<F, Fut, T>(
     name: &'static str,
     description: &'static str,
     schema: Value,
@@ -381,7 +381,7 @@ where
     }
 }
 
-async fn timed<T>(d: Duration, fut: impl Future<Output = Result<T>>) -> Result<T> {
+pub(crate) async fn timed<T>(d: Duration, fut: impl Future<Output = Result<T>>) -> Result<T> {
     tokio::time::timeout(d, fut)
         .await
         .map_err(|_| anyhow!("timed out after {}s", d.as_secs()))?
@@ -2700,7 +2700,9 @@ fn png_size(png: &[u8]) -> Option<(u32, u32)> {
 
 pub async fn serve(remote: Remote, allow_write: bool) -> Result<()> {
     let mut server = Server::new("fluxvm", env!("CARGO_PKG_VERSION"), allow_write);
-    server.add(tools(Arc::new(remote)));
+    let remote = Arc::new(remote);
+    server.add(tools(remote.clone()));
+    server.add(crate::kube_mcp::tools(remote));
     server.serve(tokio::io::stdin(), tokio::io::stdout()).await
 }
 
