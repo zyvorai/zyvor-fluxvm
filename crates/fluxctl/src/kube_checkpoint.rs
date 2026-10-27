@@ -92,6 +92,8 @@ pub async fn checkpoint<A: VmApi>(
             o.name
         );
     }
+    // What runs in the cluster, saved beside the checkpoint for `kube diff` and `kube timeline` (best effort).
+    crate::kube_diff::record(api, o, label).await;
     let started = Instant::now();
     api.snapshot(id, &tag).await?;
     Ok(format!(
@@ -163,6 +165,7 @@ pub async fn remove<A: VmApi>(api: &A, o: &kube_host::KubeOptions, label: &str) 
         bail!("{} has no checkpoint {label:?}", o.name);
     }
     api.delete_snapshot(id, &tag_of(label)).await?;
+    crate::kube_diff::forget(&o.name, label);
     Ok(format!("checkpoint {label:?} of {} removed", o.name))
 }
 
