@@ -31,12 +31,18 @@ CFLAGS=(
   "-D__TARGET_ARCH_${BPF_ARCH}"
 )
 
-# Debian/Ubuntu place asm/types.h under the GCC multiarch include path.
-if command -v gcc >/dev/null 2>&1; then
-  MULTIARCH="$(gcc -print-multiarch 2>/dev/null || true)"
-  if [[ -n "$MULTIARCH" && -d "/usr/include/$MULTIARCH" ]]; then
-    CFLAGS+=("-I/usr/include/$MULTIARCH")
-  fi
+# Debian/Ubuntu place asm/types.h under the multiarch include path of the architecture being built for. For a cross build
+# that is the target's (linux-libc-dev:arm64), never the host gcc's: x86's asm/ptrace.h has no struct user_pt_regs.
+case "$BPF_ARCH" in
+  x86) MULTIARCH=x86_64-linux-gnu ;;
+  arm64) MULTIARCH=aarch64-linux-gnu ;;
+  *) MULTIARCH="$(gcc -print-multiarch 2>/dev/null || true)" ;;
+esac
+if [[ -n "$MULTIARCH" && -d "/usr/include/$MULTIARCH" ]]; then
+  CFLAGS+=("-I/usr/include/$MULTIARCH")
+elif [[ "$BPF_ARCH" != "$(uname -m | sed 's/x86_64/x86/;s/aarch64/arm64/')" ]]; then
+  echo "build-ebpf: no /usr/include/${MULTIARCH:-<target>} for a $BPF_ARCH build (install linux-libc-dev for that architecture)" >&2
+  exit 2
 fi
 
 # Service programs exceed clang 18's default 512-byte BPF stack verifier view;
