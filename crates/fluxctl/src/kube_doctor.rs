@@ -26,6 +26,8 @@ pub enum Remedy {
     RestartResolver,
     /// Step the VM's clock to the Mac's.
     StepClock,
+    /// Keep the VM disks out of Time Machine and Spotlight. Runs on the Mac, not in the VM.
+    ExcludeFromBackup,
 }
 
 impl Remedy {
@@ -34,7 +36,13 @@ impl Remedy {
             Remedy::PruneImages => "removed images no pod uses",
             Remedy::RestartResolver => "restarted the VM's resolver",
             Remedy::StepClock => "stepped the VM's clock",
+            Remedy::ExcludeFromBackup => "excluded the VM folder from Time Machine and Spotlight",
         }
+    }
+
+    /// Whether the repair runs on the Mac instead of in the VM.
+    pub fn on_mac(self) -> bool {
+        matches!(self, Remedy::ExcludeFromBackup)
     }
 
     /// The script run in the VM. Each one is safe to run twice.
@@ -45,6 +53,7 @@ impl Remedy {
             Remedy::StepClock => format!(
                 "sudo chronyc makestep >/dev/null 2>&1 || sudo date -u -s @{mac_now} >/dev/null"
             ),
+            Remedy::ExcludeFromBackup => String::new(),
         }
     }
 }
@@ -96,6 +105,71 @@ impl Check {
 }
 
 const GIB: u64 = 1 << 30;
+
+/// Where the daemon keeps VM disks, checkpoints and images on a Mac.
+pub fn vm_folder() -> std::path::PathBuf {
+    std::path::PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/".into()))
+        .join("Library/Application Support/FluxVM")
+}
+
+/// `Some(true)` when `tmutil isexcluded` says the path is excluded from Time Machine, `Some(false)` when included.
+pub fn parse_isexcluded(out: &str) -> Option<bool> {
+    if out.contains("[Excluded]") {
+        Some(true)
+    } else if out.contains("[Included]") {
+        Some(false)
+    } else {
+        None
+    }
+}
+
+/// Whether Time Machine has a backup destination, from `tmutil destinationinfo`.
+pub fn has_destination(out: &str) -> bool {
+    out.lines().any(|l| l.trim_start().starts_with("Name"))
+}
+
+/// Time Machine and Spotlight on the VM folder: gigabytes of disk images that change all day. `excluded` is Time Machine's
+/// answer for the folder, `never_indexed` whether Spotlight has been told to skip it.
+pub fn backup(destination: bool, excluded: Option<bool>, never_indexed: bool) -> Check {
+    let mut open = vec![];
+    if destination && excluded == Some(false) {
+        open.push("Time Machine backs it up");
+    }
+    if !never_indexed {
+        open.push("Spotlight indexes it");
+    }
+    if open.is_empty() {
+        return Check::ok(
+            "Backups",
+            if destination {
+                "the VM folder is out of Time Machine and Spotlight"
+            } else {
+                "the VM folder is out of Spotlight (no Time Machine destination)"
+            },
+        );
+    }
+    Check::warn(
+        "Backups",
+        format!("the VM folder holds large disk images and {}", open.join(" and ")),
+        "fluxctl kube doctor --fix (or: tmutil addexclusion \"$HOME/Library/Application Support/FluxVM\")",
+    )
+    .fixable(Remedy::ExcludeFromBackup)
+}
+
+/// The Mac-side repair for [`Remedy::ExcludeFromBackup`].
+pub fn exclude_from_backup(dir: &std::path::Path) -> Result<()> {
+    std::fs::create_dir_all(dir)?;
+    // A sticky exclusion: it follows the folder and needs no password.
+    let out = Command::new("tmutil").arg("addexclusion").arg(dir).output()?;
+    if !out.status.success() {
+        anyhow::bail!(
+            "tmutil addexclusion failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    std::fs::write(dir.join(".metadata_never_index"), b"")?;
+    Ok(())
+}
 
 /// Free space on the Mac's disk, from `df -k <path>` output.
 pub fn parse_df_free(out: &str) -> Option<u64> {
@@ -402,7 +476,12 @@ pub async fn apply<A: VmApi>(api: &A, o: &KubeOptions, remedies: &[Remedy]) -> V
         .unwrap_or(0);
     let mut lines = vec![];
     for r in remedies {
-        match kube_host::guest_sh(api, o, &r.script(mac_now)).await {
+        let done = if r.on_mac() {
+            exclude_from_backup(&vm_folder()).map(|_| String::new())
+        } else {
+            kube_host::guest_sh(api, o, &r.script(mac_now)).await
+        };
+        match done {
             Ok(_) => lines.push(format!("fixed: {}", r.label())),
             Err(e) => lines.push(format!("could not fix ({}): {e}", r.label())),
         }
@@ -439,6 +518,15 @@ async fn run_checks<A: VmApi>(api: &A, o: &KubeOptions) -> Result<Vec<Check>> {
         "netstat",
         &["-rn", "-f", "inet"],
     ))));
+    let folder = vm_folder();
+    if folder.exists() {
+        let folder_arg = folder.display().to_string();
+        checks.push(backup(
+            has_destination(&mac_sh("tmutil", &["destinationinfo"])),
+            parse_isexcluded(&mac_sh("tmutil", &["isexcluded", &folder_arg])),
+            folder.join(".metadata_never_index").exists(),
+        ));
+    }
 
     match api.find(&o.name).await? {
         None => {
@@ -698,5 +786,41 @@ mod tests {
         assert!(text.contains("fix: "));
         assert!(failed(&checks));
         assert!(!failed(&checks[..1]));
+    }
+
+    #[test]
+    fn time_machine_answers_are_read() {
+        assert_eq!(parse_isexcluded("[Excluded]    /Users/me/Library/Application Support/FluxVM"), Some(true));
+        assert_eq!(parse_isexcluded("[Included]    /Users/me/Library/Application Support/FluxVM"), Some(false));
+        assert_eq!(parse_isexcluded(""), None);
+        assert!(has_destination("====================================================\nName          : Backup Disk\nKind          : Local\n"));
+        assert!(!has_destination("tmutil: No destinations configured.\n"));
+        assert!(!has_destination(""));
+    }
+
+    #[test]
+    fn the_vm_folder_is_flagged_only_for_what_is_actually_backed_up_or_indexed() {
+        // Backed up and indexed: warn, with the repair.
+        let c = backup(true, Some(false), false);
+        assert_eq!(c.level, Level::Warn);
+        assert!(c.detail.contains("Time Machine backs it up and Spotlight indexes it"), "{}", c.detail);
+        assert_eq!(c.remedy, Some(Remedy::ExcludeFromBackup));
+        // No Time Machine destination: only Spotlight can be wrong.
+        let c = backup(false, Some(false), false);
+        assert!(c.detail.contains("Spotlight indexes it") && !c.detail.contains("Time Machine"), "{}", c.detail);
+        // Everything excluded: fine.
+        assert_eq!(backup(true, Some(true), true).level, Level::Ok);
+        assert_eq!(backup(false, None, true).level, Level::Ok);
+        // An unknown Time Machine answer is not treated as a problem.
+        assert_eq!(backup(true, None, true).level, Level::Ok);
+    }
+
+    #[test]
+    fn the_backup_repair_runs_on_the_mac_and_is_planned_once() {
+        assert!(Remedy::ExcludeFromBackup.on_mac());
+        assert!(!Remedy::StepClock.on_mac());
+        let checks = vec![backup(true, Some(false), false), backup(true, Some(false), true)];
+        assert_eq!(plan(&checks), vec![Remedy::ExcludeFromBackup]);
+        assert!(Remedy::ExcludeFromBackup.label().contains("Time Machine"));
     }
 }

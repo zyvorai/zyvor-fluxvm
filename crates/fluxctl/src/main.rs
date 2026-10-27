@@ -50,12 +50,14 @@ mod kube_git;
 mod kube_host;
 mod kube_hostsvc;
 mod kube_logs;
+mod kube_mcp;
 mod kube_menubar;
 mod kube_names;
 mod kube_notify;
 mod kube_pin;
 mod kube_project;
 mod kube_prompt;
+mod kube_policy;
 mod kube_ps;
 mod kube_share;
 mod kube_sync;
@@ -512,6 +514,10 @@ enum KubeCommand {
         /// Run the trust command now (asks for your password).
         #[arg(long)]
         install: bool,
+        /// Trust the CA in the booted iOS/iPadOS simulators instead (`xcrun simctl keychain booted add-root-cert`). Changes
+        /// only the simulators, never this Mac, so it asks for no password.
+        #[arg(long, conflicts_with = "install")]
+        simulator: bool,
     },
     /// Open a service to your phone or another computer on this Wi-Fi: prints an address and a QR code, and closes on Ctrl-C
     /// or after `--minutes`. Only private-network addresses are let in.
@@ -8573,8 +8579,8 @@ async fn kube_command<A: run::VmApi>(api: &A, command: KubeCommand) -> Result<()
                 kube_hostsvc::run(api, &o, &name, port, &namespace).await?;
             }
         }
-        KubeCommand::Trust { install } => {
-            println!("{}", kube_tls::trust(install)?);
+        KubeCommand::Trust { install, simulator } => {
+            println!("{}", kube_tls::trust(install, simulator)?);
         }
         KubeCommand::Start { cluster, file, yes } => {
             kube_project::start(api, cluster.options()?, &file, yes).await?;
@@ -8655,6 +8661,7 @@ async fn kube_command<A: run::VmApi>(api: &A, command: KubeCommand) -> Result<()
                 (flags.sleep_on_battery, flags.sleep_on_lid_close),
                 !flags.no_names,
                 !flags.no_notify,
+                &flags.policy()?,
             )
             .await?;
         }
