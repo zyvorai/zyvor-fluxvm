@@ -45,6 +45,7 @@ mod kube_cp;
 mod kube_dev;
 mod kube_doctor;
 mod kube_forward;
+mod kube_git;
 mod kube_host;
 mod kube_hostsvc;
 mod kube_logs;
@@ -352,6 +353,31 @@ impl KubeArgs {
 }
 
 #[derive(Subcommand)]
+enum KubeGitCommand {
+    /// Install the hook in the current repository (`.git/hooks/post-checkout`).
+    Install {
+        #[command(flatten)]
+        cluster: KubeArgs,
+        /// Replace a post-checkout hook that fluxctl did not write.
+        #[arg(long)]
+        force: bool,
+    },
+    /// Remove the hook this command installed.
+    Uninstall,
+    /// What the hook does for this repository: whether it is installed, whose state the cluster holds, which branches are saved.
+    Status {
+        #[command(flatten)]
+        cluster: KubeArgs,
+    },
+    /// What the hook runs after a branch checkout. Not meant to be run by hand.
+    #[command(hide = true)]
+    Hook {
+        #[command(flatten)]
+        cluster: KubeArgs,
+    },
+}
+
+#[derive(Subcommand)]
 enum KubeCommand {
     /// Create or start a k3s cluster in a VM (a server, plus workers with --workers), publish its API server on this Mac and write a
     /// kubeconfig.
@@ -499,6 +525,12 @@ enum KubeCommand {
         /// How long to stay open (1 to 480).
         #[arg(long, default_value_t = 60)]
         minutes: u64,
+    },
+    /// The cluster follows your git branch: a `post-checkout` hook saves the cluster for the branch you leave and puts back the
+    /// one saved for the branch you enter (about 10 s), so each branch has its own databases and deployed state.
+    Git {
+        #[command(subcommand)]
+        command: KubeGitCommand,
     },
     /// Make a program on this Mac a Service in the cluster: pods call `NAME:PORT` and reach this Mac's 127.0.0.1:PORT (a model
     /// server on the Mac's GPU, Postgres.app, a dev server you are debugging). Runs until Ctrl-C; only the VM's network can use it.
@@ -6024,6 +6056,28 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
+    // Putting the hook in and taking it out only touch the repository's files.
+    if let Command::Kube {
+        command: KubeCommand::Git { command },
+    } = &cli.command
+    {
+        match command {
+            KubeGitCommand::Install { cluster, force } => {
+                let exe = stable_exe::stable_exe().context("locating fluxctl")?;
+                println!(
+                    "{}",
+                    kube_git::install(&exe, &cluster.options()?.name, *force)?
+                );
+                return Ok(());
+            }
+            KubeGitCommand::Uninstall => {
+                println!("{}", kube_git::uninstall()?);
+                return Ok(());
+            }
+            _ => {}
+        }
+    }
+
     // `doctor` only reads: it must work when the daemon is down and without a VmManager.
     if let Command::Doctor { host_only, fix } = cli.command {
         let mut fixed = Vec::new();
@@ -8466,6 +8520,15 @@ async fn kube_command<A: run::VmApi>(api: &A, command: KubeCommand) -> Result<()
         } => {
             kube_share::run(api, &cluster.options()?, &service, port, minutes).await?;
         }
+        KubeCommand::Git { command } => match command {
+            KubeGitCommand::Hook { cluster } => kube_git::hook(api, &cluster.options()?).await?,
+            KubeGitCommand::Status { cluster } => {
+                println!("{}", kube_git::status(api, &cluster.options()?).await?)
+            }
+            KubeGitCommand::Install { .. } | KubeGitCommand::Uninstall => {
+                unreachable!("handled before the daemon is opened")
+            }
+        },
         KubeCommand::Host {
             cluster,
             name,

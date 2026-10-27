@@ -254,7 +254,7 @@ fn home_kube(o: &KubeOptions) -> Result<PathBuf> {
     })
 }
 
-fn run_dir() -> PathBuf {
+pub(crate) fn run_dir() -> PathBuf {
     dh::default_socket()
         .parent()
         .map(Path::to_path_buf)
@@ -1124,7 +1124,7 @@ pub fn write_kubeconfig(c: &Cluster, name: &str) -> Result<bool> {
     Ok(true)
 }
 
-fn write_private(path: &Path, text: &str) -> Result<()> {
+pub(crate) fn write_private(path: &Path, text: &str) -> Result<()> {
     use std::{io::Write, os::unix::fs::OpenOptionsExt};
     let tmp = path.with_extension("yaml.tmp");
     let mut f = std::fs::OpenOptions::new()
