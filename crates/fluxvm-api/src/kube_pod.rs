@@ -372,7 +372,8 @@ pub(crate) fn exec_url_for(
     u.into()
 }
 
-/// The `exec` URL: the shell, a TTY, and the container if one was named.
+/// The `exec` URL: the shell, a TTY, and the container if one was named. Only the tests use this shorthand.
+#[cfg(test)]
 pub(crate) fn exec_url(port: u16, ns: &str, pod: &str, container: Option<&str>) -> String {
     exec_url_for(port, ns, pod, container, &Run::Shell)
 }
@@ -458,6 +459,7 @@ pub(crate) struct Output {
 
 /// Runs `argv` in a pod and collects its standard output. A non-zero exit, or output on stderr with no output on stdout, is
 /// an error carrying the cluster's message and what the command printed to stderr.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn exec_output(
     creds: &kube::Credentials,
     addrs: &[SocketAddr],
