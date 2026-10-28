@@ -44,18 +44,21 @@ mod kube_checkpoint;
 mod kube_cp;
 mod kube_dev;
 mod kube_diff;
+mod kube_trim;
 mod kube_doctor;
 mod kube_forward;
 mod kube_git;
 mod kube_host;
 mod kube_hostsvc;
 mod kube_logs;
+mod kube_mcp;
 mod kube_menubar;
 mod kube_names;
 mod kube_notify;
 mod kube_pin;
 mod kube_project;
 mod kube_prompt;
+mod kube_policy;
 mod kube_ps;
 mod kube_share;
 mod kube_sync;
@@ -512,6 +515,10 @@ enum KubeCommand {
         /// Run the trust command now (asks for your password).
         #[arg(long)]
         install: bool,
+        /// Trust the CA in the booted iOS/iPadOS simulators instead (`xcrun simctl keychain booted add-root-cert`). Changes
+        /// only the simulators, never this Mac, so it asks for no password.
+        #[arg(long, conflicts_with = "install")]
+        simulator: bool,
     },
     /// Open a service to your phone or another computer on this Wi-Fi: prints an address and a QR code, and closes on Ctrl-C
     /// or after `--minutes`. Only private-network addresses are let in.
@@ -537,6 +544,12 @@ enum KubeCommand {
         /// A checkpoint label, or `now`.
         b: Option<String>,
     },
+    /// Give space freed inside the cluster VM back to the Mac (TRIM). Refuses, with the reason, when the VM's disk does
+    /// not pass discards through to the host.
+    Trim {
+        #[command(flatten)]
+        cluster: KubeArgs,
+    },
     /// Every checkpoint, newest first, with what changed since the one before it: git log for the cluster.
     Timeline {
         #[command(flatten)]
@@ -554,7 +567,8 @@ enum KubeCommand {
         #[command(flatten)]
         cluster: KubeArgs,
         /// The Service name pods will use.
-        name: String,
+        #[arg(value_name = "SERVICE")]
+        service: String,
         /// The port on this Mac (and the Service's port).
         port: Option<u16>,
         /// The namespace for the Service.
@@ -8542,6 +8556,9 @@ async fn kube_command<A: run::VmApi>(api: &A, command: KubeCommand) -> Result<()
                 kube_diff::run(api, &cluster.options()?, a.as_deref(), b.as_deref()).await?
             );
         }
+        KubeCommand::Trim { cluster } => {
+            println!("{}", kube_trim::run(api, &cluster.options()?).await?);
+        }
         KubeCommand::Timeline { cluster } => {
             println!("{}", kube_diff::timeline(api, &cluster.options()?).await?);
         }
@@ -8556,7 +8573,7 @@ async fn kube_command<A: run::VmApi>(api: &A, command: KubeCommand) -> Result<()
         },
         KubeCommand::Host {
             cluster,
-            name,
+            service,
             port,
             namespace,
             remove,
@@ -8565,16 +8582,16 @@ async fn kube_command<A: run::VmApi>(api: &A, command: KubeCommand) -> Result<()
             if remove {
                 println!(
                     "{}",
-                    kube_hostsvc::remove(api, &o, &name, &namespace).await?
+                    kube_hostsvc::remove(api, &o, &service, &namespace).await?
                 );
             } else {
                 let port =
                     port.context("give the port on this Mac: fluxctl kube host NAME PORT")?;
-                kube_hostsvc::run(api, &o, &name, port, &namespace).await?;
+                kube_hostsvc::run(api, &o, &service, port, &namespace).await?;
             }
         }
-        KubeCommand::Trust { install } => {
-            println!("{}", kube_tls::trust(install)?);
+        KubeCommand::Trust { install, simulator } => {
+            println!("{}", kube_tls::trust(install, simulator)?);
         }
         KubeCommand::Start { cluster, file, yes } => {
             kube_project::start(api, cluster.options()?, &file, yes).await?;
@@ -8655,6 +8672,7 @@ async fn kube_command<A: run::VmApi>(api: &A, command: KubeCommand) -> Result<()
                 (flags.sleep_on_battery, flags.sleep_on_lid_close),
                 !flags.no_names,
                 !flags.no_notify,
+                &flags.policy()?,
             )
             .await?;
         }

@@ -1321,6 +1321,17 @@ pub struct SuperviseFlags {
     /// Also put the cluster to sleep while the Mac's lid is closed, once there has been no traffic for 2 minutes.
     #[arg(long)]
     pub sleep_on_lid_close: bool,
+    /// Keep the cluster awake only between these local times (`09:00-19:00`; `22:00-06:00` crosses midnight). Outside them it
+    /// sleeps once there has been no traffic for 2 minutes, and wakes when the window opens.
+    #[arg(long, value_name = "HH:MM-HH:MM")]
+    pub active: Option<String>,
+    /// With `--active`, only on Monday to Friday; alone, awake all day on weekdays and asleep at the weekend.
+    #[arg(long)]
+    pub weekdays: bool,
+    /// Also put the cluster to sleep while the Mac is in Low Power Mode or throttling for heat, once there has been no traffic
+    /// for 2 minutes.
+    #[arg(long)]
+    pub eco: bool,
 }
 
 impl SuperviseFlags {
@@ -1331,7 +1342,12 @@ impl SuperviseFlags {
         if self.idle_sleep.is_some_and(|s| s < 60) {
             bail!("--idle-sleep must be at least 1 minute");
         }
-        Ok(())
+        self.policy().map(|_| ())
+    }
+
+    /// The working-hours and energy rules.
+    pub fn policy(&self) -> Result<crate::kube_policy::Policy> {
+        crate::kube_policy::Policy::from_flags(self.active.as_deref(), self.weekdays, self.eco)
     }
 
     /// The flags as `supervise` takes them, for the LaunchAgent.
@@ -1358,6 +1374,15 @@ impl SuperviseFlags {
         }
         if self.sleep_on_lid_close {
             a.push("--sleep-on-lid-close".to_owned());
+        }
+        if let Some(w) = &self.active {
+            a.extend(["--active".to_owned(), w.clone()]);
+        }
+        if self.weekdays {
+            a.push("--weekdays".to_owned());
+        }
+        if self.eco {
+            a.push("--eco".to_owned());
         }
         a
     }
@@ -1631,6 +1656,7 @@ pub async fn supervise<A: VmApi>(
     sleep_on_power: (bool, bool),
     local_names: bool,
     notify: bool,
+    policy: &crate::kube_policy::Policy,
 ) -> Result<()> {
     validate(o)?;
     let names = (auto_publish && local_names).then(crate::kube_names::Names::default);
@@ -1647,12 +1673,27 @@ pub async fn supervise<A: VmApi>(
     let mut last_auto = Instant::now();
     let mut pods = crate::kube_notify::Watch::default();
     let mut last_pods: Option<Instant> = None;
+    // Parked by the working-hours schedule, so it is woken when the window opens (not when someone else put it to sleep).
+    let mut slept_by_schedule = false;
     loop {
         if sleep_in_progress(o) {
             tokio::time::sleep(Duration::from_secs(1)).await;
             continue;
         }
         if crate::kube_checkpoint::is_asleep(api, o).await {
+            if slept_by_schedule && policy.wake_due(crate::kube_policy::local_now()) {
+                match crate::kube_checkpoint::wake(api, o).await {
+                    Ok(m) => {
+                        slept_by_schedule = false;
+                        eprintln!("working hours begin: {m}");
+                    }
+                    Err(e) => {
+                        eprintln!("waking for working hours failed, will retry: {e:#}");
+                        tokio::time::sleep(every).await;
+                    }
+                }
+                continue;
+            }
             if !open.is_empty() {
                 parked = open.iter().map(|(h, _)| *h).collect();
             }
@@ -1671,6 +1712,7 @@ pub async fn supervise<A: VmApi>(
             .await;
             continue;
         }
+        slept_by_schedule = false; // awake: whoever parked it is no longer our business
         let mut healthy = api_answers(o.api_port)
             && matches!(api.find(&o.name).await, Ok(Some((_, s))) if s == "running");
         for i in 1..=o.workers {
@@ -1712,25 +1754,36 @@ pub async fn supervise<A: VmApi>(
                 write_prompt(o, crate::kube_prompt::State::Down, &[]);
             }
         }
-        let watching = idle_sleep.is_some() || sleep_on_power.0 || sleep_on_power.1;
+        let watching =
+            idle_sleep.is_some() || sleep_on_power.0 || sleep_on_power.1 || policy.enabled();
         if watching
             && healthy_enough(api, o).await
             && let Some(total) = forwarder_bytes(o)
         {
             let quiet = idle.tick(total, Instant::now());
-            let why = if idle_sleep.is_some_and(|after| quiet >= after) {
-                Some(format!("no traffic for {}s", quiet.as_secs()))
+            // (reason, whether the working-hours schedule asked for it)
+            let why: Option<(String, bool)> = if idle_sleep.is_some_and(|after| quiet >= after) {
+                Some((format!("no traffic for {}s", quiet.as_secs()), false))
             } else if quiet >= POWER_QUIET {
-                power_says_sleep(sleep_on_power.0, sleep_on_power.1).map(str::to_owned)
+                power_says_sleep(sleep_on_power.0, sleep_on_power.1)
+                    .map(|w| (w.to_owned(), false))
+                    .or_else(|| {
+                        policy
+                            .says_sleep(crate::kube_policy::local_now())
+                            .map(|r| (r.why, r.schedule))
+                    })
             } else {
                 None
             };
-            if let Some(why) = why {
+            if let Some((why, by_schedule)) = why {
                 eprintln!("{why}: putting the cluster to sleep");
                 idle.reset();
                 match crate::kube_checkpoint::sleep(api, o).await {
                     // asleep: go straight back to the top, which opens the wake port at once
-                    Ok(m) => eprintln!("{m}"),
+                    Ok(m) => {
+                        slept_by_schedule = by_schedule;
+                        eprintln!("{m}")
+                    }
                     Err(e) => {
                         eprintln!("could not sleep, will retry: {e:#}");
                         tokio::time::sleep(every).await;
@@ -3030,6 +3083,32 @@ mod tests {
     }
 
     #[test]
+    fn working_hours_and_eco_reach_the_login_agent_and_are_validated() {
+        let f = SuperviseFlags {
+            active: Some("09:00-19:00".into()),
+            weekdays: true,
+            eco: true,
+            keep_auto: 1,
+            ..Default::default()
+        };
+        assert_eq!(
+            f.args(),
+            ["--active", "09:00-19:00", "--weekdays", "--eco"]
+        );
+        assert!(f.check().is_ok());
+        assert!(f.policy().unwrap().enabled());
+        for bad in ["9-19", "09:00", "25:00-26:00", "09:00-09:00"] {
+            let f = SuperviseFlags {
+                active: Some(bad.into()),
+                keep_auto: 1,
+                ..Default::default()
+            };
+            assert!(f.check().is_err(), "{bad}");
+        }
+        assert!(!SuperviseFlags::default().policy().unwrap().enabled());
+    }
+
+    #[test]
     fn supervise_flags_become_agent_arguments_and_are_checked() {
         let f = SuperviseFlags {
             no_auto_publish: true,
@@ -3040,6 +3119,9 @@ mod tests {
             no_notify: true,
             sleep_on_battery: true,
             sleep_on_lid_close: true,
+            active: None,
+            weekdays: false,
+            eco: false,
         };
         assert_eq!(
             f.args(),

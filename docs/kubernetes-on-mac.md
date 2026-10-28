@@ -481,7 +481,15 @@ through, so you just use the cluster:
 * The Studio's **Wake** button.
 
 Single-node clusters only. `kube agent install` takes `--idle-sleep`, `--auto-checkpoint`, `--keep-auto`, `--sleep-on-battery`,
-`--sleep-on-lid-close` and `--no-auto-publish` and passes them to the LaunchAgent.
+`--sleep-on-lid-close`, `--active`, `--weekdays`, `--eco` and `--no-auto-publish` and passes them to the LaunchAgent.
+
+**Working hours and energy.** `kube supervise --active 09:00-19:00 --weekdays` keeps the cluster awake only in those local hours (a window such
+as `22:00-06:00` may cross midnight; `--weekdays` alone means awake all day Monday to Friday and asleep at the weekend). Outside them the
+cluster sleeps once nothing has used it for 2 minutes, and it wakes by itself when the window opens. A `kubectl` call in the evening still
+wakes it, and it goes back to sleep 2 minutes after you stop. `--eco` also sleeps it while the Mac is in Low Power Mode or throttling for heat
+(`pmset -g` and `pmset -g therm`); an energy reason does not schedule a wake-up, the next client simply wakes it. Status: the window
+arithmetic, the decisions and the `pmset` parsing are unit-tested, and the Low Power Mode line was read from a real Mac. Not run: a real sleep and
+wake at the edge of a window, and the thermal output on a Mac that is actually throttling (that format is from documentation, not seen here).
 
 ### Ingress hosts just work
 
@@ -504,6 +512,11 @@ fluxctl kube trust
 ```
 
 This creates a certificate authority of your own in `~/.fluxvm/ca` (its key is mode 0600 and never leaves that folder) and prints the one command that makes this Mac trust it. **Nothing is trusted until you run that command** (or `fluxctl kube trust --install`, which runs it and asks for your password); it changes the Mac's trust settings, so it is yours to run. Restart `kube supervise`, and every service also answers at `https://<service>.<namespace>.localhost` on port 443, with a certificate made for that exact name on first use. Only names ending in `.localhost` ever get one. The CA is limited to `localhost` names and cannot make intermediate CAs, so a client that honours name constraints rejects a certificate it signs for any other site, even if the key is stolen (checked with `openssl verify`: `shop.localhost` passes, `bank.example.com` fails with a permitted-subtree violation). Apps behind it see `x-forwarded-proto: https`. Safari, Chrome and curl use the system keychain; Firefox keeps its own store. To undo: `sudo security remove-trusted-cert -d ~/.fluxvm/ca/ca.pem` and delete the folder.
+
+**iOS and iPadOS simulators.** `fluxctl kube trust --simulator` adds the same CA to every booted simulator (`xcrun simctl keychain booted
+add-root-cert`), so an app or Safari in the simulator accepts `https://<service>.localhost` too. It changes only the simulators' own trust
+stores, never this Mac's, so it asks for no password. Boot a simulator first (Xcode, or `xcrun simctl boot DEVICE`); the simulator shares this Mac's
+loopback, so the `.localhost` names reach the same ports. Not run: a real simulator.
 
 Proved on a real k3s, with the CA passed to curl rather than installed in the keychain: `https://web.default.localhost/` and `https://web.localhost/` returned the pod's page; without the CA curl refused the certificate (exit 60); an unknown name got the list of known names; a request for a name outside `.localhost` was refused at the handshake; the certificate chained to the CA with the exact name as its only SAN, server-auth only, valid one year. Not run: installing the trust into the real keychain, and a browser.
 
@@ -642,6 +655,23 @@ Two working copies of one repository share the cluster but are tracked separatel
 Status: the branch-name labels, the save/restore plan, the state file and the hook script are unit-tested. Not run: the hook in a real repository
 against a real cluster, so the 10 s switch and a restore that fails halfway are untested.
 
+## Let an AI agent operate the cluster: MCP tools
+
+`fluxctl mcp serve` (registered with Claude Code, Cursor, Codex and others by `fluxctl mcp install`) now also offers the cluster as tools, with the safety net `try` and `undo` give you by hand:
+
+| Tool | Does | Needs `--allow-write` |
+|---|---|---|
+| `kube_status`, `kube_doctor`, `kube_checkpoints`, `kube_diff`, `kube_timeline` | look: pods and services, the doctor's report, checkpoints, what changed | no |
+| `kube_apply` | saves a `try-` checkpoint, applies a YAML manifest, then reports what changed and how to undo | yes |
+| `kube_checkpoint`, `kube_restore`, `kube_undo` | save the cluster, put it back, undo the last `kube_apply` | yes |
+
+Every tool takes an optional `cluster` (default `fluxvm-kube`). An agent that applies a bad manifest, or a good one that breaks something, gets the
+diff in the same reply and can call `kube_undo`; you can do the same from a terminal with `kube undo`. The server lists the write tools only when it
+was started with `--allow-write`. A manifest larger than 256 KiB is refused, and the last 5 safety checkpoints are kept.
+
+Status: the tool list, the read-only/write split, argument checking and the report text are unit-tested. Not run: an agent driving a real cluster, so
+the checkpoint-apply-diff-undo round trip through MCP is untried.
+
 ## Call your Mac from a pod: `kube host`
 
 `kube forward` brings a Service out to the Mac; `kube host` goes the other way. A program on the Mac becomes a Service in the cluster:
@@ -745,7 +775,7 @@ fluxctl kube doctor
 
 It checks what tends to go wrong for a cluster on a Mac and prints the fix next to each problem: free disk on the Mac, a VPN that takes all traffic, a kubeconfig that is missing or points at the wrong port, the VM's disk, whether the VM can resolve names and reach the image registry, the VM's clock against the Mac's, and pods that are crash-looping, out of memory, cannot pull their image, or keep restarting. A sleeping cluster is reported as asleep. It exits non-zero when something failed, so it can gate a script.
 
-`fluxctl kube doctor --fix` makes the repairs that are safe and small, inside the VM, and then checks again: it removes container images no pod uses (when the VM's disk is nearly full), restarts the VM's resolver (when it cannot resolve names) and steps the VM's clock to the Mac's (when it is more than a minute off). Each problem is fixed once, a repair that fails is reported without stopping the others, and the lines marked "`--fix` does this" in the report are exactly these. Everything else (a crash-looping pod, a full Mac disk, a VPN) is yours to decide, so it only prints the advice.
+`fluxctl kube doctor --fix` makes the repairs that are safe and small, inside the VM, and then checks again: it removes container images no pod uses (when the VM's disk is nearly full), restarts the VM's resolver (when it cannot resolve names) and steps the VM's clock to the Mac's (when it is more than a minute off). Each problem is fixed once, a repair that fails is reported without stopping the others, and the lines marked "`--fix` does this" in the report are exactly these. It also looks at the VM folder (`~/Library/Application Support/FluxVM`): when Time Machine has a destination and still backs it up, or Spotlight indexes it, the report says so (gigabytes of disk images that change all day) and `--fix` excludes the folder with `tmutil addexclusion` and a `.metadata_never_index` file, on the Mac and without a password. Everything else (a crash-looping pod, a full Mac disk, a VPN) is yours to decide, so it only prints the advice.
 
 Proved on a real k3s: a healthy cluster passes every check; with one pod killed for memory and one pointing at an image that does not exist, it named both and exited 1. Not run: a VPN, a full disk and a skewed clock on a real machine (those verdicts are unit-tested only).
 
@@ -765,6 +795,12 @@ fluxctl kube agent uninstall
 The supervisor starts the VM if it is stopped and restores the forward if it dies. With the options above it also publishes services, takes
 automatic checkpoints, and sleeps and wakes the cluster. The plist carries `FLUXVM_URL` and
 `FLUXVM_VZ_RUNNER` when set, never a token.
+
+## Give disk space back: `kube trim`
+
+Deleting images and data inside the cluster VM does not shrink its disk file on the Mac by itself. `fluxctl kube trim` runs `fstrim` in the VM so the host can reclaim the freed blocks.
+
+It first asks the VM's root device for its discard limit. If that is 0, the disk does not pass discards through, and trim stops with that reason instead of pretending to free space. Whether your VM's disk honors discards is not yet confirmed on a real cluster; check with `du -sh` on the VM folder before and after.
 
 ## What this is not
 
