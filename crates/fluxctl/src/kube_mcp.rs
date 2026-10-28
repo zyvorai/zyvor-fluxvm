@@ -289,7 +289,8 @@ mod tests {
         assert_eq!(options(&json!({})).unwrap().name, KubeOptions::default().name);
         assert_eq!(options(&json!({"cluster": "dev"})).unwrap().name, "dev");
         assert!(options(&json!({"cluster": "Dev; rm -rf"})).is_err());
-        assert!(options(&json!({"cluster": ""})).is_err());
+        // Clients often send an empty string for "not given".
+        assert_eq!(options(&json!({"cluster": ""})).unwrap().name, KubeOptions::default().name);
     }
 
     #[test]
@@ -319,9 +320,10 @@ mod tests {
         let mut s = crate::mcp::Server::new("t", "0", false);
         s.add(all());
         let input = r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#;
-        let (mut out, mut buf) = (Vec::new(), String::new());
-        s.serve(input.as_bytes(), &mut out).await.unwrap();
-        buf.push_str(&String::from_utf8(out).unwrap());
+        let (mut client, server_end) = tokio::io::duplex(1 << 20);
+        s.serve(input.as_bytes(), server_end).await.unwrap();
+        let mut buf = String::new();
+        tokio::io::AsyncReadExt::read_to_string(&mut client, &mut buf).await.unwrap();
         assert!(buf.contains("kube_status") && buf.contains("kube_diff"), "{buf}");
         assert!(!buf.contains("kube_apply") && !buf.contains("kube_undo"), "{buf}");
     }
