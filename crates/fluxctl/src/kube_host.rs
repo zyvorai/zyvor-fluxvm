@@ -58,11 +58,16 @@ impl Cni {
         }
     }
 
-    /// What `--cni` means when it is not given: k3s's bundled flannel. Cilium is opt-in (`--cni cilium`): on the Mac
-    /// mini with 0.4.17 a Cilium cluster never became Ready (the guest lost its network while Cilium's agent started),
-    /// and the same VM with flannel was Ready in about 160 s.
-    pub fn default_choice() -> Cni {
-        Cni::Flannel
+    /// What `--cni` means when it is not given: k3s's bundled flannel on macOS and when installing offline (Cilium's
+    /// chart and images come from the internet), Cilium elsewhere. On the Mac mini with 0.4.17 a Cilium cluster never
+    /// became Ready (the guest lost its network while Cilium's agent started) and the same VM with flannel was Ready in
+    /// about 160 s, so on a Mac Cilium is opt-in (`--cni cilium`).
+    pub fn default_for(offline: bool) -> Cni {
+        if offline || cfg!(target_os = "macos") {
+            Cni::Flannel
+        } else {
+            Cni::Cilium
+        }
     }
 
     pub fn name(self) -> &'static str {
@@ -126,7 +131,7 @@ impl Default for KubeOptions {
             kubeconfig: None,
             workers: 0,
             offline: None,
-            cni: Cni::default_choice(),
+            cni: Cni::default_for(false),
             cilium_version: CILIUM_VERSION.into(),
             no_merge: false,
             rosetta: false,
@@ -2806,7 +2811,12 @@ mod tests {
 
     #[test]
     fn cilium_is_the_opt_in_pod_network() {
-        assert_eq!(KubeOptions::default().cni, Cni::Flannel);
+        // The default follows the OS: flannel on a Mac, Cilium on Linux (CI runs on Linux).
+        let mac = cfg!(target_os = "macos");
+        assert_eq!(
+            KubeOptions::default().cni,
+            if mac { Cni::Flannel } else { Cni::Cilium }
+        );
         let o = KubeOptions {
             cni: Cni::Cilium,
             ..Default::default()
@@ -2878,7 +2888,11 @@ mod tests {
             ..offline
         };
         assert!(validate(&flannel_offline).is_ok());
-        assert_eq!(Cni::default_choice(), Cni::Flannel);
+        assert_eq!(Cni::default_for(true), Cni::Flannel);
+        assert_eq!(
+            Cni::default_for(false),
+            if cfg!(target_os = "macos") { Cni::Flannel } else { Cni::Cilium }
+        );
         assert_eq!(Cni::parse("cilium").unwrap(), Cni::Cilium);
         assert!(Cni::parse("calico").is_err());
     }
