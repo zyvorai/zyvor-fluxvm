@@ -44,6 +44,7 @@ mod kube_checkpoint;
 mod kube_cp;
 mod kube_dev;
 mod kube_diff;
+mod kube_trim;
 mod kube_doctor;
 mod kube_forward;
 mod kube_git;
@@ -543,6 +544,12 @@ enum KubeCommand {
         /// A checkpoint label, or `now`.
         b: Option<String>,
     },
+    /// Give space freed inside the cluster VM back to the Mac (TRIM). Refuses, with the reason, when the VM's disk does
+    /// not pass discards through to the host.
+    Trim {
+        #[command(flatten)]
+        cluster: KubeArgs,
+    },
     /// Every checkpoint, newest first, with what changed since the one before it: git log for the cluster.
     Timeline {
         #[command(flatten)]
@@ -560,7 +567,8 @@ enum KubeCommand {
         #[command(flatten)]
         cluster: KubeArgs,
         /// The Service name pods will use.
-        name: String,
+        #[arg(value_name = "SERVICE")]
+        service: String,
         /// The port on this Mac (and the Service's port).
         port: Option<u16>,
         /// The namespace for the Service.
@@ -8548,6 +8556,9 @@ async fn kube_command<A: run::VmApi>(api: &A, command: KubeCommand) -> Result<()
                 kube_diff::run(api, &cluster.options()?, a.as_deref(), b.as_deref()).await?
             );
         }
+        KubeCommand::Trim { cluster } => {
+            println!("{}", kube_trim::run(api, &cluster.options()?).await?);
+        }
         KubeCommand::Timeline { cluster } => {
             println!("{}", kube_diff::timeline(api, &cluster.options()?).await?);
         }
@@ -8562,7 +8573,7 @@ async fn kube_command<A: run::VmApi>(api: &A, command: KubeCommand) -> Result<()
         },
         KubeCommand::Host {
             cluster,
-            name,
+            service,
             port,
             namespace,
             remove,
@@ -8571,12 +8582,12 @@ async fn kube_command<A: run::VmApi>(api: &A, command: KubeCommand) -> Result<()
             if remove {
                 println!(
                     "{}",
-                    kube_hostsvc::remove(api, &o, &name, &namespace).await?
+                    kube_hostsvc::remove(api, &o, &service, &namespace).await?
                 );
             } else {
                 let port =
                     port.context("give the port on this Mac: fluxctl kube host NAME PORT")?;
-                kube_hostsvc::run(api, &o, &name, port, &namespace).await?;
+                kube_hostsvc::run(api, &o, &service, port, &namespace).await?;
             }
         }
         KubeCommand::Trust { install, simulator } => {
