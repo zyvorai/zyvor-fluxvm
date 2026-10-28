@@ -512,6 +512,8 @@ through, so you just use the cluster:
 * `fluxctl kube up` on a sleeping cluster wakes it from the checkpoint instead of cold-booting (3 seconds measured).
 * The Studio's **Wake** button.
 
+**How long a wake takes depends on the Mac.** The 2 to 3 second figures above are from an idle Mac; on the Mac mini test machine (with other work running) a wake took about 19 seconds, `kubectl` gives up on a connection after 10 seconds ("TLS handshake timeout"), and the call that triggered the wake failed. The wake still finishes, so run the command again. `kubectl` has no setting for this timeout; `fluxctl kube wake` first avoids it.
+
 Single-node clusters only. `kube agent install` takes `--idle-sleep`, `--auto-checkpoint`, `--keep-auto`, `--sleep-on-battery`,
 `--sleep-on-lid-close`, `--active`, `--weekdays`, `--eco` and `--no-auto-publish` and passes them to the LaunchAgent.
 
@@ -672,13 +674,13 @@ git checkout add-orders         # and back again
 
 A checkpoint is a whole-machine snapshot, so each branch keeps its own databases, migrations and deployed state. On a branch checkout the hook
 saves the cluster as the checkpoint `git-BRANCH` for the branch you leave and restores the one for the branch you enter, which takes about as
-long as `kube restore` (8 to 13 s on a 2 vCPU cluster). A branch with no checkpoint yet starts as a copy of where you were, as a new git branch
-starts from the commit you were on. A branch name with a slash or capitals gets a short hash in its checkpoint label, so `feature/x` and
+long as `kube restore` (8 to 13 s on a 2 vCPU cluster; over a minute on a Mac that is short of memory). A branch with no checkpoint yet starts as a copy of where you were, as a new git branch
+starts from the commit you were on. The first time you leave a branch the cluster has no record of, the hook takes it to be the branch you were on (from git's reflog) and saves it, so its changes do not leak into the next branch. A branch name with a slash or capitals gets a short hash in its checkpoint label, so `feature/x` and
 `feature-x` stay apart; `kube checkpoints` lists them.
 
 It only touches a cluster that is running and awake, never a detached HEAD or a file checkout, and a problem with the cluster is printed but
 never makes `git checkout` fail. The cluster remembers which branch its state belongs to per repository, so a checkout while the cluster was
-stopped does not mislabel anything. `kube git status` shows the hook, that record and the saved branches; `kube git uninstall` removes the hook
+stopped does not mislabel anything. The hook repeats the options `install` was given that say where the cluster is (`--api-port`, `--user`, `--kubeconfig`, `--no-merge-kubeconfig`), so install it with the same flags you started the cluster with. `kube git status` shows the hook, that record and the saved branches; `kube git uninstall` removes the hook
 (a `post-checkout` hook you wrote yourself is never replaced without `--force`).
 
 Limits: single-node clusters only (the same as checkpoints), and each saved branch takes disk, so remove old ones with `kube checkpoint-rm git-BRANCH`.
@@ -718,7 +720,7 @@ Pods use `ollama:11434` (or `ollama.default.svc`) and reach whatever listens on 
 server you are debugging. The VM reaches the Mac at its network gateway address, and only a program listening there can be reached, so the
 command opens a relay on that one address that forwards to the Mac's loopback. The relay lets in only the VM's own /24 network, never the
 Wi-Fi, and the Service it makes (a Service without a selector and an EndpointSlice pointing at the Mac, both labelled `fluxvm.dev/host-of`) goes
-away with Ctrl-C. It never touches a Service it did not create. `-n NAMESPACE` picks the namespace; `--remove` clears one left behind by a crash.
+away with Ctrl-C or SIGTERM (`kill`, a closed terminal, launchd). It never touches a Service it did not create. `-n NAMESPACE` picks the namespace; `--remove` clears one left behind by a crash.
 
 This is a plain TCP relay, so it works for anything that speaks TCP. It does not give pods the Mac's GPU: a model server running on the Mac
 uses it, and the pods just call that server.
@@ -824,7 +826,7 @@ fluxctl kube agent install --publish 30080       # LaunchAgent dev.zyvor.fluxvm.
 fluxctl kube agent uninstall
 ```
 
-The supervisor starts the VM if it is stopped and restores the forward if it dies. With the options above it also publishes services, takes
+The supervisor starts the VM if it is stopped and restores the forward if it dies. Only one supervisor can run per cluster: a second `kube supervise` for the same name is refused (it names the running one's pid), because two of them race each other's sleep and wake and can destroy the cluster's disk. With the options above it also publishes services, takes
 automatic checkpoints, and sleeps and wakes the cluster. The plist carries `FLUXVM_URL` and
 `FLUXVM_VZ_RUNNER` when set, never a token.
 

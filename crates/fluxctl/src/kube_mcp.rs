@@ -22,7 +22,21 @@ pub const MAX_MANIFEST: usize = 256 * 1024;
 /// How many `try-` checkpoints `kube_apply` keeps.
 const KEEP_TRIES: usize = 5;
 
-/// The cluster named by the `cluster` argument (default `fluxvm-kube`).
+/// The port on `127.0.0.1` a kubeconfig's `server:` line points at.
+pub fn kubeconfig_port(text: &str) -> Option<u16> {
+    text.lines().find_map(|l| {
+        l.trim()
+            .strip_prefix("server:")?
+            .trim()
+            .strip_prefix("https://127.0.0.1:")?
+            .trim_end_matches('/')
+            .parse()
+            .ok()
+    })
+}
+
+/// The cluster named by the `cluster` argument (default `fluxvm-kube`), reached on the API port its kubeconfig records, so
+/// a cluster started with `--api-port` is not reported as down for answering on another port than 6443.
 pub fn options(args: &Value) -> Result<KubeOptions> {
     let mut o = KubeOptions::default();
     if let Some(name) = str_arg(args, "cluster") {
@@ -30,6 +44,13 @@ pub fn options(args: &Value) -> Result<KubeOptions> {
             bail!("cluster {name:?} is not a valid name (lowercase letters, digits and dashes)");
         }
         o.name = name.to_owned();
+    }
+    if let Some(port) = kube_host::home_kube(&o)
+        .ok()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|t| kubeconfig_port(&t))
+    {
+        o.api_port = port;
     }
     Ok(o)
 }
@@ -246,6 +267,19 @@ pub fn tools(remote: Arc<Remote>) -> Vec<Tool> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_api_port_comes_from_the_clusters_kubeconfig() {
+        let kc = "apiVersion: v1\nclusters:\n- cluster:\n    certificate-authority-data: QUJD\n    server: https://127.0.0.1:16443\n  name: t5\n";
+        assert_eq!(kubeconfig_port(kc), Some(16443));
+        assert_eq!(
+            kubeconfig_port("    server: https://127.0.0.1:6443/\n"),
+            Some(6443)
+        );
+        // Not a local forward, or no server at all.
+        assert_eq!(kubeconfig_port("    server: https://10.0.0.5:6443\n"), None);
+        assert_eq!(kubeconfig_port("clusters: []\n"), None);
+    }
+
     use super::*;
 
     fn all() -> Vec<Tool> {
