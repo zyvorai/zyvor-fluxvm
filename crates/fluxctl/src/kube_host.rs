@@ -2891,7 +2891,11 @@ mod tests {
         assert_eq!(Cni::default_for(true), Cni::Flannel);
         assert_eq!(
             Cni::default_for(false),
-            if cfg!(target_os = "macos") { Cni::Flannel } else { Cni::Cilium }
+            if cfg!(target_os = "macos") {
+                Cni::Flannel
+            } else {
+                Cni::Cilium
+            }
         );
         assert_eq!(Cni::parse("cilium").unwrap(), Cni::Cilium);
         assert!(Cni::parse("calico").is_err());
