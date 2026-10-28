@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased
+## 0.4.17 (2026-10-28)
+
+Kubernetes on a Mac, round 3: share to a phone, run amd64 images, expose Mac programs to the cluster, follow git branches, diff checkpoints, MCP tools, working-hours sleep. Linux packages now build for aarch64 as well (experimental).
 
 - `fluxctl mcp serve` offers the cluster as MCP tools: `kube_status`, `kube_doctor`, `kube_checkpoints`, `kube_diff`, `kube_timeline`, and (with `--allow-write`) `kube_apply` (checkpoint, apply, report the diff), `kube_checkpoint`, `kube_restore` and `kube_undo`, so an AI agent's change to the cluster can be undone. Unit-tested only.
 - `fluxctl kube trust --simulator`: trusts the local CA in the booted iOS/iPadOS simulators (`xcrun simctl keychain booted add-root-cert`), so HTTPS to `*.localhost` works there. Unit-tested only.
@@ -15,6 +17,8 @@
 - `fluxctl kube prompt`: a one-line cluster status for the shell prompt (starship, zsh, bash, fish), read from a file `kube supervise` keeps current; `supervise` now checks the pods even with `--no-notify`.
 - `integrations/raycast`: script commands for start, checkpoint, undo, sleep, wake, status, doctor and share (also usable from Alfred and Shortcuts).
 - `fluxctl kube doctor --fix`: makes the safe repairs inside the VM (unused images, the VM's resolver, its clock) and checks again. `kube doctor` also checks that the kubeconfig exists and points at the forwarded API port.
+- Fixed `fluxctl kube host`: its service name clashed with the cluster `--name` option and clap rejected the command in debug builds; the argument is now `SERVICE`.
+- Linux packaging: the aarch64 cross build of the eBPF programs uses the target architecture's kernel headers, the static guest agent check no longer needs the `file` command, and a `release-linux` dispatch without a tag builds `0.0.0-dev` instead of failing.
 
 ## 0.4.16 (2026-10-27)
 
