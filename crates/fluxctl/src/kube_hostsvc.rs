@@ -190,7 +190,7 @@ pub async fn run<A: VmApi>(
         route.gateway
     );
     println!(
-        "Only the VM's network ({}.0/24) can use it. Ctrl-C removes the Service and closes the relay.",
+        "Only the VM's network ({}.0/24) can use it. Ctrl-C (or SIGTERM) removes the Service and closes the relay.",
         route.gateway.octets()[..3]
             .iter()
             .map(|b| b.to_string())
@@ -198,9 +198,7 @@ pub async fn run<A: VmApi>(
             .join(".")
     );
     let gateway = route.gateway;
-    let stop = async {
-        let _ = tokio::signal::ctrl_c().await;
-    };
+    let stop = kube_share::stop_signal();
     match listener {
         Some(l) => {
             let (served, refused) =

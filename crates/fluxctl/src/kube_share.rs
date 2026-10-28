@@ -230,7 +230,7 @@ pub async fn run<A: VmApi>(
     );
     let stop = async {
         tokio::select! {
-            _ = tokio::signal::ctrl_c() => {}
+            _ = stop_signal() => {}
             _ = tokio::time::sleep(Duration::from_secs(minutes * 60)) => {}
         }
     };
@@ -239,9 +239,41 @@ pub async fn run<A: VmApi>(
     Ok(())
 }
 
+/// Resolves when the user presses Ctrl-C or the process is asked to stop: SIGTERM (`kill`, launchd) or SIGHUP (a closed
+/// terminal). The commands that leave something behind in the cluster (a Service, a relay) clean up after any of them,
+/// not only after Ctrl-C.
+pub(crate) async fn stop_signal() {
+    use tokio::signal::unix::{SignalKind, signal};
+    let (Ok(mut term), Ok(mut hup)) = (
+        signal(SignalKind::terminate()),
+        signal(SignalKind::hangup()),
+    ) else {
+        let _ = tokio::signal::ctrl_c().await;
+        return;
+    };
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => {}
+        _ = term.recv() => {}
+        _ = hup.recv() => {}
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn sigterm_stops_what_ctrl_c_stops() {
+        let waiting = tokio::spawn(stop_signal());
+        // Let the handlers register before the signal is raised.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        unsafe { libc::raise(libc::SIGTERM) };
+        tokio::time::timeout(Duration::from_secs(5), waiting)
+            .await
+            .expect("stop_signal did not return after SIGTERM")
+            .unwrap();
+    }
+
     use serde_json::json;
 
     fn item(ns: &str, name: &str, port: u16, published: bool) -> Value {

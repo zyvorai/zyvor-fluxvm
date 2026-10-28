@@ -122,16 +122,66 @@ pub fn sh_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
 }
 
+/// The options besides `--name` that the hook repeats, so it reaches the cluster the way `kube up` did: a cluster started
+/// with `--api-port 16443` is re-forwarded on 16443, not on the default.
+pub fn hook_options(o: &KubeOptions) -> Vec<String> {
+    let mut a = vec![];
+    if o.api_port != KubeOptions::default().api_port {
+        a.extend(["--api-port".to_owned(), o.api_port.to_string()]);
+    }
+    if let Some(u) = &o.user {
+        a.extend(["--user".to_owned(), u.clone()]);
+    }
+    if let Some(k) = &o.kubeconfig {
+        a.extend(["--kubeconfig".to_owned(), k.display().to_string()]);
+    }
+    if o.no_merge {
+        a.push("--no-merge-kubeconfig".to_owned());
+    }
+    a
+}
+
+/// The words after `kube git hook`: our own `--flags` as they are, every value quoted for a POSIX shell.
+fn hook_words(cluster: &str, extra: &[String]) -> String {
+    let is_flag = |w: &str| {
+        w.strip_prefix("--").is_some_and(|f| {
+            !f.is_empty() && f.bytes().all(|c| c.is_ascii_lowercase() || c == b'-')
+        })
+    };
+    ["--name", cluster]
+        .into_iter()
+        .chain(extra.iter().map(String::as_str))
+        .map(|w| {
+            if is_flag(w) {
+                w.to_owned()
+            } else {
+                sh_quote(w)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// The `post-checkout` hook. Git passes the old HEAD, the new HEAD and 1 for a branch checkout (0 for a file checkout).
-pub fn hook_script(fluxctl: &Path, cluster: &str) -> String {
+pub fn hook_script(fluxctl: &Path, cluster: &str, extra: &[String]) -> String {
     format!(
         "#!/bin/sh\n{MARKER}\n# Written by `fluxctl kube git install`: the cluster follows the branch. Remove it with `fluxctl kube git uninstall`.\n\
          [ \"$3\" = \"1\" ] || exit 0\n\
-         {} kube git hook --name {} >&2 || true\n\
+         {} kube git hook {} >&2 || true\n\
          exit 0\n",
         sh_quote(&fluxctl.display().to_string()),
-        sh_quote(cluster)
+        hook_words(cluster, extra)
     )
+}
+
+/// The branch a checkout left, from the subject of the newest `HEAD` reflog entry (`checkout: moving from main to
+/// feat-x`), when it went to `to`. A detached HEAD (a commit hash) is not a branch.
+pub fn left_branch(reflog_subject: &str, to: &str) -> Option<String> {
+    let (from, dest) = reflog_subject
+        .strip_prefix("checkout: moving from ")?
+        .split_once(" to ")?;
+    let hash = (7..=40).contains(&from.len()) && from.bytes().all(|c| c.is_ascii_hexdigit());
+    (dest == to && from != to && !hash).then(|| from.to_owned())
 }
 
 fn git(args: &[&str]) -> Option<String> {
@@ -148,7 +198,9 @@ fn hook_path() -> Result<PathBuf> {
     Ok(PathBuf::from(p))
 }
 
-pub fn install(fluxctl: &Path, cluster: &str, force: bool) -> Result<String> {
+pub fn install(fluxctl: &Path, o: &KubeOptions, force: bool) -> Result<String> {
+    let cluster = o.name.as_str();
+    let extra = hook_options(o);
     if !kube_host::name_ok(cluster) {
         bail!("cluster name {cluster:?} is not a Kubernetes name");
     }
@@ -158,16 +210,16 @@ pub fn install(fluxctl: &Path, cluster: &str, force: bool) -> Result<String> {
         && !force
     {
         bail!(
-            "{} already has a post-checkout hook that fluxctl did not write. Add this line to it, or use --force to replace it:\n  {} kube git hook --name {} >&2 || true",
+            "{} already has a post-checkout hook that fluxctl did not write. Add this line to it, or use --force to replace it:\n  {} kube git hook {} >&2 || true",
             path.display(),
             sh_quote(&fluxctl.display().to_string()),
-            sh_quote(cluster)
+            hook_words(cluster, &extra)
         );
     }
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    std::fs::write(&path, hook_script(fluxctl, cluster))?;
+    std::fs::write(&path, hook_script(fluxctl, cluster, &extra))?;
     {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))?;
@@ -231,7 +283,11 @@ async fn switch<A: VmApi>(api: &A, o: &KubeOptions) -> Result<()> {
         .flatten()
         .filter_map(|c| c["label"].as_str().map(str::to_owned))
         .collect();
-    let recorded = state.0.get(&repo).cloned();
+    // When nothing is recorded for this repository yet, the cluster holds the work done on the branch just left: record
+    // it as that branch's, so leaving it for the first time saves it instead of leaking it into the next branch.
+    let recorded = state.0.get(&repo).cloned().or_else(|| {
+        git(&["reflog", "-1", "--format=%gs", "HEAD"]).and_then(|s| left_branch(&s, &to))
+    });
     let step = plan(recorded.as_deref(), &to, |l| {
         existing.iter().any(|e| e == l)
     });
@@ -387,14 +443,69 @@ mod tests {
 
     #[test]
     fn the_hook_only_acts_on_branch_checkouts_and_never_fails_git() {
-        let h = hook_script(Path::new("/opt/homebrew/bin/fluxctl"), "dev");
+        let h = hook_script(Path::new("/opt/homebrew/bin/fluxctl"), "dev", &[]);
         assert!(h.starts_with("#!/bin/sh\n"));
         assert!(h.contains(MARKER));
         assert!(h.contains("[ \"$3\" = \"1\" ] || exit 0"));
         assert!(h.contains("'/opt/homebrew/bin/fluxctl' kube git hook --name 'dev' >&2 || true"));
         assert!(h.trim_end().ends_with("exit 0"));
         // A path with a quote cannot break out of the script.
-        let h = hook_script(Path::new("/tmp/it's/fluxctl"), "dev");
+        let h = hook_script(Path::new("/tmp/it's/fluxctl"), "dev", &[]);
         assert!(h.contains(r"'/tmp/it'\''s/fluxctl'"), "{h}");
+    }
+
+    #[test]
+    fn the_hook_repeats_the_options_that_say_where_the_cluster_is() {
+        let o = KubeOptions {
+            name: "dev".into(),
+            api_port: 16443,
+            user: Some("me".into()),
+            no_merge: true,
+            ..Default::default()
+        };
+        let extra = hook_options(&o);
+        assert_eq!(
+            extra,
+            [
+                "--api-port",
+                "16443",
+                "--user",
+                "me",
+                "--no-merge-kubeconfig"
+            ]
+        );
+        let h = hook_script(Path::new("/bin/fluxctl"), "dev", &extra);
+        assert!(
+            h.contains("kube git hook --name 'dev' --api-port '16443' --user 'me' --no-merge-kubeconfig >&2 || true"),
+            "{h}"
+        );
+        // Nothing to repeat for a default cluster.
+        assert!(hook_options(&KubeOptions::default()).is_empty());
+    }
+
+    #[test]
+    fn the_branch_just_left_comes_from_the_checkout_reflog() {
+        assert_eq!(
+            left_branch("checkout: moving from main to feat-x", "feat-x").as_deref(),
+            Some("main")
+        );
+        assert_eq!(
+            left_branch("checkout: moving from feature/a to main", "main").as_deref(),
+            Some("feature/a")
+        );
+        // Not a branch, not this checkout, not a checkout at all.
+        assert_eq!(
+            left_branch("checkout: moving from 1a2b3c4 to main", "main"),
+            None
+        );
+        assert_eq!(
+            left_branch("checkout: moving from main to feat-x", "other"),
+            None
+        );
+        assert_eq!(left_branch("commit: fix", "main"), None);
+        assert_eq!(
+            left_branch("checkout: moving from main to main", "main"),
+            None
+        );
     }
 }

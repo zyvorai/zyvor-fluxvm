@@ -6109,10 +6109,7 @@ async fn main() -> Result<()> {
         match command {
             KubeGitCommand::Install { cluster, force } => {
                 let exe = stable_exe::stable_exe().context("locating fluxctl")?;
-                println!(
-                    "{}",
-                    kube_git::install(&exe, &cluster.options()?.name, *force)?
-                );
+                println!("{}", kube_git::install(&exe, &cluster.options()?, *force)?);
                 return Ok(());
             }
             KubeGitCommand::Uninstall => {

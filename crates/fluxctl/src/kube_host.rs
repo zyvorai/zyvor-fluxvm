@@ -252,7 +252,7 @@ pub(crate) fn kubeconfig_path(o: &KubeOptions) -> Result<PathBuf> {
     home_kube(o)
 }
 
-fn home_kube(o: &KubeOptions) -> Result<PathBuf> {
+pub(crate) fn home_kube(o: &KubeOptions) -> Result<PathBuf> {
     Ok(match &o.kubeconfig {
         Some(p) => p.clone(),
         None => dh::home()?
@@ -1696,6 +1696,47 @@ async fn publish_services<A: VmApi>(
 /// `fluxctl kube supervise`: keeps the VM running and the API port answering, for launchd. Never returns.
 /// Unless `auto_publish` is off, it also forwards each NodePort and LoadBalancer service to 127.0.0.1.
 #[allow(clippy::too_many_arguments)]
+/// The per-cluster lock `kube supervise` holds for as long as it runs, released by the OS when the process ends (so a
+/// crash leaves no stale lock). Two supervisors on one cluster race each other's sleep and wake, which has destroyed a
+/// test cluster's root disk.
+pub(crate) struct SuperviseLock(#[allow(dead_code)] std::fs::File);
+
+impl SuperviseLock {
+    pub(crate) fn acquire(cluster: &str) -> Result<Self> {
+        Self::acquire_in(&run_dir(), cluster)
+    }
+
+    pub(crate) fn acquire_in(dir: &Path, cluster: &str) -> Result<Self> {
+        use std::io::{Read, Write};
+        use std::os::unix::io::AsRawFd;
+        std::fs::create_dir_all(dir)?;
+        let path = dir.join(format!("kube-{cluster}.supervise.lock"));
+        let mut f = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&path)
+            .with_context(|| format!("opening {}", path.display()))?;
+        // SAFETY: flock on a file descriptor this function owns.
+        if unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+            let mut pid = String::new();
+            let _ = f.read_to_string(&mut pid);
+            let who = pid
+                .trim()
+                .parse::<u32>()
+                .map(|p| format!(" (pid {p})"))
+                .unwrap_or_default();
+            bail!(
+                "another `fluxctl kube supervise` is already running for {cluster}{who}: two of them race each other's sleep and wake and can destroy the cluster's disk. Stop it first, or leave it running."
+            );
+        }
+        f.set_len(0)?;
+        write!(f, "{}", std::process::id())?;
+        Ok(Self(f))
+    }
+}
+
 pub async fn supervise<A: VmApi>(
     api: &A,
     o: &KubeOptions,
@@ -1709,6 +1750,7 @@ pub async fn supervise<A: VmApi>(
     policy: &crate::kube_policy::Policy,
 ) -> Result<()> {
     validate(o)?;
+    let _only_supervisor = SuperviseLock::acquire(&o.name)?;
     let names = (auto_publish && local_names).then(crate::kube_names::Names::default);
     if let Some(n) = &names {
         tokio::spawn(crate::kube_names::serve(n.clone()));
@@ -2299,6 +2341,26 @@ pub fn agent_uninstall() -> Result<bool> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_second_supervisor_for_the_same_cluster_is_refused() {
+        let dir = std::env::temp_dir().join(format!("fluxvm-lock-test-{}", std::process::id()));
+        let first = SuperviseLock::acquire_in(&dir, "dev").unwrap();
+        let err = match SuperviseLock::acquire_in(&dir, "dev") {
+            Ok(_) => panic!("a second lock for the same cluster was granted"),
+            Err(e) => e.to_string(),
+        };
+        assert!(err.contains("already running for dev"), "{err}");
+        assert!(
+            err.contains(&format!("pid {}", std::process::id())),
+            "{err}"
+        );
+        // Another cluster is independent, and the lock is free again once the holder is gone.
+        let _other = SuperviseLock::acquire_in(&dir, "other").unwrap();
+        drop(first);
+        SuperviseLock::acquire_in(&dir, "dev").unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn the_wait_names_what_blocks_the_node() {
         use super::blocker;
