@@ -2928,6 +2928,7 @@ mod tests {
         // Cilium needs no interface; a single node needs neither.
         let cilium = install_commands(
             &KubeOptions {
+                cni: Cni::Cilium,
                 workers: 1,
                 ..Default::default()
             },
