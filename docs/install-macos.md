@@ -5,7 +5,7 @@
 > See [install.md](install.md). This page is the Homebrew route.
 
 The quickest way to a working FluxVM on Apple silicon: one `brew install`, the daemon as a background service, and
-an AI agent client wired to it over MCP. The latest release is **0.4.16**; `brew info zyvorai/tap/fluxvm` shows the version the tap serves (`fluxctl agent`, `host_gpu` /
+an AI agent client wired to it over MCP. The latest release is **0.4.17**; `brew info zyvorai/tap/fluxvm` shows the version the tap serves (`fluxctl agent`, `host_gpu` /
 [host-inference.md](host-inference.md) need 0.4.8 and later). Install, service, upgrade and uninstall were originally verified on an
 Apple M4 mini (macOS 27.2) against earlier 0.4.x packages from the tap; notes below that name `0.4.4` / `0.4.5` are
 historical (for example `/readyz` and Homebrew `opt` paths). A local model path was verified with the
