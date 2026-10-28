@@ -31,11 +31,12 @@ fi
 # entries, and `ldd` reports "not a dynamic executable" only for static ones.
 # ldd does not exist on macOS (and cannot run a foreign-arch binary), so a cross build there is judged by `file`.
 if { command -v ldd >/dev/null 2>&1 && ldd "$BUILT" 2>&1 | grep -qiE "not a dynamic executable|statically linked"; } \
-  || file -b "$BUILT" | grep -qE "statically linked|static-pie linked"; then
+  || { command -v file >/dev/null 2>&1 && file -b "$BUILT" | grep -qE "statically linked|static-pie linked"; } \
+  || { command -v readelf >/dev/null 2>&1 && ! readelf -lW "$BUILT" 2>/dev/null | grep -q INTERP && readelf -h "$BUILT" >/dev/null 2>&1; }; then
   :
 else
   echo "FAIL: ${BUILT} is dynamically linked:" >&2
-  { ldd "$BUILT" || file -b "$BUILT"; } >&2 || true
+  { ldd "$BUILT" || file -b "$BUILT" || readelf -lW "$BUILT"; } >&2 || true
   exit 1
 fi
 
