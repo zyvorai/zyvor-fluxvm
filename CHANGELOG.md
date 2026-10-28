@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.4.18 (2026-10-28)
+
+Kubernetes on a Mac: the default pod network changes, and a command to reach pods from the Mac.
+
+- Flannel is now the default pod network on macOS and with `--offline`; Cilium stays opt-in there (`--cni cilium`) and remains the default on Linux. On the Mac mini used for testing, a default (Cilium) cluster never became Ready while the same VM with flannel was Ready in about 160 s. The cause of the Cilium failure is not known, and the mini was also short of memory at the time.
+- Flannel uses its `host-gw` backend: pod traffic is routed instead of wrapped in VXLAN, so the pod MTU is 1500 and there is less CPU work. Not run on a live cluster.
+- `fluxctl kube route [--install|--remove]` prints, and with `--install` runs, the two `route` commands that let the Mac reach pod (10.42.0.0/16) and Service (10.43.0.0/16) addresses through the cluster VM. Unit-tested only.
+- `fluxctl kube up` now says why the node is not Ready yet: every 30 seconds it names the Cilium pod, or k3s, that it is waiting for.
+- Fixes to CI: formatting of the kube files, a test that assumed the default network, and the MCP script's tool lists. Docs: diagrams for the 0.4.17 features and the release pipeline.
+
 ## 0.4.17 (2026-10-28)
 
 Kubernetes on a Mac, round 3: share to a phone, run amd64 images, expose Mac programs to the cluster, follow git branches, diff checkpoints, MCP tools, working-hours sleep. Linux packages now build for aarch64 as well (experimental).
