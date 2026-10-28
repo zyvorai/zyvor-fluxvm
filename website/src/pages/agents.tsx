@@ -13,7 +13,7 @@ const REPO = 'https://github.com/zyvorai/zyvor-fluxvm';
 // Every figure on this page was measured on one Apple M4 mini (16 GB, macOS 27.2) with a debian-13 guest.
 // Sources: examples/agent-sandbox-demo/README.md (timings, two runs), docs/agent-density.md (memory, 21 sandboxes),
 // docs/install-macos.md (install and MCP). The timings and the 0.4.11 handshake were measured on those packages; the tool count was
-// re-counted on a 0.4.13 build (66 with --allow-write); the macOS package is now 0.4.17.
+// re-counted on a 0.4.13 build (66 with --allow-write); the macOS package is now 0.4.18.
 type Stat = {value: string; label: string; note: string};
 const PROOF: Stat[] = [
   {value: '4.5 s', label: 'A fresh offline sandbox', note: 'cold boot, no network card; a default sandbox claiming a warm slot takes about 1 s'},
@@ -62,7 +62,7 @@ const MCP_STEPS = [
   '#   vm_fork {"vm": id, "count": 4}   ...   vm_delete',
 ].join('\n');
 
-// Install variants. The one-liner and Homebrew install the published package (0.4.17 on macOS; sessions + host_gpu).
+// Install variants. The one-liner and Homebrew install the published package (0.4.18 on macOS; sessions + host_gpu).
 // See docs/install.md.
 const INSTALL_TABS = [
   {
@@ -77,7 +77,7 @@ const INSTALL_TABS = [
       '# it verifies the SHA-256, needs no sudo, writes under ~/.local;',
       '# --dry-run prints the plan, --version X pins or rolls back, --uninstall reverses it.',
       '',
-      'fluxctl --version   # 0.4.17',
+      'fluxctl --version   # 0.4.18',
       'fluxctl agent --help',
     ].join('\n'),
   },
@@ -458,7 +458,7 @@ function Install() {
             <p className={styles.lead}>
               The installer downloads the release package for your machine, verifies its SHA-256 and links the binaries
               into <code>~/.local/bin</code>. Run it again to upgrade; <code>--version</code> rolls back. Current is{' '}
-              <strong>0.4.17</strong> on macOS: <code>fluxctl agent</code>, sessions and <code>--host-gpu</code> are in the
+              <strong>0.4.18</strong> on macOS: <code>fluxctl agent</code>, sessions and <code>--host-gpu</code> are in the
               package (<code>fluxctl agent --help</code> confirms it).
             </p>
           </div>
