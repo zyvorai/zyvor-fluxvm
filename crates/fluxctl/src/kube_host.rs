@@ -3088,6 +3088,7 @@ mod tests {
             active: Some("09:00-19:00".into()),
             weekdays: true,
             eco: true,
+            keep_auto: 1,
             ..Default::default()
         };
         assert_eq!(
@@ -3099,6 +3100,7 @@ mod tests {
         for bad in ["9-19", "09:00", "25:00-26:00", "09:00-09:00"] {
             let f = SuperviseFlags {
                 active: Some(bad.into()),
+                keep_auto: 1,
                 ..Default::default()
             };
             assert!(f.check().is_err(), "{bad}");
