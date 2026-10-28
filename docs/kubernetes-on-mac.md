@@ -26,6 +26,7 @@ and `*.localhost` names, and the loop from a saved file to a running pod takes a
 | keep a database across rebuilds | `kube db-backup APP`, `kube db-restore APP FILE` | [`db-backup`](#keep-your-data-when-you-rebuild-db-backup) |
 | open `https://app.localhost` | `kube trust` (and `kube up --traefik` for Ingress hosts) | [Ingress](#ingress-hosts-just-work), [HTTPS](#https-kube-trust) |
 | run the code I am writing | `kube dev` (rebuild an image), `kube sync` (copy files, no build), `kube load` (copy an image in) | [`kube dev`](#save-a-file-the-cluster-runs-it-kube-dev), [`kube sync`](#reload-without-rebuilding-kube-sync), [Images](#images) |
+| see what changed between two checkpoints | `kube diff`, `kube timeline` | [`kube diff`](#what-changed-kube-diff-and-kube-timeline) |
 | undo a mistake or find when it broke | `kube checkpoint`, `kube restore`, `kube checkpoints`, `kube checkpoint-rm`, `kube try`, `kube undo`, `kube bisect` | [Time travel](#time-travel-for-your-cluster) |
 | start clean every time | `kube golden`, `kube reset`, `kube matrix` | [A clean start](#a-clean-start-every-time) |
 | see whether my app copes with failure | `kube chaos` | [Break it on purpose](#break-it-on-purpose) |
@@ -399,6 +400,34 @@ fluxctl kube bisect -- sh -c '! kubectl get cm bad'
 Proved on a real cluster: 7 automatic checkpoints a minute apart, a ConfigMap created between the third and the fourth, and a test that
 fails while it exists. Bisect restored 5 checkpoints in 54 seconds, named the checkpoint taken just after the change, and put the cluster
 back in its broken present.
+
+### What changed: `kube diff` and `kube timeline`
+
+Every checkpoint is saved with a small inventory of what ran in the cluster at that moment: each Deployment, StatefulSet, DaemonSet, CronJob,
+Service, Ingress, PersistentVolumeClaim, ConfigMap, Secret and Namespace, with its images, its replica count and a hash of its spec (the
+cluster's own `kube-system` objects are left out). Two inventories compare without starting either checkpoint:
+
+```bash
+fluxctl kube diff                  # the newest checkpoint against the cluster now
+fluxctl kube diff before-upgrade   # that checkpoint against now
+fluxctl kube diff auto-20261027-100000 try-20261027-113012345
+fluxctl kube timeline              # every checkpoint, with what changed since the one before
+```
+
+```
+~ Deployment/shop/web: image web:1.4 -> web:1.5, replicas 2 -> 5, spec changed
++ Deployment/shop/worker
+- Service/shop/legacy
+(+1 -1 ~1)
+```
+
+This answers "what changed between when it worked and now" without a restore. Secret values are hashed on the Mac and never stored, so a changed
+Secret shows only as `data changed`. The inventory costs one `kubectl get` before the snapshot, with a 20 s limit: a cluster that does not answer
+still gets its checkpoint, just without an inventory. Checkpoints made before this existed show as `no inventory`. The inventories are small files
+under the daemon's run directory and go away with their checkpoint.
+
+Status: the inventory, the comparison, the secret handling, the file format and the timeline are unit-tested. Not run: on a real cluster, so the
+`kubectl get` call and the extra time per checkpoint are unmeasured.
 
 ### A clean start every time
 

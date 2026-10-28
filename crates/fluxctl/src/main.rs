@@ -43,6 +43,7 @@ mod kube_chaos;
 mod kube_checkpoint;
 mod kube_cp;
 mod kube_dev;
+mod kube_diff;
 mod kube_doctor;
 mod kube_forward;
 mod kube_git;
@@ -525,6 +526,21 @@ enum KubeCommand {
         /// How long to stay open (1 to 480).
         #[arg(long, default_value_t = 60)]
         minutes: u64,
+    },
+    /// What changed in the cluster between two checkpoints, or since one: objects added, removed or changed (images,
+    /// replicas, spec), without starting anything. `A` defaults to the newest checkpoint, `B` to `now`.
+    Diff {
+        #[command(flatten)]
+        cluster: KubeArgs,
+        /// A checkpoint label, or `now`.
+        a: Option<String>,
+        /// A checkpoint label, or `now`.
+        b: Option<String>,
+    },
+    /// Every checkpoint, newest first, with what changed since the one before it: git log for the cluster.
+    Timeline {
+        #[command(flatten)]
+        cluster: KubeArgs,
     },
     /// The cluster follows your git branch: a `post-checkout` hook saves the cluster for the branch you leave and puts back the
     /// one saved for the branch you enter (about 10 s), so each branch has its own databases and deployed state.
@@ -8519,6 +8535,15 @@ async fn kube_command<A: run::VmApi>(api: &A, command: KubeCommand) -> Result<()
             minutes,
         } => {
             kube_share::run(api, &cluster.options()?, &service, port, minutes).await?;
+        }
+        KubeCommand::Diff { cluster, a, b } => {
+            println!(
+                "{}",
+                kube_diff::run(api, &cluster.options()?, a.as_deref(), b.as_deref()).await?
+            );
+        }
+        KubeCommand::Timeline { cluster } => {
+            println!("{}", kube_diff::timeline(api, &cluster.options()?).await?);
         }
         KubeCommand::Git { command } => match command {
             KubeGitCommand::Hook { cluster } => kube_git::hook(api, &cluster.options()?).await?,
