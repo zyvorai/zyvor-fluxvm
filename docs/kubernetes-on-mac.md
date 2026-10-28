@@ -43,6 +43,10 @@ and `*.localhost` names, and the loop from a saved file to a running pod takes a
 | have the cluster follow my git branch | `kube git install` | [`kube git`](#the-cluster-follows-your-branch-kube-git) |
 | let pods call a program on my Mac | `kube host NAME PORT` | [`kube host`](#call-your-mac-from-a-pod-kube-host) |
 | run an image that is only built for Intel | `kube up --rosetta` | [Intel-only images](#intel-only-images---rosetta) |
+| let an AI agent (Claude, Cursor) operate the cluster | `fluxctl mcp serve` (kube tools; writes need `--allow-write`) | [MCP tools](#let-an-ai-agent-operate-the-cluster-mcp-tools) |
+| park the cluster outside working hours or on low power | `kube supervise --active 09:00-19:00 --weekdays --eco` | [Working hours](#sleep-and-wake) |
+| trust HTTPS in the iOS simulator | `kube trust --simulator` | [HTTPS](#https-kube-trust) |
+| give freed disk space back to the Mac | `kube trim` | [`kube trim`](#give-disk-space-back-kube-trim) |
 | work without internet | `kube fetch DIR`, `kube up --offline DIR` | [Without internet](#without-internet-on-first-boot) |
 
 Most sections say what was proved on a real cluster and what was not; read those lines before relying on a feature.
