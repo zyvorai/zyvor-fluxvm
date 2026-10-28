@@ -78,6 +78,41 @@ const FEATURES: Feature[] = [
     cmd: 'kube pin',
   },
   {
+    title: 'Show it on your phone',
+    body: 'Open a Service to a phone on the same Wi-Fi with a QR code, a time limit and a private-network-only filter.',
+    cmd: 'kube share web',
+  },
+  {
+    title: 'Intel images just run',
+    body: 'Give the cluster VM the Mac\'s Rosetta so amd64-only images start instead of failing.',
+    cmd: 'kube up --rosetta',
+  },
+  {
+    title: 'Call your Mac from a pod',
+    body: 'Make a program on the Mac, such as a model server or Postgres.app, a Service the pods reach by name.',
+    cmd: 'kube host model 11434',
+  },
+  {
+    title: 'Follows your git branch',
+    body: 'Switch branches and the cluster is saved for the one you leave and restored for the one you enter.',
+    cmd: 'kube git install',
+  },
+  {
+    title: 'What changed since it worked',
+    body: 'Compare two checkpoints, or one against now: images, replicas and config, without starting anything.',
+    cmd: 'kube diff',
+  },
+  {
+    title: 'Let an AI agent drive it',
+    body: 'MCP tools for status, doctor, checkpoints and diff; applying a manifest takes a checkpoint first.',
+    cmd: 'fluxctl mcp serve --allow-write',
+  },
+  {
+    title: 'Works your hours',
+    body: 'Sleep outside working hours and on low power, wake when the day starts.',
+    cmd: 'kube supervise --active 09:00-19:00 --eco',
+  },
+  {
     title: 'In the menu bar',
     body: 'Pod count, failing pods and one-click Sleep and Wake, through SwiftBar or xbar.',
     cmd: 'kube menubar',
