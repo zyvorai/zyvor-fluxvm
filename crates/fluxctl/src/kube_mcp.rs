@@ -199,7 +199,12 @@ pub fn tools(remote: Arc<Remote>) -> Vec<Tool> {
             |r, args| async move {
                 timed(SLOW, async {
                     let o = options(&args)?;
-                    kube_checkpoint::checkpoint(&*r, &o, str_arg(&args, "label").unwrap_or_default()).await
+                    kube_checkpoint::checkpoint(
+                        &*r,
+                        &o,
+                        str_arg(&args, "label").unwrap_or_default(),
+                    )
+                    .await
                 })
                 .await
             },
@@ -216,7 +221,8 @@ pub fn tools(remote: Arc<Remote>) -> Vec<Tool> {
             |r, args| async move {
                 timed(SLOW, async {
                     let o = options(&args)?;
-                    kube_checkpoint::restore(&*r, &o, str_arg(&args, "label").unwrap_or_default()).await
+                    kube_checkpoint::restore(&*r, &o, str_arg(&args, "label").unwrap_or_default())
+                        .await
                 })
                 .await
             },
@@ -278,7 +284,11 @@ mod tests {
             assert!(tool.name.starts_with("kube_"));
             assert!(tool.description.len() > 20, "{}", tool.name);
             assert_eq!(tool.schema["type"], "object", "{}", tool.name);
-            assert!(tool.schema["properties"]["cluster"].is_object(), "{}", tool.name);
+            assert!(
+                tool.schema["properties"]["cluster"].is_object(),
+                "{}",
+                tool.name
+            );
         }
         let apply = t.iter().find(|t| t.name == "kube_apply").unwrap();
         assert_eq!(apply.schema["required"], json!(["manifest"]));
@@ -286,11 +296,17 @@ mod tests {
 
     #[test]
     fn the_cluster_defaults_and_a_bad_name_is_refused() {
-        assert_eq!(options(&json!({})).unwrap().name, KubeOptions::default().name);
+        assert_eq!(
+            options(&json!({})).unwrap().name,
+            KubeOptions::default().name
+        );
         assert_eq!(options(&json!({"cluster": "dev"})).unwrap().name, "dev");
         assert!(options(&json!({"cluster": "Dev; rm -rf"})).is_err());
         // Clients often send an empty string for "not given".
-        assert_eq!(options(&json!({"cluster": ""})).unwrap().name, KubeOptions::default().name);
+        assert_eq!(
+            options(&json!({"cluster": ""})).unwrap().name,
+            KubeOptions::default().name
+        );
     }
 
     #[test]
@@ -299,7 +315,12 @@ mod tests {
         assert!(check_manifest("").is_err());
         assert!(check_manifest("  \n\t").is_err());
         let big = "a".repeat(MAX_MANIFEST + 1);
-        assert!(check_manifest(&big).unwrap_err().to_string().contains("limit"));
+        assert!(
+            check_manifest(&big)
+                .unwrap_err()
+                .to_string()
+                .contains("limit")
+        );
     }
 
     #[test]
@@ -309,7 +330,9 @@ mod tests {
             "deployment.apps/web configured\n",
             "~ Deployment/shop/web: replicas 2 -> 5\n(+0 -0 ~1)",
         );
-        assert!(r.starts_with("deployment.apps/web configured\n\nChanged since the checkpoint try-20261027-100000000:"));
+        assert!(r.starts_with(
+            "deployment.apps/web configured\n\nChanged since the checkpoint try-20261027-100000000:"
+        ));
         assert!(r.contains("replicas 2 -> 5"));
         assert!(r.ends_with("call kube_undo (it restores try-20261027-100000000)."));
     }
@@ -323,8 +346,16 @@ mod tests {
         let (mut client, server_end) = tokio::io::duplex(1 << 20);
         s.serve(input.as_bytes(), server_end).await.unwrap();
         let mut buf = String::new();
-        tokio::io::AsyncReadExt::read_to_string(&mut client, &mut buf).await.unwrap();
-        assert!(buf.contains("kube_status") && buf.contains("kube_diff"), "{buf}");
-        assert!(!buf.contains("kube_apply") && !buf.contains("kube_undo"), "{buf}");
+        tokio::io::AsyncReadExt::read_to_string(&mut client, &mut buf)
+            .await
+            .unwrap();
+        assert!(
+            buf.contains("kube_status") && buf.contains("kube_diff"),
+            "{buf}"
+        );
+        assert!(
+            !buf.contains("kube_apply") && !buf.contains("kube_undo"),
+            "{buf}"
+        );
     }
 }

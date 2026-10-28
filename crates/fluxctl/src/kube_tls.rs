@@ -150,7 +150,8 @@ pub fn simulator_failure(stderr: &str) -> String {
     if e.contains("No devices are booted") || e.contains("Unable to find a device") {
         "no simulator is booted: start one in Xcode (or `xcrun simctl boot DEVICE`), then run this again".to_owned()
     } else if e.contains("unable to find utility") || e.contains("xcrun: error") {
-        "Xcode's command line tools are not installed or selected (`xcode-select --install`)".to_owned()
+        "Xcode's command line tools are not installed or selected (`xcode-select --install`)"
+            .to_owned()
     } else if e.is_empty() {
         "xcrun simctl failed".to_owned()
     } else {
@@ -299,14 +300,26 @@ mod tests {
         let a = simulator_args(std::path::Path::new("/Users/me/.fluxvm/ca.pem"));
         assert_eq!(
             a,
-            ["simctl", "keychain", "booted", "add-root-cert", "/Users/me/.fluxvm/ca.pem"]
+            [
+                "simctl",
+                "keychain",
+                "booted",
+                "add-root-cert",
+                "/Users/me/.fluxvm/ca.pem"
+            ]
         );
     }
 
     #[test]
     fn a_failed_simctl_is_explained() {
-        assert!(simulator_failure("Unable to find a device matching the provided UDID").contains("no simulator is booted"));
-        assert!(simulator_failure("xcrun: error: unable to find utility \"simctl\"").contains("xcode-select"));
+        assert!(
+            simulator_failure("Unable to find a device matching the provided UDID")
+                .contains("no simulator is booted")
+        );
+        assert!(
+            simulator_failure("xcrun: error: unable to find utility \"simctl\"")
+                .contains("xcode-select")
+        );
         assert_eq!(simulator_failure(""), "xcrun simctl failed");
         assert_eq!(simulator_failure("boom\n"), "xcrun simctl failed: boom");
     }
