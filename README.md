@@ -67,7 +67,7 @@ Measured on one Apple M4 with macOS 27.2. Multi-Mac fleets are not yet verified 
 
 ## What's new
 
-From the [CHANGELOG](CHANGELOG.md) (0.4.x, current release **0.4.16**) and recent commits:
+From the [CHANGELOG](CHANGELOG.md) (0.4.x, current release **0.4.17**) and recent commits:
 
 | Feature | What it does |
 |---|---|
