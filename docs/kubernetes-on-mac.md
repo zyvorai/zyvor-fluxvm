@@ -1,7 +1,7 @@
 # Kubernetes on a Mac (`fluxctl kube`)
 
-`fluxctl kube` runs **a [k3s](https://k3s.io) cluster in managed FluxVM VMs (one server, and workers if you ask), with Cilium for
-the pod network, its API server and a kubeconfig on your Mac.** It is the FluxVM counterpart of `colima start --kubernetes`, built the same way as [`fluxctl docker`](docker-engine.md):
+`fluxctl kube` runs **a [k3s](https://k3s.io) cluster in managed FluxVM VMs (one server, and workers if you ask), with k3s's bundled
+flannel for the pod network (Cilium is opt-in), its API server and a kubeconfig on your Mac.** It is the FluxVM counterpart of `colima start --kubernetes`, built the same way as [`fluxctl docker`](docker-engine.md):
 a Debian 13 VM, folders shared at matching paths, and a supervised SSH forward.
 
 Because the cluster is a VM, it can do things a Linux kind or minikube cluster cannot: **save the whole running machine in about a
@@ -89,7 +89,7 @@ fluxctl kube down --purge                        # delete the VM, the cluster's 
 | `--share HOST[:GUEST][:ro]` | Share a Mac folder into the VM at the same path, for `hostPath` volumes. Fixed at creation. |
 | `--k3s-version v1.31.4+k3s1` | Pin the k3s release (default: the installer's stable channel). Fixed at creation. |
 | `--k3s-arg=--disable=metrics-server` | Extra `k3s server` argument. Repeatable. Fixed at creation. |
-| `--cni cilium\|flannel` | The pod network (default `cilium`; `flannel` with `--offline`). See [The pod network](#the-pod-network). Fixed at creation. |
+| `--cni cilium\|flannel` | The pod network (default `flannel`; `cilium` is opt-in and not with `--offline`). See [The pod network](#the-pod-network). Fixed at creation. |
 | `--cilium-version 1.20.3` | The Cilium chart to install. |
 | `--traefik` | Keep k3s's bundled Traefik ingress (off by default). |
 | `--workers N` | Add N agent nodes (0 to 8), each its own VM named `NAME-w1`… and joined to the server. See [More than one node](#more-than-one-node). |
@@ -101,14 +101,30 @@ Options marked "fixed at creation" are baked into the VM's first boot. To change
 
 ## The pod network
 
-Cilium is the default. k3s starts with `--flannel-backend=none --disable-network-policy`, and the server gets a `HelmChart` manifest
-(a root-only file written by cloud-init) that k3s's built-in helm controller turns into a Cilium install from `helm.cilium.io`, with
-the chart version pinned. The node becomes Ready once Cilium is up, which adds a minute or two to the first boot. Cilium also enforces
-`NetworkPolicy`. kube-proxy stays on, so Services work as in stock k3s.
+Flannel, k3s's bundled pod network, is the default, with its `host-gw` backend: pod traffic is routed, not wrapped in VXLAN (a VM has nothing to tunnel through), so the pod MTU is 1500 and there is less CPU work. The nodes of a multi-node cluster share a layer-2 network (the private card), which `host-gw` needs; `--k3s-arg=--flannel-backend=vxlan` brings the old backend back. The node is Ready about two and a half minutes after the first boot starts, and
+`NetworkPolicy` is enforced by k3s's own controller. With workers, flannel is told to use the private network card
+(`--flannel-iface`); its default is the card with the default route, which is the NAT card, and VMs cannot reach each other over NAT.
 
-`--cni flannel` keeps k3s's bundled flannel. It is the default with `--offline`, because Cilium's chart and images come from the
-internet (`--offline --cni cilium` is refused). With workers, flannel is told to use the private network card (`--flannel-iface`);
-its default is the card with the default route, which is the NAT card, and VMs cannot reach each other over NAT.
+`--cni cilium` installs Cilium instead: k3s starts with `--flannel-backend=none --disable-network-policy`, and the server gets a
+`HelmChart` manifest (a root-only file written by cloud-init) that k3s's built-in helm controller turns into a Cilium install from
+`helm.cilium.io`, with the chart version pinned. kube-proxy stays on. It needs the internet (`--offline --cni cilium` is refused) and
+it is the only way to get the Studio Traffic map.
+
+**Cilium is not the default because it did not come up on the test machine.** On a Mac mini (Apple silicon, 0.4.17) a Cilium cluster
+stayed `NotReady` while Cilium's agent started, and the guest then stopped answering ping and SSH; the same VM and k3s with flannel
+was Ready in about 160 seconds. The cause is not known. If you use `--cni cilium`, `kube up` names the Cilium pod it is waiting for.
+
+## Reach pods and Services from the Mac: `kube route`
+
+The cluster VM routes its own pod network (10.42.0.0/16) and Service network (10.43.0.0/16), but the Mac has no route to either, so a pod IP or a ClusterIP only answers inside the cluster. `fluxctl kube route` prints the two commands that send both ranges through the VM's address:
+
+```
+fluxctl kube route            # prints them, and says whether the routes are missing or out of date
+fluxctl kube route --install  # runs them (asks for your password)
+fluxctl kube route --remove --install
+```
+
+After that `curl http://<pod ip>:<port>` and `curl http://<service clusterIP>:<port>` work from the Mac. The routes are not saved across a reboot, and the VM's address (DHCP) can change when it restarts, so run `kube route --install` again if they stop answering. It knows k3s's default ranges only and refuses a cluster started with `--cluster-cidr` or `--service-cidr`. Whether the routes work end to end on a live cluster has not been checked yet.
 
 ## More than one node
 
@@ -127,8 +143,8 @@ The default FluxVM network keeps each VM apart from the others (two VMs on it ca
 workers puts every node on a second, private network named after the cluster (`apple.networks`, a `10.89.N.0/24` subnet with its own
 switch, see [macos.md](macos.md)). The nodes advertise that address (`--node-ip`) and workers join the server through it, so node
 and pod traffic stay on the private network while the first card still gives each VM internet access and the Mac its SSH route.
-A pod on one node reaches a service on another; `scripts/kube-live-test.sh` checks that for Cilium and, with `FLUXVM_LIVE_CNI=flannel`,
-for flannel.
+A pod on one node reaches a service on another; `scripts/kube-live-test.sh` checks that for flannel and, with `FLUXVM_LIVE_CNI=cilium`,
+for Cilium.
 
 * **Decide on workers when you create the cluster.** Only VMs created with `--workers` get the private card. A cluster created
   without it cannot gain workers later: `up --workers N` stops with a message, and you `down --purge` and start again.
@@ -311,8 +327,8 @@ special role; the few changes below need the daemon's admin role.
   verbs and status codes; a line that carries its own ANSI colours keeps them), with a `-word` filter, tail size, the previous
   instance, follow, wrap, copy and download. **Shell** opens `/bin/sh` or `bash` in the container over the cluster's own `exec`; it
   needs the daemon's admin role, and an image without a shell (distroless) has nothing to open.
-* **Traffic:** who talks to whom, as a service map from Cilium's Hubble flows (so it needs the default `--cni cilium`; a flannel
-  cluster says so). Workloads are boxes, calls are arrows weighted by flow count, red where packets were dropped; click a workload
+* **Traffic:** who talks to whom, as a service map from Cilium's Hubble flows (so it needs `--cni cilium`; a flannel
+  cluster, the default, says so). Workloads are boxes, calls are arrows weighted by flow count, red where packets were dropped; click a workload
   for what it calls and what calls it, filter by namespace, name or port, and show or hide system pods. The daemon asks each Cilium
   agent for its recent flows with `hubble observe`, counts each packet event once (on the sender's node, replies skipped) and folds
   them into workload-to-workload edges. The window is however long each node's flow buffer (a few thousand flows) covers.
