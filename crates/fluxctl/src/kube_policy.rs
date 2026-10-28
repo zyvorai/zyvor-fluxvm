@@ -131,7 +131,10 @@ impl Policy {
                     .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
                     .unwrap_or_default()
             };
-            (low_power_mode(&out(&["-g"])), thermal_pressure(&out(&["-g", "therm"])))
+            (
+                low_power_mode(&out(&["-g"])),
+                thermal_pressure(&out(&["-g", "therm"])),
+            )
         } else {
             (false, false)
         };
@@ -173,10 +176,23 @@ mod tests {
     fn windows_are_read_and_bad_ones_refused() {
         assert_eq!(
             parse_window("09:00-19:30").unwrap(),
-            Window { start: at(9, 0), end: at(19, 30) }
+            Window {
+                start: at(9, 0),
+                end: at(19, 30)
+            }
         );
         assert_eq!(parse_window(" 9:05 - 17:00 ").unwrap().start, at(9, 5));
-        for bad in ["", "9", "09:00", "09:00-", "25:00-26:00", "09:60-10:00", "ab-cd", "09:00-09:00", "09:00-19:00-20:00"] {
+        for bad in [
+            "",
+            "9",
+            "09:00",
+            "09:00-",
+            "25:00-26:00",
+            "09:60-10:00",
+            "ab-cd",
+            "09:00-09:00",
+            "09:00-19:00-20:00",
+        ] {
             assert!(parse_window(bad).is_err(), "{bad:?}");
         }
     }
@@ -188,7 +204,9 @@ mod tests {
         assert!(!day.contains(at(8, 59)) && !day.contains(at(19, 0)));
         let night = parse_window("22:00-06:00").unwrap();
         assert!(night.contains(at(23, 0)) && night.contains(at(0, 0)) && night.contains(at(5, 59)));
-        assert!(!night.contains(at(6, 0)) && !night.contains(at(12, 0)) && !night.contains(at(21, 59)));
+        assert!(
+            !night.contains(at(6, 0)) && !night.contains(at(12, 0)) && !night.contains(at(21, 59))
+        );
     }
 
     #[test]
@@ -196,7 +214,10 @@ mod tests {
         let p = Policy::from_flags(Some("09:00-19:00"), true, false).unwrap();
         assert!(p.active_at((MON, at(10, 0))));
         assert!(!p.active_at((MON, at(20, 0))));
-        assert!(!p.active_at((SAT, at(10, 0))), "a Saturday is outside --weekdays");
+        assert!(
+            !p.active_at((SAT, at(10, 0))),
+            "a Saturday is outside --weekdays"
+        );
         // --weekdays alone: awake all day Monday to Friday, asleep at the weekend.
         let w = Policy::from_flags(None, true, false).unwrap();
         assert!(w.active_at((MON, at(3, 0))) && !w.active_at((SAT, at(12, 0))));
@@ -216,7 +237,11 @@ mod tests {
         assert!(!p.wake_due((MON, at(8, 0))));
         assert!(p.wake_due((MON, at(9, 0))));
         // Without a schedule there is nothing to wake for.
-        assert!(!Policy::from_flags(None, false, true).unwrap().wake_due((MON, 0)));
+        assert!(
+            !Policy::from_flags(None, false, true)
+                .unwrap()
+                .wake_due((MON, 0))
+        );
     }
 
     #[test]
@@ -225,7 +250,12 @@ mod tests {
         let r = eco.decide((MON, at(10, 0)), true, false).unwrap();
         assert_eq!(r.why, "Low Power Mode is on");
         assert!(!r.schedule, "an energy reason does not schedule a wake-up");
-        assert!(eco.decide((MON, at(10, 0)), false, true).unwrap().why.contains("heat"));
+        assert!(
+            eco.decide((MON, at(10, 0)), false, true)
+                .unwrap()
+                .why
+                .contains("heat")
+        );
         assert_eq!(eco.decide((MON, at(10, 0)), false, false), None);
         let off = Policy::default();
         assert_eq!(off.decide((MON, at(10, 0)), true, true), None);
@@ -233,12 +263,18 @@ mod tests {
 
     #[test]
     fn pmset_output_is_read() {
-        assert!(low_power_mode("System-wide power settings:\n sleep  1\n lowpowermode         1\n"));
+        assert!(low_power_mode(
+            "System-wide power settings:\n sleep  1\n lowpowermode         1\n"
+        ));
         assert!(!low_power_mode(" lowpowermode         0\n"));
         assert!(!low_power_mode(""));
-        assert!(thermal_pressure("CPU Power notify\n  CPU_Scheduler_Limit \t= 100\n  CPU_Speed_Limit \t= 70\n"));
+        assert!(thermal_pressure(
+            "CPU Power notify\n  CPU_Scheduler_Limit \t= 100\n  CPU_Speed_Limit \t= 70\n"
+        ));
         assert!(!thermal_pressure("  CPU_Speed_Limit \t= 100\n"));
-        assert!(!thermal_pressure("Note: No thermal warning level has been recorded\n"));
+        assert!(!thermal_pressure(
+            "Note: No thermal warning level has been recorded\n"
+        ));
         assert!(!thermal_pressure(""));
     }
 }

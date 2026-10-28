@@ -16,7 +16,9 @@ const PROBE: &str = r#"src=$(findmnt -no SOURCE / 2>/dev/null); [ -n "$src" ] &&
 pub(crate) fn discard_supported(probe: &str) -> Result<bool> {
     let word = probe.trim();
     if word.is_empty() || word == "none" {
-        bail!("could not find the VM's root block device, so trim cannot tell whether discards work");
+        bail!(
+            "could not find the VM's root block device, so trim cannot tell whether discards work"
+        );
     }
     let max: u64 = word
         .parse()
@@ -83,7 +85,10 @@ mod tests {
     fn fstrim_output_is_summed() {
         let out = "/boot: 100 MiB (104857600 bytes) trimmed on /dev/vda15\n/: 1.2 GiB (1288490188 bytes) trimmed on /dev/vda1\n";
         assert_eq!(trimmed_bytes(out), 104857600 + 1288490188);
-        assert_eq!(trimmed_bytes("fstrim: /: the discard operation is not supported\n"), 0);
+        assert_eq!(
+            trimmed_bytes("fstrim: /: the discard operation is not supported\n"),
+            0
+        );
     }
 
     #[test]

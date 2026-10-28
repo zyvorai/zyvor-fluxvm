@@ -58,9 +58,11 @@ impl Cni {
         }
     }
 
-    /// What `--cni` means when it is not given: Cilium, except offline.
-    pub fn default_for(offline: bool) -> Cni {
-        if offline { Cni::Flannel } else { Cni::Cilium }
+    /// What `--cni` means when it is not given: k3s's bundled flannel. Cilium is opt-in (`--cni cilium`): on the Mac
+    /// mini with 0.4.17 a Cilium cluster never became Ready (the guest lost its network while Cilium's agent started),
+    /// and the same VM with flannel was Ready in about 160 s.
+    pub fn default_choice() -> Cni {
+        Cni::Flannel
     }
 
     pub fn name(self) -> &'static str {
@@ -124,7 +126,7 @@ impl Default for KubeOptions {
             kubeconfig: None,
             workers: 0,
             offline: None,
-            cni: Cni::Cilium,
+            cni: Cni::default_choice(),
             cilium_version: CILIUM_VERSION.into(),
             no_merge: false,
             rosetta: false,
@@ -322,10 +324,16 @@ pub fn k3s_exec(o: &KubeOptions) -> String {
         a.push("--disable".into());
         a.push("traefik".into());
     }
-    if o.cni == Cni::Cilium {
-        // Cilium brings its own pod network and network policy.
-        a.push("--flannel-backend=none".into());
-        a.push("--disable-network-policy".into());
+    match o.cni {
+        Cni::Cilium => {
+            // Cilium brings its own pod network and network policy.
+            a.push("--flannel-backend=none".into());
+            a.push("--disable-network-policy".into());
+        }
+        // `host-gw` routes pod traffic without VXLAN: no encapsulation inside a VM that has nothing to tunnel through
+        // (MTU 1500 instead of 1450, less CPU). Workers share a layer-2 network (the private card), which it needs.
+        // A `--k3s-arg=--flannel-backend=…` given later wins.
+        Cni::Flannel => a.push("--flannel-backend=host-gw".into()),
     }
     a.extend(o.k3s_args.iter().cloned());
     a.join(" ")
@@ -2559,6 +2567,7 @@ mod tests {
         let o = KubeOptions {
             name: "dev".into(),
             workers: 2,
+            cni: Cni::Cilium,
             k3s_version: Some("v1.31.4+k3s1".into()),
             ..Default::default()
         };
@@ -2796,9 +2805,12 @@ mod tests {
     }
 
     #[test]
-    fn cilium_is_the_default_pod_network() {
-        let o = KubeOptions::default();
-        assert_eq!(o.cni, Cni::Cilium);
+    fn cilium_is_the_opt_in_pod_network() {
+        assert_eq!(KubeOptions::default().cni, Cni::Flannel);
+        let o = KubeOptions {
+            cni: Cni::Cilium,
+            ..Default::default()
+        };
         assert_eq!(o.cilium_version, CILIUM_VERSION);
         // k3s starts without flannel or its network-policy controller.
         let exec = k3s_exec(&o);
@@ -2845,7 +2857,9 @@ mod tests {
             cni: Cni::Flannel,
             ..Default::default()
         };
-        assert!(!k3s_exec(&o).contains("flannel"));
+        let exec = k3s_exec(&o);
+        assert!(exec.contains("--flannel-backend=host-gw"), "{exec}");
+        assert!(!exec.contains("--disable-network-policy"), "{exec}");
         let spec = kube_spec(&o, "u", "k", vec![]);
         assert_eq!(
             spec["cloud_init"]["write_files"].as_array().unwrap().len(),
@@ -2853,6 +2867,7 @@ mod tests {
         );
         assert!(validate(&o).is_ok());
         let offline = KubeOptions {
+            cni: Cni::Cilium,
             offline: Some("/Users/me/k3s".into()),
             ..Default::default()
         };
@@ -2863,8 +2878,7 @@ mod tests {
             ..offline
         };
         assert!(validate(&flannel_offline).is_ok());
-        assert_eq!(Cni::default_for(true), Cni::Flannel);
-        assert_eq!(Cni::default_for(false), Cni::Cilium);
+        assert_eq!(Cni::default_choice(), Cni::Flannel);
         assert_eq!(Cni::parse("cilium").unwrap(), Cni::Cilium);
         assert!(Cni::parse("calico").is_err());
     }

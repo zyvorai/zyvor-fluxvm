@@ -160,7 +160,10 @@ pub fn backup(destination: bool, excluded: Option<bool>, never_indexed: bool) ->
 pub fn exclude_from_backup(dir: &std::path::Path) -> Result<()> {
     std::fs::create_dir_all(dir)?;
     // A sticky exclusion: it follows the folder and needs no password.
-    let out = Command::new("tmutil").arg("addexclusion").arg(dir).output()?;
+    let out = Command::new("tmutil")
+        .arg("addexclusion")
+        .arg(dir)
+        .output()?;
     if !out.status.success() {
         anyhow::bail!(
             "tmutil addexclusion failed: {}",
@@ -790,10 +793,18 @@ mod tests {
 
     #[test]
     fn time_machine_answers_are_read() {
-        assert_eq!(parse_isexcluded("[Excluded]    /Users/me/Library/Application Support/FluxVM"), Some(true));
-        assert_eq!(parse_isexcluded("[Included]    /Users/me/Library/Application Support/FluxVM"), Some(false));
+        assert_eq!(
+            parse_isexcluded("[Excluded]    /Users/me/Library/Application Support/FluxVM"),
+            Some(true)
+        );
+        assert_eq!(
+            parse_isexcluded("[Included]    /Users/me/Library/Application Support/FluxVM"),
+            Some(false)
+        );
         assert_eq!(parse_isexcluded(""), None);
-        assert!(has_destination("====================================================\nName          : Backup Disk\nKind          : Local\n"));
+        assert!(has_destination(
+            "====================================================\nName          : Backup Disk\nKind          : Local\n"
+        ));
         assert!(!has_destination("tmutil: No destinations configured.\n"));
         assert!(!has_destination(""));
     }
@@ -803,11 +814,20 @@ mod tests {
         // Backed up and indexed: warn, with the repair.
         let c = backup(true, Some(false), false);
         assert_eq!(c.level, Level::Warn);
-        assert!(c.detail.contains("Time Machine backs it up and Spotlight indexes it"), "{}", c.detail);
+        assert!(
+            c.detail
+                .contains("Time Machine backs it up and Spotlight indexes it"),
+            "{}",
+            c.detail
+        );
         assert_eq!(c.remedy, Some(Remedy::ExcludeFromBackup));
         // No Time Machine destination: only Spotlight can be wrong.
         let c = backup(false, Some(false), false);
-        assert!(c.detail.contains("Spotlight indexes it") && !c.detail.contains("Time Machine"), "{}", c.detail);
+        assert!(
+            c.detail.contains("Spotlight indexes it") && !c.detail.contains("Time Machine"),
+            "{}",
+            c.detail
+        );
         // Everything excluded: fine.
         assert_eq!(backup(true, Some(true), true).level, Level::Ok);
         assert_eq!(backup(false, None, true).level, Level::Ok);
@@ -819,7 +839,10 @@ mod tests {
     fn the_backup_repair_runs_on_the_mac_and_is_planned_once() {
         assert!(Remedy::ExcludeFromBackup.on_mac());
         assert!(!Remedy::StepClock.on_mac());
-        let checks = vec![backup(true, Some(false), false), backup(true, Some(false), true)];
+        let checks = vec![
+            backup(true, Some(false), false),
+            backup(true, Some(false), true),
+        ];
         assert_eq!(plan(&checks), vec![Remedy::ExcludeFromBackup]);
         assert!(Remedy::ExcludeFromBackup.label().contains("Time Machine"));
     }

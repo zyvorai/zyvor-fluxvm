@@ -44,7 +44,6 @@ mod kube_checkpoint;
 mod kube_cp;
 mod kube_dev;
 mod kube_diff;
-mod kube_trim;
 mod kube_doctor;
 mod kube_forward;
 mod kube_git;
@@ -56,13 +55,15 @@ mod kube_menubar;
 mod kube_names;
 mod kube_notify;
 mod kube_pin;
+mod kube_policy;
 mod kube_project;
 mod kube_prompt;
-mod kube_policy;
 mod kube_ps;
+mod kube_route;
 mod kube_share;
 mod kube_sync;
 mod kube_tls;
+mod kube_trim;
 mod launch_agent;
 mod mcp;
 mod mcp_install;
@@ -309,8 +310,9 @@ struct KubeArgs {
     /// digits and - _ . / only). Only applies when a VM is created.
     #[arg(long, value_name = "DIR")]
     offline: Option<std::path::PathBuf>,
-    /// The pod network: `cilium` (default) or `flannel`, k3s's bundled one. Cilium is installed from helm.cilium.io on first
-    /// boot, so with `--offline` the default is `flannel`. Only applies when a VM is created.
+    /// The pod network: `flannel` (default), k3s's bundled one, or `cilium`, installed from helm.cilium.io on first boot
+    /// (not with `--offline`). Cilium is opt-in: it did not come up on the Mac mini test machine. Only applies when a VM
+    /// is created.
     #[arg(long, value_name = "cilium|flannel")]
     cni: Option<String>,
     /// The Cilium chart version to install.
@@ -330,7 +332,7 @@ impl KubeArgs {
     fn options(&self) -> Result<kube_host::KubeOptions> {
         let cni = match &self.cni {
             Some(c) => kube_host::Cni::parse(c)?,
-            None => kube_host::Cni::default_for(self.offline.is_some()),
+            None => kube_host::Cni::default_choice(),
         };
         Ok(kube_host::KubeOptions {
             name: self.name.clone(),
@@ -519,6 +521,19 @@ enum KubeCommand {
         /// only the simulators, never this Mac, so it asks for no password.
         #[arg(long, conflicts_with = "install")]
         simulator: bool,
+    },
+    /// Reach pod and Service addresses (10.42.0.0/16, 10.43.0.0/16) from this Mac: prints the two `route` commands that
+    /// send them through the cluster VM, and runs them with `--install` (asks for your password). The VM's address can
+    /// change when it restarts; run it again if they stop answering.
+    Route {
+        #[command(flatten)]
+        cluster: KubeArgs,
+        /// Run the route commands now (asks for your password).
+        #[arg(long)]
+        install: bool,
+        /// Show (or, with `--install`, run) the commands that take the routes out again.
+        #[arg(long)]
+        remove: bool,
     },
     /// Open a service to your phone or another computer on this Wi-Fi: prints an address and a QR code, and closes on Ctrl-C
     /// or after `--minutes`. Only private-network addresses are let in.
@@ -8592,6 +8607,16 @@ async fn kube_command<A: run::VmApi>(api: &A, command: KubeCommand) -> Result<()
         }
         KubeCommand::Trust { install, simulator } => {
             println!("{}", kube_tls::trust(install, simulator)?);
+        }
+        KubeCommand::Route {
+            cluster,
+            install,
+            remove,
+        } => {
+            println!(
+                "{}",
+                kube_route::run(api, &cluster.options()?, install, remove).await?
+            );
         }
         KubeCommand::Start { cluster, file, yes } => {
             kube_project::start(api, cluster.options()?, &file, yes).await?;
