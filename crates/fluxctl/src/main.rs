@@ -310,9 +310,9 @@ struct KubeArgs {
     /// digits and - _ . / only). Only applies when a VM is created.
     #[arg(long, value_name = "DIR")]
     offline: Option<std::path::PathBuf>,
-    /// The pod network: `flannel` (default), k3s's bundled one, or `cilium`, installed from helm.cilium.io on first boot
-    /// (not with `--offline`). Cilium is opt-in: it did not come up on the Mac mini test machine. Only applies when a VM
-    /// is created.
+    /// The pod network: `flannel`, k3s's bundled one (the default on macOS and with `--offline`), or `cilium`, installed
+    /// from helm.cilium.io on first boot (the default elsewhere; not with `--offline`). On a Mac Cilium did not come up on
+    /// the test machine, so it is opt-in there. Only applies when a VM is created.
     #[arg(long, value_name = "cilium|flannel")]
     cni: Option<String>,
     /// The Cilium chart version to install.
@@ -332,7 +332,7 @@ impl KubeArgs {
     fn options(&self) -> Result<kube_host::KubeOptions> {
         let cni = match &self.cni {
             Some(c) => kube_host::Cni::parse(c)?,
-            None => kube_host::Cni::default_choice(),
+            None => kube_host::Cni::default_for(self.offline.is_some()),
         };
         Ok(kube_host::KubeOptions {
             name: self.name.clone(),

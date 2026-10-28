@@ -110,7 +110,7 @@ Flannel, k3s's bundled pod network, is the default, with its `host-gw` backend: 
 `helm.cilium.io`, with the chart version pinned. kube-proxy stays on. It needs the internet (`--offline --cni cilium` is refused) and
 it is the only way to get the Studio Traffic map.
 
-**Cilium is not the default because it did not come up on the test machine.** On a Mac mini (Apple silicon, 0.4.17) a Cilium cluster
+**Cilium is not the default on a Mac because it did not come up on the test machine.** (On Linux, Cilium is the default; `--offline` always means flannel.) On a Mac mini (Apple silicon, 0.4.17) a Cilium cluster
 stayed `NotReady` while Cilium's agent started, and the guest then stopped answering ping and SSH; the same VM and k3s with flannel
 was Ready in about 160 seconds. The cause is not known. If you use `--cni cilium`, `kube up` names the Cilium pod it is waiting for.
 
