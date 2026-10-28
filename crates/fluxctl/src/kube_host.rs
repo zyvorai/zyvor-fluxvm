@@ -958,6 +958,34 @@ async fn ensure_one<A: VmApi>(
     Ok(id)
 }
 
+/// What the wait loop asks the guest for, to say why the node is not Ready yet.
+const PODS_PROBE: &str = "sudo k3s kubectl -n kube-system get pods --no-headers 2>/dev/null";
+
+/// A one-line reason the node is not Ready, from `kubectl -n kube-system get pods --no-headers`. The pod network
+/// (Cilium by default) has to run before a node turns Ready, so a Cilium pod that is not up is named first; an
+/// empty answer means k3s itself is still starting.
+fn blocker(pods: &str) -> String {
+    let rows: Vec<Vec<&str>> = pods
+        .lines()
+        .map(|l| l.split_whitespace().collect::<Vec<_>>())
+        .filter(|f| f.len() >= 3)
+        .collect();
+    if rows.is_empty() {
+        return "k3s is still starting, its API does not answer yet".into();
+    }
+    let up = |status: &str| matches!(status, "Running" | "Completed");
+    if let Some(f) = rows.iter().find(|f| f[0].contains("cilium") && !up(f[2])) {
+        return format!(
+            "Cilium is not ready ({} is {}); the node stays NotReady until the pod network runs, and the image pulls are slow on a slow link",
+            f[0], f[2]
+        );
+    }
+    match rows.iter().find(|f| !up(f[2])) {
+        Some(f) => format!("{} is {}", f[0], f[2]),
+        None => "all system pods are up, waiting for the node to report Ready".into(),
+    }
+}
+
 /// Waits until the server reports at least `want` Ready nodes and an OK `/readyz`.
 async fn wait_nodes(c: &Cluster, want: usize, started: Instant) -> Result<()> {
     let probe = format!(
@@ -990,7 +1018,16 @@ async fn wait_nodes(c: &Cluster, want: usize, started: Instant) -> Result<()> {
         let secs = started.elapsed().as_secs();
         if secs / 30 > last {
             last = secs / 30;
-            eprintln!("waiting for {want} node(s) to be Ready ({secs}s)…");
+            let pods = ssh(c, PODS_PROBE)
+                .stdin(Stdio::null())
+                .stderr(Stdio::null())
+                .output()
+                .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+                .unwrap_or_default();
+            eprintln!(
+                "waiting for {want} node(s) to be Ready ({secs}s): {}",
+                blocker(&pods)
+            );
         }
         tokio::time::sleep(Duration::from_secs(3)).await;
     }
@@ -2249,6 +2286,27 @@ pub fn agent_uninstall() -> Result<bool> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_wait_names_what_blocks_the_node() {
+        use super::blocker;
+        assert!(blocker("").contains("k3s is still starting"));
+        let pulling =
+            "coredns-1 0/1 Pending 0 10s\nhelm-install-cilium-x 0/1 ContainerCreating 0 10s\n";
+        let b = blocker(pulling);
+        assert!(
+            b.contains("Cilium is not ready")
+                && b.contains("helm-install-cilium-x is ContainerCreating"),
+            "{b}"
+        );
+        let crashing = "cilium-abc 0/1 CrashLoopBackOff 3 2m\ncoredns-1 0/1 Pending 0 2m\n";
+        assert!(blocker(crashing).contains("cilium-abc is CrashLoopBackOff"));
+        // a finished install job is fine; the next stuck pod is named instead
+        let next = "helm-install-cilium-x 0/1 Completed 0 1m\ncilium-abc 1/1 Running 0 1m\ncoredns-1 0/1 Pending 0 1m\n";
+        assert_eq!(blocker(next), "coredns-1 is Pending");
+        let all = "cilium-abc 1/1 Running 0 1m\ncoredns-1 1/1 Running 0 1m\n";
+        assert!(blocker(all).contains("waiting for the node to report Ready"));
+    }
+
     use super::*;
 
     const K3S_YAML: &str = "apiVersion: v1\nclusters:\n- cluster:\n    certificate-authority-data: QUJD\n    server: https://127.0.0.1:6443\n  name: default\ncontexts:\n- context:\n    cluster: default\n    user: default\n  name: default\ncurrent-context: default\nkind: Config\npreferences: {}\nusers:\n- name: default\n  user:\n    client-certificate-data: REVG\n    client-key-data: R0hJ\n";
@@ -3091,10 +3149,7 @@ mod tests {
             keep_auto: 1,
             ..Default::default()
         };
-        assert_eq!(
-            f.args(),
-            ["--active", "09:00-19:00", "--weekdays", "--eco"]
-        );
+        assert_eq!(f.args(), ["--active", "09:00-19:00", "--weekdays", "--eco"]);
         assert!(f.check().is_ok());
         assert!(f.policy().unwrap().enabled());
         for bad in ["9-19", "09:00", "25:00-26:00", "09:00-09:00"] {
