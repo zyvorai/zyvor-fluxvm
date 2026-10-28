@@ -15,6 +15,18 @@ and `*.localhost` names, and the loop from a saved file to a running pod takes a
 
 ![The Mac, 127.0.0.1 and the cluster VM: ports, names and commands](assets/kube/mac-like-linux.svg)
 
+## What 0.4.17 adds, in one picture
+
+![The commands 0.4.17 puts around the cluster VM](assets/kube/kube-0417-map.svg)
+
+Three groups, all talking to the same single-node cluster VM:
+
+* **Reach it from the Mac:** [`kube share`](#open-it-on-your-phone-kube-share) (open a service on your phone), [`kube prompt`](#in-your-shell-prompt-kube-prompt), [`kube host`](#call-your-mac-from-a-pod-kube-host) (pods call a service on the Mac) and the menu bar, Raycast, Alfred and Shortcuts entries.
+* **Operate it:** [`kube git`](#the-cluster-follows-your-branch-kube-git) (the cluster follows your branch), [`kube diff`](#what-changed-kube-diff-and-kube-timeline), [`kube doctor --fix`](#when-something-is-wrong-kube-doctor) and the [MCP tools](#let-an-ai-agent-operate-the-cluster-mcp-tools) for AI agents, which can run read-only.
+* **Keep it tidy:** working hours and eco mode (see [Keep it running](#keep-it-running)), [`kube trim`](#give-disk-space-back-kube-trim), backup exclusion, and `kube trust --simulator` for the iOS simulator. `kube up --rosetta` runs amd64 images through the Mac's Rosetta.
+
+These were built and unit-tested, and the release packages were installed and run, but the features were not exercised against a live cluster for 0.4.17. Whether the VM's disk passes discards through to the Mac (for `kube trim`) is still unconfirmed.
+
 ## Every command in one place
 
 | I want to… | Run | More |

@@ -1,0 +1,34 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 420" width="900" height="420" role="img" aria-label="Kubernetes on a Mac in 0.4.17: the cluster VM and the commands around it" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif">
+<title>Kubernetes on a Mac in 0.4.17: the cluster VM and the commands around it</title>
+<rect x="0.5" y="0.5" width="899" height="419" rx="14" fill="#f5f6f8" stroke="#d5d9e2"/>
+<defs><marker id="a" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#7b8296"/></marker></defs>
+<text x="450" y="32" font-size="18" fill="#1f2430" text-anchor="middle" font-weight="700">What 0.4.17 puts around the cluster VM</text>
+<rect x="30" y="60" width="250" height="130" rx="10" fill="#fff" stroke="#3b6fd4" stroke-width="2"/>
+<text x="155" y="84" font-size="14" fill="#1f2430" text-anchor="middle" font-weight="700">Reach it from the Mac</text>
+<text x="155" y="106" font-size="12" fill="#5d6577" text-anchor="middle">kube share   open on your phone</text>
+<text x="155" y="125" font-size="12" fill="#5d6577" text-anchor="middle">kube prompt   context in the shell</text>
+<text x="155" y="144" font-size="12" fill="#5d6577" text-anchor="middle">kube host   pods call the Mac</text>
+<text x="155" y="163" font-size="12" fill="#5d6577" text-anchor="middle">kube menubar, Raycast, Shortcuts</text>
+<rect x="325" y="60" width="250" height="130" rx="10" fill="#fff" stroke="#2f9e6e" stroke-width="2"/>
+<text x="450" y="84" font-size="14" fill="#1f2430" text-anchor="middle" font-weight="700">Operate it</text>
+<text x="450" y="106" font-size="12" fill="#5d6577" text-anchor="middle">kube git   cluster follows the branch</text>
+<text x="450" y="125" font-size="12" fill="#5d6577" text-anchor="middle">kube diff   what changed</text>
+<text x="450" y="144" font-size="12" fill="#5d6577" text-anchor="middle">kube doctor --fix   repair</text>
+<text x="450" y="163" font-size="12" fill="#5d6577" text-anchor="middle">MCP tools   AI agents, read-only mode</text>
+<rect x="620" y="60" width="250" height="130" rx="10" fill="#fff" stroke="#c47f17" stroke-width="2"/>
+<text x="745" y="84" font-size="14" fill="#1f2430" text-anchor="middle" font-weight="700">Keep it tidy</text>
+<text x="745" y="106" font-size="12" fill="#5d6577" text-anchor="middle">working hours and eco mode</text>
+<text x="745" y="125" font-size="12" fill="#5d6577" text-anchor="middle">kube trim   give disk back</text>
+<text x="745" y="144" font-size="12" fill="#5d6577" text-anchor="middle">backup exclusion</text>
+<text x="745" y="163" font-size="12" fill="#5d6577" text-anchor="middle">trust --simulator   iOS simulator</text>
+<path d="M155 190 V228 H450" stroke="#7b8296" stroke-width="2" fill="none" marker-end="url(#a)"/>
+<path d="M450 190 V228" stroke="#7b8296" stroke-width="2" fill="none" marker-end="url(#a)"/>
+<path d="M745 190 V228 H450" stroke="#7b8296" stroke-width="2" fill="none" marker-end="url(#a)"/>
+<rect x="200" y="232" width="500" height="110" rx="10" fill="#fff" stroke="#7b4fd0" stroke-width="2"/>
+<text x="450" y="256" font-size="14" fill="#1f2430" text-anchor="middle" font-weight="700">fluxctl kube  (one cluster, one VM)</text>
+<text x="450" y="278" font-size="12" fill="#5d6577" text-anchor="middle">k3s + Cilium in a Debian 13 FluxVM guest</text>
+<text x="450" y="297" font-size="12" fill="#5d6577" text-anchor="middle">--rosetta   run amd64 images through the Mac</text>
+<text x="450" y="316" font-size="12" fill="#5d6577" text-anchor="middle">checkpoints, try / undo, sleep / wake</text>
+<text x="450" y="372" font-size="12" fill="#5d6577" text-anchor="middle">Each command talks to the VM through the supervised SSH forward and the guest login agent.</text>
+<text x="450" y="396" font-size="12" fill="#5d6577" text-anchor="middle">Not yet proved on a live cluster: see the checklist in the release notes.</text>
+</svg>

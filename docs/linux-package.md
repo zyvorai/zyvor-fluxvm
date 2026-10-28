@@ -5,6 +5,14 @@ the ubuntu:22.04 build container (`.github/workflows/release-linux.yml`). Nothin
 are installed everywhere, by `scripts/install.sh` today and by the `.deb`/`.rpm` (and the pull installer, as it lands) (see
 the 10,000-node install plan).
 
+## How a release becomes packages
+
+![From version bump to installable packages](assets/kube/release-pipeline.svg)
+
+A version-bump PR (every crate, `Cargo.lock`, the changelog) is merged, then the tag is pushed. The tag starts `release-macos.yml` (a tarball attached to a draft release) and `release-linux.yml` (the x86_64 build, and an aarch64 cross build that is still experimental, so a green run is not proof the aarch64 packages exist). Publishing is followed by the Homebrew formula PR and the "current release" docs PR.
+
+If the Linux run cannot start, the same packages can be built by hand from the tag in the same `ubuntu:22.04` container: `scripts/package-linux.sh`, then `scripts/check-glibc-floor.sh <dir> 2.35`, then `scripts/package-linux-pkgs.sh`. For 0.4.17 the Linux x86_64 and aarch64 packages were built this way on a self-hosted server, checked (deb in Ubuntu 22.04, rpm in Fedora 43, each on its own architecture) and attached to the release, and the release notes say so.
+
 ## What is in it
 
 `packaging/files.txt` lists every file, one per line, and `scripts/package-linux.sh` builds exactly that. It fails when a

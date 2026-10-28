@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 400" width="900" height="400" role="img" aria-label="How a release becomes macOS and Linux packages" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif">
+<title>How a release becomes macOS and Linux packages</title>
+<rect x="0.5" y="0.5" width="899" height="399" rx="14" fill="#f5f6f8" stroke="#d5d9e2"/>
+<defs><marker id="a" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#7b8296"/></marker></defs>
+<text x="450" y="32" font-size="18" fill="#1f2430" text-anchor="middle" font-weight="700">From version bump to installable packages</text>
+<rect x="20" y="60" width="150" height="90" rx="10" fill="#fff" stroke="#3b6fd4" stroke-width="2"/>
+<text x="95" y="84" font-size="14" fill="#1f2430" text-anchor="middle" font-weight="700">Bump PR</text>
+<text x="95" y="106" font-size="12" fill="#5d6577" text-anchor="middle">24 crates + Cargo.lock</text>
+<text x="95" y="125" font-size="12" fill="#5d6577" text-anchor="middle">CHANGELOG</text>
+<rect x="200" y="60" width="150" height="90" rx="10" fill="#fff" stroke="#3b6fd4" stroke-width="2"/>
+<text x="275" y="84" font-size="14" fill="#1f2430" text-anchor="middle" font-weight="700">Tag vX.Y.Z</text>
+<text x="275" y="106" font-size="12" fill="#5d6577" text-anchor="middle">push triggers</text>
+<text x="275" y="125" font-size="12" fill="#5d6577" text-anchor="middle">both release workflows</text>
+<rect x="380" y="52" width="220" height="80" rx="10" fill="#fff" stroke="#2f9e6e" stroke-width="2"/>
+<text x="490" y="76" font-size="14" fill="#1f2430" text-anchor="middle" font-weight="700">release-macos.yml</text>
+<text x="490" y="98" font-size="12" fill="#5d6577" text-anchor="middle">tar.gz + sha256</text>
+<text x="490" y="117" font-size="12" fill="#5d6577" text-anchor="middle">draft release</text>
+<rect x="380" y="152" width="220" height="90" rx="10" fill="#fff" stroke="#2f9e6e" stroke-width="2"/>
+<text x="490" y="176" font-size="14" fill="#1f2430" text-anchor="middle" font-weight="700">release-linux.yml</text>
+<text x="490" y="198" font-size="12" fill="#5d6577" text-anchor="middle">ubuntu:22.04, glibc 2.35 gate</text>
+<text x="490" y="217" font-size="12" fill="#5d6577" text-anchor="middle">x86_64 + aarch64 (cross)</text>
+<rect x="380" y="262" width="220" height="90" rx="10" fill="#fff" stroke="#c47f17" stroke-width="2"/>
+<text x="490" y="286" font-size="14" fill="#1f2430" text-anchor="middle" font-weight="700">Fallback: build by hand</text>
+<text x="490" y="308" font-size="12" fill="#5d6577" text-anchor="middle">same container, dev server</text>
+<text x="490" y="327" font-size="12" fill="#5d6577" text-anchor="middle">say so in the release notes</text>
+<rect x="640" y="60" width="240" height="90" rx="10" fill="#fff" stroke="#7b4fd0" stroke-width="2"/>
+<text x="760" y="84" font-size="14" fill="#1f2430" text-anchor="middle" font-weight="700">GitHub release</text>
+<text x="760" y="106" font-size="12" fill="#5d6577" text-anchor="middle">macOS tar.gz, tarball, .deb, .rpm</text>
+<text x="760" y="125" font-size="12" fill="#5d6577" text-anchor="middle">each with a .sha256</text>
+<rect x="640" y="180" width="240" height="90" rx="10" fill="#fff" stroke="#7b4fd0" stroke-width="2"/>
+<text x="760" y="204" font-size="14" fill="#1f2430" text-anchor="middle" font-weight="700">After publishing</text>
+<text x="760" y="226" font-size="12" fill="#5d6577" text-anchor="middle">Homebrew formula PR</text>
+<text x="760" y="245" font-size="12" fill="#5d6577" text-anchor="middle">"current release" docs PR</text>
+<path d="M170 105 H200" stroke="#7b8296" stroke-width="2" fill="none" marker-end="url(#a)"/>
+<path d="M350 90 L380 90" stroke="#7b8296" stroke-width="2" fill="none" marker-end="url(#a)"/>
+<path d="M350 105 L380 190" stroke="#7b8296" stroke-width="2" fill="none" marker-end="url(#a)"/>
+<path d="M600 92 L640 100" stroke="#7b8296" stroke-width="2" fill="none" marker-end="url(#a)"/>
+<path d="M600 197 L640 130" stroke="#7b8296" stroke-width="2" fill="none" marker-end="url(#a)"/>
+<path d="M600 307 H620 V140 H640" stroke="#7b8296" stroke-width="2" stroke-dasharray="5 4" fill="none" marker-end="url(#a)"/>
+<path d="M760 150 V180" stroke="#7b8296" stroke-width="2" fill="none" marker-end="url(#a)"/>
+<text x="450" y="380" font-size="12" fill="#5d6577" text-anchor="middle">dashed: used for 0.4.17 when the Linux run stayed queued</text>
+</svg>
