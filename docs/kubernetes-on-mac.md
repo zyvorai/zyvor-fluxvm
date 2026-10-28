@@ -796,6 +796,12 @@ The supervisor starts the VM if it is stopped and restores the forward if it die
 automatic checkpoints, and sleeps and wakes the cluster. The plist carries `FLUXVM_URL` and
 `FLUXVM_VZ_RUNNER` when set, never a token.
 
+## Give disk space back: `kube trim`
+
+Deleting images and data inside the cluster VM does not shrink its disk file on the Mac by itself. `fluxctl kube trim` runs `fstrim` in the VM so the host can reclaim the freed blocks.
+
+It first asks the VM's root device for its discard limit. If that is 0, the disk does not pass discards through, and trim stops with that reason instead of pretending to free space. Whether your VM's disk honors discards is not yet confirmed on a real cluster; check with `du -sh` on the VM folder before and after.
+
 ## What this is not
 
 * No `kube fork` (a second running cluster from a checkpoint): FluxVM refuses to fork a VM on the Mac's NAT, because a saved machine state cannot be restored onto a different network attachment (the copy's network card comes up disconnected), and cluster VMs use that NAT. For a clean copy per pull request use `kube golden` and `kube reset`. 
