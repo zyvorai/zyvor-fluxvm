@@ -336,6 +336,13 @@ async fn launch_direct(
         vsock_uds: ctx.vsock_socket.clone(),
     };
     let api = ctx.workspace.join("firecracker.sock");
+    // A previous stop leaves Unix sockets on disk; Firecracker refuses to bind
+    // over them (`FailedToBindSocket` / vsock `Address in use`). Same unlink
+    // the hypervisor path and snapshot restore already do.
+    let _ = fs::remove_file(&api);
+    if let Some(vsock) = &ctx.vsock_socket {
+        let _ = fs::remove_file(vsock);
+    }
     let cfg_path = ctx.workspace.join("firecracker.json");
     fs::write(
         &cfg_path,
