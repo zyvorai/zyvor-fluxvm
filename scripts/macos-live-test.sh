@@ -86,7 +86,9 @@ STACKPS="$( cd "$T/proj" && "${FX[@]}" ps 2>/dev/null )"
 [[ "$(grep -c running <<<"$STACKPS")" == 2 ]] && ok "stack: up created db and app" || bad "stack ps: $STACKPS"
 APPIP="$(awk '$1=="app"{print $4}' <<<"$STACKPS")"
 # Stack VMs use your own user name and SSH key (like `fluxctl run`), not this script's throwaway key.
-mine() { ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o BatchMode=yes -o ConnectTimeout=8 "$USER@$1" "$2"; }
+# With no key of your own, fluxctl generates ~/.ssh/fluxvm_ed25519 and the VMs trust that one.
+MYKEY=(); ls ~/.ssh/id_ed25519.pub ~/.ssh/id_ecdsa.pub ~/.ssh/id_rsa.pub >/dev/null 2>&1 || { [[ -f ~/.ssh/fluxvm_ed25519 ]] && MYKEY=(-i ~/.ssh/fluxvm_ed25519); }
+mine() { ssh ${MYKEY[@]+"${MYKEY[@]}"} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o BatchMode=yes -o ConnectTimeout=8 "$USER@$1" "$2"; }
 [[ "$(mine "$APPIP" 'cat /tmp/db-reply' 2>/dev/null)" == db-ok ]] && ok "stack: app reached db by name through the Mac's relay (after_up)" || bad "app could not reach db"
 [[ "$(mine "$APPIP" 'cat /srv/app/marker.txt' 2>/dev/null)" == hello ]] && ok "stack: the project directory is shared into app" || bad "stack volume"
 START=$SECONDS; ( cd "$T/proj" && "${FX[@]}" up >"$T/up2.log" 2>&1 </dev/null ) && ! grep -qE "creating|recreating" "$T/up2.log" && ok "stack: a second up changes nothing ($((SECONDS-START))s)" || bad "second up was not a no-op: $(cat "$T/up2.log")"
