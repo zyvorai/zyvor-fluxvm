@@ -252,6 +252,24 @@ impl Envelope {
     }
 }
 
+/// Reads the envelope's `token` out of the first bytes of a request line without parsing (or buffering) the rest.
+/// Works only when `token` is the first member, which is how [`Envelope`] serializes; anything else (a truncated
+/// token, another member first, a non-string token) yields `None`. The agent uses it to authenticate a request line
+/// that is larger than its pre-auth cap before it reads the rest of the line.
+pub fn peek_envelope_token(prefix: &[u8]) -> Option<String> {
+    fn strip(b: &[u8]) -> &[u8] {
+        let n = b.iter().take_while(|c| c.is_ascii_whitespace()).count();
+        &b[n..]
+    }
+    let rest = strip(strip(prefix).strip_prefix(b"{")?);
+    let rest = strip(rest.strip_prefix(b"\"token\"")?);
+    let rest = rest.strip_prefix(b":")?;
+    serde_json::Deserializer::from_slice(rest)
+        .into_iter::<String>()
+        .next()?
+        .ok()
+}
+
 /// Constant-time comparison so a mismatched guest-agent token can't be
 /// brute-forced via response-time measurement. Zero-dependency by design —
 /// `fluxvm-guest-agent` deliberately stays a minimal, small guest binary
@@ -461,6 +479,40 @@ pub fn decode_line<T: for<'de> Deserialize<'de>>(line: &str) -> serde_json::Resu
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn peek_token_reads_the_leading_token_and_nothing_else() {
+        let line = encode_line(&Envelope::new(Some("tok-abc".into()), AgentRequest::Ping)).unwrap();
+        assert_eq!(
+            peek_envelope_token(line.as_bytes()).as_deref(),
+            Some("tok-abc")
+        );
+        // Only a prefix is available (the rest of a huge request has not arrived).
+        let big = format!(
+            "{{\"token\":\"tok-abc\",\"op\":\"put-file\",\"content_base64\":\"{}",
+            "A".repeat(4096)
+        );
+        assert_eq!(
+            peek_envelope_token(big.as_bytes()).as_deref(),
+            Some("tok-abc")
+        );
+        assert_eq!(
+            peek_envelope_token(b" { \"token\" : \"x\"").as_deref(),
+            Some("x")
+        );
+        // Truncated token, token not first, null or non-string token.
+        assert_eq!(peek_envelope_token(b"{\"token\":\"tok-ab"), None);
+        assert_eq!(
+            peek_envelope_token(b"{\"op\":\"ping\",\"token\":\"t\"}"),
+            None
+        );
+        assert_eq!(
+            peek_envelope_token(b"{\"token\":null,\"op\":\"ping\"}"),
+            None
+        );
+        assert_eq!(peek_envelope_token(b"{\"token\":5}"), None);
+        assert_eq!(peek_envelope_token(b""), None);
+    }
 
     #[test]
     fn reset_identity_keeps_its_old_wire_shape_and_defaults_the_new_steps_off() {

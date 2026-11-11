@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- **Guest agent hardening.** The agent read a request line with no size limit or timeout before checking the token, so any
+  vsock peer could exhaust guest memory or hold a thread forever. The pre-auth line is now capped at 64 KiB with idle and
+  total read timeouts; a longer line (file upload, up to 64 MiB as base64) is read only after its leading token
+  authenticates, up to a named cap. Also fixed: `exec`/job timeouts near `u64::MAX` panicked the thread that enforces
+  them (a job stayed `running` forever, unreaped); `get-file` hung on a FIFO and read `/dev/zero` until out of memory.
+  See `docs/vsock-agent.md`, "Request limits".
 - Docs: current-release references updated to 0.4.20, Linux `.deb`/`.rpm`/tarball install steps, a "Releasing: the guestkit pin"
   section in `docs/linux-package.md`, and a warning that mTLS identity headers are client-supplied
   (`docs/auth-oidc-mtls.md`).

@@ -240,7 +240,9 @@ mod imp {
         let out_reader = child.stdout.take().map(|s| read_capped(s, cap));
         let err_reader = child.stderr.take().map(|s| read_capped(s, cap));
 
-        let deadline = policy.timeout_secs.map(|s| start + Duration::from_secs(s));
+        let deadline = policy
+            .timeout_secs
+            .map(|s| start + Duration::from_secs(s.min(10 * 365 * 24 * 3600)));
         let mut timed_out = false;
         let status = loop {
             if let Some(st) = child.try_wait().context("waiting for child")? {
