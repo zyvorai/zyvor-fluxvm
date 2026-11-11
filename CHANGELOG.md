@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Docs: current-release references updated to 0.4.20, Linux `.deb`/`.rpm`/tarball install steps, a "Releasing: the guestkit pin"
+  section in `docs/linux-package.md`, and a warning that mTLS identity headers are client-supplied
+  (`docs/auth-oidc-mtls.md`).
+
 ## 0.4.20 (2026-11-11)
 
 First release with Linux packages since 0.4.18. **0.4.19 was published without them**: both Linux package jobs
