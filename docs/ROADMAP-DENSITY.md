@@ -21,11 +21,20 @@ Status of Phase 3 work on the in-tree KVM engine.
   child, disk bytes per child. Use `FLUXVM_KVM_EAGER_RESTORE=1` on the daemon for
   the "before" numbers.
 
-## TODO: userfaultfd demand-paged restore (`FLUXVM_KVM_UFFD=1`)
+## In progress: userfaultfd demand-paged restore (`FLUXVM_KVM_UFFD=1`)
 
-Not implemented. Only worth doing if `MAP_PRIVATE` does not meet the target
-(it already avoids the eager copy; uffd mainly helps when the snapshot lives on
-remote or non-page-cacheable storage). Design:
+**Started.** `GuestMemory::setup_uffd_restore` and the preference in
+`load_memory_into` are wired. Opt-in with `FLUXVM_KVM_UFFD=1`. Falls back
+cleanly to `MAP_PRIVATE` when the feature or sysctl is unavailable.
+
+Remaining work for a complete implementation:
+
+1. Full userfaultfd ioctl bindings (`UFFDIO_API`, `UFFDIO_REGISTER`, `UFFDIO_COPY`).
+2. Handler thread that answers faults from `snap.mem` (with optional prefetch).
+3. Keep the uffd fd alive for the VM lifetime.
+4. Live verification on a real KVM host.
+
+Design (unchanged):
 
 1. Allocate guest RAM anonymous as today, `userfaultfd(O_CLOEXEC|O_NONBLOCK)`,
    `UFFDIO_API`, `UFFDIO_REGISTER` the whole range in `MISSING` mode.
@@ -120,8 +129,9 @@ latency or throughput number has been measured, and none is claimed.
 
 ### Still to do
 
-The three TODO sections above are unchanged and still unimplemented:
-userfaultfd demand paging, dirty-log incremental snapshots, and a warm pool
+The three TODO sections above are unchanged and still unimplemented (except the
+userfaultfd entry point, which is now started):
+userfaultfd demand paging (handler), dirty-log incremental snapshots, and a warm pool
 backfilled by fork. They remain designs. `MAP_PRIVATE` is the only lazy restore
 that exists, and the dirty-log design is the riskiest because host-side device
 writes through `host_ptr()` are not tracked by KVM.

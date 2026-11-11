@@ -146,6 +146,39 @@ impl GuestMemory {
         Ok(())
     }
 
+    /// Demand-paged restore via userfaultfd (Linux only).
+    ///
+    /// Opt-in with `FLUXVM_KVM_UFFD=1`. Falls back to `MAP_PRIVATE` when
+    /// the feature is unavailable or the sysctl forbids unprivileged uffd.
+    ///
+    /// Design matches `docs/ROADMAP-DENSITY.md`.
+    #[cfg(target_os = "linux")]
+    pub fn setup_uffd_restore(&mut self, snap_file: &std::fs::File) -> Result<()> {
+        // Full implementation sketch (requires userfaultfd ioctl constants
+        // from linux/userfaultfd.h, either via libc or local definitions):
+        //
+        // 1. let uffd = unsafe { libc::syscall(libc::SYS_userfaultfd, libc::O_CLOEXEC | libc::O_NONBLOCK) };
+        // 2. UFFDIO_API to negotiate features.
+        // 3. UFFDIO_REGISTER the range [self.ptr, self.ptr+self.len) with MODE_MISSING.
+        // 4. Spawn a thread that:
+        //    - polls the uffd
+        //    - on UFFD_EVENT_PAGEFAULT does UFFDIO_COPY from snap_file (pread 4KiB page)
+        //    - optionally prefetches a small window
+        // 5. Keep the uffd fd alive for the lifetime of the VM (store it on the GuestMemory or the VM object).
+        //
+        // Until the ioctl bindings and handler are wired and verified on real KVM,
+        // we refuse so callers fall back to the existing MAP_PRIVATE path.
+        let _ = snap_file;
+        Err(FluxError::Memory(
+            "userfaultfd demand-paged restore not yet fully wired (see ROADMAP-DENSITY)".into(),
+        ))
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    pub fn setup_uffd_restore(&mut self, _snap_file: &std::fs::File) -> Result<()> {
+        Err(FluxError::Memory("userfaultfd requires Linux".into()))
+    }
+
     #[cfg(not(target_os = "linux"))]
     pub fn remap_private_file(&mut self, _file: &std::fs::File) -> Result<()> {
         Err(FluxError::Memory("file-backed restore needs Linux".into()))
