@@ -52,14 +52,14 @@ FluxVM runs natively on Apple silicon. Its `vz` backend drives Apple's **Virtual
 | **A throwaway computer per agent task** | An offline sandbox (no network card) is ready in about 4.5 s and forks into four running copies in about 4 s; a local model stays reachable over one vsock port. [Demo](examples/agent-sandbox-demo/README.md) · [Agent sessions](docs/agent-platform/README.md) · [Agents page](https://zyvorai.github.io/zyvor-fluxvm/agents) |
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/zyvorai/zyvor-fluxvm/main/scripts/install.sh | bash   # drives Homebrew, starts the service, checks healthz
+curl -fsSL https://raw.githubusercontent.com/zyvorai/zyvor-fluxvm/main/scripts/install.sh | bash   # downloads and verifies the release into ~/.local (no sudo); add --brew for Homebrew, --service for the LaunchAgent
 # or by hand:
 brew install zyvorai/tap/fluxvm                     # prebuilt, Apple silicon, macOS 14+
 fluxctl run                                         # a throwaway Debian 13 VM and a shell
 fluxctl sandbox run alpine:3.22 --rm -- echo hi     # a container in its own VM
 ```
 
-The script only runs `brew install zyvorai/tap/fluxvm` and `brew services start`, optionally wires an MCP client (`bash -s -- --client claude-code`), and has `--dry-run` and `--uninstall`; read it first at [`scripts/install.sh`](scripts/install.sh). Step by step, with what was tested (daemon as a service, first VM, MCP client): [Install on a Mac](docs/install-macos.md). From source instead: `xcode-select --install && brew install hivex && cargo build -p fluxctl` (builds and signs the vz runner).
+By default the script downloads the release tarball, verifies its SHA-256 and links it under `~/.local`; with `--brew` it runs `brew install zyvorai/tap/fluxvm` instead (and `brew services start` when you add `--service`). It can also wire an MCP client (`bash -s -- --client claude-code`), and has `--dry-run` and `--uninstall`; read it first at [`scripts/install.sh`](scripts/install.sh). Step by step, with what was tested (daemon as a service, first VM, MCP client): [Install on a Mac](docs/install-macos.md). From source instead: `xcode-select --install && brew install hivex && cargo build -p fluxctl` (builds and signs the vz runner).
 
 [**FluxVM on Mac**](https://zyvorai.github.io/zyvor-fluxvm/mac) · [**Build a Mac cloud**](https://zyvorai.github.io/zyvor-fluxvm/mac-cloud) · [Mac guide](docs/macos.md) · [Mac cloud guide](docs/mac-cloud.md) · [Tenancy, leases and roles](docs/mac-cloud-tenancy.md) · [Run central](docs/mac-cloud-operations.md) · [`fluxctl fleet`](docs/fluxctl-fleet.md) · [SDKs and Terraform](docs/fleet-sdk.md) · [Architecture](docs/macos-architecture.md)
 
@@ -67,11 +67,11 @@ Measured on one Apple M4 with macOS 27.2. Multi-Mac fleets are not yet verified 
 
 ## What's new
 
-From the [CHANGELOG](CHANGELOG.md) (0.4.x, current release **0.4.18**) and recent commits:
+From the [CHANGELOG](CHANGELOG.md) (0.4.x, current release **0.4.20**) and recent commits:
 
 | Feature | What it does |
 |---|---|
-| **Docker and Kubernetes on a Mac** | `fluxctl docker up` runs a real `dockerd` in one managed VM with its socket on the Mac (`build`, Compose, bind mounts, networks); `fluxctl kube up` runs k3s in FluxVM VMs (workers, `kube load`, offline installs, Cilium by default) and writes a kubeconfig. Studio's **Platform → Kubernetes** page shows each cluster's nodes and pods, coloured pod logs, a shell in a pod, a traffic graph and a checkpoint timeline ([docker](docs/docker-engine.md), [kubernetes](docs/kubernetes-on-mac.md)) |
+| **Docker and Kubernetes on a Mac** | `fluxctl docker up` runs a real `dockerd` in one managed VM with its socket on the Mac (`build`, Compose, bind mounts, networks); `fluxctl kube up` runs k3s in FluxVM VMs (workers, `kube load`, offline installs; flannel by default on a Mac, Cilium on Linux) and writes a kubeconfig. Studio's **Platform → Kubernetes** page shows each cluster's nodes and pods, coloured pod logs, a shell in a pod, a traffic graph and a checkpoint timeline ([docker](docs/docker-engine.md), [kubernetes](docs/kubernetes-on-mac.md)) |
 | **Time travel for a Kubernetes cluster on a Mac** | A checkpoint is the whole running VM, saved in about a second: `kube try -- kubectl apply` then `kube undo`; `kube supervise --auto-checkpoint` and `kube bisect -- TEST` to find the checkpoint where it broke; `kube golden`, `kube reset` and `kube matrix` for clean test runs; `kube chaos` to kill a pod, stop k3s or fill the disk and restore; `kube sleep`, `--idle-sleep`, `--sleep-on-battery`, woken by the first `kubectl` or browser request. Single-node clusters ([guide with diagrams](docs/kubernetes-on-mac.md#time-travel-for-your-cluster)) |
 | **Kubernetes on a Mac that feels local** | Plain `kubectl` (the cluster is merged into `~/.kube/config`); `http://web.localhost` and, after `kube trust`, `https://web.localhost` for every Service and every Traefik Ingress host; `kube add postgres\|redis\|mysql\|mongodb\|rabbitmq\|nats\|mailpit\|grafana\|redpanda\|qdrant\|meilisearch\|clickhouse\|keycloak\|seaweedfs\|vault\|jaeger\|temporal` with the usual ports and `kube connect`; `kube forward SERVICE`, a port-forward that survives pod restarts; `kube db-backup` / `db-restore`; `kube dev` (rebuild and restart on save) and `kube sync` (copy files into a pod on save); `kube doctor`, and a notification when a pod crash-loops ([the whole map](docs/kubernetes-on-mac.md#every-command-in-one-place)) |
 | **Host Metal/MLX inference for offline sandboxes** | `apple.host_gpu` / `fluxctl agent run --host-gpu`: guest `OPENAI_BASE_URL` reaches the host OpenAI-compatible server over vsock (no GPU passthrough). `fluxctl infer status` / `infer serve --stand-in` ([host-inference](docs/host-inference.md)) |
@@ -216,7 +216,12 @@ That's the default dataplane.
 
 ## Quickstart
 
-Needs a Linux host with KVM, a Rust toolchain, and a sibling `guestkit` checkout.
+**Prebuilt (Linux):** every release attaches a tarball, a `.deb` and an `.rpm` for x86_64 and aarch64, for example
+`fluxvm_0.4.20_amd64.deb` and `fluxvm-0.4.20-1.x86_64.rpm` ([install steps](docs/install.md#alternatives-homebrew-source), [package layout](docs/linux-package.md)).
+The packages need glibc 2.35 or newer (Rocky/Alma 9 is not supported yet).
+
+**From source:** needs a Linux host with KVM, a Rust toolchain, and a sibling `guestkit` checkout at the tag in
+`packaging/guestkit.ref` (v1.2.9 for 0.4.20).
 
 ```bash
 git clone https://github.com/zyvorai/zyvor-fluxvm.git && cd zyvor-fluxvm   # needs a sibling guestkit checkout

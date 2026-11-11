@@ -38,7 +38,12 @@ identity can also be passed as headers (for a trusted frontend):
 - `X-Client-Cert-Role` — `admin` or omitted (read-only)
 - `X-Client-Cert-Tenant` — tenant
 
-Headers are honored only when `tls.client_ca` is configured (mTLS on).
+Headers are honored only when `tls.client_ca` is configured (mTLS on). They are read from the request as sent: the daemon
+does not derive the actor, role or tenant from the verified client certificate itself, so when `fluxctl serve` terminates
+TLS directly, any client that holds a certificate your `client_ca` accepts can send `X-Client-Cert-Role: admin` (and any
+CN or tenant) and be treated as that identity. Until the daemon binds identity to the certificate, use mTLS only to gate who may connect,
+issue client certificates only to principals you would trust as admin, or terminate mTLS in a proxy that overwrites these headers
+and keep the daemon on a private listener.
 Do not put FluxVM behind a proxy that blindly injects these headers without
 verifying the client certificate.
 

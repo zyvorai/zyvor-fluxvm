@@ -13,6 +13,24 @@ A version-bump PR (every crate, `Cargo.lock`, the changelog) is merged, then the
 
 If the Linux run cannot start, the same packages can be built by hand from the tag in the same `ubuntu:22.04` container: `scripts/package-linux.sh`, then `scripts/check-glibc-floor.sh <dir> 2.35`, then `scripts/package-linux-pkgs.sh`. For 0.4.17 the Linux x86_64 and aarch64 packages were built this way on a self-hosted server, checked (deb in Ubuntu 22.04, rpm in Fedora 43, each on its own architecture) and attached to the release, and the release notes say so.
 
+## Installing
+
+Each release carries, per architecture, the tarball (`fluxvm-<version>-linux-<x86_64|aarch64>.tar.gz`), a `.deb`
+(`fluxvm_<version>_<amd64|arm64>.deb`) and an `.rpm` (`fluxvm-<version>-1.<x86_64|aarch64>.rpm`), each with a `.sha256`.
+Example for 0.4.20 on x86_64 (use `arm64` / `aarch64` on ARM):
+
+```bash
+V=0.4.20; B=https://github.com/zyvorai/zyvor-fluxvm/releases/download/v$V
+curl -fsSLO $B/fluxvm_${V}_amd64.deb && curl -fsSLO $B/fluxvm_${V}_amd64.deb.sha256
+sudo apt install ./fluxvm_${V}_amd64.deb              # Debian 12+, Ubuntu 22.04+
+sudo dnf install ./fluxvm-$V-1.x86_64.rpm             # Fedora, Rocky/Alma 10 (not EL9, see below)
+sudoedit /etc/fluxvm.toml && sudo systemctl start fluxvm
+```
+
+The tarball can also be installed without root by `scripts/install.sh` ([install.md](install.md)). The aarch64 build is
+still labelled experimental in the workflow. 0.4.19 was published without any Linux package (see
+[Releasing](#releasing-the-guestkit-pin)); use 0.4.20 or later.
+
 ## What is in it
 
 `packaging/files.txt` lists every file, one per line, and `scripts/package-linux.sh` builds exactly that. It fails when a
@@ -114,11 +132,30 @@ and `scripts/test-vendor-lock.sh`; `release-linux.yml` installs the real rpm in 
 
 ```bash
 scripts/package-linux.sh --check-manifest       # validate packaging/files.txt against the repo (any OS, no build)
-scripts/package-linux.sh --version 0.4.12       # build, stage and tar (Linux; see the script header for requirements)
+scripts/package-linux.sh --version 0.4.20       # build, stage and tar (Linux; see the script header for requirements)
 scripts/package-linux.sh --stage-only           # stop after staging: target/package/fluxvm-<ver>-linux-<arch>/
-scripts/check-glibc-floor.sh target/package/fluxvm-0.4.12-linux-x86_64 2.35   # the compatibility gate
+scripts/check-glibc-floor.sh target/package/fluxvm-0.4.20-linux-x86_64 2.35   # the compatibility gate
 ```
 
 To add a file to the package, add a line to `packaging/files.txt`; `scripts/test-package-manifest.sh` and CI check the file.
 A cross build (`--target aarch64-unknown-linux-gnu`) builds the BPF objects for arm64 with `FLUXVM_BPF_ARCH` and leaves
 the completions out, because it cannot run the binaries it makes.
+
+## Releasing: the guestkit pin
+
+fluxvm builds against the sibling repo `zyvorai/guestkit` through a relative path. Release builds check guestkit out at a
+fixed tag, never its default branch, and three places must name the same version:
+
+1. `packaging/guestkit.ref`: one tag, for example `v1.2.9`.
+2. `Cargo.lock`: the `guestkit` package's `version` (the tag without the `v`).
+3. Every `.github/workflows/*.yml` step that checks out `zyvorai/guestkit` has `ref:` set to that tag (the workflows
+   carry the comment `# packaging/guestkit.ref; checked by scripts/check-guestkit-pin.sh`; `release-linux.yml` reads the ref file).
+
+`scripts/check-guestkit-pin.sh [FLUXVM_DIR] [GUESTKIT_DIR]` fails when they disagree, and with a guestkit directory also when
+the checkout is not at the pinned tag. The Linux release jobs run it before building. This is what broke 0.4.19: the ref
+said `v1.2.6` while `Cargo.lock` recorded 1.2.9, both Linux package jobs failed, and the release went out without
+Linux packages (fixed for 0.4.20 in #731).
+
+To bump guestkit, in one PR: edit `packaging/guestkit.ref`, refresh `Cargo.lock` (`cargo metadata`, without `--locked`),
+and change every workflow `ref:`; run `scripts/check-guestkit-pin.sh .` before merging. Before tagging a release, check that
+the release's Linux assets (tarball, `.deb`, `.rpm` for both architectures) are all attached.
