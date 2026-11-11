@@ -2,6 +2,10 @@ name: Sentinel Set 11E sched_ext
 
 on:
   push:
+    # A release tag push must not start this CI; it only competes with the release workflows for runners.
+    # Defining only tags-ignore would stop branch pushes from triggering this workflow at all, so branches stays explicit.
+    branches: ['**']
+    tags-ignore: ['**']
     paths:
       - 'bpf/fluxvm_scx.bpf.c'
       - 'crates/fluxvm-intelligence/src/scx.rs'

@@ -7,6 +7,10 @@ on:
       - 'docs/secure-containers-set18.md'
       - '.github/workflows/secure-containers-set18.yml'
   push:
+    # A release tag push must not start this CI; it only competes with the release workflows for runners.
+    # Defining only tags-ignore would stop branch pushes from triggering this workflow at all, so branches stays explicit.
+    branches: ['**']
+    tags-ignore: ['**']
     paths:
       - 'controllers/fluxvm-networkpolicy-controller/**'
       - 'scripts/test-networkpolicy-endpointslice-set18.sh'

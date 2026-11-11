@@ -15,6 +15,10 @@ on:
       - 'packaging/systemd/fluxvm-memprof.service'
       - '.github/workflows/memory-boot-profiler.yml'
   push:
+    # A release tag push must not start this CI; it only competes with the release workflows for runners.
+    # Defining only tags-ignore would stop branch pushes from triggering this workflow at all, so branches stays explicit.
+    branches: ['**']
+    tags-ignore: ['**']
     paths:
       - 'bpf/fluxvm_memprof.bpf.c'
       - 'crates/fluxvm-intelligence/src/memprof.rs'

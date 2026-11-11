@@ -14,6 +14,10 @@ on:
       - 'scripts/install-runtime-intelligence.sh'
       - '.github/workflows/vmm-guard-qos.yml'
   push:
+    # A release tag push must not start this CI; it only competes with the release workflows for runners.
+    # Defining only tags-ignore would stop branch pushes from triggering this workflow at all, so branches stays explicit.
+    branches: ['**']
+    tags-ignore: ['**']
     paths:
       - 'bpf/fluxvm_guard.bpf.c'
       - 'crates/fluxvm-intelligence/**'
