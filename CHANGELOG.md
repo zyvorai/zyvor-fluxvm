@@ -2,9 +2,13 @@
 
 ## Unreleased
 
+## 0.4.19 (2026-11-11)
+
 - **Agent PTY tickets match kube exec-ticket.** `POST …/pty-ticket` now also returns `path` (`/console/pty/{ticket}`)
   so native clients build one WebSocket URL shape. Agent PTY resize accepts both nested
   `{"resize":{"cols","rows"}}` and flat `{"cols","rows"}` (same as kube pod shells).
+- Experimental KVM density work on main (skeletons / design notes): userfaultfd demand-paged restore
+  (`FLUXVM_KVM_UFFD=1`), dirty-log incremental snapshot notes, fork-backed warm-pool design.
 
 ## 0.4.18 (2026-10-28)
 
