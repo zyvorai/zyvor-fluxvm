@@ -381,8 +381,9 @@ and a checkpoint without `{"memory": false}` is refused with `409` and that reas
 `GET /v1/agents/sessions/{id}/pty?cols=&rows=&command=`, whose binary frames are raw terminal bytes both ways. The
 daemon runs `ssh -tt` to the guest (the vsock proxy for an offline session), so the guest sees a tty: line editing,
 job control and full-screen programs work. The size is set when it opens, and a resize is a text frame
-`{"resize":{"cols":N,"rows":N}}` (`fluxctl` sends one on SIGWINCH): the daemon sets the guest tty's window size from a
-second SSH exec, so the foreground program gets SIGWINCH after about a round trip. The close frame's reason is `exit=<code>` and the CLI exits with it. Opens and closes (duration, byte
+`{"resize":{"cols":N,"rows":N}}` (`fluxctl` sends one on SIGWINCH) or the flat kube shape `{"cols":N,"rows":N}`:
+the daemon sets the guest tty's window size from a second SSH exec, so the foreground program gets SIGWINCH after about
+a round trip. The close frame's reason is `exit=<code>` and the CLI exits with it. Opens and closes (duration, byte
 counts, exit code, never the content) are ledgered as `pty.open`/`pty.close`. A session with `process` rules or a `filesystem` policy refuses the terminal and `ssh` (`403`): both are an SSH shell, which the guest confinement does not cover. At most 16 at once on a host, one hour
 each. A session with `policy.process` rules is **refused (403)**: a shell would bypass them.
 
@@ -390,8 +391,9 @@ each. A session with `policy.process` rules is **refused (403)**: a shell would 
 terminal page built on xterm.js (MIT, vendored under `crates/fluxvm-api/src/terminal/vendor/`, checksums in
 `SHA256SUMS`): WebGL rendering with a DOM fallback, 24-bit colour, Unicode 11, OSC 8 and plain-URL links, sixel and iTerm2
 inline images, clipboard (OSC 52), 15,000 lines of scrollback. The WebSocket is opened with a **30-second single-use
-ticket** (`POST .../pty-ticket`, then `GET /console/pty/{ticket}`), because a browser WebSocket cannot send
-`Authorization`; the ticket lives in memory only, is never ledgered, and is refused for sessions with command rules.
+ticket** (`POST .../pty-ticket` → `{"ticket","expires_in","path":"/console/pty/{ticket}"}`, then
+`GET /console/pty/{ticket}`), because a browser WebSocket cannot send `Authorization`; the ticket lives in memory only,
+is never ledgered, and is refused for sessions with command rules.
 The page's own CSP is `script-src 'self' 'wasm-unsafe-eval'` (the sixel decoder is WebAssembly; no string `eval`).
 - **Tabs and panes** like WezTerm: a pill tab bar at the bottom with the tab index and the shell's own title, `+` for a
   new tab, split panes, the inactive pane dimmed. Keys: `⌘T` new tab, `⌘W` close pane/tab, `⌘1-9` tab, `⌘D` / `⌘⇧D`

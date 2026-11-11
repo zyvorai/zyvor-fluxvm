@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- **Agent PTY tickets match kube exec-ticket.** `POST …/pty-ticket` now also returns `path` (`/console/pty/{ticket}`)
+  so native clients build one WebSocket URL shape. Agent PTY resize accepts both nested
+  `{"resize":{"cols","rows"}}` and flat `{"cols","rows"}` (same as kube pod shells).
+
 ## 0.4.18 (2026-10-28)
 
 Kubernetes on a Mac: the default pod network changes, and a command to reach pods from the Mac.

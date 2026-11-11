@@ -5823,10 +5823,11 @@ fn pty_resize_script(tty_file: &str, cols: u16, rows: u16) -> String {
     format!("t=$(cat {f}) && stty -F \"$t\" cols {cols} rows {rows}")
 }
 
-/// `{"resize": {"cols": N, "rows": N}}` as a text frame, within the limits `open` enforces.
+/// Resize text frame: nested `{"resize":{"cols":N,"rows":N}}` (fluxctl / Studio) or flat
+/// `{"cols":N,"rows":N}` (same shape as kube pod shells), within the limits `open` enforces.
 fn parse_resize(text: &str) -> Option<(u16, u16)> {
     let v: Value = serde_json::from_str(text).ok()?;
-    let r = v.get("resize")?;
+    let r = v.get("resize").unwrap_or(&v);
     let cols = u16::try_from(r.get("cols")?.as_u64()?).ok()?;
     let rows = u16::try_from(r.get("rows")?.as_u64()?).ok()?;
     ((1..=500).contains(&cols) && (1..=300).contains(&rows)).then_some((cols, rows))
@@ -5887,9 +5888,12 @@ async fn pty_ticket(
         status: StatusCode::TOO_MANY_REQUESTS,
         message: "too many terminal tickets outstanding".into(),
     })?;
-    Ok(Json(
-        json!({"ticket": ticket, "expires_in": PTY_TICKET_SECS}),
-    ))
+    // `path` mirrors kube exec-ticket so native clients build one WebSocket URL shape.
+    Ok(Json(json!({
+        "ticket": ticket,
+        "expires_in": PTY_TICKET_SECS,
+        "path": format!("/console/pty/{ticket}"),
+    })))
 }
 
 /// A terminal would walk around command rules and the guest confinement (it is an SSH shell,
@@ -9650,12 +9654,18 @@ mod tests {
             parse_resize(r#"{"resize":{"cols":132,"rows":43}}"#),
             Some((132, 43))
         );
+        assert_eq!(
+            parse_resize(r#"{"cols":100,"rows":30}"#),
+            Some((100, 30)),
+            "flat resize (kube shape) is accepted too"
+        );
         for bad in [
             "ls -l",
             r#"{"resize":{"cols":0,"rows":10}}"#,
             r#"{"resize":{"cols":501,"rows":10}}"#,
             r#"{"resize":{"cols":80}}"#,
             r#"{"resize":{"cols":-1,"rows":5}}"#,
+            r#"{"cols":80}"#,
             r#"{"other":1}"#,
         ] {
             assert_eq!(parse_resize(bad), None, "{bad}");

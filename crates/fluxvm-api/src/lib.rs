@@ -8904,8 +8904,10 @@ mod tests {
             .await;
             assert_eq!(st, StatusCode::OK, "{body}");
             let v: serde_json::Value = serde_json::from_str(&body).unwrap();
-            assert_eq!(v["ticket"].as_str().unwrap().len(), 64);
+            let ticket = v["ticket"].as_str().unwrap();
+            assert_eq!(ticket.len(), 64);
             assert_eq!(v["expires_in"], 30);
+            assert_eq!(v["path"], format!("/console/pty/{ticket}"));
             // The ticket route needs no bearer: a plain GET gets past auth and fails at the missing
             // WebSocket upgrade (400), never 401.
             let st = status_for(app.clone(), "GET", "/console/pty/anything", None).await;
