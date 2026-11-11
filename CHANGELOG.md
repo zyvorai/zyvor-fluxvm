@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+## 0.4.20 (2026-11-11)
+
+First release with Linux packages since 0.4.18. **0.4.19 was published without them**: both Linux package jobs
+failed the guestkit pin check (`packaging/guestkit.ref` pinned v1.2.6 while `Cargo.lock` recorded guestkit 1.2.9).
+
+- **guestkit pin bumped to v1.2.9** in `packaging/guestkit.ref` and every workflow checkout, so the pin check
+  passes and the Linux release can build.
+- **Release tags no longer start eight CI workflows** (`afxdp-fastpath`, `memory-boot-profiler`, `quiclb-smartnic`,
+  `scx-vm-scheduler`, `secure-containers-set18`, `topology-intelligence`, `vmm-guard-qos`, `xdp-tcp-intelligence`),
+  which had filled every runner and left the release's `plan` job queued behind them.
+- No runtime changes since 0.4.19.
+
 ## 0.4.19 (2026-11-11)
 
 - **Agent PTY tickets match kube exec-ticket.** `POST …/pty-ticket` now also returns `path` (`/console/pty/{ticket}`)
