@@ -360,24 +360,79 @@ async fn tunnel(
         .await
 }
 
-/// Send one raw HTTP/1.1 request through an intercepted tunnel and return
-/// `(status, full response text)`.
-async fn https(f: &Fixture, raw_request: &str) -> (u16, String) {
-    let mut tls = tokio::time::timeout(STEP, tunnel(f, "localhost"))
-        .await
-        .expect("tunnel timeout")
-        .expect("TLS handshake against the proxy CA");
-    tls.write_all(raw_request.as_bytes()).await.unwrap();
+/// One raw HTTP/1.1 request through a fresh intercepted tunnel. `Ok` is the full response text (anything the proxy
+/// sent counts, even if the connection then ended abruptly); `Err` says why not a single byte came back, so a failing
+/// assertion can tell a hang from a reset from an early close instead of reporting a bare status of 0.
+async fn exchange(f: &Fixture, raw_request: &str, step: Duration) -> Result<String, String> {
+    let mut tls = match tokio::time::timeout(step, tunnel(f, "localhost")).await {
+        Err(_) => return Err(format!("tunnel setup timed out after {step:?}")),
+        Ok(Err(e)) => return Err(format!("tunnel setup failed: {e}")),
+        Ok(Ok(tls)) => tls,
+    };
+    if let Err(e) = tls.write_all(raw_request.as_bytes()).await {
+        return Err(format!("writing the request failed: {e}"));
+    }
     let mut out = Vec::new();
     let mut chunk = [0u8; 4096];
+    let mut end = String::from("closed by the proxy");
     loop {
-        match tokio::time::timeout(STEP, tls.read(&mut chunk)).await {
-            Ok(Ok(0)) | Ok(Err(_)) | Err(_) => break,
+        match tokio::time::timeout(step, tls.read(&mut chunk)).await {
+            Ok(Ok(0)) => break,
             Ok(Ok(n)) => out.extend_from_slice(&chunk[..n]),
+            Ok(Err(e)) => {
+                end = format!("read failed: {e}");
+                break;
+            }
+            Err(_) => {
+                end = format!("no data for {step:?} (the proxy neither answered nor closed)");
+                break;
+            }
         }
     }
-    let text = String::from_utf8_lossy(&out).into_owned();
-    (status_of(&text), text)
+    if out.is_empty() {
+        return Err(format!(
+            "no response bytes before the connection ended: {end}"
+        ));
+    }
+    Ok(String::from_utf8_lossy(&out).into_owned())
+}
+
+/// Send one raw HTTP/1.1 request through an intercepted tunnel and return
+/// `(status, full response text)`. When nothing comes back the status is 0 and
+/// the text says why (`<no response: ...>`).
+async fn https(f: &Fixture, raw_request: &str) -> (u16, String) {
+    match exchange(f, raw_request, STEP).await {
+        Ok(text) => (status_of(&text), text),
+        Err(why) => (0, format!("<no response: {why}>")),
+    }
+}
+
+/// Attempts [`https_retrying`] makes, and how long each waits for the proxy.
+const ATTEMPTS: usize = 3;
+const RETRY_STEP: Duration = Duration::from_secs(5);
+
+/// [`https`] for requests that are safe to send again (GETs, and requests the policy must refuse, which never reach
+/// the upstream): a connection that yields no bytes at all is retried on a new tunnel. A verdict, whatever the
+/// status, is never retried, so a wrongly allowed or wrongly denied request still fails the test. Each retry is
+/// printed (visible with `--nocapture` and in the failure output) so a proxy that really drops connections cannot hide.
+async fn https_retrying(f: &Fixture, raw_request: &str) -> (u16, String) {
+    let mut last = String::new();
+    for attempt in 1..=ATTEMPTS {
+        match exchange(f, raw_request, RETRY_STEP).await {
+            Ok(text) => return (status_of(&text), text),
+            Err(why) => {
+                eprintln!(
+                    "https_intercept: attempt {attempt}/{ATTEMPTS} of {:?} got no response ({why})",
+                    raw_request.lines().next().unwrap_or_default()
+                );
+                last = why;
+            }
+        }
+    }
+    (
+        0,
+        format!("<no response after {ATTEMPTS} attempts: {last}>"),
+    )
 }
 
 fn get(path: &str) -> String {
@@ -421,7 +476,7 @@ async fn method_and_path_rules_apply_inside_https() {
 
     let mut allowed = 0;
     for path in ["/ok", "/admin-panel", "/superadmin", "/a/./b"] {
-        let (status, text) = https(&f, &get(path)).await;
+        let (status, text) = https_retrying(&f, &get(path)).await;
         assert_eq!(status, 200, "{path}: {text}");
         allowed += 1;
     }
@@ -437,23 +492,23 @@ async fn method_and_path_rules_apply_inside_https() {
         "//admin",
         "/admin/.",
     ] {
-        let (status, text) = https(&f, &get(path)).await;
+        let (status, text) = https_retrying(&f, &get(path)).await;
         assert_eq!(status, 403, "{path} must be denied: {text}");
     }
 
     // Methods not allowed on the host/path.
-    let (status, _) = https(
+    let (status, text) = https_retrying(
         &f,
         "POST /ok HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
     )
     .await;
-    assert_eq!(status, 403);
-    let (status, _) = https(
+    assert_eq!(status, 403, "{text}");
+    let (status, text) = https_retrying(
         &f,
         "DELETE /ok HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
     )
     .await;
-    assert_eq!(status, 403);
+    assert_eq!(status, 403, "{text}");
 
     let (status, text) = https(
         &f,
