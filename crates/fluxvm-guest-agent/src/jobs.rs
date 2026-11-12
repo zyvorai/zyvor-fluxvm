@@ -391,7 +391,7 @@ fn killpg(pid: u32, sig: i32) {
 
 /// Waits for the process, enforces the timeout, and records how it ended.
 fn supervise(job: Arc<Job>, mut child: Child, timeout: Option<u64>) {
-    let deadline = timeout.map(|s| Instant::now() + Duration::from_secs(s));
+    let deadline = timeout.map(|s| Instant::now() + crate::clamp_timeout(s));
     let mut timed_out = false;
     let mut kill_at: Option<Instant> = None;
     let status = loop {
@@ -806,5 +806,12 @@ mod tests {
             max_output_bytes: None,
         });
         assert!(matches!(r, AgentResponse::Error { .. }));
+    }
+
+    #[test]
+    fn a_huge_job_timeout_does_not_kill_the_supervisor() {
+        let job_id = run("true", false, None, Some(u64::MAX));
+        let st = wait_final(&job_id);
+        assert_eq!(st.phase, JobPhase::Exited, "{st:?}");
     }
 }

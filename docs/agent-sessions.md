@@ -590,6 +590,9 @@ Writing and limits:
 - The same guest agent also hardens synchronous `exec`: a timeout now kills the command's process group, output is
   capped at 16 MiB per stream (with a marker), and the call returns within about two seconds once the command has
   exited even if a background child keeps the pipes open.
+- Request and timeout limits (guest agent): `exec` and job timeouts are capped at ten years (a larger value used to
+  panic the supervising thread and leave a job `running` forever), and `get-file` refuses anything that is not a regular
+  file (a FIFO or `/dev/zero` used to hang or exhaust the agent).
 
 CLI: `fluxctl agent bg [--stdin] [--max-output-bytes N] [--timeout S]`, `jobs`, `stdin <id> <job> [text] [--close]`,
 `logs [-f]` (stderr goes to the terminal's stderr; supervised jobs long-poll), `kill [--signal S]`. MCP:
