@@ -35,6 +35,18 @@ The shared crate `fluxvm-guest-protocol`: one JSON object per line, one request 
 
 Errors are `{"result": "error", "message": "…"}`. Files are capped at 64 MiB per transfer.
 
+### Request limits
+
+The token is part of the request line, so the agent reads that line under limits before it knows who is calling:
+
+- A request line is read up to 64 KiB (`AUTH_LINE_MAX_BYTES`) with a 10 s idle timeout per read and 15 s in total. A peer that
+  sends no newline, or trickles bytes, is dropped.
+- A longer line (a `put-file`) is read further only if the line starts with `{"token":"…"` and that token is valid. The
+  host client always writes the token first. Such a line may be up to 64 MiB of file as base64 plus 64 KiB of framing
+  (`ENVELOPE_LINE_MAX_BYTES`, about 85 MiB) and must arrive within 5 minutes; a longer one is refused with an error.
+- After the request line, the receive timeout is cleared, so an interactive shell's idle time is not limited.
+- `get-file` reads regular files only and never more than 64 MiB; `exec` and job timeouts above ten years are clamped.
+
 `exec` may carry a `process` object instead of relying on `command`: the agent then runs `argv` directly with `execve`, with no
 `/bin/sh -c`, so it works in images without a shell. `env` adds `KEY=value` entries (or replaces the environment with
 `clean_env`), `cwd` sets the directory, and `user` (`{"uid", "gid"}`) drops privileges. Older agents ignore the field, so only send it

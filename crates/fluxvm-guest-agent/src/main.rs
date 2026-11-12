@@ -22,7 +22,7 @@ use fluxvm_guest_protocol::{
     TOKEN_FILE_PATH, constant_time_eq, decode_line, encode_line,
 };
 #[cfg(unix)]
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 #[cfg(unix)]
 use std::process::{Command, Stdio};
 #[cfg(unix)]
@@ -256,18 +256,246 @@ impl TokenState {
     }
 }
 
+/// Bounds on reading a request line. The token travels inside the request line, so everything a peer
+/// sends before it authenticates is read under these.
+#[cfg(unix)]
+#[derive(Clone, Copy)]
+struct ConnLimits {
+    /// Largest line read before the peer has authenticated, unless the line already ends inside it.
+    auth_line_bytes: usize,
+    /// Longest a single read may wait for the peer.
+    read_idle: Duration,
+    /// Longest the whole pre-auth read may take (stops a peer that trickles bytes).
+    auth_deadline: Duration,
+    /// Largest request line once the peer has authenticated its token.
+    envelope_line_bytes: usize,
+    /// Longest the rest of an authenticated line may take (a large `put-file` legitimately takes a while).
+    body_deadline: Duration,
+}
+
+/// Pre-auth cap on a request line: ample for any ordinary request, small enough that an unauthenticated vsock peer
+/// cannot make the agent buffer much. A larger line is read further only if the token it leads with checks out.
+#[cfg(unix)]
+const AUTH_LINE_MAX_BYTES: usize = 64 * 1024;
+/// Largest request line from an authenticated peer: a `put-file` of [`MAX_FILE_TRANSFER_BYTES`] as base64 plus the
+/// rest of the JSON envelope.
+#[cfg(unix)]
+const ENVELOPE_LINE_MAX_BYTES: usize = (MAX_FILE_TRANSFER_BYTES / 3 + 1) * 4 + 64 * 1024;
+#[cfg(unix)]
+const READ_IDLE_TIMEOUT: Duration = Duration::from_secs(10);
+#[cfg(unix)]
+const AUTH_READ_DEADLINE: Duration = Duration::from_secs(15);
+#[cfg(unix)]
+const BODY_READ_DEADLINE: Duration = Duration::from_secs(300);
+
+#[cfg(unix)]
+impl Default for ConnLimits {
+    fn default() -> Self {
+        Self {
+            auth_line_bytes: AUTH_LINE_MAX_BYTES,
+            read_idle: READ_IDLE_TIMEOUT,
+            auth_deadline: AUTH_READ_DEADLINE,
+            envelope_line_bytes: ENVELOPE_LINE_MAX_BYTES,
+            body_deadline: BODY_READ_DEADLINE,
+        }
+    }
+}
+
+/// Sets (or, with `None`, clears) the receive timeout on a socket. The vsock fd, its clones and the socketpair the
+/// tests use are all sockets, and clones share the setting.
+#[cfg(unix)]
+fn set_recv_timeout(fd: std::os::fd::RawFd, timeout: Option<Duration>) {
+    let d = timeout.map_or(Duration::ZERO, |t| t.max(Duration::from_millis(1)));
+    let tv = libc::timeval {
+        tv_sec: d.as_secs() as _,
+        tv_usec: d.subsec_micros() as _,
+    };
+    unsafe {
+        libc::setsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_RCVTIMEO,
+            &tv as *const libc::timeval as *const libc::c_void,
+            std::mem::size_of::<libc::timeval>() as libc::socklen_t,
+        );
+    }
+}
+
+#[cfg(unix)]
+enum LineRead {
+    /// The peer closed before sending anything more.
+    Eof,
+    /// `buf` ends with a newline (or the peer closed after a partial last line).
+    Line,
+    /// `buf` reached the cap with no newline.
+    Capped,
+}
+
+/// Appends to `buf` from `reader` up to a newline, `cap` bytes in total, EOF or `deadline`, whichever comes first.
+#[cfg(unix)]
+fn read_line_capped(
+    reader: &mut BufReader<std::fs::File>,
+    buf: &mut Vec<u8>,
+    cap: usize,
+    idle: Duration,
+    deadline: Instant,
+) -> std::io::Result<LineRead> {
+    use std::os::fd::AsRawFd;
+    let fd = reader.get_ref().as_raw_fd();
+    loop {
+        if buf.len() >= cap {
+            return Ok(LineRead::Capped);
+        }
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "request not received in time",
+            ));
+        }
+        set_recv_timeout(fd, Some(idle.min(left)));
+        let chunk = match reader.fill_buf() {
+            Ok(c) => c,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "request not received in time",
+                ));
+            }
+            Err(e) => return Err(e),
+        };
+        if chunk.is_empty() {
+            return Ok(if buf.is_empty() {
+                LineRead::Eof
+            } else {
+                LineRead::Line
+            });
+        }
+        let room = cap - buf.len();
+        let (take, newline) = match chunk.iter().position(|&b| b == b'\n') {
+            Some(i) if i < room => (i + 1, true),
+            _ => (chunk.len().min(room), false),
+        };
+        buf.extend_from_slice(&chunk[..take]);
+        reader.consume(take);
+        if newline {
+            return Ok(LineRead::Line);
+        }
+    }
+}
+
+/// Answers the request when it may not proceed: no token provisioned (and no insecure opt-in), or a wrong token.
+/// `Ok(true)` means the peer may go on.
+#[cfg(unix)]
+fn auth_gate(
+    token_state: &std::sync::Mutex<TokenState>,
+    token: Option<&str>,
+    writer: &mut std::fs::File,
+) -> Result<bool> {
+    let auth = token_state
+        .lock()
+        .map(|mut t| t.authorize(token))
+        .unwrap_or(Auth::Denied);
+    if auth == Auth::NoToken
+        && !exec_policy::insecure_opt_in(std::env::var(exec_policy::INSECURE_ENV).ok().as_deref())
+    {
+        writer.write_all(
+            encode_line(&AgentResponse::Error {
+                message: format!(
+                    "unauthorized: guest agent has no token provisioned at {TOKEN_FILE_PATH} (set {}=1 to allow unauthenticated use)",
+                    exec_policy::INSECURE_ENV
+                ),
+            })?
+            .as_bytes(),
+        )?;
+        writer.flush()?;
+        return Ok(false);
+    }
+
+    if auth != Auth::NoToken && auth != Auth::Authorized {
+        writer.write_all(
+            encode_line(&AgentResponse::Error {
+                message: "unauthorized: missing or incorrect token".into(),
+            })?
+            .as_bytes(),
+        )?;
+        writer.flush()?;
+        return Ok(false);
+    }
+    Ok(true)
+}
+
+#[cfg(unix)]
 fn handle_connection(
     file: std::fs::File,
     token_state: &std::sync::Mutex<TokenState>,
     listener_fd: i32,
 ) -> Result<()> {
+    handle_connection_with(file, token_state, listener_fd, ConnLimits::default())
+}
+
+#[cfg(unix)]
+fn handle_connection_with(
+    file: std::fs::File,
+    token_state: &std::sync::Mutex<TokenState>,
+    listener_fd: i32,
+    limits: ConnLimits,
+) -> Result<()> {
+    use std::os::fd::AsRawFd;
     let mut writer = file.try_clone().context("cloning connection fd")?;
+    let sock_fd = file.as_raw_fd();
     let mut reader = BufReader::new(file);
 
-    let mut line = String::new();
-    if reader.read_line(&mut line).context("reading request")? == 0 {
+    let mut raw = Vec::new();
+    let started = Instant::now();
+    let mut read = read_line_capped(
+        &mut reader,
+        &mut raw,
+        limits.auth_line_bytes,
+        limits.read_idle,
+        started + limits.auth_deadline,
+    )
+    .context("reading request")?;
+    if let LineRead::Capped = read {
+        // A long line (a file upload). Only a peer whose leading token is right may make the agent buffer more.
+        let token = fluxvm_guest_protocol::peek_envelope_token(&raw);
+        if !auth_gate(token_state, token.as_deref(), &mut writer)? {
+            return Ok(());
+        }
+        read = read_line_capped(
+            &mut reader,
+            &mut raw,
+            limits.envelope_line_bytes,
+            limits.read_idle,
+            Instant::now() + limits.body_deadline,
+        )
+        .context("reading request")?;
+        if let LineRead::Capped = read {
+            writer.write_all(
+                encode_line(&AgentResponse::Error {
+                    message: format!(
+                        "request is larger than the {}-byte limit",
+                        limits.envelope_line_bytes
+                    ),
+                })?
+                .as_bytes(),
+            )?;
+            writer.flush()?;
+            return Ok(());
+        }
+    }
+    // Whatever follows (a PTY session's frames) is read without the request-line timeout.
+    set_recv_timeout(sock_fd, None);
+    if let LineRead::Eof = read {
         return Ok(()); // peer closed without sending anything
     }
+    let line = String::from_utf8_lossy(&raw);
     let envelope: Envelope = match decode_line(&line) {
         Ok(envelope) => envelope,
         Err(_) => {
@@ -285,35 +513,9 @@ fn handle_connection(
             return Ok(());
         }
     };
+    drop(line);
 
-    let auth = token_state
-        .lock()
-        .map(|mut t| t.authorize(envelope.token.as_deref()))
-        .unwrap_or(Auth::Denied);
-    if auth == Auth::NoToken
-        && !exec_policy::insecure_opt_in(std::env::var(exec_policy::INSECURE_ENV).ok().as_deref())
-    {
-        writer.write_all(
-            encode_line(&AgentResponse::Error {
-                message: format!(
-                    "unauthorized: guest agent has no token provisioned at {TOKEN_FILE_PATH} (set {}=1 to allow unauthenticated use)",
-                    exec_policy::INSECURE_ENV
-                ),
-            })?
-            .as_bytes(),
-        )?;
-        writer.flush()?;
-        return Ok(());
-    }
-
-    if auth != Auth::NoToken && auth != Auth::Authorized {
-        writer.write_all(
-            encode_line(&AgentResponse::Error {
-                message: "unauthorized: missing or incorrect token".into(),
-            })?
-            .as_bytes(),
-        )?;
-        writer.flush()?;
+    if !auth_gate(token_state, envelope.token.as_deref(), &mut writer)? {
         return Ok(());
     }
 
@@ -325,7 +527,7 @@ fn handle_connection(
             policy,
             process,
         } => {
-            let timeout = Duration::from_secs(timeout_seconds.unwrap_or(DEFAULT_EXEC_TIMEOUT_SECS));
+            let timeout = clamp_timeout(timeout_seconds.unwrap_or(DEFAULT_EXEC_TIMEOUT_SECS));
             match (policy, process) {
                 (Some(_), Some(_)) => AgentResponse::Error {
                     message: "exec process cannot be combined with policy".into(),
@@ -765,6 +967,14 @@ fn open_shell(
     Ok(())
 }
 
+/// Longest timeout a request can ask for. A peer-supplied `u64::MAX` seconds would otherwise overflow `Instant + Duration`
+/// and panic the thread that enforces it.
+pub(crate) const MAX_TIMEOUT_SECS: u64 = 10 * 365 * 24 * 3600;
+
+pub(crate) fn clamp_timeout(secs: u64) -> Duration {
+    Duration::from_secs(secs.min(MAX_TIMEOUT_SECS))
+}
+
 /// Runs `command` under `/bin/sh -c`, killing it if it runs longer than
 /// `timeout` (the draft this was ported from accepted a timeout field but
 /// never enforced it — this does). stdout/stderr are drained on their own
@@ -984,6 +1194,12 @@ fn get_file(path: &str) -> AgentResponse {
             };
         }
     };
+    // A FIFO would block the read forever, and /dev/zero or a /proc file reports length 0 and then never ends.
+    if !metadata.is_file() {
+        return AgentResponse::Error {
+            message: format!("{path} is not a regular file"),
+        };
+    }
     if metadata.len() as usize > MAX_FILE_TRANSFER_BYTES {
         return AgentResponse::Error {
             message: format!(
@@ -993,14 +1209,22 @@ fn get_file(path: &str) -> AgentResponse {
             ),
         };
     }
-    let bytes = match std::fs::read(path) {
-        Ok(b) => b,
-        Err(e) => {
-            return AgentResponse::Error {
-                message: format!("reading {path}: {e}"),
-            };
-        }
-    };
+    // Read at most one byte over the limit, so a file that grows after the check cannot exhaust memory.
+    let mut bytes = Vec::new();
+    let read = std::fs::File::open(path).and_then(|f| {
+        f.take(MAX_FILE_TRANSFER_BYTES as u64 + 1)
+            .read_to_end(&mut bytes)
+    });
+    if let Err(e) = read {
+        return AgentResponse::Error {
+            message: format!("reading {path}: {e}"),
+        };
+    }
+    if bytes.len() > MAX_FILE_TRANSFER_BYTES {
+        return AgentResponse::Error {
+            message: format!("{path} exceeds the {MAX_FILE_TRANSFER_BYTES}-byte transfer limit"),
+        };
+    }
     use std::os::unix::fs::PermissionsExt;
     let mode = metadata.permissions().mode() & 0o777;
     AgentResponse::FileContent {
@@ -1652,6 +1876,200 @@ mod tests {
             }
             agent.join().unwrap().unwrap();
         });
+    }
+
+    /// Runs `handle_connection_with` on its own thread (not scoped, so a test that finds it hung fails instead of
+    /// hanging) and returns what the client half sees. `Err` from the channel means it did not finish in time.
+    fn spawn_agent(
+        agent_end: std::fs::File,
+        limits: ConnLimits,
+    ) -> std::sync::mpsc::Receiver<Result<()>> {
+        let dir = tempfile::tempdir().unwrap();
+        let tokens = Arc::new(std::sync::Mutex::new(state(
+            dir.path(),
+            "tok-0123456789abcdef",
+        )));
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _keep = dir;
+            let _ = tx.send(handle_connection_with(agent_end, &tokens, -1, limits));
+        });
+        rx
+    }
+
+    fn small_limits() -> ConnLimits {
+        ConnLimits {
+            auth_line_bytes: 1024,
+            read_idle: Duration::from_millis(200),
+            auth_deadline: Duration::from_secs(1),
+            envelope_line_bytes: 64 * 1024,
+            body_deadline: Duration::from_secs(5),
+        }
+    }
+
+    fn read_answer(client: &std::fs::File) -> AgentResponse {
+        let mut r = BufReader::new(client.try_clone().unwrap());
+        let mut line = String::new();
+        r.read_line(&mut line).unwrap();
+        decode_line(&line).unwrap()
+    }
+
+    #[test]
+    fn a_line_without_a_newline_does_not_pin_the_agent_before_auth() {
+        // The production limits: 300 KiB with no newline, peer stays connected.
+        let (agent_end, client_end) = socketpair();
+        let rx = spawn_agent(agent_end, ConnLimits::default());
+        let mut w = client_end.try_clone().unwrap();
+        std::thread::spawn(move || {
+            let junk = vec![b'a'; 16 * 1024];
+            for _ in 0..40 {
+                if w.write_all(&junk).is_err() {
+                    break;
+                }
+            }
+        });
+        let done = rx.recv_timeout(Duration::from_secs(5));
+        assert!(
+            done.is_ok(),
+            "the agent kept reading an unauthenticated line"
+        );
+        drop(client_end);
+    }
+
+    #[test]
+    fn a_peer_that_trickles_the_first_line_is_cut_off() {
+        let (agent_end, client_end) = socketpair();
+        let rx = spawn_agent(agent_end, small_limits());
+        let mut w = client_end.try_clone().unwrap();
+        w.write_all(b"{").unwrap();
+        // Never finishes the line; the agent gives up on its own.
+        let done = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("agent still waiting");
+        assert!(done.is_err(), "{done:?}");
+        drop(client_end);
+    }
+
+    #[test]
+    fn an_oversized_line_with_a_wrong_token_is_denied_without_reading_it_all() {
+        let (agent_end, client_end) = socketpair();
+        let rx = spawn_agent(agent_end, small_limits());
+        let mut w = client_end.try_clone().unwrap();
+        std::thread::spawn(move || {
+            let _ = w.write_all(b"{\"token\":\"wrong-token-0123456789\",\"op\":\"put-file\",\"path\":\"/x\",\"content_base64\":\"");
+            let junk = vec![b'A'; 16 * 1024];
+            for _ in 0..40 {
+                if w.write_all(&junk).is_err() {
+                    break;
+                }
+            }
+        });
+        match read_answer(&client_end) {
+            AgentResponse::Error { message } => {
+                assert!(message.contains("unauthorized"), "{message}")
+            }
+            other => panic!("expected unauthorized, got {other:?}"),
+        }
+        assert!(rx.recv_timeout(Duration::from_secs(5)).unwrap().is_ok());
+    }
+
+    #[test]
+    fn an_authenticated_line_past_the_preauth_cap_is_still_served() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("big.bin");
+        let content = vec![7u8; 20 * 1024];
+        let req = Envelope::new(
+            Some("tok-0123456789abcdef".into()),
+            AgentRequest::PutFile {
+                path: path.to_string_lossy().into_owned(),
+                content_base64: B64.encode(&content),
+                mode: None,
+            },
+        );
+        let line = encode_line(&req).unwrap();
+        assert!(line.len() > small_limits().auth_line_bytes);
+        let (agent_end, client_end) = socketpair();
+        let rx = spawn_agent(agent_end, small_limits());
+        let mut w = client_end.try_clone().unwrap();
+        std::thread::spawn(move || {
+            w.write_all(line.as_bytes()).unwrap();
+        });
+        assert!(matches!(
+            read_answer(&client_end),
+            AgentResponse::FileWritten
+        ));
+        assert!(rx.recv_timeout(Duration::from_secs(5)).unwrap().is_ok());
+        assert_eq!(std::fs::read(&path).unwrap(), content);
+    }
+
+    #[test]
+    fn the_largest_file_transfer_fits_the_envelope_cap() {
+        let b64 = (MAX_FILE_TRANSFER_BYTES / 3 + 1) * 4;
+        // path, mode, token and JSON framing around the content.
+        assert!(ENVELOPE_LINE_MAX_BYTES >= b64 + 4096 + 100);
+        const { assert!(AUTH_LINE_MAX_BYTES < ENVELOPE_LINE_MAX_BYTES) };
+    }
+
+    #[test]
+    fn an_authenticated_line_past_the_envelope_cap_is_refused() {
+        let (agent_end, client_end) = socketpair();
+        let rx = spawn_agent(agent_end, small_limits());
+        let mut w = client_end.try_clone().unwrap();
+        std::thread::spawn(move || {
+            let _ = w.write_all(b"{\"token\":\"tok-0123456789abcdef\",\"op\":\"put-file\",\"path\":\"/x\",\"content_base64\":\"");
+            let junk = vec![b'A'; 16 * 1024];
+            for _ in 0..40 {
+                if w.write_all(&junk).is_err() {
+                    break;
+                }
+            }
+        });
+        match read_answer(&client_end) {
+            AgentResponse::Error { message } => {
+                assert!(message.contains("larger than"), "{message}")
+            }
+            other => panic!("expected a size error, got {other:?}"),
+        }
+        assert!(rx.recv_timeout(Duration::from_secs(5)).unwrap().is_ok());
+    }
+
+    #[test]
+    fn get_file_refuses_non_regular_files() {
+        let dir = tempfile::tempdir().unwrap();
+        match get_file(dir.path().to_str().unwrap()) {
+            AgentResponse::Error { message } => assert!(message.contains("regular"), "{message}"),
+            other => panic!("{other:?}"),
+        }
+        let fifo = dir.path().join("fifo");
+        let c = std::ffi::CString::new(fifo.to_str().unwrap()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+        let p = fifo.to_string_lossy().into_owned();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(get_file(&p));
+        });
+        match rx.recv_timeout(Duration::from_secs(5)) {
+            Ok(AgentResponse::Error { message }) => {
+                assert!(message.contains("regular"), "{message}")
+            }
+            other => panic!("get_file on a FIFO: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_huge_exec_timeout_is_served_not_a_panic() {
+        let (agent_end, client_end) = socketpair();
+        let rx = spawn_agent(agent_end, ConnLimits::default());
+        let mut w = client_end.try_clone().unwrap();
+        w.write_all(
+            b"{\"token\":\"tok-0123456789abcdef\",\"op\":\"exec\",\"command\":\"true\",\"timeout_seconds\":18446744073709551615}\n",
+        )
+        .unwrap();
+        match read_answer(&client_end) {
+            AgentResponse::Exec { exit_code: 0, .. } => {}
+            other => panic!("{other:?}"),
+        }
+        assert!(rx.recv_timeout(Duration::from_secs(5)).unwrap().is_ok());
     }
 
     #[test]
