@@ -1465,9 +1465,7 @@ mod tests {
         assert!(!args.contains("bootindex"));
     }
 
-    #[test]
-    fn boot_args_follow_the_disks_dir() {
-        let tmp = std::env::temp_dir().join(format!("fluxvm-disks-{}", uuid::Uuid::new_v4()));
+    fn check_boot_args_follow_the_disks_dir(tmp: std::path::PathBuf) {
         std::fs::create_dir_all(disks_dir(&tmp)).unwrap();
         assert!(boot_args(&tmp).is_empty());
         for n in ["b", "a", "bad.name"] {
@@ -1477,8 +1475,27 @@ mod tests {
         let args = boot_args(&tmp).join(" ");
         assert!(args.find("node-name=data-a").unwrap() < args.find("node-name=data-b").unwrap());
         assert!(args.contains("scsi-hd,bus=scsi0.0,drive=data-a,id=disk-a,serial=a"));
-        assert!(!args.contains("bad") && !args.contains("data-c"));
+        // The arguments carry the workspace path, and a random one (a UUID is hex) can spell "bad": judge the disk
+        // names, not the path.
+        let args = args.replace(tmp.to_str().unwrap(), "<workspace>");
+        assert!(!args.contains("bad") && !args.contains("data-c"), "{args}");
         std::fs::remove_dir_all(&tmp).unwrap();
+    }
+
+    #[test]
+    fn boot_args_follow_the_disks_dir() {
+        check_boot_args_follow_the_disks_dir(
+            std::env::temp_dir().join(format!("fluxvm-disks-{}", uuid::Uuid::new_v4())),
+        );
+    }
+
+    /// The random directory above contains "bad" about once in a hundred runs (a UUID is hex), which used to fail
+    /// the test on CI; pin that case.
+    #[test]
+    fn boot_args_follow_the_disks_dir_when_its_path_spells_bad() {
+        check_boot_args_follow_the_disks_dir(
+            std::env::temp_dir().join(format!("fluxvm-disks-bad-{}", uuid::Uuid::new_v4())),
+        );
     }
 
     #[test]
