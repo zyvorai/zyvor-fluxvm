@@ -31,21 +31,41 @@ key = "/etc/fluxvm/tls/server.key"
 client_ca = "/etc/fluxvm/tls/client-ca.crt"
 ```
 
-`fluxctl serve` uses rustls with `WebPkiClientVerifier`. After the handshake,
-identity can also be passed as headers (for a trusted frontend):
+`fluxctl serve` uses rustls with `WebPkiClientVerifier`: a client must present a certificate signed by `client_ca`.
+The daemon then takes the caller's identity **from that verified certificate**, not from anything the client sends:
+
+- actor: the subject `CN`
+- role: an `OU` of the form `fluxvm-role=admin`. Any other value, or no such `OU`, is read-only. The first `fluxvm-role=` `OU` wins.
+- tenant: an `OU` of the form `fluxvm-tenant=<name>`
+
+Your CA controls these fields, so issue `fluxvm-role=admin` certificates only to principals you trust as admin. A verified
+certificate with no `CN` is rejected as unauthenticated. A bearer token, when presented, is still checked first.
+
+The `X-Client-Cert-*` request headers are **ignored** on a connection the daemon terminated itself, so a client cannot
+send `X-Client-Cert-Role: admin` to raise its role.
+
+### mTLS terminated by a reverse proxy
+
+If a reverse proxy terminates mTLS and forwards plain HTTP to the daemon, opt in explicitly:
+
+```toml
+[tls]
+trust_proxy_headers = true   # default false
+```
+
+The daemon then reads the identity from these headers (when it did not terminate mTLS itself on that connection):
 
 - `X-Client-Cert-CN` — actor
 - `X-Client-Cert-Role` — `admin` or omitted (read-only)
 - `X-Client-Cert-Tenant` — tenant
 
-Headers are honored only when `tls.client_ca` is configured (mTLS on). They are read from the request as sent: the daemon
-does not derive the actor, role or tenant from the verified client certificate itself, so when `fluxctl serve` terminates
-TLS directly, any client that holds a certificate your `client_ca` accepts can send `X-Client-Cert-Role: admin` (and any
-CN or tenant) and be treated as that identity. Until the daemon binds identity to the certificate, use mTLS only to gate who may connect,
-issue client certificates only to principals you would trust as admin, or terminate mTLS in a proxy that overwrites these headers
-and keep the daemon on a private listener.
-Do not put FluxVM behind a proxy that blindly injects these headers without
-verifying the client certificate.
+Enable this only if the proxy verifies the client certificate and **overwrites or strips** these headers on every request,
+and the daemon is reachable only from the proxy (private listener or firewall). Anyone who can reach the daemon directly can
+forge them. With the default `trust_proxy_headers = false` the headers are never read.
+
+Upgrade note: before this change the headers were honored whenever `client_ca` was set. Deployments that relied on that
+behind a proxy must set `trust_proxy_headers = true`; deployments with direct mTLS need client certificates carrying
+`OU=fluxvm-role=admin` for admin access (certificates without it are read-only).
 
 ## Step-up TOTP
 

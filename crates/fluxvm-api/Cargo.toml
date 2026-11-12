@@ -50,8 +50,14 @@ include_dir = "0.7"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 rustls-pemfile = "2"
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
+# mTLS identity from the verified client certificate (see `mtls.rs`).
+axum-server = { version = "0.8", default-features = false }
+x509-parser = "0.18"
+tower-layer = "0.3"
 
 [dev-dependencies]
+rcgen = "0.14"
+axum-server = { version = "0.8", features = ["tls-rustls"] }
 chrono = { version = "0.4", features = ["serde"] }
 tempfile = "3"
 tower = { version = "0.5", features = ["util"] }

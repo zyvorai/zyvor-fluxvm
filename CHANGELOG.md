@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- **Security: mTLS identity is now taken from the verified client certificate.** Previously the actor, role and tenant came
+  from the client-supplied `X-Client-Cert-CN` / `-Role` / `-Tenant` headers, so any holder of a certificate accepted by
+  `tls.client_ca` could send `X-Client-Cert-Role: admin` and get admin. When `fluxctl serve` terminates mTLS it now derives
+  the identity from the peer certificate (CN; role from an `OU=fluxvm-role=admin`; tenant from `OU=fluxvm-tenant=<name>`) and
+  ignores those headers. They are honored only with the new opt-in `tls.trust_proxy_headers = true` (default off), for a
+  proxy that terminates mTLS. **Compatibility:** direct-mTLS clients that relied on the role header need an
+  `OU=fluxvm-role=admin` certificate; proxy deployments must set `trust_proxy_headers = true`. See `docs/auth-oidc-mtls.md`.
 - Docs: current-release references updated to 0.4.20, Linux `.deb`/`.rpm`/tarball install steps, a "Releasing: the guestkit pin"
   section in `docs/linux-package.md`, and a warning that mTLS identity headers are client-supplied
   (`docs/auth-oidc-mtls.md`).

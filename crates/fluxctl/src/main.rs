@@ -6725,9 +6725,17 @@ async fn main() -> Result<()> {
                     mtls = cfg.tls.mtls_enabled(),
                     "API listening (TLS)"
                 );
-                axum_server::bind_rustls(addr, rustls_config)
-                    .serve(app.into_make_service())
-                    .await?;
+                if cfg.tls.mtls_enabled() {
+                    // Identity comes from the verified peer certificate, not request headers.
+                    axum_server::bind(addr)
+                        .acceptor(api::mtls::IdentityAcceptor::new(rustls_config.get_inner()))
+                        .serve(app.into_make_service())
+                        .await?;
+                } else {
+                    axum_server::bind_rustls(addr, rustls_config)
+                        .serve(app.into_make_service())
+                        .await?;
+                }
             } else {
                 let listener = TcpListener::bind(&cfg.listen).await?;
                 tracing::info!(listen=%cfg.listen, "API listening");

@@ -878,6 +878,12 @@ pub struct TlsConfig {
     pub key: Option<PathBuf>,
     /// PEM CA bundle; when set, require and verify client certificates.
     pub client_ca: Option<PathBuf>,
+    /// Trust the `X-Client-Cert-CN` / `-Role` / `-Tenant` request headers as the client's identity.
+    /// Off by default: a client can send those headers itself. Enable only when a reverse proxy
+    /// that verifies the client certificate (and overwrites these headers) is the sole way to
+    /// reach the daemon. Never consulted for a connection on which this process terminated mTLS:
+    /// that identity always comes from the verified certificate.
+    pub trust_proxy_headers: bool,
 }
 
 impl TlsConfig {
