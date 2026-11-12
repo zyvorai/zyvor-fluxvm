@@ -33,3 +33,5 @@ jobs:
         run: bash scripts/check-guestkit-pin.sh .
       - name: guestkit pin checker tests
         run: bash scripts/test-check-guestkit-pin.sh
+      - name: apt dependency helper tests (self-hosted runners without sudo)
+        run: bash scripts/test-ci-install-apt-deps.sh
