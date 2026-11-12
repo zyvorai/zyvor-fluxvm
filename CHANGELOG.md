@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- **Security: mTLS identity is now taken from the verified client certificate.** Previously the actor, role and tenant came
+  from the client-supplied `X-Client-Cert-CN` / `-Role` / `-Tenant` headers, so any holder of a certificate accepted by
+  `tls.client_ca` could send `X-Client-Cert-Role: admin` and get admin. When `fluxctl serve` terminates mTLS it now derives
+  the identity from the peer certificate (CN; role from an `OU=fluxvm-role=admin`; tenant from `OU=fluxvm-tenant=<name>`) and
+  ignores those headers. They are honored only with the new opt-in `tls.trust_proxy_headers = true` (default off), for a
+  proxy that terminates mTLS. **Compatibility:** direct-mTLS clients that relied on the role header need an
+  `OU=fluxvm-role=admin` certificate; proxy deployments must set `trust_proxy_headers = true`. See `docs/auth-oidc-mtls.md`.
 - **Guest agent hardening.** The agent read a request line with no size limit or timeout before checking the token, so any
   vsock peer could exhaust guest memory or hold a thread forever. The pre-auth line is now capped at 64 KiB with idle and
   total read timeouts; a longer line (file upload, up to 64 MiB as base64) is read only after its leading token
