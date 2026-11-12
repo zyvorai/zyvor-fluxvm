@@ -67,7 +67,9 @@ Behaviour worth knowing:
   `text/plain` unless you set `Content-Type`; dict/list bodies are sent as JSON.
 - **Auth.** `Authorization: Bearer <token>` (static token or OIDC JWT). Tenant
   scoping comes from the token; other tenants' sandbox ids answer 404. Behind a
-  trusted mTLS frontend pass its identity headers via `headers=`.
+  trusted mTLS frontend (a proxy that verifies the client certificate and strips client-supplied copies) pass its identity headers via
+  `headers=`; the daemon reads them only with `tls.trust_proxy_headers = true` (0.4.21+, see
+  [docs/auth-oidc-mtls.md](../docs/auth-oidc-mtls.md)). When the daemon itself terminates mTLS, the identity comes from the client certificate.
 - All sandbox routes that reach the guest need an `admin` token.
 
 ## Errors

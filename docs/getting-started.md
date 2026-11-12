@@ -11,12 +11,15 @@ downloads and verifies a release package into `~/.local` with no sudo ([install.
 the host preparation in step 1 below. Or build from source:
 
 ```bash
-git clone https://github.com/zyvorai/fluxvm.git
-cd fluxvm
+git clone https://github.com/zyvorai/zyvor-fluxvm.git
+cd zyvor-fluxvm
 ```
 
 `fluxvm-image` depends on a sibling [`guestkit`](https://github.com/zyvorai/guestkit) checkout
-(clone it next to `fluxvm`, i.e. path `../../../guestkit` from `crates/fluxvm-image`).
+(clone it next to this repository into a directory named `guestkit`, i.e. path `../../../guestkit` from `crates/fluxvm-image`, and check out the tag in
+`packaging/guestkit.ref`: `git -C ../guestkit checkout "$(cat packaging/guestkit.ref)"`). `git clone https://github.com/zyvorai/guestkit` creates that
+directory name (the repository is called `zyvor-guestkit` on GitHub now, and the old name redirects); cloning by the new name would create `zyvor-guestkit`, which the
+path does not find.
 
 ```bash
 # 1. Prepare the host once — packages, Cloud Hypervisor, Firecracker, a bridge.

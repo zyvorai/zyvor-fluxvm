@@ -2,11 +2,15 @@
 
 ## Build
 
+`fluxvm-image` depends on the sibling repo `zyvorai/guestkit` by a relative path (`../../../guestkit`), so cargo needs a guestkit checkout next
+to this one, at the tag in `packaging/guestkit.ref`. `scripts/check-guestkit-pin.sh . ../guestkit` checks that the ref, `Cargo.lock`, the
+workflow checkouts and your checkout agree (see [docs/linux-package.md](docs/linux-package.md#releasing-the-guestkit-pin)).
+
 ```bash
-make build          # cargo build --workspace
-make test           # rust unit tests (needs workspace toolchain)
+make build          # cargo build --workspace --all-targets
+make test           # cargo test --workspace
 make test-policy    # python control-plane tests (no rustc required)
-make check          # test-policy + preflight
+make check          # fmt-check, clippy, test-policy, preflight, test-devops, test-packetflow
 make bpf            # scripts/build-ebpf.sh
 make preflight
 ./scripts/test-security-profiles.sh   # Phase 6 measured + confidential control plane (no TEE hardware)
@@ -16,7 +20,7 @@ make preflight
 ## PR bar
 
 - Apache-2.0 headers on new files
-- Changelog entry under `## 0.4.0 (unreleased)`
+- Changelog entry under `## Unreleased` at the top of `CHANGELOG.md`
 - Docs next to the feature (`docs/` + README TOC if it is operator-facing)
 - Operator-facing production/auth/tenant/probe changes also update
   [docs/PRODUCTION.md](docs/PRODUCTION.md),
@@ -28,7 +32,7 @@ make preflight
 
 ## Layout
 
-See README “Project layout”. Network Fabric lives in `crates/fluxvm-network`
+See [docs/architecture.md](docs/architecture.md#project-layout). Network Fabric lives in `crates/fluxvm-network`
 + `bpf/`. Kubernetes packaging is `deploy/k8s/` + `crates/fluxvm-kube`.
 Secure Containers (containerd runtime-v2) lives in `crates/fluxvm-container-*` /
 `crates/fluxvm-containerd-shim` + `deploy/containerd/` — see

@@ -10,7 +10,10 @@ run_dir = "/run/fluxvm"
 # docker_sock = "{run_dir}/docker.sock"
 qemu_binary = "qemu-system-x86_64"
 qemu_img_binary = "qemu-img"
+# qemu_storage_daemon_binary = "qemu-storage-daemon"   # opens a stopped VM's disks for incremental (CBT) backups
+# virtiofsd_binary = "virtiofsd"                       # only used when a create request has shared_folders (QEMU)
 cloud_hypervisor_binary = "cloud-hypervisor"
+# ch_remote_binary = "ch-remote"
 cloud_localds_binary = "cloud-localds"
 firecracker_binary = "firecracker"
 # firecracker_kernel = "/var/lib/fluxvm/kernels/vmlinux"
@@ -63,6 +66,11 @@ reaper_interval_secs = 5
 # Transparent mode: accept guest traffic redirected by nftables (ports 80/443) with no proxy
 # settings in the guest. Needs egress_tls_intercept for HTTPS. See docs/http-acl.md.
 # egress_transparent_listen = "0.0.0.0:18889"
+# Other [sandbox] keys:
+# templates_dir = "/var/lib/fluxvm/templates"   # OCI -> template builds and snapshot templates
+# volumes_dir = "/var/lib/fluxvm/volumes"       # named sandbox volumes (default <state_dir>/volumes)
+# egress_proxy_listen = "127.0.0.1:18080"       # live L7 egress proxy (empty = off)
+# http_proxy_default_port = 8080                # guest port for /sandbox/{id}/... with no port in the path
 
 # Rootless process sandboxes ("procbox": Landlock + seccomp on the host kernel).
 # Off by default; a weaker boundary than a microVM (see docs/procbox-backend.md).
@@ -88,9 +96,6 @@ reaper_interval_secs = 5
 # ports are open): "off", "auto" (use them when the kernel allows, report the
 # gap otherwise) or "strict" (fail closed, 503, without them).
 # isolation = "auto"
-# templates_dir = "/var/lib/fluxvm/templates"
-# egress_proxy_listen = "127.0.0.1:18080"
-# http_proxy_default_port = 8080
 #
 # Native VM-edge networking — Network Fabric GA (dataplane schema v4).
 # Absent / commented = native eBPF with required=true. Run host preflight before upgrading.
@@ -254,11 +259,20 @@ reaper_interval_secs = 5
 # public_key = "BASE64_ED25519_PUBLIC_KEY"    # from `fluxvm catalog keygen`
 
 # Optional HTTPS for the API. When client_ca is set, require client certs (mTLS).
-# Bearer / OIDC still apply after the TLS handshake.
+# Bearer / OIDC still apply after the TLS handshake, and take precedence over the
+# certificate. With mTLS the caller's identity is the verified client certificate:
+# subject CN = actor, an OU "fluxvm-role=admin" = admin (anything else: read-only),
+# an OU "fluxvm-tenant=<name>" = tenant. Needs at least one [[auth.tokens]] or OIDC
+# configured too (see docs/auth-oidc-mtls.md). The X-Client-Cert-* headers are ignored
+# unless trust_proxy_headers = true.
 # [tls]
 # cert = "/etc/fluxvm/tls/server.crt"
 # key = "/etc/fluxvm/tls/server.key"
 # client_ca = "/etc/fluxvm/tls/client-ca.crt"
+# Trust X-Client-Cert-CN / -Role / -Tenant as the identity, for a reverse proxy that
+# terminates mTLS, verifies the client certificate and strips client-supplied copies
+# of those headers, and is the only way to reach the daemon. Default false.
+# trust_proxy_headers = false
 
 # Firecracker only: run every Firecracker VM through Firecracker's own
 # `jailer` binary (chroot, uid/gid drop) instead of exec'ing it directly.

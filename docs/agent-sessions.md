@@ -293,7 +293,7 @@ Not done: tokens are not narrowed by path or by git repository.
 `process.allow` and `process.deny` match the command *string*, so `sh -c`, `$(...)` or a script the agent wrote walks around
 them. `"process": {"allow": ["git *", "python3 *"], "enforce": "exec"}` additionally makes the programs the patterns name
 (the first word of each `allow` and `ask` pattern) the only files the guest kernel lets start (Landlock execute right).
-`fluxctl agent create --cmd-allow 'git *' --cmd-allow 'python3 *' --cmd-enforce`.
+`fluxctl agent run --cmd-allow 'git *' --cmd-allow 'python3 *' --cmd-enforce`.
 
 - A pattern's first word must be a literal program name or absolute path. A bare name is looked up in the usual bin
   directories; `g*t` or a relative path is refused at create. An `allow`/`ask` list is required.
@@ -840,7 +840,7 @@ Each item says why it is not in the MVP.
 | Lazy memory restore (sub-second claim/fork) | **Done on the in-tree KVM engine, not on `vz`.** KVM restores RAM with a `MAP_PRIVATE` mapping of `snap.mem` (pages fault in on first touch, children share unwritten pages; see [fork-and-restore.md](fork-and-restore.md#ram-restore-map_private-with-an-eager-fallback)), so it is not what limits a fork there: one measured child took 4.3–9.2 s, of which RAM restore was about 1.2 s and the guest identity reset about 3.5 s. Not done on `vz` (Apple's Virtualization framework restores the saved state itself, which is the 4.1 s restore above) |
 
 | Workspace overlay across guest reboots | `mode: "overlay"` and `"readonly"` are implemented (see Create); the overlay mount is not persisted in the guest's fstab |
-| Process policy: argv rules as a security boundary | `process.enforce: "exec"` (`fluxctl agent create --cmd-allow ... --cmd-enforce`) makes the `allow`/`ask` programs a kernel-enforced executable allow-list (Landlock), which holds for `sh -c`, scripts and children. `deny` and argument patterns (`git push*`) are still string globs, because the kernel sees paths, not arguments. Unit-tested; not yet run on a real Linux guest |
+| Process policy: argv rules as a security boundary | `process.enforce: "exec"` (`fluxctl agent run --cmd-allow ... --cmd-enforce`) makes the `allow`/`ask` programs a kernel-enforced executable allow-list (Landlock), which holds for `sh -c`, scripts and children. `deny` and argument patterns (`git push*`) are still string globs, because the kernel sees paths, not arguments. Unit-tested; not yet run on a real Linux guest |
 | HTTP method/path rules on `vz` | the runner's allow-list proxy matches host names only; per-session rules are enforced by the host egress proxy (see above) |
 | Streaming exec output | **Done:** `POST .../exec/stream` (`fluxctl agent exec --stream`). Plain `exec` stays buffered; the stream is a job under the hood, long-polled from the guest supervisor or polled every 400 ms on older agents |
 | Replay of file writes, jobs and git steps | `replay` re-runs `exec` commands only; the ledger records a file write's path and size, not its content, so those steps are listed as skipped. Recording content would need a store the ledger does not have |

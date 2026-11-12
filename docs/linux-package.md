@@ -1,36 +1,103 @@
 # The Linux package
 
-The release builds one package per architecture, `fluxvm-<version>-linux-<x86_64|aarch64>.tar.gz` with a `.sha256`, from
-the ubuntu:22.04 build container (`.github/workflows/release-linux.yml`). Nothing is compiled on a node: the same files
-are installed everywhere, by `scripts/install.sh` today and by the `.deb`/`.rpm` (and the pull installer, as it lands) (see
-the 10,000-node install plan).
+A release builds one tarball per architecture, `fluxvm-<version>-linux-<x86_64|aarch64>.tar.gz` with a `.sha256`, in the
+ubuntu:22.04 build container (`.github/workflows/release-linux.yml`). Nothing is compiled on a node: the same files are
+installed everywhere, by `scripts/install.sh` ([install.md](install.md)), by hand (below), or by the pull installer
+`fluxvm-bootstrap`, which defaults to tarball mode ([fleet-install.md](fleet-install.md)).
 
-## How a release becomes packages
+> **Releases are tarball-only.** Since the release workflow change in #739 no release builds, verifies or attaches a `.deb` or
+> an `.rpm`. Releases up to and including 0.4.21 carry them (0.4.21 has both for x86_64 and aarch64: checked against its
+> published assets); later releases do not. The two sections "The .deb" and "The .rpm" below describe the packaging scripts
+> that remain in the tree (`scripts/package-linux-pkgs.sh`, `packaging/nfpm.yaml`, `packaging/deb/`) and the checks CI still
+> runs on them. They are not a release artifact, and nothing in a release job exercises them.
 
-![From version bump to installable packages](assets/kube/release-pipeline.svg)
+## What a release attaches
 
-A version-bump PR (every crate, `Cargo.lock`, the changelog) is merged, then the tag is pushed. The tag starts `release-macos.yml` (a tarball attached to a draft release) and `release-linux.yml` (the x86_64 build, and an aarch64 cross build that is still experimental, so a green run is not proof the aarch64 packages exist). Publishing is followed by the Homebrew formula PR and the "current release" docs PR.
+| Asset | Built by |
+|---|---|
+| `fluxvm-<version>-linux-x86_64.tar.gz`, `fluxvm-<version>-linux-aarch64.tar.gz`, each with a `.sha256` | `release-linux.yml` (the aarch64 build is a cross build and marked experimental) |
+| `fluxvm-<version>-macos-arm64.tar.gz` and its `.sha256` | `release-macos.yml` |
+| `fluxvm-k8s-<version>.yaml` and its `.sha256`, the Kubernetes manifest with the image digest pinned | `publish-image.yml` ([container-image.md](container-image.md)) |
 
-If the Linux run cannot start, the same packages can be built by hand from the tag in the same `ubuntu:22.04` container: `scripts/package-linux.sh`, then `scripts/check-glibc-floor.sh <dir> 2.35`, then `scripts/package-linux-pkgs.sh`. For 0.4.17 the Linux x86_64 and aarch64 packages were built this way on a self-hosted server, checked (deb in Ubuntu 22.04, rpm in Fedora 43, each on its own architecture) and attached to the release, and the release notes say so.
+0.4.19 was published without any Linux asset (see [Releasing](#releasing-the-guestkit-pin)); use 0.4.20 or later.
+
+## How a release becomes a tarball
+
+![From version bump to installable tarballs](assets/kube/release-pipeline.svg)
+
+A version-bump PR (every crate, `Cargo.lock`, the changelog) is merged, then the tag is pushed. The tag starts `release-macos.yml`
+(a tarball attached to a draft release) and `release-linux.yml`. The Linux workflow runs these jobs:
+
+1. **plan**: the architecture matrix. x86_64 is built natively; aarch64 is cross-built on x86_64 and marked experimental, so a failed
+   aarch64 build does not stop the x86_64 tarball or the release, and a green run is not proof the aarch64 tarball exists.
+2. **package** (in `ubuntu:22.04`): reads the guestkit tag from `packaging/guestkit.ref`, checks guestkit out at it and runs
+   `scripts/check-guestkit-pin.sh` (see [Releasing](#releasing-the-guestkit-pin)), builds with `scripts/package-linux.sh`, then runs
+   the glibc floor gate (`scripts/check-glibc-floor.sh <dir> 2.35`). A second, informational probe (`continue-on-error`) checks
+   whether the binaries would also run on glibc 2.34 (EL9).
+3. **verify**: unpacks the tarball in a clean `ubuntu:22.04` container (the aarch64 one under qemu), checks that `fluxctl`,
+   `fluxvm-hypervisor` and `fluxvm-agent` have no missing libraries and that `fluxctl --version` runs, then attaches the tarball and
+   its `.sha256` to the release (created as a draft if it does not exist, so nothing is published until someone publishes it).
+4. **publish**: writes the SBOM, attests build provenance for the tarballs and, when the `FLUXVM_RELEASE_KEY` secret is set,
+   signs a release manifest and channel file for the pull installer (default channel `canary` at 100 %). With the `MIRROR_S3_URI`
+   variable it syncs the mirror, channel files last.
+
+Publishing is followed by the Homebrew formula PR and the "current release" docs PR.
+
+If the Linux run cannot start, the same tarball can be built by hand from the tag in the same `ubuntu:22.04` container:
+`scripts/package-linux.sh`, then `scripts/check-glibc-floor.sh <dir> 2.35`, then attach `target/package/*.tar.gz` and `*.sha256` with
+`gh release upload`, and say in the release notes that it was built by hand. For 0.4.17 the Linux x86_64 and aarch64 packages
+(at that time tarball, `.deb` and `.rpm`) were built this way on a self-hosted server, checked (deb in Ubuntu 22.04, rpm in
+Fedora 43, each on its own architecture) and attached to the release.
 
 ## Installing
 
-> **Packages dropped.** Releases ship the tarball only. The `.deb` and `.rpm` sections below describe the packaging scripts
-> that remain in the tree (`scripts/package-linux-pkgs.sh`); no release attaches those packages after 0.4.21.
-
-Each release carries, per architecture, the tarball (`fluxvm-<version>-linux-<x86_64|aarch64>.tar.gz`) with a `.sha256`.
-Example for 0.4.21 on x86_64 (use `aarch64` on ARM):
+Per architecture, a release carries the tarball and its `.sha256`. Example for 0.4.21 on x86_64 (use `aarch64` on ARM; 0.4.21 is
+the last release that also carries `.deb` and `.rpm`):
 
 ```bash
 V=0.4.21; B=https://github.com/zyvorai/zyvor-fluxvm/releases/download/v$V
 curl -fsSLO $B/fluxvm-$V-linux-x86_64.tar.gz && curl -fsSLO $B/fluxvm-$V-linux-x86_64.tar.gz.sha256
 sha256sum -c fluxvm-$V-linux-x86_64.tar.gz.sha256 && tar -xzf fluxvm-$V-linux-x86_64.tar.gz
-sudoedit /etc/fluxvm.toml && sudo systemctl start fluxvm
+cd fluxvm-$V-linux-x86_64 && sha256sum -c --quiet MANIFEST.sha256     # every unpacked file against the package's own hashes
 ```
 
-The tarball can also be installed without root by `scripts/install.sh` ([install.md](install.md)). The aarch64 build is
-still labelled experimental in the workflow. 0.4.19 was published without any Linux package (see
-[Releasing](#releasing-the-guestkit-pin)); use 0.4.20 or later.
+Unpacking installs nothing. Either run `scripts/install.sh` (rootless, under `~/.local`; it prints the root steps for the service)
+or place the files yourself. By hand, as root, from the unpacked directory:
+
+```bash
+sudo install -m 0755 bin/fluxctl /usr/local/bin/fluxctl            # the unit's ExecStart is /usr/local/bin/fluxctl
+sudo ln -sfn fluxctl /usr/local/bin/fluxvm
+sudo mkdir -p /usr/lib/fluxvm && sudo cp -r lib/bpf /usr/lib/fluxvm/   # the BPF objects the daemon loads by default
+sudo install -m 0644 share/config.example.toml /etc/fluxvm.toml       # only if you have none; edit it first
+sudo install -m 0644 share/systemd/fluxvm.service /etc/systemd/system/fluxvm.service
+sudo systemctl daemon-reload && sudo systemctl enable --now fluxvm
+```
+
+The daemon looks for its eBPF objects in `/usr/lib/fluxvm/bpf` unless the config names others (`crates/fluxvm-core/src/config.rs`),
+and the unit runs `/usr/local/bin/fluxctl`. Copy the other binaries you use from `bin/` the same way. This block was written from
+the manifest and the unit, not run end to end on a fresh host. `scripts/install.sh --service` prints the `fluxctl`, config and unit steps and the
+`systemctl` line, but not the BPF directory (a gap in that script, not in the package).
+
+Needs glibc 2.35 or newer: Ubuntu 22.04+, Debian 12+, Fedora and RHEL-family 10. EL9 (glibc 2.34) is not supported; the glibc
+gate in the release job is what enforces the floor. The aarch64 build is still labelled experimental in the workflow.
+
+### Upgrading
+
+- **`scripts/install.sh`** keeps every unpacked version under `~/.local/share/fluxvm/<version>` and repoints `current`; run it again for
+  a newer version, or with `--version` to roll back ([install.md](install.md#upgrade-pin-roll-back-uninstall)). It never writes the
+  service, so after an upgrade copy the new `bin/fluxctl` over `/usr/local/bin/fluxctl` and `systemctl restart fluxvm` yourself.
+- **`fluxvm-bootstrap`** (the pull installer; mirror, signatures and waves in [fleet-install.md](fleet-install.md)) defaults to
+  `INSTALL_MODE=tarball`: it unpacks to `/opt/fluxvm/<version>`, flips `/opt/fluxvm/current`, links each `bin/*` into
+  `/usr/local/bin`, copies `share/systemd/*.service` to `/etc/systemd/system`, links `lib/bpf` at `/usr/lib/fluxvm/bpf`, restarts
+  `fluxvm.service` when it is enabled, waits for the new version to answer and rolls back by itself when it does not.
+  `/etc/fluxvm.toml` and `/var/lib/fluxvm` are not touched. The unit uses `KillMode=process`, so a restart leaves running VMs alone.
+- **A node installed from a `.deb` or `.rpm`** (0.4.21 or earlier): the packages put binaries in `/usr/bin`, the tarball paths above use
+  `/usr/local/bin`, and a release after 0.4.21 has no `.deb`/`.rpm` for `INSTALL_MODE=deb|rpm` to fetch (`release <version> has no deb for <arch>`).
+  The packaged unit is replaced by the one in `/etc/systemd/system`. To move such a node: keep `/etc/fluxvm.toml` and `/var/lib/fluxvm`,
+  remove the package (`apt-get remove fluxvm` / `dnf remove fluxvm` keep both, as the sections below describe), then install the tarball as
+  above or run `fluxvm-bootstrap` with `INSTALL_MODE` unset. Not tested: a package-to-tarball migration on a real node, and in particular
+  whether a leftover `/usr/lib/fluxvm/bpf` directory from the package is replaced (the bootstrap uses `ln -sfn`, which would
+  create the link inside an existing directory), so remove that directory first.
 
 ## What is in it
 
@@ -47,21 +114,24 @@ required file is missing, so the package cannot silently lose a binary. The core
 | `bin/fluxvm-guard` | VMM Guard CLI |
 | `lib/bpf/*.bpf.o` | the BPF objects the daemon loads, built for the package's architecture (installed to `/usr/lib/fluxvm/bpf/`) |
 | `share/guest/fluxvm-guest-agent` | the static (musl) guest agent, injected into guest images of any distro |
-| `share/config.example.toml`, `share/systemd/fluxvm.service` | config template and the one hardened unit |
+| `share/config.example.toml`, `share/systemd/fluxvm.service` | config template and the one hardened unit (`ExecStart=/usr/local/bin/fluxctl --config /etc/fluxvm.toml serve`, `KillMode=process`) |
+| `bin/fluxvm-bootstrap`, `share/systemd/fluxvm-bootstrap.{service,timer}`, `share/bootstrap.conf.example` | the pull installer, its timer (every 6 h, off until enabled) and a config template ([fleet-install.md](fleet-install.md)) |
+| `share/systemd/fluxvm-agent.service`, `share/agent.env.example` | unit and environment template for `fluxvm-agent` |
+| `share/release.pub`, `LICENSE` | the release public key and the license; both optional in the manifest (`packaging/release.pub` is not in the tree today, so the key is not in the tarball and a node needs `/etc/fluxvm/release.pub`) |
 | `share/completions/` | bash, zsh and fish completions (native builds only) |
 | `MANIFEST.sha256` | a sha256 of every other file, so what was unpacked can be checked |
 
-Not packaged yet (group `extras` in the manifest): the Sentinel / runtime-intelligence daemons and their C loaders
+Not packaged yet (the manifest reserves a group `extras` for them; it has no entries today): the Sentinel / runtime-intelligence daemons and their C loaders
 (they need libbpf at run time), the fluxmesh agents, the containerd shim and container agent, `fluxvm-procbox`. They need a
 decision on a separate package and on the runtime libraries it declares.
 
 The layout keeps `bin/`, `share/config.example.toml` and `share/systemd/fluxvm.service` where `scripts/install.sh`
 expects them; everything else is added next to them.
 
-## The .deb
+## The .deb (remaining script, not a release artifact)
 
-The release also builds `fluxvm_<version>_<amd64|arm64>.deb` from the same staged tree (`scripts/package-linux-pkgs.sh`,
-`packaging/nfpm.yaml`). Layout: `/usr/bin`, `/usr/lib/fluxvm/bpf`, `/usr/share/fluxvm` (guest agent, config template),
+Releases up to 0.4.21 attached `fluxvm_<version>_<amd64|arm64>.deb`; later releases do not. The script still builds it from the same
+staged tree (`scripts/package-linux-pkgs.sh`, `packaging/nfpm.yaml`, needs [nfpm](https://nfpm.goreleaser.com)). Layout: `/usr/bin`, `/usr/lib/fluxvm/bpf`, `/usr/share/fluxvm` (guest agent, config template),
 `/usr/lib/systemd/system/fluxvm.service` (ExecStart `/usr/bin/fluxctl`), `modules-load.d`/`modprobe.d` for `nbd max_part=16`,
 shell completions in the distribution directories.
 
@@ -77,9 +147,9 @@ The maintainer scripts (`packaging/deb/`) follow these rules:
 `scripts/test-deb.sh` installs, upgrades (with an edited config), removes and purges it in an ubuntu:22.04 container; CI runs it.
 Firecracker and Cloud Hypervisor are pinned in `packaging/vendor.lock` (see below) but not yet bundled into the packages.
 
-## The .rpm
+## The .rpm (remaining script, not a release artifact)
 
-`scripts/package-linux-pkgs.sh --stage DIR --format rpm` builds `fluxvm-<version>-1.<x86_64|aarch64>.rpm` from the same staged
+Releases up to 0.4.21 attached the `.rpm`; later releases do not. `scripts/package-linux-pkgs.sh --stage DIR --format rpm` builds `fluxvm-<version>-1.<x86_64|aarch64>.rpm` from the same staged
 tree and the same `packaging/nfpm.yaml` (an `overrides.rpm` block holds the rpm dependency names). Same layout, same
 maintainer scripts: rpm passes `1` (install) / `2` (upgrade) to the post-install script, and `0` on erase / `1` on upgrade to
 the pre- and post-uninstall scripts; `packaging/deb/*.sh` handle both conventions (`prerm`: `remove|0`; `postrm`: `purge|0`;
@@ -104,8 +174,9 @@ Support boundary:
 - **EL9 is not installable yet.** EL9 ships glibc 2.34 and the binaries are built on ubuntu:22.04 (glibc 2.35), so the rpm
   declares `glibc >= 2.35` and `dnf` refuses it with a clear message instead of the binaries dying with
   `GLIBC_2.35 not found`. The release job runs `check-glibc-floor.sh ... 2.34` as an informational probe
-  (`continue-on-error`); if it passes, lower the number in `packaging/nfpm.yaml`, otherwise build the EL9 rpm in a Rocky 9
-  container (follow-up).
+  (`continue-on-error`). The tarball has the same floor: on EL9 it needs glibc 2.35 and does not run, and with no rpm shipped any more there
+  is no package-manager message to say so. If the probe passes, the floor can be lowered (`check-glibc-floor.sh`'s argument in the workflow and,
+  for the scripts, `packaging/nfpm.yaml`); otherwise the binaries would have to be built in a Rocky 9 container (follow-up).
 - The SELinux policy for the host is not packaged. `systemd/fluxvm-selinux-ensure.service` runs inside the Secure Containers
   guest, not on the host.
 
@@ -125,9 +196,16 @@ The firmware release publishes no digest on GitHub, so its hash is trust-on-firs
 
 ## Testing
 
-`scripts/test-deb.sh` and `scripts/test-rpm.sh` build two stand-in versions and install, upgrade (edited config kept) and
-remove them in clean containers; `test-rpm.sh` also inspects the rpm metadata with `rpm -qp`. `packaging-checks.yml` runs both
-and `scripts/test-vendor-lock.sh`; `release-linux.yml` installs the real rpm in Fedora 43 and Rocky 10.
+What runs where, after the change to tarball-only releases:
+
+- `release-linux.yml` (release jobs): the glibc floor gate, the glibc 2.34 probe, and a smoke test that unpacks the tarball in a clean
+  ubuntu:22.04 container (no missing libraries, `fluxctl --version`). It no longer installs a `.deb` or `.rpm`.
+- `packaging-checks.yml` (CI on changes to `packaging/`, `scripts/`): `scripts/package-linux.sh --check-manifest` and the manifest tests,
+  the pull-installer tests (`scripts/test-bootstrap.sh`, and `scripts/e2e/bootstrap-pkg.sh` in `deb` and `rpm` mode), shellcheck, and
+  `scripts/test-vendor-lock.sh`. It also still exercises the remaining package scripts: `scripts/test-deb.sh` and `scripts/test-rpm.sh`
+  build two stand-in versions and install, upgrade (edited config kept) and remove them in clean containers (`test-rpm.sh` also inspects
+  the rpm metadata with `rpm -qp`), and `scripts/e2e/systemd-deb.sh` / `systemd-rpm.sh` install them under a real systemd.
+- Not covered by any job: installing the tarball on a fresh host and starting the service, and the package-to-tarball migration above.
 
 ## Building and checking
 
@@ -144,19 +222,45 @@ the completions out, because it cannot run the binaries it makes.
 
 ## Releasing: the guestkit pin
 
-fluxvm builds against the sibling repo `zyvorai/guestkit` through a relative path. Release builds check guestkit out at a
-fixed tag, never its default branch, and three places must name the same version:
+fluxvm builds against the sibling repo `zyvorai/guestkit` through a relative path (`crates/fluxvm-image` depends on
+`../../../guestkit`, so the checkout must sit next to the fluxvm directory). Release builds check guestkit out at a fixed tag,
+never its default branch, and three places must name the same version:
 
-1. `packaging/guestkit.ref`: one tag, for example `v1.2.9`.
+1. `packaging/guestkit.ref`: one tag, for example `v1.2.9` (the current pin; 0.4.20 and 0.4.21 are built with it).
 2. `Cargo.lock`: the `guestkit` package's `version` (the tag without the `v`).
 3. Every `.github/workflows/*.yml` step that checks out `zyvorai/guestkit` has `ref:` set to that tag (the workflows
-   carry the comment `# packaging/guestkit.ref; checked by scripts/check-guestkit-pin.sh`; `release-linux.yml` reads the ref file).
+   carry the comment `# packaging/guestkit.ref; checked by scripts/check-guestkit-pin.sh`). `release-linux.yml` reads the ref file
+   instead of repeating the tag, and the checker accepts that form.
 
-`scripts/check-guestkit-pin.sh [FLUXVM_DIR] [GUESTKIT_DIR]` fails when they disagree, and with a guestkit directory also when
-the checkout is not at the pinned tag. The Linux release jobs run it before building. This is what broke 0.4.19: the ref
-said `v1.2.6` while `Cargo.lock` recorded 1.2.9, both Linux package jobs failed, and the release went out without
-Linux packages (fixed for 0.4.20 in #731).
+`scripts/check-guestkit-pin.sh [FLUXVM_DIR] [GUESTKIT_DIR]` checks, in order:
 
-To bump guestkit, in one PR: edit `packaging/guestkit.ref`, refresh `Cargo.lock` (`cargo metadata`, without `--locked`),
-and change every workflow `ref:`; run `scripts/check-guestkit-pin.sh .` before merging. Before tagging a release, check that
-the release's Linux assets (tarball, `.deb`, `.rpm` for both architectures) are all attached.
+- `packaging/guestkit.ref` holds one `vX.Y.Z` tag and equals `Cargo.lock`'s guestkit version, else it fails ("bump both together").
+- With `GUESTKIT_DIR`: that checkout is at the pinned tag. `actions/checkout` at a tag can leave a detached HEAD without the tag
+  itself, so the script also accepts a HEAD that the remote's tag points at.
+- With `GUESTKIT_DIR` (new in 0.4.21): **Cargo.lock drift.** The version strings can agree while the lock is still stale for guestkit's own
+  dependencies: before 0.4.21 the lock pinned `evtx` 0.15.1 while guestkit 1.2.9 needs 0.12, so every `--locked` cargo command failed.
+  The script now runs `cargo metadata --locked --format-version 1` in `FLUXVM_DIR` and fails when it cannot resolve. It needs `cargo` on
+  `PATH` (without it this step is skipped silently) and the guestkit checkout at the relative path above. Set
+  `CHECK_GUESTKIT_PIN_SKIP_CARGO=1` to skip it (what `scripts/test-check-guestkit-pin.sh` does, because its fixtures are not a real
+  workspace).
+- Every workflow that checks guestkit out pins that ref (the count of `repository: zyvorai/guestkit` lines must equal the count of pinned
+  `ref:` lines in each file).
+
+Where it runs: `devops-gates.yml` runs `scripts/check-guestkit-pin.sh .` (the version and workflow checks only: no guestkit directory is
+given, so no cargo step) and the checker's own tests; `release-linux.yml` runs it with the guestkit checkout before building (the cargo
+step included); `cargo-update.yml` runs it after `cargo update`. Run it yourself before merging, with the checkout, to include the lock check:
+
+```bash
+scripts/check-guestkit-pin.sh .                    # version and workflow checks only
+scripts/check-guestkit-pin.sh . ../guestkit        # plus the checkout tag and the Cargo.lock drift check
+```
+
+This is what broke 0.4.19: the ref said `v1.2.6` while `Cargo.lock` recorded 1.2.9, both Linux package jobs failed, and the release went out
+without Linux packages (fixed for 0.4.20 in #731). 0.4.21 then found a stale lock that the version comparison could not see (#737).
+
+To bump guestkit, in one PR: edit `packaging/guestkit.ref`, refresh `Cargo.lock` (`cargo metadata`, without `--locked`; not `cargo update`,
+which moves every dependency) and change every workflow `ref:`; run the checker with the checkout before merging.
+
+Before tagging, check that the pin check passes on the release commit. After the Linux run, check that the release carries the
+tarball and `.sha256` for **both** architectures (the aarch64 build is experimental and can fail without failing the run) and that
+the macOS tarball is attached. `.deb` and `.rpm` are no longer part of the checklist; releases up to 0.4.21 have them.

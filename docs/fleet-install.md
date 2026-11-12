@@ -5,7 +5,7 @@ seeds two values on each node (the mirror URL and the release public key), and t
 install, check, roll back if it did not come up.
 
 ```
-CI release ──► packages + SBOM ──► make-release-manifest.sh (signs) ──► mirror (static files / object store)
+CI release ──► tarballs + SBOM ──► make-release-manifest.sh (signs) ──► mirror (static files / object store)
                                                                           ▲
 node: fluxvm-bootstrap (timer) ── channel file ── manifest ── package ───┘   verify signature → wave? → install → health → roll back
 ```
@@ -14,8 +14,12 @@ node: fluxvm-bootstrap (timer) ── channel file ── manifest ── packag
 
 ```
 channels/<channel>.json  + .sig     the pointer: version, serial, expiry, revoked list, rollout rules
-releases/<version>/manifest.json + .sig, SHA256SUMS, sbom.cdx.json, the .tar.gz and .deb per architecture
+releases/<version>/manifest.json + .sig, SHA256SUMS, sbom.cdx.json, the .tar.gz per architecture
 ```
+
+Releases are tarball-only since #739. `make-release-manifest.sh` still lists a `.deb` or `.rpm` when one is present in the artifacts
+directory (the manifest has an artifact kind per architecture: `tarball`, `deb`, `rpm`), which is how releases up to 0.4.21 were
+mirrored; the release workflow no longer produces them, so a mirror built from a newer release has `tarball` entries only.
 
 Signatures are raw Ed25519 over the exact bytes of the file (`openssl pkeyutl -rawin`, openssl 3). The channel file names the
 release manifest and its sha256; the manifest names each package and its sha256. A node checks the signature **before** it
@@ -34,7 +38,7 @@ The node id is `/etc/machine-id`; regenerate it for every cloned instance (see `
 
 ## Publishing
 
-`release-linux.yml` builds the tarball and `.deb` per architecture and installs them in a clean container. When
+`release-linux.yml` builds the tarball per architecture and smoke-tests it in a clean container. When
 `FLUXVM_RELEASE_KEY` (secret) is set, the `publish` job then writes the SBOM, signs, attests build provenance, uploads the
 tree as the `mirror-tree` artifact and, if `MIRROR_S3_URI` (variable) is set, syncs it: releases first, channel files last.
 A tag publishes to `canary` at 100%. Promote with a manual run of the workflow (`channel`, `percent`), or locally:
@@ -57,13 +61,19 @@ fluxvm-bootstrap install     # what the timer runs
 fluxvm-bootstrap status      # status.json: state, installed version, serial, last result
 fluxvm-bootstrap rollback    # back to the previous version; the version is marked failed and not retried
 fluxvm-bootstrap pin 0.4.11  # hold this node; `unpin` releases it
-fluxvm-bootstrap verify      # installed files against the package hashes (dpkg -V for deb)
+fluxvm-bootstrap verify      # installed files against the package's hashes (tarball mode; dpkg -V / rpm -V in deb / rpm mode)
 ```
 
 It takes a lock, waits a stable per-node plus random delay, fetches with ETag and retries with backoff that honours
 `Retry-After`, verifies, downloads with resume into `/var/lib/fluxvm-bootstrap/cache`, checks the sha256 from the signed
-manifest, checks disk and `/dev/kvm`, installs (`apt-get install` with the existing config kept, or an unpacked tree under
-`/opt/fluxvm/<version>` with an atomic `current` symlink), restarts the service and waits for the new version to answer. If
+manifest, checks disk and `/dev/kvm`, installs, restarts the service and waits for the new version to answer. The install mode is
+`INSTALL_MODE` in `/etc/fluxvm/bootstrap.conf` or the environment, and **defaults to `tarball`** (it used to be `deb` where dpkg exists, `rpm`
+where rpm and dnf/yum exist; #739 changed that because releases no longer carry the packages). Tarball mode unpacks to
+`/opt/fluxvm/<version>`, flips an atomic `/opt/fluxvm/current` symlink, links `bin/*` into `/usr/local/bin`, copies the unit files to
+`/etc/systemd/system` and links `lib/bpf` at `/usr/lib/fluxvm/bpf`. `deb` and `rpm` mode remain for a mirror that was built from a release
+with those artifacts (`apt-get install` or `dnf install` with the existing config kept); against a release without them the node stops
+with `release <version> has no deb for <arch>`. A node that runs a `.deb`/`.rpm` install and should follow newer releases must switch
+to tarball mode; see [Upgrading](linux-package.md#upgrading) for the steps and what is untested. If
 that fails it reinstalls the previous version, records the failed one, and exits 3. `FLUXVM_AUTO_UPGRADE=0` reports only.
 It writes `status.json` and, if `/var/lib/node_exporter/textfile_collector` exists, a metrics file.
 `systemctl enable --now fluxvm-bootstrap.timer` schedules it every 6 hours with randomized delay (off by default).
@@ -75,7 +85,10 @@ tampered channel, wrong key, missing signature, lower serial, expired, revoked, 
 report-only; rollback on a version that does not come up, and no retry of it; resume of a truncated download; a 429 with
 `Retry-After`; the 5% wave being a subset of the 20% wave over 10,000 synthetic ids; jitter bounds.
 
-Not tested: the `deb` install/rollback path of the bootstrap (the `.deb` itself is tested by `scripts/test-deb.sh`), systemd
-timers, and anything at fleet scale. Capacity: one wave pulls about (package size × nodes) from the mirror (the tarball is
+`scripts/e2e/bootstrap-pkg.sh` (the `packaging-checks.yml` `bootstrap-pkg` job) runs the same flow in `deb` and `rpm` mode in distro containers
+(Ubuntu 22.04, Fedora 43); those modes are not what the default or a release exercises any more.
+
+Not tested: tarball-mode install on a real node under systemd (the suite runs it under `FLUXVM_ROOT`, which skips `systemctl`),
+systemd timers, a package-to-tarball migration, and anything at fleet scale. Capacity: one wave pulls about (package size × nodes) from the mirror (the tarball is
 ~50 MB, so 10,000 nodes is ~500 GB per wave); serve it from an object store or CDN, not GitHub, and use the jitter and waves to
 spread it. Request-rate limits and a real thundering herd were not measured.

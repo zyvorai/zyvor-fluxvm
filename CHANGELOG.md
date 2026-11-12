@@ -4,6 +4,13 @@
 
 - **Releases are tarball-only.** The release workflow no longer builds, verifies or attaches `.deb` and `.rpm` packages, and
   `fluxvm-bootstrap.sh` defaults to tarball mode. Releases up to 0.4.21 carry the packages. The packaging scripts stay in the tree.
+- Docs: brought in line with 0.4.21 and the tarball-only releases. `docs/linux-package.md` (tarball install steps instead of the
+  `.deb` ones, what a release attaches, the release jobs, upgrading including a package-to-tarball move, the `.deb`/`.rpm` sections
+  labelled as remaining scripts, the guestkit pin check with its `Cargo.lock` drift step and `CHECK_GUESTKIT_PIN_SKIP_CARGO`),
+  `docs/auth-oidc-mtls.md` (certificate field mapping, when it applies, the proxy opt-in, upgrade notes), `docs/vsock-agent.md` (pre-auth
+  limits table, `get-file`, timeout clamp), `docs/fleet-install.md`, `docs/install.md`, the full `[policy]` key table and the tool-path keys in
+  `docs/operations.md`, `config.example.toml` (`tls.trust_proxy_headers`, the `[sandbox]` keys that sat under `[sandbox.procbox]`),
+  and corrections to CLI examples (`pool create --spec`, `agent run`, `disk list`) and the crate map.
 
 ## 0.4.21 (2026-11-12)
 

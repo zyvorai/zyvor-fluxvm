@@ -15,7 +15,7 @@ images — not only the dataplane.
 - [x] `GET /readyz` returns `"ok": true` (state dir + dataplane if required)
 - [x] `GET /healthz` for liveness; `/readyz` for readiness probes — DaemonSet wiring above
 - [ ] `auth.oidc_issuer` + `auth.oidc_audience` set together when using OIDC JWTs (or left unset)
-- [ ] Optional `[tls]` / `tls.client_ca` when terminating TLS on FluxVM itself
+- [ ] Optional `[tls]` / `tls.client_ca` when terminating TLS on FluxVM itself. With `client_ca`, issue admin client certificates with `OU=fluxvm-role=admin` only to admins (0.4.21+); keep at least one token or OIDC configured; leave `tls.trust_proxy_headers = false` unless a proxy that strips the headers is the only way in ([auth-oidc-mtls.md](auth-oidc-mtls.md))
 - [ ] JSON audit target `fluxvm_audit` shipped to your collector
 - [x] Tutorials: [production/01-readyz-tenant-auth.md](tutorials/production/01-readyz-tenant-auth.md)
 - [x] Example: [examples/create-vm-prod.json](../examples/create-vm-prod.json)
@@ -233,7 +233,7 @@ and to flag the few genuinely still-open follow-ups.
 4. **Storage abstraction** — already implemented and fully verified (qcow2/raw, LVM thin, NBD, Ceph RBD). NVMe-local as a distinct backend remains unnecessary. See [operations.md](operations.md#storage-backends).
 5. **Image catalog** — Ed25519 signing shipped; optional `catalog.cosign_identities` shells out to `cosign verify-blob`. See [operations.md](operations.md#image-catalog--signing).
 6. **Policy** — `allowed_network_modes` and `allow_extra_args` (default false) are enforced alongside existing vCPU/RAM/disk/TTL/backend/image-dir limits. See [operations.md](operations.md#policy-admission-limits).
-7. **Auth** — fail-closed off-loopback, JSON audit (`fluxvm_audit`), per-token quotas, VM/token `tenant`, `/readyz`. Still open: mTLS/OIDC token exchange (`auth.oidc_issuer` reserved). See [api.md](api.md#auth--rbac).
+7. **Auth** — fail-closed off-loopback, JSON audit (`fluxvm_audit`), per-token quotas, VM/token `tenant`, `/readyz`. OIDC JWT validation (`auth.oidc_issuer` + `auth.oidc_audience`) and mTLS client-certificate identity (since 0.4.21, from the verified certificate; `tls.trust_proxy_headers` for a proxy) are implemented: see [auth-oidc-mtls.md](auth-oidc-mtls.md) and [api.md](api.md#auth--rbac). Not covered: step-up MFA for OIDC and mTLS identities, and certificate revocation.
 8. **Observability** — Prometheus `/metrics` now includes auth/egress deny counters and create/start latency; OpenTelemetry remains optional.
 9. **Kubernetes CRD/operator** — DaemonSet packaging, tap/macvtap CR fields, and optional `--enable-placement` are implemented; see the [Kubernetes CRD/operator](kubernetes-operator.md#kubernetes-crdoperator) section and `deploy/k8s/`.
 10. **Distributed node-agent** — TLS/auth, persisted registry, and residual-capacity placement are implemented; see [operations.md](operations.md#distributed-node-agent).

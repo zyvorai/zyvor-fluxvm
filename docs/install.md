@@ -31,8 +31,8 @@ unchanged: read it first with `curl -fsSL https://zyvorai.github.io/zyvor-fluxvm
 | Host | Package | Needs |
 |---|---|---|
 | macOS 14 (Sonoma) or newer, **Apple silicon** | `macos-arm64` | `curl`, `tar`; the `hivex` library (`brew install hivex`: the installer does it when Homebrew is present) |
-| Linux **x86_64** | `linux-x86_64` | `curl`, `tar`; `libhivex0` and `libsystemd0` (Debian/Ubuntu) or `hivex` and `systemd-libs` (Fedora/RHEL); KVM (`/dev/kvm`) to run VMs. Built on Ubuntu 22.04, so glibc 2.35 or newer (Ubuntu 22.04+, Debian 12+, Fedora/RHEL 9+) |
-| Linux aarch64 | `linux-aarch64` | as above; cross-compiled on x86_64 by the release workflow and still marked experimental, so a failed aarch64 build does not block the x86_64 package or the release (0.4.20 has aarch64 packages) |
+| Linux **x86_64** | `linux-x86_64` | `curl`, `tar`; `libhivex0` and `libsystemd0` (Debian/Ubuntu) or `hivex` and `systemd-libs` (Fedora/RHEL); KVM (`/dev/kvm`) to run VMs. Built on Ubuntu 22.04, so glibc 2.35 or newer (Ubuntu 22.04+, Debian 12+, Fedora, RHEL-family 10); **RHEL/Rocky/Alma 9 (glibc 2.34) is not supported** |
+| Linux aarch64 | `linux-aarch64` | as above; cross-compiled on x86_64 by the release workflow and still marked experimental, so a failed aarch64 build does not block the x86_64 package or the release (0.4.20 and 0.4.21 each carry an aarch64 tarball) |
 | Intel Macs, Windows, other | none | build from source: `cargo build --release -p fluxctl` (see the [README](https://github.com/zyvorai/zyvor-fluxvm#readme)) |
 
 The installer checks the platform first and exits with status 2 and the reason if there is no package for it. A release
@@ -131,10 +131,11 @@ The one-liner installs the newest **published** release. As of this page that is
 | `0.4.8` and `0.4.9` | agent sessions: enforced filesystem policy, scoped tokens, supervised jobs, approvals, per-session HTTP rules, budgets, resumable transfer, fork/evaluate/promote. See the [session guide](agent-sessions-guide.md). |
 | `0.4.10` | host_gpu / `fluxctl infer`, QMP under short `run_dir`, Linux package in `ubuntu:22.04`. macOS asset was re-uploaded for notarization and hivex Hardened Runtime.
 | `0.4.11` | clean cut of the above: Developer ID **notarized** macOS package with Homebrew `libhivex` load fixed; speculate egress from network policy. |
-| `0.4.12` to `0.4.18` | see the [CHANGELOG](../CHANGELOG.md): Studio, Kubernetes on a Mac, Linux `.deb`/`.rpm` packages. |
+| `0.4.12` to `0.4.18` | see the [CHANGELOG](../CHANGELOG.md): Studio, Kubernetes on a Mac, Linux tarballs with `.deb`/`.rpm` packages. |
 | `0.4.19` | published **without** Linux packages (the pin check failed; see [releasing](linux-package.md#releasing-the-guestkit-pin)). Use 0.4.20 or 0.4.18 on Linux. |
 | `0.4.20` | the first release with Linux packages since 0.4.18: tarballs, `.deb` and `.rpm` for x86_64 and aarch64, and the macOS arm64 tarball. No runtime changes since 0.4.19. |
-| **`0.4.21`** (current) | security patch: mTLS identity taken from the verified client certificate (`tls.trust_proxy_headers` opt-in for proxies; see the CHANGELOG compatibility note), guest-agent pre-auth read bounds, `Cargo.lock` refreshed for guestkit v1.2.9. |
+| **`0.4.21`** (current) | security patch: mTLS identity taken from the verified client certificate (`tls.trust_proxy_headers` opt-in for proxies; [compatibility notes](auth-oidc-mtls.md#upgrading-to-0421)), guest-agent pre-auth read bounds ([limits](vsock-agent.md#request-limits)), `Cargo.lock` refreshed for guestkit v1.2.9. The last release that carries `.deb` and `.rpm` next to the tarballs. |
+| after `0.4.21` (on `main`) | Linux releases ship the tarball only; `fluxvm-bootstrap` defaults to tarball mode. No runtime change by itself. |
 
 Check what you have:
 
@@ -162,6 +163,10 @@ rm -rf ~/.local/share/fluxvm/0.4.10  # only a version `current` does not point a
 curl -fsSL https://zyvorai.github.io/zyvor-fluxvm/install.sh | bash -s -- --uninstall
 ```
 
+Re-running the installer on Linux does not touch the systemd service: after an upgrade copy the new `bin/fluxctl` to where the unit
+runs it (`/usr/local/bin/fluxctl`) and `sudo systemctl restart fluxvm` (the unit uses `KillMode=process`, so running VMs are left alone).
+For many nodes use the pull installer instead ([fleet-install.md](fleet-install.md)).
+
 `--uninstall` removes the links it created and `~/.local/share/fluxvm`, and stops the LaunchAgent on macOS. **VM images and
 state are never touched** (`~/Library/Application Support/FluxVM` on a Mac): delete them yourself to reclaim the space.
 
@@ -173,7 +178,7 @@ starts a throwaway VM. For the API and for agents you want it running:
 | Where | How |
 |---|---|
 | macOS | `curl ... \| bash -s -- --service`, or `fluxctl service install` later. It is a LaunchAgent (starts at login) and needs a logged-in session for snapshots. `fluxctl service status`, `fluxctl service uninstall`. Check: `curl -s http://127.0.0.1:7788/healthz` |
-| Linux | install the unit the package ships: `sudo install -m 0755 ~/.local/share/fluxvm/current/bin/fluxctl /usr/local/bin/`, `sudo install -m 0644 ~/.local/share/fluxvm/current/share/config.example.toml /etc/fluxvm.toml`, `sudo install -m 0644 ~/.local/share/fluxvm/current/share/systemd/fluxvm.service /etc/systemd/system/`, then `sudo systemctl daemon-reload && sudo systemctl enable --now fluxvm`. Host preparation (QEMU, Cloud Hypervisor, a bridge): `scripts/bootstrap-host.sh` |
+| Linux | install the unit the package ships: `sudo install -m 0755 ~/.local/share/fluxvm/current/bin/fluxctl /usr/local/bin/`, `sudo install -m 0644 ~/.local/share/fluxvm/current/share/config.example.toml /etc/fluxvm.toml`, `sudo install -m 0644 ~/.local/share/fluxvm/current/share/systemd/fluxvm.service /etc/systemd/system/`, then `sudo systemctl daemon-reload && sudo systemctl enable --now fluxvm`. The daemon loads its eBPF objects from `/usr/lib/fluxvm/bpf` by default, and the installer does not put them there: `sudo mkdir -p /usr/lib/fluxvm && sudo cp -r ~/.local/share/fluxvm/current/lib/bpf /usr/lib/fluxvm/` ([linux-package.md](linux-package.md#installing)). Host preparation (QEMU, Cloud Hypervisor, a bridge): `scripts/bootstrap-host.sh` |
 
 If you installed with Homebrew, use `brew services` and not `fluxctl service install`: both register a LaunchAgent for the
 same port ([install-macos.md](install-macos.md#2-start-the-daemon)).
@@ -197,7 +202,7 @@ brew install zyvorai/tap/fluxvm
 brew services start zyvorai/tap/fluxvm
 ```
 
-The formula (`packaging/homebrew/fluxvm.rb`, 0.4.20 at the time of writing) is updated by a PR after each release is published, so it can trail the newest release by a little. Details:
+The formula (`packaging/homebrew/fluxvm.rb`, 0.4.21 at the time of writing) is updated by a PR after each release is published, so it can trail the newest release by a little. Details:
 [install-macos.md](install-macos.md).
 
 **Linux:** releases ship tarballs only (`fluxvm-<version>-linux-<x86_64|aarch64>.tar.gz`, each with a `.sha256`); `.deb` and `.rpm`
@@ -206,18 +211,18 @@ packages are no longer built. Releases up to 0.4.21 attached them; later release
 ```bash
 V=0.4.21; B=https://github.com/zyvorai/zyvor-fluxvm/releases/download/v$V
 curl -fsSLO $B/fluxvm-$V-linux-x86_64.tar.gz && curl -fsSLO $B/fluxvm-$V-linux-x86_64.tar.gz.sha256
-sha256sum -c fluxvm-$V-linux-x86_64.tar.gz.sha256
+sha256sum -c fluxvm-$V-linux-x86_64.tar.gz.sha256 && tar -xzf fluxvm-$V-linux-x86_64.tar.gz   # unpacking installs nothing
 ```
 
-Needs glibc 2.35 or newer, so Rocky/Alma 9 are not supported. Layout and upgrade rules:
-[The Linux package](linux-package.md).
+Needs glibc 2.35 or newer, so Rocky/Alma 9 are not supported. Steps to install the unpacked tree and the service, the layout, and
+upgrade rules (including moving a node that was installed from a `.deb` or `.rpm`): [The Linux package](linux-package.md#installing).
 
 **From source** (any Linux, or a Mac when you need unreleased work). You need a Rust toolchain and the sibling
 `guestkit` checkout the build path-depends on:
 
 ```bash
 git clone https://github.com/zyvorai/zyvor-fluxvm
-git clone https://github.com/zyvorai/guestkit
+git clone https://github.com/zyvorai/guestkit        # the directory must be named guestkit (the repo is zyvor-guestkit on GitHub; the old name redirects)
 git -C guestkit checkout "$(cat zyvor-fluxvm/packaging/guestkit.ref)"   # the tag the release is built with (v1.2.9 for 0.4.21)
 cd zyvor-fluxvm
 # macOS: xcode-select --install && brew install hivex
@@ -247,7 +252,7 @@ On a Mac, point the source-built daemon at the signed runner from the package:
 | You see | Cause and fix |
 |---|---|
 | `No FluxVM package for Linux/riscv64` / `Apple silicon only (found x86_64)` | There is no package for this CPU. Build from source. |
-| `Download failed ... may not have a package for linux-x86_64` | The release has no Linux asset (releases before the Linux workflow, or a draft). Pick a newer `--version`, or build from source. |
+| `Download failed ... may not have a package for linux-x86_64` | The release has no Linux asset (releases before the Linux workflow, 0.4.19, or a draft). Pick a newer `--version`, or build from source. |
 | `Could not reach .../releases/latest` | No network, a proxy, or no published release. Set `HTTPS_PROXY`, or pass `--version`. |
 | `Checksum mismatch ... Nothing was installed.` | The download was altered or truncated. Run it again; if it repeats, do not use that release and report it. |
 | `fluxctl: command not found` | `~/.local/bin` is not on `PATH`. Add `export PATH="$HOME/.local/bin:$PATH"` to your shell profile, or open a new shell. |

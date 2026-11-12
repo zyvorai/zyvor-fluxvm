@@ -275,9 +275,12 @@ Highlights:
 ## Auth / RBAC
 
 `[[auth.tokens]]` entries in the config (see `config.example.toml`) enable bearer-token auth on every
-route except `GET /healthz`, `GET /readyz` (liveness vs readiness) and `GET /v1/openapi.json`. Absent or empty `auth.tokens`
+route except `GET /healthz`, `GET /readyz` (liveness vs readiness), `GET /v1/openapi.json`, the Studio pages under `GET /console/`,
+and the two routes whose path carries their own credential: `/preview/{token}/...` (a signed, expiring agent-session preview URL) and
+`GET /console/pty/{ticket}` (a single-use ticket minted by an authenticated request). Absent or empty `auth.tokens`
 (the default) leaves the API exactly as open as the pre-auth MVP — every request is treated as
-`admin`. Two roles:
+`admin` — but only on a loopback listener with no OIDC configured: `auth.require = true`, a non-loopback `listen` or OIDC make
+authentication mandatory, and `fluxctl serve` refuses to start in that case with no token and no OIDC. Two roles:
 
 - `admin` — everything: create/stop/pause/resume/exec/delete/build-image/resources/hotplug/freeze/thaw.
 - `read-only` — any `GET` route (`/v1/vms`, `/v1/vms/{uuid}`, `/metrics`, `/frozen`, `/stats`,
@@ -293,8 +296,13 @@ at all (see CHANGELOG). Per-sandbox credentials use a separate mechanism, see
 
 Optional per-token `tenant` is authoritative on create (inherited when the body omits it;
 mismatch → 403) and scopes list/get/mutate to that tenant.
-List with `GET /v1/vms?tenant=acme`. Reserved keys `auth.oidc_issuer` /
-`auth.oidc_audience` are placeholders for a future OIDC exchange — bearer tokens remain the GA path.
+List with `GET /v1/vms?tenant=acme`.
+
+Three credential types are accepted, in this order: a static bearer token, an agent-session token (`fxst_...`, confined to one
+session's routes), then an OIDC JWT when `auth.oidc_issuer` and `auth.oidc_audience` are both set (role, tenant and actor come from
+claims). With no `Authorization` header, a client certificate verified by `tls.client_ca` supplies the identity (CN, `OU=fluxvm-role=admin`,
+`OU=fluxvm-tenant=<name>`), and the `X-Client-Cert-*` headers are read only with `tls.trust_proxy_headers = true`
+(since 0.4.21). Details, claim mapping and the upgrade notes: [auth-oidc-mtls.md](auth-oidc-mtls.md).
 
 The same tenant scoping applies to `/v1/sandboxes` (a sandbox is a `VmRecord` like any other):
 `POST /v1/sandboxes` inherits/enforces the caller's token `tenant` on the resolved spec exactly
@@ -945,7 +953,7 @@ message is for people and may be reworded. The code follows the HTTP status:
 | Status | `code` | Typical cause |
 |--------|--------|---------------|
 | 400 | `BAD_REQUEST` | Malformed body, query or `Idempotency-Key` |
-| 401 | `UNAUTHORIZED` | Missing or invalid bearer token |
+| 401 | `UNAUTHORIZED` | Missing or invalid credential: a bearer token, or (with mTLS) a client certificate with no CN |
 | 403 | `FORBIDDEN` | Role or session token does not allow the route |
 | 404 | `NOT_FOUND` | No such VM or session, **or one that belongs to another tenant** (never 403, so ids do not leak) |
 | 409 | `CONFLICT` | State conflict: VM not running, a duplicate in flight, a changeset whose files moved |

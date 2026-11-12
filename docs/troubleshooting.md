@@ -17,11 +17,22 @@ install page to open.
 | `fluxctl: command not found` | `~/.local/bin` is not on `PATH`. Add `export PATH="$HOME/.local/bin:$PATH"` to your shell profile, or open a new shell. |
 | `dyld: Library not loaded: .../libhivex.dylib` | `brew install hivex` (the installer does it unless `--no-deps`). |
 | `error while loading shared libraries: libhivex.so.0` | `sudo apt-get install libhivex0` (Debian/Ubuntu) or `sudo dnf install hivex` (Fedora). |
-| `unrecognized subcommand 'agent'` | You installed a release older than 0.4.8. Install 0.4.11 (or newer), or build from source. |
+| `unrecognized subcommand 'agent'` | You installed a release older than 0.4.8. Install the current release (0.4.21) or any 0.4.11 or newer, or build from source. |
 | `skipped fluxctl: ... exists and is not a link` | A real file of yours is in the way. Move it, or use another `--prefix`. |
 | `path must be shorter than SUN_LEN` / QMP connect fails on a Mac | Unix socket path too long under `~/Library/Application Support/…`. Fixed in **0.4.10**: QMP binds under short `run_dir/qmp/<id>.sock`. Upgrade, or set a short `[paths] run_dir`. See [operations.md](operations.md#state-layout). |
 
 More: [install.md](install.md#troubleshooting).
+
+## Linux hosts, the pull installer and mTLS
+
+| You see | Cause and fix |
+|---|---|
+| `version 'GLIBC_2.35' not found` when starting a tarball binary | The host has glibc older than 2.35 (RHEL, Rocky, Alma 9 have 2.34): not supported. Use a newer OS or build from source ([linux-package.md](linux-package.md#installing)). |
+| The daemon starts but VM networking fails with a missing BPF object | The tarball's `lib/bpf` is not at `/usr/lib/fluxvm/bpf`, where the daemon looks by default: copy or link it there ([linux-package.md](linux-package.md#installing)). |
+| `fluxvm-bootstrap`: `release <version> has no deb for <arch>` (or `rpm`) | `INSTALL_MODE` is `deb` or `rpm`, but releases after 0.4.21 carry the tarball only. Remove the setting (the default is `tarball`) and read [Upgrading](linux-package.md#upgrading). |
+| A client certificate that was admin before 0.4.21 now gets `403` on writes | Identity now comes from the certificate: it needs `OU=fluxvm-role=admin`. Headers the client sends are ignored ([auth-oidc-mtls.md](auth-oidc-mtls.md#upgrading-to-0421)). |
+| Requests behind a TLS-terminating proxy got `401` after 0.4.21 | The `X-Client-Cert-*` headers are ignored unless `tls.trust_proxy_headers = true`; set it only if the proxy strips client-supplied copies. |
+| `fluxctl serve` exits: `auth is required ... but no [[auth.tokens]] and OIDC is not configured` | mTLS alone does not count as a credential: configure a token or OIDC too, or bind loopback with `auth.require = false` ([auth-oidc-mtls.md](auth-oidc-mtls.md#when-the-certificate-identity-applies)). |
 
 ## The daemon on a Mac
 

@@ -2,7 +2,7 @@
 
 ## Supported versions
 
-The `main` branch of [zyvorai/fluxvm](https://github.com/zyvorai/fluxvm) is
+The `main` branch of [zyvorai/zyvor-fluxvm](https://github.com/zyvorai/zyvor-fluxvm) is
 the supported line. Report issues against current main.
 
 ## What this project is
@@ -14,7 +14,10 @@ multi-tenant public cloud. Before exposing it off-loopback:
    `auth.oidc_issuer` + `auth.oidc_audience` (JWKS JWT validation).
    Optional per-token / OIDC `tenant` is authoritative on create (inherited when
    omitted; mismatch → 403) and scopes list/get/mutate. Optional `[tls]` enables
-   HTTPS; `tls.client_ca` enables mTLS. Probes `GET /healthz` and `GET /readyz`
+   HTTPS; `tls.client_ca` enables mTLS, and the caller's identity is then the verified
+   client certificate (CN, `OU=fluxvm-role=admin`, `OU=fluxvm-tenant=<name>`), not the
+   `X-Client-Cert-*` headers, which are ignored unless `tls.trust_proxy_headers = true`
+   for a proxy that strips them ([docs/auth-oidc-mtls.md](docs/auth-oidc-mtls.md)). Probes `GET /healthz` and `GET /readyz`
    stay auth-exempt (liveness vs readiness; `/readyz` → 503 when not ready).
 2. Bind loopback or put TLS in front (nginx/Caddy/Fabric) — or use FluxVM `[tls]`.
 3. Keep `allow_extra_args = false`.
