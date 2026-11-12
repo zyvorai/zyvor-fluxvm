@@ -86,4 +86,5 @@ jobs:
           sudo apt-get install -y clang llvm libbpf-dev libxdp-dev linux-tools-common linux-tools-generic iproute2 pkg-config libsystemd-dev libhivex-dev
       - name: Privileged Flight Recorder smoke
         working-directory: fluxvm
-        run: sudo --preserve-env=PATH ./scripts/test-flight-recorder-host.sh
+        # sudo resets PATH (secure_path), CARGO_HOME and HOME, so root cannot find the runner user's rustup toolchain: pass them through.
+        run: sudo env "PATH=$PATH" "CARGO_HOME=${CARGO_HOME:-$HOME/.cargo}" "RUSTUP_HOME=${RUSTUP_HOME:-$HOME/.rustup}" ./scripts/test-flight-recorder-host.sh

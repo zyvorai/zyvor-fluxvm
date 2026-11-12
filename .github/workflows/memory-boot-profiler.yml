@@ -64,4 +64,5 @@ jobs:
       - name: Privileged memory attribution test
         if: ${{ vars.FLUXVM_EBPF_PRIVILEGED_CI == '1' }}
         working-directory: fluxvm
-        run: sudo --preserve-env=PATH ./scripts/test-memory-profiler-host.sh
+        # sudo resets PATH (secure_path), CARGO_HOME and HOME, so root cannot find the runner user's rustup toolchain: pass them through.
+        run: sudo env "PATH=$PATH" "CARGO_HOME=${CARGO_HOME:-$HOME/.cargo}" "RUSTUP_HOME=${RUSTUP_HOME:-$HOME/.rustup}" ./scripts/test-memory-profiler-host.sh
