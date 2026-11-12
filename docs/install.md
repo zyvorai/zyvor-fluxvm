@@ -200,19 +200,16 @@ brew services start zyvorai/tap/fluxvm
 The formula (`packaging/homebrew/fluxvm.rb`, 0.4.20 at the time of writing) is updated by a PR after each release is published, so it can trail the newest release by a little. Details:
 [install-macos.md](install-macos.md).
 
-**Linux packages** (`.deb`, `.rpm`): the release attaches them next to the tarballs, each with a `.sha256`. For 0.4.21:
-`fluxvm_0.4.21_amd64.deb`, `fluxvm_0.4.21_arm64.deb`, `fluxvm-0.4.21-1.x86_64.rpm` and `fluxvm-0.4.21-1.aarch64.rpm`.
+**Linux:** releases ship tarballs only (`fluxvm-<version>-linux-<x86_64|aarch64>.tar.gz`, each with a `.sha256`); `.deb` and `.rpm`
+packages are no longer built. Releases up to 0.4.21 attached them; later releases do not.
 
 ```bash
-V=0.4.21
-curl -fsSLO https://github.com/zyvorai/zyvor-fluxvm/releases/download/v$V/fluxvm_${V}_amd64.deb
-curl -fsSLO https://github.com/zyvorai/zyvor-fluxvm/releases/download/v$V/fluxvm_${V}_amd64.deb.sha256
-sha256sum -c fluxvm_${V}_amd64.deb.sha256
-sudo apt install ./fluxvm_${V}_amd64.deb      # rpm: sudo dnf install ./fluxvm-$V-1.x86_64.rpm
+V=0.4.21; B=https://github.com/zyvorai/zyvor-fluxvm/releases/download/v$V
+curl -fsSLO $B/fluxvm-$V-linux-x86_64.tar.gz && curl -fsSLO $B/fluxvm-$V-linux-x86_64.tar.gz.sha256
+sha256sum -c fluxvm-$V-linux-x86_64.tar.gz.sha256
 ```
 
-The service is enabled but not started (edit `/etc/fluxvm.toml` first), and an upgrade never overwrites that file.
-Needs glibc 2.35 or newer, so Rocky/Alma 9 refuse the `.rpm`. Layout, dependencies and upgrade rules:
+Needs glibc 2.35 or newer, so Rocky/Alma 9 are not supported. Layout and upgrade rules:
 [The Linux package](linux-package.md).
 
 **From source** (any Linux, or a Mac when you need unreleased work). You need a Rust toolchain and the sibling
