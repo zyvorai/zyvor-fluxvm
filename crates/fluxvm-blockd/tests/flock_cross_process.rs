@@ -9,7 +9,7 @@
 //! use". Here nothing else runs in the process.
 
 use fluxvm_blockd::{BlockBackend, CowBackend, OpenOptions};
-use std::io;
+use std::io::{self, BufRead};
 
 const BLOCK_SIZE: u64 = fluxvm_blockd::BLOCK_SIZE;
 
@@ -26,15 +26,23 @@ fn resize_and_rebase_refuse_while_overlay_is_open() {
         held.write_at(0, b"xx").unwrap();
         held.flush().unwrap();
     }
+    // The holder says "locked" once it really holds the flock. Sleeping a fixed 200 ms instead raced interpreter
+    // start-up: on a loaded runner python3 had not locked yet, resize_file succeeded, and the unwrap_err below
+    // panicked ("called `Result::unwrap_err()` on an `Ok` value: false").
     let mut holder = std::process::Command::new("python3")
         .args([
             "-c",
-            "import fcntl,sys,time; f=open(sys.argv[1],'r+b'); fcntl.flock(f, fcntl.LOCK_SH); time.sleep(30)",
+            "import fcntl,sys,time; f=open(sys.argv[1],'r+b'); fcntl.flock(f, fcntl.LOCK_SH); print('locked', flush=True); time.sleep(30)",
             ov.to_str().unwrap(),
         ])
+        .stdout(std::process::Stdio::piped())
         .spawn()
         .expect("python3 flock holder");
-    std::thread::sleep(std::time::Duration::from_millis(200));
+    let mut ready = String::new();
+    std::io::BufReader::new(holder.stdout.take().unwrap())
+        .read_line(&mut ready)
+        .expect("read the flock holder's readiness line");
+    assert_eq!(ready.trim(), "locked", "flock holder did not take the lock");
     let e = CowBackend::resize_file(&ov, 4 * BLOCK_SIZE).unwrap_err();
     assert_eq!(e.kind(), io::ErrorKind::WouldBlock, "{e}");
     assert!(e.to_string().contains("in use"), "{e}");
