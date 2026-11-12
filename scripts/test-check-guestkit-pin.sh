@@ -5,6 +5,8 @@
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CHECK="${HERE}/check-guestkit-pin.sh"
+# fixtures hold a fake Cargo.lock, so skip the cargo metadata --locked step
+export CHECK_GUESTKIT_PIN_SKIP_CARGO=1
 T="$(mktemp -d)"
 trap 'rm -rf "$T"' EXIT
 fail=0

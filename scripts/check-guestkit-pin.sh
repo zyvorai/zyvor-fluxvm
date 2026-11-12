@@ -11,6 +11,7 @@
 #
 # With GUESTKIT_DIR it also checks that the checkout really is at the pinned tag. To bump guestkit:
 # change packaging/guestkit.ref, refresh Cargo.lock (cargo metadata, without --locked) and commit both.
+# With GUESTKIT_DIR it also runs `cargo metadata --locked`, so a lock that is stale for guestkit's dependencies fails here.
 set -euo pipefail
 
 FLUXVM_DIR="${1:-.}"
@@ -51,6 +52,15 @@ if [[ -n "$GUESTKIT_DIR" ]]; then
     echo "check-guestkit-pin: ${GUESTKIT_DIR} is at '${at:-no tag}', expected ${ref}" >&2
     exit 1
   }
+  # The version string above can agree while Cargo.lock is still stale for guestkit's own dependencies (evtx pinned at 0.15
+  # while guestkit 1.2.9 needs 0.12): --locked then fails everywhere. Resolving against the checkout without updating catches it.
+  if [[ -z "${CHECK_GUESTKIT_PIN_SKIP_CARGO:-}" ]] && command -v cargo >/dev/null 2>&1; then
+    (cd "$FLUXVM_DIR" && cargo metadata --locked --format-version 1 >/dev/null 2>&1) || {
+      echo "check-guestkit-pin: Cargo.lock is out of date for guestkit ${ref} (cargo metadata --locked fails)." >&2
+      echo "check-guestkit-pin: refresh it with 'cargo metadata' (not 'cargo update') and commit Cargo.lock." >&2
+      exit 1
+    }
+  fi
 fi
 # Every workflow that checks guestkit out must check out the pin: guestkit's default branch moves (1.2.9 while the lock said
 # 1.2.6) and `cargo --locked` then fails.
