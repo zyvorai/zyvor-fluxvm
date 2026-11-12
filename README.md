@@ -67,7 +67,7 @@ Measured on one Apple M4 with macOS 27.2. Multi-Mac fleets are not yet verified 
 
 ## What's new
 
-From the [CHANGELOG](CHANGELOG.md) (0.4.x, current release **0.4.20**) and recent commits:
+From the [CHANGELOG](CHANGELOG.md) (0.4.x, current release **0.4.21**) and recent commits:
 
 | Feature | What it does |
 |---|---|
@@ -217,11 +217,11 @@ That's the default dataplane.
 ## Quickstart
 
 **Prebuilt (Linux):** every release attaches a tarball, a `.deb` and an `.rpm` for x86_64 and aarch64, for example
-`fluxvm_0.4.20_amd64.deb` and `fluxvm-0.4.20-1.x86_64.rpm` ([install steps](docs/install.md#alternatives-homebrew-source), [package layout](docs/linux-package.md)).
+`fluxvm_0.4.21_amd64.deb` and `fluxvm-0.4.21-1.x86_64.rpm` ([install steps](docs/install.md#alternatives-homebrew-source), [package layout](docs/linux-package.md)).
 The packages need glibc 2.35 or newer (Rocky/Alma 9 is not supported yet).
 
 **From source:** needs a Linux host with KVM, a Rust toolchain, and a sibling `guestkit` checkout at the tag in
-`packaging/guestkit.ref` (v1.2.9 for 0.4.20).
+`packaging/guestkit.ref` (v1.2.9 for 0.4.21).
 
 ```bash
 git clone https://github.com/zyvorai/zyvor-fluxvm.git && cd zyvor-fluxvm   # needs a sibling guestkit checkout

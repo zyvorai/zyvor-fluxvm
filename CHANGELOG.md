@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.4.21 (2026-11-12)
+
 - **Security: mTLS identity is now taken from the verified client certificate.** Previously the actor, role and tenant came
   from the client-supplied `X-Client-Cert-CN` / `-Role` / `-Tenant` headers, so any holder of a certificate accepted by
   `tls.client_ca` could send `X-Client-Cert-Role: admin` and get admin. When `fluxctl serve` terminates mTLS it now derives
@@ -15,7 +17,9 @@
   authenticates, up to a named cap. Also fixed: `exec`/job timeouts near `u64::MAX` panicked the thread that enforces
   them (a job stayed `running` forever, unreaped); `get-file` hung on a FIFO and read `/dev/zero` until out of memory.
   See `docs/vsock-agent.md`, "Request limits".
-- Docs: current-release references updated to 0.4.20, Linux `.deb`/`.rpm`/tarball install steps, a "Releasing: the guestkit pin"
+- **`Cargo.lock` refreshed for guestkit v1.2.9** (it still pinned evtx 0.15.1 while guestkit needs 0.12, and the mTLS change added
+  dependencies without a lock update), so `--locked` builds pass again; `scripts/check-guestkit-pin.sh` now also fails on lock drift.
+- Docs: current-release references updated to 0.4.21, Linux `.deb`/`.rpm`/tarball install steps, a "Releasing: the guestkit pin"
   section in `docs/linux-package.md`, and a warning that mTLS identity headers are client-supplied
   (`docs/auth-oidc-mtls.md`).
 
