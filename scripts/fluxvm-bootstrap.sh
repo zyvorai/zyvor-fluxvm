@@ -18,7 +18,7 @@
 #   MIRROR_URL         base URL of the mirror (required)         CHANNEL     stable (default)
 #   PUBKEY             release public key (default /etc/fluxvm/release.pub, then /usr/share/fluxvm/release.pub)
 #   NODE_ID            default: /etc/machine-id                   LABELS      space separated key=value, for rollout rules
-#   INSTALL_MODE       deb | rpm | tarball (default: deb when dpkg exists, rpm when rpm and dnf/yum exist)
+#   INSTALL_MODE       deb | rpm | tarball (default: tarball; releases no longer ship .deb or .rpm)
 #   FLUXVM_AUTO_UPGRADE=0   check and report only; never install
 #   JITTER_MAX         seconds of start-up delay, stable per node plus random (default 300)
 # Testing: FLUXVM_ROOT prefixes every path the script writes (and disables systemctl and root checks).
@@ -44,10 +44,7 @@ if [[ -z "${PUBKEY:-}" ]]; then
   PUBKEY="$ROOT/etc/fluxvm/release.pub"; [[ -r "$PUBKEY" ]] || PUBKEY="$ROOT/usr/share/fluxvm/release.pub"
 fi
 if [[ -z "${INSTALL_MODE:-}" ]]; then
-  if [[ -n "$ROOT" ]]; then INSTALL_MODE=tarball
-  elif command -v dpkg >/dev/null 2>&1; then INSTALL_MODE=deb
-  elif command -v rpm >/dev/null 2>&1 && { command -v dnf >/dev/null 2>&1 || command -v yum >/dev/null 2>&1; }; then INSTALL_MODE=rpm
-  else INSTALL_MODE=tarball; fi
+  INSTALL_MODE=tarball
 fi
 
 # A tarball install links the binaries into /usr/local/bin; the packages put them in /usr/bin.

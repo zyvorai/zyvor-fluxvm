@@ -15,15 +15,16 @@ If the Linux run cannot start, the same packages can be built by hand from the t
 
 ## Installing
 
-Each release carries, per architecture, the tarball (`fluxvm-<version>-linux-<x86_64|aarch64>.tar.gz`), a `.deb`
-(`fluxvm_<version>_<amd64|arm64>.deb`) and an `.rpm` (`fluxvm-<version>-1.<x86_64|aarch64>.rpm`), each with a `.sha256`.
-Example for 0.4.21 on x86_64 (use `arm64` / `aarch64` on ARM):
+> **Packages dropped.** Releases ship the tarball only. The `.deb` and `.rpm` sections below describe the packaging scripts
+> that remain in the tree (`scripts/package-linux-pkgs.sh`); no release attaches those packages after 0.4.21.
+
+Each release carries, per architecture, the tarball (`fluxvm-<version>-linux-<x86_64|aarch64>.tar.gz`) with a `.sha256`.
+Example for 0.4.21 on x86_64 (use `aarch64` on ARM):
 
 ```bash
 V=0.4.21; B=https://github.com/zyvorai/zyvor-fluxvm/releases/download/v$V
-curl -fsSLO $B/fluxvm_${V}_amd64.deb && curl -fsSLO $B/fluxvm_${V}_amd64.deb.sha256
-sudo apt install ./fluxvm_${V}_amd64.deb              # Debian 12+, Ubuntu 22.04+
-sudo dnf install ./fluxvm-$V-1.x86_64.rpm             # Fedora, Rocky/Alma 10 (not EL9, see below)
+curl -fsSLO $B/fluxvm-$V-linux-x86_64.tar.gz && curl -fsSLO $B/fluxvm-$V-linux-x86_64.tar.gz.sha256
+sha256sum -c fluxvm-$V-linux-x86_64.tar.gz.sha256 && tar -xzf fluxvm-$V-linux-x86_64.tar.gz
 sudoedit /etc/fluxvm.toml && sudo systemctl start fluxvm
 ```
 

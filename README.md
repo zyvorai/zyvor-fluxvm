@@ -216,9 +216,8 @@ That's the default dataplane.
 
 ## Quickstart
 
-**Prebuilt (Linux):** every release attaches a tarball, a `.deb` and an `.rpm` for x86_64 and aarch64, for example
-`fluxvm_0.4.21_amd64.deb` and `fluxvm-0.4.21-1.x86_64.rpm` ([install steps](docs/install.md#alternatives-homebrew-source), [package layout](docs/linux-package.md)).
-The packages need glibc 2.35 or newer (Rocky/Alma 9 is not supported yet).
+**Prebuilt (Linux):** every release attaches a tarball (`.tar.gz`) for x86_64 and aarch64 ([install steps](docs/install.md#alternatives-homebrew-source), [layout](docs/linux-package.md)).
+`.deb` and `.rpm` packages are no longer built. The tarball needs glibc 2.35 or newer (Rocky/Alma 9 is not supported yet).
 
 **From source:** needs a Linux host with KVM, a Rust toolchain, and a sibling `guestkit` checkout at the tag in
 `packaging/guestkit.ref` (v1.2.9 for 0.4.21).

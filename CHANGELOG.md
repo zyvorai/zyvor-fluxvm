@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- **Releases are tarball-only.** The release workflow no longer builds, verifies or attaches `.deb` and `.rpm` packages, and
+  `fluxvm-bootstrap.sh` defaults to tarball mode. Releases up to 0.4.21 carry the packages. The packaging scripts stay in the tree.
+
 ## 0.4.21 (2026-11-12)
 
 - **Security: mTLS identity is now taken from the verified client certificate.** Previously the actor, role and tenant came
