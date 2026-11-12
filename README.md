@@ -71,6 +71,9 @@ From the [CHANGELOG](CHANGELOG.md) (0.4.x, current release **0.4.21**) and recen
 
 | Feature | What it does |
 |---|---|
+| **mTLS identity from the client certificate** (0.4.21, security) | With `tls.client_ca`, the actor, role and tenant come from the verified certificate (`CN`, `OU=fluxvm-role=admin`, `OU=fluxvm-tenant=<name>`); the client-supplied `X-Client-Cert-*` headers are ignored unless `tls.trust_proxy_headers = true` for a proxy that strips them. Direct-mTLS admins need a certificate with the admin `OU`. [Upgrade notes](docs/auth-oidc-mtls.md#upgrading-to-0421) |
+| **Guest agent request limits** (0.4.21, security) | The vsock agent reads at most 64 KiB, with idle and total timeouts, before it has checked the token; uploads up to 64 MiB are read only after their leading token authenticates; `get-file` refuses non-regular files; huge timeouts are clamped. [Limits](docs/vsock-agent.md#request-limits) |
+| **Linux releases are tarballs only** (after 0.4.21) | The release workflow no longer builds `.deb` or `.rpm`; releases up to 0.4.21 carry them. `fluxvm-bootstrap` defaults to tarball mode. [The Linux package](docs/linux-package.md) |
 | **Docker and Kubernetes on a Mac** | `fluxctl docker up` runs a real `dockerd` in one managed VM with its socket on the Mac (`build`, Compose, bind mounts, networks); `fluxctl kube up` runs k3s in FluxVM VMs (workers, `kube load`, offline installs; flannel by default on a Mac, Cilium on Linux) and writes a kubeconfig. Studio's **Platform → Kubernetes** page shows each cluster's nodes and pods, coloured pod logs, a shell in a pod, a traffic graph and a checkpoint timeline ([docker](docs/docker-engine.md), [kubernetes](docs/kubernetes-on-mac.md)) |
 | **Time travel for a Kubernetes cluster on a Mac** | A checkpoint is the whole running VM, saved in about a second: `kube try -- kubectl apply` then `kube undo`; `kube supervise --auto-checkpoint` and `kube bisect -- TEST` to find the checkpoint where it broke; `kube golden`, `kube reset` and `kube matrix` for clean test runs; `kube chaos` to kill a pod, stop k3s or fill the disk and restore; `kube sleep`, `--idle-sleep`, `--sleep-on-battery`, woken by the first `kubectl` or browser request. Single-node clusters ([guide with diagrams](docs/kubernetes-on-mac.md#time-travel-for-your-cluster)) |
 | **Kubernetes on a Mac that feels local** | Plain `kubectl` (the cluster is merged into `~/.kube/config`); `http://web.localhost` and, after `kube trust`, `https://web.localhost` for every Service and every Traefik Ingress host; `kube add postgres\|redis\|mysql\|mongodb\|rabbitmq\|nats\|mailpit\|grafana\|redpanda\|qdrant\|meilisearch\|clickhouse\|keycloak\|seaweedfs\|vault\|jaeger\|temporal` with the usual ports and `kube connect`; `kube forward SERVICE`, a port-forward that survives pod restarts; `kube db-backup` / `db-restore`; `kube dev` (rebuild and restart on save) and `kube sync` (copy files into a pod on save); `kube doctor`, and a notification when a pod crash-loops ([the whole map](docs/kubernetes-on-mac.md#every-command-in-one-place)) |
@@ -220,7 +223,8 @@ That's the default dataplane.
 `.deb` and `.rpm` packages are no longer built. The tarball needs glibc 2.35 or newer (Rocky/Alma 9 is not supported yet).
 
 **From source:** needs a Linux host with KVM, a Rust toolchain, and a sibling `guestkit` checkout at the tag in
-`packaging/guestkit.ref` (v1.2.9 for 0.4.21).
+`packaging/guestkit.ref` (v1.2.9 for 0.4.21; `scripts/check-guestkit-pin.sh . ../guestkit` checks the pin, `Cargo.lock` and the checkout, see
+[the pin](docs/linux-package.md#releasing-the-guestkit-pin)).
 
 ```bash
 git clone https://github.com/zyvorai/zyvor-fluxvm.git && cd zyvor-fluxvm   # needs a sibling guestkit checkout

@@ -154,7 +154,7 @@ covering every route.
 - H2 gate `scripts/test-kvm-windows-boot.sh` (Tiny11 on `fluxvm_engine=kvm` + OVMF).
 - In-tree virtio-fs under load bench vs CH (`scripts/bench-kvm-virtiofs.sh`).
 - Multi-container Pod Sentinel proof; aya ELF parse flake; full-fidelity KVM snapshots (**done**: FLUXKVM1 v5 captures XSAVE/MSR/LAPIC/TSC/clock/irqchip/PIT; cross-CPU-model portability remains);
-  Firecracker warm-pool claim; OIDC/mTLS; GPU-aware placement.
+  Firecracker warm-pool claim; GPU-aware placement. (OIDC JWT validation and mTLS client-certificate identity are implemented: [auth-oidc-mtls.md](auth-oidc-mtls.md).)
 
 Portable CI maps each code-side use case to a test target in
 [secure-containers-use-case-matrix.md](secure-containers-use-case-matrix.md)

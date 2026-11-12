@@ -1,5 +1,9 @@
 # Release and fleet test report
 
+> **Dated report.** It describes the state at the commit named below. The `packages`, `bootstrap-deb` / `bootstrap-rpm`, `systemd-deb` and
+> rpm rows exercise the `.deb`/`.rpm` scripts, which still exist but are no longer built or attached by the release workflow (releases up to
+> 0.4.21 carry them; see [linux-package.md](linux-package.md)). The results are not re-run for this note.
+
 `scripts/test-release-e2e.sh --host <user@host>` runs every suite below on a Linux host (rsync, one release build of
 `fluxvm-agent`, throwaway containers and state directories, nothing left behind) and prints one line per suite.
 

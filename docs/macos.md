@@ -691,7 +691,7 @@ A Linux guest takes extra disks in `apple.extra_disks`, or with `fluxctl disk at
 ```bash
 fluxctl disk attach web scratch --size-gib 20 --controller nvme --caching uncached   # a new sparse image in the VM's workspace
 fluxctl disk attach web shared --url nbd://10.0.0.5:10809/vol1 --read-only
-fluxctl disk ls web
+fluxctl disk list web
 fluxctl disk detach web scratch
 ```
 

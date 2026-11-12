@@ -104,6 +104,14 @@ credentials, or touch another session.
 | `session_events`, `session_artifacts` | Ledger and VM events; workspace changes | `GET {id}/events\|artifacts` |
 | `session_delete` *write* | Delete the session | `DELETE {id}` |
 
+The review loop works on any sandbox, not only on a session ([speculative-execution.md](speculative-execution.md)):
+
+| Tool | Effect | API (`/v1/sandboxes/...`) |
+|---|---|---|
+| `sandbox_speculate` *write* | Run a `command` in an isolated copy of a sandbox and keep the result as a pending changeset; the sandbox is untouched until the changeset is approved and applied. `paths` bounds what is diffed; `timeout_seconds` 1-600; `ttl_seconds` | `POST {id}/speculate` |
+| `sandbox_changesets` | List a sandbox's changesets, newest first, or one with its file contents when `changeset` is given | `GET {id}/changesets[/{cs}]` |
+| `sandbox_changeset_decide` *write* | `approve`, `reject` or `apply` a changeset; apply needs it approved first and fails with a conflict if the files changed meanwhile | `POST {id}/changesets/{cs}/{action}` |
+
 `vm` accepts a VM name, a UUID or a unique UUID prefix. Unknown or missing
 required arguments are rejected with an error the model can read.
 

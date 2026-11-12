@@ -16,9 +16,10 @@ Full semantics: [security-profiles.md](../security-profiles.md). Secure Boot / v
 ## Run the same suite as GitHub Actions
 
 ```bash
-git clone https://github.com/zyvorai/fluxvm.git && cd fluxvm
+git clone https://github.com/zyvorai/zyvor-fluxvm.git && cd zyvor-fluxvm
 # guestkit must sit as a sibling (same as CI)
 git clone https://github.com/zyvorai/guestkit.git ../guestkit
+git -C ../guestkit checkout "$(cat packaging/guestkit.ref)"   # the pinned tag, as CI does
 
 ./scripts/test-security-profiles.sh
 ```

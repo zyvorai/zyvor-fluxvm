@@ -22,8 +22,8 @@ fluxctl delete "$ID"
 ## 2. Warm pool (fast claim)
 
 ```bash
-fluxctl pool create --name ci --template examples/qemu.json --size 4
-fluxctl pool claim --name ci    # returns a paused, ready VM
+fluxctl pool create --spec examples/pool.json   # {"name": "ci", "size": 4, "template": {...a create spec...}}
+fluxctl pool claim ci                           # returns a paused, ready VM; --vm-name and --ttl-seconds are optional
 # resume / exec / delete as usual
 ```
 

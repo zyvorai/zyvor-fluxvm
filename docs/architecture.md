@@ -57,7 +57,7 @@ Network Fabric dataplane diagrams (packet decision and control-plane sequence):
 
 ## Project layout
 
-A Cargo workspace of **27 crates** (plus the [`python/`](https://github.com/zyvorai/zyvor-fluxvm/blob/main/python/README.md) and [`go/`](https://github.com/zyvorai/zyvor-fluxvm/blob/main/go/README.md) SDKs), structured for FluxVM's multi-node architecture.
+A Cargo workspace of **33 crates** (plus the [`python/`](https://github.com/zyvorai/zyvor-fluxvm/blob/main/python/README.md) and [`go/`](https://github.com/zyvorai/zyvor-fluxvm/blob/main/go/README.md) SDKs), structured for FluxVM's multi-node architecture.
 
 <details>
 <summary><b>Show the crate map</b></summary>
@@ -78,7 +78,7 @@ crates/
 ├── fluxvm-oci-init              PID 1 of container sandboxes on `vz` (boot an OCI rootfs) and the layer unpacker
 ├── fluxvm-vz-switch             `fluxvm-vz-switch`: serves one private network between `vz` guests (`apple.networks`)
 ├── fluxvm-guest-protocol        wire types shared by the guest agent and its host client
-├── fluxvm-guest-agent           in-guest AF_VSOCK agent binary (ping/exec/shutdown)
+├── fluxvm-guest-agent           in-guest AF_VSOCK agent binary (ping, exec, files, PTY shell, supervised jobs, identity reset; see vsock-agent.md)
 ├── fluxvm-vsock-client          host-side vsock dialing (native for QEMU, UDS proxy for CH/Firecracker)
 ├── fluxvm-procbox               rootless Landlock + seccomp process sandbox (CLI + library, profiles, `learn`)
 ├── fluxvm-scheduler             VmManager: VM lifecycle orchestration + TTL reaper
@@ -91,6 +91,12 @@ crates/
 ├── fluxvm-container-agent       in-guest OCI process supervisor (`fluxvm-container-agent`)
 ├── fluxvm-container-client      host-side VSOCK client for the container agent
 ├── fluxvm-containerd-shim       containerd runtime-v2 shim (`containerd-shim-fluxvm-v2`)
+├── fluxvm-backup-s3             backup chain storage: manifests, S3 and directory object stores, layer encryption
+├── fluxvm-blockd                `fluxvm-blockd`: pure-Rust NBD block server with copy-on-write overlays (FluxDisk)
+├── fluxvm-diskinject            offline ext4 file injection into raw disk images (no mount, no loop device)
+├── fluxvm-usernet               userspace NAT gateway for `vz` guests (ARP, DHCP, DNS, TCP/UDP NAT, port forwards, egress policy)
+├── fluxvm-netobs                guest-network observability: flows, TCP health, DNS/TLS/HTTP metadata, pcap ring
+├── fluxvm-mesh                  FluxMesh personal-cloud overlay control plane (`fluxmesh*` binaries; not in the release packages)
 └── fluxvm-intelligence          Sentinel: eBPF host+guest telemetry, drop-reason tracking, flight
                                    recorder, BPF-LSM VMM guard/QoS, XDP shield, topology steering
 ```

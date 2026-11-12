@@ -24,6 +24,15 @@ clang llvm libbpf-dev bpftool   # build + load bpf/fluxvm_tc.bpf.c (+ optional f
 tc                              # iproute2 TC attach
 ```
 
+The release tarball declares no dependencies (releases up to 0.4.21 also shipped `.deb`/`.rpm` packages that did; the package scripts
+still do, see [linux-package.md](linux-package.md)). Install what the node needs yourself. What those packages required: the runtime libraries
+`libhivex0` and `libsystemd0` (Debian/Ubuntu) or `hivex-libs` and `systemd-libs` (Fedora/RHEL), `iproute2`/`iproute`, QEMU with `qemu-img`
+(`qemu-system-x86` or `qemu-system-arm`, `qemu-utils`; `qemu-kvm`, `qemu-img` on Fedora/RHEL), and as optional extras `nftables`, `bpftool`,
+`dnsmasq`, `swtpm`, `cloud-image-utils` (or `xorriso` for the seed ISO). The config can point at each tool by path (`qemu_binary`,
+`qemu_img_binary`, `qemu_storage_daemon_binary` for incremental backups, `virtiofsd_binary` for `shared_folders`, `cloud_localds_binary`,
+`swtpm_binary`, `cloud_hypervisor_binary`, `ch_remote_binary`, `firecracker_binary`, `fluxvm_hypervisor_binary`); every default is the bare name, resolved through
+`$PATH`. The `qemu_binary` default is `qemu-system-x86_64` on every architecture: set `qemu_binary = "qemu-system-aarch64"` on an ARM host.
+
 The native dataplane is the default: a config that omits `[sandbox.dataplane]` selects
 `mode = "ebpf"` with `required = true`. On such a host, VMs with a host-visible edge (TAP,
 bridge, macvtap, per-VM netns) **fail create/start** unless `/usr/lib/fluxvm/bpf/fluxvm_tc.bpf.o`
@@ -221,6 +230,24 @@ max_ttl_seconds = 86400          # every request must set ttl_seconds <= this; u
 allowed_backends = ["qemu", "firecracker"]
 allowed_image_dirs = ["/var/lib/fluxvm/images"]
 ```
+
+Every `[policy]` key, from `crates/fluxvm-core/src/config.rs` (all optional; unset means unrestricted):
+
+| Key | Meaning |
+|---|---|
+| `max_vcpus`, `max_memory_mib`, `max_disk_gib` | per-request caps |
+| `max_ttl_seconds` | every request must set `ttl_seconds` at or below this; an unbounded VM is rejected |
+| `allowed_backends` | only these backends (checked after `"auto"` resolves) |
+| `allowed_image_dirs` | the request's `image` must sit under one of these (a path-prefix check that canonicalizes existing components) |
+| `require_catalog_names` | default false; when true create accepts only a catalog name whose signature verifies against `[[catalog.trusted_signers]]` |
+| `max_vcpus_host`, `max_memory_mib_host` | host-wide vCPU and memory (MiB) caps, summed from the quota ledger |
+| `allowed_network_modes` | only these modes are admitted (`none`, `user`, `tap`, `macvtap`) |
+| `allow_extra_args` | default false: a non-empty `extra_args` is rejected |
+| `allowed_migration_bind_addresses` | `MigrationReceiverRequest.listen_host` must be one of these literal addresses (after an empty value defaults to `0.0.0.0`) |
+| `allowed_migration_tls_dirs` | each path in a `MigrationTlsSpec` must sit under one of these directories (same prefix semantics as `allowed_image_dirs`) |
+| `default_cpu_quota_percent`, `memory_max_equals_guest` | launch-time cgroup limits, see [oversubscription.md](oversubscription.md) |
+| `min_host_mem_available_mib`, `max_host_mem_psi_some_avg10`, `max_host_mem_psi_full_avg10`, `deny_host_pressure_level`, `pressure_defer_secs` | pressure-aware admission (all default off); `deny_host_pressure_level` (`warn` or `critical`) is macOS only |
+| `[[policy.tenants]]` | per-tenant aggregate caps, below |
 
 Checked once, right after `"auto"` resolves to a concrete backend and before any disk/network work
 starts, so a rejected request fails fast with a specific reason (`request vcpus (4) exceeds policy
