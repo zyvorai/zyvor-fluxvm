@@ -123,7 +123,7 @@ same.) A tarball downloaded in a browser is quarantined by macOS: clear it with
 
 ## Which version has what
 
-The one-liner installs the newest **published** release. As of this page that is **0.4.20**:
+The one-liner installs the newest **published** release. As of this page that is **0.4.21**:
 
 | Release | Has |
 |---|---|
@@ -133,7 +133,8 @@ The one-liner installs the newest **published** release. As of this page that is
 | `0.4.11` | clean cut of the above: Developer ID **notarized** macOS package with Homebrew `libhivex` load fixed; speculate egress from network policy. |
 | `0.4.12` to `0.4.18` | see the [CHANGELOG](../CHANGELOG.md): Studio, Kubernetes on a Mac, Linux `.deb`/`.rpm` packages. |
 | `0.4.19` | published **without** Linux packages (the pin check failed; see [releasing](linux-package.md#releasing-the-guestkit-pin)). Use 0.4.20 or 0.4.18 on Linux. |
-| **`0.4.20`** (current) | the first release with Linux packages since 0.4.18: tarballs, `.deb` and `.rpm` for x86_64 and aarch64, and the macOS arm64 tarball. No runtime changes since 0.4.19. |
+| `0.4.20` | the first release with Linux packages since 0.4.18: tarballs, `.deb` and `.rpm` for x86_64 and aarch64, and the macOS arm64 tarball. No runtime changes since 0.4.19. |
+| **`0.4.21`** (current) | security patch: mTLS identity taken from the verified client certificate (`tls.trust_proxy_headers` opt-in for proxies; see the CHANGELOG compatibility note), guest-agent pre-auth read bounds, `Cargo.lock` refreshed for guestkit v1.2.9. |
 
 Check what you have:
 
@@ -142,7 +143,7 @@ fluxctl --version
 fluxctl agent --help        # "unrecognized subcommand 'agent'" means a release without sessions
 ```
 
-If you are on something older than 0.4.8 and need sessions immediately, build from source (below) or pin `--version 0.4.20`.
+If you are on something older than 0.4.8 and need sessions immediately, build from source (below) or pin `--version 0.4.21`.
 
 ## Upgrade, pin, roll back, uninstall
 
@@ -199,11 +200,11 @@ brew services start zyvorai/tap/fluxvm
 The formula (`packaging/homebrew/fluxvm.rb`, 0.4.20 at the time of writing) is updated by a PR after each release is published, so it can trail the newest release by a little. Details:
 [install-macos.md](install-macos.md).
 
-**Linux packages** (`.deb`, `.rpm`): the release attaches them next to the tarballs, each with a `.sha256`. For 0.4.20:
-`fluxvm_0.4.20_amd64.deb`, `fluxvm_0.4.20_arm64.deb`, `fluxvm-0.4.20-1.x86_64.rpm` and `fluxvm-0.4.20-1.aarch64.rpm`.
+**Linux packages** (`.deb`, `.rpm`): the release attaches them next to the tarballs, each with a `.sha256`. For 0.4.21:
+`fluxvm_0.4.21_amd64.deb`, `fluxvm_0.4.21_arm64.deb`, `fluxvm-0.4.21-1.x86_64.rpm` and `fluxvm-0.4.21-1.aarch64.rpm`.
 
 ```bash
-V=0.4.20
+V=0.4.21
 curl -fsSLO https://github.com/zyvorai/zyvor-fluxvm/releases/download/v$V/fluxvm_${V}_amd64.deb
 curl -fsSLO https://github.com/zyvorai/zyvor-fluxvm/releases/download/v$V/fluxvm_${V}_amd64.deb.sha256
 sha256sum -c fluxvm_${V}_amd64.deb.sha256
@@ -220,7 +221,7 @@ Needs glibc 2.35 or newer, so Rocky/Alma 9 refuse the `.rpm`. Layout, dependenci
 ```bash
 git clone https://github.com/zyvorai/zyvor-fluxvm
 git clone https://github.com/zyvorai/guestkit
-git -C guestkit checkout "$(cat zyvor-fluxvm/packaging/guestkit.ref)"   # the tag the release is built with (v1.2.9 for 0.4.20)
+git -C guestkit checkout "$(cat zyvor-fluxvm/packaging/guestkit.ref)"   # the tag the release is built with (v1.2.9 for 0.4.21)
 cd zyvor-fluxvm
 # macOS: xcode-select --install && brew install hivex
 # Linux: sudo apt-get install -y libsystemd-dev libhivex-dev clang llvm libbpf-dev linux-libc-dev

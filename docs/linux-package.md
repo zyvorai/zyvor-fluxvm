@@ -17,10 +17,10 @@ If the Linux run cannot start, the same packages can be built by hand from the t
 
 Each release carries, per architecture, the tarball (`fluxvm-<version>-linux-<x86_64|aarch64>.tar.gz`), a `.deb`
 (`fluxvm_<version>_<amd64|arm64>.deb`) and an `.rpm` (`fluxvm-<version>-1.<x86_64|aarch64>.rpm`), each with a `.sha256`.
-Example for 0.4.20 on x86_64 (use `arm64` / `aarch64` on ARM):
+Example for 0.4.21 on x86_64 (use `arm64` / `aarch64` on ARM):
 
 ```bash
-V=0.4.20; B=https://github.com/zyvorai/zyvor-fluxvm/releases/download/v$V
+V=0.4.21; B=https://github.com/zyvorai/zyvor-fluxvm/releases/download/v$V
 curl -fsSLO $B/fluxvm_${V}_amd64.deb && curl -fsSLO $B/fluxvm_${V}_amd64.deb.sha256
 sudo apt install ./fluxvm_${V}_amd64.deb              # Debian 12+, Ubuntu 22.04+
 sudo dnf install ./fluxvm-$V-1.x86_64.rpm             # Fedora, Rocky/Alma 10 (not EL9, see below)
@@ -132,9 +132,9 @@ and `scripts/test-vendor-lock.sh`; `release-linux.yml` installs the real rpm in 
 
 ```bash
 scripts/package-linux.sh --check-manifest       # validate packaging/files.txt against the repo (any OS, no build)
-scripts/package-linux.sh --version 0.4.20       # build, stage and tar (Linux; see the script header for requirements)
+scripts/package-linux.sh --version 0.4.21       # build, stage and tar (Linux; see the script header for requirements)
 scripts/package-linux.sh --stage-only           # stop after staging: target/package/fluxvm-<ver>-linux-<arch>/
-scripts/check-glibc-floor.sh target/package/fluxvm-0.4.20-linux-x86_64 2.35   # the compatibility gate
+scripts/check-glibc-floor.sh target/package/fluxvm-0.4.21-linux-x86_64 2.35   # the compatibility gate
 ```
 
 To add a file to the package, add a line to `packaging/files.txt`; `scripts/test-package-manifest.sh` and CI check the file.
