@@ -35,6 +35,7 @@ pub mod docker_engine;
 mod grants;
 mod idempotency;
 mod mfa;
+pub mod mtls;
 mod netobs_api;
 mod oidc;
 mod openapi;
@@ -245,10 +246,16 @@ async fn auth_middleware(State(auth): State<AuthState>, mut req: Request, next: 
         } else {
             (None, None, None)
         }
-    } else if m.cfg.tls.mtls_enabled() {
-        // Identity from a verified client cert (this process terminated mTLS)
-        // or from a trusted frontend that sets X-Client-Cert-CN only after
-        // verify. Role defaults to read-only; X-Client-Cert-Role=admin for writes.
+    } else if let Some(mtls::PeerCert(peer)) = req.extensions().get::<mtls::PeerCert>() {
+        // This process terminated mTLS: the identity is the verified client certificate
+        // (see `mtls.rs`). The X-Client-Cert-* headers are ignored on this path.
+        match peer {
+            Some(p) => (Some(p.role), Some(p.cn.clone()), p.tenant.clone()),
+            None => (None, None, None),
+        }
+    } else if m.cfg.tls.trust_proxy_headers {
+        // Opt-in: a reverse proxy verified the client certificate and set these headers
+        // (and strips any client-supplied copies). Role defaults to read-only.
         if let Some(cn) = req
             .headers()
             .get("x-client-cert-cn")
@@ -6444,6 +6451,283 @@ mod tests {
         let out = render_metrics(&[]);
         assert!(out.contains("fluxvm_vms_total{status=\"running\"} 0"));
         assert!(out.contains("fluxvm_vms_agent_enabled 0"));
+    }
+
+    /// mTLS identity: certificate-derived, and `X-Client-Cert-*` headers only behind an opt-in.
+    mod mtls_identity {
+        use super::*;
+        use axum::body::Body;
+        use axum::http::Request;
+        use fluxvm_core::config::{AuthConfig, Config, TlsConfig};
+        use rcgen::{
+            BasicConstraints, CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, Issuer,
+            KeyPair, KeyUsagePurpose,
+        };
+        use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tower::ServiceExt;
+
+        // An admin-only route: a read-only identity gets 403, an admin gets 404 (no such file).
+        const ADMIN_ONLY: &str = "/v1/backups/nope.qcow2/root";
+
+        fn manager(tls: TlsConfig) -> Arc<VmManager> {
+            let dir = Box::leak(Box::new(tempfile::tempdir().unwrap()));
+            let cfg = Config {
+                state_dir: dir.path().join("state"),
+                run_dir: dir.path().join("run"),
+                auth: AuthConfig {
+                    require: true,
+                    ..Default::default()
+                },
+                tls,
+                ..Config::default()
+            };
+            VmManager::new(cfg).unwrap()
+        }
+
+        fn mtls_cfg(trust_proxy_headers: bool) -> TlsConfig {
+            TlsConfig {
+                cert: Some("server.crt".into()),
+                key: Some("server.key".into()),
+                client_ca: Some("ca.crt".into()),
+                trust_proxy_headers,
+            }
+        }
+
+        async fn status_with_headers(
+            tls: TlsConfig,
+            peer: Option<mtls::PeerCert>,
+            headers: &[(&str, &str)],
+        ) -> StatusCode {
+            let mut b = Request::get(ADMIN_ONLY);
+            for (k, v) in headers {
+                b = b.header(*k, *v);
+            }
+            let mut req = b.body(Body::empty()).unwrap();
+            if let Some(p) = peer {
+                req.extensions_mut().insert(p);
+            }
+            router(manager(tls)).oneshot(req).await.unwrap().status()
+        }
+
+        const FORGED: [(&str, &str); 3] = [
+            ("x-client-cert-cn", "mallory"),
+            ("x-client-cert-role", "admin"),
+            ("x-client-cert-tenant", "victim"),
+        ];
+
+        #[tokio::test]
+        async fn forged_headers_are_ignored_by_default() {
+            // No peer cert extension, default config: the headers must grant nothing.
+            assert_eq!(
+                status_with_headers(mtls_cfg(false), None, &FORGED).await,
+                StatusCode::UNAUTHORIZED
+            );
+        }
+
+        #[tokio::test]
+        async fn forged_headers_cannot_upgrade_a_certificate_identity() {
+            let ro = mtls::PeerCert(Some(mtls::PeerIdentity {
+                cn: "alice".into(),
+                role: Role::ReadOnly,
+                tenant: None,
+            }));
+            // Even with the proxy opt-in on, a connection we terminated ignores the headers.
+            for trust in [false, true] {
+                assert_eq!(
+                    status_with_headers(mtls_cfg(trust), Some(ro.clone()), &FORGED).await,
+                    StatusCode::FORBIDDEN,
+                    "trust_proxy_headers={trust}"
+                );
+            }
+        }
+
+        #[tokio::test]
+        async fn certificate_identity_sets_the_role() {
+            let admin = mtls::PeerCert(Some(mtls::PeerIdentity {
+                cn: "root".into(),
+                role: Role::Admin,
+                tenant: None,
+            }));
+            assert_eq!(
+                status_with_headers(mtls_cfg(false), Some(admin), &[]).await,
+                StatusCode::NOT_FOUND
+            );
+            // Verified by the CA but no usable CN: unauthenticated.
+            assert_eq!(
+                status_with_headers(mtls_cfg(false), Some(mtls::PeerCert(None)), &[]).await,
+                StatusCode::UNAUTHORIZED
+            );
+        }
+
+        #[tokio::test]
+        async fn trusted_proxy_headers_work_only_when_opted_in() {
+            assert_eq!(
+                status_with_headers(mtls_cfg(true), None, &FORGED).await,
+                StatusCode::NOT_FOUND
+            );
+            assert_eq!(
+                status_with_headers(mtls_cfg(true), None, &[("x-client-cert-cn", "bob")]).await,
+                StatusCode::FORBIDDEN,
+                "role defaults to read-only"
+            );
+            assert_eq!(
+                status_with_headers(mtls_cfg(true), None, &[]).await,
+                StatusCode::UNAUTHORIZED
+            );
+        }
+
+        fn name_params(cn: &str, ous: &[&str]) -> CertificateParams {
+            let mut p = CertificateParams::new(vec!["localhost".to_string()]).unwrap();
+            p.distinguished_name.push(DnType::CommonName, cn);
+            for ou in ous {
+                p.distinguished_name
+                    .push(DnType::OrganizationalUnitName, *ou);
+            }
+            p
+        }
+
+        #[test]
+        fn parses_cn_role_and_tenant_from_a_certificate() {
+            // rcgen keeps one value per RDN type, so one OU per certificate here; the
+            // multi-OU rules are covered in mtls.rs.
+            let key = KeyPair::generate().unwrap();
+            let der = |cn: &str, ous: &[&str]| {
+                name_params(cn, ous)
+                    .self_signed(&key)
+                    .unwrap()
+                    .der()
+                    .clone()
+            };
+            let id = |d: &CertificateDer<'_>| mtls::identity_from_cert_der(d.as_ref()).unwrap();
+            let admin = id(&der("alice", &["fluxvm-role=admin"]));
+            assert_eq!((admin.cn.as_str(), admin.role), ("alice", Role::Admin));
+            let t = id(&der("bob", &["fluxvm-tenant=acme"]));
+            assert_eq!(
+                (t.role, t.tenant.as_deref()),
+                (Role::ReadOnly, Some("acme"))
+            );
+            for ous in [&[][..], &["fluxvm-role=root"], &["eng"]] {
+                assert_eq!(id(&der("c", ous)).role, Role::ReadOnly, "{ous:?}");
+            }
+            assert_eq!(mtls::identity_from_cert_der(b"junk"), None);
+        }
+
+        struct Client {
+            cert: CertificateDer<'static>,
+            key: Vec<u8>,
+        }
+
+        fn issue_client(ca: &Issuer<'_, KeyPair>, cn: &str, ous: &[&str]) -> Client {
+            let key = KeyPair::generate().unwrap();
+            let mut p = name_params(cn, ous);
+            p.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
+            let cert = p.signed_by(&key, ca).unwrap();
+            Client {
+                cert: cert.der().clone(),
+                key: key.serialize_der(),
+            }
+        }
+
+        /// Real handshake: `IdentityAcceptor` must derive the identity from the presented cert
+        /// and ignore forged headers sent on the same connection.
+        #[tokio::test]
+        async fn handshake_derives_identity_from_the_client_certificate() {
+            let provider = Arc::new(rustls::crypto::ring::default_provider());
+            let ca_key = KeyPair::generate().unwrap();
+            let mut ca_params = CertificateParams::new(vec![]).unwrap();
+            ca_params
+                .distinguished_name
+                .push(DnType::CommonName, "test-ca");
+            ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+            ca_params.key_usages = vec![KeyUsagePurpose::KeyCertSign];
+            let ca_cert = ca_params.self_signed(&ca_key).unwrap();
+            let ca = Issuer::new(ca_params, ca_key);
+
+            let srv_key = KeyPair::generate().unwrap();
+            let mut sp = name_params("server", &[]);
+            sp.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
+            let srv_cert = sp.signed_by(&srv_key, &ca).unwrap();
+
+            let mut roots = rustls::RootCertStore::empty();
+            roots.add(ca_cert.der().clone()).unwrap();
+            let roots = Arc::new(roots);
+            let verifier = rustls::server::WebPkiClientVerifier::builder_with_provider(
+                roots.clone(),
+                provider.clone(),
+            )
+            .build()
+            .unwrap();
+            let server_cfg = rustls::ServerConfig::builder_with_provider(provider.clone())
+                .with_safe_default_protocol_versions()
+                .unwrap()
+                .with_client_cert_verifier(verifier)
+                .with_single_cert(
+                    vec![srv_cert.der().clone()],
+                    PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(srv_key.serialize_der())),
+                )
+                .unwrap();
+
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let addr = listener.local_addr().unwrap();
+            let app = router(manager(mtls_cfg(false)));
+            tokio::spawn(async move {
+                axum_server::from_tcp(listener)
+                    .unwrap()
+                    .acceptor(mtls::IdentityAcceptor::new(Arc::new(server_cfg)))
+                    .serve(app.into_make_service())
+                    .await
+                    .unwrap();
+            });
+
+            let admin = issue_client(&ca, "root", &["fluxvm-role=admin"]);
+            let reader = issue_client(&ca, "alice", &[]);
+
+            let get = |client: Option<&Client>| {
+                let roots = roots.clone();
+                let provider = provider.clone();
+                let cc = rustls::ClientConfig::builder_with_provider(provider)
+                    .with_safe_default_protocol_versions()
+                    .unwrap()
+                    .with_root_certificates(roots);
+                let cc = match client {
+                    Some(c) => cc
+                        .with_client_auth_cert(
+                            vec![c.cert.clone()],
+                            PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(c.key.clone())),
+                        )
+                        .unwrap(),
+                    None => cc.with_no_client_auth(),
+                };
+                async move {
+                    let tcp = tokio::net::TcpStream::connect(addr).await.ok()?;
+                    let conn = tokio_rustls::TlsConnector::from(Arc::new(cc));
+                    let mut tls = conn
+                        .connect(ServerName::try_from("localhost").unwrap(), tcp)
+                        .await
+                        .ok()?;
+                    let req = format!(
+                        "GET {ADMIN_ONLY} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\
+                         X-Client-Cert-CN: mallory\r\nX-Client-Cert-Role: admin\r\n\r\n"
+                    );
+                    tls.write_all(req.as_bytes()).await.ok()?;
+                    let mut buf = Vec::new();
+                    // A server alert for a rejected client cert surfaces as a read error.
+                    tls.read_to_end(&mut buf).await.ok()?;
+                    let head = String::from_utf8_lossy(&buf);
+                    head.split_whitespace().nth(1)?.parse::<u16>().ok()
+                }
+            };
+            assert_eq!(
+                get(Some(&reader)).await,
+                Some(403),
+                "read-only cert + forged admin header"
+            );
+            assert_eq!(get(Some(&admin)).await, Some(404), "admin OU cert");
+            // Without a client certificate the handshake itself fails.
+            assert_eq!(get(None).await, None);
+        }
     }
 
     mod auth {
