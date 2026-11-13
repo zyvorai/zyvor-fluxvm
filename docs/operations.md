@@ -1529,3 +1529,41 @@ anything under `instances/<uuid>/`.
 invocation is a separate process, not just a separate task inside `serve`) via an OS-level `flock` —
 without it, two VMs created at the same moment could silently lose one's record, or both get
 assigned the same vsock CID.
+
+## Checking a config file: `fluxctl config check`
+
+The daemon loads its config leniently: unknown keys are ignored and every field has a default. A misspelled or misplaced key
+therefore silently keeps the default, and some combinations only fail at serve time or turn a protection off without a message
+(`tls.client_ca` without `tls.cert` means client certificates are **not** required). `config check` reads the file and reports, per key, what is wrong and how to
+fix it. It never starts the daemon or changes the file.
+
+```bash
+fluxctl config check /etc/fluxvm.toml        # or: fluxctl --config /etc/fluxvm.toml config check
+fluxctl config check fluxvm.toml --offline   # config written for another host: skip "does this path exist"
+fluxctl config check fluxvm.toml --strict --json   # CI: exit 1 on warnings too, machine-readable
+```
+
+```text
+error   tls.client_ca  tls.client_ca is set but TLS is off (needs tls.cert and tls.key): client certificates are NOT required
+        fix: set tls.cert and tls.key, or remove tls.client_ca
+warning tls.trust_proxy_header  unknown key, ignored by the daemon (did you mean `tls.trust_proxy_headers`?)
+        fix: rename it to `tls.trust_proxy_headers`
+```
+
+Exit status is 1 when there is an error (and with `--strict` when there is a warning). Secrets (token values, credential-vault
+authorization, inline registry passwords) are never printed. What it checks:
+
+| Area | Examples |
+|---|---|
+| Syntax and types | TOML errors with position; a value of the wrong type |
+| Unknown keys | anything the daemon would ignore, with a `did you mean` for a near miss or a key that lives in another table (`[sandbox] allow_net` -> `sandbox.procbox.allow_net`) |
+| Listen and TLS | `listen` not `host:port`; `tls.cert` without `tls.key`; `client_ca` without TLS; `trust_proxy_headers` on a non-loopback listener; missing certificate files |
+| Auth | `auth.require` with no token or OIDC; weak, empty or duplicate tokens; no admin token; OIDC issuer without audience; rate limit half-set; MFA rule for an unknown token; bearer tokens over plain HTTP |
+| Admission policy | limits of 0, empty allow-lists, duplicate or zero-capped tenants, per-VM cap above the host cap, a token tenant with no caps |
+| Sandbox and egress | autopause/balloon/hibernate timing, egress HTTP rule syntax, TLS interception without a proxy listener, interception reaching private addresses, credential vault without a proxy, proxy bound beyond loopback |
+| procbox | default above cap, bad `isolation`, uid pool overflow or overlap with real accounts, `best_effort` and `allow_root` (fail open) |
+| Dataplane | malformed `allow_cidrs`/`allow_ports`/`xdp.block_cidrs`, XDP without an interface, soft pressure threshold not below hard |
+| Jailer, catalog, Apple | jailer required but not enabled, uid range half-set; trusted signer keys that are not 32-byte base64; registry credentials |
+
+Rules live in `crates/fluxvm-core/src/config_lint.rs` and each has a test. The shipped `config.example.toml` and
+`configs/` files are linted in CI-run unit tests and must stay free of errors and unknown keys.
