@@ -176,3 +176,31 @@ changes what happens when there is none:
 ## Related: host exec allow-list
 
 This policy governs commands run inside a guest. Which binaries the VMM process may run on the host is a separate control, the VMM Guard exec allow-list; see [host-hardening.md](host-hardening.md#positive-exec-allow-list-vmm-guard).
+
+## Preflight: `fluxctl exec-policy check`
+
+Find out before the first run whether a policy will start the command and what a guest kernel would enforce. Offline: no VM,
+agent or privileges.
+
+```bash
+fluxctl exec-policy check policy.json            # lint + a table for Landlock ABI 0..7
+fluxctl exec-policy check policy.json --abi 4    # one guest; exit 1 if a strict guest at that ABI refuses it
+```
+
+```text
+error   read  no read/write entry covers /bin/sh: the command runs through `/bin/sh -c`, so the shell cannot start. Add /bin and /usr
+warning best_effort  fails open: on a guest kernel that cannot enforce a rule ...
+
+Landlock ABI 4: REFUSED
+    strict mode refuses: abstract-unix-socket and signal scoping (needs Landlock ABI >= 6, have 4)
+    (set best_effort to run with the gaps, or use a newer guest kernel)
+Landlock ABI 6: runs
+```
+
+Lint covers: the shell or the dynamic loader not reachable from `read`/`write` (or from `exec` when it is set), writable system
+directories, relative paths and `..`, `tcp_connect`/`tcp_bind` set to `any`, `allow_udp`, `allow_namespaces`, `seccomp: null`,
+`best_effort` (fails open), `run_as` of root, zero timeouts, malformed `env`, and **unknown fields**. The parser ignores unknown fields, so a
+misspelled `tcp_connects` silently drops the allowance; `max_abi` is reported because the guest agent never honours it. The ABI table uses the same
+rules as `fluxvm_procbox::landlock::plan`; `crates/fluxvm-scheduler/tests/exec_preflight_matches_procbox.rs` runs both over every policy
+shape and ABI so they cannot drift. It does not probe the guest: namespace isolation (`strict` needs unprivileged user namespaces)
+and the guest's real ABI (`fluxvm-procbox probe` on the guest) are yours to supply.

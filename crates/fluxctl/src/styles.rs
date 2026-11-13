@@ -186,6 +186,8 @@ pub fn after_help() -> String {
                 (
                     "what-if",
                     "Offline: would this connection be allowed? What does a policy change flip?",
+                    "exec-policy check",
+                    "Offline: will this exec policy start the command? What does each Landlock ABI enforce?",
                 ),
                 ("group", "Security groups for the VM-edge dataplane"),
                 ("cnp", "CNP documents compiled onto security groups"),

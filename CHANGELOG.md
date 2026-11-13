@@ -12,6 +12,11 @@
   certificates are not required). `fluxctl config check [FILE] [--offline] [--strict] [--json]` reports unknown keys with a `did you mean`, values that cannot
   work and weakened settings across listen/TLS/auth/policy/sandbox/procbox/dataplane/jailer/catalog, each with its key and a fix, and exits 1 on an error.
   Reads the file only and never prints a secret. New module `fluxvm_core::config_lint`; unit tests lint every shipped example config. Additive. See `docs/operations.md`.
+- **`fluxctl exec-policy check`: preflight a per-exec confinement policy.** `fluxctl exec-policy check policy.json [--abi N] [--json]` lints the policy
+  JSON (shell or loader unreachable so the command cannot start, writable system directories, `any` TCP rules, `allow_udp`, `seccomp: null`, `best_effort`
+  fail-open, unknown fields that the parser silently ignores) and prints, for each Landlock ABI 0-7, whether a strict guest runs or refuses it and which
+  protections are not enforced. Offline. New module `fluxvm_guest_protocol::exec_preflight`; `crates/fluxvm-scheduler/tests/exec_preflight_matches_procbox.rs` checks
+  it against `fluxvm_procbox::landlock::plan` over every policy shape and ABI so the two cannot drift. The guest agent and wire protocol are unchanged. See `docs/guest-exec-policy.md`.
 
 - CI: every workflow that ran a bare `sudo apt-get update && sudo apt-get install ...` (35 call sites in 31 workflows, including `flight-recorder`, `topology-intelligence`, `memory-boot-profiler` and the second job of `ci.yml`) now goes through `scripts/ci-install-apt-deps.sh`, so the `zyvor-build-c` to `-f` runners that refuse `sudo apt-get` pass when the packages are already present and otherwise fail with the fix. The privileged host steps of `quiclb-smartnic`, `scx-vm-scheduler` and `xdp-tcp-intelligence` now pass `PATH`, `CARGO_HOME` and `RUSTUP_HOME` through `sudo` like #746. `topology-intelligence` installs `util-linux` directly (there is no `taskset` package).
 - **Tarball-only cleanup.** Removed what #739 left behind: the `deb`, `rpm`, `bootstrap-pkg`, `systemd-deb` and `systemd-rpm` jobs of
