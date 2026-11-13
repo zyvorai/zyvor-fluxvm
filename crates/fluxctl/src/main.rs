@@ -5891,8 +5891,10 @@ async fn main() -> Result<()> {
     }
     if let Command::WhatIf(args) = &cli.command {
         std::process::exit(whatif::run(args)?);
+    }
     if let Command::Config { command } = &cli.command {
         std::process::exit(config_check::run(command, cli.config.as_deref())?);
+    }
     if let Command::ExecPolicy { command } = &cli.command {
         std::process::exit(exec_policy_check::run(command)?);
     }
@@ -10441,8 +10443,12 @@ mod backlog_tier1_cli_tests {
             ])
             .command,
             Command::WhatIf(_)
+        ));
+        assert!(matches!(
             cli(&["config", "check", "fluxvm.toml", "--strict", "--offline"]).command,
             Command::Config { .. }
+        ));
+        assert!(matches!(
             cli(&["exec-policy", "check", "p.json", "--abi", "4"]).command,
             Command::ExecPolicy { .. }
         ));
