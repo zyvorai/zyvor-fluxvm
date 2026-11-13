@@ -54,8 +54,7 @@ jobs:
           components: rustfmt,clippy
       - name: Install eBPF build deps
         run: |
-          sudo apt-get update
-          sudo apt-get install -y clang llvm libbpf-dev linux-libc-dev iproute2 libsystemd-dev libhivex-dev pkg-config             linux-tools-common linux-tools-generic
+          $GITHUB_WORKSPACE/fluxvm/scripts/ci-install-apt-deps.sh clang llvm libbpf-dev linux-libc-dev iproute2 libsystemd-dev libhivex-dev pkg-config linux-tools-common linux-tools-generic
           sudo apt-get install -y "linux-tools-$(uname -r)" || sudo apt-get install -y linux-tools-azure || true
       - name: formatting
         working-directory: fluxvm

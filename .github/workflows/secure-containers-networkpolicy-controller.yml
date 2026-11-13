@@ -77,9 +77,7 @@ jobs:
           components: rustfmt,clippy
       - name: Install eBPF build deps
         run: |
-          sudo apt-get update
-          sudo apt-get install -y clang llvm libbpf-dev linux-libc-dev iproute2 libsystemd-dev libhivex-dev pkg-config \
-            linux-tools-common linux-tools-generic
+          $GITHUB_WORKSPACE/fluxvm/scripts/ci-install-apt-deps.sh clang llvm libbpf-dev linux-libc-dev iproute2 libsystemd-dev libhivex-dev pkg-config linux-tools-common linux-tools-generic
           # Azure GH runners need the matching kernel tools package for a real bpftool binary.
           sudo apt-get install -y "linux-tools-$(uname -r)" || sudo apt-get install -y linux-tools-azure || true
           bpftool version || echo 'bpftool still stubbed for this kernel; verify step will use llvm-objdump fallback'

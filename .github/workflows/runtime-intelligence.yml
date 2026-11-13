@@ -38,7 +38,7 @@ jobs:
           path: guestkit
       - uses: dtolnay/rust-toolchain@stable
       - name: Install BPF build dependencies
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq clang llvm libbpf-dev pkg-config linux-tools-common linux-tools-generic
+        run: fluxvm/scripts/ci-install-apt-deps.sh clang llvm libbpf-dev pkg-config linux-tools-common linux-tools-generic
       - name: Cargo tests
         working-directory: fluxvm
         run: cargo test -p fluxvm-intelligence

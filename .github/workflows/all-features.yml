@@ -37,7 +37,7 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
       - name: Install system dependencies
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq libsystemd-dev libhivex-dev clang llvm libbpf-dev linux-libc-dev
+        run: fluxvm/scripts/ci-install-apt-deps.sh libsystemd-dev libhivex-dev clang llvm libbpf-dev linux-libc-dev
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: fluxvm
@@ -66,11 +66,7 @@ jobs:
           components: rustfmt,clippy
       - name: Install native dependencies
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq \
-            libsystemd-dev libhivex-dev \
-            clang llvm libbpf-dev linux-tools-common linux-tools-generic \
-            iproute2 nftables iputils-ping
+          fluxvm/scripts/ci-install-apt-deps.sh libsystemd-dev libhivex-dev clang llvm libbpf-dev linux-tools-common linux-tools-generic iproute2 nftables iputils-ping
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: fluxvm
@@ -143,7 +139,7 @@ jobs:
         with:
           components: clippy,rustfmt
       - name: System dependencies
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq libsystemd-dev libhivex-dev clang llvm libbpf-dev linux-libc-dev
+        run: fluxvm/scripts/ci-install-apt-deps.sh libsystemd-dev libhivex-dev clang llvm libbpf-dev linux-libc-dev
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: fluxvm
@@ -178,9 +174,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
       - name: Install system dependencies
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq libsystemd-dev libhivex-dev clang llvm libbpf-dev \
-            linux-tools-common linux-tools-generic pkg-config
+          fluxvm/scripts/ci-install-apt-deps.sh libsystemd-dev libhivex-dev clang llvm libbpf-dev linux-tools-common linux-tools-generic pkg-config
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
@@ -256,8 +250,7 @@ jobs:
           FLUXVM_ATTACHED_MIGRATION=0 ./scripts/evidence-migration-attached-vm.sh
       - name: S2 nftables stand-in
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq nftables iproute2 python3
+          fluxvm/scripts/ci-install-apt-deps.sh nftables iproute2 python3
           sudo -E ./scripts/evidence-networkpolicy-second-cni.sh
           sudo -E env FLUXVM_CNI_CHURN_ROUNDS=3 bash scripts/evidence-cni-churn.sh
 
@@ -278,7 +271,7 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
       - name: Install system dependencies
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq libsystemd-dev libhivex-dev clang llvm libbpf-dev linux-libc-dev
+        run: fluxvm/scripts/ci-install-apt-deps.sh libsystemd-dev libhivex-dev clang llvm libbpf-dev linux-libc-dev
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: fluxvm
@@ -304,7 +297,7 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
       - name: Install system dependencies
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq libsystemd-dev libhivex-dev clang llvm libbpf-dev linux-libc-dev
+        run: fluxvm/scripts/ci-install-apt-deps.sh libsystemd-dev libhivex-dev clang llvm libbpf-dev linux-libc-dev
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: fluxvm
@@ -330,7 +323,7 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
       - name: Install system dependencies
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq libsystemd-dev libhivex-dev clang llvm libbpf-dev linux-libc-dev
+        run: fluxvm/scripts/ci-install-apt-deps.sh libsystemd-dev libhivex-dev clang llvm libbpf-dev linux-libc-dev
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: fluxvm

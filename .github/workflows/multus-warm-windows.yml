@@ -81,7 +81,7 @@ jobs:
         with:
           components: rustfmt
       - name: System dependencies
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq libsystemd-dev libhivex-dev clang llvm libbpf-dev linux-libc-dev pkg-config
+        run: fluxvm/scripts/ci-install-apt-deps.sh libsystemd-dev libhivex-dev clang llvm libbpf-dev linux-libc-dev pkg-config
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: fluxvm
@@ -133,7 +133,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Install iproute2, nftables, python3
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq iproute2 nftables python3 curl
+        run: fluxvm/scripts/ci-install-apt-deps.sh iproute2 nftables python3 curl
       - name: Evidence script syntax
         run: |
           set -euo pipefail
@@ -165,7 +165,7 @@ jobs:
       - name: Build observer and scrape /metrics
         run: |
           set -euo pipefail
-          sudo apt-get update -qq && sudo apt-get install -y -qq curl
+          fluxvm/scripts/ci-install-apt-deps.sh curl
           (
             cd tools/fluxvm-policy-observer
             go build -o /tmp/fluxvm-policy-observer ./cmd/fluxvm-policy-observer

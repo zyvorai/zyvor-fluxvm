@@ -82,8 +82,7 @@ jobs:
           targets: aarch64-unknown-linux-musl
       - name: Build dependencies
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq build-essential flex bison bc libelf-dev libssl-dev cpio zstd xz-utils file musl-tools
+          fluxvm/scripts/ci-install-apt-deps.sh build-essential flex bison bc libelf-dev libssl-dev cpio zstd xz-utils file musl-tools
       - name: Kernel and e2fsprogs source cache
         uses: actions/cache@v6
         with:
