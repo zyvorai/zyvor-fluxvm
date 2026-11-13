@@ -147,7 +147,10 @@ pub fn unknown_fields(raw: &Value) -> Vec<String> {
         Ok(Value::Object(m)) => m.keys().cloned().collect(),
         _ => Vec::new(),
     };
-    obj.keys().filter(|k| !known.contains(k)).cloned().collect()
+    let mut unknown: Vec<String> = obj.keys().filter(|k| !known.contains(k)).cloned().collect();
+    // serde_json keeps insertion order when another crate enables preserve_order; report a stable order.
+    unknown.sort();
+    unknown
 }
 
 /// Static lint: mistakes and weakenings that do not depend on the guest kernel. `raw` (the JSON the policy was parsed
