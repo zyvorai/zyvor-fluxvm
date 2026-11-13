@@ -94,7 +94,7 @@ jobs:
       - name: S11 skips when attached migration is off
         run: FLUXVM_ATTACHED_MIGRATION=0 ./scripts/evidence-migration-attached-vm.sh
       - name: Install nftables for S2
-        run: fluxvm/scripts/ci-install-apt-deps.sh nftables iproute2 python3
+        run: scripts/ci-install-apt-deps.sh nftables iproute2 python3
       - name: S2 second policy-engine stand-in
         run: sudo -E ./scripts/evidence-networkpolicy-second-cni.sh
       - name: Calico/flannel churn
