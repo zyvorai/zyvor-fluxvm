@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Docs and comments, aligned with what merged after 0.4.21 (#739 to #747): the remaining `deb`/`rpm` text in
+  `packaging/bootstrap.conf.example`, `deploy/cloud-init/fluxvm.yaml` (now `INSTALL_MODE=tarball`), `scripts/make-release-manifest.sh` and
+  `scripts/package-linux-pkgs.sh` (comments only); a "Runner prerequisites" section in `docs/DEVOPS.md` and a CONTRIBUTING pointer
+  (`scripts/ci-install-apt-deps.sh` and the packages it checks, `zyvor-build-c` to `-f` refusing `sudo apt-get`, `PATH`/`CARGO_HOME`/
+  `RUSTUP_HOME` through `sudo`, the `has()` helper in `scripts/test-microvm.sh`); the mTLS identity rule in `docs/operations.md` and
+  `docs/host-hardening.md`. The Homebrew formula is at 0.4.21 (#740).
 - **Releases are tarball-only.** The release workflow no longer builds, verifies or attaches `.deb` and `.rpm` packages, and
   `fluxvm-bootstrap.sh` defaults to tarball mode. Releases up to 0.4.21 carry the packages. The packaging scripts stay in the tree.
 - Docs: brought in line with 0.4.21 and the tarball-only releases. `docs/linux-package.md` (tarball install steps instead of the

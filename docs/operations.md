@@ -300,7 +300,7 @@ rate_limit_burst = 40
 ```
 
 Keyed by the same actor identity the audit log already attributes a request to — a static token's
-`name`, an OIDC subject, an mTLS client-cert CN, or `"anonymous-admin"` on an unauthenticated
+`name`, an OIDC subject, an mTLS client-cert CN (taken from the verified peer certificate, not from request headers; see [auth-oidc-mtls.md](auth-oidc-mtls.md)), or `"anonymous-admin"` on an unauthenticated
 loopback deployment with no credentials configured at all — so a caller's bucket tracks the identity
 already established by `auth_middleware`, not raw connection volume; two callers sharing one token
 share one bucket by design, the same way the audit log already attributes them as one actor. Runs

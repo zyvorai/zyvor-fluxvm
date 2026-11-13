@@ -74,7 +74,9 @@ if [[ $PROMOTE -eq 1 ]]; then
 else
 rm -rf "$REL"; mkdir -p "$REL"
 
-# Artifacts: fluxvm-<ver>-linux-<arch>.tar.gz and fluxvm_<ver>_<amd64|arm64>.deb and fluxvm-<ver>-1.<x86_64|aarch64>.rpm, each with its sha256.
+# Artifacts: fluxvm-<ver>-linux-<arch>.tar.gz, each with its sha256. Releases after 0.4.21 ship tarballs only; a
+# fluxvm_<ver>_<amd64|arm64>.deb or fluxvm-<ver>-1.<x86_64|aarch64>.rpm is still listed when one is present in the
+# artifacts directory (releases up to 0.4.21 carried them).
 arts='{}'
 add() { # ARCH KIND FILE
   cp "$3" "$REL/"

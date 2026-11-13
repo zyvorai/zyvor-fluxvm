@@ -13,7 +13,7 @@ write_files:
     content: |
       MIRROR_URL=https://mirror.example.com/fluxvm        # CHANGE
       CHANNEL=stable
-      INSTALL_MODE=deb
+      INSTALL_MODE=tarball   # releases after 0.4.21 have no .deb/.rpm
   - path: /etc/fluxvm/release.pub
     permissions: "0644"
     content: |
