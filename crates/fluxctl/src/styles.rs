@@ -179,6 +179,10 @@ pub fn after_help() -> String {
         (
             "🛡️  Network Policy:",
             &[
+                (
+                    "what-if",
+                    "Offline: would this connection be allowed? What does a policy change flip?",
+                ),
                 ("group", "Security groups for the VM-edge dataplane"),
                 ("cnp", "CNP documents compiled onto security groups"),
                 ("identity", "Reserved + group numeric identities"),

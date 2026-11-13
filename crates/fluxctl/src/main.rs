@@ -78,6 +78,7 @@ mod stack_fleet;
 mod status;
 mod styles;
 mod vz_doctor;
+mod whatif;
 
 #[derive(Parser)]
 #[command(
@@ -1721,6 +1722,11 @@ enum Command {
         #[command(subcommand)]
         command: PoolCommand,
     },
+    #[command(next_help_heading = "Network Policy")]
+    /// Offline policy simulator: would this connection be allowed and which rule decides? `--against NEW` lists the
+    /// connections a policy change would flip. Reads JSON files, needs no daemon or privileges; exits 1 when a policy
+    /// has an error (a malformed CIDR or port rule).
+    WhatIf(whatif::WhatIfArgs),
     #[command(next_help_heading = "Network Policy")]
     /// Per-VM network policy and dataplane introspection
     /// (`/v1/vms/{id}/network/*`). Distinct from `group`/`cnp`/`dataplane`,
@@ -5868,6 +5874,9 @@ async fn main() -> Result<()> {
         }
         return Ok(());
     }
+    if let Command::WhatIf(args) = &cli.command {
+        std::process::exit(whatif::run(args)?);
+    }
     if let Command::VsockProxy { socket, port } = &cli.command {
         return fluxvm_apple::ssh::vsock_proxy(socket, *port);
     }
@@ -6223,6 +6232,7 @@ async fn main() -> Result<()> {
         | Command::Readyz
         | Command::Metrics { .. }
         | Command::Completions { .. }
+        | Command::WhatIf(_)
         | Command::VsockProxy { .. }
         | Command::ImportCompose { .. }
         | Command::Service { .. }
@@ -10399,6 +10409,17 @@ mod backlog_tier1_cli_tests {
         assert!(matches!(
             cli(&["completions", "zsh"]).command,
             Command::Completions { .. }
+        ));
+        assert!(matches!(
+            cli(&[
+                "what-if",
+                "p.json",
+                "--probe",
+                "tcp://10.0.0.1:443",
+                "--auto"
+            ])
+            .command,
+            Command::WhatIf(_)
         ));
     }
 

@@ -81,3 +81,44 @@ python3 scripts/test-production-dataplane.py
 sudo -E ./scripts/test-security-groups-e2e.sh
 sudo -E ./scripts/test-production-dataplane-e2e.sh
 ```
+
+## What-if: simulate a policy offline
+
+`fluxctl what-if` answers "would this connection be allowed, and which rule decides?" and "what changes if I replace this policy?"
+from JSON files. It needs no daemon, VM, root or eBPF, so it works in review and CI.
+
+```bash
+# the policy as stored for a VM (or the body you would POST to `network set-policy`)
+fluxctl network effective $VM > current.json
+
+# current.json: {"allow_cidrs": ["10.0.0.0/8"], "allow_ports": ["tcp/443"]}
+fluxctl what-if current.json --probe tcp://10.1.2.3:443 --probe tcp://10.1.2.3:22 --probe udp://8.8.8.8:53
+# ALLOW tcp://10.1.2.3:443  matches allow_cidrs and allow_ports
+# DROP  tcp://10.1.2.3:22  tcp/22 matches no allow_ports entry
+# DROP  udp://8.8.8.8:53  destination matches no allow_cidrs entry
+
+# what would break if I tighten the allow list from 10.0.0.0/8 to 10.0.0.0/16?
+# (--auto adds the first and last address of every CIDR of both policies, each with the allowed ports,
+# plus a few well-known addresses)
+fluxctl what-if current.json --against proposed.json --probe tcp://10.0.1.1:80 --probe tcp://10.5.1.1:80
+# 2 probes, 1 change verdict, 0 change only the deciding rule
+# ALLOW -> DROP  tcp://10.5.1.1:80  (CHANGED)
+#     before: matches allow_cidrs
+#     after:  destination matches no allow_cidrs entry
+```
+
+The file may be a bare policy or the JSON `network effective` returns (the policy is read from its `effective` key). Findings
+are printed first: malformed CIDRs and port rules are errors (exit 1), and the linter flags allow entries that a `deny_cidrs`
+entry already covers, `allow_ports` that `deny_udp` makes unreachable, `audit_mode` (nothing is dropped), wildcard FQDNs (skipped when
+applied), duplicate entries and unknown keys (a misspelled field leaves the default, which allows everything). `--json` prints the
+same data for tooling.
+
+**Decision order**, as the TC program applies it to a new flow: `deny_udp` (UDP/SCTP) -> `deny_cidrs` -> IPv4 `allow_icmp` ->
+no allow list: `default_allow` -> `allow_cidrs` AND `allow_ports` -> `audit_mode` forwards what would drop. One difference is
+reproduced on purpose: for IPv6 the ICMPv6 allowance applies only after the default-deny check, so with no allow list and
+`default_allow = false`, `allow_icmp` lets IPv4 ICMP through but still drops ICMPv6 (the linter warns about it).
+
+**Not modelled** (each probe lists what applies): conntrack (established flows skip all checks), rate ceilings, the Pod policy
+and the L7 edge contract, DHCP/NDP exemptions, and FQDN resolution (names become `allow_cidrs` entries when the policy is
+applied, so a simulation of the stored policy sees the addresses, not the names). It evaluates the effective policy you give it;
+it does not merge groups.
