@@ -226,7 +226,7 @@ git clone https://github.com/zyvorai/guestkit        # the directory must be nam
 git -C guestkit checkout "$(cat zyvor-fluxvm/packaging/guestkit.ref)"   # the tag the release is built with (v1.2.9 for 0.4.21)
 cd zyvor-fluxvm
 # macOS: xcode-select --install && brew install hivex
-# Linux: sudo apt-get install -y libsystemd-dev libhivex-dev clang llvm libbpf-dev linux-libc-dev
+# Linux (the same packages CI installs with scripts/ci-install-apt-deps.sh): sudo apt-get install -y libsystemd-dev libhivex-dev clang llvm libbpf-dev linux-libc-dev
 cargo build --release -p fluxctl
 target/release/fluxctl --version
 ```

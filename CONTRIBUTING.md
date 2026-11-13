@@ -27,6 +27,9 @@ make preflight
   [docs/tutorials/production/](docs/tutorials/production/), and
   `examples/create-vm-prod.json` when the create shape changes
 - Tests: Rust `#[cfg(test)]` and/or `scripts/test-*.py`
+- CI on the self-hosted `zyvor-build` runners: install apt packages with `scripts/ci-install-apt-deps.sh` (some runners refuse `sudo apt-get`),
+  pass `PATH`/`CARGO_HOME`/`RUSTUP_HOME` through `sudo`, and avoid `echo | grep -q` under `pipefail`; see
+  [docs/DEVOPS.md](docs/DEVOPS.md#runner-prerequisites-zyvor-build-self-hosted-runners)
 - Do not write Cilium-private BPF maps
 - Do not expand `extra_args` as a tenant feature
 

@@ -42,7 +42,9 @@ Not covered:
 - Local `fluxctl` (no `--server`) is not gated, because it already needs host
   access to the state directory.
 - Only static tokens are matched. For OIDC and mTLS identities, enforce MFA at
-  the IdP or proxy.
+  the IdP or proxy. An mTLS identity is the verified client certificate (CN, `OU=fluxvm-role=admin`,
+  `OU=fluxvm-tenant=<name>`); `X-Client-Cert-*` headers count only with `tls.trust_proxy_headers = true`, which is
+  safe only behind a proxy that strips client-supplied copies.
 
 Break-glass: with host root, remove the `[[auth.mfa]]` rule (or fix the secret
 file) and restart the daemon.

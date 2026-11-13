@@ -33,6 +33,25 @@ Portable gates (GitHub-hosted runners, no nested KVM):
 | [`.github/workflows/secure-containers.yml`](../.github/workflows/secure-containers.yml) | path-filtered | SC crate fmt/unit/release build |
 | [`.github/workflows/secure-containers-coverage.yml`](../.github/workflows/secure-containers-coverage.yml) | path-filtered | use-case matrix SoT lint + SC/NP/eBPF portable coverage |
 
+### Runner prerequisites (`zyvor-build` self-hosted runners)
+
+`ci.yml` `build-and-test` runs `scripts/ci-install-apt-deps.sh libsystemd-dev libhivex-dev clang llvm libbpf-dev linux-libc-dev`.
+The script checks `dpkg-query` first and calls `apt-get` (through `sudo -n` unless root) only for packages that are missing.
+The runners are not uniform: `zyvor-build-a`/`-b` allow `sudo apt-get`, `zyvor-build-c` to `-f` refuse it. So on c to f those
+packages must be preinstalled (as root: `apt-get update && apt-get install -y <packages>`), or a sudoers rule added, for example
+`/etc/sudoers.d/ghrunner-apt` with `<runner user> ALL=(root) NOPASSWD: /usr/bin/apt-get`. A runner that lacks them fails the job with
+that remediation in the log instead of a bare sudo refusal. `scripts/test-ci-install-apt-deps.sh` (run by `devops-gates.yml`) tests the
+script. Do not add a bare `sudo apt-get install` to a workflow that can land on those runners.
+
+Privileged workflows (`flight-recorder.yml`, `memory-boot-profiler.yml`, `topology-intelligence.yml`) run their host tests under
+`sudo`, which resets `PATH`, `CARGO_HOME` and `HOME` and would hide the runner user's rustup toolchain. They pass
+`PATH`, `CARGO_HOME` and `RUSTUP_HOME` through: `sudo env "PATH=$PATH" "CARGO_HOME=${CARGO_HOME:-$HOME/.cargo}" "RUSTUP_HOME=${RUSTUP_HOME:-$HOME/.rustup}" ./scripts/test-....sh`.
+
+Shell tests: do not write `echo "$out" | grep -q X` under `set -o pipefail`. `grep -q` exits at the first match and the writer then
+dies with SIGPIPE ("echo: write error: Broken pipe"), a race that failed CI on loaded runners. Match against a here-string, as the
+`has()` helper in `scripts/test-microvm.sh` does (`has() { grep -Eq -- "$1" <<<"$out"; }`), and use `$(...)` instead of
+`cmd | grep -q` the way `ci-install-apt-deps.sh` does.
+
 Live KVM / privileged BPF / multi-node stays on **self-hosted** runners and stays **off** until the matching repo variable is set (Settings → Variables).
 
 ### Repo variables (`vars.*`)

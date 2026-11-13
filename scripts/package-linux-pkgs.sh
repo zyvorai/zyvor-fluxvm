@@ -2,6 +2,9 @@
 # Copyright 2026 Zyvor AI Labs · https://zyvor.dev
 # SPDX-License-Identifier: Apache-2.0
 #
+# Not run by the release workflow since #739 (releases after 0.4.21 are tarball-only); kept for mirrors that still want
+# packages and exercised by packaging-checks.yml.
+#
 # Builds the .deb or the .rpm from the tree scripts/package-linux.sh stages, so the tarball and
 # the packages hold the same files.
 #
