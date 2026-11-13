@@ -10,6 +10,7 @@
 use serde::{Deserialize, Serialize};
 
 mod exec_policy;
+pub mod exec_preflight;
 pub use exec_policy::{
     ExecEnforcement, ExecIsolation, ExecPolicy, ExecRunAs, ExecSeccompMode, ExecTcpRule,
 };

@@ -34,6 +34,7 @@ mod contexts;
 mod create;
 mod docker_host;
 mod doctor;
+mod exec_policy_check;
 mod fleet_cli;
 mod fleet_client;
 mod guard_cmd;
@@ -1735,6 +1736,12 @@ enum Command {
     /// connections a policy change would flip. Reads JSON files, needs no daemon or privileges; exits 1 when a policy
     /// has an error (a malformed CIDR or port rule).
     WhatIf(whatif::WhatIfArgs),
+    /// Offline checks of a per-exec confinement policy (`exec-policy check`): will the command start, and what would a
+    /// guest with a given Landlock ABI enforce or refuse?
+    ExecPolicy {
+        #[command(subcommand)]
+        command: exec_policy_check::ExecPolicyCommand,
+    },
     #[command(next_help_heading = "Network Policy")]
     /// Per-VM network policy and dataplane introspection
     /// (`/v1/vms/{id}/network/*`). Distinct from `group`/`cnp`/`dataplane`,
@@ -5886,6 +5893,8 @@ async fn main() -> Result<()> {
         std::process::exit(whatif::run(args)?);
     if let Command::Config { command } = &cli.command {
         std::process::exit(config_check::run(command, cli.config.as_deref())?);
+    if let Command::ExecPolicy { command } = &cli.command {
+        std::process::exit(exec_policy_check::run(command)?);
     }
     if let Command::VsockProxy { socket, port } = &cli.command {
         return fluxvm_apple::ssh::vsock_proxy(socket, *port);
@@ -6244,6 +6253,7 @@ async fn main() -> Result<()> {
         | Command::Completions { .. }
         | Command::WhatIf(_)
         | Command::Config { .. }
+        | Command::ExecPolicy { .. }
         | Command::VsockProxy { .. }
         | Command::ImportCompose { .. }
         | Command::Service { .. }
@@ -10433,6 +10443,8 @@ mod backlog_tier1_cli_tests {
             Command::WhatIf(_)
             cli(&["config", "check", "fluxvm.toml", "--strict", "--offline"]).command,
             Command::Config { .. }
+            cli(&["exec-policy", "check", "p.json", "--abi", "4"]).command,
+            Command::ExecPolicy { .. }
         ));
     }
 
