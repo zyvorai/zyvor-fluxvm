@@ -160,9 +160,7 @@ pub fn lint(p: &ExecPolicy, raw: Option<&Value>) -> Vec<Finding> {
             let msg = if k == "max_abi" {
                 "ignored: the guest agent always uses the kernel's real Landlock ABI".to_owned()
             } else {
-                format!(
-                    "unknown field, ignored: a misspelling here silently drops the setting (an omitted field takes the safe default, but an intended allowance is lost)"
-                )
+                "unknown field, ignored: a misspelling here silently drops the setting (an omitted field takes the safe default, but an intended allowance is lost)".to_owned()
             };
             out.push(f(Warning, &k, msg));
         }
