@@ -372,7 +372,7 @@ curl -sX POST $URL/v1/agents/sessions -H "authorization: Bearer $ADMIN" -H 'cont
 }'
 ```
 
-(There is no CLI flag for `ask` yet; use REST or the MCP `policy` object.)
+(CLI: `fluxctl agent run --cmd-ask 'deploy *'` (also MCP `ask_commands`); REST `policy.process.ask` or the MCP `policy` object.)
 
 ### 6.2 What the agent sees
 
