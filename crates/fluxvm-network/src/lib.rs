@@ -25,6 +25,7 @@ pub mod netns_scope;
 pub mod packetflow;
 pub mod peer_policy;
 pub mod pod_identity;
+pub mod policy_sim;
 pub mod qemu_cgroup;
 pub mod qemu_egress;
 pub mod service;

@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- **`fluxctl what-if`: offline network-policy simulator.** `fluxctl what-if policy.json --probe tcp://10.0.0.5:443` says whether a hypothetical
+  connection would be allowed and which rule decides (deny_udp, deny_cidrs, allow_icmp, default_allow, allow_cidrs/allow_ports, audit_mode), following
+  the order of the TC program. `--against new.json` (with `--probe` and/or `--auto`, which tests the edges of every CIDR) lists the connections a policy
+  change flips. It also lints the policy (malformed CIDRs and port rules exit 1; dead allow entries, `audit_mode`, unknown keys, wildcard FQDNs warn).
+  New module `fluxvm_network::policy_sim`; reads files only, needs no daemon, root or eBPF. Additive: nothing existing changes. See `docs/network-policy.md`.
+
 - CI: every workflow that ran a bare `sudo apt-get update && sudo apt-get install ...` (35 call sites in 31 workflows, including `flight-recorder`, `topology-intelligence`, `memory-boot-profiler` and the second job of `ci.yml`) now goes through `scripts/ci-install-apt-deps.sh`, so the `zyvor-build-c` to `-f` runners that refuse `sudo apt-get` pass when the packages are already present and otherwise fail with the fix. The privileged host steps of `quiclb-smartnic`, `scx-vm-scheduler` and `xdp-tcp-intelligence` now pass `PATH`, `CARGO_HOME` and `RUSTUP_HOME` through `sudo` like #746. `topology-intelligence` installs `util-linux` directly (there is no `taskset` package).
 - **Tarball-only cleanup.** Removed what #739 left behind: the `deb`, `rpm`, `bootstrap-pkg`, `systemd-deb` and `systemd-rpm` jobs of
   `packaging-checks.yml`, `scripts/package-linux-pkgs.sh`, `packaging/nfpm.yaml`, `packaging/deb/`, `scripts/test-deb.sh`,
