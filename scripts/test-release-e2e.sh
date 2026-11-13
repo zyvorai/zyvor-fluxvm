@@ -5,14 +5,14 @@
 # Runs every release/fleet suite in one go, locally or on a Linux host over ssh, and prints one line per suite.
 #   scripts/test-release-e2e.sh                         on this machine (Linux needed for most suites)
 #   scripts/test-release-e2e.sh --host sus@212.8.248.187 [--suite NAME ...] [--keep]
-# Suites: static packages bootstrap-tarball bootstrap-deb bootstrap-rpm systemd-deb image-k8s ha enroll-invariants enroll-security
+# Suites: static bootstrap-tarball image-k8s ha enroll-invariants enroll-security
 #         central-node agent-central-api agent-central-ha agent-tunnel agents scale   (default: all of these; the two agent-central ones also run on macOS)
 #         console-ui  (opt-in: headless Chrome via puppeteer)
 #         mutation  (opt-in, slow: breaks each enrollment guard, expects a failure)
 #         guest-exec-policy agent-central-vms  (opt-in: root + KVM, builds a guest-agent image; the host's fluxctl and a base image)
 # scripts/e2e/deploy-remote.sh and scripts/e2e/fleet-two-host.sh run from the control machine, not through this runner.
 # On a host it rsyncs the tree to ~/e2e-work/tree, builds fluxvm-agent once (release) and removes only what it created.
-# Needs nfpm and docker for the package suites, curl, jq, openssl >= 3, python3. Exit status = failed suites.
+# Needs docker for the image-k8s suite, curl, jq, openssl >= 3, python3. Exit status = failed suites.
 set -uo pipefail
 cd "$(dirname "$0")/.." || exit 1
 HOST=""; SUITES=(); KEEP=0
@@ -25,7 +25,7 @@ while [[ $# -gt 0 ]]; do
     *) echo "unknown argument $1" >&2; exit 2 ;;
   esac
 done
-ALL=(static packages bootstrap-tarball bootstrap-deb bootstrap-rpm systemd-deb image-k8s enroll-invariants enroll-security central-node agent-central-api agent-central-ha agent-tunnel agents scale)
+ALL=(static bootstrap-tarball image-k8s enroll-invariants enroll-security central-node agent-central-api agent-central-ha agent-tunnel agents scale)
 [[ ${#SUITES[@]} -gt 0 ]] || SUITES=("${ALL[@]}")
 
 if [[ -n "$HOST" ]]; then
@@ -65,14 +65,13 @@ static() {
   local rc=0
   if rustfmt --version >/dev/null 2>&1; then rustfmt --edition 2024 --check crates/fluxvm-agent/src/*.rs crates/fluxctl/src/*.rs || rc=1
   else echo "static: rustfmt is not installed here; skipped"; fi
-  if command -v shellcheck >/dev/null; then shellcheck scripts/fluxvm-bootstrap.sh scripts/make-release-manifest.sh scripts/package-linux-pkgs.sh \
-      scripts/test-bootstrap.sh scripts/e2e/*.sh scripts/test-release-e2e.sh scripts/deploy-remote.sh packaging/deb/*.sh || rc=1
+  if command -v shellcheck >/dev/null; then shellcheck scripts/fluxvm-bootstrap.sh scripts/make-release-manifest.sh \
+      scripts/test-bootstrap.sh scripts/e2e/*.sh scripts/test-release-e2e.sh scripts/deploy-remote.sh || rc=1
   else echo "static: shellcheck is not installed here; skipped"; fi
   for t in test-package-manifest test-vendor-lock test-check-glibc-floor test-check-guestkit-pin verify-systemd-units; do "scripts/$t.sh" || rc=1; done
   need_agent && CARGO_INCREMENTAL=0 cargo test -p fluxvm-agent --lib || rc=1
   return $rc
 }
-packages() { scripts/test-deb.sh && scripts/test-rpm.sh; }
 # Leader election, fencing and takeover against a real Redis (the ignored tests in ha.rs), in a throwaway container.
 ha() {
   local port=$((30000 + RANDOM % 20000)) c rc
@@ -91,14 +90,10 @@ fails=0
 for s in "${SUITES[@]}"; do
   case "$s" in
     static) run static static ;;
-    packages) run packages packages ;;
     bootstrap-tarball) run bootstrap-tarball scripts/test-bootstrap.sh ;;
-    bootstrap-deb) run bootstrap-deb scripts/e2e/bootstrap-pkg.sh deb ;;
-    bootstrap-rpm) run bootstrap-rpm scripts/e2e/bootstrap-pkg.sh rpm ;;
     enroll-invariants) need_agent; run enroll-invariants scripts/test-enroll-invariants.sh ;;
     enroll-security) need_agent; run enroll-security scripts/e2e/enroll-security.sh ;;
     central-node) need_agent; run central-node scripts/e2e/central-node.sh ;;
-    systemd-deb) run systemd-deb scripts/e2e/systemd-deb.sh ;;
     image-k8s) run image-k8s scripts/e2e/image-k8s.sh ;;
     agents) run agents agents ;;
     mutation) run mutation scripts/e2e/mutation-security.sh ;;

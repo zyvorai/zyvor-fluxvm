@@ -74,9 +74,8 @@ if [[ $PROMOTE -eq 1 ]]; then
 else
 rm -rf "$REL"; mkdir -p "$REL"
 
-# Artifacts: fluxvm-<ver>-linux-<arch>.tar.gz, each with its sha256. Releases after 0.4.21 ship tarballs only; a
-# fluxvm_<ver>_<amd64|arm64>.deb or fluxvm-<ver>-1.<x86_64|aarch64>.rpm is still listed when one is present in the
-# artifacts directory (releases up to 0.4.21 carried them).
+# Artifacts: fluxvm-<ver>-linux-<arch>.tar.gz, each with its sha256. Releases ship tarballs only (since 0.4.21); .deb and .rpm
+# files in the artifacts directory are ignored.
 arts='{}'
 add() { # ARCH KIND FILE
   cp "$3" "$REL/"
@@ -87,10 +86,6 @@ add() { # ARCH KIND FILE
 try() { if [[ -f "$3" ]]; then add "$1" "$2" "$3"; n=$((n + 1)); fi; }
 try x86_64 tarball "$ARTIFACTS/fluxvm-$VERSION-linux-x86_64.tar.gz"
 try aarch64 tarball "$ARTIFACTS/fluxvm-$VERSION-linux-aarch64.tar.gz"
-try x86_64 deb "$ARTIFACTS/fluxvm_${VERSION}_amd64.deb"
-try aarch64 deb "$ARTIFACTS/fluxvm_${VERSION}_arm64.deb"
-try x86_64 rpm "$ARTIFACTS/fluxvm-${VERSION}-1.x86_64.rpm"
-try aarch64 rpm "$ARTIFACTS/fluxvm-${VERSION}-1.aarch64.rpm"
 [[ $n -gt 0 ]] || die "no fluxvm $VERSION packages in $ARTIFACTS"
 if [[ -n "$SBOM" ]]; then [[ -f "$SBOM" ]] || die "--sbom file missing"; cp "$SBOM" "$REL/sbom.cdx.json"; fi
 

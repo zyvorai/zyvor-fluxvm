@@ -18,11 +18,11 @@
 #   MIRROR_URL         base URL of the mirror (required)         CHANNEL     stable (default)
 #   PUBKEY             release public key (default /etc/fluxvm/release.pub, then /usr/share/fluxvm/release.pub)
 #   NODE_ID            default: /etc/machine-id                   LABELS      space separated key=value, for rollout rules
-#   INSTALL_MODE       deb | rpm | tarball (default: tarball; releases no longer ship .deb or .rpm)
+#   INSTALL_MODE       tarball (the only mode; releases ship tarballs, and deb/rpm are refused with an explanation)
 #   FLUXVM_AUTO_UPGRADE=0   check and report only; never install
 #   JITTER_MAX         seconds of start-up delay, stable per node plus random (default 300)
 # Testing: FLUXVM_ROOT prefixes every path the script writes (and disables systemctl and root checks).
-# Needs bash, curl, openssl >= 3.0, jq, sha256sum, flock, and dpkg/apt-get for deb mode, rpm and dnf (or yum) for rpm mode, or tar for tarball mode.
+# Needs bash, curl, openssl >= 3.0, jq, sha256sum, flock and tar.
 set -uo pipefail
 
 ROOT="${FLUXVM_ROOT:-}"
@@ -43,12 +43,14 @@ HEALTH_WAIT="${HEALTH_WAIT:-60}"
 if [[ -z "${PUBKEY:-}" ]]; then
   PUBKEY="$ROOT/etc/fluxvm/release.pub"; [[ -r "$PUBKEY" ]] || PUBKEY="$ROOT/usr/share/fluxvm/release.pub"
 fi
-if [[ -z "${INSTALL_MODE:-}" ]]; then
-  INSTALL_MODE=tarball
+INSTALL_MODE="${INSTALL_MODE:-tarball}"
+if [[ "$INSTALL_MODE" != tarball ]]; then
+  echo "fluxvm-bootstrap: INSTALL_MODE=$INSTALL_MODE is no longer supported: releases ship tarballs only (since 0.4.21). Remove INSTALL_MODE (the default is tarball)." >&2
+  exit 1
 fi
 
-# A tarball install links the binaries into /usr/local/bin; the packages put them in /usr/bin.
-if [[ "$INSTALL_MODE" == tarball ]]; then BIN_DIR="$ROOT/usr/local/bin"; else BIN_DIR="$ROOT/usr/bin"; fi
+# A tarball install links the binaries into /usr/local/bin.
+BIN_DIR="$ROOT/usr/local/bin"
 
 log() { echo "fluxvm-bootstrap: $*" >&2; }
 die() { log "$*"; set_status error "$*"; exit 1; }
@@ -77,9 +79,7 @@ set_status() { # STATE MESSAGE
 }
 
 current_version() {
-  if [[ "$INSTALL_MODE" == deb ]]; then dpkg-query -W -f='${Version}' fluxvm 2>/dev/null
-  elif [[ "$INSTALL_MODE" == rpm ]]; then rpm -q --qf '%{VERSION}' fluxvm 2>/dev/null | grep -v 'not installed' || true
-  else basename "$(readlink "$OPT/current" 2>/dev/null)" 2>/dev/null | grep -v '^\.$' || true; fi
+  basename "$(readlink "$OPT/current" 2>/dev/null)" 2>/dev/null | grep -v '^\.$' || true
 }
 
 # ------------------------------------------------------------------------------------------------- fetching
@@ -188,23 +188,14 @@ install_tarball() { # FILE VERSION
   fi
   if [[ -z "$ROOT" && -d "$OPT/current/lib/bpf" ]]; then mkdir -p /usr/lib/fluxvm && ln -sfn "$OPT/current/lib/bpf" /usr/lib/fluxvm/bpf; fi
 }
-install_deb() { # FILE
-  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq -o Dpkg::Options::=--force-confold -o Dpkg::Options::=--force-confdef "$1" >"$STATE/install.log" 2>&1
-}
-install_rpm() { # FILE [--downgrade]
-  # dnf resolves the dependencies and keeps edited config files (the package marks them noreplace).
-  if [[ "${2:-}" == --downgrade ]]; then rpm -Uvh --oldpackage --replacepkgs "$1" >"$STATE/install.log" 2>&1
-  elif command -v dnf >/dev/null 2>&1; then dnf install -y -q "$1" >"$STATE/install.log" 2>&1
-  else yum install -y -q "$1" >"$STATE/install.log" 2>&1; fi
-}
 install_artifact() { # KIND FILE VERSION
-  case "$1" in deb) install_deb "$2" ;; rpm) install_rpm "$2" ;; *) install_tarball "$2" "$3" ;; esac
+  install_tarball "$2" "$3"
 }
 
 # Keep the newest two packages (the one we run and the one to roll back to) and the manifests of the versions still cached.
 prune_cache() {
   # shellcheck disable=SC2012
-  ls -t "$STATE/cache/"*.deb "$STATE/cache/"*.rpm "$STATE/cache/"*.tar.gz 2>/dev/null | tail -n +3 | xargs -r rm -f
+  ls -t "$STATE/cache/"*.tar.gz 2>/dev/null | tail -n +3 | xargs -r rm -f
   local m v
   for m in "$STATE/cache/"manifest-*.json "$STATE/cache/"manifest-*.json.sig; do
     [[ -e "$m" ]] || continue
@@ -222,21 +213,13 @@ preflight() { # SIZE
 }
 
 do_rollback() { # reason
-  local prev kind v
+  local v
   [[ -f "$STATE/previous" ]] || { log "no previous version to go back to"; return 1; }
-  IFS=' ' read -r kind v prev < "$STATE/previous"
+  IFS=' ' read -r _ v _ < "$STATE/previous"
   log "rolling back to $v"
-  if [[ "$kind" == rpm ]]; then
-    [[ -f "$prev" ]] || { log "the previous package $prev is gone"; return 1; }
-    install_rpm "$prev" --downgrade || return 1
-  elif [[ "$kind" == deb ]]; then
-    [[ -f "$prev" ]] || { log "the previous package $prev is gone"; return 1; }
-    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --allow-downgrades -o Dpkg::Options::=--force-confold "$prev" >"$STATE/rollback.log" 2>&1 || return 1
-  else
-    [[ -d "$OPT/$v" ]] || { log "the previous tree $OPT/$v is gone"; return 1; }
-    flip_current "$v"
-    local b; for b in "$OPT/current/bin/"*; do ln -sfn "$OPT/current/bin/$(basename "$b")" "$BIN_DIR/$(basename "$b")"; done
-  fi
+  [[ -d "$OPT/$v" ]] || { log "the previous tree $OPT/$v is gone"; return 1; }
+  flip_current "$v"
+  local b; for b in "$OPT/current/bin/"*; do ln -sfn "$OPT/current/bin/$(basename "$b")" "$BIN_DIR/$(basename "$b")"; done
   service_restart
 }
 
@@ -306,7 +289,7 @@ cmd_install() { # [--dry-run] [--force]
   verify_sig "$mf" || { rm -f "$mf" "$mf.sig"; die "BAD signature on the release manifest"; }
   [[ "$(sha256 "$mf")" == "$(jq -r .manifest_sha256 <<<"$cj")" ]] || { rm -f "$mf"; die "the release manifest does not match the hash in the channel file"; }
   local a kind f h size
-  a="$(arch)"; kind=tarball; [[ "$INSTALL_MODE" == deb || "$INSTALL_MODE" == rpm ]] && kind="$INSTALL_MODE"
+  a="$(arch)"; kind=tarball
   f="$(jq -r --arg a "$a" --arg k "$kind" '.artifacts[$a][$k].file // empty' "$mf")"
   h="$(jq -r --arg a "$a" --arg k "$kind" '.artifacts[$a][$k].sha256 // empty' "$mf")"
   size="$(jq -r --arg a "$a" --arg k "$kind" '.artifacts[$a][$k].size // 0' "$mf")"
@@ -323,13 +306,7 @@ cmd_install() { # [--dry-run] [--force]
 
   # Keep the artifact we are leaving, so a rollback needs no network.
   if [[ -n "$cur" ]]; then
-    if [[ "$kind" == deb ]]; then
-      local pf; pf="$(find "$STATE/cache" -name "fluxvm_${cur}_*.deb" -print -quit)"
-      [[ -n "$pf" ]] && echo "deb $cur $pf" > "$STATE/previous.new"
-    elif [[ "$kind" == rpm ]]; then
-      local pf; pf="$(find "$STATE/cache" -name "fluxvm-${cur}-*.rpm" -print -quit)"
-      [[ -n "$pf" ]] && echo "rpm $cur $pf" > "$STATE/previous.new"
-    else echo "tarball $cur -" > "$STATE/previous.new"; fi
+    echo "tarball $cur -" > "$STATE/previous.new"
     # Remember the pointer we are replacing: when this release fails and we land back on $cur, it is still the right one.
     rm -f "$STATE/previous.prev"; [[ -f "$STATE/previous" ]] && cp "$STATE/previous" "$STATE/previous.prev"
     [[ -f "$STATE/previous.new" ]] && mv "$STATE/previous.new" "$STATE/previous"
@@ -363,8 +340,6 @@ cmd_pin() { local v="${1:-$(current_version)}"; [[ -n "$v" ]] || die "nothing in
 cmd_unpin() { rm -f "$STATE/pin"; set_status unpinned "pin removed"; }
 cmd_status() { if [[ -f "$STATE/status.json" ]]; then jq . "$STATE/status.json"; else echo '{"state":"never-run"}'; fi; }
 cmd_verify() {
-  if [[ "$INSTALL_MODE" == deb ]]; then dpkg -V fluxvm; return $?; fi
-  if [[ "$INSTALL_MODE" == rpm ]]; then rpm -V fluxvm; return $?; fi
   [[ -f "$OPT/current/MANIFEST.sha256" ]] || die "no MANIFEST.sha256 in $OPT/current"
   ( cd "$OPT/current" && sha256sum -c --quiet MANIFEST.sha256 ) && log "installed files match the package manifest"
 }

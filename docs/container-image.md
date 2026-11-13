@@ -15,7 +15,7 @@ installs the runtime packages on top. Two consequences:
   never seen. The runtime base is now `ubuntu:24.04` (glibc 2.39), which is never older than the builder.
 - **The image runs the released bytes.** What was tested and signed in the tarball is what is in the image.
 
-Runtime packages mirror `packaging/nfpm.yaml`: `libhivex0`, `libsystemd0`, `qemu-system-x86` (amd64) or `qemu-system-arm`
+Runtime packages: `libhivex0`, `libsystemd0`, `qemu-system-x86` (amd64) or `qemu-system-arm`
 (arm64), `qemu-utils`, `cloud-image-utils`, `iproute2`, `dnsmasq-base`, `nftables`, `bpftool` (linked from `linux-tools-generic`; Ubuntu 24.04 has no `bpftool` package), `util-linux`. There is no
 `python3`, `curl`, or build toolchain, and nothing is downloaded at build time except Ubuntu packages.
 
