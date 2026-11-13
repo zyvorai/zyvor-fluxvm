@@ -72,7 +72,7 @@ jobs:
           path: guestkit
       - uses: dtolnay/rust-toolchain@stable
       - name: Install system dependencies
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq libsystemd-dev libhivex-dev clang llvm libbpf-dev linux-libc-dev e2fsprogs
+        run: fluxvm/scripts/ci-install-apt-deps.sh libsystemd-dev libhivex-dev clang llvm libbpf-dev linux-libc-dev e2fsprogs
       - name: Enable KVM for the runner
         env:
           KVM_OPTIONAL: ${{ vars.FLUXVM_CI_KVM_OPTIONAL }}
@@ -173,7 +173,7 @@ jobs:
         with:
           targets: x86_64-unknown-linux-musl
       - name: Install system dependencies
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq libsystemd-dev libhivex-dev clang llvm libbpf-dev linux-libc-dev shellcheck
+        run: fluxvm/scripts/ci-install-apt-deps.sh libsystemd-dev libhivex-dev clang llvm libbpf-dev linux-libc-dev shellcheck
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: fluxvm

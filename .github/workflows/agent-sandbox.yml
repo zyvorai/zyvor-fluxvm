@@ -84,7 +84,7 @@ jobs:
           path: guestkit
       - uses: dtolnay/rust-toolchain@stable
       - name: Install system dependencies
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq libsystemd-dev libhivex-dev clang llvm libbpf-dev linux-libc-dev
+        run: fluxvm/scripts/ci-install-apt-deps.sh libsystemd-dev libhivex-dev clang llvm libbpf-dev linux-libc-dev
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: fluxvm
@@ -110,7 +110,7 @@ jobs:
           path: guestkit
       - uses: dtolnay/rust-toolchain@stable
       - name: Install system dependencies
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq libsystemd-dev libhivex-dev clang llvm libbpf-dev linux-libc-dev
+        run: fluxvm/scripts/ci-install-apt-deps.sh libsystemd-dev libhivex-dev clang llvm libbpf-dev linux-libc-dev
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: fluxvm
@@ -138,7 +138,7 @@ jobs:
           path: guestkit
       - uses: dtolnay/rust-toolchain@stable
       - name: Install system dependencies
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq libsystemd-dev libhivex-dev clang llvm libbpf-dev linux-libc-dev
+        run: fluxvm/scripts/ci-install-apt-deps.sh libsystemd-dev libhivex-dev clang llvm libbpf-dev linux-libc-dev
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: fluxvm
@@ -251,7 +251,7 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install system dependencies
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq libsystemd-dev libhivex-dev clang llvm libbpf-dev linux-libc-dev
+        run: fluxvm/scripts/ci-install-apt-deps.sh libsystemd-dev libhivex-dev clang llvm libbpf-dev linux-libc-dev
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: fluxvm

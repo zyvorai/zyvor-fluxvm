@@ -41,8 +41,7 @@ jobs:
       - uses: actions/checkout@v7
       - name: Install static test dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y shellcheck iproute2 ethtool linux-tools-common linux-tools-generic
+          scripts/ci-install-apt-deps.sh shellcheck iproute2 ethtool linux-tools-common linux-tools-generic
           # Azure GH runners need the matching kernel tools package for a real bpftool binary.
           sudo apt-get install -y "linux-tools-$(uname -r)" || sudo apt-get install -y linux-tools-azure || true
           bpftool version || echo 'bpftool still stubbed for this kernel; host gates tolerate that'

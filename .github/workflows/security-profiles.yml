@@ -68,7 +68,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Install system dependencies
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq libsystemd-dev libhivex-dev clang llvm libbpf-dev linux-libc-dev
+        run: fluxvm/scripts/ci-install-apt-deps.sh libsystemd-dev libhivex-dev clang llvm libbpf-dev linux-libc-dev
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2

@@ -46,7 +46,7 @@ jobs:
           path: guestkit
       - uses: dtolnay/rust-toolchain@stable
       - name: Install build dependencies
-        run: sudo apt-get update && sudo apt-get install -y clang llvm libbpf-dev linux-tools-common linux-tools-generic pkg-config python3-yaml
+        run: fluxvm/scripts/ci-install-apt-deps.sh clang llvm libbpf-dev linux-tools-common linux-tools-generic pkg-config python3-yaml
       - name: Rust tests
         working-directory: fluxvm
         run: cargo test -p fluxvm-intelligence scx -- --nocapture
@@ -78,4 +78,5 @@ jobs:
         working-directory: fluxvm
         env:
           FLUXVM_SCX_HOST_REQUIRED: '0'
-        run: sudo -E ./scripts/test-scx-host.sh
+        # sudo resets PATH (secure_path), CARGO_HOME and HOME, so root cannot find the runner user's rustup toolchain: pass them through.
+        run: sudo -E env "PATH=$PATH" "CARGO_HOME=${CARGO_HOME:-$HOME/.cargo}" "RUSTUP_HOME=${RUSTUP_HOME:-$HOME/.rustup}" ./scripts/test-scx-host.sh
