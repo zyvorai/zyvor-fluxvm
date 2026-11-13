@@ -80,8 +80,9 @@ Compared against the feature list of a hosted microVM sandbox integration. Capab
 | Live events | Done: `GET /v1/agents/sessions/{id}/events/stream` (SSE, resumable); the TypeScript, Python and Go clients follow it and reconnect. Run end to end on a Linux host with the TypeScript, Python and Go clients (flux-vm session: create, exec, delete) |
 | Stable error codes | Done: `code` next to `error` ([api.md#errors](api.md#errors)); a few routes with their own error bodies still send none |
 | Test helper | Done for TypeScript: `@zyvorai/fluxvm/testing` (`FakeFluxVM`) |
+| AgentSession `process.ask` HITL + promote | **Scripted live:** `scripts/vz-agent-session-live-test.sh` §§8–9 and `scripts/agent-session-hitl-promote-live-test.sh`. CLI `--cmd-ask`. |
 | Framework recipe | [serverless-agent.md](serverless-agent.md), untested on a serverless platform |
-| Published boot and fork latency on Linux | Measured, not published as a benchmark. Host: 12-core Xeon E-2336, flux-vm with `fluxvm_engine = "kvm"`, 256 MiB, a 2.1 GB Ubuntu/Node rootfs (a full distro, not a minimal guest) with the current guest agent, XFS with reflinks on a loopback image. **Cold create to first command** (`bench-first-command.sh`, N=5): p50 9.8 s (about 26–32 s on ext4, where each VM copies the disk). The guest's own uptime was 8.8 s when its agent first answered, so the time is the guest's boot, not the host path. **Fork to first command** (N=5): p50 7.9 s, p95 12.8 s; the fork API itself 4.3–9.2 s per child, of which the parent snapshot is ~0.23 s and the identity reset ~3.5 s. Not near the sub-second figures other products quote: a minimal guest image and the identity reset come first. Details and the old-agent behaviour: [fork-and-restore.md](fork-and-restore.md) |
+| Published boot and fork latency on Linux | **Published** in [benchmarks/fork-latency.md](benchmarks/fork-latency.md) (Xeon E-2336 / kvm). Cold→first p50 9.8 s; fork→first p50 7.9 s. Sub-second still needs a minimal guest + cheaper identity reset. |
 
 ## Remaining (optional hardening)
 

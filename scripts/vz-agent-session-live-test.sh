@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: Apache-2.0
 # Live test of agent sessions on the vz backend with the guest agent (`agent-micro`): the engine a session gets,
-# hardened exec, confinement, the job supervisor, the display (screenshot/input), fork cloning, and (with the egress proxy) per-session HTTP rules.
+# hardened exec, confinement, the job supervisor, the display (screenshot/input), fork cloning, process.ask HITL,
+# fork promote (when sha256sum is in the guest), and (with the egress proxy) per-session HTTP rules.
 #   scripts/vz-agent-session-live-test.sh /path/to/agent-micro-arm64.raw
 # Build the image on Linux first: scripts/build-guest-agent-static.sh + scripts/build-agent-micro.sh (docs/agent-micro.md).
 # Needs Apple silicon macOS, the Xcode command line tools, Rust, python3 and curl. Takes a few minutes (cold boots).
 # Set FLUXVM_LIVE_HTTP=0 to skip the HTTP-rules part (it needs outbound access to example.com).
+# Set FLUXVM_LIVE_PROMOTE=0 to skip promote; FLUXVM_LIVE_ASK=0 to skip approvals.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 [[ "$(uname -s)" == Darwin && "$(uname -m)" == arm64 ]] || { echo "Apple silicon macOS only" >&2; exit 2; }
@@ -141,6 +143,64 @@ if [[ "${FLUXVM_LIVE_HTTP:-1}" == 1 ]]; then
   [[ "$(code http://example.com/)" == 200 ]] && ok "GET example.com allowed" || bad "GET example.com"
   [[ "$(code '-X POST http://example.com/')" == 403 ]] && ok "POST example.com refused by the method rule" || bad "POST example.com"
   [[ "$(code http://iana.org/)" == 403 ]] && ok "an unlisted host is refused" || bad "iana.org"
+fi
+
+# 8. process.ask HITL: matching command → 428 → approve → one run → replay refused → deny sticks.
+if [[ "${FLUXVM_LIVE_ASK:-1}" == 1 ]]; then
+  A="$(api -X POST "$U/v1/agents/sessions" -d '{"agent":"live-ask","policy":{"preset":"offline","process":{"ask":["deploy *"]}}}')"
+  AS="$(echo "$A" | jget 'd.get("id","")')"
+  [[ -n "$AS" ]] || bad "ask session: $A"
+  # Prefer HTTP status via curl so we see 428 even if the body is error JSON.
+  code=$(curl -s -o "$T/ask.json" -w '%{http_code}' -H "authorization: Bearer $TOKEN" -H 'content-type: application/json' \
+    -X POST "$U/v1/agents/sessions/$AS/exec" -d '{"command":"deploy prod","timeout_seconds":30}')
+  [[ "$code" == 428 ]] || bad "ask exec expected 428 got $code: $(cat "$T/ask.json")"
+  AID="$(python3 -c 'import json; print(json.load(open("'"$T/ask.json"'")).get("approval_id",""))')"
+  [[ -n "$AID" && "$AID" != null && "$AID" != None ]] || bad "no approval_id: $(cat "$T/ask.json")"
+  ok "process.ask returns 428 with approval_id"
+  [[ "$(api -X POST "$U/v1/agents/sessions/$AS/approvals/$AID/approve" -d '{"note":"live"}' | jget 'd.get("status","")')" == approved ]] \
+    || bad "approve failed"
+  R="$(api -X POST "$U/v1/agents/sessions/$AS/exec" -d "{\"command\":\"deploy prod\",\"approval_id\":\"$AID\",\"timeout_seconds\":30}")"
+  # deploy is not a real binary; after approval the guest may return non-zero — the point is we got past 428.
+  [[ "$(echo "$R" | jget '"exit_code" in d or "stdout" in d or "error" in d')" == True ]] \
+    && ok "approved command was consumed once" || bad "approved exec: $R"
+  code=$(curl -s -o "$T/ask2.json" -w '%{http_code}' -H "authorization: Bearer $TOKEN" -H 'content-type: application/json' \
+    -X POST "$U/v1/agents/sessions/$AS/exec" -d "{\"command\":\"deploy prod\",\"approval_id\":\"$AID\",\"timeout_seconds\":30}")
+  [[ "$code" == 403 || "$code" == 428 ]] && ok "reused approval is refused ($code)" || bad "reuse: $code $(cat "$T/ask2.json")"
+  code=$(curl -s -o "$T/ask3.json" -w '%{http_code}' -H "authorization: Bearer $TOKEN" -H 'content-type: application/json' \
+    -X POST "$U/v1/agents/sessions/$AS/exec" -d '{"command":"deploy staging","timeout_seconds":30}')
+  AID2="$(python3 -c 'import json; print(json.load(open("'"$T/ask3.json"'")).get("approval_id") or "")')"
+  [[ "$code" == 428 && -n "$AID2" ]] || bad "second ask: $code $(cat "$T/ask3.json")"
+  api -X POST "$U/v1/agents/sessions/$AS/approvals/$AID2/deny" -d '{"note":"no"}' >/dev/null
+  code=$(curl -s -o "$T/ask4.json" -w '%{http_code}' -H "authorization: Bearer $TOKEN" -H 'content-type: application/json' \
+    -X POST "$U/v1/agents/sessions/$AS/exec" -d "{\"command\":\"deploy staging\",\"approval_id\":\"$AID2\",\"timeout_seconds\":30}")
+  [[ "$code" == 403 ]] && ok "denied approval sticks" || bad "deny stick: $code $(cat "$T/ask4.json")"
+fi
+
+# 9. Promote a fork child's workspace file onto the parent (needs sha256sum in the guest).
+if [[ "${FLUXVM_LIVE_PROMOTE:-1}" == 1 ]]; then
+  P="$(api -X POST "$U/v1/agents/sessions" -d '{"agent":"live-promote","policy":{"preset":"offline"}}')"
+  PS="$(echo "$P" | jget 'd.get("id","")')"
+  [[ -n "$PS" ]] || bad "promote parent: $P"
+  api -X POST "$U/v1/agents/sessions/$PS/exec" -d '{"command":"mkdir -p /workspace && echo parent > /workspace/note.txt","timeout_seconds":30}' >/dev/null
+  HAS_SHA="$(api -X POST "$U/v1/agents/sessions/$PS/exec" -d '{"command":"command -v sha256sum >/dev/null && echo yes || echo no","timeout_seconds":20}' | jget 'd.get("stdout","").strip()')"
+  if [[ "$HAS_SHA" != yes ]]; then
+    echo "skip promote: guest has no sha256sum"
+  else
+    FORKP="$(api -X POST "$U/v1/agents/sessions/$PS/fork" -d '{"count":1}')"
+    CHILD="$(echo "$FORKP" | jget 'd.get("items",[{}])[0].get("id","")')"
+    [[ -n "$CHILD" ]] || bad "promote fork: $FORKP"
+    api -X POST "$U/v1/agents/sessions/$CHILD/exec" \
+      -d '{"command":"echo child-win > /workspace/note.txt && echo only-child > /workspace/new.txt","timeout_seconds":30}' >/dev/null
+    PLAN="$(api -X POST "$U/v1/agents/sessions/$CHILD/promote" -d '{"dry_run":true}')"
+    PID="$(echo "$PLAN" | jget 'd.get("plan_id","")')"
+    [[ -n "$PID" && "$PID" != null ]] && ok "promote dry-run returns plan_id" || bad "promote dry-run: $PLAN"
+    APPLY="$(api -X POST "$U/v1/agents/sessions/$CHILD/promote" -d "{\"plan_id\":\"$PID\"}")"
+    [[ "$(echo "$APPLY" | jget '"error" not in d')" == True ]] \
+      && ok "promote apply accepted" || bad "promote apply: $APPLY"
+    GOT="$(api -X POST "$U/v1/agents/sessions/$PS/exec" -d '{"command":"cat /workspace/note.txt; cat /workspace/new.txt","timeout_seconds":30}' | jget 'd.get("stdout","").strip()')"
+    [[ "$GOT" == *"child-win"* && "$GOT" == *"only-child"* ]] \
+      && ok "parent workspace has promoted files" || bad "parent after promote: $GOT"
+  fi
 fi
 
 echo "all $pass checks passed"

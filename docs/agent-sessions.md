@@ -8,10 +8,14 @@ policy, checkpoints and a ledger of what was done. It is a thin layer over the e
 change-set and event primitives. It adds no new isolation and no new hypervisor; everything an agent could already
 do with `/v1/sandboxes` and `/v1/vms` it can now do through one id.
 
-> Status: **MVP.** Run live on an Apple M4 (macOS 27.2, `vz`, stock `debian-13`): create, exec, memory checkpoint and
-> restore, fork of an offline session into two diverging children, workspace baseline and artifacts, delete. Not run
-> live: the in-tree KVM fork (Linux), a successful git clone (the stock image has no `git`), tenant tokens against a real
-> multi-tenant daemon. Unit and router-level tests cover the rest. See [Measured](#measured) and [Roadmap](#roadmap).
+> Status: **MVP.** Run live on an Apple M4 (macOS 27.2, `vz`, stock `debian-13` / `agent-micro`): create, exec, memory checkpoint and
+> restore, fork of an offline session into two diverging children, workspace baseline and artifacts, delete, filesystem
+> confinement, HTTP method/path rules. **Scripted live:** `process.ask` HITL (428 → approve → single-use → deny sticks) and
+> fork **promote** (dry-run + apply when the guest has `sha256sum`) via `scripts/vz-agent-session-live-test.sh` and
+> `scripts/agent-session-hitl-promote-live-test.sh` (any running daemon). CLI: `fluxctl agent run --cmd-ask 'deploy *'`.
+> Not run live: the in-tree KVM fork (Linux) as a durable CI job, a successful git clone on stock images without `git`,
+> tenant tokens against a real multi-tenant daemon. Unit and router-level tests cover the rest. See [Measured](#measured)
+> and [Roadmap](#roadmap).
 
 ## API
 

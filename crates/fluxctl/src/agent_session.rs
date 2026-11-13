@@ -114,6 +114,11 @@ pub enum AgentCommand {
         /// Command pattern the session may not run (repeatable, `*` wildcard).
         #[arg(long = "cmd-deny")]
         cmd_deny: Vec<String>,
+        /// Command pattern that needs an operator approval before it runs (repeatable, `*` wildcard).
+        /// Matching `exec` / jobs answer `428` with an `approval_id` until `agent approvals approve`.
+        /// REST: `policy.process.ask`.
+        #[arg(long = "cmd-ask")]
+        cmd_ask: Vec<String>,
         /// Also enforce `--cmd-allow` programs in the guest kernel (Landlock): only the programs
         /// named by the allow patterns can start, however a command is built (`sh -c`, scripts).
         /// Each pattern's first word must be a literal program. Create fails if the guest cannot
@@ -1149,6 +1154,7 @@ pub async fn run(r: &Remote, cmd: AgentCommand) -> Result<()> {
             volume,
             cmd_allow,
             cmd_deny,
+            cmd_ask,
             cmd_enforce,
             confine,
             fs_read,
@@ -1177,7 +1183,7 @@ pub async fn run(r: &Remote, cmd: AgentCommand) -> Result<()> {
                 ttl_seconds,
                 host_gpu,
             );
-            add_process_rules(&mut body, &cmd_allow, &cmd_deny, cmd_enforce);
+            add_process_rules(&mut body, &cmd_allow, &cmd_deny, &cmd_ask, cmd_enforce);
             add_filesystem(
                 &mut body,
                 confine || confine_best_effort || !fs_read.is_empty() || !fs_write.is_empty(),
@@ -2609,9 +2615,10 @@ pub(crate) fn add_process_rules(
     body: &mut Value,
     allow: &[String],
     deny: &[String],
+    ask: &[String],
     enforce_exec: bool,
 ) {
-    if allow.is_empty() && deny.is_empty() {
+    if allow.is_empty() && deny.is_empty() && ask.is_empty() {
         return;
     }
     let mut rules = json!({});
@@ -2623,6 +2630,9 @@ pub(crate) fn add_process_rules(
     }
     if !deny.is_empty() {
         rules["deny"] = json!(deny);
+    }
+    if !ask.is_empty() {
+        rules["ask"] = json!(ask);
     }
     body["policy"]["process"] = rules;
 }
@@ -2909,21 +2919,28 @@ mod tests {
     #[test]
     fn enforce_flag_lands_as_process_enforce_exec() {
         let mut b = json!({});
-        add_process_rules(&mut b, &["git *".into()], &[], true);
+        add_process_rules(&mut b, &["git *".into()], &[], &[], true);
         assert_eq!(b["policy"]["process"]["enforce"], "exec");
         let mut b = json!({});
-        add_process_rules(&mut b, &["git *".into()], &[], false);
+        add_process_rules(&mut b, &["git *".into()], &[], &[], false);
         assert!(b["policy"]["process"].get("enforce").is_none());
     }
 
     #[test]
     fn command_rules_land_under_policy_process() {
         let mut b = json!({"agent": "custom"});
-        add_process_rules(&mut b, &[], &[], false);
+        add_process_rules(&mut b, &[], &[], &[], false);
         assert!(b.get("policy").is_none());
-        add_process_rules(&mut b, &["git *".into()], &["git push*".into()], false);
+        add_process_rules(
+            &mut b,
+            &["git *".into()],
+            &["git push*".into()],
+            &["deploy *".into()],
+            false,
+        );
         assert_eq!(b["policy"]["process"]["allow"][0], "git *");
         assert_eq!(b["policy"]["process"]["deny"][0], "git push*");
+        assert_eq!(b["policy"]["process"]["ask"][0], "deploy *");
     }
 
     #[test]
