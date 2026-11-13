@@ -7,6 +7,11 @@
   the order of the TC program. `--against new.json` (with `--probe` and/or `--auto`, which tests the edges of every CIDR) lists the connections a policy
   change flips. It also lints the policy (malformed CIDRs and port rules exit 1; dead allow entries, `audit_mode`, unknown keys, wildcard FQDNs warn).
   New module `fluxvm_network::policy_sim`; reads files only, needs no daemon, root or eBPF. Additive: nothing existing changes. See `docs/network-policy.md`.
+- **`fluxctl config check`: lint a host config file.** The daemon loads its config leniently (unknown keys ignored, every field defaulted), so a
+  misspelled or misplaced key silently keeps the default and some combinations quietly drop a protection (`tls.client_ca` without `tls.cert` means client
+  certificates are not required). `fluxctl config check [FILE] [--offline] [--strict] [--json]` reports unknown keys with a `did you mean`, values that cannot
+  work and weakened settings across listen/TLS/auth/policy/sandbox/procbox/dataplane/jailer/catalog, each with its key and a fix, and exits 1 on an error.
+  Reads the file only and never prints a secret. New module `fluxvm_core::config_lint`; unit tests lint every shipped example config. Additive. See `docs/operations.md`.
 
 - CI: every workflow that ran a bare `sudo apt-get update && sudo apt-get install ...` (35 call sites in 31 workflows, including `flight-recorder`, `topology-intelligence`, `memory-boot-profiler` and the second job of `ci.yml`) now goes through `scripts/ci-install-apt-deps.sh`, so the `zyvor-build-c` to `-f` runners that refuse `sudo apt-get` pass when the packages are already present and otherwise fail with the fix. The privileged host steps of `quiclb-smartnic`, `scx-vm-scheduler` and `xdp-tcp-intelligence` now pass `PATH`, `CARGO_HOME` and `RUSTUP_HOME` through `sudo` like #746. `topology-intelligence` installs `util-linux` directly (there is no `taskset` package).
 - **Tarball-only cleanup.** Removed what #739 left behind: the `deb`, `rpm`, `bootstrap-pkg`, `systemd-deb` and `systemd-rpm` jobs of

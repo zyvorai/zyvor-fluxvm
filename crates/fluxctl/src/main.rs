@@ -29,6 +29,7 @@ use uuid::Uuid;
 mod agent_session;
 mod cloud;
 mod compose;
+mod config_check;
 mod contexts;
 mod create;
 mod docker_host;
@@ -950,6 +951,13 @@ enum Command {
         /// VM id — when set, print that VM instead of the host panel.
         #[arg(value_parser = output::parse_vm_ref)]
         id: Option<Uuid>,
+    },
+    #[command(next_help_heading = "Basic Commands")]
+    /// Offline checks of the host config file (`config check`): unknown or misplaced keys, values that cannot work,
+    /// settings that quietly weaken a protection.
+    Config {
+        #[command(subcommand)]
+        command: config_check::ConfigCommand,
     },
     #[command(next_help_heading = "Basic Commands")]
     /// Check that this host is ready: daemon, binaries, KVM or the vz runner entitlement, disk,
@@ -5876,6 +5884,8 @@ async fn main() -> Result<()> {
     }
     if let Command::WhatIf(args) = &cli.command {
         std::process::exit(whatif::run(args)?);
+    if let Command::Config { command } = &cli.command {
+        std::process::exit(config_check::run(command, cli.config.as_deref())?);
     }
     if let Command::VsockProxy { socket, port } = &cli.command {
         return fluxvm_apple::ssh::vsock_proxy(socket, *port);
@@ -6233,6 +6243,7 @@ async fn main() -> Result<()> {
         | Command::Metrics { .. }
         | Command::Completions { .. }
         | Command::WhatIf(_)
+        | Command::Config { .. }
         | Command::VsockProxy { .. }
         | Command::ImportCompose { .. }
         | Command::Service { .. }
@@ -10420,6 +10431,8 @@ mod backlog_tier1_cli_tests {
             ])
             .command,
             Command::WhatIf(_)
+            cli(&["config", "check", "fluxvm.toml", "--strict", "--offline"]).command,
+            Command::Config { .. }
         ));
     }
 

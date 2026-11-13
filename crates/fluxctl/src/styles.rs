@@ -96,6 +96,10 @@ pub fn after_help() -> String {
                     "doctor",
                     "Is this host ready? Checks and the fix for each problem",
                 ),
+                (
+                    "config check",
+                    "Lint a host config file: typos, dead settings, weakened protections",
+                ),
                 ("completions", "Print a bash/zsh/fish completion script"),
                 ("mcp serve", "MCP stdio server for AI agents (Hermes, ...)"),
             ],
