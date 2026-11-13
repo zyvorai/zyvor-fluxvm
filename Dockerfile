@@ -45,7 +45,7 @@ ARG TARGETARCH
 ARG VERSION=unknown
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Runtime dependencies only, matching packaging/nfpm.yaml:
+# Runtime dependencies only:
 #   libhivex0 / libsystemd0   NEEDED by the binaries (check-glibc-floor allowlist)
 #   qemu-system-x86|arm       QEMU backend, chosen by target architecture
 #   qemu-utils / cloud-image-utils   qcow2 tooling, cloud-localds seed images

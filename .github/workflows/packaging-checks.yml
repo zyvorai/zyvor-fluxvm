@@ -1,6 +1,6 @@
 name: Packaging checks
 
-# Fast checks on what goes into the Linux package. The package itself is built and verified by release-linux.yml.
+# Fast checks on what goes into the Linux tarball and on the pull installer. The package itself is built and verified by release-linux.yml.
 on:
   push:
     branches: [main]
@@ -8,13 +8,10 @@ on:
       - 'packaging/**'
       - 'scripts/package-linux.sh'
       - 'scripts/test-package-manifest.sh'
-      - 'scripts/package-linux-pkgs.sh'
-      - 'scripts/test-deb.sh'
       - 'scripts/fluxvm-bootstrap.sh'
       - 'scripts/test-bootstrap.sh'
       - 'scripts/make-release-manifest.sh'
       - 'scripts/make-sbom.py'
-      - 'scripts/test-rpm.sh'
       - 'scripts/test-vendor-lock.sh'
       - 'scripts/install-firecracker.sh'
       - 'scripts/install-cloud-hypervisor.sh'
@@ -32,13 +29,10 @@ on:
       - 'packaging/**'
       - 'scripts/package-linux.sh'
       - 'scripts/test-package-manifest.sh'
-      - 'scripts/package-linux-pkgs.sh'
-      - 'scripts/test-deb.sh'
       - 'scripts/fluxvm-bootstrap.sh'
       - 'scripts/test-bootstrap.sh'
       - 'scripts/make-release-manifest.sh'
       - 'scripts/make-sbom.py'
-      - 'scripts/test-rpm.sh'
       - 'scripts/test-vendor-lock.sh'
       - 'scripts/install-firecracker.sh'
       - 'scripts/install-cloud-hypervisor.sh'
@@ -69,20 +63,6 @@ jobs:
           scripts/package-linux.sh --check-manifest
           scripts/test-package-manifest.sh
 
-  deb:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - name: Maintainer scripts and packaging scripts pass shellcheck
-        run: shellcheck packaging/deb/*.sh scripts/package-linux-pkgs.sh scripts/test-deb.sh scripts/test-rpm.sh
-      - name: Install nfpm
-        run: |
-          curl -fsSL -o /tmp/nfpm.tgz https://github.com/goreleaser/nfpm/releases/download/v2.48.0/nfpm_2.48.0_Linux_x86_64.tar.gz
-          echo "6d7f9a28b2f397934403950fcbba83f598b08d02edbe79a0815b3b4897341750  /tmp/nfpm.tgz" | sha256sum -c -
-          sudo tar -xzf /tmp/nfpm.tgz -C /usr/local/bin nfpm
-      - name: Install, upgrade, remove and purge in a clean container
-        run: scripts/test-deb.sh
-
   bootstrap:
     runs-on: ubuntu-latest
     steps:
@@ -93,19 +73,6 @@ jobs:
         run: scripts/test-bootstrap.sh
       - name: The SBOM generator runs on the lock file
         run: python3 scripts/make-sbom.py --version 0.0.0 | jq -e '.components | length > 100'
-  rpm:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - name: Install nfpm and rpm
-        run: |
-          curl -fsSL -o /tmp/nfpm.tgz https://github.com/goreleaser/nfpm/releases/download/v2.48.0/nfpm_2.48.0_Linux_x86_64.tar.gz
-          echo "6d7f9a28b2f397934403950fcbba83f598b08d02edbe79a0815b3b4897341750  /tmp/nfpm.tgz" | sha256sum -c -
-          sudo tar -xzf /tmp/nfpm.tgz -C /usr/local/bin nfpm
-          sudo apt-get update -qq && sudo apt-get install -y -qq rpm
-      - name: Inspect the rpm, then install, upgrade and erase it in Fedora and Rocky 10 containers
-        run: scripts/test-rpm.sh
-
   vendor-lock:
     runs-on: ubuntu-latest
     steps:
@@ -126,60 +93,12 @@ jobs:
         run: |
           if scripts/deploy-remote.sh 127.0.0.1 nobody --nonsense --dry-run 2>/dev/null; then echo "accepted an unknown option"; exit 1; fi
 
-  bootstrap-pkg:
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        mode: [deb, rpm]
-    steps:
-      - uses: actions/checkout@v7
-      - name: Install nfpm
-        run: |
-          curl -fsSL -o /tmp/nfpm.tgz https://github.com/goreleaser/nfpm/releases/download/v2.48.0/nfpm_2.48.0_Linux_x86_64.tar.gz
-          echo "6d7f9a28b2f397934403950fcbba83f598b08d02edbe79a0815b3b4897341750  /tmp/nfpm.tgz" | sha256sum -c -
-          sudo tar -xzf /tmp/nfpm.tgz -C /usr/local/bin nfpm
-      - name: The pull installer in ${{ matrix.mode }} mode, in a distro container (install, upgrade, auto rollback, rollback, pin, verify)
-        run: scripts/e2e/bootstrap-pkg.sh ${{ matrix.mode }}
-
   image-k8s:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
       - name: Build the Dockerfile from a staged tree, run it, render and kustomize deploy/k8s
         run: scripts/e2e/image-k8s.sh
-
-  systemd-deb:
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v7
-      - name: Install nfpm
-        run: |
-          curl -fsSL -o /tmp/nfpm.tgz https://github.com/goreleaser/nfpm/releases/download/v2.48.0/nfpm_2.48.0_Linux_x86_64.tar.gz
-          echo "6d7f9a28b2f397934403950fcbba83f598b08d02edbe79a0815b3b4897341750  /tmp/nfpm.tgz" | sha256sum -c -
-          sudo tar -xzf /tmp/nfpm.tgz -C /usr/local/bin nfpm
-      - name: The .deb under a real systemd in a rootless podman container
-        run: |
-          sudo apt-get update -qq && sudo apt-get install -y -qq podman
-          scripts/e2e/systemd-deb.sh
-
-  systemd-rpm:
-    runs-on: ubuntu-24.04
-    strategy:
-      fail-fast: false
-      matrix:
-        image: [docker.io/library/rockylinux:9, quay.io/rockylinux/rockylinux:10, quay.io/fedora/fedora:42]
-    steps:
-      - uses: actions/checkout@v7
-      - name: Install nfpm
-        run: |
-          curl -fsSL -o /tmp/nfpm.tgz https://github.com/goreleaser/nfpm/releases/download/v2.48.0/nfpm_2.48.0_Linux_x86_64.tar.gz
-          echo "6d7f9a28b2f397934403950fcbba83f598b08d02edbe79a0815b3b4897341750  /tmp/nfpm.tgz" | sha256sum -c -
-          sudo tar -xzf /tmp/nfpm.tgz -C /usr/local/bin nfpm
-      - name: The .rpm under a real systemd in ${{ matrix.image }} (EL9 must refuse it cleanly)
-        run: |
-          sudo apt-get update -qq && sudo apt-get install -y -qq podman
-          scripts/e2e/systemd-rpm.sh ${{ matrix.image }}
 
   enroll-e2e:
     runs-on: ubuntu-latest

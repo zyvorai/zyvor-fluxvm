@@ -17,9 +17,9 @@ channels/<channel>.json  + .sig     the pointer: version, serial, expiry, revoke
 releases/<version>/manifest.json + .sig, SHA256SUMS, sbom.cdx.json, the .tar.gz per architecture
 ```
 
-Releases are tarball-only since #739. `make-release-manifest.sh` still lists a `.deb` or `.rpm` when one is present in the artifacts
-directory (the manifest has an artifact kind per architecture: `tarball`, `deb`, `rpm`), which is how releases up to 0.4.21 were
-mirrored; the release workflow no longer produces them, so a mirror built from a newer release has `tarball` entries only.
+Releases are tarball-only since #739. `make-release-manifest.sh` lists the `fluxvm-<version>-linux-<arch>.tar.gz` files of the artifacts
+directory (the manifest keeps an artifact kind per architecture, now always `tarball`) and ignores any `.deb` or `.rpm` there. A mirror
+built from a release up to 0.4.21 keeps the `deb`/`rpm` entries it was signed with, but the installer no longer reads them.
 
 Signatures are raw Ed25519 over the exact bytes of the file (`openssl pkeyutl -rawin`, openssl 3). The channel file names the
 release manifest and its sha256; the manifest names each package and its sha256. A node checks the signature **before** it
@@ -61,19 +61,17 @@ fluxvm-bootstrap install     # what the timer runs
 fluxvm-bootstrap status      # status.json: state, installed version, serial, last result
 fluxvm-bootstrap rollback    # back to the previous version; the version is marked failed and not retried
 fluxvm-bootstrap pin 0.4.11  # hold this node; `unpin` releases it
-fluxvm-bootstrap verify      # installed files against the package's hashes (tarball mode; dpkg -V / rpm -V in deb / rpm mode)
+fluxvm-bootstrap verify      # installed files against the package's hashes (`MANIFEST.sha256` of the installed tree)
 ```
 
 It takes a lock, waits a stable per-node plus random delay, fetches with ETag and retries with backoff that honours
 `Retry-After`, verifies, downloads with resume into `/var/lib/fluxvm-bootstrap/cache`, checks the sha256 from the signed
 manifest, checks disk and `/dev/kvm`, installs, restarts the service and waits for the new version to answer. The install mode is
-`INSTALL_MODE` in `/etc/fluxvm/bootstrap.conf` or the environment, and **defaults to `tarball`** (it used to be `deb` where dpkg exists, `rpm`
-where rpm and dnf/yum exist; #739 changed that because releases no longer carry the packages). Tarball mode unpacks to
+`INSTALL_MODE` in `/etc/fluxvm/bootstrap.conf` or the environment, and **is `tarball`**, the only mode (it used to default to `deb` where dpkg exists, `rpm`
+where rpm and dnf/yum exist; #739 changed the default because releases no longer carry the packages, and the `deb` and `rpm` modes have been removed). Tarball mode unpacks to
 `/opt/fluxvm/<version>`, flips an atomic `/opt/fluxvm/current` symlink, links `bin/*` into `/usr/local/bin`, copies the unit files to
-`/etc/systemd/system` and links `lib/bpf` at `/usr/lib/fluxvm/bpf`. `deb` and `rpm` mode remain for a mirror that was built from a release
-with those artifacts (`apt-get install` or `dnf install` with the existing config kept); against a release without them the node stops
-with `release <version> has no deb for <arch>`. A node that runs a `.deb`/`.rpm` install and should follow newer releases must switch
-to tarball mode; see [Upgrading](linux-package.md#upgrading) for the steps and what is untested. If
+`/etc/systemd/system` and links `lib/bpf` at `/usr/lib/fluxvm/bpf`. `INSTALL_MODE=deb` or `rpm` makes the script exit with `INSTALL_MODE=... is no longer supported`.
+A node that runs a `.deb`/`.rpm` install and should follow newer releases must switch to tarball mode; see [Upgrading](linux-package.md#upgrading) for the steps and what is untested. If
 that fails it reinstalls the previous version, records the failed one, and exits 3. `FLUXVM_AUTO_UPGRADE=0` reports only.
 It writes `status.json` and, if `/var/lib/node_exporter/textfile_collector` exists, a metrics file.
 `systemctl enable --now fluxvm-bootstrap.timer` schedules it every 6 hours with randomized delay (off by default).
@@ -84,9 +82,6 @@ It writes `status.json` and, if `/var/lib/node_exporter/textfile_collector` exis
 tampered channel, wrong key, missing signature, lower serial, expired, revoked, `min_upgrade_from`; waves and labels; pin;
 report-only; rollback on a version that does not come up, and no retry of it; resume of a truncated download; a 429 with
 `Retry-After`; the 5% wave being a subset of the 20% wave over 10,000 synthetic ids; jitter bounds.
-
-`scripts/e2e/bootstrap-pkg.sh` (the `packaging-checks.yml` `bootstrap-pkg` job) runs the same flow in `deb` and `rpm` mode in distro containers
-(Ubuntu 22.04, Fedora 43); those modes are not what the default or a release exercises any more.
 
 Not tested: tarball-mode install on a real node under systemd (the suite runs it under `FLUXVM_ROOT`, which skips `systemctl`),
 systemd timers, a package-to-tarball migration, and anything at fleet scale. Capacity: one wave pulls about (package size × nodes) from the mirror (the tarball is

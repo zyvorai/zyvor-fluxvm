@@ -3,6 +3,12 @@
 ## Unreleased
 
 - CI: every workflow that ran a bare `sudo apt-get update && sudo apt-get install ...` (35 call sites in 31 workflows, including `flight-recorder`, `topology-intelligence`, `memory-boot-profiler` and the second job of `ci.yml`) now goes through `scripts/ci-install-apt-deps.sh`, so the `zyvor-build-c` to `-f` runners that refuse `sudo apt-get` pass when the packages are already present and otherwise fail with the fix. The privileged host steps of `quiclb-smartnic`, `scx-vm-scheduler` and `xdp-tcp-intelligence` now pass `PATH`, `CARGO_HOME` and `RUSTUP_HOME` through `sudo` like #746. `topology-intelligence` installs `util-linux` directly (there is no `taskset` package).
+- **Tarball-only cleanup.** Removed what #739 left behind: the `deb`, `rpm`, `bootstrap-pkg`, `systemd-deb` and `systemd-rpm` jobs of
+  `packaging-checks.yml`, `scripts/package-linux-pkgs.sh`, `packaging/nfpm.yaml`, `packaging/deb/`, `scripts/test-deb.sh`,
+  `scripts/test-rpm.sh` and `scripts/e2e/bootstrap-pkg.sh` / `systemd-deb.sh` / `systemd-rpm.sh` (and their suites in
+  `scripts/test-release-e2e.sh`). `make-release-manifest.sh` lists tarballs only. `fluxvm-bootstrap` has one install mode, tarball:
+  `INSTALL_MODE=deb` or `rpm` now exits with an explanation instead of failing later with "has no deb for <arch>".
+  `scripts/test-bootstrap.sh` covers both. Docs updated. The packages of releases up to 0.4.21 are unaffected.
 
 - Docs and comments, aligned with what merged after 0.4.21 (#739 to #747): the remaining `deb`/`rpm` text in
   `packaging/bootstrap.conf.example`, `deploy/cloud-init/fluxvm.yaml` (now `INSTALL_MODE=tarball`), `scripts/make-release-manifest.sh` and

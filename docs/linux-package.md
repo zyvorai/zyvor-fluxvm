@@ -5,11 +5,10 @@ ubuntu:22.04 build container (`.github/workflows/release-linux.yml`). Nothing is
 installed everywhere, by `scripts/install.sh` ([install.md](install.md)), by hand (below), or by the pull installer
 `fluxvm-bootstrap`, which defaults to tarball mode ([fleet-install.md](fleet-install.md)).
 
-> **Releases are tarball-only.** Since the release workflow change in #739 no release builds, verifies or attaches a `.deb` or
-> an `.rpm`. Releases up to and including 0.4.21 carry them (0.4.21 has both for x86_64 and aarch64: checked against its
-> published assets); later releases do not. The two sections "The .deb" and "The .rpm" below describe the packaging scripts
-> that remain in the tree (`scripts/package-linux-pkgs.sh`, `packaging/nfpm.yaml`, `packaging/deb/`) and the checks CI still
-> runs on them. They are not a release artifact, and nothing in a release job exercises them.
+> **Releases are tarball-only.** Since #739 no release builds, verifies or attaches a `.deb` or an `.rpm`, and the packaging
+> scripts for them (`scripts/package-linux-pkgs.sh`, `packaging/nfpm.yaml`, `packaging/deb/`, and their tests) have been removed
+> from the tree. Releases up to and including 0.4.21 carry the packages (0.4.21 has both for x86_64 and aarch64); build them from
+> that tag if you need the old scripts.
 
 ## What a release attaches
 
@@ -92,9 +91,9 @@ gate in the release job is what enforces the floor. The aarch64 build is still l
   `fluxvm.service` when it is enabled, waits for the new version to answer and rolls back by itself when it does not.
   `/etc/fluxvm.toml` and `/var/lib/fluxvm` are not touched. The unit uses `KillMode=process`, so a restart leaves running VMs alone.
 - **A node installed from a `.deb` or `.rpm`** (0.4.21 or earlier): the packages put binaries in `/usr/bin`, the tarball paths above use
-  `/usr/local/bin`, and a release after 0.4.21 has no `.deb`/`.rpm` for `INSTALL_MODE=deb|rpm` to fetch (`release <version> has no deb for <arch>`).
+  `/usr/local/bin`, and a release after 0.4.21 has no `.deb`/`.rpm`, and `fluxvm-bootstrap` now refuses `INSTALL_MODE=deb|rpm` (`INSTALL_MODE=... is no longer supported`).
   The packaged unit is replaced by the one in `/etc/systemd/system`. To move such a node: keep `/etc/fluxvm.toml` and `/var/lib/fluxvm`,
-  remove the package (`apt-get remove fluxvm` / `dnf remove fluxvm` keep both, as the sections below describe), then install the tarball as
+  remove the package (`apt-get remove fluxvm` / `dnf remove fluxvm` keep both), then install the tarball as
   above or run `fluxvm-bootstrap` with `INSTALL_MODE` unset. Not tested: a package-to-tarball migration on a real node, and in particular
   whether a leftover `/usr/lib/fluxvm/bpf` directory from the package is replaced (the bootstrap uses `ln -sfn`, which would
   create the link inside an existing directory), so remove that directory first.
@@ -128,57 +127,15 @@ decision on a separate package and on the runtime libraries it declares.
 The layout keeps `bin/`, `share/config.example.toml` and `share/systemd/fluxvm.service` where `scripts/install.sh`
 expects them; everything else is added next to them.
 
-## The .deb (remaining script, not a release artifact)
+## Distribution support
 
-Releases up to 0.4.21 attached `fluxvm_<version>_<amd64|arm64>.deb`; later releases do not. The script still builds it from the same
-staged tree (`scripts/package-linux-pkgs.sh`, `packaging/nfpm.yaml`, needs [nfpm](https://nfpm.goreleaser.com)). Layout: `/usr/bin`, `/usr/lib/fluxvm/bpf`, `/usr/share/fluxvm` (guest agent, config template),
-`/usr/lib/systemd/system/fluxvm.service` (ExecStart `/usr/bin/fluxctl`), `modules-load.d`/`modprobe.d` for `nbd max_part=16`,
-shell completions in the distribution directories.
-
-The maintainer scripts (`packaging/deb/`) follow these rules:
-
-- `/etc/fluxvm.toml` is seeded from the template only when absent and is not a conffile, so an upgrade never touches it.
-- The service is enabled on install but not started (the seeded config is a template). On upgrade the running daemon is
-  restarted only when `/etc/fluxvm/upgrade.conf` says `RESTART_ON_UPGRADE=yes`; the default is `no`. The unit uses
-  `KillMode=process`, so a restart leaves running VMs alone.
-- `/etc/qemu/bridge.conf` (`allow all`) is created if missing; the swtpm AppArmor override is added only when AppArmor is enforcing.
-- `/var/lib/fluxvm` is never deleted, not on remove and not on purge.
-
-`scripts/test-deb.sh` installs, upgrades (with an edited config), removes and purges it in an ubuntu:22.04 container; CI runs it.
-Firecracker and Cloud Hypervisor are pinned in `packaging/vendor.lock` (see below) but not yet bundled into the packages.
-
-## The .rpm (remaining script, not a release artifact)
-
-Releases up to 0.4.21 attached the `.rpm`; later releases do not. `scripts/package-linux-pkgs.sh --stage DIR --format rpm` builds `fluxvm-<version>-1.<x86_64|aarch64>.rpm` from the same staged
-tree and the same `packaging/nfpm.yaml` (an `overrides.rpm` block holds the rpm dependency names). Same layout, same
-maintainer scripts: rpm passes `1` (install) / `2` (upgrade) to the post-install script, and `0` on erase / `1` on upgrade to
-the pre- and post-uninstall scripts; `packaging/deb/*.sh` handle both conventions (`prerm`: `remove|0`; `postrm`: `purge|0`;
-`postinst`: `configure` with a previous version, or `2`). Config, state and upgrade policy behave as for the .deb; an erase
-keeps `/etc/fluxvm.toml` and `/var/lib/fluxvm`. The package co-owns `/usr/lib/modprobe.d` and `/usr/lib/modules-load.d`
-(same mode and owner as the distribution's packages, so rpm allows it).
-
-Dependencies (names checked against the Rocky 9 and 10 BaseOS/AppStream/CRB, EPEL 9 and Fedora 43 package lists):
-
-| Requires | Where it comes from |
-|---|---|
-| `glibc >= 2.35`, `systemd-libs`, `iproute` | BaseOS / Fedora |
-| `hivex-libs` | AppStream on EL9 and EL10, Fedora. Only `hivex-devel` is in CRB; EPEL is **not** needed |
-| `qemu-img`, `qemu-kvm` | AppStream / Fedora |
-| Recommends `nftables`, `bpftool`, `dnsmasq`, `swtpm`, `xorriso`, `cloud-utils` | `cloud-utils` is Fedora only; on EL the seed ISO comes from `xorriso` |
-
-Support boundary:
-
-- **EL10 and Fedora**: the dependencies resolve and glibc is newer than the build container's 2.35. Install-tested under systemd on
-  Rocky Linux 10 and Fedora 42 with `scripts/e2e/systemd-rpm.sh` (and in CI, see Testing). On Rocky Linux 9 the same script checks
-  that `dnf` refuses the rpm with the glibc message and leaves nothing behind.
-- **EL9 is not installable yet.** EL9 ships glibc 2.34 and the binaries are built on ubuntu:22.04 (glibc 2.35), so the rpm
-  declares `glibc >= 2.35` and `dnf` refuses it with a clear message instead of the binaries dying with
-  `GLIBC_2.35 not found`. The release job runs `check-glibc-floor.sh ... 2.34` as an informational probe
-  (`continue-on-error`). The tarball has the same floor: on EL9 it needs glibc 2.35 and does not run, and with no rpm shipped any more there
-  is no package-manager message to say so. If the probe passes, the floor can be lowered (`check-glibc-floor.sh`'s argument in the workflow and,
-  for the scripts, `packaging/nfpm.yaml`); otherwise the binaries would have to be built in a Rocky 9 container (follow-up).
-- The SELinux policy for the host is not packaged. `systemd/fluxvm-selinux-ensure.service` runs inside the Secure Containers
-  guest, not on the host.
+The tarball needs glibc 2.35 or newer, the floor of the ubuntu:22.04 build container. EL10 and Fedora are newer than that and
+unpack and run it; EL9 ships glibc 2.34, so the binaries do not run there yet and, with no package manager in the way, nothing
+prints a friendly message (they die with `GLIBC_2.35 not found`). The release job runs `check-glibc-floor.sh ... 2.34` as an
+informational probe (`continue-on-error`); if it passes, the floor can be lowered (the argument in the workflow), otherwise the
+binaries would have to be built in a Rocky 9 container (follow-up). The SELinux policy for the host is not packaged;
+`systemd/fluxvm-selinux-ensure.service` runs inside the Secure Containers guest, not on the host. Firecracker and Cloud Hypervisor are
+pinned in `packaging/vendor.lock` (see below) but not bundled into the tarball.
 
 ## Pinned vendor binaries
 
@@ -201,10 +158,7 @@ What runs where, after the change to tarball-only releases:
 - `release-linux.yml` (release jobs): the glibc floor gate, the glibc 2.34 probe, and a smoke test that unpacks the tarball in a clean
   ubuntu:22.04 container (no missing libraries, `fluxctl --version`). It no longer installs a `.deb` or `.rpm`.
 - `packaging-checks.yml` (CI on changes to `packaging/`, `scripts/`): `scripts/package-linux.sh --check-manifest` and the manifest tests,
-  the pull-installer tests (`scripts/test-bootstrap.sh`, and `scripts/e2e/bootstrap-pkg.sh` in `deb` and `rpm` mode), shellcheck, and
-  `scripts/test-vendor-lock.sh`. It also still exercises the remaining package scripts: `scripts/test-deb.sh` and `scripts/test-rpm.sh`
-  build two stand-in versions and install, upgrade (edited config kept) and remove them in clean containers (`test-rpm.sh` also inspects
-  the rpm metadata with `rpm -qp`), and `scripts/e2e/systemd-deb.sh` / `systemd-rpm.sh` install them under a real systemd.
+  the pull-installer tests (`scripts/test-bootstrap.sh`, tarball mode only), shellcheck, and `scripts/test-vendor-lock.sh`.
 - Not covered by any job: installing the tarball on a fresh host and starting the service, and the package-to-tarball migration above.
 
 ## Building and checking

@@ -1,8 +1,8 @@
 # Release and fleet test report
 
 > **Dated report.** It describes the state at the commit named below. The `packages`, `bootstrap-deb` / `bootstrap-rpm`, `systemd-deb` and
-> rpm rows exercise the `.deb`/`.rpm` scripts, which still exist but are no longer built or attached by the release workflow (releases up to
-> 0.4.21 carry them; see [linux-package.md](linux-package.md)). The results are not re-run for this note.
+> rpm rows exercise the `.deb`/`.rpm` scripts (`scripts/package-linux-pkgs.sh`, `test-deb.sh`, `test-rpm.sh`, `scripts/e2e/bootstrap-pkg.sh`, `systemd-deb.sh`, `systemd-rpm.sh`), which have since been removed from the tree and are no longer built or attached by the release workflow (releases up to
+> 0.4.21 carry the packages; see [linux-package.md](linux-package.md)). The matching suites are gone from `scripts/test-release-e2e.sh`. The results are not re-run for this note.
 
 `scripts/test-release-e2e.sh --host <user@host>` runs every suite below on a Linux host (rsync, one release build of
 `fluxvm-agent`, throwaway containers and state directories, nothing left behind) and prints one line per suite.
