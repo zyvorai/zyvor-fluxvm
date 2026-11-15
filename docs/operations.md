@@ -1567,3 +1567,38 @@ authorization, inline registry passwords) are never printed. What it checks:
 
 Rules live in `crates/fluxvm-core/src/config_lint.rs` and each has a test. The shipped `config.example.toml` and
 `configs/` files are linted in CI-run unit tests and must stay free of errors and unknown keys.
+
+## Checking a VM spec: `fluxctl vm-spec check`
+
+A VM spec (the JSON of `fluxctl create --spec` and `POST /v1/vms`) is parsed leniently too: a misspelled key such as `memory_mb` is dropped and the default
+used, settings that belong to another backend are ignored, and some mistakes only show up when the VMM fails to start. `vm-spec check` reads the file and
+reports what it can know without a host: nothing is created or started.
+
+```bash
+fluxctl vm-spec check vm.json
+fluxctl vm-spec check vm.json --offline        # spec for another host: do not look for the image, kernel and shared folders
+fluxctl vm-spec check vm.json --strict --json  # CI: exit 1 on warnings too, machine-readable
+```
+
+```text
+error   max_vcpus  max_vcpus (2) is below vcpus (4)
+        fix: set max_vcpus to 4 or more
+warning memory_mb  unknown key, ignored by the daemon (did you mean `memory_mib`?)
+        fix: rename it to `memory_mib`
+warning numa_node  only the qemu backend uses `numa_node`; the firecracker backend ignores it
+        fix: remove it, or set backend to qemu
+```
+
+Exit status is 1 when there is an error (and with `--strict` when there is a warning). What it checks:
+
+| Area | Examples |
+|---|---|
+| Syntax | not JSON, or not a VM spec (the serde message) |
+| Unknown keys | any top-level key the daemon would ignore, with a `did you mean` |
+| Sizes | `vcpus` 0, tiny `memory_mib`, `max_vcpus` or `max_memory_mib` below the boot value |
+| Create-time rules | the model's own `balloon` (no hugepages, VFIO or confidential profile), `numa` (memory and vCPUs add up) and `vfio_devices` (PCI address or mdev UUID, no duplicates) checks |
+| Backend fit | qemu-only settings (`numa`, `balloon`, `tpm`, `data_disks`, ...) and Firecracker rate limits or `cpu_template` on another backend; `security_profile` other than `standard` off QEMU; Firecracker without `kernel`; `secure_boot` without `firmware`; `extra_args`, `shared_memory` or `hugepages` under a confidential profile |
+| Networking | port 0, a protocol other than tcp or udp, the same host port twice, privileged host ports, a forward that listens on `0.0.0.0` |
+| Files | relative or duplicate `shared_folders[].guest_path`; unless `--offline`, an `image`, `kernel`, `initrd`, `firmware` or shared-folder `host_path` that is missing on this machine |
+
+`backend: "auto"` is resolved by the daemon, so no backend-specific claim is made about it. The rules live in `crates/fluxvm-core/src/spec_lint.rs`.

@@ -22,6 +22,7 @@ pub mod pressure_admission;
 pub mod process;
 pub mod security;
 pub mod signing;
+pub mod spec_lint;
 pub mod topology;
 pub mod virtiofs;
 pub mod vmm_seccomp;

@@ -11,6 +11,14 @@
   name such as `required`) prints the code's meaning, usual causes and what to do; `--list` shows every code, `--json` is machine-readable, an unknown
   code exits 1 with a `did you mean`. The table is the new `fluxvm_core::error_codes`, and a `fluxvm-api` test fails when the API can send a code
   the table does not explain. Offline; additive. See `docs/api.md#errors`.
+- **`fluxctl vm-spec check`: lint a VM spec before creating the VM.** `CreateVmRequest` is parsed leniently, so a misspelled key (`memory_mb`) is dropped
+  and the default used, settings of another backend are ignored, and some rules only fail at create time or when the VMM starts. `fluxctl vm-spec check
+  spec.json [--offline] [--strict] [--json]` reports unknown keys with a `did you mean`, values the daemon refuses (`max_vcpus` below `vcpus`, balloon with
+  hugepages, NUMA that does not add up, malformed VFIO ids, a security profile off QEMU, Firecracker without a kernel, duplicate or malformed port forwards,
+  relative guest paths), qemu-only or Firecracker-only settings on the wrong backend, and (unless `--offline`) image, kernel and shared-folder paths that do
+  not exist, each with its key and a fix. Exits 1 on an error (and on a warning with `--strict`). New module `fluxvm_core::spec_lint` (calls the model's own
+  `validate_balloon`/`validate_numa`/`validate_vfio_devices`; a test keeps its key list equal to the `CreateVmRequest` fields and lints every shipped example
+  spec). Reads the file only; nothing is started. Additive. See `docs/operations.md`.
 - **`fluxctl what-if`: offline network-policy simulator.** `fluxctl what-if policy.json --probe tcp://10.0.0.5:443` says whether a hypothetical
   connection would be allowed and which rule decides (deny_udp, deny_cidrs, allow_icmp, default_allow, allow_cidrs/allow_ports, audit_mode), following
   the order of the TC program. `--against new.json` (with `--probe` and/or `--auto`, which tests the edges of every CIDR) lists the connections a policy

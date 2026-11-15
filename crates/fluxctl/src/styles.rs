@@ -104,6 +104,10 @@ pub fn after_help() -> String {
                     "explain",
                     "What an API error code means, its usual causes and the fix",
                 ),
+                (
+                    "vm-spec check",
+                    "Lint a VM spec offline: unknown keys, refused values, ignored settings",
+                ),
                 ("completions", "Print a bash/zsh/fish completion script"),
                 ("mcp serve", "MCP stdio server for AI agents (Hermes, ...)"),
             ],
