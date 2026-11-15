@@ -80,6 +80,7 @@ mod stack;
 mod stack_fleet;
 mod status;
 mod styles;
+mod vm_spec;
 mod vz_doctor;
 mod whatif;
 
@@ -1746,6 +1747,12 @@ enum Command {
     /// Explain an API error code (`NOT_FOUND`, `429`, `required`): what it means, what usually causes it and what to do.
     /// Offline; `--list` shows them all.
     Explain(explain::ExplainArgs),
+    /// Offline checks of a VM spec (`vm-spec check`): unknown keys, values the daemon refuses, settings the chosen
+    /// backend ignores, missing paths.
+    VmSpec {
+        #[command(subcommand)]
+        command: vm_spec::VmSpecCommand,
+    },
     #[command(next_help_heading = "Network Policy")]
     /// Per-VM network policy and dataplane introspection
     /// (`/v1/vms/{id}/network/*`). Distinct from `group`/`cnp`/`dataplane`,
@@ -5905,6 +5912,9 @@ async fn main() -> Result<()> {
     if let Command::Explain(args) = &cli.command {
         std::process::exit(explain::run(args)?);
     }
+    if let Command::VmSpec { command } = &cli.command {
+        std::process::exit(vm_spec::run(command)?);
+    }
     if let Command::VsockProxy { socket, port } = &cli.command {
         return fluxvm_apple::ssh::vsock_proxy(socket, *port);
     }
@@ -6264,6 +6274,7 @@ async fn main() -> Result<()> {
         | Command::Config { .. }
         | Command::ExecPolicy { .. }
         | Command::Explain(_)
+        | Command::VmSpec { .. }
         | Command::VsockProxy { .. }
         | Command::ImportCompose { .. }
         | Command::Service { .. }
@@ -10463,6 +10474,10 @@ mod backlog_tier1_cli_tests {
         assert!(matches!(
             cli(&["explain", "NOT_FOUND"]).command,
             Command::Explain(_)
+        ));
+        assert!(matches!(
+            cli(&["vm-spec", "check", "vm.json", "--offline", "--strict"]).command,
+            Command::VmSpec { .. }
         ));
     }
 
