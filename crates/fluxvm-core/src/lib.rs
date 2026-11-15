@@ -6,6 +6,7 @@ pub mod backend;
 pub mod config;
 pub mod config_lint;
 pub mod egress;
+pub mod error_codes;
 pub mod fs_image;
 pub mod gpu;
 pub mod gpu_health;

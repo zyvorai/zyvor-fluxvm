@@ -6305,6 +6305,24 @@ mod tests {
         assert_eq!(error_code(StatusCode::IM_A_TEAPOT), "ERROR");
     }
 
+    /// `fluxctl explain` reads `fluxvm_core::error_codes::TABLE`; every status the API maps must be explained there.
+    #[test]
+    fn every_error_code_is_explained() {
+        use super::{StatusCode, error_code};
+        use fluxvm_core::error_codes::{for_status, lookup};
+        for status in [
+            400u16, 401, 403, 404, 409, 412, 413, 422, 428, 429, 500, 501, 502, 503,
+        ] {
+            let sent = error_code(StatusCode::from_u16(status).unwrap());
+            let e = lookup(sent)
+                .unwrap_or_else(|| panic!("{sent} (HTTP {status}) is not in error_codes::TABLE"));
+            assert_eq!(for_status(status).map(|e| e.code), Some(e.code), "{status}");
+        }
+        for special in ["STEP_UP_REQUIRED", "APPROVAL_REQUIRED"] {
+            assert!(lookup(special).is_some(), "{special}");
+        }
+    }
+
     use super::*;
     use fluxvm_core::model::{AgentSpec, CreateVmRequest, NetworkSpec};
     use std::path::PathBuf;

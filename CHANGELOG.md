@@ -7,6 +7,10 @@
   for the kernel data path), `ip forwarding` (`net.ipv4.ip_forward` for NAT'ed tap and namespace networks) and `open files` (the soft `RLIMIT_NOFILE`;
   warns below 4096). All four are warnings with the command that fixes them, never failures, so the exit code does not change on a host that passed
   before. Each rule is a pure function with unit tests. See `docs/troubleshooting.md`.
+- **`fluxctl explain`: what an API error code means.** `fluxctl explain NOT_FOUND` (also `rate-limited`, an HTTP status such as `428`, or part of a
+  name such as `required`) prints the code's meaning, usual causes and what to do; `--list` shows every code, `--json` is machine-readable, an unknown
+  code exits 1 with a `did you mean`. The table is the new `fluxvm_core::error_codes`, and a `fluxvm-api` test fails when the API can send a code
+  the table does not explain. Offline; additive. See `docs/api.md#errors`.
 - **`fluxctl what-if`: offline network-policy simulator.** `fluxctl what-if policy.json --probe tcp://10.0.0.5:443` says whether a hypothetical
   connection would be allowed and which rule decides (deny_udp, deny_cidrs, allow_icmp, default_allow, allow_cidrs/allow_ports, audit_mode), following
   the order of the TC program. `--against new.json` (with `--probe` and/or `--auto`, which tests the edges of every CIDR) lists the connections a policy

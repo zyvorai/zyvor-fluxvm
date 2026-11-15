@@ -100,6 +100,10 @@ pub fn after_help() -> String {
                     "config check",
                     "Lint a host config file: typos, dead settings, weakened protections",
                 ),
+                (
+                    "explain",
+                    "What an API error code means, its usual causes and the fix",
+                ),
                 ("completions", "Print a bash/zsh/fish completion script"),
                 ("mcp serve", "MCP stdio server for AI agents (Hermes, ...)"),
             ],
