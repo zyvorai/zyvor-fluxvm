@@ -76,7 +76,7 @@ More: [install-macos.md](install-macos.md#troubleshooting).
 
 ## Is this host ready?
 
-`fluxctl doctor` checks the daemon, the binaries, free disk, `/dev/kvm` (Linux) or the runner's virtualization
+`fluxctl doctor` checks the daemon, the binaries, free disk, `/dev/kvm`, cgroup v2 controllers, `/dev/net/tun` and `/dev/vhost-net`, `net.ipv4.ip_forward` and the open-file limit (Linux) or the runner's virtualization
 entitlement, memory headroom and whether the login session is locked (macOS), and MCP or LaunchAgent entries that still point at a removed Homebrew
 path. Each warning or failure prints the command that fixes it, and it exits `1` on a failure. It works with the
 daemon down; add `-o json` for a machine-readable report.

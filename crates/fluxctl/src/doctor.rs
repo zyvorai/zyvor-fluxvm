@@ -246,6 +246,108 @@ pub fn check_kvm(exists: bool, usable: bool, daemon_up: Option<bool>) -> Check {
     }
 }
 
+/// The controllers every VM cgroup needs delegated from the cgroup2 root (`fluxvm_cgroup::DELEGATED_CONTROLLERS`).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+const CGROUP_CONTROLLERS: &[&str] = &["cpu", "memory", "io", "pids", "cpuset"];
+
+/// Linux: the cgroup v2 root's `cgroup.controllers` (`None` = the file is absent, a cgroup v1 or hybrid host).
+/// Resource limits, pressure stats and the freezer need v2 with `cpu memory io pids cpuset` available.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub fn check_cgroups(controllers: Option<&str>) -> Check {
+    let Some(text) = controllers else {
+        return Check::warn(
+            "cgroups",
+            "no unified cgroup v2 hierarchy at /sys/fs/cgroup (cgroup.controllers is missing)",
+            "boot with systemd.unified_cgroup_hierarchy=1 (a v1 or hybrid host cannot enforce VM CPU, memory and I/O limits)",
+        );
+    };
+    let have: Vec<&str> = text.split_whitespace().collect();
+    let missing: Vec<&str> = CGROUP_CONTROLLERS
+        .iter()
+        .copied()
+        .filter(|c| !have.contains(c))
+        .collect();
+    if missing.is_empty() {
+        Check::ok("cgroups", "cgroup v2 with cpu, memory, io, pids and cpuset")
+    } else {
+        Check::warn(
+            "cgroups",
+            format!(
+                "cgroup v2 is missing the {} controller(s)",
+                missing.join(", ")
+            ),
+            "enable them in the kernel (CONFIG_CGROUP_*) or boot flags; without them the VM limits for those resources are not enforced",
+        )
+    }
+}
+
+/// Linux: this process's soft limit on open files. A VM holds many descriptors (disks, taps, sockets, vsock, logs), so
+/// the default 1024 runs out with a few dozen VMs. The daemon's own limit comes from its service unit
+/// (`LimitNOFILE`), so this is a warning that points at both.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub fn check_open_files(soft: Option<u64>) -> Check {
+    const WANT: u64 = 4096;
+    match soft {
+        None => Check::skip("open files", "could not read the open-file limit"),
+        Some(n) if n >= WANT => Check::ok("open files", format!("soft limit {n}")),
+        Some(n) => Check::warn(
+            "open files",
+            format!("soft limit {n} for this shell; a host with many VMs needs more than {WANT}"),
+            "set LimitNOFILE=1048576 in the fluxvm service unit (and `ulimit -n 65536` for a foreground `fluxctl serve`)",
+        ),
+    }
+}
+
+/// Linux: the devices tap networking uses. `/dev/net/tun` is needed for any tap-mode VM; `/dev/vhost-net` is optional
+/// and moves virtio-net's data path into the kernel.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub fn check_net_devices(tun: bool, vhost_net: bool) -> Check {
+    match (tun, vhost_net) {
+        (true, true) => Check::ok("net devices", "/dev/net/tun and /dev/vhost-net are present"),
+        (true, false) => Check::warn(
+            "net devices",
+            "/dev/vhost-net is missing: tap networking works but virtio-net stays in userspace (slower)",
+            "sudo modprobe vhost_net",
+        ),
+        (false, _) => Check::warn(
+            "net devices",
+            "/dev/net/tun is missing: tap-mode networking cannot create its device",
+            "sudo modprobe tun   (user-mode networking does not need it)",
+        ),
+    }
+}
+
+/// Linux: `net.ipv4.ip_forward`. NAT'ed tap and namespace networking only reaches beyond the host with it on.
+/// `None` = could not read it.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub fn check_ip_forward(enabled: Option<bool>) -> Check {
+    match enabled {
+        None => Check::skip("ip forwarding", "could not read net.ipv4.ip_forward"),
+        Some(true) => Check::ok("ip forwarding", "net.ipv4.ip_forward is 1"),
+        Some(false) => Check::warn(
+            "ip forwarding",
+            "net.ipv4.ip_forward is 0: VMs on a NAT'ed tap or namespace network cannot reach beyond the host",
+            "sudo sysctl -w net.ipv4.ip_forward=1   (persist it in /etc/sysctl.d/)",
+        ),
+    }
+}
+
+/// `RLIMIT_NOFILE` soft limit of this process.
+#[cfg(target_os = "linux")]
+fn open_files_soft() -> Option<u64> {
+    let mut r = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // SAFETY: `r` is a properly sized, writable rlimit.
+    if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut r) } != 0 {
+        return None;
+    }
+    // rlim_t is 32-bit on some targets, so the cast is needed there.
+    #[allow(clippy::unnecessary_cast)]
+    Some(r.rlim_cur as u64)
+}
+
 /// macOS: does the runner carry `com.apple.security.virtualization`? `None` = could not tell.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub fn check_runner_entitlement(runner: Option<&Path>, entitled: Option<bool>) -> Check {
@@ -538,6 +640,21 @@ pub async fn gather(listen: &str, state_dir: &Path, host_only: bool) -> Vec<Chec
             usable,
             (!host_only).then_some(matches!(healthz, Ok(200))),
         ));
+        out.push(check_cgroups(
+            std::fs::read_to_string("/sys/fs/cgroup/cgroup.controllers")
+                .ok()
+                .as_deref(),
+        ));
+        out.push(check_net_devices(
+            Path::new("/dev/net/tun").exists(),
+            Path::new("/dev/vhost-net").exists(),
+        ));
+        out.push(check_ip_forward(
+            std::fs::read_to_string("/proc/sys/net/ipv4/ip_forward")
+                .ok()
+                .map(|t| t.trim() == "1"),
+        ));
+        out.push(check_open_files(open_files_soft()));
     }
 
     out.push(check_disk(state_dir, free_bytes(state_dir)));
@@ -690,6 +807,75 @@ mod tests {
         }
         assert_eq!(level(&check_session(Session::Unlocked)), Level::Ok);
         assert_eq!(level(&check_session(Session::Unknown)), Level::Skip);
+    }
+
+    #[test]
+    fn cgroups_need_v2_with_the_controllers() {
+        assert_eq!(level(&check_cgroups(None)), Level::Warn);
+        let c = check_cgroups(Some("cpuset cpu io memory hugetlb pids rdma\n"));
+        assert_eq!(level(&c), Level::Ok);
+        let c = check_cgroups(Some("cpu memory\n"));
+        assert_eq!(level(&c), Level::Warn);
+        assert!(c.detail.contains("io, pids, cpuset"), "{}", c.detail);
+        // a controller name that only contains a needed one does not count
+        assert_eq!(
+            level(&check_cgroups(Some("cpuacct memory io pids cpuset"))),
+            Level::Warn
+        );
+    }
+
+    #[test]
+    fn open_file_limit_thresholds() {
+        assert_eq!(level(&check_open_files(Some(1024))), Level::Warn);
+        assert!(
+            check_open_files(Some(1024))
+                .fix
+                .unwrap()
+                .contains("LimitNOFILE")
+        );
+        assert_eq!(level(&check_open_files(Some(4095))), Level::Warn);
+        assert_eq!(level(&check_open_files(Some(4096))), Level::Ok);
+        assert_eq!(level(&check_open_files(Some(1_048_576))), Level::Ok);
+        assert_eq!(level(&check_open_files(None)), Level::Skip);
+    }
+
+    #[test]
+    fn net_devices_tun_is_needed_vhost_is_optional() {
+        assert_eq!(level(&check_net_devices(true, true)), Level::Ok);
+        let c = check_net_devices(true, false);
+        assert_eq!(level(&c), Level::Warn);
+        assert!(c.fix.unwrap().contains("vhost_net"));
+        let c = check_net_devices(false, true);
+        assert_eq!(level(&c), Level::Warn);
+        assert!(c.detail.contains("/dev/net/tun"));
+        assert!(c.fix.unwrap().contains("modprobe tun"));
+    }
+
+    #[test]
+    fn ip_forward_states() {
+        assert_eq!(level(&check_ip_forward(Some(true))), Level::Ok);
+        let c = check_ip_forward(Some(false));
+        assert_eq!(level(&c), Level::Warn);
+        assert!(c.fix.unwrap().contains("ip_forward=1"));
+        assert_eq!(level(&check_ip_forward(None)), Level::Skip);
+    }
+
+    #[test]
+    fn the_new_host_checks_never_fail_the_report() {
+        let all = [
+            check_cgroups(None),
+            check_open_files(Some(1)),
+            check_net_devices(false, false),
+            check_ip_forward(Some(false)),
+        ];
+        assert!(all.iter().all(|c| level(c) == Level::Warn));
+        assert_eq!(exit_code(&all), 0);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn open_files_soft_reads_this_process() {
+        assert!(open_files_soft().is_some_and(|n| n > 0));
     }
 
     #[test]
