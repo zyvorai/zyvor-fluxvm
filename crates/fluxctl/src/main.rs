@@ -35,6 +35,7 @@ mod create;
 mod docker_host;
 mod doctor;
 mod exec_policy_check;
+mod explain;
 mod fleet_cli;
 mod fleet_client;
 mod guard_cmd;
@@ -1742,6 +1743,9 @@ enum Command {
         #[command(subcommand)]
         command: exec_policy_check::ExecPolicyCommand,
     },
+    /// Explain an API error code (`NOT_FOUND`, `429`, `required`): what it means, what usually causes it and what to do.
+    /// Offline; `--list` shows them all.
+    Explain(explain::ExplainArgs),
     #[command(next_help_heading = "Network Policy")]
     /// Per-VM network policy and dataplane introspection
     /// (`/v1/vms/{id}/network/*`). Distinct from `group`/`cnp`/`dataplane`,
@@ -5898,6 +5902,9 @@ async fn main() -> Result<()> {
     if let Command::ExecPolicy { command } = &cli.command {
         std::process::exit(exec_policy_check::run(command)?);
     }
+    if let Command::Explain(args) = &cli.command {
+        std::process::exit(explain::run(args)?);
+    }
     if let Command::VsockProxy { socket, port } = &cli.command {
         return fluxvm_apple::ssh::vsock_proxy(socket, *port);
     }
@@ -6256,6 +6263,7 @@ async fn main() -> Result<()> {
         | Command::WhatIf(_)
         | Command::Config { .. }
         | Command::ExecPolicy { .. }
+        | Command::Explain(_)
         | Command::VsockProxy { .. }
         | Command::ImportCompose { .. }
         | Command::Service { .. }
@@ -10451,6 +10459,10 @@ mod backlog_tier1_cli_tests {
         assert!(matches!(
             cli(&["exec-policy", "check", "p.json", "--abi", "4"]).command,
             Command::ExecPolicy { .. }
+        ));
+        assert!(matches!(
+            cli(&["explain", "NOT_FOUND"]).command,
+            Command::Explain(_)
         ));
     }
 

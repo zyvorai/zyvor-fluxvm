@@ -971,6 +971,18 @@ Two special codes ride on the generic statuses: `APPROVAL_REQUIRED` (a `428` tha
 The fleet central's sign-up and SSO browser flows still send only `error`; treat a missing `code` as unknown and fall
 back to the status.
 
+Not sure what a code means or what to do about it? `fluxctl explain` answers offline, from the same table:
+
+```sh
+fluxctl explain RATE_LIMITED     # meaning, usual causes, what to do (case, - and _ do not matter)
+fluxctl explain 428              # every code on an HTTP status
+fluxctl explain required         # part of a code name
+fluxctl explain --list [--json]  # all of them
+```
+
+It exits 1 for an unknown code (with a `did you mean`). The table is `fluxvm_core::error_codes`; a test in
+`fluxvm-api` fails when the API can send a code that the table does not explain.
+
 ### Idempotency-Key
 
 `POST /v1/vms`, `DELETE /v1/vms/{uuid}`, `POST /v1/vms/{uuid}/snapshot` and
