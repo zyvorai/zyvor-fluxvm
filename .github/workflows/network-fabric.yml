@@ -208,8 +208,10 @@ jobs:
         if: ${{ vars.FLUXVM_EBPF_PRIVILEGED_CI == '1' }}
         working-directory: fluxvm
         run: |
-          cargo test -p fluxvm-network --test direct_loader --no-run
-          BIN=$(ls -t target/debug/deps/direct_loader-* | grep -v '\.d$' | head -1)
+          # Ask cargo for the executable: newer cargo no longer puts it under target/debug/deps.
+          BIN=$(cargo test -p fluxvm-network --test direct_loader --no-run --message-format=json \
+            | jq -r 'select(.executable != null and .target.name == "direct_loader") | .executable' | tail -1)
+          test -x "$BIN"
           # TCX needs Linux >= 6.6; on an older runner kernel this leg is skipped, never faked.
           if [ "$(uname -r | cut -d. -f1)" -gt 6 ] || { [ "$(uname -r | cut -d. -f1)" -eq 6 ] && [ "$(uname -r | cut -d. -f2)" -ge 6 ]; }; then
             sudo env FLUXVM_TEST_BPF_DIR="$PWD/dist/bpf" FLUXVM_TCX_HELPER="$RUNNER_TEMP/fluxvm-tcx" FLUXVM_TCX=required "$BIN" --nocapture
@@ -220,9 +222,10 @@ jobs:
         if: ${{ vars.FLUXVM_EBPF_PRIVILEGED_CI == '1' }}
         working-directory: fluxvm
         run: |
-          cargo test -p fluxvm-network --test direct_uplink --no-run
-          BIN=$(ls -t target/debug/deps/direct_uplink-* | grep -v '\.d$' | head -1)
-          sudo env FLUXVM_UPLINK_TEST_BIN="$PWD/$BIN" FLUXVM_BPF_DIR="$PWD/dist/bpf" FLUXVM_TCX_HELPER="$RUNNER_TEMP/fluxvm-tcx" ./scripts/test-direct-uplink.sh
+          BIN=$(cargo test -p fluxvm-network --test direct_uplink --no-run --message-format=json \
+            | jq -r 'select(.executable != null and .target.name == "direct_uplink") | .executable' | tail -1)
+          test -x "$BIN"
+          sudo env FLUXVM_UPLINK_TEST_BIN="$BIN" FLUXVM_BPF_DIR="$PWD/dist/bpf" FLUXVM_TCX_HELPER="$RUNNER_TEMP/fluxvm-tcx" ./scripts/test-direct-uplink.sh
 
       - name: Direct datapath static evidence
         working-directory: fluxvm
