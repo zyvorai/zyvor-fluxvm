@@ -39,6 +39,7 @@ mod explain;
 mod fleet_cli;
 mod fleet_client;
 mod guard_cmd;
+mod guest_cmd;
 mod infer;
 mod kube_apps;
 mod kube_backup;
@@ -1837,6 +1838,12 @@ enum Command {
         #[command(subcommand)]
         command: McpCommand,
     },
+    /// Guest operations over the QEMU guest agent; reached as `vm guest …`.
+    #[command(hide = true)]
+    Guest {
+        #[command(subcommand)]
+        command: guest_cmd::GuestCommand,
+    },
     /// Host Metal/MLX (or llama.cpp) inference for `apple.host_gpu` sandboxes.
     Infer {
         #[command(subcommand)]
@@ -3400,6 +3407,11 @@ enum VmCommand {
     },
     /// Fork a running VM into N running copies from one saved state. Same as `fork-vm`.
     Fork(ForkArgs),
+    /// Guest operations over the QEMU guest agent: `info`, `ssh-key add|rm|ls`, `set-password`, `time-sync`. Needs `qga.enabled`.
+    Guest {
+        #[command(subcommand)]
+        command: guest_cmd::GuestCommand,
+    },
 }
 
 /// The old hyphenated spelling of a `vm` verb, if `cmd` is one: `(old, new)`. Used for the one-line hint.
@@ -3419,6 +3431,7 @@ fn lift_vm_group(cmd: Command) -> Command {
             VmCommand::Rename { id, new_name } => Command::RenameVm { id, new_name },
             VmCommand::Clone { id, new_name } => Command::CloneVm { id, new_name },
             VmCommand::Fork(a) => Command::ForkVm(a),
+            VmCommand::Guest { command } => Command::Guest { command },
         },
         other => other,
     }
@@ -4802,6 +4815,7 @@ async fn run_remote(
             pretty(&r.call(Method::GET, &format!("/v1/vms/{id}"), None).await?)?
         }
         Command::Netobs { command } => netobs::run(r, command).await?,
+        Command::Guest { command } => guest_cmd::run(r, command).await?,
         Command::Agent { command } => agent_session::run(r, command).await?,
         Command::Vznet {
             command: VznetCommand::Ls { json },
@@ -6238,6 +6252,11 @@ async fn main() -> Result<()> {
         return infer::run(&r, command).await;
     }
 
+    if let Command::Guest { command } = cli.command {
+        let r = remote::Remote::new(&cfg.listen, cli.server_token.clone());
+        return guest_cmd::run(&r, command).await;
+    }
+
     if let Command::Fleet {
         central,
         token,
@@ -6285,6 +6304,7 @@ async fn main() -> Result<()> {
         | Command::Netobs { .. }
         | Command::Agent { .. }
         | Command::Infer { .. }
+        | Command::Guest { .. }
         | Command::Doctor { .. }
         | Command::Vm { .. }
         | Command::Quota { token: Some(_), .. } => {
