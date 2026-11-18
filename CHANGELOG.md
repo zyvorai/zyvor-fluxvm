@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- **Guest operations over the QEMU guest agent.** `fluxctl vm guest info | ssh-key add|rm|ls | set-password | time-sync` and the matching
+  `GET /v1/vms/{id}/guest/info`, `GET|POST /v1/vms/{id}/guest/ssh-keys` (+ `/remove`), `POST .../guest/password`, `POST .../guest/time-sync`
+  routes (admin for everything that changes the guest or lists keys; `info` is readable). New typed wrappers in `fluxvm_image::qga` for
+  `guest-get-osinfo`, `-fsinfo`, `-users`, `-host-name`, `-time`, `-vcpus`, `-memory-blocks`, `guest-set-time`, `guest-set-user-password` and the three
+  `guest-ssh-*-authorized-keys` commands. Passwords are base64 on the wire, read only from stdin or a file by the CLI, and never logged, echoed or put
+  in an error. Needs `qga.enabled` and a running guest. Automatic clock resync after resume/restore is not wired yet (follow-up). Unit tests drive a mock
+  QGA socket; no real guest agent was exercised. See `docs/guest-ops.md`.
 - **`fluxctl doctor` checks four more Linux host settings.** `cgroups` (a unified cgroup v2 hierarchy with the `cpu memory io pids cpuset` controllers
   the VM cgroups delegate; without them CPU, memory and I/O limits are not enforced), `net devices` (`/dev/net/tun` for tap networking, `/dev/vhost-net`
   for the kernel data path), `ip forwarding` (`net.ipv4.ip_forward` for NAT'ed tap and namespace networks) and `open files` (the soft `RLIMIT_NOFILE`;

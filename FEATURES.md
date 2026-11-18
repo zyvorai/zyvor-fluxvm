@@ -92,6 +92,7 @@ Exhaustive checklist. For the pitch, see [README.md](README.md); for who this is
 - Ed25519-signed image catalog with REST CRUD (`allowed_image_dirs`, `trusted_signers`), also reachable
   entirely offline via `fluxvm catalog list|add|remove|rename|clone|export|lock|unlock|clean`
 - Windows/Kryton golden-image customization with live QGA
+- Guest operations over the QEMU guest agent: OS/host/clock/users/filesystems/vCPU info, SSH authorized-key add/remove/list, password set (stdin/file only), clock resync; `fluxctl vm guest …`, `/v1/vms/{id}/guest/…` (`docs/guest-ops.md`)
 
 ## Operations
 
