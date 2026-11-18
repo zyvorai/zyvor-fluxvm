@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- **`fluxctl image`: OCI registry management.** `inspect` (manifest or index, config, layers, sizes, platforms, annotations), `tags` (follows `Link`
+  pagination), `tag` (retag a manifest, bytes unchanged), `rm` (delete by digest only; a registry that forbids it gets a clear error), `referrers` (OCI 1.1
+  referrers API with the `sha256-<hex>` tag-schema fallback), `attach` (publish an SBOM or attestation as an artifact whose `subject` is the target, updating
+  the fallback index when the registry does not) and `index create` (multi-arch OCI index with platforms read from each manifest's config). JSON by default,
+  `-o table` for text. New module `fluxvm_image::oci_manage`, tested against an in-process mock registry. Additive. See `docs/oci-registry-tools.md`.
 - **`fluxctl doctor` checks four more Linux host settings.** `cgroups` (a unified cgroup v2 hierarchy with the `cpu memory io pids cpuset` controllers
   the VM cgroups delegate; without them CPU, memory and I/O limits are not enforced), `net devices` (`/dev/net/tun` for tap networking, `/dev/vhost-net`
   for the kernel data path), `ip forwarding` (`net.ipv4.ip_forward` for NAT'ed tap and namespace networks) and `open files` (the soft `RLIMIT_NOFILE`;
