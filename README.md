@@ -31,6 +31,8 @@ that omit the dataplane mode, follow the [eBPF upgrade guide](docs/primary-ebpf.
 
 </div>
 
+[Client overview (PDF)](docs/FluxVM-Client-Overview.pdf)
+
 ---
 
 ## Your own Mac cloud
