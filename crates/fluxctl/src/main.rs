@@ -40,6 +40,7 @@ mod fleet_cli;
 mod fleet_client;
 mod guard_cmd;
 mod guest_cmd;
+mod image_mgmt;
 mod infer;
 mod kube_apps;
 mod kube_backup;
@@ -1631,6 +1632,12 @@ enum Command {
     VmImage {
         #[command(subcommand)]
         command: VmImageCommand,
+    },
+    /// OCI registry management, client-side: inspect, tags, tag, rm, referrers, attach, index create. Credentials:
+    /// `FLUXVM_REGISTRY_USER` / `FLUXVM_REGISTRY_PASSWORD`. See docs/oci-registry-tools.md.
+    Image {
+        #[command(subcommand)]
+        command: image_mgmt::ImageCommand,
     },
     /// Private VM-to-VM networks between `vz` guests (`apple.networks`, `oci.networks`). See docs/macos.md.
     Vznet {
@@ -6110,6 +6117,9 @@ async fn main() -> Result<()> {
     if let Command::VmImage { command } = cli.command {
         return run_vm_image(command).await;
     }
+    if let Command::Image { command } = cli.command {
+        return image_mgmt::run(command, format).await;
+    }
     if !matches!(cli.command, Command::Serve)
         && let Some(r) = remote::endpoint(
             cli.server.clone(),
@@ -8016,6 +8026,7 @@ async fn main() -> Result<()> {
             command: VznetCommand::Ls { json },
         } => print_vznets(&serde_json::to_value(m.vznets(None).await)?, json)?,
         Command::VmImage { command } => run_vm_image(command).await?,
+        Command::Image { command } => image_mgmt::run(command, format).await?,
         Command::Oci { command } => {
             let out = match command {
                 OciCommand::Pull { image, platform } => {
