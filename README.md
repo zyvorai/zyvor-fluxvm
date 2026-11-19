@@ -33,6 +33,8 @@ that omit the dataplane mode, follow the [eBPF upgrade guide](docs/primary-ebpf.
 
 [Client overview (PDF)](docs/FluxVM-Client-Overview.pdf)
 
+**On a Mac?** [FluxVM for Mac](https://zyvorai.github.io/zyvor-fluxvm/fluxvm-for-mac/) is a notarized menu-bar app with a 30-day trial. The FluxVM engine in this repository stays free and open source.
+
 ---
 
 ## Your own Mac cloud
@@ -329,6 +331,10 @@ Free under Apache-2.0. If it helps you, you can donate any amount you like: <htt
 FluxVM is **free and open source** under the [Apache License 2.0](LICENSE) — see [NOTICE](NOTICE). Copyright 2026 Zyvor AI Labs. The entire repository is under this one license; there is no dual-licensing or separately-licensed core component.
 
 **Zyvor Enterprise** adds what production teams ask for: supported releases, deployment and upgrade guidance, priority incident triage, a named technical contact and 24x7 critical intake. Plans and terms: [docs/SUBSCRIPTION-MODEL.md](docs/SUBSCRIPTION-MODEL.md) · [Pricing](https://zyvor.dev/pricing?utm_source=github&utm_medium=fluxvm&utm_campaign=readme_license) · [sales@zyvor.dev](mailto:sales@zyvor.dev).
+
+### FluxVM for Mac
+
+[FluxVM for Mac](https://zyvorai.github.io/zyvor-fluxvm/fluxvm-for-mac/) (release [`mac-v0.1.0`](https://github.com/zyvorai/zyvor-fluxvm/releases/tag/mac-v0.1.0), `FluxVM-Mac-0.1.0.dmg`) is a separate, notarized menu-bar app that bundles the FluxVM engine (0.4.21). **The app is proprietary and is not open source; its source is private.** It starts with a free 30-day trial. After the trial the price is INR 2,999 for an individual, or INR 4,999 per Mac for teams of 5 or more Macs. For a trial key or a licence, contact [sales@zyvor.dev](mailto:sales@zyvor.dev). The engine and CLI in this repository are unaffected: they stay under the Apache License 2.0, and the Linux install is unchanged.
 
 Report vulnerabilities per [SECURITY.md](SECURITY.md).
 
