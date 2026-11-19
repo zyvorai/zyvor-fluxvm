@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- **`fluxctl image push` / `image pull-disk`: VM disk images as OCI artifacts.** Pushes one raw or qcow2 disk to any OCI registry as a one-layer
+  image manifest (`artifactType application/vnd.fluxvm.disk.v1`, layer `application/vnd.fluxvm.disk.layer.v1.<raw|qcow2>`, config with architecture,
+  format and virtual size), like KubeVirt's containerDisk but pure Rust. The file is streamed (hashed first so an existing layer is skipped, then
+  sent in chunked `PATCH` uploads), Basic/Bearer auth asks for push scope, and the registry's `Docker-Content-Digest` must match. `pull-disk` checks
+  the manifest (when pinned), config and layer digests and size before the file appears. New module `fluxvm_image::oci_push`; credentials are
+  `FLUXVM_REGISTRY_USER` / `_PASSWORD` as for `vm-image`. Additive. See `docs/oci-disk-images.md`.
 - **Guest operations over the QEMU guest agent.** `fluxctl vm guest info | ssh-key add|rm|ls | set-password | time-sync` and the matching
   `GET /v1/vms/{id}/guest/info`, `GET|POST /v1/vms/{id}/guest/ssh-keys` (+ `/remove`), `POST .../guest/password`, `POST .../guest/time-sync`
   routes (admin for everything that changes the guest or lists keys; `info` is readable). New typed wrappers in `fluxvm_image::qga` for
