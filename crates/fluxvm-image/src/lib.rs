@@ -8,6 +8,7 @@ pub mod import;
 pub mod ipsw;
 pub mod oci;
 pub mod oci_boot;
+pub mod oci_push;
 pub mod oci_registry;
 pub mod ova;
 mod qcow2;
