@@ -58,9 +58,12 @@ pub const KNOWN_KEYS: &[&str] = &[
     "network",
     "numa",
     "numa_node",
+    "on_crash",
     "pod_uid",
+    "power_schedule",
     "qga",
     "root_disk_io",
+    "run_strategy",
     "secure_boot",
     "security_profile",
     "shared_folders",
@@ -142,7 +145,10 @@ pub fn unknown_keys(value: &Value) -> Vec<Finding> {
     let mut keys: Vec<&String> = map.keys().collect();
     keys.sort();
     keys.into_iter()
-        .filter(|k| !KNOWN_KEYS.contains(&k.as_str()))
+        .filter(|k| {
+            !KNOWN_KEYS.contains(&k.as_str())
+                && !matches!(k.as_str(), "runStrategy" | "onCrash" | "powerSchedule")
+        })
         .map(|k| {
             let near = KNOWN_KEYS
                 .iter()
@@ -258,6 +264,7 @@ pub fn lint_spec(s: &CreateVmRequest, env: &SpecEnv<'_>) -> Vec<Finding> {
     qemu_only("vfio_devices", !s.vfio_devices.is_empty(), &mut out);
     qemu_only("numa", !s.numa.is_empty(), &mut out);
     qemu_only("balloon", s.balloon.is_some(), &mut out);
+    qemu_only("on_crash", s.on_crash.is_some(), &mut out);
     qemu_only("data_disks", !s.data_disks.is_empty(), &mut out);
     qemu_only("cdroms", !s.cdroms.is_empty(), &mut out);
     qemu_only("root_disk_io", s.root_disk_io.is_some(), &mut out);

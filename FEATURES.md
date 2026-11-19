@@ -22,6 +22,7 @@ Exhaustive checklist. For the pitch, see [README.md](README.md); for who this is
 - QEMU data disks: qcow2 hot-add as `scsi-hd`, live `block_resize` of root or data disks, detach (`fluxctl disk`, `/v1/vms/{id}/disks`); a stopped `vz` VM's root disk can be grown offline
 - QEMU serial console on a chardev socket teeing into `console.log`; websocket `GET /v1/vms/{id}/serial` + `fluxctl serial`
 - Snapshots: save, list, delete, start-from; label-driven scheduled snapshots with retention (`fluxvm.io/snapshot-every`, `fluxvm.io/snapshot-keep`)
+- VM lifecycle resilience: `run_strategy` (Always, RerunOnFailure, Manual, Halted) restarts a dead hypervisor process with exponential backoff and a crash-loop cap; QEMU `on_crash` (pvpanic and watchdog, restart/poweroff/pause/coredump-if-existing); cron `power_schedule` start/stop ([docs/run-strategy.md](docs/run-strategy.md))
 - Backups to standalone qcow2 (root or `--all-disks`), live via one temporary internal snapshot
 - VM templates (`/v1/vm-templates`, `fluxctl vm-template save|list|show|delete|create`)
 - Instancetypes and preferences, KubeVirt-style (`/v1/instancetypes`, `/v1/preferences`, `fluxctl instancetype|preference ls|get|create|rm`): named, versioned size classes and device defaults, built-in `small`/`medium`/`large`/`memory-optimised`; `create --instancetype NAME[:VERSION] --preference NAME` (explicit spec wins over a preference, a clash with an instancetype is a 400, the resolved values are snapshotted with the VM); linted by `vm-spec check`. See [docs/instancetypes.md](docs/instancetypes.md)
@@ -43,6 +44,8 @@ Exhaustive checklist. For the pitch, see [README.md](README.md); for who this is
 - **Firecracker** — microVM backend, Linux kernel + raw root filesystem, includes the **Firecracker jailer** (chroot + uid/gid isolation, see [docs/operations.md](docs/operations.md#firecracker-jailer-chroot-uidgid-isolation-cgroups))
 - **FluxVM hypervisor** (`backend: "flux-vm"`, binary `fluxvm-hypervisor`) — agent-sandbox track: memory snapshots, `/v1/sandboxes`, guest HTTP proxy + AutoResume, L7 egress, AutoPause, `/console`; in-tree KVM virtio-vsock host→guest CSM (guest-agent ping/exec); guest→host `uds_path_<port>` muxer still deferred
 - **Apple Virtualization.framework** (`backend: "vz"`, macOS on Apple silicon) — Linux and macOS guests, snapshots, warm sandbox pool, offline and allow-listed sandboxes, direct kernel boot, **`apple.host_gpu`** host Metal/MLX OpenAI relay over vsock ([docs/host-inference.md](docs/host-inference.md)), and **container sandboxes**: an OCI image (`linux/arm64`) in its own lightweight VM with a read-only root and agent-only exec ([docs/macos.md](docs/macos.md), [docs/oci-sandboxes.md](docs/oci-sandboxes.md))
+- **VM disks as OCI artifacts** — `fluxctl image push <file> <ref>` / `image pull-disk <ref> <out>` move a raw or qcow2 disk through any OCI registry (pure Rust, streamed, every digest verified) ([docs/oci-disk-images.md](docs/oci-disk-images.md))
+- **OCI registry tools** (`fluxctl image inspect|tags|tag|rm|referrers|attach|index create`) — inspect manifests, list and retag, delete by digest, OCI 1.1 referrers with tag-schema fallback, attach SBOMs/attestations, build multi-arch indexes; client-side over the registry HTTP API ([docs/oci-registry-tools.md](docs/oci-registry-tools.md))
 - **QEMU control sockets** — QMP under short `run_dir/qmp/<id>.sock` (macOS `sockaddr_un` / `SUN_LEN` safe); migration receivers under `run_dir/mr/<id>/` ([docs/operations.md](docs/operations.md#state-layout))
 - **Agent sessions** — `fluxctl agent` / `/v1/agents/sessions`: policy, scoped tokens, jobs, approvals, budgets, fork/evaluate/promote, live event stream over SSE ([docs/agent-sessions-guide.md](docs/agent-sessions-guide.md))
 - **Agent-sandbox tooling** — HTTP method/host/path egress ACL incl. opt-in HTTPS interception ([docs/http-acl.md](docs/http-acl.md)), guest file change-set API ([docs/sandbox-changes.md](docs/sandbox-changes.md)), stdlib-only Python and Go SDKs (`python/`, `go/`), and `fluxvm-procbox`, a rootless Landlock + seccomp process sandbox with profiles and `learn` for the lightweight tier ([docs/procbox.md](docs/procbox.md)), also selectable as a `/v1/sandboxes` kind with dry-run ([docs/procbox-backend.md](docs/procbox-backend.md))
@@ -94,6 +97,7 @@ Exhaustive checklist. For the pitch, see [README.md](README.md); for who this is
 - Ed25519-signed image catalog with REST CRUD (`allowed_image_dirs`, `trusted_signers`), also reachable
   entirely offline via `fluxvm catalog list|add|remove|rename|clone|export|lock|unlock|clean`
 - Windows/Kryton golden-image customization with live QGA
+- Guest operations over the QEMU guest agent: OS/host/clock/users/filesystems/vCPU info, SSH authorized-key add/remove/list, password set (stdin/file only), clock resync; `fluxctl vm guest …`, `/v1/vms/{id}/guest/…` (`docs/guest-ops.md`)
 
 ## Operations
 

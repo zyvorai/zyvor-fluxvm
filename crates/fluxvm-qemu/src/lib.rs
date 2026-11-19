@@ -3,6 +3,7 @@
 
 pub mod block;
 mod confidential;
+pub mod crash_watch;
 pub mod diagnostics;
 pub mod disks;
 pub mod hibernate;
@@ -261,6 +262,8 @@ pub fn build_args(
             ),
         ]);
     }
+
+    a.extend(crash_watch::args(cfg, ctx.id, req.on_crash));
 
     a.extend(disks::boot_args(&ctx.workspace));
     a.extend(disks::cdrom_args(&req.cdroms));
@@ -1089,6 +1092,9 @@ mod tests {
             vfio_devices: vec![],
             numa: vec![],
             balloon: None,
+            run_strategy: None,
+            on_crash: None,
+            power_schedule: None,
             pod_uid: None,
             secure_boot: None,
             tpm: None,
@@ -1791,6 +1797,9 @@ mod snapshot_save_tests {
                 vfio_devices: vec![],
                 numa: vec![],
                 balloon: None,
+                run_strategy: None,
+                on_crash: None,
+                power_schedule: None,
                 pod_uid: None,
                 secure_boot: None,
                 tpm: None,

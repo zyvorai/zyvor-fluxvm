@@ -40,6 +40,8 @@ mod explain;
 mod fleet_cli;
 mod fleet_client;
 mod guard_cmd;
+mod guest_cmd;
+mod image_mgmt;
 mod infer;
 mod instancetype_cmd;
 mod kube_apps;
@@ -1653,6 +1655,13 @@ enum Command {
         #[command(subcommand)]
         command: VmImageCommand,
     },
+    /// Single-file VM disks as OCI artifacts (like KubeVirt containerDisk): push a raw or qcow2 image to any OCI
+    /// registry and pull it back with every digest verified. Credentials: `FLUXVM_REGISTRY_USER` /
+    /// `FLUXVM_REGISTRY_PASSWORD`. See docs/oci-disk-images.md.
+    Image {
+        #[command(subcommand)]
+        command: ImageCommand,
+    },
     /// Private VM-to-VM networks between `vz` guests (`apple.networks`, `oci.networks`). See docs/macos.md.
     Vznet {
         #[command(subcommand)]
@@ -1858,6 +1867,12 @@ enum Command {
     Mcp {
         #[command(subcommand)]
         command: McpCommand,
+    },
+    /// Guest operations over the QEMU guest agent; reached as `vm guest …`.
+    #[command(hide = true)]
+    Guest {
+        #[command(subcommand)]
+        command: guest_cmd::GuestCommand,
     },
     /// Host Metal/MLX (or llama.cpp) inference for `apple.host_gpu` sandboxes.
     Infer {
@@ -3422,6 +3437,11 @@ enum VmCommand {
     },
     /// Fork a running VM into N running copies from one saved state. Same as `fork-vm`.
     Fork(ForkArgs),
+    /// Guest operations over the QEMU guest agent: `info`, `ssh-key add|rm|ls`, `set-password`, `time-sync`. Needs `qga.enabled`.
+    Guest {
+        #[command(subcommand)]
+        command: guest_cmd::GuestCommand,
+    },
 }
 
 /// The old hyphenated spelling of a `vm` verb, if `cmd` is one: `(old, new)`. Used for the one-line hint.
@@ -3441,6 +3461,7 @@ fn lift_vm_group(cmd: Command) -> Command {
             VmCommand::Rename { id, new_name } => Command::RenameVm { id, new_name },
             VmCommand::Clone { id, new_name } => Command::CloneVm { id, new_name },
             VmCommand::Fork(a) => Command::ForkVm(a),
+            VmCommand::Guest { command } => Command::Guest { command },
         },
         other => other,
     }
@@ -3683,6 +3704,65 @@ enum GroupCommand {
     Delete {
         name: String,
     },
+}
+
+#[derive(Subcommand)]
+enum ImageCommand {
+    /// Push a raw or qcow2 disk file to `registry/repo:tag` as a one-layer OCI artifact.
+    Push {
+        file: PathBuf,
+        reference: String,
+        /// `raw` or `qcow2` (detected from the file when omitted; must agree with it).
+        #[arg(long)]
+        format: Option<String>,
+        /// `arm64` or `amd64` (default: this host's).
+        #[arg(long)]
+        arch: Option<String>,
+        /// Upload chunk size in MiB (default 64; larger files are sent in several requests).
+        #[arg(long)]
+        chunk_mib: Option<usize>,
+    },
+    /// Pull a disk artifact `registry/repo:tag` (or `@sha256:…`) into the new file `out`.
+    PullDisk { reference: String, out: PathBuf },
+    /// Registry management: inspect, tags, tag, rm, referrers, attach, index create. See docs/oci-registry-tools.md.
+    #[command(flatten)]
+    Mgmt(image_mgmt::ImageCommand),
+}
+
+/// `fluxctl image`: client-side only (registry and local files), so it never needs the daemon.
+async fn run_image(command: ImageCommand, format: output::OutputFormat) -> Result<()> {
+    let out = match command {
+        ImageCommand::Mgmt(c) => return image_mgmt::run(c, format).await,
+        ImageCommand::Push {
+            file,
+            reference,
+            format,
+            arch,
+            chunk_mib,
+        } => {
+            let opts = image::oci_push::PushOptions {
+                format: format
+                    .as_deref()
+                    .map(image::oci_push::DiskFormat::parse)
+                    .transpose()?,
+                architecture: arch,
+                chunk_size: chunk_mib.map_or(0, |m| m.saturating_mul(1024 * 1024)),
+                annotations: Default::default(),
+            };
+            serde_json::to_value(
+                image::oci_push::push(&file, &reference, registry_credentials_from_env(), &opts)
+                    .await
+                    .with_context(|| format!("pushing {} to {reference}", file.display()))?,
+            )?
+        }
+        ImageCommand::PullDisk { reference, out } => serde_json::to_value(
+            image::oci_push::pull_disk(&reference, &out, registry_credentials_from_env())
+                .await
+                .with_context(|| format!("pulling {reference}"))?,
+        )?,
+    };
+    println!("{}", serde_json::to_string_pretty(&out)?);
+    Ok(())
 }
 
 #[derive(Subcommand)]
@@ -4824,6 +4904,7 @@ async fn run_remote(
             pretty(&r.call(Method::GET, &format!("/v1/vms/{id}"), None).await?)?
         }
         Command::Netobs { command } => netobs::run(r, command).await?,
+        Command::Guest { command } => guest_cmd::run(r, command).await?,
         Command::Agent { command } => agent_session::run(r, command).await?,
         Command::Vznet {
             command: VznetCommand::Ls { json },
@@ -6118,6 +6199,9 @@ async fn main() -> Result<()> {
     if let Command::VmImage { command } = cli.command {
         return run_vm_image(command).await;
     }
+    if let Command::Image { command } = cli.command {
+        return run_image(command, format).await;
+    }
     if !matches!(cli.command, Command::Serve)
         && let Some(r) = remote::endpoint(
             cli.server.clone(),
@@ -6260,6 +6344,11 @@ async fn main() -> Result<()> {
         return infer::run(&r, command).await;
     }
 
+    if let Command::Guest { command } = cli.command {
+        let r = remote::Remote::new(&cfg.listen, cli.server_token.clone());
+        return guest_cmd::run(&r, command).await;
+    }
+
     if let Command::Fleet {
         central,
         token,
@@ -6322,6 +6411,7 @@ async fn main() -> Result<()> {
         | Command::Netobs { .. }
         | Command::Agent { .. }
         | Command::Infer { .. }
+        | Command::Guest { .. }
         | Command::Doctor { .. }
         | Command::Vm { .. }
         | Command::Quota { token: Some(_), .. } => {
@@ -8044,6 +8134,7 @@ async fn main() -> Result<()> {
             command: VznetCommand::Ls { json },
         } => print_vznets(&serde_json::to_value(m.vznets(None).await)?, json)?,
         Command::VmImage { command } => run_vm_image(command).await?,
+        Command::Image { command } => run_image(command, format).await?,
         Command::Oci { command } => {
             let out = match command {
                 OciCommand::Pull { image, platform } => {
@@ -10388,6 +10479,34 @@ mod machinectl_parity_cli_tests {
             Command::Disable { .. }
         ));
         assert!(matches!(parse(&["list-images"]), Command::ListImages));
+        let Command::Image {
+            command:
+                ImageCommand::Push {
+                    file,
+                    reference,
+                    format,
+                    ..
+                },
+        } = parse(&[
+            "image",
+            "push",
+            "d.qcow2",
+            "localhost:5000/a/b:1",
+            "--format",
+            "qcow2",
+        ])
+        else {
+            panic!("image push");
+        };
+        assert_eq!(file, PathBuf::from("d.qcow2"));
+        assert_eq!(reference, "localhost:5000/a/b:1");
+        assert_eq!(format.as_deref(), Some("qcow2"));
+        assert!(matches!(
+            parse(&["image", "pull-disk", "localhost:5000/a/b:1", "out.raw"]),
+            Command::Image {
+                command: ImageCommand::PullDisk { .. }
+            }
+        ));
         assert!(matches!(
             parse(&["image-status", "ubuntu"]),
             Command::ImageStatus { .. }

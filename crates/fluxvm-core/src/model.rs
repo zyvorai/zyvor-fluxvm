@@ -1806,6 +1806,25 @@ pub struct CreateVmRequest {
     /// memory is pinned or encrypted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub balloon: Option<BalloonSpec>,
+    /// What to do when the VM's hypervisor process dies unrequested; unset
+    /// keeps the old behaviour (the VM is marked Stopped and stays so).
+    #[serde(
+        default,
+        alias = "runStrategy",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub run_strategy: Option<crate::lifecycle::RunStrategy>,
+    /// QEMU only: what a guest panic (pvpanic) or watchdog expiry does.
+    /// Unset adds no pvpanic or watchdog device.
+    #[serde(default, alias = "onCrash", skip_serializing_if = "Option::is_none")]
+    pub on_crash: Option<crate::lifecycle::OnCrash>,
+    /// Cron-driven power on/off (UTC), see `lifecycle::PowerSchedule`.
+    #[serde(
+        default,
+        alias = "powerSchedule",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub power_schedule: Option<crate::lifecycle::PowerSchedule>,
     /// Set 6S: Kubernetes Pod UID (from the CRI `io.kubernetes.cri.sandbox-uid`
     /// annotation), supplied by `containerd-shim-fluxvm-v2` for Secure
     /// Containers Pods. Mints a stable eBPF Pod identity

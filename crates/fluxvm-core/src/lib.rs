@@ -13,6 +13,7 @@ pub mod gpu_health;
 pub mod grants;
 pub mod instancetype;
 pub mod keychain;
+pub mod lifecycle;
 pub mod login_session;
 pub mod mdev;
 pub mod metrics;
