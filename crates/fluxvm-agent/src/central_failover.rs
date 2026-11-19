@@ -34,11 +34,17 @@ pub(super) struct Config {
 
 impl Config {
     pub(super) fn from_env() -> Option<Config> {
-        let get = |k: &str| std::env::var(k).ok().and_then(|v| v.trim().parse::<i64>().ok());
+        let get = |k: &str| {
+            std::env::var(k)
+                .ok()
+                .and_then(|v| v.trim().parse::<i64>().ok())
+        };
         let grace = get(ENV_GRACE).filter(|g| *g > 0)?;
         Some(Config {
             grace_secs: grace.max(MIN_GRACE_SECS),
-            margin_secs: get(ENV_MARGIN).filter(|m| *m >= 0).unwrap_or(DEFAULT_MARGIN_SECS),
+            margin_secs: get(ENV_MARGIN)
+                .filter(|m| *m >= 0)
+                .unwrap_or(DEFAULT_MARGIN_SECS),
         })
     }
 }
@@ -92,7 +98,10 @@ pub(super) fn spawn(fleet: Fleet, every: std::time::Duration, cfg: Config) {
             }
             let since = *leading_since.get_or_insert_with(std::time::Instant::now);
             let report = pass(&fleet, &cfg, Utc::now(), since.elapsed()).await;
-            if report["rescheduled"].as_array().is_some_and(|a| !a.is_empty()) {
+            if report["rescheduled"]
+                .as_array()
+                .is_some_and(|a| !a.is_empty())
+            {
                 tracing::warn!(%report, "rescheduled VMs off silent nodes");
             }
         }
@@ -100,7 +109,12 @@ pub(super) fn spawn(fleet: Fleet, every: std::time::Duration, cfg: Config) {
 }
 
 /// One pass. `leading_for`: how long this central has been leading; nothing happens before the grace period.
-pub(super) async fn pass(fleet: &Fleet, cfg: &Config, now: DateTime<Utc>, leading_for: std::time::Duration) -> Value {
+pub(super) async fn pass(
+    fleet: &Fleet,
+    cfg: &Config,
+    now: DateTime<Utc>,
+    leading_for: std::time::Duration,
+) -> Value {
     if (leading_for.as_secs() as i64) < cfg.grace_secs {
         return json!({"skipped": "leader for less than the grace period", "rescheduled": [], "unfenced_nodes": [], "failed": []});
     }
@@ -145,8 +159,10 @@ pub(super) async fn pass(fleet: &Fleet, cfg: &Config, now: DateTime<Utc>, leadin
                     t.end_vm(&e.node, &e.vm_id, now);
                     fleet.persist_tenancy(&t);
                     any = true;
-                    moved.push(json!({"vm": e.vm_id, "from": e.node, "to": created.get("node"),
-                        "new_vm": created.get("vm").and_then(|v| v.get("id"))}));
+                    moved.push(
+                        json!({"vm": e.vm_id, "from": e.node, "to": created.get("node"),
+                        "new_vm": created.get("vm").and_then(|v| v.get("id"))}),
+                    );
                 }
                 Err(err) => failed.push(json!({"vm": e.vm_id, "node": e.node, "error": err.1})),
             }
@@ -175,7 +191,10 @@ mod tests {
     use crate::tenancy::{TenancyState, VmEntry};
     use std::time::Duration;
 
-    const CFG: Config = Config { grace_secs: 60, margin_secs: 30 };
+    const CFG: Config = Config {
+        grace_secs: 60,
+        margin_secs: 30,
+    };
 
     fn n(age: i64, caps: &[&str]) -> NodeInfo {
         NodeInfo {
@@ -205,15 +224,37 @@ mod tests {
         let now = Utc::now();
         let d = |age, caps: &[&str]| decide(&n(age, caps), &CFG, now);
         assert_eq!(d(5, &["self_fence:45"]), Decision::Alive);
-        assert_eq!(d(40, &["self_fence:45"]), Decision::Waiting, "stale but inside the grace period");
+        assert_eq!(
+            d(40, &["self_fence:45"]),
+            Decision::Waiting,
+            "stale but inside the grace period"
+        );
         // Past grace (60) but fence deadline is 45 + 30 = 75.
-        assert_eq!(d(70, &["self_fence:45"]), Decision::Waiting, "node may not have fenced itself yet");
+        assert_eq!(
+            d(70, &["self_fence:45"]),
+            Decision::Waiting,
+            "node may not have fenced itself yet"
+        );
         assert_eq!(d(76, &["self_fence:45"]), Decision::Reschedule);
-        assert_eq!(d(100_000, &[]), Decision::Unfenced, "no fencing promise: never");
+        assert_eq!(
+            d(100_000, &[]),
+            Decision::Unfenced,
+            "no fencing promise: never"
+        );
         assert_eq!(d(100_000, &["next_interval"]), Decision::Unfenced);
         assert_eq!(d(100_000, &["self_fence:0"]), Decision::Unfenced);
         // The grace period can be the later deadline.
-        assert_eq!(decide(&n(70, &["self_fence:20"]), &Config { grace_secs: 120, margin_secs: 30 }, now), Decision::Waiting);
+        assert_eq!(
+            decide(
+                &n(70, &["self_fence:20"]),
+                &Config {
+                    grace_secs: 120,
+                    margin_secs: 30
+                },
+                now
+            ),
+            Decision::Waiting
+        );
     }
 
     #[test]
@@ -240,11 +281,23 @@ mod tests {
         (format!("http://{addr}"), hits)
     }
 
-    async fn fleet_with_dead_node(caps: &[&str], age: i64, spec: Option<Value>) -> (Fleet, Arc<std::sync::atomic::AtomicUsize>) {
+    async fn fleet_with_dead_node(
+        caps: &[&str],
+        age: i64,
+        spec: Option<Value>,
+    ) -> (Fleet, Arc<std::sync::atomic::AtomicUsize>) {
         let (url, hits) = fake_node().await;
         let mut nodes = HashMap::new();
         nodes.insert("dead".to_string(), n(age, caps));
-        nodes.insert("live".to_string(), NodeInfo { name: "live".into(), fluxvm_url: url, last_seen: Utc::now(), ..n(0, &[]) });
+        nodes.insert(
+            "live".to_string(),
+            NodeInfo {
+                name: "live".into(),
+                fluxvm_url: url,
+                last_seen: Utc::now(),
+                ..n(0, &[])
+            },
+        );
         let mut t = TenancyState::default();
         t.record_vm(VmEntry {
             node: "dead".into(),
@@ -286,7 +339,8 @@ mod tests {
 
     #[tokio::test]
     async fn a_fenced_silent_node_has_its_reschedulable_vm_recreated_elsewhere() {
-        let (fleet, hits) = fleet_with_dead_node(&["self_fence:45"], 200, Some(json!({"name": "x"}))).await;
+        let (fleet, hits) =
+            fleet_with_dead_node(&["self_fence:45"], 200, Some(json!({"name": "x"}))).await;
         let r = pass(&fleet, &CFG, Utc::now(), LONG).await;
         assert_eq!(r["rescheduled"].as_array().unwrap().len(), 1, "{r}");
         assert_eq!(r["rescheduled"][0]["to"], "live");
@@ -309,13 +363,22 @@ mod tests {
         assert!(r["rescheduled"].as_array().unwrap().is_empty());
         assert_eq!(r["unfenced_nodes"][0]["node"], "dead");
         assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 0);
-        assert!(fleet.tenancy.lock().await.vm("dead", "old-1").unwrap().active());
+        assert!(
+            fleet
+                .tenancy
+                .lock()
+                .await
+                .vm("dead", "old-1")
+                .unwrap()
+                .active()
+        );
     }
 
     #[tokio::test]
     async fn before_the_fence_deadline_nothing_moves() {
         // Fenced node, silent 70s: past grace (60) but inside fence (45) + margin (30).
-        let (fleet, hits) = fleet_with_dead_node(&["self_fence:45"], 70, Some(json!({"name": "x"}))).await;
+        let (fleet, hits) =
+            fleet_with_dead_node(&["self_fence:45"], 70, Some(json!({"name": "x"}))).await;
         let r = pass(&fleet, &CFG, Utc::now(), LONG).await;
         assert!(r["rescheduled"].as_array().unwrap().is_empty());
         assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 0);
@@ -323,7 +386,8 @@ mod tests {
 
     #[tokio::test]
     async fn a_new_leader_waits_out_the_grace_period() {
-        let (fleet, hits) = fleet_with_dead_node(&["self_fence:45"], 200, Some(json!({"name": "x"}))).await;
+        let (fleet, hits) =
+            fleet_with_dead_node(&["self_fence:45"], 200, Some(json!({"name": "x"}))).await;
         let r = pass(&fleet, &CFG, Utc::now(), Duration::from_secs(10)).await;
         assert!(r["skipped"].is_string());
         assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 0);
@@ -335,15 +399,36 @@ mod tests {
         let r = pass(&fleet, &CFG, Utc::now(), LONG).await;
         assert!(r["rescheduled"].as_array().unwrap().is_empty());
         assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 0);
-        assert!(fleet.tenancy.lock().await.vm("dead", "old-1").unwrap().active());
+        assert!(
+            fleet
+                .tenancy
+                .lock()
+                .await
+                .vm("dead", "old-1")
+                .unwrap()
+                .active()
+        );
     }
 
     #[tokio::test]
     async fn a_failed_recreate_leaves_the_old_entry_active_for_the_next_pass() {
-        let (fleet, _) = fleet_with_dead_node(&["self_fence:45"], 200, Some(json!({"name": "x", "nodeSelector": {"zone": "nowhere"}}))).await;
+        let (fleet, _) = fleet_with_dead_node(
+            &["self_fence:45"],
+            200,
+            Some(json!({"name": "x", "nodeSelector": {"zone": "nowhere"}})),
+        )
+        .await;
         let r = pass(&fleet, &CFG, Utc::now(), LONG).await;
         assert_eq!(r["failed"].as_array().unwrap().len(), 1);
-        assert!(fleet.tenancy.lock().await.vm("dead", "old-1").unwrap().active());
+        assert!(
+            fleet
+                .tenancy
+                .lock()
+                .await
+                .vm("dead", "old-1")
+                .unwrap()
+                .active()
+        );
         assert!(!fleet.nodes.lock().await["dead"].cordoned);
     }
 }

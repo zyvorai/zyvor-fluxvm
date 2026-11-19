@@ -122,7 +122,12 @@ pub async fn run(mut cfg: NodeConfig) {
     }
     let fence_beat = crate::node_fence::Beat::new();
     if let Some(after) = crate::node_fence::configured() {
-        crate::node_fence::spawn_watchdog(fence_beat.clone(), after, http.clone(), cfg.fluxvm_url.clone());
+        crate::node_fence::spawn_watchdog(
+            fence_beat.clone(),
+            after,
+            http.clone(),
+            cfg.fluxvm_url.clone(),
+        );
     }
     loop {
         if enrolled && last_renew.elapsed() >= RENEW_EVERY {

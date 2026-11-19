@@ -56,7 +56,10 @@ pub fn spawn_watchdog(beat: Beat, after: Duration, http: reqwest::Client, fluxvm
             if silent < after {
                 fenced = false;
             } else if !fenced {
-                tracing::error!(silent_secs = silent.as_secs(), "no heartbeat accepted; self-fencing: stopping local VMs");
+                tracing::error!(
+                    silent_secs = silent.as_secs(),
+                    "no heartbeat accepted; self-fencing: stopping local VMs"
+                );
                 let (stopped, failed) = fence(&http, &fluxvm_url).await;
                 tracing::error!(stopped, failed, "self-fence finished");
                 // Retry next second while any stop failed: the promise to central is "stopped", not "tried".
@@ -72,7 +75,12 @@ pub async fn fence(http: &reqwest::Client, fluxvm_url: &str) -> (usize, usize) {
         Ok(r) if r.status().is_success() => r.json::<serde_json::Value>().await.ok(),
         _ => None,
     };
-    let Some(items) = list.as_ref().and_then(|v| v.get("items")).and_then(|v| v.as_array()).cloned() else {
+    let Some(items) = list
+        .as_ref()
+        .and_then(|v| v.get("items"))
+        .and_then(|v| v.as_array())
+        .cloned()
+    else {
         return (0, 1);
     };
     let (mut stopped, mut failed) = (0, 0);
@@ -81,7 +89,11 @@ pub async fn fence(http: &reqwest::Client, fluxvm_url: &str) -> (usize, usize) {
             failed += 1;
             continue;
         };
-        match http.post(format!("{fluxvm_url}/v1/vms/{id}/stop")).send().await {
+        match http
+            .post(format!("{fluxvm_url}/v1/vms/{id}/stop"))
+            .send()
+            .await
+        {
             Ok(r) if r.status().is_success() => stopped += 1,
             _ => failed += 1,
         }
@@ -92,7 +104,10 @@ pub async fn fence(http: &reqwest::Client, fluxvm_url: &str) -> (usize, usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::{Json, Router, routing::{get, post}};
+    use axum::{
+        Json, Router,
+        routing::{get, post},
+    };
     use serde_json::json;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -138,6 +153,9 @@ mod tests {
         let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = l.local_addr().unwrap();
         drop(l);
-        assert_eq!(fence(&reqwest::Client::new(), &format!("http://{addr}")).await, (0, 1));
+        assert_eq!(
+            fence(&reqwest::Client::new(), &format!("http://{addr}")).await,
+            (0, 1)
+        );
     }
 }
