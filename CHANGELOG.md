@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- **VM lifecycle resilience: `run_strategy`, `on_crash`, `power_schedule`.** Three optional `CreateVmRequest` fields (all unset by default, which keeps
+  today's behaviour). `run_strategy` (`Always`, `RerunOnFailure`, `Manual`, `Halted`) makes `reconcile()` restart a VM whose hypervisor process died
+  without a stop request, with exponential backoff (5 s doubling to 5 min) and a crash-loop cap (5 restarts without a 10-minute stable run, then the VM
+  is marked Failed); `Halted` also skips autostart. QEMU `on_crash` (`restart`, `poweroff`, `pause`, `coredump-if-existing`) adds a pvpanic device, an
+  i6300esb watchdog, `-action` policy and a dedicated event monitor, and records `GUEST_PANICKED`/`WATCHDOG`/guest `SHUTDOWN` events. `power_schedule`
+  (or labels `fluxvm.io/power-start`/`power-stop`) starts and stops a VM from UTC cron expressions. Events go to `events.jsonl` (`vm.exited`,
+  `vm.restart-scheduled`, `vm.restarted`, `vm.crash-loop`, `vm.guest-panic`, `vm.watchdog`, `vm.power-schedule`). New modules `fluxvm_scheduler::{supervisor,
+  power_schedule}`, `fluxvm_qemu::crash_watch`, `fluxvm_core::lifecycle`; the decision logic is pure and unit-tested. Not exercised against a real VM
+  crash (the build host has no KVM). See `docs/run-strategy.md`.
 - **`fluxctl doctor` checks four more Linux host settings.** `cgroups` (a unified cgroup v2 hierarchy with the `cpu memory io pids cpuset` controllers
   the VM cgroups delegate; without them CPU, memory and I/O limits are not enforced), `net devices` (`/dev/net/tun` for tap networking, `/dev/vhost-net`
   for the kernel data path), `ip forwarding` (`net.ipv4.ip_forward` for NAT'ed tap and namespace networks) and `open files` (the soft `RLIMIT_NOFILE`;
