@@ -912,9 +912,7 @@ mod tests {
         }
 
         let out = d.path().join("pulled.raw");
-        let pulled = pull_disk(&reference, &out, None)
-            .await
-            .unwrap();
+        let pulled = pull_disk(&reference, &out, None).await.unwrap();
         assert_eq!(std::fs::read(&out).unwrap(), data);
         assert_eq!(pulled.manifest_digest, pushed.manifest_digest);
         assert_eq!(pulled.architecture, "arm64");
