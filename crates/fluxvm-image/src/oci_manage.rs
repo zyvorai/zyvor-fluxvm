@@ -859,7 +859,7 @@ pub async fn attach(
     }
     let mut ann = opts.annotations.clone();
     ann.entry(ANN_CREATED.to_string())
-        .or_insert_with(|| rfc3339_now());
+        .or_insert_with(rfc3339_now);
     let manifest = json!({
         "schemaVersion": 2,
         "mediaType": MT_OCI_MANIFEST,
