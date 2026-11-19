@@ -120,6 +120,10 @@ pub async fn run(mut cfg: NodeConfig) {
     if cfg.sim.is_none() && !enrolled {
         tokio::time::sleep(start_phase(&cfg.name, cfg.interval)).await;
     }
+    let fence_beat = crate::node_fence::Beat::new();
+    if let Some(after) = crate::node_fence::configured() {
+        crate::node_fence::spawn_watchdog(fence_beat.clone(), after, http.clone(), cfg.fluxvm_url.clone());
+    }
     loop {
         if enrolled && last_renew.elapsed() >= RENEW_EVERY {
             if let (Some(cur), Some(url)) = (
@@ -155,6 +159,7 @@ pub async fn run(mut cfg: NodeConfig) {
                 next_interval,
             }) => {
                 preferred = used;
+                fence_beat.ok();
                 interval = next_interval.map_or(cfg.interval, |n| n.max(cfg.interval));
                 tracing::debug!(node = %cfg.name, "heartbeat sent");
                 if let Some(path) = &cfg.overlay_config {
@@ -296,6 +301,10 @@ async fn beat(http: &reqwest::Client, cfg: &NodeConfig, preferred: usize) -> Res
     let allocated = reachable
         .then(|| json!({"vcpus": local.allocated_vcpus, "memory_mib": local.allocated_memory_mib}));
 
+    let mut capabilities = vec!["next_interval".to_string(), "retry_after".to_string()];
+    if let Some(after) = crate::node_fence::configured() {
+        capabilities.push(crate::node_fence::capability(after));
+    }
     let body = json!({
         "name": cfg.name,
         "fluxvm_url": cfg.advertise_url,
@@ -312,7 +321,7 @@ async fn beat(http: &reqwest::Client, cfg: &NodeConfig, preferred: usize) -> Res
         // The daemon has no version endpoint yet; it is installed by the same package as this agent.
         "daemon_version": "",
         "proto": 1,
-        "capabilities": ["next_interval", "retry_after"],
+        "capabilities": capabilities,
     });
     let urls = central_urls(&cfg.central_url);
     anyhow::ensure!(!urls.is_empty(), "no central URL configured");
@@ -732,7 +741,7 @@ struct LocalVmStats {
 const ASSUMED_VM_VCPUS: u32 = 2;
 const ASSUMED_VM_MEMORY_MIB: u64 = 2048;
 
-fn is_active(vm: &serde_json::Value) -> bool {
+pub(crate) fn is_active(vm: &serde_json::Value) -> bool {
     vm.get("status")
         .or_else(|| vm.get("state"))
         .and_then(|v| v.as_str())
