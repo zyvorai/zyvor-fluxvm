@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- **`fluxctl image push` / `image pull-disk`: VM disk images as OCI artifacts.** Pushes one raw or qcow2 disk to any OCI registry as a one-layer
+  image manifest (`artifactType application/vnd.fluxvm.disk.v1`, layer `application/vnd.fluxvm.disk.layer.v1.<raw|qcow2>`, config with architecture,
+  format and virtual size), like KubeVirt's containerDisk but pure Rust. The file is streamed (hashed first so an existing layer is skipped, then
+  sent in chunked `PATCH` uploads), Basic/Bearer auth asks for push scope, and the registry's `Docker-Content-Digest` must match. `pull-disk` checks
+  the manifest (when pinned), config and layer digests and size before the file appears. New module `fluxvm_image::oci_push`; credentials are
+  `FLUXVM_REGISTRY_USER` / `_PASSWORD` as for `vm-image`. Additive. See `docs/oci-disk-images.md`.
 - **`fluxctl doctor` checks four more Linux host settings.** `cgroups` (a unified cgroup v2 hierarchy with the `cpu memory io pids cpuset` controllers
   the VM cgroups delegate; without them CPU, memory and I/O limits are not enforced), `net devices` (`/dev/net/tun` for tap networking, `/dev/vhost-net`
   for the kernel data path), `ip forwarding` (`net.ipv4.ip_forward` for NAT'ed tap and namespace networks) and `open files` (the soft `RLIMIT_NOFILE`;
