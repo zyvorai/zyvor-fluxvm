@@ -27,6 +27,7 @@ use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
 
 mod agent_session;
+mod backup_verify_cmd;
 mod cloud;
 mod compose;
 mod config_check;
@@ -40,6 +41,7 @@ mod fleet_cli;
 mod fleet_client;
 mod guard_cmd;
 mod infer;
+mod instancetype_cmd;
 mod kube_apps;
 mod kube_backup;
 mod kube_chaos;
@@ -1304,6 +1306,26 @@ enum Command {
     VmTemplate {
         #[command(subcommand)]
         command: TemplateCommand,
+    },
+    /// Named, versioned size classes (vCPUs, memory, limits) a VM can be created from with
+    /// `create --instancetype NAME[:VERSION]`. REST: `/v1/instancetypes[/{name}]`.
+    #[command(visible_alias = "it")]
+    Instancetype {
+        #[command(subcommand)]
+        command: instancetype_cmd::InstancetypeCommand,
+    },
+    /// Device and firmware defaults (disk bus, NIC model, Secure Boot, TPM) a VM can be created with via
+    /// `create --preference NAME`. REST: `/v1/preferences[/{name}]`.
+    #[command(visible_alias = "pref")]
+    Preference {
+        #[command(subcommand)]
+        command: instancetype_cmd::PreferenceCommand,
+    },
+    /// Verify object-storage backup chains and test-restore them; scheduled verify jobs. Exits 3 when a
+    /// check finds a problem. See docs/backup-verify.md.
+    BackupVerify {
+        #[command(subcommand)]
+        command: backup_verify_cmd::BackupVerifyCommand,
     },
     /// Named remote daemons (kubeconfig-style). With a current context set,
     /// VM verbs go to that server; `--context local` or `context unset`
@@ -6255,6 +6277,21 @@ async fn main() -> Result<()> {
         .await;
     }
 
+    if let Command::Instancetype { command } = cli.command {
+        let remote = remote::endpoint(cli.server, cli.server_token, cli.context.as_deref())?;
+        return instancetype_cmd::run_instancetype(command, remote, &cfg.state_dir, format).await;
+    }
+    if let Command::Preference { command } = cli.command {
+        let remote = remote::endpoint(cli.server, cli.server_token, cli.context.as_deref())?;
+        return instancetype_cmd::run_preference(command, remote, &cfg.state_dir, format).await;
+    }
+    if let Command::BackupVerify { command } = cli.command {
+        // Talks to the object store directly, like `fleet`: no local manager needed.
+        let code =
+            backup_verify_cmd::run(command, &cfg.state_dir, &cfg.qemu_img_binary, format).await?;
+        std::process::exit(code);
+    }
+
     let m = manager(cfg.clone()).await?;
 
     match cli.command {
@@ -6753,6 +6790,10 @@ async fn main() -> Result<()> {
             }
             #[cfg(target_os = "macos")]
             api::self_control::spawn(m.clone(), &cfg.state_dir);
+            fluxvm_scheduler::backup_verify::spawn(
+                cfg.state_dir.clone(),
+                cfg.qemu_img_binary.clone(),
+            );
             // Held until the daemon exits: dropping it stops the observer's pump.
             let _netobs_pump = api::install_netobs(&cfg);
             #[cfg(unix)]
@@ -6795,8 +6836,15 @@ async fn main() -> Result<()> {
             }
         }
         Command::Create(args) => {
-            let req: CreateVmRequest = serde_json::from_value(create::create_body(&args)?)?;
-            println!("{}", serde_json::to_string_pretty(&m.create(req).await?)?);
+            let (req, class_snapshot) = fluxvm_scheduler::instancetypes::resolve_create_body(
+                &m.cfg.state_dir,
+                create::create_body(&args)?,
+            )?;
+            let mut vm = m.create(req).await?;
+            if let Some(s) = &class_snapshot {
+                vm = fluxvm_scheduler::instancetypes::record_snapshot(&m, vm, s).await?;
+            }
+            println!("{}", serde_json::to_string_pretty(&vm)?);
         }
         Command::List { selector, all } => {
             let mut items = m.list().await;
