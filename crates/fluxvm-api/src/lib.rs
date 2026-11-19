@@ -34,6 +34,7 @@ use uuid::Uuid;
 pub mod docker_engine;
 mod grants;
 mod idempotency;
+mod instancetypes_api;
 mod mfa;
 pub mod mtls;
 mod netobs_api;
@@ -996,6 +997,7 @@ pub fn router(manager: Arc<VmManager>) -> Router {
             idempotency::middleware,
         ))
         .merge(speculate_api::routes())
+        .merge(instancetypes_api::routes())
         // Its own `Idempotency-Key` layer: the one above only wraps routes added before it.
         .merge(
             agent_sessions::routes().layer(middleware::from_fn_with_state(
@@ -1411,8 +1413,11 @@ async fn create_vm(
     actor: Option<Extension<AuditActor>>,
     token_tenant: Option<Extension<TokenTenant>>,
     Query(q): Query<CreateVmQuery>,
-    Json(req): Json<CreateVmRequest>,
+    Json(body): Json<serde_json::Value>,
 ) -> ApiResult<impl IntoResponse> {
+    // `instancetype`/`preference` in the body are resolved before the spec is parsed.
+    let (req, class_snapshot) =
+        fluxvm_scheduler::instancetypes::resolve_create_body(&m.cfg.state_dir, body)?;
     let started = std::time::Instant::now();
     let want_exec = ReadyQuery {
         ready: q.ready.clone(),
@@ -1426,8 +1431,14 @@ async fn create_vm(
         }
         m.break_shared_disk_lock(&req.image)?;
     }
-    let rec = create_vm_as(&m, actor, token_tenant, req).await?;
+    let mut rec = create_vm_as(&m, actor, token_tenant, req).await?;
+    if let Some(s) = &class_snapshot {
+        rec = fluxvm_scheduler::instancetypes::record_snapshot(&m, rec, s).await?;
+    }
     let mut body = json!(rec);
+    if let Some(s) = class_snapshot {
+        body["instancetype_snapshot"] = json!(s);
+    }
     if want_exec {
         merge_first_command(
             &mut body,

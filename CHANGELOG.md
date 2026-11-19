@@ -2,6 +2,27 @@
 
 ## Unreleased
 
+
+- **Instancetypes and preferences.** KubeVirt-style named classes: an *instancetype* is a versioned size class (vCPUs, memory, optional hotplug
+  ceilings, hugepages, CPU model, net/block limits) and a *preference* is a bundle of device defaults (disk bus, NIC model, Secure Boot, TPM, firmware).
+  A create body (or `fluxctl create --instancetype NAME[:VERSION] --preference NAME`) may reference them. An instancetype owns the fields it defines, so a
+  body that also sets `vcpus` or `memory_mib` is a 400 naming every clash; a preference only fills in what the spec leaves unset. The resolved values are
+  written into the VM's own spec, so later edits or deletes of a class never change existing VMs, and a snapshot of what was applied or skipped is kept in
+  the VM's workspace (`GET /v1/vms/{id}/instancetype`) with `fluxvm.io/instancetype` / `fluxvm.io/preference` labels. `small`, `medium`, `large` and
+  `memory-optimised` (and `linux`/`windows` preferences) ship built in; storing a class of the same name and version overrides one. New
+  `fluxvm_core::instancetype`; `/v1/instancetypes[/{name}]`, `/v1/preferences[/{name}]` (reads for every role, writes admin); `fluxctl instancetype|preference
+  ls|get|create|rm` (remote or local); `fluxctl vm-spec check` resolves the selectors against the built-ins and reports clashes. The NIC model and the CPU model
+  (outside Firecracker) are recorded but not yet applied, because the VM spec has no such settings. Additive: a body without the new keys behaves as before.
+  See `docs/instancetypes.md`.
+- **Backup chain verify and test-restore.** `fluxctl backup-verify verify` re-reads a changed-block-tracking chain in object storage (every manifest down to
+  the full backup, every layer: stored size and SHA-256, decrypting first when a key is given) and checks parent links, sequences, chain id, key layout and
+  that every disk is present in every layer set, without restoring; all problems are reported, not just the first. `backup-verify test-restore` also
+  restores the chain into a scratch directory and runs `qemu-img check` and `info` on the result (qcow2 header and virtual-size checks when `qemu-img`
+  cannot be run). Scheduled `backup-verify job`s, modelled on Proxmox Backup Server verify jobs, run in the daemon with `ignore-verified` / `outdated-after`
+  so only new or stale chain points are re-read; S3 credentials and keys are named by environment variable and never stored. Each result is a
+  `backup.verify` / `backup.test_restore` event (`result=ok|failed`) and the CLI exits 3 on a problem. New `fluxvm_backup_s3::verify`
+  (and an in-memory `MemStore` for tests) and `fluxvm_scheduler::backup_verify`. Additive. Not exercised against a real S3 service. See `docs/backup-verify.md`.
+=======
 - **`fluxctl image push` / `image pull-disk`: VM disk images as OCI artifacts.** Pushes one raw or qcow2 disk to any OCI registry as a one-layer
   image manifest (`artifactType application/vnd.fluxvm.disk.v1`, layer `application/vnd.fluxvm.disk.layer.v1.<raw|qcow2>`, config with architecture,
   format and virtual size), like KubeVirt's containerDisk but pure Rust. The file is streamed (hashed first so an existing layer is skipped, then
@@ -31,6 +52,7 @@
   referrers API with the `sha256-<hex>` tag-schema fallback), `attach` (publish an SBOM or attestation as an artifact whose `subject` is the target, updating
   the fallback index when the registry does not) and `index create` (multi-arch OCI index with platforms read from each manifest's config). JSON by default,
   `-o table` for text. New module `fluxvm_image::oci_manage`, tested against an in-process mock registry. Additive. See `docs/oci-registry-tools.md`.
+
 
 - **`fluxctl doctor` checks four more Linux host settings.** `cgroups` (a unified cgroup v2 hierarchy with the `cpu memory io pids cpuset` controllers
   the VM cgroups delegate; without them CPU, memory and I/O limits are not enforced), `net devices` (`/dev/net/tun` for tap networking, `/dev/vhost-net`

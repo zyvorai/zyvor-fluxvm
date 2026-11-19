@@ -55,6 +55,7 @@ const DISKS: &str = "disks";
 const SNAPSHOTS: &str = "snapshots";
 const EVENTS: &str = "events";
 const TEMPLATES: &str = "vm-templates";
+const INSTANCETYPES: &str = "instancetypes";
 const HOST: &str = "host";
 const NETOBS: &str = "netobs";
 const NETWORK: &str = "network";
@@ -559,6 +560,27 @@ fn ops() -> Vec<Op> {
             DISKS,
         )
         .returns("VmRecord"),
+        op("get", "/v1/instancetypes", "List built-in and stored instancetypes (every version)", INSTANCETYPES)
+            .returns("InstancetypeList"),
+        op("post", "/v1/instancetypes", "Store an instancetype (admin); a new version unless one is named", INSTANCETYPES)
+            .body("SaveInstancetypeRequest")
+            .returns("Instancetype")
+            .status("201"),
+        op("get", "/v1/instancetypes/{name}", "Get an instancetype: `name` (latest) or `name:version`", INSTANCETYPES)
+            .returns("Instancetype"),
+        op("delete", "/v1/instancetypes/{name}", "Delete stored versions: `name` (all) or `name:version` (admin)", INSTANCETYPES)
+            .status("204"),
+        op("get", "/v1/preferences", "List built-in and stored preferences", INSTANCETYPES)
+            .returns("PreferenceList"),
+        op("post", "/v1/preferences", "Store a preference (admin)", INSTANCETYPES)
+            .body("SavePreferenceRequest")
+            .returns("Preference")
+            .status("201"),
+        op("get", "/v1/preferences/{name}", "Get a preference", INSTANCETYPES)
+            .returns("Preference"),
+        op("delete", "/v1/preferences/{name}", "Delete a stored preference (admin)", INSTANCETYPES)
+            .status("204"),
+        op("get", "/v1/vms/{id}/instancetype", "The instancetype/preference snapshot recorded when the VM was created", INSTANCETYPES),
         op("get", "/v1/vm-templates", "List VM templates", TEMPLATES).returns("TemplateList"),
         op("post", "/v1/vm-templates", "Save a VM template", TEMPLATES)
             .body("SaveTemplateRequest")
@@ -695,7 +717,24 @@ fn schemas() -> Value {
     let list = |item: &str| json!({"type": "object", "properties": {"items": {"type": "array", "items": {"$ref": format!("#/components/schemas/{item}")}}}});
     let mut all = json!({
         "VmRecord": obj("A VM: id, name, status, backend, request, labels, workspace, guest_ip, ..."),
-        "CreateVmRequest": obj("VM spec: name, backend, image, vcpus, memory_mib, network, cloud_init, ..."),
+        "CreateVmRequest": obj("VM spec: name, backend, image, vcpus, memory_mib, network, cloud_init, ... A create body may also carry `instancetype` (`name[:version]`, sets vcpus/memory_mib and more; combining it with those keys is a 400) and `preference` (`name`, device defaults the spec overrides)"),
+        "Instancetype": obj("Named, versioned size class: name, version, description, builtin, spec {vcpus, memory_mib, max_vcpus, max_memory_mib, hugepages, cpu_model, limits}"),
+        "InstancetypeList": list("Instancetype"),
+        "SaveInstancetypeRequest": {"type": "object", "required": ["name", "spec"], "properties": {
+            "name": {"type": "string"},
+            "version": {"type": "integer", "minimum": 1},
+            "description": {"type": "string"},
+            "spec": {"type": "object", "required": ["vcpus", "memory_mib"]},
+            "replace": {"type": "boolean"}
+        }},
+        "Preference": obj("Named device and firmware defaults: name, description, builtin, spec {disk_bus, nic_model, secure_boot, tpm, firmware}"),
+        "PreferenceList": list("Preference"),
+        "SavePreferenceRequest": {"type": "object", "required": ["name", "spec"], "properties": {
+            "name": {"type": "string"},
+            "description": {"type": "string"},
+            "spec": {"type": "object"},
+            "replace": {"type": "boolean"}
+        }},
         "VmList": list("VmRecord"),
         "BranchList": list("VmBranch"),
         "HostOverview": {"type": "object", "properties": {"daemon": {"type": "object"}, "host": {"type": "object"}, "vms": {"type": "object"}, "branches": {"type": "integer"}, "usage": {"type": "array", "items": {"type": "object", "properties": {"vm_id": {"type": "string", "format": "uuid"}, "name": {"type": "string"}, "status": {"type": "string"}, "cpu_seconds_total": {"type": "number"}, "rss_bytes": {"type": "integer"}, "service_attributed": {"type": "boolean"}, "started_at": {"type": "integer", "nullable": true}}}}, "helpers": {"type": "object"}, "networking": {"type": "object"}}},

@@ -93,6 +93,8 @@ pub fn lint_str(raw: &str, env: &SpecEnv<'_>) -> Vec<Finding> {
         Ok(v) => v,
         Err(e) => return vec![err("(file)", format!("not valid JSON: {e}"), None)],
     };
+    // `instancetype`/`preference` are resolved against the built-in classes before the spec is parsed.
+    let (value, class_findings) = crate::instancetype::lint_prepare(value);
     let spec: CreateVmRequest = match serde_json::from_value(value.clone()) {
         Ok(s) => s,
         Err(e) => {
@@ -106,7 +108,8 @@ pub fn lint_str(raw: &str, env: &SpecEnv<'_>) -> Vec<Finding> {
             return vec![err("(file)", msg, fix)];
         }
     };
-    let mut out = unknown_keys(&value);
+    let mut out = class_findings;
+    out.extend(unknown_keys(&value));
     out.extend(lint_spec(&spec, env));
     out
 }

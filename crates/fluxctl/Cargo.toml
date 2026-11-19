@@ -10,6 +10,7 @@ description = "Zyvor FluxVM command-line interface (fluxctl)"
 
 [dependencies]
 fluxvm-core = { path = "../fluxvm-core" }
+fluxvm-backup-s3 = { path = "../fluxvm-backup-s3" }
 fluxvm-scheduler = { path = "../fluxvm-scheduler" }
 fluxvm-api = { path = "../fluxvm-api" }
 fluxvm-image = { path = "../fluxvm-image" }
@@ -50,6 +51,7 @@ futures-util = { version = "0.3", default-features = false, features = ["sink", 
 [dev-dependencies]
 fluxvm-agent = { path = "../fluxvm-agent" }
 tempfile = "3"
+hex = "0.4"
 
 [[bin]]
 name = "fluxctl"
