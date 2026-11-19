@@ -8,6 +8,30 @@
   sent in chunked `PATCH` uploads), Basic/Bearer auth asks for push scope, and the registry's `Docker-Content-Digest` must match. `pull-disk` checks
   the manifest (when pinned), config and layer digests and size before the file appears. New module `fluxvm_image::oci_push`; credentials are
   `FLUXVM_REGISTRY_USER` / `_PASSWORD` as for `vm-image`. Additive. See `docs/oci-disk-images.md`.
+- **Guest operations over the QEMU guest agent.** `fluxctl vm guest info | ssh-key add|rm|ls | set-password | time-sync` and the matching
+  `GET /v1/vms/{id}/guest/info`, `GET|POST /v1/vms/{id}/guest/ssh-keys` (+ `/remove`), `POST .../guest/password`, `POST .../guest/time-sync`
+  routes (admin for everything that changes the guest or lists keys; `info` is readable). New typed wrappers in `fluxvm_image::qga` for
+  `guest-get-osinfo`, `-fsinfo`, `-users`, `-host-name`, `-time`, `-vcpus`, `-memory-blocks`, `guest-set-time`, `guest-set-user-password` and the three
+  `guest-ssh-*-authorized-keys` commands. Passwords are base64 on the wire, read only from stdin or a file by the CLI, and never logged, echoed or put
+  in an error. Needs `qga.enabled` and a running guest. Automatic clock resync after resume/restore is not wired yet (follow-up). Unit tests drive a mock
+  QGA socket; no real guest agent was exercised. See `docs/guest-ops.md`.
+
+- **VM lifecycle resilience: `run_strategy`, `on_crash`, `power_schedule`.** Three optional `CreateVmRequest` fields (all unset by default, which keeps
+  today's behaviour). `run_strategy` (`Always`, `RerunOnFailure`, `Manual`, `Halted`) makes `reconcile()` restart a VM whose hypervisor process died
+  without a stop request, with exponential backoff (5 s doubling to 5 min) and a crash-loop cap (5 restarts without a 10-minute stable run, then the VM
+  is marked Failed); `Halted` also skips autostart. QEMU `on_crash` (`restart`, `poweroff`, `pause`, `coredump-if-existing`) adds a pvpanic device, an
+  i6300esb watchdog, `-action` policy and a dedicated event monitor, and records `GUEST_PANICKED`/`WATCHDOG`/guest `SHUTDOWN` events. `power_schedule`
+  (or labels `fluxvm.io/power-start`/`power-stop`) starts and stops a VM from UTC cron expressions. Events go to `events.jsonl` (`vm.exited`,
+  `vm.restart-scheduled`, `vm.restarted`, `vm.crash-loop`, `vm.guest-panic`, `vm.watchdog`, `vm.power-schedule`). New modules `fluxvm_scheduler::{supervisor,
+  power_schedule}`, `fluxvm_qemu::crash_watch`, `fluxvm_core::lifecycle`; the decision logic is pure and unit-tested. Not exercised against a real VM
+  crash (the build host has no KVM). See `docs/run-strategy.md`.
+
+- **`fluxctl image`: OCI registry management.** `inspect` (manifest or index, config, layers, sizes, platforms, annotations), `tags` (follows `Link`
+  pagination), `tag` (retag a manifest, bytes unchanged), `rm` (delete by digest only; a registry that forbids it gets a clear error), `referrers` (OCI 1.1
+  referrers API with the `sha256-<hex>` tag-schema fallback), `attach` (publish an SBOM or attestation as an artifact whose `subject` is the target, updating
+  the fallback index when the registry does not) and `index create` (multi-arch OCI index with platforms read from each manifest's config). JSON by default,
+  `-o table` for text. New module `fluxvm_image::oci_manage`, tested against an in-process mock registry. Additive. See `docs/oci-registry-tools.md`.
+
 - **`fluxctl doctor` checks four more Linux host settings.** `cgroups` (a unified cgroup v2 hierarchy with the `cpu memory io pids cpuset` controllers
   the VM cgroups delegate; without them CPU, memory and I/O limits are not enforced), `net devices` (`/dev/net/tun` for tap networking, `/dev/vhost-net`
   for the kernel data path), `ip forwarding` (`net.ipv4.ip_forward` for NAT'ed tap and namespace networks) and `open files` (the soft `RLIMIT_NOFILE`;

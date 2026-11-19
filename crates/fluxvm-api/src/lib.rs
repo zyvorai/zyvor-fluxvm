@@ -48,6 +48,7 @@ mod agent_session_auth;
 mod agent_session_transfer;
 mod agent_sessions;
 mod docker_view;
+mod guest_ops;
 mod kube;
 mod kube_actions;
 mod kube_flows;
@@ -1005,6 +1006,7 @@ pub fn router(manager: Arc<VmManager>) -> Router {
         .merge(macos_pool_api::routes())
         .merge(vz_api::routes())
         .merge(volumes_api::routes())
+        .merge(guest_ops::routes())
         .layer(middleware::from_fn_with_state(
             manager.clone(),
             tenant_guard_middleware,
@@ -6389,6 +6391,9 @@ mod tests {
                 vfio_devices: vec![],
                 numa: vec![],
                 balloon: None,
+                run_strategy: None,
+                on_crash: None,
+                power_schedule: None,
                 pod_uid: None,
                 secure_boot: None,
                 tpm: None,
