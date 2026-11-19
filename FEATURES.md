@@ -169,6 +169,8 @@ Exhaustive checklist. For the pitch, see [README.md](README.md); for who this is
   node's labels on every heartbeat, and an unaddressed create can require a subset of them via
   `"nodeSelector"` (exact-match key/value, same semantics as a Kubernetes Pod's `spec.nodeSelector`)
   without giving up failover the way hand-picking an exact `--node` would
+- Fleet placement rules — `"antiAffinity"` (group, required/preferred) and `"topologySpread"` (node label, `maxSkew`) on `POST /fleet/vms`; opt-in fencing-safe automatic reschedule of `reschedulable` VMs after heartbeat loss (`FLUXVM_AUTO_RESCHEDULE_GRACE_SECS`, node `FLUXVM_NODE_SELF_FENCE_SECS`) — see [docs/fleet-affinity.md](docs/fleet-affinity.md)
+- Outbound event webhooks (`[[event_sinks]]`): HMAC-SHA256 signed JSON POSTs of the event log, per-sink bounded queue, retries with backoff, dead-letter file, SSRF guard — see [docs/event-webhooks.md](docs/event-webhooks.md)
 - `fluxctl fleet ...` CLI subcommand — full parity with every `/fleet/*` REST route (`nodes`, `node`,
   `cordon`, `uncordon`, `node-vms`, `vms`, `capacity`, `create` incl. `--node`/`--node-selector`,
   `delete`, `deregister`), previously reachable only via raw `curl`

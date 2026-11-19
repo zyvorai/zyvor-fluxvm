@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- **Fleet anti-affinity and topology spread; opt-in reschedule after heartbeat loss.** `POST /fleet/vms` accepts `antiAffinity`
+  (`{group, mode}`) and `topologySpread` (`{key, maxSkew, mode, group}`), `required` or `preferred`, applied to automatic placement
+  (new `central_placement.rs`; the ledger remembers group membership). Heartbeat loss never rescheduled anything before; it still does not
+  unless `FLUXVM_AUTO_RESCHEDULE_GRACE_SECS` is set on central, and then only for nodes that advertised `self_fence:F`
+  (`FLUXVM_NODE_SELF_FENCE_SECS`, new `node_fence.rs`) once their heartbeat is older than `F` plus a margin. Additive and off by default.
+  See `docs/fleet-affinity.md`.
+- **Outbound event webhooks.** `[[event_sinks]]` in the host config POST each event to a URL, signed `X-Fluxvm-Signature: sha256=` (HMAC-SHA256
+  over `timestamp.body`, secret read from `secret_file`), with a bounded queue per sink, retries with backoff, a dead-letter file and an SSRF guard
+  (link-local and metadata addresses refused unless allow-listed; redirects not followed). New `fluxvm_api::event_sinks` and
+  `EventSinkConfig` in `fluxvm-core`. Additive. See `docs/event-webhooks.md`.
 - **`fluxctl doctor` checks four more Linux host settings.** `cgroups` (a unified cgroup v2 hierarchy with the `cpu memory io pids cpuset` controllers
   the VM cgroups delegate; without them CPU, memory and I/O limits are not enforced), `net devices` (`/dev/net/tun` for tap networking, `/dev/vhost-net`
   for the kernel data path), `ip forwarding` (`net.ipv4.ip_forward` for NAT'ed tap and namespace networks) and `open files` (the soft `RLIMIT_NOFILE`;
