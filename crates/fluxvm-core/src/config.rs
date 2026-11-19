@@ -86,6 +86,9 @@ pub struct Config {
     /// Guest-network observability (`/v1/netobs/*`).
     #[serde(default)]
     pub netobs: NetobsConfig,
+    /// Outbound event webhooks (`[[event_sinks]]`); see `docs/event-webhooks.md`.
+    #[serde(default)]
+    pub event_sinks: Vec<EventSinkConfig>,
     /// Where `POST /v1/vms/{id}/hibernate` writes a VM's RAM/CPU/device state
     /// (`<dir>/<id>/`). Defaults to `<state_dir>/hibernation`. Put it on
     /// storage every node mounts at the same path, next to shared root disks,
@@ -304,10 +307,53 @@ impl Default for Config {
             fluxvm_engine: FluxVmEngine::default(),
             security: SecurityConfig::default(),
             netobs: NetobsConfig::default(),
+            event_sinks: Vec::new(),
             apple: AppleConfig::default(),
             hibernation_dir: None,
             diagnostics_dir: None,
             diagnostics_max_memory_dump_mib: None,
+        }
+    }
+}
+
+/// One outbound event webhook (`[[event_sinks]]`). Behaviour lives in `fluxvm_api::event_sinks`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct EventSinkConfig {
+    /// Unique label used in logs and the dead-letter file.
+    pub name: String,
+    /// `http://` or `https://` endpoint that receives a JSON POST per event.
+    pub url: String,
+    /// Event-name prefixes to deliver (`vm.` matches `vm.start`); empty delivers every event.
+    pub events: Vec<String>,
+    /// File holding the HMAC-SHA256 secret (never the secret itself). Required.
+    pub secret_file: Option<PathBuf>,
+    /// Hosts or IP literals exempt from the SSRF guard (link-local / metadata addresses are refused otherwise).
+    pub allow_hosts: Vec<String>,
+    /// Events held per sink before new ones are dead-lettered as `queue_full`.
+    pub queue_size: usize,
+    /// Delivery attempts per event, first try included.
+    pub max_attempts: u32,
+    /// First retry delay in milliseconds; doubles each retry up to `backoff_max_ms`.
+    pub backoff_base_ms: u64,
+    pub backoff_max_ms: u64,
+    /// Per-request timeout in seconds.
+    pub timeout_secs: u64,
+}
+
+impl Default for EventSinkConfig {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            url: String::new(),
+            events: Vec::new(),
+            secret_file: None,
+            allow_hosts: Vec::new(),
+            queue_size: 1024,
+            max_attempts: 5,
+            backoff_base_ms: 500,
+            backoff_max_ms: 30_000,
+            timeout_secs: 10,
         }
     }
 }

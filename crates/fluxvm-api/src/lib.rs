@@ -32,6 +32,7 @@ use tower_http::trace::TraceLayer;
 use uuid::Uuid;
 
 pub mod docker_engine;
+pub mod event_sinks;
 mod grants;
 mod idempotency;
 mod mfa;
