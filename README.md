@@ -54,12 +54,14 @@ FluxVM runs natively on Apple silicon. Its `vz` backend drives Apple's **Virtual
 | **A throwaway computer per agent task** | An offline sandbox (no network card) is ready in about 4.5 s and forks into four running copies in about 4 s; a local model stays reachable over one vsock port. [Demo](examples/agent-sandbox-demo/README.md) · [Agent sessions](docs/agent-platform/README.md) · [Agents page](https://zyvorai.github.io/zyvor-fluxvm/agents) |
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/zyvorai/zyvor-fluxvm/main/scripts/install.sh | bash   # downloads and verifies the release into ~/.local (no sudo); add --brew for Homebrew, --service for the LaunchAgent
+curl -fsSL https://raw.githubusercontent.com/zyvorai/zyvor-fluxvm/main/scripts/install.sh | bash   # Linux: downloads and verifies the release into ~/.local (no sudo). macOS: see the note below
 # or by hand:
-brew install zyvorai/tap/fluxvm                     # prebuilt, Apple silicon, macOS 14+
+# macOS: build from source (see the Quickstart), or use FluxVM for Mac, a native app with a 30-day trial: https://github.com/zyvorai/zyvor-fluxvm/releases/tag/mac-v0.1.0
 fluxctl run                                         # a throwaway Debian 13 VM and a shell
 fluxctl sandbox run alpine:3.22 --rm -- echo hi     # a container in its own VM
 ```
+
+**macOS.** Prebuilt macOS tarballs and the Homebrew formula were withdrawn after 0.4.21. Build FluxVM from source (`xcode-select --install && brew install hivex && cargo build -p fluxctl`), or use [FluxVM for Mac](https://github.com/zyvorai/zyvor-fluxvm/releases/tag/mac-v0.1.0), a native menu-bar app that bundles the engine and comes with a 30-day trial. The FluxVM engine itself stays Apache-2.0.
 
 By default the script downloads the release tarball, verifies its SHA-256 and links it under `~/.local`; with `--brew` it runs `brew install zyvorai/tap/fluxvm` instead (and `brew services start` when you add `--service`). It can also wire an MCP client (`bash -s -- --client claude-code`), and has `--dry-run` and `--uninstall`; read it first at [`scripts/install.sh`](scripts/install.sh). Step by step, with what was tested (daemon as a service, first VM, MCP client): [Install on a Mac](docs/install-macos.md). From source instead: `xcode-select --install && brew install hivex && cargo build -p fluxctl` (builds and signs the vz runner).
 
@@ -87,7 +89,7 @@ From the [CHANGELOG](CHANGELOG.md) (0.4.x, current release **0.4.21**) and recen
 | **FluxVM Studio** | A web UI built into the binaries: the node daemon at `/console/` and fleet central at its own `/console/`, light and dark, ⌘K palette; operators and tenants sign in with their key ([docs/ui.md](docs/ui.md), [install guide](docs/install-macos.md#optional-the-fleet-console)). The previous consoles at `/console/legacy` were removed in 0.4.14 |
 | **No open registry by accident** | `central` makes a random operator token on first start, keeps it in `<state-dir>/operator-token` (`0600`) and prints it once; `--token` always wins, `--no-auth` is the explicit lab switch ([operations](docs/mac-cloud-operations.md)) |
 | **FluxMesh personal cloud** | A host-to-host WireGuard overlay across home NAT/CGNAT: overlay IPAM, private DNS (`*.flux`), fail-closed ACLs compiled to Network Fabric, relay fallback, zero-touch enrollment (`fluxctl cloud`) and an optional public HTTPS/HTTP3 edge. Unit-tested, **not yet run on real hosts**, not in the macOS package ([docs/fluxmesh.md](docs/fluxmesh.md)) |
-| **Install with Homebrew** | `brew install zyvorai/tap/fluxvm`, then `brew services start zyvorai/tap/fluxvm` and `fluxctl mcp install claude-code`; install, service, upgrade and uninstall were run for real ([install guide](docs/install-macos.md)) |
+| **Install on macOS** | Prebuilt macOS tarballs and the Homebrew formula were withdrawn after 0.4.21. Build from source, or use [FluxVM for Mac](https://github.com/zyvorai/zyvor-fluxvm/releases/tag/mac-v0.1.0) (30-day trial) |
 | **MCP server for AI agents** | `fluxctl mcp serve` speaks the Model Context Protocol over stdio; read tools by default, `--allow-write` adds VM create, clone, exec, snapshot, delete, power and capture, backups, pools and sandboxes ([docs/mcp.md](docs/mcp.md)) |
 | **VM fork** | `POST /v1/vms/{id}/fork` / `fluxctl vm fork`: snapshot a running FluxVM-engine VM once and restore N children with a shared read-only memory file and reflinked rootfs |
 | **VM import** | `POST /v1/images/import` / `fluxctl import-image`: OVA/OVF/VMDK/VHD(X)/qcow2 to raw disks, with offline GuestKit repair of the boot disk for virtio |

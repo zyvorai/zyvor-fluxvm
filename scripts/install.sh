@@ -88,6 +88,9 @@ case "$OS/$ARCH" in
   Darwin/*) die "FluxVM's Mac package is Apple silicon only (found $ARCH)." 2 ;;
   *) die "No FluxVM package for $OS/$ARCH. Build from source: cargo build --release -p fluxctl (see the README, Quickstart)." 2 ;;
 esac
+if [ "$OS" = "Darwin" ] && [ "$UNINSTALL" != 1 ]; then
+  die "Prebuilt macOS packages are no longer published. Use FluxVM for Mac (30-day trial): https://github.com/zyvorai/zyvor-fluxvm/releases/tag/mac-v0.1.0 or build from source: xcode-select --install && brew install hivex && cargo build -p fluxctl (see the README, Quickstart)." 2
+fi
 if [ "$OS" = "Darwin" ]; then
   MAJOR="$(sw_vers -productVersion | cut -d. -f1)"
   if [ "$MAJOR" -lt 14 ] 2>/dev/null; then
