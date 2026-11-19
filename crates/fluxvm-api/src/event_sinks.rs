@@ -48,7 +48,8 @@ fn unhex(s: &str) -> Option<Vec<u8>> {
 /// `sha256=<hex>` over `"{timestamp}.{body}"`. The timestamp is part of the signed message so a captured delivery
 /// cannot be replayed with a fresh timestamp.
 pub fn sign(secret: &[u8], timestamp: i64, body: &[u8]) -> String {
-    let mut mac = <HmacSha256 as KeyInit>::new_from_slice(secret).expect("HMAC takes any key length");
+    let mut mac =
+        <HmacSha256 as KeyInit>::new_from_slice(secret).expect("HMAC takes any key length");
     mac.update(timestamp.to_string().as_bytes());
     mac.update(b".");
     mac.update(body);
@@ -70,7 +71,8 @@ pub fn verify(
     let Some(sig) = header.strip_prefix("sha256=").and_then(unhex) else {
         return false;
     };
-    let mut mac = <HmacSha256 as KeyInit>::new_from_slice(secret).expect("HMAC takes any key length");
+    let mut mac =
+        <HmacSha256 as KeyInit>::new_from_slice(secret).expect("HMAC takes any key length");
     mac.update(timestamp.to_string().as_bytes());
     mac.update(b".");
     mac.update(body);
@@ -150,10 +152,14 @@ pub fn check_url(url: &str, allow: &[String]) -> Result<reqwest::Url, String> {
     }
     if let Some(ip) = ip {
         if let Some(why) = blocked_reason(ip) {
-            return Err(format!("{host} is a {why}; add it to allow_hosts to permit"));
+            return Err(format!(
+                "{host} is a {why}; add it to allow_hosts to permit"
+            ));
         }
     } else if METADATA_NAMES.iter().any(|n| bare.eq_ignore_ascii_case(n)) {
-        return Err(format!("{host} is a cloud metadata name; add it to allow_hosts to permit"));
+        return Err(format!(
+            "{host} is a cloud metadata name; add it to allow_hosts to permit"
+        ));
     }
     Ok(u)
 }
@@ -193,21 +199,33 @@ pub fn validate(sinks: &[EventSinkConfig]) -> Result<(), String> {
     let mut seen = HashSet::new();
     for s in sinks {
         let n = &s.name;
-        if n.is_empty() || !n.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.')) {
-            return Err(format!("event_sinks: name '{n}' must be non-empty [A-Za-z0-9._-]"));
+        if n.is_empty()
+            || !n
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+        {
+            return Err(format!(
+                "event_sinks: name '{n}' must be non-empty [A-Za-z0-9._-]"
+            ));
         }
         if !seen.insert(n.clone()) {
             return Err(format!("event_sinks: duplicate name '{n}'"));
         }
         check_url(&s.url, &s.allow_hosts).map_err(|e| format!("event_sinks '{n}': {e}"))?;
         if s.secret_file.is_none() {
-            return Err(format!("event_sinks '{n}': secret_file is required (the secret is never inline)"));
+            return Err(format!(
+                "event_sinks '{n}': secret_file is required (the secret is never inline)"
+            ));
         }
         if s.queue_size == 0 || s.max_attempts == 0 || s.timeout_secs == 0 {
-            return Err(format!("event_sinks '{n}': queue_size, max_attempts and timeout_secs must be above 0"));
+            return Err(format!(
+                "event_sinks '{n}': queue_size, max_attempts and timeout_secs must be above 0"
+            ));
         }
         if s.backoff_max_ms < s.backoff_base_ms {
-            return Err(format!("event_sinks '{n}': backoff_max_ms is below backoff_base_ms"));
+            return Err(format!(
+                "event_sinks '{n}': backoff_max_ms is below backoff_base_ms"
+            ));
         }
     }
     Ok(())
@@ -224,8 +242,12 @@ fn matches_filter(prefixes: &[String], event: &str) -> bool {
 }
 
 fn read_secret(path: &Path) -> Result<Vec<u8>, String> {
-    let raw = std::fs::read(path).map_err(|e| format!("reading secret_file {}: {e}", path.display()))?;
-    let end = raw.iter().rposition(|b| !matches!(b, b'\n' | b'\r')).map_or(0, |i| i + 1);
+    let raw =
+        std::fs::read(path).map_err(|e| format!("reading secret_file {}: {e}", path.display()))?;
+    let end = raw
+        .iter()
+        .rposition(|b| !matches!(b, b'\n' | b'\r'))
+        .map_or(0, |i| i + 1);
     if end == 0 {
         return Err(format!("secret_file {} is empty", path.display()));
     }
@@ -335,7 +357,9 @@ async fn attempt(sink: &EventSinkConfig, ev: &VmEvent, delivery_id: &str) -> Out
             let msg = format!("http {}", st.as_u16());
             // 408 and 429 ask for a retry; any other 4xx will fail the same way next time.
             // Redirects are never followed (SSRF), so a 3xx is final too.
-            if st.is_redirection() || (st.is_client_error() && st.as_u16() != 408 && st.as_u16() != 429) {
+            if st.is_redirection()
+                || (st.is_client_error() && st.as_u16() != 408 && st.as_u16() != 429)
+            {
                 Outcome::Permanent(msg)
             } else {
                 Outcome::Retry(msg)
@@ -369,7 +393,12 @@ async fn deliver(sink: &EventSinkConfig, ev: &VmEvent, dl: &DeadLetter, stats: &
         }
     }
     stats.dead_lettered.fetch_add(1, Ordering::Relaxed);
-    dl.write(sink, ev, sink.max_attempts, &format!("retries exhausted: {last}"));
+    dl.write(
+        sink,
+        ev,
+        sink.max_attempts,
+        &format!("retries exhausted: {last}"),
+    );
 }
 
 /// Fan-out point: one bounded queue and worker task per sink.
@@ -415,7 +444,10 @@ impl Dispatcher {
     }
 
     pub fn stats(&self, name: &str) -> Option<Arc<SinkStats>> {
-        self.sinks.iter().find(|(c, ..)| c.name == name).map(|(.., s)| s.clone())
+        self.sinks
+            .iter()
+            .find(|(c, ..)| c.name == name)
+            .map(|(.., s)| s.clone())
     }
 }
 
@@ -504,7 +536,11 @@ mod tests {
                         let head = String::from_utf8_lossy(&buf[..p]).to_string();
                         let want = head
                             .lines()
-                            .find_map(|l| l.to_ascii_lowercase().strip_prefix("content-length:").map(|v| v.trim().parse::<usize>().unwrap()))
+                            .find_map(|l| {
+                                l.to_ascii_lowercase()
+                                    .strip_prefix("content-length:")
+                                    .map(|v| v.trim().parse::<usize>().unwrap())
+                            })
                             .unwrap_or(0);
                         while buf.len() < p + 4 + want {
                             let n = sock.read(&mut tmp).await.unwrap();
@@ -517,7 +553,12 @@ mod tests {
                 let st = statuses[i.min(statuses.len() - 1)];
                 i += 1;
                 let _ = sock
-                    .write_all(format!("HTTP/1.1 {st} X\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").as_bytes())
+                    .write_all(
+                        format!(
+                            "HTTP/1.1 {st} X\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                        )
+                        .as_bytes(),
+                    )
                     .await;
             }
         });
@@ -541,7 +582,9 @@ mod tests {
 
     async fn settle(stats: &SinkStats, want: u64) {
         for _ in 0..400 {
-            if stats.delivered.load(Ordering::Relaxed) + stats.dead_lettered.load(Ordering::Relaxed) >= want {
+            if stats.delivered.load(Ordering::Relaxed) + stats.dead_lettered.load(Ordering::Relaxed)
+                >= want
+            {
                 return;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -557,8 +600,14 @@ mod tests {
         assert!(verify(b"k", 1000, body, &sig, 1010, 300));
         assert!(!verify(b"k2", 1000, body, &sig, 1010, 300), "wrong key");
         assert!(!verify(b"k", 1000, b"{}", &sig, 1010, 300), "tampered body");
-        assert!(!verify(b"k", 1001, body, &sig, 1010, 300), "timestamp is signed");
-        assert!(!verify(b"k", 1000, body, &sig, 5000, 300), "stale timestamp");
+        assert!(
+            !verify(b"k", 1001, body, &sig, 1010, 300),
+            "timestamp is signed"
+        );
+        assert!(
+            !verify(b"k", 1000, body, &sig, 5000, 300),
+            "stale timestamp"
+        );
         assert!(!verify(b"k", 1000, body, "sha256=zz", 1000, 300));
         assert!(!verify(b"k", 1000, body, "md5=00", 1000, 300));
         assert_eq!(sign(b"k", 1000, b"x").len(), "sha256=".len() + 64);
@@ -580,11 +629,21 @@ mod tests {
         ] {
             assert!(check_url(u, &[]).is_err(), "{u} should be refused");
         }
-        for u in ["https://hooks.example.com/x", "http://10.1.2.3/x", "http://127.0.0.1:9/x"] {
+        for u in [
+            "https://hooks.example.com/x",
+            "http://10.1.2.3/x",
+            "http://127.0.0.1:9/x",
+        ] {
             assert!(check_url(u, &[]).is_ok(), "{u} should be allowed");
         }
         assert!(check_url("http://169.254.169.254/", &["169.254.169.254".into()]).is_ok());
-        assert!(check_url("http://metadata.google.internal/", &["metadata.google.internal".into()]).is_ok());
+        assert!(
+            check_url(
+                "http://metadata.google.internal/",
+                &["metadata.google.internal".into()]
+            )
+            .is_ok()
+        );
     }
 
     #[tokio::test]
@@ -606,7 +665,11 @@ mod tests {
         let mut no_secret = ok.clone();
         no_secret.secret_file = None;
         assert!(validate(&[no_secret]).unwrap_err().contains("secret_file"));
-        assert!(validate(&[ok.clone(), ok.clone()]).unwrap_err().contains("duplicate"));
+        assert!(
+            validate(&[ok.clone(), ok.clone()])
+                .unwrap_err()
+                .contains("duplicate")
+        );
         let mut bad = ok.clone();
         bad.url = "http://169.254.169.254/".into();
         assert!(validate(&[bad]).unwrap_err().contains("metadata"));
@@ -615,7 +678,10 @@ mod tests {
     #[test]
     fn backoff_doubles_and_caps() {
         let b = |n| backoff(n, 100, 1000).as_millis();
-        assert_eq!((b(1), b(2), b(3), b(4), b(5), b(60)), (100, 200, 400, 800, 1000, 1000));
+        assert_eq!(
+            (b(1), b(2), b(3), b(4), b(5), b(60)),
+            (100, 200, 400, 800, 1000, 1000)
+        );
     }
 
     #[test]
@@ -637,7 +703,11 @@ mod tests {
         let (head, body) = &seen[0];
         let h = |name: &str| {
             head.lines()
-                .find_map(|l| l.to_ascii_lowercase().strip_prefix(&format!("{}:", name.to_ascii_lowercase())).map(|_| l.split_once(':').unwrap().1.trim().to_string()))
+                .find_map(|l| {
+                    l.to_ascii_lowercase()
+                        .strip_prefix(&format!("{}:", name.to_ascii_lowercase()))
+                        .map(|_| l.split_once(':').unwrap().1.trim().to_string())
+                })
                 .unwrap()
         };
         let ts: i64 = h(TIMESTAMP_HEADER).parse().unwrap();
@@ -699,7 +769,11 @@ mod tests {
         d.dispatch(&ev("vm.start"));
         settle(&d.stats("t").unwrap(), 1).await;
         assert_eq!(seen.lock().unwrap().len(), 1);
-        assert!(std::fs::read_to_string(dir.path().join("dead.jsonl")).unwrap().contains("http 400"));
+        assert!(
+            std::fs::read_to_string(dir.path().join("dead.jsonl"))
+                .unwrap()
+                .contains("http 400")
+        );
     }
 
     #[tokio::test]
@@ -709,7 +783,11 @@ mod tests {
         let d = Dispatcher::start(vec![sink(dir.path(), &url)], dir.path().join("dead.jsonl"));
         d.dispatch(&ev("vm.start"));
         settle(&d.stats("t").unwrap(), 1).await;
-        assert_eq!(seen.lock().unwrap().len(), 1, "3xx is a permanent failure, never followed");
+        assert_eq!(
+            seen.lock().unwrap().len(),
+            1,
+            "3xx is a permanent failure, never followed"
+        );
     }
 
     #[tokio::test]
@@ -740,7 +818,11 @@ mod tests {
         let d = Dispatcher::start(vec![c], dir.path().join("dead.jsonl"));
         d.dispatch(&ev("vm.start"));
         settle(&d.stats("t").unwrap(), 1).await;
-        assert!(std::fs::read_to_string(dir.path().join("dead.jsonl")).unwrap().contains("blocked"));
+        assert!(
+            std::fs::read_to_string(dir.path().join("dead.jsonl"))
+                .unwrap()
+                .contains("blocked")
+        );
     }
 
     #[tokio::test]
