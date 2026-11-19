@@ -22,6 +22,7 @@ Exhaustive checklist. For the pitch, see [README.md](README.md); for who this is
 - QEMU data disks: qcow2 hot-add as `scsi-hd`, live `block_resize` of root or data disks, detach (`fluxctl disk`, `/v1/vms/{id}/disks`); a stopped `vz` VM's root disk can be grown offline
 - QEMU serial console on a chardev socket teeing into `console.log`; websocket `GET /v1/vms/{id}/serial` + `fluxctl serial`
 - Snapshots: save, list, delete, start-from; label-driven scheduled snapshots with retention (`fluxvm.io/snapshot-every`, `fluxvm.io/snapshot-keep`)
+- VM lifecycle resilience: `run_strategy` (Always, RerunOnFailure, Manual, Halted) restarts a dead hypervisor process with exponential backoff and a crash-loop cap; QEMU `on_crash` (pvpanic and watchdog, restart/poweroff/pause/coredump-if-existing); cron `power_schedule` start/stop ([docs/run-strategy.md](docs/run-strategy.md))
 - Backups to standalone qcow2 (root or `--all-disks`), live via one temporary internal snapshot
 - VM templates (`/v1/vm-templates`, `fluxctl vm-template save|list|show|delete|create`)
 - Lifecycle events (`state_dir/events.jsonl`, `GET /v1/events`, SSE `/v1/events/stream`, `fluxctl events -f`) and quota usage (`GET /v1/quotas/me`)
