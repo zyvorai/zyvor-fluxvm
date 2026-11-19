@@ -6888,6 +6888,8 @@ async fn main() -> Result<()> {
             let _netobs_pump = api::install_netobs(&cfg);
             #[cfg(unix)]
             docker_engine::spawn_if_configured(m.clone(), &cfg);
+            // Held until the daemon exits.
+            let _event_sinks = api::event_sinks::spawn(&cfg).map_err(|e| anyhow::anyhow!(e))?;
             let app = api::router(m);
             if cfg.tls.enabled() {
                 // rustls 0.23: select a process-wide CryptoProvider (ring) before

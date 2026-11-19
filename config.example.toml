@@ -302,3 +302,18 @@ reaper_interval_secs = 5
 # [storage]
 # ceph_user = "admin"
 # ceph_conf = "/etc/ceph/ceph.conf"
+
+# Outbound event webhooks: every event in the event log (GET /v1/events) is POSTed as JSON, signed
+# with HMAC-SHA256 (X-Fluxvm-Signature: sha256=<hex> over "<timestamp>.<body>"). The secret lives in
+# a file (chmod 600), never in this config. See docs/event-webhooks.md.
+# [[event_sinks]]
+# name = "ops-hook"
+# url = "https://hooks.example.com/fluxvm"
+# events = ["vm.", "node."]             # name prefixes; empty = all events
+# secret_file = "/etc/fluxvm/hook.secret"
+# allow_hosts = []                      # exempt hosts/IPs from the SSRF guard (link-local and metadata are refused)
+# queue_size = 1024                     # per-sink bound; overflow is dead-lettered
+# max_attempts = 5
+# backoff_base_ms = 500                 # doubles per retry
+# backoff_max_ms = 30000
+# timeout_secs = 10

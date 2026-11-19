@@ -3,6 +3,18 @@
 ## Unreleased
 
 
+- **Fleet anti-affinity and topology spread; opt-in reschedule after heartbeat loss.** `POST /fleet/vms` accepts `antiAffinity`
+  (`{group, mode}`) and `topologySpread` (`{key, maxSkew, mode, group}`), `required` or `preferred`, applied to automatic placement
+  (new `central_placement.rs`; the ledger remembers group membership). Heartbeat loss never rescheduled anything before; it still does not
+  unless `FLUXVM_AUTO_RESCHEDULE_GRACE_SECS` is set on central, and then only for nodes that advertised `self_fence:F`
+  (`FLUXVM_NODE_SELF_FENCE_SECS`, new `node_fence.rs`) once their heartbeat is older than `F` plus a margin. Additive and off by default.
+  See `docs/fleet-affinity.md`.
+- **Outbound event webhooks.** `[[event_sinks]]` in the host config POST each event to a URL, signed `X-Fluxvm-Signature: sha256=` (HMAC-SHA256
+  over `timestamp.body`, secret read from `secret_file`), with a bounded queue per sink, retries with backoff, a dead-letter file and an SSRF guard
+  (link-local and metadata addresses refused unless allow-listed; redirects not followed). New `fluxvm_api::event_sinks` and
+  `EventSinkConfig` in `fluxvm-core`. Additive. See `docs/event-webhooks.md`.
+
+
 - **Instancetypes and preferences.** KubeVirt-style named classes: an *instancetype* is a versioned size class (vCPUs, memory, optional hotplug
   ceilings, hugepages, CPU model, net/block limits) and a *preference* is a bundle of device defaults (disk bus, NIC model, Secure Boot, TPM, firmware).
   A create body (or `fluxctl create --instancetype NAME[:VERSION] --preference NAME`) may reference them. An instancetype owns the fields it defines, so a
@@ -22,7 +34,7 @@
   so only new or stale chain points are re-read; S3 credentials and keys are named by environment variable and never stored. Each result is a
   `backup.verify` / `backup.test_restore` event (`result=ok|failed`) and the CLI exits 3 on a problem. New `fluxvm_backup_s3::verify`
   (and an in-memory `MemStore` for tests) and `fluxvm_scheduler::backup_verify`. Additive. Not exercised against a real S3 service. See `docs/backup-verify.md`.
-=======
+
 - **`fluxctl image push` / `image pull-disk`: VM disk images as OCI artifacts.** Pushes one raw or qcow2 disk to any OCI registry as a one-layer
   image manifest (`artifactType application/vnd.fluxvm.disk.v1`, layer `application/vnd.fluxvm.disk.layer.v1.<raw|qcow2>`, config with architecture,
   format and virtual size), like KubeVirt's containerDisk but pure Rust. The file is streamed (hashed first so an existing layer is skipped, then
@@ -52,6 +64,7 @@
   referrers API with the `sha256-<hex>` tag-schema fallback), `attach` (publish an SBOM or attestation as an artifact whose `subject` is the target, updating
   the fallback index when the registry does not) and `index create` (multi-arch OCI index with platforms read from each manifest's config). JSON by default,
   `-o table` for text. New module `fluxvm_image::oci_manage`, tested against an in-process mock registry. Additive. See `docs/oci-registry-tools.md`.
+
 
 
 - **`fluxctl doctor` checks four more Linux host settings.** `cgroups` (a unified cgroup v2 hierarchy with the `cpu memory io pids cpuset` controllers

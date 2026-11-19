@@ -879,6 +879,9 @@ pub struct TenancyState {
     /// Snapshots taken through central (`/fleet/vms/{node}/{id}/snapshots`), for the per-VM limit and storage billing.
     #[serde(default)]
     pub snapshots: Vec<SnapshotEntry>,
+    /// `"node/vm_id"` -> placement group, for anti-affinity and topology spread (`central_placement.rs`).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub placement_groups: BTreeMap<String, String>,
     /// Quota held by creates that are in flight (between the quota check and the node's answer). In memory only: a
     /// restart drops them, and the requests they belonged to are gone with it.
     #[serde(skip)]

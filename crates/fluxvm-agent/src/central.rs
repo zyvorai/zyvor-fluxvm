@@ -15,6 +15,8 @@ mod audit;
 mod cloud;
 #[path = "central_enroll.rs"]
 mod enroll;
+#[path = "central_failover.rs"]
+mod failover;
 #[path = "central_ha.rs"]
 mod ha_rt;
 #[path = "central_metrics.rs"]
@@ -23,6 +25,8 @@ mod metrics;
 mod notify;
 #[path = "central_warmpool.rs"]
 mod pools;
+#[path = "central_placement.rs"]
+mod placement;
 #[path = "central_registry.rs"]
 mod registry;
 #[path = "central_signup.rs"]
@@ -894,6 +898,12 @@ pub fn router_with_flush(
         && tokio::runtime::Handle::try_current().is_ok()
     {
         cloud::spawn_reconciler(fleet.clone(), every);
+    }
+    // Opt-in: FLUXVM_AUTO_RESCHEDULE_GRACE_SECS (see central_failover.rs).
+    if let Some(fo) = failover::Config::from_env()
+        && tokio::runtime::Handle::try_current().is_ok()
+    {
+        failover::spawn(fleet.clone(), std::time::Duration::from_secs(10), fo);
     }
     // ---- metrics ----
     if tokio::runtime::Handle::try_current().is_ok() {
@@ -1897,6 +1907,7 @@ async fn create_vm_inner(
     let volumes = vols::take_volumes(&mut body)?;
     vols::refuse_tenant_extra_disks(caller, &body)?;
     let selector = extract_selector(&mut body);
+    let rules = placement::Rules::extract(&mut body)?;
     let reschedulable = body
         .as_object_mut()
         .and_then(|o| o.remove("reschedulable"))
@@ -1978,6 +1989,7 @@ async fn create_vm_inner(
         Placement {
             requested_node,
             selector,
+            rules,
             reschedulable,
             tenant,
             vcpus: req_vcpus,
@@ -2048,6 +2060,7 @@ fn wants_tenant_vmnet(body: &Value) -> bool {
 struct Placement {
     requested_node: Option<String>,
     selector: HashMap<String, String>,
+    rules: placement::Rules,
     reschedulable: bool,
     tenant: Option<String>,
     vcpus: u32,
@@ -2068,6 +2081,7 @@ async fn place_and_dispatch(
     let Placement {
         requested_node,
         selector,
+        rules,
         reschedulable,
         tenant,
         vcpus: req_vcpus,
@@ -2081,6 +2095,7 @@ async fn place_and_dispatch(
         if !selector.is_empty() {
             s["nodeSelector"] = json!(selector);
         }
+        rules.merge_into(&mut s);
         s
     });
 
@@ -2116,6 +2131,7 @@ async fn place_and_dispatch(
                     spec,
                 )
                 .await;
+                placement::remember(fleet, &target.name, &record, &rules).await;
                 Ok(Json(json!({"node": target.name, "vm": record})))
             }
             Err(DispatchError::Unreachable(msg)) => Err(AppError(StatusCode::BAD_GATEWAY, msg)),
@@ -2138,7 +2154,7 @@ async fn place_and_dispatch(
                         .admit(&n.name, effective, macos_guest, false)
                         .is_ok()
             };
-            (
+            let pick = |admit: &dyn Fn(&NodeInfo) -> bool| {
                 pick_best_capacity_admitted(
                     &nodes,
                     req_vcpus,
@@ -2147,14 +2163,33 @@ async fn place_and_dispatch(
                     &selector,
                     profile,
                     apple_request.as_ref(),
-                    &admit,
-                ),
-                tenancy.enabled(),
-            )
+                    admit,
+                )
+            };
+            let picked = if rules.is_empty() {
+                pick(&admit)
+            } else {
+                // Same candidate test as `pick`, so spread domains only count nodes that could take the VM.
+                let schedulable = |n: &NodeInfo| {
+                    !tried.contains(&n.name)
+                        && admit(n)
+                        && n.matches_selector(&selector)
+                        && n.security.supports(profile).is_ok()
+                        && n.capacity_score(req_vcpus, req_mem).is_some()
+                };
+                let counts = placement::counts_for(&tenancy, tenant.as_deref(), &rules);
+                let gate = placement::Gate::compute(&rules, &counts, &nodes, &schedulable);
+                // Everything asked for first; then only what is required.
+                pick(&|n| admit(n) && gate.strict.contains(&n.name))
+                    .or_else(|| pick(&|n| admit(n) && gate.hard.contains(&n.name)))
+            };
+            (picked, tenancy.enabled())
         };
         let Some(target) = target else {
             return Err(last_unreachable.unwrap_or_else(|| {
-                let mut msg = no_candidate_message(&selector);
+                let mut msg = rules
+                    .unsatisfiable_message()
+                    .unwrap_or_else(|| no_candidate_message(&selector));
                 if tenancy_on && macos_guest && *effective != Caller::Admin {
                     msg.push_str(
                         "; macOS guests run only on Macs the tenant leases: lease one with POST /fleet/leases",
@@ -2177,6 +2212,7 @@ async fn place_and_dispatch(
                     spec,
                 )
                 .await;
+                placement::remember(fleet, &target.name, &record, &rules).await;
                 return Ok(Json(json!({"node": target.name, "vm": record})));
             }
             Err(DispatchError::Unreachable(msg)) => {
