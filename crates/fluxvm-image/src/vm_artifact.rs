@@ -242,15 +242,15 @@ fn write_sparse(f: &fs::File, offset: u64, data: &[u8]) -> std::io::Result<()> {
 }
 
 /// A registry session for one repository: bearer-token or basic auth, retried once on 401.
-struct Session {
-    http: reqwest::Client,
-    r: ImageRef,
+pub(crate) struct Session {
+    pub(crate) http: reqwest::Client,
+    pub(crate) r: ImageRef,
     creds: Option<Credentials>,
     auth: Option<String>,
 }
 
 impl Session {
-    fn new(r: ImageRef, creds: Option<Credentials>) -> Result<Self> {
+    pub(crate) fn new(r: ImageRef, creds: Option<Credentials>) -> Result<Self> {
         let http = reqwest::Client::builder()
             .user_agent(concat!("fluxvm/", env!("CARGO_PKG_VERSION")))
             .connect_timeout(Duration::from_secs(15))
@@ -271,7 +271,7 @@ impl Session {
         base[..cut].to_owned()
     }
 
-    async fn send(
+    pub(crate) async fn send(
         &mut self,
         build: impl Fn(&reqwest::Client) -> reqwest::RequestBuilder,
     ) -> Result<reqwest::Response> {
@@ -349,7 +349,7 @@ impl Session {
         Ok(format!("Bearer {token}"))
     }
 
-    async fn blob_exists(&mut self, digest: &str) -> Result<bool> {
+    pub(crate) async fn blob_exists(&mut self, digest: &str) -> Result<bool> {
         let url = format!("{}/blobs/{digest}", self.r.base_url());
         let resp = self.send(|h| h.head(&url)).await?;
         match resp.status().as_u16() {
@@ -360,7 +360,7 @@ impl Session {
     }
 
     /// Monolithic upload: `POST …/blobs/uploads/` then `PUT <location>?digest=`.
-    async fn upload(&mut self, digest: &str, bytes: Vec<u8>) -> Result<()> {
+    pub(crate) async fn upload(&mut self, digest: &str, bytes: Vec<u8>) -> Result<()> {
         let start = format!("{}/blobs/uploads/", self.r.base_url());
         let resp = self.send(|h| h.post(&start)).await?;
         ensure!(
@@ -415,7 +415,7 @@ impl Session {
         Ok(())
     }
 
-    async fn get_bytes(&mut self, url: &str, accept: &str, cap: u64) -> Result<Vec<u8>> {
+    pub(crate) async fn get_bytes(&mut self, url: &str, accept: &str, cap: u64) -> Result<Vec<u8>> {
         let resp = self.send(|h| h.get(url).header("Accept", accept)).await?;
         ensure!(
             resp.status().is_success(),

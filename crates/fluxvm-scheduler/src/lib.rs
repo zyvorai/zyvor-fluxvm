@@ -25,6 +25,7 @@ use uuid::Uuid;
 pub mod apple_placement;
 pub mod apple_rebalance;
 pub mod backup;
+pub mod backup_verify;
 pub mod branch;
 pub mod cbt;
 pub mod changes;
@@ -40,6 +41,7 @@ pub mod hibernate;
 pub mod history;
 pub mod http_policy;
 pub mod idempotency;
+pub mod instancetypes;
 pub mod journal;
 pub mod live_migration;
 mod migration_relay;
@@ -49,14 +51,17 @@ mod oci_pool;
 pub use oci_pool::{WARM_LABEL as OCI_WARM_LABEL, listed as vm_listed};
 pub mod macos_pool;
 pub mod oci_sandbox;
+pub mod power_schedule;
 pub mod procbox_sandbox;
 mod recovery;
+mod run_lifecycle;
 mod sandbox;
 pub mod sandbox_density;
 mod sandbox_pool;
 pub mod shared_disk;
 pub mod speculate;
 pub mod storage_report;
+pub mod supervisor;
 pub mod templates;
 pub mod vm_restore;
 pub mod vz_devices;
@@ -1263,6 +1268,12 @@ impl VmManager {
                 continue;
             };
             match self.get(id).await {
+                Ok(vm)
+                    if vm.request.run_strategy
+                        == Some(fluxvm_core::lifecycle::RunStrategy::Halted) =>
+                {
+                    tracing::info!(%id, "autostart skipped: run_strategy is Halted");
+                }
                 Ok(vm) if vm.status == VmStatus::Stopped => {
                     if let Err(e) = self.start(id).await {
                         tracing::warn!(%id, error = %e, "autostart failed");
@@ -3015,6 +3026,12 @@ impl VmManager {
             anyhow::bail!("balloon requires backend qemu");
         }
         req.validate_balloon()?;
+        if req.on_crash.is_some() && req.backend != BackendKind::Qemu {
+            anyhow::bail!("on_crash requires backend qemu");
+        }
+        if let Some(ps) = &req.power_schedule {
+            power_schedule::validate(ps)?;
+        }
         req.validate_vfio_devices()?;
 
         let result: Result<()> = async {
@@ -6049,7 +6066,8 @@ impl VmManager {
                                 let _ = mgr.remove();
                             }
                         }
-                        self.store.update(vm).await?;
+                        self.store.update(vm.clone()).await?;
+                        self.on_vm_exit(&vm).await;
                         continue;
                     }
 
@@ -6205,6 +6223,9 @@ impl VmManager {
                     }
                 }
                 me.reap_migration_receivers().await;
+                me.run_pending_restarts().await;
+                me.ensure_crash_watchers().await;
+                me.run_power_schedules().await;
                 if !me
                     .scheduled_snapshots_busy
                     .swap(true, std::sync::atomic::Ordering::AcqRel)
@@ -6729,6 +6750,9 @@ mod tests {
             vfio_devices: vec![],
             numa: vec![],
             balloon: None,
+            run_strategy: None,
+            on_crash: None,
+            power_schedule: None,
             pod_uid: None,
             secure_boot: None,
             tpm: None,

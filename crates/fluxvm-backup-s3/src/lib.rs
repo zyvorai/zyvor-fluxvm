@@ -12,7 +12,9 @@
 pub mod crypto;
 pub mod dir;
 pub mod manifest;
+pub mod mem;
 pub mod s3;
+pub mod verify;
 
 pub use manifest::{DiskLayer, LayerEncryption, Manifest, ManifestKind, ParentRef};
 

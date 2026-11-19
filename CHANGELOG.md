@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+
 - **Fleet anti-affinity and topology spread; opt-in reschedule after heartbeat loss.** `POST /fleet/vms` accepts `antiAffinity`
   (`{group, mode}`) and `topologySpread` (`{key, maxSkew, mode, group}`), `required` or `preferred`, applied to automatic placement
   (new `central_placement.rs`; the ledger remembers group membership). Heartbeat loss never rescheduled anything before; it still does not
@@ -12,6 +13,60 @@
   over `timestamp.body`, secret read from `secret_file`), with a bounded queue per sink, retries with backoff, a dead-letter file and an SSRF guard
   (link-local and metadata addresses refused unless allow-listed; redirects not followed). New `fluxvm_api::event_sinks` and
   `EventSinkConfig` in `fluxvm-core`. Additive. See `docs/event-webhooks.md`.
+
+
+- **Instancetypes and preferences.** KubeVirt-style named classes: an *instancetype* is a versioned size class (vCPUs, memory, optional hotplug
+  ceilings, hugepages, CPU model, net/block limits) and a *preference* is a bundle of device defaults (disk bus, NIC model, Secure Boot, TPM, firmware).
+  A create body (or `fluxctl create --instancetype NAME[:VERSION] --preference NAME`) may reference them. An instancetype owns the fields it defines, so a
+  body that also sets `vcpus` or `memory_mib` is a 400 naming every clash; a preference only fills in what the spec leaves unset. The resolved values are
+  written into the VM's own spec, so later edits or deletes of a class never change existing VMs, and a snapshot of what was applied or skipped is kept in
+  the VM's workspace (`GET /v1/vms/{id}/instancetype`) with `fluxvm.io/instancetype` / `fluxvm.io/preference` labels. `small`, `medium`, `large` and
+  `memory-optimised` (and `linux`/`windows` preferences) ship built in; storing a class of the same name and version overrides one. New
+  `fluxvm_core::instancetype`; `/v1/instancetypes[/{name}]`, `/v1/preferences[/{name}]` (reads for every role, writes admin); `fluxctl instancetype|preference
+  ls|get|create|rm` (remote or local); `fluxctl vm-spec check` resolves the selectors against the built-ins and reports clashes. The NIC model and the CPU model
+  (outside Firecracker) are recorded but not yet applied, because the VM spec has no such settings. Additive: a body without the new keys behaves as before.
+  See `docs/instancetypes.md`.
+- **Backup chain verify and test-restore.** `fluxctl backup-verify verify` re-reads a changed-block-tracking chain in object storage (every manifest down to
+  the full backup, every layer: stored size and SHA-256, decrypting first when a key is given) and checks parent links, sequences, chain id, key layout and
+  that every disk is present in every layer set, without restoring; all problems are reported, not just the first. `backup-verify test-restore` also
+  restores the chain into a scratch directory and runs `qemu-img check` and `info` on the result (qcow2 header and virtual-size checks when `qemu-img`
+  cannot be run). Scheduled `backup-verify job`s, modelled on Proxmox Backup Server verify jobs, run in the daemon with `ignore-verified` / `outdated-after`
+  so only new or stale chain points are re-read; S3 credentials and keys are named by environment variable and never stored. Each result is a
+  `backup.verify` / `backup.test_restore` event (`result=ok|failed`) and the CLI exits 3 on a problem. New `fluxvm_backup_s3::verify`
+  (and an in-memory `MemStore` for tests) and `fluxvm_scheduler::backup_verify`. Additive. Not exercised against a real S3 service. See `docs/backup-verify.md`.
+
+- **`fluxctl image push` / `image pull-disk`: VM disk images as OCI artifacts.** Pushes one raw or qcow2 disk to any OCI registry as a one-layer
+  image manifest (`artifactType application/vnd.fluxvm.disk.v1`, layer `application/vnd.fluxvm.disk.layer.v1.<raw|qcow2>`, config with architecture,
+  format and virtual size), like KubeVirt's containerDisk but pure Rust. The file is streamed (hashed first so an existing layer is skipped, then
+  sent in chunked `PATCH` uploads), Basic/Bearer auth asks for push scope, and the registry's `Docker-Content-Digest` must match. `pull-disk` checks
+  the manifest (when pinned), config and layer digests and size before the file appears. New module `fluxvm_image::oci_push`; credentials are
+  `FLUXVM_REGISTRY_USER` / `_PASSWORD` as for `vm-image`. Additive. See `docs/oci-disk-images.md`.
+- **Guest operations over the QEMU guest agent.** `fluxctl vm guest info | ssh-key add|rm|ls | set-password | time-sync` and the matching
+  `GET /v1/vms/{id}/guest/info`, `GET|POST /v1/vms/{id}/guest/ssh-keys` (+ `/remove`), `POST .../guest/password`, `POST .../guest/time-sync`
+  routes (admin for everything that changes the guest or lists keys; `info` is readable). New typed wrappers in `fluxvm_image::qga` for
+  `guest-get-osinfo`, `-fsinfo`, `-users`, `-host-name`, `-time`, `-vcpus`, `-memory-blocks`, `guest-set-time`, `guest-set-user-password` and the three
+  `guest-ssh-*-authorized-keys` commands. Passwords are base64 on the wire, read only from stdin or a file by the CLI, and never logged, echoed or put
+  in an error. Needs `qga.enabled` and a running guest. Automatic clock resync after resume/restore is not wired yet (follow-up). Unit tests drive a mock
+  QGA socket; no real guest agent was exercised. See `docs/guest-ops.md`.
+
+- **VM lifecycle resilience: `run_strategy`, `on_crash`, `power_schedule`.** Three optional `CreateVmRequest` fields (all unset by default, which keeps
+  today's behaviour). `run_strategy` (`Always`, `RerunOnFailure`, `Manual`, `Halted`) makes `reconcile()` restart a VM whose hypervisor process died
+  without a stop request, with exponential backoff (5 s doubling to 5 min) and a crash-loop cap (5 restarts without a 10-minute stable run, then the VM
+  is marked Failed); `Halted` also skips autostart. QEMU `on_crash` (`restart`, `poweroff`, `pause`, `coredump-if-existing`) adds a pvpanic device, an
+  i6300esb watchdog, `-action` policy and a dedicated event monitor, and records `GUEST_PANICKED`/`WATCHDOG`/guest `SHUTDOWN` events. `power_schedule`
+  (or labels `fluxvm.io/power-start`/`power-stop`) starts and stops a VM from UTC cron expressions. Events go to `events.jsonl` (`vm.exited`,
+  `vm.restart-scheduled`, `vm.restarted`, `vm.crash-loop`, `vm.guest-panic`, `vm.watchdog`, `vm.power-schedule`). New modules `fluxvm_scheduler::{supervisor,
+  power_schedule}`, `fluxvm_qemu::crash_watch`, `fluxvm_core::lifecycle`; the decision logic is pure and unit-tested. Not exercised against a real VM
+  crash (the build host has no KVM). See `docs/run-strategy.md`.
+
+- **`fluxctl image`: OCI registry management.** `inspect` (manifest or index, config, layers, sizes, platforms, annotations), `tags` (follows `Link`
+  pagination), `tag` (retag a manifest, bytes unchanged), `rm` (delete by digest only; a registry that forbids it gets a clear error), `referrers` (OCI 1.1
+  referrers API with the `sha256-<hex>` tag-schema fallback), `attach` (publish an SBOM or attestation as an artifact whose `subject` is the target, updating
+  the fallback index when the registry does not) and `index create` (multi-arch OCI index with platforms read from each manifest's config). JSON by default,
+  `-o table` for text. New module `fluxvm_image::oci_manage`, tested against an in-process mock registry. Additive. See `docs/oci-registry-tools.md`.
+
+
+
 - **`fluxctl doctor` checks four more Linux host settings.** `cgroups` (a unified cgroup v2 hierarchy with the `cpu memory io pids cpuset` controllers
   the VM cgroups delegate; without them CPU, memory and I/O limits are not enforced), `net devices` (`/dev/net/tun` for tap networking, `/dev/vhost-net`
   for the kernel data path), `ip forwarding` (`net.ipv4.ip_forward` for NAT'ed tap and namespace networks) and `open files` (the soft `RLIMIT_NOFILE`;

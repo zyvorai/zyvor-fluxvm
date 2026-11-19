@@ -35,6 +35,7 @@ pub mod docker_engine;
 pub mod event_sinks;
 mod grants;
 mod idempotency;
+mod instancetypes_api;
 mod mfa;
 pub mod mtls;
 mod netobs_api;
@@ -49,6 +50,7 @@ mod agent_session_auth;
 mod agent_session_transfer;
 mod agent_sessions;
 mod docker_view;
+mod guest_ops;
 mod kube;
 mod kube_actions;
 mod kube_flows;
@@ -996,6 +998,7 @@ pub fn router(manager: Arc<VmManager>) -> Router {
             idempotency::middleware,
         ))
         .merge(speculate_api::routes())
+        .merge(instancetypes_api::routes())
         // Its own `Idempotency-Key` layer: the one above only wraps routes added before it.
         .merge(
             agent_sessions::routes().layer(middleware::from_fn_with_state(
@@ -1006,6 +1009,7 @@ pub fn router(manager: Arc<VmManager>) -> Router {
         .merge(macos_pool_api::routes())
         .merge(vz_api::routes())
         .merge(volumes_api::routes())
+        .merge(guest_ops::routes())
         .layer(middleware::from_fn_with_state(
             manager.clone(),
             tenant_guard_middleware,
@@ -1410,8 +1414,11 @@ async fn create_vm(
     actor: Option<Extension<AuditActor>>,
     token_tenant: Option<Extension<TokenTenant>>,
     Query(q): Query<CreateVmQuery>,
-    Json(req): Json<CreateVmRequest>,
+    Json(body): Json<serde_json::Value>,
 ) -> ApiResult<impl IntoResponse> {
+    // `instancetype`/`preference` in the body are resolved before the spec is parsed.
+    let (req, class_snapshot) =
+        fluxvm_scheduler::instancetypes::resolve_create_body(&m.cfg.state_dir, body)?;
     let started = std::time::Instant::now();
     let want_exec = ReadyQuery {
         ready: q.ready.clone(),
@@ -1425,8 +1432,14 @@ async fn create_vm(
         }
         m.break_shared_disk_lock(&req.image)?;
     }
-    let rec = create_vm_as(&m, actor, token_tenant, req).await?;
+    let mut rec = create_vm_as(&m, actor, token_tenant, req).await?;
+    if let Some(s) = &class_snapshot {
+        rec = fluxvm_scheduler::instancetypes::record_snapshot(&m, rec, s).await?;
+    }
     let mut body = json!(rec);
+    if let Some(s) = class_snapshot {
+        body["instancetype_snapshot"] = json!(s);
+    }
     if want_exec {
         merge_first_command(
             &mut body,
@@ -6390,6 +6403,9 @@ mod tests {
                 vfio_devices: vec![],
                 numa: vec![],
                 balloon: None,
+                run_strategy: None,
+                on_crash: None,
+                power_schedule: None,
                 pod_uid: None,
                 secure_boot: None,
                 tpm: None,

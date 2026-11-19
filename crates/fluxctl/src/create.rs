@@ -32,6 +32,13 @@ pub struct CreateArgs {
     pub memory_mib: Option<u64>,
     #[arg(long)]
     pub disk_size_gib: Option<u64>,
+    /// Size class, `NAME` or `NAME:VERSION` (`fluxctl instancetype ls`). It sets vcpus and memory, so it
+    /// cannot be combined with `--vcpus`/`--memory-mib`.
+    #[arg(long, value_name = "NAME[:VERSION]")]
+    pub instancetype: Option<String>,
+    /// Device and firmware defaults by name (`fluxctl preference ls`); settings in the spec win.
+    #[arg(long, value_name = "NAME")]
+    pub preference: Option<String>,
     /// Guest OS on the `vz` backend (`apple.guest_os`).
     #[arg(long, value_enum)]
     pub guest: Option<GuestOs>,
@@ -135,6 +142,12 @@ pub fn create_body(a: &CreateArgs) -> Result<Value> {
     }
     if let Some(v) = a.memory_mib {
         obj.insert("memory_mib".into(), json!(v));
+    }
+    if let Some(v) = &a.instancetype {
+        obj.insert("instancetype".into(), json!(v));
+    }
+    if let Some(v) = &a.preference {
+        obj.insert("preference".into(), json!(v));
     }
     if let Some(v) = a.disk_size_gib {
         obj.insert("disk_size_gib".into(), json!(v));
@@ -274,6 +287,20 @@ mod tests {
         assert!(t.get("builtin").is_none());
         assert!(parse_vsock_service("5001").is_err());
         assert!(parse_vsock_service("x=metadata").is_err());
+    }
+
+    #[test]
+    fn instancetype_and_preference_flags_reach_the_body() {
+        let mut a = args();
+        a.instancetype = Some("large:1".into());
+        a.preference = Some("linux".into());
+        let b = create_body(&a).unwrap();
+        assert_eq!(b["instancetype"], "large:1");
+        assert_eq!(b["preference"], "linux");
+        assert!(b.get("vcpus").is_none());
+        // With --vcpus the body carries both, which the daemon refuses as a conflict.
+        a.vcpus = Some(2);
+        assert!(create_body(&a).unwrap().get("vcpus").is_some());
     }
 
     #[test]
