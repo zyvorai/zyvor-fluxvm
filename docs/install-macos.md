@@ -1,3 +1,5 @@
+> **Withdrawn.** The Homebrew formula and the prebuilt macOS tarballs were withdrawn after 0.4.21, so the `brew install` steps below no longer work for new installs. Build from source (see the README Quickstart) or use [FluxVM for Mac](https://github.com/zyvorai/zyvor-fluxvm/releases/tag/mac-v0.1.0), a native app with a 30-day trial that bundles the engine. This page is kept as a reference for existing installs.
+
 # Install FluxVM on a Mac with Homebrew
 
 > **Prefer one command and no Homebrew formula?** `curl -fsSL https://zyvorai.github.io/zyvor-fluxvm/install.sh | bash`
