@@ -334,7 +334,7 @@ FluxVM is **free and open source** under the [Apache License 2.0](LICENSE) — s
 
 ### FluxVM for Mac
 
-[FluxVM for Mac](https://zyvorai.github.io/zyvor-fluxvm/fluxvm-for-mac/) (release [`mac-v0.1.0`](https://github.com/zyvorai/zyvor-fluxvm/releases/tag/mac-v0.1.0), `FluxVM-Mac-0.1.0.dmg`) is a separate, notarized menu-bar app that bundles the FluxVM engine (0.4.21). **The app is proprietary and is not open source; its source is private.** It starts with a free 30-day trial. After the trial the price is INR 2,999 for an individual, or INR 4,999 per Mac for teams of 5 or more Macs. For a trial key or a licence, contact [sales@zyvor.dev](mailto:sales@zyvor.dev). The engine and CLI in this repository are unaffected: they stay under the Apache License 2.0, and the Linux install is unchanged.
+[FluxVM for Mac](https://zyvorai.github.io/zyvor-fluxvm/fluxvm-for-mac/) (release [`mac-v0.1.0`](https://github.com/zyvorai/zyvor-fluxvm/releases/tag/mac-v0.1.0), `FluxVM-Mac-0.1.0.dmg`) is a separate, notarized menu-bar app that bundles the FluxVM engine (0.4.21). **The app is proprietary and is not open source; its source is private.** It starts with a free 30-day trial. The trial is soft: nothing is disabled and no data is lost when it ends. After the trial the price is INR 2,999 per Mac per year including GST for an individual, or INR 2,549 per Mac per year including GST for teams of 5 or more Macs (minimum 5 Macs, INR 12,745, by invoice). For a trial key or a licence, contact [sales@zyvor.dev](mailto:sales@zyvor.dev). The engine and CLI in this repository are unaffected: they stay under the Apache License 2.0, and the Linux install is unchanged.
 
 Report vulnerabilities per [SECURITY.md](SECURITY.md).
 
