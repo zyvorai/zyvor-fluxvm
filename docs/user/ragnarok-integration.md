@@ -65,7 +65,7 @@ No Ragnarok-specific CRD fields: anything you can `kubectl apply` as a `Disposab
 
 ## Auth note
 
-**FluxVM is free** (Apache-2.0) — no Ragnarok license token applies to it.
+**FluxVM needs no Ragnarok license token.** Its own license is the Zyvor Production License v1.0 (non-production use is free; production use requires a commercial license from sales@zyvor.dev).
 
 SSO (Keycloak OIDC), local break-glass, LDAP, and the Ragnarok signed
 `trial.token` / commercial JWT live entirely in **Ragnarok** (proprietary).

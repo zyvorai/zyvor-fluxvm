@@ -29,7 +29,7 @@ is required to use FluxVM directly.
 
 ### Evaluating FluxVM for your team?
 
-FluxVM is Apache-2.0 — free to use, modify and ship commercially. If you are weighing build-vs-adopt for a
+FluxVM is under the Zyvor Production License v1.0 — free for non-production use; production use requires a commercial license. If you are weighing build-vs-adopt for a
 host-local VM layer, want a pilot, or need help scoping the [production checklist](PRODUCTION.md) against your
 threat model, **[talk to Zyvor](https://zyvor.dev?utm_source=github&utm_medium=fluxvm)**. Fabric and Ragnarok
 (separate products with their own licensing) are the managed-experience path when you outgrow a CLI and an API.

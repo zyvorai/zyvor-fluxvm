@@ -241,4 +241,4 @@ This mirrors the [maturity caveat](docs/proof-and-status.md#maturity-whats-real-
 
 ## License
 
-Apache License 2.0, entire repository, no dual licensing. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
+Zyvor Production License v1.0 (SPDX `LicenseRef-Zyvor-Production-1.0`): non-production use is free, production use requires a commercial license (sales@zyvor.dev). See [LICENSE](LICENSE) and [NOTICE](NOTICE).

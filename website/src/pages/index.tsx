@@ -237,9 +237,9 @@ function Platform() {
           <Chevron to="/mac-cloud">Build a Mac cloud</Chevron>
         </div>
         <div className={styles.platformCard}>
-          <Heading as="h3">Open source</Heading>
+          <Heading as="h3">Source-available</Heading>
           <p>
-            Apache-2.0, the whole repository. Every claim on this site links to what has and has not been
+            Zyvor Production License v1.0, the whole repository: free for non-production use. Every claim on this site links to what has and has not been
             verified.
           </p>
           <Chevron href={REPO}>GitHub</Chevron>

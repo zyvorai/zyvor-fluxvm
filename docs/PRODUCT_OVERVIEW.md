@@ -94,7 +94,7 @@ Full diagrams (image pipeline, Secure Containers request flow, Network Fabric pa
 | eBPF/TC dataplane | Yes — Network Fabric, GA schema v4 | No | Depends on CNI |
 | Multi-host fleet management | Yes — `fluxvm-agent`, verified across 2 real hosts | No (needs external orchestration) | Via Kubernetes scheduler |
 | OCI/containerd workload support | GA (Secure Containers; not Kata-equivalent) | No | No (different workload model) |
-| License | Apache-2.0 | LGPL | Apache-2.0 |
+| License | Zyvor Production 1.0 (free non-production) | LGPL | Apache-2.0 |
 
 This table intentionally covers only what's verifiable today — no unpublished performance numbers, no forward-looking claims. See [POSITIONING.md](POSITIONING.md#competitive-frame) for the fuller competitive narrative, including the honest caveats (KubeVirt still owns CDI/`virtctl` and full cluster migration orchestration; FluxVM's QEMU migration path is host-API + Fabric, not KubeVirt parity; libvirt has broader hypervisor driver support).
 
@@ -174,7 +174,7 @@ Unlike some of the figures in this table, we deliberately don't include a lines-
 
 ## License
 
-Apache License 2.0 — free for commercial use, modification, and distribution, for the entire repository. See [README.md — License](https://github.com/zyvorai/zyvor-fluxvm/blob/main/README.md#license) and [NOTICE](https://github.com/zyvorai/zyvor-fluxvm/blob/main/NOTICE).
+Zyvor Production License v1.0 for the entire repository: non-production use is free; production use requires a commercial license (sales@zyvor.dev). See [README.md — License](https://github.com/zyvorai/zyvor-fluxvm/blob/main/README.md#license) and [NOTICE](https://github.com/zyvorai/zyvor-fluxvm/blob/main/NOTICE).
 
 ---
 

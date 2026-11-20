@@ -19,7 +19,7 @@ make preflight
 
 ## PR bar
 
-- Apache-2.0 headers on new files
+- SPDX license headers (`LicenseRef-Zyvor-Production-1.0`) on new files
 - Changelog entry under `## Unreleased` at the top of `CHANGELOG.md`
 - Docs next to the feature (`docs/` + README TOC if it is operator-facing)
 - Operator-facing production/auth/tenant/probe changes also update

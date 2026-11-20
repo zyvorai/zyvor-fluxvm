@@ -73,7 +73,7 @@ COPY --from=stage share/ /usr/share/fluxvm/
 
 LABEL org.opencontainers.image.title="fluxvm" \
       org.opencontainers.image.source="https://github.com/zyvorai/zyvor-fluxvm" \
-      org.opencontainers.image.licenses="Apache-2.0" \
+      org.opencontainers.image.licenses="LicenseRef-Zyvor-Production-1.0" \
       org.opencontainers.image.version="${VERSION}"
 
 ENTRYPOINT []

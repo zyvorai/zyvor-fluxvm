@@ -127,7 +127,7 @@ const config: Config = {
               href: 'https://github.com/zyvorai/zyvor-fluxvm/blob/main/CHANGELOG.md',
             },
             {
-              label: 'License (Apache-2.0)',
+              label: 'License (Zyvor Production 1.0)',
               href: 'https://github.com/zyvorai/zyvor-fluxvm/blob/main/LICENSE',
             },
           ],
@@ -140,7 +140,7 @@ const config: Config = {
           ],
         },
       ],
-      copyright: `Copyright © ${new Date().getFullYear()} Zyvor AI Labs. FluxVM is Apache-2.0 licensed.`,
+      copyright: `Copyright © ${new Date().getFullYear()} Zyvor AI Labs. FluxVM is under the Zyvor Production License v1.0.`,
     },
     prism: {
       theme: prismThemes.github,

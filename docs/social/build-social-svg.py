@@ -84,7 +84,7 @@ def svg(p):
     <rect x="80" y="478" width="222" height="46" rx="23" fill="{p['chip_fill']}" stroke="{p['chip_stroke']}"/>
     <text x="102" y="507">Network Fabric GA</text>
     <rect x="316" y="478" width="150" height="46" rx="23" fill="{p['chip_fill']}" stroke="{p['chip_stroke']}"/>
-    <text x="338" y="507">Apache-2.0</text>
+    <text x="338" y="507">Zyvor Production License</text>
     <rect x="480" y="478" width="242" height="46" rx="23" fill="{p['chip_fill']}" stroke="{p['chip_stroke']}"/>
     <text x="502" y="507">k3s + 2-host tested</text>
     <rect x="736" y="478" width="196" height="46" rx="23" fill="url(#mac)"/>

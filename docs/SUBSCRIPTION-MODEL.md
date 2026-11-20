@@ -1,6 +1,6 @@
 # FluxVM: support subscriptions
 
-FluxVM is open-source software. It is free to use under its open-source licence, and that does not change.
+FluxVM is source-available under the Zyvor Production License v1.0. Non-production use is free; production use requires a commercial license from Zyvor (sales@zyvor.dev).
 
 Teams that want supported releases and defined response targets can buy an annual **support subscription** from Zyvor.
 
@@ -20,6 +20,6 @@ Rates are quoted by Zyvor: contact [sales@zyvor.dev](mailto:sales@zyvor.dev).
 - Annual prepaid subscription is the default, with a 12-month minimum. Multi-year prepay is available.
 - Minimums apply after any discounts.
 - Implementation, migration, training and managed operations are separate services.
-- At expiry, updates, downloads and support end. Open-source rights, where they apply, continue under the licence.
+- At expiry, updates, downloads and support end. Non-production rights continue under the Zyvor Production License v1.0.
 - Response targets need a contracted scope and are not uptime guarantees.
 - Existing signed agreements keep their agreed terms.
