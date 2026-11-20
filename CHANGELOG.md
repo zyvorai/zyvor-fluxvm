@@ -326,7 +326,7 @@ lock through `reqwest`).
   the same path, so `docker build`, `docker compose up --build --wait`, bind mounts, networks and health checks work unchanged.
   `--publish HOST[:GUEST]` forwards chosen Mac loopback ports to the guest, so a published container port is reachable from the Mac.
   See [docs/docker-engine.md](docs/docker-engine.md) and `scripts/docker-engine-live-test.sh`.
-- **`fluxctl kube`: Kubernetes (k3s) in FluxVM VMs, on a Mac.** Like `colima start --kubernetes`, built the way `fluxctl docker` is.
+- **`fluxctl kube`: Kubernetes (k3s) in FluxVM VMs, on a Mac.** Built the way `fluxctl docker` is.
   `fluxctl kube up` creates (or starts) a Debian VM running k3s, forwards the API server to `127.0.0.1:6443` over a supervised SSH
   connection, and writes a kubeconfig (cluster, user and context named after the VM, mode 600) to `~/.kube/fluxvm-NAME.yaml`,
   leaving `~/.kube/config` alone. `env`, `status`, `down [--purge]` and `supervise` complete it, and `kube agent install` runs the

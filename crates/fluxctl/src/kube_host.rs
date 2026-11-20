@@ -96,7 +96,7 @@ pub struct KubeOptions {
     pub k3s_version: Option<String>,
     /// Extra `k3s server` arguments.
     pub k3s_args: Vec<String>,
-    /// Keep k3s's bundled Traefik ingress (off by default, as Colima does).
+    /// Keep k3s's bundled Traefik ingress (off by default).
     pub traefik: bool,
     pub kubeconfig: Option<PathBuf>,
     /// Extra agent nodes (`NAME-w1` and so on), each its own VM joined to the server.
