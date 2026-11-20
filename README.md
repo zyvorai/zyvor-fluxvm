@@ -1,0 +1,341 @@
+<div align="center">
+
+# FluxVM
+
+[![CI](https://img.shields.io/github/actions/workflow/status/zyvorai/zyvor-fluxvm/ci.yml?branch=main&style=flat-square&labelColor=1d1d1f&label=CI)](https://github.com/zyvorai/zyvor-fluxvm/actions/workflows/ci.yml)
+[![Security profiles](https://img.shields.io/github/actions/workflow/status/zyvorai/zyvor-fluxvm/security-profiles.yml?branch=main&style=flat-square&labelColor=1d1d1f&label=security%20profiles)](https://github.com/zyvorai/zyvor-fluxvm/actions/workflows/security-profiles.yml)
+[![DevOps gates](https://img.shields.io/github/actions/workflow/status/zyvorai/zyvor-fluxvm/devops-gates.yml?branch=main&style=flat-square&labelColor=1d1d1f&label=devops%20gates)](https://github.com/zyvorai/zyvor-fluxvm/actions/workflows/devops-gates.yml)
+[![License: Zyvor Production 1.0](https://img.shields.io/github/license/zyvorai/zyvor-fluxvm?style=flat-square&color=0071e3&labelColor=1d1d1f)](LICENSE)
+[![Last commit](https://img.shields.io/github/last-commit/zyvorai/zyvor-fluxvm/main?style=flat-square&color=0071e3&labelColor=1d1d1f)](https://github.com/zyvorai/zyvor-fluxvm/commits/main)
+[![Rust: stable](https://img.shields.io/badge/rust-stable-0071e3?style=flat-square&labelColor=1d1d1f&logo=rust&logoColor=white)](https://www.rust-lang.org)
+
+[![Book a demo](https://img.shields.io/badge/Book_a_demo-0071e3?style=for-the-badge)](https://zyvor.dev/schedule?utm_source=github&utm_medium=fluxvm&utm_campaign=readme_hero)
+[![30-day PoC](https://img.shields.io/badge/30--day_PoC-000000?style=for-the-badge)](https://zyvor.dev/poc?utm_source=github&utm_medium=fluxvm&utm_campaign=readme_hero)
+[![Quickstart](https://img.shields.io/badge/Quickstart_one_JSON_spec-bf5af2?style=for-the-badge)](#quickstart)
+[![Kubernetes on a Mac](https://img.shields.io/badge/Kubernetes_on_a_Mac-30d158?style=for-the-badge)](https://zyvorai.github.io/zyvor-fluxvm/kubernetes)
+[![Built with Claude Code](https://img.shields.io/badge/Built_with-Claude_Code-d97757?style=for-the-badge&labelColor=1d1d1f)](https://claude.com/claude-code)
+
+<img src="docs/social/fluxvm-hero-dark.jpg" alt="FluxVM - Run real VMs. With a real API." width="100%">
+
+### Run real VMs with a real API.
+
+**Primary networking: native eBPF.** VM edges require successful attachment by
+default; nftables is an explicit compatibility mode. Before upgrading configs
+that omit the dataplane mode, follow the [eBPF upgrade guide](docs/primary-ebpf.md).
+
+**One Rust control plane for Firecracker, Cloud Hypervisor, QEMU/KVM and the in-tree FluxVM hypervisor, plus Apple's Virtualization.framework (`vz`) on a Mac.** A REST API and a CLI that do the same thing on every backend, with a vsock guest agent instead of SSH.
+
+**4 Linux backends + `vz` on Mac, one API** · **Native KVM, no QEMU** · **SDKs: Python, Go, TypeScript** · **Operator verified on real k3s**
+
+[**Quickstart**](#quickstart) · [**Mac cloud**](#your-own-mac-cloud) · [**Proof**](#maturity-whats-real-today) · [**Docs**](docs/index.md) · [**API**](docs/api.md) · [**Talk to Zyvor**](https://zyvor.dev/?utm_source=github&utm_medium=fluxvm&utm_campaign=readme_hero)
+
+</div>
+
+[Client overview (PDF)](docs/FluxVM-Client-Overview.pdf)
+
+**On a Mac?** [FluxVM for Mac](https://zyvorai.github.io/zyvor-fluxvm/fluxvm-for-mac/) is a notarized menu-bar app with a 30-day trial. The FluxVM engine in this repository is source-available under the Zyvor Production License v1.0: non-production use is permitted, production use requires a commercial license.
+
+---
+
+## Your own Mac cloud
+
+<img src="docs/assets/mac-cloud.svg" alt="A FluxVM control plane placing vz VMs on Mac Studios and Mac minis: a macOS guest, an agent sandbox, a container VM and a Debian guest with Rosetta" width="100%">
+
+FluxVM runs natively on Apple silicon. Its `vz` backend drives Apple's **Virtualization.framework**, the hypervisor behind macOS's own virtual machines. One Mac gets Linux VMs, macOS guests, agent sandboxes and container VMs over the same REST API, `fluxctl` and MCP server as Linux. A shelf of Mac minis and Mac Studios becomes one fleet: `fluxvm-agent central` places each `vz` request on the Mac that fits.
+
+| Built for Mac people | |
+|---|---|
+| **Apple silicon native** | Daemon, API and a signed Swift runner per VM (`fluxvm-vz-runner`); no QEMU, no emulation |
+| **macOS guests** | Install from an IPSW, prepare a template once, clone it with APFS in an instant for Xcode CI (two at a time per Mac, Apple's limit) |
+| **Rosetta** | x86_64 Linux binaries and `linux/amd64` container images run in arm64 guests |
+| **APFS clones and warm starts** | Copy-on-write disks and snapshots; a saved VM restores in about 2 s instead of a 10 s boot |
+| **Shared folders** | `fluxctl run -v ~/src:/mnt/src`: edit on macOS, build in Linux (virtiofs) |
+| **Keychain sign-in** | `fluxctl signin` keeps a guest password in your login Keychain and types it; the API never returns it |
+| **launchd** | `fluxctl service install` writes a LaunchAgent, so a headless Mac mini serves VMs after every reboot |
+| **Agents see the screen** | Screenshots, keyboard and mouse for any `vz` guest, with no Screen Recording permission on the host |
+| **A throwaway computer per agent task** | An offline sandbox (no network card) is ready in about 4.5 s and forks into four running copies in about 4 s; a local model stays reachable over one vsock port. [Demo](examples/agent-sandbox-demo/README.md) · [Agent sessions](docs/agent-platform/README.md) · [Agents page](https://zyvorai.github.io/zyvor-fluxvm/agents) |
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/zyvorai/zyvor-fluxvm/main/scripts/install.sh | bash   # Linux: downloads and verifies the release into ~/.local (no sudo). macOS: see the note below
+# or by hand:
+# macOS: build from source (see the Quickstart), or use FluxVM for Mac, a native app with a 30-day trial: https://github.com/zyvorai/zyvor-fluxvm/releases/tag/mac-v0.1.0
+fluxctl run                                         # a throwaway Debian 13 VM and a shell
+fluxctl sandbox run alpine:3.22 --rm -- echo hi     # a container in its own VM
+```
+
+**macOS.** Prebuilt macOS tarballs and the Homebrew formula were withdrawn after 0.4.21. Build FluxVM from source (`xcode-select --install && brew install hivex && cargo build -p fluxctl`), or use [FluxVM for Mac](https://github.com/zyvorai/zyvor-fluxvm/releases/tag/mac-v0.1.0), a native menu-bar app that bundles the engine and comes with a 30-day trial. The FluxVM engine itself is under the Zyvor Production License v1.0.
+
+By default the script downloads the release tarball, verifies its SHA-256 and links it under `~/.local`; with `--brew` it runs `brew install zyvorai/tap/fluxvm` instead (and `brew services start` when you add `--service`). It can also wire an MCP client (`bash -s -- --client claude-code`), and has `--dry-run` and `--uninstall`; read it first at [`scripts/install.sh`](scripts/install.sh). Step by step, with what was tested (daemon as a service, first VM, MCP client): [Install on a Mac](docs/install-macos.md). From source instead: `xcode-select --install && brew install hivex && cargo build -p fluxctl` (builds and signs the vz runner).
+
+[**FluxVM on Mac**](https://zyvorai.github.io/zyvor-fluxvm/mac) · [**Build a Mac cloud**](https://zyvorai.github.io/zyvor-fluxvm/mac-cloud) · [Mac guide](docs/macos.md) · [Mac cloud guide](docs/mac-cloud.md) · [Tenancy, leases and roles](docs/mac-cloud-tenancy.md) · [Run central](docs/mac-cloud-operations.md) · [`fluxctl fleet`](docs/fluxctl-fleet.md) · [SDKs and Terraform](docs/fleet-sdk.md) · [Architecture](docs/macos-architecture.md)
+
+Measured on one Apple M4 with macOS 27.2. Multi-Mac fleets are not yet verified on real hardware; see [Native macOS](#native-macos-apple-silicon) below for the full list.
+
+## What's new
+
+From the [CHANGELOG](CHANGELOG.md) (0.4.x, current release **0.4.21**) and recent commits:
+
+| Feature | What it does |
+|---|---|
+| **mTLS identity from the client certificate** (0.4.21, security) | With `tls.client_ca`, the actor, role and tenant come from the verified certificate (`CN`, `OU=fluxvm-role=admin`, `OU=fluxvm-tenant=<name>`); the client-supplied `X-Client-Cert-*` headers are ignored unless `tls.trust_proxy_headers = true` for a proxy that strips them. Direct-mTLS admins need a certificate with the admin `OU`. [Upgrade notes](docs/auth-oidc-mtls.md#upgrading-to-0421) |
+| **Guest agent request limits** (0.4.21, security) | The vsock agent reads at most 64 KiB, with idle and total timeouts, before it has checked the token; uploads up to 64 MiB are read only after their leading token authenticates; `get-file` refuses non-regular files; huge timeouts are clamped. [Limits](docs/vsock-agent.md#request-limits) |
+| **Linux releases are tarballs only** (after 0.4.21) | The release workflow no longer builds `.deb` or `.rpm`; releases up to 0.4.21 carry them. `fluxvm-bootstrap` defaults to tarball mode. [The Linux package](docs/linux-package.md) |
+| **Docker and Kubernetes on a Mac** | `fluxctl docker up` runs a real `dockerd` in one managed VM with its socket on the Mac (`build`, Compose, bind mounts, networks); `fluxctl kube up` runs k3s in FluxVM VMs (workers, `kube load`, offline installs; flannel by default on a Mac, Cilium on Linux) and writes a kubeconfig. Studio's **Platform → Kubernetes** page shows each cluster's nodes and pods, coloured pod logs, a shell in a pod, a traffic graph and a checkpoint timeline ([docker](docs/docker-engine.md), [kubernetes](docs/kubernetes-on-mac.md)) |
+| **Time travel for a Kubernetes cluster on a Mac** | A checkpoint is the whole running VM, saved in about a second: `kube try -- kubectl apply` then `kube undo`; `kube supervise --auto-checkpoint` and `kube bisect -- TEST` to find the checkpoint where it broke; `kube golden`, `kube reset` and `kube matrix` for clean test runs; `kube chaos` to kill a pod, stop k3s or fill the disk and restore; `kube sleep`, `--idle-sleep`, `--sleep-on-battery`, woken by the first `kubectl` or browser request. Single-node clusters ([guide with diagrams](docs/kubernetes-on-mac.md#time-travel-for-your-cluster)) |
+| **Kubernetes on a Mac that feels local** | Plain `kubectl` (the cluster is merged into `~/.kube/config`); `http://web.localhost` and, after `kube trust`, `https://web.localhost` for every Service and every Traefik Ingress host; `kube add postgres\|redis\|mysql\|mongodb\|rabbitmq\|nats\|mailpit\|grafana\|redpanda\|qdrant\|meilisearch\|clickhouse\|keycloak\|seaweedfs\|vault\|jaeger\|temporal` with the usual ports and `kube connect`; `kube forward SERVICE`, a port-forward that survives pod restarts; `kube db-backup` / `db-restore`; `kube dev` (rebuild and restart on save) and `kube sync` (copy files into a pod on save); `kube doctor`, and a notification when a pod crash-loops ([the whole map](docs/kubernetes-on-mac.md#every-command-in-one-place)) |
+| **Host Metal/MLX inference for offline sandboxes** | `apple.host_gpu` / `fluxctl agent run --host-gpu`: guest `OPENAI_BASE_URL` reaches the host OpenAI-compatible server over vsock (no GPU passthrough). `fluxctl infer status` / `infer serve --stand-in` ([host-inference](docs/host-inference.md)) |
+| **QMP under a short `run_dir`** | Avoids macOS `sockaddr_un` / `SUN_LEN` failures when the state path is long; sockets live at `run_dir/qmp/<id>.sock`, migration receivers at `run_dir/mr/<id>/` ([operations](docs/operations.md#state-layout)) |
+| **Agent sessions (`fluxctl agent`)** | Enforced filesystem policy, scoped tokens, supervised jobs, approvals, budgets, fork/evaluate/promote — in the published package from 0.4.8 ([session guide](docs/agent-sessions-guide.md)) |
+| **Agent sandboxes you can fork** | `sandbox_create {"offline": true}`, then `vm_fork`: four running copies in about 4 s, four fixes tested in 0.3 s, the passing one kept ([demo](examples/agent-sandbox-demo/README.md); measured on an M4 mini, copies keep the parent's identity) |
+| **Fleet platform** | Tenants and 24-hour Mac leases, snapshots and clones, volumes, SSH and port tunnels, SSO and roles, metrics and Prometheus, warm pools, prices and signed webhooks, Go/Python/TypeScript clients and a Terraform provider ([guide](docs/mac-cloud-tenancy.md), [run it](docs/mac-cloud-operations.md); tested against simulated Macs, not a real multi-Mac fleet) |
+| **FluxVM Studio** | A web UI built into the binaries: the node daemon at `/console/` and fleet central at its own `/console/`, light and dark, ⌘K palette; operators and tenants sign in with their key ([docs/ui.md](docs/ui.md), [install guide](docs/install-macos.md#optional-the-fleet-console)). The previous consoles at `/console/legacy` were removed in 0.4.14 |
+| **No open registry by accident** | `central` makes a random operator token on first start, keeps it in `<state-dir>/operator-token` (`0600`) and prints it once; `--token` always wins, `--no-auth` is the explicit lab switch ([operations](docs/mac-cloud-operations.md)) |
+| **FluxMesh personal cloud** | A host-to-host WireGuard overlay across home NAT/CGNAT: overlay IPAM, private DNS (`*.flux`), fail-closed ACLs compiled to Network Fabric, relay fallback, zero-touch enrollment (`fluxctl cloud`) and an optional public HTTPS/HTTP3 edge. Unit-tested, **not yet run on real hosts**, not in the macOS package ([docs/fluxmesh.md](docs/fluxmesh.md)) |
+| **Install on macOS** | Prebuilt macOS tarballs and the Homebrew formula were withdrawn after 0.4.21. Build from source, or use [FluxVM for Mac](https://github.com/zyvorai/zyvor-fluxvm/releases/tag/mac-v0.1.0) (30-day trial) |
+| **MCP server for AI agents** | `fluxctl mcp serve` speaks the Model Context Protocol over stdio; read tools by default, `--allow-write` adds VM create, clone, exec, snapshot, delete, power and capture, backups, pools and sandboxes ([docs/mcp.md](docs/mcp.md)) |
+| **VM fork** | `POST /v1/vms/{id}/fork` / `fluxctl vm fork`: snapshot a running FluxVM-engine VM once and restore N children with a shared read-only memory file and reflinked rootfs |
+| **VM import** | `POST /v1/images/import` / `fluxctl import-image`: OVA/OVF/VMDK/VHD(X)/qcow2 to raw disks, with offline GuestKit repair of the boot disk for virtio |
+| **Backups with quiesce** | Guest `fsfreeze` through QGA around the snapshot, plus list, delete and restore-backup |
+| **Container sandboxes on a Mac** | `"oci": {"image": "alpine:3.22"}` on `POST /v1/sandboxes`, or `fluxctl sandbox run IMAGE -- CMD`, boots the container in its own lightweight `vz` VM: direct kernel boot, a read-only root, uid 65534, no SSH, agent-only exec. Published ports, named volumes, restart policies and health checks; container services in `fluxctl up` stacks (with write-only `secret_env` and `--fleet` placement), `fluxctl import-compose`, and a web dashboard at `/console/`. Docker CLI works via `DOCKER_HOST` against `{run_dir}/docker.sock` ([docs/oci-sandboxes.md](docs/oci-sandboxes.md#docker-cli-docker_host)) |
+| **GPUs for sandboxes** | `gpus: N` on `POST /v1/sandboxes` passes free VFIO-bound GPUs to a QEMU-backed sandbox; supported in all three SDKs |
+| **Kairon VM edge, enforced** | Anti-spoof, learn-IP, DNS and SNI allow lists and an egress token bucket loaded into the VM's TC program |
+| **AppArmor covers Kairon's image cache** | The enforced `fluxctl`/`fluxvm` profiles read Kairon's node image cache and take QEMU's image lock on `storage=shared` disks; without it an image-booted Machine fails `opening base image ... Permission denied` ([profile notes](deploy/apparmor/README.md)) |
+| **Safer QEMU live migration** | A receiver boots the source's concrete machine type and refuses a host whose QEMU lacks it; the relay closes both sides when either ends; retries restate capabilities; cancelling a finished pre-copy migration resumes the guest ([operations](docs/operations.md), [contract](docs/runtime-boundary.md)). Run live between two hosts with a shared disk, including multifd, post-copy, TLS, cancel-then-retry and a QEMU 8.2 and a QEMU 7.2 source into 10.2: the guest kept running through each move ([script](scripts/test-migration-two-host.sh)). Also zstd compression and auto-converge under a dirtying guest. Not run: a source older than QEMU 7.2 |
+| **VM-edge packet capture** | A bounded `tcpdump` on the VM's dataplane interface with pcap download |
+| **Incident bundles** | `POST /v1/vms/{id}/diagnostics` / `fluxctl incident`: one redacted tar.gz with QMP state, cgroup and PSI, the console log, dataplane state and an optional pcap, plus an opt-in QEMU guest memory dump ([docs/diagnostics-bundle.md](docs/diagnostics-bundle.md)) |
+
+## Why FluxVM
+
+| When this happens… | FluxVM gives you… |
+|---|---|
+| Your automation needs to drive VMs through a stable API | A JSON VM spec and a full REST API (`fluxctl serve`), the same on every backend |
+| Each hypervisor needs its own tooling | QEMU/KVM, Cloud Hypervisor, Firecracker and the in-tree FluxVM hypervisor behind one trait; `"backend":"auto"` picks for you |
+| Running a command in a guest means SSH keys and a network path | `fluxctl exec <id> -- …` over vsock through the guest agent |
+| AI agents and CI jobs need a throwaway machine with guard rails | Agent sandboxes: egress ACL on method, host and path, a file change-set, a rootless procbox tier, VM fork and `ttl_seconds` cleanup |
+| You want Linux VMs without installing QEMU | A pure in-tree KVM engine: SMP verified at 2, 4 and 8 vCPUs, pause and snapshot across every vCPU |
+| You want VMs in Kubernetes | A `DisposableVm` CRD and a node-local operator, 9/9 checks on a real k3s cluster |
+
+![Capabilities at a glance: Run, Sandbox, Network, Platform](docs/ux/readme-capabilities.jpg)
+
+## One API. Every hypervisor.
+
+A JSON spec in, a running VM out. The same `fluxctl` verbs and the same REST API on every backend, with a vsock guest agent instead of SSH.
+
+```bash
+sudo fluxctl create --spec examples/qemu.json     # boot a VM from a JSON spec
+fluxctl list                                      # every VM, every backend
+fluxctl exec <id> -- hostname                     # run a command over vsock — no SSH
+fluxctl pause <id> && fluxctl resume <id>         # park it instead of rebuilding it
+fluxctl delete <id>                               # or set ttl_seconds and walk away
+```
+
+<table>
+<tr>
+<td valign="top" width="33%">
+<b>Four backends</b><br>
+QEMU/KVM, Cloud Hypervisor, Firecracker and the in-tree FluxVM hypervisor behind one trait. <code>"backend":"auto"</code> picks for you.<br>
+<a href="docs/index.md">Docs</a>
+</td>
+<td valign="top" width="33%">
+<b>Native KVM, no QEMU</b><br>
+A pure in-tree KVM engine: SMP verified at 2, 4 and 8 vCPUs, pause and snapshot across every vCPU, and a golden Cloud-init template.<br>
+<a href="docs/native-kvm-no-qemu.md">Native KVM</a>
+</td>
+<td valign="top" width="33%">
+<b>Agent sandboxes</b><br>
+An egress ACL on method, host and path (HTTPS via opt-in interception), a file change-set, a rootless procbox tier, GPUs for QEMU sandboxes (`gpus: N`), and Python, Go and TypeScript SDKs.<br>
+<a href="docs/agent-sandbox-gaps.md">Agent sandboxes</a>
+</td>
+</tr>
+<tr>
+<td valign="top" width="33%">
+<b>Network Fabric <sub>GA</sub></b><br>
+A TC/eBPF VM-edge dataplane with L3/L4 policy, rate limits, security groups and live reconfigure. Native eBPF is the default dataplane; nftables is an explicit compatibility mode.<br>
+<a href="docs/ebpf.md">eBPF dataplane</a> · <a href="docs/network-fabric.md">Network Fabric</a>
+</td>
+<td valign="top" width="33%">
+<b>Secure Containers <sub>GA</sub></b><br>
+A Pod gets its own guest kernel through containerd runtime-v2, with Sentinel NetworkPolicy. Not a Kata-equivalence claim.<br>
+<a href="docs/secure-containers.md">Secure Containers</a>
+</td>
+<td valign="top" width="33%">
+<b>Kubernetes</b><br>
+A <code>DisposableVm</code> CRD and a node-local operator, verified on a real k3s cluster, plus a scheduler-native path.<br>
+<a href="docs/kubernetes-operator.md">Operator</a>
+</td>
+</tr>
+</table>
+
+---
+
+## eBPF: the VM network, rewritten inside the kernel
+
+[![The VM network, rewritten inside the kernel](docs/ux/ebpf-hero.jpg)](docs/ebpf.md)
+
+Every VM's packets are decided by a kernel-verified eBPF program on its own interface, using per-VM maps.
+That's the default dataplane.
+
+- **Policy is a map write.** Live changes take about 100-120 ms p50, cost the same for the first VM and the hundredth, and never open an allow-all window.
+- **Fewer hops.** The direct datapath cuts the Pod path from 8 devices to 4: -31% latency and +60% small-packet rate in host-forwarding benchmarks.
+- **Connections survive live migration.** Conntrack moves with the VM and is checked against the destination policy.
+- **See why packets died.** Attributed drop reasons, flows, stats and on-demand pcaps over REST. It coexists with Cilium and never writes Cilium's maps.
+
+[The eBPF dataplane →](docs/ebpf.md)
+
+---
+
+## How it fits together
+
+![A JSON spec in, a running VM out](docs/ux/readme-how-it-works.jpg)
+
+- <a id="architecture-at-a-glance"></a>**Architecture:** the control plane, the four backends and the image path — [docs/architecture.md](docs/architecture.md).
+- <a id="feature-highlights"></a>**Feature highlights:** every area in one table, with its docs — [docs/index.md](docs/index.md#feature-highlights).
+- <a id="kubernetes-crdoperator"></a>**Kubernetes:** `DisposableVm` and the node-local operator — [docs/kubernetes-operator.md](docs/kubernetes-operator.md).
+- <a id="faq"></a>**FAQ:** is it for you, and the questions people ask first — [docs/faq.md](docs/faq.md).
+- <a id="ecosystem"></a><a id="who-does-what-users"></a>**Ecosystem:** how FluxVM relates to zyvor-fabric, Ragnarok, h2kvm and GuestKit — [docs/ecosystem.md](docs/ecosystem.md).
+- <a id="using-fluxvm-through-ragnarok"></a>**Using FluxVM through Ragnarok:** [docs/ragnarok.md](docs/ragnarok.md), and [zyvor-fabric](docs/zyvor-fabric.md) for the private-cloud control plane.
+
+---
+
+<a id="quick-start"></a>
+
+## Quickstart
+
+**Prebuilt (Linux):** every release attaches a tarball (`.tar.gz`) for x86_64 and aarch64 ([install steps](docs/install.md#alternatives-homebrew-source), [layout](docs/linux-package.md)).
+`.deb` and `.rpm` packages are no longer built. The tarball needs glibc 2.35 or newer (Rocky/Alma 9 is not supported yet).
+
+**From source:** needs a Linux host with KVM, a Rust toolchain, and a sibling `guestkit` checkout at the tag in
+`packaging/guestkit.ref` (v1.2.9 for 0.4.21; `scripts/check-guestkit-pin.sh . ../guestkit` checks the pin, `Cargo.lock` and the checkout, see
+[the pin](docs/linux-package.md#releasing-the-guestkit-pin)).
+
+```bash
+git clone https://github.com/zyvorai/zyvor-fluxvm.git && cd zyvor-fluxvm   # needs a sibling guestkit checkout
+sudo ./scripts/bootstrap-host.sh vmbr0 && ./scripts/preflight.sh
+cargo build --release
+sudo install -m 0755 target/release/fluxctl /usr/local/bin/fluxctl
+sudo install -m 0644 config.example.toml /etc/fluxvm.toml
+sudo fluxctl --config /etc/fluxvm.toml create --spec examples/qemu.json
+```
+
+Day-2 verbs, network modes and remote daemons: [Getting started](docs/getting-started.md).
+
+<a id="use-cases"></a>
+
+## Use cases
+
+Every one maps onto what is implemented today. [All eleven](docs/index.md#use-cases) and [docs/use-cases.md](docs/use-cases.md).
+
+- **CI runners that isolate every job:** a VM per job over vsock `exec`, with `ttl_seconds` cleanup.
+- **AI-agent sandboxes with guard rails:** a microVM or a rootless procbox, an egress ACL and a change-set.
+- **Linux VMs with no QEMU installed:** the in-tree KVM engine and a golden template, `fluxctl vm-template create native-agent <name>`.
+- **A golden-image pipeline:** build once with `fluxctl build-image`, reuse through CoW overlays and a signed catalog.
+- **Kubernetes-native VMs** and **OCI workloads with a per-Pod guest kernel.**
+
+## Documentation map
+
+| Topic | Doc |
+|---|---|
+| Every feature area and document | [docs/index.md](docs/index.md) |
+| Positioning, overview and the exhaustive feature list | [docs/POSITIONING.md](docs/POSITIONING.md) · [docs/PRODUCT_OVERVIEW.md](docs/PRODUCT_OVERVIEW.md) · [FEATURES.md](FEATURES.md) |
+| REST API, auth/RBAC and the VM JSON contract | [docs/api.md](docs/api.md) |
+| Day-2 operations | [docs/operations.md](docs/operations.md) |
+| Host hardening: the AppArmor profile and what it allows | [deploy/apparmor/README.md](deploy/apparmor/README.md) |
+| Live migration contract and receivers | [docs/runtime-boundary.md](docs/runtime-boundary.md) · [docs/operations.md](docs/operations.md) |
+| Native KVM, no QEMU | [docs/native-kvm-no-qemu.md](docs/native-kvm-no-qemu.md) |
+| Native macOS: the `vz` backend, sandboxes, container sandboxes, a Mac cloud | [docs/macos.md](docs/macos.md) · [docs/mac-cloud.md](docs/mac-cloud.md) · [docs/macos-sandboxes.md](docs/macos-sandboxes.md) · [docs/oci-sandboxes.md](docs/oci-sandboxes.md) |
+| Docker and Kubernetes on a Mac: `fluxctl docker`, `fluxctl kube` | [docs/docker-engine.md](docs/docker-engine.md) · [docs/kubernetes-on-mac.md](docs/kubernetes-on-mac.md) |
+| AI-agent sessions: install, quickstart, MCP | [docs/agent-platform/](docs/agent-platform/README.md) · [docs/agent-sessions.md](docs/agent-sessions.md) |
+| Agent sandboxes, procbox and the SDKs | [docs/agent-sandbox-gaps.md](docs/agent-sandbox-gaps.md) · [python/](python/README.md) · [go/](go/README.md) · [typescript/](typescript/README.md) |
+| Network Fabric and Service Fabric | [docs/network-fabric.md](docs/network-fabric.md) · [docs/service-fabric.md](docs/service-fabric.md) |
+| Secure Containers and MicroVM | [docs/secure-containers.md](docs/secure-containers.md) · [docs/microvm.md](docs/microvm.md) |
+| Production checklist and DevOps gates | [docs/PRODUCTION.md](docs/PRODUCTION.md) · [docs/DEVOPS.md](docs/DEVOPS.md) |
+| Architecture, FAQ and ecosystem | [docs/architecture.md](docs/architecture.md) · [docs/faq.md](docs/faq.md) · [docs/ecosystem.md](docs/ecosystem.md) |
+| Ranked backlog | [docs/NEXT-FEATURES.md](docs/NEXT-FEATURES.md) |
+
+## Contributing & community
+
+- **Contributing:** build and test commands, PR expectations and repo layout, in [CONTRIBUTING.md](CONTRIBUTING.md).
+- **Host hardening:** TOTP step-up for exec, a signed exec allow-list and signed rule packs, in [docs/host-hardening.md](docs/host-hardening.md).
+- **Security:** the current hardening bar and how to report a vulnerability, in [SECURITY.md](SECURITY.md).
+- **Changelog:** [CHANGELOG.md](CHANGELOG.md).
+
+---
+
+<a id="maturity-whats-real-today"></a>
+
+## Maturity
+
+**Proof, not promises.** We only claim what has been run. Every line links to how it was verified.
+
+- **Kubernetes operator:** 9/9 checks on a real k3s cluster, including self-healing and no leaked QEMU. [Details](docs/proof-and-status.md)
+- **Multi-host fleet:** a central registry with load-aware placement across two physically separate hosts. [Details](docs/proof-and-status.md)
+- **Storage and networking:** qcow2/raw, LVM thin, NBD and Ceph RBD (against a real Rook cluster); NAT, TAP+bridge, netns+DHCP and macvtap, SSH-verified end to end. [Details](docs/proof-and-status.md)
+- **Bridge-less direct datapath:** measured −31% latency and +60% 64 B packet rate in the Pod case, on a veth stand-in with no real guest. [Method and data](docs/direct-datapath.md#-measured-forwarding-cost)
+- **Native KVM:** 2, 4 and 8-vCPU guests boot, pause and snapshot across every vCPU, and a real `fluxctl create` passes the agent and NoCloud gate. [Details](docs/native-kvm-no-qemu.md)
+- **The boundaries, up front:** multi-tenant controls are opt-in, not a public-cloud boundary, and boot numbers are a method, not a sizing SLA. [Read them](docs/proof-and-status.md)
+
+| Status | Areas |
+|---|---|
+| **GA** | Network Fabric (TC/eBPF, the default dataplane; nftables via explicit `mode = "legacy"`) · Secure Containers (containerd runtime-v2) |
+| **Released (0.4.x)** | MCP server, agent sessions (`fluxctl agent`), `host_gpu` Metal/MLX inference, sandbox GPUs (Linux VFIO), enforced Kairon VM edge, VM-edge capture, VM fork, VM import, quiesced backups, fleet console |
+| **Built, not yet run on real hosts** | FluxMesh (overlay, DNS, relay, enrollment, public edge): unit tests only; see [Proof & status](docs/proof-and-status.md) |
+| **Not by design** | KubeVirt compatibility |
+
+---
+
+## Part of the Zyvor stack
+
+FluxVM is complete and useful on its own. **Certify with GuestKit → run and manage with FluxVM → convert/deploy with h2kvm.**
+
+| Product | Role next to FluxVM |
+|---|---|
+| **[Zyvor Fabric](https://github.com/zyvorai/zyvorai-fabric)** | Private cloud control plane on the same REST API — FluxVM runs the VMs, Fabric adds auth/RBAC, network policy and UX |
+| **[GuestKit](https://github.com/zyvorai/zyvor-guestkit)** | Offline disk scoring/repair; FluxVM's VM import uses it to repair the boot disk |
+| **[h2kvm](https://github.com/zyvorai/zyvor-h2kvm)** | Hypervisor → KVM convert + import; hands a certified disk to FluxVM to run |
+| **[Kairon](https://github.com/zyvorai/zyvor-kairon)** | Posts the VM-edge spec FluxVM enforces in its TC dataplane |
+
+→ [zyvor.dev](https://zyvor.dev)
+
+---
+
+## Support
+
+Evaluation is permitted for 30 days per organization under the Zyvor Production License v1.0; production use requires a commercial license ([sales@zyvor.dev](mailto:sales@zyvor.dev)). If it helps you, you can donate any amount you like: <https://rzp.io/rzp/utwdYh3> (Razorpay: UPI, cards and netbanking; international cards work too). A donation is voluntary and supports development and maintenance. It is not a purchase: it buys no support, SLA, features, priority or license, and it is not tax-deductible (Zyvor AI Labs Private Limited is a company, not a charity). Zyvor Enterprise (supported releases, SLAs, a named contact and enterprise features) is separate: [sales@zyvor.dev](mailto:sales@zyvor.dev).
+
+## License and support
+
+FluxVM is **source-available** under the [Zyvor Production License v1.0](LICENSE) (SPDX `LicenseRef-Zyvor-Production-1.0`) — see [NOTICE](NOTICE). Copyright 2026 Zyvor AI Labs. Evaluation (evaluation, development, testing, research, education) is free for 30 days per organization. Production Use requires a paid commercial license from Zyvor AI Labs Private Limited: [sales@zyvor.dev](mailto:sales@zyvor.dev) · [zyvor.dev/buy](https://zyvor.dev/buy); a 30-day trial key is available for production evaluation.
+
+**Zyvor Enterprise** adds what production teams ask for: supported releases, deployment and upgrade guidance, priority incident triage, a named technical contact and 24x7 critical intake. Plans and terms: [docs/SUBSCRIPTION-MODEL.md](docs/SUBSCRIPTION-MODEL.md) · [Pricing](https://zyvor.dev/pricing?utm_source=github&utm_medium=fluxvm&utm_campaign=readme_license) · [sales@zyvor.dev](mailto:sales@zyvor.dev).
+
+### FluxVM for Mac
+
+[FluxVM for Mac](https://zyvorai.github.io/zyvor-fluxvm/fluxvm-for-mac/) (release [`mac-v0.1.0`](https://github.com/zyvorai/zyvor-fluxvm/releases/tag/mac-v0.1.0), `FluxVM-Mac-0.1.0.dmg`) is a separate, notarized menu-bar app that bundles the FluxVM engine (0.4.21). **The app is proprietary; its source is not public; its source is private.** It starts with a 30-day trial. No data is lost when it ends; a commercial license is required to keep using it. After the trial the price is INR 2,999 per Mac per year incl. 18% GST in India (about US$30 excl. tax outside India) for an individual, or INR 2,549 per Mac per year (about US$26 excl. tax) for teams of 5 or more Macs (minimum 5 Macs, INR 12,745 or about US$129, by invoice). Prices: INR incl. 18% GST in India; US dollars excl. tax elsewhere (VAT, GST or sales tax added where applicable). Pay online by UPI, card or netbanking; international cards work (charged in rupees); or request a US-dollar invoice by bank transfer. Custom pricing: contact sales@zyvor.dev. [Buy FluxVM for Mac](https://zyvor.dev/buy) or request a trial key at [sales@zyvor.dev](mailto:sales@zyvor.dev). The engine and CLI in this repository are unaffected: they stay under the Zyvor Production License v1.0, and the Linux install is unchanged.
+
+Report vulnerabilities per [SECURITY.md](SECURITY.md).
+
+---
+
+<div align="center">
+
+### Put a real API in front of your VMs
+
+[![Book a demo](https://img.shields.io/badge/Book_a_demo-0071e3?style=for-the-badge)](https://zyvor.dev/schedule?utm_source=github&utm_medium=fluxvm&utm_campaign=readme_footer)
+[![30-day PoC](https://img.shields.io/badge/Start_a_30--day_PoC-000000?style=for-the-badge)](https://zyvor.dev/poc?utm_source=github&utm_medium=fluxvm&utm_campaign=readme_footer)
+[![Pricing](https://img.shields.io/badge/Pricing-1d1d1f?style=for-the-badge)](https://zyvor.dev/pricing?utm_source=github&utm_medium=fluxvm&utm_campaign=readme_footer)
+[![Contact sales](https://img.shields.io/badge/Contact_sales-2997ff?style=for-the-badge)](mailto:sales@zyvor.dev?subject=FluxVM)
+[![Star on GitHub](https://img.shields.io/github/stars/zyvorai/zyvor-fluxvm?style=for-the-badge&logo=github&label=Star&color=2997ff)](https://github.com/zyvorai/zyvor-fluxvm)
+
+</div>
+
+## Native macOS (Apple silicon)
+
+The daemon, API and `fluxctl` build and run natively on macOS, with a `vz` backend on Apple's Virtualization.framework for ARM64 Linux guests and, from a prepared template, macOS guests. See [docs/macos.md](docs/macos.md) for what is verified and what is not.
+
+![Mac mini for home, Mac Studio for a team, MacBook Pro for development](docs/assets/macos/readme-macs.jpg)
+
+The same REST API and `fluxctl` now run on a [Mac mini](https://www.apple.com/in/mac-mini/) at home, a [Mac Studio](https://www.apple.com/in/mac-studio/) for a team or a [MacBook Pro](https://www.apple.com/in/macbook-pro/) on the road. Pair FluxVM with [Velora](https://github.com/zyvorai/velora) (a private OpenAI-compatible LLM endpoint on MLX) and [Kairon](https://github.com/zyvorai/zyvor-kairon) (every Mac as a Kubernetes Node) and a few Macs become a quiet, low-power, on-premise inference cluster with real Linux VMs alongside.
+
+![A private LLM cluster made of Macs](docs/assets/macos/readme-home-cluster.jpg)
+
+**Verified** on an Apple M4, macOS 27.2: Debian 13 through the API (create, SSH, pause, resume, stop, start, delete), plus port forwards, shared folders, named images, snapshots and warm starts, `fluxctl run`, [stacks](docs/macos-stacks.md) (`fluxctl up`), and [agent sandboxes](docs/macos-sandboxes.md) (a warm pool, offline and allow-listed network, speculate and changesets). [Container sandboxes](docs/oci-sandboxes.md) (an OCI image in its own VM, `fluxctl sandbox run`) pass `scripts/oci-live-test.sh` on the same hardware (exit codes, read-only root, exec, offline and allow-listed network, a private network, `linux/amd64` under Rosetta, a warm-pool claim); published TCP and UDP ports pass `scripts/oci-udp-ports-live-test.sh` (a datagram and a TCP line echoed by the container, a clash refused, delete frees the port); volumes, restart policies, health checks, `secret_env`, stacks, `--fleet` placement and the dashboard are unit-tested only. `scripts/vz-devices-live-test.sh` also passes (extra disks, USB hot-plug, console ports, Linux display size). macOS guests install from an IPSW, boot and clone on the same hardware by hand ([details](docs/macos.md#macos-guests)). On macOS 27, the custom Virtio device's control channel (ping, echo, stats, capabilities) works on a Debian 13 guest, `host-capabilities` reports the M4, and fleet placement for `vz` (the node heartbeat carries its Apple capabilities and `fluxvm-agent central` scores nodes with `apple_placement`) was checked on loopback with one real node plus fake nodes. **Not yet verified:** multi-Mac clusters on real hardware, Thunderbolt RDMA, macOS guests through the API, the shared vmnet broker and physical USB passthrough (both blocked on the test Mac by signing). Sizing, the cluster design (after GK Servis's [Mac Studio case study](https://www.gkservis.com/case-studies/llm-inference-cluster.html)) and the roadmap: [docs/macos-cluster.md](docs/macos-cluster.md).

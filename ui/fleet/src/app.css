@@ -1,0 +1,22 @@
+.fx-logo { display: inline-block; width: 22px; height: 22px; border-radius: 6px; background: linear-gradient(135deg, #64d2ff, #0a84ff 55%, #5e5ce6); position: relative; }
+.fx-logo::after { content: ''; position: absolute; inset: 5px 4px 5px 5px; background: #fff; clip-path: polygon(0 0, 100% 0, 100% 24%, 32% 24%, 32% 42%, 80% 42%, 80% 66%, 32% 66%, 32% 100%, 0 100%); }
+.fx-logo.lg { width: 56px; height: 56px; border-radius: 15px; }
+.fx-logo.lg::after { inset: 14px 11px 14px 14px; }
+.vm-name { font-weight: 600; letter-spacing: -0.01em; }
+.vm-err { color: var(--danger); font-size: 12px; margin-top: 2px; }
+.vm-stack { display: inline-block; margin-left: 8px; font-size: 11px; color: var(--text-tertiary); border: 1px solid var(--hairline-1); border-radius: 6px; padding: 1px 6px; }
+
+/* A VM's screen, snapshots and commands */
+.fx-link { color: var(--accent, inherit); font-size: 13px; align-self: center; }
+.fx-snaps { display: grid; gap: 10px; }
+.fx-snap { border: 1px solid var(--hairline-1); border-radius: var(--radius-md); padding: 12px 14px; display: grid; gap: 8px; }
+.fx-snap-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.fx-term { background: var(--terminal-bg); color: var(--terminal-text); border-radius: var(--radius-md); padding: 12px 14px; font-family: var(--font-mono); font-size: 12.5px; max-height: 50vh; overflow: auto; }
+.fx-term pre { margin: 4px 0; white-space: pre-wrap; word-break: break-all; }
+.fx-term-entry { margin-bottom: 12px; }
+.fx-term-cmd { font-weight: 600; }
+
+/* Member roles in the add sheet */
+.fx-roles { border: 0; padding: 0; margin: 14px 0; display: grid; gap: 8px; }
+.fx-roles legend { font-weight: 600; margin-bottom: 6px; padding: 0; }
+.fx-roles .fx-check { align-items: flex-start; }

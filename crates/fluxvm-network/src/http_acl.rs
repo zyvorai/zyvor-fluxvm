@@ -1,0 +1,982 @@
+// Copyright 2026 Zyvor AI Labs · https://zyvor.dev
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+
+//! HTTP method + host + path ACL for the live L7 egress proxy.
+//!
+//! Rules are `<allow|deny> <METHOD|*> <host-glob>[/<path-glob>]`, e.g.
+//! `allow GET docs.python.org/*`, `allow POST api.openai.com/v1/chat/completions`,
+//! `deny * */admin/*`. See `docs/http-acl.md`.
+//!
+//! Semantics: no rules = ACL off. Otherwise a matching `deny` always wins, and
+//! if any `allow` rule exists a request must match one (default deny). `*` in
+//! a host or path glob matches any run of characters, including `/`. Hosts and
+//! methods compare case-insensitively; paths are case-sensitive and are matched
+//! without the query string, after [`normalize_path`]. A trailing `/*` in a
+//! path glob also matches the directory itself (`*/admin/*` covers `/admin`).
+
+/// Result of an ACL check.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Verdict {
+    Allow,
+    Deny(String),
+}
+
+impl Verdict {
+    pub fn is_allow(&self) -> bool {
+        matches!(self, Verdict::Allow)
+    }
+}
+
+/// How much a [`LintFinding`] matters. Findings never change what the ACL does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum LintSeverity {
+    Info,
+    Warn,
+    High,
+}
+
+/// Something in a rule set that is probably not what its author meant.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LintFinding {
+    pub severity: LintSeverity,
+    /// Stable id, e.g. `deny_only`.
+    pub code: &'static str,
+    pub message: String,
+}
+
+/// Hosts that hand out cloud instance credentials.
+const METADATA_HOSTS: &[&str] = &[
+    "169.254.169.254",
+    "169.254.170.2",
+    "100.100.100.200",
+    "fd00:ec2::254",
+    "metadata.google.internal",
+];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Action {
+    Allow,
+    Deny,
+}
+
+#[derive(Debug, Clone)]
+struct Rule {
+    action: Action,
+    /// Upper-case method, or `None` for `*`.
+    method: Option<String>,
+    /// Lower-case host glob.
+    host: String,
+    /// Path glob starting with `/`; `None` = any path.
+    path: Option<String>,
+    source: String,
+}
+
+impl Rule {
+    fn method_matches(&self, method: &str) -> bool {
+        self.method
+            .as_deref()
+            .is_none_or(|m| m.eq_ignore_ascii_case(method))
+    }
+
+    fn host_matches(&self, host: &str) -> bool {
+        glob_match(&self.host, host)
+    }
+
+    fn path_matches(&self, path: &str) -> bool {
+        self.path
+            .as_deref()
+            .is_none_or(|p| path_glob_match(p, path))
+    }
+
+    /// True when this (deny) rule matches every request the literal-host `allow` rule could
+    /// match. Conservative: it says yes only when it can tell, so a no is not a promise.
+    fn covers(&self, allow: &Rule) -> bool {
+        let method_ok = match (&self.method, &allow.method) {
+            (None, _) => true,
+            (Some(d), Some(a)) => d.eq_ignore_ascii_case(a),
+            (Some(_), None) => false,
+        };
+        let path_ok = match (&self.path, &allow.path) {
+            (None, _) => true,
+            (Some(d), _) if d == "/*" => true,
+            (Some(d), Some(a)) if !a.contains('*') => path_glob_match(d, a),
+            _ => false,
+        };
+        method_ok && path_ok && glob_match(&self.host, &allow.host)
+    }
+
+    fn same_as(&self, other: &Rule) -> bool {
+        self.action == other.action
+            && self.method == other.method
+            && self.host == other.host
+            && self.path == other.path
+    }
+
+    /// True when the rule constrains neither method nor path.
+    fn covers_whole_host(&self) -> bool {
+        let any_method = self
+            .method
+            .as_deref()
+            .is_none_or(|m| m.eq_ignore_ascii_case("CONNECT"));
+        let any_path = self.path.as_deref().is_none_or(|p| p == "/*");
+        any_method && any_path
+    }
+}
+
+/// A parsed rule set.
+#[derive(Debug, Clone, Default)]
+pub struct HttpAcl {
+    rules: Vec<Rule>,
+}
+
+impl HttpAcl {
+    /// Parse rules. Any malformed rule is an error: a silently dropped `deny`
+    /// rule would fail open.
+    pub fn parse(rules: &[String]) -> Result<Self, String> {
+        let mut out = Vec::with_capacity(rules.len());
+        for raw in rules {
+            out.push(parse_rule(raw).map_err(|e| format!("http rule {raw:?}: {e}"))?);
+        }
+        Ok(Self { rules: out })
+    }
+
+    pub fn is_active(&self) -> bool {
+        !self.rules.is_empty()
+    }
+
+    fn has_allow(&self) -> bool {
+        self.rules.iter().any(|r| r.action == Action::Allow)
+    }
+
+    /// Look for rule-set mistakes: a set that only denies (so everything else is allowed), an
+    /// allow that restricts nothing, an allow for a metadata address, an allow that a deny
+    /// always overrides, and repeated rules. Advisory only: it never changes what the ACL
+    /// decides, and an empty rule set has no findings.
+    pub fn lint(&self) -> Vec<LintFinding> {
+        let mut out = Vec::new();
+        let finding = |severity, code, message: String| LintFinding {
+            severity,
+            code,
+            message,
+        };
+
+        if self.is_active() && !self.has_allow() {
+            out.push(finding(
+                LintSeverity::Warn,
+                "deny_only",
+                "only deny rules: every request they do not match is allowed".into(),
+            ));
+        }
+
+        for (i, r) in self.rules.iter().enumerate() {
+            if r.action != Action::Allow {
+                continue;
+            }
+            let whole_host = r.covers_whole_host() && r.method.is_none();
+            if r.host == "*" && whole_host {
+                out.push(finding(
+                    LintSeverity::High,
+                    "allow_everything",
+                    format!(
+                        "{:?} allows every request; only deny rules restrict anything",
+                        r.source
+                    ),
+                ));
+            } else if r.host == "*" {
+                out.push(finding(
+                    LintSeverity::Warn,
+                    "allow_any_host",
+                    format!("{:?} allows any host for that method and path", r.source),
+                ));
+            }
+            let bare = r.host.trim_start_matches('[').trim_end_matches(']');
+            if METADATA_HOSTS.contains(&bare) {
+                out.push(finding(
+                    LintSeverity::High,
+                    "allow_metadata_host",
+                    format!(
+                        "{:?} allows a cloud metadata address, which can hand out instance credentials",
+                        r.source
+                    ),
+                ));
+            }
+            // A deny always wins, so an allow it fully covers can never match.
+            if !r.host.contains('*')
+                && let Some(d) = self
+                    .rules
+                    .iter()
+                    .find(|d| d.action == Action::Deny && d.covers(r))
+            {
+                out.push(finding(
+                    LintSeverity::Warn,
+                    "allow_never_matches",
+                    format!(
+                        "{:?} can never match: deny rule {:?} always wins",
+                        r.source, d.source
+                    ),
+                ));
+            }
+            if self.rules[..i].iter().any(|e| e.same_as(r)) {
+                out.push(finding(
+                    LintSeverity::Info,
+                    "duplicate_rule",
+                    format!("{:?} repeats an earlier rule", r.source),
+                ));
+            }
+        }
+        out.sort_by_key(|f| std::cmp::Reverse(f.severity));
+        out
+    }
+
+    /// Check a plain-HTTP request. `host` must already be canonical (see
+    /// [`effective_host`]); `raw_path` is the request path without the query.
+    pub fn check(&self, method: &str, host: &str, raw_path: &str) -> Verdict {
+        if !self.is_active() {
+            return Verdict::Allow;
+        }
+        let path = match normalize_path(raw_path) {
+            Ok(p) => p,
+            Err(e) => return Verdict::Deny(format!("rejected path: {e}")),
+        };
+        let host = host.to_ascii_lowercase();
+        for r in &self.rules {
+            if r.action == Action::Deny
+                && r.method_matches(method)
+                && r.host_matches(&host)
+                && r.path_matches(&path)
+            {
+                return Verdict::Deny(format!("denied by rule {:?}", r.source));
+            }
+        }
+        if !self.has_allow() {
+            return Verdict::Allow;
+        }
+        for r in &self.rules {
+            if r.action == Action::Allow
+                && r.method_matches(method)
+                && r.host_matches(&host)
+                && r.path_matches(&path)
+            {
+                return Verdict::Allow;
+            }
+        }
+        Verdict::Deny(format!("no allow rule matches {method} {host}{path}"))
+    }
+
+    /// Pre-TLS check for a `CONNECT` that the proxy will intercept: method
+    /// and path are enforced per request afterwards, so the tunnel itself is
+    /// refused only when no request to `host` could ever be allowed (a deny
+    /// rule covering the whole host, or allow rules none of which name it).
+    pub fn check_intercepted_connect(&self, host: &str) -> Verdict {
+        if !self.is_active() {
+            return Verdict::Allow;
+        }
+        let host = host.to_ascii_lowercase();
+        if let Some(r) = self.rules.iter().find(|r| {
+            r.action == Action::Deny
+                && r.method.is_none()
+                && r.path.as_deref().is_none_or(|p| p == "/*")
+                && r.host_matches(&host)
+        }) {
+            return Verdict::Deny(format!("host {host} denied by rule {:?}", r.source));
+        }
+        if self.has_allow()
+            && !self
+                .rules
+                .iter()
+                .any(|r| r.action == Action::Allow && r.host_matches(&host))
+        {
+            return Verdict::Deny(format!("no allow rule covers host {host}"));
+        }
+        Verdict::Allow
+    }
+
+    /// Check a `CONNECT` tunnel. Inside a tunnel the method and path are
+    /// invisible, so the tunnel is allowed only when that is provably safe:
+    /// no deny rule can apply to the host, and an allow rule covers every
+    /// method and path on it.
+    pub fn check_connect(&self, host: &str) -> Verdict {
+        if !self.is_active() {
+            return Verdict::Allow;
+        }
+        let host = host.to_ascii_lowercase();
+        for r in &self.rules {
+            if r.action == Action::Deny && r.host_matches(&host) {
+                return Verdict::Deny(format!(
+                    "tunnel to {host} refused: deny rule {:?} cannot be enforced inside a tunnel",
+                    r.source
+                ));
+            }
+        }
+        if !self.has_allow() {
+            return Verdict::Allow;
+        }
+        if self
+            .rules
+            .iter()
+            .any(|r| r.action == Action::Allow && r.host_matches(&host) && r.covers_whole_host())
+        {
+            return Verdict::Allow;
+        }
+        Verdict::Deny(format!(
+            "tunnel to {host} refused: no allow rule covers every method and path on it"
+        ))
+    }
+}
+
+fn parse_rule(raw: &str) -> Result<Rule, String> {
+    let parts: Vec<&str> = raw.split_whitespace().collect();
+    if parts.len() != 3 {
+        return Err("expected `<allow|deny> <METHOD|*> <host>[/<path>]`".into());
+    }
+    let action = match parts[0].to_ascii_lowercase().as_str() {
+        "allow" => Action::Allow,
+        "deny" => Action::Deny,
+        other => return Err(format!("unknown action {other:?}, expected allow or deny")),
+    };
+    let method = if parts[1] == "*" {
+        None
+    } else if !parts[1].is_empty() && parts[1].bytes().all(|b| b.is_ascii_alphabetic()) {
+        Some(parts[1].to_ascii_uppercase())
+    } else {
+        return Err(format!("invalid method {:?}", parts[1]));
+    };
+    let target = parts[2];
+    let (host, path) = match target.find('/') {
+        Some(i) => (&target[..i], Some(&target[i..])),
+        None => (target, None),
+    };
+    if host.is_empty() {
+        return Err("empty host glob".into());
+    }
+    if host
+        .bytes()
+        .any(|b| b == b'@' || b == b'\\' || b == b'?' || b == b'#' || b.is_ascii_control())
+    {
+        return Err("invalid character in host glob".into());
+    }
+    if let Some(p) = path {
+        validate_path_glob(p)?;
+    }
+    Ok(Rule {
+        action,
+        method,
+        host: host.to_ascii_lowercase(),
+        path: path.map(str::to_string),
+        source: raw.trim().to_string(),
+    })
+}
+
+/// A path glob is compared with the *normalized* request path, so a glob that
+/// could never equal one (encoded bytes, dot segments, doubled slashes) would
+/// silently never match. For a `deny` rule that fails open, so reject it.
+fn validate_path_glob(p: &str) -> Result<(), String> {
+    if p.bytes()
+        .any(|b| matches!(b, b'%' | b'?' | b'#' | b'\\') || b.is_ascii_control())
+    {
+        return Err("path glob must be a literal decoded path (no %, ?, #, or backslash)".into());
+    }
+    if p.contains("//") {
+        return Err("path glob must not contain `//`".into());
+    }
+    if p.split('/').any(|s| s == "." || s == "..") {
+        return Err("path glob must not contain `.` or `..` segments".into());
+    }
+    Ok(())
+}
+
+/// Match a rule's path glob against a normalized path. A trailing `/*` also
+/// matches the directory itself, so `deny * */admin/*` covers `/admin` and
+/// `/admin/` as well as everything below them.
+fn path_glob_match(glob: &str, path: &str) -> bool {
+    if glob_match(glob, path) {
+        return true;
+    }
+    match glob.strip_suffix("/*") {
+        Some(dir) => glob_match(dir, path.strip_suffix('/').unwrap_or(path)),
+        None => false,
+    }
+}
+
+/// Glob match where `*` matches any run of characters (including `/` and
+/// nothing) and everything else is literal. Iterative, so hostile patterns
+/// cannot blow the stack.
+pub fn glob_match(pattern: &str, text: &str) -> bool {
+    let p = pattern.as_bytes();
+    let t = text.as_bytes();
+    let (mut pi, mut ti) = (0usize, 0usize);
+    let mut star: Option<usize> = None;
+    let mut mark = 0usize;
+    while ti < t.len() {
+        if pi < p.len() && p[pi] == b'*' {
+            star = Some(pi);
+            mark = ti;
+            pi += 1;
+        } else if pi < p.len() && p[pi] == t[ti] {
+            pi += 1;
+            ti += 1;
+        } else if let Some(s) = star {
+            pi = s + 1;
+            mark += 1;
+            ti = mark;
+        } else {
+            return false;
+        }
+    }
+    while pi < p.len() && p[pi] == b'*' {
+        pi += 1;
+    }
+    pi == p.len()
+}
+
+/// Canonicalize a request path (no query) so rules see what the upstream
+/// will: percent-escapes of unreserved characters are decoded (so `%2e%2e`
+/// is `..` and `%61` is `a`), other escapes are kept with upper-case hex,
+/// duplicate slashes collapse, and `.` / `..` segments are resolved (clamped
+/// at the root). A trailing `/`, `/.` or `/..` yields a trailing slash.
+///
+/// Paths that cannot be interpreted unambiguously are rejected: malformed
+/// `%` escapes, `%00`, encoded slash (`%2F`) or backslash (`%5C`), a raw
+/// backslash, control or non-ASCII bytes, and anything not starting with `/`.
+pub fn normalize_path(raw: &str) -> Result<String, String> {
+    let raw = raw.split(['?', '#']).next().unwrap_or("");
+    if raw.is_empty() {
+        return Ok("/".into());
+    }
+    if !raw.starts_with('/') {
+        return Err(format!("path {raw:?} does not start with `/`"));
+    }
+    let bytes = raw.as_bytes();
+    let mut decoded = String::with_capacity(raw.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        match b {
+            b'%' => {
+                let hex = bytes
+                    .get(i + 1..i + 3)
+                    .and_then(|h| std::str::from_utf8(h).ok())
+                    .and_then(|h| u8::from_str_radix(h, 16).ok())
+                    .ok_or_else(|| "malformed percent-escape".to_string())?;
+                i += 3;
+                match hex {
+                    0 => return Err("encoded NUL".into()),
+                    b'/' | b'\\' => return Err("encoded slash or backslash".into()),
+                    h if is_unreserved(h) => decoded.push(h as char),
+                    h => decoded.push_str(&format!("%{h:02X}")),
+                }
+            }
+            b'\\' => return Err("backslash in path".into()),
+            b if b < 0x20 || b == 0x7f || b >= 0x80 => {
+                return Err("control or non-ASCII byte in path".into());
+            }
+            b => {
+                decoded.push(b as char);
+                i += 1;
+            }
+        }
+    }
+    let mut stack: Vec<&str> = Vec::new();
+    let mut trailing = false;
+    let segs: Vec<&str> = decoded.split('/').collect();
+    for (idx, seg) in segs.iter().enumerate() {
+        let last = idx == segs.len() - 1;
+        match *seg {
+            "" | "." => trailing = last,
+            ".." => {
+                stack.pop();
+                trailing = last;
+            }
+            s => {
+                stack.push(s);
+                trailing = false;
+            }
+        }
+    }
+    let mut out = String::from("/");
+    out.push_str(&stack.join("/"));
+    if trailing && !stack.is_empty() {
+        out.push('/');
+    }
+    Ok(out)
+}
+
+fn is_unreserved(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~')
+}
+
+/// Canonical host: userinfo-free, port stripped, trailing dot removed,
+/// lower-case. Rejects empty hosts and hosts with characters that make the
+/// authority ambiguous.
+pub fn canon_host(s: &str) -> Result<String, String> {
+    let s = s.trim();
+    if s.is_empty() {
+        return Err("empty host".into());
+    }
+    if s.bytes().any(|b| {
+        b == b'@' || b == b'/' || b == b'\\' || b.is_ascii_whitespace() || b.is_ascii_control()
+    }) {
+        return Err(format!("ambiguous host {s:?}"));
+    }
+    if !s.starts_with('[') && s.matches(':').count() > 1 {
+        return Err(format!("unbracketed IPv6 literal {s:?}"));
+    }
+    let host = if let Some(rest) = s.strip_prefix('[') {
+        let end = rest.find(']').ok_or("unterminated IPv6 literal")?;
+        &s[..end + 2]
+    } else {
+        match s.rsplit_once(':') {
+            Some((h, port)) if !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()) => h,
+            Some((_, "")) => &s[..s.len() - 1],
+            _ => s,
+        }
+    };
+    let host = host.trim_end_matches('.').to_ascii_lowercase();
+    if host.is_empty() {
+        return Err("empty host".into());
+    }
+    Ok(host)
+}
+
+/// The host a request is really addressed to. `uri_host` is the authority of
+/// an absolute-form request line, `host_header` the `Host` header. If both are
+/// present and differ the request is ambiguous (the filter would judge one
+/// host while the upstream connection goes to the other) and is rejected.
+pub fn effective_host(uri_host: Option<&str>, host_header: Option<&str>) -> Result<String, String> {
+    let from_uri = uri_host.map(canon_host).transpose()?;
+    let from_header = host_header.map(canon_host).transpose()?;
+    match (from_uri, from_header) {
+        (Some(u), Some(h)) if u != h => Err(format!(
+            "request URI host {u:?} differs from Host header {h:?}"
+        )),
+        (Some(u), _) => Ok(u),
+        (None, Some(h)) => Ok(h),
+        (None, None) => Err("request has no host".into()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn acl(rules: &[&str]) -> HttpAcl {
+        HttpAcl::parse(&rules.iter().map(|s| s.to_string()).collect::<Vec<_>>()).unwrap()
+    }
+
+    fn denied(v: Verdict) -> bool {
+        matches!(v, Verdict::Deny(_))
+    }
+
+    #[test]
+    fn empty_rules_are_a_no_op() {
+        let a = acl(&[]);
+        assert!(!a.is_active());
+        assert!(a.check("DELETE", "anything.example", "/admin").is_allow());
+        assert!(a.check_connect("anything.example").is_allow());
+    }
+
+    #[test]
+    fn allow_rules_default_deny() {
+        let a = acl(&[
+            "allow GET docs.python.org/*",
+            "allow POST api.openai.com/v1/chat/completions",
+        ]);
+        assert!(
+            a.check("GET", "docs.python.org", "/3/library/os.html")
+                .is_allow()
+        );
+        assert!(a.check("GET", "docs.python.org", "/").is_allow());
+        assert!(
+            a.check("POST", "api.openai.com", "/v1/chat/completions")
+                .is_allow()
+        );
+        assert!(denied(a.check("POST", "docs.python.org", "/3/")));
+        assert!(denied(a.check(
+            "GET",
+            "api.openai.com",
+            "/v1/chat/completions"
+        )));
+        assert!(denied(a.check("POST", "api.openai.com", "/v1/models")));
+        assert!(denied(a.check("GET", "evil.example", "/")));
+    }
+
+    #[test]
+    fn deny_wins_over_allow() {
+        let a = acl(&["allow * example.com/*", "deny * */admin/*"]);
+        assert!(a.check("GET", "example.com", "/public/x").is_allow());
+        assert!(denied(a.check("GET", "example.com", "/admin/users")));
+        assert!(denied(a.check("POST", "example.com", "/admin/users")));
+    }
+
+    #[test]
+    fn deny_only_rules_allow_everything_else() {
+        let a = acl(&["deny DELETE */*"]);
+        assert!(a.check("GET", "example.com", "/x").is_allow());
+        assert!(denied(a.check("DELETE", "example.com", "/x")));
+    }
+
+    #[test]
+    fn method_and_host_are_case_insensitive_path_is_not() {
+        let a = acl(&["allow get Docs.Python.ORG/Docs/*"]);
+        assert!(a.check("GET", "docs.python.org", "/Docs/a").is_allow());
+        assert!(a.check("get", "DOCS.PYTHON.ORG", "/Docs/a").is_allow());
+        assert!(denied(a.check("GET", "docs.python.org", "/docs/a")));
+    }
+
+    #[test]
+    fn omitted_path_matches_any_path() {
+        let a = acl(&["allow GET example.com"]);
+        assert!(a.check("GET", "example.com", "/anything/at/all").is_allow());
+        assert!(a.check("GET", "example.com", "/").is_allow());
+    }
+
+    #[test]
+    fn star_matches_across_slashes_and_empty() {
+        assert!(glob_match("/v1/*", "/v1/a/b/c"));
+        assert!(glob_match("/v1/*", "/v1/"));
+        assert!(!glob_match("/v1/*", "/v1"));
+        assert!(glob_match("*.example.com", "a.b.example.com"));
+        assert!(!glob_match("*.example.com", "example.com"));
+        assert!(glob_match("*", ""));
+        assert!(glob_match("a*b*c", "aXXbYYc"));
+        assert!(!glob_match("a*b*c", "aXXbYY"));
+    }
+
+    #[test]
+    fn deny_trailing_star_also_covers_the_bare_directory() {
+        let a = acl(&["deny * */admin/*"]);
+        for p in [
+            "/admin",
+            "/admin/",
+            "/admin/x",
+            "/a/../admin",
+            "/%61dmin",
+            "//admin",
+            "/admin/.",
+        ] {
+            assert!(denied(a.check("GET", "h.example", p)), "{p}");
+        }
+        // The path glob is `/admin/*`: a different segment or a nested `admin` is not covered.
+        for p in [
+            "/superadmin",
+            "/administrator",
+            "/adminx/y",
+            "/x/admin",
+            "/",
+        ] {
+            assert!(a.check("GET", "h.example", p).is_allow(), "{p}");
+        }
+    }
+
+    #[test]
+    fn trailing_star_allow_rules_cover_the_bare_directory_too() {
+        let a = acl(&["allow GET api.example.com/v1/*"]);
+        assert!(a.check("GET", "api.example.com", "/v1").is_allow());
+        assert!(a.check("GET", "api.example.com", "/v1/").is_allow());
+        assert!(a.check("GET", "api.example.com", "/v1/x").is_allow());
+        assert!(denied(a.check("GET", "api.example.com", "/v10")));
+        assert!(denied(a.check("GET", "api.example.com", "/v")));
+    }
+
+    #[test]
+    fn intercepted_connect_precheck_only_refuses_unreachable_hosts() {
+        let a = acl(&[
+            "allow GET docs.python.org/*",
+            "allow POST api.openai.com/v1/chat/completions",
+            "deny * */admin/*",
+            "deny * blocked.example",
+        ]);
+        assert!(a.check_intercepted_connect("docs.python.org").is_allow());
+        assert!(a.check_intercepted_connect("API.openai.com").is_allow());
+        // No allow rule names it.
+        assert!(denied(a.check_intercepted_connect("other.example")));
+        // A whole-host deny.
+        assert!(denied(a.check_intercepted_connect("blocked.example")));
+        // Inactive ACL: no opinion.
+        assert!(acl(&[]).check_intercepted_connect("any.example").is_allow());
+        // Only deny rules that are path-scoped never block the tunnel itself.
+        let d = acl(&["deny * */admin/*"]);
+        assert!(d.check_intercepted_connect("any.example").is_allow());
+    }
+
+    #[test]
+    fn root_glob_matches_the_root() {
+        let a = acl(&["deny * h.example/*"]);
+        assert!(denied(a.check("GET", "h.example", "/")));
+        assert!(denied(a.check("GET", "h.example", "/x")));
+    }
+
+    #[test]
+    fn query_string_is_ignored_for_matching() {
+        let a = acl(&["deny * */admin/*"]);
+        assert!(denied(a.check("GET", "h.example", "/admin/x?y=1")));
+        let b = acl(&["allow GET h.example/ok"]);
+        assert!(b.check("GET", "h.example", "/ok?x=/admin/").is_allow());
+    }
+
+    #[test]
+    fn dot_dot_segments_cannot_bypass_deny() {
+        let a = acl(&["allow * h.example/*", "deny * */admin/*"]);
+        for p in [
+            "/a/../admin/x",
+            "/a/b/../../admin/x",
+            "/./admin/x",
+            "/admin/./x",
+            "/%61dmin/x",
+            "//admin/x",
+            "/admin//x",
+            "/x/%2e%2e/admin/x",
+            "/x/%2E%2E/admin/x",
+            "/x/.%2e/admin/x",
+            "/admin/x/",
+            "/../admin/x",
+            "/../../admin/x",
+        ] {
+            assert!(denied(a.check("GET", "h.example", p)), "bypassed via {p}");
+        }
+    }
+
+    #[test]
+    fn trailing_dot_segment_hits_directory_rule() {
+        let a = acl(&["allow * h.example/*", "deny * */admin/*"]);
+        assert!(denied(a.check("GET", "h.example", "/admin/.")));
+        assert!(denied(a.check("GET", "h.example", "/admin/x/..")));
+    }
+
+    #[test]
+    fn deny_on_percent_encoded_literal_segment() {
+        let a = acl(&["allow * h.example/*", "deny * */secret/*"]);
+        assert!(denied(a.check("GET", "h.example", "/%73%65%63%72%65%74/k")));
+    }
+
+    #[test]
+    fn allow_rule_cannot_be_satisfied_by_traversal() {
+        let a = acl(&["allow GET h.example/public/*"]);
+        assert!(a.check("GET", "h.example", "/public/x").is_allow());
+        assert!(denied(a.check("GET", "h.example", "/public/../private/x")));
+        assert!(denied(a.check(
+            "GET",
+            "h.example",
+            "/public/%2e%2e/private/x"
+        )));
+    }
+
+    #[test]
+    fn ambiguous_encodings_are_rejected_not_guessed() {
+        let a = acl(&["allow * h.example/*"]);
+        for p in [
+            "/a%2fb",
+            "/a%2Fb",
+            "/a%5cb",
+            "/a\\b",
+            "/a%00b",
+            "/a%zz",
+            "/a%2",
+            "/a%",
+            "/a\tb",
+            "/caf\u{e9}",
+            "no-slash",
+        ] {
+            assert!(denied(a.check("GET", "h.example", p)), "accepted {p:?}");
+        }
+    }
+
+    #[test]
+    fn normalize_examples() {
+        let n = |s: &str| normalize_path(s).unwrap();
+        assert_eq!(n("/"), "/");
+        assert_eq!(n(""), "/");
+        assert_eq!(n("/a/../admin"), "/admin");
+        assert_eq!(n("/%61dmin"), "/admin");
+        assert_eq!(n("//admin"), "/admin");
+        assert_eq!(n("/admin/."), "/admin/");
+        assert_eq!(n("/admin/"), "/admin/");
+        assert_eq!(n("/a/b/.."), "/a/");
+        assert_eq!(n("/a/.."), "/");
+        assert_eq!(n("/../.."), "/");
+        assert_eq!(n("/x/%2e%2E/y"), "/y");
+        assert_eq!(n("/a%20b"), "/a%20b");
+        assert_eq!(n("/a%3bb"), "/a%3Bb");
+        assert_eq!(n("/a?b=/../c"), "/a");
+        assert_eq!(n("/a#frag"), "/a");
+    }
+
+    #[test]
+    fn effective_host_prefers_agreement_and_rejects_mismatch() {
+        assert_eq!(
+            effective_host(Some("Example.COM"), Some("example.com:8080")).unwrap(),
+            "example.com"
+        );
+        assert_eq!(
+            effective_host(None, Some("a.example.")).unwrap(),
+            "a.example"
+        );
+        assert_eq!(
+            effective_host(Some("a.example"), None).unwrap(),
+            "a.example"
+        );
+        assert!(effective_host(Some("evil.example"), Some("good.example")).is_err());
+        assert!(effective_host(None, None).is_err());
+        assert!(effective_host(None, Some("")).is_err());
+        assert!(effective_host(None, Some("user@good.example")).is_err());
+        assert!(effective_host(None, Some("good.example/x")).is_err());
+    }
+
+    #[test]
+    fn canon_host_handles_ports_and_ipv6() {
+        assert_eq!(canon_host("example.com:443").unwrap(), "example.com");
+        assert_eq!(canon_host("example.com.:443").unwrap(), "example.com");
+        assert_eq!(canon_host("[::1]:8080").unwrap(), "[::1]");
+        assert_eq!(canon_host("[::1]").unwrap(), "[::1]");
+        assert_eq!(canon_host("EXAMPLE.com").unwrap(), "example.com");
+        assert!(canon_host("[::1").is_err());
+        assert!(canon_host("a b").is_err());
+        assert!(canon_host("::1").is_err());
+    }
+
+    #[test]
+    fn host_glob_cannot_be_dodged_with_port_or_dot() {
+        let a = acl(&["deny * evil.example/*", "allow * */*"]);
+        let h = effective_host(None, Some("EVIL.example.:80")).unwrap();
+        assert!(denied(a.check("GET", &h, "/x")));
+    }
+
+    #[test]
+    fn parse_rejects_malformed_rules() {
+        for bad in [
+            "",
+            "allow",
+            "allow GET",
+            "permit GET example.com/*",
+            "allow GE7 example.com",
+            "allow GET /path-only",
+            "allow GET a@example.com/x",
+            "deny * */admin/../x",
+            "deny * */a%2fb",
+            "deny * */a//b",
+            "deny * */x?y=1",
+            "allow GET example.com/a b",
+        ] {
+            assert!(
+                HttpAcl::parse(&[bad.to_string()]).is_err(),
+                "accepted bad rule {bad:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn connect_needs_full_host_cover_and_no_applicable_deny() {
+        let a = acl(&["allow GET docs.python.org/*", "allow * api.example.com"]);
+        assert!(denied(a.check_connect("docs.python.org")));
+        assert!(a.check_connect("api.example.com").is_allow());
+        assert!(denied(a.check_connect("other.example")));
+
+        let b = acl(&["allow * */*", "deny * */admin/*"]);
+        assert!(denied(b.check_connect("anything.example")));
+
+        let c = acl(&["allow CONNECT api.example.com/*"]);
+        assert!(c.check_connect("api.example.com").is_allow());
+
+        let d = acl(&["deny * evil.example/*"]);
+        assert!(denied(d.check_connect("evil.example")));
+        assert!(d.check_connect("fine.example").is_allow());
+    }
+
+    #[test]
+    fn hostile_glob_terminates_quickly() {
+        let p = "*a".repeat(200);
+        let t = "a".repeat(2000);
+        // Must terminate promptly; the answer itself is not the point.
+        let _ = glob_match(&p, &t);
+    }
+
+    fn lint(rules: &[&str]) -> Vec<LintFinding> {
+        acl(rules).lint()
+    }
+
+    fn codes(f: &[LintFinding]) -> Vec<&'static str> {
+        f.iter().map(|x| x.code).collect()
+    }
+
+    #[test]
+    fn lint_is_quiet_for_a_sound_rule_set() {
+        assert!(
+            lint(&[
+                "allow GET docs.python.org/*",
+                "allow POST api.openai.com/v1/chat/completions",
+                "deny * */admin/*",
+            ])
+            .is_empty()
+        );
+        assert!(lint(&[]).is_empty());
+    }
+
+    #[test]
+    fn lint_flags_a_deny_only_set() {
+        let f = lint(&["deny * */admin/*"]);
+        assert_eq!(codes(&f), vec!["deny_only"]);
+    }
+
+    #[test]
+    fn lint_flags_allow_everything_and_any_host() {
+        assert_eq!(codes(&lint(&["allow * *"])), vec!["allow_everything"]);
+        assert_eq!(codes(&lint(&["allow * */*"])), vec!["allow_everything"]);
+        assert_eq!(codes(&lint(&["allow GET *"])), vec!["allow_any_host"]);
+        // A partial wildcard is ordinary.
+        assert!(lint(&["allow GET *.python.org/*"]).is_empty());
+    }
+
+    #[test]
+    fn lint_flags_metadata_hosts() {
+        let f = lint(&[
+            "allow GET 169.254.169.254/*",
+            "allow GET metadata.google.internal",
+        ]);
+        assert_eq!(
+            codes(&f),
+            vec!["allow_metadata_host", "allow_metadata_host"]
+        );
+        assert_eq!(f[0].severity, LintSeverity::High);
+    }
+
+    #[test]
+    fn lint_flags_an_allow_that_a_deny_overrides() {
+        let f = lint(&[
+            "allow GET api.example.com/admin/users",
+            "deny * api.example.com/admin/*",
+        ]);
+        assert_eq!(codes(&f), vec!["allow_never_matches"]);
+        // A deny for one method does not shadow an allow for another.
+        assert!(lint(&["allow GET api.example.com/a", "deny POST api.example.com/a"]).is_empty());
+        // A narrower deny does not shadow a broader allow.
+        assert!(
+            lint(&[
+                "allow GET api.example.com/*",
+                "deny GET api.example.com/admin"
+            ])
+            .is_empty()
+        );
+        // A whole-host deny shadows every allow on that host.
+        let f = lint(&["allow GET api.example.com/x", "deny * *.example.com"]);
+        assert_eq!(codes(&f), vec!["allow_never_matches"]);
+    }
+
+    #[test]
+    fn lint_flags_repeats_and_orders_by_severity() {
+        let f = lint(&[
+            "allow GET a.example.com/*",
+            "allow GET a.example.com/*",
+            "allow * *",
+        ]);
+        assert_eq!(f[0].severity, LintSeverity::High);
+        assert!(codes(&f).contains(&"duplicate_rule"));
+    }
+
+    #[test]
+    fn lint_does_not_change_decisions() {
+        let a = acl(&["allow * *", "deny * */admin/*"]);
+        let _ = a.lint();
+        assert!(a.check("GET", "x.example.com", "/ok").is_allow());
+        assert!(!a.check("GET", "x.example.com", "/admin/x").is_allow());
+    }
+}

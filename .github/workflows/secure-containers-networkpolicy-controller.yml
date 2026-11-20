@@ -1,0 +1,103 @@
+# Copyright 2026 Zyvor AI Labs · https://zyvor.dev
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+name: Secure Containers NetworkPolicy Controller
+
+on:
+  pull_request:
+    paths:
+      - 'controllers/fluxvm-networkpolicy-controller/**'
+      - 'bpf/fluxvm_pod_policy.bpf.h'
+      - 'bpf/fluxvm_pod_ingress.bpf.c'
+      - 'bpf/fluxvm_tc.bpf.c'
+      - 'crates/fluxvm-network/src/dataplane.rs'
+      - 'crates/fluxvm-network/src/ebpf.rs'
+      - 'scripts/build-ebpf.sh'
+      - 'docs/secure-containers-set14.md'
+      - '.github/workflows/secure-containers-networkpolicy-controller.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'controllers/fluxvm-networkpolicy-controller/**'
+      - 'bpf/fluxvm_pod_policy.bpf.h'
+      - 'bpf/fluxvm_pod_ingress.bpf.c'
+      - 'bpf/fluxvm_tc.bpf.c'
+      - 'crates/fluxvm-network/src/dataplane.rs'
+      - 'crates/fluxvm-network/src/ebpf.rs'
+      - 'scripts/build-ebpf.sh'
+      - 'docs/secure-containers-set14.md'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Collapse superseded runs of this workflow on the same ref so queued duplicates do not hold the org's runners.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  controller:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: controllers/fluxvm-networkpolicy-controller
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: '1.27.x'
+          cache-dependency-path: controllers/fluxvm-networkpolicy-controller/go.mod
+      - name: Format
+        run: test -z "$(gofmt -l cmd internal)"
+      - name: Test
+        run: go test ./...
+      - name: Race
+        run: go test -race ./...
+      - name: Vet
+        run: go vet ./...
+      - name: Static binaries
+        run: |
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags='-s -w -X main.version=set14' -o /tmp/controller-amd64 ./cmd/fluxvm-networkpolicy-controller
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags='-s -w -X main.version=set14' -o /tmp/controller-arm64 ./cmd/fluxvm-networkpolicy-controller
+  dataplane:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout fluxvm
+        uses: actions/checkout@v7
+        with:
+          path: fluxvm
+      - name: Checkout guestkit sibling dependency
+        uses: actions/checkout@v7
+        with:
+          repository: zyvorai/guestkit
+          ref: v1.2.9   # packaging/guestkit.ref; checked by scripts/check-guestkit-pin.sh
+          path: guestkit
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt,clippy
+      - name: Install eBPF build deps
+        run: |
+          $GITHUB_WORKSPACE/fluxvm/scripts/ci-install-apt-deps.sh clang llvm libbpf-dev linux-libc-dev iproute2 libsystemd-dev libhivex-dev pkg-config linux-tools-common linux-tools-generic
+          # Azure GH runners need the matching kernel tools package for a real bpftool binary.
+          sudo apt-get install -y "linux-tools-$(uname -r)" || sudo apt-get install -y linux-tools-azure || true
+          bpftool version || echo 'bpftool still stubbed for this kernel; verify step will use llvm-objdump fallback'
+      - name: Rust format/check/tests
+        working-directory: fluxvm
+        run: |
+          ./scripts/ci-fmt-check.sh
+          cargo test --locked -p fluxvm-network
+          cargo check --locked -p fluxvm-core -p fluxvm-network -p fluxvm-api
+          cargo clippy --locked -p fluxvm-network --all-targets || true
+      - name: Build eBPF objects
+        working-directory: fluxvm
+        run: ./scripts/build-ebpf.sh /tmp/fluxvm-bpf
+      - name: Verify Set 14 objects
+        run: |
+          test -s /tmp/fluxvm-bpf/fluxvm_tc.bpf.o
+          test -s /tmp/fluxvm-bpf/fluxvm_pod_ingress.bpf.o
+          if bpftool version >/dev/null 2>&1; then
+            bpftool btf dump file /tmp/fluxvm-bpf/fluxvm_tc.bpf.o format raw | grep -q fluxvm_pod_rule
+          else
+            echo 'bpftool unavailable for this runner kernel; falling back to symbol check'
+            llvm-objdump -t /tmp/fluxvm-bpf/fluxvm_tc.bpf.o | grep -E 'fluxvm_prules|fluxvm_ppstat'
+          fi

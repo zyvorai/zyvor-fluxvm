@@ -1,0 +1,16 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: fluxvm-system
+resources:
+  - ../namespace.yaml
+  - ../rbac.yaml
+  - ../configmap.yaml
+  - ../crd.yaml
+  - ../daemonset.yaml
+  - ../microvm/crd.yaml
+  - ../microvm/rbac.yaml
+  - ../microvm/controller.yaml
+  - ../microvm/node-agent.yaml
+commonLabels:
+  app.kubernetes.io/part-of: zyvor
+  zyvor.dev/component: fluxvm

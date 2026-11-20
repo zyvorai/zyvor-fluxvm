@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 296" width="900" height="296" role="img" aria-label="A cluster timeline of checkpoints you can return to" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif">
+<title>A cluster timeline of checkpoints you can return to</title>
+<rect x="0.5" y="0.5" width="899" height="295" rx="14" fill="#f5f6f8" stroke="#d5d9e2"/>
+<defs><marker id="a" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#7b8296"/></marker></defs>
+<text x="450" y="34" font-size="18" fill="#1f2430" text-anchor="middle" font-weight="700">Your cluster, on a timeline</text>
+<text x="450" y="56" font-size="13" fill="#5d6577" text-anchor="middle" font-weight="400">a checkpoint is the whole running machine, saved in about a second</text>
+<line x1="60" y1="150" x2="840" y2="150" stroke="#b9bfcc" stroke-width="3" stroke-linecap="round"/>
+<circle cx="110" cy="150" r="9" fill="#2f9e6b" stroke="#fff" stroke-width="3"/>
+<text x="110" y="184" font-size="13" fill="#1f2430" text-anchor="middle" font-weight="600">auto</text>
+<text x="110" y="202" font-size="12" fill="#5d6577" text-anchor="middle" font-weight="400">1h ago</text>
+<circle cx="230" cy="150" r="9" fill="#2f9e6b" stroke="#fff" stroke-width="3"/>
+<text x="230" y="184" font-size="13" fill="#1f2430" text-anchor="middle" font-weight="600">auto</text>
+<text x="230" y="202" font-size="12" fill="#5d6577" text-anchor="middle" font-weight="400">2h ago</text>
+<circle cx="350" cy="150" r="9" fill="#8a90a0" stroke="#fff" stroke-width="3"/>
+<text x="350" y="184" font-size="13" fill="#1f2430" text-anchor="middle" font-weight="600">before-upgrade</text>
+<text x="350" y="202" font-size="12" fill="#5d6577" text-anchor="middle" font-weight="400">manual</text>
+<circle cx="470" cy="150" r="9" fill="#2f9e6b" stroke="#fff" stroke-width="3"/>
+<text x="470" y="184" font-size="13" fill="#1f2430" text-anchor="middle" font-weight="600">auto</text>
+<text x="470" y="202" font-size="12" fill="#5d6577" text-anchor="middle" font-weight="400">30m ago</text>
+<circle cx="590" cy="150" r="9" fill="#d98e04" stroke="#fff" stroke-width="3"/>
+<text x="590" y="184" font-size="13" fill="#1f2430" text-anchor="middle" font-weight="600">try</text>
+<text x="590" y="202" font-size="12" fill="#5d6577" text-anchor="middle" font-weight="400">5m ago</text>
+<circle cx="710" cy="150" r="9" fill="#3b6fd4" stroke="#fff" stroke-width="3"/>
+<text x="710" y="184" font-size="13" fill="#1f2430" text-anchor="middle" font-weight="600">sleep</text>
+<text x="710" y="202" font-size="12" fill="#5d6577" text-anchor="middle" font-weight="400">parked</text>
+<circle cx="810" cy="150" r="11" fill="#fff" stroke="#1f2430" stroke-width="3"/><text x="810" y="184" font-size="13" fill="#1f2430" text-anchor="middle" font-weight="700">now</text>
+<path d="M590 128 C590 92 460 92 460 128" fill="none" stroke="#d98e04" stroke-width="2" marker-end="url(#a)"/>
+<text x="525" y="112" font-size="12" fill="#a76d00" text-anchor="middle" font-weight="600">kube undo</text>
+<path d="M810 128 C810 70 230 70 230 128" fill="none" stroke="#2f9e6b" stroke-width="2" stroke-dasharray="5 4" marker-end="url(#a)"/>
+<text x="520" y="72" font-size="12" fill="#237a52" text-anchor="middle" font-weight="600">kube restore any point · bisect searches the green ones</text>
+<rect x="60" y="232" width="780" height="40" rx="8" fill="#e9ecf2"/>
+<text x="450" y="257" font-size="13" fill="#1f2430" text-anchor="middle" font-weight="600">bisect  ·  golden / reset  ·  try / undo  ·  chaos  ·  sleep / wake  ·  Studio timeline</text>
+</svg>

@@ -1,0 +1,890 @@
+// Copyright 2026 Zyvor AI Labs · https://zyvor.dev
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+
+//! Guest runtime: spawn Firecracker as the KVM engine behind the FluxVM
+//! control API so create/exec/pause/resume work end-to-end today while the
+//! in-tree KVM demo path remains available for freestanding netboot.
+
+use crate::api::BootConfig;
+use crate::balloon_ctl::BalloonSlot;
+use crate::config::{GuestKind, VmConfig};
+use crate::kvm_snap::{self, SnapCmd};
+use crate::pause::{PauseHandles, VcpuKick};
+use crate::vhost::NetDatapath;
+use crate::VirtualMachine;
+use anyhow::{bail, Context, Result};
+use serde_json::json;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::Stdio;
+use std::sync::{
+    atomic::{AtomicBool, AtomicU64, Ordering},
+    mpsc, Arc,
+};
+use std::time::Duration;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::UnixStream;
+use tokio::process::{Child, Command};
+use tracing::info;
+
+const FC_API_TIMEOUT: Duration = Duration::from_secs(10);
+const KVM_START_TIMEOUT: Duration = Duration::from_secs(30);
+const KVM_PAUSE_TIMEOUT: Duration = Duration::from_secs(5);
+
+enum GuestEngine {
+    Firecracker {
+        child: Child,
+        api_sock: PathBuf,
+    },
+    Kvm {
+        stop: Arc<AtomicBool>,
+        /// When true, the vCPU thread parks (no KVM_RUN) until cleared.
+        paused: Arc<AtomicBool>,
+        pause_epoch: Arc<AtomicU64>,
+        quiesced_epoch: Arc<AtomicU64>,
+        kick: Arc<VcpuKick>,
+        snap_tx: mpsc::Sender<SnapCmd>,
+        thread: Option<std::thread::JoinHandle<()>>,
+        /// Which virtio-net datapath (vhost-net or userspace pump) is live.
+        net_datapath: Arc<NetDatapath>,
+        /// Balloon device handle, published by the VMM thread once built.
+        balloon: Arc<BalloonSlot>,
+    },
+}
+
+pub struct GuestHandle {
+    pub workspace: PathBuf,
+    engine: GuestEngine,
+}
+
+/// Ask the in-tree VMM thread to stop and wait for it. A vCPU that is idle in
+/// `KVM_RUN` (guest HLT, no userspace exits) never looks at `stop` by itself,
+/// so kick every vCPU out of the kernel until the thread has exited. Gives up
+/// and detaches after 30 s rather than blocking the caller forever.
+fn stop_kvm_thread(
+    stop: &AtomicBool,
+    kick: &VcpuKick,
+    thread: Option<std::thread::JoinHandle<()>>,
+) {
+    stop.store(true, Ordering::SeqCst);
+    let Some(t) = thread else { return };
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    while !t.is_finished() {
+        if std::time::Instant::now() >= deadline {
+            eprintln!("[kvm-engine] vCPU thread did not stop within 30s; detaching");
+            return;
+        }
+        kick.kick_all();
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let _ = t.join();
+}
+
+impl Drop for GuestHandle {
+    fn drop(&mut self) {
+        match &mut self.engine {
+            GuestEngine::Firecracker { child, .. } => {
+                let _ = child.start_kill();
+            }
+            GuestEngine::Kvm {
+                stop, thread, kick, ..
+            } => stop_kvm_thread(stop, kick, thread.take()),
+        }
+    }
+}
+
+impl GuestHandle {
+    /// Balloon control for the in-tree KVM engine; `None` for Firecracker.
+    pub fn balloon(&self) -> Option<Arc<BalloonSlot>> {
+        match &self.engine {
+            GuestEngine::Kvm { balloon, .. } => Some(Arc::clone(balloon)),
+            GuestEngine::Firecracker { .. } => None,
+        }
+    }
+
+    pub async fn pause(&self) -> Result<()> {
+        match &self.engine {
+            GuestEngine::Firecracker { api_sock, .. } => pause(api_sock).await,
+            GuestEngine::Kvm {
+                paused,
+                pause_epoch,
+                quiesced_epoch,
+                kick,
+                ..
+            } => {
+                paused.store(true, Ordering::SeqCst);
+                let epoch = pause_epoch.fetch_add(1, Ordering::SeqCst) + 1;
+                let deadline = tokio::time::Instant::now() + KVM_PAUSE_TIMEOUT;
+                loop {
+                    // Every vCPU (BSP and APs) must leave KVM_RUN; an idle
+                    // vCPU can sleep in-kernel indefinitely, so kick until
+                    // the barrier reports all of them parked.
+                    kick.kick_all();
+                    if quiesced_epoch.load(Ordering::SeqCst) == epoch {
+                        return Ok(());
+                    }
+                    if tokio::time::Instant::now() >= deadline {
+                        paused.store(false, Ordering::SeqCst);
+                        bail!("KVM vCPUs did not all quiesce within {KVM_PAUSE_TIMEOUT:?}");
+                    }
+                    tokio::time::sleep(Duration::from_millis(2)).await;
+                }
+            }
+        }
+    }
+
+    pub async fn resume(&self) -> Result<()> {
+        match &self.engine {
+            GuestEngine::Firecracker { api_sock, .. } => resume(api_sock).await,
+            GuestEngine::Kvm { paused, .. } => {
+                paused.store(false, Ordering::SeqCst);
+                Ok(())
+            }
+        }
+    }
+
+    pub async fn shutdown(mut self) -> Result<()> {
+        match &mut self.engine {
+            GuestEngine::Firecracker { child, api_sock } => {
+                shutdown(api_sock).await.ok();
+                let _ = child.kill().await;
+            }
+            GuestEngine::Kvm {
+                stop, thread, kick, ..
+            } => stop_kvm_thread(stop, kick, thread.take()),
+        }
+        Ok(())
+    }
+
+    pub async fn snapshot_create(&self, vmstate: &Path, mem: &Path) -> Result<()> {
+        match &self.engine {
+            GuestEngine::Firecracker { api_sock, .. } => {
+                snapshot_create(api_sock, vmstate, mem).await
+            }
+            GuestEngine::Kvm {
+                paused,
+                pause_epoch,
+                quiesced_epoch,
+                snap_tx,
+                ..
+            } => {
+                if !paused.load(Ordering::SeqCst)
+                    || quiesced_epoch.load(Ordering::SeqCst) != pause_epoch.load(Ordering::SeqCst)
+                {
+                    bail!("KVM snapshot requires a quiesced guest");
+                }
+                let (reply_tx, reply_rx) = mpsc::sync_channel(1);
+                snap_tx
+                    .send(SnapCmd {
+                        vmstate: vmstate.to_path_buf(),
+                        mem: mem.to_path_buf(),
+                        reply: reply_tx,
+                    })
+                    .context("vCPU thread gone; cannot snapshot")?;
+                // Wait on a blocking channel without starving the async runtime.
+                tokio::task::spawn_blocking(move || {
+                    reply_rx
+                        .recv_timeout(Duration::from_secs(30))
+                        .map_err(|_| anyhow::anyhow!("KVM snapshot timed out"))
+                        .and_then(|inner| inner.map_err(|e| anyhow::anyhow!(e)))
+                })
+                .await
+                .context("snapshot join")??;
+                Ok(())
+            }
+        }
+    }
+
+    /// Active virtio-net datapath of an in-tree KVM guest, e.g.
+    /// `vhost-net pairs=1 (...)` or `userspace-pump pairs=1 (reason)`.
+    /// `None` for Firecracker, which owns its own network path.
+    pub fn net_datapath(&self) -> Option<String> {
+        match &self.engine {
+            GuestEngine::Firecracker { .. } => None,
+            GuestEngine::Kvm { net_datapath, .. } => Some(net_datapath.summary()),
+        }
+    }
+
+    pub fn kill(&mut self) {
+        match &mut self.engine {
+            GuestEngine::Firecracker { child, .. } => {
+                let _ = child.start_kill();
+            }
+            GuestEngine::Kvm {
+                stop, thread, kick, ..
+            } => stop_kvm_thread(stop, kick, thread.take()),
+        }
+    }
+}
+
+pub async fn start(cfg: &BootConfig, workspace: &Path) -> Result<GuestHandle> {
+    fs::create_dir_all(workspace)?;
+    let api_sock = workspace.join("firecracker.sock");
+    let _ = fs::remove_file(&api_sock);
+    let cfg_path = workspace.join("firecracker.json");
+    fs::write(
+        &cfg_path,
+        serde_json::to_vec_pretty(&firecracker_config(cfg)?)?,
+    )?;
+
+    let binary =
+        std::env::var("FLUXVM_FIRECRACKER_BINARY").unwrap_or_else(|_| "firecracker".into());
+    let log = workspace.join("firecracker.log");
+    let stdout = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log)?;
+    let stderr = stdout.try_clone()?;
+
+    let mut child = Command::new(&binary)
+        .args([
+            "--api-sock",
+            &api_sock.display().to_string(),
+            "--config-file",
+            &cfg_path.display().to_string(),
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(stdout))
+        .stderr(Stdio::from(stderr))
+        .process_group(0)
+        .spawn()
+        .with_context(|| format!("spawning Firecracker ({binary})"))?;
+
+    // Wait until the API socket accepts connections.
+    let deadline = tokio::time::Instant::now() + FC_API_TIMEOUT;
+    loop {
+        if tokio::time::Instant::now() > deadline {
+            let _ = child.kill().await;
+            bail!("Firecracker API socket not ready within {FC_API_TIMEOUT:?}");
+        }
+        if api_sock.exists() && fc_request(&api_sock, "GET", "/", None).await.is_ok() {
+            break;
+        }
+        if let Ok(Some(status)) = child.try_wait() {
+            bail!("Firecracker exited early: {status}");
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    info!(
+        pid = child.id().unwrap_or(0),
+        "Firecracker guest started under fluxvm-hypervisor"
+    );
+    Ok(GuestHandle {
+        workspace: workspace.to_path_buf(),
+        engine: GuestEngine::Firecracker { child, api_sock },
+    })
+}
+
+/// Boot via the in-tree KVM path (no Firecracker child process).
+pub async fn start_kvm(cfg: &BootConfig, workspace: &Path) -> Result<GuestHandle> {
+    fs::create_dir_all(workspace)?;
+    let vm_cfg = boot_to_vm_config(cfg)?;
+    spawn_kvm(vm_cfg, workspace, None).await
+}
+
+/// Restore an in-tree KVM guest from a `FLUXKVM1` memory + vCPU snapshot.
+pub async fn start_kvm_from_snapshot(
+    cfg: &BootConfig,
+    workspace: &Path,
+    vmstate: &Path,
+    mem_path: &Path,
+) -> Result<GuestHandle> {
+    fs::create_dir_all(workspace)?;
+    let cpu = kvm_snap::load_cpu(vmstate).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let vm_cfg = boot_to_vm_config(cfg)?;
+    let configured_mem_len = u64::from(vm_cfg.memory_mib) * 1024 * 1024;
+    if cpu.mem_len != configured_mem_len {
+        bail!(
+            "vmstate RAM size {} does not match configured RAM {}",
+            cpu.mem_len,
+            configured_mem_len
+        );
+    }
+    if cpu.all_vcpus.len() != usize::from(vm_cfg.cpus) {
+        bail!(
+            "vmstate has {} vCPUs, configuration has {}",
+            cpu.all_vcpus.len(),
+            vm_cfg.cpus
+        );
+    }
+    let actual_mem_len = fs::metadata(mem_path)
+        .with_context(|| format!("reading snapshot RAM {}", mem_path.display()))?
+        .len();
+    if actual_mem_len != cpu.mem_len {
+        bail!(
+            "snapshot RAM size {} does not match vmstate size {}",
+            actual_mem_len,
+            cpu.mem_len
+        );
+    }
+    spawn_kvm(vm_cfg, workspace, Some((cpu, mem_path.to_path_buf()))).await
+}
+
+async fn spawn_kvm(
+    vm_cfg: VmConfig,
+    workspace: &Path,
+    restore: Option<(kvm_snap::CpuSnapshot, PathBuf)>,
+) -> Result<GuestHandle> {
+    let kick = VcpuKick::new(vm_cfg.cpus.max(1) as usize);
+    let stop = Arc::new(AtomicBool::new(false));
+    let paused = Arc::new(AtomicBool::new(false));
+    let pause_epoch = Arc::new(AtomicU64::new(0));
+    let quiesced_epoch = Arc::new(AtomicU64::new(0));
+    let net_datapath = Arc::new(NetDatapath::default());
+    let net_datapath_thread = Arc::clone(&net_datapath);
+    let stop_thread = Arc::clone(&stop);
+    let paused_thread = Arc::clone(&paused);
+    let pause_thread = PauseHandles {
+        requested: Arc::clone(&pause_epoch),
+        quiesced: Arc::clone(&quiesced_epoch),
+        kick: Arc::clone(&kick),
+    };
+    let (snap_tx, snap_rx) = mpsc::channel::<SnapCmd>();
+    let balloon = Arc::new(BalloonSlot::default());
+    let balloon_thread = Arc::clone(&balloon);
+    let (ready_tx, ready_rx) = mpsc::sync_channel::<std::result::Result<(), String>>(1);
+    let thread = std::thread::Builder::new()
+        .name("fluxvm-kvm".into())
+        .spawn(move || {
+            let result = (|| -> Result<()> {
+                let mut vm =
+                    VirtualMachine::from_boot_config(vm_cfg).map_err(|e| anyhow::anyhow!("{e}"))?;
+                // Share the status the VM publishes with the engine handle.
+                net_datapath_thread.copy_from(&vm.net_datapath);
+                vm.net_datapath = net_datapath_thread;
+                balloon_thread.publish(vm.balloon.clone(), vm.cfg.memory_mib as u64);
+                let cpu = if let Some((cpu, mem_file)) = restore {
+                    kvm_snap::load_memory_into(&mut vm.mem, &mem_file)
+                        .map_err(|e| anyhow::anyhow!("{e}"))?;
+                    Some(cpu)
+                } else {
+                    None
+                };
+                vm.run_until(
+                    stop_thread,
+                    paused_thread,
+                    Some(snap_rx),
+                    cpu,
+                    None,
+                    false,
+                    Some(ready_tx.clone()),
+                    Some(pause_thread),
+                )
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+                Ok(())
+            })();
+            if let Err(e) = result {
+                let _ = ready_tx.send(Err(e.to_string()));
+                eprintln!("[kvm-engine] run error: {e:#}");
+            }
+        })
+        .context("spawning in-tree KVM thread")?;
+    let mut handle = GuestHandle {
+        workspace: workspace.to_path_buf(),
+        engine: GuestEngine::Kvm {
+            stop,
+            paused,
+            pause_epoch,
+            quiesced_epoch,
+            kick,
+            snap_tx,
+            thread: Some(thread),
+            net_datapath,
+            balloon,
+        },
+    };
+    let ready = tokio::task::spawn_blocking(move || ready_rx.recv_timeout(KVM_START_TIMEOUT))
+        .await
+        .context("waiting for in-tree KVM thread")?;
+    match ready {
+        Ok(Ok(())) => {
+            info!("in-tree KVM engine initialized");
+            Ok(handle)
+        }
+        Ok(Err(e)) => bail!("in-tree KVM startup failed: {e}"),
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            // A stuck ioctl cannot be joined synchronously. Signal teardown
+            // and detach rather than blocking the API beyond its timeout.
+            if let GuestEngine::Kvm { stop, thread, .. } = &mut handle.engine {
+                stop.store(true, Ordering::SeqCst);
+                thread.take(); // Dropping JoinHandle detaches a stalled worker.
+            }
+            bail!("in-tree KVM startup timed out after {KVM_START_TIMEOUT:?}")
+        }
+        Err(mpsc::RecvTimeoutError::Disconnected) => {
+            bail!("in-tree KVM thread exited before initialization")
+        }
+    }
+}
+
+fn boot_to_vm_config(cfg: &BootConfig) -> Result<VmConfig> {
+    Ok(VmConfig {
+        memory_mib: cfg.memory_mib.min(u32::MAX as u64) as u32,
+        cpus: cfg.vcpus,
+        guest: GuestKind::Linux,
+        kernel: Some(cfg.kernel.clone()),
+        initrd: cfg.initrd.clone(),
+        disk: Some(cfg.rootfs.clone()),
+        tap: cfg.tap.clone(),
+        mac: cfg
+            .mac
+            .clone()
+            .unwrap_or_else(|| "02:00:AC:10:00:02".into()),
+        vhost_net: true,
+        net_queues: 1,
+        net_queue_pairs: 1,
+        cmdline: cfg.kernel_args.clone().unwrap_or_else(|| {
+            "console=ttyS0 earlyprintk=serial,ttyS0,115200 ignore_loglevel reboot=k panic=1 pci=off root=/dev/vda rw"
+                .into()
+        }),
+        firmware: None,
+        net_mbit_limit: cfg.net_mbit_limit.unwrap_or(0),
+        blk_mbit_limit: cfg.blk_mbit_limit.unwrap_or(0),
+        dry_run: false,
+        print_host_net: false,
+        gdb: None,
+        vsock_cid: cfg.vsock_cid,
+        vsock_uds: cfg.vsock_uds.clone(),
+        balloon: true,
+        rng: true,
+        acpi: true,
+        pci: false,
+        jailer: cfg.seccomp, // pair seccomp boots with jailer when requested
+        max_cpus: cfg.max_vcpus.unwrap_or(cfg.vcpus).max(cfg.vcpus),
+        shared_dirs: cfg
+            .shared_folders
+            .iter()
+            .enumerate()
+            .map(|(i, p)| (format!("fs{i}"), p.clone()))
+            .collect(),
+        extra_disks: Vec::new(),
+    })
+}
+
+fn firecracker_config(cfg: &BootConfig) -> Result<serde_json::Value> {
+    let boot_args = cfg
+        .kernel_args
+        .clone()
+        .unwrap_or_else(|| "console=ttyS0 reboot=k panic=1 pci=off root=/dev/vda rw".into());
+
+    let mut root_drive = json!({
+        "drive_id": "rootfs",
+        "path_on_host": cfg.rootfs.display().to_string(),
+        "is_root_device": true,
+        "is_read_only": false
+    });
+    if let Some(rl) = fc_rate_limiter(cfg.blk_mbit_limit, cfg.blk_ops_limit) {
+        root_drive
+            .as_object_mut()
+            .unwrap()
+            .insert("rate_limiter".into(), rl);
+    }
+    let mut drives = vec![root_drive];
+    if let Some(seed) = &cfg.seed {
+        drives.push(json!({
+            "drive_id": "seed",
+            "path_on_host": seed.display().to_string(),
+            "is_root_device": false,
+            "is_read_only": true
+        }));
+    }
+
+    let mut machine = json!({
+        "vcpu_count": cfg.vcpus,
+        "mem_size_mib": cfg.memory_mib,
+        "smt": false,
+        "track_dirty_pages": true
+    });
+    if let Some(t) = cfg
+        .cpu_template
+        .as_ref()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+    {
+        machine
+            .as_object_mut()
+            .unwrap()
+            .insert("cpu_template".into(), json!(t));
+    }
+
+    let mut root = json!({
+        "boot-source": {
+            "kernel_image_path": cfg.kernel.display().to_string(),
+            "boot_args": boot_args
+        },
+        "drives": drives,
+        "machine-config": machine,
+        // Without this, the guest kernel has no fast entropy source (no
+        // RDRAND passthrough, no other virtio-rng) and boots with
+        // crng_init=0. Anything that calls getrandom() before enough
+        // environmental noise accumulates -- in practice, Node's own
+        // startup -- blocks forever, which looks identical to a hung
+        // process from the outside: alive, no output, nothing listening.
+        "entropy": {}
+    });
+
+    if let Some(tap) = &cfg.tap {
+        let guest_mac = cfg
+            .mac
+            .clone()
+            .unwrap_or_else(|| "06:00:AC:10:00:02".into());
+        let mut iface = json!({
+            "iface_id": "eth0",
+            "guest_mac": guest_mac,
+            "host_dev_name": tap
+        });
+        if let Some(rl) = fc_rate_limiter(cfg.net_mbit_limit, cfg.net_pps_limit) {
+            iface
+                .as_object_mut()
+                .unwrap()
+                .insert("rate_limiter".into(), rl);
+        }
+        root.as_object_mut()
+            .unwrap()
+            .insert("network-interfaces".into(), json!([iface]));
+    }
+
+    if let (Some(cid), Some(uds)) = (cfg.vsock_cid, &cfg.vsock_uds) {
+        root.as_object_mut().unwrap().insert(
+            "vsock".into(),
+            json!({
+                "guest_cid": cid,
+                "uds_path": uds.display().to_string()
+            }),
+        );
+    }
+
+    Ok(root)
+}
+
+/// Firecracker token-bucket `rate_limiter` from optional Mbit/s and ops/s.
+fn fc_rate_limiter(mbit: Option<u32>, ops: Option<u64>) -> Option<serde_json::Value> {
+    let mut obj = serde_json::Map::new();
+    if let Some(mb) = mbit.filter(|&v| v > 0) {
+        let bytes_per_sec = (mb as u64) * 1_000_000 / 8;
+        obj.insert(
+            "bandwidth".into(),
+            json!({
+                "size": bytes_per_sec,
+                "one_time_burst": bytes_per_sec,
+                "refill_time": 1000
+            }),
+        );
+    }
+    if let Some(n) = ops.filter(|&v| v > 0) {
+        obj.insert(
+            "ops".into(),
+            json!({
+                "size": n,
+                "one_time_burst": n,
+                "refill_time": 1000
+            }),
+        );
+    }
+    if obj.is_empty() {
+        None
+    } else {
+        Some(serde_json::Value::Object(obj))
+    }
+}
+
+pub async fn pause(api: &Path) -> Result<()> {
+    fc_request(api, "PATCH", "/vm", Some(&json!({"state": "Paused"}))).await
+}
+
+pub async fn resume(api: &Path) -> Result<()> {
+    fc_request(api, "PATCH", "/vm", Some(&json!({"state": "Resumed"}))).await
+}
+
+pub async fn shutdown(api: &Path) -> Result<()> {
+    fc_request(
+        api,
+        "PUT",
+        "/actions",
+        Some(&json!({"action_type": "SendCtrlAltDel"})),
+    )
+    .await
+}
+
+/// Create a full Firecracker snapshot (VM must already be Paused).
+pub async fn snapshot_create(api: &Path, snapshot_path: &Path, mem_path: &Path) -> Result<()> {
+    fc_request(
+        api,
+        "PUT",
+        "/snapshot/create",
+        Some(&json!({
+            "snapshot_type": "Full",
+            "snapshot_path": snapshot_path.display().to_string(),
+            "mem_file_path": mem_path.display().to_string()
+        })),
+    )
+    .await
+}
+
+/// Start a fresh Firecracker process and load a snapshot (fast path).
+pub async fn start_from_snapshot(
+    workspace: &Path,
+    snapshot_path: &Path,
+    mem_path: &Path,
+    vsock_uds: Option<&Path>,
+) -> Result<GuestHandle> {
+    fs::create_dir_all(workspace)?;
+    let api_sock = workspace.join("firecracker.sock");
+    let _ = fs::remove_file(&api_sock);
+
+    let binary =
+        std::env::var("FLUXVM_FIRECRACKER_BINARY").unwrap_or_else(|_| "firecracker".into());
+    let log = workspace.join("firecracker.log");
+    let stdout = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log)?;
+    let stderr = stdout.try_clone()?;
+
+    let mut child = Command::new(&binary)
+        .args(["--api-sock", &api_sock.display().to_string()])
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(stdout))
+        .stderr(Stdio::from(stderr))
+        .process_group(0)
+        .spawn()
+        .with_context(|| format!("spawning Firecracker for snapshot load ({binary})"))?;
+
+    let deadline = tokio::time::Instant::now() + FC_API_TIMEOUT;
+    loop {
+        if tokio::time::Instant::now() > deadline {
+            let _ = child.kill().await;
+            bail!("Firecracker API not ready for snapshot load");
+        }
+        if api_sock.exists() && fc_request(&api_sock, "GET", "/", None).await.is_ok() {
+            break;
+        }
+        if let Ok(Some(status)) = child.try_wait() {
+            bail!("Firecracker exited before snapshot load: {status}");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    let mut body = json!({
+        "snapshot_path": snapshot_path.display().to_string(),
+        "mem_file_path": mem_path.display().to_string(),
+        "track_dirty_pages": true,
+        "resume_vm": true
+    });
+    if let Some(uds) = vsock_uds {
+        body.as_object_mut()
+            .unwrap()
+            .insert("vsock_override".into(), json!(uds.display().to_string()));
+    }
+
+    if let Err(e) = fc_request(&api_sock, "PUT", "/snapshot/load", Some(&body)).await {
+        let _ = child.kill().await;
+        return Err(e).context("Firecracker snapshot load");
+    }
+
+    info!(
+        pid = child.id().unwrap_or(0),
+        "Firecracker restored from memory snapshot"
+    );
+    Ok(GuestHandle {
+        workspace: workspace.to_path_buf(),
+        engine: GuestEngine::Firecracker { child, api_sock },
+    })
+}
+
+async fn fc_request(
+    socket: &Path,
+    method: &str,
+    path: &str,
+    body: Option<&serde_json::Value>,
+) -> Result<()> {
+    tokio::time::timeout(FC_API_TIMEOUT, fc_request_inner(socket, method, path, body))
+        .await
+        .with_context(|| format!("Firecracker {method} {path} timed out"))?
+}
+
+async fn fc_request_inner(
+    socket: &Path,
+    method: &str,
+    path: &str,
+    body: Option<&serde_json::Value>,
+) -> Result<()> {
+    let mut stream = UnixStream::connect(socket)
+        .await
+        .with_context(|| format!("connecting to {}", socket.display()))?;
+    let body_bytes = body
+        .map(serde_json::to_vec)
+        .transpose()?
+        .unwrap_or_default();
+    let mut req = format!(
+        "{method} {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Length: {}\r\n",
+        body_bytes.len()
+    );
+    if !body_bytes.is_empty() {
+        req.push_str("Content-Type: application/json\r\n");
+    }
+    req.push_str("\r\n");
+    stream.write_all(req.as_bytes()).await?;
+    stream.write_all(&body_bytes).await?;
+
+    let mut raw = Vec::new();
+    let boundary = loop {
+        if let Some(pos) = raw.windows(4).position(|w| w == b"\r\n\r\n") {
+            break pos;
+        }
+        let mut chunk = [0u8; 4096];
+        let n = stream.read(&mut chunk).await?;
+        if n == 0 {
+            bail!("Firecracker closed before complete headers");
+        }
+        raw.extend_from_slice(&chunk[..n]);
+    };
+    let head = String::from_utf8_lossy(&raw[..boundary]).into_owned();
+    let mut body = raw.split_off(boundary + 4);
+    let status: u16 = head
+        .lines()
+        .next()
+        .context("no status line")?
+        .split_whitespace()
+        .nth(1)
+        .context("bad status")?
+        .parse()?;
+    let content_length: usize = head
+        .lines()
+        .find_map(|l| {
+            l.split_once(':')
+                .filter(|(k, _)| k.eq_ignore_ascii_case("content-length"))
+        })
+        .and_then(|(_, v)| v.trim().parse().ok())
+        .unwrap_or(0);
+    while body.len() < content_length {
+        let mut chunk = [0u8; 4096];
+        let n = stream.read(&mut chunk).await?;
+        if n == 0 {
+            break;
+        }
+        body.extend_from_slice(&chunk[..n]);
+    }
+    if !(200..300).contains(&status) {
+        bail!(
+            "Firecracker {method} {path} -> HTTP {status}: {}",
+            String::from_utf8_lossy(&body)
+        );
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::api::FluxVmEngine;
+
+    #[tokio::test]
+    async fn kvm_pause_waits_for_current_worker_acknowledgment() {
+        let (snap_tx, _snap_rx) = mpsc::channel();
+        let requested = Arc::new(AtomicU64::new(0));
+        let ack = Arc::new(AtomicU64::new(0));
+        let handle = GuestHandle {
+            workspace: PathBuf::new(),
+            engine: GuestEngine::Kvm {
+                stop: Arc::new(AtomicBool::new(false)),
+                paused: Arc::new(AtomicBool::new(false)),
+                pause_epoch: Arc::clone(&requested),
+                quiesced_epoch: Arc::clone(&ack),
+                kick: VcpuKick::new(1),
+                snap_tx,
+                thread: None,
+                net_datapath: Arc::new(NetDatapath::default()),
+                balloon: Arc::new(BalloonSlot::default()),
+            },
+        };
+        let worker = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+            ack.store(requested.load(Ordering::SeqCst), Ordering::SeqCst);
+        });
+        handle.pause().await.unwrap();
+        worker.await.unwrap();
+    }
+
+    fn base_config() -> BootConfig {
+        BootConfig {
+            kernel: PathBuf::from("/boot/vmlinux"),
+            rootfs: PathBuf::from("/var/lib/fluxvm/rootfs.ext4"),
+            initrd: None,
+            seed: None,
+            memory_mib: 512,
+            vcpus: 1,
+            kernel_args: None,
+            tap: None,
+            mac: None,
+            vsock_cid: None,
+            vsock_uds: None,
+            seccomp: false,
+            engine: FluxVmEngine::Firecracker,
+            net_mbit_limit: None,
+            net_pps_limit: None,
+            blk_mbit_limit: None,
+            blk_ops_limit: None,
+            cpu_template: None,
+            max_vcpus: None,
+            shared_folders: Vec::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn kvm_create_reports_initialization_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = base_config();
+        cfg.engine = FluxVmEngine::Kvm;
+        cfg.memory_mib = 64;
+        cfg.kernel = dir.path().join("missing-kernel");
+        let err = match start_kvm(&cfg, dir.path()).await {
+            Err(err) => err,
+            Ok(_) => panic!("invalid guest must not be reported as running"),
+        };
+        assert!(format!("{err:#}").contains("in-tree KVM startup failed"));
+    }
+
+    // A guest kernel with no fast entropy source (no RDRAND passthrough, no
+    // virtio-rng) boots with crng_init=0; anything that calls getrandom()
+    // before enough environmental noise accumulates -- in practice, a
+    // guest's own init/runtime startup -- blocks forever, indistinguishable
+    // from a hung process from the outside. Every Firecracker boot config
+    // must request the built-in entropy device to avoid this, unconditionally
+    // -- not just when a caller happens to ask for it.
+    #[test]
+    fn firecracker_config_always_requests_an_entropy_device() {
+        let cfg = firecracker_config(&base_config()).expect("config");
+        assert_eq!(cfg["entropy"], json!({}));
+    }
+
+    #[test]
+    fn firecracker_config_embeds_virtio_rate_limiters() {
+        let mut c = base_config();
+        c.tap = Some("tap0".into());
+        c.net_mbit_limit = Some(100);
+        c.net_pps_limit = Some(50_000);
+        c.blk_mbit_limit = Some(200);
+        c.blk_ops_limit = Some(10_000);
+        let cfg = firecracker_config(&c).expect("config");
+        assert_eq!(
+            cfg["drives"][0]["rate_limiter"]["bandwidth"]["size"],
+            25_000_000
+        );
+        assert_eq!(
+            cfg["network-interfaces"][0]["rate_limiter"]["ops"]["size"],
+            50_000
+        );
+    }
+
+    #[test]
+    fn firecracker_config_entropy_device_present_regardless_of_other_options() {
+        let mut cfg = base_config();
+        cfg.tap = Some("tap0".into());
+        cfg.vsock_cid = Some(3);
+        cfg.vsock_uds = Some(PathBuf::from("/tmp/vsock.sock"));
+        let json = firecracker_config(&cfg).expect("config");
+        assert_eq!(json["entropy"], serde_json::json!({}));
+    }
+}

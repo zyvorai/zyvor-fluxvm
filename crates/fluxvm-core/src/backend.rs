@@ -1,0 +1,177 @@
+// Copyright 2026 Zyvor AI Labs · https://zyvor.dev
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+
+use crate::{
+    config::Config,
+    model::{BackendKind, CreateVmRequest, VmRecord},
+};
+use anyhow::Result;
+use async_trait::async_trait;
+use std::path::{Path, PathBuf};
+
+#[derive(Debug, Clone)]
+pub struct PreparedNetwork {
+    pub spec: crate::model::NetworkSpec,
+    /// Name of the ephemeral network device to remove on stop (a TAP or a
+    /// macvtap link, depending on `spec`).
+    pub tap_name: Option<String>,
+    /// A pre-opened, exec-inheritable tap fd passed to the VMM as `fd=`
+    /// instead of `ifname=`: for `NetworkSpec::Macvtap` the device's
+    /// `/dev/tapN`, and for a `NetworkSpec::Tap { direct: Some(..) }` whose
+    /// tap lives in a foreign netns, a `/dev/net/tun` fd bound to that netns
+    /// (the VMM cannot open the tap by name from its own namespace).
+    pub tap_fd: Option<i32>,
+    /// Set for `NetworkSpec::Tap { netns: true, .. }`: the private network
+    /// namespace `tap_name` was created inside. Every backend's `launch`
+    /// must run the VMM process itself inside this namespace (`ip netns
+    /// exec`) — see `fluxvm_core::process::netns_wrap` — or it won't be
+    /// able to open the tap device at all (it lives in a different network
+    /// namespace than the VMM process would otherwise be in).
+    pub netns: Option<String>,
+    /// Set for `NetworkSpec::Tap { netns: true, .. }`: path to the per-VM
+    /// dnsmasq DHCP server's lease file, so the guest's IP can be looked up
+    /// by MAC once it actually completes a DHCP handshake -- see
+    /// `fluxvm_network::netns::guest_ip_from_lease`.
+    pub dhcp_leasefile: Option<std::path::PathBuf>,
+    /// Set for `NetworkSpec::Tap { netns: true, .. }`: the guest's reserved
+    /// address (bare IP, pinned to its MAC via dnsmasq --dhcp-host), known
+    /// deterministically from the moment the namespace is created rather
+    /// than only after a DHCP handshake -- see
+    /// `fluxvm_network::netns::NetnsHandle`.
+    pub guest_ip: Option<String>,
+    /// `guest_ip` with the /28 prefix -- what a static (non-DHCP) guest
+    /// network-config's address needs.
+    pub guest_cidr: Option<String>,
+    /// The namespace's gateway address -- what a static guest
+    /// network-config's route needs.
+    pub gateway: Option<String>,
+    /// Exec-inheritable fds for `spec`'s extra NICs, index-aligned, when the
+    /// VMM runs in a private netns and can't open their host-bridge taps by
+    /// name (QEMU only). Empty otherwise.
+    pub extra_tap_fds: Vec<Option<i32>>,
+}
+
+impl PreparedNetwork {
+    /// Closes the parent's copies of the fds handed to the VMM (after spawn,
+    /// or on a launch error before it).
+    pub fn close_launch_fds(&self) {
+        if let Some(fd) = self.tap_fd {
+            crate::process::close_fd(fd);
+        }
+        for fd in self.extra_tap_fds.iter().flatten() {
+            crate::process::close_fd(*fd);
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct LaunchContext {
+    pub id: uuid::Uuid,
+    pub workspace: PathBuf,
+    pub disk: PathBuf,
+    pub seed_disk: Option<PathBuf>,
+    pub log_path: PathBuf,
+    pub network: PreparedNetwork,
+    /// AF_VSOCK CID for the guest agent, when `request.agent.enabled`.
+    pub guest_cid: Option<u32>,
+    /// Path for the VMM's vsock proxy UDS (Cloud Hypervisor/Firecracker
+    /// only — QEMU exposes a real kernel vsock device and needs no proxy).
+    pub vsock_socket: Option<PathBuf>,
+    /// Block format of `disk` as the VMM should open it: `"qcow2"` for a
+    /// QEMU CoW overlay (`StorageBackend::Default`), `"raw"` for every
+    /// other storage backend (a raw block device, an rbd: URI, or an NBD
+    /// export — see `fluxvm_image::storage`) and for Cloud
+    /// Hypervisor/Firecracker's always-raw disks.
+    pub disk_format: String,
+    /// `StorageBackend::Nbd` only (QEMU): the `qemu-nbd` UNIX socket path
+    /// `disk` is actually served over. When set, the QEMU backend attaches
+    /// via `file=nbd:unix:<path>,format=raw` instead of opening `disk`
+    /// directly as a local file.
+    pub nbd_export: Option<PathBuf>,
+    /// QEMU only: a concrete machine type (e.g. `pc-q35-noble`) to boot
+    /// instead of the host's `q35` alias, so a migration receiver matches
+    /// the device model of a source on a different QEMU release.
+    pub machine_type: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct LaunchResult {
+    pub pid: u32,
+    pub control_socket: Option<PathBuf>,
+    /// Firecracker-jailer only: the chroot directory this VM's resources
+    /// were placed under (`<chroot_base_dir>/firecracker/<id>/root`),
+    /// recorded on the `VmRecord` so `VmManager::delete` can reclaim it
+    /// regardless of whether `cfg.jailer.enabled` is still true by the time
+    /// the VM is deleted — the config could change in between.
+    pub jail_path: Option<PathBuf>,
+    /// The actual host-visible path to the vsock proxy UDS a backend
+    /// creates (Cloud Hypervisor/Firecracker only), echoed back because it
+    /// isn't always `LaunchContext::vsock_socket` unchanged — a jailed
+    /// Firecracker VM's proxy socket lives inside its chroot
+    /// (`jail_path`/vsock.sock`), not at the path originally requested.
+    /// `fluxvm_vsock_client` dials this path directly rather than
+    /// reconstructing it, so it works for both cases.
+    pub vsock_socket: Option<PathBuf>,
+    /// PIDs of the `virtiofsd` processes spawned for `req.shared_folders`,
+    /// one per share, in order — see `VmRecord::virtiofsd_pids`. Empty for
+    /// every backend but QEMU, and for QEMU when the request has no shares.
+    pub virtiofsd_pids: Vec<u32>,
+    /// PID of the `swtpm` process spawned for `req.tpm` -- see
+    /// `VmRecord::swtpm_pid`. `None` for every backend but QEMU, and for
+    /// QEMU when the request has no TPM.
+    pub swtpm_pid: Option<u32>,
+}
+
+#[async_trait]
+pub trait VmBackend: Send + Sync {
+    fn kind(&self) -> BackendKind;
+    async fn launch(
+        &self,
+        cfg: &Config,
+        req: &CreateVmRequest,
+        ctx: &LaunchContext,
+    ) -> Result<LaunchResult>;
+    async fn pause(&self, cfg: &Config, vm: &VmRecord) -> Result<()>;
+    async fn resume(&self, cfg: &Config, vm: &VmRecord) -> Result<()>;
+    async fn graceful_shutdown(&self, cfg: &Config, vm: &VmRecord) -> Result<()>;
+}
+
+pub fn path_arg(p: &Path) -> String {
+    p.display().to_string()
+}
+
+/// Shared `tcp:`/`unix:` migration-transport allowlist for every VMM backend
+/// wiring up `MigrationStartRequest::destination` (`fluxvm-qemu`'s QMP
+/// `migrate` URI, `fluxvm-cloud-hypervisor`'s `send-migration
+/// destination_url=`). Kept in one place so the two backends' contracts
+/// can't quietly drift apart -- `exec:` stays deliberately forbidden on
+/// both (QEMU's `exec:` runs an arbitrary shell command as the migration
+/// transport; Cloud Hypervisor has no such scheme at all, but there's no
+/// reason to special-case one backend into a looser rule the other can't
+/// match).
+pub fn validate_migration_transport(uri: &str) -> Result<()> {
+    if uri.starts_with("tcp:") || uri.starts_with("unix:") {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "unsupported migration URI '{uri}': FluxVM contract v1 permits only tcp: or unix: (exec: is intentionally forbidden)"
+    )
+}
+
+#[cfg(test)]
+mod migration_transport_tests {
+    use super::validate_migration_transport;
+
+    #[test]
+    fn accepts_tcp_and_unix() {
+        assert!(validate_migration_transport("tcp:10.0.0.5:4444").is_ok());
+        assert!(validate_migration_transport("unix:/tmp/mig.sock").is_ok());
+    }
+
+    #[test]
+    fn rejects_exec_and_anything_else() {
+        assert!(validate_migration_transport("exec:cat > /tmp/x").is_err());
+        assert!(validate_migration_transport("rdma:10.0.0.5:4444").is_err());
+        assert!(validate_migration_transport("").is_err());
+    }
+}

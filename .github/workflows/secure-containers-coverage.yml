@@ -1,0 +1,174 @@
+# Copyright 2026 Zyvor AI Labs · https://zyvor.dev
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+name: Secure Containers Coverage
+
+on:
+  pull_request:
+    paths:
+      - 'bpf/**'
+      - 'crates/fluxvm-network/**'
+      - 'crates/fluxvm-container-*/**'
+      - 'tools/fluxvm-policy-observer/**'
+      - 'controllers/fluxvm-networkpolicy-controller/**'
+      - 'scripts/**'
+      - 'docs/secure-containers*.md'
+      - 'docs/NEXT-FEATURES.md'
+      - 'docs/PRODUCTION.md'
+      - 'tools/fluxvm_*.py'
+      - 'tools/tests/**'
+      - 'benchmarks/sentinel-ga-budgets.json'
+      - '.github/workflows/secure-containers-coverage.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'bpf/**'
+      - 'crates/fluxvm-network/**'
+      - 'crates/fluxvm-container-*/**'
+      - 'tools/fluxvm-policy-observer/**'
+      - 'controllers/fluxvm-networkpolicy-controller/**'
+      - 'scripts/**'
+      - 'docs/secure-containers*.md'
+      - '.github/workflows/secure-containers-coverage.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Collapse superseded runs of this workflow on the same ref so queued duplicates do not hold the org's runners.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  matrix-lint:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - run: bash scripts/check-use-case-matrix.sh
+
+  go-controller:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with: { go-version-file: controllers/fluxvm-networkpolicy-controller/go.mod }
+      - name: gofmt
+        run: |
+          cd controllers/fluxvm-networkpolicy-controller
+          test -z "$(gofmt -l .)"
+      - name: test
+        run: |
+          cd controllers/fluxvm-networkpolicy-controller
+          go test -count=1 ./...
+          go test -race -count=1 ./...
+          go vet ./...
+
+  go-observer:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with: { go-version-file: tools/fluxvm-policy-observer/go.mod }
+      - name: gofmt
+        run: |
+          cd tools/fluxvm-policy-observer
+          test -z "$(gofmt -l .)"
+      - name: test
+        run: |
+          cd tools/fluxvm-policy-observer
+          go test -count=1 ./...
+          go test -race -count=1 ./...
+          go vet ./...
+
+  observer-sizing:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - name: sizing model JSON
+        run: |
+          python3 scripts/benchmark-policy-observer-set19.py --vms 100 --rules 16 > /tmp/sizing.json
+          python3 - <<'PY'
+          import json
+          d=json.load(open('/tmp/sizing.json'))
+          for k in ('vms','rules_per_vm','estimated_metric_series','estimated_exposition_bytes','estimated_percpu_counter_bytes'):
+              assert k in d and d[k] is not None, k
+          assert d['vms']==100 and d['rules_per_vm']==16
+          print('observer sizing OK', d)
+          PY
+
+  rust-crates:
+    runs-on: ubuntu-24.04
+    steps:
+      # fluxvm-image → guestkit path dep requires sibling checkout layout.
+      - uses: actions/checkout@v7
+        with:
+          path: fluxvm
+      - uses: actions/checkout@v7
+        with:
+          repository: zyvorai/guestkit
+          ref: v1.2.9   # packaging/guestkit.ref; checked by scripts/check-guestkit-pin.sh
+          path: guestkit
+      - uses: dtolnay/rust-toolchain@stable
+        with: { components: 'rustfmt,clippy' }
+      - name: System deps
+        run: |
+          fluxvm/scripts/ci-install-apt-deps.sh libsystemd-dev libhivex-dev pkg-config clang llvm libbpf-dev linux-libc-dev linux-tools-common linux-tools-generic
+          sudo apt-get install -y "linux-tools-$(uname -r)" || sudo apt-get install -y linux-tools-azure || true
+      - name: cargo test
+        working-directory: fluxvm
+        run: cargo test --locked -p fluxvm-network -p fluxvm-container-protocol -p fluxvm-container-agent -p fluxvm-containerd-shim
+      - name: cargo clippy
+        working-directory: fluxvm
+        # Informational: CI clippy is not a merge gate yet (matches main CI / set15).
+        run: cargo clippy --locked -p fluxvm-network -p fluxvm-container-protocol --all-targets || true
+
+  ebpf-objects:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - run: |
+          scripts/ci-install-apt-deps.sh clang llvm libbpf-dev linux-libc-dev linux-tools-common linux-tools-generic
+          sudo apt-get install -y "linux-tools-$(uname -r)" || sudo apt-get install -y linux-tools-azure || true
+      - run: scripts/build-ebpf.sh
+      - run: scripts/build-ebpf-guest.sh
+      - name: object smoke
+        run: |
+          test -s dist/bpf/fluxvm_tc.bpf.o
+          test -s dist/bpf/fluxvm_pod_ingress.bpf.o
+          test -s dist/bpf/fluxvm_guest_cgroup.bpf.o
+          test -s dist/bpf/fluxvm_guest_lsm.bpf.o
+          if bpftool version >/dev/null 2>&1; then
+            bpftool btf dump file dist/bpf/fluxvm_tc.bpf.o format raw | grep -q fluxvm_pridx || \
+              llvm-objdump -t dist/bpf/fluxvm_tc.bpf.o | grep -q fluxvm_pridx
+          else
+            llvm-objdump -t dist/bpf/fluxvm_tc.bpf.o | grep -q fluxvm_pridx
+          fi
+
+  shell-contracts:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - name: bash -n scripts
+        run: |
+          set -euo pipefail
+          for f in scripts/test-networkpolicy*.sh \
+                   scripts/test-sentinel-*.sh \
+                   scripts/secure-containers-ga-gate-set19.sh \
+                   scripts/check-use-case-matrix.sh; do
+            [[ -e "$f" ]] || continue
+            bash -n "$f"
+          done
+          echo 'shell syntax OK'
+      - name: EndpointSlice RBAC
+        run: grep -q endpointslices controllers/fluxvm-networkpolicy-controller/deploy/rbac.yaml
+
+  sentinel-python:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - run: |
+          scripts/ci-install-apt-deps.sh shellcheck iproute2 ethtool linux-tools-common linux-tools-generic
+          sudo apt-get install -y "linux-tools-$(uname -r)" || sudo apt-get install -y linux-tools-azure || true
+      - run: scripts/test-sentinel-ga-static.sh
+      - run: scripts/test-sentinel-fleet-guard-static.sh
+      - run: scripts/test-sentinel-release-admission-static.sh

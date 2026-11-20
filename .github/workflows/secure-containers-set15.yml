@@ -1,0 +1,83 @@
+name: secure-containers-set15
+
+on:
+  pull_request:
+    paths:
+      - 'crates/fluxvm-network/src/ebpf.rs'
+      - 'tools/fluxvm-policy-observer/**'
+      - 'docs/secure-containers-set15.md'
+      - 'scripts/e2e-networkpolicy-set15.sh'
+      - 'scripts/benchmark-policy-observer-set15.sh'
+      - '.github/workflows/secure-containers-set15.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'crates/fluxvm-network/src/ebpf.rs'
+      - 'tools/fluxvm-policy-observer/**'
+      - 'docs/secure-containers-set15.md'
+      - 'scripts/e2e-networkpolicy-set15.sh'
+      - 'scripts/benchmark-policy-observer-set15.sh'
+      - '.github/workflows/secure-containers-set15.yml'
+  workflow_dispatch:
+
+# Collapse superseded runs of this workflow on the same ref so queued duplicates do not hold the org's runners.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  observer:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: tools/fluxvm-policy-observer
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: '1.27.x'
+      - name: gofmt
+        run: test -z "$(gofmt -l .)"
+      - name: unit tests
+        run: go test -count=1 ./...
+      - name: race
+        run: go test -count=1 -race ./...
+      - name: vet
+        run: go vet ./...
+      - name: benchmarks
+        run: go test -run '^$' -bench . -benchmem ./internal/observer ./internal/metrics
+      - name: static builds
+        run: |
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o /tmp/fluxvm-policy-observer-amd64 ./cmd/fluxvm-policy-observer
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -o /tmp/fluxvm-policy-observer-arm64 ./cmd/fluxvm-policy-observer
+
+  fluxvm-network:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout fluxvm
+        uses: actions/checkout@v7
+        with:
+          path: fluxvm
+      - name: Checkout guestkit sibling dependency
+        uses: actions/checkout@v7
+        with:
+          repository: zyvorai/guestkit
+          ref: v1.2.9   # packaging/guestkit.ref; checked by scripts/check-guestkit-pin.sh
+          path: guestkit
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: System deps for guestkit path dependency
+        run: $GITHUB_WORKSPACE/fluxvm/scripts/ci-install-apt-deps.sh libsystemd-dev libhivex-dev pkg-config
+      - name: formatting
+        working-directory: fluxvm
+        run: ./scripts/ci-fmt-check.sh
+      - name: fluxvm-network tests
+        working-directory: fluxvm
+        run: cargo test --locked -p fluxvm-network
+      - name: compile dependent API/core
+        working-directory: fluxvm
+        run: cargo check --locked -p fluxvm-network -p fluxvm-core -p fluxvm-api
+      - name: clippy
+        working-directory: fluxvm
+        run: cargo clippy --locked -p fluxvm-network --all-targets || true

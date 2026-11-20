@@ -1,0 +1,102 @@
+# Packet flow (Hubble-style)
+
+FluxVM samples **VM-edge** flows from the TC/eBPF dataplane and renders them
+the way operators use `hubble observe`: a verdict, a 5-tuple, identities, and
+an explicit hop path.
+
+This is **not** Cilium Hubble gRPC and it does **not** write Cilium-private
+maps. On `mode=cilium` the path includes a coexistence hop only.
+
+## Packet path
+
+Egress (default for the VM-edge allowlist):
+
+```
+guest (virtio-net)
+  → tap / veth
+  → tc clsact + FluxVM eBPF (L3/L4 + optional rate limit)
+  → [cilium coexistence, if mode=cilium]
+  → host uplink / bridge
+  → peer (reserved:world=2 or another identity)
+```
+
+Ingress is the reverse, used when the flow destination equals the guest IP.
+
+Bridge-less **direct** VMs ([direct-datapath.md](direct-datapath.md)) show the path they really take,
+never a bridge they do not have. Pod veth (`peer-veth`), egress:
+
+```
+guest (virtio-net)
+  → tap (no bridge)
+  → tc clsact + FluxVM eBPF (policy, then redirect)
+  → eth0 (bpf_redirect_peer into the host-side veth peer)
+  → [cilium coexistence, if mode=cilium]
+  → uplink → peer
+```
+
+Ingress mirrors it: `peer → uplink → [cilium] → eth0 (direct_in redirects) → tap (egress hook: Pod-ingress
+policy) → guest`. For a host uplink (`l2-uplink`) the outer device *is* the uplink, so there is no
+separate `uplink` hop: `guest → tap → tc/eBPF → uplink → peer` and `peer → uplink (steered by MAC) → tap → guest`.
+
+## CLI — colorful and normal
+
+```bash
+# Colorful one-liners (ANSI). NO_COLOR=1 forces plain.
+fluxctl hubble observe
+fluxctl hubble observe --output color
+
+# Normal / plain text (no ANSI) — logs, tickets, CI
+fluxctl hubble observe --output plain
+fluxctl hubble observe --output normal
+
+# Full hop path (detailed)
+fluxctl hubble observe --detailed
+fluxctl hubble flow --output color
+fluxctl hubble flow --output plain
+
+# Filters
+fluxctl hubble observe --verdict DROPPED --protocol tcp --limit 100
+
+# Machine
+fluxctl hubble observe --output json
+```
+
+Color map:
+
+| Verdict | Color |
+|---------|--------|
+| FORWARDED | green |
+| DROPPED | red |
+| AUDIT | yellow |
+| identities / proto | cyan |
+| hops | blue |
+
+## REST
+
+| Path | Role |
+|------|------|
+| `GET /v1/network/hubble/flows` | Hubble-subset JSON + `hops`, `summary`, ports, counters |
+| `GET /v1/network/hubble/flows/text?output=color&detailed=true` | ANSI or plain text |
+| `GET /v1/network/hubble/flows/text?output=plain&verdict=DROPPED` | normal text |
+| `GET /v1/network/hubble/ui` | UI with **Colorful** / **Normal** theme toggle |
+| `GET /v1/network/endpoints` | CiliumEndpoint-shaped views |
+
+Query: `limit`, `verdict`, `protocol`, `output`, `detailed`.
+
+```bash
+curl -sS 'http://127.0.0.1:7788/v1/network/hubble/flows'
+curl -sS 'http://127.0.0.1:7788/v1/network/hubble/flows/text?output=plain&detailed=true'
+xdg-open http://127.0.0.1:7788/v1/network/hubble/ui
+```
+
+## Identities
+
+Same reserved space as Cilium `toEntities`: `host=1`, `world=2`, local VM
+identities from `ebpf::identity_for`.
+
+## Tests
+
+```bash
+# in crates/fluxvm-network
+cargo test -p fluxvm-network packetflow
+```

@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>FluxVM Terminal</title>
+<link rel="stylesheet" href="/console/terminal/xterm.css"/>
+<link rel="stylesheet" href="/console/terminal/terminal.css"/>
+</head>
+<body>
+<div id="bar">
+  <span id="brand">FluxVM</span>
+  <span id="title" class="muted"></span>
+  <span class="grow"></span>
+  <label class="muted" for="theme">Theme</label>
+  <select id="theme" aria-label="Colour theme"></select>
+  <button id="smaller" title="Smaller text (⌘−)" aria-label="Smaller text">A−</button>
+  <button id="larger" title="Larger text (⌘+)" aria-label="Larger text">A+</button>
+</div>
+<div id="stage">
+  <section id="login" class="card" hidden>
+    <h2>Sign in</h2>
+    <p class="muted">An API token for this daemon. It is kept in this tab only.</p>
+    <input id="token" type="password" placeholder="token" autocomplete="off" aria-label="API token"/>
+    <button id="signin" class="primary">Use token</button>
+    <p id="loginerr" class="bad"></p>
+  </section>
+  <section id="picker" class="card" hidden>
+    <h2>Open a terminal in a session</h2>
+    <p class="muted">Running agent sessions on this host. A session with command rules refuses a terminal.</p>
+    <div id="sessions"></div>
+    <p id="pickerr" class="bad"></p>
+  </section>
+  <div id="workspace" hidden><div id="panes"></div></div>
+  <div id="searchbar" hidden>
+    <input id="searchq" type="search" placeholder="Search scrollback" aria-label="Search scrollback" autocomplete="off"/>
+    <button id="searchprev" title="Previous (⇧Enter)" aria-label="Previous match">↑</button>
+    <button id="searchnext" title="Next (Enter)" aria-label="Next match">↓</button>
+    <span id="searchcount" class="muted"></span>
+    <button id="searchclose" title="Close (Esc)" aria-label="Close search">✕</button>
+  </div>
+  <div id="palette" hidden>
+    <div class="palette-box" role="dialog" aria-label="Command palette">
+      <input id="paletteq" type="text" placeholder="Type a command" aria-label="Command" autocomplete="off"/>
+      <div id="paletteitems"></div>
+    </div>
+  </div>
+</div>
+<div id="tabbar">
+  <div id="tabs" role="tablist"></div>
+  <span class="grow"></span>
+  <span id="left-status" class="muted"></span>
+  <span id="clock"></span>
+</div>
+<script src="/console/terminal/xterm.js"></script>
+<script src="/console/terminal/addon-fit.js"></script>
+<script src="/console/terminal/addon-unicode11.js"></script>
+<script src="/console/terminal/addon-search.js"></script>
+<script src="/console/terminal/addon-web-links.js"></script>
+<script src="/console/terminal/addon-image.js"></script>
+<script src="/console/terminal/addon-clipboard.js"></script>
+<script src="/console/terminal/addon-webgl.js"></script>
+<script src="/console/terminal/terminal.js"></script>
+</body>
+</html>

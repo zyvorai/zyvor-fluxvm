@@ -1,0 +1,216 @@
+# Next features (ranked)
+
+**This ranked set is complete** on the code + gate path as of 2026-09-26.
+
+It covers Secure Containers Set 19 and the P0 multi-VMM GA close (Cloud
+Hypervisor virtiofs, Multus hybrid/direct, Calico/Flannel, hostPath broker,
+Firecracker ext4 block shares — schema-v10, `fluxvm_pridx`, IPv6 extension
+walk, guest policy mirror, Observer ops), Sets 16–18, Sentinel operational
+tooling (Set 12E GA certification, Set 13E–17E migrate/upgrade/fleet/drift/
+admission), in-tree KVM FC/CH parity (P0–P2 / **H1–H5**), and the post-GA
+closes below. Any future ranked set should still prefer proven live gates
+over inventing new wire formats — open a new section only when product asks.
+
+## Sentinel / Secure Containers (highest leverage)
+
+| Priority | Feature | Why | Source |
+|---|---|---|---|
+| **S1** | Live stateful conntrack-bypass proof under a real TCP handshake | **Done (depth)** — mid-flow kill + live SYN anti-replay under load: `scripts/e2e-networkpolicy-s1-depth.sh` (plus set16/set17 starters) | set14, set16, PRODUCTION |
+| **S2** | Multi-node NetworkPolicy conformance | **Done** — `REQUIRE_MULTI_NODE=1` Set 17 + `scripts/evidence-networkpolicy-second-cni.sh` (second kubeconfig or nftables policy-engine stand-in) | set14 #4, set13 |
+| **S3** | True per-direction counters + rule-hit identity | **Done (live)** — Set 17 `fluxvm_prhit` + observer scrape; evidence [sc-live-s3-prhit-20260926.txt](benchmarks/evidence/sc-live-s3-prhit-20260926.txt) (`directional_counters=1`, ingress+egress hooks attached) via `scripts/evidence-s3-prhit-scrape.sh` | set14 #5, set15, set17 |
+| **S4** | EndpointSlice-aware Service VIP policy | **Done (live)** — Set 18 EndpointSlice routing; evidence [sc-live-s4-endpointslice-20260926.txt](benchmarks/evidence/sc-live-s4-endpointslice-20260926.txt) (`Set 18 live EndpointSlice Service-VIP gate: PASS`) via `scripts/test-networkpolicy-endpointslice-set18.sh` | set14 #3, set18 |
+| **S5** | Indexed LPM/L4 (or verifier-budget raise) | **Implemented by Set 19** via `fluxvm_pridx` candidate bitmap over the existing 64 `fluxvm_prules` slots (`fluxvm_prules` remains authoritative) | set14 #1, set19 |
+| **S6** | IPv6 extension-header walking | **Implemented by Set 19** (schema-v10 bounded walk in both TC directions; fragments never conntrack-learned) | set14 #2, set16, set19 |
+| **S7** | Wire Set 8S guest cgroup policy from Pod Set 6S/14 | **Implemented by Set 19** (create-time + live CIDR/direction mirror; host TC remains protocol/port SoT) | PRODUCTION, set19 |
+| **S8** | Policy Observer prod sizing + Prometheus scrape | **Done (live)** — ServiceMonitor + sizing + scrape path; schema recognition tracks dataplane (`CurrentSchema=11`); live [sc-live-observer-schema11-20260926.txt](benchmarks/evidence/sc-live-observer-schema11-20260926.txt) (`schema_compatible=1`) and earlier RSS [policy-observer-scrape-20260918T035554Z.txt](benchmarks/evidence/policy-observer-scrape-20260918T035554Z.txt) | set15, set19 |
+| **S9** | Kata P0/P1 gates (OCI fixtures, Multus, hostPath broker, NOTIF_ADDFD, TTY churn, warm-pool claim, FC block shares) | **Done (matrix)** — `scripts/evidence-kata-p0p1-matrix.sh` + `tests/oci-fixtures/`; hostPath allowlist broker; `SECCOMP_IOCTL_NOTIF_ADDFD`; Firecracker ext4 share packing (`FLUXVM_CONTAINER_BACKEND=firecracker`); RuntimeClass is GA vs full Kata product claim | secure-containers.md |
+| **S10** | Real multi-node fleet rollout run | **Done (live)** — `scripts/evidence-fleet-multihost.sh` canary→approve→resume on ≥2 SSH hosts (`StrictHostKeyChecking=yes`); evidence [sc-live-s10-fleet-20260926.txt](benchmarks/evidence/sc-live-s10-fleet-20260926.txt) (`S10 REAL MULTI-HOST FLEET: PASS`) | set15e |
+| **S11** | Migration orchestrator against a real attached VM | **Done (live)** — `scripts/evidence-migration-attached-vm.sh` quiesce→export→restore→resume on schema-11 attached dataplane; evidence [sc-live-s11-migration-20260926.txt](benchmarks/evidence/sc-live-s11-migration-20260926.txt) (`S11 ATTACHED MIGRATION: PASS`) | set13e |
+| **CNI** | Cilium-like CNI for Secure Containers | **Done (live under load)** — providers + Multus hybrid/direct; evidence [sc-live-cni-under-load-20260926.txt](benchmarks/evidence/sc-live-cni-under-load-20260926.txt) (`CNI UNDER LOAD: PASS`: calico/flannel churn×80 + Cilium/fluxvm Ready×5 + second-cluster runc×5) via `scripts/evidence-cni-under-load.sh` | secure-containers P0 |
+| **DP** | Direct (bridge-less) datapath: Cilium-style redirect between the Pod veth / host uplink and the guest tap | **Done, default `auto` for Secure Containers** — shim `FLUXVM_CONTAINER_CNI_DATAPATH=auto\|direct\|bridge` (default `auto`), daemon loader in the Pod netns (TCX + legacy tc), `l2-uplink` standalone mode (shared per-uplink maps, ARP steering, MicroVM CRD `networkMode: direct`), warm-pool hotplug via QMP fd-passing, Linux 7.x verifier fix, hop view, capability probe, bench + evidence scripts. Live Cilium + KVM evidence passed (`FLUXVM_DIRECT_LIVE=1`, [direct-datapath-live-20260919T202359Z.txt](benchmarks/evidence/direct-datapath-live-20260919T202359Z.txt)); real-guest run ([direct-datapath-live-realguest-20260920.txt](benchmarks/evidence/direct-datapath-live-realguest-20260920.txt)): default/auto fallback/`l2-uplink`/warm-pool hotplug verified, bridge-vs-direct shows no detectable guest-visible difference; Multus secondaries support hybrid/direct opt-in | [direct-datapath.md](direct-datapath.md) |
+
+## In-tree hypervisor / agent sandboxes
+
+| Priority | Feature | Why | Source |
+|---|---|---|---|
+| **H1** | Virtio **device live-state** in `FLUXKVM1` | **Done (v3)** — pack/restore queue rings + status/features; backends still re-attach paths from boot config; Firecracker remains production snap for FC guests | hypervisor README, agent-sandbox-gaps |
+| **H2** | Full virtio-pci BAR / Windows path | **Done (tables)** — ECAM virtio-net @ `00:01.0`, BAR0, MSI-X table at BAR0+`0x800`, DSDT `PCI0`, firmware entry at `0x01000000`, ACPI reset I/O `0xCF9`. virtio-win boot is unproven; Cloud Hypervisor stays the production Windows VMM | DESIGN / README |
+| **H3** | vhost-net multi-queue bind + virtio-net guest RX | **Done** — mem-table + VRING NUM/ADDR/BASE/KICK/CALL + TAP backend; kernel datapath kicks when rings programmed; a failed bind or late ring-program falls back to the userspace pump with one log line instead of a half-configured device. The userspace pump now also delivers tap frames into guest RX queue 0 (bounds-checked chain walk, used-ring publish, interrupt suppression); verified live with DHCP/ping/TCP transfer (`scripts/test-kvm-net.sh`, 5 runs x 1/2 vCPUs) and through the egress proxy (`scripts/test-egress-guest.sh` stage 2, see [http-acl.md](http-acl.md)) | hypervisor boot smoke / DESIGN |
+| **H4** | P3 on demand: virtio-fs, live migration, hotplug | **Done** — FLUXKVM1 migrate export/import bundles; **real guest-visible CPU hotplug** (`#128`): every vCPU up to `max_cpus` is pre-created parked at boot with final-topology CPUID, `maxcpus=<cpus>` caps auto-onlining, guest brings the rest online itself via sysfs (`echo 1 > .../cpuN/online`), verified live 2→4 vCPUs 5/5 (`scripts/test-kvm-hotplug.sh`); disk hotplug validation; virtio-fs attach (virtiofsd spawn + MMIO device/tag). Control API: `MigrateExport`/`Import`, `HotplugCpu`/`Disk`. Production shared-FS still prefers CH when vhost-user queue bind depth matters | DESIGN |
+| **H5** | Published kvm/FC density figures | **Done (archive)** — lab run on `80.79.5.173` archived in [benchmarks/evidence/density-20260918-80.79.5.173.txt](benchmarks/evidence/density-20260918-80.79.5.173.txt); cold flux-vm create is not a Track B density claim | ROADMAP-DENSITY, benchmarks |
+
+## Firecracker adoption (general CP — Track A follow-ups)
+
+FluxVM is a general VM control plane; FC figures are isolation layers + optional
+density. Track A isolation, virtio rate limiters, and **FC1–FC3** are shipped:
+
+| Priority | Feature | Status |
+|---|---|---|
+| **FC1** | Oversubscription policy knobs | **Done** — `default_cpu_quota_percent` / `memory_max_equals_guest` + [oversubscription.md](oversubscription.md) |
+| **FC2** | Static CPU templates | **Done** — `cpu_template` on Firecracker + FluxVm(`firecracker`); rejected on CH/QEMU/kvm |
+| **FC3** | `/v1/vms/{id}/snapshot` multi-backend | **Done** — QEMU/CH (existing) + plain Firecracker + FluxVm control path |
+
+Custom CPUID templates and Track B density publication remain out of scope here.
+
+## Fabric / density (adjacent)
+
+| Priority | Feature | Status |
+|---|---|---|
+| **F1** | Hubble SID attribution for VM traffic | **Done** — `from_flow_record_attributed` overlays CEP / Cilium-agent SID on hubble observe flows (src + peer VM dst); never writes Cilium private maps |
+| **F2** | Scrape `MICROVM_METRICS_ADDR` (`:9108`) from Prometheus | **Done** — node-agent annotations + port, `deploy/k8s/microvm/servicemonitor.yaml`, `deploy/prometheus/fluxvm-scrape.yaml` |
+
+## Post-GA closes (2026-09-26)
+
+Work closed after the numbered S/H/FC/F rows, still part of this ranked set:
+
+| Close | Status |
+|---|---|
+| Concurrent NBD device alloc | **Done** — guestkit flock serialize (`#104`); lab evidence [nbd-concurrent-alloc-20260926.txt](benchmarks/evidence/nbd-concurrent-alloc-20260926.txt) |
+| Keep create concurrency | **Done** — `ZYVOR_AGENT_SANDBOX_CREATE_CONCURRENCY` default 4 + GitHub concurrency CI |
+| Remote seccomp NOTIFY RPC | **Done** — `io.zyvor.seccomp.notify.mode=remote` guest→host AF_VSOCK (`#106`); fail closed; optional `FLUXVM_SECCOMP_POLICY_RPC_URL` |
+| AppArmor `fluxctl build-image` | **Done** — enforce-mode profile covers guestkit path (`#108`); smoke `scripts/test-apparmor-build-image.sh` |
+| **H4** | **Done** — see H table above (`#111`); not duplicated here |
+
+## This ranked set — closed
+
+**S1–S11 / CNI / DP / F1–F2 / H1–H5 / FC1–FC3** plus the post-GA closes above
+are closed on the code + gate path. Secure Containers P0/P1 multi-VMM (incl.
+Firecracker block shares) is shipped; RuntimeClass is GA. The next ranked set
+is the cross-area backlog below.
+
+### Cleared live evidence (archive)
+
+1. S2 second-cluster kubeconfig path live on 2026-09-26 — [benchmarks/evidence/sc-live-s2-real-kubeconfig-20260926.txt](benchmarks/evidence/sc-live-s2-real-kubeconfig-20260926.txt) (`S2 SECOND CNI (kubeconfig): PASS` against `80.79.5.173`, RuntimeClass `runc`). Portable nftables stand-in remains — [sc-live-s2-second-cni-20260926.txt](benchmarks/evidence/sc-live-s2-second-cni-20260926.txt). Lab drop-in `/etc/fluxvm-second-cni.env` auto-sourced by the evidence script.
+2. Live SC matrix + day-0 wow: [sc-live-matrix-20260926.txt](benchmarks/evidence/sc-live-matrix-20260926.txt) (`pass=10 skip=0 fail=0`, includes s2 + wow); earlier day-0 wow [sc-live-wow-demo-20260926.txt](benchmarks/evidence/sc-live-wow-demo-20260926.txt); post-#93 soft finish [sc-live-phases-post93-summary-20260926.txt](benchmarks/evidence/sc-live-phases-post93-summary-20260926.txt) (`pass=10 skip=1`, s2 soft-skip later cleared). Adoption packaging: [secure-containers-supported-profile.md](secure-containers-supported-profile.md), [secure-containers-15min-lab.md](secure-containers-15min-lab.md), [sentinel-wedge.md](sentinel-wedge.md).
+3. S10 live multi-host fleet cleared 2026-09-26 — [sc-live-s10-fleet-20260926.txt](benchmarks/evidence/sc-live-s10-fleet-20260926.txt) (lab `175.110.122.71` ↔ `80.79.5.173`, canary approve/resume, both nodes healthy). S11 live attached migration cleared same day — [sc-live-s11-migration-20260926.txt](benchmarks/evidence/sc-live-s11-migration-20260926.txt) (schema-11 cilium-mode fabric, quiesce/export/restore/resume). S3 live prhit directional scrape cleared same evening — [sc-live-s3-prhit-20260926.txt](benchmarks/evidence/sc-live-s3-prhit-20260926.txt) (`directional_counters=1`). Multi-CNI under load cleared same evening — [sc-live-cni-under-load-20260926.txt](benchmarks/evidence/sc-live-cni-under-load-20260926.txt). S4 EndpointSlice Service-VIP live gate cleared same evening — [sc-live-s4-endpointslice-20260926.txt](benchmarks/evidence/sc-live-s4-endpointslice-20260926.txt). Observer `CurrentSchema` bumped to 11 with live [sc-live-observer-schema11-20260926.txt](benchmarks/evidence/sc-live-observer-schema11-20260926.txt) (`schema_compatible=1`).
+
+### Still open honesty
+
+1. **H2** virtio-win guest boot is unproven; Cloud Hypervisor stays the production Windows VMM.
+2. `mode=remote` seccomp live smoke (code **Done** in `#106`): the fail-closed
+   deny path passes on the lab
+   ([sc-live-seccomp-remote-20260927.txt](benchmarks/evidence/sc-live-seccomp-remote-20260927.txt),
+   `chmod: /tmp: Operation not permitted`), but a deny can't be told apart from
+   the guest broker's own fail-closed fallback. The run that would prove the
+   RPC path (`EXPECT=continue` with containerd `FLUXVM_SECCOMP_POLICY_RPC=continue`)
+   **hangs**: `ctr` times out with no guest output. Still open. Suspects: stale
+   `containerd-shim-fluxvm-v2` processes that ignore SIGTERM and may still hold
+   vsock port 17780, or a stall in the broker's continue path.
+3. In-tree virtio-fs depth under load still prefers Cloud Hypervisor (**H4** honesty: attach/API shipped; full vhost-user queue bind under load is CH SoT).
+
+## Next set — cross-area backlog (opened 2026-09-27)
+
+Ranked by operator value vs effort. Tier 1 is being built on
+`feat/fluxctl-cli-parity`; Tiers 2–3 are the queue after it.
+
+### Tier 1 — build now
+
+| # | Item | Surface |
+|---|---|---|
+| N1 | Restart as one op | scheduler `restart`, `POST /v1/vms/{id}/restart`, `fluxctl restart` |
+| N2 | VM metadata PATCH (rename, labels) | `PATCH /v1/vms/{id}`, `fluxctl label`, `fluxctl vm rename` |
+| N3 | Snapshot list / delete | `GET/DELETE /v1/vms/{id}/snapshots[/{tag}]`, `fluxctl snapshot-list`, `snapshot-delete` |
+| N4 | Events API + watch | `GET /v1/events`, `GET /v1/events/stream` (SSE), `fluxctl events --follow` |
+| N5 | Tenant quota usage | `GET /v1/quotas/me`, `fluxctl quota` |
+| N6 | VM name / UUID-prefix resolution | every `fluxctl` VM verb |
+| N7 | Output formats | global `-o json\|table\|wide` |
+| N8 | Shell completions | `fluxctl completions bash\|zsh\|fish` |
+| N9 | Wait for state | `fluxctl wait <vm> --for running\|stopped\|agent` |
+| N10 | Console resize | `TIOCGWINSZ` + SIGWINCH → `PtyFrame::Resize` |
+| N11 | Doc honesty fixes | secure-containers.md remote RPC, PRODUCTION.md CH Windows / 13E |
+| N12 | Seccomp `mode=remote` live smoke | `MODE=remote scripts/e2e-secure-containers-seccomp-notify.sh` + SC live matrix (deny passes; continue hangs, see honesty below) |
+
+### Tier 2 — shipped (see `operations.md` → Day-2 VM operations)
+
+- `fluxctl --server` / `FLUXVM_URL` remote mode for the core VM verbs.
+- Disks: `/v1/vms/{id}/disks` list/attach (QMP `blockdev-add` + `scsi-hd`
+  hotplug)/resize (`block_resize` or `qemu-img resize`)/detach.
+- VM→VM clone (`POST /v1/vms/{id}/clone`, stopped source, data disks + labels copied).
+- Serial console: QEMU chardev socket teeing into `console.log`, websocket
+  `/v1/vms/{id}/serial`, `fluxctl serial`.
+- Root-disk backup to standalone qcow2 (live via temporary snapshot);
+  label-driven scheduled snapshots with retention.
+- Label selectors (`GET /v1/vms?label=`) and bulk `start/stop/restart/delete -l`.
+- `GET /v1/openapi.json` (hand-maintained OpenAPI 3.1, VM surface).
+
+- Follow-ups shipped: `fluxctl context` (named remotes), VM templates
+  (`/v1/vm-templates`, `fluxctl vm-template`), `backup --all-disks`, and
+  `serial` / `events -f` / `create` over `--server`.
+
+Still open from this tier: backup to S3, `console` (agent PTY) over
+`--server`, VM lifecycle pages in `/console`, a generated (utoipa) spec
+covering every route.
+
+### Sandlock gap follow-ups
+
+- procbox sandboxes: closed by per-sandbox uid, private mount/pid/ipc/uts/net namespaces and seccomp socket-arg filters (see procbox-backend.md). Still open: a live run of a root daemon with the uid pool through the HTTP API, and disk quotas for commands.
+- Dry-run for VM sandboxes: done for native flux-vm, QEMU and Firecracker (snapshot/restore, `POST /v1/vms/{id}/restore`, live-verified 2026-09-29, see [sandbox-changes.md](sandbox-changes.md)). Cloud Hypervisor sandboxes are unreachable at all (`create_sandbox` never selects that backend), so there's nothing to extend there. Each dry-run still costs a full-disk copy per snapshot and restore on filesystems without reflink for flux-vm, or a full VMM relaunch for QEMU/Firecracker.
+- HTTPS interception: HTTP/2, a body cap and a transparent (redirect) mode are implemented and verified with real curl in a throwaway namespace (`scripts/test-egress-guest.sh`, see [http-acl.md](http-acl.md)), including inside the golden KVM guest now that virtio-net has a tap-to-guest receive path (`devices/virtio_net.rs::rx_deliver`, queue worker RX polling in `queue_service.rs`); vhost-net's own bind still returns `EFAULT` before the guest programs its vrings, so this runs over the userspace pump, with a clean fallback log line instead of a half-configured device. The tap-address byte swap (`192.168.100.1` becoming `1.100.168.192`) is also fixed, with a unit test.
+- procbox `learn`: policy inference beyond one observed run (merge multiple runs); seccomp-notify variant for non-ptrace environments.
+- Live-verified 2026-09-28: change-set on a real VM guest, both SDKs against real daemons, procbox as an unprivileged daemon, and the egress ACL over HTTP/HTTPS. HTTP/2 and transparent interception were then verified with real curl (see above).
+
+### Tier 3 — evidence / hardening (lab hardware or long runs)
+
+- H2 gate `scripts/test-kvm-windows-boot.sh` (Tiny11 on `fluxvm_engine=kvm` + OVMF).
+- In-tree virtio-fs under load bench vs CH (`scripts/bench-kvm-virtiofs.sh`).
+- Multi-container Pod Sentinel proof; aya ELF parse flake; full-fidelity KVM snapshots (**done**: FLUXKVM1 v5 captures XSAVE/MSR/LAPIC/TSC/clock/irqchip/PIT; cross-CPU-model portability remains);
+  Firecracker warm-pool claim; GPU-aware placement. (OIDC JWT validation and mTLS client-certificate identity are implemented: [auth-oidc-mtls.md](auth-oidc-mtls.md).)
+
+Portable CI maps each code-side use case to a test target in
+[secure-containers-use-case-matrix.md](secure-containers-use-case-matrix.md)
+(enforced by `scripts/check-use-case-matrix.sh` and
+`.github/workflows/secure-containers-coverage.yml`). Live rows stay opt-in via
+`FLUXVM_SECURE_CONTAINERS_LIVE_CI=1`.
+
+Hypervisor work should stay Firecracker/CH-matched (no novel device models).
+
+## Update 2026-10-08: crash safety, fork efficiency, vhost-net, speculation
+
+Written from the code on `main` after merging `feat/crash-safe-lifecycle`.
+Every item below is **implemented and type-checked with unit tests passing; none
+has been verified end to end on real VMs.** "Done" in the tables above still means
+what those rows say; nothing in this section earns that word yet.
+
+### Shipped in code (unverified on hardware)
+
+| Area | What | Where |
+|---|---|---|
+| Crash safety | fsynced `write_durable` for VM state, quota ledger, journal and idempotency records; operation journal (create/delete/snapshot/fork/restore) with `OpGuard` and pid + start-time owner liveness; `replay_pending_ops`; `sweep_orphans` (1 h workspace grace, 120 s netns/tap grace, ownership validation) | [crash-recovery.md](crash-recovery.md) |
+| Idempotency | `Idempotency-Key` on create, delete, snapshot, fork; 24 h durable replay with `Idempotent-Replayed`; 400/409/422 semantics | [crash-recovery.md](crash-recovery.md) |
+| Fault test | `scripts/test-crash-recovery.sh` (SIGKILL at create/delete/snapshot/fork stages; baseline-aware cleanup) | [crash-recovery.md](crash-recovery.md) |
+| Fork | `MAP_PRIVATE` snapshot restore with eager fallback, `ResetIdentity` (hostname, machine-id, entropy, neighbour flush), `?ready=exec` / `first_command_ms` | [fork-and-restore.md](fork-and-restore.md) |
+| Networking | vhost-net bring-up in the kernel's order (owner, features, mem table, rings, IRQ relay, backend), `net_datapath` reporting, `FLUXVM_VHOST_NET` toggle, opt-in multiqueue (`--net-queue-pairs`, max 4) | [native-io-performance.md](native-io-performance.md) |
+| Density | balloon API, per-VM PSS report, idle reclaim, pressure-aware admission, `bench-density-count.sh` | [ROADMAP-DENSITY.md](ROADMAP-DENSITY.md) |
+| Speculation | `POST /v1/sandboxes/{id}/speculate`, changesets list/get/approve/reject/apply; apply refuses unless approved and the real files still match the base manifest; network effects are reported, never replayed | `fluxvm-scheduler/src/speculate.rs` |
+| Guest hardening | `ExecPolicy` (Landlock + seccomp via procbox) on exec with enforcement reported back; the guest agent now **fails closed** with no token file (override: `FLUXVM_AGENT_ALLOW_INSECURE=1`) | `fluxvm-guest-agent/src/exec_policy.rs` |
+| Credentials | per-sandbox credential grants (`/v1/sandboxes/{id}/grants`): in-memory, TTL up to 24 h, max 32 per sandbox, secret never returned or logged, injected by the egress proxy | `fluxvm-core/src/grants.rs` |
+
+The fail-closed agent is a behaviour change: a guest image without a provisioned
+token now refuses every request.
+
+### Unverified on hardware (what to run, in order)
+
+1. `scripts/test-crash-recovery.sh` on a host you control (see its warning about
+   network namespaces), with a bootable image and `--fork-spec`.
+2. `scripts/test-kvm-net.sh`, then `FLUXVM_KVM_BENCH=1 scripts/bench-kvm-vhost.sh`:
+   confirm `net_datapath` says `vhost-net`, then fill the empty table.
+3. `scripts/bench-fork.sh` with and without `FLUXVM_KVM_EAGER_RESTORE=1`, and
+   `scripts/bench-first-command.sh`.
+4. Speculate, grants and exec policy against a live sandbox.
+
+Known gaps in crash recovery (IPAM lease not released by the orphan sweep, QEMU
+internal `savevm` not rolled back, extra-NIC and user-named taps and jailer trees
+not journaled, delete intent omits nbd and Ceph) are listed in
+[crash-recovery.md](crash-recovery.md).
+
+### Remaining
+
+- **userfaultfd** demand-paged restore (design in ROADMAP-DENSITY; only worth it
+  if `MAP_PRIVATE` falls short).
+- **Dirty-log incremental snapshots** (design in ROADMAP-DENSITY).
+- **Fork-backed warm pools**: `backfill_pool` still boots members cold.
+- **SEV-SNP / confidential**: the `confidential-snp` profile stays gated; nothing
+  in this batch touches it, and `sev-snp` remains claimable only after a verified
+  hardware run ([security-profiles.md](security-profiles.md)).
+- **LiteBox spike**: not started. There is no code or design document for it in
+  the tree.

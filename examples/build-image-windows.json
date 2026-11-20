@@ -1,0 +1,25 @@
+{
+  "source": "/var/lib/fluxvm/images/windows-11e-golden.qcow2",
+  "output": "/var/lib/fluxvm/images/windows-custom.qcow2",
+  "_comment": "Prefer Kryton goldens: ./scripts/prepare-windows-golden.sh --build --version 11e (docs/windows-golden.md)",
+  "format": "qcow2",
+  "windows": {
+    "hostname": "win-lab",
+    "enable_rdp": true,
+    "enable_winrm": false,
+    "firewall_open": [
+      { "name": "ZyvorApp", "port": 8080, "protocol": "tcp" }
+    ],
+    "scripts": [
+      {
+        "name": "hello",
+        "powershell": true,
+        "content": "New-Item -Path C:\\fluxvm-ready.txt -ItemType File -Force | Out-Null\r\nSet-Content -Path C:\\fluxvm-ready.txt -Value 'guestkit-handoff-ok'\r\n"
+      }
+    ],
+    "agent": {
+      "binary": "/path/to/guestkitd.exe",
+      "virtio_serial_driver": "/usr/share/virtio-win/vioserial/w10/amd64"
+    }
+  }
+}

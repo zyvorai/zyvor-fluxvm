@@ -1,0 +1,10 @@
+{
+  "getting-started": "Install FluxVM and boot your first disposable VM.",
+  "use-cases": "Concrete scenarios \u2014 CI runners, golden images, fleets, sandboxes.",
+  "configuration": "Backends, storage, auth, policy, and agent settings.",
+  "workflows": "Day-to-day create / exec / pause / TTL / warm-pool jobs.",
+  "admin-basics": "Deploy, systemd, ports, host prep, and operations.",
+  "kubernetes-deployment": "DaemonSet / DisposableVm CRD operator path.",
+  "build-image-tutorial": "Build and customize guest OS images for disposable VMs.",
+  "ragnarok-integration": "Drive FluxVM disposable VMs from Ragnarok UI + SSO."
+}

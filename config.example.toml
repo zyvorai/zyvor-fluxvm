@@ -1,0 +1,319 @@
+# Copyright 2026 Zyvor AI Labs · https://zyvor.dev
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+
+listen = "127.0.0.1:7788"
+state_dir = "/var/lib/fluxvm"
+run_dir = "/run/fluxvm"
+# Docker Engine API shim. Empty disables. On macOS the default is
+# "{run_dir}/docker.sock" — point Docker CLI at it with:
+#   export DOCKER_HOST=unix:///tmp/fluxvm-run-$(id -u)/docker.sock
+# docker_sock = "{run_dir}/docker.sock"
+qemu_binary = "qemu-system-x86_64"
+qemu_img_binary = "qemu-img"
+# qemu_storage_daemon_binary = "qemu-storage-daemon"   # opens a stopped VM's disks for incremental (CBT) backups
+# virtiofsd_binary = "virtiofsd"                       # only used when a create request has shared_folders (QEMU)
+cloud_hypervisor_binary = "cloud-hypervisor"
+# ch_remote_binary = "ch-remote"
+cloud_localds_binary = "cloud-localds"
+firecracker_binary = "firecracker"
+# firecracker_kernel = "/var/lib/fluxvm/kernels/vmlinux"
+# In-tree microVMM for the agent-sandbox track (`backend = "flux-vm"`).
+fluxvm_hypervisor_binary = "fluxvm-hypervisor"
+# fluxvm_kernel = "/var/lib/fluxvm/kernels/vmlinux"
+# Guest engine for backend "flux-vm": firecracker (default) or kvm (in-tree, no Firecracker child).
+# fluxvm_engine = "firecracker"
+# cloud_hypervisor_firmware = "/usr/share/cloud-hypervisor/CLOUDHV.fd"
+# QEMU UEFI/Secure Boot/vTPM (see docs/secure-boot-tpm.md). qemu_ovmf_code
+# is a host-wide default for requests that omit CreateVmRequest.firmware
+# (a per-request firmware always wins when set). qemu_ovmf_vars_template
+# is required whenever a VM's effective firmware resolves to Some --
+# copied once per VM into <workspace>/ovmf_vars.fd on first launch, never
+# synthesized. Typical paths vary by distro: Debian/Ubuntu ship a
+# Microsoft-keys-pre-enrolled pair as OVMF_CODE_4M.ms.fd/OVMF_VARS_4M.ms.fd
+# (secure-boot-ready out of the box); Fedora/RHEL ship OVMF_CODE.fd plus a
+# separate OVMF_CODE.secboot.fd, with keys enrolled at first boot instead.
+# qemu_ovmf_code = "/usr/share/OVMF/OVMF_CODE_4M.ms.fd"
+# qemu_ovmf_vars_template = "/usr/share/OVMF/OVMF_VARS_4M.ms.fd"
+# Extracted virtio-win ISO; Windows imports get viostor/vioscsi/NetKVM/vioserial
+# injected offline (see docs/import-vmware.md).
+# virtio_win_dir = "/usr/share/virtio-win"
+swtpm_binary = "swtpm"
+default_bridge = "vmbr0"
+reaper_interval_secs = 5
+
+# Agent-sandbox controls (FluxVm backend). Autopause is off when idle_secs = 0.
+# [sandbox]
+# autopause_idle_secs = 300
+# autopause_scan_secs = 10
+# egress_allow_domains = ["api.openai.com", ".github.com"]
+# HTTP method/host/path rules for the egress proxy (see docs/http-acl.md). Deny
+# wins; if any allow rule exists, a request must match one. Empty = off.
+# egress_http_rules = [
+#   "allow GET docs.python.org/*",
+#   "allow POST api.openai.com/v1/chat/completions",
+#   "deny * */admin/*",
+# ]
+# Terminate TLS in the egress proxy so the rules above also apply to HTTPS
+# (default off). Guests must trust the CA certificate (docs/http-acl.md). The CA
+# is generated on first start if absent; its key is written with mode 0600.
+# egress_tls_intercept = true
+# egress_ca_cert = "/var/lib/fluxvm/egress-ca.crt"
+# egress_ca_key = "/var/lib/fluxvm/egress-ca.key"
+# egress_tls_ports = [443]           # destination ports an intercepted CONNECT may use
+# egress_tls_allow_private = false   # keep false: blocks loopback/private/metadata upstreams
+# egress_upstream_ca_file = ""       # extra roots for verifying upstreams (never disables verification)
+# egress_max_body_bytes = 1073741824 # cap on a proxied request/response body (0 = unlimited)
+# Transparent mode: accept guest traffic redirected by nftables (ports 80/443) with no proxy
+# settings in the guest. Needs egress_tls_intercept for HTTPS. See docs/http-acl.md.
+# egress_transparent_listen = "0.0.0.0:18889"
+# Other [sandbox] keys:
+# templates_dir = "/var/lib/fluxvm/templates"   # OCI -> template builds and snapshot templates
+# volumes_dir = "/var/lib/fluxvm/volumes"       # named sandbox volumes (default <state_dir>/volumes)
+# egress_proxy_listen = "127.0.0.1:18080"       # live L7 egress proxy (empty = off)
+# http_proxy_default_port = 8080                # guest port for /sandbox/{id}/... with no port in the path
+
+# Rootless process sandboxes ("procbox": Landlock + seccomp on the host kernel).
+# Off by default; a weaker boundary than a microVM (see docs/procbox-backend.md).
+# [sandbox.procbox]
+# enabled = true
+# best_effort = false        # false = fail closed if the kernel cannot enforce the policy
+# allow_net = false          # let requests open outbound TCP ports (net_ports)
+# default_timeout_secs = 30
+# max_timeout_secs = 300
+# default_memory_mib = 512
+# max_memory_mib = 2048
+# max_processes = 4096       # RLIMIT_NPROC counts every process of the daemon's UID
+# max_workspace_mib = 1024   # cap for API writes and the copy a dry-run makes
+# When the daemon runs as root, every sandbox command is dropped to its own uid
+# from this pool (RLIMIT_NPROC and file ownership become per sandbox). The pool
+# size is also the most procbox sandboxes that can exist at once. Pick a range
+# no real account uses. uid_count = 0 disables the pool; a root daemon then
+# refuses to create/run sandboxes (HTTP 503) unless allow_root = true.
+# uid_base = 200000
+# uid_count = 4096
+# allow_root = false
+# Private user/mount/pid/ipc/uts namespaces (plus no network namespace when no
+# ports are open): "off", "auto" (use them when the kernel allows, report the
+# gap otherwise) or "strict" (fail closed, 503, without them).
+# isolation = "auto"
+#
+# Native VM-edge networking — Network Fabric GA (dataplane schema v4).
+# Absent / commented = native eBPF with required=true. Run host preflight before upgrading.
+# Prefer one-command enable over hand-editing:
+#   ./scripts/network-fabric-preflight.sh
+#   sudo ./scripts/enable-network-fabric-ga.sh --restart          # fail-closed GA
+#   sudo ./scripts/enable-network-fabric-ga.sh --lab --restart    # soft lab
+# Profiles: configs/network-fabric-{lab,ga,prod}.toml
+#   lab  = required=false, default_allow=true
+#   ga   = required=true,  default_allow=false (fail-closed)
+#   prod = same knobs as ga; operator loop in docs/production-dataplane.md
+# See docs/network-fabric.md, docs/production-dataplane.md, docs/ebpf-cilium.md.
+#
+# --- Lab (soft; safe to try attach/status without deny-by-default) ---
+# Native eBPF is the default; required=true fails VM-edge attach errors.
+# Explicit mode="legacy" preserves nftables compatibility.
+# This lab example deliberately opts into fallback:
+# [sandbox.dataplane]
+# mode = "ebpf"
+# bpf_object = "/usr/lib/fluxvm/bpf/fluxvm_tc.bpf.o"
+# pin_root = "/sys/fs/bpf/fluxvm"
+# required = false
+# default_allow = true
+#
+# --- GA / production (fail-closed when a host VM edge exists) ---
+# [sandbox.dataplane]
+# # Outbound policy for the QEMU process of user-mode (slirp) guests (docs/qemu-egress.md).
+# qemu_egress_mode = "allowlist"                          # loopback (default) | allowlist | audit | open
+# qemu_egress_rules = ["10.0.0.0/8:tcp/5151", "0.0.0.0/0:udp/53"]
+# mode = "ebpf"                         # legacy | ebpf | cilium
+# bpf_object = "/usr/lib/fluxvm/bpf/fluxvm_tc.bpf.o"
+# pin_root = "/sys/fs/bpf/fluxvm"
+# required = true
+# require_edge = false                  # true: refuse a VM with no host-visible interface (user NAT, network.mode = none)
+#                                       # instead of running it unenforced (required=true only warns about it)
+# default_allow = false
+# allow_cidrs = ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"]
+# allow_ports = ["tcp/443", "tcp/80", "udp/53"]
+# max_egress_mbps = 250                 # native eBPF only
+# max_egress_pps = 100000
+# sample_rate = 100                     # 0 = off; N ≈ 1/N allowed-flow samples
+#
+# Standalone node-ingress XDP blocklist. Leave disabled with Cilium
+# (mode = "cilium" refuses XDP; meta under /run/fluxvm/xdp/).
+# [sandbox.dataplane.xdp]
+# enabled = false
+# interface = "eno1"
+# bpf_object = "/usr/lib/fluxvm/bpf/fluxvm_xdp.bpf.o"
+# pin_root = "/sys/fs/bpf/fluxvm"
+# required = true
+# block_cidrs = ["198.51.100.0/24", "2001:db8:bad::/48"]
+#
+#
+# VM Service Fabric (BPF schema 4 / program generation 8). `north_south_interfaces`
+# enables physical-uplink service VIP handling. XDP is optional and falls back to
+# TC/host routing. Do not enable service XDP with dataplane.mode = "cilium".
+# EDT pacing requires edt_enabled + edt_interfaces; FluxVM only manages fq
+# when edt_manage_fq is true. OTLP export needs otlp_endpoint.
+# cgroup_connect attaches both connect4 and connect6 (VIP→affinity/Maglev rewrite;
+# fail-open to TC/XDP). Shares host TC pinmaps including fluxvm_fct4/fct6.
+# [sandbox.dataplane.service]
+# north_south_interfaces = ["eno1", "eno2"]
+# xdp_acceleration = true
+# xdp_object = "/usr/lib/fluxvm/bpf/fluxvm_service_xdp.bpf.o"
+# cgroup_connect = false
+# connect_object = "/usr/lib/fluxvm/bpf/fluxvm_service_connect.bpf.o"
+# map_tier = "M"                 # S/M/L — loads tier ELF under /usr/lib/fluxvm/bpf/
+#                                # M → fluxvm_service.bpf.o (or _tier_M); S/L → *_tier_{S,L}.bpf.o
+#                                # Build: ./scripts/build-ebpf.sh (-DFLUXVM_MAP_TIER=S|M|L)
+# pressure_soft_percent = 70
+# pressure_hard_percent = 90
+# edt_enabled = true
+# edt_interfaces = ["eno1"]
+# edt_manage_fq = true
+# otlp_endpoint = "http://127.0.0.1:4318/v1/logs"
+# otlp_timeout_ms = 5000
+#
+# [[sandbox.credential_vault]]
+# host = "api.openai.com"
+# authorization = "Bearer REPLACE_ME"
+
+# Every field is optional and defaults to unrestricted — uncomment only the
+# limits you want. An absent [policy] table (or this whole section commented
+# out) behaves exactly like the pre-policy MVP.
+# [policy]
+# max_vcpus = 8
+# max_memory_mib = 16384
+# # FC1 oversubscription defaults (all backends, applied at cgroup attach):
+# default_cpu_quota_percent = 50
+# memory_max_equals_guest = true
+# See docs/oversubscription.md
+# max_vcpus = 8
+# max_memory_mib = 16384
+# max_disk_gib = 100
+# max_ttl_seconds = 86400          # every request must set a ttl_seconds <= this; unbounded VMs are rejected
+# allowed_backends = ["qemu", "firecracker"]
+# allowed_image_dirs = ["/var/lib/fluxvm/images"]
+# allowed_network_modes = ["none", "user", "tap"]
+# allow_extra_args = false
+#
+# Aggregate per-tenant caps (summed across every existing VM that tenant
+# already owns, plus the incoming request) -- a different kind of check
+# from the per-request fields above, matched against CreateVmRequest.tenant
+# (itself resolved authoritatively from [[auth.tokens]]'s own tenant field
+# or an OIDC claim -- see [auth] below). A tenant with no entry here is
+# unrestricted by this mechanism. See docs/ for the full writeup.
+# [[policy.tenants]]
+# tenant = "acme"
+# max_vcpus_total = 32
+# max_memory_mib_total = 131072
+# max_vms_total = 20
+
+# REST API bearer-token auth/RBAC. Absent or empty -> auth is off on
+# loopback only. Non-loopback listen with empty tokens fails at serve-time.
+# Set auth.require = true to always require tokens.
+# Unauthenticated probes: GET /healthz (liveness), GET /readyz (readiness).
+# [auth]
+# require = false
+# max_vms_per_token = 32
+# max_memory_mib_per_token = 65536
+# OIDC: accept IdP JWTs (discovery + JWKS) in addition to static tokens:
+# oidc_issuer = "https://login.example.com/"
+# oidc_audience = "fluxvm"
+# REST API rate limiting: both fields must be set together, or neither
+# applies. Keyed by authenticated caller (token name, OIDC subject, mTLS
+# cert CN, or "anonymous-admin" on an unauthenticated loopback deployment)
+# -- a burst of rate_limit_burst requests is allowed instantly, refilling
+# at rate_limit_rps requests/second after that. Absent by default: no
+# rate limiting at all.
+# rate_limit_rps = 20
+# rate_limit_burst = 40
+# [[auth.tokens]]
+# token = "REPLACE_ME_ADMIN_TOKEN"
+# role = "admin"
+# name = "ci"
+# tenant = "acme"
+#
+# [[auth.tokens]]
+# token = "REPLACE_ME_READONLY_TOKEN"
+# role = "read-only"
+# name = "dashboard"
+
+# Step-up MFA (TOTP, RFC 6238: SHA-1, 6 digits, 30 s) for a named static token.
+# The caller sends the current code as `X-Fluxvm-Totp` (`fluxctl --totp CODE`
+# or FLUXVM_TOTP). Each code works once; 5 wrong codes lock the token for 60 s.
+# require = "exec"  -> guest exec and shells only (/agent, /qga/exec, agent-session exec/pty)
+# require = "write" -> exec plus every mutating request
+# The secret is base32 in its own file (chmod 600), never inline here.
+# [[auth.mfa]]
+# token = "ci"                              # matches [[auth.tokens]] name
+# totp_secret_file = "/etc/fluxvm/mfa/ci.totp"
+# require = "exec"
+
+# Named, checksummed, optionally-signed base images -- see
+# docs/operations.md#image-catalog--signing. trusted_signers empty (the
+# default) means catalog entries don't need to be signed at all.
+# [catalog]
+# path = "/etc/fluxvm/catalog.json"
+# [[catalog.trusted_signers]]
+# name = "release-ci"
+# public_key = "BASE64_ED25519_PUBLIC_KEY"    # from `fluxvm catalog keygen`
+
+# Optional HTTPS for the API. When client_ca is set, require client certs (mTLS).
+# Bearer / OIDC still apply after the TLS handshake, and take precedence over the
+# certificate. With mTLS the caller's identity is the verified client certificate:
+# subject CN = actor, an OU "fluxvm-role=admin" = admin (anything else: read-only),
+# an OU "fluxvm-tenant=<name>" = tenant. Needs at least one [[auth.tokens]] or OIDC
+# configured too (see docs/auth-oidc-mtls.md). The X-Client-Cert-* headers are ignored
+# unless trust_proxy_headers = true.
+# [tls]
+# cert = "/etc/fluxvm/tls/server.crt"
+# key = "/etc/fluxvm/tls/server.key"
+# client_ca = "/etc/fluxvm/tls/client-ca.crt"
+# Trust X-Client-Cert-CN / -Role / -Tenant as the identity, for a reverse proxy that
+# terminates mTLS, verifies the client certificate and strips client-supplied copies
+# of those headers, and is the only way to reach the daemon. Default false.
+# trust_proxy_headers = false
+
+# Firecracker only: run every Firecracker VM through Firecracker's own
+# `jailer` binary (chroot, uid/gid drop) instead of exec'ing it directly.
+# Lab default is off. Production / untrusted tenants: set enabled = true
+# (and usually enforce = true). When jailer_required (enforce, or
+# auth.require + non-loopback listen), serve and Firecracker launch fail
+# closed unless enabled is also true. firecracker_binary above must be an
+# absolute path (jailer's --exec-file needs a real path, not one resolved
+# via $PATH), and chroot_base_dir should be on the same filesystem as
+# state_dir so resource placement can hardlink instead of copying a
+# multi-GB rootfs per VM. See docs/capability-figures.md.
+#
+# Production Track A profile (jailer enforce + checklist): merge
+# configs/production-hardening.toml — docs/capability-figures.md.
+# [jailer]
+# enabled = true
+# enforce = true
+# jailer_binary = "jailer"
+# uid = 123
+# gid = 100
+# chroot_base_dir = "/srv/jailer"
+
+# Only used by storage=ceph-rbd create requests (see "Storage backends" in
+# README.md) — every other storage backend (the default qcow2/raw overlay,
+# lvm-thin, nbd) needs no configuration here at all. Verified against a real
+# Rook Ceph cluster.
+# [storage]
+# ceph_user = "admin"
+# ceph_conf = "/etc/ceph/ceph.conf"
+
+# Outbound event webhooks: every event in the event log (GET /v1/events) is POSTed as JSON, signed
+# with HMAC-SHA256 (X-Fluxvm-Signature: sha256=<hex> over "<timestamp>.<body>"). The secret lives in
+# a file (chmod 600), never in this config. See docs/event-webhooks.md.
+# [[event_sinks]]
+# name = "ops-hook"
+# url = "https://hooks.example.com/fluxvm"
+# events = ["vm.", "node."]             # name prefixes; empty = all events
+# secret_file = "/etc/fluxvm/hook.secret"
+# allow_hosts = []                      # exempt hosts/IPs from the SSRF guard (link-local and metadata are refused)
+# queue_size = 1024                     # per-sink bound; overflow is dead-lettered
+# max_attempts = 5
+# backoff_base_ms = 500                 # doubles per retry
+# backoff_max_ms = 30000
+# timeout_secs = 10

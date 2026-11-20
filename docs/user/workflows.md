@@ -1,0 +1,153 @@
+# Common workflows
+
+Day-to-day FluxVM jobs — create, exec, pools, images, Windows, dataplane, and
+Kubernetes — as short copy-paste tutorials.
+
+**Prerequisites:** [Getting started](getting-started.md). Commands assume
+`fluxvm` on `PATH` and `/etc/fluxvm.toml` (or `--config`).
+
+## 1. CI / sandbox VM with TTL
+
+```bash
+# examples/qemu.json plus ttl_seconds in the JSON, or:
+fluxctl create --spec examples/qemu.json
+ID=…   # from response
+fluxctl exec "$ID" -- ./run-tests.sh
+fluxctl delete "$ID"
+# Or set "ttl_seconds": 900 on create and let the reaper delete it
+```
+
+`fluxctl serve` must be running for the TTL reaper.
+
+## 2. Warm pool (fast claim)
+
+```bash
+fluxctl pool create --spec examples/pool.json   # {"name": "ci", "size": 4, "template": {...a create spec...}}
+fluxctl pool claim ci                           # returns a paused, ready VM; --vm-name and --ttl-seconds are optional
+# resume / exec / delete as usual
+```
+
+Claim latency is roughly resume time, not cold boot.
+
+## 3. Build a reusable golden image
+
+Linux:
+
+```bash
+sudo modprobe nbd max_part=16
+sudo fluxctl build-image --spec examples/build-image.json
+```
+
+Windows (Kryton golden → offline customize):
+
+```bash
+./scripts/prepare-windows-golden.sh --build --version 11e
+sudo fluxctl build-image --spec examples/build-image-kryton-golden.json
+```
+
+Full walkthrough: [build-image-tutorial.md](build-image-tutorial.md) ·
+[windows-golden.md](../windows-golden.md) · [tiny-windows.md](../tiny-windows.md).
+
+## 4. Windows lab VM + QGA
+
+```bash
+sudo fluxctl build-image --spec examples/build-image-windows.json
+fluxctl create --spec examples/windows-qga.json
+fluxctl qga ping <id>
+fluxctl qga firewall-open <id> --name Lab --port 8080 --protocol tcp
+```
+
+QEMU only for this path. Do not use vsock `fluxctl exec` for Windows.
+
+## 5. Multi-host fleet
+
+```bash
+# central once
+fluxvm-agent central
+# each node
+fluxvm-agent node
+# place without pinning a node
+curl -sS -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d @examples/qemu.json http://127.0.0.1:7788/fleet/vms
+```
+
+## 6. Kubernetes DisposableVm
+
+```bash
+kubectl apply -f deploy/crd/
+# run fluxvm-kube DaemonSet / operator per node
+kubectl apply -f examples/disposablevm.yaml
+```
+
+See [Kubernetes deployment](kubernetes-deployment.md) and
+[MicroVM tutorials](../tutorials/microvm/README.md).
+
+## 7. Network Fabric edge policy (schema v4)
+
+```bash
+# /etc/fluxvm.toml: [sandbox.dataplane] mode = "ebpf"
+fluxctl create --spec examples/create-vm-prod.json   # network_tap / netns
+curl -sS -H "Authorization: Bearer $TOKEN" \
+  http://127.0.0.1:7788/v1/vms/$ID/network/status | jq .
+```
+
+Hands-on: [network-policy tutorials](../tutorials/network-policy/README.md) ·
+operator: [network-fabric.md](../network-fabric.md).
+
+## 8. Service Fabric Maglev VIP (v6 / schema 4)
+
+```bash
+curl -sS -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d @docs/examples/service-fabric-v4-east-west.json \
+  http://127.0.0.1:7788/v1/network/services
+curl -sS -H "Authorization: Bearer $TOKEN" \
+  http://127.0.0.1:7788/v1/network/services/status | jq .
+```
+
+Identity policy example: `examples/service-fabric-v6/`. Operator guide:
+[service-fabric.md](../service-fabric.md).
+
+## 9. Production readiness
+
+```bash
+curl -sf http://127.0.0.1:7788/readyz | jq .
+./scripts/release-checklist.sh
+```
+
+Tutorial: [production/01-readyz-tenant-auth.md](../tutorials/production/01-readyz-tenant-auth.md).
+
+## 10. Day-2: templates, clones, disks, backups
+
+```bash
+fluxctl vm-template save web --from-vm web-1 --description "nginx base"
+fluxctl vm-template create web web-2 --label env=dev
+fluxctl disk attach web-2 data --size-gib 20      # hot-added when running
+fluxctl disk resize web-2 root --size-gib 40      # grow the filesystem in the guest
+fluxctl label web-2 fluxvm.io/snapshot-every=6h fluxvm.io/snapshot-keep=4
+fluxctl backup web-2 --all-disks --compress       # -> <state_dir>/backups/
+fluxctl stop web-2 && fluxctl clone-vm web-2 web-3
+fluxctl list -l env=dev -o wide
+```
+
+Semantics and limits: [operations.md → Day-2 VM operations](../operations.md#day-2-vm-operations).
+
+## 11. Drive a remote host with contexts
+
+```bash
+fluxctl context add lab --server http://10.0.0.5:7788 --token "$TOKEN"
+fluxctl context use lab
+fluxctl list && fluxctl serial web-1 && fluxctl events -f
+fluxctl --context local list                       # one-off local command
+fluxctl context unset                              # back to local mode
+```
+
+Contexts live in `~/.config/fluxctl/contexts.json` (mode 0600). `--server` /
+`FLUXVM_URL` override the context for one command.
+
+## Related
+
+- [Use cases](use-cases.md)
+- [Admin basics](admin-basics.md)
+- [Configuration](configuration.md)
+- [CLI & API](using-the-dashboard.md)
+- [Page index](PAGE_INDEX.md)

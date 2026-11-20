@@ -1,0 +1,53 @@
+name: runtime-intelligence
+on:
+  pull_request:
+    paths:
+      - 'bpf/fluxvm_intelligence.bpf.c'
+      - 'crates/fluxvm-intelligence/**'
+      - 'tools/fluxvm-intelligence-loader.c'
+      - 'scripts/*runtime-intelligence*'
+      - 'scripts/build-ebpf.sh'
+      - '.github/workflows/runtime-intelligence.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'bpf/fluxvm_intelligence.bpf.c'
+      - 'crates/fluxvm-intelligence/**'
+      - 'tools/fluxvm-intelligence-loader.c'
+      - 'scripts/*runtime-intelligence*'
+      - 'scripts/build-ebpf.sh'
+      - '.github/workflows/runtime-intelligence.yml'
+# Collapse superseded runs of this workflow on the same ref so queued duplicates do not hold the org's runners.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-test:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout fluxvm
+        uses: actions/checkout@v7
+        with:
+          path: fluxvm
+      - name: Checkout guestkit sibling dependency
+        uses: actions/checkout@v7
+        with:
+          repository: zyvorai/guestkit
+          ref: v1.2.9   # packaging/guestkit.ref; checked by scripts/check-guestkit-pin.sh
+          path: guestkit
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install BPF build dependencies
+        run: fluxvm/scripts/ci-install-apt-deps.sh clang llvm libbpf-dev pkg-config linux-tools-common linux-tools-generic
+      - name: Cargo tests
+        working-directory: fluxvm
+        run: cargo test -p fluxvm-intelligence
+      - name: Build all FluxVM BPF objects
+        working-directory: fluxvm
+        run: ./scripts/build-ebpf.sh
+      - name: Compile libbpf loader
+        working-directory: fluxvm
+        run: cc -O2 -g -Wall -Wextra -Werror tools/fluxvm-intelligence-loader.c -o /tmp/fluxvm-intelligence-loader $(pkg-config --cflags --libs libbpf)
+      - name: Static gates
+        working-directory: fluxvm
+        run: ./scripts/test-runtime-intelligence-static.sh

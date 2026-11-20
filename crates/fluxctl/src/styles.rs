@@ -1,0 +1,272 @@
+// Copyright 2026 Zyvor AI Labs · https://zyvor.dev
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+
+//! Cilium-inspired clap styles + grouped help for `fluxctl --help`.
+
+use clap::builder::styling::{AnsiColor, Effects, Styles};
+use std::fmt::Write as _;
+use std::io::{self, IsTerminal};
+
+/// Matches the feel of `cilium --help`: bold yellow headers, cyan usage,
+/// green literals — auto-disabled when stdout is not a TTY / `NO_COLOR` is set.
+pub const STYLES: Styles = Styles::styled()
+    .header(AnsiColor::Yellow.on_default().effects(Effects::BOLD))
+    .usage(AnsiColor::Cyan.on_default().effects(Effects::BOLD))
+    .literal(AnsiColor::Green.on_default().effects(Effects::BOLD))
+    .placeholder(AnsiColor::Green.on_default())
+    .error(AnsiColor::Red.on_default().effects(Effects::BOLD))
+    .valid(AnsiColor::Green.on_default().effects(Effects::BOLD))
+    .invalid(AnsiColor::Yellow.on_default().effects(Effects::BOLD));
+
+/// Long help body mirrors `cilium --help`: blurb, then Examples, then Usage.
+pub const LONG_ABOUT: &str = "\
+🚀 CLI to install, manage, and troubleshoot FluxVM hosts.
+
+FluxVM is a Rust-native VM control plane for QEMU, Cloud Hypervisor,
+Firecracker, and the in-tree FluxVM hypervisor — with Network Fabric,
+warm pools, and Hubble-lite observability.
+
+Examples:
+  # Start the control plane on this host
+  $ fluxctl --config /etc/fluxvm.toml serve
+
+  # Check status of FluxVM (Cilium-style panel)
+  $ fluxctl status
+
+  # Create a VM from a JSON spec
+  $ fluxctl create --spec examples/qemu.json
+
+  # Observe Hubble-lite flows
+  $ fluxctl hubble observe
+";
+
+/// Clap's stock help cannot group subcommands (Cobra can). We replace the
+/// auto Commands section with a Cilium-style grouped listing via `after_help`,
+/// and use `{all-args}` for Options / Global Flags only (subcommands are
+/// hidden at runtime before help is rendered).
+pub const HELP_TEMPLATE: &str = "\
+{about-with-newline}\
+{usage-heading} {usage}
+
+{after-help}
+{all-args}
+";
+
+fn color_on() -> bool {
+    if std::env::var_os("NO_COLOR").is_some() {
+        return false;
+    }
+    if std::env::var_os("FORCE_COLOR").is_some() || std::env::var_os("CLICOLOR_FORCE").is_some() {
+        return true;
+    }
+    io::stdout().is_terminal()
+}
+
+/// Build the grouped Available Commands block (Cilium / kubectl style).
+///
+/// Uses clap/`anstyle` style markers (not raw CSI) so `wrap_help` preserves
+/// colors the same way clap's own headers/literals do.
+/// What `fluxctl` exits with. The pass-through rows are why these are not one enum: the code
+/// belongs to the command that ran, not to fluxctl.
+pub const EXIT_CODES: &str = "  0    success\n  1    an error (message on stderr); `doctor` found a failing check\n  2    a usage error (unknown flag, missing argument)\n  N    the command's own status, for `run`, `sandbox run`, `ssh`,\n       `fleet exec` and `agent exec`";
+
+pub fn after_help() -> String {
+    let on = color_on();
+    let header = if on {
+        AnsiColor::Yellow.on_default().effects(Effects::BOLD)
+    } else {
+        anstyle::Style::new()
+    };
+    let literal = if on {
+        AnsiColor::Green.on_default().effects(Effects::BOLD)
+    } else {
+        anstyle::Style::new()
+    };
+
+    let mut out = String::new();
+    let _ = write!(out, "{header}Available Commands:{header:#}");
+
+    let groups: &[(&str, &[(&str, &str)])] = &[
+        (
+            "✨ Basic Commands:",
+            &[
+                ("serve", "Start the FluxVM control-plane daemon"),
+                ("status", "Host panel, or VM status with an id"),
+                (
+                    "doctor",
+                    "Is this host ready? Checks and the fix for each problem",
+                ),
+                (
+                    "config check",
+                    "Lint a host config file: typos, dead settings, weakened protections",
+                ),
+                (
+                    "explain",
+                    "What an API error code means, its usual causes and the fix",
+                ),
+                (
+                    "vm-spec check",
+                    "Lint a VM spec offline: unknown keys, refused values, ignored settings",
+                ),
+                ("completions", "Print a bash/zsh/fish completion script"),
+                ("mcp serve", "MCP stdio server for AI agents (Hermes, ...)"),
+            ],
+        ),
+        (
+            "🔄 Lifecycle Commands:",
+            &[
+                ("create", "Create a VM from a JSON spec file"),
+                ("list", "List VMs"),
+                ("get", "Get a VM by id"),
+                ("start", "Relaunch a Stopped VM from its existing disk"),
+                ("stop", "Stop a VM"),
+                ("pause", "Pause a VM"),
+                ("resume", "Resume a paused VM"),
+                ("restart", "Stop then start a VM"),
+                ("wait", "Wait for running/stopped/agent"),
+                ("label", "Set (k=v) or remove (k-) VM labels"),
+                ("vm rename", "Rename a VM (was rename-vm)"),
+                ("vm clone", "Copy a stopped VM into a new VM (was clone-vm)"),
+                ("vm fork", "Fork a running VM into N copies (was fork-vm)"),
+                ("snapshot-list", "List a VM's snapshots"),
+                ("snapshot-delete", "Delete a VM snapshot tag"),
+                ("backup", "Export a VM's root disk to qcow2"),
+                ("disk", "List/attach/resize/detach data disks"),
+                ("context", "Named remote daemons (add/use/list/unset)"),
+                (
+                    "vm-template",
+                    "Named VM specs: save/list/show/create/delete",
+                ),
+                ("delete", "Delete a VM (alias: terminate)"),
+                ("set-limit", "Alias for resources (machinectl)"),
+            ],
+        ),
+        (
+            "🧊 Runtime Control:",
+            &[
+                ("freeze", "Freeze a VM via cgroup v2 freezer"),
+                ("thaw", "Thaw a previously frozen VM"),
+                ("frozen", "Report whether a VM's cgroup is frozen"),
+                ("resources", "Apply cgroup v2 resource-control settings"),
+            ],
+        ),
+        (
+            "🖥️  Guest Access:",
+            &[
+                ("console", "Guest login (aliases: login, shell)"),
+                ("serial", "Attach to the serial port (Ctrl-] detaches)"),
+                ("ssh", "SSH into the guest at guest_ip"),
+                ("show", "Show one VM's record"),
+                ("poweroff", "Guest power-off via vsock agent"),
+                ("reboot", "Guest reboot via vsock agent"),
+                ("kill", "Force-kill the VMM process"),
+                ("bind", "Bind a host dir into the guest (virtiofs)"),
+                ("enable", "Autostart VM on fluxctl serve"),
+                ("disable", "Clear autostart mark"),
+                ("exec", "Run a command inside the guest over vsock"),
+                ("ping", "Health-check the vsock guest agent"),
+                ("copy-to", "Copy a local file into the guest"),
+                ("copy-from", "Copy a file out of the guest"),
+                ("qga", "QEMU guest-agent (virtio-serial) helpers"),
+            ],
+        ),
+        (
+            "📦 Images & Pools:",
+            &[
+                ("build-image", "Build a guest disk image"),
+                ("catalog", "Manage the named/signed image catalog"),
+                ("list-images", "List catalog entries (machinectl)"),
+                ("image-status", "Show one catalog entry"),
+                ("pull-raw", "Fetch a remote image into the catalog"),
+                ("import-raw", "Register a local image in the catalog"),
+                ("export-raw", "Export a catalog entry's file"),
+                ("clone", "Clone a catalog entry"),
+                ("rename", "Rename a catalog entry"),
+                ("remove", "Remove a catalog entry"),
+                ("read-only", "Lock/unlock a catalog entry"),
+                ("clean", "Remove orphaned catalog downloads"),
+                ("pool", "Manage warm VM pools"),
+            ],
+        ),
+        (
+            "🛡️  Network Policy:",
+            &[
+                (
+                    "what-if",
+                    "Offline: would this connection be allowed? What does a policy change flip?",
+                ),
+                (
+                    "exec-policy check",
+                    "Offline: will this exec policy start the command? What does each Landlock ABI enforce?",
+                ),
+                ("group", "Security groups for the VM-edge dataplane"),
+                ("cnp", "CNP documents compiled onto security groups"),
+                ("identity", "Reserved + group numeric identities"),
+                ("dataplane", "Dataplane health, ipcache, and FQDN refresh"),
+            ],
+        ),
+        (
+            "🔭 Observability:",
+            &[
+                (
+                    "diagnose",
+                    "Correlate Runtime Intelligence with VM-edge state",
+                ),
+                ("trace", "Live VM Flight Recorder events"),
+                ("observe", "Snapshot of identities, groups, CNPs, and VMs"),
+                ("events", "VM lifecycle/audit events (--follow)"),
+                ("quota", "Per-token quota limits and usage"),
+                ("hubble", "Hubble-lite flows and CiliumEndpoint views"),
+            ],
+        ),
+        (
+            "🌐 Cluster:",
+            &[
+                ("migrate", "Live VM migration (QEMU / Cloud Hypervisor)"),
+                (
+                    "fleet",
+                    "Your Mac cloud: status, launch, leases, tenants (start with `fleet status`)",
+                ),
+            ],
+        ),
+    ];
+
+    for (group, cmds) in groups {
+        let _ = write!(out, "\n\n{header}{group}{header:#}\n");
+        for (name, about) in *cmds {
+            let pad = " ".repeat(14usize.saturating_sub(name.len()));
+            let _ = writeln!(out, "  {literal}{name}{literal:#}{pad} {about}");
+        }
+    }
+
+    let _ = write!(out, "\n\n{header}Exit codes{header:#}\n");
+    out.push_str(EXIT_CODES);
+    out.push('\n');
+    out.push_str("Use \"fluxctl [command] --help\" for more information about a command.");
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn grouped_help_uses_emoji_sections() {
+        assert!(LONG_ABOUT.contains('🚀'));
+        let help = after_help();
+        for marker in [
+            "✨ Basic Commands:",
+            "🔄 Lifecycle Commands:",
+            "🧊 Runtime Control:",
+            "🖥️",
+            "📦 Images & Pools:",
+            "🛡️",
+            "🔭 Observability:",
+            "🌐 Cluster:",
+            "Exit codes",
+            "doctor",
+        ] {
+            assert!(help.contains(marker), "grouped help missing {marker}");
+        }
+    }
+}

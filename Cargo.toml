@@ -1,0 +1,46 @@
+# Copyright 2026 Zyvor AI Labs · https://zyvor.dev
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+
+[workspace]
+resolver = "3"
+members = [
+    "crates/fluxvm-core",
+    "crates/fluxvm-cgroup",
+    "crates/fluxvm-storage",
+    "crates/fluxvm-network",
+    "crates/fluxvm-image",
+    "crates/fluxvm-guest-protocol",
+    "crates/fluxvm-guest-agent",
+    "crates/fluxvm-vsock-client",
+    "crates/fluxvm-qemu",
+    "crates/fluxvm-backup-s3",
+    "crates/fluxvm-cloud-hypervisor",
+    "crates/fluxvm-firecracker",
+    "crates/fluxvm-hypervisor",
+    "crates/fluxvm-apple",
+    "crates/fluxvm-scheduler",
+    "crates/fluxvm-api",
+    "crates/fluxctl",
+    "crates/fluxvm-agent",
+    "crates/fluxvm-kube",
+    "crates/fluxvm-microvm",
+    "crates/fluxvm-container-protocol",
+    "crates/fluxvm-container-agent",
+    "crates/fluxvm-container-client",
+    "crates/fluxvm-containerd-shim",
+    "crates/fluxvm-intelligence",
+    "crates/fluxvm-procbox",
+    "crates/fluxvm-oci-init",
+    "crates/fluxvm-vz-switch",
+    "crates/fluxvm-blockd",
+    "crates/fluxvm-diskinject",
+    "crates/fluxvm-usernet",
+    "crates/fluxvm-netobs",
+    "crates/fluxvm-mesh",
+]
+
+# containerd-shim 0.11 fatally mis-parses containerd ≥ 2.3 BootstrapParams on
+# stdin (IncorrectTag(46)). Keep a patched path copy until upstream releases
+# a fix; see vendor/containerd-shim/README.fluxvm.md.
+[patch.crates-io]
+containerd-shim = { path = "vendor/containerd-shim" }

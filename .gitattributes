@@ -1,0 +1,2 @@
+ui/node/dist/** linguist-generated=true -diff
+ui/fleet/dist/** linguist-generated=true -diff

@@ -1,0 +1,218 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Collapse superseded runs of this workflow on the same ref so queued duplicates do not hold the org's runners.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  build-and-test:
+    # `docker` keeps this off zyvor-kernel-a: every build-and-test run that landed there stalled for hours in
+    # `cargo build`/`cargo test` (linker processes never finished) and was cancelled, while the docker builders are healthy.
+    runs-on: ${{ fromJSON(github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && '"ubuntu-latest"' || '["self-hosted","Linux","X64","zyvor-build","docker"]') }}
+    # A hung test once held a self-hosted runner for 2+ hours (the default limit is 6); a normal run takes well under 45 minutes.
+    timeout-minutes: 90
+    steps:
+      # fluxvm-image depends on the sibling `guestkit` project via a
+      # relative path (../../../guestkit from crates/fluxvm-image), so it
+      # has to land as an actual sibling directory here too, not nested
+      # inside this checkout.
+      - name: Checkout fluxvm
+        uses: actions/checkout@v7
+        with:
+          path: fluxvm
+
+      - name: Checkout guestkit (sibling path dependency)
+        uses: actions/checkout@v7
+        with:
+          repository: zyvorai/guestkit
+          ref: v1.2.9   # packaging/guestkit.ref; checked by scripts/check-guestkit-pin.sh
+          path: guestkit
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      # guestkit's default feature set pulls in libsystemd-sys (journal-native
+      # logging), which needs libsystemd-dev's pkg-config file — not present
+      # on the runner image by default. guestkit's own CI hit and fixed this
+      # exact gap; we need it too since we build guestkit as a dependency.
+      - name: Install system dependencies
+        # libhivex-dev: guestkit registry-write (Windows offline hive edits / agent-inject)
+        # clang/llvm/libbpf-dev: fluxvm-container-agent build.rs compiles guest eBPF
+        # scripts/ci-install-apt-deps.sh: the zyvor-build-c..f runners refuse every `sudo apt-get`, so install only
+        # what is missing and, if that needs privileges the runner does not grant, say how to fix the runner.
+        run: fluxvm/scripts/ci-install-apt-deps.sh libsystemd-dev libhivex-dev clang llvm libbpf-dev linux-libc-dev
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fluxvm
+
+      - name: cargo build --workspace
+        working-directory: fluxvm
+        run: cargo build --workspace --all-targets
+
+      - name: cargo test --workspace
+        working-directory: fluxvm
+        run: cargo test --workspace
+
+      - name: In-tree virtio-vsock CSM unit tests
+        working-directory: fluxvm
+        run: cargo test -p fluxvm-hypervisor --lib devices::virtio_vsock -- --nocapture
+
+      - name: MicroVM gates (policy + unit + print-crd)
+        working-directory: fluxvm
+        run: |
+          chmod +x scripts/test-microvm.sh scripts/test-microvm-policy.py
+          ./scripts/test-microvm.sh
+
+      - name: cargo clippy (informational — not a merge gate yet)
+        working-directory: fluxvm
+        run: cargo clippy --workspace --all-targets || true
+
+  # Real-hardware regression test for `fluxctl build-image`'s guestkit-based
+  # customization path (see scripts/test-image-customize.sh) across every
+  # package-manager branch install_packages() supports. Doesn't need KVM —
+  # build-image never boots a VM, it mounts the image directly via
+  # guestkit's qemu-nbd + chroot — so this runs on stock GitHub-hosted
+  # runners with no nested-virtualization dependency.
+  image-customize:
+    # Needs `sudo modprobe nbd` and root for qemu-nbd; the zyvor-build runners' sudoers refuses both, so this job runs on a
+    # GitHub-hosted runner (pinned: ubuntu-latest moves).
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - distro: ubuntu
+            image_url: https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img
+            test_service: cron
+          - distro: rocky
+            image_url: https://dl.rockylinux.org/pub/rocky/9/images/x86_64/Rocky-9-GenericCloud.latest.x86_64.qcow2
+            test_service: crond
+          - distro: arch
+            image_url: https://geo.mirror.pkgbuild.com/images/latest/Arch-Linux-x86_64-cloudimg.qcow2
+            test_service: sshd
+    steps:
+      - name: Checkout fluxvm
+        uses: actions/checkout@v7
+        with:
+          path: fluxvm
+
+      - name: Checkout guestkit (sibling path dependency)
+        uses: actions/checkout@v7
+        with:
+          repository: zyvorai/guestkit
+          ref: v1.2.9   # packaging/guestkit.ref; checked by scripts/check-guestkit-pin.sh
+          path: guestkit
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install system dependencies
+        run: fluxvm/scripts/ci-install-apt-deps.sh libsystemd-dev libhivex-dev qemu-utils parted
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fluxvm
+          key: image-customize-${{ matrix.distro }}
+
+      - name: Build fluxctl + fluxvm-image (release)
+        working-directory: fluxvm
+        run: cargo build --release -p fluxctl -p fluxvm-image
+
+      # Base cloud images are 500MB+ and rarely change — cache by URL so
+      # only the first run per distro per cache-eviction cycle pays for it.
+      - name: Cache base image
+        id: cache-image
+        uses: actions/cache@v6
+        with:
+          path: /tmp/base-image.qcow2
+          key: image-customize-base-${{ matrix.distro }}-${{ matrix.image_url }}
+
+      - name: Download base image
+        if: steps.cache-image.outputs.cache-hit != 'true'
+        run: curl -sSL --retry 3 --retry-delay 5 -o /tmp/base-image.qcow2 "${{ matrix.image_url }}"
+
+      - name: modprobe nbd
+        run: sudo modprobe nbd max_part=16
+
+      - name: Run test-image-customize.sh
+        working-directory: fluxvm
+        env:
+          FLUXVM_BIN: ${{ github.workspace }}/fluxvm/target/release/fluxctl
+          TEST_PACKAGE: tree
+          TEST_SERVICE: ${{ matrix.test_service }}
+        run: sudo -E ./scripts/test-image-customize.sh --image /tmp/base-image.qcow2
+
+      - name: AppArmor profile rules
+        if: matrix.distro == 'ubuntu'
+        working-directory: fluxvm
+        run: ./scripts/test-apparmor-profile-rules.sh
+
+      # #107: same path under the enforced AppArmor profile (ubuntu only —
+      # one full guestkit pass is enough to catch profile regressions).
+      - name: AppArmor-enforced build-image smoke
+        if: matrix.distro == 'ubuntu'
+        working-directory: fluxvm
+        env:
+          FLUXVM_BIN: ${{ github.workspace }}/fluxvm/target/release/fluxctl
+          TEST_PACKAGE: tree
+          TEST_SERVICE: ${{ matrix.test_service }}
+        run: sudo -E ./scripts/test-apparmor-build-image.sh --image /tmp/base-image.qcow2
+
+  container-image:
+    # `docker`: zyvor-kernel-a also carries zyvor-build but has no Docker daemon, so buildx failed there.
+    runs-on: ${{ fromJSON(github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && '"ubuntu-latest"' || '["self-hosted","Linux","X64","zyvor-build","docker"]') }}
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout fluxvm
+        uses: actions/checkout@v7
+
+      # The Dockerfile compiles nothing: it copies a staged release tree (see its header). CI builds it from stub binaries,
+      # the same way scripts/e2e/image-k8s.sh does, so the apt layer, the COPY paths and the labels stay covered.
+      - name: Stage a stub release tree
+        run: |
+          mkdir -p stage/bin stage/lib/bpf stage/share
+          for b in fluxctl fluxvm-kube fluxvm-microvm fluxvm-agent; do
+            printf '#!/bin/sh\necho %s\n' "$b" > "stage/bin/$b"; chmod 755 "stage/bin/$b"
+          done
+          : > stage/lib/bpf/stub.bpf.o
+          cp config.example.toml stage/share/
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build image (no push)
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          build-contexts: stage=stage
+          push: false
+          tags: ghcr.io/zyvorai/fluxvm:ci
+
+  website:
+    runs-on: ${{ fromJSON(github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && '"ubuntu-latest"' || '["self-hosted","Linux","X64","zyvor-build"]') }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: website/package-lock.json
+
+      - name: Install dependencies
+        run: cd website && npm ci
+
+      - name: Build
+        run: cd website && npm run build

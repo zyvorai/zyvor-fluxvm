@@ -1,0 +1,155 @@
+// Copyright 2026 Zyvor AI Labs · https://zyvor.dev
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+
+import {themes as prismThemes} from 'prism-react-renderer';
+import type {Config} from '@docusaurus/types';
+import type * as Preset from '@docusaurus/preset-classic';
+
+// This runs in Node.js - Don't use client-side code here (browser APIs, JSX...)
+
+const config: Config = {
+  title: 'FluxVM',
+  tagline: 'Rust-native VM control plane — secure, isolated VMs via Firecracker, Cloud Hypervisor, QEMU/KVM, and the FluxVM hypervisor.',
+  favicon: 'img/favicon.svg',
+
+  future: {
+    v4: true, // Improve compatibility with the upcoming Docusaurus v4
+  },
+
+  url: 'https://zyvorai.github.io',
+  baseUrl: '/zyvor-fluxvm/',
+
+  organizationName: 'zyvorai',
+  projectName: 'zyvor-fluxvm',
+
+  onBrokenLinks: 'warn',
+
+  markdown: {
+    // The existing docs/ corpus was written as plain Markdown for GitHub
+    // rendering, not MDX — force CommonMark parsing so raw `<`/`!`/`{`
+    // characters in prose don't get misread as JSX.
+    format: 'md',
+    hooks: {
+      onBrokenMarkdownLinks: 'warn',
+    },
+  },
+
+  i18n: {
+    defaultLocale: 'en',
+    locales: ['en'],
+  },
+
+  presets: [
+    [
+      'classic',
+      {
+        docs: {
+          // Serve the repo's existing docs/ tree directly rather than
+          // hand-curating a separate copy — see website/README.md.
+          path: '../docs',
+          routeBasePath: 'docs',
+          sidebarPath: './sidebars.ts',
+          editUrl: 'https://github.com/zyvorai/zyvor-fluxvm/tree/main/docs/',
+        },
+        blog: false,
+        theme: {
+          customCss: './src/css/custom.css',
+        },
+      } satisfies Preset.Options,
+    ],
+  ],
+
+  themeConfig: {
+    image: 'img/fluxvm-share-card.png',
+    metadata: [
+      {name: 'keywords', content: 'FluxVM, Mac cloud, Mac mini, Mac Studio, Virtualization.framework, vz, macOS virtualization, VM API'},
+      {name: 'twitter:card', content: 'summary_large_image'},
+    ],
+    colorMode: {
+      defaultMode: 'dark',
+      respectPrefersColorScheme: false,
+    },
+    navbar: {
+      title: 'FluxVM',
+      logo: {
+        alt: 'FluxVM',
+        src: 'img/favicon.svg',
+      },
+      hideOnScroll: false,
+      items: [
+        {to: '/docs/install', label: 'Install', position: 'right'},
+        {to: '/mac', label: 'Mac', position: 'right'},
+        {to: '/kubernetes', label: 'Kubernetes', position: 'right'},
+        {to: '/agents', label: 'Agents', position: 'right'},
+        {to: '/studio', label: 'Studio', position: 'right'},
+        {to: '/mac-cloud', label: 'Mac cloud', position: 'right'},
+        {
+          type: 'docSidebar',
+          sidebarId: 'docsSidebar',
+          position: 'right',
+          label: 'Docs',
+        },
+        {to: '/support', label: 'Support', position: 'right'},
+        {
+          href: 'https://github.com/zyvorai/zyvor-fluxvm',
+          label: 'GitHub',
+          position: 'right',
+        },
+      ],
+    },
+    footer: {
+      style: 'dark',
+      links: [
+        {
+          title: 'Docs',
+          items: [
+            {label: 'Install FluxVM', to: '/docs/install'},
+            {label: 'Install with Homebrew', to: '/docs/install-macos'},
+            {label: 'Agent sessions guide', to: '/docs/agent-sessions-guide'},
+            {label: 'FluxVM on Mac', to: '/mac'},
+            {label: 'Kubernetes on a Mac', to: '/kubernetes'},
+            {label: 'Agent sandboxes', to: '/agents'},
+            {label: 'Build a Mac cloud', to: '/mac-cloud'},
+            {label: 'Mac cloud guide', to: '/docs/mac-cloud'},
+            {label: 'Run central in production', to: '/docs/mac-cloud-operations'},
+            {label: 'fluxctl fleet reference', to: '/docs/fluxctl-fleet'},
+            {label: 'SDKs and Terraform', to: '/docs/fleet-sdk'},
+            {label: 'How it works on a Mac', to: '/docs/macos-architecture'},
+            {label: 'Use cases', to: '/docs/use-cases'},
+            {label: 'Product overview', to: '/docs/PRODUCT_OVERVIEW'},
+            {label: 'Positioning', to: '/docs/POSITIONING'},
+          ],
+        },
+        {
+          title: 'Project',
+          items: [
+            {label: 'GitHub', href: 'https://github.com/zyvorai/zyvor-fluxvm'},
+            {label: 'Support', to: '/support'},
+            {
+              label: 'Changelog',
+              href: 'https://github.com/zyvorai/zyvor-fluxvm/blob/main/CHANGELOG.md',
+            },
+            {
+              label: 'License (Zyvor Production 1.0)',
+              href: 'https://github.com/zyvorai/zyvor-fluxvm/blob/main/LICENSE',
+            },
+          ],
+        },
+        {
+          title: 'Zyvor Enterprise',
+          items: [
+            {label: 'zyvor.dev', href: 'https://zyvor.dev'},
+            {label: 'sales@zyvor.dev', href: 'mailto:sales@zyvor.dev'},
+          ],
+        },
+      ],
+      copyright: `Copyright © ${new Date().getFullYear()} Zyvor AI Labs. FluxVM is under the Zyvor Production License v1.0.`,
+    },
+    prism: {
+      theme: prismThemes.github,
+      darkTheme: prismThemes.dracula,
+    },
+  } satisfies Preset.ThemeConfig,
+};
+
+export default config;

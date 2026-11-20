@@ -1,0 +1,58 @@
+name: quiclb-smartnic
+on:
+  pull_request:
+    paths:
+      - 'bpf/fluxvm_quiclb.bpf.c'
+      - 'crates/fluxvm-intelligence/src/quiclb.rs'
+      - 'crates/fluxvm-intelligence/src/bin/fluxvm-quiclb.rs'
+      - 'tools/fluxvm-quiclb-*.c'
+      - 'scripts/*quiclb*'
+      - '.github/workflows/quiclb-smartnic.yml'
+  push:
+    # A release tag push must not start this CI; it only competes with the release workflows for runners.
+    # Defining only tags-ignore would stop branch pushes from triggering this workflow at all, so branches stays explicit.
+    branches: ['**']
+    tags-ignore: ['**']
+    paths:
+      - 'bpf/fluxvm_quiclb.bpf.c'
+      - 'crates/fluxvm-intelligence/src/quiclb.rs'
+      - 'crates/fluxvm-intelligence/src/bin/fluxvm-quiclb.rs'
+      - 'tools/fluxvm-quiclb-*.c'
+      - 'scripts/*quiclb*'
+      - '.github/workflows/quiclb-smartnic.yml'
+# Collapse superseded runs of this workflow on the same ref so queued duplicates do not hold the org's runners.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-test:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout fluxvm
+        uses: actions/checkout@v7
+        with:
+          path: fluxvm
+      - name: Checkout guestkit sibling dependency
+        uses: actions/checkout@v7
+        with:
+          repository: zyvorai/guestkit
+          ref: v1.2.9   # packaging/guestkit.ref; checked by scripts/check-guestkit-pin.sh
+          path: guestkit
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Host packages
+        run: fluxvm/scripts/ci-install-apt-deps.sh clang llvm libbpf-dev linux-tools-common linux-tools-generic pkg-config libsystemd-dev libhivex-dev iproute2 iputils-ping ethtool
+      - name: Rust tests
+        working-directory: fluxvm
+        run: cargo test -p fluxvm-intelligence quiclb
+      - name: Build QUIC LB
+        working-directory: fluxvm
+        run: ./scripts/build-quiclb.sh /tmp/quiclb-bpf /tmp/quiclb-bin
+      - name: Portable gates
+        working-directory: fluxvm
+        run: ./scripts/test-quiclb-static.sh
+      - name: Privileged QUIC DSR test
+        if: ${{ vars.FLUXVM_EBPF_PRIVILEGED_CI == '1' }}
+        working-directory: fluxvm
+        # sudo resets PATH (secure_path), CARGO_HOME and HOME, so root cannot find the runner user's rustup toolchain: pass them through.
+        run: sudo -E env "PATH=$PATH" "CARGO_HOME=${CARGO_HOME:-$HOME/.cargo}" "RUSTUP_HOME=${RUSTUP_HOME:-$HOME/.rustup}" ./scripts/test-quiclb-host.sh

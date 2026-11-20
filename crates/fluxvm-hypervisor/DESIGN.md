@@ -1,0 +1,212 @@
+# FluxVM Design
+
+## 1. Goal
+
+Build a Type-2 VMM on Linux KVM that:
+
+- Boots Linux in ~100–300 ms (direct kernel + virtio, no firmware).
+- Can boot Windows via OVMF/UEFI + ACPI + virtio-win (slower boot than the Linux direct-boot path).
+- Speaks virtio for net, block, vsock, balloon, rng, console.
+- Uses TAP + optional `vhost-net` so packet processing stays in kernel.
+- Has a tiny device surface (tens of kLOC of Rust).
+
+## 2. Design goals: boot, footprint and I/O path
+
+Runtime CPU of a warmed Linux guest under KVM is the same whichever VMM runs it,
+because the silicon is the same. This VMM therefore optimizes boot, footprint
+and I/O path, not "the CPU":
+
+- Skip firmware for Linux (direct 64-bit kernel entry or PVH).
+- Expose a small virtio device set instead of a legacy device model.
+- Keep the VMM out of the packet path (`vhost-net`, `vhost-user`, io_uring).
+- Stay memory-safe and small enough to jail (seccomp, namespaces).
+
+## 3. Process and thread model
+
+```
+fluxvm process
+├── control thread     HTTP/UDS API, config, snapshot
+├── vmm / device thread  virtio kick handling, TAP read/write if no vhost
+├── vCPU-0 thread      KVM_RUN
+├── vCPU-1 thread      KVM_RUN
+└── …                  one OS thread per vCPU
+```
+
+Rules:
+
+- One VM per process (Firecracker model). Isolation is free.
+- vCPU threads only handle MMIO/PIO exits that must be synchronous.
+- Network RX from TAP is either:
+  - **vhost-net**: kernel writes into guest virtqueues. Fast path.
+  - **userspace virtio-net**: device thread copies frames. Simpler, slower.
+
+## 4. Address space (x86_64 Linux microVM)
+
+```
+GPA
+0x0000_0000  real-mode / identity (tiny, often unused if 64-bit boot)
+0x000A_0000  VGA hole (leave unmapped — do not emulate VGA)
+0x000F_0000  reserved
+0x0010_0000  low RAM start for kernel if needed
+0x0000_7000  zero page / boot params (Linux)
+0x0020_0000  kernel load (typical)
+…            guest RAM
+0xFEB0_0000  MMIO window (virtio-mmio, ACPI if Windows)
+0xFEE0_0000  local APIC (KVM in-kernel)
+0xFEC0_0000  IOAPIC (KVM in-kernel)
+```
+
+KVM in-kernel PIC / IOAPIC / PIT / LAPIC stay in the kernel. Userspace does
+**not** emulate them.
+
+## 5. Device model
+
+### Always (Linux microVM) — implemented in-tree
+
+| Device         | Backend                         | Notes                                      |
+|----------------|---------------------------------|--------------------------------------------|
+| virtio-net     | TAP + optional `/dev/vhost-net` | `KVM_IRQFD`; rate limit via `--net-mbit-limit` |
+| virtio-blk     | raw file                        | `KVM_IRQFD`; `--blk-mbit-limit`            |
+| serial 16550   | stdio                           | COM1 GSI 4 irqfd (vm-superio / CH semantics) |
+| virtio-rng     | `getrandom`                     | on by default (`--no-rng` to disable)      |
+| virtio-balloon | `madvise(DONTNEED)` / touch      | on by default (`--no-balloon`)             |
+| virtio-vsock   | host UDS (`--vsock-uds`)        | Firecracker unix model; CID via `--vsock-cid` |
+
+Cmdline discovery: VMM appends `virtio_mmio.device=<size>@<base>:<irq>` like Firecracker.
+
+### Extra for Windows (cloud-hypervisor SoT)
+
+| Device        | Status                                                |
+|---------------|-------------------------------------------------------|
+| UEFI firmware | `--firmware` / `--guest windows` loads image          |
+| ACPI tables   | RSDP/XSDT/FADT/MADT/MCFG; DSDT/AML still follow-up for full Windows |
+| PCI ECAM      | `--pci` ECAM + virtio-net @ 00:01.0 BAR0 (H2); MSI-X/Windows → CH SoT |
+
+### H4 (virtio-fs / migration / hotplug)
+
+| Surface | Status |
+|---|---|
+| virtio-fs | `virtio_fs::attach` spawns/validates virtiofsd; MMIO device id 26 + tag config; CLI `--shared-dir` |
+| Live migration | `migration::export_state` / `import_state` FLUXKVM1 dir bundles; API `MigrateExport`/`MigrateImport` |
+| CPU hotplug | `hotplug::plan_add_vcpu` + `KvmVm::create_vcpu`; `--max-cpus`; API `HotplugCpu` |
+| Disk hotplug | `hotplug::hotplug_disk` validates host image; API `HotplugDisk`; CLI `--extra-disk` |
+
+Cloud Hypervisor remains the SoT for production shared-FS depth (full vhost-user queue bind under load).
+
+
+## 6. Networking
+
+```
+guest TCP/IP
+    → virtio-net driver
+    → virtqueue (guest RAM)
+    → vhost-net (kernel)  OR  fluxvm device thread
+    → TAP  (e.g. tap0)
+    → Linux bridge / macvtap / nftables NAT
+    → physical NIC
+```
+
+Host setup:
+
+```bash
+sudo ip tuntap add dev tap0 mode tap user $USER multi_queue
+sudo ip link set tap0 master br0
+sudo ip link set tap0 up
+```
+
+Performance knobs that actually matter:
+
+1. `vhost=on` — kernel consumes virtqueues.
+2. Multi-queue virtio-net (`MQ`) — one queue per vCPU.
+3. Guest offloads: TSO/GSO/csum. Windows virtio-win historically has LSO bugs;
+   test and disable LSO on Windows if TX is ~Mbps.
+4. `busy_poll` / `SO_BUSY_POLL` on TAP for latency.
+5. Rate limiter (token bucket) in VMM to stop noisy neighbors.
+
+User-mode net (slirp / passt / gvproxy) is for unprivileged hosts. It will
+never beat TAP+vhost.
+
+## 7. Boot paths
+
+### Linux fast path (target: <200 ms to userspace with tiny kernel)
+
+1. Map RAM.
+2. Load `vmlinux` ELF or `bzImage` with `linux-loader`.
+3. Write `boot_params` zero page (x86).
+4. Init ramdisk at chosen GPA.
+5. Set RIP = kernel entry, RSI = boot_params, long mode already on
+   (or use PVH).
+6. `KVM_RUN`.
+
+No BIOS. No option ROMs. Kernel must be built with virtio-mmio or virtio-pci
+and a small config (`vmlinux` + virtio + ext4 + net).
+
+### Windows path
+
+1. Load OVMF.fd into flash GPA.
+2. Expose ACPI + PCI config space + virtio-pci.
+3. Attach virtio-blk with NTFS image or installer ISO.
+4. Guest needs virtio-win drivers (inbox on newer Server, or inject).
+5. Expect seconds of boot, not 125 ms. Still little device work
+   (no legacy device model).
+
+## 8. Exit handling
+
+```
+loop {
+    match vcpu.run() {
+        IoOut { port, data } => pio_bus.write(port, data),
+        IoIn  { port }       => pio_bus.read(port),
+        MmioWrite { addr }   => mmio_bus.write(addr),
+        MmioRead  { addr }   => mmio_bus.read(addr),
+        Shutdown | Hlt       => break,
+        Intr                 => continue,  // interrupt window
+        InternalError        => abort,
+    }
+}
+```
+
+Hot path: **zero exits** for ordinary guest userspace. Exits happen on
+virtio notify (doorbell MMIO/PIO) and legacy serial.
+
+Batch notifications. Do not handle one packet per exit if vhost is available.
+
+## 9. Security
+
+- One VM / process.
+- Drop privileges after opening `/dev/kvm` and TAP.
+- seccomp-bpf allowlist (`ioctl`, `KVM_*`, `read`/`write` on known fds,
+  `io_uring`, `timerfd`, `epoll`).
+- Landlock or chroot + mount namespace (jailer).
+- No file-backed executable mappings of guest memory as host code.
+- Rate-limit net and block.
+
+## 10. Snapshot / restore (optional, high leverage)
+
+For fast starts in practice, **restore a snapshot** of a booted guest.
+Snapshot restore takes tens of milliseconds. Cold boot is the wrong metric
+for agent sandboxes and functions.
+
+## 11. Implementation phases
+
+| Phase | Deliverable | Status |
+|---|---|---|
+| 0 | KVM VM + memory + vCPU + PIO/MMIO buses | **Done** |
+| 1 | Serial + tiny 16-bit/64-bit test payload | **Done** |
+| 2 | linux-loader + boot_params / PVH; serial console | **Done** |
+| 3 | virtio-blk + virtio-net TAP | **Done** |
+| 4 | vhost-net open + rate limits; TAP backend + mem-table/VRING GPA/KICK/CALL (H3) | **Done** (userspace pump fallback) |
+| 5 | balloon, vsock, rng, irqfd, seccomp jailer + FLUXKVM1 **v3** virtio live-state | **Done** (lab snap; not FC-compatible) |
+| 6 | Minimal ACPI + PCI ECAM + virtio-pci BAR0 + MSI-X + DSDT `PCI0` + firmware reset | **Done (tables)** — virtio-win boot unproven; CH remains production Windows VMM |
+
+Boot hang past `init_zbud` is **resolved** (Firecracker-matched TSS/MSRs/FPU/LAPIC/serial). Lab snapshots: `FLUXKVM1` v3. See [README.md](README.md), [docs/kvm-density.md](../../docs/kvm-density.md), [docs/NEXT-FEATURES.md](../../docs/NEXT-FEATURES.md).
+
+Windows tables (MSI-X, DSDT, firmware entry, ACPI reset) are in tree. Do not claim a virtio-win boot until a Windows guest is tested. Cloud Hypervisor stays the production Windows VMM. H4 (virtio-fs attach, FLUXKVM1 migration bundles, CPU/disk hotplug) is implemented in-tree.
+
+## 12. What we will not implement
+
+- TCG / software MMU / binary translation
+- VGA / GPU emulation (use VFIO passthrough later if needed)
+- USB, sound, floppy, PS/2 beyond reset
+- Live nested QEMU device compatibility
+- A new guest Windows kernel

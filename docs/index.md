@@ -1,0 +1,130 @@
+# Documentation index
+
+Every feature area and every document, in one place.
+
+[Back to README](https://github.com/zyvorai/zyvor-fluxvm/blob/main/README.md)
+
+## Start here
+
+| You have | Go to |
+|---|---|
+| A Mac with Apple silicon | [install-macos.md](install-macos.md) (Homebrew) or [install.md](install.md) (`curl \| bash`, no sudo), then [macos.md](macos.md) |
+| A Linux x86_64 host with KVM | [install.md](install.md), then [getting-started.md](getting-started.md) |
+| A Kubernetes cluster | [kubernetes-operator.md](kubernetes-operator.md) |
+| Something that is not working | [troubleshooting.md](troubleshooting.md) |
+| A job in mind (CI runners, agent sandboxes, per-branch environments) | [Use cases](#use-cases) below |
+
+## Feature highlights
+
+| Area | What's there | Docs |
+|------|---------------|------|
+| **Backends** | QEMU/KVM, Cloud Hypervisor, Firecracker and the in-tree FluxVM hypervisor behind one `VmBackend` trait; `"backend":"auto"`; vsock guest agent (`exec`, `ping`, PTY console with live resize, `copy-to`/`copy-from`) with no SSH | [docs/agent-sandbox-gaps.md](agent-sandbox-gaps.md) · [docs/operations.md](operations.md#auto-backend-selection) |
+| **Networking & Network Fabric** | TAP/bridge, macvtap, user-mode NAT, per-VM netns. **Network Fabric is GA (schema v4):** TC/eBPF or Cilium-coexistence dataplane with IPv4/IPv6 L3+L4 policy, rate limits, security groups, CNP, live reconfigure and REST observability; native eBPF is the default dataplane (nftables via explicit `mode = "legacy"`) | [docs/ebpf.md](ebpf.md) · [docs/network-fabric.md](network-fabric.md) · [docs/ebpf-cilium.md](ebpf-cilium.md) · [docs/network-policy.md](network-policy.md) |
+| **FluxMesh** | Host-to-host personal-cloud overlay across NAT/CGNAT: WireGuard, overlay IPAM, FluxDNS (`*.flux`), fail-closed ACLs, relay fallback, zero-touch enrollment, optional public HTTPS/HTTP3 edge. Built and unit-tested; not yet run on real hosts | [docs/fluxmesh.md](fluxmesh.md) · `fluxctl cloud` |
+| **Service Fabric** | Node-local Maglev VIP load balancing: dual-stack NAT/DSR/SNAT, health-aware routing, per-service EDT, flow export | [docs/service-fabric.md](service-fabric.md) |
+| **Images** | virt-builder-style `build-image` (guestkit-based, never libguestfs), per-distro package install, Ed25519-signed catalog with REST CRUD, Windows golden-image customization | [docs/build-image-tutorials.md](build-image-tutorials.md) · [docs/operations.md](operations.md#image-catalog--signing) · [docs/windows-golden.md](windows-golden.md) |
+| **Operations** | Day-2 VM verbs: restart, rename, labels + bulk selectors, clone, QEMU data disks (hot-add, live resize), serial console, live backups, scheduled snapshots with retention, VM templates, lifecycle events (SSE), remote `fluxctl` contexts, OpenAPI; cgroup v2 limits, freeze/thaw and PSI; warm VM pools; Firecracker jailer; LVM thin / NBD / Ceph RBD; admission limits; bearer-token auth/RBAC; incident bundles with an opt-in memory dump ([diagnostics-bundle.md](diagnostics-bundle.md)) | [docs/operations.md](operations.md) · [docs/api.md](api.md#auth--rbac) |
+| **Native KVM (no QEMU)** | In-tree KVM engine for Linux guests: SMP, pause/snapshot for every vCPU, restore preflight (no silent cold boot), atomic snapshot writes, raw-ext4 direct-kernel boot, static musl guest agent, and a golden Cloud-init template with a baked systemd-networkd config | [docs/native-kvm-no-qemu.md](native-kvm-no-qemu.md) · [crate README](https://github.com/zyvorai/zyvor-fluxvm/blob/main/crates/fluxvm-hypervisor/README.md) |
+| **Agent sandboxes** | Egress **HTTP ACL** (method/host/path rules, deny wins, path normalisation; HTTPS via opt-in interception) · guest file **change-set** (`baseline` / `changes`) · rootless **procbox** tier with profiles, a ptrace `learn` mode and a real-discard `dry-run` · stdlib-only **Python** and **Go** SDKs and a dependency-free **TypeScript** SDK | [docs/http-acl.md](http-acl.md) · [docs/sandbox-changes.md](sandbox-changes.md) · [docs/procbox.md](procbox.md) · [`python/`](https://github.com/zyvorai/zyvor-fluxvm/blob/main/python/README.md) · [`go/`](https://github.com/zyvorai/zyvor-fluxvm/blob/main/go/README.md) · [`typescript/`](https://github.com/zyvorai/zyvor-fluxvm/blob/main/typescript/README.md) |
+| **Native macOS (`vz`)** | Daemon, API and `fluxctl` on Apple silicon; Linux and macOS guests on Virtualization.framework; agent sandboxes with a warm pool, offline and allow-listed egress; **`host_gpu`**: host Metal/MLX OpenAI endpoint inside an offline guest over vsock; **container sandboxes**: an OCI image in its own lightweight VM (`fluxctl sandbox run IMAGE -- CMD`); a **Mac cloud** of Mac minis and Mac Studios behind one fleet registry | [docs/macos.md](macos.md) · [docs/host-inference.md](host-inference.md) · [docs/mac-cloud.md](mac-cloud.md) · [docs/macos-sandboxes.md](macos-sandboxes.md) · [docs/oci-sandboxes.md](oci-sandboxes.md) · [docs/agent-density.md](agent-density.md) |
+| **Docker and Kubernetes on a Mac** | `fluxctl docker up` runs a real `dockerd` in one managed VM with its socket on the Mac (`build`, Compose, bind mounts, networks); `fluxctl kube up` runs a k3s cluster (a server and optional workers, Cilium by default) the same way and writes a kubeconfig; Studio shows its nodes, pods, logs, a shell, a traffic graph and a checkpoint timeline. Each can be kept running by a LaunchAgent. **Time travel** (whole-machine checkpoints in about a second): `kube try`/`undo`, rolling `--auto-checkpoint`, `kube bisect`, `kube golden`/`reset`/`matrix`, `kube chaos`, and sleep that wakes on the first `kubectl` or browser request. Verified live on an Apple silicon Mac mini | [docs/docker-engine.md](docker-engine.md) · [docs/kubernetes-on-mac.md](kubernetes-on-mac.md) |
+| **Kubernetes on a Mac that feels local** | Plain `kubectl` (the cluster is merged into `~/.kube/config`); `http://web.localhost` and, after `kube trust`, `https://web.localhost` for every Service and every Traefik Ingress host; `kube add postgres\|redis\|mysql\|mongodb\|rabbitmq\|nats\|mailpit\|grafana\|redpanda\|qdrant\|meilisearch\|clickhouse\|keycloak\|seaweedfs\|vault\|jaeger\|temporal` with the usual ports and `kube connect`; `kube forward SERVICE`, a port-forward that survives pod restarts; `kube db-backup` / `db-restore`; `kube dev` (rebuild and restart on save) and `kube sync` (copy files into a pod on save); `kube doctor`, and a notification when a pod crash-loops; `kube share` (phone, QR code), `kube up --rosetta` (Intel images), `kube host` (a Mac program as a Service), `kube git` (the cluster follows your branch), `kube diff`/`timeline`, MCP tools for AI agents, working-hours and low-power sleep, `kube trim` ([the whole map](kubernetes-on-mac.md#every-command-in-one-place)) |
+| **Kubernetes & fleet** | `DisposableVm` CRD + node-local operator; `fluxvm-microvm` scheduler-native path; `fluxvm-agent` fleet registry with load-aware placement | [Kubernetes CRD/operator](kubernetes-operator.md#kubernetes-crdoperator) · [docs/microvm.md](microvm.md) · [docs/operations.md](operations.md#distributed-node-agent) |
+| **Secure Containers** *(GA)* | containerd runtime-v2 shim mapping a Pod onto one microVM: CNI L2, Sentinel policy, cgroup-v2 stats, VSOCK stdio/TTY, guest AppArmor/SELinux/seccomp | [docs/secure-containers.md](secure-containers.md) · [supported profile](secure-containers-supported-profile.md) · [15-min lab](secure-containers-15min-lab.md) · [Sentinel wedge](sentinel-wedge.md) |
+| **Security profiles (Phase 6)** | `standard` / `measured` / `confidential-snp` / `confidential-tdx`: measured software-test evidence on ordinary QEMU hosts; confidential control plane tested without claiming host-memory encryption until a hardware run | [docs/security-profiles.md](security-profiles.md) · [howto / CI](guides/security-profiles-howto.md) |
+| **Host hardening** | Step-up TOTP for exec and writes, a signed exec allow-list and signed, expiring virtual-patch rule packs on the BPF-LSM guard | [docs/host-hardening.md](host-hardening.md) |
+| **Sentinel observability** | eBPF host + guest runtime intelligence: per-VM syscall/page-fault telemetry, drop reasons, flight recorder, BPF-LSM VMM guard/QoS, XDP shield | [docs/runtime-intelligence.md](runtime-intelligence.md) · [docs/flight-recorder.md](flight-recorder.md) |
+
+---
+
+<a id="use-cases"></a>
+
+## Use cases
+
+Eleven use cases map onto what is implemented today — nothing below is aspirational. Detail:
+[docs/use-cases.md](use-cases.md).
+
+| Outcome you want | What it uses |
+|---|---|
+| **CI/CD runners that isolate every job** | VM-per-job over vsock `exec` (no SSH, no network path needed); `ttl_seconds` guarantees cleanup even if the job crashes |
+| **A golden-image pipeline** | Build once (`fluxctl build-image`), reuse via qcow2 CoW overlays; SHA-256 plus an optional Ed25519-signed image catalog |
+| **Kubernetes-native VM workloads** | `DisposableVm` CRD + node-local `fluxvm-kube` operator, verified against a real k3s cluster |
+| **OCI workloads with a per-Pod guest kernel** | `containerd-shim-fluxvm-v2` — **GA** (see GA boundaries in [docs/secure-containers.md](secure-containers.md)) |
+| **A multi-host fleet without Kubernetes** | `fluxvm-agent` central registry + load-aware placement, verified across two physically separate hosts |
+| **Sandboxed / untrusted code execution** | Firecracker jailer + cgroup v2 + netns + vsock `exec` + TTL reaper |
+| **AI-agent sandboxes with guard rails** | `/v1/sandboxes` in two tiers (microVM, or rootless procbox), an egress ACL on **method + host + path** (HTTPS via opt-in TLS interception), a file **change-set** of what the agent touched, and Python and Go SDKs — [docs/http-acl.md](http-acl.md) · [docs/sandbox-changes.md](sandbox-changes.md) |
+| **Linux VMs with no QEMU installed** | In-tree KVM engine + a golden Cloud-init/agent template: `fluxctl vm-template create native-agent <name>` — [docs/native-kvm-no-qemu.md](native-kvm-no-qemu.md) |
+| **Per-branch dev and test environments** | Cheap qcow2 CoW cloning, optional `ttl_seconds`, `pause`/`resume` to park instead of rebuild |
+| **Your own storage backend** | LVM thin, NBD or Ceph RBD |
+| **Networking that matches your environment** | User-mode NAT, TAP+bridge or macvtap, plus an opt-in bridge-less direct tap (eBPF redirect; [docs/direct-datapath.md](direct-datapath.md)) |
+
+---
+
+## Documentation map
+
+| Topic | Doc |
+|-------|-----|
+| Product positioning (who/why/when-not) | [docs/POSITIONING.md](POSITIONING.md) |
+| Install on a Mac with Homebrew (daemon, first VM, MCP agent client) | [docs/install-macos.md](install-macos.md) |
+| Build a Mac cloud (Mac mini and Mac Studio fleet on `vz`) | [docs/mac-cloud.md](mac-cloud.md) |
+| Mac cloud: tenants, leases, quotas, snapshots and clones, volumes, tunnels, SSO and roles, API keys, webhooks | [docs/mac-cloud-tenancy.md](mac-cloud-tenancy.md) |
+| Mac cloud: run central in production (flags, state, exposure, checklist) | [docs/mac-cloud-operations.md](mac-cloud-operations.md) |
+| Mac cloud: prices, statements, self-service sign-up and Stripe | [docs/mac-cloud-billing.md](mac-cloud-billing.md) |
+| Mac cloud: graphs, `fluxctl fleet top` and Prometheus | [docs/fleet-metrics.md](fleet-metrics.md) |
+| Mac cloud: warm pools (CI jobs start in seconds) | [docs/warm-pools.md](warm-pools.md) |
+| Mac cloud: how a Mac is chosen (memory headroom, image already there), rebalance dry run, macOS pool checkout across Macs | [docs/macos-cluster.md](macos-cluster.md#placing-a-vm-on-the-right-mac) |
+| Mac cloud: `fluxctl fleet` command reference | [docs/fluxctl-fleet.md](fluxctl-fleet.md) |
+| Mac cloud: Go, Python and TypeScript clients, OpenAPI, Terraform provider | [docs/fleet-sdk.md](fleet-sdk.md) |
+| Mac cloud on one laptop with simulated Macs | [docs/fleet-quickstart.md](fleet-quickstart.md) |
+| Product overview + metrics | [docs/PRODUCT_OVERVIEW.md](PRODUCT_OVERVIEW.md) |
+| Exhaustive feature checklist | [FEATURES.md](https://github.com/zyvorai/zyvor-fluxvm/blob/main/FEATURES.md) |
+| Concrete use cases (CI runners, golden images, sandboxes, fleets) | [docs/use-cases.md](use-cases.md) |
+| Network Fabric (eBPF/Cilium dataplane, diagrams, why it's faster) | [docs/network-fabric.md](network-fabric.md) |
+| eBPF / Cilium coexistence detail | [docs/ebpf-cilium.md](ebpf-cilium.md) |
+| Cilium CNI (Secure Containers L2) | [docs/cilium-cni.md](cilium-cni.md) |
+| Direct (bridge-less) datapath, with measurements | [docs/direct-datapath.md](direct-datapath.md) |
+| Security groups & CNP network policy | [docs/network-groups.md](network-groups.md) · [docs/network-policy.md](network-policy.md) |
+| Kairon VM edge (anti-spoof, learn-IP, DNS/SNI allow lists, QoS, conntrack move) | [docs/vm-edge-contract.md](vm-edge-contract.md) |
+| Install FluxVM: one command (`curl ... \| bash`), what it does, options, upgrade and rollback, Linux, troubleshooting | [docs/install.md](install.md) |
+| Agent sessions: how to use them (policy, tokens, approvals, jobs, uploads, budgets, fork/promote), with a troubleshooting table | [docs/agent-sessions-guide.md](agent-sessions-guide.md) |
+| Agent sessions: API and behaviour reference, including the live events stream | [docs/agent-sessions.md](agent-sessions.md) |
+| Host Metal/MLX inference for offline VZ sandboxes (`host_gpu`, `fluxctl infer`) | [docs/host-inference.md](host-inference.md) |
+| AI agents over MCP (`fluxctl mcp serve`: Hermes Agent, Claude Code, Cursor; tools, setup, workflows) | [docs/mcp.md](mcp.md) |
+| REST API reference, auth/RBAC, VM JSON contract | [docs/api.md](api.md) |
+| Day-2 operations (jailer, cgroups, pools, catalog, storage, fleet, state layout) | [docs/operations.md](operations.md) |
+| Building custom images (per-distro + Windows) | [docs/build-image-tutorials.md](build-image-tutorials.md) |
+| Secure Containers (containerd runtime-v2) | [docs/secure-containers.md](secure-containers.md) |
+| Security profiles (Phase 6) — measured + confidential control plane | [docs/security-profiles.md](security-profiles.md) · [howto + how to test](guides/security-profiles-howto.md) · [CI](../.github/workflows/security-profiles.yml) |
+| MicroVM (Kubernetes-native) | [docs/microvm.md](microvm.md) |
+| Whole-project production checklist | [docs/PRODUCTION.md](PRODUCTION.md) |
+| DevOps / CI / readiness probes | [docs/DEVOPS.md](DEVOPS.md) |
+| Using FluxVM through zyvor-fabric | [docs/zyvor-fabric.md](zyvor-fabric.md) |
+| Using FluxVM through Ragnarok | [docs/ragnarok.md](ragnarok.md) |
+| AI-agent sandbox capability gaps | [docs/agent-sandbox-gaps.md](agent-sandbox-gaps.md) |
+| The Linux package: what is in it, how it is built and checked | [docs/linux-package.md](linux-package.md) |
+| Per-node enrollment: join tokens, node credentials, `--node-auth` | [docs/fleet-enroll.md](fleet-enroll.md) |
+| Installing FluxVM on many nodes: signed releases, waves, the pull installer | [docs/fleet-install.md](fleet-install.md) |
+| The container image: how it is assembled, signed and pinned; Kubernetes host prep and its limits | [docs/container-image.md](container-image.md) |
+| Use FluxVM from a serverless backend, with live events | [docs/serverless-agent.md](serverless-agent.md) |
+| Fleet scale: what `fluxvm-agent central` takes today, and how to measure it | [docs/fleet-scale.md](fleet-scale.md) |
+| Native macOS backend (`vz`), Mac sandboxes and agent density | [docs/macos.md](macos.md) · [docs/macos-sandboxes.md](macos-sandboxes.md) · [docs/agent-density.md](agent-density.md) |
+| Guest-network observability (flows, DNS, capture) and FluxDisk overlays (`fluxvm-blockd`) | [docs/netobs.md](netobs.md) · [docs/flux-disk.md](flux-disk.md) |
+| Container (OCI) sandboxes on a Mac, one VM per container | [docs/oci-sandboxes.md](oci-sandboxes.md) |
+| A real Docker engine on a Mac (`docker build`, Compose, bind mounts) | [docs/docker-engine.md](docker-engine.md) |
+| A Kubernetes (k3s) cluster on a Mac | [docs/kubernetes-on-mac.md](kubernetes-on-mac.md) |
+| Undo a bad `kubectl apply`, bisect cluster history, reset to a clean state, chaos-test, sleep and wake a cluster | [docs/kubernetes-on-mac.md#time-travel-for-your-cluster](kubernetes-on-mac.md#time-travel-for-your-cluster) |
+| GPUs for sandboxes | [docs/sandbox-gpus.md](sandbox-gpus.md) |
+| Host topology and NUMA binding | [docs/host-topology.md](host-topology.md) |
+| vGPU (mediated devices) and GPU health | [docs/vgpu.md](vgpu.md) |
+| Virtual networks (eBPF routing, Geneve, SNAT, floating IPs) | [docs/virtual-network.md](virtual-network.md) |
+| Native KVM, no QEMU (golden template, snapshots, SMP) | [docs/native-kvm-no-qemu.md](native-kvm-no-qemu.md) · [crates/fluxvm-hypervisor/README.md](https://github.com/zyvorai/zyvor-fluxvm/blob/main/crates/fluxvm-hypervisor/README.md) |
+| Egress HTTP method/path ACL and HTTPS interception | [docs/http-acl.md](http-acl.md) |
+| Sandbox file change-set (baseline / changes) | [docs/sandbox-changes.md](sandbox-changes.md) |
+| procbox: rootless Landlock + seccomp sandbox, and as a `/v1/sandboxes` kind | [docs/procbox.md](procbox.md) · [docs/procbox-backend.md](procbox-backend.md) |
+| Python, Go and TypeScript SDKs | [python/README.md](https://github.com/zyvorai/zyvor-fluxvm/blob/main/python/README.md) · [go/README.md](https://github.com/zyvorai/zyvor-fluxvm/blob/main/go/README.md) · [typescript/README.md](https://github.com/zyvorai/zyvor-fluxvm/blob/main/typescript/README.md) |
+| CI for these features (portable lane, hosted KVM smokes, lab gate) | [agent-sandbox.yml](../.github/workflows/agent-sandbox.yml) · [native-kvm.yml](../.github/workflows/native-kvm.yml) · [all-features.yml](../.github/workflows/all-features.yml) |
+| Ranked backlog / next features | [docs/NEXT-FEATURES.md](NEXT-FEATURES.md) |
+
+Hands-on tutorials: [network policy](tutorials/network-policy/README.md) ·
+[production readiness](tutorials/production/README.md) ·
+[MicroVM](tutorials/microvm/README.md).

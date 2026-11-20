@@ -1,0 +1,281 @@
+{
+  "title": "FluxVM vz (Apple Virtualization.framework)",
+  "uid": "fluxvm-vz",
+  "schemaVersion": 39,
+  "version": 1,
+  "tags": [
+    "fluxvm",
+    "vz",
+    "macos"
+  ],
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "refresh": "30s",
+  "templating": {
+    "list": [
+      {
+        "name": "DS_PROMETHEUS",
+        "label": "Data source",
+        "type": "datasource",
+        "query": "prometheus"
+      },
+      {
+        "name": "instance",
+        "label": "Mac",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${DS_PROMETHEUS}"
+        },
+        "query": "label_values(fluxvm_vm_create_total, instance)",
+        "includeAll": true,
+        "multi": true,
+        "allValue": ".*",
+        "refresh": 2
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Guest agent vs SSH fallback (req/s)",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(fluxvm_vz_agent_calls_total{instance=~\"$instance\"}[5m]))",
+          "legendFormat": "agent"
+        },
+        {
+          "refId": "B",
+          "expr": "sum(rate(fluxvm_vz_agent_ssh_fallbacks_total{instance=~\"$instance\"}[5m]))",
+          "legendFormat": "ssh fallback"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "SSH fallback share",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 12,
+        "y": 0,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(fluxvm_vz_agent_ssh_fallbacks_total{instance=~\"$instance\"}[10m])) / clamp_min(sum(rate(fluxvm_vz_agent_calls_total{instance=~\"$instance\"}[10m]) + rate(fluxvm_vz_agent_ssh_fallbacks_total{instance=~\"$instance\"}[10m])), 1e-9)",
+          "legendFormat": "fallback share"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Warm pool hit rate",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 0,
+        "y": 8,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(fluxvm_sandbox_warm_hits_total{instance=~\"$instance\"}[15m])) / clamp_min(sum(rate(fluxvm_sandbox_warm_hits_total{instance=~\"$instance\"}[15m]) + rate(fluxvm_sandbox_warm_misses_total{instance=~\"$instance\"}[15m])), 1e-9)",
+          "legendFormat": "hit rate"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "Warm hits vs misses (per min)",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 12,
+        "y": 8,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(fluxvm_sandbox_warm_hits_total{instance=~\"$instance\"}[5m])) * 60",
+          "legendFormat": "hits"
+        },
+        {
+          "refId": "B",
+          "expr": "sum(rate(fluxvm_sandbox_warm_misses_total{instance=~\"$instance\"}[5m])) * 60",
+          "legendFormat": "misses"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "title": "Host memory pressure (0 normal, 1 warn, 2 critical)",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 0,
+        "y": 16,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (instance) (fluxvm_host_memory_pressure_level{instance=~\"$instance\"})",
+          "legendFormat": "{{instance}}"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "title": "Host memory available",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 12,
+        "y": 16,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "decmbytes"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "min by (instance) (fluxvm_host_mem_available_mib{instance=~\"$instance\"})",
+          "legendFormat": "{{instance}}"
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "title": "Sandboxes with balloon inflated",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 0,
+        "y": 24,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (instance) (fluxvm_sandbox_balloons_inflated{instance=~\"$instance\"})",
+          "legendFormat": "{{instance}}"
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "title": "Mean VM create time",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 12,
+        "y": 24,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "rate(fluxvm_vm_create_duration_ms_total{instance=~\"$instance\"}[30m]) / clamp_min(rate(fluxvm_vm_create_total{instance=~\"$instance\"}[30m]), 1e-9)",
+          "legendFormat": "create {{instance}}"
+        },
+        {
+          "refId": "B",
+          "expr": "rate(fluxvm_vm_start_duration_ms_total{instance=~\"$instance\"}[30m]) / clamp_min(rate(fluxvm_vm_start_total{instance=~\"$instance\"}[30m]), 1e-9)",
+          "legendFormat": "start {{instance}}"
+        }
+      ]
+    }
+  ]
+}

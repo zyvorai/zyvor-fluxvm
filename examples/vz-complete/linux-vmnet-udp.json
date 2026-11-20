@@ -1,0 +1,21 @@
+{
+  "name": "debian-vmnet",
+  "backend": "vz",
+  "image": "debian-13",
+  "vcpus": 2,
+  "memory_mib": 2048,
+  "network": { "mode": "none" },
+  "apple": {
+    "guest_os": "linux",
+    "vmnet": {
+      "name": "lab-shared",
+      "mode": "shared",
+      "subnet": "192.168.105.0",
+      "mask": "255.255.255.0",
+      "forwards": [
+        { "protocol": "tcp", "host_port": 2222, "guest_port": 22, "guest_ip": "192.168.105.2" },
+        { "protocol": "udp", "host_port": 5353, "guest_port": 53, "guest_ip": "192.168.105.2" }
+      ]
+    }
+  }
+}

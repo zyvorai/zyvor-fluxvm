@@ -1,0 +1,166 @@
+{
+  "apiVersion": "apiextensions.k8s.io/v1",
+  "kind": "CustomResourceDefinition",
+  "metadata": {
+    "name": "disposablevms.fluxvm.zyvor.io"
+  },
+  "spec": {
+    "group": "fluxvm.zyvor.io",
+    "names": {
+      "categories": [],
+      "kind": "DisposableVm",
+      "plural": "disposablevms",
+      "shortNames": [
+        "dvm"
+      ],
+      "singular": "disposablevm"
+    },
+    "scope": "Namespaced",
+    "versions": [
+      {
+        "additionalPrinterColumns": [
+          {
+            "jsonPath": ".status.phase",
+            "name": "Phase",
+            "type": "string"
+          },
+          {
+            "jsonPath": ".spec.node",
+            "name": "Node",
+            "type": "string"
+          },
+          {
+            "jsonPath": ".status.vmId",
+            "name": "VmId",
+            "type": "string"
+          },
+          {
+            "jsonPath": ".metadata.creationTimestamp",
+            "name": "Age",
+            "type": "date"
+          }
+        ],
+        "name": "v1",
+        "schema": {
+          "openAPIV3Schema": {
+            "description": "Auto-generated derived type for DisposableVmSpec via `CustomResource`",
+            "properties": {
+              "spec": {
+                "description": "A disposable VM, declared as a Kubernetes custom resource. The operator running on each node (see `crate::controller`) watches these and drives a *local* `fluxctl serve` instance's REST API to create/delete the underlying VM — it never talks to another node's fluxvm, matching the \"node-local daemonset\" model described in the project README rather than a centralized scheduler that place VMs across a fleet.",
+                "properties": {
+                  "backend": {
+                    "default": "qemu",
+                    "description": "One of \"qemu\", \"cloud-hypervisor\", \"firecracker\", \"auto\" — passed straight through to the local fluxvm's `CreateVmRequest.backend`.",
+                    "type": "string"
+                  },
+                  "bridge": {
+                    "nullable": true,
+                    "type": "string"
+                  },
+                  "diskSizeGib": {
+                    "format": "uint64",
+                    "minimum": 0.0,
+                    "nullable": true,
+                    "type": "integer"
+                  },
+                  "image": {
+                    "description": "Passed straight through as `CreateVmRequest.image`. No catalog aliasing awareness beyond whatever the local fluxvm is itself configured with (see README's \"Image catalog & signing\").",
+                    "type": "string"
+                  },
+                  "mac": {
+                    "nullable": true,
+                    "type": "string"
+                  },
+                  "macvtapMode": {
+                    "nullable": true,
+                    "type": "string"
+                  },
+                  "memoryMib": {
+                    "default": 2048,
+                    "format": "uint64",
+                    "minimum": 0.0,
+                    "type": "integer"
+                  },
+                  "netns": {
+                    "default": false,
+                    "type": "boolean"
+                  },
+                  "networkMode": {
+                    "default": "none",
+                    "description": "\"none\", \"user\", \"tap\", or \"macvtap\". Tap needs optional `bridge`/ `tapName`/`mac`/`netns`; macvtap needs `parent` (+ optional `macvtapMode`/`mac`).",
+                    "type": "string"
+                  },
+                  "node": {
+                    "description": "Node this VM must run on. Optional when a cluster placer (`fluxvm-kube --enable-placement`) is running — it fills this in. A `DisposableVm` with no `node` set is ignored by node-local operators until placement assigns one.",
+                    "nullable": true,
+                    "type": "string"
+                  },
+                  "parent": {
+                    "description": "Parent link for `networkMode: macvtap` (required in that mode).",
+                    "nullable": true,
+                    "type": "string"
+                  },
+                  "storage": {
+                    "default": "default",
+                    "description": "One of \"default\", \"lvm-thin\", \"nbd\", \"ceph-rbd\" — see README's \"Storage backends\".",
+                    "type": "string"
+                  },
+                  "tapName": {
+                    "nullable": true,
+                    "type": "string"
+                  },
+                  "ttlSeconds": {
+                    "format": "uint64",
+                    "minimum": 0.0,
+                    "nullable": true,
+                    "type": "integer"
+                  },
+                  "vcpus": {
+                    "default": 2,
+                    "format": "uint8",
+                    "minimum": 0.0,
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "image"
+                ],
+                "type": "object"
+              },
+              "status": {
+                "nullable": true,
+                "properties": {
+                  "error": {
+                    "nullable": true,
+                    "type": "string"
+                  },
+                  "phase": {
+                    "default": "",
+                    "description": "\"Pending\" (finalizer not yet attached), \"Running\", or \"Failed\" — mirrors `fluxvm_core::model::VmStatus` where they overlap, plus the CR-lifecycle-only \"Pending\". \"Failed\" is momentary in practice: this CRD is declarative (like a `Deployment`, not a one-shot `Job`) — if the underlying VM vanishes on its own (its `ttl_seconds` expired, or something deleted it directly via the REST API) the *next* reconcile clears `vm_id` and briefly reports \"Failed\", but the reconcile immediately after that creates a fresh VM and returns to \"Running\". Confirmed on real hardware: deleting a VM out from under a live CR via `DELETE /v1/vms/{id}` produced a genuinely new VM (a different id, a different pid) within two reconcile ticks, with no action needed on the CR itself. Only deleting the `DisposableVm` object stops this — see `controller::cleanup`.",
+                    "type": "string"
+                  },
+                  "vmId": {
+                    "description": "The underlying VM's UUID once `POST /v1/vms` has succeeded — `None` before that, and briefly `None` again if the VM disappeared and is about to be recreated (see `phase`'s doc comment).",
+                    "nullable": true,
+                    "type": "string"
+                  }
+                },
+                "type": "object"
+              }
+            },
+            "required": [
+              "spec"
+            ],
+            "title": "DisposableVm",
+            "type": "object"
+          }
+        },
+        "served": true,
+        "storage": true,
+        "subresources": {
+          "status": {}
+        }
+      }
+    ]
+  }
+}

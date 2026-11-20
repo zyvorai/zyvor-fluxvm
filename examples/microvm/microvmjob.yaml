@@ -1,0 +1,22 @@
+apiVersion: microvm.fluxvm.zyvor.io/v1alpha1
+kind: MicroVMJob
+metadata:
+  name: compile-main
+spec:
+  completions: 1
+  parallelism: 1
+  backoffLimit: 2
+  # Delete this MicroVMJob (and its child MicroVMs) 5 minutes after it
+  # reaches Succeeded/Failed, instead of leaving it around forever.
+  ttlSecondsAfterFinished: 300
+  template:
+    backend: firecracker
+    image: /var/lib/fluxvm/images/ci-rootfs.ext4
+    vcpus: 4
+    memoryMib: 4096
+    networkMode: tap
+    bridge: vmbr0
+    netns: true
+    claimFrom: ci-warm
+    command: "/usr/local/bin/run-ci"
+    persist: false

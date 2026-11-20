@@ -1,0 +1,17 @@
+[Unit]
+Description=FluxMesh CGNAT-safe public relay connector
+After=network-online.target fluxmesh-edge.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/fluxctl cloud relay-connect
+Restart=always
+RestartSec=2
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/fluxvm/mesh
+
+[Install]
+WantedBy=multi-user.target

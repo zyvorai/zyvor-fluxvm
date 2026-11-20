@@ -1,0 +1,72 @@
+name: secure-containers-set19
+on:
+  pull_request:
+    paths:
+      - "bpf/**"
+      - "crates/fluxvm-network/**"
+      - "crates/fluxvm-container-*/**"
+      - "tools/fluxvm-policy-observer/**"
+      - "controllers/fluxvm-networkpolicy-controller/**"
+      - "scripts/**"
+      - "docs/**"
+# Collapse superseded runs of this workflow on the same ref so queued duplicates do not hold the org's runners.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust-bpf:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: fluxvm
+      - uses: actions/checkout@v7
+        with:
+          repository: zyvorai/guestkit
+          ref: v1.2.9   # packaging/guestkit.ref; checked by scripts/check-guestkit-pin.sh
+          path: guestkit
+      - uses: dtolnay/rust-toolchain@stable
+        with: {components: "rustfmt,clippy"}
+      - name: System deps
+        run: |
+          fluxvm/scripts/ci-install-apt-deps.sh clang llvm libbpf-dev linux-libc-dev linux-tools-common linux-tools-generic libsystemd-dev libhivex-dev pkg-config
+          sudo apt-get install -y "linux-tools-$(uname -r)" || sudo apt-get install -y linux-tools-azure || true
+          bpftool version || echo 'bpftool still stubbed for this kernel; build scripts may fall back'
+      - name: cargo fmt
+        working-directory: fluxvm
+        run: ./scripts/ci-fmt-check.sh
+      - name: cargo test
+        working-directory: fluxvm
+        run: cargo test --locked -p fluxvm-network -p fluxvm-container-protocol -p fluxvm-container-agent -p fluxvm-containerd-shim
+      - name: cargo clippy
+        working-directory: fluxvm
+        # Informational: match Secure Containers / set15 (clippy not a hard merge gate yet).
+        run: cargo clippy --locked -p fluxvm-network -p fluxvm-container-protocol -p fluxvm-container-agent -p fluxvm-containerd-shim --all-targets || true
+      - name: build host eBPF
+        working-directory: fluxvm
+        run: scripts/build-ebpf.sh
+      - name: build guest eBPF
+        working-directory: fluxvm
+        run: scripts/build-ebpf-guest.sh
+  controller:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: controllers/fluxvm-networkpolicy-controller/go.mod
+      - run: cd controllers/fluxvm-networkpolicy-controller && go test -count=1 ./... && go test -race -count=1 ./... && go vet ./...
+  observer:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: tools/fluxvm-policy-observer/go.mod
+      - run: |
+          cd tools/fluxvm-policy-observer
+          test -z "$(gofmt -l .)"
+          go test -count=1 ./...
+          go test -race -count=1 ./...
+          go vet ./...

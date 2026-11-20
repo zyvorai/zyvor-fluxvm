@@ -1,0 +1,182 @@
+:root {
+  color-scheme: light;
+  --bg-page: #ffffff;
+  --bg-elevated: #ffffff;
+  /* Sub-card/toolbar-input fill, nested inside a --bg-elevated .card — in
+     light mode this is the same value as --bg-page, which is fine (and not
+     mergeable with it): the two are never adjacent to each other, so what
+     matters is contrast against --bg-elevated, which this has. */
+  --bg-elevated-2: #f5f5f7;
+  --bg-glass: rgba(251, 251, 253, 0.8);
+  --text-primary: #1d1d1f;
+  /* --text-secondary/--text-tertiary/--btn-secondary look like three near-
+     duplicate grays but serve three different jobs that happen to share a
+     value in light mode and deliberately diverge in dark mode: secondary
+     copy (readable but de-emphasized text), tertiary copy (the dimmest
+     legible label/caption tier), and a button FILL color (needs enough
+     contrast against --bg-elevated as a solid pill, a stricter bar than
+     either text color needs) — see --btn-secondary below. Not merged on
+     purpose; keep them distinct rather than collapsing to one token. */
+  --text-secondary: #6e6e73;
+  --text-tertiary: #86868b;
+  --border: #d2d2d7;
+  --border-strong: #c7c7cc;
+  --hover-fill: rgba(0, 0, 0, 0.04);
+  --hover-fill-strong: rgba(0, 0, 0, 0.08);
+  --nav-bg: rgba(251, 251, 253, 0.8);
+  --nav-link: rgba(0, 0, 0, 0.8);
+  --nav-link-active: #1d1d1f;
+  --apple-blue: #0071e3;
+  --apple-blue-hover: #0077ed;
+  --apple-link: #0066cc;
+  --danger: #ff3b30;
+  --danger-bg: #fff1f0;
+  --accent-cyan: #32ade6;
+  --accent-cyan-hover: #28a0d8;
+  --accent-green: #34c759;
+  --accent-green-hover: #30b753;
+  --accent-amber: #ff9f0a;
+  --accent-amber-hover: #f09400;
+  --accent-purple: #af52de;
+  --accent-purple-hover: #a246d4;
+  /* Same value as --text-secondary in light mode, diverges in dark mode —
+     see the note on --text-secondary above for why this stays separate. */
+  --btn-secondary: #6e6e73;
+  --btn-secondary-hover: #5a5a5e;
+  --disabled-bg: #dcdce1;
+  --disabled-text: #86868b;
+  --warning-bg: #fff6ed;
+  --warning-border: #ffd8ba;
+  --warning-text: #8b3d00;
+  --success-bg: #e8f8ec;
+  --success-border: #b8ecc4;
+  --success-text: #1e7b34;
+  /* Text-safe accents: the bright --accent-* values are fills/strokes (~2:1 as
+     text on white). These reach >=4.5:1 on light surfaces; dark theme keeps the
+     bright originals. */
+  --accent-cyan-text: #0a6b99;
+  --accent-green-text: #1e7b34;
+  --accent-amber-text: #8b4b00;
+  --accent-purple-text: #8a3fb5;
+  --info-bg: #eaf6fc;
+  --info-border: #bfe6f5;
+  --terminal-bg: #0d0d0f;
+  --terminal-bar: #1b1b1e;
+  --terminal-text: #f5f5f7;
+  --terminal-text-dim: #86868b;
+  --card-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
+  --hero-glow-a: rgba(0, 113, 227, 0.14);
+  --hero-glow-b: rgba(50, 173, 230, 0.12);
+  --theme-color: #ffffff;
+  /* apple.com contract tokens (docs/design/APPLE-UX-CONTRACT.md). Semantic
+     surface/hairline/shadow/text-faint/focus names shared with the docs site
+     so the two never drift. Existing --bg-* / --border tokens stay the
+     source for legacy rules; new code should prefer these. */
+  --surface-1: #ffffff;
+  --surface-hover: #f5f5f7;
+  --hairline-1: rgba(0, 0, 0, 0.1);
+  --fill-tertiary: rgba(0, 0, 0, 0.04);
+  --text-faint: #a1a1a6;
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.04);
+  --shadow-2: 0 4px 16px rgba(0, 0, 0, 0.08);
+  --shadow-3: 0 12px 40px rgba(0, 0, 0, 0.14);
+  --focus-ring: 0 0 0 4px rgba(0, 113, 227, 0.3);
+  --hit-min: 44px;
+  /* Type scale (docs/design/APPLE-UX-CONTRACT.md). Headings and figures read
+     from these instead of raw px so every page shrinks or grows together. */
+  --fs-body: 15px;
+  --fs-lede: 16px;
+  --fs-link: 15px;
+  --fs-h1: clamp(24px, 2.6vw, 34px);
+  --fs-h2: clamp(20px, 1.8vw, 24px);
+  --fs-h3: 17px;
+  --fs-figure: clamp(18px, 1.6vw, 24px);
+  --font-display: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text", "Segoe UI", sans-serif;
+  --font-mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  /* Border-radius scale — theme-independent (not a color), defined once
+     here rather than repeated in [data-theme="dark"]. Every radius value
+     used anywhere in this file is one of these steps, plus the 50%/0
+     one-offs (circular icon buttons, square nav links) that aren't part
+     of a "rounded corner" scale at all. */
+  --radius-xs: 6px;
+  --radius-sm: 10px;
+  --radius-md: 12px;
+  --radius-base: 14px;
+  --radius-lg: 16px;
+  --radius-xl: 18px;
+  --radius-2xl: 24px;
+  --radius-3xl: 28px;
+  --radius-pill: 980px;
+  /* Apple's signature interaction curve — a fast, slightly overshooting
+     ease-out. Used in place of generic `ease` on interactive transitions
+     app-wide so motion reads as deliberately "Apple" rather than default
+     browser easing. Purely cosmetic; never affects layout or timing enough
+     to change when something becomes interactive. */
+  --ease-apple: cubic-bezier(0.28, 0.11, 0.32, 1);
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display", "Segoe UI", sans-serif;
+  color: var(--text-primary);
+  background: var(--bg-page);
+  font-synthesis: none;
+}
+
+[data-theme="dark"] {
+  color-scheme: dark;
+  --bg-page: #000000;
+  --bg-elevated: #1d1d1f;
+  --bg-elevated-2: #2c2c2e;
+  --bg-glass: rgba(22, 22, 23, 0.8);
+  --text-primary: #f5f5f7;
+  --text-secondary: #a1a1a6;
+  --text-tertiary: #86868b;
+  --border: rgba(255, 255, 255, 0.16);
+  --border-strong: rgba(255, 255, 255, 0.24);
+  --hover-fill: rgba(255, 255, 255, 0.06);
+  --hover-fill-strong: rgba(255, 255, 255, 0.1);
+  --nav-bg: rgba(22, 22, 23, 0.8);
+  --nav-link: rgba(255, 255, 255, 0.8);
+  --nav-link-active: #f5f5f7;
+  --apple-link: #2997ff;
+  --danger: #ff453a;
+  --danger-bg: rgba(255, 69, 58, 0.14);
+  --accent-cyan: #64d2ff;
+  --accent-cyan-hover: #70d7ff;
+  --accent-green: #30d158;
+  --accent-green-hover: #3ad463;
+  --accent-amber: #ff9f0a;
+  --accent-amber-hover: #ffb340;
+  --accent-purple: #bf5af2;
+  --accent-purple-hover: #c767f3;
+  --btn-secondary: #737378;
+  --btn-secondary-hover: #7e7e84;
+  --disabled-bg: #3a3a3d;
+  --disabled-text: #9a9aa0;
+  --warning-bg: rgba(255, 159, 10, 0.12);
+  --warning-border: rgba(255, 159, 10, 0.35);
+  --warning-text: #ffd60a;
+  --success-bg: rgba(48, 209, 88, 0.14);
+  --success-border: rgba(48, 209, 88, 0.35);
+  --success-text: #30d158;
+  --accent-cyan-text: #64d2ff;
+  --accent-green-text: #30d158;
+  --accent-amber-text: #ff9f0a;
+  --accent-purple-text: #bf5af2;
+  --info-bg: rgba(100, 210, 255, 0.14);
+  --info-border: rgba(100, 210, 255, 0.35);
+  --terminal-bg: #000000;
+  --terminal-bar: #1d1d1f;
+  --terminal-text: #f5f5f7;
+  --terminal-text-dim: #86868b;
+  --card-shadow: none;
+  --hero-glow-a: rgba(0, 113, 227, 0.18);
+  --hero-glow-b: rgba(50, 173, 230, 0.16);
+  --theme-color: #000000;
+  --surface-1: #1d1d1f;
+  --surface-hover: #2c2c2e;
+  --hairline-1: rgba(255, 255, 255, 0.12);
+  --fill-tertiary: rgba(255, 255, 255, 0.08);
+  --text-faint: #6e6e73;
+  --shadow-1: none;
+  --shadow-2: 0 4px 16px rgba(0, 0, 0, 0.5);
+  --shadow-3: 0 12px 40px rgba(0, 0, 0, 0.6);
+  --focus-ring: 0 0 0 4px rgba(41, 151, 255, 0.4);
+}

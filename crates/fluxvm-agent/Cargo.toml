@@ -1,0 +1,45 @@
+# Copyright 2026 Zyvor AI Labs · https://zyvor.dev
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+
+[package]
+name = "fluxvm-agent"
+version = "0.4.21"
+edition = "2024"
+license = "LicenseRef-Zyvor-Production-1.0"
+description = "Distributed node-agent + fleet registry for multi-host Zyvor FluxVM deployments"
+
+[[bin]]
+name = "fluxvm-agent"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+axum = { version = "0.8", features = ["ws"] }
+fluxvm-core = { path = "../fluxvm-core" }
+fluxvm-apple = { path = "../fluxvm-apple" }
+fluxvm-scheduler = { path = "../fluxvm-scheduler" }
+axum-server = { version = "0.8", features = ["tls-rustls"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4", features = ["derive", "env"] }
+# Verifies console SSO ID tokens (same features as fluxvm-api, so nothing new is built).
+jsonwebtoken = { version = "11", default-features = false, features = ["use_pem", "rust_crypto"] }
+libc = "0.2"
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "form"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.11"
+include_dir = "0.7"
+hex = "0.4"
+uuid = { version = "1", features = ["v4"] }
+redis = { version = "1.7", features = ["tokio-comp", "connection-manager"] }
+tokio = { version = "1", features = ["full"] }
+# Tunnels: central relays a client's WebSocket to the node's (`central_tunnel.rs`).
+tokio-tungstenite = { version = "0.30", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
+futures-util = { version = "0.3", default-features = false, features = ["sink", "alloc"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+tempfile = "3"
+tower = { version = "0.5", features = ["util"] }

@@ -1,0 +1,9 @@
+{
+  "source": "/var/lib/fluxvm/images/base-ubuntu.qcow2",
+  "output": "/var/lib/fluxvm/images/ubuntu-dev.qcow2",
+  "format": "qcow2",
+  "size_gib": 20,
+  "hostname": "zyvor-template",
+  "packages": ["curl", "jq", "qemu-guest-agent"],
+  "commands": ["systemctl enable qemu-guest-agent"]
+}

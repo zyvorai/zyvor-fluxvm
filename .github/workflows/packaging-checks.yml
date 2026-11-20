@@ -1,0 +1,129 @@
+name: Packaging checks
+
+# Fast checks on what goes into the Linux tarball and on the pull installer. The package itself is built and verified by release-linux.yml.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'packaging/**'
+      - 'scripts/package-linux.sh'
+      - 'scripts/test-package-manifest.sh'
+      - 'scripts/fluxvm-bootstrap.sh'
+      - 'scripts/test-bootstrap.sh'
+      - 'scripts/make-release-manifest.sh'
+      - 'scripts/make-sbom.py'
+      - 'scripts/test-vendor-lock.sh'
+      - 'scripts/install-firecracker.sh'
+      - 'scripts/install-cloud-hypervisor.sh'
+      - 'scripts/build-ebpf.sh'
+      - 'scripts/e2e/**'
+      - 'crates/fluxvm-agent/**'
+      - 'ui/**'
+      - 'scripts/test-release-e2e.sh'
+      - 'scripts/deploy-remote.sh'
+      - 'Dockerfile'
+      - 'deploy/k8s/**'
+      - '.github/workflows/packaging-checks.yml'
+  pull_request:
+    paths:
+      - 'packaging/**'
+      - 'scripts/package-linux.sh'
+      - 'scripts/test-package-manifest.sh'
+      - 'scripts/fluxvm-bootstrap.sh'
+      - 'scripts/test-bootstrap.sh'
+      - 'scripts/make-release-manifest.sh'
+      - 'scripts/make-sbom.py'
+      - 'scripts/test-vendor-lock.sh'
+      - 'scripts/install-firecracker.sh'
+      - 'scripts/install-cloud-hypervisor.sh'
+      - 'scripts/build-ebpf.sh'
+      - 'scripts/e2e/**'
+      - 'crates/fluxvm-agent/**'
+      - 'ui/**'
+      - 'scripts/test-release-e2e.sh'
+      - 'scripts/deploy-remote.sh'
+      - 'Dockerfile'
+      - 'deploy/k8s/**'
+      - '.github/workflows/packaging-checks.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  manifest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: packaging/files.txt is valid and its tests pass
+        run: |
+          scripts/package-linux.sh --check-manifest
+          scripts/test-package-manifest.sh
+
+  bootstrap:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: shellcheck
+        run: shellcheck scripts/fluxvm-bootstrap.sh scripts/test-bootstrap.sh scripts/make-release-manifest.sh
+      - name: Pull installer tests (signatures, waves, rollback, resume, 429)
+        run: scripts/test-bootstrap.sh
+      - name: The SBOM generator runs on the lock file
+        run: python3 scripts/make-sbom.py --version 0.0.0 | jq -e '.components | length > 100'
+  vendor-lock:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install scripts and the lock file pass shellcheck
+        run: shellcheck scripts/install-firecracker.sh scripts/install-cloud-hypervisor.sh scripts/test-vendor-lock.sh
+      - name: packaging/vendor.lock is well formed and the install scripts accept the pin flags (offline)
+        run: scripts/test-vendor-lock.sh
+
+  # The suites of scripts/test-release-e2e.sh that need no KVM and no root on the host. docs/release-test-report.md has the rest.
+  e2e-scripts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: The e2e scripts and the deploy script pass shellcheck (warnings and above)
+        run: shellcheck -S warning scripts/e2e/*.sh scripts/test-release-e2e.sh scripts/deploy-remote.sh
+      - name: deploy-remote.sh refuses an unknown option
+        run: |
+          if scripts/deploy-remote.sh 127.0.0.1 nobody --nonsense --dry-run 2>/dev/null; then echo "accepted an unknown option"; exit 1; fi
+
+  image-k8s:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Build the Dockerfile from a staged tree, run it, render and kustomize deploy/k8s
+        run: scripts/e2e/image-k8s.sh
+
+  enroll-e2e:
+    runs-on: ubuntu-latest
+    steps:
+      # fluxvm-image needs the sibling guestkit checkout at the pinned tag (packaging/guestkit.ref).
+      - uses: actions/checkout@v7
+        with:
+          path: fluxvm
+      - uses: actions/checkout@v7
+        with:
+          repository: zyvorai/guestkit
+          ref: v1.2.9   # packaging/guestkit.ref; checked by scripts/check-guestkit-pin.sh
+          path: guestkit
+      - uses: dtolnay/rust-toolchain@stable
+      - name: System deps
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq libsystemd-dev libhivex-dev pkg-config jq redis-server
+      - name: Enrollment security (58 checks), real central and nodes, the central API (82 checks), HA with a real Redis (21 checks), tunnels through central
+        working-directory: fluxvm
+        run: scripts/test-release-e2e.sh --suite enroll-invariants --suite enroll-security --suite central-node --suite agent-central-api --suite agent-central-ha --suite agent-tunnel
+      # The suites above left a release fluxvm-agent in target/. The Studio fleet forms run against it with the embedded bundle.
+      - name: Studio fleet forms (join token, lease, billing) against a real central and a simulated Mac
+        working-directory: fluxvm
+        run: |
+          if command -v google-chrome >/dev/null 2>&1 || command -v google-chrome-stable >/dev/null 2>&1; then
+            BIN="$PWD/target/release/fluxvm-agent" bash ui/e2e/flows.sh
+          else
+            echo "::notice::no Chrome on this runner; skipping the Studio form flows"
+          fi

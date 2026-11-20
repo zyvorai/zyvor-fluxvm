@@ -1,0 +1,135 @@
+.fx-logo { display: inline-block; width: 22px; height: 22px; border-radius: 6px; background: linear-gradient(135deg, #64d2ff, #0a84ff 55%, #5e5ce6); position: relative; }
+.fx-logo::after { content: ''; position: absolute; inset: 5px 4px 5px 5px; background: #fff; clip-path: polygon(0 0, 100% 0, 100% 24%, 32% 24%, 32% 42%, 80% 42%, 80% 66%, 32% 66%, 32% 100%, 0 100%); }
+.fx-logo.lg { width: 56px; height: 56px; border-radius: 15px; }
+.fx-logo.lg::after { inset: 14px 11px 14px 14px; }
+.vm-name { font-weight: 600; letter-spacing: -0.01em; }
+.vm-err { color: var(--danger); font-size: 12px; margin-top: 2px; }
+.vm-stack { display: inline-block; margin-left: 8px; font-size: 11px; color: var(--text-tertiary); border: 1px solid var(--hairline-1); border-radius: 6px; padding: 1px 6px; }
+
+/* Kubernetes pod window: logs and a shell, dressed like Terminal.app (always dark, whatever the theme). */
+.kx-wrap { position: fixed; inset: 0; z-index: 60; display: grid; place-items: center; padding: 3vh 3vw; background: rgba(0, 0, 0, 0.45); backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px); }
+.kx-window { --kx-bg: #1c1c1e; --kx-fg: #e9ebeb; --kx-dim: #8e8e93; --kx-line: #2c2c2e; width: min(1200px, 100%); height: min(86vh, 900px); display: grid; grid-template-rows: auto auto 1fr auto; border-radius: 12px; overflow: hidden; background: var(--kx-bg); color: var(--kx-fg); box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.12), 0 28px 80px rgba(0, 0, 0, 0.6); font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace; font-size: 12.5px; }
+.kx-window:has(.kx-sub-bar) { grid-template-rows: auto auto auto 1fr auto; }
+.kx-titlebar { display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 12px; padding: 9px 12px; background: linear-gradient(#3a3a3c, #2c2c2e); border-bottom: 1px solid #000; font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', system-ui, sans-serif; font-size: 13px; }
+.kx-dots { display: inline-flex; gap: 8px; }
+.kx-dot { width: 12px; height: 12px; border-radius: 50%; border: 0; padding: 0; display: inline-grid; place-items: center; color: transparent; }
+.kx-dot-close { background: #ff5f57; cursor: pointer; }
+.kx-dot-close:hover, .kx-dot-close:focus-visible { color: rgba(0, 0, 0, 0.6); }
+.kx-dot-min { background: #febc2e; }
+.kx-dot-max { background: #28c840; }
+.kx-title { text-align: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: #e5e5ea; }
+.kx-title b { font-weight: 600; }
+.kx-sub { color: var(--kx-dim); }
+.kx-tabs { display: inline-flex; background: #1c1c1e; border-radius: 7px; padding: 2px; }
+.kx-tabs button { all: unset; cursor: pointer; padding: 3px 12px; border-radius: 5px; color: var(--kx-dim); font: inherit; }
+.kx-tabs button.is-on { background: #636366; color: #fff; }
+.kx-sub-bar { padding: 6px 12px; background: #242426; border-bottom: 1px solid var(--kx-line); color: var(--kx-dim); }
+.kx-sub-bar select, .kx-bar select, .kx-bar input { background: #1c1c1e; color: var(--kx-fg); border: 1px solid #48484a; border-radius: 6px; padding: 3px 8px; font: inherit; }
+.kx-bar { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; padding: 7px 12px; background: #242426; border-bottom: 1px solid var(--kx-line); }
+.kx-bar input { flex: 1 1 200px; min-width: 120px; }
+.kx-bar button { all: unset; cursor: pointer; display: inline-flex; align-items: center; gap: 5px; padding: 3px 9px; border-radius: 6px; border: 1px solid #48484a; color: #d1d1d6; font: inherit; }
+.kx-bar button:hover { background: #3a3a3c; }
+.kx-bar button.is-on { background: #0a84ff33; border-color: #0a84ff; color: #fff; }
+.kx-bar button:focus-visible, .kx-tabs button:focus-visible, .kx-dot:focus-visible { outline: 2px solid #0a84ff; outline-offset: 1px; }
+.kx-log { overflow: auto; padding: 8px 0; line-height: 1.5; background: #141416; min-height: 0; }
+.kx-line { display: flex; gap: 10px; padding: 0 14px 0 0; border-left: 3px solid transparent; }
+.kx-line:hover { background: #ffffff0d; }
+.kx-line.lv-error, .kx-line.lv-fatal { background: #ff453a14; border-left-color: #ff453a; }
+.kx-line.lv-warn { background: #ffd60a10; border-left-color: #ffd60a; }
+.kx-n { flex: none; width: 4.5ch; text-align: right; color: #48484a; user-select: none; padding-left: 8px; }
+.kx-ts { flex: none; color: var(--kx-dim); }
+.kx-lv { flex: none; font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.04em; padding: 0 6px; border-radius: 4px; align-self: flex-start; margin-top: 2px; line-height: 1.55; }
+.kx-lv.lv-fatal { background: #ff453a; color: #fff; font-weight: 700; }
+.kx-lv.lv-error { background: #ff453a33; color: #ff6961; }
+.kx-lv.lv-warn { background: #ffd60a2e; color: #ffd60a; }
+.kx-lv.lv-info { background: #30d1582e; color: #32d74b; }
+.kx-lv.lv-debug { background: #64d2ff26; color: #64d2ff; }
+.kx-lv.lv-trace { background: #ffffff14; color: var(--kx-dim); }
+.kx-msg { flex: 1 1 auto; min-width: 0; white-space: pre; }
+.kx-log.is-wrap .kx-msg { white-space: pre-wrap; overflow-wrap: anywhere; }
+.kx-note { margin: 0; padding: 14px; color: var(--kx-dim); } .kx-err { color: #ff6961; }
+/* Terminal.app's ANSI palette */
+.kx-fg-black { color: #6e6e73; } .kx-fg-red { color: #c23621; } .kx-fg-green { color: #25bc24; } .kx-fg-yellow { color: #adad27; }
+.kx-fg-blue { color: #6d5cff; } .kx-fg-magenta { color: #d338d3; } .kx-fg-cyan { color: #33bbc8; } .kx-fg-white { color: #cbcccd; }
+.kx-fg-bright-black { color: #818383; } .kx-fg-bright-red { color: #fc391f; } .kx-fg-bright-green { color: #31e722; } .kx-fg-bright-yellow { color: #eaec23; }
+.kx-fg-bright-blue { color: #7c6bff; } .kx-fg-bright-magenta { color: #f935f8; } .kx-fg-bright-cyan { color: #14f0f0; } .kx-fg-bright-white { color: #e9ebeb; }
+.kx-bg-black { background: #000; } .kx-bg-red { background: #c23621; } .kx-bg-green { background: #25bc24; } .kx-bg-yellow { background: #adad27; }
+.kx-bg-blue { background: #492ee1; } .kx-bg-magenta { background: #d338d3; } .kx-bg-cyan { background: #33bbc8; } .kx-bg-white { background: #cbcccd; color: #000; }
+.kx-b { font-weight: 700; } .kx-dim { opacity: 0.6; } .kx-u { text-decoration: underline; }
+/* highlights for plain log text */
+.kx-key { color: #64d2ff; } .kx-str { color: #32d74b; } .kx-num { color: #ffd60a; } .kx-ip { color: #bf5af2; }
+.kx-url { color: #0a84ff; text-decoration: underline; } .kx-method { color: #ff79c6; font-weight: 700; } .kx-lit { color: #bf5af2; }
+.kx-code-ok { color: #32d74b; font-weight: 700; } .kx-code-info { color: #64d2ff; font-weight: 700; } .kx-code-warn { color: #ffd60a; font-weight: 700; } .kx-code-error { color: #ff453a; font-weight: 700; }
+.kx-foot { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; padding: 6px 12px; background: #242426; border-top: 1px solid #000; color: var(--kx-dim); font-size: 11.5px; }
+.kx-grow { flex: 1; }
+.kx-shell { min-height: 0; padding: 10px 12px; background: #141416; overflow: auto; --terminal-bg: #141416; --terminal-text: #e9ebeb; }
+.kx-shell .fx-term-body { height: min(66vh, 640px); border-color: #2c2c2e; }
+.kx-shell .fx-muted { color: var(--kx-dim); }
+@media (max-width: 700px) { .kx-wrap { padding: 0; } .kx-window { height: 100vh; border-radius: 0; } .kx-titlebar { grid-template-columns: auto 1fr; } .kx-tabs { grid-column: 1 / -1; justify-self: start; } }
+@media (prefers-reduced-motion: no-preference) { .kx-window { animation: kxIn 0.22s cubic-bezier(0.2, 0.9, 0.3, 1.1) both; } @keyframes kxIn { from { opacity: 0; transform: scale(0.97) translateY(6px); } } }
+.fx-link { all: unset; cursor: pointer; color: var(--apple-link, #2997ff); }
+.fx-link:hover { text-decoration: underline; }
+.fx-link:focus-visible { outline: 2px solid var(--apple-link, #2997ff); outline-offset: 2px; border-radius: 3px; }
+
+/* Kubernetes traffic graph */
+.kg-layout { display: grid; grid-template-columns: minmax(0, 1fr) minmax(280px, 380px); gap: 16px; align-items: start; }
+@media (max-width: 1100px) { .kg-layout { grid-template-columns: minmax(0, 1fr); } }
+.kg-bar { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center; margin-bottom: 12px; }
+.kg-bar label { display: inline-flex; gap: 6px; align-items: center; font-size: 13px; color: var(--text-secondary); }
+.kg-bar .fx-input { max-width: 220px; }
+.kg-grow { flex: 1; }
+.kg-scroll { overflow: auto; border: 1px solid var(--hairline-1); border-radius: var(--radius-lg); background: var(--fill-quaternary, transparent); max-height: 70vh; }
+.kg-svg { display: block; }
+.kg-node { cursor: pointer; outline: none; transition: opacity 0.15s; }
+.kg-node rect { fill: var(--surface-1, #fff); stroke: var(--hairline-2, #c7c7cc); stroke-width: 1.2; }
+.kg-node.workload rect { stroke: var(--apple-blue, #0071e3); }
+.kg-node.system rect { stroke-dasharray: 4 3; }
+.kg-node.world rect { fill: color-mix(in srgb, #8e8e93 14%, var(--surface-1, #fff)); stroke: #8e8e93; }
+.kg-node.host rect { stroke: #bf5af2; }
+.kg-node:hover rect, .kg-node:focus-visible rect, .kg-node.is-picked rect { stroke-width: 2.4; filter: drop-shadow(0 2px 6px rgba(0, 0, 0, 0.18)); }
+.kg-node:focus-visible rect { stroke: var(--apple-link, #2997ff); }
+.kg-label { font: 600 13px -apple-system, BlinkMacSystemFont, system-ui, sans-serif; fill: var(--text-primary, #1d1d1f); }
+.kg-sub { font: 11px -apple-system, BlinkMacSystemFont, system-ui, sans-serif; fill: var(--text-tertiary, #86868b); }
+.kg-edge path:first-child { stroke: color-mix(in srgb, var(--apple-blue, #0071e3) 70%, transparent); transition: opacity 0.15s; }
+.kg-edge.bad path:first-child { stroke: var(--apple-red, #ff3b30); }
+.kg-edge .kg-hit { stroke: transparent; }
+.kg-edge:hover path:first-child { stroke-opacity: 1; }
+.kg-arrowhead { fill: color-mix(in srgb, var(--apple-blue, #0071e3) 80%, transparent); } .kg-arrowhead.bad { fill: var(--apple-red, #ff3b30); }
+.kg-count { font: 600 10.5px ui-monospace, 'SF Mono', Menlo, monospace; fill: var(--text-secondary, #6e6e73); paint-order: stroke; stroke: var(--surface-1, #fff); stroke-width: 3px; }
+.kg-edge.dim, .kg-node.dim { opacity: 0.18; }
+.kg-legend { display: flex; flex-wrap: wrap; gap: 14px; align-items: center; margin-top: 10px; font-size: 12px; color: var(--text-secondary); }
+.kg-sw { display: inline-block; width: 18px; height: 4px; border-radius: 2px; vertical-align: middle; margin-right: 4px; background: var(--apple-blue, #0071e3); }
+.kg-sw.bad { background: var(--apple-red, #ff3b30); }
+.kg-panel dl { display: grid; grid-template-columns: auto 1fr; gap: 6px 14px; margin: 10px 0; }
+.kg-panel dt { color: var(--text-tertiary); } .kg-panel dd { margin: 0; }
+.kg-h { margin: 14px 0 6px; font-size: 13px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-tertiary); }
+@media (prefers-reduced-motion: reduce) { .kg-node, .kg-edge path:first-child { transition: none; } }
+
+/* Connect tab */
+.cn-routes { display: grid; gap: 14px; }
+.cn-route { padding-bottom: 12px; border-bottom: 1px solid var(--hairline-1); }
+.cn-route:last-child { border-bottom: 0; padding-bottom: 0; }
+.cn-head { display: flex; gap: 10px; align-items: center; margin-bottom: 6px; }
+.cn-cmd { display: flex; gap: 8px; align-items: center; background: var(--fill-tertiary); border: 1px solid var(--hairline-1); border-radius: var(--radius-md); padding: 6px 6px 6px 12px; }
+.cn-cmd code { flex: 1; min-width: 0; overflow-x: auto; white-space: nowrap; font-size: 13px; }
+.cn-route p { margin: 6px 0 0; }
+
+/* VNC display (noVNC) */
+
+/* Kubernetes usage cells */
+.kd-use { display: inline-flex; gap: 8px; align-items: center; min-width: 190px; }
+.kd-use .fx-meter { flex: 0 0 64px; }
+
+/* checkpoint timeline: oldest on the left, click a point to go back to it */
+.kx-undo { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; padding: 10px 14px; margin-bottom: 14px; border: 1px solid var(--accent-amber); border-radius: 10px; }
+.kx-timeline { list-style: none; margin: 0 0 16px; padding: 18px 4px 4px; display: flex; gap: 0; overflow-x: auto; position: relative; }
+.kx-timeline li { flex: 0 0 auto; min-width: 110px; position: relative; padding-top: 14px; }
+.kx-timeline li::before { content: ""; position: absolute; top: 5px; left: 0; right: 0; height: 2px; background: var(--hairline-1); }
+.kx-tl-dot { all: unset; cursor: pointer; display: flex; flex-direction: column; gap: 2px; padding: 0 10px 0 0; position: relative; }
+.kx-tl-dot::before { content: ""; position: absolute; top: -14px; left: 0; width: 12px; height: 12px; border-radius: 50%; background: var(--text-tertiary); border: 2px solid var(--bg, transparent); }
+.kx-tl-dot:hover::before, .kx-tl-dot:focus-visible::before { outline: 2px solid var(--text-primary); }
+.kx-tl-auto::before { background: var(--accent-green); }
+.kx-tl-try::before { background: var(--accent-amber); }
+.kx-tl-sleep::before { background: var(--accent-blue, var(--text-secondary)); }
+.kx-tl-label { color: var(--text-primary); font-size: 13px; overflow: hidden; text-overflow: ellipsis; max-width: 150px; }
+.kx-tl-when { color: var(--text-secondary); font-size: 12px; }

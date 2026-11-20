@@ -1,0 +1,1604 @@
+# Day-2 operations
+
+Host setup, remote deploy, end-to-end verification, the Firecracker jailer, backend
+auto-selection, admission policy, pause/resume/exec, cgroup v2 resource control, warm
+VM pools, the image catalog, alternative storage backends, the distributed node-agent,
+and on-disk state layout. See also [api.md](api.md) for the REST API and
+[PRODUCTION.md](PRODUCTION.md) for the whole-project production checklist.
+
+## Host requirements
+
+Linux x86_64 with virtualization enabled and `/dev/kvm` available.
+
+Typical packages/tools:
+
+```bash
+qemu-system-x86_64
+qemu-img
+cloud-localds
+ip
+cp
+nft                 # netns NAT + explicit mode = "legacy" sandbox dataplane
+# Native eBPF dataplane — the default (sandbox.dataplane.mode = ebpf, required = true):
+clang llvm libbpf-dev bpftool   # build + load bpf/fluxvm_tc.bpf.c (+ optional fluxvm_xdp.bpf.c)
+tc                              # iproute2 TC attach
+```
+
+The release tarball declares no dependencies (releases up to 0.4.21 also shipped `.deb`/`.rpm` packages that did; the package scripts
+still do, see [linux-package.md](linux-package.md)). Install what the node needs yourself. What those packages required: the runtime libraries
+`libhivex0` and `libsystemd0` (Debian/Ubuntu) or `hivex-libs` and `systemd-libs` (Fedora/RHEL), `iproute2`/`iproute`, QEMU with `qemu-img`
+(`qemu-system-x86` or `qemu-system-arm`, `qemu-utils`; `qemu-kvm`, `qemu-img` on Fedora/RHEL), and as optional extras `nftables`, `bpftool`,
+`dnsmasq`, `swtpm`, `cloud-image-utils` (or `xorriso` for the seed ISO). The config can point at each tool by path (`qemu_binary`,
+`qemu_img_binary`, `qemu_storage_daemon_binary` for incremental backups, `virtiofsd_binary` for `shared_folders`, `cloud_localds_binary`,
+`swtpm_binary`, `cloud_hypervisor_binary`, `ch_remote_binary`, `firecracker_binary`, `fluxvm_hypervisor_binary`); every default is the bare name, resolved through
+`$PATH`. The `qemu_binary` default is `qemu-system-x86_64` on every architecture: set `qemu_binary = "qemu-system-aarch64"` on an ARM host.
+
+The native dataplane is the default: a config that omits `[sandbox.dataplane]` selects
+`mode = "ebpf"` with `required = true`. On such a host, VMs with a host-visible edge (TAP,
+bridge, macvtap, per-VM netns) **fail create/start** unless `/usr/lib/fluxvm/bpf/fluxvm_tc.bpf.o`
+is installed, bpffs is mounted at `/sys/fs/bpf`, and the service can load BPF (`CAP_BPF` /
+`CAP_SYS_ADMIN`, sufficient `LimitMEMLOCK`). User-mode NAT and `none` networking have no host
+edge and are unaffected. Check readiness with `./scripts/network-fabric-preflight.sh --require-bpf`.
+Hosts that cannot load BPF must set `mode = "legacy"` explicitly. See
+[primary-ebpf.md](primary-ebpf.md).
+
+### Upgrading a host to the eBPF-default release
+
+Releases before native eBPF became primary treated an omitted dataplane table as legacy nftables
+with optional attachment. Before restarting an upgraded daemon:
+
+1. Check the config: `grep -A3 '^\[sandbox.dataplane\]' /etc/fluxvm.toml`. Hosts that already
+   set `mode` (`legacy`, `ebpf` or `cilium`) and `required` explicitly keep their behavior.
+2. If the mode is omitted, either install the BPF objects and pass
+   `./scripts/network-fabric-preflight.sh --require-bpf`, or pin `mode = "legacy"`.
+3. Optionally adopt the deny-by-default GA policy with
+   `sudo ./scripts/enable-network-fabric-ga.sh --dry-run`, then `--restart`. This is a separate
+   policy decision: the new default keeps `default_allow = true`.
+4. After the restart, `curl -sf http://127.0.0.1:7788/readyz` and `fluxvm dataplane health`
+   should report `"ok": true`; start one VM with a TAP/bridge network to confirm attachment.
+
+Neither Cloud Hypervisor nor Firecracker is packaged by `apt`/`dnf`, so this repo ships installer
+scripts that fetch the upstream release binary for your CPU architecture (x86_64 or aarch64) and
+verify it against the SHA-256 digest GitHub records for that release asset before installing it.
+
+For Firecracker, provide a compatible uncompressed guest kernel (`vmlinux`) and a Linux rootfs. For Cloud Hypervisor, use either direct kernel boot or firmware boot. The project's Rust Hypervisor Firmware (`hypervisor-fw`) is passed through the request's `kernel` field, matching the Cloud Hypervisor quick-start; `firmware` is reserved for firmware loaded through the VMM's `--firmware` option.
+
+### Installing (or updating) a single VMM
+
+```bash
+./scripts/install-cloud-hypervisor.sh            # latest release, both cloud-hypervisor + hypervisor-fw
+./scripts/install-cloud-hypervisor.sh v53.0       # pin a version
+./scripts/install-cloud-hypervisor.sh --no-firmware
+
+./scripts/install-firecracker.sh                  # latest release, firecracker + jailer
+./scripts/install-firecracker.sh v1.16.1          # pin a version
+```
+
+Both scripts resolve the requested (or latest) GitHub release, download the arch-appropriate
+binary, verify its SHA-256 digest, and `install` it to `/usr/local/bin` (override with
+`INSTALL_DIR=...`). They are safe to re-run — an already-installed matching version is a no-op.
+
+## Deploy to a remote host
+
+**Easiest (Fabric + FluxVM stack):** from this repo with sibling `../fabric`:
+
+```bash
+./scripts/ship sus@HOST           # quick redeploy + readiness
+./scripts/ship sus@HOST --full    # first install
+```
+
+FluxVM-only remote deploy:
+
+`scripts/deploy-remote.sh` does the above end-to-end over SSH: rsync the source, install system
+packages + Cloud Hypervisor/Firecracker, install a Rust toolchain if needed, build, and install the
+binary, config, and systemd unit.
+
+```bash
+./scripts/deploy-remote.sh 10.0.0.5 deploy --key   # full deploy, SSH key auth
+./scripts/deploy-remote.sh deploy@10.0.0.5 --quick  # rsync + build only, skip dep install
+./scripts/deploy-remote.sh 10.0.0.5 deploy --verify-only
+./scripts/deploy-remote.sh --help
+```
+
+## Testing networking and lifecycle end-to-end
+
+`scripts/test-networking.sh` boots real VMs over each supported network mode and proves they're
+actually reachable over SSH — not just that the process launched:
+
+- **QEMU user-mode NAT** + host port forward (no host network changes required).
+- **TAP + Linux bridge + DHCP** (against an existing bridge with a DHCP server on it, e.g.
+  libvirt's `virbr0` or a bridge set up by `bootstrap-host.sh`). Skipped with a warning if the
+  bridge doesn't exist.
+- **macvtap**, against a throwaway `dummy0` parent by default so the test never touches a real
+  physical NIC/switch (pass `--macvtap-parent eth0` to test against a real uplink instead). Since
+  macvtap's `bridge` mode can't reach the parent/host directly, the test creates a second, host-side
+  macvtap sibling on the same parent to reach the guest's statically-assigned IP.
+
+All three also assert cleanup: the QEMU process and (for TAP/macvtap) the interface must actually be
+gone after `fluxctl delete` — this is what caught a TAP-interface leak during development (fixed
+by making VM shutdown wait for the process to actually exit before releasing its network resources).
+
+```bash
+sudo ./scripts/test-networking.sh                          # bridge defaults to vmbr0, macvtap uses dummy0
+sudo ./scripts/test-networking.sh --bridge virbr0           # test TAP against libvirt's default network
+sudo ./scripts/test-networking.sh --macvtap-parent eth0     # test macvtap against a real uplink
+sudo ./scripts/test-networking.sh --image /path/to/base.qcow2   # skip auto-downloading a test image
+```
+
+It downloads an Ubuntu 24.04 cloud image on first run (cached under `<state_dir>/images/`) unless
+`--image` is given, generates a throwaway SSH keypair, and prints a pass/fail/warn summary.
+
+`scripts/test-lifecycle.sh` covers the rest of the VM lifecycle the same way: boots a QEMU VM with
+the guest agent enabled and `network.mode=none`, proves `exec` round-trips real output over vsock
+(no network path exists at all), forces a CPU-bound loop into the guest so pausing has something to
+verify (an idle guest's VMM process shows ~flat CPU time whether it's paused or just idle — this
+avoids that false signal), confirms the VMM's own CPU-time counter actually freezes while paused,
+confirms `exec` works again after resume, confirms `stop` exits the VMM process, and confirms two
+concurrently-created VMs get distinct vsock CIDs. QEMU only — Cloud Hypervisor and Firecracker were
+validated manually (see [Pause, resume, and exec](#pause-resume-and-exec) below) since they need a
+Firecracker-compatible uncompressed `vmlinux` / extracted whole-disk rootfs respectively, more setup
+than belongs in an unattended script.
+
+```bash
+sudo ./scripts/test-lifecycle.sh
+sudo ./scripts/test-lifecycle.sh --image /path/to/base.qcow2
+```
+
+## Firecracker jailer (chroot, uid/gid isolation, cgroups)
+
+Lab default is off. Production and untrusted multi-tenant hosts should enable
+jailer (Firecracker's own rule: start via `jailer` only in production). Config
+is host-wide (no per-VM flag) — every Firecracker VM either goes through
+`jailer` or none do:
+
+```toml
+[jailer]
+enabled = true
+enforce = true                 # fail closed at serve + launch if enabled is false
+jailer_binary = "jailer"          # resolved via $PATH unless you give an absolute path
+uid = 123                         # must be non-root; unique per tenant for a real isolation boundary
+gid = 100
+chroot_base_dir = "/srv/jailer"   # should be on the same filesystem as state_dir (see below)
+```
+
+`jailer.enforce = true`, or `auth.require = true` with a non-loopback `listen`,
+makes jailer **required**: `fluxctl serve` and Firecracker launches refuse to
+proceed until `enabled = true`. Loopback lab with `auth.require` alone does
+not force jailer.
+
+When jailer is on and the request omits `kernel_args`, FluxVM uses production
+boot args (`quiet 8250.nr_uarts=0`, no `console=ttyS0`) so the guest cannot
+unbounded-flood host stdout via the 8250 serial (Firecracker prod-host-setup).
+Override with an explicit `kernel_args` if you need a serial console.
+
+`firecracker_binary` must be an absolute path when jailer is enabled — `jailer`'s `--exec-file` needs
+a real path, not a bare command resolved via `$PATH`.
+
+FluxVM hardlinks the kernel and rootfs into `jailer`'s chroot (`<chroot_base_dir>/<firecracker
+basename>/<vm-id>/root/`) before invoking it — falling back to a real copy if `chroot_base_dir` is on
+a different filesystem than the source files, which is why same-filesystem placement matters (a
+multi-GB rootfs copy per VM otherwise). Every subsequent control-plane operation (pause/resume/stop,
+vsock exec) is routed through the VM's *actual* recorded socket paths rather than a path reconstructed
+from its workspace directory — necessary because jailing relocates both the Firecracker API socket and
+the vsock proxy socket into the chroot, a genuinely different location than the non-jailed case.
+
+Verified on real hardware (`scripts/test-firecracker-jailer.sh`): the resulting Firecracker process
+really runs as the configured unprivileged uid/gid (confirmed via `ps`, not just "the command didn't
+error"); the guest boots and answers `exec` over vsock through the relocated proxy socket;
+pause/resume/stop all work against the relocated API socket; `delete` cleans up both the normal
+workspace and the separate jail chroot tree, leaving no orphaned files or process.
+
+Threat-containment mapping (jailer + virtio rate limiters + Fabric egress) —
+Track A for the general control plane (not disposable-only):
+[capability-figures.md](capability-figures.md). Production merge profile:
+[configs/production-hardening.toml](../configs/production-hardening.toml).
+
+## Auto backend selection
+
+Set `"backend": "auto"` and the manager picks a concrete backend for you, resolved once at the very
+start of `create` (the resolved value — never `"auto"` — is what's persisted and returned):
+
+1. **Firecracker** if the request has a `kernel`, or `firecracker_kernel` is set in the config — the
+   fastest microVM start when a direct-boot kernel is available.
+2. otherwise **Cloud Hypervisor** if the request has a `kernel`/`firmware`, or
+   `cloud_hypervisor_firmware` is set in the config.
+3. otherwise **QEMU** — the only one of the three that boots from just a disk image, via its own
+   BIOS/UEFI, with no kernel or firmware required.
+
+`"backend": "flux-vm"` is never chosen by `auto` — set it explicitly for the agent-sandbox track.
+
+```json
+{ "name": "auto-example", "backend": "auto", "image": "/var/lib/fluxvm/images/ubuntu.qcow2", "...": "..." }
+```
+
+Verified on real hardware (`scripts/test-auto-backend.sh`): all three resolution paths actually boot
+the chosen backend and answer over vsock, not just that `resolve_backend` returns the right enum
+value in isolation.
+
+## Policy (admission limits)
+
+`[policy]` in the config file (see `config.example.toml`) lets an operator cap what a `create`
+request is allowed to ask for. Every field is optional and defaults to unrestricted — an absent or
+empty `[policy]` table behaves exactly like no policy at all:
+
+```toml
+[policy]
+max_vcpus = 8
+max_memory_mib = 16384
+max_disk_gib = 100
+max_ttl_seconds = 86400          # every request must set ttl_seconds <= this; unbounded VMs are rejected
+allowed_backends = ["qemu", "firecracker"]
+allowed_image_dirs = ["/var/lib/fluxvm/images"]
+```
+
+Every `[policy]` key, from `crates/fluxvm-core/src/config.rs` (all optional; unset means unrestricted):
+
+| Key | Meaning |
+|---|---|
+| `max_vcpus`, `max_memory_mib`, `max_disk_gib` | per-request caps |
+| `max_ttl_seconds` | every request must set `ttl_seconds` at or below this; an unbounded VM is rejected |
+| `allowed_backends` | only these backends (checked after `"auto"` resolves) |
+| `allowed_image_dirs` | the request's `image` must sit under one of these (a path-prefix check that canonicalizes existing components) |
+| `require_catalog_names` | default false; when true create accepts only a catalog name whose signature verifies against `[[catalog.trusted_signers]]` |
+| `max_vcpus_host`, `max_memory_mib_host` | host-wide vCPU and memory (MiB) caps, summed from the quota ledger |
+| `allowed_network_modes` | only these modes are admitted (`none`, `user`, `tap`, `macvtap`) |
+| `allow_extra_args` | default false: a non-empty `extra_args` is rejected |
+| `allowed_migration_bind_addresses` | `MigrationReceiverRequest.listen_host` must be one of these literal addresses (after an empty value defaults to `0.0.0.0`) |
+| `allowed_migration_tls_dirs` | each path in a `MigrationTlsSpec` must sit under one of these directories (same prefix semantics as `allowed_image_dirs`) |
+| `default_cpu_quota_percent`, `memory_max_equals_guest` | launch-time cgroup limits, see [oversubscription.md](oversubscription.md) |
+| `min_host_mem_available_mib`, `max_host_mem_psi_some_avg10`, `max_host_mem_psi_full_avg10`, `deny_host_pressure_level`, `pressure_defer_secs` | pressure-aware admission (all default off); `deny_host_pressure_level` (`warn` or `critical`) is macOS only |
+| `[[policy.tenants]]` | per-tenant aggregate caps, below |
+
+Checked once, right after `"auto"` resolves to a concrete backend and before any disk/network work
+starts, so a rejected request fails fast with a specific reason (`request vcpus (4) exceeds policy
+max_vcpus (2)`, `policy requires ttl_seconds to be set...`, `backend Firecracker is not permitted by
+policy allowed_backends [Qemu]`, etc.) rather than a generic 400. `allowed_image_dirs` is a plain
+path-prefix check — good enough to stop a tenant pointing `image` at an arbitrary host path, not a
+symlink-resistant sandboxing boundary. Verified against a real config on real hardware: all five
+cases (four rejections, one compliant create that actually boots) behave as documented.
+
+### Per-tenant aggregate quotas
+
+Everything above is a **per-request** check — it validates the one incoming `CreateVmRequest` in
+isolation, never looking at what else already exists. `[[policy.tenants]]` is different: an
+**aggregate** cap, summed across every existing VM a tenant already owns plus the incoming request,
+matched against `CreateVmRequest.tenant` (itself resolved authoritatively by `fluxvm-api` from
+`[[auth.tokens]]`'s own `tenant` field or an OIDC claim before `fluxvm-scheduler` ever sees the
+request — see `SECURITY.md`'s "per-token / OIDC `tenant` is authoritative" note):
+
+```toml
+[[policy.tenants]]
+tenant = "acme"
+max_vcpus_total = 32
+max_memory_mib_total = 131072
+max_vms_total = 20
+```
+
+A tenant with no matching entry is unrestricted by this mechanism (still subject to every
+per-request `[policy]` field above, unchanged). Checked right after the per-request `[policy]`
+check, only when the request actually has a `tenant` set and at least one `[[policy.tenants]]`
+entry exists at all — a full `Store::list()` scan is skipped entirely otherwise, so hosts that
+don't use per-tenant quotas pay nothing extra per create. This is the aggregate, fleet-wide
+counterpart to Kairon's own `MachineQuota` CRD (a sibling project in the same family) — deliberately
+config-file-based here rather than a separate CRD/API object, matching how every other admission
+control in this project is already shaped (`[policy]`, `[[auth.tokens]]`).
+
+### REST API rate limiting
+
+`[policy]`/`[[policy.tenants]]` above cap what a request may *ask for*; neither caps how *often* one
+caller can ask. Before this existed, `fluxvm-api` had no request-volume limiting at all — a single
+misbehaving script holding one valid token (or hitting an unauthenticated loopback deployment) could
+issue an unbounded number of requests, no different in effect from an external DoS, with nothing in
+the REST layer itself to push back. `auth.rate_limit_rps`/`auth.rate_limit_burst` (both opt-in, must
+be set together) close that gap with a small hand-rolled per-caller token bucket
+(`fluxvm-api::rate_limit`, no new dependency):
+
+```toml
+[auth]
+rate_limit_rps = 20
+rate_limit_burst = 40
+```
+
+Keyed by the same actor identity the audit log already attributes a request to — a static token's
+`name`, an OIDC subject, an mTLS client-cert CN (taken from the verified peer certificate, not from request headers; see [auth-oidc-mtls.md](auth-oidc-mtls.md)), or `"anonymous-admin"` on an unauthenticated
+loopback deployment with no credentials configured at all — so a caller's bucket tracks the identity
+already established by `auth_middleware`, not raw connection volume; two callers sharing one token
+share one bucket by design, the same way the audit log already attributes them as one actor. Runs
+after auth (so every request it sees already carries that identity) and before the per-tenant scope
+guard, with its own explicit bypass for `GET /healthz`/`GET /readyz` (auth only skips resolving an
+identity for those two, it doesn't stop them reaching the layers below it), so a liveness/readiness
+probe can never be starved by a caller's own throttling. A throttled request gets
+`429 Too Many Requests` with `Retry-After` set. Absent by default (both fields unset): no rate
+limiting at all, byte-for-byte the behavior before this existed. The admission-side checks above stay
+separate and unaffected either way — this only bounds request frequency, never what a single request
+is allowed to contain.
+
+## Pause, resume, and exec
+
+```bash
+sudo /usr/local/bin/fluxctl --config /etc/fluxvm.toml pause <id>
+sudo /usr/local/bin/fluxctl --config /etc/fluxvm.toml resume <id>
+sudo /usr/local/bin/fluxctl --config /etc/fluxvm.toml exec <id> -- echo hello
+```
+
+`exec` requires `agent.enabled: true` in the VM spec (see [the JSON contract](api.md#vm-json-contract))
+and the guest image to have `fluxvm-guest-agent` installed and running — build it with `cargo build
+--release -p fluxvm-guest-agent` and bake it into an image via `build-image`'s
+`copy_in`/`enable_services` (see [Build an image](build-image-tutorials.md) and
+`systemd/fluxvm-guest-agent.service`).
+
+**Guest-agent auth:** every agent-enabled VM gets a random shared-secret token (or the one you set in
+`agent.token`) burned into that VM's own disk — never the shared base image — before it boots, at
+`/etc/fluxvm-guest-agent.token`. The agent checks it on every request; `eph exec`/the REST `/agent`
+route supply it automatically from the VM's own record, so callers never handle it directly. This
+stops a process on the host *other than fluxvm* from opening a raw vsock socket to the VM's CID and
+running commands as root — it does not replace REST-layer auth (see [api.md](api.md#auth--rbac)),
+which answers a different question ("can this caller reach fluxvm's API at all"). A VM created before
+this existed, or with no token file baked into its image for another reason, still runs the agent
+unauthenticated — check the agent's own startup log line to be sure. Verified on real hardware
+(`scripts/test-guest-agent-auth.sh`): a raw, tokenless (or wrong-token) vsock request is rejected,
+the correct token succeeds, and `eph exec` keeps working unmodified.
+
+`stop` always tries a graceful VMM-level shutdown first (QMP `system_powerdown` for QEMU, `ch-remote
+shutdown` for Cloud Hypervisor, `SendCtrlAltDel` for Firecracker — x86_64 only, no ARM equivalent in
+Firecracker's API today) and only force-kills the process if it doesn't exit within a grace period.
+
+**`ping`, `copy-to`, `copy-from`: CLI parity for the rest of the vsock agent.** The REST API has had
+`POST /v1/vms/{id}/agent/put-file` and `.../get-file` since the guest agent gained `PutFile`/`GetFile`,
+but for a while `exec` was the only one of the vsock agent's operations the CLI itself exposed —
+copying a file into or out of a VM meant calling the HTTP route by hand, base64-encoding the content
+yourself. These three close that gap:
+
+```bash
+sudo /usr/local/bin/fluxctl --config /etc/fluxvm.toml ping <id>
+sudo /usr/local/bin/fluxctl --config /etc/fluxvm.toml copy-to <id> ./local-file.txt /etc/app/config.yaml --mode 600
+sudo /usr/local/bin/fluxctl --config /etc/fluxvm.toml copy-from <id> /etc/app/config.yaml ./local-file.txt
+```
+
+**machinectl-shaped guest access.** Beside `console`/`exec`/`copy-*`, fluxctl also speaks the verbs
+operators reach for from systemd-machined:
+
+| machinectl | fluxctl |
+|---|---|
+| `list` | `list` |
+| `status` / `show` | `status <id>` / `show <id>` (bare `status` = host panel) |
+| `start` / `stop` | `start` / `stop` |
+| `login` / `shell` | `console` (aliases `login`, `shell`; trailing args → vsock `exec`) |
+| `enable` / `disable` | `enable` / `disable` (autostart on `fluxctl serve`) |
+| `poweroff` / `reboot` | `poweroff` / `reboot` (guest agent) |
+| `kill` | `kill` (force VMM; prefer `stop` for clean) |
+| `terminate` | `terminate` → `delete` |
+| `bind` | `bind` → virtiofs `hotplug share` |
+| `copy-to` / `copy-from` | `copy-to` / `copy-from` |
+| `set-limit` | `set-limit` / `resources` |
+| `list-images` / `image-status` | `list-images` / `image-status` (`show-image`) |
+| `clone` / `rename` / `remove` | `clone` / `rename` / `remove` (catalog images) |
+| `read-only` | `read-only` / `read-only --off` |
+| `clean` | `clean` |
+| `pull-raw` / `import-raw` / `export-raw` | same |
+| `pull-tar` / `import-tar` / `import-fs` / `export-tar` | rejected — use `*-raw` (qcow2/raw) |
+| `list-transfers` / `cancel` | empty / no-op (pulls are synchronous) |
+| `edit` | rejected — use `resources` or recreate from spec |
+
+`console`/`login` put the local TTY in raw mode so keystrokes reach the guest PTY intact.
+
+`ping` sends a bare `AgentRequest::Ping` — the same health check `POST /v1/vms/{id}/agent/ping` performs
+over the REST API — so a caller can confirm the guest agent is up (and, if a token is configured, that
+this VM's own token still authenticates) without spending a real `exec` round trip and whatever
+guest-side work that would imply just to find out. This is a distinct channel from `qga ping`, which
+checks the separate QEMU guest-agent (virtio-serial) socket instead — a VM can have either, both, or
+neither enabled.
+
+`copy-to` reads the local file and rejects anything already over the guest agent's own
+`fluxvm_guest_protocol::MAX_FILE_TRANSFER_BYTES` cap (64MB) before spending a base64 encode and a vsock
+round trip on content the agent's own `put_file` would just reject anyway — the same cap `get_file`
+already enforced server-side on the way out, now checked client-side on the way in too. `copy-from`
+restores the guest-reported Unix permission bits on the local copy, not just its bytes: a key or script
+copied out of a VM keeps behaving the way its mode implies instead of silently landing at this
+process's umask default (`--mode` on `copy-to` is the same idea in the other direction — see `put_file`'s
+own `0o644` default when it's left unset). Both still go through the same 64MB single-message,
+no-chunking transfer `PutFile`/`GetFile` already used — bulk data still belongs in a disk image, not
+this channel; see `MAX_FILE_TRANSFER_BYTES`'s own doc comment in `fluxvm-guest-protocol`.
+
+**`migrate start`/`status`/`cancel`: CLI parity for live migration.** `POST /v1/vms/{id}/migration/start`,
+`GET .../migration/status`, and `POST .../migration/cancel` (see
+[docs/runtime-boundary.md](runtime-boundary.md#runtime-contract-v1) for the full contract) previously had
+no CLI equivalent at all — triggering a migration by hand meant a raw HTTP call with a hand-built JSON
+body. This closes that gap for the standalone mode `docs/runtime-boundary.md` already calls out: a
+deployment with no Fabric orchestrator driving these routes over HTTP still needs a way to move a VM off
+a node by hand.
+
+```bash
+sudo /usr/local/bin/fluxctl --config /etc/fluxvm.toml migrate start <id> --destination tcp:10.0.0.9:49152
+sudo /usr/local/bin/fluxctl --config /etc/fluxvm.toml migrate start <id> --destination unix:/run/fluxvm/migrate.sock \
+    --mode post-copy --bandwidth-mbps 500 --max-downtime-ms 300 --multifd-channels 4
+sudo /usr/local/bin/fluxctl --config /etc/fluxvm.toml migrate status <id>
+sudo /usr/local/bin/fluxctl --config /etc/fluxvm.toml migrate cancel <id>
+```
+
+`start` requires the VM to already be `Running` and refuses anything but a `tcp:`/`unix:` destination —
+the same shared allowlist the REST route validates against, `exec:` included, so a migration can't be
+turned into an arbitrary shell invocation on the source host. Direct-datapath VMs are refused until a
+two-host test exists. VMs whose CD-ROM still holds install media are refused (the ISO path is
+host-local). Eject it first with `POST /v1/vms/{id}/cdroms/{name}/eject`, which works live and leaves an
+empty drive (see [api.md](api.md)). When the Network Fabric dataplane is attached, `start` quiesces the VM edge first;
+the gate is **resumed automatically** if start returns an error, if QEMU reports `Failed`/`Cancelled`,
+when `migrate status` later sees those terminal phases, or on `migrate cancel` — so a failed or abandoned
+migration does not leave new flows blocked by reason `migration-quiesce`. `--mode` takes `pre-copy`
+(default) or `post-copy`, matching `MigrationMode`'s own wire spelling exactly rather than inventing a
+second CLI vocabulary for the same two values. `status` and `cancel` are QEMU-only — Cloud Hypervisor's
+`send-migration` is fire-and-forget with no status-polling or cancellation primitive of its own (see
+runtime-boundary.md's `statusPollable` capability field) — calling either against a Cloud Hypervisor VM
+returns a clear error rather than hanging. None of this picks a destination host, confirms shared
+storage, or does anything Fabric-shaped; it is exactly the three existing REST primitives, reachable
+without Fabric or `curl`.
+
+**QEMU migration receivers.** The target node reserves host quota and launches QEMU with `-incoming defer`
+via `POST /v1/migration/receivers` (activate with the returned token), or the matching CLI:
+`fluxctl migrate receiver create …`, `fluxctl migrate receiver activate --token …`, and
+`fluxctl migrate receiver delete`. Receivers count against the O(1)
+host ledger as untracked capacity until reaped. Default listen is `0.0.0.0` — bind to a management
+address or firewall the port in multi-tenant networks. Cloud Hypervisor has no matching receiver API.
+
+A receiver boots the **concrete machine type** the source booted (`pc-q35-noble`, not the `q35` alias, which
+moves with the QEMU release). A running QEMU's type is recorded in the VM label `fluxvm.dev/machine-type` by
+reconcile and cleared on a fresh start. Creating a receiver fails up front when the receiving host's QEMU
+(`qemu -machine help`) does not list that type: QEMU migrates only to the same or a newer release. A receiver
+that is still receiving when its TTL passes gets a fresh 300 s window instead of being reaped mid-transfer, and
+an adopt-mode receiver's placeholder VM stays `Creating` until adopted instead of being swept as stuck.
+
+**Firecracker-specific note:** pause/resume were verified correct and fast against Firecracker's own
+authoritative `GET /` state (not CPU-time heuristics — an idle guest and a paused one both show flat
+CPU time, which is a false "it's paused" signal either way). `exec` over vsock works before a VM is
+ever paused, but did not survive a pause/resume cycle in testing on this Firecracker version — a
+Cloud Hypervisor VM's vsock connection *did* survive the identical pause/resume/exec sequence using
+the same client code, so this looks like a Firecracker vsock characteristic rather than an fluxvm
+bug, but it's not something this project has a fix for.
+
+**Interactive console:** `GET /v1/vms/{id}/console?cols=&rows=` upgrades to a WebSocket relayed
+end-to-end to a real PTY-backed `/bin/sh` in the guest over the same vsock agent connection as
+`exec` (see `fluxvm_vsock_client::open_shell`) — real keystrokes, real job control, verified live
+against a real QEMU VM (connect, `echo` a marker string, see it echoed back through the PTY).
+
+**Live resize, no reconnect.** The console's initial `cols`/`rows` used to be the PTY's size for the
+whole session — a client whose terminal window changed mid-session (a browser tab resized, an
+`xterm.js` container relayout) had no way to tell the guest. Once the WS upgrade completes, a
+**binary** WS frame is a keystroke (unchanged); a **text** WS frame is now read as a resize control
+message, `{"cols":<u16>,"rows":<u16>}`, applied to the guest's PTY immediately via a real
+`ioctl(TIOCSWINSZ)` — the shell sees an actual `SIGWINCH`, not just a cosmetic size report, so
+full-screen programs (`vim`, `htop`, `less`) redraw correctly right after. A malformed text frame
+(not valid JSON in that shape) is dropped, not treated as an error — it costs the client one missed
+resize, not the console session. On the wire between `fluxvm-api` and the guest agent this rides as
+a new `fluxvm_guest_protocol::PtyFrame`: every byte written to the guest after `ShellOpened` is now
+`PtyFrame::Data` (keystrokes) or `PtyFrame::Resize`, while output flowing back stays completely
+unframed raw PTY bytes (see `PtyFrame`'s own doc comment for why only one direction needed framing,
+and why this uses in-band frames on the existing connection rather than a second control connection
+addressed by session ID the way `fluxvm-container-protocol`'s `ResizePty` does for exec sessions —
+the plain guest agent's `OpenShell` handler has no session registry to address into by design, see
+the "Fixed — process isolation" note just below). **Verified:** a real `/bin/sh` spawned on a real
+PTY, resized mid-session, running `stty size` and getting back the new size — proves the ioctl lands
+on the actual PTY the shell is attached to, not just that the resize frame parses
+(`fluxvm-guest-agent`'s `open_shell_resize_frame_changes_the_ptys_window_size` test). **Not
+verified:** the full path through a real QEMU/Cloud Hypervisor vsock connection and a real browser
+WebSocket client sending a text frame — that would need a live VM and a live client, neither
+exercised here; the wire format and the guest-side PTY behavior are each independently verified for
+real, but not the two ends wired together end to end against real hardware.
+
+**Fixed — process isolation, not a kernel-level root cause.** For a while, roughly 1-in-3 console
+sessions left the guest agent's vsock listener unable to accept any further connections afterward
+(`exec`/console/file-copy calls to the same VM would then fail with a raw `Connection reset by peer`),
+with process/thread tracing showing the listener's `accept()` thread permanently parked in the
+kernel's `vsock_accept`. Extensive live isolation ruled out every userspace trigger tried — whether
+and from which thread `child.kill()`/`.wait()`/`.try_wait()` was called on the spawned shell made no
+measurable difference, and a from-scratch reproducer mirroring the real PTY/fork/setsid/relay-thread
+structure could not trigger it at all across 40+ trials while the real binary kept failing — pointing
+at something below userspace, in the exact `AF_VSOCK`/`vhost_vsock` accept path, that was never
+pinned down to a specific kernel commit or mechanism.
+
+The actual fix doesn't require knowing that mechanism: `OpenShell` sessions are no longer handled in a
+thread of the guest agent's own process at all. `spawn_open_shell_session()` double-forks — the
+grandchild does the PTY/`setsid()`/shell/relay work fully detached from the agent's process tree (never
+sharing a process, even via a thread, with the vsock listener), while the agent's original process
+only reaps the fast-exiting intermediate child and returns straight to `accept()`. This is exactly how
+OpenSSH's `sshd` and systemd isolate PTY/session-leader work from their own long-lived listeners — see
+their `session.c`/`systemd-executor` fork-per-session model — for the same underlying reason: signal
+disposition and `waitpid()` are process-wide, so a session leader's lifecycle can affect an unrelated
+listener sharing its process in ways a separate process boundary cannot. Verified live: 20/20 console
+sessions back-to-back left `exec` working afterward every time (statistically conclusive against the
+prior ~1-in-3 failure rate), including through the real WebSocket console path end-to-end, not just a
+raw vsock handshake. `zyvor-fabric`'s FluxVM driver can now safely request `agent.enabled: true` by
+default — see its own `docs/guides/vm-drivers/fluxvm.md`.
+
+## Day-2 VM operations
+
+Every `fluxctl` VM argument accepts a UUID, an exact VM name, or a unique UUID
+prefix (4+ hex chars). Ambiguous names/prefixes are rejected with the matching ids.
+
+| Task | CLI | REST |
+|---|---|---|
+| Restart (graceful stop, then start) | `fluxctl restart <vm>` | `POST /v1/vms/{id}/restart` |
+| Rename | `fluxctl vm rename <vm> <new-name>` | `PATCH /v1/vms/{id}` `{"name": "..."}` |
+| Set / remove labels | `fluxctl label <vm> env=prod team-` | `PATCH /v1/vms/{id}` `{"labels": {"env": "prod", "team": null}}` |
+| List snapshots | `fluxctl snapshot-list <vm>` | `GET /v1/vms/{id}/snapshots` |
+| Delete a snapshot | `fluxctl snapshot-delete <vm> --tag <t>` | `DELETE /v1/vms/{id}/snapshots/{tag}` |
+| Wait for a state | `fluxctl wait <vm> --for running\|stopped\|paused\|failed\|agent --timeout 120` | poll `GET /v1/vms/{id}` |
+| Events | `fluxctl events [--vm <vm>] [--event vm.] [--since RFC3339] [-f]` | `GET /v1/events?vm=&event=&since=&limit=`, `GET /v1/events/stream` (SSE) |
+| Token quota usage | `fluxctl quota [--token T \| --name N]` | `GET /v1/quotas/me` |
+| Shell completions | `fluxctl completions bash\|zsh\|fish` | — |
+| Filter by labels | `fluxctl list -l env=prod,!tmp` | `GET /v1/vms?label=env%3Dprod` |
+| Bulk lifecycle | `fluxctl start\|stop\|restart -l <sel>`, `fluxctl delete -l <sel> --yes` | per-VM calls |
+| Clone a stopped VM | `fluxctl vm clone <vm> <new-name>` | `POST /v1/vms/{id}/clone` `{"name": "..."}` |
+| Disks | `fluxctl disk list\|attach\|resize\|detach\|throttle <vm> ...` | `GET/POST /v1/vms/{id}/disks`, `PATCH/DELETE /v1/vms/{id}/disks/{name}`, `PUT /v1/vms/{id}/disks/{name}/throttle` |
+| Serial console | `fluxctl serial <vm>` (Ctrl-] detaches) | websocket `GET /v1/vms/{id}/serial` |
+| Backup root disk | `fluxctl backup <vm> [--compress] [--dest PATH]` | `POST /v1/vms/{id}/backup` `{"compress": true}` |
+| Backup root + data disks | `fluxctl backup <vm> --all-disks` | `POST /v1/vms/{id}/backup` `{"all_disks": true}` |
+| VM templates | `fluxctl vm-template save\|list\|show\|delete`, `fluxctl vm-template create <tpl> <vm> [--label k=v]` | `/v1/vm-templates[/{name}]`, `POST /v1/vm-templates/{name}/instantiate` |
+| Remote contexts | `fluxctl context add\|use\|list\|current\|unset\|delete` (`--token-keychain SERVICE`) | — |
+| Web dashboard | `fluxctl dashboard` (opens `/console`) | `GET /console` (static page, no auth; it asks for a token) |
+| Daemon as a LaunchAgent (macOS) | `fluxctl [--config F] service install\|uninstall\|status` | — |
+| Scheduled snapshots | `fluxctl label <vm> fluxvm.io/snapshot-every=6h fluxvm.io/snapshot-keep=7` | same `PATCH` |
+| API description | — | `GET /v1/openapi.json` (no auth) |
+
+QEMU snapshots are qcow2-internal (`qemu-img info -U` lists them; delete uses HMP
+`delvm` while running, `qemu-img snapshot -d` when stopped). Other backends keep
+snapshots under `instances/<uuid>/snapshots/<tag>/`. Tags are `[A-Za-z0-9._-]{1,128}`.
+
+Events are appended to `state_dir/events.jsonl` by the daemon **and** by local
+`fluxctl` invocations, so both `fluxctl events` and the REST routes see every
+source. Tenant-scoped tokens only see events for their own tenant's VMs.
+
+List-style commands take a global `-o json|table|wide` (`--output-format`,
+`FLUXCTL_OUTPUT`); JSON stays the default so scripts are unaffected:
+
+```bash
+fluxctl -o table list
+fluxctl list -o wide
+fluxctl -o table events --vm web -f
+```
+
+`fluxctl console` / `login` / `shell` now sizes the guest PTY from the local
+terminal and forwards resizes (SIGWINCH → `PtyFrame::Resize`).
+
+Label selectors are a kubectl subset: `k=v`, `k==v`, `k!=v`, `k` (present),
+`!k` (absent), comma-joined, all terms must match. Bulk `delete -l` refuses to
+run without `--yes` and lists what it would have deleted.
+
+**Clone** requires a stopped VM on the default qcow2 storage. The source disk is
+flattened into `state_dir/images/clones/<name>-<hex>.qcow2`, which becomes the
+new VM's base image (removed again when the last VM using it is deleted). Data
+disks and labels are copied; a Tap MAC is regenerated.
+
+**Disks (QEMU).** The root disk is `root` (virtio). Data disks are qcow2 files
+in `instances/<uuid>/disks/<name>.qcow2`, attached as `scsi-hd` on the boot-time
+`virtio-scsi` controller; the directory is the source of truth, so a disk
+hot-added with `disk attach` comes back on every boot. `resize` only grows
+(`block_resize` live, `qemu-img resize` stopped); the guest still has to grow
+its partition/filesystem. `detach` unplugs and deletes the file.
+
+`disk attach ... --bus virtio-blk|vhost-user-blk --aio io_uring --cache none
+--iothread --queues 4` picks the bus and I/O path per disk (REST: `io`, see
+[api.md](api.md)); `root_disk_io` on create does the same for the root. A live
+VM hot-adds virtio disks onto the `hotplug-disk-N` root ports it reserved at
+create (`disk_hotplug_ports`, default 4). A `vhost-user-blk` disk is served by
+its own `qemu-storage-daemon` (`instances/<uuid>/vub-<name>.{sock,pid,log}`),
+recorded with the VM's sidecar pids so stop and delete end it. A VM with such a
+disk boots with shareable memory; hot-adding one to a running VM needs
+`shared_memory: true` at create. On the eBPF dataplane, a disk on a host block
+device (an NVMe-oF namespace, an RBD map) is added to the VM's device-cgroup
+allowlist before QEMU opens it. That allowlist has 8 entries in total: the 3
+fixed devices, VFIO groups and block devices.
+
+`disk throttle <vm> <disk|root> --iops-total 500 --bps-total 52428800` caps a
+QEMU disk's IOPS and bandwidth (`--iops-read/--iops-write`, `--bps-read/--bps-write`,
+bursts with `--iops-total-max/--bps-total-max --burst-seconds`). It applies
+live through `block_set_io_throttle` and is kept for every later start, a
+migration target included; no limit flags lifts them. `io.throttle` on attach
+or create sets them up front. vhost-user-blk disks cannot be throttled.
+
+`disk attach <vm> <name> --path <file-or-device>` (REST: `{"name", "path"}`
+instead of `size_gib`) attaches an **existing** qcow2/raw image or block device
+(a CSI volume, an RBD map) as a symlink `disks/<name>.{qcow2,raw}`; block
+devices boot with `host_device`. Files must sit under `policy.allowed_image_dirs`
+when that is set, block devices under `/dev`. Detach removes only the link and
+resize is refused; QEMU's image locking stops two VMs opening the same source.
+
+**NIC unplug (QEMU).** `hotplug nic-unplug <vm> --mac <mac>|--tap <tap>` (REST:
+`POST /v1/vms/{id}/hotplug/nic/unplug`) removes an **extra** NIC from a running
+VM and deletes its TAP. The guest must acknowledge PCIe unplug (10 s timeout).
+The primary NIC lives on the root bus and can't be removed; direct (Pod-owned)
+NICs go with their sandbox. A NIC removed from the middle leaves an empty slot
+that the next hotplug reuses, so the remaining NICs keep their PCIe ports.
+
+**Serial.** QEMU's first serial port is a UNIX socket
+(`instances/<uuid>/serial.sock`) that also tees into `console.log`, so
+`/logs` keeps working. It needs no guest agent; one client at a time. VMs
+started before this change need a restart to get the socket.
+
+**Backup** writes a standalone (no backing file) qcow2, for any engine on
+default storage or a `shared` disk file. Running VMs (QEMU on default storage
+only; stop the others first) are captured via a temporary internal snapshot
+(`backup-<utc>`, deleted afterwards), so the copy is crash-consistent. REST backups always land in
+`state_dir/backups/<name>-<utc>.qcow2`; only the local CLI accepts `--dest`.
+With `--all-disks` the destination is a directory holding `root.qcow2` and one
+`<disk>.qcow2` per data disk; a live VM's disks all come from the same
+temporary snapshot, so they are consistent with each other.
+
+With the guest agent enabled (`qga.enabled`) and answering, a running VM's
+filesystems are frozen (`guest-fsfreeze-freeze`) just for the snapshot and
+thawed right after, so the backup is application-consistent (databases see a
+clean fsync point). `--quiesce auto` (default) falls back to crash-consistent
+when the agent doesn't answer, `required` fails instead, `never` skips it. The
+result and a sidecar (`<file>.json`, or `backup.json` in a directory backup)
+record `quiesced`, the source VM and the disks.
+
+`backups` lists them, `backup-delete <name>` removes one, and
+`restore-backup <vm> <name>` copies one back into a **stopped** VM in place:
+root disk plus every data disk the backup holds (recreated if the VM no
+longer has it). Disks attached from an existing image are skipped, and data
+disks the backup doesn't hold are left alone. Each disk is converted back to
+its own format (raw stays raw) through a temp file, so a failed copy leaves it
+untouched.
+
+**VM templates** are named `CreateVmRequest` specs in
+`state_dir/vm-templates.json` (separate from sandbox templates at
+`/v1/templates`). Save from a spec file (its `name` may be omitted) or from an
+existing VM (`--from-vm`, which copies the VM's *spec*, not its disk — use
+`vm clone` for that). `vm-template create` goes through the normal create path,
+so policy, tenant and token quotas apply. A template that references a clone
+base image keeps that image alive after the clone VM is deleted.
+
+**Scheduled snapshots.** The daemon's reaper takes an `auto-<utc>` snapshot of
+every running QEMU VM labelled `fluxvm.io/snapshot-every` (`3600`, `30m`, `6h`,
+`1d`; minimum 60s) once the newest `auto-*` snapshot is older than the interval,
+then prunes to `fluxvm.io/snapshot-keep` (default 7). Manual snapshots are never
+pruned.
+
+**Remote mode.** `fluxctl --server http://host:7788 [--server-token T]` (or
+`FLUXVM_URL` / `FLUXVM_TOKEN`) drives a remote daemon over REST for: `create`,
+`vm-template`, `list`, `get`, `status <vm>`, `start`, `stop`, `restart`,
+`delete`, `pause`, `resume`, `label`, `rename-vm`, `clone-vm`, `snapshot`,
+`snapshot-list`, `snapshot-delete`, `backup`, `disk`, `events [-f]` (SSE),
+`serial` (websocket), `quota`, `healthz`, `readyz`, `wait` (not `--for
+agent`). VM names/prefixes resolve against the server's VM list. Other commands
+exit with an error in remote mode.
+
+**Contexts** save named endpoints so `--server` isn't needed every time:
+
+```bash
+fluxctl context add lab --server http://10.0.0.5:7788 --token "$TOKEN"
+# or keep the token in the macOS Keychain (account = context name), not in the file:
+security add-generic-password -s fluxvm-api -a lab -w
+fluxctl context add lab --server http://10.0.0.5:7788 --token-keychain fluxvm-api
+fluxctl context use lab        # VM verbs now go to lab
+fluxctl --context prod list    # one-off
+fluxctl --context local list   # force local mode
+fluxctl context unset          # back to local by default
+```
+
+The file is `$FLUXCTL_CONTEXTS`, else `$XDG_CONFIG_HOME/fluxctl/contexts.json`,
+else `~/.config/fluxctl/contexts.json`, written mode 0600 (it holds tokens;
+`context list` never prints them). Precedence: `--server`/`FLUXVM_URL`, then
+`--context`/`FLUXCTL_CONTEXT`, then the current context, then local.
+`fluxctl serve` always runs locally. With `--token-keychain`, the token is read
+with `security find-generic-password -s SERVICE -a CONTEXT -w` each time the
+context is used; a context has either `--token` or `--token-keychain`.
+
+**Dashboard.** `GET /console` is a small web page (`fluxctl dashboard` opens it,
+for the current context or the local `listen` address). It lists VMs and
+container sandboxes grouped by stack, with start/stop/restart/delete and the
+console or container logs, and refreshes every 5 s. The page itself is static and
+served without auth; when the daemon has `[[auth.tokens]]` it asks for a token,
+keeps it in the tab's session storage and sends it as a bearer token. A
+read-only token can browse but not act. It is served with a strict
+Content-Security-Policy (no inline script, no framing).
+
+## Resource control (cgroup v2)
+
+Every VM (all three backends) is migrated into its own `fluxvm.slice/{id}.scope` cgroup right after
+launch, giving real, kernel-enforced control independent of anything a VMM's own API exposes:
+
+```bash
+curl -sS -X POST http://127.0.0.1:7788/v1/vms/<uuid>/resources \
+  -H 'content-type: application/json' \
+  -d '{"cpu_quota_percent": 150, "memory_max_bytes": 536870912, "pids_max": 64}' | jq
+
+curl -sS -X POST http://127.0.0.1:7788/v1/vms/<uuid>/freeze   # cgroup-level freeze — works even if the VMM's own API doesn't respond
+curl -sS -X POST http://127.0.0.1:7788/v1/vms/<uuid>/thaw
+curl -sS http://127.0.0.1:7788/v1/vms/<uuid>/frozen            # {"frozen": true|false}
+curl -sS http://127.0.0.1:7788/v1/vms/<uuid>/stats              # CPU%, memory, disk I/O, read from the cgroup
+curl -sS http://127.0.0.1:7788/v1/vms/<uuid>/pressure           # PSI: cpu/memory/io some+full, avg10/60/300 + total
+
+# CLI equivalents (freeze/thaw/frozen/resources/stats/pressure):
+sudo /usr/local/bin/fluxctl --config /etc/fluxvm.toml freeze <uuid>
+sudo /usr/local/bin/fluxctl --config /etc/fluxvm.toml frozen <uuid>   # {"frozen": true|false}
+sudo /usr/local/bin/fluxctl --config /etc/fluxvm.toml thaw <uuid>
+sudo /usr/local/bin/fluxctl --config /etc/fluxvm.toml resources <uuid> \
+    --cpu-quota-percent 150 --memory-max-bytes 536870912 --pids-max 64
+sudo /usr/local/bin/fluxctl --config /etc/fluxvm.toml stats <uuid>
+sudo /usr/local/bin/fluxctl --config /etc/fluxvm.toml pressure <uuid>
+```
+
+`resources` (`ResourcePatch`) is a partial patch — only the fields you set are touched: `cpu_quota_percent`
+(percentage of one core, e.g. `150` = 1.5 cores), `memory_max_bytes`, `io_weight` (1-10000), `pids_max`,
+`cpuset_cpus` (pin to specific host cores). `freeze`/`thaw` act on the cgroup directly via
+`cgroup.freeze`, independent of the VMM's own pause/resume API (see "Pause, resume, and exec" above) —
+useful as a control path that still works if a VMM's control socket is unresponsive. Delegation
+(`cgroup.subtree_control`) is set up once at `VmManager` startup; if that fails (e.g. no cgroup v2, or
+insufficient privilege), resource control/metrics are unavailable for that run but VM creation/lifecycle
+are otherwise unaffected — a warning is logged, not a hard failure.
+
+Verified on real hardware (`scripts/test-cgroup-resources.sh`, all through the REST API against a
+running `fluxctl serve`): a launched VM really lands in its own cgroup (confirmed by reading
+`cgroup.procs` directly, not just trusting the recorded path); a memory limit set via `resources` is
+really written to `memory.max` and reads back correctly; `freeze` really stops the VMM process (CPU
+time frozen with a forced busy-loop running in the guest, same technique used to verify QMP-level
+pause) and `thaw` really resumes it; `stats`/`pressure` return real nonzero, cgroup-derived numbers;
+`delete` removes the VM's cgroup directory.
+
+**`freeze`/`thaw`/`frozen`: CLI parity for the cgroup-level freezer.** `POST /v1/vms/{id}/freeze`,
+`POST .../thaw`, and `GET .../frozen` have existed since cgroup v2 resource control landed, but like
+`resources`/`stats`/`pressure` above them, triggering one meant a raw `curl` call — there was no CLI
+form at all, unlike `pause`/`resume`, the VMM-level operation these are easy to reach for by mistake
+instead of. `fluxctl freeze <id>` calls `cgroup.freeze` directly via `VmManager::freeze`, stopping every
+process in the VM's `fluxvm.slice/{id}.scope` at the kernel level — this keeps working even when the
+VMM's own control socket is wedged or unresponsive, which is exactly the scenario `pause` (QMP
+`stop`/`ch-remote pause`) can't help with, since that goes through the same socket. `fluxctl thaw <id>`
+reverses it, and `fluxctl frozen <id>` reports the freezer's current state as `{"frozen": true|false}`
+without changing anything, matching the REST route exactly (both are plain GETs/POSTs with no request
+body — no new wire types were needed). `resources` later gained CLI flags; `stats`/`pressure` now
+have thin read-only CLI forms (`fluxctl stats <id>` / `fluxctl pressure <id>`) that print the same
+JSON as `GET /v1/vms/{id}/stats` and `GET /v1/vms/{id}/pressure`. 7 new
+CLI-argument-parsing tests covering all three commands plus a check that they aren't accidentally
+aliased to each other or to `pause`/`resume`.
+
+**`resources`: CLI parity for the cgroup resource patch.** `POST /v1/vms/{id}/resources` deserved
+the real flag design called out above instead of a JSON blob shoved onto the command line: `fluxctl
+resources <id> [--cpu-quota-percent N] [--memory-max-bytes N] [--io-weight N] [--pids-max N]
+[--cpuset-cpus SPEC]` maps one flag onto each `ResourcePatch` field, and — matching the wire type's
+own "only touch what's set" contract exactly — a field is left alone unless its flag is passed; there
+is no `--clear-cpu-quota` or similar, because omitting a flag already means "don't touch this."
+Passing none of the five is refused outright at the CLI layer (`ResourcePatch`'s own shape gives clap
+no way to express "at least one of these," so the check is a plain `bail!` in the match arm) rather
+than silently issuing a no-op `POST` with an empty body. `--cpuset-cpus` takes the exact same range
+syntax `cpuset.cpus`/`cpuset.cpus.effective` themselves use when read back (`fluxvm_cgroup::cpuset`'s
+`parse_set`/`format_set`) — `"0-3"`, `"0,2,4"`, `"0-1,4-5"` — so a value copied straight out of
+`cpuset.cpus` round-trips, but it is deliberately its own independent parser (`parse_cpuset_spec` in
+`fluxctl`), not a reuse of that one, because it enforces two things the internal parser doesn't need
+to: an empty string is rejected rather than accepted as "no CPUs" (the flag is already `Option<String>`,
+so "leave cpuset pinning untouched" is expressed by omitting `--cpuset-cpus` entirely, not by passing
+`""`), and a reversed range like `"5-2"` is a hard error instead of silently expanding to an empty
+range under plain `start..=end` and applying an empty cpuset — a typo that would otherwise fail open
+into "pin this VM to no CPUs at all" with no error at all. 17 new tests: CLI-argument-parsing coverage
+for every flag alone and all five together, the "zero flags parses fine at the clap layer but the
+match arm still refuses it" split, a distinctness check against `freeze`/`pause`, and dedicated
+`parse_cpuset_spec` coverage (ranges, comma lists, mixed, sort+dedup, whitespace, and all three
+rejection cases). Verified building, `cargo test -p fluxctl` (50/50 passing, including the 17 new),
+`cargo clippy -p fluxctl --no-deps` (clean against this change; the two pre-existing warnings it
+reports belong to `CatalogCommand`'s enum size and an unrelated `PrivateKeyDer` conversion), and
+`cargo fmt -p fluxctl -- --check` on the Linux remote, the same way prior CLI-parity work in this
+section was verified — at the time `fluxctl` did not build on macOS; it now does (see [macos.md](macos.md)). Not verified against a real running VM's cgroup in this pass — `set_resources`
+itself (the code this command calls) was already proven against real `memory.max`/`cgroup.procs` files
+by `scripts/test-cgroup-resources.sh` when `resources` first landed as a REST route; this change adds
+no new behavior to that path, only a CLI front end for it.
+
+## Incident bundles
+
+When a VM misbehaves, collect its state before restarting it:
+
+```bash
+fluxctl incident <id> --out vm-incident.tar.gz                  # QMP, cgroup/PSI, console, dataplane, host
+fluxctl incident <id> --pcap-seconds 10 --pcap-filter 'tcp port 443'
+fluxctl incident <id> --memory-dump                             # + ELF guest memory dump (QEMU; pauses the guest)
+```
+
+The job runs asynchronously (`POST /v1/vms/{id}/diagnostics`, admin only); `fluxctl incident` polls it and downloads
+the bundle. Secrets are fingerprinted unless `--no-redact`. Bundles and dumps live under `diagnostics_dir` (default
+`<state_dir>/diagnostics`), the last five per VM, and go away with the VM. Size the directory for a guest's memory plus
+1 GiB if you take dumps, and cap them with `diagnostics_max_memory_dump_mib`. Layout, redaction and limits:
+[diagnostics-bundle.md](diagnostics-bundle.md).
+
+## Warm VM pools
+
+A pool keeps `size` VMs booted from a template sitting `Paused`, ready to be handed out on `claim` in
+a fraction of a full `create`'s time instead of a full boot:
+
+```bash
+sudo /usr/local/bin/fluxctl --config /etc/fluxvm.toml pool create --spec examples/pool.json
+sudo /usr/local/bin/fluxctl --config /etc/fluxvm.toml pool list
+sudo /usr/local/bin/fluxctl --config /etc/fluxvm.toml pool get my-pool
+```
+
+Pool spec (`template` is a normal `CreateVmRequest` — its `name`/`ttl_seconds` are ignored for pool
+members, which must never expire on their own while sitting idle):
+
+```json
+{
+  "name": "my-pool",
+  "size": 4,
+  "template": {
+    "name": "ignored",
+    "backend": "qemu",
+    "image": "/var/lib/fluxvm/images/ubuntu-agent.qcow2",
+    "vcpus": 2,
+    "memory_mib": 2048,
+    "network": {"mode": "none"},
+    "agent": {"enabled": true, "port": 17777}
+  }
+}
+```
+
+Claim one through REST against a running `fluxctl serve` daemon — the recommended way, since a
+claim's own backfill-the-pool-back-up work runs as a background task inside that long-lived process:
+
+```bash
+curl -sS -X POST http://127.0.0.1:7788/v1/pools/my-pool/claim \
+  -H 'content-type: application/json' \
+  -d '{"name": "job-123", "ttl_seconds": 900}' | jq
+```
+
+`fluxctl pool claim <name>` also exists on the CLI, but as a **one-shot process** it exits right
+after printing the claimed VM — which can take its own backfill-replenishment task down with it
+mid-flight before the process exits. `fluxctl pool create` avoids this by blocking until the pool is
+genuinely full before its own process exits; `pool claim` deliberately doesn't, to keep a claim fast.
+A separately-running `fluxctl serve` daemon's reaper independently tops up every pool on its own
+schedule regardless of which process's claim under-filled it, so pool health converges either way —
+but for a claim's *own* immediate replenishment to be reliable, use REST against a running daemon.
+
+Resize a pool after the fact instead of deleting and recreating it from the same spec just to change
+one number:
+
+```bash
+curl -sS -X POST http://127.0.0.1:7788/v1/pools/my-pool/resize \
+  -H 'content-type: application/json' \
+  -d '{"size": 8}' | jq
+```
+
+Growing behaves exactly like `pool create`'s own initial fill — the target size is updated
+immediately and a background backfill (same code path, same reaper backstop) brings membership up
+to it. Shrinking is synchronous: excess ready members are popped and deleted right away, not left
+for the reaper. `fluxctl pool resize <name> --size N` exists on the CLI too, and — like `pool
+create` but unlike `pool claim` — blocks on `backfill_pool_sync` when growing, so this one-shot
+process doesn't take its own background backfill down with it before the pool actually reaches the
+requested size.
+
+`pool list`/`pool get` (and the equivalent REST responses) report computed occupancy alongside the
+stored fields, so you don't have to derive it yourself:
+
+```bash
+sudo /usr/local/bin/fluxctl --config /etc/fluxvm.toml pool get my-pool
+```
+
+```json
+{
+  "name": "my-pool",
+  "size": 8,
+  "members": ["...", "..."],
+  "claimed_total": 41,
+  "ready": 6,
+  "pending": 2
+}
+```
+
+`ready` is `members.len()` under a clearer name; `pending` is how many more members are still
+needed to reach `size` (0 once backfill has caught up); `claimed_total` is a lifetime count of
+every member this pool has ever successfully handed out via `pool claim` — useful for telling
+"this pool is sized about right" apart from "this pool has never actually been claimed from" or
+"this pool is running dry constantly and should be bigger," none of which the bare `size`/`members`
+pair said on their own.
+
+**Real limits today**: resizing has unit and router-level tests (`fluxvm-scheduler`,
+`fluxvm-api`) but, unlike the rest of this section, has not been exercised against real hardware —
+`scripts/test-warm-pool.sh` doesn't cover it yet. A shrink that fails to delete one excess member
+(logged, not fatal) leaves the pool's target size reduced but membership not fully caught up; the
+reaper never shrinks a pool on its own, so an under-trimmed pool stays exactly that size until
+resized again, rather than silently drifting back up. The `ready`/`pending`/`claimed_total` fields
+are pure read-side computation over state `pool create`/`claim`/`resize` already maintain and
+already exercise on real hardware above — nothing new to independently verify against a live guest,
+but also not separately re-run against real hardware under this name.
+
+Every pool member is verified genuinely ready — not just "a process exists" — before being paused: a
+real bug found on real hardware pausing a member immediately after `create()` returns (before the
+guest had even finished booting, let alone started its guest-agent) meant a "warm" member was actually
+frozen mid-boot, so resuming it on claim still had to finish booting before `exec` worked at all,
+defeating the point. Backfill now waits for the guest agent to answer a ping before pausing.
+
+Verified on real hardware (`scripts/test-warm-pool.sh`): a pool backfills to size on its own, a REST
+claim is dramatically faster than a plain create (real numbers observed: ~0.2–0.5s vs. ~4–17s), the
+claimed VM works immediately (`exec` succeeds right away), the pool tops itself back up unasked after
+each claim, two claims in a row hand out two different VMs, and `pool delete` cleans up every member
+it still owns with no leftover VMs or processes.
+
+## Image catalog & signing
+
+Reference a named, checksummed image instead of a raw path or URL — resolved transparently by
+`create` before policy/existence checks, so `allowed_image_dirs` still governs the real resolved file:
+
+```json
+{"name": "job-1", "backend": "qemu", "image": "ubuntu-24.04", "...": "..."}
+```
+
+Enable it with `[catalog]` in the config:
+
+```toml
+[catalog]
+path = "/etc/fluxvm/catalog.json"
+# Empty = signatures not required; non-empty = every entry MUST verify against one of these.
+# Named (unlike a bare list of keys) so `signed_by` below can report real signer identity,
+# not just pass/fail -- the same [[auth.tokens]]-shaped "array of tables with a name" this
+# project uses everywhere else it needs a labeled list of credentials.
+[[catalog.trusted_signers]]
+name = "release-ci"
+public_key = "BASE64_ED25519_PUBLIC_KEY"
+```
+
+An image reference that doesn't match any catalog entry's `name` is treated as a literal path/URL,
+exactly like before this existed — the catalog is purely additive.
+
+Signing is a self-contained Ed25519 scheme (not cosign/Sigstore, which need either a local `cosign`
+binary or a live Fulcio/Rekor round trip — neither of which this project can verify end-to-end without
+external network-dependent test infrastructure):
+
+```bash
+fluxvm catalog keygen
+#   private key (keep secret, use with `catalog sign --key`): ...
+#   public key -- add as [[catalog.trusted_signers]] with a name: ...
+
+fluxvm catalog sign \
+  --key <private-key> --name ubuntu-24.04 \
+  --source https://cloud-images.ubuntu.com/releases/noble/release/ubuntu-24.04-server-cloudimg-amd64.img \
+  --sha256 <sha256> --distro ubuntu --version 24.04 --arch x86_64 \
+  --build-pipeline github-actions/build-images.yml --build-run-id 987654321 --build-commit <commit-sha> \
+  --catalog-file /etc/fluxvm/catalog.json   # appends/updates in place; omit to just print the entry
+```
+
+`sign` also stamps a `signed_at` (Unix seconds, right when signing runs) onto the entry, **covered by
+the signature itself** — the signed payload now spans `name`/`source`/`sha256`/`format`/
+`distro`/`version`/`arch`/`signed_at`/`build_pipeline`/`build_run_id`/`build_commit`, not just the
+first four. Previously `distro`/`version`/`arch` were present on an entry but excluded from what was
+actually signed, so they could be edited in `catalog.json` after the fact (e.g. relabeling `arch` to
+mislead a platform-matching consumer) without invalidating the signature — closed now. `read_only`
+stays deliberately unsigned, since it's a mutable operational flag toggled via its own REST route
+(below), not provenance data — signing it would mean every legitimate toggle silently breaks the
+signature.
+
+**Build lineage** (`--build-pipeline`/`--build-run-id`/`--build-commit`, all optional) records which
+CI pipeline, which run within it, and which source commit produced the image's bytes — the real gap
+this closes: previously signing only ever vouched for the catalog entry's own fields (name, source,
+checksum, ...), with no way to record *who built it* at all. Read this claim honestly, though: it's
+asserted by whoever ran `catalog sign`, the same posture as `signed_by` below — there is no
+cryptographic attestation chain proving the named CI system actually produced these bytes (that would
+need something like Sigstore/in-toto, which this project's signing scheme deliberately avoids for the
+same reason it avoids cosign — see above). What signing *does* give it: once set, `build_pipeline`/
+`build_run_id`/`build_commit` are tamper-evident exactly like `distro`/`version`/`arch` — relabeling
+any of them in `catalog.json` after the fact invalidates the signature.
+
+**Breaking change for existing signed catalogs**: an entry signed before this existed will fail
+verification against the new, wider payload — there's no dual-format fallback. Re-run `fluxvm catalog
+sign` for every entry after upgrading if `trusted_signers` is configured.
+
+With `trusted_signers` set, an unsigned (or wrongly-signed) catalog entry is rejected at `create` time
+— fails closed, no silent fallback to "unsigned is fine." `GET /v1/images/catalog` lists every entry
+with a computed `signature_valid`, and — new — `signed_by`: the *name* of whichever configured
+`trusted_signers` entry's key actually verified the signature (`null` when unsigned, wrongly signed, or
+signatures aren't required at all). This is derived fresh on every call from which key matched, not
+something the entry itself claims about its own signer — an entry can't assert its own identity, only a
+real key can prove it. Signing itself stays a CLI/offline operation; private keys never touch the API
+surface.
+
+**Catalog CRUD over REST** — add/remove/rename/clone/export entries without hand-editing
+`catalog.json` or going through the CLI's offline sign flow (this is what zyvor-fabric's
+`FluxVMDriver::ImageDriver` uses to replace machinectl's image-management verbs):
+
+```bash
+# Register a new entry — source can be a local path or an http(s) URL; sha256 is computed
+# fresh from what actually lands on disk, not trusted from the caller.
+curl -sS -X POST http://127.0.0.1:7788/v1/images/catalog \
+  -H 'content-type: application/json' \
+  -d '{"name": "ubuntu-24.04", "source": "/var/lib/fluxvm/images/ubuntu.qcow2", "format": "qcow2"}' | jq
+
+curl -sS -X POST http://127.0.0.1:7788/v1/images/catalog/ubuntu-24.04/clone \
+  -d '{"target_name": "ubuntu-24.04-staging"}' | jq
+curl -sS -X POST http://127.0.0.1:7788/v1/images/catalog/ubuntu-24.04-staging/rename \
+  -d '{"new_name": "ubuntu-24.04-qa"}' | jq
+curl -sS -X POST http://127.0.0.1:7788/v1/images/catalog/ubuntu-24.04/export \
+  -d '{"path": "/var/lib/fluxvm/exports/ubuntu-24.04.qcow2"}' | jq
+curl -sS -X DELETE http://127.0.0.1:7788/v1/images/catalog/ubuntu-24.04-qa
+```
+
+A clone or rename drops any existing signature and `signed_at` (a signature covers the entry's `name`,
+so it no longer vouches for the new one — the old `signed_at` timestamp would also be misleading once
+detached from a valid signature). All five mutating operations are serialized against each other and
+against a fresh `catalog.json` read on every call — no in-memory cache to go stale.
+
+**The same CRUD lives on `fluxvm catalog`, too** — `keygen`/`sign` were the only catalog subcommands
+this project's CLI had for a while (offline-signing needs to stay CLI/offline; private keys never touch
+the API surface), leaving list/add/remove/rename/clone/export/lock unlock/clean reachable only over
+REST even though the underlying `fluxvm_image::catalog` functions backing all of it (`add_entry`,
+`remove_entry`, ...) always covered them. That meant a one-shot admin task against a `catalog.json` no
+`fluxctl serve` was currently serving — seeding a fresh host's catalog before the daemon is even up, or a
+script that would rather shell out than depend on a running HTTP endpoint — had no CLI path at all. Each
+subcommand below is a thin wrapper: it operates on `catalog.path` from `--config`/`FLUXVM_CONFIG`
+directly (same one-shot-process model as `fluxctl pool claim`, see its own doc comment), so it works
+identically whether or not `fluxctl serve` happens to be running against the same `state_dir`:
+
+```bash
+fluxvm catalog list
+#   [{"name": "ubuntu-24.04", "source": "...", "sha256": "...", "signature_valid": null, ...}, ...]
+
+fluxvm catalog add ubuntu-24.04 --source /var/lib/fluxvm/images/ubuntu.qcow2
+fluxvm catalog clone ubuntu-24.04 ubuntu-24.04-staging
+fluxvm catalog rename ubuntu-24.04-staging ubuntu-24.04-qa
+fluxvm catalog export ubuntu-24.04 /var/lib/fluxvm/exports/ubuntu-24.04.qcow2
+fluxvm catalog lock ubuntu-24.04     # refuse remove/rename until unlocked
+fluxvm catalog unlock ubuntu-24.04
+fluxvm catalog remove ubuntu-24.04-qa
+fluxvm catalog clean                 # prune downloads/ orphans no entry's source references any more
+```
+
+`lock`/`unlock` are new: the REST route (`POST .../read-only`) took a `{"read_only": bool}` body, which
+the CLI now exposes as two verbs instead of a boolean flag — clearer on a command line than
+`--read-only true`, and it keeps `fluxvm catalog --help` self-explanatory without reading the REST docs
+first. Every other subcommand mirrors its REST counterpart's semantics exactly (same refuse-on-read-only,
+same signature/`signed_at` clearing on `clone`/`rename`), since both ultimately call the identical
+`fluxvm_image::catalog` functions.
+
+Verified on real hardware (`scripts/test-image-catalog.sh`, 10/10): `keygen`/`sign` produce a real
+verifiable entry; creating a VM by catalog name actually resolves and boots the underlying image; with
+`trusted_signers` configured, an unsigned entry is rejected while a validly signed one is accepted (both
+confirmed by actually trying to boot); a plain literal path still works unchanged; `GET
+/v1/images/catalog` correctly reports `signature_valid: true`/`false` for the two cases. The CRUD
+endpoints above were verified live against a real deployed instance: full add → list → clone →
+rename → export (byte-identical file at the destination) → delete round trip, plus the duplicate-name
+and not-found error paths.
+
+## Storage backends
+
+By default a VM's disk is provisioned the same way it always has been: a
+qcow2 copy-on-write overlay for QEMU, a reflinked-or-copied raw file for
+Cloud Hypervisor/Firecracker. Setting `storage` on a create request switches
+to one of three alternative provisioning backends instead —
+`fluxvm_core::model::StorageBackend`, implemented in `fluxvm_image::storage`:
+
+- **`lvm-thin`** — `image` must be a `/dev/<vg>/<lv>` path to an existing
+  LVM thin logical volume (in a thin pool). A fresh thin *snapshot* LV is
+  created per VM (`lvcreate --snapshot`) and handed to the VMM directly as a
+  raw block device — real copy-on-write at the block layer, and near-instant
+  regardless of image size. Verified end to end on real hardware: create →
+  a genuinely new `/dev/<vg>/eph-<id>` snapshot LV appears → the guest boots
+  off it and answers `exec` → `delete` removes the snapshot LV, `stop` alone
+  leaves it in place (same as the disk file is left in place for every other
+  backend). Not supported under the Firecracker jailer, since its
+  chroot/hardlink resource-placement model doesn't extend to a shared block
+  device — use direct (non-jailed) Firecracker, QEMU, or Cloud Hypervisor.
+  **Real bug found and fixed while testing this**: LVM sets a persistent
+  "activation skip" flag on every new thin snapshot by default; without
+  `--setactivationskip n` on the `lvcreate`, the following `lvchange -ay`
+  exits 0 but silently activates nothing, and the VM fails to boot with a
+  "device does not exist" error. There's also a real (if narrow) udev race —
+  `lvchange -ay` returns as soon as the kernel dm target is live, before
+  udev has necessarily finished creating the `/dev/<vg>/<lv>` symlink — so
+  provisioning polls for that symlink for up to 5s rather than trusting the
+  command's exit status alone.
+- **`nbd`** — QEMU only (QEMU has a native `nbd:` block client; Cloud
+  Hypervisor and Firecracker don't). The disk is the same disposable qcow2
+  overlay as the default backend, but it's exported over NBD via a
+  `qemu-nbd` subprocess this VM owns (over a UNIX socket, not a TCP port)
+  instead of being opened directly as a local file — the same client/server
+  split real remote/shared NBD storage uses, without needing a separate
+  storage host to prove the mechanism end to end. Verified on real hardware:
+  the exporting `qemu-nbd` process is a real, findable pid; the guest boots
+  over the NBD attachment and answers `exec`; `delete` kills the export
+  (`stop` alone leaves it running, so a later `start` can reattach). **Real
+  bug found and fixed while testing this**: injecting the guest-agent token
+  into the disk (via `guestkit`, which does its own independent qemu-nbd
+  mount) after this VM's own `qemu-nbd --persistent` export was already
+  running raced its write lock and failed with "Failed to get 'write' lock".
+  Fixed by injecting the token before the export starts, not after.
+  Separately, concurrent creates that each inject a token used to race
+  guestkit's `/dev/nbdN` pick (same device handed to two mounts — see #104);
+  guestkit ≥1.2.5 serializes allocate+connect with `flock`.
+- **`ceph-rbd`** — `rbd clone <pool>/<image>@fluxvm-base ...` and QEMU's
+  native `rbd:` block driver (QEMU only; Cloud Hypervisor/Firecracker have
+  no built-in Ceph client). Verified end to end against a real, live Rook
+  Ceph cluster (the Atlas storage-control-plane project's lab: Rook v1.20.2
+  + Ceph Squid v19.2.3, `rbd-nvme-prod` pool): imported a raw image as
+  `rbd-nvme-prod/fluxvm-base`, protected an `fluxvm-base` snapshot on
+  it, created a VM with `storage=ceph-rbd` — `rbd clone` produced a real
+  `eph-<id>` clone, QEMU booted a real guest straight off
+  `rbd:rbd-nvme-prod/eph-<id>:id=admin:conf=...` all the way to a login
+  prompt, and `delete` reaped the clone (confirmed gone via `rbd ls`, no
+  leak). Doesn't support automatic guest-agent token injection (`guestkit`
+  needs a local file or block device to mount, not an arbitrary `rbd:`
+  URI) — that combination fails fast with a clear error rather than
+  attempting it.
+- **`ceph-rbd-in-place`** — QEMU opens an existing `<pool>/<image>` as-is,
+  with no clone and no `fluxvm-base` snapshot. The image is owned by
+  whoever created it (typically the Atlas storage control plane, via
+  Kairon's `spec.volumes[].atlas.mode: rbd`); FluxVM checks it with
+  `rbd info` before boot and never deletes it. Because every node opens the
+  same image, live migration of these VMs is shared-storage migration with
+  no block copy. Credentials come only from node config
+  (`[storage] ceph_user` / `ceph_conf`); pool and image names are limited to
+  `[A-Za-z0-9._-]`, so a request can't smuggle `:id=`/`:conf=` options or an
+  `@snapshot` into the `rbd:` URI. QEMU only, and no automatic guest-agent
+  token injection (same reason as `ceph-rbd`).
+
+`storage` defaults to unset (`Default`) on every create request — nothing
+above changes any existing behavior unless a caller opts in.
+
+See `scripts/test-storage-backends.sh` for the repeatable real-hardware
+regression test covering `lvm-thin` and `nbd` (it also sets up a
+loopback-backed thin pool from scratch if you don't already have one — see
+the script's own `--help`). `ceph-rbd` isn't in that script — it was
+verified manually against the specific external Rook Ceph lab above, which
+this repo has no automated way to stand up or tear down; the recipe was:
+`rbd import` a raw image into a pool, `rbd snap create` + `rbd snap
+protect` an `fluxvm-base` snapshot on it, then create a VM with
+`"storage":"ceph-rbd","image":"<pool>/<image>"`.
+
+## Distributed node-agent
+
+`fluxvm-agent` is the non-Kubernetes multi-host story — a caller talks to one central endpoint
+instead of knowing which host a VM is on, distinct from `fluxvm-kube`'s per-node reconciliation
+against a *local* fluxvm. One binary, two modes:
+
+```bash
+# Central fleet registry + create/list/delete proxy — one instance for the whole fleet.
+fluxvm-agent central --listen 0.0.0.0:7799
+
+# Per-host heartbeat client — one instance per hypervisor host, alongside a local `fluxctl serve`.
+fluxvm-agent node --name worker-1 \
+    --central http://fleet-registry:7799 \
+    --fluxvm-url http://127.0.0.1:7788 \
+    --advertise-url http://worker-1.internal:7788 \
+    --label zone=us-east --label gpu=true
+```
+
+Every `--interval-secs` (default 10), each node agent reports its name, real capacity (vCPUs off
+`available_parallelism()`, RAM off `/proc/meminfo`), and current VM count (via its own local
+`GET /v1/vms`) to the central registry. `POST /fleet/vms` with no `"node"` field picks the healthy
+node with the fewest VMs and proxies the create there; with an explicit `"node"` it targets that node
+directly. `GET /fleet/vms` aggregates every healthy node's VMs, tagged with which node each came from,
+and names any node it couldn't account for in a separate `"unreachable_nodes"` field (see below) rather
+than silently omitting it.
+`GET /fleet/nodes/{name}/vms` narrows that same query to exactly one node, queried directly rather
+than filtered out of the aggregate. `DELETE /fleet/vms/{node}/{id}` proxies to that exact node.
+
+Verified end to end across two real, physically separate hosts (`scripts/test-fleet-agent.sh`, 11/11
+passing): both hosts register with real capacity; an unaddressed create picks the least-loaded host
+and produces a real QEMU process confirmed on that exact physical host (and confirmed absent on the
+other); a second create lands on the *other* host once the first host's load is known — real
+load-aware placement, not round-robin; the fleet-wide list correctly aggregates and tags VMs from
+both hosts; a fleet-proxied delete reaps the right VM on the right host and leaves the other alone.
+
+**Real bugs found and fixed while testing this across two actual hosts** (bugs that are invisible
+running everything on one machine, which is exactly why this got tested on two real, separate hosts
+instead of just trusting the code): a node's heartbeat originally reported its own `--fluxvm-url`
+(almost always a loopback address) straight to central — central's proxy calls for a *remote* node
+would then silently hit whatever was listening on *central's own* localhost instead, with no error at
+all. Fixed by splitting `--fluxvm-url` (what this agent uses to reach its own local fluxvm) from
+`--advertise-url` (what a remote central should use to reach this same fluxvm — must be a real,
+externally routable address). Separately, this test script's own cleanup function first tried
+`sudo pkill -f "target/release/fluxctl --config ..."` over SSH — which matched **its own** command
+line (the pattern string is a substring of the `pkill` invocation's own argv) and SIGTERMed itself
+before it ever reached the real target process, leaving the actual `fluxctl serve` running every
+time with no error surfaced. Fixed with the standard `[t]arget/...` bracket-escape idiom that keeps
+`pgrep`/`pkill -f` from matching their own invocation.
+
+**CLI equivalents.** Every `/fleet/*` route below also has a `fluxctl fleet ...`
+subcommand — previously the only way to drive the central registry was a raw
+`curl` call:
+
+```bash
+fluxctl fleet --central http://fleet-registry:7799 nodes
+fluxctl fleet --central http://fleet-registry:7799 node worker-1
+fluxctl fleet --central http://fleet-registry:7799 cordon worker-1
+fluxctl fleet --central http://fleet-registry:7799 uncordon worker-1
+fluxctl fleet --central http://fleet-registry:7799 node-vms worker-1
+fluxctl fleet --central http://fleet-registry:7799 vms
+fluxctl fleet --central http://fleet-registry:7799 capacity
+fluxctl fleet --central http://fleet-registry:7799 create --spec vm.json [--node worker-1] [--node-selector zone=us-east]
+fluxctl fleet --central http://fleet-registry:7799 delete worker-1 <vm-id>
+fluxctl fleet --central http://fleet-registry:7799 deregister worker-1
+```
+
+`--central` also reads `CENTRAL_URL`; pass `--token`/`FLUXVM_AGENT_TOKEN` the
+same way `fluxvm-agent node` does when the registry has a bearer token
+configured. Bodies, status codes, and error text are unchanged from the raw
+HTTP routes documented throughout this section — this is a thin client, not
+a second implementation of any of it.
+
+**Auth / TLS / persistence / placement**: set `--token` / `FLUXVM_AGENT_TOKEN` on both
+`central` and `node` (Bearer on all `/fleet/*` except `/healthz`). Optional
+`--tls-cert`/`--tls-key` on central. Registry persists to
+`--state-dir/fleet-nodes.json` (survives central restart until heartbeats refresh
+`last_seen`). Unaddressed creates use residual CPU/memory capacity scoring (not
+only fewest-VMs).
+
+**Cordon a node for planned maintenance** without deregistering it, waiting out
+`HEALTHY_WINDOW_SECS` for a heartbeat timeout, or draining/evicting anything
+already running on it:
+
+```bash
+curl -X POST http://fleet-registry:7799/fleet/nodes/worker-1/cordon
+curl -X POST http://fleet-registry:7799/fleet/nodes/worker-1/uncordon
+```
+
+(add `-H "Authorization: Bearer $FLUXVM_AGENT_TOKEN"` when the registry has a
+token configured, same as every other `/fleet/*` route). A cordoned node keeps
+heartbeating, keeps reporting real capacity in `GET /fleet/nodes` (now with a
+`"cordoned"` field alongside `"healthy"`), and any VM already on it keeps
+running and keeps showing up in `GET /fleet/vms` — cordon only removes the
+node from automatic placement's candidate set in a subsequent unaddressed
+`POST /fleet/vms`, the same "stop scheduling here, don't touch what's already
+there" semantics as `kubectl cordon`. It does *not* block an explicit
+`POST /fleet/vms {"node": "worker-1", ...}` naming that exact node — matching
+the same precedent: a Kubernetes Pod with `spec.nodeName` set bypasses the
+scheduler and can still land on a cordoned node, because cordoning was never a
+per-node admission check, only a placement-candidate filter. Cordoned state is
+per-node-name in the registry, not carried in the node agent's heartbeat body
+at all (the node agent has no idea cordoning exists), so it survives every
+subsequent heartbeat and a central restart (it's in `fleet-nodes.json`)
+without a node operator having to do anything to keep it in effect, and
+without a node agent's own heartbeat ever silently clearing it back off. 9 new
+unit tests in `fluxvm-agent::central` (cordoned-node placement exclusion, the
+only-node-cordoned case, uncordon restoring eligibility, cordoning an unknown
+node reporting not-found rather than silently succeeding, heartbeat
+preserving an existing cordon vs. a brand-new node registering uncordoned,
+and both directions of the explicit-`"node"`-bypasses-cordon behavior).
+
+**Check one node's own state** without fetching and filtering the whole
+fleet:
+
+```bash
+curl http://fleet-registry:7799/fleet/nodes/worker-1
+```
+
+`GET /fleet/nodes/{name}` returns exactly the same JSON shape a
+`GET /fleet/nodes` list entry already has — `healthy`, `cordoned`, `labels`,
+`free_vcpus`/`free_memory_mib`, and the rest — for exactly one node, instead
+of an operator or script having to pull the whole registry and pick one entry
+back out client-side just to answer "is worker-1 cordoned right now?" or "did
+worker-1's last heartbeat actually land?". `404` for a name that was never
+registered, the same status `cordon`/`uncordon`/`deregister` already use for
+an unknown `{name}` on this same path — unlike `GET /fleet/nodes/{name}/vms`
+below, whose unknown-name case is a bad *proxy target* (`400`), not a missing
+*resource*. `fluxctl fleet node worker-1` is the CLI equivalent.
+
+**See what's actually running on a node** before deciding to cordon it (or
+after, to confirm nothing changed):
+
+```bash
+curl http://fleet-registry:7799/fleet/nodes/worker-1/vms
+```
+
+This is deliberately a different route from the fleet-wide `GET /fleet/vms`,
+not a documented query-param filter on it: answering "what's on *one* node"
+by filtering the fleet-wide list client-side would still require every
+*other* node in the fleet to also be up and reachable just to answer a
+question about one of them. `GET /fleet/nodes/{name}/vms` proxies straight
+to that one node's own `GET /v1/vms` — it works regardless of the node's
+`cordoned`/`healthy` state, tags each VM with `"node"` the same way the
+fleet-wide list does, and turns that node being unreachable or erroring
+into a real `502` naming the node instead of an empty, unexplained list.
+Unknown node name is a `400`, same as every other `/fleet/*` route that
+takes a `{name}` path segment. 5 new tests in `fluxvm-agent::central`
+against a real (not mocked) minimal HTTP server standing in for the node —
+happy path with correct tagging, unknown node, an unreachable node, a node
+whose own `/v1/vms` itself errors, and a node with zero VMs.
+
+**Know when the fleet-wide list is incomplete.** `GET /fleet/vms` originally
+dropped any node it couldn't account for — one excluded up front for a stale
+heartbeat, or one whose `GET /v1/vms` call failed partway through — with
+nothing but a server-side `tracing::warn!` the caller never saw; a fleet
+member being down looked identical to it simply having no VMs. The response
+now carries a second field naming exactly which nodes that happened to and
+why:
+
+```bash
+curl http://fleet-registry:7799/fleet/vms
+# {
+#   "items": [ ... VMs from every node that did answer, "node"-tagged ... ],
+#   "unreachable_nodes": [
+#     { "node": "worker-2", "reason": "unhealthy (stale heartbeat)" },
+#     { "node": "worker-5", "reason": "unreachable: error sending request..." }
+#   ]
+# }
+```
+
+`"unreachable_nodes"` is `[]` on the ordinary all-healthy path — existing
+callers that only ever read `"items"` see no behavior change. A caller that
+does care whether the list it just got is the *whole* fleet's now has a
+direct way to check, instead of having to cross-reference `GET /fleet/nodes`
+or grep server logs to rule out a silent gap. Each reason distinguishes a
+node excluded before it was even queried (stale heartbeat) from one that
+was queried and failed (connection error, a non-2xx from its own
+`GET /v1/vms`, or an unparseable body), matching the same three failure
+modes `GET /fleet/nodes/{name}/vms` already turns into a `502` for the
+single-node case — this just extends that surface-don't-hide behavior to
+the aggregate instead of requiring a per-node loop to get it. 4 new tests in
+`fluxvm-agent::central`: all-healthy-and-reachable reports an empty
+`unreachable_nodes`; an unreachable node is named without losing the other
+node's real VMs; a stale-heartbeat node is named without ever being
+contacted; a node that rejects the call with a non-2xx is named with its
+own error message included in the reason.
+
+**Permanently forget a decommissioned node.** Cordoning and a stale
+heartbeat both take a node out of automatic placement, but neither ever
+actually removes its record — retire a host for good (old hardware
+decommissioned, migrated to a different fleet) and it sits in the registry,
+excluded from scheduling but still cluttering `GET /fleet/nodes`, forever.
+`DELETE /fleet/nodes/{name}` removes the record outright:
+
+```bash
+curl -X DELETE http://fleet-registry:7799/fleet/nodes/worker-1
+```
+
+It refuses with a `409` if that node's heartbeat is still fresh
+(`healthy()`, same `HEALTHY_WINDOW_SECS` window as everywhere else) rather
+than deleting it anyway. That's a deliberate fail-closed choice, not
+laziness: `apply_register` treats a name with no existing record as a
+brand-new node and inserts it uncordoned (see its doc comment) — so
+deregistering a *live* node and letting its very next heartbeat re-create
+the record would silently drop any cordon an operator had set on it,
+undoing the exact maintenance state cordoning exists to hold in place.
+Requiring staleness first gives an operator one unambiguous path to
+decommission a live host: stop that host's `fluxvm-agent node` process (or
+otherwise let its heartbeat lapse), wait out `HEALTHY_WINDOW_SECS`, then
+deregister — never a race between "delete" and "the next heartbeat wins".
+An unknown node name is a `404`, same as every other `/fleet/*` route
+keyed by `{name}`. Deregistering also persists immediately to
+`--state-dir/fleet-nodes.json`, same as cordon/uncordon, so the removal
+survives a central restart. 7 new tests in `fluxvm-agent::central`: a
+stale node is removed (both at the pure-function level and through the
+HTTP handler); a healthy node is refused and its record left untouched
+(both levels); an unknown name reports not-found (both levels); and one
+test documents the exact hazard the health check guards against — deleting
+a cordoned-but-stale node's record, then feeding it a fresh heartbeat,
+recreates it uncordoned.
+
+**See the fleet's total capacity** without fetching `GET /fleet/nodes` and
+summing every node's `free_vcpus`/`free_memory_mib` yourself:
+
+```bash
+curl http://fleet-registry:7799/fleet/capacity
+# {
+#   "nodes_total": 3, "nodes_healthy": 2, "nodes_cordoned": 1, "nodes_schedulable": 1,
+#   "vm_count": 4,
+#   "vcpus_total": 16, "vcpus_used": 8, "vcpus_free": 8,
+#   "memory_mib_total": 32768, "memory_mib_used": 8192, "memory_mib_free": 24576
+# }
+```
+
+Computed entirely from what each node already reported in its own last
+heartbeat, sitting in the registry — unlike `GET /fleet/vms`, this never
+proxies a single call to any node's own `fluxctl serve`, so it's cheap and
+never degrades or blocks because one node happens to be slow or briefly
+unreachable right now (a stale node is simply excluded from every total,
+same as it already is from `pick_best_capacity`'s own candidate set — not
+guessed at). `nodes_total`/`nodes_healthy`/`nodes_cordoned` count against
+the whole registry regardless of reachability; every other field counts
+only *healthy* nodes. `vcpus_total`/`memory_mib_total` sum every healthy
+node whether cordoned or not — cordoned hardware still physically exists
+and still counts as real fleet capacity, it's simply not accepting new
+placements right now — while `vcpus_free`/`memory_mib_free` (and
+`nodes_schedulable`) sum only the healthy-and-uncordoned subset: exactly
+the same node set an unaddressed `POST /fleet/vms` itself draws from via
+`pick_best_capacity`, so a nonzero `*_free` here is a precise answer to
+"would an unaddressed create fit right now," not an approximation that
+then has to account for cordoning separately. `vcpus_used`/
+`memory_mib_used` reuse `capacity_score`'s own existing per-VM estimate
+(`vm_count * DEFAULT_VM_VCPUS`/`DEFAULT_VM_MEMORY_MIB`) rather than asking
+any node for each VM's real configured size — an estimate for the same
+reason placement's own scoring already is one. This is the natural single
+call for a capacity-planning dashboard or an autoscaler deciding whether
+the fleet needs another host, instead of it re-deriving these same sums
+from `GET /fleet/nodes` on every poll. 4 new tests in
+`fluxvm-agent::central`: an empty fleet reports all zeros; healthy
+uncordoned nodes sum correctly; a stale node contributes to none of the
+totals (not just placement); and a cordoned node's hardware counts toward
+`*_total` but is excluded from `*_free`/`nodes_schedulable`.
+
+**Constrain automatic placement by node label** — e.g. keep a create off
+every node except ones in a given zone, or ones that actually have a GPU —
+without hand-picking an exact `--node` and losing failover entirely. Each
+node agent reports its own operator-set labels on every heartbeat:
+
+```bash
+fluxvm-agent node --name worker-1 --central http://fleet-registry:7799 \
+    --label zone=us-east --label gpu=true
+```
+
+and an unaddressed create can require a subset of them via `"nodeSelector"`
+(exact-match key/value, same semantics as a Kubernetes Pod's own
+`spec.nodeSelector`):
+
+```bash
+curl -X POST http://fleet-registry:7799/fleet/vms \
+    -d '{"name": "gpu-job", "vcpus": 4, "memory_mib": 8192, "nodeSelector": {"gpu": "true"}}'
+# or:
+fluxctl fleet --central http://fleet-registry:7799 create --spec vm.json --node-selector gpu=true
+```
+
+`pick_best_capacity_excluding` only ever considers a node whose labels are a
+superset of `nodeSelector` before scoring residual capacity, so a node with
+far more free capacity but the wrong label is never picked over a smaller
+one that actually matches; a `nodeSelector` matching no registered node
+fails with a `503` naming the selector, the same "surface, don't hide"
+posture the rest of this fleet API already has (`no healthy, uncordoned
+node matches nodeSelector {gpu=true}`, not a generic "no nodes"). An
+explicit `"node"` bypasses `nodeSelector` entirely, exactly like it already
+bypasses cordoning — the same single-attempt, no-surprise-landing semantics
+`resolve_target` documents for cordoning apply here too. `"nodeSelector"` is
+stripped from the body before it's forwarded to the target node's own
+`fluxctl serve`, same as `"node"` already is — neither is part of
+`CreateVmRequest`. Labels are advisory metadata only: an older node agent
+that predates `--label` simply reports none and matches no non-empty
+selector, and `GET /fleet/nodes` includes each node's current labels
+alongside its capacity and health. 10 new tests in `fluxvm-agent::central`
+(selector picks the matching lower-capacity node over the non-matching
+higher-capacity one, an unmatched selector's error naming, an empty
+selector matching everything, both directions of explicit-`"node"`
+bypassing a non-matching selector, `nodeSelector` extraction/stripping
+edge cases) plus 2 more in `fluxctl::fleet_client` exercising the
+`--node-selector` flag end to end against a real router.
+
+**Automatic placement fails over to the next-best node when the first pick
+is unreachable.** A node's heartbeat only goes stale (and drops out of
+placement) after `HEALTHY_WINDOW_SECS` (30s) with no beat — a node that
+crashed, wedged, or dropped off the network moments after its last
+heartbeat still looks perfectly healthy to `pick_best_capacity` and gets
+picked anyway. Before this existed, an unaddressed `POST /fleet/vms`
+dispatched to that single best-scoring node with no retry, so the create
+failed outright even while other schedulable nodes sat idle. `create_vm`
+now distinguishes a genuinely *unreachable* node (a connection failure, or
+a response that isn't valid JSON) from one that reached its own `fluxctl
+serve` and explicitly rejected the request: only the former triggers
+failover — the unreachable node is excluded and
+`pick_best_capacity_excluding` tries the next-best remaining candidate,
+looping until one accepts the create or every schedulable node has been
+tried and found unreachable, at which point the `502` names the last node
+tried. A rejection is never retried elsewhere, since every other node
+would reject the identical request body identically — only connectivity
+failures are worth a second attempt. An explicit `"node"`/`--node` target
+is unaffected by any of this: it stays a single, non-retried attempt (the
+same "bypasses the scheduler" semantics `nodeSelector`/cordoning already
+have above), so a caller who pinned a node gets an honest failure instead
+of a surprise landing somewhere else.
+
+## State layout
+
+Durable VM state lives under `state_dir` (Linux default `/var/lib/fluxvm`; on a Mac,
+`~/Library/Application Support/FluxVM`). **QMP and other Unix control sockets** are not kept
+under the long instance path: on macOS a `sockaddr_un` path must stay under ~104 bytes
+(`SUN_LEN`), and `…/instances/<uuid>/qmp.sock` overflows that. From **0.4.10** QEMU binds
+`run_dir/qmp/<id>.sock` (default `run_dir` is `/tmp/fluxvm-run-<uid>`), records it as
+`control_socket` on the VM record, and still accepts a legacy workspace `qmp.sock` for older
+VMs. Migration receiver workspaces use `run_dir/mr/<id>/`. Override with `[paths] run_dir` in
+the config.
+
+```text
+/var/lib/fluxvm/                 (state_dir)
+  vms.json
+  vms.lock
+  events.jsonl                (VM lifecycle/audit events; rotates to events.jsonl.1 at 16 MiB)
+  autostart/<uuid>            (fluxctl enable markers)
+  network-policy/             (per-VM dataplane policy JSON)
+  network-groups/             (security groups, CNP store, ipcache.json)
+  downloads/
+  images/
+    clones/                   (standalone root images written by clone-vm)
+  kernels/
+  templates/                 ([sandbox].templates_dir; OCI→template export)
+  oci/                        (macOS container sandboxes; docs/oci-sandboxes.md)
+    blobs/sha256/<hex>        (pulled manifests, configs and layers, digest-verified)
+    rootfs/<digest>.ext4      (one built root filesystem per image, + <digest>.json)
+    build/                    (builder VM workspaces while a rootfs is built)
+    boot/                     (oci-kernel, oci-initrd when given as file names)
+  vm-templates.json           (VM templates, /v1/vm-templates)
+  backups/                    (fluxctl backup / POST /v1/vms/{id}/backup output)
+  instances/
+    <uuid>/
+      root.qcow2 | root.raw
+      disks/<name>.qcow2      (QEMU data disks)
+      disks/<name>.io.json    (a data disk's bus and I/O options, hotplug port)
+      vub-<name>.sock|.pid|.log (qemu-storage-daemon of a vhost-user-blk disk)
+      seed.img
+      user-data
+      meta-data
+      console.log
+      serial.sock             (QEMU serial chardev; fluxctl serial / websocket)
+      ch-api.sock | firecracker.sock | fluxvm.sock
+      qmp.sock                (legacy only; prefer run_dir/qmp/<id>.sock)
+      vsock.sock              (CH / Firecracker / FluxVm, when agent.enabled)
+      firecracker.json
+      snapshot/               (FluxVm memory+disk snapshots)
+      nbd.sock | nbd.pid      (storage=nbd only — see "Storage backends" above)
+
+/tmp/fluxvm-run-<uid>/           (run_dir; short path for Unix sockets)
+  qmp/<id>.sock                  (QEMU monitor; also VmRecord.control_socket)
+  mr/<id>/                       (migration receiver workspace)
+```
+
+`storage=lvm-thin` and `storage=ceph-rbd` disks live outside this tree entirely — a thin
+snapshot LV (`/dev/<vg>/eph-<id>`) and an RBD clone (`rbd:<pool>/eph-<id>:...`) respectively,
+both torn down by `delete` via `VmRecord.lvm_lv`/parsing the `rbd:` URI, not by deleting
+anything under `instances/<uuid>/`.
+
+`vms.lock` coordinates `vms.json` reads/writes across concurrent `fluxvm` processes (each CLI
+invocation is a separate process, not just a separate task inside `serve`) via an OS-level `flock` —
+without it, two VMs created at the same moment could silently lose one's record, or both get
+assigned the same vsock CID.
+
+## Checking a config file: `fluxctl config check`
+
+The daemon loads its config leniently: unknown keys are ignored and every field has a default. A misspelled or misplaced key
+therefore silently keeps the default, and some combinations only fail at serve time or turn a protection off without a message
+(`tls.client_ca` without `tls.cert` means client certificates are **not** required). `config check` reads the file and reports, per key, what is wrong and how to
+fix it. It never starts the daemon or changes the file.
+
+```bash
+fluxctl config check /etc/fluxvm.toml        # or: fluxctl --config /etc/fluxvm.toml config check
+fluxctl config check fluxvm.toml --offline   # config written for another host: skip "does this path exist"
+fluxctl config check fluxvm.toml --strict --json   # CI: exit 1 on warnings too, machine-readable
+```
+
+```text
+error   tls.client_ca  tls.client_ca is set but TLS is off (needs tls.cert and tls.key): client certificates are NOT required
+        fix: set tls.cert and tls.key, or remove tls.client_ca
+warning tls.trust_proxy_header  unknown key, ignored by the daemon (did you mean `tls.trust_proxy_headers`?)
+        fix: rename it to `tls.trust_proxy_headers`
+```
+
+Exit status is 1 when there is an error (and with `--strict` when there is a warning). Secrets (token values, credential-vault
+authorization, inline registry passwords) are never printed. What it checks:
+
+| Area | Examples |
+|---|---|
+| Syntax and types | TOML errors with position; a value of the wrong type |
+| Unknown keys | anything the daemon would ignore, with a `did you mean` for a near miss or a key that lives in another table (`[sandbox] allow_net` -> `sandbox.procbox.allow_net`) |
+| Listen and TLS | `listen` not `host:port`; `tls.cert` without `tls.key`; `client_ca` without TLS; `trust_proxy_headers` on a non-loopback listener; missing certificate files |
+| Auth | `auth.require` with no token or OIDC; weak, empty or duplicate tokens; no admin token; OIDC issuer without audience; rate limit half-set; MFA rule for an unknown token; bearer tokens over plain HTTP |
+| Admission policy | limits of 0, empty allow-lists, duplicate or zero-capped tenants, per-VM cap above the host cap, a token tenant with no caps |
+| Sandbox and egress | autopause/balloon/hibernate timing, egress HTTP rule syntax, TLS interception without a proxy listener, interception reaching private addresses, credential vault without a proxy, proxy bound beyond loopback |
+| procbox | default above cap, bad `isolation`, uid pool overflow or overlap with real accounts, `best_effort` and `allow_root` (fail open) |
+| Dataplane | malformed `allow_cidrs`/`allow_ports`/`xdp.block_cidrs`, XDP without an interface, soft pressure threshold not below hard |
+| Jailer, catalog, Apple | jailer required but not enabled, uid range half-set; trusted signer keys that are not 32-byte base64; registry credentials |
+
+Rules live in `crates/fluxvm-core/src/config_lint.rs` and each has a test. The shipped `config.example.toml` and
+`configs/` files are linted in CI-run unit tests and must stay free of errors and unknown keys.
+
+## Checking a VM spec: `fluxctl vm-spec check`
+
+A VM spec (the JSON of `fluxctl create --spec` and `POST /v1/vms`) is parsed leniently too: a misspelled key such as `memory_mb` is dropped and the default
+used, settings that belong to another backend are ignored, and some mistakes only show up when the VMM fails to start. `vm-spec check` reads the file and
+reports what it can know without a host: nothing is created or started.
+
+```bash
+fluxctl vm-spec check vm.json
+fluxctl vm-spec check vm.json --offline        # spec for another host: do not look for the image, kernel and shared folders
+fluxctl vm-spec check vm.json --strict --json  # CI: exit 1 on warnings too, machine-readable
+```
+
+```text
+error   max_vcpus  max_vcpus (2) is below vcpus (4)
+        fix: set max_vcpus to 4 or more
+warning memory_mb  unknown key, ignored by the daemon (did you mean `memory_mib`?)
+        fix: rename it to `memory_mib`
+warning numa_node  only the qemu backend uses `numa_node`; the firecracker backend ignores it
+        fix: remove it, or set backend to qemu
+```
+
+Exit status is 1 when there is an error (and with `--strict` when there is a warning). What it checks:
+
+| Area | Examples |
+|---|---|
+| Syntax | not JSON, or not a VM spec (the serde message) |
+| Unknown keys | any top-level key the daemon would ignore, with a `did you mean` |
+| Sizes | `vcpus` 0, tiny `memory_mib`, `max_vcpus` or `max_memory_mib` below the boot value |
+| Create-time rules | the model's own `balloon` (no hugepages, VFIO or confidential profile), `numa` (memory and vCPUs add up) and `vfio_devices` (PCI address or mdev UUID, no duplicates) checks |
+| Backend fit | qemu-only settings (`numa`, `balloon`, `tpm`, `data_disks`, ...) and Firecracker rate limits or `cpu_template` on another backend; `security_profile` other than `standard` off QEMU; Firecracker without `kernel`; `secure_boot` without `firmware`; `extra_args`, `shared_memory` or `hugepages` under a confidential profile |
+| Networking | port 0, a protocol other than tcp or udp, the same host port twice, privileged host ports, a forward that listens on `0.0.0.0` |
+| Files | relative or duplicate `shared_folders[].guest_path`; unless `--offline`, an `image`, `kernel`, `initrd`, `firmware` or shared-folder `host_path` that is missing on this machine |
+
+`backend: "auto"` is resolved by the daemon, so no backend-specific claim is made about it. The rules live in `crates/fluxvm-core/src/spec_lint.rs`.

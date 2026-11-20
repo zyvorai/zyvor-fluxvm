@@ -1,0 +1,21 @@
+# Copyright 2026 Zyvor
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+
+# Runs INSIDE a guest image (baked in via fluxctl build-image's copy_in),
+# not on the host. Distinct from fluxvm.service (the host control plane).
+
+[Unit]
+Description=Zyvor FluxVM in-guest agent (vsock ping/exec/shutdown)
+After=network.target fluxvm-selinux-ensure.service
+Wants=fluxvm-selinux-ensure.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/fluxvm-guest-agent
+Restart=on-failure
+RestartSec=2
+StandardOutput=journal+console
+StandardError=journal+console
+
+[Install]
+WantedBy=multi-user.target

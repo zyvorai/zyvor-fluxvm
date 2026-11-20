@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# Copyright 2026 Zyvor AI Labs · https://zyvor.dev
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+
+set -euo pipefail
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+export PYTHONDONTWRITEBYTECODE=1
+python3 - <<'PY' "$ROOT/tools/fluxvm_release_admission.py"
+import ast,sys
+from pathlib import Path; ast.parse(Path(sys.argv[1]).read_text(encoding='utf-8'),filename=sys.argv[1])
+PY
+python3 "$ROOT/tools/tests/test_fluxvm_release_admission.py"
+python3 - <<'PY' "$ROOT/schemas/sentinel-release-admission.schema.json" "$ROOT/examples/sentinel-release-admission.json"
+import json,sys
+from pathlib import Path
+for p in sys.argv[1:]: json.loads(Path(p).read_text(encoding='utf-8'))
+PY
+bash -n "$ROOT/scripts/install-sentinel-release-admission.sh" "$ROOT/scripts/test-sentinel-release-admission-host.sh"
+if find "$ROOT" -type d -name __pycache__ -print -quit | grep -q .; then echo '__pycache__ found' >&2; exit 1; fi
+if find "$ROOT" -type f \( -name '*.pyc' -o -name '*.pyo' \) -print -quit | grep -q .; then echo 'bytecode found' >&2; exit 1; fi
+echo "Set 17E static gates: PASS"

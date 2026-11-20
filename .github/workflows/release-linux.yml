@@ -1,0 +1,265 @@
+name: Release (Linux package)
+
+# Builds the Linux package (tarball only, see docs/linux-package.md) for a version tag and attaches it, with its
+# checksum, to that tag's GitHub release (created as a DRAFT if it does not exist yet, so nothing is published until
+# someone publishes it). scripts/install.sh downloads exactly these assets. The macOS package is release-macos.yml.
+#
+# The build runs in an ubuntu:22.04 container: the self-hosted runners differ in OS release, and a binary linked on a newer
+# glibc (2.38/2.39) does not start on 22.04. The container also needs no sudo on the runner host. Smoke test and attach run
+# on the host afterwards (they need docker and the release token), from the uploaded artifact.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to package (builds and uploads a workflow artifact only if empty)"
+        required: false
+      arch:
+        description: "Build only this architecture (x86_64 or aarch64); empty builds both"
+        required: false
+      channel:
+        description: "Channel the signed manifest is published to (default canary; use stable only after a canary soak)"
+        required: false
+      percent:
+        description: "Rollout wave for that channel, 0-100 (default 100 on canary, 5 elsewhere)"
+        required: false
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+
+# The package and verify jobs run Docker (a build container, then the smoke-test containers). zyvor-kernel-a also carries
+# zyvor-build but has no Docker daemon, so without the `docker` label they landed there and failed in "Set up job".
+jobs:
+  plan:
+    runs-on: [self-hosted, Linux, X64, zyvor-build]
+    outputs:
+      matrix: ${{ steps.m.outputs.matrix }}
+    steps:
+      - id: m
+        env:
+          ARCH: ${{ github.event.inputs.arch }}
+        run: |
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json, os
+          arch = os.environ.get("ARCH", "")
+          rows = [
+              {"arch": "x86_64", "runner": ["self-hosted", "Linux", "X64", "zyvor-build", "docker"], "experimental": False, "cross": False},
+              # Cross-compiled on x86_64: this organization has no hosted arm64 Linux runners (the `ubuntu-22.04-arm`
+              # job queued forever). A failure must not block the x86_64 package or the release.
+              {"arch": "aarch64", "runner": ["self-hosted", "Linux", "X64", "zyvor-build", "docker"], "experimental": True, "cross": True},
+          ]
+          rows = [r for r in rows if not arch or r["arch"] == arch]
+          print("matrix=" + json.dumps({"include": rows}))
+          PY
+
+  package:
+    needs: plan
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    runs-on: ${{ matrix.runner }}
+    continue-on-error: ${{ matrix.experimental }}
+    container: ubuntu:22.04
+    env:
+      DEBIAN_FRONTEND: noninteractive
+    steps:
+      - name: Base tools (the container is a bare ubuntu:22.04)
+        run: apt-get update -qq && apt-get install -y -qq git curl ca-certificates build-essential pkg-config python3 file binutils
+      - uses: actions/checkout@v7
+        with:
+          path: fluxvm
+          ref: ${{ github.event.inputs.tag || github.ref }}
+      # fluxvm-image depends on the sibling guestkit project through a relative path. It is checked out at the
+      # tag pinned in packaging/guestkit.ref (not its default branch), so a guestkit release cannot change or
+      # break a fluxvm release build; rebuilding an old fluxvm tag uses the guestkit it was released with.
+      - name: Read the pinned guestkit tag
+        id: gk
+        run: echo "ref=$(tr -d '[:space:]' < fluxvm/packaging/guestkit.ref)" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v7
+        with:
+          repository: zyvorai/guestkit
+          path: guestkit
+          ref: ${{ steps.gk.outputs.ref }}
+      - name: Check the guestkit pin against Cargo.lock and the checkout
+        run: |
+          # The container runs as root over a workspace the runner user owns, so git refuses the checkouts as "dubious
+          # ownership" (and the pin check, which hides git's stderr, then reports "no tag").
+          git config --global --add safe.directory '*'
+          # The checkout can leave HEAD at the pinned commit without the tag. fluxvm/ is the release tag's tree, whose
+          # copy of the check predates the remote-tag fallback, so create the tag here.
+          git -C guestkit fetch --depth=1 --no-tags origin "refs/tags/${{ steps.gk.outputs.ref }}:refs/tags/${{ steps.gk.outputs.ref }}"
+          fluxvm/scripts/check-guestkit-pin.sh fluxvm guestkit
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          # The musl target builds the static guest agent that ships in share/guest/ (packaging/files.txt).
+          targets: ${{ matrix.cross && 'aarch64-unknown-linux-gnu,aarch64-unknown-linux-musl' || 'x86_64-unknown-linux-musl' }}
+      - name: arm64 development packages (cross build)
+        if: matrix.cross
+        run: |
+          # The default sources serve amd64 only; arm64 packages come from ports.ubuntu.com.
+          sed -i 's/^deb \(http\|https\):/deb [arch=amd64] \1:/' /etc/apt/sources.list
+          find /etc/apt/sources.list.d -name '*.sources' -exec sed -i '/^Types:/a Architectures: amd64' {} +
+          dpkg --add-architecture arm64
+          for suite in jammy jammy-updates jammy-security; do
+            echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports $suite main universe" >> /etc/apt/sources.list.d/arm64.list
+          done
+          apt-get update -qq
+          apt-get install -y -qq gcc-aarch64-linux-gnu libsystemd-dev:arm64 libhivex-dev:arm64 libbpf-dev:arm64 linux-libc-dev:arm64
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
+          echo "PKG_CONFIG_aarch64_unknown_linux_gnu=aarch64-linux-gnu-pkg-config" >> "$GITHUB_ENV"
+          echo "PKG_CONFIG_ALLOW_CROSS=1" >> "$GITHUB_ENV"
+          echo "PKG_CONFIG_PATH=/usr/lib/aarch64-linux-gnu/pkgconfig" >> "$GITHUB_ENV"
+          echo "PKG_CONFIG_LIBDIR=/usr/lib/aarch64-linux-gnu/pkgconfig:/usr/share/pkgconfig" >> "$GITHUB_ENV"
+          echo "BINDGEN_EXTRA_CLANG_ARGS_aarch64_unknown_linux_gnu=--sysroot=/ -I/usr/include/aarch64-linux-gnu" >> "$GITHUB_ENV"
+      - name: System dependencies (the same as ci.yml)
+        run: apt-get install -y -qq libsystemd-dev libhivex-dev clang llvm libbpf-dev linux-libc-dev
+      # The eBPF objects are bytecode, so the build container's old clang is the only thing tying them to Ubuntu 22.04.
+      # Its clang 14 cannot fully unroll fluxvm_qemu_egress's port loop and has no -bpf-stack-size, so the service
+      # objects overflow the default 512-byte stack view. scripts/build-ebpf.sh honors $CLANG.
+      - name: clang 18 for the eBPF objects (apt.llvm.org)
+        run: |
+          apt-get install -y -qq gnupg
+          curl -fsSL https://apt.llvm.org/llvm-snapshot.gpg.key | gpg --dearmor -o /usr/share/keyrings/llvm.gpg
+          echo "deb [arch=amd64 signed-by=/usr/share/keyrings/llvm.gpg] http://apt.llvm.org/jammy/ llvm-toolchain-jammy-18 main" > /etc/apt/sources.list.d/llvm.list
+          apt-get update -qq
+          apt-get install -y -qq clang-18 llvm-18
+          echo "CLANG=clang-18" >> "$GITHUB_ENV"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fluxvm
+          key: release-linux-${{ matrix.arch }}-jammy
+      - name: Package
+        working-directory: fluxvm
+        run: |
+          # The workspace persists between runs on a self-hosted runner. A stage directory or tarball of an earlier tag
+          # in target/package made `ls -d target/package/fluxvm-*-linux-*/ | head -n1` pick the old stage (v0.4.14 built
+          # nfpm packages from fluxvm-0.4.13-linux-x86_64) and the *.tar.gz glob match more than one version.
+          rm -rf target/package
+          # A dispatch without a tag from a branch is a build-only check: the branch name is not a version.
+          TAG="${{ github.event.inputs.tag || (github.ref_type == 'tag' && github.ref_name) || 'v0.0.0-dev' }}"
+          scripts/package-linux.sh --version "${TAG#v}" ${{ matrix.cross && '--target aarch64-unknown-linux-gnu' || '' }}
+      # The ubuntu:22.04 build container (glibc 2.35) is the compatibility floor for every supported node. This
+      # fails the release if a binary needs a newer glibc symbol or a library outside the allowlist, instead of
+      # shipping a package that dies with "version GLIBC_2.xx not found" on an older node.
+      - name: glibc floor gate
+        working-directory: fluxvm
+        run: |
+          d="$(mktemp -d)"
+          tar -xzf target/package/*.tar.gz -C "$d"
+          OBJDUMP=${{ matrix.cross && 'aarch64-linux-gnu-objdump' || 'objdump' }} scripts/check-glibc-floor.sh "$d" 2.35
+      # Informational: would the binaries also run on EL9 (glibc 2.34)? The tarball needs glibc >= 2.35 until this passes.
+      - name: glibc 2.34 probe (EL9)
+        continue-on-error: true
+        working-directory: fluxvm
+        run: |
+          d="$(mktemp -d)"
+          tar -xzf target/package/*.tar.gz -C "$d"
+          OBJDUMP=${{ matrix.cross && 'aarch64-linux-gnu-objdump' || 'objdump' }} scripts/check-glibc-floor.sh "$d" 2.34
+      - uses: actions/upload-artifact@v7
+        with:
+          name: fluxvm-linux-${{ matrix.arch }}
+          path: |
+            fluxvm/target/package/*.tar.gz
+            fluxvm/target/package/*.sha256
+      # The container runs as root, and its workspace is the runner's own _work directory on the host. Without this, the
+      # root-owned fluxvm/target and fluxvm/.git left behind make the next host-side checkout on this runner (CI, site-check)
+      # fail with EACCES while it deletes them.
+      - name: Give the workspace back to the runner user
+        if: always()
+        run: chown -R "$(stat -c '%u:%g' "$GITHUB_WORKSPACE")" "$GITHUB_WORKSPACE"
+
+  verify:
+    needs: [plan, package]
+    # Runs even when the experimental aarch64 build failed, so the x86_64 package still reaches the release.
+    if: ${{ !cancelled() && needs.package.result != 'cancelled' }}
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    runs-on: ${{ matrix.runner }}
+    continue-on-error: ${{ matrix.experimental }}
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: fluxvm-linux-${{ matrix.arch }}
+          path: pkg
+      - uses: docker/setup-qemu-action@v4
+        if: matrix.cross
+        with:
+          platforms: arm64
+      - name: Smoke test in a clean container
+        run: |
+          F="$(realpath pkg/*.tar.gz)"
+          docker run --rm ${{ matrix.cross && '--platform linux/arm64' || '' }} -v "$F:/pkg.tar.gz:ro" ubuntu:22.04 bash -euc '
+            apt-get update -qq && apt-get install -y -qq libhivex0 libsystemd0 >/dev/null
+            mkdir /p && tar -xzf /pkg.tar.gz -C /p
+            for b in fluxctl fluxvm-hypervisor fluxvm-agent; do
+              ldd /p/fluxvm-*/bin/$b | grep "not found" && { echo "$b has missing libraries"; exit 1; }
+            done
+            /p/fluxvm-*/bin/fluxctl --version
+          '
+      - name: Attach to the release (draft if new)
+        if: github.event_name == 'push' || github.event.inputs.tag != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --draft --title "$TAG" --notes "Linux package. Install with: curl -fsSL https://zyvorai.github.io/zyvor-fluxvm/install.sh | bash"
+          gh release upload "$TAG" pkg/*.tar.gz pkg/*.sha256 --clobber
+
+  # Signs the release and publishes it for the pull installer (scripts/fluxvm-bootstrap.sh) only after the packages
+  # installed cleanly in the verify job. Runs when FLUXVM_RELEASE_KEY (an Ed25519 private key, PEM) is configured;
+  # the mirror sync additionally needs the MIRROR_S3_URI variable. Artifacts go up first and the channel file last.
+  publish:
+    needs: [plan, package, verify]
+    if: ${{ !cancelled() && needs.verify.result == 'success' && (github.event_name == 'push' || github.event.inputs.tag != '') }}
+    runs-on: ubuntu-latest
+    env:
+      RELEASE_KEY: ${{ secrets.FLUXVM_RELEASE_KEY }}
+      MIRROR_S3_URI: ${{ vars.MIRROR_S3_URI }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: fluxvm-linux-*
+          merge-multiple: true
+          path: pkg
+      - uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: |
+            pkg/*.tar.gz
+      - name: Sign and build the mirror tree
+        id: sign
+        run: |
+          if [ -z "$RELEASE_KEY" ]; then echo "FLUXVM_RELEASE_KEY is not set; the release is not signed for the pull installer."; exit 0; fi
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"; VERSION="${TAG#v}"
+          CHANNEL="${{ github.event.inputs.channel }}"; CHANNEL="${CHANNEL:-canary}"
+          PERCENT="${{ github.event.inputs.percent }}"; PERCENT="${PERCENT:-$([ "$CHANNEL" = canary ] && echo 100 || echo 5)}"
+          umask 077; printf '%s\n' "$RELEASE_KEY" > "$RUNNER_TEMP/release.key"
+          python3 scripts/make-sbom.py --version "$VERSION" > "$RUNNER_TEMP/sbom.cdx.json"
+          scripts/make-release-manifest.sh --version "$VERSION" --artifacts pkg --key "$RUNNER_TEMP/release.key" \
+            --out mirror --channel "$CHANNEL" --percent "$PERCENT" --sbom "$RUNNER_TEMP/sbom.cdx.json"
+          openssl pkey -in "$RUNNER_TEMP/release.key" -pubout -out "$RUNNER_TEMP/release.pub"
+          scripts/make-release-manifest.sh --verify "mirror/channels/$CHANNEL.json" --pubkey "$RUNNER_TEMP/release.pub"
+          rm -f "$RUNNER_TEMP/release.key"
+          echo "signed=1" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v7
+        if: steps.sign.outputs.signed == '1'
+        with:
+          name: mirror-tree
+          path: mirror
+      - name: Sync to the mirror (artifacts first, channel file last)
+        if: steps.sign.outputs.signed == '1' && env.MIRROR_S3_URI != ''
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.MIRROR_AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.MIRROR_AWS_SECRET_ACCESS_KEY }}
+          AWS_ENDPOINT_URL: ${{ vars.MIRROR_ENDPOINT }}
+        run: |
+          aws s3 sync mirror/releases "$MIRROR_S3_URI/releases" --only-show-errors
+          for f in mirror/channels/*.json.sig; do aws s3 cp "$f" "$MIRROR_S3_URI/channels/$(basename "$f")" --only-show-errors; done
+          for f in mirror/channels/*.json; do aws s3 cp "$f" "$MIRROR_S3_URI/channels/$(basename "$f")" --only-show-errors; done

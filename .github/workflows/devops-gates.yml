@@ -1,0 +1,37 @@
+name: DevOps gates
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Collapse superseded runs of this workflow on the same ref so queued duplicates do not hold the org's runners.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  examples-and-contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Contract + example tests
+        working-directory: examples/devops
+        run: python3 -m unittest test_contract.py test_examples.py -v
+      - name: glibc floor gate tests
+        run: bash scripts/test-check-glibc-floor.sh
+      - name: Offline devops-gate
+        run: bash scripts/test-devops-gate.sh
+      - name: Shipped systemd units verify
+        run: REQUIRE_SYSTEMD_ANALYZE=1 bash scripts/verify-systemd-units.sh
+      - name: Upgrade snapshot dry-run
+        run: bash scripts/test-upgrade-snapshot.sh
+      - name: guestkit pin matches Cargo.lock
+        run: bash scripts/check-guestkit-pin.sh .
+      - name: guestkit pin checker tests
+        run: bash scripts/test-check-guestkit-pin.sh
+      - name: apt dependency helper tests (self-hosted runners without sudo)
+        run: bash scripts/test-ci-install-apt-deps.sh

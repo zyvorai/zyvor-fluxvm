@@ -1,0 +1,24 @@
+# Copyright 2026 Zyvor AI Labs · https://zyvor.dev
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+
+[package]
+name = "fluxvm-guest-agent"
+version = "0.4.21"
+edition = "2024"
+license = "LicenseRef-Zyvor-Production-1.0"
+description = "In-guest AF_VSOCK agent for Zyvor FluxVM (ping/exec/put-file/get-file/shutdown, no SSH needed)"
+
+[dependencies]
+fluxvm-guest-protocol = { path = "../fluxvm-guest-protocol" }
+fluxvm-procbox = { path = "../fluxvm-procbox" }
+anyhow = "1"
+base64 = "0.23"
+clap = { version = "4", features = ["derive"] }
+libc = "0.2"
+
+[dev-dependencies]
+tempfile = "3"
+
+[[bin]]
+name = "fluxvm-guest-agent"
+path = "src/main.rs"

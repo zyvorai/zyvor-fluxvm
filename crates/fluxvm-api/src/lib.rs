@@ -1,0 +1,10878 @@
+// Copyright 2026 Zyvor AI Labs · https://zyvor.dev
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+
+// The OpenAPI schema table in openapi.rs is one large json! literal; it outgrew the default limit of 128.
+#![recursion_limit = "512"]
+
+use axum::{
+    Extension, Json, Router,
+    body::Body,
+    extract::{Path, Query, Request, State},
+    http::{Method, StatusCode, header},
+    middleware::{self, Next},
+    response::{IntoResponse, Response},
+    routing::{any, delete, get, post, put},
+};
+use fluxvm_core::{
+    config::{Role, constant_time_eq},
+    model::{
+        BackendKind, ClaimOverrides, CreateVmRequest, PoolResizeRequest, PoolSpec, VmRecord,
+        VmStatus,
+    },
+};
+use fluxvm_image::{self as image, BuildImageRequest};
+use fluxvm_scheduler::VmManager;
+use http_body_util::{BodyExt, Full, Limited};
+use hyper_util::rt::TokioIo;
+use serde::Deserialize;
+use serde_json::json;
+#[cfg(target_os = "linux")]
+use std::os::fd::AsRawFd;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Duration;
+use tower_http::trace::TraceLayer;
+use uuid::Uuid;
+
+pub mod docker_engine;
+pub mod event_sinks;
+mod grants;
+mod idempotency;
+mod instancetypes_api;
+mod mfa;
+pub mod mtls;
+mod netobs_api;
+mod oidc;
+mod openapi;
+mod rate_limit;
+#[cfg(target_os = "macos")]
+pub mod self_control;
+pub use netobs_api::install_netobs;
+mod agent_session_approvals;
+mod agent_session_auth;
+mod agent_session_transfer;
+mod agent_sessions;
+mod docker_view;
+mod guest_ops;
+mod kube;
+mod kube_actions;
+mod kube_flows;
+mod kube_metrics;
+mod kube_pod;
+mod kube_workloads;
+mod macos_pool_api;
+mod speculate_api;
+mod studio;
+mod tunnel_api;
+mod volumes_api;
+mod vz_api;
+
+#[derive(Clone)]
+struct AuthState {
+    manager: Arc<VmManager>,
+    oidc: Option<Arc<oidc::OidcValidator>>,
+}
+
+#[derive(Debug)]
+struct ApiError {
+    status: StatusCode,
+    message: String,
+}
+impl<E: Into<anyhow::Error>> From<E> for ApiError {
+    fn from(e: E) -> Self {
+        let e: anyhow::Error = e.into();
+        // Not enough free GPUs is a capacity condition the caller can retry, not a bad request.
+        if e.downcast_ref::<fluxvm_core::gpu::GpuShortage>().is_some()
+            || e.downcast_ref::<fluxvm_core::mdev::MdevShortage>()
+                .is_some()
+        {
+            return Self {
+                status: StatusCode::SERVICE_UNAVAILABLE,
+                message: format!("{:#}", e),
+            };
+        }
+        // A control call that needs a live runner on a VM that is not running: a state conflict.
+        if e.downcast_ref::<fluxvm_scheduler::VmNotLive>().is_some()
+            || e.downcast_ref::<fluxvm_core::mdev::MdevConflict>()
+                .is_some()
+        {
+            return Self {
+                status: StatusCode::CONFLICT,
+                message: format!("{:#}", e),
+            };
+        }
+        if e.downcast_ref::<fluxvm_scheduler::diagnostics::DiagnosticsBusy>()
+            .is_some()
+        {
+            return Self {
+                status: StatusCode::CONFLICT,
+                message: format!("{:#}", e),
+            };
+        }
+        // Apple allows two macOS guests per Mac; it clears when one stops.
+        if e.downcast_ref::<fluxvm_scheduler::apple_placement::MacosGuestLimit>()
+            .is_some()
+        {
+            return Self {
+                status: StatusCode::CONFLICT,
+                message: format!("{:#}", e),
+            };
+        }
+        use fluxvm_scheduler::procbox_sandbox::ProcboxError;
+        // Procbox sandboxes fail in ways a plain 400 would hide: a disabled
+        // feature, a guest-only route, an unenforceable policy, a too-large
+        // workspace. Anything else keeps the historical 400.
+        let status = match e.downcast_ref::<ProcboxError>() {
+            Some(ProcboxError::Disabled) => StatusCode::FORBIDDEN,
+            Some(ProcboxError::Unsupported(_)) => StatusCode::NOT_IMPLEMENTED,
+            Some(ProcboxError::Unavailable(_)) => StatusCode::SERVICE_UNAVAILABLE,
+            Some(ProcboxError::TooLarge(_)) => StatusCode::PAYLOAD_TOO_LARGE,
+            Some(ProcboxError::PathEscape(_)) | None => StatusCode::BAD_REQUEST,
+        };
+        Self {
+            status,
+            message: format!("{:#}", e),
+        }
+    }
+}
+impl ApiError {
+    fn forbidden(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::FORBIDDEN,
+            message: message.into(),
+        }
+    }
+}
+impl IntoResponse for ApiError {
+    fn into_response(self) -> Response {
+        let code = error_code(self.status);
+        (
+            self.status,
+            Json(json!({"error": self.message, "code": code})),
+        )
+            .into_response()
+    }
+}
+
+/// Stable, machine-readable name for an error status, sent as `code` next to `error`. Clients
+/// should branch on this, not on the message text. Listed in `docs/api.md#errors`.
+fn error_code(status: StatusCode) -> &'static str {
+    match status.as_u16() {
+        400 => "BAD_REQUEST",
+        401 => "UNAUTHORIZED",
+        403 => "FORBIDDEN",
+        404 => "NOT_FOUND",
+        409 => "CONFLICT",
+        412 => "PRECONDITION_FAILED",
+        413 => "PAYLOAD_TOO_LARGE",
+        422 => "UNPROCESSABLE",
+        428 => "PRECONDITION_REQUIRED",
+        429 => "RATE_LIMITED",
+        501 => "NOT_IMPLEMENTED",
+        503 => "UNAVAILABLE",
+        s if s >= 500 => "INTERNAL",
+        _ => "ERROR",
+    }
+}
+
+type ApiResult<T> = Result<T, ApiError>;
+
+/// Bounces a request without a valid bearer token; requests that do have
+/// one carry their resolved `Role` (and optional token name) onward.
+/// Fail-closed when `auth.must_authenticate(listen)` is true.
+/// Static `[[auth.tokens]]` are tried first; OIDC JWTs when configured.
+async fn auth_middleware(State(auth): State<AuthState>, mut req: Request, next: Next) -> Response {
+    let m = &auth.manager;
+    let path = req.uri().path().to_string();
+    let method = req.method().clone();
+    // Liveness/readiness probes must work without auth (Kubernetes convention);
+    // the API description is public so tooling can fetch it before a token.
+    // `/preview/{token}/...` is the signed, expiring preview URL of an agent session: the token
+    // in the path is the credential (see agent_sessions.rs), so no bearer token is required.
+    if path == "/healthz"
+        || path == "/readyz"
+        || path == "/v1/openapi.json"
+        || path.starts_with("/preview/")
+        || ((method == Method::GET || method == Method::HEAD)
+            && (path == "/console" || path.starts_with("/console/")))
+        // A browser WebSocket cannot send `Authorization`: the single-use ticket in the path is the
+        // credential (minted by an authenticated `POST .../pty-ticket`, see agent_sessions.rs).
+        || (method == Method::GET && path.starts_with("/console/pty/"))
+    {
+        return next.run(req).await;
+    }
+    let must = m.cfg.auth.must_authenticate(&m.cfg.listen);
+    let presented = req
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|h| h.strip_prefix("Bearer "))
+        .map(str::to_string);
+
+    // Set only for an `fxst_` session token: confines the request to one session's routes.
+    let mut session_scope: Option<agent_session_auth::SessionScope> = None;
+    let (role, token_name, token_tenant) = if !must && !m.cfg.auth.has_credentials() {
+        (Some(Role::Admin), Some("anonymous-admin".to_string()), None)
+    } else if let Some(ref t) = presented {
+        if t.starts_with(agent_session_auth::TOKEN_PREFIX) {
+            // Read-only role as defence in depth: the path check below and the handlers'
+            // `authorize` are what actually confine it, and neither consults the admin role.
+            match agent_session_auth::resolve(&m.cfg.state_dir, t).await {
+                Some(sc) => {
+                    let who = (
+                        Some(Role::ReadOnly),
+                        Some(format!("session-token:{}", sc.token_id)),
+                        sc.tenant.clone(),
+                    );
+                    session_scope = Some(sc);
+                    who
+                }
+                None => (None, None, None),
+            }
+        } else if let Some(entry) = m
+            .cfg
+            .auth
+            .tokens
+            .iter()
+            .find(|entry| constant_time_eq(&entry.token, t))
+        {
+            (
+                Some(entry.role),
+                entry.name.clone().or_else(|| Some("unnamed".into())),
+                entry.tenant.clone(),
+            )
+        } else if let Some(ref oidc) = auth.oidc {
+            match oidc.validate(t).await {
+                Ok(id) => (Some(id.role), Some(id.actor), id.tenant),
+                Err(e) => {
+                    tracing::debug!(error = %e, "OIDC bearer rejected");
+                    (None, None, None)
+                }
+            }
+        } else {
+            (None, None, None)
+        }
+    } else if let Some(mtls::PeerCert(peer)) = req.extensions().get::<mtls::PeerCert>() {
+        // This process terminated mTLS: the identity is the verified client certificate
+        // (see `mtls.rs`). The X-Client-Cert-* headers are ignored on this path.
+        match peer {
+            Some(p) => (Some(p.role), Some(p.cn.clone()), p.tenant.clone()),
+            None => (None, None, None),
+        }
+    } else if m.cfg.tls.trust_proxy_headers {
+        // Opt-in: a reverse proxy verified the client certificate and set these headers
+        // (and strips any client-supplied copies). Role defaults to read-only.
+        if let Some(cn) = req
+            .headers()
+            .get("x-client-cert-cn")
+            .and_then(|v| v.to_str().ok())
+            .filter(|s| !s.is_empty())
+        {
+            let role = match req
+                .headers()
+                .get("x-client-cert-role")
+                .and_then(|v| v.to_str().ok())
+            {
+                Some("admin") => Role::Admin,
+                _ => Role::ReadOnly,
+            };
+            let tenant = req
+                .headers()
+                .get("x-client-cert-tenant")
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_string);
+            (Some(role), Some(cn.to_string()), tenant)
+        } else {
+            (None, None, None)
+        }
+    } else {
+        (None, None, None)
+    };
+    match role {
+        Some(role) => {
+            if let Some(sc) = session_scope {
+                if !agent_session_auth::path_allowed(&path, sc.session) {
+                    return (
+                        StatusCode::FORBIDDEN,
+                        Json(json!({"error": "a session token only reaches its own session's routes", "code": "FORBIDDEN"})),
+                    )
+                        .into_response();
+                }
+                req.extensions_mut().insert(sc);
+            }
+            let mfa_outcome = mfa::enforce(
+                &m.cfg.auth,
+                token_name.as_deref(),
+                method.as_str(),
+                &path,
+                req.headers().get(mfa::HEADER).and_then(|v| v.to_str().ok()),
+            );
+            if !matches!(mfa_outcome, mfa::Outcome::NotRequired | mfa::Outcome::Ok) {
+                fluxvm_core::metrics::inc_auth_deny();
+                let status = if mfa_outcome == mfa::Outcome::LockedOut {
+                    StatusCode::TOO_MANY_REQUESTS
+                } else {
+                    StatusCode::UNAUTHORIZED
+                };
+                audit_log(
+                    token_name.as_deref().unwrap_or("anonymous"),
+                    role,
+                    &method,
+                    &path,
+                    status.as_u16(),
+                    mfa_outcome,
+                );
+                let mut resp = (
+                    status,
+                    Json(json!({
+                        "error": "step-up authentication required: send a valid TOTP code in X-Fluxvm-Totp",
+                        "code": "STEP_UP_REQUIRED",
+                        "mfa": mfa_outcome.label(),
+                    })),
+                )
+                    .into_response();
+                resp.headers_mut().insert(
+                    header::WWW_AUTHENTICATE,
+                    header::HeaderValue::from_static("TOTP realm=\"fluxvm\""),
+                );
+                return resp;
+            }
+            req.extensions_mut().insert(role);
+            if let Some(name) = token_name.clone() {
+                req.extensions_mut().insert(AuditActor(name));
+            }
+            if let Some(tenant) = token_tenant {
+                req.extensions_mut().insert(TokenTenant(tenant));
+            }
+            let response = next.run(req).await;
+            audit_log(
+                token_name.as_deref().unwrap_or("anonymous"),
+                role,
+                &method,
+                &path,
+                response.status().as_u16(),
+                mfa_outcome,
+            );
+            response
+        }
+        None => {
+            fluxvm_core::metrics::inc_auth_deny();
+            audit_log(
+                "none",
+                Role::ReadOnly,
+                &method,
+                &path,
+                401,
+                mfa::Outcome::NotRequired,
+            );
+            (
+                StatusCode::UNAUTHORIZED,
+                Json(json!({"error": "missing or invalid bearer token", "code": "UNAUTHORIZED"})),
+            )
+                .into_response()
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct AuditActor(pub String);
+
+/// Tenant claim carried by the authenticated API token (if any).
+#[derive(Clone, Debug)]
+struct TokenTenant(pub String);
+
+fn extract_vm_uuid(path: &str) -> Option<Uuid> {
+    let rest = path
+        .strip_prefix("/v1/vms/")
+        .or_else(|| path.strip_prefix("/v1/sandboxes/"))
+        // The short-form proxy route ("/sandbox/{id}/{*path}", registered
+        // separately from "/v1/sandboxes/{id}/http/{port}/{*path}") matched
+        // neither prefix above, so tenant_guard_middleware silently no-op'd
+        // for it below -- any authenticated caller who knew or guessed
+        // another tenant's sandbox UUID could proxy HTTP traffic straight
+        // into that tenant's guest through this route, unscoped, even
+        // though the equivalent long-form route was already correctly
+        // tenant-checked. See sandbox_id_routes_are_tenant_scoped_like_vm_routes
+        // for the long-form route's existing coverage, and
+        // short_form_sandbox_proxy_route_is_tenant_scoped below for this fix.
+        .or_else(|| path.strip_prefix("/sandbox/"))?;
+    let id = rest.split('/').next()?;
+    Uuid::parse_str(id).ok()
+}
+
+/// When a token carries a tenant, scope all `/v1/vms/{uuid}…`,
+/// `/v1/sandboxes/{uuid}…`, and `/sandbox/{uuid}…` access to that tenant --
+/// a sandbox is a `VmRecord` like any other (`VmManager::create_sandbox`
+/// funnels through the same `create()`), so the same per-record tenant
+/// check applies to all three id-bearing path spaces uniformly rather than
+/// needing a second copy of this
+/// logic.
+async fn tenant_guard_middleware(
+    State(m): State<Arc<VmManager>>,
+    req: Request,
+    next: Next,
+) -> Response {
+    let Some(TokenTenant(tenant)) = req.extensions().get::<TokenTenant>().cloned() else {
+        return next.run(req).await;
+    };
+    let path = req.uri().path().to_string();
+    if let Some(id) = extract_vm_uuid(&path) {
+        match m.get(id).await {
+            Ok(vm) if vm.request.tenant.as_deref() == Some(tenant.as_str()) => {}
+            _ => {
+                return (
+                    StatusCode::NOT_FOUND,
+                    Json(json!({"error": "VM not found", "code": "NOT_FOUND"})),
+                )
+                    .into_response();
+            }
+        }
+    }
+    next.run(req).await
+}
+
+/// Rejects a request with 429 (`Retry-After` set) once its authenticated
+/// caller has exceeded `Limiter`'s configured rate -- runs after
+/// `auth_middleware` so `AuditActor` is present for every request this
+/// middleware actually rate-limits. Explicitly bypasses `/healthz`/
+/// `/readyz` itself: `auth_middleware` only skips resolving an identity
+/// for those two paths, it still calls `next.run` and lets them reach
+/// every layer below it -- without this bypass they'd all share one
+/// `"unknown"` bucket here, and a caller's own throttling could starve
+/// its own liveness/readiness probes. Keyed by the same actor identity
+/// `audit_log` already records -- a static token's name, an OIDC
+/// subject, an mTLS cert CN, or `"anonymous-admin"` on an unauthenticated
+/// loopback deployment -- so distinct real callers behind a shared
+/// token/identity share one bucket by design, the same way `audit_log`
+/// already attributes them as one actor.
+async fn rate_limit_middleware(
+    State(limiter): State<Arc<rate_limit::Limiter>>,
+    req: Request,
+    next: Next,
+) -> Response {
+    // /healthz and /readyz reach every layer below auth_middleware too --
+    // it only skips *resolving an identity* for them, then still calls
+    // `next.run(req)` -- so without this explicit check they'd all share
+    // one "unknown" bucket here and a real caller's own throttling could
+    // starve its own liveness/readiness probes. Caught by
+    // healthz_is_never_rate_limited failing before this check existed.
+    let path = req.uri().path();
+    if path == "/healthz" || path == "/readyz" {
+        return next.run(req).await;
+    }
+    let key = req
+        .extensions()
+        .get::<AuditActor>()
+        .map(|a| a.0.clone())
+        .unwrap_or_else(|| "unknown".to_string());
+    match limiter.allow(&key) {
+        Ok(()) => next.run(req).await,
+        Err(retry_after) => {
+            tracing::warn!(actor = %key, "fluxvm-api rate limited");
+            (
+                StatusCode::TOO_MANY_REQUESTS,
+                [(header::RETRY_AFTER, (retry_after.as_secs() + 1).to_string())],
+                Json(
+                    json!({"error": "too many requests; try again later", "code": "RATE_LIMITED"}),
+                ),
+            )
+                .into_response()
+        }
+    }
+}
+
+fn audit_log(actor: &str, role: Role, method: &Method, path: &str, status: u16, mfa: mfa::Outcome) {
+    let role = match role {
+        Role::Admin => "admin",
+        Role::ReadOnly => "read-only",
+    };
+    tracing::info!(
+        target: "fluxvm_audit",
+        actor = %actor,
+        role = %role,
+        method = %method,
+        path = %path,
+        status = status,
+        mfa = mfa.label(),
+        "audit"
+    );
+}
+
+fn require_admin(role: Role) -> ApiResult<()> {
+    if role != Role::Admin {
+        return Err(ApiError::forbidden("admin role required"));
+    }
+    Ok(())
+}
+
+pub fn router(manager: Arc<VmManager>) -> Router {
+    fluxvm_scheduler::history::start_sampler(&manager);
+    agent_sessions::start_sweeper(&manager);
+    let oidc = build_oidc(&manager.cfg.auth);
+    let mut router = Router::new()
+        .route("/healthz", get(|| async { Json(json!({"ok": true})) }))
+        .route("/readyz", get(readyz))
+        .route("/v1/openapi.json", get(|| async { Json(openapi::spec()) }))
+        .route("/metrics", get(metrics))
+        .route("/v1/runtime/capabilities", get(runtime_capabilities)) // ZYVOR_RUNTIME_BOUNDARY_V1
+        .route("/v1/security/capabilities", get(security_capabilities))
+        .route("/v1/host/confidential", get(host_confidential))
+        .route("/v1/host/topology", get(host_topology))
+        .route("/v1/host/memory", get(host_memory))
+        .route("/v1/host/pressure", get(host_pressure))
+        .route("/v1/host/hibernation", get(host_hibernation))
+        .route("/v1/host/hibernation/check", post(check_hibernation))
+        .route("/v1/host/gpus", get(list_host_gpus))
+        .route("/v1/host/gpus/preflight", get(host_gpu_preflight))
+        .route("/v1/host/gpus/bind", post(bind_host_gpu))
+        .route("/v1/host/gpus/release", post(release_host_gpu))
+        .route("/v1/host/gpus/health", get(host_gpu_health))
+        .route("/v1/host/infer", get(host_infer_status))
+        .route("/v1/host/mdev", get(list_host_mdev).post(create_host_mdev))
+        .route("/v1/host/mdev/{uuid}", delete(remove_host_mdev))
+        .route("/v1/host/pci/bind", post(bind_host_pci))
+        .route("/v1/host/pci/release", post(release_host_pci))
+        .route("/v1/vms", post(create_vm).get(list_vms))
+        .route(
+            "/v1/vms/{id}",
+            get(get_vm).delete(delete_vm).patch(patch_vm),
+        )
+        .route("/v1/vms/{id}/restart", post(restart_vm))
+        .route("/v1/vms/{id}/clone", post(clone_vm))
+        .route("/v1/vms/{id}/fork", post(fork_vm))
+        .route("/v1/vms/{id}/fork/plan", post(fork_plan))
+        .route("/v1/branches/{id}/start/plan", post(branch_start_plan))
+        .route(
+            "/v1/vm-templates",
+            get(list_vm_templates).post(save_vm_template),
+        )
+        .route(
+            "/v1/vm-templates/{name}",
+            get(get_vm_template).delete(delete_vm_template),
+        )
+        .route(
+            "/v1/vm-templates/{name}/instantiate",
+            post(instantiate_vm_template),
+        )
+        .route("/v1/vms/{id}/backup", post(backup_vm))
+        .route("/v1/vms/{id}/restore-backup", post(restore_vm_backup))
+        .route("/v1/backups", get(list_backups))
+        .route("/v1/backups/{name}", delete(delete_backup))
+        .route("/v1/backups/{name}/root", get(download_backup_root))
+        .route(
+            "/v1/vms/{id}/branches",
+            get(list_vm_branches).post(create_branch),
+        )
+        .route("/v1/branches", get(list_branches))
+        .route("/v1/branches/prune", post(prune_branches))
+        .route("/v1/branches/import", post(import_branch))
+        .route("/v1/branches/{a}/diff/{b}", get(diff_branches))
+        .route("/v1/branches/{id}/export", post(export_branch))
+        .route("/v1/branches/{id}", get(get_branch).delete(delete_branch))
+        .route("/v1/branches/{id}/start", post(start_branch))
+        .route("/v1/vms/{id}/cbt-backup", post(cbt_backup))
+        .route("/v1/vms/{id}/cbt-restore", post(cbt_restore))
+        .route("/v1/cbt/synthesize", post(cbt_synthesize))
+        .route("/v1/cbt/delete", post(cbt_delete))
+        .route("/v1/cbt-jobs/{id}", get(cbt_job))
+        .route("/v1/vms/{id}/snapshots", get(list_vm_snapshots))
+        .route("/v1/vms/{id}/snapshots/{tag}", delete(delete_vm_snapshot))
+        .route(
+            "/v1/vms/{id}/disks",
+            get(list_vm_disks).post(attach_vm_disk),
+        )
+        .route(
+            "/v1/vms/{id}/disks/{name}",
+            delete(detach_vm_disk).patch(resize_vm_disk),
+        )
+        .route(
+            "/v1/vms/{id}/disks/{name}/throttle",
+            put(set_vm_disk_throttle),
+        )
+        .route("/v1/vms/{id}/cdroms/{name}/eject", post(eject_vm_cdrom))
+        .route("/v1/events", get(list_events))
+        .route("/v1/events/stream", get(stream_events))
+        .route("/v1/netobs/summary", get(netobs_api::summary))
+        .route("/v1/netobs/flows", get(netobs_api::flows))
+        .route("/v1/netobs/flows/stream", get(netobs_api::stream))
+        .route("/v1/netobs/dns", get(netobs_api::dns))
+        .route("/v1/netobs/history", get(netobs_api::history))
+        .route(
+            "/v1/netobs/capture",
+            get(netobs_api::capture_status)
+                .post(netobs_api::capture_enable)
+                .delete(netobs_api::capture_disable),
+        )
+        .route("/v1/netobs/capture.pcap", get(netobs_api::capture_pcap))
+        .route("/v1/quotas/me", get(my_quota))
+        .route("/v1/vms/{id}/attest", get(get_vm_evidence))
+        .route("/v1/vms/{id}/secrets/release", post(release_vm_secret))
+        .route("/v1/vms/{id}/start", post(start_vm))
+        .route(
+            "/v1/vms/{id}/start-from-snapshot",
+            post(start_vm_from_snapshot),
+        )
+        .route("/v1/vms/{id}/snapshot", post(snapshot_vm))
+        .route("/v1/vms/{id}/restore", post(restore_vm))
+        .route("/v1/vms/{id}/migration/start", post(start_migration))
+        .route("/v1/vms/{id}/migration/status", get(migration_status))
+        .route("/v1/vms/{id}/migration/cancel", post(cancel_migration))
+        .route("/v1/vms/{id}/migration/tune", post(tune_migration))
+        .route("/v1/vms/{id}/migration/postcopy", post(start_postcopy))
+        .route("/v1/vms/{id}/migration/finish", post(finish_migration))
+        .route("/v1/migration/receivers", post(create_migration_receiver))
+        .route(
+            "/v1/migration/receivers/{id}/activate",
+            post(activate_migration_receiver),
+        )
+        .route(
+            "/v1/migration/receivers/{id}/adopt",
+            post(adopt_migration_receiver),
+        )
+        .route(
+            "/v1/migration/receivers/{id}",
+            axum::routing::delete(delete_migration_receiver),
+        )
+        .route("/v1/vms/{id}/hibernate", post(hibernate_vm))
+        .route(
+            "/v1/vms/{id}/hibernation",
+            axum::routing::delete(discard_vm_hibernation),
+        )
+        .route("/v1/vms/import-hibernated", post(import_hibernated_vm))
+        .route(
+            "/v1/vms/{id}/diagnostics",
+            get(list_vm_diagnostics).post(start_vm_diagnostics),
+        )
+        .route(
+            "/v1/vms/{id}/diagnostics/{token}",
+            get(get_vm_diagnostics).delete(delete_vm_diagnostics),
+        )
+        .route(
+            "/v1/vms/{id}/diagnostics/{token}/bundle",
+            get(download_vm_diagnostics_bundle),
+        )
+        .route(
+            "/v1/vms/{id}/diagnostics/{token}/memory-dump",
+            get(download_vm_memory_dump),
+        )
+        .route("/v1/vms/{id}/stop", post(stop_vm))
+        .route("/v1/vms/{id}/pause", post(pause_vm))
+        .route("/v1/vms/{id}/resume", post(resume_vm))
+        .route("/v1/vms/{id}/resources", post(set_vm_resources))
+        .route("/v1/vms/{id}/hotplug/cpu", post(hotplug_vm_cpu))
+        .route("/v1/vms/{id}/hotplug/memory", post(hotplug_vm_memory))
+        .route("/v1/vms/{id}/hotplug/nic", post(hotplug_vm_nic))
+        .route("/v1/vms/{id}/hotplug/nic/unplug", post(unplug_vm_nic))
+        .route("/v1/vms/{id}/hotplug/share", post(hotplug_vm_share))
+        .route("/v1/vms/{id}/cpuset", get(vm_cpuset))
+        .route("/v1/vms/{id}/numa", get(vm_numa))
+        .route("/v1/vms/{id}/freeze", post(freeze_vm))
+        .route("/v1/vms/{id}/thaw", post(thaw_vm))
+        .route("/v1/vms/{id}/frozen", get(vm_frozen))
+        .route("/v1/vms/{id}/stats", get(vm_stats))
+        .route("/v1/vms/{id}/network/stats", get(vm_network_stats))
+        .route("/v1/vms/{id}/network/flows", get(vm_network_flows))
+        .route(
+            "/v1/vms/{id}/network/drop-reasons",
+            get(vm_network_drop_reasons),
+        )
+        .route("/v1/vms/{id}/network/drops", get(vm_network_drops))
+        .route("/v1/vms/{id}/network/edge", post(vm_network_edge))
+        .route(
+            "/v1/vms/{id}/network/conntrack",
+            get(vm_network_conntrack_export).post(vm_network_conntrack_restore),
+        )
+        .route(
+            "/v1/vms/{id}/network/learned-ip",
+            get(vm_network_learned_ip),
+        )
+        .route(
+            "/v1/vms/{id}/network/capture",
+            get(vm_network_captures).post(vm_network_capture),
+        )
+        .route(
+            "/v1/vms/{id}/network/capture/{token}",
+            get(vm_network_capture_file),
+        )
+        .route("/v1/vms/{id}/network/status", get(vm_network_status))
+        .route(
+            "/v1/vms/{id}/network/migration/state",
+            get(vm_network_migration_state),
+        )
+        .route(
+            "/v1/vms/{id}/network/migration/quiesce",
+            post(vm_network_migration_quiesce),
+        )
+        .route(
+            "/v1/vms/{id}/network/migration/export",
+            get(vm_network_migration_export),
+        )
+        .route(
+            "/v1/vms/{id}/network/migration/restore",
+            post(vm_network_migration_restore),
+        )
+        .route(
+            "/v1/vms/{id}/network/migration/resume",
+            post(vm_network_migration_resume),
+        )
+        .route(
+            "/v1/vms/{id}/network/services/stats",
+            get(vm_network_service_stats),
+        )
+        .route(
+            "/v1/vms/{id}/network/policy",
+            get(get_vm_network_policy).post(set_vm_network_policy),
+        )
+        .route(
+            "/v1/vms/{id}/network/egress",
+            get(get_vm_qemu_egress)
+                .put(set_vm_qemu_egress)
+                .delete(clear_vm_qemu_egress),
+        )
+        .route(
+            "/v1/vms/{id}/network/egress/observed",
+            get(get_vm_qemu_egress_observed),
+        )
+        .route(
+            "/v1/vms/{id}/network/egress/suggest",
+            post(suggest_vm_qemu_egress),
+        )
+        .route(
+            "/v1/network/egress/defaults",
+            get(get_qemu_egress_defaults).put(set_qemu_egress_defaults),
+        )
+        .route(
+            "/v1/vms/{id}/network/pod-policy",
+            get(get_vm_pod_network_policy)
+                .post(set_vm_pod_network_policy)
+                .delete(clear_vm_pod_network_policy),
+        )
+        .route(
+            "/v1/vms/{id}/network/effective",
+            get(get_vm_network_effective),
+        )
+        .route("/v1/network/vnets", get(list_vnets))
+        .route(
+            "/v1/network/vnets/{vni}",
+            get(get_vnet).put(put_vnet).delete(delete_vnet),
+        )
+        .route(
+            "/v1/network/groups",
+            get(list_network_groups).post(upsert_network_group),
+        )
+        .route(
+            "/v1/network/services",
+            get(list_network_services).post(upsert_network_service),
+        )
+        .route("/v1/network/services/status", get(network_service_status))
+        .route("/v1/network/services/stats", get(network_service_stats))
+        .route("/v1/network/services/health", get(network_service_health))
+        .route(
+            "/v1/network/services/health/reconcile",
+            post(reconcile_network_service_health),
+        )
+        .route(
+            "/v1/network/services/conntrack/gc",
+            post(gc_network_service_conntrack),
+        )
+        .route(
+            "/v1/network/services/pressure/reconcile",
+            post(reconcile_network_service_pressure),
+        )
+        .route(
+            "/v1/network/services/advertisements",
+            get(network_service_advertisements),
+        )
+        .route("/v1/network/services/flows", get(network_service_flows))
+        .route(
+            "/v1/network/services/telemetry/export",
+            post(export_network_service_telemetry),
+        )
+        .route(
+            "/v1/network/services/policies",
+            get(list_network_service_policies).post(upsert_network_service_policy),
+        )
+        .route(
+            "/v1/network/services/policies/reconcile",
+            post(reconcile_network_service_policies),
+        )
+        .route(
+            "/v1/network/services/{name}/policy",
+            get(get_network_service_policy).delete(delete_network_service_policy),
+        )
+        .route(
+            "/v1/network/services/{name}/l7/envoy",
+            get(network_service_envoy_contract),
+        )
+        .route(
+            "/v1/network/services/{name}/conntrack/export",
+            get(export_network_service_conntrack),
+        )
+        .route(
+            "/v1/network/services/{name}/conntrack/import",
+            post(import_network_service_conntrack),
+        )
+        .route(
+            "/v1/network/services/{name}/conntrack/delta",
+            get(export_network_service_conntrack_delta),
+        )
+        .route(
+            "/v1/network/services/{name}/conntrack/delta/import",
+            post(import_network_service_conntrack_delta),
+        )
+        .route(
+            "/v1/network/services/{name}/conntrack/delta/ack",
+            post(ack_network_service_conntrack_delta),
+        )
+        .route(
+            "/v1/network/services/{name}",
+            get(get_network_service).delete(delete_network_service),
+        )
+        .route(
+            "/v1/network/groups/{name}",
+            get(get_network_group).delete(delete_network_group),
+        )
+        .route("/v1/network/cnp", get(list_cnp).post(apply_cnp))
+        .route("/v1/network/cnp/{name}", get(get_cnp).delete(delete_cnp))
+        .route("/v1/network/identities", get(list_identities))
+        .route("/v1/network/observe", get(network_observe))
+        .route("/v1/network/health", get(network_health))
+        .route("/v1/network/ipcache", get(network_ipcache))
+        .route("/v1/network/ipam", get(network_ipam_status))
+        .route("/v1/network/ipcache/remote", post(upsert_remote_ipcache))
+        .route(
+            "/v1/network/ipcache/remote/{identity}",
+            delete(delete_remote_ipcache),
+        )
+        .route("/v1/network/refresh-dns", post(network_refresh_dns))
+        .route("/v1/network/endpoints", get(list_endpoints))
+        .route("/v1/network/hubble/flows", get(hubble_flows))
+        .route("/v1/network/hubble/flows/text", get(hubble_flows_text))
+        .route("/v1/network/hubble/ui", get(hubble_ui))
+        .route("/v1/vms/{id}/pressure", get(vm_pressure))
+        .route("/v1/vms/{id}/guard", get(vm_guard))
+        .route("/v1/vms/{id}/logs", get(vm_logs))
+        .route("/v1/vms/{id}/agent", post(agent_exec))
+        .route("/v1/vms/{id}/screenshot", get(vm_screenshot))
+        .route("/v1/vms/{id}/input", post(vm_input))
+        .route(
+            "/v1/vms/{id}/signin",
+            get(vm_signin_status)
+                .put(set_vm_signin)
+                .delete(delete_vm_signin)
+                .post(vm_signin),
+        )
+        .route("/v1/vms/{id}/agent/ping", post(agent_ping))
+        .route("/v1/vms/{id}/agent/put-file", post(agent_put_file))
+        .route("/v1/vms/{id}/agent/get-file", post(agent_get_file))
+        .route("/v1/vms/{id}/console", get(agent_console))
+        .route("/v1/vms/{id}/serial", get(serial_console))
+        .route("/v1/vms/{id}/ws-ticket", post(vm_ws_ticket))
+        .route("/console/ws/{ticket}", get(vm_ws_by_ticket))
+        .route("/v1/vms/{id}/tunnel", get(tunnel_api::vm_tunnel))
+        .route("/v1/vms/{id}/ports/{name}", get(console_port))
+        .route("/v1/vms/{id}/qga/ping", post(qga_ping))
+        .route(
+            "/v1/vms/{id}/qga/network-interfaces",
+            get(qga_network_interfaces),
+        )
+        .route("/v1/vms/{id}/qga/exec", post(qga_exec))
+        .route("/v1/vms/{id}/qga/fsfreeze", post(qga_fsfreeze_freeze))
+        .route("/v1/vms/{id}/qga/fsthaw", post(qga_fsfreeze_thaw))
+        .route("/v1/vms/{id}/qga/fsfreeze-status", get(qga_fsfreeze_status))
+        .route("/v1/vms/{id}/qga/firewall/open", post(qga_firewall_open))
+        .route("/v1/vms/{id}/qga/firewall/close", post(qga_firewall_close))
+        .route("/v1/sandboxes", post(create_sandbox).get(list_sandboxes))
+        .route("/v1/sandboxes/warm", post(warm_sandboxes))
+        .route("/v1/sandboxes/density", get(sandbox_density))
+        .route("/v1/sandboxes/{id}/snapshot", post(snapshot_sandbox))
+        .route("/v1/sandboxes/{id}/fs/read", post(sandbox_fs_read))
+        .route("/v1/sandboxes/{id}/fs/write", post(sandbox_fs_write))
+        .route("/v1/sandboxes/{id}/process", post(sandbox_process))
+        .route("/v1/sandboxes/{id}/logs", get(sandbox_logs))
+        .route("/v1/sandboxes/{id}/baseline", post(sandbox_baseline))
+        .route("/v1/sandboxes/{id}/changes", post(sandbox_changes))
+        .route("/v1/sandboxes/{id}/dry-run", post(sandbox_dry_run))
+        .route(
+            "/v1/sandboxes/{id}/grants",
+            post(grants::create_grant)
+                .get(grants::list_grants)
+                .delete(grants::delete_grants),
+        )
+        .route(
+            "/v1/sandboxes/{id}/grants/{grant_id}",
+            delete(grants::delete_grant),
+        )
+        .route(
+            "/v1/sandboxes/{id}/http/{port}/{*path}",
+            any(sandbox_http_proxy),
+        )
+        .route(
+            "/v1/sandboxes/{id}/ws/{port}/{*path}",
+            get(sandbox_ws_proxy),
+        )
+        .route(
+            "/sandbox/{id}/{*path}",
+            any(sandbox_http_proxy_default_port),
+        )
+        .route("/v1/templates", get(list_templates).post(build_template))
+        .route("/v1/egress/check", post(egress_check))
+        .route("/v1/egress/nftables", get(egress_nftables))
+        // FluxVM Studio (the embedded SPA) owns /console.
+        .route("/console", get(studio::studio_root))
+        .route("/console/", get(studio::studio_index))
+        .route("/console/terminal", get(terminal_page))
+        .route("/console/terminal/", get(terminal_page))
+        .route("/console/terminal/{file}", get(terminal_asset))
+        .route("/console/{*path}", get(studio::studio_file))
+        .route("/v1/images/build", post(build_image))
+        .route("/v1/images/import", post(import_image))
+        .route("/v1/images/catalog", post(add_catalog_entry))
+        .route("/v1/images/catalog/{name}", delete(remove_catalog_entry))
+        .route(
+            "/v1/images/catalog/{name}/rename",
+            post(rename_catalog_entry),
+        )
+        .route("/v1/images/catalog/{name}/clone", post(clone_catalog_entry))
+        .route(
+            "/v1/images/catalog/{name}/export",
+            post(export_catalog_entry),
+        )
+        .route(
+            "/v1/images/catalog/{name}/read-only",
+            post(set_catalog_read_only),
+        )
+        .route("/v1/images/catalog/clean", post(clean_catalog))
+        .route("/v1/images/catalog", get(list_catalog))
+        .route("/v1/oci/images", get(list_oci_images).post(pull_oci_image))
+        .route("/v1/vznets", get(list_vznets))
+        .route("/v1/docker", get(docker_view::get_docker))
+        .route(
+            "/v1/docker/containers/{id}/logs",
+            get(docker_view::container_logs),
+        )
+        .route(
+            "/v1/docker/containers/{id}/{action}",
+            post(docker_view::container_action),
+        )
+        .route("/v1/kube", get(kube::list_clusters))
+        .route("/v1/kube/{name}", get(kube::get_cluster))
+        .route("/v1/kube/{name}/flows", get(kube_flows::get_flows))
+        .route(
+            "/v1/kube/{name}/workloads",
+            get(kube_workloads::get_workloads),
+        )
+        .route("/v1/kube/{name}/events", get(kube_workloads::get_events))
+        .route(
+            "/v1/kube/{name}/pods/{ns}/{pod}/log",
+            get(kube_pod::pod_log),
+        )
+        .route(
+            "/v1/kube/{name}/pods/{ns}/{pod}/exec-ticket",
+            post(kube_pod::exec_ticket),
+        )
+        .route(
+            "/v1/kube/{name}/pods/{ns}/{pod}/delete",
+            post(kube_actions::delete_pod),
+        )
+        .route(
+            "/v1/kube/{name}/workloads/{ns}/{kind}/{wname}/scale",
+            post(kube_actions::scale),
+        )
+        .route(
+            "/v1/kube/{name}/workloads/{ns}/{kind}/{wname}/restart",
+            post(kube_actions::restart),
+        )
+        .route(
+            "/v1/kube/{name}/nodes/{node}/{what}",
+            post(kube_actions::cordon),
+        )
+        .route("/console/kube/ws/{ticket}", get(kube_pod::exec_ws))
+        .route("/v1/oci/images/{what}", delete(remove_oci_image))
+        .route("/v1/oci/prune", post(prune_oci_images))
+        .route("/v1/pools", post(create_pool).get(list_pools))
+        .route("/v1/pools/{name}", get(get_pool).delete(delete_pool))
+        .route("/v1/pools/{name}/claim", post(claim_pool))
+        .route("/v1/pools/{name}/resize", post(resize_pool))
+        // Innermost, so the tenant guard still runs before a stored response
+        // is replayed; see idempotency.rs.
+        .layer(middleware::from_fn_with_state(
+            manager.clone(),
+            idempotency::middleware,
+        ))
+        .merge(speculate_api::routes())
+        .merge(instancetypes_api::routes())
+        // Its own `Idempotency-Key` layer: the one above only wraps routes added before it.
+        .merge(
+            agent_sessions::routes().layer(middleware::from_fn_with_state(
+                manager.clone(),
+                idempotency::middleware,
+            )),
+        )
+        .merge(macos_pool_api::routes())
+        .merge(vz_api::routes())
+        .merge(volumes_api::routes())
+        .merge(guest_ops::routes())
+        .layer(middleware::from_fn_with_state(
+            manager.clone(),
+            tenant_guard_middleware,
+        ));
+    // Between tenant_guard (innermost) and auth (below): runs after auth
+    // has resolved an AuditActor, before tenant scoping -- see
+    // rate_limit_middleware's own doc comment.
+    if let Some(limiter) = build_rate_limiter(&manager.cfg.auth) {
+        router = router.layer(middleware::from_fn_with_state(
+            limiter,
+            rate_limit_middleware,
+        ));
+    }
+    router
+        .layer(middleware::from_fn_with_state(
+            AuthState {
+                manager: manager.clone(),
+                oidc: oidc.clone(),
+            },
+            auth_middleware,
+        ))
+        .layer(TraceLayer::new_for_http())
+        .with_state(manager)
+}
+
+/// Builds the REST API rate limiter from `auth.rate_limit_rps`/
+/// `.rate_limit_burst` when both are set (`None` = no rate limiting,
+/// byte-for-byte the behavior before this existed) -- mirrors
+/// `build_oidc`'s own "both fields or neither, warn on a half-set pair"
+/// shape.
+fn build_rate_limiter(cfg: &fluxvm_core::config::AuthConfig) -> Option<Arc<rate_limit::Limiter>> {
+    match cfg.rate_limit_enabled() {
+        Some((rps, burst)) => {
+            let limiter = Arc::new(rate_limit::Limiter::new(rps, burst));
+            // Bounds memory growth from a long-running process seeing many
+            // distinct actors over its lifetime (every distinct token name
+            // plus, for OIDC, every distinct subject ever seen) -- an idle
+            // key's bucket is dropped 10 minutes after its last request,
+            // long enough that a real caller's own average rate has fully
+            // refilled it anyway.
+            let prune_target = limiter.clone();
+            tokio::spawn(async move {
+                let mut ticker = tokio::time::interval(Duration::from_secs(60));
+                loop {
+                    ticker.tick().await;
+                    prune_target.prune(Duration::from_secs(600));
+                }
+            });
+            Some(limiter)
+        }
+        None => {
+            if cfg.rate_limit_rps.is_some() != cfg.rate_limit_burst.is_some() {
+                tracing::warn!(
+                    "auth.rate_limit_rps and auth.rate_limit_burst must both be set — rate limiting disabled"
+                );
+            }
+            None
+        }
+    }
+}
+
+fn build_oidc(cfg: &fluxvm_core::config::AuthConfig) -> Option<Arc<oidc::OidcValidator>> {
+    if !cfg.oidc_enabled() {
+        if cfg.oidc_issuer.is_some() && cfg.oidc_audience.is_none() {
+            tracing::warn!(
+                "auth.oidc_issuer is set without auth.oidc_audience — OIDC JWT validation disabled"
+            );
+        }
+        return None;
+    }
+    let issuer = cfg.oidc_issuer.clone()?;
+    let audience = cfg.oidc_audience.clone()?;
+    tracing::info!(%issuer, %audience, "OIDC JWT validation enabled (JWKS)");
+    Some(Arc::new(oidc::OidcValidator::new(issuer, audience)))
+}
+
+async fn metrics(State(m): State<Arc<VmManager>>) -> Response {
+    let vms = m.list().await;
+    let mut body = render_metrics(&vms);
+    let usage = fluxvm_scheduler::vz_devices::runner_usage_samples(&vms);
+    body.push_str(&render_runner_usage(&usage));
+    body.push_str(&netobs_api::prometheus());
+    (
+        StatusCode::OK,
+        [("content-type", "text/plain; version=0.0.4; charset=utf-8")],
+        body,
+    )
+        .into_response()
+}
+
+/// `fluxvm_vm_runner_rss_bytes` / `fluxvm_vm_runner_cpu_seconds_total` for `vz` VMs: resident size and CPU time of the
+/// runner process plus its Virtualization XPC service when that could be attributed (`fluxvm_vm_runner_service_attributed`
+/// says which), labelled by VM id and name. Empty when there are no samples.
+fn render_runner_usage(samples: &[fluxvm_scheduler::vz_devices::VmRunnerUsage]) -> String {
+    if samples.is_empty() {
+        return String::new();
+    }
+    fn esc(s: &str) -> String {
+        s.replace('\\', "\\\\")
+            .replace('"', "\\\"")
+            .replace('\n', "\\n")
+    }
+    let mut out = String::new();
+    out.push_str(
+        "# HELP fluxvm_vm_runner_rss_bytes Resident memory of a vz VM: its runner process plus, when fluxvm_vm_runner_service_attributed is 1, the Virtualization XPC service that runs the guest. With 0 it is the runner process only and the guest's memory is not included.\n",
+    );
+    out.push_str("# TYPE fluxvm_vm_runner_rss_bytes gauge\n");
+    for s in samples {
+        out.push_str(&format!(
+            "fluxvm_vm_runner_rss_bytes{{vm=\"{}\",name=\"{}\"}} {}\n",
+            s.vm_id,
+            esc(&s.name),
+            s.rss_bytes
+        ));
+    }
+    out.push_str(
+        "# HELP fluxvm_vm_runner_cpu_seconds_total CPU time (user + system) of a vz VM: its runner process plus, when fluxvm_vm_runner_service_attributed is 1, the Virtualization XPC service that runs the guest. With 0 it is the runner process only and the guest's CPU is not included.\n",
+    );
+    out.push_str("# TYPE fluxvm_vm_runner_cpu_seconds_total counter\n");
+    for s in samples {
+        out.push_str(&format!(
+            "fluxvm_vm_runner_cpu_seconds_total{{vm=\"{}\",name=\"{}\"}} {:.3}\n",
+            s.vm_id,
+            esc(&s.name),
+            s.cpu_seconds
+        ));
+    }
+    out.push_str(
+        "# HELP fluxvm_vm_runner_service_attributed 1 when the two series above include the Virtualization XPC service that runs the guest, 0 when they are the runner process only.\n",
+    );
+    out.push_str("# TYPE fluxvm_vm_runner_service_attributed gauge\n");
+    for s in samples {
+        out.push_str(&format!(
+            "fluxvm_vm_runner_service_attributed{{vm=\"{}\",name=\"{}\"}} {}\n",
+            s.vm_id,
+            esc(&s.name),
+            u8::from(s.service_attributed)
+        ));
+    }
+    out
+}
+
+/// Pure text-rendering, kept separate from the handler so it's unit-testable
+/// without spinning up a VmManager/axum app.
+fn render_metrics(vms: &[VmRecord]) -> String {
+    let mut out = String::new();
+
+    out.push_str(
+        "# HELP fluxvm_vms_total Number of VMs known to this fluxvm instance, by status.\n",
+    );
+    out.push_str("# TYPE fluxvm_vms_total gauge\n");
+    for status in [
+        VmStatus::Creating,
+        VmStatus::Running,
+        VmStatus::Paused,
+        VmStatus::Stopped,
+        VmStatus::Failed,
+    ] {
+        let count = vms.iter().filter(|v| v.status == status).count();
+        out.push_str(&format!(
+            "fluxvm_vms_total{{status=\"{}\"}} {count}\n",
+            status_label(status)
+        ));
+    }
+
+    out.push_str(
+        "# HELP fluxvm_vms_by_backend Number of VMs known to this fluxvm instance, by backend.\n",
+    );
+    out.push_str("# TYPE fluxvm_vms_by_backend gauge\n");
+    for backend in [
+        BackendKind::Qemu,
+        BackendKind::CloudHypervisor,
+        BackendKind::Firecracker,
+        BackendKind::FluxVm,
+    ] {
+        let count = vms.iter().filter(|v| v.backend == backend).count();
+        out.push_str(&format!(
+            "fluxvm_vms_by_backend{{backend=\"{}\"}} {count}\n",
+            backend_label(backend)
+        ));
+    }
+
+    out.push_str(
+        "# HELP fluxvm_vms_agent_enabled Number of VMs with the vsock guest agent enabled.\n",
+    );
+    out.push_str("# TYPE fluxvm_vms_agent_enabled gauge\n");
+    let agent_enabled = vms
+        .iter()
+        .filter(|v| v.request.agent.as_ref().is_some_and(|a| a.enabled))
+        .count();
+    out.push_str(&format!("fluxvm_vms_agent_enabled {agent_enabled}\n"));
+
+    out.push_str(
+        "# HELP fluxvm_auth_deny_total REST requests rejected for missing or invalid bearer token.\n",
+    );
+    out.push_str("# TYPE fluxvm_auth_deny_total counter\n");
+    out.push_str(&format!(
+        "fluxvm_auth_deny_total {}\n",
+        fluxvm_core::metrics::auth_deny_total()
+    ));
+
+    out.push_str(
+        "# HELP fluxvm_egress_deny_total Outbound HTTP(S) requests denied by the L7 egress proxy.\n",
+    );
+    out.push_str("# TYPE fluxvm_egress_deny_total counter\n");
+    out.push_str(&format!(
+        "fluxvm_egress_deny_total {}\n",
+        fluxvm_core::metrics::egress_deny_total()
+    ));
+
+    out.push_str(
+        "# HELP fluxvm_sandbox_warm_hits_total Default-shaped sandbox creates served from a warm slot.\n",
+    );
+    out.push_str("# TYPE fluxvm_sandbox_warm_hits_total counter\n");
+    out.push_str(&format!(
+        "fluxvm_sandbox_warm_hits_total {}\n",
+        fluxvm_core::agent_density::warm_hits()
+    ));
+    out.push_str(
+        "# HELP fluxvm_sandbox_warm_misses_total Default-shaped sandbox creates that cold-booted.\n",
+    );
+    out.push_str("# TYPE fluxvm_sandbox_warm_misses_total counter\n");
+    out.push_str(&format!(
+        "fluxvm_sandbox_warm_misses_total {}\n",
+        fluxvm_core::agent_density::warm_misses()
+    ));
+
+    let host = fluxvm_core::pressure_admission::sample_host();
+    if let Some(level) = host.level {
+        out.push_str(
+            "# HELP fluxvm_host_memory_pressure_level Host memory-pressure level (0 normal, 1 warn, 2 critical; macOS).\n",
+        );
+        out.push_str("# TYPE fluxvm_host_memory_pressure_level gauge\n");
+        out.push_str(&format!(
+            "fluxvm_host_memory_pressure_level {}\n",
+            level as u8
+        ));
+    }
+    if let Some(mib) = host.mem_available_mib {
+        out.push_str(
+            "# HELP fluxvm_host_mem_available_mib Host memory available without swapping, MiB.\n",
+        );
+        out.push_str("# TYPE fluxvm_host_mem_available_mib gauge\n");
+        out.push_str(&format!("fluxvm_host_mem_available_mib {mib}\n"));
+    }
+    out.push_str(
+        "# HELP fluxvm_sandbox_balloons_inflated Sandboxes whose balloon idle reclaim holds inflated.\n",
+    );
+    out.push_str("# TYPE fluxvm_sandbox_balloons_inflated gauge\n");
+    out.push_str(&format!(
+        "fluxvm_sandbox_balloons_inflated {}\n",
+        fluxvm_scheduler::density::inflated_balloons()
+    ));
+
+    let (agent_calls, ssh_fallbacks) = fluxvm_scheduler::vz_guest::agent_counters();
+    out.push_str(
+        "# HELP fluxvm_vz_agent_calls_total vz sandbox requests answered by the vsock guest agent.\n",
+    );
+    out.push_str("# TYPE fluxvm_vz_agent_calls_total counter\n");
+    out.push_str(&format!("fluxvm_vz_agent_calls_total {agent_calls}\n"));
+    out.push_str(
+        "# HELP fluxvm_vz_agent_ssh_fallbacks_total vz sandbox requests that fell back to SSH because the agent did not answer.\n",
+    );
+    out.push_str("# TYPE fluxvm_vz_agent_ssh_fallbacks_total counter\n");
+    out.push_str(&format!(
+        "fluxvm_vz_agent_ssh_fallbacks_total {ssh_fallbacks}\n"
+    ));
+
+    out.push_str("# HELP fluxvm_vm_create_total VM create operations completed successfully.\n");
+    out.push_str("# TYPE fluxvm_vm_create_total counter\n");
+    out.push_str(&format!(
+        "fluxvm_vm_create_total {}\n",
+        fluxvm_core::metrics::vm_create_total()
+    ));
+    out.push_str(
+        "# HELP fluxvm_vm_create_duration_ms_total Cumulative wall time of successful VM creates in milliseconds.\n",
+    );
+    out.push_str("# TYPE fluxvm_vm_create_duration_ms_total counter\n");
+    out.push_str(&format!(
+        "fluxvm_vm_create_duration_ms_total {}\n",
+        fluxvm_core::metrics::vm_create_duration_ms_total()
+    ));
+
+    out.push_str(
+        "# HELP fluxvm_vm_start_total VM start (relaunch) operations completed successfully.\n",
+    );
+    out.push_str("# TYPE fluxvm_vm_start_total counter\n");
+    out.push_str(&format!(
+        "fluxvm_vm_start_total {}\n",
+        fluxvm_core::metrics::vm_start_total()
+    ));
+    out.push_str(
+        "# HELP fluxvm_vm_start_duration_ms_total Cumulative wall time of successful VM starts in milliseconds.\n",
+    );
+    out.push_str("# TYPE fluxvm_vm_start_duration_ms_total counter\n");
+    out.push_str(&format!(
+        "fluxvm_vm_start_duration_ms_total {}\n",
+        fluxvm_core::metrics::vm_start_duration_ms_total()
+    ));
+
+    let (forks, failed, children, total_ms, snap_ms, restore_ms, identity_ms, identity_failed) =
+        fluxvm_core::metrics::fork_totals();
+    for (name, help, v) in [
+        ("fluxvm_fork_total", "Fork requests that completed.", forks),
+        (
+            "fluxvm_fork_failed_total",
+            "Fork requests that were refused or rolled back after starting.",
+            failed,
+        ),
+        (
+            "fluxvm_fork_children_total",
+            "Children created by completed forks.",
+            children,
+        ),
+        (
+            "fluxvm_fork_duration_ms_total",
+            "Cumulative wall time of completed forks in milliseconds.",
+            total_ms,
+        ),
+        (
+            "fluxvm_fork_parent_snapshot_ms_total",
+            "Cumulative time parents were held for the fork save and disk clone, in milliseconds.",
+            snap_ms,
+        ),
+        (
+            "fluxvm_fork_child_restore_ms_total",
+            "Cumulative per-child restore time in milliseconds (divide by children for a mean).",
+            restore_ms,
+        ),
+        (
+            "fluxvm_fork_child_identity_ms_total",
+            "Cumulative per-child identity reset time in milliseconds.",
+            identity_ms,
+        ),
+        (
+            "fluxvm_fork_identity_failed_total",
+            "Strict or best-effort identity resets that could not be confirmed.",
+            identity_failed,
+        ),
+    ] {
+        out.push_str(&format!(
+            "# HELP {name} {help}\n# TYPE {name} counter\n{name} {v}\n"
+        ));
+    }
+
+    out
+}
+
+fn status_label(s: VmStatus) -> &'static str {
+    match s {
+        VmStatus::Creating => "creating",
+        VmStatus::Running => "running",
+        VmStatus::Paused => "paused",
+        VmStatus::Stopped => "stopped",
+        VmStatus::Failed => "failed",
+    }
+}
+
+fn backend_label(b: BackendKind) -> &'static str {
+    match b {
+        BackendKind::Qemu => "qemu",
+        BackendKind::CloudHypervisor => "cloud-hypervisor",
+        BackendKind::Firecracker => "firecracker",
+        BackendKind::FluxVm => "fluxvm",
+        BackendKind::Vz => "vz",
+        BackendKind::Auto => "auto",
+    }
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct CreateVmQuery {
+    /// `storage: shared` only: break the disk's lock first. For a caller that
+    /// has fenced the previous holder's node (HA re-create).
+    #[serde(default)]
+    shared_takeover: bool,
+    /// `ready=exec` (or `wait_first_command=true`): block until a trivial
+    /// guest-agent exec succeeds and add `first_command_ms` + `phases`.
+    #[serde(default)]
+    ready: Option<String>,
+    #[serde(default)]
+    wait_first_command: bool,
+}
+
+/// `?ready=exec` / `?wait_first_command=true` on fork and pool claim.
+#[derive(Debug, Default, Deserialize)]
+struct ReadyQuery {
+    #[serde(default)]
+    ready: Option<String>,
+    #[serde(default)]
+    wait_first_command: bool,
+}
+
+impl ReadyQuery {
+    fn wants_exec(&self) -> bool {
+        self.wait_first_command || self.ready.as_deref() == Some("exec")
+    }
+}
+
+async fn create_vm(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    actor: Option<Extension<AuditActor>>,
+    token_tenant: Option<Extension<TokenTenant>>,
+    Query(q): Query<CreateVmQuery>,
+    Json(body): Json<serde_json::Value>,
+) -> ApiResult<impl IntoResponse> {
+    // `instancetype`/`preference` in the body are resolved before the spec is parsed.
+    let (req, class_snapshot) =
+        fluxvm_scheduler::instancetypes::resolve_create_body(&m.cfg.state_dir, body)?;
+    let started = std::time::Instant::now();
+    let want_exec = ReadyQuery {
+        ready: q.ready.clone(),
+        wait_first_command: q.wait_first_command,
+    }
+    .wants_exec();
+    require_admin(role)?;
+    if q.shared_takeover {
+        if req.storage != fluxvm_core::model::StorageBackend::Shared {
+            return Err(anyhow::anyhow!("shared_takeover applies to storage=shared only").into());
+        }
+        m.break_shared_disk_lock(&req.image)?;
+    }
+    let mut rec = create_vm_as(&m, actor, token_tenant, req).await?;
+    if let Some(s) = &class_snapshot {
+        rec = fluxvm_scheduler::instancetypes::record_snapshot(&m, rec, s).await?;
+    }
+    let mut body = json!(rec);
+    if let Some(s) = class_snapshot {
+        body["instancetype_snapshot"] = json!(s);
+    }
+    if want_exec {
+        merge_first_command(
+            &mut body,
+            first_command_or_error(&m, rec.id, "create", started).await,
+        );
+    }
+    Ok((StatusCode::CREATED, Json(body)))
+}
+
+/// The VM already exists when the measurement runs, so a failure must not
+/// replace the response (the caller would never learn the id): it is reported
+/// as `first_command_error` next to the record instead.
+async fn first_command_or_error(
+    m: &Arc<VmManager>,
+    id: Uuid,
+    source: &str,
+    started: std::time::Instant,
+) -> serde_json::Value {
+    match m.measure_first_command(id, source, started).await {
+        Ok(v) => v,
+        Err(e) => json!({ "first_command_error": format!("{e:#}") }),
+    }
+}
+
+/// Copy `first_command_ms` and `phases` from `extra` into the JSON object `body`.
+fn merge_first_command(body: &mut serde_json::Value, extra: serde_json::Value) {
+    if let (Some(obj), Some(src)) = (body.as_object_mut(), extra.as_object()) {
+        for (k, v) in src {
+            obj.insert(k.clone(), v.clone());
+        }
+    }
+}
+
+/// `create` on behalf of the authenticated caller: tenant and
+/// `created_by_token` come from the token, then token quotas apply.
+async fn create_vm_as(
+    m: &Arc<VmManager>,
+    actor: Option<Extension<AuditActor>>,
+    token_tenant: Option<Extension<TokenTenant>>,
+    mut req: CreateVmRequest,
+) -> ApiResult<VmRecord> {
+    // Token tenant is authoritative: inherit when omitted; reject mismatch.
+    if let Some(Extension(TokenTenant(t))) = token_tenant {
+        if let Some(ref body) = req.tenant
+            && body != &t
+        {
+            return Err(ApiError::forbidden(format!(
+                "token tenant '{t}' cannot create VM for tenant '{body}'"
+            )));
+        }
+        req.tenant = Some(t);
+    }
+    // Server-side only, unconditionally -- unlike `tenant` above,
+    // `created_by_token` is always overwritten from the authenticated
+    // caller's own identity regardless of what the body claims (see
+    // `CreateVmRequest.created_by_token`'s own doc comment for why this is
+    // a handler-level overwrite rather than `skip_deserializing`), then
+    // used by `enforce_token_quotas` to scope quotas to this token's own
+    // VMs instead of every VM on the node.
+    let actor_name = actor.as_ref().map(|a| a.0.0.as_str());
+    req.created_by_token = actor_name.map(String::from);
+    m.enforce_token_quotas(actor_name, &req)
+        .await
+        .map_err(|e| ApiError::forbidden(e.to_string()))?;
+    Ok(m.create(req).await?)
+}
+
+async fn list_vm_templates(State(m): State<Arc<VmManager>>) -> ApiResult<Json<serde_json::Value>> {
+    Ok(Json(json!({"items": m.list_vm_templates()?})))
+}
+
+async fn get_vm_template(
+    State(m): State<Arc<VmManager>>,
+    Path(name): Path<String>,
+) -> ApiResult<Json<fluxvm_scheduler::templates::VmTemplate>> {
+    Ok(Json(m.get_vm_template(&name)?))
+}
+
+#[derive(Deserialize)]
+struct SaveTemplateRequest {
+    name: String,
+    #[serde(default)]
+    description: Option<String>,
+    spec: serde_json::Value,
+    #[serde(default)]
+    replace: bool,
+}
+
+async fn save_vm_template(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Json(req): Json<SaveTemplateRequest>,
+) -> ApiResult<impl IntoResponse> {
+    require_admin(role)?;
+    let spec = fluxvm_scheduler::templates::spec_from_json(&req.name, req.spec)?;
+    Ok((
+        StatusCode::CREATED,
+        Json(
+            m.save_vm_template(&req.name, req.description, spec, req.replace)
+                .await?,
+        ),
+    ))
+}
+
+async fn delete_vm_template(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(name): Path<String>,
+) -> ApiResult<StatusCode> {
+    require_admin(role)?;
+    m.delete_vm_template(&name).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Deserialize)]
+struct InstantiateTemplateRequest {
+    name: String,
+    #[serde(default)]
+    labels: std::collections::BTreeMap<String, String>,
+}
+
+async fn instantiate_vm_template(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    actor: Option<Extension<AuditActor>>,
+    token_tenant: Option<Extension<TokenTenant>>,
+    Path(template): Path<String>,
+    Json(body): Json<InstantiateTemplateRequest>,
+) -> ApiResult<impl IntoResponse> {
+    require_admin(role)?;
+    let req = m.vm_template_request(&template, &body.name)?;
+    let mut vm = create_vm_as(&m, actor, token_tenant, req).await?;
+    if !body.labels.is_empty() {
+        vm = m
+            .patch(
+                vm.id,
+                fluxvm_core::model::VmPatch {
+                    name: None,
+                    labels: body.labels.into_iter().map(|(k, v)| (k, Some(v))).collect(),
+                },
+            )
+            .await?;
+    }
+    Ok((StatusCode::CREATED, Json(vm)))
+}
+
+async fn create_sandbox(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    actor: Option<Extension<AuditActor>>,
+    token_tenant: Option<Extension<TokenTenant>>,
+    Json(req): Json<fluxvm_scheduler::SandboxCreateRequest>,
+) -> ApiResult<impl IntoResponse> {
+    require_admin(role)?;
+    let token_tenant = token_tenant.map(|Extension(TokenTenant(t))| t);
+    let actor_name = actor.as_ref().map(|a| a.0.0.as_str());
+    let record = m
+        .create_sandbox(req, token_tenant.as_deref(), actor_name)
+        .await?;
+    // Report the confidential outcome next to the VM record, when one was asked for.
+    let status = fluxvm_scheduler::confidential::read_status(&record.workspace).await;
+    let mut body = serde_json::to_value(&record).map_err(anyhow::Error::from)?;
+    if let (Some(status), Some(object)) = (status, body.as_object_mut()) {
+        object.insert("confidential".into(), json!(status));
+    }
+    Ok((StatusCode::CREATED, Json(body)))
+}
+
+/// Fill the warm sandbox pool to `count` slots in the background. Host-wide, so not for tenant tokens.
+async fn warm_sandboxes(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    token_tenant: Option<Extension<TokenTenant>>,
+    Json(req): Json<fluxvm_core::agent_density::WarmRequest>,
+) -> ApiResult<impl IntoResponse> {
+    require_admin(role)?;
+    if token_tenant.is_some() {
+        return Err(ApiError::forbidden(
+            "the warm pool is host-wide; use a token without a tenant",
+        ));
+    }
+    let target = m.warm_sandboxes(req.count).await?;
+    Ok((StatusCode::ACCEPTED, Json(json!({ "target": target }))))
+}
+
+/// Sandbox counts, warm-pool state and host memory pressure.
+async fn sandbox_density(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    token_tenant: Option<Extension<TokenTenant>>,
+) -> ApiResult<Json<fluxvm_core::agent_density::DensityReport>> {
+    require_admin(role)?;
+    if token_tenant.is_some() {
+        return Err(ApiError::forbidden(
+            "density is host-wide; use a token without a tenant",
+        ));
+    }
+    Ok(Json(m.sandbox_density().await))
+}
+
+/// What this host offers for confidential guests, and whether FluxVM can use it.
+async fn host_confidential() -> Json<serde_json::Value> {
+    Json(json!(fluxvm_scheduler::confidential::detect()))
+}
+
+async fn list_sandboxes(
+    State(m): State<Arc<VmManager>>,
+    token_tenant: Option<Extension<TokenTenant>>,
+) -> Json<serde_json::Value> {
+    // Unlike list_vms, this had no tenant filtering at all -- any
+    // authenticated caller, tenant-scoped token or not, could see every
+    // sandbox across every tenant. tenant_guard_middleware only ever
+    // scoped *per-record* access by id (GET/POST .../{id}/...), never a
+    // list. Mirrors list_vms's own filtering exactly.
+    let items: Vec<_> = m
+        .list()
+        .await
+        .into_iter()
+        // QEMU-backed sandboxes (volume templates) are sandboxes too; they are
+        // recognised by the marker `create_sandbox` writes into their workspace.
+        .filter(|v| {
+            v.backend == BackendKind::FluxVm
+                || v.labels
+                    .contains_key(fluxvm_scheduler::sandbox_density::SANDBOX_LABEL)
+                || v.workspace.join("sandbox-proxy.json").exists()
+        })
+        .filter(|v| match &token_tenant {
+            Some(Extension(TokenTenant(t))) => v.request.tenant.as_deref() == Some(t.as_str()),
+            None => true,
+        })
+        .collect();
+    Json(json!({ "items": items }))
+}
+
+#[derive(Deserialize)]
+struct SnapshotBody {
+    path: PathBuf,
+}
+
+async fn snapshot_sandbox(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+    Json(body): Json<SnapshotBody>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    m.snapshot_sandbox(id, &body.path).await?;
+    Ok(Json(json!({ "ok": true, "path": body.path })))
+}
+
+#[derive(Deserialize)]
+struct FsReadBody {
+    path: String,
+}
+
+async fn sandbox_fs_read(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+    Json(body): Json<FsReadBody>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    m.ensure_running_for_request(id).await?;
+    Ok(Json(json!(m.get_file(id, body.path).await?)))
+}
+
+#[derive(Deserialize)]
+struct FsWriteBody {
+    path: String,
+    content_base64: String,
+    #[serde(default)]
+    mode: Option<u32>,
+}
+
+async fn sandbox_fs_write(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+    Json(body): Json<FsWriteBody>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    m.ensure_running_for_request(id).await?;
+    Ok(Json(json!(
+        m.put_file(id, body.path, body.content_base64, body.mode)
+            .await?
+    )))
+}
+
+#[derive(Deserialize)]
+struct ProcessBody {
+    #[serde(default)]
+    command: String,
+    #[serde(default)]
+    timeout_seconds: Option<u64>,
+    #[serde(default)]
+    policy: Option<fluxvm_guest_protocol::ExecPolicy>,
+    /// Run `argv` directly instead of `command` through a shell; needs the guest agent.
+    #[serde(default)]
+    process: Option<fluxvm_guest_protocol::ExecProcess>,
+}
+
+async fn sandbox_process(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+    Json(body): Json<ProcessBody>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    m.ensure_running_for_request(id).await?;
+    let response = match body.process {
+        Some(_) if body.policy.is_some() || !body.command.is_empty() => {
+            return Err(anyhow::anyhow!(
+                "give either process (argv) or command (and policy), not both"
+            )
+            .into());
+        }
+        Some(process) => m.exec_process(id, process, body.timeout_seconds).await?,
+        None if body.command.is_empty() => {
+            return Err(anyhow::anyhow!("command or process is required").into());
+        }
+        None => {
+            m.exec_with_policy(id, body.command, body.timeout_seconds, body.policy)
+                .await?
+        }
+    };
+    Ok(Json(json!(response)))
+}
+
+#[derive(Deserialize)]
+struct BaselineBody {
+    paths: Vec<String>,
+}
+
+#[derive(Deserialize, Default)]
+struct ChangesBody {
+    #[serde(default)]
+    paths: Option<Vec<String>>,
+}
+
+/// Maps the typed change-set errors to precise statuses: a missing baseline
+/// is 404, an incomparable one 409; everything else keeps the default 400.
+fn change_error(e: anyhow::Error) -> ApiError {
+    use fluxvm_scheduler::changes::ChangeError;
+    use fluxvm_scheduler::vm_restore::RestoreError;
+    let status = match (
+        e.downcast_ref::<ChangeError>(),
+        e.downcast_ref::<RestoreError>(),
+    ) {
+        (Some(ChangeError::NoBaseline), _) => StatusCode::NOT_FOUND,
+        (Some(ChangeError::ModeMismatch { .. }), _) => StatusCode::CONFLICT,
+        (_, Some(RestoreError::NoSnapshot(_))) => StatusCode::NOT_FOUND,
+        (_, Some(RestoreError::Conflict(_))) => StatusCode::CONFLICT,
+        (_, Some(RestoreError::Unsupported(_))) => StatusCode::NOT_IMPLEMENTED,
+        (None, None) => return ApiError::from(e),
+    };
+    ApiError {
+        status,
+        message: format!("{e:#}"),
+    }
+}
+
+async fn sandbox_baseline(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+    Json(body): Json<BaselineBody>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    m.ensure_running_for_request(id).await?;
+    let summary = m
+        .sandbox_baseline(id, body.paths)
+        .await
+        .map_err(change_error)?;
+    Ok(Json(json!(summary)))
+}
+
+#[derive(Deserialize)]
+struct DryRunBody {
+    command: String,
+    #[serde(default)]
+    timeout_seconds: Option<u64>,
+    #[serde(default)]
+    paths: Option<Vec<String>>,
+}
+
+/// Run a command and report what it changed, then discard it: procbox sandboxes
+/// use a throwaway workspace copy, native flux-vm sandboxes snapshot/restore.
+async fn sandbox_dry_run(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+    Json(body): Json<DryRunBody>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    m.ensure_running_for_request(id).await?;
+    let report = m
+        .sandbox_dry_run(id, body.command, body.timeout_seconds, body.paths)
+        .await
+        .map_err(change_error)?;
+    Ok(Json(json!(report)))
+}
+
+// `paths` is optional, and the body itself may be omitted entirely.
+async fn sandbox_changes(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+    body: Option<Json<ChangesBody>>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    m.ensure_running_for_request(id).await?;
+    let paths = body.and_then(|Json(b)| b.paths);
+    let report = m.sandbox_changes(id, paths).await.map_err(change_error)?;
+    Ok(Json(json!(report)))
+}
+
+// Admin-only, like every other guest-reaching route (sandbox_fs_read,
+// sandbox_process, agent_exec, qga_exec, ...). These two handlers had no
+// role check of any kind before -- registered with `any(...)`, a
+// `read-only` token could issue arbitrary HTTP methods into a tenant's
+// guest through the proxy. They return a bare `Response` rather than an
+// `ApiResult<T>`, so the `require_admin` error has to be converted with
+// `.into_response()` explicitly instead of `?`.
+async fn sandbox_http_proxy_default_port(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path((id, path)): Path<(Uuid, String)>,
+    req: Request,
+) -> Response {
+    if let Err(e) = require_admin(role) {
+        return e.into_response();
+    }
+    let port = match m.get(id).await {
+        Ok(vm) => m.sandbox_http_proxy_port(&vm).await,
+        Err(_) => m.cfg.sandbox.http_proxy_default_port,
+    };
+    sandbox_proxy_inner(m, id, port, path, req).await
+}
+
+async fn sandbox_http_proxy(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path((id, port, path)): Path<(Uuid, u16, String)>,
+    req: Request,
+) -> Response {
+    if let Err(e) = require_admin(role) {
+        return e.into_response();
+    }
+    sandbox_proxy_inner(m, id, port, path, req).await
+}
+
+/// Connects to `addr` from inside the network namespace `pid` is running in,
+/// by `setns()`-ing a throwaway OS thread before calling `connect()`. A
+/// namespace only governs which sockets a thread's *syscalls* create, not
+/// fds it already holds, so the resulting `TcpStream` stays perfectly usable
+/// once handed back to the async runtime on any other thread -- only the
+/// `connect()` itself needs to happen inside the namespace.
+///
+/// A `tap`+`netns=true` sandbox's `guest_ip` (assigned by the per-VM dnsmasq
+/// on its internal bridge, see `fluxvm_network::netns`) is only routable
+/// from inside that namespace: the daemon's own default namespace has no
+/// path to it, so a plain `reqwest::Client` (which always connects from the
+/// calling thread's ambient namespace) hangs until it times out. That was
+/// silently breaking the HTTP proxy for every netns sandbox -- vsock-based
+/// guest-agent calls (exec, fs read/write) were unaffected since vsock
+/// doesn't route through the guest's network namespace at all, so a booted,
+/// working guest still looked completely unreachable over this path.
+///
+/// Uses a plain `std::thread::spawn`, never `tokio::task::spawn_blocking`:
+/// tokio's blocking pool reuses its threads across unrelated work, and
+/// `setns()` would leak into whatever that thread runs next. A one-shot
+/// thread that exits right after `connect()` has nothing left to leak.
+async fn connect_in_netns(
+    pid: u32,
+    addr: std::net::SocketAddr,
+) -> std::io::Result<tokio::net::TcpStream> {
+    fn connect(pid: u32, addr: std::net::SocketAddr) -> std::io::Result<std::net::TcpStream> {
+        #[cfg(target_os = "linux")]
+        {
+            let ns_file = std::fs::File::open(format!("/proc/{pid}/ns/net"))?;
+            if unsafe { libc::setns(ns_file.as_raw_fd(), libc::CLONE_NEWNET) } != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            std::net::TcpStream::connect_timeout(&addr, Duration::from_secs(5))
+        }
+        // Network namespaces are a Linux kernel feature. Elsewhere (macOS `vz`) a sandbox's NAT
+        // address (vmnet, e.g. 192.168.64.x) is routable from the host itself, so connect directly.
+        // A guest with no network card has no `guest_ip` and never reaches this point.
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = pid;
+            std::net::TcpStream::connect_timeout(&addr, Duration::from_secs(5))
+        }
+    }
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    std::thread::spawn(move || {
+        let result = connect(pid, addr);
+        // The receiver only drops early if the whole proxy request was
+        // itself abandoned (e.g. the client disconnected) -- nothing to do.
+        let _ = tx.send(result);
+    });
+    let std_stream = rx.await.map_err(|_| {
+        std::io::Error::other("netns connect worker thread panicked before replying")
+    })??;
+    std_stream.set_nonblocking(true)?;
+    tokio::net::TcpStream::from_std(std_stream)
+}
+
+/// Caps both the request body read from the caller and the response body
+/// read back from the guest in `sandbox_proxy_inner`/`proxy_over_tcp`. A
+/// compromised or buggy guest can otherwise stream an effectively unbounded
+/// response for up to 30s per request (the only prior limit was the
+/// timeout, not a size) -- a straightforward host-memory-exhaustion
+/// primitive from inside any tenant's own sandbox.
+const SANDBOX_PROXY_MAX_BODY_BYTES: usize = 16 * 1024 * 1024;
+
+/// The hyper-client half of the sandbox HTTP proxy: handshake over an
+/// already-connected stream to the guest, forward the request, and read
+/// back the response (capped at `SANDBOX_PROXY_MAX_BODY_BYTES`). Factored
+/// out of `sandbox_proxy_inner` so it's testable directly against a real
+/// loopback TCP "guest" -- `sandbox_proxy_inner`'s own connection setup
+/// (`connect_in_netns`) needs `CAP_SYS_ADMIN` for `setns()`, unavailable on
+/// this project's remote build host, let alone in a normal test run, so
+/// there was previously no way to exercise this half of the proxy at all.
+async fn proxy_over_tcp(
+    tcp: tokio::net::TcpStream,
+    method: Method,
+    uri: String,
+    headers: axum::http::HeaderMap,
+    body: bytes::Bytes,
+    // Authority the guest should see in `Host` (typically `guest_ip:port`).
+    // Must be set: Node and other HTTP/1.1 servers reject requests with no
+    // Host header (400 + Connection: close), which previously made the
+    // sandbox HTTP proxy look like a hard connection reset against any
+    // Node-based guest worker while Python's more lenient server still
+    // answered 200.
+    guest_host: &str,
+) -> Response {
+    let (mut sender, connection) =
+        match hyper::client::conn::http1::handshake(TokioIo::new(tcp)).await {
+            Ok(pair) => pair,
+            Err(e) => {
+                return (StatusCode::BAD_GATEWAY, format!("guest upstream: {e}")).into_response();
+            }
+        };
+    // Drives the connection's I/O; must stay alive for `sender` to work at
+    // all, but its exit (guest closes the connection) isn't itself an error.
+    tokio::spawn(async move {
+        let _ = connection.await;
+    });
+
+    let mut builder = hyper::Request::builder().method(method).uri(uri);
+    for (k, v) in headers.iter() {
+        // host: about the FluxVM API peer, not the guest -- replaced with
+        // `guest_host` below. content-length: hyper computes and sets its
+        // own from the `Full` body below -- forwarding the original value
+        // duplicates the header, and on a non-empty body (anything but the
+        // plain GETs this path was first exercised with) that framing
+        // mismatch left the guest's HTTP server waiting on body bytes that
+        // were never coming, hanging the request indefinitely instead of
+        // erroring.
+        if k == header::HOST || k == header::CONTENT_LENGTH || k == header::TRANSFER_ENCODING {
+            continue;
+        }
+        builder = builder.header(k, v);
+    }
+    builder = builder.header(header::HOST, guest_host);
+    let outgoing = match builder.body(Full::new(body)) {
+        Ok(r) => r,
+        Err(e) => {
+            return (StatusCode::BAD_REQUEST, format!("building request: {e}")).into_response();
+        }
+    };
+
+    let up = match tokio::time::timeout(Duration::from_secs(30), sender.send_request(outgoing))
+        .await
+    {
+        Ok(Ok(r)) => r,
+        Ok(Err(e)) => {
+            return (StatusCode::BAD_GATEWAY, format!("guest upstream: {e}")).into_response();
+        }
+        Err(_) => {
+            return (StatusCode::BAD_GATEWAY, "guest upstream: request timed out").into_response();
+        }
+    };
+    let status = StatusCode::from_u16(up.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+    let headers = up.headers().clone();
+    let bytes = match tokio::time::timeout(
+        Duration::from_secs(30),
+        Limited::new(up.into_body(), SANDBOX_PROXY_MAX_BODY_BYTES).collect(),
+    )
+    .await
+    {
+        Ok(Ok(collected)) => collected.to_bytes(),
+        Ok(Err(e)) => {
+            // Covers both a genuine guest-connection error and a
+            // `Limited`-imposed cap violation (`LengthLimitError`) without a
+            // separate branch -- `Limited<B>::Error` is `Box<dyn
+            // std::error::Error + Send + Sync>`, which both `Display`s
+            // through the same `{e}` this arm already used for the
+            // unwrapped `hyper::Error` before this body was capped.
+            return (
+                StatusCode::BAD_GATEWAY,
+                format!("guest upstream: reading response body: {e}"),
+            )
+                .into_response();
+        }
+        Err(_) => {
+            return (
+                StatusCode::BAD_GATEWAY,
+                "guest upstream: reading response body timed out",
+            )
+                .into_response();
+        }
+    };
+    let mut response = Response::builder().status(status);
+    for (k, v) in headers.iter() {
+        // connection/keep-alive describe *this* handler's short-lived,
+        // one-shot connection to the guest (which we tear down right after
+        // this response regardless of what it says) -- forwarding them onto
+        // the outer response tells the caller's connection pool it can
+        // reuse this connection to fluxvm-api's own server for a "next
+        // request" that has nothing to do with the guest's keep-alive.
+        // Harmless when the semantics happen to line up; when they don't,
+        // the caller tries to reuse a connection axum's own server settings
+        // already closed, and reqwest reports it as a bare "connection
+        // closed before message completed" with no indication why.
+        if k == header::CONNECTION || k == header::HeaderName::from_static("keep-alive") {
+            continue;
+        }
+        response = response.header(k, v);
+    }
+    response
+        .body(Body::from(bytes))
+        .unwrap_or_else(|_| StatusCode::BAD_GATEWAY.into_response())
+}
+
+pub(crate) async fn sandbox_proxy_inner(
+    m: Arc<VmManager>,
+    id: Uuid,
+    port: u16,
+    path: String,
+    req: Request,
+) -> Response {
+    let vm = match m.ensure_running_for_request(id).await {
+        Ok(v) => v,
+        Err(e) => {
+            return (
+                StatusCode::BAD_GATEWAY,
+                format!("resume/get sandbox: {e:#}"),
+            )
+                .into_response();
+        }
+    };
+    if fluxvm_scheduler::procbox_sandbox::is_procbox(&vm) {
+        return (
+            StatusCode::NOT_IMPLEMENTED,
+            "a procbox sandbox has no guest network to proxy HTTP into",
+        )
+            .into_response();
+    }
+    let Some(guest_ip) = vm.guest_ip.clone() else {
+        return (
+            StatusCode::BAD_REQUEST,
+            "sandbox has no guest_ip (use network.mode=tap with netns for HTTP proxy)",
+        )
+            .into_response();
+    };
+    let Some(pid) = vm.pid else {
+        return (
+            StatusCode::BAD_GATEWAY,
+            "sandbox has no running process to reach its network namespace through",
+        )
+            .into_response();
+    };
+    let addr = match format!("{guest_ip}:{port}").parse::<std::net::SocketAddr>() {
+        Ok(a) => a,
+        Err(e) => return (StatusCode::BAD_GATEWAY, format!("guest_ip: {e}")).into_response(),
+    };
+    let method = req.method().clone();
+    let query = req
+        .uri()
+        .query()
+        .map(|q| format!("?{q}"))
+        .unwrap_or_default();
+    let uri = format!("/{path}{query}");
+    let headers = req.headers().clone();
+
+    let tcp = match tokio::time::timeout(Duration::from_secs(10), connect_in_netns(pid, addr)).await
+    {
+        Ok(Ok(s)) => s,
+        Ok(Err(e)) => {
+            return (
+                StatusCode::BAD_GATEWAY,
+                format!("guest upstream: connecting to {addr}: {e}"),
+            )
+                .into_response();
+        }
+        Err(_) => {
+            return (
+                StatusCode::BAD_GATEWAY,
+                format!("guest upstream: connecting to {addr} timed out"),
+            )
+                .into_response();
+        }
+    };
+
+    let body = match axum::body::to_bytes(req.into_body(), SANDBOX_PROXY_MAX_BODY_BYTES).await {
+        Ok(b) => b,
+        Err(e) => return (StatusCode::BAD_REQUEST, format!("body: {e}")).into_response(),
+    };
+    proxy_over_tcp(
+        tcp,
+        method,
+        uri,
+        headers,
+        body,
+        &format!("{guest_ip}:{port}"),
+    )
+    .await
+}
+
+/// `GET /v1/sandboxes/{id}/ws/{port}/{*path}` — WebSocket upgrade bridged to a
+/// guest TCP WebSocket (Chrome DevTools CDP, etc.). Used by Keep screencast /
+/// screenshot so the operator never receives a raw guest debugger URL.
+async fn sandbox_ws_proxy(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path((id, port, path)): Path<(Uuid, u16, String)>,
+    ws: axum::extract::ws::WebSocketUpgrade,
+) -> Response {
+    if let Err(e) = require_admin(role) {
+        return e.into_response();
+    }
+    sandbox_ws_inner(m, id, port, path, ws).await
+}
+
+/// The WebSocket bridge itself, with no authorisation: the caller decided who may use it (the
+/// admin route above, or a preview token).
+pub(crate) async fn sandbox_ws_inner(
+    m: Arc<VmManager>,
+    id: Uuid,
+    port: u16,
+    path: String,
+    ws: axum::extract::ws::WebSocketUpgrade,
+) -> Response {
+    let vm = match m.ensure_running_for_request(id).await {
+        Ok(v) => v,
+        Err(e) => {
+            return (
+                StatusCode::BAD_GATEWAY,
+                format!("resume/get sandbox: {e:#}"),
+            )
+                .into_response();
+        }
+    };
+    let Some(guest_ip) = vm.guest_ip.clone() else {
+        return (
+            StatusCode::BAD_REQUEST,
+            "sandbox has no guest_ip (use network.mode=tap with netns for WS proxy)",
+        )
+            .into_response();
+    };
+    let Some(pid) = vm.pid else {
+        return (
+            StatusCode::BAD_GATEWAY,
+            "sandbox has no running process to reach its network namespace through",
+        )
+            .into_response();
+    };
+    let addr = match format!("{guest_ip}:{port}").parse::<std::net::SocketAddr>() {
+        Ok(a) => a,
+        Err(e) => return (StatusCode::BAD_GATEWAY, format!("guest_ip: {e}")).into_response(),
+    };
+    let tcp = match tokio::time::timeout(Duration::from_secs(10), connect_in_netns(pid, addr)).await
+    {
+        Ok(Ok(s)) => s,
+        Ok(Err(e)) => {
+            return (
+                StatusCode::BAD_GATEWAY,
+                format!("guest upstream: connecting to {addr}: {e}"),
+            )
+                .into_response();
+        }
+        Err(_) => {
+            return (
+                StatusCode::BAD_GATEWAY,
+                format!("guest upstream: connecting to {addr} timed out"),
+            )
+                .into_response();
+        }
+    };
+    let guest_host = format!("{guest_ip}:{port}");
+    let path = path.trim_start_matches('/').to_string();
+    ws.on_upgrade(move |client| relay_sandbox_ws(client, tcp, guest_host, path))
+}
+
+async fn relay_sandbox_ws(
+    client: axum::extract::ws::WebSocket,
+    tcp: tokio::net::TcpStream,
+    guest_host: String,
+    path: String,
+) {
+    use axum::extract::ws::Message as AxumMessage;
+    use futures::{SinkExt, StreamExt};
+    use tokio_tungstenite::{
+        client_async,
+        tungstenite::{Message as TungsteniteMessage, client::IntoClientRequest},
+    };
+
+    let uri = format!("ws://{guest_host}/{path}");
+    let request = match uri.into_client_request() {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!(%e, "sandbox ws: bad guest uri");
+            return;
+        }
+    };
+    let (guest, _resp) = match client_async(request, tcp).await {
+        Ok(pair) => pair,
+        Err(e) => {
+            tracing::warn!(%e, %guest_host, %path, "sandbox ws: guest handshake failed");
+            return;
+        }
+    };
+
+    let (mut client_tx, mut client_rx) = client.split();
+    let (mut guest_tx, mut guest_rx) = guest.split();
+
+    let to_guest = async {
+        while let Some(Ok(msg)) = client_rx.next().await {
+            let out = match msg {
+                AxumMessage::Text(t) => TungsteniteMessage::Text(t.to_string().into()),
+                AxumMessage::Binary(b) => TungsteniteMessage::Binary(b.to_vec().into()),
+                AxumMessage::Ping(p) => TungsteniteMessage::Ping(p.to_vec().into()),
+                AxumMessage::Pong(p) => TungsteniteMessage::Pong(p.to_vec().into()),
+                AxumMessage::Close(_) => {
+                    let _ = guest_tx.close().await;
+                    break;
+                }
+            };
+            if guest_tx.send(out).await.is_err() {
+                break;
+            }
+        }
+    };
+    let to_client = async {
+        while let Some(Ok(msg)) = guest_rx.next().await {
+            let out = match msg {
+                TungsteniteMessage::Text(t) => AxumMessage::Text(t.to_string().into()),
+                TungsteniteMessage::Binary(b) => AxumMessage::Binary(b.to_vec().into()),
+                TungsteniteMessage::Ping(p) => AxumMessage::Ping(p.to_vec().into()),
+                TungsteniteMessage::Pong(p) => AxumMessage::Pong(p.to_vec().into()),
+                TungsteniteMessage::Close(_) | TungsteniteMessage::Frame(_) => break,
+            };
+            if client_tx.send(out).await.is_err() {
+                break;
+            }
+        }
+    };
+    tokio::select! {
+        _ = to_guest => {}
+        _ = to_client => {}
+    }
+}
+
+async fn list_templates(State(m): State<Arc<VmManager>>) -> ApiResult<Json<serde_json::Value>> {
+    Ok(Json(json!({ "items": m.list_templates().await? })))
+}
+
+#[derive(Deserialize)]
+struct BuildTemplateBody {
+    name: String,
+    image_ref: String,
+}
+
+async fn build_template(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Json(body): Json<BuildTemplateBody>,
+) -> ApiResult<impl IntoResponse> {
+    require_admin(role)?;
+    Ok((
+        StatusCode::CREATED,
+        Json(m.build_oci_template(&body.name, &body.image_ref).await?),
+    ))
+}
+
+#[derive(Deserialize)]
+struct EgressCheckBody {
+    host: String,
+}
+
+// Admin-only: a matching host can return `inject_authorization`, a real
+// credential-vault secret (see `fluxvm_network::egress::decide`) -- letting
+// a `read-only` token call this would hand it a secret only an `admin`
+// caller should ever see, contradicting api.md's own "any mutating route
+// ... returns 403 [for read-only]" RBAC contract this route had silently
+// never enforced (no role check of any kind existed here before).
+async fn egress_check(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Json(body): Json<EgressCheckBody>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    Ok(Json(json!(fluxvm_network::egress::decide(
+        &m.cfg.sandbox,
+        &body.host
+    ))))
+}
+
+async fn egress_nftables() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+        fluxvm_network::egress::nftables_redirect_snippet(18080),
+    )
+}
+
+/// The terminal page needs three things the read-only console does not: its own stylesheets
+/// (`style-src 'self'`), WebAssembly for the sixel decoder (`'wasm-unsafe-eval'`, which allows
+/// compiling wasm but not `eval` of strings), and `blob:` images for inline-image protocols.
+const TERMINAL_CSP: &str = "default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; \
+     style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data: blob:; \
+     font-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
+
+fn console_file_with(
+    content_type: &'static str,
+    body: &'static str,
+    csp: &'static str,
+) -> Response {
+    (
+        [
+            (header::CONTENT_TYPE, content_type),
+            (header::CONTENT_SECURITY_POLICY, csp),
+            (header::X_FRAME_OPTIONS, "DENY"),
+            (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+            (header::REFERRER_POLICY, "no-referrer"),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
+        body,
+    )
+        .into_response()
+}
+
+/// The terminal page and its vendored xterm.js files (`terminal/vendor/NOTICE`, checked by `SHA256SUMS`).
+const TERMINAL_FILES: &[(&str, &str, &str)] = &[
+    (
+        "terminal.js",
+        "text/javascript; charset=utf-8",
+        include_str!("terminal/terminal.js"),
+    ),
+    (
+        "terminal.css",
+        "text/css; charset=utf-8",
+        include_str!("terminal/terminal.css"),
+    ),
+    (
+        "xterm.js",
+        "text/javascript; charset=utf-8",
+        include_str!("terminal/vendor/xterm.js"),
+    ),
+    (
+        "xterm.css",
+        "text/css; charset=utf-8",
+        include_str!("terminal/vendor/xterm.css"),
+    ),
+    (
+        "addon-fit.js",
+        "text/javascript; charset=utf-8",
+        include_str!("terminal/vendor/addon-fit.js"),
+    ),
+    (
+        "addon-search.js",
+        "text/javascript; charset=utf-8",
+        include_str!("terminal/vendor/addon-search.js"),
+    ),
+    (
+        "addon-web-links.js",
+        "text/javascript; charset=utf-8",
+        include_str!("terminal/vendor/addon-web-links.js"),
+    ),
+    (
+        "addon-image.js",
+        "text/javascript; charset=utf-8",
+        include_str!("terminal/vendor/addon-image.js"),
+    ),
+    (
+        "addon-unicode11.js",
+        "text/javascript; charset=utf-8",
+        include_str!("terminal/vendor/addon-unicode11.js"),
+    ),
+    (
+        "addon-clipboard.js",
+        "text/javascript; charset=utf-8",
+        include_str!("terminal/vendor/addon-clipboard.js"),
+    ),
+    (
+        "addon-webgl.js",
+        "text/javascript; charset=utf-8",
+        include_str!("terminal/vendor/addon-webgl.js"),
+    ),
+];
+const TERMINAL_HTML: &str = include_str!("terminal/terminal.html");
+
+async fn terminal_page() -> Response {
+    console_file_with("text/html; charset=utf-8", TERMINAL_HTML, TERMINAL_CSP)
+}
+
+async fn terminal_asset(Path(file): Path<String>) -> Response {
+    match TERMINAL_FILES.iter().find(|(name, _, _)| *name == file) {
+        Some((_, ct, body)) => console_file_with(ct, body, TERMINAL_CSP),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+#[cfg(test)]
+const CONSOLE_PATHS: [&str; 1] = ["/console/"];
+
+// ZYVOR_RUNTIME_BOUNDARY_V1: stable node-runtime feature discovery for Fabric.
+async fn security_capabilities(
+    State(m): State<Arc<VmManager>>,
+) -> Json<fluxvm_core::security::HostCapabilities> {
+    Json(m.host_security_capabilities())
+}
+
+async fn get_vm_evidence(
+    State(m): State<Arc<VmManager>>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let vm = m.get(id).await?;
+    if let Some(ev) = &vm.security_evidence {
+        return Ok(Json(json!(ev)));
+    }
+    Ok(Json(json!(fluxvm_core::security::read_evidence(
+        &vm.workspace
+    )?)))
+}
+
+async fn release_vm_secret(
+    State(m): State<Arc<VmManager>>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<serde_json::Value>> {
+    Ok(Json(json!(m.release_test_secret(id).await?)))
+}
+
+async fn runtime_capabilities(
+    State(m): State<Arc<VmManager>>,
+) -> Json<fluxvm_core::model::RuntimeCapabilities> {
+    // multifd+post-copy together needs QEMU 10.0; an unknown version is
+    // reported as unsupported rather than guessed.
+    let qemu_postcopy_with_multifd = m.qemu_version().is_some_and(|v| v >= (10, 0));
+    use fluxvm_core::model::{
+        BackendKind, RuntimeBackupCapability, RuntimeCapabilities, RuntimeMigrationCapability,
+        RuntimeSnapshotCapability,
+    };
+    // Persistent bitmaps, bitmap-mode and zstd qcow2 clusters need QEMU 5.1.
+    let cbt = m.qemu_version().is_some_and(|v| v >= (5, 1));
+    let io = m.host_io_support();
+    Json(RuntimeCapabilities {
+        api_version: "runtime.fluxvm.zyvor.io/v1".into(),
+        scope: "node-local".into(),
+        orchestration_owner: "zyvor-fabric".into(),
+        migration: vec![
+            RuntimeMigrationCapability {
+                backend: BackendKind::Qemu,
+                live: true,
+                pre_copy: true,
+                post_copy: true,
+                multifd: true,
+                requires_shared_storage: true,
+                transports: vec!["tcp".into(), "unix".into()],
+                status_pollable: true,
+                auto_converge: true,
+                compression: vec!["zlib".into(), "zstd".into()],
+                post_copy_switch: true,
+                live_tune: true,
+                post_copy_with_multifd: qemu_postcopy_with_multifd,
+            },
+            RuntimeMigrationCapability {
+                backend: BackendKind::CloudHypervisor,
+                live: true,
+                pre_copy: true,
+                post_copy: true,
+                // `connections` (send-migration's multifd analogue) only
+                // over `tcp:` -- verified live it's rejected outright
+                // alongside a `unix:` destination.
+                multifd: true,
+                requires_shared_storage: true,
+                transports: vec!["tcp".into(), "unix".into()],
+                status_pollable: false,
+                auto_converge: false,
+                compression: Vec::new(),
+                post_copy_switch: false,
+                live_tune: false,
+                post_copy_with_multifd: false,
+            },
+        ],
+        snapshot: vec![
+            RuntimeSnapshotCapability {
+                backend: BackendKind::Qemu,
+                memory: true,
+                disk: true,
+                portable: false,
+            },
+            RuntimeSnapshotCapability {
+                backend: BackendKind::CloudHypervisor,
+                memory: true,
+                disk: true,
+                portable: false,
+            },
+            RuntimeSnapshotCapability {
+                backend: BackendKind::Firecracker,
+                memory: false,
+                disk: false,
+                portable: false,
+            },
+            RuntimeSnapshotCapability {
+                backend: BackendKind::FluxVm,
+                memory: true,
+                disk: true,
+                portable: false,
+            },
+        ],
+        backup: if cbt {
+            vec![RuntimeBackupCapability {
+                backend: BackendKind::Qemu,
+                full: true,
+                incremental: true,
+                targets: vec!["s3".into(), "dir".into()],
+                compression: vec!["zstd".into()],
+                encryption: vec![fluxvm_scheduler::cbt::ENCRYPTION_ALGORITHM.into()],
+            }]
+        } else {
+            vec![]
+        },
+        host: fluxvm_core::model::RuntimeHostCapability {
+            topology: cfg!(target_os = "linux"),
+            numa_binding: cfg!(target_os = "linux"),
+            pci_bind: cfg!(target_os = "linux"),
+            balloon: cfg!(target_os = "linux"),
+            vnet: cfg!(target_os = "linux"),
+            hibernate: cfg!(target_os = "linux"),
+            io_uring: io.io_uring,
+            vhost_user_blk: io.vhost_user_blk,
+            nvme_multipath: io.nvme_multipath,
+            mdev: cfg!(target_os = "linux"),
+            gpu_health: cfg!(target_os = "linux"),
+        },
+    })
+}
+
+fn allocated_vfio_bdfs(vms: &[VmRecord]) -> std::collections::HashSet<String> {
+    let mut out = std::collections::HashSet::new();
+    for vm in vms {
+        for bdf in &vm.request.vfio_devices {
+            out.insert(bdf.trim().to_ascii_lowercase());
+        }
+    }
+    out
+}
+
+/// Host memory and memory PSI, sampled now.
+async fn host_memory() -> Json<fluxvm_core::pressure_admission::HostPressure> {
+    Json(
+        tokio::task::spawn_blocking(fluxvm_core::pressure_admission::sample_host)
+            .await
+            .unwrap_or_default(),
+    )
+}
+
+/// Whole-host CPU, memory and IO PSI, sampled now.
+async fn host_pressure() -> Json<fluxvm_core::model::VmPressure> {
+    Json(
+        tokio::task::spawn_blocking(fluxvm_core::pressure_admission::sample_host_psi)
+            .await
+            .unwrap_or_default(),
+    )
+}
+
+async fn host_topology(
+    State(m): State<Arc<VmManager>>,
+) -> Json<fluxvm_core::topology::HostTopology> {
+    let allocated = allocated_vfio_bdfs(&m.list().await);
+    let state_dir = m.cfg.state_dir.clone();
+    Json(
+        tokio::task::spawn_blocking(move || {
+            fluxvm_core::topology::discover_host(&state_dir, &allocated)
+        })
+        .await
+        .unwrap_or_default(),
+    )
+}
+
+async fn list_host_gpus(State(m): State<Arc<VmManager>>) -> ApiResult<Json<serde_json::Value>> {
+    let allocated = allocated_vfio_bdfs(&m.list().await);
+    let gpus = fluxvm_core::gpu::list_host_gpus(&m.cfg.state_dir, &allocated)?;
+    Ok(Json(json!({ "items": gpus })))
+}
+
+/// Whether the host OpenAI-compatible model server (MLX / llama.cpp) answers on `[apple].host_infer_port`.
+async fn host_infer_status(State(m): State<Arc<VmManager>>) -> Json<serde_json::Value> {
+    let port = m.cfg.apple.host_infer_port;
+    let guest_base_url = format!("http://127.0.0.1:{}/v1", 8080u16);
+    let url = format!("http://127.0.0.1:{port}/v1/models");
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(2))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            return Json(json!({
+                "port": port,
+                "guest_base_url": guest_base_url,
+                "reachable": false,
+                "models_ok": false,
+                "error": e.to_string(),
+            }));
+        }
+    };
+    match client.get(&url).send().await {
+        Ok(resp) => {
+            let models_ok = resp.status().is_success();
+            let model = if models_ok {
+                resp.json::<serde_json::Value>().await.ok().and_then(|v| {
+                    v.get("data")
+                        .and_then(|d| d.as_array())
+                        .and_then(|a| a.first())
+                        .and_then(|m| m.get("id"))
+                        .and_then(|id| id.as_str())
+                        .map(str::to_string)
+                })
+            } else {
+                None
+            };
+            let mut out = json!({
+                "port": port,
+                "guest_base_url": guest_base_url,
+                "reachable": true,
+                "models_ok": models_ok,
+                "model": model,
+            });
+            if !models_ok {
+                out["error"] = json!("GET /v1/models was not 2xx");
+            }
+            Json(out)
+        }
+        Err(e) => Json(json!({
+            "port": port,
+            "guest_base_url": guest_base_url,
+            "reachable": false,
+            "models_ok": false,
+            "error": e.to_string(),
+        })),
+    }
+}
+
+async fn host_gpu_health() -> Json<serde_json::Value> {
+    let items = tokio::task::spawn_blocking(fluxvm_core::gpu_health::discover_host)
+        .await
+        .unwrap_or_default();
+    Json(json!({ "items": items }))
+}
+
+async fn list_host_mdev(State(m): State<Arc<VmManager>>) -> Json<fluxvm_core::mdev::MdevInventory> {
+    let allocated = allocated_vfio_bdfs(&m.list().await);
+    Json(
+        tokio::task::spawn_blocking(move || fluxvm_core::mdev::discover_host(&allocated))
+            .await
+            .unwrap_or_default(),
+    )
+}
+
+async fn create_host_mdev(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Json(req): Json<fluxvm_core::mdev::MdevCreateRequest>,
+) -> ApiResult<impl IntoResponse> {
+    require_admin(role)?;
+    let allocated = allocated_vfio_bdfs(&m.list().await);
+    let inst = tokio::task::spawn_blocking(move || {
+        fluxvm_core::mdev::create(std::path::Path::new("/"), &req, &allocated)
+    })
+    .await
+    .map_err(anyhow::Error::from)??;
+    Ok((StatusCode::CREATED, Json(inst)))
+}
+
+async fn remove_host_mdev(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(uuid): Path<String>,
+) -> ApiResult<StatusCode> {
+    require_admin(role)?;
+    let allocated = allocated_vfio_bdfs(&m.list().await);
+    tokio::task::spawn_blocking(move || {
+        fluxvm_core::mdev::remove(std::path::Path::new("/"), &uuid, &allocated)
+    })
+    .await
+    .map_err(anyhow::Error::from)??;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn host_gpu_preflight(
+    State(m): State<Arc<VmManager>>,
+) -> ApiResult<Json<fluxvm_core::gpu::GpuPreflight>> {
+    Ok(Json(fluxvm_core::gpu::gpu_preflight(&m.cfg.state_dir)?))
+}
+
+async fn bind_host_gpu(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Json(req): Json<fluxvm_core::gpu::GpuBindRequest>,
+) -> ApiResult<impl IntoResponse> {
+    require_admin(role)?;
+    let allocated = allocated_vfio_bdfs(&m.list().await);
+    let result = fluxvm_core::gpu::bind_gpu_group(&m.cfg.state_dir, &req, &allocated)?;
+    Ok((StatusCode::OK, Json(result)))
+}
+
+async fn release_host_gpu(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Json(req): Json<fluxvm_core::gpu::GpuReleaseRequest>,
+) -> ApiResult<Json<fluxvm_core::gpu::HostGpu>> {
+    require_admin(role)?;
+    let allocated = allocated_vfio_bdfs(&m.list().await);
+    Ok(Json(fluxvm_core::gpu::release_gpu_group(
+        &m.cfg.state_dir,
+        &req,
+        &allocated,
+    )?))
+}
+
+/// Binds any PCI function's IOMMU group to vfio-pci (NIC, NVMe, SR-IOV VF,
+/// accelerator); `/v1/host/gpus/bind` is the GPU-only view of the same.
+async fn bind_host_pci(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Json(req): Json<fluxvm_core::gpu::GpuBindRequest>,
+) -> ApiResult<Json<fluxvm_core::gpu::GpuBindResult>> {
+    require_admin(role)?;
+    let allocated = allocated_vfio_bdfs(&m.list().await);
+    let state_dir = m.cfg.state_dir.clone();
+    Ok(Json(
+        tokio::task::spawn_blocking(move || {
+            fluxvm_core::gpu::bind_gpu_group(&state_dir, &req, &allocated)
+        })
+        .await
+        .map_err(anyhow::Error::from)??,
+    ))
+}
+
+async fn release_host_pci(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Json(req): Json<fluxvm_core::gpu::GpuReleaseRequest>,
+) -> ApiResult<Json<fluxvm_core::gpu::PciReleaseResult>> {
+    require_admin(role)?;
+    let allocated = allocated_vfio_bdfs(&m.list().await);
+    let state_dir = m.cfg.state_dir.clone();
+    Ok(Json(
+        tokio::task::spawn_blocking(move || {
+            fluxvm_core::gpu::release_pci_group(&state_dir, &req, &allocated)
+        })
+        .await
+        .map_err(anyhow::Error::from)??,
+    ))
+}
+
+async fn start_migration(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<fluxvm_core::model::MigrationStartRequest>,
+) -> ApiResult<Json<fluxvm_core::model::MigrationStatus>> {
+    require_admin(role)?;
+    Ok(Json(m.start_migration(id, &req).await?))
+}
+
+async fn migration_status(
+    State(m): State<Arc<VmManager>>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<fluxvm_core::model::MigrationStatus>> {
+    Ok(Json(m.migration_status(id).await?))
+}
+
+async fn cancel_migration(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<fluxvm_core::model::MigrationStatus>> {
+    require_admin(role)?;
+    Ok(Json(m.cancel_migration(id).await?))
+}
+
+async fn tune_migration(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<fluxvm_core::model::MigrationTuneRequest>,
+) -> ApiResult<Json<fluxvm_core::model::MigrationStatus>> {
+    require_admin(role)?;
+    Ok(Json(m.tune_migration(id, &req).await?))
+}
+
+async fn start_postcopy(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<fluxvm_core::model::MigrationStatus>> {
+    require_admin(role)?;
+    Ok(Json(m.start_postcopy(id).await?))
+}
+
+async fn create_migration_receiver(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Json(req): Json<fluxvm_core::model::MigrationReceiverRequest>,
+) -> ApiResult<impl IntoResponse> {
+    require_admin(role)?;
+    let rec = m.create_migration_receiver(req).await?;
+    Ok((StatusCode::CREATED, Json(rec)))
+}
+
+async fn activate_migration_receiver(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<fluxvm_core::model::MigrationReceiverActivate>,
+) -> ApiResult<Json<fluxvm_core::model::MigrationReceiver>> {
+    require_admin(role)?;
+    Ok(Json(m.activate_migration_receiver(id, &req.token).await?))
+}
+
+/// Source side of a completed migration: removes the paused source VM (the
+/// shared disk stays). 409 while the migration is still in flight.
+async fn finish_migration(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    m.finish_migration(id).await.map_err(|e| {
+        let mut err = ApiError::from(e);
+        if err.message.contains("has not completed") {
+            err.status = StatusCode::CONFLICT;
+        }
+        err
+    })?;
+    Ok(Json(json!({"finished": id})))
+}
+
+/// Target side: turns a completed adopt-mode receiver into a VM (same id as
+/// the receiver, the source's name). 409 until the incoming migration is done.
+async fn adopt_migration_receiver(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<fluxvm_core::model::MigrationReceiverActivate>,
+) -> ApiResult<Json<VmRecord>> {
+    require_admin(role)?;
+    m.adopt_migration_receiver(id, &req.token)
+        .await
+        .map(Json)
+        .map_err(|e| {
+            let mut err = ApiError::from(e);
+            if err.message.contains("has not completed") {
+                err.status = StatusCode::CONFLICT;
+            }
+            err
+        })
+}
+
+async fn delete_migration_receiver(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<StatusCode> {
+    require_admin(role)?;
+    m.delete_migration_receiver(id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Deserialize)]
+struct ListVmsQuery {
+    /// Exact-match filter on `VmRecord.name`. Added for zyvor-fabric's
+    /// `FluxVMDriver`, which is keyed by name (systemd-machined's model)
+    /// while `VmRecord` is keyed by `Uuid` — this lets the driver resolve a
+    /// name to a record server-side instead of pulling the full list on
+    /// every lookup.
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    tenant: Option<String>,
+    /// Label selector: `k=v,k2!=v2,k3` (all terms must match).
+    #[serde(default)]
+    label: Option<String>,
+    /// Include the container warm pool's waiting VMs.
+    #[serde(default)]
+    all: bool,
+}
+
+async fn list_vms(
+    State(m): State<Arc<VmManager>>,
+    token_tenant: Option<Extension<TokenTenant>>,
+    Query(q): Query<ListVmsQuery>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let mut items = m.list().await;
+    items.retain(|vm| fluxvm_scheduler::vm_listed(vm, q.all, q.label.as_deref()));
+    if let Some(name) = q.name {
+        items.retain(|vm| vm.name == name);
+    }
+    if let Some(sel) = q.label.as_deref() {
+        let sel = fluxvm_core::model::LabelSelector::parse(sel)?;
+        items.retain(|vm| sel.matches(&vm.labels));
+    }
+    // Token tenant forces scope; query ?tenant= must match when both present.
+    if let Some(Extension(TokenTenant(t))) = token_tenant {
+        if let Some(ref qt) = q.tenant
+            && qt != &t
+        {
+            return Err(ApiError::forbidden(format!(
+                "token tenant '{t}' cannot list tenant '{qt}'"
+            )));
+        }
+        items.retain(|vm| vm.request.tenant.as_deref() == Some(t.as_str()));
+    } else if let Some(tenant) = q.tenant {
+        items.retain(|vm| vm.request.tenant.as_deref() == Some(tenant.as_str()));
+    }
+    Ok(Json(json!({"items": items})))
+}
+
+async fn readyz(State(m): State<Arc<VmManager>>) -> impl IntoResponse {
+    let body = match m.readyz().await {
+        Ok(v) => v,
+        Err(e) => json!({"ok": false, "error": e.to_string()}),
+    };
+    let ok = body.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
+    let status = if ok {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    };
+    (status, Json(body))
+}
+async fn get_vm(
+    State(m): State<Arc<VmManager>>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<serde_json::Value>> {
+    Ok(Json(json!(m.get(id).await?)))
+}
+async fn start_vm(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    Ok(Json(json!(m.start(id).await?)))
+}
+#[derive(Debug, serde::Deserialize)]
+struct StartFromSnapshotRequest {
+    tag: String,
+}
+async fn start_vm_from_snapshot(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<StartFromSnapshotRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    Ok(Json(json!(m.start_from_snapshot(id, &req.tag).await?)))
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct VmSnapshotRequest {
+    tag: String,
+    /// `false`: a disk-only snapshot (vz), which a stopped VM can take too. Default `true`: memory and disk.
+    #[serde(default)]
+    memory: Option<bool>,
+}
+
+async fn snapshot_vm(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<VmSnapshotRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    let memory = req.memory.unwrap_or(true);
+    m.create_vm_snapshot_with(id, &req.tag, memory).await?;
+    Ok(Json(json!({"ok": true, "tag": req.tag, "memory": memory})))
+}
+
+/// Restore a VM from a snapshot tag. A running flux-vm VM is restored in place
+/// (memory, CPU, devices and disk); a stopped VM is relaunched from the tag.
+async fn restore_vm(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<VmSnapshotRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    let vm = m
+        .restore_vm_snapshot(id, &req.tag)
+        .await
+        .map_err(change_error)?;
+    Ok(Json(json!(vm)))
+}
+
+async fn stop_vm(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    Ok(Json(json!(m.stop(id).await?)))
+}
+
+/// Save RAM/CPU/device state to the hibernation directory and stop QEMU; the
+/// next `start` resumes. See docs/hibernation.md.
+async fn hibernate_vm(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    Ok(Json(json!(m.hibernate(id).await?)))
+}
+
+async fn start_vm_diagnostics(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+    body: Option<Json<fluxvm_core::model::DiagnosticsRequest>>,
+) -> ApiResult<(StatusCode, Json<serde_json::Value>)> {
+    require_admin(role)?;
+    let req = body.map(|Json(r)| r).unwrap_or_default();
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(json!(m.start_diagnostics(id, req).await?)),
+    ))
+}
+
+async fn list_vm_diagnostics(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    Ok(Json(json!({"items": m.list_diagnostics(id).await?})))
+}
+
+async fn get_vm_diagnostics(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path((id, token)): Path<(Uuid, String)>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    let job = m.get_diagnostics(id, &token).await.map_err(|e| ApiError {
+        status: StatusCode::NOT_FOUND,
+        message: format!("{e:#}"),
+    })?;
+    Ok(Json(json!(job)))
+}
+
+async fn delete_vm_diagnostics(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path((id, token)): Path<(Uuid, String)>,
+) -> ApiResult<StatusCode> {
+    require_admin(role)?;
+    m.delete_diagnostics(id, &token).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn download_vm_diagnostics_bundle(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path((id, token)): Path<(Uuid, String)>,
+) -> ApiResult<Response> {
+    require_admin(role)?;
+    stream_diagnostics_file(
+        &m,
+        id,
+        &token,
+        fluxvm_scheduler::diagnostics::BUNDLE_FILE,
+        "application/gzip",
+    )
+    .await
+}
+
+async fn download_vm_memory_dump(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path((id, token)): Path<(Uuid, String)>,
+) -> ApiResult<Response> {
+    require_admin(role)?;
+    stream_diagnostics_file(
+        &m,
+        id,
+        &token,
+        fluxvm_scheduler::diagnostics::DUMP_FILE,
+        "application/octet-stream",
+    )
+    .await
+}
+
+/// Streams one file of a finished bundle: 404 for an unknown token or a
+/// missing file, 409 while the bundle is collected or after it failed.
+async fn stream_diagnostics_file(
+    m: &VmManager,
+    id: Uuid,
+    token: &str,
+    file: &str,
+    content_type: &str,
+) -> ApiResult<Response> {
+    let job = m.get_diagnostics(id, token).await.map_err(|e| ApiError {
+        status: StatusCode::NOT_FOUND,
+        message: format!("{e:#}"),
+    })?;
+    if job.state != fluxvm_scheduler::diagnostics::STATE_DONE {
+        return Err(ApiError {
+            status: StatusCode::CONFLICT,
+            message: match &job.error {
+                Some(e) => format!("diagnostics bundle {token} is {}: {e}", job.state),
+                None => format!("diagnostics bundle {token} is {}", job.state),
+            },
+        });
+    }
+    let path = m
+        .diagnostics_file(id, token, file)
+        .await
+        .map_err(|e| ApiError {
+            status: StatusCode::NOT_FOUND,
+            message: format!("{e:#}"),
+        })?;
+    let mut f = tokio::fs::File::open(&path).await?;
+    let len = f.metadata().await?.len();
+    let stream = async_stream::stream! {
+        use tokio::io::AsyncReadExt;
+        let mut buf = vec![0u8; 1 << 20];
+        loop {
+            match f.read(&mut buf).await {
+                Ok(0) => break,
+                Ok(n) => yield Ok::<_, std::io::Error>(bytes::Bytes::copy_from_slice(&buf[..n])),
+                Err(e) => {
+                    yield Err(e);
+                    break;
+                }
+            }
+        }
+    };
+    let name = format!("{id}-{token}-{file}");
+    Ok(Response::builder()
+        .header(header::CONTENT_TYPE, content_type)
+        .header(header::CONTENT_LENGTH, len)
+        .header(
+            header::CONTENT_DISPOSITION,
+            format!("attachment; filename=\"{name}\""),
+        )
+        .header(header::CACHE_CONTROL, "no-store")
+        .body(Body::from_stream(stream))?)
+}
+
+async fn discard_vm_hibernation(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    Ok(Json(json!(m.discard_hibernation(id).await?)))
+}
+
+async fn import_hibernated_vm(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Json(req): Json<fluxvm_core::model::ImportHibernatedRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    Ok(Json(json!(m.import_hibernated(req.id).await?)))
+}
+
+async fn host_hibernation(
+    State(m): State<Arc<VmManager>>,
+) -> ApiResult<Json<fluxvm_core::model::HostHibernationReport>> {
+    Ok(Json(fluxvm_core::model::HostHibernationReport {
+        facts: m.host_hibernation_facts().await?,
+    }))
+}
+
+async fn check_hibernation(
+    State(m): State<Arc<VmManager>>,
+    Json(req): Json<fluxvm_core::model::HibernationCheckRequest>,
+) -> ApiResult<Json<fluxvm_core::model::HibernationCheck>> {
+    Ok(Json(m.check_hibernation(&req.manifest).await?))
+}
+
+async fn restart_vm(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    Ok(Json(json!(m.restart(id).await?)))
+}
+
+/// Fork a running flux-vm VM into `count` running children from one memory
+/// snapshot (see `fluxvm_scheduler::fork`).
+/// What a fork would be refused for and cost, without doing it (same body as `POST /v1/vms/{id}/fork`).
+async fn fork_plan(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+    actor: Option<Extension<AuditActor>>,
+    Json(req): Json<fluxvm_scheduler::fork::ForkSpec>,
+) -> ApiResult<Json<fluxvm_scheduler::fork_plan::ForkPlan>> {
+    require_admin(role)?;
+    let actor_name = actor.as_ref().map(|a| a.0.0.as_str());
+    Ok(Json(m.plan_fork(id, req, actor_name).await?))
+}
+
+/// What a start from a branch would be refused for and cost, without doing it.
+async fn branch_start_plan(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+    actor: Option<Extension<AuditActor>>,
+    Json(req): Json<fluxvm_scheduler::fork::ForkSpec>,
+) -> ApiResult<Json<fluxvm_scheduler::fork_plan::ForkPlan>> {
+    require_admin(role)?;
+    let actor_name = actor.as_ref().map(|a| a.0.0.as_str());
+    Ok(Json(m.plan_branch_start(id, req, actor_name).await?))
+}
+
+async fn fork_vm(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+    actor: Option<Extension<AuditActor>>,
+    Query(rq): Query<ReadyQuery>,
+    Json(req): Json<fluxvm_scheduler::fork::ForkSpec>,
+) -> ApiResult<impl IntoResponse> {
+    require_admin(role)?;
+    let actor_name = actor.as_ref().map(|a| a.0.0.as_str());
+    // Host, tenant and token quotas are checked, as one batch and atomically with the reservation, inside the fork.
+    let started = std::time::Instant::now();
+    let report = m.fork_vm_spec(id, req, actor_name).await?;
+    let items = report.children.clone();
+    let mut body = json!({
+        "items": items,
+        "elapsed_ms": started.elapsed().as_millis() as u64,
+        "fork": {
+            "identity": report.reports.first().map(|r| r.identity.via.clone()),
+            "parent_snapshot_ms": report.parent_snapshot_ms,
+            "total_ms": report.total_ms,
+            "parallelism": report.parallelism,
+            "children": report.reports,
+        },
+    });
+    if rq.wants_exec() {
+        let mut tasks = Vec::new();
+        for item in &items {
+            let m = Arc::clone(&m);
+            let id = item.id;
+            tasks.push(tokio::spawn(async move {
+                first_command_or_error(&m, id, "fork", started).await
+            }));
+        }
+        let mut per_child = Vec::new();
+        let mut worst: Option<u64> = None;
+        for t in tasks {
+            let r = t.await.unwrap_or_else(
+                |e| json!({ "first_command_error": format!("first-command task failed: {e}") }),
+            );
+            if let Some(ms) = r["first_command_ms"].as_u64() {
+                worst = Some(worst.map_or(ms, |w| w.max(ms)));
+            }
+            per_child.push(r);
+        }
+        // Only set when every child answered; a partial max would understate.
+        if per_child
+            .iter()
+            .all(|r| r.get("first_command_error").is_none())
+        {
+            body["first_command_ms"] = json!(worst);
+        }
+        body["first_command"] = json!(per_child);
+    }
+    Ok((StatusCode::CREATED, Json(body)))
+}
+
+#[derive(Deserialize)]
+struct CloneVmRequest {
+    name: String,
+    /// Clone from this snapshot's disk instead of the (stopped) VM's own.
+    #[serde(default)]
+    snapshot: Option<String>,
+}
+
+async fn clone_vm(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+    actor: Option<Extension<AuditActor>>,
+    Json(req): Json<CloneVmRequest>,
+) -> ApiResult<impl IntoResponse> {
+    require_admin(role)?;
+    let actor_name = actor.as_ref().map(|a| a.0.0.as_str());
+    let src = m.get(id).await?;
+    m.enforce_token_quotas(actor_name, &src.request)
+        .await
+        .map_err(|e| ApiError::forbidden(e.to_string()))?;
+    Ok((
+        StatusCode::CREATED,
+        Json(
+            m.clone_vm_from(id, req.name, actor_name, req.snapshot.as_deref())
+                .await?,
+        ),
+    ))
+}
+
+async fn patch_vm(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+    Json(patch): Json<fluxvm_core::model::VmPatch>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    Ok(Json(json!(m.patch(id, patch).await?)))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CreateBranchRequest {
+    name: String,
+    #[serde(default)]
+    labels: std::collections::BTreeMap<String, String>,
+}
+
+/// Checkpoint a running `vz` guest as a named, durable branch (see `fluxvm_scheduler::branch`).
+async fn create_branch(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+    actor: Option<Extension<AuditActor>>,
+    Json(req): Json<CreateBranchRequest>,
+) -> ApiResult<impl IntoResponse> {
+    require_admin(role)?;
+    let actor_name = actor.as_ref().map(|a| a.0.0.as_str());
+    let branch = m
+        .create_branch(id, req.name, req.labels, actor_name)
+        .await?;
+    Ok((StatusCode::CREATED, Json(json!(branch))))
+}
+
+async fn list_vm_branches(
+    State(m): State<Arc<VmManager>>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<serde_json::Value>> {
+    Ok(Json(json!({"items": m.list_branches(Some(id)).await?})))
+}
+
+async fn list_branches(State(m): State<Arc<VmManager>>) -> ApiResult<Json<serde_json::Value>> {
+    Ok(Json(json!({"items": m.list_branches(None).await?})))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PruneBranchesRequest {
+    #[serde(flatten)]
+    policy: fluxvm_scheduler::branch::PrunePolicy,
+    /// Defaults to true: nothing is deleted unless the caller sends `"dry_run": false`.
+    #[serde(default = "default_true")]
+    dry_run: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// Remove branches by policy (newest N kept, older than a cutoff, scoped to a VM or name prefix; branches labelled
+/// `fluxvm.dev/keep: "true"` are never removed). A dry run by default.
+async fn prune_branches(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    actor: Option<Extension<AuditActor>>,
+    Json(req): Json<PruneBranchesRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    let actor_name = actor.as_ref().map(|a| a.0.0.as_str());
+    let report = m
+        .prune_branches(&req.policy, req.dry_run, actor_name)
+        .await?;
+    Ok(Json(json!(report)))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ExportBranchRequest {
+    /// A directory that does not exist yet; the bundle is written there.
+    path: std::path::PathBuf,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ImportBranchRequest {
+    /// A bundle written by export.
+    path: std::path::PathBuf,
+    /// Defaults to the bundle's own name.
+    name: Option<String>,
+}
+
+/// How branch `b` differs from `a`: saved sizes, lineage and labels.
+async fn diff_branches(
+    State(m): State<Arc<VmManager>>,
+    Path((a, b)): Path<(Uuid, Uuid)>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let (x, y) = (m.get_branch(a).await?, m.get_branch(b).await?);
+    Ok(Json(json!(fluxvm_scheduler::branch::diff_branches(&x, &y))))
+}
+
+/// Writes a branch to a bundle directory on the host (owner-only; it carries the guest's agent token like its disk).
+async fn export_branch(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+    actor: Option<Extension<AuditActor>>,
+    Json(req): Json<ExportBranchRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    let actor_name = actor.as_ref().map(|a| a.0.0.as_str());
+    let path = m.export_branch(id, &req.path, actor_name).await?;
+    Ok(Json(json!({"branch": id, "path": path})))
+}
+
+/// Imports an exported bundle as a new branch (new id, parent link dropped).
+async fn import_branch(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    actor: Option<Extension<AuditActor>>,
+    Json(req): Json<ImportBranchRequest>,
+) -> ApiResult<impl IntoResponse> {
+    require_admin(role)?;
+    let actor_name = actor.as_ref().map(|a| a.0.0.as_str());
+    let b = m.import_branch(&req.path, req.name, actor_name).await?;
+    Ok((StatusCode::CREATED, Json(json!(b))))
+}
+
+async fn get_branch(
+    State(m): State<Arc<VmManager>>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<serde_json::Value>> {
+    Ok(Json(json!(m.get_branch(id).await?)))
+}
+
+async fn delete_branch(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+    actor: Option<Extension<AuditActor>>,
+) -> ApiResult<StatusCode> {
+    require_admin(role)?;
+    let actor_name = actor.as_ref().map(|a| a.0.0.as_str());
+    m.delete_branch(id, actor_name).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Start `count` new VMs from a branch; the body is the fork spec and so is the response.
+async fn start_branch(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+    actor: Option<Extension<AuditActor>>,
+    Json(spec): Json<fluxvm_scheduler::fork::ForkSpec>,
+) -> ApiResult<impl IntoResponse> {
+    require_admin(role)?;
+    let actor_name = actor.as_ref().map(|a| a.0.0.as_str());
+    let started = std::time::Instant::now();
+    let report = m.start_branch(id, spec, actor_name).await?;
+    let body = json!({
+        "items": report.children,
+        "elapsed_ms": started.elapsed().as_millis() as u64,
+        "fork": {
+            "identity": report.reports.first().map(|r| r.identity.via.clone()),
+            "total_ms": report.total_ms,
+            "parallelism": report.parallelism,
+            "children": report.reports,
+        },
+    });
+    Ok((StatusCode::CREATED, Json(body)))
+}
+
+async fn list_vm_snapshots(
+    State(m): State<Arc<VmManager>>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<serde_json::Value>> {
+    Ok(Json(json!({"items": m.list_vm_snapshots(id).await?})))
+}
+
+async fn delete_vm_snapshot(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path((id, tag)): Path<(Uuid, String)>,
+) -> ApiResult<StatusCode> {
+    require_admin(role)?;
+    m.delete_vm_snapshot(id, &tag).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Deserialize, Default)]
+struct BackupVmRequest {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    compress: bool,
+    #[serde(default)]
+    all_disks: bool,
+    #[serde(default)]
+    quiesce: fluxvm_core::model::BackupQuiesce,
+}
+
+/// Writes under `state_dir/backups/`; the API never takes a destination path.
+async fn backup_vm(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+    body: Option<Json<BackupVmRequest>>,
+) -> ApiResult<impl IntoResponse> {
+    require_admin(role)?;
+    let req = body.map(|b| b.0).unwrap_or_default();
+    let opts = fluxvm_core::model::BackupOptions {
+        dest: None,
+        name: req.name,
+        compress: req.compress,
+        all_disks: req.all_disks,
+        quiesce: req.quiesce,
+    };
+    Ok((StatusCode::CREATED, Json(m.backup_vm(id, opts).await?)))
+}
+
+async fn list_backups(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    Ok(Json(json!({"items": m.list_backups()})))
+}
+
+async fn delete_backup(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(name): Path<String>,
+) -> ApiResult<StatusCode> {
+    require_admin(role)?;
+    if fluxvm_scheduler::backup::validate_backup_name(&name).is_ok()
+        && !m.list_backups().iter().any(|b| b["name"] == name.as_str())
+    {
+        return Err(ApiError {
+            status: StatusCode::NOT_FOUND,
+            message: format!("backup {name:?} not found"),
+        });
+    }
+    m.delete_backup(&name)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Starts a changed-block-tracking backup to object storage; poll the
+/// returned job at `GET /v1/cbt-jobs/{id}`.
+async fn cbt_backup(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<fluxvm_scheduler::cbt::CbtBackupRequest>,
+) -> ApiResult<impl IntoResponse> {
+    require_admin(role)?;
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(m.start_cbt_backup(id, req).await?),
+    ))
+}
+
+async fn cbt_restore(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<fluxvm_scheduler::cbt::CbtRestoreRequest>,
+) -> ApiResult<impl IntoResponse> {
+    require_admin(role)?;
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(m.start_cbt_restore(id, req).await?),
+    ))
+}
+
+async fn cbt_synthesize(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Json(req): Json<fluxvm_scheduler::cbt::CbtSynthesizeRequest>,
+) -> ApiResult<impl IntoResponse> {
+    require_admin(role)?;
+    Ok((StatusCode::ACCEPTED, Json(m.start_cbt_synthesize(req)?)))
+}
+
+async fn cbt_delete(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Json(req): Json<fluxvm_scheduler::cbt::CbtDeleteRequest>,
+) -> ApiResult<Json<fluxvm_scheduler::cbt::CbtDeleteResult>> {
+    require_admin(role)?;
+    Ok(Json(m.cbt_delete(req).await?))
+}
+
+async fn cbt_job(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<fluxvm_scheduler::cbt::CbtJob>> {
+    require_admin(role)?;
+    m.cbt_job(id)?.map(Json).ok_or_else(|| ApiError {
+        status: StatusCode::NOT_FOUND,
+        message: format!("CBT job {id} not found"),
+    })
+}
+
+/// Streams a backup's standalone root qcow2, e.g. so Veyron can publish an
+/// installed VM as a golden image.
+async fn download_backup_root(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(name): Path<String>,
+) -> ApiResult<Response> {
+    require_admin(role)?;
+    let path = m.backup_root_disk(&name).map_err(|e| ApiError {
+        status: StatusCode::NOT_FOUND,
+        message: e.to_string(),
+    })?;
+    let mut file = tokio::fs::File::open(&path).await?;
+    let len = file.metadata().await?.len();
+    let stream = async_stream::stream! {
+        use tokio::io::AsyncReadExt;
+        let mut buf = vec![0u8; 1 << 20];
+        loop {
+            match file.read(&mut buf).await {
+                Ok(0) => break,
+                Ok(n) => yield Ok::<_, std::io::Error>(bytes::Bytes::copy_from_slice(&buf[..n])),
+                Err(e) => {
+                    yield Err(e);
+                    break;
+                }
+            }
+        }
+    };
+    Ok(Response::builder()
+        .header(header::CONTENT_TYPE, "application/octet-stream")
+        .header(header::CONTENT_LENGTH, len)
+        .body(Body::from_stream(stream))?)
+}
+
+#[derive(Deserialize)]
+struct RestoreBackupRequest {
+    name: String,
+}
+
+async fn restore_vm_backup(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<RestoreBackupRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    Ok(Json(m.restore_backup(id, &req.name).await?))
+}
+
+async fn list_vm_disks(
+    State(m): State<Arc<VmManager>>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<serde_json::Value>> {
+    Ok(Json(json!({"items": m.list_vm_disks(id).await?})))
+}
+
+#[derive(Deserialize)]
+struct DiskSizeRequest {
+    size_gib: u64,
+}
+
+/// Exactly one of `size_gib` (create a new qcow2), `path` (attach an
+/// existing image file or block device) or `backing` (a new qcow2 overlay
+/// on a shared image).
+///
+/// On a `vz` VM the disk goes into `apple.extra_disks` (see `AppleDisk`): `size_gib` makes a new sparse image, `path` is an
+/// image file or (with `kind: block`) a device, `url` an NBD export; `kind`, `read_only`, `caching`, `sync` and
+/// `controller` apply. It takes effect at the next start, or at once for a USB image disk.
+#[derive(Deserialize)]
+struct AttachDiskRequest {
+    name: String,
+    #[serde(default)]
+    size_gib: Option<u64>,
+    #[serde(default)]
+    path: Option<std::path::PathBuf>,
+    #[serde(default)]
+    backing: Option<std::path::PathBuf>,
+    /// QEMU: bus (scsi, virtio-blk, vhost-user-blk), aio, cache, iothread, queues.
+    #[serde(default)]
+    io: Option<fluxvm_core::model::DiskIo>,
+    #[serde(flatten)]
+    vz: VzDiskFields,
+}
+
+#[derive(Deserialize, Default)]
+struct VzDiskFields {
+    #[serde(default)]
+    kind: Option<fluxvm_core::model::AppleDiskKind>,
+    #[serde(default)]
+    url: Option<String>,
+    #[serde(default)]
+    read_only: Option<bool>,
+    #[serde(default)]
+    caching: Option<fluxvm_core::model::AppleDiskCaching>,
+    #[serde(default)]
+    sync: Option<fluxvm_core::model::AppleDiskSync>,
+    #[serde(default)]
+    controller: Option<fluxvm_core::model::AppleDiskController>,
+    #[serde(default)]
+    usb_bus: Option<u8>,
+    /// `kind: overlay`: the overlay file (the request's `path` is the base image).
+    #[serde(default)]
+    overlay: Option<std::path::PathBuf>,
+    #[serde(default)]
+    iops: Option<u64>,
+    #[serde(default)]
+    bps: Option<u64>,
+}
+
+async fn attach_vm_disk(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<AttachDiskRequest>,
+) -> ApiResult<impl IntoResponse> {
+    require_admin(role)?;
+    if m.get(id).await?.backend == fluxvm_core::model::BackendKind::Vz {
+        if req.backing.is_some() {
+            return Err(anyhow::anyhow!(
+                "backing overlays are qcow2 (QEMU); a vz disk takes size_gib, path or url"
+            )
+            .into());
+        }
+        if req.io.is_some() {
+            return Err(anyhow::anyhow!(
+                "io applies to QEMU disks; a vz disk takes caching and sync"
+            )
+            .into());
+        }
+        let v = req.vz;
+        let disk = fluxvm_core::model::AppleDisk {
+            name: None,
+            path: req.path.unwrap_or_default(),
+            read_only: v.read_only.unwrap_or(false),
+            kind: v.kind.unwrap_or_default(),
+            url: v.url,
+            caching: v.caching.unwrap_or_default(),
+            sync: v.sync.unwrap_or_default(),
+            controller: v.controller.unwrap_or_default(),
+            block_device_id: None,
+            usb_bus: v.usb_bus,
+            overlay: v.overlay,
+            iops: v.iops,
+            bps: v.bps,
+        };
+        let info = m.attach_vz_disk(id, &req.name, disk, req.size_gib).await?;
+        return Ok((StatusCode::CREATED, Json(info)));
+    }
+    let v = &req.vz;
+    if v.kind.is_some()
+        || v.url.is_some()
+        || v.read_only.is_some()
+        || v.caching.is_some()
+        || v.sync.is_some()
+        || v.controller.is_some()
+        || v.usb_bus.is_some()
+        || v.overlay.is_some()
+        || v.iops.is_some()
+        || v.bps.is_some()
+    {
+        return Err(anyhow::anyhow!(
+            "kind, url, read_only, caching, sync, controller and usb_bus are vz disk options"
+        )
+        .into());
+    }
+    let io = req.io.unwrap_or_default();
+    let info = match (req.size_gib, req.path, req.backing) {
+        (Some(size), None, None) => m.attach_vm_disk(id, &req.name, size, &io).await?,
+        (None, Some(path), None) => m.attach_existing_vm_disk(id, &req.name, &path, &io).await?,
+        (None, None, Some(backing)) => {
+            m.attach_overlay_vm_disk(id, &req.name, &backing, &io)
+                .await?
+        }
+        _ => {
+            return Err(anyhow::anyhow!("set exactly one of size_gib, path or backing").into());
+        }
+    };
+    Ok((StatusCode::CREATED, Json(info)))
+}
+
+async fn resize_vm_disk(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path((id, name)): Path<(Uuid, String)>,
+    Json(req): Json<DiskSizeRequest>,
+) -> ApiResult<Json<fluxvm_core::model::VmDiskInfo>> {
+    require_admin(role)?;
+    Ok(Json(m.resize_vm_disk(id, &name, req.size_gib).await?))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DiskThrottleRequest {
+    #[serde(default)]
+    throttle: Option<fluxvm_core::model::DiskThrottle>,
+}
+
+async fn set_vm_disk_throttle(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path((id, name)): Path<(Uuid, String)>,
+    Json(req): Json<DiskThrottleRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    let throttle = m.set_vm_disk_throttle(id, &name, req.throttle).await?;
+    Ok(Json(
+        serde_json::json!({"name": name, "throttle": throttle}),
+    ))
+}
+
+async fn eject_vm_cdrom(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path((id, name)): Path<(Uuid, String)>,
+) -> ApiResult<Json<VmRecord>> {
+    require_admin(role)?;
+    Ok(Json(m.eject_vm_cdrom(id, &name).await?))
+}
+
+async fn detach_vm_disk(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path((id, name)): Path<(Uuid, String)>,
+) -> ApiResult<StatusCode> {
+    require_admin(role)?;
+    m.detach_vm_disk(id, &name).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Tenant-scoped tokens only see events for their own tenant's VMs.
+async fn tenant_event_scope(
+    m: &VmManager,
+    token_tenant: Option<Extension<TokenTenant>>,
+) -> Option<std::collections::HashSet<Uuid>> {
+    let Extension(TokenTenant(t)) = token_tenant?;
+    Some(
+        m.list()
+            .await
+            .into_iter()
+            .filter(|vm| vm.request.tenant.as_deref() == Some(t.as_str()))
+            .map(|vm| vm.id)
+            .collect(),
+    )
+}
+
+fn in_scope(
+    scope: &Option<std::collections::HashSet<Uuid>>,
+    ev: &fluxvm_scheduler::VmEvent,
+) -> bool {
+    match scope {
+        None => true,
+        Some(ids) => ev.vm_id.is_some_and(|id| ids.contains(&id)),
+    }
+}
+
+async fn list_events(
+    State(m): State<Arc<VmManager>>,
+    token_tenant: Option<Extension<TokenTenant>>,
+    Query(mut filter): Query<fluxvm_scheduler::EventFilter>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let Some(log) = fluxvm_scheduler::events::global() else {
+        return Ok(Json(json!({"items": []})));
+    };
+    let scope = tenant_event_scope(&m, token_tenant).await;
+    let limit = filter.limit.take().unwrap_or(500).min(10_000);
+    let mut items: Vec<_> = log
+        .list(&filter)?
+        .into_iter()
+        .filter(|e| in_scope(&scope, e))
+        .collect();
+    if items.len() > limit {
+        items.drain(..items.len() - limit);
+    }
+    Ok(Json(json!({"items": items})))
+}
+
+/// Server-sent events: one `data:` JSON line per new event, tailing the
+/// shared events file so CLI-originated events show up too.
+async fn stream_events(
+    State(m): State<Arc<VmManager>>,
+    token_tenant: Option<Extension<TokenTenant>>,
+    Query(filter): Query<fluxvm_scheduler::EventFilter>,
+) -> ApiResult<Response> {
+    let Some(log) = fluxvm_scheduler::events::global() else {
+        return Err(anyhow::anyhow!("event log not initialised").into());
+    };
+    let scope = tenant_event_scope(&m, token_tenant).await;
+    let stream = async_stream::stream! {
+        let mut offset = log.end_offset();
+        yield Ok::<_, std::io::Error>(bytes::Bytes::from_static(b": fluxvm events\n\n"));
+        loop {
+            match log.read_from(offset, &filter) {
+                Ok((events, next)) => {
+                    offset = next;
+                    for ev in events.iter().filter(|e| in_scope(&scope, e)) {
+                        if let Ok(s) = serde_json::to_string(ev) {
+                            yield Ok(bytes::Bytes::from(format!("event: {}\ndata: {s}\n\n", ev.event)));
+                        }
+                    }
+                }
+                Err(e) => {
+                    yield Ok(bytes::Bytes::from(format!("event: error\ndata: {}\n\n", json!({"error": e.to_string()}))));
+                    return;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+    };
+    Ok(Response::builder()
+        .header(header::CONTENT_TYPE, "text/event-stream")
+        .header(header::CACHE_CONTROL, "no-cache")
+        .body(Body::from_stream(stream))?)
+}
+
+async fn my_quota(
+    State(m): State<Arc<VmManager>>,
+    actor: Option<Extension<AuditActor>>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let actor_name = actor.as_ref().map(|a| a.0.0.as_str());
+    Ok(Json(m.token_quota_usage(actor_name).await?))
+}
+async fn pause_vm(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    Ok(Json(json!(m.pause(id).await?)))
+}
+async fn resume_vm(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    Ok(Json(json!(m.resume(id).await?)))
+}
+
+async fn set_vm_resources(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+    Json(patch): Json<fluxvm_core::model::ResourcePatch>,
+) -> ApiResult<StatusCode> {
+    require_admin(role)?;
+    m.set_resources(id, patch).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn hotplug_vm_cpu(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<fluxvm_core::model::HotplugCpuRequest>,
+) -> ApiResult<Json<fluxvm_core::model::HotplugCpuResult>> {
+    require_admin(role)?;
+    let vcpus = m.hotplug_cpu(id, req.add_vcpus).await?;
+    Ok(Json(fluxvm_core::model::HotplugCpuResult { vcpus }))
+}
+
+async fn hotplug_vm_memory(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<fluxvm_core::model::HotplugMemoryRequest>,
+) -> ApiResult<Json<fluxvm_core::model::HotplugMemoryResult>> {
+    require_admin(role)?;
+    let memory_mib = m.hotplug_memory(id, req.add_memory_mib).await?;
+    Ok(Json(fluxvm_core::model::HotplugMemoryResult { memory_mib }))
+}
+
+async fn hotplug_vm_nic(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<fluxvm_core::model::HotplugNicRequest>,
+) -> ApiResult<StatusCode> {
+    require_admin(role)?;
+    req.validate().map_err(|e| anyhow::anyhow!(e))?;
+    match req.direct {
+        Some(direct) => m.hotplug_direct_nic(id, direct, req.mac).await?,
+        None => m.hotplug_nic(id, req.bridge, req.mac).await?,
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn unplug_vm_nic(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<fluxvm_core::model::UnplugNicRequest>,
+) -> ApiResult<StatusCode> {
+    require_admin(role)?;
+    req.validate().map_err(|e| anyhow::anyhow!(e))?;
+    m.unplug_nic(id, &req).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn hotplug_vm_share(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<fluxvm_core::model::HotplugShareRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    req.validate().map_err(|e| anyhow::anyhow!(e))?;
+    let tag = m.hotplug_share(id, req.host_path, req.read_only).await?;
+    Ok(Json(json!({"tag": tag})))
+}
+
+async fn freeze_vm(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<StatusCode> {
+    require_admin(role)?;
+    m.freeze(id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn thaw_vm(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<StatusCode> {
+    require_admin(role)?;
+    m.thaw(id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn vm_frozen(
+    State(m): State<Arc<VmManager>>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<serde_json::Value>> {
+    Ok(Json(json!({"frozen": m.is_frozen(id).await?})))
+}
+
+async fn vm_stats(
+    State(m): State<Arc<VmManager>>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<serde_json::Value>> {
+    Ok(Json(json!(m.metrics(id).await?)))
+}
+
+async fn vm_pressure(
+    State(m): State<Arc<VmManager>>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<serde_json::Value>> {
+    Ok(Json(json!(m.pressure(id).await?)))
+}
+
+/// `GET /v1/vms/{id}/guard`: the VMM Guard policy applied to this VM (mode, exec allow-list, applied
+/// virtual-patch rule packs and which of them have expired). Read-only; applying packs stays a
+/// host-local `fluxvm-guard apply` because it needs root and the pinned BPF maps.
+async fn vm_guard(
+    State(m): State<Arc<VmManager>>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<serde_json::Value>> {
+    m.get(id).await?;
+    let pin = std::env::var("FLUXVM_GUARD_PIN_ROOT")
+        .unwrap_or_else(|_| fluxvm_intelligence::guard::DEFAULT_GUARD_PIN_ROOT.into());
+    let state = std::env::var("FLUXVM_GUARD_STATE_ROOT")
+        .unwrap_or_else(|_| fluxvm_intelligence::guard::DEFAULT_GUARD_STATE_ROOT.into());
+    let status = tokio::task::spawn_blocking(move || {
+        fluxvm_intelligence::guard::status(
+            id,
+            std::path::Path::new(&pin),
+            std::path::Path::new(&state),
+        )
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("guard status task failed: {e}"))??;
+    Ok(Json(json!(status)))
+}
+
+async fn vm_network_stats(
+    State(m): State<Arc<VmManager>>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<serde_json::Value>> {
+    Ok(Json(json!(m.network_stats(id).await?)))
+}
+
+async fn vm_network_status(
+    State(m): State<Arc<VmManager>>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<serde_json::Value>> {
+    Ok(Json(json!(m.network_status(id).await?)))
+}
+
+#[derive(Debug, Deserialize)]
+struct NetworkFlowsQuery {
+    #[serde(default = "default_network_flow_limit")]
+    limit: usize,
+}
+fn default_network_flow_limit() -> usize {
+    100
+}
+
+async fn vm_network_flows(
+    State(m): State<Arc<VmManager>>,
+    Path(id): Path<Uuid>,
+    Query(q): Query<NetworkFlowsQuery>,
+) -> ApiResult<Json<serde_json::Value>> {
+    Ok(Json(json!({"items": m.network_flows(id, q.limit).await?})))
+}
+
+async fn vm_network_edge(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+    Json(spec): Json<fluxvm_network::edge_contract::EdgeSpec>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    m.get(id).await?;
+    let applied = fluxvm_network::edge_contract::apply_edge(&m.cfg, id, spec)?;
+    Ok(Json(json!(applied)))
+}
+
+async fn vm_network_conntrack_export(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    m.get(id).await?;
+    Ok(Json(json!(
+        fluxvm_network::edge_contract::export_conntrack(&m.cfg, id)?
+    )))
+}
+
+async fn vm_network_conntrack_restore(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+    Json(snap): Json<fluxvm_network::edge_contract::ConntrackSnapshot>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    m.get(id).await?;
+    Ok(Json(json!(
+        fluxvm_network::edge_contract::restore_conntrack(&m.cfg, id, snap)?
+    )))
+}
+
+async fn vm_network_learned_ip(
+    State(m): State<Arc<VmManager>>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let vm = m.get(id).await?;
+    let source = if vm.dhcp_leasefile.is_some() {
+        "dhcp"
+    } else {
+        "fluxvm"
+    };
+    let fallback = vm.guest_ip.map(|ip| (ip, source));
+    Ok(Json(fluxvm_network::edge_contract::learned_ip(
+        &m.cfg, id, fallback,
+    )?))
+}
+
+async fn vm_network_drops(
+    State(m): State<Arc<VmManager>>,
+    Path(id): Path<Uuid>,
+    Query(q): Query<NetworkFlowsQuery>,
+) -> ApiResult<Json<serde_json::Value>> {
+    m.get(id).await?;
+    Ok(Json(json!({
+        "items": fluxvm_network::edge_contract::attributed_drops(&m.cfg, id, q.limit)?
+    })))
+}
+
+async fn vm_network_capture(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+    Json(session): Json<fluxvm_network::edge_contract::CaptureSession>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    m.get(id).await?;
+    Ok(Json(json!(fluxvm_network::edge_contract::start_capture(
+        &m.cfg, id, session
+    )?)))
+}
+
+async fn vm_network_captures(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    m.get(id).await?;
+    Ok(Json(json!({
+        "items": fluxvm_network::edge_contract::captures(&m.cfg, id)?
+    })))
+}
+
+async fn vm_network_capture_file(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path((id, token)): Path<(Uuid, String)>,
+) -> ApiResult<Response> {
+    use fluxvm_network::edge_contract::CaptureFile;
+    require_admin(role)?;
+    m.get(id).await?;
+    match fluxvm_network::edge_contract::capture_file(&m.cfg, id, &token)? {
+        CaptureFile::Ready(path) => {
+            let bytes = tokio::fs::read(&path)
+                .await
+                .map_err(|e| anyhow::anyhow!("reading {}: {e}", path.display()))?;
+            Ok((
+                [
+                    (
+                        header::CONTENT_TYPE,
+                        "application/vnd.tcpdump.pcap".to_string(),
+                    ),
+                    (
+                        header::CONTENT_DISPOSITION,
+                        format!("attachment; filename=\"{token}.pcap\""),
+                    ),
+                ],
+                bytes,
+            )
+                .into_response())
+        }
+        CaptureFile::Running => Err(ApiError {
+            status: StatusCode::CONFLICT,
+            message: "capture is still running".into(),
+        }),
+        CaptureFile::Missing => Err(ApiError {
+            status: StatusCode::NOT_FOUND,
+            message: format!("capture '{token}' not found"),
+        }),
+    }
+}
+
+async fn vm_network_drop_reasons(
+    State(m): State<Arc<VmManager>>,
+    Path(id): Path<Uuid>,
+    Query(q): Query<NetworkFlowsQuery>,
+) -> ApiResult<Json<serde_json::Value>> {
+    m.get(id).await?;
+    Ok(Json(json!({
+        "items": fluxvm_network::ebpf::drop_reasons(&m.cfg.sandbox.dataplane, id, q.limit)?
+    })))
+}
+
+async fn vm_network_migration_state(
+    State(m): State<Arc<VmManager>>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<serde_json::Value>> {
+    m.get(id).await?;
+    Ok(Json(json!(fluxvm_network::migration_state::status(
+        &m.cfg, id
+    )?)))
+}
+
+async fn vm_network_migration_quiesce(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    m.get(id).await?;
+    Ok(Json(json!(fluxvm_network::migration_state::quiesce(
+        &m.cfg, id
+    )?)))
+}
+
+async fn vm_network_migration_export(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    m.get(id).await?;
+    Ok(Json(json!(
+        fluxvm_network::migration_state::export_snapshot(&m.cfg, id)?
+    )))
+}
+
+async fn vm_network_migration_restore(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+    Json(snapshot): Json<fluxvm_network::migration_state::VmNetworkStateSnapshot>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    m.get(id).await?;
+    Ok(Json(json!(
+        fluxvm_network::migration_state::restore_snapshot(&m.cfg, id, &snapshot)?
+    )))
+}
+
+async fn vm_network_migration_resume(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    m.get(id).await?;
+    Ok(Json(json!(fluxvm_network::migration_state::resume(
+        &m.cfg, id
+    )?)))
+}
+
+async fn get_vm_network_policy(
+    State(m): State<Arc<VmManager>>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<serde_json::Value>> {
+    Ok(Json(json!(m.network_policy(id).await?)))
+}
+
+/// Egress policy of the VM's QEMU process: the only policy that governs a user-mode (slirp)
+/// guest, which has no host-visible interface for `network/policy` to attach to.
+async fn get_vm_qemu_egress(
+    State(m): State<Arc<VmManager>>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<serde_json::Value>> {
+    Ok(Json(m.qemu_egress(id).await?))
+}
+
+async fn set_vm_qemu_egress(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+    Json(policy): Json<fluxvm_network::qemu_egress::QemuEgressPolicy>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    Ok(Json(m.set_qemu_egress(id, policy).await?))
+}
+
+/// Remove the VM's own policy so it follows the node default again.
+async fn clear_vm_qemu_egress(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    Ok(Json(m.clear_qemu_egress(id).await?))
+}
+
+async fn get_vm_qemu_egress_observed(
+    State(m): State<Arc<VmManager>>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let flows = m.qemu_egress_observed(id).await?;
+    Ok(Json(json!({"vm_id": id, "flows": flows})))
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct EgressSuggestQuery {
+    /// Add the suggested rules to the VM's policy (and switch an audit/loopback policy to
+    /// an allow-list) instead of only returning them.
+    #[serde(default)]
+    apply: bool,
+}
+
+/// Turn what the guest tried to reach into rules that would allow it. Read-only unless `?apply=true`.
+async fn suggest_vm_qemu_egress(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+    Query(q): Query<EgressSuggestQuery>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let flows = m.qemu_egress_observed(id).await?;
+    let rules = fluxvm_network::qemu_egress::suggest(&flows);
+    if !q.apply {
+        return Ok(Json(json!({"vm_id": id, "rules": rules, "applied": false})));
+    }
+    require_admin(role)?;
+    let current = m.qemu_egress(id).await?;
+    let mut policy: fluxvm_network::qemu_egress::QemuEgressPolicy =
+        serde_json::from_value(current["policy"].clone()).unwrap_or_default();
+    for r in &rules {
+        if !policy.rules.contains(r) {
+            policy.rules.push(r.clone());
+        }
+    }
+    policy.mode = fluxvm_network::qemu_egress::EgressMode::Allowlist;
+    let applied = m.set_qemu_egress(id, policy).await?;
+    Ok(Json(
+        json!({"vm_id": id, "rules": rules, "applied": true, "egress": applied}),
+    ))
+}
+
+async fn get_qemu_egress_defaults(
+    State(m): State<Arc<VmManager>>,
+) -> ApiResult<Json<serde_json::Value>> {
+    Ok(Json(json!({"policy": m.qemu_egress_defaults().await?})))
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct EgressDefaultsQuery {
+    /// Also re-program running VMs that have no policy of their own.
+    #[serde(default)]
+    apply_running: bool,
+}
+
+async fn set_qemu_egress_defaults(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Query(q): Query<EgressDefaultsQuery>,
+    Json(policy): Json<fluxvm_network::qemu_egress::QemuEgressPolicy>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    Ok(Json(
+        m.set_qemu_egress_defaults(policy, q.apply_running).await?,
+    ))
+}
+
+async fn vm_network_service_stats(
+    State(m): State<Arc<VmManager>>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<serde_json::Value>> {
+    Ok(Json(
+        json!({"items": fluxvm_network::service::stats_for_vm(&m.cfg, id)?}),
+    ))
+}
+
+async fn network_service_status(
+    State(m): State<Arc<VmManager>>,
+) -> ApiResult<Json<serde_json::Value>> {
+    Ok(Json(json!(fluxvm_network::service::host_status(&m.cfg)?)))
+}
+
+async fn network_service_stats(
+    State(m): State<Arc<VmManager>>,
+) -> ApiResult<Json<serde_json::Value>> {
+    Ok(Json(
+        json!({"interfaces": fluxvm_network::service::host_stats(&m.cfg)?}),
+    ))
+}
+
+async fn network_service_health(
+    State(m): State<Arc<VmManager>>,
+) -> ApiResult<Json<serde_json::Value>> {
+    Ok(Json(json!(fluxvm_network::service::health_report(&m.cfg)?)))
+}
+
+async fn reconcile_network_service_health(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    Ok(Json(json!(
+        fluxvm_network::service::reconcile_health(&m.cfg).await?
+    )))
+}
+
+async fn gc_network_service_conntrack(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    Ok(Json(json!(fluxvm_network::service::gc_conntrack(&m.cfg)?)))
+}
+
+async fn reconcile_network_service_pressure(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    Ok(Json(json!(fluxvm_network::service_pressure::reconcile(
+        &m.cfg
+    )?)))
+}
+
+async fn network_service_advertisements(
+    State(m): State<Arc<VmManager>>,
+) -> ApiResult<Json<serde_json::Value>> {
+    Ok(Json(json!(
+        fluxvm_network::service::advertisement_snapshot(&m.cfg)?
+    )))
+}
+
+#[derive(Debug, Deserialize)]
+struct ServiceFlowsQuery {
+    #[serde(default = "default_service_flow_limit")]
+    limit: usize,
+}
+
+fn default_service_flow_limit() -> usize {
+    256
+}
+
+async fn network_service_flows(
+    State(m): State<Arc<VmManager>>,
+    Query(q): Query<ServiceFlowsQuery>,
+) -> ApiResult<Json<serde_json::Value>> {
+    Ok(Json(json!({
+        "items": fluxvm_network::service::service_flows(&m.cfg, q.limit)?
+    })))
+}
+
+async fn export_network_service_telemetry(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Query(q): Query<ServiceFlowsQuery>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    Ok(Json(json!(
+        fluxvm_network::service::export_otlp(&m.cfg, q.limit).await?
+    )))
+}
+
+async fn export_network_service_conntrack(
+    State(m): State<Arc<VmManager>>,
+    Path(name): Path<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    Ok(Json(json!(fluxvm_network::service::export_conntrack(
+        &m.cfg, &name
+    )?)))
+}
+
+async fn import_network_service_conntrack(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(name): Path<String>,
+    Json(snapshot): Json<fluxvm_network::service::ConntrackSnapshot>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    let written = fluxvm_network::service::import_conntrack(&m.cfg, &name, &snapshot)?;
+    Ok(Json(json!({"written": written})))
+}
+
+#[derive(Debug, Deserialize)]
+struct ServiceDeltaQuery {
+    after_seq: Option<u64>,
+    max_entries: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ServiceDeltaAck {
+    ack_seq: u64,
+}
+
+async fn export_network_service_conntrack_delta(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(name): Path<String>,
+    Query(q): Query<ServiceDeltaQuery>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    Ok(Json(json!(
+        fluxvm_network::service::export_conntrack_delta(
+            &m.cfg,
+            &name,
+            q.after_seq.unwrap_or(0),
+            q.max_entries.unwrap_or(1024),
+        )?
+    )))
+}
+
+async fn import_network_service_conntrack_delta(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(name): Path<String>,
+    Json(batch): Json<fluxvm_network::service::ConntrackDeltaBatch>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    Ok(Json(json!(
+        fluxvm_network::service::import_conntrack_delta(&m.cfg, &name, &batch)?
+    )))
+}
+
+async fn ack_network_service_conntrack_delta(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(name): Path<String>,
+    Json(req): Json<ServiceDeltaAck>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    Ok(Json(json!(fluxvm_network::service::ack_conntrack_delta(
+        &m.cfg,
+        &name,
+        req.ack_seq
+    )?)))
+}
+
+async fn list_network_services(
+    State(m): State<Arc<VmManager>>,
+) -> ApiResult<Json<serde_json::Value>> {
+    Ok(Json(
+        json!({"items": fluxvm_network::service::list(&m.cfg)?}),
+    ))
+}
+
+async fn get_network_service(
+    State(m): State<Arc<VmManager>>,
+    Path(name): Path<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    match fluxvm_network::service::get(&m.cfg, &name)? {
+        Some(service) => Ok(Json(json!(service))),
+        None => Err(ApiError {
+            status: StatusCode::NOT_FOUND,
+            message: format!("service '{name}' not found"),
+        }),
+    }
+}
+
+async fn upsert_network_service(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Json(service): Json<fluxvm_network::service::ServiceSpec>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    Ok(Json(json!(fluxvm_network::service::upsert(
+        &m.cfg, service
+    )?)))
+}
+
+async fn delete_network_service(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(name): Path<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    let deleted = fluxvm_network::service::delete(&m.cfg, &name)?;
+    if !deleted {
+        return Err(ApiError {
+            status: StatusCode::NOT_FOUND,
+            message: format!("service '{name}' not found"),
+        });
+    }
+    Ok(Json(json!({"deleted": name})))
+}
+
+async fn list_vnets(State(m): State<Arc<VmManager>>) -> ApiResult<Json<serde_json::Value>> {
+    let cfg = m.cfg.clone();
+    let items = tokio::task::spawn_blocking(move || fluxvm_network::vnet::list(&cfg)).await?;
+    Ok(Json(json!({"items": items})))
+}
+
+async fn get_vnet(
+    State(m): State<Arc<VmManager>>,
+    Path(vni): Path<u32>,
+) -> ApiResult<Json<fluxvm_core::model::VnetStatus>> {
+    let cfg = m.cfg.clone();
+    tokio::task::spawn_blocking(move || fluxvm_network::vnet::status(&cfg, vni))
+        .await?
+        .map(Json)
+        .ok_or_else(|| ApiError {
+            status: StatusCode::NOT_FOUND,
+            message: format!("virtual network {vni} is not configured on this host"),
+        })
+}
+
+async fn put_vnet(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(vni): Path<u32>,
+    Json(config): Json<fluxvm_core::model::VnetConfig>,
+) -> ApiResult<Json<fluxvm_core::model::VnetStatus>> {
+    require_admin(role)?;
+    if config.vni != vni {
+        return Err(ApiError::from(anyhow::anyhow!(
+            "body vni {} does not match the path vni {vni}",
+            config.vni
+        )));
+    }
+    let cfg = m.cfg.clone();
+    let status =
+        tokio::task::spawn_blocking(move || fluxvm_network::vnet::apply_config(&cfg, &config))
+            .await??;
+    Ok(Json(status))
+}
+
+async fn delete_vnet(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(vni): Path<u32>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    let cfg = m.cfg.clone();
+    let removed =
+        tokio::task::spawn_blocking(move || fluxvm_network::vnet::remove_config(&cfg, vni))
+            .await??;
+    if !removed {
+        return Err(ApiError {
+            status: StatusCode::NOT_FOUND,
+            message: format!("virtual network {vni} is not configured on this host"),
+        });
+    }
+    Ok(Json(json!({"deleted": vni})))
+}
+
+async fn list_network_groups(
+    State(m): State<Arc<VmManager>>,
+) -> ApiResult<Json<serde_json::Value>> {
+    Ok(Json(json!({"items": m.list_network_groups().await?})))
+}
+
+async fn get_network_group(
+    State(m): State<Arc<VmManager>>,
+    Path(name): Path<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    Ok(Json(json!(m.get_network_group(&name).await?)))
+}
+
+async fn upsert_network_group(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Json(group): Json<fluxvm_network::groups::SecurityGroup>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    Ok(Json(json!(m.upsert_network_group(group).await?)))
+}
+
+async fn delete_network_group(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(name): Path<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    m.delete_network_group(&name).await?;
+    Ok(Json(json!({"deleted": name})))
+}
+
+async fn list_cnp(State(m): State<Arc<VmManager>>) -> ApiResult<Json<serde_json::Value>> {
+    Ok(Json(json!({"items": m.list_cnp().await?})))
+}
+
+async fn get_cnp(
+    State(m): State<Arc<VmManager>>,
+    Path(name): Path<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    Ok(Json(json!(m.get_cnp(&name).await?)))
+}
+
+async fn apply_cnp(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Json(policy): Json<fluxvm_network::cnp::CiliumNetworkPolicy>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    Ok(Json(json!(m.apply_cnp(policy).await?)))
+}
+
+async fn delete_cnp(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(name): Path<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    m.delete_cnp(&name).await?;
+    Ok(Json(json!({"deleted": name})))
+}
+
+async fn list_identities(State(m): State<Arc<VmManager>>) -> ApiResult<Json<serde_json::Value>> {
+    Ok(Json(json!({"items": m.list_identities().await?})))
+}
+
+async fn network_observe(State(m): State<Arc<VmManager>>) -> ApiResult<Json<serde_json::Value>> {
+    Ok(Json(json!(m.network_observe().await?)))
+}
+
+async fn network_health(State(m): State<Arc<VmManager>>) -> ApiResult<Json<serde_json::Value>> {
+    Ok(Json(json!(m.network_health().await?)))
+}
+
+async fn network_ipcache(State(m): State<Arc<VmManager>>) -> ApiResult<Json<serde_json::Value>> {
+    Ok(Json(json!({"items": m.network_ipcache().await?})))
+}
+
+/// Netns-sandbox `/28` IPAM pool utilization — see `fluxvm_network::ipam::IpamStatus`.
+async fn network_ipam_status(
+    State(m): State<Arc<VmManager>>,
+) -> ApiResult<Json<fluxvm_network::ipam::IpamStatus>> {
+    Ok(Json(m.network_ipam_status().await?))
+}
+
+#[derive(Debug, Deserialize)]
+struct RemoteIpcacheUpsert {
+    identity: u32,
+    #[serde(default)]
+    cidrs: Vec<String>,
+}
+
+/// Fabric ClusterMesh-like: upsert remote identity CIDRs into local ipcache
+/// (nil `vm_id` sentinel). Does not implement full mesh datapath.
+async fn upsert_remote_ipcache(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Json(body): Json<RemoteIpcacheUpsert>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    let identity = body.identity;
+    let upserted = m.upsert_remote_ipcache(identity, body.cidrs).await?;
+    Ok(Json(json!({
+        "identity": identity,
+        "upserted": upserted,
+    })))
+}
+
+async fn delete_remote_ipcache(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(identity): Path<u32>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    let deleted = m.delete_remote_ipcache(identity).await?;
+    Ok(Json(json!({
+        "identity": identity,
+        "deleted": deleted,
+    })))
+}
+
+async fn list_endpoints(State(m): State<Arc<VmManager>>) -> ApiResult<Json<serde_json::Value>> {
+    Ok(Json(json!({"items": m.network_endpoints().await?})))
+}
+
+#[derive(Debug, Deserialize)]
+struct HubbleFlowsQuery {
+    #[serde(default = "default_hubble_limit")]
+    limit: usize,
+    #[serde(default = "default_all")]
+    verdict: String,
+    #[serde(default = "default_all")]
+    protocol: String,
+    /// color | plain | normal | json
+    #[serde(default = "default_hubble_output")]
+    output: String,
+    #[serde(default)]
+    detailed: bool,
+}
+fn default_hubble_limit() -> usize {
+    64
+}
+fn default_all() -> String {
+    "all".into()
+}
+fn default_hubble_output() -> String {
+    "json".into()
+}
+
+async fn hubble_flows(
+    State(m): State<Arc<VmManager>>,
+    Query(q): Query<HubbleFlowsQuery>,
+) -> ApiResult<Json<serde_json::Value>> {
+    use fluxvm_network::packetflow::{filter_views, to_hubble_flow};
+    let views = filter_views(
+        m.hubble_observe_views(q.limit).await?,
+        Some(q.verdict.as_str()),
+        Some(q.protocol.as_str()),
+    );
+    let items: Vec<_> = views.iter().map(to_hubble_flow).collect();
+    Ok(Json(json!({"items": items})))
+}
+
+async fn hubble_flows_text(
+    State(m): State<Arc<VmManager>>,
+    Query(q): Query<HubbleFlowsQuery>,
+) -> impl axum::response::IntoResponse {
+    use fluxvm_network::packetflow::{FlowOutput, filter_views, render_flows};
+    let views = match m.hubble_observe_views(q.limit).await {
+        Ok(v) => filter_views(v, Some(q.verdict.as_str()), Some(q.protocol.as_str())),
+        Err(e) => {
+            return (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+                format!("error: {e:#}\n"),
+            );
+        }
+    };
+    let mode = FlowOutput::parse(&q.output);
+    let body = render_flows(&views, mode, q.detailed);
+    (
+        axum::http::StatusCode::OK,
+        [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+        body,
+    )
+}
+
+async fn hubble_ui() -> impl axum::response::IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+        HUBBLE_UI_HTML,
+    )
+}
+
+const HUBBLE_UI_HTML: &str = include_str!("hubble_ui.html");
+
+async fn network_refresh_dns(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    Ok(Json(json!({"refreshed": m.refresh_fqdn_policies().await?})))
+}
+
+async fn get_vm_network_effective(
+    State(m): State<Arc<VmManager>>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<serde_json::Value>> {
+    Ok(Json(json!(m.network_effective(id).await?)))
+}
+
+async fn set_vm_network_policy(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+    Json(policy): Json<fluxvm_network::dataplane::VmNetworkPolicy>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    Ok(Json(json!(m.set_network_policy(id, policy).await?)))
+}
+
+/// Set 6S: `null`/absent when unconfigured, matching `get_vm_network_policy`'s
+/// shape but distinguishing "no Pod-scoped policy" from an empty object
+/// (which would mean "policy present, everything allowed").
+async fn get_vm_pod_network_policy(
+    State(m): State<Arc<VmManager>>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<serde_json::Value>> {
+    Ok(Json(json!(m.pod_network_policy(id).await?)))
+}
+
+async fn set_vm_pod_network_policy(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+    Json(policy): Json<fluxvm_network::dataplane::PodNetworkPolicy>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    m.set_pod_network_policy(id, Some(policy)).await?;
+    Ok(Json(json!({"ok": true})))
+}
+
+async fn clear_vm_pod_network_policy(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    m.set_pod_network_policy(id, None).await?;
+    Ok(Json(json!({"ok": true})))
+}
+
+async fn vm_cpuset(
+    State(m): State<Arc<VmManager>>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<serde_json::Value>> {
+    Ok(Json(json!({"cpus": m.get_cpuset(id).await?})))
+}
+
+async fn vm_numa(
+    State(m): State<Arc<VmManager>>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<fluxvm_core::model::VmNumaStatus>> {
+    Ok(Json(m.numa_status(id).await?))
+}
+
+#[derive(Debug, Deserialize)]
+struct LogsQuery {
+    #[serde(default)]
+    follow: bool,
+    #[serde(default = "default_log_lines")]
+    lines: usize,
+}
+fn default_log_lines() -> usize {
+    100
+}
+
+#[derive(Debug, Deserialize)]
+struct SandboxLogsQuery {
+    #[serde(default = "default_sandbox_log_lines")]
+    lines: usize,
+}
+
+fn default_sandbox_log_lines() -> usize {
+    200
+}
+
+/// `GET /v1/sandboxes/{id}/logs?lines=N` — the console tail as JSON, with a
+/// container sandbox's exit code (`null` while it runs) and init error.
+async fn sandbox_logs(
+    State(m): State<Arc<VmManager>>,
+    Path(id): Path<Uuid>,
+    Query(q): Query<SandboxLogsQuery>,
+) -> ApiResult<Json<fluxvm_scheduler::oci_sandbox::SandboxLogs>> {
+    Ok(Json(m.sandbox_logs(id, q.lines.min(10_000)).await?))
+}
+
+/// `GET /v1/vms/{id}/logs?lines=N&follow=true` — tail-follow the VM's
+/// captured console output (`VmRecord.log_path`) as a plain-text chunked
+/// stream, one line per chunk. Raw serial output has no journald-equivalent
+/// structure (no per-line priority/unit), so unlike `machinectl-driver`'s
+/// `journalctl --output=json` this is deliberately unstructured — the
+/// caller (`fluxvm-driver::LogDriver`) assigns a constant priority when
+/// wrapping lines into `driver-core::LogEntry`.
+async fn vm_logs(
+    State(m): State<Arc<VmManager>>,
+    Path(id): Path<Uuid>,
+    Query(q): Query<LogsQuery>,
+) -> ApiResult<Response> {
+    let record = m.get(id).await?;
+    let path = record.log_path;
+    let follow = q.follow;
+    let lines = q.lines.max(1);
+
+    let stream = async_stream::stream! {
+        use std::collections::VecDeque;
+        use tokio::io::{AsyncBufReadExt, BufReader};
+
+        let file = match tokio::fs::File::open(&path).await {
+            Ok(f) => f,
+            Err(e) => {
+                yield Ok::<_, std::io::Error>(bytes::Bytes::from(format!("error opening log: {e}\n")));
+                return;
+            }
+        };
+        let mut reader = BufReader::new(file);
+        let mut line = String::new();
+
+        // First pass: keep only the last `lines` lines already on disk.
+        let mut tail: VecDeque<String> = VecDeque::with_capacity(lines);
+        loop {
+            line.clear();
+            match reader.read_line(&mut line).await {
+                Ok(0) => break,
+                Ok(_) => {
+                    if tail.len() == lines {
+                        tail.pop_front();
+                    }
+                    tail.push_back(std::mem::take(&mut line));
+                }
+                Err(_) => break,
+            }
+        }
+        for l in tail {
+            yield Ok::<_, std::io::Error>(bytes::Bytes::from(l));
+        }
+
+        if follow {
+            loop {
+                line.clear();
+                match reader.read_line(&mut line).await {
+                    Ok(0) => tokio::time::sleep(std::time::Duration::from_millis(300)).await,
+                    Ok(_) => yield Ok::<_, std::io::Error>(bytes::Bytes::from(std::mem::take(&mut line))),
+                    Err(_) => break,
+                }
+            }
+        }
+    };
+
+    // nosniff: clients that sniff a text/plain body (URLSession buffers 512 bytes for it) would hold back a quiet console.
+    Ok(Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
+        .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff")
+        .header(header::CACHE_CONTROL, "no-cache")
+        .body(axum::body::Body::from_stream(stream))
+        .unwrap())
+}
+
+#[derive(Deserialize)]
+struct ExecRequest {
+    command: String,
+    #[serde(default)]
+    timeout_seconds: Option<u64>,
+    #[serde(default)]
+    policy: Option<fluxvm_guest_protocol::ExecPolicy>,
+}
+async fn agent_exec(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<ExecRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    let response = m
+        .exec_with_policy(id, req.command, req.timeout_seconds, req.policy)
+        .await?;
+    Ok(Json(json!(response)))
+}
+
+#[derive(Deserialize)]
+struct ScreenshotQuery {
+    max_width: Option<u32>,
+}
+
+/// `GET /v1/vms/{id}/screenshot[?max_width=N]` — the guest display of a running `vz` VM as a PNG. The size is in the
+/// `x-fluxvm-screen-width`/`-height` headers; `x-fluxvm-screen-blank: true` means nothing is drawn yet. Admin-only: the
+/// screen can show anything the guest does.
+async fn vm_screenshot(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+    Query(q): Query<ScreenshotQuery>,
+) -> ApiResult<Response> {
+    require_admin(role)?;
+    let shot = m.vm_screenshot(id, q.max_width).await?;
+    Ok((
+        [
+            (header::CONTENT_TYPE, "image/png".to_string()),
+            (header::CACHE_CONTROL, "no-store".to_string()),
+            (
+                header::HeaderName::from_static("x-fluxvm-screen-width"),
+                shot.width.to_string(),
+            ),
+            (
+                header::HeaderName::from_static("x-fluxvm-screen-height"),
+                shot.height.to_string(),
+            ),
+            (
+                header::HeaderName::from_static("x-fluxvm-screen-blank"),
+                shot.blank.to_string(),
+            ),
+        ],
+        shot.png,
+    )
+        .into_response())
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum InputRequest {
+    Batch {
+        actions: Vec<fluxvm_scheduler::vz_screen::InputAction>,
+    },
+    One(fluxvm_scheduler::vz_screen::InputAction),
+}
+
+/// `POST /v1/vms/{id}/input` — keyboard and mouse input for a running `vz` VM's display: one action
+/// (`{"action": "click", "x": 10, "y": 20}`) or `{"actions": [...]}` run in order. Admin-only, like `agent_exec`.
+async fn vm_input(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<InputRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    let actions = match req {
+        InputRequest::Batch { actions } => actions,
+        InputRequest::One(a) => vec![a],
+    };
+    let n = m.vm_input(id, &actions).await?;
+    Ok(Json(json!({"ok": true, "actions": n})))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SetSigninRequest {
+    username: Option<String>,
+    password: String,
+}
+
+/// `PUT /v1/vms/{id}/signin` — stores the sign-in for a `vz` VM in the host's login Keychain. Admin-only; the reply
+/// and every later read leave the password out.
+async fn set_vm_signin(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<SetSigninRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    let status = m.set_vm_signin(id, req.username, req.password).await?;
+    Ok(Json(json!(status)))
+}
+
+/// `GET /v1/vms/{id}/signin` — `{"configured", "username"?}`.
+async fn vm_signin_status(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    Ok(Json(json!(m.vm_signin_status(id).await?)))
+}
+
+/// `DELETE /v1/vms/{id}/signin`.
+async fn delete_vm_signin(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    m.get(id).await?;
+    Ok(Json(json!({"deleted": m.delete_vm_signin(id).await?})))
+}
+
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct SigninRequest {
+    #[serde(default)]
+    mode: fluxvm_scheduler::vz_screen::SigninMode,
+    submit: Option<bool>,
+}
+
+/// `POST /v1/vms/{id}/signin` — types the stored sign-in into the guest display (`mode`: `password`, `username`
+/// or `username_tab`; `submit` presses Enter, default true). Admin-only.
+async fn vm_signin(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+    body: Option<Json<SigninRequest>>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    let req = body.map(|Json(r)| r).unwrap_or_default();
+    m.vm_signin(id, req.mode, req.submit.unwrap_or(true))
+        .await?;
+    Ok(Json(json!({"ok": true})))
+}
+
+/// `POST /v1/vms/{id}/agent/ping` — health-checks the vsock guest agent
+/// without spending a real `exec` round trip to find out whether it's
+/// reachable. Distinct from `/qga/ping` below, which checks the separate
+/// QEMU guest-agent (virtio-serial) channel instead. Gated the same as
+/// `agent_exec`/`agent_put_file`/`agent_get_file`: it still opens a vsock
+/// connection into a specific VM, so it carries the same admin requirement
+/// as every other agent operation, even though it changes nothing itself.
+async fn agent_ping(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    m.agent_ping(id).await?;
+    Ok(Json(json!({"ok": true})))
+}
+
+#[derive(Deserialize)]
+struct QgaExecRequest {
+    /// Guest executable path (e.g. `powershell.exe`). Ignored when `powershell` is set.
+    #[serde(default)]
+    path: Option<String>,
+    #[serde(default)]
+    args: Vec<String>,
+    /// Convenience: run this string via `powershell.exe -Command`.
+    #[serde(default)]
+    powershell: Option<String>,
+    #[serde(default)]
+    timeout_seconds: Option<u64>,
+}
+
+async fn qga_ping(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    m.qga_ping(id).await?;
+    Ok(Json(json!({"ok": true})))
+}
+
+// A GET query, not a mutation -- read-only tokens can call this like any
+// other GET route, same as vm_stats/vm_frozen below.
+async fn qga_network_interfaces(
+    State(m): State<Arc<VmManager>>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<Vec<fluxvm_image::qga::QgaNetworkInterface>>> {
+    Ok(Json(m.qga_network_interfaces(id).await?))
+}
+
+// Mutating (freezes real guest I/O), so this requires admin like qga_ping
+// above -- not a read-only query.
+async fn qga_fsfreeze_freeze(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    let frozen = m.qga_fsfreeze_freeze(id).await?;
+    Ok(Json(json!({"frozen": frozen})))
+}
+
+// Deliberately no admin gate weaker than freeze's own -- thaw is the
+// recovery half of the same operation, and a caller (Kairon's own
+// MachineSnapshot reconcile, in particular) must be able to retry this
+// unconditionally until it succeeds without a separate escalation path.
+async fn qga_fsfreeze_thaw(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    let thawed = m.qga_fsfreeze_thaw(id).await?;
+    Ok(Json(json!({"thawed": thawed})))
+}
+
+// A GET query, not a mutation -- read-only tokens can call this like any
+// other GET route, same as qga_network_interfaces above.
+async fn qga_fsfreeze_status(
+    State(m): State<Arc<VmManager>>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let status = m.qga_fsfreeze_status(id).await?;
+    Ok(Json(json!({"status": status})))
+}
+
+async fn qga_exec(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<QgaExecRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    let result = if let Some(ps) = req.powershell {
+        m.qga_powershell(id, ps, req.timeout_seconds).await?
+    } else {
+        let path = req.path.ok_or_else(|| ApiError {
+            status: StatusCode::BAD_REQUEST,
+            message: "qga exec requires `path` or `powershell`".into(),
+        })?;
+        m.qga_exec(id, path, req.args, req.timeout_seconds).await?
+    };
+    Ok(Json(json!(result)))
+}
+
+#[derive(Deserialize)]
+struct QgaFirewallOpenRequest {
+    name: String,
+    port: u16,
+    #[serde(default = "default_fw_proto")]
+    protocol: String,
+    #[serde(default)]
+    timeout_seconds: Option<u64>,
+}
+fn default_fw_proto() -> String {
+    "tcp".into()
+}
+
+#[derive(Deserialize)]
+struct QgaFirewallCloseRequest {
+    name: String,
+    #[serde(default)]
+    timeout_seconds: Option<u64>,
+}
+
+async fn qga_firewall_open(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<QgaFirewallOpenRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    let result = m
+        .qga_firewall_open(id, req.name, req.port, req.protocol, req.timeout_seconds)
+        .await?;
+    Ok(Json(json!(result)))
+}
+
+async fn qga_firewall_close(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<QgaFirewallCloseRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    let result = m
+        .qga_firewall_close(id, req.name, req.timeout_seconds)
+        .await?;
+    Ok(Json(json!(result)))
+}
+
+#[derive(Deserialize)]
+struct PutFileRequest {
+    path: String,
+    content_base64: String,
+    #[serde(default)]
+    mode: Option<u32>,
+}
+async fn agent_put_file(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<PutFileRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    let response = m
+        .put_file(id, req.path, req.content_base64, req.mode)
+        .await?;
+    Ok(Json(json!(response)))
+}
+
+#[derive(Deserialize)]
+struct GetFileRequest {
+    path: String,
+}
+async fn agent_get_file(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<GetFileRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    let response = m.get_file(id, req.path).await?;
+    Ok(Json(json!(response)))
+}
+#[derive(Deserialize)]
+struct ConsoleQuery {
+    #[serde(default = "default_console_cols")]
+    cols: u16,
+    #[serde(default = "default_console_rows")]
+    rows: u16,
+}
+fn default_console_cols() -> u16 {
+    80
+}
+fn default_console_rows() -> u16 {
+    24
+}
+
+/// `GET /v1/vms/{id}/console` — upgrades to a WebSocket carrying a live
+/// interactive shell (`AgentRequest::OpenShell` under the hood). Once the
+/// vsock handshake completes: binary WS frames in are keystrokes, relayed
+/// to the guest as `PtyFrame::Data`; binary WS frames out are the guest's
+/// raw PTY output, unmodified. Text WS frames in are read as a resize
+/// control message instead of data — `{"cols":<u16>,"rows":<u16>}` — and
+/// relayed as `PtyFrame::Resize`, so a client (an xterm.js-style terminal
+/// reacting to its own container resizing, say) can resize the PTY at any
+/// point in the session without reconnecting. A text frame that isn't
+/// valid JSON in that shape is silently ignored rather than closing the
+/// session — a malformed control message costs the client a missed resize,
+/// not the whole interactive shell.
+async fn agent_console(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+    Query(q): Query<ConsoleQuery>,
+    ws: axum::extract::ws::WebSocketUpgrade,
+) -> ApiResult<Response> {
+    require_admin(role)?;
+    open_agent_console(m, id, q, ws).await
+}
+
+async fn open_agent_console(
+    m: Arc<VmManager>,
+    id: Uuid,
+    q: ConsoleQuery,
+    ws: axum::extract::ws::WebSocketUpgrade,
+) -> ApiResult<Response> {
+    // Open the console *before* upgrading, so a failure (agent disabled,
+    // guest unreachable, VM not found) comes back as a normal HTTP error
+    // instead of a WS connection that opens and then immediately closes
+    // with no useful diagnostic on the client side.
+    let console = m.open_console(id, q.cols, q.rows).await?;
+    Ok(ws.on_upgrade(move |socket| relay_console(socket, console)))
+}
+
+/// A console-resize control message sent as a WS *text* frame — see
+/// `agent_console`'s doc comment for why text/binary carry different
+/// meanings on this route.
+#[derive(Deserialize)]
+struct ConsoleResizeMessage {
+    cols: u16,
+    rows: u16,
+}
+
+/// Maps one inbound WS message to the `PtyFrame` it should become on the
+/// guest connection, or `None` if there's nothing to forward — a
+/// ping/pong, or a text frame that isn't valid `ConsoleResizeMessage` JSON
+/// (see `agent_console`'s doc comment: a malformed control message is
+/// dropped, not treated as an error). `Message::Close` is handled by the
+/// caller instead of here since it ends the whole relay loop rather than
+/// mapping to a frame. Split out from `relay_console` purely so this
+/// mapping is unit-testable without a real WebSocket or vsock connection.
+fn ws_message_to_pty_frame(
+    msg: &axum::extract::ws::Message,
+) -> Option<fluxvm_guest_protocol::PtyFrame> {
+    use axum::extract::ws::Message;
+    use fluxvm_guest_protocol::PtyFrame;
+    match msg {
+        Message::Binary(b) => Some(PtyFrame::Data(b.to_vec())),
+        Message::Text(t) => serde_json::from_str::<ConsoleResizeMessage>(t)
+            .ok()
+            .map(|r| PtyFrame::Resize {
+                cols: r.cols,
+                rows: r.rows,
+            }),
+        _ => None,
+    }
+}
+
+async fn relay_console(
+    socket: axum::extract::ws::WebSocket,
+    console: fluxvm_vsock_client::ConsoleStream,
+) {
+    use axum::extract::ws::Message;
+    use futures::{SinkExt, StreamExt};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let (mut ws_tx, mut ws_rx) = socket.split();
+    let (mut console_rx, mut console_tx) = tokio::io::split(console);
+
+    let to_console = async {
+        while let Some(Ok(msg)) = ws_rx.next().await {
+            if matches!(msg, Message::Close(_)) {
+                break;
+            }
+            let Some(frame) = ws_message_to_pty_frame(&msg) else {
+                continue;
+            };
+            if console_tx.write_all(&frame.encode()).await.is_err() {
+                break;
+            }
+        }
+    };
+    let to_ws = async {
+        let mut buf = [0u8; 4096];
+        loop {
+            match console_rx.read(&mut buf).await {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    if ws_tx
+                        .send(Message::Binary(buf[..n].to_vec().into()))
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            }
+        }
+    };
+    tokio::select! {
+        _ = to_console => {}
+        _ = to_ws => {}
+    }
+}
+
+/// Raw bytes to and from the VM's first serial port (QEMU `serial.sock`).
+/// Works without a guest agent — bootloader, kernel and getty output alike.
+/// Binary and text frames are both written verbatim; QEMU serves one client
+/// at a time.
+async fn serial_console(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+    ws: axum::extract::ws::WebSocketUpgrade,
+) -> ApiResult<Response> {
+    require_admin(role)?;
+    open_serial_ws(m, id, ws).await
+}
+
+async fn open_serial_ws(
+    m: Arc<VmManager>,
+    id: Uuid,
+    ws: axum::extract::ws::WebSocketUpgrade,
+) -> ApiResult<Response> {
+    let record = m.get(id).await?;
+    if record.backend != BackendKind::Qemu {
+        // Only QEMU has an interactive serial socket; every other backend's
+        // console output is captured into `log_path`, so stream that read-only.
+        if record.jail_path.is_some() {
+            return Err(anyhow::anyhow!(
+                "VM {id} runs under the Firecracker jailer, which disables the serial UART"
+            )
+            .into());
+        }
+        let file = tokio::fs::File::open(&record.log_path).await.map_err(|e| {
+            anyhow::anyhow!("opening console log {}: {e}", record.log_path.display())
+        })?;
+        return Ok(ws.on_upgrade(move |socket| relay_log_tail(socket, file)));
+    }
+    let stream = m.open_serial(id).await?;
+    Ok(ws.on_upgrade(move |socket| relay_serial(socket, stream)))
+}
+
+/// Single-use WebSocket tickets for the browser UI, which cannot put `Authorization` on a WebSocket. A ticket is
+/// 256 random bits, lives 30 seconds, is consumed by its first use and exists only in memory. It is minted by an
+/// authenticated admin request (`POST /v1/vms/{id}/ws-ticket`) and redeemed at `GET /console/ws/{ticket}`.
+const WS_TICKET_SECS: u64 = 30;
+const MAX_WS_TICKETS: usize = 256;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum WsKind {
+    /// The guest agent's interactive shell (`/v1/vms/{id}/console`).
+    Console,
+    /// The QEMU serial port, or a read-only console-log tail on other backends (`/v1/vms/{id}/serial`).
+    Serial,
+    /// The QEMU graphical console: the VM's VNC socket, raw RFB bytes in binary frames (what a browser VNC client speaks).
+    Vnc,
+}
+
+type WsTickets =
+    std::sync::Mutex<std::collections::HashMap<String, (Uuid, WsKind, std::time::Instant)>>;
+
+fn ws_tickets() -> &'static WsTickets {
+    static T: std::sync::OnceLock<WsTickets> = std::sync::OnceLock::new();
+    T.get_or_init(Default::default)
+}
+
+/// `None` when too many are outstanding (a flood, not a person).
+fn mint_ws_ticket(vm: Uuid, kind: WsKind) -> Option<String> {
+    let now = std::time::Instant::now();
+    let mut t = ws_tickets().lock().unwrap_or_else(|e| e.into_inner());
+    t.retain(|_, (_, _, exp)| *exp > now);
+    if t.len() >= MAX_WS_TICKETS {
+        return None;
+    }
+    let ticket = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
+    t.insert(
+        ticket.clone(),
+        (
+            vm,
+            kind,
+            now + std::time::Duration::from_secs(WS_TICKET_SECS),
+        ),
+    );
+    Some(ticket)
+}
+
+fn take_ws_ticket(ticket: &str) -> Option<(Uuid, WsKind)> {
+    let mut t = ws_tickets().lock().unwrap_or_else(|e| e.into_inner());
+    let (vm, kind, exp) = t.remove(ticket)?;
+    (exp > std::time::Instant::now()).then_some((vm, kind))
+}
+
+#[derive(Debug, Deserialize)]
+struct WsTicketRequest {
+    kind: WsKind,
+}
+
+/// `POST /v1/vms/{id}/ws-ticket` `{"kind": "console"|"serial"}` (admin): a 30 s single-use ticket for
+/// `GET /console/ws/{ticket}`.
+async fn vm_ws_ticket(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<WsTicketRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    let record = m.get(id).await?; // 404 for an unknown VM now, not when the socket opens
+    if req.kind == WsKind::Vnc {
+        // Say why there is no screen now, rather than minting a ticket that cannot be redeemed.
+        vnc_socket(
+            &record.backend,
+            record.status == VmStatus::Running,
+            &record.workspace,
+            id,
+        )?;
+    }
+    let ticket = mint_ws_ticket(id, req.kind).ok_or(ApiError {
+        status: StatusCode::TOO_MANY_REQUESTS,
+        message: "too many WebSocket tickets outstanding".into(),
+    })?;
+    Ok(Json(json!({
+        "ticket": ticket,
+        "expires_in": WS_TICKET_SECS,
+        "path": format!("/console/ws/{ticket}"),
+    })))
+}
+
+/// `GET /console/ws/{ticket}`: the ticket stands in for the bearer token (no `Authorization` on a browser
+/// WebSocket) and was minted by an authenticated, tenant-checked request. Unknown, expired or used: 404.
+async fn vm_ws_by_ticket(
+    State(m): State<Arc<VmManager>>,
+    Path(ticket): Path<String>,
+    Query(q): Query<ConsoleQuery>,
+    ws: axum::extract::ws::WebSocketUpgrade,
+) -> ApiResult<Response> {
+    let (id, kind) = take_ws_ticket(&ticket).ok_or(ApiError {
+        status: StatusCode::NOT_FOUND,
+        message: "WebSocket ticket not found".into(),
+    })?;
+    match kind {
+        WsKind::Console => open_agent_console(m, id, q, ws).await,
+        WsKind::Serial => open_serial_ws(m, id, ws).await,
+        WsKind::Vnc => open_vnc_ws(m, id, ws).await,
+    }
+}
+
+/// Where a running QEMU VM's VNC server listens: `vnc.sock` in its workspace, the path `fluxvm-qemu` starts it on. Anything
+/// else has no VNC socket, and the error says what to use instead.
+fn vnc_socket(
+    backend: &BackendKind,
+    running: bool,
+    workspace: &std::path::Path,
+    id: Uuid,
+) -> Result<PathBuf, ApiError> {
+    let conflict = |message: String| ApiError {
+        status: StatusCode::CONFLICT,
+        message,
+    };
+    if *backend != BackendKind::Qemu {
+        return Err(conflict(format!(
+            "VM {id} has no VNC server: only QEMU machines do. A vz guest's screen is `GET /v1/vms/{id}/screenshot`; other backends have the console"
+        )));
+    }
+    if !running {
+        return Err(conflict(format!(
+            "VM {id} is not running: start it to see its screen"
+        )));
+    }
+    let socket = workspace.join("vnc.sock");
+    if !socket.exists() {
+        return Err(conflict(format!(
+            "VM {id} has no VNC socket at {}",
+            socket.display()
+        )));
+    }
+    Ok(socket)
+}
+
+/// The bridge to a QEMU VM's VNC socket. A VNC client (noVNC) speaks RFB in binary WebSocket frames, which is what the raw
+/// relay carries; the VM's display is as sensitive as its console, so only the admin-minted ticket gets here.
+async fn open_vnc_ws(
+    m: Arc<VmManager>,
+    id: Uuid,
+    ws: axum::extract::ws::WebSocketUpgrade,
+) -> ApiResult<Response> {
+    let record = m.get(id).await?;
+    let socket = vnc_socket(
+        &record.backend,
+        record.status == VmStatus::Running,
+        &record.workspace,
+        id,
+    )?;
+    let stream = tokio::net::UnixStream::connect(&socket)
+        .await
+        .map_err(|e| anyhow::anyhow!("connecting to {}: {e}", socket.display()))?;
+    Ok(ws.on_upgrade(move |socket| relay_serial(socket, stream)))
+}
+
+/// Raw bytes to and from a `vz` VM's named console port (`apple.console_ports`). Binary and text frames are both written
+/// verbatim; a new connection replaces the previous one.
+async fn console_port(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path((id, name)): Path<(Uuid, String)>,
+    ws: axum::extract::ws::WebSocketUpgrade,
+) -> ApiResult<Response> {
+    require_admin(role)?;
+    let stream = m.open_console_port(id, &name).await?;
+    Ok(ws.on_upgrade(move |socket| relay_serial(socket, stream)))
+}
+
+/// Bytes of existing console output replayed before following new output.
+const SERIAL_LOG_REPLAY_BYTES: u64 = 64 * 1024;
+
+/// Read-only serial for non-QEMU backends: replay the tail of the console log,
+/// then follow it. Raw byte chunks (not lines) keep ANSI escapes and bare CRs
+/// intact. Inbound frames are discarded; Close ends the session.
+async fn relay_log_tail(socket: axum::extract::ws::WebSocket, mut file: tokio::fs::File) {
+    use axum::extract::ws::Message;
+    use futures::{SinkExt, StreamExt};
+    use tokio::io::{AsyncReadExt, AsyncSeekExt};
+
+    let (mut ws_tx, mut ws_rx) = socket.split();
+    let drain = async {
+        while let Some(Ok(msg)) = ws_rx.next().await {
+            if matches!(msg, Message::Close(_)) {
+                break;
+            }
+        }
+    };
+    let follow = async {
+        if let Ok(meta) = file.metadata().await {
+            let start = meta.len().saturating_sub(SERIAL_LOG_REPLAY_BYTES);
+            if file.seek(std::io::SeekFrom::Start(start)).await.is_err() {
+                return;
+            }
+        }
+        let mut buf = vec![0u8; 8192];
+        loop {
+            match file.read(&mut buf).await {
+                Ok(0) => tokio::time::sleep(std::time::Duration::from_millis(200)).await,
+                Ok(n) => {
+                    if ws_tx
+                        .send(Message::Binary(buf[..n].to_vec().into()))
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+    };
+    tokio::select! {
+        _ = drain => {}
+        _ = follow => {}
+    }
+}
+
+async fn relay_serial(socket: axum::extract::ws::WebSocket, stream: tokio::net::UnixStream) {
+    use axum::extract::ws::Message;
+    use futures::{SinkExt, StreamExt};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let (mut ws_tx, mut ws_rx) = socket.split();
+    let (mut rx, mut tx) = stream.into_split();
+    let to_serial = async {
+        while let Some(Ok(msg)) = ws_rx.next().await {
+            let bytes = match msg {
+                Message::Close(_) => break,
+                Message::Binary(b) => b.to_vec(),
+                Message::Text(t) => t.as_bytes().to_vec(),
+                _ => continue,
+            };
+            if tx.write_all(&bytes).await.is_err() {
+                break;
+            }
+        }
+    };
+    let to_ws = async {
+        let mut buf = [0u8; 4096];
+        loop {
+            match rx.read(&mut buf).await {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    if ws_tx
+                        .send(Message::Binary(buf[..n].to_vec().into()))
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            }
+        }
+    };
+    tokio::select! {
+        _ = to_serial => {}
+        _ = to_ws => {}
+    }
+}
+
+async fn delete_vm(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<StatusCode> {
+    require_admin(role)?;
+    m.delete(id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+async fn build_image(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Json(req): Json<BuildImageRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    Ok(Json(json!(image::build_image(&m.cfg, &req).await?)))
+}
+
+/// Convert an OVA/OVF/VMDK on the host to raw disks under
+/// `state_dir/images/imported/<name>/`, repairing the boot disk for virtio.
+async fn import_image(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Json(req): Json<image::import::ImportRequest>,
+) -> ApiResult<impl IntoResponse> {
+    require_admin(role)?;
+    Ok((
+        StatusCode::CREATED,
+        Json(json!(image::import::import_image(&m.cfg, &req).await?)),
+    ))
+}
+
+/// Read-only (no role check beyond a valid token, like other GET routes) —
+/// signing itself is a CLI/offline operation (`fluxvm catalog sign`), not
+/// exposed here, so private keys never touch this API's surface.
+async fn list_catalog(State(m): State<Arc<VmManager>>) -> ApiResult<Json<serde_json::Value>> {
+    Ok(Json(
+        json!({"items": image::catalog::list_with_verification(&m.cfg)?}),
+    ))
+}
+
+#[derive(Deserialize)]
+struct AddCatalogEntryRequest {
+    name: String,
+    /// Local path or `http(s)://` URL — see `CatalogEntry::source`.
+    source: String,
+    #[serde(default = "default_catalog_format")]
+    format: String,
+}
+fn default_catalog_format() -> String {
+    "qcow2".into()
+}
+
+async fn add_catalog_entry(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Json(req): Json<AddCatalogEntryRequest>,
+) -> ApiResult<impl IntoResponse> {
+    require_admin(role)?;
+    let entry = m
+        .add_catalog_entry(req.name, req.source, req.format)
+        .await?;
+    Ok((StatusCode::CREATED, Json(json!(entry))))
+}
+
+async fn remove_catalog_entry(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(name): Path<String>,
+) -> ApiResult<StatusCode> {
+    require_admin(role)?;
+    m.remove_catalog_entry(&name).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Deserialize)]
+struct RenameCatalogEntryRequest {
+    new_name: String,
+}
+async fn rename_catalog_entry(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(name): Path<String>,
+    Json(req): Json<RenameCatalogEntryRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    let entry = m.rename_catalog_entry(&name, &req.new_name).await?;
+    Ok(Json(json!(entry)))
+}
+
+#[derive(Deserialize)]
+struct CloneCatalogEntryRequest {
+    target_name: String,
+}
+async fn clone_catalog_entry(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(name): Path<String>,
+    Json(req): Json<CloneCatalogEntryRequest>,
+) -> ApiResult<impl IntoResponse> {
+    require_admin(role)?;
+    let entry = m.clone_catalog_entry(&name, &req.target_name).await?;
+    Ok((StatusCode::CREATED, Json(json!(entry))))
+}
+
+#[derive(Deserialize)]
+struct ExportCatalogEntryRequest {
+    path: PathBuf,
+}
+async fn export_catalog_entry(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(name): Path<String>,
+    Json(req): Json<ExportCatalogEntryRequest>,
+) -> ApiResult<StatusCode> {
+    require_admin(role)?;
+    m.export_catalog_entry(&name, &req.path).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Deserialize)]
+struct SetCatalogReadOnlyRequest {
+    read_only: bool,
+}
+async fn set_catalog_read_only(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(name): Path<String>,
+    Json(req): Json<SetCatalogReadOnlyRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    let entry = m.set_catalog_read_only(&name, req.read_only).await?;
+    Ok(Json(json!(entry)))
+}
+
+async fn clean_catalog(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    let removed = m.clean_catalog_downloads().await?;
+    Ok(Json(json!({"removed": removed})))
+}
+
+/// `GET /v1/vznets`: private VM-to-VM networks on this Mac, with their members.
+async fn list_vznets(
+    State(m): State<Arc<VmManager>>,
+    token_tenant: Option<Extension<TokenTenant>>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let tenant = token_tenant.map(|Extension(TokenTenant(t))| t);
+    Ok(Json(json!({"items": m.vznets(tenant.as_deref()).await})))
+}
+
+async fn list_oci_images(State(m): State<Arc<VmManager>>) -> ApiResult<Json<serde_json::Value>> {
+    Ok(Json(json!({"items": m.oci_list()?})))
+}
+
+#[derive(Deserialize)]
+struct OciPullRequest {
+    image: String,
+    /// `linux/arm64` (default) or `linux/amd64`.
+    #[serde(default)]
+    platform: Option<String>,
+}
+
+async fn pull_oci_image(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Json(req): Json<OciPullRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    Ok(Json(json!(
+        m.oci_pull(&req.image, req.platform.as_deref()).await?
+    )))
+}
+
+async fn remove_oci_image(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(what): Path<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    Ok(Json(json!({"removed": m.oci_remove(&what)?})))
+}
+
+async fn prune_oci_images(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    Ok(Json(json!(m.oci_prune().await?)))
+}
+
+async fn create_pool(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    token_tenant: Option<Extension<TokenTenant>>,
+    Json(mut spec): Json<PoolSpec>,
+) -> ApiResult<impl IntoResponse> {
+    require_admin(role)?;
+    // Every member ever backfilled from this pool inherits
+    // spec.template.tenant unchanged (create()'s own req.clone() into each
+    // member's VmRecord) -- enforcing it once here, exactly like
+    // create_vm's own token-tenant forcing above, means it's correct for
+    // every future member too, not just re-checked per member.
+    if let Some(Extension(TokenTenant(t))) = token_tenant {
+        if let Some(ref body) = spec.template.tenant
+            && body != &t
+        {
+            return Err(ApiError::forbidden(format!(
+                "token tenant '{t}' cannot create a pool for tenant '{body}'"
+            )));
+        }
+        spec.template.tenant = Some(t);
+    }
+    Ok((
+        StatusCode::CREATED,
+        Json(fluxvm_core::model::PoolView::from(
+            m.create_pool(spec).await?,
+        )),
+    ))
+}
+async fn list_pools(
+    State(m): State<Arc<VmManager>>,
+    token_tenant: Option<Extension<TokenTenant>>,
+) -> Json<serde_json::Value> {
+    // Mirrors list_vms/list_sandboxes: a tenant-scoped token only ever
+    // sees pools whose template.tenant matches its own -- previously
+    // every pool, of every tenant, was visible to any authenticated
+    // caller regardless of role or tenant.
+    let items: Vec<_> = m
+        .list_pools()
+        .await
+        .into_iter()
+        .filter(|p| match &token_tenant {
+            Some(Extension(TokenTenant(t))) => p.template.tenant.as_deref() == Some(t.as_str()),
+            None => true,
+        })
+        // See PoolView's doc comment: `size`/`members` alone don't say
+        // which is the target and which is what's ready right now.
+        .map(fluxvm_core::model::PoolView::from)
+        .collect();
+    Json(json!({ "items": items }))
+}
+
+/// Returns `p` only if it's visible to `token_tenant` (no tenant on the
+/// token, or an exact match) -- otherwise the generic "not found" every
+/// other cross-tenant lookup in this file already returns, never a
+/// distinguishable 403 (same reasoning tenant_guard_middleware's own 404
+/// already documents: a tenant-scoped caller shouldn't be able to tell
+/// "wrong tenant" apart from "doesn't exist" for a resource they have no
+/// business seeing either way).
+fn pool_visible_to(
+    p: &fluxvm_core::model::PoolRecord,
+    token_tenant: &Option<Extension<TokenTenant>>,
+) -> bool {
+    match token_tenant {
+        Some(Extension(TokenTenant(t))) => p.template.tenant.as_deref() == Some(t.as_str()),
+        None => true,
+    }
+}
+
+async fn get_pool(
+    State(m): State<Arc<VmManager>>,
+    Path(name): Path<String>,
+    token_tenant: Option<Extension<TokenTenant>>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let pool = m.get_pool(&name).await?;
+    if !pool_visible_to(&pool, &token_tenant) {
+        return Err(ApiError {
+            status: StatusCode::NOT_FOUND,
+            message: "pool not found".into(),
+        });
+    }
+    Ok(Json(json!(fluxvm_core::model::PoolView::from(pool))))
+}
+async fn delete_pool(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(name): Path<String>,
+    token_tenant: Option<Extension<TokenTenant>>,
+) -> ApiResult<StatusCode> {
+    require_admin(role)?;
+    let pool = m.get_pool(&name).await?;
+    if !pool_visible_to(&pool, &token_tenant) {
+        return Err(ApiError {
+            status: StatusCode::NOT_FOUND,
+            message: "pool not found".into(),
+        });
+    }
+    m.delete_pool(&name).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+async fn claim_pool(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(name): Path<String>,
+    token_tenant: Option<Extension<TokenTenant>>,
+    Query(rq): Query<ReadyQuery>,
+    Json(overrides): Json<ClaimOverrides>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let started = std::time::Instant::now();
+    require_admin(role)?;
+    let pool = m.get_pool(&name).await?;
+    if !pool_visible_to(&pool, &token_tenant) {
+        return Err(ApiError {
+            status: StatusCode::NOT_FOUND,
+            message: "pool not found".into(),
+        });
+    }
+    let token_tenant = token_tenant.map(|Extension(TokenTenant(t))| t);
+    let rec = m
+        .claim_from_pool(&name, overrides, token_tenant.as_deref())
+        .await?;
+    let mut body = json!(rec);
+    if rq.wants_exec() {
+        merge_first_command(
+            &mut body,
+            first_command_or_error(&m, rec.id, "claim", started).await,
+        );
+    }
+    Ok(Json(body))
+}
+
+/// Changes an existing pool's target size without deleting and recreating
+/// it from the same spec just to change one number -- see
+/// `VmManager::resize_pool`. Admin-only and tenant-scoped exactly like
+/// `delete_pool`/`claim_pool` above (a pool is name-keyed, so this needs
+/// its own `pool_visible_to` check same as those two).
+async fn resize_pool(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(name): Path<String>,
+    token_tenant: Option<Extension<TokenTenant>>,
+    Json(body): Json<PoolResizeRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    let pool = m.get_pool(&name).await?;
+    if !pool_visible_to(&pool, &token_tenant) {
+        return Err(ApiError {
+            status: StatusCode::NOT_FOUND,
+            message: "pool not found".into(),
+        });
+    }
+    Ok(Json(json!(fluxvm_core::model::PoolView::from(
+        m.resize_pool(&name, body.size).await?
+    ))))
+}
+
+// ZYVOR_SERVICE_FABRIC_V6_API
+async fn list_network_service_policies(
+    State(m): State<Arc<VmManager>>,
+) -> ApiResult<Json<serde_json::Value>> {
+    Ok(Json(
+        json!({"items": fluxvm_network::service_policy::list(&m.cfg)?}),
+    ))
+}
+
+async fn upsert_network_service_policy(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Json(spec): Json<fluxvm_network::service_policy::ServicePolicySpec>,
+) -> ApiResult<Json<fluxvm_network::service_policy::ServicePolicyStatus>> {
+    require_admin(role)?;
+    Ok(Json(fluxvm_network::service_policy::upsert(&m.cfg, spec)?))
+}
+
+async fn reconcile_network_service_policies(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    Ok(Json(
+        json!({"items": fluxvm_network::service_policy::reconcile(&m.cfg)?}),
+    ))
+}
+
+async fn get_network_service_policy(
+    State(m): State<Arc<VmManager>>,
+    Path(name): Path<String>,
+) -> ApiResult<Json<fluxvm_network::service_policy::ServicePolicySpec>> {
+    match fluxvm_network::service_policy::get(&m.cfg, &name)? {
+        Some(spec) => Ok(Json(spec)),
+        None => Err(ApiError {
+            status: StatusCode::NOT_FOUND,
+            message: format!("service policy '{name}' not found"),
+        }),
+    }
+}
+
+async fn delete_network_service_policy(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(name): Path<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    if !fluxvm_network::service_policy::delete(&m.cfg, &name)? {
+        return Err(ApiError {
+            status: StatusCode::NOT_FOUND,
+            message: format!("service policy '{name}' not found"),
+        });
+    }
+    Ok(Json(json!({"deleted": name})))
+}
+
+async fn network_service_envoy_contract(
+    State(m): State<Arc<VmManager>>,
+    Path(name): Path<String>,
+) -> ApiResult<Json<fluxvm_network::service_policy::EnvoyRedirectContract>> {
+    Ok(Json(fluxvm_network::service_policy::envoy_contract(
+        &m.cfg, &name,
+    )?))
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn error_codes_are_stable() {
+        use super::{StatusCode, error_code};
+        assert_eq!(error_code(StatusCode::NOT_FOUND), "NOT_FOUND");
+        assert_eq!(error_code(StatusCode::CONFLICT), "CONFLICT");
+        assert_eq!(error_code(StatusCode::SERVICE_UNAVAILABLE), "UNAVAILABLE");
+        assert_eq!(error_code(StatusCode::BAD_GATEWAY), "INTERNAL");
+        assert_eq!(
+            error_code(StatusCode::PRECONDITION_FAILED),
+            "PRECONDITION_FAILED"
+        );
+        assert_eq!(
+            error_code(StatusCode::PRECONDITION_REQUIRED),
+            "PRECONDITION_REQUIRED"
+        );
+        assert_eq!(error_code(StatusCode::NOT_IMPLEMENTED), "NOT_IMPLEMENTED");
+        assert_eq!(error_code(StatusCode::IM_A_TEAPOT), "ERROR");
+    }
+
+    /// `fluxctl explain` reads `fluxvm_core::error_codes::TABLE`; every status the API maps must be explained there.
+    #[test]
+    fn every_error_code_is_explained() {
+        use super::{StatusCode, error_code};
+        use fluxvm_core::error_codes::{for_status, lookup};
+        for status in [
+            400u16, 401, 403, 404, 409, 412, 413, 422, 428, 429, 500, 501, 502, 503,
+        ] {
+            let sent = error_code(StatusCode::from_u16(status).unwrap());
+            let e = lookup(sent)
+                .unwrap_or_else(|| panic!("{sent} (HTTP {status}) is not in error_codes::TABLE"));
+            assert_eq!(for_status(status).map(|e| e.code), Some(e.code), "{status}");
+        }
+        for special in ["STEP_UP_REQUIRED", "APPROVAL_REQUIRED"] {
+            assert!(lookup(special).is_some(), "{special}");
+        }
+    }
+
+    use super::*;
+    use fluxvm_core::model::{AgentSpec, CreateVmRequest, NetworkSpec};
+    use std::path::PathBuf;
+
+    fn fixture(backend: BackendKind, status: VmStatus, agent_enabled: bool) -> VmRecord {
+        // A path that does not exist and is unique to the fixture; a fixed `/tmp/x` broke these tests on any machine
+        // where something (even an empty file) already sat there.
+        let id = Uuid::new_v4();
+        let root = std::env::temp_dir().join(format!("fluxvm-fixture-{id}"));
+        VmRecord {
+            id,
+            name: "fixture".into(),
+            backend,
+            status,
+            pid: None,
+            created_at: chrono::Utc::now(),
+            expires_at: None,
+            workspace: root.clone(),
+            disk: root.join("root.qcow2"),
+            seed_disk: None,
+            tap_name: None,
+            control_socket: None,
+            log_path: root.join("console.log"),
+            error: None,
+            request: CreateVmRequest {
+                egress: None,
+                apple: None,
+                name: "fixture".into(),
+                tenant: None,
+                created_by_token: None,
+                backend,
+                image: PathBuf::from("/tmp/base.qcow2"),
+                vcpus: 1,
+                memory_mib: 512,
+                max_vcpus: None,
+                max_memory_mib: None,
+                loadvm_tag: None,
+                disk_size_gib: None,
+                kernel: None,
+                initrd: None,
+                firmware: None,
+                kernel_args: None,
+                network: NetworkSpec::None,
+                cloud_init: None,
+                ttl_seconds: None,
+                extra_args: vec![],
+                shared_memory: false,
+                root_disk_io: None,
+                disk_hotplug_ports: None,
+                agent: agent_enabled.then_some(AgentSpec {
+                    enabled: true,
+                    port: 17777,
+                    token: None,
+                }),
+                qga: None,
+                hyperv: false,
+                storage: Default::default(),
+                shared_folders: vec![],
+                data_disks: vec![],
+                cdroms: vec![],
+                numa_node: None,
+                cpuset: None,
+                hugepages: None,
+                vfio_devices: vec![],
+                numa: vec![],
+                balloon: None,
+                run_strategy: None,
+                on_crash: None,
+                power_schedule: None,
+                pod_uid: None,
+                secure_boot: None,
+                tpm: None,
+                net_mbit_limit: None,
+                net_pps_limit: None,
+                blk_mbit_limit: None,
+                blk_ops_limit: None,
+                cpu_template: None,
+                security_profile: Default::default(),
+                measurement_policy: None,
+            },
+            guest_cid: None,
+            jail_path: None,
+            vsock_socket: None,
+            qga_socket: None,
+            cgroup_path: None,
+            netns: None,
+            lvm_lv: None,
+            nbd_pid: None,
+            virtiofsd_pids: vec![],
+            swtpm_pid: None,
+            dhcp_leasefile: None,
+            guest_ip: None,
+            requested_security_profile: Default::default(),
+            achieved_security_profile: Default::default(),
+            security_evidence: None,
+            labels: Default::default(),
+            hibernation: None,
+        }
+    }
+
+    #[test]
+    fn counts_by_status_and_backend() {
+        let vms = vec![
+            fixture(BackendKind::Qemu, VmStatus::Running, true),
+            fixture(BackendKind::Qemu, VmStatus::Paused, false),
+            fixture(BackendKind::CloudHypervisor, VmStatus::Running, false),
+            fixture(BackendKind::Firecracker, VmStatus::Failed, false),
+        ];
+        let out = render_metrics(&vms);
+
+        assert!(out.contains("fluxvm_vms_total{status=\"running\"} 2"));
+        assert!(out.contains("fluxvm_vms_total{status=\"paused\"} 1"));
+        assert!(out.contains("fluxvm_vms_total{status=\"stopped\"} 0"));
+        assert!(out.contains("fluxvm_vms_total{status=\"failed\"} 1"));
+
+        assert!(out.contains("fluxvm_vms_by_backend{backend=\"qemu\"} 2"));
+        assert!(out.contains("fluxvm_vms_by_backend{backend=\"cloud-hypervisor\"} 1"));
+        assert!(out.contains("fluxvm_vms_by_backend{backend=\"firecracker\"} 1"));
+
+        assert!(out.contains("fluxvm_vms_agent_enabled 1"));
+    }
+
+    #[test]
+    fn renders_runner_usage_per_vm() {
+        use fluxvm_scheduler::vz_devices::VmRunnerUsage;
+        assert_eq!(render_runner_usage(&[]), "");
+        let id = Uuid::nil();
+        let out = render_runner_usage(&[VmRunnerUsage {
+            vm_id: id,
+            name: "a\"b".into(),
+            rss_bytes: 1_073_741_824,
+            cpu_seconds: 12.3456,
+            service_attributed: true,
+        }]);
+        assert!(out.contains("fluxvm_vm_runner_service_attributed{vm=\"00000000-0000-0000-0000-000000000000\",name=\"a\\\"b\"} 1\n"));
+        assert!(out.contains("the runner process only and the guest's CPU is not included"));
+        assert!(out.contains("# TYPE fluxvm_vm_runner_rss_bytes gauge\n"));
+        assert!(out.contains("# TYPE fluxvm_vm_runner_cpu_seconds_total counter\n"));
+        assert!(out.contains(&format!(
+            "fluxvm_vm_runner_rss_bytes{{vm=\"{id}\",name=\"a\\\"b\"}} 1073741824\n"
+        )));
+        assert!(out.contains("fluxvm_vm_runner_cpu_seconds_total{vm=\"00000000-0000-0000-0000-000000000000\",name=\"a\\\"b\"} 12.346\n"));
+    }
+
+    #[test]
+    fn empty_fleet_still_renders_zeroed_gauges() {
+        let out = render_metrics(&[]);
+        assert!(out.contains("fluxvm_vms_total{status=\"running\"} 0"));
+        assert!(out.contains("fluxvm_vms_agent_enabled 0"));
+    }
+
+    /// mTLS identity: certificate-derived, and `X-Client-Cert-*` headers only behind an opt-in.
+    mod mtls_identity {
+        use super::*;
+        use axum::body::Body;
+        use axum::http::Request;
+        use fluxvm_core::config::{AuthConfig, Config, TlsConfig};
+        use rcgen::{
+            BasicConstraints, CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, Issuer,
+            KeyPair, KeyUsagePurpose,
+        };
+        use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tower::ServiceExt;
+
+        // An admin-only route: a read-only identity gets 403, an admin gets 404 (no such file).
+        const ADMIN_ONLY: &str = "/v1/backups/nope.qcow2/root";
+
+        fn manager(tls: TlsConfig) -> Arc<VmManager> {
+            let dir = Box::leak(Box::new(tempfile::tempdir().unwrap()));
+            let cfg = Config {
+                state_dir: dir.path().join("state"),
+                run_dir: dir.path().join("run"),
+                auth: AuthConfig {
+                    require: true,
+                    ..Default::default()
+                },
+                tls,
+                ..Config::default()
+            };
+            VmManager::new(cfg).unwrap()
+        }
+
+        fn mtls_cfg(trust_proxy_headers: bool) -> TlsConfig {
+            TlsConfig {
+                cert: Some("server.crt".into()),
+                key: Some("server.key".into()),
+                client_ca: Some("ca.crt".into()),
+                trust_proxy_headers,
+            }
+        }
+
+        async fn status_with_headers(
+            tls: TlsConfig,
+            peer: Option<mtls::PeerCert>,
+            headers: &[(&str, &str)],
+        ) -> StatusCode {
+            let mut b = Request::get(ADMIN_ONLY);
+            for (k, v) in headers {
+                b = b.header(*k, *v);
+            }
+            let mut req = b.body(Body::empty()).unwrap();
+            if let Some(p) = peer {
+                req.extensions_mut().insert(p);
+            }
+            router(manager(tls)).oneshot(req).await.unwrap().status()
+        }
+
+        const FORGED: [(&str, &str); 3] = [
+            ("x-client-cert-cn", "mallory"),
+            ("x-client-cert-role", "admin"),
+            ("x-client-cert-tenant", "victim"),
+        ];
+
+        #[tokio::test]
+        async fn forged_headers_are_ignored_by_default() {
+            // No peer cert extension, default config: the headers must grant nothing.
+            assert_eq!(
+                status_with_headers(mtls_cfg(false), None, &FORGED).await,
+                StatusCode::UNAUTHORIZED
+            );
+        }
+
+        #[tokio::test]
+        async fn forged_headers_cannot_upgrade_a_certificate_identity() {
+            let ro = mtls::PeerCert(Some(mtls::PeerIdentity {
+                cn: "alice".into(),
+                role: Role::ReadOnly,
+                tenant: None,
+            }));
+            // Even with the proxy opt-in on, a connection we terminated ignores the headers.
+            for trust in [false, true] {
+                assert_eq!(
+                    status_with_headers(mtls_cfg(trust), Some(ro.clone()), &FORGED).await,
+                    StatusCode::FORBIDDEN,
+                    "trust_proxy_headers={trust}"
+                );
+            }
+        }
+
+        #[tokio::test]
+        async fn certificate_identity_sets_the_role() {
+            let admin = mtls::PeerCert(Some(mtls::PeerIdentity {
+                cn: "root".into(),
+                role: Role::Admin,
+                tenant: None,
+            }));
+            assert_eq!(
+                status_with_headers(mtls_cfg(false), Some(admin), &[]).await,
+                StatusCode::NOT_FOUND
+            );
+            // Verified by the CA but no usable CN: unauthenticated.
+            assert_eq!(
+                status_with_headers(mtls_cfg(false), Some(mtls::PeerCert(None)), &[]).await,
+                StatusCode::UNAUTHORIZED
+            );
+        }
+
+        #[tokio::test]
+        async fn trusted_proxy_headers_work_only_when_opted_in() {
+            assert_eq!(
+                status_with_headers(mtls_cfg(true), None, &FORGED).await,
+                StatusCode::NOT_FOUND
+            );
+            assert_eq!(
+                status_with_headers(mtls_cfg(true), None, &[("x-client-cert-cn", "bob")]).await,
+                StatusCode::FORBIDDEN,
+                "role defaults to read-only"
+            );
+            assert_eq!(
+                status_with_headers(mtls_cfg(true), None, &[]).await,
+                StatusCode::UNAUTHORIZED
+            );
+        }
+
+        fn name_params(cn: &str, ous: &[&str]) -> CertificateParams {
+            let mut p = CertificateParams::new(vec!["localhost".to_string()]).unwrap();
+            p.distinguished_name.push(DnType::CommonName, cn);
+            for ou in ous {
+                p.distinguished_name
+                    .push(DnType::OrganizationalUnitName, *ou);
+            }
+            p
+        }
+
+        #[test]
+        fn parses_cn_role_and_tenant_from_a_certificate() {
+            // rcgen keeps one value per RDN type, so one OU per certificate here; the
+            // multi-OU rules are covered in mtls.rs.
+            let key = KeyPair::generate().unwrap();
+            let der = |cn: &str, ous: &[&str]| {
+                name_params(cn, ous)
+                    .self_signed(&key)
+                    .unwrap()
+                    .der()
+                    .clone()
+            };
+            let id = |d: &CertificateDer<'_>| mtls::identity_from_cert_der(d.as_ref()).unwrap();
+            let admin = id(&der("alice", &["fluxvm-role=admin"]));
+            assert_eq!((admin.cn.as_str(), admin.role), ("alice", Role::Admin));
+            let t = id(&der("bob", &["fluxvm-tenant=acme"]));
+            assert_eq!(
+                (t.role, t.tenant.as_deref()),
+                (Role::ReadOnly, Some("acme"))
+            );
+            for ous in [&[][..], &["fluxvm-role=root"], &["eng"]] {
+                assert_eq!(id(&der("c", ous)).role, Role::ReadOnly, "{ous:?}");
+            }
+            assert_eq!(mtls::identity_from_cert_der(b"junk"), None);
+        }
+
+        struct Client {
+            cert: CertificateDer<'static>,
+            key: Vec<u8>,
+        }
+
+        fn issue_client(ca: &Issuer<'_, KeyPair>, cn: &str, ous: &[&str]) -> Client {
+            let key = KeyPair::generate().unwrap();
+            let mut p = name_params(cn, ous);
+            p.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
+            let cert = p.signed_by(&key, ca).unwrap();
+            Client {
+                cert: cert.der().clone(),
+                key: key.serialize_der(),
+            }
+        }
+
+        /// Real handshake: `IdentityAcceptor` must derive the identity from the presented cert
+        /// and ignore forged headers sent on the same connection.
+        #[tokio::test]
+        async fn handshake_derives_identity_from_the_client_certificate() {
+            let provider = Arc::new(rustls::crypto::ring::default_provider());
+            let ca_key = KeyPair::generate().unwrap();
+            let mut ca_params = CertificateParams::new(vec![]).unwrap();
+            ca_params
+                .distinguished_name
+                .push(DnType::CommonName, "test-ca");
+            ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+            ca_params.key_usages = vec![KeyUsagePurpose::KeyCertSign];
+            let ca_cert = ca_params.self_signed(&ca_key).unwrap();
+            let ca = Issuer::new(ca_params, ca_key);
+
+            let srv_key = KeyPair::generate().unwrap();
+            let mut sp = name_params("server", &[]);
+            sp.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
+            let srv_cert = sp.signed_by(&srv_key, &ca).unwrap();
+
+            let mut roots = rustls::RootCertStore::empty();
+            roots.add(ca_cert.der().clone()).unwrap();
+            let roots = Arc::new(roots);
+            let verifier = rustls::server::WebPkiClientVerifier::builder_with_provider(
+                roots.clone(),
+                provider.clone(),
+            )
+            .build()
+            .unwrap();
+            let server_cfg = rustls::ServerConfig::builder_with_provider(provider.clone())
+                .with_safe_default_protocol_versions()
+                .unwrap()
+                .with_client_cert_verifier(verifier)
+                .with_single_cert(
+                    vec![srv_cert.der().clone()],
+                    PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(srv_key.serialize_der())),
+                )
+                .unwrap();
+
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let addr = listener.local_addr().unwrap();
+            let app = router(manager(mtls_cfg(false)));
+            tokio::spawn(async move {
+                axum_server::from_tcp(listener)
+                    .unwrap()
+                    .acceptor(mtls::IdentityAcceptor::new(Arc::new(server_cfg)))
+                    .serve(app.into_make_service())
+                    .await
+                    .unwrap();
+            });
+
+            let admin = issue_client(&ca, "root", &["fluxvm-role=admin"]);
+            let reader = issue_client(&ca, "alice", &[]);
+
+            let get = |client: Option<&Client>| {
+                let roots = roots.clone();
+                let provider = provider.clone();
+                let cc = rustls::ClientConfig::builder_with_provider(provider)
+                    .with_safe_default_protocol_versions()
+                    .unwrap()
+                    .with_root_certificates(roots);
+                let cc = match client {
+                    Some(c) => cc
+                        .with_client_auth_cert(
+                            vec![c.cert.clone()],
+                            PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(c.key.clone())),
+                        )
+                        .unwrap(),
+                    None => cc.with_no_client_auth(),
+                };
+                async move {
+                    let tcp = tokio::net::TcpStream::connect(addr).await.ok()?;
+                    let conn = tokio_rustls::TlsConnector::from(Arc::new(cc));
+                    let mut tls = conn
+                        .connect(ServerName::try_from("localhost").unwrap(), tcp)
+                        .await
+                        .ok()?;
+                    let req = format!(
+                        "GET {ADMIN_ONLY} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\
+                         X-Client-Cert-CN: mallory\r\nX-Client-Cert-Role: admin\r\n\r\n"
+                    );
+                    tls.write_all(req.as_bytes()).await.ok()?;
+                    let mut buf = Vec::new();
+                    // A server alert for a rejected client cert surfaces as a read error.
+                    tls.read_to_end(&mut buf).await.ok()?;
+                    let head = String::from_utf8_lossy(&buf);
+                    head.split_whitespace().nth(1)?.parse::<u16>().ok()
+                }
+            };
+            assert_eq!(
+                get(Some(&reader)).await,
+                Some(403),
+                "read-only cert + forged admin header"
+            );
+            assert_eq!(get(Some(&admin)).await, Some(404), "admin OU cert");
+            // Without a client certificate the handshake itself fails.
+            assert_eq!(get(None).await, None);
+        }
+    }
+
+    mod auth {
+        use super::*;
+        use axum::body::Body;
+        use axum::http::Request;
+        use fluxvm_core::config::{ApiToken, AuthConfig, Config};
+        use tower::ServiceExt;
+
+        fn manager(auth: AuthConfig) -> Arc<VmManager> {
+            let dir = tempfile::tempdir().unwrap();
+            // Leak: the tempdir must outlive every VmManager call in the
+            // test, and these tests are short-lived processes anyway.
+            let dir = Box::leak(Box::new(dir));
+            let cfg = Config {
+                state_dir: dir.path().join("state"),
+                run_dir: dir.path().join("run"),
+                auth,
+                ..Config::default()
+            };
+            VmManager::new(cfg).unwrap()
+        }
+
+        async fn status_for(
+            app: Router,
+            method: &str,
+            uri: &str,
+            bearer: Option<&str>,
+        ) -> StatusCode {
+            request(app, method, uri, bearer, None).await
+        }
+
+        /// `body` is sent as `application/json` when present — needed for
+        /// any route whose handler takes a `Json<T>` extractor, since axum
+        /// rejects with 415 during extraction (before the handler body, and
+        /// so before this module's `require_admin` role check, ever runs)
+        /// if the request has no JSON content-type at all.
+        async fn request(
+            app: Router,
+            method: &str,
+            uri: &str,
+            bearer: Option<&str>,
+            body: Option<&str>,
+        ) -> StatusCode {
+            let mut builder = Request::builder().method(method).uri(uri);
+            if let Some(t) = bearer {
+                builder = builder.header(header::AUTHORIZATION, format!("Bearer {t}"));
+            }
+            let body = match body {
+                Some(b) => {
+                    builder = builder.header(header::CONTENT_TYPE, "application/json");
+                    Body::from(b.to_string())
+                }
+                None => Body::empty(),
+            };
+            let req = builder.body(body).unwrap();
+            app.oneshot(req).await.unwrap().status()
+        }
+
+        #[tokio::test]
+        async fn backup_root_download_streams_the_root_qcow2() {
+            let dir = Box::leak(Box::new(tempfile::tempdir().unwrap()));
+            let backups = dir.path().join("state/backups");
+            std::fs::create_dir_all(backups.join("db-1")).unwrap();
+            std::fs::write(backups.join("web-1.qcow2"), b"web-root").unwrap();
+            std::fs::write(backups.join("db-1/root.qcow2"), b"db-root").unwrap();
+            std::fs::write(backups.join("db-1/data.qcow2"), b"db-data").unwrap();
+            let auth = AuthConfig {
+                tokens: vec![
+                    ApiToken {
+                        token: "admin".into(),
+                        role: Role::Admin,
+                        name: None,
+                        tenant: None,
+                    },
+                    ApiToken {
+                        token: "ro".into(),
+                        role: Role::ReadOnly,
+                        name: None,
+                        tenant: None,
+                    },
+                ],
+                ..Default::default()
+            };
+            let m = VmManager::new(Config {
+                state_dir: dir.path().join("state"),
+                run_dir: dir.path().join("run"),
+                auth,
+                ..Config::default()
+            })
+            .unwrap();
+            let get = |uri: &str, token: &str| {
+                Request::builder()
+                    .uri(uri)
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap()
+            };
+            for (name, want) in [("web-1.qcow2", "web-root"), ("db-1", "db-root")] {
+                let resp = router(m.clone())
+                    .oneshot(get(&format!("/v1/backups/{name}/root"), "admin"))
+                    .await
+                    .unwrap();
+                assert_eq!(resp.status(), StatusCode::OK, "{name}");
+                let body = axum::body::to_bytes(resp.into_body(), 1 << 20)
+                    .await
+                    .unwrap();
+                assert_eq!(&body[..], want.as_bytes());
+            }
+            let resp = router(m.clone())
+                .oneshot(get("/v1/backups/nope.qcow2/root", "admin"))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+            let resp = router(m)
+                .oneshot(get("/v1/backups/web-1.qcow2/root", "ro"))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        }
+
+        #[tokio::test]
+        async fn cbt_routes_are_admin_only_and_delete_by_manifest() {
+            let dir = Box::leak(Box::new(tempfile::tempdir().unwrap()));
+            let bucket = dir.path().join("bucket");
+            let backup = bucket.join("ns/vm/c1/00000000-b0");
+            std::fs::create_dir_all(&backup).unwrap();
+            std::fs::write(backup.join("root.qcow2"), b"layer").unwrap();
+            let manifest = json!({
+                "version": 1, "backupId": "b0", "chainId": "c1", "sequence": 0,
+                "kind": "full", "parent": null, "vmName": "vm",
+                "createdAt": "2026-10-11T00:00:00Z", "quiesced": false,
+                "disks": [{"name": "root", "key": "ns/vm/c1/00000000-b0/root.qcow2",
+                    "virtualSize": 5, "storedSize": 5, "changedBytes": 5, "sha256": "x"}],
+                "consolidates": [], "retainUntil": null
+            });
+            std::fs::write(backup.join("manifest.json"), manifest.to_string()).unwrap();
+            let app = router(manager(AuthConfig {
+                tokens: vec![
+                    ApiToken {
+                        token: "admin".into(),
+                        role: Role::Admin,
+                        name: None,
+                        tenant: None,
+                    },
+                    ApiToken {
+                        token: "ro".into(),
+                        role: Role::ReadOnly,
+                        name: None,
+                        tenant: None,
+                    },
+                ],
+                ..Default::default()
+            }));
+            let target = json!({"type": "dir", "path": bucket});
+            let delete =
+                json!({"target": target, "manifestKeys": ["ns/vm/c1/00000000-b0/manifest.json"]});
+            assert_eq!(
+                request(
+                    app.clone(),
+                    "POST",
+                    "/v1/cbt/delete",
+                    Some("ro"),
+                    Some(&delete.to_string())
+                )
+                .await,
+                StatusCode::FORBIDDEN
+            );
+            assert_eq!(
+                request(
+                    app.clone(),
+                    "POST",
+                    "/v1/cbt/delete",
+                    Some("admin"),
+                    Some(&delete.to_string())
+                )
+                .await,
+                StatusCode::OK
+            );
+            assert!(!backup.join("root.qcow2").exists());
+            assert!(!backup.join("manifest.json").exists());
+            assert_eq!(
+                status_for(
+                    app.clone(),
+                    "GET",
+                    &format!("/v1/cbt-jobs/{}", Uuid::new_v4()),
+                    Some("admin")
+                )
+                .await,
+                StatusCode::NOT_FOUND
+            );
+            let bad_chain = json!({
+                "target": target, "prefix": "ns/vm", "chainId": "../x", "sequence": 0,
+                "backupId": "b1", "mode": "full"
+            });
+            assert_eq!(
+                request(
+                    app,
+                    "POST",
+                    &format!("/v1/vms/{}/cbt-backup", Uuid::new_v4()),
+                    Some("admin"),
+                    Some(&bad_chain.to_string())
+                )
+                .await,
+                StatusCode::BAD_REQUEST
+            );
+        }
+
+        #[tokio::test]
+        async fn auth_disabled_allows_unauthenticated_requests() {
+            let app = router(manager(AuthConfig::default()));
+            assert_eq!(
+                status_for(app, "GET", "/v1/vms", None).await,
+                StatusCode::OK
+            );
+        }
+
+        #[tokio::test]
+        async fn missing_token_is_rejected_when_auth_is_enabled() {
+            let auth = AuthConfig {
+                tokens: vec![ApiToken {
+                    token: "secret".into(),
+                    role: Role::Admin,
+                    name: None,
+                    tenant: None,
+                }],
+                ..Default::default()
+            };
+            let app = router(manager(auth));
+            assert_eq!(
+                status_for(app, "GET", "/v1/vms", None).await,
+                StatusCode::UNAUTHORIZED
+            );
+        }
+
+        #[tokio::test]
+        async fn the_dashboard_files_load_without_a_token_but_its_data_does_not() {
+            let auth = AuthConfig {
+                tokens: vec![ApiToken {
+                    token: "secret".into(),
+                    role: Role::Admin,
+                    name: None,
+                    tenant: None,
+                }],
+                ..Default::default()
+            };
+            let m = manager(auth);
+            for path in CONSOLE_PATHS {
+                let resp = router(m.clone())
+                    .oneshot(Request::get(path).body(Body::empty()).unwrap())
+                    .await
+                    .unwrap();
+                assert_eq!(resp.status(), StatusCode::OK, "{path}");
+                let csp = resp.headers()[header::CONTENT_SECURITY_POLICY]
+                    .to_str()
+                    .unwrap();
+                assert!(
+                    csp.contains("script-src 'self'") && csp.contains("frame-ancestors 'none'")
+                );
+            }
+            let post = Request::post("/console/app.js")
+                .body(Body::empty())
+                .unwrap();
+            assert_ne!(
+                router(m.clone()).oneshot(post).await.unwrap().status(),
+                StatusCode::OK
+            );
+            assert_eq!(
+                status_for(router(m), "GET", "/v1/vms", None).await,
+                StatusCode::UNAUTHORIZED
+            );
+        }
+
+        #[tokio::test]
+        async fn studio_serves_the_spa_without_a_token_and_never_html_for_a_missing_asset() {
+            let auth = AuthConfig {
+                tokens: vec![ApiToken {
+                    token: "secret".into(),
+                    role: Role::Admin,
+                    name: None,
+                    tenant: None,
+                }],
+                ..Default::default()
+            };
+            let m = manager(auth);
+            let get = |path: &'static str| {
+                let m = m.clone();
+                async move {
+                    router(m)
+                        .oneshot(Request::get(path).body(Body::empty()).unwrap())
+                        .await
+                        .unwrap()
+                }
+            };
+            // `/console` must redirect: the app's asset URLs are relative to `/console/`.
+            let r = get("/console").await;
+            assert_eq!(r.status(), StatusCode::PERMANENT_REDIRECT);
+            assert_eq!(r.headers()[header::LOCATION], "/console/");
+            // The entry point and a client-side route both get index.html.
+            for path in ["/console/", "/console/machines/abc"] {
+                let r = get(path).await;
+                assert_eq!(r.status(), StatusCode::OK, "{path}");
+                assert!(
+                    r.headers()[header::CONTENT_TYPE]
+                        .to_str()
+                        .unwrap()
+                        .starts_with("text/html")
+                );
+                let csp = r.headers()[header::CONTENT_SECURITY_POLICY]
+                    .to_str()
+                    .unwrap();
+                assert!(
+                    csp.contains("script-src 'self'") && !csp.contains("script-src 'self' 'unsafe")
+                );
+            }
+            // Assets are JavaScript/CSS with an ETag; a stale asset URL is a 404, not HTML-as-JS.
+            let js = get("/console/assets/app.js").await;
+            assert_eq!(js.status(), StatusCode::OK);
+            assert!(
+                js.headers()[header::CONTENT_TYPE]
+                    .to_str()
+                    .unwrap()
+                    .starts_with("text/javascript")
+            );
+            let etag = js.headers()[header::ETAG].clone();
+            assert_eq!(
+                get("/console/assets/gone-123.js").await.status(),
+                StatusCode::NOT_FOUND
+            );
+            let cached = router(m.clone())
+                .oneshot(
+                    Request::get("/console/assets/app.js")
+                        .header(header::IF_NONE_MATCH, etag)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(cached.status(), StatusCode::NOT_MODIFIED);
+            // Static files are read-only, and the data behind them still needs a token.
+            let post = Request::post("/console/assets/app.js")
+                .body(Body::empty())
+                .unwrap();
+            assert_ne!(
+                router(m.clone()).oneshot(post).await.unwrap().status(),
+                StatusCode::OK
+            );
+            assert_eq!(
+                status_for(router(m), "GET", "/v1/vms", None).await,
+                StatusCode::UNAUTHORIZED
+            );
+        }
+
+        #[test]
+        fn ws_tickets_are_single_use_and_bound_to_a_vm_and_kind() {
+            let vm = Uuid::new_v4();
+            let t = mint_ws_ticket(vm, WsKind::Serial).unwrap();
+            assert_eq!(t.len(), 64);
+            assert_eq!(take_ws_ticket("not-a-ticket"), None);
+            assert_eq!(take_ws_ticket(&t), Some((vm, WsKind::Serial)));
+            assert_eq!(take_ws_ticket(&t), None, "a ticket works once");
+        }
+
+        #[test]
+        fn a_vnc_ticket_is_bound_to_its_vm_and_kind() {
+            let vm = Uuid::new_v4();
+            let t = mint_ws_ticket(vm, WsKind::Vnc).unwrap();
+            assert_eq!(take_ws_ticket(&t), Some((vm, WsKind::Vnc)));
+            assert_eq!(take_ws_ticket(&t), None, "a ticket works once");
+            let parsed: WsTicketRequest = serde_json::from_str(r#"{"kind":"vnc"}"#).unwrap();
+            assert_eq!(parsed.kind, WsKind::Vnc);
+        }
+
+        #[test]
+        fn the_vnc_socket_lookup_says_what_is_missing() {
+            let dir = tempfile::tempdir().unwrap();
+            let id = Uuid::nil();
+            let msg = |r: Result<PathBuf, ApiError>| {
+                let e = r.unwrap_err();
+                assert_eq!(e.status, StatusCode::CONFLICT);
+                e.message
+            };
+            assert!(
+                msg(vnc_socket(&BackendKind::Qemu, true, dir.path(), id)).contains("no VNC socket")
+            );
+            assert!(
+                msg(vnc_socket(&BackendKind::Qemu, false, dir.path(), id)).contains("not running")
+            );
+            let other = msg(vnc_socket(&BackendKind::Firecracker, true, dir.path(), id));
+            assert!(
+                other.contains("only QEMU") && other.contains("screenshot"),
+                "{other}"
+            );
+            std::fs::write(dir.path().join("vnc.sock"), b"").unwrap();
+            assert_eq!(
+                vnc_socket(&BackendKind::Qemu, true, dir.path(), id).unwrap(),
+                dir.path().join("vnc.sock")
+            );
+        }
+
+        /// Against a real QEMU VNC server: `qemu-system-x86_64 -display none -vnc unix:/tmp/x/vnc.sock ...` then
+        /// `FLUXVM_VNC_LIVE_SOCKET=/tmp/x/vnc.sock cargo test -p fluxvm-api --lib vnc_live -- --ignored --nocapture`.
+        /// The relay carries a full RFB 3.8 handshake to ServerInit, and then a FramebufferUpdate of real pixels.
+        #[tokio::test]
+        #[ignore = "needs a running QEMU with a VNC unix socket"]
+        async fn vnc_live_a_real_qemu_screen_comes_through_the_relay() {
+            use axum::{Router, extract::ws::WebSocketUpgrade, routing::get};
+            use futures::{SinkExt, StreamExt};
+            use tokio_tungstenite::tungstenite::Message as Wire;
+
+            let path = std::env::var("FLUXVM_VNC_LIVE_SOCKET").expect("FLUXVM_VNC_LIVE_SOCKET");
+            let app = Router::new().route(
+                "/vnc",
+                get(move |ws: WebSocketUpgrade| {
+                    let path = path.clone();
+                    async move {
+                        let stream = tokio::net::UnixStream::connect(&path).await.unwrap();
+                        ws.on_upgrade(move |socket| relay_serial(socket, stream))
+                    }
+                }),
+            );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/vnc"))
+                .await
+                .unwrap();
+            let mut got: Vec<u8> = Vec::new();
+            async fn need(
+                ws: &mut tokio_tungstenite::WebSocketStream<
+                    tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+                >,
+                got: &mut Vec<u8>,
+                n: usize,
+            ) {
+                while got.len() < n {
+                    let next =
+                        tokio::time::timeout(std::time::Duration::from_secs(20), ws.next()).await;
+                    match next
+                        .expect("timed out waiting for QEMU")
+                        .expect("closed")
+                        .unwrap()
+                    {
+                        Wire::Binary(b) => got.extend_from_slice(&b),
+                        other => panic!("expected binary, got {other:?}"),
+                    }
+                }
+            }
+            need(&mut ws, &mut got, 12).await;
+            let greeting = String::from_utf8_lossy(&got[..12]).into_owned();
+            println!("server greeting: {greeting:?}");
+            assert!(greeting.starts_with("RFB 003.00"));
+            ws.send(Wire::Binary(b"RFB 003.008\n".to_vec().into()))
+                .await
+                .unwrap();
+            got.drain(..12);
+            need(&mut ws, &mut got, 2).await;
+            let types = got[1..1 + usize::from(got[0])].to_vec();
+            println!("security types offered: {types:?}");
+            assert!(
+                types.contains(&1),
+                "QEMU's unix-socket VNC offers no authentication"
+            );
+            ws.send(Wire::Binary(vec![1].into())).await.unwrap(); // choose None
+            got.clear();
+            need(&mut ws, &mut got, 4).await;
+            assert_eq!(&got[..4], &[0, 0, 0, 0], "SecurityResult OK");
+            got.clear();
+            ws.send(Wire::Binary(vec![1].into())).await.unwrap(); // ClientInit: share the desktop
+            need(&mut ws, &mut got, 24).await; // width, height, pixel format, name length
+            let (w, h) = (
+                u16::from_be_bytes([got[0], got[1]]),
+                u16::from_be_bytes([got[2], got[3]]),
+            );
+            let name_len = u32::from_be_bytes([got[20], got[21], got[22], got[23]]) as usize;
+            need(&mut ws, &mut got, 24 + name_len).await;
+            println!(
+                "ServerInit: {w} x {h}, name {:?}",
+                String::from_utf8_lossy(&got[24..24 + name_len])
+            );
+            assert!(w >= 320 && h >= 200, "a real framebuffer size: {w}x{h}");
+            got.clear();
+            // SetEncodings: Raw only, then ask for the whole screen.
+            let mut req = vec![2, 0, 0, 1, 0, 0, 0, 0];
+            req.extend_from_slice(&[3, 0, 0, 0, 0, 0]);
+            req.extend_from_slice(&w.to_be_bytes());
+            req.extend_from_slice(&h.to_be_bytes());
+            ws.send(Wire::Binary(req.into())).await.unwrap();
+            need(&mut ws, &mut got, 16).await; // message type 0, padding, rect count, first rect header
+            assert_eq!(got[0], 0, "a FramebufferUpdate");
+            let (rw, rh) = (
+                u16::from_be_bytes([got[8], got[9]]),
+                u16::from_be_bytes([got[10], got[11]]),
+            );
+            println!(
+                "first rectangle: {rw} x {rh}, encoding {}",
+                i32::from_be_bytes([got[12], got[13], got[14], got[15]])
+            );
+            assert!(rw > 0 && rh > 0);
+        }
+
+        /// A stand-in RFB server on one end of a socket pair, the relay and a real WebSocket client on the other: the greeting
+        /// reaches the client, the client's reply reaches the server, and a payload bigger than the relay's read buffer
+        /// arrives whole.
+        #[tokio::test]
+        async fn the_vnc_relay_carries_rfb_bytes_both_ways() {
+            use axum::{Router, extract::ws::WebSocketUpgrade, routing::get};
+            use futures::{SinkExt, StreamExt};
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            use tokio_tungstenite::tungstenite::Message as Wire;
+
+            const BIG: usize = 70_000;
+            let app = Router::new().route(
+                "/vnc",
+                get(|ws: WebSocketUpgrade| async move {
+                    let (ours, mut server) = tokio::net::UnixStream::pair().unwrap();
+                    tokio::spawn(async move {
+                        server.write_all(b"RFB 003.008\n").await.unwrap();
+                        let mut version = [0u8; 12];
+                        server.read_exact(&mut version).await.unwrap();
+                        assert_eq!(&version, b"RFB 003.008\n");
+                        server.write_all(&[1, 1]).await.unwrap(); // one security type: None
+                        let mut big = vec![0u8; BIG];
+                        server.read_exact(&mut big).await.unwrap();
+                        let sum: u64 = big.iter().map(|b| u64::from(*b)).sum();
+                        server.write_all(&sum.to_be_bytes()).await.unwrap();
+                    });
+                    ws.on_upgrade(move |socket| relay_serial(socket, ours))
+                }),
+            );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/vnc"))
+                .await
+                .unwrap();
+            let mut received = Vec::new();
+            let read_n = async |ws: &mut _, n: usize, received: &mut Vec<u8>| {
+                let ws: &mut tokio_tungstenite::WebSocketStream<_> = ws;
+                while received.len() < n {
+                    match ws.next().await.expect("the relay closed early").unwrap() {
+                        Wire::Binary(b) => received.extend_from_slice(&b),
+                        other => panic!("expected binary frames, got {other:?}"),
+                    }
+                }
+            };
+            read_n(&mut ws, 12, &mut received).await;
+            assert_eq!(&received[..12], b"RFB 003.008\n");
+            ws.send(Wire::Binary(b"RFB 003.008\n".to_vec().into()))
+                .await
+                .unwrap();
+            read_n(&mut ws, 14, &mut received).await;
+            assert_eq!(&received[12..14], &[1, 1]);
+            let payload: Vec<u8> = (0..BIG).map(|i| (i % 251) as u8).collect();
+            ws.send(Wire::Binary(payload.clone().into())).await.unwrap();
+            read_n(&mut ws, 22, &mut received).await;
+            let want: u64 = payload.iter().map(|b| u64::from(*b)).sum();
+            assert_eq!(&received[14..22], &want.to_be_bytes());
+        }
+
+        #[tokio::test]
+        async fn ws_ticket_routes_need_a_token_to_mint_but_not_to_redeem() {
+            let auth = AuthConfig {
+                tokens: vec![ApiToken {
+                    token: "secret".into(),
+                    role: Role::Admin,
+                    name: None,
+                    tenant: None,
+                }],
+                ..Default::default()
+            };
+            let m = manager(auth);
+            let id = Uuid::new_v4();
+            let mint = Request::post(format!("/v1/vms/{id}/ws-ticket"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"kind":"console"}"#))
+                .unwrap();
+            assert_eq!(
+                router(m.clone()).oneshot(mint).await.unwrap().status(),
+                StatusCode::UNAUTHORIZED
+            );
+            // Redeeming is exempt from the bearer check (the ticket is the credential), so it must reach the WebSocket
+            // handler: never a 401, and never the SPA's index.html. A plain request has no upgrade handshake, so axum
+            // rejects it with 400 before the ticket is looked at; an unknown ticket is a 404 once a real client upgrades
+            // (`take_ws_ticket` returning `None`, covered above).
+            let resp = router(m)
+                .oneshot(
+                    Request::get("/console/ws/nope")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_ne!(resp.status(), StatusCode::UNAUTHORIZED);
+            assert!(
+                !resp
+                    .headers()
+                    .get(header::CONTENT_TYPE)
+                    .is_some_and(|v| v.to_str().unwrap_or("").starts_with("text/html")),
+                "the SPA fallback must not shadow /console/ws/{{ticket}}"
+            );
+        }
+
+        #[tokio::test]
+        async fn guard_status_route_is_authenticated_and_read_only() {
+            let auth = AuthConfig {
+                tokens: vec![ApiToken {
+                    token: "ro-secret".into(),
+                    role: Role::ReadOnly,
+                    name: Some("dash".into()),
+                    tenant: None,
+                }],
+                ..Default::default()
+            };
+            let m = manager(auth);
+            let guard = format!("/v1/vms/{}/guard", Uuid::nil());
+            let plain = format!("/v1/vms/{}", Uuid::nil());
+            assert_eq!(
+                status_for(router(m.clone()), "GET", &guard, None).await,
+                StatusCode::UNAUTHORIZED
+            );
+            // A read-only token reaches it (no 401/403) and an unknown VM is answered exactly like
+            // `GET /v1/vms/{id}` answers it.
+            let got = status_for(router(m.clone()), "GET", &guard, Some("ro-secret")).await;
+            let want = status_for(router(m), "GET", &plain, Some("ro-secret")).await;
+            assert_eq!(got, want);
+            assert_ne!(got, StatusCode::UNAUTHORIZED);
+            assert_ne!(got, StatusCode::FORBIDDEN);
+            assert_ne!(got, StatusCode::OK);
+        }
+
+        #[tokio::test]
+        async fn exec_requires_a_totp_code_for_an_mfa_token_but_reads_do_not() {
+            use fluxvm_core::config::{MfaRule, MfaScope};
+            let dir = tempfile::tempdir().unwrap();
+            let secret_file = dir.path().join("totp");
+            std::fs::write(&secret_file, "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ").unwrap();
+            let auth = AuthConfig {
+                tokens: vec![ApiToken {
+                    token: "ops-secret".into(),
+                    role: Role::Admin,
+                    name: Some("ops-mfa".into()),
+                    tenant: None,
+                }],
+                mfa: vec![MfaRule {
+                    token: "ops-mfa".into(),
+                    totp_secret_file: secret_file.to_string_lossy().into(),
+                    require: MfaScope::Exec,
+                }],
+                ..Default::default()
+            };
+            let m = manager(auth);
+            let uri = format!("/v1/vms/{}/agent", Uuid::nil());
+            let send = |code: Option<String>| {
+                let mut b = Request::post(uri.clone())
+                    .header(header::AUTHORIZATION, "Bearer ops-secret")
+                    .header(header::CONTENT_TYPE, "application/json");
+                if let Some(c) = code {
+                    b = b.header("x-fluxvm-totp", c);
+                }
+                router(m.clone()).oneshot(b.body(Body::from("{}")).unwrap())
+            };
+            let missing = send(None).await.unwrap();
+            assert_eq!(missing.status(), StatusCode::UNAUTHORIZED);
+            assert!(missing.headers().contains_key(header::WWW_AUTHENTICATE));
+            assert_eq!(
+                send(Some("000000".into())).await.unwrap().status(),
+                StatusCode::UNAUTHORIZED
+            );
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+            let code = format!(
+                "{:06}",
+                super::super::mfa::hotp(b"12345678901234567890", now / 30)
+            );
+            let ok = send(Some(code.clone())).await.unwrap().status();
+            assert_ne!(ok, StatusCode::UNAUTHORIZED, "valid code passes MFA");
+            // the same code cannot be replayed
+            assert_eq!(
+                send(Some(code)).await.unwrap().status(),
+                StatusCode::UNAUTHORIZED
+            );
+            // non-exec reads are untouched
+            assert_eq!(
+                status_for(router(m), "GET", "/v1/vms", Some("ops-secret")).await,
+                StatusCode::OK
+            );
+        }
+
+        #[tokio::test]
+        async fn wrong_token_is_rejected() {
+            let auth = AuthConfig {
+                tokens: vec![ApiToken {
+                    token: "secret".into(),
+                    role: Role::Admin,
+                    name: None,
+                    tenant: None,
+                }],
+                ..Default::default()
+            };
+            let app = router(manager(auth));
+            assert_eq!(
+                status_for(app, "GET", "/v1/vms", Some("nope")).await,
+                StatusCode::UNAUTHORIZED
+            );
+        }
+
+        #[tokio::test]
+        async fn healthz_is_reachable_without_a_token_even_when_auth_is_enabled() {
+            let auth = AuthConfig {
+                tokens: vec![ApiToken {
+                    token: "secret".into(),
+                    role: Role::Admin,
+                    name: None,
+                    tenant: None,
+                }],
+                ..Default::default()
+            };
+            let app = router(manager(auth));
+            assert_eq!(
+                status_for(app, "GET", "/healthz", None).await,
+                StatusCode::OK
+            );
+        }
+
+        #[tokio::test]
+        async fn openapi_is_public_but_vm_routes_are_not() {
+            let auth = AuthConfig {
+                tokens: vec![ApiToken {
+                    token: "secret".into(),
+                    role: Role::Admin,
+                    name: None,
+                    tenant: None,
+                }],
+                ..Default::default()
+            };
+            let app = router(manager(auth));
+            assert_eq!(
+                status_for(app.clone(), "GET", "/v1/openapi.json", None).await,
+                StatusCode::OK
+            );
+            assert_eq!(
+                status_for(
+                    app,
+                    "GET",
+                    "/v1/vms/00000000-0000-0000-0000-000000000000/disks",
+                    None
+                )
+                .await,
+                StatusCode::UNAUTHORIZED
+            );
+        }
+
+        const VALID_CREATE_BODY: &str =
+            r#"{"name":"t","backend":"qemu","image":"/does/not/exist.qcow2"}"#;
+
+        #[tokio::test]
+        async fn readonly_token_can_list_but_not_create() {
+            let auth = AuthConfig {
+                tokens: vec![ApiToken {
+                    token: "ro".into(),
+                    role: Role::ReadOnly,
+                    name: None,
+                    tenant: None,
+                }],
+                ..Default::default()
+            };
+            let app = router(manager(auth));
+            assert_eq!(
+                status_for(app.clone(), "GET", "/v1/vms", Some("ro")).await,
+                StatusCode::OK
+            );
+            assert_eq!(
+                request(app, "POST", "/v1/vms", Some("ro"), Some(VALID_CREATE_BODY)).await,
+                StatusCode::FORBIDDEN
+            );
+        }
+
+        #[tokio::test]
+        async fn readonly_token_cannot_call_egress_check() {
+            // Regression test: egress_check previously had no role check at
+            // all, so a read-only token could call this POST route and get
+            // back a real credential-vault secret (inject_authorization)
+            // that only an admin caller should ever see.
+            let auth = AuthConfig {
+                tokens: vec![ApiToken {
+                    token: "ro".into(),
+                    role: Role::ReadOnly,
+                    name: None,
+                    tenant: None,
+                }],
+                ..Default::default()
+            };
+            let app = router(manager(auth));
+            assert_eq!(
+                request(
+                    app,
+                    "POST",
+                    "/v1/egress/check",
+                    Some("ro"),
+                    Some(r#"{"host":"example.com"}"#),
+                )
+                .await,
+                StatusCode::FORBIDDEN
+            );
+        }
+
+        #[tokio::test]
+        async fn admin_token_can_call_egress_check() {
+            let auth = AuthConfig {
+                tokens: vec![ApiToken {
+                    token: "admin".into(),
+                    role: Role::Admin,
+                    name: None,
+                    tenant: None,
+                }],
+                ..Default::default()
+            };
+            let app = router(manager(auth));
+            assert_eq!(
+                request(
+                    app,
+                    "POST",
+                    "/v1/egress/check",
+                    Some("admin"),
+                    Some(r#"{"host":"example.com"}"#),
+                )
+                .await,
+                StatusCode::OK
+            );
+        }
+
+        #[tokio::test]
+        async fn admin_token_passes_auth_for_a_mutating_route() {
+            let auth = AuthConfig {
+                tokens: vec![ApiToken {
+                    token: "admin".into(),
+                    role: Role::Admin,
+                    name: None,
+                    tenant: None,
+                }],
+                ..Default::default()
+            };
+            let app = router(manager(auth));
+            // The image path doesn't exist, so this fails downstream with
+            // 400 — the point is it's NOT 401/403, i.e. the Admin token
+            // cleared the auth layer and reached VmManager::create.
+            let status = request(
+                app,
+                "POST",
+                "/v1/vms",
+                Some("admin"),
+                Some(VALID_CREATE_BODY),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+        }
+
+        #[tokio::test]
+        async fn per_token_quota_does_not_count_other_tokens_vms() {
+            // Regression test: enforce_token_quotas previously called
+            // m.list().await -- every VM on the node from every token --
+            // and checked that *global* count against each token's own
+            // max_vms_per_token. With two tokens both configured (via the
+            // one shared max_vms_per_token) with a quota of 1, the first
+            // token to reach its quota blocked every OTHER token from
+            // creating any VMs at all, not just itself: a quota meant to
+            // contain a noisy tenant instead let that tenant deny service
+            // to every other tenant. Filtering by created_by_token (see
+            // CreateVmRequest's own doc comment) fixes this.
+            let auth = AuthConfig {
+                tokens: vec![
+                    ApiToken {
+                        token: "a".into(),
+                        role: Role::Admin,
+                        name: Some("tokenA".into()),
+                        tenant: None,
+                    },
+                    ApiToken {
+                        token: "b".into(),
+                        role: Role::Admin,
+                        name: Some("tokenB".into()),
+                        tenant: None,
+                    },
+                ],
+                max_vms_per_token: Some(1),
+                ..Default::default()
+            };
+            let m = manager(auth);
+            // Token A is already at its own quota of 1 -- a real stored VM
+            // it created.
+            let mut vm = fixture(BackendKind::Qemu, VmStatus::Running, false);
+            vm.request.created_by_token = Some("tokenA".into());
+            m.store.insert(vm).await.unwrap();
+
+            let app = router(m);
+            // Token A: correctly blocked by its own quota.
+            assert_eq!(
+                request(
+                    app.clone(),
+                    "POST",
+                    "/v1/vms",
+                    Some("a"),
+                    Some(VALID_CREATE_BODY)
+                )
+                .await,
+                StatusCode::FORBIDDEN
+            );
+            // Token B: has zero VMs of its own -- must NOT be blocked by
+            // token A's quota. May still fail downstream (fake image
+            // path, same as admin_token_passes_auth_for_a_mutating_route
+            // above), but that's a different, later error, never the 403
+            // a full quota gets.
+            assert_ne!(
+                request(app, "POST", "/v1/vms", Some("b"), Some(VALID_CREATE_BODY)).await,
+                StatusCode::FORBIDDEN
+            );
+        }
+
+        #[tokio::test]
+        async fn created_by_token_cannot_be_spoofed_via_the_request_body() {
+            // Regression test, behavioral half of the created_by_token
+            // guarantee (see model::create_vm_request_tests for the
+            // serde-round-trip half): create_vm unconditionally overwrites
+            // CreateVmRequest.created_by_token from the authenticated
+            // caller's identity right after deserializing, so that stamp
+            // must win regardless of what the body claims. Proven here via
+            // the same quota mechanism as
+            // the test above -- "tokenA" is already at its quota of 1; if
+            // the body's "created_by_token":"spoofed" were honored,
+            // enforce_token_quotas would filter by "spoofed" instead of
+            // the real caller, find zero matching VMs, and let this
+            // through. It doesn't: this still hits the same 403 an
+            // unspoofed request from "tokenA" would.
+            let auth = AuthConfig {
+                tokens: vec![ApiToken {
+                    token: "a".into(),
+                    role: Role::Admin,
+                    name: Some("tokenA".into()),
+                    tenant: None,
+                }],
+                max_vms_per_token: Some(1),
+                ..Default::default()
+            };
+            let m = manager(auth);
+            let mut vm = fixture(BackendKind::Qemu, VmStatus::Running, false);
+            vm.request.created_by_token = Some("tokenA".into());
+            m.store.insert(vm).await.unwrap();
+
+            let app = router(m);
+            let body = r#"{"name":"t","backend":"qemu","image":"/does/not/exist.qcow2","created_by_token":"spoofed"}"#;
+            assert_eq!(
+                request(app, "POST", "/v1/vms", Some("a"), Some(body)).await,
+                StatusCode::FORBIDDEN
+            );
+        }
+
+        fn token_auth(rps: f64, burst: u32) -> AuthConfig {
+            AuthConfig {
+                tokens: vec![
+                    ApiToken {
+                        token: "alice".into(),
+                        role: Role::Admin,
+                        name: Some("alice".into()),
+                        tenant: None,
+                    },
+                    ApiToken {
+                        token: "bob".into(),
+                        role: Role::Admin,
+                        name: Some("bob".into()),
+                        tenant: None,
+                    },
+                ],
+                rate_limit_rps: Some(rps),
+                rate_limit_burst: Some(burst),
+                ..Default::default()
+            }
+        }
+
+        #[tokio::test]
+        async fn caller_is_throttled_past_burst_with_retry_after_set() {
+            // A refill this slow means no token comes back during the test, however long a busy machine takes between requests
+            // (with 1 request per second a pause of a second between two calls refilled the bucket and the 429 never came).
+            let app = router(manager(token_auth(0.001, 2)));
+            for _ in 0..2 {
+                assert_eq!(
+                    status_for(app.clone(), "GET", "/v1/vms", Some("alice")).await,
+                    StatusCode::OK
+                );
+            }
+            let req = Request::builder()
+                .method("GET")
+                .uri("/v1/vms")
+                .header(header::AUTHORIZATION, "Bearer alice")
+                .body(Body::empty())
+                .unwrap();
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+            assert!(resp.headers().get(header::RETRY_AFTER).is_some());
+        }
+
+        #[tokio::test]
+        async fn distinct_tokens_have_independent_buckets() {
+            // A near-zero refill, so no token comes back however long a busy machine pauses between the requests.
+            let app = router(manager(token_auth(0.001, 1)));
+            assert_eq!(
+                status_for(app.clone(), "GET", "/v1/vms", Some("alice")).await,
+                StatusCode::OK
+            );
+            // alice's single-token burst is spent -- she's throttled now.
+            assert_eq!(
+                status_for(app.clone(), "GET", "/v1/vms", Some("alice")).await,
+                StatusCode::TOO_MANY_REQUESTS
+            );
+            // bob has never made a request -- his own bucket is untouched.
+            assert_eq!(
+                status_for(app, "GET", "/v1/vms", Some("bob")).await,
+                StatusCode::OK
+            );
+        }
+
+        #[tokio::test]
+        async fn healthz_is_never_rate_limited() {
+            let app = router(manager(token_auth(1.0, 1)));
+            for _ in 0..5 {
+                assert_eq!(
+                    status_for(app.clone(), "GET", "/healthz", None).await,
+                    StatusCode::OK
+                );
+            }
+        }
+
+        #[tokio::test]
+        async fn unset_config_applies_no_rate_limiting_at_all() {
+            let app = router(manager(AuthConfig {
+                tokens: vec![ApiToken {
+                    token: "alice".into(),
+                    role: Role::Admin,
+                    name: Some("alice".into()),
+                    tenant: None,
+                }],
+                ..Default::default()
+            }));
+            for _ in 0..10 {
+                assert_eq!(
+                    status_for(app.clone(), "GET", "/v1/vms", Some("alice")).await,
+                    StatusCode::OK
+                );
+            }
+        }
+
+        fn tenant_tokens() -> AuthConfig {
+            AuthConfig {
+                tokens: vec![
+                    ApiToken {
+                        token: "acme".into(),
+                        role: Role::Admin,
+                        name: Some("acme".into()),
+                        tenant: Some("acme".into()),
+                    },
+                    ApiToken {
+                        token: "other".into(),
+                        role: Role::Admin,
+                        name: Some("other".into()),
+                        tenant: Some("other".into()),
+                    },
+                ],
+                ..Default::default()
+            }
+        }
+
+        async fn body_string(resp: Response) -> String {
+            let bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+                .await
+                .unwrap();
+            String::from_utf8(bytes.to_vec()).unwrap()
+        }
+
+        #[tokio::test]
+        async fn list_sandboxes_only_returns_the_callers_own_tenant() {
+            // Regression test: list_sandboxes previously had no tenant
+            // filtering at all (unlike list_vms), so any authenticated
+            // caller -- tenant-scoped or not -- could see every sandbox
+            // across every tenant.
+            let m = manager(tenant_tokens());
+            let mut acme_sandbox = fixture(BackendKind::FluxVm, VmStatus::Running, true);
+            acme_sandbox.request.tenant = Some("acme".into());
+            let mut other_sandbox = fixture(BackendKind::FluxVm, VmStatus::Running, true);
+            other_sandbox.request.tenant = Some("other".into());
+            m.store.insert(acme_sandbox.clone()).await.unwrap();
+            m.store.insert(other_sandbox).await.unwrap();
+
+            let app = router(m);
+            let req = Request::builder()
+                .method("GET")
+                .uri("/v1/sandboxes")
+                .header(header::AUTHORIZATION, "Bearer acme")
+                .body(Body::empty())
+                .unwrap();
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            let body = body_string(resp).await;
+            assert!(
+                body.contains(&acme_sandbox.id.to_string()),
+                "expected acme's own sandbox in:\n{body}"
+            );
+            let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
+            assert_eq!(
+                parsed["items"].as_array().unwrap().len(),
+                1,
+                "expected exactly one sandbox (the caller's own) in:\n{body}"
+            );
+        }
+
+        fn procbox_manager(auth: AuthConfig, enabled: bool) -> Arc<VmManager> {
+            let dir = Box::leak(Box::new(tempfile::tempdir().unwrap()));
+            let mut cfg = Config {
+                state_dir: dir.path().join("state"),
+                run_dir: dir.path().join("run"),
+                auth,
+                ..Config::default()
+            };
+            cfg.sandbox.procbox.enabled = enabled;
+            VmManager::new(cfg).unwrap()
+        }
+
+        async fn call(
+            app: Router,
+            method: &str,
+            uri: &str,
+            bearer: &str,
+            body: Option<&str>,
+        ) -> (StatusCode, String) {
+            let mut b = Request::builder()
+                .method(method)
+                .uri(uri)
+                .header(header::AUTHORIZATION, format!("Bearer {bearer}"));
+            let body = match body {
+                Some(j) => {
+                    b = b.header(header::CONTENT_TYPE, "application/json");
+                    Body::from(j.to_string())
+                }
+                None => Body::empty(),
+            };
+            let resp = app.oneshot(b.body(body).unwrap()).await.unwrap();
+            let status = resp.status();
+            (status, body_string(resp).await)
+        }
+
+        fn density_tokens() -> AuthConfig {
+            let mut auth = tenant_tokens();
+            auth.tokens.push(ApiToken {
+                token: "ops".into(),
+                role: Role::Admin,
+                name: Some("ops".into()),
+                tenant: None,
+            });
+            auth
+        }
+
+        #[tokio::test]
+        async fn density_and_warm_are_host_wide() {
+            let m = manager(density_tokens());
+            let (st, body) = call(
+                router(m.clone()),
+                "GET",
+                "/v1/sandboxes/density",
+                "ops",
+                None,
+            )
+            .await;
+            assert_eq!(st, StatusCode::OK, "{body}");
+            let report: serde_json::Value = serde_json::from_str(&body).unwrap();
+            assert!(report["warm_slots_configured"].is_u64(), "{body}");
+            assert_eq!(report["active_sandboxes"], 0);
+            let (st, _) = call(
+                router(m.clone()),
+                "GET",
+                "/v1/sandboxes/density",
+                "acme",
+                None,
+            )
+            .await;
+            assert_eq!(st, StatusCode::FORBIDDEN);
+            let (st, _) = call(
+                router(m.clone()),
+                "POST",
+                "/v1/sandboxes/warm",
+                "acme",
+                Some(r#"{"count":2}"#),
+            )
+            .await;
+            assert_eq!(st, StatusCode::FORBIDDEN);
+            let (st, body) = call(
+                router(m),
+                "POST",
+                "/v1/sandboxes/warm",
+                "ops",
+                Some(r#"{"count":0}"#),
+            )
+            .await;
+            assert!(st.is_client_error() || st.is_server_error(), "{st} {body}");
+        }
+
+        #[tokio::test]
+        async fn metrics_report_density_and_agent_counters() {
+            let (st, body) = call(
+                router(manager(density_tokens())),
+                "GET",
+                "/metrics",
+                "ops",
+                None,
+            )
+            .await;
+            assert_eq!(st, StatusCode::OK);
+            for name in [
+                "fluxvm_sandbox_warm_hits_total",
+                "fluxvm_sandbox_warm_misses_total",
+                "fluxvm_sandbox_balloons_inflated",
+                "fluxvm_vz_agent_calls_total",
+                "fluxvm_vz_agent_ssh_fallbacks_total",
+            ] {
+                assert!(body.contains(&format!("\n{name} ")), "{name} missing");
+            }
+            if cfg!(target_os = "macos") {
+                assert!(body.contains("\nfluxvm_host_memory_pressure_level "));
+                assert!(body.contains("\nfluxvm_host_mem_available_mib "));
+            }
+        }
+
+        #[tokio::test]
+        async fn daemon_install_enables_netobs_summary() {
+            let cfg = fluxvm_core::config::Config::default();
+            // Another test may have installed the observer first; either way it is installed afterwards.
+            let pump = install_netobs(&cfg);
+            assert!(fluxvm_netobs::global().is_some());
+            let (st, body) = call(
+                router(manager(density_tokens())),
+                "GET",
+                "/v1/netobs/summary",
+                "ops",
+                None,
+            )
+            .await;
+            assert_eq!(st, StatusCode::OK, "{body}");
+            assert!(body.contains("\"enabled\":true"), "{body}");
+            if pump.is_some() {
+                assert!(
+                    fluxvm_netobs::global_tap().is_some(),
+                    "the install published its tap"
+                );
+            }
+        }
+
+        #[tokio::test]
+        async fn netobs_routes_scope_by_tenant_and_gate_capture() {
+            use fluxvm_netobs::{Direction, FrameMeta, Identity, Observer, Verdict};
+            let obs = match fluxvm_netobs::global() {
+                Some(o) => o,
+                None => {
+                    let o = Arc::new(Observer::new(Default::default()));
+                    fluxvm_netobs::install_global(o);
+                    fluxvm_netobs::global().expect("observer installed")
+                }
+            };
+            let ip = |n| std::net::Ipv4Addr::new(10, 9, 9, n);
+            let frame = fluxvm_netobs::packet::build::udp_v4((ip(1), 5000), (ip(2), 6000), b"x");
+            obs.ingest(
+                &frame,
+                &FrameMeta {
+                    identity: Identity::new("netobs-test-vm", "n", "eth0", [2, 0, 0, 0, 0, 1]),
+                    ts_us: fluxvm_netobs::now_us(),
+                    direction: Direction::FromGuest,
+                    verdict: Verdict::Allowed,
+                },
+            );
+            let m = manager(density_tokens());
+            let app = || router(m.clone());
+
+            let (st, body) = call(app(), "GET", "/v1/netobs/flows", "ops", None).await;
+            assert_eq!(st, StatusCode::OK, "{body}");
+            assert!(body.contains("netobs-test-vm"), "{body}");
+            let (_, body) = call(app(), "GET", "/v1/netobs/flows", "acme", None).await;
+            assert!(
+                !body.contains("netobs-test-vm"),
+                "tenant token saw another VM: {body}"
+            );
+
+            let (st, body) = call(app(), "GET", "/v1/netobs/summary", "ops", None).await;
+            assert_eq!(st, StatusCode::OK);
+            assert!(body.contains("\"enabled\":true"), "{body}");
+
+            let (_, body) = call(app(), "GET", "/metrics", "ops", None).await;
+            assert!(body.contains("\nfluxvm_netobs_frames_total "), "{body}");
+
+            // Capture needs a filter, is scoped, and has nothing to download until enabled.
+            let (st, _) = call(
+                app(),
+                "POST",
+                "/v1/netobs/capture",
+                "ops",
+                Some(r#"{"vm":"netobs-test-vm"}"#),
+            )
+            .await;
+            assert_eq!(st, StatusCode::BAD_REQUEST);
+            let (st, _) = call(
+                app(),
+                "POST",
+                "/v1/netobs/capture",
+                "acme",
+                Some(r#"{"vm":"netobs-test-vm","filter":{"port":53}}"#),
+            )
+            .await;
+            assert_eq!(st, StatusCode::NOT_FOUND);
+            let (st, _) = call(
+                app(),
+                "GET",
+                "/v1/netobs/capture.pcap?vm=netobs-test-vm",
+                "ops",
+                None,
+            )
+            .await;
+            assert_eq!(st, StatusCode::NOT_FOUND);
+        }
+
+        #[tokio::test]
+        async fn vz_display_resize_is_tenant_scoped_admin_only_and_validated() {
+            let mut auth = tenant_tokens();
+            auth.tokens.push(ApiToken {
+                token: "ro".into(),
+                role: Role::ReadOnly,
+                name: Some("ro".into()),
+                tenant: None,
+            });
+            let m = manager(auth);
+            let mut vm = fixture(BackendKind::Vz, VmStatus::Stopped, false);
+            vm.request.tenant = Some("acme".into());
+            let id = vm.id;
+            m.store.insert(vm).await.unwrap();
+            let uri = format!("/v1/vms/{id}/vz/display");
+            let ok = r#"{"width":1920,"height":1080}"#;
+
+            // Another tenant sees no such VM.
+            let (st, _) = call(router(m.clone()), "POST", &uri, "other", Some(ok)).await;
+            assert_eq!(st, StatusCode::NOT_FOUND);
+            // A read-only token may not change the display.
+            let (st, _) = call(router(m.clone()), "POST", &uri, "ro", Some(ok)).await;
+            assert_eq!(st, StatusCode::FORBIDDEN);
+            // A bad size is rejected before the VM state matters.
+            let (st, body) = call(
+                router(m.clone()),
+                "POST",
+                &uri,
+                "acme",
+                Some(r#"{"width":100,"height":1080}"#),
+            )
+            .await;
+            assert_eq!(st, StatusCode::BAD_REQUEST);
+            assert!(body.contains("width"), "{body}");
+            // The owner reaches the VM; it is not running, so there is nothing to resize.
+            let (st, body) = call(router(m.clone()), "POST", &uri, "acme", Some(ok)).await;
+            assert_eq!(st, StatusCode::CONFLICT);
+            assert!(body.contains("start it first"), "{body}");
+            // Missing required fields never reach the handler.
+            let (st, _) = call(router(m), "POST", &uri, "acme", Some(r#"{"width":1920}"#)).await;
+            assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY);
+        }
+
+        #[tokio::test]
+        async fn runner_controls_on_a_stopped_vm_are_a_readable_conflict() {
+            let m = manager(tenant_tokens());
+            let mut vm = fixture(BackendKind::Vz, VmStatus::Stopped, false);
+            vm.request.tenant = Some("acme".into());
+            let id = vm.id;
+            m.store.insert(vm).await.unwrap();
+            for (method, path) in [
+                ("POST", format!("/v1/vms/{id}/pause")),
+                ("POST", format!("/v1/vms/{id}/resume")),
+                ("GET", format!("/v1/vms/{id}/screenshot")),
+            ] {
+                let (st, body) = call(router(m.clone()), method, &path, "acme", None).await;
+                assert_eq!(st, StatusCode::CONFLICT, "{path}: {body}");
+                assert!(body.contains("start it first"), "{path}: {body}");
+                assert!(!body.contains("os error"), "{path}: {body}");
+            }
+        }
+
+        #[tokio::test]
+        async fn vz_attestation_is_tenant_scoped_and_served_with_the_host_key() {
+            let m = manager(tenant_tokens());
+            let ws = tempfile::tempdir().unwrap();
+            let mut vm = fixture(BackendKind::Vz, VmStatus::Stopped, false);
+            vm.request.tenant = Some("acme".into());
+            vm.workspace = ws.path().to_path_buf();
+            let id = vm.id;
+            m.store.insert(vm).await.unwrap();
+            let mut qemu = fixture(BackendKind::Qemu, VmStatus::Stopped, false);
+            qemu.request.tenant = Some("acme".into());
+            let qemu_id = qemu.id;
+            m.store.insert(qemu).await.unwrap();
+            let uri = format!("/v1/vms/{id}/vz/attestation");
+
+            // Not launched yet: nothing to serve.
+            let (st, body) = call(router(m.clone()), "GET", &uri, "acme", None).await;
+            assert_eq!(st, StatusCode::BAD_REQUEST);
+            assert!(body.contains("no attestation recorded"), "{body}");
+
+            // What a launch records: the attestation object, and the daemon's public key under state_dir.
+            let payload = json!({
+                "version": 1, "claim": "host-asserted", "vm_id": id.to_string(), "issued_at_unix": 7,
+                "kernel": null, "initrd": null, "cmdline_sha256": null,
+                "root_disk": {"path": "/r", "size": 1, "mtime_unix": null, "digest": "00"},
+                "runner": {"path": "/x", "size": 1, "mtime_unix": null, "digest": "11"},
+                "apple_spec_sha256": "22",
+            })
+            .to_string();
+            let pk = "ab".repeat(32);
+            std::fs::write(
+                ws.path().join("vz-attestation.json"),
+                json!({"alg": "ed25519", "payload": payload, "signature": "cd".repeat(64), "public_key": pk})
+                    .to_string(),
+            )
+            .unwrap();
+            std::fs::create_dir_all(&m.cfg.state_dir).unwrap();
+            std::fs::write(
+                m.cfg.state_dir.join("vz-attestation.pub"),
+                format!("{pk}\n"),
+            )
+            .unwrap();
+
+            let (st, body) = call(router(m.clone()), "GET", &uri, "acme", None).await;
+            assert_eq!(st, StatusCode::OK, "{body}");
+            let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+            assert_eq!(v["public_key"], pk);
+            assert_eq!(v["manifest"]["vm_id"], id.to_string());
+            assert_eq!(v["attestation"]["alg"], "ed25519");
+            assert!(v["claim"].as_str().unwrap().contains("not by hardware"));
+
+            // Another tenant sees no such VM; a non-vz VM has no attestation.
+            let (st, _) = call(router(m.clone()), "GET", &uri, "other", None).await;
+            assert_eq!(st, StatusCode::NOT_FOUND);
+            let (st, body) = call(
+                router(m),
+                "GET",
+                &format!("/v1/vms/{qemu_id}/vz/attestation"),
+                "acme",
+                None,
+            )
+            .await;
+            assert_eq!(st, StatusCode::BAD_REQUEST);
+            assert!(body.contains("vz backend"), "{body}");
+        }
+
+        /// A read-only workspace refuses host-side file writes into it, before anything reaches the guest.
+        #[tokio::test]
+        async fn a_readonly_workspace_refuses_file_writes_into_it() {
+            let m = procbox_manager(tenant_tokens(), false);
+            let id = seed_session(&m, Some("acme"), "vz", "running");
+            let path = m
+                .cfg
+                .state_dir
+                .join("agent-sessions")
+                .join(format!("{id}.json"));
+            let mut rec: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            rec["workspace"] = json!({"path": "/workspace", "git": null, "mode": "readonly",
+                "cloned": false, "baseline": false, "note": null});
+            std::fs::write(&path, rec.to_string()).unwrap();
+            let app = router(m);
+            let base = format!("/v1/agents/sessions/{id}");
+            let w = r#"{"path":"/workspace/src/a.txt","content_base64":"aGk="}"#;
+            let (st, body) = call(
+                app.clone(),
+                "PUT",
+                &format!("{base}/files/content"),
+                "acme",
+                Some(w),
+            )
+            .await;
+            assert_eq!(st, StatusCode::FORBIDDEN, "{body}");
+            assert!(body.contains("read-only workspace"), "{body}");
+            let (st, _) = call(
+                app.clone(),
+                "PUT",
+                &format!("{base}/files/content"),
+                "acme",
+                Some(r#"{"path":"/workspace","content_base64":"aGk="}"#),
+            )
+            .await;
+            assert_eq!(st, StatusCode::FORBIDDEN);
+            let (st, _) = call(
+                app.clone(),
+                "DELETE",
+                &format!("{base}/files?path=/workspace/src/a.txt"),
+                "acme",
+                None,
+            )
+            .await;
+            assert_eq!(st, StatusCode::FORBIDDEN);
+            let (st, _) = call(
+                app.clone(),
+                "POST",
+                &format!("{base}/uploads"),
+                "acme",
+                Some(r#"{"path":"/workspace/big.bin","size":10}"#),
+            )
+            .await;
+            assert_eq!(st, StatusCode::FORBIDDEN);
+            // A sibling that only shares the prefix is not the workspace, so it gets past the guard
+            // (and fails later, on the guest the test does not have).
+            let (st, _) = call(
+                app,
+                "PUT",
+                &format!("{base}/files/content"),
+                "acme",
+                Some(r#"{"path":"/workspace2/a.txt","content_base64":"aGk="}"#),
+            )
+            .await;
+            assert_ne!(st, StatusCode::FORBIDDEN);
+        }
+
+        /// `POST .../exec/stream` goes through the same gates as `exec` before anything starts.
+        #[tokio::test]
+        async fn exec_stream_applies_auth_tenant_and_process_rules_before_starting() {
+            let m = procbox_manager(tenant_tokens(), false);
+            let id = seed_session(&m, Some("acme"), "vz", "running");
+            let app = router(m.clone());
+            let uri = format!("/v1/agents/sessions/{id}/exec/stream");
+            let st = status_for(app.clone(), "POST", &uri, None).await;
+            assert_eq!(st, StatusCode::UNAUTHORIZED);
+            let (st, _) = call(
+                app.clone(),
+                "POST",
+                &uri,
+                "other",
+                Some(r#"{"command":"ls"}"#),
+            )
+            .await;
+            assert_eq!(st, StatusCode::NOT_FOUND);
+            let (st, _) = call(
+                app.clone(),
+                "POST",
+                &uri,
+                "acme",
+                Some(r#"{"command":"  "}"#),
+            )
+            .await;
+            assert_eq!(st, StatusCode::BAD_REQUEST);
+            let path = m
+                .cfg
+                .state_dir
+                .join("agent-sessions")
+                .join(format!("{id}.json"));
+            let mut rec: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            rec["policy"]["process"] = json!({"allow": [], "deny": ["rm *"]});
+            std::fs::write(&path, rec.to_string()).unwrap();
+            let (st, body) =
+                call(app, "POST", &uri, "acme", Some(r#"{"command":"rm -rf /"}"#)).await;
+            assert_eq!(st, StatusCode::FORBIDDEN, "{body}");
+            assert!(body.contains("process policy"), "{body}");
+        }
+
+        /// `POST .../browser` is gated like the calls it is made of, and refuses a bad port before anything starts.
+        #[tokio::test]
+        async fn browser_start_is_authenticated_tenant_scoped_and_validates_the_port() {
+            let m = procbox_manager(tenant_tokens(), false);
+            let id = seed_session(&m, Some("acme"), "vz", "running");
+            let app = router(m);
+            let uri = format!("/v1/agents/sessions/{id}/browser");
+            assert_eq!(
+                status_for(app.clone(), "POST", &uri, None).await,
+                StatusCode::UNAUTHORIZED
+            );
+            let (st, _) = call(app.clone(), "POST", &uri, "other", Some("{}")).await;
+            assert_eq!(st, StatusCode::NOT_FOUND);
+            let (st, body) = call(app, "POST", &uri, "acme", Some(r#"{"port":80}"#)).await;
+            assert_eq!(st, StatusCode::BAD_REQUEST, "{body}");
+        }
+
+        /// `POST .../replay` lists what a ledger can redo, refuses to run without a target, is tenant-scoped, and
+        /// sends every command through the target's own exec gates.
+        #[tokio::test]
+        async fn replay_lists_skips_and_runs_through_the_targets_gates() {
+            let m = procbox_manager(tenant_tokens(), false);
+            let src = seed_session(&m, Some("acme"), "vz", "running");
+            let dir = m.cfg.state_dir.join("agent-sessions");
+            let line = |kind: &str, detail: serde_json::Value| {
+                json!({"ts": "2026-10-22T10:00:00Z", "kind": kind, "detail": detail}).to_string()
+            };
+            std::fs::write(
+                dir.join(format!("{src}.ledger.jsonl")),
+                [
+                    line("exec", json!({"command": "echo hi", "exit_code": 0})),
+                    line("file.write", json!({"path": "/workspace/a", "bytes": 3})),
+                    line("job.start", json!({"job": "j", "command": "sleep 9"})),
+                    line("exec", json!({"command": "rm -rf /", "exit_code": 0})),
+                ]
+                .join("\n")
+                    + "\n",
+            )
+            .unwrap();
+            let app = router(m.clone());
+            let uri = format!("/v1/agents/sessions/{src}/replay");
+            let (st, body) = call(
+                app.clone(),
+                "POST",
+                &uri,
+                "acme",
+                Some(r#"{"dry_run":true}"#),
+            )
+            .await;
+            assert_eq!(st, StatusCode::OK, "{body}");
+            let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+            assert_eq!(v["steps"].as_array().unwrap().len(), 2, "{body}");
+            assert_eq!(v["steps"][0]["command"], "echo hi");
+            assert_eq!(v["skipped"].as_array().unwrap().len(), 2, "{body}");
+            // Without a target nothing runs.
+            let (st, _) = call(app.clone(), "POST", &uri, "acme", Some("{}")).await;
+            assert_eq!(st, StatusCode::BAD_REQUEST);
+            // Another tenant cannot see the source.
+            let (st, _) = call(
+                app.clone(),
+                "POST",
+                &uri,
+                "other",
+                Some(r#"{"dry_run":true}"#),
+            )
+            .await;
+            assert_eq!(st, StatusCode::NOT_FOUND);
+            // An unknown target is 404.
+            let missing = format!(r#"{{"target":"{}"}}"#, Uuid::new_v4());
+            let (st, _) = call(app.clone(), "POST", &uri, "acme", Some(&missing)).await;
+            assert_eq!(st, StatusCode::NOT_FOUND);
+            // The target's process policy refuses the second command, and the replay reports it and stops.
+            let tgt = seed_session(&m, Some("acme"), "vz", "running");
+            let path = dir.join(format!("{tgt}.json"));
+            let mut rec: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            rec["policy"]["process"] = json!({"allow": [], "deny": ["rm *"]});
+            std::fs::write(&path, rec.to_string()).unwrap();
+            let one = format!(r#"{{"target":"{tgt}","since":"2026-10-22T09:59:59Z"}}"#);
+            let rm_only = line("exec", json!({"command": "rm -rf /", "exit_code": 0})) + "\n";
+            std::fs::write(dir.join(format!("{src}.ledger.jsonl")), rm_only).unwrap();
+            let (st, body) = call(app, "POST", &uri, "acme", Some(&one)).await;
+            assert_eq!(st, StatusCode::OK, "{body}");
+            let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+            assert_eq!(v["steps"][0]["status"], "refused", "{body}");
+            assert_eq!(v["steps"][0]["http_status"], 403, "{body}");
+            assert_eq!(v["ran"], 0);
+            assert!(v["stopped"].is_string(), "{body}");
+        }
+
+        /// Writes a session record the way `agent_sessions::save` does, so the routes can be exercised
+        /// without booting a sandbox.
+        fn seed_session(m: &VmManager, tenant: Option<&str>, backend: &str, state: &str) -> Uuid {
+            let id = Uuid::new_v4();
+            let dir = m.cfg.state_dir.join("agent-sessions");
+            std::fs::create_dir_all(&dir).unwrap();
+            let rec = json!({
+                "id": id, "agent": "claude-code", "sandbox_id": Uuid::new_v4(), "backend": backend,
+                "parent": null, "children": [], "tenant": tenant, "state": state,
+                "created_at": chrono::Utc::now(), "expires_at": null,
+                "capabilities": {"snapshot": true, "fork": backend == "flux-vm", "pty": false},
+                "policy": {"preset": null, "offline": false, "allow_hosts": [], "unenforced": []},
+                "workspace": null, "checkpoints": [],
+            });
+            std::fs::write(dir.join(format!("{id}.json")), rec.to_string()).unwrap();
+            std::fs::write(
+                dir.join(format!("{id}.ledger.jsonl")),
+                format!(
+                    "{}\n",
+                    json!({"ts": chrono::Utc::now(), "kind": "exec", "detail": {"command": "true"}})
+                ),
+            )
+            .unwrap();
+            id
+        }
+
+        #[tokio::test]
+        async fn agent_sessions_are_tenant_scoped() {
+            let m = procbox_manager(tenant_tokens(), false);
+            let id = seed_session(&m, Some("acme"), "vz", "running");
+            let app = router(m);
+            let uri = format!("/v1/agents/sessions/{id}");
+            let (st, body) = call(app.clone(), "GET", &uri, "acme", None).await;
+            assert_eq!(st, StatusCode::OK, "{body}");
+            assert!(body.contains(r#""fork":false"#), "{body}");
+            // Another tenant gets a 404 on every route, not a 403 that confirms the id.
+            for (method, suffix) in [
+                ("GET", ""),
+                ("GET", "/events"),
+                ("GET", "/artifacts"),
+                ("DELETE", ""),
+            ] {
+                let (st, _) = call(
+                    app.clone(),
+                    method,
+                    &format!("{uri}{suffix}"),
+                    "other",
+                    None,
+                )
+                .await;
+                assert_eq!(st, StatusCode::NOT_FOUND, "{method} {suffix}");
+            }
+            let (_, list) = call(app, "GET", "/v1/agents/sessions", "other", None).await;
+            assert!(!list.contains(&id.to_string()), "{list}");
+        }
+
+        #[tokio::test]
+        async fn a_session_token_reaches_only_its_session_and_only_what_it_grants() {
+            let m = procbox_manager(tenant_tokens(), false);
+            let id = seed_session(&m, Some("acme"), "vz", "running");
+            let other = seed_session(&m, Some("acme"), "vz", "running");
+            let app = router(m);
+            let uri = format!("/v1/agents/sessions/{id}");
+
+            // Minting is admin-only and tenant-checked; bad requests mint nothing.
+            let tok = format!("{uri}/tokens");
+            let (st, _) = call(
+                app.clone(),
+                "POST",
+                &tok,
+                "other",
+                Some(r#"{"ops":["read"]}"#),
+            )
+            .await;
+            assert_eq!(st, StatusCode::NOT_FOUND);
+            for bad in [
+                r#"{"ops":[]}"#,
+                r#"{"ops":["restore"]}"#,
+                r#"{"ops":["read"],"ttl_seconds":999999}"#,
+            ] {
+                let (st, b) = call(app.clone(), "POST", &tok, "acme", Some(bad)).await;
+                assert_eq!(st, StatusCode::BAD_REQUEST, "{bad}: {b}");
+            }
+            let (st, body) = call(
+                app.clone(),
+                "POST",
+                &tok,
+                "acme",
+                Some(r#"{"ops":["read","checkpoint"],"ttl_seconds":600}"#),
+            )
+            .await;
+            assert_eq!(st, StatusCode::CREATED, "{body}");
+            let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+            let scoped = v["token"].as_str().unwrap().to_string();
+            let token_id = v["id"].as_str().unwrap().to_string();
+            assert!(scoped.starts_with("fxst_"));
+
+            // Granted: its own session's read routes.
+            let (st, b) = call(app.clone(), "GET", &uri, &scoped, None).await;
+            assert_eq!(st, StatusCode::OK, "{b}");
+            let (st, _) = call(app.clone(), "GET", &format!("{uri}/events"), &scoped, None).await;
+            assert_eq!(st, StatusCode::OK);
+            // Not granted: other ops of the same session, and admin-only verbs.
+            for (method, suffix, body) in [
+                ("POST", "/exec", Some(r#"{"command":"id"}"#)),
+                (
+                    "PUT",
+                    "/files/content",
+                    Some(r#"{"path":"/workspace/a","content_base64":"eA=="}"#),
+                ),
+                ("DELETE", "", None),
+                ("POST", "/restore", Some(r#"{"tag":"x"}"#)),
+                ("POST", "/fork", Some(r#"{"count":1}"#)),
+                ("POST", "/tokens", Some(r#"{"ops":["read"]}"#)),
+                ("GET", "/tokens", None),
+                ("POST", "/pty-ticket", None),
+            ] {
+                let (st, b) = call(
+                    app.clone(),
+                    method,
+                    &format!("{uri}{suffix}"),
+                    &scoped,
+                    body,
+                )
+                .await;
+                assert_eq!(st, StatusCode::FORBIDDEN, "{method} {suffix}: {b}");
+            }
+            // Out of scope: another session, the session list, and every non-session route.
+            for path in [
+                format!("/v1/agents/sessions/{other}"),
+                format!("/v1/agents/sessions/{other}/events"),
+                "/v1/agents/sessions".to_string(),
+                "/v1/vms".to_string(),
+                "/v1/sandboxes".to_string(),
+            ] {
+                let (st, b) = call(app.clone(), "GET", &path, &scoped, None).await;
+                assert_eq!(st, StatusCode::FORBIDDEN, "{path}: {b}");
+            }
+            // The listing never shows a secret.
+            let (_, list) = call(app.clone(), "GET", &tok, "acme", None).await;
+            assert!(
+                list.contains(&token_id) && !list.contains(&scoped),
+                "{list}"
+            );
+            // A forged token for the other session, and a revoked one, are 401.
+            let forged = scoped.replacen(&id.simple().to_string(), &other.simple().to_string(), 1);
+            let (st, _) = call(
+                app.clone(),
+                "GET",
+                &format!("/v1/agents/sessions/{other}"),
+                &forged,
+                None,
+            )
+            .await;
+            assert_eq!(st, StatusCode::UNAUTHORIZED);
+            let (st, _) = call(
+                app.clone(),
+                "DELETE",
+                &format!("{tok}/{token_id}"),
+                "acme",
+                None,
+            )
+            .await;
+            assert_eq!(st, StatusCode::NO_CONTENT);
+            let (st, _) = call(app, "GET", &uri, &scoped, None).await;
+            assert_eq!(st, StatusCode::UNAUTHORIZED);
+        }
+
+        #[tokio::test]
+        async fn a_command_matching_an_ask_rule_waits_for_an_operators_approval() {
+            let m = procbox_manager(tenant_tokens(), false);
+            let id = seed_session(&m, Some("acme"), "vz", "running");
+            let path = m
+                .cfg
+                .state_dir
+                .join("agent-sessions")
+                .join(format!("{id}.json"));
+            let mut rec: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            rec["policy"]["process"] = json!({"allow": [], "deny": [], "ask": ["deploy *"]});
+            std::fs::write(&path, rec.to_string()).unwrap();
+            let app = router(m);
+            let uri = format!("/v1/agents/sessions/{id}");
+
+            let (st, body) = call(
+                app.clone(),
+                "POST",
+                &format!("{uri}/tokens"),
+                "acme",
+                Some(r#"{"ops":["read","exec"]}"#),
+            )
+            .await;
+            assert_eq!(st, StatusCode::CREATED, "{body}");
+            let scoped = serde_json::from_str::<serde_json::Value>(&body).unwrap()["token"]
+                .as_str()
+                .unwrap()
+                .to_string();
+
+            // The agent's own request is held: 428 with an approval id, nothing runs.
+            let exec = format!("{uri}/exec");
+            let (st, b) = call(
+                app.clone(),
+                "POST",
+                &exec,
+                &scoped,
+                Some(r#"{"command":"deploy prod"}"#),
+            )
+            .await;
+            assert_eq!(st, StatusCode::PRECONDITION_REQUIRED, "{b}");
+            let v: serde_json::Value = serde_json::from_str(&b).unwrap();
+            let aid = v["approval_id"].as_str().unwrap().to_string();
+            assert_eq!(v["state"], "pending");
+            // Asking again does not make a second request.
+            let (_, b2) = call(
+                app.clone(),
+                "POST",
+                &exec,
+                &scoped,
+                Some(r#"{"command":"deploy prod"}"#),
+            )
+            .await;
+            assert!(b2.contains(&aid), "{b2}");
+
+            // The agent can see the request but cannot decide it.
+            let (st, list) = call(
+                app.clone(),
+                "GET",
+                &format!("{uri}/approvals"),
+                &scoped,
+                None,
+            )
+            .await;
+            assert_eq!(st, StatusCode::OK, "{list}");
+            assert!(
+                list.contains(&aid) && list.contains("deploy prod"),
+                "{list}"
+            );
+            for verb in ["approve", "deny"] {
+                let (st, b) = call(
+                    app.clone(),
+                    "POST",
+                    &format!("{uri}/approvals/{aid}/{verb}"),
+                    &scoped,
+                    None,
+                )
+                .await;
+                assert_eq!(st, StatusCode::FORBIDDEN, "{verb}: {b}");
+            }
+            // Pending: presenting the id early is refused as not yet decided.
+            let with_id = format!(r#"{{"command":"deploy prod","approval_id":"{aid}"}}"#);
+            let (st, _) = call(app.clone(), "POST", &exec, &scoped, Some(&with_id)).await;
+            assert_eq!(st, StatusCode::PRECONDITION_REQUIRED);
+
+            // Another tenant cannot decide it; the operator can.
+            let (st, _) = call(
+                app.clone(),
+                "POST",
+                &format!("{uri}/approvals/{aid}/approve"),
+                "other",
+                None,
+            )
+            .await;
+            assert_eq!(st, StatusCode::NOT_FOUND);
+            let (st, b) = call(
+                app.clone(),
+                "POST",
+                &format!("{uri}/approvals/{aid}/approve"),
+                "acme",
+                Some(r#"{"note":"ship it"}"#),
+            )
+            .await;
+            assert_eq!(st, StatusCode::OK, "{b}");
+            assert!(b.contains(r#""state":"approved""#), "{b}");
+
+            // It does not stretch to another command.
+            let other = format!(r#"{{"command":"deploy staging","approval_id":"{aid}"}}"#);
+            let (st, b) = call(app.clone(), "POST", &exec, &scoped, Some(&other)).await;
+            assert_eq!(st, StatusCode::FORBIDDEN, "{b}");
+            // The exact request passes the gate (it then fails on the stand-in sandbox, which is
+            // not what this test is about), and the approval is spent.
+            let (st, b) = call(app.clone(), "POST", &exec, &scoped, Some(&with_id)).await;
+            assert_ne!(st, StatusCode::PRECONDITION_REQUIRED, "{b}");
+            assert!(!b.contains("approval"), "{b}");
+            let (st, b) = call(app.clone(), "POST", &exec, &scoped, Some(&with_id)).await;
+            assert_eq!(st, StatusCode::FORBIDDEN, "{b}");
+            assert!(b.contains("already used"), "{b}");
+            let (_, list) = call(
+                app.clone(),
+                "GET",
+                &format!("{uri}/approvals"),
+                "acme",
+                None,
+            )
+            .await;
+            assert!(list.contains(r#""state":"consumed""#), "{list}");
+
+            // A denial stays denied.
+            let (_, b) = call(
+                app.clone(),
+                "POST",
+                &exec,
+                &scoped,
+                Some(r#"{"command":"deploy qa"}"#),
+            )
+            .await;
+            let qa = serde_json::from_str::<serde_json::Value>(&b).unwrap()["approval_id"]
+                .as_str()
+                .unwrap()
+                .to_string();
+            let (st, _) = call(
+                app.clone(),
+                "POST",
+                &format!("{uri}/approvals/{qa}/deny"),
+                "acme",
+                None,
+            )
+            .await;
+            assert_eq!(st, StatusCode::OK);
+            let body = format!(r#"{{"command":"deploy qa","approval_id":"{qa}"}}"#);
+            let (st, b) = call(app, "POST", &exec, &scoped, Some(&body)).await;
+            assert_eq!(st, StatusCode::FORBIDDEN, "{b}");
+            assert!(b.contains("denied"), "{b}");
+        }
+
+        #[tokio::test]
+        async fn uploads_validate_input_and_unknown_ids_before_touching_the_guest() {
+            let m = procbox_manager(tenant_tokens(), false);
+            let id = seed_session(&m, Some("acme"), "vz", "running");
+            let app = router(m);
+            let up = format!("/v1/agents/sessions/{id}/uploads");
+            for (body, why) in [
+                (r#"{"path":"rel","size":5}"#, "relative path"),
+                (r#"{"path":"/a/../b","size":5}"#, ".."),
+                (r#"{"path":"/a/b/","size":5}"#, "directory"),
+                (r#"{"path":"/a/b","size":0}"#, "empty"),
+                (r#"{"path":"/a/b","size":3000000000}"#, "over the limit"),
+                (r#"{"path":"/a/b","size":5,"sha256":"xyz"}"#, "bad checksum"),
+                (r#"{"path":"/a/b","size":5,"mode":65535}"#, "bad mode"),
+            ] {
+                let (st, b) = call(app.clone(), "POST", &up, "acme", Some(body)).await;
+                assert_eq!(st, StatusCode::BAD_REQUEST, "{why}: {b}");
+            }
+            // Unknown upload: 404 for every verb, and another tenant cannot even see the session.
+            let ghost = uuid::Uuid::new_v4();
+            for (method, suffix) in [
+                ("GET", format!("/{ghost}")),
+                ("DELETE", format!("/{ghost}")),
+                ("POST", format!("/{ghost}/complete")),
+            ] {
+                let (st, b) =
+                    call(app.clone(), method, &format!("{up}{suffix}"), "acme", None).await;
+                assert_eq!(st, StatusCode::NOT_FOUND, "{method} {suffix}: {b}");
+            }
+            let (st, _) = call(app.clone(), "GET", &up, "other", None).await;
+            assert_eq!(st, StatusCode::NOT_FOUND);
+            let (st, b) = call(app.clone(), "GET", &up, "acme", None).await;
+            assert_eq!(st, StatusCode::OK, "{b}");
+            assert!(b.contains(r#""items":[]"#), "{b}");
+            // A token that may only read cannot upload or abort.
+            let (_, t) = call(
+                app.clone(),
+                "POST",
+                &format!("/v1/agents/sessions/{id}/tokens"),
+                "acme",
+                Some(r#"{"ops":["files.read"]}"#),
+            )
+            .await;
+            let scoped = serde_json::from_str::<serde_json::Value>(&t).unwrap()["token"]
+                .as_str()
+                .unwrap()
+                .to_string();
+            let (st, _) = call(
+                app.clone(),
+                "POST",
+                &up,
+                &scoped,
+                Some(r#"{"path":"/a/b","size":5}"#),
+            )
+            .await;
+            assert_eq!(st, StatusCode::FORBIDDEN);
+            let (st, _) = call(
+                app.clone(),
+                "DELETE",
+                &format!("{up}/{ghost}"),
+                &scoped,
+                None,
+            )
+            .await;
+            assert_eq!(st, StatusCode::FORBIDDEN);
+            let (st, _) = call(app, "GET", &up, &scoped, None).await;
+            assert_eq!(st, StatusCode::OK);
+        }
+
+        #[tokio::test]
+        async fn the_sweeper_expires_sessions_and_removes_what_they_left() {
+            let m = procbox_manager(tenant_tokens(), false);
+            let id = seed_session(&m, Some("acme"), "vz", "running");
+            let live = seed_session(&m, Some("acme"), "vz", "running");
+            let path = m
+                .cfg
+                .state_dir
+                .join("agent-sessions")
+                .join(format!("{id}.json"));
+            let mut rec: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            rec["expires_at"] = json!(chrono::Utc::now() - chrono::Duration::seconds(5));
+            std::fs::write(&path, rec.to_string()).unwrap();
+            // Side files the session left, for both.
+            let side = |kind: &str, sid: uuid::Uuid| {
+                let d = m.cfg.state_dir.join(kind);
+                std::fs::create_dir_all(&d).unwrap();
+                let p = d.join(format!("{sid}.json"));
+                std::fs::write(&p, "[]").unwrap();
+                p
+            };
+            let (a1, a2) = (
+                side("agent-session-approvals", id),
+                side("agent-session-jobs", id),
+            );
+            let b1 = side("agent-session-approvals", live);
+            let swept = agent_sessions::sweep_sessions(&m).await;
+            assert_eq!(swept, 1);
+            assert!(
+                !a1.exists() && !a2.exists(),
+                "the expired session's files go"
+            );
+            assert!(b1.exists(), "a live session keeps its files");
+            // It is now persisted as expired, with a ledger line, and a second pass has no work.
+            let on_disk = std::fs::read_to_string(&path).unwrap();
+            assert!(on_disk.contains(r#""state": "expired""#), "{on_disk}");
+            assert_eq!(agent_sessions::sweep_sessions(&m).await, 0);
+            let app = router(m);
+            let (_, ev) = call(
+                app,
+                "GET",
+                &format!("/v1/agents/sessions/{id}/events"),
+                "acme",
+                None,
+            )
+            .await;
+            assert!(ev.contains("session.cleanup"), "{ev}");
+        }
+
+        #[tokio::test]
+        async fn an_operation_a_dead_daemon_left_behind_is_reported_once() {
+            let m = procbox_manager(tenant_tokens(), false);
+            let id = seed_session(&m, Some("acme"), "vz", "running");
+            let d = m.cfg.state_dir.join("agent-session-ops");
+            std::fs::create_dir_all(&d).unwrap();
+            std::fs::write(
+                d.join(format!("{id}.json")),
+                r#"{"op":"restore","started_at":"2026-01-01T00:00:00Z","reported":false}"#,
+            )
+            .unwrap();
+            let app = router(m);
+            let uri = format!("/v1/agents/sessions/{id}");
+            for _ in 0..2 {
+                let (st, b) = call(app.clone(), "GET", &uri, "acme", None).await;
+                assert_eq!(st, StatusCode::OK, "{b}");
+                assert!(b.contains(r#""interrupted_op":{"op":"restore""#), "{b}");
+            }
+            let (_, ev) = call(app, "GET", &format!("{uri}/events"), "acme", None).await;
+            assert_eq!(ev.matches("lifecycle.interrupted").count(), 1, "{ev}");
+        }
+
+        #[tokio::test]
+        async fn an_expired_session_is_persisted_as_expired_and_refuses_work() {
+            let m = procbox_manager(tenant_tokens(), false);
+            let id = seed_session(&m, Some("acme"), "vz", "running");
+            let path = m
+                .cfg
+                .state_dir
+                .join("agent-sessions")
+                .join(format!("{id}.json"));
+            let mut rec: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            rec["expires_at"] = json!(chrono::Utc::now() - chrono::Duration::seconds(5));
+            std::fs::write(&path, rec.to_string()).unwrap();
+            let app = router(m);
+            let uri = format!("/v1/agents/sessions/{id}");
+            let (st, b) = call(app.clone(), "GET", &uri, "acme", None).await;
+            assert_eq!(st, StatusCode::OK, "{b}");
+            assert!(b.contains(r#""state":"expired""#), "{b}");
+            // Persisted: the record on disk says so, and ledgered once.
+            let on_disk = std::fs::read_to_string(&path).unwrap();
+            assert!(on_disk.contains(r#""state": "expired""#), "{on_disk}");
+            let (st, b) = call(
+                app.clone(),
+                "POST",
+                &format!("{uri}/exec"),
+                "acme",
+                Some(r#"{"command":"id"}"#),
+            )
+            .await;
+            assert_eq!(st, StatusCode::CONFLICT, "{b}");
+            assert!(b.contains("expired"), "{b}");
+            // The listing agrees.
+            let (_, list) = call(app, "GET", "/v1/agents/sessions", "acme", None).await;
+            assert!(list.contains(r#""state":"expired""#), "{list}");
+        }
+
+        #[tokio::test]
+        async fn if_match_stops_a_stale_lifecycle_call_and_the_session_reports_its_revision() {
+            let m = procbox_manager(tenant_tokens(), false);
+            let id = seed_session(&m, Some("acme"), "vz", "running");
+            let app = router(m);
+            let uri = format!("/v1/agents/sessions/{id}");
+            for suffix in ["/checkpoint", "/restore", "/fork"] {
+                let resp = app
+                    .clone()
+                    .oneshot(
+                        Request::builder()
+                            .method("POST")
+                            .uri(format!("{uri}{suffix}"))
+                            .header(header::AUTHORIZATION, "Bearer acme")
+                            .header(header::CONTENT_TYPE, "application/json")
+                            .header(header::IF_MATCH, "41")
+                            .body(Body::from(r#"{"tag":"t","count":1}"#))
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(resp.status(), StatusCode::PRECONDITION_FAILED, "{suffix}");
+            }
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("DELETE")
+                        .uri(&uri)
+                        .header(header::AUTHORIZATION, "Bearer acme")
+                        .header(header::IF_MATCH, "41")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::PRECONDITION_FAILED);
+            // A refused call changed nothing.
+            let (st, b) = call(app, "GET", &uri, "acme", None).await;
+            assert_eq!(st, StatusCode::OK, "{b}");
+            assert!(
+                b.contains(r#""state":"running""#) || b.contains(r#""state":"gone""#),
+                "{b}"
+            );
+        }
+
+        #[tokio::test]
+        async fn promote_is_admin_only_tenant_scoped_and_needs_a_fork_child_with_a_baseline() {
+            let m = procbox_manager(tenant_tokens(), false);
+            let parent = seed_session(&m, Some("acme"), "vz", "running");
+            let child = seed_session(&m, Some("acme"), "vz", "running");
+            let lone = seed_session(&m, Some("acme"), "vz", "running");
+            // Make `child` a fork child of `parent`; neither has a workspace baseline.
+            let path = m
+                .cfg
+                .state_dir
+                .join("agent-sessions")
+                .join(format!("{child}.json"));
+            let mut rec: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            rec["parent"] = json!(parent);
+            std::fs::write(&path, rec.to_string()).unwrap();
+            let app = router(m);
+            let uri = |id: Uuid| format!("/v1/agents/sessions/{id}/promote");
+
+            // Another tenant: 404, not a hint that the id exists.
+            let (st, _) = call(app.clone(), "POST", &uri(child), "other", Some("{}")).await;
+            assert_eq!(st, StatusCode::NOT_FOUND);
+            // A session that is not a fork child has nothing to promote into.
+            let (st, b) = call(app.clone(), "POST", &uri(lone), "acme", Some("{}")).await;
+            assert_eq!(st, StatusCode::CONFLICT, "{b}");
+            assert!(b.contains("not a fork child"), "{b}");
+            // A child without a workspace baseline cannot be planned, dry run or not.
+            for body in [r#"{}"#, r#"{"dry_run":true}"#] {
+                let (st, b) = call(app.clone(), "POST", &uri(child), "acme", Some(body)).await;
+                assert_eq!(st, StatusCode::CONFLICT, "{b}");
+                assert!(b.contains("workspace with a baseline"), "{b}");
+            }
+            // A session token never promotes, whatever it was granted.
+            let (_, minted) = call(
+                app.clone(),
+                "POST",
+                &format!("/v1/agents/sessions/{child}/tokens"),
+                "acme",
+                Some(
+                    r#"{"ops":["read","exec","files.write","git","jobs","checkpoint","preview"]}"#,
+                ),
+            )
+            .await;
+            let v: serde_json::Value = serde_json::from_str(&minted).unwrap();
+            let (st, _) = call(
+                app,
+                "POST",
+                &uri(child),
+                v["token"].as_str().unwrap(),
+                Some("{}"),
+            )
+            .await;
+            assert_eq!(st, StatusCode::FORBIDDEN);
+        }
+
+        #[tokio::test]
+        async fn job_list_stdin_and_stream_are_tenant_scoped_and_validated() {
+            let m = procbox_manager(tenant_tokens(), false);
+            let id = seed_session(&m, Some("acme"), "vz", "running");
+            let job = Uuid::new_v4();
+            let app = router(m);
+            let base = format!("/v1/agents/sessions/{id}/jobs");
+            // Another tenant gets 404 on all three, never a hint the session exists.
+            for (method, suffix, body) in [
+                ("GET", String::new(), None),
+                ("POST", format!("/{job}/stdin"), Some(r#"{"text":"x"}"#)),
+                ("GET", format!("/{job}/stream"), None),
+            ] {
+                let (st, _) = call(
+                    app.clone(),
+                    method,
+                    &format!("{base}{suffix}"),
+                    "other",
+                    body,
+                )
+                .await;
+                assert_eq!(st, StatusCode::NOT_FOUND, "{method} {suffix}");
+            }
+            // stdin takes exactly one of text and data_base64, and a bounded amount.
+            let stdin = format!("{base}/{job}/stdin");
+            for bad in [
+                r#"{}"#.to_string(),
+                r#"{"text":"a","data_base64":"YQ=="}"#.to_string(),
+                r#"{"text":""}"#.to_string(),
+                format!(r#"{{"text":"{}"}}"#, "a".repeat(50_000)),
+            ] {
+                let (st, b) = call(app.clone(), "POST", &stdin, "acme", Some(&bad)).await;
+                assert_eq!(st, StatusCode::BAD_REQUEST, "{b}");
+            }
+            // A job that was never started with stdin: 409, before any guest is touched.
+            let (st, b) = call(app.clone(), "POST", &stdin, "acme", Some(r#"{"text":"x"}"#)).await;
+            assert_eq!(st, StatusCode::CONFLICT, "{b}");
+            // The output bound is validated at start.
+            for n in ["0", "999999999999"] {
+                let (st, b) = call(
+                    app.clone(),
+                    "POST",
+                    &base,
+                    "acme",
+                    Some(&format!(r#"{{"command":"true","max_output_bytes":{n}}}"#)),
+                )
+                .await;
+                assert_eq!(st, StatusCode::BAD_REQUEST, "{n}: {b}");
+            }
+        }
+
+        #[tokio::test]
+        async fn a_bad_budget_is_refused_before_any_sandbox_is_made() {
+            let m = procbox_manager(tenant_tokens(), false);
+            let app = router(m);
+            for body in [
+                r#"{"budget":{"max_execs":0}}"#,
+                r#"{"budget":{"max_jobs":99999999999}}"#,
+                r#"{"budget":{"max_execs":"many"}}"#,
+            ] {
+                let (st, b) = call(
+                    app.clone(),
+                    "POST",
+                    "/v1/agents/sessions",
+                    "acme",
+                    Some(body),
+                )
+                .await;
+                assert!(
+                    st == StatusCode::BAD_REQUEST || st == StatusCode::UNPROCESSABLE_ENTITY,
+                    "{body}: {st} {b}"
+                );
+            }
+        }
+
+        #[tokio::test]
+        async fn session_grants_are_admin_only_and_tenant_scoped() {
+            let m = procbox_manager(tenant_tokens(), false);
+            let id = seed_session(&m, Some("acme"), "vz", "running");
+            let app = router(m);
+            let base = format!("/v1/agents/sessions/{id}/grants");
+            let body = r#"{"secret_ref":"gh","value":"s3cret","hosts":["api.github.com"]}"#;
+            // Another tenant: 404 on every verb.
+            for (method, uri, b) in [
+                ("POST", base.clone(), Some(body)),
+                ("GET", base.clone(), None),
+                ("DELETE", base.clone(), None),
+                ("DELETE", format!("{base}/g1"), None),
+            ] {
+                let (st, _) = call(app.clone(), method, &uri, "other", b).await;
+                assert_eq!(st, StatusCode::NOT_FOUND, "{method} {uri}");
+            }
+            // A session token, whatever it was granted, cannot give itself a credential.
+            let (_, minted) = call(
+                app.clone(),
+                "POST",
+                &format!("/v1/agents/sessions/{id}/tokens"),
+                "acme",
+                Some(
+                    r#"{"ops":["read","exec","files.write","git","jobs","checkpoint","preview"]}"#,
+                ),
+            )
+            .await;
+            let v: serde_json::Value = serde_json::from_str(&minted).unwrap();
+            let tok = v["token"].as_str().unwrap();
+            for (method, uri, b) in [
+                ("POST", base.clone(), Some(body)),
+                ("GET", base.clone(), None),
+                ("DELETE", base.clone(), None),
+            ] {
+                let (st, _) = call(app.clone(), method, &uri, tok, b).await;
+                assert_eq!(st, StatusCode::FORBIDDEN, "{method} {uri}");
+            }
+            // The owner is let in (the seeded sandbox does not exist, so the broker answers 400),
+            // and no response echoes a secret.
+            let (st, b) = call(app.clone(), "GET", &base, "acme", None).await;
+            assert!(
+                st != StatusCode::FORBIDDEN && st != StatusCode::UNAUTHORIZED,
+                "{st} {b}"
+            );
+            assert!(!b.contains("s3cret"));
+        }
+
+        #[tokio::test]
+        async fn the_terminal_page_needs_no_token_and_the_ticket_is_scoped_to_its_session() {
+            use tower::ServiceExt as _;
+            let m = procbox_manager(tenant_tokens(), false);
+            let id = seed_session(&m, Some("acme"), "vz", "running");
+            let app = router(m.clone());
+            // The page and its vendored files load without a bearer token and carry the console CSP.
+            for (uri, ct) in [
+                ("/console/terminal", "text/html"),
+                ("/console/terminal/", "text/html"),
+                ("/console/terminal/terminal.js", "text/javascript"),
+                ("/console/terminal/xterm.js", "text/javascript"),
+                ("/console/terminal/xterm.css", "text/css"),
+            ] {
+                let resp = app
+                    .clone()
+                    .oneshot(
+                        Request::builder()
+                            .method("GET")
+                            .uri(uri)
+                            .body(Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(resp.status(), StatusCode::OK, "{uri}");
+                let h = resp.headers();
+                assert!(
+                    h[header::CONTENT_TYPE].to_str().unwrap().starts_with(ct),
+                    "{uri}"
+                );
+                let csp = h[header::CONTENT_SECURITY_POLICY].to_str().unwrap();
+                // wasm may compile (the sixel decoder); strings may not be eval'd; nothing loads from elsewhere
+                assert!(
+                    csp.contains("script-src 'self' 'wasm-unsafe-eval'"),
+                    "{csp}"
+                );
+                assert!(
+                    !csp.contains("'unsafe-eval'") && !csp.contains("http"),
+                    "{csp}"
+                );
+                assert!(
+                    csp.contains("default-src 'none'") && csp.contains("frame-ancestors 'none'"),
+                    "{csp}"
+                );
+            }
+            let st = status_for(app.clone(), "GET", "/console/terminal/nope.js", None).await;
+            assert_eq!(st, StatusCode::NOT_FOUND);
+            // Only GET gets past auth for the page.
+            let st = status_for(app.clone(), "POST", "/console/terminal", None).await;
+            assert_eq!(st, StatusCode::UNAUTHORIZED);
+
+            // Minting a ticket needs a token, and another tenant cannot mint one.
+            let st = status_for(
+                app.clone(),
+                "POST",
+                &format!("/v1/agents/sessions/{id}/pty-ticket"),
+                None,
+            )
+            .await;
+            assert_eq!(st, StatusCode::UNAUTHORIZED);
+            let (st, _) = call(
+                app.clone(),
+                "POST",
+                &format!("/v1/agents/sessions/{id}/pty-ticket"),
+                "other",
+                None,
+            )
+            .await;
+            assert_eq!(st, StatusCode::NOT_FOUND);
+            let (st, body) = call(
+                app.clone(),
+                "POST",
+                &format!("/v1/agents/sessions/{id}/pty-ticket"),
+                "acme",
+                None,
+            )
+            .await;
+            assert_eq!(st, StatusCode::OK, "{body}");
+            let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+            let ticket = v["ticket"].as_str().unwrap();
+            assert_eq!(ticket.len(), 64);
+            assert_eq!(v["expires_in"], 30);
+            assert_eq!(v["path"], format!("/console/pty/{ticket}"));
+            // The ticket route needs no bearer: a plain GET gets past auth and fails at the missing
+            // WebSocket upgrade (400), never 401.
+            let st = status_for(app.clone(), "GET", "/console/pty/anything", None).await;
+            assert_ne!(st, StatusCode::UNAUTHORIZED);
+
+            // A session with command rules refuses a terminal at the ticket, not later.
+            let ruled = seed_session(&m, Some("acme"), "vz", "running");
+            let path = m
+                .cfg
+                .state_dir
+                .join("agent-sessions")
+                .join(format!("{ruled}.json"));
+            let mut rec: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            rec["policy"]["process"] = json!({"allow": ["ls"], "deny": []});
+            std::fs::write(&path, rec.to_string()).unwrap();
+            let (st, _) = call(
+                app,
+                "POST",
+                &format!("/v1/agents/sessions/{ruled}/pty-ticket"),
+                "acme",
+                None,
+            )
+            .await;
+            assert_eq!(st, StatusCode::FORBIDDEN);
+        }
+
+        /// The page's pure helpers and palettes, run under node when it is installed.
+        #[test]
+        fn the_terminal_page_helpers_and_themes_hold() {
+            let Ok(node) = std::process::Command::new("node").arg("--version").output() else {
+                eprintln!("node is not installed; skipping");
+                return;
+            };
+            assert!(node.status.success());
+            let file = concat!(env!("CARGO_MANIFEST_DIR"), "/src/terminal/terminal.js");
+            let script = format!(
+                r##"
+const assert = require("assert");
+const t = require({file:?});
+const keys = ["foreground","background","cursor","cursorAccent","selectionBackground","black","red","green","yellow",
+  "blue","magenta","cyan","white","brightBlack","brightRed","brightGreen","brightYellow","brightBlue","brightMagenta",
+  "brightCyan","brightWhite"];
+assert(Object.keys(t.THEMES).length >= 5);
+for (const [name, th] of Object.entries(t.THEMES)) {{
+  for (const k of keys) assert(/^#[0-9a-f]{{6}}$/i.test(th[k]), name + "." + k + " = " + th[k]);
+  assert.strictEqual(typeof th.dark, "boolean", name);
+  assert(t.contrast(th.foreground, th.background) >= 4.5, name + " text contrast " + t.contrast(th.foreground, th.background));
+  // dark themes have a dark background and light ones a light one
+  assert.strictEqual(t.contrast(th.background, "#000000") < t.contrast(th.background, "#ffffff"), th.dark, name);
+}}
+assert.strictEqual(t.pickTheme("Dracula", false), "Dracula");
+assert.strictEqual(t.pickTheme("nope", true), t.DEFAULT_DARK);
+assert.strictEqual(t.pickTheme(null, false), t.DEFAULT_LIGHT);
+assert.strictEqual(t.pickTheme("__proto__", true), t.DEFAULT_DARK);
+const u = t.ptyUrl({{ protocol: "http:", host: "127.0.0.1:7788" }}, "ab12", 100, 30);
+assert(u.startsWith("ws://127.0.0.1:7788/console/pty/ab12?"), u);
+assert(u.includes("cols=100") && u.includes("rows=30") && u.includes("term_program=FluxVM") && u.includes("colorterm=truecolor"), u);
+assert(t.ptyUrl({{ protocol: "https:", host: "h" }}, "x/y", 1, 1).startsWith("wss://h/console/pty/x%2Fy?"));
+assert.strictEqual(t.exitCode("exit=3"), 3);
+assert.strictEqual(t.exitCode("exit=-1"), -1);
+assert.strictEqual(t.exitCode(""), null);
+assert.strictEqual(t.exitCode("exit=3; rm"), null);
+assert.strictEqual(t.clampSize(2), 9);
+assert.strictEqual(t.clampSize(99), 32);
+assert.strictEqual(t.clampSize("14"), 14);
+assert.strictEqual(t.clampSize("x"), 16);
+assert.strictEqual(t.clampSize(99), 32);
+// the WezTerm-style theme: neon accent, a gradient window and dimmed inactive panes
+const neon = t.THEMES["Neon Storm"], c = t.chromeFor(neon);
+assert.strictEqual(t.DEFAULT_DARK, "Neon Storm");
+assert.strictEqual(c.accent, "#82aaff"); assert.strictEqual(c.tabActiveBg, "#82aaff");
+assert.deepStrictEqual(c.gradient, ["#16161e", "#2a2b3b", "#16161e"]);
+assert.strictEqual(c.opacity, 0.94); assert.strictEqual(c.paneDim.brightness, 0.7);
+assert(t.contrast(c.tabActiveFg, c.tabActiveBg) >= 4.5, "active tab text");
+assert(t.contrast(c.tabInactiveFg, c.tabInactiveBg) >= 4.5, "inactive tab text");
+const plain = t.chromeFor(t.THEMES["Dracula"]);
+assert.strictEqual(plain.gradient, null); assert.strictEqual(plain.opacity, 1);
+// layout tree
+let tree = {{ leaf: 1 }};
+tree = t.splitLeaf(tree, 1, "h", 2);        // 1 | 2
+tree = t.splitLeaf(tree, 2, "v", 3);        // 1 | (2 over 3)
+assert.deepStrictEqual(t.leaves(tree), [1, 2, 3]);
+assert.deepStrictEqual(t.leaves(t.splitLeaf(tree, 99, "h", 4)), [1, 2, 3], "unknown pane changes nothing");
+const rects = t.layoutRects(tree, {{ x: 0, y: 0, w: 100, h: 60 }});
+assert.deepStrictEqual(rects[1], {{ x: 0, y: 0, w: 50, h: 60 }});
+assert.deepStrictEqual(rects[2], {{ x: 50, y: 0, w: 50, h: 30 }});
+assert.deepStrictEqual(rects[3], {{ x: 50, y: 30, w: 50, h: 30 }});
+assert.strictEqual(t.neighbour(rects, 1, "right"), "2");
+assert.strictEqual(t.neighbour(rects, 3, "left"), "1");
+assert.strictEqual(t.neighbour(rects, 2, "down"), "3");
+assert.strictEqual(t.neighbour(rects, 3, "up"), "2");
+assert.strictEqual(t.neighbour(rects, 1, "left"), null);
+assert.strictEqual(t.neighbour(rects, 1, "up"), null);
+assert.deepStrictEqual(t.leaves(t.removeLeaf(tree, 2)), [1, 3]);
+assert.deepStrictEqual(t.removeLeaf(t.removeLeaf(tree, 2), 3), {{ leaf: 1 }});
+assert.strictEqual(t.removeLeaf({{ leaf: 1 }}, 1), null, "closing the last pane leaves nothing");
+assert.deepStrictEqual(t.removeLeaf({{ leaf: 1 }}, 7), {{ leaf: 1 }});
+// titles and clock
+assert.strictEqual(t.tabTitle("  sandbox@host:   ~  ", "x", 24), "sandbox@host: ~");
+assert.strictEqual(t.tabTitle("", "fallback", 24), "fallback");
+assert.strictEqual(t.tabTitle("a".repeat(40), "x", 10), "aaaaaaaaa…");
+assert.strictEqual(t.clock(new Date(2026, 0, 2, 3, 4, 5)), "03:04:05");
+// keys: the user's bindings (⌘T ⌘W ⌘⌃hjkl) plus WezTerm's split keys; nothing else is taken
+const key = (o) => Object.assign({{ key: "", metaKey: false, ctrlKey: false, shiftKey: false, altKey: false }}, o);
+assert.deepStrictEqual(t.shortcut(key({{ key: "t", metaKey: true }}), true), {{ action: "new-tab" }});
+assert.deepStrictEqual(t.shortcut(key({{ key: "w", metaKey: true }}), true), {{ action: "close" }});
+assert.deepStrictEqual(t.shortcut(key({{ key: "h", metaKey: true, ctrlKey: true }}), true), {{ action: "focus", dir: "left" }});
+assert.deepStrictEqual(t.shortcut(key({{ key: "j", metaKey: true, ctrlKey: true }}), true), {{ action: "focus", dir: "down" }});
+assert.deepStrictEqual(t.shortcut(key({{ key: "3", metaKey: true }}), true), {{ action: "tab", index: 2 }});
+assert.deepStrictEqual(t.shortcut(key({{ key: '"', ctrlKey: true, shiftKey: true, altKey: true }}), true), {{ action: "split", dir: "v" }});
+assert.deepStrictEqual(t.shortcut(key({{ key: "T", ctrlKey: true, shiftKey: true }}), false), {{ action: "new-tab" }});
+// plain typing, Ctrl-C/Ctrl-W/Ctrl-T for the shell and bare Cmd on a non-mac are left alone
+for (const e of [key({{ key: "t" }}), key({{ key: "c", ctrlKey: true }}), key({{ key: "w", ctrlKey: true }}),
+  key({{ key: "t", ctrlKey: true }}), key({{ key: "a", metaKey: true }})]) assert.strictEqual(t.shortcut(e, true), null, JSON.stringify(e));
+assert.strictEqual(t.shortcut(key({{ key: "t", metaKey: true }}), false), null);
+// search, palette, copy mode, quick select and prompt jumps
+assert.deepStrictEqual(t.shortcut(key({{ key: "f", metaKey: true }}), true), {{ action: "search" }});
+assert.deepStrictEqual(t.shortcut(key({{ key: "P", metaKey: true, shiftKey: true }}), true), {{ action: "palette" }});
+assert.deepStrictEqual(t.shortcut(key({{ key: "X", ctrlKey: true, shiftKey: true }}), true), {{ action: "copy-mode" }});
+assert.deepStrictEqual(t.shortcut(key({{ key: " ", ctrlKey: true, shiftKey: true }}), true), {{ action: "quick-select" }});
+assert.deepStrictEqual(t.shortcut(key({{ key: "ArrowUp", metaKey: true }}), true), {{ action: "prompt", dir: -1 }});
+assert.strictEqual(t.shortcut(key({{ key: "f", ctrlKey: true }}), true), null, "Ctrl-F stays the shell's");
+assert.strictEqual(t.shortcut(key({{ key: "ArrowUp" }}), true), null, "history stays the shell's");
+// quick select
+const q = t.quickMatches([
+  "see https://example.com/a/b?x=1, and /etc/hosts or ~/src/app.rs",
+  "commit 3f2a9c1d4e at 10.0.0.12:8080 id 123e4567-e89b-12d3-a456-426614174000 pid 48213",
+  "plain words only and 12",
+]);
+const kinds = q.map((m) => m.kind + ":" + m.text);
+assert.deepStrictEqual(kinds, [
+  "url:https://example.com/a/b?x=1", "path:/etc/hosts", "path:~/src/app.rs",
+  "hash:3f2a9c1d4e", "ipv4:10.0.0.12:8080", "uuid:123e4567-e89b-12d3-a456-426614174000", "number:48213",
+], JSON.stringify(kinds));
+assert.deepStrictEqual(q[0], {{ row: 0, col: 4, len: 27, text: "https://example.com/a/b?x=1", kind: "url" }});
+assert.strictEqual(t.quickMatches(["a/b"]).length, 0, "a bare relative word is not a path");
+assert.strictEqual(t.quickMatches(["deadbeef cafebabe"]).length, 0, "words made only of hex letters are not hashes");
+assert.deepStrictEqual(t.hintLabels(3), ["a", "s", "d"]);
+assert.strictEqual(t.hintLabels(26).length, 26);
+const many = t.hintLabels(40);
+assert.strictEqual(new Set(many).size, 40);
+assert(many.every((l) => l.length === 2), "two letters each once they no longer fit in one");
+for (const a of many) for (const b of many) if (a !== b) assert(!b.startsWith(a), "prefix-free");
+// copy mode
+const L = ["alpha beta  gamma", "", "x.y z"];
+const mv = (st, ...ks) => ks.reduce((s, k) => t.copyMove(s, k, L), st);
+let st = {{ row: 0, col: 0, mode: null, anchor: null }};
+assert.deepStrictEqual(mv(st, "w"), {{ ...st, col: 6 }});
+assert.deepStrictEqual(mv(st, "w", "w"), {{ ...st, col: 12 }});
+assert.deepStrictEqual(mv(st, "w", "w", "w"), {{ ...st, row: 1, col: 0 }}, "w crosses a line break");
+assert.deepStrictEqual(mv(st, "$"), {{ ...st, col: 16 }});
+assert.deepStrictEqual(mv(st, "$", "b"), {{ ...st, col: 12 }});
+assert.deepStrictEqual(mv(st, "$", "b", "b"), {{ ...st, col: 6 }});
+assert.deepStrictEqual(mv(st, "j", "j"), {{ ...st, row: 2, col: 0 }});
+assert.deepStrictEqual(mv(st, "k", "h"), st, "stays inside the buffer");
+assert.deepStrictEqual(mv(st, "G"), {{ ...st, row: 2, col: 0 }});
+assert.deepStrictEqual(mv(st, "G", "g"), st);
+assert.strictEqual(mv(st, "$", "j").col, 0, "an empty line clamps the column");
+// visual selection and yank
+let v = mv(st, "v", "w");
+assert.strictEqual(t.copyText(v, L), "alpha b");
+assert.strictEqual(t.copyText(mv(st, "V", "j", "j"), L), "alpha beta  gamma\n\nx.y z");
+assert.strictEqual(t.copyText(mv(st, "j", "j", "v", "k", "k"), L), "alpha beta  gamma\n\nx");
+assert.strictEqual(t.copyText(st, L), "", "nothing without a selection");
+assert.strictEqual(mv(st, "v", "v").mode, null, "v again leaves visual mode");
+// prompt marks
+assert.strictEqual(t.promptJump([4, 20, 9], 10, -1), 9);
+assert.strictEqual(t.promptJump([4, 20, 9], 10, 1), 20);
+assert.strictEqual(t.promptJump([4, 20, 9], 9, -1), 4);
+assert.strictEqual(t.promptJump([4], 0, -1), null);
+assert.strictEqual(t.promptJump([-1, 4], 0, 1), 4, "disposed markers (line -1) are ignored");
+// palette
+assert(t.ACTIONS.length > 10);
+assert.deepStrictEqual(t.filterActions(t.ACTIONS, "split").map((a) => a.run.dir), ["h", "v"]);
+assert.strictEqual(t.filterActions(t.ACTIONS, "THEME dracula").length, 1);
+assert.strictEqual(t.filterActions(t.ACTIONS, "").length, t.ACTIONS.length);
+assert.strictEqual(t.filterActions(t.ACTIONS, "zzzz").length, 0);
+for (const a of t.ACTIONS) if (a.run.action === "theme") assert(t.THEMES[a.run.name], a.title);
+"##
+            );
+            let dir = tempfile::tempdir().unwrap();
+            let js = dir.path().join("t.js");
+            std::fs::write(&js, script).unwrap();
+            let out = std::process::Command::new("node")
+                .arg(&js)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "{}{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+
+        #[test]
+        fn the_vendored_terminal_files_match_their_checksums() {
+            use sha2::{Digest, Sha256};
+            let sums = include_str!("terminal/vendor/SHA256SUMS");
+            let mut seen = 0;
+            for line in sums.lines().filter(|l| !l.trim().is_empty()) {
+                let (want, name) = line.split_once("  ").expect("sha256sum format");
+                let body = TERMINAL_FILES
+                    .iter()
+                    .find(|(n, _, _)| *n == name)
+                    .map(|(_, _, b)| *b);
+                let Some(body) = body else {
+                    assert_eq!(name, "LICENSE-xterm", "{name} is listed but not served");
+                    continue;
+                };
+                let got: String = Sha256::digest(body.as_bytes())
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect();
+                assert_eq!(got, want, "{name} differs from what was vendored");
+                seen += 1;
+            }
+            // xterm.js, xterm.css and the seven add-ons; terminal.js and terminal.css are ours.
+            assert_eq!(seen, 9, "every vendored file is checksummed");
+            assert!(!sums.contains("sourceMappingURL"));
+        }
+
+        #[tokio::test]
+        async fn agent_session_preview_urls_are_tokens_that_expire_and_can_be_revoked() {
+            let m = procbox_manager(tenant_tokens(), false);
+            let id = seed_session(&m, Some("acme"), "vz", "running");
+            let app = router(m.clone());
+            let base = format!("/v1/agents/sessions/{id}");
+            // Bad input is refused before anything is minted.
+            for body in [
+                r#"{"port":0}"#,
+                r#"{"port":8000,"ttl_seconds":0}"#,
+                r#"{"port":8000,"ttl_seconds":86401}"#,
+            ] {
+                let (st, msg) = call(
+                    app.clone(),
+                    "POST",
+                    &format!("{base}/preview"),
+                    "acme",
+                    Some(body),
+                )
+                .await;
+                assert_eq!(st, StatusCode::BAD_REQUEST, "{body} -> {msg}");
+            }
+            // Another tenant cannot mint one for this session.
+            let (st, _) = call(
+                app.clone(),
+                "POST",
+                &format!("{base}/preview"),
+                "other",
+                Some(r#"{"port":8000}"#),
+            )
+            .await;
+            assert_eq!(st, StatusCode::NOT_FOUND);
+
+            let (st, body) = call(
+                app.clone(),
+                "POST",
+                &format!("{base}/preview"),
+                "acme",
+                Some(r#"{"port":8000,"ttl_seconds":60}"#),
+            )
+            .await;
+            assert_eq!(st, StatusCode::CREATED, "{body}");
+            let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+            let token = v["token"].as_str().unwrap().to_string();
+            assert_eq!(token.len(), 64);
+            assert_eq!(v["url"], format!("/preview/{token}/"));
+            // The token never reaches the ledger.
+            let ledger = std::fs::read_to_string(
+                m.cfg
+                    .state_dir
+                    .join("agent-sessions")
+                    .join(format!("{id}.ledger.jsonl")),
+            )
+            .unwrap();
+            assert!(
+                ledger.contains("preview.create") && !ledger.contains(&token),
+                "{ledger}"
+            );
+
+            // The preview needs no bearer token: it gets past auth and fails at the sandbox (which
+            // this test never booted), not with 401/404.
+            let st = status_for(
+                app.clone(),
+                "GET",
+                &format!("/preview/{token}/index.html"),
+                None,
+            )
+            .await;
+            assert_ne!(st, StatusCode::UNAUTHORIZED);
+            assert_ne!(st, StatusCode::NOT_FOUND);
+            // Unknown and malformed tokens are 404 and say nothing else.
+            for t in [
+                "0".repeat(64),
+                "short".to_string(),
+                "../../etc/passwd".to_string(),
+            ] {
+                let st = status_for(app.clone(), "GET", &format!("/preview/{t}/"), None).await;
+                assert_eq!(st, StatusCode::NOT_FOUND, "{t}");
+            }
+            // Another tenant cannot list or revoke it.
+            let (st, _) = call(
+                app.clone(),
+                "GET",
+                &format!("{base}/previews"),
+                "other",
+                None,
+            )
+            .await;
+            assert_eq!(st, StatusCode::NOT_FOUND);
+            let (st, list) = call(
+                app.clone(),
+                "GET",
+                &format!("{base}/previews"),
+                "acme",
+                None,
+            )
+            .await;
+            assert_eq!(st, StatusCode::OK);
+            assert!(list.contains(&token), "{list}");
+
+            // Revoked means gone.
+            let (st, _) = call(
+                app.clone(),
+                "DELETE",
+                &format!("{base}/preview/{token}"),
+                "acme",
+                None,
+            )
+            .await;
+            assert_eq!(st, StatusCode::NO_CONTENT);
+            let st = status_for(app.clone(), "GET", &format!("/preview/{token}/"), None).await;
+            assert_eq!(st, StatusCode::NOT_FOUND);
+
+            // Expired means gone, and the file is cleaned up.
+            let (_, body) = call(
+                app.clone(),
+                "POST",
+                &format!("{base}/preview"),
+                "acme",
+                Some(r#"{"port":8000}"#),
+            )
+            .await;
+            let t2 = serde_json::from_str::<serde_json::Value>(&body).unwrap()["token"]
+                .as_str()
+                .unwrap()
+                .to_string();
+            let f = m
+                .cfg
+                .state_dir
+                .join("agent-previews")
+                .join(format!("{t2}.json"));
+            let mut rec: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&f).unwrap()).unwrap();
+            rec["expires_at"] = json!(chrono::Utc::now() - chrono::Duration::seconds(1));
+            std::fs::write(&f, rec.to_string()).unwrap();
+            let st = status_for(app, "GET", &format!("/preview/{t2}/"), None).await;
+            assert_eq!(st, StatusCode::NOT_FOUND);
+            assert!(!f.exists());
+        }
+
+        #[tokio::test]
+        async fn agent_session_jobs_are_tenant_scoped_and_validated() {
+            let m = procbox_manager(tenant_tokens(), false);
+            let id = seed_session(&m, Some("acme"), "vz", "running");
+            let app = router(m);
+            let base = format!("/v1/agents/sessions/{id}/jobs");
+            let job = Uuid::new_v4();
+            // Another tenant sees a 404 on every job route, like the session itself.
+            for (method, uri, body) in [
+                ("POST", base.clone(), Some(r#"{"command":"true"}"#)),
+                ("GET", format!("{base}/{job}"), None),
+                ("DELETE", format!("{base}/{job}"), None),
+            ] {
+                let (st, _) = call(app.clone(), method, &uri, "other", body).await;
+                assert_eq!(st, StatusCode::NOT_FOUND, "{method} {uri}");
+            }
+            // An empty command is refused before anything reaches a guest.
+            let (st, _) = call(
+                app.clone(),
+                "POST",
+                &base,
+                "acme",
+                Some(r#"{"command":"  "}"#),
+            )
+            .await;
+            assert_eq!(st, StatusCode::BAD_REQUEST);
+            // A job id that is not a UUID never becomes a guest path.
+            let (st, _) = call(app, "GET", &format!("{base}/..%2F..%2Fetc"), "acme", None).await;
+            assert!(
+                st == StatusCode::BAD_REQUEST || st == StatusCode::NOT_FOUND,
+                "{st}"
+            );
+        }
+
+        #[tokio::test]
+        async fn agent_session_files_are_tenant_scoped_and_paths_validated() {
+            let m = procbox_manager(tenant_tokens(), false);
+            let id = seed_session(&m, Some("acme"), "vz", "running");
+            let app = router(m);
+            let base = format!("/v1/agents/sessions/{id}/files");
+            for (method, uri, body) in [
+                ("GET", format!("{base}?path=/workspace"), None),
+                ("GET", format!("{base}/content?path=/workspace/a"), None),
+                (
+                    "PUT",
+                    format!("{base}/content"),
+                    Some(r#"{"path":"/workspace/a","content_base64":"YQ=="}"#),
+                ),
+                ("DELETE", format!("{base}?path=/workspace/a"), None),
+            ] {
+                let (st, _) = call(app.clone(), method, &uri, "other", body).await;
+                assert_eq!(st, StatusCode::NOT_FOUND, "{method} {uri}");
+            }
+            // Paths that are relative, climb out, or name a directory to write are refused before
+            // anything reaches a guest.
+            for (method, uri, body) in [
+                ("GET", format!("{base}?path=workspace"), None),
+                ("GET", format!("{base}?path=/workspace/../etc"), None),
+                ("GET", format!("{base}/content?path=/a/../b"), None),
+                (
+                    "PUT",
+                    format!("{base}/content"),
+                    Some(r#"{"path":"/workspace/dir/","content_base64":"YQ=="}"#),
+                ),
+                ("DELETE", format!("{base}?path=/etc&recursive=true"), None),
+                ("DELETE", format!("{base}?path=/"), None),
+            ] {
+                let (st, msg) = call(app.clone(), method, &uri, "acme", body).await;
+                assert_eq!(st, StatusCode::BAD_REQUEST, "{method} {uri} -> {msg}");
+            }
+        }
+
+        #[tokio::test]
+        async fn agent_session_git_is_tenant_scoped_and_inputs_validated() {
+            let m = procbox_manager(tenant_tokens(), false);
+            let id = seed_session(&m, Some("acme"), "vz", "running");
+            let app = router(m);
+            let base = format!("/v1/agents/sessions/{id}/git");
+            for (method, uri, body) in [
+                ("GET", format!("{base}/status"), None),
+                ("GET", format!("{base}/diff"), None),
+                ("GET", format!("{base}/log"), None),
+                ("POST", format!("{base}/commit"), Some(r#"{"message":"x"}"#)),
+                ("POST", format!("{base}/branch"), Some(r#"{"name":"x"}"#)),
+            ] {
+                let (st, _) = call(app.clone(), method, &uri, "other", body).await;
+                assert_eq!(st, StatusCode::NOT_FOUND, "{method} {uri}");
+            }
+            // Refused before anything runs in a guest.
+            for (method, uri, body) in [
+                ("GET", format!("{base}/status?repo=relative"), None),
+                ("GET", format!("{base}/diff?path=../etc/passwd"), None),
+                ("GET", format!("{base}/diff?path=-p"), None),
+                ("GET", format!("{base}/diff?path=/etc/passwd"), None),
+                (
+                    "POST",
+                    format!("{base}/commit"),
+                    Some(r#"{"message":"  "}"#),
+                ),
+                (
+                    "POST",
+                    format!("{base}/branch"),
+                    Some(r#"{"name":"--detach"}"#),
+                ),
+                ("POST", format!("{base}/branch"), Some(r#"{"name":"a b"}"#)),
+            ] {
+                let (st, msg) = call(app.clone(), method, &uri, "acme", body).await;
+                assert_eq!(st, StatusCode::BAD_REQUEST, "{method} {uri} -> {msg}");
+            }
+        }
+
+        #[tokio::test]
+        async fn agent_session_fork_is_refused_for_a_session_on_the_nat() {
+            let m = procbox_manager(tenant_tokens(), false);
+            let id = seed_session(&m, Some("acme"), "vz", "running");
+            let (st, body) = call(
+                router(m),
+                "POST",
+                &format!("/v1/agents/sessions/{id}/fork"),
+                "acme",
+                Some(r#"{"count":2}"#),
+            )
+            .await;
+            assert_eq!(st, StatusCode::CONFLICT, "{body}");
+            assert!(body.contains("no network card of its own"), "{body}");
+        }
+
+        #[tokio::test]
+        async fn agent_session_inputs_are_validated_before_any_sandbox_is_made() {
+            let m = procbox_manager(tenant_tokens(), false);
+            let app = router(m.clone());
+            for body in [
+                r#"{"policy":{"preset":"nope"}}"#,
+                r#"{"policy":{"network":{"allow":[{"host":"a.b","verbs":["GET"]}]}}}"#,
+                r#"{"policy":{"network":{"allow":[{"host":"a.b","methods":["G ET"]}]}}}"#,
+                r#"{"workspace":{"git":"git@github.com:a/b.git"}}"#,
+                r#"{"workspace":{"path":"/a/../b"}}"#,
+                r#"{"workspace":{"mode":"overlay"}}"#,
+                r#"{"workspace":{"mode":"overlay","lower":"relative/dir"}}"#,
+                r#"{"workspace":{"mode":"overlay","lower":"/workspace"}}"#,
+                r#"{"workspace":{"mode":"overlay","lower":"/opt/app","git":"https://github.com/a/b"}}"#,
+                r#"{"workspace":{"mode":"clone","lower":"/opt/app"}}"#,
+                r#"{"agent":"bad agent"}"#,
+            ] {
+                let (st, msg) = call(
+                    app.clone(),
+                    "POST",
+                    "/v1/agents/sessions",
+                    "acme",
+                    Some(body),
+                )
+                .await;
+                assert_eq!(st, StatusCode::BAD_REQUEST, "{body} -> {msg}");
+            }
+            assert!(
+                !m.cfg.state_dir.join("agent-sessions").exists(),
+                "a refused request must leave no session behind"
+            );
+            let id = seed_session(&m, Some("acme"), "vz", "running");
+            let base = format!("/v1/agents/sessions/{id}");
+            let (st, _) = call(
+                app.clone(),
+                "POST",
+                &format!("{base}/checkpoint"),
+                "acme",
+                Some(r#"{"tag":"a/b"}"#),
+            )
+            .await;
+            assert_eq!(st, StatusCode::BAD_REQUEST);
+            let (st, body) = call(
+                app.clone(),
+                "POST",
+                &format!("{base}/restore"),
+                "acme",
+                Some(r#"{"tag":"nope"}"#),
+            )
+            .await;
+            assert_eq!(st, StatusCode::NOT_FOUND, "{body}");
+            let (st, _) = call(
+                app,
+                "POST",
+                &format!("{base}/exec"),
+                "acme",
+                Some(r#"{"command":"  "}"#),
+            )
+            .await;
+            assert_eq!(st, StatusCode::BAD_REQUEST);
+        }
+
+        #[tokio::test]
+        async fn agent_session_delete_is_idempotent_and_closes_the_session() {
+            let m = procbox_manager(tenant_tokens(), false);
+            let id = seed_session(&m, Some("acme"), "vz", "running");
+            let app = router(m);
+            let base = format!("/v1/agents/sessions/{id}");
+            // The seeded sandbox does not exist: the delete is logged, the session still closes.
+            for _ in 0..2 {
+                let (st, body) = call(app.clone(), "DELETE", &base, "acme", None).await;
+                assert_eq!(st, StatusCode::NO_CONTENT, "{body}");
+            }
+            let (_, body) = call(app.clone(), "GET", &base, "acme", None).await;
+            assert!(body.contains(r#""state":"deleted""#), "{body}");
+            let (st, _) = call(
+                app.clone(),
+                "POST",
+                &format!("{base}/exec"),
+                "acme",
+                Some(r#"{"command":"true"}"#),
+            )
+            .await;
+            assert_eq!(
+                st,
+                StatusCode::CONFLICT,
+                "a deleted session cannot run commands"
+            );
+            let (_, ev) = call(app, "GET", &format!("{base}/events"), "acme", None).await;
+            assert!(
+                ev.contains("session.delete") && ev.contains(r#""kind":"exec""#),
+                "{ev}"
+            );
+        }
+
+        #[tokio::test]
+        async fn procbox_create_is_403_until_an_operator_enables_it() {
+            let app = router(procbox_manager(tenant_tokens(), false));
+            let (st, body) = call(
+                app,
+                "POST",
+                "/v1/sandboxes",
+                "acme",
+                Some(r#"{"procbox":{}}"#),
+            )
+            .await;
+            assert_eq!(st, StatusCode::FORBIDDEN, "{body}");
+            assert!(body.contains("disabled"), "{body}");
+        }
+
+        #[tokio::test]
+        async fn cdrom_eject_records_an_empty_drive() {
+            let m = procbox_manager(tenant_tokens(), false);
+            let mut vm = fixture(BackendKind::Qemu, VmStatus::Stopped, false);
+            vm.request.tenant = Some("acme".into());
+            vm.request.cdroms = vec![fluxvm_core::model::CdromSpec {
+                name: "install".into(),
+                path: "/srv/iso/win.iso".into(),
+            }];
+            let id = vm.id;
+            m.store.insert(vm).await.unwrap();
+            let app = router(m.clone());
+            let uri = format!("/v1/vms/{id}/cdroms/install/eject");
+            for _ in 0..2 {
+                let (st, body) = call(app.clone(), "POST", &uri, "acme", None).await;
+                assert_eq!(st, StatusCode::OK, "{body}");
+                assert!(body.contains(r#""path":"""#), "{body}");
+            }
+            assert!(m.get(id).await.unwrap().request.cdroms[0].is_ejected());
+            let (st, body) = call(
+                app.clone(),
+                "POST",
+                &format!("/v1/vms/{id}/cdroms/nope/eject"),
+                "acme",
+                None,
+            )
+            .await;
+            assert_eq!(st, StatusCode::BAD_REQUEST, "{body}");
+            assert!(body.contains("not found"), "{body}");
+        }
+
+        #[tokio::test]
+        async fn vm_dry_run_is_tenant_scoped_and_reports_precise_statuses() {
+            let m = procbox_manager(tenant_tokens(), true);
+            let mut vm = fixture(BackendKind::FluxVm, VmStatus::Running, true);
+            vm.request.tenant = Some("acme".into());
+            let id = vm.id;
+            m.store.insert(vm).await.unwrap();
+            // A running non-flux-vm sandbox can also dry-run (restore-by-relaunch);
+            // it hits the same "no reachable agent" conflict as flux-vm here since
+            // the fixture has no vsock CID, never a fake 501.
+            let mut qemu = fixture(BackendKind::Qemu, VmStatus::Running, true);
+            qemu.request.tenant = Some("acme".into());
+            let qid = qemu.id;
+            m.store.insert(qemu).await.unwrap();
+            let app = router(m);
+            let uri = format!("/v1/sandboxes/{id}/dry-run");
+            // Another tenant sees nothing.
+            let (st, _) = call(
+                app.clone(),
+                "POST",
+                &uri,
+                "other",
+                Some(r#"{"command":"true","paths":["/work"]}"#),
+            )
+            .await;
+            assert_eq!(st, StatusCode::NOT_FOUND);
+            // The guest root is too large to scan: paths are required (400).
+            let (st, msg) = call(
+                app.clone(),
+                "POST",
+                &uri,
+                "acme",
+                Some(r#"{"command":"true"}"#),
+            )
+            .await;
+            assert_eq!(st, StatusCode::BAD_REQUEST, "{msg}");
+            assert!(msg.contains("paths is required"), "{msg}");
+            // No reachable guest agent behind the fixture: 409, never a fake success.
+            let (st, msg) = call(
+                app.clone(),
+                "POST",
+                &uri,
+                "acme",
+                Some(r#"{"command":"true","paths":["/work"]}"#),
+            )
+            .await;
+            assert_eq!(st, StatusCode::CONFLICT, "{msg}");
+            assert!(msg.contains("agent"), "{msg}");
+            let (st, msg) = call(
+                app,
+                "POST",
+                &format!("/v1/sandboxes/{qid}/dry-run"),
+                "acme",
+                Some(r#"{"command":"true","paths":["/work"]}"#),
+            )
+            .await;
+            assert_eq!(st, StatusCode::CONFLICT, "{msg}");
+            assert!(msg.contains("agent"), "{msg}");
+        }
+
+        #[tokio::test]
+        async fn non_qemu_serial_streams_the_console_log_read_only() {
+            use futures::{SinkExt, StreamExt};
+            use tokio::io::AsyncWriteExt;
+            use tokio_tungstenite::tungstenite::Message as WsMessage;
+
+            let m = manager(AuthConfig::default());
+            let logdir = tempfile::tempdir().unwrap();
+            let log = logdir.path().join("console.log");
+            std::fs::write(&log, b"boot: hello\r\n").unwrap();
+            let mut vm = fixture(BackendKind::CloudHypervisor, VmStatus::Running, false);
+            vm.log_path = log.clone();
+            let id = vm.id;
+            m.store.insert(vm).await.unwrap();
+            let mut jailed = fixture(BackendKind::Firecracker, VmStatus::Running, false);
+            jailed.jail_path = Some(PathBuf::from("/srv/jailer/x"));
+            jailed.log_path = log.clone();
+            let jid = jailed.id;
+            m.store.insert(jailed).await.unwrap();
+
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let app = router(m);
+            tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+            let (mut ws, _) =
+                tokio_tungstenite::connect_async(format!("ws://{addr}/v1/vms/{id}/serial"))
+                    .await
+                    .unwrap();
+            async fn next_text<S>(ws: &mut S) -> String
+            where
+                S: futures::Stream<Item = Result<WsMessage, tokio_tungstenite::tungstenite::Error>>
+                    + Unpin,
+            {
+                match tokio::time::timeout(std::time::Duration::from_secs(5), ws.next()).await {
+                    Ok(Some(Ok(WsMessage::Binary(b)))) => String::from_utf8_lossy(&b).to_string(),
+                    other => panic!("expected a binary frame, got {other:?}"),
+                }
+            }
+            assert_eq!(next_text(&mut ws).await, "boot: hello\r\n");
+            // Input is ignored rather than written anywhere.
+            ws.send(WsMessage::Text("ls\n".into())).await.unwrap();
+            let mut f = tokio::fs::OpenOptions::new()
+                .append(true)
+                .open(&log)
+                .await
+                .unwrap();
+            f.write_all(b"login: ").await.unwrap();
+            f.flush().await.unwrap();
+            assert_eq!(next_text(&mut ws).await, "login: ");
+            assert_eq!(std::fs::read(&log).unwrap(), b"boot: hello\r\nlogin: ");
+
+            let err = tokio_tungstenite::connect_async(format!("ws://{addr}/v1/vms/{jid}/serial"))
+                .await
+                .unwrap_err();
+            assert!(err.to_string().contains("400"), "{err}");
+        }
+
+        #[tokio::test]
+        async fn restore_route_is_tenant_scoped_with_precise_statuses() {
+            let m = procbox_manager(tenant_tokens(), true);
+            let mut vm = fixture(BackendKind::FluxVm, VmStatus::Running, true);
+            vm.request.tenant = Some("acme".into());
+            let id = vm.id;
+            m.store.insert(vm).await.unwrap();
+            let mut qemu = fixture(BackendKind::Qemu, VmStatus::Running, true);
+            qemu.request.tenant = Some("acme".into());
+            let qid = qemu.id;
+            m.store.insert(qemu).await.unwrap();
+            let app = router(m);
+            let uri = format!("/v1/vms/{id}/restore");
+            let body = r#"{"tag":"nope"}"#;
+            let (st, _) = call(app.clone(), "POST", &uri, "other", Some(body)).await;
+            assert_eq!(st, StatusCode::NOT_FOUND);
+            // Unknown tag: 404 (nothing is touched).
+            let (st, msg) = call(app.clone(), "POST", &uri, "acme", Some(body)).await;
+            assert_eq!(st, StatusCode::NOT_FOUND, "{msg}");
+            // Path-like tags are rejected before anything runs.
+            let (st, _) = call(
+                app.clone(),
+                "POST",
+                &uri,
+                "acme",
+                Some(r#"{"tag":"../etc"}"#),
+            )
+            .await;
+            assert_eq!(st, StatusCode::BAD_REQUEST);
+            // A running QEMU VM must be stopped first: 409.
+            let (st, msg) = call(
+                app,
+                "POST",
+                &format!("/v1/vms/{qid}/restore"),
+                "acme",
+                Some(body),
+            )
+            .await;
+            assert_eq!(st, StatusCode::CONFLICT, "{msg}");
+            assert!(msg.contains("stop"), "{msg}");
+        }
+
+        #[tokio::test]
+        async fn procbox_sandbox_end_to_end_over_http() {
+            if !fluxvm_scheduler::procbox_sandbox::confinement_available() {
+                eprintln!("skip: Landlock/seccomp not fully available on this host");
+                return;
+            }
+            let app = router(procbox_manager(tenant_tokens(), true));
+            let (st, body) = call(
+                app.clone(),
+                "POST",
+                "/v1/sandboxes",
+                "acme",
+                Some(r#"{"procbox":{}}"#),
+            )
+            .await;
+            assert_eq!(st, StatusCode::CREATED, "{body}");
+            let id = serde_json::from_str::<serde_json::Value>(&body).unwrap()["id"]
+                .as_str()
+                .unwrap()
+                .to_string();
+            let p = |suffix: &str| format!("/v1/sandboxes/{id}/{suffix}");
+
+            // Another tenant cannot see or use it.
+            let (st, _) = call(
+                app.clone(),
+                "POST",
+                &p("process"),
+                "other",
+                Some(r#"{"command":"true"}"#),
+            )
+            .await;
+            assert_eq!(st, StatusCode::NOT_FOUND);
+
+            // Files inside the workspace work; escapes are 400.
+            let (st, b) = call(
+                app.clone(),
+                "POST",
+                &p("fs/write"),
+                "acme",
+                Some(r#"{"path":"a.txt","content_base64":"aGk="}"#),
+            )
+            .await;
+            assert_eq!(st, StatusCode::OK, "{b}");
+            let (st, b) = call(
+                app.clone(),
+                "POST",
+                &p("fs/read"),
+                "acme",
+                Some(r#"{"path":"a.txt"}"#),
+            )
+            .await;
+            assert_eq!(st, StatusCode::OK, "{b}");
+            assert!(b.contains("aGk="), "{b}");
+            for bad in ["../x", "/etc/passwd"] {
+                let (st, b) = call(
+                    app.clone(),
+                    "POST",
+                    &p("fs/read"),
+                    "acme",
+                    Some(&format!(r#"{{"path":"{bad}"}}"#)),
+                )
+                .await;
+                assert_eq!(st, StatusCode::BAD_REQUEST, "{bad}: {b}");
+            }
+
+            // Process: same response shape as a VM sandbox.
+            let (st, b) = call(
+                app.clone(),
+                "POST",
+                &p("process"),
+                "acme",
+                Some(r#"{"command":"cat a.txt"}"#),
+            )
+            .await;
+            assert_eq!(st, StatusCode::OK, "{b}");
+            let v: serde_json::Value = serde_json::from_str(&b).unwrap();
+            assert_eq!(v["result"], "exec");
+            assert_eq!(v["exit_code"], 0);
+            assert_eq!(v["stdout"], "hi");
+
+            // Baseline, change, changes, dry-run.
+            let (st, b) = call(
+                app.clone(),
+                "POST",
+                &p("baseline"),
+                "acme",
+                Some(r#"{"paths":["/"]}"#),
+            )
+            .await;
+            assert_eq!(st, StatusCode::OK, "{b}");
+            let (st, _) = call(
+                app.clone(),
+                "POST",
+                &p("process"),
+                "acme",
+                Some(r#"{"command":"echo x > b.txt"}"#),
+            )
+            .await;
+            assert_eq!(st, StatusCode::OK);
+            let (st, b) = call(app.clone(), "POST", &p("changes"), "acme", None).await;
+            assert_eq!(st, StatusCode::OK, "{b}");
+            assert!(b.contains("/b.txt"), "{b}");
+            let (st, b) = call(
+                app.clone(),
+                "POST",
+                &p("dry-run"),
+                "acme",
+                Some(r#"{"command":"rm a.txt; echo n > c.txt"}"#),
+            )
+            .await;
+            assert_eq!(st, StatusCode::OK, "{b}");
+            let v: serde_json::Value = serde_json::from_str(&b).unwrap();
+            assert_eq!(v["discarded"], true);
+            assert_eq!(v["changes"]["added"], serde_json::json!(["/c.txt"]));
+            assert_eq!(v["changes"]["deleted"], serde_json::json!(["/a.txt"]));
+            // ...and a.txt is still there.
+            let (st, _) = call(
+                app.clone(),
+                "POST",
+                &p("fs/read"),
+                "acme",
+                Some(r#"{"path":"a.txt"}"#),
+            )
+            .await;
+            assert_eq!(st, StatusCode::OK);
+
+            // Guest-only routes say so.
+            let (st, b) = call(
+                app.clone(),
+                "POST",
+                &p("snapshot"),
+                "acme",
+                Some(r#"{"path":"/tmp/s"}"#),
+            )
+            .await;
+            assert_eq!(st, StatusCode::NOT_IMPLEMENTED, "{b}");
+            let (st, _) = call(
+                app.clone(),
+                "GET",
+                &format!("/sandbox/{id}/x"),
+                "acme",
+                None,
+            )
+            .await;
+            assert_eq!(st, StatusCode::NOT_IMPLEMENTED);
+            let (st, _) = call(
+                app.clone(),
+                "POST",
+                &format!("/v1/vms/{id}/pause"),
+                "acme",
+                None,
+            )
+            .await;
+            assert_eq!(st, StatusCode::NOT_IMPLEMENTED);
+
+            // It is listed for its tenant only, and deletable.
+            let (_, list) = call(app.clone(), "GET", "/v1/sandboxes", "acme", None).await;
+            assert!(list.contains(&id), "{list}");
+            let (_, other) = call(app.clone(), "GET", "/v1/sandboxes", "other", None).await;
+            assert!(!other.contains(&id), "{other}");
+            let (st, b) = call(
+                app.clone(),
+                "DELETE",
+                &format!("/v1/vms/{id}"),
+                "acme",
+                None,
+            )
+            .await;
+            assert!(st.is_success(), "{st} {b}");
+        }
+
+        #[tokio::test]
+        async fn sandbox_id_routes_are_tenant_scoped_like_vm_routes() {
+            // tenant_guard_middleware previously only recognized "/v1/vms/"
+            // paths -- every "/v1/sandboxes/{id}/..." route (snapshot,
+            // fs/read, fs/write, process) was entirely unscoped, so a
+            // tenant-scoped admin token could reach any tenant's sandbox by
+            // UUID, not just its own.
+            let m = manager(tenant_tokens());
+            let mut acme_sandbox = fixture(BackendKind::FluxVm, VmStatus::Running, true);
+            acme_sandbox.request.tenant = Some("acme".into());
+            let id = acme_sandbox.id;
+            m.store.insert(acme_sandbox).await.unwrap();
+
+            let app = router(m);
+            // The "other" tenant's token gets exactly the same 404 the
+            // tenant_guard already returns for a mismatched /v1/vms/{id}.
+            assert_eq!(
+                request(
+                    app.clone(),
+                    "POST",
+                    &format!("/v1/sandboxes/{id}/process"),
+                    Some("other"),
+                    Some(r#"{"command":["true"]}"#),
+                )
+                .await,
+                StatusCode::NOT_FOUND
+            );
+            // The owning tenant's token clears the tenant guard -- it may
+            // still fail downstream (no real agent/vsock in this test), but
+            // that's a different, later error, never a 404 "not found".
+            assert_ne!(
+                request(
+                    app,
+                    "POST",
+                    &format!("/v1/sandboxes/{id}/process"),
+                    Some("acme"),
+                    Some(r#"{"command":["true"]}"#),
+                )
+                .await,
+                StatusCode::NOT_FOUND
+            );
+        }
+
+        #[tokio::test]
+        async fn short_form_sandbox_proxy_route_is_tenant_scoped() {
+            // Regression test: extract_vm_uuid only recognized "/v1/vms/"
+            // and "/v1/sandboxes/" -- the short-form "/sandbox/{id}/..."
+            // proxy route (the one AI-agent callers actually use, per
+            // docs/agent-sandbox-gaps.md's "Guest HTTP reverse proxy") never
+            // matched either prefix, so tenant_guard_middleware silently
+            // no-op'd for it: any tenant-scoped token could proxy HTTP
+            // traffic into another tenant's guest by UUID through this
+            // specific route, even though the equivalent long-form
+            // "/v1/sandboxes/{id}/http/{port}/..." route was already
+            // correctly scoped (see the test above).
+            let m = manager(tenant_tokens());
+            let mut acme_sandbox = fixture(BackendKind::FluxVm, VmStatus::Running, true);
+            acme_sandbox.request.tenant = Some("acme".into());
+            let id = acme_sandbox.id;
+            m.store.insert(acme_sandbox).await.unwrap();
+
+            let app = router(m);
+            // Wrong tenant: the same 404 the long-form route already
+            // returns for a mismatched sandbox.
+            assert_eq!(
+                request(
+                    app.clone(),
+                    "GET",
+                    &format!("/sandbox/{id}/x"),
+                    Some("other"),
+                    None
+                )
+                .await,
+                StatusCode::NOT_FOUND
+            );
+            // Owning tenant: clears the tenant guard -- may still fail
+            // downstream (no real netns/guest in this test), but that's a
+            // different, later error, never a 404 "not found".
+            assert_ne!(
+                request(app, "GET", &format!("/sandbox/{id}/x"), Some("acme"), None).await,
+                StatusCode::NOT_FOUND
+            );
+        }
+
+        #[tokio::test]
+        async fn readonly_token_cannot_call_sandbox_proxy() {
+            // Regression test: sandbox_http_proxy/sandbox_http_proxy_default_port
+            // previously had no role check at all -- registered with
+            // `any(...)`, a read-only token could issue arbitrary HTTP
+            // methods (not just GET) into a tenant's guest through the
+            // proxy, unlike every other guest-reaching route
+            // (sandbox_fs_read, sandbox_process, agent_exec, qga_exec,
+            // ...), which all gate on Extension<Role> + require_admin.
+            let auth = AuthConfig {
+                tokens: vec![ApiToken {
+                    token: "ro".into(),
+                    role: Role::ReadOnly,
+                    name: None,
+                    tenant: None,
+                }],
+                ..Default::default()
+            };
+            let m = manager(auth);
+            let sandbox = fixture(BackendKind::FluxVm, VmStatus::Running, true);
+            let id = sandbox.id;
+            m.store.insert(sandbox).await.unwrap();
+            let app = router(m);
+            assert_eq!(
+                request(app, "GET", &format!("/sandbox/{id}/x"), Some("ro"), None).await,
+                StatusCode::FORBIDDEN
+            );
+        }
+
+        async fn request_with_body(
+            app: Router,
+            method: &str,
+            uri: &str,
+            bearer: Option<&str>,
+            body: Option<&str>,
+        ) -> (StatusCode, String) {
+            let mut builder = Request::builder().method(method).uri(uri);
+            if let Some(t) = bearer {
+                builder = builder.header(header::AUTHORIZATION, format!("Bearer {t}"));
+            }
+            let body = match body {
+                Some(b) => {
+                    builder = builder.header(header::CONTENT_TYPE, "application/json");
+                    Body::from(b.to_string())
+                }
+                None => Body::empty(),
+            };
+            let resp = app.oneshot(builder.body(body).unwrap()).await.unwrap();
+            let status = resp.status();
+            let bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+                .await
+                .unwrap();
+            (status, String::from_utf8_lossy(&bytes).into_owned())
+        }
+
+        #[tokio::test]
+        async fn sandbox_change_routes_are_tenant_scoped() {
+            let m = manager(tenant_tokens());
+            let mut acme_sandbox = fixture(BackendKind::FluxVm, VmStatus::Running, true);
+            acme_sandbox.request.tenant = Some("acme".into());
+            let id = acme_sandbox.id;
+            m.store.insert(acme_sandbox).await.unwrap();
+            let app = router(m);
+            for route in ["baseline", "changes"] {
+                let uri = format!("/v1/sandboxes/{id}/{route}");
+                let (status, body) = request_with_body(
+                    app.clone(),
+                    "POST",
+                    &uri,
+                    Some("other"),
+                    Some(r#"{"paths":["/w"]}"#),
+                )
+                .await;
+                assert_eq!(status, StatusCode::NOT_FOUND, "{route}");
+                assert!(
+                    !body.contains("no baseline"),
+                    "the tenant guard must answer, not the handler: {body}"
+                );
+            }
+            // Owner clears the guard: baseline then fails at the guest (no
+            // agent in this test), never with the guard's 404.
+            assert_ne!(
+                request(
+                    app,
+                    "POST",
+                    &format!("/v1/sandboxes/{id}/baseline"),
+                    Some("acme"),
+                    Some(r#"{"paths":["/w"]}"#),
+                )
+                .await,
+                StatusCode::NOT_FOUND
+            );
+        }
+
+        #[tokio::test]
+        async fn readonly_token_cannot_use_sandbox_change_routes() {
+            let auth = AuthConfig {
+                tokens: vec![ApiToken {
+                    token: "ro".into(),
+                    role: Role::ReadOnly,
+                    name: None,
+                    tenant: None,
+                }],
+                ..Default::default()
+            };
+            let m = manager(auth);
+            let sandbox = fixture(BackendKind::FluxVm, VmStatus::Running, true);
+            let id = sandbox.id;
+            m.store.insert(sandbox).await.unwrap();
+            let app = router(m);
+            for route in ["baseline", "changes"] {
+                assert_eq!(
+                    request(
+                        app.clone(),
+                        "POST",
+                        &format!("/v1/sandboxes/{id}/{route}"),
+                        Some("ro"),
+                        Some(r#"{"paths":["/w"]}"#),
+                    )
+                    .await,
+                    StatusCode::FORBIDDEN,
+                    "{route}"
+                );
+            }
+        }
+
+        #[tokio::test]
+        async fn changes_without_a_baseline_is_a_clear_404() {
+            let m = manager(AuthConfig::default());
+            let dir = tempfile::tempdir().unwrap();
+            let mut sandbox = fixture(BackendKind::FluxVm, VmStatus::Running, true);
+            sandbox.workspace = dir.path().to_path_buf();
+            let id = sandbox.id;
+            m.store.insert(sandbox).await.unwrap();
+            let app = router(m);
+            // Both with and without a request body.
+            for body in [None, Some(r#"{"paths":["/w"]}"#)] {
+                let (status, msg) = request_with_body(
+                    app.clone(),
+                    "POST",
+                    &format!("/v1/sandboxes/{id}/changes"),
+                    None,
+                    body,
+                )
+                .await;
+                assert_eq!(status, StatusCode::NOT_FOUND);
+                assert!(msg.contains("no baseline"), "{msg}");
+            }
+        }
+
+        #[tokio::test]
+        async fn a_corrupt_baseline_file_is_reported_not_trusted() {
+            let m = manager(AuthConfig::default());
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::write(dir.path().join("sandbox-baseline.json"), "{not json").unwrap();
+            let mut sandbox = fixture(BackendKind::FluxVm, VmStatus::Running, true);
+            sandbox.workspace = dir.path().to_path_buf();
+            let id = sandbox.id;
+            m.store.insert(sandbox).await.unwrap();
+            let (status, msg) = request_with_body(
+                router(m),
+                "POST",
+                &format!("/v1/sandboxes/{id}/changes"),
+                None,
+                None,
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert!(msg.contains("corrupt"), "{msg}");
+        }
+
+        #[tokio::test]
+        async fn baseline_rejects_unsafe_paths_before_touching_the_guest() {
+            let m = manager(AuthConfig::default());
+            let sandbox = fixture(BackendKind::FluxVm, VmStatus::Running, true);
+            let id = sandbox.id;
+            m.store.insert(sandbox).await.unwrap();
+            let app = router(m);
+            for bad in [
+                r#"{"paths":["../etc"]}"#,
+                r#"{"paths":["relative"]}"#,
+                r#"{"paths":["/w/../etc"]}"#,
+                r#"{"paths":[]}"#,
+            ] {
+                let (status, msg) = request_with_body(
+                    app.clone(),
+                    "POST",
+                    &format!("/v1/sandboxes/{id}/baseline"),
+                    None,
+                    Some(bad),
+                )
+                .await;
+                assert_eq!(status, StatusCode::BAD_REQUEST, "{bad}: {msg}");
+                assert!(
+                    msg.contains("absolute") || msg.contains("..") || msg.contains("empty"),
+                    "{bad}: {msg}"
+                );
+            }
+        }
+
+        #[tokio::test]
+        async fn admin_token_can_reach_sandbox_proxy_role_gate() {
+            let auth = AuthConfig {
+                tokens: vec![ApiToken {
+                    token: "admin".into(),
+                    role: Role::Admin,
+                    name: None,
+                    tenant: None,
+                }],
+                ..Default::default()
+            };
+            let m = manager(auth);
+            let sandbox = fixture(BackendKind::FluxVm, VmStatus::Running, true);
+            let id = sandbox.id;
+            m.store.insert(sandbox).await.unwrap();
+            let app = router(m);
+            // Clears the role gate -- may still fail downstream (no real
+            // netns/guest in this test), but that's a different, later
+            // error, never the 403 a read-only token gets above.
+            assert_ne!(
+                request(app, "GET", &format!("/sandbox/{id}/x"), Some("admin"), None).await,
+                StatusCode::FORBIDDEN
+            );
+        }
+
+        fn pool_fixture(name: &str, tenant: Option<&str>) -> fluxvm_core::model::PoolRecord {
+            let mut template = fixture(BackendKind::Qemu, VmStatus::Running, false).request;
+            template.tenant = tenant.map(String::from);
+            fluxvm_core::model::PoolRecord {
+                name: name.into(),
+                size: 1,
+                template,
+                members: vec![],
+                claimed_total: 0,
+            }
+        }
+
+        #[tokio::test]
+        async fn list_pools_only_returns_the_callers_own_tenant() {
+            // Regression test: list_pools previously had no tenant
+            // filtering at all, unlike list_vms/list_sandboxes.
+            let m = manager(tenant_tokens());
+            m.pools
+                .insert(pool_fixture("acme-pool", Some("acme")))
+                .await
+                .unwrap();
+            m.pools
+                .insert(pool_fixture("other-pool", Some("other")))
+                .await
+                .unwrap();
+            let app = router(m);
+            let req = Request::builder()
+                .method("GET")
+                .uri("/v1/pools")
+                .header(header::AUTHORIZATION, "Bearer acme")
+                .body(Body::empty())
+                .unwrap();
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            let body = body_string(resp).await;
+            let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
+            let items = parsed["items"].as_array().unwrap();
+            assert_eq!(items.len(), 1, "expected exactly one pool in:\n{body}");
+            assert_eq!(items[0]["name"], "acme-pool");
+        }
+
+        #[tokio::test]
+        async fn pool_routes_report_computed_ready_pending_and_claimed_total() {
+            // Regression coverage for PoolView: GET /v1/pools and
+            // GET /v1/pools/{name} previously returned the raw PoolRecord
+            // (`size`/`members` only) -- a caller had no named field for
+            // "how many are ready right now" or "how many more are still
+            // needed to reach target," and no visibility at all into a
+            // pool's lifetime claim history.
+            let m = manager(tenant_tokens());
+            let mut pool = pool_fixture("acme-pool", Some("acme"));
+            pool.size = 5;
+            pool.members = vec![Uuid::new_v4(), Uuid::new_v4()];
+            pool.claimed_total = 7;
+            m.pools.insert(pool).await.unwrap();
+            let app = router(m);
+
+            let req = Request::builder()
+                .method("GET")
+                .uri("/v1/pools/acme-pool")
+                .header(header::AUTHORIZATION, "Bearer acme")
+                .body(Body::empty())
+                .unwrap();
+            let resp = app.clone().oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            let body = body_string(resp).await;
+            let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
+            assert_eq!(parsed["size"], 5);
+            assert_eq!(parsed["ready"], 2);
+            assert_eq!(parsed["pending"], 3);
+            assert_eq!(parsed["claimed_total"], 7);
+
+            let req = Request::builder()
+                .method("GET")
+                .uri("/v1/pools")
+                .header(header::AUTHORIZATION, "Bearer acme")
+                .body(Body::empty())
+                .unwrap();
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            let body = body_string(resp).await;
+            let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
+            let items = parsed["items"].as_array().unwrap();
+            assert_eq!(items.len(), 1);
+            assert_eq!(items[0]["ready"], 2);
+            assert_eq!(items[0]["pending"], 3);
+            assert_eq!(items[0]["claimed_total"], 7);
+        }
+
+        #[tokio::test]
+        async fn pool_by_name_routes_are_tenant_scoped() {
+            // Regression test: get_pool/delete_pool/claim_pool previously
+            // had no tenant check at all -- pools are name-keyed, not
+            // UUID-keyed, so tenant_guard_middleware's own generic
+            // "/v1/vms/{id}..." extraction never covered them either way.
+            let m = manager(tenant_tokens());
+            m.pools
+                .insert(pool_fixture("acme-pool", Some("acme")))
+                .await
+                .unwrap();
+            let app = router(m);
+            assert_eq!(
+                status_for(app.clone(), "GET", "/v1/pools/acme-pool", Some("other")).await,
+                StatusCode::NOT_FOUND
+            );
+            assert_eq!(
+                status_for(app.clone(), "GET", "/v1/pools/acme-pool", Some("acme")).await,
+                StatusCode::OK
+            );
+            assert_eq!(
+                request(
+                    app,
+                    "POST",
+                    "/v1/pools/acme-pool/claim",
+                    Some("other"),
+                    Some("{}"),
+                )
+                .await,
+                StatusCode::NOT_FOUND
+            );
+        }
+
+        #[tokio::test]
+        async fn resize_pool_route_is_tenant_scoped() {
+            // Same reasoning as pool_by_name_routes_are_tenant_scoped
+            // above -- resize is one more name-keyed pool route that needs
+            // its own pool_visible_to check, not tenant_guard_middleware's
+            // generic UUID-based one.
+            let m = manager(tenant_tokens());
+            m.pools
+                .insert(pool_fixture("acme-pool", Some("acme")))
+                .await
+                .unwrap();
+            let app = router(m.clone());
+            assert_eq!(
+                request(
+                    app.clone(),
+                    "POST",
+                    "/v1/pools/acme-pool/resize",
+                    Some("other"),
+                    Some(r#"{"size":3}"#),
+                )
+                .await,
+                StatusCode::NOT_FOUND
+            );
+            // Untouched by the rejected cross-tenant attempt.
+            assert_eq!(m.get_pool("acme-pool").await.unwrap().size, 1);
+
+            assert_eq!(
+                request(
+                    app,
+                    "POST",
+                    "/v1/pools/acme-pool/resize",
+                    Some("acme"),
+                    Some(r#"{"size":3}"#),
+                )
+                .await,
+                StatusCode::OK
+            );
+            assert_eq!(m.get_pool("acme-pool").await.unwrap().size, 3);
+        }
+
+        #[tokio::test]
+        async fn resize_pool_route_requires_admin() {
+            let auth = AuthConfig {
+                tokens: vec![ApiToken {
+                    token: "ro".into(),
+                    role: Role::ReadOnly,
+                    name: None,
+                    tenant: None,
+                }],
+                ..Default::default()
+            };
+            let m = manager(auth);
+            m.pools.insert(pool_fixture("p", None)).await.unwrap();
+            let app = router(m.clone());
+            assert_eq!(
+                request(
+                    app,
+                    "POST",
+                    "/v1/pools/p/resize",
+                    Some("ro"),
+                    Some(r#"{"size":3}"#),
+                )
+                .await,
+                StatusCode::FORBIDDEN
+            );
+            assert_eq!(m.get_pool("p").await.unwrap().size, 1);
+        }
+
+        #[tokio::test]
+        async fn resize_pool_route_rejects_zero_size() {
+            let m = manager(tenant_tokens());
+            m.pools
+                .insert(pool_fixture("acme-pool", Some("acme")))
+                .await
+                .unwrap();
+            let app = router(m);
+            assert_eq!(
+                request(
+                    app,
+                    "POST",
+                    "/v1/pools/acme-pool/resize",
+                    Some("acme"),
+                    Some(r#"{"size":0}"#),
+                )
+                .await,
+                StatusCode::BAD_REQUEST
+            );
+        }
+
+        const VALID_POOL_BODY: &str = r#"{"name":"p1","size":1,"template":{"name":"t","backend":"qemu","image":"/does/not/exist.qcow2"}}"#;
+
+        #[tokio::test]
+        async fn create_pool_forces_the_callers_own_tenant() {
+            // Regression test: create_pool previously never forced the
+            // caller's own token tenant onto template.tenant the way
+            // create_vm already does for a plain VM create -- every
+            // member ever backfilled from an untenanted pool would have
+            // inherited no tenant at all, making it unreachable via any
+            // tenant-scoped route once claimed.
+            let m = manager(tenant_tokens());
+            let app = router(m.clone());
+            assert_eq!(
+                request(
+                    app,
+                    "POST",
+                    "/v1/pools",
+                    Some("acme"),
+                    Some(VALID_POOL_BODY)
+                )
+                .await,
+                StatusCode::CREATED
+            );
+            let pool = m.get_pool("p1").await.unwrap();
+            assert_eq!(pool.template.tenant.as_deref(), Some("acme"));
+        }
+
+        #[tokio::test]
+        async fn create_pool_rejects_a_template_tenant_mismatch() {
+            let m = manager(tenant_tokens());
+            let app = router(m);
+            let body = r#"{"name":"p2","size":1,"template":{"name":"t","tenant":"other","backend":"qemu","image":"/does/not/exist.qcow2"}}"#;
+            assert_eq!(
+                request(app, "POST", "/v1/pools", Some("acme"), Some(body)).await,
+                StatusCode::FORBIDDEN
+            );
+        }
+    }
+
+    mod console_ws_message_mapping {
+        use super::*;
+        use axum::extract::ws::Message;
+        use fluxvm_guest_protocol::PtyFrame;
+
+        #[test]
+        fn binary_message_becomes_a_data_frame() {
+            let frame = ws_message_to_pty_frame(&Message::Binary(b"echo hi\n".to_vec().into()));
+            assert_eq!(frame, Some(PtyFrame::Data(b"echo hi\n".to_vec())));
+        }
+
+        #[test]
+        fn valid_resize_text_message_becomes_a_resize_frame() {
+            let frame = ws_message_to_pty_frame(&Message::Text(r#"{"cols":120,"rows":40}"#.into()));
+            assert_eq!(
+                frame,
+                Some(PtyFrame::Resize {
+                    cols: 120,
+                    rows: 40
+                })
+            );
+        }
+
+        #[test]
+        fn malformed_text_message_is_dropped_not_forwarded_as_data() {
+            // Would previously have been forwarded to the shell as literal
+            // keystrokes (`t.as_bytes()`) -- now it's a control channel, so
+            // anything that isn't a valid resize message is simply ignored.
+            assert_eq!(
+                ws_message_to_pty_frame(&Message::Text("not json".into())),
+                None
+            );
+            assert_eq!(
+                ws_message_to_pty_frame(&Message::Text(r#"{"cols":120}"#.into())),
+                None
+            );
+        }
+
+        #[test]
+        fn ping_pong_messages_are_dropped() {
+            assert_eq!(
+                ws_message_to_pty_frame(&Message::Ping(Vec::new().into())),
+                None
+            );
+            assert_eq!(
+                ws_message_to_pty_frame(&Message::Pong(Vec::new().into())),
+                None
+            );
+        }
+    }
+
+    mod sandbox_proxy_body_cap {
+        use super::*;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        #[tokio::test]
+        async fn oversized_guest_response_body_is_rejected_not_fully_buffered() {
+            // Regression test for the previously-unbounded response body
+            // read in sandbox_proxy_inner: `up.into_body().collect()` had
+            // no size cap at all, only the existing 30s timeout -- a
+            // compromised/buggy guest could stream an effectively
+            // unbounded response for up to 30s per request, a
+            // straightforward host-memory-exhaustion primitive from inside
+            // any tenant's own sandbox. The full proxy path needs
+            // CAP_SYS_ADMIN for connect_in_netns (not available on this
+            // project's remote build host either), so this exercises
+            // `proxy_over_tcp` -- the send/receive half factored out of
+            // `sandbox_proxy_inner` specifically to make this testable --
+            // directly against a real loopback TCP listener standing in
+            // for the "guest".
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+
+            let over_cap = SANDBOX_PROXY_MAX_BODY_BYTES + 4096;
+            let guest = tokio::spawn(async move {
+                let (mut sock, _) = listener.accept().await.unwrap();
+                // Drain the (empty-body GET) request before responding.
+                let mut buf = [0u8; 4096];
+                loop {
+                    let n = sock.read(&mut buf).await.unwrap();
+                    if n == 0 || buf[..n].windows(4).any(|w| w == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                let header = format!("HTTP/1.1 200 OK\r\nContent-Length: {over_cap}\r\n\r\n");
+                sock.write_all(header.as_bytes()).await.unwrap();
+                // A real Content-Length this large, fully written -- proves
+                // the cap fires on its own rather than relying on the
+                // guest ever running short or the connection erroring out.
+                // Errors past this point are expected once the capped
+                // client gives up and closes its side; ignored rather than
+                // unwrapped so this task always finishes promptly.
+                let chunk = vec![0u8; 64 * 1024];
+                let mut written = 0usize;
+                while written < over_cap {
+                    let n = chunk.len().min(over_cap - written);
+                    let _ = sock.write_all(&chunk[..n]).await;
+                    written += n;
+                }
+                let _ = sock.shutdown().await;
+            });
+
+            let tcp = tokio::net::TcpStream::connect(addr).await.unwrap();
+            let response = proxy_over_tcp(
+                tcp,
+                Method::GET,
+                "/".to_string(),
+                axum::http::HeaderMap::new(),
+                bytes::Bytes::new(),
+                "127.0.0.1",
+            )
+            .await;
+
+            // Without the Limited::new(..., SANDBOX_PROXY_MAX_BODY_BYTES)
+            // cap, this would come back 200 OK with the full
+            // over-cap-byte body fully buffered (comfortably within the
+            // 30s timeout over loopback) -- the point of this test is
+            // that it does not.
+            assert_ne!(response.status(), StatusCode::OK);
+
+            guest.await.unwrap();
+        }
+    }
+}

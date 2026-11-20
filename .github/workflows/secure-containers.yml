@@ -1,0 +1,56 @@
+name: Secure Containers
+
+on:
+  pull_request:
+    paths:
+      - 'crates/fluxvm-container-*/**'
+      - 'crates/fluxvm-containerd-shim/**'
+      - 'deploy/containerd/**'
+      - 'scripts/*secure-containers*'
+      - 'Cargo.toml'
+  push:
+    branches: [main]
+    paths:
+      - 'crates/fluxvm-container-*/**'
+      - 'crates/fluxvm-containerd-shim/**'
+      - 'deploy/containerd/**'
+      - 'scripts/*secure-containers*'
+      - 'Cargo.toml'
+
+# Collapse superseded runs of this workflow on the same ref so queued duplicates do not hold the org's runners.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: fluxvm
+      - uses: actions/checkout@v7
+        with:
+          repository: zyvorai/guestkit
+          ref: v1.2.9   # packaging/guestkit.ref; checked by scripts/check-guestkit-pin.sh
+          path: guestkit
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy,rustfmt
+      - name: System dependencies
+        # clang is required at `cargo build` time now, not just for bpf/:
+        # fluxvm-container-agent's build.rs compiles bpf/fluxvm_guest_cgroup.bpf.c
+        # (Set 8S) into the binary via scripts/build-ebpf-guest.sh.
+        run: fluxvm/scripts/ci-install-apt-deps.sh libsystemd-dev libhivex-dev clang llvm libbpf-dev linux-libc-dev
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fluxvm
+      - name: Format
+        working-directory: fluxvm
+        run: ./scripts/ci-fmt-check.sh
+      - name: Secure-container unit tests
+        working-directory: fluxvm
+        run: ./scripts/test-secure-containers.sh
+      - name: Clippy new crates
+        working-directory: fluxvm
+        run: cargo clippy -p fluxvm-container-protocol -p fluxvm-container-agent -p fluxvm-container-client -p fluxvm-containerd-shim --all-targets || true

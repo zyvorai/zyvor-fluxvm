@@ -1,0 +1,142 @@
+// Copyright 2026 Zyvor AI Labs · https://zyvor.dev
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+
+//! `exec` with an optional per-request guest confinement policy (Landlock +
+//! seccomp, applied inside the guest by the agent through `fluxvm-procbox`).
+
+use crate::{VmManager, procbox_sandbox};
+use anyhow::{Result, bail};
+use fluxvm_guest_protocol::{AgentRequest, AgentResponse, ExecPolicy, ExecProcess};
+use uuid::Uuid;
+
+/// Parse a JSON exec policy (the `fluxvm-procbox` policy shape). Unknown
+/// fields are ignored; missing ones take the safe defaults (no network).
+pub fn parse_exec_policy(json: &str) -> Result<ExecPolicy> {
+    Ok(serde_json::from_str(json)?)
+}
+
+impl VmManager {
+    /// Like [`VmManager::exec`], confined by `policy` when given. The
+    /// response's `enforcement` reports what the guest actually enforced.
+    pub async fn exec_with_policy(
+        &self,
+        id: Uuid,
+        command: String,
+        timeout_seconds: Option<u64>,
+        policy: Option<ExecPolicy>,
+    ) -> Result<AgentResponse> {
+        self.exec_request(id, command, timeout_seconds, policy, None)
+            .await
+    }
+
+    /// Runs `process.argv` directly, with no shell (images without one, such as distroless). Needs the guest agent.
+    pub async fn exec_process(
+        &self,
+        id: Uuid,
+        process: ExecProcess,
+        timeout_seconds: Option<u64>,
+    ) -> Result<AgentResponse> {
+        process.validate().map_err(anyhow::Error::msg)?;
+        let command = process.argv.join(" ");
+        self.exec_request(id, command, timeout_seconds, None, Some(process))
+            .await
+    }
+
+    /// Sends one request to the sandbox's guest agent and returns its answer. Used by the job
+    /// supervisor, which has no SSH or procbox equivalent: a sandbox without a reachable agent
+    /// is an error here, and callers fall back to shell scripts.
+    pub async fn guest_agent_call(
+        &self,
+        id: Uuid,
+        request: AgentRequest,
+        timeout: std::time::Duration,
+    ) -> Result<AgentResponse> {
+        let vm = self.get(id).await?;
+        if procbox_sandbox::load_spec(&vm)?.is_some() {
+            bail!("supervised jobs are not available on procbox sandboxes");
+        }
+        if vm.backend == fluxvm_core::model::BackendKind::Vz {
+            if crate::oci_sandbox::is_oci(&vm) {
+                return self.oci_agent(&vm, request, timeout).await;
+            }
+            return self
+                .vz_agent(&vm, request, timeout)
+                .await
+                .ok_or_else(|| anyhow::anyhow!("this guest does not run the vsock guest agent"));
+        }
+        fluxvm_vsock_client::call(&vm, request, timeout + std::time::Duration::from_secs(5)).await
+    }
+
+    /// Whether the guest agent has the job supervisor (`jobs-v2`). Any failure, including an
+    /// older agent answering `Error` to the unknown op, reads as "no".
+    pub async fn guest_jobs_supported(&self, id: Uuid) -> bool {
+        match self
+            .guest_agent_call(
+                id,
+                AgentRequest::Capabilities,
+                std::time::Duration::from_secs(5),
+            )
+            .await
+        {
+            Ok(AgentResponse::Capabilities { features }) => features
+                .iter()
+                .any(|f| f == fluxvm_guest_protocol::FEATURE_JOBS_V2),
+            _ => false,
+        }
+    }
+
+    async fn exec_request(
+        &self,
+        id: Uuid,
+        command: String,
+        timeout_seconds: Option<u64>,
+        policy: Option<ExecPolicy>,
+        process: Option<ExecProcess>,
+    ) -> Result<AgentResponse> {
+        let vm = self.get(id).await?;
+        if let Some(spec) = procbox_sandbox::load_spec(&vm)? {
+            if policy.is_some() {
+                bail!(
+                    "a per-exec policy is not supported on procbox sandboxes (they are already confined by their own spec)"
+                );
+            }
+            if process.is_some() {
+                bail!("exec with argv is not supported on procbox sandboxes; pass a command");
+            }
+            return self.procbox_exec(&vm, spec, command, timeout_seconds).await;
+        }
+        if vm.backend == fluxvm_core::model::BackendKind::Vz {
+            return self
+                .vz_exec(&vm, command, timeout_seconds, policy, process)
+                .await;
+        }
+        let wait = std::time::Duration::from_secs(
+            timeout_seconds.unwrap_or(fluxvm_guest_protocol::DEFAULT_EXEC_TIMEOUT_SECS) + 5,
+        );
+        fluxvm_vsock_client::call(
+            &vm,
+            AgentRequest::Exec {
+                command,
+                timeout_seconds,
+                policy,
+                process,
+            },
+            wait,
+        )
+        .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use fluxvm_guest_protocol::ExecTcpRule;
+
+    #[test]
+    fn parses_a_procbox_shaped_policy_with_safe_defaults() {
+        let p = parse_exec_policy(r#"{"read":["/usr","/bin"],"max_abi":3}"#).unwrap();
+        assert_eq!(p.read.len(), 2);
+        assert_eq!(p.tcp_connect, ExecTcpRule::Deny);
+        assert!(parse_exec_policy("not json").is_err());
+    }
+}

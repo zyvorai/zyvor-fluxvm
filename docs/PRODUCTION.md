@@ -1,0 +1,244 @@
+# FluxVM production checklist (whole project)
+
+This is the host-local production bar — VMM, storage, auth, network, k8s,
+images — not only the dataplane.
+
+## 1. Control plane
+
+- [x] `listen` is loopback **or** `auth.require = true` with real tokens and/or OIDC — see [tutorials/production/01-readyz-tenant-auth.md](tutorials/production/01-readyz-tenant-auth.md); merge [configs/production-hardening.toml](../configs/production-hardening.toml)
+- [x] Per-token `max_vms_per_token` / `max_memory_mib_per_token` — production-hardening + admission policy
+- [x] Tokens carry optional `tenant`; VM specs set `tenant` — same tutorial
+- [x] Token/OIDC tenant is authoritative on create (inherited when omitted; mismatch → 403)
+- [x] Token tenant auto-scopes list / get / mutate (other tenants → 404)
+- [x] `GET /readyz` returns HTTP 503 when `"ok": false` — DaemonSet probes in [deploy/k8s/daemonset.yaml](../deploy/k8s/daemonset.yaml); [deploy/k8s/README.md](https://github.com/zyvorai/zyvor-fluxvm/blob/main/deploy/k8s/README.md)
+- [x] `GET /v1/vms?tenant=<id>` filters the fleet
+- [x] `GET /readyz` returns `"ok": true` (state dir + dataplane if required)
+- [x] `GET /healthz` for liveness; `/readyz` for readiness probes — DaemonSet wiring above
+- [ ] `auth.oidc_issuer` + `auth.oidc_audience` set together when using OIDC JWTs (or left unset)
+- [ ] Optional `[tls]` / `tls.client_ca` when terminating TLS on FluxVM itself. With `client_ca`, issue admin client certificates with `OU=fluxvm-role=admin` only to admins (0.4.21+); keep at least one token or OIDC configured; leave `tls.trust_proxy_headers = false` unless a proxy that strips the headers is the only way in ([auth-oidc-mtls.md](auth-oidc-mtls.md))
+- [ ] JSON audit target `fluxvm_audit` shipped to your collector
+- [x] Tutorials: [production/01-readyz-tenant-auth.md](tutorials/production/01-readyz-tenant-auth.md)
+- [x] Example: [examples/create-vm-prod.json](../examples/create-vm-prod.json)
+- [x] DevOps gates: [DEVOPS.md](DEVOPS.md) + `scripts/devops-gate.sh` / `scripts/upgrade-snapshot.sh`
+- [ ] **Ship stack:** `./scripts/ship USER@HOST` (or from Fabric repo) then confirm done card
+- [ ] **Production readiness script:** `FABRIC_URL=… FLUXVM_URL=… ./scripts/test-production-readiness.sh`
+  (control + Network Fabric health + Service Fabric schema/pins; optional `VIP=` SLO)
+
+## 2. Compute
+
+- [ ] `/dev/kvm` present; cgroup v2 delegated
+- [x] Firecracker jailer on for untrusted guests (`[jailer] enabled = true`; set `enforce = true` or use `auth.require` + non-loopback listen so serve/launch fail closed) — merge [configs/production-hardening.toml](../configs/production-hardening.toml); multi-tenant remains **opt-in, not a public-cloud boundary** ([README](proof-and-status.md#maturity-whats-real-today))
+- [x] Jailed FC boots use serial-off defaults (`8250.nr_uarts=0`) unless you override `kernel_args`
+- [ ] VMM logs bounded (journald/logrotate or redirect) — guest can influence FC stdout/log volume
+- [ ] `allowed_backends` pinned
+- [ ] Warm pools only on dedicated hosts
+- [ ] Snapshots tested for the backends you run (QEMU `savevm`, CH `ch-remote`, Firecracker `/snapshot/*`, FluxVm control SnapshotSave — restore via `start_from_snapshot`)
+- [ ] Optional `[policy] default_cpu_quota_percent` / `memory_max_equals_guest` when you want launch-time oversub caps ([oversubscription.md](oversubscription.md))
+- [ ] Optional Firecracker `cpu_template` on create (static names only; not for CH/QEMU/kvm)
+- [ ] Optional `FLUXVM_VMM_SECCOMP=1` for QEMU/Cloud Hypervisor children (log mode by default; set kill mode only after validating the allowlist) — Firecracker/jailer is not covered yet
+- [ ] AppArmor (`deploy/apparmor`) or SELinux reference module (`deploy/selinux`) loaded for the `fluxvm` unit when you want MAC confinement
+- [ ] Windows + QGA on QEMU or Cloud Hypervisor (CH QGA over `--serial socket=qga.sock`; named virtio-serial stays QEMU-only — [ch-windows-qga.md](ch-windows-qga.md)); `fluxvm_engine=kvm` lab-only (H2 virtio-win boot unproven)
+- [x] Capability figures: Track A isolation checklist done; Track B density archive productized next to SC sizing — [PRODUCT_OVERVIEW.md](PRODUCT_OVERVIEW.md) capacity table + [benchmarks/evidence/density-20260918-80.79.5.173.txt](benchmarks/evidence/density-20260918-80.79.5.173.txt) (not an FC Track B SLA)
+
+## 3. Images & storage
+
+- [x] Catalog names instead of raw paths where possible — [operations.md](operations.md#image-catalog--signing)
+- [x] Ed25519 and/or `cosign verify-blob` on catalog entries — same
+- [x] `policy.require_catalog_names = true` when unsigned path creates must be rejected — production-hardening
+- [x] `allowed_image_dirs` set (symlink-aware)
+- [ ] Storage backend chosen (local qcow2, LVM-thin, NBD, Ceph RBD) and backed up
+
+## 4. Network
+
+- [ ] Merge `configs/network-fabric-prod.toml` when VMs have a host edge
+- [ ] Threat-containment egress barrier: Fabric policy **or** `network.mode=none` for every untrusted guest (Firecracker does not filter egress inside the VMM)
+- [ ] Optional per-VM virtio caps on Firecracker: `net_mbit_limit` / `net_pps_limit` / `blk_mbit_limit` / `blk_ops_limit` on create (VMM-side token buckets; complementary to Fabric `max_egress_mbps`/`max_egress_pps`)
+- [ ] `fluxvm dataplane health` ok
+- [ ] CNP/groups for tenant labels; `fluxctl observe`
+- [ ] Packet flow: `fluxctl hubble observe --output color` and `--output plain`; UI `/v1/network/hubble/ui` ([packet-flow.md](packet-flow.md))
+- [ ] Cilium coexistence (`mode=cilium`) only if sock/bpffs present — not Cilium-native endpoints
+- [ ] Cilium nodes: no FluxVM XDP on the shared datapath
+- [ ] See [production-dataplane.md](production-dataplane.md)
+
+## 5. Kubernetes
+
+- [x] DaemonSet readiness → `/readyz`; liveness → `/healthz` — [deploy/k8s/daemonset.yaml](../deploy/k8s/daemonset.yaml)
+- [x] Privileged DaemonSet + hostNetwork as in `deploy/k8s/` — [deploy/k8s/README.md](https://github.com/zyvorai/zyvor-fluxvm/blob/main/deploy/k8s/README.md)
+- [x] Host `nbd` module loaded if GuestKit customize runs on-node — documented in [deploy/k8s/README.md](https://github.com/zyvorai/zyvor-fluxvm/blob/main/deploy/k8s/README.md) (`modprobe nbd`)
+- [ ] Operator talks to an already-healthy fabricd/FluxVM API
+- [ ] Optional MicroVM stack after DaemonSet: `deploy/k8s/microvm/`
+      (GuestImage Ready on host files; `--convert` opt-in only)
+      (`fluxvm-microvm` controller + node-agent; API
+      `microvm.fluxvm.zyvor.io`) — [microvm.md](microvm.md),
+      [tutorials/microvm/](tutorials/microvm/README.md)
+- [x] Secure Containers RuntimeClass **live lab** on nodes after guest-image +
+      CNI L2 + Set 3–11 smoke (code-side P0/P1 multi-VMM is **Done** on main;
+      2026-09-26 lab: SELinux mountLabel green, guestkit Fedora/btrfs token
+      inject, `FLUXVM_USERNS_MODE=k8s` Succeeded, k8s-multi
+      `distinct_user_ns=2`, finish pass `pass=7 skip=3 fail=0`
+      (`SC_LIVE_FINISH=COMPLETE`) —
+      [benchmarks/evidence/sc-hotcake-bundle-20260926.txt](benchmarks/evidence/sc-hotcake-bundle-20260926.txt)) —
+      [secure-containers.md](secure-containers.md),
+      [secure-containers-supported-profile.md](secure-containers-supported-profile.md),
+      [secure-containers-15min-lab.md](secure-containers-15min-lab.md),
+      `deploy/containerd/`
+
+## 6. Fleet (non-k8s)
+
+- [ ] `fluxvm-agent` TLS + token
+- [ ] Persisted `fleet-nodes.json`
+- [ ] Placement uses residual CPU/memory
+
+## 7. Sentinel operations tooling
+
+Not the same "fleet" as section 6 above — `fluxvm-fleet` here is a
+multi-node *rollout orchestrator* for Sentinel's own eBPF/controller
+components, unrelated to `fluxvm-agent`'s VM-placement fleet.
+
+- [ ] `fluxvm-sentinel-certify` (Set 12E): GA hardening & performance
+      certification — capability profiles (`baseline`/`performance`/`strict`),
+      versioned budgets, evidence bundling, ownership-conservative stale-bpffs
+      reconcile, and double-gated failure injection. Static + host recovery
+      gates are proven; a full release certification (real verifier matrix,
+      privileged lab lane, archived evidence + commit SHA) is still a
+      release-engineering step, not an automatic claim
+      ([sentinel-ga-certification.md](sentinel-ga-certification.md),
+      [sentinel-ga-release-checklist.md](sentinel-ga-release-checklist.md))
+- [ ] `fluxvm-migrate` (Set 13E): crash-resumable per-VM migration
+      transactions wrapping the real `fluxvm dataplane migration-*` CLI —
+      real CLI integration and real failure/rollback proven; live attached
+      migration (schema-11 cilium-mode fabric) cleared on the lab —
+      [sc-live-s11-migration-20260926.txt](benchmarks/evidence/sc-live-s11-migration-20260926.txt)
+      ([sentinel-migration-orchestrator.md](sentinel-migration-orchestrator.md))
+- [ ] `fluxvm-upgrade` (Set 14E): crash-resumable per-node component
+      upgrades with eBPF map snapshot/restore across a reload — a real
+      transaction against a real pinned BPF map proven end to end on the
+      lab host, including three bugs (`bpftool` JSON field-name/encoding
+      mismatches, an unhandled `PermissionError` in `probe`) found and
+      fixed during that validation, not just claimed
+      ([sentinel-stateful-upgrades.md](sentinel-stateful-upgrades.md))
+- [ ] `fluxvm-fleet` (Set 15E): canary-first multi-node rollout wrapping
+      `fluxvm-upgrade` per node — real SSH-shaped single-node and 2-node
+      canary-approval runs proven via a local `ssh` shim on the lab host,
+      including two real bugs found and fixed (a canary-approval-gate
+      bypass on resume, and a `remote()` stdin bug that always wrote an
+      empty file to the target node); a genuinely multi-host run with real
+      SSH trust between separate machines has not been done
+      ([sentinel-fleet-rollout.md](sentinel-fleet-rollout.md))
+- [ ] `fluxvm-fleet-guard` (Set 16E): continuous observe-only fleet drift /
+      SLO verification with policy-gated remediation, evidence journals, and
+      systemd timer wiring after Set 15E rollout — static/unit gates proven;
+      disposable multi-host smoke remains opt-in behind
+      `FLUXVM_FLEET_GUARD_HOST_TEST`
+      ([sentinel-fleet-drift-slo-guard.md](sentinel-fleet-drift-slo-guard.md))
+- [ ] `fluxvm-admit` (Set 17E): non-mutating pre-rollout release admission —
+      artifact/evidence integrity, strict-SSH capability probes, state-ABI
+      compatibility, cohort coverage, and short-lived tamper-evident admission
+      records — static/unit gates proven; never deploys or remediates
+      ([sentinel-release-admission.md](sentinel-release-admission.md))
+
+## Do not ship yet as “done”
+
+Cilium-native VM endpoints / in-tree Hubble UI, CH Windows+QGA,
+in-tree KVM without Firecracker for production density.
+Secure Containers RuntimeClass as unrestricted (Firecracker has no
+live virtiofs write-through; remote seccomp NOTIFY RPC is opt-in `mode=remote`) —
+[secure-containers.md](secure-containers.md). Device-cgroup enforcement
+(`BPF_PROG_TYPE_CGROUP_DEVICE`, Set 10), the seccomp user-notification
+broker (Set 11), and `SECCOMP_IOCTL_NOTIF_ADDFD` are implemented; live
+seccomp NOTIFY deny and enforcing-SELinux `linux.mountLabel` green path
+are gated by `scripts/e2e-secure-containers-seccomp-notify.sh` and
+`scripts/e2e-secure-containers-selinux-mountlabel.sh`; CLONE_NEWUSER load
+(including RuntimeClass and in-VM distinct userns) by
+`scripts/e2e-secure-containers-userns-load.sh` (archive under
+`docs/benchmarks/evidence/sc-live-*.txt`).
+Sentinel Pod-scoped network policy (Set 6S) automatically enforcing
+Kubernetes `NetworkPolicy` objects — a standalone `fluxvm-networkpolicy-
+controller` DaemonSet compiles both egress and ingress `NetworkPolicy`
+objects into a versioned directional CIDR+L4 tuple Pod policy schema
+(Set 14, superseding Set 13's exact-peer/exact-port design), including exact
+numeric and named TCP/UDP/SCTP ports, `endPort` ranges, real recursive CIDR
+subtraction for `ipBlock.except` (no approximation fallback), and a separate
+Pod-ingress eBPF program that shares the main program's conntrack table for
+a stateful return-traffic fast path (dataplane schema v9 — Set 16 changed
+the shared conntrack table's value from a one-byte, never-expiring presence
+marker to a timestamped entry with a per-protocol idle timeout, and made a
+VM/Pod policy update clear it synchronously so a tightened policy can never
+be bypassed by a stale established-flow entry; TCP SYN/SCTP INIT packets
+always re-evaluate current policy rather than taking the established-flow
+shortcut, closing a same-5-tuple replay gap). Build/test/
+verifier validation for Set 14 is real (workspace `cargo build`/`test`, both
+BPF objects load through the real kernel verifier with confirmed shared map
+IDs, full Go build/vet/test/race/gofmt/cross-build gate), and so is live
+validation: the rewritten `scripts/test-ebpf-smoke.sh` exercises the unified
+`fluxvm_prules` rich CIDR+L4 tuple rules (including SCTP) and the separate
+shared-map `fluxvm_pod_ingress.bpf.o` object in real network namespaces
+against the real kernel verifier, and the rewritten
+`scripts/test-networkpolicy-live.sh` proves the new schema-v2 wire shape
+against a real single-node k3s cluster — see
+[secure-containers-set14.md](secure-containers-set14.md) for specifics,
+including the four eBPF verifier bugs found and fixed in the process. Set 15
+adds directional `fluxvm_pod_ingress` attachment health and the read-only
+Sentinel Policy Observer (`tools/fluxvm-policy-observer`) —
+[secure-containers-set15.md](secure-containers-set15.md). Set 16's schema-v9
+conntrack revocation-safety was verifier-loaded and its `ct_state` write
+confirmed for real (a real ping's learned entry decodes as a plausible
+`last_seen_ns` timestamp via bpftool's BTF-aware dump), and VM-level
+`allow_ports` now also accepts `sctp/PORT` — see
+[secure-containers-set16.md](secure-containers-set16.md). Set 17 adds optional
+`fluxvm_prhit` rule-attributed directional telemetry (no schema-v8 ABI bump;
+Policy Observer prefers it when present and keeps Set 15's shared-counter
+fallback otherwise) —
+[secure-containers-set17.md](secure-containers-set17.md). Set 18 tightens
+opt-in Service ClusterIP inclusion with EndpointSlice routing proof
+([secure-containers-set18.md](secure-containers-set18.md)). Set 19 is the
+code-side GA completion candidate (schema-v10, `fluxvm_pridx`, IPv6 extension
+walk, guest policy mirror, Observer sizing) —
+[secure-containers-set19.md](secure-containers-set19.md). Still open: the live
+stateful-conntrack-bypass path between the egress and Pod-ingress programs,
+and Set 16's own timeout expiry/anti-replay behavior, are implemented but not
+yet proven with a live TCP handshake or wall-clock timing test; the per-VM
+rule cap is 64 (kernel verifier limit); multi-node Pod-to-Pod dataplane
+conformance is still missing; Set 17/19 production Prometheus scrape evidence
+and fleet/migration lab gates remain open — see
+[NEXT-FEATURES.md](NEXT-FEATURES.md),
+[secure-containers-set14.md](secure-containers-set14.md),
+[secure-containers-set16.md](secure-containers-set16.md),
+[secure-containers-set17.md](secure-containers-set17.md),
+[secure-containers-set18.md](secure-containers-set18.md), and
+[secure-containers-set19.md](secure-containers-set19.md). Sentinel
+in-guest per-container network policy (Set 8S) inherits a Pod's Set 6S
+policy automatically as of Set 19 — every container is enforced fail-closed
+by default, and the shim now fetches and forwards Pod policy content per
+container at create time, kept in sync afterward via a continuous watch
+(see [secure-containers-set8s.md](secure-containers-set8s.md)); still open
+is a live multi-container Pod e2e proof against a real Kubernetes cluster
+with the `fluxvm` RuntimeClass installed. Sentinel
+in-guest eBPF LSM MAC (Set 9S) is off by default
+(`FLUXVM_CONTAINER_LSM=1`) and audit-only unless
+`FLUXVM_CONTAINER_LSM_ENFORCE=1` is also set; the guest-embedded `aya`
+loader has a known intermittent "error parsing ELF data" load failure on at
+least one validation host (see [secure-containers-set9s.md](secure-containers-set9s.md)),
+not yet root-caused to a fix.
+
+## MVP-era roadmap notes (mostly resolved)
+
+Historical per-area status notes carried over from the original MVP README. Most
+items below are now implemented; kept here for the reasoning/context behind each,
+and to flag the few genuinely still-open follow-ups.
+
+1. **Firecracker jailer's own `--cgroup`/`--resource-limit` flags** — superseded: every VM already gets cgroup v2 resource control independent of the jailer (see [operations.md](operations.md#resource-control-cgroup-v2)). Wiring jailer-native limits remains optional hardening only.
+2. **Network namespace / Fabric** — nftables NAT + IPAM are implemented; native TC/eBPF Network Fabric (schema **v4**: L3+L4, rate limits, groups/CNP, observe/health/ipcache, FQDN refresh, optional XDP) is implemented and is the default dataplane (`mode = "ebpf"`, `required = true`; nftables only via explicit `mode = "legacy"` — see [primary-ebpf.md](primary-ebpf.md), [ebpf-cilium.md](ebpf-cilium.md), [network-fabric.md](network-fabric.md), [network-policy.md](network-policy.md), [production-dataplane.md](production-dataplane.md)). Follow-ups: Cilium-native VM endpoints / first-class Hubble attribution — see [ROADMAP-DENSITY.md](ROADMAP-DENSITY.md).
+3. **Snapshots on QEMU/CH** — QEMU `savevm` + `POST /v1/vms/{id}/snapshot` and Cloud Hypervisor `ch-remote snapshot` are implemented (pair with `POST /v1/vms/{id}/start-from-snapshot`). FluxVm memory+disk snapshots remain on the agent-sandbox track.
+4. **Storage abstraction** — already implemented and fully verified (qcow2/raw, LVM thin, NBD, Ceph RBD). NVMe-local as a distinct backend remains unnecessary. See [operations.md](operations.md#storage-backends).
+5. **Image catalog** — Ed25519 signing shipped; optional `catalog.cosign_identities` shells out to `cosign verify-blob`. See [operations.md](operations.md#image-catalog--signing).
+6. **Policy** — `allowed_network_modes` and `allow_extra_args` (default false) are enforced alongside existing vCPU/RAM/disk/TTL/backend/image-dir limits. See [operations.md](operations.md#policy-admission-limits).
+7. **Auth** — fail-closed off-loopback, JSON audit (`fluxvm_audit`), per-token quotas, VM/token `tenant`, `/readyz`. OIDC JWT validation (`auth.oidc_issuer` + `auth.oidc_audience`) and mTLS client-certificate identity (since 0.4.21, from the verified certificate; `tls.trust_proxy_headers` for a proxy) are implemented: see [auth-oidc-mtls.md](auth-oidc-mtls.md) and [api.md](api.md#auth--rbac). Not covered: step-up MFA for OIDC and mTLS identities, and certificate revocation.
+8. **Observability** — Prometheus `/metrics` now includes auth/egress deny counters and create/start latency; OpenTelemetry remains optional.
+9. **Kubernetes CRD/operator** — DaemonSet packaging, tap/macvtap CR fields, and optional `--enable-placement` are implemented; see the [Kubernetes CRD/operator](kubernetes-operator.md#kubernetes-crdoperator) section and `deploy/k8s/`.
+10. **Distributed node-agent** — TLS/auth, persisted registry, and residual-capacity placement are implemented; see [operations.md](operations.md#distributed-node-agent).
+11. **Scheduler placement** — `CreateVmRequest` accepts optional `numa` (guest nodes bound to host nodes, vCPU threads pinned), `numa_node`, `cpuset`, `hugepages`, and `vfio_devices` (PCI addresses or mdev UUIDs, QEMU backend only); `GET /v1/host/topology` reports the hardware graph. See [host-topology.md](host-topology.md) and [vgpu.md](vgpu.md).
+12. **Windows path** — Offline `windows{}` (incl. `unattend_path`/`sysprep`) and live QGA on QEMU are implemented; Cloud Hypervisor Windows boot + QGA over serial socket are also done (named virtio-serial remains QEMU-only) — see [ROADMAP-DENSITY.md](ROADMAP-DENSITY.md).
+13. **AI-agent sandbox hardening** (see [agent-sandbox-gaps.md](agent-sandbox-gaps.md)) — `fluxvm_engine=kvm`, multi-port proxy, native TC/eBPF + Cilium coexistence, benchmarks. Optional: Cilium-native identities / Hubble; published density numbers.
+
+"auto" backend selection is already implemented — see [operations.md](operations.md#auto-backend-selection).

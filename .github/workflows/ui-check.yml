@@ -1,0 +1,40 @@
+# FluxVM Studio (ui/): typecheck, unit tests and a production build on pull requests. The built bundle
+# (ui/node/dist) is committed and embedded in the daemon, so this also fails when it is stale: rebuild with
+# `npm --prefix ui ci && npm --prefix ui run build` and commit the result.
+name: UI check
+on:
+  pull_request:
+    paths: ['ui/**', '.github/workflows/ui-check.yml']
+permissions:
+  contents: read
+concurrency:
+  group: ui-check-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  build:
+    runs-on: ${{ fromJSON(github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && '"ubuntu-latest"' || '["self-hosted","Linux","X64","zyvor-build"]') }}
+    steps:
+    - uses: actions/checkout@v7
+    - uses: actions/setup-node@v7
+      with: {node-version: '22', cache: npm, cache-dependency-path: ui/package-lock.json}
+    - run: npm --prefix ui ci
+    - name: Typecheck
+      run: npm --prefix ui run typecheck
+    - name: Unit tests
+      run: npm --prefix ui test
+    - name: Build
+      run: npm --prefix ui run build
+    - name: Smoke test every page (both apps, both themes, phone and desktop), then a VM's screen, snapshots, commands and the image catalog
+      run: |
+        if command -v google-chrome >/dev/null 2>&1 || command -v google-chrome-stable >/dev/null 2>&1; then
+          bash ui/e2e/run.sh node && bash ui/e2e/run.sh fleet && bash ui/e2e/run.sh vmtools
+        else
+          echo "::notice::no Chrome on this runner; skipping the page smoke test"
+        fi
+    - name: The committed bundle is up to date
+      run: |
+        if ! git diff --quiet -- ui/node/dist ui/fleet/dist || [ -n "$(git ls-files --others --exclude-standard ui/node/dist ui/fleet/dist)" ]; then
+          git status --short ui/node/dist ui/fleet/dist
+          echo "::error::ui/node/dist or ui/fleet/dist is stale. Run: npm --prefix ui ci && npm --prefix ui run build, then commit it."
+          exit 1
+        fi

@@ -1,0 +1,308 @@
+// Copyright 2026 Zyvor AI Labs · https://zyvor.dev
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+
+use crate::error::{FluxError, Result};
+use crate::ffi;
+use std::os::raw::c_void;
+use std::ptr::NonNull;
+
+pub const MMIO_WINDOW: u64 = 0xFEB0_0000;
+pub const KERNEL_LOAD_ADDR: u64 = 0x0020_0000;
+/// Linux zero-page / boot_params GPA (also Firecracker `ZERO_PAGE_START`).
+pub const BOOT_PARAMS_ADDR: u64 = 0x0000_7000;
+pub const INITRD_ADDR: u64 = 0x0400_0000;
+pub const GUEST_STACK: u64 = 0x0080_0000;
+
+// ---- x86_64 guest layout (match Firecracker / cloud-hypervisor) ----
+/// `hvm_start_info` for PVH (`Firecracker::PVH_INFO_START`).
+pub const PVH_INFO_START: u64 = 0x6000;
+/// PVH module list (`Firecracker::MODLIST_START`).
+pub const MODLIST_START: u64 = 0x6040;
+/// PVH memmap table (`Firecracker::MEMMAP_START`); overlaps zero-page GPA
+/// because the two boot paths are mutually exclusive.
+pub const MEMMAP_START: u64 = 0x7000;
+/// Start of high usable RAM.
+pub const HIMEM_START: u64 = 0x0010_0000;
+/// EBDA-ish system-data window start (MP table, etc.).
+pub const SYSTEM_MEM_START: u64 = 0x0009_fc00;
+/// RSDP placeholder address; system reserved runs `[SYSTEM_MEM_START, RSDP_ADDR)`.
+pub const RSDP_ADDR: u64 = 0x000e_0000;
+pub const SYSTEM_MEM_SIZE: u64 = RSDP_ADDR - SYSTEM_MEM_START;
+pub const IOAPIC_ADDR: u64 = 0xfec0_0000;
+/// PCIe ECAM window reserved in e820/memmap (Firecracker layout).
+pub const PCI_MMCONFIG_SIZE: u64 = 256 << 20;
+pub const PCI_MMCONFIG_START: u64 = IOAPIC_ADDR - PCI_MMCONFIG_SIZE;
+/// Three-page Intel VT-x quirk region (`Firecracker::KVM_TSS_ADDRESS`).
+/// Must sit outside guest RAM / MMIO slots; required with in-kernel irqchip.
+pub const KVM_TSS_ADDRESS: u64 = 0xfffb_d000;
+/// One-page identity-mapped region for `KVM_SET_IDENTITY_MAP_ADDR`, placed
+/// immediately below `KVM_TSS_ADDRESS` (Firecracker's `KVM_IDENTITY_MAP_START`
+/// layout) so the two reserved regions sit contiguously outside guest RAM.
+pub const KVM_IDENTITY_MAP_ADDRESS: u64 = KVM_TSS_ADDRESS - 0x1000;
+
+pub struct GuestMemory {
+    ptr: NonNull<u8>,
+    len: usize,
+}
+
+unsafe impl Send for GuestMemory {}
+unsafe impl Sync for GuestMemory {}
+
+impl GuestMemory {
+    pub fn allocate(len: usize) -> Result<Self> {
+        if len == 0 || !len.is_multiple_of(4096) {
+            return Err(FluxError::Memory(
+                "size must be non-zero and 4 KiB aligned".into(),
+            ));
+        }
+        let dense = std::env::var("FLUXVM_KVM_LOCK_MEM").ok().as_deref() == Some("1");
+        let mut flags = ffi::MAP_SHARED | ffi::MAP_ANONYMOUS;
+        if dense {
+            flags |= ffi::MAP_POPULATE;
+        } else {
+            flags |= ffi::MAP_NORESERVE;
+        }
+        // Firecracker-style optional hugepage backing.
+        #[cfg(target_os = "linux")]
+        if std::env::var("FLUXVM_HUGEPAGES").ok().as_deref() == Some("1") {
+            flags |= libc::MAP_HUGETLB as i32;
+        }
+        let p = unsafe {
+            ffi::mmap(
+                std::ptr::null_mut(),
+                len,
+                ffi::PROT_READ | ffi::PROT_WRITE,
+                flags,
+                -1,
+                0,
+            )
+        };
+        if p as usize == ffi::MAP_FAILED {
+            return Err(FluxError::Memory("mmap guest ram failed".into()));
+        }
+        if dense {
+            let _ = unsafe { ffi::mlock(p as *const c_void, len) };
+        }
+        Ok(Self {
+            ptr: NonNull::new(p as *mut u8).unwrap(),
+            len,
+        })
+    }
+
+    /// Restore path: replace the guest RAM mapping, in place, with a
+    /// `MAP_PRIVATE` mapping of `file` (a snapshot's `snap.mem`). Pages are
+    /// faulted from the page cache on first touch, so N children restored
+    /// from one snapshot share every page none of them has written and only
+    /// copy-on-write the ones they dirty. The host address does not change,
+    /// so the KVM memslot and every `host_ptr()` copy stay valid.
+    ///
+    /// Must run before any vCPU or device thread touches RAM. Errors (and
+    /// leaves the anonymous mapping untouched) when the file size differs or
+    /// when mlock/hugepage backing was requested, since a file mapping can
+    /// honour neither; callers fall back to an eager copy.
+    ///
+    /// The snapshot file must not be truncated or rewritten in place while a
+    /// child runs (that would SIGBUS the guest). Unlinking it is fine.
+    #[cfg(target_os = "linux")]
+    pub fn remap_private_file(&mut self, file: &std::fs::File) -> Result<()> {
+        use std::os::fd::AsRawFd;
+        let flag = |name: &str| std::env::var(name).ok().as_deref() == Some("1");
+        if flag("FLUXVM_KVM_LOCK_MEM") || flag("FLUXVM_HUGEPAGES") {
+            return Err(FluxError::Memory(
+                "file-backed restore is incompatible with mlock/hugepage guest RAM".into(),
+            ));
+        }
+        if flag("FLUXVM_KVM_EAGER_RESTORE") {
+            return Err(FluxError::Memory(
+                "FLUXVM_KVM_EAGER_RESTORE=1 forces the eager copy".into(),
+            ));
+        }
+        let size = file
+            .metadata()
+            .map_err(|e| FluxError::Memory(e.to_string()))?
+            .len();
+        if size != self.len as u64 {
+            return Err(FluxError::Memory(format!(
+                "snapshot RAM size {size} does not match guest RAM {}",
+                self.len
+            )));
+        }
+        let p = unsafe {
+            libc::mmap(
+                self.ptr.as_ptr() as *mut libc::c_void,
+                self.len,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_PRIVATE | libc::MAP_FIXED | libc::MAP_NORESERVE,
+                file.as_raw_fd(),
+                0,
+            )
+        };
+        if p == libc::MAP_FAILED || p as usize != self.ptr.as_ptr() as usize {
+            return Err(FluxError::Memory(format!(
+                "mmap snapshot RAM failed: {}",
+                std::io::Error::last_os_error()
+            )));
+        }
+        Ok(())
+    }
+
+    /// Demand-paged restore via userfaultfd (Linux only).
+    ///
+    /// Opt-in with `FLUXVM_KVM_UFFD=1`. Falls back to `MAP_PRIVATE` when
+    /// the feature is unavailable or the sysctl forbids unprivileged uffd.
+    ///
+    /// Design matches `docs/ROADMAP-DENSITY.md`.
+    #[cfg(target_os = "linux")]
+    pub fn setup_uffd_restore(&mut self, snap_file: &std::fs::File) -> Result<()> {
+        // Full implementation sketch (requires userfaultfd ioctl constants
+        // from linux/userfaultfd.h, either via libc or local definitions):
+        //
+        // 1. let uffd = unsafe { libc::syscall(libc::SYS_userfaultfd, libc::O_CLOEXEC | libc::O_NONBLOCK) };
+        // 2. UFFDIO_API to negotiate features.
+        // 3. UFFDIO_REGISTER the range [self.ptr, self.ptr+self.len) with MODE_MISSING.
+        // 4. Spawn a thread that:
+        //    - polls the uffd
+        //    - on UFFD_EVENT_PAGEFAULT does UFFDIO_COPY from snap_file (pread 4KiB page)
+        //    - optionally prefetches a small window
+        // 5. Keep the uffd fd alive for the lifetime of the VM (store it on the GuestMemory or the VM object).
+        //
+        // Until the ioctl bindings and handler are wired and verified on real KVM,
+        // we refuse so callers fall back to the existing MAP_PRIVATE path.
+        let _ = snap_file;
+        Err(FluxError::Memory(
+            "userfaultfd demand-paged restore not yet fully wired (see ROADMAP-DENSITY)".into(),
+        ))
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    pub fn setup_uffd_restore(&mut self, _snap_file: &std::fs::File) -> Result<()> {
+        Err(FluxError::Memory("userfaultfd requires Linux".into()))
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    pub fn remap_private_file(&mut self, _file: &std::fs::File) -> Result<()> {
+        Err(FluxError::Memory("file-backed restore needs Linux".into()))
+    }
+
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    pub fn host_ptr(&self) -> *mut u8 {
+        self.ptr.as_ptr()
+    }
+
+    pub fn as_slice(&self) -> &[u8] {
+        unsafe { std::slice::from_raw_parts(self.ptr.as_ptr(), self.len) }
+    }
+
+    pub fn as_slice_mut(&mut self) -> &mut [u8] {
+        unsafe { std::slice::from_raw_parts_mut(self.ptr.as_ptr(), self.len) }
+    }
+
+    pub fn write_at(&mut self, gpa: u64, data: &[u8]) -> Result<()> {
+        let start = gpa as usize;
+        let end = start
+            .checked_add(data.len())
+            .ok_or_else(|| FluxError::Memory("GPA overflow".into()))?;
+        if end > self.len {
+            return Err(FluxError::Memory(format!(
+                "write GPA {gpa:#x}+{} past RAM {}",
+                data.len(),
+                self.len
+            )));
+        }
+        self.as_slice_mut()[start..end].copy_from_slice(data);
+        Ok(())
+    }
+
+    pub fn read_at(&self, gpa: u64, buf: &mut [u8]) -> Result<()> {
+        let start = usize::try_from(gpa)
+            .map_err(|_| FluxError::Memory("GPA does not fit host address space".into()))?;
+        let end = start
+            .checked_add(buf.len())
+            .ok_or_else(|| FluxError::Memory("GPA overflow".into()))?;
+        if end > self.len {
+            return Err(FluxError::Memory(format!(
+                "read GPA {gpa:#x}+{} past RAM {}",
+                buf.len(),
+                self.len
+            )));
+        }
+        buf.copy_from_slice(&self.as_slice()[start..end]);
+        Ok(())
+    }
+
+    pub fn read_u16(&self, gpa: u64) -> Result<u16> {
+        let mut b = [0u8; 2];
+        self.read_at(gpa, &mut b)?;
+        Ok(u16::from_le_bytes(b))
+    }
+
+    pub fn write_u16(&mut self, gpa: u64, v: u16) -> Result<()> {
+        self.write_at(gpa, &v.to_le_bytes())
+    }
+
+    /// Firecracker balloon inflate: discard host backing for a guest page.
+    pub fn advise_dontneed(&self, gpa: u64, len: usize) {
+        let start = gpa as usize;
+        if start.saturating_add(len) > self.len {
+            return;
+        }
+        #[cfg(target_os = "linux")]
+        unsafe {
+            let _ = libc::madvise(
+                self.ptr.as_ptr().add(start) as *mut libc::c_void,
+                len,
+                libc::MADV_DONTNEED,
+            );
+        }
+        #[cfg(not(target_os = "linux"))]
+        let _ = (start, len);
+    }
+
+    /// Balloon deflate: force page present again.
+    pub fn touch_page(&self, gpa: u64) {
+        let start = gpa as usize;
+        if start + 1 > self.len {
+            return;
+        }
+        unsafe {
+            let p = self.ptr.as_ptr().add(start);
+            std::ptr::read_volatile(p);
+        }
+    }
+}
+
+impl Drop for GuestMemory {
+    fn drop(&mut self) {
+        unsafe {
+            ffi::munmap(self.ptr.as_ptr() as *mut c_void, self.len);
+        }
+    }
+}
+
+impl Clone for GuestMemory {
+    fn clone(&self) -> Self {
+        Self {
+            ptr: self.ptr,
+            len: self.len,
+        }
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn read_at_rejects_overflowing_guest_address() {
+        let mem = GuestMemory::allocate(4096).unwrap();
+        let mut buf = [0u8; 16];
+        assert!(mem.read_at(u64::MAX, &mut buf).is_err());
+    }
+}

@@ -1,0 +1,41 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 380" width="900" height="380" role="img" aria-label="How a Mac reaches a cluster in a VM as if it were local" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif">
+<title>How a Mac reaches a cluster in a VM as if it were local</title>
+<rect x="0.5" y="0.5" width="899" height="379" rx="14" fill="#f5f6f8" stroke="#d5d9e2"/>
+<defs><marker id="a" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#7b8296"/></marker></defs>
+<text x="450" y="32" font-size="18" fill="#1f2430" text-anchor="middle" font-weight="700">The cluster is a VM; it feels like it is on your Mac</text>
+<rect x="30" y="56" width="250" height="296" rx="12" fill="#fff" stroke="#3b6fd4" stroke-width="2"/>
+<text x="155" y="82" font-size="15" fill="#1f2430" text-anchor="middle" font-weight="700">Your Mac</text>
+<text x="155" y="112" font-size="13" fill="#1f2430" text-anchor="middle">browser</text>
+<text x="155" y="136" font-size="13" fill="#1f2430" text-anchor="middle">kubectl, helm, k9s</text>
+<text x="155" y="160" font-size="13" fill="#1f2430" text-anchor="middle">psql, redis-cli, your app</text>
+<text x="155" y="184" font-size="13" fill="#1f2430" text-anchor="middle">editor and source files</text>
+<text x="155" y="226" font-size="12" fill="#5d6577" text-anchor="middle">fluxctl kube dev   rebuild + restart</text>
+<text x="155" y="246" font-size="12" fill="#5d6577" text-anchor="middle">fluxctl kube sync  copy on save</text>
+<text x="155" y="266" font-size="12" fill="#5d6577" text-anchor="middle">fluxctl kube load  images in</text>
+<text x="155" y="296" font-size="12" fill="#5d6577" text-anchor="middle">fluxctl kube supervise</text>
+<text x="155" y="314" font-size="12" fill="#5d6577" text-anchor="middle">keeps it all open, wakes it on demand</text>
+<rect x="320" y="56" width="260" height="296" rx="12" fill="#fff" stroke="#8a63d2" stroke-width="2"/>
+<text x="450" y="82" font-size="15" fill="#1f2430" text-anchor="middle" font-weight="700">127.0.0.1</text>
+<text x="450" y="112" font-size="13" fill="#1f2430" text-anchor="middle">:6443   the Kubernetes API</text>
+<text x="450" y="140" font-size="13" fill="#1f2430" text-anchor="middle">:5432 :6379 :3306   kube add</text>
+<text x="450" y="168" font-size="13" fill="#1f2430" text-anchor="middle">:8080   kube forward web</text>
+<text x="450" y="204" font-size="13" fill="#1f2430" text-anchor="middle" font-weight="600">http://web.localhost</text>
+<text x="450" y="226" font-size="13" fill="#1f2430" text-anchor="middle" font-weight="600">https://shop.localhost</text>
+<text x="450" y="248" font-size="12" fill="#5d6577" text-anchor="middle">a name per Service, and per Ingress host,</text>
+<text x="450" y="266" font-size="12" fill="#5d6577" text-anchor="middle">on ports 80 and 443; no /etc/hosts</text>
+<text x="450" y="304" font-size="12" fill="#5d6577" text-anchor="middle">kubectl is in ~/.kube/config already</text>
+<text x="450" y="324" font-size="12" fill="#5d6577" text-anchor="middle">pod trouble arrives as a notification</text>
+<rect x="620" y="56" width="250" height="296" rx="12" fill="#fff" stroke="#2f9e6b" stroke-width="2"/>
+<text x="745" y="82" font-size="15" fill="#1f2430" text-anchor="middle" font-weight="700">k3s in a FluxVM VM</text>
+<text x="745" y="112" font-size="13" fill="#1f2430" text-anchor="middle">your pods and Services</text>
+<text x="745" y="136" font-size="13" fill="#1f2430" text-anchor="middle">Traefik (optional) and Cilium</text>
+<text x="745" y="160" font-size="13" fill="#1f2430" text-anchor="middle">postgres, redis, kafka, ...</text>
+<text x="745" y="202" font-size="12" fill="#5d6577" text-anchor="middle">the whole machine can be saved</text>
+<text x="745" y="220" font-size="12" fill="#5d6577" text-anchor="middle">in about a second:</text>
+<text x="745" y="244" font-size="12" fill="#5d6577" text-anchor="middle">try / undo, bisect, reset,</text>
+<text x="745" y="262" font-size="12" fill="#5d6577" text-anchor="middle">chaos, sleep and wake</text>
+<text x="745" y="298" font-size="12" fill="#5d6577" text-anchor="middle">fluxctl kube doctor</text>
+<text x="745" y="316" font-size="12" fill="#5d6577" text-anchor="middle">says what is wrong and how to fix it</text>
+<line x1="280" y1="200" x2="320" y2="200" stroke="#7b8296" stroke-width="2" marker-end="url(#a)"/>
+<line x1="580" y1="200" x2="620" y2="200" stroke="#7b8296" stroke-width="2" marker-end="url(#a)"/>
+</svg>

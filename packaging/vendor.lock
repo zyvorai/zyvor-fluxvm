@@ -1,0 +1,18 @@
+# Pinned third-party binaries bundled with a FluxVM release. A release build passes this file to
+# scripts/install-firecracker.sh and scripts/install-cloud-hypervisor.sh with --lock, so it never calls the GitHub
+# API and never resolves "latest". Checked by scripts/test-vendor-lock.sh (format, offline).
+#
+# Format: one entry per line, whitespace separated, '#' starts a comment:
+#   <component> <arch> <version> <sha256> <url>
+# component: firecracker | cloud-hypervisor | ch-remote | hypervisor-fw ; arch: x86_64 | aarch64
+# The SHA-256 values were computed over the downloaded files (and match the digests GitHub records for the assets).
+# To bump a version: download each asset, run sha256sum on it, edit the line, run scripts/test-vendor-lock.sh.
+# The firmware release records no digest on GitHub, so its hash is trust-on-first-download of the 0.5.0 asset.
+firecracker       x86_64   v1.17.0  06094a1108ae9e82aa4c23a775aa92758f53f1175d422270d9d6162cb9ade558  https://github.com/firecracker-microvm/firecracker/releases/download/v1.17.0/firecracker-v1.17.0-x86_64.tgz
+firecracker       aarch64  v1.17.0  e351ebe4f7a16b5873bbd51005d2e6767103cff4d5ebc829df2d3f95a93e2256  https://github.com/firecracker-microvm/firecracker/releases/download/v1.17.0/firecracker-v1.17.0-aarch64.tgz
+cloud-hypervisor  x86_64   v54.0    4f4f98a3d661a40f3e5272627cc895a1b2e525f2f6bedf5f895f9cd21ba5c65b  https://github.com/cloud-hypervisor/cloud-hypervisor/releases/download/v54.0/cloud-hypervisor-static
+cloud-hypervisor  aarch64  v54.0    e8a6d9786ea678e739f1a386682846e93742dcb9c7b6e3e0c62e3bda6cff0ef3  https://github.com/cloud-hypervisor/cloud-hypervisor/releases/download/v54.0/cloud-hypervisor-static-aarch64
+ch-remote         x86_64   v54.0    acd5be240d5c73373effbe818908fc03e313ec8486237904bff11d93b71b1c83  https://github.com/cloud-hypervisor/cloud-hypervisor/releases/download/v54.0/ch-remote-static
+ch-remote         aarch64  v54.0    44521d7415eb45ac3188e1d90ab3b12f689e6548606df779ec87c4fcce297d9e  https://github.com/cloud-hypervisor/cloud-hypervisor/releases/download/v54.0/ch-remote-static-aarch64
+hypervisor-fw     x86_64   0.5.0    4a0a1e977368f6b15d2198a216bdedf9a350bf5e5ae07e29e695373ec16ad958  https://github.com/cloud-hypervisor/rust-hypervisor-firmware/releases/download/0.5.0/hypervisor-fw
+hypervisor-fw     aarch64  0.5.0    2a22aed888572ae319e231b85a7b4de951c7eca8857730300653512d064c8102  https://github.com/cloud-hypervisor/rust-hypervisor-firmware/releases/download/0.5.0/hypervisor-fw-aarch64

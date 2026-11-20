@@ -1,0 +1,32 @@
+# Copyright 2026 Zyvor AI Labs · https://zyvor.dev
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+#
+# Production Network Fabric profile (dataplane schema v4).
+#
+# Same [sandbox.dataplane] knobs as network-fabric-ga.toml. Prefer enabling via:
+#   sudo ./scripts/enable-network-fabric-ga.sh --restart
+# then run the operator loop in docs/production-dataplane.md
+# (fluxvm dataplane health | ipcache | refresh-dns, CNP apply).
+#
+# Merging this file alone does not add FQDN/ipcache features — those are
+# runtime APIs once mode=ebpf/cilium is active. Preflight:
+#   ./scripts/network-fabric-preflight.sh --require-bpf
+#
+# On nodes that already run a CNI agent: use --cilium on the enable script
+# (or set mode = "cilium") and leave XDP disabled.
+
+[sandbox.dataplane]
+mode = "ebpf"
+bpf_object = "/usr/lib/fluxvm/bpf/fluxvm_tc.bpf.o"
+pin_root = "/sys/fs/bpf/fluxvm"
+required = true
+default_allow = false
+allow_cidrs = ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"]
+allow_ports = ["tcp/443", "tcp/80", "udp/53"]
+max_egress_mbps = 250
+max_egress_pps = 100000
+sample_rate = 100
+
+# On nodes that already run a CNI agent:
+# mode = "cilium"
+# and leave XDP disabled.

@@ -1,0 +1,236 @@
+// Copyright 2026 Zyvor AI Labs · https://zyvor.dev
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+
+use crate::api::{ApiRequest, BootConfig};
+use crate::control;
+use anyhow::{bail, Context, Result};
+use async_trait::async_trait;
+use fluxvm_core::{
+    backend::{LaunchContext, LaunchResult, VmBackend},
+    config::{Config, FluxVmEngine},
+    model::{BackendKind, CreateVmRequest, NetworkSpec, VmRecord},
+    process::{netns_wrap, spawn_logged_with_env},
+};
+use std::{fs, path::Path, time::Duration};
+
+const API_TIMEOUT: Duration = Duration::from_secs(45);
+
+pub struct FluxVmBackend;
+
+#[async_trait]
+impl VmBackend for FluxVmBackend {
+    fn kind(&self) -> BackendKind {
+        BackendKind::FluxVm
+    }
+
+    async fn launch(
+        &self,
+        cfg: &Config,
+        req: &CreateVmRequest,
+        ctx: &LaunchContext,
+    ) -> Result<LaunchResult> {
+        let kernel = req
+            .kernel
+            .as_ref()
+            .or(cfg.fluxvm_kernel.as_ref())
+            .or(cfg.firecracker_kernel.as_ref())
+            .context("FluxVm requires a Linux kernel via request.kernel, config.fluxvm_kernel, or config.firecracker_kernel")?;
+
+        let api = ctx.workspace.join("fluxvm.sock");
+        let _ = fs::remove_file(&api);
+
+        let boot = BootConfig {
+            kernel: kernel.clone(),
+            rootfs: ctx.disk.clone(),
+            initrd: req.initrd.clone(),
+            seed: ctx.seed_disk.clone(),
+            memory_mib: req.memory_mib,
+            vcpus: req.vcpus,
+            kernel_args: req.kernel_args.clone().or_else(|| {
+                Some(match cfg.fluxvm_engine {
+                    // Firecracker attaches virtio devices via its API and appends
+                    // its own `root=/dev/vda` + virtio_mmiocmdline — do not inject
+                    // in-tree KVM `virtio_mmio.device=0x200@0xfeb…` hints (Wrong
+                    // magic value) or a competing `root=` that loses to FC's
+                    // append. Use a flat ext4 rootfs (see fabric
+                    // `scripts/keep-bake-fc-rootfs.sh`); GPT cloud images panic.
+                    FluxVmEngine::Firecracker => {
+                        "console=ttyS0 earlyprintk=serial,ttyS0,115200 ignore_loglevel reboot=k panic=1 pci=off rw random.trust_cpu=on rdrand=force"
+                            .into()
+                    }
+                    FluxVmEngine::Kvm => {
+                        // random.trust_cpu=on: this kernel has no virtio-rng driver, and
+                        // without it the guest's CRNG gets stuck at "fast init" forever
+                        // (real entropy sources -- disk/keyboard/network jitter -- barely
+                        // exist in a headless microVM). Anything that calls the blocking
+                        // getrandom() before the CRNG is *fully* seeded hangs indefinitely
+                        // in wait_for_random_bytes(), which is indistinguishable from a
+                        // hung process from the outside -- alive, no output, nothing
+                        // listening. Trusting RDRAND lets it seed fully at boot instead.
+                        "console=ttyS0 earlyprintk=serial,ttyS0,115200 ignore_loglevel reboot=k panic=1 pci=off root=/dev/vda rw \
+                     random.trust_cpu=on rdrand=force \
+                     virtio_mmio.device=0x200@0xfeb00000:5 \
+                     virtio_mmio.device=0x200@0xfeb00200:6"
+                            .into()
+                    }
+                })
+            }),
+            tap: match &ctx.network.spec {
+                NetworkSpec::Tap { .. } if ctx.network.tap_fd.is_some() => bail!(
+                    "FluxVm backend opens taps by name and cannot take a pre-opened fd; a \
+                     bridge-less direct tap in a foreign netns needs the QEMU or Cloud Hypervisor backend"
+                ),
+                NetworkSpec::Tap {
+                    tap_name: Some(t), ..
+                } => Some(t.clone()),
+                NetworkSpec::None => None,
+                NetworkSpec::Tap { tap_name: None, .. } => bail!("tap network was not prepared"),
+                NetworkSpec::Macvtap { .. } => bail!(
+                    "FluxVm backend does not support macvtap yet; use network.mode=tap or none"
+                ),
+                NetworkSpec::User { .. } => {
+                    bail!("FluxVm backend requires network.mode=none or tap")
+                }
+            },
+            mac: match &ctx.network.spec {
+                NetworkSpec::Tap { mac, .. } => mac.clone(),
+                _ => None,
+            },
+            vsock_cid: ctx.guest_cid,
+            vsock_uds: ctx.vsock_socket.clone(),
+            // Firecracker applies its own seccomp to the guest VMM. A process-wide
+            // KillProcess filter on the FluxVM control plane races with tokio and
+            // prevents the API from answering Ping after boot starts.
+            seccomp: matches!(cfg.fluxvm_engine, FluxVmEngine::Kvm),
+            engine: match cfg.fluxvm_engine {
+                FluxVmEngine::Firecracker => crate::api::FluxVmEngine::Firecracker,
+                FluxVmEngine::Kvm => crate::api::FluxVmEngine::Kvm,
+            },
+            net_mbit_limit: req.net_mbit_limit,
+            net_pps_limit: req.net_pps_limit,
+            blk_mbit_limit: req.blk_mbit_limit,
+            blk_ops_limit: req.blk_ops_limit,
+            cpu_template: req.cpu_template.clone(),
+            max_vcpus: None,
+            shared_folders: req
+                .shared_folders
+                .iter()
+                .map(|s| s.host_path.clone())
+                .collect(),
+        };
+
+        let boot_path = ctx.workspace.join("fluxvm-boot.json");
+        fs::write(&boot_path, serde_json::to_vec_pretty(&boot)?)?;
+
+        let args = vec![
+            "--api-sock".into(),
+            api.display().to_string(),
+            "--boot-config".into(),
+            boot_path.display().to_string(),
+        ];
+        let (program, args) = netns_wrap(
+            ctx.network.netns.as_deref(),
+            &cfg.fluxvm_hypervisor_binary,
+            &args,
+        );
+        let mut child = spawn_logged_with_env(
+            &program,
+            &args,
+            &ctx.log_path,
+            &[
+                ("FLUXVM_FIRECRACKER_BINARY", cfg.firecracker_binary.as_str()),
+                (
+                    "FLUXVM_ENGINE",
+                    match cfg.fluxvm_engine {
+                        FluxVmEngine::Firecracker => "firecracker",
+                        FluxVmEngine::Kvm => "kvm",
+                    },
+                ),
+            ],
+        )
+        .await?;
+        let pid = child
+            .id()
+            .context("fluxvm-hypervisor exited before PID was available")?;
+
+        // Ping only proves the API socket is up; the guest may still be
+        // booting (or may already have failed). Wait for actual VM state.
+        let deadline = tokio::time::Instant::now() + API_TIMEOUT;
+        let ready: Result<()> = async {
+            loop {
+                let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+                if remaining.is_zero() {
+                    bail!("FluxVm guest did not reach running state within {API_TIMEOUT:?}");
+                }
+                if let Some(status) = child.try_wait()? {
+                    bail!("fluxvm-hypervisor exited during boot: {status}");
+                }
+                match control::request_with_timeout(
+                    &api,
+                    &ApiRequest::Metrics,
+                    remaining.min(Duration::from_secs(35)),
+                )
+                .await
+                {
+                    Ok(crate::api::ApiResponse::Metrics { lifecycle, .. })
+                        if lifecycle == "running" =>
+                    {
+                        break Ok(())
+                    }
+                    Ok(crate::api::ApiResponse::Error { message }) => {
+                        bail!("FluxVm guest boot failed: {message}")
+                    }
+                    Ok(crate::api::ApiResponse::Metrics { .. }) | Err(_) => {}
+                    Ok(other) => bail!("unexpected FluxVm boot response: {other:?}"),
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        }
+        .await;
+        if let Err(e) = ready {
+            let _ = child.kill().await;
+            return Err(e);
+        }
+
+        Ok(LaunchResult {
+            pid,
+            control_socket: Some(api),
+            jail_path: None,
+            vsock_socket: ctx.vsock_socket.clone(),
+            virtiofsd_pids: Vec::new(),
+            swtpm_pid: None,
+        })
+    }
+
+    async fn pause(&self, _cfg: &Config, vm: &VmRecord) -> Result<()> {
+        let sock = control_socket(vm)?;
+        let resp = control::request(sock, &ApiRequest::Pause).await?;
+        match resp {
+            crate::api::ApiResponse::State { .. } | crate::api::ApiResponse::Ok { .. } => Ok(()),
+            crate::api::ApiResponse::Error { message } => bail!("{message}"),
+            other => bail!("unexpected pause response: {other:?}"),
+        }
+    }
+
+    async fn resume(&self, _cfg: &Config, vm: &VmRecord) -> Result<()> {
+        let sock = control_socket(vm)?;
+        let resp = control::request(sock, &ApiRequest::Resume).await?;
+        match resp {
+            crate::api::ApiResponse::State { .. } | crate::api::ApiResponse::Ok { .. } => Ok(()),
+            crate::api::ApiResponse::Error { message } => bail!("{message}"),
+            other => bail!("unexpected resume response: {other:?}"),
+        }
+    }
+
+    async fn graceful_shutdown(&self, _cfg: &Config, vm: &VmRecord) -> Result<()> {
+        let sock = control_socket(vm)?;
+        let _ = control::request(sock, &ApiRequest::Shutdown).await?;
+        Ok(())
+    }
+}
+
+fn control_socket(vm: &VmRecord) -> Result<&Path> {
+    vm.control_socket
+        .as_deref()
+        .context("FluxVm VM has no control socket recorded")
+}

@@ -1,0 +1,731 @@
+// Copyright 2026 Zyvor AI Labs · https://zyvor.dev
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+
+//! The host-to-guest contract: `config.json` in the meta share, and the markers init prints on the console.
+
+use anyhow::{Context, Result, bail};
+use serde::{Deserialize, Serialize};
+
+/// virtiofs tag of the read-only share holding [`CONFIG_FILE`] and [`TOKEN_FILE`].
+pub const META_TAG: &str = "fluxvm-meta";
+/// virtiofs tag of the read-only blob store share (builder VM only).
+pub const BLOBS_TAG: &str = "fluxvm-blobs";
+pub const CONFIG_FILE: &str = "config.json";
+pub const TOKEN_FILE: &str = "agent.token";
+/// `{"NAME": "value"}` in the meta share: environment the host keeps out of `config.json`.
+pub const SECRETS_FILE: &str = "secrets.json";
+
+/// A POSIX environment variable name.
+pub fn valid_env_name(name: &str) -> bool {
+    let mut b = name.bytes();
+    matches!(b.next(), Some(c) if c.is_ascii_alphabetic() || c == b'_')
+        && b.all(|c| c.is_ascii_alphanumeric() || c == b'_')
+}
+
+/// `env` with each secret set, replacing an entry of the same name.
+pub fn with_secrets(
+    env: &[String],
+    secrets: &std::collections::BTreeMap<String, String>,
+) -> Vec<String> {
+    env.iter()
+        .filter(|e| {
+            let name = e.split_once('=').map_or(e.as_str(), |(n, _)| n);
+            !secrets.contains_key(name)
+        })
+        .cloned()
+        .chain(secrets.iter().map(|(k, v)| format!("{k}={v}")))
+        .collect()
+}
+/// Where the initramfs tools are visible inside the container after the root switch.
+pub const TOOLS_DIR: &str = "/.fluxvm";
+/// virtiofs tags of persistent volumes: `fluxvm-vol0`, `fluxvm-vol1`, …
+pub const VOLUME_TAG_PREFIX: &str = "fluxvm-vol";
+
+/// Console lines the host parses from the serial log.
+pub const UNPACK_OK: &str = "FLUXVM-UNPACK-OK";
+pub const UNPACK_ERR: &str = "FLUXVM-UNPACK-ERR";
+pub const EXIT_MARKER: &str = "FLUXVM-EXIT";
+/// Init could not start the container (bad rootfs, unknown user, missing binary); the reason follows.
+pub const INIT_ERR: &str = "FLUXVM-INIT-ERR";
+/// The guest's DHCP address; the runner parses it to know where published ports go (same line as cloud-init guests).
+pub const GUEST_IP_MARKER: &str = "VELORA-IP";
+
+/// Tells the guest agent that `Shutdown` means "signal PID 1" (SIGUSR2), not the image's shutdown(8).
+pub const POWEROFF_VIA_INIT_ENV: &str = "FLUXVM_POWEROFF_VIA_INIT";
+pub const EGRESS_PROXY_PORT: u16 = 3128;
+pub const EGRESS_PROXY_URL: &str = "http://127.0.0.1:3128";
+
+pub const DEFAULT_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+/// The process runs as `nobody` unless the image or the request names a user.
+pub const DEFAULT_USER: &str = "65534:65534";
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "mode", rename_all = "lowercase")]
+#[allow(clippy::large_enum_variant)]
+pub enum InitConfig {
+    Boot(BootConfig),
+    Unpack(UnpackConfig),
+    /// A warm-pool VM: boot, take a lease, then wait on vsock for a [`Claim`] naming the real boot config and the
+    /// root disk the host hot-attaches over USB.
+    Wait(WaitConfig),
+}
+
+/// Default vsock port a waiting init accepts its claim on.
+pub const WARM_PORT: u32 = 1026;
+/// Printed once a waiting init is ready to be claimed.
+pub const WARM_READY: &str = "FLUXVM-WARM-READY";
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WaitConfig {
+    #[serde(default = "default_warm_port")]
+    pub port: u32,
+    /// The NIC is configured before the claim, so a claimed container starts with its address.
+    #[serde(default)]
+    pub network: NetworkMode,
+}
+
+fn default_warm_port() -> u32 {
+    WARM_PORT
+}
+
+/// The one JSON line the host sends a waiting init; init answers `ok` or `error <reason>`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Claim {
+    /// A file in the meta share holding a `boot` [`InitConfig`] (a new name, so no cached copy is read).
+    pub config: String,
+    /// The hot-attached root disk, e.g. `/dev/sda`.
+    pub disk: String,
+}
+
+impl Claim {
+    pub fn validate(&self) -> Result<()> {
+        let c = &self.config;
+        if c.is_empty()
+            || c.len() > 64
+            || c.contains('/')
+            || c.starts_with('.')
+            || !c.ends_with(".json")
+        {
+            bail!("claim config {c:?} must be a .json file name in the meta share");
+        }
+        let dev = self.disk.strip_prefix("/dev/").unwrap_or("");
+        if dev.is_empty()
+            || dev.len() > 16
+            || !dev
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+        {
+            bail!(
+                "claim disk {:?} must be a /dev/<name> block device",
+                self.disk
+            );
+        }
+        Ok(())
+    }
+}
+
+/// Whether the console shows a waiting init ready for a claim.
+pub fn warm_ready_in_log(log: &str) -> bool {
+    log.lines().any(|l| l.trim_end() == WARM_READY)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BootConfig {
+    pub hostname: String,
+    pub process: ProcessSpec,
+    /// Image root stays read-only (an overlay with a tmpfs upper, remounted read-only); `/tmp` and `/run` are tmpfs.
+    #[serde(default)]
+    pub read_only_root: bool,
+    #[serde(default)]
+    pub network: NetworkMode,
+    /// Relay `127.0.0.1:3128` to the host's allow-listed egress proxy on vsock port 3128.
+    #[serde(default)]
+    pub egress_proxy: bool,
+    #[serde(default)]
+    pub exit_policy: ExitPolicy,
+    #[serde(default = "default_agent_port")]
+    pub agent_port: u32,
+    #[serde(default)]
+    pub restart: crate::supervise::RestartPolicy,
+    /// Stop restarting after this many restarts (unlimited when absent).
+    #[serde(default)]
+    pub max_restarts: Option<u32>,
+    #[serde(default)]
+    pub healthcheck: Option<crate::supervise::HealthCheck>,
+    /// Persistent volumes: virtiofs shares mounted into the root before the process starts.
+    #[serde(default)]
+    pub mounts: Vec<VolumeMount>,
+    /// Names that resolve to the DHCP router (the Mac's NAT gateway) in the container's `/etc/hosts`.
+    #[serde(default)]
+    pub gateway_hosts: Vec<String>,
+    /// Private VM-to-VM networks: the card with `mac` gets `address` statically (no DHCP, no route).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub networks: Vec<PrivateNetwork>,
+    /// Extra `/etc/hosts` lines, e.g. the other containers of a stack on a private network.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hosts: Vec<HostEntry>,
+    /// Register the Rosetta share (virtiofs tag [`ROSETTA_TAG`]) for x86-64 binaries, so a `linux/amd64` image runs.
+    #[serde(default)]
+    pub rosetta: bool,
+}
+
+/// The runner's Rosetta share tag (`apple.rosetta`).
+pub const ROSETTA_TAG: &str = "rosetta";
+/// Where init mounts it; visible in the container as `/.fluxvm/rosetta`.
+pub const ROSETTA_DIR: &str = "/fluxvm/rosetta";
+
+/// The `binfmt_misc` registration for Rosetta: x86-64 ELF executables, with `F` (the interpreter is opened now, so it need
+/// not exist in the container) and `C` (credentials from the binary, so setuid works as on x86).
+pub fn rosetta_binfmt() -> String {
+    format!(
+        r":rosetta:M::\x7fELF\x02\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x02\x00\x3e\x00:\xff\xff\xff\xff\xff\xfe\xfe\x00\xff\xff\xff\xff\xff\xff\xff\xff\xfe\xff\xff\xff:{ROSETTA_DIR}/rosetta:CF"
+    )
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PrivateNetwork {
+    pub name: String,
+    pub mac: String,
+    /// `a.b.c.d/len`.
+    pub address: String,
+}
+
+impl PrivateNetwork {
+    pub fn parse(&self) -> anyhow::Result<([u8; 6], std::net::Ipv4Addr, u8)> {
+        let bytes: Vec<u8> = self
+            .mac
+            .split(':')
+            .map(|h| u8::from_str_radix(h, 16))
+            .collect::<Result<_, _>>()
+            .map_err(|_| anyhow::anyhow!("network {}: bad MAC {:?}", self.name, self.mac))?;
+        let mac: [u8; 6] = bytes
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("network {}: bad MAC {:?}", self.name, self.mac))?;
+        let (ip, len) = self
+            .address
+            .split_once('/')
+            .ok_or_else(|| anyhow::anyhow!("network {}: address needs a /prefix", self.name))?;
+        let ip: std::net::Ipv4Addr = ip.parse().map_err(|_| {
+            anyhow::anyhow!("network {}: bad address {:?}", self.name, self.address)
+        })?;
+        let len: u8 = len
+            .parse()
+            .ok()
+            .filter(|l| (1..=30).contains(l))
+            .ok_or_else(|| {
+                anyhow::anyhow!("network {}: bad prefix {:?}", self.name, self.address)
+            })?;
+        Ok((mac, ip, len))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostEntry {
+    pub ip: std::net::Ipv4Addr,
+    pub names: Vec<String>,
+}
+
+/// An RFC 1123 host name: dot-separated labels of 1-63 letters, digits and inner hyphens, 253 characters at most.
+pub fn valid_host_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 253
+        && name.split('.').all(|l| {
+            !l.is_empty()
+                && l.len() <= 63
+                && !l.starts_with('-')
+                && !l.ends_with('-')
+                && l.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+        })
+}
+
+/// A virtiofs share (tag `fluxvm-vol<N>`) mounted at `target` in the container's root.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VolumeMount {
+    pub tag: String,
+    pub target: String,
+    #[serde(default)]
+    pub read_only: bool,
+}
+
+/// The tag of the `index`th volume share.
+pub fn volume_tag(index: usize) -> String {
+    format!("{VOLUME_TAG_PREFIX}{index}")
+}
+
+impl VolumeMount {
+    /// An absolute path below the root (not `/` itself, no `.` or `..` parts) and a `fluxvm-vol<N>` tag.
+    pub fn validate(&self) -> Result<()> {
+        let n = self
+            .tag
+            .strip_prefix(VOLUME_TAG_PREFIX)
+            .context("volume tag must start with fluxvm-vol")?;
+        if n.is_empty() || !n.bytes().all(|b| b.is_ascii_digit()) {
+            bail!("bad volume tag {:?}", self.tag);
+        }
+        let rel = self
+            .target
+            .strip_prefix('/')
+            .with_context(|| format!("volume target {:?} must be absolute", self.target))?;
+        if rel.is_empty()
+            || rel
+                .split('/')
+                .any(|c| c.is_empty() || c == "." || c == "..")
+        {
+            bail!("bad volume target {:?}", self.target);
+        }
+        Ok(())
+    }
+}
+
+fn default_agent_port() -> u32 {
+    17777
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum NetworkMode {
+    #[default]
+    Dhcp,
+    None,
+}
+
+/// What happens when the main process exits.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ExitPolicy {
+    /// Keep the VM (and the agent) up for exec and file access.
+    #[default]
+    Keep,
+    /// Power off; the exit code is on the console as `FLUXVM-EXIT <code>`.
+    Poweroff,
+}
+
+/// The container process, already resolved from the image config and the request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProcessSpec {
+    pub argv: Vec<String>,
+    pub env: Vec<String>,
+    pub cwd: String,
+    /// OCI `User`: `uid`, `uid:gid`, `name` or `name:group`, resolved inside the guest against the image's
+    /// `/etc/passwd` and `/etc/group`.
+    pub user: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnpackConfig {
+    pub layers: Vec<UnpackLayer>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnpackLayer {
+    /// File name in the blob share (the sha256 hex of the compressed blob).
+    pub blob: String,
+    pub compression: Compression,
+    /// `sha256:` of the uncompressed tar.
+    pub diff_id: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Compression {
+    None,
+    Gzip,
+    Zstd,
+}
+
+/// Overrides a request may apply on top of the image config.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProcessOverrides {
+    /// Replaces the image `Entrypoint` (and, as with `docker run --entrypoint`, drops its `Cmd`).
+    #[serde(default)]
+    pub entrypoint: Option<Vec<String>>,
+    /// Replaces the image `Cmd`.
+    #[serde(default)]
+    pub command: Option<Vec<String>>,
+    /// `KEY=value`, added to or replacing the image's entries.
+    #[serde(default)]
+    pub env: Vec<String>,
+    #[serde(default)]
+    pub workdir: Option<String>,
+    #[serde(default)]
+    pub user: Option<String>,
+}
+
+/// Image config fields that decide the process (OCI `config` object).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ImageProcess {
+    pub entrypoint: Option<Vec<String>>,
+    pub cmd: Option<Vec<String>>,
+    pub env: Option<Vec<String>>,
+    pub working_dir: Option<String>,
+    pub user: Option<String>,
+}
+
+/// Docker/OCI rules: argv is Entrypoint + Cmd; overrides win; `PATH` always set; user defaults to nobody.
+pub fn resolve_process(image: &ImageProcess, o: &ProcessOverrides) -> Result<ProcessSpec> {
+    let entrypoint = o
+        .entrypoint
+        .clone()
+        .or_else(|| image.entrypoint.clone())
+        .unwrap_or_default();
+    let cmd = match (&o.command, &o.entrypoint) {
+        (Some(c), _) => c.clone(),
+        (None, Some(_)) => Vec::new(),
+        (None, None) => image.cmd.clone().unwrap_or_default(),
+    };
+    let argv: Vec<String> = entrypoint.into_iter().chain(cmd).collect();
+    if argv.first().is_none_or(|a| a.is_empty()) {
+        bail!("the image has no Entrypoint or Cmd; give a command");
+    }
+    if argv.iter().any(|a| a.contains('\0')) {
+        bail!("command arguments cannot contain NUL");
+    }
+    let mut env: Vec<String> = Vec::new();
+    for e in image.env.iter().flatten().chain(o.env.iter()) {
+        let Some((k, _)) = e.split_once('=') else {
+            bail!("environment entry {e:?} is not KEY=value");
+        };
+        if k.is_empty() || e.contains('\0') {
+            bail!("environment entry {e:?} is invalid");
+        }
+        env.retain(|x| x.split_once('=').map(|(xk, _)| xk) != Some(k));
+        env.push(e.clone());
+    }
+    if !env.iter().any(|e| e.starts_with("PATH=")) {
+        env.push(format!("PATH={DEFAULT_PATH}"));
+    }
+    let cwd = o
+        .workdir
+        .clone()
+        .or_else(|| image.working_dir.clone().filter(|w| !w.is_empty()))
+        .unwrap_or_else(|| "/".into());
+    if !cwd.starts_with('/') {
+        bail!("working directory {cwd:?} must be absolute");
+    }
+    let user = o
+        .user
+        .clone()
+        .or_else(|| image.user.clone().filter(|u| !u.is_empty()))
+        .unwrap_or_else(|| DEFAULT_USER.into());
+    Ok(ProcessSpec {
+        argv,
+        env,
+        cwd,
+        user,
+    })
+}
+
+/// The exit code from a console log, if the main process has exited.
+pub fn exit_code_from_log(log: &str) -> Option<i32> {
+    log.lines()
+        .rev()
+        .find_map(|l| l.trim().strip_prefix(EXIT_MARKER)?.trim().parse().ok())
+}
+
+/// Why init gave up before the process ran, if it did.
+pub fn init_error_from_log(log: &str) -> Option<String> {
+    log.lines().rev().find_map(|l| {
+        l.trim()
+            .strip_prefix(INIT_ERR)
+            .map(|r| r.trim().to_string())
+    })
+}
+
+/// The builder VM's verdict from its console log: `Some(Ok)`, `Some(Err(reason))`, or `None` if it has not finished.
+pub fn unpack_result_from_log(log: &str) -> Option<Result<(), String>> {
+    log.lines().rev().find_map(|l| {
+        let l = l.trim();
+        if l == UNPACK_OK {
+            Some(Ok(()))
+        } else {
+            l.strip_prefix(UNPACK_ERR)
+                .map(|r| Err(r.trim().to_string()))
+        }
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn secrets_replace_env_entries_of_the_same_name() {
+        let secrets = std::collections::BTreeMap::from([
+            ("DB_PASSWORD".to_string(), "s3=cret".to_string()),
+            ("TOKEN".to_string(), String::new()),
+        ]);
+        let env = [
+            "PATH=/bin".to_string(),
+            "DB_PASSWORD=old".to_string(),
+            "TOKEN".to_string(),
+        ];
+        assert_eq!(
+            with_secrets(&env, &secrets),
+            ["PATH=/bin", "DB_PASSWORD=s3=cret", "TOKEN="]
+        );
+        for ok in ["A", "_x", "DB_PASSWORD2"] {
+            assert!(valid_env_name(ok), "{ok}");
+        }
+        for bad in ["", "1A", "A-B", "A=B", "A B"] {
+            assert!(!valid_env_name(bad), "{bad}");
+        }
+    }
+
+    #[test]
+    fn claims_name_a_meta_file_and_a_block_device() {
+        let ok = Claim {
+            config: "claim-1a2b.json".into(),
+            disk: "/dev/sda".into(),
+        };
+        ok.validate().unwrap();
+        for (config, disk) in [
+            ("../config.json", "/dev/sda"),
+            ("a/b.json", "/dev/sda"),
+            (".hidden.json", "/dev/sda"),
+            ("claim.txt", "/dev/sda"),
+            ("claim.json", "/dev/../etc"),
+            ("claim.json", "/tmp/sda"),
+            ("claim.json", "/dev/"),
+        ] {
+            let c = Claim {
+                config: config.into(),
+                disk: disk.into(),
+            };
+            assert!(c.validate().is_err(), "{config} {disk}");
+        }
+        let w: InitConfig = serde_json::from_str(r#"{"mode": "wait"}"#).unwrap();
+        assert_eq!(
+            w,
+            InitConfig::Wait(WaitConfig {
+                port: WARM_PORT,
+                network: NetworkMode::default()
+            })
+        );
+        assert!(warm_ready_in_log("boot\nFLUXVM-WARM-READY\n"));
+        assert!(!warm_ready_in_log("FLUXVM-WARM-READY-ish"));
+    }
+
+    #[test]
+    fn the_rosetta_registration_matches_x86_64_elf_with_fix_binary() {
+        let r = rosetta_binfmt();
+        let fields: Vec<&str> = r.split(':').collect();
+        // :name:type:offset:magic:mask:interpreter:flags
+        assert_eq!(fields.len(), 8, "{r}");
+        assert_eq!((fields[1], fields[2]), ("rosetta", "M"));
+        assert!(fields[4].starts_with(r"\x7fELF\x02") && fields[4].ends_with(r"\x3e\x00"));
+        let bytes = |s: &str| s.len() - 3 * s.matches(r"\x").count();
+        assert_eq!(bytes(fields[4]), 20);
+        assert_eq!(bytes(fields[5]), 20, "magic and mask are the same length");
+        assert_eq!(fields[6], "/fluxvm/rosetta/rosetta");
+        assert_eq!(fields[7], "CF");
+    }
+
+    #[test]
+    fn private_networks_parse_their_mac_and_address() {
+        let n = PrivateNetwork {
+            name: "shop".into(),
+            mac: "02:aa:bb:cc:dd:0e".into(),
+            address: "10.89.3.7/24".into(),
+        };
+        assert_eq!(
+            n.parse().unwrap(),
+            (
+                [2, 0xaa, 0xbb, 0xcc, 0xdd, 0x0e],
+                std::net::Ipv4Addr::new(10, 89, 3, 7),
+                24
+            )
+        );
+        for (mac, address) in [
+            ("02:aa:bb:cc:dd", "10.89.3.7/24"),
+            ("02:aa:bb:cc:dd:0e", "10.89.3.7"),
+            ("02:aa:bb:cc:dd:0e", "10.89.3.7/0"),
+            ("02:aa:bb:cc:dd:0e", "host/24"),
+        ] {
+            let bad = PrivateNetwork {
+                mac: mac.into(),
+                address: address.into(),
+                ..n.clone()
+            };
+            assert!(bad.parse().is_err(), "{mac} {address}");
+        }
+        // Older host configs without the new fields still load.
+        let b: BootConfig = serde_json::from_value(serde_json::json!({
+            "hostname": "h",
+            "process": {"argv": ["/bin/sh"], "env": [], "cwd": "/", "user": "0:0"}
+        }))
+        .unwrap();
+        assert!(b.networks.is_empty() && b.hosts.is_empty());
+    }
+
+    #[test]
+    fn host_names_follow_rfc_1123() {
+        for ok in ["db", "myapp-db", "a.b-c.d", "x1"] {
+            assert!(valid_host_name(ok), "{ok}");
+        }
+        for bad in [
+            "",
+            "-db",
+            "db-",
+            "a..b",
+            "a b",
+            "db\n1.2.3.4 evil",
+            &"a".repeat(64),
+        ] {
+            assert!(!valid_host_name(bad), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn volume_mounts_stay_inside_the_root() {
+        let m = |tag: &str, target: &str| VolumeMount {
+            tag: tag.into(),
+            target: target.into(),
+            read_only: false,
+        };
+        assert!(m(&volume_tag(0), "/data").validate().is_ok());
+        assert!(m("fluxvm-vol12", "/srv/app/cache").validate().is_ok());
+        for (tag, target) in [
+            ("fluxvm-vol0", "/"),
+            ("fluxvm-vol0", "data"),
+            ("fluxvm-vol0", "/data/../etc"),
+            ("fluxvm-vol0", "/data//x"),
+            ("fluxvm-volx", "/data"),
+            ("fluxvm-meta", "/data"),
+        ] {
+            assert!(m(tag, target).validate().is_err(), "{tag} {target}");
+        }
+    }
+
+    #[test]
+    fn older_boot_configs_still_parse() {
+        let b: BootConfig = serde_json::from_value(serde_json::json!({
+            "hostname": "h",
+            "process": {"argv": ["/bin/true"], "env": [], "cwd": "/", "user": "0:0"},
+        }))
+        .unwrap();
+        assert_eq!(b.restart, crate::supervise::RestartPolicy::No);
+        assert!(b.healthcheck.is_none() && b.mounts.is_empty() && b.max_restarts.is_none());
+    }
+
+    fn image() -> ImageProcess {
+        ImageProcess {
+            entrypoint: Some(vec!["/docker-entrypoint.sh".into()]),
+            cmd: Some(vec!["nginx".into(), "-g".into(), "daemon off;".into()]),
+            env: Some(vec![
+                "PATH=/usr/bin:/bin".into(),
+                "NGINX_VERSION=1.27".into(),
+            ]),
+            working_dir: Some(String::new()),
+            user: None,
+        }
+    }
+
+    #[test]
+    fn entrypoint_plus_cmd_with_defaults() {
+        let p = resolve_process(&image(), &ProcessOverrides::default()).unwrap();
+        assert_eq!(
+            p.argv,
+            ["/docker-entrypoint.sh", "nginx", "-g", "daemon off;"]
+        );
+        assert_eq!(p.cwd, "/");
+        assert_eq!(p.user, DEFAULT_USER);
+        assert!(p.env.contains(&"PATH=/usr/bin:/bin".to_string()));
+    }
+
+    #[test]
+    fn overrides_follow_docker_rules() {
+        let cmd = ProcessOverrides {
+            command: Some(vec!["sh".into(), "-c".into(), "exit 7".into()]),
+            env: vec!["NGINX_VERSION=2".into(), "A=b=c".into()],
+            workdir: Some("/srv".into()),
+            user: Some("0".into()),
+            ..Default::default()
+        };
+        let p = resolve_process(&image(), &cmd).unwrap();
+        assert_eq!(p.argv, ["/docker-entrypoint.sh", "sh", "-c", "exit 7"]);
+        assert_eq!(
+            p.env
+                .iter()
+                .filter(|e| e.starts_with("NGINX_VERSION="))
+                .count(),
+            1
+        );
+        assert!(p.env.contains(&"NGINX_VERSION=2".to_string()));
+        assert!(p.env.contains(&"A=b=c".to_string()));
+        assert_eq!((p.cwd.as_str(), p.user.as_str()), ("/srv", "0"));
+
+        let ep = ProcessOverrides {
+            entrypoint: Some(vec!["/bin/true".into()]),
+            ..Default::default()
+        };
+        assert_eq!(resolve_process(&image(), &ep).unwrap().argv, ["/bin/true"]);
+    }
+
+    #[test]
+    fn path_is_always_set_and_bad_input_is_refused() {
+        let bare = ImageProcess {
+            cmd: Some(vec!["/app".into()]),
+            ..Default::default()
+        };
+        let p = resolve_process(&bare, &ProcessOverrides::default()).unwrap();
+        assert!(p.env.contains(&format!("PATH={DEFAULT_PATH}")));
+        assert!(resolve_process(&ImageProcess::default(), &ProcessOverrides::default()).is_err());
+        for o in [
+            ProcessOverrides {
+                env: vec!["NOVALUE".into()],
+                ..Default::default()
+            },
+            ProcessOverrides {
+                workdir: Some("rel".into()),
+                ..Default::default()
+            },
+        ] {
+            assert!(resolve_process(&bare, &o).is_err(), "{o:?}");
+        }
+    }
+
+    #[test]
+    fn config_round_trips_with_defaults() {
+        let j = r#"{"mode":"boot","hostname":"h","process":{"argv":["/a"],"env":[],"cwd":"/","user":"0"}}"#;
+        let InitConfig::Boot(b) = serde_json::from_str(j).unwrap() else {
+            panic!()
+        };
+        assert_eq!(
+            (b.network, b.exit_policy, b.agent_port, b.read_only_root),
+            (NetworkMode::Dhcp, ExitPolicy::Keep, 17777, false)
+        );
+        let u = InitConfig::Unpack(UnpackConfig {
+            layers: vec![UnpackLayer {
+                blob: "ab".into(),
+                compression: Compression::Zstd,
+                diff_id: "sha256:cd".into(),
+            }],
+        });
+        let s = serde_json::to_string(&u).unwrap();
+        assert!(s.contains(r#""mode":"unpack""#) && s.contains(r#""compression":"zstd""#));
+        assert_eq!(serde_json::from_str::<InitConfig>(&s).unwrap(), u);
+    }
+
+    #[test]
+    fn console_markers_parse() {
+        assert_eq!(exit_code_from_log("boot\nFLUXVM-EXIT 7\n"), Some(7));
+        assert_eq!(
+            exit_code_from_log("FLUXVM-EXIT 1\nFLUXVM-EXIT 0\n"),
+            Some(0)
+        );
+        assert_eq!(exit_code_from_log("still running"), None);
+        assert_eq!(
+            unpack_result_from_log("x\nFLUXVM-UNPACK-OK\n"),
+            Some(Ok(()))
+        );
+        assert_eq!(
+            unpack_result_from_log("FLUXVM-UNPACK-ERR layer 2: diff_id mismatch"),
+            Some(Err("layer 2: diff_id mismatch".into()))
+        );
+        assert_eq!(unpack_result_from_log("booting"), None);
+        assert_eq!(
+            init_error_from_log("FLUXVM-INIT-ERR user \"app\" is not in the image's /etc/passwd\n"),
+            Some("user \"app\" is not in the image's /etc/passwd".into())
+        );
+    }
+}

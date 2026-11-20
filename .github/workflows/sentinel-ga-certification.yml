@@ -1,0 +1,78 @@
+# Copyright 2026 Zyvor AI Labs · https://zyvor.dev
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+name: Sentinel GA Certification
+
+on:
+  pull_request:
+    paths:
+      - 'tools/fluxvm-sentinel-certify.py'
+      - 'tools/tests/test_fluxvm_sentinel_certify.py'
+      - 'scripts/sentinel-ga-*'
+      - 'scripts/test-sentinel-ga-*'
+      - 'benchmarks/**'
+      - 'docs/sentinel-ga-*'
+      - 'packaging/systemd/fluxvm-sentinel-reconcile.*'
+      - '.github/workflows/sentinel-ga-certification.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'tools/fluxvm-sentinel-certify.py'
+      - 'tools/tests/test_fluxvm_sentinel_certify.py'
+      - 'scripts/sentinel-ga-*'
+      - 'scripts/test-sentinel-ga-*'
+      - 'benchmarks/**'
+      - 'docs/sentinel-ga-*'
+      - 'packaging/systemd/fluxvm-sentinel-reconcile.*'
+      - '.github/workflows/sentinel-ga-certification.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Collapse superseded runs of this workflow on the same ref so queued duplicates do not hold the org's runners.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  static:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install static test dependencies
+        run: |
+          scripts/ci-install-apt-deps.sh shellcheck iproute2 ethtool linux-tools-common linux-tools-generic
+          # Azure GH runners need the matching kernel tools package for a real bpftool binary.
+          sudo apt-get install -y "linux-tools-$(uname -r)" || sudo apt-get install -y linux-tools-azure || true
+          bpftool version || echo 'bpftool still stubbed for this kernel; host gates tolerate that'
+      - name: Static and unit gates
+        run: scripts/test-sentinel-ga-static.sh
+      - name: Non-destructive host recovery gates
+        run: scripts/test-sentinel-ga-host.sh
+      - name: Baseline capability report
+        run: |
+          mkdir -p artifacts
+          python3 tools/fluxvm-sentinel-certify.py probe > artifacts/probe.json
+          python3 tools/fluxvm-sentinel-certify.py evidence artifacts/evidence > artifacts/evidence-summary.json
+      - uses: actions/upload-artifact@v7
+        with:
+          name: sentinel-ga-probe
+          path: artifacts
+
+  privileged-lab:
+    if: ${{ vars.FLUXVM_SENTINEL_PRIVILEGED_CI == '1' }}
+    runs-on: [self-hosted, linux, x64, fluxvm-sentinel-lab]
+    steps:
+      - uses: actions/checkout@v7
+      - name: Failure injection
+        env:
+          FLUXVM_SENTINEL_FAILURE_INJECTION: '1'
+          FLUXVM_SENTINEL_LAB_MARKER: /etc/fluxvm/sentinel-lab-host
+        run: sudo -E scripts/sentinel-ga-failure-injection.sh
+      - name: Strict capability gate
+        run: |
+          python3 tools/fluxvm-sentinel-certify.py gate \
+            --profile strict \
+            --budgets benchmarks/sentinel-ga-budgets.json \
+            --json-out /tmp/sentinel-strict.json
+          cat /tmp/sentinel-strict.json

@@ -1,0 +1,54 @@
+name: migration-receiver
+
+on:
+  pull_request:
+    paths:
+      - 'crates/fluxvm-core/**'
+      - 'crates/fluxvm-qemu/**'
+      - 'crates/fluxvm-scheduler/**'
+      - 'crates/fluxvm-api/**'
+      - '.github/workflows/migration-receiver.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'crates/fluxvm-core/**'
+      - 'crates/fluxvm-qemu/**'
+      - 'crates/fluxvm-scheduler/**'
+      - 'crates/fluxvm-api/**'
+      - '.github/workflows/migration-receiver.yml'
+
+# Collapse superseded runs of this workflow on the same ref so queued duplicates do not hold the org's runners.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  migration-receiver:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout fluxvm
+        uses: actions/checkout@v7
+        with:
+          path: fluxvm
+      - name: Checkout guestkit (sibling path dependency)
+        uses: actions/checkout@v7
+        with:
+          repository: zyvorai/guestkit
+          ref: v1.2.9   # packaging/guestkit.ref; checked by scripts/check-guestkit-pin.sh
+          path: guestkit
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Install system dependencies
+        run: fluxvm/scripts/ci-install-apt-deps.sh libsystemd-dev libhivex-dev clang llvm libbpf-dev linux-libc-dev
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fluxvm
+      - name: Test (migration-receiver crates)
+        working-directory: fluxvm
+        run: cargo test --locked -p fluxvm-core -p fluxvm-qemu -p fluxvm-scheduler -p fluxvm-api migration
+      - name: Clippy (migration-receiver crates, deny warnings)
+        working-directory: fluxvm
+        run: cargo clippy --locked --no-deps -p fluxvm-core -p fluxvm-qemu -p fluxvm-scheduler -p fluxvm-api --all-targets -- -D warnings

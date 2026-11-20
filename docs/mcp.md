@@ -1,0 +1,285 @@
+# AI agents over MCP (`fluxctl mcp serve`)
+
+`fluxctl mcp serve` is a [Model Context Protocol](https://modelcontextprotocol.io)
+server on stdin/stdout. An MCP client such as
+[Hermes Agent](https://github.com/NousResearch/hermes-agent) starts it as a
+subprocess and uses it to inspect, and optionally operate, the VMs of one
+FluxVM daemon. It talks to the daemon over the REST API, the same way
+`fluxctl --server` does; it never opens the state directory.
+
+Kairon has a matching server, `kaironctl mcp serve`, for the cluster view of
+Kairon Machines. Kairon's `docs/ai-agents.md` covers using both together:
+scoped Kubernetes credentials, other MCP clients and example workflows.
+
+```mermaid
+flowchart LR
+  Agent["Hermes Agent"] -->|"stdio, JSON-RPC 2.0"| FS["fluxctl mcp serve"]
+  FS -->|"REST + bearer token"| API["FluxVM daemon :7788"]
+```
+
+The server starts when the agent starts it and exits when stdin closes. It
+needs network access to the daemon only, not root or the state directory,
+so it can run on a workstation against a remote host.
+
+## Tools
+
+Read tools are always offered:
+
+| Tool | What it returns | API |
+| --- | --- | --- |
+| `list_vms` | VMs with id, name, status, backend, guest IP, vCPUs, memory, labels and error; `selector` filters by labels | `GET /v1/vms` |
+| `get_vm` | One VM's full record | `GET /v1/vms/{id}` |
+| `host_status` | `/readyz` (KVM, dataplane mode and BPF/Cilium health, secure containers) plus a count of VMs by status | `GET /readyz`, `GET /v1/vms` |
+| `vm_network` | `kind` = `status`, `effective`, `stats`, `flows`, `drops`, `drop-reasons`, `learned-ip`, `conntrack` or `capture`; `limit` for flows and drops | `GET /v1/vms/{id}/network/{kind}` |
+| `vm_logs` | The last `lines` (default 100, max 500) of the serial console log | `GET /v1/vms/{id}/logs` |
+| `host_apple_capabilities` | What this Mac's Virtualization.framework offers (macOS version, vmnet, custom Virtio, Secure Boot, Rosetta); Apple VZ hosts only | `GET /v1/host/apple` |
+| `vm_vz_status` | Device state of a running Apple VZ VM: `what` is `secure_boot`, `custom_virtio`, `usb` or `usb_physical` | `GET /v1/vms/{id}/vz/{secure-boot,custom-virtio,usb,usb/physical}` |
+| `vm_screenshot` | The display of a running Apple VZ VM (Linux or macOS guest) as an image, scaled to `max_width` (default 1280), with a caption giving its size | `GET /v1/vms/{id}/screenshot` |
+
+Write tools are offered only with `--allow-write`:
+
+| Tool | Effect | API |
+| --- | --- | --- |
+| `vm_create` | Create a normal VM from a `CreateVmRequest` JSON object (`spec`; `backend: "vz"` with `apple.guest_os: "macos"` clones a prepared macOS template); optional `ready_exec` waits for command readiness | `POST /v1/vms[?ready=exec]` |
+| `vm_clone` | Clone a stopped VM under a new name | `POST /v1/vms/{id}/clone` |
+| `vm_exec` | Execute a command in a normal VM; VZ guests use the Apple SSH transport | `POST /v1/vms/{id}/agent` |
+| `vm_snapshot` | Save a named snapshot | `POST /v1/vms/{id}/snapshot` |
+| `vm_snapshot_restore` | Restore a named snapshot | `POST /v1/vms/{id}/restore` |
+| `vm_snapshot_delete` | Delete a named snapshot | `DELETE /v1/vms/{id}/snapshots/{tag}` |
+| `vm_delete` | Delete a VM | `DELETE /v1/vms/{id}` |
+| `vm_input` | Keyboard and mouse input for a running Apple VZ VM's display: one `action` (`type`, `key`, `move`, `click`, `double_click`, `right_click`, `middle_click`, `down`, `up`, `drag`, `scroll`) or a list of `actions`; coordinates are `vm_screenshot` pixels with `screen_width` set to its width; `screenshot: true` returns the display afterwards | `POST /v1/vms/{id}/input` |
+| `vm_sign_in` | Types the sign-in stored with `fluxctl signin set` into an Apple VZ VM's login screen (`mode`: `password`, `username`, `username_tab`; `submit`); the password never passes through the agent; `screenshot: true` returns the display afterwards | `POST /v1/vms/{id}/signin` |
+| `vm_power` | `op` = `start`, `stop`, `pause`, `resume` or `restart` | `POST /v1/vms/{id}/{op}` |
+| `vm_capture` | A 1-30 s tcpdump capture (optional `filter`). With `output`, waits and writes the pcap to that path on the machine running fluxctl; otherwise returns the token | `POST` / `GET /v1/vms/{id}/network/capture[/{token}]` |
+| `vm_fork` | Fork a running flux-vm VM into `count` (1-32) running children sharing its memory snapshot | `POST /v1/vms/{id}/fork` |
+| `image_import` | Import an OVA/OVF/VMDK from a server path as raw disks with offline virtio repair | `POST /v1/images/import` |
+| `vm_backup` | Back up a VM (running: QEMU only; guest fsfreeze when the agent answers) | `POST /v1/vms/{id}/backup` |
+| `backup_list` | Backups with source VM, size and quiesced flag | `GET /v1/backups` |
+| `backup_restore` | Restore a backup into a stopped VM in place | `POST /v1/vms/{id}/restore-backup` |
+| `pool_claim` | Claim a booted VM from a warm `pool` (optional `name`, `ttl_seconds`) | `POST /v1/pools/{name}/claim` |
+| `sandbox_create` | Create an agent sandbox from a `template` (optional `name`, `ttl_seconds`, `offline`, `allow_hosts`, `host_gpu` for host Metal/MLX over vsock — [host-inference.md](host-inference.md)), or on a Mac from a container image with `oci_image` (plus `oci_platform`, `oci_command`, `oci_env`, `oci_ports`); see [oci-sandboxes.md](oci-sandboxes.md) | `POST /v1/sandboxes` |
+| `sandbox_exec` | Run `command` in a sandbox through the guest agent | `POST /v1/sandboxes/{id}/process` |
+| `sandbox_write_file` | Write UTF-8 `content` to `path` in a sandbox | `POST /v1/sandboxes/{id}/fs/write` |
+
+`vm_snapshot_list` (`GET /v1/vms/{id}/snapshots`),
+`sandbox_read_file` (`POST /v1/sandboxes/{id}/fs/read`) and `sandbox_logs`
+(`GET /v1/sandboxes/{id}/logs`: the console tail and, for a container sandbox,
+the process's `exit_code` or `init_error`) are read-only and always offered.
+
+Migrate, and edge or policy changes are not exposed.
+
+### Agent session tools
+
+Agent sessions ([agent-sessions.md](agent-sessions.md), practical walkthroughs in
+[agent-sessions-guide.md](agent-sessions-guide.md)) have their own tools, named `session_*`. Reads are always offered;
+tools marked *write* need `--allow-write`. Give an agent-facing server a **session token** (`FLUXVM_TOKEN=fxst_...`,
+minted with `fluxctl agent token`), not the admin token: then an agent cannot approve its own commands, grant itself
+credentials, or touch another session.
+
+| Tool | Effect | API (`/v1/agents/sessions/...`) |
+|---|---|---|
+| `session_create` *write* | Create a session: `policy` (network allow-list or `preset`, `filesystem`, `process` allow/deny/ask), `workspace`, `budget`, `confine` | `POST ` |
+| `session_exec` *write* | Run a command; a command matching `process.ask` returns `428` with an `approval_id` (`approval_id`, `approval_wait_seconds` params) | `POST {id}/exec` |
+| `session_approvals` | List approval requests and their state | `GET {id}/approvals` |
+| `session_approve` *write* | Approve or deny a request. **Admin credential only** | `POST {id}/approvals/{a}/approve\|deny` |
+| `session_job_start` *write* | Start a background job (`stdin`, `timeout_seconds`, `max_output_bytes`, approval params) | `POST {id}/jobs` |
+| `session_job_read` | Job output from offsets (stdout, stderr, `wait_ms`), state, exit code | `GET {id}/jobs/{job}` |
+| `session_job_stdin` *write* | Write to a job's stdin; `close: true` sends EOF | `POST {id}/jobs/{job}/stdin` |
+| `session_jobs`, `session_job_kill` *(kill: write)* | List jobs; stop one (`signal`) | `GET {id}/jobs`, `DELETE {id}/jobs/{job}` |
+| `session_files`, `session_file_read` | List a directory; read a file | `GET {id}/files`, `GET {id}/files/content` |
+| `session_file_write` *write* | Write a file (up to ~1.5 MB; use `fluxctl agent upload` for larger) | `PUT {id}/files/content` |
+| `session_git` | git status, diff, log; commit and branch with `--allow-write` | `GET\|POST {id}/git/*` |
+| `session_checkpoint`, `session_restore`, `session_fork` *write* | Snapshot, roll back, fork | `POST {id}/checkpoint\|restore\|fork` |
+| `session_rewind_points` | List the automatic checkpoints taken before each exec | `GET {id}/rewind` |
+| `session_rewind` *write* | `on`/`off`, `undo` (steps or a point), `pin`/`unpin`, `bisect` (find the command that broke it) | `POST {id}/rewind/config\|undo\|pin\|bisect` |
+| `session_rollout`, `session_evaluate` *write* | Run a command in N forks; try candidates, test and rank them, keep the winner | fork + exec |
+| `session_promote` *write* | Apply a fork child's workspace changes to its parent (`dry_run`, `plan_id`) | `POST {id}/promote` |
+| `session_grant`, `session_revoke_grants` *write* | Brokered credential limited to hosts, `methods`, `paths`; revoke | `POST\|DELETE {id}/grants` |
+| `session_token` *write* | Mint a scoped session token | `POST {id}/tokens` |
+| `session_preview` *write* | Expiring URL for a guest port | `POST {id}/preview` |
+| `session_probe` | What the guest image has, and what that enables | `GET {id}/probe` |
+| `session_screenshot` | The guest display of a vz session as an image (token scope `screen`); coordinates for `session_input` are its pixels | `GET /v1/agents/sessions/{id}/screenshot` |
+| `session_input` | Keyboard and mouse input for a vz session's display; same actions as `vm_input`; typed text is not ledgered | `POST /v1/agents/sessions/{id}/input` |
+| `session_wait_screen` | Block until a vz session's display changes or the timeout (≤ 60 s); returns `changed`, `waited_ms`, size; token scope `screen` | `POST /v1/agents/sessions/{id}/screen/wait` |
+| `session_events`, `session_artifacts` | Ledger and VM events; workspace changes | `GET {id}/events\|artifacts` |
+| `session_delete` *write* | Delete the session | `DELETE {id}` |
+
+The review loop works on any sandbox, not only on a session ([speculative-execution.md](speculative-execution.md)):
+
+| Tool | Effect | API (`/v1/sandboxes/...`) |
+|---|---|---|
+| `sandbox_speculate` *write* | Run a `command` in an isolated copy of a sandbox and keep the result as a pending changeset; the sandbox is untouched until the changeset is approved and applied. `paths` bounds what is diffed; `timeout_seconds` 1-600; `ttl_seconds` | `POST {id}/speculate` |
+| `sandbox_changesets` | List a sandbox's changesets, newest first, or one with its file contents when `changeset` is given | `GET {id}/changesets[/{cs}]` |
+| `sandbox_changeset_decide` *write* | `approve`, `reject` or `apply` a changeset; apply needs it approved first and fails with a conflict if the files changed meanwhile | `POST {id}/changesets/{cs}/{action}` |
+
+`vm` accepts a VM name, a UUID or a unique UUID prefix. Unknown or missing
+required arguments are rejected with an error the model can read.
+
+For a VM that Kairon manages (named `kairon-<namespace>-<name>`), power
+changes made here are reverted on Kairon's next reconcile; use Kairon's
+`set_power_state` instead.
+
+`vm_capture` posts a session with namespace `fluxvm` and the VM's UUID as
+the machine name, and a random `mcp-…` token; it shows up in
+`vm_network` `kind: capture` like any other capture. The capture limits
+are FluxVM's (see [vm-edge-contract.md](vm-edge-contract.md)): one capture
+per VM at a time, 20,000 packets, 1,600-byte frames.
+
+## Configure Hermes
+
+```yaml
+mcp_servers:
+  fluxvm:
+    command: fluxctl
+    args: ["mcp", "serve"]          # add "--allow-write" for vm_power and vm_capture
+    env:
+      FLUXVM_URL: "http://127.0.0.1:7788"
+      FLUXVM_TOKEN: "..."           # when auth.require is on
+    timeout: 120
+```
+
+Then `/reload-mcp` in Hermes. The tools appear as `mcp_fluxvm_list_vms` and
+so on; `hermes mcp test fluxvm` shows what the server answered if not.
+The same entry can be added with
+`hermes mcp add fluxvm --command fluxctl --args mcp serve`.
+
+For several hosts, add one entry per daemon (`fluxvm-a`, `fluxvm-b`, …)
+with its own `FLUXVM_URL`, or point entries at named contexts with
+`args: ["--context", "host-a", "mcp", "serve"]` after
+`fluxctl context add`.
+
+The daemon is chosen like any remote `fluxctl` command: `--server` or
+`FLUXVM_URL`, then `--context` or the current context, and otherwise
+`listen` from the config file (`--config` / `FLUXVM_CONFIG`). With
+`auth.require` on, a `read-only` token covers the read tools except
+`vm_network` with `conntrack` or `capture`, which need `admin`; the write
+tools need `admin`.
+
+## From inside a VM
+
+A `vz` guest created with `apple.self_control` gets its own MCP server at
+`http://127.0.0.1:7790/mcp` with `self_*` tools that snapshot, restore and
+restart that VM only; see [macOS: guest self-control](macos.md#guest-self-control).
+
+## Installing into a client
+
+`fluxctl mcp install <client>` adds a `fluxvm` server to the client's own
+config file, pointing at the running `fluxctl` binary, and leaves every
+other entry alone (Codex's TOML keeps its comments and layout). Installed with
+Homebrew, the entry points at the version-free `/opt/homebrew/opt/fluxvm/bin/fluxctl`
+so it survives `brew upgrade`; 0.4.4 wrote the versioned Cellar path, so re-run
+`fluxctl mcp install` after upgrading from it. The full Homebrew walk-through,
+with what was tested, is [install-macos.md](install-macos.md):
+
+```sh
+fluxctl mcp install claude-code                 # ~/.claude.json
+fluxctl mcp install cursor --allow-write        # ~/.cursor/mcp.json, with write tools
+fluxctl --server http://mac:7788 mcp install codex   # ~/.codex/config.toml, FLUXVM_URL set
+fluxctl mcp install vscode --project            # ./.vscode/mcp.json
+fluxctl mcp install gemini --dry-run            # print the entry and the file, write nothing
+fluxctl mcp status                              # which clients have it
+fluxctl mcp uninstall cursor
+```
+
+| Client | User-wide | `--project` (current directory) |
+| --- | --- | --- |
+| `claude-code` | `~/.claude.json` | `.mcp.json` |
+| `cursor` | `~/.cursor/mcp.json` | `.cursor/mcp.json` |
+| `claude-desktop` | `~/Library/Application Support/Claude/claude_desktop_config.json` (Linux: `~/.config/Claude/`) | — |
+| `codex` | `~/.codex/config.toml` | `.codex/config.toml` |
+| `vscode` | — (kept in the VS Code profile) | `.vscode/mcp.json` |
+| `windsurf` | `~/.codeium/windsurf/mcp_config.json` | — |
+| `gemini` | `~/.gemini/settings.json` | `.gemini/settings.json` |
+
+`--server`/`FLUXVM_URL` and `--config` become the entry's `FLUXVM_URL` and
+`FLUXVM_CONFIG`, and `--context` its first arguments. The token is only
+written with `--with-token`, since these files are plain text. A JSON file
+with comments is refused rather than rewritten without them; `--dry-run`
+prints what to paste. Restart the client, or reload its MCP servers,
+afterwards. Verified with Claude Code (`claude mcp list` connects), Codex
+(`codex mcp list`) and Cursor's agent.
+
+## Other MCP clients
+
+Claude Code (`.mcp.json`), Cursor (`.cursor/mcp.json`) and Claude Desktop
+use this shape:
+
+```json
+{
+  "mcpServers": {
+    "fluxvm": {
+      "command": "fluxctl",
+      "args": ["mcp", "serve"],
+      "env": {"FLUXVM_URL": "http://127.0.0.1:7788", "FLUXVM_TOKEN": "<token>"}
+    }
+  }
+}
+```
+
+## Example workflows
+
+**"Why did VM web fail to start?"** `get_vm` shows `status: failed` and the
+`error` (for example `spawning qemu-system-x86_64: Permission denied`);
+`vm_logs` shows the end of the console log.
+
+**"Is the eBPF dataplane healthy?"** `host_status` reports the dataplane
+mode and the BPF object, pin root, bpffs and Cilium socket checks;
+`vm_network` with `kind: status` shows whether a VM is attached, on which
+interface, and its schema version.
+
+**"What is being dropped for this VM?"** `vm_network` with `kind: drops`
+lists attributed drops (reason, policy, flow, packets); `kind: effective`
+shows the merged policy that produced them.
+
+**"Capture ICMP on web for five seconds."** (needs `--allow-write`)
+`vm_capture` with `seconds: 5`, `filter: "icmp"` and
+`output: "/tmp/web.pcap"`.
+
+## Security
+
+- The server has no listener and no identity of its own. It acts with the
+  token it is given, so the token's role is the real limit.
+- Writes are opt-in per server (`--allow-write`). Hermes can narrow the
+  list further with `tools.include` / `tools.exclude`.
+- Tool results include data a guest can influence (console log, flows,
+  drops). An agent that reads them and also has write tools can be steered;
+  keep agents that look at untrusted VMs read-only.
+- `vm_capture` with `output` writes a file with the server process's
+  permissions.
+- Output is capped at 64 KB per call (with a truncation note). Calls time
+  out after 30 s; power changes after 120 s; a capture after its length plus
+  45 s.
+
+## Troubleshooting
+
+| Symptom | Cause and fix |
+| --- | --- |
+| Every tool fails with `connection refused` | Wrong `FLUXVM_URL`, or the daemon is down (`fluxctl readyz`). |
+| `401` / `403` | `FLUXVM_TOKEN` missing, or its role is too low (`admin` for conntrack, capture and write tools). |
+| `no VM named or prefixed "web"` | Use the full VM name (`kairon-<namespace>-<name>` for Kairon VMs) or the UUID. |
+| `"web" matches 2 VMs` | Two VMs share the name; use the UUID. |
+| `vm_capture` returns 400 `a capture is already running` | One capture per VM; wait for it. |
+| A write tool says to start with `--allow-write` | Add it to `args`, then `/reload-mcp`. |
+
+## Testing without Hermes
+
+```bash
+printf '%s\n' \
+  '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}' \
+  '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' \
+  '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"host_status","arguments":{}}}' \
+  | FLUXVM_URL=http://127.0.0.1:7788 fluxctl mcp serve
+```
+
+Logs go to stderr; stdout carries only protocol messages. The server
+implements the tools capability only (no MCP resources or prompts) and
+accepts protocol versions 2024-11-05, 2025-03-26 and 2025-06-18.
+
+## For developers
+
+The protocol and tools live in `crates/fluxctl/src/mcp.rs`: a small JSON-RPC
+loop (`Server`), a registry of `Tool { name, description, schema, write,
+call }`, and `tools()` with the FluxVM tools built on `remote::Remote`. To add
+a tool, append to `tools()` with a description written for the model and a
+JSON Schema for its arguments, set `write: true` if it changes anything, and
+extend `mcp::tests` (an in-process axum server stands in for the daemon).

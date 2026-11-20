@@ -1,0 +1,359 @@
+# Copyright 2026 Zyvor AI Labs · https://zyvor.dev
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+#
+# Portable all-features umbrella: every GitHub-hosted suite that does not need
+# nested KVM or self-hosted lab runners. Path-filtered feature lanes still
+# cover PRs; this runs on push to main and manual dispatch.
+name: All features
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Collapse superseded runs of this workflow on the same ref so queued duplicates do not hold the org's runners.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  vsock-csm:
+    name: Virtio-vsock CSM
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout fluxvm
+        uses: actions/checkout@v7
+        with:
+          path: fluxvm
+      - name: Checkout guestkit sibling
+        uses: actions/checkout@v7
+        with:
+          repository: zyvorai/guestkit
+          ref: v1.2.9   # packaging/guestkit.ref; checked by scripts/check-guestkit-pin.sh
+          path: guestkit
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Install system dependencies
+        run: fluxvm/scripts/ci-install-apt-deps.sh libsystemd-dev libhivex-dev clang llvm libbpf-dev linux-libc-dev
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fluxvm
+          key: all-features-vsock
+      - name: Virtio-vsock CSM unit tests
+        working-directory: fluxvm
+        run: cargo test -p fluxvm-hypervisor --lib devices::virtio_vsock -- --nocapture
+
+  network-fabric:
+    name: Network Fabric portable
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout fluxvm
+        uses: actions/checkout@v7
+        with:
+          path: fluxvm
+      - name: Checkout guestkit sibling
+        uses: actions/checkout@v7
+        with:
+          repository: zyvorai/guestkit
+          ref: v1.2.9   # packaging/guestkit.ref; checked by scripts/check-guestkit-pin.sh
+          path: guestkit
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt,clippy
+      - name: Install native dependencies
+        run: |
+          fluxvm/scripts/ci-install-apt-deps.sh libsystemd-dev libhivex-dev clang llvm libbpf-dev linux-tools-common linux-tools-generic iproute2 nftables iputils-ping
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fluxvm
+          key: all-features-fabric
+      - name: Flow exporter unit tests
+        working-directory: fluxvm
+        run: python3 scripts/test_flow_exporter.py
+      - name: Build eBPF objects
+        working-directory: fluxvm
+        run: ./scripts/build-ebpf.sh
+      - name: Enable/preflight shell syntax
+        working-directory: fluxvm
+        run: |
+          bash -n scripts/network-fabric-preflight.sh
+          bash -n scripts/enable-network-fabric-ga.sh
+      - name: Install TC/XDP objects for preflight
+        working-directory: fluxvm
+        run: |
+          sudo install -D -m 0644 dist/bpf/fluxvm_tc.bpf.o /usr/lib/fluxvm/bpf/fluxvm_tc.bpf.o
+          if [[ -f dist/bpf/fluxvm_xdp.bpf.o ]]; then
+            sudo install -D -m 0644 dist/bpf/fluxvm_xdp.bpf.o /usr/lib/fluxvm/bpf/fluxvm_xdp.bpf.o
+          fi
+      - name: Network Fabric preflight
+        working-directory: fluxvm
+        run: ./scripts/network-fabric-preflight.sh --require-bpf
+      - name: Enable script dry-run (lab + GA)
+        working-directory: fluxvm
+        run: |
+          ./scripts/enable-network-fabric-ga.sh --dry-run --lab
+          ./scripts/enable-network-fabric-ga.sh --dry-run
+      - name: Service Fabric SLO scripts (syntax)
+        working-directory: fluxvm
+        run: |
+          bash -n scripts/test-service-fabric-perf.sh
+          bash -n scripts/test-service-fabric-slo.sh
+          bash -n scripts/test-service-fabric-rss.sh
+      - name: Service Fabric SLO CI gates
+        working-directory: fluxvm
+        run: SLO_CI=1 ./scripts/test-service-fabric-slo.sh
+
+  devops-gates:
+    name: DevOps gates
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Contract + example tests
+        working-directory: examples/devops
+        run: python3 -m unittest test_contract.py test_examples.py -v
+      - name: Offline devops-gate
+        run: bash scripts/test-devops-gate.sh
+      - name: Upgrade snapshot dry-run
+        run: bash scripts/test-upgrade-snapshot.sh
+
+  secure-containers-portable:
+    name: Secure Containers portable
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: fluxvm
+      - uses: actions/checkout@v7
+        with:
+          repository: zyvorai/guestkit
+          ref: v1.2.9   # packaging/guestkit.ref; checked by scripts/check-guestkit-pin.sh
+          path: guestkit
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy,rustfmt
+      - name: System dependencies
+        run: fluxvm/scripts/ci-install-apt-deps.sh libsystemd-dev libhivex-dev clang llvm libbpf-dev linux-libc-dev
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fluxvm
+          key: all-features-sc
+      - name: Use-case matrix lint
+        working-directory: fluxvm
+        run: bash scripts/check-use-case-matrix.sh
+      - name: Secure-container unit tests
+        working-directory: fluxvm
+        run: ./scripts/test-secure-containers.sh
+      - name: Multus, warm-pool, and Windows unit tests
+        working-directory: fluxvm
+        run: ./scripts/test-multus-warm-windows.sh unit
+
+  sentinel-static:
+    name: Sentinel / intelligence static
+    runs-on: ubuntu-24.04
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
+    steps:
+      - name: Checkout fluxvm
+        uses: actions/checkout@v7
+        with:
+          path: fluxvm
+      - name: Checkout guestkit sibling
+        uses: actions/checkout@v7
+        with:
+          repository: zyvorai/guestkit
+          ref: v1.2.9   # packaging/guestkit.ref; checked by scripts/check-guestkit-pin.sh
+          path: guestkit
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Install system dependencies
+        run: |
+          fluxvm/scripts/ci-install-apt-deps.sh libsystemd-dev libhivex-dev clang llvm libbpf-dev linux-tools-common linux-tools-generic pkg-config
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Install Python deps for static gates
+        run: pip install pyyaml
+      - name: Shell syntax for build/install helpers
+        working-directory: fluxvm
+        run: |
+          set -euo pipefail
+          for f in \
+            scripts/build-runtime-intelligence.sh \
+            scripts/build-memory-profiler.sh \
+            scripts/build-network-intelligence.sh \
+            scripts/build-topology-intelligence.sh \
+            scripts/build-afxdp-fastpath.sh \
+            scripts/build-quiclb.sh \
+            scripts/build-scx-scheduler.sh \
+            scripts/build-vmm-guard.sh \
+            scripts/network-fabric-preflight.sh \
+            scripts/enable-network-fabric-ga.sh
+          do
+            if [[ -f "$f" ]]; then
+              bash -n "$f"
+              echo "OK bash -n $f"
+            fi
+          done
+      - name: Sentinel / feature static gates
+        working-directory: fluxvm
+        run: |
+          set -euo pipefail
+          # Each *-static.sh that asserts "no __pycache__" expects a clean tree;
+          # earlier unittest runs can leave caches even with PYTHONDONTWRITEBYTECODE.
+          clean_pycache() {
+            find . -type d -name __pycache__ -prune -exec rm -rf {} + 2>/dev/null || true
+          }
+          clean_pycache
+          for s in \
+            scripts/test-sentinel-ga-static.sh \
+            scripts/test-sentinel-fleet-guard-static.sh \
+            scripts/test-sentinel-fleet-rollout-static.sh \
+            scripts/test-sentinel-release-admission-static.sh \
+            scripts/test-sentinel-upgrade-manager-static.sh \
+            scripts/test-migration-orchestrator-static.sh \
+            scripts/test-runtime-intelligence-static.sh \
+            scripts/test-flight-recorder-static.sh \
+            scripts/test-memory-profiler-static.sh \
+            scripts/test-vmm-guard-qos-static.sh \
+            scripts/test-xdp-tcp-intelligence-static.sh \
+            scripts/test-topology-static.sh \
+            scripts/test-afxdp-static.sh \
+            scripts/test-quiclb-static.sh \
+            scripts/test-scx-static.sh \
+            scripts/test-tcx-drop-detective-static.sh \
+            scripts/test-drop-reason-migration-static.sh
+          do
+            clean_pycache
+            echo "==> $s"
+            "./$s"
+          done
+
+  cilium-cni-evidence:
+    name: Cilium CNI evidence (portable)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Evidence script syntax and skip paths
+        run: |
+          set -euo pipefail
+          for f in scripts/evidence-*.sh scripts/e2e-networkpolicy-s1-depth.sh; do
+            bash -n "$f"
+          done
+          ./scripts/evidence-fleet-multihost.sh
+          FLUXVM_ATTACHED_MIGRATION=0 ./scripts/evidence-migration-attached-vm.sh
+      - name: S2 nftables stand-in
+        run: |
+          scripts/ci-install-apt-deps.sh nftables iproute2 python3
+          sudo -E ./scripts/evidence-networkpolicy-second-cni.sh
+          sudo -E env FLUXVM_CNI_CHURN_ROUNDS=3 bash scripts/evidence-cni-churn.sh
+
+  egress-acl:
+    name: Egress HTTP/HTTPS ACL
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout fluxvm
+        uses: actions/checkout@v7
+        with:
+          path: fluxvm
+      - name: Checkout guestkit sibling
+        uses: actions/checkout@v7
+        with:
+          repository: zyvorai/guestkit
+          ref: v1.2.9   # packaging/guestkit.ref; checked by scripts/check-guestkit-pin.sh
+          path: guestkit
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Install system dependencies
+        run: fluxvm/scripts/ci-install-apt-deps.sh libsystemd-dev libhivex-dev clang llvm libbpf-dev linux-libc-dev
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fluxvm
+          key: all-features-egress
+      - name: Egress ACL + TLS interception tests
+        working-directory: fluxvm
+        run: cargo test -p fluxvm-network -p fluxvm-core
+
+  sandbox-api:
+    name: Sandbox API (change-set, procbox kind)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout fluxvm
+        uses: actions/checkout@v7
+        with:
+          path: fluxvm
+      - name: Checkout guestkit sibling
+        uses: actions/checkout@v7
+        with:
+          repository: zyvorai/guestkit
+          ref: v1.2.9   # packaging/guestkit.ref; checked by scripts/check-guestkit-pin.sh
+          path: guestkit
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Install system dependencies
+        run: fluxvm/scripts/ci-install-apt-deps.sh libsystemd-dev libhivex-dev clang llvm libbpf-dev linux-libc-dev
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fluxvm
+          key: all-features-sandbox-api
+      - name: Scheduler + API tests
+        working-directory: fluxvm
+        run: cargo test -p fluxvm-scheduler -p fluxvm-api
+
+  procbox:
+    name: procbox (Landlock + seccomp)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout fluxvm
+        uses: actions/checkout@v7
+        with:
+          path: fluxvm
+      - name: Checkout guestkit sibling
+        uses: actions/checkout@v7
+        with:
+          repository: zyvorai/guestkit
+          ref: v1.2.9   # packaging/guestkit.ref; checked by scripts/check-guestkit-pin.sh
+          path: guestkit
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Install system dependencies
+        run: fluxvm/scripts/ci-install-apt-deps.sh libsystemd-dev libhivex-dev clang llvm libbpf-dev linux-libc-dev
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fluxvm
+          key: all-features-procbox
+      - name: procbox tests (unprivileged)
+        working-directory: fluxvm
+        run: cargo test -p fluxvm-procbox
+
+  python-sdk:
+    name: Python SDK
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: SDK unit tests
+        run: python3 -m unittest discover -s python/tests -v
+
+  go-sdk:
+    name: Go SDK
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: stable
+      - name: gofmt, vet and tests
+        working-directory: go
+        run: |
+          test -z "$(gofmt -l .)"
+          go vet ./...
+          go test -race ./...

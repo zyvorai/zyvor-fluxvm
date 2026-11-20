@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  LaunchDaemon for the FluxVM guest agent inside a macOS guest.
+  EXPERIMENTAL. Verified on an Apple M4 with a macOS 27.0.1 guest created with apple.macos_vsock = true. Install with
+  install.sh; the token is read from /etc/fluxvm-guest-agent.token, or, when there is none, taken from the host's
+  read-only firstboot share (--token-seed) and kept there.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>dev.zyvor.fluxvm-guest-agent</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/local/libexec/fluxvm-guest-agent</string>
+    <string>--port</string>
+    <string>17777</string>
+    <string>--token-file</string>
+    <string>/etc/fluxvm-guest-agent.token</string>
+    <string>--token-seed</string>
+    <string>/Volumes/My Shared Files/firstboot/agent-token</string>
+  </array>
+  <key>UserName</key>
+  <string>root</string>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>5</integer>
+  <key>StandardErrorPath</key>
+  <string>/var/log/fluxvm-guest-agent.log</string>
+  <key>StandardOutPath</key>
+  <string>/var/log/fluxvm-guest-agent.log</string>
+</dict>
+</plist>

@@ -1,0 +1,244 @@
+name: Network Fabric
+
+"on":
+  pull_request:
+    paths:
+      - 'bpf/**'
+      - 'crates/fluxvm-network/**'
+      - 'crates/fluxvm-core/**'
+      - 'crates/fluxvm-scheduler/**'
+      - 'crates/fluxvm-api/**'
+      - 'scripts/build-ebpf.sh'
+      - 'scripts/test-ebpf-smoke.sh'
+      - 'scripts/test-verifier-budget.sh'
+      - 'scripts/test-pod-policy-verdict.py'
+      - 'scripts/test-ebpf-performance-host.sh'
+      - 'tests/ebpf-host/**'
+      - 'scripts/test-vm-edge-verdict.py'
+      - 'scripts/test-direct-datapath.sh'
+      - 'scripts/direct-datapath-guest.py'
+      - 'scripts/test-direct-uplink.sh'
+      - 'scripts/evidence-direct-datapath.sh'
+      - 'scripts/bench-direct-datapath.sh'
+      - 'tools/fluxvm-tcx.c'
+      - 'tools/fluxvm-sentinel-certify.py'
+      - 'crates/fluxvm-qemu/**'
+      - 'crates/fluxvm-containerd-shim/**'
+      - 'scripts/bpf-map-clear.py'
+      - 'scripts/test-network-fabric.sh'
+      - 'scripts/validate-network-fabric.sh'
+      - 'scripts/network-fabric-preflight.sh'
+      - 'scripts/enable-network-fabric-ga.sh'
+      - 'configs/network-fabric-*.toml'
+      - 'scripts/test-service-fabric-perf.sh'
+      - 'scripts/test-service-fabric-slo.sh'
+      - 'scripts/test-service-fabric-rss.sh'
+      - 'scripts/export_network_flows.py'
+      - 'scripts/test_flow_exporter.py'
+      - 'deploy/k8s/**'
+      - '.github/workflows/network-fabric.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'bpf/**'
+      - 'crates/fluxvm-network/**'
+      - 'crates/fluxvm-core/**'
+      - 'crates/fluxvm-scheduler/**'
+      - 'crates/fluxvm-api/**'
+      - 'scripts/build-ebpf.sh'
+      - 'scripts/test-ebpf-smoke.sh'
+      - 'scripts/test-verifier-budget.sh'
+      - 'scripts/test-pod-policy-verdict.py'
+      - 'scripts/test-ebpf-performance-host.sh'
+      - 'tests/ebpf-host/**'
+      - 'scripts/test-vm-edge-verdict.py'
+      - 'scripts/test-direct-datapath.sh'
+      - 'scripts/direct-datapath-guest.py'
+      - 'scripts/test-direct-uplink.sh'
+      - 'scripts/evidence-direct-datapath.sh'
+      - 'scripts/bench-direct-datapath.sh'
+      - 'tools/fluxvm-tcx.c'
+      - 'tools/fluxvm-sentinel-certify.py'
+      - 'crates/fluxvm-qemu/**'
+      - 'crates/fluxvm-containerd-shim/**'
+      - 'scripts/bpf-map-clear.py'
+      - 'scripts/test-network-fabric.sh'
+      - 'scripts/validate-network-fabric.sh'
+      - 'scripts/network-fabric-preflight.sh'
+      - 'scripts/enable-network-fabric-ga.sh'
+      - 'configs/network-fabric-*.toml'
+      - 'scripts/test-service-fabric-perf.sh'
+      - 'scripts/test-service-fabric-slo.sh'
+      - 'scripts/test-service-fabric-rss.sh'
+      - 'scripts/export_network_flows.py'
+      - 'scripts/test_flow_exporter.py'
+      - '.github/workflows/network-fabric.yml'
+  workflow_dispatch:
+
+# Collapse superseded runs of this workflow on the same ref so queued duplicates do not hold the org's runners.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout fluxvm
+        uses: actions/checkout@v7
+        with:
+          path: fluxvm
+
+      - name: Checkout guestkit sibling
+        uses: actions/checkout@v7
+        with:
+          repository: zyvorai/guestkit
+          ref: v1.2.9   # packaging/guestkit.ref; checked by scripts/check-guestkit-pin.sh
+          path: guestkit
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt,clippy
+
+      - name: Install native dependencies
+        run: |
+          fluxvm/scripts/ci-install-apt-deps.sh libsystemd-dev libhivex-dev clang llvm libbpf-dev linux-tools-common linux-tools-generic iproute2 nftables iputils-ping
+          # Ubuntu runners ship bpftool via linux-tools-*; bare `bpftool` apt name is often missing.
+      - name: Flow exporter unit tests
+        working-directory: fluxvm
+        run: python3 scripts/test_flow_exporter.py
+
+      - name: eBPF performance behavior tests
+        working-directory: fluxvm
+        run: |
+          scripts/test-ebpf-performance-host.sh
+          SANITIZE=1 scripts/test-ebpf-performance-host.sh
+
+      - name: Build eBPF objects
+        working-directory: fluxvm
+        run: ./scripts/build-ebpf.sh
+
+      - name: Network Fabric enable/preflight shell syntax
+        working-directory: fluxvm
+        run: |
+          bash -n scripts/network-fabric-preflight.sh
+          bash -n scripts/enable-network-fabric-ga.sh
+
+      - name: Install TC/XDP objects for preflight
+        working-directory: fluxvm
+        run: |
+          sudo install -D -m 0644 dist/bpf/fluxvm_tc.bpf.o /usr/lib/fluxvm/bpf/fluxvm_tc.bpf.o
+          if [[ -f dist/bpf/fluxvm_xdp.bpf.o ]]; then
+            sudo install -D -m 0644 dist/bpf/fluxvm_xdp.bpf.o /usr/lib/fluxvm/bpf/fluxvm_xdp.bpf.o
+          fi
+
+      - name: Network Fabric preflight
+        working-directory: fluxvm
+        run: ./scripts/network-fabric-preflight.sh --require-bpf
+
+      - name: Enable script dry-run (lab + GA)
+        working-directory: fluxvm
+        run: |
+          ./scripts/enable-network-fabric-ga.sh --dry-run --lab
+          ./scripts/enable-network-fabric-ga.sh --dry-run
+
+      - name: Format check
+        working-directory: fluxvm
+        run: ./scripts/ci-fmt-check.sh
+
+      - name: Build full Rust workspace
+        working-directory: fluxvm
+        run: cargo build --workspace --all-targets
+
+      - name: Test full Rust workspace
+        working-directory: fluxvm
+        run: cargo test --workspace
+
+      - name: Clippy (informational, matching main CI)
+        working-directory: fluxvm
+        run: cargo clippy --workspace --all-targets || true
+
+      - name: Kernel TC/XDP smoke test
+        if: ${{ vars.FLUXVM_EBPF_PRIVILEGED_CI == '1' }}
+        working-directory: fluxvm
+        run: sudo -E ./scripts/test-ebpf-smoke.sh
+
+      - name: Direct-datapath and verifier-budget scripts (syntax)
+        working-directory: fluxvm
+        run: |
+          bash -n scripts/test-verifier-budget.sh
+          bash -n scripts/test-direct-datapath.sh
+          bash -n scripts/evidence-cni-churn.sh
+          bash -n scripts/test-direct-uplink.sh
+          bash -n scripts/evidence-direct-datapath.sh
+          bash -n scripts/bench-direct-datapath.sh
+          python3 -m py_compile scripts/test-pod-policy-verdict.py scripts/test-vm-edge-verdict.py scripts/direct-datapath-guest.py scripts/bpf-map-clear.py
+
+      # The VM-edge program's verifier cost is kernel- and compiler-dependent: on Linux 7.0 the
+      # unmodified object was rejected (>1,000,000 insns). This fails long before a kernel does.
+      - name: Verifier complexity budget
+        if: ${{ vars.FLUXVM_EBPF_PRIVILEGED_CI == '1' }}
+        working-directory: fluxvm
+        run: sudo -E env FLUXVM_BPF_DIR="$PWD/dist/bpf" ./scripts/test-verifier-budget.sh
+
+      - name: Pod-policy matching (equivalence + real-object verdicts)
+        if: ${{ vars.FLUXVM_EBPF_PRIVILEGED_CI == '1' }}
+        working-directory: fluxvm
+        run: sudo -E env FLUXVM_BPF_DIR="$PWD/dist/bpf" ./scripts/test-pod-policy-verdict.py
+
+      - name: VM-edge enforcement (anti-spoof, learn-IP, DNS/SNI, token bucket)
+        if: ${{ vars.FLUXVM_EBPF_PRIVILEGED_CI == '1' }}
+        working-directory: fluxvm
+        run: sudo -E env FLUXVM_BPF_DIR="$PWD/dist/bpf" ./scripts/test-vm-edge-verdict.py
+
+      - name: Bridge-less direct datapath (netns)
+        if: ${{ vars.FLUXVM_EBPF_PRIVILEGED_CI == '1' }}
+        working-directory: fluxvm
+        run: sudo -E env FLUXVM_BPF_DIR="$PWD/dist/bpf" ./scripts/test-direct-datapath.sh
+
+      # Without this helper `FLUXVM_TCX=auto` silently falls back to legacy clsact/tc and the TCX
+      # path (the chain semantics several VMs on one uplink rely on) would go untested.
+      - name: Build the TCX helper
+        if: ${{ vars.FLUXVM_EBPF_PRIVILEGED_CI == '1' }}
+        working-directory: fluxvm
+        run: cc -O2 -g -Wall -Wextra -Werror tools/fluxvm-tcx.c -o "$RUNNER_TEMP/fluxvm-tcx" $(pkg-config --cflags --libs libbpf)
+
+      - name: Bridge-less direct datapath (loader integration; TCX required, then legacy tc)
+        if: ${{ vars.FLUXVM_EBPF_PRIVILEGED_CI == '1' }}
+        working-directory: fluxvm
+        run: |
+          # Ask cargo for the executable: newer cargo no longer puts it under target/debug/deps.
+          BIN=$(cargo test -p fluxvm-network --test direct_loader --no-run --message-format=json \
+            | jq -r 'select(.executable != null and .target.name == "direct_loader") | .executable' | tail -1)
+          test -x "$BIN"
+          # TCX needs Linux >= 6.6; on an older runner kernel this leg is skipped, never faked.
+          if [ "$(uname -r | cut -d. -f1)" -gt 6 ] || { [ "$(uname -r | cut -d. -f1)" -eq 6 ] && [ "$(uname -r | cut -d. -f2)" -ge 6 ]; }; then
+            sudo env FLUXVM_TEST_BPF_DIR="$PWD/dist/bpf" FLUXVM_TCX_HELPER="$RUNNER_TEMP/fluxvm-tcx" FLUXVM_TCX=required "$BIN" --nocapture
+          fi
+          sudo env FLUXVM_TEST_BPF_DIR="$PWD/dist/bpf" FLUXVM_TCX=off "$BIN" --nocapture
+
+      - name: Bridge-less direct datapath (standalone uplink, two VMs)
+        if: ${{ vars.FLUXVM_EBPF_PRIVILEGED_CI == '1' }}
+        working-directory: fluxvm
+        run: |
+          BIN=$(cargo test -p fluxvm-network --test direct_uplink --no-run --message-format=json \
+            | jq -r 'select(.executable != null and .target.name == "direct_uplink") | .executable' | tail -1)
+          test -x "$BIN"
+          sudo env FLUXVM_UPLINK_TEST_BIN="$BIN" FLUXVM_BPF_DIR="$PWD/dist/bpf" FLUXVM_TCX_HELPER="$RUNNER_TEMP/fluxvm-tcx" ./scripts/test-direct-uplink.sh
+
+      - name: Direct datapath static evidence
+        working-directory: fluxvm
+        run: ./scripts/evidence-direct-datapath.sh
+
+      - name: Service Fabric SLO scripts (syntax)
+        working-directory: fluxvm
+        run: |
+          bash -n scripts/test-service-fabric-perf.sh
+          bash -n scripts/test-service-fabric-slo.sh
+          bash -n scripts/test-service-fabric-rss.sh
+
+      - name: Service Fabric SLO CI gates
+        working-directory: fluxvm
+        run: SLO_CI=1 ./scripts/test-service-fabric-slo.sh
+        # Shape / soft-skip without VIP or live API is OK on runners.

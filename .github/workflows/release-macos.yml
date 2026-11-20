@@ -1,0 +1,124 @@
+name: Release (macOS package)
+
+# Builds the Apple-silicon package (fluxctl + the signed Virtualization.framework runner) for a version tag and attaches it,
+# with its checksum, to that tag's GitHub release (created as a DRAFT if it does not exist yet, so nothing is published
+# until someone publishes it). The Homebrew formula in packaging/homebrew is then updated with scripts/update-homebrew-formula.sh.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to package (builds and uploads a workflow artifact only if empty)"
+        required: false
+
+permissions:
+  contents: write
+
+jobs:
+  package:
+    runs-on: [self-hosted, macOS, ARM64, fluxvm-mac]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: fluxvm
+          ref: ${{ github.event.inputs.tag || github.ref }}
+      # fluxvm-image depends on the sibling guestkit project through a relative path.
+      - uses: actions/checkout@v7
+        with:
+          repository: zyvorai/guestkit
+          ref: v1.2.9   # packaging/guestkit.ref; checked by scripts/check-guestkit-pin.sh
+          path: guestkit
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Use the newest Xcode (the VZ runner needs the macOS 27 SDK)
+        run: |
+          X="$(ls -d /Applications/Xcode_*.app 2>/dev/null | sort -V | tail -1)"
+          [ -n "$X" ] && sudo xcode-select -s "$X"
+          echo "$(xcode-select -p): SDK $(xcrun --show-sdk-version)"
+      - run: brew install hivex
+      # Developer ID signing and notarization, when the repository has the secrets (docs/macos-signing.md). Without
+      # them (forks, first releases) the package is ad hoc signed exactly as before.
+      - name: Import the signing certificate and profiles
+        id: signing
+        env:
+          CERT_P12: ${{ secrets.MACOS_DEVELOPER_ID_P12 }}
+          CERT_PASSWORD: ${{ secrets.MACOS_DEVELOPER_ID_P12_PASSWORD }}
+          PROFILE_RUNNER: ${{ secrets.MACOS_PROFILE_RUNNER }}
+          PROFILE_VMNETD: ${{ secrets.MACOS_PROFILE_VMNETD }}
+          PROFILE_USBD: ${{ secrets.MACOS_PROFILE_USBD }}
+          NOTARY_KEY: ${{ secrets.MACOS_NOTARY_KEY_P8 }}
+          NOTARY_KEY_ID: ${{ secrets.MACOS_NOTARY_KEY_ID }}
+          NOTARY_ISSUER: ${{ secrets.MACOS_NOTARY_ISSUER }}
+        run: |
+          if [ -z "$CERT_P12" ]; then echo "no signing secrets: ad hoc package"; exit 0; fi
+          S="$RUNNER_TEMP/signing"; mkdir -p "$S"; chmod 700 "$S"
+          KC="$S/build.keychain-db"; KC_PW="$(uuidgen)"
+          echo "$CERT_P12" | base64 --decode > "$S/cert.p12"
+          security create-keychain -p "$KC_PW" "$KC"
+          security set-keychain-settings -lut 21600 "$KC"
+          security unlock-keychain -p "$KC_PW" "$KC"
+          security import "$S/cert.p12" -k "$KC" -P "$CERT_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KC_PW" "$KC" >/dev/null
+          security list-keychains -d user -s "$KC" $(security list-keychains -d user | tr -d '"')
+          rm -f "$S/cert.p12"
+          ID="$(security find-identity -v -p codesigning "$KC" | sed -n 's/.*"\(Developer ID Application: .*\)"/\1/p' | head -n1)"
+          [ -n "$ID" ] || { echo "no Developer ID Application identity in the certificate" >&2; exit 1; }
+          echo "FLUXVM_SIGN_IDENTITY=$ID" >> "$GITHUB_ENV"
+          for p in RUNNER VMNETD USBD; do
+            v="PROFILE_$p"; [ -n "${!v}" ] || continue
+            echo "${!v}" | base64 --decode > "$S/$p.provisionprofile"
+            echo "FLUXVM_PROFILE_$p=$S/$p.provisionprofile" >> "$GITHUB_ENV"
+          done
+          if [ -n "$NOTARY_KEY" ]; then
+            echo "$NOTARY_KEY" | base64 --decode > "$S/notary.p8"
+            { echo "FLUXVM_NOTARY_KEY=$S/notary.p8"; echo "FLUXVM_NOTARY_KEY_ID=$NOTARY_KEY_ID";
+              echo "FLUXVM_NOTARY_ISSUER=$NOTARY_ISSUER"; echo "FLUXVM_NOTARIZE=1"; } >> "$GITHUB_ENV"
+          fi
+          echo "keychain=$KC" >> "$GITHUB_OUTPUT"
+      - name: Package
+        id: pkg
+        working-directory: fluxvm
+        run: |
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          scripts/package-macos.sh --version "${TAG#v}"
+          echo "file=$(ls target/package/*.tar.gz)" >> "$GITHUB_OUTPUT"
+      - name: Smoke test the package
+        working-directory: fluxvm
+        run: |
+          D="$(mktemp -d)"; tar -xzf "${{ steps.pkg.outputs.file }}" -C "$D"
+          "$D"/fluxvm-*/bin/fluxctl --version
+          for b in fluxvm-vz-runner fluxvm-vz-switch fluxvm-blockd fluxvm-usernet; do test -x "$D"/fluxvm-*/bin/$b || { echo "missing $b"; exit 1; }; done
+          codesign -d --entitlements - "$D"/fluxvm-*/bin/fluxvm-vz-runner 2>&1 | grep com.apple.security.virtualization
+          if [ -d "$D"/fluxvm-*/libexec/FluxVMUSBAccess.app ]; then
+            echo "USB helper: included" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "USB helper: **not included** (this runner's SDK has no AccessoryAccess framework); USB passthrough needs a source build" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          for app in "$D"/fluxvm-*/libexec/*.app "$D"/fluxvm-*/bin/*.app; do
+            [ -d "$app" ] || continue
+            codesign --verify --strict --deep "$app"
+            if [ "${FLUXVM_NOTARIZE:-0}" = 1 ]; then xcrun stapler validate "$app"; spctl -a -t exec -vv "$app"; fi
+          done
+          if [ -n "${FLUXVM_PROFILE_RUNNER:-}" ]; then
+            codesign -d --entitlements - "$D"/fluxvm-*/bin/FluxVMRunner.app 2>&1 | grep com.apple.vm.networking
+          fi
+      - name: Remove the signing keychain
+        if: always() && steps.signing.outputs.keychain != ''
+        run: |
+          security delete-keychain "${{ steps.signing.outputs.keychain }}" || true
+          rm -rf "$RUNNER_TEMP/signing"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: fluxvm-macos-arm64
+          path: |
+            fluxvm/target/package/*.tar.gz
+            fluxvm/target/package/*.sha256
+      - name: Attach to the release (draft if new)
+        if: github.event_name == 'push' || github.event.inputs.tag != ''
+        working-directory: fluxvm
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --draft --title "$TAG" --notes "macOS (Apple silicon) package. Install with Homebrew once the formula is updated for $TAG."
+          gh release upload "$TAG" target/package/*.tar.gz target/package/*.sha256 --clobber

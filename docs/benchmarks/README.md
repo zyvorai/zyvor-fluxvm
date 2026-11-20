@@ -1,0 +1,179 @@
+# FluxVM sandbox benchmarks
+
+Reproduce cold-start numbers for FluxVM sandboxes and MicroVM create→Running
+on a KVM lab host.
+
+`scripts/record-baseline.sh` writes one evidence file per host under
+`docs/benchmarks/evidence/`. `avg_create_ms` and `boot_to_ready_ms` from
+`bench-sandbox.sh` are control-plane create time, not guest init.
+`scripts/bench-warm-claim.sh` reports `warm_claim_ms` for
+`POST /v1/pools/{name}/claim`, which is not comparable to a cold create.
+These records are not a sizing SLA until the same script has been run on a
+second host. Migration downtime is a separate QMP `query-migrate` figure.
+
+## Prerequisites
+
+- Linux x86_64 host with `/dev/kvm`
+- `fluxctl serve` running (default `127.0.0.1:7788`)
+- For MicroVM: k3s/`kubectl`, CRDs, and `fluxvm-microvm` controller + node-agent
+- Boot assets (script defaults / env):
+
+```bash
+export IMAGE="${IMAGE:-/var/lib/fluxvm/images/bionic-fabric-rootfs.ext4}"
+export KERNEL="${KERNEL:-/var/lib/fluxvm/kernels/vmlinux}"
+# Optional: FLUXVM_TOKEN=… when auth.require is on
+```
+
+## Sandbox (REST `/v1/sandboxes`)
+
+```bash
+chmod +x scripts/bench-sandbox.sh
+IMAGE=/var/lib/fluxvm/images/bionic-fabric-rootfs.ext4 \
+  KERNEL=/var/lib/fluxvm/kernels/vmlinux \
+  FLUXVM_API=http://127.0.0.1:7788 BENCH_N=5 MEMORY_MIB=128 REPORT_RSS=1 \
+  FLUXVM_TOKEN=… ./scripts/bench-sandbox.sh
+```
+
+Reports `avg_create_ms` / `boot_to_ready_ms`, `mutation_per_sec`,
+`mutation_per_core_sec`, and with `REPORT_RSS=1` approximate
+`vmm_overhead_mib_approx` for comparison to Firecracker's ≤5 MiB overhead
+target. Full figure map: [capability-figures.md](../capability-figures.md).
+
+### Engine comparison
+
+Set the host config engine before `serve`:
+
+```toml
+fluxvm_engine = "firecracker"   # default — Firecracker child under fluxvm-hypervisor
+# fluxvm_engine = "kvm"         # pure in-tree KVM (no Firecracker child)
+```
+
+Restart `fluxctl serve` between runs and compare `avg_create_ms`.
+
+## Concurrent density (keep-alive)
+
+Creates N sandboxes **in parallel** and leaves them running until the end of
+the run (then deletes unless `DENSITY_CLEANUP=0`):
+
+```bash
+chmod +x scripts/bench-density.sh
+BENCH_N=8 DENSITY_MEMORY_MIB=128 IMAGE=… KERNEL=… FLUXVM_TOKEN=… ./scripts/bench-density.sh
+```
+
+Reports `concurrent_alive`, `wall_ms`, `p50_create_ms` / `p95_create_ms`,
+`mutation_per_core_sec` (FC design target: 5), and
+`approx_guest_ram_mib`. This is the density signal; cold-start sequential
+benches above are not.
+
+## MicroVM (Kubernetes create → Running)
+
+```bash
+chmod +x scripts/bench-microvm.sh
+# controller + node-agent must already be running against the cluster
+BENCH_N=5 IMAGE=/var/lib/fluxvm/images/fluxvm-lifecycle-test.qcow2 \
+  ./scripts/bench-microvm.sh
+```
+
+Reports `avg_scheduled_ms`, `avg_running_ms`, and `p50_running_ms` (API apply →
+`status.phase=Running`).
+
+Lab one-shot (sandbox + MicroVM):
+
+```bash
+./scripts/run-lab-benches.sh
+```
+
+## Secure Containers (`ctr run` cold-boot)
+
+```bash
+chmod +x scripts/bench-secure-containers.sh
+BENCH_N=5 ./scripts/bench-secure-containers.sh
+```
+
+Reports `avg_run_ms` for `ctr run` (containerd task create through completion)
+against the `io.containerd.fluxvm.v2` runtime. There is no warm-pool reuse
+for Secure Containers yet (see
+[docs/secure-containers-set7r.md](../secure-containers-set7r.md)), so every
+run cold-boots a fresh Pod VM — this is the number that Set closes.
+
+## Lab results (2026-09-08)
+
+Host: Ubuntu 24.04 · Xeon E-2336 (12 threads) · 31 GiB RAM · k3s + FluxVM
+`:7788`. `BENCH_N=5`. Numbers are wall-clock create latency, **not** steady-state
+density or warm-pool claim.
+
+### Sandbox (`backend: flux-vm`, network `none`)
+
+Default engine (`fluxvm_engine` unset → **firecracker**). Image
+`bionic-fabric-rootfs.ext4`, kernel `vmlinux`.
+
+| Metric | Value |
+|--------|-------|
+| samples | 5348, 5721, 6448, 4775, 4932 ms |
+| **avg_create_ms** | **5444** |
+
+Earlier same-lab snapshot (2026-09-07): firecracker **6905** ms avg, kvm
+**5783** ms avg — see history below.
+
+### MicroVM (`backend: qemu`, `networkMode: user`, qcow2)
+
+Image `fluxvm-lifecycle-test.qcow2`. Shadow Pod + node-agent → local `fluxctl
+serve`.
+
+| Metric | Value |
+|--------|-------|
+| avg_scheduled_ms | **1475** |
+| **avg_running_ms** | **2655** |
+| **p50_running_ms** | **2736** |
+| samples (running_ms) | 1881, 2736, 1332, 3698, 3632 |
+
+### How to read these
+
+- Sandbox and MicroVM rows use **different** images/backends — do not treat the
+  faster MicroVM wall time as “QEMU beats Firecracker density.”
+- MicroVM time includes kube-apiserver + shadow Pod bind + agent `POST /v1/vms`.
+- Do **not** treat kvm create latency as a density win over Firecracker warm
+  pools / snapshots — see [ROADMAP-DENSITY.md](ROADMAP-DENSITY.md).
+
+## Earlier lab results (2026-09-07)
+
+`BENCH_N=5`, image `bionic-fabric-rootfs.ext4`, kernel `vmlinux`, network `none`.
+
+| Engine      | avg_create_ms | notes |
+|-------------|---------------|-------|
+| firecracker | **6905**      | production density engine; memory snapshots OK |
+| kvm         | **5783**      | lab only — pause/resume + in-tree `FLUXKVM1` v2 memory snapshots (not FC-compatible) |
+
+## Density archive (2026-09-18, `80.79.5.173`)
+
+`scripts/bench-density.sh` against live `fluxctl serve` (auth token), image
+`bionic-fabric-rootfs.ext4`, kernel `vmlinux`, `network=none`, backend
+`flux-vm` sandboxes. Full transcript:
+[evidence/density-20260918-80.79.5.173.txt](evidence/density-20260918-80.79.5.173.txt).
+
+| N | wall_ms | avg_create_ms | mutation_per_core_sec | sample_vmm_rss_kib | notes |
+|---|---------|---------------|------------------------|--------------------|-------|
+| 8 | 70493 | 65360 | **0.01** | 5612 | cold create; FC target is 5/core/sec |
+| 4 | 28961 | 28520 | **0.01** | 5616 | same host |
+
+Track B mutation targets are **not** claimed from this cold-create path —
+Firecracker warm pools/snapshots remain the density SoT. This closes the H5
+“archive a host run” evidence gate.
+
+## Direct datapath (host forwarding cost)
+
+`scripts/bench-direct-datapath.sh` compares today's bridge chains with the bridge-less direct paths using
+netns + veth stand-ins for the tap (no KVM, no QEMU; so it measures host forwarding cost only, not virtio
+or VMM cost). Bridge topologies are measured both bare and with FluxVM's real `fluxvm_egress` attached, so
+the direct path is compared with what a production bridge VM actually runs.
+
+```bash
+sudo FLUXVM_BPF_DIR=dist/bpf BENCH_INTERLEAVE=1 BENCH_RUNS=6 \
+  BENCH_OUT=docs/benchmarks/evidence/direct-datapath-<date>.txt BENCH_JSON=…json \
+  ./scripts/bench-direct-datapath.sh
+```
+
+Use `BENCH_INTERLEAVE=1` on shared machines: it measures every topology once per round so load drift lands
+on all of them equally (a sequential run on a busy node swung one topology by ~40%). Archived runs and their
+interpretation are in [../direct-datapath.md](../direct-datapath.md#-measured-forwarding-cost); `BENCH_TARGET_IP`
+runs the same measurements against a real guest.

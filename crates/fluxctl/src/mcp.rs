@@ -1,0 +1,3132 @@
+// Copyright 2026 Zyvor AI Labs · https://zyvor.dev
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+
+//! `fluxctl mcp serve`: a Model Context Protocol server over stdio
+//! (newline-delimited JSON-RPC 2.0, tools capability only) that drives a
+//! FluxVM daemon through its REST API.
+
+use std::collections::BTreeMap;
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::Arc;
+use std::time::Duration;
+
+use anyhow::{Context, Result, anyhow, bail};
+use reqwest::{Method, StatusCode};
+use serde_json::{Map, Value, json};
+use tokio::io::{AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader};
+use tokio::sync::Mutex;
+use uuid::Uuid;
+
+use crate::remote::{Remote, encode_query};
+
+pub const LATEST_PROTOCOL_VERSION: &str = "2025-06-18";
+const SUPPORTED_VERSIONS: &[&str] = &["2024-11-05", "2025-03-26", LATEST_PROTOCOL_VERSION];
+/// Cap on one tool result, so a call cannot flood the model's context.
+pub const MAX_OUTPUT: usize = 64 * 1024;
+pub(crate) const CALL_TIMEOUT: Duration = Duration::from_secs(30);
+const MAX_LOG_LINES: u64 = 500;
+
+type ToolFuture = Pin<Box<dyn Future<Output = Result<Reply>> + Send>>;
+type ToolFn = Arc<dyn Fn(Value) -> ToolFuture + Send + Sync>;
+
+/// What a tool returns: text, or MCP content blocks (e.g. an image with a caption).
+pub enum Reply {
+    Text(String),
+    Content(Vec<Value>),
+}
+
+impl From<String> for Reply {
+    fn from(s: String) -> Self {
+        Self::Text(s)
+    }
+}
+
+impl From<Vec<Value>> for Reply {
+    fn from(c: Vec<Value>) -> Self {
+        Self::Content(c)
+    }
+}
+
+/// One callable tool. Write tools change state and are only listed and
+/// callable when the server allows writes.
+#[derive(Clone)]
+pub struct Tool {
+    pub name: &'static str,
+    pub description: &'static str,
+    pub schema: Value,
+    pub write: bool,
+    pub call: ToolFn,
+}
+
+pub struct Server {
+    name: String,
+    version: String,
+    allow_write: bool,
+    tools: BTreeMap<&'static str, Tool>,
+}
+
+impl Server {
+    pub fn new(name: &str, version: &str, allow_write: bool) -> Self {
+        Self {
+            name: name.into(),
+            version: version.into(),
+            allow_write,
+            tools: BTreeMap::new(),
+        }
+    }
+
+    pub fn add(&mut self, tools: impl IntoIterator<Item = Tool>) {
+        for t in tools {
+            self.tools.insert(t.name, t);
+        }
+    }
+
+    /// Read requests from `r` and write one response line each to `w`
+    /// until `r` ends. Requests run concurrently.
+    pub async fn serve<R, W>(self, r: R, w: W) -> Result<()>
+    where
+        R: tokio::io::AsyncRead + Unpin,
+        W: AsyncWrite + Unpin + Send + 'static,
+    {
+        let me = Arc::new(self);
+        let w = Arc::new(Mutex::new(w));
+        let mut lines = BufReader::new(r).lines();
+        let mut tasks = tokio::task::JoinSet::new();
+        while let Some(line) = lines.next_line().await? {
+            if line.trim().is_empty() {
+                continue;
+            }
+            let req: Value = match serde_json::from_str(&line) {
+                Ok(v) => v,
+                Err(e) => {
+                    write_line(
+                        &w,
+                        error_response(Value::Null, -32700, &format!("parse error: {e}")),
+                    )
+                    .await?;
+                    continue;
+                }
+            };
+            let id = req.get("id").cloned();
+            let method = req.get("method").and_then(Value::as_str).unwrap_or("");
+            if method.is_empty() {
+                if let Some(id) = id {
+                    write_line(&w, error_response(id, -32600, "missing method")).await?;
+                }
+                continue;
+            }
+            let Some(id) = id else {
+                continue; // notification; nothing to answer
+            };
+            let method = method.to_string();
+            let params = req.get("params").cloned().unwrap_or(Value::Null);
+            let me = me.clone();
+            let w = w.clone();
+            tasks.spawn(async move {
+                let resp = match me.handle(&method, params).await {
+                    Ok(result) => json!({"jsonrpc": "2.0", "id": id, "result": result}),
+                    Err((code, msg)) => error_response(id, code, &msg),
+                };
+                let _ = write_line(&w, resp).await;
+            });
+        }
+        while tasks.join_next().await.is_some() {}
+        Ok(())
+    }
+
+    async fn handle(&self, method: &str, params: Value) -> Result<Value, (i64, String)> {
+        match method {
+            "initialize" => {
+                let asked = params
+                    .get("protocolVersion")
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                let version = if SUPPORTED_VERSIONS.contains(&asked) {
+                    asked
+                } else {
+                    LATEST_PROTOCOL_VERSION
+                };
+                Ok(json!({
+                    "protocolVersion": version,
+                    "capabilities": {"tools": {}},
+                    "serverInfo": {"name": self.name, "version": self.version},
+                }))
+            }
+            "ping" => Ok(json!({})),
+            "tools/list" => Ok(json!({"tools": self.listed()})),
+            "tools/call" => {
+                let name = params.get("name").and_then(Value::as_str).unwrap_or("");
+                if name.is_empty() {
+                    return Err((-32602, "tools/call needs a name".into()));
+                }
+                let Some(tool) = self.tools.get(name) else {
+                    return Err((-32602, format!("unknown tool {name}")));
+                };
+                if tool.write && !self.allow_write {
+                    return Ok(tool_result(
+                        &format!(
+                            "{name} changes state; start the server with --allow-write to use it"
+                        ),
+                        true,
+                    ));
+                }
+                let args = match params.get("arguments") {
+                    None | Some(Value::Null) => json!({}),
+                    Some(v) => v.clone(),
+                };
+                if let Err(e) = check_args(&tool.schema, &args) {
+                    return Ok(tool_result(&e.to_string(), true));
+                }
+                match (tool.call)(args).await {
+                    Ok(Reply::Text(text)) => Ok(tool_result(&text, false)),
+                    Ok(Reply::Content(content)) => {
+                        Ok(json!({"content": content, "isError": false}))
+                    }
+                    Err(e) => Ok(tool_result(&format!("{e:#}"), true)),
+                }
+            }
+            _ => Err((-32601, format!("method not found: {method}"))),
+        }
+    }
+
+    fn listed(&self) -> Vec<Value> {
+        self.tools
+            .values()
+            .filter(|t| self.allow_write || !t.write)
+            .map(|t| {
+                let mut entry = json!({
+                    "name": t.name,
+                    "description": t.description,
+                    "inputSchema": t.schema,
+                });
+                if !t.write {
+                    entry["annotations"] = json!({"readOnlyHint": true});
+                }
+                entry
+            })
+            .collect()
+    }
+}
+
+async fn write_line<W: AsyncWrite + Unpin>(w: &Mutex<W>, v: Value) -> Result<()> {
+    let mut line = serde_json::to_vec(&v)?;
+    line.push(b'\n');
+    let mut w = w.lock().await;
+    w.write_all(&line).await?;
+    w.flush().await?;
+    Ok(())
+}
+
+fn error_response(id: Value, code: i64, message: &str) -> Value {
+    json!({"jsonrpc": "2.0", "id": id, "error": {"code": code, "message": message}})
+}
+
+fn tool_result(text: &str, is_error: bool) -> Value {
+    let text = if text.len() > MAX_OUTPUT {
+        let mut cut = MAX_OUTPUT;
+        while !text.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        format!(
+            "{}\n[truncated: output exceeded {MAX_OUTPUT} bytes; narrow the request, e.g. with limit]",
+            &text[..cut]
+        )
+    } else {
+        text.to_string()
+    };
+    json!({"content": [{"type": "text", "text": text}], "isError": is_error})
+}
+
+/// Rejects unknown and missing required arguments, so a model's typo is
+/// reported instead of silently ignored.
+fn check_args(schema: &Value, args: &Value) -> Result<()> {
+    let Some(obj) = args.as_object() else {
+        bail!("invalid arguments: expected an object");
+    };
+    let props = schema.get("properties").and_then(Value::as_object);
+    for key in obj.keys() {
+        if !props.is_some_and(|p| p.contains_key(key)) {
+            bail!("invalid arguments: unknown field {key:?}");
+        }
+    }
+    for req in schema
+        .get("required")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+    {
+        if !obj.contains_key(req) {
+            bail!("invalid arguments: missing {req:?}");
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn object(props: Value, required: &[&str]) -> Value {
+    let mut s = json!({"type": "object", "properties": props, "additionalProperties": false});
+    if !required.is_empty() {
+        s["required"] = json!(required);
+    }
+    s
+}
+
+pub(crate) fn pretty(v: &Value) -> Result<String> {
+    Ok(serde_json::to_string_pretty(v)?)
+}
+
+pub(crate) fn str_arg<'a>(args: &'a Value, key: &str) -> Option<&'a str> {
+    args.get(key)
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+}
+
+fn int_arg(args: &Value, key: &str) -> Result<Option<u64>> {
+    match args.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(v) => v
+            .as_u64()
+            .map(Some)
+            .ok_or_else(|| anyhow!("{key} must be a non-negative integer")),
+    }
+}
+
+/// Resolve a VM name or UUID (or unique UUID prefix) to its id.
+async fn resolve(remote: &Remote, vm: &str) -> Result<Uuid> {
+    if let Ok(id) = vm.parse::<Uuid>() {
+        return Ok(id);
+    }
+    let index = remote.vm_index().await;
+    let mut hits: Vec<Uuid> = index
+        .iter()
+        .filter(|(_, name)| name == vm)
+        .map(|(id, _)| *id)
+        .collect();
+    if hits.is_empty() {
+        hits = index
+            .iter()
+            .filter(|(id, _)| id.to_string().starts_with(vm))
+            .map(|(id, _)| *id)
+            .collect();
+    }
+    match hits.as_slice() {
+        [id] => Ok(*id),
+        [] => bail!("no VM named or prefixed {vm:?}"),
+        _ => bail!("{vm:?} matches {} VMs; use the full UUID", hits.len()),
+    }
+}
+
+fn summarize(vm: &Value) -> Value {
+    let mut out = Map::new();
+    for key in [
+        "id",
+        "name",
+        "status",
+        "backend",
+        "guest_ip",
+        "tap_name",
+        "created_at",
+        "error",
+    ] {
+        if let Some(v) = vm.get(key).filter(|v| !v.is_null()) {
+            out.insert(key.into(), v.clone());
+        }
+    }
+    if let Some(req) = vm.get("request") {
+        for key in ["vcpus", "memory_mib", "labels"] {
+            if let Some(v) = req.get(key).filter(|v| !v.is_null()) {
+                out.insert(key.into(), v.clone());
+            }
+        }
+    }
+    Value::Object(out)
+}
+
+const NETWORK_KINDS: &[&str] = &[
+    "status",
+    "effective",
+    "stats",
+    "flows",
+    "drops",
+    "drop-reasons",
+    "learned-ip",
+    "conntrack",
+    "capture",
+];
+const POWER_OPS: &[&str] = &["start", "stop", "pause", "resume", "restart"];
+
+pub(crate) fn tool<F, Fut, T>(
+    name: &'static str,
+    description: &'static str,
+    schema: Value,
+    write: bool,
+    remote: &Arc<Remote>,
+    f: F,
+) -> Tool
+where
+    F: Fn(Arc<Remote>, Value) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = Result<T>> + Send + 'static,
+    T: Into<Reply>,
+{
+    let remote = remote.clone();
+    let f = Arc::new(f);
+    Tool {
+        name,
+        description,
+        schema,
+        write,
+        call: Arc::new(move |args| {
+            let remote = remote.clone();
+            let f = f.clone();
+            Box::pin(async move { f(remote, args).await.map(Into::into) })
+        }),
+    }
+}
+
+pub(crate) async fn timed<T>(d: Duration, fut: impl Future<Output = Result<T>>) -> Result<T> {
+    tokio::time::timeout(d, fut)
+        .await
+        .map_err(|_| anyhow!("timed out after {}s", d.as_secs()))?
+}
+
+/// The `session` argument as a UUID, so a typo is an error here and not a path on the server.
+fn session_id(args: &Value) -> Result<Uuid> {
+    let raw = str_arg(args, "session").unwrap_or_default();
+    Uuid::parse_str(raw).map_err(|_| anyhow!("session must be a session id (UUID), got {raw:?}"))
+}
+
+pub fn tools(remote: Arc<Remote>) -> Vec<Tool> {
+    let vm_prop = json!({"type": "string", "description": "VM name, UUID or unique UUID prefix"});
+    vec![
+        tool(
+            "list_vms",
+            "List FluxVM VMs with status, backend, guest IP, size and labels. selector filters by labels, e.g. \"env=dev,team!=x\".",
+            object(
+                json!({"selector": {"type": "string", "description": "label selector"}}),
+                &[],
+            ),
+            false,
+            &remote,
+            |r, args| async move {
+                timed(CALL_TIMEOUT, async {
+                    let vms = r.list_vms(str_arg(&args, "selector")).await?;
+                    let items: Vec<Value> = vms.iter().map(summarize).collect();
+                    pretty(&json!({"vms": items}))
+                })
+                .await
+            },
+        ),
+        tool(
+            "get_vm",
+            "Get one VM's full FluxVM record: request spec, status, error, network (tap, netns, guest IP) and paths.",
+            object(json!({"vm": vm_prop}), &["vm"]),
+            false,
+            &remote,
+            |r, args| async move {
+                timed(CALL_TIMEOUT, async {
+                    let id = resolve(&r, str_arg(&args, "vm").unwrap_or_default()).await?;
+                    pretty(&r.call(Method::GET, &format!("/v1/vms/{id}"), None).await?)
+                })
+                .await
+            },
+        ),
+        tool(
+            "host_status",
+            "FluxVM host readiness: KVM, state dir, dataplane mode and BPF/Cilium health, secure containers, plus the VM count by status.",
+            object(json!({}), &[]),
+            false,
+            &remote,
+            |r, _args| async move {
+                timed(CALL_TIMEOUT, async {
+                    let (_, body) = r.get_raw("/readyz").await?;
+                    let ready: Value = serde_json::from_slice(&body)
+                        .unwrap_or_else(|_| json!(String::from_utf8_lossy(&body)));
+                    let mut counts = BTreeMap::<String, u64>::new();
+                    for vm in r.list_vms(None).await? {
+                        let s = vm
+                            .get("status")
+                            .and_then(Value::as_str)
+                            .unwrap_or("unknown");
+                        *counts.entry(s.to_string()).or_default() += 1;
+                    }
+                    pretty(&json!({"readyz": ready, "vms_by_status": counts}))
+                })
+                .await
+            },
+        ),
+        tool(
+            "vm_network",
+            "Live VM-edge network data for a VM: status (dataplane attach), effective (policy), stats, flows, drops (attributed), drop-reasons, learned-ip, conntrack (live table) or capture (packet capture sessions).",
+            object(
+                json!({
+                    "vm": vm_prop,
+                    "kind": {"type": "string", "enum": NETWORK_KINDS, "description": "which view"},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 1000, "description": "max entries for flows and drops"},
+                }),
+                &["vm", "kind"],
+            ),
+            false,
+            &remote,
+            |r, args| async move {
+                timed(CALL_TIMEOUT, async {
+                    let kind = str_arg(&args, "kind").unwrap_or_default();
+                    if !NETWORK_KINDS.contains(&kind) {
+                        bail!("kind must be one of {}", NETWORK_KINDS.join(", "));
+                    }
+                    let id = resolve(&r, str_arg(&args, "vm").unwrap_or_default()).await?;
+                    let mut path = format!("/v1/vms/{id}/network/{kind}");
+                    if let Some(limit) = int_arg(&args, "limit")? {
+                        path.push_str(&format!("?limit={limit}"));
+                    }
+                    pretty(&r.call(Method::GET, &path, None).await?)
+                })
+                .await
+            },
+        ),
+        tool(
+            "vm_logs",
+            "The last lines of a VM's serial console log (boot messages, kernel panics, QEMU errors).",
+            object(
+                json!({
+                    "vm": vm_prop,
+                    "lines": {"type": "integer", "minimum": 1, "maximum": MAX_LOG_LINES, "description": "lines from the end, default 100"},
+                }),
+                &["vm"],
+            ),
+            false,
+            &remote,
+            |r, args| async move {
+                timed(CALL_TIMEOUT, async {
+                    let id = resolve(&r, str_arg(&args, "vm").unwrap_or_default()).await?;
+                    let lines = int_arg(&args, "lines")?
+                        .unwrap_or(100)
+                        .clamp(1, MAX_LOG_LINES);
+                    let (status, body) = r
+                        .get_raw(&format!("/v1/vms/{id}/logs?lines={lines}"))
+                        .await?;
+                    if !status.is_success() {
+                        bail!("logs: {status}: {}", String::from_utf8_lossy(&body));
+                    }
+                    Ok(String::from_utf8_lossy(&body).into_owned())
+                })
+                .await
+            },
+        ),
+        tool(
+            "vm_create",
+            "Create a normal FluxVM VM from a REST create spec. Minimal vz spec: {\"name\", \"backend\":\"vz\", \"image\"}. apple.* options (all optional): guest_os (linux|macos), install (macOS from the IPSW in image/media), display_width/display_height/display_ppi/display_count (1-8 displays, macOS), window, rosetta, clipboard, microphone, audio_output, nested_virtualization, usb_controller, asif_overlay, bridge_interface, recovery, vmnet {mode, subnet, mask}, provision_full_name/provision_username/provision_password_file (macOS 27 first boot), extra_disks, console_ports, custom_virtio, efi_secure_boot, vsock_services [{port, builtin: metadata|telemetry | socket: name | tcp: \"127.0.0.1:PORT\"}] (guest→host vsock; Linux guests; tcp is loopback only). With ready_exec=true, wait until guest commands are usable.",
+            object(
+                json!({
+                    "spec": {"type": "object", "description": "CreateVmRequest JSON accepted by POST /v1/vms"},
+                    "ready_exec": {"type": "boolean", "description": "wait until guest command execution is ready"}
+                }),
+                &["spec"],
+            ),
+            true,
+            &remote,
+            |r, args| async move {
+                timed(Duration::from_secs(900), async {
+                    let spec = args.get("spec").cloned().unwrap_or_else(|| json!({}));
+                    if !spec.is_object() {
+                        bail!("spec must be an object");
+                    }
+                    let path = if args.get("ready_exec").and_then(Value::as_bool) == Some(true) {
+                        "/v1/vms?ready=exec"
+                    } else {
+                        "/v1/vms"
+                    };
+                    let v = r.call(Method::POST, path, Some(spec)).await?;
+                    pretty(&v)
+                })
+                .await
+            },
+        ),
+        tool(
+            "vm_clone",
+            "Clone a stopped VM into a new VM with a fresh identity/MAC and copy-on-write storage where supported.",
+            object(
+                json!({
+                    "vm": vm_prop,
+                    "name": {"type": "string", "description": "name for the clone"}
+                }),
+                &["vm", "name"],
+            ),
+            true,
+            &remote,
+            |r, args| async move {
+                timed(Duration::from_secs(300), async {
+                    let id = resolve(&r, str_arg(&args, "vm").unwrap_or_default()).await?;
+                    let body = json!({"name": str_arg(&args, "name").unwrap_or_default()});
+                    let v = r
+                        .call(Method::POST, &format!("/v1/vms/{id}/clone"), Some(body))
+                        .await?;
+                    pretty(&v)
+                })
+                .await
+            },
+        ),
+        tool(
+            "vm_exec",
+            "Run a shell command in a normal VM. Apple VZ guests use FluxVM's SSH transport; agent-enabled guests use the authenticated guest agent.",
+            object(
+                json!({
+                    "vm": vm_prop,
+                    "command": {"type": "string"},
+                    "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 600}
+                }),
+                &["vm", "command"],
+            ),
+            true,
+            &remote,
+            |r, args| async move {
+                let timeout = int_arg(&args, "timeout_seconds")?
+                    .unwrap_or(60)
+                    .clamp(1, 600);
+                timed(Duration::from_secs(timeout + 30), async {
+                    let id = resolve(&r, str_arg(&args, "vm").unwrap_or_default()).await?;
+                    let body = json!({
+                        "command": str_arg(&args, "command").unwrap_or_default(),
+                        "timeout_seconds": timeout
+                    });
+                    pretty(
+                        &r.call(Method::POST, &format!("/v1/vms/{id}/agent"), Some(body))
+                            .await?,
+                    )
+                })
+                .await
+            },
+        ),
+        tool(
+            "vm_snapshot",
+            "Create a named VM snapshot. On the Apple VZ backend this captures VM state and the disk consistently.",
+            object(
+                json!({
+                    "vm": vm_prop,
+                    "tag": {"type": "string", "description": "snapshot name/tag"}
+                }),
+                &["vm", "tag"],
+            ),
+            true,
+            &remote,
+            |r, args| async move {
+                timed(Duration::from_secs(300), async {
+                    let id = resolve(&r, str_arg(&args, "vm").unwrap_or_default()).await?;
+                    let body = json!({"tag": str_arg(&args, "tag").unwrap_or_default()});
+                    let v = r
+                        .call(Method::POST, &format!("/v1/vms/{id}/snapshot"), Some(body))
+                        .await?;
+                    pretty(&v)
+                })
+                .await
+            },
+        ),
+        tool(
+            "vm_snapshot_list",
+            "List a VM's named snapshots.",
+            object(json!({"vm": vm_prop}), &["vm"]),
+            false,
+            &remote,
+            |r, args| async move {
+                timed(CALL_TIMEOUT, async {
+                    let id = resolve(&r, str_arg(&args, "vm").unwrap_or_default()).await?;
+                    pretty(
+                        &r.call(Method::GET, &format!("/v1/vms/{id}/snapshots"), None)
+                            .await?,
+                    )
+                })
+                .await
+            },
+        ),
+        tool(
+            "vm_snapshot_restore",
+            "Restore a VM from a named snapshot. Uses the generic restore endpoint so supported running VMs can restore in place.",
+            object(
+                json!({
+                    "vm": vm_prop,
+                    "tag": {"type": "string"}
+                }),
+                &["vm", "tag"],
+            ),
+            true,
+            &remote,
+            |r, args| async move {
+                timed(Duration::from_secs(300), async {
+                    let id = resolve(&r, str_arg(&args, "vm").unwrap_or_default()).await?;
+                    let body = json!({"tag": str_arg(&args, "tag").unwrap_or_default()});
+                    pretty(
+                        &r.call(Method::POST, &format!("/v1/vms/{id}/restore"), Some(body))
+                            .await?,
+                    )
+                })
+                .await
+            },
+        ),
+        tool(
+            "vm_snapshot_delete",
+            "Delete a named VM snapshot.",
+            object(
+                json!({
+                    "vm": vm_prop,
+                    "tag": {"type": "string"}
+                }),
+                &["vm", "tag"],
+            ),
+            true,
+            &remote,
+            |r, args| async move {
+                timed(CALL_TIMEOUT, async {
+                    let id = resolve(&r, str_arg(&args, "vm").unwrap_or_default()).await?;
+                    let tag = encode_query(str_arg(&args, "tag").unwrap_or_default());
+                    r.call(Method::DELETE, &format!("/v1/vms/{id}/snapshots/{tag}"), None).await?;
+                    pretty(&json!({"id": id, "tag": str_arg(&args, "tag").unwrap_or_default(), "deleted": true}))
+                }).await
+            },
+        ),
+        tool(
+            "host_apple_capabilities",
+            "What this Mac's Virtualization.framework offers: macOS version, CPU/memory limits, nested virtualization, bridged interfaces, vmnet custom networks, custom Virtio, EFI Secure Boot, Rosetta. Apple VZ hosts only.",
+            object(json!({}), &[]),
+            false,
+            &remote,
+            |r, _args| async move {
+                timed(CALL_TIMEOUT, async {
+                    pretty(&r.call(Method::GET, "/v1/host/apple", None).await?)
+                })
+                .await
+            },
+        ),
+        tool(
+            "vm_vz_status",
+            "Virtualization.framework device state of a running Apple VZ VM. what: secure_boot (EFI Secure Boot enabled and key counts, the pre-boot snapshot while it runs), custom_virtio (custom Virtio device driver state and counters), usb (USB devices on the VM's controllers) or usb_physical (host accessories granted for passthrough).",
+            object(
+                json!({
+                    "vm": vm_prop,
+                    "what": {"type": "string", "enum": ["secure_boot", "custom_virtio", "usb", "usb_physical"]}
+                }),
+                &["vm", "what"],
+            ),
+            false,
+            &remote,
+            |r, args| async move {
+                timed(CALL_TIMEOUT, async {
+                    let id = resolve(&r, str_arg(&args, "vm").unwrap_or_default()).await?;
+                    let path = match str_arg(&args, "what").unwrap_or_default() {
+                        "secure_boot" => "secure-boot",
+                        "custom_virtio" => "custom-virtio",
+                        "usb" => "usb",
+                        "usb_physical" => "usb/physical",
+                        other => bail!(
+                            "what must be secure_boot, custom_virtio, usb or usb_physical (got {other:?})"
+                        ),
+                    };
+                    pretty(
+                        &r.call(Method::GET, &format!("/v1/vms/{id}/vz/{path}"), None)
+                            .await?,
+                    )
+                })
+                .await
+            },
+        ),
+        tool(
+            "vm_screenshot",
+            "Screenshot of a running Apple VZ VM's display (Linux or macOS guest), as an image. Coordinates for vm_input are pixels of this image from the top left; pass its width as screen_width.",
+            object(
+                json!({
+                    "vm": vm_prop,
+                    "max_width": {"type": "integer", "minimum": 64, "maximum": 8192, "description": "scale down to this width (default 1280)"}
+                }),
+                &["vm"],
+            ),
+            false,
+            &remote,
+            |r, args| async move {
+                timed(CALL_TIMEOUT, async {
+                    let id = resolve(&r, str_arg(&args, "vm").unwrap_or_default()).await?;
+                    let width = int_arg(&args, "max_width")?.unwrap_or(DEFAULT_SCREEN_WIDTH);
+                    screenshot_content(&r, &format!("/v1/vms/{id}"), width).await
+                })
+                .await
+            },
+        ),
+        tool(
+            "vm_input",
+            "Keyboard and mouse input for a running Apple VZ VM's display. action: type (text), key (key, modifiers), move, click (modifiers), double_click, right_click, middle_click, down, up, drag (to_x, to_y) or scroll (dx, dy notches; positive dy scrolls down). Keys: a character, enter, tab, escape, backspace, delete, up, down, left, right, home, end, page_up, page_down, f1-f12; modifiers: shift, control, option, command. Coordinates are vm_screenshot pixels; pass that image's width as screen_width. actions runs a list of such objects in order instead. screenshot returns the display afterwards.",
+            object(
+                json!({
+                    "vm": vm_prop,
+                    "action": {"type": "string", "enum": INPUT_ACTIONS},
+                    "text": {"type": "string"},
+                    "key": {"type": "string"},
+                    "modifiers": {"type": "array", "items": {"type": "string", "enum": ["shift", "control", "option", "command"]}},
+                    "x": {"type": "number"},
+                    "y": {"type": "number"},
+                    "to_x": {"type": "number"},
+                    "to_y": {"type": "number"},
+                    "dx": {"type": "integer"},
+                    "dy": {"type": "integer"},
+                    "screen_width": {"type": "integer", "minimum": 1},
+                    "actions": {"type": "array", "maxItems": 100, "items": {"type": "object"}},
+                    "screenshot": {"type": "boolean", "description": "return a screenshot (default width 1280) after the input"}
+                }),
+                &["vm"],
+            ),
+            true,
+            &remote,
+            |r, args| async move {
+                timed(Duration::from_secs(120), async {
+                    let id = resolve(&r, str_arg(&args, "vm").unwrap_or_default()).await?;
+                    let body = input_body(&args)?;
+                    let v = r
+                        .call(Method::POST, &format!("/v1/vms/{id}/input"), Some(body))
+                        .await?;
+                    if args.get("screenshot").and_then(Value::as_bool) == Some(true) {
+                        // Give the guest a moment to redraw.
+                        tokio::time::sleep(Duration::from_millis(500)).await;
+                        let width = args
+                            .get("screen_width")
+                            .and_then(Value::as_u64)
+                            .unwrap_or(DEFAULT_SCREEN_WIDTH);
+                        return screenshot_content(&r, &format!("/v1/vms/{id}"), width).await;
+                    }
+                    Ok(vec![json!({"type": "text", "text": pretty(&v)?})])
+                })
+                .await
+            },
+        ),
+        tool(
+            "vm_sign_in",
+            "Type the sign-in stored for an Apple VZ VM (fluxctl signin set) into its login screen. The password never passes through the agent. mode: password (default; types the password into the focused field), username (username, Enter, then password, for a text console login) or username_tab (username, Tab, password, for a graphical form). submit presses Enter after the password (default true).",
+            object(
+                json!({
+                    "vm": vm_prop,
+                    "mode": {"type": "string", "enum": ["password", "username", "username_tab"]},
+                    "submit": {"type": "boolean"},
+                    "screenshot": {"type": "boolean", "description": "return a screenshot (default width 1280) afterwards"}
+                }),
+                &["vm"],
+            ),
+            true,
+            &remote,
+            |r, args| async move {
+                timed(Duration::from_secs(60), async {
+                    let id = resolve(&r, str_arg(&args, "vm").unwrap_or_default()).await?;
+                    let mut body = json!({});
+                    for key in ["mode", "submit"] {
+                        if let Some(v) = args.get(key) {
+                            body[key] = v.clone();
+                        }
+                    }
+                    r.call(Method::POST, &format!("/v1/vms/{id}/signin"), Some(body))
+                        .await?;
+                    if args.get("screenshot").and_then(Value::as_bool) == Some(true) {
+                        tokio::time::sleep(Duration::from_secs(2)).await;
+                        return screenshot_content(
+                            &r,
+                            &format!("/v1/vms/{id}"),
+                            DEFAULT_SCREEN_WIDTH,
+                        )
+                        .await;
+                    }
+                    Ok(vec![
+                        json!({"type": "text", "text": "signed in (typed the stored sign-in)"}),
+                    ])
+                })
+                .await
+            },
+        ),
+        tool(
+            "vm_delete",
+            "Delete a VM and its FluxVM-owned runtime resources.",
+            object(json!({"vm": vm_prop}), &["vm"]),
+            true,
+            &remote,
+            |r, args| async move {
+                timed(Duration::from_secs(120), async {
+                    let id = resolve(&r, str_arg(&args, "vm").unwrap_or_default()).await?;
+                    pretty(&r.vm_op(id, "delete").await?)
+                })
+                .await
+            },
+        ),
+        tool(
+            "vm_power",
+            "Change a VM's power state: start (a stopped VM), stop, pause, resume or restart. For Kairon-managed VMs prefer Kairon's set_power_state, or Kairon will reconcile it back.",
+            object(
+                json!({
+                    "vm": vm_prop,
+                    "op": {"type": "string", "enum": POWER_OPS},
+                }),
+                &["vm", "op"],
+            ),
+            true,
+            &remote,
+            |r, args| async move {
+                timed(Duration::from_secs(120), async {
+                    let op = str_arg(&args, "op").unwrap_or_default();
+                    if !POWER_OPS.contains(&op) {
+                        bail!("op must be one of {}", POWER_OPS.join(", "));
+                    }
+                    let id = resolve(&r, str_arg(&args, "vm").unwrap_or_default()).await?;
+                    let v = r.vm_op(id, op).await?;
+                    pretty(&summarize(&v)).or_else(|_| pretty(&v))
+                })
+                .await
+            },
+        ),
+        tool(
+            "vm_capture",
+            "Run a bounded tcpdump capture (1-30 s) on a VM's dataplane interface. With output, waits and writes the pcap to that local path; otherwise returns the token (check with vm_network kind=capture).",
+            object(
+                json!({
+                    "vm": vm_prop,
+                    "seconds": {"type": "integer", "minimum": 1, "maximum": 30, "description": "capture length, default 10"},
+                    "filter": {"type": "string", "description": "optional tcpdump filter, e.g. \"udp port 53\""},
+                    "output": {"type": "string", "description": "optional local file path for the pcap"},
+                }),
+                &["vm"],
+            ),
+            true,
+            &remote,
+            |r, args| async move {
+                let seconds = int_arg(&args, "seconds")?.unwrap_or(10);
+                if !(1..=30).contains(&seconds) {
+                    bail!("seconds must be 1-30");
+                }
+                timed(Duration::from_secs(seconds + 45), capture(r, args, seconds)).await
+            },
+        ),
+        tool(
+            "vm_fork",
+            "Fork a running VM (flux-vm, or a vz Linux guest on apple.usernet or without a network) into count (1-32) running copies from one saved state; each child gets a copy-on-write disk. By default every child's identity (hostname, machine-id, SSH host keys, cloud-init, DHCP, agent token) is reset and the fork fails if that cannot be confirmed. Returns the children and per-phase timings.",
+            object(
+                json!({
+                    "vm": vm_prop,
+                    "count": {"type": "integer", "minimum": 1, "maximum": 32, "description": "children to create, default 1"},
+                    "name_prefix": {"type": "string", "description": "child names are <prefix>-<n>; default <vm>-fork"},
+                    "identity": {"type": "string", "enum": ["unique", "best-effort", "preserve"], "description": "unique (default) fails the fork unless each child's identity reset is confirmed; best-effort keeps the child anyway; preserve resets nothing"},
+                    "network": {"type": "string", "enum": ["auto", "isolated", "none", "preserve"], "description": "default auto"},
+                    "parallelism": {"type": "integer", "minimum": 1, "maximum": 32, "description": "children restored at once (vz); default min(count, 8)"},
+                    "ready": {"description": "when a child counts as ready: \"running\" (default), \"agent\", \"exec\", {\"tcp\": port} or {\"http\": {\"port\": n, \"path\": \"/health\"}}, probed inside each child"},
+                    "hooks": {"type": "array", "items": {"type": "array", "items": {"type": "string"}}, "description": "argv commands run in each child after its identity reset (needs the guest agent); a non-zero exit fails the fork"},
+                    "ready_timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 600, "description": "default 60, hooks included"},
+                }),
+                &["vm"],
+            ),
+            true,
+            &remote,
+            |r, args| async move {
+                timed(Duration::from_secs(300), async {
+                    let count = int_arg(&args, "count")?.unwrap_or(1);
+                    if !(1..=32).contains(&count) {
+                        bail!("count must be 1-32");
+                    }
+                    let id = resolve(&r, str_arg(&args, "vm").unwrap_or_default()).await?;
+                    let mut body = json!({"count": count});
+                    if let Some(p) = str_arg(&args, "name_prefix") {
+                        body["namePrefix"] = json!(p);
+                    }
+                    for key in ["identity", "network"] {
+                        if let Some(v) = str_arg(&args, key) {
+                            body[key] = json!(v);
+                        }
+                    }
+                    if let Some(p) = int_arg(&args, "parallelism")? {
+                        body["parallelism"] = json!(p);
+                    }
+                    for key in ["ready", "hooks", "ready_timeout_seconds"] {
+                        if let Some(v) = args.get(key) {
+                            body[key] = v.clone();
+                        }
+                    }
+                    let v = r
+                        .call(Method::POST, &format!("/v1/vms/{id}/fork"), Some(body))
+                        .await?;
+                    let items: Vec<Value> = v["items"]
+                        .as_array()
+                        .map(|a| a.iter().map(summarize).collect())
+                        .unwrap_or_default();
+                    pretty(&json!({"children": items, "elapsed_ms": v["elapsed_ms"]}))
+                })
+                .await
+            },
+        ),
+        tool(
+            "image_import",
+            "Import a VM disk from a host path (OVA, OVF, VMDK, VHD(X), qcow2) as raw disks, repairing the boot disk for virtio (VMware tools off, virtio initramfs, /dev/sdX to /dev/vdX, DHCP fallback). Returns the disk paths, OVF hardware, repair report and a suggested create request.",
+            object(
+                json!({
+                    "source": {"type": "string", "description": "host path on the FluxVM server"},
+                    "name": {"type": "string", "description": "import name, [A-Za-z0-9_-]"},
+                    "repair": {"type": "boolean", "description": "offline guest repair, default true"},
+                    "remove_vmware_tools": {"type": "boolean", "description": "uninstall VMware tools packages, default false"},
+                }),
+                &["source", "name"],
+            ),
+            true,
+            &remote,
+            |r, args| async move {
+                timed(Duration::from_secs(1800), async {
+                    let body = json!({
+                        "source": str_arg(&args, "source").unwrap_or_default(),
+                        "name": str_arg(&args, "name").unwrap_or_default(),
+                        "repair": args.get("repair").and_then(Value::as_bool).unwrap_or(true),
+                        "remove_vmware_tools": args.get("remove_vmware_tools").and_then(Value::as_bool).unwrap_or(false),
+                    });
+                    pretty(&r.call(Method::POST, "/v1/images/import", Some(body)).await?)
+                })
+                .await
+            },
+        ),
+        tool(
+            "vm_backup",
+            "Back up a QEMU VM's disks to standalone qcow2 files on the server. A running VM is snapshotted briefly; with quiesce auto (default) its filesystems are frozen through the guest agent when it answers. Returns the backup name, size and whether it was quiesced.",
+            object(
+                json!({
+                    "vm": vm_prop,
+                    "name": {"type": "string", "description": "backup name, default <vm>-<utc>"},
+                    "all_disks": {"type": "boolean", "description": "include data disks (a directory backup), default false"},
+                    "compress": {"type": "boolean", "description": "qcow2 compression, default false"},
+                    "quiesce": {"type": "string", "enum": ["auto", "required", "never"], "description": "guest fsfreeze, default auto"},
+                }),
+                &["vm"],
+            ),
+            true,
+            &remote,
+            |r, args| async move {
+                timed(Duration::from_secs(1800), async {
+                    let id = resolve(&r, str_arg(&args, "vm").unwrap_or_default()).await?;
+                    let body = json!({
+                        "name": str_arg(&args, "name"),
+                        "all_disks": args.get("all_disks").and_then(Value::as_bool).unwrap_or(false),
+                        "compress": args.get("compress").and_then(Value::as_bool).unwrap_or(false),
+                        "quiesce": str_arg(&args, "quiesce").unwrap_or("auto"),
+                    });
+                    pretty(&r.call(Method::POST, &format!("/v1/vms/{id}/backup"), Some(body)).await?)
+                })
+                .await
+            },
+        ),
+        tool(
+            "backup_list",
+            "Backups on the server, newest first: name, source VM, size, whether live and quiesced.",
+            object(json!({}), &[]),
+            false,
+            &remote,
+            |r, _args| async move { pretty(&r.call(Method::GET, "/v1/backups", None).await?) },
+        ),
+        tool(
+            "backup_restore",
+            "Restore a backup (name from backup_list) into a stopped VM in place, replacing its root and backed-up data disks.",
+            object(
+                json!({
+                    "vm": vm_prop,
+                    "name": {"type": "string", "description": "backup name"},
+                }),
+                &["vm", "name"],
+            ),
+            true,
+            &remote,
+            |r, args| async move {
+                timed(Duration::from_secs(1800), async {
+                    let id = resolve(&r, str_arg(&args, "vm").unwrap_or_default()).await?;
+                    let body = json!({"name": str_arg(&args, "name").unwrap_or_default()});
+                    pretty(
+                        &r.call(
+                            Method::POST,
+                            &format!("/v1/vms/{id}/restore-backup"),
+                            Some(body),
+                        )
+                        .await?,
+                    )
+                })
+                .await
+            },
+        ),
+        tool(
+            "pool_claim",
+            "Claim an already-booted VM from a warm pool (milliseconds instead of a cold boot). The pool refills in the background.",
+            object(
+                json!({
+                    "pool": {"type": "string", "description": "warm pool name"},
+                    "name": {"type": "string", "description": "optional new VM name"},
+                    "ttl_seconds": {"type": "integer", "minimum": 1, "description": "optional lifetime"},
+                }),
+                &["pool"],
+            ),
+            true,
+            &remote,
+            |r, args| async move {
+                timed(Duration::from_secs(120), async {
+                    let pool = str_arg(&args, "pool").unwrap_or_default();
+                    let mut body = json!({});
+                    if let Some(n) = str_arg(&args, "name") {
+                        body["name"] = json!(n);
+                    }
+                    if let Some(t) = int_arg(&args, "ttl_seconds")? {
+                        body["ttl_seconds"] = json!(t);
+                    }
+                    let v = r
+                        .call(
+                            Method::POST,
+                            &format!("/v1/pools/{}/claim", encode_query(pool)),
+                            Some(body),
+                        )
+                        .await?;
+                    pretty(&summarize(&v)).or_else(|_| pretty(&v))
+                })
+                .await
+            },
+        ),
+        tool(
+            "sandbox_create",
+            "Create an agent sandbox VM from a named template (or the host default; on a Mac, a small Debian VM) with an optional TTL, or (macOS) from a container image, one lightweight VM per container. Returns once commands can run in it.",
+            object(
+                json!({
+                    "template": {"type": "string", "description": "sandbox template name"},
+                    "oci_platform": {"type": "string", "enum": ["linux/arm64", "linux/amd64"], "description": "with oci_image: linux/amd64 runs an x86-64 image under Rosetta (default linux/arm64)"},
+                    "oci_image": {"type": "string", "description": "macOS only: run this container image (alpine:3.22, ghcr.io/org/app:1.2) as the sandbox instead of a template. The first use of an image pulls it and builds its root filesystem (up to a few minutes)."},
+                    "oci_command": {"type": "array", "items": {"type": "string"}, "description": "with oci_image: argv replacing the image's Cmd"},
+                    "oci_env": {"type": "array", "items": {"type": "string"}, "description": "with oci_image: KEY=value entries"},
+                    "oci_ports": {"type": "array", "items": {"type": "string"}, "description": "with oci_image: published TCP ports, HOST:CONTAINER (the Mac's 127.0.0.1:HOST reaches the container)"},
+                    "name": {"type": "string"},
+                    "ttl_seconds": {"type": "integer", "minimum": 1},
+                    "offline": {"type": "boolean", "description": "macOS only: no network card at all, so the sandbox cannot reach anything; commands and files still work. Slower to start (about 10 s)."},
+                    "allow_hosts": {"type": "array", "items": {"type": "string"}, "description": "macOS only: host names the sandbox may reach (example.com, *.example.com; ports 80/443) through a proxy on the Mac; everything else is refused. Implies offline."},
+                }),
+                &[],
+            ),
+            true,
+            &remote,
+            |r, args| async move {
+                let oci = str_arg(&args, "oci_image").map(|image| {
+                    let mut oci = json!({"image": image});
+                    if let Some(p) = str_arg(&args, "oci_platform") {
+                        oci["platform"] = json!(p);
+                    }
+                    for (from, to) in [
+                        ("oci_command", "command"),
+                        ("oci_env", "env"),
+                        ("oci_ports", "ports"),
+                    ] {
+                        if let Some(v) = args.get(from).filter(|v| v.is_array()) {
+                            oci[to] = v.clone();
+                        }
+                    }
+                    oci
+                });
+                let limit = Duration::from_secs(if oci.is_some() { 1200 } else { 180 });
+                timed(limit, async {
+                    let mut body = json!({});
+                    if let Some(oci) = oci {
+                        body["oci"] = oci;
+                    }
+                    if args.get("offline").and_then(|v| v.as_bool()) == Some(true) {
+                        body["offline"] = json!(true);
+                    }
+                    for key in ["template", "name"] {
+                        if let Some(v) = str_arg(&args, key) {
+                            body[key] = json!(v);
+                        }
+                    }
+                    if let Some(hosts) = args.get("allow_hosts").filter(|v| v.is_array()) {
+                        body["allow_hosts"] = hosts.clone();
+                    }
+                    if let Some(t) = int_arg(&args, "ttl_seconds")? {
+                        body["ttl_seconds"] = json!(t);
+                    }
+                    pretty(&r.call(Method::POST, "/v1/sandboxes", Some(body)).await?)
+                })
+                .await
+            },
+        ),
+        tool(
+            "sandbox_logs",
+            "A sandbox's console output (last N lines) and, for a container sandbox, its main process's exit code (null while it runs) or why it failed to start.",
+            object(
+                json!({
+                    "vm": vm_prop,
+                    "lines": {"type": "integer", "minimum": 1, "maximum": 10000, "description": "default 200"},
+                }),
+                &["vm"],
+            ),
+            false,
+            &remote,
+            |r, args| async move {
+                timed(Duration::from_secs(30), async {
+                    let id = resolve(&r, str_arg(&args, "vm").unwrap_or_default()).await?;
+                    let lines = int_arg(&args, "lines")?.unwrap_or(200).clamp(1, 10_000);
+                    pretty(
+                        &r.call(
+                            Method::GET,
+                            &format!("/v1/sandboxes/{id}/logs?lines={lines}"),
+                            None,
+                        )
+                        .await?,
+                    )
+                })
+                .await
+            },
+        ),
+        tool(
+            "sandbox_exec",
+            "Run a shell command inside a sandbox VM (through the guest agent; over SSH on a Mac); returns exit code, stdout and stderr.",
+            object(
+                json!({
+                    "vm": vm_prop,
+                    "command": {"type": "string"},
+                    "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 600, "description": "default 60"},
+                }),
+                &["vm", "command"],
+            ),
+            true,
+            &remote,
+            |r, args| async move {
+                let timeout = int_arg(&args, "timeout_seconds")?.unwrap_or(60).min(600);
+                timed(Duration::from_secs(timeout + 30), async {
+                    let id = resolve(&r, str_arg(&args, "vm").unwrap_or_default()).await?;
+                    let body = json!({
+                        "command": str_arg(&args, "command").unwrap_or_default(),
+                        "timeout_seconds": timeout,
+                    });
+                    pretty(
+                        &r.call(
+                            Method::POST,
+                            &format!("/v1/sandboxes/{id}/process"),
+                            Some(body),
+                        )
+                        .await?,
+                    )
+                })
+                .await
+            },
+        ),
+        tool(
+            "sandbox_read_file",
+            "Read a file from inside a sandbox VM (returned base64-encoded with its size).",
+            object(
+                json!({"vm": vm_prop, "path": {"type": "string", "description": "absolute guest path"}}),
+                &["vm", "path"],
+            ),
+            false,
+            &remote,
+            |r, args| async move {
+                timed(CALL_TIMEOUT, async {
+                    let id = resolve(&r, str_arg(&args, "vm").unwrap_or_default()).await?;
+                    let body = json!({"path": str_arg(&args, "path").unwrap_or_default()});
+                    pretty(
+                        &r.call(
+                            Method::POST,
+                            &format!("/v1/sandboxes/{id}/fs/read"),
+                            Some(body),
+                        )
+                        .await?,
+                    )
+                })
+                .await
+            },
+        ),
+        tool(
+            "sandbox_write_file",
+            "Write a UTF-8 text file inside a sandbox VM.",
+            object(
+                json!({
+                    "vm": vm_prop,
+                    "path": {"type": "string", "description": "absolute guest path"},
+                    "content": {"type": "string"},
+                    "mode": {"type": "integer", "description": "octal permission bits as a number, e.g. 420 for 0644"},
+                }),
+                &["vm", "path", "content"],
+            ),
+            true,
+            &remote,
+            |r, args| async move {
+                use base64::Engine as _;
+                timed(CALL_TIMEOUT, async {
+                    let id = resolve(&r, str_arg(&args, "vm").unwrap_or_default()).await?;
+                    let content = str_arg(&args, "content").unwrap_or_default();
+                    let mut body = json!({
+                        "path": str_arg(&args, "path").unwrap_or_default(),
+                        "content_base64": base64::engine::general_purpose::STANDARD.encode(content),
+                    });
+                    if let Some(m) = int_arg(&args, "mode")? {
+                        body["mode"] = json!(m);
+                    }
+                    pretty(
+                        &r.call(
+                            Method::POST,
+                            &format!("/v1/sandboxes/{id}/fs/write"),
+                            Some(body),
+                        )
+                        .await?,
+                    )
+                })
+                .await
+            },
+        ),
+        tool(
+            "session_create",
+            "Start an agent session: a sandbox with an optional git workspace and a network policy. Returns the session (id, backend, capabilities such as whether fork works, policy, workspace).",
+            object(
+                json!({
+                    "agent": {"type": "string", "description": "which agent this is for, e.g. claude-code"},
+                    "repo": {"type": "string", "description": "https git URL cloned into /workspace (the image needs git and the policy must allow the host)"},
+                    "policy": {"type": "string", "enum": ["offline", "developer-safe", "open"]},
+                    "allow": {"type": "array", "items": {"type": "string"}, "description": "host names the session may reach; everything else is refused"},
+                    "image": {"type": "string", "description": "guest image, e.g. agent-micro"},
+                    "require_ready": {"type": "boolean", "description": "fail the create unless the workspace directory exists and the repo clone succeeded (default: the session is made and workspace.note says why not)"},
+                    "volumes": {"type": "array", "items": {"type": "string"}, "description": "named host volumes as NAME:/guest/path (vz only; formatted ext4 on first use; the session cannot fork)"},
+                    "allow_commands": {"type": "array", "items": {"type": "string"}, "description": "command patterns (* wildcard) session_exec may run; other commands are refused. A guardrail on the command string, not a security boundary"},
+                    "deny_commands": {"type": "array", "items": {"type": "string"}, "description": "command patterns (* wildcard) session_exec refuses"},
+                    "ask_commands": {"type": "array", "items": {"type": "string"}, "description": "command patterns (* wildcard) that need an operator approval (428 + approval_id) before session_exec / jobs run"},
+                    "enforce_exec": {"type": "boolean", "description": "also enforce allow_commands in the guest kernel (Landlock): only the programs the patterns name can start, however a command is built. Each pattern's first word must be a literal program; Linux guests only"},
+                    "confine": {"type": "boolean", "description": "confine every command, job, file and git call in the guest with Landlock + seccomp: system directories read-only, /tmp and the workspace writable. Fails if the guest cannot enforce it (macOS guests cannot); a terminal and ssh are refused on such a session"},
+                    "read_paths": {"type": "array", "items": {"type": "string"}, "description": "extra absolute paths a confined session may read (implies confine)"},
+                    "write_paths": {"type": "array", "items": {"type": "string"}, "description": "extra absolute paths a confined session may write (implies confine)"},
+                    "budget": {"type": "object", "description": "limits on the session: max_execs, max_exec_seconds (summed wall time of commands), max_jobs, max_concurrent_jobs, max_children (fork children), max_compute_seconds (commands plus jobs), max_output_bytes (kept per stream), max_workspace_bytes (measured at command/job start). Fork children start with what is left. Exceeding one refuses the call with 403 (output is truncated, not refused)", "properties": {"max_execs": {"type": "integer", "minimum": 1}, "max_exec_seconds": {"type": "integer", "minimum": 1}, "max_jobs": {"type": "integer", "minimum": 1}, "max_concurrent_jobs": {"type": "integer", "minimum": 1}, "max_children": {"type": "integer", "minimum": 1}, "max_compute_seconds": {"type": "integer", "minimum": 1}, "max_output_bytes": {"type": "integer", "minimum": 1}, "max_workspace_bytes": {"type": "integer", "minimum": 1}}},
+                    "confine_best_effort": {"type": "boolean", "description": "create the session even if the guest cannot enforce confinement; capabilities.confinement says whether it did (implies confine)"},
+                    "ttl_seconds": {"type": "integer", "minimum": 30},
+                }),
+                &[],
+            ),
+            true,
+            &remote,
+            |r, args| async move {
+                timed(Duration::from_secs(300), async {
+                    let mut body = json!({"agent": str_arg(&args, "agent").unwrap_or("custom")});
+                    if let Some(g) = str_arg(&args, "repo") {
+                        body["workspace"] = json!({"git": g});
+                        if args["require_ready"].as_bool().unwrap_or(false) {
+                            body["workspace"]["require_ready"] = json!(true);
+                        }
+                    }
+                    if let Some(i) = str_arg(&args, "image") {
+                        body["runtime"] = json!({"image": i});
+                    }
+                    let allow: Vec<Value> = args["allow"].as_array().cloned().unwrap_or_default();
+                    let mut policy = json!({});
+                    if let Some(p) = str_arg(&args, "policy") {
+                        policy["preset"] = json!(p);
+                    }
+                    if !allow.is_empty() {
+                        policy["network"] = json!({"default": "deny", "allow": allow});
+                    }
+                    if policy != json!({}) {
+                        body["policy"] = policy;
+                    }
+                    let strs = |k: &str| -> Vec<String> {
+                        args[k]
+                            .as_array()
+                            .map(|a| {
+                                a.iter()
+                                    .filter_map(|v| v.as_str().map(str::to_string))
+                                    .collect()
+                            })
+                            .unwrap_or_default()
+                    };
+                    crate::agent_session::add_volumes(&mut body, &strs("volumes"))?;
+                    crate::agent_session::add_process_rules(
+                        &mut body,
+                        &strs("allow_commands"),
+                        &strs("deny_commands"),
+                        &strs("ask_commands"),
+                        args["enforce_exec"].as_bool().unwrap_or(false),
+                    );
+                    if args["budget"].is_object() {
+                        body["budget"] = args["budget"].clone();
+                    }
+                    let best_effort = args["confine_best_effort"].as_bool().unwrap_or(false);
+                    let (rp, wp) = (strs("read_paths"), strs("write_paths"));
+                    crate::agent_session::add_filesystem(
+                        &mut body,
+                        args["confine"].as_bool().unwrap_or(false)
+                            || best_effort
+                            || !rp.is_empty()
+                            || !wp.is_empty(),
+                        &rp,
+                        &wp,
+                        best_effort,
+                    );
+                    if let Some(t) = int_arg(&args, "ttl_seconds")? {
+                        body["ttl_seconds"] = json!(t);
+                    }
+                    pretty(
+                        &r.call(Method::POST, "/v1/agents/sessions", Some(body))
+                            .await?,
+                    )
+                })
+                .await
+            },
+        ),
+        tool(
+            "session_exec",
+            "Run a shell command in an agent session; returns exit code, stdout and stderr. The action is recorded in the session's ledger. A command matching the session's process.ask rules is not run: the call fails with 428 and an approval_id; an operator approves it (session_approve with an admin credential, or `fluxctl agent approve`), then call again with approval_id, or set approval_wait_seconds to wait for the decision.",
+            object(
+                json!({
+                    "session": {"type": "string", "description": "session id"},
+                    "command": {"type": "string"},
+                    "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 600, "description": "default 60"},
+                    "approval_id": {"type": "string", "description": "an approval granted for exactly this command and timeout"},
+                    "approval_wait_seconds": {"type": "integer", "minimum": 1, "maximum": 120, "description": "wait this long for an operator's decision"},
+                }),
+                &["session", "command"],
+            ),
+            true,
+            &remote,
+            |r, args| async move {
+                let timeout = int_arg(&args, "timeout_seconds")?.unwrap_or(60).min(600);
+                let waiting = int_arg(&args, "approval_wait_seconds")?
+                    .unwrap_or(0)
+                    .min(120);
+                timed(Duration::from_secs(timeout + waiting + 30), async {
+                    let id = session_id(&args)?;
+                    let mut body = json!({
+                        "command": str_arg(&args, "command").unwrap_or_default(),
+                        "timeout_seconds": timeout,
+                    });
+                    if let Some(a) = str_arg(&args, "approval_id") {
+                        body["approval_id"] = json!(a);
+                    }
+                    if waiting > 0 {
+                        body["approval_wait_seconds"] = json!(waiting);
+                    }
+                    pretty(
+                        &r.call(
+                            Method::POST,
+                            &format!("/v1/agents/sessions/{id}/exec"),
+                            Some(body),
+                        )
+                        .await?,
+                    )
+                })
+                .await
+            },
+        ),
+        tool(
+            "session_approvals",
+            "List a session's approval requests: commands that matched a process.ask rule, with id, summary, state (pending|approved|denied|consumed|expired) and expiry. Read-only.",
+            object(json!({"session": {"type": "string"}}), &["session"]),
+            false,
+            &remote,
+            |r, args| async move {
+                timed(CALL_TIMEOUT, async {
+                    let id = session_id(&args)?;
+                    pretty(
+                        &r.call(
+                            Method::GET,
+                            &format!("/v1/agents/sessions/{id}/approvals"),
+                            None,
+                        )
+                        .await?,
+                    )
+                })
+                .await
+            },
+        ),
+        tool(
+            "session_approve",
+            "Approve or deny a pending approval request. Needs an admin credential: a session token is refused, so an agent cannot approve its own command. Approving lets exactly that command run once, until it expires.",
+            object(
+                json!({
+                    "session": {"type": "string"},
+                    "approval": {"type": "string", "description": "approval id from the 428 answer or session_approvals"},
+                    "decision": {"type": "string", "enum": ["approve", "deny"]},
+                    "note": {"type": "string"},
+                }),
+                &["session", "approval", "decision"],
+            ),
+            true,
+            &remote,
+            |r, args| async move {
+                timed(CALL_TIMEOUT, async {
+                    let id = session_id(&args)?;
+                    let approval = str_arg(&args, "approval")
+                        .and_then(|a| Uuid::parse_str(a).ok())
+                        .ok_or_else(|| anyhow::anyhow!("approval must be an approval id"))?;
+                    let verb = match str_arg(&args, "decision") {
+                        Some("approve") => "approve",
+                        Some("deny") => "deny",
+                        _ => anyhow::bail!("decision must be approve or deny"),
+                    };
+                    let body = str_arg(&args, "note").map(|n| json!({"note": n}));
+                    pretty(
+                        &r.call(
+                            Method::POST,
+                            &format!("/v1/agents/sessions/{id}/approvals/{approval}/{verb}"),
+                            body,
+                        )
+                        .await?,
+                    )
+                })
+                .await
+            },
+        ),
+        tool(
+            "session_checkpoint",
+            "Snapshot an agent session under a tag so it can be restored later. disk_only skips memory (much smaller; restore then cold-boots).",
+            object(
+                json!({
+                    "session": {"type": "string"},
+                    "tag": {"type": "string", "description": "[A-Za-z0-9._-], default cp-N"},
+                    "disk_only": {"type": "boolean"},
+                }),
+                &["session"],
+            ),
+            true,
+            &remote,
+            |r, args| async move {
+                timed(Duration::from_secs(300), async {
+                    let id = session_id(&args)?;
+                    let mut body = json!({});
+                    if let Some(t) = str_arg(&args, "tag") {
+                        body["tag"] = json!(t);
+                    }
+                    if args["disk_only"].as_bool() == Some(true) {
+                        body["memory"] = json!(false);
+                    }
+                    pretty(
+                        &r.call(
+                            Method::POST,
+                            &format!("/v1/agents/sessions/{id}/checkpoint"),
+                            Some(body),
+                        )
+                        .await?,
+                    )
+                })
+                .await
+            },
+        ),
+        tool(
+            "session_restore",
+            "Restore an agent session to one of its checkpoints (discards everything since).",
+            object(
+                json!({"session": {"type": "string"}, "tag": {"type": "string"}}),
+                &["session", "tag"],
+            ),
+            true,
+            &remote,
+            |r, args| async move {
+                timed(Duration::from_secs(300), async {
+                    let id = session_id(&args)?;
+                    let body = json!({"tag": str_arg(&args, "tag").unwrap_or_default()});
+                    pretty(
+                        &r.call(
+                            Method::POST,
+                            &format!("/v1/agents/sessions/{id}/restore"),
+                            Some(body),
+                        )
+                        .await?,
+                    )
+                })
+                .await
+            },
+        ),
+        tool(
+            "session_rewind_points",
+            "List an agent session's rewind points: the automatic checkpoints taken before each exec (oldest first, each with the command that ran next, and whether it is pinned), and whether rewind is on.",
+            object(json!({"session": {"type": "string"}}), &["session"]),
+            false,
+            &remote,
+            |r, args| async move {
+                timed(Duration::from_secs(30), async {
+                    let id = session_id(&args)?;
+                    pretty(
+                        &r.call(
+                            Method::GET,
+                            &format!("/v1/agents/sessions/{id}/rewind"),
+                            None,
+                        )
+                        .await?,
+                    )
+                })
+                .await
+            },
+        ),
+        tool(
+            "session_rewind",
+            "Undo and debug an agent session with its rewind points. action: on (take a checkpoint before every exec; optional max_points 1-50, disk_only), off, undo (put the whole machine back before the last `steps` commands, default 1, or to point `to`; discards everything since, memory included), pin or unpin (tag; a pinned point is kept through eviction and undo), branch (tag, optional count: start that many child sessions from that past point while this session carries on untouched; the session must be forkable like session_fork), bisect (give `test`, a shell command that exits 0 on a good machine: it restores points, runs the test after each and returns the first command after which it fails, then puts the machine back as it was; optional good and bad point tags).",
+            object(
+                json!({
+                    "session": {"type": "string"},
+                    "action": {"type": "string", "enum": ["on", "off", "undo", "pin", "unpin", "bisect", "branch"]},
+                    "steps": {"type": "integer", "minimum": 1, "description": "undo: commands to go back (default 1)"},
+                    "to": {"type": "string", "description": "undo: a point tag instead of steps"},
+                    "tag": {"type": "string", "description": "pin, unpin and branch: the point"},
+                    "count": {"type": "integer", "minimum": 1, "maximum": 32, "description": "branch: child sessions to start (default 1)"},
+                    "max_points": {"type": "integer", "minimum": 1, "maximum": 50},
+                    "disk_only": {"type": "boolean", "description": "on: points without memory (much smaller)"},
+                    "triggers": {"type": "array", "items": {"type": "string", "enum": ["exec", "job", "file", "git"]}, "description": "on: what takes a point (default exec only; file = writes, deletes and uploads, git = commit and branch)"},
+                    "test": {"type": "string", "description": "bisect: shell command, exit 0 = good"},
+                    "good": {"type": "string", "description": "bisect: a point known to pass (default the oldest)"},
+                    "bad": {"type": "string", "description": "bisect: a point known to fail (default the machine now)"},
+                    "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 600, "description": "bisect: per-run limit, default 60"},
+                }),
+                &["session", "action"],
+            ),
+            true,
+            &remote,
+            |r, args| async move {
+                timed(Duration::from_secs(900), async {
+                    let id = session_id(&args)?;
+                    let action = str_arg(&args, "action").unwrap_or_default();
+                    let (path, body) = match action {
+                        "on" => {
+                            let mut b = json!({"enabled": true});
+                            if let Some(n) = int_arg(&args, "max_points")? {
+                                if !(1..=50).contains(&n) {
+                                    bail!("max_points must be 1-50");
+                                }
+                                b["max_points"] = json!(n);
+                            }
+                            if args["disk_only"].as_bool() == Some(true) {
+                                b["memory"] = json!(false);
+                            }
+                            if let Some(t) = args.get("triggers").filter(|t| t.is_array()) {
+                                b["triggers"] = t.clone();
+                            }
+                            ("config", b)
+                        }
+                        "off" => ("config", json!({"enabled": false})),
+                        "undo" => {
+                            let b = match str_arg(&args, "to") {
+                                Some(t) => json!({"to": t}),
+                                None => json!({"steps": int_arg(&args, "steps")?.unwrap_or(1)}),
+                            };
+                            ("undo", b)
+                        }
+                        "pin" | "unpin" => {
+                            let Some(tag) = str_arg(&args, "tag") else {
+                                bail!("{action} needs tag");
+                            };
+                            ("pin", json!({"tag": tag, "pinned": action == "pin"}))
+                        }
+                        "branch" => {
+                            let Some(tag) = str_arg(&args, "tag") else {
+                                bail!("branch needs tag, a point from session_rewind_points");
+                            };
+                            let count = int_arg(&args, "count")?.unwrap_or(1);
+                            if !(1..=32).contains(&count) {
+                                bail!("count must be 1-32");
+                            }
+                            ("branch", json!({"tag": tag, "count": count}))
+                        }
+                        "bisect" => {
+                            let Some(test) = str_arg(&args, "test") else {
+                                bail!("bisect needs test, a shell command that exits 0 on a good machine");
+                            };
+                            let mut b = json!({"test": test});
+                            for k in ["good", "bad"] {
+                                if let Some(v) = str_arg(&args, k) {
+                                    b[k] = json!(v);
+                                }
+                            }
+                            if let Some(t) = int_arg(&args, "timeout_seconds")? {
+                                b["timeout_seconds"] = json!(t);
+                            }
+                            ("bisect", b)
+                        }
+                        other => bail!("action must be on, off, undo, pin, unpin, branch or bisect, not {other:?}"),
+                    };
+                    pretty(
+                        &r.call(
+                            Method::POST,
+                            &format!("/v1/agents/sessions/{id}/rewind/{path}"),
+                            Some(body),
+                        )
+                        .await?,
+                    )
+                })
+                .await
+            },
+        ),
+        tool(
+            "session_fork",
+            "Fork an agent session into COUNT child sessions that start from its current state, to try approaches in parallel. Needs a forkable session: the in-tree KVM engine, or a vz session with no network card (policy offline or a host allow-list). Otherwise this fails with the reason and nothing is created.",
+            object(
+                json!({
+                    "session": {"type": "string"},
+                    "count": {"type": "integer", "minimum": 1, "maximum": 32},
+                    "identity": {"type": "string", "enum": ["best-effort", "unique", "preserve"], "description": "default best-effort; unique refuses guests that cannot confirm the identity reset"},
+                }),
+                &["session"],
+            ),
+            true,
+            &remote,
+            |r, args| async move {
+                timed(Duration::from_secs(300), async {
+                    let id = session_id(&args)?;
+                    let count = int_arg(&args, "count")?.unwrap_or(1);
+                    if !(1..=32).contains(&count) {
+                        bail!("count must be 1-32");
+                    }
+                    let mut body = json!({"count": count});
+                    if let Some(i) = str_arg(&args, "identity") {
+                        body["identity"] = json!(i);
+                    }
+                    pretty(
+                        &r.call(
+                            Method::POST,
+                            &format!("/v1/agents/sessions/{id}/fork"),
+                            Some(body),
+                        )
+                        .await?,
+                    )
+                })
+                .await
+            },
+        ),
+        tool(
+            "session_rollout",
+            "Try one command several times at once: fork the session into COUNT children, run COMMAND in every child in parallel, return each child's exit code and output, then delete the children unless keep is true. Same forkability rules as session_fork. Each child is a full sandbox, so keep COUNT small.",
+            object(
+                json!({
+                    "session": {"type": "string"},
+                    "command": {"type": "string", "description": "shell command run in every child"},
+                    "count": {"type": "integer", "minimum": 1, "maximum": 32},
+                    "timeout_seconds": {"type": "integer", "minimum": 1},
+                    "keep": {"type": "boolean", "description": "keep the children (default false: they are deleted)"},
+                }),
+                &["session", "command"],
+            ),
+            true,
+            &remote,
+            |r, args| async move {
+                timed(Duration::from_secs(600), async {
+                    let id = session_id(&args)?;
+                    let count = int_arg(&args, "count")?.unwrap_or(2);
+                    if !(1..=32).contains(&count) {
+                        bail!("count must be 1-32");
+                    }
+                    let command = str_arg(&args, "command")
+                        .filter(|c| !c.trim().is_empty())
+                        .ok_or_else(|| anyhow::anyhow!("command is required"))?;
+                    let timeout = int_arg(&args, "timeout_seconds")?;
+                    let keep = args["keep"].as_bool().unwrap_or(false);
+                    pretty(
+                        &crate::agent_session::rollout(
+                            &r,
+                            id,
+                            count as u32,
+                            command,
+                            timeout,
+                            keep,
+                            None,
+                        )
+                        .await?,
+                    )
+                })
+                .await
+            },
+        ),
+        tool(
+            "session_evaluate",
+            "Try several candidate fixes in isolated forks and keep the best: forks one child per candidate command, runs the candidate and then the test command in it, scores each (passed only if the test exits 0), deletes the losing children and returns the winner. Then review it with session_promote dry_run and apply. Needs a forkable session (see session_fork); each child is a full sandbox, so keep candidates few.",
+            object(
+                json!({
+                    "session": {"type": "string"},
+                    "candidates": {"type": "array", "items": {"type": "string"}, "minItems": 1, "maxItems": 32, "description": "one shell command per candidate, each run in its own child"},
+                    "test": {"type": "string", "description": "shell command that decides a candidate passed (exit 0); without it, the candidate's own exit code decides"},
+                    "timeout_seconds": {"type": "integer", "minimum": 1},
+                    "keep_all": {"type": "boolean", "description": "keep losing children too (default false)"},
+                }),
+                &["session", "candidates"],
+            ),
+            true,
+            &remote,
+            |r, args| async move {
+                timed(Duration::from_secs(1800), async {
+                    let id = session_id(&args)?;
+                    let candidates: Vec<String> = args["candidates"]
+                        .as_array()
+                        .map(|a| {
+                            a.iter()
+                                .filter_map(|v| v.as_str().map(str::to_string))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    pretty(
+                        &crate::agent_session::evaluate(
+                            &r,
+                            id,
+                            &candidates,
+                            str_arg(&args, "test").filter(|t| !t.trim().is_empty()),
+                            int_arg(&args, "timeout_seconds")?,
+                            args["keep_all"].as_bool().unwrap_or(false),
+                            None,
+                        )
+                        .await?,
+                    )
+                })
+                .await
+            },
+        ),
+        tool(
+            "session_grant",
+            "Give a session a brokered credential: the egress proxy injects it as an Authorization header for the named hosts only, so the agent never sees the secret. secret_ref names a secret held by the daemon (FLUXVM_SECRET_<REF>). It ends with the session and is not inherited by fork children (grant each child explicitly).",
+            object(
+                json!({
+                    "session": {"type": "string"},
+                    "secret_ref": {"type": "string", "description": "name of the daemon-held secret"},
+                    "hosts": {"type": "array", "items": {"type": "string"}, "minItems": 1, "description": "destination hosts (exact or domain suffix)"},
+                    "ttl_seconds": {"type": "integer", "minimum": 1},
+                    "methods": {"type": "array", "items": {"type": "string"}, "description": "send the secret only with these HTTP methods (default: any)"},
+                    "paths": {"type": "array", "items": {"type": "string"}, "description": "send the secret only to these paths; * matches any run (default: any)"},
+                }),
+                &["session", "secret_ref", "hosts"],
+            ),
+            true,
+            &remote,
+            |r, args| async move {
+                timed(CALL_TIMEOUT, async {
+                    let id = session_id(&args)?;
+                    let mut body = json!({
+                        "secret_ref": str_arg(&args, "secret_ref").unwrap_or_default(),
+                        "hosts": args["hosts"],
+                    });
+                    if let Some(t) = int_arg(&args, "ttl_seconds")? {
+                        body["ttl_seconds"] = json!(t);
+                    }
+                    for key in ["methods", "paths"] {
+                        if args[key].is_array() {
+                            body[key] = args[key].clone();
+                        }
+                    }
+                    pretty(
+                        &r.call(
+                            Method::POST,
+                            &format!("/v1/agents/sessions/{id}/grants"),
+                            Some(body),
+                        )
+                        .await?,
+                    )
+                })
+                .await
+            },
+        ),
+        tool(
+            "session_revoke_grants",
+            "Revoke one credential grant of a session (grant id), or all of them.",
+            object(
+                json!({"session": {"type": "string"}, "grant": {"type": "string", "description": "grant id; omit to revoke all"}}),
+                &["session"],
+            ),
+            true,
+            &remote,
+            |r, args| async move {
+                timed(CALL_TIMEOUT, async {
+                    let id = session_id(&args)?;
+                    let path = match str_arg(&args, "grant") {
+                        Some(g) => format!("/v1/agents/sessions/{id}/grants/{g}"),
+                        None => format!("/v1/agents/sessions/{id}/grants"),
+                    };
+                    pretty(&r.call(Method::DELETE, &path, None).await?)
+                })
+                .await
+            },
+        ),
+        tool(
+            "session_probe",
+            "Which tools a session's guest image has (git, sha256sum, node, python, cargo, a browser, socat, playwright) and which features that enables: git, promote (needs sha256sum), build toolchains, browser_cdp. Run it before relying on the image.",
+            object(json!({"session": {"type": "string"}}), &["session"]),
+            false,
+            &remote,
+            |r, args| async move {
+                timed(CALL_TIMEOUT, async {
+                    let id = session_id(&args)?;
+                    pretty(
+                        &r.call(
+                            Method::GET,
+                            &format!("/v1/agents/sessions/{id}/probe"),
+                            None,
+                        )
+                        .await?,
+                    )
+                })
+                .await
+            },
+        ),
+        tool(
+            "session_screenshot",
+            "Screenshot of a vz session's guest display, as an image (token scope: screen). Coordinates for session_input are pixels of this image from the top left; pass its width as screen_width.",
+            object(
+                json!({
+                    "session": {"type": "string"},
+                    "max_width": {"type": "integer", "minimum": 64, "maximum": 8192, "description": "scale down to this width (default 1280)"}
+                }),
+                &["session"],
+            ),
+            false,
+            &remote,
+            |r, args| async move {
+                timed(CALL_TIMEOUT, async {
+                    let id = session_id(&args)?;
+                    let width = int_arg(&args, "max_width")?.unwrap_or(DEFAULT_SCREEN_WIDTH);
+                    screenshot_content(&r, &format!("/v1/agents/sessions/{id}"), width).await
+                })
+                .await
+            },
+        ),
+        tool(
+            "session_input",
+            "Keyboard and mouse input for a vz session's guest display (token scope: screen). Same actions as vm_input: type, key, move, click, double_click, right_click, middle_click, down, up, drag, scroll; actions runs a list in order. Typed text is not copied into the session ledger. screenshot returns the display afterwards.",
+            object(
+                json!({
+                    "session": {"type": "string"},
+                    "action": {"type": "string", "enum": INPUT_ACTIONS},
+                    "text": {"type": "string"},
+                    "key": {"type": "string"},
+                    "modifiers": {"type": "array", "items": {"type": "string", "enum": ["shift", "control", "option", "command"]}},
+                    "x": {"type": "number"},
+                    "y": {"type": "number"},
+                    "to_x": {"type": "number"},
+                    "to_y": {"type": "number"},
+                    "dx": {"type": "integer"},
+                    "dy": {"type": "integer"},
+                    "screen_width": {"type": "integer", "minimum": 1},
+                    "actions": {"type": "array", "maxItems": 100, "items": {"type": "object"}},
+                    "screenshot": {"type": "boolean", "description": "return a screenshot (default width 1280) after the input"}
+                }),
+                &["session"],
+            ),
+            true,
+            &remote,
+            |r, args| async move {
+                timed(Duration::from_secs(120), async {
+                    let id = session_id(&args)?;
+                    let body = input_body(&args)?;
+                    let base = format!("/v1/agents/sessions/{id}");
+                    let v = r
+                        .call(Method::POST, &format!("{base}/input"), Some(body))
+                        .await?;
+                    if args.get("screenshot").and_then(Value::as_bool) == Some(true) {
+                        tokio::time::sleep(Duration::from_millis(500)).await;
+                        let width = args
+                            .get("screen_width")
+                            .and_then(Value::as_u64)
+                            .unwrap_or(DEFAULT_SCREEN_WIDTH);
+                        return screenshot_content(&r, &base, width).await;
+                    }
+                    Ok(vec![json!({"type": "text", "text": pretty(&v)?})])
+                })
+                .await
+            },
+        ),
+        tool(
+            "session_wait_screen",
+            "Block until a vz session's display changes (or the timeout): returns changed, waited_ms and the size. Call session_screenshot afterwards. Use it after session_input instead of sleeping and polling (token scope: screen).",
+            object(
+                json!({
+                    "session": {"type": "string"},
+                    "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 60, "description": "default 10"},
+                    "interval_ms": {"type": "integer", "minimum": 100, "maximum": 5000, "description": "how often to look, default 500"}
+                }),
+                &["session"],
+            ),
+            false,
+            &remote,
+            |r, args| async move {
+                timed(Duration::from_secs(90), async {
+                    let id = session_id(&args)?;
+                    let mut body = serde_json::Map::new();
+                    for k in ["timeout_seconds", "interval_ms"] {
+                        if let Some(v) = args.get(k) {
+                            body.insert(k.into(), v.clone());
+                        }
+                    }
+                    pretty(
+                        &r.call(
+                            Method::POST,
+                            &format!("/v1/agents/sessions/{id}/screen/wait"),
+                            Some(Value::Object(body)),
+                        )
+                        .await?,
+                    )
+                })
+                .await
+            },
+        ),
+        tool(
+            "session_events",
+            "What an agent session did: its ledger (exec, checkpoint, restore, fork, ...) and the sandbox's VM events. since is an RFC 3339 time.",
+            object(
+                json!({"session": {"type": "string"}, "since": {"type": "string"}}),
+                &["session"],
+            ),
+            false,
+            &remote,
+            |r, args| async move {
+                timed(CALL_TIMEOUT, async {
+                    let id = session_id(&args)?;
+                    let mut path = format!("/v1/agents/sessions/{id}/events");
+                    if let Some(s) = str_arg(&args, "since") {
+                        path.push_str("?since=");
+                        path.push_str(&encode_query(s));
+                    }
+                    pretty(&r.call(Method::GET, &path, None).await?)
+                })
+                .await
+            },
+        ),
+        tool(
+            "session_artifacts",
+            "The workspace changes a session made since it started (added/modified/deleted files), plus its checkpoints and forks.",
+            object(json!({"session": {"type": "string"}}), &["session"]),
+            false,
+            &remote,
+            |r, args| async move {
+                timed(CALL_TIMEOUT, async {
+                    let id = session_id(&args)?;
+                    pretty(
+                        &r.call(
+                            Method::GET,
+                            &format!("/v1/agents/sessions/{id}/artifacts"),
+                            None,
+                        )
+                        .await?,
+                    )
+                })
+                .await
+            },
+        ),
+        tool(
+            "session_preview",
+            "Mint an expiring URL that reaches one TCP port of a session's guest (a dev server, a web app). The URL is the credential: share it only with who should see the app.",
+            object(
+                json!({
+                    "session": {"type": "string"},
+                    "port": {"type": "integer", "description": "guest TCP port, 1-65535"},
+                    "ttl_seconds": {"type": "integer", "description": "1-86400, default 3600"},
+                }),
+                &["session", "port"],
+            ),
+            true,
+            &remote,
+            |r, args| async move {
+                timed(CALL_TIMEOUT, async {
+                    let id = session_id(&args)?;
+                    let port = int_arg(&args, "port")?
+                        .ok_or_else(|| anyhow::anyhow!("port is required"))?;
+                    let mut body = json!({"port": port});
+                    if let Some(t) = int_arg(&args, "ttl_seconds")? {
+                        body["ttl_seconds"] = json!(t);
+                    }
+                    let mut v = r
+                        .call(
+                            Method::POST,
+                            &format!("/v1/agents/sessions/{id}/preview"),
+                            Some(body),
+                        )
+                        .await?;
+                    if let Some(path) = v["url"].as_str() {
+                        v["url"] = json!(format!("{}{}", r.base().trim_end_matches('/'), path));
+                    }
+                    pretty(&v)
+                })
+                .await
+            },
+        ),
+        tool(
+            "session_job_start",
+            "Start a command that keeps running after the call returns (a dev server, a long build). Returns a job id; read output with session_job_read. No TTY; set stdin true to feed it with session_job_stdin.",
+            object(
+                json!({
+                    "session": {"type": "string"},
+                    "command": {"type": "string", "description": "one shell line"},
+                    "stdin": {"type": "boolean", "description": "give the job a stdin that session_job_stdin writes to; close it with session_job_stdin close=true"},
+                    "max_output_bytes": {"type": "integer", "minimum": 1, "description": "keep this many bytes of output per stream (default 16 MiB); the job keeps running past it and later output is dropped"},
+                    "timeout_seconds": {"type": "integer", "minimum": 1, "description": "kill the job's whole process tree after this long"},
+                    "approval_id": {"type": "string", "description": "an approval granted for exactly this job (command, stdin, caps)"},
+                    "approval_wait_seconds": {"type": "integer", "minimum": 1, "maximum": 120},
+                }),
+                &["session", "command"],
+            ),
+            true,
+            &remote,
+            |r, args| async move {
+                timed(CALL_TIMEOUT, async {
+                    let id = session_id(&args)?;
+                    let command = str_arg(&args, "command")
+                        .ok_or_else(|| anyhow::anyhow!("command is required"))?;
+                    let mut body = json!({"command": command});
+                    if args["stdin"].as_bool().unwrap_or(false) {
+                        body["stdin"] = json!(true);
+                    }
+                    if let Some(n) = int_arg(&args, "max_output_bytes")? {
+                        body["max_output_bytes"] = json!(n);
+                    }
+                    if let Some(n) = int_arg(&args, "timeout_seconds")? {
+                        body["timeout_seconds"] = json!(n);
+                    }
+                    if let Some(a) = str_arg(&args, "approval_id") {
+                        body["approval_id"] = json!(a);
+                    }
+                    if let Some(w) = int_arg(&args, "approval_wait_seconds")? {
+                        body["approval_wait_seconds"] = json!(w);
+                    }
+                    pretty(
+                        &r.call(
+                            Method::POST,
+                            &format!("/v1/agents/sessions/{id}/jobs"),
+                            Some(body),
+                        )
+                        .await?,
+                    )
+                })
+                .await
+            },
+        ),
+        tool(
+            "session_job_stdin",
+            "Write text to the stdin of a background job started with stdin true; a newline is not added. Set close true to send end-of-file afterwards (text may then be omitted).",
+            object(
+                json!({
+                    "session": {"type": "string"},
+                    "job": {"type": "string"},
+                    "text": {"type": "string", "description": "up to 48 KiB"},
+                    "close": {"type": "boolean", "description": "close stdin after this write (EOF)"},
+                }),
+                &["session", "job"],
+            ),
+            true,
+            &remote,
+            |r, args| async move {
+                timed(CALL_TIMEOUT, async {
+                    let id = session_id(&args)?;
+                    let job = str_arg(&args, "job")
+                        .and_then(|j| Uuid::parse_str(j).ok())
+                        .ok_or_else(|| anyhow::anyhow!("job must be a job id"))?;
+                    let close = args["close"].as_bool().unwrap_or(false);
+                    let mut body = json!({});
+                    match str_arg(&args, "text") {
+                        Some(t) => body["text"] = json!(t),
+                        None if close => {}
+                        None => anyhow::bail!("text is required unless close is true"),
+                    }
+                    if close {
+                        body["close"] = json!(true);
+                    }
+                    pretty(
+                        &r.call(
+                            Method::POST,
+                            &format!("/v1/agents/sessions/{id}/jobs/{job}/stdin"),
+                            Some(body),
+                        )
+                        .await?,
+                    )
+                })
+                .await
+            },
+        ),
+        tool(
+            "session_jobs",
+            "List a session's background jobs with command, state (running|exited|killed|signaled|timed_out) and exit code.",
+            object(json!({"session": {"type": "string"}}), &["session"]),
+            false,
+            &remote,
+            |r, args| async move {
+                timed(CALL_TIMEOUT, async {
+                    let id = session_id(&args)?;
+                    pretty(
+                        &r.call(Method::GET, &format!("/v1/agents/sessions/{id}/jobs"), None)
+                            .await?,
+                    )
+                })
+                .await
+            },
+        ),
+        tool(
+            "session_job_read",
+            "Output of a background job from a byte offset. Returns state (running|exited|killed|signaled|timed_out), exit_code, output (stdout) and next_offset: pass next_offset back to read only what is new. Jobs run by the guest supervisor also return stderr and stderr_next_offset (pass stderr_offset), dropped_bytes, and eof; wait_ms holds the call open until output arrives. more=true means read again at once.",
+            object(
+                json!({
+                    "session": {"type": "string"},
+                    "job": {"type": "string"},
+                    "offset": {"type": "integer", "description": "stdout byte offset, default 0"},
+                    "stderr_offset": {"type": "integer", "description": "stderr byte offset, default 0 (supervised jobs)"},
+                    "wait_ms": {"type": "integer", "description": "wait up to this long for new output, at most 25000 (supervised jobs)"},
+                }),
+                &["session", "job"],
+            ),
+            false,
+            &remote,
+            |r, args| async move {
+                timed(CALL_TIMEOUT, async {
+                    let id = session_id(&args)?;
+                    let job =
+                        str_arg(&args, "job").ok_or_else(|| anyhow::anyhow!("job is required"))?;
+                    let offset = int_arg(&args, "offset")?.unwrap_or(0);
+                    let err_offset = int_arg(&args, "stderr_offset")?.unwrap_or(0);
+                    let wait = int_arg(&args, "wait_ms")?.unwrap_or(0);
+                    pretty(
+                        &r.call(
+                            Method::GET,
+                            &format!(
+                                "/v1/agents/sessions/{id}/jobs/{job}?offset={offset}&stderr_offset={err_offset}&wait_ms={wait}"
+                            ),
+                            None,
+                        )
+                        .await?,
+                    )
+                })
+                .await
+            },
+        ),
+        tool(
+            "session_job_kill",
+            "Stop a background job: SIGTERM (or `signal`, a name like KILL or a number) to its whole process tree. A shell-script job then reads exit_code 143; a supervised job reads state killed.",
+            object(
+                json!({
+                    "session": {"type": "string"},
+                    "job": {"type": "string"},
+                    "signal": {"type": "string", "description": "TERM (default), KILL, INT, HUP or 1-64; supervised jobs only"},
+                }),
+                &["session", "job"],
+            ),
+            true,
+            &remote,
+            |r, args| async move {
+                timed(CALL_TIMEOUT, async {
+                    let id = session_id(&args)?;
+                    let job =
+                        str_arg(&args, "job").ok_or_else(|| anyhow::anyhow!("job is required"))?;
+                    let q = str_arg(&args, "signal")
+                        .map(|s| format!("?signal={s}"))
+                        .unwrap_or_default();
+                    r.call(
+                        Method::DELETE,
+                        &format!("/v1/agents/sessions/{id}/jobs/{job}{q}"),
+                        None,
+                    )
+                    .await?;
+                    pretty(&json!({"ok": true, "killed": job}))
+                })
+                .await
+            },
+        ),
+        tool(
+            "session_files",
+            "List a directory in a session's guest, or stat one file. Entries have name, type, size, mtime, mode.",
+            object(
+                json!({"session": {"type": "string"}, "path": {"type": "string", "description": "absolute guest path"}}),
+                &["session", "path"],
+            ),
+            false,
+            &remote,
+            |r, args| async move {
+                timed(CALL_TIMEOUT, async {
+                    let id = session_id(&args)?;
+                    let path = str_arg(&args, "path")
+                        .ok_or_else(|| anyhow::anyhow!("path is required"))?;
+                    pretty(
+                        &r.call(
+                            Method::GET,
+                            &format!("/v1/agents/sessions/{id}/files?path={}", encode_query(path)),
+                            None,
+                        )
+                        .await?,
+                    )
+                })
+                .await
+            },
+        ),
+        tool(
+            "session_file_read",
+            "Read a file from a session's guest as base64 (content_base64).",
+            object(
+                json!({"session": {"type": "string"}, "path": {"type": "string"}}),
+                &["session", "path"],
+            ),
+            false,
+            &remote,
+            |r, args| async move {
+                timed(CALL_TIMEOUT, async {
+                    let id = session_id(&args)?;
+                    let path = str_arg(&args, "path")
+                        .ok_or_else(|| anyhow::anyhow!("path is required"))?;
+                    pretty(
+                        &r.call(
+                            Method::GET,
+                            &format!(
+                                "/v1/agents/sessions/{id}/files/content?path={}",
+                                encode_query(path)
+                            ),
+                            None,
+                        )
+                        .await?,
+                    )
+                })
+                .await
+            },
+        ),
+        tool(
+            "session_file_write",
+            "Write a text file into a session's guest (parent directories are created). Use content for text; for binary use the CLI or REST with content_base64. About 1.5 MiB per call.",
+            object(
+                json!({
+                    "session": {"type": "string"},
+                    "path": {"type": "string"},
+                    "content": {"type": "string"},
+                    "mode": {"type": "integer", "description": "decimal file mode, e.g. 493 for 0755"},
+                }),
+                &["session", "path", "content"],
+            ),
+            true,
+            &remote,
+            |r, args| async move {
+                timed(CALL_TIMEOUT, async {
+                    use base64::Engine as _;
+                    let id = session_id(&args)?;
+                    let path = str_arg(&args, "path")
+                        .ok_or_else(|| anyhow::anyhow!("path is required"))?;
+                    let content = str_arg(&args, "content")
+                        .ok_or_else(|| anyhow::anyhow!("content is required"))?;
+                    crate::agent_session::check_file_write_size(content.len(), "content")?;
+                    let mut body = json!({
+                        "path": path,
+                        "content_base64": base64::engine::general_purpose::STANDARD.encode(content),
+                    });
+                    if let Some(m) = int_arg(&args, "mode")? {
+                        body["mode"] = json!(m);
+                    }
+                    pretty(
+                        &r.call(
+                            Method::PUT,
+                            &format!("/v1/agents/sessions/{id}/files/content"),
+                            Some(body),
+                        )
+                        .await?,
+                    )
+                })
+                .await
+            },
+        ),
+        tool(
+            "session_git",
+            "Git in a session's workspace repository (the guest needs git; offline sessions cannot install it). op: status | diff | log | commit | branch. commit stages everything first unless all=false.",
+            object(
+                json!({
+                    "session": {"type": "string"},
+                    "op": {"type": "string", "enum": ["status", "diff", "log", "commit", "branch"]},
+                    "repo": {"type": "string", "description": "guest directory; default the session workspace"},
+                    "message": {"type": "string", "description": "commit message (commit)"},
+                    "name": {"type": "string", "description": "branch name (branch)"},
+                    "staged": {"type": "boolean", "description": "diff only staged changes"},
+                    "path": {"type": "string", "description": "diff one path, relative to the repo"},
+                    "limit": {"type": "integer", "description": "log length, default 20"},
+                    "all": {"type": "boolean", "description": "commit: stage everything first (default true)"},
+                }),
+                &["session", "op"],
+            ),
+            true,
+            &remote,
+            |r, args| async move {
+                timed(CALL_TIMEOUT, async {
+                    let id = session_id(&args)?;
+                    let base = format!("/v1/agents/sessions/{id}/git");
+                    let mut q = Vec::new();
+                    for k in ["repo", "path"] {
+                        if let Some(v) = str_arg(&args, k) {
+                            q.push(format!("{k}={}", encode_query(v)));
+                        }
+                    }
+                    if args["staged"].as_bool() == Some(true) {
+                        q.push("staged=true".to_string());
+                    }
+                    if let Some(n) = int_arg(&args, "limit")? {
+                        q.push(format!("limit={n}"));
+                    }
+                    let qs = if q.is_empty() {
+                        String::new()
+                    } else {
+                        format!("?{}", q.join("&"))
+                    };
+                    match str_arg(&args, "op").unwrap_or("") {
+                        "status" => pretty(
+                            &r.call(Method::GET, &format!("{base}/status{qs}"), None)
+                                .await?,
+                        ),
+                        "diff" => pretty(
+                            &r.call(Method::GET, &format!("{base}/diff{qs}"), None)
+                                .await?,
+                        ),
+                        "log" => pretty(
+                            &r.call(Method::GET, &format!("{base}/log{qs}"), None)
+                                .await?,
+                        ),
+                        "commit" => {
+                            let message = str_arg(&args, "message")
+                                .ok_or_else(|| anyhow::anyhow!("message is required for commit"))?;
+                            pretty(
+                                &r.call(
+                                    Method::POST,
+                                    &format!("{base}/commit"),
+                                    Some(json!({
+                                        "message": message,
+                                        "repo": str_arg(&args, "repo"),
+                                        "all": args["all"].as_bool().unwrap_or(true),
+                                    })),
+                                )
+                                .await?,
+                            )
+                        }
+                        "branch" => {
+                            let name = str_arg(&args, "name")
+                                .ok_or_else(|| anyhow::anyhow!("name is required for branch"))?;
+                            pretty(
+                                &r.call(
+                                    Method::POST,
+                                    &format!("{base}/branch"),
+                                    Some(json!({"name": name, "repo": str_arg(&args, "repo")})),
+                                )
+                                .await?,
+                            )
+                        }
+                        other => anyhow::bail!("unknown op {other:?}"),
+                    }
+                })
+                .await
+            },
+        ),
+        tool(
+            "session_promote",
+            "Apply a fork child's workspace file changes to its parent session as a three-way merge. Call with dry_run true first: it returns the plan (paths to apply, already applied, conflicts) and a plan_id. Then call again with that plan_id to apply exactly what was reviewed. The parent is checkpointed first (the checkpoint tag is returned) and a path the parent also changed is a conflict, never overwritten. Workspace files only; the child must have been forked from a session with a workspace.",
+            object(
+                json!({
+                    "session": {"type": "string", "description": "the child session id"},
+                    "dry_run": {"type": "boolean", "description": "return the plan and plan_id; change nothing"},
+                    "plan_id": {"type": "string", "description": "plan_id from a dry run; refused if the plan is different now"},
+                    "skip_conflicts": {"type": "boolean", "description": "apply the clean paths and leave conflicting ones (default: any conflict refuses everything)"},
+                    "paths": {"type": "array", "items": {"type": "string"}, "description": "only these files or directories inside the workspace"},
+                }),
+                &["session"],
+            ),
+            true,
+            &remote,
+            |r, args| async move {
+                timed(Duration::from_secs(300), async {
+                    let id = session_id(&args)?;
+                    let paths: Vec<String> = args["paths"]
+                        .as_array()
+                        .map(|a| {
+                            a.iter()
+                                .filter_map(|v| v.as_str().map(str::to_string))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    let body = crate::agent_session::promote_body(
+                        args["dry_run"].as_bool().unwrap_or(false),
+                        str_arg(&args, "plan_id").map(str::to_string),
+                        args["skip_conflicts"].as_bool().unwrap_or(false),
+                        &paths,
+                    );
+                    pretty(
+                        &r.call(
+                            Method::POST,
+                            &format!("/v1/agents/sessions/{id}/promote"),
+                            Some(body),
+                        )
+                        .await?,
+                    )
+                })
+                .await
+            },
+        ),
+        tool(
+            "session_token",
+            "Mint an expiring bearer token that works on this one session and only for the listed operations, to hand to a less-trusted agent. The token is shown once. Grantable: read, exec, jobs, files.read, files.write, git, checkpoint, preview, screen; restore, fork, delete, terminals and promote stay with the caller.",
+            object(
+                json!({
+                    "session": {"type": "string"},
+                    "ops": {"type": "array", "items": {"type": "string", "enum": ["read", "exec", "jobs", "files.read", "files.write", "git", "checkpoint", "preview", "screen"]}, "minItems": 1},
+                    "ttl_seconds": {"type": "integer", "minimum": 1, "maximum": 86400},
+                    "label": {"type": "string"},
+                }),
+                &["session", "ops"],
+            ),
+            true,
+            &remote,
+            |r, args| async move {
+                timed(CALL_TIMEOUT, async {
+                    let id = session_id(&args)?;
+                    let mut body = json!({"ops": args["ops"]});
+                    if let Some(t) = int_arg(&args, "ttl_seconds")? {
+                        body["ttl_seconds"] = json!(t);
+                    }
+                    if let Some(l) = str_arg(&args, "label") {
+                        body["label"] = json!(l);
+                    }
+                    pretty(
+                        &r.call(
+                            Method::POST,
+                            &format!("/v1/agents/sessions/{id}/tokens"),
+                            Some(body),
+                        )
+                        .await?,
+                    )
+                })
+                .await
+            },
+        ),
+        tool(
+            "session_delete",
+            "End an agent session and delete its sandbox.",
+            object(json!({"session": {"type": "string"}}), &["session"]),
+            true,
+            &remote,
+            |r, args| async move {
+                timed(Duration::from_secs(120), async {
+                    let id = session_id(&args)?;
+                    r.call(Method::DELETE, &format!("/v1/agents/sessions/{id}"), None)
+                        .await?;
+                    pretty(&json!({"ok": true, "deleted": id}))
+                })
+                .await
+            },
+        ),
+        tool(
+            "sandbox_speculate",
+            "Run a command in an isolated copy of a sandbox and keep the result as a pending changeset; the sandbox itself is not touched until the changeset is approved and applied. paths bounds what is diffed.",
+            object(
+                json!({
+                    "vm": vm_prop,
+                    "command": {"type": "string"},
+                    "paths": {"type": "array", "items": {"type": "string"}, "description": "absolute guest directories to diff"},
+                    "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 600},
+                    "ttl_seconds": {"type": "integer", "minimum": 30},
+                }),
+                &["vm", "command"],
+            ),
+            true,
+            &remote,
+            |r, args| async move {
+                timed(Duration::from_secs(660), async {
+                    let id = resolve(&r, str_arg(&args, "vm").unwrap_or_default()).await?;
+                    let mut body =
+                        json!({"command": str_arg(&args, "command").unwrap_or_default()});
+                    for k in ["paths", "timeout_seconds", "ttl_seconds"] {
+                        if !args[k].is_null() {
+                            body[k] = args[k].clone();
+                        }
+                    }
+                    pretty(
+                        &r.call(
+                            Method::POST,
+                            &format!("/v1/sandboxes/{id}/speculate"),
+                            Some(body),
+                        )
+                        .await?,
+                    )
+                })
+                .await
+            },
+        ),
+        tool(
+            "sandbox_changesets",
+            "List a sandbox's changesets (newest first), or one with its file contents when changeset is given.",
+            object(
+                json!({"vm": vm_prop, "changeset": {"type": "string", "description": "changeset id"}}),
+                &["vm"],
+            ),
+            false,
+            &remote,
+            |r, args| async move {
+                timed(CALL_TIMEOUT, async {
+                    let id = resolve(&r, str_arg(&args, "vm").unwrap_or_default()).await?;
+                    let path = match str_arg(&args, "changeset") {
+                        Some(cs) => format!("/v1/sandboxes/{id}/changesets/{}", encode_query(cs)),
+                        None => format!("/v1/sandboxes/{id}/changesets"),
+                    };
+                    pretty(&r.call(Method::GET, &path, None).await?)
+                })
+                .await
+            },
+        ),
+        tool(
+            "sandbox_changeset_decide",
+            "Approve, reject or apply a pending changeset. Apply needs it approved first and fails with a conflict if the files changed meanwhile.",
+            object(
+                json!({
+                    "vm": vm_prop,
+                    "changeset": {"type": "string"},
+                    "action": {"type": "string", "enum": ["approve", "reject", "apply"]},
+                }),
+                &["vm", "changeset", "action"],
+            ),
+            true,
+            &remote,
+            |r, args| async move {
+                timed(Duration::from_secs(120), async {
+                    let id = resolve(&r, str_arg(&args, "vm").unwrap_or_default()).await?;
+                    let action = str_arg(&args, "action").unwrap_or_default();
+                    if !["approve", "reject", "apply"].contains(&action) {
+                        bail!("action must be approve, reject or apply");
+                    }
+                    let cs = encode_query(str_arg(&args, "changeset").unwrap_or_default());
+                    pretty(
+                        &r.call(
+                            Method::POST,
+                            &format!("/v1/sandboxes/{id}/changesets/{cs}/{action}"),
+                            None,
+                        )
+                        .await?,
+                    )
+                })
+                .await
+            },
+        ),
+    ]
+}
+
+async fn capture(r: Arc<Remote>, args: Value, seconds: u64) -> Result<String> {
+    let id = resolve(&r, str_arg(&args, "vm").unwrap_or_default()).await?;
+    let token = format!("mcp-{}", Uuid::new_v4().simple());
+    let expires = chrono::Utc::now() + chrono::Duration::seconds(seconds as i64 + 60);
+    let session = json!({
+        "token": token,
+        "namespace": "fluxvm",
+        "machine": id.to_string(),
+        "seconds": seconds,
+        "filter": str_arg(&args, "filter").unwrap_or(""),
+        "expiresAt": expires.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+    });
+    r.call(
+        Method::POST,
+        &format!("/v1/vms/{id}/network/capture"),
+        Some(session),
+    )
+    .await?;
+    let Some(output) = str_arg(&args, "output") else {
+        return pretty(&json!({"token": token, "seconds": seconds, "state": "running"}));
+    };
+    tokio::time::sleep(Duration::from_secs(seconds)).await;
+    let path = format!("/v1/vms/{id}/network/capture/{}", encode_query(&token));
+    loop {
+        let (status, body) = r.get_raw(&path).await?;
+        match status {
+            StatusCode::OK => {
+                tokio::fs::write(output, &body)
+                    .await
+                    .with_context(|| format!("writing {output}"))?;
+                return Ok(format!(
+                    "capture {token} done: wrote {} bytes to {output}",
+                    body.len()
+                ));
+            }
+            StatusCode::CONFLICT => tokio::time::sleep(Duration::from_secs(1)).await,
+            _ => bail!(
+                "capture download: {status}: {}",
+                String::from_utf8_lossy(&body)
+            ),
+        }
+    }
+}
+
+const DEFAULT_SCREEN_WIDTH: u64 = 1280;
+const INPUT_ACTIONS: &[&str] = &[
+    "type",
+    "key",
+    "move",
+    "click",
+    "double_click",
+    "right_click",
+    "middle_click",
+    "down",
+    "up",
+    "drag",
+    "scroll",
+];
+
+/// The `POST /v1/vms/{id}/input` body for `vm_input`'s arguments: `{"actions": [...]}` or one action.
+fn input_body(args: &Value) -> Result<Value> {
+    let single = args.get("action").is_some();
+    match args.get("actions") {
+        Some(_) if single => bail!("give either action or actions, not both"),
+        Some(Value::Array(list)) => {
+            let width = args.get("screen_width").cloned();
+            let actions = list
+                .iter()
+                .map(|a| {
+                    let mut a = a.clone();
+                    if let (Some(w), Some(o)) = (&width, a.as_object_mut()) {
+                        o.entry("screen_width").or_insert_with(|| w.clone());
+                    }
+                    a
+                })
+                .collect::<Vec<_>>();
+            Ok(json!({"actions": actions}))
+        }
+        Some(_) => bail!("actions must be a list"),
+        None if single => {
+            let mut a = args.as_object().cloned().unwrap_or_default();
+            a.remove("vm");
+            a.remove("screenshot");
+            Ok(Value::Object(a))
+        }
+        None => bail!("give an action (or a list of actions)"),
+    }
+}
+
+/// `vm_screenshot`'s reply: the PNG as an MCP image block and a caption with its size.
+async fn screenshot_content(r: &Remote, base: &str, max_width: u64) -> Result<Vec<Value>> {
+    use base64::Engine as _;
+    let (status, png) = r
+        .get_raw(&format!("{base}/screenshot?max_width={max_width}"))
+        .await?;
+    if !status.is_success() {
+        let body = String::from_utf8_lossy(&png);
+        let msg = serde_json::from_str::<Value>(&body)
+            .ok()
+            .and_then(|v| v.get("error").and_then(Value::as_str).map(str::to_string))
+            .unwrap_or_else(|| body.into_owned());
+        bail!("screenshot: {status}: {msg}");
+    }
+    let (w, h) = png_size(&png).context("the screenshot is not a PNG")?;
+    Ok(vec![
+        json!({
+            "type": "image",
+            "mimeType": "image/png",
+            "data": base64::engine::general_purpose::STANDARD.encode(&png),
+        }),
+        json!({
+            "type": "text",
+            "text": format!("{w}x{h} screenshot; for vm_input use these pixel coordinates with screen_width={w}"),
+        }),
+    ])
+}
+
+/// Width and height from a PNG's IHDR chunk.
+fn png_size(png: &[u8]) -> Option<(u32, u32)> {
+    if png.len() < 24 || &png[..8] != b"\x89PNG\r\n\x1a\n" || &png[12..16] != b"IHDR" {
+        return None;
+    }
+    let be = |b: &[u8]| u32::from_be_bytes([b[0], b[1], b[2], b[3]]);
+    Some((be(&png[16..20]), be(&png[20..24])))
+}
+
+pub async fn serve(remote: Remote, allow_write: bool) -> Result<()> {
+    let mut server = Server::new("fluxvm", env!("CARGO_PKG_VERSION"), allow_write);
+    let remote = Arc::new(remote);
+    server.add(tools(remote.clone()));
+    server.add(crate::kube_mcp::tools(remote));
+    server.serve(tokio::io::stdin(), tokio::io::stdout()).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_server(allow_write: bool) -> Server {
+        let mut s = Server::new("t", "0", allow_write);
+        let echo: ToolFn = Arc::new(|args| {
+            Box::pin(async move { Ok(str_arg(&args, "msg").unwrap_or("").to_string().into()) })
+        });
+        let fail: ToolFn = Arc::new(|_| Box::pin(async { Err(anyhow!("boom")) }));
+        let big: ToolFn = Arc::new(|_| Box::pin(async { Ok("é".repeat(MAX_OUTPUT).into()) }));
+        let stop: ToolFn = Arc::new(|_| Box::pin(async { Ok("stopped".to_string().into()) }));
+        s.add([
+            Tool {
+                name: "echo",
+                description: "",
+                schema: object(json!({"msg": {"type": "string"}}), &["msg"]),
+                write: false,
+                call: echo,
+            },
+            Tool {
+                name: "fail",
+                description: "",
+                schema: object(json!({}), &[]),
+                write: false,
+                call: fail,
+            },
+            Tool {
+                name: "big",
+                description: "",
+                schema: object(json!({}), &[]),
+                write: false,
+                call: big,
+            },
+            Tool {
+                name: "stop",
+                description: "",
+                schema: object(json!({}), &[]),
+                write: true,
+                call: stop,
+            },
+        ]);
+        s
+    }
+
+    async fn run(s: Server, lines: &[&str]) -> BTreeMap<String, Value> {
+        let input = lines.join("\n") + "\n";
+        let (client, server_end) = tokio::io::duplex(1 << 20);
+        s.serve(input.as_bytes(), server_end).await.unwrap();
+        let mut out = String::new();
+        let mut reader = BufReader::new(client);
+        let mut got = BTreeMap::new();
+        loop {
+            out.clear();
+            let n = tokio::time::timeout(Duration::from_millis(200), reader.read_line(&mut out))
+                .await
+                .unwrap_or(Ok(0))
+                .unwrap();
+            if n == 0 {
+                break;
+            }
+            let v: Value = serde_json::from_str(&out).unwrap();
+            got.insert(v["id"].to_string(), v);
+        }
+        got
+    }
+
+    fn text(v: &Value) -> (&str, bool) {
+        (
+            v["result"]["content"][0]["text"].as_str().unwrap(),
+            v["result"]["isError"].as_bool().unwrap(),
+        )
+    }
+
+    #[tokio::test]
+    async fn initialize_ping_and_notifications() {
+        let got = run(
+            test_server(false),
+            &[
+                r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05"}}"#,
+                r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+                r#"{"jsonrpc":"2.0","id":2,"method":"initialize","params":{"protocolVersion":"1999-01-01"}}"#,
+                r#"{"jsonrpc":"2.0","id":3,"method":"ping"}"#,
+                r#"not json"#,
+                r#"{"jsonrpc":"2.0","id":4,"method":"resources/list"}"#,
+            ],
+        )
+        .await;
+        assert_eq!(got.len(), 5, "{got:?}");
+        assert_eq!(got["1"]["result"]["protocolVersion"], "2024-11-05");
+        assert_eq!(
+            got["2"]["result"]["protocolVersion"],
+            LATEST_PROTOCOL_VERSION
+        );
+        assert!(got["3"]["error"].is_null());
+        assert_eq!(got["null"]["error"]["code"], -32700);
+        assert_eq!(got["4"]["error"]["code"], -32601);
+    }
+
+    #[tokio::test]
+    async fn write_tools_are_gated() {
+        let names = |got: &BTreeMap<String, Value>| -> Vec<String> {
+            got["1"]["result"]["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|t| t["name"].as_str().unwrap().to_string())
+                .collect()
+        };
+        let list = r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#;
+        assert_eq!(
+            names(&run(test_server(false), &[list]).await),
+            ["big", "echo", "fail"]
+        );
+        assert_eq!(
+            names(&run(test_server(true), &[list]).await),
+            ["big", "echo", "fail", "stop"]
+        );
+        let got = run(
+            test_server(false),
+            &[r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"stop"}}"#],
+        )
+        .await;
+        let (t, err) = text(&got["2"]);
+        assert!(err && t.contains("--allow-write"), "{t}");
+    }
+
+    #[tokio::test]
+    async fn tool_calls_and_argument_checks() {
+        let got = run(
+            test_server(false),
+            &[
+                r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo","arguments":{"msg":"hi"}}}"#,
+                r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"fail"}}"#,
+                r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"echo","arguments":{"msg":"x","bogus":1}}}"#,
+                r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"echo","arguments":{}}}"#,
+                r#"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"nope"}}"#,
+                r#"{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"big"}}"#,
+            ],
+        )
+        .await;
+        assert_eq!(text(&got["1"]), ("hi", false));
+        assert_eq!(text(&got["2"]), ("boom", true));
+        assert!(text(&got["3"]).0.contains("unknown field"));
+        assert!(text(&got["4"]).0.contains("missing"));
+        assert_eq!(got["5"]["error"]["code"], -32602);
+        let (t, _) = text(&got["6"]);
+        assert!(t.contains("[truncated") && t.len() < MAX_OUTPUT + 200);
+    }
+
+    #[test]
+    fn vmpal_parity_tools_are_registered_with_safe_write_gates() {
+        let registry = tools(Arc::new(Remote::new("127.0.0.1:9", None)));
+        let lookup = |name: &str| {
+            registry
+                .iter()
+                .find(|tool| tool.name == name)
+                .unwrap_or_else(|| panic!("missing MCP tool {name}"))
+        };
+        for name in [
+            "vm_create",
+            "vm_clone",
+            "vm_exec",
+            "vm_snapshot",
+            "vm_snapshot_restore",
+            "vm_snapshot_delete",
+            "vm_delete",
+            "vm_input",
+            "session_input",
+            "vm_sign_in",
+        ] {
+            assert!(lookup(name).write, "{name} must require --allow-write");
+        }
+        assert!(
+            !lookup("vm_snapshot_list").write,
+            "snapshot listing must remain available to read-only agents"
+        );
+        assert!(check_args(&lookup("vm_exec").schema, &json!({"vm":"web"})).is_err());
+        assert!(
+            check_args(
+                &lookup("vm_exec").schema,
+                &json!({"vm":"web","command":"uname -a"})
+            )
+            .is_ok()
+        );
+        assert!(check_args(&lookup("vm_snapshot").schema, &json!({"vm":"web"})).is_err());
+        assert!(
+            !lookup("vm_screenshot").write,
+            "screenshots must remain available to read-only agents"
+        );
+        assert!(!lookup("vm_vz_status").write && !lookup("host_apple_capabilities").write);
+        assert!(
+            check_args(&lookup("vm_vz_status").schema, &json!({"vm":"web"})).is_err(),
+            "what is required"
+        );
+    }
+
+    #[test]
+    fn input_body_builds_one_action_or_a_batch() {
+        assert_eq!(
+            input_body(
+                &json!({"vm": "web", "action": "click", "x": 3, "y": 4, "screenshot": true})
+            )
+            .unwrap(),
+            json!({"action": "click", "x": 3, "y": 4})
+        );
+        assert_eq!(
+            input_body(&json!({"vm": "web", "screen_width": 1280, "actions": [
+                {"action": "type", "text": "hi"},
+                {"action": "click", "x": 1, "y": 2, "screen_width": 640}
+            ]}))
+            .unwrap(),
+            json!({"actions": [
+                {"action": "type", "text": "hi", "screen_width": 1280},
+                {"action": "click", "x": 1, "y": 2, "screen_width": 640}
+            ]})
+        );
+        assert!(input_body(&json!({"vm": "web"})).is_err());
+        assert!(input_body(&json!({"vm": "web", "action": "type", "actions": []})).is_err());
+    }
+
+    #[test]
+    fn png_size_reads_the_header() {
+        let mut png = b"\x89PNG\r\n\x1a\n\0\0\0\x0dIHDR".to_vec();
+        png.extend(1280u32.to_be_bytes());
+        png.extend(800u32.to_be_bytes());
+        assert_eq!(png_size(&png), Some((1280, 800)));
+        assert_eq!(png_size(b"not a png at all, really no"), None);
+    }
+
+    #[tokio::test]
+    async fn session_and_changeset_tools_drive_the_rest_api() {
+        use axum::{Json, Router, extract::Path, routing::get, routing::post};
+        let sid = Uuid::new_v4();
+        let app = Router::new()
+            .route(
+                "/v1/agents/sessions",
+                post(move |Json(b): Json<Value>| async move {
+                    Json(json!({"id": sid, "agent": b["agent"], "policy": b["policy"], "workspace": b["workspace"]}))
+                }),
+            )
+            .route(
+                "/v1/agents/sessions/{id}/exec",
+                post(|Path(_): Path<Uuid>, Json(b): Json<Value>| async move {
+                    Json(json!({"exit_code": 0, "stdout": b["command"], "timeout": b["timeout_seconds"]}))
+                }),
+            )
+            .route(
+                "/v1/agents/sessions/{id}/fork",
+                post(|Path(_): Path<Uuid>, Json(b): Json<Value>| async move {
+                    (
+                        axum::http::StatusCode::CONFLICT,
+                        Json(json!({"error": format!("fork on vz needs a session with no network card of its own (count {})", b["count"])})),
+                    )
+                }),
+            )
+            .route(
+                "/v1/sandboxes/{id}/changesets/{cs}/{action}",
+                post(|Path((_, cs, action)): Path<(Uuid, String, String)>| async move {
+                    Json(json!({"changeset": cs, "state": action}))
+                }),
+            )
+            .route(
+                "/v1/agents/sessions/{id}/artifacts",
+                get(|Path(_): Path<Uuid>| async move { Json(json!({"changes": {"added": ["/workspace/a"]}})) }),
+            )
+            .route(
+                "/v1/agents/sessions/{id}/rewind",
+                get(|Path(_): Path<Uuid>| async move { Json(json!({"enabled": true, "points": []})) }),
+            )
+            .route(
+                "/v1/agents/sessions/{id}/rewind/{action}",
+                post(|Path((_, action)): Path<(Uuid, String)>, Json(b): Json<Value>| async move {
+                    Json(json!({"action": action, "body": b}))
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let remote = Arc::new(Remote::new(&addr.to_string(), None));
+        let mut s = Server::new("fluxvm", "0", true);
+        s.add(tools(remote));
+        let vm = Uuid::new_v4();
+        let calls = [
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"session_create","arguments":{"agent":"codex","policy":"developer-safe","allow":["a.example"],"repo":"https://x/y"}}}"#.to_string(),
+            format!(r#"{{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{{"name":"session_exec","arguments":{{"session":"{sid}","command":"ls","timeout_seconds":9}}}}}}"#),
+            r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"session_exec","arguments":{"session":"not-a-uuid","command":"ls"}}}"#.to_string(),
+            format!(r#"{{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{{"name":"session_fork","arguments":{{"session":"{sid}","count":2}}}}}}"#),
+            format!(r#"{{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{{"name":"session_fork","arguments":{{"session":"{sid}","count":99}}}}}}"#),
+            format!(r#"{{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{{"name":"sandbox_changeset_decide","arguments":{{"vm":"{vm}","changeset":"c1","action":"apply"}}}}}}"#),
+            format!(r#"{{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{{"name":"sandbox_changeset_decide","arguments":{{"vm":"{vm}","changeset":"c1","action":"delete"}}}}}}"#),
+            format!(r#"{{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{{"name":"session_artifacts","arguments":{{"session":"{sid}"}}}}}}"#),
+            format!(r#"{{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{{"name":"session_rewind","arguments":{{"session":"{sid}","action":"bisect","test":"curl -fs localhost/health","good":"rw-1"}}}}}}"#),
+            format!(r#"{{"jsonrpc":"2.0","id":10,"method":"tools/call","params":{{"name":"session_rewind","arguments":{{"session":"{sid}","action":"undo","steps":2}}}}}}"#),
+            format!(r#"{{"jsonrpc":"2.0","id":11,"method":"tools/call","params":{{"name":"session_rewind","arguments":{{"session":"{sid}","action":"bisect"}}}}}}"#),
+            format!(r#"{{"jsonrpc":"2.0","id":12,"method":"tools/call","params":{{"name":"session_rewind","arguments":{{"session":"{sid}","action":"pin","tag":"rw-1"}}}}}}"#),
+            format!(r#"{{"jsonrpc":"2.0","id":13,"method":"tools/call","params":{{"name":"session_rewind_points","arguments":{{"session":"{sid}"}}}}}}"#),
+        ];
+        let refs: Vec<&str> = calls.iter().map(String::as_str).collect();
+        let got = run(s, &refs).await;
+        let (t, err) = text(&got["1"]);
+        assert!(
+            !err && t.contains("codex")
+                && t.contains("developer-safe")
+                && t.contains("a.example")
+                && t.contains("https://x/y"),
+            "{t}"
+        );
+        let (t, err) = text(&got["2"]);
+        assert!(
+            !err && t.contains("\"timeout\": 9") && t.contains("ls"),
+            "{t}"
+        );
+        let (t, err) = text(&got["3"]);
+        assert!(err && t.contains("session must be a session id"), "{t}");
+        let (t, err) = text(&got["4"]);
+        assert!(err && t.contains("no network card of its own"), "{t}");
+        let (t, err) = text(&got["5"]);
+        assert!(err && t.contains("1-32"), "{t}");
+        let (t, err) = text(&got["6"]);
+        assert!(!err && t.contains("\"state\": \"apply\""), "{t}");
+        let (t, err) = text(&got["7"]);
+        assert!(err && t.contains("approve, reject or apply"), "{t}");
+        assert!(text(&got["8"]).0.contains("/workspace/a"));
+        let (t, err) = text(&got["9"]);
+        assert!(
+            !err && t.contains("\"action\": \"bisect\"")
+                && t.contains("curl -fs localhost/health")
+                && t.contains("rw-1"),
+            "{t}"
+        );
+        let (t, err) = text(&got["10"]);
+        assert!(!err && t.contains("\"steps\": 2"), "{t}");
+        let (t, err) = text(&got["11"]);
+        assert!(err && t.contains("bisect needs test"), "{t}");
+        let (t, err) = text(&got["12"]);
+        assert!(!err && t.contains("\"pinned\": true"), "{t}");
+        assert!(text(&got["13"]).0.contains("\"enabled\": true"));
+    }
+
+    #[tokio::test]
+    async fn tools_drive_the_rest_api() {
+        use axum::{Json, Router, extract::Path, routing::get, routing::post};
+        let id = Uuid::new_v4();
+        let app = Router::new()
+            .route(
+                "/v1/vms",
+                get(move || async move {
+                    Json(json!({"items": [{"id": id, "name": "web", "status": "running", "backend": "qemu", "request": {"vcpus": 2, "labels": {"env": "dev"}}, "pid": 7}]}))
+                }),
+            )
+            .route(
+                "/v1/vms/{id}/network/{kind}",
+                get(|Path((_, kind)): Path<(Uuid, String)>| async move { Json(json!({"kind": kind})) }),
+            )
+            .route(
+                "/v1/vms/{id}/stop",
+                post(move || async move { Json(json!({"id": id, "name": "web", "status": "stopped"})) }),
+            )
+            .route(
+                "/v1/vms/{id}/fork",
+                post(|Json(body): Json<Value>| async move {
+                    let n = body["count"].as_u64().unwrap_or(0);
+                    let items: Vec<Value> = (1..=n)
+                        .map(|i| json!({"id": Uuid::new_v4(), "name": format!("{}-{i}", body["namePrefix"].as_str().unwrap_or("web-fork")), "status": "running"}))
+                        .collect();
+                    Json(json!({"items": items, "elapsed_ms": 42}))
+                }),
+            )
+            .route(
+                "/v1/vms/{id}/backup",
+                post(|Json(body): Json<Value>| async move {
+                    Json(json!({"name": "web-1", "quiesced": body["quiesce"] != "never", "all": body["all_disks"]}))
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let remote = Arc::new(Remote::new(&addr.to_string(), None));
+        let mut s = Server::new("fluxvm", "0", true);
+        s.add(tools(remote));
+        let got = run(
+            s,
+            &[
+                r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list_vms","arguments":{}}}"#,
+                r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"vm_network","arguments":{"vm":"web","kind":"drops","limit":5}}}"#,
+                r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"vm_network","arguments":{"vm":"web","kind":"bogus"}}}"#,
+                r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"vm_power","arguments":{"vm":"web","op":"stop"}}}"#,
+                r#"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"get_vm","arguments":{"vm":"missing"}}}"#,
+                r#"{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"vm_fork","arguments":{"vm":"web","count":3,"name_prefix":"kid"}}}"#,
+                r#"{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"vm_fork","arguments":{"vm":"web","count":99}}}"#,
+                r#"{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"vm_backup","arguments":{"vm":"web","all_disks":true}}}"#,
+            ],
+        )
+        .await;
+        let (t, err) = text(&got["1"]);
+        assert!(
+            !err && t.contains("\"vcpus\": 2") && !t.contains("\"pid\""),
+            "{t}"
+        );
+        assert!(text(&got["2"]).0.contains("\"kind\": \"drops\""));
+        assert!(text(&got["3"]).1);
+        assert!(text(&got["4"]).0.contains("stopped"));
+        let (t, err) = text(&got["5"]);
+        assert!(err && t.contains("no VM named"), "{t}");
+        let (t, err) = text(&got["6"]);
+        assert!(
+            !err && t.contains("kid-3") && t.contains("\"elapsed_ms\": 42"),
+            "{t}"
+        );
+        let (t, err) = text(&got["7"]);
+        assert!(err && t.contains("1-32"), "{t}");
+        let (t, err) = text(&got["8"]);
+        assert!(
+            !err && t.contains("\"quiesced\": true") && t.contains("\"all\": true"),
+            "{t}"
+        );
+    }
+}

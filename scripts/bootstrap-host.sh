@@ -1,0 +1,97 @@
+#!/usr/bin/env bash
+# Copyright 2026 Zyvor AI Labs · https://zyvor.dev
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+# Prepare a fresh Linux host to run Zyvor FluxVM: install QEMU/cloud-init
+# tooling via the system package manager, load the nbd kernel module (used by
+# guestkit for image customization), install Cloud Hypervisor and Firecracker
+# from upstream releases, create the state directories and an optional
+# bridge.
+#
+# Usage:
+#   sudo ./scripts/bootstrap-host.sh [bridge-name]
+#
+# Env:
+#   SKIP_CLOUD_HYPERVISOR=1   don't install Cloud Hypervisor
+#   SKIP_FIRECRACKER=1        don't install Firecracker
+#   SKIP_BRIDGE=1             don't create a Linux bridge
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+BRIDGE="${1:-vmbr0}"
+
+info() { echo "  [*] $*"; }
+ok()   { echo "  [ok] $*"; }
+warn() { echo "  [WARN] $*" >&2; }
+
+[ "$(uname -s)" = "Linux" ] || { echo "ERROR: this script only supports Linux hosts" >&2; exit 1; }
+
+if [[ ! -e /dev/kvm ]]; then
+  echo "ERROR: /dev/kvm is missing. Enable CPU virtualization/KVM first." >&2
+  exit 1
+fi
+
+SUDO=""
+[ "$(id -u)" -ne 0 ] && SUDO="sudo"
+
+info "Installing system packages (qemu, cloud-localds)..."
+. /etc/os-release 2>/dev/null || true
+if [[ "${ID:-}" == "debian" || "${ID:-}" == "ubuntu" || "${ID_LIKE:-}" == *"debian"* ]]; then
+    $SUDO apt-get update -qq
+    # libhivex-dev: guestkit registry-write for Windows offline customize / agent-inject
+    # dnsmasq-base: the DHCP server FluxVM starts per VM network namespace (tap+netns mode);
+    # the -base package ships the binary without a system service, so port 53 stays free
+    $SUDO apt-get install -y -qq qemu-system-x86 qemu-utils cloud-image-utils iproute2 curl libhivex-dev dnsmasq-base
+elif command -v dnf >/dev/null || command -v yum >/dev/null; then
+    PKG="$(command -v dnf >/dev/null && echo dnf || echo yum)"
+    $SUDO "$PKG" install -y qemu-kvm qemu-img cloud-utils iproute curl hivex-devel dnsmasq
+else
+    warn "unrecognized package manager — install qemu-system-x86_64, qemu-img and cloud-localds manually"
+fi
+ok "system packages ready"
+
+# guestkit (used by `fluxctl build-image`'s copy_in) mounts qcow2/raw images
+# via qemu-nbd, which needs the nbd kernel module loaded.
+$SUDO modprobe nbd max_part=16 2>/dev/null || warn "modprobe nbd failed — image copy_in will not work until the nbd module is loaded"
+ok "nbd kernel module loaded"
+
+if [ "${SKIP_BRIDGE:-0}" != "1" ]; then
+    if ! ip link show "$BRIDGE" >/dev/null 2>&1; then
+        $SUDO ip link add name "$BRIDGE" type bridge
+        $SUDO ip link set "$BRIDGE" up
+        ok "created bridge ${BRIDGE}"
+    else
+        ok "bridge ${BRIDGE} already exists"
+    fi
+fi
+
+$SUDO install -d -m 0755 /var/lib/fluxvm/{images,kernels,instances,downloads}
+$SUDO install -d -m 0755 /run/fluxvm
+ok "state directories ready under /var/lib/fluxvm"
+
+if [ "${SKIP_CLOUD_HYPERVISOR:-0}" != "1" ]; then
+    info "Installing Cloud Hypervisor..."
+    bash "${SCRIPT_DIR}/install-cloud-hypervisor.sh" || warn "Cloud Hypervisor install failed — see above"
+else
+    info "Skipping Cloud Hypervisor (SKIP_CLOUD_HYPERVISOR=1)"
+fi
+
+if [ "${SKIP_FIRECRACKER:-0}" != "1" ]; then
+    info "Installing Firecracker..."
+    bash "${SCRIPT_DIR}/install-firecracker.sh" || warn "Firecracker install failed — see above"
+else
+    info "Skipping Firecracker (SKIP_FIRECRACKER=1)"
+fi
+
+if [ -d /etc/apparmor.d ] && command -v apparmor_parser >/dev/null 2>&1; then
+    if [ -f "${SCRIPT_DIR}/../deploy/apparmor/fluxvm" ]; then
+        $SUDO install -m 0644 "${SCRIPT_DIR}/../deploy/apparmor/fluxvm" /etc/apparmor.d/fluxvm
+        $SUDO apparmor_parser -r /etc/apparmor.d/fluxvm 2>/dev/null \
+            && ok "AppArmor profile fluxvm loaded" \
+            || warn "AppArmor profile install failed (non-fatal)"
+    fi
+else
+    info "AppArmor not present — skipping profile install (SELinux hosts: see deploy/apparmor/README)"
+fi
+
+echo ""
+echo "Host ready. Run ./scripts/preflight.sh to confirm everything is on PATH."

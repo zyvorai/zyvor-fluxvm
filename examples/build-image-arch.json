@@ -1,0 +1,9 @@
+{
+  "source": "/var/lib/fluxvm/images/arch.qcow2",
+  "output": "/var/lib/fluxvm/images/arch-dev.qcow2",
+  "format": "qcow2",
+  "hostname": "arch-dev",
+  "packages": ["tree", "jq"],
+  "commands": ["touch /etc/provisioned-by-fluxvm"],
+  "enable_services": ["sshd"]
+}

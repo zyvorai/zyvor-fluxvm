@@ -1,0 +1,139 @@
+# FluxVM eBPF Set 3 — kernel drop reasons and migration state continuity
+
+Set 3 moves Drop Detective from policy inference to a kernel-owned reason ABI and adds the node-local state contract required for VM migration without immediately breaking established connections.
+
+## Ownership boundary
+
+FluxVM owns VM-local eBPF mechanics: the VM edge, stable VM identity, conntrack, policy branch reasons, quiesce/restore gates, and state import/export. Zyvor Fabric remains the distributed control plane for node selection, leases, routing/BGP, multi-site coordination, and orchestration.
+
+## Dataplane schema v6
+
+Schema v6 adds two maps to each VM's private pin set:
+
+* `fluxvm_drop_reasons` — LRU branch-accounting map keyed by the existing 44-byte flow tuple plus a stable `reason` and `action` field.
+* `fluxvm_migration` — per-VM state (`running`, `quiescing`, `restoring`) plus a monotonic local generation.
+
+The original `fluxvm_flows`, policy maps and conntrack key/value ABI stay intact. Existing schema-v5 pins are intentionally considered incompatible and are repaired by the existing attach/reconcile path. Schema v6 also closes an older conntrack fast-path gap: established flows continue to hit the configured Mbps/PPS limiter instead of bypassing QoS after the first accepted packet.
+
+### Stable reason codes
+
+| Code | Name | Meaning |
+|---:|---|---|
+| 1 | `malformed-l4` | transport header could not be safely parsed |
+| 2 | `fragmented-l4` | fragmented IPv4 packet while L4 enforcement is active |
+| 3 | `explicit-cidr-deny` | destination matched VM/group deny CIDR |
+| 4 | `cidr-miss` | destination missed the effective CIDR allowlist |
+| 5 | `l4-miss` | protocol/port missed the effective L4 allowlist |
+| 6 | `pod-policy-deny` | Pod-identity policy rejected the peer |
+| 7 | `rate-limit` | packet or bandwidth ceiling rejected the packet |
+| 8 | `default-deny` | no allow dimension and default action is deny |
+| 9 | `migration-quiesce` | source rejects a new flow during quiesce |
+| 10 | `migration-restoring` | destination rejects a new flow during restore |
+| 11 | `unsupported-ethertype` | non-ARP/non-IP frame rejected by default policy |
+| 12 | `udp-deny` | `deny_udp` policy rejected a UDP or SCTP packet |
+| 13 | `spoof-mac` | VM edge (schema 12): source or ARP sender MAC is not the assigned MAC |
+| 14 | `spoof-ip` | VM edge (schema 12): source IP is not the assigned or learned address |
+| 15 | `dns-deny` | VM edge (schema 12): DNS query for a name not on `allowDNS` |
+| 16 | `sni-deny` | VM edge (schema 12): TLS ClientHello SNI not on `allowSNI` |
+
+Codes 13-16 come from the Kairon VM edge; see
+[vm-edge-contract.md](vm-edge-contract.md) for how they map to Kairon's
+reason names.
+
+`action=drop` means the packet was rejected. `action=audit` means the same branch would have rejected it, but audit mode allowed it. Schema v6 also preserves Pod-policy audit verdicts with a richer internal verdict API while keeping the existing boolean Pod-policy helpers as compatibility wrappers. This fixes the previous ambiguity around rate-limit and audit-only observations.
+
+## Dataplane schema v7
+
+Schema v7 adds two maps used only by Set 6S/13's Pod-scoped policy path: `fluxvm_pid4_port` and `fluxvm_pid6_port`. A peer with no entry in the existing address-wide `fluxvm_pid4`/`fluxvm_pid6` maps now falls through to these before the pod-level `default_deny` fallback, keyed by `(pod_id, address, protocol, port)` instead of just `(pod_id, address)`. This lets the Kubernetes NetworkPolicy controller (Set 13) compile a `ports`-restricted egress rule into an exact protocol+port allow instead of denying the rule outright, without ever widening a restricted peer to every port: an address-wide `fluxvm_pid4`/`fluxvm_pid6` ALLOW entry is still checked first and still wins, matching Kubernetes' own union-of-rules semantics.
+
+No existing map's ABI changed. Existing schema-v6 pins are considered incompatible and repaired by the existing attach/reconcile path, same as every prior schema bump. A `fluxvm_tc.bpf.o` built before Set 13 has no `fluxvm_pid4_port`/`fluxvm_pid6_port` pins; `configure_pod_maps` detects their absence and skips writing port rules rather than failing the whole policy apply, the same graceful-degradation shape used for `fluxvm_pspol` predating Set 6S.
+
+## Dataplane schema v8
+
+> **Superseded layout note:** Secure Containers Set 14 replaced the early
+> schema-v8 sketch below (parallel `_in` maps + `fluxvm_pod_ingress` inside
+> `fluxvm_tc.bpf.c` / `loadall`) with a unified directional rule model. Current
+> code: shared maps (`fluxvm_pspol` / `fluxvm_ppstat` / exact-peer / CIDR /
+> port-range / `fluxvm_prules`), a separate `bpf/fluxvm_pod_ingress.bpf.c`
+> object attached at TC egress pref `49153`/handle `2`, and schema-v2 wire
+> policy from the NetworkPolicy controller. See
+> [secure-containers-set14.md](secure-containers-set14.md) and
+> [secure-containers-set15.md](secure-containers-set15.md) (directional health +
+> Policy Observer). Historical Set 13 notes remain in
+> [secure-containers-set13.md](secure-containers-set13.md).
+
+Schema v8 (as originally written for Set 13 completion) added:
+
+- `fluxvm_pid4_cidr`/`fluxvm_pid6_cidr` LPM tries for broad `ipBlock` peers;
+- `fluxvm_pid4_port_range`/`fluxvm_pid6_port_range` for `endPort` ranges;
+- a Pod-ingress program path (now a **separate** ELF under Set 14, not a second
+  `SEC("tc")` in `fluxvm_tc.bpf.c`);
+- shared conntrack with the guest-egress program for return-traffic bypass.
+
+Do not use this section as the live map/attach inventory — Set 14 is SoT.
+
+## Migration contract
+
+The migration sequence is deliberately explicit and fail-closed:
+
+```text
+source                              destination
+------                              -----------
+running
+   |
+   +-- quiesce
+       existing CT: allow
+       new flows:   deny (reason 9)
+   |
+   +-- export CT + optional flow/reason history ---> attach same VM UUID/policy
+                                                     mark restoring
+                                                     new flows: deny (reason 10)
+                                                     import CT/history
+                 VMM memory/device cutover -------->
+                                                     resume
+                                                     new flows: allow by policy
+```
+
+Bootstrap traffic remains available: ARP, DHCP, IPv6 NDP and DHCPv6 are not blocked by the migration gate.
+
+When `fluxctl migrate start` (or `POST /v1/vms/{id}/migration/start`) runs against a VM with an attached
+Network Fabric dataplane, FluxVM calls `quiesce` first. It calls `resume` again if start fails, if the
+VMM reports a terminal `Failed`/`Cancelled` phase, when status polling later sees those phases, or on
+`migrate cancel`. Fabric orchestrators that only call the lower-level
+`POST .../network/migration/quiesce` APIs must still resume explicitly after cutover or abort.
+
+The snapshot carries the stable VM UUID-derived FluxVM identity, dataplane schema, and the committed effective-policy fingerprint. Export refuses an uncommitted policy generation, and restore requires the destination fingerprint to exactly match the source before conntrack is imported. This prevents stale established-flow state from bypassing a changed destination policy. Restore also rejects a mismatched VM UUID, identity or schema rather than importing state into the wrong VM.
+
+## REST API
+
+```text
+GET  /v1/vms/{id}/network/drop-reasons?limit=256
+GET  /v1/vms/{id}/network/migration/state
+POST /v1/vms/{id}/network/migration/quiesce
+GET  /v1/vms/{id}/network/migration/export
+POST /v1/vms/{id}/network/migration/restore
+POST /v1/vms/{id}/network/migration/resume
+```
+
+All mutation/export operations use the existing admin-role enforcement. Drop reasons and state inspection remain read-only authenticated endpoints.
+
+## CLI
+
+```bash
+fluxctl diagnose <uuid>
+fluxvm dataplane migration-state <uuid>
+fluxvm dataplane migration-quiesce <uuid>
+fluxvm dataplane migration-export <uuid> --output /tmp/vm-net.json
+fluxvm dataplane migration-restore <uuid> --input /tmp/vm-net.json
+fluxvm dataplane migration-resume <uuid>
+```
+
+`fluxctl diagnose` automatically prefers schema-v6 kernel reasons and falls back to Set-2 policy inference when running against an older node.
+
+## What is intentionally not transferred
+
+The rate map contains a `bpf_spin_lock` and is not raw-imported. Rate windows restart on the destination. Per-CPU stats are also not imported. Those are local telemetry/rate-window details, not connection correctness. Policy is reconciled from the existing FluxVM control-plane state before restore; the migration snapshot moves connection and diagnostic state, not policy ownership.
+
+## Testing
+
+`test-drop-reason-migration-static.sh` validates source contracts and runs the affected Rust tests/build when Cargo is available. `test-drop-reason-migration-host.sh` is a privileged Linux smoke test that loads the production TC object on a veth, proves an established flow survives quiesce, then proves new flows receive quiesce/restoring kernel reason codes.

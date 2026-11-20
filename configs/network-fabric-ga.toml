@@ -1,0 +1,36 @@
+# Copyright 2026 Zyvor AI Labs · https://zyvor.dev
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+#
+# Network Fabric GA production profile (dataplane schema v4 fragment).
+#
+# Prefer one-command enable (builds/installs BPF objects + merges this file):
+#   sudo ./scripts/enable-network-fabric-ga.sh --restart
+# Host readiness: ./scripts/network-fabric-preflight.sh
+# Lab (soft, default-allow): configs/network-fabric-lab.toml or --lab
+#
+# Code defaults are mode=ebpf, required=true; this profile adds deny-by-default.
+# Dataplane knobs here match network-fabric-prod.toml; "prod" adds the operator
+# loop (health / ipcache / refresh-dns / CNP), not a different mode — see
+# docs/production-dataplane.md.
+#
+# Prerequisites:
+#   ./scripts/build-ebpf.sh && install .o under /usr/lib/fluxvm/bpf/
+#   systemd LimitMEMLOCK=infinity + ReadWritePaths for bpffs / /run/fluxvm
+#   Bridged or TAP+netns VMs for attach; user NAT / mode=none soft-skip even
+#   when required=true (fail-closed only when a host-visible edge exists).
+
+[sandbox.dataplane]
+mode = "ebpf"
+bpf_object = "/usr/lib/fluxvm/bpf/fluxvm_tc.bpf.o"
+pin_root = "/sys/fs/bpf/fluxvm"
+required = true
+default_allow = false
+allow_cidrs = ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"]
+allow_ports = ["tcp/443", "tcp/80", "udp/53"]
+max_egress_mbps = 250
+max_egress_pps = 100000
+sample_rate = 100
+
+# On Cilium nodes use mode = "cilium" instead and leave XDP disabled.
+# [sandbox.dataplane.xdp]
+# enabled = false

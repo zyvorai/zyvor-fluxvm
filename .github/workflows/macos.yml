@@ -1,0 +1,65 @@
+name: macOS (Apple silicon)
+
+on:
+  pull_request:
+    paths:
+      - "crates/fluxvm-apple/**"
+      - "crates/fluxvm-agent/**"
+      - "crates/fluxvm-usernet/**"
+      - "crates/fluxvm-guest-agent/**"
+      - "crates/fluxvm-core/**"
+      - "crates/fluxvm-scheduler/**"
+      - "crates/fluxvm-network/**"
+      - "crates/fluxvm-api/**"
+      - "crates/fluxctl/**"
+      - "scripts/macos-live-test.sh"
+      - ".github/workflows/macos.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Collapse superseded runs of this workflow on the same ref so queued duplicates do not hold the org's runners.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    runs-on: [self-hosted, macOS, ARM64, fluxvm-mac]
+    steps:
+      # fluxvm-image depends on the sibling guestkit project through a relative path.
+      - uses: actions/checkout@v7
+        with:
+          path: fluxvm
+      - uses: actions/checkout@v7
+        with:
+          repository: zyvorai/guestkit
+          ref: v1.2.9   # packaging/guestkit.ref; checked by scripts/check-guestkit-pin.sh
+          path: guestkit
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Use the newest Xcode (the VZ runner needs the macOS 27 SDK)
+        run: |
+          X="$(ls -d /Applications/Xcode_*.app 2>/dev/null | sort -V | tail -1)"
+          [ -n "$X" ] && sudo xcode-select -s "$X"
+          echo "$(xcode-select -p): SDK $(xcrun --show-sdk-version)"
+      - run: brew install hivex
+      - name: Build the buildable subset (Linux-only crates are not built on macOS)
+        working-directory: fluxvm
+        run: cargo build -p fluxctl -p fluxvm-apple -p fluxvm-vz-switch -p fluxvm-agent
+      - name: Unit tests that do not need KVM or root
+        working-directory: fluxvm
+        run: |
+          cargo test -p fluxvm-core --lib
+          cargo test -p fluxvm-scheduler --lib
+          cargo test -p fluxvm-api --lib
+          cargo test -p fluxvm-network --lib
+          cargo test -p fluxvm-storage --lib
+          cargo test -p fluxvm-guest-protocol --lib
+          cargo test -p fluxvm-apple
+          cargo test -p fluxvm-vz-switch
+          cargo test -p fluxvm-agent --lib
+          cargo test -p fluxvm-usernet
+          cargo test -p fluxvm-guest-agent
+      # Booting a real VM needs Virtualization.framework, which hosted runners do not provide (no nested virtualization).
+      # Run scripts/macos-live-test.sh on a physical Mac instead.

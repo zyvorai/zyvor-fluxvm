@@ -1,0 +1,64 @@
+# Copyright 2026 Zyvor AI Labs · https://zyvor.dev
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+
+[package]
+name = "fluxvm-api"
+version = "0.4.21"
+edition = "2024"
+license = "LicenseRef-Zyvor-Production-1.0"
+description = "REST API for Zyvor FluxVM"
+
+[dependencies]
+fluxvm-core = { path = "../fluxvm-core" }
+fluxvm-scheduler = { path = "../fluxvm-scheduler" }
+fluxvm-image = { path = "../fluxvm-image" }
+fluxvm-intelligence = { path = "../fluxvm-intelligence" }
+fluxvm-network = { path = "../fluxvm-network" }
+fluxvm-netobs = { path = "../fluxvm-netobs" }
+fluxvm-vsock-client = { path = "../fluxvm-vsock-client" }
+fluxvm-guest-protocol = { path = "../fluxvm-guest-protocol" }
+fluxvm-oci-init = { path = "../fluxvm-oci-init" }
+anyhow = "1"
+async-stream = "0.3"
+axum = { version = "0.8", features = ["ws"] }
+bytes = "1"
+futures = "0.3"
+tokio-tungstenite = { version = "0.30", default-features = false, features = ["connect"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["fs", "io-util", "time", "net", "sync", "rt"] }
+tower-http = { version = "0.7", features = ["trace"] }
+tracing = "0.1"
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "json"] }
+jsonwebtoken = { version = "11", default-features = false, features = ["use_pem", "rust_crypto"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+# Used only by sandbox_proxy_inner: reqwest has no way to hand it a socket
+# that was connected from inside the sandbox's network namespace (see the
+# setns() call in connect_in_netns below), so that one path speaks HTTP/1.1
+# directly over a pre-connected stream instead of going through reqwest.
+hyper = { version = "1", features = ["client", "server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio", "service"] }
+chrono = { version = "0.4", features = ["serde"] }
+http-body-util = "0.1"
+libc = "0.2"
+sha2 = "0.11"
+sha1 = "0.11"
+hmac = "0.13"
+base64 = "0.23"
+include_dir = "0.7"
+# `kube_pod`: an mTLS WebSocket to a cluster's API server for `exec` (the same TLS stack reqwest already uses).
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+rustls-pemfile = "2"
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
+# mTLS identity from the verified client certificate (see `mtls.rs`).
+axum-server = { version = "0.8", default-features = false }
+x509-parser = "0.18"
+tower-layer = "0.3"
+
+[dev-dependencies]
+rcgen = "0.14"
+axum-server = { version = "0.8", features = ["tls-rustls"] }
+chrono = { version = "0.4", features = ["serde"] }
+tempfile = "3"
+tower = { version = "0.5", features = ["util"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

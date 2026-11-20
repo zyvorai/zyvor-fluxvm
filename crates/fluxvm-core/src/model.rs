@@ -1,0 +1,3782 @@
+// Copyright 2026 Zyvor AI Labs · https://zyvor.dev
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
+use uuid::Uuid;
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum BackendKind {
+    Qemu,
+    CloudHypervisor,
+    Firecracker,
+    /// In-tree FluxVM hypervisor (`fluxvm-hypervisor`) — agent-sandbox track.
+    FluxVm,
+    /// Apple Virtualization.framework (macOS on Apple silicon), driven through the
+    /// signed `fluxvm-vz-runner` helper. See `fluxvm-apple` and `docs/macos.md`.
+    Vz,
+    /// Resolved to a concrete backend by `fluxvm_scheduler::resolve_backend`
+    /// as the very first step of `VmManager::create` — never persisted, and
+    /// every other function taking a `BackendKind` (the backend dispatcher,
+    /// image cloning, ...) assumes it never sees this variant.
+    Auto,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case", tag = "mode")]
+pub enum NetworkSpec {
+    None,
+    User {
+        #[serde(default)]
+        forwards: Vec<PortForward>,
+    },
+    Tap {
+        #[serde(default)]
+        tap_name: Option<String>,
+        #[serde(default)]
+        bridge: Option<String>,
+        #[serde(default)]
+        mac: Option<String>,
+        /// Give this VM its own network namespace (veth pair + NAT to the
+        /// host, an internal bridge joining the veth and the tap inside the
+        /// namespace) instead of putting its tap directly on the shared
+        /// host bridge named by `bridge` (which is ignored when this is
+        /// true). Real isolation: the VM's own routing table, iptables, and
+        /// interface list are separate from the host's and from every other
+        /// namespaced VM's — not just a shared L2 segment. The VMM process
+        /// itself is launched inside the namespace (`ip netns exec`) so it
+        /// can see the tap at all.
+        #[serde(default)]
+        netns: bool,
+        /// Secondary guest NICs (Multus `netN`). Each entry is a host
+        /// bridge the scheduler attaches as an extra TAP at create time
+        /// (QEMU, Cloud Hypervisor, Firecracker) or via
+        /// `POST /v1/vms/{id}/hotplug/nic` after a warm-pool claim.
+        #[serde(default)]
+        extra: Vec<ExtraNic>,
+        /// Bridge-less attach: the tap is not enslaved to any bridge and a
+        /// TC/eBPF redirect moves frames straight between `direct.outer`
+        /// and the tap (see [`DirectSpec`]). Mutually exclusive with
+        /// `bridge` and `netns`. Absent on every record written before this
+        /// field existed, which keeps meaning "bridged tap".
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        direct: Option<DirectSpec>,
+        /// Virtual network attach: the tap joins overlay network `vnet.vni`
+        /// with a fixed address and no bridge; the vnet eBPF datapath routes
+        /// it (see [`VnetAttach`] and `docs/virtual-network.md`). Needs `mac`
+        /// and excludes `bridge`, `netns`, `direct` and `extra`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        vnet: Option<VnetAttach>,
+    },
+    /// A macvtap device on `parent`, giving the VM its own MAC directly on
+    /// that link with no host bridge involved. Supported by the QEMU and
+    /// Cloud Hypervisor backends only (attached via a pre-opened file
+    /// descriptor); Firecracker has no fd-based tap attachment in its API.
+    Macvtap {
+        parent: String,
+        /// macvtap link mode: bridge (default) | vepa | private | passthru
+        #[serde(default)]
+        macvtap_mode: Option<String>,
+        #[serde(default)]
+        mac: Option<String>,
+    },
+}
+
+impl NetworkSpec {
+    /// Bridge-less datapath. Live migration of these VMs is refused until a
+    /// two-host test exists.
+    pub fn is_direct(&self) -> bool {
+        matches!(
+            self,
+            NetworkSpec::Tap {
+                direct: Some(_),
+                ..
+            }
+        )
+    }
+}
+
+/// How a bridge-less ("direct") tap is paired with its outer device.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum DirectMode {
+    /// `outer` is a veth (a CNI pod's `eth0`). Frames arriving on `outer` are
+    /// redirected to the tap, and guest frames are `bpf_redirect_peer`d back
+    /// through `outer` to its peer -- the Cilium `lxc*` delivery hop.
+    #[default]
+    PeerVeth,
+    /// `outer` is a physical/bond uplink NIC with no bridge master. Frames
+    /// are steered to the tap by destination MAC; anything else is passed to
+    /// the host stack.
+    L2Uplink,
+}
+
+/// Bridge-less attach of a VM tap to an outer device. The tap and `outer`
+/// live in the same network namespace (`netns_path`, or the host's when
+/// `None`) because `bpf_redirect` only works within one namespace.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DirectSpec {
+    /// Interface the redirect pairs with the tap (`eth0` for a CNI pod).
+    pub outer: String,
+    /// Path of the network namespace holding both devices (for a CNI pod, the
+    /// bind-mounted pod netns). `None` means the host namespace.
+    #[serde(default)]
+    pub netns_path: Option<String>,
+    #[serde(default)]
+    pub mode: DirectMode,
+    /// IPv4 addresses the guest will use, for `l2-uplink` only. They let the datapath deliver an
+    /// ARP request for one of them (from the LAN, or from another guest on the same uplink) to
+    /// this guest's tap, since a bridge-less uplink has no other way to find it. Optional: without
+    /// them unicast still works by MAC, but a LAN peer cannot discover the guest by ARP.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub guest_ips: Vec<String>,
+}
+
+/// Most guest IPs one VM may declare for uplink ARP steering.
+pub const MAX_DIRECT_GUEST_IPS: usize = 8;
+
+impl DirectSpec {
+    /// Structural checks that need no host access, so a bad request is
+    /// rejected at admission instead of half-way through `prepare`.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.outer.is_empty() || self.outer.len() > 15 {
+            return Err("direct.outer must be 1..=15 characters".into());
+        }
+        if self.outer.contains(['/', ' ']) {
+            return Err("direct.outer is not a valid interface name".into());
+        }
+        if let Some(p) = &self.netns_path
+            && !p.starts_with('/')
+        {
+            return Err("direct.netns_path must be an absolute path".into());
+        }
+        if !self.guest_ips.is_empty() {
+            if self.mode != DirectMode::L2Uplink {
+                return Err("direct.guest_ips only applies to mode=l2-uplink".into());
+            }
+            if self.guest_ips.len() > MAX_DIRECT_GUEST_IPS {
+                return Err(format!(
+                    "direct.guest_ips accepts at most {MAX_DIRECT_GUEST_IPS} addresses"
+                ));
+            }
+            for ip in &self.guest_ips {
+                if ip.parse::<std::net::Ipv4Addr>().is_err() {
+                    return Err(format!(
+                        "direct.guest_ips entry {ip:?} is not an IPv4 address (IPv6/NDP steering is not supported)"
+                    ));
+                }
+            }
+        }
+        if self.mode == DirectMode::L2Uplink && self.netns_path.is_some() {
+            return Err(
+                "direct.mode=l2-uplink attaches to a host uplink; netns_path must be unset".into(),
+            );
+        }
+        Ok(())
+    }
+}
+
+impl NetworkSpec {
+    /// Validates the bridge-less options of a `Tap` spec. Other variants and
+    /// bridged taps always pass.
+    pub fn validate_direct(&self) -> Result<(), String> {
+        self.validate_vnet()?;
+        let NetworkSpec::Tap {
+            direct: Some(d),
+            bridge,
+            netns,
+            extra,
+            ..
+        } = self
+        else {
+            return Ok(());
+        };
+        d.validate()?;
+        if bridge.is_some() {
+            return Err("network.direct and network.bridge are mutually exclusive".into());
+        }
+        if *netns {
+            return Err("network.direct and network.netns=true are mutually exclusive".into());
+        }
+        if !extra.is_empty() {
+            for (i, nic) in extra.iter().enumerate() {
+                match &nic.direct {
+                    Some(ed) => {
+                        ed.validate()
+                            .map_err(|e| format!("network.extra[{i}].direct: {e}"))?;
+                        if !nic.bridge.is_empty() {
+                            return Err(format!(
+                                "network.extra[{i}]: bridge and direct are mutually exclusive"
+                            ));
+                        }
+                    }
+                    None => {
+                        if nic.bridge.is_empty() {
+                            return Err(format!("network.extra[{i}]: need bridge or direct"));
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+impl NetworkSpec {
+    /// Validates a `Tap` spec's virtual network attach. Other variants and
+    /// taps without `vnet` always pass.
+    pub fn validate_vnet(&self) -> Result<(), String> {
+        let NetworkSpec::Tap {
+            vnet: Some(v),
+            bridge,
+            netns,
+            direct,
+            extra,
+            mac,
+            ..
+        } = self
+        else {
+            return Ok(());
+        };
+        v.validate()?;
+        if mac.as_deref().unwrap_or("").is_empty() {
+            return Err("network.vnet needs network.mac".into());
+        }
+        if bridge.is_some() || *netns || direct.is_some() || !extra.is_empty() {
+            return Err(
+                "network.vnet excludes network.bridge, network.netns, network.direct and network.extra"
+                    .into(),
+            );
+        }
+        Ok(())
+    }
+
+    /// The virtual network attach of a `Tap` spec, if any.
+    pub fn vnet(&self) -> Option<&VnetAttach> {
+        match self {
+            NetworkSpec::Tap { vnet, .. } => vnet.as_ref(),
+            _ => None,
+        }
+    }
+}
+
+/// Largest Geneve VNI (24 bits).
+pub const MAX_VNI: u32 = 0x00ff_ffff;
+
+/// A guest NIC's place on a virtual network: overlay `vni`, its address and
+/// the network's gateway. The gateway is distributed: every host answers for
+/// it with the same MAC ([`vnet_gateway_mac`]), so a VM keeps its gateway when
+/// it moves.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct VnetAttach {
+    pub vni: u32,
+    /// Guest IPv4 address.
+    pub ip: String,
+    /// Prefix length of the network the address is on.
+    pub prefix_len: u8,
+    /// Gateway IPv4 address on that network.
+    pub gateway: String,
+}
+
+impl VnetAttach {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.vni == 0 || self.vni > MAX_VNI {
+            return Err(format!("vnet.vni must be 1..={MAX_VNI}"));
+        }
+        if !(8..=30).contains(&self.prefix_len) {
+            return Err("vnet.prefix_len must be 8..=30".into());
+        }
+        let ip: std::net::Ipv4Addr = self
+            .ip
+            .parse()
+            .map_err(|_| format!("vnet.ip {:?} is not an IPv4 address", self.ip))?;
+        let gw: std::net::Ipv4Addr = self
+            .gateway
+            .parse()
+            .map_err(|_| format!("vnet.gateway {:?} is not an IPv4 address", self.gateway))?;
+        let mask = u32::MAX << (32 - u32::from(self.prefix_len));
+        if u32::from(ip) & mask != u32::from(gw) & mask {
+            return Err("vnet.ip and vnet.gateway must be on the same network".into());
+        }
+        if ip == gw {
+            return Err("vnet.ip must differ from vnet.gateway".into());
+        }
+        Ok(())
+    }
+}
+
+/// The distributed gateway MAC of virtual network `vni`: locally
+/// administered, the same on every host.
+pub fn vnet_gateway_mac(vni: u32) -> [u8; 6] {
+    [
+        0x02,
+        0x66,
+        0x76,
+        (vni >> 16) as u8,
+        (vni >> 8) as u8,
+        vni as u8,
+    ]
+}
+
+/// `PUT /v1/network/vnets/{vni}`: one virtual network as this host should
+/// route it. Replaces any earlier config for the same VNI.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct VnetConfig {
+    pub vni: u32,
+    /// Network CIDR, e.g. `10.20.0.0/24`.
+    pub cidr: String,
+    pub gateway: String,
+    /// Host interface for traffic leaving the network (SNAT) and for floating
+    /// IPs arriving. Required with `snat_address` or `floating_ips`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uplink: Option<String>,
+    /// Source address for outbound traffic from guests without a floating
+    /// IP. No SNAT, and no outbound traffic, when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snat_address: Option<String>,
+    #[serde(default)]
+    pub floating_ips: Vec<VnetFloatingIp>,
+    /// Every guest on the network, on any host. Guests attached on this host
+    /// are routed locally whatever `node_ip` says.
+    #[serde(default)]
+    pub endpoints: Vec<VnetEndpoint>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct VnetEndpoint {
+    pub ip: String,
+    pub mac: String,
+    /// Underlay IPv4 address of the host running the guest.
+    pub node_ip: String,
+}
+
+/// A public address translated 1:1 to a guest address.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct VnetFloatingIp {
+    pub address: String,
+    pub ip: String,
+}
+
+/// Parses `a.b.c.d/n` into the network address and prefix length.
+pub fn parse_ipv4_cidr(cidr: &str) -> Result<(std::net::Ipv4Addr, u8), String> {
+    let (ip, len) = cidr
+        .split_once('/')
+        .ok_or_else(|| format!("CIDR {cidr:?} needs a /prefix"))?;
+    let ip: std::net::Ipv4Addr = ip
+        .parse()
+        .map_err(|_| format!("CIDR {cidr:?} is not IPv4"))?;
+    let len: u8 = len
+        .parse()
+        .map_err(|_| format!("CIDR {cidr:?} has a bad prefix"))?;
+    if !(8..=30).contains(&len) {
+        return Err(format!("CIDR {cidr:?}: prefix must be 8..=30"));
+    }
+    let mask = u32::MAX << (32 - u32::from(len));
+    if u32::from(ip) & !mask != 0 {
+        return Err(format!("CIDR {cidr:?} has host bits set"));
+    }
+    Ok((ip, len))
+}
+
+impl VnetConfig {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.vni == 0 || self.vni > MAX_VNI {
+            return Err(format!("vni must be 1..={MAX_VNI}"));
+        }
+        let (net, len) = parse_ipv4_cidr(&self.cidr)?;
+        let mask = u32::MAX << (32 - u32::from(len));
+        let inside = |what: &str, raw: &str| -> Result<std::net::Ipv4Addr, String> {
+            let ip: std::net::Ipv4Addr = raw
+                .parse()
+                .map_err(|_| format!("{what} {raw:?} is not an IPv4 address"))?;
+            if u32::from(ip) & mask != u32::from(net) {
+                return Err(format!("{what} {raw} is outside {}", self.cidr));
+            }
+            Ok(ip)
+        };
+        inside("gateway", &self.gateway)?;
+        let needs_uplink = self.snat_address.is_some() || !self.floating_ips.is_empty();
+        match &self.uplink {
+            Some(u) if u.is_empty() || u.len() > 15 => {
+                return Err("uplink must be 1..=15 characters".into());
+            }
+            None if needs_uplink => {
+                return Err("snat_address and floating_ips need an uplink".into());
+            }
+            _ => {}
+        }
+        if let Some(a) = &self.snat_address {
+            a.parse::<std::net::Ipv4Addr>()
+                .map_err(|_| format!("snat_address {a:?} is not an IPv4 address"))?;
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        for e in &self.endpoints {
+            inside("endpoint", &e.ip)?;
+            e.node_ip
+                .parse::<std::net::Ipv4Addr>()
+                .map_err(|_| format!("endpoint {} node_ip {:?} is not IPv4", e.ip, e.node_ip))?;
+            if e.mac.split(':').count() != 6 {
+                return Err(format!("endpoint {} mac {:?} is not a MAC", e.ip, e.mac));
+            }
+            if !seen.insert(e.ip.as_str()) {
+                return Err(format!("endpoint {} listed twice", e.ip));
+            }
+        }
+        let mut public = std::collections::BTreeSet::new();
+        for f in &self.floating_ips {
+            f.address
+                .parse::<std::net::Ipv4Addr>()
+                .map_err(|_| format!("floating IP {:?} is not IPv4", f.address))?;
+            inside("floating IP target", &f.ip)?;
+            if !public.insert(f.address.as_str()) {
+                return Err(format!("floating IP {} listed twice", f.address));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// One virtual network as `GET /v1/network/vnets` reports it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct VnetStatus {
+    pub config: VnetConfig,
+    /// Guests of this network attached on this host.
+    pub local_endpoints: Vec<String>,
+    /// Endpoints routed through the Geneve overlay.
+    pub remote_endpoints: usize,
+    pub gateway_mac: String,
+}
+
+/// One extra guest NIC — either on a host bridge or bridge-less direct.
+/// `tap_name` is filled by `fluxvm_network::prepare` (or NIC hotplug).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct ExtraNic {
+    /// Host bridge name when this NIC is bridged. Empty when `direct` is set.
+    #[serde(default)]
+    pub bridge: String,
+    #[serde(default)]
+    pub mac: Option<String>,
+    #[serde(default)]
+    pub tap_name: Option<String>,
+    /// Bridge-less attach for this extra NIC (Secure Containers Multus `netN`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub direct: Option<DirectSpec>,
+}
+
+impl Default for NetworkSpec {
+    fn default() -> Self {
+        Self::User { forwards: vec![] }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PortForward {
+    pub host_port: u16,
+    pub guest_port: u16,
+    #[serde(default = "default_tcp")]
+    pub protocol: String,
+    /// vz backend: listen on the NAT gateway address (the Mac, as the guests see it) instead of `127.0.0.1`, so *other
+    /// guests* can reach this port. Guests on Virtualization.framework's NAT cannot talk to each other directly; this
+    /// relays through the Mac. Ignored by other backends.
+    #[serde(default)]
+    pub guests: bool,
+    /// QEMU user networking: the host address the forward listens on. Unset keeps the long-standing `0.0.0.0`
+    /// (reachable from outside the host). Stack-managed SSH forwards set `127.0.0.1` so the control path into a
+    /// guest is never exposed. Must be an IP literal. Ignored by other backends.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_addr: Option<String>,
+}
+
+impl PortForward {
+    /// The address QEMU should listen on: `host_addr`, or all interfaces when unset.
+    pub fn listen_addr(&self) -> Result<std::net::IpAddr, String> {
+        match &self.host_addr {
+            None => Ok(std::net::Ipv4Addr::UNSPECIFIED.into()),
+            Some(a) => a
+                .parse()
+                .map_err(|_| format!("port forward host_addr {a:?} is not an IP address")),
+        }
+    }
+
+    /// True for a forward to the guest's SSH port that only listens on the host's loopback: the path
+    /// `fluxctl` uses to reach a QEMU user-mode guest, which has no address of its own on the host.
+    pub fn is_loopback_ssh(&self) -> bool {
+        self.guest_port == 22
+            && self.protocol == "tcp"
+            && self.listen_addr().map(|a| a.is_loopback()).unwrap_or(false)
+            && self.host_addr.is_some()
+    }
+}
+
+fn default_tcp() -> String {
+    "tcp".into()
+}
+
+/// Where and how a VM's writable disk is actually provisioned, independent
+/// of which VMM backend boots it. `Default` (the empty/unset request field)
+/// keeps today's per-VMM behavior unchanged: a qcow2 copy-on-write overlay
+/// for QEMU, a reflinked-or-copied raw file for Cloud Hypervisor/Firecracker.
+/// See `fluxvm_image::storage` for how each variant is actually
+/// provisioned and torn down.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum StorageBackend {
+    #[default]
+    Default,
+    /// `request.image` must be the path to an existing LVM thin logical
+    /// volume block device (e.g. `/dev/vg0/base-image`), itself backed by a
+    /// thin pool. A new thin snapshot LV is created per VM and handed to
+    /// the VMM directly as a raw block device: near-instant, real
+    /// copy-on-write at the block layer, no filesystem/reflink involved.
+    /// Not supported under the Firecracker jailer — its chroot/hardlink
+    /// resource-placement model doesn't extend to shared block devices; use
+    /// direct (non-jailed) Firecracker, QEMU, or Cloud Hypervisor instead.
+    LvmThin,
+    /// QEMU only. The per-VM disk is a normal qcow2 CoW overlay, exported
+    /// over NBD via a `qemu-nbd` subprocess this VM owns (over a UNIX
+    /// socket, not a TCP port) instead of being opened directly as a local
+    /// file by QEMU — the same client/server split real remote/shared NBD
+    /// storage uses, without requiring a separate storage host to exist in
+    /// order to prove the mechanism end to end.
+    Nbd,
+    /// Ceph RBD. `request.image` is a `pool/image` reference to an existing
+    /// RBD image; a snapshot on it named `fluxvm-base` must already exist
+    /// and be protected (`rbd snap protect`) for the per-VM clone to work.
+    /// Verified end to end against a real Rook Ceph cluster: `rbd clone`
+    /// produces a genuine per-VM thin clone, and QEMU boots a real guest to
+    /// a login prompt straight off the `rbd:` URI — see
+    /// `fluxvm_image::storage::provision_ceph_rbd`. Does not support
+    /// automatic guest-agent token injection (see that function).
+    CephRbd,
+    /// QEMU only. `request.image` is a `pool/image` reference to an RBD
+    /// image owned by an external control plane (e.g. Atlas); QEMU opens it
+    /// as-is, with no clone. FluxVM never deletes it, and because every node
+    /// opens the same image, live migration needs no block copy. Ceph
+    /// credentials come from node config (`storage.ceph_user`/`ceph_conf`),
+    /// never from the request.
+    CephRbdInPlace,
+    /// `request.image` is a raw disk (file or block device) on storage every
+    /// node can open, such as NFS, a clustered filesystem or a multipath LUN,
+    /// used in place with no clone. FluxVM never deletes it. A lock file next
+    /// to the disk (`<disk>.fluxvm-lock`) names the VM that has it open, so a
+    /// second VM cannot start on it while the first runs. This is what HA
+    /// re-create and live migration use: the disk outlives any one node.
+    Shared,
+}
+
+impl StorageBackend {
+    /// True for both RBD variants: `request.image` is a `pool/image`
+    /// reference, not a local path.
+    pub fn is_ceph_rbd(self) -> bool {
+        matches!(
+            self,
+            StorageBackend::CephRbd | StorageBackend::CephRbdInPlace
+        )
+    }
+}
+
+/// Enables the in-guest vsock agent (ping/exec/shutdown, no SSH needed).
+/// `port` is the AF_VSOCK port the guest listens on, not a host TCP port.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentSpec {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_agent_port")]
+    pub port: u32,
+    /// Shared secret the guest agent requires on every request. If left
+    /// unset on a request with `enabled: true`, `VmManager::create`
+    /// generates a random one and burns it into that VM's own disk before
+    /// boot (see `fluxvm_image::inject_guest_agent_token`) — every
+    /// agent-enabled VM ends up authenticated by default, without the
+    /// caller having to think about it.
+    #[serde(default)]
+    pub token: Option<String>,
+}
+fn default_agent_port() -> u32 {
+    17777
+}
+
+impl Default for AgentSpec {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            port: default_agent_port(),
+            token: None,
+        }
+    }
+}
+
+/// QEMU guest-agent (virtio-serial `org.qemu.guest_agent.0`) channel.
+/// Used for Zyvor/GuestKit Windows agent live control (`fluxctl qga …`).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct QgaSpec {
+    #[serde(default)]
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct CloudInitSpec {
+    #[serde(default)]
+    pub hostname: Option<String>,
+    #[serde(default)]
+    pub user: Option<String>,
+    #[serde(default)]
+    pub ssh_authorized_keys: Vec<String>,
+    #[serde(default)]
+    pub packages: Vec<String>,
+    #[serde(default)]
+    pub runcmd: Vec<String>,
+    /// Configure the guest's network address statically via cloud-init
+    /// (network-config v2) instead of leaving it to the guest's own DHCP
+    /// client. Only meaningful for `NetworkSpec::Tap { netns: true, .. }`
+    /// -- that's the only mode with a known address to inject before boot
+    /// (see `fluxvm_network::netns::NetnsHandle`). Ignored (no-op) for
+    /// every other networking mode. The address is the same one DHCP mode
+    /// would hand out anyway (both are pinned to the same reservation) --
+    /// this just skips depending on the guest actually running a working
+    /// DHCP client, which not every image does out of the box.
+    #[serde(default)]
+    pub static_network: bool,
+    /// Files to write into the guest before first boot, via cloud-init's
+    /// own `write_files` module -- e.g. dropping a systemd unit or app
+    /// config without needing a custom image build.
+    #[serde(default)]
+    pub write_files: Vec<CloudInitFile>,
+    /// Additional cards the guest must configure statically and must not run DHCP on (private networks of
+    /// `apple.networks`). They go into the seed's `network-config` so the guest's network stack configures them before
+    /// `network-online.target`; a catch-all DHCP match would otherwise wait on them until its timeout.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub static_nics: Vec<CloudInitNic>,
+    /// MTU for the guest's DHCP-configured primary card (`apple.nat_mtu`), as a network-config `mtu`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mtu: Option<u16>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CloudInitNic {
+    /// The card's MAC address, lower case, colon separated.
+    pub mac: String,
+    /// Address with prefix length, e.g. `10.89.7.20/24`.
+    pub address: String,
+    /// The card's MTU, when it is not the default 1500.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mtu: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CloudInitFile {
+    pub path: String,
+    pub content: String,
+    /// Octal file mode, e.g. `"0644"`. Defaults to cloud-init's own default
+    /// (`0644`) when unset.
+    #[serde(default)]
+    pub permissions: Option<String>,
+}
+
+/// A host directory shared into the guest via virtiofs (QEMU / Cloud
+/// Hypervisor) or packed into an ext4 block device (Firecracker — no
+/// virtio-fs upstream). Requires `virtiofsd` on `$PATH` for QEMU/CH, or
+/// `mkfs.ext4` privileges for Firecracker packing at launch.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SharedFolder {
+    pub host_path: PathBuf,
+    /// Where to mount it inside the guest. Auto-mounted via a generated
+    /// cloud-init `runcmd` entry when `cloud_init` is set on the request
+    /// (see `VmManager::create`); otherwise the guest must mount itself —
+    /// `mount -t virtiofs <tag> <guest_path>` for QEMU/CH (`tag` = `fs0`…),
+    /// or `mount /dev/vdX <guest_path>` for Firecracker share drives.
+    pub guest_path: String,
+    #[serde(default)]
+    pub read_only: bool,
+}
+
+/// One `CreateVmRequest::data_disks` entry: data disk `name` (`[a-z0-9-]`,
+/// up to 32) as a qcow2 overlay on `backing`, which is never written.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct DataDiskSpec {
+    pub name: String,
+    pub backing: PathBuf,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub io: Option<DiskIo>,
+}
+
+/// QEMU only: how one disk is attached and how QEMU does its I/O. Every field
+/// is optional; an unset field keeps FluxVM's default (SCSI for data disks,
+/// writeback cache, the thread pool, no iothread).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct DiskIo {
+    /// `scsi` (default), `virtio-blk`, or `vhost-user-blk` (served by a
+    /// per-disk `qemu-storage-daemon`). Data disks only; the root is always
+    /// virtio-blk.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bus: Option<DiskBus>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aio: Option<DiskAio>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache: Option<DiskCache>,
+    /// A dedicated iothread for this disk (virtio-blk, vhost-user-blk and the
+    /// root).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub iothread: bool,
+    /// virtio queues, 1-64 (virtio-blk, vhost-user-blk and the root).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queues: Option<u16>,
+    /// IOPS and bandwidth limits QEMU enforces on this disk (`scsi`,
+    /// `virtio-blk` and the root; a vhost-user-blk disk bypasses QEMU's block
+    /// layer). Applied when QEMU starts and changeable live.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub throttle: Option<DiskThrottle>,
+}
+
+/// Most a single throttle limit may be (QEMU's `THROTTLE_VALUE_MAX`).
+pub const DISK_THROTTLE_MAX: u64 = 1_000_000_000_000_000;
+
+/// Per-disk I/O limits. A `*_total` limit and its `*_read`/`*_write` pair
+/// are mutually exclusive. `*_total_max` lets the disk burst above
+/// `*_total` for up to `burst_seconds` (default 1).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct DiskThrottle {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub iops_total: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub iops_read: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub iops_write: Option<u64>,
+    /// Bytes per second.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bps_total: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bps_read: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bps_write: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub iops_total_max: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bps_total_max: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub burst_seconds: Option<u64>,
+}
+
+impl DiskThrottle {
+    pub fn is_empty(&self) -> bool {
+        *self == DiskThrottle::default()
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        let all = [
+            ("iops_total", self.iops_total),
+            ("iops_read", self.iops_read),
+            ("iops_write", self.iops_write),
+            ("bps_total", self.bps_total),
+            ("bps_read", self.bps_read),
+            ("bps_write", self.bps_write),
+            ("iops_total_max", self.iops_total_max),
+            ("bps_total_max", self.bps_total_max),
+        ];
+        for (k, v) in all {
+            if let Some(v) = v
+                && !(1..=DISK_THROTTLE_MAX).contains(&v)
+            {
+                return Err(format!(
+                    "throttle.{k} must be 1-{DISK_THROTTLE_MAX} (got {v})"
+                ));
+            }
+        }
+        if self.iops_total.is_some() && (self.iops_read.is_some() || self.iops_write.is_some()) {
+            return Err("throttle.iops_total excludes iops_read and iops_write".into());
+        }
+        if self.bps_total.is_some() && (self.bps_read.is_some() || self.bps_write.is_some()) {
+            return Err("throttle.bps_total excludes bps_read and bps_write".into());
+        }
+        for (max, base, k) in [
+            (self.iops_total_max, self.iops_total, "iops_total"),
+            (self.bps_total_max, self.bps_total, "bps_total"),
+        ] {
+            match (max, base) {
+                (Some(_), None) => return Err(format!("throttle.{k}_max needs {k}")),
+                (Some(m), Some(b)) if m < b => {
+                    return Err(format!("throttle.{k}_max ({m}) is below {k} ({b})"));
+                }
+                _ => {}
+            }
+        }
+        if let Some(s) = self.burst_seconds {
+            if self.iops_total_max.is_none() && self.bps_total_max.is_none() {
+                return Err("throttle.burst_seconds needs iops_total_max or bps_total_max".into());
+            }
+            if !(1..=86_400).contains(&s) {
+                return Err(format!("throttle.burst_seconds must be 1-86400 (got {s})"));
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum DiskBus {
+    Scsi,
+    VirtioBlk,
+    VhostUserBlk,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DiskAio {
+    IoUring,
+    Native,
+    Threads,
+}
+
+impl DiskAio {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            DiskAio::IoUring => "io_uring",
+            DiskAio::Native => "native",
+            DiskAio::Threads => "threads",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum DiskCache {
+    None,
+    Writeback,
+    Writethrough,
+    Directsync,
+    Unsafe,
+}
+
+impl DiskCache {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            DiskCache::None => "none",
+            DiskCache::Writeback => "writeback",
+            DiskCache::Writethrough => "writethrough",
+            DiskCache::Directsync => "directsync",
+            DiskCache::Unsafe => "unsafe",
+        }
+    }
+
+    /// O_DIRECT on the host file or device.
+    pub fn direct(self) -> bool {
+        matches!(self, DiskCache::None | DiskCache::Directsync)
+    }
+
+    /// The guest sees a write-back cache it has to flush.
+    pub fn guest_write_cache(self) -> bool {
+        !matches!(self, DiskCache::Writethrough | DiskCache::Directsync)
+    }
+}
+
+impl DiskIo {
+    pub fn bus(&self) -> DiskBus {
+        self.bus.unwrap_or(DiskBus::Scsi)
+    }
+
+    pub fn cache(&self) -> DiskCache {
+        self.cache.unwrap_or(DiskCache::Writeback)
+    }
+
+    /// Rejects combinations QEMU refuses or that would silently do nothing.
+    /// `root` is the boot disk, which is always virtio-blk.
+    pub fn validate(&self, root: bool) -> Result<(), String> {
+        if root && matches!(self.bus, Some(DiskBus::Scsi | DiskBus::VhostUserBlk)) {
+            return Err("the root disk is always virtio-blk; bus applies to data disks".into());
+        }
+        if self.aio == Some(DiskAio::Native) && !self.cache().direct() {
+            return Err("aio native needs cache none or directsync (O_DIRECT)".into());
+        }
+        if let Some(q) = self.queues
+            && !(1..=64).contains(&q)
+        {
+            return Err(format!("queues must be 1-64 (got {q})"));
+        }
+        if !root && self.bus() == DiskBus::Scsi && (self.iothread || self.queues.is_some()) {
+            return Err(
+                "iothread and queues need bus virtio-blk or vhost-user-blk (SCSI disks share one controller)".into(),
+            );
+        }
+        if let Some(t) = &self.throttle {
+            if !root && self.bus() == DiskBus::VhostUserBlk {
+                return Err(
+                    "throttle needs bus scsi or virtio-blk (vhost-user-blk bypasses QEMU's block layer)".into(),
+                );
+            }
+            t.validate()?;
+        }
+        Ok(())
+    }
+
+    /// The throttle, unless it sets no limit.
+    pub fn throttle(&self) -> Option<&DiskThrottle> {
+        self.throttle.as_ref().filter(|t| !t.is_empty())
+    }
+
+    /// True when anything besides the throttle is set; only then does the
+    /// root get an explicit `virtio-blk-pci` device.
+    pub fn has_device_settings(&self) -> bool {
+        DiskIo {
+            throttle: None,
+            ..self.clone()
+        } != DiskIo::default()
+    }
+}
+
+/// One `CreateVmRequest::cdroms` entry: a read-only ISO attached as a SATA
+/// CD-ROM on q35's built-in AHCI controller, so installers (Windows Setup
+/// included) see it without extra drivers. `name` follows the data-disk
+/// rules; `path` is fenced like any other disk source. An empty `path` is a
+/// drive with no medium (ejected): the device stays so the guest's device
+/// layout is unchanged across restarts and migrations.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CdromSpec {
+    pub name: String,
+    pub path: PathBuf,
+}
+
+impl CdromSpec {
+    pub fn is_ejected(&self) -> bool {
+        self.path.as_os_str().is_empty()
+    }
+}
+
+/// AHCI ports available for `CreateVmRequest::cdroms` (q35's ich9-ahci has six).
+pub const MAX_CDROMS: usize = 4;
+
+/// Guest operating system for the Apple (`vz`) backend.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum AppleGuest {
+    /// ARM64 Linux booted with EFI from a raw disk image.
+    #[default]
+    Linux,
+    /// macOS installed from an Apple IPSW restore image (needs an explicit `install` before first boot).
+    Macos,
+}
+
+/// First-boot material for a macOS guest. The guest runs `firstboot.sh` from the share (once, as an admin, or from a
+/// LaunchDaemon in the template): it installs the keys as a root-owned `AuthorizedKeysFile` outside any home directory, so
+/// fresh clones accept them before anyone has logged in, and turns on Remote Login.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AppleFirstBoot {
+    #[serde(default)]
+    pub ssh_public_keys: Vec<String>,
+    #[serde(default = "default_true")]
+    pub enable_remote_login: bool,
+    /// Optional local admin account to create on first boot (sysadminctl).
+    /// Useful when the native macOS 27 VZMacGuestProvisioningOptions path is unavailable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub username: Option<String>,
+    /// Display name for the created account.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub full_name: Option<String>,
+    /// Password for the created account. Prefer `password_file` in production so the secret does not live in the VM spec.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub password: Option<String>,
+    /// Path to a file containing the account password (one line). Takes precedence over `password` when both are set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub password_file: Option<PathBuf>,
+    /// Enable auto-login for the created account (writes `/etc/kcpassword` via the helper).
+    #[serde(default)]
+    pub auto_login: bool,
+}
+
+/// Mode of a macOS 26+ vmnet network.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum AppleVmnetMode {
+    /// NAT to the host's uplink.
+    Shared,
+    /// Guests and host only, no uplink.
+    HostOnly,
+}
+
+/// A TCP or UDP forward from a host port to a guest address on a vmnet network.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AppleVmnetForward {
+    /// `tcp` or `udp`.
+    #[serde(default = "default_vmnet_protocol")]
+    pub protocol: String,
+    pub host_port: u16,
+    pub guest_port: u16,
+    pub guest_ip: String,
+}
+
+fn default_vmnet_protocol() -> String {
+    "tcp".into()
+}
+
+/// A per-VM vmnet network (macOS 26+). VMs sharing one network need the broker in `docs/VMNET_BROKER.md`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AppleVmnetSpec {
+    /// Optional broker-owned network name. VMs using the same name and identical
+    /// spec share one vmnet_network_ref through fluxvm-vmnetd.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    pub mode: AppleVmnetMode,
+    /// IPv4 subnet address, for example `192.168.105.0`.
+    pub subnet: String,
+    /// IPv4 subnet mask, for example `255.255.255.0`. vmnet's DHCP serves the whole subnet.
+    pub mask: String,
+    /// Accepted for wire compatibility and refused at admission: the vmnet SDK has no DHCP pool setter.
+    #[serde(default)]
+    pub dhcp_start: Option<String>,
+    #[serde(default)]
+    pub dhcp_end: Option<String>,
+    /// Stable DHCP reservation for this VM's MAC address.
+    #[serde(default)]
+    pub reserved_ip: Option<String>,
+    #[serde(default)]
+    pub forwards: Vec<AppleVmnetForward>,
+    /// IPv6 ULA prefix for the network, for example `fd00:1::/64`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ipv6_prefix: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mtu: Option<u32>,
+    /// Shared mode: the host interface (for example `en0`) the network NATs through.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_interface: Option<String>,
+    /// Guests configure addresses themselves (no vmnet DHCP server).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub disable_dhcp: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub disable_dns_proxy: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub disable_nat44: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub disable_nat66: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub disable_router_advertisement: bool,
+}
+
+/// Options for the Apple (`vz`) backend. Ignored by every other backend.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AppleSpec {
+    #[serde(default)]
+    pub guest_os: AppleGuest,
+    /// macOS guests: the IPSW restore image. Linux guests: an optional installer ISO attached read-only.
+    #[serde(default)]
+    pub media: Option<PathBuf>,
+    /// macOS guests: install from the IPSW (`media`, or `image` when `media` is unset) onto a fresh sparse disk of
+    /// `disk_size_gib` before the first boot, instead of cloning a prepared template.
+    #[serde(default)]
+    pub install: bool,
+    /// macOS guests: files shared into the guest at `/Volumes/My Shared Files/firstboot` for a first-boot helper.
+    #[serde(default)]
+    pub firstboot: Option<AppleFirstBoot>,
+    /// Open the guest's native console window (a `VZVirtualMachineView`).
+    #[serde(default)]
+    pub window: bool,
+    /// Number of displays exposed to a macOS guest.
+    #[serde(default = "default_apple_display_count")]
+    pub display_count: u8,
+    /// Linux guest SPICE clipboard sharing. Guest needs spice-vdagent.
+    #[serde(default)]
+    pub clipboard: bool,
+    /// Host BSD interface (for example en0) for VZ bridged networking.
+    /// None keeps the current VZ NAT behavior.
+    #[serde(default)]
+    pub bridge_interface: Option<String>,
+    /// macOS 27+: use a sparse DiskImageKit ASIF overlay for guest writes.
+    #[serde(default)]
+    pub asif_overlay: bool,
+    /// macOS 27 first-boot automated provisioning. Password contents are read
+    /// from a one-shot file and are never serialized into the VM request.
+    #[serde(default)]
+    pub provision_full_name: Option<String>,
+    #[serde(default)]
+    pub provision_username: Option<String>,
+    #[serde(default)]
+    pub provision_password_file: Option<PathBuf>,
+    #[serde(default)]
+    pub provision_auto_login: bool,
+    #[serde(default)]
+    pub provision_remote_login: bool,
+    /// Initial guest display width. The VZ window still dynamically
+    /// reconfigures the guest display while it is resized.
+    #[serde(default = "default_apple_display_width")]
+    pub display_width: u32,
+    /// Initial guest display height.
+    #[serde(default = "default_apple_display_height")]
+    pub display_height: u32,
+    /// Guest display density. 220 is Retina-class; callers may request
+    /// larger displays (including 5K) without changing the host scale.
+    #[serde(default = "default_apple_display_ppi")]
+    pub display_ppi: u32,
+    /// Play guest audio through the host default output device.
+    #[serde(default = "default_true")]
+    pub audio_output: bool,
+    /// Expose the host microphone to the guest. Off by default because this
+    /// crosses a privacy boundary and macOS will request microphone access.
+    #[serde(default)]
+    pub microphone: bool,
+    /// Linux-on-Apple only: expose the host Rosetta runtime to the guest.
+    /// The guest still has to mount/register binfmt as documented by Apple.
+    #[serde(default)]
+    pub rosetta: bool,
+    /// Linux-on-Apple only: enable nested virtualization when the current
+    /// host/platform supports it. A request on an unsupported host fails.
+    #[serde(default)]
+    pub nested_virtualization: bool,
+    /// Add an XHCI controller so USB mass-storage/passthrough devices can be
+    /// attached with Virtualization.framework's hotplug API (macOS 15+).
+    /// Opt-in so hosts that still run the supported macOS 14 baseline do not regress.
+    #[serde(default)]
+    pub usb_controller: bool,
+    /// Number of XHCI controllers (USB buses), 1-4; implies `usb_controller`. 0 keeps the default of one when
+    /// `usb_controller` is set. Hot-plugged USB disks pick a bus with `usb_bus`.
+    #[serde(default, skip_serializing_if = "is_zero_u8")]
+    pub usb_controllers: u8,
+    /// macOS 26+ custom vmnet network (shared or host-only) with its own DHCP pool, reservation and port forwards.
+    #[serde(default)]
+    pub vmnet: Option<AppleVmnetSpec>,
+    /// macOS 27+ custom Virtio device hook for Linux guests.
+    #[serde(default)]
+    pub custom_virtio: bool,
+    /// Host names the guest may reach, through an HTTP(S) proxy the runner serves over vsock (`network.mode = "none"` only: the guest
+    /// has no card, so the proxy is its only way out). `example.com` matches that host, `*.example.com` its subdomains; ports 80 and 443.
+    #[serde(default)]
+    pub egress_allow: Vec<String>,
+    /// Linux guests: let software inside the guest snapshot, restore and restart this VM through an MCP server at
+    /// `http://127.0.0.1:7790/mcp` in the guest (relayed to the host over vsock; scoped to this VM only).
+    #[serde(default)]
+    pub self_control: bool,
+    /// Linux guests: wire host Metal/MLX (or llama.cpp) inference into the guest over vsock. The guest sees
+    /// `http://127.0.0.1:8080/v1` (`OPENAI_BASE_URL`); the host end is `[apple].host_infer_port` (default 8080).
+    /// No guest network card is required. See `docs/host-inference.md`.
+    #[serde(default)]
+    pub host_gpu: bool,
+    /// Extra guest→host vsock services: each guest-facing `port` is relayed either to a host Unix socket the daemon owner
+    /// runs (`socket`, a name resolved under the runner socket directory, never an arbitrary path) or answered by the runner itself (`builtin`: `metadata` or `telemetry`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub vsock_services: Vec<AppleVsockService>,
+    /// macOS guests: add a virtio-socket (vsock) device so a guest-side agent (a LaunchDaemon) can be reached without SSH.
+    /// EXPERIMENTAL; verified once on one M4 and macOS 27.0.1, other macOS versions untested. When
+    /// the guest does not answer on vsock, exec and file access fall back to SSH. Refused for Linux guests (they always have vsock).
+    #[serde(default)]
+    pub macos_vsock: bool,
+    /// Attach the root disk read-only (OCI sandboxes boot an immutable image; writes go to tmpfs).
+    #[serde(default)]
+    pub root_read_only: bool,
+    /// Host caching of the root (and seed) disk image; `automatic` is VZ's default.
+    #[serde(default)]
+    pub root_caching: AppleDiskCaching,
+    /// Host flush behaviour of the root (and seed) disk image; `full` is VZ's default.
+    #[serde(default)]
+    pub root_sync: AppleDiskSync,
+    /// Extra raw disks after the root (and seed) disk, in order: `/dev/vdb`, `/dev/vdc`, … for a direct-boot guest.
+    #[serde(default)]
+    pub extra_disks: Vec<AppleDisk>,
+    /// virtiofs shares with fixed tags for a Linux guest's own init to mount (an OCI sandbox's `fluxvm-meta`),
+    /// alongside the positional `fs0`, `fs1`, … of `shared_folders`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tagged_shares: Vec<AppleShare>,
+    /// OCI sandbox: the guest's PID 1 is fluxvm-oci-init, and this is its `config.json`. At launch it is written with the
+    /// agent token to `<workspace>/meta`, shared read-only under the `fluxvm-meta` tag. Needs direct boot (`kernel`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub init_config: Option<serde_json::Value>,
+    /// OCI sandbox: environment variables kept out of `init_config`, the VM record and every API response. Only the
+    /// launch that creates the VM sees them; it writes them to a 0600 file in the meta share, which later boots reuse.
+    #[serde(skip)]
+    pub secret_env: std::collections::BTreeMap<String, crate::grants::Secret>,
+    /// Private networks between `vz` guests on this Mac: each one is an extra network card on a userspace switch, so
+    /// guests on the same network reach each other directly (any port, TCP and UDP). The daemon fills in `address` and
+    /// `mac` when they are left out.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub networks: Vec<AppleNetwork>,
+    /// Named virtio console ports (Linux guests): each appears in the guest as `/dev/virtio-ports/<name>` and on the host as
+    /// a unix socket, reached with `fluxctl port-connect` or the websocket `GET /v1/vms/{id}/ports/{name}`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub console_ports: Vec<String>,
+    /// macOS 27+ EFI Secure Boot keys for a Linux EFI guest; Secure Boot itself is the top-level `secure_boot`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub efi_secure_boot: Option<AppleSecureBoot>,
+    /// macOS guests: start up from macOS Recovery.
+    #[serde(default)]
+    pub recovery: bool,
+    /// Linux Rosetta AOT cache: `default`, a guest unix socket path (`/run/rosettad/rosetta.sock`) or an abstract
+    /// socket name; the guest runs `rosettad` there.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rosetta_cache: Option<String>,
+    /// Linux guests: replace the NAT card with a userspace gateway (`fluxvm-usernet`) that applies this egress policy,
+    /// DNS allow/deny and port forwards, and feeds `/v1/netobs/*`. Verified on an M4.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usernet: Option<AppleUsernet>,
+    /// Linux guests on the Mac's NAT (or bridged): the MTU the guest sets on its primary card, 576..=1500, applied through the
+    /// seed's network-config. Virtualization has no MTU property for NAT attachments, so this only *lowers* what the guest
+    /// sends (a tunnel or VPN path that cannot carry 1500); the host's NAT still passes at most 1500. For a gateway you
+    /// control and for jumbo frames use `usernet.mtu`. Needs cloud-init (a seed is built with defaults when none was given).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nat_mtu: Option<u16>,
+}
+
+/// Userspace gateway settings for a `vz` Linux guest (see [`AppleSpec::usernet`]). Mapped to `fluxvm-usernet`'s
+/// config by the Apple backend; with every list empty the guest gets "the public internet, no private ranges".
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct AppleUsernet {
+    /// IPv4 CIDRs (or bare addresses) the guest may reach. Any entry here, or in `allow_domains`, makes it a strict allow-list.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allow_cidrs: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deny_cidrs: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allow_ports: Vec<u16>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deny_ports: Vec<u16>,
+    /// Domain suffixes the guest may resolve (`example.com` matches itself and subdomains); others get NXDOMAIN.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dns_allow: Vec<String>,
+    /// Names that always get NXDOMAIN.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dns_deny: Vec<String>,
+    /// Let the guest reach private (RFC 1918, loopback, link-local) ranges.
+    #[serde(default)]
+    pub allow_private: bool,
+    /// Publish a guest port on the host.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub port_forwards: Vec<AppleUsernetForward>,
+    /// IP MTU, 576..=9000 (default 1500).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mtu: Option<u16>,
+    /// Serve IPv6 to the guest (a ULA /64 by SLAAC, with the same egress policy). Off by default.
+    #[serde(default)]
+    pub ipv6: bool,
+    /// IPv6 CIDRs the guest may reach (any entry here makes the policy a strict allow-list, like `allow_cidrs`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allow_cidrs6: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deny_cidrs6: Vec<String>,
+}
+
+/// One host -> guest port forward of [`AppleUsernet`].
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct AppleUsernetForward {
+    /// `tcp` (default) or `udp`.
+    #[serde(default = "default_usernet_proto")]
+    pub protocol: String,
+    /// Host address to listen on (default 127.0.0.1).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_addr: Option<String>,
+    /// 1024..=65535, or 0 for an ephemeral port.
+    pub host_port: u16,
+    pub guest_port: u16,
+    /// `v4` (default) forwards to the guest's lease address; `v6` needs `apple.usernet.ipv6`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guest_family: Option<String>,
+    /// Explicit guest address: for `v6` an address inside the guest /64 (otherwise the last one the guest used).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guest_addr: Option<String>,
+}
+
+fn default_usernet_proto() -> String {
+    "tcp".into()
+}
+
+/// Signatures and platform key for macOS 27 EFI Secure Boot (`VZEFIVariableStore`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct AppleSecureBoot {
+    /// Enroll Microsoft's KEK, UEFI CA and revocation list, so Microsoft-signed shims boot.
+    #[serde(default = "default_true")]
+    pub default_signatures: bool,
+    /// X.509 platform key (DER or PEM). None uses Apple's managed platform key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub platform_key: Option<PathBuf>,
+    /// Signature files (certificate, SHA-256 hash or EFI signature list) appended to KEK, db and dbx.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub kek: Vec<PathBuf>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub db: Vec<PathBuf>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dbx: Vec<PathBuf>,
+    /// Clear previously enrolled keys before applying these on each boot.
+    #[serde(default)]
+    pub reset: bool,
+}
+
+/// One private network a `vz` guest joins (see [`AppleSpec::networks`]).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct AppleNetwork {
+    /// `a-z`, `0-9` and `-`, 1-32 characters.
+    pub name: String,
+    /// `10.89.N.H/24`; must be in the network's subnet once the network exists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub address: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mac: Option<String>,
+    /// MTU of the whole network, 1280-9000 (default 1500). Every member must agree; a guest that omits it inherits
+    /// the network's. Above 1500 the runner raises its card's `maximumTransmissionUnit` and the guest sets the
+    /// same MTU through its seed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mtu: Option<u32>,
+}
+
+/// A host directory shared into a `vz` Linux guest under a fixed virtiofs tag.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AppleShare {
+    pub tag: String,
+    pub host_path: PathBuf,
+    #[serde(default)]
+    pub read_only: bool,
+}
+
+/// One guest→host vsock service (see `AppleSpec::vsock_services`). Exactly one of `socket`, `builtin` and `tcp` is set.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct AppleVsockService {
+    /// The vsock port the guest connects to (1024..=65535; not 3128, 7790 or 7791, which the runner uses itself).
+    pub port: u32,
+    /// Relay to the host Unix socket `<runner socket dir>/<vm id>.svc-<socket>`; the name is `[a-z0-9_-]{1,32}`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub socket: Option<String>,
+    /// `metadata`: the guest reads one JSON document (id, name, vcpus, memory_mib) and the runner closes.
+    /// `telemetry`: the guest writes lines that the runner appends to `<workspace>/telemetry.log` (capped at 8 MiB).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub builtin: Option<String>,
+    /// Relay to a TCP server on this Mac, `127.0.0.1:<port>` (port 1024..=65535; `localhost` is accepted and means
+    /// 127.0.0.1). Loopback only: any other host is refused. Use it to give a guest an OpenAI-compatible local model
+    /// server (MLX, llama.cpp) without a network card.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tcp: Option<String>,
+}
+
+/// An extra disk for a `vz` Linux guest: a raw image file (default), a host block device, or a network block device
+/// export, on a virtio, NVMe or USB controller.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct AppleDisk {
+    /// Name for `fluxctl disk detach`; `disk<N>` when left out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// The image file (`kind: image`) or the device, e.g. `/dev/disk4` (`kind: block`).
+    #[serde(default)]
+    pub path: PathBuf,
+    #[serde(default)]
+    pub read_only: bool,
+    #[serde(default)]
+    pub kind: AppleDiskKind,
+    /// `nbd://host:port/export` or `nbd+unix:///export?socket=/path` (`kind: nbd`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    /// Host caching of an image file.
+    #[serde(default)]
+    pub caching: AppleDiskCaching,
+    /// When writes reach stable storage: `full` (default), `fsync` (image files only) or `none`.
+    #[serde(default)]
+    pub sync: AppleDiskSync,
+    #[serde(default)]
+    pub controller: AppleDiskController,
+    /// Virtio controller only: the serial the guest sees, for a stable `/dev/disk/by-id/virtio-<id>` (1-20 ASCII).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub block_device_id: Option<String>,
+    /// USB controller, hot-plug only: which XHCI bus (0-based, below `apple.usb_controllers`) a hot-attached disk joins.
+    /// Disks present at boot are placed by Virtualization.framework.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usb_bus: Option<u8>,
+    /// `kind: overlay`: the copy-on-write overlay file (created on top of `path` if missing). Writes land here; `path`
+    /// is never modified.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub overlay: Option<PathBuf>,
+    /// `kind: overlay`: I/O operations per second cap.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub iops: Option<u64>,
+    /// `kind: overlay`: bytes per second cap.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bps: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum AppleDiskKind {
+    #[default]
+    Image,
+    /// `VZDiskBlockDeviceStorageDeviceAttachment` (macOS 14); the daemon's user must be able to open the device.
+    Block,
+    /// `VZNetworkBlockDeviceStorageDeviceAttachment` (macOS 14).
+    Nbd,
+    /// A copy-on-write overlay (`overlay`) on a base image (`path`), served to the guest by a `fluxvm-blockd` the daemon
+    /// supervises on 127.0.0.1 and attached as an `nbd` disk. UNVERIFIED against Virtualization.framework's NBD client.
+    Overlay,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum AppleDiskCaching {
+    #[default]
+    Automatic,
+    Cached,
+    Uncached,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum AppleDiskSync {
+    #[default]
+    Full,
+    Fsync,
+    None,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum AppleDiskController {
+    #[default]
+    Virtio,
+    /// `VZNVMExpressControllerDeviceConfiguration` (macOS 14).
+    Nvme,
+    /// `VZUSBMassStorageDeviceConfiguration`; can also be hot-attached to a running guest (macOS 15).
+    Usb,
+}
+
+impl AppleDisk {
+    /// The disk's name: its own, or `disk<index>`.
+    pub fn name_at(&self, index: usize) -> String {
+        self.name.clone().unwrap_or_else(|| format!("disk{index}"))
+    }
+}
+
+fn default_true() -> bool {
+    true
+}
+fn default_apple_display_count() -> u8 {
+    1
+}
+fn default_apple_display_width() -> u32 {
+    2560
+}
+fn default_apple_display_height() -> u32 {
+    1600
+}
+fn default_apple_display_ppi() -> u32 {
+    220
+}
+
+impl Default for AppleSpec {
+    fn default() -> Self {
+        Self {
+            guest_os: AppleGuest::default(),
+            media: None,
+            install: false,
+            firstboot: None,
+            window: false,
+            display_count: default_apple_display_count(),
+            clipboard: false,
+            bridge_interface: None,
+            asif_overlay: false,
+            provision_full_name: None,
+            provision_username: None,
+            provision_password_file: None,
+            provision_auto_login: false,
+            provision_remote_login: false,
+            display_width: default_apple_display_width(),
+            display_height: default_apple_display_height(),
+            display_ppi: default_apple_display_ppi(),
+            audio_output: true,
+            microphone: false,
+            rosetta: false,
+            nested_virtualization: false,
+            usb_controller: false,
+            usb_controllers: 0,
+            vmnet: None,
+            custom_virtio: false,
+            egress_allow: Vec::new(),
+            self_control: false,
+            host_gpu: false,
+            vsock_services: Vec::new(),
+            macos_vsock: false,
+            root_read_only: false,
+            root_caching: AppleDiskCaching::default(),
+            root_sync: AppleDiskSync::default(),
+            extra_disks: Vec::new(),
+            tagged_shares: Vec::new(),
+            init_config: None,
+            secret_env: std::collections::BTreeMap::new(),
+            networks: Vec::new(),
+            console_ports: Vec::new(),
+            efi_secure_boot: None,
+            recovery: false,
+            rosetta_cache: None,
+            usernet: None,
+            nat_mtu: None,
+        }
+    }
+}
+
+/// One guest NUMA node of a QEMU VM and the host node backing it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct VmNumaNode {
+    pub host_node: u32,
+    /// Guest vCPU indexes on this node.
+    pub vcpus: Vec<u32>,
+    /// Host CPUs the node's vCPU threads may run on; empty means every
+    /// CPU of `host_node`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub host_cpus: Vec<u32>,
+    pub memory_mib: u64,
+}
+
+/// virtio-balloon options of a QEMU VM.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BalloonSpec {
+    /// Guest reports freed pages so the host can drop them without a
+    /// balloon target (`free-page-reporting=on`, guest kernel 5.8+).
+    #[serde(default = "default_true")]
+    pub free_page_reporting: bool,
+    /// The guest may take pages back from the balloon instead of hitting
+    /// its OOM killer (`deflate-on-oom=on`).
+    #[serde(default = "default_true")]
+    pub deflate_on_oom: bool,
+    /// Guest memory statistics polling interval in seconds; 0 disables
+    /// guest stats.
+    #[serde(default = "default_balloon_stats_secs")]
+    pub stats_interval_secs: u32,
+}
+
+fn default_balloon_stats_secs() -> u32 {
+    5
+}
+
+impl Default for BalloonSpec {
+    fn default() -> Self {
+        Self {
+            free_page_reporting: true,
+            deflate_on_oom: true,
+            stats_interval_secs: default_balloon_stats_secs(),
+        }
+    }
+}
+
+impl CreateVmRequest {
+    /// Checks `balloon` against the rest of the request: guest memory that
+    /// is pinned (hugepages, VFIO) or encrypted cannot be ballooned.
+    pub fn validate_balloon(&self) -> anyhow::Result<()> {
+        if self.balloon.is_none() {
+            return Ok(());
+        }
+        if self.hugepages == Some(true) {
+            anyhow::bail!("balloon cannot be combined with hugepages");
+        }
+        if !self.vfio_devices.is_empty() {
+            anyhow::bail!("balloon cannot be combined with vfio_devices");
+        }
+        if self.security_profile.is_confidential() {
+            anyhow::bail!(
+                "balloon cannot be combined with security_profile {}",
+                self.security_profile.as_str()
+            );
+        }
+        Ok(())
+    }
+
+    /// Every `vfio_devices` entry must be a PCI address (`0000:01:00.0` or
+    /// `01:00.0`) or a mediated device UUID, each listed once: the value
+    /// becomes part of a QEMU `-device` argument.
+    pub fn validate_vfio_devices(&self) -> anyhow::Result<()> {
+        let mut seen = std::collections::HashSet::new();
+        for d in &self.vfio_devices {
+            let key = d.trim().to_ascii_lowercase();
+            let short_bdf = key.len() == 7 && crate::gpu::valid_pci_bdf(&format!("0000:{key}"));
+            if !crate::gpu::valid_pci_bdf(&key) && !short_bdf && !crate::mdev::valid_mdev_uuid(&key)
+            {
+                anyhow::bail!("vfio_devices entry {d:?} is neither a PCI address nor an mdev UUID");
+            }
+            if !seen.insert(key) {
+                anyhow::bail!("vfio_devices lists {d:?} twice");
+            }
+        }
+        Ok(())
+    }
+
+    /// Checks `numa` against the rest of the request: no mixing with the
+    /// legacy `numa_node`/`cpuset` fields, memory adds up to `memory_mib`,
+    /// and every boot vCPU `0..vcpus` sits on exactly one node.
+    pub fn validate_numa(&self) -> anyhow::Result<()> {
+        if self.numa.is_empty() {
+            return Ok(());
+        }
+        if self.numa_node.is_some() || self.cpuset.is_some() {
+            anyhow::bail!("numa cannot be combined with numa_node or cpuset");
+        }
+        let total: u64 = self.numa.iter().map(|n| n.memory_mib).sum();
+        if total != self.memory_mib {
+            anyhow::bail!(
+                "numa memory_mib adds up to {total} but the VM has {} MiB",
+                self.memory_mib
+            );
+        }
+        let mut seen = vec![false; usize::from(self.vcpus)];
+        for (i, node) in self.numa.iter().enumerate() {
+            if node.memory_mib == 0 {
+                anyhow::bail!("numa[{i}].memory_mib must be > 0");
+            }
+            if node.vcpus.is_empty() {
+                anyhow::bail!("numa[{i}].vcpus must not be empty");
+            }
+            for &v in &node.vcpus {
+                let Some(slot) = seen.get_mut(v as usize) else {
+                    anyhow::bail!("numa[{i}] vCPU {v} is outside 0..{}", self.vcpus);
+                };
+                if *slot {
+                    anyhow::bail!("vCPU {v} is on more than one numa node");
+                }
+                *slot = true;
+            }
+        }
+        if let Some(missing) = seen.iter().position(|s| !s) {
+            anyhow::bail!("vCPU {missing} is not on any numa node");
+        }
+        Ok(())
+    }
+}
+
+/// Where a vCPU thread was pinned at launch.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct VcpuAffinity {
+    pub vcpu: u32,
+    pub thread_id: i32,
+    pub host_node: u32,
+    pub host_cpus: Vec<u32>,
+}
+
+/// A guest memory backend as QEMU reports it (`query-memdev`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MemdevBinding {
+    pub id: String,
+    pub size_mib: u64,
+    pub host_nodes: Vec<u32>,
+    pub policy: String,
+}
+
+/// Live NUMA placement of a running QEMU VM (`GET /v1/vms/{id}/numa`).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct VmNumaStatus {
+    /// The guest NUMA nodes the VM was launched with.
+    pub nodes: Vec<VmNumaNode>,
+    /// Each vCPU thread's current host CPU affinity.
+    pub vcpus: Vec<VcpuAffinity>,
+    pub memdevs: Vec<MemdevBinding>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateVmRequest {
+    /// Apple Virtualization.framework options (`backend: "vz"` only).
+    #[serde(default)]
+    pub apple: Option<AppleSpec>,
+    pub name: String,
+    /// First-class tenant id for multi-team hosts. Optional; filterable on list.
+    #[serde(default)]
+    pub tenant: Option<String>,
+    /// Identity of the API token that created this VM, stamped server-side
+    /// in `create_vm`/`create_sandbox` (`fluxvm-api`) from the authenticated
+    /// caller right after deserializing the request -- unconditionally,
+    /// unlike `tenant` above (which has a legitimate client-supplied path
+    /// for the untenanted-token case), so whatever a request body claims
+    /// for this field is always discarded and replaced. Deliberately
+    /// *not* `skip_deserializing`, even though there's no legitimate
+    /// client-supplied path for it either: `fluxvm-storage::Store`
+    /// round-trips every `VmRecord` (this field included) through this
+    /// exact same serde codec on every single read (its flock-per-
+    /// operation, read-fresh-under-lock file), so a `skip_deserializing`
+    /// field would silently come back `None` on every `list()`/`get()`
+    /// after being written -- which is exactly what broke
+    /// `enforce_token_quotas` (it always saw zero VMs for any token) during
+    /// development of this field. The request-body attack surface this
+    /// would have closed is already closed by the handler's unconditional
+    /// overwrite instead. Used by `enforce_token_quotas` to scope
+    /// `max_vms_per_token`/`max_memory_mib_per_token` to the calling
+    /// token's own VMs instead of every VM on the node from every token.
+    #[serde(default)]
+    pub created_by_token: Option<String>,
+    pub backend: BackendKind,
+    pub image: PathBuf,
+    #[serde(default = "default_vcpus")]
+    pub vcpus: u8,
+    #[serde(default = "default_memory")]
+    pub memory_mib: u64,
+    /// Upper bound for CPU hotplug (`query-hotpluggable-cpus` / `device_add`
+    /// slots) -- must be >= `vcpus`. `None` lets the backend pick a default
+    /// headroom rather than disabling hotplug outright.
+    #[serde(default)]
+    pub max_vcpus: Option<u8>,
+    /// Upper bound for memory hotplug (DIMM `device_add` address space) in
+    /// MiB -- must be >= `memory_mib`. `None` lets the backend pick a
+    /// default headroom rather than disabling hotplug outright.
+    #[serde(default)]
+    pub max_memory_mib: Option<u64>,
+    #[serde(default)]
+    pub disk_size_gib: Option<u64>,
+    #[serde(default)]
+    pub kernel: Option<PathBuf>,
+    #[serde(default)]
+    pub initrd: Option<PathBuf>,
+    #[serde(default)]
+    pub firmware: Option<PathBuf>,
+    #[serde(default)]
+    pub kernel_args: Option<String>,
+    #[serde(default)]
+    pub network: NetworkSpec,
+    #[serde(default)]
+    pub cloud_init: Option<CloudInitSpec>,
+    #[serde(default)]
+    pub ttl_seconds: Option<u64>,
+    /// Resume from an existing internal (`snapshot-save`) tag on this VM's
+    /// own disk instead of a normal cold boot -- restores CPU/memory/device
+    /// state via QEMU's `-loadvm`, not just disk content. A one-shot
+    /// override applied to a single `start`/`start_from_snapshot` call
+    /// (see `fluxvm_scheduler::VmManager::start_from_snapshot`), never
+    /// persisted onto the VM's own stored `CreateVmRequest` -- a later
+    /// ordinary restart must not keep trying to load a now-stale tag.
+    #[serde(default)]
+    pub loadvm_tag: Option<String>,
+    #[serde(default)]
+    pub extra_args: Vec<String>,
+    /// Boot with shareable (memfd) guest memory even without a boot-time virtiofs share, so shares can be
+    /// hot-added later (`POST /v1/vms/{id}/hotplug/share`). Warm-pool templates set this: a pool member
+    /// is booted before any Pod exists, so its per-Pod shares can only arrive after it is claimed.
+    #[serde(default)]
+    pub shared_memory: bool,
+    /// QEMU only: I/O settings for the root disk (`bus` must be unset or
+    /// `virtio-blk`). Unset keeps the plain `-drive if=virtio` root.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub root_disk_io: Option<DiskIo>,
+    /// QEMU only: PCIe root ports reserved for hot-adding virtio-blk and
+    /// vhost-user-blk data disks. Set when the VM is created; VMs created
+    /// before these ports existed have none, which keeps their device layout
+    /// (and live migration and saved state) unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk_hotplug_ports: Option<u8>,
+    #[serde(default)]
+    pub agent: Option<AgentSpec>,
+    /// Enable QEMU guest-agent virtio-serial channel (QEMU backend only).
+    #[serde(default)]
+    pub qga: Option<QgaSpec>,
+    /// Cloud Hypervisor: pass `kvm_hyperv=on` on `--cpus` for Windows guests.
+    /// Required for most Windows boots on CH; ignored by other backends.
+    #[serde(default)]
+    pub hyperv: bool,
+    #[serde(default)]
+    pub storage: StorageBackend,
+    #[serde(default)]
+    pub shared_folders: Vec<SharedFolder>,
+    /// QEMU only: data disks present from the first boot, each a qcow2
+    /// overlay on a shared image (an imported OVA's extra disks).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub data_disks: Vec<DataDiskSpec>,
+    /// QEMU only: install media (ISO) attached read-only as CD-ROMs. Boot
+    /// order is left to the firmware, so a blank root disk falls through to
+    /// the first CD-ROM and an installed one boots itself.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cdroms: Vec<CdromSpec>,
+    /// QEMU only: bind vCPU threads to host NUMA node(s).
+    #[serde(default)]
+    pub numa_node: Option<u8>,
+    /// QEMU only: cpuset expression passed to `-numa cpu=…` / taskset-style
+    /// pinning via `-object memory-backend-…` + `-numa` when combined with
+    /// `hugepages`.
+    #[serde(default)]
+    pub cpuset: Option<String>,
+    /// QEMU only: back guest RAM with host huge pages (`-mem-prealloc
+    /// -mem-path /dev/hugepages/...` when set true).
+    #[serde(default)]
+    pub hugepages: Option<bool>,
+    /// QEMU only: VFIO passthrough devices. Each is a PCI address
+    /// (`0000:01:00.0`, passed as `host=`) or a mediated device UUID from
+    /// `POST /v1/host/mdev` (passed as `sysfsdev=`), e.g. a vGPU.
+    #[serde(default)]
+    pub vfio_devices: Vec<String>,
+    /// QEMU only: guest NUMA nodes, each bound to a host NUMA node. Guest
+    /// memory is allocated on the host node (`policy=bind`) and the node's
+    /// vCPU threads are pinned to `host_cpus`. Replaces `numa_node` and
+    /// `cpuset`; memory must add up to `memory_mib` and vCPUs must cover
+    /// `0..vcpus` exactly once.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub numa: Vec<VmNumaNode>,
+    /// QEMU only: attach a virtio-balloon device so guest memory can be
+    /// reclaimed at runtime (`POST /v1/vms/{id}/balloon`). Rejected with
+    /// `hugepages`, `vfio_devices` and confidential profiles, whose guest
+    /// memory is pinned or encrypted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub balloon: Option<BalloonSpec>,
+    /// What to do when the VM's hypervisor process dies unrequested; unset
+    /// keeps the old behaviour (the VM is marked Stopped and stays so).
+    #[serde(
+        default,
+        alias = "runStrategy",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub run_strategy: Option<crate::lifecycle::RunStrategy>,
+    /// QEMU only: what a guest panic (pvpanic) or watchdog expiry does.
+    /// Unset adds no pvpanic or watchdog device.
+    #[serde(default, alias = "onCrash", skip_serializing_if = "Option::is_none")]
+    pub on_crash: Option<crate::lifecycle::OnCrash>,
+    /// Cron-driven power on/off (UTC), see `lifecycle::PowerSchedule`.
+    #[serde(
+        default,
+        alias = "powerSchedule",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub power_schedule: Option<crate::lifecycle::PowerSchedule>,
+    /// Set 6S: Kubernetes Pod UID (from the CRI `io.kubernetes.cri.sandbox-uid`
+    /// annotation), supplied by `containerd-shim-fluxvm-v2` for Secure
+    /// Containers Pods. Mints a stable eBPF Pod identity
+    /// (`fluxvm_network::pod_identity`) used for Pod-scoped network policy;
+    /// `None` for every non-Secure-Containers VM, matching today's behavior.
+    #[serde(default)]
+    pub pod_uid: Option<String>,
+    /// QEMU only, requires `firmware` (OVMF) to also be set: enable UEFI
+    /// Secure Boot (`-global driver=cfi.pflash01,property=secure,value=on`
+    /// plus `smm=on`) and require `Config::qemu_ovmf_vars_template` to be
+    /// configured -- a real Secure Boot chain needs a vars store with
+    /// Microsoft's UEFI CA keys already enrolled, which this project
+    /// doesn't synthesize. See docs/secure-boot-tpm.md.
+    #[serde(default)]
+    pub secure_boot: Option<bool>,
+    /// QEMU only: attach an emulated TPM 2.0 device (`swtpm` sidecar +
+    /// `-tpmdev emulator` + `-device tpm-crb`). Independent of
+    /// `secure_boot`/`firmware` -- a TPM is useful under legacy BIOS too
+    /// (measured boot, disk encryption unseal), not only under UEFI.
+    #[serde(default)]
+    pub tpm: Option<bool>,
+    /// Phase 6 security profile (`standard` | `measured` | `confidential-snp` |
+    /// `confidential-tdx`). See `docs/security-profiles.md`.
+    #[serde(default)]
+    pub security_profile: crate::security::SecurityProfile,
+    /// Optional policy evaluated against collected evidence (measured secret-release).
+    #[serde(default)]
+    pub measurement_policy: Option<crate::security::MeasurementPolicy>,
+    /// Firecracker virtio-net bandwidth cap (Mbit/s). `None` or `0` =
+    /// unlimited. Mapped to Firecracker's iface `rate_limiter.bandwidth`
+    /// (threat-containment barrier at the VMM, complementary to Fabric
+    /// egress Mbps). Ignored by QEMU/CH.
+    #[serde(default)]
+    pub net_mbit_limit: Option<u32>,
+    /// Firecracker virtio-net operations (packets) per second cap.
+    /// Mapped to iface `rate_limiter.ops`. Ignored by QEMU/CH.
+    #[serde(default)]
+    pub net_pps_limit: Option<u64>,
+    /// Firecracker virtio-block bandwidth cap (Mbit/s). Mapped to drive
+    /// `rate_limiter.bandwidth`. Ignored by QEMU/CH.
+    #[serde(default)]
+    pub blk_mbit_limit: Option<u32>,
+    /// Firecracker virtio-block operations per second cap. Mapped to drive
+    /// `rate_limiter.ops`. Ignored by QEMU/CH.
+    #[serde(default)]
+    pub blk_ops_limit: Option<u64>,
+    /// Firecracker static CPU template name (e.g. `T2`, `T2A`, `C3`).
+    /// Emitted into Firecracker `machine-config.cpu_template` and into
+    /// FluxVm when `fluxvm_engine=firecracker`. Rejected on QEMU, Cloud
+    /// Hypervisor, and FluxVm+kvm (no FC-style template ABI).
+    #[serde(default)]
+    pub cpu_template: Option<String>,
+    /// Outbound policy for the QEMU process (user-mode networking, where the guest has no host-visible interface for the
+    /// tc dataplane). Stored with the VM and applied when its cgroup programs attach; unset inherits the node default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub egress: Option<crate::egress::QemuEgressPolicy>,
+}
+fn default_vcpus() -> u8 {
+    2
+}
+fn default_memory() -> u64 {
+    2048
+}
+
+// ZYVOR_RUNTIME_BOUNDARY_V1: node-local migration contract consumed by Zyvor Fabric.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum MigrationMode {
+    #[default]
+    PreCopy,
+    PostCopy,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MigrationStartRequest {
+    /// QEMU migration URI. Contract v1 deliberately permits only `tcp:` and
+    /// `unix:` transports; shell-backed `exec:` URIs are rejected by FluxVM.
+    pub destination: String,
+    #[serde(default)]
+    pub mode: MigrationMode,
+    #[serde(default)]
+    pub bandwidth_mbps: Option<u64>,
+    #[serde(default)]
+    pub max_downtime_ms: Option<u64>,
+    #[serde(default)]
+    pub multifd_channels: Option<u8>,
+    /// When set, the migration stream is authenticated/encrypted via QEMU's
+    /// `tls-creds-x509` object (client/source endpoint). `None` keeps today's
+    /// plain `tcp:`/`unix:` behavior.
+    #[serde(default)]
+    pub tls: Option<MigrationTlsSpec>,
+    /// Enables QEMU's `auto-converge` capability with these throttle
+    /// parameters. The caller can raise them mid-flight with
+    /// `POST /v1/vms/{id}/migration/tune`.
+    #[serde(default)]
+    pub auto_converge: Option<MigrationAutoConverge>,
+    /// multifd stream compression. Needs `multifd_channels > 1`, and the
+    /// receiver must be created with the same compression.
+    #[serde(default)]
+    pub compression: Option<MigrationCompression>,
+    /// Overrides `mode`'s post-copy handling. `Armed` enables `postcopy-ram`
+    /// without switching; `POST /v1/vms/{id}/migration/postcopy` switches
+    /// later. `None` keeps `mode`'s meaning (`PostCopy` = `Immediate`).
+    #[serde(default)]
+    pub post_copy: Option<PostCopyMode>,
+}
+
+impl MigrationStartRequest {
+    /// The post-copy behaviour `mode` and `post_copy` resolve to; errors when
+    /// they contradict each other.
+    pub fn effective_post_copy(&self) -> anyhow::Result<PostCopyMode> {
+        match (self.mode, self.post_copy) {
+            (MigrationMode::PreCopy, None) => Ok(PostCopyMode::Disabled),
+            (MigrationMode::PostCopy, None) => Ok(PostCopyMode::Immediate),
+            (MigrationMode::PostCopy, Some(PostCopyMode::Disabled)) => {
+                anyhow::bail!("mode post-copy contradicts post_copy disabled")
+            }
+            (_, Some(p)) => Ok(p),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum PostCopyMode {
+    #[default]
+    Disabled,
+    /// Switch to post-copy as soon as pre-copy is active.
+    Immediate,
+    /// Enable post-copy but stay in pre-copy until asked to switch.
+    Armed,
+}
+
+/// QEMU auto-converge throttle, in percent of guest vCPU time (1-99 each).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct MigrationAutoConverge {
+    #[serde(default)]
+    pub initial_pct: Option<u8>,
+    #[serde(default)]
+    pub increment_pct: Option<u8>,
+    #[serde(default)]
+    pub max_pct: Option<u8>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum MigrationCompressionAlgorithm {
+    #[default]
+    None,
+    Zlib,
+    Zstd,
+}
+
+impl MigrationCompressionAlgorithm {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Zlib => "zlib",
+            Self::Zstd => "zstd",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct MigrationCompression {
+    pub algorithm: MigrationCompressionAlgorithm,
+    /// zstd 0-20, zlib 0-9. `None` keeps QEMU's default level.
+    #[serde(default)]
+    pub level: Option<u8>,
+}
+
+impl MigrationCompression {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        let max = match self.algorithm {
+            MigrationCompressionAlgorithm::None => return Ok(()),
+            MigrationCompressionAlgorithm::Zlib => 9,
+            MigrationCompressionAlgorithm::Zstd => 20,
+        };
+        if let Some(level) = self.level
+            && level > max
+        {
+            anyhow::bail!(
+                "{} compression level must be 0-{max} (got {level})",
+                self.algorithm.as_str()
+            );
+        }
+        Ok(())
+    }
+}
+
+/// Stream capabilities a receiver must enable before `migrate-incoming`;
+/// QEMU refuses a stream whose capabilities don't match on both ends.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct MigrationStreamCapabilities {
+    #[serde(default)]
+    pub multifd_channels: Option<u8>,
+    #[serde(default)]
+    pub compression: Option<MigrationCompression>,
+    #[serde(default)]
+    pub post_copy: bool,
+}
+
+impl MigrationStreamCapabilities {
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+/// Mid-flight changes to a running migration (`migrate-set-parameters`).
+/// Unset fields are left as they are.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct MigrationTuneRequest {
+    #[serde(default)]
+    pub bandwidth_mbps: Option<u64>,
+    #[serde(default)]
+    pub max_downtime_ms: Option<u64>,
+    #[serde(default)]
+    pub cpu_throttle_initial_pct: Option<u8>,
+    #[serde(default)]
+    pub cpu_throttle_increment_pct: Option<u8>,
+    #[serde(default)]
+    pub max_cpu_throttle_pct: Option<u8>,
+}
+
+impl MigrationTuneRequest {
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+/// Cert/key material for QEMU's `tls-creds-x509` migration transport.
+/// Paths are absolute on the FluxVM host; FluxVM copies them into the
+/// filenames QEMU expects (`ca-cert.pem`, `server-*.pem` / `client-*.pem`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MigrationTlsSpec {
+    pub ca_path: PathBuf,
+    pub cert_path: PathBuf,
+    pub key_path: PathBuf,
+    /// Hostname/IP the source verifies the receiver cert against. Ignored on
+    /// the receiver (server) endpoint.
+    #[serde(default)]
+    pub tls_hostname: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum MigrationPhase {
+    None,
+    Setup,
+    Active,
+    PostcopyActive,
+    Completed,
+    Failed,
+    Cancelled,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MigrationStatus {
+    pub phase: MigrationPhase,
+    /// Raw VMM status for forward compatibility with newer QEMU states.
+    pub status: String,
+    #[serde(default)]
+    pub ram_transferred: Option<u64>,
+    #[serde(default)]
+    pub ram_remaining: Option<u64>,
+    #[serde(default)]
+    pub ram_total: Option<u64>,
+    #[serde(default)]
+    pub total_time_ms: Option<u64>,
+    #[serde(default)]
+    pub downtime_ms: Option<u64>,
+    #[serde(default)]
+    pub error: Option<String>,
+    #[serde(flatten)]
+    pub telemetry: MigrationTelemetry,
+}
+
+/// `query-migrate` progress detail beyond the RAM counters. Every field is
+/// optional: QEMU only reports some of them in some phases.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Default)]
+pub struct MigrationTelemetry {
+    /// Pages dirtied per second, as of the last dirty sync.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dirty_pages_rate: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dirty_sync_count: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page_size: Option<u64>,
+    /// Zero pages sent as a marker instead of their contents.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duplicate_pages: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub normal_bytes: Option<u64>,
+    /// Current transfer rate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mbps: Option<f64>,
+    /// QEMU's estimate of the stop-and-copy downtime if it switched now.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_downtime_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_throttle_pct: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub setup_time_ms: Option<u64>,
+    /// Destination page faults served from the source during post-copy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub postcopy_requests: Option<u64>,
+}
+
+/// Target-side QEMU incoming receiver. The caller picks the node; this
+/// record is only the runtime reservation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MigrationReceiverRequest {
+    /// Required unless `record` is set.
+    #[serde(default)]
+    pub vcpus: u8,
+    /// Required unless `record` is set.
+    #[serde(default)]
+    pub memory_mib: u64,
+    /// Empty or `host`. Other CPU models are rejected.
+    #[serde(default)]
+    pub cpu_model: String,
+    /// Empty or a `q35...` machine type.
+    #[serde(default)]
+    pub machine: String,
+    /// Shared disk both hosts already open. The receiver does not copy it.
+    /// Required unless `record` is set.
+    #[serde(default)]
+    pub disk: PathBuf,
+    #[serde(default = "default_disk_format")]
+    pub disk_format: String,
+    #[serde(default = "default_listen_host")]
+    pub listen_host: String,
+    /// Address the source dials. Required when `listen_host` is a wildcard.
+    #[serde(default)]
+    pub advertise_host: String,
+    /// `0` binds an ephemeral port.
+    #[serde(default)]
+    pub listen_port: u16,
+    #[serde(default)]
+    pub expires_in_seconds: Option<u64>,
+    /// When set, activate arms `migrate-incoming` with `tls-creds-x509`
+    /// (server endpoint) instead of a plain socket.
+    #[serde(default)]
+    pub tls: Option<MigrationTlsSpec>,
+    /// The source VM's record (`GET /v1/vms/{id}` on the source node). When
+    /// set, the receiver is launched from that record's own device model
+    /// (network, seed, agent vsock, firmware) instead of a bare disk-only
+    /// QEMU, so a real FluxVM VM can migrate into it, and it can later be
+    /// adopted as a first-class VM. `vcpus`, `memory_mib`, `disk` and
+    /// `disk_format` are then taken from the record.
+    #[serde(default)]
+    pub record: Option<Box<VmRecord>>,
+    /// Must match the source's `migration/start` request (multifd,
+    /// compression, post-copy); applied on activate.
+    #[serde(default)]
+    pub capabilities: MigrationStreamCapabilities,
+}
+
+fn default_disk_format() -> String {
+    "raw".into()
+}
+fn default_listen_host() -> String {
+    "0.0.0.0".into()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MigrationReceiver {
+    pub id: Uuid,
+    /// Address the source VMM dials.
+    pub uri: String,
+    /// Address passed to QMP `migrate-incoming`. May be a wildcard.
+    #[serde(default)]
+    pub listen_uri: String,
+    pub token: String,
+    pub expires_at_unix: u64,
+    pub pid: u32,
+    pub qmp_socket: PathBuf,
+    pub workspace: PathBuf,
+    pub disk: PathBuf,
+    #[serde(default)]
+    pub cgroup_path: Option<PathBuf>,
+    /// Charged against the host quota while this receiver is reserved.
+    #[serde(default)]
+    pub vcpus: u8,
+    #[serde(default)]
+    pub memory_mib: u64,
+    /// TLS material supplied at create time; applied on activate.
+    #[serde(default)]
+    pub tls: Option<MigrationTlsSpec>,
+    /// Set for receivers created with a source `record`: the source VM's id.
+    /// Such a receiver is also a `Creating` VM record with the receiver's id,
+    /// which `adopt` turns into a running VM.
+    #[serde(default)]
+    pub source_id: Option<Uuid>,
+    /// Stream capabilities supplied at create time; applied on activate.
+    #[serde(default, skip_serializing_if = "MigrationStreamCapabilities::is_empty")]
+    pub capabilities: MigrationStreamCapabilities,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MigrationReceiverActivate {
+    pub token: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeMigrationCapability {
+    pub backend: BackendKind,
+    pub live: bool,
+    pub pre_copy: bool,
+    pub post_copy: bool,
+    pub multifd: bool,
+    /// Contract v1 does not copy VM disks. Fabric must place the VM on
+    /// shared storage (for example Ceph RBD) or prepare storage separately.
+    pub requires_shared_storage: bool,
+    pub transports: Vec<String>,
+    /// Whether this backend's migration-start call can be followed up with
+    /// a `GET .../migration/status` poll to observe progress, and whether
+    /// an in-flight migration can be cancelled at all.
+    ///
+    /// `true` for QEMU: QMP's `migrate` is asynchronous and `query-migrate`
+    /// reports live phase/progress, so Fabric polls status and can
+    /// `migrate_cancel` mid-flight.
+    ///
+    /// `false` for Cloud Hypervisor: verified live against a real
+    /// `cloud-hypervisor`/`ch-remote` v53.0 pair that `send-migration`
+    /// returns as soon as the VMM *accepts* the request, not once the
+    /// transfer finishes -- the real outcome (including any failure) is
+    /// only ever visible in the VMM's own process log, which this contract
+    /// does not scrape. Cloud Hypervisor's API also has no cancellation
+    /// primitive once a migration has been requested. Fabric must instead
+    /// infer completion the same way it already detects any other node-local
+    /// state change: this VM disappearing from `GET /v1/vms` on the source
+    /// node once its process exits (success) versus it staying `Running`
+    /// there (no attempt has succeeded yet).
+    #[serde(default = "default_status_pollable")]
+    pub status_pollable: bool,
+    /// `auto_converge` on `migration/start` is honoured.
+    #[serde(default)]
+    pub auto_converge: bool,
+    /// multifd compression algorithms `migration/start` accepts.
+    #[serde(default)]
+    pub compression: Vec<String>,
+    /// `post_copy: armed` plus `POST .../migration/postcopy` work.
+    #[serde(default)]
+    pub post_copy_switch: bool,
+    /// `POST .../migration/tune` works on an in-flight migration.
+    #[serde(default)]
+    pub live_tune: bool,
+    /// multifd and post-copy may be combined (QEMU 10.0 and later).
+    #[serde(default)]
+    pub post_copy_with_multifd: bool,
+}
+fn default_status_pollable() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeSnapshotCapability {
+    pub backend: BackendKind,
+    pub memory: bool,
+    pub disk: bool,
+    pub portable: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeCapabilities {
+    pub api_version: String,
+    pub scope: String,
+    pub orchestration_owner: String,
+    pub migration: Vec<RuntimeMigrationCapability>,
+    pub snapshot: Vec<RuntimeSnapshotCapability>,
+    /// Changed-block-tracking backups to object storage.
+    #[serde(default)]
+    pub backup: Vec<RuntimeBackupCapability>,
+    /// Host-level placement support.
+    #[serde(default)]
+    pub host: RuntimeHostCapability,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeHostCapability {
+    /// `GET /v1/host/topology` reports NUMA nodes and placeable devices.
+    pub topology: bool,
+    /// `CreateVmRequest.numa` binds guest memory and vCPU threads to host
+    /// NUMA nodes (QEMU).
+    pub numa_binding: bool,
+    /// `POST /v1/host/pci/bind` and `/release` move any IOMMU group to and
+    /// from vfio-pci.
+    pub pci_bind: bool,
+    /// `CreateVmRequest.balloon` and `POST /v1/vms/{id}/balloon` work for
+    /// QEMU VMs, and `GET /v1/host/memory` reports host memory pressure.
+    #[serde(default)]
+    pub balloon: bool,
+    /// `NetworkSpec::Tap.vnet` and `/v1/network/vnets` route isolated
+    /// virtual networks over Geneve (eBPF dataplane).
+    #[serde(default)]
+    pub vnet: bool,
+    /// `POST /v1/vms/{id}/hibernate`, resume on `start`,
+    /// `POST /v1/vms/import-hibernated` and `/v1/host/hibernation` (QEMU).
+    #[serde(default)]
+    pub hibernate: bool,
+    /// The kernel allows io_uring, so `DiskIo.aio: io_uring` works (QEMU).
+    #[serde(default)]
+    pub io_uring: bool,
+    /// `qemu-storage-daemon` is installed, so `DiskIo.bus: vhost-user-blk`
+    /// data disks work (QEMU).
+    #[serde(default)]
+    pub vhost_user_blk: bool,
+    /// The kernel's native NVMe multipath is on: an NVMe-oF namespace
+    /// reached over several paths shows up as one `/dev/nvmeXnY`.
+    #[serde(default)]
+    pub nvme_multipath: bool,
+    /// `/v1/host/mdev` lists, creates and removes mediated devices (vGPU),
+    /// and `vfio_devices` accepts their UUIDs (QEMU).
+    #[serde(default)]
+    pub mdev: bool,
+    /// `GET /v1/host/gpus/health` reports per-GPU health.
+    #[serde(default)]
+    pub gpu_health: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RuntimeBackupCapability {
+    pub backend: BackendKind,
+    pub full: bool,
+    pub incremental: bool,
+    pub targets: Vec<String>,
+    pub compression: Vec<String>,
+    pub encryption: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum VmStatus {
+    Creating,
+    Running,
+    Paused,
+    Stopped,
+    Failed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VmRecord {
+    pub id: Uuid,
+    pub name: String,
+    pub backend: BackendKind,
+    pub status: VmStatus,
+    pub pid: Option<u32>,
+    pub created_at: DateTime<Utc>,
+    pub expires_at: Option<DateTime<Utc>>,
+    pub workspace: PathBuf,
+    pub disk: PathBuf,
+    pub seed_disk: Option<PathBuf>,
+    pub tap_name: Option<String>,
+    pub control_socket: Option<PathBuf>,
+    pub log_path: PathBuf,
+    pub error: Option<String>,
+    pub request: CreateVmRequest,
+    /// Host-unique AF_VSOCK CID assigned when `request.agent` is enabled.
+    #[serde(default)]
+    pub guest_cid: Option<u32>,
+    /// Firecracker-jailer only — see `backend::LaunchResult::jail_path`.
+    #[serde(default)]
+    pub jail_path: Option<PathBuf>,
+    /// Host-visible path to the vsock proxy UDS (Cloud Hypervisor/
+    /// Firecracker only) — see `backend::LaunchResult::vsock_socket`.
+    #[serde(default)]
+    pub vsock_socket: Option<PathBuf>,
+    /// QEMU guest-agent unix socket (`org.qemu.guest_agent.0`) when
+    /// `request.qga.enabled` — see `VmRecord::qga_socket`.
+    #[serde(default)]
+    pub qga_socket: Option<PathBuf>,
+    /// cgroup v2 path (`fluxvm.slice/{id}.scope`) the launched VMM
+    /// process was migrated into, once `VmManager` has done so —
+    /// `None` until the first successful launch completes cgroup setup.
+    #[serde(default)]
+    pub cgroup_path: Option<PathBuf>,
+    /// Name of this VM's private network namespace, when
+    /// `NetworkSpec::Tap { netns: true, .. }` — see
+    /// `fluxvm_network::netns`. `None` for every other networking mode.
+    #[serde(default)]
+    pub netns: Option<String>,
+    /// `StorageBackend::LvmThin` only: the thin snapshot LV device path
+    /// (`/dev/<vg>/eph-<id>`) created for this VM, so `VmManager::delete`
+    /// can `lvremove` it regardless of what `request.storage` says by the
+    /// time the VM is deleted.
+    #[serde(default)]
+    pub lvm_lv: Option<PathBuf>,
+    /// `StorageBackend::Nbd` only: pid of the `qemu-nbd` subprocess serving
+    /// this VM's disk over `<workspace>/nbd.sock`, kept alive across
+    /// stop/start (like the disk file itself) and reaped only on delete.
+    #[serde(default)]
+    pub nbd_pid: Option<u32>,
+    /// PIDs of the `virtiofsd` processes backing `request.shared_folders`,
+    /// one per share (same order), kept alive alongside the VM and killed
+    /// on delete/stop by `VmManager` — see `LaunchResult::virtiofsd_pids`.
+    #[serde(default)]
+    pub virtiofsd_pids: Vec<u32>,
+    /// PID of the `swtpm` process backing `request.tpm`, when set --
+    /// respawned fresh on every launch (like `virtiofsd_pids`, not kept
+    /// alive across stop/start like `nbd_pid`) -- see
+    /// `backend::LaunchResult::swtpm_pid`. The TPM's actual persistent
+    /// state (NVRAM/keys) lives under `workspace/tpm/`, independent of
+    /// this PID's lifetime.
+    #[serde(default)]
+    pub swtpm_pid: Option<u32>,
+    /// Path to this VM's per-namespace dnsmasq lease file -- only set for
+    /// `NetworkSpec::Tap { netns: true, .. }` VMs. `VmManager::get`/`list`
+    /// use it to freshly resolve `guest_ip` on every read rather than
+    /// trusting a value that could go stale as leases renew.
+    #[serde(default)]
+    pub dhcp_leasefile: Option<std::path::PathBuf>,
+    /// The guest's IP address on its own private subnet, learned from
+    /// `dhcp_leasefile` by MAC lookup -- only set for `NetworkSpec::Tap {
+    /// netns: true, .. }` VMs (see `fluxvm_network::netns`). `None` until
+    /// the guest actually completes a DHCP handshake, and for every other
+    /// networking mode. Recomputed on every read (see `dhcp_leasefile`
+    /// above), not authoritative between reads.
+    #[serde(default)]
+    pub guest_ip: Option<String>,
+    /// Phase 6: profile the create request asked for.
+    #[serde(default)]
+    pub requested_security_profile: crate::security::SecurityProfile,
+    /// Phase 6: profile actually achieved after launch / evidence.
+    /// Confidential-* only when the matching `*_launch_verified` flag is true.
+    #[serde(default)]
+    pub achieved_security_profile: crate::security::SecurityProfile,
+    /// Phase 6: last collected evidence bundle (also on disk as security-evidence.json).
+    #[serde(default)]
+    pub security_evidence: Option<crate::security::SecurityEvidence>,
+    /// Operator key/value labels, editable after create via `PATCH /v1/vms/{id}`.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub labels: std::collections::BTreeMap<String, String>,
+    /// Set while the VM is hibernated: its RAM/CPU/device state sits in
+    /// `dir` and the next `start` restores it instead of booting.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hibernation: Option<HibernationInfo>,
+}
+
+/// Version of the on-disk hibernation layout (`manifest.json`, `state.bin`,
+/// `record.json`, `ovmf_vars.fd`, `seed.img`).
+pub const HIBERNATION_FORMAT: u32 = 1;
+
+/// Where a hibernated VM's state lives and what it needs to resume.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HibernationInfo {
+    pub dir: PathBuf,
+    pub manifest: HibernationManifest,
+}
+
+/// `manifest.json`: written next to the saved state, checked before any
+/// node restores it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HibernationManifest {
+    pub format: u32,
+    pub vm_id: Uuid,
+    pub hibernated_at: DateTime<Utc>,
+    /// Hostname of the node that wrote the state.
+    pub node: String,
+    pub fluxvm_version: String,
+    pub host: HostHibernationFacts,
+    pub vcpus: u8,
+    pub memory_mib: u64,
+    pub state_bytes: u64,
+    /// Whether the root disk is on storage another node can open at the
+    /// same path (`storage: shared` or Ceph RBD).
+    pub shared_storage: bool,
+}
+
+/// The parts of a host that a saved QEMU state depends on.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HostHibernationFacts {
+    /// `qemu-system-x86_64 --version`, e.g. `10.2.1`.
+    pub qemu_version: String,
+    /// The versioned machine type `q35` resolves to, e.g. `pc-q35-10.2`.
+    pub machine_type: String,
+    /// `vendor_id` from `/proc/cpuinfo`.
+    pub cpu_vendor: String,
+    /// `flags` from `/proc/cpuinfo`, sorted. Guests run with `-cpu host`, so
+    /// a target must offer every flag the source did.
+    pub cpu_flags: Vec<String>,
+    /// The effective hibernation directory on this host.
+    pub state_dir: PathBuf,
+}
+
+/// Why `manifest` cannot be restored on a host with `host`'s facts; empty
+/// when it can.
+pub fn hibernation_incompatibilities(
+    manifest: &HibernationManifest,
+    host: &HostHibernationFacts,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    if manifest.format != HIBERNATION_FORMAT {
+        out.push(format!(
+            "state format {} (this host reads {HIBERNATION_FORMAT})",
+            manifest.format
+        ));
+    }
+    let src = &manifest.host;
+    if src.qemu_version != host.qemu_version {
+        out.push(format!(
+            "QEMU {} saved the state, this host has {}",
+            src.qemu_version, host.qemu_version
+        ));
+    }
+    if src.machine_type != host.machine_type {
+        out.push(format!(
+            "machine type {} saved, this host's q35 is {}",
+            src.machine_type, host.machine_type
+        ));
+    }
+    if src.cpu_vendor != host.cpu_vendor {
+        out.push(format!(
+            "CPU vendor {} saved, this host is {}",
+            src.cpu_vendor, host.cpu_vendor
+        ));
+    }
+    let have: std::collections::BTreeSet<&str> =
+        host.cpu_flags.iter().map(String::as_str).collect();
+    let missing: Vec<&str> = src
+        .cpu_flags
+        .iter()
+        .map(String::as_str)
+        .filter(|f| !have.contains(f))
+        .collect();
+    if !missing.is_empty() {
+        out.push(format!("CPU lacks flags: {}", missing.join(" ")));
+    }
+    out
+}
+
+/// Body of `POST /v1/vms/import-hibernated`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImportHibernatedRequest {
+    pub id: Uuid,
+}
+
+/// `GET /v1/host/hibernation`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HostHibernationReport {
+    pub facts: HostHibernationFacts,
+}
+
+/// Body of `POST /v1/host/hibernation/check`; the answer is
+/// [`HibernationCheck`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HibernationCheckRequest {
+    pub manifest: HibernationManifest,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HibernationCheck {
+    pub compatible: bool,
+    #[serde(default)]
+    pub reasons: Vec<String>,
+}
+
+/// Body of `POST /v1/vms/{id}/diagnostics`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiagnosticsRequest {
+    /// Seconds of packet capture on the VM's dataplane interface, 0-30.
+    #[serde(default)]
+    pub pcap_seconds: u32,
+    /// tcpdump filter for the capture.
+    #[serde(default)]
+    pub pcap_filter: String,
+    /// Dump guest memory (QEMU `dump-guest-memory`, ELF). The guest is paused
+    /// while it is written. The dump stays on this host.
+    #[serde(default)]
+    pub memory_dump: bool,
+    /// Replace secrets (tokens, passwords, cloud-init files, secret env)
+    /// with sha256 fingerprints. Default true.
+    #[serde(default = "default_true")]
+    pub redact: bool,
+    /// Console log lines to include. Default 2000, at most 20000.
+    #[serde(default)]
+    pub log_lines: Option<usize>,
+}
+
+impl Default for DiagnosticsRequest {
+    fn default() -> Self {
+        Self {
+            pcap_seconds: 0,
+            pcap_filter: String::new(),
+            memory_dump: false,
+            redact: true,
+            log_lines: None,
+        }
+    }
+}
+
+/// One file (or group of files) in a diagnostics bundle.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DiagnosticsSection {
+    pub name: String,
+    pub ok: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(default)]
+    pub bytes: u64,
+}
+
+/// A guest memory dump kept on the host next to its bundle.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MemoryDumpInfo {
+    pub path: PathBuf,
+    pub format: String,
+    pub size_bytes: u64,
+    pub sha256: String,
+    /// How long the guest was paused while QEMU wrote the dump.
+    pub paused_ms: u64,
+}
+
+/// A diagnostics bundle job. `state` is `running`, `done` or `failed`; the
+/// bundle (`bundle.tar.gz`) is downloadable once `done`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiagnosticsBundle {
+    pub token: String,
+    pub vm_id: Uuid,
+    pub state: String,
+    pub created_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finished_at: Option<DateTime<Utc>>,
+    pub request: DiagnosticsRequest,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(default)]
+    pub sections: Vec<DiagnosticsSection>,
+    #[serde(default)]
+    pub size_bytes: u64,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub sha256: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_dump: Option<MemoryDumpInfo>,
+}
+
+/// Body of `PATCH /v1/vms/{id}`: rename and/or edit labels. A label value of
+/// `None` removes the key.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct VmPatch {
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub labels: std::collections::BTreeMap<String, Option<String>>,
+}
+
+/// `k=v,k2!=v2,k3,!k4` label selector (kubectl subset); every term must match.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LabelSelector {
+    terms: Vec<LabelTerm>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum LabelTerm {
+    Eq(String, String),
+    Ne(String, String),
+    Exists(String),
+    Absent(String),
+}
+
+impl LabelSelector {
+    pub fn parse(s: &str) -> anyhow::Result<Self> {
+        let mut terms = Vec::new();
+        for raw in s.split(',').map(str::trim).filter(|t| !t.is_empty()) {
+            let term = if let Some((k, v)) = raw.split_once("!=") {
+                LabelTerm::Ne(k.trim().into(), v.trim().into())
+            } else if let Some((k, v)) = raw.split_once("==").or_else(|| raw.split_once('=')) {
+                LabelTerm::Eq(k.trim().into(), v.trim().into())
+            } else if let Some(k) = raw.strip_prefix('!') {
+                LabelTerm::Absent(k.trim().into())
+            } else {
+                LabelTerm::Exists(raw.into())
+            };
+            let key = match &term {
+                LabelTerm::Eq(k, _)
+                | LabelTerm::Ne(k, _)
+                | LabelTerm::Exists(k)
+                | LabelTerm::Absent(k) => k,
+            };
+            if key.is_empty() {
+                anyhow::bail!("invalid label selector term {raw:?}");
+            }
+            terms.push(term);
+        }
+        if terms.is_empty() {
+            anyhow::bail!("empty label selector");
+        }
+        Ok(Self { terms })
+    }
+
+    pub fn matches(&self, labels: &std::collections::BTreeMap<String, String>) -> bool {
+        self.terms.iter().all(|t| match t {
+            LabelTerm::Eq(k, v) => labels.get(k) == Some(v),
+            LabelTerm::Ne(k, v) => labels.get(k) != Some(v),
+            LabelTerm::Exists(k) => labels.contains_key(k),
+            LabelTerm::Absent(k) => !labels.contains_key(k),
+        })
+    }
+}
+
+#[cfg(test)]
+mod label_selector_tests {
+    use super::LabelSelector;
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn selector_terms() {
+        let labels: BTreeMap<String, String> =
+            [("env".into(), "dev".into()), ("team".into(), "core".into())].into();
+        assert!(LabelSelector::parse("env=dev").unwrap().matches(&labels));
+        assert!(
+            LabelSelector::parse("env==dev,team")
+                .unwrap()
+                .matches(&labels)
+        );
+        assert!(!LabelSelector::parse("env!=dev").unwrap().matches(&labels));
+        assert!(LabelSelector::parse("!gpu,env").unwrap().matches(&labels));
+        assert!(!LabelSelector::parse("env=prod").unwrap().matches(&labels));
+        assert!(LabelSelector::parse("").is_err());
+        assert!(LabelSelector::parse("=x").is_err());
+    }
+}
+
+/// One entry of `GET /v1/vms/{id}/snapshots`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VmSnapshotInfo {
+    pub tag: String,
+    pub created_at: Option<DateTime<Utc>>,
+    pub size_bytes: u64,
+    /// Whether the snapshot carries saved memory and device state (restoring resumes the guest where it was) or
+    /// only the disk (restoring boots it cold). `None` when the backend does not say.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub has_memory: Option<bool>,
+}
+
+/// One entry of `GET /v1/vms/{id}/disks`. `name` is `root` for the boot disk.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VmDiskInfo {
+    pub name: String,
+    pub path: PathBuf,
+    pub bus: String,
+    pub format: String,
+    pub size_bytes: u64,
+    pub allocated_bytes: u64,
+    /// The configured limits (QEMU).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub throttle: Option<DiskThrottle>,
+}
+
+/// A named template for a warm pool: `size` VMs matching `template` are
+/// kept pre-booted-and-`Paused`, ready to be handed out by
+/// `VmManager::claim_from_pool` in roughly resume-time (already fast — see
+/// "Pause, resume, and exec") instead of full create-time. `template.name`
+/// and `template.ttl_seconds` are ignored for pool members (a paused pool
+/// member must never expire on its own; the claimed VM gets a fresh name/TTL
+/// at claim time — see `ClaimOverrides`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PoolSpec {
+    pub name: String,
+    pub size: usize,
+    pub template: CreateVmRequest,
+}
+
+/// `POST /v1/vms/{id}/hotplug/share`: hot-add a virtiofs share (QEMU only, the VM must have booted with
+/// `shared_memory` or a boot-time share). The tag is the next `fs{N}`, i.e. the share's index in the VM's
+/// `shared_folders` after the call, and is returned to the caller.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HotplugShareRequest {
+    pub host_path: PathBuf,
+    #[serde(default)]
+    pub read_only: bool,
+}
+
+impl HotplugShareRequest {
+    pub fn validate(&self) -> Result<(), String> {
+        if !self.host_path.is_absolute() {
+            return Err("host_path must be absolute".into());
+        }
+        if self
+            .host_path
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
+        {
+            return Err("host_path must not contain '..'".into());
+        }
+        Ok(())
+    }
+}
+
+/// Persisted state of a warm pool: which VM ids are currently reserved
+/// members (booted, paused, unclaimed). A member id present here always
+/// corresponds to a real `Paused` `VmRecord` in the main VM store — the two
+/// are kept in sync by `VmManager`, not merged into one store, since pool
+/// membership and VM lifecycle are different concerns with different
+/// locking needs.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PoolRecord {
+    pub name: String,
+    pub size: usize,
+    pub template: CreateVmRequest,
+    #[serde(default)]
+    pub members: Vec<Uuid>,
+    /// Lifetime count of members successfully handed out by
+    /// `VmManager::claim_from_pool` — incremented once per claim that
+    /// actually succeeded (resumed and, if tenant-scoped, verified), not
+    /// once per pop attempt. Pure observability: nothing reads this back to
+    /// make a decision, it exists so an operator staring at a pool that
+    /// keeps running dry (or one that's never claimed at all) has a number
+    /// to size it by, instead of only ever seeing a point-in-time
+    /// ready-vs-target snapshot that says nothing about actual demand over
+    /// time. `#[serde(default)]` so a `pools.json` written before this
+    /// field existed still loads (as 0, the honest "unknown history"
+    /// value) rather than failing to parse.
+    #[serde(default)]
+    pub claimed_total: u64,
+}
+
+/// Read-only view of a [`PoolRecord`] returned by the pool API/CLI surfaces,
+/// augmenting the persisted fields with occupancy stats a caller would
+/// otherwise have to derive itself. Before this, `GET /v1/pools/{name}` (and
+/// `fluxctl pool get`/`list`) returned only `size` (the *target* member
+/// count) and `members` (the ids of members currently ready) — nothing
+/// named which was which, so telling "fully backfilled" apart from "still
+/// catching up" meant a caller had to know, unprompted, to compare
+/// `members.len()` against `size` itself. `ready`/`pending` name that
+/// comparison explicitly; `claimed_total` (already on `record`, just called
+/// out here too since it's the other half of "is this pool sized right")
+/// rides along via the flatten.
+#[derive(Debug, Clone, Serialize)]
+pub struct PoolView {
+    #[serde(flatten)]
+    pub record: PoolRecord,
+    /// `record.members.len()` — members currently paused and claimable
+    /// right now.
+    pub ready: usize,
+    /// How many more members are needed to reach `record.size`. Saturating,
+    /// so a pool briefly over target (e.g. mid-shrink, before the excess is
+    /// trimmed) reports 0 rather than an underflowed huge number.
+    pub pending: usize,
+}
+
+impl From<PoolRecord> for PoolView {
+    fn from(record: PoolRecord) -> Self {
+        let ready = record.members.len();
+        let pending = record.size.saturating_sub(ready);
+        Self {
+            record,
+            ready,
+            pending,
+        }
+    }
+}
+
+/// Applied to the VM handed back by a pool claim, replacing whatever the
+/// template said for these fields (a pool member is paused with no name
+/// worth keeping and no TTL, precisely so it never expires while idle in
+/// the pool).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ClaimOverrides {
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub ttl_seconds: Option<u64>,
+    /// Kubernetes Pod UID the claimed VM now belongs to (Secure Containers). Recorded as the VM's
+    /// `request.pod_uid` so the dataplane attached at NIC hotplug carries the Pod's eBPF identity, exactly as
+    /// for a VM created for the Pod (`CreateVmRequest::pod_uid`). A pool member is booted before any Pod
+    /// exists, so this is the only point the identity can be supplied.
+    #[serde(default)]
+    pub pod_uid: Option<String>,
+}
+
+impl ClaimOverrides {
+    /// Rejects a `pod_uid` that could not be a Kubernetes UID: it becomes a key of the persisted
+    /// pod-identity store and part of file names, so keep it to a short run of `[A-Za-z0-9._-]`.
+    pub fn validate(&self) -> Result<(), String> {
+        let Some(uid) = self.pod_uid.as_deref() else {
+            return Ok(());
+        };
+        if uid.is_empty() || uid.len() > 128 {
+            return Err("pod_uid must be 1-128 characters".into());
+        }
+        if !uid
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+        {
+            return Err("pod_uid may only contain letters, digits, '.', '_' and '-'".into());
+        }
+        Ok(())
+    }
+}
+
+/// Body of `POST /v1/pools/{name}/resize` / `fluxctl pool resize` — the new
+/// target `size` for an existing pool. See `VmManager::resize_pool`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PoolResizeRequest {
+    pub size: usize,
+}
+
+/// cgroup v2 resource-control settings to apply to a running VM. Every
+/// field is optional so a caller only touches what it actually wants to
+/// change — see `VmManager::set_resources`.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ResourcePatch {
+    /// CPU quota as a percentage of one core (200 = 2 full cores).
+    #[serde(default)]
+    pub cpu_quota_percent: Option<u32>,
+    /// Memory limit in bytes.
+    #[serde(default)]
+    pub memory_max_bytes: Option<u64>,
+    /// I/O weight (1-10000, default 100).
+    #[serde(default)]
+    pub io_weight: Option<u32>,
+    /// Maximum number of PIDs in the VM's cgroup.
+    #[serde(default)]
+    pub pids_max: Option<u64>,
+    /// Pin the VM to these host CPU cores.
+    #[serde(default)]
+    pub cpuset_cpus: Option<Vec<u32>>,
+}
+
+/// Request body for `POST /v1/vms/{id}/hotplug/cpu` -- adds vCPUs into the
+/// unrealized `query-hotpluggable-cpus` slots reserved via `max_vcpus` at
+/// creation. QEMU-only; other backends reject this outright (see
+/// `VmManager::hotplug_cpu`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HotplugCpuRequest {
+    pub add_vcpus: u8,
+}
+
+/// Response for a successful CPU hotplug -- the realized vCPU count after
+/// adding, not just what this call added.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HotplugCpuResult {
+    pub vcpus: u8,
+}
+
+/// Request body for `POST /v1/vms/{id}/hotplug/memory` -- adds RAM as a new
+/// `pc-dimm` backed by a fresh `memory-backend-ram` object, into the DIMM
+/// slots reserved via `max_memory_mib` at creation. QEMU-only.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HotplugMemoryRequest {
+    pub add_memory_mib: u64,
+}
+
+/// Response for a successful memory hotplug -- the VM's new *total* live
+/// memory (boot-time `memory_mib` plus every hot-added DIMM so far).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HotplugMemoryResult {
+    pub memory_mib: u64,
+}
+
+/// Request body for `POST /v1/vms/{id}/hotplug/nic`. QEMU only: creates a
+/// TAP on `bridge` and `device_add`s `virtio-net-pci` onto the next free
+/// `hotplug-pcie-*` root port. Used by Secure Containers after a warm-pool
+/// claim, when the template VM was booted with `network.mode=none`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HotplugNicRequest {
+    /// Host bridge for a bridged NIC. Empty when `direct` is set.
+    #[serde(default)]
+    pub bridge: String,
+    #[serde(default)]
+    pub mac: Option<String>,
+    /// Bridge-less attach instead of a bridge: the daemon creates the tap (inside the outer
+    /// device's netns when `netns_path` is set), wires the eBPF redirect, and hands the tap to QEMU
+    /// as a descriptor. Mutually exclusive with `bridge`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub direct: Option<DirectSpec>,
+}
+
+impl HotplugNicRequest {
+    /// Exactly one of `bridge` / `direct`, and a valid `direct`.
+    pub fn validate(&self) -> Result<(), String> {
+        match (&self.direct, self.bridge.is_empty()) {
+            (None, true) => Err("hotplug/nic needs either `bridge` or `direct`".into()),
+            (Some(_), false) => {
+                Err("hotplug/nic `bridge` and `direct` are mutually exclusive".into())
+            }
+            (Some(d), true) => d.validate(),
+            (None, false) => Ok(()),
+        }
+    }
+}
+
+/// Whether a backup freezes guest filesystems (QGA `guest-fsfreeze-freeze`)
+/// around its snapshot. `auto` freezes when the guest agent answers and
+/// otherwise takes a crash-consistent copy; `required` fails without it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BackupQuiesce {
+    #[default]
+    Auto,
+    Required,
+    Never,
+}
+
+/// Options for `VmManager::backup_vm`.
+#[derive(Debug, Clone, Default)]
+pub struct BackupOptions {
+    /// Local CLI only; the REST API always writes under `state_dir/backups`.
+    pub dest: Option<PathBuf>,
+    /// Backup name under `state_dir/backups` instead of `<vm>-<utc>`;
+    /// ignored when `dest` is set.
+    pub name: Option<String>,
+    pub compress: bool,
+    pub all_disks: bool,
+    pub quiesce: BackupQuiesce,
+}
+
+/// Request body for `POST /v1/vms/{id}/hotplug/nic/unplug`: the extra NIC to
+/// remove, by exactly one of `mac` or host `tap` name. The primary NIC sits on
+/// the root bus and can't be hot-removed.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct UnplugNicRequest {
+    #[serde(default)]
+    pub mac: Option<String>,
+    #[serde(default)]
+    pub tap: Option<String>,
+}
+
+impl UnplugNicRequest {
+    pub fn validate(&self) -> Result<(), String> {
+        match (&self.mac, &self.tap) {
+            (Some(_), None) | (None, Some(_)) => Ok(()),
+            _ => Err("hotplug/nic/unplug needs exactly one of `mac` or `tap`".into()),
+        }
+    }
+
+    /// True when `nic` is the one this request names.
+    pub fn matches(&self, mac: Option<&str>, tap: Option<&str>) -> bool {
+        match (&self.mac, &self.tap) {
+            (Some(want), _) => mac.is_some_and(|m| m.eq_ignore_ascii_case(want)),
+            (_, Some(want)) => tap == Some(want.as_str()),
+            _ => false,
+        }
+    }
+}
+
+/// Point-in-time resource usage for a VM, read from its cgroup.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VmMetrics {
+    /// CPU usage as a percentage of one core, averaged over the process's
+    /// entire lifetime (not an instantaneous rate).
+    pub cpu_usage_percent: f64,
+    pub memory_usage_bytes: u64,
+    pub disk_read_bytes: u64,
+    pub disk_write_bytes: u64,
+}
+
+/// PSI (Pressure Stall Information) for a VM's cgroup — see
+/// `fluxvm_cgroup::PressureStats` for field semantics.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct VmPressure {
+    pub cpu_some: Option<fluxvm_cgroup::PressureRecord>,
+    pub memory_some: Option<fluxvm_cgroup::PressureRecord>,
+    pub memory_full: Option<fluxvm_cgroup::PressureRecord>,
+    pub io_some: Option<fluxvm_cgroup::PressureRecord>,
+    pub io_full: Option<fluxvm_cgroup::PressureRecord>,
+}
+
+#[cfg(test)]
+mod pool_view_tests {
+    use super::*;
+
+    /// A `CreateVmRequest` has ~25 fields, nearly all `#[serde(default)]` --
+    /// going through JSON with only the three actually-required ones set
+    /// exercises the same defaulting real request bodies rely on, instead
+    /// of this test needing to list every field by hand (and rot every time
+    /// a field is added elsewhere).
+    fn minimal_request() -> CreateVmRequest {
+        serde_json::from_value(serde_json::json!({
+            "name": "t",
+            "backend": "qemu",
+            "image": "/does/not/exist.qcow2",
+        }))
+        .unwrap()
+    }
+
+    fn pool(size: usize, member_count: usize, claimed_total: u64) -> PoolRecord {
+        PoolRecord {
+            name: "p".into(),
+            size,
+            template: minimal_request(),
+            members: (0..member_count).map(|_| Uuid::new_v4()).collect(),
+            claimed_total,
+        }
+    }
+
+    #[test]
+    fn ready_and_pending_reflect_members_vs_target() {
+        let view = PoolView::from(pool(5, 2, 0));
+        assert_eq!(view.ready, 2);
+        assert_eq!(view.pending, 3);
+    }
+
+    #[test]
+    fn pending_is_zero_once_fully_backfilled() {
+        let view = PoolView::from(pool(3, 3, 0));
+        assert_eq!(view.ready, 3);
+        assert_eq!(view.pending, 0);
+    }
+
+    #[test]
+    fn pending_saturates_rather_than_underflows_when_over_target() {
+        // Briefly possible mid-shrink, before the excess members are
+        // trimmed -- must report 0, not wrap around to a huge usize.
+        let view = PoolView::from(pool(2, 5, 0));
+        assert_eq!(view.ready, 5);
+        assert_eq!(view.pending, 0);
+    }
+
+    #[test]
+    fn claim_overrides_without_a_pod_uid_still_deserialize() {
+        let o: ClaimOverrides =
+            serde_json::from_str(r#"{"name":"ctr-a","ttl_seconds":60}"#).unwrap();
+        assert_eq!(o.pod_uid, None);
+        assert!(o.validate().is_ok());
+        let o: ClaimOverrides =
+            serde_json::from_str(r#"{"pod_uid":"3f1c2a4e-9d7b-4c11-8a0e-5b6d7e8f9a01"}"#).unwrap();
+        assert_eq!(
+            o.pod_uid.as_deref(),
+            Some("3f1c2a4e-9d7b-4c11-8a0e-5b6d7e8f9a01")
+        );
+        assert!(o.validate().is_ok());
+    }
+
+    #[test]
+    fn claim_overrides_reject_a_pod_uid_that_cannot_be_a_kubernetes_uid() {
+        for bad in ["", "a/b", "../x", "uid with space", "x\n", &"a".repeat(129)] {
+            let o = ClaimOverrides {
+                pod_uid: Some(bad.to_string()),
+                ..Default::default()
+            };
+            assert!(o.validate().is_err(), "{bad:?} should be rejected");
+        }
+    }
+
+    #[test]
+    fn claimed_total_rides_along_via_the_flatten() {
+        let view = PoolView::from(pool(1, 0, 42));
+        let value = serde_json::to_value(&view).unwrap();
+        assert_eq!(value["claimed_total"], 42);
+        assert_eq!(value["ready"], 0);
+        assert_eq!(value["pending"], 1);
+        // The flatten must not shadow or duplicate any persisted field.
+        assert_eq!(value["size"], 1);
+        assert_eq!(value["name"], "p");
+    }
+}
+
+#[cfg(test)]
+mod create_vm_request_tests {
+    use super::*;
+
+    #[test]
+    fn created_by_token_round_trips_through_serde_like_a_stored_record_would() {
+        // created_by_token is deliberately a plain #[serde(default)]
+        // field, not skip_deserializing (see its own doc comment for why:
+        // fluxvm-storage::Store round-trips every VmRecord through this
+        // exact same codec on every read, and a skip_deserializing field
+        // would silently come back None there every time). This proves
+        // the round trip that quota accounting depends on actually works
+        // -- the client-spoofing concern that might otherwise motivate
+        // skip_deserializing is handled instead by fluxvm-api's create_vm/
+        // create_sandbox unconditionally overwriting this field from the
+        // authenticated caller right after deserializing (see
+        // created_by_token_cannot_be_spoofed_via_the_request_body in
+        // fluxvm-api for that half of the guarantee).
+        let req: CreateVmRequest = serde_json::from_str(
+            r#"{"name":"t","backend":"qemu","image":"/does/not/exist.qcow2","created_by_token":"tokenA"}"#,
+        )
+        .unwrap();
+        assert_eq!(req.created_by_token.as_deref(), Some("tokenA"));
+
+        let json = serde_json::to_string(&req).unwrap();
+        let round_tripped: CreateVmRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(round_tripped.created_by_token.as_deref(), Some("tokenA"));
+    }
+
+    #[test]
+    fn tap_without_extra_deserializes_empty_multus_list() {
+        let spec: NetworkSpec = serde_json::from_str(
+            r#"{"mode":"tap","bridge":"br0","mac":"02:00:00:00:00:01","netns":false}"#,
+        )
+        .unwrap();
+        match spec {
+            NetworkSpec::Tap {
+                extra,
+                bridge,
+                netns,
+                ..
+            } => {
+                assert!(extra.is_empty());
+                assert_eq!(bridge.as_deref(), Some("br0"));
+                assert!(!netns);
+            }
+            other => panic!("expected tap, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn tap_extra_nics_round_trip_bridge_and_mac() {
+        let raw = r#"{"mode":"tap","bridge":"fvbhprimary","mac":"02:00:00:00:00:01","extra":[{"bridge":"fvbhnet1","mac":"02:11:22:33:44:55"}]}"#;
+        let spec: NetworkSpec = serde_json::from_str(raw).unwrap();
+        let NetworkSpec::Tap { extra, .. } = &spec else {
+            panic!("expected tap");
+        };
+        assert_eq!(extra.len(), 1);
+        assert_eq!(extra[0].bridge, "fvbhnet1");
+        assert_eq!(extra[0].mac.as_deref(), Some("02:11:22:33:44:55"));
+        assert!(extra[0].tap_name.is_none());
+        let again: NetworkSpec =
+            serde_json::from_str(&serde_json::to_string(&spec).unwrap()).unwrap();
+        assert_eq!(
+            serde_json::to_value(&spec).unwrap(),
+            serde_json::to_value(&again).unwrap()
+        );
+    }
+
+    #[test]
+    fn bridged_tap_record_without_direct_stays_bridged_and_reserializes_unchanged() {
+        // Persisted VM requests are re-prepared on start/restore, so a record
+        // written before `direct` existed must keep meaning "bridged tap" and
+        // must not sprout a `direct` key when written back.
+        let raw = r#"{"mode":"tap","bridge":"vmbr0","mac":"02:00:00:00:00:01","netns":false}"#;
+        let spec: NetworkSpec = serde_json::from_str(raw).unwrap();
+        let NetworkSpec::Tap { direct, .. } = &spec else {
+            panic!("expected tap");
+        };
+        assert!(direct.is_none());
+        assert!(serde_json::to_value(&spec).unwrap().get("direct").is_none());
+        assert!(spec.validate_direct().is_ok());
+    }
+
+    #[test]
+    fn direct_tap_round_trips_with_defaults() {
+        let raw = r#"{"mode":"tap","mac":"02:00:00:00:00:01","direct":{"outer":"eth0","netns_path":"/run/netns/fvcni-abc123"}}"#;
+        let spec: NetworkSpec = serde_json::from_str(raw).unwrap();
+        let NetworkSpec::Tap { direct, bridge, .. } = &spec else {
+            panic!("expected tap");
+        };
+        let d = direct.as_ref().expect("direct present");
+        assert_eq!(d.outer, "eth0");
+        assert_eq!(d.netns_path.as_deref(), Some("/run/netns/fvcni-abc123"));
+        assert_eq!(d.mode, DirectMode::PeerVeth, "mode defaults to peer-veth");
+        assert!(bridge.is_none());
+        assert!(spec.validate_direct().is_ok());
+        let again: NetworkSpec =
+            serde_json::from_str(&serde_json::to_string(&spec).unwrap()).unwrap();
+        assert_eq!(
+            serde_json::to_value(&spec).unwrap(),
+            serde_json::to_value(&again).unwrap()
+        );
+        let l2: NetworkSpec = serde_json::from_str(
+            r#"{"mode":"tap","direct":{"outer":"enp1s0","mode":"l2-uplink"}}"#,
+        )
+        .unwrap();
+        assert!(l2.validate_direct().is_ok());
+    }
+
+    #[test]
+    fn hotplug_requests_need_exactly_one_attach_mode() {
+        let ok_bridge: HotplugNicRequest =
+            serde_json::from_str(r#"{"bridge":"fvbh1","mac":"02:00:00:00:00:01"}"#).unwrap();
+        assert!(ok_bridge.validate().is_ok());
+        assert!(
+            ok_bridge.direct.is_none(),
+            "old bridge requests keep meaning a bridged NIC"
+        );
+        let ok_direct: HotplugNicRequest = serde_json::from_str(
+            r#"{"mac":"02:00:00:00:00:01","direct":{"outer":"eth0","netns_path":"/run/netns/fvcni-x"}}"#,
+        )
+        .unwrap();
+        assert!(ok_direct.validate().is_ok());
+        assert!(ok_direct.bridge.is_empty());
+        let neither: HotplugNicRequest = serde_json::from_str(r#"{}"#).unwrap();
+        assert!(neither.validate().unwrap_err().contains("either"));
+        let both: HotplugNicRequest =
+            serde_json::from_str(r#"{"bridge":"b","direct":{"outer":"eth0"}}"#).unwrap();
+        assert!(both.validate().unwrap_err().contains("mutually exclusive"));
+        let bad: HotplugNicRequest = serde_json::from_str(r#"{"direct":{"outer":""}}"#).unwrap();
+        assert!(bad.validate().is_err(), "the direct spec is validated too");
+        // a bridged request serialises without a `direct` key, so older daemons still accept it
+        assert!(
+            serde_json::to_value(&ok_bridge)
+                .unwrap()
+                .get("direct")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn guest_ips_are_validated_and_only_for_the_uplink_mode() {
+        fn check(json: &str) -> Result<(), String> {
+            serde_json::from_str::<NetworkSpec>(json)
+                .unwrap()
+                .validate_direct()
+        }
+        let ok = r#"{"mode":"tap","direct":{"outer":"enp1s0","mode":"l2-uplink","guest_ips":["10.0.0.5","192.168.1.9"]}}"#;
+        assert!(check(ok).is_ok());
+        // round-trips, and stays out of the JSON when empty (old records are unchanged)
+        let spec: NetworkSpec = serde_json::from_str(ok).unwrap();
+        assert_eq!(
+            serde_json::to_value(&spec).unwrap()["direct"]["guest_ips"][1],
+            "192.168.1.9"
+        );
+        let bare: NetworkSpec =
+            serde_json::from_str(r#"{"mode":"tap","direct":{"outer":"eth0"}}"#).unwrap();
+        assert!(
+            serde_json::to_value(&bare).unwrap()["direct"]
+                .get("guest_ips")
+                .is_none()
+        );
+        assert!(
+            check(r#"{"mode":"tap","direct":{"outer":"eth0","guest_ips":["10.0.0.5"]}}"#)
+                .unwrap_err()
+                .contains("l2-uplink")
+        );
+        assert!(check(
+            r#"{"mode":"tap","direct":{"outer":"e","mode":"l2-uplink","guest_ips":["fd00::5"]}}"#
+        )
+        .unwrap_err()
+        .contains("IPv4"));
+        assert!(check(
+            r#"{"mode":"tap","direct":{"outer":"e","mode":"l2-uplink","guest_ips":["not-an-ip"]}}"#
+        )
+        .is_err());
+        let many = (1..=9)
+            .map(|i| format!("\"10.0.0.{i}\""))
+            .collect::<Vec<_>>()
+            .join(",");
+        let too_many = format!(
+            r#"{{"mode":"tap","direct":{{"outer":"e","mode":"l2-uplink","guest_ips":[{many}]}}}}"#
+        );
+        assert!(check(&too_many).unwrap_err().contains("at most"));
+    }
+
+    #[test]
+    fn direct_validation_rejects_conflicting_or_malformed_specs() {
+        fn check(json: &str) -> Result<(), String> {
+            serde_json::from_str::<NetworkSpec>(json)
+                .unwrap()
+                .validate_direct()
+        }
+        let ok = r#""direct":{"outer":"eth0","netns_path":"/run/netns/x"}"#;
+        assert!(check(&format!(r#"{{"mode":"tap",{ok}}}"#)).is_ok());
+        let bridge = check(&format!(r#"{{"mode":"tap","bridge":"vmbr0",{ok}}}"#));
+        assert!(bridge.unwrap_err().contains("mutually exclusive"));
+        let netns = check(&format!(r#"{{"mode":"tap","netns":true,{ok}}}"#));
+        assert!(netns.unwrap_err().contains("netns=true"));
+        // Hybrid Multus: direct primary + bridged extras is allowed.
+        assert!(
+            check(&format!(
+                r#"{{"mode":"tap","extra":[{{"bridge":"b"}}],{ok}}}"#
+            ))
+            .is_ok()
+        );
+        // Extra still needs bridge or direct.
+        let bare_extra = check(&format!(r#"{{"mode":"tap","extra":[{{}}],{ok}}}"#));
+        assert!(bare_extra.unwrap_err().contains("need bridge or direct"));
+        assert!(check(r#"{"mode":"tap","direct":{"outer":""}}"#).is_err());
+        assert!(check(r#"{"mode":"tap","direct":{"outer":"averyveryverylongname"}}"#).is_err());
+        assert!(check(r#"{"mode":"tap","direct":{"outer":"a/b"}}"#).is_err());
+        let rel = check(r#"{"mode":"tap","direct":{"outer":"eth0","netns_path":"relative/ns"}}"#);
+        assert!(rel.unwrap_err().contains("absolute"));
+        let l2ns = check(
+            r#"{"mode":"tap","direct":{"outer":"eth0","mode":"l2-uplink","netns_path":"/run/netns/x"}}"#,
+        );
+        assert!(l2ns.unwrap_err().contains("l2-uplink"));
+        // Non-tap variants never trip direct validation.
+        assert!(check(r#"{"mode":"none"}"#).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod balloon_model_tests {
+    use super::*;
+
+    #[test]
+    fn empty_balloon_object_takes_the_defaults() {
+        let spec: BalloonSpec = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert_eq!(spec, BalloonSpec::default());
+        assert!(spec.free_page_reporting && spec.deflate_on_oom);
+        assert_eq!(spec.stats_interval_secs, 5);
+    }
+
+    #[test]
+    fn host_capability_without_balloon_still_parses() {
+        let cap: RuntimeHostCapability = serde_json::from_value(serde_json::json!({
+            "topology": true, "numaBinding": true, "pciBind": true
+        }))
+        .unwrap();
+        assert!(!cap.balloon);
+    }
+}
+
+#[cfg(test)]
+mod migration_tls_model_tests {
+    use super::*;
+
+    #[test]
+    fn migration_tls_spec_field_names_match_documented_contract() {
+        let spec = MigrationTlsSpec {
+            ca_path: "a".into(),
+            cert_path: "b".into(),
+            key_path: "c".into(),
+            tls_hostname: Some("d".into()),
+        };
+        let value = serde_json::to_value(&spec).unwrap();
+        let obj = value.as_object().unwrap();
+        let mut keys: Vec<&str> = obj.keys().map(String::as_str).collect();
+        keys.sort();
+        assert_eq!(
+            keys,
+            vec!["ca_path", "cert_path", "key_path", "tls_hostname"]
+        );
+    }
+
+    #[test]
+    fn migration_start_request_tls_defaults_none_when_absent() {
+        let value = serde_json::json!({"destination": "tcp:10.0.0.5:4444"});
+        let req: MigrationStartRequest = serde_json::from_value(value).unwrap();
+        assert!(req.tls.is_none());
+        assert_eq!(req.mode, MigrationMode::PreCopy);
+    }
+
+    #[test]
+    fn migration_start_request_tls_round_trips() {
+        let req = MigrationStartRequest {
+            destination: "tcp:10.0.0.5:4444".into(),
+            mode: MigrationMode::PostCopy,
+            bandwidth_mbps: Some(800),
+            max_downtime_ms: Some(300),
+            multifd_channels: Some(4),
+            tls: Some(MigrationTlsSpec {
+                ca_path: "/etc/ca.pem".into(),
+                cert_path: "/etc/cert.pem".into(),
+                key_path: "/etc/key.pem".into(),
+                tls_hostname: Some("dest.example.com".into()),
+            }),
+            auto_converge: Some(MigrationAutoConverge {
+                initial_pct: Some(20),
+                increment_pct: Some(10),
+                max_pct: Some(80),
+            }),
+            compression: Some(MigrationCompression {
+                algorithm: MigrationCompressionAlgorithm::Zstd,
+                level: Some(3),
+            }),
+            post_copy: Some(PostCopyMode::Armed),
+        };
+        let round_tripped: MigrationStartRequest =
+            serde_json::from_value(serde_json::to_value(&req).unwrap()).unwrap();
+        assert_eq!(round_tripped, req);
+    }
+
+    #[test]
+    fn migration_start_request_adaptive_fields_default_when_absent() {
+        let req: MigrationStartRequest =
+            serde_json::from_value(serde_json::json!({"destination": "tcp:h:1"})).unwrap();
+        assert_eq!(req.auto_converge, None);
+        assert_eq!(req.compression, None);
+        assert_eq!(req.post_copy, None);
+        assert_eq!(req.effective_post_copy().unwrap(), PostCopyMode::Disabled);
+    }
+
+    #[test]
+    fn effective_post_copy_resolves_mode_and_override() {
+        let mut req: MigrationStartRequest = serde_json::from_value(
+            serde_json::json!({"destination": "tcp:h:1", "mode": "post-copy"}),
+        )
+        .unwrap();
+        assert_eq!(req.effective_post_copy().unwrap(), PostCopyMode::Immediate);
+        req.post_copy = Some(PostCopyMode::Armed);
+        assert_eq!(req.effective_post_copy().unwrap(), PostCopyMode::Armed);
+        req.post_copy = Some(PostCopyMode::Disabled);
+        assert!(req.effective_post_copy().is_err());
+        req.mode = MigrationMode::PreCopy;
+        req.post_copy = Some(PostCopyMode::Armed);
+        assert_eq!(req.effective_post_copy().unwrap(), PostCopyMode::Armed);
+    }
+
+    #[test]
+    fn compression_level_is_bounded_per_algorithm() {
+        let zstd = |level| MigrationCompression {
+            algorithm: MigrationCompressionAlgorithm::Zstd,
+            level: Some(level),
+        };
+        assert!(zstd(20).validate().is_ok());
+        assert!(zstd(21).validate().is_err());
+        let zlib = MigrationCompression {
+            algorithm: MigrationCompressionAlgorithm::Zlib,
+            level: Some(10),
+        };
+        assert!(zlib.validate().is_err());
+    }
+
+    #[test]
+    fn migration_status_telemetry_is_flat_on_the_wire() {
+        let v = serde_json::json!({
+            "phase": "active", "status": "active",
+            "dirty_pages_rate": 1200, "mbps": 941.5, "expected_downtime_ms": 80
+        });
+        let s: MigrationStatus = serde_json::from_value(v).unwrap();
+        assert_eq!(s.telemetry.dirty_pages_rate, Some(1200));
+        assert_eq!(s.telemetry.mbps, Some(941.5));
+        assert_eq!(s.telemetry.expected_downtime_ms, Some(80));
+        let out = serde_json::to_value(&s).unwrap();
+        assert_eq!(out["dirty_pages_rate"], 1200);
+        assert!(out.get("telemetry").is_none());
+        assert!(out.get("postcopy_requests").is_none());
+    }
+
+    #[test]
+    fn migration_receiver_request_tls_defaults_none_when_absent() {
+        let value = serde_json::json!({
+            "vcpus": 2,
+            "memory_mib": 1024,
+            "disk": "/srv/shared/disk.raw",
+        });
+        let req: MigrationReceiverRequest = serde_json::from_value(value).unwrap();
+        assert!(req.tls.is_none());
+        assert_eq!(req.listen_host, "0.0.0.0");
+    }
+
+    #[test]
+    fn migration_receiver_persists_tls_field_name() {
+        let value = serde_json::to_value(MigrationReceiver {
+            id: Uuid::nil(),
+            uri: "tcp:10.0.0.1:1".into(),
+            listen_uri: "tcp:0.0.0.0:1".into(),
+            token: "t".into(),
+            expires_at_unix: 0,
+            pid: 1,
+            qmp_socket: "/tmp/qmp.sock".into(),
+            workspace: "/tmp/ws".into(),
+            disk: "/tmp/disk.raw".into(),
+            cgroup_path: None,
+            vcpus: 1,
+            memory_mib: 512,
+            source_id: None,
+            capabilities: Default::default(),
+            tls: Some(MigrationTlsSpec {
+                ca_path: "a".into(),
+                cert_path: "b".into(),
+                key_path: "c".into(),
+                tls_hostname: None,
+            }),
+        })
+        .unwrap();
+        assert!(value.get("tls").is_some());
+    }
+}
+
+fn is_zero_u8(v: &u8) -> bool {
+    *v == 0
+}
+
+#[cfg(test)]
+mod vnet_model_tests {
+    use super::*;
+
+    fn tap(vnet: VnetAttach) -> NetworkSpec {
+        NetworkSpec::Tap {
+            tap_name: None,
+            bridge: None,
+            mac: Some("52:54:00:00:00:02".into()),
+            netns: false,
+            extra: vec![],
+            direct: None,
+            vnet: Some(vnet),
+        }
+    }
+
+    fn attach() -> VnetAttach {
+        VnetAttach {
+            vni: 42,
+            ip: "10.20.0.5".into(),
+            prefix_len: 24,
+            gateway: "10.20.0.1".into(),
+        }
+    }
+
+    #[test]
+    fn a_vnet_tap_validates_and_round_trips() {
+        let spec = tap(attach());
+        spec.validate_direct().unwrap();
+        let json = serde_json::to_value(&spec).unwrap();
+        assert_eq!(json["vnet"]["vni"], 42);
+        let back: NetworkSpec = serde_json::from_value(json).unwrap();
+        assert_eq!(back.vnet(), Some(&attach()));
+    }
+
+    #[test]
+    fn a_tap_without_vnet_omits_the_field() {
+        let spec: NetworkSpec = serde_json::from_value(serde_json::json!({"mode": "tap"})).unwrap();
+        assert!(spec.vnet().is_none());
+        assert!(serde_json::to_value(&spec).unwrap().get("vnet").is_none());
+    }
+
+    #[test]
+    fn vnet_attach_rejects_bad_addresses() {
+        for bad in [
+            VnetAttach { vni: 0, ..attach() },
+            VnetAttach {
+                vni: MAX_VNI + 1,
+                ..attach()
+            },
+            VnetAttach {
+                prefix_len: 31,
+                ..attach()
+            },
+            VnetAttach {
+                ip: "10.21.0.5".into(),
+                ..attach()
+            },
+            VnetAttach {
+                ip: "10.20.0.1".into(),
+                ..attach()
+            },
+            VnetAttach {
+                gateway: "fd00::1".into(),
+                ..attach()
+            },
+        ] {
+            assert!(bad.validate().is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn vnet_excludes_bridges_and_needs_a_mac() {
+        let mut no_mac = tap(attach());
+        if let NetworkSpec::Tap { mac, .. } = &mut no_mac {
+            *mac = None;
+        }
+        assert!(no_mac.validate_vnet().is_err());
+        let mut bridged = tap(attach());
+        if let NetworkSpec::Tap { bridge, .. } = &mut bridged {
+            *bridge = Some("br0".into());
+        }
+        assert!(bridged.validate_direct().is_err());
+    }
+
+    #[test]
+    fn gateway_mac_is_local_and_encodes_the_vni() {
+        assert_eq!(
+            vnet_gateway_mac(0x0a0b0c),
+            [0x02, 0x66, 0x76, 0x0a, 0x0b, 0x0c]
+        );
+    }
+
+    fn config() -> VnetConfig {
+        VnetConfig {
+            vni: 7,
+            cidr: "10.20.0.0/24".into(),
+            gateway: "10.20.0.1".into(),
+            uplink: Some("eth0".into()),
+            snat_address: Some("192.0.2.10".into()),
+            floating_ips: vec![VnetFloatingIp {
+                address: "198.51.100.7".into(),
+                ip: "10.20.0.5".into(),
+            }],
+            endpoints: vec![VnetEndpoint {
+                ip: "10.20.0.5".into(),
+                mac: "52:54:00:00:00:05".into(),
+                node_ip: "192.168.1.2".into(),
+            }],
+        }
+    }
+
+    #[test]
+    fn vnet_config_validates() {
+        config().validate().unwrap();
+        let mut c = config();
+        c.uplink = None;
+        assert!(c.validate().unwrap_err().contains("uplink"));
+        let mut c = config();
+        c.cidr = "10.20.0.1/24".into();
+        assert!(c.validate().unwrap_err().contains("host bits"));
+        let mut c = config();
+        c.endpoints.push(c.endpoints[0].clone());
+        assert!(c.validate().unwrap_err().contains("twice"));
+        let mut c = config();
+        c.floating_ips[0].ip = "10.30.0.5".into();
+        assert!(c.validate().unwrap_err().contains("outside"));
+        let mut c = config();
+        c.gateway = "10.21.0.1".into();
+        assert!(c.validate().is_err());
+    }
+}
+
+#[cfg(test)]
+mod hibernation_tests {
+    use super::*;
+
+    fn facts(flags: &[&str]) -> HostHibernationFacts {
+        HostHibernationFacts {
+            qemu_version: "10.2.1".into(),
+            machine_type: "pc-q35-10.2".into(),
+            cpu_vendor: "GenuineIntel".into(),
+            cpu_flags: flags.iter().map(|s| s.to_string()).collect(),
+            state_dir: "/var/lib/fluxvm/hibernation".into(),
+        }
+    }
+
+    fn manifest(host: HostHibernationFacts) -> HibernationManifest {
+        HibernationManifest {
+            format: HIBERNATION_FORMAT,
+            vm_id: Uuid::nil(),
+            hibernated_at: Utc::now(),
+            node: "a".into(),
+            fluxvm_version: "0".into(),
+            host,
+            vcpus: 2,
+            memory_mib: 2048,
+            state_bytes: 1,
+            shared_storage: true,
+        }
+    }
+
+    #[test]
+    fn identical_host_is_compatible() {
+        let m = manifest(facts(&["sse4_2", "avx2"]));
+        assert!(hibernation_incompatibilities(&m, &facts(&["avx2", "sse4_2"])).is_empty());
+    }
+
+    #[test]
+    fn superset_flags_are_compatible() {
+        let m = manifest(facts(&["sse4_2"]));
+        assert!(hibernation_incompatibilities(&m, &facts(&["sse4_2", "avx512f"])).is_empty());
+    }
+
+    #[test]
+    fn mismatches_are_reported() {
+        let m = manifest(facts(&["sse4_2", "avx512f"]));
+        let mut host = facts(&["sse4_2"]);
+        host.qemu_version = "9.2.0".into();
+        host.machine_type = "pc-q35-9.2".into();
+        host.cpu_vendor = "AuthenticAMD".into();
+        let r = hibernation_incompatibilities(&m, &host);
+        assert_eq!(r.len(), 4, "{r:?}");
+        assert!(r[3].contains("avx512f"));
+    }
+
+    #[test]
+    fn newer_format_is_rejected() {
+        let mut m = manifest(facts(&[]));
+        m.format = HIBERNATION_FORMAT + 1;
+        assert_eq!(hibernation_incompatibilities(&m, &facts(&[])).len(), 1);
+    }
+}

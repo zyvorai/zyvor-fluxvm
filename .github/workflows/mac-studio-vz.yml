@@ -1,0 +1,67 @@
+name: mac-studio-vz
+on:
+  pull_request:
+    paths:
+      - 'crates/fluxvm-core/**'
+      - 'crates/fluxvm-apple/**'
+      - 'crates/fluxvm-scheduler/**'
+      - '.github/workflows/mac-studio-vz.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+# Collapse superseded runs of this workflow on the same ref so queued duplicates do not hold the org's runners.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: fluxvm
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: fluxvm
+      # fluxvm-image depends on the sibling guestkit project through a relative path.
+      - uses: actions/checkout@v7
+        with:
+          repository: zyvorai/guestkit
+          ref: v1.2.9   # packaging/guestkit.ref; checked by scripts/check-guestkit-pin.sh
+          path: guestkit
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: $GITHUB_WORKSPACE/fluxvm/scripts/ci-install-apt-deps.sh libsystemd-dev libhivex-dev pkg-config
+      - run: ./scripts/ci-fmt-check.sh
+      - run: cargo test -p fluxvm-core
+      - run: FLUXVM_SKIP_VZ_RUNNER=1 cargo test -p fluxvm-apple
+      - run: cargo test -p fluxvm-scheduler density
+  apple:
+    runs-on: [self-hosted, macOS, ARM64, fluxvm-mac]
+    defaults:
+      run:
+        working-directory: fluxvm
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: fluxvm
+      - uses: actions/checkout@v7
+        with:
+          repository: zyvorai/guestkit
+          ref: v1.2.9   # packaging/guestkit.ref; checked by scripts/check-guestkit-pin.sh
+          path: guestkit
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Use the newest Xcode (the VZ runner needs the macOS 27 SDK)
+        run: |
+          X="$(ls -d /Applications/Xcode_*.app 2>/dev/null | sort -V | tail -1)"
+          [ -n "$X" ] && sudo xcode-select -s "$X"
+          echo "$(xcode-select -p): SDK $(xcrun --show-sdk-version)"
+      - run: cargo build -p fluxvm-apple
+      - run: cargo test -p fluxvm-apple
+      - run: |
+          grep -q 'VZBridgedNetworkDeviceAttachment' crates/fluxvm-apple/runner/ModernFeatures.swift
+          grep -q 'VZSpiceAgentPortAttachment' crates/fluxvm-apple/runner/ModernFeatures.swift
+          grep -q 'targetVirtualMachineMemorySize' crates/fluxvm-apple/runner/ModernFeatures.swift
+          grep -q 'VZUSBMassStorageDevice' crates/fluxvm-apple/runner/ModernFeatures.swift

@@ -1,0 +1,23 @@
+name: Runner workspace cleanup
+
+# One-off repair, run by hand. release-linux.yml used to build as root in a container inside the runner's own _work
+# directory, which left root-owned files that make every later host-side checkout on that runner fail with EACCES. This
+# job chowns this repository's workspace on whichever zyvor-build runner picks it up back to the runner user; run it
+# until the log shows the affected runner (zyvor-build-b). It does not check anything out, so it works on a poisoned runner.
+# It touches only $GITHUB_WORKSPACE, never other repositories' directories.
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  cleanup:
+    runs-on: ["self-hosted", "Linux", "X64", "zyvor-build", "docker"]
+    steps:
+      - name: Chown the workspace back to the runner user
+        run: |
+          echo "runner: $RUNNER_NAME"
+          echo "workspace: $GITHUB_WORKSPACE"
+          echo "root-owned entries before: $(find "$GITHUB_WORKSPACE" -user root 2>/dev/null | wc -l)"
+          docker run --rm -v "$GITHUB_WORKSPACE:/w" ubuntu:22.04 chown -R "$(id -u):$(id -g)" /w
+          echo "root-owned entries after: $(find "$GITHUB_WORKSPACE" -user root 2>/dev/null | wc -l)"

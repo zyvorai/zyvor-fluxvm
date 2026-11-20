@@ -1,0 +1,50 @@
+// Copyright 2026 Zyvor AI Labs · https://zyvor.dev
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+
+//! FluxVM hypervisor — lightweight KVM microVMM (one VM per process).
+//!
+//! Long-lived mode: JSON-over-UDS control API (`--api-sock`).
+//! Demo mode: freestanding netboot guest (legacy CLI flags).
+
+pub mod acpi;
+pub mod api;
+pub mod backend;
+pub mod balloon_ctl;
+pub mod boot;
+pub mod bus;
+pub mod config;
+pub mod control;
+pub mod cpuid_topology;
+pub mod devices;
+pub mod error;
+pub mod ffi;
+pub mod gdbstub;
+pub mod guest;
+pub mod hotplug;
+pub mod hypervisor;
+pub mod jailer;
+pub mod kvm;
+pub mod kvm_snap;
+pub mod kvm_state;
+pub mod memory;
+pub mod migration;
+pub mod mptable;
+pub mod net;
+pub mod pause;
+pub mod pci;
+pub mod queue_service;
+pub mod seccomp;
+pub mod snapshot;
+pub mod state;
+pub mod tap;
+pub mod vcpu;
+pub mod vhost;
+pub mod virtio_fs;
+pub mod vm;
+
+pub use api::{ApiRequest, ApiResponse, BootConfig, SnapshotSpec};
+pub use backend::FluxVmBackend;
+pub use config::VmConfig;
+pub use error::FluxError;
+pub use state::{VmLifecycle, VmState};
+pub use vm::VirtualMachine;

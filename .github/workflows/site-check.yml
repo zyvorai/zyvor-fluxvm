@@ -1,0 +1,36 @@
+# Builds the docs site on pull requests, so a broken page or a TypeScript error shows up before the merge that would
+# deploy it (pages.yml only builds on push to main). No deploy happens here.
+name: Docs site check
+on:
+  pull_request:
+    paths: ['website/**', 'docs/**', 'scripts/install.sh', 'scripts/test-install.sh', '.github/workflows/site-check.yml']
+permissions:
+  contents: read
+concurrency:
+  group: site-check-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  build:
+    runs-on: ${{ fromJSON(github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && '"ubuntu-latest"' || '["self-hosted","Linux","X64","zyvor-build"]') }}
+    steps:
+    - uses: actions/checkout@v7
+    - uses: actions/setup-node@v7
+      with: {node-version: '22', cache: npm, cache-dependency-path: website/package-lock.json}
+    - name: install.sh served by the site matches scripts/install.sh
+      run: cmp scripts/install.sh website/static/install.sh
+    - name: shellcheck (the self-hosted runner does not ship it; ubuntu-latest does)
+      run: |
+        if ! command -v shellcheck >/dev/null; then
+          sudo -n apt-get update -qq
+          sudo -n apt-get install -y -qq shellcheck
+        fi
+        shellcheck --version
+    - name: install.sh lints and passes its tests (fake releases, no network)
+      run: |
+        shellcheck scripts/install.sh scripts/test-install.sh
+        scripts/test-install.sh
+    - run: npm --prefix website ci
+    - name: Typecheck
+      run: npm --prefix website run typecheck
+    - name: Build
+      run: npm --prefix website run build

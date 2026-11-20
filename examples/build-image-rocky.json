@@ -1,0 +1,9 @@
+{
+  "source": "/var/lib/fluxvm/images/rocky9.qcow2",
+  "output": "/var/lib/fluxvm/images/rocky9-dev.qcow2",
+  "format": "qcow2",
+  "hostname": "rocky-dev",
+  "packages": ["tree", "jq"],
+  "commands": ["touch /etc/provisioned-by-fluxvm"],
+  "enable_services": ["crond"]
+}

@@ -1,0 +1,33 @@
+# Copyright 2026 Zyvor AI Labs · https://zyvor.dev
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+
+[package]
+name = "fluxvm-vz-switch"
+version = "0.4.21"
+edition = "2024"
+license = "LicenseRef-Zyvor-Production-1.0"
+description = "Userspace Ethernet switch for private networks between FluxVM vz guests"
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "fluxvm-vz-switch"
+path = "src/main.rs"
+
+[features]
+default = ["netobs"]
+# Frame tap for guest-network observability (fluxvm-netobs). On by default so a plain build accepts
+# `--netobs-socket`; build with `--no-default-features` for a switch without it (see `set_tap`).
+netobs = ["dep:fluxvm-netobs"]
+
+[dependencies]
+fluxvm-netobs = { path = "../fluxvm-netobs", optional = true }
+aes-gcm = "0.11"
+anyhow = "1"
+libc = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+tempfile = "3"

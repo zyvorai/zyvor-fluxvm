@@ -1,0 +1,21 @@
+{
+  "name": "certified-from-guestkit",
+  "backend": "qemu",
+  "image": "/path/to/guestkit-certified.qcow2",
+  "vcpus": 2,
+  "memory_mib": 2048,
+  "disk_size_gib": 20,
+  "network": {
+    "mode": "tap",
+    "netns": true,
+    "mac": "06:00:ac:10:00:42"
+  },
+  "cloud_init": {
+    "hostname": "certified-vm",
+    "user": "zyvor",
+    "ssh_authorized_keys": ["ssh-ed25519 REPLACE_ME"],
+    "static_network": true,
+    "runcmd": ["echo guestkit-handoff-ok > /tmp/ready"]
+  },
+  "ttl_seconds": 3600
+}

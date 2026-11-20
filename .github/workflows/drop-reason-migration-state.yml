@@ -1,0 +1,59 @@
+name: drop-reason-migration-state
+on:
+  pull_request:
+    paths:
+      - 'bpf/fluxvm_tc.bpf.c'
+      - 'bpf/fluxvm_pod_policy.bpf.h'
+      - 'crates/fluxvm-network/src/ebpf.rs'
+      - 'crates/fluxvm-network/src/migration_state.rs'
+      - 'crates/fluxvm-network/src/lib.rs'
+      - 'crates/fluxvm-intelligence/**'
+      - 'crates/fluxvm-api/**'
+      - 'crates/fluxctl/**'
+      - 'scripts/test-drop-reason-migration-*'
+      - '.github/workflows/drop-reason-migration-state.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'bpf/fluxvm_tc.bpf.c'
+      - 'bpf/fluxvm_pod_policy.bpf.h'
+      - 'crates/fluxvm-network/src/ebpf.rs'
+      - 'crates/fluxvm-network/src/migration_state.rs'
+      - 'crates/fluxvm-intelligence/**'
+      - 'crates/fluxvm-api/**'
+      - 'crates/fluxctl/**'
+
+# Collapse superseded runs of this workflow on the same ref so queued duplicates do not hold the org's runners.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-test:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout fluxvm
+        uses: actions/checkout@v7
+        with:
+          path: fluxvm
+      - name: Checkout guestkit sibling dependency
+        uses: actions/checkout@v7
+        with:
+          repository: zyvorai/guestkit
+          ref: v1.2.9   # packaging/guestkit.ref; checked by scripts/check-guestkit-pin.sh
+          path: guestkit
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install dependencies
+        run: fluxvm/scripts/ci-install-apt-deps.sh clang llvm libbpf-dev linux-tools-common linux-tools-generic iproute2 libsystemd-dev libhivex-dev pkg-config
+      - name: Rust tests
+        working-directory: fluxvm
+        run: cargo test -p fluxvm-network -p fluxvm-intelligence -p fluxvm-api -p fluxctl
+      - name: Build eBPF object
+        working-directory: fluxvm
+        run: ./scripts/build-ebpf.sh /tmp/fluxvm-bpf
+      - name: Static gates
+        working-directory: fluxvm
+        run: ./scripts/test-drop-reason-migration-static.sh
+      - name: Privileged VM-edge smoke test
+        working-directory: fluxvm
+        run: sudo -E ./scripts/test-drop-reason-migration-host.sh

@@ -1,0 +1,308 @@
+// Copyright 2026 Zyvor AI Labs · https://zyvor.dev
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+
+use std::env;
+use std::path::PathBuf;
+
+use crate::error::{FluxError, Result};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GuestKind {
+    Linux,
+    Windows,
+}
+
+#[derive(Debug, Clone)]
+pub struct VmConfig {
+    pub memory_mib: u32,
+    pub cpus: u8,
+    pub guest: GuestKind,
+    pub kernel: Option<PathBuf>,
+    pub initrd: Option<PathBuf>,
+    pub disk: Option<PathBuf>,
+    pub tap: Option<String>,
+    pub mac: String,
+    pub vhost_net: bool,
+    pub net_queues: u8,
+    /// virtio-net RX/TX queue pairs. 1 (default) keeps the single-pair device
+    /// byte-identical; more enables `VIRTIO_NET_F_MQ` with one vhost-net
+    /// instance and one multi_queue TAP queue per pair (needs vhost-net).
+    /// `FLUXVM_NET_QUEUE_PAIRS` overrides it (see [`Self::effective_net_queue_pairs`]).
+    pub net_queue_pairs: u8,
+    pub cmdline: String,
+    pub firmware: Option<PathBuf>,
+    pub net_mbit_limit: u32,
+    pub blk_mbit_limit: u32,
+    pub dry_run: bool,
+    pub print_host_net: bool,
+    /// `addr:port` to listen on for the minimal gdbstub (see `gdbstub.rs`).
+    pub gdb: Option<String>,
+    /// Firecracker-style virtio-vsock (guest CID + host UDS).
+    pub vsock_cid: Option<u32>,
+    pub vsock_uds: Option<PathBuf>,
+    /// Attach virtio-balloon / virtio-rng (FC defaults for Linux microVMs).
+    pub balloon: bool,
+    pub rng: bool,
+    /// Write Firecracker-style ACPI tables + set PVH rsdp_paddr.
+    pub acpi: bool,
+    /// Enable PCI ECAM window (CH / FC `--enable-pci` prep).
+    pub pci: bool,
+    pub jailer: bool,
+    /// H4: max vCPUs for hotplug headroom (`>= cpus`).
+    pub max_cpus: u8,
+    /// H4: host dirs for virtio-fs (spawn virtiofsd + advertise device).
+    pub shared_dirs: Vec<(String, PathBuf)>,
+    /// H4: additional virtio-blk images beyond `--disk`.
+    pub extra_disks: Vec<PathBuf>,
+}
+
+impl Default for VmConfig {
+    fn default() -> Self {
+        Self {
+            memory_mib: 256,
+            cpus: 1,
+            guest: GuestKind::Linux,
+            kernel: None,
+            initrd: None,
+            disk: None,
+            tap: None,
+            mac: "02:00:00:00:00:01".into(),
+            vhost_net: true,
+            net_queues: 1,
+            net_queue_pairs: 1,
+            cmdline: "console=ttyS0 reboot=k panic=1 pci=off".into(),
+            firmware: None,
+            net_mbit_limit: 0,
+            blk_mbit_limit: 0,
+            dry_run: false,
+            print_host_net: false,
+            gdb: None,
+            vsock_cid: None,
+            vsock_uds: None,
+            balloon: true,
+            rng: true,
+            acpi: true,
+            pci: false,
+            jailer: false,
+            max_cpus: 1,
+            shared_dirs: Vec::new(),
+            extra_disks: Vec::new(),
+        }
+    }
+}
+
+impl VmConfig {
+    pub fn from_args() -> Result<Self> {
+        let mut c = Self::default();
+        let mut args = env::args().skip(1);
+        while let Some(a) = args.next() {
+            match a.as_str() {
+                "-h" | "--help" => {
+                    print_help();
+                    std::process::exit(0);
+                }
+                "--memory-mib" => c.memory_mib = parse_next(&mut args, "--memory-mib")?,
+                "--cpus" => {
+                    c.cpus = parse_next(&mut args, "--cpus")?;
+                    if c.max_cpus < c.cpus {
+                        c.max_cpus = c.cpus;
+                    }
+                }
+                "--max-cpus" => c.max_cpus = parse_next(&mut args, "--max-cpus")?,
+                "--guest" => {
+                    let v: String = parse_next(&mut args, "--guest")?;
+                    c.guest = match v.as_str() {
+                        "linux" => GuestKind::Linux,
+                        "windows" => GuestKind::Windows,
+                        _ => {
+                            return Err(FluxError::Unsupported(
+                                "guest must be linux|windows".into(),
+                            ))
+                        }
+                    };
+                }
+                "--kernel" => c.kernel = Some(PathBuf::from(req(&mut args, "--kernel")?)),
+                "--initrd" => c.initrd = Some(PathBuf::from(req(&mut args, "--initrd")?)),
+                "--disk" => c.disk = Some(PathBuf::from(req(&mut args, "--disk")?)),
+                "--extra-disk" => c
+                    .extra_disks
+                    .push(PathBuf::from(req(&mut args, "--extra-disk")?)),
+                "--shared-dir" => {
+                    // --shared-dir TAG=PATH  (tag defaults to fsN)
+                    let raw = req(&mut args, "--shared-dir")?;
+                    let (tag, path) = match raw.split_once('=') {
+                        Some((t, p)) => (t.to_string(), PathBuf::from(p)),
+                        None => (format!("fs{}", c.shared_dirs.len()), PathBuf::from(raw)),
+                    };
+                    c.shared_dirs.push((tag, path));
+                }
+                "--tap" => c.tap = Some(req(&mut args, "--tap")?),
+                "--mac" => c.mac = req(&mut args, "--mac")?,
+                "--vhost-net" => c.vhost_net = true,
+                "--no-vhost-net" => c.vhost_net = false,
+                "--net-queues" => c.net_queues = parse_next(&mut args, "--net-queues")?,
+                "--net-queue-pairs" => {
+                    c.net_queue_pairs = parse_next(&mut args, "--net-queue-pairs")?
+                }
+                "--cmdline" => c.cmdline = req(&mut args, "--cmdline")?,
+                "--firmware" => c.firmware = Some(PathBuf::from(req(&mut args, "--firmware")?)),
+                "--net-mbit-limit" => c.net_mbit_limit = parse_next(&mut args, "--net-mbit-limit")?,
+                "--blk-mbit-limit" => c.blk_mbit_limit = parse_next(&mut args, "--blk-mbit-limit")?,
+                "--vsock-cid" => c.vsock_cid = Some(parse_next(&mut args, "--vsock-cid")?),
+                "--vsock-uds" => c.vsock_uds = Some(PathBuf::from(req(&mut args, "--vsock-uds")?)),
+                "--no-balloon" => c.balloon = false,
+                "--no-rng" => c.rng = false,
+                "--no-acpi" => c.acpi = false,
+                "--pci" => c.pci = true,
+                "--jailer" => c.jailer = true,
+                "--dry-run" => c.dry_run = true,
+                "--print-host-net" => c.print_host_net = true,
+                "--gdb" => c.gdb = Some(req(&mut args, "--gdb")?),
+                other => {
+                    return Err(FluxError::Unsupported(format!("unknown arg {other}")));
+                }
+            }
+        }
+        c.validate()?;
+        Ok(c)
+    }
+
+    pub fn memory_bytes(&self) -> usize {
+        (self.memory_mib as usize) * 1024 * 1024
+    }
+
+    /// Queue pairs to build the virtio-net device with: the
+    /// `FLUXVM_NET_QUEUE_PAIRS` env var when set and numeric (so the engine
+    /// path, which has no flag, can be A/B benchmarked), else the configured
+    /// value, clamped to `1..=NET_MAX_QUEUE_PAIRS`.
+    pub fn effective_net_queue_pairs(&self) -> u8 {
+        let raw = std::env::var("FLUXVM_NET_QUEUE_PAIRS")
+            .ok()
+            .and_then(|v| v.trim().parse::<u8>().ok())
+            .unwrap_or(self.net_queue_pairs);
+        raw.clamp(1, crate::devices::virtio_mmio::NET_MAX_QUEUE_PAIRS as u8)
+    }
+
+    /// vhost-net is requested by the config and not forced off with
+    /// `FLUXVM_VHOST_NET=0` (userspace-pump A/B toggle).
+    pub fn vhost_net_enabled(&self) -> bool {
+        self.vhost_net && crate::vhost::env_enabled()
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        if self.vsock_cid.is_some() != self.vsock_uds.is_some() {
+            return Err(FluxError::Unsupported(
+                "vsock_cid and vsock_uds must be configured together".into(),
+            ));
+        }
+        if self.cpus == 0 || self.cpus > 32 {
+            return Err(FluxError::Unsupported("cpus must be 1..=32".into()));
+        }
+        // H4: every vCPU up to max_cpus is now really created at boot (see
+        // vm.rs::run_until) and must have a matching mptable.rs MP-table
+        // entry, which is clamped to 8 processors (the proven SMP envelope).
+        // A max_cpus above that would create vCPUs with no MP-table entry —
+        // invisible to the guest and never onlineable.
+        if self.max_cpus < self.cpus || self.max_cpus > 8 {
+            return Err(FluxError::Unsupported("max_cpus must be cpus..=8".into()));
+        }
+        if self.net_queue_pairs == 0
+            || self.net_queue_pairs > crate::devices::virtio_mmio::NET_MAX_QUEUE_PAIRS as u8
+        {
+            return Err(FluxError::Unsupported(format!(
+                "net-queue-pairs must be 1..={}",
+                crate::devices::virtio_mmio::NET_MAX_QUEUE_PAIRS
+            )));
+        }
+        if self.memory_mib < 64 {
+            return Err(FluxError::Unsupported("memory-mib must be >= 64".into()));
+        }
+        Ok(())
+    }
+}
+
+fn req(args: &mut impl Iterator<Item = String>, flag: &str) -> Result<String> {
+    args.next()
+        .ok_or_else(|| FluxError::Unsupported(format!("{flag} needs a value")))
+}
+
+fn parse_next<T: std::str::FromStr>(
+    args: &mut impl Iterator<Item = String>,
+    flag: &str,
+) -> Result<T>
+where
+    T::Err: std::fmt::Display,
+{
+    let v = req(args, flag)?;
+    v.parse()
+        .map_err(|e| FluxError::Unsupported(format!("{flag}: {e}")))
+}
+
+pub fn print_help() {
+    eprintln!(
+        "\
+fluxvm — lightweight KVM VMM skeleton
+
+USAGE:
+  fluxvm [OPTIONS]
+
+OPTIONS:
+  --guest linux|windows
+  --memory-mib <N>          default 256
+  --cpus <N>                default 1
+  --max-cpus <N>            hotplug headroom (default = cpus)
+  --kernel <PATH>           Linux bzImage/vmlinux
+  --initrd <PATH>
+  --disk <PATH>             virtio-blk image
+  --extra-disk <PATH>       additional virtio-blk (repeatable)
+  --shared-dir [TAG=]PATH   virtio-fs share (spawns virtiofsd)
+  --tap <NAME>              existing host TAP
+  --mac <AA:BB:...>
+  --vhost-net / --no-vhost-net
+  --net-queues <N>
+  --net-queue-pairs <N>     virtio-net multiqueue pairs (default 1; needs vhost-net)
+  --net-mbit-limit <N>
+  --cmdline <STR>
+  --firmware <OVMF.fd>      Windows / UEFI
+  --dry-run                 print topology, do not KVM_RUN
+  --print-host-net          print TAP setup script
+  --gdb <ADDR:PORT>         minimal read-only gdbstub for live inspection
+  -h, --help
+"
+    );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn vsock_requires_both_cid_and_socket_path() {
+        let mut cfg = VmConfig {
+            vsock_cid: Some(3),
+            ..Default::default()
+        };
+        assert!(cfg.validate().is_err());
+        cfg.vsock_uds = Some(PathBuf::from("/tmp/fluxvm-vsock-test.sock"));
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn max_cpus_must_cover_cpus_and_stay_within_mptable_cap() {
+        let mut cfg = VmConfig {
+            cpus: 2,
+            max_cpus: 4,
+            ..Default::default()
+        };
+        assert!(cfg.validate().is_ok(), "2..=4 headroom should be valid");
+
+        cfg.max_cpus = 1; // below cpus
+        assert!(cfg.validate().is_err());
+
+        cfg.max_cpus = 9; // above the 8-processor mptable envelope
+        assert!(cfg.validate().is_err());
+
+        cfg.max_cpus = 8;
+        assert!(cfg.validate().is_ok(), "8 is the max supported headroom");
+    }
+}
