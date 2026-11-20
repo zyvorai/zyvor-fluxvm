@@ -1,3 +1,6 @@
+// Copyright 2026 Zyvor AI Labs · https://zyvor.dev
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+
 import { type ReactNode, useEffect, useMemo, useRef, useState } from 'react';
 import { ChevronLeft, Copy, Pause, Play, RotateCw, Square, Trash2 } from 'lucide-react';
 import { Button, Card, Field, KV, Meter, Pill, Sheet, Skeleton, Sparkline, Tabs, ago, api, fmtMiB, navigate, statusTone, streamEvents, usePoll, type Vm } from '@fluxvm/ui-core';

@@ -1,3 +1,6 @@
+// Copyright 2026 Zyvor AI Labs · https://zyvor.dev
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+
 //! `fluxctl kube prompt`: one short line about the cluster for a shell prompt, such as `⎈ dev 12/12`, `⎈ dev 10/12 ✗2`
 //! or `⎈ dev 💤`. It reads a small file that `kube supervise` keeps up to date, so it answers in a millisecond, never wakes
 //! a sleeping cluster and never talks to the VM. With no supervisor, or a file that has gone stale, it prints nothing, so a

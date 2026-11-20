@@ -1,3 +1,6 @@
+// Copyright 2026 Zyvor AI Labs · https://zyvor.dev
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+
 /** Catalog and template names share one rule on the daemon: 1-63 of [A-Za-z0-9._-], no leading - or . */
 export function nameProblem(name: string): string {
   if (!name) return 'Give it a name.';

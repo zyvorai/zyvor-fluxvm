@@ -1,3 +1,6 @@
+// Copyright 2026 Zyvor AI Labs · https://zyvor.dev
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+
 import { useMemo, useState, type ReactNode } from 'react';
 import { Play, Pause, Plus, RotateCw, Square, Trash2 } from 'lucide-react';
 import { Button, Card, EmptyState, Hero, Pill, Segmented, Sheet, Skeleton, api, fmtMiB, statusTone, usePoll, type Vm } from '@fluxvm/ui-core';

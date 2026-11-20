@@ -1,3 +1,6 @@
+// Copyright 2026 Zyvor AI Labs · https://zyvor.dev
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+
 import { describe, expect, it } from 'vitest';
 import { type KubeEvent, type KubePod, type Workloads, ageOf, eventTone, filterEvents, filterPods, fmtCpu, fmtMem, inNamespace, kubeProblem, namespacesOf, namespacesOfAll, namespacesOfEvents, podTone, portText, readyTone, shortImage, summarize, usageTone, actionPath, actionToast, canScale, clampReplicas, checkpointLabelNow, checkpointLabelOk, checkpointsOf, serviceUrls } from './kube';
 

@@ -1,3 +1,6 @@
+// Copyright 2026 Zyvor AI Labs · https://zyvor.dev
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+
 //! HTTPS for the service names: a local certificate authority that `fluxctl kube trust` creates and prints the one command
 //! to trust, and a resolver that mints a short-lived certificate for each `*.localhost` name on demand. The CA's key never
 //! leaves `~/.fluxvm/ca` (mode 0600). Nothing here changes the Mac's trust settings; that is the user's one command.

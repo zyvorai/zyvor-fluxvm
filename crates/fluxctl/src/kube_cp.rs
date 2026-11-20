@@ -1,3 +1,6 @@
+// Copyright 2026 Zyvor AI Labs · https://zyvor.dev
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+
 //! `fluxctl kube cp`: copy a file or directory between this Mac and a pod, like `docker cp`. Both directions are a tar
 //! stream through the VM into `kubectl exec`, the same path `kube sync` uses, so it needs no `tar` quirks on either side.
 

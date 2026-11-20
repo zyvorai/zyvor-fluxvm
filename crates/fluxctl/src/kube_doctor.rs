@@ -1,3 +1,6 @@
+// Copyright 2026 Zyvor AI Labs · https://zyvor.dev
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+
 //! `fluxctl kube doctor`: the things that go wrong for a Kubernetes cluster on a Mac and are not Kubernetes' fault (a VPN
 //! that swallowed the VM's DNS, a full disk, a skewed clock, a crash-looping pod), each with the command that fixes it.
 //! The parsers and verdicts are pure; `run` only gathers the facts.

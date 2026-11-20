@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Copyright 2026 Zyvor AI Labs · https://zyvor.dev
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+
 # Create COUNT sandboxes of PROFILE on a running daemon, run a command in each, print the density report, delete them.
 # Usage: scripts/density-smoke.sh [COUNT] [PROFILE]     (FLUXVM_URL, default http://127.0.0.1:7788; FLUXVM_TOKEN if auth is on)
 set -euo pipefail

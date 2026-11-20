@@ -1,3 +1,6 @@
+// Copyright 2026 Zyvor AI Labs · https://zyvor.dev
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+
 //! `fluxctl kube host ollama 11434`: a program on the Mac becomes a Service in the cluster. Pods then call
 //! `ollama:11434` (or `ollama.default.svc`) and reach whatever listens on the Mac's 127.0.0.1:11434: a model server that
 //! uses the Mac's GPU, Postgres.app, a dev server with a debugger attached. The VM reaches the Mac at the address of its

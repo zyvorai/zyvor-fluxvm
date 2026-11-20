@@ -1,3 +1,6 @@
+// Copyright 2026 Zyvor AI Labs · https://zyvor.dev
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+
 import { useState, type ReactNode } from 'react';
 import { Plus, Trash2 } from 'lucide-react';
 import { Button, Card, EmptyState, Field, KV, Pill, Segmented, Sheet, Skeleton, api, usePoll } from '@fluxvm/ui-core';

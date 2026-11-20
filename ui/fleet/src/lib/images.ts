@@ -1,3 +1,6 @@
+// Copyright 2026 Zyvor AI Labs · https://zyvor.dev
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+
 // The image catalog: what a tenant can pick when launching. The disk must already be on every Mac that should run it.
 
 export interface CatalogImage {

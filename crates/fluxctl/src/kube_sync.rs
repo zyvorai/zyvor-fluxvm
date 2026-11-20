@@ -1,3 +1,6 @@
+// Copyright 2026 Zyvor AI Labs · https://zyvor.dev
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+
 //! `fluxctl kube sync`: copy a directory into a running pod every time a file changes, so an interpreted app (Node, Python,
 //! a static site) reloads in about a second with no image build. It is what a bind mount gives a Linux developer; the
 //! files travel as a tar stream through the VM into `kubectl exec`.

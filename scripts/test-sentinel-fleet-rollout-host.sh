@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Copyright 2026 Zyvor AI Labs · https://zyvor.dev
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+
 set -euo pipefail
 if [[ "${FLUXVM_FLEET_E2E:-0}" != 1 ]]; then echo "SKIP: set FLUXVM_FLEET_E2E=1 on a disposable SSH lab"; exit 0; fi
 [[ -f /etc/fluxvm-fleet-lab ]] || { echo "refusing: /etc/fluxvm-fleet-lab marker missing" >&2; exit 2; }

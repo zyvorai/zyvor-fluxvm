@@ -1,3 +1,6 @@
+// Copyright 2026 Zyvor AI Labs · https://zyvor.dev
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+
 //! QMP block primitives for changed-block-tracking backups: persistent
 //! dirty bitmaps, backup targets, the backup transaction and job polling.
 //!

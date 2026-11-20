@@ -1,3 +1,6 @@
+// Copyright 2026 Zyvor AI Labs · https://zyvor.dev
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+
 //! `fluxctl kube add postgres`: the services a developer reaches for, running in the cluster with their usual port on
 //! 127.0.0.1 and a connection string printed, like a package manager for local infrastructure. The Service carries a
 //! `fluxvm.dev/local-ports` annotation, which is how the supervisor knows to open 5432 on the Mac for node port 30432.

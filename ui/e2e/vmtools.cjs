@@ -1,3 +1,6 @@
+// Copyright 2026 Zyvor AI Labs · https://zyvor.dev
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+
 // A fleet VM's sheet in a real browser against the mock API: the live screen (and clicks and keys sent to it), snapshots and clones, and a
 // command run in the guest. The mock records every mutating call; each step is confirmed from that record, not from a toast.
 // Run through ./run.sh vmtools.

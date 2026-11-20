@@ -1,3 +1,6 @@
+# Copyright 2026 Zyvor AI Labs · https://zyvor.dev
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+
 # Homebrew formula for the prebuilt macOS package (see scripts/package-macos.sh and .github/workflows/release-macos.yml).
 # The version and sha256 below are filled in by scripts/update-homebrew-formula.sh when a release is published.
 class Fluxvm < Formula

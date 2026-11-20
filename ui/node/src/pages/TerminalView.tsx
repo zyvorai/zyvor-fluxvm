@@ -1,3 +1,6 @@
+// Copyright 2026 Zyvor AI Labs · https://zyvor.dev
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+
 import { useEffect, useRef, useState } from 'react';
 import { Plug, Unplug } from 'lucide-react';
 import { Button, Pill } from '@fluxvm/ui-core';

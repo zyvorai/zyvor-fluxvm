@@ -1,3 +1,6 @@
+// Copyright 2026 Zyvor AI Labs · https://zyvor.dev
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+
 import { Card, Hero, KV, Skeleton, api, usePoll } from '@fluxvm/ui-core';
 import type { Ctx } from '../App';
 import { GenericTable, flatten, rowsOf } from '../lib/generic';

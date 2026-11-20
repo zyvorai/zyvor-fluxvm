@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Copyright 2026 Zyvor AI Labs · https://zyvor.dev
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+
 set -euo pipefail
 # Node-level Set 8 raw block smoke. Requires a Kubernetes raw block PVC and
 # RuntimeClass fluxvm. Destructive writes are intentionally opt-in.

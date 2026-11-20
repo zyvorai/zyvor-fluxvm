@@ -1,3 +1,6 @@
+// Copyright 2026 Zyvor AI Labs · https://zyvor.dev
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+
 import { api } from '@fluxvm/ui-core';
 import type { Notify } from '../App';
 import { type KubeVerb, actionToast } from './kube';

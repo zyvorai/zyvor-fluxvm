@@ -1,3 +1,6 @@
+// Copyright 2026 Zyvor AI Labs · https://zyvor.dev
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+
 //! `fluxctl kube start`: a project describes what it needs in `fluxvm-kube.yaml`, and one command builds that
 //! environment from nothing (and, run again, changes nothing): the cluster, the images, the apps, your manifests and
 //! the forwards. It adds no new mechanism; it runs the commands that already exist, in the order that works.

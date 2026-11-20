@@ -1,3 +1,6 @@
+// Copyright 2026 Zyvor AI Labs · https://zyvor.dev
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+
 //! Hibernate a QEMU VM to a state directory, resume it on the next `start`,
 //! and import a hibernated VM from shared storage on another node.
 //! See docs/hibernation.md.

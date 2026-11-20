@@ -1,3 +1,6 @@
+// Copyright 2026 Zyvor AI Labs · https://zyvor.dev
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+
 // Helpers for the guest-agent style responses shared by VM exec, sandbox process and agent-session exec.
 export interface ExecResult {
   result?: string;

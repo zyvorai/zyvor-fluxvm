@@ -1,3 +1,6 @@
+// Copyright 2026 Zyvor AI Labs · https://zyvor.dev
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+
 import { useState } from 'react';
 import { Camera, HardDrive, Plus, RotateCcw, Send, Trash2 } from 'lucide-react';
 import { Button, Card, Field, KV, Meter, Pill, Segmented, Sheet, api, ago, fmtMiB, usePoll } from '@fluxvm/ui-core';

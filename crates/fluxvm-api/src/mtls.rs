@@ -1,3 +1,6 @@
+// Copyright 2026 Zyvor AI Labs · https://zyvor.dev
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+
 //! Identity from the verified mTLS client certificate.
 //!
 //! When `fluxctl serve` terminates mTLS itself, [`IdentityAcceptor`] performs the TLS handshake,

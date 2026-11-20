@@ -1,3 +1,6 @@
+// Copyright 2026 Zyvor AI Labs · https://zyvor.dev
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+
 //! `fluxctl kube share web`: open a service from a phone or another computer on the same Wi-Fi. A published service
 //! answers only on 127.0.0.1; this opens one extra port on the Mac's network address that relays to it, prints the
 //! address with a QR code to scan, and closes again on Ctrl-C or after a time limit. Only peers on a private or

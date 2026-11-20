@@ -1,3 +1,6 @@
+// Copyright 2026 Zyvor AI Labs · https://zyvor.dev
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+
 // Turning raw container log text into coloured segments, in the palette of Terminal.app.
 // Pure and DOM-free so it can be tested: the page maps a segment's `cls` to a CSS class.
 

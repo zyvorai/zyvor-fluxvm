@@ -1,3 +1,6 @@
+// Copyright 2026 Zyvor AI Labs · https://zyvor.dev
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+
 //! How central keeps the node registry under a heartbeat load: heartbeats change memory and, only when something
 //! durable changed, mark the registry dirty; one background task writes `fleet-nodes.json` at most every few
 //! seconds. Heartbeats are also admitted through a concurrency limit and a token bucket, and a refused one gets a

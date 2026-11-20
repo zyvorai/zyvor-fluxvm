@@ -1,3 +1,6 @@
+// Copyright 2026 Zyvor AI Labs · https://zyvor.dev
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+
 'use strict';
 // FluxVM terminal page: tabs and split panes of xterm.js terminals, each wired to an agent session's
 // pty WebSocket. The pure helpers at the top (themes, layout tree, URL, etc.) are exported for node

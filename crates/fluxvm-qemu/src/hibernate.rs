@@ -1,3 +1,6 @@
+// Copyright 2026 Zyvor AI Labs · https://zyvor.dev
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+
 //! Hibernation: write a paused guest's RAM/CPU/device state to a file through
 //! QEMU's migration stream (`file:` URI), and load it back into a QEMU
 //! started with `-incoming defer`.

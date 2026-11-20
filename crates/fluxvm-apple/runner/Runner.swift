@@ -2,7 +2,7 @@
 // Copyright 2026 Zyvor AI Labs
 //
 // fluxvm-vz-runner: runs one VM on Apple's Virtualization.framework for FluxVM's `vz` backend.
-// Adapted from Zyvor Velora's verified runner code (Apache-2.0). Usage:
+// Adapted from Zyvor Velora's verified runner code (Zyvor Production License v1.0). Usage:
 //   fluxvm-vz-runner run     --config <json>   boot the VM and serve the control socket
 //   fluxvm-vz-runner install --config <json>   install macOS from an IPSW (prints JSON progress lines)
 //   fluxvm-vz-runner check   --config <json>   validate the configuration and exit

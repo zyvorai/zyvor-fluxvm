@@ -1,3 +1,6 @@
+// Copyright 2026 Zyvor AI Labs · https://zyvor.dev
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+
 //! Data disks: qcow2 files under `<workspace>/disks/<name>.qcow2`, attached
 //! as `scsi-hd` on the boot-time `scsi0` controller. The directory is the
 //! source of truth, so a disk attached live is re-attached on every boot.

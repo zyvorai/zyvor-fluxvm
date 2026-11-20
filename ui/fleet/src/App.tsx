@@ -1,3 +1,6 @@
+// Copyright 2026 Zyvor AI Labs · https://zyvor.dev
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
 import { Activity, Cable, CreditCard, Cpu, Flame, HardDrive, KeyRound, LayoutDashboard, Layers, UserRound, LogOut, Moon, Network, Server, ShieldCheck, SlidersHorizontal, Users } from 'lucide-react';
 import {

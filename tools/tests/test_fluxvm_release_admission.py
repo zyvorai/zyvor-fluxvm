@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# Copyright 2026 Zyvor AI Labs · https://zyvor.dev
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+
 import hashlib, importlib.util, json, pathlib, sys, tempfile, unittest
 
 HERE=pathlib.Path(__file__).resolve()

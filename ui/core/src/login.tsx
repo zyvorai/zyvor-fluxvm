@@ -1,3 +1,6 @@
+// Copyright 2026 Zyvor AI Labs · https://zyvor.dev
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+
 import { type FormEvent, type ReactNode, useState } from 'react';
 import { ApiError, api, setToken } from './api';
 import { Button } from './components';

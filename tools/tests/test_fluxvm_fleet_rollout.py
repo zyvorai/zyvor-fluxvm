@@ -1,3 +1,6 @@
+# Copyright 2026 Zyvor AI Labs · https://zyvor.dev
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+
 import importlib.util, json, pathlib, tempfile, unittest, sys
 P=pathlib.Path(__file__).parents[1]/"fluxvm_fleet_rollout.py"
 s=importlib.util.spec_from_file_location("fleet",P); m=importlib.util.module_from_spec(s); sys.modules["fleet"]=m; s.loader.exec_module(m)

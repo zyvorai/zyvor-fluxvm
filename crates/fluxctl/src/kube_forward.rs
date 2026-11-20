@@ -1,3 +1,6 @@
+// Copyright 2026 Zyvor AI Labs · https://zyvor.dev
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+
 //! `fluxctl kube forward web`: a port-forward that stays. It gives an existing Service a port on 127.0.0.1 (and a
 //! `.localhost` name) by adding a companion NodePort Service next to it, which the supervisor then opens. Unlike
 //! `kubectl port-forward` it does not die when the pod restarts and needs no terminal kept open.

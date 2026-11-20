@@ -1,3 +1,6 @@
+// Copyright 2026 Zyvor AI Labs · https://zyvor.dev
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+
 //! `fluxctl kube trim`: give the space the cluster has freed back to the Mac. Deleting images and data inside the VM
 //! leaves its disk file as large as it ever was unless the guest tells the host which blocks are unused (TRIM).
 //! Whether the host honors that depends on how the disk is attached, so trim first asks the guest's block device if it

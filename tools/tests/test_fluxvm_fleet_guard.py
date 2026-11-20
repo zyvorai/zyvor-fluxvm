@@ -1,3 +1,6 @@
+# Copyright 2026 Zyvor AI Labs · https://zyvor.dev
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+
 import importlib.util,json,pathlib,sys,tempfile,unittest
 P=pathlib.Path(__file__).parents[1]/"fluxvm_fleet_guard.py"
 s=importlib.util.spec_from_file_location("guard",P); m=importlib.util.module_from_spec(s); sys.modules["guard"]=m; s.loader.exec_module(m)

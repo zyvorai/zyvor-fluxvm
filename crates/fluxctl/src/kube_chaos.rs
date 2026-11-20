@@ -1,3 +1,6 @@
+// Copyright 2026 Zyvor AI Labs · https://zyvor.dev
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+
 //! `fluxctl kube chaos`: break a single-node cluster on purpose, check that the app copes, then put it back from a checkpoint.
 //! A checkpoint covers the whole machine, so faults that pod-level chaos tools cannot undo (a stopped control plane, a full disk) are safe.
 

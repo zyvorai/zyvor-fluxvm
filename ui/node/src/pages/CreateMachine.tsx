@@ -1,3 +1,6 @@
+// Copyright 2026 Zyvor AI Labs · https://zyvor.dev
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+
 import { useEffect, useMemo, useState } from 'react';
 import { ArrowLeft, ArrowRight, Plus, Trash2 } from 'lucide-react';
 import { Button, Field, Segmented, Sheet, Steps, api, fmtMiB, navigate, type Vm } from '@fluxvm/ui-core';

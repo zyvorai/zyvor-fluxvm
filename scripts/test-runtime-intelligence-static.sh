@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Copyright 2026 Zyvor AI Labs · https://zyvor.dev
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 for f in "$ROOT/scripts/build-ebpf.sh" "$ROOT/scripts/build-runtime-intelligence.sh" "$ROOT/scripts/install-runtime-intelligence.sh"; do bash -n "$f"; done

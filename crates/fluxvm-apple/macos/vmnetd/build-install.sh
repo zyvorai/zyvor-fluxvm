@@ -1,4 +1,7 @@
 #!/bin/bash
+# Copyright 2026 Zyvor AI Labs · https://zyvor.dev
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+
 # Installs the vmnet broker as a per-user launch agent.
 #   ./build-install.sh                          build from source, ad hoc sign, install to /usr/local/libexec (sudo)
 #   FLUXVM_PACKAGE_DIR=<unpacked release> ./build-install.sh

@@ -1,3 +1,6 @@
+// Copyright 2026 Zyvor AI Labs · https://zyvor.dev
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+
 //! macOS notifications from `kube supervise` when a pod starts failing (crash loop, out of memory, image that cannot be
 //! pulled), so a problem shows up on the desktop instead of in a terminal nobody is looking at. The decisions are pure;
 //! only `send` talks to the system.

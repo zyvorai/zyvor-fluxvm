@@ -1,3 +1,6 @@
+// Copyright 2026 Zyvor AI Labs · https://zyvor.dev
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+
 //! `fluxctl kube route`: let this Mac reach pod and Service addresses directly.
 //!
 //! The cluster VM sits behind vmnet NAT (192.168.64.0/24) and routes its own pod network (10.42.0.0/16) and Service

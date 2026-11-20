@@ -1,3 +1,6 @@
+// Copyright 2026 Zyvor AI Labs · https://zyvor.dev
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Keyboard, Maximize, Plug, Unplug } from 'lucide-react';
 import type RFB from '@novnc/novnc';

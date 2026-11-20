@@ -1,3 +1,6 @@
+// Copyright 2026 Zyvor AI Labs · https://zyvor.dev
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+
 import { useMemo, useState } from 'react';
 import { Card, EmptyState, Pill, Skeleton, api, usePoll } from '@fluxvm/ui-core';
 import { type EventFilter, type KubeEvent, ageOf, eventTone, filterEvents, kubeProblem, namespacesOfEvents } from '../lib/kube';

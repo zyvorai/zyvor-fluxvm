@@ -1,3 +1,6 @@
+// Copyright 2026 Zyvor AI Labs · https://zyvor.dev
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+
 // Pure helpers for the Kubernetes page: how the daemon's /v1/kube answers are summarised and filtered.
 
 export type Tone = 'ok' | 'warn' | 'bad' | 'info' | 'idle';

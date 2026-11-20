@@ -1,3 +1,6 @@
+// Copyright 2026 Zyvor AI Labs · https://zyvor.dev
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+
 //! `fluxctl kube pin`: the images the cluster is running right now, each as `name:tag@sha256:...`. A tag such as
 //! `postgres:17-alpine` can point at a different image next month; the digest cannot. Paste the output into a manifest
 //! (or a `kube start` project) and the same bytes run on every machine, every time.

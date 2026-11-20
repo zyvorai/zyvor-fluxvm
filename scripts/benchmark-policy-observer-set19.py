@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# Copyright 2026 Zyvor AI Labs · https://zyvor.dev
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+
 """Deterministic observer sizing model; use --vms/--rules for fleet envelopes."""
 import argparse, json
 p=argparse.ArgumentParser(); p.add_argument('--vms',type=int,default=1000); p.add_argument('--rules',type=int,default=64); p.add_argument('--cpus',type=int,default=64); a=p.parse_args()

@@ -1,3 +1,6 @@
+// Copyright 2026 Zyvor AI Labs · https://zyvor.dev
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+
 //! When `kube supervise` should let the cluster sleep for reasons of the Mac's own life rather than the cluster's traffic:
 //! outside working hours (`--active 09:00-19:00`, `--weekdays`), and when the Mac is saving energy or running hot
 //! (`--eco`: Low Power Mode, thermal throttling). The decisions are pure; only `Policy::says_sleep` reads `pmset`.

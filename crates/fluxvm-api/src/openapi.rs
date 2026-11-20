@@ -1,3 +1,6 @@
+// Copyright 2026 Zyvor AI Labs · https://zyvor.dev
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+
 //! `GET /v1/openapi.json`: OpenAPI 3.1 description of the VM lifecycle routes.
 
 use serde_json::{Map, Value, json};

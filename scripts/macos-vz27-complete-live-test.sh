@@ -1,4 +1,7 @@
 #!/bin/bash
+# Copyright 2026 Zyvor AI Labs · https://zyvor.dev
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+
 set -euo pipefail
 : "${FLUXVM_TEST_VM:?set FLUXVM_TEST_VM to a running Linux VZ VM id}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"

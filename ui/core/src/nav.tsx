@@ -1,3 +1,6 @@
+// Copyright 2026 Zyvor AI Labs · https://zyvor.dev
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+
 import { type ReactNode, useEffect, useRef, useState } from 'react';
 import { ChevronRight, Command, Menu, Search } from 'lucide-react';
 import { ThemeToggle } from './components';

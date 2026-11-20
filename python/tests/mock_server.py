@@ -1,3 +1,6 @@
+# Copyright 2026 Zyvor AI Labs · https://zyvor.dev
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+
 """In-process stand-in for the FluxVM API, mirroring crates/fluxvm-api/src/lib.rs.
 
 Behaviour copied from the real handlers:

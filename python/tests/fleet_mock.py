@@ -1,3 +1,6 @@
+# Copyright 2026 Zyvor AI Labs · https://zyvor.dev
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+
 """In-process stand-in for FluxVM central's fleet API (crates/fluxvm-agent/src/central*.rs), for FleetClient tests.
 
 Covers the routes the tests use, with central's shapes and statuses: bearer auth (401), tenant scoping (403 for

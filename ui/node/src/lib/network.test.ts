@@ -1,3 +1,6 @@
+// Copyright 2026 Zyvor AI Labs · https://zyvor.dev
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+
 import { describe, expect, it } from 'vitest';
 import { CNP_TEMPLATE, SERVICE_REQUIRED, SERVICE_TEMPLATE, cnpName, describePolicy, parseObject, groupBody, groupProblem, inCidr, isIpv4, isIpv4Cidr, protoName, serviceHealth, vnetBody, vnetProblem } from './network';
 

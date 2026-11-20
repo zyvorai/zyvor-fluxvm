@@ -1,3 +1,6 @@
+// Copyright 2026 Zyvor AI Labs · https://zyvor.dev
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+
 import { useEffect, useState } from 'react';
 import { Eye, Plus, RotateCcw, Sparkles, X } from 'lucide-react';
 import { Button, Card, Pill, Segmented, api, usePoll } from '@fluxvm/ui-core';

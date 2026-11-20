@@ -1,3 +1,6 @@
+// Copyright 2026 Zyvor AI Labs · https://zyvor.dev
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+
 //! Named remote endpoints (`fluxctl context ...`), kubeconfig-style.
 //! Stored as JSON (mode 0600, it holds tokens) at `$FLUXCTL_CONTEXTS`, else
 //! `$XDG_CONFIG_HOME/fluxctl/contexts.json`, else `~/.config/fluxctl/contexts.json`.

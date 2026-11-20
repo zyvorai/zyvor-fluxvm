@@ -1,3 +1,6 @@
+// Copyright 2026 Zyvor AI Labs · https://zyvor.dev
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+
 import type { NavGroup } from '@fluxvm/ui-core';
 
 // Phases add groups here as their pages land; nothing is listed that does not work.

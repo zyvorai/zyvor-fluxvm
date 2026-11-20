@@ -1,3 +1,6 @@
+// Copyright 2026 Zyvor AI Labs · https://zyvor.dev
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+
 // Shapes and helpers for the Network pages. Only the fields the UI reads; the daemon returns more.
 
 export interface VnetConfig {

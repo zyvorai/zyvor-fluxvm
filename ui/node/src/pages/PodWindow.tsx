@@ -1,3 +1,6 @@
+// Copyright 2026 Zyvor AI Labs · https://zyvor.dev
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Check, Copy, Download, Pause, Play, Trash2, WrapText, X } from 'lucide-react';
 import { api, usePoll } from '@fluxvm/ui-core';

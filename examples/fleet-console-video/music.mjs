@@ -1,3 +1,6 @@
+// Copyright 2026 Zyvor AI Labs · https://zyvor.dev
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+
 // Original 90 s track: 96 bpm, A minor, Am-F-C-G, 36 bars of 2.5 s. Deterministic (seeded noise).
 import { writeFileSync } from 'node:fs';
 const SR = 48000, BPM = 96, BEAT = 60 / BPM, BAR = BEAT * 4, BARS = 36, DUR = BAR * BARS;

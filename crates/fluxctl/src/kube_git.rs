@@ -1,3 +1,6 @@
+// Copyright 2026 Zyvor AI Labs · https://zyvor.dev
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+
 //! `fluxctl kube git install`: the cluster follows your git branch. A `post-checkout` hook saves the cluster as a checkpoint
 //! named after the branch you leave and puts back the one saved for the branch you enter, so each branch has its own
 //! databases, migrations and deployed state. A branch with no checkpoint yet starts as a copy of where you were, as a new

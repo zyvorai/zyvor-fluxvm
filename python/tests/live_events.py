@@ -1,3 +1,6 @@
+# Copyright 2026 Zyvor AI Labs · https://zyvor.dev
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+
 """Live check of Session.watch_events against a real daemon. Skips unless FLUXVM_LIVE_EVENTS_URL is set.
 
 The daemon needs a session template named "fc" (a flux-vm spec.json under sandbox.templates_dir).

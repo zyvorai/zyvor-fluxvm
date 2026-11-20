@@ -1,3 +1,6 @@
+// Copyright 2026 Zyvor AI Labs · https://zyvor.dev
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+
 import { useEffect, useMemo, useState } from 'react';
 import { Button, Card, Hero, Pill, Reveal, Skeleton, Stat, ago, api, navigate, statusTone, streamEvents, usePoll, type Density, type Vm } from '@fluxvm/ui-core';
 

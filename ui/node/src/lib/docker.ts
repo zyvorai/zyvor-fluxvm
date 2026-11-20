@@ -1,3 +1,6 @@
+// Copyright 2026 Zyvor AI Labs · https://zyvor.dev
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+
 // Pure helpers for the Docker page: how the daemon's /v1/docker answer is summarised, filtered and written out.
 import { type Tone, ageOf } from './kube';
 

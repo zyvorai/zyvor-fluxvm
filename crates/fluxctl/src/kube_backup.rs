@@ -1,3 +1,6 @@
+// Copyright 2026 Zyvor AI Labs · https://zyvor.dev
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+
 //! `fluxctl kube db-backup postgres` and `db-restore`: a database's contents as one file on the Mac, so a cluster can be
 //! thrown away and rebuilt without losing the data you were developing against. The dump runs inside the pod with the
 //! database's own tool; nothing needs installing on the Mac.

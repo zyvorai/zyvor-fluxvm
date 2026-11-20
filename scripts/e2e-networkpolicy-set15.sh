@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Copyright 2026 Zyvor AI Labs · https://zyvor.dev
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+
 # Live-node Set 15 telemetry gate. This script does not create policy by itself;
 # it validates that an already-running Secure Containers workload is visible in
 # the observer and that both directional hooks are healthy.
