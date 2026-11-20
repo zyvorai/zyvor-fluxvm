@@ -15,7 +15,7 @@ QEMU VM boundary was the *only* isolation between containers in the same Pod.
   inherits whatever `/proc` was mounted at unshare time).
 - **PID namespace: private per container by default, shareable via
   `shareProcessNamespace`.** The shim detects Kubernetes'
-  `shareProcessNamespace: true` the same cross-runtime way Kata/runc do:
+  `shareProcessNamespace: true` the standard cross-runtime way:
   containerd's CRI plugin only sets a `path` on the OCI `linux.namespaces` PID
   entry when the Pod requested a shared PID namespace. We only check
   *presence* of that path, never its value (it is host-meaningless from
@@ -25,7 +25,7 @@ QEMU VM boundary was the *only* isolation between containers in the same Pod.
   id equals its containerd shim group (`is_sandbox`) — the CRI
   pause/sandbox-equivalent. That container's IPC and UTS namespaces (and PID,
   when shared) are recorded in the guest agent; every sibling container in the
-  same Pod VM joins them via `setns()`, matching runc/Kata's "join the pause
+  same Pod VM joins them via `setns()`, matching the usual "join the pause
   container" model. IPC/UTS are always Pod-shared (standard Kubernetes/CRI
   behavior, no separate flag needed).
 - **User namespace: opt-in, off by default.** Set `FLUXVM_CONTAINER_USERNS=1`

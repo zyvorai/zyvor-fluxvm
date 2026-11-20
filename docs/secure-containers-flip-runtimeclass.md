@@ -87,10 +87,9 @@ FLUXVM_SECURE_CONTAINERS_E2E=1 ./scripts/demo-secure-containers-wow.sh
 Runs RuntimeClass userns (and optional SELinux / multi-container distinct)
 wrappers against the same lab.
 
-## When to stay on Kata
+## Limits
 
-- You need SEV-SNP/TDX + attestation (use Ragnarok + Kata/KubeVirt).
+- You need SEV-SNP/TDX + attestation (use Ragnarok).
 - You need unrestricted hostPath or Firecracker + live virtio-fs.
-- You need Kata-compatible static policy files as a drop-in (FluxVM remote NOTIFY RPC is vsock/HTTP, not Kata policy files).
 
 Otherwise `runtimeClassName: fluxvm` is the supported flip.

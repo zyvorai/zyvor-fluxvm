@@ -51,8 +51,6 @@ plan one or two small VMs on a 16 GB Mac. Kairon's Mac Node reports allocatable 
 The cluster design follows GK Servis's [Mac Studio LLM inference cluster](https://www.gkservis.com/case-studies/llm-inference-cluster.html)
 (4x Mac Studio, Thunderbolt 5 RDMA, EXO + MLX, about 1 TB pooled, under 250 W). Their figures are theirs, not FluxVM measurements.
 
-![Why Macs for private inference](assets/macos/readme-cost.jpg)
-
 ## Placing a VM on the right Mac
 
 Macs in one cluster differ: macOS version (vmnet needs 26, custom Virtio devices 27), nested virtualization (M3 or later), which

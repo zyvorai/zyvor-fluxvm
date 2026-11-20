@@ -4,7 +4,7 @@ A **lightweight KVM Virtual Machine Monitor** in Rust (Firecracker / cloud-hyper
 
 ## Honest performance claim
 
-| Layer | Who is faster than QEMU? |
+| Layer | Where the in-tree VMM helps |
 |---|---|
 | Guest CPU after boot | Neither. Both use KVM VT-x / AMD-V. Same silicon. |
 | Cold boot + memory overhead | Yes, if you skip BIOS/UEFI, PCI, VGA, USB, floppy, ACPI bloat. |

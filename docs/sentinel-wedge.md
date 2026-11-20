@@ -1,9 +1,8 @@
-# Sentinel wedge — policy Kata does not ship
+# Sentinel wedge — host and guest policy
 
 **One sentence:** Secure Containers give every Pod its own guest kernel;
 **Sentinel** adds a shared host↔guest eBPF policy schema so Kubernetes
-`NetworkPolicy` reaches the VMM edge **and** (optionally) the guest — something
-Kata’s namespace + seccomp + static policy-file model does not attempt.
+`NetworkPolicy` reaches the VMM edge **and** (optionally) the guest.
 
 ## What buyers get
 
@@ -17,7 +16,6 @@ Kata’s namespace + seccomp + static policy-file model does not attempt.
 
 - Not a TEE / confidential computing product (see Ragnarok for SNP/TDX).
 - Remote seccomp NOTIFY RPC is opt-in (`mode=remote`); default remains in-guest deny/continue/addfd.
-- Not “Kata-equivalent packaging.”
 
 ## Where to go next
 

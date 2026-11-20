@@ -1,8 +1,8 @@
 # FluxVM MicroVM
 
-**Schedule a VM like a Pod. Without KubeVirt.**
+**Schedule a VM like a Pod.**
 
-Kubernetes-native MicroVM compute for FluxVM — **without KubeVirt**.
+Kubernetes-native MicroVM compute for FluxVM.
 Supports short-lived / disposable jobs when you set TTLs; not limited to them.
 
 The VMM process lives on the host under `fluxctl serve`. The Pod is only a
@@ -19,21 +19,21 @@ privileged surface stays the existing `fluxvm-kube` DaemonSet that already runs
 | **Examples** | [`examples/microvm/`](https://github.com/zyvorai/zyvor-fluxvm/tree/main/examples/microvm) |
 | **Tutorials** | [`docs/tutorials/microvm/`](tutorials/microvm/README.md) |
 
-## Vs DisposableVm and KubeVirt
+## DisposableVm and MicroVM
 
-| | **DisposableVm** (`fluxvm-kube`) | **MicroVM** (`fluxvm-microvm`) | **KubeVirt** |
-|---|---|---|---|
-| API group | `fluxvm.zyvor.io` | `microvm.fluxvm.zyvor.io` | `kubevirt.io` |
-| Placement | Explicit `spec.node` (or optional placer) | kube-scheduler via shadow Pod | virt-launcher Pod |
-| Where QEMU/CH/FC runs | Host under `fluxctl serve` | Host under `fluxctl serve` | Inside virt-launcher container |
-| Privileged surface | `fluxvm-kube` DaemonSet | Same DaemonSet + thin node-agent | virt-handler / launcher |
-| Capacity accounting | Operator / placer heuristics | Pod requests (CPU/memory) | Pod + CDI |
-| Jobs / pools | Warm pools via REST | `MicroVMJob`, `MicroVMPool` CRs | Jobs / DataVolumes (different model) |
-| Live migration / CDI / virtctl | No CDI/`virtctl`; QEMU migrate via `fluxctl` / receivers | Same (v1) | Yes |
+| | **DisposableVm** (`fluxvm-kube`) | **MicroVM** (`fluxvm-microvm`) |
+|---|---|---|
+| API group | `fluxvm.zyvor.io` | `microvm.fluxvm.zyvor.io` |
+| Placement | Explicit `spec.node` (or optional placer) | kube-scheduler via shadow Pod |
+| Where QEMU/CH/FC runs | Host under `fluxctl serve` | Host under `fluxctl serve` |
+| Privileged surface | `fluxvm-kube` DaemonSet | Same DaemonSet + thin node-agent |
+| Capacity accounting | Operator / placer heuristics | Pod requests (CPU/memory) |
+| Jobs / pools | Warm pools via REST | `MicroVMJob`, `MicroVMPool` CRs |
+| Live migration / CDI / virtctl | No CDI/`virtctl`; QEMU migrate via `fluxctl` / receivers | Same (v1) |
 
 Use **DisposableVm** when Ragnarok (or another controller) already pins `spec.node`.
 Use **MicroVM** when you want scheduler-driven placement and Job/Pool CRs on the
-same host VMM. Both talk to local `fluxctl serve` — neither is KubeVirt.
+same host VMM. Both talk to local `fluxctl serve`.
 
 ## Architecture
 
@@ -286,7 +286,7 @@ python3 scripts/test-microvm-policy.py
 
 ## Limitations (v1)
 
-- No virt-launcher, CDI, or `virtctl`. QEMU live migration uses `fluxctl migrate` plus `POST /v1/migration/receivers` (not KubeVirt migration parity).
+- No virt-launcher, CDI, or `virtctl`. QEMU live migration uses `fluxctl migrate` plus `POST /v1/migration/receivers`.
 - No second privileged VMM DaemonSet — reuse `fluxvm-kube` / host `fluxctl serve`.
 - No k8s-native image pull — host-staged paths only (`GuestImage` Ready when the file exists on the node; HTTP sources are staged on the node and are not CDI DataVolumes).
 - `kubectl-fluxvm` resolves `spec.node` / runtime node for console/exec/pause/resume; node names are validated as SSH hostnames (`ssh -- host -- …`) to block option injection.

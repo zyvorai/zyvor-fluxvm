@@ -1,7 +1,7 @@
 # Kubernetes on a Mac (`fluxctl kube`)
 
 `fluxctl kube` runs **a [k3s](https://k3s.io) cluster in managed FluxVM VMs (one server, and workers if you ask), with k3s's bundled
-flannel for the pod network (Cilium is opt-in), its API server and a kubeconfig on your Mac.** It is the FluxVM counterpart of `colima start --kubernetes`, built the same way as [`fluxctl docker`](docker-engine.md):
+flannel for the pod network (Cilium is opt-in), its API server and a kubeconfig on your Mac.** It is built the same way as [`fluxctl docker`](docker-engine.md):
 a Debian 13 VM, folders shared at matching paths, and a supervised SSH forward.
 
 Because the cluster is a VM, it can do things a Linux kind or minikube cluster cannot: **save the whole running machine in about a

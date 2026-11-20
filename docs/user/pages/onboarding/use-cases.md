@@ -107,7 +107,7 @@ GA — see
 
 Not every team wants a Kubernetes control plane just to spread disposable
 VMs across a handful of bare-metal or edge hosts. `fluxvm-agent` is a
-lighter-weight alternative: a central fleet registry plus a per-host
+lightweight option: a central fleet registry plus a per-host
 heartbeat client, with load-aware placement deciding which host a new VM
 request lands on — verified across two real, physically separate hosts.
 This fits edge deployments, colo racks, or any fleet where standing up a

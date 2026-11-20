@@ -47,7 +47,7 @@ failed verification is not restored. No VM is touched; the scratch files are del
 
 ## Scheduled verify jobs
 
-Modelled on Proxmox Backup Server verify jobs. A job names a target, chain points, a schedule and a mode:
+A job names a target, chain points, a schedule and a mode:
 
 ```sh
 fluxctl backup-verify job add nightly --dir /mnt/backups \

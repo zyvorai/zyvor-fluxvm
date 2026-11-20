@@ -23,9 +23,9 @@
 default; nftables is an explicit compatibility mode. Before upgrading configs
 that omit the dataplane mode, follow the [eBPF upgrade guide](docs/primary-ebpf.md).
 
-**One Rust control plane for Firecracker, Cloud Hypervisor, QEMU/KVM and the in-tree FluxVM hypervisor, plus Apple's Virtualization.framework (`vz`) on a Mac.** No libvirtd. No XML. A REST API and a CLI that do the same thing on every backend, with a vsock guest agent instead of SSH.
+**One Rust control plane for Firecracker, Cloud Hypervisor, QEMU/KVM and the in-tree FluxVM hypervisor, plus Apple's Virtualization.framework (`vz`) on a Mac.** A REST API and a CLI that do the same thing on every backend, with a vsock guest agent instead of SSH.
 
-**4 Linux backends + `vz` on Mac, one API** · **No libvirtd, no XML** · **Native KVM, no QEMU** · **SDKs: Python, Go, TypeScript** · **Operator verified on real k3s**
+**4 Linux backends + `vz` on Mac, one API** · **Native KVM, no QEMU** · **SDKs: Python, Go, TypeScript** · **Operator verified on real k3s**
 
 [**Quickstart**](#quickstart) · [**Mac cloud**](#your-own-mac-cloud) · [**Proof**](#maturity-whats-real-today) · [**Docs**](docs/index.md) · [**API**](docs/api.md) · [**Talk to Zyvor**](https://zyvor.dev/?utm_source=github&utm_medium=fluxvm&utm_campaign=readme_hero)
 
@@ -108,12 +108,12 @@ From the [CHANGELOG](CHANGELOG.md) (0.4.x, current release **0.4.21**) and recen
 
 | When this happens… | FluxVM gives you… |
 |---|---|
-| Your automation has to template libvirt XML and talk to libvirtd | A JSON VM spec and a full REST API (`fluxctl serve`), the same on every backend |
+| Your automation needs to drive VMs through a stable API | A JSON VM spec and a full REST API (`fluxctl serve`), the same on every backend |
 | Each hypervisor needs its own tooling | QEMU/KVM, Cloud Hypervisor, Firecracker and the in-tree FluxVM hypervisor behind one trait; `"backend":"auto"` picks for you |
 | Running a command in a guest means SSH keys and a network path | `fluxctl exec <id> -- …` over vsock through the guest agent |
 | AI agents and CI jobs need a throwaway machine with guard rails | Agent sandboxes: egress ACL on method, host and path, a file change-set, a rootless procbox tier, VM fork and `ttl_seconds` cleanup |
 | You want Linux VMs without installing QEMU | A pure in-tree KVM engine: SMP verified at 2, 4 and 8 vCPUs, pause and snapshot across every vCPU |
-| You want VMs in Kubernetes without KubeVirt | A `DisposableVm` CRD and a node-local operator, 9/9 checks on a real k3s cluster |
+| You want VMs in Kubernetes | A `DisposableVm` CRD and a node-local operator, 9/9 checks on a real k3s cluster |
 
 ![Capabilities at a glance: Run, Sandbox, Network, Platform](docs/ux/readme-capabilities.jpg)
 
@@ -134,7 +134,7 @@ fluxctl delete <id>                               # or set ttl_seconds and walk 
 <td valign="top" width="33%">
 <b>Four backends</b><br>
 QEMU/KVM, Cloud Hypervisor, Firecracker and the in-tree FluxVM hypervisor behind one trait. <code>"backend":"auto"</code> picks for you.<br>
-<a href="docs/vs-libvirt.md#backends">Backends</a>
+<a href="docs/index.md">Docs</a>
 </td>
 <td valign="top" width="33%">
 <b>Native KVM, no QEMU</b><br>
@@ -160,35 +160,11 @@ A Pod gets its own guest kernel through containerd runtime-v2, with Sentinel Net
 </td>
 <td valign="top" width="33%">
 <b>Kubernetes</b><br>
-A <code>DisposableVm</code> CRD and a node-local operator, verified on a real k3s cluster, plus a scheduler-native path without KubeVirt.<br>
+A <code>DisposableVm</code> CRD and a node-local operator, verified on a real k3s cluster, plus a scheduler-native path.<br>
 <a href="docs/kubernetes-operator.md">Operator</a>
 </td>
 </tr>
 </table>
-
----
-
-<a id="vs-libvirtvirsh"></a>
-
-## FluxVM vs libvirt/virsh
-
-![FluxVM vs libvirt/virsh: no libvirtd, no XML, a REST API on every backend](docs/ux/readme-vs.jpg)
-
-FluxVM is the Zyvor **host-local** replacement for libvirt/virsh VM lifecycle and networking. It is **not** a drop-in for KubeVirt/OpenShift.
-
-| libvirt/virsh | FluxVM |
-|---|---|
-| `virsh define` + `virsh start` | `fluxctl create` |
-| `virsh list` / `virsh suspend` / `virsh resume` | `fluxctl list` / `pause` / `resume` |
-| `virsh console` | `fluxctl serial` (websocket over REST too) |
-| XML domain definitions | A JSON VM spec (`fluxctl create --spec vm.json`) |
-| No REST API | A full REST API (`fluxctl serve`) |
-| `virsh -c qemu+ssh://host` | `fluxctl --server` / `fluxctl context` (REST, bearer token) |
-| `virsh event` | `fluxctl events -f` (SSE: `/v1/events/stream`) |
-| libvirtd manages networks | TAP/bridge/netns networking managed directly via netlink |
-| **Choose libvirt when** | Your tooling is built on its XML, language bindings and ecosystem (virt-manager, virt-install), or you need hypervisors beyond FluxVM's four |
-
-The [full command mapping](docs/vs-libvirt.md) covers disks, snapshots, backups, clone and events.
 
 ---
 
@@ -253,7 +229,7 @@ Every one maps onto what is implemented today. [All eleven](docs/index.md#use-ca
 - **AI-agent sandboxes with guard rails:** a microVM or a rootless procbox, an egress ACL and a change-set.
 - **Linux VMs with no QEMU installed:** the in-tree KVM engine and a golden template, `fluxctl vm-template create native-agent <name>`.
 - **A golden-image pipeline:** build once with `fluxctl build-image`, reuse through CoW overlays and a signed catalog.
-- **Kubernetes-native VMs without KubeVirt** and **OCI workloads with a per-Pod guest kernel.**
+- **Kubernetes-native VMs** and **OCI workloads with a per-Pod guest kernel.**
 
 ## Documentation map
 
@@ -268,7 +244,7 @@ Every one maps onto what is implemented today. [All eleven](docs/index.md#use-ca
 | Native KVM, no QEMU | [docs/native-kvm-no-qemu.md](docs/native-kvm-no-qemu.md) |
 | Native macOS: the `vz` backend, sandboxes, container sandboxes, a Mac cloud | [docs/macos.md](docs/macos.md) · [docs/mac-cloud.md](docs/mac-cloud.md) · [docs/macos-sandboxes.md](docs/macos-sandboxes.md) · [docs/oci-sandboxes.md](docs/oci-sandboxes.md) |
 | Docker and Kubernetes on a Mac: `fluxctl docker`, `fluxctl kube` | [docs/docker-engine.md](docs/docker-engine.md) · [docs/kubernetes-on-mac.md](docs/kubernetes-on-mac.md) |
-| AI-agent sessions: install, quickstart, MCP, comparison | [docs/agent-platform/](docs/agent-platform/README.md) · [docs/agent-sessions.md](docs/agent-sessions.md) · [vs microsandbox](docs/vs-microsandbox.md) |
+| AI-agent sessions: install, quickstart, MCP | [docs/agent-platform/](docs/agent-platform/README.md) · [docs/agent-sessions.md](docs/agent-sessions.md) |
 | Agent sandboxes, procbox and the SDKs | [docs/agent-sandbox-gaps.md](docs/agent-sandbox-gaps.md) · [python/](python/README.md) · [go/](go/README.md) · [typescript/](typescript/README.md) |
 | Network Fabric and Service Fabric | [docs/network-fabric.md](docs/network-fabric.md) · [docs/service-fabric.md](docs/service-fabric.md) |
 | Secure Containers and MicroVM | [docs/secure-containers.md](docs/secure-containers.md) · [docs/microvm.md](docs/microvm.md) |
@@ -300,7 +276,7 @@ Every one maps onto what is implemented today. [All eleven](docs/index.md#use-ca
 
 | Status | Areas |
 |---|---|
-| **GA** | Network Fabric (TC/eBPF, the default dataplane; nftables via explicit `mode = "legacy"`) · Secure Containers (containerd runtime-v2, not a Kata-equivalence claim) |
+| **GA** | Network Fabric (TC/eBPF, the default dataplane; nftables via explicit `mode = "legacy"`) · Secure Containers (containerd runtime-v2) |
 | **Released (0.4.x)** | MCP server, agent sessions (`fluxctl agent`), `host_gpu` Metal/MLX inference, sandbox GPUs (Linux VFIO), enforced Kairon VM edge, VM-edge capture, VM fork, VM import, quiesced backups, fleet console |
 | **Built, not yet run on real hosts** | FluxMesh (overlay, DNS, relay, enrollment, public edge): unit tests only; see [Proof & status](docs/proof-and-status.md) |
 | **Not by design** | KubeVirt compatibility |

@@ -18,7 +18,7 @@ DARK = dict(
     hair="#2c2c2e")
 
 def svg(p):
-    return f'''<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="640" viewBox="0 0 1280 640" role="img" aria-label="FluxVM — Real VMs. Real API. One Rust control plane and one REST API for Firecracker, Cloud Hypervisor, QEMU/KVM, the FluxVM hypervisor and Apple Virtualization.framework (vz) on a Mac. No libvirtd, no XML.">
+    return f'''<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="640" viewBox="0 0 1280 640" role="img" aria-label="FluxVM — Real VMs. Real API. One Rust control plane and one REST API for Firecracker, Cloud Hypervisor, QEMU/KVM, the FluxVM hypervisor and Apple Virtualization.framework (vz) on a Mac.">
   <defs>
     <linearGradient id="bg" x1="0" y1="0" x2="0" y2="640" gradientUnits="userSpaceOnUse">
       <stop offset="0" stop-color="{p['bg0']}"/>
@@ -79,7 +79,7 @@ def svg(p):
   <!-- sub -->
   <g font-family="'Helvetica Neue',Helvetica,Arial,sans-serif" font-size="26" fill="{p['sec']}">
     <text x="80" y="398">One Rust control plane. One REST API.</text>
-    <text x="80" y="434">No libvirtd, no XML.</text>
+    <text x="80" y="434">A JSON spec on every backend.</text>
   </g>
 
   <!-- proof chips -->
@@ -87,7 +87,7 @@ def svg(p):
     <rect x="80" y="478" width="222" height="46" rx="23" fill="{p['chip_fill']}" stroke="{p['chip_stroke']}"/>
     <text x="102" y="507">Network Fabric GA</text>
     <rect x="316" y="478" width="150" height="46" rx="23" fill="{p['chip_fill']}" stroke="{p['chip_stroke']}"/>
-    <text x="338" y="507">Zyvor Production License</text>
+    <text x="338" y="507">Zyvor PL 1.0</text>
     <rect x="480" y="478" width="242" height="46" rx="23" fill="{p['chip_fill']}" stroke="{p['chip_stroke']}"/>
     <text x="502" y="507">k3s + 2-host tested</text>
     <rect x="736" y="478" width="196" height="46" rx="23" fill="url(#mac)"/>
@@ -142,7 +142,7 @@ def svg(p):
   <!-- footer -->
   <line x1="80" y1="556" x2="1200" y2="556" stroke="{p['hair']}" stroke-width="1"/>
   <text x="80" y="598" font-family="'Helvetica Neue',Helvetica,Arial,sans-serif" font-size="18"
-        fill="{p['sec']}">Secure, isolated VMs on Linux and macOS · Host-local libvirt replacement</text>
+        fill="{p['sec']}">Secure, isolated VMs on Linux and macOS</text>
   <text x="1200" y="586" text-anchor="end" font-family="'Menlo','JetBrains Mono',monospace"
         font-size="16" fill="{p['sec']}">github.com/zyvorai/fluxvm</text>
   <text x="1200" y="614" text-anchor="end" font-family="'Helvetica Neue',Helvetica,Arial,sans-serif"

@@ -12,7 +12,7 @@ orchestration and UX on the same REST API rather than forking FluxVM:
 | Product | Role |
 |---|---|
 | **[zyvor-fabric](zyvor-fabric.md)** | Private cloud control plane (CLI/Web/K8s operator/Terraform) — FluxVM runs the VMs, Fabric adds auth/RBAC, network policy and UX |
-| **[Ragnarok](ragnarok.md)** | AI-powered KubeVirt-style VM management — creates `DisposableVm` CRs through its FluxVM Hub with OIDC/SSO and RBAC |
+| **[Ragnarok](ragnarok.md)** | AI-powered VM management — creates `DisposableVm` CRs through its FluxVM Hub with OIDC/SSO and RBAC |
 | **[h2kvm](https://github.com/zyvorai/h2kvm)** | Hypervisor → KVM convert + import; hands a certified disk to FluxVM to run |
 | **[GuestKit](https://github.com/zyvorai/guestkit)** | Offline disk scoring/repair — FluxVM boots and manages what GuestKit certifies |
 

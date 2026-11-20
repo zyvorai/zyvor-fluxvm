@@ -4,12 +4,11 @@
 
 FluxVM Secure Containers is the first container-runtime layer on top of the
 existing FluxVM VM lifecycle, VSOCK guest agent and QEMU virtiofs support.
-The goal is the same security shape users expect from Kata Containers: a Pod
+The goal is a strong isolation shape: a Pod
 or container group gets its own guest kernel instead of sharing the node's
 host kernel — plus, starting with Set 6, **FluxVM Sentinel**: an eBPF-based
 policy substrate spanning the host VMM edge and (in later Sets) the guest
-kernel with one shared schema and identity model, which Kata's namespace +
-seccomp + static-policy-file model does not attempt.
+kernel with one shared schema and identity model.
 
 ## Architecture
 
@@ -97,7 +96,7 @@ Everything through Set 13 below, plus:
   `chroot`); containers in a Pod no longer rely on the VM boundary alone
 - sandbox/pause-container convention: the CRI sandbox container's IPC/UTS
   (and PID, when `shareProcessNamespace: true`) are joined by sibling
-  containers, matching runc/Kata's "join the pause container" model
+  containers, matching the usual "join the pause container" model
 - opt-in `CLONE_NEWUSER` per container (`FLUXVM_CONTAINER_USERNS=1`, off by
   default) for an additional capability-scoping boundary
 - **Sentinel**: identity-aware, Kubernetes-NetworkPolicy-*shaped* Pod network
@@ -144,8 +143,7 @@ Everything through Set 13 below, plus:
   sequential — see [docs/secure-containers-set7r.md](secure-containers-set7r.md).
 - **Sentinel**: in-guest, per-container `cgroup_skb` network policy
   (fail-closed by default) so one container in a multi-container Pod can no
-  longer reach another's local ports unchecked — the first Sentinel piece
-  Kata has no equivalent of. Uses `aya` as a deliberate, narrowly-scoped
+  longer reach another's local ports unchecked — the first Sentinel piece. Uses `aya` as a deliberate, narrowly-scoped
   exception to the project's "no aya/libbpf" rule. Not yet wired to Set 6S's
   Pod policy as an automatic per-container default — see
   [docs/secure-containers-set8s.md](secure-containers-set8s.md).
@@ -165,8 +163,7 @@ Everything through Set 13 below, plus:
 
 ## Current limitations
 
-**Status: GA.** Scope boundaries below — not a claim of full Kata Containers
-compatibility.
+**Status: GA.** Scope boundaries below with documented boundaries.
 
 **Supported production profile:** see
 [secure-containers-supported-profile.md](secure-containers-supported-profile.md)
@@ -226,7 +223,7 @@ Sentinel wedge: [sentinel-wedge.md](sentinel-wedge.md).
    already bound to `vfio-pci`. Anything outside those allowlists still fails
    closed instead of silently `mknod`-ing an unrelated node.
 
-## Next gates to production Kata-style Kubernetes support
+## Next gates to production Kubernetes support
 
 Code-side P0/P1 phases below are **closed**. Remaining work is live-node
 evidence under `FLUXVM_SECURE_CONTAINERS_E2E=1` / lab scripts — not new VMM
@@ -297,7 +294,7 @@ uses `network.mode=none`. The shim claims a paused member, then
 `POST /v1/vms/{id}/hotplug/nic` for the Pod CNI bridge (and each Multus
 `netN`). Warm-pool claim requires QEMU or Cloud Hypervisor (share hotplug);
 Firecracker uses cold create with ext4-packed shares. RuntimeClass is **GA**,
-not a Kata-equivalent product.
+with documented boundaries.
 
 ### P1 — additional VMMs
 

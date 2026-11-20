@@ -20,10 +20,10 @@ const FeatureList: FeatureItem[] = [
     to: '/docs/PRODUCT_OVERVIEW',
   },
   {
-    title: 'Host-local libvirt replacement',
+    title: 'Host-local VM control plane',
     description:
-      'No libvirtd, no XML domain definitions — a direct command mapping (fluxctl create ≈ virsh define+start, fluxctl delete ≈ virsh destroy) plus a real REST API libvirt doesn\'t have.',
-    to: '/docs/POSITIONING',
+      'A JSON VM spec, a real REST API and a CLI on every backend, with direct netlink networking and a vsock guest agent.',
+    to: '/docs/PRODUCT_OVERVIEW',
   },
   {
     title: 'Network Fabric (GA, schema v4)',
@@ -32,9 +32,9 @@ const FeatureList: FeatureItem[] = [
     to: '/docs/network-fabric',
   },
   {
-    title: 'Kubernetes-native, without KubeVirt',
+    title: 'Kubernetes-native VMs',
     description:
-      'The DisposableVm CRD (verified end to end against a real k3s cluster, 9/9 checks) and the scheduler-native MicroVM path — a different, lighter model than KubeVirt, not a clone of it.',
+      'The DisposableVm CRD (verified end to end against a real k3s cluster, 9/9 checks) and the scheduler-native MicroVM path.',
     to: '/docs/microvm',
   },
   {

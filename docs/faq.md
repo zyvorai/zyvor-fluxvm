@@ -8,27 +8,22 @@ Is this for you, and the questions people ask first.
 
 **A strong fit when you…**
 
-- want VM lifecycle without a systemd/libvirtd dependency — direct netlink networking, JSON specs, a real REST API;
+- want VM lifecycle without a systemd dependency — direct netlink networking, JSON specs, a real REST API;
 - run CI runners, sandboxed execution or per-branch environments and want cleanup you don't have to remember;
-- are looking for a Kubernetes-native VM path that isn't KubeVirt (`DisposableVm`, `fluxvm-microvm`);
+- are looking for a Kubernetes-native VM path (`DisposableVm`, `fluxvm-microvm`);
 - want to adopt it standalone — no Fabric, Ragnarok or other Zyvor product required.
 
 **Look elsewhere (for now) when you…**
 
 - need a finished multi-tenant security boundary today ([details](proof-and-status.md#maturity-whats-real-today));
-- need full Kata / CDI / non-QEMU Secure Containers VMM parity (Secure Containers is GA with documented scope boundaries);
-- need KubeVirt/OpenShift compatibility (`virtctl`, CDI, live-migration parity);
+- need full CDI / non-QEMU Secure Containers VMM parity (Secure Containers is GA with documented scope boundaries);
 - need published performance numbers for capacity planning.
 
 ---
 
 ## FAQ
 
-**Is FluxVM production-ready?** For the core VM-lifecycle primitives (auth/RBAC, jailer, cgroups, netns), yes — with the caveats in [Proof & status](proof-and-status.md#maturity-whats-real-today). Turn on `policy.require_catalog_names`, the quota ledger, `FLUXVM_VMM_SECCOMP`, and the AppArmor or SELinux profile before exposing it to untrusted tenants. Secure Containers is GA with documented scope boundaries (not Kata-equivalent).
-
-**How is this different from libvirt?** No libvirtd, no XML domain definitions — its own REST API, with netlink for networking. See [vs. libvirt/virsh](vs-libvirt.md#vs-libvirtvirsh).
-
-**How is this different from KubeVirt?** A different model: FluxVM's `DisposableVm` and MicroVM paths run the VMM on the host under `fluxctl serve`, not inside a virt-launcher Pod. `kubectl-fluxvm` covers console, exec, pause, resume, and CR delete. `GuestImage` HTTP staging is not CDI. QEMU live migration has a target receiver; it is not KubeVirt migration parity. Full comparison: [docs/microvm.md](microvm.md#vs-disposablevm-and-kubevirt).
+**Is FluxVM production-ready?** For the core VM-lifecycle primitives (auth/RBAC, jailer, cgroups, netns), yes — with the caveats in [Proof & status](proof-and-status.md#maturity-whats-real-today). Turn on `policy.require_catalog_names`, the quota ledger, `FLUXVM_VMM_SECCOMP`, and the AppArmor or SELinux profile before exposing it to untrusted tenants. Secure Containers is GA with documented scope boundaries .
 
 **Do I need Fabric or Ragnarok?** No. Clone it, build it, run `fluxctl create`. Fabric and Ragnarok are separate products that use FluxVM as their VM engine — see [Ecosystem](ecosystem.md).
 

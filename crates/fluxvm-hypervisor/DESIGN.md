@@ -5,31 +5,21 @@
 Build a Type-2 VMM on Linux KVM that:
 
 - Boots Linux in ~100–300 ms (direct kernel + virtio, no firmware).
-- Can boot Windows via OVMF/UEFI + ACPI + virtio-win (slower boot, still
-  faster device path than default QEMU).
+- Can boot Windows via OVMF/UEFI + ACPI + virtio-win (slower boot than the Linux direct-boot path).
 - Speaks virtio for net, block, vsock, balloon, rng, console.
 - Uses TAP + optional `vhost-net` so packet processing stays in kernel.
-- Has a tiny device surface compared to QEMU (~2M LOC C vs tens of kLOC Rust).
+- Has a tiny device surface (tens of kLOC of Rust).
 
-## 2. Why QEMU is “slow” (and what is not slow)
+## 2. Design goals: boot, footprint and I/O path
 
-QEMU is two products in one:
+Runtime CPU of a warmed Linux guest under KVM is the same whichever VMM runs it,
+because the silicon is the same. This VMM therefore optimizes boot, footprint
+and I/O path, not "the CPU":
 
-1. **TCG emulator** — software CPU. Slow. We will never beat this by writing
-   another emulator in Rust.
-2. **KVM accelerator + giant device model** — hardware virtualization plus
-   every legacy device ever needed (i440fx, Q35, IDE, e1000, VGA BIOS, USB,
-   ACPI AML, SMBIOS, floppy, parallel port…).
-
-Firecracker / Cloud Hypervisor beat *default QEMU* because they:
-
-- Skip SeaBIOS / OVMF for Linux (direct 64-bit kernel entry or PVH).
-- Expose ~5–16 devices instead of 40+.
+- Skip firmware for Linux (direct 64-bit kernel entry or PVH).
+- Expose a small virtio device set instead of a legacy device model.
 - Keep the VMM out of the packet path (`vhost-net`, `vhost-user`, io_uring).
-- Are memory-safe and small enough to jail (seccomp, namespaces).
-
-Runtime CPU of a warmed Linux guest on QEMU+KVM vs Firecracker is essentially
-identical. Optimize boot, footprint, and I/O path — not “the CPU”.
+- Stay memory-safe and small enough to jail (seccomp, namespaces).
 
 ## 3. Process and thread model
 
@@ -157,8 +147,8 @@ and a small config (`vmlinux` + virtio + ext4 + net).
 2. Expose ACPI + PCI config space + virtio-pci.
 3. Attach virtio-blk with NTFS image or installer ISO.
 4. Guest needs virtio-win drivers (inbox on newer Server, or inject).
-5. Expect seconds of boot, not 125 ms. Still far less device work than QEMU
-   Q35+everything.
+5. Expect seconds of boot, not 125 ms. Still little device work
+   (no legacy device model).
 
 ## 8. Exit handling
 
@@ -193,8 +183,8 @@ Batch notifications. Do not handle one packet per exit if vhost is available.
 
 ## 10. Snapshot / restore (optional, high leverage)
 
-For “faster than QEMU” in practice, **restore a snapshot** of a booted guest.
-Firecracker restore is tens of milliseconds. Cold boot is the wrong metric
+For fast starts in practice, **restore a snapshot** of a booted guest.
+Snapshot restore takes tens of milliseconds. Cold boot is the wrong metric
 for agent sandboxes and functions.
 
 ## 11. Implementation phases

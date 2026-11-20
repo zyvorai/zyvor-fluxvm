@@ -54,8 +54,8 @@ Pod correctly), and no change to what gets copied or where.
   opt-in direct datapath the hotplug request carries a `direct` spec instead of
   a bridge: the daemon creates the tap inside the Pod netns and passes it to QEMU
   over QMP `getfd` ([direct-datapath.md](direct-datapath.md)).
-- **RuntimeClass** is **GA**, not a Kata-equivalent product.
-- Lazy/guest-pull imagery (full guest-pull parity with Kata) remains
+- **RuntimeClass** is **GA**.
+- Lazy/guest-pull imagery remains
   explicitly out of scope for the whole performance track; this Set's
   pipelining is the right-sized first step, not a step toward guest-pull.
 - Published before/after latency numbers once a live run is done (see

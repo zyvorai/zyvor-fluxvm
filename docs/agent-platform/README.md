@@ -26,7 +26,7 @@ vz · KVM · Firecracker · Cloud Hypervisor · QEMU
 > method/path rules, budgets, resumable file transfer and fork-evaluate-promote. Those are **implemented and unit/router
 > tested, not yet field-tested on a live guest**; the practical guide ends with the exact list.
 > Start with [agent-sessions-guide.md](../agent-sessions-guide.md). The table at the end lists every claim and how it was
-> checked. Compared with microsandbox: [vs-microsandbox.md](../vs-microsandbox.md).
+> checked.
 
 ## Install
 
@@ -158,4 +158,3 @@ How to choose and verify each: [agent-sessions-guide.md](../agent-sessions-guide
 - [agent-sessions.md](../agent-sessions.md): the API, backends, policy compiler, roadmap.
 - [macos-sandboxes.md](../macos-sandboxes.md), [agent-density.md](../agent-density.md): sandboxes on a Mac, warm pool, density.
 - [credential-broker.md](../credential-broker.md), [http-acl.md](../http-acl.md), [procbox.md](../procbox.md): secrets, egress rules, rootless sandbox.
-- [vs-microsandbox.md](../vs-microsandbox.md): how this compares, including where FluxVM is behind.

@@ -140,8 +140,7 @@ function Statement() {
     <section className={styles.statement}>
       <Reveal>
         <p className={styles.statementText}>
-          No libvirtd. No XML.{' '}
-          <span className={styles.gradient}>Just a JSON spec, a REST API and a vsock agent</span>{' '}
+          <span className={styles.gradient}>A JSON spec, a REST API and a vsock agent</span>{' '}
           that does the same thing on a Linux server and on the Mac on your desk.
         </p>
       </Reveal>
@@ -218,7 +217,7 @@ function Platform() {
         <div className={styles.platformCard}>
           <Heading as="h3">On Linux</Heading>
           <p>
-            Native eBPF networking, Secure Containers (GA), a Kubernetes operator without KubeVirt, live
+            Native eBPF networking, Secure Containers (GA), a Kubernetes operator, live
             backups and a fleet registry.
           </p>
           <Chevron to="/docs/network-fabric">Network Fabric</Chevron>

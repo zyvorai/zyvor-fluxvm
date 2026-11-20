@@ -6,7 +6,7 @@ name = "fluxvm-microvm"
 version = "0.4.21"
 edition = "2024"
 license = "LicenseRef-Zyvor-Production-1.0"
-description = "FluxVM MicroVM — Kubernetes-native MicroVM compute without KubeVirt"
+description = "FluxVM MicroVM — Kubernetes-native MicroVM compute"
 
 [[bin]]
 name = "fluxvm-microvm"

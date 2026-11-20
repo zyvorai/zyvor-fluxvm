@@ -2,20 +2,16 @@
 
 **A host-local VM API — without the platform rewrite.** Secure Containers add
 Kubernetes RuntimeClass `fluxvm`: a Pod with its own guest kernel, plus
-**Sentinel** host↔guest policy ([sentinel-wedge.md](sentinel-wedge.md)) — not
-Kata-equivalent packaging ([secure-containers-supported-profile.md](secure-containers-supported-profile.md)).
+**Sentinel** host↔guest policy ([sentinel-wedge.md](sentinel-wedge.md)); see the
+[supported profile](secure-containers-supported-profile.md).
 
 This doc is the capability tour and the one authoritative metrics table for FluxVM. For the pitch and quick start, see the [README](https://github.com/zyvorai/zyvor-fluxvm/blob/main/README.md); for who this is (and isn't) for, see [POSITIONING.md](POSITIONING.md); for the exhaustive feature checklist, see [FEATURES.md](https://github.com/zyvorai/zyvor-fluxvm/blob/main/FEATURES.md).
 
 ## The Problem
 
-Teams that need a host-local VM control plane — CI runners, sandboxed code execution, per-branch environments, Kubernetes VM workloads, or longer-lived guests — are usually stuck choosing between:
+Teams that need a host-local VM control plane — CI runners, sandboxed code execution, per-branch environments, Kubernetes VM workloads, or longer-lived guests — need a real API, a real kernel boundary and automatic cleanup, without adopting a whole private-cloud stack.
 
-- **Manual libvirt/virsh scripting** — XML domain definitions, no REST API, no optional TTL cleanup, easy for orphaned VMs to accumulate
-- **A full private-cloud platform** — adopting VMware/OpenStack/a KubeVirt cluster just to get a solid VM API is disproportionate overhead for many teams
-- **Container-only isolation** — good enough until the workload needs a real kernel boundary (untrusted code, a kernel-dependent test, a legacy binary that needs its own kernel)
-
-FluxVM fills that gap: a control plane with a real API, without requiring a whole private-cloud stack. Disposable / short-lived patterns (TTL, CoW) are available when you want them.
+FluxVM is a control plane with a real API, without requiring a whole private-cloud stack. Disposable / short-lived patterns (TTL, CoW) are available when you want them.
 
 ---
 
@@ -23,7 +19,7 @@ FluxVM fills that gap: a control plane with a real API, without requiring a whol
 
 FluxVM is a Rust-native VM control plane. It provides:
 
-- **One binary, one REST API** — `fluxvm` CLI talks to `fluxctl serve`, no libvirtd, no XML
+- **One binary, one REST API** — `fluxvm` CLI talks to `fluxctl serve`
 - **4 backends behind one trait** — QEMU/KVM, Cloud Hypervisor, Firecracker, and the in-tree FluxVM hypervisor, selectable per-VM or via `"backend":"auto"`
 - **Optional TTL cleanup** — `ttl_seconds` on a VM spec means a forgotten or crashed job still gets torn down when you opt in
 - **A vsock guest agent** — `exec`, PTY console, file transfer, with no SSH or network path required
@@ -44,7 +40,7 @@ The exhaustive, line-by-line checklist lives in **[FEATURES.md](https://github.c
 
 **Operations** — cgroup v2 resource control (limits, freeze/thaw, PSI), warm VM pools, the Firecracker jailer (chroot + uid/gid drop), alternative storage backends (LVM thin, NBD, Ceph RBD — RBD verified against a real Rook Ceph cluster), admission policy limits, bearer-token auth/RBAC.
 
-**Kubernetes & fleet** — `DisposableVm` CRD + node-local operator (verified end to end against a real k3s cluster, 9/9 checks passing); `fluxvm-microvm` scheduler-native path as a KubeVirt alternative; `fluxvm-agent` distributed node-agent with a central fleet registry and load-aware placement, verified across two real, physically separate hosts.
+**Kubernetes & fleet** — `DisposableVm` CRD + node-local operator (verified end to end against a real k3s cluster, 9/9 checks passing); `fluxvm-microvm` scheduler-native path; `fluxvm-agent` distributed node-agent with a central fleet registry and load-aware placement, verified across two real, physically separate hosts.
 
 **Secure Containers** *(GA)* — containerd runtime-v2 shim (`containerd-shim-fluxvm-v2`) mapping a Pod/task group onto one FluxVM microVM, with CNI L2, cgroup-v2 stats, VSOCK stdio/TTY, namespaces, device passthrough, guest AppArmor/SELinux/seccomp, and Sentinel NetworkPolicy. Supported profile + flip runbook: [secure-containers-supported-profile.md](secure-containers-supported-profile.md), [secure-containers-flip-runtimeclass.md](secure-containers-flip-runtimeclass.md). Not Kata-equivalent — see [secure-containers.md](secure-containers.md).
 
@@ -77,26 +73,6 @@ The exhaustive, line-by-line checklist lives in **[FEATURES.md](https://github.c
 ```
 
 Full diagrams (image pipeline, Secure Containers request flow, Network Fabric packet-decision and control-plane sequence): [Architecture at a glance](architecture.md#architecture-at-a-glance) and [docs/network-fabric.md](network-fabric.md#packet-decision-and-control-plane-diagrams).
-
----
-
-## Comparison
-
-| Feature | FluxVM | libvirt/virsh | KubeVirt |
-|---------|:--------:|:----------:|:---------:|
-| REST API | Yes | No (XML-RPC-ish via libvirtd) | Yes (Kubernetes API) |
-| VM spec format | JSON | XML domain definitions | Kubernetes CRD YAML |
-| TTL-guaranteed cleanup | Yes (`ttl_seconds`) | No | No (Pod lifecycle only) |
-| Backends | QEMU/KVM, Cloud Hypervisor, Firecracker, in-tree hypervisor | QEMU/KVM (broad hypervisor support via drivers) | KVM via virt-launcher |
-| Where the VMM runs | Host, under `fluxctl serve` | Host, under `libvirtd` | Inside a virt-launcher Pod |
-| Kubernetes-native | Yes (`DisposableVm` CRD, MicroVM) | No | Yes (native) |
-| Live migration / CDI / `virtctl` | QEMU source + receiver (not KubeVirt parity); no CDI/`virtctl` | No (needs orchestration layer) | Yes |
-| eBPF/TC dataplane | Yes — Network Fabric, GA schema v4 | No | Depends on CNI |
-| Multi-host fleet management | Yes — `fluxvm-agent`, verified across 2 real hosts | No (needs external orchestration) | Via Kubernetes scheduler |
-| OCI/containerd workload support | GA (Secure Containers; not Kata-equivalent) | No | No (different workload model) |
-| License | Zyvor Production 1.0 (free non-production) | LGPL | Apache-2.0 |
-
-This table intentionally covers only what's verifiable today — no unpublished performance numbers, no forward-looking claims. See [POSITIONING.md](POSITIONING.md#competitive-frame) for the fuller competitive narrative, including the honest caveats (KubeVirt still owns CDI/`virtctl` and full cluster migration orchestration; FluxVM's QEMU migration path is host-API + Fabric, not KubeVirt parity; libvirt has broader hypervisor driver support).
 
 ---
 

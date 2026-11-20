@@ -39,8 +39,7 @@ Firecracker's jailer (chroot + uid/gid drop, see "Firecracker jailer" in the
 README) gives each job its own privilege-dropped sandbox, and cgroup v2
 resource control caps what a single job can consume on a shared runner host.
 `network.mode: "none"` plus vsock `exec` means a compromised or malicious
-test suite has no network path out at all — the same isolation shape as
-gVisor/Firecracker-based CI sandboxes, built on this project's own control
+test suite has no network path out at all — built on this project's own control
 plane instead of a hosted service.
 
 ## Golden-image pipeline
@@ -137,7 +136,7 @@ ctr run --rm --runtime io.containerd.fluxvm.v2 docker.io/library/busybox:1.36 sm
 
 Not every team wants a Kubernetes control plane just to spread disposable
 VMs across a handful of bare-metal or edge hosts. `fluxvm-agent` is a
-lighter-weight alternative: a central fleet registry plus a per-host
+lightweight option: a central fleet registry plus a per-host
 heartbeat client, with load-aware placement deciding which host a new VM
 request lands on — verified across two real, physically separate hosts.
 This fits edge deployments, colo racks, or any fleet where standing up a

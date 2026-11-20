@@ -141,7 +141,7 @@ components, unrelated to `fluxvm-agent`'s VM-placement fleet.
 
 Cilium-native VM endpoints / in-tree Hubble UI, CH Windows+QGA,
 in-tree KVM without Firecracker for production density.
-Secure Containers RuntimeClass as full Kata-equivalent (Firecracker has no
+Secure Containers RuntimeClass as unrestricted (Firecracker has no
 live virtiofs write-through; remote seccomp NOTIFY RPC is opt-in `mode=remote`) —
 [secure-containers.md](secure-containers.md). Device-cgroup enforcement
 (`BPF_PROG_TYPE_CGROUP_DEVICE`, Set 10), the seccomp user-notification
@@ -200,7 +200,7 @@ and Set 16's own timeout expiry/anti-replay behavior, are implemented but not
 yet proven with a live TCP handshake or wall-clock timing test; the per-VM
 rule cap is 64 (kernel verifier limit); multi-node Pod-to-Pod dataplane
 conformance is still missing; Set 17/19 production Prometheus scrape evidence
-and Kata/fleet/migration lab gates remain open — see
+and fleet/migration lab gates remain open — see
 [NEXT-FEATURES.md](NEXT-FEATURES.md),
 [secure-containers-set14.md](secure-containers-set14.md),
 [secure-containers-set16.md](secure-containers-set16.md),

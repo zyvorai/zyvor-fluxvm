@@ -141,23 +141,6 @@ const SESSION_LOOP = [
   '  session.create · exec · checkpoint · fork',
 ].join('\n');
 
-type Cmp = {cap: string; them: string; us: string; status: 'ok' | 'warn' | 'behind'; label: string};
-// microsandbox cells are what its README and v0.7.x release notes say; FluxVM cells link to docs/vs-microsandbox.md.
-// Nothing here was measured against microsandbox.
-const COMPARE: Cmp[] = [
-  {cap: 'Isolation', them: 'microVMs (libkrun)', us: 'vz on a Mac; KVM, Firecracker, Cloud Hypervisor, QEMU on Linux', status: 'ok', label: 'Run on vz'},
-  {cap: 'Startup', them: 'under 100 ms guest boot (their M1 figure)', us: '4.6 s offline, 6.8 s on the NAT (M4, debug build)', status: 'behind', label: 'Behind'},
-  {cap: 'Fork a running sandbox', them: 'yes', us: 'offline vz sessions and in-tree KVM; not a NAT sandbox', status: 'ok', label: 'Run on vz'},
-  {cap: 'Checkpoint / restore', them: 'full snapshots, branches, --cow-mem', us: 'memory+disk or disk-only per session', status: 'ok', label: 'Run on vz'},
-  {cap: 'Review before apply', them: 'not documented', us: 'speculate, changeset, approve, apply', status: 'warn', label: 'Tests'},
-  {cap: 'Network policy', them: 'host allow-list, CONNECT proxy', us: 'host allow-list; eBPF CIDR/DNS/rate rules on Linux', status: 'ok', label: 'Run on vz; eBPF not run'},
-  {cap: 'Secrets kept out of the VM', them: 'yes (TLS interception)', us: 'credential broker with per-sandbox grants', status: 'warn', label: 'Tests'},
-  {cap: 'Embeddable, no daemon', them: 'yes', us: 'no: needs fluxctl serve', status: 'behind', label: 'Behind'},
-  {cap: 'SDKs', them: 'TS, Rust, Python, Go, Ruby', us: 'Go, Python, TypeScript (sessions: Go, Python)', status: 'behind', label: 'Behind'},
-  {cap: 'Windows host', them: 'yes (WHP)', us: 'no', status: 'behind', label: 'Behind'},
-  {cap: 'Fleet of Macs, tenants', them: 'not documented', us: 'central, leases, FluxMesh', status: 'warn', label: 'Simulator only'},
-];
-
 function Hero() {
   const [copied, setCopied] = useState(false);
   const cmd = 'curl -fsSL https://zyvorai.github.io/zyvor-fluxvm/install.sh | bash';
@@ -667,58 +650,6 @@ function Controls() {
   );
 }
 
-function Compare() {
-  const tag = (s: Cmp['status']) =>
-    s === 'ok' ? styles.tagOk : s === 'warn' ? styles.tagWarn : styles.tagBehind;
-  return (
-    <section className={clsx(styles.section, styles.alt)}>
-      <div className="container">
-        <Reveal>
-          <div className="text--center">
-            <p className={styles.kicker}>Versus microsandbox</p>
-            <Heading as="h2" className={styles.h2}>
-              Where we are ahead, and where we are not
-            </Heading>
-            <p className={styles.lead}>
-              microsandbox is a good, fast, embeddable runtime. The left column is what its README and releases say;
-              the right is what we ran. We have not benchmarked them against each other.
-            </p>
-          </div>
-          <div className={styles.tableWrap}>
-            <table className={styles.macTable}>
-              <thead>
-                <tr>
-                  <th>Capability</th>
-                  <th>microsandbox (documented)</th>
-                  <th>FluxVM</th>
-                  <th>Status</th>
-                </tr>
-              </thead>
-              <tbody>
-                {COMPARE.map((r) => (
-                  <tr key={r.cap}>
-                    <td>{r.cap}</td>
-                    <td>{r.them}</td>
-                    <td>{r.us}</td>
-                    <td>
-                      <span className={clsx(styles.tag, tag(r.status))}>{r.label}</span>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-          <p className={clsx(styles.footnote, 'text--center')}>
-            We are behind on startup time, embeddability, SDK languages and Windows. We are different in running one
-            control plane over several VMMs with a fleet layer, and in ending a speculative run as a changeset you can
-            review. <Link to="/docs/vs-microsandbox">The full comparison, with sources</Link>
-          </p>
-        </Reveal>
-      </div>
-    </section>
-  );
-}
-
 function Honest(): ReactNode {
   return (
     <section className={clsx(styles.section, styles.alt)}>
@@ -798,7 +729,6 @@ export default function AgentsPage(): ReactNode {
         <Sessions />
         <Controls />
         <Offline />
-        <Compare />
         <Cost />
         <PlugIn />
         <Honest />

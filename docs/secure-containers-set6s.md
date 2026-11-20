@@ -2,8 +2,7 @@
 
 Set 6 (Sentinel track) is the first piece of **FluxVM Sentinel**: the
 eBPF-based policy substrate spanning the host VMM edge and (in later Sets)
-the guest kernel, sharing one schema and identity model — the differentiator
-from Kata's namespace+seccomp+static-policy-file security story. This Set
+the guest kernel, sharing one schema and identity model — the differentiator. This Set
 wires Secure Containers Pod VMs into a Kubernetes-NetworkPolicy-*shaped*,
 identity-based ACL, extending the existing per-VM `fluxvm_tc.bpf.c` dataplane
 that Secure Containers already attaches to (via

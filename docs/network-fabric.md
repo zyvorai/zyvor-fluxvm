@@ -48,9 +48,6 @@ Pair with gateway-only `allow_ports` for proxy-or-die. See Fabric
 
 For the control-plane/packet-decision diagrams, see
 [Packet-decision and control-plane diagrams](#packet-decision-and-control-plane-diagrams) below.
-For a **user-facing speed comparison** vs traditional VM firewalls / bridges /
-user-mode NAT (plus lab policy-update numbers), see
-[Why Network Fabric is faster](#why-network-fabric-is-faster-than-traditional-vm-networking) below.
 
 When operated through [Zyvor Fabric](https://github.com/zyvorai/fabric), the same
 APIs are proxied name-keyed as `/api/vms/{name}/dataplane/*`, with a **Dataplane**
@@ -513,48 +510,6 @@ TAP+netns. Known independent lab gaps (not dataplane ABI regressions):
 
 Fabric console UX (Status / Policy save / Stats / Flows + dashboard capability)
 has been verified end-to-end against attached schema v4 VMs.
-
-## Why Network Fabric is faster than traditional VM networking
-
-Traditional VM edge security usually means **userspace orchestration of
-iptables/nftables chains**, a **shared bridge + host firewall**, or **user-mode
-NAT** (QEMU SLIRP). Those paths work — until you need **per-VM L4 policy,
-live rate limits, and telemetry at density**. Network Fabric moves the hot
-path into a **TC/eBPF classifier on the host-visible VM interface** so every
-packet is decided in-kernel with **O(1) map lookups**, while policy updates
-rewrite maps **without tearing the filter down**.
-
-### At a glance
-
-| | Traditional (libvirt / iptables / nft) | Shared bridge + host FW | QEMU user-mode NAT | **FluxVM Network Fabric (eBPF, schema v4)** |
-|---|---|---|---|---|
-| **Where each packet is decided** | Host netfilter chains (often linear / table walks) | Shared bridge + global rules | Userspace SLIRP / usernet | **TC classifier on the VM edge** (`vh*` / TAP) |
-| **Rule scaling** | Cost grows with chain length and NAT helpers | Contention on one bridge/FW | Fine for one VM; poor under load | **Per-VM BPF maps** (LPM + L4 + rate) — constant-time lookups |
-| **Live policy change** | Flush/reload chains; easy to open an allow-all gap | Host-wide blast radius | Restart or reconfigure usernet | **In-place map update** (deny-all window only — never allow-all) |
-| **Policy API latency (lab)** | Seconds-class ops common when rebuilding large tables | Same | N/A (not a real edge FW) | **~100–120 ms p50** end-to-end `POST …/network/policy` on attached VMs¹ |
-| **Mbps / PPS egress caps** | tc/htb or nft meters (separate plumbing) | Rarely per-VM | Soft / inaccurate | **First-class maps** (`max_egress_mbps` / `max_egress_pps`) |
-| **IPv6 + L4** | Extra chains, easy to drift from IPv4 | Often IPv4-only in practice | Limited | **Dual-stack L3+L4** in one program |
-| **Observability** | `conntrack` / `tcpdump` / log spam | Host-centric | Almost none | **Per-VM stats + LRU flows + optional ring samples** via REST |
-| **Cilium / k8s nodes** | Fight over iptables; fragile | Same | Irrelevant | **Coexistence mode** — FluxVM owns the VM edge; Cilium keeps the node |
-| **Fallback** | You are the fallback | — | — | **nftables** unless `required = true` |
-
-¹ Measured on Zyvor lab hardware (`mode=ebpf`, QEMU TAP+netns, live reconfigure, n=45).
-Numbers are **control-plane round-trips** (HTTP + map rewrite), not raw NIC Gbps.
-Reproduce with `POST /v1/vms/{id}/network/policy` against an attached VM.
-
-### What "faster" means for users
-
-| Need | Traditional pain | Fabric win |
-|------|------------------|------------|
-| **AI / CI sandboxes** spinning up by the dozen | Per-VM nft tables and NAT helpers pile up; policy edits get slower and riskier | Attach once; **policy is a map write** — same cost for VM #1 and VM #100 |
-| **Stop a bad agent in seconds** | Rebuild firewall, hope nothing leaked during reload | **Live deny / rate-limit** while TC stays attached |
-| **Prove what left the box** | Grep logs and conntrack | **`/network/stats` + `/network/flows`** without a packet capture tax |
-| **Run next to Cilium** | Dual iptables owners | Explicit **cilium** mode — no private Cilium map writes |
-
-```text
-Guest → TAP/netns → host-visible iface → TC/eBPF (allow / L4 / Mbps·PPS / sample)
-                                         └─ maps updated live via REST — no detach
-```
 
 ## Packet-decision and control-plane diagrams
 

@@ -25,5 +25,5 @@ the operator notices on its next reconcile and creates a replacement — the sam
 `spec.node`, or run one `fluxvm-kube --enable-placement` instance to pin to the least-loaded capable node.
 
 Related but separate: [Secure Containers](secure-containers.md) uses containerd RuntimeClass `fluxvm` for OCI
-workloads and does not replace `DisposableVm`. The scheduler-native alternative to KubeVirt is `fluxvm-microvm` —
+workloads and does not replace `DisposableVm`. The scheduler-native path is `fluxvm-microvm` —
 see [docs/microvm.md](microvm.md).

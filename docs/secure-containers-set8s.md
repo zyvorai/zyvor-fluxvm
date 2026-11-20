@@ -1,7 +1,6 @@
 # FluxVM Secure Containers — Set 8 (Sentinel): in-guest per-container network policy
 
-Set 8 (Sentinel track) is the first genuinely novel piece of the roadmap —
-not something Kata attempts. Through Set 7, nothing stopped one container in
+Set 8 (Sentinel track) is the first genuinely novel piece of the roadmap. Through Set 7, nothing stopped one container in
 a multi-container Pod from reaching another container's local ports: the
 only network enforcement was Set 6S's Pod-wide policy at the VM edge, which
 by definition can't see traffic that never leaves the guest. Set 8S closes

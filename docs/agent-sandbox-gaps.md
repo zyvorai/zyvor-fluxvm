@@ -2,7 +2,7 @@
 
 FluxVM is a **multi-VMM control plane** (QEMU, Cloud Hypervisor,
 Firecracker, and the in-tree **FluxVM hypervisor**) with CLI/REST, warm pools,
-and Kubernetes CRDs — a host-local libvirt/virsh-style lifecycle layer. Disposable
+and Kubernetes CRDs — a host-local VM lifecycle layer. Disposable
 patterns (TTL, CoW) are optional.
 
 The FluxVM hypervisor track (`backend: "flux-vm"`) is the AI-agent sandbox path.
