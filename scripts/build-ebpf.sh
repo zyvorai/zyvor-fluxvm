@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 # Build fluxvm_tc.bpf.o, fluxvm_xdp.bpf.o and runtime-intelligence BPF into dist/bpf/ (or OUT_DIR).
 # Service Fabric objects are also emitted as map-tier variants
 # (fluxvm_service_tier_{S,M,L}.bpf.o and matching xdp/connect ELFs).

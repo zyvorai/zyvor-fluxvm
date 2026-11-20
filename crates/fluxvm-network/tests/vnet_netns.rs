@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 
 //! Root + Linux integration test for virtual networks, driven through the
 //! same entry points the daemon uses (`record_port` -> `attach_vm`,

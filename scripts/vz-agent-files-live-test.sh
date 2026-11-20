@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 # Live test: guest file transfer on a vz guest (`POST /v1/vms/{id}/agent/put-file` and `/agent/get-file`). Binary content must
 # round-trip byte for byte, the requested mode must be applied, files up to the request body limit must survive and larger ones be refused, and a missing file must
 # be refused with an error; put-file creates missing parent directories.

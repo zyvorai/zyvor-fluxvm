@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 # Live test of an agent session on a macOS guest (template clone, SSH engine). Builds a template from an IPSW
 # (scripts/macos-session-template.sh) into `FLUXVM_MACOS_TEMPLATE_DIR` (default: the run's temp dir), or reuses one there: set FLUXVM_MACOS_TEMPLATE_DIR to a directory that holds
 # `<name>/spec.json` and pass FLUXVM_MACOS_TEMPLATE=<name>.

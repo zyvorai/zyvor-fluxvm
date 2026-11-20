@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 use fluxvm_mesh::mdns::{OVERLAY_MDNS_PORT, run_bridge_dual};
 use fluxvm_mesh::{StateStore, default_state_path};
 use std::net::SocketAddr;

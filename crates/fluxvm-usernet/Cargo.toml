@@ -1,11 +1,11 @@
 # Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 
 [package]
 name = "fluxvm-usernet"
 version = "0.3.0"
 edition = "2024"
-license = "Apache-2.0"
+license = "LicenseRef-Zyvor-Production-1.0"
 description = "Userspace NAT gateway (ARP, DHCP, DNS, TCP/UDP NAT, port forwards, egress policy) for vz guests over a frame socket"
 
 [lib]

@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 //!
 //! GPU health from what the host can see without a vendor agent: whether
 //! the function still answers config reads, PCIe AER error counters and

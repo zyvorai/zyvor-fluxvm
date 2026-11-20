@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 //
 // Wire protocol for FluxVM's macOS 27 custom Virtio control device.
 // Kept Foundation-only so the codec can be compiled and tested away from macOS.

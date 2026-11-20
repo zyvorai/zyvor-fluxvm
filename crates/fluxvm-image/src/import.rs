@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 
 //! Import a VMware (or other hypervisor) VM: OVA, OVF, VMDK, VHD(X) or
 //! qcow2 in, raw disks plus a suggested create request out. With `repair`,

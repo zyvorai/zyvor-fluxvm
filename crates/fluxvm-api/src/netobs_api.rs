@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 
 //! `/v1/netobs/*`: guest-network observability (flows, DNS, roll-ups, capture) from the process-wide
 //! `fluxvm_netobs` observer. When no observer is installed the read routes answer with `enabled: false` and an

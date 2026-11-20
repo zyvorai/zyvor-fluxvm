@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 # Opt-in two-host QEMU pre-copy check. Without FLUXVM_MIGRATION_DEST this
 # records the contract and exits 0. It does not cold-boot a guest.
 #

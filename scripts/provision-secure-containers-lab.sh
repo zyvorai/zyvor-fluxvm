@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 #
 # Provision Secure Containers on a KVM lab host: build shim/agent/guest-agent,
 # bake a guest image with fluxvm-guest-agent, install binaries, register

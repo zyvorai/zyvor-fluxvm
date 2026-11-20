@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 #
 # Runs every release/fleet suite in one go, locally or on a Linux host over ssh, and prints one line per suite.
 #   scripts/test-release-e2e.sh                         on this machine (Linux needed for most suites)

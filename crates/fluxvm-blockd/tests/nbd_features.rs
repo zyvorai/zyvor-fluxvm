@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 
 //! Structured replies, parallel in-flight requests, flush barrier, resize
 //! advertisement and the CLI subcommands, against an in-test NBD client.

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # shellcheck disable=SC2015
 # Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 #
 # The Python and Go SDKs against a REAL daemon, not the mock servers their unit tests use, so the SDKs cannot drift from the
 # REST API unnoticed. Starts an isolated `fluxctl serve` (loopback, own port and state dir, [sandbox.procbox] enabled; Linux)

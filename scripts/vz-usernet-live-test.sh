@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 # Live test of `apple.usernet` on a Linux guest: a root login with an injected SSH key (`cloud_init.user: root`), a TCP
 # forward, a UDP forward, live guest traffic in `/v1/netobs/flows`, and the runner's plain refusal of a pause on a paused VM.
 #   scripts/vz-usernet-live-test.sh [image]

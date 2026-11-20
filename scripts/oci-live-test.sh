@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 # Live test of container (OCI) sandboxes on vz: one lightweight VM per container (docs/oci-sandboxes.md). Starts a daemon,
 # then through the REST API and `fluxctl sandbox run`: exit code propagation, a read-only root with a writable /tmp, the
 # default uid 65534, exec with argv in an image without a shell, offline mode, an egress allow-list, TTL expiry, and the

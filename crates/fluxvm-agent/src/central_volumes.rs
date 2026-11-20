@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 
 //! `/fleet/volumes`: persistent volumes, block disks that outlive VMs. Rules live in [`crate::volumes`]; this module is
 //! HTTP and node I/O. A volume is a file on one Mac, made by that Mac's `fluxctl serve` (`/v1/volumes`).

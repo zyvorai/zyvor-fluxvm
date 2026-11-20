@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 #
 # Behavior tests for the Kairon VM-edge checks in bpf/fluxvm_tc.bpf.c
 # (schema v12): anti-spoof, learn-IP, the egress token bucket, and the DNS

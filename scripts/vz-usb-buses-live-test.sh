@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 # Live test of `apple.usb_controllers`: two XHCI buses, a USB disk hot-attached to each, and a detach of the second.
 #   scripts/vz-usb-buses-live-test.sh [image]
 # Needs Apple silicon macOS 15+, the Xcode command line tools, Rust and python3.

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 # Live test of `fluxctl docker` (docs/docker-engine.md): a real engine in a VM, driven from the Mac.
 #   scripts/docker-engine-live-test.sh
 # Needs Apple silicon, the Docker CLI (`brew install docker docker-compose`) and network for the first boot and image pulls.

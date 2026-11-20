@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 # Live test of `vz` devices on a Linux guest: extra disks of every kind and controller (image on virtio, NVMe and USB, a
 # host block device, an NBD export), a USB disk hot-attached and detached while running, a named console port both
 # ways, and the Linux display size.

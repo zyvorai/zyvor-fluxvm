@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 # Live test of `fluxvm-blockd` rebase and resize against a `vz` guest's overlay extra disk:
 # offline grow + rebase keep guest data; live rebase/resize while blockd is serving must be refused
 # (shared flock held by the server) without disturbing the guest's data.

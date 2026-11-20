@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 #
 # Live gate: SCMP_ACT_NOTIFY via ctr --seccomp-profile + notify-mode annotation.
 # Uses chmod (not openat) so the broker is not flooded during rootfs bootstrap.

@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 
 //! Team members and console sessions: the people of a tenant who sign in with SSO, their roles, and the sessions
 //! central issues after a sign-in. Pure state and rules (no HTTP), like the rest of [`super`].

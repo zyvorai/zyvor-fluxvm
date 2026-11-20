@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 
 //! Stand-alone egress proxy for `scripts/test-egress-guest.sh`. It never touches
 //! the host's default network namespace: the proxy binds where it is started

@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 
 //! The activity log: every change made through central (who, what, when, and whether it worked), and the screen
 //! proxy that lets a tenant see its VM's display.

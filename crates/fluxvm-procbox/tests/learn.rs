@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 
 //! End to end: learn a program, then run it confined by the generated
 //! profile. Tests skip (not fail) when ptrace or the needed Landlock ABI is

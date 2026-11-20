@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # shellcheck disable=SC2015,SC2154,SC2034
 # Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 #
 # A real central and real `fluxvm-agent node` processes: enrolling from a token file, restarting without it, version
 # gating, the node list (fields, filters, paging), the registry across kill -9 of central, admission control under

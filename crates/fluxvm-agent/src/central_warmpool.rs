@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 
 //! Warm pools in `fluxvm-agent central`: the `/fleet/pools` routes, claiming a warm VM for a launch, and the task that
 //! keeps every pool at `min_ready`. The rules are in [`crate::warmpool`].

@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 
 //! `fluxctl config check`: lint a host config file without starting the daemon. See `fluxvm_core::config_lint` for
 //! the rules. Read-only; needs no daemon, VM or privileges.

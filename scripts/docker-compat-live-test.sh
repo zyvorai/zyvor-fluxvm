@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 # Live test of the Docker Engine API shim (docs/oci-sandboxes.md#docker-cli-docker_host).
 #   FLUXVM_OCI_BOOT_DIR=dist/oci-boot scripts/docker-compat-live-test.sh
 # Needs Apple silicon, Docker CLI (`brew install docker`), network for alpine pull, and OCI boot artifacts.

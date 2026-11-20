@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 
 //! `fluxctl create` without a hand-written spec: `--name` and `--image` start a `vz` VM request, and the `--apple-*`
 //! style flags fill in `apple.*` fields. With `--spec` the flags are applied on top of the file.

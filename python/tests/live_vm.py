@@ -1,5 +1,5 @@
 # Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 """Live check of a VM sandbox against a real daemon (KVM host, golden template).
 
 Needs the golden guest from ``scripts/setup-native-agent-template.sh`` and a

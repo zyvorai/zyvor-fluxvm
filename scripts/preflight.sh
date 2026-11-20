@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 #
 # Is this host ready for FluxVM? With `fluxctl` on PATH (or built in ./target) this runs `fluxctl doctor --host-only`, so the
 # script and the command cannot drift apart. Without it (a fresh machine, before install) the checks below run instead.

@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 
 //! VM lifecycle spec types: what the host does when a VM's hypervisor process
 //! dies (`run_strategy`), what a guest panic or watchdog expiry does

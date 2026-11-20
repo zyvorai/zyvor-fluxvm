@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 
 //! A per-VM packet capture ring. Capture is **off by default**: nothing is retained until a session is enabled
 //! for a VM with an explicit filter and a time-to-live, and it stops by itself when the TTL passes. A session is

@@ -1,5 +1,5 @@
 # Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 #
 # Prometheus scrape for fluxvm-microvm schedule→Running histograms
 # (MICROVM_METRICS_ADDR, default :9108). Pair with node-agent hostNetwork.

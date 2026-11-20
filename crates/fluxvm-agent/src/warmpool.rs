@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 
 //! Warm pools: VMs booted ahead of time so a launch (a macOS CI job, say) starts in seconds instead of minutes.
 //!

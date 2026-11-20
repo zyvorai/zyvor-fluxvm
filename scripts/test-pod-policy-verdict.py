@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 #
 # Behavior tests for the Set 14 pod-policy rule matching in bpf/fluxvm_tc.bpf.c,
 # written for the Linux 7.x verifier fix: the rule scan and prefix match were

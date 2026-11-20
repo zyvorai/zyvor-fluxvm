@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 
 //! Positive exec allow-list for the VMM Guard: file format, Ed25519 signing
 //! and a `learn` inventory helper. Kernel enforcement lives in

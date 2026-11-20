@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 
 //! The `VmManager` side of `run_strategy`, `on_crash` and `power_schedule`: the
 //! glue that calls the pure logic in `supervisor` and `power_schedule` and acts

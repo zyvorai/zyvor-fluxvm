@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 
 //! Static checks of a VM spec (the JSON body of `fluxctl create --spec` and `POST /v1/vms`), for
 //! `fluxctl vm-spec check`.

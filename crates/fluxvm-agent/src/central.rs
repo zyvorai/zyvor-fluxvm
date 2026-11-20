@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 
 //! Central fleet registry + proxy. Deliberately doesn't depend on
 //! `fluxvm-core` — it treats `CreateVmRequest`/`VmRecord` bodies as opaque

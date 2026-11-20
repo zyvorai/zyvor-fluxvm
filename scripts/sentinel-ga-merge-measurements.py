@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 import json, pathlib, sys
 if len(sys.argv) < 3:
     raise SystemExit("usage: sentinel-ga-merge-measurements.py OUT INPUT...")

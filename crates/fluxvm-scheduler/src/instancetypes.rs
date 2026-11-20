@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 
 //! Create-time glue for instancetypes and preferences (`fluxvm_core::instancetype`): resolves the
 //! selectors in a create body against the host's catalog, and records what was resolved with the VM.

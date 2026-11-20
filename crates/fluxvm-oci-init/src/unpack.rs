@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 
 //! Apply OCI image layers to a directory: decompress, verify the diff_id, honour whiteouts, and never write
 //! outside the root, even through symlinks planted by earlier layers.

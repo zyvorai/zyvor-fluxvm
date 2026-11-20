@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 
 //! Stable, versioned wire types for everything netobs hands to the outside: flow views, events, the summary, a
 //! Prometheus text rendering, SSE framing, and (behind the `otlp` feature) an OTLP/JSON metrics mapping.

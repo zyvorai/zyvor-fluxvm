@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # shellcheck disable=SC2015,SC2016
 # Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 #
 # Exec policy and the job supervisor inside a REAL guest (docs/guest-exec-policy.md says "not yet verified on hardware"):
 # one QEMU VM with the vsock guest agent, then `fluxctl exec --policy` cases: what the policy allows works, what it does not

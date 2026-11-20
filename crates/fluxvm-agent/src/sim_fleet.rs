@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 
 //! `fluxvm-agent sim-fleet`: N simulated nodes heartbeating one central, to measure it and to check that no
 //! registration is lost.

@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 
 //! Bounded packet capture for a Kairon capture session: `tcpdump` on the VM's
 //! dataplane interface, writing a pcap the API serves once it finishes.

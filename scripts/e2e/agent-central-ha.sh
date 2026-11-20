@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # shellcheck disable=SC2015,SC2154,SC2034
 # Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 #
 # High availability with real processes (Linux and macOS): a local redis-server and two `fluxvm-agent central` on it.
 # One leader, the standby answers 503 naming it; the leader's state (nodes, tenants, keys) reaches the standby when the

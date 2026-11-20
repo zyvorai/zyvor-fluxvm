@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 
 //! Wire types for the guest job supervisor: long-lived commands the agent runs, with separate
 //! stdout/stderr spools that can be read from an offset, a stdin pipe that can be closed, and

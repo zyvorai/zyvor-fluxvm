@@ -2,7 +2,7 @@
   "name": "@zyvorai/fluxvm",
   "version": "0.1.0",
   "description": "Client for FluxVM's agent-sandbox REST API (/v1/sandboxes). No runtime dependencies.",
-  "license": "Apache-2.0",
+  "license": "LicenseRef-Zyvor-Production-1.0",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",

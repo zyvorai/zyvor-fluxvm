@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 # Live test: the live-resize routes a vz guest does not support (`POST /v1/vms/{id}/resources`, `/hotplug/{cpu,memory,nic,nic/unplug,share}`) and the
 # read-only `GET /v1/vms/{id}/guard`. Each unsupported change is refused with 400 and a message naming the reason, malformed requests are told
 # apart from unsupported ones, an unknown VM is refused, and through all of it the guest keeps running with the same vCPUs, memory and agent.

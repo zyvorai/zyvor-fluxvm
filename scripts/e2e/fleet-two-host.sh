@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # shellcheck disable=SC2029,SC2015,SC2016,SC2034
 # Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 #
 # The fleet across two REAL hosts, driven from the control machine over ssh: central on host A, a node agent on A and one on B,
 # each with its own real `fluxctl serve` (loopback only, own state dir) and a real VM created on each. Checks real capacity

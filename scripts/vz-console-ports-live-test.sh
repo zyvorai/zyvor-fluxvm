@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 # Live test: named console ports and the read-only serial stream of a vz guest. `apple.console_ports` adds virtio console ports
 # (`GET /v1/vms/{id}/ports/{name}`, a WebSocket of raw bytes both ways, no network or agent needed in the guest); `GET /v1/vms/{id}/serial`
 # replays the tail of the console log and follows it, read only. The WebSocket client is a small stdlib Python one.

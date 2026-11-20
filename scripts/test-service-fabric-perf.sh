@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 #
 # Service Fabric performance / qualification lab (black-box).
 # Measures VIP RTT p50/p99, optional PPS/Mpps sample, host-routing counters,

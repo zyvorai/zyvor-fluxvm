@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 # Live test: agent ping and incident bundles on a vz guest (`POST /v1/vms/{id}/agent/ping`, `/v1/vms/{id}/diagnostics`). A bundle job
 # finishes, its checksum matches the download, the agent token is redacted by default and present with `redact:false`, bad requests
 # (pcap over 30 s, a memory dump on vz) are refused, and a bundle can be listed and deleted.

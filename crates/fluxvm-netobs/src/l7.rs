@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 
 //! Application-layer metadata extraction. Everything here is bounds-checked and allocation-light, and works on
 //! byte slices; reassembling a stream into such a slice is the job of [`crate::reasm`] / [`crate::streams`], and

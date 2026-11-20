@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 
 //! Ethernet / ARP / IPv4 / IPv6 / UDP / TCP parsing and building. No checksum verification on input (a guest's
 //! virtio-net may hand us partially checksummed frames); every frame we build carries correct checksums.

@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 
 //! The HPACK static Huffman code (RFC 7541 Appendix B): `(bit length, code)` for symbols 0..=255 and EOS (256).
 //! The values are the RFC constants; they are exercised by the RFC 7541 Appendix C vectors in `h2.rs`.

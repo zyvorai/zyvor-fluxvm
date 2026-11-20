@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 //
 // Screen capture and keyboard/mouse input for agents. Virtualization.framework has no framebuffer or input API, so
 // the runner drives the VM's own display view: screenshots come from the view's window and input is delivered as

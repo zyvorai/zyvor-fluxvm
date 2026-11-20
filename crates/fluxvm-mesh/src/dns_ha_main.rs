@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 
 use fluxvm_mesh::catalog::{CatalogStore, default_catalog_path};
 use fluxvm_mesh::dns::{PrivateDns, serve_udp};

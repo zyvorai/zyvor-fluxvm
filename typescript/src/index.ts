@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 
 export { FluxVM, Sandbox, shellQuote, MAX_FILE_TRANSFER_BYTES, DEFAULT_EXEC_TIMEOUT_SECS } from "./client.js";
 export type { FluxVMOptions } from "./client.js";

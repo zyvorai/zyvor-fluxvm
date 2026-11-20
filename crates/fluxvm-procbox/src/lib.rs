@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 
 //! `fluxvm-procbox`: a rootless process sandbox built on Landlock and
 //! seccomp-bpf. It is the lightweight tier below FluxVM's microVMs: no root,

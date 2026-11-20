@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 # Opt-in, root-only lab probe: does Cloud Hypervisor's own snapshot/restore
 # mechanism work at all via the *plain* /v1/vms route (NOT a sandbox --
 # create_sandbox always forces flux-vm for a client spec and only allows

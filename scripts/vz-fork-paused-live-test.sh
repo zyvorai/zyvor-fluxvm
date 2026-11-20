@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 # Live test: fork a PAUSED vz guest (`POST /v1/vms/{id}/fork`). A memory marker is written in the running guest, the
 # guest is paused, forked, and: the parent must still be paused afterwards, the child must run and hold the marker, and the
 # parent must resume and still hold it.

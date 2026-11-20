@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 //
 // Drives `AppleBackend` against a fake runner (a small Python process that speaks the control-socket protocol),
 // so the supervision logic is tested without Virtualization.framework. Real VM runs: scripts/macos-live-test.sh.

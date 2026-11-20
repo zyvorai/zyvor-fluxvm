@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 # Live test: live migration (`/v1/vms/{id}/migration/{start,status,cancel,tune,postcopy,finish}`, `POST /v1/migration/receivers`) is QEMU-only, so a
 # vz guest must be refused cleanly on every route: 400 naming the backend, a malformed body told apart from an unsupported backend, an unknown or
 # stopped VM refused for its own reason, no migration receiver process left behind, and the guest keeps running with its agent answering.

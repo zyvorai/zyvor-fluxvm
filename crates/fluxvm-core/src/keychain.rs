@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 
 //! Secrets kept in the macOS login Keychain as generic-password items, read with `/usr/bin/security` so no secret
 //! has to sit in a config file. The value is never logged or put into an error message.

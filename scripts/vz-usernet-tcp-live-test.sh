@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 # Live test of `apple.usernet` TCP on a Linux guest: host-to-guest port forwards (SSH and an HTTP server), TCP egress
 # through the userspace gateway, and `deny_ports` refusing a port while another still connects.
 #   scripts/vz-usernet-tcp-live-test.sh [image]

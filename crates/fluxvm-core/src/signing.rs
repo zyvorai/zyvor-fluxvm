@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 
 //! Generic Ed25519 sign/verify over raw bytes, verified against the operator's
 //! configured `trusted_signers`. Shared by the image catalog and signed host

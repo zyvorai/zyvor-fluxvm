@@ -1,5 +1,5 @@
 # Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 """Live checks of the procbox uid pool against a daemon started as ROOT.
 
 Each class needs its own daemon (see docs/procbox-backend.md, "Verified live

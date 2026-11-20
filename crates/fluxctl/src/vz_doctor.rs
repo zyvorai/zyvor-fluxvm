@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 
 //! `fluxctl vz doctor`: a preflight for the `vz` backend. It never needs the daemon: facts are gathered from the OS and
 //! the signed runner, then judged by the pure [`evaluate`], so every rule is unit tested without a Mac.

@@ -1,5 +1,5 @@
 # Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 # One image, several entrypoints: `fluxctl serve` (VMM REST API), `fluxvm-kube`
 # (DisposableVm operator), `fluxvm-microvm` (scheduled MicroVM controller /
 # node-agent). Deploy selects via each container's `command:` - see

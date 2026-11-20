@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 //
 // FluxVM Studio for the fleet central: the built SPA (`ui/fleet/dist`, committed so `cargo build` stays Node-free;
 // CI rebuilds and fails if it is stale) embedded and served under `/console/`. Mirrors `fluxvm-api`'s studio.rs

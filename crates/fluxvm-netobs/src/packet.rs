@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 
 //! A bounds-checked parser for the frames a guest NIC carries: Ethernet (with 802.1Q/802.1ad tags), ARP, IPv4,
 //! IPv6 (with extension headers), TCP, UDP and ICMP/ICMPv6.

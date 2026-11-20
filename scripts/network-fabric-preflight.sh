@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 #
 # Host readiness checks for Network Fabric (GA; dataplane schema v4) before
 # enabling eBPF/cilium mode. Does not flip dataplane mode and does not run

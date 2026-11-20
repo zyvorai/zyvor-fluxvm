@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 # Live test of published UDP (and TCP) ports on a container sandbox (docs/oci-sandboxes.md, "Published ports"). Starts a
 # daemon, runs an alpine container with `nc` echo servers on a UDP and a TCP port, then from the Mac sends a datagram and
 # a TCP line to the published 127.0.0.1 ports and checks they come back. Also checks that a second sandbox cannot take a

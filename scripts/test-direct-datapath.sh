@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 #
 # Linux-root netns test for the direct (bridge-less) datapath. No KVM, no
 # daemon: it loads the real BPF objects with bpftool and emulates a Cilium pod.

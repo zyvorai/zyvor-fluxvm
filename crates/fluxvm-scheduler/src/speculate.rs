@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 
 //! Safe speculative execution: run a command in an isolated copy of a
 //! sandbox, keep what it changed as a *changeset*, and let a caller approve

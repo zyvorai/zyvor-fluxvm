@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 use anyhow::{Context, Result, bail};
 use fluxvm_intelligence::tcpintel::{self, DEFAULT_TCP_PIN_ROOT, DEFAULT_TCP_STATE_ROOT};
 use std::{env, path::PathBuf};

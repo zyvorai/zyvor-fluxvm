@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # shellcheck disable=SC2034
 # Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 #
 # The secure-container runtime end to end on a shared Linux/KVM host without touching what is there: a PRIVATE containerd (own
 # socket, root and state under a temp dir, no CRI), an isolated `fluxctl serve` (own port and state dir), the shim and agent built

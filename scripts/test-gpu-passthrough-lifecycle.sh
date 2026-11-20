@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 #
 # Hardware-gated GPU passthrough lifecycle check.
 # Soft-skips when the host has no NVIDIA/AMD GPU, IOMMU, or vfio-pci.

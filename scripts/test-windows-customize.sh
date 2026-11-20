@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 # Gated Windows offline-customize smoke test. Skips unless WINDOWS_IMAGE or
 # KRYTON_WINDOWS_IMAGE is set to a Windows qcow2/raw disk. Does not boot the guest.
 # Prefer Kryton goldens: docs/windows-golden.md / scripts/prepare-windows-golden.sh

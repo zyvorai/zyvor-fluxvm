@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 # Live test of the macOS (Apple Virtualization.framework) backend: starts the daemon, creates a real ARM64 Linux VM
 # through the REST API, SSHes into it, pauses/resumes, stops and restarts it, then deletes it.
 #   scripts/macos-live-test.sh [path/to/arm64-linux-image.raw]

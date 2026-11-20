@@ -1,5 +1,5 @@
 # Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 #
 # AppArmor local-include for /usr/bin/swtpm, granting the paths FluxVM's
 # own req.tpm sidecar (fluxvm_core::process::spawn_swtpm) needs -- see

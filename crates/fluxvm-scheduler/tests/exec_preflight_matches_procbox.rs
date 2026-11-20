@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 
 //! `fluxvm_guest_protocol::exec_preflight::preflight` (used by `fluxctl exec-policy check`) must give the same answer
 //! as the real decision in `fluxvm_procbox::landlock::plan` for every policy shape and Landlock ABI, so the offline

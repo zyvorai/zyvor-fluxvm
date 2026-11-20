@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 
 //! `fluxctl agent`: AgentSession from the command line. REST: `/v1/agents/sessions/*`.
 //! Always talks to the daemon (`--server`, the current context, or the local `listen`).

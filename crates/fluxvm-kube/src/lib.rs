@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 
 //! `DisposableVm` CRD + a node-local operator that reconciles them against a
 //! *local* `fluxctl serve` instance's REST API. See `crd::DisposableVmSpec`

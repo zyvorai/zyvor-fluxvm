@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 
 //! The Mac-cloud half of `fluxvm-agent central`: tenants, host leases, scrub, drain, metering, the ledger
 //! reconciler and an exec proxy. Rules live in [`crate::tenancy`]; this module is HTTP and node I/O.

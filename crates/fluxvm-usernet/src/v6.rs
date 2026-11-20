@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 
 //! IPv6 for the guest (enabled by `UserNetConfig::ipv6`): neighbour discovery for the gateway addresses, router
 //! advertisements carrying a /64 prefix for SLAAC plus an RDNSS option (so no DHCPv6), ICMPv6 echo to the

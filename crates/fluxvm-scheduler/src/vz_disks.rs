@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 
 //! Extra disks of `vz` Linux guests (`apple.extra_disks`): image files, host block devices and NBD exports on virtio, NVMe or
 //! USB controllers. Virtualization.framework fixes a VM's devices when it starts, so a change applies at the next start, except

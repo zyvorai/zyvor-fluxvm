@@ -1,5 +1,5 @@
 # Copyright 2026 Zyvor
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 
 # The one fluxvm.service: scripts/deploy-remote.sh, the release tarball (share/systemd/) and the Linux
 # packages all install this file. There used to be a second, weaker copy under systemd/ with no capabilities,

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 #
 # Resolve a Windows golden qcow2 for FluxVM from the sibling Kryton checkout
 # (https://github.com/zyvorai/kryton). Optionally build via Kryton's

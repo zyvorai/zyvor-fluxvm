@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 //! `apple.vsock_services[].tcp`: a guest vsock port relayed to a loopback TCP server on the Mac (a local
 //! OpenAI-compatible model server). Nothing here opens a socket; the relay itself runs in the Swift runner and was
 //! verified on an M4 against a stand-in and a real `llama-server` (docs/macos.md).

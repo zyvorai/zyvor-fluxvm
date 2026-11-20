@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 #
 # Runs `systemd-analyze verify` over the host units this repo ships (packaging/systemd and deploy/systemd) and
 # fails on anything real: unknown directives, bad values, a Requires=/After= on a unit that is not shipped.

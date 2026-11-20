@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 
 //! GPT / MBR parsing. Only locates candidate byte ranges; deciding which one
 //! is the root filesystem is done by probing them (see `lib.rs`).

@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 
 //! `fluxctl what-if`: offline policy simulator. Reads one or two `VmNetworkPolicy` JSON files, answers "would this
 //! connection be allowed, and which rule decides", and shows which connections change between two policies. Needs no

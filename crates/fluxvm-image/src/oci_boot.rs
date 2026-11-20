@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 
 //! Locating the kernel and initramfs that boot OCI sandboxes on `vz` (`apple.oci_kernel`, `apple.oci_initrd`).
 //!

@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 
 //! A small S3 client: SigV4-signed PUT (single or multipart), GET and
 //! DELETE against AWS S3, MinIO, Ceph RGW or Atlas S3.

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 //! `apple.macos_vsock` is an experimental, opt-in flag: the Rust spec, the runner config, the Swift runner and the guest
 //! agent's LaunchDaemon files agree on its name and default off. Nothing here boots a VM; the hardware result (a macOS 27.0.1
 //! guest binds AF_VSOCK and the LaunchDaemon agent answers over it) is recorded in docs/macos.md.

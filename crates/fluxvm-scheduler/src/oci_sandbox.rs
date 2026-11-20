@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 
 //! OCI sandboxes on `vz`: one lightweight Linux VM per container. The image's rootfs (built once per manifest digest, see
 //! [`crate::oci_images`]) is APFS-cloned for the sandbox and booted directly with the OCI kernel and initramfs; PID 1 is

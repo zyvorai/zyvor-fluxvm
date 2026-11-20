@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 
 //! `GET /v1/vms/{id}/tunnel?port=N`: a WebSocket that carries one TCP connection to port N of a running VM.
 //!

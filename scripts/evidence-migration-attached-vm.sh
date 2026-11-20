@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 # S11 — migration orchestrator against a VM with a live dataplane attached.
 #
 # Boots (or reuses) a FluxVM guest, attaches eBPF/nft dataplane, then runs

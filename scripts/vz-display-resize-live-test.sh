@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 # Live test of `POST /v1/vms/{id}/vz/display` on a Linux guest: the host updates the DRM connector's preferred
 # mode; without a KMS client the active mode stays put; with `modetest` the guest can switch to the new size.
 #   scripts/vz-display-resize-live-test.sh [image]

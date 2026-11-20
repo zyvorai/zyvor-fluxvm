@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 #
 # Idempotent single-node k3s bootstrap for live Kubernetes-facing tests
 # (e.g. scripts/test-networkpolicy-live.sh). This is lab/CI infrastructure,

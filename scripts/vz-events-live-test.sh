@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 # Live test: the lifecycle event log of a vz guest (`GET /v1/events`, `GET /v1/events/stream`). A VM's create, pause, resume, restart
 # (which is a stop, a start and then the restart event) and stop are recorded in order; the stream carries only events that happen
 # after it connects; the vm, event-prefix, since and limit filters narrow the list.

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 """FluxVM Sentinel Set 15E fleet rollout and canary controller.
 
 Conservative multi-node wrapper around Set 14E's node-local upgrade manager.

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # shellcheck disable=SC2015,SC2016,SC2034,SC2154,SC2329,SC2086
 # Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 #
 # Tunnels through central with real processes (Linux and macOS): `fluxvm-agent central`, a `sim-node`, and the `fluxctl fleet`
 # client. A tenant leases the simulated Mac, starts a VM, and its bytes come back from the VM's echo server through

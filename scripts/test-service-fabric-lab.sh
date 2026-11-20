@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 #
 # Lab-grade Service Fabric SLO wrapper with higher Mpps / CPU ceilings.
 # Exports SLO_LAB=1 so perf harness defaults to:

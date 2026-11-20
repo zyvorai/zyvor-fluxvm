@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 
 //! `display-resize`: resize a running VM's display through the runner control socket
 //! (`VZGraphicsDisplay.reconfigure(configuration:)`, macOS 14+). The call only updates the connector's preferred mode on

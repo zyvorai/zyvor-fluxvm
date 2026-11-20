@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 """End-to-end MCP check: drive a built `fluxctl mcp serve` with the official
 MCP Python SDK client against a fake FluxVM REST API.
 

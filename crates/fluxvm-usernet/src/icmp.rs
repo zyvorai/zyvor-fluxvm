@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 
 //! Outbound ICMP echo proxy. The guest's echo request is re-sent from an unprivileged ICMP datagram socket
 //! (`socket(AF_INET, SOCK_DGRAM, IPPROTO_ICMP)`, no root on macOS; on Linux it needs `net.ipv4.ping_group_range`

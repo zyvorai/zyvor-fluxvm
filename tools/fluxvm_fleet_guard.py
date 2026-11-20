@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 """FluxVM Sentinel Set 16E continuous fleet drift and SLO guard.
 
 Read-mostly by default. It inventories nodes over strict SSH, compares release/build/file/BPF

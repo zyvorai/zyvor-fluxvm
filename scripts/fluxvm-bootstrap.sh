@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 #
 # fluxvm-bootstrap: the pull installer. A node holds a mirror URL and the release public key; it fetches the signed
 # channel file, decides whether it is in the current rollout wave, downloads and verifies the package named by the

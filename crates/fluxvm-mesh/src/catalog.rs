@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 
 //! Durable Phase-2 policy/catalog state. Connectivity state remains in the
 //! Phase-1 `state.v1`; service/DNS/ACL/gateway/relay intent is a separate

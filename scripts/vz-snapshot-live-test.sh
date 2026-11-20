@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 # Live test: VM snapshots on a vz guest (`POST /v1/vms/{id}/snapshot`, `start-from-snapshot`, `GET .../snapshots`,
 # `DELETE .../snapshots/{tag}`). A memory snapshot brings back disk and memory (the guest does not reboot); a disk-only snapshot
 # (`memory: false`) brings back the disk with a cold boot; an unknown or deleted tag is refused (400) and a plain start recovers the VM.

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 # Checkout / return latency of the macOS warm pool, against a local fluxctl serve on a Mac.
 #
 # Needs a macOS guest that is set up and logged in, and an unlocked login session (restore fails on a locked screen).

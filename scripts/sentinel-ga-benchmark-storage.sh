@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 set -euo pipefail
 OUT="${1:-/tmp/fluxvm-storage-measurements.json}"
 DIR="${FLUXVM_BENCH_STORAGE_DIR:-/var/tmp}"

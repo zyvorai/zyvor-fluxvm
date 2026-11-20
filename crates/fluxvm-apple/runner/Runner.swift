@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 // Copyright 2026 Zyvor AI Labs
 //
 // fluxvm-vz-runner: runs one VM on Apple's Virtualization.framework for FluxVM's `vz` backend.

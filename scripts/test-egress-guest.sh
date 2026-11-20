@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 #
 # Real-traffic test of the egress proxy: HTTPS interception with a client that
 # trusts the proxy CA, explicit-proxy and transparent-redirect modes (real nft

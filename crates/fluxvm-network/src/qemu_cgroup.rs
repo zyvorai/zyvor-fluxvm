@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 
 //! Sentinel Set 7S: per-VM device-cgroup + outbound-IP hardening for the
 //! QEMU/VMM process itself, layered onto the same `fluxvm.slice/{id}.scope`

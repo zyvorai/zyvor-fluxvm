@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 # Time POST /v1/vms/{id}/fork for COUNT children of one running flux-vm VM,
 # RUNS times, then delete the children (KEEP=1 keeps the last run's).
 # Reports p50/p95 fork time per child ("ready": the API returns once every

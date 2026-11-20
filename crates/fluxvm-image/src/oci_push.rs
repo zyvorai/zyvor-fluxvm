@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 
 //! A VM disk image as a single-layer OCI artifact, like KubeVirt's containerDisk but pushed and pulled in pure Rust
 //! (no skopeo or docker): [`push`] streams one raw or qcow2 file to a registry, [`pull_disk`] fetches it back.

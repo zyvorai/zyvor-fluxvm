@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 #
 # Guards the "runs on every supported distro" promise for the prebuilt Linux binaries. A binary built on a
 # newer glibc than the oldest node it must run on fails at start with "version GLIBC_2.xx not found". This

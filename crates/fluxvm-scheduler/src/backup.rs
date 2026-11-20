@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 
 //! Backups under `state_dir/backups`: guest quiescing for `backup_vm`, and
 //! listing, deleting and restoring what it wrote.

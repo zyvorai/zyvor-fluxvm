@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 
 //! `fluxctl mcp install|uninstall|status`: registers `fluxctl mcp serve` with an MCP client by editing that
 //! client's own config file, leaving every other entry (and, for TOML, comments and layout) as it was.

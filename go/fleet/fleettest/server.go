@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 
 // Package fleettest is an in-memory fake of FluxVM central's fleet API for
 // tests: tenants and their tokens, API keys, nodes, leases, VMs, networks, the

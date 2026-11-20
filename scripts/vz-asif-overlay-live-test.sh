@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 # Live test of `apple.asif_overlay` on a Linux guest (macOS 27+ host): guest writes land in the sparse
 # `disk-overlay.asif`, not in the base `root.raw`.
 #   scripts/vz-asif-overlay-live-test.sh [image]

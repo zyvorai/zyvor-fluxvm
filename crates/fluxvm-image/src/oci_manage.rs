@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 
 //! Registry management over the OCI distribution HTTP API: inspect, list tags, retag, delete, referrers (OCI 1.1
 //! API with the tag-schema fallback), attach an artifact to a subject, and build multi-arch indexes. Client-side

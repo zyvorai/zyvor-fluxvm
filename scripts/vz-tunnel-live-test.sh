@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 # Live test: the TCP tunnel to a vz guest (`GET /v1/vms/{id}/tunnel?port=N`, a WebSocket relaying raw bytes to a TCP port in the guest).
 # A guest on the Mac's NAT is reached on its sshd (banner, then the key exchange the guest sends once the client has spoken), and
 # the refusals are checked: port 0, a closed port, a stopped VM, an unknown VM and a usernet guest. The WebSocket client is a small stdlib Python one.

@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 
 //! `fluxctl import-compose`: a `docker-compose.yml` as a `fluxvm.toml` of container services. Only what maps onto a
 //! container sandbox is carried over; everything else is reported so nothing is dropped silently.

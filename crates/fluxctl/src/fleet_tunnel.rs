@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 
 //! `fluxctl fleet ssh`, `tunnel-stdio`, `port-forward` and `tunnels`: SSH and other ports of a VM, through central.
 //!

@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 
 //! What runs in a cluster and what has happened to it, for the Kubernetes page: `GET /v1/kube/{cluster}/workloads` (Deployments,
 //! StatefulSets, DaemonSets and Services) and `GET /v1/kube/{cluster}/events`. Read-only, through the same client certificate and

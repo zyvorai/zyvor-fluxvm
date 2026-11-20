@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 
 //! A small, hand-rolled per-key token-bucket rate limiter for
 //! `fluxvm-api`'s REST surface -- no new dependency for what a basic

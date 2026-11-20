@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 
 //! FluxDisk block server: NBD (newstyle, fixed handshake) over TCP, with raw
 //! file and copy-on-write overlay backends.

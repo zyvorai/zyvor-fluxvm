@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 
 //! Offline preflight of an [`ExecPolicy`]: "what would a guest with Landlock ABI N enforce, and will the command even
 //! start?" without a VM. Dependency-free and pure.

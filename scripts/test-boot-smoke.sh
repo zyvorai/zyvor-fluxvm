@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 # Minimal real-hardware smoke test: `fluxctl serve` comes up, answers
 # /healthz, boots a real QEMU VM via the REST API (no agent, no network —
 # just the bare create path), and the VM actually reaches a real systemd

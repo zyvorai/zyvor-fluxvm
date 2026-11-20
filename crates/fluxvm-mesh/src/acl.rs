@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 
 //! Fail-closed personal-cloud ACLs. These rules are control-plane intent; a
 //! runtime can compile them to Network Fabric, nftables, or a userspace tunnel.

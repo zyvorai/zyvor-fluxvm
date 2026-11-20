@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 # Live test: what the daemon reports about the Mac host (`GET /v1/host/{apple,apple/capabilities,apple/ipsw,overview,memory,storage,images}`).
 # The probes agree with each other and with the machine (CPU count, memory, macOS version), the capability list covers the vz features, and
 # a running guest shows up in the overview counts and the storage report; the Linux-only reports (topology, pressure) come back empty, not an error.

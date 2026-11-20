@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 
 //! Credential broker: per-sandbox grants {secret ref, destination hosts,
 //! expiry} that the egress proxy turns into an injected `Authorization`

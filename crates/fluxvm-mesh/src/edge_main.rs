@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 use fluxvm_mesh::edge::{EdgeConfig, reconcile_once, run};
 use fluxvm_mesh::wan::WanState;
 use std::path::PathBuf;

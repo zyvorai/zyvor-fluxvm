@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 
 //! `fluxctl vm-spec check`: lint a VM spec (the JSON of `fluxctl create --spec` and `POST /v1/vms`) without a daemon.
 //! See `fluxvm_core::spec_lint` for the rules. Read-only; needs no daemon, VM or privileges.

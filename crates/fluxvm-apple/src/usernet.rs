@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 
 //! `apple.usernet`: the guest's only NIC is a file-handle attachment whose peer is a supervised `fluxvm-usernet`
 //! process (userspace NAT, egress/DNS policy, port forwards).

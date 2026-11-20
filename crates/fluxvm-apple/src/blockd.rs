@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 
 //! `apple.extra_disks` of kind `overlay`: a copy-on-write overlay on a base image, served over NBD by a supervised
 //! `fluxvm-blockd serve` on 127.0.0.1 (ephemeral port) and attached to the guest as an ordinary `nbd` disk.

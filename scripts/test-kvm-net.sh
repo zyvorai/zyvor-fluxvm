@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 #
 # Guest networking smoke for the in-tree KVM engine's virtio-net (tap -> guest
 # RX and guest -> tap TX). Per run, at each vCPU count, in a throwaway network

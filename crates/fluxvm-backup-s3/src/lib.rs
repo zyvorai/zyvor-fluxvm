@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 
 //! Where changed-block-tracking backups live: one manifest per backup and
 //! one qcow2 layer per disk, in an S3-compatible bucket (or a directory).

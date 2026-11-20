@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 # Fills the version and checksum of the Homebrew formula from a release package.
 #   scripts/update-homebrew-formula.sh <version> <package.tar.gz | sha256> [formula.rb]
 set -euo pipefail

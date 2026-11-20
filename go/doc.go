@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 
 // Package fluxvm is a client for the FluxVM agent-sandbox API
 // (/v1/sandboxes). It uses only the standard library and mirrors the Python

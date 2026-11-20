@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 
 //! Persistent volumes on this host: sparse raw disk files under `<state_dir>/volumes/` that outlive the VMs using them.
 //! `fluxvm-agent central` (`/fleet/volumes`) creates them here and attaches one to a `vz` Linux guest at create time as

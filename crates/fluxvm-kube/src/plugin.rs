@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 
 //! `kubectl-fluxvm` resolves a DisposableVm or MicroVM to the node-local
 //! `fluxctl` API. It does not speak virtctl and does not open a second

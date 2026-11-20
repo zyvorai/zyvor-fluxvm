@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 # Live test: Studio's fleet VM tools against a real vz guest. A local `fluxctl serve` runs a guest with the vz runner, a
 # `fluxvm-agent central` and a `fluxvm-agent node` put it behind central, and Chrome drives the VM's sheet (screen, snapshots,
 # clone, command) through central. Every step is confirmed through the API, not from a toast.

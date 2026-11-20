@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 # Real-cluster gate for Set 16. This script intentionally does not pretend to
 # provision FluxVM itself; run it only on a cluster where Secure Containers
 # Pods are already backed by FluxVM schema-v9 eBPF VMs.

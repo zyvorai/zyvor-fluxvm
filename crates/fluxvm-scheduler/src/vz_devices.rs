@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 
 //! Read-only device state and a few controls of a running `vz` VM that the runner already serves over its control
 //! socket: EFI Secure Boot status, the custom Virtio device, and USB devices (mounted mass storage and passthrough).

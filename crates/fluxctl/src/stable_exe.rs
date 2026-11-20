@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 
 //! The path of this `fluxctl` to write into a config that must keep working later (an MCP client's entry, a LaunchAgent,
 //! an ssh ProxyCommand).

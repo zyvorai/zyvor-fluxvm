@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 # Live test of named volumes on a `vz` VM sandbox: RW persistence across delete, two volumes at once, and a read_only
 # volume that the guest can read but not write.
 #   scripts/vz-sandbox-volume-live-test.sh

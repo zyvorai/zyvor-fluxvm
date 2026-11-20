@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 
 //! `fluxctl fleet snapshot | snapshots | restore | snapshot-rm | clone`: VM snapshots and clones through central
 //! (`/fleet/vms/{node}/{id}/snapshots`, `…/clone`). VMs are found by name or ID prefix like every other fleet verb.

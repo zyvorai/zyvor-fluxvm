@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 
 //! Runner control calls for the macOS 27 Virtualization additions: EFI Secure Boot status, the custom Virtio device's
 //! lifecycle, and the USB devices currently on the VM's controllers.

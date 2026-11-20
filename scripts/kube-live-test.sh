@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 # Live test of `fluxctl kube` (docs/kubernetes-on-mac.md): a k3s cluster in a VM, driven from the Mac.
 #   scripts/kube-live-test.sh
 # Needs Apple silicon, kubectl (`brew install kubectl`) and network for `kube fetch` and image pulls. For the `kube load`

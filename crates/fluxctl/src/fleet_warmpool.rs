@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 
 //! `fluxctl fleet pools | pool-create | pool-set | pool-rm`: warm pools (`/fleet/pools`), VMs central keeps booted so a
 //! launch of their image starts in seconds.

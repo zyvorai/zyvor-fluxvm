@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # shellcheck disable=SC2015,SC2016,SC2034
 # Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 #
 # The central features that need real VMs, on one Linux/KVM host: central + a node agent + the node's own `fluxctl serve`
 # (loopback, own ports and state dir, nothing shared with the host's service). Through central: a VM placed on the node,

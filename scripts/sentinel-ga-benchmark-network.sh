@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 set -euo pipefail
 OUT="${1:-/tmp/fluxvm-network-measurements.json}"
 DURATION="${FLUXVM_BENCH_SECONDS:-5}"

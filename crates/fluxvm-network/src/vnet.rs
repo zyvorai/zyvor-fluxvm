@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 
 //! Virtual networks: isolated IPv4 networks (one VNI each) routed by
 //! `bpf/fluxvm_vnet.bpf.c` and carried between hosts in Geneve.

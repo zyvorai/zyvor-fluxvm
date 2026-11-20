@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 # Live QEMU migration between two real FluxVM hosts that mount the same shared
 # storage at the same path. Drives each host's API (127.0.0.1:7788) over ssh.
 #

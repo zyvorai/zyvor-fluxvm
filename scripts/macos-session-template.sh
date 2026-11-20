@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 # Build a macOS guest template that agent sessions can start from (`runtime.template`): installs from an IPSW with
 # the unattended `provision_*` options, authorizes the daemon's SSH key for the guest user, turns off sleep and the
 # screen lock, shuts the guest down, and writes `<templates_dir>/<name>/spec.json` with the disk and identity files

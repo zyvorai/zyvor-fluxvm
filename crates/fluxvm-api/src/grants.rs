@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 
 //! Credential broker routes: `POST/GET/DELETE /v1/sandboxes/{id}/grants`.
 //! Responses carry [`GrantInfo`] only, which has no secret field.

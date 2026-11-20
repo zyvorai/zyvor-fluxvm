@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 """FluxVM Sentinel GA certification and recovery helper.
 
 Stdlib-only by design. It never loads or replaces a BPF program. Mutation is
