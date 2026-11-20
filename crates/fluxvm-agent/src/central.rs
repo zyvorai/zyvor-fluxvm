@@ -23,10 +23,10 @@ mod ha_rt;
 mod metrics;
 #[path = "central_notify.rs"]
 mod notify;
-#[path = "central_warmpool.rs"]
-mod pools;
 #[path = "central_placement.rs"]
 mod placement;
+#[path = "central_warmpool.rs"]
+mod pools;
 #[path = "central_registry.rs"]
 mod registry;
 #[path = "central_signup.rs"]

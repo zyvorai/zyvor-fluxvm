@@ -158,7 +158,9 @@ check "jitter stays within 0..JITTER_MAX" test "$okj" = 1
 mkdir -p "$T/art-stray" && for f in fluxvm-9.9.9-linux-x86_64.tar.gz fluxvm_9.9.9_amd64.deb fluxvm-9.9.9-1.x86_64.rpm; do echo "$f" > "$T/art-stray/$f"; done
 "$MK" --version 9.9.9 --artifacts "$T/art-stray" --key "$T/k.pem" --out "$T/mirror-stray" >/dev/null
 check "the manifest lists only the tarball" test "$(jq -c '.artifacts.x86_64 | keys' "$T/mirror-stray/releases/9.9.9/manifest.json")" = '["tarball"]'
+# shellcheck disable=SC2016  # the single quotes are deliberate: the inner bash expands $1/$2
 check "a stray rpm is not covered by SHA256SUMS" bash -c '! grep -q "\.rpm" "$1"' _ "$T/mirror-stray/releases/9.9.9/SHA256SUMS"
+# shellcheck disable=SC2016  # the single quotes are deliberate: the inner bash expands $1/$2
 check "INSTALL_MODE=deb is refused with an explanation" bash -c 'out="$(INSTALL_MODE=deb FLUXVM_ROOT="$1/refuse" bash "$2/scripts/fluxvm-bootstrap.sh" status 2>&1)"; rc=$?; [[ $rc -ne 0 && $out == *"no longer supported"* ]]' _ "$T" "$REPO"
 
 echo; echo "$pass passed, $fail failed"

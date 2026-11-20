@@ -1,6 +1,9 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
 // SPDX-License-Identifier: Apache-2.0
 
+// The OpenAPI schema table in openapi.rs is one large json! literal; it outgrew the default limit of 128.
+#![recursion_limit = "512"]
+
 use axum::{
     Extension, Json, Router,
     body::Body,

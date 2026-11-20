@@ -52,7 +52,9 @@ fn parse_mode(v: Option<&Value>, what: &str) -> Result<bool, AppError> {
     match v.and_then(Value::as_str) {
         None | Some("preferred") => Ok(false),
         Some("required") => Ok(true),
-        Some(o) => Err(bad(format!("{what}.mode must be 'required' or 'preferred', not '{o}'"))),
+        Some(o) => Err(bad(format!(
+            "{what}.mode must be 'required' or 'preferred', not '{o}'"
+        ))),
     }
 }
 
@@ -71,12 +73,16 @@ impl Rules {
         let mut raw = serde_json::Map::new();
         let mut rules = Rules::default();
         if let Some(v) = anti_v.filter(|v| !v.is_null()) {
-            let o = v.as_object().ok_or_else(|| bad("antiAffinity must be an object"))?;
+            let o = v
+                .as_object()
+                .ok_or_else(|| bad("antiAffinity must be an object"))?;
             let group = o
                 .get("group")
                 .and_then(Value::as_str)
                 .filter(|g| valid_name(g))
-                .ok_or_else(|| bad("antiAffinity.group must be 1-63 characters of [A-Za-z0-9._-]"))?;
+                .ok_or_else(|| {
+                    bad("antiAffinity.group must be 1-63 characters of [A-Za-z0-9._-]")
+                })?;
             rules.anti = Some(Anti {
                 group: group.to_owned(),
                 required: parse_mode(o.get("mode"), "antiAffinity")?,
@@ -84,7 +90,9 @@ impl Rules {
             raw.insert("antiAffinity".into(), v.clone());
         }
         if let Some(v) = spread_v.filter(|v| !v.is_null()) {
-            let o = v.as_object().ok_or_else(|| bad("topologySpread must be an object"))?;
+            let o = v
+                .as_object()
+                .ok_or_else(|| bad("topologySpread must be an object"))?;
             let key = o
                 .get("key")
                 .and_then(Value::as_str)
@@ -95,22 +103,33 @@ impl Rules {
                 Some(m) => m
                     .as_u64()
                     .filter(|m| (1..=1000).contains(m))
-                    .ok_or_else(|| bad("topologySpread.maxSkew must be an integer from 1 to 1000"))?
-                    as u32,
+                    .ok_or_else(|| {
+                        bad("topologySpread.maxSkew must be an integer from 1 to 1000")
+                    })? as u32,
             };
             let group = match o.get("group").and_then(Value::as_str) {
                 Some(g) if valid_name(g) => Some(g.to_owned()),
-                Some(_) => return Err(bad("topologySpread.group must be 1-63 characters of [A-Za-z0-9._-]")),
+                Some(_) => {
+                    return Err(bad(
+                        "topologySpread.group must be 1-63 characters of [A-Za-z0-9._-]",
+                    ));
+                }
                 None => None,
             };
             let anti_group = rules.anti.as_ref().map(|a| a.group.clone());
             rules.group = match (anti_group, group) {
                 (Some(a), Some(g)) if a != g => {
-                    return Err(bad("antiAffinity.group and topologySpread.group must match: a VM joins one group"));
+                    return Err(bad(
+                        "antiAffinity.group and topologySpread.group must match: a VM joins one group",
+                    ));
                 }
                 (Some(a), _) => Some(a),
                 (None, Some(g)) => Some(g),
-                (None, None) => return Err(bad("topologySpread needs a group (its own, or antiAffinity.group)")),
+                (None, None) => {
+                    return Err(bad(
+                        "topologySpread needs a group (its own, or antiAffinity.group)",
+                    ));
+                }
             };
             rules.spread = Some(Spread {
                 key: key.to_owned(),
@@ -137,7 +156,8 @@ impl Rules {
     }
 
     fn has_required(&self) -> bool {
-        self.anti.as_ref().is_some_and(|a| a.required) || self.spread.as_ref().is_some_and(|s| s.required)
+        self.anti.as_ref().is_some_and(|a| a.required)
+            || self.spread.as_ref().is_some_and(|s| s.required)
     }
 
     /// Error text for "no node satisfies the rules".
@@ -151,14 +171,23 @@ impl Rules {
             parts.push("required antiAffinity".to_string());
         }
         if let Some(s) = self.spread.as_ref().filter(|s| s.required) {
-            parts.push(format!("required topologySpread on '{}' (maxSkew {})", s.key, s.max_skew));
+            parts.push(format!(
+                "required topologySpread on '{}' (maxSkew {})",
+                s.key, s.max_skew
+            ));
         }
-        Some(format!("no healthy, uncordoned node satisfies {} for group '{g}'", parts.join(" and ")))
+        Some(format!(
+            "no healthy, uncordoned node satisfies {} for group '{g}'",
+            parts.join(" and ")
+        ))
     }
 }
 
 fn valid_name(s: &str) -> bool {
-    !s.is_empty() && s.len() <= 63 && s.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+    !s.is_empty()
+        && s.len() <= 63
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
 }
 
 /// Which nodes may take the next member of the group.
@@ -186,7 +215,8 @@ impl Gate {
                 let mut per: HashMap<&str, usize> = HashMap::new();
                 for n in nodes.values() {
                     if let Some(v) = n.labels.get(&s.key) {
-                        *per.entry(v.as_str()).or_default() += counts.get(&n.name).copied().unwrap_or(0);
+                        *per.entry(v.as_str()).or_default() +=
+                            counts.get(&n.name).copied().unwrap_or(0);
                     }
                 }
                 let min = cand
@@ -203,7 +233,8 @@ impl Gate {
         let spread_ok = |n: &NodeInfo| match &rules.spread {
             // A node without the label is outside every domain: it cannot satisfy a spread.
             Some(s) => n.labels.get(&s.key).is_some_and(|v| {
-                per_domain.get(v.as_str()).copied().unwrap_or(0) + 1 <= min_domain + s.max_skew as usize
+                per_domain.get(v.as_str()).copied().unwrap_or(0) + 1
+                    <= min_domain + s.max_skew as usize
             }),
             None => true,
         };
@@ -212,7 +243,8 @@ impl Gate {
         for n in cand {
             let a = rules.anti.as_ref().map(|a| (anti_ok(n), a.required));
             let s = rules.spread.as_ref().map(|s| (spread_ok(n), s.required));
-            let hard_ok = a.is_none_or(|(ok, req)| ok || !req) && s.is_none_or(|(ok, req)| ok || !req);
+            let hard_ok =
+                a.is_none_or(|(ok, req)| ok || !req) && s.is_none_or(|(ok, req)| ok || !req);
             let strict_ok = a.is_none_or(|(ok, _)| ok) && s.is_none_or(|(ok, _)| ok);
             if hard_ok {
                 hard.insert(n.name.clone());
@@ -233,8 +265,17 @@ impl TenancyState {
     /// Active VMs of `group` per node, among `tenant`'s VMs (`None`: the operator's own, which have no tenant).
     pub(super) fn group_counts(&self, tenant: Option<&str>, group: &str) -> HashMap<String, usize> {
         let mut out = HashMap::new();
-        for v in self.vms.iter().filter(|v| v.active() && v.tenant.as_deref() == tenant) {
-            if self.placement_groups.get(&Self::group_key(&v.node, &v.vm_id)).map(String::as_str) == Some(group) {
+        for v in self
+            .vms
+            .iter()
+            .filter(|v| v.active() && v.tenant.as_deref() == tenant)
+        {
+            if self
+                .placement_groups
+                .get(&Self::group_key(&v.node, &v.vm_id))
+                .map(String::as_str)
+                == Some(group)
+            {
                 *out.entry(v.node.clone()).or_default() += 1;
             }
         }
@@ -256,7 +297,11 @@ impl TenancyState {
 }
 
 /// Counts the rules' group among the ledger for `tenant`.
-pub(super) fn counts_for(t: &TenancyState, tenant: Option<&str>, rules: &Rules) -> HashMap<String, usize> {
+pub(super) fn counts_for(
+    t: &TenancyState,
+    tenant: Option<&str>,
+    rules: &Rules,
+) -> HashMap<String, usize> {
     rules
         .group
         .as_deref()
@@ -266,7 +311,10 @@ pub(super) fn counts_for(t: &TenancyState, tenant: Option<&str>, rules: &Rules) 
 
 /// Records the new VM's group after the ledger entry exists.
 pub(super) async fn remember(fleet: &Fleet, node: &str, record: &Value, rules: &Rules) {
-    let (Some(group), Some(id)) = (rules.group.as_deref(), record.get("id").and_then(Value::as_str)) else {
+    let (Some(group), Some(id)) = (
+        rules.group.as_deref(),
+        record.get("id").and_then(Value::as_str),
+    ) else {
         return;
     };
     let mut t = fleet.tenancy.lock().await;
@@ -296,7 +344,10 @@ mod tests {
             vm_count: 0,
             last_seen: Utc::now(),
             cordoned: false,
-            labels: labels.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
+            labels: labels
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
             security: NodeSecurityCapabilities::default(),
             density: None,
             daemon: None,
@@ -332,7 +383,10 @@ mod tests {
         assert_eq!(b["vcpus"], 2);
         assert_eq!(r.group.as_deref(), Some("web"));
         assert!(r.anti.as_ref().unwrap().required);
-        assert!(!r.spread.as_ref().unwrap().required, "mode defaults to preferred");
+        assert!(
+            !r.spread.as_ref().unwrap().required,
+            "mode defaults to preferred"
+        );
         assert_eq!(r.spread.as_ref().unwrap().max_skew, 2);
         let mut spec = json!({"vcpus": 2});
         r.merge_into(&mut spec);
@@ -348,7 +402,11 @@ mod tests {
             json!({"topologySpread": {"key": "zone", "group": "g", "maxSkew": 0}}),
             json!({"antiAffinity": {"group": "a"}, "topologySpread": {"key": "zone", "group": "b"}}),
         ] {
-            assert_eq!(Rules::extract(&mut bad_body.clone()).unwrap_err().0, StatusCode::BAD_REQUEST, "{bad_body}");
+            assert_eq!(
+                Rules::extract(&mut bad_body.clone()).unwrap_err().0,
+                StatusCode::BAD_REQUEST,
+                "{bad_body}"
+            );
         }
         assert!(Rules::extract(&mut json!({"vcpus": 1})).unwrap().is_empty());
     }
@@ -360,8 +418,16 @@ mod tests {
         let g = Gate::compute(&r, &counts(&[("a", 1), ("b", 2)]), &nodes, &|_| true);
         assert_eq!(sorted(&g.hard), ["c"]);
         assert_eq!(sorted(&g.strict), ["c"]);
-        let g = Gate::compute(&r, &counts(&[("a", 1), ("b", 1), ("c", 1)]), &nodes, &|_| true);
-        assert!(g.hard.is_empty(), "required with every node taken has no candidate");
+        let g = Gate::compute(
+            &r,
+            &counts(&[("a", 1), ("b", 1), ("c", 1)]),
+            &nodes,
+            &|_| true,
+        );
+        assert!(
+            g.hard.is_empty(),
+            "required with every node taken has no candidate"
+        );
     }
 
     #[test]
@@ -380,7 +446,9 @@ mod tests {
             mk("a2", &[("zone", "a")]),
             mk("b1", &[("zone", "b")]),
         ]);
-        let r = rules(json!({"topologySpread": {"key": "zone", "maxSkew": 1, "mode": "required", "group": "g"}}));
+        let r = rules(
+            json!({"topologySpread": {"key": "zone", "maxSkew": 1, "mode": "required", "group": "g"}}),
+        );
         // zone a already has 2, zone b 0: only b may take the next one.
         let g = Gate::compute(&r, &counts(&[("a1", 1), ("a2", 1)]), &nodes, &|_| true);
         assert_eq!(sorted(&g.hard), ["b1"]);
@@ -388,7 +456,9 @@ mod tests {
         let g = Gate::compute(&r, &counts(&[("a1", 1), ("b1", 1)]), &nodes, &|_| true);
         assert_eq!(sorted(&g.hard), ["a1", "a2", "b1"]);
         // maxSkew 2 tolerates 2 vs 0 -> 3 vs 0 is 3 > 2, but 2 vs 0 -> a is 3? no: a has 2, +1 = 3 > 0 + 2.
-        let r2 = rules(json!({"topologySpread": {"key": "zone", "maxSkew": 2, "mode": "required", "group": "g"}}));
+        let r2 = rules(
+            json!({"topologySpread": {"key": "zone", "maxSkew": 2, "mode": "required", "group": "g"}}),
+        );
         let g = Gate::compute(&r2, &counts(&[("a1", 1), ("a2", 1)]), &nodes, &|_| true);
         assert_eq!(sorted(&g.hard), ["b1"]);
         let g = Gate::compute(&r2, &counts(&[("a1", 1)]), &nodes, &|_| true);
@@ -405,7 +475,11 @@ mod tests {
         let r = rules(json!({"topologySpread": {"key": "zone", "mode": "required", "group": "g"}}));
         // zone b cannot take VMs (down), so it must not hold the minimum at 0 and block zone a forever.
         let g = Gate::compute(&r, &counts(&[("a1", 1)]), &nodes, &|n| n.name != "b1");
-        assert_eq!(sorted(&g.hard), ["a1"], "unlabelled node is outside every domain");
+        assert_eq!(
+            sorted(&g.hard),
+            ["a1"],
+            "unlabelled node is outside every domain"
+        );
     }
 
     #[test]
@@ -432,7 +506,10 @@ mod tests {
             post(move |Json(b): Json<Value>| {
                 let n = h.fetch_add(1, Ordering::SeqCst);
                 async move {
-                    assert!(b.get("antiAffinity").is_none() && b.get("topologySpread").is_none(), "must be stripped");
+                    assert!(
+                        b.get("antiAffinity").is_none() && b.get("topologySpread").is_none(),
+                        "must be stripped"
+                    );
                     Json(json!({"id": format!("vm-{}-{n}", uuid::Uuid::new_v4())}))
                 }
             }),
@@ -494,13 +571,25 @@ mod tests {
         let body = json!({"antiAffinity": {"group": "web", "mode": "required"}});
         let mut placed = HashSet::new();
         for _ in 0..3 {
-            assert!(placed.insert(create(&fleet, body.clone()).await.unwrap()), "each member on its own node");
+            assert!(
+                placed.insert(create(&fleet, body.clone()).await.unwrap()),
+                "each member on its own node"
+            );
         }
         let err = create(&fleet, body.clone()).await.unwrap_err();
         assert_eq!(err.0, StatusCode::SERVICE_UNAVAILABLE);
-        assert!(err.1.contains("required antiAffinity") && err.1.contains("'web'"), "{}", err.1);
+        assert!(
+            err.1.contains("required antiAffinity") && err.1.contains("'web'"),
+            "{}",
+            err.1
+        );
         // A different group is unaffected.
-        create(&fleet, json!({"antiAffinity": {"group": "db", "mode": "required"}})).await.unwrap();
+        create(
+            &fleet,
+            json!({"antiAffinity": {"group": "db", "mode": "required"}}),
+        )
+        .await
+        .unwrap();
     }
 
     #[tokio::test]
@@ -516,7 +605,14 @@ mod tests {
 
     #[tokio::test]
     async fn simulated_fleet_zone_spread_stays_within_max_skew() {
-        let (fleet, _) = sim_fleet(&[("n1", "a"), ("n2", "a"), ("n3", "b"), ("n4", "b"), ("n5", "c")]).await;
+        let (fleet, _) = sim_fleet(&[
+            ("n1", "a"),
+            ("n2", "a"),
+            ("n3", "b"),
+            ("n4", "b"),
+            ("n5", "c"),
+        ])
+        .await;
         let body = json!({"topologySpread": {"key": "zone", "maxSkew": 1, "mode": "required", "group": "api"}});
         let mut per_zone: HashMap<&str, usize> = HashMap::new();
         for _ in 0..9 {
@@ -527,7 +623,13 @@ mod tests {
                 _ => "c",
             };
             *per_zone.entry(zone).or_default() += 1;
-            let (mx, mn) = (per_zone.values().max().unwrap(), per_zone.get("a").min(per_zone.get("b")).min(per_zone.get("c")));
+            let (mx, mn) = (
+                per_zone.values().max().unwrap(),
+                per_zone
+                    .get("a")
+                    .min(per_zone.get("b"))
+                    .min(per_zone.get("c")),
+            );
             let mn = mn.copied().unwrap_or(0);
             assert!(*mx - mn <= 1, "skew exceeded after {per_zone:?}");
         }
@@ -543,7 +645,9 @@ mod tests {
         // The same group name for another tenant does not see the first VM.
         let mut other = body.clone();
         other["tenant"] = json!("acme");
-        let Json(r) = create_vm_inner(&fleet, &Caller::Admin, other, true).await.unwrap();
+        let Json(r) = create_vm_inner(&fleet, &Caller::Admin, other, true)
+            .await
+            .unwrap();
         let _ = r;
         // Ending the operator's VM frees its node for the group.
         let (node, id) = {
@@ -556,7 +660,16 @@ mod tests {
         let again = create(&fleet, body.clone()).await.unwrap();
         let third = create(&fleet, body).await;
         assert!(again == n || third.is_ok() || third.is_err()); // placement is capacity-ordered; both nodes are legal here
-        assert_eq!(fleet.tenancy.lock().await.group_counts(None, "web").values().sum::<usize>(), if third.is_ok() { 2 } else { 1 });
+        assert_eq!(
+            fleet
+                .tenancy
+                .lock()
+                .await
+                .group_counts(None, "web")
+                .values()
+                .sum::<usize>(),
+            if third.is_ok() { 2 } else { 1 }
+        );
     }
 
     #[tokio::test]
@@ -564,9 +677,17 @@ mod tests {
         let (fleet, _) = sim_fleet(&[("n1", "a"), ("n2", "a")]).await;
         let mut b = json!({"node": "n1", "antiAffinity": {"group": "web", "mode": "required"}});
         assert_eq!(create(&fleet, b.clone()).await.unwrap(), "n1");
-        assert_eq!(create(&fleet, b.clone()).await.unwrap(), "n1", "explicit node is not subject to the rule");
+        assert_eq!(
+            create(&fleet, b.clone()).await.unwrap(),
+            "n1",
+            "explicit node is not subject to the rule"
+        );
         b.as_object_mut().unwrap().remove("node");
-        assert_eq!(create(&fleet, b).await.unwrap(), "n2", "automatic placement avoids n1");
+        assert_eq!(
+            create(&fleet, b).await.unwrap(),
+            "n2",
+            "automatic placement avoids n1"
+        );
     }
 
     #[tokio::test]

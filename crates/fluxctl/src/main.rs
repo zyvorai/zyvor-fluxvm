@@ -8345,6 +8345,11 @@ async fn main() -> Result<()> {
             );
         }
         Command::Fleet { .. } => unreachable!("handled before the local manager is built"),
+        Command::Instancetype { .. }
+        | Command::Preference { .. }
+        | Command::BackupVerify { .. } => {
+            unreachable!("handled before the local manager is built")
+        }
     }
     Ok(())
 }

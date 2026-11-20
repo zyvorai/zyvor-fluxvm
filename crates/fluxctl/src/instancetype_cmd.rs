@@ -49,7 +49,7 @@ pub enum InstancetypeCommand {
     Ls,
     /// Show one instancetype: `NAME` (latest version) or `NAME:VERSION`.
     Get { name: String },
-    /// Store an instancetype. Without `--version` it becomes the next version of NAME; a version that
+    /// Store an instancetype. Without `--spec-version` it becomes the next version of NAME; a version that
     /// exists (stored or built in) needs `--replace`.
     Create {
         name: String,
@@ -57,8 +57,9 @@ pub enum InstancetypeCommand {
         vcpus: u8,
         #[arg(long)]
         memory_mib: u64,
-        #[arg(long)]
-        version: Option<u32>,
+        /// Explicit version number (not `--version`, which clap reserves for the binary version).
+        #[arg(long = "spec-version")]
+        spec_version: Option<u32>,
         /// CPU hotplug ceiling.
         #[arg(long)]
         max_vcpus: Option<u8>,
@@ -169,7 +170,7 @@ pub async fn run_instancetype(
             name,
             vcpus,
             memory_mib,
-            version,
+            spec_version: version,
             max_vcpus,
             max_memory_mib,
             hugepages,
@@ -329,7 +330,7 @@ mod tests {
                 name: "web".into(),
                 vcpus: 2,
                 memory_mib: 4096,
-                version: None,
+                spec_version: None,
                 max_vcpus: None,
                 max_memory_mib: None,
                 hugepages: None,

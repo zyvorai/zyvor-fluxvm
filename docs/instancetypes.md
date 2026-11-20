@@ -68,7 +68,7 @@ Preference `spec`:
 
 Classes are stored in `<state_dir>/instancetypes.json` and `<state_dir>/preferences.json`, next to `vm-templates.json`.
 `fluxctl instancetype create web --vcpus 2 --memory-mib 4096` stores `web:1`; creating `web` again stores `web:2`, which an unversioned reference then
-picks. `--version N --replace` overwrites version N.
+picks. `--spec-version N --replace` overwrites version N.
 
 Built in (version 1): `small` (1 vCPU, 2 GiB), `medium` (2, 4 GiB), `large` (4, 8 GiB), `memory-optimised` (4, 32 GiB); preferences `linux`
 (virtio disk and NIC) and `windows` (virtio disk, e1000e NIC, Secure Boot, TPM). Built-ins cannot be deleted but can be **overridden**: store a class
@@ -77,7 +77,7 @@ of the same name and version with `--replace`, or a new version of the name to m
 ## CLI and REST
 
 ```
-fluxctl instancetype ls | get NAME[:VER] | create NAME --vcpus N --memory-mib M [--version V] [--max-vcpus ..] [--hugepages true] [--cpu-model ..] [--net-mbit-limit ..] [--replace] | rm NAME[:VER]
+fluxctl instancetype ls | get NAME[:VER] | create NAME --vcpus N --memory-mib M [--spec-version V] [--max-vcpus ..] [--hugepages true] [--cpu-model ..] [--net-mbit-limit ..] [--replace] | rm NAME[:VER]
 fluxctl preference   ls | get NAME      | create NAME [--disk-bus virtio-blk] [--nic-model ..] [--secure-boot true] [--tpm true] [--firmware PATH] [--replace] | rm NAME
 ```
 
