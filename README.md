@@ -334,7 +334,7 @@ The daemon, API and `fluxctl` build and run natively on macOS, with a `vz` backe
 
 ![Mac mini for home, Mac Studio for a team, MacBook Pro for development](docs/assets/macos/readme-macs.jpg)
 
-The same REST API and `fluxctl` now run on a [Mac mini](https://www.apple.com/in/mac-mini/) at home, a [Mac Studio](https://www.apple.com/in/mac-studio/) for a team or a [MacBook Pro](https://www.apple.com/in/macbook-pro/) on the road. Pair FluxVM with [Velora](https://github.com/zyvorai/zyvor-velora) (a private OpenAI-compatible LLM endpoint on MLX) and [Kairon](https://github.com/zyvorai/zyvor-kairon) (every Mac as a Kubernetes Node) and a few Macs become a quiet, low-power, on-premise inference cluster with real Linux VMs alongside.
+The same REST API and `fluxctl` now run on a [Mac mini](https://www.apple.com/in/mac-mini/) at home, a [Mac Studio](https://www.apple.com/in/mac-studio/) for a team or a [MacBook Pro](https://www.apple.com/in/macbook-pro/) on the road. Pair FluxVM with [Velora](https://github.com/zyvorai/velora) (a private OpenAI-compatible LLM endpoint on MLX) and [Kairon](https://github.com/zyvorai/zyvor-kairon) (every Mac as a Kubernetes Node) and a few Macs become a quiet, low-power, on-premise inference cluster with real Linux VMs alongside.
 
 ![A private LLM cluster made of Macs](docs/assets/macos/readme-home-cluster.jpg)
 

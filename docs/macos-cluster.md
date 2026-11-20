@@ -2,7 +2,7 @@
 
 FluxVM's control plane and its `vz` backend run natively on Apple silicon (see [macos.md](macos.md) for the backend itself).
 This page is about where that fits: Linux VMs over a REST API on the Mac you already have, next to a private LLM endpoint
-from [Velora](https://github.com/zyvorai/zyvor-velora), with [Kairon](https://github.com/zyvorai/zyvor-kairon) scheduling
+from [Velora](https://github.com/zyvorai/velora), with [Kairon](https://github.com/zyvorai/zyvor-kairon) scheduling
 across several Macs.
 
 ![Mac mini, Mac Studio, MacBook Pro](assets/macos/readme-macs.jpg)
