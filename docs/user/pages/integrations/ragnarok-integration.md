@@ -24,7 +24,7 @@ Ragnarok never calls `fluxctl serve` over the host REST API from the product pat
 
 ## Install order (user / lab)
 
-0. **Optional — Ragnarok binary trial** (proprietary; FluxVM stays free):
+0. **Optional — Ragnarok binary trial** (proprietary):
 
    ```bash
    VER=0.5.1
@@ -76,7 +76,7 @@ No Ragnarok-specific CRD fields: anything you can `kubectl apply` as a `Disposab
 
 ## Auth note
 
-**FluxVM needs no Ragnarok license token.** Its own license is the Zyvor Production License v1.0 (non-production use is free; production use requires a commercial license from sales@zyvor.dev).
+**FluxVM needs no Ragnarok license token.** Its own license is the Zyvor Production License v1.0 (non-production use is permitted; production use requires a commercial license from sales@zyvor.dev).
 
 SSO (Keycloak OIDC), local break-glass, LDAP, and the Ragnarok signed
 `trial.token` / commercial JWT live entirely in **Ragnarok** (proprietary).

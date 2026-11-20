@@ -33,4 +33,4 @@ Is this for you, and the questions people ask first.
 
 **How do I test security profiles without SNP/TDX hardware?** Run `./scripts/test-security-profiles.sh` (same suite as [CI](../.github/workflows/security-profiles.yml)). Measured evidence is always `software-test` — see [docs/guides/security-profiles-howto.md](guides/security-profiles-howto.md).
 
-**What license is this under?** Zyvor Production License v1.0 for the whole repository. Non-production use is free; production use requires a commercial license (sales@zyvor.dev) — see [License](https://github.com/zyvorai/zyvor-fluxvm/blob/main/README.md#license).
+**What license is this under?** Zyvor Production License v1.0 for the whole repository. Non-production use is permitted; production use requires a commercial license (sales@zyvor.dev) — see [License](https://github.com/zyvorai/zyvor-fluxvm/blob/main/README.md#license).

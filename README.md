@@ -33,7 +33,7 @@ that omit the dataplane mode, follow the [eBPF upgrade guide](docs/primary-ebpf.
 
 [Client overview (PDF)](docs/FluxVM-Client-Overview.pdf)
 
-**On a Mac?** [FluxVM for Mac](https://zyvorai.github.io/zyvor-fluxvm/fluxvm-for-mac/) is a notarized menu-bar app with a 30-day trial. The FluxVM engine in this repository is source-available under the Zyvor Production License v1.0: non-production use is free, production use requires a commercial license.
+**On a Mac?** [FluxVM for Mac](https://zyvorai.github.io/zyvor-fluxvm/fluxvm-for-mac/) is a notarized menu-bar app with a 30-day trial. The FluxVM engine in this repository is source-available under the Zyvor Production License v1.0: non-production use is permitted, production use requires a commercial license.
 
 ---
 
@@ -300,7 +300,7 @@ FluxVM is complete and useful on its own. **Certify with GuestKit → run and ma
 
 ## Support
 
-Non-production use is free under the Zyvor Production License v1.0; production use requires a commercial license ([sales@zyvor.dev](mailto:sales@zyvor.dev)). If it helps you, you can donate any amount you like: <https://rzp.io/rzp/utwdYh3> (Razorpay: UPI, cards and netbanking; international cards work too). A donation is voluntary and supports development and maintenance. It is not a purchase: it buys no support, SLA, features, priority or license, and it is not tax-deductible (Zyvor AI Labs Private Limited is a company, not a charity). Zyvor Enterprise (supported releases, SLAs, a named contact and enterprise features) is separate: [sales@zyvor.dev](mailto:sales@zyvor.dev).
+Non-production use is permitted under the Zyvor Production License v1.0; production use requires a commercial license ([sales@zyvor.dev](mailto:sales@zyvor.dev)). If it helps you, you can donate any amount you like: <https://rzp.io/rzp/utwdYh3> (Razorpay: UPI, cards and netbanking; international cards work too). A donation is voluntary and supports development and maintenance. It is not a purchase: it buys no support, SLA, features, priority or license, and it is not tax-deductible (Zyvor AI Labs Private Limited is a company, not a charity). Zyvor Enterprise (supported releases, SLAs, a named contact and enterprise features) is separate: [sales@zyvor.dev](mailto:sales@zyvor.dev).
 
 ## License and support
 
@@ -310,7 +310,7 @@ FluxVM is **source-available** under the [Zyvor Production License v1.0](LICENSE
 
 ### FluxVM for Mac
 
-[FluxVM for Mac](https://zyvorai.github.io/zyvor-fluxvm/fluxvm-for-mac/) (release [`mac-v0.1.0`](https://github.com/zyvorai/zyvor-fluxvm/releases/tag/mac-v0.1.0), `FluxVM-Mac-0.1.0.dmg`) is a separate, notarized menu-bar app that bundles the FluxVM engine (0.4.21). **The app is proprietary; its source is not public; its source is private.** It starts with a free 30-day trial. The trial is soft: nothing is disabled and no data is lost when it ends. After the trial the price is INR 2,999 per Mac per year incl. 18% GST in India (about US$30 excl. tax outside India) for an individual, or INR 2,549 per Mac per year (about US$26 excl. tax) for teams of 5 or more Macs (minimum 5 Macs, INR 12,745 or about US$129, by invoice). Prices: INR incl. 18% GST in India; US dollars excl. tax elsewhere (VAT, GST or sales tax added where applicable). Pay online by UPI, card or netbanking; international cards work (charged in rupees); or request a US-dollar invoice by bank transfer. Custom pricing: contact sales@zyvor.dev. [Buy FluxVM for Mac](https://zyvor.dev/buy) or request a trial key at [sales@zyvor.dev](mailto:sales@zyvor.dev). The engine and CLI in this repository are unaffected: they stay under the Zyvor Production License v1.0, and the Linux install is unchanged.
+[FluxVM for Mac](https://zyvorai.github.io/zyvor-fluxvm/fluxvm-for-mac/) (release [`mac-v0.1.0`](https://github.com/zyvorai/zyvor-fluxvm/releases/tag/mac-v0.1.0), `FluxVM-Mac-0.1.0.dmg`) is a separate, notarized menu-bar app that bundles the FluxVM engine (0.4.21). **The app is proprietary; its source is not public; its source is private.** It starts with a 30-day trial. The trial is soft: nothing is disabled and no data is lost when it ends. After the trial the price is INR 2,999 per Mac per year incl. 18% GST in India (about US$30 excl. tax outside India) for an individual, or INR 2,549 per Mac per year (about US$26 excl. tax) for teams of 5 or more Macs (minimum 5 Macs, INR 12,745 or about US$129, by invoice). Prices: INR incl. 18% GST in India; US dollars excl. tax elsewhere (VAT, GST or sales tax added where applicable). Pay online by UPI, card or netbanking; international cards work (charged in rupees); or request a US-dollar invoice by bank transfer. Custom pricing: contact sales@zyvor.dev. [Buy FluxVM for Mac](https://zyvor.dev/buy) or request a trial key at [sales@zyvor.dev](mailto:sales@zyvor.dev). The engine and CLI in this repository are unaffected: they stay under the Zyvor Production License v1.0, and the Linux install is unchanged.
 
 Report vulnerabilities per [SECURITY.md](SECURITY.md).
 
