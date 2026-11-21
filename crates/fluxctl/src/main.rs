@@ -72,6 +72,8 @@ mod kube_sync;
 mod kube_tls;
 mod kube_trim;
 mod launch_agent;
+mod mac_cmd;
+mod mac_store;
 mod mcp;
 mod mcp_install;
 mod netobs;
@@ -1667,6 +1669,12 @@ enum Command {
     VmImage {
         #[command(subcommand)]
         command: VmImageCommand,
+    },
+    /// Docker-style workflow for macOS guests: a local image store plus pull, push, tag, rmi, import. Each image is a
+    /// macOS VM template; at most 2 macOS VMs run at once. See docs/macos-containers-design.md.
+    Mac {
+        #[command(subcommand)]
+        command: mac_cmd::MacCommand,
     },
     /// Single-file VM disks as OCI artifacts (like KubeVirt containerDisk): push a raw or qcow2 image to any OCI
     /// registry and pull it back with every digest verified. Credentials: `FLUXVM_REGISTRY_USER` /
@@ -6226,6 +6234,9 @@ async fn main() -> Result<()> {
     if let Command::VmImage { command } = cli.command {
         return run_vm_image(command).await;
     }
+    if let Command::Mac { command } = cli.command {
+        return mac_cmd::run(command).await;
+    }
     if let Command::Image { command } = cli.command {
         return run_image(command, format).await;
     }
@@ -8164,6 +8175,7 @@ async fn main() -> Result<()> {
             command: VznetCommand::Ls { json },
         } => print_vznets(&serde_json::to_value(m.vznets(None).await)?, json)?,
         Command::VmImage { command } => run_vm_image(command).await?,
+        Command::Mac { .. } => unreachable!("handled before the daemon is contacted"),
         Command::Image { command } => run_image(command, format).await?,
         Command::Oci { command } => {
             let out = match command {
