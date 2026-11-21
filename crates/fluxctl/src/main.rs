@@ -72,6 +72,7 @@ mod kube_sync;
 mod kube_tls;
 mod kube_trim;
 mod launch_agent;
+mod mac_build;
 mod mac_cmd;
 mod mac_store;
 mod mcp;
