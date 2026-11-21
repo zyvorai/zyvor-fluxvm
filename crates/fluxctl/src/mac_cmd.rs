@@ -82,6 +82,11 @@ pub enum MacCommand {
         wait: u64,
         #[command(flatten)]
         opts: crate::mac_instance::RunOpts,
+        #[command(flatten)]
+        queue: crate::mac_queue::QueueOpts,
+        /// Print one JSON object (schema in docs/macos-containers.md) as the last line of stdout instead of the instance name.
+        #[arg(long)]
+        json: bool,
         /// A local image (`fluxctl mac images`).
         image: String,
         /// The command to run in the guest, after `--`.
@@ -110,6 +115,33 @@ pub enum MacCommand {
         #[arg(last = true, required = true)]
         cmd: Vec<String>,
     },
+    /// Preflight: Apple silicon, macOS version, free macOS VM slots, free disk and APFS clone volume, login session, daemon,
+    /// ssh key, FileVault, store location. Read-only (it creates the store directory); every problem prints a fix. Exits 1
+    /// when a check fails.
+    Doctor {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Block until an instance is running, has an address and answers on SSH (and, with --check, until CMD exits 0 in the guest).
+    #[command(
+        name = "wait-ready",
+        after_help = "Example:
+  fluxctl mac run -d --name ci macos-xcode:15 && fluxctl mac wait-ready ci --check 'xcodebuild -version'"
+    )]
+    WaitReady {
+        name: String,
+        /// Give up after this many seconds (0 = never).
+        #[arg(long, default_value_t = 900)]
+        timeout: u64,
+        /// SSH user for --check.
+        #[arg(long, default_value = "admin")]
+        user: String,
+        /// A command that must exit 0 in the guest (over SSH) before the instance counts as ready.
+        #[arg(long, value_name = "CMD")]
+        check: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
     #[command(flatten)]
     More(crate::mac_more::MacMore),
 }
@@ -122,7 +154,11 @@ impl MacCommand {
             Self::More(m) => m.is_client_side(),
             _ => !matches!(
                 self,
-                Self::Run { .. } | Self::Ps { .. } | Self::Rm { .. } | Self::Exec { .. }
+                Self::Run { .. }
+                    | Self::Ps { .. }
+                    | Self::Rm { .. }
+                    | Self::Exec { .. }
+                    | Self::WaitReady { .. }
             ),
         }
     }
@@ -301,9 +337,42 @@ pub async fn run_daemon(r: &crate::remote::Remote, command: MacCommand) -> Resul
             user,
             wait,
             opts,
+            queue,
+            json,
             image,
             cmd,
-        } => crate::mac_instance::run(r, rm, name, publish, user, wait, image, cmd, opts).await,
+        } => {
+            let outcome = crate::mac_queue::run_queued(r, &queue, || {
+                crate::mac_instance::run_outcome(
+                    r,
+                    rm,
+                    name.clone(),
+                    publish.clone(),
+                    user.clone(),
+                    wait,
+                    image.clone(),
+                    cmd.clone(),
+                    opts.clone(),
+                )
+            })
+            .await?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string(&crate::mac_json::run_document(&outcome))?
+                );
+            } else if outcome.print_name {
+                println!("{}", outcome.name);
+            }
+            Ok(())
+        }
+        MacCommand::WaitReady {
+            name,
+            timeout,
+            user,
+            check,
+            json,
+        } => crate::mac_ready::run(r, &name, timeout, &user, check, json).await,
         MacCommand::Ps { json, opts } => crate::mac_more::ps(r, json, opts).await,
         MacCommand::Rm { name } => {
             let vm = find_instance(r, &name).await?;
@@ -659,10 +728,14 @@ pub async fn run(command: MacCommand) -> Result<()> {
             )?;
             println!("imported {} as {key}", dir.display());
         }
+        MacCommand::Doctor { json } => {
+            return crate::mac_doctor::run(json, crate::remote::from_argv_env()).await;
+        }
         MacCommand::Run { .. }
         | MacCommand::Ps { .. }
         | MacCommand::Rm { .. }
-        | MacCommand::Exec { .. } => unreachable!("rejected above"),
+        | MacCommand::Exec { .. }
+        | MacCommand::WaitReady { .. } => unreachable!("rejected above"),
     }
     Ok(())
 }
@@ -1015,5 +1088,68 @@ mod tests {
             }
             .is_client_side()
         );
+    }
+
+    #[test]
+    fn doctor_is_client_side_and_wait_ready_needs_the_daemon() {
+        use clap::Parser;
+        #[derive(Parser)]
+        struct T {
+            #[command(subcommand)]
+            c: MacCommand,
+        }
+        let p = |a: &[&str]| {
+            let mut v = vec!["t"];
+            v.extend(a);
+            T::try_parse_from(v).unwrap().c
+        };
+        assert!(p(&["doctor", "--json"]).is_client_side());
+        let w = p(&[
+            "wait-ready",
+            "ci",
+            "--timeout",
+            "30",
+            "--check",
+            "true",
+            "--json",
+        ]);
+        assert!(!w.is_client_side());
+        let MacCommand::WaitReady {
+            name,
+            timeout,
+            check,
+            json,
+            user,
+        } = w
+        else {
+            panic!("not wait-ready")
+        };
+        assert_eq!(
+            (name.as_str(), timeout, json, user.as_str()),
+            ("ci", 30, true, "admin")
+        );
+        assert_eq!(check.as_deref(), Some("true"));
+        let MacCommand::Run {
+            queue, json, rm, ..
+        } = p(&[
+            "run",
+            "--rm",
+            "--queue",
+            "--queue-timeout",
+            "120",
+            "--json",
+            "img",
+            "--",
+            "true",
+        ])
+        else {
+            panic!("not run")
+        };
+        assert!(queue.queue && json && rm);
+        assert_eq!(queue.queue_timeout, 120);
+        let MacCommand::Run { queue, json, .. } = p(&["run", "img"]) else {
+            panic!("not run")
+        };
+        assert!(!queue.queue && !json);
     }
 }

@@ -369,6 +369,23 @@ pub async fn run_in_guest(r: &crate::remote::Remote, id: &str, job: &GuestJob) -
     Ok(ip)
 }
 
+/// What `mac run` did, for `--json` and for the plain output.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RunOutcome {
+    pub name: String,
+    pub id: String,
+    pub image: String,
+    /// The guest address, when the run waited for SSH.
+    pub ip: Option<String>,
+    /// The instance was deleted at the end (`--rm`).
+    pub removed: bool,
+    /// A command ran in the guest (in the background with `-d`).
+    pub ran_command: bool,
+    pub detached: bool,
+    /// The plain output prints the instance name (the instance stays up and nothing else was printed).
+    pub print_name: bool,
+}
+
 /// `fluxctl mac run`.
 #[allow(clippy::too_many_arguments)]
 pub async fn run(
@@ -382,6 +399,26 @@ pub async fn run(
     cmd: Vec<String>,
     opts: RunOpts,
 ) -> Result<()> {
+    let o = run_outcome(r, rm, name, publish, user, wait, image, cmd, opts).await?;
+    if o.print_name {
+        println!("{}", o.name);
+    }
+    Ok(())
+}
+
+/// `fluxctl mac run`, returning what happened instead of printing it.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_outcome(
+    r: &crate::remote::Remote,
+    rm: bool,
+    name: Option<String>,
+    publish: Vec<String>,
+    user: Option<String>,
+    wait: u64,
+    image: String,
+    cmd: Vec<String>,
+    opts: RunOpts,
+) -> Result<RunOutcome> {
     let store = Store::open(mac_store::default_root()?)?;
     let dir = store.resolve(&image)?;
     let cfg: ImageConfig = mac_config::load(&dir)?;
@@ -424,9 +461,18 @@ pub async fn run(
         project: None,
     };
     let id = launch(r, &store, &spec).await?;
+    let outcome = |ip: Option<String>, removed: bool, print_name: bool| RunOutcome {
+        name: name.clone(),
+        id: id.clone(),
+        image: image.clone(),
+        ip,
+        removed,
+        ran_command: command.is_some(),
+        detached: opts.detach,
+        print_name,
+    };
     if command.is_none() && mounts.is_empty() {
-        println!("{name}");
-        return Ok(());
+        return Ok(outcome(None, false, true));
     }
     let job = GuestJob {
         user: user
@@ -440,16 +486,14 @@ pub async fn run(
     let result = run_in_guest(r, &id, &job).await;
     if command.is_none() || opts.detach {
         // Nothing to wait for: the instance stays up.
-        result?;
-        println!("{name}");
-        return Ok(());
+        return Ok(outcome(Some(result?), false, true));
     }
     if rm {
         crate::mac_cmd::delete_instance(r, &id).await.ok();
     } else {
         eprintln!("instance {name} is still running (fluxctl mac rm {name})");
     }
-    result.map(|_| ())
+    Ok(outcome(Some(result?), rm, false))
 }
 
 #[cfg(test)]

@@ -1,0 +1,29 @@
+[
+  {
+    "schema_version": 1,
+    "id": "0b1c2d3e-0000-4000-8000-000000000001",
+    "short_id": "0b1c2d3e0000",
+    "name": "ci-1",
+    "image": "macos-xcode:15",
+    "status": "running",
+    "ip": "192.168.64.7",
+    "ports": [
+      {
+        "host": 2222,
+        "guest": 22
+      },
+      {
+        "host": 8080,
+        "guest": 80
+      }
+    ],
+    "ssh_port": 2222,
+    "created": "2026-11-21T10:00:00Z",
+    "restart_policy": "always",
+    "project": null,
+    "service": null,
+    "labels": {
+      "team": "ios"
+    }
+  }
+]
