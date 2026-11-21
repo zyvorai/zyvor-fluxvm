@@ -3,7 +3,7 @@
 # Design: a Docker-style workflow for macOS guests
 
 Status: **phase 1 (store and registry) is implemented** as `fluxctl mac images|pull|push|tag|rmi|import`; see
-[macos-containers.md](macos-containers.md). Phase 2 (`run`, `ps`, `rm`, `exec`) is implemented but unit-tested only, never run on a real VM. Phase 3 (`mac build`: Macfile parser, `--dry-run`, and running the steps in a throwaway instance) is implemented, unit-tested with a fake host only and never run against a real macOS guest; `SNAPSHOT` and `FROM IPSW latest` are refused, and the no-Setup-Assistant provisioning account is not part of it. Phase 4 (warm start) is still a proposal. It lives in this repository for now; it can move to its own project once the shape
+[macos-containers.md](macos-containers.md). Phase 2 (`run`, `ps`, `rm`, `exec`) is implemented but unit-tested only, never run on a real VM. Phase 3 (`mac build`: Macfile parser, `--dry-run`, and running the steps in a throwaway instance) is implemented, unit-tested with a fake host only and never run against a real macOS guest; `SNAPSHOT` and `FROM IPSW latest` are refused, and the no-Setup-Assistant provisioning account is not part of it. A later pass added the instance and image commands, the wider Macfile, `.macignore` and `mac compose`, all described in [macos-containers.md](macos-containers.md) and equally unverified on a real VM. Phase 4 (warm start) is still a proposal. It lives in this repository for now; it can move to its own project once the shape
 is settled, because it only needs FluxVM's daemon API.
 
 ## Goal

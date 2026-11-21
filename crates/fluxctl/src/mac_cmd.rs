@@ -51,6 +51,9 @@ pub enum MacCommand {
         /// Seconds to wait for the build instance to answer on SSH.
         #[arg(long, default_value_t = 900)]
         wait: u64,
+        /// Set an `ARG` of the Macfile: `NAME=value`. Repeatable.
+        #[arg(long = "build-arg", value_name = "NAME=VALUE")]
+        build_arg: Vec<String>,
         /// Build context directory: COPY sources are relative to it.
         // Own id: `context` is the global --context flag (a String) and clap panics on the clash.
         #[arg(id = "build_context", value_name = "CONTEXT", default_value = ".")]
@@ -58,8 +61,11 @@ pub enum MacCommand {
     },
     /// Start a macOS VM from a local image (an APFS clone of its disk) and, with CMD, run it over SSH. Needs the daemon
     /// (`--server`/context). At most 2 macOS VMs run at once. Without CMD the instance keeps running: see `mac ps`.
+    #[command(
+        after_help = "Examples:\n  fluxctl mac run --rm macos-xcode:15 -- xcodebuild -version\n  fluxctl mac run -d --name ci -e TOKEN -v ./src:/src:ro --cpus 4 --memory 8g --restart unless-stopped macos-xcode:15 -- ./serve.sh\n\nA Mac runs at most 2 macOS VMs: a 409 means both slots are taken."
+    )]
     Run {
-        /// Delete the instance when CMD finishes (needs CMD).
+        /// Delete the instance when CMD finishes (needs CMD, or an image with CMD/ENTRYPOINT).
         #[arg(long)]
         rm: bool,
         /// Instance name (default: mac-<random>).
@@ -68,22 +74,29 @@ pub enum MacCommand {
         /// Publish a guest port on this Mac: `[ADDR:]HOST:GUEST`. Repeatable.
         #[arg(short = 'p', long = "publish")]
         publish: Vec<String>,
-        /// SSH user inside the guest (the template's account).
-        #[arg(long, default_value = "admin")]
-        user: String,
+        /// SSH user inside the guest (default: the image's USER, else `admin`).
+        #[arg(long)]
+        user: Option<String>,
         /// Seconds to wait for the guest to answer on SSH.
         #[arg(long, default_value_t = 900)]
         wait: u64,
+        #[command(flatten)]
+        opts: crate::mac_instance::RunOpts,
         /// A local image (`fluxctl mac images`).
         image: String,
         /// The command to run in the guest, after `--`.
         #[arg(last = true)]
         cmd: Vec<String>,
     },
-    /// List the instances (VMs labelled `fluxvm.mac=instance`).
+    /// List the instances (VMs labelled `fluxvm.mac=instance`). Shows running ones unless `-a`.
+    #[command(
+        after_help = "Examples:\n  fluxctl mac ps -a\n  fluxctl mac ps -f status=running -f name=build --format '{{.Name}} {{.IP}}'\n  fluxctl mac ps -q"
+    )]
     Ps {
         #[arg(long)]
         json: bool,
+        #[command(flatten)]
+        opts: crate::mac_more::PsOpts,
     },
     /// Stop and delete an instance.
     Rm { name: String },
@@ -92,9 +105,13 @@ pub enum MacCommand {
         name: String,
         #[arg(long, default_value = "admin")]
         user: String,
+        #[command(flatten)]
+        opts: crate::mac_more::ExecOpts,
         #[arg(last = true, required = true)]
         cmd: Vec<String>,
     },
+    #[command(flatten)]
+    More(crate::mac_more::MacMore),
 }
 
 impl MacCommand {
@@ -102,6 +119,7 @@ impl MacCommand {
     pub fn is_client_side(&self) -> bool {
         match self {
             Self::Build { dry_run, .. } => *dry_run,
+            Self::More(m) => m.is_client_side(),
             _ => !matches!(
                 self,
                 Self::Run { .. } | Self::Ps { .. } | Self::Rm { .. } | Self::Exec { .. }
@@ -218,12 +236,12 @@ pub fn explain_error(e: anyhow::Error) -> anyhow::Error {
     }
 }
 
-fn random_name() -> String {
+pub(crate) fn random_name() -> String {
     format!("mac-{}", &short_id()[..6])
 }
 
 /// The VM record of the instance called `name`, found through the label selector so only instances can be touched.
-async fn find_instance(r: &crate::remote::Remote, name: &str) -> Result<Value> {
+pub(crate) async fn find_instance(r: &crate::remote::Remote, name: &str) -> Result<Value> {
     let q = format!(
         "/v1/vms?label={}&name={}",
         crate::remote::encode_query(INSTANCE_SELECTOR),
@@ -237,7 +255,7 @@ async fn find_instance(r: &crate::remote::Remote, name: &str) -> Result<Value> {
         .with_context(|| format!("no instance named {name:?} (see `fluxctl mac ps`)"))
 }
 
-async fn delete_instance(r: &crate::remote::Remote, id: &str) -> Result<()> {
+pub(crate) async fn delete_instance(r: &crate::remote::Remote, id: &str) -> Result<()> {
     use reqwest::Method;
     r.call(Method::POST, &format!("/v1/vms/{id}/stop"), None)
         .await
@@ -248,7 +266,7 @@ async fn delete_instance(r: &crate::remote::Remote, id: &str) -> Result<()> {
 }
 
 /// Wait until the guest has an address and SSH answers there; returns the address.
-async fn wait_for_ssh(r: &crate::remote::Remote, id: &str, secs: u64) -> Result<String> {
+pub(crate) async fn wait_for_ssh(r: &crate::remote::Remote, id: &str, secs: u64) -> Result<String> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(secs);
     loop {
         let vm = r
@@ -275,7 +293,6 @@ async fn wait_for_ssh(r: &crate::remote::Remote, id: &str, secs: u64) -> Result<
 
 /// `run`, `ps`, `rm`, `exec`: they need the daemon.
 pub async fn run_daemon(r: &crate::remote::Remote, command: MacCommand) -> Result<()> {
-    use reqwest::Method;
     match command {
         MacCommand::Run {
             rm,
@@ -283,99 +300,38 @@ pub async fn run_daemon(r: &crate::remote::Remote, command: MacCommand) -> Resul
             publish,
             user,
             wait,
+            opts,
             image,
             cmd,
-        } => {
-            ensure!(
-                !rm || !cmd.is_empty(),
-                "--rm needs a command to run (fluxctl mac run --rm IMAGE -- CMD)"
-            );
-            let store = Store::open(mac_store::default_root()?)?;
-            let disk = store.resolve(&image)?.join("disk.raw");
-            let name = name.unwrap_or_else(random_name);
-            let body = build_create_body(&name, &disk, &publish)?;
-            let vm = r
-                .call(Method::POST, "/v1/vms", Some(body))
-                .await
-                .map_err(explain_error)?;
-            let id = vm["id"]
-                .as_str()
-                .context("the daemon returned no id")?
-                .to_string();
-            let started = async {
-                r.call(
-                    Method::PATCH,
-                    &format!("/v1/vms/{id}"),
-                    Some(instance_labels(&image)),
-                )
-                .await?;
-                r.call(Method::POST, &format!("/v1/vms/{id}/start"), None)
-                    .await
-                    .map_err(explain_error)
-            }
-            .await;
-            if let Err(e) = started {
-                delete_instance(r, &id).await.ok();
-                return Err(e);
-            }
-            if cmd.is_empty() {
-                println!("{name}");
-                return Ok(());
-            }
-            let result = async {
-                let ip = wait_for_ssh(r, &id, wait).await?;
-                crate::run::ssh_to(&ip, &user, 22, true, &cmd).await
-            }
-            .await;
-            if rm {
-                delete_instance(r, &id).await.ok();
-            } else {
-                eprintln!("instance {name} is still running (fluxctl mac rm {name})");
-            }
-            result
-        }
-        MacCommand::Ps { json } => {
-            let q = format!(
-                "/v1/vms?label={}",
-                crate::remote::encode_query(INSTANCE_SELECTOR)
-            );
-            let v = r.call(Method::GET, &q, None).await?;
-            let rows = filter_instances(&v["items"]);
-            if json {
-                println!("{}", serde_json::to_string_pretty(&rows)?);
-            } else {
-                print!("{}", render_ps(&rows));
-            }
-            Ok(())
-        }
+        } => crate::mac_instance::run(r, rm, name, publish, user, wait, image, cmd, opts).await,
+        MacCommand::Ps { json, opts } => crate::mac_more::ps(r, json, opts).await,
         MacCommand::Rm { name } => {
             let vm = find_instance(r, &name).await?;
             delete_instance(r, vm["id"].as_str().context("no id")?).await?;
             println!("removed {name}");
             Ok(())
         }
-        MacCommand::Exec { name, user, cmd } => {
-            let vm = find_instance(r, &name).await?;
-            ensure!(
-                vm["status"].as_str() == Some("running"),
-                "{name} is {} (not running)",
-                vm["status"].as_str().unwrap_or("unknown")
-            );
-            let ip = vm["guest_ip"]
-                .as_str()
-                .context("the instance has no address yet: wait for it to boot")?;
-            crate::run::ssh_to(ip, &user, 22, true, &cmd).await
-        }
+        MacCommand::Exec {
+            name,
+            user,
+            opts,
+            cmd,
+        } => crate::mac_more::exec(r, name, user, cmd, opts).await,
+        MacCommand::More(m) => crate::mac_more::run_daemon(r, m).await,
         MacCommand::Build {
             file,
             tag,
             context,
             wait,
+            build_arg,
             ..
         } => {
             let src = read_macfile(file, &context)?;
             let key = mac_store::normalize(&tag)?;
-            let steps = crate::mac_build::plan(&crate::mac_build::parse(&src)?);
+            let (steps, config) = crate::mac_build::plan_with(
+                &crate::mac_build::parse(&src)?,
+                &parse_build_args(&build_arg)?,
+            );
             crate::mac_build_exec::check_supported(&steps)?;
             let mut host = DaemonHost {
                 r,
@@ -386,6 +342,7 @@ pub async fn run_daemon(r: &crate::remote::Remote, command: MacCommand) -> Resul
                 instance: None,
             };
             crate::mac_build_exec::execute(&mut host, &steps).await?;
+            crate::mac_image_ops::write_build_config(&host.store, &key, config)?;
             println!("built {key}");
             Ok(())
         }
@@ -471,7 +428,9 @@ impl crate::mac_build_exec::BuildHost for DaemonHost<'_> {
 
     async fn copy(&mut self, user: &str, src: &str, dst: &str) -> Result<()> {
         let (_, ip) = self.ready()?;
-        scp_to(ip, user, &self.context.join(src), dst).await
+        // `.macignore` in the context filters a directory source through a scratch copy (see mac_ignore).
+        let staged = crate::mac_ignore::stage(&self.context, src)?;
+        scp_to(ip, user, &staged.path, dst).await
     }
 
     async fn stop_and_store(&mut self) -> Result<()> {
@@ -512,7 +471,12 @@ impl crate::mac_build_exec::BuildHost for DaemonHost<'_> {
 }
 
 /// Clone a stopped instance's disk, hardware model and auxiliary storage into the store as a template named `key`.
-fn store_instance_files(store: &Store, key: &str, disk: &Path, workspace: &Path) -> Result<()> {
+pub(crate) fn store_instance_files(
+    store: &Store,
+    key: &str,
+    disk: &Path,
+    workspace: &Path,
+) -> Result<()> {
     let sources = [
         ("disk.raw", disk.to_path_buf()),
         ("hardware.bin", workspace.join("hardware.bin")),
@@ -544,7 +508,7 @@ fn store_instance_files(store: &Store, key: &str, disk: &Path, workspace: &Path)
 }
 
 /// `scp -r LOCAL USER@IP:DST` with the same host-key and identity handling as `mac exec`.
-async fn scp_to(ip: &str, user: &str, local: &Path, dst: &str) -> Result<()> {
+pub(crate) async fn scp_to(ip: &str, user: &str, local: &Path, dst: &str) -> Result<()> {
     ensure!(
         local.exists(),
         "COPY source {} does not exist",
@@ -657,6 +621,7 @@ pub async fn run(command: MacCommand) -> Result<()> {
             tag,
             dry_run,
             context,
+            build_arg,
             ..
         } => {
             ensure!(
@@ -664,8 +629,12 @@ pub async fn run(command: MacCommand) -> Result<()> {
                 "a real build needs the daemon: pass --server (or select a context)"
             );
             let src = read_macfile(file, &context)?;
-            print!("{}", build_plan_text(&src, &tag)?);
+            print!(
+                "{}",
+                build_plan_text_with(&src, &tag, &parse_build_args(&build_arg)?)?
+            );
         }
+        MacCommand::More(m) => return crate::mac_more::run_client(m),
         MacCommand::Import { dir, reference } => {
             check_template(&dir)?;
             let key = mac_store::normalize(&reference)?;
@@ -699,10 +668,31 @@ pub async fn run(command: MacCommand) -> Result<()> {
 }
 
 /// Parse a Macfile and render the plan for `tag`; errors carry the Macfile line.
+#[cfg(test)]
 fn build_plan_text(src: &str, tag: &str) -> Result<String> {
+    build_plan_text_with(src, tag, &Default::default())
+}
+
+/// `NAME=value` pairs of `--build-arg`.
+fn parse_build_args(args: &[String]) -> Result<std::collections::BTreeMap<String, String>> {
+    args.iter()
+        .map(|a| {
+            a.split_once('=')
+                .filter(|(k, _)| !k.is_empty())
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .with_context(|| format!("--build-arg {a:?} must be NAME=value"))
+        })
+        .collect()
+}
+
+fn build_plan_text_with(
+    src: &str,
+    tag: &str,
+    args: &std::collections::BTreeMap<String, String>,
+) -> Result<String> {
     let key = mac_store::normalize(tag)?;
     let file = crate::mac_build::parse(src)?;
-    let steps = crate::mac_build::plan(&file);
+    let steps = crate::mac_build::plan_with(&file, args).0;
     Ok(format!(
         "build {key}\n{}",
         crate::mac_build::render_dry_run(&steps)
@@ -715,7 +705,7 @@ fn creds() -> Option<image::oci_registry::Credentials> {
     Some(image::oci_registry::Credentials { username, password })
 }
 
-fn check_template(dir: &Path) -> Result<()> {
+pub(crate) fn check_template(dir: &Path) -> Result<()> {
     for f in REQUIRED_FILES {
         ensure!(
             dir.join(f).is_file(),
@@ -728,7 +718,7 @@ fn check_template(dir: &Path) -> Result<()> {
 }
 
 /// APFS copy-on-write clone where available (`cp -c`), else a plain copy.
-fn clone_file(src: &Path, dst: &Path) -> Result<()> {
+pub(crate) fn clone_file(src: &Path, dst: &Path) -> Result<()> {
     let cloned = std::process::Command::new("cp")
         .arg("-c")
         .arg(src)
@@ -742,7 +732,7 @@ fn clone_file(src: &Path, dst: &Path) -> Result<()> {
     Ok(())
 }
 
-fn short_id() -> String {
+pub(crate) fn short_id() -> String {
     uuid::Uuid::new_v4().simple().to_string()[..12].to_string()
 }
 
@@ -770,7 +760,7 @@ fn remote_reference(local: &str, explicit: Option<&str>) -> Result<String> {
     }
 }
 
-fn dir_size(dir: &Path) -> u64 {
+pub(crate) fn dir_size(dir: &Path) -> u64 {
     std::fs::read_dir(dir)
         .map(|rd| {
             rd.flatten()
@@ -782,7 +772,7 @@ fn dir_size(dir: &Path) -> u64 {
         .unwrap_or(0)
 }
 
-fn human(bytes: u64) -> String {
+pub(crate) fn human(bytes: u64) -> String {
     const G: f64 = 1024.0 * 1024.0 * 1024.0;
     const M: f64 = 1024.0 * 1024.0;
     let b = bytes as f64;
@@ -1018,6 +1008,12 @@ mod tests {
             .is_client_side()
         );
         assert!(!MacCommand::Rm { name: "x".into() }.is_client_side());
-        assert!(!MacCommand::Ps { json: false }.is_client_side());
+        assert!(
+            !MacCommand::Ps {
+                json: false,
+                opts: Default::default()
+            }
+            .is_client_side()
+        );
     }
 }
