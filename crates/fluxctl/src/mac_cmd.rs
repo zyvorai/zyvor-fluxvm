@@ -1,13 +1,16 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
 // SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 
-//! `fluxctl mac`: the image half of the Docker-style workflow for macOS guests (docs/macos-containers-design.md, phase 1).
-//! Client-side only: it talks to a registry and the local store, never the daemon.
+//! `fluxctl mac`: the Docker-style workflow for macOS guests (docs/macos-containers-design.md).
+//! Phase 1 (images: pull, push, tag, rmi, import) is client-side only: a registry and the local store, never the daemon.
+//! Phase 2 (run, ps, rm, exec) needs the daemon: an instance is a VM created from a template's `disk.raw` and labelled
+//! `fluxvm.mac=instance`. Not verified against a real VM: no macOS guest could be booted when this was written.
 
 use crate::mac_store::{self, Entry, REQUIRED_FILES, Store};
 use anyhow::{Context, Result, bail, ensure};
 use clap::Subcommand;
 use fluxvm_image as image;
+use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 
 #[derive(Subcommand)]
@@ -32,9 +35,322 @@ pub enum MacCommand {
     /// Add a template directory (disk.raw, hardware.bin, auxiliary.bin) to the store as `name:tag`; an APFS clone, so it is instant
     /// on the same volume.
     Import { dir: PathBuf, reference: String },
+    /// Start a macOS VM from a local image (an APFS clone of its disk) and, with CMD, run it over SSH. Needs the daemon
+    /// (`--server`/context). At most 2 macOS VMs run at once. Without CMD the instance keeps running: see `mac ps`.
+    Run {
+        /// Delete the instance when CMD finishes (needs CMD).
+        #[arg(long)]
+        rm: bool,
+        /// Instance name (default: mac-<random>).
+        #[arg(long)]
+        name: Option<String>,
+        /// Publish a guest port on this Mac: `[ADDR:]HOST:GUEST`. Repeatable.
+        #[arg(short = 'p', long = "publish")]
+        publish: Vec<String>,
+        /// SSH user inside the guest (the template's account).
+        #[arg(long, default_value = "admin")]
+        user: String,
+        /// Seconds to wait for the guest to answer on SSH.
+        #[arg(long, default_value_t = 900)]
+        wait: u64,
+        /// A local image (`fluxctl mac images`).
+        image: String,
+        /// The command to run in the guest, after `--`.
+        #[arg(last = true)]
+        cmd: Vec<String>,
+    },
+    /// List the instances (VMs labelled `fluxvm.mac=instance`).
+    Ps {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Stop and delete an instance.
+    Rm { name: String },
+    /// Run a command in a running instance over SSH: `fluxctl mac exec NAME -- sw_vers`.
+    Exec {
+        name: String,
+        #[arg(long, default_value = "admin")]
+        user: String,
+        #[arg(last = true, required = true)]
+        cmd: Vec<String>,
+    },
+}
+
+impl MacCommand {
+    /// Image subcommands never contact the daemon; the instance ones do.
+    pub fn is_client_side(&self) -> bool {
+        !matches!(
+            self,
+            Self::Run { .. } | Self::Ps { .. } | Self::Rm { .. } | Self::Exec { .. }
+        )
+    }
+}
+
+/// The label that marks a VM as a `fluxctl mac` instance, and the selector `ps` and `rm` send to the daemon.
+pub const INSTANCE_LABEL: &str = "fluxvm.mac";
+pub const INSTANCE_SELECTOR: &str = "fluxvm.mac=instance";
+const IMAGE_LABEL: &str = "fluxvm.mac.image";
+/// Apple's licence limit, as the daemon enforces it (`MAX_MACOS_GUESTS`).
+const MAX_MACOS: usize = 2;
+
+/// POST /v1/vms body: a macOS guest on `vz`, the image being the template's disk (the daemon clones it).
+pub fn build_create_body(name: &str, disk: &Path, publish: &[String]) -> Result<Value> {
+    ensure!(!name.is_empty(), "the instance name is empty");
+    let forwards = publish
+        .iter()
+        .map(|p| crate::run::parse_port(p))
+        .collect::<Result<Vec<_>>>()?;
+    let mut body = json!({
+        "name": name,
+        "backend": "vz",
+        "image": disk,
+        "apple": {"guest_os": "macos"},
+    });
+    if !forwards.is_empty() {
+        body["network"] = json!({"mode": "user", "forwards": forwards});
+    }
+    Ok(body)
+}
+
+/// PATCH body that labels a new VM as an instance of `image`.
+pub fn instance_labels(image: &str) -> Value {
+    json!({"labels": {INSTANCE_LABEL: "instance", IMAGE_LABEL: image}})
+}
+
+/// Keep only the instances among VM records (the daemon filters too; this guards a daemon that ignores `label`).
+pub fn filter_instances(items: &Value) -> Vec<&Value> {
+    items
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter(|v| v["labels"][INSTANCE_LABEL].as_str() == Some("instance"))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn forwards_text(vm: &Value) -> String {
+    let f = vm["request"]["network"]["forwards"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|f| {
+                    Some(format!(
+                        "{}->{}",
+                        f["host_port"].as_u64()?,
+                        f["guest_port"].as_u64()?
+                    ))
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    if f.is_empty() {
+        "-".into()
+    } else {
+        f.join(",")
+    }
+}
+
+/// The `ps` table and the "N of 2" line.
+pub fn render_ps(instances: &[&Value]) -> String {
+    let running = instances
+        .iter()
+        .filter(|v| v["status"].as_str() == Some("running"))
+        .count();
+    let mut out = format!(
+        "{:<20}  {:<24}  {:<9}  {:<15}  {:<14}  CREATED\n",
+        "NAME", "IMAGE", "STATUS", "IP", "PORTS"
+    );
+    for v in instances {
+        out.push_str(&format!(
+            "{:<20}  {:<24}  {:<9}  {:<15}  {:<14}  {}\n",
+            v["name"].as_str().unwrap_or("-"),
+            v["labels"][IMAGE_LABEL].as_str().unwrap_or("-"),
+            v["status"].as_str().unwrap_or("-"),
+            v["guest_ip"].as_str().unwrap_or("-"),
+            forwards_text(v),
+            v["created_at"].as_str().unwrap_or("-"),
+        ));
+    }
+    out.push_str(&format!(
+        "{running} of {MAX_MACOS} macOS VMs running from this list (other macOS VMs on the host count toward the limit too)\n"
+    ));
+    out
+}
+
+/// Turn the daemon's `METHOD path: 409 Conflict: msg` / `503` into the message a user can act on; other errors pass through.
+pub fn explain_error(e: anyhow::Error) -> anyhow::Error {
+    let t = format!("{e:#}");
+    if t.contains(": 409 ") {
+        anyhow::anyhow!(
+            "no room: this Mac already runs {MAX_MACOS} macOS VMs (Apple's licence limit). Stop one (`fluxctl mac rm NAME`, or `fluxctl stop ID`) and retry. Daemon said: {t}"
+        )
+    } else if t.contains(": 503 ") {
+        anyhow::anyhow!(
+            "this Mac's login session is locked, and a macOS guest cannot start from a locked session. Unlock it (a headless host needs an auto-login user with the lock off) and retry. Daemon said: {t}"
+        )
+    } else {
+        e
+    }
+}
+
+fn random_name() -> String {
+    format!("mac-{}", &short_id()[..6])
+}
+
+/// The VM record of the instance called `name`, found through the label selector so only instances can be touched.
+async fn find_instance(r: &crate::remote::Remote, name: &str) -> Result<Value> {
+    let q = format!(
+        "/v1/vms?label={}&name={}",
+        crate::remote::encode_query(INSTANCE_SELECTOR),
+        crate::remote::encode_query(name)
+    );
+    let v = r.call(reqwest::Method::GET, &q, None).await?;
+    filter_instances(&v["items"])
+        .into_iter()
+        .next()
+        .cloned()
+        .with_context(|| format!("no instance named {name:?} (see `fluxctl mac ps`)"))
+}
+
+async fn delete_instance(r: &crate::remote::Remote, id: &str) -> Result<()> {
+    use reqwest::Method;
+    r.call(Method::POST, &format!("/v1/vms/{id}/stop"), None)
+        .await
+        .ok();
+    r.call(Method::DELETE, &format!("/v1/vms/{id}"), None)
+        .await?;
+    Ok(())
+}
+
+/// Wait until the guest has an address and SSH answers there; returns the address.
+async fn wait_for_ssh(r: &crate::remote::Remote, id: &str, secs: u64) -> Result<String> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(secs);
+    loop {
+        let vm = r
+            .call(reqwest::Method::GET, &format!("/v1/vms/{id}"), None)
+            .await?;
+        if let Some(ip) = vm["guest_ip"].as_str() {
+            let up = tokio::time::timeout(
+                std::time::Duration::from_secs(3),
+                tokio::net::TcpStream::connect((ip, 22)),
+            )
+            .await
+            .is_ok_and(|c| c.is_ok());
+            if up {
+                return Ok(ip.to_string());
+            }
+        }
+        ensure!(
+            std::time::Instant::now() < deadline,
+            "the guest did not answer on SSH within {secs}s (a first boot of a clone can take minutes; raise --wait)"
+        );
+        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    }
+}
+
+/// `run`, `ps`, `rm`, `exec`: they need the daemon.
+pub async fn run_daemon(r: &crate::remote::Remote, command: MacCommand) -> Result<()> {
+    use reqwest::Method;
+    match command {
+        MacCommand::Run {
+            rm,
+            name,
+            publish,
+            user,
+            wait,
+            image,
+            cmd,
+        } => {
+            ensure!(
+                !rm || !cmd.is_empty(),
+                "--rm needs a command to run (fluxctl mac run --rm IMAGE -- CMD)"
+            );
+            let store = Store::open(mac_store::default_root()?)?;
+            let disk = store.resolve(&image)?.join("disk.raw");
+            let name = name.unwrap_or_else(random_name);
+            let body = build_create_body(&name, &disk, &publish)?;
+            let vm = r
+                .call(Method::POST, "/v1/vms", Some(body))
+                .await
+                .map_err(explain_error)?;
+            let id = vm["id"]
+                .as_str()
+                .context("the daemon returned no id")?
+                .to_string();
+            let started = async {
+                r.call(
+                    Method::PATCH,
+                    &format!("/v1/vms/{id}"),
+                    Some(instance_labels(&image)),
+                )
+                .await?;
+                r.call(Method::POST, &format!("/v1/vms/{id}/start"), None)
+                    .await
+                    .map_err(explain_error)
+            }
+            .await;
+            if let Err(e) = started {
+                delete_instance(r, &id).await.ok();
+                return Err(e);
+            }
+            if cmd.is_empty() {
+                println!("{name}");
+                return Ok(());
+            }
+            let result = async {
+                let ip = wait_for_ssh(r, &id, wait).await?;
+                crate::run::ssh_to(&ip, &user, 22, true, &cmd).await
+            }
+            .await;
+            if rm {
+                delete_instance(r, &id).await.ok();
+            } else {
+                eprintln!("instance {name} is still running (fluxctl mac rm {name})");
+            }
+            result
+        }
+        MacCommand::Ps { json } => {
+            let q = format!(
+                "/v1/vms?label={}",
+                crate::remote::encode_query(INSTANCE_SELECTOR)
+            );
+            let v = r.call(Method::GET, &q, None).await?;
+            let rows = filter_instances(&v["items"]);
+            if json {
+                println!("{}", serde_json::to_string_pretty(&rows)?);
+            } else {
+                print!("{}", render_ps(&rows));
+            }
+            Ok(())
+        }
+        MacCommand::Rm { name } => {
+            let vm = find_instance(r, &name).await?;
+            delete_instance(r, vm["id"].as_str().context("no id")?).await?;
+            println!("removed {name}");
+            Ok(())
+        }
+        MacCommand::Exec { name, user, cmd } => {
+            let vm = find_instance(r, &name).await?;
+            ensure!(
+                vm["status"].as_str() == Some("running"),
+                "{name} is {} (not running)",
+                vm["status"].as_str().unwrap_or("unknown")
+            );
+            let ip = vm["guest_ip"]
+                .as_str()
+                .context("the instance has no address yet: wait for it to boot")?;
+            crate::run::ssh_to(ip, &user, 22, true, &cmd).await
+        }
+        _ => bail!("not an instance command"),
+    }
 }
 
 pub async fn run(command: MacCommand) -> Result<()> {
+    ensure!(
+        command.is_client_side(),
+        "`fluxctl mac run/ps/rm/exec` need the daemon: pass --server (or select a context)"
+    );
     let store = Store::open(mac_store::default_root()?)?;
     match command {
         MacCommand::Images { json } => {
@@ -133,6 +449,10 @@ pub async fn run(command: MacCommand) -> Result<()> {
             )?;
             println!("imported {} as {key}", dir.display());
         }
+        MacCommand::Run { .. }
+        | MacCommand::Ps { .. }
+        | MacCommand::Rm { .. }
+        | MacCommand::Exec { .. } => unreachable!("rejected above"),
     }
     Ok(())
 }
@@ -339,5 +659,101 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(e.contains("not a macOS template"), "{e}");
+    }
+
+    #[test]
+    fn create_body_is_a_macos_vz_request_the_core_accepts() {
+        let b = build_create_body(
+            "ci1",
+            Path::new("/s/t/disk.raw"),
+            &["2222:22".into(), "127.0.0.1:8080:80".into()],
+        )
+        .unwrap();
+        assert_eq!(b["backend"], "vz");
+        assert_eq!(b["apple"]["guest_os"], "macos");
+        assert_eq!(b["image"], "/s/t/disk.raw");
+        assert_eq!(b["network"]["forwards"][0]["host_port"], 2222);
+        assert_eq!(b["network"]["forwards"][1]["host_addr"], "127.0.0.1");
+        let req: fluxvm_core::model::CreateVmRequest = serde_json::from_value(b).unwrap();
+        assert_eq!(req.name, "ci1");
+        assert!(build_create_body("x", Path::new("/d"), &["nope".into()]).is_err());
+        assert!(build_create_body("", Path::new("/d"), &[]).is_err());
+        let plain = build_create_body("x", Path::new("/d"), &[]).unwrap();
+        assert!(plain.get("network").is_none());
+    }
+
+    fn vm(name: &str, label: Option<&str>, status: &str) -> Value {
+        let mut v = json!({"name": name, "status": status, "guest_ip": "192.168.64.5",
+            "created_at": "2026-11-21T10:00:00Z", "labels": {},
+            "request": {"network": {"forwards": [{"host_port": 2222, "guest_port": 22}]}}});
+        if let Some(l) = label {
+            v["labels"] = json!({"fluxvm.mac": l, "fluxvm.mac.image": "xcode:15"});
+        }
+        v
+    }
+
+    #[test]
+    fn labels_and_filtering() {
+        let l = instance_labels("xcode:15");
+        assert_eq!(l["labels"]["fluxvm.mac"], "instance");
+        assert_eq!(INSTANCE_SELECTOR, "fluxvm.mac=instance");
+        let items = json!([
+            vm("a", Some("instance"), "running"),
+            vm("b", None, "running"),
+            vm("c", Some("other"), "stopped")
+        ]);
+        let kept = filter_instances(&items);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0]["name"], "a");
+        assert!(filter_instances(&json!(null)).is_empty());
+    }
+
+    #[test]
+    fn ps_renders_rows_and_the_limit() {
+        let items = json!([
+            vm("a", Some("instance"), "running"),
+            vm("b", Some("instance"), "stopped")
+        ]);
+        let text = render_ps(&filter_instances(&items));
+        assert!(
+            text.contains("NAME") && text.contains("xcode:15") && text.contains("2222->22"),
+            "{text}"
+        );
+        assert!(text.contains("1 of 2 macOS VMs"), "{text}");
+        assert!(render_ps(&[]).contains("0 of 2"));
+    }
+
+    #[test]
+    fn errors_name_the_limit_and_the_locked_session() {
+        let conflict = anyhow::anyhow!(
+            "POST /v1/vms/x/start: 409 Conflict: this Mac already runs 2 macOS guests"
+        );
+        let m = explain_error(conflict).to_string();
+        assert!(
+            m.contains("already runs 2 macOS VMs") && m.contains("mac rm"),
+            "{m}"
+        );
+        let locked =
+            anyhow::anyhow!("POST /v1/vms/x/start: 503 Service Unavailable: session locked");
+        assert!(
+            explain_error(locked)
+                .to_string()
+                .contains("login session is locked")
+        );
+        let other =
+            explain_error(anyhow::anyhow!("POST /v1/vms: 400 Bad Request: nope")).to_string();
+        assert_eq!(other, "POST /v1/vms: 400 Bad Request: nope");
+    }
+
+    #[test]
+    fn only_image_commands_are_client_side() {
+        assert!(
+            MacCommand::Rmi {
+                reference: "x".into()
+            }
+            .is_client_side()
+        );
+        assert!(!MacCommand::Rm { name: "x".into() }.is_client_side());
+        assert!(!MacCommand::Ps { json: false }.is_client_side());
     }
 }

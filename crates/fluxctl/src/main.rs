@@ -5146,6 +5146,7 @@ async fn run_remote(
             )
             .await?,
         )?,
+        Command::Mac { command } => mac_cmd::run_daemon(r, command).await?,
         Command::MacosPool { command } => match command {
             MacosPoolCommand::List => pretty(&r.call(Method::GET, "/v1/macos-pool", None).await?)?,
             MacosPoolCommand::Status => {
@@ -6234,7 +6235,12 @@ async fn main() -> Result<()> {
     if let Command::VmImage { command } = cli.command {
         return run_vm_image(command).await;
     }
-    if let Command::Mac { command } = cli.command {
+    if let Command::Mac { command } = &cli.command
+        && command.is_client_side()
+    {
+        let Command::Mac { command } = cli.command else {
+            unreachable!()
+        };
         return mac_cmd::run(command).await;
     }
     if let Command::Image { command } = cli.command {
@@ -8175,7 +8181,9 @@ async fn main() -> Result<()> {
             command: VznetCommand::Ls { json },
         } => print_vznets(&serde_json::to_value(m.vznets(None).await)?, json)?,
         Command::VmImage { command } => run_vm_image(command).await?,
-        Command::Mac { .. } => unreachable!("handled before the daemon is contacted"),
+        Command::Mac { .. } => anyhow::bail!(
+            "`fluxctl mac run/ps/rm/exec` need the daemon: pass --server (or select a context)"
+        ),
         Command::Image { command } => run_image(command, format).await?,
         Command::Oci { command } => {
             let out = match command {
