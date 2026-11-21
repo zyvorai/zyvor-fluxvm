@@ -12,6 +12,17 @@ Apple-silicon native k3s: `fluxctl kube apple`, a persistent ARM64 Linux VM per 
   `backup`/`restore` save the SQLite or embedded-etcd datastore as a private, checksummed archive and verify it before stopping anything. `persist mark|verify|cycle` proves data survives a stop/start.
   `snapshot save|ls|delete|prune|pull|restore` wrap `k3s etcd-snapshot` for `--embedded-etcd` clusters (names validated, pulled files private and checksummed). Agents join with a separate agent token sent on stdin (`--agent-token-file`), so no token is in cloud-init or on a command line.
   `recover` repairs the journal from VM ownership labels (adopts, relabels, reports orphans, never touches another owner's VMs). `status` exits non-zero when unhealthy and flags version skew.
+- `fluxctl kube apple` HA and day-2 (the "ideas not done" of the first cut), in `crates/fluxctl/src/kube_apple/`. Unit-tested against the fake host (and the failover forwarder over real loopback sockets); **none of it was run on real hardware**.
+  - `create --servers 3` (odd, up to 7; implies embedded etcd): servers join one at a time, a failed join is finished by running `create` again, shared server flags (`--cluster-cidr`, `--service-cidr`,
+    `--cluster-dns`, `--cluster-domain`, `--disable`, `--secrets-encryption`) are journalled and written into every server's unit and compared again by `doctor`. Stable endpoint: `--endpoint proxy` (default; a
+    failover TCP forwarder on the Mac over a pinned-host-key ssh tunnel per server) or `kube-vip` (`--vip`, a static pod on every server). The kubeconfig gets one context per server. `status` reports lost quorum.
+  - `token rotate --agent|--server`: new values made on the Mac, sent on stdin, servers first one at a time; no token in an argument, script or the journal. `snapshot schedule` sets cron, retention, compression and an
+    S3 target on every server (S3 keys only from a mode-600 file or `AWS_*` environment, on stdin into a root-only drop-in; never in argv, the journal or messages), plus `--show` and `--reset`.
+  - `remove NAME NODE`: refuses to break etcd quorum or remove the only server, then cordon, drain, stop k3s, delete the node object (k3s drops the etcd member), delete the VM, update the journal; `--force` for a dead node.
+  - `tunnel --install-agent|--remove-agent|--agent-status|--foreground`: a LaunchAgent (`dev.zyvor.fluxvm.k3s-tunnel.NAME`) that keeps the tunnel, or the multi-server forwarder, up.
+  - `rebuild NAME [--accept-host-keys]`: writes a new journal for a lost one from the ownership labels and the guests, and lists what cannot be recovered (the creation-time host-key pins, the published digest, VM sizing).
+    `doctor NAME`: quorum, shared-flag drift, endpoint, LaunchAgent, snapshot schedule/age/offsite, token age, each with its fix.
+  - New `scripts/test-kube-apple.sh` hardware acceptance script with an offline `--self-test`.
 Several Macs as one fleet from one command line. Unit-tested with a fake ssh transport only; **not run against a real Mac**.
 
 - New `fluxctl mac-fleet up|add user@host...`, `apply inventory`, `status`, `exec`, `upgrade`, `remove`, `doctor`. Over the system `ssh`

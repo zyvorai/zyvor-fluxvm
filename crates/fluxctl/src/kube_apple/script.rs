@@ -126,22 +126,20 @@ pub struct UnitOpts<'a> {
     pub token_file: bool,
     /// A server reads the token agents join with from [`AGENT_TOKEN_PATH`], so agents never hold the server token.
     pub agent_token_file: bool,
+    /// The flags every server of the cluster shares (servers only; `None` means just `--disable traefik`).
+    pub flags: Option<&'a SharedFlags>,
 }
 
 pub fn exec_args(o: &UnitOpts) -> String {
     let mut a: Vec<String> = vec![];
     match o.role {
         Role::Server => {
-            a.extend(
-                [
-                    "server",
-                    "--disable",
-                    "traefik",
-                    "--write-kubeconfig-mode",
-                    "600",
-                ]
-                .map(String::from),
-            );
+            a.push("server".into());
+            match o.flags {
+                Some(f) => a.extend(f.args()),
+                None => a.extend(["--disable", "traefik"].map(String::from)),
+            }
+            a.extend(["--write-kubeconfig-mode", "600"].map(String::from));
             a.extend(["--tls-san".into(), "127.0.0.1".into()]);
             for s in o.tls_sans {
                 a.extend(["--tls-san".into(), s.clone()]);
@@ -222,7 +220,11 @@ pub fn write_agent_token_script() -> String {
 pub fn read_token_script(role: Role) -> String {
     match role {
         Role::Agent => format!("set -eu; sudo -n cat {AGENT_TOKEN_PATH}"),
-        Role::Server => format!("set -eu; sudo -n cat {SERVER_DIR}/token"),
+        // A server that joined (or was rotated) keeps the cluster's server token in its own token file; the first server
+        // otherwise keeps it where k3s generated it.
+        Role::Server => format!(
+            "set -eu; if sudo -n test -s {TOKEN_PATH}; then sudo -n cat {TOKEN_PATH}; else sudo -n cat {SERVER_DIR}/token; fi"
+        ),
     }
 }
 
@@ -606,6 +608,7 @@ mod tests {
             join_url: None,
             token_file: false,
             agent_token_file: true,
+            flags: None,
         };
         let sc = install_unit_script(&o);
         assert!(sc.contains("--disable traefik"));
@@ -624,6 +627,7 @@ mod tests {
             join_url: Some("https://10.89.1.2:6443"),
             token_file: true,
             agent_token_file: false,
+            flags: None,
         };
         let ex = exec_args(&join);
         assert!(ex.starts_with(

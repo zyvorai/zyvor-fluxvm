@@ -8,13 +8,14 @@
 use super::host::{Host, LabelledVm, Power};
 use super::model::*;
 use super::script::{self, NodeInfo, UnitOpts};
+use super::script_ha;
 use anyhow::{Context, Result, anyhow, bail};
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 
 /// Polls of the node list while waiting for Ready, five seconds apart: ten minutes for a first boot.
 const READY_POLLS: u32 = 120;
-const POLL_SECS: u64 = 5;
+pub(super) const POLL_SECS: u64 = 5;
 
 /// How k3s gets into a guest.
 pub enum Install {
@@ -45,6 +46,13 @@ pub struct CreateReq {
     pub install: Install,
     pub kubeconfig: Option<PathBuf>,
     pub user: String,
+    /// Control-plane nodes to create (1, or an odd number up to [`MAX_SERVERS`]; more than one needs embedded etcd).
+    pub servers: u8,
+    /// The stable registration endpoint; `None` means the default for the server count (a forwarder when there are several).
+    pub endpoint: Option<EndpointKind>,
+    /// The kube-vip address, for `EndpointKind::KubeVip`.
+    pub vip: Option<String>,
+    pub flags: SharedFlags,
 }
 
 #[derive(Serialize, Debug)]
@@ -53,18 +61,36 @@ pub struct CreateReport {
     pub kubeconfig: PathBuf,
     pub k3s_version: Option<String>,
     pub resumed: bool,
+    pub servers: Vec<String>,
     pub next: String,
 }
 
-async fn sh<H: Host>(h: &H, st: &State, node: &str, script: &str) -> Result<String> {
+pub(super) async fn sh<H: Host>(h: &H, st: &State, node: &str, script: &str) -> Result<String> {
     let out = h.ssh(st, node, script, None).await?;
     Ok(String::from_utf8_lossy(&out).trim().to_owned())
 }
 
-fn server_name(st: &State) -> Result<String> {
+pub(super) fn server_name(st: &State) -> Result<String> {
     st.server()
         .map(|n| n.name.clone())
         .context("this record has no local server node")
+}
+
+/// Runs a script on the first server that answers (journal order) and returns that server's name with the output. With one
+/// server this is exactly `sh` on it; with several, a server that is down or restarting does not stop the command.
+pub async fn sh_server<H: Host>(h: &H, st: &State, script: &str) -> Result<(String, String)> {
+    let servers = st.servers();
+    if servers.is_empty() {
+        bail!("this record has no local server node");
+    }
+    let mut last = None;
+    for s in servers {
+        match sh(h, st, &s.name, script).await {
+            Ok(o) => return Ok((s.name.clone(), o)),
+            Err(e) => last = Some(e),
+        }
+    }
+    Err(last.unwrap())
 }
 
 /// Polls the server's node list until every node in `want` is Ready (and runs `version`, when given).
@@ -74,10 +100,13 @@ pub async fn wait_ready<H: Host>(
     want: &[String],
     version: Option<&str>,
 ) -> Result<Vec<NodeInfo>> {
-    let server = server_name(st)?;
+    server_name(st)?;
     let mut last = String::from("no answer yet");
     for _ in 0..READY_POLLS {
-        match sh(h, st, &server, &script::nodes_json_script()).await {
+        match sh_server(h, st, &script::nodes_json_script())
+            .await
+            .map(|(_, o)| o)
+        {
             Ok(j) => match script::parse_nodes(&j) {
                 Ok(nodes) => {
                     let missing: Vec<&String> = want
@@ -246,9 +275,9 @@ async fn bootstrap_node<H: Host>(
     Ok(())
 }
 
-async fn export_kubeconfig<H: Host>(h: &H, st: &State, path: Option<&Path>) -> Result<PathBuf> {
-    let server = server_name(st)?;
-    let raw = sh(h, st, &server, &script::kubeconfig_script()).await?;
+pub(super) async fn export_kubeconfig<H: Host>(h: &H, st: &State, path: Option<&Path>) -> Result<PathBuf> {
+    server_name(st)?;
+    let (_, raw) = sh_server(h, st, &script::kubeconfig_script()).await?;
     if !raw.contains("server:") {
         bail!("the server returned no kubeconfig");
     }
@@ -267,14 +296,61 @@ pub async fn create<H: Host>(h: &H, store: &Store, req: &CreateReq) -> Result<Cr
             bail!("--tls-san {s:?} must be a DNS name or address");
         }
     }
+    if req.servers == 0 || req.servers > MAX_SERVERS || (req.servers > 1 && req.servers % 2 == 0) {
+        bail!(
+            "--servers must be 1 or an odd number up to {MAX_SERVERS} (etcd needs a majority; an even count tolerates no more failures than one fewer)"
+        );
+    }
+    if req.servers > 1 && req.datastore != Datastore::Etcd {
+        bail!("--servers {} needs embedded etcd (--embedded-etcd)", req.servers);
+    }
+    if req.servers > 1 && req.api_port > u16::MAX - 8 {
+        bail!("--api-port must leave eight free ports above it for the servers' tunnels");
+    }
+    req.flags.validate()?;
+    let mut tls_sans = req.tls_sans.clone();
+    let endpoint = match (req.endpoint, req.servers > 1) {
+        (Some(EndpointKind::KubeVip), false) => bail!("--endpoint kube-vip needs --servers 3 or more"),
+        (None, false) => None,
+        (None, true) => Some(EndpointCfg { kind: EndpointKind::Proxy, vip: None }),
+        (Some(EndpointKind::Proxy), _) => Some(EndpointCfg { kind: EndpointKind::Proxy, vip: None }),
+        (Some(EndpointKind::KubeVip), true) => {
+            let vip = req
+                .vip
+                .clone()
+                .context("--endpoint kube-vip needs --vip ADDRESS on the private network (10.89.x.y)")?;
+            if !script_ha::private_vip_ok(&vip) {
+                bail!("--vip {vip:?} must be an address on the private network (10.89.x.y)");
+            }
+            tls_sans.push(vip.clone());
+            Some(EndpointCfg { kind: EndpointKind::KubeVip, vip: Some(vip) })
+        }
+    };
+    if req.vip.is_some() && !matches!(endpoint.as_ref().map(|e| e.kind), Some(EndpointKind::KubeVip)) {
+        bail!("--vip is only for --endpoint kube-vip");
+    }
     let _lock = store.lock(&req.name)?;
     let (mut st, resumed) = match store.load(&req.name)? {
         Some(s) if s.phase == Phase::Ready => {
-            bail!(
-                "{} already exists; see `fluxctl kube apple status {}`",
-                req.name,
-                req.name
-            )
+            if joined_servers(&s) >= usize::from(s.servers_wanted) {
+                bail!(
+                    "{} already exists; see `fluxctl kube apple status {}`",
+                    req.name,
+                    req.name
+                )
+            }
+            // A multi-server cluster whose extra servers did not all join: finish them.
+            let servers = add_servers(h, store, &req.name, &req.install).await?;
+            let st = store.require(&req.name)?;
+            let kc = export_kubeconfig(h, &st, req.kubeconfig.as_deref()).await?;
+            return Ok(CreateReport {
+                name: st.name.clone(),
+                kubeconfig: kc,
+                k3s_version: st.k3s_version.clone(),
+                resumed: true,
+                servers,
+                next: next_hint(&st),
+            });
         }
         Some(s) => (s, true),
         None => {
@@ -287,12 +363,18 @@ pub async fn create<H: Host>(h: &H, store: &Store, req: &CreateReq) -> Result<Cr
                 api_port: req.api_port,
                 datastore: req.datastore,
                 external_url: None,
-                tls_sans: req.tls_sans.clone(),
+                tls_sans: tls_sans.clone(),
                 k3s_sha256: None,
                 k3s_version: None,
                 params: req.params.clone(),
                 nodes: vec![new_node(&req.name, Role::Server)],
                 canary: None,
+                servers_wanted: req.servers,
+                flags: req.flags.clone(),
+                endpoint: endpoint.clone(),
+                snapshots: None,
+                agent_secret_rotated: None,
+                server_secret_rotated: None,
             };
             if let Install::Binary { sha256, .. } = &req.install {
                 s.k3s_sha256 = Some(sha256.clone());
@@ -311,23 +393,22 @@ pub async fn create<H: Host>(h: &H, store: &Store, req: &CreateReq) -> Result<Cr
         .await
         .is_ok_and(|s| s == "active");
     if !already {
+        let sans = st.tls_sans.clone();
+        let flags = st.flags.clone();
         let unit = UnitOpts {
             role: Role::Server,
             node: &node,
-            tls_sans: &st.tls_sans,
+            tls_sans: &sans,
             cluster_init: st.datastore == Datastore::Etcd,
             join_url: None,
             token_file: false,
             agent_token_file: true,
-        };
-        let sans = st.tls_sans.clone();
-        let unit = UnitOpts {
-            tls_sans: &sans,
-            ..unit
+            flags: Some(&flags),
         };
         // Agents join with their own token, made here and sent on stdin: it is never in the VM request.
         let agent_token = format!("{}{}", h.new_id(), h.new_id());
         bootstrap_node(h, &st, &node, &req.install, None, Some(&agent_token), &unit).await?;
+        install_kube_vip(h, &st, &node).await?;
     }
     wait_ready(h, &st, std::slice::from_ref(&node), None).await?;
     let version = sh(h, &st, &node, &script::version_script(script::K3S_BIN))
@@ -346,19 +427,88 @@ pub async fn create<H: Host>(h: &H, store: &Store, req: &CreateReq) -> Result<Cr
         n.version = version.clone();
         n.joined = true;
     }
-    let kc = export_kubeconfig(h, &st, req.kubeconfig.as_deref()).await?;
     st.phase = Phase::Ready;
     store.save(&st)?;
+    // The other control-plane nodes, one at a time (etcd admits one new member at a time).
+    let servers = add_servers(h, store, &req.name, &req.install).await?;
+    let st = store.require(&req.name)?;
+    let kc = export_kubeconfig(h, &st, req.kubeconfig.as_deref()).await?;
     Ok(CreateReport {
         name: st.name.clone(),
         kubeconfig: kc,
         k3s_version: version,
         resumed,
-        next: format!(
-            "fluxctl kube apple tunnel {0}; then: KUBECONFIG=<kubeconfig> kubectl get nodes",
-            st.name
-        ),
+        servers,
+        next: next_hint(&st),
     })
+}
+
+pub(super) fn joined_servers(st: &State) -> usize {
+    st.servers().iter().filter(|n| n.joined).count()
+}
+
+fn next_hint(st: &State) -> String {
+    format!(
+        "fluxctl kube apple tunnel {0}{1}; then: KUBECONFIG=<kubeconfig> kubectl get nodes",
+        st.name,
+        if st.uses_proxy() {
+            " (a forwarder over every server's tunnel; add --install-agent to keep it up)"
+        } else {
+            ""
+        }
+    )
+}
+
+/// Writes the kube-vip static pod on a server when the cluster uses kube-vip.
+async fn install_kube_vip<H: Host>(h: &H, st: &State, node: &str) -> Result<()> {
+    if let Some(EndpointCfg { kind: EndpointKind::KubeVip, vip: Some(vip) }) = &st.endpoint {
+        h.ssh(
+            st,
+            node,
+            &script_ha::install_kube_vip_script(),
+            Some(script_ha::kube_vip_manifest(vip).as_bytes()),
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+/// Joins servers until the cluster has as many as it was created for. Returns every server's name.
+async fn add_servers<H: Host>(
+    h: &H,
+    store: &Store,
+    name: &str,
+    install: &Install,
+) -> Result<Vec<String>> {
+    loop {
+        let st = store.require(name)?;
+        if joined_servers(&st) >= usize::from(st.servers_wanted) {
+            return Ok(st.servers().iter().map(|n| n.name.clone()).collect());
+        }
+        // A server that was journalled but never finished joining is retried, not duplicated.
+        let node = st
+            .servers()
+            .iter()
+            .find(|n| !n.joined)
+            .map(|n| n.name.clone());
+        let install = match install {
+            Install::Preinstalled => Install::Preinstalled,
+            _ => Install::FromServer,
+        };
+        let req = JoinReq {
+            cluster: name.to_owned(),
+            node,
+            role: Role::Server,
+            install,
+            external: None,
+            params: st.params.clone(),
+            user: st.user.clone(),
+            keep_failed: true,
+        };
+        join_inner(h, store, &req).await.with_context(|| {
+            format!("adding a control-plane node to {name}; run `fluxctl kube apple create {name} ...` again to continue")
+        })?;
+    }
 }
 
 pub struct JoinReq {
@@ -407,7 +557,21 @@ pub async fn join<H: Host>(h: &H, store: &Store, req: &JoinReq) -> Result<JoinRe
         bail!("{:?} is not a valid cluster name", req.cluster);
     }
     let _lock = store.lock(&req.cluster)?;
-    let (mut st, url, token) = match &req.external {
+    let report = join_inner(h, store, req).await?;
+    if req.role == Role::Server && req.external.is_none() {
+        // The kubeconfig lists one context per server.
+        let st = store.require(&req.cluster)?;
+        export_kubeconfig(h, &st, None).await?;
+    }
+    Ok(report)
+}
+
+/// `join` without taking the cluster lock, for callers that already hold it (`create --servers`).
+async fn join_inner<H: Host>(h: &H, store: &Store, req: &JoinReq) -> Result<JoinReport> {
+    if !name_ok(&req.cluster) {
+        bail!("{:?} is not a valid cluster name", req.cluster);
+    }
+    let (mut st, url, token, agent_token) = match &req.external {
         Some((url, file)) => {
             if !join_url_ok(url) {
                 bail!("--url must be https://HOST[:PORT] of plain characters");
@@ -430,9 +594,15 @@ pub async fn join<H: Host>(h: &H, store: &Store, req: &JoinReq) -> Result<JoinRe
                     params: req.params.clone(),
                     nodes: vec![],
                     canary: None,
+                    servers_wanted: 1,
+                    flags: SharedFlags::default(),
+                    endpoint: None,
+                    snapshots: None,
+                    agent_secret_rotated: None,
+                    server_secret_rotated: None,
                 },
             };
-            (st, url.clone(), token)
+            (st, url.clone(), token, None)
         }
         None => {
             let st = store.require(&req.cluster)?;
@@ -448,8 +618,13 @@ pub async fn join<H: Host>(h: &H, store: &Store, req: &JoinReq) -> Result<JoinRe
                     "a second server needs embedded etcd; create the cluster with --embedded-etcd"
                 );
             }
-            let server = server_name(&st)?;
-            let ip = sh(h, &st, &server, &script::private_ip_script()).await?;
+            if req.role == Role::Server && st.servers().iter().filter(|n| n.joined).count() >= usize::from(MAX_SERVERS) {
+                bail!("a cluster may have at most {MAX_SERVERS} servers");
+            }
+            server_name(&st)?;
+            // The first server that answers; the new node joins through it (its private address), then through whichever
+            // servers k3s's own client-side balancing finds.
+            let (server, ip) = sh_server(h, &st, &script::private_ip_script()).await?;
             if !script::private_ip_ok(&ip) {
                 bail!("the server has no address on the cluster's private network");
             }
@@ -457,7 +632,17 @@ pub async fn join<H: Host>(h: &H, store: &Store, req: &JoinReq) -> Result<JoinRe
             if !token_ok(&token) {
                 bail!("could not read a usable node token from the server");
             }
-            (st, format!("https://{ip}:{GUEST_API_PORT}"), token)
+            // A joining server must hold the same agent token as the others, or agents could not join through it.
+            let agent_token = if req.role == Role::Server {
+                let t = sh(h, &st, &server, &script::read_token_script(Role::Agent)).await?;
+                if !token_ok(&t) {
+                    bail!("could not read the agent token from the server");
+                }
+                Some(t)
+            } else {
+                None
+            };
+            (st, format!("https://{ip}:{GUEST_API_PORT}"), token, agent_token)
         }
     };
     if st.nodes.len() >= MAX_NODES {
@@ -466,12 +651,15 @@ pub async fn join<H: Host>(h: &H, store: &Store, req: &JoinReq) -> Result<JoinRe
     let node = match &req.node {
         Some(n) => n.clone(),
         None if req.external.is_some() => format!("{}-{}1", st.name, &req.role.as_str()[..1]),
+        None if req.role == Role::Server => st.next_server_name(),
         None => st.next_agent_name(),
     };
     if !name_ok(&node) {
         bail!("{node:?} is not a valid node name");
     }
-    if st.node(&node).is_some() {
+    // A node that an earlier, interrupted join left in the journal unjoined is picked up again.
+    let retry = st.node(&node).is_some_and(|n| !n.joined && n.role == req.role);
+    if st.node(&node).is_some() && !retry {
         bail!("{} already has a node named {node}", st.name);
     }
     if let Install::FromServer = req.install
@@ -479,22 +667,42 @@ pub async fn join<H: Host>(h: &H, store: &Store, req: &JoinReq) -> Result<JoinRe
     {
         bail!("a node of a cluster on another Mac needs --binary and --sha256, or --preinstalled");
     }
-    st.nodes.push(new_node(&node, req.role));
+    if !retry {
+        st.nodes.push(new_node(&node, req.role));
+    }
     store.save(&st)?;
 
     let result: Result<Option<String>> = async {
         ensure_vm(h, store, &mut st, &node).await?;
         h.wait_ssh(&st, &node).await?;
+        let (sans, flags): (Vec<String>, SharedFlags) = if req.role == Role::Server {
+            (st.tls_sans.clone(), st.flags.clone())
+        } else {
+            (vec![], SharedFlags::default())
+        };
         let unit = UnitOpts {
             role: req.role,
             node: &node,
-            tls_sans: &[],
+            tls_sans: &sans,
             cluster_init: false,
             join_url: Some(&url),
             token_file: true,
-            agent_token_file: false,
+            agent_token_file: agent_token.is_some(),
+            flags: (req.role == Role::Server).then_some(&flags),
         };
-        bootstrap_node(h, &st, &node, &req.install, Some(&token), None, &unit).await?;
+        bootstrap_node(
+            h,
+            &st,
+            &node,
+            &req.install,
+            Some(&token),
+            agent_token.as_deref(),
+            &unit,
+        )
+        .await?;
+        if req.role == Role::Server {
+            install_kube_vip(h, &st, &node).await?;
+        }
         if req.external.is_none() {
             let nodes = wait_ready(h, &st, std::slice::from_ref(&node), None).await?;
             Ok(nodes
@@ -511,6 +719,10 @@ pub async fn join<H: Host>(h: &H, store: &Store, req: &JoinReq) -> Result<JoinRe
             let n = st.node_mut(&node).unwrap();
             n.joined = true;
             n.version = version.clone();
+            if req.role == Role::Server && req.external.is_none() {
+                // A server added by hand makes the cluster a multi-server one from now on.
+                st.servers_wanted = st.servers_wanted.max(joined_servers(&st) as u8);
+            }
             store.save(&st)?;
             Ok(JoinReport {
                 cluster: st.name.clone(),
@@ -520,7 +732,10 @@ pub async fn join<H: Host>(h: &H, store: &Store, req: &JoinReq) -> Result<JoinRe
             })
         }
         Err(e) => {
-            let msg = redact(&format!("{e:#}"), &token);
+            let mut msg = redact(&format!("{e:#}"), &token);
+            if let Some(t) = &agent_token {
+                msg = redact(&msg, t);
+            }
             if req.keep_failed {
                 bail!("{msg}; the node {node} was kept (--keep-failed) and is recorded unjoined");
             }
@@ -560,7 +775,7 @@ pub async fn join<H: Host>(h: &H, store: &Store, req: &JoinReq) -> Result<JoinRe
 }
 
 /// Stops (if running) and deletes a node's VM. A node that never got a VM is fine.
-async fn remove_node_vm<H: Host>(h: &H, st: &State, node: &str) -> Result<()> {
+pub(super) async fn remove_node_vm<H: Host>(h: &H, st: &State, node: &str) -> Result<()> {
     let n = st.node(node).context("unknown node")?;
     let Some(vm) = h.find_vm(&n.vm_name).await? else {
         return Ok(());
@@ -652,8 +867,10 @@ pub async fn status<H: Host>(h: &H, store: &Store, name: &str) -> Result<Status>
         out.push(ns);
     }
     let mut readyz = None;
-    if let Some(server) = st.server()
-        && out.iter().any(|n| n.name == server.name && n.ssh)
+    if let Some(server) = st
+        .servers()
+        .into_iter()
+        .find(|s| out.iter().any(|n| n.name == s.name && n.ssh))
     {
         readyz = sh(h, &st, &server.name, &script::readyz_script())
             .await
@@ -661,9 +878,9 @@ pub async fn status<H: Host>(h: &H, store: &Store, name: &str) -> Result<Status>
         if readyz.as_deref() != Some("ok") {
             problems.push("the API server's /readyz does not say ok".into());
         }
-        match sh(h, &st, &server.name, &script::nodes_json_script())
+        match sh_server(h, &st, &script::nodes_json_script())
             .await
-            .and_then(|j| script::parse_nodes(&j))
+            .and_then(|(_, j)| script::parse_nodes(&j))
         {
             Ok(nodes) => {
                 for ns in out.iter_mut() {
@@ -677,10 +894,25 @@ pub async fn status<H: Host>(h: &H, store: &Store, name: &str) -> Result<Status>
                         problems.push(format!("{}: not registered in the cluster", ns.name));
                     }
                 }
+                // The oldest server sets the skew limit for agents.
                 let sv = out
                     .iter()
-                    .find(|n| n.role == "server")
-                    .and_then(|n| n.version.clone());
+                    .filter(|n| n.role == "server")
+                    .filter_map(|n| n.version.clone())
+                    .min_by_key(|v| parse_version(v));
+                if st.servers().len() > 1 {
+                    let ready = out
+                        .iter()
+                        .filter(|n| n.role == "server" && n.ready == Some(true))
+                        .count();
+                    let want = script_ha::majority(st.servers().len());
+                    if ready < want {
+                        problems.push(format!(
+                            "etcd has no quorum: {ready} of {} servers Ready, {want} needed",
+                            st.servers().len()
+                        ));
+                    }
+                }
                 for ns in out.iter().filter(|n| n.role == "agent") {
                     if let (Some(s), Some(a)) = (sv.as_deref(), ns.version.as_deref())
                         && let (Some(sp), Some(ap)) = (parse_version(s), parse_version(a))
@@ -695,6 +927,13 @@ pub async fn status<H: Host>(h: &H, store: &Store, name: &str) -> Result<Status>
             }
             Err(e) => problems.push(format!("node list failed: {e}")),
         }
+    }
+    if st.external_url.is_none() && joined_servers(&st) < usize::from(st.servers_wanted) {
+        problems.push(format!(
+            "{} of {} servers have joined; run create again to add the rest",
+            joined_servers(&st),
+            st.servers_wanted
+        ));
     }
     if st.phase != Phase::Ready {
         problems.push(format!(
@@ -768,7 +1007,8 @@ pub async fn start<H: Host>(
         }
         h.wait_ssh(&st, &n.name).await?;
         order.push(n.name.clone());
-        if n.name == server {
+        // With several servers the first cannot be Ready before a majority of etcd members is up: start them all first.
+        if n.name == server && st.servers().len() == 1 {
             wait_ready(h, &st, std::slice::from_ref(&server), None).await?;
         }
     }
@@ -1355,7 +1595,7 @@ pub async fn logs<H: Host>(
 
 // ---- etcd snapshots (embedded etcd only) ------------------------------------------------------------------------
 
-fn etcd_only(st: &State) -> Result<String> {
+pub(super) fn etcd_only(st: &State) -> Result<String> {
     if st.datastore != Datastore::Etcd {
         bail!(
             "snapshots need embedded etcd (create --embedded-etcd); a SQLite cluster uses `backup`"
