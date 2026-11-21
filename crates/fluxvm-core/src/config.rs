@@ -447,6 +447,54 @@ pub struct SandboxConfig {
     pub dataplane: DataplaneConfig,
     /// Rootless process sandboxes (`SandboxCreateRequest.procbox`).
     pub procbox: ProcboxConfig,
+    /// FluxVM's own Linux container runtime and the default for `--runtime auto` (see `docs/linux-runtime.md`).
+    pub container: ContainerRuntimeConfig,
+}
+
+/// `[sandbox.container]`: the native Linux container runtime and the runtime choice defaults.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ContainerRuntimeConfig {
+    /// Allow `runtime = "container"` sandboxes on Linux. On by default; it still needs the host to support it
+    /// (`fluxctl doctor` says what is missing).
+    pub enabled: bool,
+    /// What a request without `runtime` gets: `auto`, `container` or `vm`.
+    pub default_runtime: String,
+    /// The trust level of a request that does not say: `dev`, `trusted`, `untrusted` or `agent`.
+    /// `untrusted` (the default) makes `auto` pick a microVM.
+    pub default_trust: String,
+    /// Let callers run `untrusted`/`agent` workloads in a container by passing `allow_container_untrusted`.
+    /// Off by default: a container shares the host kernel.
+    pub allow_untrusted: bool,
+    /// Defaults applied to every container, capped by the caller's own request never being above these maxima.
+    pub default_memory_mib: u64,
+    pub max_memory_mib: u64,
+    pub default_pids: u64,
+    pub max_pids: u64,
+    /// Per-container TTL cap (0 = none); a request's `ttl_seconds` is used otherwise.
+    pub max_ttl_seconds: u64,
+    /// Path of the `fluxvm-container-run` launcher; empty = next to the daemon, then PATH.
+    pub launcher: String,
+    /// How containers are managed: `auto` (systemd when it is PID 1, else direct), `systemd` or `direct`.
+    pub manager: String,
+}
+
+impl Default for ContainerRuntimeConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            default_runtime: "auto".to_string(),
+            default_trust: "untrusted".to_string(),
+            allow_untrusted: false,
+            default_memory_mib: 512,
+            max_memory_mib: 16384,
+            default_pids: 512,
+            max_pids: 32768,
+            max_ttl_seconds: 0,
+            launcher: String::new(),
+            manager: "auto".to_string(),
+        }
+    }
 }
 
 /// Server-side gate and caps for `procbox` sandboxes: a Landlock + seccomp
@@ -544,6 +592,7 @@ impl Default for SandboxConfig {
             warm_slots: default_warm_slots(),
             dataplane: DataplaneConfig::default(),
             procbox: ProcboxConfig::default(),
+            container: ContainerRuntimeConfig::default(),
         }
     }
 }

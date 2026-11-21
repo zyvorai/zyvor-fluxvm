@@ -8,6 +8,9 @@ the subset cannot `build`, run Compose, bind-mount Mac paths or create Docker ne
 CLI does works, because it is the real engine: `docker build`, `docker compose up --build --wait`, bind mounts, user-defined
 networks with name resolution, `tmpfs`, `read_only`, `cap_drop`, health checks.
 
+On Linux there is a third option that is not Docker at all: FluxVM's own container runtime (`fluxctl sandbox run IMAGE --runtime container`),
+managed by systemd, rootless where the kernel allows it, no Docker API. See [linux-runtime.md](linux-runtime.md) for the support matrix.
+
 | | Built-in `docker.sock` | `fluxctl docker` |
 |---|---|---|
 | Containers | one microVM each | ordinary containers in one VM |

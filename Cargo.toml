@@ -30,6 +30,7 @@ members = [
     "crates/fluxvm-containerd-shim",
     "crates/fluxvm-intelligence",
     "crates/fluxvm-procbox",
+    "crates/fluxvm-ctr",
     "crates/fluxvm-oci-init",
     "crates/fluxvm-vz-switch",
     "crates/fluxvm-blockd",

@@ -1,0 +1,30 @@
+# Copyright 2026 Zyvor AI Labs · https://zyvor.dev
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+
+[package]
+name = "fluxvm-ctr"
+version = "0.4.21"
+edition = "2024"
+license = "LicenseRef-Zyvor-Production-1.0"
+description = "FluxVM's own Linux container runtime: runtime choice, systemd unit rendering, host probe, and the namespace/cgroup/seccomp launcher"
+
+[lib]
+name = "fluxvm_ctr"
+path = "src/lib.rs"
+
+[[bin]]
+name = "fluxvm-container-run"
+path = "src/main.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+anyhow = "1"
+libc = "0.2"
+serde_json = "1"
+fluxvm-procbox = { path = "../fluxvm-procbox" }
+
+[dev-dependencies]
+tempfile = "3"
+serde_json = "1"

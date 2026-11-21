@@ -31,6 +31,10 @@ LimitMEMLOCK=infinity
 # tracked ExecStart PID, QEMU children left alone) is exactly what lets a
 # binary upgrade/restart happen without disrupting live VMs.
 KillMode=process
+# Delegate=yes hands this unit its own cgroup subtree with the controllers enabled, so fluxvm can create and limit
+# cgroups for VMs without the "failed to delegate cgroup controllers" warning. Native containers
+# (--runtime container) are separate transient units with their own Delegate=yes and are not touched by a restart.
+Delegate=yes
 # TAP creation needs CAP_NET_ADMIN. KVM needs /dev/kvm access. Disk
 # provisioning (cloud-init/agent injection via guestfs) attaches the image
 # through /dev/nbd*, which needs CAP_SYS_ADMIN for the NBD_SET_SOCK ioctl.

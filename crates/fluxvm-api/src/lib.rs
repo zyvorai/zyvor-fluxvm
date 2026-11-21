@@ -130,6 +130,16 @@ impl<E: Into<anyhow::Error>> From<E> for ApiError {
             Some(ProcboxError::TooLarge(_)) => StatusCode::PAYLOAD_TOO_LARGE,
             Some(ProcboxError::PathEscape(_)) | None => StatusCode::BAD_REQUEST,
         };
+        // The runtime choice: refusing a container for untrusted code is a policy decision (403); a runtime this host
+        // cannot run is a 503 the operator can fix (`GET /v1/sandbox/runtimes` says how).
+        use fluxvm_scheduler::container_sandbox::RuntimeError;
+        let status = match e.downcast_ref::<RuntimeError>() {
+            Some(RuntimeError::UntrustedContainer { .. }) => StatusCode::FORBIDDEN,
+            Some(RuntimeError::Unavailable { .. } | RuntimeError::NoRuntime { .. }) => {
+                StatusCode::SERVICE_UNAVAILABLE
+            }
+            None => status,
+        };
         Self {
             status,
             message: format!("{:#}", e),
@@ -891,6 +901,8 @@ pub fn router(manager: Arc<VmManager>) -> Router {
         .route("/v1/sandboxes/{id}/fs/write", post(sandbox_fs_write))
         .route("/v1/sandboxes/{id}/process", post(sandbox_process))
         .route("/v1/sandboxes/{id}/logs", get(sandbox_logs))
+        .route("/v1/sandboxes/{id}/inspect", get(sandbox_inspect))
+        .route("/v1/sandbox/runtimes", get(sandbox_runtimes))
         .route("/v1/sandboxes/{id}/baseline", post(sandbox_baseline))
         .route("/v1/sandboxes/{id}/changes", post(sandbox_changes))
         .route("/v1/sandboxes/{id}/dry-run", post(sandbox_dry_run))
@@ -2099,6 +2111,13 @@ pub(crate) async fn sandbox_proxy_inner(
                 .into_response();
         }
     };
+    if fluxvm_scheduler::container_sandbox::is_container(&vm) {
+        return (
+            StatusCode::NOT_IMPLEMENTED,
+            "a native container sandbox has no guest network to proxy HTTP into",
+        )
+            .into_response();
+    }
     if fluxvm_scheduler::procbox_sandbox::is_procbox(&vm) {
         return (
             StatusCode::NOT_IMPLEMENTED,
@@ -5049,6 +5068,19 @@ async fn sandbox_logs(
     Query(q): Query<SandboxLogsQuery>,
 ) -> ApiResult<Json<fluxvm_scheduler::oci_sandbox::SandboxLogs>> {
     Ok(Json(m.sandbox_logs(id, q.lines.min(10_000)).await?))
+}
+
+/// `GET /v1/sandboxes/{id}/inspect` — a native container's runtime decision, its systemd unit file and live state.
+async fn sandbox_inspect(
+    State(m): State<Arc<VmManager>>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<fluxvm_scheduler::container_sandbox::ContainerInspect>> {
+    Ok(Json(m.container_inspect(id).await?))
+}
+
+/// `GET /v1/sandbox/runtimes` — what this host supports for `runtime = container | vm`, with fix hints.
+async fn sandbox_runtimes(State(m): State<Arc<VmManager>>) -> Json<serde_json::Value> {
+    Json(m.runtime_report())
 }
 
 /// `GET /v1/vms/{id}/logs?lines=N&follow=true` — tail-follow the VM's

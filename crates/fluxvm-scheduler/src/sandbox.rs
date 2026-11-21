@@ -12,7 +12,7 @@ use uuid::Uuid;
 
 use crate::VmManager;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SandboxCreateRequest {
     /// Optional human name (defaults to sandbox-<uuid>).
     #[serde(default)]
@@ -89,6 +89,21 @@ pub struct SandboxCreateRequest {
     /// `volumes`, `gpus` or `confidential`; `profile`, `vcpus`, `memory_mib`, `offline`, `allow_hosts` and `ttl_seconds` apply.
     #[serde(default)]
     pub oci: Option<crate::oci_sandbox::OciSandboxSpec>,
+    /// How to run: `auto`, `container` (FluxVM's own Linux container runtime, shares the host kernel) or `vm` (a microVM,
+    /// its own kernel). Absent: `sandbox.container.default_runtime`. See `docs/linux-runtime.md`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<fluxvm_ctr::runtime::Runtime>,
+    /// How much the workload is trusted: `dev`, `trusted`, `untrusted` or `agent`. `auto` gives `dev`/`trusted` a
+    /// container and `untrusted`/`agent` a VM; `runtime: "container"` is refused for the last two unless
+    /// `allow_container_untrusted` is set and the operator allows it. Absent: `sandbox.container.default_trust`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trust: Option<fluxvm_ctr::runtime::Trust>,
+    /// Accept a shared-kernel container for `untrusted`/`agent` code (also needs `sandbox.container.allow_untrusted`).
+    #[serde(default)]
+    pub allow_container_untrusted: bool,
+    /// Settings only the native container runtime has (limits, network, capabilities, seccomp).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub container: Option<crate::container_sandbox::ContainerOptions>,
 }
 
 pub const MIN_SANDBOX_MEMORY_MIB: u64 = 128;
@@ -265,6 +280,15 @@ impl VmManager {
             bail!(
                 "gpus cannot be combined with confidential: a passed-through device is outside the encrypted guest"
             );
+        }
+        // Resolve the runtime first: an image goes to the native container runtime or to a VM, and the decision (with its
+        // reason) is kept on the record. A request that names neither an image nor a runtime is left alone.
+        if let Some(decision) = self.decide_runtime(&req)? {
+            if decision.runtime == fluxvm_ctr::runtime::Runtime::Container {
+                return self
+                    .create_container_sandbox(req, decision, token_tenant, created_by_token)
+                    .await;
+            }
         }
         crate::oci_sandbox::validate(&req)?;
         if let Some(pb) = req.procbox.clone() {

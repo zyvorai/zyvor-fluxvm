@@ -30,6 +30,7 @@ pub mod branch;
 pub mod cbt;
 pub mod changes;
 pub mod confidential;
+pub mod container_sandbox;
 pub mod density;
 pub mod diagnostics;
 pub mod events;
@@ -1066,7 +1067,12 @@ impl VmManager {
         // failure here shouldn't block VmManager from doing everything
         // else, only resource-control/metrics for VMs it launches.
         if let Err(e) = fluxvm_cgroup::ensure_delegation() {
-            tracing::warn!(error = %e, "failed to delegate cgroup controllers — resource control/metrics will be unavailable");
+            tracing::warn!(
+                error = %e,
+                "failed to delegate cgroup controllers — VM resource control/metrics will be unavailable. \
+                 Run the daemon as a systemd unit with Delegate=yes (packaging/systemd/fluxvm.service) or as root; \
+                 `fluxctl doctor` shows what is missing. Native containers are not affected: each runs as its own transient unit"
+            );
         }
         if let Err(e) = fluxvm_network::xdp::ensure(&cfg.sandbox.dataplane) {
             if cfg.sandbox.dataplane.xdp.required {
@@ -5488,6 +5494,11 @@ impl VmManager {
         if procbox_sandbox::is_procbox(&vm) {
             return self.procbox_put_file(&vm, path, content_base64, mode).await;
         }
+        if let Some(m) = container_sandbox::load(&vm)? {
+            return self
+                .container_put_file(&m, path, content_base64, mode)
+                .await;
+        }
         if vm.backend == BackendKind::Vz {
             return self.vz_put_file(&vm, path, content_base64, mode).await;
         }
@@ -5513,6 +5524,9 @@ impl VmManager {
         let vm = self.get(id).await?;
         if procbox_sandbox::is_procbox(&vm) {
             return self.procbox_get_file(&vm, path).await;
+        }
+        if let Some(m) = container_sandbox::load(&vm)? {
+            return self.container_get_file(&m, path).await;
         }
         if vm.backend == BackendKind::Vz {
             return self.vz_get_file(&vm, path).await;
@@ -5543,6 +5557,8 @@ impl VmManager {
 
     pub async fn delete(&self, id: Uuid) -> Result<()> {
         let mut vm = self.get(id).await?;
+        // A native container has no VMM: stop its unit (or launcher) and cgroup first.
+        self.container_teardown(&vm).await;
         // A Paused VM is not "already stopped" — its process is fully
         // alive with vCPUs suspended (real bug found on real hardware: a
         // warm pool's never-claimed, still-Paused members were getting

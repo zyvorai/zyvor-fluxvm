@@ -32,7 +32,9 @@ pub fn is_hibernated(vm: &VmRecord) -> bool {
 
 /// What AutoPause may pause: KVM-engine sandboxes (every FluxVm VM is one) and labelled `vz` sandboxes.
 pub(crate) fn autopause_eligible(vm: &VmRecord) -> bool {
-    (vm.backend == BackendKind::FluxVm && !crate::procbox_sandbox::is_procbox(vm))
+    (vm.backend == BackendKind::FluxVm
+        && !crate::procbox_sandbox::is_procbox(vm)
+        && !crate::container_sandbox::is_container(vm))
         || is_vz_sandbox(vm)
 }
 

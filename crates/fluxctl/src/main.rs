@@ -3035,6 +3035,18 @@ enum SandboxCommand {
         #[arg(long, default_value_t = 200)]
         lines: usize,
     },
+    /// A native container sandbox (`--runtime container`) as the systemd unit it runs as, with the runtime decision and
+    /// its live state. REST: `GET /v1/sandboxes/{id}/inspect`.
+    Inspect {
+        #[arg(value_parser = output::parse_vm_ref)]
+        id: Uuid,
+        /// Print only the unit file, ready to copy.
+        #[arg(long)]
+        unit: bool,
+    },
+    /// What this host supports for `--runtime container` and `--runtime vm`, with how to fix what is missing.
+    /// REST: `GET /v1/sandbox/runtimes`.
+    Runtimes,
     /// Fill the warm `vz` sandbox pool to COUNT slots in the daemon's
     /// background (macOS; needs --server). REST: `POST /v1/sandboxes/warm`.
     Warm {
@@ -5799,9 +5811,22 @@ async fn run_remote(
                 SandboxCommand::Logs { id, lines } => pretty(&serde_json::to_value(
                     sandbox_run::Target::Remote(r).logs(id, lines).await?,
                 )?)?,
+                SandboxCommand::Inspect { id, unit } => {
+                    let v = r
+                        .call(Method::GET, &format!("/v1/sandboxes/{id}/inspect"), None)
+                        .await?;
+                    if unit {
+                        print!("{}", v["unit"].as_str().unwrap_or_default());
+                    } else {
+                        pretty(&v)?
+                    }
+                }
+                SandboxCommand::Runtimes => {
+                    pretty(&r.call(Method::GET, "/v1/sandbox/runtimes", None).await?)?
+                }
                 _ => anyhow::bail!(
                     "this sandbox command is not available with --server; supported: run, logs, \
-                     speculate, changesets, changeset, approve, reject, apply, warm, density"
+                     inspect, runtimes, speculate, changesets, changeset, approve, reject, apply, warm, density"
                 ),
             }
         }
@@ -7777,6 +7802,17 @@ async fn main() -> Result<()> {
                     "{}",
                     serde_json::to_string_pretty(&m.sandbox_logs(id, lines).await?)?
                 );
+            }
+            SandboxCommand::Inspect { id, unit } => {
+                let i = m.container_inspect(id).await?;
+                if unit {
+                    print!("{}", i.unit);
+                } else {
+                    println!("{}", serde_json::to_string_pretty(&i)?);
+                }
+            }
+            SandboxCommand::Runtimes => {
+                println!("{}", serde_json::to_string_pretty(&m.runtime_report())?);
             }
             SandboxCommand::Warm { .. } => {
                 anyhow::bail!(
@@ -10353,6 +10389,49 @@ mod sandbox_cli_tests {
         let mut full = vec!["fluxvm"];
         full.extend_from_slice(args);
         Cli::try_parse_from(full).unwrap().command
+    }
+
+    #[test]
+    fn sandbox_run_runtime_flags_and_inspect_parse() {
+        let Command::Sandbox {
+            command: SandboxCommand::Run(args),
+        } = parse(&[
+            "sandbox",
+            "run",
+            "alpine:3.22",
+            "--runtime",
+            "container",
+            "--trust",
+            "dev",
+            "--allow-container-untrusted",
+            "--cpu-percent",
+            "50",
+            "--pids",
+            "64",
+            "--net",
+            "host",
+            "--print-unit",
+        ])
+        else {
+            panic!("expected SandboxCommand::Run");
+        };
+        assert_eq!(args.rt.runtime.as_deref(), Some("container"));
+        assert_eq!(args.rt.trust.as_deref(), Some("dev"));
+        assert!(args.rt.allow_container_untrusted && args.rt.print_unit);
+        assert_eq!((args.rt.cpu_percent, args.rt.pids), (Some(50), Some(64)));
+        let id = Uuid::new_v4();
+        let Command::Sandbox {
+            command: SandboxCommand::Inspect { id: got, unit },
+        } = parse(&["sandbox", "inspect", &id.to_string(), "--unit"])
+        else {
+            panic!("expected SandboxCommand::Inspect");
+        };
+        assert_eq!(got, id);
+        assert!(unit);
+        assert!(matches!(
+            parse(&["sandbox", "runtimes"]),
+            Command::Sandbox { command: SandboxCommand::Runtimes }
+        ));
     }
 
     #[test]

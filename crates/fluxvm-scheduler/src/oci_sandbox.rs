@@ -646,6 +646,9 @@ impl VmManager {
     /// exited and init's own startup error when it failed. The markers are looked for in the whole log, not just the tail.
     pub async fn sandbox_logs(&self, id: Uuid, lines: usize) -> Result<SandboxLogs> {
         let vm = self.get(id).await?;
+        if let Some(m) = crate::container_sandbox::load(&vm)? {
+            return self.container_logs(&vm, &m, lines).await;
+        }
         let log = read_console(&vm.log_path).await?;
         Ok(SandboxLogs {
             id,
