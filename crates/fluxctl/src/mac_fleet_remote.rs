@@ -127,7 +127,7 @@ pub fn valid_label(l: &str) -> bool {
 
 // ---- the probe and what it tells us ----------------------------------------------------------------------------------
 
-const PRELUDE: &str = r#"export PATH="/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:$PATH"
+pub(crate) const PRELUDE: &str = r#"export PATH="/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:$PATH"
 ROOT="$HOME/.local/share/fluxvm"
 FLUXCTL="$ROOT/current/bin/fluxctl"
 [ -x "$FLUXCTL" ] || FLUXCTL="$(command -v fluxctl || true)"

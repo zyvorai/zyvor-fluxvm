@@ -87,6 +87,8 @@ pub enum MacCommand {
         /// Print one JSON object (schema in docs/macos-containers.md) as the last line of stdout instead of the instance name.
         #[arg(long)]
         json: bool,
+        #[command(flatten)]
+        sched: crate::mac_fleet_run::FleetRun,
         /// A local image (`fluxctl mac images`).
         image: String,
         /// The command to run in the guest, after `--`.
@@ -142,6 +144,9 @@ pub enum MacCommand {
         #[arg(long)]
         json: bool,
     },
+    /// GitHub Actions runners on macOS: one ephemeral VM per job, registered just in time, deleted after the job. Spreads over
+    /// a Mac fleet with --fleet and never runs more than 2 guests per Mac. See docs/mac-runner.md.
+    Runner(crate::mac_runner::RunnerArgs),
     #[command(flatten)]
     More(crate::mac_more::MacMore),
     /// The Mac that runs FluxVM as a server: power and sleep status, a keep-awake LaunchAgent, the unlocked-session check,
@@ -157,6 +162,8 @@ impl MacCommand {
     pub fn is_client_side(&self) -> bool {
         match self {
             Self::Build { dry_run, .. } => *dry_run,
+            // The fleet scheduler talks to the Macs over ssh, not to a daemon from here.
+            Self::Run { sched, .. } => sched.fleet.is_some(),
             Self::More(m) => m.is_client_side(),
             _ => !matches!(
                 self,
@@ -347,6 +354,7 @@ pub async fn run_daemon(r: &crate::remote::Remote, command: MacCommand) -> Resul
             json,
             image,
             cmd,
+            ..
         } => {
             let outcome = crate::mac_queue::run_queued(r, &queue, || {
                 crate::mac_instance::run_outcome(
@@ -621,6 +629,26 @@ pub async fn run(command: MacCommand) -> Result<()> {
         MacCommand::Host { command } => return crate::mac_host::run(command),
         c => c,
     };
+    match command {
+        MacCommand::Runner(a) => return tokio::task::block_in_place(|| crate::mac_runner::run(a)),
+        MacCommand::Run {
+            publish,
+            name,
+            user,
+            wait,
+            opts,
+            sched,
+            queue,
+            image,
+            cmd,
+            ..
+        } => {
+            return tokio::task::block_in_place(|| {
+                crate::mac_fleet_run::mac_run_fleet(publish, name, user, wait, opts, sched, &queue, image, cmd)
+            });
+        }
+        _ => {}
+    }
     let store = Store::open(mac_store::default_root()?)?;
     match command {
         MacCommand::Images { json } => {
@@ -742,6 +770,7 @@ pub async fn run(command: MacCommand) -> Result<()> {
             return crate::mac_doctor::run(json, crate::remote::from_argv_env()).await;
         }
         MacCommand::Run { .. }
+        | MacCommand::Runner(_)
         | MacCommand::Ps { .. }
         | MacCommand::Rm { .. }
         | MacCommand::Exec { .. }
