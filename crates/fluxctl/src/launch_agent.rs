@@ -229,9 +229,17 @@ pub fn uninstall() -> Result<bool> {
 /// `{installed, loaded, pid, plist, log}` from the plist file and `launchctl print`.
 pub fn status() -> Result<serde_json::Value> {
     let home = home()?;
-    let plist = plist_path(&home);
-    let out = launchctl(&["print", &format!("{}/{LABEL}", domain())])?;
+    status_of(LABEL, &plist_path(&home), &log_path(&home))
+}
+
+/// The same report for any LaunchAgent label (the kube and docker agents reuse it).
+pub(crate) fn status_of(label: &str, plist: &Path, log: &Path) -> Result<serde_json::Value> {
+    let out = launchctl(&["print", &format!("{}/{label}", domain())])?;
     let text = String::from_utf8_lossy(&out.stdout);
+    Ok(parse_status(&text, out.status.success(), plist, log))
+}
+
+fn parse_status(text: &str, loaded: bool, plist: &Path, log: &Path) -> serde_json::Value {
     let field = |key: &str| {
         text.lines()
             .find_map(|l| {
@@ -244,19 +252,34 @@ pub fn status() -> Result<serde_json::Value> {
             })
             .map(str::to_owned)
     };
-    Ok(serde_json::json!({
+    serde_json::json!({
         "installed": plist.is_file(),
-        "loaded": out.status.success(),
+        "loaded": loaded,
         "state": field("state"),
         "pid": field("pid").and_then(|p| p.parse::<u32>().ok()),
         "last_exit_code": field("last exit code"),
         "plist": plist,
-        "log": log_path(&home),
-    }))
+        "log": log,
+    })
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn status_is_parsed_from_launchctl_print_for_any_label() {
+        let text =
+            "dev.zyvor.fluxvm.kube = {\n\tstate = running\n\tpid = 4242\n\tlast exit code = 0\n}\n";
+        let v = parse_status(text, true, Path::new("/p.plist"), Path::new("/l.log"));
+        assert_eq!(v["loaded"], true);
+        assert_eq!(v["state"], "running");
+        assert_eq!(v["pid"], 4242);
+        assert_eq!(v["last_exit_code"], "0");
+        assert_eq!(v["installed"], false);
+        let gone = parse_status("", false, Path::new("/p.plist"), Path::new("/l.log"));
+        assert_eq!(gone["loaded"], false);
+        assert!(gone["pid"].is_null());
+    }
+
     #[test]
     fn homebrew_paths_are_recognised() {
         assert!(is_homebrew_exe(Path::new(

@@ -11,13 +11,13 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 PLIST="$HOME/Library/LaunchAgents/dev.zyvor.fluxvm.usbd.plist"
-mkdir -p "$HOME/Library/LaunchAgents"
+mkdir -p "$HOME/Library/LaunchAgents" "$HOME/Library/Logs"
 if [[ -n "${FLUXVM_PACKAGE_DIR:-}" ]]; then
   PKG="$(cd "$FLUXVM_PACKAGE_DIR" && pwd)"
   APP="$PKG/libexec/FluxVMUSBAccess.app"
   [[ -d "$APP" ]] || { echo "no $APP in that package" >&2; exit 1; }
   codesign --verify --strict --deep "$APP"
-  sed "s#__PREFIX__#$PKG#" "$PKG/share/launchd/dev.zyvor.fluxvm.usbd.plist" > "$PLIST"
+  sed -e "s#__PREFIX__#$PKG#" -e "s#__HOME__#$HOME#" "$PKG/share/launchd/dev.zyvor.fluxvm.usbd.plist" > "$PLIST"
 else
   APP="${TMPDIR:-/tmp}/FluxVMUSBAccess.app"
   rm -rf "$APP" && mkdir -p "$APP/Contents/MacOS"
@@ -29,7 +29,7 @@ else
   codesign --force --deep --sign - "$APP"
   sudo rm -rf /Applications/FluxVMUSBAccess.app
   sudo cp -R "$APP" /Applications/FluxVMUSBAccess.app
-  cp "$ROOT/dev.zyvor.fluxvm.usbd.plist" "$PLIST"
+  sed "s#__HOME__#$HOME#" "$ROOT/dev.zyvor.fluxvm.usbd.plist" > "$PLIST"
 fi
 launchctl bootout "gui/$UID/dev.zyvor.fluxvm.usbd" 2>/dev/null || true
 launchctl bootstrap "gui/$UID" "$PLIST"

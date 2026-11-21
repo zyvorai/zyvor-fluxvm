@@ -1342,6 +1342,31 @@ pub async fn down<A: VmApi>(api: &A, o: &KubeOptions, purge: bool) -> Result<()>
     Ok(())
 }
 
+/// How launchd restarts the agent; only `kube agent install` takes these.
+#[derive(clap::Args, Debug, Clone)]
+pub struct LaunchdFlags {
+    /// `always` restarts the supervisor whenever it exits; `on-failure` only after a crash or error (a clean `kube down`
+    /// then stays down).
+    #[arg(long, value_parser = ["always", "on-failure"], default_value = "always")]
+    pub restart: String,
+    /// Minimum seconds between launchd restarts of a crashing supervisor.
+    #[arg(long, default_value_t = 30)]
+    pub throttle_secs: u32,
+}
+
+impl LaunchdFlags {
+    pub fn opts(&self) -> Result<dh::PlistOpts> {
+        if !(5..=3600).contains(&self.throttle_secs) {
+            bail!("--throttle-secs must be between 5 and 3600");
+        }
+        Ok(dh::PlistOpts {
+            keep_alive: self.restart == "always",
+            throttle_secs: self.throttle_secs,
+            ..Default::default()
+        })
+    }
+}
+
 /// What `kube supervise` does besides keeping the cluster up. Shared by `supervise` and `agent install`.
 #[derive(clap::Args, Debug, Clone, Default)]
 pub struct SuperviseFlags {
@@ -1706,6 +1731,11 @@ impl SuperviseLock {
         Self::acquire_in(&run_dir(), cluster)
     }
 
+    /// Whether another process holds the lock for `cluster`; the lock is released again before returning.
+    pub(crate) fn is_held_in(dir: &Path, cluster: &str) -> bool {
+        Self::acquire_in(dir, cluster).is_err()
+    }
+
     pub(crate) fn acquire_in(dir: &Path, cluster: &str) -> Result<Self> {
         use std::io::{Read, Write};
         use std::os::unix::io::AsRawFd;
@@ -1767,6 +1797,8 @@ pub async fn supervise<A: VmApi>(
     let mut last_pods: Option<Instant> = None;
     // Parked by the working-hours schedule, so it is woken when the window opens (not when someone else put it to sleep).
     let mut slept_by_schedule = false;
+    // Whether the "restores need an unlocked Mac" message was already printed for the current lock.
+    let mut told_locked = false;
     loop {
         if sleep_in_progress(o) {
             tokio::time::sleep(Duration::from_secs(1)).await;
@@ -1774,6 +1806,10 @@ pub async fn supervise<A: VmApi>(
         }
         if crate::kube_checkpoint::is_asleep(api, o).await {
             if slept_by_schedule && policy.wake_due(crate::kube_policy::local_now()) {
+                if restore_blocked(&mut told_locked).await {
+                    tokio::time::sleep(every).await;
+                    continue;
+                }
                 match crate::kube_checkpoint::wake(api, o).await {
                     Ok(m) => {
                         slept_by_schedule = false;
@@ -1800,6 +1836,7 @@ pub async fn supervise<A: VmApi>(
                 auto_publish,
                 &mut open,
                 names.as_ref(),
+                &mut told_locked,
             )
             .await;
             continue;
@@ -1899,6 +1936,41 @@ pub async fn supervise<A: VmApi>(
     }
 }
 
+/// Restoring the saved state of a sleeping cluster needs an unlocked login session (`docs/macos-sandboxes.md`). The message
+/// is wanted once per lock, not once per poll; `told` remembers that and is cleared when the Mac is usable again.
+fn session_blocks_restore(s: fluxvm_core::login_session::LoginSession, told: &mut bool) -> bool {
+    use fluxvm_core::login_session::LoginSession::*;
+    match s {
+        Locked | NoSession => {
+            if !*told {
+                *told = true;
+                let what = if s == Locked {
+                    "the screen is locked"
+                } else {
+                    "nobody is logged in"
+                };
+                eprintln!(
+                    "{what}: the sleeping cluster cannot be restored until then; {}",
+                    fluxvm_core::login_session::UNLOCK_HINT
+                );
+            }
+            true
+        }
+        // An unreadable session is not a reason to refuse: try, and report the restore's own error.
+        Unlocked | Unknown => {
+            *told = false;
+            false
+        }
+    }
+}
+
+async fn restore_blocked(told: &mut bool) -> bool {
+    let s = tokio::task::spawn_blocking(fluxvm_core::login_session::LoginSession::current)
+        .await
+        .unwrap_or(fluxvm_core::login_session::LoginSession::Unknown);
+    session_blocks_restore(s, told)
+}
+
 /// A parked cluster: holds 127.0.0.1:<api-port> open, and the ports of the services that were published when it went to
 /// sleep (`parked`), and the first client to connect to any of them wakes it. That client waits for the cluster and is then
 /// proxied through. Returns after one wake, or after `every` with nobody connecting.
@@ -1910,6 +1982,7 @@ async fn wake_on_demand<A: VmApi>(
     auto_publish: bool,
     open: &mut Vec<(u16, u16)>,
     names: Option<&crate::kube_names::Names>,
+    told_locked: &mut bool,
 ) {
     use tokio::net::{TcpListener, TcpStream};
     let mut waiting = tokio::task::JoinSet::new();
@@ -1927,6 +2000,9 @@ async fn wake_on_demand<A: VmApi>(
     let Ok(Some(Ok(Some((port, mut client))))) = first else {
         return;
     };
+    if restore_blocked(told_locked).await {
+        return; // the client is dropped and retries; restoring now would fail
+    }
     eprintln!("a client connected to the sleeping cluster on port {port}: waking it");
     match crate::kube_checkpoint::wake(api, o).await {
         Ok(m) => eprintln!("{m}"),
@@ -1989,6 +2065,18 @@ pub fn render_agent(
     env: &[(String, String)],
     extras: &[String],
 ) -> String {
+    render_agent_with(fluxctl, o, log, env, extras, &dh::PlistOpts::default())
+}
+
+/// `render_agent` with explicit launchd settings (`--restart`, `--throttle-secs`).
+pub fn render_agent_with(
+    fluxctl: &Path,
+    o: &KubeOptions,
+    log: &Path,
+    env: &[(String, String)],
+    extras: &[String],
+    opts: &dh::PlistOpts,
+) -> String {
     let mut args = vec![
         fluxctl.display().to_string(),
         "kube".into(),
@@ -2046,7 +2134,7 @@ pub fn render_agent(
         args.push("--rosetta".into());
     }
     args.extend(extras.iter().cloned());
-    dh::render_plist(AGENT_LABEL, &args, log, env)
+    dh::render_plist_with(AGENT_LABEL, &args, log, env, opts)
 }
 
 /// A container image reference: plain characters, never starting with a dash, so it cannot be read as a docker option.
@@ -2319,18 +2407,42 @@ fn agent_paths(home: &Path) -> (PathBuf, PathBuf) {
     )
 }
 
+/// Refuse to install an agent beside a supervisor that launchd does not own: the new agent would start a second
+/// supervisor, and the lock would make it exit and restart in a loop. `own_loaded` means our own agent is loaded, which
+/// the install replaces anyway.
+fn install_guard(lock_held: bool, own_loaded: bool, name: &str) -> Result<()> {
+    if lock_held && !own_loaded {
+        bail!(
+            "a `fluxctl kube supervise` for {name} is already running outside launchd. Stop it first (or run `fluxctl kube agent install` after it exits), otherwise the agent would fight it for the cluster."
+        );
+    }
+    Ok(())
+}
+
 /// `fluxctl kube agent install`: write the LaunchAgent and load it.
-pub fn agent_install(o: &KubeOptions, extras: &[String]) -> Result<PathBuf> {
+pub fn agent_install(o: &KubeOptions, extras: &[String], opts: &dh::PlistOpts) -> Result<PathBuf> {
     validate(o)?;
     let (plist, log) = agent_paths(&dh::home()?);
-    let exe = std::env::current_exe().context("finding fluxctl's own path")?;
+    let own_loaded = agent_status()?["loaded"].as_bool().unwrap_or(false);
+    install_guard(
+        SuperviseLock::is_held_in(&run_dir(), &o.name),
+        own_loaded,
+        &o.name,
+    )?;
+    let exe = crate::stable_exe::stable_exe().context("finding fluxctl's own path")?;
     std::fs::create_dir_all(plist.parent().unwrap())?;
     std::fs::write(
         &plist,
-        render_agent(&exe, o, &log, &dh::carried_env(), extras),
+        render_agent_with(&exe, o, &log, &dh::carried_env(), extras, opts),
     )?;
     dh::launchctl_load(AGENT_LABEL, &plist)?;
     Ok(plist)
+}
+
+/// `fluxctl kube agent status`.
+pub fn agent_status() -> Result<serde_json::Value> {
+    let (plist, log) = agent_paths(&dh::home()?);
+    crate::launch_agent::status_of(AGENT_LABEL, &plist, &log)
 }
 
 /// `fluxctl kube agent uninstall`.
@@ -2358,6 +2470,63 @@ mod tests {
         let _other = SuperviseLock::acquire_in(&dir, "other").unwrap();
         drop(first);
         SuperviseLock::acquire_in(&dir, "dev").unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn launchd_flags_pick_the_restart_policy_and_bound_the_throttle() {
+        let f = |r: &str, t| LaunchdFlags {
+            restart: r.into(),
+            throttle_secs: t,
+        };
+        assert!(f("always", 30).opts().unwrap().keep_alive);
+        assert!(!f("on-failure", 30).opts().unwrap().keep_alive);
+        assert!(f("always", 1).opts().is_err());
+        assert!(f("always", 4000).opts().is_err());
+        let o = KubeOptions::default();
+        let p = render_agent_with(
+            Path::new("/x/fluxctl"),
+            &o,
+            Path::new("/l"),
+            &[],
+            &[],
+            &f("on-failure", 60).opts().unwrap(),
+        );
+        assert!(
+            p.contains("<key>SuccessfulExit</key><false/>") && p.contains("<integer>60</integer>")
+        );
+    }
+
+    #[test]
+    fn a_locked_or_absent_session_blocks_a_restore_and_says_so_once() {
+        use fluxvm_core::login_session::LoginSession::*;
+        let mut told = false;
+        assert!(session_blocks_restore(Locked, &mut told));
+        assert!(told, "the first block is announced");
+        assert!(session_blocks_restore(NoSession, &mut told));
+        // unlocking clears it, so the next lock is announced again
+        assert!(!session_blocks_restore(Unlocked, &mut told));
+        assert!(!told);
+        assert!(!session_blocks_restore(Unknown, &mut told));
+        assert!(session_blocks_restore(Locked, &mut told) && told);
+    }
+
+    #[test]
+    fn install_is_refused_beside_a_foreign_supervisor_only() {
+        assert!(install_guard(false, false, "dev").is_ok());
+        assert!(install_guard(true, true, "dev").is_ok());
+        let e = install_guard(true, false, "dev").unwrap_err().to_string();
+        assert!(e.contains("already running outside launchd"), "{e}");
+    }
+
+    #[test]
+    fn a_held_lock_is_detected_without_being_taken() {
+        let dir = std::env::temp_dir().join(format!("fluxvm-held-test-{}", std::process::id()));
+        assert!(!SuperviseLock::is_held_in(&dir, "dev"));
+        let g = SuperviseLock::acquire_in(&dir, "dev").unwrap();
+        assert!(SuperviseLock::is_held_in(&dir, "dev"));
+        drop(g);
+        assert!(!SuperviseLock::is_held_in(&dir, "dev"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
