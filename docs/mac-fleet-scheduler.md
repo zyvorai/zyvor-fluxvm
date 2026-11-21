@@ -86,6 +86,16 @@ output. `--pull-timeout` bounds each pull (default 3600 s). Apple's licence limi
 VM images and data stay) from Macs that the previous `apply` listed and this one does not. Without `--prune` it only names them. A Mac that still runs VMs is
 refused and stays on the list for the next `apply --prune`. A Mac that was never applied from this machine is not known and is never pruned. `apply --dry-run` records nothing.
 
+## `status --detail`
+
+```bash
+fluxctl mac-fleet status --detail -f fleet.yaml [--json]
+```
+
+The `status` table plus, per Mac, what the scheduler and the operator of a headless Mac need: **drain state** (and for how long), macOS guests in use (n/2), AC or battery, free disk, the **templates it holds**
+(name and digest) and the **headless checks** of `fluxctl mac host headless-check` (an unlocked console session, sleep, auto-login), each failing one with its fix. Read-only: one probe and one `mac host headless-check --json` per Mac. A Mac whose
+FluxVM is too old to have `mac host` shows `?` for headless. It also prints how many shared leases the placements on this machine hold. `--json` gives `{"hosts": [...], "leases": N}`. Plain `status` is unchanged.
+
 ## Timeouts
 
 `--step-timeout SECS` (default 1800, `0` = none) bounds every ssh call of every `mac-fleet` command: each step of `up`/`apply` (install, daemon,

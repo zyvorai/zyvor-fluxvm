@@ -92,6 +92,7 @@ mod mac_events;
 mod mac_fleet;
 mod mac_fleet_inv;
 mod mac_fleet_lease;
+mod mac_fleet_status;
 mod mac_fleet_remote;
 mod mac_fleet_run;
 mod mac_fleet_sched;

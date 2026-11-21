@@ -170,6 +170,10 @@ pub struct ApplyArgs {
 pub struct StatusArgs {
     #[command(flatten)]
     pub which: Which,
+    /// Add, per Mac: whether it is drained (and for how long), the templates it holds, free disk and power, and the
+    /// headless checks (`mac host headless-check`). With --json the same keys are added. Read-only.
+    #[arg(long)]
+    pub detail: bool,
     #[command(flatten)]
     pub conn: Conn,
 }
@@ -1008,6 +1012,9 @@ pub fn run(cmd: MacFleetCommand) -> Result<()> {
         }
         MacFleetCommand::Status(a) => {
             let (targets, inv) = resolve(&a.which, &a.conn)?;
+            if a.detail {
+                return crate::mac_fleet_status::status_detail_cmd(&a.conn, inv.as_ref(), &targets);
+            }
             do_status(&a.conn, inv.as_ref(), &targets)
         }
         MacFleetCommand::Exec(a) => {
