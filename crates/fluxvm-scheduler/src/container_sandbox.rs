@@ -956,6 +956,8 @@ mod tests {
         assert!(resolve_user_str("nginx:ghost", passwd, group).is_err());
     }
 
+    // `state_of` decides liveness from /proc, so this runs on Linux only (the container runtime is Linux-only).
+    #[cfg(target_os = "linux")]
     #[test]
     fn state_files() {
         let d = tempfile::tempdir().unwrap();
