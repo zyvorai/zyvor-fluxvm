@@ -6,5 +6,5 @@
   <key>MachServices</key><dict><key>dev.zyvor.fluxvm.vmnetd</key><true/></dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
-  <key>StandardErrorPath</key><string>/tmp/fluxvm-vmnetd.err</string>
+  <key>StandardErrorPath</key><string>__HOME__/Library/Logs/fluxvm-vmnetd.err</string>
 </dict></plist>

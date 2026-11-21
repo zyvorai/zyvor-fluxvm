@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+LaunchAgent hardening for Kubernetes and Docker on a Mac. Unit-tested only; not yet run against a live cluster.
+
+- `fluxctl kube agent install` and `docker agent install` write the Homebrew `opt/` path of `fluxctl` (via `stable_exe`), so a
+  `brew upgrade` no longer leaves the agent pointing at a deleted Cellar directory.
+- Both agents' plists set `ProcessType=Interactive`, as the `dev.zyvor.fluxvm` service agent does.
+- New `fluxctl kube agent status` and `fluxctl docker agent status` (installed, loaded, state, pid, last exit code, as JSON).
+- `kube agent install --restart always|on-failure` and `--throttle-secs N` set how launchd restarts the supervisor.
+- `kube agent install` refuses when a `kube supervise` for that cluster is already running outside launchd (it holds the
+  per-cluster lock), instead of starting a second one.
+- `fluxctl doctor` checks every `dev.zyvor.fluxvm*` LaunchAgent (daemon, kube, docker, vmnetd, usbd) for a binary that no
+  longer exists, and warns about an installed agent that is not loaded.
+- `kube supervise` no longer tries to wake a sleeping cluster while the Mac is locked or nobody is logged in (a Virtualization.framework
+  restore needs an unlocked session). It holds the cluster asleep, says why once, and wakes it when the Mac is usable again.
+  Applies to both the working-hours wake and the wake-on-first-connection. Unit-tested only.
+- New `scripts/test-kube-vz.sh`: boots a throwaway k3s cluster in a VZ VM and checks checkpoint/diff/timeline, trim, git, host,
+  `--rosetta`, `supervise --active` (sleep and wake-on-connect) and, with `--agent`, the LaunchAgent. Written, **not yet run**; it needs
+  an unlocked Mac. On a real Apple Silicon host, `docker agent status`, `kube agent status` and `doctor` ran correctly against live launchd.
+- The vmnetd and usbd helper plists log to `~/Library/Logs/fluxvm-{vmnetd,usbd}.err` instead of `/tmp`; the install scripts fill in the home directory.
+
 
 - **Fleet anti-affinity and topology spread; opt-in reschedule after heartbeat loss.** `POST /fleet/vms` accepts `antiAffinity`
   (`{group, mode}`) and `topologySpread` (`{key, maxSkew, mode, group}`), `required` or `preferred`, applied to automatic placement
