@@ -50,6 +50,7 @@ mod kube_apps;
 mod kube_backup;
 mod kube_chaos;
 mod kube_checkpoint;
+mod kube_cis;
 mod kube_cp;
 mod kube_dev;
 mod kube_diff;
@@ -743,6 +744,9 @@ enum KubeCommand {
         /// Make the safe repairs inside the VM (remove unused images, restart its resolver, step its clock), then check again.
         #[arg(long)]
         fix: bool,
+        /// Also audit the server against the k3s CIS profile (read-only; `kube addons config --cis` writes it).
+        #[arg(long)]
+        cis: bool,
     },
     /// Make this cluster the current `kubectl` context in ~/.kube/config (`fluxctl kube up` adds it without switching).
     Use(KubeArgs),
@@ -8963,9 +8967,12 @@ async fn kube_command<A: run::VmApi>(api: &A, command: KubeCommand) -> Result<()
             let snapshot = kube_ps::gather(api, &cluster.options()?).await?;
             print!("{}", kube_ps::render(&snapshot));
         }
-        KubeCommand::Doctor { cluster, fix } => {
+        KubeCommand::Doctor { cluster, fix, cis } => {
             let o = cluster.options()?;
             let mut checks = kube_doctor::run(api, &o).await?;
+            if cis {
+                checks.extend(kube_cis::run_kube(api, &o).await?);
+            }
             print!("{}", kube_doctor::render(&checks));
             let plan = kube_doctor::plan(&checks);
             if fix && !plan.is_empty() {
@@ -8974,6 +8981,9 @@ async fn kube_command<A: run::VmApi>(api: &A, command: KubeCommand) -> Result<()
                 }
                 println!("\nchecking again:");
                 checks = kube_doctor::run(api, &o).await?;
+                if cis {
+                    checks.extend(kube_cis::run_kube(api, &o).await?);
+                }
                 print!("{}", kube_doctor::render(&checks));
             } else if fix {
                 println!("nothing `--fix` can repair");
