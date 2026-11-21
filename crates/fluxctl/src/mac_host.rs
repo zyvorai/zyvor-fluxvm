@@ -1116,12 +1116,12 @@ pub fn rosetta_guidance() -> String {
 
 // ------------------------------------------------------------------ commands
 
-fn uid() -> u32 {
+pub(crate) fn uid() -> u32 {
     // SAFETY: getuid has no preconditions and cannot fail.
     unsafe { libc::getuid() }
 }
 
-fn user() -> String {
+pub(crate) fn user() -> String {
     std::env::var("USER").unwrap_or_default()
 }
 
@@ -1139,7 +1139,7 @@ fn require_macos() -> Result<()> {
     Ok(())
 }
 
-fn keepawake_loaded() -> bool {
+pub(crate) fn keepawake_loaded() -> bool {
     home()
         .ok()
         .and_then(|h| {

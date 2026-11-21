@@ -11,6 +11,7 @@ pub mod fs_image;
 pub mod gpu;
 pub mod gpu_health;
 pub mod grants;
+pub mod health;
 pub mod instancetype;
 pub mod keychain;
 pub mod lifecycle;
