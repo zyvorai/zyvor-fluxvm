@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+Host safety guards for the Mac (research backlog 2, 3, 4, 5, 8, 9, 10). Unit-tested on fixtures and fakes only; **not run on a live daemon, a locked or throttled Mac, a macOS update or a fleet** (see [docs/macos-host.md](docs/macos-host.md#host-safety-guards)).
+
+- Saved VM state records the host macOS build; a restore on another build cold-boots from the snapshot's disk (or fails with `FLUXVM_RESTORE_ON_OS_UPDATE=refuse`). A restore from a locked session fails with a pointer to `fluxctl mac host headless-check`.
+- `mac-fleet doctor` runs the Mac's `mac host headless-check` and `mac-fleet status` gains a SESSION column.
+- `fluxvm-agent node` publishes an optional `health` object (session unlocked, sleep held, thermal limit, free disk, OS build) in its Apple capabilities; wire format backward compatible. Apple placement skips throttled or full-disk Macs and ranks a locked one last.
+- New `vz` admission check refuses new VMs while `pmset -g therm` reports a CPU speed limit below 80%.
+- Opt-in `FLUXVM_KEEPAWAKE_WHILE_RUNNING=1`: a `caffeinate` assertion only while a `vz` VM runs.
+- `mac host status` shows `AutomaticallyInstallMacOSUpdates`; `headless-check` warns when it is on.
+
 `fluxctl mac host`: the Mac that runs FluxVM, as a server. Parsers tested on output captured from one Mac, decisions and apply paths on a fake host; the read-only commands were run on that Mac; **`keepawake install` and `tune --apply` were not run**.
 
 - New `fluxctl mac host status | headless-check | keepawake install|uninstall|status | tune | rosetta` (module `mac_host`, see [docs/macos-host.md](docs/macos-host.md)). `status` reads `pmset`, `ioreg`, `fdesetup`, `defaults`, `system_profiler` and `df` without sudo.

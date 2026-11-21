@@ -1,0 +1,302 @@
+// Copyright 2026 Zyvor AI Labs · https://zyvor.dev
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+
+//! Host facts that decide whether a Mac can run a VM right now: the macOS build, whether the login session is unlocked,
+//! whether something holds sleep off, thermal throttling and free disk. Read-only: every probe is a command that needs no
+//! sudo, and every decision is a pure function over captured text so it is tested from fixtures.
+//!
+//! Used by the runner launch path (restore guards), the `fluxvm-agent node` heartbeat (placement) and admission.
+
+use serde::{Deserialize, Serialize};
+use std::path::Path;
+
+/// File in a snapshot directory that records the macOS build the state was saved on.
+pub const HOST_BUILD_FILE: &str = "host-build.txt";
+
+/// The command to run when a restore is refused for a locked session.
+pub const HEADLESS_CHECK_HINT: &str = "fluxctl mac host headless-check";
+
+/// A Mac that has been throttled to at most this CPU speed limit (percent) is not given new VMs.
+pub const THERMAL_ADMISSION_LIMIT: u32 = 80;
+
+/// Facts a node publishes in its heartbeat. Every field is optional so an older agent (which sends none) and a probe that
+/// failed both read as "unknown", which placement never penalises.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostHealth {
+    /// The login session exists and its screen is not locked. Restoring saved VM state needs it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_unlocked: Option<bool>,
+    /// Something (caffeinate, the keep-awake agent, Screen Sharing) is holding system sleep off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sleep_held: Option<bool>,
+    /// `pmset -g therm` `CPU_Speed_Limit` when below 100, else `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thermal_limit: Option<u32>,
+    /// Free space on the data volume, MiB.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub free_disk_mib: Option<u64>,
+    /// `sw_vers -buildVersion`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub os_build: Option<String>,
+}
+
+// ------------------------------------------------------------------ parsers
+
+/// `Some(true)` when the console session's screen is locked, `Some(false)` when unlocked, and `Some(true)` for the login
+/// window (no session at all: a restore cannot work there either). `None` when the text is not `ioreg` output.
+pub fn session_locked(ioreg: &str) -> Option<bool> {
+    let users = ioreg
+        .lines()
+        .find(|l| l.contains("\"IOConsoleUsers\""))
+        .map(|l| l.split_once('=').map_or("", |x| x.1).trim());
+    match users {
+        None => ioreg.contains("IOConsole").then_some(true).or(None),
+        Some(u) if !u.contains('{') => Some(true),
+        Some(u) => Some(u.contains("\"CGSSessionScreenIsLocked\"=Yes")),
+    }
+}
+
+/// `pmset -g therm`: the CPU speed limit when it is below 100.
+pub fn thermal_limit(text: &str) -> Option<u32> {
+    text.lines().find_map(|l| {
+        let n = l
+            .trim()
+            .strip_prefix("CPU_Speed_Limit")?
+            .trim_start()
+            .strip_prefix('=')?
+            .trim()
+            .parse::<u32>()
+            .ok()?;
+        (n < 100).then_some(n)
+    })
+}
+
+/// `pmset -g`: whether a `(sleep prevented by ...)` note is present.
+pub fn sleep_held(pmset_g: &str) -> bool {
+    pmset_g.contains("sleep prevented by")
+}
+
+/// `df -k` free space in MiB (the `Available` column of the first data row).
+pub fn free_disk_mib(df: &str) -> Option<u64> {
+    let row = df.lines().nth(1)?;
+    let kib: u64 = row.split_whitespace().nth(3)?.parse().ok()?;
+    Some(kib / 1024)
+}
+
+// ------------------------------------------------------------------ probes
+
+/// Runs a read-only command and returns stdout when it exits 0.
+#[cfg(target_os = "macos")]
+fn read(program: &str, args: &[&str]) -> Option<String> {
+    let o = std::process::Command::new(program).args(args).output().ok()?;
+    o.status
+        .success()
+        .then(|| String::from_utf8_lossy(&o.stdout).into_owned())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn read(_program: &str, _args: &[&str]) -> Option<String> {
+    None
+}
+
+/// The host's macOS build (`24G90`), or `None` off macOS or when `sw_vers` cannot run.
+pub fn current_os_build() -> Option<String> {
+    read("/usr/bin/sw_vers", &["-buildVersion"])
+        .map(|s| s.trim().to_owned())
+        .filter(|s| !s.is_empty())
+}
+
+/// Reads the session lock state of this Mac (`None` when unknown, for example off macOS).
+pub fn probe_session_locked() -> Option<bool> {
+    read("ioreg", &["-n", "Root", "-d1", "-r"]).and_then(|t| session_locked(&t))
+}
+
+/// Reads only the thermal limit (one short command), for admission on the VM create path.
+pub fn probe_thermal_limit() -> Option<u32> {
+    read("pmset", &["-g", "therm"]).and_then(|t| thermal_limit(&t))
+}
+
+/// Probes every fact. Blocking (runs a few short commands); call from `spawn_blocking`.
+pub fn probe() -> HostHealth {
+    HostHealth {
+        session_unlocked: probe_session_locked().map(|l| !l),
+        sleep_held: read("pmset", &["-g"]).map(|t| sleep_held(&t)),
+        thermal_limit: read("pmset", &["-g", "therm"]).and_then(|t| thermal_limit(&t)),
+        free_disk_mib: read("df", &["-k", "/System/Volumes/Data"])
+            .or_else(|| read("df", &["-k", "/"]))
+            .and_then(|t| free_disk_mib(&t)),
+        os_build: current_os_build(),
+    }
+}
+
+// ------------------------------------------------------------------ decisions
+
+/// What a restore of saved state should do given the build it was saved on and the host's build.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RestoreVerdict {
+    /// Same build, or no way to tell (an old snapshot with no record, or the host build is unreadable): restore.
+    Allow,
+    /// The saved state is from another macOS build. Saved state is bound to the OS that wrote it, so a restore may fail.
+    Mismatch { saved: String, host: String },
+}
+
+/// Compares the recorded build with the host's. A missing record is [`RestoreVerdict::Allow`]: snapshots written before this
+/// check existed keep working, and the framework's own validation still applies.
+pub fn restore_verdict(saved: Option<&str>, host: Option<&str>) -> RestoreVerdict {
+    match (saved.map(str::trim), host.map(str::trim)) {
+        (Some(s), Some(h)) if !s.is_empty() && !h.is_empty() && s != h => {
+            RestoreVerdict::Mismatch {
+                saved: s.to_owned(),
+                host: h.to_owned(),
+            }
+        }
+        _ => RestoreVerdict::Allow,
+    }
+}
+
+/// The recorded build in snapshot directory `dir`, if any.
+pub fn read_recorded_build(dir: &Path) -> Option<String> {
+    std::fs::read_to_string(dir.join(HOST_BUILD_FILE))
+        .ok()
+        .map(|s| s.trim().to_owned())
+        .filter(|s| !s.is_empty())
+}
+
+/// Writes the host's current build into snapshot directory `dir`. Best effort: a snapshot is never failed over this.
+pub fn record_build(dir: &Path) {
+    if let Some(b) = current_os_build() {
+        let _ = std::fs::write(dir.join(HOST_BUILD_FILE), format!("{b}\n"));
+    }
+}
+
+/// How to treat a restore across a macOS update.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OnBuildMismatch {
+    /// Boot cold from the snapshot's disk and say so (default).
+    ColdBoot,
+    /// Fail the launch (`FLUXVM_RESTORE_ON_OS_UPDATE=refuse`).
+    Refuse,
+}
+
+pub fn on_build_mismatch_from(value: Option<&str>) -> OnBuildMismatch {
+    match value.map(str::trim) {
+        Some("refuse") => OnBuildMismatch::Refuse,
+        _ => OnBuildMismatch::ColdBoot,
+    }
+}
+
+/// The message for a restore across macOS builds.
+pub fn mismatch_message(saved: &str, host: &str) -> String {
+    format!(
+        "the saved VM state was written on macOS build {saved} but this Mac now runs build {host}; Virtualization.framework \
+         state is not portable across macOS updates"
+    )
+}
+
+/// The message for a restore attempted from a locked session.
+pub fn locked_message() -> String {
+    format!(
+        "restoring saved VM state needs an unlocked login session and this Mac's session is locked; unlock it (or enable \
+         automatic login) and retry, and run `{HEADLESS_CHECK_HINT}` to see what to change"
+    )
+}
+
+/// Decisions for placement and admission over published facts.
+impl HostHealth {
+    /// Reasons this Mac should not get a new VM right now. Unknown facts never count.
+    pub fn admission_blockers(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        if let Some(n) = self.thermal_limit
+            && n < THERMAL_ADMISSION_LIMIT
+        {
+            out.push(format!(
+                "thermally throttled (CPU speed limit {n}%, admission stops below {THERMAL_ADMISSION_LIMIT}%)"
+            ));
+        }
+        out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const IOREG_LOCKED: &str = include_str!("host_health_fixtures/ioreg_locked.txt");
+    const IOREG_UNLOCKED: &str = include_str!("host_health_fixtures/ioreg_unlocked.txt");
+    const IOREG_LOGINWINDOW: &str = include_str!("host_health_fixtures/ioreg_loginwindow.txt");
+
+    #[test]
+    fn session_lock_from_ioreg() {
+        assert_eq!(session_locked(IOREG_LOCKED), Some(true));
+        assert_eq!(session_locked(IOREG_UNLOCKED), Some(false));
+        assert_eq!(session_locked(IOREG_LOGINWINDOW), Some(true));
+        assert_eq!(session_locked("garbage"), None);
+    }
+
+    #[test]
+    fn thermal_limit_only_below_100() {
+        assert_eq!(thermal_limit("CPU_Scheduler_Limit = 100\nCPU_Speed_Limit = 70\n"), Some(70));
+        assert_eq!(thermal_limit("CPU_Speed_Limit \t= 100\n"), None);
+        assert_eq!(
+            thermal_limit("Note: No thermal warning level has been recorded\n"),
+            None
+        );
+    }
+
+    #[test]
+    fn sleep_held_and_disk() {
+        assert!(sleep_held(" sleep 0 (sleep prevented by caffeinate, powerd)\n"));
+        assert!(!sleep_held(" sleep 1\n"));
+        let df = "Filesystem 1024-blocks Used Available Capacity iused ifree %iused Mounted on\n/dev/disk3s5 482746452 416546668 34973776 93% 1 2 1% /System/Volumes/Data\n";
+        assert_eq!(free_disk_mib(df), Some(34973776 / 1024));
+        assert_eq!(free_disk_mib("nothing"), None);
+    }
+
+    #[test]
+    fn build_mismatch_is_flagged_only_when_both_known_and_different() {
+        assert_eq!(restore_verdict(Some("24G90"), Some("24G90")), RestoreVerdict::Allow);
+        assert_eq!(restore_verdict(None, Some("24G90")), RestoreVerdict::Allow);
+        assert_eq!(restore_verdict(Some("24G90"), None), RestoreVerdict::Allow);
+        assert_eq!(
+            restore_verdict(Some("24G90\n"), Some("25A5")),
+            RestoreVerdict::Mismatch {
+                saved: "24G90".into(),
+                host: "25A5".into()
+            }
+        );
+    }
+
+    #[test]
+    fn recorded_build_round_trips_and_policy_defaults_to_cold_boot() {
+        let d = tempfile::tempdir().unwrap();
+        assert_eq!(read_recorded_build(d.path()), None);
+        std::fs::write(d.path().join(HOST_BUILD_FILE), "24G90\n").unwrap();
+        assert_eq!(read_recorded_build(d.path()).as_deref(), Some("24G90"));
+        assert_eq!(on_build_mismatch_from(None), OnBuildMismatch::ColdBoot);
+        assert_eq!(on_build_mismatch_from(Some("refuse")), OnBuildMismatch::Refuse);
+        assert!(mismatch_message("a", "b").contains("macOS build a"));
+        assert!(locked_message().contains("headless-check"));
+    }
+
+    #[test]
+    fn throttling_blocks_admission_and_unknown_does_not() {
+        let hot = HostHealth {
+            thermal_limit: Some(50),
+            ..Default::default()
+        };
+        assert_eq!(hot.admission_blockers().len(), 1);
+        let mild = HostHealth {
+            thermal_limit: Some(90),
+            ..Default::default()
+        };
+        assert!(mild.admission_blockers().is_empty());
+        assert!(HostHealth::default().admission_blockers().is_empty());
+    }
+
+    #[test]
+    fn old_heartbeat_without_health_decodes() {
+        let h: HostHealth = serde_json::from_str("{}").unwrap();
+        assert_eq!(h, HostHealth::default());
+        assert_eq!(serde_json::to_string(&h).unwrap(), "{}");
+    }
+}

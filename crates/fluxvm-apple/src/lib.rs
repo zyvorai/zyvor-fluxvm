@@ -13,6 +13,8 @@ mod capability;
 mod control;
 pub mod display;
 mod host_caps;
+pub mod host_health;
+pub mod keepawake;
 pub mod host_infer;
 pub mod ipsw;
 pub mod macos_install;
@@ -516,6 +518,7 @@ pub async fn snapshot_save(vm: &VmRecord, tag: &str) -> Result<()> {
             );
         }
         // The guest is paused, so these files match the saved memory exactly.
+        host_health::record_build(&dir);
         save_files(&vm.workspace, &vm.disk, &dir)
     })();
     if was_running {

@@ -313,6 +313,15 @@ pub fn parse_console(ioreg: &str) -> Console {
     }
 }
 
+/// `defaults read /Library/Preferences/com.apple.SoftwareUpdate AutomaticallyInstallMacOSUpdates`: `1`/`0`.
+pub fn parse_auto_updates(text: &str) -> Option<bool> {
+    match text.trim() {
+        "1" => Some(true),
+        "0" => Some(false),
+        _ => None,
+    }
+}
+
 /// One display from `system_profiler SPDisplaysDataType`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Display {
@@ -386,6 +395,8 @@ pub struct HostFacts {
     pub displays: Option<Vec<Display>>,
     pub free_bytes: Option<u64>,
     pub keepawake_loaded: bool,
+    /// `AutomaticallyInstallMacOSUpdates`: on means macOS may install an update and reboot unattended.
+    pub auto_macos_updates: Option<bool>,
 }
 
 pub fn collect(sh: &dyn Sh, _uid: u32, user: &str, keepawake_loaded: bool) -> HostFacts {
@@ -437,6 +448,18 @@ pub fn collect(sh: &dyn Sh, _uid: u32, user: &str, keepawake_loaded: bool) -> Ho
             .or_else(|| sh.read("df", &["-k", "/"]))
             .and_then(|t| parse_df_available(&t)),
         keepawake_loaded,
+        // The key is absent until someone changes the setting, which is how `defaults` reports the default: unknown, and
+        // not treated as on.
+        auto_macos_updates: sh
+            .read(
+                "defaults",
+                &[
+                    "read",
+                    "/Library/Preferences/com.apple.SoftwareUpdate",
+                    "AutomaticallyInstallMacOSUpdates",
+                ],
+            )
+            .and_then(|t| parse_auto_updates(&t)),
     }
 }
 
@@ -485,6 +508,7 @@ pub fn status_json(f: &HostFacts) -> Value {
             "resolution": d.resolution, "online": d.online,
         })).collect::<Vec<_>>()),
         "free_bytes": f.free_bytes,
+        "auto_install_macos_updates": f.auto_macos_updates,
         "thermal": thermal_text(&f.thermal),
     })
 }
@@ -600,6 +624,14 @@ pub fn render_status(f: &HostFacts) -> String {
         f.free_bytes.map_or("?".into(), gib),
     );
     row("thermal", thermal_text(&f.thermal));
+    row(
+        "automatic macOS updates",
+        match f.auto_macos_updates {
+            Some(true) => "ON: an update can reboot this Mac unattended and invalidate saved VM state".into(),
+            Some(false) => "off".into(),
+            None => "not set (macOS default)".into(),
+        },
+    );
     s
 }
 
@@ -743,6 +775,14 @@ pub fn headless_checks(f: &HostFacts) -> Vec<Check> {
             Some("attach an HDMI/DisplayPort dummy plug (display emulator) to the headless Mac"),
         )),
         None => {}
+    }
+    if f.auto_macos_updates == Some(true) {
+        out.push(chk(
+            "automatic macOS updates",
+            Status::Warn,
+            "on: macOS can download, install and reboot into a new build on its own; saved VM state does not survive a macOS update and the Mac may wait at the login window",
+            Some("System Settings > General > Software Update > (i) > turn off 'Install macOS updates', and update on your schedule; then re-take snapshots"),
+        ));
     }
     if let Some(b) = f.free_bytes {
         let gb = b as f64 / 1e9;
@@ -1307,6 +1347,21 @@ mod tests {
             ],
             ..Fake::default()
         }
+    }
+
+    #[test]
+    fn pending_automatic_updates_warn() {
+        assert_eq!(parse_auto_updates("1\n"), Some(true));
+        assert_eq!(parse_auto_updates("0"), Some(false));
+        assert_eq!(parse_auto_updates("The domain/default pair does not exist"), None);
+        let mut f = HostFacts::default();
+        assert!(headless_checks(&f).iter().all(|c| c.name != "automatic macOS updates"));
+        f.auto_macos_updates = Some(true);
+        let c = headless_checks(&f);
+        let w = c.iter().find(|c| c.name == "automatic macOS updates").unwrap();
+        assert_eq!(w.status, Status::Warn);
+        assert!(render_status(&f).contains("ON:"));
+        assert_eq!(status_json(&f)["auto_install_macos_updates"], true);
     }
 
     #[test]
