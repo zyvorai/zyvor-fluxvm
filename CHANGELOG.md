@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+The platform layer of `kube apple` (module files `platform`, `platform_cmd`, `suc`, `gitops`, `recipes`, `netpol`, `restore_all`, `pins`, plus `kube_cis`; see [docs/apple-k3s-platform.md](docs/apple-k3s-platform.md)). Unit-tested with golden generators and a recording fake for every remote step; **not run against a real cluster: no manifest was applied, no node restarted, no snapshot restored, no controller synced**. The pinned manifest digests were computed from the upstream release files but never applied.
+
+- `kube apple create` takes `--registries-file`, `--embedded-registry`, `--harden cis` (`--psa-level`), `--addons default|minimal|metallb` and `--cilium`: the `kube addons` generators, written to a k3s drop-in and the nodes after the cluster is up, then a one-at-a-time restart; `kube apple platform apply NAME` does the same for an existing cluster (`--dry-run`, `--restart`).
+- `kube apple doctor --cis` and `kube doctor --cis`: the read-only CIS profile audit folded into the doctor reports.
+- `kube apple snapshot restore NAME SNAP --rejoin-servers [--from-node N] --yes`: restore on one server, move the other servers' etcd data aside and rejoin them one at a time, after checking that every server answers and the snapshot exists; prints the plan without `--yes`.
+- `kube apple upgrade NAME --channel stable|latest|testing|vX.Y`: upgrade through the system-upgrade-controller (pinned, SHA-256-verified manifests) with downgrade and skew refusal, health check and an etcd snapshot first. The journal's recorded k3s version is not updated.
+- `kube apple platform gitops flux|argo` (pinned install, deploy key from a mode-600 file sent on stdin, host keys from a file you verified), `platform metallb` (pool helper), `platform cert-manager`, `platform metrics-server`, `platform netpol` (baseline deny-all, DNS, same-namespace, named namespaces and CIDRs) and `platform pins`. `--manifest-file` installs a local copy that matches the pin or `--sha256`.
+
 `fluxctl mac host`: the Mac that runs FluxVM, as a server. Parsers tested on output captured from one Mac, decisions and apply paths on a fake host; the read-only commands were run on that Mac; **`keepawake install` and `tune --apply` were not run**.
 
 - New `fluxctl mac host status | headless-check | keepawake install|uninstall|status | tune | rosetta` (module `mac_host`, see [docs/macos-host.md](docs/macos-host.md)). `status` reads `pmset`, `ioreg`, `fdesetup`, `defaults`, `system_profiler` and `df` without sudo.
