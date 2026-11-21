@@ -2,7 +2,8 @@
 <!-- SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0 -->
 # Design: a Docker-style workflow for macOS guests
 
-Status: **proposal, nothing implemented.** It lives in this repository for now; it can move to its own project once the shape
+Status: **phase 1 (store and registry) is implemented** as `fluxctl mac images|pull|push|tag|rmi|import`; see
+[macos-containers.md](macos-containers.md). Everything else here (run, ps, exec, build, warm start) is still a proposal. It lives in this repository for now; it can move to its own project once the shape
 is settled, because it only needs FluxVM's daemon API.
 
 ## Goal

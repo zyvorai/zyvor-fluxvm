@@ -236,6 +236,7 @@ Verified by hand on an Apple M4 running macOS 27.2 with macOS 27.0.1 (26A434) as
   Apple M4: a fresh clone of such a template accepted the key on its first login, no password needed. If encryption is still running
   when you try, `fdesetup disable` fails with error -69573; wait for it to reach 100% first. The guest's disk is a file on your Mac, so
   turning FileVault off there only matters if the template file itself needs to stay secret.
+- **Images.** `fluxctl mac images|pull|push|tag|rmi|import` stores templates locally and moves them through an OCI registry; see [macOS images](macos-containers.md).
 - **First boot of a clone** is slow on a USB drive (about 5 minutes to SSH at 37 MB/s) and restarts sshd once, so retry SSH for a minute.
 
 ### As an agent session
