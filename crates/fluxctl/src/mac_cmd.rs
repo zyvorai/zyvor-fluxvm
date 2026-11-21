@@ -48,7 +48,8 @@ pub enum MacCommand {
         #[arg(long)]
         dry_run: bool,
         /// Build context directory: COPY sources are relative to it.
-        #[arg(default_value = ".")]
+        // Own id: `context` is the global --context flag (a String) and clap panics on the clash.
+        #[arg(id = "build_context", value_name = "CONTEXT", default_value = ".")]
         context: PathBuf,
     },
     /// Start a macOS VM from a local image (an APFS clone of its disk) and, with CMD, run it over SSH. Needs the daemon

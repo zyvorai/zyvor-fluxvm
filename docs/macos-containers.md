@@ -13,11 +13,11 @@ Status: the commands below are implemented and unit-tested. Nothing has been run
 | Command | State |
 |---|---|
 | `fluxctl mac images`, `pull`, `push`, `tag`, `rmi`, `import` | Implemented (this page) |
-| `fluxctl mac run [--rm] [--name N] [-p H:G] IMAGE [-- CMD]`, `ps`, `rm`, `exec` | Implemented, needs the daemon (`--server` or a context). **Unit-tested only; never run against a real VM.** An instance is a VZ macOS VM, an APFS clone of the image's disk, labelled `fluxvm.mac=instance`. A 409 means the Mac already runs 2 macOS guests; a 503 means its login session is locked. |
+| `fluxctl mac run [--rm] [--name N] [--user U] [--wait S] [-p H:G] IMAGE [-- CMD]`, `ps`, `rm`, `exec [--user U]` | Implemented, needs the daemon (`--server` or a context). **Unit-tested only; never run against a real VM.** An instance is a VZ macOS VM, an APFS clone of the image's disk, labelled `fluxvm.mac=instance`. A 409 means the Mac already runs 2 macOS guests; a 503 means its login session is locked. |
 | `fluxctl mac build -t NAME [-f Macfile] --dry-run [CONTEXT]` | Parses a Macfile and prints the plan, with line-numbered errors. Only `--dry-run` works: running the steps in a build VM is **not implemented**. A `#` comment must be on its own line (a trailing one after a directive is an error). |
 
-The image commands are client-side only: they talk to a registry and the local store, never to the daemon. Until `run` exists, a stored
-image is not started by `fluxctl mac`; to use a template today, follow the clone steps in [macos.md](macos.md#macos-guests).
+The image commands are client-side only: they talk to a registry and the local store, never to the daemon. `run` and the other instance
+commands start a stored image through the daemon.
 
 ## The local store
 
