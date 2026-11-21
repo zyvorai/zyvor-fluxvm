@@ -13,6 +13,13 @@ Mac integrations: MCP tools, lifecycle events, Prometheus metrics. Unit-tested w
 - New `fluxctl mac watch` and `mac events` (module `mac_events`): one lifecycle event per change of a macOS instance (`mac.instance.created|started|paused|resumed|stopped|failed|removed`, `mac.slots.full|free`) and, with `--kube`, of a `kube apple` node or cluster (`kube.apple.node.*`, `kube.apple.cluster.*`), carrying ids, names, images and `kairon.zyvor.dev/*` labels only. `--record-to DIR` appends them to the daemon's `events.jsonl`, so `/v1/events`, the SSE stream and `[[event_sinks]]` webhooks carry them.
 - New `fluxctl mac metrics` (module `mac_metrics`): Prometheus text for instances by state, macOS slots used of 2, template store size and, with `--kube`, `kube apple` node readiness and etcd snapshot age; `--textfile` writes it atomically for node_exporter.
 - `kube_apple` submodules are now `pub(crate)` so these modules can reuse the lifecycle and journal types.
+macOS guests, "make it real" (research backlog items 1, 2, 3, 5, 6). Unit-tested with fakes and golden files; **none of it has been run against a real daemon or macOS VM**, and the acceptance script has not been run on hardware.
+
+- New `scripts/test-mac-vz.sh`: a live acceptance script for `fluxctl mac` (import, `run --rm`, detach + `wait-ready`, `exec`, `ps`/`inspect` JSON, `cp`, stop/start, `commit`, `build`, `--queue`, `push`/`pull` to a local registry, `prune`). `--self-test` runs it against a fake `fluxctl` so CI can check the script itself.
+- New `fluxctl mac doctor [--json]`: Apple silicon, macOS version, macOS VM slots, free disk, APFS and same-volume clone check, unlocked login session, daemon reachable, ssh key, FileVault, store location; each problem prints an exact fix and a failure exits 1.
+- New `fluxctl mac wait-ready NAME [--timeout S] [--check CMD] [--json]`.
+- `fluxctl mac run --queue [--queue-timeout SECS]` waits for a free macOS slot instead of failing with 409. Not first-come-first-served across several waiting clients.
+- Stable, documented `--json` (schema version 1) for `mac run`, `ps` and `inspect`, pinned by golden files. **Changed:** `mac ps --json` now prints one object per instance with the contract keys; the daemon's raw record moved under each object's `vm` key. `mac run --json` is new.
 
 Apple-silicon native k3s: `fluxctl kube apple`, a persistent ARM64 Linux VM per node. Unit-tested against a fake host only; **not run against real hardware** (no guest was booted, no real ssh, tunnel, etcd snapshot or multi-Mac join was exercised).
 

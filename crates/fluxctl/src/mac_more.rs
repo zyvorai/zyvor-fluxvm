@@ -392,7 +392,10 @@ pub async fn ps(r: &crate::remote::Remote, json_out: bool, o: PsOpts) -> Result<
     let all: Vec<&Value> = items.iter().collect();
     let rows = view::select(&all, o.all, &filters);
     if json_out {
-        println!("{}", serde_json::to_string_pretty(&rows)?);
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&crate::mac_json::ps_document(&rows))?
+        );
     } else if o.quiet {
         print!("{}", view::render_quiet(&rows));
     } else if let Some(f) = &o.format {
@@ -651,7 +654,7 @@ pub async fn run_daemon(r: &crate::remote::Remote, cmd: MacMore) -> Result<()> {
                 let cfg = image_config_of(&full)
                     .map(serde_json::to_value)
                     .transpose()?;
-                out.push(view::inspect(&full, cfg));
+                out.push(crate::mac_json::inspect_v1(view::inspect(&full, cfg)));
             }
             println!("{}", serde_json::to_string_pretty(&out)?);
         }
