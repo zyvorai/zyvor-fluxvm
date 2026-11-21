@@ -252,6 +252,7 @@ mod tests {
             rosetta: false,
             images: vec![],
             macos_pool_idle: None,
+            health: None,
         }
     }
 
