@@ -106,6 +106,18 @@ fluxctl mac images --fleet fleet.yaml [-a] [-f reference=xcode*] [--json]
 The same listings from every Mac of the inventory at once over ssh, one table with the Mac in the first column. `--json` prints one document: `{"schema_version": 1, "hosts": [{host, name, ok, error}], "instances"|"images": [...]}`, each row with `host` (the Mac's name) and
 `host_label` added and the daemon's raw `vm` record left out. A Mac that cannot be reached is a row in `hosts` with the reason, and the command exits non-zero. `-a` and `-f` are passed to each Mac; `--format` and `-q` are refused with `--fleet`. ssh uses the defaults (`~/.ssh/config`; no `--identity` flag here, like `mac run --fleet`). Read-only.
 
+## Rolling upgrade: `upgrade --rolling`
+
+```bash
+fluxctl mac-fleet upgrade --rolling -f fleet.yaml --release 0.5.0 [--drain-timeout 3600] [--health-timeout 300]
+```
+
+One Mac at a time: **drain** it (no new job is placed, running jobs finish), wait until it has no VM, **upgrade** it (never forced), wait for the **health gate** (its daemon answers and reports the new version, polled every 10 s), then **resume** it. The first Mac that fails any step
+**stops the roll**: it stays drained so no job lands on a half-upgraded Mac, the Macs after it are not touched, and the command exits non-zero naming it and how many were skipped. A Mac that was drained before the roll is left drained afterwards. Runners and
+`mac-fleet run` read the drain list before every placement, so they stop using a Mac as soon as its turn comes. `--rolling` cannot be combined with `--force`. `--dry-run` prints the plan only. Output: a table (or `--json`) of `upgraded`, `failed` or `skipped` per Mac.
+
+Not covered: the health gate checks the daemon and the version, not that a guest boots; there is no automatic rollback (re-run `upgrade` with the old `--release` on the failed Mac).
+
 ## Timeouts
 
 `--step-timeout SECS` (default 1800, `0` = none) bounds every ssh call of every `mac-fleet` command: each step of `up`/`apply` (install, daemon,
