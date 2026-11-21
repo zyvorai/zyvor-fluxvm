@@ -118,6 +118,7 @@ Exhaustive checklist. For the pitch, see [README.md](README.md); for who this is
 - **Admission policy limits** — caps on what a request is allowed to provision
 - **Bearer-token auth/RBAC** — on the REST API
 - **State layout** — durable per-VM state under a documented path structure, see [docs/operations.md — State layout](docs/operations.md#state-layout)
+- **Kairon on FluxVM's Kubernetes** — `fluxctl kube kairon install|status|upgrade|uninstall|selftest`: the pinned Kairon chart (digest-verified) on the cluster FluxVM made, node labels, optional production Secrets generated in process, health checks with a fix per failure, `kaironctl selftest` (checksum-verified) against registered FluxVM hosts. Offline-verified only, no live install yet ([docs/kairon-on-kube.md](docs/kairon-on-kube.md))
 
 ## Storage
 

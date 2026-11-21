@@ -421,3 +421,5 @@ Not exercised against real hardware at the time of writing:
 Not implemented: automatic LAN load balancing beyond the forwarder and kube-vip, restoring etcd with multiple servers automatically (the other servers are still wiped and
 rejoined by hand), HA for clusters that join from another Mac (each Mac's servers are journalled where they run), and recovering the host keys, SHA-256 and sizing of a lost
 journal (see `rebuild`).
+
+To put Kairon (Kubernetes-native VM orchestration) on a cluster made this way, and register Macs and Linux hosts as its VM nodes, see [kairon-on-kube.md](kairon-on-kube.md): `fluxctl kube kairon install`.

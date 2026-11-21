@@ -39,6 +39,12 @@ Cluster pairing, recipes and the cluster passport. Unit-tested with fakes and go
 - New `fluxctl cluster report [--format md|html|json] [--out FILE] [--serve]` ([docs/cluster-passport.md](docs/cluster-passport.md)): machines, versions, health, how to add a machine, back up, undo, logs and a contacts/notes field in one document; secrets are scrubbed in every format and tested.
 
 
+Kairon on FluxVM's own Kubernetes. Unit-tested with golden files, captured `kubectl` JSON and a fake runner for `helm`/`kubectl`/`kaironctl`; the pinned chart renders and passes `kubeconform`; **no live install was done, `kaironctl selftest` was not run, and the `kaironctl` checksum check was not run against a real release (v0.10.6 had no published release assets, so it fails closed)** (see [docs/kairon-on-kube.md](docs/kairon-on-kube.md)).
+
+- New `fluxctl kube kairon install|status|upgrade|uninstall|selftest` (module `kube_kairon`): installs the pinned Kairon chart 0.10.6 into the FluxVM-created cluster (evaluation profile; `--production` makes the webhook and migration Secrets in process and never prints keys), labels the nodes you name (`kairon.zyvor.dev/capable`, `backend.*`, `chip`, `memory-gib`), and runs health checks with a fix per failure (CRDs, controller, dashboard, node agent, webhook, Kairon nodes). The chart is refused unless `helm pull` reports the pinned registry digest; `upgrade` applies the CRDs first; `uninstall` keeps CRDs and Machines unless `--purge --yes`.
+- `kube kairon selftest` runs `kaironctl selftest` (verified against the release's SHA256SUMS) only when a Ready, non-control-plane Kairon node (a FluxVM host) is registered, and otherwise says what to register.
+- The Mac story is explicit: control plane in the k3s VM, Macs as Kairon nodes through `kairon-node`; `fluxvm-agent` is FluxVM's separate fleet registry.
+
 `fluxctl mac host`: the Mac that runs FluxVM, as a server. Parsers tested on output captured from one Mac, decisions and apply paths on a fake host; the read-only commands were run on that Mac; **`keepawake install` and `tune --apply` were not run**.
 
 - New `fluxctl mac host status | headless-check | keepawake install|uninstall|status | tune | rosetta` (module `mac_host`, see [docs/macos-host.md](docs/macos-host.md)). `status` reads `pmset`, `ioreg`, `fdesetup`, `defaults`, `system_profiler` and `df` without sudo.
