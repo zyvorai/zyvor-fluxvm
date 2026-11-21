@@ -18,7 +18,7 @@ class Fluxvm < Formula
   def install
     # The runner must sit next to fluxctl: that is where the daemon looks for it first.
     bin.install "bin/fluxctl", "bin/fluxvm-vz-runner", "bin/fluxvm-vz-switch", "bin/fluxvm-blockd",
-                "bin/fluxvm-usernet"
+                "bin/fluxvm-usernet", "bin/fluxvm-agent"
     pkgshare.install "config.example.toml"
   end
 
@@ -35,6 +35,8 @@ class Fluxvm < Formula
         fluxctl run                  # a throwaway Debian VM and a shell
       Run the daemon in the background:
         brew services start fluxvm   # API on 127.0.0.1:7788
+      Register this Mac with a fleet (or Kairon) as its own launch agent:
+        fluxctl node-agent install --name NAME --central https://fleet.example:7790 --token-file FILE
       Restoring VM snapshots needs an unlocked login session.
     EOS
   end
@@ -45,6 +47,7 @@ class Fluxvm < Formula
     assert_predicate bin/"fluxvm-vz-switch", :executable?
     assert_predicate bin/"fluxvm-blockd", :executable?
     assert_predicate bin/"fluxvm-usernet", :executable?
+    assert_predicate bin/"fluxvm-agent", :executable?
     assert_match "com.apple.security.virtualization",
                  shell_output("codesign -d --entitlements - #{bin}/fluxvm-vz-runner 2>&1")
   end

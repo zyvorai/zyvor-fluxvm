@@ -75,6 +75,7 @@ mod launch_agent;
 mod mcp;
 mod mcp_install;
 mod netobs;
+mod node_agent;
 mod output;
 mod remote;
 mod run;
@@ -954,6 +955,12 @@ enum Command {
     Service {
         #[command(subcommand)]
         command: ServiceCommand,
+    },
+    /// Run `fluxvm-agent node` (the fleet heartbeat that registers this Mac with a central registry, or with Kairon) as its
+    /// own launchd LaunchAgent, next to the daemon's.
+    NodeAgent {
+        #[command(subcommand)]
+        command: node_agent::NodeAgentCommand,
     },
     /// Display status. With no id: Cilium-style host panel. With an id:
     /// that VM's record (machinectl `status`/`show`).
@@ -6115,6 +6122,20 @@ async fn main() -> Result<()> {
         println!("{}", serde_json::to_string_pretty(&out)?);
         return Ok(());
     }
+    if let Command::NodeAgent { command } = &cli.command {
+        let out = match command {
+            node_agent::NodeAgentCommand::Install(a) => {
+                let plist = node_agent::install(a)?;
+                serde_json::json!({"ok": true, "plist": plist, "label": node_agent::LABEL})
+            }
+            node_agent::NodeAgentCommand::Uninstall => {
+                serde_json::json!({"ok": true, "removed": node_agent::uninstall()?})
+            }
+            node_agent::NodeAgentCommand::Status => node_agent::status()?,
+        };
+        println!("{}", serde_json::to_string_pretty(&out)?);
+        return Ok(());
+    }
     let format = cli.output;
     if let Command::Mcp {
         command: McpCommand::Serve { allow_write },
@@ -6410,6 +6431,7 @@ async fn main() -> Result<()> {
         | Command::VsockProxy { .. }
         | Command::ImportCompose { .. }
         | Command::Service { .. }
+        | Command::NodeAgent { .. }
         | Command::Dashboard { .. }
         | Command::Mcp { .. }
         | Command::Events { .. }
