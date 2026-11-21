@@ -44,6 +44,7 @@ mod guest_cmd;
 mod image_mgmt;
 mod infer;
 mod instancetype_cmd;
+mod kube_addons;
 mod kube_apps;
 mod kube_backup;
 mod kube_chaos;
@@ -54,8 +55,11 @@ mod kube_diff;
 mod kube_doctor;
 mod kube_forward;
 mod kube_git;
+mod kube_harden;
 mod kube_host;
 mod kube_hostsvc;
+mod kube_ingress;
+mod kube_kubeconfig;
 mod kube_logs;
 mod kube_mcp;
 mod kube_menubar;
@@ -63,10 +67,14 @@ mod kube_names;
 mod kube_notify;
 mod kube_pin;
 mod kube_policy;
+mod kube_preflight;
 mod kube_project;
 mod kube_prompt;
 mod kube_ps;
+mod kube_recipes;
+mod kube_registry;
 mod kube_route;
+mod kube_secrets;
 mod kube_share;
 mod kube_sync;
 mod kube_tls;
@@ -401,6 +409,12 @@ enum KubeGitCommand {
 
 #[derive(Subcommand)]
 enum KubeCommand {
+    /// Generated k3s configuration: add-on toggles, Cilium, registries and airgap, hardening, etcd HA and snapshots,
+    /// node flags, kubeconfig merge, preflight checks, virtiofs volume and Rosetta recipes. Nothing here creates a cluster.
+    Addons {
+        #[command(subcommand)]
+        command: kube_addons::AddonsCommand,
+    },
     /// Create or start a k3s cluster in a VM (a server, plus workers with --workers), publish its API server on this Mac and write a
     /// kubeconfig.
     /// Idempotent. The first run downloads k3s and takes a few minutes.
@@ -6282,6 +6296,22 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
+    // `kube addons` generates text and talks to a host over ssh: no daemon needed.
+    if matches!(
+        &cli.command,
+        Command::Kube {
+            command: KubeCommand::Addons { .. }
+        }
+    ) {
+        let Command::Kube {
+            command: KubeCommand::Addons { command },
+        } = cli.command
+        else {
+            unreachable!()
+        };
+        return kube_addons::run(command);
+    }
+
     // `kube prompt` runs on every shell prompt: no daemon, no VmManager, nothing slow.
     if let Command::Kube {
         command:
@@ -8816,6 +8846,7 @@ async fn kube_command<A: run::VmApi>(api: &A, command: KubeCommand) -> Result<()
             .await?;
         }
         KubeCommand::Prompt { .. } => unreachable!("handled before the daemon is opened"),
+        KubeCommand::Addons { .. } => unreachable!("handled before the daemon is opened"),
         KubeCommand::Share {
             cluster,
             service,

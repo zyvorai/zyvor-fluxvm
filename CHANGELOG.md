@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- **`fluxctl kube addons`: generated k3s configuration.** Pure generators (golden-tested) for `/etc/rancher/k3s/config.yaml`: bundled add-on
+  toggles (Traefik, ServiceLB, local-path, metrics-server, CoreDNS), a Cilium-ready config, node labels/taints/kubelet reservations, Secrets encryption and a CIS profile with its PSA, audit and
+  sysctl files; a Traefik `HelmChartConfig` and ServiceLB pool labels, `secrets-encrypt` status and guarded key rotation, a read-only CIS settings check; `registries.yaml` mirrors/credentials/TLS, the embedded (Spegel) mirror and airgap image preload; kubeconfig merge/rename into `~/.kube/config`; a host preflight
+  (RAM/CPU/disk, time sync, ports, cgroup, Apple VZ limits); a virtiofs `hostPath` PV recipe; Rosetta-for-amd64 guidance. Prints by default; `--ssh`
+  writes over the user's ssh. Does not create or manage clusters. Unit-tested only, not run against real hardware. New modules `kube_addons`,
+  `kube_harden`, `kube_registry`, `kube_kubeconfig`, `kube_preflight`, `kube_recipes`, `kube_ingress`, `kube_secrets`. See `docs/apple-k3s-addons.md`.
+
 macOS image store, the first part of a Docker-style workflow for macOS guests. Unit-tested only; not run against a real registry or VM.
 
 - New `fluxctl mac images|pull|push|tag|rmi|import`: a local store of macOS templates (`~/.fluxvm/mac-images` or `$FLUXVM_MAC_STORE`, with an
