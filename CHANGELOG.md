@@ -7,7 +7,7 @@ macOS image store, the first part of a Docker-style workflow for macOS guests. U
 - New `fluxctl mac images|pull|push|tag|rmi|import`: a local store of macOS templates (`~/.fluxvm/mac-images` or `$FLUXVM_MAC_STORE`, with an
   `index.json`) that pulls and pushes them as OCI artifacts. Several tags can share one directory, and the files are deleted with the last
   tag. `push` needs a registry reference; credentials come from `FLUXVM_REGISTRY_USER` / `FLUXVM_REGISTRY_PASSWORD`. `import` uses APFS clones.
-  `mac run [--rm]`, `ps`, `rm` and `exec` start and manage macOS VMs cloned from an image (needs the daemon; a 409 reports the 2-guest limit, a 503 the locked session). `mac build --dry-run` checks a Macfile and prints its plan; running a build is not implemented. See [docs/macos-containers.md](docs/macos-containers.md).
+  `mac run [--rm]`, `ps`, `rm` and `exec` start and manage macOS VMs cloned from an image (needs the daemon; a 409 reports the 2-guest limit, a 503 the locked session). `mac build --dry-run` checks a Macfile and prints its plan. `mac build -t NAME[:TAG]` now runs it: a throwaway instance is cloned from the `FROM` template, `RUN` goes over SSH as the `USER` and `COPY` over scp, then the instance is stopped, stored as the new template and deleted; any failure deletes it and names the failing step. `SNAPSHOT` and `FROM IPSW latest` are refused. Step order and failure cleanup are unit-tested with a fake host; **live execution against a macOS guest is not verified**. See [docs/macos-containers.md](docs/macos-containers.md).
 
 LaunchAgent hardening for Kubernetes and Docker on a Mac. Unit-tested only; not yet run against a live cluster.
 
