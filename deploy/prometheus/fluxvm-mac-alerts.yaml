@@ -1,0 +1,111 @@
+# Copyright 2026 Zyvor AI Labs · https://zyvor.dev
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+#
+# Prometheus alert rules for the Mac fleet (`fluxvm_mac_*`) and Kubernetes on Apple guests (`fluxvm_kube_apple_*`).
+# The metrics come from `fluxctl mac metrics --kube [--textfile PATH]` (crates/fluxctl/src/mac_metrics.rs; node_exporter textfile collector), scraped
+# from each Mac. Check with: promtool check rules deploy/prometheus/fluxvm-mac-alerts.yaml
+# Thresholds are starting points. Add under `rule_files:` in prometheus.yml.
+groups:
+  - name: fluxvm-mac
+    rules:
+      - alert: FluxvmMacCollectorFailing
+        # `fluxvm_mac_collect_ok` is 1 while that part of the reading works.
+        expr: min by (instance, source) (fluxvm_mac_collect_ok) == 0
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: "{{ $labels.instance }}: the {{ $labels.source }} reading fails"
+          description: "daemon: the FluxVM daemon does not answer (`fluxctl mac doctor`). store: the template store is unreadable. Other metrics of this Mac are stale or absent."
+
+      - alert: FluxvmMacMetricsMissing
+        expr: absent(fluxvm_mac_slots_max) or (up{job=~".*fluxvm.*"} == 0)
+        for: 10m
+        labels: {severity: warning}
+        annotations:
+          summary: "No fluxvm_mac_* metrics (a Mac stopped answering the scrape)"
+          description: "Check that the Mac is awake and the metrics endpoint is running; `fluxctl mac-fleet status --detail`."
+
+      - alert: FluxvmMacSlotsSaturated
+        # Both macOS slots (Apple's licence limit) taken for a long time: jobs queue behind them.
+        expr: min_over_time(fluxvm_mac_slots_used[30m]) >= fluxvm_mac_slots_max
+        for: 15m
+        labels: {severity: info}
+        annotations:
+          summary: "{{ $labels.instance }}: both macOS slots have been in use for 45 minutes"
+          description: "New jobs wait or go to another Mac. If it is always full, add a Mac to the fleet."
+
+      - alert: FluxvmMacFleetSlotsSaturated
+        expr: sum(fluxvm_mac_slots_used) >= sum(fluxvm_mac_slots_max) and sum(fluxvm_mac_slots_max) > 0
+        for: 20m
+        labels: {severity: warning}
+        annotations:
+          summary: "Every Mac of the fleet is full (all macOS slots in use)"
+          description: "Queued jobs cannot start until a guest ends. Add a Mac or lower job timeouts."
+
+      - alert: FluxvmMacInstancesFailed
+        expr: sum by (instance) (fluxvm_mac_instances{state="failed"}) > 0
+        for: 15m
+        labels: {severity: warning}
+        annotations:
+          summary: "{{ $labels.instance }}: {{ $value }} instance(s) in the failed state"
+          description: "`fluxctl mac ps -a` lists them; `fluxctl mac rm NAME` removes one. A failed guest still holds disk."
+
+      - alert: FluxvmMacNoTemplates
+        expr: fluxvm_mac_templates == 0
+        for: 30m
+        labels: {severity: info}
+        annotations:
+          summary: "{{ $labels.instance }} holds no template"
+          description: "Jobs placed here must pull one first. `fluxctl mac-fleet templates distribute`."
+
+      - alert: FluxvmMacTemplateStoreLarge
+        # Starting point: 500 GiB. Tune to the Mac's disk.
+        expr: fluxvm_mac_template_store_bytes > 500 * 1024 * 1024 * 1024
+        for: 1h
+        labels: {severity: info}
+        annotations:
+          summary: "{{ $labels.instance }}: the template store is {{ $value | humanize1024 }}B"
+          description: "`fluxctl mac images -a` and `fluxctl mac-fleet templates prune` free space."
+
+  - name: fluxvm-kube-apple
+    rules:
+      - alert: FluxvmKubeAppleClusterUnhealthy
+        expr: min by (instance, cluster) (fluxvm_kube_apple_cluster_healthy) == 0
+        for: 10m
+        labels: {severity: critical}
+        annotations:
+          summary: "{{ $labels.cluster }} on {{ $labels.instance }}: `fluxctl kube apple status` reports a problem"
+          description: "Run `fluxctl kube apple status` on the Mac for the reason."
+
+      - alert: FluxvmKubeAppleNodeVmDown
+        expr: fluxvm_kube_apple_node_up == 0
+        for: 5m
+        labels: {severity: critical}
+        annotations:
+          summary: "{{ $labels.cluster }}/{{ $labels.k8s_node }} ({{ $labels.role }}): its VM is not running"
+          description: "Start it with `fluxctl kube apple up`; check the Mac with `fluxctl mac-fleet status --detail`."
+
+      - alert: FluxvmKubeAppleNodeNotReady
+        # `node_ready` is absent while Kubernetes cannot be asked, so this only fires on an explicit NotReady.
+        expr: fluxvm_kube_apple_node_ready == 0 and on (instance, cluster, k8s_node) fluxvm_kube_apple_node_up == 1
+        for: 10m
+        labels: {severity: warning}
+        annotations:
+          summary: "{{ $labels.cluster }}/{{ $labels.k8s_node }}: the VM runs but Kubernetes says NotReady"
+          description: "kubelet or the network is unhealthy: `kubectl describe node {{ $labels.k8s_node }}`."
+
+      - alert: FluxvmKubeAppleEtcdSnapshotStale
+        expr: fluxvm_kube_apple_snapshot_age_seconds > 2 * 86400
+        for: 30m
+        labels: {severity: warning}
+        annotations:
+          summary: "{{ $labels.cluster }}: the newest etcd snapshot is {{ $value | humanizeDuration }} old"
+          description: "Scheduled snapshots stopped. Check `k3s etcd-snapshot ls` in the server VM. Starting point: 2 days."
+
+      - alert: FluxvmKubeAppleNoEtcdSnapshots
+        expr: fluxvm_kube_apple_snapshots == 0
+        for: 1h
+        labels: {severity: info}
+        annotations:
+          summary: "{{ $labels.cluster }}: no etcd snapshot exists"
+          description: "A lost server cannot be restored. Enable snapshots or take one (`fluxctl kube apple snapshot save CLUSTER`)."
