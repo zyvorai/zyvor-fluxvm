@@ -230,12 +230,7 @@ impl RunnerConfig {
             vmnet: apple.vmnet.clone(),
             custom_virtio: apple.custom_virtio,
             macos_vsock: apple.macos_vsock,
-            restore_state: req
-                .loadvm_tag
-                .as_deref()
-                .map(|tag| snapshot_dir(&ctx.workspace, tag).join(STATE_FILE))
-                // A disk-only snapshot has no saved state: its disk is put back and the guest boots cold.
-                .filter(|state| state.is_file()),
+            restore_state: guarded_restore_state(req, &ctx.workspace)?,
             shares: req
                 .shared_folders
                 .iter()
@@ -482,6 +477,40 @@ pub fn set_self_control_socket(path: PathBuf) {
     let _ = SELF_CONTROL_SOCKET.set(path);
 }
 
+/// The saved state a launch restores from, after the host guards. A disk-only snapshot has no state, so it cold-boots from its
+/// disk. State written on another macOS build is not restored (cold boot, or a refusal with
+/// `FLUXVM_RESTORE_ON_OS_UPDATE=refuse`), and a restore from a locked session fails here with a pointer to
+/// `fluxctl mac host headless-check` instead of a framework error.
+fn guarded_restore_state(req: &CreateVmRequest, workspace: &Path) -> Result<Option<PathBuf>> {
+    let Some(tag) = req.loadvm_tag.as_deref() else {
+        return Ok(None);
+    };
+    let dir = snapshot_dir(workspace, tag);
+    let state = dir.join(STATE_FILE);
+    if !state.is_file() {
+        return Ok(None);
+    }
+    use crate::host_health as hh;
+    if let hh::RestoreVerdict::Mismatch { saved, host } = hh::restore_verdict(
+        hh::read_recorded_build(&dir).as_deref(),
+        hh::current_os_build().as_deref(),
+    ) {
+        let msg = hh::mismatch_message(&saved, &host);
+        let policy = hh::on_build_mismatch_from(
+            std::env::var("FLUXVM_RESTORE_ON_OS_UPDATE").ok().as_deref(),
+        );
+        if policy == hh::OnBuildMismatch::Refuse {
+            bail!("{msg}; refusing to restore (FLUXVM_RESTORE_ON_OS_UPDATE=refuse). Take a new snapshot on this build");
+        }
+        tracing::warn!("{msg}; booting cold from the snapshot's disk instead of restoring memory");
+        return Ok(None);
+    }
+    if hh::probe_session_locked() == Some(true) {
+        bail!("{}", hh::locked_message());
+    }
+    Ok(Some(state))
+}
+
 pub const STATE_FILE: &str = "state.vzvmsave";
 /// Files cloned alongside the saved state, so a restore gets the disk exactly as it was when the state was saved.
 /// `auxiliary.bin` is a macOS guest's NVRAM.
@@ -502,7 +531,7 @@ pub fn export_checkpoint(parent: &Path, tag: &str, dest: &Path, dest_tag: &str) 
     }
     let dst = snapshot_dir(dest, dest_tag);
     fs::create_dir_all(&dst).with_context(|| format!("creating {}", dst.display()))?;
-    for name in std::iter::once(&STATE_FILE).chain(SNAPSHOT_FILES.iter()) {
+    for name in [STATE_FILE, crate::host_health::HOST_BUILD_FILE].iter().chain(SNAPSHOT_FILES.iter()) {
         let from = src.join(name);
         if from.is_file() {
             clone_file(&from, &dst.join(name))?;
@@ -529,7 +558,7 @@ pub fn prepare_fork_child(parent: &Path, tag: &str, child: &Path) -> Result<Path
     }
     let dst = snapshot_dir(child, tag);
     fs::create_dir_all(&dst).with_context(|| format!("creating {}", dst.display()))?;
-    for name in std::iter::once(&STATE_FILE).chain(SNAPSHOT_FILES.iter()) {
+    for name in [STATE_FILE, crate::host_health::HOST_BUILD_FILE].iter().chain(SNAPSHOT_FILES.iter()) {
         let from = src.join(name);
         if from.is_file() {
             clone_file(&from, &dst.join(name))?;

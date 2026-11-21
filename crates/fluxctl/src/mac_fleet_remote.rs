@@ -156,6 +156,7 @@ echo "daemon_healthy=$(yn curl -fsS -m 3 http://127.0.0.1:7788/healthz)"
 echo "enrolled=$(yn test -f "$HOME/Library/Application Support/FluxVM/agent/node-credential")"
 echo "vms_json=$(curl -fsS -m 5 http://127.0.0.1:7788/v1/vms 2>/dev/null | tr -d '\n')"
 echo "kube_json=$([ -n "$FLUXCTL" ] && "$FLUXCTL" kube status 2>/dev/null | tr -d '\n')"
+echo "headless_json=$([ -n "$FLUXCTL" ] && "$FLUXCTL" mac host headless-check --json 2>/dev/null | tr -d '\n')"
 "#
     )
 }
@@ -182,6 +183,8 @@ pub struct Facts {
     pub enrolled: bool,
     pub vms_json: Option<serde_json::Value>,
     pub kube_json: Option<serde_json::Value>,
+    /// `fluxctl mac host headless-check --json` run on the Mac (None from an older install that lacks it).
+    pub headless_json: Option<serde_json::Value>,
 }
 
 pub fn parse_facts(out: &str) -> Facts {
@@ -222,6 +225,7 @@ pub fn parse_facts(out: &str) -> Facts {
             "enrolled" => f.enrolled = yes,
             "vms_json" => f.vms_json = serde_json::from_str(v).ok(),
             "kube_json" => f.kube_json = serde_json::from_str(v).ok(),
+            "headless_json" => f.headless_json = serde_json::from_str(v).ok(),
             _ => {}
         }
     }
@@ -257,6 +261,30 @@ impl Facts {
                     .count()
             })
             .unwrap_or(0)
+    }
+
+    fn headless_check(&self, name: &str) -> Option<&serde_json::Value> {
+        self.headless_json
+            .as_ref()?
+            .get("checks")?
+            .as_array()?
+            .iter()
+            .find(|c| c["name"].as_str() == Some(name))
+    }
+
+    /// One word for the status table: `unlocked`, `locked`, `login window`, or `-` when the Mac could not say.
+    pub fn session_state(&self) -> String {
+        let status = |n: &str| {
+            self.headless_check(n)
+                .and_then(|c| c["status"].as_str().map(str::to_owned))
+        };
+        match (status("console session").as_deref(), status("screen lock").as_deref()) {
+            (Some("fail"), _) => "login window",
+            (_, Some("fail")) => "locked",
+            (_, Some("ok")) => "unlocked",
+            _ => "-",
+        }
+        .into()
     }
 
     /// One word for the table: `none`, `stopped`, `starting`, `running`, or `-` when `kube status` could not be read.
