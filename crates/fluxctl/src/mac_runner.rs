@@ -80,6 +80,9 @@ pub struct RunnerArgs {
     /// Print what would happen and call nothing (no GitHub request, no Mac).
     #[arg(long)]
     pub plan: bool,
+    /// Do not look, at start, for `fleet-*` guests and `fluxvm-*` runners left behind by a run that was killed.
+    #[arg(long)]
+    pub no_sweep: bool,
     #[command(flatten)]
     pub place: PlaceFlags,
     /// Seconds the guest may take to answer on SSH.
@@ -104,6 +107,19 @@ pub trait Github: Send + Sync {
     fn jit(&self, name: &str, labels: &[String]) -> Result<Jit>;
     /// A JIT runner that never took a job stays registered until deleted.
     fn remove(&self, runner_id: u64) -> Result<()>;
+    /// This process's kind of runners (`fluxvm-*`) as GitHub lists them; used by the startup sweep. Default: none known.
+    fn runners(&self) -> Result<Vec<RunnerInfo>> {
+        Ok(vec![])
+    }
+}
+
+/// One `fluxvm-*` runner as GitHub lists it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RunnerInfo {
+    pub id: u64,
+    pub name: String,
+    pub busy: bool,
+    pub status: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -199,6 +215,15 @@ impl RealGithub {
             .header("X-GitHub-Api-Version", "2022-11-28")
     }
 
+    pub fn scope(&self) -> &Scope {
+        &self.scope
+    }
+
+    /// GET `path` (relative to the API base).
+    pub fn get(&self, path: &str, what: &str) -> Result<serde_json::Value> {
+        self.json(self.req(reqwest::Method::GET, path), what)
+    }
+
     fn json(&self, b: reqwest::RequestBuilder, what: &str) -> Result<serde_json::Value> {
         self.handle.block_on(async {
             let r = b.send().await.map_err(|e| anyhow::anyhow!("{what}: {}", e.without_url()))?;
@@ -266,6 +291,25 @@ impl Github for RealGithub {
             .flatten()
             .filter(|r| r["name"].as_str().is_some_and(|n| n.starts_with(NAME_PREFIX)) && r["busy"].as_bool() == Some(true))
             .count())
+    }
+
+    fn runners(&self) -> Result<Vec<RunnerInfo>> {
+        let v = self.get(&format!("{}/actions/runners?per_page=100", self.scope.path()), "listing runners")?;
+        Ok(v["runners"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|r| {
+                let name = r["name"].as_str()?.to_owned();
+                name.starts_with(NAME_PREFIX).then(|| RunnerInfo {
+                    id: r["id"].as_u64().unwrap_or(0),
+                    name,
+                    busy: r["busy"].as_bool() == Some(true),
+                    status: r["status"].as_str().unwrap_or("").to_owned(),
+                })
+            })
+            .filter(|r| r.id != 0)
+            .collect())
     }
 
     fn jit(&self, name: &str, labels: &[String]) -> Result<Jit> {
@@ -357,9 +401,11 @@ pub fn serve_one(c: &Ctx) -> JobReport {
             return rep;
         }
     };
+    crate::mac_runner_life::track_runner(&id, jit.runner_id);
     let cleanup = |detail: String, mut rep: JobReport| {
         // Unused JIT runners are removed; a used one is already gone (the call then fails, which is fine).
         let _ = c.gh.remove(jit.runner_id);
+        crate::mac_runner_life::untrack(&id);
         rep.detail = detail;
         rep
     };
@@ -378,6 +424,12 @@ pub fn serve_one(c: &Ctx) -> JobReport {
         Ok(p) => p,
         Err(e) => return cleanup(format!("{e:#}"), rep),
     };
+    crate::mac_runner_life::track_target(&id, &placed.target);
+    if crate::mac_runner_life::requested() {
+        // Stopped while queued: do not start a guest for a runner that shutdown already unregistered.
+        placer.release(&placed.lease);
+        return cleanup("stopped before the job started".into(), rep);
+    }
     rep.host = Some(placed.view.label.clone());
     (c.log)(&format!("{name}: started on {}", placed.view.label));
     let run = JobRun {
@@ -431,6 +483,11 @@ pub fn supervise(
     std::thread::scope(|s| {
         let mut ticks = 0;
         loop {
+            if crate::mac_runner_life::requested() {
+                // The watcher deletes the guests; the scope joins their threads.
+                (c.log)("stop requested: no new runners; cleaning up what is in flight");
+                break;
+            }
             let n = in_flight.load(Ordering::SeqCst);
             let (queued, busy) = match (c.gh.queued(c.labels), c.gh.busy()) {
                 (Ok(q), Ok(b)) => (q, b),
@@ -472,7 +529,13 @@ pub fn supervise(
             if max_ticks.is_some_and(|m| ticks >= m) && in_flight.load(Ordering::SeqCst) == 0 {
                 break;
             }
-            c.clock.sleep(interval.max(1));
+            // One second at a time, so a stop request is noticed within a second.
+            for _ in 0..interval.max(1) {
+                if crate::mac_runner_life::requested() {
+                    break;
+                }
+                c.clock.sleep(1);
+            }
         }
     });
     reports.into_inner().unwrap()
@@ -573,7 +636,42 @@ pub fn run(a: RunnerArgs) -> Result<()> {
         jobs: jobs(&a.conn),
         log: &log,
     };
-    let reports = supervise(&ctx, cap, warm, a.once, a.interval, None);
+    // SIGINT/SIGTERM/SIGHUP: stop starting runners, delete the guests and unregister the runners in flight, then leave.
+    crate::mac_runner_life::install_signals();
+    let claimed = |id: &str| crate::mac_runner_life::is_live(id);
+    if !a.no_sweep {
+        for l in crate::mac_runner_life::sweep(&gh, tr.as_ref(), &targets, &claimed, false) {
+            log(&l);
+        }
+    }
+    let done = std::sync::atomic::AtomicBool::new(false);
+    let reports = std::thread::scope(|s| {
+        s.spawn(|| {
+            while !done.load(Ordering::SeqCst) {
+                if crate::mac_runner_life::requested() {
+                    log("stop requested: deleting guests and unregistering runners");
+                    for l in crate::mac_runner_life::shutdown_cleanup(&gh, tr.as_ref(), &crate::mac_runner_life::live_snapshot()) {
+                        log(&l);
+                    }
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(200));
+            }
+        });
+        let r = supervise(&ctx, cap, warm, a.once, a.interval, None);
+        done.store(true, Ordering::SeqCst);
+        r
+    });
+    if crate::mac_runner_life::requested() {
+        // Anything a thread created after the watcher looked.
+        if !a.no_sweep {
+            for l in crate::mac_runner_life::sweep(&gh, tr.as_ref(), &targets, &claimed, false) {
+                log(&l);
+            }
+        }
+        log("stopped");
+        return Ok(());
+    }
     if a.once && reports.iter().any(|r| !r.ok) {
         bail!("{}", reports.iter().map(|r| format!("{}: {}", r.runner, r.detail)).collect::<Vec<_>>().join("; "));
     }

@@ -354,6 +354,9 @@ impl Placer<'_> {
         let started = self.clock.now();
         let mut last_note = String::new();
         loop {
+            if crate::mac_runner_life::requested() {
+                bail!("stopping: the runner was asked to stop");
+            }
             let views = snapshot(self.tr, self.targets, self.jobs, self.probe_timeout);
             let state = FleetState::load(self.state_path)?;
             let now = self.clock.now();

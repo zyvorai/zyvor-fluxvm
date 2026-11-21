@@ -37,9 +37,18 @@ again and the loop tries at its next look. Runners to start = queued jobs plus t
 `queued` whose labels all belong to the runner: `self-hosted`, `macOS`, `ARM64` and your `--label`s, in runs that are queued or in progress, first 50 runs of each); for `--org` GitHub gives no
 org-wide queue, so use `--warm N` (default 1) to keep N runners waiting.
 
+## Stopping, and what a crash leaves behind
+
+`SIGINT`, `SIGTERM` and `SIGHUP` (Ctrl-C, `kill`, `launchctl stop`) make the runner stop starting runners, **delete every guest it has in flight** and **unregister every runner it
+registered**, then exit 0. A second signal exits at once (status 130) and leaves the cleanup undone. A runner that is still waiting for a slot is unregistered and never starts a guest.
+
+At start (and again after a stop) a **sweep** looks for what a run that was killed with `SIGKILL` or a power cut left: guests named `fleet-*` labelled `fluxvm.owner=mac-fleet` on the Macs, and idle `fluxvm-*`
+runners on GitHub. It removes those whose job id is not in flight here and is not held by another process's live lease (see the scheduler page); a runner that is running a job is never touched. `--no-sweep` turns it off.
+The sweep is by name: do not run two runners for the same repository or organisation that you do not want to see each other's leftovers, unless both are on one machine (where the shared leases tell them apart).
+
 ## What is not verified
 
 - Any request to GitHub (`generate-jitconfig`, listing runs, jobs and runners, deleting a runner): the shapes were written from the REST documentation and are only tested against a fake.
 - That the Actions runner in a guest accepts its JIT configuration from `ACTIONS_RUNNER_INPUT_JITCONFIG` and exits after one job; that `mac run -e` passes the value into the guest intact.
 - Everything the scheduler page lists, over real ssh and real guests.
-- Killing the `fluxctl mac runner` process leaves running guests and registered runners behind (no signal handler yet): `fluxctl mac ps` shows guests named `fleet-*`, and unused JIT runners are removed by GitHub after a day.
+- Signal handling and the sweep: tested with fakes (a real `raise` of a non-stop signal checks the handler is installed; the stop path is called directly), not with a real `kill` of a runner that has guests, and not against GitHub's runner list. A `SIGKILL` cannot be handled; the next start sweeps.

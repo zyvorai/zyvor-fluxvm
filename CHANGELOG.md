@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+Mac fleet operations: clean shutdown, shared leases, richer status, aggregated listings, rolling upgrade, org warm pool, dashboards and alerts. Unit-tested with fakes only; **none of it was run against a real Mac, a real macOS guest, GitHub or Prometheus/Grafana** (see the "What is not verified" sections of the pages linked below).
+
+- `fluxctl mac runner` stops cleanly on SIGINT/SIGTERM/SIGHUP: it deletes the guests and unregisters the runners it has in flight (a second signal exits at once), and at start it sweeps orphaned `fleet-*` guests and idle `fluxvm-*` runners left by a killed run (`--no-sweep` to skip). New module `mac_runner_life`; see [docs/mac-runner.md](docs/mac-runner.md).
 `fluxctl mac host`: the Mac that runs FluxVM, as a server. Parsers tested on output captured from one Mac, decisions and apply paths on a fake host; the read-only commands were run on that Mac; **`keepawake install` and `tune --apply` were not run**.
 
 - New `fluxctl mac host status | headless-check | keepawake install|uninstall|status | tune | rosetta` (module `mac_host`, see [docs/macos-host.md](docs/macos-host.md)). `status` reads `pmset`, `ioreg`, `fdesetup`, `defaults`, `system_profiler` and `df` without sudo.
