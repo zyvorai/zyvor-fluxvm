@@ -994,4 +994,29 @@ mod tests {
             assert!(d.path().join(p).exists(), "{p}");
         }
     }
+
+    /// Needs the network: pulls alpine from the registry, unpacks it and checks the layout. Run with
+    /// `cargo test -p fluxvm-scheduler -- --ignored live_pull_and_unpack`.
+    #[tokio::test]
+    #[ignore = "needs registry access"]
+    async fn live_pull_and_unpack() {
+        let d = tempfile::tempdir().unwrap();
+        let cfg = fluxvm_core::config::Config { state_dir: d.path().to_path_buf(), ..Default::default() };
+        let image = oci_images::pull(&cfg, "alpine:3.22", host_arch()).await.unwrap();
+        let cache = ensure_cache(&cfg, &image, false).unwrap();
+        for p in ["bin/busybox", "etc/os-release", "proc", "dev", "tmp", "etc/resolv.conf", ".fluxvm-unpacked"] {
+            assert!(std::fs::symlink_metadata(cache.join(p)).is_ok(), "{p} missing in {}", cache.display());
+        }
+        assert_eq!(ensure_cache(&cfg, &image, false).unwrap(), cache, "second call reuses the cache");
+        let rootfs = d.path().join("copy");
+        copy_rootfs(&cache, &rootfs).unwrap();
+        assert!(rootfs.join("bin/busybox").exists());
+        let proc_ = init::resolve_process(
+            &init::ImageProcess { entrypoint: image.config.entrypoint.clone(), cmd: image.config.cmd.clone(), env: image.config.env.clone(), working_dir: image.config.working_dir.clone(), user: image.config.user.clone() },
+            &init::ProcessOverrides::default(),
+        )
+        .unwrap();
+        assert_eq!(proc_.argv, ["/bin/sh"]);
+        eprintln!("unpacked {} layers into {}", image.layers.len(), cache.display());
+    }
 }

@@ -6,7 +6,9 @@
 use crate::render::Manager;
 use crate::runtime::HostSupport;
 use serde::Serialize;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
+#[cfg(target_os = "linux")]
+use std::path::Path;
 
 /// Whether an unprivileged process can create a user namespace (needed by a rootless container).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -257,6 +259,7 @@ pub fn parse_self_cgroup(s: &str) -> Option<String> {
     s.lines().find_map(|l| l.strip_prefix("0::")).map(|p| p.trim().to_string())
 }
 
+#[cfg(target_os = "linux")]
 fn read_u64(p: &str) -> Option<u64> {
     std::fs::read_to_string(p).ok()?.trim().parse().ok()
 }

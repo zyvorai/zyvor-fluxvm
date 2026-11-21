@@ -213,7 +213,40 @@ changing the runtime API (`spec.rootfs` stays a directory or, later, a mount the
 
 ## Verification status
 
-See the end of the change description in the CHANGELOG entry and the list below, which separates what ran live from what is only
-unit-tested.
+What ran for real, and what is only unit-tested. Nothing here was run on a Mac.
 
-VERIFIED_PLACEHOLDER
+**Run live, in a Debian 13 guest** (own QEMU/KVM VM on the Linux test host, kernel 6.12.117, cgroup v2, systemd, statically linked
+launcher, a static busybox as the image rootfs), both as an unprivileged user (rootless) and as root:
+
+- `run`: PID 1 inside, own hostname, uid 0, exit code propagated (7) and recorded; read-only root (`Read-only file system`), tmpfs `/tmp`;
+  `NoNewPrivs: 1`, `Seccomp: 2`, bounding set `a80425fb` (the Docker default set); `mount(2)` refused; only `lo` in the network namespace.
+- `exec` (joins namespaces and cgroup; pid 2 inside, same restrictions), `fs write`/`fs read` through the mount namespace (mode kept),
+  a write to the read-only root refused.
+- cgroup v2 limits through the direct manager: `memory.max`, `memory.swap.max`, `pids.max`, `cpu.max` written and the container in the
+  cgroup; an 80 MB allocation under `memory.max` 32 MiB was OOM-killed (`oom_kill` counted; `memory.oom.group` makes the kill take the whole
+  container, a deliberate choice).
+- A transient system unit (`systemd-run --property=Delegate=yes MemoryMax=48M TasksMax=24 ...`) running the launcher: the properties applied,
+  exec worked inside the unit's cgroup, `systemctl stop` ended it.
+- Two bugs found and fixed by this (the child shared the launcher's mount namespace; `/proc` changed under `setns`).
+
+**Run live, on the Ubuntu 26.04 test host** (kernel 7.0, systemd 259 with a user manager, AppArmor restricting user namespaces):
+
+- `systemd-run --user` with `Delegate=yes`, `MemoryMax`, `TasksMax`, `NoNewPrivileges`, `StandardOutput=append:` works; writing the cgroup v2 limit files in
+  the delegated user subtree works (`memory.max=67108864`, `pids.max=32`, `cpu.max=50000 100000`).
+- A rootless container **cannot start there**: `unshare -Ur` and the launcher fail at `setgroups`/`uid_map` (AppArmor `unprivileged_userns`
+  denies capabilities), `RootDirectory=` is refused by the user manager (`EOPNOTSUPP`), `PrivatePIDs=yes` fails (`226/NAMESPACE`). The
+  launcher reports the AppArmor cause and the fix. The shipped AppArmor profile was **not** installed or tested there (it needs root and
+  changes system policy).
+- `fluxctl sandbox run ... --print-unit` printed the unit and the `systemd-run` command for the host's user manager; `fluxctl doctor --host-only` printed the
+  Linux runtime checks (manager, cgroup delegation `writable: false`, rootless `FAIL` with the AppArmor fix, seccomp, launcher, each runtime).
+- Runtime choice through the real CLI against a local manager: `--runtime container --trust untrusted` refused with the isolation difference;
+  `auto` with the default trust and `--runtime vm` for an image refused with the reason; `--trust dev` refused with the AppArmor cause.
+- A real registry pull of `alpine:3.22`, layer unpack with diff_id verification into the shared rootfs (mountpoints added), the second call
+  reusing the cache, the writable copy, and the image process resolved (`/bin/sh`): the ignored test `live_pull_and_unpack`.
+
+**Unit-tested only** (golden strings and fakes): runtime selection and refusal rules, spec generation, unit/`systemd-run`/cgroup file
+rendering, host verdicts and doctor lines, user resolution, the request/CLI/REST fields, `--print-unit`.
+
+**Not verified at all:** the daemon end to end (create through the REST API, pull, start, exec, delete) with a real image; the systemd
+**user** manager running the launcher (blocked by AppArmor on the only host with one); restart policy, TTL (`RuntimeMaxSec`), journald;
+the direct manager as a non-root user; reflink copies; anything on macOS; EROFS, lazy pulling, snapshot-restored microVMs.
