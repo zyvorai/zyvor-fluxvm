@@ -1,0 +1,32 @@
+#!/sbin/openrc-run
+# Copyright 2026 Zyvor
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+
+# The OpenRC counterpart of packaging/systemd/fluxvm-agent.service: the per-node fleet heartbeat (`fluxvm-agent node`).
+# Installed by scripts/install.sh --service --agent as /etc/init.d/fluxvm-agent. Reads /etc/fluxvm/agent.env (CENTRAL_URL,
+# NODE_NAME, ADVERTISE_URL) and the token from /etc/fluxvm/agent.token (mode 0600); the token is passed as a file path, so it
+# is not in argv. Not tested on a live OpenRC host yet.
+
+description="Zyvor FluxVM fleet node agent"
+command="/usr/local/bin/fluxvm-agent"
+command_background=true
+pidfile="/run/${RC_SVCNAME}.pid"
+output_log="/var/log/fluxvm-agent.log"
+error_log="/var/log/fluxvm-agent.log"
+
+depend() {
+	need net
+	after fluxvm
+}
+
+start_pre() {
+	[ -r /etc/fluxvm/agent.env ] || { eerror "/etc/fluxvm/agent.env is missing (see share/agent.env.example)"; return 1; }
+	# shellcheck disable=SC1091
+	. /etc/fluxvm/agent.env
+	[ -n "${ADVERTISE_URL:-}" ] || { eerror "ADVERTISE_URL is empty in /etc/fluxvm/agent.env"; return 1; }
+	export CENTRAL_URL NODE_NAME
+	export FLUXVM_AGENT_TOKEN_FILE=/etc/fluxvm/agent.token
+	export FLUXVM_AGENT_STATE_DIR=/var/lib/fluxvm-agent
+	checkpath --directory --mode 0700 /var/lib/fluxvm-agent
+	command_args="node --advertise-url ${ADVERTISE_URL}"
+}
