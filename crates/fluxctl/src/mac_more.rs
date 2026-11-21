@@ -37,6 +37,10 @@ pub struct PsOpts {
     /// Print only the short ids.
     #[arg(short = 'q', long)]
     pub quiet: bool,
+    /// List the instances of every Mac of this inventory (`fleet.yaml`) over ssh, one table; with --json one document with the
+    /// Mac named in each row. Needs no daemon here.
+    #[arg(long, value_name = "INVENTORY", num_args = 0..=1, default_missing_value = "fleet")]
+    pub fleet: Option<std::path::PathBuf>,
 }
 
 #[derive(clap::Args, Debug, Default)]

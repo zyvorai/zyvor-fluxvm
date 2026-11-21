@@ -62,6 +62,16 @@ Host safety guards for the Mac (research backlog 2, 3, 4, 5, 8, 9, 10). Unit-tes
 - Opt-in `FLUXVM_KEEPAWAKE_WHILE_RUNNING=1`: a `caffeinate` assertion only while a `vz` VM runs.
 - `mac host status` shows `AutomaticallyInstallMacOSUpdates`; `headless-check` warns when it is on.
 
+
+Mac fleet operations: clean shutdown, shared leases, richer status, aggregated listings, rolling upgrade, org warm pool, dashboards and alerts. Unit-tested with fakes only; **none of it was run against a real Mac, a real macOS guest, GitHub or Prometheus/Grafana** (see the "What is not verified" sections of the pages linked below).
+
+- `fluxctl mac runner` stops cleanly on SIGINT/SIGTERM/SIGHUP: it deletes the guests and unregisters the runners it has in flight (a second signal exits at once), and at start it sweeps orphaned `fleet-*` guests and idle `fluxvm-*` runners left by a killed run (`--no-sweep` to skip). New module `mac_runner_life`; see [docs/mac-runner.md](docs/mac-runner.md).
+- Fleet leases are now shared between the `fluxctl` processes of one machine (module `mac_fleet_lease`): an advisory `flock` guards `mac-fleet-leases.json`, leases of dead processes are dropped, and the runner's sweep leaves guests that another process's live lease claims. Single machine only, no first-come-first-served order; `FLUXVM_MAC_FLEET_NO_SHARED_LEASES=1` disables it ([docs/mac-fleet-scheduler.md](docs/mac-fleet-scheduler.md)).
+- `fluxctl mac-fleet status --detail [--json]` adds drain state (with age), macOS guests, power, free disk, held templates and the headless checks of `mac host headless-check` per Mac (module `mac_fleet_status`); plain `status` is unchanged.
+- `fluxctl mac ps --fleet [INVENTORY]` and `mac images --fleet [INVENTORY]`: the listings of every Mac in one table, or one JSON document (`hosts` with per-Mac errors plus `instances` / `images`, each row naming its Mac). Module `mac_fleet_agg`.
+- `fluxctl mac-fleet upgrade --rolling [--drain-timeout S] [--health-timeout S]`: one Mac at a time, drain, wait for its VMs, upgrade, health gate (daemon up at the new version), resume; the first failure stops the roll and leaves that Mac drained. Module `mac_fleet_roll`.
+- `fluxctl mac runner --org` warm pool: `--runner-group-name`, `--ephemeral-pool N` (ceiling, driven by the queue), `--queue-repo OWNER/REPO` and `--queue-scan [--scan-limit N]` read the queue from repositories because GitHub has no organisation-wide call; each start decision is logged. Module `mac_runner_pool`.
+- Grafana dashboard `deploy/grafana/fluxvm-mac.json` and Prometheus rules `deploy/prometheus/fluxvm-mac-alerts.yaml` for the `fluxvm_mac_*` and `fluxvm_kube_apple_*` families ([docs/mac-integrations.md](docs/mac-integrations.md)). Validated as JSON and YAML only.
 `fluxctl mac host`: the Mac that runs FluxVM, as a server. Parsers tested on output captured from one Mac, decisions and apply paths on a fake host; the read-only commands were run on that Mac; **`keepawake install` and `tune --apply` were not run**.
 
 - New `fluxctl mac host status | headless-check | keepawake install|uninstall|status | tune | rosetta` (module `mac_host`, see [docs/macos-host.md](docs/macos-host.md)). `status` reads `pmset`, `ioreg`, `fdesetup`, `defaults`, `system_profiler` and `df` without sudo.

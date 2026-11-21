@@ -94,13 +94,19 @@ line and falls back to the `-<unix seconds>` suffix of k3s's snapshot names.
 - No MCP client, webhook receiver or Prometheus scraped these outputs; the exposition format is checked by string assertions, not `promtool check metrics`.
 - `mac watch --record-to` writing into a running daemon's `events.jsonl`, and the daemon's sinks picking those lines up, rests on reading the code (`EventLog` appends to a shared file; `event_sinks::spawn` tails it), not on a test with a daemon.
 
+## Dashboard and alert rules
+
+- [deploy/grafana/fluxvm-mac.json](../deploy/grafana/fluxvm-mac.json): import into Grafana (data source variable `DS_PROMETHEUS`, `instance` variable from `fluxvm_mac_slots_max`). Rows: macOS guest slots (used of 2 per Mac, instances by state), collection and templates (collector health, templates held, store size), Kubernetes on Apple guests (cluster healthy, node VMs up against Ready, nodes not Ready, etcd snapshots and the age of the newest).
+- [deploy/prometheus/fluxvm-mac-alerts.yaml](../deploy/prometheus/fluxvm-mac-alerts.yaml): 12 rules in two groups. `fluxvm-mac`: collector failing, metrics missing, a Mac or the whole fleet saturated, failed instances, no templates, template store large. `fluxvm-kube-apple`: cluster unhealthy, node VM down, node NotReady while its VM runs, newest etcd snapshot older than 2 days, no snapshot at all. Thresholds are starting points. Add the file under `rule_files:`.
+- The metrics are those `mac metrics --kube --textfile` writes (see `mac_metrics.rs`); the `instance` label comes from your scrape, the optional `node` label from `--node`.
+- **Not verified:** the JSON was checked with `python3 -m json.tool` and the rules parsed as YAML, with the metric and label names compared by hand against `mac_metrics.rs`. Neither was imported into Grafana or run through `promtool check rules`, and no alert was fired against a live Prometheus.
+
 ## Backlog (not done)
 
 - A daemon-side `POST /v1/events` so `mac watch` need not write to the state directory (needed for a remote daemon; today `--record-to` requires local access).
 - Emit events from the commands themselves (`mac run`, `rm`, `kube apple create|join|upgrade`) instead of polling, which misses short-lived changes between polls and cannot say who or why.
 - Readiness and upgrade events for k3s nodes (Ready flips) in `watch`: today `--kube` sees VM state and journal phase only, because Ready needs SSH.
 - `mac metrics --serve ADDR` (an HTTP endpoint) and an HA-aware aggregation into central's `/metrics`; today it is a textfile or stdout exporter.
-- Grafana dashboard and alert rules for these families (like `deploy/grafana/fluxvm-vz.json`).
 - Per-instance CPU, memory and disk series (`mac stats` data), with the cardinality bound `fleet-metrics.md` applies.
 - MCP: `mac_stop`/`start`/`rm`, `mac_stats`, `mac_logs`, `kube_apple_snapshot_save`/`delete`, `mac_compose_up|down`; deliberately left out of this first set so the write surface stays two tools. An `mac_exec` environment/workdir argument and streaming output.
 - Mac-side Orchard compatibility (a read-only adapter speaking Orchard's API) if existing Tart tooling should see FluxVM Macs; unresearched.

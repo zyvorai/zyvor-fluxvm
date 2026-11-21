@@ -170,6 +170,10 @@ pub struct ApplyArgs {
 pub struct StatusArgs {
     #[command(flatten)]
     pub which: Which,
+    /// Add, per Mac: whether it is drained (and for how long), the templates it holds, free disk and power, and the
+    /// headless checks (`mac host headless-check`). With --json the same keys are added. Read-only.
+    #[arg(long)]
+    pub detail: bool,
     #[command(flatten)]
     pub conn: Conn,
 }
@@ -200,6 +204,16 @@ pub struct UpgradeArgs {
     /// Upgrade a Mac that has running VMs (the daemon restarts).
     #[arg(long)]
     pub force: bool,
+    /// One Mac at a time: drain it, wait for its VMs to end, upgrade, wait until its daemon answers at the new version,
+    /// put it back. The first failure stops the roll and leaves that Mac drained. Needs the scheduler's state file.
+    #[arg(long, conflicts_with = "force")]
+    pub rolling: bool,
+    /// With --rolling: seconds to wait for a drained Mac's VMs to end.
+    #[arg(long, value_name = "SECS", default_value_t = 3600, requires = "rolling")]
+    pub drain_timeout: u64,
+    /// With --rolling: seconds to wait for the daemon to answer at the new version after the upgrade.
+    #[arg(long, value_name = "SECS", default_value_t = 300, requires = "rolling")]
+    pub health_timeout: u64,
     #[command(flatten)]
     pub conn: Conn,
 }
@@ -1049,6 +1063,9 @@ pub fn run(cmd: MacFleetCommand) -> Result<()> {
         }
         MacFleetCommand::Status(a) => {
             let (targets, inv) = resolve(&a.which, &a.conn)?;
+            if a.detail {
+                return crate::mac_fleet_status::status_detail_cmd(&a.conn, inv.as_ref(), &targets);
+            }
             do_status(&a.conn, inv.as_ref(), &targets)
         }
         MacFleetCommand::Exec(a) => {
@@ -1100,6 +1117,15 @@ pub fn run(cmd: MacFleetCommand) -> Result<()> {
             let mut targets = targets;
             let s = build_settings(&flags, inv.as_ref(), &mut targets, None)?;
             let tr = transport(&a.conn, inv.as_ref());
+            if a.rolling {
+                return crate::mac_fleet_roll::roll_cmd(
+                    &a.conn,
+                    tr.as_ref(),
+                    &targets,
+                    &s.install,
+                    crate::mac_fleet_roll::RollOpts { drain_timeout: a.drain_timeout, health_timeout: a.health_timeout, poll: 10 },
+                );
+            }
             let rs = par_map(&targets, jobs(&a.conn), |t| {
                 upgrade_host(tr.as_ref(), t, &s.install, a.force)
             });

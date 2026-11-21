@@ -47,9 +47,13 @@ operator, it fails immediately and says what each Mac needs. Without `--cpus` an
 own defaults apply).
 
 Leases: a placement holds its slot, CPUs and memory in this process for 120 s or until its job ends, so a second placement before the next
-probe cannot take the same slot. They are not persisted: two separate `fluxctl` processes can still race for the last slot, and the
-Mac's daemon then answers 409 (the job fails; run it again). The queue is the polling loop of the command that is waiting; it is not a
-shared queue.
+probe cannot take the same slot. Since this version they are also **shared between the `fluxctl` processes of one machine**: each placement takes
+an advisory `flock` on `mac-fleet-leases.lock` (next to the state file), reads the other processes' live leases from `mac-fleet-leases.json`, decides, writes its own and unlocks. The
+critical section is pure computation (the ssh probes happen before it), so it is short. A lease of a process that died is dropped at once (its pid is gone), or after 120 s at the latest.
+
+Limits: it is a local `flock`, so it coordinates processes on **one machine** on a file system with working locks (not NFS); two supervisors on two machines still race for the last slot,
+and the Mac's daemon then answers 409 (the job fails; run it again). Waiting placements poll the files and the Macs; there is **no first-come-first-served order** between processes, and the queue is still the
+polling loop of the command that is waiting. `FLUXVM_MAC_FLEET_NO_SHARED_LEASES=1` turns the sharing off (leases are then in-process only, as before). A lease that cannot be read or written fails the placement with the reason rather than being ignored.
 
 ## Drain and resume
 
@@ -82,6 +86,38 @@ output. `--pull-timeout` bounds each pull (default 3600 s). Apple's licence limi
 VM images and data stay) from Macs that the previous `apply` listed and this one does not. Without `--prune` it only names them. A Mac that still runs VMs is
 refused and stays on the list for the next `apply --prune`. A Mac that was never applied from this machine is not known and is never pruned. `apply --dry-run` records nothing.
 
+## `status --detail`
+
+```bash
+fluxctl mac-fleet status --detail -f fleet.yaml [--json]
+```
+
+The `status` table plus, per Mac, what the scheduler and the operator of a headless Mac need: **drain state** (and for how long), macOS guests in use (n/2), AC or battery, free disk, the **templates it holds**
+(name and digest) and the **headless checks** of `fluxctl mac host headless-check` (an unlocked console session, sleep, auto-login), each failing one with its fix. Read-only: one probe and one `mac host headless-check --json` per Mac. A Mac whose
+FluxVM is too old to have `mac host` shows `?` for headless. It also prints how many shared leases the placements on this machine hold. `--json` gives `{"hosts": [...], "leases": N}`. Plain `status` is unchanged.
+
+## `mac ps --fleet` and `mac images --fleet`
+
+```bash
+fluxctl mac ps --fleet fleet.yaml [-a] [-f status=running] [--json]
+fluxctl mac images --fleet fleet.yaml [-a] [-f reference=xcode*] [--json]
+```
+
+The same listings from every Mac of the inventory at once over ssh, one table with the Mac in the first column. `--json` prints one document: `{"schema_version": 1, "hosts": [{host, name, ok, error}], "instances"|"images": [...]}`, each row with `host` (the Mac's name) and
+`host_label` added and the daemon's raw `vm` record left out. A Mac that cannot be reached is a row in `hosts` with the reason, and the command exits non-zero. `-a` and `-f` are passed to each Mac; `--format` and `-q` are refused with `--fleet`. ssh uses the defaults (`~/.ssh/config`; no `--identity` flag here, like `mac run --fleet`). Read-only.
+
+## Rolling upgrade: `upgrade --rolling`
+
+```bash
+fluxctl mac-fleet upgrade --rolling -f fleet.yaml --release 0.5.0 [--drain-timeout 3600] [--health-timeout 300]
+```
+
+One Mac at a time: **drain** it (no new job is placed, running jobs finish), wait until it has no VM, **upgrade** it (never forced), wait for the **health gate** (its daemon answers and reports the new version, polled every 10 s), then **resume** it. The first Mac that fails any step
+**stops the roll**: it stays drained so no job lands on a half-upgraded Mac, the Macs after it are not touched, and the command exits non-zero naming it and how many were skipped. A Mac that was drained before the roll is left drained afterwards. Runners and
+`mac-fleet run` read the drain list before every placement, so they stop using a Mac as soon as its turn comes. `--rolling` cannot be combined with `--force`. `--dry-run` prints the plan only. Output: a table (or `--json`) of `upgraded`, `failed` or `skipped` per Mac.
+
+Not covered: the health gate checks the daemon and the version, not that a guest boots; there is no automatic rollback (re-run `upgrade` with the old `--release` on the failed Mac).
+
 ## Timeouts
 
 `--step-timeout SECS` (default 1800, `0` = none) bounds every ssh call of every `mac-fleet` command: each step of `up`/`apply` (install, daemon,
@@ -94,5 +130,5 @@ waiting for the remote command; for a job the guest is then deleted by a separat
 - Everything over a real `ssh`, on a real Mac; the probe lines (`sysctl hw.ncpu`, `hw.memsize`, `pmset -g batt`, `fluxctl mac images --json`) and their parsing against real output.
 - That `fluxctl mac run --rm ... -- CMD` run from an ssh session reaches the Mac's daemon (default endpoint) and boots a guest; that `mac rm` removes a half-started one.
 - A real registry pull, the digest the store records for it (taken from `mac images --json`), and what `mac pull` does with a moved tag.
-- Races between two `fluxctl` processes (see Leases), and a leftover guest after the local process is killed.
+- Races between two `fluxctl` processes: the file lock is unit-tested (threads, a second pid, dead pids, expiry), not with two real `fluxctl` processes placing on real Macs at once.
 - `mac run --fleet` takes the system ssh defaults (no `--identity`/`--known-hosts` flags there; use `~/.ssh/config`), and refuses `-p`, `-e`, `-v`, `-w`, `--label`, `--name`, `--restart` and `-d`.
