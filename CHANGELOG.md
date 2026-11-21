@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+Apple-silicon native k3s: `fluxctl kube apple`, a persistent ARM64 Linux VM per node. Unit-tested against a fake host only; **not run against real hardware** (no guest was booted, no real ssh, tunnel, etcd snapshot or multi-Mac join was exercised).
+
+- New `fluxctl kube apple create|join|kubeconfig|tunnel|status|list|stop|start|persist|upgrade|backup|restore|recover|delete|logs` (module `kube_apple`, see [docs/apple-k3s.md](docs/apple-k3s.md)).
+  `create` installs a k3s binary whose SHA-256 is checked on the Mac and again in the guest (or uses a preinstalled service), pins an SSH host key generated on the Mac before the guest boots, and
+  journals the cluster before any VM exists so a failed run resumes with the same command. `join` adds a VM per node on the cluster's private network; the token goes to the node on stdin and is never
+  printed, put in an argument, the journal or an error message; a node that fails to join is removed again. `join --url --token-file` joins a cluster owned by another Mac.
+- `upgrade` swaps the binary server-first with a pre-upgrade backup, refuses downgrades and skipped minor releases, waits for each node to be Ready at the new version and rolls a failed node back.
+  `backup`/`restore` save the SQLite or embedded-etcd datastore as a private, checksummed archive and verify it before stopping anything. `persist mark|verify|cycle` proves data survives a stop/start.
+  `snapshot save|ls|delete|prune|pull|restore` wrap `k3s etcd-snapshot` for `--embedded-etcd` clusters (names validated, pulled files private and checksummed). Agents join with a separate agent token sent on stdin (`--agent-token-file`), so no token is in cloud-init or on a command line.
+  `recover` repairs the journal from VM ownership labels (adopts, relabels, reports orphans, never touches another owner's VMs). `status` exits non-zero when unhealthy and flags version skew.
+
 macOS image store, the first part of a Docker-style workflow for macOS guests. Unit-tested only; not run against a real registry or VM.
 
 - New `fluxctl mac images|pull|push|tag|rmi|import`: a local store of macOS templates (`~/.fluxvm/mac-images` or `$FLUXVM_MAC_STORE`, with an
