@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+macOS image store, the first part of a Docker-style workflow for macOS guests. Unit-tested only; not run against a real registry or VM.
+
+- New `fluxctl mac images|pull|push|tag|rmi|import`: a local store of macOS templates (`~/.fluxvm/mac-images` or `$FLUXVM_MAC_STORE`, with an
+  `index.json`) that pulls and pushes them as OCI artifacts. Several tags can share one directory, and the files are deleted with the last
+  tag. `push` needs a registry reference; credentials come from `FLUXVM_REGISTRY_USER` / `FLUXVM_REGISTRY_PASSWORD`. `import` uses APFS clones.
+  `mac run [--rm]`, `ps`, `rm` and `exec` start and manage macOS VMs cloned from an image (needs the daemon; a 409 reports the 2-guest limit, a 503 the locked session). `mac build --dry-run` checks a Macfile and prints its plan; running a build is not implemented. See [docs/macos-containers.md](docs/macos-containers.md).
+
 LaunchAgent hardening for Kubernetes and Docker on a Mac. Unit-tested only; not yet run against a live cluster.
 
 - `fluxctl kube agent install` and `docker agent install` write the Homebrew `opt/` path of `fluxctl` (via `stable_exe`), so a

@@ -149,6 +149,10 @@ Exhaustive checklist. For the pitch, see [README.md](README.md); for who this is
 - `fluxctl doctor` reports stale binary paths and unloaded agents across all `dev.zyvor.fluxvm*` LaunchAgents, including the vmnetd/usbd helpers
 - VZ restores saved state only in an unlocked login session, so these are LaunchAgents, not LaunchDaemons ([deploy/launchd-notes.md](deploy/launchd-notes.md)); unit-tested, not yet verified on a live cluster
 
+### macOS image store (`fluxctl mac`)
+- `fluxctl mac images|pull|push|tag|rmi|import` keeps macOS guest templates in a local store (`~/.fluxvm/mac-images`, or `$FLUXVM_MAC_STORE`) and moves them to and from an OCI registry; names can share files, which are freed with the last name
+- `mac run`, `ps`, `rm`, `exec` manage macOS VMs cloned from an image; `mac build --dry-run` prints a Macfile's plan (running a build is not implemented); at most 2 macOS VMs, no fork, restore needs an unlocked session, and Apple's licence limits where images may be stored ([docs/macos-containers.md](docs/macos-containers.md)); unit-tested, not run against a real registry or VM
+
 ### `fluxvm-agent` (multi-host fleet, no Kubernetes)
 
 - Central fleet registry + per-host heartbeat client
