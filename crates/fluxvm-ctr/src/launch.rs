@@ -309,7 +309,9 @@ pub fn run(spec: &ContainerSpec) -> Result<i32> {
     let _ = fs::remove_file(spec.state_dir.join("exit"));
     setup_cgroup(spec)?;
 
-    let mut flags = libc::CLONE_NEWNS | libc::CLONE_NEWPID | libc::CLONE_NEWIPC | libc::CLONE_NEWUTS;
+    // The mount namespace is NOT created here: the child makes its own (see `child`), so its pivot_root does not take
+    // the launcher's view of the host filesystem (state_dir, cgroups) away.
+    let mut flags = libc::CLONE_NEWPID | libc::CLONE_NEWIPC | libc::CLONE_NEWUTS;
     if spec.net == Net::None {
         flags |= libc::CLONE_NEWNET;
     }
@@ -321,12 +323,16 @@ pub fn run(spec: &ContainerSpec) -> Result<i32> {
         if rootless && matches!(e.raw_os_error(), Some(libc::EPERM) | Some(libc::EACCES)) {
             bail!(
                 "unshare({}) was refused ({e}). A rootless container needs an unprivileged user namespace; on Ubuntu 23.10+ AppArmor restricts that (kernel.apparmor_restrict_unprivileged_userns=1): install deploy/apparmor/fluxvm-container-run, or run the daemon as root. `fluxctl doctor` shows which",
-                if rootless { "NEWUSER|NEWNS|NEWPID|NEWIPC|NEWUTS" } else { "" }
+                if rootless { "NEWUSER|NEWPID|NEWIPC|NEWUTS" } else { "" }
             );
         }
         bail!("unshare: {e}");
     }
-    write_uid_map(rootless, uid, gid)?;
+    write_uid_map(rootless, uid, gid).map_err(|e| {
+        anyhow::anyhow!(
+            "{e:#}. A rootless container needs an unprivileged user namespace that keeps its capabilities; on Ubuntu 23.10+ AppArmor restricts that (kernel.apparmor_restrict_unprivileged_userns=1): install deploy/apparmor/fluxvm-container-run, or run the daemon as root. `fluxctl doctor` shows which"
+        )
+    })?;
     install_forwarding();
     // SAFETY: the launcher has one thread; the child only calls async-signal-safe-ish setup and then exec.
     let pid = unsafe { libc::fork() };
@@ -346,13 +352,20 @@ pub fn run(spec: &ContainerSpec) -> Result<i32> {
         unsafe { libc::_exit(code) };
     }
     CHILD.store(pid, Ordering::SeqCst);
-    let _ = fs::write(spec.state_dir.join("pid"), pid.to_string());
+    if let Err(e) = fs::write(spec.state_dir.join("pid"), pid.to_string()) {
+        eprintln!("fluxvm-container-run: recording the pid in {}: {e}", spec.state_dir.display());
+    }
     let code = wait_for(pid, std::time::Duration::from_secs(10));
-    let _ = fs::write(spec.state_dir.join("exit"), code.to_string());
+    if let Err(e) = fs::write(spec.state_dir.join("exit"), code.to_string()) {
+        eprintln!("fluxvm-container-run: recording the exit code in {}: {e}", spec.state_dir.display());
+    }
     Ok(code)
 }
 
 fn child(spec: &ContainerSpec, rootless: bool) -> Result<std::convert::Infallible> {
+    if unsafe { libc::unshare(libc::CLONE_NEWNS) } != 0 {
+        bail!("unshare(NEWNS): {}", errno());
+    }
     let host = CString::new(spec.name.as_str())?;
     if unsafe { libc::sethostname(host.as_ptr(), spec.name.len()) } != 0 {
         bail!("sethostname: {}", errno());
@@ -372,6 +385,10 @@ fn child(spec: &ContainerSpec, rootless: bool) -> Result<std::convert::Infallibl
 fn join_cgroup_of(pid: i32) -> Result<()> {
     let raw = fs::read_to_string(format!("/proc/{pid}/cgroup")).with_context(|| format!("reading /proc/{pid}/cgroup (is the container running?)"))?;
     let rel = crate::probe::parse_self_cgroup(&raw).context("the container is not in a cgroup v2 hierarchy")?;
+    let mine = fs::read_to_string("/proc/self/cgroup").ok().and_then(|s| crate::probe::parse_self_cgroup(&s));
+    if mine.as_deref() == Some(rel.as_str()) {
+        return Ok(());
+    }
     let dir = format!("/sys/fs/cgroup{}", rel.trim_end_matches('/'));
     fs::write(format!("{dir}/cgroup.procs"), std::process::id().to_string()).with_context(|| {
         format!("joining the container's cgroup {dir}: run the daemon where it can write to it (a unit with Delegate=yes, or as root)")
@@ -396,6 +413,8 @@ fn join_namespaces(pid: i32) -> Result<()> {
             _ => false,
         }
     };
+    // Open every namespace first: once the mount namespace is joined, /proc is the container's, not the host's.
+    let mut fds: Vec<(&str, i32, i32)> = Vec::new();
     for (name, flag) in [
         ("user", libc::CLONE_NEWUSER),
         ("mnt", libc::CLONE_NEWNS),
@@ -404,10 +423,11 @@ fn join_namespaces(pid: i32) -> Result<()> {
         ("uts", libc::CLONE_NEWUTS),
         ("net", libc::CLONE_NEWNET),
     ] {
-        if same(name) {
-            continue;
+        if !same(name) {
+            fds.push((name, open(name)?, flag));
         }
-        let fd = open(name)?;
+    }
+    for (name, fd, flag) in fds {
         if unsafe { libc::setns(fd, flag) } != 0 {
             bail!("setns({name}): {}", errno());
         }
