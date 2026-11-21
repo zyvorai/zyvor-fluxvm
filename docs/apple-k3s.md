@@ -18,6 +18,9 @@ lifecycle from the Mac. It sits next to [`fluxctl kube up`](kubernetes-on-mac.md
 Use `kube up` for a quick developer cluster with time travel; use `kube apple` when the cluster should be long-lived, pinned to a k3s
 build you vetted, and spread over several VMs or Macs.
 
+For registries and mirrors, CIS hardening, add-on profiles, Cilium, GitOps (Flux, Argo CD), MetalLB, cert-manager, metrics-server, network policies,
+`upgrade --channel` and multi-server snapshot restore, see [apple-k3s-platform.md](apple-k3s-platform.md).
+
 > **Verification status.** The lifecycle logic is unit-tested against a fake host (order of operations, cleanup, redaction), and the
 > failover forwarder is tested over real loopback sockets. The shell scripts that run inside the guests, the Apple Virtualization
 > networking, `etcd-snapshot`/`cluster-reset`, the real `ssh` tunnels, multi-server etcd, kube-vip, token rotation, scheduled snapshots and S3,
@@ -354,6 +357,7 @@ Each finding is `ok`, `warn` or `FAIL` with the command that fixes it; the exit 
 (degraded vs lost), an even server count, whether every VM runs, that every server's unit has the journal's shared flags, the forwarder or the kube-vip
 manifest on every server, the tunnel LaunchAgent, the kubeconfig file, the snapshot schedule, offsite copy and age (etcd clusters), and the age of the
 token rotations. It reads the cluster and the guests; it changes nothing. This is separate from `fluxctl kube doctor`, which checks the `kube up` clusters.
+`--cis` adds the read-only CIS profile audit of every server (see [apple-k3s-platform.md](apple-k3s-platform.md#kube-apple-doctor-name---cis-kube-doctor---cis)); `fluxctl kube doctor --cis` does the same for a `kube up` server.
 
 ## Acceptance on hardware: `scripts/test-kube-apple.sh`
 
