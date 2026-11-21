@@ -67,6 +67,12 @@ pub enum ImageCommand {
     },
     /// How an image was built (same as `mac history`).
     History { reference: String },
+    /// Every file of the image bundle with size and sha256, as JSON (same as `mac sbom`).
+    Sbom {
+        reference: String,
+        #[arg(long = "to", value_name = "FILE")]
+        output: Option<PathBuf>,
+    },
     /// Write an image to a tar file (same as `mac save`).
     Save {
         reference: String,
@@ -567,6 +573,17 @@ pub fn run_client(cmd: MacMore) -> Result<()> {
                 },
         } => {
             prune_store(&open_store()?, &[], dry_run, force)?;
+        }
+        MacMore::Image {
+            command: ImageCommand::Sbom { reference, output },
+        } => {
+            let text =
+                serde_json::to_string_pretty(&crate::mac_plus::sbom(&open_store()?, &reference)?)?;
+            match output {
+                Some(p) => std::fs::write(&p, text)
+                    .with_context(|| format!("writing {}", p.display()))?,
+                None => println!("{text}"),
+            }
         }
         MacMore::Compose { command } => crate::mac_compose::run_client(command)?,
         _ => bail!("this command needs the daemon: pass --server (or select a context)"),

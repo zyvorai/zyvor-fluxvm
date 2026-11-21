@@ -89,7 +89,7 @@ Builds an image from a Macfile (default `CONTEXT/Macfile`; `CONTEXT` defaults to
 5. Deletes the instance.
 
 On any failure the instance is deleted and the error names the failing step, numbered as in `--dry-run` (`build failed at step 3 (...)`).
-There is no layer cache: every build starts from `FROM`. The build instance runs on the daemon's Mac, so the daemon must be on this machine
+By default the build uses a step cache (see [Build cache](#build-cache)); `--no-cache` runs the plain straight-through build above. The build instance runs on the daemon's Mac, so the daemon must be on this machine
 (the template and the result are local paths).
 
 ## Run options
@@ -334,6 +334,70 @@ scripts/test-mac-vz.sh --self-test     # no Mac needed: the same script against 
 missing template or a failing `doctor` stops it); it says nothing about `fluxctl mac`. The first live run will show how a real
 registry treats `http://localhost`, how long a clone takes to answer SSH, and whether the checks' expected strings match real output.
 
+## Signing, licence guard, cache, search and contents
+
+Added on top of the commands above. Unit-tested with fakes and the mock registries of `fluxvm-image`; **nothing here was run against a
+real registry, a real Mac or a real macOS template**.
+
+### Signing and verification
+
+`fluxctl mac keys generate` creates an Ed25519 keypair (the same scheme as the image catalog, `fluxvm_core::signing`) in
+`$FLUXVM_MAC_TRUST` or `~/.fluxvm/mac-trust/` (next to the store, never inside it); the private key file is mode 0600 and is never
+overwritten. `mac keys trust NAME FILE` adds someone's public key, `mac keys ls` lists them (your own key shows as `self`), `mac keys untrust NAME` removes one.
+
+- `mac push --sign REF [REMOTE]` signs `fluxvm-mac-image-v1\n<manifest digest>` and attaches the signature as an OCI referrer (artifact type
+  `application/vnd.zyvor.fluxvm.signature.v1+json`; the signature and signer key are in the referrer's annotations). `mac sign REGISTRY_REF` signs an image already pushed.
+- `mac pull --verify REF` (or `FLUXVM_MAC_REQUIRE_SIGNED=1`) fetches the signatures, requires one from a trusted key, and then pulls **that
+  digest** (`repo@sha256:...`), so a tag that moves after the check cannot swap the image. Unsigned, signed by an untrusted key, and signed
+  for a different digest are three distinct errors. The verified signatures are kept beside the trust store.
+- `mac verify REF` checks a registry reference (asks the registry), or a local image against the signatures kept at pull or push time. It exits 1 on failure; `--json` for scripts.
+
+This is **not cosign**: no keyless flow, no transparency log, no certificate chain. A key inside a signature proves nothing unless you
+trusted it. A signature covers the manifest digest, hence the config and every chunk; it does not say the image is safe. The referrers
+API or the `sha256-<hex>` tag fallback must be available on the registry. Local-only images (built or imported, never pushed) have no manifest digest and cannot be signed.
+
+### Licence guard
+
+`mac push` refuses well-known public registries (Docker Hub, GHCR, Quay, public ECR, GitLab, MCR, Codeberg, registry.k8s.io) before any
+upload. Apple's macOS licence terms may restrict copying and redistributing macOS; the message says plainly that FluxVM cannot tell what
+your licence allows, that it is not legal advice and that the clauses were not verified. Pass `--i-have-checked-the-licence` (or
+`FLUXVM_MAC_ALLOW_PUBLIC_REGISTRY=1`) to proceed; a warning is printed and the image gets the annotation
+`dev.zyvor.fluxvm.licence-ack=public-registry-override`. The list is a safety default, not a statement that other registries are fine:
+a private registry on a public host name is your responsibility.
+
+### Build cache
+
+`mac build` keeps an intermediate template after every `RUN`/`COPY` as `fluxvm-cache/<key>:c` in the store (hidden from `mac images`
+unless `--all`). The key chains: `sha256(previous key, step text, hash of the COPY source tree)`, starting from the `FROM` template's
+digest (or its store directory for a local import). A later build restarts from the longest cached prefix; a fully cached build starts no
+VM at all and just clones the entry into `-t NAME`. Macfile line numbers and `--dry-run` do not affect keys; `ENV`, `ARG`, `WORKDIR` are folded into the `RUN` text and so are part of it.
+
+- `--no-cache` runs the old straight-through build and neither reads nor writes the cache.
+- `mac cache ls [--json]`; `mac cache prune [--older-than 7d] [--all] [--dry-run]`.
+- Size budget: `FLUXVM_MAC_CACHE_MAX` (`50g`, `512m`; default 100g). After each build the oldest entries beyond it are removed, except those that build used. Sizes are allocated blocks; APFS clones share blocks, so the total can overstate what deleting frees.
+- Costs: every checkpoint stops the guest and boots a new one from the stored disk (a macOS boot takes minutes), so a long Macfile pays that once per step. Non-deterministic steps (a `curl`, a package index) are cached like any other: use `--no-cache` to refresh. `mac system prune --all` and `image prune --all` treat cache entries as unused images.
+
+### Chunk reuse on pull and push
+
+The `vm-image` format is unchanged (64 MiB zstd chunks, each annotated with file, offset and raw sha256). **Push** already skips chunks the registry has (`HEAD` per layer) and all-zero chunks. **Pull** now takes up to two other local tags of the
+same repository as seeds: a chunk whose raw sha256 already matches the bytes at the same file and offset in a seed is copied locally and never downloaded; everything is still checked against the manifest. This helps point releases that change some blocks in place; a disk that grew or shifted data gets no reuse. `mac pull --no-reuse` disables it. There is no cross-repository mount on push and no peer or LAN chunk source.
+
+### Labels and `mac images --filter`
+
+`LABEL` in a Macfile already records labels in the image config. `mac label IMAGE k=v ... [-k KEY]` edits them (names sharing the image's files share labels); `mac push --label k=v` adds more. Labels travel as push annotations (`dev.zyvor.fluxvm.label.<key>`) and in the pushed `config.json`.
+`mac images --filter label=KEY[=VALUE] --filter reference=GLOB --filter source=TEXT` (all must match; `*` wildcard); `--json` includes the labels.
+
+### `mac search REGISTRY [TERM]`
+
+Lists repositories from `GET /v2/_catalog` (follows pagination), filtered by substring; `--tags` adds each repository's tags, `--limit N`. Many
+registries, including Docker Hub and GHCR, do not serve the catalog; the error says so. It lists names, not whether an image is a macOS image.
+
+### `mac sbom REF` (also `mac image sbom REF`)
+
+A JSON contents manifest of the template bundle: every file (`disk.raw`, `hardware.bin`, `auxiliary.bin`, `config.json`) with size and sha256, plus the registry digest, labels and
+build history. `--to FILE` writes it; `--attach REGISTRY_REF` publishes it as a referrer (`application/vnd.zyvor.fluxvm.contents.v1+json`). It does
+**not** list the files inside the guest's disk, so it is not an SPDX/CycloneDX software inventory. Hashing reads the sparse `disk.raw` at its full size: minutes for a 64 GiB disk.
+
 ## Hard limits
 
 These come from the design and from macOS itself; they apply to the whole workflow.
@@ -347,7 +411,7 @@ These come from the design and from macOS itself; they apply to the whole workfl
 - FileVault must be off in a template, or key login fails on clones.
 - Not supported for macOS guests: extra disks, Rosetta, nested virtualization, private networks, console ports, tagged shares.
 - **Apple's licence terms limit where macOS images may be stored.** Pushing a template to a public registry is likely not allowed; use
-  a private registry. This is a caution, not a legal reading; check the terms that apply to you.
+  a private registry. This is a caution, not a legal reading; check the terms that apply to you. `mac push` refuses well-known public registries unless overridden (see the licence guard).
 
 ## See also
 
@@ -360,5 +424,5 @@ Written from the source. The commands are covered by unit tests on a temporary s
 against a real registry or daemon, and no imported, pulled, built or committed template was booted. Specifically unverified: the
 virtiofs share names inside a macOS guest, the generated `export ...; cd ... &&` shell text on a real guest, `scp` and `curl` in a
 guest, the `/logs`, `/stats`, `/pause`, `/resume`, `/restart` routes' exact output for macOS VMs, `tar` on a multi-GiB sparse disk,
-and everything in `compose`. `build --dry-run`, `compose up --dry-run` and the image tools on a store are the parts you can try
+and everything in `compose`. Also unverified: signing and verification against a real registry's referrers API, `--sign` attach, `mac search` against a real catalog, the build cache on a real guest (stop, clone, reboot per step), chunk reuse on a real 20+ GB template, and `mac sbom --attach`. `build --dry-run`, `compose up --dry-run` and the image tools on a store are the parts you can try
 without a VM.

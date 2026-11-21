@@ -642,6 +642,57 @@ pub async fn list_tags(
     bail!("tag list for {r} has more than {MAX_TAG_PAGES} pages")
 }
 
+/// Repositories the registry lists at `GET /v2/_catalog`, following `Link: rel="next"` pages. `registry` is a host such as
+/// `localhost:5000` (not a full reference). Many public registries (Docker Hub, GHCR) do not serve the catalog: the error then
+/// says so, since a 401/403/404 there is the registry declining, not a bad name.
+pub async fn catalog(
+    registry: &str,
+    creds: Option<Credentials>,
+    page_size: Option<usize>,
+) -> Result<Vec<String>> {
+    // Borrow the reference parser for the scheme rule (plain HTTP only for local registries).
+    let r = ImageRef::parse(&format!("{registry}/x"))?;
+    let root = r.base_url();
+    let root = root.strip_suffix("/x").unwrap_or(&root).to_string();
+    let mut reg = Registry::new(creds)?;
+    let mut url = format!("{root}/_catalog");
+    if let Some(n) = page_size {
+        url.push_str(&format!("?n={n}"));
+    }
+    let mut repos = Vec::new();
+    for _ in 0..MAX_TAG_PAGES {
+        let resp = reg
+            .send(Method::GET, &url, Some("application/json"), None)
+            .await?;
+        if matches!(
+            resp.status(),
+            StatusCode::NOT_FOUND | StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN
+        ) {
+            bail!(
+                "{registry} does not serve the repository catalog ({}): many registries disable `GET /v2/_catalog`; use a registry that lists repositories, or name the repository and use tags",
+                resp.status()
+            );
+        }
+        if !resp.status().is_success() {
+            return Err(http_error("GET", &url, resp).await);
+        }
+        let next = resp
+            .headers()
+            .get_all("link")
+            .iter()
+            .filter_map(|v| v.to_str().ok())
+            .find_map(parse_link_next);
+        let body = read_capped(resp, MAX_JSON).await?;
+        let v: Value = serde_json::from_slice(&body).context("parsing the catalog")?;
+        repos.extend(str_list(v.get("repositories")));
+        match next {
+            Some(n) => url = resolve_url(&r, &n),
+            None => return Ok(repos),
+        }
+    }
+    bail!("the catalog of {registry} has more than {MAX_TAG_PAGES} pages")
+}
+
 /// The target of `<url>; rel="next"` in a Link header value.
 fn parse_link_next(h: &str) -> Option<String> {
     h.split(',').find_map(|part| {
@@ -1118,6 +1169,14 @@ mod tests {
                 vec![],
             );
         }
+        if path == "/v2/_catalog" {
+            let repos: Vec<_> = st.tags.iter().map(|t| format!("team/{t}")).collect();
+            return resp(
+                200,
+                &[],
+                serde_json::to_vec(&json!({"repositories": repos})).unwrap(),
+            );
+        }
         let Some(rest) = path.strip_prefix("/v2/app/") else {
             return resp(404, &[], vec![]);
         };
@@ -1305,6 +1364,19 @@ mod tests {
             .count();
         // 3 pages, plus the unauthenticated first attempt.
         assert_eq!(pages, 4);
+    }
+
+    #[tokio::test]
+    async fn catalog_lists_repositories_and_explains_a_registry_without_one() {
+        let (addr, _st) = serve(St {
+            tags: vec!["mac-a".into(), "mac-b".into()],
+            ..Default::default()
+        })
+        .await;
+        assert_eq!(
+            catalog(&addr, None, None).await.unwrap(),
+            vec!["team/mac-a".to_string(), "team/mac-b".to_string()]
+        );
     }
 
     #[test]
