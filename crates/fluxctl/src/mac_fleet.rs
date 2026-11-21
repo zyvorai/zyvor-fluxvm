@@ -546,7 +546,7 @@ pub(crate) fn blank(target: &Target) -> HostResult {
     }
 }
 
-fn run_steps(
+pub(crate) fn run_steps(
     t: &dyn Transport,
     target: &Target,
     steps: &[Step],

@@ -28,5 +28,5 @@ start_pre() {
 	export FLUXVM_AGENT_TOKEN_FILE=/etc/fluxvm/agent.token
 	export FLUXVM_AGENT_STATE_DIR=/var/lib/fluxvm-agent
 	checkpath --directory --mode 0700 /var/lib/fluxvm-agent
-	command_args="node --advertise-url ${ADVERTISE_URL}"
+	command_args="node --advertise-url ${ADVERTISE_URL} ${LABEL_ARGS:-}"
 }

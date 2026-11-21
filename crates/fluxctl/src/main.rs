@@ -29,6 +29,8 @@ use uuid::Uuid;
 mod agent_session;
 mod backup_verify_cmd;
 mod cloud;
+mod cluster;
+mod cluster_remote;
 mod compose;
 mod config_check;
 mod contexts;
@@ -1020,6 +1022,13 @@ enum Command {
     MacFleet {
         #[command(subcommand)]
         command: mac_fleet::MacFleetCommand,
+    },
+    /// A cluster of FluxVM machines, the k3s way: `cluster init` on the server (prints one join command), `cluster join URL`
+    /// on every other machine, `cluster add user@host` to bring Linux hosts in over SSH, `cluster nodes | token | remove`, and
+    /// optional add-ons (`cluster addon k3s`). Built on the fleet central, not on Kubernetes. See docs/cluster-quickstart.md.
+    Cluster {
+        #[command(subcommand)]
+        command: cluster::ClusterCommand,
     },
     /// Display status. With no id: Cilium-style host panel. With an id:
     /// that VM's record (machinectl `status`/`show`).
@@ -6194,6 +6203,12 @@ async fn main() -> Result<()> {
         };
         return tokio::task::block_in_place(|| mac_fleet::run(command));
     }
+    if let Command::Cluster { .. } = &cli.command {
+        let Command::Cluster { command } = cli.command else {
+            unreachable!()
+        };
+        return cluster::run(command).await;
+    }
     if let Command::NodeAgent { command } = &cli.command {
         let out = match command {
             node_agent::NodeAgentCommand::Install(a) => {
@@ -6529,6 +6544,7 @@ async fn main() -> Result<()> {
         | Command::Service { .. }
         | Command::NodeAgent { .. }
         | Command::MacFleet { .. }
+        | Command::Cluster { .. }
         | Command::Dashboard { .. }
         | Command::Mcp { .. }
         | Command::Events { .. }

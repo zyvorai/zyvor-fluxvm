@@ -175,6 +175,10 @@ Exhaustive checklist. For the pitch, see [README.md](README.md); for who this is
 
 - Image trust and housekeeping: `mac keys|push --sign|sign|pull --verify|verify` (Ed25519 over the manifest digest, OCI referrer, local trust store; not cosign), a licence guard that refuses public registries unless overridden, a `mac build` step cache (`--no-cache`, `mac cache ls|prune`, size budget), chunk reuse on `mac pull` from other local tags (format unchanged), labels and `mac images --filter`, `mac search` over `/v2/_catalog`, `mac sbom` (bundle file list with sha256); unit-tested with fakes, not run against a real registry or macOS template ([docs/macos-containers.md](docs/macos-containers.md))
 
+### Cluster front door (`install.sh --server|--join`, `fluxctl cluster`)
+- k3s-style provisioning for FluxVM's own fleet, no Kubernetes: `install.sh --server` (central as a service, prerequisites installed additively after printing the list, per-user config, verified Debian 13 base image, boot-a-VM self-test, one join command and the Studio URL), `install.sh --join URL` (token from file, env or stdin, never argv; enrolls, starts the node agent, waits for Ready; idempotent; `--uninstall`; Linux systemd/OpenRC and macOS)
+- `fluxctl cluster init|join|nodes|token|remove|add|addon k3s|selftest` on the existing enrollment API; `cluster add user@host` over SSH (pinned host keys, golden remote scripts, fake transport); k3s only as an optional add-on ([docs/cluster-quickstart.md](docs/cluster-quickstart.md)); unit- and shell-tested with fakes, not run on real machines
+
 ### Mac fleet over SSH (`fluxctl mac-fleet`)
 - `up|add user@host...` and `apply inventory.yaml` install a pinned, checksum-verified FluxVM on each Mac, start the daemon and node agent LaunchAgents, enroll with a join token (via ssh stdin, never argv) and optionally prepare a k3s guest (`--k3s`); idempotent, parallel, per-Mac results with partial failure
 - `status` (one table: version, daemon, VMs, macOS slots n/2, k3s, node), `exec HOST|--all -- cmd`, `upgrade` (refuses running VMs without `--force`), `remove --yes`, `doctor` (exact fix per finding), `--dry-run` everywhere
