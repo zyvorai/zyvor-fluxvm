@@ -74,6 +74,9 @@ enum Command {
         /// they find it. Nothing is granted until an operator approves a request (docs/cluster-pairing.md).
         #[arg(long, env = "FLUXVM_PAIRING")]
         pairing: bool,
+        /// With --pairing, accept requests but do not announce on the LAN (machines then use `--server`).
+        #[arg(long, env = "FLUXVM_PAIRING_NO_ANNOUNCE")]
+        pairing_no_announce: bool,
         /// The fleet's name as shown to a machine that finds it (default: this host's name).
         #[arg(long, env = "FLUXVM_PAIRING_NAME")]
         pairing_name: Option<String>,
@@ -319,6 +322,7 @@ async fn main() -> Result<()> {
             sso,
             pairing,
             pairing_name,
+            pairing_no_announce,
             stripe_secret_key_file,
             stripe_webhook_secret_file,
             stripe_api_base,
@@ -480,7 +484,7 @@ async fn main() -> Result<()> {
                 .parse()
                 .with_context(|| format!("parsing listen address {listen}"))?;
             // Kept alive until central exits; dropping it stops the announcement.
-            let _announcer = if pairing {
+            let _announcer = if pairing && !pairing_no_announce {
                 announce_pairing(addr, pairing_name, tls_cert.is_some())
             } else {
                 None

@@ -5,6 +5,9 @@
 > on a real LAN (a router or switch that filters multicast, a Wi-Fi network with client isolation, another responder holding port 5353, IPv6-only
 > networks), a Mac or Linux machine pairing across two real machines, and the Studio page in a browser. This is authentication code and has had no
 > external security review. The `--server` path does not depend on mDNS.
+>
+> **Run for real (Linux, loopback only, `--pairing-no-announce`):** a real `fluxvm-agent central --pairing` and a real `fluxctl cluster pair --server`, approved with
+> `fluxctl cluster pending` and `approve CODE`; the node credential was stored 0600, registered as the node with HTTP 200, and `cluster report` listed it with no secret in the output.
 
 ## What a person does
 
@@ -38,6 +41,8 @@ fluxctl cluster approve 7KQ4M-T9XH2      # the same code the machine shows
 or open Studio, **Home, Machines asking to join**, compare the code and press **Approve** (or **Deny**). The machine receives its credential
 within a few seconds and stores it. Nobody typed a URL or a token. Then start the node agent with the line `cluster pair` prints (on a Mac,
 `fluxctl cluster pair --install` does it).
+
+`--pairing-no-announce` accepts requests without announcing on the LAN (machines then need `--server`).
 
 If no fleet is found, the command says why and what to do: `fluxctl cluster pair --server ADDRESS` (a host, host:port or URL) skips discovery.
 `--fleet NAME` picks one when several answer. `--yes` skips the question before the fleet is contacted.
