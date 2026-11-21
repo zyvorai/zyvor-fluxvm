@@ -37,7 +37,7 @@ if [[ "${FLUXVM_NOTARIZE:-0}" == 1 ]] && fs_is_adhoc; then
   echo "FLUXVM_NOTARIZE=1 needs FLUXVM_SIGN_IDENTITY (a Developer ID Application identity)" >&2; exit 2
 fi
 
-if [[ "$PROFILE" == release ]]; then cargo build --release -p fluxctl -p fluxvm-vz-switch -p fluxvm-blockd -p fluxvm-usernet; else cargo build -p fluxctl -p fluxvm-vz-switch -p fluxvm-blockd -p fluxvm-usernet; fi
+if [[ "$PROFILE" == release ]]; then cargo build --release -p fluxctl -p fluxvm-vz-switch -p fluxvm-blockd -p fluxvm-usernet -p fluxvm-agent; else cargo build -p fluxctl -p fluxvm-vz-switch -p fluxvm-blockd -p fluxvm-usernet -p fluxvm-agent; fi
 
 # build.rs of fluxvm-apple compiles and signs the runner into its OUT_DIR; take the newest one.
 RUNNER="$(find "target/$PROFILE/build" -path '*fluxvm-apple-*/out/fluxvm-vz-runner' -type f -print0 | xargs -0 ls -t | head -n1)"
@@ -56,6 +56,8 @@ cp "target/$PROFILE/fluxvm-vz-switch" "$STAGE/bin/fluxvm-vz-switch"
 cp "target/$PROFILE/fluxvm-blockd" "$STAGE/bin/fluxvm-blockd"
 # The userspace gateway behind `apple.usernet`: the daemon supervises one per VM and looks for it next to fluxctl.
 cp "target/$PROFILE/fluxvm-usernet" "$STAGE/bin/fluxvm-usernet"
+# The fleet node agent (`fluxctl node-agent install` runs it as a LaunchAgent); `fluxctl` looks for it next to itself.
+cp "target/$PROFILE/fluxvm-agent" "$STAGE/bin/fluxvm-agent"
 # Not stripped: stripping would invalidate the runner's signature, and the entitlement is what lets it start VMs.
 cp "$RUNNER" "$STAGE/bin/fluxvm-vz-runner"
 cp LICENSE NOTICE "$STAGE/" 2>/dev/null || cp LICENSE "$STAGE/"
@@ -120,7 +122,7 @@ fi
 # Re-sign the plain binaries with the chosen identity (the runner keeps its virtualization entitlement).
 # fluxctl links Homebrew libhivex: under Hardened Runtime that needs disable-library-validation.
 fs_sign_binary "$STAGE/bin/fluxctl" "packaging/macos/fluxctl.entitlements.plist"
-for b in fluxvm-vz-switch fluxvm-blockd fluxvm-usernet; do fs_sign_binary "$STAGE/bin/$b"; done
+for b in fluxvm-vz-switch fluxvm-blockd fluxvm-usernet fluxvm-agent; do fs_sign_binary "$STAGE/bin/$b"; done
 fs_sign_binary "$STAGE/bin/fluxvm-vz-runner" "$APPLE/runner/Entitlements.plist"
 fs_has_entitlement "$STAGE/bin/fluxvm-vz-runner" com.apple.security.virtualization \
   || { echo "the re-signed runner lost com.apple.security.virtualization" >&2; exit 1; }

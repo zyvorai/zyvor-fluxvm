@@ -19,6 +19,9 @@ LaunchAgent hardening for Kubernetes and Docker on a Mac. Unit-tested only; not 
 - New `scripts/test-kube-vz.sh`: boots a throwaway k3s cluster in a VZ VM and checks checkpoint/diff/timeline, trim, git, host,
   `--rosetta`, `supervise --active` (sleep and wake-on-connect) and, with `--agent`, the LaunchAgent. Written, **not yet run**; it needs
   an unlocked Mac. On a real Apple Silicon host, `docker agent status`, `kube agent status` and `doctor` ran correctly against live launchd.
+- New `fluxctl node-agent install|uninstall|status`: runs `fluxvm-agent node` as its own LaunchAgent (`dev.zyvor.fluxvm-agent`), with the
+  token from `--token-file` (never in the plist) and automatic `kairon.zyvor.dev/{backend.vz,chip,memory-gib}` labels. The macOS tarball and
+  the Homebrew formula now include `fluxvm-agent`, and the release smoke test checks for it. Unit-tested only.
 - The vmnetd and usbd helper plists log to `~/Library/Logs/fluxvm-{vmnetd,usbd}.err` instead of `/tmp`; the install scripts fill in the home directory.
 
 
